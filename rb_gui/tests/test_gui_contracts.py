@@ -9,8 +9,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rb_servo_gui.app import _format_joints, _joint_cfg_radians, _joint_marker_position, _mount_position, _pose6_from_mounts, _pose_wxyz, update_scene_markers
+from rb_servo_gui.app import _format_fk_status, _format_joints, _joint_cfg_radians, _joint_marker_position, _mount_position, _pose6_from_mounts, _pose_wxyz, update_scene_markers
 from rb_servo_gui.command_client import CommandClient
+from rb_servo_gui.models import Pose6D
 from rb_servo_gui.safety import OperatorSafety, Readiness, normalize_observed_mode_backend
 from rb_servo_gui.state_receiver import StateStore
 
@@ -32,6 +33,7 @@ def sample_state(**overrides):
         "error_code": 0,
         "tcp_stand": None,
         "tcp_base": None,
+        "has_valid_tcp_pose": False,
         "tcp_deferred": True,
     }
     data = {
@@ -73,6 +75,7 @@ class RecordingSceneHandle:
         self.position = None
         self.wxyz = None
         self.points = None
+        self.visible = None
 
 
 class RecordingUrdf:
@@ -123,6 +126,42 @@ class GuiContractsTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("joint state invalid", reason)
         self.assertEqual(client.sent_packets, [])
+
+    def test_parser_preserves_valid_tcp_pose_fields(self):
+        state = sample_state()
+        state["left"]["tcp_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": math.pi}
+        state["left"]["tcp_base"] = [0.1, 0.2, 0.3, 0.0, 0.0, 1.0]
+        state["left"]["has_valid_tcp_pose"] = True
+        state["left"]["tcp_deferred"] = False
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        self.assertIsInstance(latest.left.tcp_stand, Pose6D)
+        self.assertEqual(latest.left.tcp_stand.as_tuple(), (0.31, 0.12, 0.44, 0.0, 0.0, math.pi))
+        self.assertEqual(latest.left.tcp_base.as_tuple(), (0.1, 0.2, 0.3, 0.0, 0.0, 1.0))
+        self.assertTrue(latest.left.has_valid_tcp_pose)
+        self.assertFalse(latest.left.tcp_deferred)
+
+    def test_parser_keeps_arm_snapshot_when_tcp_pose_is_null(self):
+        store, _, _ = self.make_safety(sample_state())
+        latest = store.latest()
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.left.connection_state, "Connected")
+        self.assertIsNone(latest.left.tcp_stand)
+        self.assertFalse(latest.left.has_valid_tcp_pose)
+        self.assertTrue(latest.left.tcp_deferred)
+
+    def test_parser_preserves_status_when_tcp_pose_is_invalid(self):
+        state = sample_state(fault_latched=True, fault_reason="tcp invalid test")
+        state["left"]["tcp_stand"] = {"x": 0.31, "y": float("nan"), "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+        state["left"]["has_valid_tcp_pose"] = False
+        state["left"]["tcp_deferred"] = False
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        self.assertIsNotNone(latest)
+        self.assertIsNone(latest.left.tcp_stand)
+        self.assertFalse(latest.left.has_valid_tcp_pose)
+        self.assertFalse(latest.left.tcp_deferred)
+        self.assertEqual(latest.fault_reason, "tcp invalid test")
 
     def test_rejected_motion_state_remains_operator_visible_hold(self):
         state = sample_state(motion_state="ArmedHold", safety_verdict="CartesianUnavailable")
@@ -272,6 +311,8 @@ class GuiContractsTest(unittest.TestCase):
     def test_scene_update_sets_tcp_target_from_tcp_stand_without_base_axes(self):
         state = sample_state()
         state["left"]["tcp_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": math.pi}
+        state["left"]["has_valid_tcp_pose"] = True
+        state["left"]["tcp_deferred"] = False
         store, _, _ = self.make_safety(state)
         latest = store.latest()
         left_tcp = RecordingSceneHandle()
@@ -290,6 +331,42 @@ class GuiContractsTest(unittest.TestCase):
         update_scene_markers(handles, store.latest())
         self.assertEqual(left_tcp.position, (0.5, 0.5, 0.5))
         self.assertEqual(left_target.position, (9.0, 9.0, 9.0))
+
+    def test_scene_update_hides_tcp_marker_when_pose_is_not_valid(self):
+        state = sample_state()
+        state["left"]["tcp_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+        state["left"]["has_valid_tcp_pose"] = False
+        state["left"]["tcp_deferred"] = False
+        store, _, _ = self.make_safety(state)
+        left_tcp = RecordingSceneHandle()
+        left_target = RecordingSceneHandle()
+        handles = {"left_tcp": left_tcp, "left_tcp_target": left_target}
+        update_scene_markers(handles, store.latest())
+        self.assertIsNone(left_tcp.position)
+        self.assertFalse(left_tcp.visible)
+        self.assertFalse(left_target.visible)
+
+    def test_fk_status_distinguishes_available_deferred_invalid_and_stale(self):
+        available = sample_state()
+        for arm in ("left", "right"):
+            available[arm]["tcp_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+            available[arm]["has_valid_tcp_pose"] = True
+            available[arm]["tcp_deferred"] = False
+        store, _, _ = self.make_safety(available)
+        self.assertEqual(_format_fk_status(store.latest(), stale=False), "FK: available")
+        self.assertEqual(_format_fk_status(store.latest(), stale=True), "State stream stale")
+
+        deferred_store, _, _ = self.make_safety(sample_state())
+        self.assertEqual(_format_fk_status(deferred_store.latest(), stale=False), "FK: deferred")
+
+        invalid = sample_state()
+        invalid["left"]["tcp_deferred"] = False
+        invalid["right"]["tcp_deferred"] = False
+        invalid["left"]["has_valid_joint_state"] = False
+        invalid["left"]["q_actual_deg"] = [0, 0, 0]
+        invalid_store, _, _ = self.make_safety(invalid)
+        self.assertIn("left invalid joint state", _format_fk_status(invalid_store.latest(), stale=False))
+        self.assertIn("right invalid TCP pose", _format_fk_status(invalid_store.latest(), stale=False))
 
     def test_visual_disabled_state_matches_safety_blocks(self):
         _, _, real_safety = self.make_safety(sample_state(), desired="real", observed="real")

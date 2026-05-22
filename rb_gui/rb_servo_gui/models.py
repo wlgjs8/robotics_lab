@@ -20,6 +20,35 @@ def finite_joint_array(value: Any) -> tuple[float, ...] | None:
 
 
 @dataclass(frozen=True)
+class Pose6D:
+    x: float
+    y: float
+    z: float
+    rx: float
+    ry: float
+    rz: float
+
+    @classmethod
+    def parse(cls, value: Any) -> "Pose6D | None":
+        try:
+            if isinstance(value, Mapping):
+                values = (value["x"], value["y"], value["z"], value["rx"], value["ry"], value["rz"])
+            elif isinstance(value, list | tuple) and len(value) == 6:
+                values = tuple(value)
+            else:
+                return None
+            parsed = tuple(float(item) for item in values)
+        except Exception:
+            return None
+        if not all(math.isfinite(item) for item in parsed):
+            return None
+        return cls(*parsed)
+
+    def as_tuple(self) -> tuple[float, float, float, float, float, float]:
+        return (self.x, self.y, self.z, self.rx, self.ry, self.rz)
+
+
+@dataclass(frozen=True)
 class ArmSnapshot:
     mode: str
     q_actual_deg: tuple[float, ...] | None
@@ -29,8 +58,10 @@ class ArmSnapshot:
     connection_state: str
     send_ok: bool
     error_code: int | None = None
-    tcp_stand: Mapping[str, Any] | None = None
-    tcp_base: Mapping[str, Any] | None = None
+    tcp_stand: Pose6D | None = None
+    tcp_base: Pose6D | None = None
+    has_valid_tcp_pose: bool = False
+    tcp_deferred: bool = True
     send_duration_us: float | None = None
 
     @classmethod
@@ -40,8 +71,11 @@ class ArmSnapshot:
         q_prev = finite_joint_array(data.get("q_previous_sent_deg"))
         has_valid_joint_state = bool(data.get("has_valid_joint_state", False)) and q_actual is not None and q_sent is not None and q_prev is not None
         error_code = data.get("error_code")
-        tcp_stand = data.get("tcp_stand")
-        tcp_base = data.get("tcp_base")
+        tcp_stand = Pose6D.parse(data.get("tcp_stand"))
+        tcp_base = Pose6D.parse(data.get("tcp_base"))
+        has_valid_tcp_pose_raw = data.get("has_valid_tcp_pose")
+        has_valid_tcp_pose = bool(has_valid_tcp_pose_raw) if isinstance(has_valid_tcp_pose_raw, bool) else tcp_stand is not None
+        tcp_deferred = bool(data.get("tcp_deferred", tcp_stand is None and tcp_base is None and not has_valid_tcp_pose))
         return cls(
             mode=str(data.get("mode", "Unknown")),
             q_actual_deg=q_actual,
@@ -51,8 +85,10 @@ class ArmSnapshot:
             connection_state=str(data.get("connection_state", "Disconnected")),
             send_ok=bool(data.get("send_ok", False)),
             error_code=int(error_code) if isinstance(error_code, int) else None,
-            tcp_stand=tcp_stand if isinstance(tcp_stand, Mapping) else None,
-            tcp_base=tcp_base if isinstance(tcp_base, Mapping) else None,
+            tcp_stand=tcp_stand,
+            tcp_base=tcp_base,
+            has_valid_tcp_pose=has_valid_tcp_pose and tcp_stand is not None,
+            tcp_deferred=tcp_deferred,
             send_duration_us=float(data["send_duration_us"]) if isinstance(data.get("send_duration_us"), int | float) else None,
         )
 

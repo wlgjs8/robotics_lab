@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .command_client import CommandClient
+from .models import ArmSnapshot, Pose6D, StateSnapshot
 from .safety import OperatorSafety, Readiness, normalize_observed_mode_backend
 from .state_receiver import StateReceiver, StateStore
 
@@ -83,6 +84,12 @@ def _mount_position(mounts: dict[str, Any], arm: str, fallback: tuple[float, flo
 
 def _pose_position(pose6: tuple[float, float, float, float, float, float]) -> tuple[float, float, float]:
     return (pose6[0], pose6[1], pose6[2])
+
+
+def _pose6_tuple(pose6: Pose6D | tuple[float, float, float, float, float, float]) -> tuple[float, float, float, float, float, float]:
+    if isinstance(pose6, Pose6D):
+        return pose6.as_tuple()
+    return pose6
 
 
 def _rpy_to_wxyz(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
@@ -249,6 +256,28 @@ def _format_joints(q_values: tuple[float, ...] | None) -> str:
     return ", ".join(f"{value:.2f}" for value in q_values)
 
 
+def _arm_fk_status(arm: ArmSnapshot) -> str:
+    if not arm.has_valid_joint_state:
+        return "invalid joint state"
+    if arm.tcp_deferred:
+        return "deferred"
+    if not arm.has_valid_tcp_pose:
+        return "invalid TCP pose"
+    return "available"
+
+
+def _format_fk_status(latest: StateSnapshot | None, *, stale: bool) -> str:
+    if latest is None:
+        return "FK: no state"
+    if stale:
+        return "State stream stale"
+    left = _arm_fk_status(latest.left)
+    right = _arm_fk_status(latest.right)
+    if left == right:
+        return f"FK: {left}"
+    return f"FK: left {left}, right {right}"
+
+
 def _joint_cfg_radians(q_values: tuple[float, ...] | None) -> tuple[float, ...]:
     if q_values is None:
         return tuple(0.0 for _ in _ROBOT_JOINT_NAMES)
@@ -367,18 +396,20 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any) -> None:
         "left_marker": _joint_marker_position(left_base, latest.left.q_actual_deg),
         "right_marker": _joint_marker_position(right_base, latest.right.q_actual_deg),
     }
-    raw = latest.raw if isinstance(latest.raw, dict) else {}
     tcp_updates: dict[str, tuple[tuple[float, float, float], tuple[float, float, float, float]]] = {}
-    for arm, arm_state, base_pose in (("left", latest.left, left_pose), ("right", latest.right, right_pose)):
-        tcp_pose = _pose6_from_state_arm(raw.get(arm), "tcp_stand")
-        if tcp_pose is not None:
-            tcp_updates[arm] = (_pose_position(tcp_pose), _pose_wxyz(tcp_pose))
+    for arm, arm_state in (("left", latest.left), ("right", latest.right)):
+        tcp_pose = arm_state.tcp_stand
+        if arm_state.has_valid_tcp_pose and tcp_pose is not None:
+            tcp_pose_tuple = _pose6_tuple(tcp_pose)
+            tcp_updates[arm] = (_pose_position(tcp_pose_tuple), _pose_wxyz(tcp_pose_tuple))
             continue
-        urdf_tcp = _tcp_pose_from_urdf(scene_handles.get(f"{arm}_urdf"), base_pose)
-        if urdf_tcp is not None:
-            tcp_updates[arm] = urdf_tcp
-            continue
-        tcp_updates[arm] = (_joint_marker_position(_pose_position(base_pose), arm_state.q_actual_deg), _pose_wxyz(base_pose))
+        for key in (f"{arm}_tcp", f"{arm}_tcp_target"):
+            handle = scene_handles.get(key)
+            if handle is not None:
+                try:
+                    handle.visible = False
+                except Exception:
+                    pass
 
     for arm, (position, wxyz) in tcp_updates.items():
         updates[f"{arm}_tcp"] = position
@@ -386,6 +417,13 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any) -> None:
         if target_key not in scene_handles or f"{arm}_tcp_target_user_moved" not in scene_handles:
             updates[target_key] = position
             scene_handles[f"{arm}_tcp_target_pose"] = _pose6_from_transform(position, wxyz)
+        for key in (f"{arm}_tcp", f"{arm}_tcp_target"):
+            handle = scene_handles.get(key)
+            if handle is not None:
+                try:
+                    handle.visible = True
+                except Exception:
+                    pass
 
     for key, position in updates.items():
         handle = scene_handles.get(key)
@@ -448,6 +486,7 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
         handles["readiness"] = server.gui.add_text("Readiness", initial_value="No-Go: no state", disabled=True)
         handles["motion"] = server.gui.add_text("Motion state", initial_value="unknown", disabled=True)
         handles["fault"] = server.gui.add_text("Fault", initial_value="none", disabled=True)
+        handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
         handles["ops"] = server.gui.add_text(
             "Container ops",
             initial_value="manual compose commands only; no Docker socket in GUI",
@@ -581,6 +620,8 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
     if latest is None:
         handles["connection"].value = "disconnected/stale"
         handles["readiness"].value = readiness.no_go_reason or "No-Go: no state stream"
+        if "fk_status" in handles:
+            handles["fk_status"].value = _format_fk_status(None, stale=True)
         handles["packets"].value = f"{store.received_packets} received / {store.invalid_packets} invalid"
         return
 
@@ -605,6 +646,10 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
     handles["readiness"].value = ", ".join(readiness_parts)
     handles["motion"].value = latest.motion_state
     handles["fault"].value = latest.fault_reason if latest.fault_latched else "none"
+    if "fk_status" in handles:
+        handles["fk_status"].value = _format_fk_status(latest, stale=stale)
+    if "tcp_status" in handles and not str(handles["tcp_status"].value).startswith(("OK:", "BLOCKED:")):
+        handles["tcp_status"].value = f"{_format_fk_status(latest, stale=stale)}; TCP pose command disabled until FK/IK milestone is enabled"
     update_scene_markers(handles.get("scene", {}), latest)
     if "scene_assets" in handles:
         scene_errors = [
