@@ -127,6 +127,21 @@ public:
             mount.base_pose_in_stand.rz + tcp_base.rz,
         };
     }
+
+    rb_servo::IkResult solveIk(
+        rb_servo::ArmId arm,
+        const rb_servo::Pose6D& target_tcp_stand,
+        const rb_servo::JointArray& seed_q_deg,
+        const rb_servo::ArmMountConfig& mount
+    ) const override {
+        (void)arm;
+        (void)target_tcp_stand;
+        (void)mount;
+        rb_servo::IkResult result;
+        result.q_solution_deg = seed_q_deg;
+        result.reason = "kinematics_unavailable";
+        return result;
+    }
 };
 
 class TestBackend final : public rb_servo::IRobotBackend {

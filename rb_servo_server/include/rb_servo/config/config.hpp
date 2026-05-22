@@ -40,6 +40,16 @@ struct ArmMountConfig {
     Pose6D base_pose_in_stand;
 };
 
+struct IkSolverConfig {
+    bool enable = true;
+    int max_iterations = 50;
+    double timeout_ms = 2.0;
+    double damping = 0.001;
+    double position_tolerance_m = 0.001;
+    double orientation_tolerance_rad = 0.02;
+    JointArray max_step_deg{2.0, 2.0, 2.0, 3.0, 3.0, 4.0};
+};
+
 struct KinematicsConfig {
     bool enable = false;
     std::string provider = "none";
@@ -56,6 +66,7 @@ struct KinematicsConfig {
     };
     std::string q_units = "deg";
     bool publish_tcp = false;
+    IkSolverConfig ik;
 };
 
 struct SafetyConfig {

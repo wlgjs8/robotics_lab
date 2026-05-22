@@ -321,6 +321,12 @@ void validatePositiveFinite(double value, const std::string& name) {
     }
 }
 
+void validatePositiveFiniteArray(const JointArray& values, const std::string& name) {
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        validatePositiveFinite(values[i], name + "[" + std::to_string(i) + "]");
+    }
+}
+
 void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(static_cast<double>(cfg.servo.rate_hz), "servo.rate_hz");
     validatePositiveFinite(cfg.servo.command_timeout_sec, "servo.command_timeout_sec");
@@ -397,6 +403,14 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error("kinematics.urdf must point to an existing URDF file: " + cfg.kinematics.urdf);
         }
     }
+    if (cfg.kinematics.ik.max_iterations <= 0) {
+        throw std::runtime_error("kinematics.ik.max_iterations must be positive");
+    }
+    validatePositiveFinite(cfg.kinematics.ik.timeout_ms, "kinematics.ik.timeout_ms");
+    validatePositiveFinite(cfg.kinematics.ik.damping, "kinematics.ik.damping");
+    validatePositiveFinite(cfg.kinematics.ik.position_tolerance_m, "kinematics.ik.position_tolerance_m");
+    validatePositiveFinite(cfg.kinematics.ik.orientation_tolerance_rad, "kinematics.ik.orientation_tolerance_rad");
+    validatePositiveFiniteArray(cfg.kinematics.ik.max_step_deg, "kinematics.ik.max_step_deg");
 
     const auto validate_simulator_backend = [](const BackendConfig& backend, const std::string& label) {
         if (backend.backend_type != BackendType::Simulator) return;
@@ -677,6 +691,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "joint_names",
             "q_units",
             "publish_tcp",
+            "ik",
         }, "kinematics");
         if (has(sec, "enable")) cfg.kinematics.enable = asBool(sec["enable"], "kinematics.enable");
         if (has(sec, "provider")) cfg.kinematics.provider = lower(asString(sec["provider"], "kinematics.provider"));
@@ -690,6 +705,25 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "joint_names")) cfg.kinematics.joint_names = asStringArray(sec["joint_names"], "kinematics.joint_names");
         if (has(sec, "q_units")) cfg.kinematics.q_units = lower(asString(sec["q_units"], "kinematics.q_units"));
         if (has(sec, "publish_tcp")) cfg.kinematics.publish_tcp = asBool(sec["publish_tcp"], "kinematics.publish_tcp");
+        if (has(sec, "ik")) {
+            const YAML::Node ik = sec["ik"];
+            validateAllowedKeys(ik, {
+                "enable",
+                "max_iterations",
+                "timeout_ms",
+                "damping",
+                "position_tolerance_m",
+                "orientation_tolerance_rad",
+                "max_step_deg",
+            }, "kinematics.ik");
+            if (has(ik, "enable")) cfg.kinematics.ik.enable = asBool(ik["enable"], "kinematics.ik.enable");
+            if (has(ik, "max_iterations")) cfg.kinematics.ik.max_iterations = asInt(ik["max_iterations"], "kinematics.ik.max_iterations");
+            if (has(ik, "timeout_ms")) cfg.kinematics.ik.timeout_ms = asDouble(ik["timeout_ms"], "kinematics.ik.timeout_ms");
+            if (has(ik, "damping")) cfg.kinematics.ik.damping = asDouble(ik["damping"], "kinematics.ik.damping");
+            if (has(ik, "position_tolerance_m")) cfg.kinematics.ik.position_tolerance_m = asDouble(ik["position_tolerance_m"], "kinematics.ik.position_tolerance_m");
+            if (has(ik, "orientation_tolerance_rad")) cfg.kinematics.ik.orientation_tolerance_rad = asDouble(ik["orientation_tolerance_rad"], "kinematics.ik.orientation_tolerance_rad");
+            if (has(ik, "max_step_deg")) cfg.kinematics.ik.max_step_deg = parseJointArray(ik["max_step_deg"], "kinematics.ik.max_step_deg");
+        }
     }
 
     if ((cfg.left_robot.run_mode == RunMode::Real || cfg.right_robot.run_mode == RunMode::Real) &&

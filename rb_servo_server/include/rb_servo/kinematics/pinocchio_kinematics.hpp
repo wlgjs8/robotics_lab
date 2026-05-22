@@ -24,6 +24,12 @@ public:
         const JointArray& q_deg,
         const ArmMountConfig& mount
     ) const override;
+    IkResult solveIk(
+        ArmId arm,
+        const Pose6D& target_tcp_stand,
+        const JointArray& seed_q_deg,
+        const ArmMountConfig& mount
+    ) const override;
 
 private:
     struct Impl;

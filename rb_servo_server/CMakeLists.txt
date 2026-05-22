@@ -14,6 +14,7 @@ add_library(rb_servo_core
     src/core/clock.cpp
     src/core/realtime.cpp
     src/config/config.cpp
+    src/kinematics/ik_solver.cpp
     src/kinematics/pinocchio_kinematics.cpp
     src/robot/mock_backend.cpp
     src/robot/rbpodo_backend.cpp
@@ -82,6 +83,10 @@ if(BUILD_TESTING)
     add_executable(test_kinematics_fk tests/test_kinematics_fk.cpp)
     target_link_libraries(test_kinematics_fk PRIVATE rb_servo_core)
     add_test(NAME kinematics_fk COMMAND test_kinematics_fk)
+
+    add_executable(test_kinematics_ik tests/test_kinematics_ik.cpp)
+    target_link_libraries(test_kinematics_ik PRIVATE rb_servo_core)
+    add_test(NAME kinematics_ik COMMAND test_kinematics_ik)
 
     set(RB_GUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rb_gui")
     find_package(Python3 COMPONENTS Interpreter)

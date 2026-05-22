@@ -1,9 +1,20 @@
 #pragma once
 
+#include <string>
+
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/core/types.hpp"
 
 namespace rb_servo {
+
+struct IkResult {
+    bool success = false;
+    JointArray q_solution_deg{};
+    double position_error_m = 0.0;
+    double orientation_error_rad = 0.0;
+    int iterations = 0;
+    std::string reason;
+};
 
 class IKinematics {
 public:
@@ -18,6 +29,13 @@ public:
     virtual Pose6D computeTcpStand(
         ArmId arm,
         const JointArray& q_deg,
+        const ArmMountConfig& mount
+    ) const = 0;
+
+    virtual IkResult solveIk(
+        ArmId arm,
+        const Pose6D& target_tcp_stand,
+        const JointArray& seed_q_deg,
         const ArmMountConfig& mount
     ) const = 0;
 };
