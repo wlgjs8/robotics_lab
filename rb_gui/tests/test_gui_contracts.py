@@ -87,10 +87,22 @@ class RecordingUrdf:
 
 
 class GuiContractsTest(unittest.TestCase):
-    def make_safety(self, state=None, *, desired="mock", observed="mock", observed_backend=None, sim_ready=False, enable_tcp_pose=False):
+    def make_safety(
+        self,
+        state=None,
+        *,
+        desired="mock",
+        observed="mock",
+        observed_backend=None,
+        sim_ready=False,
+        cartesian_available=None,
+        enable_tcp_pose=False,
+        stale=False,
+    ):
         store = StateStore(stale_after_sec=0.5)
         if state is not None:
-            self.assertTrue(store.update_from_json_bytes(json.dumps(state).encode(), received_monotonic=time.monotonic()))
+            received = time.monotonic() - 1.0 if stale else time.monotonic()
+            self.assertTrue(store.update_from_json_bytes(json.dumps(state).encode(), received_monotonic=received))
         client = RecordingClient()
         safety = OperatorSafety(
             store,
@@ -98,10 +110,27 @@ class GuiContractsTest(unittest.TestCase):
             desired_mode=desired,
             observed_server_mode=observed,
             observed_backend=observed_backend,
-            sim_readiness=Readiness(running=True, connected=True, ready=sim_ready, no_go_reason="sim readiness not proven"),
+            sim_readiness=Readiness(
+                running=True,
+                connected=True,
+                ready=sim_ready,
+                no_go_reason="sim readiness not proven",
+                cartesian_available=cartesian_available,
+                cartesian_no_go_reason="cartesian readiness not proven",
+            ),
             enable_tcp_pose_commands=enable_tcp_pose,
         )
         return store, client, safety
+
+    def tcp_available_state(self, **overrides):
+        state = sample_state(**overrides)
+        for arm in ("left", "right"):
+            state[arm]["tcp_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+            state[arm]["tcp_base"] = {"x": 0.2, "y": 0.1, "z": 0.4, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+            state[arm]["has_valid_tcp_pose"] = True
+            state[arm]["tcp_deferred"] = False
+        state["tcp_fields_deferred"] = False
+        return state
 
     def test_valid_state_updates_latest_and_invalid_json_is_counted(self):
         store, _, safety = self.make_safety(sample_state())
@@ -247,14 +276,122 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("TCP pose command disabled", reason)
         self.assertEqual(client.sent_packets, [])
 
-    def test_tcp_pose_target_packet_builder_uses_gizmo_pose_and_holds_other_arm(self):
+    def test_tcp_delta_stand_packet_builder_holds_other_arm(self):
         client = RecordingClient()
-        pose = (0.3, 0.1, 0.4, 0.0, 0.0, 0.0)
-        packet = client.build_tcp_pose_target(left_pose=pose)
+        delta = (0.005, 0.0, 0.0, 0.0, 0.0, 0.0)
+        packet = client.build_tcp_delta_stand(left_delta=delta)
+        self.assertEqual(packet["schema_version"], 1)
         self.assertEqual(packet["mode"], "Hold")
-        self.assertEqual(packet["left"]["mode"], "TcpPoseTarget")
-        self.assertEqual(packet["left"]["tcp_target_stand"], list(pose))
+        self.assertEqual(packet["left"]["mode"], "TcpDeltaStand")
+        self.assertEqual(packet["left"]["tcp_delta_stand"], list(delta))
         self.assertEqual(packet["right"], {})
+
+    def test_tcp_delta_stand_enabled_only_for_simulator_with_fk_and_feature_flag(self):
+        state = self.tcp_available_state()
+        _, client, safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="simulator",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+        )
+        self.assertIsNone(safety.tcp_command_disabled_reason("left"))
+        self.assertFalse(safety.control_disabled_states()["tcp_pose"])
+
+        ok, reason = safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertTrue(ok, reason)
+        packet = client.sent_packets[-1]
+        self.assertEqual(packet["mode"], "Hold")
+        self.assertEqual(packet["left"]["mode"], "TcpDeltaStand")
+        self.assertEqual(packet["left"]["tcp_delta_stand"], [0.005, 0.0, 0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(packet["right"], {})
+        self.assertIn("server verdict: Ok", reason)
+
+    def test_tcp_delta_stand_real_mode_disabled_even_with_feature_flag(self):
+        _, client, safety = self.make_safety(
+            self.tcp_available_state(),
+            desired="real",
+            observed="real",
+            observed_backend="rbpodo",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+        )
+        ok, reason = safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        self.assertIn("real mode TCP command disabled", reason)
+        self.assertTrue(safety.control_disabled_states()["tcp_pose"])
+        self.assertEqual(client.sent_packets, [])
+
+    def test_tcp_delta_stand_requires_simulator_backend_fk_and_readiness(self):
+        state = self.tcp_available_state()
+        _, _, backend_safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="mock",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+        )
+        self.assertIn("simulator backend", backend_safety.tcp_command_disabled_reason("left"))
+
+        no_fk = sample_state()
+        _, _, fk_safety = self.make_safety(
+            no_fk,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="simulator",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+        )
+        self.assertIn("FK/TCP pose unavailable", fk_safety.tcp_command_disabled_reason("left"))
+
+        _, _, cart_safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="simulator",
+            sim_ready=True,
+            cartesian_available=False,
+            enable_tcp_pose=True,
+        )
+        self.assertIn("cartesian readiness", cart_safety.tcp_command_disabled_reason("left"))
+
+    def test_tcp_delta_stand_blocks_stale_and_faulted_state(self):
+        state = self.tcp_available_state()
+        _, client, stale_safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="simulator",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+            stale=True,
+        )
+        ok, reason = stale_safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        self.assertIn("state stream", reason)
+        self.assertEqual(client.sent_packets, [])
+
+        faulted = self.tcp_available_state(fault_latched=True, fault_reason="test fault")
+        _, client, fault_safety = self.make_safety(
+            faulted,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="simulator",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+        )
+        ok, reason = fault_safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        self.assertIn("fault", reason)
+        self.assertEqual(client.sent_packets, [])
 
 
     def test_scene_marker_helpers_use_mounts_and_joint_state(self):

@@ -63,6 +63,8 @@ class Readiness:
     ready: bool = False
     fault: bool = False
     no_go_reason: str = ""
+    cartesian_available: bool | None = None
+    cartesian_no_go_reason: str = ""
 
 
 class OperatorSafety:
@@ -81,6 +83,8 @@ class OperatorSafety:
         ops_available: bool = False,
         enable_tcp_pose_commands: bool = False,
         max_jog_step_deg: float = 2.0,
+        max_tcp_linear_step_m: float = 0.005,
+        max_tcp_angular_step_rad: float = 0.02,
         command_timeout_sec: float = 0.2,
     ) -> None:
         desired = normalize_observed_mode_backend(str(desired_mode), None)
@@ -95,9 +99,12 @@ class OperatorSafety:
         self.ops_available = ops_available
         self.enable_tcp_pose_commands = bool(enable_tcp_pose_commands)
         self.max_jog_step_deg = float(max_jog_step_deg)
+        self.max_tcp_linear_step_m = float(max_tcp_linear_step_m)
+        self.max_tcp_angular_step_rad = float(max_tcp_angular_step_rad)
         self.command_timeout_sec = float(command_timeout_sec)
         self.status_message = "; ".join(self.config_warnings) if self.config_warnings else "starting"
         self.recording_intent = False
+        self.last_tcp_command = "none"
 
     def set_desired_mode(self, mode: Mode | str) -> None:
         normalized = normalize_observed_mode_backend(str(mode), None)
@@ -162,6 +169,34 @@ class OperatorSafety:
             return "fault is latched; reset and arm before motion"
         return None
 
+    @staticmethod
+    def _arm_has_tcp_pose(latest: StateSnapshot, arm: Literal["left", "right"]) -> bool:
+        arm_state = latest.left if arm == "left" else latest.right
+        return bool(arm_state.has_valid_tcp_pose and arm_state.tcp_stand is not None and not arm_state.tcp_deferred)
+
+    def tcp_command_disabled_reason(self, arm: Literal["left", "right"] | None = None) -> str | None:
+        if not self.enable_tcp_pose_commands:
+            return "TCP pose command disabled until RB_GUI_ENABLE_TCP_POSE_COMMANDS=1"
+        if self.desired_mode == "real" or self.observed_server_mode == "real":
+            return "real mode TCP command disabled until real Cartesian acceptance passes"
+        if self.observed_server_mode != "simulation":
+            return "TCP pose command requires observed simulation mode"
+        if self.observed_backend != "simulator":
+            return "TCP pose command requires simulator backend"
+        reason = self.blocked_reason("TcpDeltaStand")
+        if reason:
+            return reason
+        latest = self.latest_valid()
+        if latest is None:
+            return "state stream missing or stale"
+        if self.sim_readiness.cartesian_available is False:
+            return self.sim_readiness.cartesian_no_go_reason or "server Cartesian/IK readiness not proven"
+        if arm is not None:
+            if not self._arm_has_tcp_pose(latest, arm):
+                return f"{arm} FK/TCP pose unavailable"
+        elif not (self._arm_has_tcp_pose(latest, "left") or self._arm_has_tcp_pose(latest, "right")):
+            return "FK/TCP pose unavailable"
+        return None
 
     def control_disabled_states(self) -> dict[str, bool]:
         """Return visual disabled-state for controls.
@@ -172,7 +207,7 @@ class OperatorSafety:
         states: dict[str, bool] = {
             "jog": self.blocked_reason("JointTarget") is not None,
             "tcp_jog": True,
-            "tcp_pose": (not self.enable_tcp_pose_commands) or self.blocked_reason("TcpPoseTarget") is not None,
+            "tcp_pose": self.tcp_command_disabled_reason() is not None,
         }
         for mode in self.lifecycle_modes:
             states[f"lifecycle:{mode}"] = self.blocked_reason(mode) is not None
@@ -213,6 +248,44 @@ class OperatorSafety:
     def tcp_jog_unavailable(self) -> tuple[bool, str]:
         return False, "TCP jog unavailable: FK/IK is deferred; no Cartesian motion command sent"
 
+    def send_tcp_delta_stand(
+        self,
+        arm: Literal["left", "right"],
+        delta: tuple[float, ...],
+    ) -> tuple[bool, str]:
+        reason = self.tcp_command_disabled_reason(arm)
+        if reason:
+            return False, reason
+        if len(delta) != 6:
+            return False, "TCP stand delta must have 6 values"
+        try:
+            delta_values = tuple(float(value) for value in delta)
+        except (TypeError, ValueError):
+            return False, "non-finite TCP stand delta rejected"
+        if any(not math.isfinite(value) for value in delta_values):
+            return False, "non-finite TCP stand delta rejected"
+        if any(abs(value) > self.max_tcp_linear_step_m for value in delta_values[:3]):
+            return False, f"TCP linear delta exceeds {self.max_tcp_linear_step_m:.3f} m limit"
+        if any(abs(value) > self.max_tcp_angular_step_rad for value in delta_values[3:]):
+            return False, f"TCP angular delta exceeds {self.max_tcp_angular_step_rad:.3f} rad limit"
+        packet = self.command_client.build_tcp_delta_stand(
+            left_delta=delta_values if arm == "left" else None,
+            right_delta=delta_values if arm == "right" else None,
+            timeout_sec=self.command_timeout_sec,
+        )
+        self.command_client.send(packet)
+        axis_names = ("X", "Y", "Z", "roll", "pitch", "yaw")
+        moved = [
+            f"{'+' if value >= 0.0 else '-'}{axis_names[index]} {abs(value):.3f}{' m' if index < 3 else ' rad'}"
+            for index, value in enumerate(delta_values)
+            if abs(value) > 0.0
+        ]
+        delta_label = ", ".join(moved) if moved else "zero delta"
+        self.last_tcp_command = f"TcpDeltaStand {arm} {delta_label}"
+        latest = self.latest_valid()
+        verdict = latest.safety_verdict if latest is not None else "unavailable"
+        return True, f"sent {self.last_tcp_command}; server verdict: {verdict}"
+
     def send_tcp_pose_target(
         self,
         *,
@@ -221,7 +294,7 @@ class OperatorSafety:
     ) -> tuple[bool, str]:
         if not self.enable_tcp_pose_commands:
             return False, "TCP pose command disabled until FK/IK milestone is enabled"
-        reason = self.blocked_reason("TcpPoseTarget")
+        reason = self.tcp_command_disabled_reason()
         if reason:
             return False, reason
         if left_pose is None and right_pose is None:

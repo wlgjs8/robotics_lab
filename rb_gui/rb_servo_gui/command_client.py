@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import socket
 import time
 from typing import Any, Mapping
@@ -16,6 +17,15 @@ class CommandClient:
     def next_seq(self) -> int:
         self._seq += 1
         return self._seq
+
+    @staticmethod
+    def _finite_six(values: tuple[float, ...], label: str) -> list[float]:
+        if len(values) != 6:
+            raise ValueError(f"{label} must have 6 values")
+        parsed = [float(v) for v in values]
+        if any(not math.isfinite(v) for v in parsed):
+            raise ValueError(f"{label} values must be finite")
+        return parsed
 
     def build_lifecycle(self, mode: str, *, timeout_sec: float = 0.2) -> dict[str, Any]:
         return {"seq": self.next_seq(), "mode": mode, "timeout_sec": timeout_sec, "left": {}, "right": {}}
@@ -48,21 +58,44 @@ class CommandClient:
         if left_pose is None and right_pose is None:
             raise ValueError("at least one TCP target is required")
         packet: dict[str, Any] = {
+            "schema_version": 1,
             "seq": self.next_seq(),
             "mode": "Hold",
+            "host_time_ns": time.monotonic_ns(),
             "timeout_sec": timeout_sec,
             "coupled_timeout": True,
             "left": {},
             "right": {},
         }
         if left_pose is not None:
-            if len(left_pose) != 6:
-                raise ValueError("left TCP target must have 6 values")
-            packet["left"] = {"mode": "TcpPoseTarget", "tcp_target_stand": [float(v) for v in left_pose]}
+            packet["left"] = {"mode": "TcpPoseTarget", "tcp_target_stand": self._finite_six(left_pose, "left TCP target")}
         if right_pose is not None:
-            if len(right_pose) != 6:
-                raise ValueError("right TCP target must have 6 values")
-            packet["right"] = {"mode": "TcpPoseTarget", "tcp_target_stand": [float(v) for v in right_pose]}
+            packet["right"] = {"mode": "TcpPoseTarget", "tcp_target_stand": self._finite_six(right_pose, "right TCP target")}
+        return packet
+
+    def build_tcp_delta_stand(
+        self,
+        *,
+        left_delta: tuple[float, ...] | None = None,
+        right_delta: tuple[float, ...] | None = None,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        if left_delta is None and right_delta is None:
+            raise ValueError("at least one TCP stand delta is required")
+        packet: dict[str, Any] = {
+            "schema_version": 1,
+            "seq": self.next_seq(),
+            "mode": "TcpDeltaStand" if left_delta is not None and right_delta is not None else "Hold",
+            "host_time_ns": time.monotonic_ns(),
+            "timeout_sec": timeout_sec,
+            "coupled_timeout": True,
+            "left": {},
+            "right": {},
+        }
+        if left_delta is not None:
+            packet["left"] = {"mode": "TcpDeltaStand", "tcp_delta_stand": self._finite_six(left_delta, "left TCP stand delta")}
+        if right_delta is not None:
+            packet["right"] = {"mode": "TcpDeltaStand", "tcp_delta_stand": self._finite_six(right_delta, "right TCP stand delta")}
         return packet
 
     def send(self, packet: Mapping[str, Any]) -> None:

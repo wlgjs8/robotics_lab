@@ -470,7 +470,7 @@ def _install_tcp_target_callbacks(scene_handles: dict[str, Any], status_handle: 
                 scene_handles[f"{arm}_tcp_target_pose"] = _pose6_from_transform(position, wxyz)
                 scene_handles[f"{arm}_tcp_target_user_moved"] = True
                 if status_handle is not None:
-                    status_handle.value = f"{arm} TCP target updated; press a send button to command from the gizmo"
+                    status_handle.value = f"{arm} TCP marker updated; commands use bounded stand-frame delta buttons"
             except Exception as exc:
                 scene_handles["tcp_target_error"] = f"{type(exc).__name__}: {exc}"
 
@@ -535,35 +535,51 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
     with tabs.add_tab("TCP target"):
         handles["tcp_status"] = server.gui.add_text(
             "TCP status",
-            initial_value="TCP pose command disabled until FK/IK milestone is enabled",
+            initial_value="TCP delta command disabled until RB_GUI_ENABLE_TCP_POSE_COMMANDS=1",
             disabled=True,
         )
         _install_tcp_target_callbacks(handles["scene"], handles["tcp_status"])
-        send_left_tcp = server.gui.add_button("Send left TCP target")
-        send_right_tcp = server.gui.add_button("Send right TCP target")
-        send_both_tcp = server.gui.add_button("Send both TCP targets")
-        handles["tcp_pose_buttons"] = (send_left_tcp, send_right_tcp, send_both_tcp)
+        tcp_arm_group = server.gui.add_button_group("TCP arm", ("left", "right"))
+        linear_step = server.gui.add_slider("Linear step m", min=0.001, max=0.005, step=0.001, initial_value=0.005)
+        angular_step = server.gui.add_slider("Angular step rad", min=0.005, max=0.02, step=0.005, initial_value=0.02)
+        handles["tcp_arm_group"] = tcp_arm_group
+        handles["tcp_linear_step"] = linear_step
+        handles["tcp_angular_step"] = angular_step
+        handles["tcp_pose_buttons"] = []
 
-        def _target_pose(arm: str) -> tuple[float, ...] | None:
-            pose = handles["scene"].get(f"{arm}_tcp_target_pose")
-            if isinstance(pose, tuple) and len(pose) == 6:
-                return pose
-            return None
-
-        @send_left_tcp.on_click
-        def _(_: Any) -> None:
-            ok, message = safety.send_tcp_pose_target(left_pose=_target_pose("left"))
+        def _send_delta(delta: tuple[float, float, float, float, float, float]) -> None:
+            ok, message = safety.send_tcp_delta_stand(tcp_arm_group.value, delta)
             handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-        @send_right_tcp.on_click
-        def _(_: Any) -> None:
-            ok, message = safety.send_tcp_pose_target(right_pose=_target_pose("right"))
-            handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+        def _add_tcp_delta_button(label: str, axis_index: int, sign: float, angular: bool = False) -> None:
+            button = server.gui.add_button(label)
+            handles["tcp_pose_buttons"].append(button)
 
-        @send_both_tcp.on_click
-        def _(_: Any) -> None:
-            ok, message = safety.send_tcp_pose_target(left_pose=_target_pose("left"), right_pose=_target_pose("right"))
-            handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+            @button.on_click
+            def _(_: Any, axis_index: int = axis_index, sign: float = sign, angular: bool = angular) -> None:
+                step = float(angular_step.value if angular else linear_step.value)
+                delta = [0.0] * 6
+                delta[axis_index] = sign * step
+                _send_delta(tuple(delta))  # type: ignore[arg-type]
+
+        for label, index, sign in (
+            ("+X", 0, 1.0),
+            ("-X", 0, -1.0),
+            ("+Y", 1, 1.0),
+            ("-Y", 1, -1.0),
+            ("+Z", 2, 1.0),
+            ("-Z", 2, -1.0),
+        ):
+            _add_tcp_delta_button(label, index, sign)
+        for label, index, sign in (
+            ("+roll", 3, 1.0),
+            ("-roll", 3, -1.0),
+            ("+pitch", 4, 1.0),
+            ("-pitch", 4, -1.0),
+            ("+yaw", 5, 1.0),
+            ("-yaw", 5, -1.0),
+        ):
+            _add_tcp_delta_button(label, index, sign, angular=True)
 
     with tabs.add_tab("Debug"):
         handles["tick"] = server.gui.add_number("tick", initial_value=0, disabled=True)
@@ -600,6 +616,20 @@ def _set_disabled(handle: Any, disabled: bool) -> None:
         pass
 
 
+def _format_tcp_command_status(safety: OperatorSafety, latest: StateSnapshot | None, *, stale: bool) -> str:
+    parts: list[str] = []
+    if safety.last_tcp_command != "none":
+        parts.append(f"last sent: {safety.last_tcp_command}")
+    if latest is not None and not stale:
+        parts.append(f"server verdict: {latest.safety_verdict}")
+    reason = safety.tcp_command_disabled_reason()
+    if reason:
+        parts.append(f"disabled: {reason}")
+    else:
+        parts.append("enabled: TcpDeltaStand small stand-frame steps")
+    return "; ".join(parts)
+
+
 def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStore) -> None:
     disabled_states = safety.control_disabled_states()
     for mode, button in handles.get("lifecycle_buttons", {}).items():
@@ -622,6 +652,8 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
         handles["readiness"].value = readiness.no_go_reason or "No-Go: no state stream"
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
+        if "tcp_status" in handles:
+            handles["tcp_status"].value = _format_tcp_command_status(safety, None, stale=True)
         handles["packets"].value = f"{store.received_packets} received / {store.invalid_packets} invalid"
         return
 
@@ -648,8 +680,8 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
     handles["fault"].value = latest.fault_reason if latest.fault_latched else "none"
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
-    if "tcp_status" in handles and not str(handles["tcp_status"].value).startswith(("OK:", "BLOCKED:")):
-        handles["tcp_status"].value = f"{_format_fk_status(latest, stale=stale)}; TCP pose command disabled until FK/IK milestone is enabled"
+    if "tcp_status" in handles:
+        handles["tcp_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     update_scene_markers(handles.get("scene", {}), latest)
     if "scene_assets" in handles:
         scene_errors = [
