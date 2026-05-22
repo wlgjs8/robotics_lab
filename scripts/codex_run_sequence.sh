@@ -40,12 +40,26 @@ run_one_task() {
   echo "Artifacts: $artifact_dir"
   echo "============================================================"
 
-  "$CODEX_BIN" exec \
-    --cd "$REPO_ROOT" \
-    --sandbox workspace-write \
-    --ask-for-approval never \
-    --json \
-    --output-last-message "$artifact_dir/final.md" \
+  # "$CODEX_BIN" exec \
+  #   --cd "$REPO_ROOT" \
+  #   --sandbox workspace-write \
+  #   --ask-for-approval never \
+  #   --json \
+  #   --output-last-message "$artifact_dir/final.md" \
+  #   - < "$prompt" \
+  #   > "$artifact_dir/events.jsonl" \
+  #   2> "$artifact_dir/stderr.log"
+  local codex_args
+  codex_args=(
+    exec
+    --cd "$REPO_ROOT"
+    --sandbox workspace-write
+    -c approval_policy=never
+    --json
+    --output-last-message "$artifact_dir/final.md"
+  )
+
+  "$CODEX_BIN" "${codex_args[@]}" \
     - < "$prompt" \
     > "$artifact_dir/events.jsonl" \
     2> "$artifact_dir/stderr.log"
