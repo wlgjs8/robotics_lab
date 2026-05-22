@@ -10,6 +10,7 @@
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/safety_filter.hpp"
 #include "rb_servo/control/trajectory_filter.hpp"
+#include "rb_servo/kinematics/i_kinematics.hpp"
 #include "rb_servo/logging/servo_logger.hpp"
 #include "rb_servo/robot/i_robot_backend.hpp"
 
@@ -22,7 +23,8 @@ public:
         std::unique_ptr<IRobotBackend> right_robot,
         const DualArmConfig& config,
         CommandBuffer* command_buffer,
-        ServoLogger* logger
+        ServoLogger* logger,
+        std::shared_ptr<IKinematics> kinematics = nullptr
     );
 
     ~DualArmServoLoop();
@@ -43,6 +45,7 @@ private:
 
     bool initializeRobots();
     bool readRobotStates(RobotState& left, RobotState& right);
+    void populateTcpPose(RobotState& state, const ArmMountConfig& mount) const;
     bool isValidRobotStateForStartup(const RobotState& state) const;
     bool isValidJointState(const RobotState& state) const;
 
@@ -107,6 +110,7 @@ private:
 
     CommandBuffer* command_buffer_ = nullptr;
     ServoLogger* logger_ = nullptr;
+    std::shared_ptr<IKinematics> kinematics_;
 
     TrajectoryFilter left_traj_filter_;
     TrajectoryFilter right_traj_filter_;

@@ -4,10 +4,12 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <mutex>
 
 #include "rb_servo/core/clock.hpp"
 #include "rb_servo/core/realtime.hpp"
+#include "rb_servo/kinematics/pinocchio_kinematics.hpp"
 
 namespace rb_servo {
 namespace {
@@ -45,6 +47,26 @@ bool isCommandModeMissingPayload(const ArmCommand& command) {
             return false;
     }
 }
+
+std::shared_ptr<IKinematics> makeKinematicsProvider(const DualArmConfig& config) {
+    if (!config.kinematics.enable || !config.kinematics.publish_tcp) {
+        return nullptr;
+    }
+    if (config.kinematics.provider != "pinocchio") {
+        return nullptr;
+    }
+    if (!PinocchioKinematics::isAvailable()) {
+        std::cerr << "[WARN] FK TCP publish deferred: Pinocchio kinematics is not available in this build\n";
+        return nullptr;
+    }
+    try {
+        return std::make_shared<PinocchioKinematics>(config.kinematics);
+    } catch (const std::exception& exc) {
+        std::cerr << "[WARN] FK TCP publish deferred: failed to initialize kinematics: "
+                  << exc.what() << "\n";
+        return nullptr;
+    }
+}
 }
 
 DualArmServoLoop::DualArmServoLoop(
@@ -52,12 +74,14 @@ DualArmServoLoop::DualArmServoLoop(
     std::unique_ptr<IRobotBackend> right_robot,
     const DualArmConfig& config,
     CommandBuffer* command_buffer,
-    ServoLogger* logger
+    ServoLogger* logger,
+    std::shared_ptr<IKinematics> kinematics
 ) : left_robot_(std::move(left_robot)),
     right_robot_(std::move(right_robot)),
     config_(config),
     command_buffer_(command_buffer),
     logger_(logger),
+    kinematics_(kinematics ? std::move(kinematics) : makeKinematicsProvider(config)),
     left_traj_filter_(config.servo, config.safety),
     right_traj_filter_(config.servo, config.safety),
     safety_filter_(config.safety) {}
@@ -404,7 +428,34 @@ bool DualArmServoLoop::configureRealtimeForLoop() {
 bool DualArmServoLoop::readRobotStates(RobotState& left, RobotState& right) {
     const bool left_ok = left_robot_ && left_robot_->readState(left);
     const bool right_ok = right_robot_ && right_robot_->readState(right);
+    populateTcpPose(left, config_.left_mount);
+    populateTcpPose(right, config_.right_mount);
     return left_ok && right_ok;
+}
+
+void DualArmServoLoop::populateTcpPose(RobotState& state, const ArmMountConfig& mount) const {
+    state.tcp_base.reset();
+    state.tcp_stand.reset();
+    state.has_valid_tcp_pose = false;
+    state.tcp_deferred = kinematics_ == nullptr;
+
+    if (!kinematics_) {
+        return;
+    }
+    if (!isValidJointState(state)) {
+        return;
+    }
+
+    try {
+        state.tcp_base = kinematics_->computeTcpBase(state.q_actual_deg);
+        state.tcp_stand = kinematics_->computeTcpStand(state.arm_id, state.q_actual_deg, mount);
+        state.has_valid_tcp_pose = true;
+        state.tcp_deferred = false;
+    } catch (const std::exception& exc) {
+        std::cerr << "[WARN] FK TCP publish invalid for "
+                  << (state.arm_id == ArmId::Left ? "left" : "right")
+                  << " arm: " << exc.what() << "\n";
+    }
 }
 
 bool DualArmServoLoop::isValidJointState(const RobotState& state) const {

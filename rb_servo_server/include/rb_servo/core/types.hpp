@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace rb_servo {
@@ -132,8 +133,10 @@ struct RobotState {
     JointArray dq_actual_deg_s{};
     bool has_valid_joint_state = false;
 
-    Pose6D tcp_base;
-    Pose6D tcp_stand;
+    std::optional<Pose6D> tcp_base;
+    std::optional<Pose6D> tcp_stand;
+    bool has_valid_tcp_pose = false;
+    bool tcp_deferred = true;
     Wrench6D wrench_tcp;
 
     RobotConnectionState connection_state = RobotConnectionState::Disconnected;

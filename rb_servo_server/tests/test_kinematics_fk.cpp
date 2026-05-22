@@ -1,14 +1,23 @@
 #include <cmath>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <unistd.h>
 
 #include "rb_servo/config/config.hpp"
+#include "rb_servo/control/command_buffer.hpp"
+#include "rb_servo/control/dual_arm_servo_loop.hpp"
 #include "rb_servo/kinematics/i_kinematics.hpp"
 #include "rb_servo/kinematics/pinocchio_kinematics.hpp"
+#include "rb_servo/network/state_publisher.hpp"
+#include "rb_servo/robot/i_robot_backend.hpp"
+
+#include <nlohmann/json.hpp>
 
 namespace {
 
@@ -67,6 +76,103 @@ bool differentPose(const rb_servo::Pose6D& a, const rb_servo::Pose6D& b) {
            std::fabs(a.ry - b.ry) > 1e-9 ||
            std::fabs(a.rz - b.rz) > 1e-9;
 }
+
+rb_servo::JointArray joints(double value) {
+    rb_servo::JointArray out{};
+    out.fill(value);
+    return out;
+}
+
+rb_servo::DualArmConfig testConfig() {
+    rb_servo::DualArmConfig cfg;
+    cfg.left_robot.run_mode = rb_servo::RunMode::Mock;
+    cfg.right_robot.run_mode = rb_servo::RunMode::Mock;
+    cfg.left_mount.arm_id = rb_servo::ArmId::Left;
+    cfg.left_mount.base_pose_in_stand = {0.1, 0.2, 0.3, 0.0, 0.0, 0.0};
+    cfg.right_mount.arm_id = rb_servo::ArmId::Right;
+    cfg.right_mount.base_pose_in_stand = {-0.1, 0.2, 0.3, 0.0, 0.0, 0.0};
+    cfg.servo.rate_hz = 200;
+    cfg.servo.enable_realtime_priority = false;
+    cfg.servo.send_servo_commands = false;
+    cfg.safety.q_min_deg = joints(-180.0);
+    cfg.safety.q_max_deg = joints(180.0);
+    cfg.safety.dq_max_deg_s = joints(10000.0);
+    cfg.safety.ddq_max_deg_s2 = joints(100000.0);
+    cfg.safety.max_tracking_error_deg = 1000.0;
+    cfg.safety.tracking_error_policy = rb_servo::TrackingErrorPolicy::SnapToActual;
+    cfg.safety.stop_both_arms_on_single_arm_error = false;
+    cfg.safety.latch_fault_on_robot_state_error = true;
+    return cfg;
+}
+
+class FakeKinematics final : public rb_servo::IKinematics {
+public:
+    rb_servo::Pose6D computeTcpBase(const rb_servo::JointArray& q_deg) const override {
+        return {q_deg[0] * 0.001, q_deg[1] * 0.001, 0.7, 0.01, 0.02, 0.03};
+    }
+
+    rb_servo::Pose6D computeTcpStand(
+        rb_servo::ArmId arm,
+        const rb_servo::JointArray& q_deg,
+        const rb_servo::ArmMountConfig& mount
+    ) const override {
+        const rb_servo::Pose6D tcp_base = computeTcpBase(q_deg);
+        const double arm_offset = arm == rb_servo::ArmId::Left ? 1.0 : -1.0;
+        return {
+            mount.base_pose_in_stand.x + tcp_base.x + arm_offset,
+            mount.base_pose_in_stand.y + tcp_base.y,
+            mount.base_pose_in_stand.z + tcp_base.z,
+            mount.base_pose_in_stand.rx + tcp_base.rx,
+            mount.base_pose_in_stand.ry + tcp_base.ry,
+            mount.base_pose_in_stand.rz + tcp_base.rz,
+        };
+    }
+};
+
+class TestBackend final : public rb_servo::IRobotBackend {
+public:
+    TestBackend(rb_servo::ArmId arm_id, rb_servo::JointArray q_actual)
+        : arm_id_(arm_id), q_actual_(q_actual) {}
+
+    bool connect() override {
+        connected_ = true;
+        return true;
+    }
+
+    bool initialize() override {
+        initialized_ = true;
+        return true;
+    }
+
+    bool readState(rb_servo::RobotState& out_state) override {
+        out_state.arm_id = arm_id_;
+        out_state.q_actual_deg = q_actual_;
+        out_state.q_target_deg = q_actual_;
+        out_state.has_valid_joint_state = true;
+        out_state.connection_state = connected_
+            ? rb_servo::RobotConnectionState::Connected
+            : rb_servo::RobotConnectionState::Disconnected;
+        out_state.servo_enabled = initialized_;
+        return true;
+    }
+
+    bool sendServoJ(const rb_servo::JointArray& q_target_deg) override {
+        q_actual_ = q_target_deg;
+        return true;
+    }
+
+    bool stop() override { return true; }
+    bool resetFault() override { return true; }
+    bool isConnected() const override { return connected_; }
+    rb_servo::ArmId armId() const override { return arm_id_; }
+    std::string name() const override { return "test"; }
+
+private:
+    rb_servo::ArmId arm_id_;
+    rb_servo::JointArray q_actual_{};
+    bool connected_ = false;
+    bool initialized_ = false;
+};
 
 std::string validKinematicsYaml(const std::string& urdf_path) {
     return
@@ -214,6 +320,99 @@ bool testPinocchioFkIfEnabled() {
     return true;
 }
 
+bool testStatePublisherSerializesTcpPoseValidity() {
+    rb_servo::DualArmConfig cfg = testConfig();
+    rb_servo::ServoSnapshot snapshot;
+    snapshot.left_state.arm_id = rb_servo::ArmId::Left;
+    snapshot.left_state.has_valid_joint_state = true;
+    snapshot.left_state.connection_state = rb_servo::RobotConnectionState::Connected;
+    snapshot.left_state.tcp_base = rb_servo::Pose6D{0.1, 0.2, 0.3, 0.01, 0.02, 0.03};
+    snapshot.left_state.tcp_stand = rb_servo::Pose6D{1.1, 1.2, 1.3, 0.11, 0.12, 0.13};
+    snapshot.left_state.has_valid_tcp_pose = true;
+    snapshot.left_state.tcp_deferred = false;
+
+    snapshot.right_state.arm_id = rb_servo::ArmId::Right;
+    snapshot.right_state.has_valid_joint_state = false;
+    snapshot.right_state.connection_state = rb_servo::RobotConnectionState::Connected;
+    snapshot.right_state.has_valid_tcp_pose = false;
+    snapshot.right_state.tcp_deferred = false;
+
+    rb_servo::StatePublisher publisher(cfg);
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+
+    RB_CHECK(!json.at("tcp_fields_deferred").get<bool>());
+    RB_CHECK(!json.at("left").at("tcp_base").is_null());
+    RB_CHECK(!json.at("left").at("tcp_stand").is_null());
+    RB_CHECK(json.at("left").at("tcp_base").at("x").get<double>() == 0.1);
+    RB_CHECK(json.at("left").at("has_valid_tcp_pose").get<bool>());
+    RB_CHECK(!json.at("left").at("tcp_deferred").get<bool>());
+
+    RB_CHECK(json.at("right").at("tcp_base").is_null());
+    RB_CHECK(json.at("right").at("tcp_stand").is_null());
+    RB_CHECK(!json.at("right").at("has_valid_tcp_pose").get<bool>());
+    RB_CHECK(!json.at("right").at("tcp_deferred").get<bool>());
+    return true;
+}
+
+bool testStatePublisherKeepsTcpDeferredWhenFkDisabled() {
+    rb_servo::DualArmConfig cfg = testConfig();
+    rb_servo::ServoSnapshot snapshot;
+    snapshot.left_state.arm_id = rb_servo::ArmId::Left;
+    snapshot.right_state.arm_id = rb_servo::ArmId::Right;
+
+    rb_servo::StatePublisher publisher(cfg);
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+
+    RB_CHECK(json.at("tcp_fields_deferred").get<bool>());
+    RB_CHECK(json.at("left").at("tcp_base").is_null());
+    RB_CHECK(json.at("left").at("tcp_stand").is_null());
+    RB_CHECK(!json.at("left").at("has_valid_tcp_pose").get<bool>());
+    RB_CHECK(json.at("left").at("tcp_deferred").get<bool>());
+    RB_CHECK(json.at("right").at("tcp_base").is_null());
+    RB_CHECK(json.at("right").at("tcp_stand").is_null());
+    RB_CHECK(!json.at("right").at("has_valid_tcp_pose").get<bool>());
+    RB_CHECK(json.at("right").at("tcp_deferred").get<bool>());
+    return true;
+}
+
+bool testServoLoopPublishesInjectedFkForValidJointState() {
+    rb_servo::DualArmConfig cfg = testConfig();
+    rb_servo::CommandBuffer buffer;
+    auto kinematics = std::make_shared<FakeKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, joints(10.0)),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, joints(20.0)),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+
+    RB_CHECK(loop.start());
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+
+    RB_CHECK(snapshot.left_state.has_valid_tcp_pose);
+    RB_CHECK(snapshot.right_state.has_valid_tcp_pose);
+    RB_CHECK(snapshot.left_state.tcp_base.has_value());
+    RB_CHECK(snapshot.left_state.tcp_stand.has_value());
+    RB_CHECK(snapshot.right_state.tcp_base.has_value());
+    RB_CHECK(snapshot.right_state.tcp_stand.has_value());
+    RB_CHECK(!snapshot.left_state.tcp_deferred);
+    RB_CHECK(!snapshot.right_state.tcp_deferred);
+
+    rb_servo::StatePublisher publisher(cfg);
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    RB_CHECK(!json.at("left").at("tcp_base").is_null());
+    RB_CHECK(!json.at("left").at("tcp_stand").is_null());
+    RB_CHECK(json.at("left").at("has_valid_tcp_pose").get<bool>());
+    RB_CHECK(!json.at("right").at("tcp_base").is_null());
+    RB_CHECK(!json.at("right").at("tcp_stand").is_null());
+    RB_CHECK(json.at("right").at("has_valid_tcp_pose").get<bool>());
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -221,5 +420,8 @@ int main() {
     if (!testIkRemainsUnavailable()) return 1;
     if (!testDisabledBuildBehavior()) return 1;
     if (!testPinocchioFkIfEnabled()) return 1;
+    if (!testStatePublisherSerializesTcpPoseValidity()) return 1;
+    if (!testStatePublisherKeepsTcpDeferredWhenFkDisabled()) return 1;
+    if (!testServoLoopPublishesInjectedFkForValidJointState()) return 1;
     return 0;
 }

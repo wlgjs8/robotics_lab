@@ -39,6 +39,11 @@ nlohmann::json poseJson(const Pose6D& pose) {
     };
 }
 
+nlohmann::json optionalPoseJson(const std::optional<Pose6D>& pose) {
+    if (!pose) return nullptr;
+    return poseJson(*pose);
+}
+
 nlohmann::json armStateJson(
     const RobotState& state,
     const ArmCommand& command,
@@ -65,9 +70,10 @@ nlohmann::json armStateJson(
         {"robot_time_ns", state.robot_time_ns},
         {"host_time_ns", state.host_time_ns},
         {"error_code", state.error_code},
-        {"tcp_stand", nullptr},
-        {"tcp_base", nullptr},
-        {"tcp_deferred", true},
+        {"tcp_stand", optionalPoseJson(state.tcp_stand)},
+        {"tcp_base", optionalPoseJson(state.tcp_base)},
+        {"has_valid_tcp_pose", state.has_valid_tcp_pose},
+        {"tcp_deferred", state.tcp_deferred},
     };
 }
 
@@ -146,7 +152,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             {"base_pose_in_stand", poseJson(config_.right_mount.base_pose_in_stand)},
         }},
     };
-    message["tcp_fields_deferred"] = true;
+    message["tcp_fields_deferred"] =
+        snapshot.left_state.tcp_deferred || snapshot.right_state.tcp_deferred;
     return message.dump();
 }
 
