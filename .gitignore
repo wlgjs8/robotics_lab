@@ -15,7 +15,8 @@
 **/artifacts/
 **/episodes/
 camera_server/episodes/
-rb_servo_server/config/local/
+rb_servo_server/config/local/*.yaml
+!rb_servo_server/config/local/.gitkeep
 calibration/local/
 geometry/local/
 

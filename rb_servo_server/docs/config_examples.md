@@ -20,23 +20,41 @@ Mock mode uses `MockBackend` for both arms.
 
 ## Hardware-free simulator
 
-`config/dual_simulator.yaml` pairs with two repo-local simulator processes,
-one per arm:
+Use `config/dual_simulator.yaml` for host-run simulator checks. It pairs with
+two repo-local simulator processes, one per arm, on separate loopback ports:
 
 ```yaml
 left_robot:
   backend_type: simulator
   run_mode: simulation
+  name: left_simulator
   simulator_control_endpoint: "tcp://127.0.0.1:50200"
 
 right_robot:
   backend_type: simulator
   run_mode: simulation
+  name: right_simulator
   simulator_control_endpoint: "tcp://127.0.0.1:50210"
 ```
 
-For Docker Compose, use `config/dual_simulator_compose.yaml`; it points to
-`tcp://rb_simulator_left:50200` and `tcp://rb_simulator_right:50200`.
+Use `config/dual_simulator_compose.yaml` for Docker Compose checks. Each
+simulator runs in its own container, so both services use internal port
+`50200` behind different service DNS names:
+
+```yaml
+left_robot:
+  backend_type: simulator
+  run_mode: simulation
+  name: left_simulator
+  simulator_control_endpoint: "tcp://rb_simulator_left:50200"
+
+right_robot:
+  backend_type: simulator
+  run_mode: simulation
+  name: right_simulator
+  simulator_control_endpoint: "tcp://rb_simulator_right:50200"
+```
+
 The deprecated `dual_rb_simulator.yaml`, `dual_rb_simulator_compose.yaml`, and
 `dual_rbsim.yaml` profiles are compatibility aliases only. New configs should
 use `backend_type: simulator`, `run_mode: simulation`, and
@@ -46,9 +64,31 @@ See `docs/rb_simulator_dev.md` for the supported unit and local-smoke evidence.
 
 ## Real robot
 
-Real robot startup is intentionally omitted from the hardware-free simulator
-phase. It requires explicit human-gated approval, real hardware readiness, and
-the real-mode guard environment outside this local simulator workflow.
+`config/dual_real.example.yaml` is a template only. Actual site-specific real
+robot YAML files belong under `config/local/`, and local `*.yaml` files there
+are gitignored.
+
+The real example uses the assigned controller IPs:
+
+```yaml
+left_robot:
+  backend_type: rbpodo
+  run_mode: real
+  ip: "172.28.60.200"
+
+right_robot:
+  backend_type: rbpodo
+  run_mode: real
+  ip: "172.28.60.201"
+
+servo:
+  send_servo_commands: false
+```
+
+Real robot startup remains gated outside the hardware-free simulator workflow:
+`RB_ALLOW_REAL_ROBOT=1` is required for read-only real connection, and
+`RB_ALLOW_REAL_MOTION=1` plus `servo.send_servo_commands=true` is required for
+real `servo_j` motion.
 
 ## Force control
 

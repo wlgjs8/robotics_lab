@@ -1,8 +1,9 @@
 schema: robotics_lab.rb_servo_server.v1
 
-# Example only. Copy to rb_servo_server/config/local/ for site-specific use.
-# Real connection requires RB_ALLOW_REAL_ROBOT=1.
-# Real servo motion additionally requires RB_ALLOW_REAL_MOTION=1 and
+# Template only. Do not run this file as a site-specific real robot config.
+# Copy to rb_servo_server/config/local/ and edit that local YAML for hardware use.
+# Read-only real connection requires RB_ALLOW_REAL_ROBOT=1.
+# Real servo_j motion additionally requires RB_ALLOW_REAL_MOTION=1 and
 # servo.send_servo_commands=true.
 
 left_robot:
