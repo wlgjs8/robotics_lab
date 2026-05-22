@@ -24,6 +24,13 @@ class SafetyConfig:
     kinematics_available: bool = False
     camera_available: bool = False
     camera_stale: bool = False
+    allow_configured_estimate_geometry_in_simulation: bool = True
+    allow_configured_estimate_geometry_in_real: bool = False
+
+
+@dataclass(frozen=True)
+class GeometryConfig:
+    path: str = "calibration/active_calibration.yaml"
 
 
 @dataclass(frozen=True)
@@ -56,6 +63,7 @@ class PolicyRunnerConfig:
     schema: str = "robotics_lab.policy_runner.v1"
     mode: str = "simulation"
     action_source: str = "hold"
+    geometry: GeometryConfig = field(default_factory=GeometryConfig)
     robot_state: RobotStateConfig = field(default_factory=RobotStateConfig)
     servo_command: ServoCommandConfig = field(default_factory=ServoCommandConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
@@ -77,6 +85,7 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         schema=str(raw.get("schema", "robotics_lab.policy_runner.v1")),
         mode=str(raw.get("mode", "simulation")),
         action_source=str(raw.get("action_source", "hold")),
+        geometry=GeometryConfig(**_section(raw, "geometry")),
         robot_state=RobotStateConfig(**_section(raw, "robot_state")),
         servo_command=ServoCommandConfig(**_section(raw, "servo_command")),
         safety=SafetyConfig(**_section(raw, "safety")),

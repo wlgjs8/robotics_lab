@@ -12,6 +12,8 @@ Supported P1 action sources:
   joint velocity commands.
 
 FK/IK is not available in P1, so there are no Cartesian policy actions.
+P2 adds geometry awareness for future Cartesian and camera policies, but does
+not add a Cartesian action source.
 
 ## Safety
 
@@ -21,6 +23,13 @@ Motion commands are blocked when:
 - `fault_latched` is true
 - `motion_state` is `FaultLatched` or `EmergencyLatched`
 - joint state is invalid and `require_valid_joint_state` is true
+- an action source declares `requires_geometry` and the calibration registry is
+  missing, invalid, lacks robot mount geometry, or is not policy-ready for the
+  configured mode
+- an action source declares `requires_camera_geometry` and measured camera
+  intrinsics/extrinsics are unavailable
+- an action source declares `requires_valid_tcp_pose` and the state stream does
+  not report valid TCP pose for both arms
 - configured mode is `real` and `allow_real_motion` is false
 - an action source requires camera or kinematics inputs that are unavailable
 
@@ -31,6 +40,23 @@ they do not send motion unless the config explicitly sets
 `spacemouse_joint_velocity` also remains behind the same stale-state,
 fault-state, and real-motion gates. Button 0 is the default deadman switch:
 when it is released, the action source emits no motion command.
+
+Joint-only sources do not require the geometry registry. Future Cartesian or
+camera policy sources must declare geometry requirements before emitting
+commands. The default geometry config is:
+
+```yaml
+geometry:
+  path: "calibration/active_calibration.yaml"
+safety:
+  allow_configured_estimate_geometry_in_simulation: true
+  allow_configured_estimate_geometry_in_real: false
+```
+
+The current active calibration is a configured estimate. It is acceptable for
+simulation geometry-aware policy tests when the simulation toggle remains true,
+but it is blocked for real geometry-dependent policy by default because
+`geometry_valid_for_real_policy` is false.
 
 Only one command source should be active at a time. Do not run GUI teleop and
 `policy_runner` teleop against the same `rb_servo_server` command port
