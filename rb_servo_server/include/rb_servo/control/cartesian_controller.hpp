@@ -2,26 +2,39 @@
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/core/types.hpp"
+#include "rb_servo/kinematics/i_kinematics.hpp"
+
+#include <memory>
+#include <string>
 
 namespace rb_servo {
+
+struct CartesianArmTargetResult {
+    SafetyVerdict verdict = SafetyVerdict::CartesianUnavailable;
+    JointArray q_target_deg{};
+    std::string reason;
+};
 
 class CartesianController {
 public:
     CartesianController(
         const ArmMountConfig& left_mount,
-        const ArmMountConfig& right_mount
+        const ArmMountConfig& right_mount,
+        std::shared_ptr<IKinematics> kinematics
     );
 
-    JointArray computeArmJointTarget(
+    CartesianArmTargetResult computeArmJointTarget(
         const ArmCommand& command,
-        const RobotState& state
+        const RobotState& state,
+        const JointArray& previous_safe_sent_q_deg
     );
 
 private:
-    JointArray solveIkFromTcpStandTarget(
+    CartesianArmTargetResult solveIkFromTcpStandTarget(
         ArmId arm_id,
         const Pose6D& target_tcp_stand,
-        const RobotState& state
+        const RobotState& state,
+        const JointArray& previous_safe_sent_q_deg
     );
 
     Pose6D applyTcpDeltaStand(
@@ -37,6 +50,7 @@ private:
 private:
     ArmMountConfig left_mount_;
     ArmMountConfig right_mount_;
+    std::shared_ptr<IKinematics> kinematics_;
 };
 
 }  // namespace rb_servo

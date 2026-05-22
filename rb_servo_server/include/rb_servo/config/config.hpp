@@ -134,6 +134,12 @@ struct ForceControlConfig {
     double max_rot_step_rad = 0.01;
 };
 
+struct CartesianControlConfig {
+    bool enable = true;
+    bool allow_in_simulation = true;
+    bool allow_in_real = false;
+};
+
 struct DualArmConfig {
     BackendConfig left_robot;
     BackendConfig right_robot;
@@ -146,6 +152,7 @@ struct DualArmConfig {
     NetworkConfig network;
     LoggingConfig logging;
     ForceControlConfig force_control;
+    CartesianControlConfig cartesian_control;
     KinematicsConfig kinematics;
 };
 

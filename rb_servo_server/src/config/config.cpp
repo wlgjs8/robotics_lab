@@ -373,6 +373,13 @@ void validateConfig(const DualArmConfig& cfg) {
         throw std::runtime_error("force_control.enable must remain false");
     }
 
+    if (anyReal(cfg) && cfg.cartesian_control.enable && cfg.cartesian_control.allow_in_real) {
+        const char* allow_cartesian = std::getenv("RB_ALLOW_REAL_CARTESIAN");
+        if (!allow_cartesian || std::string(allow_cartesian) != "1") {
+            throw std::runtime_error("Refusing real Cartesian control. Set RB_ALLOW_REAL_CARTESIAN=1.");
+        }
+    }
+
     if (cfg.kinematics.enable) {
         const std::string provider = lower(cfg.kinematics.provider);
         if (provider != "pinocchio") {
@@ -520,6 +527,7 @@ void validateRootKeys(const YAML::Node& root) {
         "network",
         "logging",
         "force_control",
+        "cartesian_control",
         "kinematics",
     }, "config");
 }
@@ -678,6 +686,24 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         validateAllowedKeys(sec, {"provider", "enable"}, "force_control");
         if (has(sec, "provider")) cfg.force_control.provider = lower(asString(sec["provider"], "force_control.provider"));
         if (has(sec, "enable")) cfg.force_control.enable = asBool(sec["enable"], "force_control.enable");
+    }
+
+    if (has(root, "cartesian_control")) {
+        const YAML::Node sec = root["cartesian_control"];
+        validateAllowedKeys(sec, {
+            "enable",
+            "allow_in_simulation",
+            "allow_in_real",
+        }, "cartesian_control");
+        if (has(sec, "enable")) cfg.cartesian_control.enable = asBool(sec["enable"], "cartesian_control.enable");
+        if (has(sec, "allow_in_simulation")) {
+            cfg.cartesian_control.allow_in_simulation =
+                asBool(sec["allow_in_simulation"], "cartesian_control.allow_in_simulation");
+        }
+        if (has(sec, "allow_in_real")) {
+            cfg.cartesian_control.allow_in_real =
+                asBool(sec["allow_in_real"], "cartesian_control.allow_in_real");
+        }
     }
 
     if (has(root, "kinematics")) {

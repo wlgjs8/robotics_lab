@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <mutex>
 
+#include "rb_servo/control/cartesian_controller.hpp"
 #include "rb_servo/core/clock.hpp"
 #include "rb_servo/core/realtime.hpp"
 #include "rb_servo/kinematics/pinocchio_kinematics.hpp"
@@ -49,7 +51,7 @@ bool isCommandModeMissingPayload(const ArmCommand& command) {
 }
 
 std::shared_ptr<IKinematics> makeKinematicsProvider(const DualArmConfig& config) {
-    if (!config.kinematics.enable || !config.kinematics.publish_tcp) {
+    if (!config.kinematics.enable || (!config.kinematics.publish_tcp && !config.kinematics.ik.enable)) {
         return nullptr;
     }
     if (config.kinematics.provider != "pinocchio") {
@@ -67,6 +69,17 @@ std::shared_ptr<IKinematics> makeKinematicsProvider(const DualArmConfig& config)
         return nullptr;
     }
 }
+
+bool envFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value && std::string(value) == "1";
+}
+
+RunMode runModeForArm(const DualArmConfig& config, ArmId arm_id) {
+    return arm_id == ArmId::Left
+        ? config.left_robot.run_mode
+        : config.right_robot.run_mode;
+}
 }
 
 DualArmServoLoop::DualArmServoLoop(
@@ -81,10 +94,13 @@ DualArmServoLoop::DualArmServoLoop(
     config_(config),
     command_buffer_(command_buffer),
     logger_(logger),
-    kinematics_(kinematics ? std::move(kinematics) : makeKinematicsProvider(config)),
+    kinematics_(nullptr),
+    kinematics_injected_(kinematics != nullptr),
     left_traj_filter_(config.servo, config.safety),
     right_traj_filter_(config.servo, config.safety),
-    safety_filter_(config.safety) {}
+    safety_filter_(config.safety) {
+    kinematics_ = kinematics ? std::move(kinematics) : makeKinematicsProvider(config);
+}
 
 DualArmServoLoop::~DualArmServoLoop() {
     stop();
@@ -437,9 +453,10 @@ void DualArmServoLoop::populateTcpPose(RobotState& state, const ArmMountConfig& 
     state.tcp_base.reset();
     state.tcp_stand.reset();
     state.has_valid_tcp_pose = false;
-    state.tcp_deferred = kinematics_ == nullptr;
+    const bool publish_tcp = config_.kinematics.publish_tcp || kinematics_injected_;
+    state.tcp_deferred = kinematics_ == nullptr || !publish_tcp;
 
-    if (!kinematics_) {
+    if (!kinematics_ || !publish_tcp) {
         return;
     }
     if (!isValidJointState(state)) {
@@ -492,9 +509,73 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     }
 
     if (isCartesianMode(command.left.mode) || isCartesianMode(command.right.mode)) {
-        if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
-        target.left_q_target_deg = left_prev_sent_q_deg_;
-        target.right_q_target_deg = right_prev_sent_q_deg_;
+        bool cartesian_available =
+            config_.cartesian_control.enable &&
+            config_.kinematics.enable &&
+            config_.kinematics.ik.enable &&
+            kinematics_ != nullptr;
+        if (cartesian_available) {
+            for (const ArmCommand* arm_command : {&command.left, &command.right}) {
+                if (!isCartesianMode(arm_command->mode)) continue;
+                const RunMode run_mode = runModeForArm(config_, arm_command->arm_id);
+                if (run_mode == RunMode::Simulation) {
+                    cartesian_available = config_.cartesian_control.allow_in_simulation;
+                } else if (run_mode == RunMode::Real) {
+                    cartesian_available =
+                        config_.cartesian_control.allow_in_real &&
+                        envFlagEnabled("RB_ALLOW_REAL_CARTESIAN");
+                } else {
+                    cartesian_available = false;
+                }
+                if (!cartesian_available) break;
+            }
+        }
+        if (!cartesian_available) {
+            if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
+            target.left_q_target_deg = left_prev_sent_q_deg_;
+            target.right_q_target_deg = right_prev_sent_q_deg_;
+            return target;
+        }
+
+        CartesianController cartesian(
+            config_.left_mount,
+            config_.right_mount,
+            kinematics_
+        );
+
+        const CartesianArmTargetResult left_cartesian_result = isCartesianMode(command.left.mode)
+            ? cartesian.computeArmJointTarget(command.left, left_state, left_prev_sent_q_deg_)
+            : CartesianArmTargetResult{
+                SafetyVerdict::Ok,
+                left_traj_filter_.computeJointTarget(command.left, left_state, left_prev_sent_q_deg_, dt_sec),
+                ""
+            };
+        target.left_q_target_deg = left_cartesian_result.q_target_deg;
+
+        const CartesianArmTargetResult right_cartesian_result = isCartesianMode(command.right.mode)
+            ? cartesian.computeArmJointTarget(command.right, right_state, right_prev_sent_q_deg_)
+            : CartesianArmTargetResult{
+                SafetyVerdict::Ok,
+                right_traj_filter_.computeJointTarget(command.right, right_state, right_prev_sent_q_deg_, dt_sec),
+                ""
+            };
+        target.right_q_target_deg = right_cartesian_result.q_target_deg;
+
+        if (left_cartesian_result.verdict != SafetyVerdict::Ok ||
+            right_cartesian_result.verdict != SafetyVerdict::Ok) {
+            SafetyVerdict verdict = SafetyVerdict::CartesianUnavailable;
+            if (left_cartesian_result.verdict == SafetyVerdict::IkFailed ||
+                right_cartesian_result.verdict == SafetyVerdict::IkFailed) {
+                verdict = SafetyVerdict::IkFailed;
+            }
+            if (command_verdict) *command_verdict = verdict;
+            if (left_cartesian_result.verdict != SafetyVerdict::Ok) {
+                target.left_q_target_deg = left_prev_sent_q_deg_;
+            }
+            if (right_cartesian_result.verdict != SafetyVerdict::Ok) {
+                target.right_q_target_deg = right_prev_sent_q_deg_;
+            }
+        }
         return target;
     }
 

@@ -23,6 +23,7 @@
 #include "rb_servo/control/dual_arm_servo_loop.hpp"
 #include "rb_servo/control/safety_filter.hpp"
 #include "rb_servo/core/clock.hpp"
+#include "rb_servo/kinematics/i_kinematics.hpp"
 #include "rb_servo/logging/servo_logger.hpp"
 #include "rb_servo/network/command_server.hpp"
 #include "rb_servo/network/state_publisher.hpp"
@@ -141,6 +142,57 @@ private:
     int read_count_ = 0;
     int reset_count_ = 0;
     int send_count_ = 0;
+};
+
+class FakeCartesianKinematics final : public rb_servo::IKinematics {
+public:
+    rb_servo::Pose6D computeTcpBase(const rb_servo::JointArray& q_deg) const override {
+        return {q_deg[0] / 100.0, q_deg[1] / 100.0, q_deg[2] / 100.0, 0.0, 0.0, 0.0};
+    }
+
+    rb_servo::Pose6D computeTcpStand(
+        rb_servo::ArmId arm,
+        const rb_servo::JointArray& q_deg,
+        const rb_servo::ArmMountConfig& mount
+    ) const override {
+        (void)arm;
+        const rb_servo::Pose6D tcp_base = computeTcpBase(q_deg);
+        return {
+            mount.base_pose_in_stand.x + tcp_base.x,
+            mount.base_pose_in_stand.y + tcp_base.y,
+            mount.base_pose_in_stand.z + tcp_base.z,
+            0.0,
+            0.0,
+            0.0,
+        };
+    }
+
+    rb_servo::IkResult solveIk(
+        rb_servo::ArmId arm,
+        const rb_servo::Pose6D& target_tcp_stand,
+        const rb_servo::JointArray& seed_q_deg,
+        const rb_servo::ArmMountConfig& mount
+    ) const override {
+        (void)arm;
+        rb_servo::IkResult result;
+        result.q_solution_deg = seed_q_deg;
+        if (fail_) {
+            result.success = false;
+            result.q_solution_deg = joints(999.0);
+            result.reason = "injected_failure";
+            return result;
+        }
+        result.success = true;
+        result.q_solution_deg[0] = (target_tcp_stand.x - mount.base_pose_in_stand.x) * 100.0;
+        result.q_solution_deg[1] = (target_tcp_stand.y - mount.base_pose_in_stand.y) * 100.0;
+        result.q_solution_deg[2] = (target_tcp_stand.z - mount.base_pose_in_stand.z) * 100.0;
+        return result;
+    }
+
+    void setFail(bool fail) { fail_ = fail; }
+
+private:
+    bool fail_ = false;
 };
 
 class ScriptedRbsimServer {
@@ -1968,6 +2020,208 @@ bool testDisarmAndCartesianHoldPreviousTarget() {
     return true;
 }
 
+bool testCartesianPoseTargetUsesIkInSimulation() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.right_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.left_mount.arm_id = rb_servo::ArmId::Left;
+    cfg.right_mount.arm_id = rb_servo::ArmId::Right;
+    cfg.kinematics.enable = true;
+    cfg.kinematics.ik.enable = true;
+    cfg.kinematics.publish_tcp = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    rb_servo::DualArmCommand mixed = command(rb_servo::ControlMode::Hold);
+    mixed.left.mode = rb_servo::ControlMode::TcpPoseTarget;
+    mixed.left.has_tcp_target = true;
+    mixed.left.tcp_target_stand = {0.04, 0.02, 0.01, 0.0, 0.0, 0.0};
+    mixed.right.mode = rb_servo::ControlMode::JointTarget;
+    mixed.right.has_joint_target = true;
+    mixed.right.q_target_deg = joints(3.0);
+    buffer.setCommand(mixed);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        const rb_servo::ServoTarget previous = loop.previousSentTarget();
+        return snapshot.command.left.mode == rb_servo::ControlMode::TcpPoseTarget &&
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok &&
+               snapshot.motion_state == rb_servo::ServerMotionState::Running &&
+               std::abs(previous.left_q_target_deg[0] - 4.0) < kEpsilon &&
+               std::abs(previous.left_q_target_deg[1] - 2.0) < kEpsilon &&
+               std::abs(previous.left_q_target_deg[2] - 1.0) < kEpsilon &&
+               sameJointArray(previous.right_q_target_deg, joints(3.0));
+    }));
+    const rb_servo::ServoTarget previous = loop.previousSentTarget();
+    loop.stop();
+
+    RB_CHECK(std::abs(previous.left_q_target_deg[0] - 4.0) < kEpsilon);
+    RB_CHECK(std::abs(previous.left_q_target_deg[1] - 2.0) < kEpsilon);
+    RB_CHECK(std::abs(previous.left_q_target_deg[2] - 1.0) < kEpsilon);
+    RB_CHECK(sameJointArray(previous.right_q_target_deg, joints(3.0)));
+    return true;
+}
+
+bool testCartesianDeltaStandAndLocalUseIkInSimulation() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.right_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.left_mount.arm_id = rb_servo::ArmId::Left;
+    cfg.right_mount.arm_id = rb_servo::ArmId::Right;
+    cfg.kinematics.enable = true;
+    cfg.kinematics.ik.enable = true;
+    cfg.kinematics.publish_tcp = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    rb_servo::DualArmCommand stand_delta = command(rb_servo::ControlMode::TcpDeltaStand);
+    stand_delta.left.has_tcp_delta_stand = true;
+    stand_delta.right.has_tcp_delta_stand = true;
+    stand_delta.left.tcp_delta_stand = {0.02, 0.0, 0.0, 0.0, 0.0, 0.0};
+    stand_delta.right.tcp_delta_stand = {0.0, 0.03, 0.0, 0.0, 0.0, 0.0};
+    buffer.setCommand(stand_delta);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoTarget previous = loop.previousSentTarget();
+        return previous.left_q_target_deg[0] >= 2.0 - kEpsilon &&
+               previous.right_q_target_deg[1] >= 3.0 - kEpsilon;
+    }));
+    const rb_servo::ServoTarget after_stand_delta = loop.previousSentTarget();
+
+    rb_servo::DualArmCommand local_delta = command(rb_servo::ControlMode::TcpDeltaLocal);
+    local_delta.left.has_tcp_delta_local = true;
+    local_delta.right.has_tcp_delta_local = true;
+    local_delta.left.tcp_delta_local = {0.01, 0.0, 0.0, 0.0, 0.0, 0.0};
+    local_delta.right.tcp_delta_local = {0.0, 0.01, 0.0, 0.0, 0.0, 0.0};
+    buffer.setCommand(local_delta);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoTarget previous = loop.previousSentTarget();
+        return previous.left_q_target_deg[0] >= after_stand_delta.left_q_target_deg[0] + 1.0 - kEpsilon &&
+               previous.right_q_target_deg[1] >= after_stand_delta.right_q_target_deg[1] + 1.0 - kEpsilon;
+    }));
+
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+    RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok);
+    return true;
+}
+
+bool testCartesianIkFailureHoldsPreviousSafeTarget() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.right_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.kinematics.enable = true;
+    cfg.kinematics.ik.enable = true;
+    cfg.kinematics.publish_tcp = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    kinematics->setFail(true);
+
+    rb_servo::DualArmCommand cartesian = command(rb_servo::ControlMode::TcpPoseTarget);
+    cartesian.left.has_tcp_target = true;
+    cartesian.right.has_tcp_target = true;
+    cartesian.left.tcp_target_stand = {0.5, 0.0, 0.0, 0.0, 0.0, 0.0};
+    cartesian.right.tcp_target_stand = {0.5, 0.0, 0.0, 0.0, 0.0, 0.0};
+    buffer.setCommand(cartesian);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.command.left.mode == rb_servo::ControlMode::TcpPoseTarget &&
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::IkFailed;
+    }));
+    const rb_servo::ServoTarget previous = loop.previousSentTarget();
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+
+    RB_CHECK(sameJointArray(previous.left_q_target_deg, initial));
+    RB_CHECK(sameJointArray(previous.right_q_target_deg, initial));
+    RB_CHECK(sameJointArray(snapshot.left_sent_q_deg, initial));
+    RB_CHECK(sameJointArray(snapshot.right_sent_q_deg, initial));
+    RB_CHECK(snapshot.motion_state == rb_servo::ServerMotionState::ArmedHold);
+    return true;
+}
+
+bool testCartesianRealModeBlockedByDefault() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_robot.run_mode = rb_servo::RunMode::Real;
+    cfg.right_robot.run_mode = rb_servo::RunMode::Real;
+    cfg.kinematics.enable = true;
+    cfg.kinematics.ik.enable = true;
+    cfg.kinematics.publish_tcp = true;
+    cfg.cartesian_control.allow_in_real = false;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    rb_servo::DualArmCommand cartesian = command(rb_servo::ControlMode::TcpPoseTarget);
+    cartesian.left.has_tcp_target = true;
+    cartesian.right.has_tcp_target = true;
+    cartesian.left.tcp_target_stand = {0.04, 0.0, 0.0, 0.0, 0.0, 0.0};
+    cartesian.right.tcp_target_stand = {0.04, 0.0, 0.0, 0.0, 0.0, 0.0};
+    buffer.setCommand(cartesian);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.command.left.mode == rb_servo::ControlMode::TcpPoseTarget &&
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable;
+    }));
+    const rb_servo::ServoTarget previous = loop.previousSentTarget();
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+
+    RB_CHECK(sameJointArray(previous.left_q_target_deg, initial));
+    RB_CHECK(sameJointArray(previous.right_q_target_deg, initial));
+    RB_CHECK(snapshot.motion_state == rb_servo::ServerMotionState::ArmedHold);
+    return true;
+}
+
 bool testInvalidMotionCommandDoesNotReportRunning() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
@@ -2135,6 +2389,10 @@ int main() {
     if (!testResetFaultFailureKeepsFaultLatched()) return 1;
     if (!testResetFaultRequiresFreshValidState()) return 1;
     if (!testDisarmAndCartesianHoldPreviousTarget()) return 1;
+    if (!testCartesianPoseTargetUsesIkInSimulation()) return 1;
+    if (!testCartesianDeltaStandAndLocalUseIkInSimulation()) return 1;
+    if (!testCartesianIkFailureHoldsPreviousSafeTarget()) return 1;
+    if (!testCartesianRealModeBlockedByDefault()) return 1;
     if (!testInvalidMotionCommandDoesNotReportRunning()) return 1;
     if (!testJointLimitClamp()) return 1;
     if (!testSendFailureDoesNotAdvancePreviousTarget()) return 1;

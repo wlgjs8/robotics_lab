@@ -111,6 +111,7 @@ private:
     CommandBuffer* command_buffer_ = nullptr;
     ServoLogger* logger_ = nullptr;
     std::shared_ptr<IKinematics> kinematics_;
+    bool kinematics_injected_ = false;
 
     TrajectoryFilter left_traj_filter_;
     TrajectoryFilter right_traj_filter_;
