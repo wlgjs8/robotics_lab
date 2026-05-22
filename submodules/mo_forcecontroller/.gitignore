@@ -1,0 +1,89 @@
+# Visual Studio
+**/.vs
+**/bin
+**/obj
+**/Release
+**/Debug
+**/x64
+**/x86
+*.user
+
+# Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/c_cpp_properties.json
+!.vscode/tasks.json
+#!.vscode/launch.json
+*.code-workspace
+
+# Temporary Files
+*.diff
+*.err
+*.log
+*.orig
+*.rej
+*.swo
+*.swp
+*.vi
+
+# Compressed Files
+*.zip
+*.rar
+*.gzip
+*.deb
+*.7z
+*.tar.gz
+*.xz
+*.alz
+
+# Build
+build
+
+# Ctags
+**/tags
+
+# PIPC generated
+!CMakeLists.txt
+!setup.py
+**/CMakeLists.txt
+**/clean.sh
+**/output
+**/setup.py
+**/pypipc*
+
+# Python
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Workspace cache
+.cache/

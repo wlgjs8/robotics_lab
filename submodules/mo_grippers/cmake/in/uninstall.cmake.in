@@ -1,0 +1,43 @@
+file(READ "@CMAKE_BINARY_DIR@/install_manifest.txt" files_to_remove)
+string(REPLACE "\n" ";" files_to_remove "${files_to_remove}")
+set(dirs_to_check "")
+
+# Remove each installed file
+foreach(file ${files_to_remove})
+    if(EXISTS "${file}")
+        message(STATUS "Removing ${file}")
+        file(REMOVE "${file}")
+    else()
+        message(STATUS "File not found: ${file}")
+    endif()
+
+    # Extract directory to check later
+    get_filename_component(dir "${file}" DIRECTORY)
+    list(APPEND dirs_to_check "${dir}")
+endforeach()
+
+# Remove empty directories
+list(REMOVE_DUPLICATES dirs_to_check)
+foreach(dir ${dirs_to_check})
+    if(EXISTS "${dir}")
+        file(GLOB children RELATIVE "${dir}" "${dir}/*")
+        if(NOT children)
+            message(STATUS "Removing empty directory: ${dir}")
+            file(REMOVE_RECURSE "${dir}")
+        endif()
+    endif()
+endforeach()
+
+# Explicitly check parent directories for cleanup
+set(parent_dirs_to_check "/usr/local/include/plaif" "/usr/local/include/plaif/mpc-solver")
+foreach(parent_dir ${parent_dirs_to_check})
+    if(EXISTS "${parent_dir}")
+        file(GLOB children RELATIVE "${parent_dir}" "${parent_dir}/*")
+        if(NOT children)
+            message(STATUS "Removing empty parent directory: ${parent_dir}")
+            file(REMOVE_RECURSE "${parent_dir}")
+        else()
+            message(STATUS "Parent directory not empty: ${parent_dir}. Skipping removal.")
+        endif()
+    endif()
+endforeach()

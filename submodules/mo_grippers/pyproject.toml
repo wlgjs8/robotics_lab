@@ -1,0 +1,21 @@
+[project]
+name = "mo-grippers"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Batbold Nemekhbold",email = "bath@plaif.com"},
+    {name = "김주확",email = "juhk.kim@plaif.com"},
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pymodbus (==2.5.3)",
+    # following libraries for different protocols have been used yet
+    # but could be in the near future for different grippers
+    "pyserial (>=3.5,<4.0)",
+    "canopen (>=2.3.0,<3.0.0)"
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

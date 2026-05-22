@@ -7,7 +7,6 @@
 **/CTestTestfile.cmake
 **/cmake_install.cmake
 **/compile_commands.json
-**/Makefile
 
 # Logs and runtime artifacts
 **/logs/
