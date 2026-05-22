@@ -47,7 +47,12 @@ using json = nlohmann::json;
 
 bool isFiniteNumber(const json& value, double* out) {
     if (!value.is_number()) return false;
-    const double parsed = value.get<double>();
+    double parsed = 0.0;
+    try {
+        parsed = value.get<double>();
+    } catch (const json::exception&) {
+        return false;
+    }
     if (!std::isfinite(parsed)) return false;
     if (out) *out = parsed;
     return true;
@@ -388,13 +393,17 @@ bool CommandServer::parseMessage(
     json root;
     try {
         root = json::parse(message);
-    } catch (const json::parse_error&) {
+    } catch (const json::exception&) {
         return false;
     }
     if (!root.is_object()) return false;
 
     DualArmCommand cmd;
     cmd.host_time_ns = receive_time_ns;  // authoritative timestamp for timeout checks
+
+    uint64_t schema_version = 1;
+    if (!readOptionalUint64(root, "schema_version", &schema_version)) return false;
+    if (schema_version != 1) return false;
 
     if (!root.contains("seq")) return false;
     if (!readOptionalUint64(root, "seq", &cmd.seq)) return false;

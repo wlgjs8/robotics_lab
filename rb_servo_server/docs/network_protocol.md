@@ -88,6 +88,31 @@ or stale `seq` values are dropped before the command buffer is updated.
 }
 ```
 
+## Units and Pose Convention
+
+All command arrays are exactly six finite JSON numbers. `NaN`, `Infinity`,
+overflowed numeric values, strings, nulls, short arrays, and long arrays are
+invalid and the packet is dropped.
+
+- `q_target_deg`: joint position target, degrees.
+- `dq_target_deg_s`: joint velocity target, degrees/second.
+- `tcp_target_stand`: `[x, y, z, rx, ry, rz]` TCP pose target in the `stand`
+  frame. `x,y,z` are meters. `rx,ry,rz` are radians as roll, pitch, yaw
+  Euler angles; the C++ transform convention is `Rz(rz) * Ry(ry) * Rx(rx)`.
+- `tcp_delta_stand`: `[dx, dy, dz, drx, dry, drz]` incremental TCP delta in
+  the `stand` frame. Translational components are meters. Rotational
+  components are radians as an so(3) rotation-vector increment. The delta
+  transform is pre-multiplied before the current stand-frame TCP pose.
+- `tcp_delta_local`: `[dx, dy, dz, drx, dry, drz]` incremental TCP delta in
+  the current TCP local frame. Units match `tcp_delta_stand`. The delta
+  transform is post-multiplied after the current stand-frame TCP pose.
+
+The accepted Cartesian command modes are `TcpPoseTarget`, `TcpDeltaStand`, and
+`TcpDeltaLocal`. Runtime Cartesian verdicts include `Ok`,
+`CartesianUnavailable`, and `IkFailed`. Real Cartesian motion remains closed
+unless real mode is explicitly enabled, Cartesian control is configured for
+real, and `RB_ALLOW_REAL_CARTESIAN=1` is set.
+
 ## Joint target command
 
 The server must first be armed:
@@ -129,13 +154,45 @@ Top-level `mode` applies to both arms unless an arm object has its own `mode`.
 }
 ```
 
-## Future Cartesian command
+## TCP Cartesian command schema
 
-These fields are parsed into `ArmCommand`, but Cartesian IK is intentionally deferred.
+TCP Cartesian commands use the same UDP JSON packet envelope as joint commands:
+
+- `schema_version`: optional unsigned integer. If present, it must be `1`.
+- `seq`: required unsigned integer, strictly increasing per server process.
+- `mode`: top-level default command mode for both arms.
+- `host_time_ns`: optional sender timestamp for debugging. The server uses its
+  receive timestamp for timeout enforcement.
+- `timeout_sec`: optional finite positive command timeout in seconds.
+- `left` / `right`: per-arm command objects. A per-arm `mode` overrides the
+  top-level `mode`, which lets one arm receive a TCP command while the other
+  remains `Hold`.
+
+`TcpPoseTarget` requires each Cartesian arm object to include
+`tcp_target_stand`:
 
 ```json
 {
-  "seq": 4,
+  "schema_version": 1,
+  "seq": 123,
+  "mode": "TcpPoseTarget",
+  "host_time_ns": 123456789,
+  "timeout_sec": 0.2,
+  "left": {
+    "tcp_target_stand": [0.3, 0.1, 0.5, 0, 3.14, 0]
+  },
+  "right": {
+    "tcp_target_stand": [0.3, -0.1, 0.5, 0, 3.14, 0]
+  }
+}
+```
+
+`TcpDeltaStand` requires `tcp_delta_stand`. The delta frame is `stand`:
+
+```json
+{
+  "schema_version": 1,
+  "seq": 124,
   "mode": "TcpDeltaStand",
   "timeout_sec": 0.2,
   "left": {
@@ -146,6 +203,28 @@ These fields are parsed into `ArmCommand`, but Cartesian IK is intentionally def
   }
 }
 ```
+
+`TcpDeltaLocal` requires `tcp_delta_local`. The delta frame is the current TCP
+local frame:
+
+```json
+{
+  "schema_version": 1,
+  "seq": 125,
+  "mode": "TcpDeltaLocal",
+  "timeout_sec": 0.2,
+  "left": {
+    "tcp_delta_local": [0, 0, 0.001, 0, 0, 0]
+  },
+  "right": {
+    "tcp_delta_local": [0, 0, -0.001, 0, 0, 0]
+  }
+}
+```
+
+If a top-level Cartesian `mode` applies to both arms, both arm objects must
+carry the matching payload. To command only one arm, set top-level `mode` to
+`Hold` and put the Cartesian `mode` plus payload inside the selected arm object.
 
 ## Future force-control fields
 

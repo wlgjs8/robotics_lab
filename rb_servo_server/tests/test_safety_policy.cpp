@@ -1016,6 +1016,62 @@ bool testCommandValidation() {
     return true;
 }
 
+bool testCartesianCommandParser() {
+    rb_servo::NetworkConfig network;
+    network.command_timeout_sec = 0.35;
+    rb_servo::CommandBuffer buffer;
+    rb_servo::CommandServer server(network, &buffer);
+    rb_servo::DualArmCommand out;
+    const uint64_t now = rb_servo::nowSteadyNs();
+
+    RB_CHECK(!server.parseMessage(R"({"schema_version":2,"seq":1,"mode":"TcpPoseTarget","tcp_target_stand":[0,0,0,0,0,0]})", now, &out));
+    RB_CHECK(!server.parseMessage(R"({"schema_version":1,"seq":1,"mode":"TcpPoseTarget"})", now, &out));
+    RB_CHECK(!server.parseMessage(R"({"schema_version":1,"seq":1,"mode":"TcpPoseTarget","tcp_target_stand":[0,0,0,0,0]})", now, &out));
+    RB_CHECK(!server.parseMessage(R"({"schema_version":1,"seq":1,"mode":"TcpPoseTarget","tcp_target_stand":[0,0,0,0,0,1e999]})", now, &out));
+    RB_CHECK(!server.parseMessage(R"({"schema_version":1,"seq":1,"mode":"TcpPoseTarget","left":{"tcp_target_stand":[0,0,0,0,0,0]},"right":{}})", now, &out));
+
+    RB_CHECK(server.parseMessage(
+        R"({"schema_version":1,"seq":1,"mode":"TcpPoseTarget","host_time_ns":123456789,"timeout_sec":0.2,"left":{"tcp_target_stand":[0.3,0.1,0.5,0,3.14,0]},"right":{"tcp_target_stand":[0.3,-0.1,0.5,0,3.14,0]}})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpPoseTarget);
+    RB_CHECK(out.right.mode == rb_servo::ControlMode::TcpPoseTarget);
+    RB_CHECK(out.left.has_tcp_target);
+    RB_CHECK(out.right.has_tcp_target);
+    RB_CHECK(std::abs(out.left.tcp_target_stand.x - 0.3) < kEpsilon);
+    RB_CHECK(std::abs(out.right.tcp_target_stand.y + 0.1) < kEpsilon);
+    RB_CHECK(!out.left.has_tcp_delta_stand);
+    RB_CHECK(!out.left.has_tcp_delta_local);
+
+    RB_CHECK(server.parseMessage(
+        R"({"schema_version":1,"seq":2,"mode":"TcpDeltaStand","timeout_sec":0.2,"left":{"tcp_delta_stand":[0.01,0,0,0,0,0]},"right":{"tcp_delta_stand":[0,-0.01,0,0,0,0]}})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpDeltaStand);
+    RB_CHECK(out.right.mode == rb_servo::ControlMode::TcpDeltaStand);
+    RB_CHECK(out.left.has_tcp_delta_stand);
+    RB_CHECK(out.right.has_tcp_delta_stand);
+    RB_CHECK(!out.left.has_tcp_delta_local);
+    RB_CHECK(std::abs(out.left.tcp_delta_stand.x - 0.01) < kEpsilon);
+    RB_CHECK(std::abs(out.right.tcp_delta_stand.y + 0.01) < kEpsilon);
+
+    RB_CHECK(server.parseMessage(
+        R"({"schema_version":1,"seq":3,"mode":"TcpDeltaLocal","timeout_sec":0.2,"left":{"tcp_delta_local":[0,0,0.01,0,0,0]},"right":{"tcp_delta_local":[0,0,-0.01,0,0,0]}})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpDeltaLocal);
+    RB_CHECK(out.right.mode == rb_servo::ControlMode::TcpDeltaLocal);
+    RB_CHECK(out.left.has_tcp_delta_local);
+    RB_CHECK(out.right.has_tcp_delta_local);
+    RB_CHECK(!out.left.has_tcp_delta_stand);
+    RB_CHECK(std::abs(out.left.tcp_delta_local.z - 0.01) < kEpsilon);
+    RB_CHECK(std::abs(out.right.tcp_delta_local.z + 0.01) < kEpsilon);
+    return true;
+}
+
 bool testCommandSequenceRequiredAndMonotonic() {
     rb_servo::NetworkConfig network;
     rb_servo::CommandBuffer buffer;
@@ -2363,6 +2419,7 @@ int main() {
     if (!testRbsimStopFailureDoesNotReportStoppedState()) return 1;
     if (!testRbsimTrackingErrorFaultLatchHoldsPreviousTarget()) return 1;
     if (!testCommandSequenceRequiredAndMonotonic()) return 1;
+    if (!testCartesianCommandParser()) return 1;
     if (!testCommandSourceAllowlistMatching()) return 1;
     if (!testUdpCommandIngressAllowsOnlyTrustedSources()) return 1;
     if (!testCommandSourceAllowlistConfigValidation()) return 1;
