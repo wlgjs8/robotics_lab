@@ -14,23 +14,30 @@ services:
       RB_GUI_PORT: "8080"
       RB_GUI_STATE_BIND: "0.0.0.0"
       RB_GUI_STATE_PORT: "50110"
-      RB_GUI_COMMAND_HOST: "rb_simulator"
+      RB_GUI_COMMAND_HOST: "rb_servo_server"
       RB_GUI_COMMAND_PORT: "50010"
-      RB_GUI_OBSERVED_MODE: "rbsim_local"
+      RB_GUI_OBSERVED_MODE: "simulation"
+      RB_GUI_OBSERVED_BACKEND: "simulator"
+      RB_GUI_ENABLE_TCP_POSE_COMMANDS: "0"
       RB_GUI_OPS_AVAILABLE: "0"
     ports:
       - "127.0.0.1:8080:8080/tcp"
       - "127.0.0.1:50110:50110/udp"
 
-  rb_simulator:
+  rb_simulator_left:
     build:
       context: .
       dockerfile: rb_simulator/docker/rb_simulator.Dockerfile
     image: robotics_lab/rb_simulator:dev
+    command: ["--config", "rb_simulator/config/left_rb3_730e.yaml"]
+    environment:
+      RB_SIMULATOR_COMPOSE_BIND: "1"
     init: true
-    networks: [rb_servo_net]
-    ports:
-      - "127.0.0.1:50010:50010/udp"
+    networks:
+      rb_servo_net:
+        aliases:
+          - rb_simulator_left
+          - left_controller_sim
     healthcheck:
       test:
         [
@@ -44,32 +51,91 @@ services:
       retries: 10
       start_period: 1s
     labels:
-      rb-servo.role: "hardware-free-rb-simulator"
+      rb-servo.role: "hardware-free-simulator-left"
+      rb-servo.hardware: "none"
+      rb-servo.ova: "not-used"
+
+  rb_simulator_right:
+    build:
+      context: .
+      dockerfile: rb_simulator/docker/rb_simulator.Dockerfile
+    image: robotics_lab/rb_simulator:dev
+    command: ["--config", "rb_simulator/config/right_rb3_730e.yaml"]
+    environment:
+      RB_SIMULATOR_COMPOSE_BIND: "1"
+    init: true
+    networks:
+      rb_servo_net:
+        aliases:
+          - rb_simulator_right
+          - right_controller_sim
+    depends_on:
+      rb_simulator_left:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1', 50200), 1.0); s.close()",
+        ]
+      interval: 1s
+      timeout: 2s
+      retries: 10
+      start_period: 1s
+    labels:
+      rb-servo.role: "hardware-free-simulator-right"
       rb-servo.hardware: "none"
       rb-servo.ova: "not-used"
 
   rb_servo_server:
     build:
-      context: ./rb_servo_server
-      dockerfile: docker/rb_servo_server.Dockerfile
-      target: build
+      context: .
+      dockerfile: scripts/docker/rb_servo_server.hardware_free.Dockerfile
+      target: runtime
     image: robotics_lab/rb_servo_server:dev
-    command: ["./build/rb_servo_server", "--config", "config/dual_rb_simulator_compose.yaml"]
+    command: ["--config", "config/dual_simulator_compose.yaml"]
     init: true
-    network_mode: "service:rb_simulator"
+    networks:
+      rb_servo_net:
+        aliases:
+          - rb_servo_server
     depends_on:
       rb_gui:
         condition: service_started
-      rb_simulator:
+      rb_simulator_left:
+        condition: service_healthy
+      rb_simulator_right:
         condition: service_healthy
     volumes:
       - ./rb_servo_server/logs:/workspace/logs
     labels:
-      rb-servo.role: "hardware-free-rbsim-servo-server"
+      rb-servo.role: "hardware-free-simulator-servo-server"
       rb-servo.hardware: "none"
       rb-servo.ova: "not-used"
 
+  camera_server_mock:
+    profiles: ["mock_camera"]
+    build:
+      context: .
+      dockerfile: scripts/docker/camera_server_mock.Dockerfile
+    image: robotics_lab/camera_server_mock:dev
+    command: ["--config", "/app/config/mock_triple_realsense.yaml", "--simulate"]
+    init: true
+    ipc: private
+    shm_size: "256mb"
+    networks: [rb_servo_net]
+    volumes:
+      - ./camera_server/episodes:/data/episodes
+    environment:
+      CAMERA_SERVER_CONFIG: /app/config/mock_triple_realsense.yaml
+    labels:
+      rb-servo.role: "hardware-free-mock-camera"
+      rb-servo.hardware: "none"
+
   camera_server:
+    profiles: ["real_camera"]
     build:
       context: ./camera_server
       dockerfile: Dockerfile
@@ -89,6 +155,9 @@ services:
     environment:
       CAMERA_SERVER_CONFIG: /app/config/triple_realsense.yaml
     command: ["--config", "/app/config/triple_realsense.yaml"]
+    labels:
+      rb-servo.role: "real-camera"
+      rb-servo.hardware: "realsense"
 
 networks:
   rb_servo_net:

@@ -1,3 +1,6 @@
+> Historical review/planning document. Some findings may be obsolete.
+> The current source of truth is root README.md and docs/architecture.md.
+
 검토했습니다. 결론부터 말하면, 구조 방향은 좋고 mock/simulation 기반 MVP로는 꽤 잘 구현되어 있습니다.
 다만 “RealSense 3대 30fps를 sync 맞춰서 policy input으로 안정적으로 공급”이라는 목표 기준에서는 아직 몇 가지 중요한 수정이 필요합니다.
 

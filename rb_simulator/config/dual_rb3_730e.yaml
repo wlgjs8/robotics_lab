@@ -1,13 +1,12 @@
-# Hardware-free rb_simulator profile.
+# Deprecated hardware-free simulator profile.
 #
-# This config describes one dual-arm simulator process, not rb_servo_server.
-# The process owns both left_arm and right_arm state and exposes one loopback
-# control endpoint plus one admin endpoint. Pair it with
-# rb_servo_server/config/dual_rb_simulator.yaml, where both RbsimBackend
-# instances point at simulator.control_bind and select their arm by request
-# field. A future per-arm endpoint split must update both config files together.
+# This file is kept only as a historical/test fixture for the old dual-arm
+# topology. The supported runtime uses one process per arm:
+# - left_rb3_730e.yaml
+# - right_rb3_730e.yaml
 
 simulator:
+  deprecated: true
   control_bind: "tcp://127.0.0.1:50200"
   admin_bind: "tcp://127.0.0.1:50201"
   update_rate_hz: 200
@@ -16,12 +15,12 @@ simulator:
   model: "RB3_730E"
 
 left_arm:
-  name: "left_rbsim"
+  name: "left_simulator"
   initial_q_deg: [0, -30, 80, 0, 60, 0]
   mount: [0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0]
 
 right_arm:
-  name: "right_rbsim"
+  name: "right_simulator"
   initial_q_deg: [0, -30, 80, 0, 60, 0]
   mount: [-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0]
 

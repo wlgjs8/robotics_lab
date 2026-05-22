@@ -29,6 +29,8 @@ No failure path may output [0, 0, 0, 0, 0, 0] unless that was a validated user c
 | robot disconnected/error | latch current/last-safe pose by default |
 | EmergencyStop | latch current/last-safe pose |
 | ResetFault | clear fault only; return to ConnectedHold |
+| read-only mode (`servo.send_servo_commands=false`) | connect/read/publish state; suppress all `sendServoJ` calls |
+| motion command in read-only mode | reject and hold previous safe target |
 | sendServoJ failure in mock/rbsim | failed arm target is not recorded; optional stop-both latch |
 | sendServoJ failure in real | fault latch |
 
@@ -43,6 +45,21 @@ The server starts in `ConnectedHold`. Motion commands are ignored until an expli
 `DisarmMotion` returns to `ConnectedHold`. `ResetFault` returns to `ConnectedHold` only after backend reset succeeds and a fresh valid robot state is read; it must not resume motion directly.
 
 If a command includes both `EmergencyStop` and `ResetFault`, `EmergencyStop` wins.
+
+## Read-only mode
+
+Set:
+
+```yaml
+servo:
+  send_servo_commands: false
+```
+
+Read-only mode lets the server connect to backends, read robot state, and publish state snapshots without sending servo motion. `ArmMotion`, `JointTarget`, `JointVelocity`, `TcpPoseTarget`, `TcpDeltaStand`, and `TcpDeltaLocal` are fail-closed and hold the previous safe target. `Hold` remains safe, but it is also not sent to the backend.
+
+State output marks the policy with `send_suppressed: true` and `send_policy: "read_only"` so suppression is distinguishable from a send failure. In read-only mode `send_ok` means "policy suppressed without backend send failure", not "the robot accepted a servo command".
+
+`EmergencyStop` only latches the server fault state in read-only mode; the loop still does not send motion. `ResetFault` does not call backend reset APIs while read-only is active, and an existing fault latch remains until the server is restarted or read-only is disabled under the normal real-motion gates.
 
 ## ResetFault
 
@@ -59,6 +76,7 @@ After reset succeeds, the server re-baselines previous targets to the freshly re
 Real mode requires:
 
 - `RB_ALLOW_REAL_ROBOT=1`
+- `RB_ALLOW_REAL_MOTION=1` when `servo.send_servo_commands=true`
 - `servo.enable_realtime_priority=true`
 - successful realtime setup in the servo loop
 - `safety.tracking_error_policy=fault_latch`

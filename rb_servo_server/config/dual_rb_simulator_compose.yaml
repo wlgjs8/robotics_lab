@@ -1,33 +1,35 @@
-# Docker Compose hardware-free rb_simulator backend profile.
-# Pair with ../rb_simulator/config/dual_rb3_730e.yaml. rb_servo_server shares
-# the rb_simulator network namespace in compose, so both arms keep the loopback
-# rbsim_control_endpoint while command/state ports are exposed to rb_gui.
+# Docker Compose hardware-free simulator backend profile.
+# rb_servo_server shares the simulator network namespace in compose, so both
+# arms keep the loopback simulator_control_endpoint while command/state ports
+# are exposed to rb_gui.
 # This profile must not be used as Rainbow rbsim/OVA or real robot evidence.
 
+schema: robotics_lab.rb_servo_server.v1
+
 left_robot:
-  backend_type: rbsim_local
-  run_mode: rbsim_local
+  backend_type: simulator
+  run_mode: simulation
   name: left_rbsim
-  rbsim_control_endpoint: "tcp://127.0.0.1:50200"
-  rbsim_request_timeout_sec: 0.2
-  rbsim_connect_timeout_sec: 0.2
-  rbsim_read_timeout_sec: 0.2
-  rbsim_send_timeout_sec: 0.2
-  rbsim_stop_timeout_sec: 0.2
-  rbsim_reset_timeout_sec: 0.2
+  simulator_control_endpoint: "tcp://127.0.0.1:50200"
+  simulator_request_timeout_sec: 0.2
+  simulator_connect_timeout_sec: 0.2
+  simulator_read_timeout_sec: 0.2
+  simulator_send_timeout_sec: 0.2
+  simulator_stop_timeout_sec: 0.2
+  simulator_reset_timeout_sec: 0.2
   initial_q_deg: [0, -30, 80, 0, 60, 0]
 
 right_robot:
-  backend_type: rbsim_local
-  run_mode: rbsim_local
+  backend_type: simulator
+  run_mode: simulation
   name: right_rbsim
-  rbsim_control_endpoint: "tcp://127.0.0.1:50200"
-  rbsim_request_timeout_sec: 0.2
-  rbsim_connect_timeout_sec: 0.2
-  rbsim_read_timeout_sec: 0.2
-  rbsim_send_timeout_sec: 0.2
-  rbsim_stop_timeout_sec: 0.2
-  rbsim_reset_timeout_sec: 0.2
+  simulator_control_endpoint: "tcp://127.0.0.1:50200"
+  simulator_request_timeout_sec: 0.2
+  simulator_connect_timeout_sec: 0.2
+  simulator_read_timeout_sec: 0.2
+  simulator_send_timeout_sec: 0.2
+  simulator_stop_timeout_sec: 0.2
+  simulator_reset_timeout_sec: 0.2
   initial_q_deg: [0, -30, 80, 0, 60, 0]
 
 left_mount:
@@ -59,7 +61,8 @@ safety:
 
 network:
   command_bind: "udp://0.0.0.0:50010"
-  state_pub_bind: "udp://rb_gui:50110"
+  state_pub_endpoint: "udp://rb_gui:50110"
+  state_pub_rate_hz: 20
   command_source_allowlist: ["127.0.0.1/32", "172.16.0.0/12"]
 
 logging:
@@ -69,12 +72,5 @@ logging:
   queue_capacity: 4096
 
 force_control:
+  provider: null
   enable: false
-  update_rate_hz: 100
-  admittance_gain_pos: 0.0002
-  admittance_gain_rot: 0.0001
-  force_lpf_alpha: 0.2
-  max_pos_offset_m: 0.01
-  max_rot_offset_rad: 0.1
-  max_pos_step_m: 0.001
-  max_rot_step_rad: 0.01

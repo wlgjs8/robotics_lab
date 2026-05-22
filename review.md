@@ -1,3 +1,6 @@
+> Historical review/planning document. Some findings may be obsolete.
+> The current source of truth is root README.md and docs/architecture.md.
+
 # robotics_lab 통합 검토 및 향후 개발 필요사항
 
 작성일: 2026-05-23

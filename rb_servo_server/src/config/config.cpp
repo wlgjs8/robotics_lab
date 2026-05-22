@@ -6,31 +6,19 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
-#include <fstream>
+#include <filesystem>
 #include <iostream>
-#include <map>
-#include <sstream>
+#include <set>
 #include <stdexcept>
+#include <string>
 #include <vector>
+
+#include <yaml-cpp/yaml.h>
 
 namespace rb_servo {
 namespace {
 
-std::string trim(const std::string& s) {
-    const auto begin = s.find_first_not_of(" \t\r\n");
-    if (begin == std::string::npos) return "";
-    const auto end = s.find_last_not_of(" \t\r\n");
-    return s.substr(begin, end - begin + 1);
-}
-
-std::string stripQuotes(std::string s) {
-    s = trim(s);
-    if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"') ||
-                          (s.front() == '\'' && s.back() == '\''))) {
-        return s.substr(1, s.size() - 2);
-    }
-    return s;
-}
+constexpr const char* kConfigSchema = "robotics_lab.rb_servo_server.v1";
 
 std::string lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
@@ -39,143 +27,209 @@ std::string lower(std::string s) {
     return s;
 }
 
-bool parseBool(const std::string& s) {
-    const std::string v = lower(stripQuotes(s));
-    return v == "true" || v == "1" || v == "yes" || v == "on";
+std::string location(const YAML::Node& node) {
+    const YAML::Mark mark = node.Mark();
+    if (mark.line < 0) return {};
+    return " at line " + std::to_string(mark.line + 1);
 }
 
-double parseDouble(const std::string& s) {
-    return std::stod(stripQuotes(s));
+[[noreturn]] void fail(const std::string& message, const YAML::Node& node = YAML::Node()) {
+    throw std::runtime_error(message + location(node));
 }
 
-int parseInt(const std::string& s) {
-    return std::stoi(stripQuotes(s));
+void warn(const std::string& message) {
+    std::cerr << "[WARN] " << message << "\n";
 }
 
-std::vector<double> parseDoubleArray(std::string s) {
-    s = trim(s);
-    if (!s.empty() && s.front() == '[') s.erase(s.begin());
-    if (!s.empty() && s.back() == ']') s.pop_back();
-    std::vector<double> values;
-    std::stringstream ss(s);
-    std::string token;
-    while (std::getline(ss, token, ',')) {
-        token = trim(token);
-        if (!token.empty()) values.push_back(std::stod(token));
+void warnDeprecatedValue(const std::string& path, const std::string& old_value, const std::string& new_value) {
+    warn("deprecated config value " + path + "=" + old_value + "; use " + new_value);
+}
+
+void warnDeprecatedKey(const std::string& old_key, const std::string& new_key) {
+    warn("deprecated config key " + old_key + "; use " + new_key);
+}
+
+void requireMapping(const YAML::Node& node, const std::string& path) {
+    if (!node || node.IsNull()) return;
+    if (!node.IsMap()) fail(path + " must be a YAML mapping", node);
+}
+
+void validateAllowedKeys(const YAML::Node& node, const std::set<std::string>& allowed, const std::string& path) {
+    requireMapping(node, path);
+    if (!node || node.IsNull()) return;
+    for (const auto& item : node) {
+        if (!item.first.IsScalar()) {
+            fail(path + " contains a non-scalar key", item.first);
+        }
+        const std::string key = item.first.as<std::string>();
+        if (allowed.find(key) == allowed.end()) {
+            fail("Unknown config key " + path + "." + key, item.first);
+        }
     }
-    return values;
 }
 
-std::vector<std::string> parseStringArray(std::string s) {
-    s = trim(s);
-    if (!s.empty() && s.front() == '[') s.erase(s.begin());
-    if (!s.empty() && s.back() == ']') s.pop_back();
+bool has(const YAML::Node& node, const std::string& key) {
+    return node && node.IsMap() && static_cast<bool>(node[key]);
+}
+
+template <typename T>
+T asValue(const YAML::Node& node, const std::string& path) {
+    try {
+        return node.as<T>();
+    } catch (const YAML::Exception& exc) {
+        fail("Invalid value for " + path + ": " + exc.msg, node);
+    }
+}
+
+std::string asString(const YAML::Node& node, const std::string& path) {
+    if (!node || node.IsNull()) return "null";
+    if (!node.IsScalar()) fail(path + " must be a scalar", node);
+    return asValue<std::string>(node, path);
+}
+
+double asDouble(const YAML::Node& node, const std::string& path) {
+    return asValue<double>(node, path);
+}
+
+int asInt(const YAML::Node& node, const std::string& path) {
+    return asValue<int>(node, path);
+}
+
+bool asBool(const YAML::Node& node, const std::string& path) {
+    return asValue<bool>(node, path);
+}
+
+std::vector<std::string> asStringArray(const YAML::Node& node, const std::string& path) {
+    if (!node.IsSequence()) fail(path + " must be a sequence", node);
     std::vector<std::string> values;
-    std::stringstream ss(s);
-    std::string token;
-    while (std::getline(ss, token, ',')) {
-        token = stripQuotes(trim(token));
-        if (!token.empty()) values.push_back(token);
-    }
-    if (values.empty() && !trim(s).empty()) {
-        values.push_back(stripQuotes(s));
+    values.reserve(node.size());
+    for (std::size_t i = 0; i < node.size(); ++i) {
+        values.push_back(asString(node[i], path + "[" + std::to_string(i) + "]"));
     }
     return values;
 }
 
-JointArray parseJointArray(const std::string& s) {
-    const auto values = parseDoubleArray(s);
-    if (values.size() != kDof) {
-        throw std::runtime_error("Expected 6 values in JointArray, got " + std::to_string(values.size()));
+JointArray parseJointArray(const YAML::Node& node, const std::string& path) {
+    if (!node.IsSequence()) fail(path + " must be a sequence", node);
+    if (node.size() != kDof) {
+        fail(path + " must contain exactly 6 values", node);
     }
     JointArray out{};
-    for (int i = 0; i < kDof; ++i) out[i] = values[static_cast<size_t>(i)];
+    for (int i = 0; i < kDof; ++i) {
+        out[static_cast<std::size_t>(i)] = asDouble(node[static_cast<std::size_t>(i)], path + "[" + std::to_string(i) + "]");
+    }
     return out;
 }
 
-Pose6D parsePose6D(const std::string& s) {
-    const auto v = parseDoubleArray(s);
-    if (v.size() != 6) {
-        throw std::runtime_error("Expected 6 values in Pose6D, got " + std::to_string(v.size()));
-    }
+Pose6D parsePose6D(const YAML::Node& node, const std::string& path) {
+    const JointArray v = parseJointArray(node, path);
     return Pose6D{v[0], v[1], v[2], v[3], v[4], v[5]};
 }
 
-BackendType parseBackendType(const std::string& s) {
-    const std::string v = lower(stripQuotes(s));
-    if (v == "mock") return BackendType::Mock;
-    if (v == "rbpodo") return BackendType::Rbpodo;
-    if (v == "rbsim" || v == "rbsim_local") return BackendType::Rbsim;
-    throw std::runtime_error("Unknown backend_type: " + s);
-}
-
-RunMode parseRunMode(const std::string& s) {
-    const std::string v = lower(stripQuotes(s));
-    if (v == "mock") return RunMode::Mock;
-    if (v == "simulation" || v == "sim" || v == "rbsim" || v == "rbsim_local") return RunMode::Simulation;
-    if (v == "real") return RunMode::Real;
-    throw std::runtime_error("Unknown run_mode: " + s);
-}
-
-using Section = std::map<std::string, std::string>;
-using Sections = std::map<std::string, Section>;
-
-Sections parseSimpleYaml(const std::string& path) {
-    std::ifstream in(path);
-    if (!in) {
-        throw std::runtime_error("Failed to open config file: " + path);
+BackendType parseBackendType(const YAML::Node& node, const std::string& path) {
+    const std::string value = lower(asString(node, path));
+    if (value == "mock") return BackendType::Mock;
+    if (value == "rbpodo") return BackendType::Rbpodo;
+    if (value == "simulator") return BackendType::Simulator;
+    if (value == "rbsim" || value == "rbsim_local") {
+        warnDeprecatedValue(path, value, "simulator");
+        return BackendType::Simulator;
     }
+    fail("Unknown backend_type: " + value, node);
+}
 
-    Sections sections;
-    std::string current_section;
-    std::string line;
-    int line_no = 0;
-    while (std::getline(in, line)) {
-        ++line_no;
-        const auto comment_pos = line.find('#');
-        if (comment_pos != std::string::npos) line = line.substr(0, comment_pos);
-        if (trim(line).empty()) continue;
-
-        const size_t indent = line.find_first_not_of(' ');
-        const std::string t = trim(line);
-        const auto colon = t.find(':');
-        if (colon == std::string::npos) {
-            throw std::runtime_error("Invalid YAML line " + std::to_string(line_no) + ": " + line);
-        }
-        const std::string key = trim(t.substr(0, colon));
-        const std::string value = trim(t.substr(colon + 1));
-
-        if (indent == 0 && value.empty()) {
-            current_section = key;
-            sections[current_section];
-        } else {
-            if (current_section.empty()) {
-                throw std::runtime_error("Key outside section at line " + std::to_string(line_no));
-            }
-            sections[current_section][key] = value;
-        }
+RunMode parseRunMode(const YAML::Node& node, const std::string& path) {
+    const std::string value = lower(asString(node, path));
+    if (value == "mock") return RunMode::Mock;
+    if (value == "simulation") return RunMode::Simulation;
+    if (value == "real") return RunMode::Real;
+    if (value == "sim" || value == "rbsim" || value == "rbsim_local") {
+        warnDeprecatedValue(path, value, "simulation");
+        return RunMode::Simulation;
     }
-    return sections;
+    fail("Unknown run_mode: " + value, node);
 }
 
-bool has(const Section& sec, const std::string& key) {
-    return sec.find(key) != sec.end();
+std::string getString(const YAML::Node& sec, const std::string& key, const std::string& fallback, const std::string& path) {
+    return has(sec, key) ? asString(sec[key], path + "." + key) : fallback;
 }
 
-std::string getString(const Section& sec, const std::string& key, const std::string& fallback) {
-    auto it = sec.find(key);
-    return it == sec.end() ? fallback : stripQuotes(it->second);
+void applySimulatorTimeoutAlias(
+    const YAML::Node& sec,
+    const std::string& canonical,
+    const std::string& deprecated,
+    const std::string& path,
+    double* target
+) {
+    const bool has_canonical = has(sec, canonical);
+    const bool has_deprecated = has(sec, deprecated);
+    if (has_canonical && has_deprecated) {
+        fail(path + " cannot set both " + canonical + " and deprecated " + deprecated, sec[deprecated]);
+    }
+    if (has_canonical) {
+        *target = asDouble(sec[canonical], path + "." + canonical);
+    } else if (has_deprecated) {
+        warnDeprecatedKey(path + "." + deprecated, path + "." + canonical);
+        *target = asDouble(sec[deprecated], path + "." + deprecated);
+    }
 }
 
-void applyBackendSection(const Section& sec, BackendConfig* cfg) {
-    if (has(sec, "backend_type")) cfg->backend_type = parseBackendType(sec.at("backend_type"));
-    if (has(sec, "run_mode")) cfg->run_mode = parseRunMode(sec.at("run_mode"));
-    cfg->name = getString(sec, "name", cfg->name);
-    cfg->ip = getString(sec, "ip", cfg->ip);
-    cfg->operation_mode = getString(sec, "operation_mode", cfg->operation_mode);
-    cfg->rbsim_control_endpoint = getString(sec, "rbsim_control_endpoint", cfg->rbsim_control_endpoint);
-    if (has(sec, "rbsim_request_timeout_sec")) {
-        const double request_timeout = parseDouble(sec.at("rbsim_request_timeout_sec"));
+void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::string& path) {
+    validateAllowedKeys(sec, {
+        "backend_type",
+        "run_mode",
+        "name",
+        "ip",
+        "operation_mode",
+        "simulator_control_endpoint",
+        "simulator_request_timeout_sec",
+        "simulator_connect_timeout_sec",
+        "simulator_read_timeout_sec",
+        "simulator_send_timeout_sec",
+        "simulator_stop_timeout_sec",
+        "simulator_reset_timeout_sec",
+        "rbsim_control_endpoint",
+        "rbsim_request_timeout_sec",
+        "rbsim_connect_timeout_sec",
+        "rbsim_read_timeout_sec",
+        "rbsim_send_timeout_sec",
+        "rbsim_stop_timeout_sec",
+        "rbsim_reset_timeout_sec",
+        "initial_q_deg",
+        "speed_bar",
+        "servo_time_sec",
+        "servo_lookahead_sec",
+        "servo_gain",
+        "servo_acc",
+        "disable_waiting_ack",
+    }, path);
+
+    if (has(sec, "backend_type")) cfg->backend_type = parseBackendType(sec["backend_type"], path + ".backend_type");
+    if (has(sec, "run_mode")) cfg->run_mode = parseRunMode(sec["run_mode"], path + ".run_mode");
+    cfg->name = getString(sec, "name", cfg->name, path);
+    cfg->ip = getString(sec, "ip", cfg->ip, path);
+    cfg->operation_mode = getString(sec, "operation_mode", cfg->operation_mode, path);
+
+    if (has(sec, "simulator_control_endpoint") && has(sec, "rbsim_control_endpoint")) {
+        fail(path + " cannot set both simulator_control_endpoint and deprecated rbsim_control_endpoint", sec["rbsim_control_endpoint"]);
+    }
+    if (has(sec, "simulator_control_endpoint")) {
+        cfg->simulator_control_endpoint = asString(sec["simulator_control_endpoint"], path + ".simulator_control_endpoint");
+    } else if (has(sec, "rbsim_control_endpoint")) {
+        warnDeprecatedKey(path + ".rbsim_control_endpoint", path + ".simulator_control_endpoint");
+        cfg->simulator_control_endpoint = asString(sec["rbsim_control_endpoint"], path + ".rbsim_control_endpoint");
+    }
+    cfg->rbsim_control_endpoint = cfg->simulator_control_endpoint;
+
+    double request_timeout = cfg->rbsim_request_timeout_sec;
+    applySimulatorTimeoutAlias(
+        sec,
+        "simulator_request_timeout_sec",
+        "rbsim_request_timeout_sec",
+        path,
+        &request_timeout
+    );
+    if (request_timeout != cfg->rbsim_request_timeout_sec) {
         cfg->rbsim_request_timeout_sec = request_timeout;
         cfg->rbsim_connect_timeout_sec = request_timeout;
         cfg->rbsim_read_timeout_sec = request_timeout;
@@ -183,22 +237,41 @@ void applyBackendSection(const Section& sec, BackendConfig* cfg) {
         cfg->rbsim_stop_timeout_sec = request_timeout;
         cfg->rbsim_reset_timeout_sec = request_timeout;
     }
-    if (has(sec, "rbsim_connect_timeout_sec")) cfg->rbsim_connect_timeout_sec = parseDouble(sec.at("rbsim_connect_timeout_sec"));
-    if (has(sec, "rbsim_read_timeout_sec")) cfg->rbsim_read_timeout_sec = parseDouble(sec.at("rbsim_read_timeout_sec"));
-    if (has(sec, "rbsim_send_timeout_sec")) cfg->rbsim_send_timeout_sec = parseDouble(sec.at("rbsim_send_timeout_sec"));
-    if (has(sec, "rbsim_stop_timeout_sec")) cfg->rbsim_stop_timeout_sec = parseDouble(sec.at("rbsim_stop_timeout_sec"));
-    if (has(sec, "rbsim_reset_timeout_sec")) cfg->rbsim_reset_timeout_sec = parseDouble(sec.at("rbsim_reset_timeout_sec"));
-    if (has(sec, "initial_q_deg")) cfg->initial_q_deg = parseJointArray(sec.at("initial_q_deg"));
-    if (has(sec, "speed_bar")) cfg->speed_bar = parseDouble(sec.at("speed_bar"));
-    if (has(sec, "servo_time_sec")) cfg->servo_time_sec = parseDouble(sec.at("servo_time_sec"));
-    if (has(sec, "servo_lookahead_sec")) cfg->servo_lookahead_sec = parseDouble(sec.at("servo_lookahead_sec"));
-    if (has(sec, "servo_gain")) cfg->servo_gain = parseDouble(sec.at("servo_gain"));
-    if (has(sec, "servo_acc")) cfg->servo_acc = parseDouble(sec.at("servo_acc"));
-    if (has(sec, "disable_waiting_ack")) cfg->disable_waiting_ack = parseBool(sec.at("disable_waiting_ack"));
+    applySimulatorTimeoutAlias(sec, "simulator_connect_timeout_sec", "rbsim_connect_timeout_sec", path, &cfg->rbsim_connect_timeout_sec);
+    applySimulatorTimeoutAlias(sec, "simulator_read_timeout_sec", "rbsim_read_timeout_sec", path, &cfg->rbsim_read_timeout_sec);
+    applySimulatorTimeoutAlias(sec, "simulator_send_timeout_sec", "rbsim_send_timeout_sec", path, &cfg->rbsim_send_timeout_sec);
+    applySimulatorTimeoutAlias(sec, "simulator_stop_timeout_sec", "rbsim_stop_timeout_sec", path, &cfg->rbsim_stop_timeout_sec);
+    applySimulatorTimeoutAlias(sec, "simulator_reset_timeout_sec", "rbsim_reset_timeout_sec", path, &cfg->rbsim_reset_timeout_sec);
+
+    if (has(sec, "initial_q_deg")) cfg->initial_q_deg = parseJointArray(sec["initial_q_deg"], path + ".initial_q_deg");
+    if (has(sec, "speed_bar")) cfg->speed_bar = asDouble(sec["speed_bar"], path + ".speed_bar");
+    if (has(sec, "servo_time_sec")) cfg->servo_time_sec = asDouble(sec["servo_time_sec"], path + ".servo_time_sec");
+    if (has(sec, "servo_lookahead_sec")) cfg->servo_lookahead_sec = asDouble(sec["servo_lookahead_sec"], path + ".servo_lookahead_sec");
+    if (has(sec, "servo_gain")) cfg->servo_gain = asDouble(sec["servo_gain"], path + ".servo_gain");
+    if (has(sec, "servo_acc")) cfg->servo_acc = asDouble(sec["servo_acc"], path + ".servo_acc");
+    if (has(sec, "disable_waiting_ack")) cfg->disable_waiting_ack = asBool(sec["disable_waiting_ack"], path + ".disable_waiting_ack");
 }
 
 bool anyReal(const DualArmConfig& cfg) {
     return cfg.left_robot.run_mode == RunMode::Real || cfg.right_robot.run_mode == RunMode::Real;
+}
+
+std::string resolvePathForConfig(const std::string& value, const std::string& config_path) {
+    namespace fs = std::filesystem;
+    fs::path raw(value);
+    if (raw.is_absolute()) return raw.lexically_normal().string();
+
+    const fs::path cwd_candidate = fs::absolute(raw);
+    if (fs::exists(cwd_candidate)) return cwd_candidate.lexically_normal().string();
+
+    const fs::path parent = fs::absolute(fs::path(config_path)).parent_path();
+    const fs::path sibling_candidate = parent / raw;
+    if (fs::exists(sibling_candidate)) return sibling_candidate.lexically_normal().string();
+
+    const fs::path repo_candidate = parent.parent_path() / raw;
+    if (fs::exists(repo_candidate)) return repo_candidate.lexically_normal().string();
+
+    return repo_candidate.lexically_normal().string();
 }
 
 std::string bindHost(const std::string& bind) {
@@ -255,18 +328,19 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.safety.max_tracking_error_deg, "safety.max_tracking_error_deg");
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
     validatePositiveFinite(cfg.servo.filter_dt_max_ratio, "servo.filter_dt_max_ratio");
-    validatePositiveFinite(cfg.left_robot.rbsim_request_timeout_sec, "left_robot.rbsim_request_timeout_sec");
-    validatePositiveFinite(cfg.right_robot.rbsim_request_timeout_sec, "right_robot.rbsim_request_timeout_sec");
-    validatePositiveFinite(cfg.left_robot.rbsim_connect_timeout_sec, "left_robot.rbsim_connect_timeout_sec");
-    validatePositiveFinite(cfg.right_robot.rbsim_connect_timeout_sec, "right_robot.rbsim_connect_timeout_sec");
-    validatePositiveFinite(cfg.left_robot.rbsim_read_timeout_sec, "left_robot.rbsim_read_timeout_sec");
-    validatePositiveFinite(cfg.right_robot.rbsim_read_timeout_sec, "right_robot.rbsim_read_timeout_sec");
-    validatePositiveFinite(cfg.left_robot.rbsim_send_timeout_sec, "left_robot.rbsim_send_timeout_sec");
-    validatePositiveFinite(cfg.right_robot.rbsim_send_timeout_sec, "right_robot.rbsim_send_timeout_sec");
-    validatePositiveFinite(cfg.left_robot.rbsim_stop_timeout_sec, "left_robot.rbsim_stop_timeout_sec");
-    validatePositiveFinite(cfg.right_robot.rbsim_stop_timeout_sec, "right_robot.rbsim_stop_timeout_sec");
-    validatePositiveFinite(cfg.left_robot.rbsim_reset_timeout_sec, "left_robot.rbsim_reset_timeout_sec");
-    validatePositiveFinite(cfg.right_robot.rbsim_reset_timeout_sec, "right_robot.rbsim_reset_timeout_sec");
+    validatePositiveFinite(static_cast<double>(cfg.network.state_pub_rate_hz), "network.state_pub_rate_hz");
+    validatePositiveFinite(cfg.left_robot.rbsim_request_timeout_sec, "left_robot.simulator_request_timeout_sec");
+    validatePositiveFinite(cfg.right_robot.rbsim_request_timeout_sec, "right_robot.simulator_request_timeout_sec");
+    validatePositiveFinite(cfg.left_robot.rbsim_connect_timeout_sec, "left_robot.simulator_connect_timeout_sec");
+    validatePositiveFinite(cfg.right_robot.rbsim_connect_timeout_sec, "right_robot.simulator_connect_timeout_sec");
+    validatePositiveFinite(cfg.left_robot.rbsim_read_timeout_sec, "left_robot.simulator_read_timeout_sec");
+    validatePositiveFinite(cfg.right_robot.rbsim_read_timeout_sec, "right_robot.simulator_read_timeout_sec");
+    validatePositiveFinite(cfg.left_robot.rbsim_send_timeout_sec, "left_robot.simulator_send_timeout_sec");
+    validatePositiveFinite(cfg.right_robot.rbsim_send_timeout_sec, "right_robot.simulator_send_timeout_sec");
+    validatePositiveFinite(cfg.left_robot.rbsim_stop_timeout_sec, "left_robot.simulator_stop_timeout_sec");
+    validatePositiveFinite(cfg.right_robot.rbsim_stop_timeout_sec, "right_robot.simulator_stop_timeout_sec");
+    validatePositiveFinite(cfg.left_robot.rbsim_reset_timeout_sec, "left_robot.simulator_reset_timeout_sec");
+    validatePositiveFinite(cfg.right_robot.rbsim_reset_timeout_sec, "right_robot.simulator_reset_timeout_sec");
     if (cfg.servo.filter_dt_max_ratio < cfg.servo.filter_dt_min_ratio) {
         throw std::runtime_error("servo.filter_dt_max_ratio must be >= filter_dt_min_ratio");
     }
@@ -281,24 +355,97 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error("Invalid network.command_source_allowlist entry: " + entry);
         }
     }
+    if (cfg.network.state_pub_endpoint != cfg.network.state_pub_bind) {
+        throw std::runtime_error("network.state_pub_endpoint and deprecated state_pub_bind must be synchronized");
+    }
 
-    const auto validate_rbsim_backend = [](const BackendConfig& backend, const std::string& label) {
-        if (backend.backend_type != BackendType::Rbsim) return;
-        const std::string host = bindHost(backend.rbsim_control_endpoint);
-        if (host.empty() || !isLoopbackHost(host)) {
-            throw std::runtime_error(label + ".rbsim_control_endpoint must use loopback");
+    const std::string force_provider = lower(cfg.force_control.provider);
+    if (!(force_provider == "null" || force_provider == "none" || force_provider.empty())) {
+        throw std::runtime_error("force_control.provider must be null");
+    }
+    if (cfg.force_control.enable) {
+        throw std::runtime_error("force_control.enable must remain false");
+    }
+
+    if (cfg.kinematics.enable) {
+        const std::string provider = lower(cfg.kinematics.provider);
+        if (provider != "pinocchio") {
+            throw std::runtime_error("kinematics.provider must be pinocchio when kinematics.enable=true");
+        }
+        if (lower(cfg.kinematics.q_units) != "deg") {
+            throw std::runtime_error("kinematics.q_units must be deg");
+        }
+        if (cfg.kinematics.base_link.empty()) {
+            throw std::runtime_error("kinematics.base_link must not be empty");
+        }
+        if (cfg.kinematics.tip_link.empty()) {
+            throw std::runtime_error("kinematics.tip_link must not be empty");
+        }
+        if (cfg.kinematics.joint_names.size() != kDof) {
+            throw std::runtime_error("kinematics.joint_names must contain exactly 6 names");
+        }
+        std::set<std::string> joint_names;
+        for (const std::string& joint_name : cfg.kinematics.joint_names) {
+            if (joint_name.empty()) {
+                throw std::runtime_error("kinematics.joint_names must not contain empty names");
+            }
+            if (!joint_names.insert(joint_name).second) {
+                throw std::runtime_error("kinematics.joint_names must be unique");
+            }
+        }
+        if (cfg.kinematics.urdf.empty() || !std::filesystem::is_regular_file(cfg.kinematics.urdf)) {
+            throw std::runtime_error("kinematics.urdf must point to an existing URDF file: " + cfg.kinematics.urdf);
+        }
+    }
+
+    const auto validate_simulator_backend = [](const BackendConfig& backend, const std::string& label) {
+        if (backend.backend_type != BackendType::Simulator) return;
+        const std::string host = bindHost(backend.simulator_control_endpoint);
+        if (host.empty()) {
+            throw std::runtime_error(label + ".simulator_control_endpoint must use tcp://host:port");
+        }
+        if (host == "0.0.0.0" || host == "::" || host == "*") {
+            throw std::runtime_error(label + ".simulator_control_endpoint must name a reachable simulator host, not a wildcard bind");
         }
         if (backend.run_mode == RunMode::Real) {
-            throw std::runtime_error(label + " backend_type=rbsim cannot use run_mode=real");
+            throw std::runtime_error(label + " backend_type=simulator cannot use run_mode=real");
         }
     };
-    validate_rbsim_backend(cfg.left_robot, "left_robot");
-    validate_rbsim_backend(cfg.right_robot, "right_robot");
+    validate_simulator_backend(cfg.left_robot, "left_robot");
+    validate_simulator_backend(cfg.right_robot, "right_robot");
+
+#ifdef RB_SERVO_ENABLE_RBPODO
+    const auto validate_rbpodo_backend = [](const BackendConfig& backend, const std::string& label) {
+        if (backend.backend_type != BackendType::Rbpodo) return;
+        if (backend.ip.empty()) {
+            throw std::runtime_error(label + ".ip must be set for backend_type=rbpodo");
+        }
+        const std::string operation_mode = lower(backend.operation_mode);
+        if (!(operation_mode == "real" || operation_mode == "simulation" || operation_mode == "sim")) {
+            throw std::runtime_error(label + ".operation_mode must be real or simulation for backend_type=rbpodo");
+        }
+        if (!std::isfinite(backend.speed_bar) || backend.speed_bar < 0.0 || backend.speed_bar > 1.0) {
+            throw std::runtime_error(label + ".speed_bar must be finite and in [0, 1] for backend_type=rbpodo");
+        }
+        validatePositiveFinite(backend.servo_time_sec, label + ".servo_time_sec");
+        validatePositiveFinite(backend.servo_lookahead_sec, label + ".servo_lookahead_sec");
+        validatePositiveFinite(backend.servo_gain, label + ".servo_gain");
+        validatePositiveFinite(backend.servo_acc, label + ".servo_acc");
+    };
+    validate_rbpodo_backend(cfg.left_robot, "left_robot");
+    validate_rbpodo_backend(cfg.right_robot, "right_robot");
+#endif
 
     if (anyReal(cfg)) {
         const char* allow = std::getenv("RB_ALLOW_REAL_ROBOT");
         if (!allow || std::string(allow) != "1") {
             throw std::runtime_error("Refusing real mode. Set RB_ALLOW_REAL_ROBOT=1.");
+        }
+        if (cfg.servo.send_servo_commands) {
+            const char* allow_motion = std::getenv("RB_ALLOW_REAL_MOTION");
+            if (!allow_motion || std::string(allow_motion) != "1") {
+                throw std::runtime_error("Refusing real robot motion. Set RB_ALLOW_REAL_MOTION=1 or servo.send_servo_commands=false.");
+            }
         }
         if (!cfg.servo.enable_realtime_priority) {
             throw std::runtime_error("Refusing real mode without servo.enable_realtime_priority=true.");
@@ -313,13 +460,54 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error("Refusing real mode without latch_fault_on_robot_state_error=true.");
         }
         if (bindRequiresExposureOverride(cfg.network.command_bind) ||
-            bindRequiresExposureOverride(cfg.network.state_pub_bind)) {
+            bindRequiresExposureOverride(cfg.network.state_pub_endpoint)) {
             const char* allow_network = std::getenv("RB_ALLOW_NETWORK_EXPOSURE");
             if (!allow_network || std::string(allow_network) != "1") {
                 throw std::runtime_error("Refusing exposed network bind in real mode. Set RB_ALLOW_NETWORK_EXPOSURE=1.");
             }
         }
     }
+}
+
+void applySchema(const YAML::Node& root) {
+    if (!has(root, "schema")) {
+        warn("config schema is missing; loading in compatibility mode. Add schema: " + std::string(kConfigSchema));
+        return;
+    }
+    const std::string schema = asString(root["schema"], "schema");
+    if (schema != kConfigSchema) {
+        fail("Unknown config schema: " + schema, root["schema"]);
+    }
+}
+
+YAML::Node loadYamlFile(const std::string& path) {
+    try {
+        YAML::Node root = YAML::LoadFile(path);
+        if (!root || root.IsNull()) {
+            return YAML::Node(YAML::NodeType::Map);
+        }
+        return root;
+    } catch (const YAML::BadFile&) {
+        throw std::runtime_error("Failed to open config file: " + path);
+    } catch (const YAML::ParserException& exc) {
+        throw std::runtime_error("Failed to parse config file " + path + ": " + exc.msg);
+    }
+}
+
+void validateRootKeys(const YAML::Node& root) {
+    validateAllowedKeys(root, {
+        "schema",
+        "left_robot",
+        "right_robot",
+        "left_mount",
+        "right_mount",
+        "servo",
+        "safety",
+        "network",
+        "logging",
+        "force_control",
+        "kinematics",
+    }, "config");
 }
 
 }  // namespace
@@ -352,62 +540,118 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
     cfg.safety.ddq_max_deg_s2 = {300, 300, 300, 500, 500, 700};
     cfg.safety.tracking_error_policy = TrackingErrorPolicy::SnapToActual;
 
-    const Sections sections = parseSimpleYaml(path);
+    const YAML::Node root = loadYamlFile(path);
+    validateRootKeys(root);
+    applySchema(root);
 
-    if (sections.count("left_robot")) applyBackendSection(sections.at("left_robot"), &cfg.left_robot);
-    if (sections.count("right_robot")) applyBackendSection(sections.at("right_robot"), &cfg.right_robot);
+    if (has(root, "left_robot")) applyBackendSection(root["left_robot"], &cfg.left_robot, "left_robot");
+    if (has(root, "right_robot")) applyBackendSection(root["right_robot"], &cfg.right_robot, "right_robot");
 
-    if (sections.count("left_mount")) {
-        const Section& sec = sections.at("left_mount");
-        if (has(sec, "base_pose_in_stand")) cfg.left_mount.base_pose_in_stand = parsePose6D(sec.at("base_pose_in_stand"));
-    }
-    if (sections.count("right_mount")) {
-        const Section& sec = sections.at("right_mount");
-        if (has(sec, "base_pose_in_stand")) cfg.right_mount.base_pose_in_stand = parsePose6D(sec.at("base_pose_in_stand"));
-    }
-
-    if (sections.count("servo")) {
-        const Section& sec = sections.at("servo");
-        if (has(sec, "rate_hz")) cfg.servo.rate_hz = parseInt(sec.at("rate_hz"));
-        if (has(sec, "command_timeout_sec")) cfg.servo.command_timeout_sec = parseDouble(sec.at("command_timeout_sec"));
-        if (has(sec, "startup_mode")) cfg.servo.startup_mode = controlModeFromString(stripQuotes(sec.at("startup_mode")));
-        if (has(sec, "enable_realtime_priority")) cfg.servo.enable_realtime_priority = parseBool(sec.at("enable_realtime_priority"));
-        if (has(sec, "realtime_priority")) cfg.servo.realtime_priority = parseInt(sec.at("realtime_priority"));
-        if (has(sec, "cpu_core")) cfg.servo.cpu_core = parseInt(sec.at("cpu_core"));
-        if (has(sec, "filter_dt_min_ratio")) cfg.servo.filter_dt_min_ratio = parseDouble(sec.at("filter_dt_min_ratio"));
-        if (has(sec, "filter_dt_max_ratio")) cfg.servo.filter_dt_max_ratio = parseDouble(sec.at("filter_dt_max_ratio"));
-    }
-
-    if (sections.count("safety")) {
-        const Section& sec = sections.at("safety");
-        if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec.at("q_min_deg"));
-        if (has(sec, "q_max_deg")) cfg.safety.q_max_deg = parseJointArray(sec.at("q_max_deg"));
-        if (has(sec, "dq_max_deg_s")) cfg.safety.dq_max_deg_s = parseJointArray(sec.at("dq_max_deg_s"));
-        if (has(sec, "ddq_max_deg_s2")) cfg.safety.ddq_max_deg_s2 = parseJointArray(sec.at("ddq_max_deg_s2"));
-        if (has(sec, "command_timeout_sec")) cfg.safety.command_timeout_sec = parseDouble(sec.at("command_timeout_sec"));
-        if (has(sec, "max_tracking_error_deg")) cfg.safety.max_tracking_error_deg = parseDouble(sec.at("max_tracking_error_deg"));
-        if (has(sec, "stop_both_arms_on_single_arm_error")) cfg.safety.stop_both_arms_on_single_arm_error = parseBool(sec.at("stop_both_arms_on_single_arm_error"));
-        if (has(sec, "tracking_error_policy")) cfg.safety.tracking_error_policy = trackingErrorPolicyFromString(stripQuotes(sec.at("tracking_error_policy")));
-        if (has(sec, "latch_fault_on_robot_state_error")) cfg.safety.latch_fault_on_robot_state_error = parseBool(sec.at("latch_fault_on_robot_state_error"));
-    }
-
-    if (sections.count("network")) {
-        const Section& sec = sections.at("network");
-        cfg.network.command_bind = getString(sec, "command_bind", cfg.network.command_bind);
-        cfg.network.state_pub_bind = getString(sec, "state_pub_bind", cfg.network.state_pub_bind);
-        if (has(sec, "command_source_allowlist")) {
-            cfg.network.command_source_allowlist = parseStringArray(sec.at("command_source_allowlist"));
+    if (has(root, "left_mount")) {
+        const YAML::Node sec = root["left_mount"];
+        validateAllowedKeys(sec, {"base_pose_in_stand"}, "left_mount");
+        if (has(sec, "base_pose_in_stand")) {
+            cfg.left_mount.base_pose_in_stand = parsePose6D(sec["base_pose_in_stand"], "left_mount.base_pose_in_stand");
         }
+    }
+    if (has(root, "right_mount")) {
+        const YAML::Node sec = root["right_mount"];
+        validateAllowedKeys(sec, {"base_pose_in_stand"}, "right_mount");
+        if (has(sec, "base_pose_in_stand")) {
+            cfg.right_mount.base_pose_in_stand = parsePose6D(sec["base_pose_in_stand"], "right_mount.base_pose_in_stand");
+        }
+    }
+
+    if (has(root, "servo")) {
+        const YAML::Node sec = root["servo"];
+        validateAllowedKeys(sec, {
+            "rate_hz",
+            "command_timeout_sec",
+            "startup_mode",
+            "send_servo_commands",
+            "enable_realtime_priority",
+            "realtime_priority",
+            "cpu_core",
+            "filter_dt_min_ratio",
+            "filter_dt_max_ratio",
+        }, "servo");
+        if (has(sec, "rate_hz")) cfg.servo.rate_hz = asInt(sec["rate_hz"], "servo.rate_hz");
+        if (has(sec, "command_timeout_sec")) cfg.servo.command_timeout_sec = asDouble(sec["command_timeout_sec"], "servo.command_timeout_sec");
+        if (has(sec, "startup_mode")) cfg.servo.startup_mode = controlModeFromString(asString(sec["startup_mode"], "servo.startup_mode"));
+        if (has(sec, "send_servo_commands")) cfg.servo.send_servo_commands = asBool(sec["send_servo_commands"], "servo.send_servo_commands");
+        if (has(sec, "enable_realtime_priority")) cfg.servo.enable_realtime_priority = asBool(sec["enable_realtime_priority"], "servo.enable_realtime_priority");
+        if (has(sec, "realtime_priority")) cfg.servo.realtime_priority = asInt(sec["realtime_priority"], "servo.realtime_priority");
+        if (has(sec, "cpu_core")) cfg.servo.cpu_core = asInt(sec["cpu_core"], "servo.cpu_core");
+        if (has(sec, "filter_dt_min_ratio")) cfg.servo.filter_dt_min_ratio = asDouble(sec["filter_dt_min_ratio"], "servo.filter_dt_min_ratio");
+        if (has(sec, "filter_dt_max_ratio")) cfg.servo.filter_dt_max_ratio = asDouble(sec["filter_dt_max_ratio"], "servo.filter_dt_max_ratio");
+    }
+
+    if (has(root, "safety")) {
+        const YAML::Node sec = root["safety"];
+        validateAllowedKeys(sec, {
+            "q_min_deg",
+            "q_max_deg",
+            "dq_max_deg_s",
+            "ddq_max_deg_s2",
+            "command_timeout_sec",
+            "max_tracking_error_deg",
+            "stop_both_arms_on_single_arm_error",
+            "tracking_error_policy",
+            "latch_fault_on_robot_state_error",
+        }, "safety");
+        if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
+        if (has(sec, "q_max_deg")) cfg.safety.q_max_deg = parseJointArray(sec["q_max_deg"], "safety.q_max_deg");
+        if (has(sec, "dq_max_deg_s")) cfg.safety.dq_max_deg_s = parseJointArray(sec["dq_max_deg_s"], "safety.dq_max_deg_s");
+        if (has(sec, "ddq_max_deg_s2")) cfg.safety.ddq_max_deg_s2 = parseJointArray(sec["ddq_max_deg_s2"], "safety.ddq_max_deg_s2");
+        if (has(sec, "command_timeout_sec")) cfg.safety.command_timeout_sec = asDouble(sec["command_timeout_sec"], "safety.command_timeout_sec");
+        if (has(sec, "max_tracking_error_deg")) cfg.safety.max_tracking_error_deg = asDouble(sec["max_tracking_error_deg"], "safety.max_tracking_error_deg");
+        if (has(sec, "stop_both_arms_on_single_arm_error")) cfg.safety.stop_both_arms_on_single_arm_error = asBool(sec["stop_both_arms_on_single_arm_error"], "safety.stop_both_arms_on_single_arm_error");
+        if (has(sec, "tracking_error_policy")) cfg.safety.tracking_error_policy = trackingErrorPolicyFromString(asString(sec["tracking_error_policy"], "safety.tracking_error_policy"));
+        if (has(sec, "latch_fault_on_robot_state_error")) cfg.safety.latch_fault_on_robot_state_error = asBool(sec["latch_fault_on_robot_state_error"], "safety.latch_fault_on_robot_state_error");
+    }
+
+    if (has(root, "network")) {
+        const YAML::Node sec = root["network"];
+        validateAllowedKeys(sec, {
+            "command_bind",
+            "state_pub_endpoint",
+            "state_pub_bind",
+            "state_pub_rate_hz",
+            "command_source_allowlist",
+        }, "network");
+        cfg.network.command_bind = getString(sec, "command_bind", cfg.network.command_bind, "network");
+        if (has(sec, "state_pub_endpoint") && has(sec, "state_pub_bind")) {
+            fail("network cannot set both state_pub_endpoint and deprecated state_pub_bind", sec["state_pub_bind"]);
+        }
+        if (has(sec, "state_pub_endpoint")) {
+            cfg.network.state_pub_endpoint = asString(sec["state_pub_endpoint"], "network.state_pub_endpoint");
+        } else if (has(sec, "state_pub_bind")) {
+            warnDeprecatedKey("network.state_pub_bind", "network.state_pub_endpoint");
+            cfg.network.state_pub_endpoint = asString(sec["state_pub_bind"], "network.state_pub_bind");
+        }
+        cfg.network.state_pub_bind = cfg.network.state_pub_endpoint;
+        if (has(sec, "state_pub_rate_hz")) cfg.network.state_pub_rate_hz = asInt(sec["state_pub_rate_hz"], "network.state_pub_rate_hz");
+        if (has(sec, "command_source_allowlist")) {
+            cfg.network.command_source_allowlist = asStringArray(sec["command_source_allowlist"], "network.command_source_allowlist");
+        }
+    } else {
+        cfg.network.state_pub_bind = cfg.network.state_pub_endpoint;
     }
     cfg.network.command_timeout_sec = cfg.servo.command_timeout_sec;
 
-    if (sections.count("logging")) {
-        const Section& sec = sections.at("logging");
-        if (has(sec, "enable")) cfg.logging.enable = parseBool(sec.at("enable"));
-        cfg.logging.directory = getString(sec, "directory", cfg.logging.directory);
-        if (has(sec, "flush_period_ms")) cfg.logging.flush_period_ms = parseInt(sec.at("flush_period_ms"));
+    if (has(root, "logging")) {
+        const YAML::Node sec = root["logging"];
+        validateAllowedKeys(sec, {
+            "enable",
+            "directory",
+            "flush_period_ms",
+            "queue_capacity",
+        }, "logging");
+        if (has(sec, "enable")) cfg.logging.enable = asBool(sec["enable"], "logging.enable");
+        cfg.logging.directory = getString(sec, "directory", cfg.logging.directory, "logging");
+        if (has(sec, "flush_period_ms")) cfg.logging.flush_period_ms = asInt(sec["flush_period_ms"], "logging.flush_period_ms");
         if (has(sec, "queue_capacity")) {
-            const int capacity = parseInt(sec.at("queue_capacity"));
+            const int capacity = asInt(sec["queue_capacity"], "logging.queue_capacity");
             if (capacity <= 0) {
                 throw std::runtime_error("logging.queue_capacity must be positive");
             }
@@ -415,21 +659,41 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         }
     }
 
-    if (sections.count("force_control")) {
-        const Section& sec = sections.at("force_control");
-        if (has(sec, "enable")) cfg.force_control.enable = parseBool(sec.at("enable"));
-        if (has(sec, "update_rate_hz")) cfg.force_control.update_rate_hz = parseInt(sec.at("update_rate_hz"));
-        if (has(sec, "admittance_gain_pos")) cfg.force_control.admittance_gain_pos = parseDouble(sec.at("admittance_gain_pos"));
-        if (has(sec, "admittance_gain_rot")) cfg.force_control.admittance_gain_rot = parseDouble(sec.at("admittance_gain_rot"));
-        if (has(sec, "force_lpf_alpha")) cfg.force_control.force_lpf_alpha = parseDouble(sec.at("force_lpf_alpha"));
-        if (has(sec, "max_pos_offset_m")) cfg.force_control.max_pos_offset_m = parseDouble(sec.at("max_pos_offset_m"));
-        if (has(sec, "max_rot_offset_rad")) cfg.force_control.max_rot_offset_rad = parseDouble(sec.at("max_rot_offset_rad"));
-        if (has(sec, "max_pos_step_m")) cfg.force_control.max_pos_step_m = parseDouble(sec.at("max_pos_step_m"));
-        if (has(sec, "max_rot_step_rad")) cfg.force_control.max_rot_step_rad = parseDouble(sec.at("max_rot_step_rad"));
+    if (has(root, "force_control")) {
+        const YAML::Node sec = root["force_control"];
+        validateAllowedKeys(sec, {"provider", "enable"}, "force_control");
+        if (has(sec, "provider")) cfg.force_control.provider = lower(asString(sec["provider"], "force_control.provider"));
+        if (has(sec, "enable")) cfg.force_control.enable = asBool(sec["enable"], "force_control.enable");
+    }
+
+    if (has(root, "kinematics")) {
+        const YAML::Node sec = root["kinematics"];
+        validateAllowedKeys(sec, {
+            "enable",
+            "provider",
+            "urdf",
+            "base_link",
+            "tip_link",
+            "joint_names",
+            "q_units",
+            "publish_tcp",
+        }, "kinematics");
+        if (has(sec, "enable")) cfg.kinematics.enable = asBool(sec["enable"], "kinematics.enable");
+        if (has(sec, "provider")) cfg.kinematics.provider = lower(asString(sec["provider"], "kinematics.provider"));
+        if (has(sec, "urdf")) {
+            cfg.kinematics.urdf = resolvePathForConfig(asString(sec["urdf"], "kinematics.urdf"), path);
+        } else {
+            cfg.kinematics.urdf = resolvePathForConfig(cfg.kinematics.urdf, path);
+        }
+        if (has(sec, "base_link")) cfg.kinematics.base_link = asString(sec["base_link"], "kinematics.base_link");
+        if (has(sec, "tip_link")) cfg.kinematics.tip_link = asString(sec["tip_link"], "kinematics.tip_link");
+        if (has(sec, "joint_names")) cfg.kinematics.joint_names = asStringArray(sec["joint_names"], "kinematics.joint_names");
+        if (has(sec, "q_units")) cfg.kinematics.q_units = lower(asString(sec["q_units"], "kinematics.q_units"));
+        if (has(sec, "publish_tcp")) cfg.kinematics.publish_tcp = asBool(sec["publish_tcp"], "kinematics.publish_tcp");
     }
 
     if ((cfg.left_robot.run_mode == RunMode::Real || cfg.right_robot.run_mode == RunMode::Real) &&
-        (!sections.count("safety") || !has(sections.at("safety"), "tracking_error_policy"))) {
+        (!has(root, "safety") || !has(root["safety"], "tracking_error_policy"))) {
         cfg.safety.tracking_error_policy = TrackingErrorPolicy::FaultLatch;
     }
 

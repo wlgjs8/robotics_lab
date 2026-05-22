@@ -1,24 +1,30 @@
 # rb_simulator Operator Smoke
 
+> Historical smoke document. The current P0-B simulator runtime is one
+> simulator process per arm. The smoke runner described here still targets the
+> previous dual-arm servo-server wiring and is not a P0-B acceptance gate.
+
 This smoke is the hardware-free operator check for the `rb_simulator` plus
-`rb_servo_server` rbsim backend path. It starts both local
+`rb_servo_server` simulator backend path. It starts both local
 processes, sends `ArmMotion`, sends one small dual-arm `JointTarget`, captures
 the UDP state stream, and verifies that the servo CSV log reflects the same
 commanded target.
 
-Topology under test: one `rb_simulator` process owns both left and right arm
-state. Both servo-server `RbsimBackend` instances connect to that same process
-through `tcp://127.0.0.1:50200`; requests are routed by their `arm` field.
+Current P0-B topology: one simulator process owns the left arm and a second
+simulator process owns the right arm. Host defaults are
+`tcp://127.0.0.1:50200` for left control and `tcp://127.0.0.1:50210` for right
+control. Wrong-arm requests are rejected fail-closed.
 
 ## Preconditions
 
 Run this only after these software-only prerequisites are complete:
 
-- `rb_simulator/build/rb_simulator` exists and starts from
-  `rb_simulator/config/dual_rb3_730e.yaml`.
+- left and right simulator processes can start from
+  `rb_simulator/config/left_rb3_730e.yaml` and
+  `rb_simulator/config/right_rb3_730e.yaml`.
 - `rb_servo_server/build/rb_servo_server` exists.
-- `rb_servo_server/config/dual_rb_simulator.yaml` uses the
-  loopback `rbsim` backend, not `rbpodo`, not `dual_real.yaml`, and not any
+- `rb_servo_server` has a per-arm simulator config that uses the loopback
+  simulator backend, not `rbpodo`, not `dual_real.yaml`, and not any
   exposed network bind.
 
 The smoke runner fails closed if any prerequisite is missing. That failure means
@@ -34,9 +40,9 @@ python3 rb_simulator/tools/rbsim_servo_smoke.py \
   --artifacts-dir /tmp/rbsim_servo_smoke
 ```
 
-The default command starts:
+The historical default command starts:
 
-- `rb_simulator/build/rb_simulator --config rb_simulator/config/dual_rb3_730e.yaml`
+- a deprecated dual-arm simulator profile
 - `rb_servo_server/build/rb_servo_server --config rb_servo_server/config/dual_rb_simulator.yaml`
 
 It then listens on `127.0.0.1:50110`, sends commands to `127.0.0.1:50010`,
@@ -81,7 +87,7 @@ Any non-zero exit means the smoke evidence is not usable as a pass artifact.
 
 This is simulator-only evidence. It does not prove:
 
-- Rainbow Robotics rbsim / OVA readiness.
+- Rainbow Robotics simulator / OVA readiness.
 - `rbpodo` readiness.
 - Real robot readiness.
 - Realtime scheduling readiness.

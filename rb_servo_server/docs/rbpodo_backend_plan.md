@@ -4,14 +4,26 @@ This document defines the implementation plan and acceptance gates for the real
 Rainbow RB3-730 backend. It is a planning artifact only. Do not use it as
 evidence that real-robot operation is ready.
 
-Current state:
+Current state after P1-B:
 
-- `RbpodoBackend` is intentionally incomplete.
-- With `RB_SERVO_ENABLE_RBPODO=OFF`, it fails immediately.
-- With `RB_SERVO_ENABLE_RBPODO=ON`, it still refuses to connect because state
-  read and servo send paths are not implemented.
-- `config/dual_real.yaml` is a real-mode target config, but real mode must not
-  be launched until the implementation and acceptance steps below are complete.
+- `RB_SERVO_ENABLE_RBPODO=OFF` remains the default hardware-free build.
+- `RB_SERVO_ENABLE_RBPODO=ON` requires the installed `rbpodo` CMake package and
+  links `rbpodo::rbpodo`.
+- The inspected SDK surface is `/usr/local/include/rbpodo/rbpodo.hpp`, which
+  includes `cobot.hpp` and `cobot_data.hpp`.
+- `RbpodoBackend::connect()` creates `rb::podo::Cobot<>` and
+  `rb::podo::CobotData` only after `RB_ALLOW_REAL_ROBOT=1` is present in real
+  mode.
+- `readState()` uses `rb::podo::CobotData::request_data()` and maps
+  `SystemState::sdata.jnt_ang` / `jnt_ref` to degrees.
+- `sendServoJ()` uses the verified `rb::podo::Cobot<>::move_servo_j()` API, but
+  real sends remain blocked unless `RB_ALLOW_REAL_MOTION=1` is present and the
+  servo loop calls it only when `servo.send_servo_commands=true`.
+- `stop()` and `resetFault()` remain conservative and do not call real robot
+  APIs because no dedicated safe stop/fault-reset API was verified for this
+  package slice.
+- `config/dual_real.example.yaml` is an example only. Site-specific real configs
+  belong under `config/local/`, which is gitignored.
 
 ## Scope
 
@@ -30,8 +42,7 @@ The first real backend milestone is joint-servo only:
 - initialize
 - readState
 - sendServoJ
-- stop
-- resetFault
+- conservative stop/reset behavior
 - real-mode safety guards
 - first-motion acceptance
 
@@ -87,6 +98,22 @@ Acceptance:
 - `-DRB_SERVO_ENABLE_RBPODO=ON` fails clearly when the SDK is absent.
 - With the SDK present, the project links without starting real robot code.
 
+P1-B verification:
+
+- SDK package discovered at `/usr/local/lib/cmake/rbpodo`.
+- Headers discovered at `/usr/local/include/rbpodo`.
+- Verified API names:
+  - `rb::podo::Cobot<>(address)`
+  - `rb::podo::CobotData(address)`
+  - `rb::podo::CobotData::request_data(timeout)`
+  - `rb::podo::Cobot<>::set_operation_mode(...)`
+  - `rb::podo::Cobot<>::set_speed_bar(...)`
+  - `rb::podo::Cobot<>::move_servo_j(...)`
+- `SystemState::sdata.jnt_ang` and `jnt_ref` are documented in degrees.
+- `SystemState` does not expose a dedicated `jnt_vel[6]` member in the data
+  struct; P1-B publishes finite zero joint velocities until a verified velocity
+  path is added.
+
 ### Phase 1: Connection Object and Ownership
 
 Goal: create a per-arm SDK object that can connect and disconnect safely.
@@ -128,6 +155,12 @@ Tasks:
 - Enable servo mode only when required for subsequent `sendServoJ`.
 - Do not send a motion target during `initialize()`.
 - Return false if controller state, servo mode, or safety state is not accepted.
+
+P1-B behavior:
+
+- Read-only initialization requests data only.
+- If `RB_ALLOW_REAL_MOTION=1` is present, initialization may set operation mode
+  and speed bar using verified rbpodo calls. It still does not send a target.
 
 Acceptance:
 
@@ -186,6 +219,14 @@ Tasks:
 - Avoid hidden retries inside the backend; one servo loop tick should produce at
   most one backend send attempt per arm.
 
+P1-B behavior:
+
+- The SDK `move_servo_j` joint argument is documented as degrees, so no
+  degree/radian conversion is applied at this backend boundary.
+- The backend checks `RB_ALLOW_REAL_MOTION=1` before real sends. The
+  `servo.send_servo_commands` gate lives in `DualArmServoLoop`, so read-only
+  mode never reaches `RbpodoBackend::sendServoJ()`.
+
 Acceptance:
 
 - `testSendFailureDoesNotAdvancePreviousTarget` remains valid for real backend
@@ -207,6 +248,11 @@ Tasks:
 - Preserve state truthfulness after stop: the next `readState()` must show
   controller state as connected/error/stopped according to SDK data.
 
+P1-B status: deferred. `task_stop()` exists in the inspected SDK, but it is a
+task-program stop, not a verified controller-level servo hold primitive for this
+package. `RbpodoBackend::stop()` therefore fails closed without issuing a robot
+API call.
+
 Acceptance:
 
 - On stop success, no new motion target is sent by the backend.
@@ -226,6 +272,10 @@ Tasks:
 - After reset, require a fresh valid `readState()` before clearing the servo
   loop latch.
 - Keep `DualArmServoLoop` in `ConnectedHold`; require a new `ArmMotion`.
+
+P1-B status: deferred. No dedicated recover/reset API was verified in the
+inspected rbpodo headers, so `RbpodoBackend::resetFault()` fails closed without
+issuing a robot API call.
 
 Acceptance:
 
@@ -248,8 +298,9 @@ Before first hardware motion:
   `RB_SERVO_ENABLE_RBPODO=ON`.
 - Add a fake or adapter-level rbpodo test seam if the SDK can be abstracted
   without linking hardware code into default tests.
-- Confirm `dual_real.yaml` IPs, joint limits, servo rate, and speed parameters
-  are site-specific placeholders until operator signoff.
+- Confirm `dual_real.example.yaml` IPs, joint limits, servo rate, and speed
+  parameters are copied into a site-specific `config/local/*.yaml` file and
+  reviewed before operator signoff.
 - Keep GUI real-mode motion disabled until a separate operator-console review
   approves it.
 
@@ -260,7 +311,8 @@ This checklist must be completed in order. Stop immediately on any failed item.
 ### 1. Desk Review
 
 - Review this document with the operator.
-- Review `config/dual_real.yaml` line by line.
+- Review the site-specific `config/local/*.yaml` copied from
+  `config/dual_real.example.yaml` line by line.
 - Confirm left/right robot identity and IP mapping.
 - Confirm joint limits are conservative for the physical setup.
 - Confirm the first target is within 1 degree of current actual joints.
@@ -290,7 +342,7 @@ With real config but without `RB_ALLOW_REAL_ROBOT=1`, confirm startup refuses:
 
 ```bash
 ./rb_servo_server/build/rbpodo/rb_servo_server \
-  --config rb_servo_server/config/dual_real.yaml
+  --config rb_servo_server/config/local/dual_real_readonly.yaml
 ```
 
 Expected result: non-zero exit before hardware contact.
@@ -312,7 +364,7 @@ Run real mode only after preflight:
 
 ```bash
 RB_ALLOW_REAL_ROBOT=1 ./rb_servo_server/build/rbpodo/rb_servo_server \
-  --config rb_servo_server/config/dual_real.yaml
+  --config rb_servo_server/config/local/dual_real_readonly.yaml
 ```
 
 Expected:
@@ -374,7 +426,7 @@ Stop condition:
 Store the following artifacts for each hardware run:
 
 - exact git revision or patch bundle
-- `dual_real.yaml` copy used for the run
+- `config/local/*.yaml` copy used for the run
 - build command and `RB_SERVO_ENABLE_RBPODO` state
 - operator name and date
 - startup stdout/stderr
@@ -391,4 +443,3 @@ Do not mark real backend acceptance complete unless the evidence package shows:
 - first motion bounded and correct direction
 - send failure and reset semantics remain fail-closed
 - no relaxation of real-mode guards
-

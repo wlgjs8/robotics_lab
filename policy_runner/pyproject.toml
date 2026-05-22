@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robotics-lab-policy-runner"
+version = "0.1.0"
+description = "Python action-source runner for robotics_lab servo commands"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+spacemouse = ["hidapi", "pyspacemouse"]
+
+[project.scripts]
+policy-runner = "policy_runner.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["policy_runner*"]

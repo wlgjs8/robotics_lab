@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .state_machine import ArmSnapshot, DualArmSimulator, SimulatorError
+from .state_machine import ArmSnapshot, ArmSimulator, SimulatorError
 
 PROTOCOL_VERSION = "rbsim.v1"
 
@@ -20,6 +20,7 @@ ERROR_DISCONNECTED = 1001
 ERROR_NOT_INITIALIZED = 1002
 ERROR_SERVO_DISABLED = 1003
 ERROR_UNKNOWN_ARM = 1004
+ERROR_WRONG_ARM = 1005
 ERROR_FAULT_LATCHED = 2001
 ERROR_INVALID_STATE = 2002
 ERROR_SEND_FAILURE = 2101
@@ -71,9 +72,9 @@ class FaultInjectionState:
 class SimulatorProtocol:
     """Request dispatcher shared by the control and admin JSONL endpoints."""
 
-    def __init__(self, simulator: DualArmSimulator):
+    def __init__(self, simulator: ArmSimulator):
         self.simulator = simulator
-        self.faults = FaultInjectionState.for_arms(tuple(simulator.snapshots()))
+        self.faults = FaultInjectionState.for_arms((simulator.arm,))
 
     def handle_json_line(self, payload: bytes | str, endpoint_role: str) -> str:
         request_id: str | None = None
@@ -169,8 +170,14 @@ class SimulatorProtocol:
 
         if op == "admin.tick":
             steps = int(params.get("steps", 1))
+            if arm is None:
+                arm = self.simulator.arm
+            self._validate_arm(arm)
             states = self.simulator.tick(steps)
             return _ok_response(request_id, arm, states.get(arm) if arm else None, states=states)
+        if arm is None:
+            arm = self.simulator.arm
+        self._validate_arm(arm)
         if op == "admin.reset_hooks":
             self.faults.reset(arm)
         elif op == "admin.inject":
@@ -225,9 +232,13 @@ class SimulatorProtocol:
         return _ok_response(request_id, arm, snapshot, admin={"fault_hooks": hooks})
 
     def _apply_latency(self, arm: str) -> None:
+        self._validate_arm(arm)
         latency_sec = self.faults.hook(arm).latency_ms / 1000.0
         if latency_sec > 0:
             time.sleep(latency_sec)
+
+    def _validate_arm(self, arm: str) -> None:
+        self.simulator.snapshot(arm)
 
 
 def _decode_request(payload: bytes | str) -> dict[str, Any]:
@@ -299,7 +310,7 @@ def _error_response(
 def _classify_simulator_error(
     message: str,
     arm: str | None,
-    simulator: DualArmSimulator,
+    simulator: ArmSimulator,
 ) -> tuple[str, str, int]:
     if arm is not None:
         try:
@@ -308,6 +319,8 @@ def _classify_simulator_error(
                 return ("fault_latched", message, snapshot.error_code or ERROR_FAULT_LATCHED)
         except SimulatorError:
             pass
+    if "wrong arm" in message:
+        return ("wrong_arm", message, ERROR_WRONG_ARM)
     if "unknown arm" in message:
         return ("unknown_arm", message, ERROR_UNKNOWN_ARM)
     if "disconnected" in message:

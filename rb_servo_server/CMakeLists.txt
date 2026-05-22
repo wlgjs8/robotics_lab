@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(RB_SERVO_ENABLE_RBPODO "Enable rbpodo backend" OFF)
+option(RB_SERVO_ENABLE_PINOCCHIO "Enable Pinocchio FK support" OFF)
 option(RB_SERVO_ALLOW_FETCHCONTENT "Allow CMake to download missing build dependencies" ON)
 
 add_library(rb_servo_core
@@ -13,6 +14,7 @@ add_library(rb_servo_core
     src/core/clock.cpp
     src/core/realtime.cpp
     src/config/config.cpp
+    src/kinematics/pinocchio_kinematics.cpp
     src/robot/mock_backend.cpp
     src/robot/rbpodo_backend.cpp
     src/robot/rbsim_backend.cpp
@@ -49,8 +51,20 @@ if(NOT nlohmann_json_FOUND)
     FetchContent_MakeAvailable(json)
 endif()
 
+find_package(yaml-cpp REQUIRED)
 find_package(Threads REQUIRED)
-target_link_libraries(rb_servo_core PUBLIC Threads::Threads nlohmann_json::nlohmann_json)
+target_link_libraries(rb_servo_core PUBLIC Threads::Threads nlohmann_json::nlohmann_json yaml-cpp)
+
+if(RB_SERVO_ENABLE_RBPODO)
+    find_package(rbpodo REQUIRED)
+    target_link_libraries(rb_servo_core PUBLIC rbpodo::rbpodo)
+endif()
+
+if(RB_SERVO_ENABLE_PINOCCHIO)
+    find_package(pinocchio REQUIRED)
+    target_link_libraries(rb_servo_core PUBLIC pinocchio::pinocchio)
+    target_compile_definitions(rb_servo_core PUBLIC RB_SERVO_ENABLE_PINOCCHIO=1)
+endif()
 
 add_executable(rb_servo_server src/main.cpp)
 target_link_libraries(rb_servo_server PRIVATE rb_servo_core)
@@ -60,6 +74,14 @@ if(BUILD_TESTING)
     add_executable(test_safety_policy tests/test_safety_policy.cpp)
     target_link_libraries(test_safety_policy PRIVATE rb_servo_core)
     add_test(NAME safety_policy COMMAND test_safety_policy)
+
+    add_executable(test_config_loader tests/test_config_loader.cpp)
+    target_link_libraries(test_config_loader PRIVATE rb_servo_core)
+    add_test(NAME config_loader COMMAND test_config_loader)
+
+    add_executable(test_kinematics_fk tests/test_kinematics_fk.cpp)
+    target_link_libraries(test_kinematics_fk PRIVATE rb_servo_core)
+    add_test(NAME kinematics_fk COMMAND test_kinematics_fk)
 
     set(RB_GUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rb_gui")
     find_package(Python3 COMPONENTS Interpreter)

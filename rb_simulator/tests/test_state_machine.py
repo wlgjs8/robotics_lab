@@ -3,27 +3,34 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from rbsim import DualArmSimulator, SimulatorError, load_simulator_config
+from rbsim import ArmSimulator, SimulatorError, load_simulator_config
 
 
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "dual_rb3_730e.yaml"
+CONFIG_LEFT = Path(__file__).resolve().parents[1] / "config" / "left_rb3_730e.yaml"
+CONFIG_RIGHT = Path(__file__).resolve().parents[1] / "config" / "right_rb3_730e.yaml"
 
 
 class SimulatorStateMachineTest(unittest.TestCase):
-    def make_simulator(self) -> DualArmSimulator:
-        return DualArmSimulator(load_simulator_config(CONFIG_PATH))
+    def make_simulator(self, config_path: Path = CONFIG_LEFT) -> ArmSimulator:
+        return ArmSimulator(load_simulator_config(config_path))
 
-    def test_loads_dual_arm_config(self) -> None:
-        config = load_simulator_config(CONFIG_PATH)
+    def test_loads_per_arm_configs(self) -> None:
+        config = load_simulator_config(CONFIG_LEFT)
 
+        self.assertEqual(config.arm, "left")
         self.assertEqual(config.control_bind, "tcp://127.0.0.1:50200")
         self.assertEqual(config.admin_bind, "tcp://127.0.0.1:50201")
         self.assertEqual(config.update_rate_hz, 200)
         self.assertEqual(config.max_joint_velocity_deg_s, 360)
         self.assertEqual(config.model, "RB3_730E")
-        self.assertEqual(set(config.arms), {"left", "right"})
-        self.assertEqual(len(config.arms["left"].initial_q_deg), 6)
-        self.assertEqual(len(config.arms["right"].initial_q_deg), 6)
+        self.assertEqual(config.arm_config.name, "left_simulator")
+        self.assertEqual(len(config.arm_config.initial_q_deg), 6)
+
+        right = load_simulator_config(CONFIG_RIGHT)
+        self.assertEqual(right.arm, "right")
+        self.assertEqual(right.control_bind, "tcp://127.0.0.1:50210")
+        self.assertEqual(right.admin_bind, "tcp://127.0.0.1:50211")
+        self.assertEqual(right.arm_config.name, "right_simulator")
 
     def test_lifecycle_transitions_are_explicit(self) -> None:
         sim = self.make_simulator()
@@ -67,20 +74,35 @@ class SimulatorStateMachineTest(unittest.TestCase):
         self.assertAlmostEqual(after_one.q_actual_deg[0], 1.8)
         self.assertAlmostEqual(after_one.dq_actual_deg_s[0], 360.0)
 
-    def test_both_arms_maintain_independent_six_joint_state(self) -> None:
-        sim = self.make_simulator()
-        for arm in ("left", "right"):
-            sim.initialize(arm)
-            sim.enable_servo(arm)
+    def test_one_process_owns_exactly_one_arm(self) -> None:
+        left = self.make_simulator(CONFIG_LEFT)
+        right = self.make_simulator(CONFIG_RIGHT)
 
-        sim.send_servo_j("left", [6, -30, 80, 0, 60, 0])
-        sim.send_servo_j("right", [-6, -30, 80, 0, 60, 0])
-        snapshots = sim.tick(4)
+        left.initialize("left")
+        left.enable_servo("left")
+        right.initialize("right")
+        right.enable_servo("right")
 
-        self.assertGreater(snapshots["left"].q_actual_deg[0], 0)
-        self.assertLess(snapshots["right"].q_actual_deg[0], 0)
-        self.assertEqual(len(snapshots["left"].q_actual_deg), 6)
-        self.assertEqual(len(snapshots["right"].q_actual_deg), 6)
+        left.send_servo_j("left", [6, -30, 80, 0, 60, 0])
+        right.send_servo_j("right", [-6, -30, 80, 0, 60, 0])
+        left_snapshot = left.tick(4)["left"]
+        right_snapshot = right.tick(4)["right"]
+
+        self.assertEqual(set(left.snapshots()), {"left"})
+        self.assertEqual(set(right.snapshots()), {"right"})
+        self.assertGreater(left_snapshot.q_actual_deg[0], 0)
+        self.assertLess(right_snapshot.q_actual_deg[0], 0)
+        self.assertEqual(len(left_snapshot.q_actual_deg), 6)
+        self.assertEqual(len(right_snapshot.q_actual_deg), 6)
+
+    def test_wrong_arm_requests_fail_closed(self) -> None:
+        left = self.make_simulator(CONFIG_LEFT)
+        right = self.make_simulator(CONFIG_RIGHT)
+
+        with self.assertRaisesRegex(SimulatorError, "wrong arm"):
+            left.snapshot("right")
+        with self.assertRaisesRegex(SimulatorError, "wrong arm"):
+            right.snapshot("left")
 
     def test_fault_and_stop_do_not_mutate_to_new_targets(self) -> None:
         sim = self.make_simulator()
@@ -180,10 +202,10 @@ class SimulatorStateMachineTest(unittest.TestCase):
             sim.send_servo_j("left", [1, 2, 3])
         self.assertEqual(sim.snapshot("left").q_target_deg, before.q_target_deg)
 
-        sim.disconnect("right")
+        sim.disconnect("left")
         with self.assertRaises(SimulatorError):
-            sim.initialize("right")
-        self.assertEqual(sim.snapshot("right").lifecycle_state, "disconnected")
+            sim.initialize("left")
+        self.assertEqual(sim.snapshot("left").lifecycle_state, "disconnected")
 
 
 if __name__ == "__main__":

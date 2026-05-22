@@ -83,7 +83,8 @@ Acceptance:
 - server does not crash unexpectedly
 - health event reports disconnect
 - bundles become incomplete or are dropped according to config
-- reconnect policy works if enabled
+- reconnect remains disabled in P0; `reconnect.enabled: true` must fail config
+  validation until reconnect is implemented
 
 ## 9. Docker test
 
@@ -122,6 +123,6 @@ ctest --test-dir build --output-on-failure
 python3 tools/inspect_shm.py --shm /camera_server_frames_test
 ```
 
-Hardware acceptance(실제 RealSense 3대 10분, Docker USB permission, disconnect test)는 실제 장비가 연결된 host에서 `config/triple_realsense.yaml`의 serial을 채운 뒤 수행해야 한다.
+Hardware acceptance(실제 RealSense 3대 10분, Docker USB permission, disconnect test)는 실제 장비가 연결된 host에서 `config/triple_realsense_640x360.yaml` 또는 명시 승인된 `config/triple_realsense_640x480.yaml` variant를 복사하고 serial placeholder를 채운 뒤 수행해야 한다.
 The gated operator procedure and evidence template live in
 `docs/hardware_acceptance_runbook.md`.

@@ -7,15 +7,16 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from rbsim import PROTOCOL_VERSION, DualArmSimulator, SimulatorProtocol, load_simulator_config
+from rbsim import PROTOCOL_VERSION, ArmSimulator, SimulatorProtocol, load_simulator_config
 
 
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "dual_rb3_730e.yaml"
+CONFIG_LEFT = Path(__file__).resolve().parents[1] / "config" / "left_rb3_730e.yaml"
+CONFIG_RIGHT = Path(__file__).resolve().parents[1] / "config" / "right_rb3_730e.yaml"
 
 
 class SimulatorProtocolContractTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.protocol = SimulatorProtocol(DualArmSimulator(load_simulator_config(CONFIG_PATH)))
+        self.protocol = SimulatorProtocol(ArmSimulator(load_simulator_config(CONFIG_LEFT)))
 
     def request(self, endpoint_role: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = self.protocol.handle_json_line(json.dumps(payload, separators=(",", ":")), endpoint_role)
@@ -90,21 +91,29 @@ class SimulatorProtocolContractTest(unittest.TestCase):
 
             self.assertTrue(self.admin("admin.inject", params={"hook": hook, "enabled": False})["ok"])
 
-    def test_injected_read_failure_is_per_arm_isolated(self) -> None:
+    def test_wrong_arm_requests_are_rejected(self) -> None:
         self.assertTrue(self.control("initialize", arm="left")["ok"])
-        self.assertTrue(self.control("initialize", arm="right")["ok"])
 
-        injected = self.admin("admin.inject", arm="left", params={"hook": "read_failure", "enabled": True})
-        self.assertTrue(injected["admin"]["fault_hooks"]["read_failure"])
+        failed_right = self.control("read_state", arm="right")
+        self.assertFalse(failed_right["ok"])
+        self.assertEqual(failed_right["error"]["name"], "wrong_arm")
 
-        failed_left = self.control("read_state", arm="left")
-        self.assertFalse(failed_left["ok"])
-        self.assertEqual(failed_left["error"]["name"], "read_failure_injected")
-        self.assertEqual(failed_left["error"]["code"], 2104)
-
-        right = self.control("read_state", arm="right")
-        self.assertTrue(right["ok"])
-        self.assertEqual(right["state"]["arm"], "right")
+        right_protocol = SimulatorProtocol(ArmSimulator(load_simulator_config(CONFIG_RIGHT)))
+        response = json.loads(
+            right_protocol.handle_json_line(
+                json.dumps(
+                    {
+                        "schema_version": PROTOCOL_VERSION,
+                        "request_id": "wrong-left",
+                        "op": "read_state",
+                        "arm": "left",
+                    }
+                ),
+                "control",
+            )
+        )
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["name"], "wrong_arm")
 
     def test_send_failure_preserves_last_safe_target_without_zero_substitution(self) -> None:
         self.assertTrue(self.control("initialize")["ok"])

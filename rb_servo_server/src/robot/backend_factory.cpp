@@ -17,7 +17,7 @@ std::unique_ptr<IRobotBackend> BackendFactory::create(
             return std::make_unique<MockBackend>(arm_id, config);
         case BackendType::Rbpodo:
             return std::make_unique<RbpodoBackend>(arm_id, config);
-        case BackendType::Rbsim:
+        case BackendType::Simulator:
             return std::make_unique<RbsimBackend>(arm_id, config);
     }
     throw std::runtime_error("Unsupported backend type");

@@ -1,33 +1,37 @@
 # rb_simulator Protocol v1
 
-This protocol is a hardware-free contract for `RbsimBackend`. It is
-not the Rainbow Robotics Virtual Simulator protocol, does not speak `rbpodo`,
-and must bind to loopback by default.
+Protocol v1 is a JSON Lines contract for the hardware-free simulator backend.
+It is not the Rainbow Robotics simulator protocol, does not speak `rbpodo`, and
+binds to loopback by default.
+
+The schema version remains `rbsim.v1` for compatibility with existing clients.
+Public configuration should still use `backend_type: simulator`.
 
 ## Transport
 
 - Framing: one UTF-8 JSON object per TCP line, terminated by `\n`.
-- Default control endpoint: `tcp://127.0.0.1:50200`.
-- Default admin endpoint: `tcp://127.0.0.1:50201`.
+- Left host control endpoint: `tcp://127.0.0.1:50200`.
+- Left host admin endpoint: `tcp://127.0.0.1:50201`.
+- Right host control endpoint: `tcp://127.0.0.1:50210`.
+- Right host admin endpoint: `tcp://127.0.0.1:50211`.
 - Default schema version: `rbsim.v1`.
-- Client timeout guidance: fail a request if no response line arrives within
-  the servo-server backend timeout budget. Initial local tests should use
-  100-500 ms and avoid hidden retries.
 
-The simulator rejects non-loopback bind addresses by default to avoid accidental
-production or hardware-facing exposure.
+Non-loopback binds are rejected unless
+`RB_SIMULATOR_ALLOW_NON_LOOPBACK=1` is set.
 
 ## Topology
 
-Protocol v1 standardizes a single dual-arm simulator process. Both
-`rb_servo_server` `RbsimBackend` instances connect to the same control endpoint
-and set the request `arm` field to `left` or `right`. The process owns
-independent state for both arms and exposes one admin endpoint for deterministic
-test hooks.
+One process owns exactly one arm. The configured arm is loaded from
+`simulator.arm` in the process config.
 
-Splitting left and right across separate endpoints or separate simulator
-processes is a future option, not the current contract. Such a change must
-revise this protocol, the config pair, and smoke-runner defaults together.
+```text
+left process  owns left  and rejects right
+right process owns right and rejects left
+```
+
+The `arm` request field is retained for compatibility. It is required for
+control operations. Admin operations may omit it, in which case the process arm
+is used. Any mismatched explicit arm is rejected fail-closed.
 
 ## Request Envelope
 
@@ -48,12 +52,12 @@ Fields:
 - `schema_version`: required string, currently `rbsim.v1`.
 - `request_id`: optional string echoed in the response.
 - `op`: required operation string.
-- `arm`: required for per-arm control operations and most admin operations.
+- `arm`: required for control operations; optional for admin operations.
 - `params`: optional object for operation-specific arguments.
 
 ## Response Envelope
 
-Successful responses:
+Successful response:
 
 ```json
 {
@@ -80,24 +84,24 @@ Successful responses:
 }
 ```
 
-Failure responses:
+Failure response:
 
 ```json
 {
   "schema_version": "rbsim.v1",
   "request_id": "client-unique-id",
   "ok": false,
-  "arm": "left",
+  "arm": "right",
   "server_time_ns": 123456789,
   "error": {
-    "name": "send_failure_injected",
-    "message": "left send failure injected",
-    "code": 2101
+    "name": "wrong_arm",
+    "message": "wrong arm: simulator owns left, got right",
+    "code": 1005
   }
 }
 ```
 
-Error names and codes are stable enough for tests:
+## Error Names
 
 | Code | Name | Meaning |
 | --- | --- | --- |
@@ -105,6 +109,7 @@ Error names and codes are stable enough for tests:
 | 1002 | `not_initialized` | Operation requires initialization. |
 | 1003 | `servo_disabled` | Servo target requires servo enabled. |
 | 1004 | `unknown_arm` | Arm key is not configured. |
+| 1005 | `wrong_arm` | Request arm does not match the process arm. |
 | 2001 | `fault_latched` | Arm has a latched simulator fault. |
 | 2002 | `invalid_joint_state` | Joint state validity was disabled. |
 | 2101 | `send_failure_injected` | Deterministic send failure hook is active. |
@@ -121,12 +126,12 @@ Error names and codes are stable enough for tests:
 
 `connect`
 
-- Requires `arm`.
+- Requires matching `arm`.
 - Marks the arm connected and returns state.
 
 `initialize`
 
-- Requires `arm`.
+- Requires matching `arm`.
 - Marks the arm initialized.
 - By default also enables servo motion so the minimal backend path can call
   `send_servo_j` after `initialize`.
@@ -134,51 +139,46 @@ Error names and codes are stable enough for tests:
 
 `read_state`
 
-- Requires `arm`.
+- Requires matching `arm`.
 - Returns the current arm snapshot without mutating state.
-- Returns `read_failure_injected` when the per-arm read-failure hook is active.
+- Returns `read_failure_injected` when the read-failure hook is active.
 
 `send_servo_j`
 
+- Requires matching `arm`.
 - Requires initialized, servo-enabled, connected, non-faulted, valid state.
 - Requires `params.q_target_deg` as a six-number joint target in degrees.
-- Updates only the target; actual joints advance by deterministic ticks using
-  interpolation capped by `simulator.max_joint_velocity_deg_s`.
+- Updates only the target; actual joints advance by deterministic ticks.
 
 `stop`
 
-- Requires connected arm.
+- Requires matching `arm` and connected state.
 - Holds current actual joints when joint state is valid, otherwise holds the
-  last accepted safe target. It does not synthesize zero joint targets.
-- Disables servo motion and returns stopped state unless stop-failure injection
-  is active.
+  last accepted safe target.
+- Disables servo motion unless stop-failure injection is active.
 
 `reset_fault`
 
-- Requires connected arm.
-- Clears a recoverable latched fault only when explicitly called and unless
-  reset-failure injection is active.
-- Unrecoverable faults remain latched and return `fault_latched`.
+- Requires matching `arm` and connected state.
+- Clears recoverable latched faults unless reset-failure injection is active.
 - Does not re-enable motion or initialization.
 
 ## Admin Operations
 
 Admin operations are test hooks and belong only on the admin endpoint.
 
-- `admin.tick`: `params.steps` advances deterministic simulator ticks and
-  returns all arm states.
-- `admin.inject`: `params.hook` is one of `read_failure`, `send_failure`,
-  `stop_failure`, or `reset_failure`; `params.enabled` toggles it.
-- `admin.reset_hooks`: clears one arm's hooks or all hooks when `arm` is absent.
-- `admin.set_latency`: sets deterministic per-arm response latency in ms.
+- `admin.tick`: advances deterministic simulator ticks and returns one state
+  under `states.left` or `states.right`.
+- `admin.inject`: toggles `read_failure`, `send_failure`, `stop_failure`, or
+  `reset_failure`.
+- `admin.reset_hooks`: clears hooks for the process arm.
+- `admin.set_latency`: sets deterministic response latency in ms.
 - `admin.disconnect` / `admin.reconnect`: toggles connection state.
 - `admin.set_joint_validity`: toggles `has_valid_joint_state`.
-- `admin.set_stale_state`: freezes reported state timestamp and motion while
-  preserving connection state.
-- `admin.set_fault`: latches a fault with `params.error_code`; optional
-  `params.recoverable=false` makes reset reject the fault.
-- `admin.set_tracking_bias`: adds a deterministic reported actual-joint bias.
+- `admin.set_stale_state`: freezes reported state timestamp and motion.
+- `admin.set_fault`: latches a fault with `params.error_code`.
+- `admin.set_tracking_bias`: adds reported actual-joint bias.
 - `admin.freeze_motion`: freezes actual-joint motion while robot time advances.
 
-These hooks are for unit, contract, and smoke tests only. They must not be used
-as evidence of Rainbow Virtual Simulator or real-robot readiness.
+These hooks are for unit, contract, and smoke tests only. They are not evidence
+of Rainbow simulator or real robot readiness.

@@ -83,6 +83,8 @@ private:
     bool commandRequestsArmMotion(const DualArmCommand& command) const;
     bool commandRequestsDisarmMotion(const DualArmCommand& command) const;
     bool commandRequestsMotion(const DualArmCommand& command) const;
+    bool commandBlockedByReadOnly(const DualArmCommand& command) const;
+    bool readOnlyMode() const;
     bool motionAllowed() const;
     bool isRealMode() const;
     bool clearFaultLatch(RobotState& left_state, RobotState& right_state);

@@ -123,6 +123,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     );
 
     message["send_skew_us"] = snapshot.send_skew_us;
+    message["send_suppressed"] = snapshot.send_suppressed;
+    message["send_policy"] = snapshot.send_policy;
     message["safety_verdict"] = toString(snapshot.safety_verdict);
     message["motion_state"] = toString(snapshot.motion_state);
     message["fault_latched"] = snapshot.fault_latched;

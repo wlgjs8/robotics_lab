@@ -13,6 +13,8 @@ struct BackendConfig {
     std::string name;
     std::string ip;
     std::string operation_mode = "real";
+    std::string simulator_control_endpoint = "tcp://127.0.0.1:50200";
+    // Deprecated compatibility alias. Keep synchronized with simulator_control_endpoint.
     std::string rbsim_control_endpoint = "tcp://127.0.0.1:50200";
     double rbsim_request_timeout_sec = 0.2;
     double rbsim_connect_timeout_sec = 0.2;
@@ -38,6 +40,24 @@ struct ArmMountConfig {
     Pose6D base_pose_in_stand;
 };
 
+struct KinematicsConfig {
+    bool enable = false;
+    std::string provider = "none";
+    std::string urdf = "descriptions/urdf/rb3_730e.urdf";
+    std::string base_link = "world";
+    std::string tip_link = "tcp";
+    std::vector<std::string> joint_names{
+        "base_joint",
+        "shoulder_joint",
+        "elbow_joint",
+        "wrist1_joint",
+        "wrist2_joint",
+        "wrist3_joint",
+    };
+    std::string q_units = "deg";
+    bool publish_tcp = false;
+};
+
 struct SafetyConfig {
     JointArray q_min_deg{};
     JointArray q_max_deg{};
@@ -58,6 +78,7 @@ struct ServoConfig {
     int rate_hz = 200;
     double command_timeout_sec = 0.2;
     ControlMode startup_mode = ControlMode::Hold;
+    bool send_servo_commands = true;
 
     bool enable_realtime_priority = true;
     int realtime_priority = 80;
@@ -71,7 +92,10 @@ struct ServoConfig {
 
 struct NetworkConfig {
     std::string command_bind = "udp://127.0.0.1:50010";
+    std::string state_pub_endpoint = "udp://127.0.0.1:50110";
+    // Deprecated compatibility alias. Keep synchronized with state_pub_endpoint.
     std::string state_pub_bind = "udp://127.0.0.1:50110";
+    int state_pub_rate_hz = 20;
     std::vector<std::string> command_source_allowlist{"127.0.0.1/32"};
     double command_timeout_sec = 0.2;
 };
@@ -84,6 +108,7 @@ struct LoggingConfig {
 };
 
 struct ForceControlConfig {
+    std::string provider = "null";
     bool enable = false;
     int update_rate_hz = 200;
 
@@ -110,6 +135,7 @@ struct DualArmConfig {
     NetworkConfig network;
     LoggingConfig logging;
     ForceControlConfig force_control;
+    KinematicsConfig kinematics;
 };
 
 DualArmConfig loadConfigFromYaml(const std::string& path);

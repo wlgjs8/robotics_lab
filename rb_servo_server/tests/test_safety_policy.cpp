@@ -12,6 +12,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -96,6 +97,7 @@ public:
     }
 
     bool sendServoJ(const rb_servo::JointArray& q_target_deg) override {
+        ++send_count_;
         if (fail_send_) return false;
         q_target_ = q_target_deg;
         q_actual_ = q_target_deg;
@@ -122,6 +124,7 @@ public:
     void setInvalidateJointStateOnReset(bool invalidate) { invalidate_joint_state_on_reset_ = invalidate; }
     int readCount() const { return read_count_; }
     int resetCount() const { return reset_count_; }
+    int sendCount() const { return send_count_; }
 
 private:
     rb_servo::ArmId arm_id_;
@@ -137,6 +140,7 @@ private:
     bool initialized_ = false;
     int read_count_ = 0;
     int reset_count_ = 0;
+    int send_count_ = 0;
 };
 
 class ScriptedRbsimServer {
@@ -513,32 +517,93 @@ bool sendUdpJson(const std::string& host, int port, const std::string& payload) 
     return sent == static_cast<ssize_t>(payload.size());
 }
 
-bool testRbsimConfigParsesAndStaysLoopback() {
+class EnvVarGuard {
+public:
+    explicit EnvVarGuard(const char* name)
+        : name_(name) {
+        const char* value = std::getenv(name_.c_str());
+        if (value) {
+            had_value_ = true;
+            old_value_ = value;
+        }
+    }
+
+    ~EnvVarGuard() {
+        if (had_value_) {
+            setenv(name_.c_str(), old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+
+    void set(const char* value) const { setenv(name_.c_str(), value, 1); }
+    void unset() const { unsetenv(name_.c_str()); }
+
+private:
+    std::string name_;
+    bool had_value_ = false;
+    std::string old_value_;
+};
+
+bool testSimulatorConfigParsesCanonicalAndAliases() {
     const std::filesystem::path config_path =
-        std::filesystem::path(__FILE__).parent_path().parent_path() / "config" / "dual_rb_simulator.yaml";
+        std::filesystem::path(__FILE__).parent_path().parent_path() / "config" / "dual_simulator.yaml";
     const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(config_path.string());
 
-    RB_CHECK(cfg.left_robot.backend_type == rb_servo::BackendType::Rbsim);
-    RB_CHECK(cfg.right_robot.backend_type == rb_servo::BackendType::Rbsim);
+    RB_CHECK(cfg.left_robot.backend_type == rb_servo::BackendType::Simulator);
+    RB_CHECK(cfg.right_robot.backend_type == rb_servo::BackendType::Simulator);
     RB_CHECK(cfg.left_robot.run_mode == rb_servo::RunMode::Simulation);
     RB_CHECK(cfg.right_robot.run_mode == rb_servo::RunMode::Simulation);
+    RB_CHECK(cfg.left_robot.simulator_control_endpoint == "tcp://127.0.0.1:50200");
+    RB_CHECK(cfg.right_robot.simulator_control_endpoint == "tcp://127.0.0.1:50210");
     RB_CHECK(cfg.left_robot.rbsim_control_endpoint == "tcp://127.0.0.1:50200");
-    RB_CHECK(cfg.right_robot.rbsim_control_endpoint == "tcp://127.0.0.1:50200");
+    RB_CHECK(cfg.right_robot.rbsim_control_endpoint == "tcp://127.0.0.1:50210");
     RB_CHECK(std::abs(cfg.left_robot.rbsim_connect_timeout_sec - 0.2) < kEpsilon);
     RB_CHECK(std::abs(cfg.left_robot.rbsim_read_timeout_sec - 0.2) < kEpsilon);
     RB_CHECK(std::abs(cfg.left_robot.rbsim_send_timeout_sec - 0.2) < kEpsilon);
     RB_CHECK(std::abs(cfg.left_robot.rbsim_stop_timeout_sec - 0.2) < kEpsilon);
     RB_CHECK(std::abs(cfg.left_robot.rbsim_reset_timeout_sec - 0.2) < kEpsilon);
     RB_CHECK(cfg.network.command_bind == "udp://127.0.0.1:50010");
+    RB_CHECK(cfg.network.state_pub_endpoint == "udp://127.0.0.1:50110");
     RB_CHECK(cfg.network.state_pub_bind == "udp://127.0.0.1:50110");
+    RB_CHECK(cfg.network.state_pub_rate_hz == 20);
 
-    const std::string path = "/tmp/rb-servo-rbsim-exposure-" + std::to_string(getpid()) + ".yaml";
+    const std::filesystem::path compose_config_path =
+        std::filesystem::path(__FILE__).parent_path().parent_path() / "config" / "dual_simulator_compose.yaml";
+    const rb_servo::DualArmConfig compose_cfg = rb_servo::loadConfigFromYaml(compose_config_path.string());
+    RB_CHECK(compose_cfg.left_robot.simulator_control_endpoint == "tcp://rb_simulator_left:50200");
+    RB_CHECK(compose_cfg.right_robot.simulator_control_endpoint == "tcp://rb_simulator_right:50200");
+
+    const std::string alias_path = "/tmp/rb-servo-simulator-alias-" + std::to_string(getpid()) + ".yaml";
+    {
+        std::ofstream file(alias_path);
+        file << "left_robot:\n"
+             << "  backend_type: rbsim_local\n"
+             << "  run_mode: rbsim_local\n"
+             << "  rbsim_control_endpoint: \"tcp://127.0.0.1:50200\"\n"
+             << "right_robot:\n"
+             << "  backend_type: mock\n"
+             << "  run_mode: mock\n";
+    }
+
+    std::ostringstream warnings;
+    auto* const old_cerr = std::cerr.rdbuf(warnings.rdbuf());
+    const rb_servo::DualArmConfig alias_cfg = rb_servo::loadConfigFromYaml(alias_path);
+    std::cerr.rdbuf(old_cerr);
+    ::unlink(alias_path.c_str());
+
+    RB_CHECK(alias_cfg.left_robot.backend_type == rb_servo::BackendType::Simulator);
+    RB_CHECK(alias_cfg.left_robot.run_mode == rb_servo::RunMode::Simulation);
+    RB_CHECK(alias_cfg.left_robot.simulator_control_endpoint == "tcp://127.0.0.1:50200");
+    RB_CHECK(warnings.str().find("deprecated") != std::string::npos);
+
+    const std::string path = "/tmp/rb-servo-simulator-exposure-" + std::to_string(getpid()) + ".yaml";
     {
         std::ofstream file(path);
         file << "left_robot:\n"
-             << "  backend_type: rbsim\n"
+             << "  backend_type: simulator\n"
              << "  run_mode: simulation\n"
-             << "  rbsim_control_endpoint: \"tcp://0.0.0.0:50200\"\n"
+             << "  simulator_control_endpoint: \"tcp://0.0.0.0:50200\"\n"
              << "right_robot:\n"
              << "  backend_type: mock\n"
              << "  run_mode: mock\n";
@@ -553,6 +618,28 @@ bool testRbsimConfigParsesAndStaysLoopback() {
     ::unlink(path.c_str());
 
     RB_CHECK(rejected);
+
+    const std::string real_sim_path = "/tmp/rb-servo-real-simulator-" + std::to_string(getpid()) + ".yaml";
+    {
+        std::ofstream file(real_sim_path);
+        file << "left_robot:\n"
+             << "  backend_type: simulator\n"
+             << "  run_mode: real\n"
+             << "  simulator_control_endpoint: \"tcp://127.0.0.1:50200\"\n"
+             << "right_robot:\n"
+             << "  backend_type: mock\n"
+             << "  run_mode: mock\n";
+    }
+
+    bool real_sim_rejected = false;
+    try {
+        (void)rb_servo::loadConfigFromYaml(real_sim_path);
+    } catch (const std::exception&) {
+        real_sim_rejected = true;
+    }
+    ::unlink(real_sim_path.c_str());
+
+    RB_CHECK(real_sim_rejected);
     return true;
 }
 
@@ -1173,11 +1260,14 @@ bool testSecondCommandServerStartFailsOnSamePort() {
 
 bool testRealModeTcpStatePublisherExposureRequiresOverride() {
     const char* old_allow_real = std::getenv("RB_ALLOW_REAL_ROBOT");
+    const char* old_allow_motion = std::getenv("RB_ALLOW_REAL_MOTION");
     const char* old_allow_network = std::getenv("RB_ALLOW_NETWORK_EXPOSURE");
     const std::string saved_allow_real = old_allow_real ? old_allow_real : "";
+    const std::string saved_allow_motion = old_allow_motion ? old_allow_motion : "";
     const std::string saved_allow_network = old_allow_network ? old_allow_network : "";
 
     setenv("RB_ALLOW_REAL_ROBOT", "1", 1);
+    setenv("RB_ALLOW_REAL_MOTION", "1", 1);
     unsetenv("RB_ALLOW_NETWORK_EXPOSURE");
 
     const std::string path = "/tmp/rb-servo-real-exposure-" + std::to_string(getpid()) + ".yaml";
@@ -1191,7 +1281,7 @@ bool testRealModeTcpStatePublisherExposureRequiresOverride() {
              << "  run_mode: real\n"
              << "network:\n"
              << "  command_bind: \"udp://127.0.0.1:50010\"\n"
-             << "  state_pub_bind: \"tcp://0.0.0.0:50110\"\n";
+             << "  state_pub_endpoint: \"tcp://0.0.0.0:50110\"\n";
     }
 
     bool rejected = false;
@@ -1207,6 +1297,11 @@ bool testRealModeTcpStatePublisherExposureRequiresOverride() {
     } else {
         unsetenv("RB_ALLOW_REAL_ROBOT");
     }
+    if (old_allow_motion) {
+        setenv("RB_ALLOW_REAL_MOTION", saved_allow_motion.c_str(), 1);
+    } else {
+        unsetenv("RB_ALLOW_REAL_MOTION");
+    }
     if (old_allow_network) {
         setenv("RB_ALLOW_NETWORK_EXPOSURE", saved_allow_network.c_str(), 1);
     } else {
@@ -1214,6 +1309,72 @@ bool testRealModeTcpStatePublisherExposureRequiresOverride() {
     }
 
     RB_CHECK(rejected);
+    return true;
+}
+
+bool testRealModeReadOnlyAndMotionEnvGates() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    allow_real.unset();
+    allow_motion.unset();
+
+    const std::string read_only_path = "/tmp/rb-servo-real-read-only-" + std::to_string(getpid()) + ".yaml";
+    {
+        std::ofstream file(read_only_path);
+        file << "left_robot:\n"
+             << "  backend_type: rbpodo\n"
+             << "  run_mode: real\n"
+             << "right_robot:\n"
+             << "  backend_type: rbpodo\n"
+             << "  run_mode: real\n"
+             << "servo:\n"
+             << "  enable_realtime_priority: true\n"
+             << "  send_servo_commands: false\n"
+             << "safety:\n"
+             << "  tracking_error_policy: fault_latch\n";
+    }
+
+    bool rejected_without_robot = false;
+    try {
+        (void)rb_servo::loadConfigFromYaml(read_only_path);
+    } catch (const std::exception&) {
+        rejected_without_robot = true;
+    }
+    RB_CHECK(rejected_without_robot);
+
+    allow_real.set("1");
+    const rb_servo::DualArmConfig read_only_cfg = rb_servo::loadConfigFromYaml(read_only_path);
+    RB_CHECK(!read_only_cfg.servo.send_servo_commands);
+    ::unlink(read_only_path.c_str());
+
+    const std::string motion_path = "/tmp/rb-servo-real-motion-" + std::to_string(getpid()) + ".yaml";
+    {
+        std::ofstream file(motion_path);
+        file << "left_robot:\n"
+             << "  backend_type: rbpodo\n"
+             << "  run_mode: real\n"
+             << "right_robot:\n"
+             << "  backend_type: rbpodo\n"
+             << "  run_mode: real\n"
+             << "servo:\n"
+             << "  enable_realtime_priority: true\n"
+             << "  send_servo_commands: true\n"
+             << "safety:\n"
+             << "  tracking_error_policy: fault_latch\n";
+    }
+
+    bool rejected_without_motion = false;
+    try {
+        (void)rb_servo::loadConfigFromYaml(motion_path);
+    } catch (const std::exception&) {
+        rejected_without_motion = true;
+    }
+    RB_CHECK(rejected_without_motion);
+
+    allow_motion.set("1");
+    const rb_servo::DualArmConfig motion_cfg = rb_servo::loadConfigFromYaml(motion_path);
+    RB_CHECK(motion_cfg.servo.send_servo_commands);
+    ::unlink(motion_path.c_str());
     return true;
 }
 
@@ -1348,6 +1509,82 @@ bool testLatestSnapshotContainsSendTimingAndPreviousTargets() {
     return true;
 }
 
+bool testReadOnlyModeSuppressesSendsAndBlocksMotionCommands() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.servo.send_servo_commands = false;
+    cfg.safety.dq_max_deg_s = joints(10000.0);
+    cfg.safety.ddq_max_deg_s2 = joints(100000.0);
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    TestBackend* left_backend = left.get();
+    TestBackend* right_backend = right.get();
+    rb_servo::DualArmServoLoop loop(
+        std::move(left),
+        std::move(right),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    sleepTicks();
+    uint64_t tick_before = loop.latestSnapshot().tick;
+    RB_CHECK(left_backend->sendCount() == 0);
+    RB_CHECK(right_backend->sendCount() == 0);
+
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot current = loop.latestSnapshot();
+        return current.command.left.mode == rb_servo::ControlMode::ArmMotion &&
+               current.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand;
+    }));
+    rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    RB_CHECK(snapshot.tick > tick_before);
+    RB_CHECK(snapshot.send_suppressed);
+    RB_CHECK(snapshot.send_policy == "read_only");
+    RB_CHECK(snapshot.left_send_ok);
+    RB_CHECK(snapshot.right_send_ok);
+    RB_CHECK(snapshot.left_send_start_ns == 0);
+    RB_CHECK(snapshot.right_send_start_ns == 0);
+    RB_CHECK(snapshot.motion_state == rb_servo::ServerMotionState::ConnectedHold);
+    RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand);
+
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.left.q_target_deg = joints(9.0);
+    target.right.q_target_deg = joints(9.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    buffer.setCommand(target);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot current = loop.latestSnapshot();
+        return current.command.left.mode == rb_servo::ControlMode::JointTarget &&
+               current.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand;
+    }));
+    snapshot = loop.latestSnapshot();
+    RB_CHECK(left_backend->sendCount() == 0);
+    RB_CHECK(right_backend->sendCount() == 0);
+    RB_CHECK(snapshot.send_suppressed);
+    RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand);
+    RB_CHECK(sameJointArray(loop.previousSentTarget().left_q_target_deg, initial));
+    RB_CHECK(sameJointArray(loop.previousSentTarget().right_q_target_deg, initial));
+
+    buffer.setCommand(command(rb_servo::ControlMode::EmergencyStop));
+    RB_CHECK(waitUntil([&] { return loop.faultLatched(); }));
+    buffer.setCommand(command(rb_servo::ControlMode::ResetFault));
+    sleepTicks();
+    RB_CHECK(left_backend->resetCount() == 0);
+    RB_CHECK(right_backend->resetCount() == 0);
+    RB_CHECK(loop.faultLatched());
+    RB_CHECK(loop.motionState() == rb_servo::ServerMotionState::EmergencyLatched);
+    RB_CHECK(left_backend->sendCount() == 0);
+    RB_CHECK(right_backend->sendCount() == 0);
+
+    loop.stop();
+    return true;
+}
+
 
 bool testStatePublisherAcceptsDockerServiceHostnameEndpoint() {
     std::string host;
@@ -1398,6 +1635,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.right_send_start_ns = 30;
     snapshot.right_send_end_ns = 40;
     snapshot.send_skew_us = 20.0;
+    snapshot.send_suppressed = true;
+    snapshot.send_policy = "read_only";
     snapshot.left_send_duration_us = 10.0;
     snapshot.right_send_duration_us = 10.0;
     snapshot.safety_verdict = rb_servo::SafetyVerdict::Ok;
@@ -1413,7 +1652,7 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     const char* top_keys[] = {
         "schema_version", "tick", "host_time_ns", "loop_start_time_ns", "loop_end_time_ns",
         "period_ms", "jitter_ms", "filter_dt_ms", "command_seq", "left", "right",
-        "send_skew_us", "safety_verdict", "motion_state", "fault_latched",
+        "send_skew_us", "send_suppressed", "send_policy", "safety_verdict", "motion_state", "fault_latched",
         "latched_fault_reason", "fault_reason", "logger_dropped_samples", "logger_health",
         "mount_transform_deferred", "mounts", "tcp_fields_deferred"
     };
@@ -1458,6 +1697,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("left").at("host_time_ns").get<uint64_t>() == 11'000);
     RB_CHECK(json.at("right").at("robot_time_ns").get<uint64_t>() == 22'000);
     RB_CHECK(json.at("send_skew_us").get<double>() == 20.0);
+    RB_CHECK(json.at("send_suppressed").get<bool>());
+    RB_CHECK(json.at("send_policy").get<std::string>() == "read_only");
     RB_CHECK(json.at("left").at("send_duration_us").get<double>() == 10.0);
     RB_CHECK(json.at("right").at("send_duration_us").get<double>() == 10.0);
     RB_CHECK(json.at("safety_verdict").get<std::string>() == "Ok");
@@ -1858,7 +2099,7 @@ bool testStopBothOnSendFailureLatchesFault() {
 
 int main() {
     if (!testCommandValidation()) return 1;
-    if (!testRbsimConfigParsesAndStaysLoopback()) return 1;
+    if (!testSimulatorConfigParsesCanonicalAndAliases()) return 1;
     if (!testRbsimBackendMapsStateAndFailureResponses()) return 1;
     if (!testRbsimInvalidJointStateLatchesAndHoldsPreviousTarget()) return 1;
     if (!testRbsimPerArmDisconnectLatchesAndPublishesTruthfulSnapshot()) return 1;
@@ -1879,10 +2120,12 @@ int main() {
     if (!testCommandServerStartFailsOnPortConflict()) return 1;
     if (!testSecondCommandServerStartFailsOnSamePort()) return 1;
     if (!testRealModeTcpStatePublisherExposureRequiresOverride()) return 1;
+    if (!testRealModeReadOnlyAndMotionEnvGates()) return 1;
     if (!testSafetyFilterVelocityClampMaxStep()) return 1;
     if (!testSafetyFilterAccelerationClampDoesNotOvershoot()) return 1;
     if (!testRobotStateErrorRealPolicyLatchesFault()) return 1;
     if (!testLatestSnapshotContainsSendTimingAndPreviousTargets()) return 1;
+    if (!testReadOnlyModeSuppressesSendsAndBlocksMotionCommands()) return 1;
     if (!testStatePublisherAcceptsDockerServiceHostnameEndpoint()) return 1;
     if (!testStatePublisherSerializesServoSnapshotSchema()) return 1;
     if (!testStatePublisherUsesLatestSnapshotWithoutBackendReadsAndDoesNotStallLoop()) return 1;

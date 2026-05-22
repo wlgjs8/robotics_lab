@@ -1,38 +1,64 @@
 # Hardware-Free Validation Gate
 
-This gate is the local and CI-equivalent regression command set for first-wave
-safety fixes. It exercises only mock/stub and loopback simulator code paths and
-does not start real robot, Rainbow rbsim, RealSense, Docker, privileged
-deployment, external network, credentialed, or production network checks.
+This gate is the local and CI-equivalent regression command set for
+hardware-free development. It exercises only mock/stub and loopback simulator
+code paths and does not start real robot motion, RealSense capture, Docker,
+privileged deployment, external network, credentialed, or production network
+checks.
+
+The architecture source of truth is [architecture.md](architecture.md). Public
+terminology is:
+
+```yaml
+run_mode: mock | simulation | real
+backend_type: mock | simulator | rbpodo
+```
 
 Run from the workspace root:
 
 ```bash
+bash scripts/check_deps.sh --profile hardware-free
 bash scripts/hardware_free_validation.sh
 ```
 
 The script runs:
 
+- `scripts/check_deps.sh --profile hardware-free`: fails before CMake when
+  CMake, a C++17 compiler, `yaml-cpp`, `nlohmann_json`, or `python3` is
+  missing.
 - `camera_server`: CMake configure/build/CTest with `CAMERA_SERVER_FORCE_MOCK_CAMERA=ON` and `CAMERA_SERVER_FORCE_ZMQ_STUB=ON`.
 - `rb_servo_server`: CMake configure/build/CTest with `RB_SERVO_ENABLE_RBPODO=OFF`.
+  The stale single-process `rbsim_hardware_free_gate` CTest is excluded here
+  and replaced by the per-arm smoke below.
 - `rb_servo_gui`: stdlib `unittest` discovery registered as the `rb_servo_gui_unittest` CTest test with `PYTHONPATH` pointed at top-level `rb_gui`.
 - `rb_servo_server/tools/analyze_servo_log.py --self-test`: local
-  mock/rbsim analyzer profiles and fail-closed parser checks for generated
+  mock/simulator analyzer profiles and fail-closed parser checks for generated
   sample logs.
 - `rb_simulator`: `compileall` over the simulator package/tools, then stdlib
-  `unittest` discovery for the deterministic dual-arm state-machine core and
+  `unittest` discovery for the deterministic simulator state-machine core and
   loopback JSONL protocol.
 - `rb_simulator/tools/rbsim_servo_smoke.py --self-test`: parser, state-stream,
   and servo-log validator coverage without launching processes.
-- Full local loopback smoke when prerequisites are present: starts the
-  `rb_simulator` executable plus the freshly built `rb_servo_server`, sends a
-  small command through the rbsim profile, and validates UDP state plus CSV log
-  evidence.
+- Full local loopback smoke when prerequisites are present: starts separate
+  left and right simulator Python module processes plus the freshly built
+  `rb_servo_server`, sends a small command through the simulator profile, and
+  validates UDP state plus CSV log evidence.
 
 The rb_servo configure sets `RB_SERVO_ALLOW_FETCHCONTENT=OFF` so the local gate
 does not silently download missing dependencies. If `nlohmann_json` is installed
 outside the default CMake search path, set `CMAKE_PREFIX_PATH` before running the
 script.
+
+Additional dependency preflight profiles are available:
+
+```bash
+bash scripts/check_deps.sh --profile real-camera
+bash scripts/check_deps.sh --profile real-robot
+bash scripts/check_deps.sh --profile kinematics
+```
+
+These profiles report dependency readiness only. They do not open real robot
+motion gates, start RealSense capture, or validate hardware.
 
 Some sandboxed CI runners block `AF_INET` socket creation. In that case the
 rb_servo tests keep the parser, sequence, source-allowlist, and config
@@ -41,32 +67,59 @@ checks. The rb_simulator protocol tests likewise keep non-socket assertions
 active and self-skip the live JSONL server cases when loopback socket creation
 is denied by the sandbox.
 
-The full rbsim smoke is controlled by `RBSIM_SMOKE_MODE`:
+The full simulator smoke is controlled by `RBSIM_SMOKE_MODE`. The environment
+variable names are compatibility names in the current script, not public
+architecture terminology:
 
-- `auto` (default): run the full smoke only when the simulator executable, the
-  freshly built servo-server binary, and `config/dual_rb_simulator.yaml` exist.
+- `auto` (default): run the full smoke when the freshly built servo-server
+  binary and both per-arm simulator configs exist.
 - `required`: fail closed if any full-smoke prerequisite is missing.
 - `skip`: skip the full smoke intentionally while still running build, unit, and
   smoke-validator checks.
 
 Dependency prerequisites for `RBSIM_SMOKE_MODE=required`:
 
-- `rb_simulator/build/rb_simulator` or `RBSIM_EXECUTABLE` points to an
-  executable hardware-free simulator.
-- `rb_servo_server/config/dual_rb_simulator.yaml` or
-  `RBSIM_SERVO_CONFIG` points to a loopback-only `backend_type: rbsim` profile.
+- `RBSIM_COMMAND` defaults to `python3 -m rbsim`, with `PYTHONPATH` set to
+  `rb_simulator/src` by the smoke runner.
+- `RBSIM_LEFT_CONFIG` and `RBSIM_RIGHT_CONFIG` point to per-arm simulator YAML
+  profiles. Defaults are `rb_simulator/config/left_rb3_730e.yaml` and
+  `rb_simulator/config/right_rb3_730e.yaml`.
+- `RBSIM_SERVO_CONFIG` may point to a loopback-only simulator backend profile.
+  If unset, the smoke runner writes a generated compatibility config into the
+  artifact directory.
 - CMake can build `rb_servo_server` with `RB_SERVO_ENABLE_RBPODO=OFF` and
   `RB_SERVO_ALLOW_FETCHCONTENT=OFF`.
+
+Smoke artifacts are written under
+`rb_simulator/artifacts/hardware_free_gate` by default:
+
+```text
+state_stream.jsonl
+servo_log.csv
+left_simulator.log
+right_simulator.log
+rb_servo_server.log
+summary.json
+```
+
+Current compatibility assumption: the simulator process still binds loopback
+only. The hardware-free smoke therefore uses left `127.0.0.1:50200` and right
+`127.0.0.1:50210`. Docker Compose keeps the canonical
+`rb_simulator_left:50200` and `rb_simulator_right:50200` topology by using the
+simulator image entrypoint to proxy container port `50200` to the loopback-only
+Python module inside each container.
 
 Skipped by design:
 
 - real robot and Rainbow rbsim motion
-- Rainbow rbsim or real robot timing acceptance; analyzer profiles here cover
-  only hardware-free rb_simulator loopback logs
+- external simulator or real robot timing acceptance; analyzer profiles here
+  cover only hardware-free `rb_simulator` loopback logs
 - RealSense capture and hardware-sync acceptance
-- Docker compose, privileged containers, host IPC/network, and USB device access
+- privileged containers, host IPC/network, and USB device access
 - command-sender tools against non-mock endpoints
 - production network exposure, external network, or credentialed operations
+- force/admittance/impedance control
+- real Cartesian/TCP motion
 
 When new first-wave C++ regressions are added to the existing CTest targets, this
 gate picks them up through `ctest`. Hardware acceptance remains a separate

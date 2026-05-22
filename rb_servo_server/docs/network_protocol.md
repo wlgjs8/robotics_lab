@@ -20,13 +20,26 @@ The command server drops UDP packets whose source IP is not in
 the list must be non-empty. The Docker Compose mock config is explicitly
 dev-only and allows loopback plus Docker bridge private addresses.
 
-The hardware-free simulator config, `config/dual_rb_simulator.yaml`, is
-stricter: it binds `command_bind` and `state_pub_bind` to `127.0.0.1` and points
-both `rbsim_local` backends at `tcp://127.0.0.1:50200`. That shared endpoint is
-one dual-arm `rb_simulator` process; left/right are selected by the backend
-request `arm` field. The compose `sim` profile keeps that TCP endpoint
-loopback-only by sharing the `rb_simulator` service network namespace; it does
-not require host networking or exposed simulator ports.
+The hardware-free simulator config, `config/dual_simulator.yaml`, is stricter:
+it binds `command_bind` and `state_pub_bind` to `127.0.0.1` and points each arm
+at its own simulator endpoint:
+
+```yaml
+left_robot:
+  backend_type: simulator
+  run_mode: simulation
+  simulator_control_endpoint: "tcp://127.0.0.1:50200"
+
+right_robot:
+  backend_type: simulator
+  run_mode: simulation
+  simulator_control_endpoint: "tcp://127.0.0.1:50210"
+```
+
+The compose profile uses service DNS names instead:
+`tcp://rb_simulator_left:50200` and `tcp://rb_simulator_right:50200`.
+Simulator endpoints may use loopback or compose service hostnames, but
+`backend_type: simulator` with `run_mode: real` fails closed.
 
 ## State publisher
 

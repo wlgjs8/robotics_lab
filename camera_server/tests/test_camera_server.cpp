@@ -15,6 +15,7 @@
 #include <cassert>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -69,6 +70,17 @@ AppConfig make_test_config() {
   return cfg;
 }
 
+void expect_config_failure(const std::function<void()>& fn, const std::string& expected) {
+  bool threw = false;
+  try {
+    fn();
+  } catch (const std::runtime_error& e) {
+    threw = true;
+    assert(std::string(e.what()).find(expected) != std::string::npos);
+  }
+  assert(threw);
+}
+
 void test_config() {
   std::string path = "config/mock_triple_realsense.yaml";
   if (!std::ifstream(path).good()) path = "../config/mock_triple_realsense.yaml";
@@ -78,6 +90,60 @@ void test_config() {
   assert(cfg.cameras.size() == 3);
   assert(required_stream_keys(cfg).size() == 3);
   assert(required_shared_memory_bytes(cfg) < cfg.shared_memory.size_mb * 1024ull * 1024ull);
+}
+
+void test_config_validation_rejects_real_serial_placeholders() {
+  auto cfg = make_test_config();
+  cfg.server.simulate_cameras = false;
+  cfg.cameras[0].serial = "1234567890";
+  cfg.cameras[1].serial = "1234567891";
+  cfg.cameras[2].serial = "1234567892";
+  validate_config(cfg);
+
+  auto empty_serial = cfg;
+  empty_serial.cameras[0].serial = "";
+  expect_config_failure([&] { validate_config(empty_serial); }, "empty serial");
+
+  const std::vector<std::string> placeholders = {"REPLACE_HEAD_SERIAL", "TODO", "CHANGEME", "UNKNOWN"};
+  for (const auto& placeholder : placeholders) {
+    auto bad = cfg;
+    bad.cameras[0].serial = placeholder;
+    expect_config_failure([&] { validate_config(bad); }, "invalid serial placeholder");
+  }
+
+  auto mock_serial_in_real_mode = cfg;
+  mock_serial_in_real_mode.cameras[0].serial = "MOCK_HEAD";
+  expect_config_failure([&] { validate_config(mock_serial_in_real_mode); }, "MOCK_* serial");
+}
+
+void test_config_validation_rejects_invalid_sync_combinations() {
+  auto cfg = make_test_config();
+  cfg.server.simulate_cameras = false;
+  cfg.cameras[0].serial = "1234567890";
+  cfg.cameras[1].serial = "1234567891";
+  cfg.cameras[2].serial = "1234567892";
+
+  auto software_frame_number = cfg;
+  software_frame_number.sync.mode = "software";
+  software_frame_number.sync.bundle_policy = "frame_number";
+  expect_config_failure([&] { validate_config(software_frame_number); }, "sync.mode=software");
+
+  auto hardware_nearest_timestamp = cfg;
+  hardware_nearest_timestamp.sync.mode = "hardware";
+  hardware_nearest_timestamp.sync.bundle_policy = "nearest_timestamp";
+  expect_config_failure([&] { validate_config(hardware_nearest_timestamp); }, "sync.mode=hardware");
+}
+
+void test_config_validation_rejects_reconnect_until_implemented() {
+  auto cfg = make_test_config();
+  cfg.reconnect.enabled = true;
+  expect_config_failure([&] { validate_config(cfg); }, "reconnect.enabled=true is not implemented yet");
+}
+
+void test_real_placeholder_config_fails() {
+  std::string path = "config/triple_realsense.yaml";
+  if (!std::ifstream(path).good()) path = "../config/triple_realsense.yaml";
+  expect_config_failure([&] { (void)load_config(path); }, "invalid serial placeholder");
 }
 
 void test_shared_memory_roundtrip() {
@@ -328,6 +394,10 @@ void test_health_threshold_status() {
 
 int main() {
   test_config();
+  test_config_validation_rejects_real_serial_placeholders();
+  test_config_validation_rejects_invalid_sync_combinations();
+  test_config_validation_rejects_reconnect_until_implemented();
+  test_real_placeholder_config_fails();
   test_shared_memory_roundtrip();
   test_shared_memory_rejects_oversized_slot_metadata();
   test_shared_memory_open_rejects_invalid_slot_offsets();

@@ -1,0 +1,96 @@
+# Canonical D435f + D405 RGB profile.
+# Real serial placeholders intentionally fail validation until replaced with
+# approved physical camera serials.
+server:
+  name: camera_server
+  mode: capture_only
+  clock: monotonic_raw
+  simulate_cameras: false
+
+shared_memory:
+  name: "/camera_server_frames"
+  size_mb: 1024
+  ring_slots: 4
+  unlink_on_start: true
+
+metadata:
+  transport: zmq_pub
+  pub_bind: "tcp://127.0.0.1:5600"
+  health_topic: "camera.health"
+  bundle_topic: "camera.bundle"
+
+sync:
+  mode: software
+  master_camera: head
+  bundle_policy: nearest_timestamp
+  max_bundle_time_diff_ms: 10.0
+  publish_incomplete_bundles: false
+
+cameras:
+  head:
+    serial: "REPLACE_HEAD_SERIAL"
+    required: true
+    streams:
+      color:
+        enabled: true
+        width: 1280
+        height: 720
+        fps: 30
+        format: rgb8
+      depth:
+        enabled: false
+        width: 1280
+        height: 720
+        fps: 30
+        format: z16
+  left_wrist:
+    serial: "REPLACE_LEFT_SERIAL"
+    required: true
+    streams:
+      color:
+        enabled: true
+        width: 640
+        height: 360
+        fps: 30
+        format: rgb8
+      depth:
+        enabled: false
+        width: 640
+        height: 360
+        fps: 30
+        format: z16
+  right_wrist:
+    serial: "REPLACE_RIGHT_SERIAL"
+    required: true
+    streams:
+      color:
+        enabled: true
+        width: 640
+        height: 360
+        fps: 30
+        format: rgb8
+      depth:
+        enabled: false
+        width: 640
+        height: 360
+        fps: 30
+        format: z16
+
+recording:
+  enabled: false
+  output_dir: "/data/episodes"
+  queue_capacity_frames: 300
+  writer_threads: 4
+  drop_policy: drop_oldest
+  raw_format: true
+
+health:
+  publish_rate_hz: 1
+  warn_if_frame_age_ms_gt: 100
+  warn_if_drop_count_increases: true
+  warn_if_bundle_skew_ms_gt: 10
+
+reconnect:
+  enabled: false
+  max_attempts: 0
+  retry_interval_ms: 1000

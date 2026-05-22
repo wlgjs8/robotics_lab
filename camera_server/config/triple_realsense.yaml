@@ -1,3 +1,7 @@
+# Canonical default profile: D435f head 1280x720@30 and D405 wrists
+# 640x360@30. Keep in sync with triple_realsense_640x360.yaml.
+# Real serial placeholders intentionally fail validation until replaced with
+# approved physical camera serials.
 server:
   name: camera_server
   mode: capture_only

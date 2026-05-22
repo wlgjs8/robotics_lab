@@ -7,17 +7,18 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from rbsim import PROTOCOL_VERSION, DualArmSimulator, RbsimService, SimulatorProtocol, load_simulator_config
+from rbsim import PROTOCOL_VERSION, ArmSimulator, RbsimService, SimulatorProtocol, load_simulator_config
 from rbsim.server import parse_tcp_bind
 
 
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "dual_rb3_730e.yaml"
+CONFIG_LEFT = Path(__file__).resolve().parents[1] / "config" / "left_rb3_730e.yaml"
+CONFIG_RIGHT = Path(__file__).resolve().parents[1] / "config" / "right_rb3_730e.yaml"
 
 
 class JsonlProtocolServerTest(unittest.TestCase):
     def setUp(self) -> None:
-        config = load_simulator_config(CONFIG_PATH)
-        self.protocol = SimulatorProtocol(DualArmSimulator(config))
+        config = load_simulator_config(CONFIG_LEFT)
+        self.protocol = SimulatorProtocol(ArmSimulator(config))
 
     def request(self, endpoint_role: str, payload: dict[str, Any]) -> dict[str, Any]:
         request = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
@@ -154,8 +155,14 @@ class JsonlProtocolServerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_tcp_bind("tcp://0.0.0.0:50200")
 
+    def test_non_loopback_bind_requires_environment_gate(self) -> None:
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"RB_SIMULATOR_ALLOW_NON_LOOPBACK": "1"}):
+            self.assertEqual(parse_tcp_bind("tcp://0.0.0.0:50200"), ("0.0.0.0", 50200))
+
     def test_tcp_service_accepts_json_lines_on_control_and_admin_loopback_ports(self) -> None:
-        config = load_simulator_config(CONFIG_PATH)
+        config = load_simulator_config(CONFIG_LEFT)
         service = RbsimService.with_binds(config, "tcp://127.0.0.1:0", "tcp://127.0.0.1:0")
         try:
             service.start(start_tick_loop=False)
@@ -186,7 +193,7 @@ class JsonlProtocolServerTest(unittest.TestCase):
             service.stop()
 
     def test_tcp_service_waits_for_jsonl_frame_before_responding(self) -> None:
-        config = load_simulator_config(CONFIG_PATH)
+        config = load_simulator_config(CONFIG_LEFT)
         service = RbsimService.with_binds(config, "tcp://127.0.0.1:0", "tcp://127.0.0.1:0")
         try:
             service.start(start_tick_loop=False)
@@ -212,6 +219,50 @@ class JsonlProtocolServerTest(unittest.TestCase):
             self.assertEqual(decoded["request_id"], "partial-frame")
         finally:
             service.stop()
+
+    def test_left_and_right_services_can_run_concurrently(self) -> None:
+        left = RbsimService.with_binds(
+            load_simulator_config(CONFIG_LEFT),
+            "tcp://127.0.0.1:0",
+            "tcp://127.0.0.1:0",
+        )
+        right = RbsimService.with_binds(
+            load_simulator_config(CONFIG_RIGHT),
+            "tcp://127.0.0.1:0",
+            "tcp://127.0.0.1:0",
+        )
+        try:
+            left.start(start_tick_loop=False)
+            right.start(start_tick_loop=False)
+        except PermissionError as exc:
+            self.skipTest(f"loopback sockets are unavailable in this environment: {exc}")
+        try:
+            left_ok = self.tcp_request(
+                left.control_address,
+                {"schema_version": PROTOCOL_VERSION, "request_id": "left-ok", "op": "read_state", "arm": "left"},
+            )
+            right_ok = self.tcp_request(
+                right.control_address,
+                {"schema_version": PROTOCOL_VERSION, "request_id": "right-ok", "op": "read_state", "arm": "right"},
+            )
+            left_wrong = self.tcp_request(
+                left.control_address,
+                {"schema_version": PROTOCOL_VERSION, "request_id": "left-wrong", "op": "read_state", "arm": "right"},
+            )
+            right_wrong = self.tcp_request(
+                right.control_address,
+                {"schema_version": PROTOCOL_VERSION, "request_id": "right-wrong", "op": "read_state", "arm": "left"},
+            )
+
+            self.assertTrue(left_ok["ok"])
+            self.assertTrue(right_ok["ok"])
+            self.assertFalse(left_wrong["ok"])
+            self.assertEqual(left_wrong["error"]["name"], "wrong_arm")
+            self.assertFalse(right_wrong["ok"])
+            self.assertEqual(right_wrong["error"]["name"], "wrong_arm")
+        finally:
+            left.stop()
+            right.stop()
 
     def tcp_request(self, address: tuple[str, int], payload: dict[str, Any]) -> dict[str, Any]:
         line = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"

@@ -190,6 +190,15 @@ double timeoutForOperation(const BackendConfig& config, const std::string& op) {
     return config.rbsim_request_timeout_sec;
 }
 
+std::string simulatorEndpoint(const BackendConfig& config) {
+    const BackendConfig defaults;
+    if (config.simulator_control_endpoint == defaults.simulator_control_endpoint &&
+        config.rbsim_control_endpoint != defaults.rbsim_control_endpoint) {
+        return config.rbsim_control_endpoint;
+    }
+    return config.simulator_control_endpoint;
+}
+
 }  // namespace
 
 RbsimBackend::RbsimBackend(ArmId arm_id, const BackendConfig& config)
@@ -247,7 +256,7 @@ std::string RbsimBackend::name() const {
 }
 
 bool RbsimBackend::controlRequest(const std::string& op, const json& params, RobotState* out_state) {
-    const TcpEndpoint endpoint = parseTcpEndpoint(config_.rbsim_control_endpoint);
+    const TcpEndpoint endpoint = parseTcpEndpoint(simulatorEndpoint(config_));
     const int fd = openTcpConnection(endpoint, timeoutForOperation(config_, op));
     if (fd < 0) {
         connected_ = false;

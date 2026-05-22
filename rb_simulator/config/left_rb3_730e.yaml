@@ -1,0 +1,27 @@
+# Hardware-free left-arm simulator profile.
+#
+# One simulator process owns exactly one arm. Use this host profile with
+# tcp://127.0.0.1:50200 for control and tcp://127.0.0.1:50201 for admin.
+
+simulator:
+  schema: robotics_lab.simulator.v1
+  arm: left
+  control_bind: "tcp://127.0.0.1:50200"
+  admin_bind: "tcp://127.0.0.1:50201"
+  update_rate_hz: 200
+  motion_time_constant_sec: 0.04
+  max_joint_velocity_deg_s: 360
+  model: "RB3_730E"
+
+arm:
+  name: "left_simulator"
+  initial_q_deg: [0, -30, 80, 0, 60, 0]
+  mount: [0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0]
+
+fault_defaults:
+  connected: true
+  initialized: false
+  servo_enabled: false
+  has_valid_joint_state: true
+  has_error: false
+  error_code: 0

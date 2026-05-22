@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import socket
 import socketserver
 import threading
@@ -13,7 +14,7 @@ from urllib.parse import urlparse
 
 from .config import SimulatorConfig, load_simulator_config
 from .protocol import SimulatorProtocol
-from .state_machine import DualArmSimulator
+from .state_machine import ArmSimulator
 
 
 class RbsimService:
@@ -21,7 +22,7 @@ class RbsimService:
 
     def __init__(self, config: SimulatorConfig):
         self.config = config
-        self.simulator = DualArmSimulator(config)
+        self.simulator = ArmSimulator(config)
         self.protocol = SimulatorProtocol(self.simulator)
         self._servers: list[_RbsimTCPServer] = []
         self._threads: list[threading.Thread] = []
@@ -117,7 +118,7 @@ def parse_tcp_bind(bind: str) -> tuple[str, int]:
     parsed = urlparse(bind)
     if parsed.scheme != "tcp" or not parsed.hostname or parsed.port is None:
         raise ValueError(f"bind must be tcp://host:port, got {bind!r}")
-    if not _is_loopback(parsed.hostname):
+    if not _is_loopback(parsed.hostname) and os.environ.get("RB_SIMULATOR_ALLOW_NON_LOOPBACK") != "1":
         raise ValueError(f"rb_simulator only binds loopback addresses by default, got {parsed.hostname!r}")
     return (parsed.hostname, parsed.port)
 

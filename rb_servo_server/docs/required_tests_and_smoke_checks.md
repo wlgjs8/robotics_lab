@@ -1,3 +1,6 @@
+> Historical review/planning document. Some findings may be obsolete.
+> The current source of truth is root README.md and docs/architecture.md.
+
 # Required Tests and Smoke Checks
 
 Architect-level checklist for the unattended real-readiness safety loop. Every

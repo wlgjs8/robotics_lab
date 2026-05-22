@@ -26,35 +26,36 @@ class FaultDefaults:
 
 @dataclass(frozen=True)
 class SimulatorConfig:
+    arm: str
     control_bind: str
     admin_bind: str
     update_rate_hz: float
     motion_time_constant_sec: float
     max_joint_velocity_deg_s: float
     model: str
-    arms: dict[str, ArmConfig]
+    arm_config: ArmConfig
     fault_defaults: FaultDefaults
 
 
 def load_simulator_config(path: str | Path) -> SimulatorConfig:
-    """Load the simulator YAML profile without requiring PyYAML."""
+    """Load a single-arm simulator YAML profile without requiring PyYAML."""
 
     raw = _load_yaml_subset(Path(path))
     try:
         simulator = raw["simulator"]
         fault_defaults = raw["fault_defaults"]
-        arms = {
-            "left": _parse_arm(raw["left_arm"]),
-            "right": _parse_arm(raw["right_arm"]),
-        }
+        arm = str(simulator["arm"])
+        if arm not in {"left", "right"}:
+            raise ValueError("simulator.arm must be 'left' or 'right'")
         return SimulatorConfig(
+            arm=arm,
             control_bind=str(simulator["control_bind"]),
             admin_bind=str(simulator["admin_bind"]),
             update_rate_hz=float(simulator["update_rate_hz"]),
             motion_time_constant_sec=float(simulator["motion_time_constant_sec"]),
             max_joint_velocity_deg_s=float(simulator.get("max_joint_velocity_deg_s", 360.0)),
             model=str(simulator["model"]),
-            arms=arms,
+            arm_config=_parse_arm(raw["arm"]),
             fault_defaults=FaultDefaults(
                 connected=bool(fault_defaults["connected"]),
                 initialized=bool(fault_defaults["initialized"]),

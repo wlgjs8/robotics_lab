@@ -13,7 +13,11 @@ memory production endpoints, or recording until all items below are true.
 - USB and udev access are approved for the test host.
 - Storage target, retention period, and cleanup owner are recorded.
 - Test endpoints are isolated from production policy and metadata consumers.
-- `config/triple_realsense.yaml` contains the approved serial mapping.
+- A copied config based on `config/triple_realsense_640x360.yaml` or the
+  explicitly approved `config/triple_realsense_640x480.yaml` variant contains
+  the approved serial mapping. Do not run the checked-in template directly;
+  `REPLACE_*`, `TODO`, `CHANGEME`, `UNKNOWN`, empty required serials, and
+  `MOCK_*` serials in real mode fail validation.
 - First-wave code-only and mock-only gates have passed.
 
 Record:
@@ -29,6 +33,32 @@ metadata_endpoint:
 shared_memory_name:
 production_isolation_notes:
 ```
+
+## 1.1 Dependency profiles
+
+Hardware-free config/build validation does not require RealSense devices or
+ZeroMQ headers when forced to mock/stub mode:
+
+```bash
+sudo apt install cmake build-essential libyaml-cpp-dev
+cmake -S camera_server -B camera_server/build/hardware_free_gate \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCAMERA_SERVER_FORCE_MOCK_CAMERA=ON \
+  -DCAMERA_SERVER_FORCE_ZMQ_STUB=ON \
+  -DCAMERA_SERVER_BUILD_TESTS=ON
+cmake --build camera_server/build/hardware_free_gate -j
+ctest --test-dir camera_server/build/hardware_free_gate --output-on-failure
+```
+
+Real-camera acceptance additionally needs the metadata backend and RealSense SDK:
+
+```bash
+sudo apt install libzmq3-dev
+# Install librealsense2-dev from the Intel RealSense package source approved for the host OS.
+```
+
+Use `rs-enumerate-devices` for P0 serial discovery. A dedicated
+`camera_server/tools/list_realsense_devices` helper is still a future task.
 
 ## 2. Hardware inventory
 
@@ -68,7 +98,7 @@ approved session explicitly authorizes the defaults.
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j2
-./build/camera_server --config config/triple_realsense.approved.yaml --run-seconds 600
+./build/camera_server --config config/triple_realsense_640x360.approved.yaml --run-seconds 600
 python3 tools/print_camera_health.py --once
 python3 tools/read_latest_bundle.py --once --shm /camera_server_frames
 ```
@@ -142,10 +172,13 @@ Acceptance:
   throughput bottleneck note.
 - Disk write errors are zero.
 
-## 5. Disconnect and reconnect run
+## 5. Disconnect run
 
 Perform this only when the operator confirms which camera may be unplugged.
 Never unplug a device used by production workloads.
+
+`reconnect.enabled: true` is not implemented and fails config validation in P0.
+This run observes disconnect health behavior only; leave reconnect disabled.
 
 Record:
 
@@ -155,9 +188,7 @@ disconnect_time:
 health_event_time:
 server_crashed: yes/no
 bundle_behavior: incomplete/dropped/other
-reconnect_enabled: yes/no
-reconnect_time:
-post_reconnect_fps:
+reconnect_enabled: no
 residual_errors:
 ```
 
@@ -166,7 +197,8 @@ Acceptance:
 - Server does not crash unexpectedly.
 - Health reports the disconnect.
 - Bundles become incomplete or are dropped according to config.
-- Reconnect behavior matches the approved config.
+- Reconnect remains disabled; any reconnect test is a follow-up after the
+  implementation lands.
 
 ## 6. Docker and policy-reader run
 

@@ -1,3 +1,6 @@
+> Historical review/planning document. Some findings may be obsolete.
+> The current source of truth is root README.md and docs/architecture.md.
+
 # Commit Slicing Advice
 
 Architect-level guidance for how to slice future commits on

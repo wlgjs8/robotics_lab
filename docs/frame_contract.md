@@ -3,6 +3,10 @@
 This document is the shared coordinate-frame contract for `rb_servo_server`,
 `camera_server`, `rb_gui`, and the future `policy_runner`.
 
+The system source of truth is [architecture.md](architecture.md). Frame data is
+for visualization, calibration, and policy inputs; it does not open any real
+motion path by itself.
+
 It defines names, transform direction, calibration file locations, and the
 minimum schema needed before real calibration is available. Values already
 present in configs are treated as current configured estimates, not measured
@@ -104,7 +108,8 @@ The current system does not yet publish real `tcp_stand` or `tcp_base` fields;
 `StatePublisher` marks TCP fields as deferred. Until FK/IK is implemented,
 `policy_runner` must not assume camera-to-robot geometry is available from live
 state. It may use joint state plus a versioned FK/calibration package once that
-package exists.
+package exists. Real Cartesian/TCP motion remains closed until a separate
+real-hardware acceptance procedure approves it, even after simulator validation.
 
 ## Component Responsibilities
 
@@ -146,6 +151,9 @@ package exists.
 - Refuses geometry-dependent policy execution if a required extrinsic is absent,
   stale, or marked `configured_estimate` when a measured calibration is required.
 - Logs the calibration package id with every episode/action trace.
+- Does not route Cartesian/TCP targets into real motion unless the servo server
+  has accepted the explicit real Cartesian gate and a real-hardware acceptance
+  procedure has approved that path.
 
 ## Calibration File Locations
 
@@ -291,4 +299,3 @@ inputs can be audited against the geometry used at runtime.
 - Add hand-eye calibration for wrist cameras.
 - Add measured `T_stand_head_camera`.
 - Add validation tooling that rejects missing, inverted, or stale transforms.
-

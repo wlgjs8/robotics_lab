@@ -20,7 +20,12 @@ struct Vec6 {
 
 enum class ArmId { Left, Right };
 enum class RunMode { Real, Simulation, Mock };
-enum class BackendType { Rbpodo, Mock, Rbsim };
+enum class BackendType {
+    Rbpodo,
+    Mock,
+    Simulator,
+    Rbsim = Simulator  // Deprecated compatibility name.
+};
 
 enum class ControlMode {
     Idle,
@@ -200,6 +205,8 @@ struct ServoSample {
 
     bool left_send_ok = false;
     bool right_send_ok = false;
+    bool send_suppressed = false;
+    std::string send_policy = "send_servo_j";
     uint64_t left_send_start_ns = 0;
     uint64_t left_send_end_ns = 0;
     uint64_t right_send_start_ns = 0;
@@ -245,6 +252,8 @@ struct ServoSnapshot {
 
     bool left_send_ok = false;
     bool right_send_ok = false;
+    bool send_suppressed = false;
+    std::string send_policy = "send_servo_j";
     uint64_t left_send_start_ns = 0;
     uint64_t left_send_end_ns = 0;
     uint64_t right_send_start_ns = 0;

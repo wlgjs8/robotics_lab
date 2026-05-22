@@ -1,4 +1,4 @@
-"""Deterministic dual-arm simulator state machine."""
+"""Deterministic per-arm simulator state machine."""
 
 from __future__ import annotations
 
@@ -105,29 +105,24 @@ class _ArmRuntime:
         return "connected"
 
 
-class DualArmSimulator:
-    """Hardware-free simulator for two six-joint RB arms."""
+class ArmSimulator:
+    """Hardware-free simulator for one six-joint RB arm."""
 
     def __init__(self, config: SimulatorConfig):
         if config.update_rate_hz <= 0:
             raise ValueError("update_rate_hz must be positive")
         if config.motion_time_constant_sec <= 0:
             raise ValueError("motion_time_constant_sec must be positive")
-        missing = {"left", "right"} - set(config.arms)
-        if missing:
-            raise ValueError(f"missing arm config: {', '.join(sorted(missing))}")
 
         self.config = config
-        self._arms = {
-            name: _ArmRuntime.from_config(arm_config, config.fault_defaults)
-            for name, arm_config in config.arms.items()
-        }
+        self.arm = config.arm
+        self._runtime = _ArmRuntime.from_config(config.arm_config, config.fault_defaults)
 
     def snapshot(self, arm: str) -> ArmSnapshot:
-        return self._arm(arm).snapshot(arm)
+        return self._arm(arm).snapshot(self.arm)
 
     def snapshots(self) -> dict[str, ArmSnapshot]:
-        return {arm: runtime.snapshot(arm) for arm, runtime in self._arms.items()}
+        return {self.arm: self._runtime.snapshot(self.arm)}
 
     def connect(self, arm: str) -> ArmSnapshot:
         runtime = self._arm(arm)
@@ -233,8 +228,7 @@ class DualArmSimulator:
             raise ValueError("steps must be non-negative")
         dt_sec = 1.0 / self.config.update_rate_hz
         for _ in range(steps):
-            for runtime in self._arms.values():
-                self._advance_arm(runtime, dt_sec)
+            self._advance_arm(self._runtime, dt_sec)
         return self.snapshots()
 
     def _advance_arm(self, runtime: _ArmRuntime, dt_sec: float) -> None:
@@ -286,10 +280,12 @@ class DualArmSimulator:
         return runtime
 
     def _arm(self, arm: str) -> _ArmRuntime:
-        try:
-            return self._arms[arm]
-        except KeyError as exc:
-            raise SimulatorError(f"unknown arm: {arm}") from exc
+        if arm != self.arm:
+            raise SimulatorError(f"wrong arm: simulator owns {self.arm}, got {arm}")
+        return self._runtime
+
+
+DualArmSimulator = ArmSimulator
 
 
 def _motion_active(runtime: _ArmRuntime) -> bool:

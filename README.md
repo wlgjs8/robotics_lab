@@ -1,0 +1,156 @@
+# robotics_lab
+
+`robotics_lab` is the integration workspace for a dual-arm RB3-730 system with
+servo control, a topology-isomorphic local simulator, camera capture, and an
+operator GUI.
+
+## Current Maturity
+
+Currently supported:
+
+- mock dual-arm servo control
+- per-arm local simulator backend
+- mock camera server
+- GUI viewer/operator console for mock/simulation
+
+Not production-ready yet:
+
+- real RB3-730 motion
+- Cartesian TCP motion in real mode
+- force control
+- gripper control
+- measured camera/robot calibration
+
+Real robot motion remains explicitly gated. Do not treat a passing mock or
+simulation run as permission to move hardware.
+
+## Source Of Truth
+
+Start here, then follow component docs only for implementation details:
+
+- [docs/architecture.md](docs/architecture.md): system topology, terms, safety
+  gates, and roadmap.
+- [docs/hardware_free_validation.md](docs/hardware_free_validation.md):
+  hardware-free build and test gate.
+- [docs/frame_contract.md](docs/frame_contract.md): shared robot/camera frame
+  names and transform direction.
+- [TODO.md](TODO.md): P0-P3 work packages and acceptance criteria.
+
+Historical review and planning notes may remain in the tree for audit context.
+When they disagree with this README or [docs/architecture.md](docs/architecture.md),
+the root source-of-truth docs win.
+
+## Canonical Terms
+
+Public config, docs, logs intended for operators, and GUI labels use these
+terms:
+
+```yaml
+run_mode: mock | simulation | real
+backend_type: mock | simulator | rbpodo
+```
+
+`run_mode` describes the operating environment. `backend_type` describes the
+servo backend implementation selected for each arm.
+
+## Real And Simulator Topology
+
+The physical system has one controller endpoint per arm:
+
+```text
+rb_servo_server
+  left_robot  backend_type=rbpodo -> 172.28.60.200
+  right_robot backend_type=rbpodo -> 172.28.60.201
+```
+
+The simulator mirrors that shape with one independent simulator endpoint per
+arm:
+
+```text
+rb_servo_server
+  left_robot  backend_type=simulator -> rb_simulator_left
+  right_robot backend_type=simulator -> rb_simulator_right
+
+rb_simulator_left
+  arm: left
+  control: tcp://0.0.0.0:50200 inside its container
+  admin:   tcp://0.0.0.0:50201 inside its container
+
+rb_simulator_right
+  arm: right
+  control: tcp://0.0.0.0:50200 inside its container
+  admin:   tcp://0.0.0.0:50201 inside its container
+```
+
+Separate simulator containers may reuse the same internal ports because each
+container has its own network namespace. Direct host execution must use
+separate loopback ports:
+
+```text
+left simulator:
+  control: tcp://127.0.0.1:50200
+  admin:   tcp://127.0.0.1:50201
+
+right simulator:
+  control: tcp://127.0.0.1:50210
+  admin:   tcp://127.0.0.1:50211
+```
+
+Simulator endpoints must not default to the real robot IP addresses. The
+isomorphism is one controller endpoint per arm, not reuse of physical network
+addresses.
+
+## Safety Gates
+
+Real robot connection is closed unless:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1
+```
+
+Real joint servo motion is closed unless:
+
+```bash
+RB_ALLOW_REAL_MOTION=1
+```
+
+Real Cartesian/TCP motion is closed unless:
+
+```bash
+RB_ALLOW_REAL_CARTESIAN=1
+```
+
+TCP Cartesian command support is simulation-only until P3 validation lands.
+Even after P3, real Cartesian motion stays closed until a separate real-hardware
+acceptance procedure approves it.
+
+Force/admittance/impedance control is not implemented. Force control must remain
+null:
+
+```yaml
+force_control:
+  provider: null
+  enable: false
+```
+
+## Component Map
+
+```text
+rb_servo_server/   dual-arm servo control, backend selection, safety gates
+rb_simulator/      hardware-free per-arm simulator backend
+camera_server/     RealSense/mock camera capture and metadata publishing
+rb_gui/            operator viewer and console for mock/simulation workflows
+docs/              shared architecture, validation, and frame contracts
+scripts/           repository-level validation helpers
+```
+
+## Roadmap
+
+- P0 aligns architecture docs, simulator topology, public terminology, and the
+  hardware-free validation gate.
+- P1 stabilizes joint-only servo behavior across mock, simulator, and real
+  topology while preserving real-motion gates.
+- P2 adds truthful FK/TCP pose publication and measured calibration workflows
+  for visualization and policy inputs.
+- P3 enables simulator-only Cartesian/TCP command validation. Real Cartesian
+  motion remains separately gated after P3.

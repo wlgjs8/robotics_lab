@@ -1,139 +1,93 @@
 # rb_simulator
 
-`rb_simulator` is the hardware-free development and verification workspace for
-`rb_servo_server`.
+`rb_simulator` is the hardware-free simulator workspace for
+`rb_servo_server`. It provides a deterministic local controller endpoint for
+one RB3-730 arm per process, matching the real system topology of one
+controller per arm.
 
-It is intentionally separate from `mo_rbsim_docker`. The existing
-`mo_rbsim_docker` assets are useful reference material for robot identity,
-network shape, and operator expectations, but this workspace owns a smaller,
-deterministic simulator contract that can run in local tests and CI without an
-OVA image, privileged Docker, robot hardware, or `rbpodo`.
+It does not use `rbpodo`, robot hardware, privileged Docker, real robot
+networks, or Rainbow Robotics simulator images.
 
 ## Scope
 
-- Provide a deterministic dual-arm simulator that mimics the `IRobotBackend`
-  behavior needed by `rb_servo_server`.
-- Standardize the local simulator topology as one `rb_simulator` process that
-  owns both left and right arm state.
+- Run one simulator process for the left arm and one simulator process for the
+  right arm.
 - Exercise `connect`, `initialize`, `readState`, `sendServoJ`, `stop`, and
-  `resetFault` paths through a new `rbsim` backend type.
-- Publish truthful state, connection, servo-enabled, and fault fields so
-  `rb_servo_server` can validate safety behavior before hardware gates.
-- Support scripted fault injection for disconnects, invalid state, read/send
-  failures, tracking error, stop failure, and reset failure.
-- Provide a bounded operator smoke runner for the simulator-backed
-  `rb_servo_server` path.
+  `resetFault` paths through the simulator backend contract.
+- Reject wrong-arm requests fail-closed. A left process accepts `arm: "left"`
+  and rejects `arm: "right"`; a right process does the inverse.
+- Publish truthful joint state, connection state, servo-enabled state, and
+  fault state for hardware-free servo-server tests.
+- Support deterministic admin hooks for disconnects, invalid state, read/send
+  failures, tracking bias, frozen motion, stop failure, reset failure, and
+  manual ticks.
 
 ## Non-goals
 
-- No Rainbow Robotics OVA conversion.
-- No privileged Docker requirement.
-- No real robot or `rbpodo` command execution.
-- No claim that green simulator tests replace rbsim/real hardware acceptance.
+- No real robot motion.
+- No force, admittance, or impedance control.
+- No Cartesian/TCP motion acceptance.
+- No claim that green simulator tests replace Rainbow simulator or real robot
+  acceptance.
 
 ## Layout
 
 ```text
 rb_simulator/
   config/
-    dual_rb3_730e.yaml
+    left_rb3_730e.yaml
+    right_rb3_730e.yaml
+    dual_rb3_730e.yaml    # deprecated historical fixture
   docs/
     architecture.md
-    operator_smoke.md
-    task_breakdown.md
+    protocol_v1.md
   src/
-    README.md
+    rbsim/
   tests/
-    README.md
-  tools/
-    rbsim_servo_smoke.py
 ```
-
-The servo-side integration lives in
-`../rb_servo_server/config/dual_rb_simulator.yaml`,
-`RbsimBackend`, and the smoke tooling under `tools/`.
 
 ## Topology
 
-The standard hardware-free topology is a single dual-arm simulator process:
+Host-run default:
 
 ```text
 rb_servo_server
-  left RbsimBackend  -> tcp://127.0.0.1:50200
-  right RbsimBackend -> tcp://127.0.0.1:50200
+  left backend_type=simulator  -> tcp://127.0.0.1:50200
+  right backend_type=simulator -> tcp://127.0.0.1:50210
 
-rb_simulator process
-  control endpoint: tcp://127.0.0.1:50200
-  admin endpoint:   tcp://127.0.0.1:50201
-  arm state: left + right
+left simulator process
+  arm: left
+  control: tcp://127.0.0.1:50200
+  admin:   tcp://127.0.0.1:50201
+
+right simulator process
+  arm: right
+  control: tcp://127.0.0.1:50210
+  admin:   tcp://127.0.0.1:50211
 ```
 
-Each backend request carries `arm: "left"` or `arm: "right"`. The simulator
-uses that field to route the operation to the matching in-process arm state.
-This keeps dual-arm fault injection, deterministic ticks, and smoke-runner
-process management in one local service.
+Containerized runs may bind inside each container to `0.0.0.0:50200` and
+`0.0.0.0:50201`, but non-loopback binds are rejected unless
+`RB_SIMULATOR_ALLOW_NON_LOOPBACK=1` is set.
 
-A future two-endpoint or two-process layout may be added if per-arm simulator
-isolation is needed. That is not the current standard; configs and smoke checks
-should keep both arms pointed at the same control endpoint unless a future
-migration explicitly updates the contract.
+## Running
 
-## Operator Smoke
-
-After the simulator executable and `rb_servo_server` binary are available, run:
+From the repository root:
 
 ```bash
-python3 rb_simulator/tools/rbsim_servo_smoke.py \
-  --artifacts-dir /tmp/rbsim_servo_smoke
+PYTHONPATH=rb_simulator/src python3 -m rbsim --config rb_simulator/config/left_rb3_730e.yaml
+PYTHONPATH=rb_simulator/src python3 -m rbsim --config rb_simulator/config/right_rb3_730e.yaml
 ```
 
-The smoke starts both local processes, sends `ArmMotion` and a small joint
-target, verifies the UDP state stream and servo CSV log, and writes bounded
-artifacts. See `docs/operator_smoke.md` and
-`../rb_servo_server/docs/rb_simulator_dev.md` for pass criteria and
-the explicit caveat that simulator-only evidence does not prove Rainbow rbsim,
-`rbpodo`, or real robot readiness.
+The Python module name and protocol schema retain the existing `rbsim` names
+for compatibility. Public configuration should use `backend_type: simulator`
+and `run_mode: simulation`.
 
-## Current Core
-
-The first hardware-free core lives in `src/rbsim`. It loads
-`config/dual_rb3_730e.yaml`, maintains independent left/right six-joint state
-inside one simulator process, supports explicit connected, initialized,
-servo-enabled, stopped, and faulted transitions, and advances actual joints
-toward targets with deterministic fixed-step timing.
-
-Run the unit coverage from the workspace root:
+## Tests
 
 ```bash
-python3 -m unittest discover rb_simulator/tests
+PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
 ```
 
-The loopback JSONL service and protocol contract now live beside the core. Run
-the service from source with:
-
-```bash
-PYTHONPATH=rb_simulator/src python3 -m rbsim --config rb_simulator/config/dual_rb3_730e.yaml
-```
-
-The protocol spec is `docs/protocol_v1.md`. The simulator service binds only to
-loopback by default, uses the repo-local config for control/admin endpoints,
-and has deterministic admin hooks for invalid state, injected read/send/stop/reset
-failures, latency, tracking bias, frozen motion, and manual ticks.
-
-This core and service do not start Docker, import `rbpodo`, contact a real
-robot, expose production network endpoints, or use `mo_rbsim_docker` assets.
-
-## Compose Wiring
-
-`../rb_servo_server/docker-compose.yml` contains a `sim` profile
-with two hardware-free services:
-
-- `rb_simulator`: this Python JSONL simulator.
-- `rb_servo_rbsim`: `rb_servo_server` with
-  `config/dual_rb_simulator.yaml`.
-
-The compose profile is non-OVA and non-hardware. It does not use privileged
-Docker, host networking, USB devices, real robot credentials, or
-`mo_rbsim_docker`; `rb_servo_rbsim` shares the simulator network namespace so
-both servo backends reach the single dual-arm simulator at
-`tcp://127.0.0.1:50200`.
+The deprecated `config/dual_rb3_730e.yaml` is kept only as a historical
+dual-arm fixture. It is not the supported runtime profile for P0-B.

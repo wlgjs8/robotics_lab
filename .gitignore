@@ -15,6 +15,9 @@
 **/artifacts/
 **/episodes/
 camera_server/episodes/
+rb_servo_server/config/local/
+calibration/local/
+geometry/local/
 
 # Python caches
 **/__pycache__/

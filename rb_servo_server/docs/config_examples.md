@@ -18,16 +18,29 @@ It is intentionally minimal. Replace with `yaml-cpp` before adding complex neste
 
 Mock mode uses `MockBackend` for both arms.
 
-## Hardware-free rb_simulator
+## Hardware-free simulator
 
-`config/dual_rb_simulator.yaml` pairs with the repo-local `rb_simulator`
-process on loopback endpoint `tcp://127.0.0.1:50200`. The current standard is
-one dual-arm simulator process: both `RbsimBackend` instances use that same
-endpoint and select left/right by the request `arm` field. It uses the
-`rbsim_local` backend and does not require `rbpodo`, Rainbow Robotics OVA
-assets, privileged Docker, real robot hardware, or exposed network binds.
-`dual_rbsim.yaml` is a compatibility alias for this same local
-software-simulator shape.
+`config/dual_simulator.yaml` pairs with two repo-local simulator processes,
+one per arm:
+
+```yaml
+left_robot:
+  backend_type: simulator
+  run_mode: simulation
+  simulator_control_endpoint: "tcp://127.0.0.1:50200"
+
+right_robot:
+  backend_type: simulator
+  run_mode: simulation
+  simulator_control_endpoint: "tcp://127.0.0.1:50210"
+```
+
+For Docker Compose, use `config/dual_simulator_compose.yaml`; it points to
+`tcp://rb_simulator_left:50200` and `tcp://rb_simulator_right:50200`.
+The deprecated `dual_rb_simulator.yaml`, `dual_rb_simulator_compose.yaml`, and
+`dual_rbsim.yaml` profiles are compatibility aliases only. New configs should
+use `backend_type: simulator`, `run_mode: simulation`, and
+`simulator_control_endpoint`.
 
 See `docs/rb_simulator_dev.md` for the supported unit and local-smoke evidence.
 

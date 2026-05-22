@@ -22,12 +22,15 @@ def finite_joint_array(value: Any) -> tuple[float, ...] | None:
 @dataclass(frozen=True)
 class ArmSnapshot:
     mode: str
-    q_actual_deg: tuple[float, ...]
-    q_sent_deg: tuple[float, ...]
-    q_previous_sent_deg: tuple[float, ...]
+    q_actual_deg: tuple[float, ...] | None
+    q_sent_deg: tuple[float, ...] | None
+    q_previous_sent_deg: tuple[float, ...] | None
     has_valid_joint_state: bool
     connection_state: str
     send_ok: bool
+    error_code: int | None = None
+    tcp_stand: Mapping[str, Any] | None = None
+    tcp_base: Mapping[str, Any] | None = None
     send_duration_us: float | None = None
 
     @classmethod
@@ -35,18 +38,21 @@ class ArmSnapshot:
         q_actual = finite_joint_array(data.get("q_actual_deg"))
         q_sent = finite_joint_array(data.get("q_sent_deg"))
         q_prev = finite_joint_array(data.get("q_previous_sent_deg"))
-        if q_actual is None or q_sent is None or q_prev is None:
-            return None
-        if not bool(data.get("has_valid_joint_state", False)):
-            return None
+        has_valid_joint_state = bool(data.get("has_valid_joint_state", False)) and q_actual is not None and q_sent is not None and q_prev is not None
+        error_code = data.get("error_code")
+        tcp_stand = data.get("tcp_stand")
+        tcp_base = data.get("tcp_base")
         return cls(
             mode=str(data.get("mode", "Unknown")),
             q_actual_deg=q_actual,
             q_sent_deg=q_sent,
             q_previous_sent_deg=q_prev,
-            has_valid_joint_state=True,
+            has_valid_joint_state=has_valid_joint_state,
             connection_state=str(data.get("connection_state", "Disconnected")),
             send_ok=bool(data.get("send_ok", False)),
+            error_code=int(error_code) if isinstance(error_code, int) else None,
+            tcp_stand=tcp_stand if isinstance(tcp_stand, Mapping) else None,
+            tcp_base=tcp_base if isinstance(tcp_base, Mapping) else None,
             send_duration_us=float(data["send_duration_us"]) if isinstance(data.get("send_duration_us"), int | float) else None,
         )
 

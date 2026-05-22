@@ -25,6 +25,10 @@ bool isMotionMode(ControlMode mode) {
            mode == ControlMode::TcpDeltaLocal;
 }
 
+bool isReadOnlyBlockedMode(ControlMode mode) {
+    return mode == ControlMode::ArmMotion || isMotionMode(mode);
+}
+
 bool isCommandModeMissingPayload(const ArmCommand& command) {
     switch (command.mode) {
         case ControlMode::JointTarget:
@@ -144,6 +148,9 @@ bool DualArmServoLoop::initializeRobots() {
     left_fault_hold_q_deg_ = left.q_actual_deg;
     right_fault_hold_q_deg_ = right.q_actual_deg;
     setMotionState(ServerMotionState::ConnectedHold);
+    if (readOnlyMode()) {
+        std::cerr << "[INFO] servo send policy: read_only; backend sendServoJ calls are suppressed\n";
+    }
     return true;
 }
 
@@ -179,12 +186,17 @@ void DualArmServoLoop::loopMain() {
         DualArmCommand command = command_buffer_
             ? command_buffer_->latestOrHold(loop_start)
             : makeHoldCommand(left_state, right_state, loop_start);
+        const bool read_only_command_blocked = readOnlyMode() && commandBlockedByReadOnly(command);
 
-        if (commandRequestsEmergencyStop(command)) {
+        if (read_only_command_blocked) {
+            setMotionState(ServerMotionState::ConnectedHold);
+        } else if (commandRequestsEmergencyStop(command)) {
             latchFault(SafetyVerdict::EmergencyStop, "EmergencyStop command", left_state, right_state);
             command = makeHoldCommand(left_state, right_state, loop_start);
         } else if (commandRequestsResetFault(command)) {
-            if (fault_latched_.load()) {
+            if (readOnlyMode()) {
+                command = makeHoldCommand(left_state, right_state, loop_start);
+            } else if (fault_latched_.load()) {
                 clearFaultLatch(left_state, right_state);
             } else {
                 setMotionState(ServerMotionState::ConnectedHold);
@@ -218,6 +230,10 @@ void DualArmServoLoop::loopMain() {
         } else if (fault_latched_.load()) {
             safe_target = currentFaultHoldTarget();
             safety_verdict = SafetyVerdict::FaultLatched;
+        } else if (read_only_command_blocked) {
+            safe_target.left_q_target_deg = left_prev_sent_q_deg_;
+            safe_target.right_q_target_deg = right_prev_sent_q_deg_;
+            safety_verdict = SafetyVerdict::InvalidCommand;
         } else {
             SafetyVerdict command_verdict = SafetyVerdict::Ok;
             const bool motion_requested = commandRequestsMotion(command);
@@ -253,6 +269,8 @@ void DualArmServoLoop::loopMain() {
         uint64_t right_send_end_ns = 0;
         const ServoTarget attempted_target = safe_target;
         const bool fault_latched_before_send = fault_latched_.load();
+        const bool send_suppressed = readOnlyMode();
+        const std::string send_policy = send_suppressed ? "read_only" : "send_servo_j";
         sendTargets(
             attempted_target,
             &left_ok,
@@ -275,11 +293,11 @@ void DualArmServoLoop::loopMain() {
 
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            if (left_ok && !fault_latched_before_send) {
+            if (left_ok && !fault_latched_before_send && !send_suppressed) {
                 left_prevprev_sent_q_deg_ = left_prev_sent_q_deg_;
                 left_prev_sent_q_deg_ = attempted_target.left_q_target_deg;
             }
-            if (right_ok && !fault_latched_before_send) {
+            if (right_ok && !fault_latched_before_send && !send_suppressed) {
                 right_prevprev_sent_q_deg_ = right_prev_sent_q_deg_;
                 right_prev_sent_q_deg_ = attempted_target.right_q_target_deg;
             }
@@ -296,6 +314,8 @@ void DualArmServoLoop::loopMain() {
         sample.right_sent_q_deg = attempted_target.right_q_target_deg;
         sample.left_send_ok = left_ok;
         sample.right_send_ok = right_ok;
+        sample.send_suppressed = send_suppressed;
+        sample.send_policy = send_policy;
         sample.left_send_start_ns = left_send_start_ns;
         sample.left_send_end_ns = left_send_end_ns;
         sample.right_send_start_ns = right_send_start_ns;
@@ -344,6 +364,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.fault_reason = fault_reason_;
             latest_snapshot_.left_send_ok = left_ok;
             latest_snapshot_.right_send_ok = right_ok;
+            latest_snapshot_.send_suppressed = send_suppressed;
+            latest_snapshot_.send_policy = send_policy;
             latest_snapshot_.left_send_start_ns = left_send_start_ns;
             latest_snapshot_.left_send_end_ns = left_send_end_ns;
             latest_snapshot_.right_send_start_ns = right_send_start_ns;
@@ -507,6 +529,16 @@ void DualArmServoLoop::sendTargets(
     uint64_t* right_send_start_ns,
     uint64_t* right_send_end_ns
 ) {
+    if (readOnlyMode()) {
+        if (left_ok) *left_ok = true;
+        if (right_ok) *right_ok = true;
+        if (left_send_start_ns) *left_send_start_ns = 0;
+        if (left_send_end_ns) *left_send_end_ns = 0;
+        if (right_send_start_ns) *right_send_start_ns = 0;
+        if (right_send_end_ns) *right_send_end_ns = 0;
+        return;
+    }
+
     if (left_send_start_ns) *left_send_start_ns = nowSteadyNs();
     const bool left_result = left_robot_->sendServoJ(target.left_q_target_deg);
     if (left_send_end_ns) *left_send_end_ns = nowSteadyNs();
@@ -552,6 +584,14 @@ bool DualArmServoLoop::commandRequestsDisarmMotion(const DualArmCommand& command
 
 bool DualArmServoLoop::commandRequestsMotion(const DualArmCommand& command) const {
     return isMotionMode(command.left.mode) || isMotionMode(command.right.mode);
+}
+
+bool DualArmServoLoop::commandBlockedByReadOnly(const DualArmCommand& command) const {
+    return isReadOnlyBlockedMode(command.left.mode) || isReadOnlyBlockedMode(command.right.mode);
+}
+
+bool DualArmServoLoop::readOnlyMode() const {
+    return !config_.servo.send_servo_commands;
 }
 
 bool DualArmServoLoop::motionAllowed() const {

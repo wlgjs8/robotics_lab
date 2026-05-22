@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .command_client import CommandClient
-from .safety import OperatorSafety, Readiness
+from .safety import OperatorSafety, Readiness, normalize_observed_mode_backend
 from .state_receiver import StateReceiver, StateStore
 
 _ROBOT_JOINT_NAMES = (
@@ -243,18 +243,24 @@ def _pose6_from_transform(
     return (float(position[0]), float(position[1]), float(position[2]), roll, pitch, yaw)
 
 
-def _format_joints(q_values: tuple[float, ...]) -> str:
+def _format_joints(q_values: tuple[float, ...] | None) -> str:
+    if q_values is None:
+        return "invalid"
     return ", ".join(f"{value:.2f}" for value in q_values)
 
 
-def _joint_cfg_radians(q_values: tuple[float, ...]) -> tuple[float, ...]:
+def _joint_cfg_radians(q_values: tuple[float, ...] | None) -> tuple[float, ...]:
+    if q_values is None:
+        return tuple(0.0 for _ in _ROBOT_JOINT_NAMES)
     padded = tuple(float(q_values[index]) if index < len(q_values) else 0.0 for index in range(len(_ROBOT_JOINT_NAMES)))
     return tuple(math.radians(value) for value in padded)
 
 
-def _joint_marker_position(base: tuple[float, float, float], q_values: tuple[float, ...]) -> tuple[float, float, float]:
+def _joint_marker_position(base: tuple[float, float, float], q_values: tuple[float, ...] | None) -> tuple[float, float, float]:
     # Marker-only fallback: not FK. It gives operators visible left/right state
     # changes without pretending Cartesian kinematics are available.
+    if q_values is None:
+        return (base[0], base[1], base[2] + 0.04)
     shoulder = q_values[0] / 180.0 if q_values else 0.0
     elbow = q_values[1] / 180.0 if len(q_values) > 1 else 0.0
     wrist = q_values[2] / 180.0 if len(q_values) > 2 else 0.0
@@ -438,7 +444,7 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
     tabs = server.gui.add_tab_group()
     with tabs.add_tab("Status"):
         handles["connection"] = server.gui.add_text("Connection", initial_value="disconnected", disabled=True)
-        handles["mode"] = server.gui.add_text("Observed mode", initial_value=safety.observed_server_mode, disabled=True)
+        handles["mode"] = server.gui.add_text("Observed mode/backend", initial_value=f"{safety.observed_server_mode}/{safety.observed_backend}", disabled=True)
         handles["readiness"] = server.gui.add_text("Readiness", initial_value="No-Go: no state", disabled=True)
         handles["motion"] = server.gui.add_text("Motion state", initial_value="unknown", disabled=True)
         handles["fault"] = server.gui.add_text("Fault", initial_value="none", disabled=True)
@@ -448,11 +454,17 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
             disabled=True,
         )
         mode_group = server.gui.add_button_group("Desired mode", ("mock", "simulation", "real"))
+        try:
+            mode_group.value = safety.desired_mode
+        except Exception:
+            pass
+        handles["mode_group_last_value"] = getattr(mode_group, "value", safety.desired_mode)
         handles["mode_group"] = mode_group
 
         @mode_group.on_click
         def _(_: Any) -> None:
             safety.set_desired_mode(mode_group.value)
+            handles["mode_group_last_value"] = mode_group.value
 
     with tabs.add_tab("Lifecycle"):
         handles["lifecycle_buttons"] = {}
@@ -484,7 +496,7 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
     with tabs.add_tab("TCP target"):
         handles["tcp_status"] = server.gui.add_text(
             "TCP status",
-            initial_value="Move the left/right TCP gizmos, then send a TCP pose target",
+            initial_value="TCP pose command disabled until FK/IK milestone is enabled",
             disabled=True,
         )
         _install_tcp_target_callbacks(handles["scene"], handles["tcp_status"])
@@ -560,8 +572,9 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
 
     if "mode_group" in handles:
         current_mode = handles["mode_group"].value
-        if current_mode != safety.desired_mode:
+        if current_mode != handles.get("mode_group_last_value"):
             safety.set_desired_mode(current_mode)
+            handles["mode_group_last_value"] = current_mode
     latest = store.latest()
     stale = store.is_stale()
     readiness = safety.readiness()
@@ -572,7 +585,14 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
         return
 
     handles["connection"].value = "stale" if stale else "live"
-    handles["mode"].value = f"desired={safety.desired_mode}, observed={safety.observed_server_mode}"
+    mode_parts = [
+        f"desired={safety.desired_mode}",
+        f"observed={safety.observed_server_mode}",
+        f"backend={safety.observed_backend}",
+    ]
+    if safety.config_warnings:
+        mode_parts.append("warning=" + "; ".join(safety.config_warnings))
+    handles["mode"].value = ", ".join(mode_parts)
     readiness_parts = [
         f"configured={readiness.configured}",
         f"running={readiness.running}",
@@ -604,7 +624,10 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
     handles["timestamps"].value = f"host={raw.get('host_time_ns')} loop_start={raw.get('loop_start_time_ns')} loop_end={raw.get('loop_end_time_ns')} left_host={raw.get('left', {}).get('host_time_ns')} right_host={raw.get('right', {}).get('host_time_ns')}"
     handles["timing"].value = f"period={raw.get('period_ms')} ms jitter={raw.get('jitter_ms')} ms filter={raw.get('filter_dt_ms')} ms skew={raw.get('send_skew_us')} us"
     handles["send_durations"].value = f"left={raw.get('left', {}).get('send_duration_us')} us right={raw.get('right', {}).get('send_duration_us')} us"
-    handles["arm_modes"].value = f"left={latest.left.mode}/{latest.left.connection_state} right={latest.right.mode}/{latest.right.connection_state}"
+    handles["arm_modes"].value = (
+        f"left={latest.left.mode}/{latest.left.connection_state}/valid_joints={latest.left.has_valid_joint_state} "
+        f"right={latest.right.mode}/{latest.right.connection_state}/valid_joints={latest.right.has_valid_joint_state}"
+    )
     handles["logger"].value = str(latest.logger_health)
     handles["packets"].value = f"{store.received_packets} received / {store.invalid_packets} invalid"
 
@@ -621,8 +644,11 @@ def main() -> None:
     state_port = _env_int("RB_GUI_STATE_PORT", 50110)
     command_host = os.environ.get("RB_GUI_COMMAND_HOST", "127.0.0.1")
     command_port = _env_int("RB_GUI_COMMAND_PORT", 50010)
-    observed_mode = os.environ.get("RB_GUI_OBSERVED_MODE", "mock")
+    observed_mode_raw = os.environ.get("RB_GUI_OBSERVED_MODE", "mock")
+    observed_backend_raw = os.environ.get("RB_GUI_OBSERVED_BACKEND", "")
+    observed = normalize_observed_mode_backend(observed_mode_raw, observed_backend_raw)
     ops_available = os.environ.get("RB_GUI_OPS_AVAILABLE", "0") == "1"
+    enable_tcp_pose_commands = os.environ.get("RB_GUI_ENABLE_TCP_POSE_COMMANDS", "0") == "1"
 
     store = StateStore()
     receiver = StateReceiver(store, host=state_host, port=state_port)
@@ -630,10 +656,12 @@ def main() -> None:
     safety = OperatorSafety(
         store,
         CommandClient(command_host, command_port),
-        desired_mode="mock",
-        observed_server_mode=observed_mode,  # type: ignore[arg-type]
-        sim_readiness=Readiness(no_go_reason="rbpodo/rbsim readiness tests have not passed"),
+        desired_mode=observed.mode,
+        observed_server_mode=observed_mode_raw,
+        observed_backend=observed_backend_raw,
+        sim_readiness=Readiness(no_go_reason="simulator/rbpodo readiness tests have not passed"),
         ops_available=ops_available,
+        enable_tcp_pose_commands=enable_tcp_pose_commands,
     )
     server = viser.ViserServer(host=host, port=port)
     handles = build_gui(server, safety, store)

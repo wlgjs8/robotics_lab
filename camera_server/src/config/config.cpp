@@ -3,6 +3,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include <algorithm>
+#include <cctype>
 #include <stdexcept>
 
 namespace camera_server {
@@ -33,6 +34,22 @@ uint64_t aligned_payload_bytes(const CameraStreamConfig& stream) {
   const uint64_t row_bytes = static_cast<uint64_t>(stream.width) * bpp;
   const uint64_t aligned_row = (row_bytes + 63u) & ~63ull;
   return aligned_row * static_cast<uint64_t>(stream.height);
+}
+
+std::string uppercase_ascii(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::toupper(c));
+  });
+  return value;
+}
+
+bool starts_with(const std::string& value, const std::string& prefix) {
+  return value.rfind(prefix, 0) == 0;
+}
+
+bool is_disallowed_serial_placeholder(const std::string& serial) {
+  const std::string upper = uppercase_ascii(serial);
+  return starts_with(upper, "REPLACE_") || upper == "TODO" || upper == "CHANGEME" || upper == "UNKNOWN";
 }
 
 }  // namespace
@@ -160,15 +177,30 @@ void validate_config(const AppConfig& cfg) {
   if (cfg.sync.mode != "software" && cfg.sync.mode != "hardware") {
     throw std::runtime_error("sync.mode must be software or hardware");
   }
+  if (cfg.sync.mode == "software" && cfg.sync.bundle_policy != "nearest_timestamp") {
+    throw std::runtime_error("sync.mode=software requires sync.bundle_policy=nearest_timestamp");
+  }
+  if (cfg.sync.mode == "hardware" && cfg.sync.bundle_policy != "frame_number") {
+    throw std::runtime_error("sync.mode=hardware requires sync.bundle_policy=frame_number");
+  }
   if (cfg.server.simulate_cameras && cfg.sync.mode == "hardware") {
     throw std::runtime_error("sync.mode=hardware requires real RealSense devices; mock cameras cannot verify hardware sync");
   }
   if (cfg.sync.bundle_policy != "nearest_timestamp" && cfg.sync.bundle_policy != "frame_number") {
     throw std::runtime_error("sync.bundle_policy must be nearest_timestamp or frame_number");
   }
+  if (cfg.reconnect.enabled) {
+    throw std::runtime_error("reconnect.enabled=true is not implemented yet");
+  }
   for (const auto& cam : cfg.cameras) {
     if (cam.name.empty()) throw std::runtime_error("camera name cannot be empty");
     if (cam.required && cam.serial.empty()) throw std::runtime_error("required camera " + cam.name + " has empty serial");
+    if (is_disallowed_serial_placeholder(cam.serial)) {
+      throw std::runtime_error("camera " + cam.name + " has invalid serial placeholder: " + cam.serial);
+    }
+    if (!cfg.server.simulate_cameras && starts_with(uppercase_ascii(cam.serial), "MOCK_")) {
+      throw std::runtime_error("camera " + cam.name + " uses MOCK_* serial but server.simulate_cameras=false");
+    }
     const CameraStreamConfig streams[] = {cam.color, cam.depth};
     const char* names[] = {"color", "depth"};
     for (size_t i = 0; i < 2; ++i) {
