@@ -25,6 +25,9 @@ class ActionRequirements:
     requires_valid_tcp_pose: bool = False
     requires_valid_joint_state: bool = True
     simulation_only: bool = False
+    requires_observed_simulation: bool = False
+    requires_simulator_backend_if_available: bool = False
+    cartesian_motion: bool = False
 
 
 class SafetyGate:
@@ -75,6 +78,18 @@ class SafetyGate:
             return SafetyDecision(False, "kinematics_unavailable")
         observed_mode = _observed_mode(payload)
         effective_mode = observed_mode or self.mode
+        if requirements.cartesian_motion and (observed_mode == "real" or self.mode == "real"):
+            return SafetyDecision(False, "real_cartesian_not_allowed")
+        if requirements.cartesian_motion and str(payload.get("safety_verdict", "")) == "CartesianUnavailable":
+            return SafetyDecision(False, "cartesian_unavailable")
+        if requirements.requires_observed_simulation and observed_mode != "simulation":
+            return SafetyDecision(False, "observed_mode_not_simulation")
+        if requirements.requires_observed_simulation and self.mode != "simulation":
+            return SafetyDecision(False, "configured_mode_not_simulation")
+        if requirements.requires_simulator_backend_if_available:
+            observed_backend = _observed_backend(payload)
+            if observed_backend is not None and observed_backend != "simulator":
+                return SafetyDecision(False, "observed_backend_not_simulator")
         geometry_decision = self._evaluate_geometry_requirements(requirements, payload, effective_mode)
         if not geometry_decision.allowed:
             return geometry_decision
@@ -122,6 +137,14 @@ def _observed_mode(payload: dict[str, Any]) -> str | None:
     for key in ("observed_mode", "run_mode", "mode"):
         value = payload.get(key)
         if isinstance(value, str) and value.lower() in {"mock", "simulation", "real"}:
+            return value.lower()
+    return None
+
+
+def _observed_backend(payload: dict[str, Any]) -> str | None:
+    for key in ("observed_backend", "backend_type", "backend"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.lower() in {"mock", "simulator", "rbpodo"}:
             return value.lower()
     return None
 

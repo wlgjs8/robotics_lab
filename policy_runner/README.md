@@ -10,10 +10,13 @@ Supported P1 action sources:
 - `joint_velocity`: fixed simulation-only joint velocity command.
 - `spacemouse_joint_velocity`: SpaceMouse six-axis input mapped directly to
   joint velocity commands.
+- `tcp_delta`: small simulation-only `TcpDeltaStand` command.
+- `spacemouse_cartesian`: simulation-only SpaceMouse input mapped to
+  `TcpDeltaStand`.
 
-FK/IK is not available in P1, so there are no Cartesian policy actions.
-P2 adds geometry awareness for future Cartesian and camera policies, but does
-not add a Cartesian action source.
+P1 joint actions remain joint-only. P2 adds geometry awareness for future
+Cartesian and camera policies. P3 enables Cartesian action sources for
+simulation only.
 
 ## Safety
 
@@ -30,6 +33,8 @@ Motion commands are blocked when:
   intrinsics/extrinsics are unavailable
 - an action source declares `requires_valid_tcp_pose` and the state stream does
   not report valid TCP pose for both arms
+- a Cartesian source does not observe `observed_mode: simulation`
+- a Cartesian source sees a non-simulator `observed_backend`/`backend_type`
 - configured mode is `real` and `allow_real_motion` is false
 - an action source requires camera or kinematics inputs that are unavailable
 
@@ -57,6 +62,13 @@ The current active calibration is a configured estimate. It is acceptable for
 simulation geometry-aware policy tests when the simulation toggle remains true,
 but it is blocked for real geometry-dependent policy by default because
 `geometry_valid_for_real_policy` is false.
+
+Cartesian sources are stricter than joint sources. They require fresh state, no
+fault latch, valid joint state, valid TCP pose for both arms, simulation as the
+observed mode, and simulator backend when the backend is reported. Real
+Cartesian commands remain blocked even when `allow_real_motion: true`; a future
+separate `allow_real_cartesian` implementation must be added before real
+Cartesian motion can be opened.
 
 Only one command source should be active at a time. Do not run GUI teleop and
 `policy_runner` teleop against the same `rb_servo_server` command port
@@ -110,6 +122,36 @@ Hardware-free tests use `FakeSpaceMouseReader`. Real HID support is optional:
 python3 -m pip install -e policy_runner[spacemouse]
 ```
 
+## Cartesian TCP Delta
+
+`tcp_delta` emits a small scripted stand-frame TCP delta using the server
+`TcpDeltaStand` mode. `spacemouse_cartesian` maps SpaceMouse axes to the same
+stand-frame TCP delta mode:
+
+```text
+tx, ty, tz -> TCP dx, dy, dz in meters
+rx, ry, rz -> TCP drx, dry, drz in radians
+```
+
+Example config fields:
+
+```yaml
+action_source: spacemouse_cartesian
+spacemouse_cartesian:
+  selected_arm: left
+  frame: stand
+  command_rate_hz: 30
+  max_linear_step_m: 0.002
+  max_angular_step_rad: 0.01
+  deadband: 0.08
+  require_deadman: true
+  deadman_button: 0
+```
+
+Button 0 is the default deadman switch. When it is released, the source emits
+no command. Linear and angular deltas are clamped per command. `TcpDeltaLocal`
+is intentionally not enabled by policy_runner yet.
+
 ## Command Packets
 
 All packets include `seq`, `mode`, and `timeout_sec`. Lifecycle packets use the
@@ -133,3 +175,5 @@ Joint actions use per-arm modes so either arm can hold independently:
 
 Supported P1-D modes are `Hold`, `ArmMotion`, `DisarmMotion`,
 `EmergencyStop`, `ResetFault`, `JointTarget`, and `JointVelocity`.
+P3 Cartesian packets additionally use `TcpDeltaStand` with per-arm
+`tcp_delta_stand` payloads in simulation only.

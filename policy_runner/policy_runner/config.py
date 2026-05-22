@@ -49,11 +49,33 @@ class JointVelocityConfig:
 
 
 @dataclass(frozen=True)
+class TcpDeltaConfig:
+    selected_arm: str = "both"
+    frame: str = "stand"
+    delta: tuple[float, ...] = (0.001, 0.0, 0.0, 0.0, 0.0, 0.0)
+    max_linear_step_m: float = 0.002
+    max_angular_step_rad: float = 0.01
+    simulation_only: bool = True
+
+
+@dataclass(frozen=True)
 class SpaceMouseConfig:
     selected_arm: str = "left"
     max_joint_velocity_deg_s: tuple[float, ...] = (5.0, 5.0, 5.0, 8.0, 8.0, 10.0)
     deadband: float = 0.08
     smoothing_alpha: float = 0.2
+    require_deadman: bool = True
+    deadman_button: int = 0
+
+
+@dataclass(frozen=True)
+class SpaceMouseCartesianConfig:
+    selected_arm: str = "left"
+    frame: str = "stand"
+    command_rate_hz: float = 30.0
+    max_linear_step_m: float = 0.002
+    max_angular_step_rad: float = 0.01
+    deadband: float = 0.08
     require_deadman: bool = True
     deadman_button: int = 0
 
@@ -69,7 +91,9 @@ class PolicyRunnerConfig:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     joint_sine: JointSineConfig = field(default_factory=JointSineConfig)
     joint_velocity: JointVelocityConfig = field(default_factory=JointVelocityConfig)
+    tcp_delta: TcpDeltaConfig = field(default_factory=TcpDeltaConfig)
     spacemouse: SpaceMouseConfig = field(default_factory=SpaceMouseConfig)
+    spacemouse_cartesian: SpaceMouseCartesianConfig = field(default_factory=SpaceMouseCartesianConfig)
     command_rate_hz: float = 30.0
 
 
@@ -91,7 +115,9 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         safety=SafetyConfig(**_section(raw, "safety")),
         joint_sine=_joint_sine_config(_section(raw, "joint_sine")),
         joint_velocity=_joint_velocity_config(_section(raw, "joint_velocity")),
+        tcp_delta=_tcp_delta_config(_section(raw, "tcp_delta")),
         spacemouse=_spacemouse_config(_section(raw, "spacemouse")),
+        spacemouse_cartesian=_spacemouse_cartesian_config(_section(raw, "spacemouse_cartesian")),
         command_rate_hz=float(raw.get("command_rate_hz", 30.0)),
     )
 
@@ -117,6 +143,12 @@ def _joint_velocity_config(raw: dict[str, Any]) -> JointVelocityConfig:
     return JointVelocityConfig(**raw)
 
 
+def _tcp_delta_config(raw: dict[str, Any]) -> TcpDeltaConfig:
+    if "delta" in raw:
+        raw["delta"] = _tuple6(raw["delta"], "tcp_delta.delta")
+    return TcpDeltaConfig(**raw)
+
+
 def _spacemouse_config(raw: dict[str, Any]) -> SpaceMouseConfig:
     if "max_joint_velocity_deg_s" in raw:
         raw["max_joint_velocity_deg_s"] = _tuple6(
@@ -124,6 +156,10 @@ def _spacemouse_config(raw: dict[str, Any]) -> SpaceMouseConfig:
             "spacemouse.max_joint_velocity_deg_s",
         )
     return SpaceMouseConfig(**raw)
+
+
+def _spacemouse_cartesian_config(raw: dict[str, Any]) -> SpaceMouseCartesianConfig:
+    return SpaceMouseCartesianConfig(**raw)
 
 
 def _tuple6(value: Any, label: str) -> tuple[float, ...]:
