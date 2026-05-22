@@ -145,9 +145,20 @@ must not bypass servo safety gates.
 ## Frame And Calibration Contract
 
 Shared frame names and transform direction are defined in
-[frame_contract.md](frame_contract.md). Current mount values are configured
-estimates, not measured calibration. Geometry-dependent policy execution must
-fail closed when measured calibration is required but unavailable.
+[frame_contract.md](frame_contract.md). The active global setup registry is
+`calibration/active_calibration.yaml`.
+
+Current mount values are configured estimates, not measured calibration. Servo
+config mount transforms remain the current runtime source for
+`rb_servo_server`; the calibration registry is the cross-component geometry
+source of truth that future work should load or cross-check against runtime
+config.
+
+`configured_estimate` geometry is allowed for visualization and simulation. It
+is not valid for real geometry-dependent policy, and the active registry marks
+`geometry_valid_for_real_policy: false`. Joint-only control does not require
+measured calibration. TCP/Cartesian and camera-geometry policy paths require
+measured and accepted calibration in a later milestone.
 
 ## Validation Contract
 

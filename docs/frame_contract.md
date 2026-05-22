@@ -3,9 +3,11 @@
 This document is the shared coordinate-frame contract for `rb_servo_server`,
 `camera_server`, `rb_gui`, and the future `policy_runner`.
 
-The system source of truth is [architecture.md](architecture.md). Frame data is
-for visualization, calibration, and policy inputs; it does not open any real
-motion path by itself.
+The system source of truth is [architecture.md](architecture.md). The active
+global setup registry is
+[`calibration/active_calibration.yaml`](../calibration/active_calibration.yaml).
+Frame data is for visualization, calibration, and policy inputs; it does not
+open any real motion path by itself.
 
 It defines names, transform direction, calibration file locations, and the
 minimum schema needed before real calibration is available. Values already
@@ -56,6 +58,22 @@ right_wrist.color
 
 Geometry uses `head_camera`, `left_wrist_camera`, and `right_wrist_camera`.
 
+The root frame tree is:
+
+```text
+stand
+  left_base
+    left_tcp
+      left_wrist_camera
+  right_base
+    right_tcp
+      right_wrist_camera
+  head_camera
+```
+
+`left_tcp` and `right_tcp` are dynamic frames derived from joint state and FK.
+The stand-to-base and camera transforms are setup/calibration data.
+
 ## Current Configured Mounts
 
 `rb_servo_server` publishes mount estimates from `left_mount` and `right_mount`
@@ -78,6 +96,31 @@ T_stand_right_base:
 
 These are not measured acceptance calibration. Treat them as current setup
 values until a hardware calibration run produces a signed calibration file.
+
+## Runtime Source Of Truth Policy
+
+- Servo config mount transforms are the current runtime source for
+  `rb_servo_server`.
+- `calibration/active_calibration.yaml` is the global setup source of truth for
+  robot, camera, and stand frame relationships.
+- Future work should load the registry into runtime config or cross-check
+  runtime mount values against it, warning or failing on mismatch according to
+  the operating mode.
+- This registry does not change current `rb_servo_server` behavior.
+
+## Validity Semantics
+
+- `configured_estimate` means a value is a repository-configured setup estimate,
+  not a measured and accepted calibration.
+- `configured_estimate` is allowed for visualization, simulation, frame display,
+  and development of geometry-aware interfaces.
+- `configured_estimate` is not valid for real geometry-dependent policy.
+- `geometry_valid_for_real_policy: false` blocks real geometry-dependent policy
+  consumers once those checks are implemented.
+- Missing, unmeasured, or unknown camera calibration must not block joint-only
+  action sources.
+- TCP/Cartesian policies and camera-to-robot geometry policies require better
+  calibration in a later measured/accepted milestone.
 
 ## Transform Chain
 
@@ -157,7 +200,7 @@ real-hardware acceptance procedure approves it, even after simulator validation.
 
 ## Calibration File Locations
 
-Draft shared layout:
+Active shared layout:
 
 ```text
 calibration/
@@ -174,26 +217,58 @@ calibration/
     YYYYMMDD_HHMMSS_<label>.yaml
 ```
 
-Repository configs may continue to carry default configured estimates. Measured
-calibration belongs under `calibration/` and should be copied into run artifacts
-for each hardware or dataset session.
+Only `active_calibration.yaml` exists for P2-B. The subdirectories above are
+reserved for future measured artifacts. Repository configs may continue to carry
+default configured estimates. Measured calibration belongs under `calibration/`
+and should be copied into run artifacts for each hardware or dataset session.
 
-## Draft Calibration Schema
+## Active Calibration Schema
 
 `calibration/active_calibration.yaml`:
 
 ```yaml
 schema: robotics_lab.calibration.v1
-calibration_id: "UNMEASURED_CONFIG_ESTIMATE"
-created_utc: null
+calibration_id: "CONFIG_ESTIMATE_001"
 status: configured_estimate
-source: "rb_servo_server config defaults"
-files:
-  stand_mounts: robot/stand_mounts.yaml
-  camera_intrinsics: cameras/intrinsics.yaml
-  camera_extrinsics: cameras/extrinsics.yaml
-  wrist_hand_eye: hand_eye/wrist_cameras.yaml
+geometry_valid_for_real_policy: false
+
+robot:
+  T_stand_left_base:
+    parent: stand
+    child: left_base
+    xyz_rpy: [0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0]
+    units:
+      translation: m
+      rotation: rad
+    status: configured_estimate
+    source: rb_servo_server mount config
+  T_stand_right_base:
+    parent: stand
+    child: right_base
+    xyz_rpy: [-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0]
+    units:
+      translation: m
+      rotation: rad
+    status: configured_estimate
+    source: rb_servo_server mount config
+
+cameras:
+  head:
+    frame: head_camera
+    serial: "REPLACE_HEAD_SERIAL"
+    intrinsics_status: unknown
+    extrinsics_status: unmeasured
+  left_wrist:
+    frame: left_wrist_camera
+    serial: "REPLACE_LEFT_SERIAL"
+    hand_eye_status: unmeasured
+  right_wrist:
+    frame: right_wrist_camera
+    serial: "REPLACE_RIGHT_SERIAL"
+    hand_eye_status: unmeasured
 ```
+
+Future measured calibration may split this into the following files:
 
 `calibration/robot/stand_mounts.yaml`:
 
