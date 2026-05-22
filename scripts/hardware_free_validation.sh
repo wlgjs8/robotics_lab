@@ -13,6 +13,25 @@ RBSIM_LEFT_CONFIG="${RBSIM_LEFT_CONFIG:-${ROOT_DIR}/rb_simulator/config/left_rb3
 RBSIM_RIGHT_CONFIG="${RBSIM_RIGHT_CONFIG:-${ROOT_DIR}/rb_simulator/config/right_rb3_730e.yaml}"
 RBSIM_SERVO_CONFIG="${RBSIM_SERVO_CONFIG:-}"
 
+loopback_socket_available() {
+  python3 - <<'PY'
+import socket
+import sys
+
+sockets = []
+try:
+    for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+        sock = socket.socket(socket.AF_INET, kind)
+        sock.bind(("127.0.0.1", 0))
+        sockets.append(sock)
+except OSError:
+    sys.exit(1)
+finally:
+    for sock in sockets:
+        sock.close()
+PY
+}
+
 echo "hardware-free gate: dependency preflight"
 "${ROOT_DIR}/scripts/check_deps.sh" --profile hardware-free
 
@@ -45,8 +64,8 @@ cmake \
   -DBUILD_TESTING=ON \
   "${cmake_prefix_args[@]}"
 cmake --build "${RB_SERVO_BUILD_DIR}" -j "${JOBS}"
-echo "hardware-free gate: rb_servo CTest excluding stale single-process simulator gate"
-ctest --test-dir "${RB_SERVO_BUILD_DIR}" --output-on-failure -E '^rbsim_hardware_free_gate$'
+echo "hardware-free gate: rb_servo CTest including per-arm simulator gate"
+ctest --test-dir "${RB_SERVO_BUILD_DIR}" --output-on-failure
 
 echo "hardware-free gate: rb_servo log analyzer self-test"
 python3 "${ROOT_DIR}/rb_servo_server/tools/analyze_servo_log.py" --self-test
@@ -64,7 +83,10 @@ python3 "${ROOT_DIR}/rb_simulator/tools/rbsim_servo_smoke.py" --self-test
 run_rbsim_smoke=false
 case "${RBSIM_SMOKE_MODE}" in
   auto)
-    if [[ -x "${RB_SERVO_BUILD_DIR}/rb_servo_server" && -f "${RBSIM_LEFT_CONFIG}" && -f "${RBSIM_RIGHT_CONFIG}" ]]; then
+    if ! loopback_socket_available; then
+      echo "hardware-free gate: skipping per-arm simulator smoke; AF_INET loopback sockets are unavailable in this sandbox"
+      echo "hardware-free gate: set RBSIM_SMOKE_MODE=required to fail instead of skipping"
+    elif [[ -x "${RB_SERVO_BUILD_DIR}/rb_servo_server" && -f "${RBSIM_LEFT_CONFIG}" && -f "${RBSIM_RIGHT_CONFIG}" ]]; then
       run_rbsim_smoke=true
     else
       echo "hardware-free gate: skipping per-arm simulator smoke; set RBSIM_SMOKE_MODE=required to fail on missing prerequisites"
@@ -88,16 +110,19 @@ esac
 if [[ "${run_rbsim_smoke}" == true ]]; then
   echo "hardware-free gate: per-arm rb_simulator + rb_servo_server loopback smoke"
   per_arm_args=(
-    --rbsim-command "${RBSIM_COMMAND}"
-    --left-config "${RBSIM_LEFT_CONFIG}"
-    --right-config "${RBSIM_RIGHT_CONFIG}"
+    --left-simulator-command "${RBSIM_COMMAND}"
+    --right-simulator-command "${RBSIM_COMMAND}"
+    --left-simulator-config "${RBSIM_LEFT_CONFIG}"
+    --right-simulator-config "${RBSIM_RIGHT_CONFIG}"
     --server "${RB_SERVO_BUILD_DIR}/rb_servo_server"
-    --artifacts-dir "${RBSIM_SMOKE_ARTIFACTS_DIR}"
+    --artifact-dir "${RBSIM_SMOKE_ARTIFACTS_DIR}"
   )
   if [[ -n "${RBSIM_SERVO_CONFIG}" ]]; then
     per_arm_args+=(--server-config "${RBSIM_SERVO_CONFIG}")
+  else
+    per_arm_args+=(--server-config "${ROOT_DIR}/rb_servo_server/config/dual_simulator.yaml")
   fi
-  python3 "${ROOT_DIR}/scripts/per_arm_simulator_smoke.py" "${per_arm_args[@]}"
+  python3 "${ROOT_DIR}/rb_simulator/tools/rbsim_servo_smoke.py" "${per_arm_args[@]}"
 fi
 
 echo "hardware-free gate passed"

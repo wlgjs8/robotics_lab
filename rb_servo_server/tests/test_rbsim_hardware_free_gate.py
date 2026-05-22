@@ -100,8 +100,10 @@ class RbsimHardwareFreeGateTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="rb-servo-rbsim-gate-")
         self.tmp_path = Path(self.tmp.name)
         try:
-            self.control_port = reserve_port(socket.SOCK_STREAM)
-            self.admin_port = reserve_port(socket.SOCK_STREAM)
+            self.left_control_port = reserve_port(socket.SOCK_STREAM)
+            self.left_admin_port = reserve_port(socket.SOCK_STREAM)
+            self.right_control_port = reserve_port(socket.SOCK_STREAM)
+            self.right_admin_port = reserve_port(socket.SOCK_STREAM)
             self.command_port = reserve_port(socket.SOCK_DGRAM)
             self.state_port = reserve_port(socket.SOCK_DGRAM)
         except PermissionError as exc:
@@ -110,18 +112,25 @@ class RbsimHardwareFreeGateTest(unittest.TestCase):
         self.capture = StateCapture(self.state_port)
         self.capture.start()
 
-        sim_config = load_simulator_config(SIM_ROOT / "config" / "dual_rb3_730e.yaml")
-        self.service = RbsimService.with_binds(
-            sim_config,
-            f"tcp://127.0.0.1:{self.control_port}",
-            f"tcp://127.0.0.1:{self.admin_port}",
+        left_sim_config = load_simulator_config(SIM_ROOT / "config" / "left_rb3_730e.yaml")
+        right_sim_config = load_simulator_config(SIM_ROOT / "config" / "right_rb3_730e.yaml")
+        self.left_service = RbsimService.with_binds(
+            left_sim_config,
+            f"tcp://127.0.0.1:{self.left_control_port}",
+            f"tcp://127.0.0.1:{self.left_admin_port}",
         )
-        self.service.start()
+        self.right_service = RbsimService.with_binds(
+            right_sim_config,
+            f"tcp://127.0.0.1:{self.right_control_port}",
+            f"tcp://127.0.0.1:{self.right_admin_port}",
+        )
+        self.left_service.start()
+        self.right_service.start()
 
         self.server_bin = Path(os.environ.get("RB_SERVO_SERVER_BIN", SERVO_ROOT / "build" / "rb_servo_server"))
         if not self.server_bin.exists():
             self.skipTest(f"rb_servo_server binary not found: {self.server_bin}")
-        self.server_config = self.tmp_path / "dual_rb_simulator_test.yaml"
+        self.server_config = self.tmp_path / "dual_simulator_test.yaml"
         self.log_dir = self.tmp_path / "logs"
         self.server_config.write_text(self._server_config_text(), encoding="utf-8")
         self.server_log = (self.tmp_path / "rb_servo_server.log").open("w", encoding="utf-8")
@@ -147,9 +156,12 @@ class RbsimHardwareFreeGateTest(unittest.TestCase):
         server_log = getattr(self, "server_log", None)
         if server_log is not None:
             server_log.close()
-        service = getattr(self, "service", None)
-        if service is not None:
-            service.stop()
+        right_service = getattr(self, "right_service", None)
+        if right_service is not None:
+            right_service.stop()
+        left_service = getattr(self, "left_service", None)
+        if left_service is not None:
+            left_service.stop()
         capture = getattr(self, "capture", None)
         if capture is not None:
             capture.stop()
@@ -158,19 +170,20 @@ class RbsimHardwareFreeGateTest(unittest.TestCase):
             tmp.cleanup()
 
     def _server_config_text(self) -> str:
-        endpoint = f"tcp://127.0.0.1:{self.control_port}"
+        left_endpoint = f"tcp://127.0.0.1:{self.left_control_port}"
+        right_endpoint = f"tcp://127.0.0.1:{self.right_control_port}"
         return f"""left_robot:
-  backend_type: rbsim_local
-  run_mode: rbsim_local
+  backend_type: simulator
+  run_mode: simulation
   name: left_rbsim_test
-  rbsim_control_endpoint: "{endpoint}"
-  rbsim_request_timeout_sec: 0.2
+  simulator_control_endpoint: "{left_endpoint}"
+  simulator_request_timeout_sec: 0.2
 right_robot:
-  backend_type: rbsim_local
-  run_mode: rbsim_local
+  backend_type: simulator
+  run_mode: simulation
   name: right_rbsim_test
-  rbsim_control_endpoint: "{endpoint}"
-  rbsim_request_timeout_sec: 0.2
+  simulator_control_endpoint: "{right_endpoint}"
+  simulator_request_timeout_sec: 0.2
 servo:
   rate_hz: 100
   command_timeout_sec: 0.5
@@ -193,6 +206,9 @@ logging:
   directory: "{self.log_dir}"
   flush_period_ms: 20
   queue_capacity: 4096
+force_control:
+  provider: null
+  enable: false
 """
 
     def admin(self, op: str, arm: str | None = None, **params: Any) -> dict[str, Any]:
@@ -205,9 +221,28 @@ logging:
         }
         if arm is not None:
             request["arm"] = arm
-        response = tcp_jsonl_request(("127.0.0.1", self.admin_port), request)
+        if arm is None and op == "admin.reset_hooks":
+            left_response = tcp_jsonl_request(("127.0.0.1", self.left_admin_port), {**request, "arm": "left"})
+            right_response = tcp_jsonl_request(("127.0.0.1", self.right_admin_port), {**request, "arm": "right"})
+            self.assertTrue(left_response.get("ok"), left_response)
+            self.assertTrue(right_response.get("ok"), right_response)
+            return {"ok": True, "left": left_response, "right": right_response}
+
+        admin_port = self.left_admin_port if arm != "right" else self.right_admin_port
+        response = tcp_jsonl_request(("127.0.0.1", admin_port), request)
         self.assertTrue(response.get("ok"), response)
         return response
+
+    def control_request(self, port: int, op: str, arm: str, **params: Any) -> dict[str, Any]:
+        self.seq += 1
+        request: dict[str, Any] = {
+            "schema_version": PROTOCOL_VERSION,
+            "request_id": f"control-{self.seq}",
+            "op": op,
+            "arm": arm,
+            "params": params,
+        }
+        return tcp_jsonl_request(("127.0.0.1", port), request)
 
     def send_command(self, mode: str, **extra: Any) -> int:
         self.seq += 1
@@ -260,6 +295,17 @@ logging:
         candidates = sorted(self.log_dir.glob("*.csv"), key=lambda path: path.stat().st_mtime)
         self.assertTrue(candidates, f"no CSV logs under {self.log_dir}")
         return candidates[-1]
+
+    def test_wrong_arm_requests_fail_closed(self) -> None:
+        right_to_left = self.control_request(self.left_control_port, "read_state", "right")
+        self.assertFalse(right_to_left.get("ok"), right_to_left)
+        self.assertEqual(right_to_left.get("error", {}).get("name"), "wrong_arm")
+        self.assertEqual(right_to_left.get("error", {}).get("code"), 1005)
+
+        left_to_right = self.control_request(self.right_control_port, "read_state", "left")
+        self.assertFalse(left_to_right.get("ok"), left_to_right)
+        self.assertEqual(left_to_right.get("error", {}).get("name"), "wrong_arm")
+        self.assertEqual(left_to_right.get("error", {}).get("code"), 1005)
 
     def test_nominal_motion_and_log_budget_gate(self) -> None:
         first = self.wait_snapshot(self.connected_valid, "startup")

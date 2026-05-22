@@ -27,9 +27,8 @@ The script runs:
   CMake, a C++17 compiler, `yaml-cpp`, `nlohmann_json`, or `python3` is
   missing.
 - `camera_server`: CMake configure/build/CTest with `CAMERA_SERVER_FORCE_MOCK_CAMERA=ON` and `CAMERA_SERVER_FORCE_ZMQ_STUB=ON`.
-- `rb_servo_server`: CMake configure/build/CTest with `RB_SERVO_ENABLE_RBPODO=OFF`.
-  The stale single-process `rbsim_hardware_free_gate` CTest is excluded here
-  and replaced by the per-arm smoke below.
+- `rb_servo_server`: CMake configure/build/CTest with `RB_SERVO_ENABLE_RBPODO=OFF`,
+  including the per-arm `rbsim_hardware_free_gate` integration test.
 - `rb_servo_gui`: stdlib `unittest` discovery registered as the `rb_servo_gui_unittest` CTest test with `PYTHONPATH` pointed at top-level `rb_gui`.
 - `rb_servo_server/tools/analyze_servo_log.py --self-test`: local
   mock/simulator analyzer profiles and fail-closed parser checks for generated
@@ -41,8 +40,9 @@ The script runs:
   and servo-log validator coverage without launching processes.
 - Full local loopback smoke when prerequisites are present: starts separate
   left and right simulator Python module processes plus the freshly built
-  `rb_servo_server`, sends a small command through the simulator profile, and
-  validates UDP state plus CSV log evidence.
+  `rb_servo_server`, checks wrong-arm requests fail closed, sends a small
+  command through the simulator profile, and validates UDP state plus CSV log
+  evidence.
 
 The rb_servo configure sets `RB_SERVO_ALLOW_FETCHCONTENT=OFF` so the local gate
 does not silently download missing dependencies. If `nlohmann_json` is installed
@@ -72,21 +72,21 @@ variable names are compatibility names in the current script, not public
 architecture terminology:
 
 - `auto` (default): run the full smoke when the freshly built servo-server
-  binary and both per-arm simulator configs exist.
+  binary, both per-arm simulator configs, and loopback socket support exist.
 - `required`: fail closed if any full-smoke prerequisite is missing.
 - `skip`: skip the full smoke intentionally while still running build, unit, and
   smoke-validator checks.
 
 Dependency prerequisites for `RBSIM_SMOKE_MODE=required`:
 
-- `RBSIM_COMMAND` defaults to `python3 -m rbsim`, with `PYTHONPATH` set to
-  `rb_simulator/src` by the smoke runner.
+- `RBSIM_COMMAND` defaults to `python3 -m rbsim`; the validation script passes
+  it as both `--left-simulator-command` and `--right-simulator-command`, with
+  `PYTHONPATH` set to `rb_simulator/src` by the smoke runner.
 - `RBSIM_LEFT_CONFIG` and `RBSIM_RIGHT_CONFIG` point to per-arm simulator YAML
   profiles. Defaults are `rb_simulator/config/left_rb3_730e.yaml` and
   `rb_simulator/config/right_rb3_730e.yaml`.
 - `RBSIM_SERVO_CONFIG` may point to a loopback-only simulator backend profile.
-  If unset, the smoke runner writes a generated compatibility config into the
-  artifact directory.
+  If unset, the script uses `rb_servo_server/config/dual_simulator.yaml`.
 - CMake can build `rb_servo_server` with `RB_SERVO_ENABLE_RBPODO=OFF` and
   `RB_SERVO_ALLOW_FETCHCONTENT=OFF`.
 
