@@ -1,0 +1,80 @@
+# Hardware-free rb_simulator backend profile.
+# Pair with ../rb_simulator/config/dual_rb3_730e.yaml. The standard topology is
+# one dual-arm rb_simulator process; both arms below intentionally share the
+# same loopback rbsim_control_endpoint and are routed by the request arm field.
+# This profile must not be used as Rainbow rbsim/OVA or real robot evidence.
+
+left_robot:
+  backend_type: rbsim_local
+  run_mode: rbsim_local
+  name: left_rbsim
+  rbsim_control_endpoint: "tcp://127.0.0.1:50200"
+  rbsim_request_timeout_sec: 0.2
+  rbsim_connect_timeout_sec: 0.2
+  rbsim_read_timeout_sec: 0.2
+  rbsim_send_timeout_sec: 0.2
+  rbsim_stop_timeout_sec: 0.2
+  rbsim_reset_timeout_sec: 0.2
+  initial_q_deg: [0, -30, 80, 0, 60, 0]
+
+right_robot:
+  backend_type: rbsim_local
+  run_mode: rbsim_local
+  name: right_rbsim
+  rbsim_control_endpoint: "tcp://127.0.0.1:50200"
+  rbsim_request_timeout_sec: 0.2
+  rbsim_connect_timeout_sec: 0.2
+  rbsim_read_timeout_sec: 0.2
+  rbsim_send_timeout_sec: 0.2
+  rbsim_stop_timeout_sec: 0.2
+  rbsim_reset_timeout_sec: 0.2
+  initial_q_deg: [0, -30, 80, 0, 60, 0]
+
+left_mount:
+  base_pose_in_stand: [0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0]
+
+right_mount:
+  base_pose_in_stand: [-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0]
+
+servo:
+  rate_hz: 100
+  command_timeout_sec: 0.2
+  startup_mode: Hold
+  enable_realtime_priority: false
+  realtime_priority: 80
+  cpu_core: -1
+  filter_dt_min_ratio: 0.5
+  filter_dt_max_ratio: 1.5
+
+safety:
+  q_min_deg: [-170, -120, -170, -190, -120, -360]
+  q_max_deg: [170, 120, 170, 190, 120, 360]
+  dq_max_deg_s: [60, 60, 60, 90, 90, 120]
+  ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]
+  command_timeout_sec: 0.2
+  max_tracking_error_deg: 10.0
+  tracking_error_policy: snap_to_actual
+  latch_fault_on_robot_state_error: true
+  stop_both_arms_on_single_arm_error: true
+
+network:
+  command_bind: "udp://127.0.0.1:50010"
+  state_pub_bind: "udp://127.0.0.1:50110"
+  command_source_allowlist: ["127.0.0.1/32"]
+
+logging:
+  enable: true
+  directory: "./logs"
+  flush_period_ms: 100
+  queue_capacity: 4096
+
+force_control:
+  enable: false
+  update_rate_hz: 100
+  admittance_gain_pos: 0.0002
+  admittance_gain_rot: 0.0001
+  force_lpf_alpha: 0.2
+  max_pos_offset_m: 0.01
+  max_rot_offset_rad: 0.1
+  max_pos_step_m: 0.001
+  max_rot_step_rad: 0.01

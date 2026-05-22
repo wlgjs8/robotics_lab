@@ -1,0 +1,95 @@
+services:
+  rb_gui:
+    build:
+      context: .
+      dockerfile: rb_gui/docker/rb_servo_gui.Dockerfile
+    image: robotics_lab/rb_gui:dev
+    init: true
+    networks:
+      rb_servo_net:
+        aliases:
+          - rb_servo_gui
+    environment:
+      RB_GUI_HOST: "0.0.0.0"
+      RB_GUI_PORT: "8080"
+      RB_GUI_STATE_BIND: "0.0.0.0"
+      RB_GUI_STATE_PORT: "50110"
+      RB_GUI_COMMAND_HOST: "rb_simulator"
+      RB_GUI_COMMAND_PORT: "50010"
+      RB_GUI_OBSERVED_MODE: "rbsim_local"
+      RB_GUI_OPS_AVAILABLE: "0"
+    ports:
+      - "127.0.0.1:8080:8080/tcp"
+      - "127.0.0.1:50110:50110/udp"
+
+  rb_simulator:
+    build:
+      context: .
+      dockerfile: rb_simulator/docker/rb_simulator.Dockerfile
+    image: robotics_lab/rb_simulator:dev
+    init: true
+    networks: [rb_servo_net]
+    ports:
+      - "127.0.0.1:50010:50010/udp"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1', 50200), 1.0); s.close()",
+        ]
+      interval: 1s
+      timeout: 2s
+      retries: 10
+      start_period: 1s
+    labels:
+      rb-servo.role: "hardware-free-rb-simulator"
+      rb-servo.hardware: "none"
+      rb-servo.ova: "not-used"
+
+  rb_servo_server:
+    build:
+      context: ./rb_servo_server
+      dockerfile: docker/rb_servo_server.Dockerfile
+      target: build
+    image: robotics_lab/rb_servo_server:dev
+    command: ["./build/rb_servo_server", "--config", "config/dual_rb_simulator_compose.yaml"]
+    init: true
+    network_mode: "service:rb_simulator"
+    depends_on:
+      rb_gui:
+        condition: service_started
+      rb_simulator:
+        condition: service_healthy
+    volumes:
+      - ./rb_servo_server/logs:/workspace/logs
+    labels:
+      rb-servo.role: "hardware-free-rbsim-servo-server"
+      rb-servo.hardware: "none"
+      rb-servo.ova: "not-used"
+
+  camera_server:
+    build:
+      context: ./camera_server
+      dockerfile: Dockerfile
+    image: robotics_lab/camera_server:dev
+    container_name: camera_server
+    ipc: host
+    shm_size: "2gb"
+    network_mode: host
+    privileged: true
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    volumes:
+      - /dev:/dev
+      - /run/udev:/run/udev:ro
+      - ./camera_server/config:/app/config:ro
+      - ./camera_server/episodes:/data/episodes
+    environment:
+      CAMERA_SERVER_CONFIG: /app/config/triple_realsense.yaml
+    command: ["--config", "/app/config/triple_realsense.yaml"]
+
+networks:
+  rb_servo_net:
+    driver: bridge

@@ -1,0 +1,34 @@
+# Hardware-free rb_simulator profile.
+#
+# This config describes one dual-arm simulator process, not rb_servo_server.
+# The process owns both left_arm and right_arm state and exposes one loopback
+# control endpoint plus one admin endpoint. Pair it with
+# rb_servo_server/config/dual_rb_simulator.yaml, where both RbsimBackend
+# instances point at simulator.control_bind and select their arm by request
+# field. A future per-arm endpoint split must update both config files together.
+
+simulator:
+  control_bind: "tcp://127.0.0.1:50200"
+  admin_bind: "tcp://127.0.0.1:50201"
+  update_rate_hz: 200
+  motion_time_constant_sec: 0.04
+  max_joint_velocity_deg_s: 360
+  model: "RB3_730E"
+
+left_arm:
+  name: "left_rbsim"
+  initial_q_deg: [0, -30, 80, 0, 60, 0]
+  mount: [0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0]
+
+right_arm:
+  name: "right_rbsim"
+  initial_q_deg: [0, -30, 80, 0, 60, 0]
+  mount: [-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0]
+
+fault_defaults:
+  connected: true
+  initialized: false
+  servo_enabled: false
+  has_valid_joint_state: true
+  has_error: false
+  error_code: 0

@@ -1,0 +1,31 @@
+services:
+  camera_server:
+    build: .
+    image: camera_server:latest
+    container_name: camera_server
+    ipc: host
+    shm_size: "2gb"
+    network_mode: host
+    privileged: true
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    volumes:
+      - /dev:/dev
+      - /run/udev:/run/udev:ro
+      - ./config:/app/config:ro
+      - ./episodes:/data/episodes
+    environment:
+      - CAMERA_SERVER_CONFIG=/app/config/triple_realsense.yaml
+    command: ["--config", "/app/config/triple_realsense.yaml"]
+
+  policy_runner_sample:
+    image: python:3.11-slim
+    container_name: policy_runner_sample
+    ipc: host
+    shm_size: "2gb"
+    network_mode: host
+    depends_on:
+      - camera_server
+    volumes:
+      - ./tools:/tools:ro
+    command: ["sh", "-lc", "pip install --no-cache-dir pyzmq && python /tools/read_latest_bundle.py --metadata tcp://127.0.0.1:5600 --shm /camera_server_frames"]

@@ -1,0 +1,251 @@
+<mujoco model="rb3_730e">
+  <compiler angle="radian" meshdir="../../meshes" autolimits="true" eulerseq="xyz" />
+
+  <option integrator="implicitfast" />
+
+  <asset>
+    <material name="black" specular="0.0" shininess="0.5" rgba="0.100000 0.100000 0.100000 1.000000" />
+    <material name="gray_30" specular="0.0" shininess="0.5"
+      rgba="0.300000 0.300000 0.300000 1.000000" />
+    <material name="gray_80" specular="0.0" shininess="0.5"
+      rgba="0.800000 0.800000 0.800000 1.000000" />
+    <material name="dark_gray" specular="0.0" shininess="0.5"
+      rgba="0.072272 0.090842 0.097587 1.000000" />
+    <mesh file="robots/rb3_730e/visual/link0/link0_0.obj" />
+    <mesh file="robots/rb3_730e/visual/link0/link0_1.obj" />
+    <mesh file="robots/rb3_730e/visual/link0/link0_2.obj" />
+    <mesh file="robots/rb3_730e/visual/link0/link0_3.obj" />
+    <mesh file="robots/rb3_730e/visual/link0/link0_4.obj" />
+  </asset>
+
+  <asset>
+    <mesh file="robots/rb3_730e/visual/link1/link1_0.obj" />
+    <mesh file="robots/rb3_730e/visual/link1/link1_1.obj" />
+    <mesh file="robots/rb3_730e/visual/link1/link1_2.obj" />
+    <mesh file="robots/rb3_730e/visual/link1/link1_3.obj" />
+    <mesh file="robots/rb3_730e/visual/link1/link1_4.obj" />
+  </asset>
+
+  <asset>
+    <mesh file="robots/rb3_730e/visual/link2/link2_0.obj" />
+    <mesh file="robots/rb3_730e/visual/link2/link2_1.obj" />
+    <mesh file="robots/rb3_730e/visual/link2/link2_2.obj" />
+    <mesh file="robots/rb3_730e/visual/link2/link2_3.obj" />
+    <mesh file="robots/rb3_730e/visual/link2/link2_4.obj" />
+    <mesh file="robots/rb3_730e/visual/link2/link2_5.obj" />
+    <mesh file="robots/rb3_730e/visual/link2/link2_6.obj" />
+    <mesh file="robots/rb3_730e/visual/link2/link2_7.obj" />
+    <mesh file="robots/rb3_730e/visual/link2/link2_8.obj" />
+    <mesh file="robots/rb3_730e/visual/link2/link2_9.obj" />
+    <mesh file="robots/rb3_730e/visual/link2/link2_10.obj" />
+  </asset>
+
+  <asset>
+    <mesh file="robots/rb3_730e/visual/link3/link3_0.obj" />
+    <mesh file="robots/rb3_730e/visual/link3/link3_1.obj" />
+    <mesh file="robots/rb3_730e/visual/link3/link3_2.obj" />
+    <mesh file="robots/rb3_730e/visual/link3/link3_3.obj" />
+    <mesh file="robots/rb3_730e/visual/link3/link3_4.obj" />
+    <mesh file="robots/rb3_730e/visual/link3/link3_5.obj" />
+  </asset>
+
+  <asset>
+    <mesh file="robots/rb3_730e/visual/link4/link4_0.obj" />
+    <mesh file="robots/rb3_730e/visual/link4/link4_1.obj" />
+    <mesh file="robots/rb3_730e/visual/link4/link4_2.obj" />
+    <mesh file="robots/rb3_730e/visual/link4/link4_3.obj" />
+    <mesh file="robots/rb3_730e/visual/link4/link4_4.obj" />
+  </asset>
+
+  <asset>
+    <mesh file="robots/rb3_730e/visual/link5/link5_0.obj" />
+    <mesh file="robots/rb3_730e/visual/link5/link5_1.obj" />
+    <mesh file="robots/rb3_730e/visual/link5/link5_2.obj" />
+    <mesh file="robots/rb3_730e/visual/link5/link5_3.obj" />
+  </asset>
+
+  <asset>
+    <mesh file="robots/rb3_730e/visual/link6/link6_0.obj" />
+    <mesh file="robots/rb3_730e/visual/link6/link6_1.obj" />
+    <mesh file="robots/rb3_730e/visual/link6/link6_2.obj" />
+    <mesh file="robots/rb3_730e/visual/link6/link6_3.obj" />
+    <mesh file="robots/rb3_730e/visual/link6/link6_4.obj" />
+    <mesh file="robots/rb3_730e/visual/link6/link6_5.obj" />
+    <mesh file="robots/rb3_730e/visual/link6/link6_6.obj" />
+  </asset>
+
+  <asset>
+    <mesh name="link0" file="robots/rb3_730e/collision/link0.stl" />
+    <mesh name="link1" file="robots/rb3_730e/collision/link1.stl" />
+    <mesh name="link2" file="robots/rb3_730e/collision/link2.stl" />
+    <mesh name="link3" file="robots/rb3_730e/collision/link3.stl" />
+    <mesh name="link4" file="robots/rb3_730e/collision/link4.stl" />
+    <mesh name="link5" file="robots/rb3_730e/collision/link5.stl" />
+    <mesh name="link6" file="robots/rb3_730e/collision/link6.stl" />
+  </asset>
+
+  <asset>
+    <mesh file="robots/rb3_730e/collision/link2/link2_hull_000.stl" />
+    <mesh file="robots/rb3_730e/collision/link2/link2_hull_001.stl" />
+    <mesh file="robots/rb3_730e/collision/link2/link2_hull_002.stl" />
+  </asset>
+
+  <asset>
+    <mesh file="robots/rb3_730e/collision/link4/link4_hull_000.stl" />
+    <mesh file="robots/rb3_730e/collision/link4/link4_hull_001.stl" />
+    <mesh file="robots/rb3_730e/collision/link4/link4_hull_002.stl" />
+    <mesh file="robots/rb3_730e/collision/link4/link4_hull_003.stl" />
+  </asset>
+
+  <default>
+    <!-- general tag settings from
+    https://github.com/google-deepmind/mujoco_menagerie/blob/main/universal_robots_ur5e/ur5e.xml -->
+    <default class="rb3_730e">
+      <material specular="0.5" shininess="0.25" />
+      <joint axis="0 1 0" range="-6.2832 6.2832" />
+      <general gaintype="fixed" biastype="affine" ctrlrange="-6.2832 6.2832" gainprm="2000"
+        biasprm="0 -2000 -400"
+        forcerange="-150 150" />
+
+      <default class="size3">
+        <default class="size3_limited">
+          <joint range="-2.618 2.618" />
+          <general ctrlrange="-2.618 2.618" />
+        </default>
+      </default>
+      <default class="size1">
+        <general gainprm="500" biasprm="0 -500 -100" forcerange="-28 28" />
+      </default>
+      <default class="visual">
+        <geom type="mesh" contype="0" conaffinity="0" group="2" />
+      </default>
+      <default class="collision">
+        <geom type="mesh" contype="1" conaffinity="1" group="3" />
+      </default>
+      <site size="0.001" rgba="0.5 0.5 0.5 0.3" group="4" />
+    </default>
+  </default>
+
+
+  <!-- Inertia and Mass from
+  https://github.com/RainbowRobotics/rbpodo_ros2/blob/main/rbpodo_description/robots/rb3_730es_u/link.yaml -->
+  <worldbody>
+    <!-- link0 -->
+    <body name="link0" pos="0 0 0" euler="0.0 0.0 1.5708">
+      <geom mesh="link0_0" material="dark_gray" class="visual" />
+      <geom mesh="link0_1" material="gray_80" class="visual" />
+      <geom mesh="link0_2" material="gray_80" class="visual" />
+      <geom mesh="link0_3" material="gray_30" class="visual" />
+      <geom mesh="link0_4" material="black" class="visual" />
+      <geom mesh="link0" class="collision" euler="0.0 0.0 -1.5708"/>
+      <!-- link1 -->
+      <body name="link1" pos="0 0 0.1453" euler="0.0 0.0 -1.5708">
+        <inertial pos="0.000101 -0.003241 -0.017587" mass="2.058"
+          fullinertia="0.003 0.003 0.002 0.0 0.0 0.0" />
+        <joint name="base_joint" class="size3" axis="0 0 1" user="3.1415" />
+        <geom mesh="link1_0" material="gray_80" class="visual" />
+        <geom mesh="link1_1" material="gray_30" class="visual" />
+        <geom mesh="link1_2" material="black" class="visual" />
+        <geom mesh="link1_3" material="gray_80" class="visual" />
+        <geom mesh="link1_4" material="black" class="visual" />
+        <geom mesh="link1" class="collision" />
+        <!-- link2 -->
+        <body name="link2" pos="0 0 0" euler="0.0 0.0 0.0">
+          <inertial pos="-0.000049 -0.095326 0.121743" mass="4.227"
+            fullinertia="0.075 0.073 0.005 0.0 0.0 0.0" />
+          <joint name="shoulder_joint" class="size3" user="3.1415" />
+          <geom mesh="link2_0" material="gray_30" class="visual" />
+          <geom mesh="link2_1" material="gray_30" class="visual" />
+          <geom mesh="link2_2" material="gray_80" class="visual" />
+          <geom mesh="link2_3" material="gray_80" class="visual" />
+          <geom mesh="link2_4" material="gray_30" class="visual" />
+          <geom mesh="link2_5" material="gray_80" class="visual" />
+          <geom mesh="link2_6" material="gray_80" class="visual" />
+          <geom mesh="link2_7" material="gray_30" class="visual" />
+          <geom mesh="link2_8" material="black" class="visual" />
+          <geom mesh="link2_9" material="black" class="visual" />
+          <geom mesh="link2_10" material="black" class="visual" />
+          <geom mesh="link2_hull_000" class="collision" />
+          <geom mesh="link2_hull_001" class="collision" />
+          <geom mesh="link2_hull_002" class="collision" />
+          
+          <!-- link3 -->
+          <body name="link3" pos="0 -0.00645 0.286">
+            <inertial pos="0 -0.004 0.026" mass="1.45"
+              fullinertia="0.02 0.018 0.003 0.0 0.0 0.004" />
+            <joint name="elbow_joint" class="size3_limited" user="3.1415" />
+            <geom mesh="link3_0" material="black" class="visual" />
+            <geom mesh="link3_1" material="gray_80" class="visual" />
+            <geom mesh="link3_2" material="gray_80" class="visual" />
+            <geom mesh="link3_3" material="gray_30" class="visual" />
+            <geom mesh="link3_4" material="black" class="visual" />
+            <geom mesh="link3_5" material="black" class="visual" />
+            <geom mesh="link3" class="collision" />
+            <!-- link4 -->
+            <body name="link4" pos="0 0 0">
+              <inertial pos="0 -0.065 0.264" mass="1.798"
+                fullinertia="0.02 0.018 0.003 0.0 0.0 0.004" />
+              <joint name="wrist1_joint" class="size3" axis="0 0 1" user="3.1415" />
+              <geom mesh="link4_0" material="gray_30" class="visual" />
+              <geom mesh="link4_1" material="black" class="visual" />
+              <geom mesh="link4_2" material="gray_80" class="visual" />
+              <geom mesh="link4_3" material="black" class="visual" />
+              <geom mesh="link4_4" material="gray_30" class="visual" />
+              <geom mesh="link4_hull_000" class="collision" />
+              <geom mesh="link4_hull_001" class="collision" />
+              <geom mesh="link4_hull_002" class="collision" />
+              <geom mesh="link4_hull_003" class="collision" />
+              <!-- link5 -->
+              <body name="link5" pos="0 0 0.344">
+                <inertial pos="0 -0.001 0.017" mass="0.944"
+                  fullinertia="0.000776694 0.000786695 0.000515123 0.000005052 -0.000005306 -0.000017419" />
+                <joint name="wrist2_joint" class="size1" user="6.2832" />
+                <geom mesh="link5_0" material="black" class="visual" />
+                <geom mesh="link5_1" material="gray_80" class="visual" />
+                <geom mesh="link5_2" material="gray_80" class="visual" />
+                <geom mesh="link5_3" material="gray_30" class="visual" />
+                <geom mesh="link5" class="collision" />
+                <!-- link6 -->
+                <body name="link6" pos="0 0 0">
+                  <inertial pos="-0.001 -0.001 0.068" mass="0.05"
+                    fullinertia="0.000026302 0.000016887 0.000035232 -0.000000340 0.000000457 0.000000148" />
+                  <joint name="wrist3_joint" class="size1" axis="0 0 1" user="6.2832" />
+                  <geom mesh="link6_0" material="black" class="visual" />
+                  <geom mesh="link6_1" material="gray_30" class="visual" />
+                  <geom mesh="link6_2" material="gray_30" class="visual" />
+                  <geom mesh="link6_3" material="gray_80" class="visual" />
+                  <geom mesh="link6_4" material="gray_80" class="visual" />
+                  <geom mesh="link6_5" material="gray_30" class="visual" />
+                  <geom mesh="link6_6" material="gray_30" class="visual" />
+                  <geom mesh="link6" class="collision" />
+                  <site name="tcp" pos="0 0 0.1" />
+                  <site name="attachment_site" pos="0 0.0 0.1"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+ <contact>
+    <!-- Exclude only adjacent link pairs from collisions -->
+    <exclude body1="link0" body2="link1"/>
+    <exclude body1="link1" body2="link2"/>
+    <exclude body1="link2" body2="link3"/>
+    <exclude body1="link3" body2="link4"/>
+    <exclude body1="link4" body2="link5"/>
+    <exclude body1="link5" body2="link6"/>
+  </contact>
+
+  <actuator>
+    <general class="size3" name="base_joint" joint="base_joint" />
+    <general class="size3" name="shoulder_joint" joint="shoulder_joint" />
+    <general class="size3_limited" name="elbow_joint" joint="elbow_joint" />
+    <general class="size1" name="wrist1_joint" joint="wrist1_joint" />
+    <general class="size1" name="wrist2_joint" joint="wrist2_joint" />
+    <general class="size1" name="wrist3_joint" joint="wrist3_joint" />
+  </actuator>
+
+</mujoco>

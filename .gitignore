@@ -1,0 +1,47 @@
+# Build outputs
+**/build/
+**/build*/
+**/cmake-build-*/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/CTestTestfile.cmake
+**/cmake_install.cmake
+**/compile_commands.json
+**/Makefile
+
+# Logs and runtime artifacts
+**/logs/
+**/*.log
+**/*.tmp
+**/artifacts/
+**/episodes/
+camera_server/episodes/
+
+# Python caches
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local agent/runtime state
+.omx/
+**/.omx/
+.codex/
+**/.codex/
+.agents/
+**/.agents/
+**/.claude/settings.local.json
+
+# Local/vendor integration checkouts
+rb_servo_server/submodules/
+
+# Migration backups
+.git-backups/
+
+# OS/editor files
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/

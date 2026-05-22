@@ -1,0 +1,473 @@
+#include "rb_servo/network/command_server.hpp"
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <array>
+#include <algorithm>
+#include <cerrno>
+#include <cmath>
+#include <cstring>
+#include <cstdint>
+#include <iostream>
+#include <stdexcept>
+
+#include <nlohmann/json.hpp>
+
+#include "rb_servo/core/clock.hpp"
+
+namespace rb_servo {
+namespace {
+
+struct UdpEndpoint {
+    std::string host = "0.0.0.0";
+    int port = 0;
+};
+
+UdpEndpoint parseUdpUri(const std::string& uri) {
+    const std::string prefix = "udp://";
+    if (uri.rfind(prefix, 0) != 0) {
+        throw std::runtime_error("Only udp:// command_bind is supported now: " + uri);
+    }
+    const std::string rest = uri.substr(prefix.size());
+    const auto colon = rest.rfind(':');
+    if (colon == std::string::npos) {
+        throw std::runtime_error("Invalid udp uri: " + uri);
+    }
+    UdpEndpoint ep;
+    ep.host = rest.substr(0, colon);
+    ep.port = std::stoi(rest.substr(colon + 1));
+    return ep;
+}
+
+using json = nlohmann::json;
+
+bool isFiniteNumber(const json& value, double* out) {
+    if (!value.is_number()) return false;
+    const double parsed = value.get<double>();
+    if (!std::isfinite(parsed)) return false;
+    if (out) *out = parsed;
+    return true;
+}
+
+bool readOptionalNumber(const json& object, const char* key, double* out) {
+    const auto it = object.find(key);
+    if (it == object.end()) return true;
+    return isFiniteNumber(*it, out);
+}
+
+bool readOptionalBool(const json& object, const char* key, bool* out) {
+    const auto it = object.find(key);
+    if (it == object.end()) return true;
+    if (!it->is_boolean()) return false;
+    if (out) *out = it->get<bool>();
+    return true;
+}
+
+bool readOptionalString(const json& object, const char* key, std::string* out) {
+    const auto it = object.find(key);
+    if (it == object.end()) return true;
+    if (!it->is_string()) return false;
+    if (out) *out = it->get<std::string>();
+    return true;
+}
+
+bool readOptionalUint64(const json& object, const char* key, uint64_t* out) {
+    const auto it = object.find(key);
+    if (it == object.end()) return true;
+    if (!it->is_number_unsigned()) return false;
+    if (out) *out = it->get<uint64_t>();
+    return true;
+}
+
+bool parseIpv4Address(const std::string& value, uint32_t* out) {
+    in_addr addr{};
+    if (::inet_pton(AF_INET, value.c_str(), &addr) != 1) return false;
+    if (out) *out = ntohl(addr.s_addr);
+    return true;
+}
+
+bool allowlistEntryMatches(const std::string& entry, uint32_t source_ip) {
+    const auto slash = entry.find('/');
+    const std::string host = slash == std::string::npos ? entry : entry.substr(0, slash);
+
+    uint32_t network = 0;
+    if (!parseIpv4Address(host, &network)) return false;
+
+    int prefix = 32;
+    if (slash != std::string::npos) {
+        const std::string prefix_text = entry.substr(slash + 1);
+        if (prefix_text.empty()) return false;
+        for (char c : prefix_text) {
+            if (c < '0' || c > '9') return false;
+        }
+        prefix = std::stoi(prefix_text);
+        if (prefix < 0 || prefix > 32) return false;
+    }
+
+    const uint32_t mask = prefix == 0 ? 0U : (0xffffffffU << (32 - prefix));
+    return (source_ip & mask) == (network & mask);
+}
+
+template <typename Target, typename Assign>
+bool readOptionalArray6(const json& object, const char* key, Target* out, bool* present, Assign assign) {
+    const auto it = object.find(key);
+    if (present) *present = false;
+    if (it == object.end()) return true;
+    if (!it->is_array() || it->size() != 6) return false;
+
+    std::array<double, 6> values{};
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (!isFiniteNumber((*it)[i], &values[i])) return false;
+    }
+    assign(values, out);
+    if (present) *present = true;
+    return true;
+}
+
+bool readOptionalJointArray(const json& object, const char* key, JointArray* out, bool* present) {
+    return readOptionalArray6(object, key, out, present, [](const std::array<double, 6>& values, JointArray* target) {
+        for (int i = 0; i < kDof; ++i) {
+            (*target)[i] = values[static_cast<size_t>(i)];
+        }
+    });
+}
+
+bool readOptionalPose6D(const json& object, const char* key, Pose6D* out, bool* present) {
+    return readOptionalArray6(object, key, out, present, [](const std::array<double, 6>& values, Pose6D* target) {
+        *target = Pose6D{values[0], values[1], values[2], values[3], values[4], values[5]};
+    });
+}
+
+bool readOptionalWrench6D(const json& object, const char* key, Wrench6D* out, bool* present) {
+    return readOptionalArray6(object, key, out, present, [](const std::array<double, 6>& values, Wrench6D* target) {
+        *target = Wrench6D{values[0], values[1], values[2], values[3], values[4], values[5]};
+    });
+}
+
+bool parseForceControlObject(const json& object, ForceControlCommand* cmd) {
+    const auto force_it = object.find("force_control");
+    if (force_it == object.end()) return true;
+    if (!force_it->is_object()) return false;
+
+    const json& force = *force_it;
+    std::string mode;
+    if (!readOptionalString(force, "mode", &mode)) return false;
+    if (!mode.empty()) cmd->mode = forceControlModeFromString(mode);
+
+    bool present = false;
+    if (!readOptionalWrench6D(force, "target_wrench", &cmd->target_wrench, &present)) return false;
+    if (!readOptionalNumber(force, "max_pos_offset_m", &cmd->max_pos_offset_m)) return false;
+    if (!readOptionalNumber(force, "max_rot_offset_rad", &cmd->max_rot_offset_rad)) return false;
+    if (!readOptionalNumber(force, "max_pos_step_m", &cmd->max_pos_step_m)) return false;
+    if (!readOptionalNumber(force, "max_rot_step_rad", &cmd->max_rot_step_rad)) return false;
+
+    const auto axis_it = force.find("enabled_axis");
+    if (axis_it != force.end()) {
+        if (!axis_it->is_object()) return false;
+        const json& axis = *axis_it;
+        if (!readOptionalBool(axis, "x", &cmd->enabled_axis.x)) return false;
+        if (!readOptionalBool(axis, "y", &cmd->enabled_axis.y)) return false;
+        if (!readOptionalBool(axis, "z", &cmd->enabled_axis.z)) return false;
+        if (!readOptionalBool(axis, "roll", &cmd->enabled_axis.roll)) return false;
+        if (!readOptionalBool(axis, "pitch", &cmd->enabled_axis.pitch)) return false;
+        if (!readOptionalBool(axis, "yaw", &cmd->enabled_axis.yaw)) return false;
+    }
+    return true;
+}
+
+bool requiresPayload(ControlMode mode) {
+    return mode == ControlMode::JointTarget ||
+           mode == ControlMode::JointVelocity ||
+           mode == ControlMode::TcpPoseTarget ||
+           mode == ControlMode::TcpDeltaStand ||
+           mode == ControlMode::TcpDeltaLocal;
+}
+
+bool hasRequiredPayload(const ArmCommand& command) {
+    switch (command.mode) {
+        case ControlMode::JointTarget:
+            return command.has_joint_target;
+        case ControlMode::JointVelocity:
+            return command.has_joint_velocity;
+        case ControlMode::TcpPoseTarget:
+            return command.has_tcp_target;
+        case ControlMode::TcpDeltaStand:
+            return command.has_tcp_delta_stand;
+        case ControlMode::TcpDeltaLocal:
+            return command.has_tcp_delta_local;
+        default:
+            return true;
+    }
+}
+
+bool parseArmObject(
+    const json& object,
+    ArmId arm_id,
+    uint64_t seq,
+    uint64_t receive_time_ns,
+    ControlMode default_mode,
+    double default_timeout_sec,
+    ArmCommand* out
+) {
+    out->arm_id = arm_id;
+    out->seq = seq;
+    out->host_time_ns = receive_time_ns;
+    out->mode = default_mode;
+    out->timeout_sec = default_timeout_sec;
+
+    if (!object.is_null()) {
+        if (!object.is_object()) return false;
+
+        std::string mode;
+        if (!readOptionalString(object, "mode", &mode)) return false;
+        if (!mode.empty()) out->mode = controlModeFromString(mode);
+
+        double timeout = out->timeout_sec;
+        if (!readOptionalNumber(object, "timeout_sec", &timeout)) return false;
+        out->timeout_sec = timeout;
+
+        double gripper = out->gripper_target;
+        if (object.contains("gripper_target")) {
+            if (!readOptionalNumber(object, "gripper_target", &gripper)) return false;
+            out->gripper_target = gripper;
+        } else if (object.contains("gripper")) {
+            if (!readOptionalNumber(object, "gripper", &gripper)) return false;
+            out->gripper_target = gripper;
+        }
+
+        bool present = false;
+        if (!readOptionalJointArray(object, "q_target_deg", &out->q_target_deg, &present)) return false;
+        out->has_joint_target = present;
+        if (!readOptionalJointArray(object, "dq_target_deg_s", &out->dq_target_deg_s, &present)) return false;
+        out->has_joint_velocity = present;
+        if (!readOptionalPose6D(object, "tcp_target_stand", &out->tcp_target_stand, &present)) return false;
+        out->has_tcp_target = present;
+        if (!readOptionalPose6D(object, "tcp_delta_stand", &out->tcp_delta_stand, &present)) return false;
+        out->has_tcp_delta_stand = present;
+        if (!readOptionalPose6D(object, "tcp_delta_local", &out->tcp_delta_local, &present)) return false;
+        out->has_tcp_delta_local = present;
+        if (!parseForceControlObject(object, &out->force_control)) return false;
+    }
+    if (out->timeout_sec <= 0.0 || !std::isfinite(out->timeout_sec)) return false;
+    return true;
+}
+
+}  // namespace
+
+CommandServer::CommandServer(
+    const NetworkConfig& config,
+    CommandBuffer* command_buffer
+) : config_(config), command_buffer_(command_buffer) {}
+
+CommandServer::~CommandServer() {
+    stop();
+}
+
+bool CommandServer::start() {
+    if (thread_.joinable()) return running_.load();
+    running_ = true;
+    std::promise<bool> startup_result;
+    std::future<bool> startup_ready = startup_result.get_future();
+    thread_ = std::thread(&CommandServer::threadMain, this, std::move(startup_result));
+    const bool started = startup_ready.get();
+    if (!started) {
+        running_ = false;
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        return false;
+    }
+    return running_.load();
+}
+
+void CommandServer::stop() {
+    running_ = false;
+    if (thread_.joinable()) {
+        thread_.join();
+    }
+}
+
+void CommandServer::threadMain(std::promise<bool> startup_result) {
+    int socket_fd = -1;
+    bool startup_reported = false;
+    auto report_startup = [&](bool ok) {
+        if (!startup_reported) {
+            startup_result.set_value(ok);
+            startup_reported = true;
+        }
+    };
+    auto close_socket = [&]() {
+        if (socket_fd >= 0) {
+            ::close(socket_fd);
+            socket_fd = -1;
+        }
+    };
+
+    try {
+        const UdpEndpoint ep = parseUdpUri(config_.command_bind);
+        socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (socket_fd < 0) {
+            throw std::runtime_error(std::string("socket() failed: ") + std::strerror(errno));
+        }
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(static_cast<uint16_t>(ep.port));
+        if (::inet_pton(AF_INET, ep.host.c_str(), &addr.sin_addr) != 1) {
+            throw std::runtime_error("Invalid bind host: " + ep.host);
+        }
+        if (::bind(socket_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            throw std::runtime_error(std::string("bind() failed: ") + std::strerror(errno));
+        }
+
+        std::cerr << "[INFO] CommandServer listening on " << config_.command_bind << "\n";
+        report_startup(true);
+        std::array<char, 8192> buffer{};
+        while (running_) {
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(socket_fd, &fds);
+            timeval tv{};
+            tv.tv_sec = 0;
+            tv.tv_usec = 100000;
+            const int ready = ::select(socket_fd + 1, &fds, nullptr, nullptr, &tv);
+            if (ready <= 0) continue;
+
+            sockaddr_in src{};
+            socklen_t src_len = sizeof(src);
+            const ssize_t n = ::recvfrom(socket_fd, buffer.data(), buffer.size() - 1, 0,
+                                         reinterpret_cast<sockaddr*>(&src), &src_len);
+            if (n <= 0) continue;
+            if (static_cast<size_t>(n) >= buffer.size() - 1) {
+                std::cerr << "[WARN] command packet too large; dropped\n";
+                continue;
+            }
+            char source_ip[INET_ADDRSTRLEN] = {};
+            if (!::inet_ntop(AF_INET, &src.sin_addr, source_ip, sizeof(source_ip))) {
+                std::cerr << "[WARN] command packet source could not be decoded; dropped\n";
+                continue;
+            }
+            if (!acceptsCommandSource(source_ip)) {
+                std::cerr << "[WARN] command packet from untrusted source " << source_ip << " dropped\n";
+                continue;
+            }
+            buffer[static_cast<size_t>(n)] = '\0';
+            const uint64_t receive_time_ns = nowSteadyNs();
+            DualArmCommand cmd;
+            bool parsed = false;
+            try {
+                parsed = parseMessage(std::string(buffer.data(), static_cast<size_t>(n)), receive_time_ns, &cmd);
+            } catch (const std::exception& e) {
+                std::cerr << "[WARN] invalid command packet: " << e.what() << "\n";
+            }
+            if (parsed) {
+                if (command_buffer_) command_buffer_->setCommand(cmd);
+            } else {
+                std::cerr << "[WARN] command packet dropped\n";
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] CommandServer failed: " << e.what() << "\n";
+        running_ = false;
+        report_startup(false);
+    }
+    close_socket();
+}
+
+bool CommandServer::parseMessage(
+    const std::string& message,
+    uint64_t receive_time_ns,
+    DualArmCommand* out_command
+) {
+    if (!out_command) return false;
+
+    json root;
+    try {
+        root = json::parse(message);
+    } catch (const json::parse_error&) {
+        return false;
+    }
+    if (!root.is_object()) return false;
+
+    DualArmCommand cmd;
+    cmd.host_time_ns = receive_time_ns;  // authoritative timestamp for timeout checks
+
+    if (!root.contains("seq")) return false;
+    if (!readOptionalUint64(root, "seq", &cmd.seq)) return false;
+    if (!readOptionalBool(root, "coupled_timeout", &cmd.coupled_timeout)) return false;
+
+    std::string mode_string = "Hold";
+    if (!readOptionalString(root, "mode", &mode_string)) return false;
+    ControlMode default_mode = ControlMode::Hold;
+    try {
+        default_mode = controlModeFromString(mode_string);
+    } catch (const std::exception&) {
+        return false;
+    }
+
+    double timeout_sec = config_.command_timeout_sec;
+    if (timeout_sec <= 0.0 || !std::isfinite(timeout_sec)) return false;
+    if (!readOptionalNumber(root, "timeout_sec", &timeout_sec)) return false;
+    if (timeout_sec <= 0.0 || !std::isfinite(timeout_sec)) return false;
+
+    const json left_object = root.contains("left") ? root.at("left") : json();
+    const json right_object = root.contains("right") ? root.at("right") : json();
+
+    try {
+        if (!parseArmObject(left_object, ArmId::Left, cmd.seq, receive_time_ns, default_mode, timeout_sec, &cmd.left)) return false;
+        if (!parseArmObject(right_object, ArmId::Right, cmd.seq, receive_time_ns, default_mode, timeout_sec, &cmd.right)) return false;
+    } catch (const std::exception&) {
+        return false;
+    }
+
+    if (!root.contains("left") && !root.contains("right")) {
+        bool present = false;
+        if (!readOptionalJointArray(root, "q_target_deg", &cmd.left.q_target_deg, &present)) return false;
+        cmd.left.has_joint_target = cmd.left.has_joint_target || present;
+        cmd.right.q_target_deg = cmd.left.q_target_deg;
+        cmd.right.has_joint_target = cmd.right.has_joint_target || present;
+
+        if (!readOptionalJointArray(root, "dq_target_deg_s", &cmd.left.dq_target_deg_s, &present)) return false;
+        cmd.left.has_joint_velocity = cmd.left.has_joint_velocity || present;
+        cmd.right.dq_target_deg_s = cmd.left.dq_target_deg_s;
+        cmd.right.has_joint_velocity = cmd.right.has_joint_velocity || present;
+
+        if (!readOptionalPose6D(root, "tcp_target_stand", &cmd.left.tcp_target_stand, &present)) return false;
+        cmd.left.has_tcp_target = cmd.left.has_tcp_target || present;
+        cmd.right.tcp_target_stand = cmd.left.tcp_target_stand;
+        cmd.right.has_tcp_target = cmd.right.has_tcp_target || present;
+
+        if (!readOptionalPose6D(root, "tcp_delta_stand", &cmd.left.tcp_delta_stand, &present)) return false;
+        cmd.left.has_tcp_delta_stand = cmd.left.has_tcp_delta_stand || present;
+        cmd.right.tcp_delta_stand = cmd.left.tcp_delta_stand;
+        cmd.right.has_tcp_delta_stand = cmd.right.has_tcp_delta_stand || present;
+
+        if (!readOptionalPose6D(root, "tcp_delta_local", &cmd.left.tcp_delta_local, &present)) return false;
+        cmd.left.has_tcp_delta_local = cmd.left.has_tcp_delta_local || present;
+        cmd.right.tcp_delta_local = cmd.left.tcp_delta_local;
+        cmd.right.has_tcp_delta_local = cmd.right.has_tcp_delta_local || present;
+    }
+
+    if (requiresPayload(cmd.left.mode) && !hasRequiredPayload(cmd.left)) return false;
+    if (requiresPayload(cmd.right.mode) && !hasRequiredPayload(cmd.right)) return false;
+    if (last_accepted_seq_ && cmd.seq <= *last_accepted_seq_) return false;
+
+    *out_command = cmd;
+    last_accepted_seq_ = cmd.seq;
+    return true;
+}
+
+bool CommandServer::acceptsCommandSource(const std::string& source_ip) const {
+    uint32_t parsed_source = 0;
+    if (!parseIpv4Address(source_ip, &parsed_source)) return false;
+    for (const std::string& entry : config_.command_source_allowlist) {
+        if (allowlistEntryMatches(entry, parsed_source)) return true;
+    }
+    return false;
+}
+
+}  // namespace rb_servo

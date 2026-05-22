@@ -1,0 +1,16 @@
+build/
+logs/
+*.log
+*.tmp
+
+.omx/logs/
+.omx/state/
+.omx/team/
+.omx/reports/
+.omx/metrics.json
+.omx/tmux-hook.json
+
+.claude/settings.local.json
+
+# Local/vendor integration checkouts kept out of this scaffold repo
+submodules/

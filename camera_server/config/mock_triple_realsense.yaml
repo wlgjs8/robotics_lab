@@ -1,0 +1,56 @@
+server:
+  name: camera_server
+  mode: diagnostic
+  clock: monotonic_raw
+  simulate_cameras: true
+shared_memory:
+  name: "/camera_server_frames_test"
+  size_mb: 128
+  ring_slots: 4
+  unlink_on_start: true
+metadata:
+  transport: zmq_pub
+  pub_bind: "tcp://127.0.0.1:5600"
+  health_topic: "camera.health"
+  bundle_topic: "camera.bundle"
+sync:
+  mode: software
+  master_camera: head
+  bundle_policy: nearest_timestamp
+  max_bundle_time_diff_ms: 20.0
+  publish_incomplete_bundles: false
+cameras:
+  head:
+    serial: "MOCK_HEAD"
+    required: true
+    streams:
+      color: {enabled: true, width: 64, height: 48, fps: 30, format: rgb8}
+      depth: {enabled: false, width: 64, height: 48, fps: 30, format: z16}
+  left_wrist:
+    serial: "MOCK_LEFT"
+    required: true
+    streams:
+      color: {enabled: true, width: 64, height: 48, fps: 30, format: rgb8}
+      depth: {enabled: false, width: 64, height: 48, fps: 30, format: z16}
+  right_wrist:
+    serial: "MOCK_RIGHT"
+    required: true
+    streams:
+      color: {enabled: true, width: 64, height: 48, fps: 30, format: rgb8}
+      depth: {enabled: false, width: 64, height: 48, fps: 30, format: z16}
+recording:
+  enabled: false
+  output_dir: "./episodes"
+  queue_capacity_frames: 32
+  writer_threads: 1
+  drop_policy: drop_oldest
+  raw_format: true
+health:
+  publish_rate_hz: 2
+  warn_if_frame_age_ms_gt: 100
+  warn_if_drop_count_increases: true
+  warn_if_bundle_skew_ms_gt: 20
+reconnect:
+  enabled: false
+  max_attempts: 0
+  retry_interval_ms: 1000

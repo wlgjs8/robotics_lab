@@ -1,0 +1,7 @@
+build/
+build*/
+.git/
+.omx/
+episodes/
+tools/__pycache__/
+*.pyc

@@ -1,0 +1,95 @@
+<mujoco model="dual_rb3_730e_ver3">
+
+  <compiler angle="radian" meshdir="../meshes" autolimits="true" />
+
+  <option integrator="implicitfast" />
+
+  <default>
+    <material specular="0.5" shininess="0.25" />
+    <default class="visual">
+      <geom type="mesh" contype="0" conaffinity="0" group="2" />
+    </default>
+    <default class="collision">
+      <geom type="capsule" group="3" />
+    </default>
+  </default>
+
+  <default>
+    <default class="stand_vis">
+      <geom contype="0" conaffinity="0" group="1" density="0" rgba="0.5 0.5 0.66 1" />
+    </default>
+  </default>
+
+  <asset>
+    <mesh name="dual_rb3_730e_stand_ver3" file="stands/dual_rb3_730e/dual_rb3_730e_stand_ver3.stl"
+      scale="0.001 0.001 0.001" />
+    <mesh name="realsense_d435f" file="../camera/realsense_d435f.obj" />
+  </asset>
+
+  <asset>
+    <model name="rb3_730e" file="rb3_730e/rb3_730e.xml" />
+  </asset>
+
+  <!-- TODO: Use dual_rb3_730e_stand.xml -->
+  <worldbody>
+    <body name="base" pos="0 0 0">
+      <body
+        name="stand" pos="0 0 0" euler="0 0 1.57078">
+        <geom name="stand_base_vis" type="mesh" mesh="dual_rb3_730e_stand_ver3" pos="0 0 0.01"
+          euler="0 0 -1.57078" rgba="0.5 0.5 0.5 1" class="stand_vis" />
+        <!-- TODO: Change to Accurate Collision -->
+        <body name="stand_base_col" euler="0 0 -1.57078">
+          <geom name="stand_body_base_geom" type="box" size="0.12 0.15 0.005"
+            rgba="0.0 0.5 0.66 0.4" class="collision" pos="0 0 0.005" />
+          <geom name="stand_body_pillar0_geom" type="box" size="0.05 0.08 0.215"
+            rgba="0.0 0.5 0.66 0.4" class="collision" pos="0 0 0.215" />
+          <body name="stand_body_upper" pos="0 0 0.410" euler="0 0.785398 0">
+            <geom name="stand_body_pillar1_geom" type="box" size="0.05 0.08 0.1125"
+              rgba="0.0 0.5 0.66 0.4" class="collision" pos="0 0 0.09" />
+            <body name="stand_body_shoulder" pos="0 0 0.2025">
+              <geom name="stand_body_shoulder_center_geom" type="box" size="0.075 0.105 0.075"
+                rgba="0.0 0.5 0.66 0.4" class="collision" pos="0 0 0.071" />
+              <geom name="stand_body_shoulder_upper_geom" type="box" size="0.075 0.25 0.01"
+                rgba="0.0 0.5 0.66 0.4" class="collision" pos="0 0 0.137" />
+              <geom name="stand_body_shoulder_left_arm_base_geom" type="box" size="0.08 0.111 0.005"
+                rgba="0.0 0.5 0.66 0.4" class="collision" pos="0 -0.1777 0.0662"
+                euler="-0.785398 0 0" />
+              <geom name="stand_body_shoulder_right_arm_base_geom" type="box" size="0.08 0.111 0.005"
+                rgba="0.0 0.5 0.66 0.4" class="collision" pos="0 0.1777 0.0662" euler="0.785398 0 0" />
+            </body>
+          </body>
+        </body>
+
+        <!-- left arm -->
+        <body name="stand_left_arm_base" pos="0.1601 -0.1725 0.5825"
+          euler="0.785 2.35619 0">
+          <attach model="rb3_730e" body="world" prefix="dual_rb3_730e_left_" />
+        </body>
+
+        <!-- right arm -->
+        <body name="stand_right_arm_base" pos="-0.1601 -0.1725 0.5825"
+          euler="0.785 -2.35619 0">
+          <attach model="rb3_730e" body="world" prefix="dual_rb3_730e_right_" />
+        </body>
+      </body>
+
+      <body name="head_camera_mount" pos="0 0 0" euler="0 0 0">
+        <geom name="head_camera_vis" type="mesh" mesh="realsense_d435f" class="stand_vis"
+          pos="0 0 0" euler="0 0 3.14159" rgba="0.1 0.1 0.1 1" />
+      </body>
+
+      <body name="left_wrist_camera_mount" pos="0 0 0" euler="0 0 0">
+        <geom name="left_wrist_camera_vis" type="mesh" mesh="realsense_d435f" class="stand_vis"
+          pos="0 0 0" euler="0 0 3.14159" rgba="0.1 0.1 0.1 1" />
+      </body>
+
+      <body name="right_wrist_camera_mount" pos="0 0 0" euler="0 0 0">
+        <geom name="right_wrist_camera_vis" type="mesh" mesh="realsense_d435f" class="stand_vis"
+          pos="0 0 0" euler="0 0 3.14159" rgba="0.1 0.1 0.1 1" />
+      </body>
+
+      <site name="base_site" pos="0 0 0" size="0.001 0.001 0.001" rgba="1 0 0 1" type="sphere"
+        group="1" />
+    </body>
+  </worldbody>
+</mujoco>
