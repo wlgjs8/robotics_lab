@@ -34,6 +34,8 @@ Start here, then follow component docs only for implementation details:
   hardware-free build and test gate.
 - [docs/frame_contract.md](docs/frame_contract.md): shared robot/camera frame
   names and transform direction.
+- [docs/runbooks/tcp_pose_simulator_acceptance.md](docs/runbooks/tcp_pose_simulator_acceptance.md):
+  simulator-only TCP Pose/Delta acceptance.
 - [calibration/active_calibration.yaml](calibration/active_calibration.yaml):
   configured-estimate robot/camera/stand setup registry.
 - [TODO.md](TODO.md): P0-P3 work packages and acceptance criteria.
