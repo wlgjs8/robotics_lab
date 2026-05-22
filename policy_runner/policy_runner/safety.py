@@ -19,6 +19,7 @@ class SafetyDecision:
 class ActionRequirements:
     requires_camera: bool = False
     requires_kinematics: bool = False
+    requires_valid_joint_state: bool = True
     simulation_only: bool = False
 
 
@@ -49,18 +50,35 @@ class SafetyGate:
             return SafetyDecision(False, "fault_latched")
         if str(payload.get("motion_state", "")) in {"FaultLatched", "EmergencyLatched"}:
             return SafetyDecision(False, "motion_state_latched")
-        if self.config.require_valid_joint_state and not _has_valid_joint_state(payload):
+        if (
+            self.config.require_valid_joint_state
+            and requirements.requires_valid_joint_state
+            and not _has_valid_joint_state(payload)
+        ):
             return SafetyDecision(False, "invalid_joint_state")
+        if requirements.requires_camera and not self.config.camera_available:
+            return SafetyDecision(False, "camera_unavailable")
         if requirements.requires_camera and self.config.camera_stale:
             return SafetyDecision(False, "camera_stale")
         if requirements.requires_kinematics and not self.config.kinematics_available:
             return SafetyDecision(False, "kinematics_unavailable")
+        observed_mode = _observed_mode(payload)
+        if observed_mode == "real" and intent.is_motion and not self.config.allow_real_motion:
+            return SafetyDecision(False, "real_motion_not_allowed")
         if requirements.simulation_only and self.mode == "real" and intent.is_motion:
             if not self.config.allow_real_motion:
                 return SafetyDecision(False, "real_motion_not_allowed")
         if self.mode == "real" and intent.is_motion and not self.config.allow_real_motion:
             return SafetyDecision(False, "real_motion_not_allowed")
         return SafetyDecision(True)
+
+
+def _observed_mode(payload: dict[str, Any]) -> str | None:
+    for key in ("observed_mode", "run_mode", "mode"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.lower() in {"mock", "simulation", "real"}:
+            return value.lower()
+    return None
 
 
 def _has_valid_joint_state(payload: dict[str, Any]) -> bool:

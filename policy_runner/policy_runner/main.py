@@ -7,13 +7,11 @@ from .action_sources import (
     HoldActionSource,
     JointSineActionSource,
     JointVelocityActionSource,
-    SpaceMouseJointVelocitySource,
 )
 from .config import PolicyRunnerConfig, load_config
 from .robot_state_client import RobotStateClient
 from .safety import SafetyGate
 from .servo_command_client import CommandIntent, ServoCommandClient
-from .spacemouse import HidSpaceMouseReader
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -74,18 +72,5 @@ def make_action_source(config: PolicyRunnerConfig):
             selected_arm=config.joint_velocity.selected_arm,
             timeout_sec=config.servo_command.timeout_sec,
             simulation_only=config.joint_velocity.simulation_only,
-        )
-    if config.action_source == "spacemouse_joint_velocity":
-        reader = HidSpaceMouseReader()
-        return SpaceMouseJointVelocitySource(
-            reader=reader,
-            max_joint_velocity_deg_s=config.spacemouse.max_joint_velocity_deg_s,
-            selected_arm=config.spacemouse.selected_arm,
-            deadband=config.spacemouse.deadband,
-            smoothing_alpha=config.spacemouse.smoothing_alpha,
-            require_deadman=config.spacemouse.require_deadman,
-            deadman_button=config.spacemouse.deadman_button,
-            timeout_sec=config.servo_command.timeout_sec,
-            simulation_only=config.spacemouse.simulation_only,
         )
     raise ValueError(f"unknown action_source: {config.action_source}")

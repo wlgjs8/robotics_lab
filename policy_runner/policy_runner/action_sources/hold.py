@@ -6,7 +6,7 @@ from policy_runner.safety import ActionRequirements
 
 
 class HoldActionSource:
-    requirements = ActionRequirements()
+    requirements = ActionRequirements(requires_valid_joint_state=False)
 
     def __init__(self, send_hold: bool = False, timeout_sec: float = 0.2):
         self.send_hold = send_hold

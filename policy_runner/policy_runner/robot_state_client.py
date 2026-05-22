@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -40,9 +40,15 @@ def parse_udp_endpoint(endpoint: str) -> UdpEndpoint:
 class RobotStateClient:
     """UDP JSON state subscriber with latest-snapshot cache."""
 
-    def __init__(self, bind: str, stale_timeout_sec: float = 0.5):
+    def __init__(
+        self,
+        bind: str,
+        stale_timeout_sec: float = 0.5,
+        socket_factory: Callable[..., socket.socket] = socket.socket,
+    ):
         self.bind = bind
         self.stale_timeout_sec = stale_timeout_sec
+        self._socket_factory = socket_factory
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._running = False
@@ -64,7 +70,7 @@ class RobotStateClient:
         if self._socket is not None:
             return
         endpoint = parse_udp_endpoint(self.bind)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock = self._socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind((endpoint.host, endpoint.port))
         self._socket = sock
 

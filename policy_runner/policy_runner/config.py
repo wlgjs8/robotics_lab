@@ -22,6 +22,7 @@ class SafetyConfig:
     allow_real_motion: bool = False
     require_valid_joint_state: bool = True
     kinematics_available: bool = False
+    camera_available: bool = False
     camera_stale: bool = False
 
 
@@ -41,17 +42,6 @@ class JointVelocityConfig:
 
 
 @dataclass(frozen=True)
-class SpaceMouseConfig:
-    selected_arm: str = "both"
-    max_joint_velocity_deg_s: tuple[float, ...] = (5.0, 5.0, 5.0, 8.0, 8.0, 10.0)
-    deadband: float = 0.08
-    smoothing_alpha: float = 0.2
-    require_deadman: bool = True
-    deadman_button: int = 0
-    simulation_only: bool = True
-
-
-@dataclass(frozen=True)
 class PolicyRunnerConfig:
     schema: str = "robotics_lab.policy_runner.v1"
     mode: str = "simulation"
@@ -61,7 +51,6 @@ class PolicyRunnerConfig:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     joint_sine: JointSineConfig = field(default_factory=JointSineConfig)
     joint_velocity: JointVelocityConfig = field(default_factory=JointVelocityConfig)
-    spacemouse: SpaceMouseConfig = field(default_factory=SpaceMouseConfig)
     command_rate_hz: float = 30.0
 
 
@@ -82,7 +71,6 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         safety=SafetyConfig(**_section(raw, "safety")),
         joint_sine=_joint_sine_config(_section(raw, "joint_sine")),
         joint_velocity=_joint_velocity_config(_section(raw, "joint_velocity")),
-        spacemouse=_spacemouse_config(_section(raw, "spacemouse")),
         command_rate_hz=float(raw.get("command_rate_hz", 30.0)),
     )
 
@@ -106,15 +94,6 @@ def _joint_velocity_config(raw: dict[str, Any]) -> JointVelocityConfig:
     if "velocity_deg_s" in raw:
         raw["velocity_deg_s"] = _tuple6(raw["velocity_deg_s"], "joint_velocity.velocity_deg_s")
     return JointVelocityConfig(**raw)
-
-
-def _spacemouse_config(raw: dict[str, Any]) -> SpaceMouseConfig:
-    if "max_joint_velocity_deg_s" in raw:
-        raw["max_joint_velocity_deg_s"] = _tuple6(
-            raw["max_joint_velocity_deg_s"],
-            "spacemouse.max_joint_velocity_deg_s",
-        )
-    return SpaceMouseConfig(**raw)
 
 
 def _tuple6(value: Any, label: str) -> tuple[float, ...]:

@@ -9,9 +9,6 @@ description = "Python action-source runner for robotics_lab servo commands"
 requires-python = ">=3.10"
 dependencies = []
 
-[project.optional-dependencies]
-spacemouse = ["hidapi", "pyspacemouse"]
-
 [project.scripts]
 policy-runner = "policy_runner.main:main"
 

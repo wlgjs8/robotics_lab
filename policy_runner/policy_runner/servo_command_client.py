@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import socket
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .robot_state_client import parse_udp_endpoint
 
@@ -79,11 +79,16 @@ class CommandIntent:
 class ServoCommandClient:
     """UDP command sender compatible with rb_servo_server CommandServer."""
 
-    def __init__(self, endpoint: str, timeout_sec: float = 0.2):
+    def __init__(
+        self,
+        endpoint: str,
+        timeout_sec: float = 0.2,
+        socket_factory: Callable[..., socket.socket] = socket.socket,
+    ):
         self.endpoint = endpoint
         self.timeout_sec = timeout_sec
         self._seq = 0
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket = socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
         parsed = parse_udp_endpoint(endpoint)
         self._address = (parsed.host, parsed.port)
 
