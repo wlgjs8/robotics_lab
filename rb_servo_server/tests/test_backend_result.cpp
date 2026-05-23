@@ -1,9 +1,13 @@
 #include <cmath>
 #include <iostream>
+#include <limits>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rb_servo/robot/backend_result.hpp"
+#include "rb_servo/robot/rbpodo_backend.hpp"
 
 namespace {
 
@@ -151,6 +155,128 @@ bool testSendHelpersKeepStateAfterExplicit() {
     return true;
 }
 
+rb_servo::BackendConfig rbpodoConfig(std::string operation_mode = "real") {
+    rb_servo::BackendConfig config;
+    config.backend_type = rb_servo::BackendType::Rbpodo;
+    config.run_mode = rb_servo::RunMode::Real;
+    config.operation_mode = std::move(operation_mode);
+    return config;
+}
+
+rb_servo::RbpodoSystemStateSnapshot rbpodoSnapshot() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot;
+    snapshot.q_actual_deg = {1.0, -2.0, 3.0, -4.0, 5.0, -6.0};
+    snapshot.q_target_deg = snapshot.q_actual_deg;
+    snapshot.robot_time_sec = 12.5;
+    snapshot.real_vs_simulation_mode = 0;
+    snapshot.init_state_info = 6;
+    return snapshot;
+}
+
+bool testRbpodoReadStateAcceptsServoDisabledJointFeedback() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+    snapshot.init_state_info = 4;
+
+    const rb_servo::RobotState state =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
+    RB_CHECK(state.has_valid_joint_state);
+    RB_CHECK(state.connection_state == rb_servo::RobotConnectionState::Connected);
+    RB_CHECK(!state.servo_enabled);
+    RB_CHECK(!state.has_error);
+    RB_CHECK(state.lifecycle_state == "connected_not_motion_ready");
+    RB_CHECK(!rb_servo::rbpodoStateAcquisitionError(state).has_value());
+    const rb_servo::BackendResult<rb_servo::RobotState> read_result = rb_servo::okReadState(state);
+    RB_CHECK(read_result.ok);
+    RB_CHECK(!read_result.value.servo_enabled);
+
+    const std::optional<rb_servo::BackendError> readiness =
+        rb_servo::rbpodoMotionReadinessError(rbpodoConfig(), snapshot, state);
+    RB_CHECK(readiness.has_value());
+    RB_CHECK(readiness->kind == rb_servo::BackendErrorKind::ServoDisabled);
+    RB_CHECK(readiness->name == "rbpodo_servo_disabled");
+    return true;
+}
+
+bool testRbpodoServoDisabledSendRejectsWithoutTransportWriteFailure() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+    snapshot.init_state_info = 4;
+    const rb_servo::RobotState state =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Right, snapshot);
+    const std::optional<rb_servo::BackendError> readiness =
+        rb_servo::rbpodoMotionReadinessError(rbpodoConfig(), snapshot, state);
+    RB_CHECK(readiness.has_value());
+
+    rb_servo::SendServoJRequest request;
+    request.command_seq = 77;
+    request.q_target_deg = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
+    const rb_servo::SendServoJResult result =
+        rb_servo::rejectedSend(request, *readiness, {}, state, "cache");
+    RB_CHECK(!result.accepted);
+    RB_CHECK(result.error.kind == rb_servo::BackendErrorKind::ServoDisabled);
+    RB_CHECK(result.error.kind != rb_servo::BackendErrorKind::TransportWriteFailed);
+    RB_CHECK(result.state_after.has_value());
+    RB_CHECK(!result.state_after->servo_enabled);
+    RB_CHECK(result.state_after_source == "cache");
+    return true;
+}
+
+bool testRbpodoFaultedJointFeedbackIsReadableButNotMotionReady() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+    snapshot.op_stat_collision_occur = 1234;
+
+    const rb_servo::RobotState state =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
+    RB_CHECK(state.has_valid_joint_state);
+    RB_CHECK(state.has_error);
+    RB_CHECK(state.error_code == 1234);
+    RB_CHECK(state.lifecycle_state == "faulted");
+    RB_CHECK(!rb_servo::rbpodoStateAcquisitionError(state).has_value());
+
+    const std::optional<rb_servo::BackendError> readiness =
+        rb_servo::rbpodoMotionReadinessError(rbpodoConfig(), snapshot, state);
+    RB_CHECK(readiness.has_value());
+    RB_CHECK(readiness->kind == rb_servo::BackendErrorKind::RobotFault);
+    return true;
+}
+
+bool testRbpodoWrongModeIsMotionReadinessNotReadFailure() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+    snapshot.real_vs_simulation_mode = 1;
+
+    const rb_servo::RobotState state =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
+    RB_CHECK(state.has_valid_joint_state);
+    RB_CHECK(state.servo_enabled);
+    RB_CHECK(!rb_servo::rbpodoStateAcquisitionError(state).has_value());
+
+    const std::optional<rb_servo::BackendError> readiness =
+        rb_servo::rbpodoMotionReadinessError(rbpodoConfig("real"), snapshot, state);
+    RB_CHECK(readiness.has_value());
+    RB_CHECK(readiness->kind == rb_servo::BackendErrorKind::WrongMode);
+    RB_CHECK(readiness->name == "rbpodo_wrong_operation_mode");
+    return true;
+}
+
+bool testRbpodoInvalidJointStateFailsAcquisition() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+    snapshot.q_actual_deg[2] = std::numeric_limits<double>::quiet_NaN();
+
+    const rb_servo::RobotState state =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
+    RB_CHECK(!state.has_valid_joint_state);
+
+    const std::optional<rb_servo::BackendError> acquisition =
+        rb_servo::rbpodoStateAcquisitionError(state);
+    RB_CHECK(acquisition.has_value());
+    RB_CHECK(acquisition->kind == rb_servo::BackendErrorKind::InvalidJointState);
+
+    const std::optional<rb_servo::BackendError> readiness =
+        rb_servo::rbpodoMotionReadinessError(rbpodoConfig(), snapshot, state);
+    RB_CHECK(readiness.has_value());
+    RB_CHECK(readiness->kind == rb_servo::BackendErrorKind::InvalidJointState);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -159,5 +285,10 @@ int main() {
     if (!testErrorFlags()) return 1;
     if (!testReadStateHelpers()) return 1;
     if (!testSendHelpersKeepStateAfterExplicit()) return 1;
+    if (!testRbpodoReadStateAcceptsServoDisabledJointFeedback()) return 1;
+    if (!testRbpodoServoDisabledSendRejectsWithoutTransportWriteFailure()) return 1;
+    if (!testRbpodoFaultedJointFeedbackIsReadableButNotMotionReady()) return 1;
+    if (!testRbpodoWrongModeIsMotionReadinessNotReadFailure()) return 1;
+    if (!testRbpodoInvalidJointStateFailsAcquisition()) return 1;
     return 0;
 }

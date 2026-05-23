@@ -76,11 +76,6 @@ RobotState basicState(ArmId arm_id, bool connected) {
     return state;
 }
 
-#ifdef RB_SERVO_ENABLE_RBPODO
-constexpr double kDefaultCommandTimeoutSec = 0.5;
-constexpr double kDefaultStateTimeoutSec = 0.2;
-constexpr uint64_t kRecentStateCacheMaxAgeNs = 1'000'000'000ULL;
-
 std::string lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -88,66 +83,72 @@ std::string lower(std::string value) {
     return value;
 }
 
-rb::podo::OperationMode operationModeFromConfig(const BackendConfig& config) {
+bool expectedSimulationMode(const BackendConfig& config) {
     const std::string operation_mode = lower(config.operation_mode);
     if (operation_mode == "simulation" || operation_mode == "sim") {
-        return rb::podo::OperationMode::Simulation;
+        return true;
     }
-    return rb::podo::OperationMode::Real;
+    return false;
 }
 
 std::string rbpodoModeName(bool simulation_mode) {
     return simulation_mode ? "simulation" : "real";
 }
 
-bool operationModeMatchesConfig(const BackendConfig& config, const rb::podo::SystemState& state) {
-    const bool expected_simulation = operationModeFromConfig(config) == rb::podo::OperationMode::Simulation;
-    const bool actual_simulation = state.sdata.real_vs_simulation_mode == 1;
-    return expected_simulation == actual_simulation;
+bool operationModeMatchesConfig(const BackendConfig& config, const RbpodoSystemStateSnapshot& snapshot) {
+    const bool actual_simulation = snapshot.real_vs_simulation_mode == 1;
+    return expectedSimulationMode(config) == actual_simulation;
 }
 
-int firstNonZeroErrorCode(const rb::podo::SystemState& state) {
-    if (state.sdata.op_stat_sos_flag != 0) return state.sdata.op_stat_sos_flag;
-    if (state.sdata.init_error != 0) return state.sdata.init_error;
-    if (state.sdata.op_stat_ems_flag != 0) return state.sdata.op_stat_ems_flag;
-    if (state.sdata.op_stat_soft_estop_occur != 0) return state.sdata.op_stat_soft_estop_occur;
-    if (state.sdata.op_stat_collision_occur != 0) return state.sdata.op_stat_collision_occur;
-    if (state.sdata.op_stat_self_collision != 0) return state.sdata.op_stat_self_collision;
+int firstNonZeroErrorCode(const RbpodoSystemStateSnapshot& snapshot) {
+    if (snapshot.op_stat_sos_flag != 0) return snapshot.op_stat_sos_flag;
+    if (snapshot.init_error != 0) return snapshot.init_error;
+    if (snapshot.op_stat_ems_flag != 0) return snapshot.op_stat_ems_flag;
+    if (snapshot.op_stat_soft_estop_occur != 0) return snapshot.op_stat_soft_estop_occur;
+    if (snapshot.op_stat_collision_occur != 0) return snapshot.op_stat_collision_occur;
+    if (snapshot.op_stat_self_collision != 0) return snapshot.op_stat_self_collision;
     return 0;
 }
 
-void fillRobotStateFromSystemState(
+}  // namespace
+
+RobotState mapRbpodoSystemStateSnapshot(
     ArmId arm_id,
-    const rb::podo::SystemState& rb_state,
-    RobotState* out_state
+    const RbpodoSystemStateSnapshot& snapshot
 ) {
-    out_state->arm_id = arm_id;
-    out_state->host_time_ns = nowSteadyNs();
-    out_state->robot_time_ns = std::isfinite(static_cast<double>(rb_state.sdata.time)) && rb_state.sdata.time >= 0.0f
-        ? static_cast<uint64_t>(static_cast<double>(rb_state.sdata.time) * 1'000'000'000.0)
+    RobotState out_state;
+    out_state.arm_id = arm_id;
+    out_state.host_time_ns = nowSteadyNs();
+    out_state.robot_time_ns = std::isfinite(snapshot.robot_time_sec) && snapshot.robot_time_sec >= 0.0
+        ? static_cast<uint64_t>(snapshot.robot_time_sec * 1'000'000'000.0)
         : 0;
 
-    for (int i = 0; i < kDof; ++i) {
-        out_state->q_actual_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ang[i];
-        out_state->q_target_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ref[i];
-        out_state->dq_actual_deg_s[static_cast<std::size_t>(i)] = 0.0;
-    }
+    out_state.q_actual_deg = snapshot.q_actual_deg;
+    out_state.q_target_deg = snapshot.q_target_deg;
+    out_state.dq_actual_deg_s.fill(0.0);
 
-    const int error_code = firstNonZeroErrorCode(rb_state);
-    out_state->connection_state = RobotConnectionState::Connected;
-    out_state->servo_enabled = rb_state.sdata.init_state_info == 6;
-    out_state->has_error = error_code != 0;
-    out_state->error_code = error_code;
-    out_state->has_valid_joint_state =
-        finiteJointArray(out_state->q_actual_deg) &&
-        finiteJointArray(out_state->q_target_deg);
+    const int error_code = firstNonZeroErrorCode(snapshot);
+    out_state.connection_state = RobotConnectionState::Connected;
+    out_state.servo_enabled = snapshot.init_state_info == 6;
+    out_state.has_error = error_code != 0;
+    out_state.error_code = error_code;
+    out_state.has_valid_joint_state =
+        finiteJointArray(out_state.q_actual_deg) &&
+        finiteJointArray(out_state.q_target_deg);
+    if (!out_state.has_valid_joint_state) {
+        out_state.lifecycle_state = "invalid_joint_state";
+    } else if (out_state.has_error) {
+        out_state.lifecycle_state = "faulted";
+        out_state.fault_recoverable = true;
+    } else if (out_state.servo_enabled) {
+        out_state.lifecycle_state = "servo_enabled";
+    } else {
+        out_state.lifecycle_state = "connected_not_motion_ready";
+    }
+    return out_state;
 }
 
-std::optional<BackendError> errorFromSystemState(
-    const BackendConfig& config,
-    const rb::podo::SystemState& rb_state,
-    const RobotState& mapped
-) {
+std::optional<BackendError> rbpodoStateAcquisitionError(const RobotState& mapped) {
     if (!mapped.has_valid_joint_state) {
         return backendError(
             BackendErrorKind::InvalidJointState,
@@ -155,6 +156,17 @@ std::optional<BackendError> errorFromSystemState(
             "",
             "rbpodo_invalid_joint_state"
         );
+    }
+    return std::nullopt;
+}
+
+std::optional<BackendError> rbpodoMotionReadinessError(
+    const BackendConfig& config,
+    const RbpodoSystemStateSnapshot& snapshot,
+    const RobotState& mapped
+) {
+    if (const auto acquisition_error = rbpodoStateAcquisitionError(mapped)) {
+        return acquisition_error;
     }
     if (mapped.has_error) {
         return backendError(
@@ -164,27 +176,52 @@ std::optional<BackendError> errorFromSystemState(
             "rbpodo_robot_fault"
         );
     }
-    if (!operationModeMatchesConfig(config, rb_state)) {
-        const bool actual_simulation = rb_state.sdata.real_vs_simulation_mode == 1;
-        const bool expected_simulation = operationModeFromConfig(config) == rb::podo::OperationMode::Simulation;
+    if (!operationModeMatchesConfig(config, snapshot)) {
+        const bool actual_simulation = snapshot.real_vs_simulation_mode == 1;
+        const bool expected_simulation = expectedSimulationMode(config);
         return backendError(
             BackendErrorKind::WrongMode,
             "rbpodo controller mode is " + rbpodoModeName(actual_simulation) +
                 " but config expects " + rbpodoModeName(expected_simulation),
-            std::to_string(rb_state.sdata.real_vs_simulation_mode),
+            std::to_string(snapshot.real_vs_simulation_mode),
             "rbpodo_wrong_operation_mode"
         );
     }
     if (!mapped.servo_enabled) {
         return backendError(
             BackendErrorKind::ServoDisabled,
-            "rbpodo activation stage is " + std::to_string(rb_state.sdata.init_state_info) +
+            "rbpodo activation stage is " + std::to_string(snapshot.init_state_info) +
                 "; expected activation done stage 6 before servo_j",
-            std::to_string(rb_state.sdata.init_state_info),
+            std::to_string(snapshot.init_state_info),
             "rbpodo_servo_disabled"
         );
     }
     return std::nullopt;
+}
+
+namespace {
+
+#ifdef RB_SERVO_ENABLE_RBPODO
+constexpr double kDefaultCommandTimeoutSec = 0.5;
+constexpr double kDefaultStateTimeoutSec = 0.2;
+constexpr uint64_t kRecentStateCacheMaxAgeNs = 1'000'000'000ULL;
+
+RbpodoSystemStateSnapshot snapshotFromSystemState(const rb::podo::SystemState& rb_state) {
+    RbpodoSystemStateSnapshot snapshot;
+    snapshot.robot_time_sec = static_cast<double>(rb_state.sdata.time);
+    snapshot.real_vs_simulation_mode = rb_state.sdata.real_vs_simulation_mode;
+    snapshot.init_state_info = rb_state.sdata.init_state_info;
+    snapshot.init_error = rb_state.sdata.init_error;
+    snapshot.op_stat_sos_flag = rb_state.sdata.op_stat_sos_flag;
+    snapshot.op_stat_ems_flag = rb_state.sdata.op_stat_ems_flag;
+    snapshot.op_stat_soft_estop_occur = rb_state.sdata.op_stat_soft_estop_occur;
+    snapshot.op_stat_collision_occur = rb_state.sdata.op_stat_collision_occur;
+    snapshot.op_stat_self_collision = rb_state.sdata.op_stat_self_collision;
+    for (int i = 0; i < kDof; ++i) {
+        snapshot.q_actual_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ang[i];
+        snapshot.q_target_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ref[i];
+    }
+    return snapshot;
 }
 
 std::optional<RobotState> recentStateCache(
@@ -357,14 +394,14 @@ BackendResult<RobotState> RbpodoBackend::connect() {
         impl_->connected = true;
         std::cerr << "[INFO] RbpodoBackend connected to " << impl_->config.ip
                   << " for " << impl_->config.name << "\n";
-        RobotState mapped;
-        fillRobotStateFromSystemState(impl_->arm_id, *state, &mapped);
+        const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
+        RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
         impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
-        impl_->last_state_error = errorFromSystemState(impl_->config, *state, mapped);
-        if (impl_->last_state_error.has_value()) {
+        impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
+        if (const auto acquisition_error = rbpodoStateAcquisitionError(mapped)) {
             return failedResultWithValue(
                 BackendOp::Connect,
-                *impl_->last_state_error,
+                *acquisition_error,
                 mapped,
                 makeBackendTiming(start, nowSteadyNs())
             );
@@ -423,14 +460,14 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
             );
         }
 
-        RobotState mapped;
-        fillRobotStateFromSystemState(impl_->arm_id, *state, &mapped);
+        const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
+        RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
         impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
-        impl_->last_state_error = errorFromSystemState(impl_->config, *state, mapped);
-        if (impl_->last_state_error.has_value()) {
+        impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
+        if (const auto acquisition_error = rbpodoStateAcquisitionError(mapped)) {
             return failedResultWithValue(
                 BackendOp::Initialize,
-                *impl_->last_state_error,
+                *acquisition_error,
                 mapped,
                 makeBackendTiming(start, nowSteadyNs())
             );
@@ -493,13 +530,14 @@ BackendResult<RobotState> RbpodoBackend::readState() {
                 makeBackendTiming(start, nowSteadyNs())
             );
         }
-        fillRobotStateFromSystemState(impl_->arm_id, *state, &out_state);
+        const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
+        out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
         impl_->last_state_cache = out_state.has_valid_joint_state ? std::make_optional(out_state) : std::nullopt;
-        impl_->last_state_error = errorFromSystemState(impl_->config, *state, out_state);
-        if (impl_->last_state_error.has_value()) {
+        impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, out_state);
+        if (const auto acquisition_error = rbpodoStateAcquisitionError(out_state)) {
             return failedResultWithValue(
                 BackendOp::ReadState,
-                *impl_->last_state_error,
+                *acquisition_error,
                 out_state,
                 makeBackendTiming(start, nowSteadyNs())
             );
@@ -536,15 +574,6 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
 #else
     const std::optional<RobotState> cached_state = recentStateCache(impl_->last_state_cache, nowSteadyNs());
     const char* cached_source = cached_state.has_value() ? "cache" : "none";
-    if (!impl_->connected || !impl_->robot) {
-        return rejectedSend(
-            request,
-            backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
-            makeBackendTiming(start, nowSteadyNs()),
-            cached_state,
-            cached_source
-        );
-    }
     if (impl_->config.run_mode == RunMode::Real && !envIsOne("RB_ALLOW_REAL_MOTION")) {
         std::cerr << "[ERROR] RbpodoBackend refused servo_j without RB_ALLOW_REAL_MOTION=1\n";
         return rejectedSend(
@@ -555,6 +584,15 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
                 "",
                 "rbpodo_motion_gate_closed"
             ),
+            makeBackendTiming(start, nowSteadyNs()),
+            cached_state,
+            cached_source
+        );
+    }
+    if (!impl_->connected || !impl_->robot) {
+        return rejectedSend(
+            request,
+            backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
             makeBackendTiming(start, nowSteadyNs()),
             cached_state,
             cached_source

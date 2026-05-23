@@ -320,3 +320,33 @@ State JSON publishes the same data under each arm's `worker` object:
 
 Direct I/O mode may publish the same object with `enabled=false` and zero/default
 sequence counters so schema consumers do not need a separate parser path.
+
+## MIG-15 Rbpodo Read-Only State Semantics
+
+`RbpodoBackend::readState()` separates state acquisition from motion readiness.
+A read is successful when the backend communicates with the controller and maps
+finite, internally consistent joint state into `RobotState`. Controller state
+that is valid for observation but not ready for motion remains an OK read:
+
+- `servo_enabled=false` is reported in `RobotState` and does not by itself make
+  `readState().ok=false`.
+- Controller fault or emergency flags are reported as `has_error=true` with the
+  controller error code when the joint sample is valid.
+- Controller/config mode mismatch is a motion-readiness problem, not a state
+  acquisition failure.
+- Non-finite or missing joint values still fail the read with
+  `InvalidJointState`.
+- Data-channel request failures still fail the read with a transport read
+  error.
+
+Rbpodo `sendServoJ()` remains motion-gated. In real mode it checks
+`RB_ALLOW_REAL_MOTION=1` before any send attempt. If the latest cached state is
+not motion-ready, `sendServoJ()` rejects with the structured readiness error
+such as `ServoDisabled`, `WrongMode`, or `RobotFault`, and may attach that
+cached state with `state_after_source="cache"`. These rejections are not
+transport write failures.
+
+Real read-only acceptance therefore expects that `q_actual` can publish while
+`servo_enabled=false`. The tracked read-only real template still requires
+`RB_ALLOW_REAL_ROBOT=1`, keeps `servo.send_servo_commands: false`, and must not
+attempt motion mode entry or `servo_j`.

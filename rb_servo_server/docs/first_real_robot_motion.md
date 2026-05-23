@@ -15,6 +15,9 @@ joint-only acceptance run after read-only state publishing has been verified.
 - Cartesian/TCP and force control remain disabled.
 - `RbpodoBackend::initialize()` is read-only: it must not enter operation mode
   or set speed bar during the read-only run.
+- Read-only state publishing can be healthy with `servo_enabled=false` when
+  `q_actual` is valid. Treat that as observation-only readiness, not permission
+  to send `servo_j`.
 - `RbpodoBackend::stop()` and `resetFault()` are not verified controller-level
   real-robot recovery APIs. They return `rbpodo_stop_unverified` and
   `rbpodo_reset_fault_unverified`; use the physical E-stop and operator
@@ -31,6 +34,10 @@ For read-only acceptance:
 servo:
   send_servo_commands: false
 ```
+
+During this run, accepted evidence is valid published joint state plus
+`servo_enabled=false` or another non-motion-ready lifecycle. It must not include
+motion mode entry, speed-bar setup, or `servo_j`.
 
 For the first motion attempt, change only the local copy:
 

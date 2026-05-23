@@ -1,12 +1,40 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/robot/i_robot_backend.hpp"
 
 namespace rb_servo {
+
+struct RbpodoSystemStateSnapshot {
+    JointArray q_actual_deg{};
+    JointArray q_target_deg{};
+    double robot_time_sec = 0.0;
+    int real_vs_simulation_mode = 0;
+    int init_state_info = 0;
+    int init_error = 0;
+    int op_stat_sos_flag = 0;
+    int op_stat_ems_flag = 0;
+    int op_stat_soft_estop_occur = 0;
+    int op_stat_collision_occur = 0;
+    int op_stat_self_collision = 0;
+};
+
+RobotState mapRbpodoSystemStateSnapshot(
+    ArmId arm_id,
+    const RbpodoSystemStateSnapshot& snapshot
+);
+
+std::optional<BackendError> rbpodoStateAcquisitionError(const RobotState& mapped);
+
+std::optional<BackendError> rbpodoMotionReadinessError(
+    const BackendConfig& config,
+    const RbpodoSystemStateSnapshot& snapshot,
+    const RobotState& mapped
+);
 
 class RbpodoBackend final : public IRobotBackend {
 public:

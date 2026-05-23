@@ -126,6 +126,12 @@ stand-in.
 safety gates, state publication, and robot mount estimates. It must preserve
 one backend instance per arm.
 
+For `backend_type=rbpodo`, read-only state acquisition and motion readiness are
+separate. A controller can return valid joint feedback while servo motion is not
+enabled; `rb_servo_server` should publish that state with
+`servo_enabled=false` and a non-ready lifecycle, while `sendServoJ()` remains
+closed unless the real-motion gate and controller readiness are both true.
+
 `rb_simulator` owns hardware-free simulator state. The target architecture is
 one simulator process/container per arm, with deterministic control and admin
 interfaces.

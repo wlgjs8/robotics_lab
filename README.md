@@ -295,6 +295,10 @@ The current review baseline is:
   `servo_j` transmission additionally requires `RB_ALLOW_REAL_MOTION=1`.
   Real Cartesian/TCP motion additionally requires
   `RB_ALLOW_REAL_CARTESIAN=1`.
+- Rbpodo state acquisition is separate from motion readiness. A real read-only
+  run can publish valid `q_actual` with `servo_enabled=false`; that is a
+  successful state read, while later `servo_j` attempts remain rejected until
+  the real-motion gate and controller readiness are both satisfied.
 - `stop()` and `resetFault()` for rbpodo controller recovery remain
   unverified. On a real robot fault, treat them as a fail-closed result that
   requires operator intervention, not as automatic recovery.
