@@ -210,6 +210,12 @@ run_mig13_gate() {
   run_servo_gate
 }
 
+run_mig20_gate() {
+  run_shell_syntax_checks
+  run_servo_gate
+  run_optional_pinocchio_gate
+}
+
 case "$TASK" in
   P0-A)
     grep_existing "RB_ALLOW_REAL_MOTION" README.md docs
@@ -249,6 +255,7 @@ case "$TASK" in
   P3-F)
     bash -n scripts/tcp_pose_simulator_acceptance.sh
     grep_existing "RB_ALLOW_REAL_CARTESIAN" docs/runbooks/tcp_pose_simulator_acceptance.md README.md
+    run_optional_pinocchio_gate
     ;;
 
   MIG-00)
@@ -268,8 +275,12 @@ case "$TASK" in
     run_mig13_gate
     ;;
 
-  MIG-14|MIG-15|MIG-16|MIG-20|MIG-21|MIG-22|MIG-23|MIG-24)
+  MIG-14|MIG-15|MIG-16|MIG-21|MIG-22|MIG-23|MIG-24)
     run_servo_gate
+    ;;
+
+  MIG-20)
+    run_mig20_gate
     ;;
 
   MIG-10)

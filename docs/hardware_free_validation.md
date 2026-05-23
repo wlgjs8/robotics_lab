@@ -61,11 +61,14 @@ does not silently download missing dependencies. If `nlohmann_json` is installed
 outside the default CMake search path, set `CMAKE_PREFIX_PATH` before running the
 script.
 
-Pinocchio is intentionally not required by this hardware-free gate. MIG-12 runs
-an optional Pinocchio-enabled C++ gate through `scripts/codex_gate.sh MIG-12`
+Pinocchio is intentionally not required by this hardware-free gate. MIG-12 and
+MIG-20 run an optional Pinocchio-enabled C++ gate through `scripts/codex_gate.sh`
 only when the `pinocchio` CMake package is already available. The TCP pose
-simulator acceptance script requires Pinocchio because FK/IK behavior is the
-subject of that acceptance.
+simulator acceptance script defaults to
+`rb_servo_server/config/dual_simulator_tcp_acceptance.yaml` and requires
+Pinocchio because FK/IK behavior is the subject of that acceptance. Use
+`--allow-missing-pinocchio` only for syntax/config-only validation; it skips the
+runtime simulator FK/IK acceptance sequence when Pinocchio is unavailable.
 
 Additional dependency preflight profiles are available:
 

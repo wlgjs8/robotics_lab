@@ -19,8 +19,9 @@ P3-F depends on these earlier work packages:
   `rb_servo_server/tools/send_tcp_delta.py` and
   `rb_servo_server/tools/send_tcp_pose_target.py`.
 
-Before running the acceptance sequence, verify the server config used for the
-run has:
+The canonical simulator-only server config for this runbook is
+`rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`. It is the default
+used by `scripts/tcp_pose_simulator_acceptance.sh` and contains:
 
 ```yaml
 kinematics:
@@ -35,6 +36,9 @@ cartesian_control:
   enable: true
   allow_in_simulation: true
   allow_in_real: false
+
+servo:
+  send_servo_commands: true
 ```
 
 If those dependencies or config gates are missing, the scripted runner exits
@@ -43,7 +47,14 @@ nonzero before motion commands and prints the missing item.
 The server binary must be built with `RB_SERVO_ENABLE_PINOCCHIO=ON`; the
 default hardware-free gate intentionally builds with Pinocchio off. The
 scripted runner checks `scripts/check_deps.sh --profile kinematics` and, for
-local starts, rejects a CMake build cache that shows Pinocchio was off.
+local starts, rejects a CMake build cache that shows Pinocchio was off. Its
+default server path is
+`rb_servo_server/build/pinocchio_gate/rb_servo_server`.
+
+For syntax-only environments where Pinocchio is not installed, pass
+`--allow-missing-pinocchio`. That mode still validates the script, command-tool
+dry runs, and selected config contract, then exits before launching the
+simulator/server FK/IK acceptance sequence.
 
 ## Start Per-Arm Simulator Stack
 
@@ -63,6 +74,16 @@ one left simulator process, one right simulator process, and one
 `rb_servo_server` process unless `--assume-running` is passed:
 
 ```bash
+bash scripts/codex_gate.sh P3-F
+
+cmake -S rb_servo_server -B rb_servo_server/build/pinocchio_gate \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DRB_SERVO_ENABLE_RBPODO=OFF \
+  -DRB_SERVO_ENABLE_PINOCCHIO=ON \
+  -DRB_SERVO_ALLOW_FETCHCONTENT=OFF \
+  -DBUILD_TESTING=ON
+cmake --build rb_servo_server/build/pinocchio_gate -j
+
 bash scripts/tcp_pose_simulator_acceptance.sh
 ```
 
@@ -152,11 +173,12 @@ Default behavior:
 
 - runs `scripts/check_deps.sh --profile hardware-free`
 - runs `scripts/check_deps.sh --profile kinematics` so missing Pinocchio/Eigen
-  fails before processes start
+  fails before processes start unless `--allow-missing-pinocchio` is provided
 - verifies required TCP command tools exist and parse dry-run packets
 - verifies the server binary and simulator configs exist
-- verifies the selected server config declares Pinocchio FK/TCP, IK, and
-  Cartesian simulation gates
+- verifies the selected server config declares simulator-only endpoints,
+  Pinocchio FK/TCP, IK, Cartesian simulation gates, and
+  `servo.send_servo_commands: true`
 - starts host-loopback left/right simulator processes and `rb_servo_server`
 - captures the state stream
 - sends `ArmMotion`

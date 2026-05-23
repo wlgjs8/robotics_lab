@@ -6,9 +6,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR=""
 STACK_MODE="start-local"
 CHECK_DEPS=1
+ALLOW_MISSING_PINOCCHIO=0
 RUN_ESTOP_RESET=1
-SERVER="${ROOT_DIR}/rb_servo_server/build/hardware_free_gate/rb_servo_server"
-SERVER_CONFIG="${ROOT_DIR}/rb_servo_server/config/dual_simulator.yaml"
+SERVER="${ROOT_DIR}/rb_servo_server/build/pinocchio_gate/rb_servo_server"
+SERVER_CONFIG="${ROOT_DIR}/rb_servo_server/config/dual_simulator_tcp_acceptance.yaml"
 LEFT_CONFIG="${ROOT_DIR}/rb_simulator/config/left_rb3_730e.yaml"
 RIGHT_CONFIG="${ROOT_DIR}/rb_simulator/config/right_rb3_730e.yaml"
 RBSIM_COMMAND="${RBSIM_COMMAND:-python3 -m rbsim}"
@@ -31,6 +32,7 @@ Options:
   --assume-running            Do not start local simulator/server processes; use configured host endpoints.
   --start-local               Start host-loopback simulators/server locally. Default.
   --skip-deps                 Skip scripts/check_deps.sh --profile hardware-free.
+  --allow-missing-pinocchio   Allow syntax/config checks to pass without Pinocchio; runtime FK/IK acceptance is skipped if unavailable.
   --skip-estop-reset          Skip the optional EmergencyStop/ResetFault check.
   --server PATH               rb_servo_server binary.
   --server-config PATH        FK/IK-enabled simulator server config.
@@ -54,6 +56,10 @@ USAGE
 fail() {
   echo "tcp_pose_acceptance: FAIL: $*" >&2
   exit 2
+}
+
+pinocchio_available() {
+  "${ROOT_DIR}/scripts/check_deps.sh" --profile kinematics
 }
 
 require_file() {
@@ -86,6 +92,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-deps)
       CHECK_DEPS=0
+      shift
+      ;;
+    --allow-missing-pinocchio)
+      ALLOW_MISSING_PINOCCHIO=1
       shift
       ;;
     --skip-estop-reset)
@@ -168,7 +178,15 @@ fi
 
 if [[ "${CHECK_DEPS}" -eq 1 ]]; then
   "${ROOT_DIR}/scripts/check_deps.sh" --profile hardware-free
-  "${ROOT_DIR}/scripts/check_deps.sh" --profile kinematics
+fi
+
+PINOCCHIO_READY=0
+if pinocchio_available; then
+  PINOCCHIO_READY=1
+elif [[ "${ALLOW_MISSING_PINOCCHIO}" -eq 0 ]]; then
+  fail "Pinocchio is required for simulator TCP FK/IK acceptance. Install the pinocchio CMake package or pass --allow-missing-pinocchio for syntax/config-only validation."
+else
+  echo "tcp_pose_acceptance: Pinocchio unavailable; continuing only because --allow-missing-pinocchio was provided." >&2
 fi
 
 require_file "${ROOT_DIR}/rb_servo_server/tools/send_arm_motion.py" "ArmMotion send tool"
@@ -190,14 +208,6 @@ grep -q "solveIk" "${ROOT_DIR}/rb_servo_server/src/control/cartesian_controller.
 grep -q "isCartesianMode" "${ROOT_DIR}/rb_servo_server/src/control/dual_arm_servo_loop.cpp" \
   || fail "P3-B servo loop Cartesian command path appears missing"
 
-if [[ "${STACK_MODE}" == "start-local" ]]; then
-  require_executable "${SERVER}" "rb_servo_server binary"
-  server_cache="$(dirname "${SERVER}")/CMakeCache.txt"
-  if [[ -f "${server_cache}" ]] && ! grep -q '^RB_SERVO_ENABLE_PINOCCHIO:BOOL=ON$' "${server_cache}"; then
-    fail "rb_servo_server binary was not built with RB_SERVO_ENABLE_PINOCCHIO=ON: ${SERVER}. Reconfigure a simulator acceptance build with Pinocchio enabled."
-  fi
-fi
-
 python3 "${ROOT_DIR}/rb_servo_server/tools/send_tcp_delta.py" \
   --dry-run --frame stand \
   --left 0.005 0 0 0 0 0 \
@@ -214,6 +224,14 @@ path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 
 checks = [
+    ("left_robot section", r"(?m)^left_robot:\s*$"),
+    ("left_robot backend_type simulator", r"(?ms)^left_robot:.*?^\s+backend_type:\s+simulator\s*$"),
+    ("left_robot run_mode simulation", r"(?ms)^left_robot:.*?^\s+run_mode:\s+simulation\s*$"),
+    ("right_robot section", r"(?m)^right_robot:\s*$"),
+    ("right_robot backend_type simulator", r"(?ms)^right_robot:.*?^\s+backend_type:\s+simulator\s*$"),
+    ("right_robot run_mode simulation", r"(?ms)^right_robot:.*?^\s+run_mode:\s+simulation\s*$"),
+    ("servo section", r"(?m)^servo:\s*$"),
+    ("servo.send_servo_commands true", r"(?ms)^servo:.*?^\s+send_servo_commands:\s+true\s*$"),
     ("kinematics section", r"(?m)^kinematics:\s*$"),
     ("kinematics.enable true", r"(?ms)^kinematics:.*?^\s+enable:\s+true\s*$"),
     ("kinematics.provider pinocchio", r"(?ms)^kinematics:.*?^\s+provider:\s+pinocchio\s*$"),
@@ -235,6 +253,10 @@ if re.search(r"(?m)^\s+backend_type:\s+rbpodo\s*$", text):
     unsafe.append("backend_type: rbpodo")
 if re.search(r"(?ms)^cartesian_control:.*?^\s+allow_in_real:\s+true\s*$", text):
     unsafe.append("cartesian_control.allow_in_real: true")
+if "172.28.60.200" in text:
+    unsafe.append("real left robot IP 172.28.60.200")
+if "172.28.60.201" in text:
+    unsafe.append("real right robot IP 172.28.60.201")
 if missing:
     print(
         "tcp_pose_acceptance: FAIL: selected server config is not FK/IK TCP acceptance-ready: "
@@ -247,7 +269,8 @@ if missing:
         "Provide --server-config with kinematics.enable=true, "
         "kinematics.provider=pinocchio, kinematics.urdf, "
         "kinematics.publish_tcp=true, kinematics.ik.enable=true, "
-        "cartesian_control.enable=true, and allow_in_simulation=true. "
+        "cartesian_control.enable=true, allow_in_simulation=true, "
+        "allow_in_real=false, and servo.send_servo_commands=true. "
         "Build the server with RB_SERVO_ENABLE_PINOCCHIO=ON.",
         file=sys.stderr,
     )
@@ -263,6 +286,19 @@ if unsafe:
     print("Use only run_mode: simulation and backend_type: simulator for this acceptance.", file=sys.stderr)
     sys.exit(2)
 PY
+
+if [[ "${PINOCCHIO_READY}" -eq 0 ]]; then
+  echo "tcp_pose_acceptance: syntax/config checks passed; runtime FK/IK acceptance skipped because Pinocchio is unavailable." >&2
+  exit 0
+fi
+
+if [[ "${STACK_MODE}" == "start-local" ]]; then
+  require_executable "${SERVER}" "rb_servo_server binary"
+  server_cache="$(dirname "${SERVER}")/CMakeCache.txt"
+  if [[ -f "${server_cache}" ]] && ! grep -q '^RB_SERVO_ENABLE_PINOCCHIO:BOOL=ON$' "${server_cache}"; then
+    fail "rb_servo_server binary was not built with RB_SERVO_ENABLE_PINOCCHIO=ON: ${SERVER}. Reconfigure a simulator acceptance build with Pinocchio enabled."
+  fi
+fi
 
 PYTHONPATH="${ROOT_DIR}/rb_simulator/src${PYTHONPATH:+:${PYTHONPATH}}" \
 python3 - \
@@ -321,10 +357,15 @@ class StateCapture:
 
     def start(self) -> None:
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self.host, self.port))
-        sock.settimeout(0.1)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.host, self.port))
+            sock.settimeout(0.1)
+        except OSError as exc:
+            raise AcceptanceError(
+                f"loopback UDP state capture socket unavailable at {self.host}:{self.port}: {exc}"
+            ) from exc
         self._sock = sock
         self._thread = threading.Thread(target=self._run, name="tcp-pose-state-capture", daemon=True)
         self._thread.start()
