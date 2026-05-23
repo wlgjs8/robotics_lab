@@ -425,6 +425,11 @@ force_control:
             "send failure latch",
         )
         self.assertEqual(send_fault["motion_state"], "FaultLatched")
+        self.assertEqual(send_fault["fault_context"]["latched"], True)
+        self.assertEqual(send_fault["fault_context"]["backend_error_kind"], "TransportWriteFailed")
+        self.assertEqual(send_fault["fault_context"]["backend_error_name"], "send_failure_injected")
+        self.assertEqual(send_fault["fault_context"]["arm"], "left")
+        self.assertEqual(send_fault["fault_context"]["backend_op"], "SendServoJ")
         self.admin("admin.reset_hooks")
         self.send_command("ResetFault")
         send_fault_tick = int(send_fault.get("tick", 0))
@@ -462,12 +467,22 @@ force_control:
         self.assertEqual(recoverable["left"]["last_read"]["backend_error_kind"], "RobotFault")
         self.assertEqual(recoverable["left"]["last_send"]["backend_error_kind"], "SuppressedByPolicy")
         self.assertFalse(recoverable["left"]["last_send"]["accepted"])
+        self.assertEqual(recoverable["fault_context"]["latched"], True)
+        self.assertEqual(recoverable["fault_context"]["verdict"], "RobotStateError")
+        self.assertEqual(recoverable["fault_context"]["domain"], "RobotState")
+        self.assertEqual(recoverable["fault_context"]["arm"], "left")
+        self.assertEqual(recoverable["fault_context"]["backend_error_kind"], "RobotFault")
+        self.assertEqual(recoverable["fault_context"]["backend_error_name"], "fault_latched")
+        self.assertEqual(recoverable["fault_context"]["backend_error_code"], "2222")
+        self.assertEqual(recoverable["fault_context"]["state_after_source"], "response")
         self.send_command("ResetFault")
         recoverable_tick = int(recoverable.get("tick", 0))
-        self.wait_snapshot(
+        reset = self.wait_snapshot(
             lambda snap: int(snap.get("tick", 0)) > recoverable_tick and self.connected_valid(snap),
             "recoverable simulator fault reset",
         )
+        self.assertEqual(reset["fault_context"]["latched"], False)
+        self.assertIsNone(reset["fault_context"]["backend_error_kind"])
 
         self.admin("admin.set_fault", "right", error_code=3333, recoverable=False)
         unrecoverable = self.wait_snapshot(
@@ -523,6 +538,8 @@ class RbsimWorkerHardwareFreeGateTest(RbsimHardwareFreeGateTest):
         self.assertEqual(send_fault["motion_state"], "FaultLatched")
         self.assertEqual(send_fault["left"]["last_send"]["backend_error_kind"], "TransportWriteFailed")
         self.assertEqual(send_fault["left"]["last_send"]["error_name"], "send_failure_injected")
+        self.assertEqual(send_fault["fault_context"]["backend_error_kind"], "TransportWriteFailed")
+        self.assertEqual(send_fault["fault_context"]["backend_error_name"], "send_failure_injected")
         self.assert_latency_metrics_present(send_fault)
 
         self.admin("admin.reset_hooks")
@@ -541,6 +558,8 @@ class RbsimWorkerHardwareFreeGateTest(RbsimHardwareFreeGateTest):
         self.assertFalse(suppressed["left"]["last_send"]["accepted"])
         self.assertEqual(suppressed["right"]["last_send"]["backend_error_kind"], "SuppressedByPolicy")
         self.assertFalse(suppressed["right"]["last_send"]["accepted"])
+        self.assertEqual(suppressed["fault_context"]["backend_error_kind"], "TransportWriteFailed")
+        self.assertEqual(suppressed["fault_context"]["backend_error_name"], "send_failure_injected")
 
     def test_worker_simulator_robot_fault_is_distinguishable(self) -> None:
         self.admin("admin.set_fault", "right", error_code=3333, recoverable=False)
@@ -555,6 +574,9 @@ class RbsimWorkerHardwareFreeGateTest(RbsimHardwareFreeGateTest):
         self.assertEqual(fault["right"]["last_read"]["error_name"], "fault_latched")
         self.assertEqual(fault["right"]["last_send"]["backend_error_kind"], "SuppressedByPolicy")
         self.assertFalse(fault["right"]["last_send"]["accepted"])
+        self.assertEqual(fault["fault_context"]["backend_error_kind"], "RobotFault")
+        self.assertEqual(fault["fault_context"]["backend_error_name"], "fault_latched")
+        self.assertEqual(fault["fault_context"]["backend_error_code"], "3333")
         self.assert_latency_metrics_present(fault)
 
 

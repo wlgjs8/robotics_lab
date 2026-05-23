@@ -63,6 +63,7 @@ bool testRobotFaultSendIsRobotStateFault() {
     RB_CHECK(context.backend_error.kind == rb_servo::BackendErrorKind::RobotFault);
     RB_CHECK(context.robot_error_code == 2222);
     RB_CHECK(context.state_after.has_value());
+    RB_CHECK(context.state_after_source == "response");
     RB_CHECK(contains(context.reason, "robot/controller fault"));
     RB_CHECK(!contains(context.reason, "transport failure"));
     return true;
@@ -88,6 +89,7 @@ bool testRobotFaultReadIsRobotStateFault() {
     RB_CHECK(context.backend_error.kind == rb_servo::BackendErrorKind::RobotFault);
     RB_CHECK(context.robot_error_code == 2222);
     RB_CHECK(context.state_after.has_value());
+    RB_CHECK(context.state_after_source == "response");
     RB_CHECK(contains(context.reason, "robot/controller fault"));
     RB_CHECK(!contains(context.reason, "transport failure"));
     return true;
@@ -111,6 +113,7 @@ bool testTransportSendFailureStaysSendFailure() {
     RB_CHECK(context.backend_error.transport_fault);
     RB_CHECK(context.retryable);
     RB_CHECK(context.recoverable);
+    RB_CHECK(context.state_after_source == "none");
     RB_CHECK(contains(context.reason, "transport failure"));
     return true;
 }

@@ -2387,6 +2387,7 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("fault_reason").get<std::string>().empty());
     RB_CHECK(!json.at("fault_context").at("latched").get<bool>());
     RB_CHECK(json.at("fault_context").at("motion_state").get<std::string>() == "Running");
+    RB_CHECK(json.at("fault_context").at("backend_error_kind").is_null());
     RB_CHECK(json.at("logger_dropped_samples").get<uint64_t>() == 0);
     RB_CHECK(json.at("logger_health").at("ok").get<bool>());
     RB_CHECK(!json.at("mount_transform_deferred").get<bool>());
@@ -2407,6 +2408,42 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("left").at("worker").at("last_enqueued_seq").get<uint64_t>() == 0);
     RB_CHECK(json.at("left").at("worker").at("last_dispatched_seq").get<uint64_t>() == 0);
     RB_CHECK(json.at("left").at("worker").at("last_completed_seq").get<uint64_t>() == 0);
+
+    snapshot.fault_latched = true;
+    snapshot.motion_state = rb_servo::ServerMotionState::FaultLatched;
+    snapshot.latched_fault_reason = rb_servo::SafetyVerdict::RobotStateError;
+    snapshot.fault_reason = "robot/controller fault during ReadState on left";
+    rb_servo::LatchedFaultContextSnapshot latched_context;
+    latched_context.verdict = "RobotStateError";
+    latched_context.domain = "RobotState";
+    latched_context.arm = "left";
+    latched_context.backend_op = "ReadState";
+    latched_context.backend_error_kind = "RobotFault";
+    latched_context.backend_error_name = "fault_latched";
+    latched_context.backend_error_code = "2222";
+    latched_context.retryable = false;
+    latched_context.recoverable = true;
+    latched_context.robot_fault = true;
+    latched_context.transport_fault = false;
+    latched_context.state_after_source = "response";
+    latched_context.reason = "robot/controller fault during ReadState on left";
+    snapshot.latched_fault_context = latched_context;
+
+    const nlohmann::json latched_json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    RB_CHECK(latched_json.at("fault_context").at("latched").get<bool>());
+    RB_CHECK(latched_json.at("fault_context").at("verdict").get<std::string>() == "RobotStateError");
+    RB_CHECK(latched_json.at("fault_context").at("domain").get<std::string>() == "RobotState");
+    RB_CHECK(latched_json.at("fault_context").at("arm").get<std::string>() == "left");
+    RB_CHECK(latched_json.at("fault_context").at("backend_op").get<std::string>() == "ReadState");
+    RB_CHECK(latched_json.at("fault_context").at("backend_error_kind").get<std::string>() == "RobotFault");
+    RB_CHECK(latched_json.at("fault_context").at("backend_error_name").get<std::string>() == "fault_latched");
+    RB_CHECK(latched_json.at("fault_context").at("backend_error_code").get<std::string>() == "2222");
+    RB_CHECK(!latched_json.at("fault_context").at("retryable").get<bool>());
+    RB_CHECK(latched_json.at("fault_context").at("recoverable").get<bool>());
+    RB_CHECK(latched_json.at("fault_context").at("robot_fault").get<bool>());
+    RB_CHECK(!latched_json.at("fault_context").at("transport_fault").get<bool>());
+    RB_CHECK(latched_json.at("fault_context").at("state_after_source").get<std::string>() == "response");
+    RB_CHECK(latched_json.at("left").at("last_send").at("backend_error_kind").get<std::string>() == "SuppressedByPolicy");
 
     rb_servo::DualArmConfig worker_cfg = cfg;
     worker_cfg.servo.io_model = rb_servo::ServoIoModel::Worker;
@@ -2584,6 +2621,7 @@ bool testEmergencyWinsAndResetDoesNotRun() {
     sleepTicks();
     RB_CHECK(!loop.faultLatched());
     RB_CHECK(loop.motionState() == rb_servo::ServerMotionState::ConnectedHold);
+    RB_CHECK(!loop.latestSnapshot().latched_fault_context.has_value());
 
     rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
     target.left.q_target_deg = joints(5.0);
@@ -3034,6 +3072,19 @@ bool testStopBothOnSendFailureLatchesFault() {
     RB_CHECK(loop.faultLatched());
     RB_CHECK(loop.latchedFaultReason() == rb_servo::SafetyVerdict::SendFailure);
     RB_CHECK(loop.motionState() == rb_servo::ServerMotionState::FaultLatched);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.latched_fault_context.has_value() &&
+               snapshot.latched_fault_context->verdict == "SendFailure";
+    }));
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    RB_CHECK(snapshot.latched_fault_context.has_value());
+    RB_CHECK(snapshot.latched_fault_context->domain == "Backend");
+    RB_CHECK(
+        snapshot.latched_fault_context->backend_error_kind == "ControllerRejected" ||
+        snapshot.latched_fault_context->backend_error_kind == "TransportWriteFailed" ||
+        snapshot.latched_fault_context->backend_error_kind == "TransportTimeout"
+    );
     loop.stop();
     return true;
 }
@@ -3072,6 +3123,11 @@ bool testRobotFaultSendClassifiesAsRobotStateFault() {
     buffer.setCommand(target);
     RB_CHECK(waitUntil([&] { return loop.faultLatched(); }));
 
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot current = loop.latestSnapshot();
+        return current.latched_fault_context.has_value() &&
+               current.latched_fault_context->backend_error_kind == "RobotFault";
+    }));
     const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
     const int left_send_count_at_latch = left_backend->sendCount();
     const int right_send_count_at_latch = right_backend->sendCount();
@@ -3079,6 +3135,18 @@ bool testRobotFaultSendClassifiesAsRobotStateFault() {
     const rb_servo::ServoSnapshot suppressed = loop.latestSnapshot();
     RB_CHECK(snapshot.fault_latched);
     RB_CHECK(snapshot.latched_fault_reason == rb_servo::SafetyVerdict::RobotStateError);
+    RB_CHECK(snapshot.latched_fault_context.has_value());
+    RB_CHECK(snapshot.latched_fault_context->verdict == "RobotStateError");
+    RB_CHECK(snapshot.latched_fault_context->domain == "RobotState");
+    RB_CHECK(snapshot.latched_fault_context->arm == "left");
+    RB_CHECK(snapshot.latched_fault_context->backend_op == "SendServoJ");
+    RB_CHECK(snapshot.latched_fault_context->backend_error_kind == "RobotFault");
+    RB_CHECK(snapshot.latched_fault_context->backend_error_code == "2222");
+    RB_CHECK(snapshot.latched_fault_context->recoverable);
+    RB_CHECK(!snapshot.latched_fault_context->retryable);
+    RB_CHECK(snapshot.latched_fault_context->robot_fault);
+    RB_CHECK(!snapshot.latched_fault_context->transport_fault);
+    RB_CHECK(snapshot.latched_fault_context->state_after_source == "cache");
     RB_CHECK(snapshot.left_state.has_error);
     RB_CHECK(snapshot.left_state.error_code == 2222);
     RB_CHECK(!snapshot.left_send_ok);
@@ -3093,6 +3161,9 @@ bool testRobotFaultSendClassifiesAsRobotStateFault() {
     RB_CHECK(suppressed.send_suppressed);
     RB_CHECK(!suppressed.left_last_send.accepted);
     RB_CHECK(suppressed.left_last_send.backend_error_kind == "SuppressedByPolicy");
+    RB_CHECK(suppressed.latched_fault_context.has_value());
+    RB_CHECK(suppressed.latched_fault_context->backend_error_kind == "RobotFault");
+    RB_CHECK(suppressed.latched_fault_context->backend_error_code == "2222");
     RB_CHECK(suppressed.left_last_read.backend_error_kind == "RobotFault");
     loop.stop();
     return true;

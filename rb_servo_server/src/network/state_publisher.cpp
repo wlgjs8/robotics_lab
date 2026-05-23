@@ -98,6 +98,47 @@ nlohmann::json workerTelemetryJson(const ArmWorkerTelemetry& telemetry, bool ena
     };
 }
 
+nlohmann::json faultContextJson(const ServoSnapshot& snapshot) {
+    nlohmann::json out = {
+        {"latched", snapshot.fault_latched},
+        {"motion_state", toString(snapshot.motion_state)},
+        {"safety_verdict", toString(snapshot.safety_verdict)},
+        {"latched_fault_reason", toString(snapshot.latched_fault_reason)},
+        {"reason", snapshot.fault_reason},
+    };
+    if (!snapshot.latched_fault_context.has_value()) {
+        out["verdict"] = nullptr;
+        out["domain"] = nullptr;
+        out["arm"] = nullptr;
+        out["backend_op"] = nullptr;
+        out["backend_error_kind"] = nullptr;
+        out["backend_error_name"] = nullptr;
+        out["backend_error_code"] = nullptr;
+        out["retryable"] = nullptr;
+        out["recoverable"] = nullptr;
+        out["robot_fault"] = nullptr;
+        out["transport_fault"] = nullptr;
+        out["state_after_source"] = nullptr;
+        return out;
+    }
+
+    const LatchedFaultContextSnapshot& context = *snapshot.latched_fault_context;
+    out["verdict"] = context.verdict;
+    out["domain"] = context.domain;
+    out["arm"] = context.arm;
+    out["backend_op"] = context.backend_op;
+    out["backend_error_kind"] = context.backend_error_kind;
+    out["backend_error_name"] = context.backend_error_name;
+    out["backend_error_code"] = context.backend_error_code;
+    out["retryable"] = context.retryable;
+    out["recoverable"] = context.recoverable;
+    out["robot_fault"] = context.robot_fault;
+    out["transport_fault"] = context.transport_fault;
+    out["state_after_source"] = context.state_after_source;
+    out["reason"] = context.reason;
+    return out;
+}
+
 std::string runModeString(RunMode mode) {
     switch (mode) {
         case RunMode::Real: return "real";
@@ -280,13 +321,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["fault_latched"] = snapshot.fault_latched;
     message["latched_fault_reason"] = toString(snapshot.latched_fault_reason);
     message["fault_reason"] = snapshot.fault_reason;
-    message["fault_context"] = {
-        {"latched", snapshot.fault_latched},
-        {"motion_state", toString(snapshot.motion_state)},
-        {"safety_verdict", toString(snapshot.safety_verdict)},
-        {"latched_fault_reason", toString(snapshot.latched_fault_reason)},
-        {"reason", snapshot.fault_reason},
-    };
+    message["fault_context"] = faultContextJson(snapshot);
     message["logger_dropped_samples"] = snapshot.logger_dropped_samples;
     message["logger_health"] = {
         {"dropped_samples", snapshot.logger_dropped_samples},

@@ -72,7 +72,8 @@ FaultContext classifyBackendError(
     BackendOp op,
     ArmId arm,
     const BackendError& error,
-    const std::optional<RobotState>& state_after
+    const std::optional<RobotState>& state_after,
+    const std::string& state_after_source
 ) {
     FaultContext context;
     context.arm = arm;
@@ -81,6 +82,7 @@ FaultContext classifyBackendError(
     context.recoverable = error.recoverable;
     context.retryable = error.retryable;
     context.state_after = state_after;
+    context.state_after_source = state_after.has_value() ? state_after_source : "none";
     context.robot_error_code = state_after.has_value()
         ? state_after->error_code
         : parseErrorCode(error.code);
@@ -196,9 +198,10 @@ FaultContext classifyReadStateResult(
                     BackendErrorKind::RobotFault,
                     result.value,
                     "robot/controller fault reported by read_state",
-                    "RobotFault"
+                    "fault_latched"
                 ),
-                result.value
+                result.value,
+                "response"
             );
         }
         if (result.value.connection_state != RobotConnectionState::Connected) {
@@ -211,7 +214,8 @@ FaultContext classifyReadStateResult(
                     "robot/controller is disconnected",
                     "RobotDisconnected"
                 ),
-                result.value
+                result.value,
+                "response"
             );
         }
         if (!result.value.has_valid_joint_state || !hasFiniteJointState(result.value)) {
@@ -224,7 +228,8 @@ FaultContext classifyReadStateResult(
                     "robot/controller reported invalid joint state",
                     "InvalidJointState"
                 ),
-                result.value
+                result.value,
+                "response"
             );
         }
         return okContext(BackendOp::ReadState, arm);
@@ -238,7 +243,8 @@ FaultContext classifyReadStateResult(
         error,
         result.value.has_valid_joint_state || result.value.has_error
             ? std::optional<RobotState>(result.value)
-            : std::nullopt
+            : std::nullopt,
+        result.value.has_valid_joint_state || result.value.has_error ? "response" : "none"
     );
 }
 
@@ -249,13 +255,15 @@ FaultContext classifySendServoJResult(
     if (result.accepted) {
         FaultContext context = okContext(BackendOp::SendServoJ, arm);
         context.state_after = result.state_after;
+        context.state_after_source = result.state_after_source;
         return context;
     }
     return classifyBackendError(
         BackendOp::SendServoJ,
         arm,
         result.error,
-        result.state_after
+        result.state_after,
+        result.state_after_source
     );
 }
 

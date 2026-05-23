@@ -321,6 +321,44 @@ State JSON publishes the same data under each arm's `worker` object:
 Direct I/O mode may publish the same object with `enabled=false` and zero/default
 sequence counters so schema consumers do not need a separate parser path.
 
+## MIG-16 Latched Fault Context
+
+`ServoLoop` preserves the structured `FaultContext` that first causes a fault
+latch. Per-arm `last_read` and `last_send` remain live telemetry and may later
+show `SuppressedByPolicy` while regular `servo_j` is blocked by the latch. That
+live suppression result must not replace the original latched diagnostic.
+
+State JSON publishes a top-level `fault_context` object. It keeps the existing
+latch summary fields and, when a context is latched, adds:
+
+- `verdict`
+- `domain`
+- `arm`
+- `backend_op`
+- `backend_error_kind`
+- `backend_error_name`
+- `backend_error_code`
+- `retryable`
+- `recoverable`
+- `robot_fault`
+- `transport_fault`
+- `state_after_source`
+- `reason`
+
+Unavailable detail fields are serialized as JSON null when no latched context
+exists. The context is cleared only by an explicit successful `ResetFault` flow
+or by server restart.
+
+Latch policy:
+
+- On the transition from not latched to latched, store the `FaultContext`
+  returned by the fault classifier.
+- Once latched, later regular send suppressions such as
+  `backend_error_kind=SuppressedByPolicy` remain visible under each arm's
+  `last_send` but do not overwrite `fault_context`.
+- MIG-16 does not add an emergency override of a previously latched non-emergency
+  context. A future task may define that policy explicitly if needed.
+
 ## MIG-15 Rbpodo Read-Only State Semantics
 
 `RbpodoBackend::readState()` separates state acquisition from motion readiness.

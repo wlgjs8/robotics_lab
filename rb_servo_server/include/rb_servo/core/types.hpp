@@ -226,6 +226,22 @@ struct ArmWorkerTelemetry {
     std::string worker_queue_policy = "latest_wins";
 };
 
+struct LatchedFaultContextSnapshot {
+    std::string verdict = "Ok";
+    std::string domain = "None";
+    std::string arm = "left";
+    std::string backend_op = "ReadState";
+    std::string backend_error_kind = "None";
+    std::string backend_error_name = "None";
+    std::string backend_error_code;
+    bool retryable = false;
+    bool recoverable = false;
+    bool robot_fault = false;
+    bool transport_fault = false;
+    std::string state_after_source = "none";
+    std::string reason;
+};
+
 struct ServoSample {
     uint64_t tick = 0;
     uint64_t loop_start_time_ns = 0;
@@ -273,6 +289,7 @@ struct ServoSample {
     ServerMotionState motion_state = ServerMotionState::Disconnected;
     bool fault_latched = false;
     std::string fault_reason;
+    std::optional<LatchedFaultContextSnapshot> latched_fault_context;
 };
 
 struct ServoSnapshot {
@@ -299,6 +316,7 @@ struct ServoSnapshot {
     bool fault_latched = false;
     SafetyVerdict latched_fault_reason = SafetyVerdict::Ok;
     std::string fault_reason;
+    std::optional<LatchedFaultContextSnapshot> latched_fault_context;
 
     bool left_send_ok = false;
     bool right_send_ok = false;

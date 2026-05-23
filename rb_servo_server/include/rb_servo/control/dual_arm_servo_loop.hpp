@@ -3,12 +3,14 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/arm_worker.hpp"
 #include "rb_servo/control/command_buffer.hpp"
+#include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/safety_filter.hpp"
 #include "rb_servo/control/trajectory_filter.hpp"
 #include "rb_servo/kinematics/i_kinematics.hpp"
@@ -98,7 +100,8 @@ private:
         SafetyVerdict verdict,
         const std::string& reason,
         const RobotState& left_state,
-        const RobotState& right_state
+        const RobotState& right_state,
+        const std::optional<FaultContext>& context = std::nullopt
     );
     void setMotionState(ServerMotionState state);
     ServoTarget currentFaultHoldTarget() const;
@@ -142,6 +145,7 @@ private:
     std::atomic<SafetyVerdict> fault_verdict_{SafetyVerdict::Ok};
     std::atomic<SafetyVerdict> latched_fault_reason_{SafetyVerdict::Ok};
     std::string fault_reason_;
+    std::optional<FaultContext> latched_fault_context_;
     JointArray left_fault_hold_q_deg_{};
     JointArray right_fault_hold_q_deg_{};
     ServoSnapshot latest_snapshot_;

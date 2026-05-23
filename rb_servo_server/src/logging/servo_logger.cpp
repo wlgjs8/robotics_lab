@@ -85,6 +85,7 @@ void ServoLogger::threadMain() {
 
 void ServoLogger::writeHeader() {
     file_ << "tick,loop_start_time_ns,loop_end_time_ns,period_ms,jitter_ms,filter_dt_ms,safety_verdict,motion_state,fault_latched,fault_reason,logger_dropped_samples,command_seq,left_mode,right_mode,left_send_ok,right_send_ok";
+    file_ << ",fault_context_verdict,fault_context_domain,fault_context_arm,fault_context_backend_op,fault_context_backend_error_kind,fault_context_backend_error_name,fault_context_backend_error_code,fault_context_retryable,fault_context_recoverable,fault_context_robot_fault,fault_context_transport_fault,fault_context_state_after_source,fault_context_reason";
     file_ << ",left_send_start_ns,left_send_end_ns,right_send_start_ns,right_send_end_ns,send_skew_us,left_send_duration_us,right_send_duration_us";
     file_ << ",left_state_age_us,right_state_age_us,left_send_result_age_us,right_send_result_age_us,left_send_deadline_hit,right_send_deadline_hit,dispatch_skew_us,left_worker_loop_read_duration_us,right_worker_loop_read_duration_us";
     for (int i = 0; i < kDof; ++i) file_ << ",left_q_actual_" << i;
@@ -142,8 +143,26 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << toString(sample.command.left.mode) << ','
           << toString(sample.command.right.mode) << ','
           << sample.left_send_ok << ','
-          << sample.right_send_ok << ','
-          << sample.left_send_start_ns << ','
+          << sample.right_send_ok << ',';
+    if (sample.latched_fault_context.has_value()) {
+        const LatchedFaultContextSnapshot& context = *sample.latched_fault_context;
+        file_ << context.verdict << ','
+              << context.domain << ','
+              << context.arm << ','
+              << context.backend_op << ','
+              << context.backend_error_kind << ','
+              << csvEscape(context.backend_error_name) << ','
+              << csvEscape(context.backend_error_code) << ','
+              << context.retryable << ','
+              << context.recoverable << ','
+              << context.robot_fault << ','
+              << context.transport_fault << ','
+              << context.state_after_source << ','
+              << csvEscape(context.reason) << ',';
+    } else {
+        file_ << ",,,,,,,,,,,,,";
+    }
+    file_ << sample.left_send_start_ns << ','
           << sample.left_send_end_ns << ','
           << sample.right_send_start_ns << ','
           << sample.right_send_end_ns << ','

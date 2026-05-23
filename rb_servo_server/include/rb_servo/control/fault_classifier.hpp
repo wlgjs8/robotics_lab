@@ -20,6 +20,7 @@ struct FaultContext {
     bool retryable = false;
     bool suppress_regular_servo = false;
     std::optional<RobotState> state_after;
+    std::string state_after_source = "none";
 };
 
 FaultContext classifyReadStateResult(

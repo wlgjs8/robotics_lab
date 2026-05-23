@@ -153,6 +153,24 @@ uint64_t commandSendDeadlineNs(
 ArmWorkerTelemetry workerTelemetryOrDefault(const ArmWorker* worker) {
     return worker ? worker->telemetry() : ArmWorkerTelemetry{};
 }
+
+LatchedFaultContextSnapshot faultContextSnapshot(const FaultContext& context) {
+    LatchedFaultContextSnapshot snapshot;
+    snapshot.verdict = toString(context.verdict);
+    snapshot.domain = toString(context.domain);
+    snapshot.arm = toString(context.arm);
+    snapshot.backend_op = toString(context.backend_op);
+    snapshot.backend_error_kind = toString(context.backend_error.kind);
+    snapshot.backend_error_name = context.backend_error.name;
+    snapshot.backend_error_code = context.backend_error.code;
+    snapshot.retryable = context.retryable;
+    snapshot.recoverable = context.recoverable;
+    snapshot.robot_fault = context.backend_error.robot_fault;
+    snapshot.transport_fault = context.backend_error.transport_fault;
+    snapshot.state_after_source = context.state_after_source;
+    snapshot.reason = context.reason;
+    return snapshot;
+}
 }
 
 DualArmServoLoop::DualArmServoLoop(
@@ -408,7 +426,18 @@ void DualArmServoLoop::loopMain() {
         if (read_only_command_blocked) {
             setMotionState(ServerMotionState::ConnectedHold);
         } else if (commandRequestsEmergencyStop(command)) {
-            latchFault(SafetyVerdict::EmergencyStop, "EmergencyStop command", left_state, right_state);
+            const FaultContext emergency_context = classifyCommandValidation(
+                SafetyVerdict::EmergencyStop,
+                command.left.mode == ControlMode::EmergencyStop ? ArmId::Left : ArmId::Right,
+                "EmergencyStop command"
+            );
+            latchFault(
+                SafetyVerdict::EmergencyStop,
+                "EmergencyStop command",
+                left_state,
+                right_state,
+                emergency_context
+            );
             command = makeHoldCommand(left_state, right_state, loop_start);
         } else if (commandRequestsResetFault(command)) {
             if (readOnlyMode()) {
@@ -440,7 +469,11 @@ void DualArmServoLoop::loopMain() {
                 const std::string reason = state_ok || read_fault.reason.empty()
                     ? "robot state read failed or invalid"
                     : read_fault.reason;
-                latchFault(safety_verdict, reason, left_state, right_state);
+                const std::optional<FaultContext> context =
+                    read_fault.verdict != SafetyVerdict::Ok
+                        ? std::optional<FaultContext>(read_fault)
+                        : std::nullopt;
+                latchFault(safety_verdict, reason, left_state, right_state, context);
                 safe_target = currentFaultHoldTarget();
                 safety_verdict = SafetyVerdict::FaultLatched;
             } else {
@@ -529,7 +562,7 @@ void DualArmServoLoop::loopMain() {
                 std::string reason = send_fault.reason.empty()
                     ? "sendServoJ failed"
                     : send_fault.reason;
-                latchFault(send_fault.verdict, reason, left_state, right_state);
+                latchFault(send_fault.verdict, reason, left_state, right_state, send_fault);
                 safe_target = currentFaultHoldTarget();
                 safety_verdict = SafetyVerdict::FaultLatched;
             }
@@ -604,6 +637,11 @@ void DualArmServoLoop::loopMain() {
             sample.fault_latched = fault_latched_.load();
             sample.motion_state = motion_state_.load();
             sample.fault_reason = fault_reason_;
+            if (latched_fault_context_) {
+                sample.latched_fault_context = faultContextSnapshot(*latched_fault_context_);
+            } else {
+                sample.latched_fault_context.reset();
+            }
 
             latest_snapshot_.tick = sample.tick;
             latest_snapshot_.loop_start_time_ns = loop_start;
@@ -623,6 +661,7 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.latched_fault_reason = latched_fault_reason_.load();
             latest_snapshot_.fault_reason = fault_reason_;
+            latest_snapshot_.latched_fault_context = sample.latched_fault_context;
             latest_snapshot_.left_send_ok = left_ok;
             latest_snapshot_.right_send_ok = right_ok;
             latest_snapshot_.left_last_read = sample.left_last_read;
@@ -1068,6 +1107,7 @@ bool DualArmServoLoop::clearFaultLatch(RobotState& left_state, RobotState& right
     fault_verdict_.store(SafetyVerdict::Ok);
     latched_fault_reason_.store(SafetyVerdict::Ok);
     fault_reason_.clear();
+    latched_fault_context_.reset();
     left_prev_sent_q_deg_ = chooseSafeHoldTarget(left_state, left_prev_sent_q_deg_);
     right_prev_sent_q_deg_ = chooseSafeHoldTarget(right_state, right_prev_sent_q_deg_);
     left_prevprev_sent_q_deg_ = left_prev_sent_q_deg_;
@@ -1083,7 +1123,8 @@ void DualArmServoLoop::latchFault(
     SafetyVerdict verdict,
     const std::string& reason,
     const RobotState& left_state,
-    const RobotState& right_state
+    const RobotState& right_state,
+    const std::optional<FaultContext>& context
 ) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (fault_latched_.load()) return;
@@ -1091,6 +1132,19 @@ void DualArmServoLoop::latchFault(
     fault_verdict_.store(verdict);
     latched_fault_reason_.store(verdict);
     fault_reason_ = reason;
+    if (context.has_value()) {
+        latched_fault_context_ = context;
+        if (latched_fault_context_->reason.empty()) {
+            latched_fault_context_->reason = reason;
+        }
+    } else {
+        FaultContext fallback;
+        fallback.verdict = verdict;
+        fallback.domain = verdict == SafetyVerdict::EmergencyStop ? FaultDomain::Emergency : FaultDomain::SafetyPolicy;
+        fallback.reason = reason;
+        fallback.suppress_regular_servo = true;
+        latched_fault_context_ = fallback;
+    }
     left_fault_hold_q_deg_ = chooseSafeHoldTarget(left_state, left_prev_sent_q_deg_);
     right_fault_hold_q_deg_ = chooseSafeHoldTarget(right_state, right_prev_sent_q_deg_);
     setMotionState(verdict == SafetyVerdict::EmergencyStop
