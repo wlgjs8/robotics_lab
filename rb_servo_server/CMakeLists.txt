@@ -26,6 +26,7 @@ add_library(rb_servo_core
     src/control/safety_filter.cpp
     src/control/fault_classifier.cpp
     src/control/servo_dispatcher.cpp
+    src/control/arm_worker.cpp
     src/control/cartesian_controller.cpp
     src/control/force_controller.cpp
     src/control/dual_arm_servo_loop.cpp
@@ -86,6 +87,10 @@ if(BUILD_TESTING)
     add_executable(test_servo_dispatcher tests/test_servo_dispatcher.cpp)
     target_link_libraries(test_servo_dispatcher PRIVATE rb_servo_core)
     add_test(NAME servo_dispatcher COMMAND test_servo_dispatcher)
+
+    add_executable(test_arm_worker tests/test_arm_worker.cpp)
+    target_link_libraries(test_arm_worker PRIVATE rb_servo_core)
+    add_test(NAME arm_worker COMMAND test_arm_worker)
 
     add_executable(test_safety_policy tests/test_safety_policy.cpp)
     target_link_libraries(test_safety_policy PRIVATE rb_servo_core)
