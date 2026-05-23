@@ -13,6 +13,7 @@ add_library(rb_servo_core
     src/core/types.cpp
     src/core/clock.cpp
     src/core/realtime.cpp
+    src/robot/backend_result.cpp
     src/config/config.cpp
     src/kinematics/ik_solver.cpp
     src/kinematics/pinocchio_kinematics.cpp
@@ -72,6 +73,10 @@ target_link_libraries(rb_servo_server PRIVATE rb_servo_core)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(test_backend_result tests/test_backend_result.cpp)
+    target_link_libraries(test_backend_result PRIVATE rb_servo_core)
+    add_test(NAME backend_result COMMAND test_backend_result)
+
     add_executable(test_safety_policy tests/test_safety_policy.cpp)
     target_link_libraries(test_safety_policy PRIVATE rb_servo_core)
     add_test(NAME safety_policy COMMAND test_safety_policy)
