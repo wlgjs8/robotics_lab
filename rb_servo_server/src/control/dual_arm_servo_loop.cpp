@@ -81,6 +81,44 @@ RunMode runModeForArm(const DualArmConfig& config, ArmId arm_id) {
         ? config.left_robot.run_mode
         : config.right_robot.run_mode;
 }
+
+BackendCallSnapshot readCallSnapshot(
+    const BackendResult<RobotState>& result,
+    const FaultContext& classified
+) {
+    BackendCallSnapshot snapshot;
+    snapshot.ok = classified.verdict == SafetyVerdict::Ok;
+    snapshot.accepted = snapshot.ok;
+    const BackendError& error = snapshot.ok ? result.error : classified.backend_error;
+    snapshot.backend_error_kind = toString(error.kind);
+    snapshot.error_name = error.name;
+    snapshot.error_code = error.code;
+    snapshot.error_message = error.message;
+    snapshot.duration_us = result.timing.duration_us;
+    return snapshot;
+}
+
+BackendCallSnapshot sendCallSnapshot(const SendServoJResult& result) {
+    BackendCallSnapshot snapshot;
+    snapshot.ok = result.accepted || result.error.kind == BackendErrorKind::SuppressedByPolicy;
+    snapshot.accepted = result.accepted;
+    snapshot.backend_error_kind = toString(result.error.kind);
+    snapshot.error_name = result.error.name;
+    snapshot.error_code = result.error.code;
+    snapshot.error_message = result.error.message;
+    snapshot.duration_us = result.timing.duration_us;
+    snapshot.state_after_source = result.state_after_source;
+    return snapshot;
+}
+
+BackendError suppressedSendError(const std::string& send_policy) {
+    return backendError(
+        BackendErrorKind::SuppressedByPolicy,
+        "regular servo_j suppressed by send_policy=" + send_policy,
+        "",
+        send_policy
+    );
+}
 }
 
 DualArmServoLoop::DualArmServoLoop(
@@ -338,11 +376,12 @@ void DualArmServoLoop::loopMain() {
         uint64_t right_send_end_ns = 0;
         const ServoTarget attempted_target = safe_target;
         const bool fault_latched_before_send = fault_latched_.load();
-        const bool send_suppressed = readOnlyMode();
-        const std::string send_policy = send_suppressed ? "read_only" : "send_servo_j";
+        const std::string send_policy = currentSendPolicy();
+        const bool send_suppressed = send_policy != "send_servo_j";
         sendTargets(
             attempted_target,
             command.seq,
+            send_policy,
             &left_send_result,
             &right_send_result,
             &left_send_start_ns,
@@ -408,6 +447,10 @@ void DualArmServoLoop::loopMain() {
         sample.right_sent_q_deg = attempted_target.right_q_target_deg;
         sample.left_send_ok = left_ok;
         sample.right_send_ok = right_ok;
+        sample.left_last_read = readCallSnapshot(left_state_result, left_read_fault);
+        sample.right_last_read = readCallSnapshot(right_state_result, right_read_fault);
+        sample.left_last_send = sendCallSnapshot(left_send_result);
+        sample.right_last_send = sendCallSnapshot(right_send_result);
         if (!left_ok) {
             sample.left_send_error_kind = toString(left_send_result.error.kind);
             sample.left_send_error_name = left_send_result.error.name;
@@ -470,6 +513,10 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.fault_reason = fault_reason_;
             latest_snapshot_.left_send_ok = left_ok;
             latest_snapshot_.right_send_ok = right_ok;
+            latest_snapshot_.left_last_read = sample.left_last_read;
+            latest_snapshot_.right_last_read = sample.right_last_read;
+            latest_snapshot_.left_last_send = sample.left_last_send;
+            latest_snapshot_.right_last_send = sample.right_last_send;
             latest_snapshot_.left_send_error_kind = sample.left_send_error_kind;
             latest_snapshot_.left_send_error_name = sample.left_send_error_name;
             latest_snapshot_.left_send_error_code = sample.left_send_error_code;
@@ -745,6 +792,7 @@ ServoTarget DualArmServoLoop::applySafety(
 void DualArmServoLoop::sendTargets(
     const ServoTarget& target,
     uint64_t command_seq,
+    const std::string& send_policy,
     SendServoJResult* left_result,
     SendServoJResult* right_result,
     uint64_t* left_send_start_ns,
@@ -752,17 +800,20 @@ void DualArmServoLoop::sendTargets(
     uint64_t* right_send_start_ns,
     uint64_t* right_send_end_ns
 ) {
-    if (readOnlyMode()) {
+    if (send_policy != "send_servo_j") {
+        const uint64_t suppressed_time_ns = nowSteadyNs();
+        const BackendTiming timing = makeBackendTiming(suppressed_time_ns, suppressed_time_ns);
+        const BackendError error = suppressedSendError(send_policy);
         SendServoJRequest left_request;
         left_request.q_target_deg = target.left_q_target_deg;
         left_request.command_seq = command_seq;
-        left_request.host_time_ns = nowSteadyNs();
+        left_request.host_time_ns = suppressed_time_ns;
         SendServoJRequest right_request;
         right_request.q_target_deg = target.right_q_target_deg;
         right_request.command_seq = command_seq;
         right_request.host_time_ns = left_request.host_time_ns;
-        if (left_result) *left_result = acceptedSend(left_request);
-        if (right_result) *right_result = acceptedSend(right_request);
+        if (left_result) *left_result = rejectedSend(left_request, error, timing);
+        if (right_result) *right_result = rejectedSend(right_request, error, timing);
         if (left_send_start_ns) *left_send_start_ns = 0;
         if (left_send_end_ns) *left_send_end_ns = 0;
         if (right_send_start_ns) *right_send_start_ns = 0;
@@ -840,6 +891,20 @@ bool DualArmServoLoop::motionAllowed() const {
 
 bool DualArmServoLoop::isRealMode() const {
     return config_.left_robot.run_mode == RunMode::Real || config_.right_robot.run_mode == RunMode::Real;
+}
+
+std::string DualArmServoLoop::currentSendPolicy() const {
+    const ServerMotionState state = motion_state_.load();
+    if (state == ServerMotionState::EmergencyLatched) {
+        return "emergency_latched";
+    }
+    if (fault_latched_.load() || state == ServerMotionState::FaultLatched) {
+        return "fault_latched";
+    }
+    if (readOnlyMode()) {
+        return "read_only";
+    }
+    return "send_servo_j";
 }
 
 bool DualArmServoLoop::clearFaultLatch(RobotState& left_state, RobotState& right_state) {

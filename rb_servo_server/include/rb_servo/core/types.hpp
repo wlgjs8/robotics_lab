@@ -153,6 +153,8 @@ struct RobotState {
 
     bool servo_enabled = false;
     bool has_error = false;
+    std::optional<bool> fault_recoverable;
+    std::string lifecycle_state;
     int error_code = 0;
 };
 
@@ -203,6 +205,17 @@ struct ServoTarget {
     JointArray right_q_target_deg{};
 };
 
+struct BackendCallSnapshot {
+    bool ok = true;
+    bool accepted = true;
+    std::string backend_error_kind = "None";
+    std::string error_name = "None";
+    std::string error_code;
+    std::string error_message;
+    double duration_us = 0.0;
+    std::string state_after_source = "none";
+};
+
 struct ServoSample {
     uint64_t tick = 0;
     uint64_t loop_start_time_ns = 0;
@@ -218,6 +231,10 @@ struct ServoSample {
 
     bool left_send_ok = false;
     bool right_send_ok = false;
+    BackendCallSnapshot left_last_read;
+    BackendCallSnapshot right_last_read;
+    BackendCallSnapshot left_last_send;
+    BackendCallSnapshot right_last_send;
     std::string left_send_error_kind;
     std::string left_send_error_name;
     std::string left_send_error_code;
@@ -273,6 +290,10 @@ struct ServoSnapshot {
 
     bool left_send_ok = false;
     bool right_send_ok = false;
+    BackendCallSnapshot left_last_read;
+    BackendCallSnapshot right_last_read;
+    BackendCallSnapshot left_last_send;
+    BackendCallSnapshot right_last_send;
     std::string left_send_error_kind;
     std::string left_send_error_name;
     std::string left_send_error_code;

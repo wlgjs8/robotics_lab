@@ -393,6 +393,11 @@ force_control:
             "recoverable simulator fault",
         )
         self.assertEqual(recoverable["motion_state"], "FaultLatched")
+        self.assertEqual(recoverable["send_policy"], "fault_latched")
+        self.assertTrue(recoverable["send_suppressed"])
+        self.assertEqual(recoverable["left"]["last_read"]["backend_error_kind"], "RobotFault")
+        self.assertEqual(recoverable["left"]["last_send"]["backend_error_kind"], "SuppressedByPolicy")
+        self.assertFalse(recoverable["left"]["last_send"]["accepted"])
         self.send_command("ResetFault")
         recoverable_tick = int(recoverable.get("tick", 0))
         self.wait_snapshot(
@@ -407,6 +412,11 @@ force_control:
             and snap.get("right", {}).get("error_code") == 3333,
             "unrecoverable simulator fault",
         )
+        self.assertEqual(unrecoverable["send_policy"], "fault_latched")
+        self.assertTrue(unrecoverable["send_suppressed"])
+        self.assertEqual(unrecoverable["right"]["last_read"]["backend_error_kind"], "RobotFault")
+        self.assertEqual(unrecoverable["right"]["last_send"]["backend_error_kind"], "SuppressedByPolicy")
+        self.assertFalse(unrecoverable["right"]["last_send"]["accepted"])
         self.send_command("ResetFault")
         unrecoverable_tick = int(unrecoverable.get("tick", 0))
         still_latched = self.wait_snapshot(

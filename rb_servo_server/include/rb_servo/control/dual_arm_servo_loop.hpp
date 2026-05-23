@@ -68,6 +68,7 @@ private:
     void sendTargets(
         const ServoTarget& target,
         uint64_t command_seq,
+        const std::string& send_policy,
         SendServoJResult* left_result,
         SendServoJResult* right_result,
         uint64_t* left_send_start_ns,
@@ -91,6 +92,7 @@ private:
     bool readOnlyMode() const;
     bool motionAllowed() const;
     bool isRealMode() const;
+    std::string currentSendPolicy() const;
     bool clearFaultLatch(RobotState& left_state, RobotState& right_state);
     void latchFault(
         SafetyVerdict verdict,

@@ -1832,8 +1832,12 @@ bool testReadOnlyModeSuppressesSendsAndBlocksMotionCommands() {
     RB_CHECK(snapshot.tick > tick_before);
     RB_CHECK(snapshot.send_suppressed);
     RB_CHECK(snapshot.send_policy == "read_only");
-    RB_CHECK(snapshot.left_send_ok);
-    RB_CHECK(snapshot.right_send_ok);
+    RB_CHECK(!snapshot.left_send_ok);
+    RB_CHECK(!snapshot.right_send_ok);
+    RB_CHECK(snapshot.left_last_send.backend_error_kind == "SuppressedByPolicy");
+    RB_CHECK(snapshot.right_last_send.backend_error_kind == "SuppressedByPolicy");
+    RB_CHECK(!snapshot.left_last_send.accepted);
+    RB_CHECK(!snapshot.right_last_send.accepted);
     RB_CHECK(snapshot.left_send_start_ns == 0);
     RB_CHECK(snapshot.right_send_start_ns == 0);
     RB_CHECK(snapshot.motion_state == rb_servo::ServerMotionState::ConnectedHold);
@@ -1854,6 +1858,7 @@ bool testReadOnlyModeSuppressesSendsAndBlocksMotionCommands() {
     RB_CHECK(left_backend->sendCount() == 0);
     RB_CHECK(right_backend->sendCount() == 0);
     RB_CHECK(snapshot.send_suppressed);
+    RB_CHECK(snapshot.send_policy == "read_only");
     RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand);
     RB_CHECK(sameJointArray(loop.previousSentTarget().left_q_target_deg, initial));
     RB_CHECK(sameJointArray(loop.previousSentTarget().right_q_target_deg, initial));
@@ -1868,6 +1873,9 @@ bool testReadOnlyModeSuppressesSendsAndBlocksMotionCommands() {
     RB_CHECK(loop.motionState() == rb_servo::ServerMotionState::EmergencyLatched);
     RB_CHECK(left_backend->sendCount() == 0);
     RB_CHECK(right_backend->sendCount() == 0);
+    snapshot = loop.latestSnapshot();
+    RB_CHECK(snapshot.send_policy == "emergency_latched");
+    RB_CHECK(snapshot.send_suppressed);
 
     loop.stop();
     return true;
@@ -1887,6 +1895,8 @@ bool testStatePublisherAcceptsDockerServiceHostnameEndpoint() {
 
 bool testStatePublisherSerializesServoSnapshotSchema() {
     rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_robot.backend_type = rb_servo::BackendType::Mock;
+    cfg.right_robot.backend_type = rb_servo::BackendType::Mock;
     cfg.left_mount.base_pose_in_stand = {0.1, 0.2, 0.3, 0.4, 0.5, 0.6};
     cfg.right_mount.base_pose_in_stand = {-0.1, -0.2, 0.3, -0.4, -0.5, 0.6};
 
@@ -1912,12 +1922,36 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.right_state.has_valid_joint_state = true;
     snapshot.left_state.connection_state = rb_servo::RobotConnectionState::Connected;
     snapshot.right_state.connection_state = rb_servo::RobotConnectionState::Connected;
+    snapshot.left_state.servo_enabled = true;
+    snapshot.right_state.servo_enabled = true;
+    snapshot.left_state.has_error = true;
+    snapshot.left_state.error_code = 2222;
+    snapshot.left_state.fault_recoverable = true;
+    snapshot.left_state.lifecycle_state = "faulted";
     snapshot.left_sent_q_deg = joints(3.0);
     snapshot.right_sent_q_deg = joints(4.0);
     snapshot.left_prev_sent_q_deg = joints(5.0);
     snapshot.right_prev_sent_q_deg = joints(6.0);
-    snapshot.left_send_ok = true;
+    snapshot.left_send_ok = false;
     snapshot.right_send_ok = true;
+    snapshot.left_last_read.ok = false;
+    snapshot.left_last_read.backend_error_kind = "RobotFault";
+    snapshot.left_last_read.error_name = "fault_latched";
+    snapshot.left_last_read.error_code = "2222";
+    snapshot.left_last_read.duration_us = 12.0;
+    snapshot.right_last_read.ok = true;
+    snapshot.left_last_send.ok = true;
+    snapshot.left_last_send.accepted = false;
+    snapshot.left_last_send.backend_error_kind = "SuppressedByPolicy";
+    snapshot.left_last_send.error_name = "read_only";
+    snapshot.left_last_send.duration_us = 0.0;
+    snapshot.left_last_send.state_after_source = "none";
+    snapshot.right_last_send.ok = true;
+    snapshot.right_last_send.accepted = true;
+    snapshot.right_last_send.backend_error_kind = "None";
+    snapshot.right_last_send.error_name = "None";
+    snapshot.right_last_send.duration_us = 10.0;
+    snapshot.right_last_send.state_after_source = "response";
     snapshot.left_send_start_ns = 10;
     snapshot.left_send_end_ns = 20;
     snapshot.right_send_start_ns = 30;
@@ -1939,10 +1973,10 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
 
     const char* top_keys[] = {
         "schema_version", "tick", "host_time_ns", "loop_start_time_ns", "loop_end_time_ns",
-        "period_ms", "jitter_ms", "filter_dt_ms", "command_seq", "left", "right",
+        "period_ms", "jitter_ms", "filter_dt_ms", "command_seq", "observed_mode", "observed_backend", "left", "right",
         "send_skew_us", "send_suppressed", "send_policy", "safety_verdict", "motion_state", "fault_latched",
         "latched_fault_reason", "fault_reason", "logger_dropped_samples", "logger_health",
-        "mount_transform_deferred", "mounts", "tcp_fields_deferred"
+        "fault_context", "mount_transform_deferred", "mounts", "tcp_fields_deferred"
     };
     for (const char* key : top_keys) {
         RB_CHECK(json.contains(key));
@@ -1950,7 +1984,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     const char* arm_keys[] = {
         "mode", "q_actual_deg", "q_sent_deg", "q_previous_sent_deg", "send_ok",
         "send_start_ns", "send_end_ns", "send_duration_us", "has_valid_joint_state",
-        "connection_state", "robot_time_ns", "host_time_ns", "error_code",
+        "connection_state", "has_error", "servo_enabled", "fault_recoverable", "lifecycle_state",
+        "last_read", "last_send", "robot_time_ns", "host_time_ns", "error_code",
         "tcp_stand", "tcp_base", "tcp_deferred"
     };
     for (const char* arm_name : {"left", "right"}) {
@@ -1968,6 +2003,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("jitter_ms").get<double>() == 0.1);
     RB_CHECK(json.at("filter_dt_ms").get<double>() == 5.0);
     RB_CHECK(json.at("command_seq").get<uint64_t>() == 42);
+    RB_CHECK(json.at("observed_mode").get<std::string>() == "mock");
+    RB_CHECK(json.at("observed_backend").get<std::string>() == "mock");
     RB_CHECK(json.at("left").at("mode").get<std::string>() == "JointTarget");
     RB_CHECK(json.at("right").at("mode").get<std::string>() == "Hold");
     RB_CHECK(jsonArrayHasSixFinite(json.at("left").at("q_actual_deg")));
@@ -1976,8 +2013,24 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(jsonArrayHasSixFinite(json.at("right").at("q_sent_deg")));
     RB_CHECK(jsonArrayHasSixFinite(json.at("left").at("q_previous_sent_deg")));
     RB_CHECK(jsonArrayHasSixFinite(json.at("right").at("q_previous_sent_deg")));
-    RB_CHECK(json.at("left").at("send_ok").get<bool>());
+    RB_CHECK(!json.at("left").at("send_ok").get<bool>());
     RB_CHECK(json.at("right").at("send_ok").get<bool>());
+    RB_CHECK(json.at("left").at("has_error").get<bool>());
+    RB_CHECK(json.at("left").at("servo_enabled").get<bool>());
+    RB_CHECK(json.at("left").at("fault_recoverable").get<bool>());
+    RB_CHECK(json.at("left").at("lifecycle_state").get<std::string>() == "faulted");
+    RB_CHECK(json.at("right").at("fault_recoverable").is_null());
+    RB_CHECK(json.at("right").at("lifecycle_state").is_null());
+    RB_CHECK(!json.at("left").at("last_read").at("ok").get<bool>());
+    RB_CHECK(json.at("left").at("last_read").at("backend_error_kind").get<std::string>() == "RobotFault");
+    RB_CHECK(json.at("left").at("last_read").at("error_name").get<std::string>() == "fault_latched");
+    RB_CHECK(json.at("left").at("last_read").at("error_code").get<std::string>() == "2222");
+    RB_CHECK(!json.at("left").at("last_send").at("accepted").get<bool>());
+    RB_CHECK(json.at("left").at("last_send").at("backend_error_kind").get<std::string>() == "SuppressedByPolicy");
+    RB_CHECK(json.at("left").at("last_send").at("error_name").get<std::string>() == "read_only");
+    RB_CHECK(json.at("left").at("last_send").at("state_after_source").get<std::string>() == "none");
+    RB_CHECK(json.at("right").at("last_send").at("accepted").get<bool>());
+    RB_CHECK(json.at("right").at("last_send").at("state_after_source").get<std::string>() == "response");
     RB_CHECK(json.at("left").at("send_start_ns").get<uint64_t>() == 10);
     RB_CHECK(json.at("left").at("send_end_ns").get<uint64_t>() == 20);
     RB_CHECK(json.at("right").at("send_start_ns").get<uint64_t>() == 30);
@@ -1994,6 +2047,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(!json.at("fault_latched").get<bool>());
     RB_CHECK(json.at("latched_fault_reason").get<std::string>() == "Ok");
     RB_CHECK(json.at("fault_reason").get<std::string>().empty());
+    RB_CHECK(!json.at("fault_context").at("latched").get<bool>());
+    RB_CHECK(json.at("fault_context").at("motion_state").get<std::string>() == "Running");
     RB_CHECK(json.at("logger_dropped_samples").get<uint64_t>() == 0);
     RB_CHECK(json.at("logger_health").at("ok").get<bool>());
     RB_CHECK(!json.at("mount_transform_deferred").get<bool>());
@@ -2590,14 +2645,18 @@ bool testRobotFaultSendClassifiesAsRobotStateFault() {
     rb_servo::DualArmConfig cfg = testConfig();
     cfg.safety.stop_both_arms_on_single_arm_error = true;
     const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left,
+        initial,
+        true,
+        rb_servo::BackendErrorKind::RobotFault
+    );
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    TestBackend* left_backend = left.get();
+    TestBackend* right_backend = right.get();
     rb_servo::DualArmServoLoop loop(
-        std::make_unique<TestBackend>(
-            rb_servo::ArmId::Left,
-            initial,
-            true,
-            rb_servo::BackendErrorKind::RobotFault
-        ),
-        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        std::move(left),
+        std::move(right),
         cfg,
         &buffer,
         nullptr
@@ -2616,13 +2675,27 @@ bool testRobotFaultSendClassifiesAsRobotStateFault() {
     RB_CHECK(waitUntil([&] { return loop.faultLatched(); }));
 
     const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    const int left_send_count_at_latch = left_backend->sendCount();
+    const int right_send_count_at_latch = right_backend->sendCount();
+    sleepTicks();
+    const rb_servo::ServoSnapshot suppressed = loop.latestSnapshot();
     RB_CHECK(snapshot.fault_latched);
     RB_CHECK(snapshot.latched_fault_reason == rb_servo::SafetyVerdict::RobotStateError);
     RB_CHECK(snapshot.left_state.has_error);
     RB_CHECK(snapshot.left_state.error_code == 2222);
     RB_CHECK(!snapshot.left_send_ok);
-    RB_CHECK(snapshot.left_send_error_kind == "RobotFault");
+    RB_CHECK(
+        snapshot.left_send_error_kind == "RobotFault" ||
+        snapshot.left_last_send.backend_error_kind == "SuppressedByPolicy"
+    );
     RB_CHECK(loop.motionState() == rb_servo::ServerMotionState::FaultLatched);
+    RB_CHECK(left_backend->sendCount() == left_send_count_at_latch);
+    RB_CHECK(right_backend->sendCount() == right_send_count_at_latch);
+    RB_CHECK(suppressed.send_policy == "fault_latched");
+    RB_CHECK(suppressed.send_suppressed);
+    RB_CHECK(!suppressed.left_last_send.accepted);
+    RB_CHECK(suppressed.left_last_send.backend_error_kind == "SuppressedByPolicy");
+    RB_CHECK(suppressed.left_last_read.backend_error_kind == "RobotFault");
     loop.stop();
     return true;
 }

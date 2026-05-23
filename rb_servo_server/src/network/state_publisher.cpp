@@ -44,12 +44,72 @@ nlohmann::json optionalPoseJson(const std::optional<Pose6D>& pose) {
     return poseJson(*pose);
 }
 
+nlohmann::json optionalBoolJson(const std::optional<bool>& value) {
+    if (!value.has_value()) return nullptr;
+    return *value;
+}
+
+nlohmann::json optionalStringJson(const std::string& value) {
+    if (value.empty()) return nullptr;
+    return value;
+}
+
+nlohmann::json backendCallJson(const BackendCallSnapshot& call, bool send_call) {
+    nlohmann::json out = {
+        {"backend_error_kind", call.backend_error_kind},
+        {"error_name", call.error_name},
+        {"error_code", call.error_code},
+        {"duration_us", call.duration_us},
+    };
+    if (send_call) {
+        out["accepted"] = call.accepted;
+        out["state_after_source"] = call.state_after_source;
+    } else {
+        out["ok"] = call.ok;
+    }
+    return out;
+}
+
+std::string runModeString(RunMode mode) {
+    switch (mode) {
+        case RunMode::Real: return "real";
+        case RunMode::Simulation: return "simulation";
+        case RunMode::Mock: return "mock";
+    }
+    return "unknown";
+}
+
+std::string backendTypeString(BackendType backend_type) {
+    switch (backend_type) {
+        case BackendType::Rbpodo: return "rbpodo";
+        case BackendType::Mock: return "mock";
+        case BackendType::Simulator: return "simulator";
+    }
+    return "unknown";
+}
+
+std::string observedModeString(const DualArmConfig& config) {
+    if (config.left_robot.run_mode == config.right_robot.run_mode) {
+        return runModeString(config.left_robot.run_mode);
+    }
+    return "mixed";
+}
+
+std::string observedBackendString(const DualArmConfig& config) {
+    if (config.left_robot.backend_type == config.right_robot.backend_type) {
+        return backendTypeString(config.left_robot.backend_type);
+    }
+    return "mixed";
+}
+
 nlohmann::json armStateJson(
     const RobotState& state,
     const ArmCommand& command,
     const JointArray& sent_q_deg,
     const JointArray& previous_sent_q_deg,
     bool send_ok,
+    const BackendCallSnapshot& last_read,
+    const BackendCallSnapshot& last_send,
     const std::string& send_error_kind,
     const std::string& send_error_name,
     const std::string& send_error_code,
@@ -75,6 +135,12 @@ nlohmann::json armStateJson(
         {"connection_state", state.connection_state == RobotConnectionState::Connected
             ? "Connected"
             : state.connection_state == RobotConnectionState::Error ? "Error" : "Disconnected"},
+        {"has_error", state.has_error},
+        {"servo_enabled", state.servo_enabled},
+        {"fault_recoverable", optionalBoolJson(state.fault_recoverable)},
+        {"lifecycle_state", optionalStringJson(state.lifecycle_state)},
+        {"last_read", backendCallJson(last_read, false)},
+        {"last_send", backendCallJson(last_send, true)},
         {"robot_time_ns", state.robot_time_ns},
         {"host_time_ns", state.host_time_ns},
         {"error_code", state.error_code},
@@ -114,6 +180,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["jitter_ms"] = snapshot.jitter_ms;
     message["filter_dt_ms"] = snapshot.filter_dt_ms;
     message["command_seq"] = snapshot.command.seq;
+    message["observed_mode"] = observedModeString(config_);
+    message["observed_backend"] = observedBackendString(config_);
 
     message["left"] = armStateJson(
         snapshot.left_state,
@@ -121,6 +189,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.left_sent_q_deg,
         snapshot.left_prev_sent_q_deg,
         snapshot.left_send_ok,
+        snapshot.left_last_read,
+        snapshot.left_last_send,
         snapshot.left_send_error_kind,
         snapshot.left_send_error_name,
         snapshot.left_send_error_code,
@@ -135,6 +205,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.right_sent_q_deg,
         snapshot.right_prev_sent_q_deg,
         snapshot.right_send_ok,
+        snapshot.right_last_read,
+        snapshot.right_last_send,
         snapshot.right_send_error_kind,
         snapshot.right_send_error_name,
         snapshot.right_send_error_code,
@@ -152,6 +224,13 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["fault_latched"] = snapshot.fault_latched;
     message["latched_fault_reason"] = toString(snapshot.latched_fault_reason);
     message["fault_reason"] = snapshot.fault_reason;
+    message["fault_context"] = {
+        {"latched", snapshot.fault_latched},
+        {"motion_state", toString(snapshot.motion_state)},
+        {"safety_verdict", toString(snapshot.safety_verdict)},
+        {"latched_fault_reason", toString(snapshot.latched_fault_reason)},
+        {"reason", snapshot.fault_reason},
+    };
     message["logger_dropped_samples"] = snapshot.logger_dropped_samples;
     message["logger_health"] = {
         {"dropped_samples", snapshot.logger_dropped_samples},
