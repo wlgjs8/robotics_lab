@@ -135,16 +135,13 @@ check_real_config_safety_docs() {
   grep_existing "RB_ALLOW_REAL_MOTION" README.md docs AGENTS.md
   grep_existing "BackendResult|SendServoJResult|ArmWorker" README.md docs AGENTS.md
 
-  if [[ -e rb_servo_server/config/dual_real.yaml ]]; then
-    if grep -E '192\.168\.0\.1(0|1)' rb_servo_server/config/dual_real.yaml >/dev/null; then
-      echo "ERROR: rb_servo_server/config/dual_real.yaml contains old placeholder real robot IPs" >&2
-      return 1
-    fi
-  fi
-
   grep -E 'ip: "172\.28\.60\.200"' rb_servo_server/config/dual_real.example.yaml >/dev/null
   grep -E 'ip: "172\.28\.60\.201"' rb_servo_server/config/dual_real.example.yaml >/dev/null
   grep -E 'send_servo_commands: false' rb_servo_server/config/dual_real.example.yaml >/dev/null
+  grep_existing "dual_real.example.yaml" README.md docs rb_servo_server/docs rb_servo_server/config/dual_real.example.yaml
+  grep_existing "dual_real_readonly.yaml" README.md docs rb_servo_server/docs rb_servo_server/config/dual_real.example.yaml
+  grep_existing "dual_real_motion.yaml" README.md docs rb_servo_server/docs rb_servo_server/config/dual_real.example.yaml
+  grep_existing "RB_ALLOW_REAL_CARTESIAN" README.md docs rb_servo_server/docs rb_servo_server/config/dual_real.example.yaml
 }
 
 check_migration_rebaseline_docs() {
@@ -163,6 +160,38 @@ check_migration_rebaseline_docs() {
   grep -E "Deprecated|deprecated|Compatibility" rb_servo_server/config/dual_rbsim.yaml >/dev/null
   grep -E "Deprecated|deprecated|Compatibility" rb_servo_server/config/dual_rb_simulator.yaml >/dev/null
   grep -E "Deprecated|deprecated|Compatibility" rb_servo_server/config/dual_rb_simulator_compose.yaml >/dev/null
+}
+
+check_mig18_config_rebaseline() {
+  check_real_config_safety_docs
+
+  local canonical_configs=(
+    rb_servo_server/config/dual_simulator.yaml
+    rb_servo_server/config/dual_simulator_compose.yaml
+    rb_servo_server/config/dual_simulator_worker.yaml
+    rb_simulator/config/left_rb3_730e.yaml
+    rb_simulator/config/right_rb3_730e.yaml
+  )
+  local config_path
+  for config_path in "${canonical_configs[@]}"; do
+    if [[ ! -f "${config_path}" ]]; then
+      echo "ERROR: missing canonical simulator config: ${config_path}" >&2
+      return 1
+    fi
+  done
+
+  grep_existing "Canonical Config Names" README.md
+  grep_existing "dual_simulator.yaml" README.md docs/architecture.md rb_servo_server/docs/config_examples.md
+  grep_existing "dual_simulator_compose.yaml" README.md docs/architecture.md rb_servo_server/docs/config_examples.md
+  grep_existing "dual_simulator_worker.yaml" README.md docs/architecture.md docs/hardware_free_validation.md
+  grep_existing "left_rb3_730e.yaml" README.md rb_simulator/README.md rb_simulator/docs/architecture.md
+  grep_existing "right_rb3_730e.yaml" README.md rb_simulator/README.md rb_simulator/docs/architecture.md
+
+  grep -E "Deprecated|deprecated|compatibility|Compatibility" rb_servo_server/config/dual_rbsim.yaml >/dev/null
+  grep -E "Deprecated|deprecated|compatibility|Compatibility" rb_servo_server/config/dual_rb_simulator.yaml >/dev/null
+  grep -E "Deprecated|deprecated|compatibility|Compatibility" rb_servo_server/config/dual_rb_simulator_compose.yaml >/dev/null
+  grep -E "NOT RUNNABLE|not runnable|historical" rb_simulator/config/dual_rb3_730e.yaml >/dev/null
+  grep_existing "rbsim_local.*simulator|rbsim.*simulator|compatibility names should be removed" README.md docs rb_servo_server/docs rb_simulator/docs
 }
 
 run_mig12_gate() {
@@ -258,7 +287,15 @@ case "$TASK" in
     run_policy_runner_tests
     ;;
 
-  MIG-18|MIG-19|MIG-25|MIG-26)
+  MIG-18)
+    run_shell_syntax_checks
+    check_mig18_config_rebaseline
+    run_simulator_tests
+    run_gui_tests
+    run_policy_runner_tests
+    ;;
+
+  MIG-19|MIG-25|MIG-26)
     run_shell_syntax_checks
     run_simulator_tests
     run_gui_tests

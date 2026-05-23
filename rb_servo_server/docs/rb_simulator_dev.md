@@ -25,7 +25,8 @@ Use these files together:
 `config/dual_rb_simulator_compose.yaml` are compatibility aliases only. Do not
 use them for new evidence. New docs and configs should use
 `run_mode: simulation`, `backend_type: simulator`, and
-`simulator_control_endpoint`.
+`simulator_control_endpoint`. Remove the compatibility names after downstream
+configs stop depending on them.
 
 The per-arm endpoint split is the supported topology. Each simulator process
 owns exactly one arm and rejects wrong-arm requests fail-closed.

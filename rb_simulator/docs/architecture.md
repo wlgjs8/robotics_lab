@@ -89,7 +89,7 @@ Supported runtime profiles:
 - `rb_simulator/config/left_rb3_730e.yaml`
 - `rb_simulator/config/right_rb3_730e.yaml`
 
-Deprecated historical fixture:
+Deprecated historical fixture, not runnable for the current per-arm topology:
 
 - `rb_simulator/config/dual_rb3_730e.yaml`
 

@@ -20,8 +20,8 @@ Run this only after these software-only prerequisites are complete:
   `rb_simulator/config/right_rb3_730e.yaml`.
 - `rb_servo_server/build/rb_servo_server` exists.
 - `rb_servo_server` has a per-arm simulator config that uses the loopback
-  simulator backend, not `rbpodo`, not `dual_real.yaml`, and not any
-  exposed network bind.
+  simulator backend, not `rbpodo`, not the tracked real template or local real
+  configs, and not any exposed network bind.
 
 The smoke runner fails closed if any prerequisite is missing. That failure means
 the requested local smoke evidence is unavailable, not that hardware validation

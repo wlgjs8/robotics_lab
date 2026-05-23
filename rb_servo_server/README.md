@@ -126,8 +126,12 @@ python3 tools/send_reset_fault.py
 
 Real mode refuses to start unless explicitly enabled. Do not run real robot
 configs in the hardware-free simulator phase; real validation is a separate
-human-gated task. `dual_real.yaml` defaults to
-`tracking_error_policy: fault_latch`.
+human-gated task. Start from the tracked
+`config/dual_real.example.yaml` template, then create a site-owned
+`config/local/dual_real_readonly.yaml` for read-only bring-up or
+`config/local/dual_real_motion.yaml` for a separately approved motion
+procedure. The real template defaults to `tracking_error_policy: fault_latch`
+and `servo.send_servo_commands: false`.
 
 ## Command channel
 

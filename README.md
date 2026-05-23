@@ -150,6 +150,38 @@ docs/              shared architecture, validation, and frame contracts
 scripts/           repository-level validation helpers
 ```
 
+## Canonical Config Names
+
+Simulator operator paths use these current configs:
+
+- `rb_servo_server/config/dual_simulator.yaml`: host-loopback direct I/O.
+- `rb_servo_server/config/dual_simulator_compose.yaml`: Docker Compose service
+  DNS.
+- `rb_servo_server/config/dual_simulator_worker.yaml`: host-loopback worker I/O
+  evidence.
+- `rb_simulator/config/left_rb3_730e.yaml`: left simulator process.
+- `rb_simulator/config/right_rb3_730e.yaml`: right simulator process.
+
+Deprecated simulator compatibility names, including `dual_rbsim.yaml`,
+`dual_rb_simulator.yaml`, `dual_rb_simulator_compose.yaml`, `rbsim_local`, and
+public `rbsim`, are retained only for migration compatibility or internal
+package/protocol names. New operator docs and configs should use
+`run_mode: simulation`, `backend_type: simulator`, and the canonical files
+above; compatibility names should be removed after downstream configs stop
+referencing them.
+
+Real robot config guidance uses this split:
+
+- tracked template: `rb_servo_server/config/dual_real.example.yaml`
+- user local read-only config:
+  `rb_servo_server/config/local/dual_real_readonly.yaml`
+- user local motion config:
+  `rb_servo_server/config/local/dual_real_motion.yaml`
+
+The tracked real template is read-only by default and documents the real
+controller IPs with the required gates. Local real configs are site-owned and
+must stay under `rb_servo_server/config/local/`.
+
 ## Make Quick Starts
 
 Run all examples from the repository root:

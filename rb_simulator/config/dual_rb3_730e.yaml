@@ -1,9 +1,10 @@
-# Deprecated hardware-free simulator profile.
+# HISTORICAL ONLY - NOT RUNNABLE FOR THE CURRENT PER-ARM TOPOLOGY.
 #
-# This file is kept only as a historical/test fixture for the old dual-arm
-# topology. The supported runtime uses one process per arm:
+# This file is kept only as a deprecated fixture for the old single-process
+# dual-arm simulator schema. The supported runtime uses one process per arm:
 # - left_rb3_730e.yaml
 # - right_rb3_730e.yaml
+# Do not use this file for operator runs, smoke evidence, or compose startup.
 
 simulator:
   deprecated: true

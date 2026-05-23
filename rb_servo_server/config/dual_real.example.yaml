@@ -1,10 +1,13 @@
 schema: robotics_lab.rb_servo_server.v1
 
 # Template only. Do not run this file as a site-specific real robot config.
-# Copy to rb_servo_server/config/local/ and edit that local YAML for hardware use.
+# Copy to one of these user-owned local paths before hardware use:
+# - rb_servo_server/config/local/dual_real_readonly.yaml
+# - rb_servo_server/config/local/dual_real_motion.yaml
 # Read-only real connection requires RB_ALLOW_REAL_ROBOT=1.
 # Real servo_j motion additionally requires RB_ALLOW_REAL_MOTION=1 and
 # servo.send_servo_commands=true.
+# Real Cartesian/TCP motion additionally requires RB_ALLOW_REAL_CARTESIAN=1.
 
 left_robot:
   backend_type: rbpodo

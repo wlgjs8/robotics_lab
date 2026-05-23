@@ -191,3 +191,18 @@ RealSense, external simulator, force-control, gripper, or real Cartesian
 readiness.
 
 Hardware acceptance is a separate, human-gated workflow.
+
+## Config Naming Rebaseline
+
+Canonical simulator configs are documented in the root
+[README.md](../README.md#canonical-config-names). The recommended simulator
+paths are the per-arm host, compose, and worker configs listed there; no legacy
+dual-arm simulator config is recommended for new evidence.
+
+Real robot config uses a tracked read-only template,
+`rb_servo_server/config/dual_real.example.yaml`, and user-owned local configs
+under `rb_servo_server/config/local/`. Use
+`rb_servo_server/config/local/dual_real_readonly.yaml` for read-only state
+bring-up and `rb_servo_server/config/local/dual_real_motion.yaml` only for a
+separately approved motion procedure. Real connection, joint motion, and
+Cartesian motion remain gated by the environment variables above.

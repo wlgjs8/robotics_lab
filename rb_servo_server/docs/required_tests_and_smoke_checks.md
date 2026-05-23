@@ -27,7 +27,7 @@ upstream; never skip ahead.
 | G2 | `ctest` (unit) | `tests/test_safety_policy.cpp` invariants still hold | Yes |
 | G3 | Mock smoke (server only) | Server starts under `config/dual_mock.yaml` and exits cleanly | Yes |
 | G4 | Mock smoke (server + driver) | Sine driver completes a short loop without faulting the server | Yes |
-| G5 | Real-mode env-var guard | Server refuses to launch under `config/dual_real.yaml` without `RB_ALLOW_REAL_ROBOT=1` | Yes |
+| G5 | Real-mode env-var guard | Server refuses to launch under `config/local/dual_real_readonly.yaml` without `RB_ALLOW_REAL_ROBOT=1` | Yes |
 | G6 | Touched-area regression | A behavior changed in this iteration is covered by a new or strengthened assertion in `tests/` | Yes for any behavioral change |
 | G7 | Doc parity | Any policy or behavior change is reflected in `docs/fail_safe_policy.md`, `docs/network_protocol.md`, or `docs/testing.md` | Yes for any policy change |
 
@@ -105,7 +105,7 @@ Pass criteria:
 ### G5 — real-mode env-var guard
 
 ```bash
-./build/rb_servo_server --config config/dual_real.yaml
+./build/rb_servo_server --config config/local/dual_real_readonly.yaml
 ```
 
 This **must** fail-fast before opening a socket to hardware. Specifically,
@@ -146,9 +146,9 @@ Doc drift is treated as a real bug, not a stylistic issue.
 In this repo, "smoke" is intentionally narrow:
 
 - It runs the server binary against a **mock** backend (`config/dual_mock.yaml`).
-- It never touches `config/dual_real.yaml` against real hardware. The real
-  config is only exercised via the env-var guard check (G5) to prove the
-  guard latches.
+- It never touches physical hardware. The local read-only real config is only
+  exercised via the env-var guard check (G5) to prove the guard latches before
+  any socket is opened.
 - It is short (≤ 1 s server, ≤ a few seconds of driver traffic). The intent
   is to catch startup, parser, and state-machine regressions — not soak
   testing or performance.

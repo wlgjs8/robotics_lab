@@ -56,9 +56,11 @@ right_robot:
 ```
 
 The deprecated `dual_rb_simulator.yaml`, `dual_rb_simulator_compose.yaml`, and
-`dual_rbsim.yaml` profiles are compatibility aliases only. New configs should
+`dual_rbsim.yaml` profiles are compatibility aliases only. They are not
+recommended for new operator runs or acceptance evidence. New configs should
 use `backend_type: simulator`, `run_mode: simulation`, and
-`simulator_control_endpoint`.
+`simulator_control_endpoint`. Remove these compatibility names after downstream
+configs no longer reference them.
 
 See `docs/rb_simulator_dev.md` for the supported unit and local-smoke evidence.
 
@@ -66,7 +68,9 @@ See `docs/rb_simulator_dev.md` for the supported unit and local-smoke evidence.
 
 `config/dual_real.example.yaml` is a template only. Actual site-specific real
 robot YAML files belong under `config/local/`, and local `*.yaml` files there
-are gitignored.
+are gitignored. Use `config/local/dual_real_readonly.yaml` for read-only
+bring-up and `config/local/dual_real_motion.yaml` only for separately approved
+motion procedures.
 
 The real example uses the assigned controller IPs:
 
@@ -88,7 +92,8 @@ servo:
 Real robot startup remains gated outside the hardware-free simulator workflow:
 `RB_ALLOW_REAL_ROBOT=1` is required for read-only real connection, and
 `RB_ALLOW_REAL_MOTION=1` plus `servo.send_servo_commands=true` is required for
-real `servo_j` motion.
+real `servo_j` motion. Real Cartesian/TCP motion additionally requires
+`RB_ALLOW_REAL_CARTESIAN=1`.
 
 ## Force control
 
