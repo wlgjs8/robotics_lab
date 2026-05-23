@@ -142,6 +142,14 @@ The future `policy_runner` owns Python action sources, including SpaceMouse
 input. It consumes robot state, camera metadata, and calibration packages; it
 must not bypass servo safety gates.
 
+The backend-contract migration target is defined in
+[servo_backend_contract.md](servo_backend_contract.md). `IRobotBackend` should
+migrate from bool/log-string behavior to structured `BackendResult` and
+`SendServoJResult` diagnostics, while `ServoLoop` gradually stops owning
+blocking network I/O. The future ownership target is `CommandBuffer ->
+ServoCoordinator -> Left/Right ArmWorker`. This is a diagnostics and loop
+architecture migration, not a real-motion enablement.
+
 ## Frame And Calibration Contract
 
 Shared frame names and transform direction are defined in

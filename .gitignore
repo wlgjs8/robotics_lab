@@ -17,6 +17,7 @@
 camera_server/episodes/
 rb_servo_server/config/local/*.yaml
 !rb_servo_server/config/local/.gitkeep
+rb_servo_server/config/dual_real.yaml
 calibration/local/
 geometry/local/
 

@@ -46,9 +46,50 @@ run_camera_gate() {
   ctest --test-dir camera_server/build/hardware_free_gate --output-on-failure
 }
 
+run_shell_syntax_checks() {
+  bash -n scripts/codex_gate.sh
+  bash -n scripts/codex_run_sequence.sh
+}
+
+grep_existing() {
+  local pattern="$1"
+  shift
+
+  local paths=()
+  local path
+  for path in "$@"; do
+    if [[ -e "$path" ]]; then
+      paths+=("$path")
+    fi
+  done
+
+  if [[ "${#paths[@]}" -eq 0 ]]; then
+    echo "ERROR: no existing paths to grep for pattern: $pattern" >&2
+    return 2
+  fi
+
+  grep -R -E "$pattern" "${paths[@]}" >/dev/null
+}
+
+check_real_config_safety_docs() {
+  grep_existing "RB_ALLOW_REAL_MOTION" README.md docs AGENTS.md
+  grep_existing "BackendResult|SendServoJResult|ArmWorker" README.md docs AGENTS.md
+
+  if [[ -e rb_servo_server/config/dual_real.yaml ]]; then
+    if grep -E '192\.168\.0\.1(0|1)' rb_servo_server/config/dual_real.yaml >/dev/null; then
+      echo "ERROR: rb_servo_server/config/dual_real.yaml contains old placeholder real robot IPs" >&2
+      return 1
+    fi
+  fi
+
+  grep -E 'ip: "172\.28\.60\.200"' rb_servo_server/config/dual_real.example.yaml >/dev/null
+  grep -E 'ip: "172\.28\.60\.201"' rb_servo_server/config/dual_real.example.yaml >/dev/null
+  grep -E 'send_servo_commands: false' rb_servo_server/config/dual_real.example.yaml >/dev/null
+}
+
 case "$TASK" in
   P0-A)
-    grep -R "RB_ALLOW_REAL_MOTION" README.md docs >/dev/null
+    grep_existing "RB_ALLOW_REAL_MOTION" README.md docs
     ;;
 
   P0-B)
@@ -78,13 +119,27 @@ case "$TASK" in
     ;;
 
   P2-B)
-    grep -R "geometry_valid_for_real_policy" calibration geometry docs README.md >/dev/null 2>&1
-    grep -R "configured_estimate" calibration geometry docs README.md >/dev/null 2>&1
+    grep_existing "geometry_valid_for_real_policy" calibration geometry docs README.md
+    grep_existing "configured_estimate" calibration geometry docs README.md
     ;;
 
   P3-F)
     bash -n scripts/tcp_pose_simulator_acceptance.sh
-    grep -R "RB_ALLOW_REAL_CARTESIAN" docs/runbooks/tcp_pose_simulator_acceptance.md README.md >/dev/null 2>&1
+    grep_existing "RB_ALLOW_REAL_CARTESIAN" docs/runbooks/tcp_pose_simulator_acceptance.md README.md
+    ;;
+
+  MIG-00)
+    run_shell_syntax_checks
+    check_real_config_safety_docs
+    ;;
+
+  MIG-01|MIG-02|MIG-04|MIG-05|MIG-06|MIG-07|MIG-08|MIG-09|MIG-10|MIG-11|MIG-12)
+    run_servo_gate
+    ;;
+
+  MIG-03)
+    run_simulator_tests
+    run_servo_gate
     ;;
 
   *)

@@ -283,7 +283,7 @@ transforms:
       translation: m
       rotation: rad
     status: configured_estimate
-    source: rb_servo_server/config/dual_real.yaml
+    source: rb_servo_server/config/dual_real.example.yaml
   - name: T_stand_right_base
     parent: stand
     child: right_base
@@ -292,7 +292,7 @@ transforms:
       translation: m
       rotation: rad
     status: configured_estimate
-    source: rb_servo_server/config/dual_real.yaml
+    source: rb_servo_server/config/dual_real.example.yaml
 ```
 
 `calibration/cameras/intrinsics.yaml`:

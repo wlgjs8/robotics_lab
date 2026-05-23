@@ -34,6 +34,8 @@ Start here, then follow component docs only for implementation details:
   hardware-free build and test gate.
 - [docs/frame_contract.md](docs/frame_contract.md): shared robot/camera frame
   names and transform direction.
+- [docs/servo_backend_contract.md](docs/servo_backend_contract.md): MIG backend
+  result contract and non-blocking servo-loop migration target.
 - [docs/runbooks/tcp_pose_simulator_acceptance.md](docs/runbooks/tcp_pose_simulator_acceptance.md):
   simulator-only TCP Pose/Delta acceptance.
 - [calibration/active_calibration.yaml](calibration/active_calibration.yaml):
@@ -158,3 +160,9 @@ scripts/           repository-level validation helpers
   for visualization and policy inputs.
 - P3 enables simulator-only Cartesian/TCP command validation. Real Cartesian
   motion remains separately gated after P3.
+- MIG migrates `IRobotBackend` bool/log-string operations toward structured
+  `BackendResult` and `SendServoJResult` diagnostics, then moves blocking
+  network I/O out of `ServoLoop` toward `CommandBuffer -> ServoCoordinator ->
+  Left/Right ArmWorker`. This migration is not a real-motion enablement and
+  does not weaken `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`, or
+  `RB_ALLOW_REAL_CARTESIAN`.
