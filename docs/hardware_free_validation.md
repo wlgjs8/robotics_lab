@@ -35,7 +35,9 @@ The script runs:
   sample logs.
 - `rb_simulator`: `compileall` over the simulator package/tools, then stdlib
   `unittest` discovery for the deterministic simulator state-machine core and
-  loopback JSONL protocol.
+  loopback JSONL protocol, including the structured MIG-03 error envelope
+  (`error.kind/name/message/code/retryable/recoverable`) and state snapshots
+  on stateful robot/controller rejections.
 - `rb_simulator/tools/rbsim_servo_smoke.py --self-test`: parser, state-stream,
   and servo-log validator coverage without launching processes.
 - Full local loopback smoke when prerequisites are present: starts separate

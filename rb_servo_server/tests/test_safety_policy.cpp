@@ -323,6 +323,15 @@ public:
         state.stopped = true;
     }
 
+    void setFault(const std::string& arm, int error_code) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        ArmRuntime& state = armState(arm);
+        state.has_error = true;
+        state.error_code = error_code;
+        state.servo_enabled = false;
+        state.stopped = true;
+    }
+
 private:
     struct ArmRuntime {
         bool connected = false;
@@ -377,13 +386,33 @@ private:
 
         std::lock_guard<std::mutex> lock(state_mutex_);
         ArmRuntime& state = armState(arm);
+        const auto stateJson = [&]() {
+            std::vector<double> q_actual = state.q_actual;
+            q_actual[0] += state.tracking_bias_deg;
+            return nlohmann::json{
+                {"arm", arm},
+                {"q_actual_deg", q_actual},
+                {"q_target_deg", state.q_target},
+                {"dq_actual_deg_s", std::vector<double>{0, 0, 0, 0, 0, 0}},
+                {"has_valid_joint_state", state.has_valid_joint_state},
+                {"connection_state", state.connected ? "Connected" : "Disconnected"},
+                {"servo_enabled", state.servo_enabled},
+                {"has_error", state.has_error},
+                {"error_code", state.error_code},
+                {"robot_time_ns", state.robot_time_ns},
+                {"lifecycle_state", state.has_error ? "faulted" : state.stopped ? "stopped" : state.servo_enabled ? "servo_enabled" : "connected"},
+            };
+        };
         if (op == "read_state" && state.fail_next_read) {
             state.fail_next_read = false;
             response["ok"] = false;
             response["error"] = {
+                {"kind", "TransportReadFailed"},
                 {"name", "read_failure_injected"},
                 {"message", "read failure injected"},
                 {"code", 2104},
+                {"retryable", true},
+                {"recoverable", true},
             };
             sendResponse(client, response);
             return;
@@ -393,10 +422,28 @@ private:
             state.fail_next_send = false;
             response["ok"] = false;
             response["error"] = {
+                {"kind", "TransportWriteFailed"},
                 {"name", "send_failure_injected"},
                 {"message", "send failure injected"},
                 {"code", 2101},
+                {"retryable", true},
+                {"recoverable", true},
             };
+            sendResponse(client, response);
+            return;
+        }
+
+        if (op == "send_servo_j" && state.has_error) {
+            response["ok"] = false;
+            response["error"] = {
+                {"kind", "RobotFault"},
+                {"name", "fault_latched"},
+                {"message", "fault latched"},
+                {"code", state.error_code},
+                {"retryable", false},
+                {"recoverable", true},
+            };
+            response["state"] = stateJson();
             sendResponse(client, response);
             return;
         }
@@ -417,9 +464,12 @@ private:
             if (state.stop_failure) {
                 response["ok"] = false;
                 response["error"] = {
+                    {"kind", "TransportWriteFailed"},
                     {"name", "stop_failure_injected"},
                     {"message", "stop failure injected"},
                     {"code", 2102},
+                    {"retryable", true},
+                    {"recoverable", true},
                 };
                 sendResponse(client, response);
                 return;
@@ -431,9 +481,12 @@ private:
             if (state.reset_failure) {
                 response["ok"] = false;
                 response["error"] = {
+                    {"kind", "TransportWriteFailed"},
                     {"name", "reset_failure_injected"},
                     {"message", "reset failure injected"},
                     {"code", 2103},
+                    {"retryable", true},
+                    {"recoverable", true},
                 };
                 sendResponse(client, response);
                 return;
@@ -451,22 +504,8 @@ private:
         }
 
         state.robot_time_ns += 5000000;
-        std::vector<double> q_actual = state.q_actual;
-        q_actual[0] += state.tracking_bias_deg;
         response["ok"] = true;
-        response["state"] = {
-            {"arm", arm},
-            {"q_actual_deg", q_actual},
-            {"q_target_deg", state.q_target},
-            {"dq_actual_deg_s", std::vector<double>{0, 0, 0, 0, 0, 0}},
-            {"has_valid_joint_state", state.has_valid_joint_state},
-            {"connection_state", state.connected ? "Connected" : "Disconnected"},
-            {"servo_enabled", state.servo_enabled},
-            {"has_error", state.has_error},
-            {"error_code", state.error_code},
-            {"robot_time_ns", state.robot_time_ns},
-            {"lifecycle_state", state.stopped ? "stopped" : state.servo_enabled ? "servo_enabled" : "connected"},
-        };
+        response["state"] = stateJson();
         sendResponse(client, response);
     }
 
@@ -783,14 +822,33 @@ bool testRbsimBackendMapsStateAndFailureResponses() {
     request.q_target_deg = target;
     const rb_servo::SendServoJResult rejected = backend.sendServoJ(request);
     RB_CHECK(!rejected.accepted);
-    RB_CHECK(rejected.error.kind == rb_servo::BackendErrorKind::ProtocolError);
+    RB_CHECK(rejected.error.kind == rb_servo::BackendErrorKind::TransportWriteFailed);
     RB_CHECK(rejected.error.name == "send_failure_injected");
     RB_CHECK(rejected.error.code == "2101");
     RB_CHECK(rejected.error.message == "send failure injected");
+    RB_CHECK(rejected.error.transport_fault);
+    RB_CHECK(!rejected.error.robot_fault);
+    RB_CHECK(!rejected.state_after.has_value());
+    RB_CHECK(rejected.state_after_source == "none");
     state_result = backend.readState();
     RB_CHECK(state_result.ok);
     state = state_result.value;
     RB_CHECK(state.q_target_deg[0] == 1.25);
+
+    server->setFault("left", 2222);
+    target[0] += 5.0;
+    request.q_target_deg = target;
+    const rb_servo::SendServoJResult faulted = backend.sendServoJ(request);
+    RB_CHECK(!faulted.accepted);
+    RB_CHECK(faulted.error.kind == rb_servo::BackendErrorKind::RobotFault);
+    RB_CHECK(faulted.error.name == "fault_latched");
+    RB_CHECK(faulted.error.code == "2222");
+    RB_CHECK(faulted.error.robot_fault);
+    RB_CHECK(!faulted.error.transport_fault);
+    RB_CHECK(faulted.state_after.has_value());
+    RB_CHECK(faulted.state_after_source == "response");
+    RB_CHECK(faulted.state_after->has_error);
+    RB_CHECK(faulted.state_after->error_code == 2222);
 
     RB_CHECK(backend.stop().ok);
     RB_CHECK(backend.resetFault().ok);

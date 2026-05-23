@@ -77,6 +77,7 @@ class JsonlProtocolServerTest(unittest.TestCase):
 
         failed = self.control("send_servo_j", params={"q_target_deg": [2, -30, 80, 0, 60, 0]})
         self.assertFalse(failed["ok"])
+        self.assertEqual(failed["error"]["kind"], "TransportWriteFailed")
         self.assertEqual(failed["error"]["name"], "send_failure_injected")
         self.assertEqual(failed["error"]["code"], 2101)
 
@@ -90,15 +91,19 @@ class JsonlProtocolServerTest(unittest.TestCase):
 
         blocked = self.control("initialize")
         self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["error"]["kind"], "InvalidJointState")
         self.assertEqual(blocked["error"]["name"], "invalid_joint_state")
         self.assertEqual(blocked["error"]["code"], 2002)
+        self.assertIn("state", blocked)
 
         self.assertTrue(self.admin("admin.set_joint_validity", params={"valid": True})["ok"])
         faulted = self.admin("admin.set_fault", params={"error_code": 4321})
         self.assertEqual(faulted["state"]["error_code"], 4321)
         fault_response = self.control("initialize")
+        self.assertEqual(fault_response["error"]["kind"], "RobotFault")
         self.assertEqual(fault_response["error"]["name"], "fault_latched")
         self.assertEqual(fault_response["error"]["code"], 4321)
+        self.assertIn("state", fault_response)
 
     def test_control_and_admin_endpoints_are_separated(self) -> None:
         admin_on_control = self.request(
@@ -106,6 +111,7 @@ class JsonlProtocolServerTest(unittest.TestCase):
             {"schema_version": PROTOCOL_VERSION, "request_id": "wrong", "op": "admin.tick", "params": {}},
         )
         self.assertFalse(admin_on_control["ok"])
+        self.assertEqual(admin_on_control["error"]["kind"], "WrongEndpoint")
         self.assertEqual(admin_on_control["error"]["name"], "wrong_endpoint")
 
         control_on_admin = self.request(
@@ -113,6 +119,7 @@ class JsonlProtocolServerTest(unittest.TestCase):
             {"schema_version": PROTOCOL_VERSION, "request_id": "wrong", "op": "read_state", "arm": "left"},
         )
         self.assertFalse(control_on_admin["ok"])
+        self.assertEqual(control_on_admin["error"]["kind"], "WrongEndpoint")
         self.assertEqual(control_on_admin["error"]["name"], "wrong_endpoint")
 
     def test_protocol_rejects_schema_mismatch_and_malformed_requests(self) -> None:
@@ -122,6 +129,7 @@ class JsonlProtocolServerTest(unittest.TestCase):
         )
         self.assertFalse(bad_schema["ok"])
         self.assertEqual(bad_schema["request_id"], "bad-schema")
+        self.assertEqual(bad_schema["error"]["kind"], "UnsupportedSchema")
         self.assertEqual(bad_schema["error"]["name"], "unsupported_schema_version")
         self.assertEqual(bad_schema["error"]["code"], 4001)
 
@@ -130,6 +138,7 @@ class JsonlProtocolServerTest(unittest.TestCase):
             {"schema_version": PROTOCOL_VERSION, "request_id": "missing-arm", "op": "read_state"},
         )
         self.assertFalse(missing_arm["ok"])
+        self.assertEqual(missing_arm["error"]["kind"], "ProtocolError")
         self.assertEqual(missing_arm["error"]["name"], "bad_request")
 
         bad_params = self.request(
@@ -147,6 +156,7 @@ class JsonlProtocolServerTest(unittest.TestCase):
 
         invalid_json = json.loads(self.protocol.handle_json_line(b"{not-json}\n", "control"))
         self.assertFalse(invalid_json["ok"])
+        self.assertEqual(invalid_json["error"]["kind"], "ProtocolError")
         self.assertEqual(invalid_json["error"]["name"], "invalid_json")
         self.assertEqual(invalid_json["error"]["code"], 4002)
 

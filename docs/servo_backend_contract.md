@@ -82,3 +82,58 @@ MIG-00 establishes only migration infrastructure and safety cleanup:
 Later MIG tasks may change `rb_servo_server` source code, but each task must
 keep real robot connection, real joint motion, and real Cartesian motion gated
 by the environment variables above.
+
+## MIG-03 Simulator Error Envelope
+
+The hardware-free `rb_simulator` error response is structured. Failed responses
+carry:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "kind": "RobotFault",
+    "name": "fault_latched",
+    "message": "left is faulted",
+    "code": 2222,
+    "retryable": false,
+    "recoverable": true
+  },
+  "state": {}
+}
+```
+
+`error.kind` uses the C++ `BackendErrorKind` spelling when the simulator can
+classify the failure. `error.name` remains the simulator-specific symbolic name,
+and `error.code` remains the numeric simulator/controller code. Stateful robot
+or controller rejections include `state` in the same response so callers can
+record `SendServoJResult.state_after` without issuing a second read.
+
+Stateful simulator names map as follows:
+
+| Simulator name | Backend kind | State included |
+| --- | --- | --- |
+| `fault_latched` | `RobotFault` | yes |
+| `servo_disabled` | `ServoDisabled` | yes |
+| `disconnected` | `RobotDisconnected` | yes |
+| `not_initialized` | `RobotNotInitialized` | yes |
+| `invalid_joint_state` | `InvalidJointState` | yes |
+| `wrong_arm` | `WrongArm` | no |
+| `wrong_endpoint` | `WrongEndpoint` | no |
+| `unsupported_schema_version` | `UnsupportedSchema` | no |
+| `bad_request`, `invalid_json`, `unknown_operation` | `ProtocolError` | no |
+
+Injected transport-like failures are not robot faults:
+
+| Simulator name | Backend kind |
+| --- | --- |
+| `send_failure_injected` | `TransportWriteFailed` |
+| `read_failure_injected` | `TransportReadFailed` |
+| `stop_failure_injected` | `TransportWriteFailed` |
+| `reset_failure_injected` | `TransportWriteFailed` |
+
+`RbsimBackend` parses `error.kind` when present, preserves
+`error.name/code/message`, and falls back from older name-only simulator
+responses to the same mapping. When an error response includes `state`,
+`sendServoJ` rejects with `state_after_source="response"`; otherwise the source
+is `"none"`.

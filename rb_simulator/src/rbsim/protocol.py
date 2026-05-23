@@ -32,10 +32,33 @@ ERROR_READ_FAILURE = 2104
 class ProtocolError(RuntimeError):
     """A machine-testable protocol failure."""
 
-    def __init__(self, name: str, message: str, code: int = ERROR_BAD_REQUEST):
+    def __init__(
+        self,
+        name: str,
+        message: str,
+        code: int = ERROR_BAD_REQUEST,
+        *,
+        kind: str = "ProtocolError",
+        retryable: bool = False,
+        recoverable: bool = True,
+    ):
         super().__init__(message)
         self.name = name
         self.code = code
+        self.kind = kind
+        self.retryable = retryable
+        self.recoverable = recoverable
+
+
+@dataclass(frozen=True)
+class ErrorEnvelope:
+    kind: str
+    name: str
+    message: str
+    code: int
+    retryable: bool
+    recoverable: bool
+    state: ArmSnapshot | None = None
 
 
 @dataclass
@@ -59,7 +82,7 @@ class FaultInjectionState:
         try:
             return self.arms[arm]
         except KeyError as exc:
-            raise ProtocolError("unknown_arm", f"unknown arm: {arm}", ERROR_UNKNOWN_ARM) from exc
+            raise ProtocolError("unknown_arm", f"unknown arm: {arm}", ERROR_UNKNOWN_ARM, kind="UnknownArm") from exc
 
     def reset(self, arm: str | None = None) -> None:
         if arm is None:
@@ -85,11 +108,33 @@ class SimulatorProtocol:
             arm = _optional_string(request.get("arm"))
             response = self.handle_request(request, endpoint_role)
         except ProtocolError as exc:
-            response = _error_response(request_id, arm, exc.name, str(exc), exc.code)
+            response = _error_response(
+                request_id,
+                arm,
+                ErrorEnvelope(
+                    kind=exc.kind,
+                    name=exc.name,
+                    message=str(exc),
+                    code=exc.code,
+                    retryable=exc.retryable,
+                    recoverable=exc.recoverable,
+                ),
+            )
         except SimulatorError as exc:
-            response = _error_response(request_id, arm, *_classify_simulator_error(str(exc), arm, self.simulator))
+            response = _error_response(request_id, arm, _classify_simulator_error(str(exc), arm, self.simulator))
         except ValueError as exc:
-            response = _error_response(request_id, arm, "bad_request", str(exc), ERROR_BAD_REQUEST)
+            response = _error_response(
+                request_id,
+                arm,
+                ErrorEnvelope(
+                    kind="ProtocolError",
+                    name="bad_request",
+                    message=str(exc),
+                    code=ERROR_BAD_REQUEST,
+                    retryable=False,
+                    recoverable=True,
+                ),
+            )
 
         return json.dumps(response, sort_keys=True, separators=(",", ":"))
 
@@ -100,6 +145,8 @@ class SimulatorProtocol:
                 "unsupported_schema_version",
                 f"schema_version must be {PROTOCOL_VERSION!r}",
                 ERROR_UNSUPPORTED_SCHEMA,
+                kind="UnsupportedSchema",
+                recoverable=False,
             )
 
         op = _required_string(request, "op")
@@ -110,11 +157,21 @@ class SimulatorProtocol:
 
         if op.startswith("admin."):
             if endpoint_role != "admin":
-                raise ProtocolError("wrong_endpoint", "admin operation sent to control endpoint", ERROR_WRONG_ENDPOINT)
+                raise ProtocolError(
+                    "wrong_endpoint",
+                    "admin operation sent to control endpoint",
+                    ERROR_WRONG_ENDPOINT,
+                    kind="WrongEndpoint",
+                )
             return self._handle_admin(op, request_id, params, request)
 
         if endpoint_role != "control":
-            raise ProtocolError("wrong_endpoint", "control operation sent to admin endpoint", ERROR_WRONG_ENDPOINT)
+            raise ProtocolError(
+                "wrong_endpoint",
+                "control operation sent to admin endpoint",
+                ERROR_WRONG_ENDPOINT,
+                kind="WrongEndpoint",
+            )
         return self._handle_control(op, request_id, params, request)
 
     def _handle_control(
@@ -136,22 +193,50 @@ class SimulatorProtocol:
         elif op == "read_state":
             hooks = self.faults.hook(arm)
             if hooks.read_failure:
-                raise ProtocolError("read_failure_injected", f"{arm} read failure injected", ERROR_READ_FAILURE)
+                raise ProtocolError(
+                    "read_failure_injected",
+                    f"{arm} read failure injected",
+                    ERROR_READ_FAILURE,
+                    kind="TransportReadFailed",
+                    retryable=True,
+                    recoverable=True,
+                )
             snapshot = self.simulator.snapshot(arm)
         elif op == "send_servo_j":
             hooks = self.faults.hook(arm)
             if hooks.send_failure:
-                raise ProtocolError("send_failure_injected", f"{arm} send failure injected", ERROR_SEND_FAILURE)
+                raise ProtocolError(
+                    "send_failure_injected",
+                    f"{arm} send failure injected",
+                    ERROR_SEND_FAILURE,
+                    kind="TransportWriteFailed",
+                    retryable=True,
+                    recoverable=True,
+                )
             snapshot = self.simulator.send_servo_j(arm, params.get("q_target_deg"))
         elif op == "stop":
             hooks = self.faults.hook(arm)
             if hooks.stop_failure:
-                raise ProtocolError("stop_failure_injected", f"{arm} stop failure injected", ERROR_STOP_FAILURE)
+                raise ProtocolError(
+                    "stop_failure_injected",
+                    f"{arm} stop failure injected",
+                    ERROR_STOP_FAILURE,
+                    kind="TransportWriteFailed",
+                    retryable=True,
+                    recoverable=True,
+                )
             snapshot = self.simulator.stop(arm)
         elif op == "reset_fault":
             hooks = self.faults.hook(arm)
             if hooks.reset_failure:
-                raise ProtocolError("reset_failure_injected", f"{arm} reset failure injected", ERROR_RESET_FAILURE)
+                raise ProtocolError(
+                    "reset_failure_injected",
+                    f"{arm} reset failure injected",
+                    ERROR_RESET_FAILURE,
+                    kind="TransportWriteFailed",
+                    retryable=True,
+                    recoverable=True,
+                )
             snapshot = self.simulator.reset_fault(arm)
         else:
             raise ProtocolError("unknown_operation", f"unknown control operation: {op}", ERROR_UNKNOWN_OPERATION)
@@ -291,19 +376,26 @@ def _ok_response(
 def _error_response(
     request_id: str | None,
     arm: str | None,
-    name: str,
-    message: str,
-    code: int,
+    error: ErrorEnvelope,
 ) -> dict[str, Any]:
     response: dict[str, Any] = {
         "schema_version": PROTOCOL_VERSION,
         "request_id": request_id,
         "ok": False,
         "server_time_ns": time.monotonic_ns(),
-        "error": {"name": name, "message": message, "code": int(code)},
+        "error": {
+            "kind": error.kind,
+            "name": error.name,
+            "message": error.message,
+            "code": int(error.code),
+            "retryable": error.retryable,
+            "recoverable": error.recoverable,
+        },
     }
     if arm is not None:
         response["arm"] = arm
+    if error.state is not None:
+        response["state"] = snapshot_to_state(error.state)
     return response
 
 
@@ -311,27 +403,52 @@ def _classify_simulator_error(
     message: str,
     arm: str | None,
     simulator: ArmSimulator,
-) -> tuple[str, str, int]:
+) -> ErrorEnvelope:
     if arm is not None:
         try:
             snapshot = simulator.snapshot(arm)
             if snapshot.faulted:
-                return ("fault_latched", message, snapshot.error_code or ERROR_FAULT_LATCHED)
+                return ErrorEnvelope(
+                    kind="RobotFault",
+                    name="fault_latched",
+                    message=message,
+                    code=snapshot.error_code or ERROR_FAULT_LATCHED,
+                    retryable=False,
+                    recoverable=snapshot.fault_recoverable,
+                    state=snapshot,
+                )
         except SimulatorError:
             pass
     if "wrong arm" in message:
-        return ("wrong_arm", message, ERROR_WRONG_ARM)
+        return ErrorEnvelope("WrongArm", "wrong_arm", message, ERROR_WRONG_ARM, False, True)
     if "unknown arm" in message:
-        return ("unknown_arm", message, ERROR_UNKNOWN_ARM)
+        return ErrorEnvelope("UnknownArm", "unknown_arm", message, ERROR_UNKNOWN_ARM, False, True)
     if "disconnected" in message:
-        return ("disconnected", message, ERROR_DISCONNECTED)
+        return _stateful_error("RobotDisconnected", "disconnected", message, ERROR_DISCONNECTED, arm, simulator)
     if "not initialized" in message:
-        return ("not_initialized", message, ERROR_NOT_INITIALIZED)
+        return _stateful_error("RobotNotInitialized", "not_initialized", message, ERROR_NOT_INITIALIZED, arm, simulator)
     if "servo is not enabled" in message:
-        return ("servo_disabled", message, ERROR_SERVO_DISABLED)
+        return _stateful_error("ServoDisabled", "servo_disabled", message, ERROR_SERVO_DISABLED, arm, simulator)
     if "joint state is invalid" in message:
-        return ("invalid_joint_state", message, ERROR_INVALID_STATE)
-    return ("state_rejected", message, ERROR_BAD_REQUEST)
+        return _stateful_error("InvalidJointState", "invalid_joint_state", message, ERROR_INVALID_STATE, arm, simulator)
+    return _stateful_error("ControllerRejected", "state_rejected", message, ERROR_BAD_REQUEST, arm, simulator)
+
+
+def _stateful_error(
+    kind: str,
+    name: str,
+    message: str,
+    code: int,
+    arm: str | None,
+    simulator: ArmSimulator,
+) -> ErrorEnvelope:
+    snapshot: ArmSnapshot | None = None
+    if arm is not None:
+        try:
+            snapshot = simulator.snapshot(arm)
+        except SimulatorError:
+            snapshot = None
+    return ErrorEnvelope(kind, name, message, code, False, True, snapshot)
 
 
 def snapshot_to_state(snapshot: ArmSnapshot) -> dict[str, Any]:

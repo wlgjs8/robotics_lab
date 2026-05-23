@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -229,18 +230,91 @@ std::string jsonCodeString(const json& object, const char* key) {
     return "";
 }
 
+std::string jsonString(const json& object, const char* key, const std::string& fallback = "") {
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_string()) return fallback;
+    return it->get<std::string>();
+}
+
+std::optional<bool> jsonOptionalBool(const json& object, const char* key) {
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_boolean()) return std::nullopt;
+    return it->get<bool>();
+}
+
+BackendErrorKind kindFromString(const std::string& kind) {
+    if (kind == "TransportConnectFailed") return BackendErrorKind::TransportConnectFailed;
+    if (kind == "TransportWriteFailed") return BackendErrorKind::TransportWriteFailed;
+    if (kind == "TransportReadFailed") return BackendErrorKind::TransportReadFailed;
+    if (kind == "TransportTimeout") return BackendErrorKind::TransportTimeout;
+    if (kind == "ProtocolError") return BackendErrorKind::ProtocolError;
+    if (kind == "UnsupportedSchema") return BackendErrorKind::UnsupportedSchema;
+    if (kind == "WrongArm") return BackendErrorKind::WrongArm;
+    if (kind == "WrongEndpoint") return BackendErrorKind::WrongEndpoint;
+    if (kind == "UnknownArm") return BackendErrorKind::UnknownArm;
+    if (kind == "RobotDisconnected") return BackendErrorKind::RobotDisconnected;
+    if (kind == "RobotNotInitialized") return BackendErrorKind::RobotNotInitialized;
+    if (kind == "ServoDisabled") return BackendErrorKind::ServoDisabled;
+    if (kind == "WrongMode") return BackendErrorKind::WrongMode;
+    if (kind == "RobotFault") return BackendErrorKind::RobotFault;
+    if (kind == "InvalidJointState") return BackendErrorKind::InvalidJointState;
+    if (kind == "InvalidTarget") return BackendErrorKind::InvalidTarget;
+    if (kind == "ControllerRejected") return BackendErrorKind::ControllerRejected;
+    if (kind == "CommandTimeout") return BackendErrorKind::CommandTimeout;
+    if (kind == "DependencyUnavailable") return BackendErrorKind::DependencyUnavailable;
+    if (kind == "SuppressedByPolicy") return BackendErrorKind::SuppressedByPolicy;
+    if (kind == "Unknown") return BackendErrorKind::Unknown;
+    return BackendErrorKind::Unknown;
+}
+
+BackendErrorKind fallbackKindFromRbsimName(const std::string& name) {
+    if (name == "unsupported_schema_version") return BackendErrorKind::UnsupportedSchema;
+    if (name == "wrong_arm") return BackendErrorKind::WrongArm;
+    if (name == "wrong_endpoint") return BackendErrorKind::WrongEndpoint;
+    if (name == "unknown_arm") return BackendErrorKind::UnknownArm;
+    if (name == "disconnected") return BackendErrorKind::RobotDisconnected;
+    if (name == "not_initialized") return BackendErrorKind::RobotNotInitialized;
+    if (name == "servo_disabled") return BackendErrorKind::ServoDisabled;
+    if (name == "fault_latched") return BackendErrorKind::RobotFault;
+    if (name == "invalid_joint_state") return BackendErrorKind::InvalidJointState;
+    if (name == "send_failure_injected") return BackendErrorKind::TransportWriteFailed;
+    if (name == "read_failure_injected") return BackendErrorKind::TransportReadFailed;
+    if (name == "stop_failure_injected") return BackendErrorKind::TransportWriteFailed;
+    if (name == "reset_failure_injected") return BackendErrorKind::TransportWriteFailed;
+    if (name == "state_rejected") return BackendErrorKind::ControllerRejected;
+    if (name == "bad_request" || name == "invalid_json" || name == "unknown_operation") {
+        return BackendErrorKind::ProtocolError;
+    }
+    return BackendErrorKind::ProtocolError;
+}
+
+BackendErrorKind errorKindFromResponse(const json& error) {
+    const std::string explicit_kind = jsonString(error, "kind");
+    if (!explicit_kind.empty()) {
+        const BackendErrorKind kind = kindFromString(explicit_kind);
+        if (kind != BackendErrorKind::Unknown || explicit_kind == "Unknown") return kind;
+    }
+    return fallbackKindFromRbsimName(jsonString(error, "name"));
+}
+
+bool hasMappedResponseState(const RobotState& state) {
+    return state.host_time_ns != 0;
+}
+
 BackendError protocolErrorFromResponse(const std::string& op, const json& response) {
     const auto error_it = response.find("error");
     if (error_it == response.end() || !error_it->is_object()) {
         return backendError(BackendErrorKind::ProtocolError, "rbsim " + op + " failed without an error object");
     }
-    const std::string name = error_it->value("name", "ProtocolError");
-    const std::string message = error_it->value("message", "rbsim " + op + " failed");
+    const std::string name = jsonString(*error_it, "name", "ProtocolError");
+    const std::string message = jsonString(*error_it, "message", "rbsim " + op + " failed");
     return backendError(
-        BackendErrorKind::ProtocolError,
+        errorKindFromResponse(*error_it),
         message,
         jsonCodeString(*error_it, "code"),
-        name
+        name,
+        jsonOptionalBool(*error_it, "retryable"),
+        jsonOptionalBool(*error_it, "recoverable")
     );
 }
 
@@ -291,6 +365,9 @@ SendServoJResult RbsimBackend::sendServoJ(const SendServoJRequest& request) {
     params["q_target_deg"] = jointArrayJson(request.q_target_deg);
     BackendResult<RobotState> result = controlRequest("send_servo_j", BackendOp::SendServoJ, params, false);
     if (!result.ok) {
+        if (hasMappedResponseState(result.value)) {
+            return rejectedSend(request, result.error, result.timing, result.value, "response");
+        }
         return rejectedSend(request, result.error, result.timing);
     }
     return acceptedSend(request, result.timing, result.value, "response");
@@ -390,6 +467,18 @@ BackendResult<RobotState> RbsimBackend::controlRequest(
 
     if (!jsonBool(response, "ok", false)) {
         const BackendError error = protocolErrorFromResponse(op, response);
+        RobotState response_state;
+        const auto state_it = response.find("state");
+        if (state_it != response.end() && mapState(*state_it, arm_id_, &response_state)) {
+            connected_ = response_state.connection_state == RobotConnectionState::Connected;
+            BackendResult<RobotState> failed =
+                failedResult<RobotState>(backend_op, error, makeBackendTiming(start, nowSteadyNs()));
+            failed.value = response_state;
+            std::cerr << "[WARN] RbsimBackend " << op << " failed for "
+                      << toString(arm_id_) << ": " << error.name << " (" << error.code
+                      << "): " << error.message << "\n";
+            return failed;
+        }
         std::cerr << "[WARN] RbsimBackend " << op << " failed for "
                   << toString(arm_id_) << ": " << error.name << " (" << error.code
                   << "): " << error.message << "\n";

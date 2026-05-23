@@ -48,6 +48,29 @@ class SimulatorProtocolContractTest(unittest.TestCase):
             payload["arm"] = arm
         return self.request("admin", payload)
 
+    def assert_error(
+        self,
+        response: dict[str, Any],
+        *,
+        kind: str,
+        name: str,
+        code: int,
+        has_state: bool = False,
+    ) -> None:
+        self.assertFalse(response["ok"])
+        error = response["error"]
+        self.assertEqual(error["kind"], kind)
+        self.assertEqual(error["name"], name)
+        self.assertEqual(error["code"], code)
+        self.assertIsInstance(error["message"], str)
+        self.assertIsInstance(error["retryable"], bool)
+        self.assertIsInstance(error["recoverable"], bool)
+        if has_state:
+            self.assertIn("state", response)
+            self.assertEqual(response["state"]["arm"], "left")
+        else:
+            self.assertNotIn("state", response)
+
     def test_control_operations_return_machine_testable_states(self) -> None:
         self.assertEqual(self.admin("admin.disconnect")["state"]["lifecycle_state"], "disconnected")
 
@@ -74,20 +97,18 @@ class SimulatorProtocolContractTest(unittest.TestCase):
     def test_admin_fault_injection_operations_are_machine_testable(self) -> None:
         self.assertTrue(self.control("initialize")["ok"])
 
-        for hook, op, code, name in (
-            ("read_failure", "read_state", 2104, "read_failure_injected"),
-            ("send_failure", "send_servo_j", 2101, "send_failure_injected"),
-            ("stop_failure", "stop", 2102, "stop_failure_injected"),
-            ("reset_failure", "reset_fault", 2103, "reset_failure_injected"),
+        for hook, op, code, name, kind in (
+            ("read_failure", "read_state", 2104, "read_failure_injected", "TransportReadFailed"),
+            ("send_failure", "send_servo_j", 2101, "send_failure_injected", "TransportWriteFailed"),
+            ("stop_failure", "stop", 2102, "stop_failure_injected", "TransportWriteFailed"),
+            ("reset_failure", "reset_fault", 2103, "reset_failure_injected", "TransportWriteFailed"),
         ):
             injected = self.admin("admin.inject", params={"hook": hook, "enabled": True})
             self.assertTrue(injected["admin"]["fault_hooks"][hook])
 
             params = {"q_target_deg": [1, -30, 80, 0, 60, 0]} if op == "send_servo_j" else None
             failed = self.control(op, params=params)
-            self.assertFalse(failed["ok"])
-            self.assertEqual(failed["error"]["name"], name)
-            self.assertEqual(failed["error"]["code"], code)
+            self.assert_error(failed, kind=kind, name=name, code=code)
 
             self.assertTrue(self.admin("admin.inject", params={"hook": hook, "enabled": False})["ok"])
 
@@ -95,8 +116,7 @@ class SimulatorProtocolContractTest(unittest.TestCase):
         self.assertTrue(self.control("initialize", arm="left")["ok"])
 
         failed_right = self.control("read_state", arm="right")
-        self.assertFalse(failed_right["ok"])
-        self.assertEqual(failed_right["error"]["name"], "wrong_arm")
+        self.assert_error(failed_right, kind="WrongArm", name="wrong_arm", code=1005)
 
         right_protocol = SimulatorProtocol(ArmSimulator(load_simulator_config(CONFIG_RIGHT)))
         response = json.loads(
@@ -113,7 +133,51 @@ class SimulatorProtocolContractTest(unittest.TestCase):
             )
         )
         self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["kind"], "WrongArm")
         self.assertEqual(response["error"]["name"], "wrong_arm")
+
+    def test_stateful_errors_include_state_snapshot(self) -> None:
+        self.assertEqual(self.admin("admin.disconnect")["state"]["lifecycle_state"], "disconnected")
+        self.assert_error(
+            self.control("initialize"),
+            kind="RobotDisconnected",
+            name="disconnected",
+            code=1001,
+            has_state=True,
+        )
+
+        self.assertTrue(self.control("connect")["ok"])
+        self.assert_error(
+            self.control("send_servo_j", params={"q_target_deg": [1, -30, 80, 0, 60, 0]}),
+            kind="RobotNotInitialized",
+            name="not_initialized",
+            code=1002,
+            has_state=True,
+        )
+
+        self.assertTrue(self.control("initialize", params={"enable_servo": False})["ok"])
+        self.assert_error(
+            self.control("send_servo_j", params={"q_target_deg": [1, -30, 80, 0, 60, 0]}),
+            kind="ServoDisabled",
+            name="servo_disabled",
+            code=1003,
+            has_state=True,
+        )
+
+        self.assertTrue(self.admin("admin.set_joint_validity", params={"valid": False})["ok"])
+        self.assert_error(
+            self.control("initialize"),
+            kind="InvalidJointState",
+            name="invalid_joint_state",
+            code=2002,
+            has_state=True,
+        )
+
+        self.assertTrue(self.admin("admin.set_joint_validity", params={"valid": True})["ok"])
+        self.assertTrue(self.admin("admin.set_fault", params={"error_code": 2222})["ok"])
+        faulted = self.control("send_servo_j", params={"q_target_deg": [1, -30, 80, 0, 60, 0]})
+        self.assert_error(faulted, kind="RobotFault", name="fault_latched", code=2222, has_state=True)
+        self.assertTrue(faulted["state"]["has_error"])
 
     def test_send_failure_preserves_last_safe_target_without_zero_substitution(self) -> None:
         self.assertTrue(self.control("initialize")["ok"])
@@ -131,18 +195,29 @@ class SimulatorProtocolContractTest(unittest.TestCase):
     def test_admin_state_faults_bias_freeze_and_latency(self) -> None:
         self.assertEqual(self.admin("admin.disconnect")["state"]["lifecycle_state"], "disconnected")
         disconnected = self.control("initialize")
-        self.assertFalse(disconnected["ok"])
-        self.assertEqual(disconnected["error"]["code"], 1001)
+        self.assert_error(disconnected, kind="RobotDisconnected", name="disconnected", code=1001, has_state=True)
 
         self.assertTrue(self.admin("admin.reconnect")["ok"])
         invalid = self.admin("admin.set_joint_validity", params={"valid": False})
         self.assertFalse(invalid["state"]["has_valid_joint_state"])
-        self.assertEqual(self.control("initialize")["error"]["code"], 2002)
+        self.assert_error(
+            self.control("initialize"),
+            kind="InvalidJointState",
+            name="invalid_joint_state",
+            code=2002,
+            has_state=True,
+        )
 
         self.assertTrue(self.admin("admin.set_joint_validity", params={"valid": True})["ok"])
         faulted = self.admin("admin.set_fault", params={"error_code": 4321})
         self.assertEqual(faulted["state"]["error_code"], 4321)
-        self.assertEqual(self.control("initialize")["error"]["code"], 4321)
+        self.assert_error(
+            self.control("initialize"),
+            kind="RobotFault",
+            name="fault_latched",
+            code=4321,
+            has_state=True,
+        )
 
         self.assertTrue(self.control("reset_fault")["ok"])
         self.assertTrue(self.control("initialize")["ok"])
@@ -178,9 +253,7 @@ class SimulatorProtocolContractTest(unittest.TestCase):
         self.assertFalse(faulted["state"]["fault_recoverable"])
 
         reset = self.control("reset_fault")
-        self.assertFalse(reset["ok"])
-        self.assertEqual(reset["error"]["name"], "fault_latched")
-        self.assertEqual(reset["error"]["code"], 9001)
+        self.assert_error(reset, kind="RobotFault", name="fault_latched", code=9001, has_state=True)
 
         still_faulted = self.control("read_state")
         self.assertTrue(still_faulted["state"]["has_error"])
@@ -190,9 +263,7 @@ class SimulatorProtocolContractTest(unittest.TestCase):
         self.assertTrue(self.control("initialize")["ok"])
 
         missing = self.control("send_servo_j")
-        self.assertFalse(missing["ok"])
-        self.assertEqual(missing["error"]["name"], "bad_request")
-        self.assertEqual(missing["error"]["code"], 4000)
+        self.assert_error(missing, kind="ProtocolError", name="bad_request", code=4000)
 
 
 if __name__ == "__main__":
