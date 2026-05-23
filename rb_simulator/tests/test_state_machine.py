@@ -8,6 +8,8 @@ from rbsim import ArmSimulator, SimulatorError, load_simulator_config
 
 CONFIG_LEFT = Path(__file__).resolve().parents[1] / "config" / "left_rb3_730e.yaml"
 CONFIG_RIGHT = Path(__file__).resolve().parents[1] / "config" / "right_rb3_730e.yaml"
+CONFIG_LEFT_COMPOSE = Path(__file__).resolve().parents[1] / "config" / "left_rb3_730e_compose.yaml"
+CONFIG_RIGHT_COMPOSE = Path(__file__).resolve().parents[1] / "config" / "right_rb3_730e_compose.yaml"
 
 
 class SimulatorStateMachineTest(unittest.TestCase):
@@ -31,6 +33,20 @@ class SimulatorStateMachineTest(unittest.TestCase):
         self.assertEqual(right.control_bind, "tcp://127.0.0.1:50210")
         self.assertEqual(right.admin_bind, "tcp://127.0.0.1:50211")
         self.assertEqual(right.arm_config.name, "right_simulator")
+
+    def test_compose_configs_use_explicit_container_binds(self) -> None:
+        left = load_simulator_config(CONFIG_LEFT_COMPOSE)
+        right = load_simulator_config(CONFIG_RIGHT_COMPOSE)
+
+        self.assertEqual(left.arm, "left")
+        self.assertEqual(left.control_bind, "tcp://0.0.0.0:50200")
+        self.assertEqual(left.admin_bind, "tcp://0.0.0.0:50201")
+        self.assertEqual(right.arm, "right")
+        self.assertEqual(right.control_bind, "tcp://0.0.0.0:50200")
+        self.assertEqual(right.admin_bind, "tcp://0.0.0.0:50201")
+        for config in (left, right):
+            self.assertNotIn("172.28.60.200", config.control_bind)
+            self.assertNotIn("172.28.60.201", config.control_bind)
 
     def test_lifecycle_transitions_are_explicit(self) -> None:
         sim = self.make_simulator()

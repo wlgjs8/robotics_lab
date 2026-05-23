@@ -70,6 +70,10 @@ rb_simulator_right container
   admin:   tcp://0.0.0.0:50201
 ```
 
+Docker Compose selects compose-specific simulator configs with these
+container-internal binds and sets `RB_SIMULATOR_ALLOW_NON_LOOPBACK=1`. There is
+no runtime YAML port rewrite or proxy bridge in the simulator image.
+
 Host-local topology:
 
 ```text

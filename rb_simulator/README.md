@@ -37,6 +37,8 @@ rb_simulator/
   config/
     left_rb3_730e.yaml
     right_rb3_730e.yaml
+    left_rb3_730e_compose.yaml
+    right_rb3_730e_compose.yaml
     dual_rb3_730e.yaml    # historical only, not runnable for current topology
   docs/
     architecture.md
@@ -66,9 +68,29 @@ right simulator process
   admin:   tcp://127.0.0.1:50211
 ```
 
-Containerized runs may bind inside each container to `0.0.0.0:50200` and
-`0.0.0.0:50201`, but non-loopback binds are rejected unless
-`RB_SIMULATOR_ALLOW_NON_LOOPBACK=1` is set.
+Compose-run container profile:
+
+```text
+rb_servo_server
+  left backend_type=simulator  -> tcp://rb_simulator_left:50200
+  right backend_type=simulator -> tcp://rb_simulator_right:50200
+
+left simulator container
+  config: rb_simulator/config/left_rb3_730e_compose.yaml
+  arm: left
+  control: tcp://0.0.0.0:50200
+  admin:   tcp://0.0.0.0:50201
+
+right simulator container
+  config: rb_simulator/config/right_rb3_730e_compose.yaml
+  arm: right
+  control: tcp://0.0.0.0:50200
+  admin:   tcp://0.0.0.0:50201
+```
+
+Compose sets `RB_SIMULATOR_ALLOW_NON_LOOPBACK=1` for the simulator services.
+Without that explicit gate, non-loopback binds are rejected. There is no socat
+bridge or runtime YAML rewrite in the simulator image.
 
 ## Running
 
@@ -78,6 +100,9 @@ From the repository root:
 PYTHONPATH=rb_simulator/src python3 -m rbsim --config rb_simulator/config/left_rb3_730e.yaml
 PYTHONPATH=rb_simulator/src python3 -m rbsim --config rb_simulator/config/right_rb3_730e.yaml
 ```
+
+Compose startup uses the compose profiles through `docker-compose.yml`; the
+host-run profiles above remain loopback-only.
 
 The Python module name and protocol schema retain the existing `rbsim` names
 for compatibility. Public configuration should use `backend_type: simulator`

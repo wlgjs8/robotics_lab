@@ -89,8 +89,10 @@ rb_simulator_right
 ```
 
 Separate simulator containers may reuse the same internal ports because each
-container has its own network namespace. Direct host execution must use
-separate loopback ports:
+container has its own network namespace. Compose uses explicit
+`rb_simulator/config/*_compose.yaml` profiles and sets
+`RB_SIMULATOR_ALLOW_NON_LOOPBACK=1`; host-run profiles remain loopback-only by
+default. Direct host execution must use separate loopback ports:
 
 ```text
 left simulator:
@@ -161,6 +163,10 @@ Simulator operator paths use these current configs:
   evidence.
 - `rb_simulator/config/left_rb3_730e.yaml`: left simulator process.
 - `rb_simulator/config/right_rb3_730e.yaml`: right simulator process.
+- `rb_simulator/config/left_rb3_730e_compose.yaml`: left simulator container
+  bind profile.
+- `rb_simulator/config/right_rb3_730e_compose.yaml`: right simulator container
+  bind profile.
 
 Deprecated simulator compatibility names, including `dual_rbsim.yaml`,
 `dual_rb_simulator.yaml`, `dual_rb_simulator_compose.yaml`, `rbsim_local`, and

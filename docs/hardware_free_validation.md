@@ -144,12 +144,13 @@ The UDP state publisher period is controlled by `network.state_pub_rate_hz`;
 tracked hardware-free configs publish at 20 Hz unless a test overrides the
 value.
 
-Current compatibility assumption: the simulator process still binds loopback
-only. The hardware-free smoke therefore uses left `127.0.0.1:50200` and right
-`127.0.0.1:50210`. Docker Compose keeps the canonical
-`rb_simulator_left:50200` and `rb_simulator_right:50200` topology by using the
-simulator image entrypoint to proxy container port `50200` to the loopback-only
-Python module inside each container.
+The local hardware-free smoke uses host-run simulator configs that bind
+loopback only: left `127.0.0.1:50200` and right `127.0.0.1:50210`. Docker
+Compose uses separate compose simulator configs that bind each container to
+`0.0.0.0:50200` and `0.0.0.0:50201` with
+`RB_SIMULATOR_ALLOW_NON_LOOPBACK=1`, so `rb_servo_server` reaches
+`rb_simulator_left:50200` and `rb_simulator_right:50200` through Compose service
+DNS. The simulator image does not rewrite YAML or run a socat proxy bridge.
 
 Skipped by design:
 

@@ -29,9 +29,9 @@ services:
       context: .
       dockerfile: rb_simulator/docker/rb_simulator.Dockerfile
     image: robotics_lab/rb_simulator:dev
-    command: ["--config", "rb_simulator/config/left_rb3_730e.yaml"]
+    command: ["--config", "rb_simulator/config/left_rb3_730e_compose.yaml"]
     environment:
-      RB_SIMULATOR_COMPOSE_BIND: "1"
+      RB_SIMULATOR_ALLOW_NON_LOOPBACK: "1"
     init: true
     networks:
       rb_servo_net:
@@ -60,9 +60,9 @@ services:
       context: .
       dockerfile: rb_simulator/docker/rb_simulator.Dockerfile
     image: robotics_lab/rb_simulator:dev
-    command: ["--config", "rb_simulator/config/right_rb3_730e.yaml"]
+    command: ["--config", "rb_simulator/config/right_rb3_730e_compose.yaml"]
     environment:
-      RB_SIMULATOR_COMPOSE_BIND: "1"
+      RB_SIMULATOR_ALLOW_NON_LOOPBACK: "1"
     init: true
     networks:
       rb_servo_net:
