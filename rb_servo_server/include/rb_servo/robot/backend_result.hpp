@@ -88,12 +88,20 @@ struct ArmSendResult {
     ArmId arm_id = ArmId::Left;
     SendServoJRequest request;
     SendServoJResult result;
+    BackendTiming dispatch_timing;
 };
 
 struct DualSendResult {
     ArmSendResult left;
     ArmSendResult right;
     BackendTiming timing;
+    uint64_t dispatch_start_ns = 0;
+    uint64_t dispatch_end_ns = 0;
+    double left_right_start_skew_us = 0.0;
+    double left_right_end_skew_us = 0.0;
+
+    bool any_transport_failure() const;
+    bool any_robot_fault() const;
 };
 
 std::string toString(BackendOp op);

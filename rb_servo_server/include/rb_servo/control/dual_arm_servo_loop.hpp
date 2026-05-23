@@ -65,16 +65,12 @@ private:
         SafetyVerdict* verdict
     );
 
-    void sendTargets(
+    DualSendResult sendTargets(
         const ServoTarget& target,
         uint64_t command_seq,
         const std::string& send_policy,
-        SendServoJResult* left_result,
-        SendServoJResult* right_result,
-        uint64_t* left_send_start_ns,
-        uint64_t* left_send_end_ns,
-        uint64_t* right_send_start_ns,
-        uint64_t* right_send_end_ns
+        uint64_t dispatch_start_ns,
+        uint64_t deadline_ns
     );
 
     DualArmCommand makeHoldCommand(

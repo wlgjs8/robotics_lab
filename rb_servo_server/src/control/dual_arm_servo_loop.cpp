@@ -10,6 +10,7 @@
 
 #include "rb_servo/control/cartesian_controller.hpp"
 #include "rb_servo/control/fault_classifier.hpp"
+#include "rb_servo/control/servo_dispatcher.hpp"
 #include "rb_servo/core/clock.hpp"
 #include "rb_servo/core/realtime.hpp"
 #include "rb_servo/kinematics/pinocchio_kinematics.hpp"
@@ -368,27 +369,23 @@ void DualArmServoLoop::loopMain() {
             }
         }
 
-        SendServoJResult left_send_result;
-        SendServoJResult right_send_result;
-        uint64_t left_send_start_ns = 0;
-        uint64_t left_send_end_ns = 0;
-        uint64_t right_send_start_ns = 0;
-        uint64_t right_send_end_ns = 0;
         const ServoTarget attempted_target = safe_target;
         const bool fault_latched_before_send = fault_latched_.load();
         const std::string send_policy = currentSendPolicy();
         const bool send_suppressed = send_policy != "send_servo_j";
-        sendTargets(
+        DualSendResult dual_send_result = sendTargets(
             attempted_target,
             command.seq,
             send_policy,
-            &left_send_result,
-            &right_send_result,
-            &left_send_start_ns,
-            &left_send_end_ns,
-            &right_send_start_ns,
-            &right_send_end_ns
+            loop_start,
+            loop_start + nominal_period_ns
         );
+        const SendServoJResult& left_send_result = dual_send_result.left.result;
+        const SendServoJResult& right_send_result = dual_send_result.right.result;
+        const uint64_t left_send_start_ns = dual_send_result.left.dispatch_timing.start_ns;
+        const uint64_t left_send_end_ns = dual_send_result.left.dispatch_timing.end_ns;
+        const uint64_t right_send_start_ns = dual_send_result.right.dispatch_timing.start_ns;
+        const uint64_t right_send_end_ns = dual_send_result.right.dispatch_timing.end_ns;
         const bool left_ok = left_send_result.accepted;
         const bool right_ok = right_send_result.accepted;
         if (left_send_result.state_after.has_value()) {
@@ -400,15 +397,6 @@ void DualArmServoLoop::loopMain() {
             populateTcpPose(right_state, config_.right_mount);
         }
 
-        DualSendResult dual_send_result;
-        dual_send_result.left.arm_id = ArmId::Left;
-        dual_send_result.left.result = left_send_result;
-        dual_send_result.left.request.q_target_deg = attempted_target.left_q_target_deg;
-        dual_send_result.left.request.command_seq = command.seq;
-        dual_send_result.right.arm_id = ArmId::Right;
-        dual_send_result.right.result = right_send_result;
-        dual_send_result.right.request.q_target_deg = attempted_target.right_q_target_deg;
-        dual_send_result.right.request.command_seq = command.seq;
         const FaultContext send_fault = classifyDualSendResult(dual_send_result);
         if (send_fault.verdict != SafetyVerdict::Ok) {
             safety_verdict = send_fault.verdict;
@@ -469,12 +457,7 @@ void DualArmServoLoop::loopMain() {
         sample.left_send_end_ns = left_send_end_ns;
         sample.right_send_start_ns = right_send_start_ns;
         sample.right_send_end_ns = right_send_end_ns;
-        if (left_send_start_ns > 0 && right_send_start_ns > 0) {
-            const uint64_t skew_ns = left_send_start_ns > right_send_start_ns
-                ? left_send_start_ns - right_send_start_ns
-                : right_send_start_ns - left_send_start_ns;
-            sample.send_skew_us = static_cast<double>(skew_ns) / 1000.0;
-        }
+        sample.send_skew_us = dual_send_result.left_right_start_skew_us;
         if (left_send_end_ns >= left_send_start_ns && left_send_start_ns > 0) {
             sample.left_send_duration_us = static_cast<double>(left_send_end_ns - left_send_start_ns) / 1000.0;
         }
@@ -789,55 +772,45 @@ ServoTarget DualArmServoLoop::applySafety(
     return out;
 }
 
-void DualArmServoLoop::sendTargets(
+DualSendResult DualArmServoLoop::sendTargets(
     const ServoTarget& target,
     uint64_t command_seq,
     const std::string& send_policy,
-    SendServoJResult* left_result,
-    SendServoJResult* right_result,
-    uint64_t* left_send_start_ns,
-    uint64_t* left_send_end_ns,
-    uint64_t* right_send_start_ns,
-    uint64_t* right_send_end_ns
+    uint64_t dispatch_start_ns,
+    uint64_t deadline_ns
 ) {
+    ServoDispatchRequest dispatch_request;
+    dispatch_request.left.q_target_deg = target.left_q_target_deg;
+    dispatch_request.right.q_target_deg = target.right_q_target_deg;
+    dispatch_request.seq = command_seq;
+    dispatch_request.dispatch_start_ns = dispatch_start_ns;
+    dispatch_request.deadline_ns = deadline_ns;
+
     if (send_policy != "send_servo_j") {
         const uint64_t suppressed_time_ns = nowSteadyNs();
         const BackendTiming timing = makeBackendTiming(suppressed_time_ns, suppressed_time_ns);
         const BackendError error = suppressedSendError(send_policy);
-        SendServoJRequest left_request;
-        left_request.q_target_deg = target.left_q_target_deg;
-        left_request.command_seq = command_seq;
-        left_request.host_time_ns = suppressed_time_ns;
-        SendServoJRequest right_request;
-        right_request.q_target_deg = target.right_q_target_deg;
-        right_request.command_seq = command_seq;
-        right_request.host_time_ns = left_request.host_time_ns;
-        if (left_result) *left_result = rejectedSend(left_request, error, timing);
-        if (right_result) *right_result = rejectedSend(right_request, error, timing);
-        if (left_send_start_ns) *left_send_start_ns = 0;
-        if (left_send_end_ns) *left_send_end_ns = 0;
-        if (right_send_start_ns) *right_send_start_ns = 0;
-        if (right_send_end_ns) *right_send_end_ns = 0;
-        return;
+        dispatch_request.left.command_seq = command_seq;
+        dispatch_request.left.host_time_ns = suppressed_time_ns;
+        dispatch_request.left.deadline_ns = deadline_ns;
+        dispatch_request.right.command_seq = command_seq;
+        dispatch_request.right.host_time_ns = suppressed_time_ns;
+        dispatch_request.right.deadline_ns = deadline_ns;
+
+        DualSendResult result;
+        result.left.arm_id = ArmId::Left;
+        result.left.request = dispatch_request.left;
+        result.left.result = rejectedSend(dispatch_request.left, error, timing);
+        result.right.arm_id = ArmId::Right;
+        result.right.request = dispatch_request.right;
+        result.right.result = rejectedSend(dispatch_request.right, error, timing);
+        result.dispatch_start_ns = suppressed_time_ns;
+        result.dispatch_end_ns = suppressed_time_ns;
+        result.timing = timing;
+        return result;
     }
 
-    if (left_send_start_ns) *left_send_start_ns = nowSteadyNs();
-    SendServoJRequest left_request;
-    left_request.q_target_deg = target.left_q_target_deg;
-    left_request.command_seq = command_seq;
-    left_request.host_time_ns = left_send_start_ns ? *left_send_start_ns : nowSteadyNs();
-    const SendServoJResult left_send_result = left_robot_->sendServoJ(left_request);
-    if (left_send_end_ns) *left_send_end_ns = nowSteadyNs();
-    if (left_result) *left_result = left_send_result;
-
-    if (right_send_start_ns) *right_send_start_ns = nowSteadyNs();
-    SendServoJRequest right_request;
-    right_request.q_target_deg = target.right_q_target_deg;
-    right_request.command_seq = command_seq;
-    right_request.host_time_ns = right_send_start_ns ? *right_send_start_ns : nowSteadyNs();
-    const SendServoJResult right_send_result = right_robot_->sendServoJ(right_request);
-    if (right_send_end_ns) *right_send_end_ns = nowSteadyNs();
-    if (right_result) *right_result = right_send_result;
+    return ServoDispatcher::dispatchDirectSequential(*left_robot_, *right_robot_, dispatch_request);
 }
 
 DualArmCommand DualArmServoLoop::makeHoldCommand(
