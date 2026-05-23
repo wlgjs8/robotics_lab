@@ -6,8 +6,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -32,8 +34,21 @@ nlohmann::json jointArrayJson(const JointArray& joints) {
     return out;
 }
 
-nlohmann::json poseJson(const Pose6D& pose) {
+nlohmann::json quaternionJson(const std::optional<std::array<double, 4>>& quaternion_xyzw) {
+    if (!quaternion_xyzw) return nullptr;
+    const auto& q = *quaternion_xyzw;
+    const double norm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (!std::isfinite(norm) || norm <= 0.0) return nullptr;
     return {
+        q[0] / norm,
+        q[1] / norm,
+        q[2] / norm,
+        q[3] / norm,
+    };
+}
+
+nlohmann::json poseJson(const Pose6D& pose) {
+    nlohmann::json out = {
         {"x", pose.x},
         {"y", pose.y},
         {"z", pose.z},
@@ -41,6 +56,15 @@ nlohmann::json poseJson(const Pose6D& pose) {
         {"ry", pose.ry},
         {"rz", pose.rz},
     };
+    const nlohmann::json quaternion_xyzw = quaternionJson(pose.quaternion_xyzw);
+    if (!quaternion_xyzw.is_null()) {
+        out["quaternion_xyzw"] = quaternion_xyzw;
+        out["qx"] = quaternion_xyzw.at(0);
+        out["qy"] = quaternion_xyzw.at(1);
+        out["qz"] = quaternion_xyzw.at(2);
+        out["qw"] = quaternion_xyzw.at(3);
+    }
+    return out;
 }
 
 nlohmann::json optionalPoseJson(const std::optional<Pose6D>& pose) {

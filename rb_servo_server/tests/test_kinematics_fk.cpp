@@ -1,4 +1,5 @@
 #include <cmath>
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -78,6 +79,13 @@ bool differentPose(const rb_servo::Pose6D& a, const rb_servo::Pose6D& b) {
            std::fabs(a.rz - b.rz) > 1e-9;
 }
 
+bool normalizedQuaternion(const rb_servo::Pose6D& pose) {
+    if (!pose.quaternion_xyzw.has_value()) return false;
+    const auto& q = *pose.quaternion_xyzw;
+    const double norm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    return std::isfinite(norm) && std::fabs(norm - 1.0) < 1e-9;
+}
+
 rb_servo::JointArray joints(double value) {
     rb_servo::JointArray out{};
     out.fill(value);
@@ -109,7 +117,9 @@ rb_servo::DualArmConfig testConfig() {
 class FakeKinematics final : public rb_servo::IKinematics {
 public:
     rb_servo::Pose6D computeTcpBase(const rb_servo::JointArray& q_deg) const override {
-        return {q_deg[0] * 0.001, q_deg[1] * 0.001, 0.7, 0.01, 0.02, 0.03};
+        rb_servo::Pose6D pose{q_deg[0] * 0.001, q_deg[1] * 0.001, 0.7, 0.01, 0.02, 0.03};
+        pose.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+        return pose;
     }
 
     rb_servo::Pose6D computeTcpStand(
@@ -119,7 +129,7 @@ public:
     ) const override {
         const rb_servo::Pose6D tcp_base = computeTcpBase(q_deg);
         const double arm_offset = arm == rb_servo::ArmId::Left ? 1.0 : -1.0;
-        return {
+        rb_servo::Pose6D pose{
             mount.base_pose_in_stand.x + tcp_base.x + arm_offset,
             mount.base_pose_in_stand.y + tcp_base.y,
             mount.base_pose_in_stand.z + tcp_base.z,
@@ -127,6 +137,8 @@ public:
             mount.base_pose_in_stand.ry + tcp_base.ry,
             mount.base_pose_in_stand.rz + tcp_base.rz,
         };
+        pose.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+        return pose;
     }
 
     rb_servo::IkResult solveIk(
@@ -349,11 +361,13 @@ bool testPinocchioFkIfEnabled() {
     rb_servo::JointArray zero{};
     const rb_servo::Pose6D tcp_zero = kin.computeTcpBase(zero);
     RB_CHECK(finitePose(tcp_zero));
+    RB_CHECK(normalizedQuaternion(tcp_zero));
 
     rb_servo::JointArray base_90{};
     base_90[0] = 90.0;
     const rb_servo::Pose6D tcp_base_90 = kin.computeTcpBase(base_90);
     RB_CHECK(finitePose(tcp_base_90));
+    RB_CHECK(normalizedQuaternion(tcp_base_90));
     RB_CHECK(differentPose(tcp_zero, tcp_base_90));
 
     rb_servo::ArmMountConfig mount;
@@ -361,6 +375,7 @@ bool testPinocchioFkIfEnabled() {
     mount.base_pose_in_stand = {0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0};
     const rb_servo::Pose6D tcp_stand = kin.computeTcpStand(rb_servo::ArmId::Left, zero, mount);
     RB_CHECK(finitePose(tcp_stand));
+    RB_CHECK(normalizedQuaternion(tcp_stand));
 
     cfg.tip_link = "missing_tip";
     bool bad_tip_threw = false;
@@ -392,6 +407,8 @@ bool testStatePublisherSerializesTcpPoseValidity() {
     snapshot.left_state.connection_state = rb_servo::RobotConnectionState::Connected;
     snapshot.left_state.tcp_base = rb_servo::Pose6D{0.1, 0.2, 0.3, 0.01, 0.02, 0.03};
     snapshot.left_state.tcp_stand = rb_servo::Pose6D{1.1, 1.2, 1.3, 0.11, 0.12, 0.13};
+    snapshot.left_state.tcp_base->quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 2.0};
+    snapshot.left_state.tcp_stand->quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
     snapshot.left_state.has_valid_tcp_pose = true;
     snapshot.left_state.tcp_deferred = false;
 
@@ -408,6 +425,10 @@ bool testStatePublisherSerializesTcpPoseValidity() {
     RB_CHECK(!json.at("left").at("tcp_base").is_null());
     RB_CHECK(!json.at("left").at("tcp_stand").is_null());
     RB_CHECK(json.at("left").at("tcp_base").at("x").get<double>() == 0.1);
+    RB_CHECK(json.at("left").at("tcp_base").at("quaternion_xyzw").is_array());
+    RB_CHECK(json.at("left").at("tcp_base").at("quaternion_xyzw").at(3).get<double>() == 1.0);
+    RB_CHECK(json.at("left").at("tcp_base").at("qx").get<double>() == 0.0);
+    RB_CHECK(json.at("left").at("tcp_base").at("qw").get<double>() == 1.0);
     RB_CHECK(json.at("left").at("has_valid_tcp_pose").get<bool>());
     RB_CHECK(!json.at("left").at("tcp_deferred").get<bool>());
 
@@ -463,6 +484,10 @@ bool testServoLoopPublishesInjectedFkForValidJointState() {
     RB_CHECK(snapshot.left_state.tcp_stand.has_value());
     RB_CHECK(snapshot.right_state.tcp_base.has_value());
     RB_CHECK(snapshot.right_state.tcp_stand.has_value());
+    RB_CHECK(normalizedQuaternion(*snapshot.left_state.tcp_base));
+    RB_CHECK(normalizedQuaternion(*snapshot.left_state.tcp_stand));
+    RB_CHECK(normalizedQuaternion(*snapshot.right_state.tcp_base));
+    RB_CHECK(normalizedQuaternion(*snapshot.right_state.tcp_stand));
     RB_CHECK(!snapshot.left_state.tcp_deferred);
     RB_CHECK(!snapshot.right_state.tcp_deferred);
 
@@ -470,9 +495,13 @@ bool testServoLoopPublishesInjectedFkForValidJointState() {
     const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
     RB_CHECK(!json.at("left").at("tcp_base").is_null());
     RB_CHECK(!json.at("left").at("tcp_stand").is_null());
+    RB_CHECK(json.at("left").at("tcp_base").contains("quaternion_xyzw"));
+    RB_CHECK(json.at("left").at("tcp_stand").contains("quaternion_xyzw"));
     RB_CHECK(json.at("left").at("has_valid_tcp_pose").get<bool>());
     RB_CHECK(!json.at("right").at("tcp_base").is_null());
     RB_CHECK(!json.at("right").at("tcp_stand").is_null());
+    RB_CHECK(json.at("right").at("tcp_base").contains("quaternion_xyzw"));
+    RB_CHECK(json.at("right").at("tcp_stand").contains("quaternion_xyzw"));
     RB_CHECK(json.at("right").at("has_valid_tcp_pose").get<bool>());
     return true;
 }

@@ -158,8 +158,27 @@ class GuiContractsTest(unittest.TestCase):
 
     def test_parser_preserves_valid_tcp_pose_fields(self):
         state = sample_state()
-        state["left"]["tcp_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": math.pi}
-        state["left"]["tcp_base"] = [0.1, 0.2, 0.3, 0.0, 0.0, 1.0]
+        state["left"]["tcp_stand"] = {
+            "x": 0.31,
+            "y": 0.12,
+            "z": 0.44,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": math.pi,
+            "quaternion_xyzw": [0.0, 0.0, 2.0, 0.0],
+        }
+        state["left"]["tcp_base"] = {
+            "x": 0.1,
+            "y": 0.2,
+            "z": 0.3,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": 1.0,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0,
+        }
         state["left"]["has_valid_tcp_pose"] = True
         state["left"]["tcp_deferred"] = False
         store, _, _ = self.make_safety(state)
@@ -167,8 +186,15 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIsInstance(latest.left.tcp_stand, Pose6D)
         self.assertEqual(latest.left.tcp_stand.as_tuple(), (0.31, 0.12, 0.44, 0.0, 0.0, math.pi))
         self.assertEqual(latest.left.tcp_base.as_tuple(), (0.1, 0.2, 0.3, 0.0, 0.0, 1.0))
+        self.assertEqual(latest.left.tcp_stand.quaternion_xyzw, (0.0, 0.0, 1.0, 0.0))
+        self.assertEqual(latest.left.tcp_base.quaternion_xyzw, (0.0, 0.0, 0.0, 1.0))
         self.assertTrue(latest.left.has_valid_tcp_pose)
         self.assertFalse(latest.left.tcp_deferred)
+
+    def test_parser_accepts_legacy_tcp_pose_without_quaternion(self):
+        pose = Pose6D.parse({"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": 0.0})
+        self.assertIsNotNone(pose)
+        self.assertIsNone(pose.quaternion_xyzw)
 
     def test_parser_keeps_arm_snapshot_when_tcp_pose_is_null(self):
         store, _, _ = self.make_safety(sample_state())

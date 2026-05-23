@@ -100,6 +100,9 @@ struct Pose6D {
     double rx = 0.0;
     double ry = 0.0;
     double rz = 0.0;
+    // Optional canonical orientation for state publication. RPY remains for
+    // display and legacy command compatibility.
+    std::optional<std::array<double, 4>> quaternion_xyzw;
 };
 
 struct Wrench6D {

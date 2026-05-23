@@ -27,12 +27,15 @@ class Pose6D:
     rx: float
     ry: float
     rz: float
+    quaternion_xyzw: tuple[float, float, float, float] | None = None
 
     @classmethod
     def parse(cls, value: Any) -> "Pose6D | None":
         try:
+            quaternion_xyzw = None
             if isinstance(value, Mapping):
                 values = (value["x"], value["y"], value["z"], value["rx"], value["ry"], value["rz"])
+                quaternion_xyzw = _parse_quaternion_xyzw(value)
             elif isinstance(value, list | tuple) and len(value) == 6:
                 values = tuple(value)
             else:
@@ -42,10 +45,30 @@ class Pose6D:
             return None
         if not all(math.isfinite(item) for item in parsed):
             return None
-        return cls(*parsed)
+        return cls(*parsed, quaternion_xyzw=quaternion_xyzw)
 
     def as_tuple(self) -> tuple[float, float, float, float, float, float]:
         return (self.x, self.y, self.z, self.rx, self.ry, self.rz)
+
+
+def _parse_quaternion_xyzw(value: Mapping[str, Any]) -> tuple[float, float, float, float] | None:
+    raw = value.get("quaternion_xyzw")
+    if isinstance(raw, list | tuple) and len(raw) == 4:
+        values = raw
+    elif all(key in value for key in ("qx", "qy", "qz", "qw")):
+        values = (value["qx"], value["qy"], value["qz"], value["qw"])
+    else:
+        return None
+    try:
+        parsed = tuple(float(item) for item in values)
+    except Exception:
+        return None
+    if len(parsed) != 4 or not all(math.isfinite(item) for item in parsed):
+        return None
+    norm = math.sqrt(sum(item * item for item in parsed))
+    if not math.isfinite(norm) or norm <= 0.0:
+        return None
+    return (parsed[0] / norm, parsed[1] / norm, parsed[2] / norm, parsed[3] / norm)
 
 
 @dataclass(frozen=True)

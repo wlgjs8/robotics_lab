@@ -105,6 +105,15 @@ JointArray fromPinocchioQ(
 }
 
 Eigen::Matrix3d rotationFromPose(const Pose6D& pose) {
+    if (pose.quaternion_xyzw.has_value()) {
+        const auto& q = *pose.quaternion_xyzw;
+        const double norm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+        if (!std::isfinite(norm) || norm <= 0.0) {
+            throw std::runtime_error("Pose6D quaternion is non-finite or zero length");
+        }
+        Eigen::Quaterniond quaternion(q[3] / norm, q[0] / norm, q[1] / norm, q[2] / norm);
+        return quaternion.toRotationMatrix();
+    }
     const Eigen::AngleAxisd roll(pose.rx, Eigen::Vector3d::UnitX());
     const Eigen::AngleAxisd pitch(pose.ry, Eigen::Vector3d::UnitY());
     const Eigen::AngleAxisd yaw(pose.rz, Eigen::Vector3d::UnitZ());
@@ -120,6 +129,8 @@ pinocchio::SE3 se3FromPose(const Pose6D& pose) {
 
 Pose6D poseFromSe3(const pinocchio::SE3& placement) {
     const Eigen::Vector3d ypr = placement.rotation().eulerAngles(2, 1, 0);
+    Eigen::Quaterniond quaternion(placement.rotation());
+    quaternion.normalize();
     Pose6D pose;
     pose.x = placement.translation().x();
     pose.y = placement.translation().y();
@@ -127,6 +138,12 @@ Pose6D poseFromSe3(const pinocchio::SE3& placement) {
     pose.rx = ypr.z();
     pose.ry = ypr.y();
     pose.rz = ypr.x();
+    pose.quaternion_xyzw = std::array<double, 4>{
+        quaternion.x(),
+        quaternion.y(),
+        quaternion.z(),
+        quaternion.w(),
+    };
     if (!finitePose(pose)) {
         throw std::runtime_error("Pinocchio FK produced a non-finite TCP pose");
     }

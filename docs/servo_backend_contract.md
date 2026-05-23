@@ -388,3 +388,27 @@ Real read-only acceptance therefore expects that `q_actual` can publish while
 `servo_enabled=false`. The tracked read-only real template still requires
 `RB_ALLOW_REAL_ROBOT=1`, keeps `servo.send_servo_commands: false`, and must not
 attempt motion mode entry or `servo_j`.
+
+## MIG-21 TCP Pose Quaternion Publishing
+
+FK-enabled state JSON publishes TCP orientation as a normalized quaternion in
+addition to the existing display pose fields. Each non-null `tcp_base` and
+`tcp_stand` object keeps:
+
+- `x`, `y`, `z` in meters
+- `rx`, `ry`, `rz` in radians for display and legacy compatibility
+- `quaternion_xyzw: [qx, qy, qz, qw]`
+- scalar aliases `qx`, `qy`, `qz`, and `qw`
+
+The quaternion order is explicitly `xyzw`; `qw` is the scalar component. The
+publisher normalizes the quaternion before serialization. RPY/Euler values are
+not the canonical control, GUI policy, or dataset orientation representation.
+They remain available only so older consumers and operator displays continue to
+work.
+
+When Pinocchio/FK is disabled or unavailable, TCP pose publication remains
+deferred: `tcp_base` and `tcp_stand` are `null`, `has_valid_tcp_pose=false`, and
+`tcp_deferred=true`. GUI and `policy_runner` consumers must continue accepting
+the legacy schema without quaternion fields; quaternion presence is an
+orientation-quality improvement, not a new requirement for joint-only policy
+paths.

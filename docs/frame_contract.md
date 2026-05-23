@@ -31,6 +31,13 @@ p_parent = T_parent_child * p_child
 - Rotation units are radians.
 - `rx`, `ry`, `rz` are roll, pitch, yaw Euler angles using the same convention
   currently used by `rb_servo_server` mount config and `rb_gui` display helpers.
+- Runtime TCP state uses quaternion orientation as the canonical published
+  orientation. The order is `xyzw`: `quaternion_xyzw: [qx, qy, qz, qw]`.
+  The scalar component is `qw`; quaternions are normalized before publication.
+- TCP `rx`, `ry`, and `rz` remain display/legacy fields for operator UI and
+  backward compatibility. They are not the canonical control or dataset
+  orientation representation because Euler angles are ambiguous near
+  singularities.
 - Components must not silently invert transform direction based on field name.
   If a component needs the inverse, it computes and names it explicitly.
 
@@ -163,10 +170,14 @@ simulator validation.
 - Publishes `mounts.left.base_pose_in_stand` and
   `mounts.right.base_pose_in_stand` as `T_stand_left_base` and
   `T_stand_right_base`.
-- Publishes joint state and, in the future, `tcp_base` and `tcp_stand`.
+- Publishes joint state plus `tcp_base` and `tcp_stand` when FK is configured
+  and available.
 - Must label `tcp_stand` as `T_stand_<arm>_tcp`.
 - Must label `tcp_base` as `T_<arm>_base_<arm>_tcp`.
-- Must keep `tcp_fields_deferred=true` until TCP transforms are real.
+- Each TCP pose object keeps legacy `x`, `y`, `z`, `rx`, `ry`, and `rz` fields
+  and adds normalized `quaternion_xyzw` plus scalar aliases `qx`, `qy`, `qz`,
+  and `qw` when FK produced a valid orientation.
+- Must keep `tcp_fields_deferred=true` while TCP transforms are unavailable.
 
 ### camera_server
 
@@ -364,13 +375,16 @@ Every recorded episode should include:
 `policy_runner` should include the same calibration id in action logs so model
 inputs can be audited against the geometry used at runtime.
 
+Runtime state consumers should prefer the normalized TCP quaternion over RPY for
+GUI policy inputs and datasets. Legacy consumers may continue reading
+`[x, y, z, rx, ry, rz]`, but new geometry-dependent code should treat RPY as a
+display-only compatibility field.
+
 ## Open Items
 
 - Measure real stand origin and axis convention against the physical fixture.
-- Decide whether Euler `xyz_rpy` remains sufficient or whether runtime geometry
-  should require quaternions/matrices.
-- Implement FK so `T_<arm>_base_<arm>_tcp` and `T_stand_<arm>_tcp` can be
-  populated truthfully.
+- Keep FK coverage and simulator evidence current for
+  `T_<arm>_base_<arm>_tcp` and `T_stand_<arm>_tcp`.
 - Add camera intrinsics extraction from RealSense profiles.
 - Add hand-eye calibration for wrist cameras.
 - Add measured `T_stand_head_camera`.
