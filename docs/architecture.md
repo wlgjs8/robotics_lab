@@ -158,7 +158,12 @@ required real-mode gates.
 
 The future `policy_runner` owns Python action sources, including SpaceMouse
 input. It consumes robot state, camera metadata, and calibration packages; it
-must not bypass servo safety gates.
+must not bypass servo safety gates. Joint-only action sources do not require
+camera observations. Camera-dependent action sources must declare
+`requires_camera` with a `camera_stale_timeout_sec` and fail closed when camera
+readiness is absent or stale. Camera geometry-dependent sources must also
+declare `requires_camera_geometry` and require measured, accepted camera
+geometry.
 
 The backend-contract migration target is defined in
 [servo_backend_contract.md](servo_backend_contract.md). `IRobotBackend` should
@@ -195,6 +200,11 @@ RealSense, external simulator, force-control, gripper, or real Cartesian
 readiness.
 
 Hardware acceptance is a separate, human-gated workflow.
+
+Real three-camera acceptance is defined in
+[runbooks/camera_acceptance.md](runbooks/camera_acceptance.md). The canonical
+profile is a D435f head camera at 1280x720@30 and D405 wrist cameras at
+640x360@30, with an explicitly approved 640x480 D405 variant.
 
 ## Config Naming Rebaseline
 

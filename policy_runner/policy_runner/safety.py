@@ -19,6 +19,7 @@ class SafetyDecision:
 @dataclass(frozen=True)
 class ActionRequirements:
     requires_camera: bool = False
+    camera_stale_timeout_sec: float | None = None
     requires_kinematics: bool = False
     requires_geometry: bool = False
     requires_camera_geometry: bool = False
@@ -29,6 +30,17 @@ class ActionRequirements:
     requires_simulator_backend_if_available: bool = False
     cartesian_motion: bool = False
 
+    def __post_init__(self) -> None:
+        if self.camera_stale_timeout_sec is not None and self.camera_stale_timeout_sec <= 0.0:
+            raise ValueError("camera_stale_timeout_sec must be positive")
+
+
+@dataclass(frozen=True)
+class CameraReadiness:
+    available: bool = False
+    last_observed_monotonic_sec: float | None = None
+    stale: bool = False
+
 
 class SafetyGate:
     def __init__(
@@ -37,11 +49,13 @@ class SafetyGate:
         config: SafetyConfig,
         stale_timeout_sec: float,
         geometry_status: GeometryStatus | None = None,
+        camera_readiness: CameraReadiness | None = None,
     ):
         self.mode = mode
         self.config = config
         self.stale_timeout_sec = stale_timeout_sec
         self.geometry_status = geometry_status
+        self.camera_readiness = camera_readiness
 
     def evaluate(
         self,
@@ -70,10 +84,9 @@ class SafetyGate:
             and not _has_valid_joint_state(payload)
         ):
             return SafetyDecision(False, "invalid_joint_state")
-        if requirements.requires_camera and not self.config.camera_available:
-            return SafetyDecision(False, "camera_unavailable")
-        if requirements.requires_camera and self.config.camera_stale:
-            return SafetyDecision(False, "camera_stale")
+        camera_decision = self._evaluate_camera_requirements(requirements, now)
+        if not camera_decision.allowed:
+            return camera_decision
         if requirements.requires_kinematics and not self.config.kinematics_available:
             return SafetyDecision(False, "kinematics_unavailable")
         observed_mode = _observed_mode(payload)
@@ -100,6 +113,31 @@ class SafetyGate:
                 return SafetyDecision(False, "real_motion_not_allowed")
         if self.mode == "real" and intent.is_motion and not self.config.allow_real_motion:
             return SafetyDecision(False, "real_motion_not_allowed")
+        return SafetyDecision(True)
+
+    def _evaluate_camera_requirements(
+        self,
+        requirements: ActionRequirements,
+        now_monotonic: float,
+    ) -> SafetyDecision:
+        if not requirements.requires_camera:
+            return SafetyDecision(True)
+        timeout_sec = requirements.camera_stale_timeout_sec or self.config.camera_stale_timeout_sec
+        readiness = self.camera_readiness
+        if readiness is None:
+            if not self.config.camera_available:
+                return SafetyDecision(False, "camera_unavailable")
+            if self.config.camera_stale:
+                return SafetyDecision(False, "camera_stale")
+            return SafetyDecision(True)
+        if not readiness.available:
+            return SafetyDecision(False, "camera_unavailable")
+        if readiness.stale:
+            return SafetyDecision(False, "camera_stale")
+        if readiness.last_observed_monotonic_sec is None:
+            return SafetyDecision(False, "camera_unavailable")
+        if now_monotonic - readiness.last_observed_monotonic_sec > timeout_sec:
+            return SafetyDecision(False, "camera_stale")
         return SafetyDecision(True)
 
     def _evaluate_geometry_requirements(

@@ -38,6 +38,8 @@ Start here, then follow component docs only for implementation details:
   result contract and non-blocking servo-loop migration target.
 - [docs/runbooks/tcp_pose_simulator_acceptance.md](docs/runbooks/tcp_pose_simulator_acceptance.md):
   simulator-only TCP Pose/Delta acceptance.
+- [docs/runbooks/camera_acceptance.md](docs/runbooks/camera_acceptance.md):
+  real three-camera acceptance and policy-runner camera readiness criteria.
 - [calibration/active_calibration.yaml](calibration/active_calibration.yaml):
   configured-estimate robot/camera/stand setup registry.
 - [TODO.md](TODO.md): P0-P3 work packages and acceptance criteria.

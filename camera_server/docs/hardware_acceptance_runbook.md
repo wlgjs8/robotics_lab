@@ -2,6 +2,9 @@
 
 This runbook is for the RealSense hardware session gated by kanban task
 `t_8f430205`. It must not be used during code-only or mock-only validation.
+The repository-level source for current three-camera acceptance criteria is
+`../../docs/runbooks/camera_acceptance.md`; keep this component runbook aligned
+with that checklist.
 
 ## 1. Entry gate
 

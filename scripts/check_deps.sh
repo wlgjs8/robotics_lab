@@ -9,10 +9,13 @@ usage() {
 Usage: scripts/check_deps.sh --profile <hardware-free|real-camera|real-robot|kinematics>
 
 Profiles:
-  hardware-free  CMake, C++17, Python, yaml-cpp, nlohmann_json
-  real-camera    hardware-free C++ basics plus librealsense2 and libzmq
-  real-robot     hardware-free C++ basics plus rbpodo SDK/package
-  kinematics     CMake, C++17, Eigen3, Pinocchio
+  hardware-free  local mock/stub validation: CMake, C++17, Python, yaml-cpp, nlohmann_json
+  real-camera    RealSense capture readiness: CMake, C++17, yaml-cpp, librealsense2, libzmq
+  real-robot     RB controller SDK readiness: hardware-free basics plus rbpodo SDK/package
+  kinematics     FK/IK readiness: CMake, C++17, Eigen3, Pinocchio
+
+These profiles check dependencies only. They do not enable real robot
+connection, real motion, RealSense capture, or Cartesian motion gates.
 USAGE
 }
 
@@ -155,7 +158,9 @@ check_real_camera() {
   check_cmake_package yaml-cpp "Ubuntu: sudo apt-get install libyaml-cpp-dev"
   check_pkg_config_module realsense2 "Install librealsense2-dev and RealSense udev rules; USB access is required at runtime."
   check_pkg_config_module libzmq "Ubuntu: sudo apt-get install libzmq3-dev"
-  add_warning "real-camera runtime also needs USB device access, udev rules, shared memory sizing, and the real_camera compose profile."
+  require_command rs-enumerate-devices "Install RealSense tools such as librealsense2-utils for serial identification."
+  add_warning "real-camera runtime also needs USB device access, udev rules, shared memory sizing, serial-specific local config, and the real_camera compose profile."
+  add_warning "real-camera acceptance is documented in docs/runbooks/camera_acceptance.md and does not imply real robot readiness."
 }
 
 check_real_robot() {

@@ -29,8 +29,13 @@ class SafetyConfig:
     kinematics_available: bool = False
     camera_available: bool = False
     camera_stale: bool = False
+    camera_stale_timeout_sec: float = 0.5
     allow_configured_estimate_geometry_in_simulation: bool = True
     allow_configured_estimate_geometry_in_real: bool = False
+
+    def __post_init__(self) -> None:
+        if self.camera_stale_timeout_sec <= 0.0:
+            raise ValueError("safety.camera_stale_timeout_sec must be positive")
 
 
 @dataclass(frozen=True)
@@ -119,7 +124,7 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         geometry=GeometryConfig(**_section(raw, "geometry")),
         robot_state=RobotStateConfig(**_section(raw, "robot_state")),
         servo_command=ServoCommandConfig(**_section(raw, "servo_command")),
-        safety=SafetyConfig(**_section(raw, "safety")),
+        safety=_safety_config(_section(raw, "safety")),
         joint_sine=_joint_sine_config(_section(raw, "joint_sine")),
         joint_velocity=_joint_velocity_config(_section(raw, "joint_velocity")),
         tcp_delta=_tcp_delta_config(_section(raw, "tcp_delta")),
@@ -142,6 +147,12 @@ def _runtime_config(raw: dict[str, Any]) -> RuntimeConfig:
     if "startup_timeout_sec" in raw:
         raw["startup_timeout_sec"] = float(raw["startup_timeout_sec"])
     return RuntimeConfig(**raw)
+
+
+def _safety_config(raw: dict[str, Any]) -> SafetyConfig:
+    if "camera_stale_timeout_sec" in raw:
+        raw["camera_stale_timeout_sec"] = float(raw["camera_stale_timeout_sec"])
+    return SafetyConfig(**raw)
 
 
 def _joint_sine_config(raw: dict[str, Any]) -> JointSineConfig:
