@@ -318,6 +318,33 @@ State JSON publishes the same data under each arm's `worker` object:
 }
 ```
 
+## MIG-23 Worker Lifecycle Queue
+
+Worker mode separates streaming servo targets from lifecycle commands.
+`servo_j` keeps the MIG-14 single-slot latest-wins policy because only the most
+recent streaming target should be dispatched. Lifecycle commands have different
+semantics and must not be routed through or overwritten by that slot.
+
+`ArmWorker` now has a small bounded FIFO lifecycle lane for simulator/mock
+worker mode:
+
+- `ResetFault`
+- `Stop` for backend stop/shutdown paths where the backend already implements
+  structured stop behavior
+
+Lifecycle enqueue and dispatch results are structured `BackendResult<RobotState>`
+values. If the FIFO is full, the worker rejects the enqueue explicitly with
+`BackendErrorKind::SuppressedByPolicy` and
+`error.name="arm_worker_lifecycle_queue_full"`; it must not silently drop an
+older lifecycle command. Expired lifecycle commands report
+`BackendErrorKind::CommandTimeout`.
+
+`DualArmServoLoop` uses the worker lifecycle lane for `ResetFault` when
+`servo.io_model: worker`, then requires fresh valid worker state before
+clearing the server fault latch. Direct mode still calls backend `resetFault()`
+directly. Real mode still rejects `servo.io_model: worker` in the config parser,
+and this migration does not change `RbpodoBackend` stop/reset behavior.
+
 Direct I/O mode may publish the same object with `enabled=false` and zero/default
 sequence counters so schema consumers do not need a separate parser path.
 

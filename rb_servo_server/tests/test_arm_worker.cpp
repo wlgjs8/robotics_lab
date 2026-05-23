@@ -131,11 +131,15 @@ public:
 
     rb_servo::BackendResult<rb_servo::RobotState> stop() override {
         std::lock_guard<std::mutex> lock(mutex_);
+        ++stop_count_;
         return backendStateResult(rb_servo::BackendOp::Stop, state_);
     }
 
     rb_servo::BackendResult<rb_servo::RobotState> resetFault() override {
         std::lock_guard<std::mutex> lock(mutex_);
+        ++reset_count_;
+        state_.has_error = false;
+        state_.error_code = 0;
         return backendStateResult(rb_servo::BackendOp::ResetFault, state_);
     }
 
@@ -158,6 +162,13 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         return cv_.wait_for(lock, timeout, [this, expected] {
             return send_count_ >= expected;
+        });
+    }
+
+    bool waitForResets(int expected, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this, expected] {
+            return reset_count_ >= expected;
         });
     }
 
@@ -191,6 +202,16 @@ public:
         return send_count_;
     }
 
+    int resetCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return reset_count_;
+    }
+
+    int stopCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return stop_count_;
+    }
+
     std::optional<rb_servo::SendServoJRequest> lastRequest() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return last_request_;
@@ -210,6 +231,8 @@ private:
     int initialize_count_ = 0;
     int read_count_ = 0;
     int send_count_ = 0;
+    int reset_count_ = 0;
+    int stop_count_ = 0;
     rb_servo::RobotState state_;
     std::optional<rb_servo::SendServoJRequest> last_request_;
 };
@@ -411,6 +434,89 @@ bool testNoDropCountedAfterImmediateDispatch() {
     return true;
 }
 
+bool testResetFaultUsesLifecycleQueue() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None,
+        true
+    );
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorker worker(std::move(backend));
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForFirstReadEntered(std::chrono::milliseconds(200)));
+
+    worker.enqueueServoJ(request(30, joints(30.0), rb_servo::nowSteadyNs() + 1'000'000'000));
+    const uint64_t lifecycle_host_time = rb_servo::nowSteadyNs();
+    const uint64_t lifecycle_deadline = lifecycle_host_time + 1'000'000'000;
+    const rb_servo::ArmWorkerCommand reset_command{
+        rb_servo::ArmWorkerCommandKind::ResetFault,
+        {},
+        31,
+        lifecycle_host_time,
+        lifecycle_deadline
+    };
+    const rb_servo::BackendResult<rb_servo::RobotState> enqueued =
+        worker.enqueueLifecycleCommand(reset_command);
+    RB_CHECK(enqueued.ok);
+    RB_CHECK(raw_backend->resetCount() == 0);
+    RB_CHECK(raw_backend->sendCount() == 0);
+
+    raw_backend->releaseFirstRead();
+    RB_CHECK(raw_backend->waitForResets(1, std::chrono::milliseconds(200)));
+    const std::optional<rb_servo::ArmWorkerLifecycleResult> lifecycle =
+        worker.waitForLifecycleResult(
+            reset_command,
+            enqueued.timing.start_ns,
+            rb_servo::nowSteadyNs() + 1'000'000'000
+        );
+    RB_CHECK(lifecycle.has_value());
+    RB_CHECK(lifecycle->command.kind == rb_servo::ArmWorkerCommandKind::ResetFault);
+    RB_CHECK(lifecycle->command.command_seq == 31);
+    RB_CHECK(lifecycle->result.ok);
+    RB_CHECK(lifecycle->result.op == rb_servo::BackendOp::ResetFault);
+    RB_CHECK(raw_backend->resetCount() == 1);
+    worker.stop();
+    return true;
+}
+
+bool testLifecycleQueueFullIsExplicit() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None,
+        true
+    );
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorkerOptions options;
+    options.lifecycle_queue_capacity = 2;
+    rb_servo::ArmWorker worker(std::move(backend), options);
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForFirstReadEntered(std::chrono::milliseconds(200)));
+
+    const uint64_t deadline = rb_servo::nowSteadyNs() + 1'000'000'000;
+    rb_servo::ArmWorkerCommand first;
+    first.kind = rb_servo::ArmWorkerCommandKind::ResetFault;
+    first.command_seq = 40;
+    first.deadline_ns = deadline;
+    rb_servo::ArmWorkerCommand second = first;
+    second.command_seq = 41;
+    rb_servo::ArmWorkerCommand third = first;
+    third.command_seq = 42;
+
+    RB_CHECK(worker.enqueueLifecycleCommand(first).ok);
+    RB_CHECK(worker.enqueueLifecycleCommand(second).ok);
+    const rb_servo::BackendResult<rb_servo::RobotState> rejected =
+        worker.enqueueLifecycleCommand(third);
+    RB_CHECK(!rejected.ok);
+    RB_CHECK(rejected.op == rb_servo::BackendOp::ResetFault);
+    RB_CHECK(rejected.error.kind == rb_servo::BackendErrorKind::SuppressedByPolicy);
+    RB_CHECK(rejected.error.name == "arm_worker_lifecycle_queue_full");
+    RB_CHECK(raw_backend->resetCount() == 0);
+
+    raw_backend->releaseFirstRead();
+    worker.stop();
+    return true;
+}
+
 bool testStopJoinsThreadAndRejectsNewCommand() {
     auto backend = std::make_unique<WorkerTestBackend>(rb_servo::ArmId::Right);
     WorkerTestBackend* raw_backend = backend.get();
@@ -484,6 +590,8 @@ int main() {
     if (!testBackendSendFailurePreserved()) return 1;
     if (!testLatestQueuedCommandWins()) return 1;
     if (!testNoDropCountedAfterImmediateDispatch()) return 1;
+    if (!testResetFaultUsesLifecycleQueue()) return 1;
+    if (!testLifecycleQueueFullIsExplicit()) return 1;
     if (!testStopJoinsThreadAndRejectsNewCommand()) return 1;
     if (!testNoDeadlockOnDestruction()) return 1;
     if (!testStopWithPendingCommandBehindReadDoesNotDeadlock()) return 1;

@@ -561,6 +561,13 @@ class RbsimWorkerHardwareFreeGateTest(RbsimHardwareFreeGateTest):
         self.assertEqual(suppressed["fault_context"]["backend_error_kind"], "TransportWriteFailed")
         self.assertEqual(suppressed["fault_context"]["backend_error_name"], "send_failure_injected")
 
+        self.send_command("ResetFault")
+        suppressed_tick = int(suppressed.get("tick", 0))
+        self.wait_snapshot(
+            lambda snap: int(snap.get("tick", 0)) > suppressed_tick and self.connected_valid(snap),
+            "worker reset after injected send failure",
+        )
+
     def test_worker_simulator_robot_fault_is_distinguishable(self) -> None:
         self.admin("admin.set_fault", "right", error_code=3333, recoverable=False)
         fault = self.wait_snapshot(
@@ -578,6 +585,25 @@ class RbsimWorkerHardwareFreeGateTest(RbsimHardwareFreeGateTest):
         self.assertEqual(fault["fault_context"]["backend_error_name"], "fault_latched")
         self.assertEqual(fault["fault_context"]["backend_error_code"], "3333")
         self.assert_latency_metrics_present(fault)
+
+    def test_worker_recoverable_simulator_fault_resets_through_lifecycle_queue(self) -> None:
+        self.admin("admin.set_fault", "left", error_code=2222, recoverable=True)
+        fault = self.wait_snapshot(
+            lambda snap: snap.get("fault_latched") is True
+            and snap.get("latched_fault_reason") == "RobotStateError"
+            and snap.get("left", {}).get("error_code") == 2222,
+            "worker recoverable simulator fault",
+        )
+        self.assertEqual(fault["left"]["last_read"]["backend_error_kind"], "RobotFault")
+        self.assertEqual(fault["fault_context"]["backend_error_kind"], "RobotFault")
+        self.send_command("ResetFault")
+        fault_tick = int(fault.get("tick", 0))
+        reset = self.wait_snapshot(
+            lambda snap: int(snap.get("tick", 0)) > fault_tick and self.connected_valid(snap),
+            "worker recoverable simulator fault reset",
+        )
+        self.assertEqual(reset["fault_context"]["latched"], False)
+        self.assertIsNone(reset["fault_context"]["backend_error_kind"])
 
 
 if __name__ == "__main__":

@@ -1129,24 +1129,61 @@ std::string DualArmServoLoop::currentSendPolicy() const {
 }
 
 bool DualArmServoLoop::clearFaultLatch(RobotState& left_state, RobotState& right_state) {
+    const uint64_t reset_start_ns = nowSteadyNs();
+    const uint64_t reset_timeout_ns = timeoutNs(config_.servo.command_timeout_sec, 1'000'000'000);
+    const uint64_t reset_deadline_ns = addDeadlineNs(reset_start_ns, reset_timeout_ns);
     if (workerIoMode()) {
-        std::cerr << "[WARN] fault latch remains: worker io_model does not expose resetFault in MIG-09\n";
-        return false;
-    }
-
-    const BackendResult<RobotState> left_reset = left_robot_
-        ? left_robot_->resetFault()
-        : BackendResult<RobotState>{};
-    const BackendResult<RobotState> right_reset = right_robot_
-        ? right_robot_->resetFault()
-        : BackendResult<RobotState>{};
-    const bool left_reset_ok = left_reset.ok;
-    const bool right_reset_ok = right_reset.ok;
-    if (!left_reset_ok || !right_reset_ok) {
-        std::cerr << "[WARN] fault latch remains: backend resetFault failed"
-                  << " left=" << left_reset.error.name << ":" << left_reset.error.message
-                  << " right=" << right_reset.error.name << ":" << right_reset.error.message << "\n";
-        return false;
+        const BackendResult<RobotState> left_reset = left_worker_
+            ? left_worker_->resetFault(tick_, reset_deadline_ns)
+            : BackendResult<RobotState>{
+                false,
+                BackendOp::ResetFault,
+                RobotState{},
+                backendError(
+                    BackendErrorKind::RobotDisconnected,
+                    "left worker unavailable for resetFault",
+                    "",
+                    "left_worker_unavailable"
+                ),
+                makeBackendTiming(reset_start_ns, nowSteadyNs())
+            };
+        const BackendResult<RobotState> right_reset = right_worker_
+            ? right_worker_->resetFault(tick_, reset_deadline_ns)
+            : BackendResult<RobotState>{
+                false,
+                BackendOp::ResetFault,
+                RobotState{},
+                backendError(
+                    BackendErrorKind::RobotDisconnected,
+                    "right worker unavailable for resetFault",
+                    "",
+                    "right_worker_unavailable"
+                ),
+                makeBackendTiming(reset_start_ns, nowSteadyNs())
+            };
+        const bool left_reset_ok = left_reset.ok;
+        const bool right_reset_ok = right_reset.ok;
+        if (!left_reset_ok || !right_reset_ok) {
+            std::cerr << "[WARN] fault latch remains: worker resetFault failed"
+                      << " left=" << left_reset.error.name << ":" << left_reset.error.message
+                      << " right=" << right_reset.error.name << ":" << right_reset.error.message << "\n";
+            return false;
+        }
+    } else {
+        const BackendResult<RobotState> left_reset = left_robot_
+            ? left_robot_->resetFault()
+            : BackendResult<RobotState>{};
+        const BackendResult<RobotState> right_reset = right_robot_
+            ? right_robot_->resetFault()
+            : BackendResult<RobotState>{};
+        const bool left_reset_ok = left_reset.ok;
+        const bool right_reset_ok = right_reset.ok;
+        if (!left_reset_ok || !right_reset_ok) {
+            std::cerr << "[WARN] fault latch remains: backend resetFault failed"
+                      << " left=" << left_reset.error.name << ":" << left_reset.error.message
+                      << " right=" << right_reset.error.name << ":" << right_reset.error.message << "\n";
+            return false;
+        }
     }
 
     RobotState fresh_left;
