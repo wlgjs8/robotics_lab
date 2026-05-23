@@ -6,6 +6,10 @@ code paths and does not start real robot motion, RealSense capture, Docker,
 privileged deployment, external network, credentialed, or production network
 checks.
 
+Passing this gate is not real robot readiness. It does not prove rbpodo SDK
+availability, controller reachability, read-only real connection, real
+`servo_j`, or real Cartesian/TCP motion.
+
 The architecture source of truth is [architecture.md](architecture.md). Public
 terminology is:
 
@@ -28,7 +32,8 @@ The script runs:
   missing.
 - `camera_server`: CMake configure/build/CTest with `CAMERA_SERVER_FORCE_MOCK_CAMERA=ON` and `CAMERA_SERVER_FORCE_ZMQ_STUB=ON`.
 - `rb_servo_server`: CMake configure/build/CTest with `RB_SERVO_ENABLE_RBPODO=OFF`,
-  including the per-arm `rbsim_hardware_free_gate` integration test.
+  `RB_SERVO_ENABLE_PINOCCHIO=OFF`, and the per-arm
+  `rbsim_hardware_free_gate` integration test.
 - `rb_servo_gui`: stdlib `unittest` discovery registered as the `rb_servo_gui_unittest` CTest test with `PYTHONPATH` pointed at top-level `rb_gui`.
 - `rb_servo_server/tools/analyze_servo_log.py --self-test`: local
   mock/simulator analyzer profiles and fail-closed parser checks for generated
@@ -55,6 +60,12 @@ The rb_servo configure sets `RB_SERVO_ALLOW_FETCHCONTENT=OFF` so the local gate
 does not silently download missing dependencies. If `nlohmann_json` is installed
 outside the default CMake search path, set `CMAKE_PREFIX_PATH` before running the
 script.
+
+Pinocchio is intentionally not required by this hardware-free gate. MIG-12 runs
+an optional Pinocchio-enabled C++ gate through `scripts/codex_gate.sh MIG-12`
+only when the `pinocchio` CMake package is already available. The TCP pose
+simulator acceptance script requires Pinocchio because FK/IK behavior is the
+subject of that acceptance.
 
 Additional dependency preflight profiles are available:
 
@@ -129,6 +140,9 @@ The state stream includes MIG-10 diagnostics for each arm:
 `worker_loop_read_duration_us`. Top-level fields include `command_seq`,
 `send_deadline_hit`, `send_skew_us`, and `dispatch_skew_us`. The CSV servo log
 records the same age, deadline, skew, and worker-read-duration metrics.
+The UDP state publisher period is controlled by `network.state_pub_rate_hz`;
+tracked hardware-free configs publish at 20 Hz unless a test overrides the
+value.
 
 Current compatibility assumption: the simulator process still binds loopback
 only. The hardware-free smoke therefore uses left `127.0.0.1:50200` and right
@@ -140,6 +154,7 @@ Python module inside each container.
 Skipped by design:
 
 - real robot and Rainbow rbsim motion
+- rbpodo dependency discovery and real read-only connection acceptance
 - external simulator or real robot timing acceptance; analyzer profiles here
   cover only hardware-free `rb_simulator` loopback logs
 - RealSense capture and hardware-sync acceptance

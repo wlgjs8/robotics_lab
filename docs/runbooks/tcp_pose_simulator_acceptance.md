@@ -25,6 +25,8 @@ run has:
 ```yaml
 kinematics:
   enable: true
+  provider: pinocchio
+  urdf: path/to/rb3_730e.urdf
   publish_tcp: true
   ik:
     enable: true
@@ -37,6 +39,11 @@ cartesian_control:
 
 If those dependencies or config gates are missing, the scripted runner exits
 nonzero before motion commands and prints the missing item.
+
+The server binary must be built with `RB_SERVO_ENABLE_PINOCCHIO=ON`; the
+default hardware-free gate intentionally builds with Pinocchio off. The
+scripted runner checks `scripts/check_deps.sh --profile kinematics` and, for
+local starts, rejects a CMake build cache that shows Pinocchio was off.
 
 ## Start Per-Arm Simulator Stack
 
@@ -143,10 +150,12 @@ bash scripts/tcp_pose_simulator_acceptance.sh \
 Default behavior:
 
 - runs `scripts/check_deps.sh --profile hardware-free`
+- runs `scripts/check_deps.sh --profile kinematics` so missing Pinocchio/Eigen
+  fails before processes start
 - verifies required TCP command tools exist and parse dry-run packets
 - verifies the server binary and simulator configs exist
-- verifies the selected server config declares FK/TCP and Cartesian simulation
-  gates
+- verifies the selected server config declares Pinocchio FK/TCP, IK, and
+  Cartesian simulation gates
 - starts host-loopback left/right simulator processes and `rb_servo_server`
 - captures the state stream
 - sends `ArmMotion`

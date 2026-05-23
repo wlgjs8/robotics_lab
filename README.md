@@ -166,3 +166,29 @@ scripts/           repository-level validation helpers
   Left/Right ArmWorker`. This migration is not a real-motion enablement and
   does not weaken `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`, or
   `RB_ALLOW_REAL_CARTESIAN`.
+
+## MIG-12 Migration Baseline
+
+The current review baseline is:
+
+- `CommandBuffer -> ServoCoordinator -> Left/Right ArmWorker` is the intended
+  backend I/O ownership architecture. Direct loop operation remains the stable
+  default until worker mode is promoted beyond simulator evidence.
+- Backend results use structured taxonomy. Important operator-visible classes
+  include `RobotFault` for controller/robot fault state,
+  `TransportWriteFailed` for command-channel write failures,
+  `SuppressedByPolicy` for environment gate or read-only suppression, and
+  `WrongMode` for controller mode/config mismatch.
+- Real read-only rbpodo connection requires `RB_ALLOW_REAL_ROBOT=1`. Real
+  `servo_j` transmission additionally requires `RB_ALLOW_REAL_MOTION=1`.
+  Real Cartesian/TCP motion additionally requires
+  `RB_ALLOW_REAL_CARTESIAN=1`.
+- `stop()` and `resetFault()` for rbpodo controller recovery remain
+  unverified. On a real robot fault, treat them as a fail-closed result that
+  requires operator intervention, not as automatic recovery.
+- `network.state_pub_rate_hz` controls UDP state publication rate. The default
+  tracked configs use 20 Hz.
+- `servo.io_model: direct` is the stable default. `servo.io_model: worker` is
+  simulator-accepted when the MIG-10/MIG-11 worker smoke passes. Real +
+  `worker` remains disabled or experimental until a separate real read-only
+  acceptance task exists.

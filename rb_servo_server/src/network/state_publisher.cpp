@@ -20,7 +20,11 @@ namespace rb_servo {
 namespace {
 
 constexpr int kStateSchemaVersion = 1;
-constexpr std::chrono::milliseconds kPublishPeriod{50};
+
+std::chrono::nanoseconds publishPeriod(int state_pub_rate_hz) {
+    const int rate_hz = state_pub_rate_hz > 0 ? state_pub_rate_hz : 20;
+    return std::chrono::nanoseconds(1'000'000'000LL / rate_hz);
+}
 
 nlohmann::json jointArrayJson(const JointArray& joints) {
     nlohmann::json out = nlohmann::json::array();
@@ -359,6 +363,7 @@ void StatePublisher::threadMain() {
         return;
     }
 
+    const auto publish_period = publishPeriod(config_.network.state_pub_rate_hz);
     bool send_warned = false;
     while (running_) {
         ServoSnapshot snapshot;
@@ -383,7 +388,7 @@ void StatePublisher::threadMain() {
             std::cerr << "[WARN] StatePublisher send failed: " << std::strerror(errno) << "\n";
             send_warned = true;
         }
-        std::this_thread::sleep_for(kPublishPeriod);
+        std::this_thread::sleep_for(publish_period);
     }
 
     ::close(fd);

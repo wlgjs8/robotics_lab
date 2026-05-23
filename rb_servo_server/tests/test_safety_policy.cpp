@@ -2341,6 +2341,36 @@ bool testStatePublisherUsesLatestSnapshotWithoutBackendReadsAndDoesNotStallLoop(
     return true;
 }
 
+bool testStatePublisherUsesConfiguredPublishRate() {
+    const int port = reserveLoopbackUdpPort();
+    if (port <= 0) {
+        std::cerr << "SKIP testStatePublisherUsesConfiguredPublishRate: loopback UDP unavailable\n";
+        return true;
+    }
+
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.network.state_pub_bind = "udp://127.0.0.1:" + std::to_string(port);
+    cfg.network.state_pub_endpoint = cfg.network.state_pub_bind;
+    cfg.network.state_pub_rate_hz = 100;
+
+    std::atomic<int> provider_calls{0};
+    rb_servo::StatePublisher publisher(cfg, [&provider_calls]() {
+        ++provider_calls;
+        rb_servo::ServoSnapshot snapshot;
+        snapshot.tick = static_cast<uint64_t>(provider_calls.load());
+        return snapshot;
+    });
+
+    RB_CHECK(publisher.start());
+    std::this_thread::sleep_for(std::chrono::milliseconds(180));
+    publisher.stop();
+
+    const int calls = provider_calls.load();
+    RB_CHECK(calls >= 8);
+    RB_CHECK(calls <= 30);
+    return true;
+}
+
 bool testLoggerZeroCapacityDropsWithoutBlocking() {
     rb_servo::LoggingConfig cfg;
     cfg.enable = true;
@@ -3000,6 +3030,7 @@ int main() {
     if (!testStatePublisherAcceptsDockerServiceHostnameEndpoint()) return 1;
     if (!testStatePublisherSerializesServoSnapshotSchema()) return 1;
     if (!testStatePublisherUsesLatestSnapshotWithoutBackendReadsAndDoesNotStallLoop()) return 1;
+    if (!testStatePublisherUsesConfiguredPublishRate()) return 1;
     if (!testLoggerZeroCapacityDropsWithoutBlocking()) return 1;
     if (!testInvalidStartupRobotStateFailsStart()) return 1;
     if (!testEmergencyWinsAndResetDoesNotRun()) return 1;

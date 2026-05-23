@@ -168,6 +168,7 @@ fi
 
 if [[ "${CHECK_DEPS}" -eq 1 ]]; then
   "${ROOT_DIR}/scripts/check_deps.sh" --profile hardware-free
+  "${ROOT_DIR}/scripts/check_deps.sh" --profile kinematics
 fi
 
 require_file "${ROOT_DIR}/rb_servo_server/tools/send_arm_motion.py" "ArmMotion send tool"
@@ -191,6 +192,10 @@ grep -q "isCartesianMode" "${ROOT_DIR}/rb_servo_server/src/control/dual_arm_serv
 
 if [[ "${STACK_MODE}" == "start-local" ]]; then
   require_executable "${SERVER}" "rb_servo_server binary"
+  server_cache="$(dirname "${SERVER}")/CMakeCache.txt"
+  if [[ -f "${server_cache}" ]] && ! grep -q '^RB_SERVO_ENABLE_PINOCCHIO:BOOL=ON$' "${server_cache}"; then
+    fail "rb_servo_server binary was not built with RB_SERVO_ENABLE_PINOCCHIO=ON: ${SERVER}. Reconfigure a simulator acceptance build with Pinocchio enabled."
+  fi
 fi
 
 python3 "${ROOT_DIR}/rb_servo_server/tools/send_tcp_delta.py" \
@@ -211,6 +216,8 @@ text = path.read_text(encoding="utf-8")
 checks = [
     ("kinematics section", r"(?m)^kinematics:\s*$"),
     ("kinematics.enable true", r"(?ms)^kinematics:.*?^\s+enable:\s+true\s*$"),
+    ("kinematics.provider pinocchio", r"(?ms)^kinematics:.*?^\s+provider:\s+pinocchio\s*$"),
+    ("kinematics.urdf path", r"(?ms)^kinematics:.*?^\s+urdf:\s+\"?[^\n\"]+\"?\s*$"),
     ("kinematics.publish_tcp true", r"(?ms)^kinematics:.*?^\s+publish_tcp:\s+true\s*$"),
     ("kinematics.ik section", r"(?ms)^kinematics:.*?^\s+ik:\s*$"),
     ("kinematics.ik.enable true", r"(?ms)^kinematics:.*?^\s+ik:\s*$.*?^\s+enable:\s+true\s*$"),
@@ -238,8 +245,10 @@ if missing:
         print(f"  - missing {label}", file=sys.stderr)
     print(
         "Provide --server-config with kinematics.enable=true, "
+        "kinematics.provider=pinocchio, kinematics.urdf, "
         "kinematics.publish_tcp=true, kinematics.ik.enable=true, "
-        "cartesian_control.enable=true, and allow_in_simulation=true.",
+        "cartesian_control.enable=true, and allow_in_simulation=true. "
+        "Build the server with RB_SERVO_ENABLE_PINOCCHIO=ON.",
         file=sys.stderr,
     )
     sys.exit(2)

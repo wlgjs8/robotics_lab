@@ -38,6 +38,20 @@ Do not fake rbpodo APIs while adding this contract. If rbpodo headers or docs
 are not available, keep rbpodo builds gated behind the existing dependency
 switches and report the limitation.
 
+## Backend Result Taxonomy
+
+The review baseline is a structured taxonomy, not bool + log-string behavior:
+
+| Kind | Meaning | Typical operator action |
+| --- | --- | --- |
+| `RobotFault` | The controller or simulator reports a robot/controller fault state. | Stop the workflow, inspect the reported code/name, and recover through the approved robot procedure. |
+| `TransportWriteFailed` | The command channel could not write a request, or a write-like operation failed before controller acceptance was known. | Treat the command as not accepted; investigate network/backend health. |
+| `SuppressedByPolicy` | The server intentionally did not perform an operation because a safety gate, read-only mode, stopped worker, or timeout policy blocked it. | Check mode, environment gates, and command freshness rather than retrying blindly. |
+| `WrongMode` | The controller-reported mode conflicts with the selected config, such as real/simulation mismatch. | Fix controller/config mode alignment before any motion attempt. |
+
+These kinds are diagnostic and safety inputs. They do not by themselves enable
+real connection or real motion.
+
 ## Servo Loop Ownership Boundary
 
 `ServoLoop` should remain responsible for timing policy, command freshness,
@@ -57,6 +71,16 @@ CommandBuffer -> ServoCoordinator -> Left ArmWorker  -> left IRobotBackend
 owns dual-arm coordination, stop-both-arms policy, and result aggregation.
 Each `ArmWorker` owns one arm backend instance, network I/O, reconnect/reset
 behavior, and the latest structured backend result for diagnostics.
+
+Current `io_model` status:
+
+- `servo.io_model: direct` is the stable default for tracked mock, simulator,
+  and real template configs.
+- `servo.io_model: worker` is accepted for simulator evidence when the
+  MIG-10/MIG-11 worker smoke passes with
+  `rb_servo_server/config/dual_simulator_worker.yaml`.
+- real + `worker` remains disabled or experimental until a separate real
+  read-only acceptance task proves connection/read behavior without motion.
 
 The target still preserves one endpoint per arm:
 
@@ -176,6 +200,17 @@ Structured rbpodo mapping:
 not call `set_operation_mode`, `set_speed_bar`, or any command that enters a
 motion mode.
 
+Real robot policy:
+
+- real read-only connect is allowed only when `RB_ALLOW_REAL_ROBOT=1`
+- real `servo_j` motion requires both `RB_ALLOW_REAL_ROBOT=1` and
+  `RB_ALLOW_REAL_MOTION=1`
+- real Cartesian/TCP motion requires `RB_ALLOW_REAL_CARTESIAN=1` in addition to
+  the real robot gates
+- unverified rbpodo `stop()` and `resetFault()` must be reported as requiring
+  operator intervention on a real fault; they must not be treated as automatic
+  controller recovery
+
 `sendServoJ()` may include the backend's recent timestamped state cache on
 rejections. When included, `state_after_source` must be `"cache"`. The cache is
 only diagnostic state from the last rbpodo state sample; it is not a hidden
@@ -195,3 +230,21 @@ hold/fault-reset. They fail closed without issuing a robot API call:
 
 Their messages must state that operator intervention is required. Reset must
 not implicitly re-enable motion.
+
+## MIG-12 Migration Rebaseline
+
+MIG-12 closes the migration baseline by making review surfaces explicit:
+
+- docs describe `CommandBuffer -> ServoCoordinator -> Left/Right ArmWorker`
+  and the direct/worker `io_model` status above.
+- tracked real config remains a template with real IPs only in
+  `dual_real.example.yaml`, `servo.send_servo_commands: false`, and no implicit
+  real connection unless `RB_ALLOW_REAL_ROBOT=1`.
+- tracked simulator configs use loopback or compose service DNS, never the real
+  robot IP addresses.
+- deprecated simulator compatibility filenames are marked as historical or
+  compatibility-only and are not new acceptance evidence.
+- `network.state_pub_rate_hz` is wired to the UDP state publisher period.
+- Pinocchio-enabled C++ validation is optional: `scripts/codex_gate.sh MIG-12`
+  runs it when the `pinocchio` CMake package is available, while
+  `scripts/hardware_free_validation.sh` keeps `RB_SERVO_ENABLE_PINOCCHIO=OFF`.

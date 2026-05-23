@@ -1,8 +1,10 @@
-# Docker Compose hardware-free simulator backend profile.
-# rb_servo_server shares the simulator network namespace in compose, so both
-# arms keep the loopback simulator_control_endpoint while command/state ports
-# are exposed to rb_gui.
-# This profile must not be used as Rainbow rbsim/OVA or real robot evidence.
+# Deprecated compatibility Docker Compose simulator backend profile.
+#
+# Use dual_simulator_compose.yaml for the current per-arm compose topology.
+# This historical filename remains only for migration compatibility and keeps
+# the old shared-network-namespace endpoint shape. Do not use it for new
+# acceptance evidence. This profile must not be used as Rainbow rbsim/OVA or
+# real robot evidence.
 
 schema: robotics_lab.rb_servo_server.v1
 
