@@ -1,11 +1,15 @@
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
 
 #include "rb_servo/control/servo_dispatcher.hpp"
+#include "rb_servo/core/clock.hpp"
 
 namespace {
 
@@ -131,6 +135,124 @@ private:
     rb_servo::SendServoJRequest last_request_;
 };
 
+class WorkerDispatchBackend final : public rb_servo::IRobotBackend {
+public:
+    WorkerDispatchBackend(
+        rb_servo::ArmId arm_id,
+        rb_servo::BackendErrorKind send_error_kind = rb_servo::BackendErrorKind::None,
+        std::chrono::milliseconds send_delay = std::chrono::milliseconds(0)
+    ) : arm_id_(arm_id),
+        send_error_kind_(send_error_kind),
+        send_delay_(send_delay),
+        state_(validState(arm_id, joints(0.0))) {}
+
+    rb_servo::BackendResult<rb_servo::RobotState> connect() override {
+        return backendStateResult(rb_servo::BackendOp::Connect, state_);
+    }
+
+    rb_servo::BackendResult<rb_servo::RobotState> initialize() override {
+        return backendStateResult(rb_servo::BackendOp::Initialize, state_);
+    }
+
+    rb_servo::BackendResult<rb_servo::RobotState> readState() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_.host_time_ns = rb_servo::nowSteadyNs();
+        return backendStateResult(rb_servo::BackendOp::ReadState, state_);
+    }
+
+    rb_servo::SendServoJResult sendServoJ(const rb_servo::SendServoJRequest& request) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++send_count_;
+            last_request_ = request;
+        }
+        cv_.notify_all();
+
+        if (send_delay_.count() > 0) {
+            std::this_thread::sleep_for(send_delay_);
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (send_error_kind_ == rb_servo::BackendErrorKind::None) {
+            state_.q_target_deg = request.q_target_deg;
+            state_.q_actual_deg = request.q_target_deg;
+            state_.host_time_ns = rb_servo::nowSteadyNs();
+            return rb_servo::acceptedSend(request, {}, state_, "cache");
+        }
+
+        return rb_servo::rejectedSend(
+            request,
+            rb_servo::backendError(
+                send_error_kind_,
+                "worker dispatch test failure",
+                "",
+                "worker_dispatch_failure"
+            )
+        );
+    }
+
+    rb_servo::BackendResult<rb_servo::RobotState> stop() override {
+        return backendStateResult(rb_servo::BackendOp::Stop, state_);
+    }
+
+    rb_servo::BackendResult<rb_servo::RobotState> resetFault() override {
+        return backendStateResult(rb_servo::BackendOp::ResetFault, state_);
+    }
+
+    bool isConnected() const override { return true; }
+    rb_servo::ArmId armId() const override { return arm_id_; }
+    std::string name() const override { return "worker_dispatch_backend"; }
+
+    bool waitForSends(int expected, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this, expected] {
+            return send_count_ >= expected;
+        });
+    }
+
+    int sendCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return send_count_;
+    }
+
+    std::optional<rb_servo::SendServoJRequest> lastRequest() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_request_;
+    }
+
+private:
+    rb_servo::ArmId arm_id_;
+    rb_servo::BackendErrorKind send_error_kind_;
+    std::chrono::milliseconds send_delay_;
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    rb_servo::RobotState state_;
+    int send_count_ = 0;
+    std::optional<rb_servo::SendServoJRequest> last_request_;
+};
+
+bool waitForWorkerState(rb_servo::ArmWorker& worker) {
+    for (int i = 0; i < 200; ++i) {
+        if (worker.latestState(1'000'000'000).ok) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+}
+
+rb_servo::ServoDispatchRequest workerRequest(uint64_t seq, uint64_t host_time_ns, uint64_t deadline_ns) {
+    rb_servo::ServoDispatchRequest request;
+    request.seq = seq;
+    request.dispatch_start_ns = host_time_ns;
+    request.deadline_ns = deadline_ns;
+    request.left.host_time_ns = host_time_ns;
+    request.right.host_time_ns = host_time_ns;
+    request.left.q_target_deg = joints(1.0);
+    request.right.q_target_deg = joints(2.0);
+    return request;
+}
+
 bool testDirectSequentialPopulatesTimingAndPreservesResults() {
     DispatchBackend left(rb_servo::ArmId::Left, rb_servo::BackendErrorKind::None, std::chrono::microseconds(200));
     DispatchBackend right(rb_servo::ArmId::Right, rb_servo::BackendErrorKind::TransportWriteFailed);
@@ -153,6 +275,7 @@ bool testDirectSequentialPopulatesTimingAndPreservesResults() {
     RB_CHECK(result.left.dispatch_timing.start_ns > 0);
     RB_CHECK(result.left.dispatch_timing.end_ns >= result.left.dispatch_timing.start_ns);
     RB_CHECK(result.left.dispatch_timing.duration_us > 0.0);
+    RB_CHECK(result.left.result.timing.duration_us > 0.0);
     RB_CHECK(result.right.dispatch_timing.start_ns > 0);
     RB_CHECK(result.right.dispatch_timing.end_ns >= result.right.dispatch_timing.start_ns);
     RB_CHECK(result.left_right_start_skew_us > 0.0);
@@ -170,12 +293,141 @@ bool testDirectSequentialPopulatesTimingAndPreservesResults() {
     RB_CHECK(result.right.request.command_seq == 42);
     RB_CHECK(result.left.request.deadline_ns == 9000);
     RB_CHECK(result.right.request.deadline_ns == 9000);
+    RB_CHECK(result.left.request.host_time_ns == 1000);
+    RB_CHECK(result.right.request.host_time_ns == 1000);
     RB_CHECK(result.left.request.host_time_ns == left.lastRequest().host_time_ns);
     RB_CHECK(result.right.request.host_time_ns == right.lastRequest().host_time_ns);
     RB_CHECK(sameJointArray(result.left.request.q_target_deg, joints(1.0)));
     RB_CHECK(sameJointArray(result.right.request.q_target_deg, joints(2.0)));
     RB_CHECK(sameJointArray(result.left.result.requested_q_deg, joints(1.0)));
     RB_CHECK(sameJointArray(result.right.result.requested_q_deg, joints(2.0)));
+    return true;
+}
+
+bool testWorkerDispatchBothAccepted() {
+    auto left_backend = std::make_unique<WorkerDispatchBackend>(rb_servo::ArmId::Left);
+    auto right_backend = std::make_unique<WorkerDispatchBackend>(rb_servo::ArmId::Right);
+    WorkerDispatchBackend* left_raw = left_backend.get();
+    WorkerDispatchBackend* right_raw = right_backend.get();
+    rb_servo::ArmWorker left(std::move(left_backend));
+    rb_servo::ArmWorker right(std::move(right_backend));
+    RB_CHECK(left.start());
+    RB_CHECK(right.start());
+    RB_CHECK(waitForWorkerState(left));
+    RB_CHECK(waitForWorkerState(right));
+
+    const uint64_t host_time_ns = rb_servo::nowSteadyNs();
+    const rb_servo::DualSendResult result = rb_servo::ServoDispatcher::dispatchWorker(
+        left,
+        right,
+        workerRequest(100, host_time_ns, host_time_ns + 500'000'000)
+    );
+
+    left.stop();
+    right.stop();
+    RB_CHECK(result.left.result.accepted);
+    RB_CHECK(result.right.result.accepted);
+    RB_CHECK(result.left.request.command_seq == 100);
+    RB_CHECK(result.right.request.command_seq == 100);
+    RB_CHECK(result.left.request.host_time_ns == host_time_ns);
+    RB_CHECK(result.right.request.host_time_ns == host_time_ns);
+    RB_CHECK(result.left.result.error.kind == rb_servo::BackendErrorKind::None);
+    RB_CHECK(result.right.result.error.kind == rb_servo::BackendErrorKind::None);
+    RB_CHECK(!rb_servo::ServoDispatcher::deadlineMissed(result));
+    RB_CHECK(result.left_right_start_skew_us < 10'000.0);
+    RB_CHECK(left_raw->sendCount() == 1);
+    RB_CHECK(right_raw->sendCount() == 1);
+    return true;
+}
+
+bool testWorkerDispatchSlowArmDoesNotHideFastArm() {
+    auto left_backend = std::make_unique<WorkerDispatchBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None,
+        std::chrono::milliseconds(60)
+    );
+    auto right_backend = std::make_unique<WorkerDispatchBackend>(rb_servo::ArmId::Right);
+    WorkerDispatchBackend* left_raw = left_backend.get();
+    WorkerDispatchBackend* right_raw = right_backend.get();
+    rb_servo::ArmWorker left(std::move(left_backend));
+    rb_servo::ArmWorker right(std::move(right_backend));
+    RB_CHECK(left.start());
+    RB_CHECK(right.start());
+    RB_CHECK(waitForWorkerState(left));
+    RB_CHECK(waitForWorkerState(right));
+
+    const uint64_t host_time_ns = rb_servo::nowSteadyNs();
+    const rb_servo::DualSendResult result = rb_servo::ServoDispatcher::dispatchWorker(
+        left,
+        right,
+        workerRequest(101, host_time_ns, host_time_ns + 20'000'000)
+    );
+
+    RB_CHECK(left_raw->waitForSends(1, std::chrono::milliseconds(50)));
+    RB_CHECK(right_raw->sendCount() == 1);
+    left.stop();
+    right.stop();
+    RB_CHECK(!result.left.result.accepted);
+    RB_CHECK(result.left.result.error.kind == rb_servo::BackendErrorKind::CommandTimeout);
+    RB_CHECK(result.right.result.accepted);
+    RB_CHECK(result.right.result.error.kind == rb_servo::BackendErrorKind::None);
+    RB_CHECK(rb_servo::ServoDispatcher::armDeadlineMissed(result.left));
+    RB_CHECK(rb_servo::ServoDispatcher::deadlineMissed(result));
+    RB_CHECK(result.left_right_start_skew_us < 10'000.0);
+    return true;
+}
+
+bool testWorkerDispatchTransportFailureDoesNotHideAcceptedArm() {
+    auto left_backend = std::make_unique<WorkerDispatchBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::TransportWriteFailed
+    );
+    auto right_backend = std::make_unique<WorkerDispatchBackend>(rb_servo::ArmId::Right);
+    rb_servo::ArmWorker left(std::move(left_backend));
+    rb_servo::ArmWorker right(std::move(right_backend));
+    RB_CHECK(left.start());
+    RB_CHECK(right.start());
+    RB_CHECK(waitForWorkerState(left));
+    RB_CHECK(waitForWorkerState(right));
+
+    const uint64_t host_time_ns = rb_servo::nowSteadyNs();
+    const rb_servo::DualSendResult result = rb_servo::ServoDispatcher::dispatchWorker(
+        left,
+        right,
+        workerRequest(102, host_time_ns, host_time_ns + 500'000'000)
+    );
+
+    left.stop();
+    right.stop();
+    RB_CHECK(!result.left.result.accepted);
+    RB_CHECK(result.left.result.error.kind == rb_servo::BackendErrorKind::TransportWriteFailed);
+    RB_CHECK(result.left.result.error.transport_fault);
+    RB_CHECK(result.right.result.accepted);
+    RB_CHECK(result.right.result.error.kind == rb_servo::BackendErrorKind::None);
+    RB_CHECK(result.any_transport_failure());
+    RB_CHECK(!result.any_robot_fault());
+    return true;
+}
+
+bool testDirectSequentialDeadlineMissFlag() {
+    DispatchBackend left(rb_servo::ArmId::Left, rb_servo::BackendErrorKind::None, std::chrono::microseconds(2000));
+    DispatchBackend right(rb_servo::ArmId::Right);
+    rb_servo::ServoDispatchRequest request;
+    request.seq = 103;
+    request.dispatch_start_ns = rb_servo::nowSteadyNs();
+    request.deadline_ns = request.dispatch_start_ns + 1000;
+    request.left.host_time_ns = request.dispatch_start_ns;
+    request.right.host_time_ns = request.dispatch_start_ns;
+    request.left.q_target_deg = joints(1.0);
+    request.right.q_target_deg = joints(2.0);
+
+    const rb_servo::DualSendResult result =
+        rb_servo::ServoDispatcher::dispatchDirectSequential(left, right, request);
+
+    RB_CHECK(result.left.result.accepted);
+    RB_CHECK(result.right.result.accepted);
+    RB_CHECK(rb_servo::ServoDispatcher::armDeadlineMissed(result.left));
+    RB_CHECK(rb_servo::ServoDispatcher::deadlineMissed(result));
     return true;
 }
 
@@ -203,6 +455,10 @@ bool testRobotFaultHelper() {
 
 int main() {
     if (!testDirectSequentialPopulatesTimingAndPreservesResults()) return 1;
+    if (!testWorkerDispatchBothAccepted()) return 1;
+    if (!testWorkerDispatchSlowArmDoesNotHideFastArm()) return 1;
+    if (!testWorkerDispatchTransportFailureDoesNotHideAcceptedArm()) return 1;
+    if (!testDirectSequentialDeadlineMissFlag()) return 1;
     if (!testRobotFaultHelper()) return 1;
     return 0;
 }

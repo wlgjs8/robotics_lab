@@ -120,6 +120,35 @@ BackendError suppressedSendError(const std::string& send_policy) {
         send_policy
     );
 }
+
+uint64_t timeoutNs(double timeout_sec, uint64_t fallback_ns) {
+    if (timeout_sec <= 0.0 || !std::isfinite(timeout_sec)) {
+        return fallback_ns;
+    }
+    return static_cast<uint64_t>(timeout_sec * 1'000'000'000.0);
+}
+
+uint64_t addDeadlineNs(uint64_t host_time_ns, uint64_t timeout_ns) {
+    if (host_time_ns == 0 || timeout_ns == 0) {
+        return 0;
+    }
+    constexpr uint64_t kMax = ~uint64_t{0};
+    if (kMax - host_time_ns < timeout_ns) {
+        return kMax;
+    }
+    return host_time_ns + timeout_ns;
+}
+
+uint64_t commandSendDeadlineNs(
+    const DualArmCommand& command,
+    uint64_t command_host_time_ns,
+    uint64_t fallback_timeout_ns
+) {
+    const uint64_t left_timeout_ns = timeoutNs(command.left.timeout_sec, fallback_timeout_ns);
+    const uint64_t right_timeout_ns = timeoutNs(command.right.timeout_sec, fallback_timeout_ns);
+    const uint64_t timeout_ns = std::min(left_timeout_ns, right_timeout_ns);
+    return addDeadlineNs(command_host_time_ns, timeout_ns);
+}
 }
 
 DualArmServoLoop::DualArmServoLoop(
@@ -452,12 +481,25 @@ void DualArmServoLoop::loopMain() {
         const bool fault_latched_before_send = fault_latched_.load();
         const std::string send_policy = currentSendPolicy();
         const bool send_suppressed = send_policy != "send_servo_j";
+        const uint64_t command_host_time_ns = command.host_time_ns > 0
+            ? command.host_time_ns
+            : loop_start;
+        const uint64_t fallback_timeout_ns = timeoutNs(
+            config_.servo.command_timeout_sec,
+            nominal_period_ns
+        );
+        const uint64_t send_deadline_ns = commandSendDeadlineNs(
+            command,
+            command_host_time_ns,
+            fallback_timeout_ns
+        );
         DualSendResult dual_send_result = sendTargets(
             attempted_target,
             command.seq,
+            command_host_time_ns,
             send_policy,
             loop_start,
-            loop_start + nominal_period_ns
+            send_deadline_ns
         );
         const SendServoJResult& left_send_result = dual_send_result.left.result;
         const SendServoJResult& right_send_result = dual_send_result.right.result;
@@ -856,6 +898,7 @@ ServoTarget DualArmServoLoop::applySafety(
 DualSendResult DualArmServoLoop::sendTargets(
     const ServoTarget& target,
     uint64_t command_seq,
+    uint64_t command_host_time_ns,
     const std::string& send_policy,
     uint64_t dispatch_start_ns,
     uint64_t deadline_ns
@@ -872,10 +915,14 @@ DualSendResult DualArmServoLoop::sendTargets(
         const BackendTiming timing = makeBackendTiming(suppressed_time_ns, suppressed_time_ns);
         const BackendError error = suppressedSendError(send_policy);
         dispatch_request.left.command_seq = command_seq;
-        dispatch_request.left.host_time_ns = suppressed_time_ns;
+        dispatch_request.left.host_time_ns = command_host_time_ns > 0
+            ? command_host_time_ns
+            : suppressed_time_ns;
         dispatch_request.left.deadline_ns = deadline_ns;
         dispatch_request.right.command_seq = command_seq;
-        dispatch_request.right.host_time_ns = suppressed_time_ns;
+        dispatch_request.right.host_time_ns = command_host_time_ns > 0
+            ? command_host_time_ns
+            : suppressed_time_ns;
         dispatch_request.right.deadline_ns = deadline_ns;
 
         DualSendResult result;
@@ -892,9 +939,13 @@ DualSendResult DualArmServoLoop::sendTargets(
     }
 
     if (workerIoMode()) {
+        dispatch_request.left.host_time_ns = command_host_time_ns;
+        dispatch_request.right.host_time_ns = command_host_time_ns;
         return ServoDispatcher::dispatchWorker(*left_worker_, *right_worker_, dispatch_request);
     }
 
+    dispatch_request.left.host_time_ns = command_host_time_ns;
+    dispatch_request.right.host_time_ns = command_host_time_ns;
     return ServoDispatcher::dispatchDirectSequential(*left_robot_, *right_robot_, dispatch_request);
 }
 

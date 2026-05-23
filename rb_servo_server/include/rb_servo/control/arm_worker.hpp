@@ -32,6 +32,11 @@ public:
     BackendResult<RobotState> latestState(uint64_t max_age_ns) const;
     void enqueueServoJ(SendServoJRequest request);
     std::optional<ArmSendResult> lastSendResult() const;
+    std::optional<ArmSendResult> waitForSendResult(
+        const SendServoJRequest& request,
+        uint64_t not_before_ns,
+        uint64_t wait_until_ns
+    );
 
     ArmId armId() const;
     std::string name() const;
@@ -51,6 +56,10 @@ private:
     );
     bool isExpired(const SendServoJRequest& request, uint64_t now_ns) const;
     SendServoJResult expiredResult(const SendServoJRequest& request, uint64_t now_ns) const;
+    SendServoJResult deadlineMissedResult(
+        const SendServoJRequest& request,
+        const BackendTiming& dispatch_timing
+    ) const;
     SendServoJResult notRunningResult(const SendServoJRequest& request, uint64_t now_ns) const;
 
     std::unique_ptr<IRobotBackend> backend_;

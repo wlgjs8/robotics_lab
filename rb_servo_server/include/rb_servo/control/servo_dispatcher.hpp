@@ -28,6 +28,9 @@ public:
         ArmWorker& right,
         const ServoDispatchRequest& request
     );
+
+    static bool armDeadlineMissed(const ArmSendResult& result);
+    static bool deadlineMissed(const DualSendResult& result);
 };
 
 }  // namespace rb_servo

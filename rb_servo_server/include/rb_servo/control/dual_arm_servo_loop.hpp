@@ -70,6 +70,7 @@ private:
     DualSendResult sendTargets(
         const ServoTarget& target,
         uint64_t command_seq,
+        uint64_t command_host_time_ns,
         const std::string& send_policy,
         uint64_t dispatch_start_ns,
         uint64_t deadline_ns

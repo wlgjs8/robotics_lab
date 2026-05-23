@@ -20,6 +20,18 @@ BackendResult<RobotState> lifecycleFailureAsReadResult(
     return failedReadState(lifecycle_result.error, lifecycle_result.timing);
 }
 
+bool sendResultMatches(
+    const std::optional<ArmSendResult>& result,
+    const SendServoJRequest& request,
+    uint64_t not_before_ns
+) {
+    return result.has_value() &&
+           result->request.command_seq == request.command_seq &&
+           result->request.deadline_ns == request.deadline_ns &&
+           result->request.host_time_ns == request.host_time_ns &&
+           result->dispatch_timing.end_ns >= not_before_ns;
+}
+
 }  // namespace
 
 ArmWorker::ArmWorker(std::unique_ptr<IRobotBackend> backend, ArmWorkerOptions options)
@@ -118,6 +130,32 @@ std::optional<ArmSendResult> ArmWorker::lastSendResult() const {
     return last_send_result_;
 }
 
+std::optional<ArmSendResult> ArmWorker::waitForSendResult(
+    const SendServoJRequest& request,
+    uint64_t not_before_ns,
+    uint64_t wait_until_ns
+) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    const auto matches = [this, &request, not_before_ns] {
+        return sendResultMatches(last_send_result_, request, not_before_ns);
+    };
+
+    while (!matches()) {
+        if (wait_until_ns == 0) {
+            return std::nullopt;
+        }
+
+        const uint64_t now = nowSteadyNs();
+        if (now >= wait_until_ns) {
+            return std::nullopt;
+        }
+
+        cv_.wait_for(lock, std::chrono::nanoseconds(wait_until_ns - now), matches);
+    }
+
+    return last_send_result_;
+}
+
 ArmId ArmWorker::armId() const {
     return arm_id_;
 }
@@ -175,9 +213,13 @@ void ArmWorker::run() {
                 storeSendResult(*command, result, makeBackendTiming(now, now));
             } else {
                 const uint64_t send_start_ns = nowSteadyNs();
-                const SendServoJResult result = backend_->sendServoJ(*command);
+                SendServoJResult result = backend_->sendServoJ(*command);
                 const uint64_t send_end_ns = nowSteadyNs();
-                storeSendResult(*command, result, makeBackendTiming(send_start_ns, send_end_ns));
+                const BackendTiming dispatch_timing = makeBackendTiming(send_start_ns, send_end_ns);
+                if (isExpired(*command, send_end_ns)) {
+                    result = deadlineMissedResult(*command, dispatch_timing);
+                }
+                storeSendResult(*command, result, dispatch_timing);
             }
         }
 
@@ -220,8 +262,12 @@ void ArmWorker::storeSendResultLocked(
     arm_result.arm_id = arm_id_;
     arm_result.request = request;
     arm_result.result = result;
+    if (arm_result.result.timing.start_ns == 0 && arm_result.result.timing.end_ns == 0) {
+        arm_result.result.timing = dispatch_timing;
+    }
     arm_result.dispatch_timing = dispatch_timing;
     last_send_result_ = std::move(arm_result);
+    cv_.notify_all();
 }
 
 bool ArmWorker::isExpired(const SendServoJRequest& request, uint64_t now_ns) const {
@@ -241,6 +287,22 @@ SendServoJResult ArmWorker::expiredResult(
             "arm_worker_command_expired"
         ),
         makeBackendTiming(now_ns, now_ns)
+    );
+}
+
+SendServoJResult ArmWorker::deadlineMissedResult(
+    const SendServoJRequest& request,
+    const BackendTiming& dispatch_timing
+) const {
+    return rejectedSend(
+        request,
+        backendError(
+            BackendErrorKind::CommandTimeout,
+            "servo_j request completed after its command deadline",
+            "",
+            "arm_worker_send_result_timeout"
+        ),
+        dispatch_timing
     );
 }
 

@@ -1948,7 +1948,7 @@ bool testWorkerIoModeTimesOutMissingSendResultByDeadline() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
     cfg.servo.io_model = rb_servo::ServoIoModel::Worker;
-    cfg.servo.rate_hz = 50;
+    cfg.servo.rate_hz = 2;
     cfg.safety.dq_max_deg_s = joints(10000.0);
     cfg.safety.ddq_max_deg_s2 = joints(100000.0);
     const rb_servo::JointArray initial = joints(0.0);
@@ -1965,24 +1965,32 @@ bool testWorkerIoModeTimesOutMissingSendResultByDeadline() {
     );
 
     RB_CHECK(loop.start());
-    left_backend->setSendSleepMs(30);
-    right_backend->setSendSleepMs(30);
-    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
-    RB_CHECK(waitUntil([&] { return loop.motionState() == rb_servo::ServerMotionState::ArmedHold; }));
+    left_backend->setSendSleepMs(800);
+    right_backend->setSendSleepMs(800);
+    rb_servo::DualArmCommand arm_motion = command(rb_servo::ControlMode::ArmMotion);
+    arm_motion.left.timeout_sec = 2.0;
+    arm_motion.right.timeout_sec = 2.0;
+    buffer.setCommand(arm_motion);
+    RB_CHECK(waitUntil(
+        [&] { return loop.motionState() == rb_servo::ServerMotionState::ArmedHold; },
+        std::chrono::milliseconds(1500)
+    ));
 
     rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
     target.left.q_target_deg = joints(4.0);
     target.right.q_target_deg = joints(4.0);
     target.left.has_joint_target = true;
     target.right.has_joint_target = true;
+    target.left.timeout_sec = 0.6;
+    target.right.timeout_sec = 0.6;
     buffer.setCommand(target);
 
-    RB_CHECK(waitUntil([&] {
+    const bool saw_timeout = waitUntil([&] {
         const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
-        return snapshot.command.left.mode == rb_servo::ControlMode::JointTarget &&
-               snapshot.left_last_send.backend_error_kind == "CommandTimeout" &&
+        return snapshot.left_last_send.backend_error_kind == "CommandTimeout" &&
                snapshot.right_last_send.backend_error_kind == "CommandTimeout";
-    }, std::chrono::milliseconds(500)));
+    }, std::chrono::milliseconds(3000));
+    RB_CHECK(saw_timeout);
 
     const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
     loop.stop();
@@ -1992,6 +2000,71 @@ bool testWorkerIoModeTimesOutMissingSendResultByDeadline() {
     RB_CHECK(snapshot.right_last_send.error_name == "arm_worker_send_result_timeout");
     RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::SendFailure ||
              snapshot.safety_verdict == rb_servo::SafetyVerdict::FaultLatched);
+    return true;
+}
+
+bool testWorkerIoModeReportsMixedTimeoutAndAcceptedArm() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.servo.io_model = rb_servo::ServoIoModel::Worker;
+    cfg.servo.rate_hz = 2;
+    cfg.safety.stop_both_arms_on_single_arm_error = true;
+    cfg.safety.dq_max_deg_s = joints(10000.0);
+    cfg.safety.ddq_max_deg_s2 = joints(100000.0);
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    TestBackend* left_backend = left.get();
+    TestBackend* right_backend = right.get();
+    rb_servo::DualArmServoLoop loop(
+        std::move(left),
+        std::move(right),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    left_backend->setSendSleepMs(800);
+    rb_servo::DualArmCommand arm_motion = command(rb_servo::ControlMode::ArmMotion);
+    arm_motion.left.timeout_sec = 2.0;
+    arm_motion.right.timeout_sec = 2.0;
+    buffer.setCommand(arm_motion);
+    RB_CHECK(waitUntil(
+        [&] { return loop.motionState() == rb_servo::ServerMotionState::ArmedHold; },
+        std::chrono::milliseconds(1500)
+    ));
+
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.left.q_target_deg = joints(5.0);
+    target.right.q_target_deg = joints(5.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    target.left.timeout_sec = 0.6;
+    target.right.timeout_sec = 0.6;
+    buffer.setCommand(target);
+
+    std::optional<rb_servo::ServoSnapshot> mixed_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (snapshot.left_last_send.backend_error_kind == "CommandTimeout" &&
+            snapshot.right_last_send.accepted) {
+            mixed_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(3000)));
+
+    loop.stop();
+    RB_CHECK(mixed_snapshot.has_value());
+    RB_CHECK(!mixed_snapshot->left_send_ok);
+    RB_CHECK(mixed_snapshot->right_send_ok);
+    RB_CHECK(mixed_snapshot->left_last_send.error_name == "arm_worker_send_result_timeout");
+    RB_CHECK(mixed_snapshot->right_last_send.backend_error_kind == "None");
+    RB_CHECK(mixed_snapshot->fault_latched);
+    RB_CHECK(mixed_snapshot->latched_fault_reason == rb_servo::SafetyVerdict::SendFailure);
+    RB_CHECK(left_backend->sendCount() > 0);
+    RB_CHECK(right_backend->sendCount() > 0);
     return true;
 }
 
@@ -2012,12 +2085,13 @@ bool testWorkerIoModeClassifiesStaleStateExplicitly() {
     );
 
     RB_CHECK(loop.start());
-    left_backend->setReadSleepMs(50);
-    RB_CHECK(waitUntil([&] {
+    left_backend->setReadSleepMs(2000);
+    const bool saw_stale = waitUntil([&] {
         const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
         return snapshot.left_last_read.backend_error_kind == "TransportTimeout" &&
                snapshot.left_last_read.error_name == "arm_worker_state_stale";
-    }, std::chrono::milliseconds(500)));
+    }, std::chrono::milliseconds(2500));
+    RB_CHECK(saw_stale);
 
     const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
     loop.stop();
@@ -2921,6 +2995,7 @@ int main() {
     if (!testReadOnlyModeSuppressesSendsAndBlocksMotionCommands()) return 1;
     if (!testWorkerIoModeDispatchesThroughArmWorkers()) return 1;
     if (!testWorkerIoModeTimesOutMissingSendResultByDeadline()) return 1;
+    if (!testWorkerIoModeReportsMixedTimeoutAndAcceptedArm()) return 1;
     if (!testWorkerIoModeClassifiesStaleStateExplicitly()) return 1;
     if (!testStatePublisherAcceptsDockerServiceHostnameEndpoint()) return 1;
     if (!testStatePublisherSerializesServoSnapshotSchema()) return 1;

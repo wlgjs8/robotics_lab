@@ -394,6 +394,33 @@ bool testNoDeadlockOnDestruction() {
     return true;
 }
 
+bool testStopWithPendingCommandBehindReadDoesNotDeadlock() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None,
+        true
+    );
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorker worker(std::move(backend));
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForFirstReadEntered(std::chrono::milliseconds(200)));
+
+    worker.enqueueServoJ(request(13, joints(13.0), rb_servo::nowSteadyNs() + 1'000'000'000));
+    bool stopped = false;
+    std::thread stopper([&] {
+        worker.stop();
+        stopped = true;
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    raw_backend->releaseFirstRead();
+    stopper.join();
+
+    RB_CHECK(stopped);
+    RB_CHECK(raw_backend->sendCount() == 0);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -405,5 +432,6 @@ int main() {
     if (!testLatestQueuedCommandWins()) return 1;
     if (!testStopJoinsThreadAndRejectsNewCommand()) return 1;
     if (!testNoDeadlockOnDestruction()) return 1;
+    if (!testStopWithPendingCommandBehindReadDoesNotDeadlock()) return 1;
     return 0;
 }

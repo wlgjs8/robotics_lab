@@ -60,3 +60,27 @@ State snapshots and servo CSV logs expose MIG-10 diagnostics:
 - per-arm and aggregate `send_deadline_hit`
 - `send_skew_us` / `dispatch_skew_us`
 - per-arm `worker_loop_read_duration_us` when `servo.io_model: worker`
+
+## MIG-11 Parallel Dispatch And Deadlines
+
+Worker dispatch treats a dual-arm command as one coordination event for two
+independent controller endpoints:
+
+- The left and right `SendServoJRequest` records preserve the same command
+  sequence, command host timestamp, and command-derived deadline.
+- Both arm requests are enqueued before the dispatcher waits for either worker
+  result, so a slow or timed-out backend on one arm cannot prevent enqueueing
+  the other arm in the same servo-loop tick.
+- `DualSendResult` always contains left and right `ArmSendResult` records.
+  Missing worker responses are represented as structured `CommandTimeout`
+  send results instead of absent data.
+- A mixed result remains visible: if one arm times out or rejects and the other
+  accepts, the accepted arm result is still reported while the safety policy
+  classifies the aggregate as fail-closed according to the configured
+  stop-both-arms behavior.
+- Worker waits are bounded by `command.host_time_ns + min(left.timeout_sec,
+  right.timeout_sec)`. They no longer depend on an arbitrary polling sleep or
+  on a single backend call returning.
+- Dispatch diagnostics preserve per-arm send start/end/duration timing and
+  start/end skew. Dispatcher deadline helpers report whether either arm
+  completed after its command deadline.
