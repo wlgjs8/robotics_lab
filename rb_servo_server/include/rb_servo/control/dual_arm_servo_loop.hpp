@@ -148,6 +148,8 @@ private:
     std::optional<FaultContext> latched_fault_context_;
     JointArray left_fault_hold_q_deg_{};
     JointArray right_fault_hold_q_deg_{};
+    CartesianSolveTelemetry left_last_cartesian_solve_;
+    CartesianSolveTelemetry right_last_cartesian_solve_;
     ServoSnapshot latest_snapshot_;
 };
 

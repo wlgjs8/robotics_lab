@@ -122,6 +122,25 @@ nlohmann::json workerTelemetryJson(const ArmWorkerTelemetry& telemetry, bool ena
     };
 }
 
+nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
+    return {
+        {"attempted", telemetry.attempted},
+        {"success", telemetry.success},
+        {"status", telemetry.status},
+        {"reason", telemetry.reason},
+        {"fk_duration_us", telemetry.fk_duration_us},
+        {"ik_duration_us", telemetry.ik_duration_us},
+        {"ik_iterations", telemetry.ik_iterations},
+        {"ik_status", telemetry.status},
+        {"ik_reason", telemetry.reason},
+        {"ik_timed_out", telemetry.ik_timed_out},
+        {"ik_warn_duration_exceeded", telemetry.ik_warn_duration_exceeded},
+        {"ik_fail_duration_exceeded", telemetry.ik_fail_duration_exceeded},
+        {"warn_ik_duration_us", telemetry.warn_ik_duration_us},
+        {"fail_ik_duration_us", telemetry.fail_ik_duration_us},
+    };
+}
+
 nlohmann::json faultContextJson(const ServoSnapshot& snapshot) {
     nlohmann::json out = {
         {"latched", snapshot.fault_latched},
@@ -215,7 +234,8 @@ nlohmann::json armStateJson(
     bool send_deadline_hit,
     double worker_loop_read_duration_us,
     const ArmWorkerTelemetry& worker_telemetry,
-    bool worker_enabled
+    bool worker_enabled,
+    const CartesianSolveTelemetry& cartesian_solve
 ) {
     return {
         {"mode", toString(command.mode)},
@@ -252,6 +272,8 @@ nlohmann::json armStateJson(
         {"tcp_base", optionalPoseJson(state.tcp_base)},
         {"has_valid_tcp_pose", state.has_valid_tcp_pose},
         {"tcp_deferred", state.tcp_deferred},
+        {"fk_duration_us", state.fk_duration_us},
+        {"cartesian_solve", cartesianSolveJson(cartesian_solve)},
     };
 }
 
@@ -308,7 +330,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.left_send_end_ns),
         worker_enabled ? snapshot.left_last_read.duration_us : 0.0,
         snapshot.left_worker_telemetry,
-        worker_enabled
+        worker_enabled,
+        snapshot.left_cartesian_solve
     );
     message["right"] = armStateJson(
         snapshot.right_state,
@@ -330,8 +353,13 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.right_send_end_ns),
         worker_enabled ? snapshot.right_last_read.duration_us : 0.0,
         snapshot.right_worker_telemetry,
-        worker_enabled
+        worker_enabled,
+        snapshot.right_cartesian_solve
     );
+    message["last_cartesian_solve"] = {
+        {"left", cartesianSolveJson(snapshot.left_cartesian_solve)},
+        {"right", cartesianSolveJson(snapshot.right_cartesian_solve)},
+    };
 
     message["send_skew_us"] = snapshot.send_skew_us;
     message["dispatch_skew_us"] = snapshot.send_skew_us;

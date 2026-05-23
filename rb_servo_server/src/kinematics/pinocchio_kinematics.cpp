@@ -278,19 +278,38 @@ IkResult PinocchioKinematics::solveIk(
     const ArmMountConfig& mount
 ) const {
     (void)arm;
+    const auto started = std::chrono::steady_clock::now();
+    const auto elapsedUs = [&]() {
+        return std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - started
+        ).count();
+    };
 #if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
     if (!config_.enable || !config_.ik.enable || !impl_) {
-        return ik_solver::failureResult(ik_solver::kReasonKinematicsUnavailable, seed_q_deg);
+        return ik_solver::failureResult(
+            ik_solver::kReasonKinematicsUnavailable,
+            seed_q_deg,
+            0.0,
+            0.0,
+            0,
+            elapsedUs()
+        );
     }
     if (!ik_solver::isFinitePose(target_tcp_stand) || !ik_solver::isFiniteJoints(seed_q_deg)) {
-        return ik_solver::failureResult(ik_solver::kReasonInvalidTarget, seed_q_deg);
+        return ik_solver::failureResult(
+            ik_solver::kReasonInvalidTarget,
+            seed_q_deg,
+            0.0,
+            0.0,
+            0,
+            elapsedUs()
+        );
     }
 
     Eigen::VectorXd q = toPinocchioQ(seed_q_deg, impl_->model, impl_->joints);
     bool hit_joint_limit = clampJointLimits(&q, impl_->model, impl_->joints);
     const pinocchio::SE3 target_base =
         se3FromPose(mount.base_pose_in_stand).inverse() * se3FromPose(target_tcp_stand);
-    const auto started = std::chrono::steady_clock::now();
     double position_error_m = 0.0;
     double orientation_error_rad = 0.0;
     int iterations = 0;
@@ -305,7 +324,9 @@ IkResult PinocchioKinematics::solveIk(
                 fromPinocchioQ(q, impl_->model, impl_->joints),
                 position_error_m,
                 orientation_error_rad,
-                iterations
+                iterations,
+                elapsedUs(),
+                true
             );
         }
 
@@ -327,7 +348,8 @@ IkResult PinocchioKinematics::solveIk(
                 fromPinocchioQ(q, impl_->model, impl_->joints),
                 position_error_m,
                 orientation_error_rad,
-                iterations
+                iterations,
+                elapsedUs()
             );
         }
         if (position_error_m <= config_.ik.position_tolerance_m &&
@@ -337,6 +359,7 @@ IkResult PinocchioKinematics::solveIk(
             result.q_solution_deg = fromPinocchioQ(q, impl_->model, impl_->joints);
             result.position_error_m = position_error_m;
             result.orientation_error_rad = orientation_error_rad;
+            result.duration_us = elapsedUs();
             result.iterations = iterations;
             return result;
         }
@@ -361,7 +384,8 @@ IkResult PinocchioKinematics::solveIk(
                 fromPinocchioQ(q, impl_->model, impl_->joints),
                 position_error_m,
                 orientation_error_rad,
-                iterations
+                iterations,
+                elapsedUs()
             );
         }
 
@@ -376,7 +400,8 @@ IkResult PinocchioKinematics::solveIk(
                 fromPinocchioQ(q, impl_->model, impl_->joints),
                 position_error_m,
                 orientation_error_rad,
-                iterations
+                iterations,
+                elapsedUs()
             );
         }
 
@@ -387,7 +412,8 @@ IkResult PinocchioKinematics::solveIk(
                 fromPinocchioQ(q, impl_->model, impl_->joints),
                 position_error_m,
                 orientation_error_rad,
-                iterations
+                iterations,
+                elapsedUs()
             );
         }
 
@@ -400,12 +426,20 @@ IkResult PinocchioKinematics::solveIk(
         fromPinocchioQ(q, impl_->model, impl_->joints),
         position_error_m,
         orientation_error_rad,
-        iterations
+        iterations,
+        elapsedUs()
     );
 #else
     (void)target_tcp_stand;
     (void)mount;
-    return ik_solver::failureResult(ik_solver::kReasonKinematicsUnavailable, seed_q_deg);
+    return ik_solver::failureResult(
+        ik_solver::kReasonKinematicsUnavailable,
+        seed_q_deg,
+        0.0,
+        0.0,
+        0,
+        elapsedUs()
+    );
 #endif
 }
 

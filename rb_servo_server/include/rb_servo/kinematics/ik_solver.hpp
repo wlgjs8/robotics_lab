@@ -20,7 +20,9 @@ IkResult failureResult(
     const JointArray& q_solution_deg,
     double position_error_m = 0.0,
     double orientation_error_rad = 0.0,
-    int iterations = 0
+    int iterations = 0,
+    double duration_us = 0.0,
+    bool timed_out = false
 );
 
 }  // namespace rb_servo::ik_solver

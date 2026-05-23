@@ -119,7 +119,10 @@ std::string validIkYaml(const std::string& urdf_path) {
         "    damping: 0.002\n"
         "    position_tolerance_m: 0.002\n"
         "    orientation_tolerance_rad: 0.03\n"
-        "    max_step_deg: [1, 1, 1, 2, 2, 3]\n";
+        "    max_step_deg: [1, 1, 1, 2, 2, 3]\n"
+        "cartesian_control:\n"
+        "  warn_ik_duration_us: 2500\n"
+        "  fail_ik_duration_us: 4500\n";
 }
 
 bool testIkConfigParsing() {
@@ -135,6 +138,8 @@ bool testIkConfigParsing() {
     RB_CHECK(std::fabs(cfg.kinematics.ik.orientation_tolerance_rad - 0.03) < 1e-12);
     RB_CHECK(cfg.kinematics.ik.max_step_deg[0] == 1.0);
     RB_CHECK(cfg.kinematics.ik.max_step_deg[5] == 3.0);
+    RB_CHECK(std::fabs(cfg.cartesian_control.warn_ik_duration_us - 2500.0) < 1e-12);
+    RB_CHECK(std::fabs(cfg.cartesian_control.fail_ik_duration_us - 4500.0) < 1e-12);
 
     const std::string bad_iter_path = writeTempConfig(
         "bad-iter",
@@ -166,6 +171,9 @@ bool testDisabledBuildReturnsUnavailable() {
     );
     RB_CHECK(!result.success);
     RB_CHECK(result.reason == rb_servo::ik_solver::kReasonKinematicsUnavailable);
+    RB_CHECK(std::isfinite(result.duration_us));
+    RB_CHECK(result.duration_us >= 0.0);
+    RB_CHECK(result.iterations == 0);
     return true;
 #endif
 }
@@ -186,6 +194,10 @@ bool testPinocchioIkIfEnabled() {
     );
     RB_CHECK(same_pose.success);
     RB_CHECK(closeJoints(same_pose.q_solution_deg, seed, 1e-6));
+    RB_CHECK(std::isfinite(same_pose.duration_us));
+    RB_CHECK(same_pose.duration_us >= 0.0);
+    RB_CHECK(same_pose.iterations >= 0);
+    RB_CHECK(!same_pose.timed_out);
     RB_CHECK(same_pose.position_error_m <= testKinematicsConfig().ik.position_tolerance_m);
     RB_CHECK(same_pose.orientation_error_rad <= testKinematicsConfig().ik.orientation_tolerance_rad);
 
@@ -213,6 +225,9 @@ bool testPinocchioIkIfEnabled() {
     );
     RB_CHECK(!unreachable_result.success);
     RB_CHECK(!unreachable_result.reason.empty());
+    RB_CHECK(std::isfinite(unreachable_result.duration_us));
+    RB_CHECK(unreachable_result.duration_us >= 0.0);
+    RB_CHECK(unreachable_result.iterations >= 0);
     RB_CHECK(finiteJoints(unreachable_result.q_solution_deg));
 
     rb_servo::KinematicsConfig one_iter_cfg = testKinematicsConfig();
@@ -233,6 +248,9 @@ bool testPinocchioIkIfEnabled() {
         mount
     );
     RB_CHECK(!non_converged.success);
+    RB_CHECK(std::isfinite(non_converged.duration_us));
+    RB_CHECK(non_converged.duration_us >= 0.0);
+    RB_CHECK(non_converged.iterations >= 0);
     RB_CHECK(non_converged.reason == rb_servo::ik_solver::kReasonMaxIterations ||
              non_converged.reason == rb_servo::ik_solver::kReasonJointLimit);
 
@@ -247,6 +265,18 @@ bool testPinocchioIkIfEnabled() {
     );
     RB_CHECK(!disabled.success);
     RB_CHECK(disabled.reason == rb_servo::ik_solver::kReasonKinematicsUnavailable);
+    RB_CHECK(std::isfinite(disabled.duration_us));
+    RB_CHECK(disabled.duration_us >= 0.0);
+
+    std::cout << "[IK_LATENCY] same_pose_duration_us=" << same_pose.duration_us
+              << " same_pose_iterations=" << same_pose.iterations
+              << " nearby_duration_us=" << nearby.duration_us
+              << " nearby_iterations=" << nearby.iterations
+              << " unreachable_duration_us=" << unreachable_result.duration_us
+              << " unreachable_iterations=" << unreachable_result.iterations
+              << " non_converged_duration_us=" << non_converged.duration_us
+              << " non_converged_iterations=" << non_converged.iterations
+              << "\n";
 #endif
     return true;
 }
@@ -267,6 +297,8 @@ bool testInvalidTargetDoesNotThrow() {
 #else
     RB_CHECK(result.reason == rb_servo::ik_solver::kReasonKinematicsUnavailable);
 #endif
+    RB_CHECK(std::isfinite(result.duration_us));
+    RB_CHECK(result.duration_us >= 0.0);
     return true;
 }
 

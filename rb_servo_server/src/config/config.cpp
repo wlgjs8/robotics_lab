@@ -328,6 +328,12 @@ void validatePositiveFinite(double value, const std::string& name) {
     }
 }
 
+void validateNonNegativeFinite(double value, const std::string& name) {
+    if (!(value >= 0.0) || !std::isfinite(value)) {
+        throw std::runtime_error(name + " must be non-negative and finite");
+    }
+}
+
 void validatePositiveFiniteArray(const JointArray& values, const std::string& name) {
     for (std::size_t i = 0; i < values.size(); ++i) {
         validatePositiveFinite(values[i], name + "[" + std::to_string(i) + "]");
@@ -386,6 +392,8 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error("Refusing real Cartesian control. Set RB_ALLOW_REAL_CARTESIAN=1.");
         }
     }
+    validateNonNegativeFinite(cfg.cartesian_control.warn_ik_duration_us, "cartesian_control.warn_ik_duration_us");
+    validateNonNegativeFinite(cfg.cartesian_control.fail_ik_duration_us, "cartesian_control.fail_ik_duration_us");
 
     if (cfg.kinematics.enable) {
         const std::string provider = lower(cfg.kinematics.provider);
@@ -706,6 +714,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "enable",
             "allow_in_simulation",
             "allow_in_real",
+            "warn_ik_duration_us",
+            "fail_ik_duration_us",
         }, "cartesian_control");
         if (has(sec, "enable")) cfg.cartesian_control.enable = asBool(sec["enable"], "cartesian_control.enable");
         if (has(sec, "allow_in_simulation")) {
@@ -715,6 +725,14 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "allow_in_real")) {
             cfg.cartesian_control.allow_in_real =
                 asBool(sec["allow_in_real"], "cartesian_control.allow_in_real");
+        }
+        if (has(sec, "warn_ik_duration_us")) {
+            cfg.cartesian_control.warn_ik_duration_us =
+                asDouble(sec["warn_ik_duration_us"], "cartesian_control.warn_ik_duration_us");
+        }
+        if (has(sec, "fail_ik_duration_us")) {
+            cfg.cartesian_control.fail_ik_duration_us =
+                asDouble(sec["fail_ik_duration_us"], "cartesian_control.fail_ik_duration_us");
         }
     }
 

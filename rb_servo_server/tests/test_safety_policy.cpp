@@ -264,12 +264,16 @@ public:
             result.success = false;
             result.q_solution_deg = joints(999.0);
             result.reason = "injected_failure";
+            result.duration_us = 125.0;
+            result.iterations = 7;
             return result;
         }
         result.success = true;
         result.q_solution_deg[0] = (target_tcp_stand.x - mount.base_pose_in_stand.x) * 100.0;
         result.q_solution_deg[1] = (target_tcp_stand.y - mount.base_pose_in_stand.y) * 100.0;
         result.q_solution_deg[2] = (target_tcp_stand.z - mount.base_pose_in_stand.z) * 100.0;
+        result.duration_us = 125.0;
+        result.iterations = 7;
         return result;
     }
 
@@ -2262,6 +2266,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.right_state.connection_state = rb_servo::RobotConnectionState::Connected;
     snapshot.left_state.servo_enabled = true;
     snapshot.right_state.servo_enabled = true;
+    snapshot.left_state.fk_duration_us = 11.0;
+    snapshot.right_state.fk_duration_us = 12.0;
     snapshot.left_state.has_error = true;
     snapshot.left_state.error_code = 2222;
     snapshot.left_state.fault_recoverable = true;
@@ -2290,6 +2296,24 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.right_last_send.error_name = "None";
     snapshot.right_last_send.duration_us = 10.0;
     snapshot.right_last_send.state_after_source = "response";
+    snapshot.left_cartesian_solve.attempted = true;
+    snapshot.left_cartesian_solve.success = true;
+    snapshot.left_cartesian_solve.status = "ok";
+    snapshot.left_cartesian_solve.reason = "";
+    snapshot.left_cartesian_solve.fk_duration_us = 11.0;
+    snapshot.left_cartesian_solve.ik_duration_us = 125.0;
+    snapshot.left_cartesian_solve.ik_iterations = 7;
+    snapshot.left_cartesian_solve.warn_ik_duration_us = 3000.0;
+    snapshot.right_cartesian_solve.attempted = true;
+    snapshot.right_cartesian_solve.success = false;
+    snapshot.right_cartesian_solve.status = "failed";
+    snapshot.right_cartesian_solve.reason = "timeout";
+    snapshot.right_cartesian_solve.fk_duration_us = 12.0;
+    snapshot.right_cartesian_solve.ik_duration_us = 5000.0;
+    snapshot.right_cartesian_solve.ik_iterations = 50;
+    snapshot.right_cartesian_solve.ik_timed_out = true;
+    snapshot.right_cartesian_solve.ik_warn_duration_exceeded = true;
+    snapshot.right_cartesian_solve.warn_ik_duration_us = 3000.0;
     snapshot.left_send_start_ns = 10;
     snapshot.left_send_end_ns = 20;
     snapshot.right_send_start_ns = 30;
@@ -2314,7 +2338,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "period_ms", "jitter_ms", "filter_dt_ms", "command_seq", "observed_mode", "observed_backend", "left", "right",
         "send_skew_us", "send_suppressed", "send_policy", "safety_verdict", "motion_state", "fault_latched",
         "latched_fault_reason", "fault_reason", "logger_dropped_samples", "logger_health",
-        "fault_context", "mount_transform_deferred", "mounts", "tcp_fields_deferred"
+        "fault_context", "mount_transform_deferred", "mounts", "tcp_fields_deferred",
+        "last_cartesian_solve"
     };
     for (const char* key : top_keys) {
         RB_CHECK(json.contains(key));
@@ -2324,7 +2349,7 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "send_start_ns", "send_end_ns", "send_duration_us", "has_valid_joint_state",
         "connection_state", "has_error", "servo_enabled", "fault_recoverable", "lifecycle_state",
         "last_read", "last_send", "robot_time_ns", "host_time_ns", "error_code",
-        "tcp_stand", "tcp_base", "tcp_deferred", "worker"
+        "tcp_stand", "tcp_base", "tcp_deferred", "fk_duration_us", "cartesian_solve", "worker"
     };
     for (const char* arm_name : {"left", "right"}) {
         for (const char* key : arm_keys) {
@@ -2397,9 +2422,19 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("left").at("tcp_stand").is_null());
     RB_CHECK(json.at("left").at("tcp_base").is_null());
     RB_CHECK(json.at("left").at("tcp_deferred").get<bool>());
+    RB_CHECK(json.at("left").at("fk_duration_us").get<double>() == 11.0);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("attempted").get<bool>());
+    RB_CHECK(json.at("left").at("cartesian_solve").at("status").get<std::string>() == "ok");
+    RB_CHECK(json.at("left").at("cartesian_solve").at("ik_status").get<std::string>() == "ok");
+    RB_CHECK(json.at("left").at("cartesian_solve").at("ik_duration_us").get<double>() == 125.0);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("ik_iterations").get<int>() == 7);
     RB_CHECK(json.at("right").at("tcp_stand").is_null());
     RB_CHECK(json.at("right").at("tcp_base").is_null());
     RB_CHECK(json.at("right").at("tcp_deferred").get<bool>());
+    RB_CHECK(json.at("right").at("fk_duration_us").get<double>() == 12.0);
+    RB_CHECK(json.at("right").at("cartesian_solve").at("ik_timed_out").get<bool>());
+    RB_CHECK(json.at("right").at("cartesian_solve").at("ik_warn_duration_exceeded").get<bool>());
+    RB_CHECK(json.at("last_cartesian_solve").at("right").at("ik_reason").get<std::string>() == "timeout");
     RB_CHECK(!json.at("left").at("worker").at("enabled").get<bool>());
     RB_CHECK(json.at("left").at("worker").at("queue_policy").get<std::string>() == "latest_wins");
     RB_CHECK(json.at("left").at("worker").at("command_drops_total").get<uint64_t>() == 0);
@@ -2786,6 +2821,10 @@ bool testCartesianPoseTargetUsesIkInSimulation() {
         return snapshot.command.left.mode == rb_servo::ControlMode::TcpPoseTarget &&
                snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok &&
                snapshot.motion_state == rb_servo::ServerMotionState::Running &&
+               snapshot.left_cartesian_solve.attempted &&
+               snapshot.left_cartesian_solve.status == "ok" &&
+               snapshot.left_cartesian_solve.ik_duration_us == 125.0 &&
+               snapshot.left_cartesian_solve.ik_iterations == 7 &&
                std::abs(previous.left_q_target_deg[0] - 4.0) < kEpsilon &&
                std::abs(previous.left_q_target_deg[1] - 2.0) < kEpsilon &&
                std::abs(previous.left_q_target_deg[2] - 1.0) < kEpsilon &&
@@ -2900,6 +2939,57 @@ bool testCartesianIkFailureHoldsPreviousSafeTarget() {
     RB_CHECK(sameJointArray(previous.right_q_target_deg, initial));
     RB_CHECK(sameJointArray(snapshot.left_sent_q_deg, initial));
     RB_CHECK(sameJointArray(snapshot.right_sent_q_deg, initial));
+    RB_CHECK(snapshot.left_cartesian_solve.attempted);
+    RB_CHECK(snapshot.left_cartesian_solve.status == "failed");
+    RB_CHECK(snapshot.left_cartesian_solve.reason == "injected_failure");
+    RB_CHECK(snapshot.left_cartesian_solve.ik_duration_us == 125.0);
+    RB_CHECK(snapshot.left_cartesian_solve.ik_iterations == 7);
+    RB_CHECK(snapshot.motion_state == rb_servo::ServerMotionState::ArmedHold);
+    return true;
+}
+
+bool testCartesianIkDurationBudgetFailureIsSimulatorOnly() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.right_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.kinematics.enable = true;
+    cfg.kinematics.ik.enable = true;
+    cfg.kinematics.publish_tcp = true;
+    cfg.cartesian_control.fail_ik_duration_us = 1.0;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    rb_servo::DualArmCommand cartesian = command(rb_servo::ControlMode::TcpPoseTarget);
+    cartesian.left.has_tcp_target = true;
+    cartesian.right.has_tcp_target = true;
+    cartesian.left.tcp_target_stand = {0.04, 0.0, 0.0, 0.0, 0.0, 0.0};
+    cartesian.right.tcp_target_stand = {0.04, 0.0, 0.0, 0.0, 0.0, 0.0};
+    buffer.setCommand(cartesian);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.command.left.mode == rb_servo::ControlMode::TcpPoseTarget &&
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::IkFailed &&
+               snapshot.left_cartesian_solve.ik_fail_duration_exceeded &&
+               snapshot.left_cartesian_solve.reason == "ik_duration_budget_exceeded";
+    }));
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+
+    RB_CHECK(snapshot.left_cartesian_solve.ik_duration_us == 125.0);
+    RB_CHECK(snapshot.left_cartesian_solve.fail_ik_duration_us == 1.0);
     RB_CHECK(snapshot.motion_state == rb_servo::ServerMotionState::ArmedHold);
     return true;
 }
@@ -3260,6 +3350,7 @@ int main() {
     if (!testCartesianPoseTargetUsesIkInSimulation()) return 1;
     if (!testCartesianDeltaStandAndLocalUseIkInSimulation()) return 1;
     if (!testCartesianIkFailureHoldsPreviousSafeTarget()) return 1;
+    if (!testCartesianIkDurationBudgetFailureIsSimulatorOnly()) return 1;
     if (!testCartesianRealModeBlockedByDefault()) return 1;
     if (!testInvalidMotionCommandDoesNotReportRunning()) return 1;
     if (!testJointLimitClamp()) return 1;

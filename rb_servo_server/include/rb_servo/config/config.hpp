@@ -144,6 +144,8 @@ struct CartesianControlConfig {
     bool enable = true;
     bool allow_in_simulation = true;
     bool allow_in_real = false;
+    double warn_ik_duration_us = 3000.0;
+    double fail_ik_duration_us = 0.0;
 };
 
 struct DualArmConfig {

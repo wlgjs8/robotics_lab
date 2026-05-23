@@ -36,6 +36,8 @@ cartesian_control:
   enable: true
   allow_in_simulation: true
   allow_in_real: false
+  warn_ik_duration_us: 3000
+  fail_ik_duration_us: 0  # disabled by default; simulator-only when set
 
 servo:
   send_servo_commands: true
@@ -135,6 +137,11 @@ FK/IK-enabled simulator config. Do not use a real-mode or `rbpodo` config.
    - no fault latch is set
    - `q_sent_deg` / target q values are finite
    - q remains within configured joint limits
+   - `left.cartesian_solve.ik_duration_us`,
+     `left.cartesian_solve.ik_iterations`, and `left.fk_duration_us` are
+     finite in the state stream
+   - IK latency is below the acceptance threshold for the 200 Hz loop:
+     p95 `ik_duration_us <= 3000` and max `ik_duration_us <= 5000`
    - final left FK TCP `x` moves in the positive direction within tolerance
    - right FK TCP pose remains within the no-motion tolerance
 
@@ -150,6 +157,8 @@ FK/IK-enabled simulator config. Do not use a real-mode or `rbpodo` config.
 
    - verdict is `IkFailed` or an explicitly documented equivalent failure
      verdict for a Cartesian dependency that is unavailable
+   - state reports `cartesian_solve.status`, `cartesian_solve.reason`,
+     `ik_duration_us`, `ik_iterations`, and `ik_timed_out`
    - previous safe target is retained; no zero/default q target is sent
    - no crash occurs and the state stream continues
 
@@ -184,6 +193,12 @@ Default behavior:
 - sends `ArmMotion`
 - sends left `TcpDeltaStand` `+0.005 m x` and right zero delta
 - verifies `Ok`, no fault latch, finite q, joint limits, and TCP x direction
+- records FK/IK latency summary from `last_cartesian_solve` /
+  per-arm `cartesian_solve` state fields, including count, min, p50, p95, max,
+  timeout count, and iteration min/max
+- fails simulator acceptance if p95 IK latency is above `3000 us` or max IK
+  latency is above one 200 Hz loop period (`5000 us`), unless the run is
+  explicitly marked latency-informational only
 - sends an unreachable `TcpPoseTarget`
 - verifies `IkFailed`, previous safe q retention, and continued state stream
 - attempts simulator `EmergencyStop` / `ResetFault` unless skipped
@@ -203,6 +218,25 @@ servo_log.csv
 rb_servo_server.log
 left_simulator.log
 right_simulator.log
+```
+
+`tcp_pose_acceptance_summary.json` should include:
+
+```json
+{
+  "ik_latency_us": {
+    "count": 0,
+    "min": 0,
+    "p50": 0,
+    "p95": 0,
+    "max": 0,
+    "threshold_p95": 3000,
+    "threshold_max": 5000,
+    "timed_out_count": 0,
+    "iterations_min": 0,
+    "iterations_max": 0
+  }
+}
 ```
 
 These artifacts are for debugging only and are ignored by git.

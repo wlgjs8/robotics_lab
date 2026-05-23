@@ -150,6 +150,7 @@ struct RobotState {
     std::optional<Pose6D> tcp_stand;
     bool has_valid_tcp_pose = false;
     bool tcp_deferred = true;
+    double fk_duration_us = 0.0;
     Wrench6D wrench_tcp;
 
     RobotConnectionState connection_state = RobotConnectionState::Disconnected;
@@ -159,6 +160,21 @@ struct RobotState {
     std::optional<bool> fault_recoverable;
     std::string lifecycle_state;
     int error_code = 0;
+};
+
+struct CartesianSolveTelemetry {
+    bool attempted = false;
+    bool success = false;
+    std::string status = "not_attempted";
+    std::string reason;
+    double fk_duration_us = 0.0;
+    double ik_duration_us = 0.0;
+    int ik_iterations = 0;
+    bool ik_timed_out = false;
+    bool ik_warn_duration_exceeded = false;
+    bool ik_fail_duration_exceeded = false;
+    double warn_ik_duration_us = 0.0;
+    double fail_ik_duration_us = 0.0;
 };
 
 struct ArmCommand {
@@ -272,6 +288,8 @@ struct ServoSample {
     std::string right_send_error_name;
     std::string right_send_error_code;
     std::string right_send_error_message;
+    CartesianSolveTelemetry left_cartesian_solve;
+    CartesianSolveTelemetry right_cartesian_solve;
     bool send_suppressed = false;
     std::string send_policy = "send_servo_j";
     uint64_t left_send_start_ns = 0;
@@ -335,6 +353,8 @@ struct ServoSnapshot {
     std::string right_send_error_name;
     std::string right_send_error_code;
     std::string right_send_error_message;
+    CartesianSolveTelemetry left_cartesian_solve;
+    CartesianSolveTelemetry right_cartesian_solve;
     bool send_suppressed = false;
     std::string send_policy = "send_servo_j";
     uint64_t left_send_start_ns = 0;

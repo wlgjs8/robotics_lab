@@ -83,6 +83,22 @@ RunMode runModeForArm(const DualArmConfig& config, ArmId arm_id) {
         : config.right_robot.run_mode;
 }
 
+CartesianSolveTelemetry cartesianUnavailableTelemetry(
+    const RobotState& state,
+    const CartesianControlConfig& config,
+    const std::string& reason
+) {
+    CartesianSolveTelemetry telemetry;
+    telemetry.attempted = true;
+    telemetry.success = false;
+    telemetry.status = "unavailable";
+    telemetry.reason = reason;
+    telemetry.fk_duration_us = state.fk_duration_us;
+    telemetry.warn_ik_duration_us = config.warn_ik_duration_us;
+    telemetry.fail_ik_duration_us = config.fail_ik_duration_us;
+    return telemetry;
+}
+
 BackendCallSnapshot readCallSnapshot(
     const BackendResult<RobotState>& result,
     const FaultContext& classified
@@ -597,6 +613,8 @@ void DualArmServoLoop::loopMain() {
         sample.right_last_read = readCallSnapshot(right_state_result, right_read_fault);
         sample.left_last_send = sendCallSnapshot(left_send_result);
         sample.right_last_send = sendCallSnapshot(right_send_result);
+        sample.left_cartesian_solve = left_last_cartesian_solve_;
+        sample.right_cartesian_solve = right_last_cartesian_solve_;
         if (!left_ok) {
             sample.left_send_error_kind = toString(left_send_result.error.kind);
             sample.left_send_error_name = left_send_result.error.name;
@@ -668,6 +686,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.right_last_read = sample.right_last_read;
             latest_snapshot_.left_last_send = sample.left_last_send;
             latest_snapshot_.right_last_send = sample.right_last_send;
+            latest_snapshot_.left_cartesian_solve = sample.left_cartesian_solve;
+            latest_snapshot_.right_cartesian_solve = sample.right_cartesian_solve;
             latest_snapshot_.left_send_error_kind = sample.left_send_error_kind;
             latest_snapshot_.left_send_error_name = sample.left_send_error_name;
             latest_snapshot_.left_send_error_code = sample.left_send_error_code;
@@ -745,6 +765,7 @@ void DualArmServoLoop::populateTcpPose(RobotState& state, const ArmMountConfig& 
     state.tcp_base.reset();
     state.tcp_stand.reset();
     state.has_valid_tcp_pose = false;
+    state.fk_duration_us = 0.0;
     const bool publish_tcp = config_.kinematics.publish_tcp || kinematics_injected_;
     state.tcp_deferred = kinematics_ == nullptr || !publish_tcp;
 
@@ -755,12 +776,19 @@ void DualArmServoLoop::populateTcpPose(RobotState& state, const ArmMountConfig& 
         return;
     }
 
+    const auto started = std::chrono::steady_clock::now();
     try {
         state.tcp_base = kinematics_->computeTcpBase(state.q_actual_deg);
         state.tcp_stand = kinematics_->computeTcpStand(state.arm_id, state.q_actual_deg, mount);
+        state.fk_duration_us = std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - started
+        ).count();
         state.has_valid_tcp_pose = true;
         state.tcp_deferred = false;
     } catch (const std::exception& exc) {
+        state.fk_duration_us = std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - started
+        ).count();
         std::cerr << "[WARN] FK TCP publish invalid for "
                   << (state.arm_id == ArmId::Left ? "left" : "right")
                   << " arm: " << exc.what() << "\n";
@@ -792,6 +820,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
 ) {
     if (command_verdict) *command_verdict = SafetyVerdict::Ok;
     ServoTarget target;
+    left_last_cartesian_solve_ = CartesianSolveTelemetry{};
+    right_last_cartesian_solve_ = CartesianSolveTelemetry{};
 
     if (isCommandModeMissingPayload(command.left) || isCommandModeMissingPayload(command.right)) {
         if (command_verdict) *command_verdict = SafetyVerdict::InvalidCommand;
@@ -824,6 +854,20 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         }
         if (!cartesian_available) {
             if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
+            if (isCartesianMode(command.left.mode)) {
+                left_last_cartesian_solve_ = cartesianUnavailableTelemetry(
+                    left_state,
+                    config_.cartesian_control,
+                    "cartesian_control_unavailable"
+                );
+            }
+            if (isCartesianMode(command.right.mode)) {
+                right_last_cartesian_solve_ = cartesianUnavailableTelemetry(
+                    right_state,
+                    config_.cartesian_control,
+                    "cartesian_control_unavailable"
+                );
+            }
             target.left_q_target_deg = left_prev_sent_q_deg_;
             target.right_q_target_deg = right_prev_sent_q_deg_;
             return target;
@@ -832,26 +876,41 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         CartesianController cartesian(
             config_.left_mount,
             config_.right_mount,
+            config_.cartesian_control,
             kinematics_
         );
 
         const CartesianArmTargetResult left_cartesian_result = isCartesianMode(command.left.mode)
-            ? cartesian.computeArmJointTarget(command.left, left_state, left_prev_sent_q_deg_)
+            ? cartesian.computeArmJointTarget(
+                command.left,
+                left_state,
+                left_prev_sent_q_deg_,
+                runModeForArm(config_, ArmId::Left)
+            )
             : CartesianArmTargetResult{
                 SafetyVerdict::Ok,
                 left_traj_filter_.computeJointTarget(command.left, left_state, left_prev_sent_q_deg_, dt_sec),
-                ""
+                "",
+                CartesianSolveTelemetry{}
             };
         target.left_q_target_deg = left_cartesian_result.q_target_deg;
+        left_last_cartesian_solve_ = left_cartesian_result.telemetry;
 
         const CartesianArmTargetResult right_cartesian_result = isCartesianMode(command.right.mode)
-            ? cartesian.computeArmJointTarget(command.right, right_state, right_prev_sent_q_deg_)
+            ? cartesian.computeArmJointTarget(
+                command.right,
+                right_state,
+                right_prev_sent_q_deg_,
+                runModeForArm(config_, ArmId::Right)
+            )
             : CartesianArmTargetResult{
                 SafetyVerdict::Ok,
                 right_traj_filter_.computeJointTarget(command.right, right_state, right_prev_sent_q_deg_, dt_sec),
-                ""
+                "",
+                CartesianSolveTelemetry{}
             };
         target.right_q_target_deg = right_cartesian_result.q_target_deg;
+        right_last_cartesian_solve_ = right_cartesian_result.telemetry;
 
         if (left_cartesian_result.verdict != SafetyVerdict::Ok ||
             right_cartesian_result.verdict != SafetyVerdict::Ok) {
