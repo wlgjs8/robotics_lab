@@ -2318,7 +2318,7 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "send_start_ns", "send_end_ns", "send_duration_us", "has_valid_joint_state",
         "connection_state", "has_error", "servo_enabled", "fault_recoverable", "lifecycle_state",
         "last_read", "last_send", "robot_time_ns", "host_time_ns", "error_code",
-        "tcp_stand", "tcp_base", "tcp_deferred"
+        "tcp_stand", "tcp_base", "tcp_deferred", "worker"
     };
     for (const char* arm_name : {"left", "right"}) {
         for (const char* key : arm_keys) {
@@ -2393,6 +2393,36 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("right").at("tcp_stand").is_null());
     RB_CHECK(json.at("right").at("tcp_base").is_null());
     RB_CHECK(json.at("right").at("tcp_deferred").get<bool>());
+    RB_CHECK(!json.at("left").at("worker").at("enabled").get<bool>());
+    RB_CHECK(json.at("left").at("worker").at("queue_policy").get<std::string>() == "latest_wins");
+    RB_CHECK(json.at("left").at("worker").at("command_drops_total").get<uint64_t>() == 0);
+    RB_CHECK(json.at("left").at("worker").at("pending_overwrites_total").get<uint64_t>() == 0);
+    RB_CHECK(json.at("left").at("worker").at("last_dropped_seq").get<uint64_t>() == 0);
+    RB_CHECK(json.at("left").at("worker").at("last_enqueued_seq").get<uint64_t>() == 0);
+    RB_CHECK(json.at("left").at("worker").at("last_dispatched_seq").get<uint64_t>() == 0);
+    RB_CHECK(json.at("left").at("worker").at("last_completed_seq").get<uint64_t>() == 0);
+
+    rb_servo::DualArmConfig worker_cfg = cfg;
+    worker_cfg.servo.io_model = rb_servo::ServoIoModel::Worker;
+    rb_servo::ServoSnapshot worker_snapshot = snapshot;
+    worker_snapshot.left_worker_telemetry.worker_command_drops_total = 3;
+    worker_snapshot.left_worker_telemetry.worker_pending_overwrites_total = 3;
+    worker_snapshot.left_worker_telemetry.worker_last_dropped_seq = 1201;
+    worker_snapshot.left_worker_telemetry.worker_last_enqueued_seq = 1204;
+    worker_snapshot.left_worker_telemetry.worker_last_dispatched_seq = 1204;
+    worker_snapshot.left_worker_telemetry.worker_last_completed_seq = 1204;
+    rb_servo::StatePublisher worker_publisher(worker_cfg);
+    const nlohmann::json worker_json =
+        nlohmann::json::parse(worker_publisher.serializeSnapshot(worker_snapshot));
+    const nlohmann::json& worker = worker_json.at("left").at("worker");
+    RB_CHECK(worker.at("enabled").get<bool>());
+    RB_CHECK(worker.at("queue_policy").get<std::string>() == "latest_wins");
+    RB_CHECK(worker.at("command_drops_total").get<uint64_t>() == 3);
+    RB_CHECK(worker.at("pending_overwrites_total").get<uint64_t>() == 3);
+    RB_CHECK(worker.at("last_dropped_seq").get<uint64_t>() == 1201);
+    RB_CHECK(worker.at("last_enqueued_seq").get<uint64_t>() == 1204);
+    RB_CHECK(worker.at("last_dispatched_seq").get<uint64_t>() == 1204);
+    RB_CHECK(worker.at("last_completed_seq").get<uint64_t>() == 1204);
     return true;
 }
 

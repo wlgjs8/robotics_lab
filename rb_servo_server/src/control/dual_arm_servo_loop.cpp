@@ -149,6 +149,10 @@ uint64_t commandSendDeadlineNs(
     const uint64_t timeout_ns = std::min(left_timeout_ns, right_timeout_ns);
     return addDeadlineNs(command_host_time_ns, timeout_ns);
 }
+
+ArmWorkerTelemetry workerTelemetryOrDefault(const ArmWorker* worker) {
+    return worker ? worker->telemetry() : ArmWorkerTelemetry{};
+}
 }
 
 DualArmServoLoop::DualArmServoLoop(
@@ -585,6 +589,10 @@ void DualArmServoLoop::loopMain() {
         if (right_send_end_ns >= right_send_start_ns && right_send_start_ns > 0) {
             sample.right_send_duration_us = static_cast<double>(right_send_end_ns - right_send_start_ns) / 1000.0;
         }
+        if (workerIoMode()) {
+            sample.left_worker_telemetry = workerTelemetryOrDefault(left_worker_.get());
+            sample.right_worker_telemetry = workerTelemetryOrDefault(right_worker_.get());
+        }
         sample.period_ms = nsToMs(actual_period_ns);
         sample.filter_dt_ms = filter_dt_sec * 1000.0;
         sample.jitter_ms = nsToMs(actual_period_ns > nominal_period_ns
@@ -638,6 +646,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.send_skew_us = sample.send_skew_us;
             latest_snapshot_.left_send_duration_us = sample.left_send_duration_us;
             latest_snapshot_.right_send_duration_us = sample.right_send_duration_us;
+            latest_snapshot_.left_worker_telemetry = sample.left_worker_telemetry;
+            latest_snapshot_.right_worker_telemetry = sample.right_worker_telemetry;
             latest_snapshot_.logger_dropped_samples = logger_ ? logger_->droppedSamples() : 0;
         }
 

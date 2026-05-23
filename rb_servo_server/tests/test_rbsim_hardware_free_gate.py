@@ -325,12 +325,25 @@ force_control:
                 "send_result_age_us",
                 "send_deadline_hit",
                 "worker_loop_read_duration_us",
+                "worker",
             ):
                 self.assertIn(key, arm_state)
             self.assertGreaterEqual(float(arm_state["state_age_us"]), 0.0)
             self.assertGreaterEqual(float(arm_state["send_result_age_us"]), 0.0)
             self.assertIsInstance(arm_state["send_deadline_hit"], bool)
             self.assertGreaterEqual(float(arm_state["worker_loop_read_duration_us"]), 0.0)
+            worker = arm_state["worker"]
+            self.assertEqual(worker["queue_policy"], "latest_wins")
+            for key in (
+                "enabled",
+                "command_drops_total",
+                "pending_overwrites_total",
+                "last_dropped_seq",
+                "last_enqueued_seq",
+                "last_dispatched_seq",
+                "last_completed_seq",
+            ):
+                self.assertIn(key, worker)
 
     def test_wrong_arm_requests_fail_closed(self) -> None:
         right_to_left = self.control_request(self.left_control_port, "read_state", "right")

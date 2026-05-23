@@ -85,6 +85,19 @@ nlohmann::json backendCallJson(const BackendCallSnapshot& call, bool send_call) 
     return out;
 }
 
+nlohmann::json workerTelemetryJson(const ArmWorkerTelemetry& telemetry, bool enabled) {
+    return {
+        {"enabled", enabled},
+        {"queue_policy", telemetry.worker_queue_policy},
+        {"command_drops_total", telemetry.worker_command_drops_total},
+        {"pending_overwrites_total", telemetry.worker_pending_overwrites_total},
+        {"last_dropped_seq", telemetry.worker_last_dropped_seq},
+        {"last_enqueued_seq", telemetry.worker_last_enqueued_seq},
+        {"last_dispatched_seq", telemetry.worker_last_dispatched_seq},
+        {"last_completed_seq", telemetry.worker_last_completed_seq},
+    };
+}
+
 std::string runModeString(RunMode mode) {
     switch (mode) {
         case RunMode::Real: return "real";
@@ -135,7 +148,9 @@ nlohmann::json armStateJson(
     double state_age_us,
     double send_result_age_us,
     bool send_deadline_hit,
-    double worker_loop_read_duration_us
+    double worker_loop_read_duration_us,
+    const ArmWorkerTelemetry& worker_telemetry,
+    bool worker_enabled
 ) {
     return {
         {"mode", toString(command.mode)},
@@ -154,6 +169,7 @@ nlohmann::json armStateJson(
         {"send_result_age_us", send_result_age_us},
         {"send_deadline_hit", send_deadline_hit},
         {"worker_loop_read_duration_us", worker_loop_read_duration_us},
+        {"worker", workerTelemetryJson(worker_telemetry, worker_enabled)},
         {"has_valid_joint_state", state.has_valid_joint_state},
         {"connection_state", state.connection_state == RobotConnectionState::Connected
             ? "Connected"
@@ -205,6 +221,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["command_seq"] = snapshot.command.seq;
     message["observed_mode"] = observedModeString(config_);
     message["observed_backend"] = observedBackendString(config_);
+    const bool worker_enabled = config_.servo.io_model == ServoIoModel::Worker;
 
     message["left"] = armStateJson(
         snapshot.left_state,
@@ -224,7 +241,9 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         ageUs(snapshot.loop_end_time_ns, snapshot.left_state.host_time_ns),
         ageUs(snapshot.loop_end_time_ns, snapshot.left_send_end_ns),
         sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.left_send_end_ns),
-        config_.servo.io_model == ServoIoModel::Worker ? snapshot.left_last_read.duration_us : 0.0
+        worker_enabled ? snapshot.left_last_read.duration_us : 0.0,
+        snapshot.left_worker_telemetry,
+        worker_enabled
     );
     message["right"] = armStateJson(
         snapshot.right_state,
@@ -244,7 +263,9 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         ageUs(snapshot.loop_end_time_ns, snapshot.right_state.host_time_ns),
         ageUs(snapshot.loop_end_time_ns, snapshot.right_send_end_ns),
         sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.right_send_end_ns),
-        config_.servo.io_model == ServoIoModel::Worker ? snapshot.right_last_read.duration_us : 0.0
+        worker_enabled ? snapshot.right_last_read.duration_us : 0.0,
+        snapshot.right_worker_telemetry,
+        worker_enabled
     );
 
     message["send_skew_us"] = snapshot.send_skew_us;

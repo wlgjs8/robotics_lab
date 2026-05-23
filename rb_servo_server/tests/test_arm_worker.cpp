@@ -345,7 +345,23 @@ bool testLatestQueuedCommandWins() {
     RB_CHECK(raw_backend->waitForFirstReadEntered(std::chrono::milliseconds(200)));
 
     worker.enqueueServoJ(request(11, joints(11.0), rb_servo::nowSteadyNs() + 1'000'000'000));
+    rb_servo::ArmWorkerTelemetry telemetry = worker.telemetry();
+    RB_CHECK(telemetry.worker_queue_policy == "latest_wins");
+    RB_CHECK(telemetry.worker_command_drops_total == 0);
+    RB_CHECK(telemetry.worker_pending_overwrites_total == 0);
+    RB_CHECK(telemetry.worker_last_enqueued_seq == 11);
+    RB_CHECK(telemetry.worker_last_dispatched_seq == 0);
+    RB_CHECK(telemetry.worker_last_completed_seq == 0);
+
     worker.enqueueServoJ(request(12, joints(12.0), rb_servo::nowSteadyNs() + 1'000'000'000));
+    telemetry = worker.telemetry();
+    RB_CHECK(telemetry.worker_command_drops_total == 1);
+    RB_CHECK(telemetry.worker_pending_overwrites_total == 1);
+    RB_CHECK(telemetry.worker_last_dropped_seq == 11);
+    RB_CHECK(telemetry.worker_last_enqueued_seq == 12);
+    RB_CHECK(telemetry.worker_last_dispatched_seq == 0);
+    RB_CHECK(telemetry.worker_last_completed_seq == 0);
+
     raw_backend->releaseFirstRead();
 
     RB_CHECK(raw_backend->waitForSends(1, std::chrono::milliseconds(200)));
@@ -354,6 +370,43 @@ bool testLatestQueuedCommandWins() {
     RB_CHECK(last->request.command_seq == 12);
     RB_CHECK(last->result.accepted);
     RB_CHECK(raw_backend->sendCount() == 1);
+    telemetry = worker.telemetry();
+    RB_CHECK(telemetry.worker_command_drops_total == 1);
+    RB_CHECK(telemetry.worker_pending_overwrites_total == 1);
+    RB_CHECK(telemetry.worker_last_dropped_seq == 11);
+    RB_CHECK(telemetry.worker_last_enqueued_seq == 12);
+    RB_CHECK(telemetry.worker_last_dispatched_seq == 12);
+    RB_CHECK(telemetry.worker_last_completed_seq == 12);
+    worker.stop();
+    return true;
+}
+
+bool testNoDropCountedAfterImmediateDispatch() {
+    auto backend = std::make_unique<WorkerTestBackend>(rb_servo::ArmId::Right);
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorker worker(std::move(backend));
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(200)));
+
+    worker.enqueueServoJ(request(20, joints(20.0), rb_servo::nowSteadyNs() + 1'000'000'000));
+    RB_CHECK(raw_backend->waitForSends(1, std::chrono::milliseconds(200)));
+    rb_servo::ArmWorkerTelemetry telemetry = worker.telemetry();
+    RB_CHECK(telemetry.worker_command_drops_total == 0);
+    RB_CHECK(telemetry.worker_pending_overwrites_total == 0);
+    RB_CHECK(telemetry.worker_last_enqueued_seq == 20);
+    RB_CHECK(telemetry.worker_last_dispatched_seq == 20);
+    RB_CHECK(telemetry.worker_last_completed_seq == 20);
+
+    worker.enqueueServoJ(request(21, joints(21.0), rb_servo::nowSteadyNs() + 1'000'000'000));
+    RB_CHECK(raw_backend->waitForSends(2, std::chrono::milliseconds(200)));
+    telemetry = worker.telemetry();
+    RB_CHECK(telemetry.worker_command_drops_total == 0);
+    RB_CHECK(telemetry.worker_pending_overwrites_total == 0);
+    RB_CHECK(telemetry.worker_last_dropped_seq == 0);
+    RB_CHECK(telemetry.worker_last_enqueued_seq == 21);
+    RB_CHECK(telemetry.worker_last_dispatched_seq == 21);
+    RB_CHECK(telemetry.worker_last_completed_seq == 21);
+
     worker.stop();
     return true;
 }
@@ -430,6 +483,7 @@ int main() {
     if (!testExpiredCommandDropped()) return 1;
     if (!testBackendSendFailurePreserved()) return 1;
     if (!testLatestQueuedCommandWins()) return 1;
+    if (!testNoDropCountedAfterImmediateDispatch()) return 1;
     if (!testStopJoinsThreadAndRejectsNewCommand()) return 1;
     if (!testNoDeadlockOnDestruction()) return 1;
     if (!testStopWithPendingCommandBehindReadDoesNotDeadlock()) return 1;

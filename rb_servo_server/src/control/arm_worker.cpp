@@ -121,6 +121,13 @@ void ArmWorker::enqueueServoJ(SendServoJRequest request) {
         return;
     }
 
+    if (pending_servo_j_.has_value() &&
+        pending_servo_j_->command_seq != request.command_seq) {
+        ++telemetry_.worker_command_drops_total;
+        ++telemetry_.worker_pending_overwrites_total;
+        telemetry_.worker_last_dropped_seq = pending_servo_j_->command_seq;
+    }
+    telemetry_.worker_last_enqueued_seq = request.command_seq;
     pending_servo_j_ = std::move(request);
     cv_.notify_one();
 }
@@ -154,6 +161,11 @@ std::optional<ArmSendResult> ArmWorker::waitForSendResult(
     }
 
     return last_send_result_;
+}
+
+ArmWorkerTelemetry ArmWorker::telemetry() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return telemetry_;
 }
 
 ArmId ArmWorker::armId() const {
@@ -190,6 +202,7 @@ void ArmWorker::run() {
             }
             if (pending_servo_j_.has_value()) {
                 command = pending_servo_j_;
+                telemetry_.worker_last_dispatched_seq = command->command_seq;
                 pending_servo_j_.reset();
             }
         }
@@ -267,6 +280,7 @@ void ArmWorker::storeSendResultLocked(
     }
     arm_result.dispatch_timing = dispatch_timing;
     last_send_result_ = std::move(arm_result);
+    telemetry_.worker_last_completed_seq = request.command_seq;
     cv_.notify_all();
 }
 

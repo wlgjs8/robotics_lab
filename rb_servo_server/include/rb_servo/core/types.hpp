@@ -216,6 +216,16 @@ struct BackendCallSnapshot {
     std::string state_after_source = "none";
 };
 
+struct ArmWorkerTelemetry {
+    uint64_t worker_command_drops_total = 0;
+    uint64_t worker_pending_overwrites_total = 0;
+    uint64_t worker_last_dropped_seq = 0;
+    uint64_t worker_last_enqueued_seq = 0;
+    uint64_t worker_last_dispatched_seq = 0;
+    uint64_t worker_last_completed_seq = 0;
+    std::string worker_queue_policy = "latest_wins";
+};
+
 struct ServoSample {
     uint64_t tick = 0;
     uint64_t loop_start_time_ns = 0;
@@ -252,6 +262,8 @@ struct ServoSample {
     double send_skew_us = 0.0;
     double left_send_duration_us = 0.0;
     double right_send_duration_us = 0.0;
+    ArmWorkerTelemetry left_worker_telemetry;
+    ArmWorkerTelemetry right_worker_telemetry;
 
     double period_ms = 0.0;
     double jitter_ms = 0.0;
@@ -311,6 +323,8 @@ struct ServoSnapshot {
     double send_skew_us = 0.0;
     double left_send_duration_us = 0.0;
     double right_send_duration_us = 0.0;
+    ArmWorkerTelemetry left_worker_telemetry;
+    ArmWorkerTelemetry right_worker_telemetry;
 
     uint64_t logger_dropped_samples = 0;
 };

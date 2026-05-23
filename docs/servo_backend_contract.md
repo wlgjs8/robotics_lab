@@ -284,3 +284,39 @@ The simulator transport records internal counters for diagnostics and tests:
 `read_syscalls_total`, `write_syscalls_total`, and
 `last_transport_error_kind`. These counters are hardware-free evidence only and
 do not change any real robot gate.
+
+## MIG-14 ArmWorker Latest-Wins Telemetry
+
+`ArmWorker` keeps the latest-wins queue policy for streaming `servo_j` targets:
+there is at most one pending request per arm worker. When a new request
+overwrites an older pending request with a different command sequence, the
+older request is counted as dropped/superseded exactly once. Drops are
+diagnostic telemetry only and do not latch a fault by themselves.
+
+The per-arm worker telemetry fields are:
+
+- `worker_queue_policy`, always `latest_wins`
+- `worker_command_drops_total`
+- `worker_pending_overwrites_total`
+- `worker_last_dropped_seq`
+- `worker_last_enqueued_seq`
+- `worker_last_dispatched_seq`
+- `worker_last_completed_seq`
+
+State JSON publishes the same data under each arm's `worker` object:
+
+```json
+"worker": {
+  "enabled": true,
+  "queue_policy": "latest_wins",
+  "command_drops_total": 3,
+  "pending_overwrites_total": 3,
+  "last_dropped_seq": 1201,
+  "last_enqueued_seq": 1204,
+  "last_dispatched_seq": 1204,
+  "last_completed_seq": 1204
+}
+```
+
+Direct I/O mode may publish the same object with `enabled=false` and zero/default
+sequence counters so schema consumers do not need a separate parser path.

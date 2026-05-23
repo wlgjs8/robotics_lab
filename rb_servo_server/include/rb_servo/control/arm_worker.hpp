@@ -37,6 +37,7 @@ public:
         uint64_t not_before_ns,
         uint64_t wait_until_ns
     );
+    ArmWorkerTelemetry telemetry() const;
 
     ArmId armId() const;
     std::string name() const;
@@ -75,6 +76,7 @@ private:
     std::optional<BackendResult<RobotState>> latest_state_;
     uint64_t latest_state_observed_ns_ = 0;
     std::optional<ArmSendResult> last_send_result_;
+    ArmWorkerTelemetry telemetry_;
 
     std::thread thread_;
 };
