@@ -137,6 +137,8 @@ Example config fields:
 
 ```yaml
 action_source: spacemouse_cartesian
+runtime:
+  startup_timeout_sec: 5.0
 spacemouse_cartesian:
   selected_arm: left
   frame: stand
@@ -151,6 +153,21 @@ spacemouse_cartesian:
 Button 0 is the default deadman switch. When it is released, the source emits
 no command. Linear and angular deltas are clamped per command. `TcpDeltaLocal`
 is intentionally not enabled by policy_runner yet.
+
+## Runtime Startup
+
+`policy_runner` fails closed if no first robot state packet arrives before
+`runtime.startup_timeout_sec`. The default is 5 seconds:
+
+```yaml
+runtime:
+  startup_timeout_sec: 5.0
+```
+
+This prevents a runner from waiting forever on a misconfigured or absent state
+publisher. A missing or empty `geometry.path` does not block joint-only action
+sources, but geometry-dependent Cartesian sources are blocked with an explicit
+safety reason.
 
 ## Command Packets
 

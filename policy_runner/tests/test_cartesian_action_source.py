@@ -191,6 +191,23 @@ class CartesianActionSourceTest(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "real_cartesian_not_allowed")
 
+    def test_real_mode_blocks_spacemouse_cartesian_by_default(self):
+        reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
+        source = SpaceMouseCartesianActionSource(reader=reader)
+        snapshot = sample_state(observed_mode="real", observed_backend="rbpodo")
+        intent = source.next_intent(snapshot, time.monotonic())
+        gate = SafetyGate(
+            "real",
+            SafetyConfig(allow_real_motion=False),
+            stale_timeout_sec=0.5,
+            geometry_status=configured_estimate_geometry(),
+        )
+
+        decision = gate.evaluate(snapshot, intent, source.requirements, time.monotonic())
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "real_cartesian_not_allowed")
+
     def test_stale_and_fault_state_block_cartesian_command(self):
         source = TcpDeltaActionSource()
         gate = SafetyGate(

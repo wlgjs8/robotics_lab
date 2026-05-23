@@ -12,6 +12,11 @@ class RobotStateConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeConfig:
+    startup_timeout_sec: float = 5.0
+
+
+@dataclass(frozen=True)
 class ServoCommandConfig:
     endpoint: str = "udp://127.0.0.1:50010"
     timeout_sec: float = 0.2
@@ -85,6 +90,7 @@ class PolicyRunnerConfig:
     schema: str = "robotics_lab.policy_runner.v1"
     mode: str = "simulation"
     action_source: str = "hold"
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     geometry: GeometryConfig = field(default_factory=GeometryConfig)
     robot_state: RobotStateConfig = field(default_factory=RobotStateConfig)
     servo_command: ServoCommandConfig = field(default_factory=ServoCommandConfig)
@@ -109,6 +115,7 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         schema=str(raw.get("schema", "robotics_lab.policy_runner.v1")),
         mode=str(raw.get("mode", "simulation")),
         action_source=str(raw.get("action_source", "hold")),
+        runtime=_runtime_config(_section(raw, "runtime")),
         geometry=GeometryConfig(**_section(raw, "geometry")),
         robot_state=RobotStateConfig(**_section(raw, "robot_state")),
         servo_command=ServoCommandConfig(**_section(raw, "servo_command")),
@@ -129,6 +136,12 @@ def _section(raw: dict[str, Any], key: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{key} must be a mapping")
     return dict(value)
+
+
+def _runtime_config(raw: dict[str, Any]) -> RuntimeConfig:
+    if "startup_timeout_sec" in raw:
+        raw["startup_timeout_sec"] = float(raw["startup_timeout_sec"])
+    return RuntimeConfig(**raw)
 
 
 def _joint_sine_config(raw: dict[str, Any]) -> JointSineConfig:

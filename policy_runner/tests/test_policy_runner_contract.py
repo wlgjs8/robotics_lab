@@ -4,14 +4,17 @@ import json
 import sys
 import time
 import unittest
+from io import StringIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from policy_runner.action_sources.tcp_delta import tcp_delta_stand_intent
 from policy_runner.action_sources.hold import HoldActionSource
 from policy_runner.action_sources.joint_sine import JointSineActionSource
 from policy_runner.action_sources.joint_velocity import JointVelocityActionSource
-from policy_runner.config import load_config
+from policy_runner.config import config_from_mapping, load_config
+from policy_runner.main import STARTUP_TIMEOUT_EXIT_CODE, make_action_source, run
 from policy_runner.robot_state_client import RobotStateClient, StateSnapshot
 from policy_runner.safety import ActionRequirements, SafetyConfig, SafetyGate
 from policy_runner.servo_command_client import CommandIntent, ServoCommandClient
@@ -69,11 +72,124 @@ class FakeSendSocket:
         self.closed = True
 
 
+class FakeStateClient:
+    def __init__(self, snapshots):
+        self._snapshots = list(snapshots)
+        self.started = False
+        self.closed = False
+
+    @property
+    def latest(self):
+        if not self._snapshots:
+            return None
+        return self._snapshots[0]
+
+    def start(self):
+        self.started = True
+
+    def close(self):
+        self.closed = True
+
+
+class FakeCommandClient:
+    def __init__(self):
+        self.sent = []
+        self.closed = False
+
+    def send(self, intent):
+        self.sent.append(intent)
+        return len(self.sent)
+
+    def close(self):
+        self.closed = True
+
+
+class CloseableSource:
+    requirements = ActionRequirements(requires_valid_joint_state=False)
+
+    def __init__(self):
+        self.closed = False
+
+    def next_intent(self, snapshot, now_monotonic):
+        _ = snapshot, now_monotonic
+        return None
+
+    def close(self):
+        self.closed = True
+
+
+class CartesianOnceSource:
+    requirements = ActionRequirements(
+        requires_geometry=True,
+        requires_valid_tcp_pose=True,
+        simulation_only=True,
+        requires_observed_simulation=True,
+        requires_simulator_backend_if_available=True,
+        cartesian_motion=True,
+    )
+
+    def next_intent(self, snapshot, now_monotonic):
+        _ = snapshot, now_monotonic
+        return tcp_delta_stand_intent(left=(0.001, 0.0, 0.0, 0.0, 0.0, 0.0))
+
+
+def geometry_file_text():
+    return """\
+calibration_id: CONFIG_ESTIMATE_TEST
+status: configured_estimate
+geometry_valid_for_real_policy: false
+robot:
+  T_stand_left_base:
+    parent: stand
+    child: left_base
+    xyz_rpy: [0.1, 0.2, 0.3, 0.0, 0.0, 0.0]
+    status: configured_estimate
+  T_stand_right_base:
+    parent: stand
+    child: right_base
+    xyz_rpy: [-0.1, 0.2, 0.3, 0.0, 0.0, 0.0]
+    status: configured_estimate
+"""
+
+
 class PolicyRunnerContractTest(unittest.TestCase):
     def test_config_example_loads_without_yaml_dependency(self):
         cfg = load_config(Path(__file__).resolve().parents[1] / "config" / "simulator_hold.yaml")
         self.assertEqual(cfg.action_source, "hold")
         self.assertFalse(cfg.safety.allow_real_motion)
+
+    def test_runtime_config_defaults_and_parses_startup_timeout(self):
+        default_cfg = config_from_mapping({"schema": "robotics_lab.policy_runner.v1"})
+        self.assertEqual(default_cfg.runtime.startup_timeout_sec, 5.0)
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "runtime": {"startup_timeout_sec": 0.25},
+            }
+        )
+        self.assertEqual(cfg.runtime.startup_timeout_sec, 0.25)
+
+    def test_make_action_source_accepts_all_configured_action_sources_without_hardware(self):
+        for action_source in (
+            "hold",
+            "joint_sine",
+            "joint_velocity",
+            "spacemouse_joint_velocity",
+            "tcp_delta",
+            "spacemouse_cartesian",
+        ):
+            with self.subTest(action_source=action_source):
+                cfg = config_from_mapping(
+                    {
+                        "schema": "robotics_lab.policy_runner.v1",
+                        "action_source": action_source,
+                    }
+                )
+                source = make_action_source(cfg)
+                self.assertIsNotNone(source)
+                close = getattr(source, "close", None)
+                if callable(close):
+                    close()
 
     def test_udp_state_subscriber_receives_latest_snapshot(self):
         packet = json.dumps(sample_state().payload).encode("utf-8")
@@ -196,6 +312,113 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertEqual(intent.left["mode"], "JointTarget")
         self.assertEqual(intent.right["mode"], "Hold")
         self.assertEqual(len(intent.left["q_target_deg"]), 6)
+
+    def test_startup_timeout_returns_clean_error_when_no_state_arrives(self):
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "runtime": {"startup_timeout_sec": 0.01},
+                "geometry": {"path": ""},
+            }
+        )
+        state_client = FakeStateClient([])
+        command_client = FakeCommandClient()
+        source = CloseableSource()
+        stderr = StringIO()
+
+        result = run(
+            cfg,
+            state_client=state_client,
+            command_client=command_client,
+            source=source,
+            monotonic_fn=iter([0.0, 0.02]).__next__,
+            sleep_fn=lambda _period: None,
+            stderr=stderr,
+        )
+
+        self.assertEqual(result, STARTUP_TIMEOUT_EXIT_CODE)
+        self.assertTrue(state_client.started)
+        self.assertTrue(state_client.closed)
+        self.assertTrue(command_client.closed)
+        self.assertTrue(source.closed)
+        self.assertIn("startup_timeout_no_state", stderr.getvalue())
+        self.assertEqual(command_client.sent, [])
+
+    def test_run_loads_geometry_from_config_for_geometry_dependent_actions(self):
+        geometry_path = Path(self.id().replace(".", "_") + ".yaml")
+        geometry_path.write_text(geometry_file_text())
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "geometry": {"path": str(geometry_path)},
+                "runtime": {"startup_timeout_sec": 0.1},
+            }
+        )
+        state = sample_state(
+            observed_mode="simulation",
+            observed_backend="simulator",
+            left={
+                "has_valid_joint_state": True,
+                "has_valid_tcp_pose": True,
+                "q_actual_deg": [0, -30, 80, 0, 60, 0],
+            },
+            right={
+                "has_valid_joint_state": True,
+                "has_valid_tcp_pose": True,
+                "q_actual_deg": [0, -30, 80, 0, 60, 0],
+            },
+        )
+        command_client = FakeCommandClient()
+        try:
+            result = run(
+                cfg,
+                state_client=FakeStateClient([state]),
+                command_client=command_client,
+                source=CartesianOnceSource(),
+                monotonic_fn=lambda: time.monotonic(),
+                sleep_fn=lambda _period: (_ for _ in ()).throw(KeyboardInterrupt()),
+            )
+        finally:
+            geometry_path.unlink(missing_ok=True)
+
+        self.assertEqual(result, 0)
+        self.assertEqual([intent.mode for intent in command_client.sent], ["ArmMotion", "TcpDeltaStand"])
+
+    def test_missing_runtime_geometry_blocks_geometry_dependent_actions(self):
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "geometry": {"path": ""},
+                "runtime": {"startup_timeout_sec": 0.1},
+            }
+        )
+        state = sample_state(
+            observed_mode="simulation",
+            observed_backend="simulator",
+            left={
+                "has_valid_joint_state": True,
+                "has_valid_tcp_pose": True,
+                "q_actual_deg": [0, -30, 80, 0, 60, 0],
+            },
+            right={
+                "has_valid_joint_state": True,
+                "has_valid_tcp_pose": True,
+                "q_actual_deg": [0, -30, 80, 0, 60, 0],
+            },
+        )
+        command_client = FakeCommandClient()
+
+        result = run(
+            cfg,
+            state_client=FakeStateClient([state]),
+            command_client=command_client,
+            source=CartesianOnceSource(),
+            monotonic_fn=lambda: time.monotonic(),
+            sleep_fn=lambda _period: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(command_client.sent, [])
 
 
 if __name__ == "__main__":
