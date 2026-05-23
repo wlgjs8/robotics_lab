@@ -1,9 +1,5 @@
 # rb_simulator Operator Smoke
 
-> Historical smoke document. The current P0-B simulator runtime is one
-> simulator process per arm. The smoke runner described here still targets the
-> previous dual-arm servo-server wiring and is not a P0-B acceptance gate.
-
 This smoke is the hardware-free operator check for the `rb_simulator` plus
 `rb_servo_server` simulator backend path. It starts both local
 processes, sends `ArmMotion`, sends one small dual-arm `JointTarget`, captures
@@ -36,26 +32,31 @@ should be attempted.
 From the workspace root:
 
 ```bash
+PYTHONPATH=rb_simulator/src \
 python3 rb_simulator/tools/rbsim_servo_smoke.py \
+  --left-simulator-command "python3 -m rbsim" \
+  --right-simulator-command "python3 -m rbsim" \
+  --left-simulator-config rb_simulator/config/left_rb3_730e.yaml \
+  --right-simulator-config rb_simulator/config/right_rb3_730e.yaml \
+  --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
+  --server-config rb_servo_server/config/dual_simulator.yaml \
   --artifacts-dir /tmp/rbsim_servo_smoke
 ```
 
-The historical default command starts:
-
-- a deprecated dual-arm simulator profile
-- `rb_servo_server/build/rb_servo_server --config rb_servo_server/config/dual_rb_simulator.yaml`
-
-It then listens on `127.0.0.1:50110`, sends commands to `127.0.0.1:50010`,
-and records artifacts under the selected artifact directory. It does not launch
-one simulator per arm.
+It starts one simulator process per arm, then starts
+`rb_servo_server/build/hardware_free_gate/rb_servo_server --config
+rb_servo_server/config/dual_simulator.yaml`. It listens on `127.0.0.1:50110`,
+sends commands to `127.0.0.1:50010`, and records artifacts under the selected
+artifact directory.
 
 ## Artifacts
 
 The artifact directory is bounded and reviewable:
 
-- `simulator.log` captures simulator stdout/stderr.
+- `left_simulator.log` captures left simulator stdout/stderr.
+- `right_simulator.log` captures right simulator stdout/stderr.
 - `rb_servo_server.log` captures servo-server stdout/stderr.
-- `state_snapshots.jsonl` captures at most 200 state packets and at most
+- `state_stream.jsonl` captures at most 300 state packets and at most
   1 MB by default.
 - `logs/*.csv` is the servo-server CSV log because the runner starts the
   server with the artifact directory as its working directory.

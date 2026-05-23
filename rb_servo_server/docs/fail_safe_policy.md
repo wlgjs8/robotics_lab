@@ -82,13 +82,16 @@ Real mode requires:
 - `safety.tracking_error_policy=fault_latch`
 - `safety.stop_both_arms_on_single_arm_error=true`
 - `safety.latch_fault_on_robot_state_error=true`
-- loopback `network.command_bind` and `network.state_pub_bind`, unless `RB_ALLOW_NETWORK_EXPOSURE=1` is explicitly set
+- loopback `network.command_bind` and `network.state_pub_endpoint`, unless `RB_ALLOW_NETWORK_EXPOSURE=1` is explicitly set
 
 ## Robot State Validity
 
 Startup requires both backends to return a connected, error-free, finite joint state inside configured joint limits. Backends must set `RobotState::has_valid_joint_state=true` only after reading real joint data from a trusted source.
 
-Until the rbpodo data channel is implemented, `RbpodoBackend` refuses to report valid state or accept servo targets even when compiled with `RB_SERVO_ENABLE_RBPODO=ON`.
+`RbpodoBackend` must report valid state only after reading real joint data from
+a trusted rbpodo controller path. Compiling with `RB_SERVO_ENABLE_RBPODO=ON`
+does not bypass `RB_ALLOW_REAL_ROBOT=1` for real connection or
+`RB_ALLOW_REAL_MOTION=1` for `servo_j` transmission.
 
 ## Future Cartesian/IK rule
 

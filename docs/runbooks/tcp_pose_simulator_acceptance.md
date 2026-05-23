@@ -76,10 +76,11 @@ endpoints. For a manual host-loopback run, start the same three processes the
 script starts: left simulator, right simulator, and `rb_servo_server` with an
 FK/IK-enabled simulator config. Do not use a real-mode or `rbpodo` config.
 
-1. Start the per-arm simulator stack:
+1. Start the per-arm host-loopback simulator stack with an FK/IK-enabled
+   simulator config, or let the scripted runner start it:
 
    ```bash
-   make sim-up
+   bash scripts/tcp_pose_simulator_acceptance.sh
    ```
 
 2. Verify the state stream reports FK TCP pose for both arms:

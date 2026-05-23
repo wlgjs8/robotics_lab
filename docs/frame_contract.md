@@ -147,12 +147,13 @@ Head camera in stand:
 T_stand_head_camera = calibrated fixed transform
 ```
 
-The current system does not yet publish real `tcp_stand` or `tcp_base` fields;
-`StatePublisher` marks TCP fields as deferred. Until FK/IK is implemented,
+TCP fields are published only when kinematics are configured and available for
+the running server. Otherwise `StatePublisher` marks TCP fields as deferred.
 `policy_runner` must not assume camera-to-robot geometry is available from live
-state. It may use joint state plus a versioned FK/calibration package once that
-package exists. Real Cartesian/TCP motion remains closed until a separate
-real-hardware acceptance procedure approves it, even after simulator validation.
+state unless the state stream reports valid TCP pose and the calibration package
+is accepted for the configured mode. Real Cartesian/TCP motion remains closed
+until a separate real-hardware acceptance procedure approves it, even after
+simulator validation.
 
 ## Component Responsibilities
 

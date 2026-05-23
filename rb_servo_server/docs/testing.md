@@ -51,25 +51,29 @@ separate human-gated hardware tasks.
 ## Hardware-free rb_simulator path
 
 The local simulator path is documented in `docs/rb_simulator_dev.md`. Use
-`config/dual_rb_simulator.yaml` with `../rb_simulator/config/dual_rb3_730e.yaml`;
-both bind only loopback endpoints in this phase.
+`config/dual_simulator.yaml` with
+`../rb_simulator/config/left_rb3_730e.yaml` and
+`../rb_simulator/config/right_rb3_730e.yaml`; all host-run endpoints bind only
+loopback in this phase.
 
 Simulator unit and contract checks:
 
 ```bash
-python3 -m unittest discover ../rb_simulator/tests
+PYTHONPATH=../rb_simulator/src python3 -m unittest discover ../rb_simulator/tests
 python3 ../rb_simulator/tools/rbsim_servo_smoke.py --self-test
 ```
 
-When the local simulator executable and `rb_servo_server` binary both exist,
-the bounded smoke command is:
+When the local `rb_servo_server` binary exists, the bounded smoke command is:
 
 ```bash
+PYTHONPATH=../rb_simulator/src \
 python3 ../rb_simulator/tools/rbsim_servo_smoke.py \
-  --simulator ../rb_simulator/build/rb_simulator \
-  --simulator-config ../rb_simulator/config/dual_rb3_730e.yaml \
+  --left-simulator-command "python3 -m rbsim" \
+  --right-simulator-command "python3 -m rbsim" \
+  --left-simulator-config ../rb_simulator/config/left_rb3_730e.yaml \
+  --right-simulator-config ../rb_simulator/config/right_rb3_730e.yaml \
   --server build/rb_servo_server \
-  --server-config config/dual_rb_simulator.yaml \
+  --server-config config/dual_simulator.yaml \
   --artifacts-dir ../rb_simulator/artifacts/rbsim_servo_smoke
 ```
 

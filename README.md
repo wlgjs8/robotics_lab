@@ -150,6 +150,118 @@ docs/              shared architecture, validation, and frame contracts
 scripts/           repository-level validation helpers
 ```
 
+## Make Quick Starts
+
+Run all examples from the repository root:
+
+```bash
+cd /home/plaif/workspace/robotics_lab
+```
+
+The root `Makefile` wraps the current Docker Compose and validation entry
+points. It does not enable real robot motion.
+
+### Build all Compose images
+
+```bash
+make build
+```
+
+Equivalent command:
+
+```bash
+docker compose -p robotics_lab -f docker-compose.yml build
+```
+
+### Start the simulator operator stack
+
+This starts the browser GUI, one left simulator container, one right simulator
+container, and `rb_servo_server` with the per-arm simulator compose config:
+
+```bash
+make sim-up
+```
+
+Open the GUI at:
+
+```text
+http://127.0.0.1:8080
+```
+
+`make sim-up` runs in the foreground. Stop it with `Ctrl+C`, then clean up
+containers with:
+
+```bash
+make sim-down
+```
+
+### Run the hardware-free validation gate
+
+This builds and tests mock/stub paths, simulator unit tests, and per-arm
+loopback simulator smoke checks when local prerequisites are available:
+
+```bash
+make sim-smoke
+```
+
+Equivalent command:
+
+```bash
+./scripts/hardware_free_validation.sh
+```
+
+To require the direct and worker simulator smokes instead of allowing an
+environment skip:
+
+```bash
+RBSIM_SMOKE_MODE=required RBSIM_WORKER_SMOKE_MODE=required make sim-smoke
+```
+
+### Start the mock camera server
+
+This starts only the mock camera service through the `mock_camera` compose
+profile:
+
+```bash
+make camera-mock-up
+```
+
+Stop it with:
+
+```bash
+make stop
+```
+
+### Start the real camera server
+
+This starts the RealSense camera container with host IPC/network and USB device
+access. It is camera hardware only; it does not enable robot motion:
+
+```bash
+make camera-real-up
+```
+
+Stop it with:
+
+```bash
+make stop
+```
+
+### Deploy or stop the default compose project
+
+Use these when you want the default compose lifecycle directly:
+
+```bash
+make deploy
+make stop
+```
+
+The Makefile variables are overrideable:
+
+```bash
+PROJECT=robotics_lab_dev COMPOSE_FILE=docker-compose.yml make sim-up
+```
+
 ## Roadmap
 
 - P0 aligns architecture docs, simulator topology, public terminology, and the

@@ -15,6 +15,8 @@ Implemented in this server:
 
 - dual-arm same-tick servo loop
 - mock backend
+- per-arm local simulator backend through the `RbsimBackend` protocol client
+- guarded `RbpodoBackend` integration path, disabled unless built and gated
 - actual UDP JSON command receiver
 - minimal YAML config parser for the provided config files
 - velocity/acceleration safety clamps
@@ -24,20 +26,27 @@ Implemented in this server:
 - Hold mode using previous sent target
 - capped filter dt so one late tick does not create a large motion step
 - servo period/jitter/filter-dt/safety logging
+- structured backend result taxonomy for mock, simulator, and rbpodo paths
+- direct and worker backend I/O models for simulator validation
+- optional Pinocchio FK/IK support when built with `RB_SERVO_ENABLE_PINOCCHIO=ON`
+- simulator-only Cartesian command routing when kinematics and Cartesian config
+  gates are enabled
 - force-control design types, config, and optional controller scaffold
 
 Still pending:
 
-- real `RbpodoBackend`
-- Rainbow simulator connection
-- Cartesian FK/IK
+- real-hardware acceptance for `RbpodoBackend`
+- real `servo_j` motion acceptance
+- real Cartesian/TCP motion acceptance
 - production force-control integration
-- production robot state/TCP pose publisher fields
-- lock-free buffers and parallel left/right send for 500 Hz experiments
+- gripper integration
+- measured camera/robot calibration
+- production promotion of worker I/O for real hardware
 
 The real RB3-730 backend implementation plan and hardware acceptance runbook
 are in `docs/rbpodo_backend_plan.md`. Treat that document as a planning gate;
-it does not make `dual_real.yaml` runnable.
+it does not make real robot motion runnable without the documented build,
+environment, and human acceptance gates.
 
 ## Build
 
@@ -68,17 +77,28 @@ python3 tools/plot_servo_log.py logs/servo_log.csv
 
 ## Run hardware-free rb_simulator mode
 
-Use the repo-local software simulator for backend integration checks. Start
-with the bounded smoke runner:
+Use the repo-local software simulator for backend integration checks. The
+current topology is one simulator process per arm.
+
+From the repository root, run the full validation gate:
 
 ```bash
-python3 ../rb_simulator/tools/rbsim_servo_smoke.py --self-test
+./scripts/hardware_free_validation.sh
 ```
 
-When local binaries are available, run the full local smoke command shown in
-`docs/rb_simulator_dev.md`; that runner starts the simulator and server with
-`config/dual_rb_simulator.yaml`. This path is not Rainbow Robotics rbsim/OVA,
-`rbpodo`, real robot, privileged Docker, or production network validation.
+For a focused simulator smoke after the hardware-free CMake build exists:
+
+```bash
+PYTHONPATH=rb_simulator/src python3 rb_simulator/tools/rbsim_servo_smoke.py \
+  --left-simulator-config rb_simulator/config/left_rb3_730e.yaml \
+  --right-simulator-config rb_simulator/config/right_rb3_730e.yaml \
+  --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
+  --server-config rb_servo_server/config/dual_simulator.yaml \
+  --artifact-dir rb_simulator/artifacts/rbsim_servo_smoke
+```
+
+The simulator path is not Rainbow Robotics rbsim/OVA, real robot, privileged
+Docker, or production network validation.
 
 ## Fault behavior
 
@@ -137,16 +157,15 @@ Force control is present as a design scaffold only. It is disabled by default an
 
 ## Docker + viser operator GUI
 
-Mock-mode browser operation is defined in the Docker Compose stack, with host
-ports pinned to loopback. The GUI receives UDP state snapshots and sends only
-validated UDP JSON commands. Real motion is disabled, simulator motion is
-limited to the repo-local hardware-free `rb_simulator` path until local evidence
-passes, TCP target gizmos can emit `TcpPoseTarget` commands but the C++
-Cartesian controller still holds until IK is implemented, and the GUI does not
-mount the raw Docker socket. See `docs/gui_operator_console.md`.
+The root Docker Compose stack defines the simulator operator path:
 
-The `sim` compose profile now wires `rb_simulator` plus `rb_servo_rbsim` as a
-hardware-free, non-OVA software simulator pair. Use it as configuration
-documentation unless a container smoke is explicitly in scope; the supported
-phase evidence is the unit/contract checks and local smoke runner in
-`docs/rb_simulator_dev.md`.
+```bash
+cd /home/plaif/workspace/robotics_lab
+make sim-up
+```
+
+It starts `rb_gui`, `rb_simulator_left`, `rb_simulator_right`, and
+`rb_servo_server` with `config/dual_simulator_compose.yaml`. Host GUI ports are
+pinned to loopback. The GUI receives UDP state snapshots and sends only
+validated UDP JSON commands. Real motion is disabled, and the GUI does not
+mount the raw Docker socket. See `docs/gui_operator_console.md`.

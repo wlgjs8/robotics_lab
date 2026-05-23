@@ -80,7 +80,7 @@ Do not run real mode unless all are true:
 - `safety.tracking_error_policy=fault_latch`.
 - `safety.stop_both_arms_on_single_arm_error=true`.
 - `safety.latch_fault_on_robot_state_error=true`.
-- `network.command_bind` and `network.state_pub_bind` remain loopback unless a
+- `network.command_bind` and `network.state_pub_endpoint` remain loopback unless a
   separate deployment review explicitly sets `RB_ALLOW_NETWORK_EXPOSURE=1`.
 - Hardware-free gate and rb_simulator gate pass immediately before real work.
 

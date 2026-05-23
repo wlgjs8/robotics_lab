@@ -9,11 +9,14 @@ Default:
 ```yaml
 network:
   command_bind: "udp://127.0.0.1:50010"
-  state_pub_bind: "udp://127.0.0.1:50110"
+  state_pub_endpoint: "udp://127.0.0.1:50110"
   command_source_allowlist: ["127.0.0.1/32"]
 ```
 
-In real mode, exposed command or state publisher binds such as `udp://0.0.0.0:50010` or `tcp://0.0.0.0:50110` are rejected unless `RB_ALLOW_NETWORK_EXPOSURE=1` is set. Unknown bind formats fail closed in real mode.
+`network.state_pub_bind` is a deprecated compatibility alias for
+`network.state_pub_endpoint`. Do not use both keys in the same config.
+
+In real mode, exposed command or state publisher endpoints such as `udp://0.0.0.0:50010` or `tcp://0.0.0.0:50110` are rejected unless `RB_ALLOW_NETWORK_EXPOSURE=1` is set. Unknown bind formats fail closed in real mode.
 
 The command server drops UDP packets whose source IP is not in
 `network.command_source_allowlist`. Entries are IPv4 addresses or CIDR ranges;
@@ -21,8 +24,8 @@ the list must be non-empty. The Docker Compose mock config is explicitly
 dev-only and allows loopback plus Docker bridge private addresses.
 
 The hardware-free simulator config, `config/dual_simulator.yaml`, is stricter:
-it binds `command_bind` and `state_pub_bind` to `127.0.0.1` and points each arm
-at its own simulator endpoint:
+it binds `command_bind` and `state_pub_endpoint` to `127.0.0.1` and points each
+arm at its own simulator endpoint:
 
 ```yaml
 left_robot:
@@ -36,7 +39,7 @@ right_robot:
   simulator_control_endpoint: "tcp://127.0.0.1:50210"
 ```
 
-The compose profile uses service DNS names instead:
+The root compose stack uses service DNS names instead:
 `tcp://rb_simulator_left:50200` and `tcp://rb_simulator_right:50200`.
 Simulator endpoints may use loopback or compose service hostnames, but
 `backend_type: simulator` with `run_mode: real` fails closed.
@@ -47,7 +50,7 @@ Simulator endpoints may use loopback or compose service hostnames, but
 it does not read robot backends. The high-rate servo loop remains the sole owner
 of backend `readState()` calls.
 
-The current state stream is UDP JSON to `network.state_pub_bind` at 20 Hz. `StatePublisher` accepts hostname endpoints such as `udp://rb_servo_gui:50110` for Docker Compose DNS, so static container IPs are not required. The
+The current state stream is UDP JSON to `network.state_pub_endpoint` at 20 Hz. `StatePublisher` accepts hostname endpoints such as `udp://rb_gui:50110` for Docker Compose DNS, so static container IPs are not required. The
 payload includes:
 
 - `schema_version`, `tick`, `host_time_ns`, `loop_start_time_ns`, `loop_end_time_ns`
@@ -58,8 +61,8 @@ payload includes:
   `latched_fault_reason`, `fault_reason`
 - `logger_dropped_samples` / `logger_health`
 - stand-frame mount transforms from config
-- nullable/deferred TCP fields (`tcp_fields_deferred: true`) until Cartesian FK/IK
-  is implemented
+- TCP pose fields when kinematics are configured and available; otherwise
+  nullable/deferred TCP fields with `tcp_fields_deferred: true`
 
 Consumers should join this stream with external RealSense logs by host/loop
 timestamps. RealSense capture stays outside `rb_servo_server`.
