@@ -24,6 +24,7 @@ add_library(rb_servo_core
     src/control/command_buffer.cpp
     src/control/trajectory_filter.cpp
     src/control/safety_filter.cpp
+    src/control/fault_classifier.cpp
     src/control/cartesian_controller.cpp
     src/control/force_controller.cpp
     src/control/dual_arm_servo_loop.cpp
@@ -76,6 +77,10 @@ if(BUILD_TESTING)
     add_executable(test_backend_result tests/test_backend_result.cpp)
     target_link_libraries(test_backend_result PRIVATE rb_servo_core)
     add_test(NAME backend_result COMMAND test_backend_result)
+
+    add_executable(test_fault_classifier tests/test_fault_classifier.cpp)
+    target_link_libraries(test_fault_classifier PRIVATE rb_servo_core)
+    add_test(NAME fault_classifier COMMAND test_fault_classifier)
 
     add_executable(test_safety_policy tests/test_safety_policy.cpp)
     target_link_libraries(test_safety_policy PRIVATE rb_servo_core)

@@ -9,6 +9,7 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <optional>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -68,8 +69,16 @@ bool jsonArrayHasSixFinite(const nlohmann::json& value) {
 
 class TestBackend final : public rb_servo::IRobotBackend {
 public:
-    TestBackend(rb_servo::ArmId arm_id, rb_servo::JointArray initial, bool fail_send)
-        : arm_id_(arm_id), q_actual_(initial), q_target_(initial), fail_send_(fail_send) {}
+    TestBackend(
+        rb_servo::ArmId arm_id,
+        rb_servo::JointArray initial,
+        bool fail_send,
+        rb_servo::BackendErrorKind send_error_kind = rb_servo::BackendErrorKind::ControllerRejected
+    ) : arm_id_(arm_id),
+        q_actual_(initial),
+        q_target_(initial),
+        fail_send_(fail_send),
+        send_error_kind_(send_error_kind) {}
 
     rb_servo::BackendResult<rb_servo::RobotState> connect() override {
         connected_ = true;
@@ -97,9 +106,27 @@ public:
     rb_servo::SendServoJResult sendServoJ(const rb_servo::SendServoJRequest& request) override {
         ++send_count_;
         if (fail_send_) {
+            std::optional<rb_servo::RobotState> state_after;
+            std::string state_after_source = "none";
+            if (send_error_kind_ == rb_servo::BackendErrorKind::RobotFault) {
+                has_error_ = true;
+                error_code_ = 2222;
+                state_after = currentState();
+                state_after_source = "cache";
+            }
             return rb_servo::rejectedSend(
                 request,
-                rb_servo::backendError(rb_servo::BackendErrorKind::ControllerRejected, "test send failed")
+                rb_servo::backendError(
+                    send_error_kind_,
+                    send_error_kind_ == rb_servo::BackendErrorKind::SuppressedByPolicy
+                        ? "test send suppressed by policy"
+                        : "test send failed",
+                    send_error_kind_ == rb_servo::BackendErrorKind::RobotFault ? "2222" : "",
+                    ""
+                ),
+                {},
+                state_after,
+                state_after_source
             );
         }
         q_target_ = request.q_target_deg;
@@ -149,6 +176,7 @@ private:
             : rb_servo::RobotConnectionState::Disconnected;
         state.servo_enabled = initialized_;
         state.has_error = has_error_;
+        state.error_code = error_code_;
         return state;
     }
 
@@ -170,11 +198,13 @@ private:
     rb_servo::JointArray q_actual_{};
     rb_servo::JointArray q_target_{};
     bool fail_send_ = false;
+    rb_servo::BackendErrorKind send_error_kind_ = rb_servo::BackendErrorKind::ControllerRejected;
     bool valid_joint_state_ = true;
     bool read_ok_ = true;
     bool reset_ok_ = true;
     bool invalidate_joint_state_on_reset_ = false;
     bool has_error_ = false;
+    int error_code_ = 0;
     bool connected_ = false;
     bool initialized_ = false;
     int read_count_ = 0;
@@ -2518,6 +2548,88 @@ bool testStopBothOnSendFailureLatchesFault() {
     return true;
 }
 
+bool testRobotFaultSendClassifiesAsRobotStateFault() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.safety.stop_both_arms_on_single_arm_error = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left,
+            initial,
+            true,
+            rb_servo::BackendErrorKind::RobotFault
+        ),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.left.q_target_deg = joints(7.0);
+    target.right.q_target_deg = joints(7.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    buffer.setCommand(target);
+    RB_CHECK(waitUntil([&] { return loop.faultLatched(); }));
+
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    RB_CHECK(snapshot.fault_latched);
+    RB_CHECK(snapshot.latched_fault_reason == rb_servo::SafetyVerdict::RobotStateError);
+    RB_CHECK(snapshot.left_state.has_error);
+    RB_CHECK(snapshot.left_state.error_code == 2222);
+    RB_CHECK(!snapshot.left_send_ok);
+    RB_CHECK(snapshot.left_send_error_kind == "RobotFault");
+    RB_CHECK(loop.motionState() == rb_servo::ServerMotionState::FaultLatched);
+    loop.stop();
+    return true;
+}
+
+bool testSuppressedByPolicySendDoesNotLatchFault() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.safety.stop_both_arms_on_single_arm_error = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left,
+            initial,
+            true,
+            rb_servo::BackendErrorKind::SuppressedByPolicy
+        ),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.left.q_target_deg = joints(7.0);
+    target.right.q_target_deg = joints(7.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    buffer.setCommand(target);
+    sleepTicks();
+
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    RB_CHECK(!snapshot.fault_latched);
+    RB_CHECK(snapshot.latched_fault_reason == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(!snapshot.left_send_ok);
+    RB_CHECK(snapshot.left_send_error_kind == "SuppressedByPolicy");
+    RB_CHECK(loop.latchedFaultReason() == rb_servo::SafetyVerdict::Ok);
+    loop.stop();
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -2567,5 +2679,7 @@ int main() {
     if (!testJointLimitClamp()) return 1;
     if (!testSendFailureDoesNotAdvancePreviousTarget()) return 1;
     if (!testStopBothOnSendFailureLatchesFault()) return 1;
+    if (!testRobotFaultSendClassifiesAsRobotStateFault()) return 1;
+    if (!testSuppressedByPolicySendDoesNotLatchFault()) return 1;
     return 0;
 }

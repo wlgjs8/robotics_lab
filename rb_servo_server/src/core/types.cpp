@@ -74,6 +74,19 @@ std::string toString(SafetyVerdict verdict) {
     return "Unknown";
 }
 
+std::string toString(FaultDomain domain) {
+    switch (domain) {
+        case FaultDomain::None: return "None";
+        case FaultDomain::SafetyPolicy: return "SafetyPolicy";
+        case FaultDomain::Backend: return "Backend";
+        case FaultDomain::RobotState: return "RobotState";
+        case FaultDomain::Command: return "Command";
+        case FaultDomain::Kinematics: return "Kinematics";
+        case FaultDomain::Emergency: return "Emergency";
+    }
+    return "Unknown";
+}
+
 std::string toString(TrackingErrorPolicy policy) {
     switch (policy) {
         case TrackingErrorPolicy::SnapToActual: return "snap_to_actual";

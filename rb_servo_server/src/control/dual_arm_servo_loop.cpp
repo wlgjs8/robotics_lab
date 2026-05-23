@@ -9,6 +9,7 @@
 #include <mutex>
 
 #include "rb_servo/control/cartesian_controller.hpp"
+#include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/core/clock.hpp"
 #include "rb_servo/core/realtime.hpp"
 #include "rb_servo/kinematics/pinocchio_kinematics.hpp"
@@ -331,13 +332,32 @@ void DualArmServoLoop::loopMain() {
         );
         const bool left_ok = left_send_result.accepted;
         const bool right_ok = right_send_result.accepted;
-        if (!left_ok || !right_ok) {
-            safety_verdict = SafetyVerdict::SendFailure;
+        if (left_send_result.state_after.has_value()) {
+            left_state = *left_send_result.state_after;
+            populateTcpPose(left_state, config_.left_mount);
+        }
+        if (right_send_result.state_after.has_value()) {
+            right_state = *right_send_result.state_after;
+            populateTcpPose(right_state, config_.right_mount);
+        }
+
+        DualSendResult dual_send_result;
+        dual_send_result.left.arm_id = ArmId::Left;
+        dual_send_result.left.result = left_send_result;
+        dual_send_result.left.request.q_target_deg = attempted_target.left_q_target_deg;
+        dual_send_result.left.request.command_seq = command.seq;
+        dual_send_result.right.arm_id = ArmId::Right;
+        dual_send_result.right.result = right_send_result;
+        dual_send_result.right.request.q_target_deg = attempted_target.right_q_target_deg;
+        dual_send_result.right.request.command_seq = command.seq;
+        const FaultContext send_fault = classifyDualSendResult(dual_send_result);
+        if (send_fault.verdict != SafetyVerdict::Ok) {
+            safety_verdict = send_fault.verdict;
             if (isRealMode() || config_.safety.stop_both_arms_on_single_arm_error) {
-                std::string reason = "sendServoJ failed";
-                if (!left_ok) reason += " left=" + left_send_result.error.name + ":" + left_send_result.error.message;
-                if (!right_ok) reason += " right=" + right_send_result.error.name + ":" + right_send_result.error.message;
-                latchFault(SafetyVerdict::SendFailure, reason, left_state, right_state);
+                std::string reason = send_fault.reason.empty()
+                    ? "sendServoJ failed"
+                    : send_fault.reason;
+                latchFault(send_fault.verdict, reason, left_state, right_state);
                 safe_target = currentFaultHoldTarget();
                 safety_verdict = SafetyVerdict::FaultLatched;
             }

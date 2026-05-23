@@ -78,6 +78,16 @@ enum class SafetyVerdict {
     UnknownError
 };
 
+enum class FaultDomain {
+    None,
+    SafetyPolicy,
+    Backend,
+    RobotState,
+    Command,
+    Kinematics,
+    Emergency
+};
+
 enum class TrackingErrorPolicy {
     SnapToActual,
     FaultLatch
@@ -289,6 +299,7 @@ std::string toString(ControlMode mode);
 std::string toString(ServerMotionState state);
 std::string toString(ForceControlMode mode);
 std::string toString(SafetyVerdict verdict);
+std::string toString(FaultDomain domain);
 std::string toString(TrackingErrorPolicy policy);
 ControlMode controlModeFromString(const std::string& mode);
 ForceControlMode forceControlModeFromString(const std::string& mode);
