@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "rb_servo/config/config.hpp"
+#include "rb_servo/control/arm_worker.hpp"
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/safety_filter.hpp"
 #include "rb_servo/control/trajectory_filter.hpp"
@@ -44,6 +45,7 @@ private:
     bool configureRealtimeForLoop();
 
     bool initializeRobots();
+    bool initializeWorkers();
     bool readRobotStates(RobotState& left, RobotState& right);
     void populateTcpPose(RobotState& state, const ArmMountConfig& mount) const;
     bool isValidRobotStateForStartup(const RobotState& state) const;
@@ -86,6 +88,7 @@ private:
     bool commandRequestsMotion(const DualArmCommand& command) const;
     bool commandBlockedByReadOnly(const DualArmCommand& command) const;
     bool readOnlyMode() const;
+    bool workerIoMode() const;
     bool motionAllowed() const;
     bool isRealMode() const;
     std::string currentSendPolicy() const;
@@ -104,6 +107,8 @@ private:
 private:
     std::unique_ptr<IRobotBackend> left_robot_;
     std::unique_ptr<IRobotBackend> right_robot_;
+    std::unique_ptr<ArmWorker> left_worker_;
+    std::unique_ptr<ArmWorker> right_worker_;
 
     DualArmConfig config_;
 

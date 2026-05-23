@@ -246,6 +246,23 @@ bool testSuccessfulReadLoop() {
     return true;
 }
 
+bool testLatestStateReportsStaleSample() {
+    auto backend = std::make_unique<WorkerTestBackend>(rb_servo::ArmId::Left);
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorker worker(std::move(backend));
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(200)));
+    worker.stop();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    const rb_servo::BackendResult<rb_servo::RobotState> state = worker.latestState(1);
+    RB_CHECK(!state.ok);
+    RB_CHECK(state.op == rb_servo::BackendOp::ReadState);
+    RB_CHECK(state.error.kind == rb_servo::BackendErrorKind::TransportTimeout);
+    RB_CHECK(state.error.name == "arm_worker_state_stale");
+    return true;
+}
+
 bool testSendRequestAccepted() {
     auto backend = std::make_unique<WorkerTestBackend>(rb_servo::ArmId::Right);
     WorkerTestBackend* raw_backend = backend.get();
@@ -381,6 +398,7 @@ bool testNoDeadlockOnDestruction() {
 
 int main() {
     if (!testSuccessfulReadLoop()) return 1;
+    if (!testLatestStateReportsStaleSample()) return 1;
     if (!testSendRequestAccepted()) return 1;
     if (!testExpiredCommandDropped()) return 1;
     if (!testBackendSendFailurePreserved()) return 1;

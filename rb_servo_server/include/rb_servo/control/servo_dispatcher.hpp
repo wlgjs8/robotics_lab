@@ -2,6 +2,7 @@
 
 #include <cstdint>
 
+#include "rb_servo/control/arm_worker.hpp"
 #include "rb_servo/robot/i_robot_backend.hpp"
 
 namespace rb_servo {
@@ -19,6 +20,12 @@ public:
     static DualSendResult dispatchDirectSequential(
         IRobotBackend& left,
         IRobotBackend& right,
+        const ServoDispatchRequest& request
+    );
+
+    static DualSendResult dispatchWorker(
+        ArmWorker& left,
+        ArmWorker& right,
         const ServoDispatchRequest& request
     );
 };

@@ -47,6 +47,7 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(mock.network.state_pub_rate_hz == 20);
     RB_CHECK(mock.force_control.provider == "null");
     RB_CHECK(!mock.force_control.enable);
+    RB_CHECK(mock.servo.io_model == rb_servo::ServoIoModel::Direct);
 
     const rb_servo::DualArmConfig simulator =
         rb_servo::loadConfigFromYaml((config_dir / "dual_simulator.yaml").string());
@@ -56,6 +57,53 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(simulator.right_robot.run_mode == rb_servo::RunMode::Simulation);
     RB_CHECK(simulator.left_robot.simulator_control_endpoint == "tcp://127.0.0.1:50200");
     RB_CHECK(simulator.right_robot.simulator_control_endpoint == "tcp://127.0.0.1:50210");
+    return true;
+}
+
+bool testServoIoModelParsesAndValidates() {
+    const std::string worker_path = writeTempConfig(
+        "worker-io-model",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  io_model: worker\n"
+    );
+    const rb_servo::DualArmConfig worker = rb_servo::loadConfigFromYaml(worker_path);
+    ::unlink(worker_path.c_str());
+    RB_CHECK(worker.servo.io_model == rb_servo::ServoIoModel::Worker);
+
+    const std::string invalid_path = writeTempConfig(
+        "invalid-io-model",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  io_model: threadpool\n"
+    );
+    const bool invalid_rejected = loadRejects(invalid_path);
+    ::unlink(invalid_path.c_str());
+    RB_CHECK(invalid_rejected);
+
+    const std::string real_worker_path = writeTempConfig(
+        "real-worker-io-model",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.200\"\n"
+        "right_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.201\"\n"
+        "servo:\n"
+        "  io_model: worker\n"
+        "  send_servo_commands: false\n"
+        "  enable_realtime_priority: true\n"
+        "safety:\n"
+        "  tracking_error_policy: fault_latch\n"
+        "  stop_both_arms_on_single_arm_error: true\n"
+        "  latch_fault_on_robot_state_error: true\n"
+    );
+    const bool real_worker_rejected = loadRejects(real_worker_path);
+    ::unlink(real_worker_path.c_str());
+    RB_CHECK(real_worker_rejected);
     return true;
 }
 
@@ -143,6 +191,7 @@ bool testForceControlStaysDisabled() {
 
 int main() {
     if (!testRepositoryConfigsParse()) return 1;
+    if (!testServoIoModelParsesAndValidates()) return 1;
     if (!testUnknownKeysAndSchemaFail()) return 1;
     if (!testDeprecatedAliasesWarnAndParse()) return 1;
     if (!testForceControlStaysDisabled()) return 1;

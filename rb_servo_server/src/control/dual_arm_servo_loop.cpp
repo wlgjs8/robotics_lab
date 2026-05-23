@@ -171,8 +171,12 @@ void DualArmServoLoop::stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
-    if (left_robot_) left_robot_->stop();
-    if (right_robot_) right_robot_->stop();
+    if (left_worker_) left_worker_->stop();
+    if (right_worker_) right_worker_->stop();
+    if (!workerIoMode()) {
+        if (left_robot_) left_robot_->stop();
+        if (right_robot_) right_robot_->stop();
+    }
 }
 
 bool DualArmServoLoop::isRunning() const {
@@ -205,6 +209,10 @@ ServoSnapshot DualArmServoLoop::latestSnapshot() const {
 }
 
 bool DualArmServoLoop::initializeRobots() {
+    if (workerIoMode()) {
+        return initializeWorkers();
+    }
+
     const BackendResult<RobotState> left_connect = left_robot_->connect();
     const BackendResult<RobotState> right_connect = right_robot_->connect();
     if (!left_connect.ok || !right_connect.ok) {
@@ -242,6 +250,68 @@ bool DualArmServoLoop::initializeRobots() {
     return true;
 }
 
+bool DualArmServoLoop::initializeWorkers() {
+    if (!left_worker_) {
+        if (!left_robot_) {
+            std::cerr << "[ERROR] worker io requested but left backend is unavailable\n";
+            return false;
+        }
+        left_worker_ = std::make_unique<ArmWorker>(std::move(left_robot_));
+    }
+    if (!right_worker_) {
+        if (!right_robot_) {
+            std::cerr << "[ERROR] worker io requested but right backend is unavailable\n";
+            return false;
+        }
+        right_worker_ = std::make_unique<ArmWorker>(std::move(right_robot_));
+    }
+
+    const bool left_started = left_worker_->start();
+    const bool right_started = right_worker_->start();
+    if (!left_started || !right_started) {
+        std::cerr << "[ERROR] failed to start arm workers"
+                  << " left_started=" << left_started
+                  << " right_started=" << right_started << "\n";
+        if (left_worker_) left_worker_->stop();
+        if (right_worker_) right_worker_->stop();
+        return false;
+    }
+
+    const uint64_t startup_timeout_ns =
+        static_cast<uint64_t>(std::max(0.1, config_.servo.command_timeout_sec) * 1'000'000'000.0);
+    const uint64_t deadline_ns = nowSteadyNs() + startup_timeout_ns;
+    RobotState left;
+    RobotState right;
+    while (nowSteadyNs() < deadline_ns) {
+        if (readRobotStates(left, right) &&
+            isValidRobotStateForStartup(left) &&
+            isValidRobotStateForStartup(right)) {
+            left_prev_sent_q_deg_ = left.q_actual_deg;
+            left_prevprev_sent_q_deg_ = left.q_actual_deg;
+            right_prev_sent_q_deg_ = right.q_actual_deg;
+            right_prevprev_sent_q_deg_ = right.q_actual_deg;
+            left_fault_hold_q_deg_ = left.q_actual_deg;
+            right_fault_hold_q_deg_ = right.q_actual_deg;
+            setMotionState(ServerMotionState::ConnectedHold);
+            if (readOnlyMode()) {
+                std::cerr << "[INFO] servo send policy: read_only; worker sendServoJ requests are suppressed\n";
+            }
+            std::cerr << "[INFO] servo io_model: worker; ServoLoop reads cached ArmWorker state and enqueues sends\n";
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    const BackendResult<RobotState> left_state = left_worker_->latestState(startup_timeout_ns);
+    const BackendResult<RobotState> right_state = right_worker_->latestState(startup_timeout_ns);
+    std::cerr << "[ERROR] invalid worker startup state"
+              << " left=" << left_state.error.name << ":" << left_state.error.message
+              << " right=" << right_state.error.name << ":" << right_state.error.message << "\n";
+    left_worker_->stop();
+    right_worker_->stop();
+    return false;
+}
+
 void DualArmServoLoop::loopMain() {
     if (!configureRealtimeForLoop()) {
         startup_ok_ = false;
@@ -267,12 +337,21 @@ void DualArmServoLoop::loopMain() {
         const double filter_dt_sec = computeFilterDtSec(actual_period_ns, nominal_period_ns);
         last_loop_start_ns_ = loop_start;
 
-        const BackendResult<RobotState> left_state_result = left_robot_
-            ? left_robot_->readState()
-            : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "left backend unavailable"));
-        const BackendResult<RobotState> right_state_result = right_robot_
-            ? right_robot_->readState()
-            : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "right backend unavailable"));
+        const uint64_t worker_state_max_age_ns = std::max<uint64_t>(2 * nominal_period_ns, 1'000'000);
+        const BackendResult<RobotState> left_state_result = workerIoMode()
+            ? (left_worker_
+                ? left_worker_->latestState(worker_state_max_age_ns)
+                : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "left worker unavailable")))
+            : (left_robot_
+                ? left_robot_->readState()
+                : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "left backend unavailable")));
+        const BackendResult<RobotState> right_state_result = workerIoMode()
+            ? (right_worker_
+                ? right_worker_->latestState(worker_state_max_age_ns)
+                : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "right worker unavailable")))
+            : (right_robot_
+                ? right_robot_->readState()
+                : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "right backend unavailable")));
 
         RobotState left_state = left_state_result.value;
         RobotState right_state = right_state_result.value;
@@ -546,12 +625,14 @@ bool DualArmServoLoop::configureRealtimeForLoop() {
 }
 
 bool DualArmServoLoop::readRobotStates(RobotState& left, RobotState& right) {
-    const BackendResult<RobotState> left_result = left_robot_
-        ? left_robot_->readState()
-        : BackendResult<RobotState>{};
-    const BackendResult<RobotState> right_result = right_robot_
-        ? right_robot_->readState()
-        : BackendResult<RobotState>{};
+    const uint64_t max_age_ns =
+        static_cast<uint64_t>(std::max(0.1, config_.servo.command_timeout_sec) * 1'000'000'000.0);
+    const BackendResult<RobotState> left_result = workerIoMode()
+        ? (left_worker_ ? left_worker_->latestState(max_age_ns) : BackendResult<RobotState>{})
+        : (left_robot_ ? left_robot_->readState() : BackendResult<RobotState>{});
+    const BackendResult<RobotState> right_result = workerIoMode()
+        ? (right_worker_ ? right_worker_->latestState(max_age_ns) : BackendResult<RobotState>{})
+        : (right_robot_ ? right_robot_->readState() : BackendResult<RobotState>{});
     if (left_result.ok) {
         left = left_result.value;
     } else {
@@ -810,6 +891,10 @@ DualSendResult DualArmServoLoop::sendTargets(
         return result;
     }
 
+    if (workerIoMode()) {
+        return ServoDispatcher::dispatchWorker(*left_worker_, *right_worker_, dispatch_request);
+    }
+
     return ServoDispatcher::dispatchDirectSequential(*left_robot_, *right_robot_, dispatch_request);
 }
 
@@ -857,6 +942,10 @@ bool DualArmServoLoop::readOnlyMode() const {
     return !config_.servo.send_servo_commands;
 }
 
+bool DualArmServoLoop::workerIoMode() const {
+    return config_.servo.io_model == ServoIoModel::Worker;
+}
+
 bool DualArmServoLoop::motionAllowed() const {
     const ServerMotionState state = motion_state_.load();
     return state == ServerMotionState::ArmedHold || state == ServerMotionState::Running;
@@ -881,6 +970,11 @@ std::string DualArmServoLoop::currentSendPolicy() const {
 }
 
 bool DualArmServoLoop::clearFaultLatch(RobotState& left_state, RobotState& right_state) {
+    if (workerIoMode()) {
+        std::cerr << "[WARN] fault latch remains: worker io_model does not expose resetFault in MIG-09\n";
+        return false;
+    }
+
     const BackendResult<RobotState> left_reset = left_robot_
         ? left_robot_->resetFault()
         : BackendResult<RobotState>{};

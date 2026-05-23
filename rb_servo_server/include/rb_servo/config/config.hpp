@@ -6,6 +6,11 @@
 
 namespace rb_servo {
 
+enum class ServoIoModel {
+    Direct,
+    Worker
+};
+
 struct BackendConfig {
     BackendType backend_type = BackendType::Rbpodo;
     RunMode run_mode = RunMode::Real;
@@ -88,6 +93,7 @@ struct SafetyConfig {
 struct ServoConfig {
     int rate_hz = 200;
     double command_timeout_sec = 0.2;
+    ServoIoModel io_model = ServoIoModel::Direct;
     ControlMode startup_mode = ControlMode::Hold;
     bool send_servo_commands = true;
 

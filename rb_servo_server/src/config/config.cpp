@@ -150,6 +150,13 @@ RunMode parseRunMode(const YAML::Node& node, const std::string& path) {
     fail("Unknown run_mode: " + value, node);
 }
 
+ServoIoModel parseServoIoModel(const YAML::Node& node, const std::string& path) {
+    const std::string value = lower(asString(node, path));
+    if (value == "direct") return ServoIoModel::Direct;
+    if (value == "worker") return ServoIoModel::Worker;
+    fail("Unknown servo.io_model: " + value, node);
+}
+
 std::string getString(const YAML::Node& sec, const std::string& key, const std::string& fallback, const std::string& path) {
     return has(sec, key) ? asString(sec[key], path + "." + key) : fallback;
 }
@@ -458,6 +465,9 @@ void validateConfig(const DualArmConfig& cfg) {
 #endif
 
     if (anyReal(cfg)) {
+        if (cfg.servo.io_model == ServoIoModel::Worker) {
+            throw std::runtime_error("Refusing servo.io_model=worker in real mode until worker I/O has real-hardware acceptance.");
+        }
         const char* allow = std::getenv("RB_ALLOW_REAL_ROBOT");
         if (!allow || std::string(allow) != "1") {
             throw std::runtime_error("Refusing real mode. Set RB_ALLOW_REAL_ROBOT=1.");
@@ -589,6 +599,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         validateAllowedKeys(sec, {
             "rate_hz",
             "command_timeout_sec",
+            "io_model",
             "startup_mode",
             "send_servo_commands",
             "enable_realtime_priority",
@@ -599,6 +610,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         }, "servo");
         if (has(sec, "rate_hz")) cfg.servo.rate_hz = asInt(sec["rate_hz"], "servo.rate_hz");
         if (has(sec, "command_timeout_sec")) cfg.servo.command_timeout_sec = asDouble(sec["command_timeout_sec"], "servo.command_timeout_sec");
+        if (has(sec, "io_model")) cfg.servo.io_model = parseServoIoModel(sec["io_model"], "servo.io_model");
         if (has(sec, "startup_mode")) cfg.servo.startup_mode = controlModeFromString(asString(sec["startup_mode"], "servo.startup_mode"));
         if (has(sec, "send_servo_commands")) cfg.servo.send_servo_commands = asBool(sec["send_servo_commands"], "servo.send_servo_commands");
         if (has(sec, "enable_realtime_priority")) cfg.servo.enable_realtime_priority = asBool(sec["enable_realtime_priority"], "servo.enable_realtime_priority");

@@ -39,6 +39,7 @@ right_mount:
 servo:
   rate_hz: 100
   command_timeout_sec: 0.2
+  io_model: direct
   startup_mode: Hold
   enable_realtime_priority: false
   realtime_priority: 80

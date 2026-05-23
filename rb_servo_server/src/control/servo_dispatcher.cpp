@@ -1,5 +1,9 @@
 #include "rb_servo/control/servo_dispatcher.hpp"
 
+#include <chrono>
+#include <optional>
+#include <thread>
+
 #include "rb_servo/core/clock.hpp"
 
 namespace rb_servo {
@@ -16,6 +20,38 @@ bool hasTransportFailure(const ArmSendResult& result) {
 
 bool hasRobotFault(const ArmSendResult& result) {
     return !result.result.accepted && result.result.error.robot_fault;
+}
+
+bool matchesRequest(
+    const std::optional<ArmSendResult>& result,
+    const SendServoJRequest& request
+) {
+    return result.has_value() &&
+           result->request.command_seq == request.command_seq &&
+           result->request.deadline_ns == request.deadline_ns;
+}
+
+ArmSendResult timeoutResult(
+    ArmId arm_id,
+    const SendServoJRequest& request,
+    uint64_t start_ns,
+    uint64_t end_ns
+) {
+    ArmSendResult result;
+    result.arm_id = arm_id;
+    result.request = request;
+    result.dispatch_timing = makeBackendTiming(start_ns, end_ns);
+    result.result = rejectedSend(
+        request,
+        backendError(
+            BackendErrorKind::CommandTimeout,
+            "arm worker did not publish send result before command deadline",
+            "",
+            "arm_worker_send_result_timeout"
+        ),
+        result.dispatch_timing
+    );
+    return result;
 }
 
 }  // namespace
@@ -71,6 +107,69 @@ DualSendResult ServoDispatcher::dispatchDirectSequential(
 
     result.left_right_start_skew_us = absDurationUs(left_start_ns, right_start_ns);
     result.left_right_end_skew_us = absDurationUs(left_end_ns, right_end_ns);
+    return result;
+}
+
+DualSendResult ServoDispatcher::dispatchWorker(
+    ArmWorker& left_worker,
+    ArmWorker& right_worker,
+    const ServoDispatchRequest& request
+) {
+    DualSendResult result;
+    result.dispatch_start_ns = request.dispatch_start_ns > 0
+        ? request.dispatch_start_ns
+        : nowSteadyNs();
+
+    SendServoJRequest left_request = request.left;
+    left_request.command_seq = request.seq;
+    left_request.deadline_ns = request.deadline_ns;
+
+    SendServoJRequest right_request = request.right;
+    right_request.command_seq = request.seq;
+    right_request.deadline_ns = request.deadline_ns;
+
+    const uint64_t left_enqueue_ns = nowSteadyNs();
+    left_request.host_time_ns = left_enqueue_ns;
+    left_worker.enqueueServoJ(left_request);
+
+    const uint64_t right_enqueue_ns = nowSteadyNs();
+    right_request.host_time_ns = right_enqueue_ns;
+    right_worker.enqueueServoJ(right_request);
+
+    std::optional<ArmSendResult> left_result;
+    std::optional<ArmSendResult> right_result;
+    while (true) {
+        if (!left_result.has_value()) {
+            const std::optional<ArmSendResult> candidate = left_worker.lastSendResult();
+            if (matchesRequest(candidate, left_request)) {
+                left_result = candidate;
+            }
+        }
+        if (!right_result.has_value()) {
+            const std::optional<ArmSendResult> candidate = right_worker.lastSendResult();
+            if (matchesRequest(candidate, right_request)) {
+                right_result = candidate;
+            }
+        }
+        if (left_result.has_value() && right_result.has_value()) {
+            break;
+        }
+
+        const uint64_t now = nowSteadyNs();
+        if (request.deadline_ns > 0 && now >= request.deadline_ns) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+
+    const uint64_t end_ns = nowSteadyNs();
+    result.left = left_result.value_or(timeoutResult(ArmId::Left, left_request, left_enqueue_ns, end_ns));
+    result.right = right_result.value_or(timeoutResult(ArmId::Right, right_request, right_enqueue_ns, end_ns));
+    result.dispatch_end_ns = end_ns;
+    result.timing = makeBackendTiming(result.dispatch_start_ns, result.dispatch_end_ns);
+    result.left_right_start_skew_us = absDurationUs(left_enqueue_ns, right_enqueue_ns);
+    result.left_right_end_skew_us =
+        absDurationUs(result.left.dispatch_timing.end_ns, result.right.dispatch_timing.end_ns);
     return result;
 }
 
