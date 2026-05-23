@@ -12,6 +12,8 @@ Supported today:
 - per-arm local simulator backend
 - mock camera server
 - GUI viewer/operator console for mock/simulation
+- hardware-free `policy_runner` action-source tests for joint and
+  simulator-only TCP commands
 
 Not production-ready:
 
@@ -128,7 +130,20 @@ stand-in.
 
 `rb_servo_server` owns dual-arm servo command ingestion, backend selection,
 safety gates, state publication, and robot mount estimates. It must preserve
-one backend instance per arm.
+one backend instance per arm. The current command path is:
+
+```text
+CommandBuffer -> ServoCoordinator/DualArmServoLoop -> Left ArmWorker  -> left IRobotBackend
+                                                \-> Right ArmWorker -> right IRobotBackend
+```
+
+`ServoCoordinator/DualArmServoLoop` owns timing policy, command freshness,
+fault latching, safety checks, hold-versus-command selection, and dual-arm
+result aggregation. In `servo.io_model: direct`, it still performs per-arm
+backend calls directly. In `servo.io_model: worker`, each `ArmWorker` owns one
+arm's blocking backend I/O and returns cached structured results to the loop.
+Real mode still keeps worker I/O disabled or experimental until separate
+read-only hardware acceptance proves it without motion.
 
 For `backend_type=rbpodo`, read-only state acquisition and motion readiness are
 separate. A controller can return valid joint feedback while servo motion is not
@@ -136,7 +151,7 @@ enabled; `rb_servo_server` should publish that state with
 `servo_enabled=false` and a non-ready lifecycle, while `sendServoJ()` remains
 closed unless the real-motion gate and controller readiness are both true.
 
-`rb_simulator` owns hardware-free simulator state. The target architecture is
+`rb_simulator` owns hardware-free simulator state. The current architecture is
 one simulator process/container per arm, with deterministic control and admin
 interfaces.
 
@@ -156,22 +171,20 @@ calibration is still pending.
 not make real motion available unless the servo server has already accepted the
 required real-mode gates.
 
-The future `policy_runner` owns Python action sources, including SpaceMouse
-input. It consumes robot state, camera metadata, and calibration packages; it
-must not bypass servo safety gates. Joint-only action sources do not require
-camera observations. Camera-dependent action sources must declare
-`requires_camera` with a `camera_stale_timeout_sec` and fail closed when camera
-readiness is absent or stale. Camera geometry-dependent sources must also
-declare `requires_camera_geometry` and require measured, accepted camera
-geometry.
+`policy_runner` owns Python action sources, including SpaceMouse input. It
+consumes robot state, camera metadata, and calibration packages; it must not
+bypass servo safety gates. Joint-only action sources do not require camera
+observations. Camera-dependent action sources must declare `requires_camera`
+with a `camera_stale_timeout_sec` and fail closed when camera readiness is
+absent or stale. Camera geometry-dependent sources must also declare
+`requires_camera_geometry` and require measured, accepted camera geometry.
 
 The backend-contract migration target is defined in
-[servo_backend_contract.md](servo_backend_contract.md). `IRobotBackend` should
-migrate from bool/log-string behavior to structured `BackendResult` and
-`SendServoJResult` diagnostics, while `ServoLoop` gradually stops owning
-blocking network I/O. The future ownership target is `CommandBuffer ->
-ServoCoordinator -> Left/Right ArmWorker`. This is a diagnostics and loop
-architecture migration, not a real-motion enablement.
+[servo_backend_contract.md](servo_backend_contract.md). `IRobotBackend` has
+been moving from bool/log-string behavior to structured `BackendResult` and
+`SendServoJResult` diagnostics, while worker I/O moves blocking network work
+out of the servo loop. This is a diagnostics and loop architecture migration,
+not a real-motion enablement.
 
 ## Frame And Calibration Contract
 

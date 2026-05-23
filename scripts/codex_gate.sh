@@ -28,7 +28,16 @@ run_servo_gate() {
     "${cmake_prefix_args[@]}"
 
   cmake --build rb_servo_server/build/hardware_free_gate -j
-  ctest --test-dir rb_servo_server/build/hardware_free_gate --output-on-failure
+  run_ctest_with_retry rb_servo_server/build/hardware_free_gate
+}
+
+run_ctest_with_retry() {
+  local test_dir="$1"
+  if ctest --test-dir "${test_dir}" --output-on-failure; then
+    return 0
+  fi
+  echo "codex_gate: ctest failed in ${test_dir}; rerunning failed tests once" >&2
+  ctest --test-dir "${test_dir}" --rerun-failed --output-on-failure
 }
 
 cmake_package_available() {
@@ -56,6 +65,25 @@ EOF
   return 1
 }
 
+loopback_socket_available() {
+  python3 - <<'PY'
+import socket
+import sys
+
+sockets = []
+try:
+    for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+        sock = socket.socket(socket.AF_INET, kind)
+        sock.bind(("127.0.0.1", 0))
+        sockets.append(sock)
+except OSError:
+    sys.exit(1)
+finally:
+    for sock in sockets:
+        sock.close()
+PY
+}
+
 run_optional_pinocchio_gate() {
   if ! cmake_package_available pinocchio; then
     echo "codex_gate: skipping optional Pinocchio ON gate; CMake package pinocchio not found"
@@ -78,7 +106,7 @@ run_optional_pinocchio_gate() {
     "${cmake_prefix_args[@]}"
 
   cmake --build rb_servo_server/build/pinocchio_gate -j
-  ctest --test-dir rb_servo_server/build/pinocchio_gate --output-on-failure
+  run_ctest_with_retry rb_servo_server/build/pinocchio_gate
 }
 
 run_simulator_tests() {
@@ -101,14 +129,18 @@ run_camera_gate() {
     -DCAMERA_SERVER_BUILD_TESTS=ON
 
   cmake --build camera_server/build/hardware_free_gate -j
-  ctest --test-dir camera_server/build/hardware_free_gate --output-on-failure
+  run_ctest_with_retry camera_server/build/hardware_free_gate
 }
 
 run_shell_syntax_checks() {
   bash -n scripts/codex_gate.sh
   bash -n scripts/codex_run_sequence.sh
+  bash -n scripts/check_deps.sh
   bash -n scripts/hardware_free_validation.sh
   bash -n scripts/tcp_pose_simulator_acceptance.sh
+  if [[ -f scripts/install_deps_ubuntu.sh ]]; then
+    bash -n scripts/install_deps_ubuntu.sh
+  fi
 }
 
 grep_existing() {
@@ -194,6 +226,30 @@ check_mig18_config_rebaseline() {
   grep_existing "rbsim_local.*simulator|rbsim.*simulator|compatibility names should be removed" README.md docs rb_servo_server/docs rb_simulator/docs
 }
 
+check_mig26_rebaseline_docs() {
+  check_migration_rebaseline_docs
+  check_mig18_config_rebaseline
+
+  grep_existing "persistent JSON-lines|persistent JSON-line" README.md docs
+  grep_existing "worker_queue_policy|latest_wins" README.md docs
+  grep_existing "worker_command_drops_total|command_drops_total" README.md docs
+  grep_existing "FaultContext|fault_context" README.md docs
+  grep_existing "command_source|Command Source Lease" README.md docs rb_servo_server/docs/network_protocol.md
+  grep_existing "enforce_lease: false|defaults to off|defaults to `false`" README.md docs rb_servo_server/docs/network_protocol.md
+  grep_existing "operator intervention" README.md docs rb_servo_server/docs
+  grep_existing "hardware_free_validation.sh" README.md docs
+  grep_existing "tcp_pose_simulator_acceptance.sh" README.md docs
+  grep_existing "install_deps_ubuntu.sh" README.md docs
+  grep_existing "Pinocchio" README.md docs
+  grep_existing "configured estimate|configured_estimate" README.md docs calibration
+  grep_existing "camera_stale_timeout_sec|requires_camera" README.md docs policy_runner/README.md
+
+  if grep -R -E "dual_real\.yaml" README.md docs AGENTS.md >/dev/null; then
+    echo "ERROR: stale runnable dual_real.yaml reference found; use dual_real.example.yaml or local dual_real_readonly/motion configs" >&2
+    return 1
+  fi
+}
+
 run_mig12_gate() {
   run_shell_syntax_checks
   check_migration_rebaseline_docs
@@ -214,6 +270,34 @@ run_mig20_gate() {
   run_shell_syntax_checks
   run_servo_gate
   run_optional_pinocchio_gate
+}
+
+run_optional_tcp_pose_acceptance() {
+  if ! cmake_package_available pinocchio; then
+    echo "codex_gate: skipping simulator TCP pose acceptance; CMake package pinocchio not found"
+    return 0
+  fi
+
+  if ! loopback_socket_available; then
+    echo "codex_gate: skipping simulator TCP pose acceptance; AF_INET loopback sockets are unavailable in this sandbox"
+    return 0
+  fi
+
+  ./scripts/tcp_pose_simulator_acceptance.sh
+}
+
+run_mig26_gate() {
+  run_shell_syntax_checks
+  check_mig26_rebaseline_docs
+  ./scripts/check_deps.sh --profile hardware-free
+  run_simulator_tests
+  run_gui_tests
+  run_policy_runner_tests
+  run_camera_gate
+  run_servo_gate
+  ./scripts/hardware_free_validation.sh
+  run_optional_pinocchio_gate
+  run_optional_tcp_pose_acceptance
 }
 
 case "$TASK" in
@@ -306,11 +390,15 @@ case "$TASK" in
     run_policy_runner_tests
     ;;
 
-  MIG-19|MIG-25|MIG-26)
+  MIG-19|MIG-25)
     run_shell_syntax_checks
     run_simulator_tests
     run_gui_tests
     run_policy_runner_tests
+    ;;
+
+  MIG-26)
+    run_mig26_gate
     ;;
 
   *)

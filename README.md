@@ -32,6 +32,8 @@ Start here, then follow component docs only for implementation details:
   gates, and roadmap.
 - [docs/hardware_free_validation.md](docs/hardware_free_validation.md):
   hardware-free build and test gate.
+- [docs/developer_environment.md](docs/developer_environment.md):
+  dependency installation profiles and the MIG-26 rebaseline command set.
 - [docs/frame_contract.md](docs/frame_contract.md): shared robot/camera frame
   names and transform direction.
 - [docs/servo_backend_contract.md](docs/servo_backend_contract.md): MIG backend
@@ -163,6 +165,9 @@ Simulator operator paths use these current configs:
   DNS.
 - `rb_servo_server/config/dual_simulator_worker.yaml`: host-loopback worker I/O
   evidence.
+- `rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`: simulator-only
+  TCP Pose/Delta acceptance with Pinocchio/FK/IK enabled and
+  `cartesian_control.allow_in_real: false`.
 - `rb_simulator/config/left_rb3_730e.yaml`: left simulator process.
 - `rb_simulator/config/right_rb3_730e.yaml`: right simulator process.
 - `rb_simulator/config/left_rb3_730e_compose.yaml`: left simulator container
@@ -248,6 +253,25 @@ Equivalent command:
 
 ```bash
 ./scripts/hardware_free_validation.sh
+```
+
+For a final MIG-13+ developer rebaseline, including docs/shell checks, Python
+unit tests, mock/stub CMake gates, hardware-free validation, and optional
+Pinocchio/TCP acceptance when Pinocchio is installed, run:
+
+```bash
+bash scripts/codex_gate.sh MIG-26
+```
+
+The TCP acceptance branch also requires local AF_INET loopback sockets. In
+sandboxed environments that deny loopback sockets, `MIG-26` reports that branch
+as skipped while keeping build, unit, and non-socket validation active.
+
+Install or inspect local dependencies with:
+
+```bash
+bash scripts/install_deps_ubuntu.sh --profile hardware-free
+bash scripts/check_deps.sh --profile hardware-free
 ```
 
 To require the direct and worker simulator smokes instead of allowing an
@@ -348,3 +372,41 @@ The current review baseline is:
   simulator-accepted when the MIG-10/MIG-11 worker smoke passes. Real +
   `worker` remains disabled or experimental until a separate real read-only
   acceptance task exists.
+
+## MIG-26 Rebaseline
+
+Current backend-contract architecture:
+
+```text
+CommandBuffer -> ServoCoordinator/DualArmServoLoop -> Left ArmWorker  -> simulator/rbpodo endpoint
+                                                \-> Right ArmWorker -> simulator/rbpodo endpoint
+```
+
+`ServoCoordinator/DualArmServoLoop` owns timing policy, command freshness,
+fault latching, safety checks, and result aggregation. In direct I/O mode it
+still calls the per-arm backends directly. In worker I/O mode each `ArmWorker`
+owns blocking connect/read/reset/`servo_j` work for one arm and publishes
+cached structured results.
+
+MIG-13+ status:
+
+- `RbsimBackend` uses one persistent JSON-lines TCP transport per simulator
+  backend instance during healthy operation. Transport/protocol failures close
+  the socket for later reconnect; structured robot/controller rejections such
+  as `RobotFault` do not by themselves corrupt the transport.
+- `ArmWorker` streaming `servo_j` queue policy is `latest_wins`. Per-arm state
+  publishes command drop/overwrite counters and last enqueued/dispatched/
+  completed sequence values under the `worker` object.
+- `FaultContext` is latched as structured state. Later suppression results
+  remain live telemetry but do not overwrite the first latched fault context.
+- Rbpodo read-only state can succeed while motion readiness is false.
+  `stop()` and `resetFault()` remain fail-closed for real controller recovery
+  and require operator intervention.
+- Command source lease enforcement defaults to off for compatibility. State
+  still publishes source/lease metadata, and simulator acceptance profiles may
+  enable enforcement explicitly.
+- TCP Pose/Delta acceptance is simulator-only and Pinocchio-gated. It does not
+  enable real Cartesian motion.
+- Camera acceptance is a separate real-camera hardware workflow. Joint-only
+  `policy_runner` actions remain allowed without camera readiness; camera and
+  camera-geometry sources fail closed when declared readiness is absent.

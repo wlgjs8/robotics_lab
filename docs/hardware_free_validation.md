@@ -21,9 +21,20 @@ backend_type: mock | simulator | rbpodo
 Run from the workspace root:
 
 ```bash
+bash scripts/install_deps_ubuntu.sh --profile hardware-free
 bash scripts/check_deps.sh --profile hardware-free
 bash scripts/hardware_free_validation.sh
 ```
+
+For the full MIG-26 rebaseline, prefer:
+
+```bash
+bash scripts/codex_gate.sh MIG-26
+```
+
+That wrapper runs this hardware-free gate plus docs/shell checks, Python
+component tests, mock/stub CMake/CTest gates, and optional Pinocchio/TCP
+simulator acceptance when Pinocchio and local loopback sockets are available.
 
 The script runs:
 
@@ -80,6 +91,18 @@ bash scripts/check_deps.sh --profile kinematics
 
 These profiles report dependency readiness only. They do not open real robot
 motion gates, start RealSense capture, or validate hardware.
+
+Ubuntu dependency installation helpers mirror these profiles:
+
+```bash
+bash scripts/install_deps_ubuntu.sh --profile hardware-free
+bash scripts/install_deps_ubuntu.sh --profile kinematics
+bash scripts/install_deps_ubuntu.sh --profile real-camera
+```
+
+`rbpodo` remains vendor-provided and is not faked by the apt helper. Install
+the vendor SDK/package separately and expose it through `CMAKE_PREFIX_PATH` or
+`RBPODO_ROOT` before using the `real-robot` dependency profile.
 
 Some sandboxed CI runners block `AF_INET` socket creation. In that case the
 rb_servo tests keep the parser, sequence, source-allowlist, and config

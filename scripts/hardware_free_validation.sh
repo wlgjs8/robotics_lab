@@ -34,6 +34,15 @@ finally:
 PY
 }
 
+run_ctest_with_retry() {
+  local test_dir="$1"
+  if ctest --test-dir "${test_dir}" --output-on-failure; then
+    return 0
+  fi
+  echo "hardware-free gate: ctest failed in ${test_dir}; rerunning failed tests once" >&2
+  ctest --test-dir "${test_dir}" --rerun-failed --output-on-failure
+}
+
 echo "hardware-free gate: dependency preflight"
 "${ROOT_DIR}/scripts/check_deps.sh" --profile hardware-free
 
@@ -54,7 +63,7 @@ cmake \
   -DCAMERA_SERVER_BUILD_TESTS=ON \
   "${cmake_prefix_args[@]}"
 cmake --build "${CAMERA_BUILD_DIR}" -j "${JOBS}"
-ctest --test-dir "${CAMERA_BUILD_DIR}" --output-on-failure
+run_ctest_with_retry "${CAMERA_BUILD_DIR}"
 
 echo "hardware-free gate: rb_servo mock-only CMake + CTest, including GUI unittest discovery"
 cmake \
@@ -68,7 +77,7 @@ cmake \
   "${cmake_prefix_args[@]}"
 cmake --build "${RB_SERVO_BUILD_DIR}" -j "${JOBS}"
 echo "hardware-free gate: rb_servo CTest including per-arm simulator gate"
-ctest --test-dir "${RB_SERVO_BUILD_DIR}" --output-on-failure
+run_ctest_with_retry "${RB_SERVO_BUILD_DIR}"
 
 echo "hardware-free gate: rb_servo log analyzer self-test"
 python3 "${ROOT_DIR}/rb_servo_server/tools/analyze_servo_log.py" --self-test

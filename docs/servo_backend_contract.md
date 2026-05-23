@@ -439,3 +439,89 @@ deferred: `tcp_base` and `tcp_stand` are `null`, `has_valid_tcp_pose=false`, and
 the legacy schema without quaternion fields; quaternion presence is an
 orientation-quality improvement, not a new requirement for joint-only policy
 paths.
+
+## MIG-22 Command Source Lease
+
+The command source lease is explicit metadata on accepted UDP command packets
+and state publication. It is intended to prevent accidental concurrent command
+sources such as GUI teleop and `policy_runner` teleop from both driving the
+same server.
+
+Default enforcement remains off:
+
+```yaml
+command_source:
+  enforce_lease: false
+  lease_timeout_sec: 1.0
+```
+
+With enforcement off, the server still parses and publishes command source
+metadata, active source/session/token fields, and command lease verdict fields,
+but non-owner commands are not rejected solely because of lease ownership. This
+keeps legacy hardware-free tools compatible.
+
+When `command_source.enforce_lease: true`, normal motion commands require the
+active lease. A source acquires or refreshes the lease by sending an accepted
+lease-owning motion command with `source_id` and optional `session_id` /
+`lease_token`. `EmergencyStop` bypasses the lease so any accepted source can
+stop motion. `ResetFault` requires the active lease when enforcement is enabled.
+Rejections are explicit parser diagnostics such as
+`command_source_lease_required`, `command_source_lease_conflict`, or
+`command_source_lease_token_mismatch`.
+
+The simulator TCP acceptance profile may enable lease enforcement as evidence.
+Tracked default mock/simulator operator configs do not use lease enforcement as
+a hidden behavior change.
+
+## MIG-24 Camera Readiness And Policy Wiring
+
+Camera readiness is a policy input, not a servo-loop requirement. Joint-only
+`policy_runner` action sources can run without camera observations. Any
+camera-dependent action source must declare `requires_camera` and a
+`camera_stale_timeout_sec`; camera-geometry-dependent action sources must also
+declare `requires_camera_geometry`.
+
+Policy sources fail closed when required camera readiness is absent, stale, or
+lacks measured accepted geometry. The active calibration remains a configured
+estimate and is not real geometry acceptance evidence.
+
+Real three-camera acceptance is documented separately in
+`docs/runbooks/camera_acceptance.md`. It is a hardware workflow for RealSense
+capture and policy-readiness evidence only; it does not imply real robot
+connection, real `servo_j`, real Cartesian motion, or force-control readiness.
+
+## MIG-26 Final Rebaseline
+
+The current review and validation baseline after MIG-13+ is:
+
+- Command flow is `CommandBuffer -> ServoCoordinator/DualArmServoLoop ->
+  Left/Right ArmWorker -> simulator/rbpodo endpoint`.
+- `servo.io_model: direct` remains the stable default. Worker I/O is accepted
+  for simulator evidence; real worker mode still needs separate read-only
+  hardware acceptance before any promotion.
+- `RbsimBackend` uses persistent JSON-lines transport per simulator backend
+  instance and exposes transport counters for tests/diagnostics.
+- `ArmWorker` has latest-wins streaming `servo_j` telemetry and a separate
+  bounded lifecycle queue for reset/stop-like commands.
+- Rbpodo read-only state semantics remain separate from motion readiness.
+  Unverified real `stop()` / `resetFault()` recovery still fails closed and
+  requires operator intervention.
+- `FaultContext` is latched as structured state and is not replaced by later
+  routine suppression telemetry.
+- Command lease enforcement defaults to off and must be enabled explicitly in
+  acceptance profiles that need it.
+- TCP Pose/Delta acceptance is simulator-only, Pinocchio-gated, and keeps
+  `cartesian_control.allow_in_real: false`.
+- Camera acceptance is separate from hardware-free validation and separate from
+  real robot acceptance.
+
+The one-command developer rebaseline is:
+
+```bash
+bash scripts/codex_gate.sh MIG-26
+```
+
+That gate must remain hardware-free by default. It may run optional Pinocchio
+and simulator TCP acceptance when the dependency is already installed, but it
+must not require rbpodo, RealSense hardware, real robot network access, or any
+real motion environment gate.
