@@ -137,3 +137,61 @@ Injected transport-like failures are not robot faults:
 responses to the same mapping. When an error response includes `state`,
 `sendServoJ` rejects with `state_after_source="response"`; otherwise the source
 is `"none"`.
+
+## MIG-04 Rbpodo Structured Result Mapping
+
+`RbpodoBackend` must keep the real-robot gates unchanged while preserving the
+cause of controller and SDK failures in structured fields.
+
+Verified rbpodo API surface for this migration:
+
+- `rb::podo::Cobot<>(address)`
+- `rb::podo::CobotData(address)`
+- `rb::podo::CobotData::request_data(timeout)`
+- `rb::podo::Cobot<>::move_servo_j(...)`
+- `rb::podo::ReturnType::{is_success,is_timeout,is_error}`
+- `rb::podo::ResponseCollector::has_error()`
+- `rb::podo::SystemState::sdata.jnt_ang`, `jnt_ref`, `time`,
+  `real_vs_simulation_mode`, `init_state_info`, `init_error`,
+  `op_stat_sos_flag`, `op_stat_ems_flag`, `op_stat_soft_estop_occur`,
+  `op_stat_collision_occur`, and `op_stat_self_collision`
+
+Structured rbpodo mapping:
+
+| Condition | Backend kind | Required details |
+| --- | --- | --- |
+| `RB_ALLOW_REAL_ROBOT` missing for real connect | `SuppressedByPolicy` | `error.name="rbpodo_real_robot_gate_closed"` |
+| `RB_ALLOW_REAL_MOTION` missing for real `sendServoJ` | `SuppressedByPolicy` | `error.name="rbpodo_motion_gate_closed"` |
+| `SystemState` fault code is nonzero | `RobotFault` | `error.code` is the controller code |
+| `real_vs_simulation_mode` conflicts with config | `WrongMode` | `error.code` is the reported mode value |
+| `init_state_info` is not activation done stage 6 | `ServoDisabled` | `error.code` is the activation stage |
+| non-finite joint sample | `InvalidJointState` | state is not valid |
+| connected backend returns no data | `TransportReadFailed` | no valid state is invented |
+| known disconnected backend | `RobotDisconnected` | no transport read is attempted |
+| command acknowledgement timeout | `CommandTimeout` | command was not accepted |
+| controller error response | `ControllerRejected` | response category/message are preserved when present |
+| command-channel exception during send | `TransportWriteFailed` | exception text is preserved |
+
+`initialize()` is read-only in MIG-04. It requests and validates state, but does
+not call `set_operation_mode`, `set_speed_bar`, or any command that enters a
+motion mode.
+
+`sendServoJ()` may include the backend's recent timestamped state cache on
+rejections. When included, `state_after_source` must be `"cache"`. The cache is
+only diagnostic state from the last rbpodo state sample; it is not a hidden
+retry or second read.
+
+`dq_actual_deg_s` remains finite zero for rbpodo because the inspected
+`SystemState` has no verified joint-velocity field. Replace it only after a
+specific rbpodo header or official doc field is verified.
+
+`stop()` and `resetFault()` remain unverified for controller-level servo
+hold/fault-reset. They fail closed without issuing a robot API call:
+
+| Operation | Backend kind | Required name |
+| --- | --- | --- |
+| `stop()` | `DependencyUnavailable` | `rbpodo_stop_unverified` |
+| `resetFault()` | `DependencyUnavailable` | `rbpodo_reset_fault_unverified` |
+
+Their messages must state that operator intervention is required. Reset must
+not implicitly re-enable motion.

@@ -4,7 +4,7 @@ This document defines the implementation plan and acceptance gates for the real
 Rainbow RB3-730 backend. It is a planning artifact only. Do not use it as
 evidence that real-robot operation is ready.
 
-Current state after P1-B:
+Current state after MIG-04:
 
 - `RB_SERVO_ENABLE_RBPODO=OFF` remains the default hardware-free build.
 - `RB_SERVO_ENABLE_RBPODO=ON` requires the installed `rbpodo` CMake package and
@@ -19,9 +19,21 @@ Current state after P1-B:
 - `sendServoJ()` uses the verified `rb::podo::Cobot<>::move_servo_j()` API, but
   real sends remain blocked unless `RB_ALLOW_REAL_MOTION=1` is present and the
   servo loop calls it only when `servo.send_servo_commands=true`.
+- `initialize()` is read-only for MIG-04. It requests controller data and maps
+  the resulting state, but does not set operation mode, speed bar, or any
+  motion-enabling controller mode.
+- Verified controller state maps into structured errors: `RobotFault` with the
+  `SystemState` error code, `WrongMode` from `real_vs_simulation_mode`,
+  `ServoDisabled` from `init_state_info`, and `InvalidJointState` for
+  non-finite joint samples.
+- `sendServoJ()` includes a recent timestamped rbpodo state cache as
+  `state_after_source="cache"` on rejected sends when a cache newer than one
+  second exists. The cache is a diagnostic only; it is not a hidden second read
+  or command retry.
 - `stop()` and `resetFault()` remain conservative and do not call real robot
   APIs because no dedicated safe stop/fault-reset API was verified for this
-  package slice.
+  package slice. They fail closed with names `rbpodo_stop_unverified` and
+  `rbpodo_reset_fault_unverified` and require operator intervention.
 - `config/dual_real.example.yaml` is an example only. Site-specific real configs
   belong under `config/local/`, which is gitignored.
 
@@ -156,11 +168,14 @@ Tasks:
 - Do not send a motion target during `initialize()`.
 - Return false if controller state, servo mode, or safety state is not accepted.
 
-P1-B behavior:
+MIG-04 behavior:
 
-- Read-only initialization requests data only.
-- If `RB_ALLOW_REAL_MOTION=1` is present, initialization may set operation mode
-  and speed bar using verified rbpodo calls. It still does not send a target.
+- Initialization requests data only and maps the returned `SystemState`.
+- Initialization does not call `set_operation_mode`, `set_speed_bar`, or any
+  command that enters a motion mode, even if `RB_ALLOW_REAL_MOTION=1` is present.
+- If the read state shows a controller fault, operation-mode mismatch, disabled
+  servo/activation stage, or invalid joints, initialization fails with the
+  corresponding structured backend error.
 
 Acceptance:
 
@@ -226,6 +241,12 @@ P1-B behavior:
 - The backend checks `RB_ALLOW_REAL_MOTION=1` before real sends. The
   `servo.send_servo_commands` gate lives in `DualArmServoLoop`, so read-only
   mode never reaches `RbpodoBackend::sendServoJ()`.
+- MIG-04 additionally rejects a send before touching the command channel when a
+  recent cached state already proves `RobotFault`, `WrongMode`,
+  `ServoDisabled`, or invalid joint state.
+- Command acknowledgement timeouts map to `CommandTimeout`, controller error
+  responses map to `ControllerRejected`, and write exceptions map to
+  `TransportWriteFailed`.
 
 Acceptance:
 
@@ -248,10 +269,11 @@ Tasks:
 - Preserve state truthfulness after stop: the next `readState()` must show
   controller state as connected/error/stopped according to SDK data.
 
-P1-B status: deferred. `task_stop()` exists in the inspected SDK, but it is a
+MIG-04 status: deferred. `task_stop()` exists in the inspected SDK, but it is a
 task-program stop, not a verified controller-level servo hold primitive for this
 package. `RbpodoBackend::stop()` therefore fails closed without issuing a robot
-API call.
+API call. The structured error name is `rbpodo_stop_unverified`, and the
+message tells the operator that intervention is required.
 
 Acceptance:
 
@@ -273,9 +295,11 @@ Tasks:
   loop latch.
 - Keep `DualArmServoLoop` in `ConnectedHold`; require a new `ArmMotion`.
 
-P1-B status: deferred. No dedicated recover/reset API was verified in the
+MIG-04 status: deferred. No dedicated recover/reset API was verified in the
 inspected rbpodo headers, so `RbpodoBackend::resetFault()` fails closed without
-issuing a robot API call.
+issuing a robot API call. The structured error name is
+`rbpodo_reset_fault_unverified`, and the message requires operator intervention
+without implicitly re-enabling motion.
 
 Acceptance:
 

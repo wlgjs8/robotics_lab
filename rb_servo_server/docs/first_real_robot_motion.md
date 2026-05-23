@@ -13,6 +13,12 @@ joint-only acceptance run after read-only state publishing has been verified.
 - `RB_ALLOW_REAL_MOTION=1` set only for the first-motion run.
 - Command and state endpoints remain loopback unless separately reviewed.
 - Cartesian/TCP and force control remain disabled.
+- `RbpodoBackend::initialize()` is read-only: it must not enter operation mode
+  or set speed bar during the read-only run.
+- `RbpodoBackend::stop()` and `resetFault()` are not verified controller-level
+  real-robot recovery APIs. They return `rbpodo_stop_unverified` and
+  `rbpodo_reset_fault_unverified`; use the physical E-stop and operator
+  procedure as the actual stop/recovery path until a verified API is added.
 
 ## Config
 
@@ -40,5 +46,6 @@ current measured joint position on one low-risk joint. Stop immediately on any
 unexpected direction, tracking error, send failure, stale state, or controller
 warning.
 
-`ResetFault` must not resume motion by itself. After any reset, return to
-`ConnectedHold` and require a new `ArmMotion`.
+`ResetFault` must not resume motion by itself. The rbpodo backend currently
+fails reset closed until a verified fault-reset API exists. After any external
+operator reset, return to `ConnectedHold` and require a new `ArmMotion`.
