@@ -130,6 +130,14 @@ one backend instance per arm.
 one simulator process/container per arm, with deterministic control and admin
 interfaces.
 
+`RbsimBackend` keeps one persistent JSON-lines TCP connection per simulator
+backend instance during healthy operation, matching the one endpoint per arm
+topology. It reuses that socket for connect, initialize, state reads,
+`servo_j`, stop, and reset requests; transport or protocol-corruption failures
+close the socket so a later request can reconnect. Robot/controller-level
+simulator responses such as `RobotFault` remain structured backend results and
+do not imply TCP transport corruption.
+
 `camera_server` owns camera capture, shared-memory frame transport, metadata,
 and health reporting. Mock camera operation is supported; measured RealSense
 calibration is still pending.

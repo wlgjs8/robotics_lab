@@ -96,7 +96,7 @@ endpoint per arm, never the physical robot IP addresses as simulator defaults.
 
 MIG-00 establishes only migration infrastructure and safety cleanup:
 
-- `scripts/codex_gate.sh` recognizes `MIG-00` through `MIG-12`.
+- `scripts/codex_gate.sh` recognizes `MIG-00` through `MIG-26`.
 - MIG gates reuse existing hardware-free checks and never require real robot
   hardware.
 - `MIG-00` runs shell syntax checks and documentation/config safety assertions.
@@ -248,3 +248,39 @@ MIG-12 closes the migration baseline by making review surfaces explicit:
 - Pinocchio-enabled C++ validation is optional: `scripts/codex_gate.sh MIG-12`
   runs it when the `pinocchio` CMake package is available, while
   `scripts/hardware_free_validation.sh` keeps `RB_SERVO_ENABLE_PINOCCHIO=OFF`.
+
+## MIG-13 Persistent Simulator Transport
+
+`RbsimBackend` owns one persistent JSON-lines TCP client per backend instance,
+which means one socket per configured simulator arm endpoint during healthy
+operation. The client sends multiple request lines over the same connection and
+uses buffered chunk reads to extract response lines, rather than opening a new
+TCP connection or issuing one-byte reads for each operation.
+
+The backend still increments `request_id` monotonically per `RbsimBackend`
+instance and preserves the MIG-03 structured result semantics. Simulator error
+responses that include `state` continue to populate `SendServoJResult.state_after`
+with `state_after_source="response"`.
+
+The persistent socket is closed on transport/protocol-corruption classes:
+
+- `TransportConnectFailed`
+- `TransportWriteFailed`
+- `TransportReadFailed`
+- `TransportTimeout`
+- `ProtocolError`
+
+Controller-level or protocol-successful robot rejections do not close the
+transport by themselves:
+
+- `RobotFault`
+- `ServoDisabled`
+- `WrongMode`
+- `WrongArm`
+- `InvalidTarget`
+
+The simulator transport records internal counters for diagnostics and tests:
+`connections_opened_total`, `reconnects_total`, `requests_total`,
+`read_syscalls_total`, `write_syscalls_total`, and
+`last_transport_error_kind`. These counters are hardware-free evidence only and
+do not change any real robot gate.

@@ -11,6 +11,7 @@
 #include <iostream>
 #include <optional>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -53,64 +54,6 @@ timeval timeoutValue(double seconds) {
     tv.tv_sec = static_cast<time_t>(seconds);
     tv.tv_usec = static_cast<suseconds_t>((seconds - static_cast<double>(tv.tv_sec)) * 1000000.0);
     return tv;
-}
-
-int openTcpConnection(const TcpEndpoint& endpoint, double timeout_sec) {
-    addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    addrinfo* results = nullptr;
-    const std::string port = std::to_string(endpoint.port);
-    const int gai = ::getaddrinfo(endpoint.host.c_str(), port.c_str(), &hints, &results);
-    if (gai != 0 || results == nullptr) {
-        std::cerr << "[ERROR] RbsimBackend resolve failed for " << endpoint.host
-                  << ": " << ::gai_strerror(gai) << "\n";
-        return -1;
-    }
-
-    int fd = -1;
-    for (addrinfo* item = results; item != nullptr; item = item->ai_next) {
-        fd = ::socket(item->ai_family, item->ai_socktype, item->ai_protocol);
-        if (fd < 0) continue;
-
-        timeval tv = timeoutValue(timeout_sec);
-        (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-        if (::connect(fd, item->ai_addr, item->ai_addrlen) == 0) break;
-        ::close(fd);
-        fd = -1;
-    }
-
-    ::freeaddrinfo(results);
-    return fd;
-}
-
-bool sendAll(int fd, const std::string& payload) {
-    const char* data = payload.data();
-    size_t remaining = payload.size();
-    while (remaining > 0) {
-        const ssize_t sent = ::send(fd, data, remaining, 0);
-        if (sent <= 0) return false;
-        data += sent;
-        remaining -= static_cast<size_t>(sent);
-    }
-    return true;
-}
-
-bool recvLine(int fd, std::string* line) {
-    line->clear();
-    constexpr size_t kMaxResponseBytes = 64 * 1024;
-    while (line->size() < kMaxResponseBytes) {
-        char c = '\0';
-        const ssize_t received = ::recv(fd, &c, 1, 0);
-        if (received <= 0) return false;
-        if (c == '\n') return true;
-        line->push_back(c);
-    }
-    return false;
 }
 
 bool jsonBool(const json& object, const char* key, bool fallback) {
@@ -198,6 +141,14 @@ std::string simulatorEndpoint(const BackendConfig& config) {
         return config.rbsim_control_endpoint;
     }
     return config.simulator_control_endpoint;
+}
+
+bool closesPersistentTransport(BackendErrorKind kind) {
+    return kind == BackendErrorKind::TransportConnectFailed ||
+           kind == BackendErrorKind::TransportWriteFailed ||
+           kind == BackendErrorKind::TransportReadFailed ||
+           kind == BackendErrorKind::TransportTimeout ||
+           kind == BackendErrorKind::ProtocolError;
 }
 
 template <typename T>
@@ -320,8 +271,198 @@ BackendError protocolErrorFromResponse(const std::string& op, const json& respon
 
 }  // namespace
 
+struct JsonLineRequestResult {
+    bool ok = false;
+    std::string line;
+    BackendError error = noBackendError();
+};
+
+class JsonLineTcpClient {
+public:
+    explicit JsonLineTcpClient(std::string endpoint)
+        : endpoint_text_(std::move(endpoint)), endpoint_(parseTcpEndpoint(endpoint_text_)) {}
+
+    ~JsonLineTcpClient() {
+        close();
+    }
+
+    JsonLineRequestResult request(const std::string& line, double timeout_sec, const std::string& op) {
+        counters_.requests_total += 1;
+        if (!connectIfNeeded(timeout_sec)) {
+            return failure(
+                BackendErrorKind::TransportConnectFailed,
+                "rbsim connect failed for " + endpoint_text_
+            );
+        }
+
+        setSocketTimeouts(timeout_sec);
+        const BackendError write_error = sendAll(line, op);
+        if (write_error.kind != BackendErrorKind::None) {
+            closeForTransportError(write_error.kind);
+            return JsonLineRequestResult{false, {}, write_error};
+        }
+
+        std::string response_line;
+        const BackendError read_error = recvLineBuffered(&response_line, op);
+        if (read_error.kind != BackendErrorKind::None) {
+            closeForTransportError(read_error.kind);
+            return JsonLineRequestResult{false, {}, read_error};
+        }
+
+        JsonLineRequestResult result;
+        result.ok = true;
+        result.line = std::move(response_line);
+        return result;
+    }
+
+    void close() {
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+        read_buffer_.clear();
+    }
+
+    void closeForBackendError(BackendErrorKind kind) {
+        if (!closesPersistentTransport(kind)) return;
+        closeForTransportError(kind);
+    }
+
+    RbsimTransportCounters counters() const {
+        return counters_;
+    }
+
+private:
+    bool connectIfNeeded(double timeout_sec) {
+        if (fd_ >= 0) return true;
+
+        addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+
+        addrinfo* results = nullptr;
+        const std::string port = std::to_string(endpoint_.port);
+        const int gai = ::getaddrinfo(endpoint_.host.c_str(), port.c_str(), &hints, &results);
+        if (gai != 0 || results == nullptr) {
+            std::cerr << "[ERROR] RbsimBackend resolve failed for " << endpoint_.host
+                      << ": " << ::gai_strerror(gai) << "\n";
+            counters_.last_transport_error_kind = BackendErrorKind::TransportConnectFailed;
+            return false;
+        }
+
+        int opened_fd = -1;
+        for (addrinfo* item = results; item != nullptr; item = item->ai_next) {
+            opened_fd = ::socket(item->ai_family, item->ai_socktype, item->ai_protocol);
+            if (opened_fd < 0) continue;
+
+            setSocketTimeouts(opened_fd, timeout_sec);
+            if (::connect(opened_fd, item->ai_addr, item->ai_addrlen) == 0) break;
+
+            ::close(opened_fd);
+            opened_fd = -1;
+        }
+
+        ::freeaddrinfo(results);
+        if (opened_fd < 0) {
+            counters_.last_transport_error_kind = BackendErrorKind::TransportConnectFailed;
+            return false;
+        }
+
+        if (counters_.connections_opened_total > 0) {
+            counters_.reconnects_total += 1;
+        }
+        counters_.connections_opened_total += 1;
+        fd_ = opened_fd;
+        read_buffer_.clear();
+        return true;
+    }
+
+    void setSocketTimeouts(double timeout_sec) {
+        if (fd_ >= 0) setSocketTimeouts(fd_, timeout_sec);
+    }
+
+    static void setSocketTimeouts(int fd, double timeout_sec) {
+        timeval tv = timeoutValue(timeout_sec);
+        (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
+
+    BackendError sendAll(const std::string& payload, const std::string& op) {
+        const char* data = payload.data();
+        size_t remaining = payload.size();
+        while (remaining > 0) {
+#ifdef MSG_NOSIGNAL
+            constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+            constexpr int kSendFlags = 0;
+#endif
+            const ssize_t sent = ::send(fd_, data, remaining, kSendFlags);
+            counters_.write_syscalls_total += 1;
+            if (sent > 0) {
+                data += sent;
+                remaining -= static_cast<size_t>(sent);
+                continue;
+            }
+            if (sent < 0 && errno == EINTR) continue;
+            if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                return backendError(BackendErrorKind::TransportTimeout, "rbsim write timed out for " + op);
+            }
+            return backendError(BackendErrorKind::TransportWriteFailed, "rbsim write failed for " + op);
+        }
+        return noBackendError();
+    }
+
+    BackendError recvLineBuffered(std::string* line, const std::string& op) {
+        constexpr size_t kMaxResponseBytes = 64 * 1024;
+        constexpr size_t kReadChunkBytes = 4096;
+        line->clear();
+
+        while (read_buffer_.size() <= kMaxResponseBytes) {
+            const auto newline = read_buffer_.find('\n');
+            if (newline != std::string::npos) {
+                *line = read_buffer_.substr(0, newline);
+                read_buffer_.erase(0, newline + 1);
+                return noBackendError();
+            }
+
+            char chunk[kReadChunkBytes];
+            const ssize_t received = ::recv(fd_, chunk, sizeof(chunk), 0);
+            counters_.read_syscalls_total += 1;
+            if (received > 0) {
+                read_buffer_.append(chunk, static_cast<size_t>(received));
+                continue;
+            }
+            if (received < 0 && errno == EINTR) continue;
+            if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                return backendError(BackendErrorKind::TransportTimeout, "rbsim read timed out for " + op);
+            }
+            return backendError(BackendErrorKind::TransportReadFailed, "rbsim read failed for " + op);
+        }
+
+        return backendError(BackendErrorKind::ProtocolError, "rbsim " + op + " response exceeded JSON-line limit");
+    }
+
+    void closeForTransportError(BackendErrorKind kind) {
+        counters_.last_transport_error_kind = kind;
+        close();
+    }
+
+    JsonLineRequestResult failure(BackendErrorKind kind, const std::string& message) {
+        return JsonLineRequestResult{false, {}, backendError(kind, message)};
+    }
+
+    std::string endpoint_text_;
+    TcpEndpoint endpoint_;
+    int fd_ = -1;
+    std::string read_buffer_;
+    RbsimTransportCounters counters_;
+};
+
 RbsimBackend::RbsimBackend(ArmId arm_id, const BackendConfig& config)
     : arm_id_(arm_id), config_(config) {}
+
+RbsimBackend::~RbsimBackend() = default;
 
 BackendResult<RobotState> RbsimBackend::connect() {
     BackendResult<RobotState> result = controlRequest("connect", BackendOp::Connect, json::object(), true);
@@ -397,6 +538,10 @@ std::string RbsimBackend::name() const {
     return config_.name;
 }
 
+RbsimTransportCounters RbsimBackend::transportCounters() const {
+    return client_ ? client_->counters() : RbsimTransportCounters{};
+}
+
 BackendResult<RobotState> RbsimBackend::controlRequest(
     const std::string& op,
     BackendOp backend_op,
@@ -404,22 +549,14 @@ BackendResult<RobotState> RbsimBackend::controlRequest(
     bool require_state
 ) {
     const uint64_t start = nowSteadyNs();
-    TcpEndpoint endpoint;
     try {
-        endpoint = parseTcpEndpoint(simulatorEndpoint(config_));
+        if (!client_) {
+            client_ = std::make_unique<JsonLineTcpClient>(simulatorEndpoint(config_));
+        }
     } catch (const std::exception& exc) {
         return failedResult<RobotState>(
             backend_op,
             backendError(BackendErrorKind::WrongEndpoint, exc.what()),
-            makeBackendTiming(start, nowSteadyNs())
-        );
-    }
-    const int fd = openTcpConnection(endpoint, timeoutForOperation(config_, op));
-    if (fd < 0) {
-        connected_ = false;
-        return failedResult<RobotState>(
-            backend_op,
-            backendError(BackendErrorKind::TransportConnectFailed, "rbsim connect failed for " + simulatorEndpoint(config_)),
             makeBackendTiming(start, nowSteadyNs())
         );
     }
@@ -432,32 +569,22 @@ BackendResult<RobotState> RbsimBackend::controlRequest(
     request["params"] = params;
 
     const std::string line = request.dump() + "\n";
-    std::string response_line;
-    const bool write_ok = sendAll(fd, line);
-    const bool read_ok = write_ok && recvLine(fd, &response_line);
-    ::close(fd);
-    if (!write_ok) {
+    const JsonLineRequestResult transport = client_->request(line, timeoutForOperation(config_, op), op);
+    if (!transport.ok) {
         connected_ = false;
         return failedResult<RobotState>(
             backend_op,
-            backendError(BackendErrorKind::TransportWriteFailed, "rbsim write failed for " + op),
-            makeBackendTiming(start, nowSteadyNs())
-        );
-    }
-    if (!read_ok) {
-        connected_ = false;
-        return failedResult<RobotState>(
-            backend_op,
-            backendError(BackendErrorKind::TransportReadFailed, "rbsim read failed for " + op),
+            transport.error,
             makeBackendTiming(start, nowSteadyNs())
         );
     }
 
     json response;
     try {
-        response = json::parse(response_line);
+        response = json::parse(transport.line);
     } catch (const json::exception& exc) {
         std::cerr << "[ERROR] RbsimBackend invalid JSON response: " << exc.what() << "\n";
+        client_->closeForBackendError(BackendErrorKind::ProtocolError);
         return failedResult<RobotState>(
             backend_op,
             backendError(BackendErrorKind::ProtocolError, exc.what()),
@@ -467,6 +594,7 @@ BackendResult<RobotState> RbsimBackend::controlRequest(
 
     if (!jsonBool(response, "ok", false)) {
         const BackendError error = protocolErrorFromResponse(op, response);
+        client_->closeForBackendError(error.kind);
         RobotState response_state;
         const auto state_it = response.find("state");
         if (state_it != response.end() && mapState(*state_it, arm_id_, &response_state)) {

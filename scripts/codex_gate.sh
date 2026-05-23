@@ -175,6 +175,12 @@ run_mig12_gate() {
   run_optional_pinocchio_gate
 }
 
+run_mig13_gate() {
+  run_shell_syntax_checks
+  run_simulator_tests
+  run_servo_gate
+}
+
 case "$TASK" in
   P0-A)
     grep_existing "RB_ALLOW_REAL_MOTION" README.md docs
@@ -229,6 +235,14 @@ case "$TASK" in
     run_mig12_gate
     ;;
 
+  MIG-13)
+    run_mig13_gate
+    ;;
+
+  MIG-14|MIG-15|MIG-16|MIG-20|MIG-21|MIG-22|MIG-23|MIG-24)
+    run_servo_gate
+    ;;
+
   MIG-10)
     run_simulator_tests
     run_servo_gate
@@ -238,6 +252,17 @@ case "$TASK" in
   MIG-03)
     run_simulator_tests
     run_servo_gate
+    ;;
+
+  MIG-17)
+    run_policy_runner_tests
+    ;;
+
+  MIG-18|MIG-19|MIG-25|MIG-26)
+    run_shell_syntax_checks
+    run_simulator_tests
+    run_gui_tests
+    run_policy_runner_tests
     ;;
 
   *)

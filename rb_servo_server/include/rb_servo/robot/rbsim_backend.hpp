@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -10,9 +12,21 @@
 
 namespace rb_servo {
 
+class JsonLineTcpClient;
+
+struct RbsimTransportCounters {
+    uint64_t connections_opened_total = 0;
+    uint64_t reconnects_total = 0;
+    uint64_t requests_total = 0;
+    uint64_t read_syscalls_total = 0;
+    uint64_t write_syscalls_total = 0;
+    std::optional<BackendErrorKind> last_transport_error_kind;
+};
+
 class RbsimBackend final : public IRobotBackend {
 public:
     RbsimBackend(ArmId arm_id, const BackendConfig& config);
+    ~RbsimBackend() override;
 
     BackendResult<RobotState> connect() override;
     BackendResult<RobotState> initialize() override;
@@ -26,6 +40,7 @@ public:
     bool isConnected() const override;
     ArmId armId() const override;
     std::string name() const override;
+    RbsimTransportCounters transportCounters() const;
 
 private:
     BackendResult<RobotState> controlRequest(
@@ -39,6 +54,7 @@ private:
     BackendConfig config_;
     bool connected_ = false;
     uint64_t request_seq_ = 0;
+    std::unique_ptr<JsonLineTcpClient> client_;
 };
 
 }  // namespace rb_servo

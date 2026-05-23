@@ -319,10 +319,18 @@ public:
             listen_fd_ = -1;
         }
         if (thread_.joinable()) thread_.join();
+        std::lock_guard<std::mutex> lock(client_threads_mutex_);
+        for (std::thread& client_thread : client_threads_) {
+            if (client_thread.joinable()) client_thread.join();
+        }
     }
 
     std::string endpoint() const {
         return "tcp://127.0.0.1:" + std::to_string(port_);
+    }
+
+    int connectionCount() const {
+        return connection_count_.load();
     }
 
     void failNextSend(const std::string& arm = "left") {
@@ -338,6 +346,11 @@ public:
     void failNextRead(const std::string& arm = "left") {
         std::lock_guard<std::mutex> lock(state_mutex_);
         armState(arm).fail_next_read = true;
+    }
+
+    void dropNextRequest(const std::string& arm = "left") {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        armState(arm).drop_next_request = true;
     }
 
     void setStopFailure(const std::string& arm, bool enabled) {
@@ -389,6 +402,7 @@ private:
         bool send_failure = false;
         bool fail_next_send = false;
         bool fail_next_read = false;
+        bool drop_next_request = false;
         bool stop_failure = false;
         bool reset_failure = false;
         int error_code = 0;
@@ -406,19 +420,45 @@ private:
         while (running_) {
             const int client = ::accept(listen_fd_, nullptr, nullptr);
             if (client < 0) continue;
-            handleClient(client);
-            ::close(client);
+            connection_count_.fetch_add(1);
+            std::lock_guard<std::mutex> lock(client_threads_mutex_);
+            client_threads_.emplace_back(&ScriptedRbsimServer::handleClient, this, client);
         }
     }
 
     void handleClient(int client) {
+        timeval tv{};
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000;
+        (void)::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
         std::string line;
         char c = '\0';
-        while (::recv(client, &c, 1, 0) == 1) {
-            if (c == '\n') break;
-            line.push_back(c);
+        while (running_) {
+            line.clear();
+            while (running_) {
+                const ssize_t received = ::recv(client, &c, 1, 0);
+                if (received == 1) {
+                    if (c == '\n') break;
+                    line.push_back(c);
+                    continue;
+                }
+                if (received == 0) {
+                    ::close(client);
+                    return;
+                }
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                ::close(client);
+                return;
+            }
+            if (line.empty() && !running_) break;
+            if (!handleRequest(client, line)) break;
         }
+        ::close(client);
+    }
 
+    bool handleRequest(int client, const std::string& line) {
         nlohmann::json request = nlohmann::json::parse(line);
         const std::string op = request.value("op", "");
         const std::string arm = request.value("arm", "left");
@@ -432,6 +472,10 @@ private:
 
         std::lock_guard<std::mutex> lock(state_mutex_);
         ArmRuntime& state = armState(arm);
+        if (state.drop_next_request) {
+            state.drop_next_request = false;
+            return false;
+        }
         const auto stateJson = [&]() {
             std::vector<double> q_actual = state.q_actual;
             q_actual[0] += state.tracking_bias_deg;
@@ -461,7 +505,7 @@ private:
                 {"recoverable", true},
             };
             sendResponse(client, response);
-            return;
+            return true;
         }
 
         if (op == "send_servo_j" && (state.send_failure || state.fail_next_send)) {
@@ -476,7 +520,7 @@ private:
                 {"recoverable", true},
             };
             sendResponse(client, response);
-            return;
+            return true;
         }
 
         if (op == "send_servo_j" && state.has_error) {
@@ -491,7 +535,7 @@ private:
             };
             response["state"] = stateJson();
             sendResponse(client, response);
-            return;
+            return true;
         }
 
         if (op == "connect") {
@@ -518,7 +562,7 @@ private:
                     {"recoverable", true},
                 };
                 sendResponse(client, response);
-                return;
+                return true;
             }
             state.q_target = state.q_actual;
             state.servo_enabled = false;
@@ -535,7 +579,7 @@ private:
                     {"recoverable", true},
                 };
                 sendResponse(client, response);
-                return;
+                return true;
             }
             state.initialized = false;
             state.servo_enabled = false;
@@ -546,13 +590,14 @@ private:
             response["ok"] = false;
             response["error"] = {{"name", "unknown_operation"}, {"message", op}, {"code", 4003}};
             sendResponse(client, response);
-            return;
+            return true;
         }
 
         state.robot_time_ns += 5000000;
         response["ok"] = true;
         response["state"] = stateJson();
         sendResponse(client, response);
+        return true;
     }
 
     void sendResponse(int client, const nlohmann::json& response) {
@@ -563,7 +608,10 @@ private:
     int listen_fd_ = -1;
     int port_ = 0;
     std::atomic<bool> running_{true};
+    std::atomic<int> connection_count_{0};
     std::thread thread_;
+    std::mutex client_threads_mutex_;
+    std::vector<std::thread> client_threads_;
     std::mutex state_mutex_;
     ArmRuntime left_;
     ArmRuntime right_;
@@ -838,6 +886,7 @@ bool testRbsimBackendMapsStateAndFailureResponses() {
     RB_CHECK(backend.connect().ok);
     RB_CHECK(backend.isConnected());
     RB_CHECK(backend.initialize().ok);
+    RB_CHECK(server->connectionCount() == 1);
 
     rb_servo::BackendResult<rb_servo::RobotState> state_result = backend.readState();
     RB_CHECK(state_result.ok);
@@ -862,6 +911,19 @@ bool testRbsimBackendMapsStateAndFailureResponses() {
     RB_CHECK(state_result.ok);
     state = state_result.value;
     RB_CHECK(sameJointArray(state.q_target_deg, target));
+    for (int i = 0; i < 8; ++i) {
+        target[0] += 0.1;
+        request.q_target_deg = target;
+        RB_CHECK(backend.sendServoJ(request).accepted);
+        RB_CHECK(backend.readState().ok);
+    }
+    RB_CHECK(server->connectionCount() == 1);
+    rb_servo::RbsimTransportCounters counters = backend.transportCounters();
+    RB_CHECK(counters.connections_opened_total == 1);
+    RB_CHECK(counters.reconnects_total == 0);
+    RB_CHECK(counters.requests_total >= 20);
+    RB_CHECK(counters.read_syscalls_total < counters.requests_total * 2);
+    const double last_accepted_target0 = target[0];
 
     server->failNextSend();
     target[0] += 5.0;
@@ -879,9 +941,16 @@ bool testRbsimBackendMapsStateAndFailureResponses() {
     state_result = backend.readState();
     RB_CHECK(state_result.ok);
     state = state_result.value;
-    RB_CHECK(state.q_target_deg[0] == 1.25);
+    RB_CHECK(state.q_target_deg[0] == last_accepted_target0);
+    RB_CHECK(server->connectionCount() == 2);
+    counters = backend.transportCounters();
+    RB_CHECK(counters.connections_opened_total == 2);
+    RB_CHECK(counters.reconnects_total == 1);
+    RB_CHECK(counters.last_transport_error_kind.has_value());
+    RB_CHECK(*counters.last_transport_error_kind == rb_servo::BackendErrorKind::TransportWriteFailed);
 
     server->setFault("left", 2222);
+    const int connections_before_fault = server->connectionCount();
     target[0] += 5.0;
     request.q_target_deg = target;
     const rb_servo::SendServoJResult faulted = backend.sendServoJ(request);
@@ -895,9 +964,52 @@ bool testRbsimBackendMapsStateAndFailureResponses() {
     RB_CHECK(faulted.state_after_source == "response");
     RB_CHECK(faulted.state_after->has_error);
     RB_CHECK(faulted.state_after->error_code == 2222);
+    RB_CHECK(server->connectionCount() == connections_before_fault);
+    RB_CHECK(backend.transportCounters().connections_opened_total == counters.connections_opened_total);
 
     RB_CHECK(backend.stop().ok);
     RB_CHECK(backend.resetFault().ok);
+    RB_CHECK(server->connectionCount() == connections_before_fault);
+    return true;
+}
+
+bool testRbsimPersistentTransportReconnectsAfterSocketDrop() {
+    std::unique_ptr<ScriptedRbsimServer> server;
+    try {
+        server = std::make_unique<ScriptedRbsimServer>();
+    } catch (const std::exception& exc) {
+        std::cerr << "[SKIP] rbsim socket fixture unavailable: " << exc.what() << "\n";
+        return true;
+    }
+
+    rb_servo::BackendConfig cfg;
+    cfg.backend_type = rb_servo::BackendType::Rbsim;
+    cfg.run_mode = rb_servo::RunMode::Simulation;
+    cfg.name = "left_rbsim_reconnect_test";
+    cfg.rbsim_control_endpoint = server->endpoint();
+    cfg.rbsim_request_timeout_sec = 0.2;
+
+    rb_servo::RbsimBackend backend(rb_servo::ArmId::Left, cfg);
+    RB_CHECK(backend.connect().ok);
+    RB_CHECK(backend.initialize().ok);
+    RB_CHECK(server->connectionCount() == 1);
+
+    server->dropNextRequest("left");
+    const rb_servo::BackendResult<rb_servo::RobotState> dropped = backend.readState();
+    RB_CHECK(!dropped.ok);
+    RB_CHECK(dropped.error.kind == rb_servo::BackendErrorKind::TransportReadFailed);
+    rb_servo::RbsimTransportCounters counters = backend.transportCounters();
+    RB_CHECK(counters.connections_opened_total == 1);
+    RB_CHECK(counters.reconnects_total == 0);
+    RB_CHECK(counters.last_transport_error_kind.has_value());
+    RB_CHECK(*counters.last_transport_error_kind == rb_servo::BackendErrorKind::TransportReadFailed);
+
+    const rb_servo::BackendResult<rb_servo::RobotState> recovered = backend.readState();
+    RB_CHECK(recovered.ok);
+    RB_CHECK(server->connectionCount() == 2);
+    counters = backend.transportCounters();
+    RB_CHECK(counters.connections_opened_total == 2);
+    RB_CHECK(counters.reconnects_total == 1);
     return true;
 }
 
@@ -2996,6 +3108,7 @@ int main() {
     if (!testCommandValidation()) return 1;
     if (!testSimulatorConfigParsesCanonicalAndAliases()) return 1;
     if (!testRbsimBackendMapsStateAndFailureResponses()) return 1;
+    if (!testRbsimPersistentTransportReconnectsAfterSocketDrop()) return 1;
     if (!testRbsimInvalidJointStateLatchesAndHoldsPreviousTarget()) return 1;
     if (!testRbsimPerArmDisconnectLatchesAndPublishesTruthfulSnapshot()) return 1;
     if (!testRbsimReadRobotFaultUsesFaultClassifierReason()) return 1;
