@@ -7,11 +7,13 @@ JOBS="${JOBS:-$(nproc 2>/dev/null || echo 2)}"
 CAMERA_BUILD_DIR="${CAMERA_BUILD_DIR:-${ROOT_DIR}/camera_server/build/hardware_free_gate}"
 RB_SERVO_BUILD_DIR="${RB_SERVO_BUILD_DIR:-${ROOT_DIR}/rb_servo_server/build/hardware_free_gate}"
 RBSIM_SMOKE_MODE="${RBSIM_SMOKE_MODE:-auto}"
+RBSIM_WORKER_SMOKE_MODE="${RBSIM_WORKER_SMOKE_MODE:-auto}"
 RBSIM_SMOKE_ARTIFACTS_DIR="${RBSIM_SMOKE_ARTIFACTS_DIR:-${ROOT_DIR}/rb_simulator/artifacts/hardware_free_gate}"
 RBSIM_COMMAND="${RBSIM_COMMAND:-python3 -m rbsim}"
 RBSIM_LEFT_CONFIG="${RBSIM_LEFT_CONFIG:-${ROOT_DIR}/rb_simulator/config/left_rb3_730e.yaml}"
 RBSIM_RIGHT_CONFIG="${RBSIM_RIGHT_CONFIG:-${ROOT_DIR}/rb_simulator/config/right_rb3_730e.yaml}"
 RBSIM_SERVO_CONFIG="${RBSIM_SERVO_CONFIG:-}"
+RBSIM_WORKER_SERVO_CONFIG="${RBSIM_WORKER_SERVO_CONFIG:-${ROOT_DIR}/rb_servo_server/config/dual_simulator_worker.yaml}"
 
 loopback_socket_available() {
   python3 - <<'PY'
@@ -107,22 +109,62 @@ case "${RBSIM_SMOKE_MODE}" in
     ;;
 esac
 
-if [[ "${run_rbsim_smoke}" == true ]]; then
-  echo "hardware-free gate: per-arm rb_simulator + rb_servo_server loopback smoke"
+run_per_arm_smoke() {
+  local label="$1"
+  local server_config="$2"
+  local artifact_dir="$3"
+  echo "hardware-free gate: per-arm rb_simulator + rb_servo_server loopback smoke (${label})"
   per_arm_args=(
     --left-simulator-command "${RBSIM_COMMAND}"
     --right-simulator-command "${RBSIM_COMMAND}"
     --left-simulator-config "${RBSIM_LEFT_CONFIG}"
     --right-simulator-config "${RBSIM_RIGHT_CONFIG}"
     --server "${RB_SERVO_BUILD_DIR}/rb_servo_server"
-    --artifact-dir "${RBSIM_SMOKE_ARTIFACTS_DIR}"
+    --artifact-dir "${artifact_dir}"
+    --server-config "${server_config}"
   )
-  if [[ -n "${RBSIM_SERVO_CONFIG}" ]]; then
-    per_arm_args+=(--server-config "${RBSIM_SERVO_CONFIG}")
-  else
-    per_arm_args+=(--server-config "${ROOT_DIR}/rb_servo_server/config/dual_simulator.yaml")
-  fi
   python3 "${ROOT_DIR}/rb_simulator/tools/rbsim_servo_smoke.py" "${per_arm_args[@]}"
+}
+
+if [[ "${run_rbsim_smoke}" == true ]]; then
+  if [[ -n "${RBSIM_SERVO_CONFIG}" ]]; then
+    direct_servo_config="${RBSIM_SERVO_CONFIG}"
+  else
+    direct_servo_config="${ROOT_DIR}/rb_servo_server/config/dual_simulator.yaml"
+  fi
+  run_per_arm_smoke "direct io_model" "${direct_servo_config}" "${RBSIM_SMOKE_ARTIFACTS_DIR}/direct"
+fi
+
+run_worker_smoke=false
+case "${RBSIM_WORKER_SMOKE_MODE}" in
+  auto)
+    if ! loopback_socket_available; then
+      echo "hardware-free gate: skipping worker-mode simulator smoke; AF_INET loopback sockets are unavailable in this sandbox"
+      echo "hardware-free gate: set RBSIM_WORKER_SMOKE_MODE=required to fail instead of skipping"
+    elif [[ -x "${RB_SERVO_BUILD_DIR}/rb_servo_server" && -f "${RBSIM_LEFT_CONFIG}" && -f "${RBSIM_RIGHT_CONFIG}" && -f "${RBSIM_WORKER_SERVO_CONFIG}" ]]; then
+      run_worker_smoke=true
+    else
+      echo "hardware-free gate: skipping worker-mode simulator smoke; set RBSIM_WORKER_SMOKE_MODE=required to fail on missing prerequisites"
+      echo "  expected servo server: ${RB_SERVO_BUILD_DIR}/rb_servo_server"
+      echo "  expected left simulator config: ${RBSIM_LEFT_CONFIG}"
+      echo "  expected right simulator config: ${RBSIM_RIGHT_CONFIG}"
+      echo "  expected worker servo config: ${RBSIM_WORKER_SERVO_CONFIG}"
+    fi
+    ;;
+  required)
+    run_worker_smoke=true
+    ;;
+  skip)
+    echo "hardware-free gate: worker-mode simulator smoke skipped by RBSIM_WORKER_SMOKE_MODE=skip"
+    ;;
+  *)
+    echo "hardware-free gate: RBSIM_WORKER_SMOKE_MODE must be auto, required, or skip; got ${RBSIM_WORKER_SMOKE_MODE}" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${run_worker_smoke}" == true ]]; then
+  run_per_arm_smoke "worker io_model" "${RBSIM_WORKER_SERVO_CONFIG}" "${RBSIM_SMOKE_ARTIFACTS_DIR}/worker"
 fi
 
 echo "hardware-free gate passed"

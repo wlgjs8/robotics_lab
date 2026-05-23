@@ -54,6 +54,17 @@ nlohmann::json optionalStringJson(const std::string& value) {
     return value;
 }
 
+double ageUs(uint64_t newer_ns, uint64_t older_ns) {
+    if (newer_ns == 0 || older_ns == 0 || newer_ns < older_ns) return 0.0;
+    return static_cast<double>(newer_ns - older_ns) / 1000.0;
+}
+
+bool sendDeadlineHit(uint64_t loop_start_ns, double period_ms, uint64_t send_end_ns) {
+    if (loop_start_ns == 0 || send_end_ns == 0 || period_ms <= 0.0) return false;
+    const auto period_ns = static_cast<uint64_t>(period_ms * 1'000'000.0);
+    return send_end_ns <= loop_start_ns + period_ns;
+}
+
 nlohmann::json backendCallJson(const BackendCallSnapshot& call, bool send_call) {
     nlohmann::json out = {
         {"backend_error_kind", call.backend_error_kind},
@@ -116,7 +127,11 @@ nlohmann::json armStateJson(
     const std::string& send_error_message,
     uint64_t send_start_ns,
     uint64_t send_end_ns,
-    double send_duration_us
+    double send_duration_us,
+    double state_age_us,
+    double send_result_age_us,
+    bool send_deadline_hit,
+    double worker_loop_read_duration_us
 ) {
     return {
         {"mode", toString(command.mode)},
@@ -131,6 +146,10 @@ nlohmann::json armStateJson(
         {"send_start_ns", send_start_ns},
         {"send_end_ns", send_end_ns},
         {"send_duration_us", send_duration_us},
+        {"state_age_us", state_age_us},
+        {"send_result_age_us", send_result_age_us},
+        {"send_deadline_hit", send_deadline_hit},
+        {"worker_loop_read_duration_us", worker_loop_read_duration_us},
         {"has_valid_joint_state", state.has_valid_joint_state},
         {"connection_state", state.connection_state == RobotConnectionState::Connected
             ? "Connected"
@@ -197,7 +216,11 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.left_send_error_message,
         snapshot.left_send_start_ns,
         snapshot.left_send_end_ns,
-        snapshot.left_send_duration_us
+        snapshot.left_send_duration_us,
+        ageUs(snapshot.loop_end_time_ns, snapshot.left_state.host_time_ns),
+        ageUs(snapshot.loop_end_time_ns, snapshot.left_send_end_ns),
+        sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.left_send_end_ns),
+        config_.servo.io_model == ServoIoModel::Worker ? snapshot.left_last_read.duration_us : 0.0
     );
     message["right"] = armStateJson(
         snapshot.right_state,
@@ -213,10 +236,18 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.right_send_error_message,
         snapshot.right_send_start_ns,
         snapshot.right_send_end_ns,
-        snapshot.right_send_duration_us
+        snapshot.right_send_duration_us,
+        ageUs(snapshot.loop_end_time_ns, snapshot.right_state.host_time_ns),
+        ageUs(snapshot.loop_end_time_ns, snapshot.right_send_end_ns),
+        sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.right_send_end_ns),
+        config_.servo.io_model == ServoIoModel::Worker ? snapshot.right_last_read.duration_us : 0.0
     );
 
     message["send_skew_us"] = snapshot.send_skew_us;
+    message["dispatch_skew_us"] = snapshot.send_skew_us;
+    message["send_deadline_hit"] =
+        sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.left_send_end_ns) &&
+        sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.right_send_end_ns);
     message["send_suppressed"] = snapshot.send_suppressed;
     message["send_policy"] = snapshot.send_policy;
     message["safety_verdict"] = toString(snapshot.safety_verdict);

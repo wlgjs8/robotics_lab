@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -27,6 +28,18 @@ sys.path.insert(0, str(SERVO_ROOT / "tools"))
 
 from rbsim import PROTOCOL_VERSION, RbsimService, load_simulator_config  # noqa: E402
 import analyze_servo_log  # noqa: E402
+
+
+class RbsimWorkerConfigContractTest(unittest.TestCase):
+    def test_worker_profile_keeps_simulator_motion_gates_explicit(self) -> None:
+        config_path = SERVO_ROOT / "config" / "dual_simulator_worker.yaml"
+        text = config_path.read_text(encoding="utf-8")
+        self.assertRegex(text, r"backend_type:\s*simulator")
+        self.assertRegex(text, r"run_mode:\s*simulation")
+        self.assertRegex(text, r"io_model:\s*worker")
+        self.assertRegex(text, r"send_servo_commands:\s*true")
+        self.assertRegex(text, r"force_control:\s*\n\s*provider:\s*null\s*\n\s*enable:\s*false")
+        self.assertNotRegex(text, r"172\.28\.60\.20[01]")
 
 
 def reserve_port(kind: socket.SocketKind) -> int:
@@ -94,6 +107,8 @@ class StateCapture:
 
 
 class RbsimHardwareFreeGateTest(unittest.TestCase):
+    SERVER_IO_MODEL = "direct"
+
     def setUp(self) -> None:
         if "RB_SERVO_SERVER_BIN" not in os.environ:
             self.skipTest("set RB_SERVO_SERVER_BIN to run the hardware-free integration gate")
@@ -187,6 +202,8 @@ right_robot:
 servo:
   rate_hz: 100
   command_timeout_sec: 0.5
+  io_model: {self.SERVER_IO_MODEL}
+  send_servo_commands: true
   enable_realtime_priority: false
 safety:
   q_min_deg: [-170, -120, -170, -190, -120, -360]
@@ -296,6 +313,25 @@ force_control:
         self.assertTrue(candidates, f"no CSV logs under {self.log_dir}")
         return candidates[-1]
 
+    def assert_latency_metrics_present(self, snapshot: dict[str, Any]) -> None:
+        self.assertIn("command_seq", snapshot)
+        self.assertIn("send_skew_us", snapshot)
+        self.assertIn("dispatch_skew_us", snapshot)
+        self.assertIn("send_deadline_hit", snapshot)
+        for arm in ("left", "right"):
+            arm_state = snapshot[arm]
+            for key in (
+                "state_age_us",
+                "send_result_age_us",
+                "send_deadline_hit",
+                "worker_loop_read_duration_us",
+            ):
+                self.assertIn(key, arm_state)
+            self.assertGreaterEqual(float(arm_state["state_age_us"]), 0.0)
+            self.assertGreaterEqual(float(arm_state["send_result_age_us"]), 0.0)
+            self.assertIsInstance(arm_state["send_deadline_hit"], bool)
+            self.assertGreaterEqual(float(arm_state["worker_loop_read_duration_us"]), 0.0)
+
     def test_wrong_arm_requests_fail_closed(self) -> None:
         right_to_left = self.control_request(self.left_control_port, "read_state", "right")
         self.assertFalse(right_to_left.get("ok"), right_to_left)
@@ -330,12 +366,27 @@ force_control:
             "running joint target",
         )
         self.assertFalse(running["fault_latched"])
+        self.assert_latency_metrics_present(running)
         time.sleep(2.1)
 
         metrics = analyze_servo_log.analyze_csv(self.latest_log())
         failures = analyze_servo_log.check_budget(metrics, analyze_servo_log.BUDGETS["rbsim-local100"])
         self.assertEqual(failures, [])
         self.assertGreaterEqual(metrics["duration_s"], 2.0)
+        with self.latest_log().open(newline="", encoding="utf-8") as handle:
+            fieldnames = csv.DictReader(handle).fieldnames or []
+        for column in (
+            "left_state_age_us",
+            "right_state_age_us",
+            "left_send_result_age_us",
+            "right_send_result_age_us",
+            "left_send_deadline_hit",
+            "right_send_deadline_hit",
+            "dispatch_skew_us",
+            "left_worker_loop_read_duration_us",
+            "right_worker_loop_read_duration_us",
+        ):
+            self.assertIn(column, fieldnames)
 
     def test_faults_are_visible_and_reset_semantics_are_truthful(self) -> None:
         self.send_command("ArmMotion")
@@ -431,6 +482,67 @@ force_control:
             rows = list(csv.DictReader(handle))
         self.assertTrue(any(row["left_send_ok"] in {"0", "false"} for row in rows))
         self.assertTrue(any(row["fault_latched"] in {"1", "true"} for row in rows))
+
+
+class RbsimWorkerHardwareFreeGateTest(RbsimHardwareFreeGateTest):
+    SERVER_IO_MODEL = "worker"
+
+    def test_faults_are_visible_and_reset_semantics_are_truthful(self) -> None:
+        self.send_command("ArmMotion")
+        send_fail_seq = self.send_command(
+            "JointTarget",
+            q_target_deg=[1, -29, 80, 0, 60, 0],
+            timeout_sec=2.0,
+        )
+        self.wait_snapshot(
+            lambda snap: snap.get("command_seq", 0) >= send_fail_seq
+            and snap.get("motion_state") == "Running",
+            "worker send failure target armed",
+        )
+
+        self.admin("admin.inject", "left", hook="send_failure", enabled=True)
+        send_fault = self.wait_snapshot(
+            lambda snap: snap.get("fault_latched") is True
+            and snap.get("latched_fault_reason") == "SendFailure"
+            and snap.get("left", {}).get("send_ok") is False,
+            "worker send failure latch",
+        )
+        self.assertEqual(send_fault["motion_state"], "FaultLatched")
+        self.assertEqual(send_fault["left"]["last_send"]["backend_error_kind"], "TransportWriteFailed")
+        self.assertEqual(send_fault["left"]["last_send"]["error_name"], "send_failure_injected")
+        self.assert_latency_metrics_present(send_fault)
+
+        self.admin("admin.reset_hooks")
+        suppressed_seq = self.send_command(
+            "JointTarget",
+            q_target_deg=[2, -29, 80, 0, 60, 0],
+            timeout_sec=2.0,
+        )
+        suppressed = self.wait_snapshot(
+            lambda snap: snap.get("command_seq", 0) >= suppressed_seq
+            and snap.get("send_policy") == "fault_latched"
+            and snap.get("send_suppressed") is True,
+            "worker fault-latched regular servo_j suppression",
+        )
+        self.assertEqual(suppressed["left"]["last_send"]["backend_error_kind"], "SuppressedByPolicy")
+        self.assertFalse(suppressed["left"]["last_send"]["accepted"])
+        self.assertEqual(suppressed["right"]["last_send"]["backend_error_kind"], "SuppressedByPolicy")
+        self.assertFalse(suppressed["right"]["last_send"]["accepted"])
+
+    def test_worker_simulator_robot_fault_is_distinguishable(self) -> None:
+        self.admin("admin.set_fault", "right", error_code=3333, recoverable=False)
+        fault = self.wait_snapshot(
+            lambda snap: snap.get("fault_latched") is True
+            and snap.get("latched_fault_reason") == "RobotStateError"
+            and snap.get("right", {}).get("error_code") == 3333,
+            "worker simulator robot fault",
+        )
+        self.assertEqual(fault["motion_state"], "FaultLatched")
+        self.assertEqual(fault["right"]["last_read"]["backend_error_kind"], "RobotFault")
+        self.assertEqual(fault["right"]["last_read"]["error_name"], "fault_latched")
+        self.assertEqual(fault["right"]["last_send"]["backend_error_kind"], "SuppressedByPolicy")
+        self.assertFalse(fault["right"]["last_send"]["accepted"])
+        self.assert_latency_metrics_present(fault)
 
 
 if __name__ == "__main__":

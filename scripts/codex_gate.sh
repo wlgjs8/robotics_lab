@@ -133,8 +133,14 @@ case "$TASK" in
     check_real_config_safety_docs
     ;;
 
-  MIG-01|MIG-02|MIG-04|MIG-05|MIG-06|MIG-07|MIG-08|MIG-09|MIG-10|MIG-11|MIG-12)
+  MIG-01|MIG-02|MIG-04|MIG-05|MIG-06|MIG-07|MIG-08|MIG-09|MIG-11|MIG-12)
     run_servo_gate
+    ;;
+
+  MIG-10)
+    run_simulator_tests
+    run_servo_gate
+    ./scripts/hardware_free_validation.sh
     ;;
 
   MIG-03)

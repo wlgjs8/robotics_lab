@@ -28,3 +28,35 @@ without changing active `DualArmServoLoop` behavior.
 MIG-08 does not integrate `ArmWorker` into `DualArmServoLoop`, does not change
 backend concrete behavior, and does not weaken the existing real-hardware
 environment gates.
+
+## MIG-10 Worker Simulator Smoke And Metrics
+
+`rb_servo_server/config/dual_simulator_worker.yaml` is the hardware-free
+worker-I/O profile. It keeps the canonical simulator contract:
+
+```yaml
+backend_type: simulator
+run_mode: simulation
+servo:
+  io_model: worker
+  send_servo_commands: true
+```
+
+The profile targets one loopback simulator endpoint per arm and is not real
+robot evidence. Real mode still rejects `servo.io_model: worker` until a
+separate real-hardware acceptance task exists.
+
+The hardware-free gate runs the direct per-arm simulator smoke and can also run
+the worker-mode smoke. Worker smoke must prove that the server receives cached
+worker state, dispatches joint `servo_j` requests through each `ArmWorker`, and
+continues to distinguish wrong-arm simulator requests, injected transport send
+failures, and simulator robot faults.
+
+State snapshots and servo CSV logs expose MIG-10 diagnostics:
+
+- per-arm `state_age_us`
+- per-arm `send_result_age_us`
+- top-level `command_seq`
+- per-arm and aggregate `send_deadline_hit`
+- `send_skew_us` / `dispatch_skew_us`
+- per-arm `worker_loop_read_duration_us` when `servo.io_model: worker`

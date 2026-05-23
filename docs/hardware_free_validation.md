@@ -43,8 +43,13 @@ The script runs:
 - Full local loopback smoke when prerequisites are present: starts separate
   left and right simulator Python module processes plus the freshly built
   `rb_servo_server`, checks wrong-arm requests fail closed, sends a small
-  command through the simulator profile, and validates UDP state plus CSV log
-  evidence.
+  command through the direct simulator profile, and validates UDP state plus CSV
+  log evidence.
+- Worker-mode local loopback smoke when prerequisites are present: repeats the
+  same per-arm simulator smoke with
+  `rb_servo_server/config/dual_simulator_worker.yaml`, proving
+  `servo.io_model: worker` can receive state and send joint commands without
+  real hardware.
 
 The rb_servo configure sets `RB_SERVO_ALLOW_FETCHCONTENT=OFF` so the local gate
 does not silently download missing dependencies. If `nlohmann_json` is installed
@@ -79,6 +84,11 @@ architecture terminology:
 - `skip`: skip the full smoke intentionally while still running build, unit, and
   smoke-validator checks.
 
+The worker-mode simulator smoke is controlled separately by
+`RBSIM_WORKER_SMOKE_MODE` with the same `auto|required|skip` values. The worker
+profile defaults to `rb_servo_server/config/dual_simulator_worker.yaml` and can
+be overridden with `RBSIM_WORKER_SERVO_CONFIG`.
+
 Dependency prerequisites for `RBSIM_SMOKE_MODE=required`:
 
 - `RBSIM_COMMAND` defaults to `python3 -m rbsim`; the validation script passes
@@ -87,8 +97,12 @@ Dependency prerequisites for `RBSIM_SMOKE_MODE=required`:
 - `RBSIM_LEFT_CONFIG` and `RBSIM_RIGHT_CONFIG` point to per-arm simulator YAML
   profiles. Defaults are `rb_simulator/config/left_rb3_730e.yaml` and
   `rb_simulator/config/right_rb3_730e.yaml`.
-- `RBSIM_SERVO_CONFIG` may point to a loopback-only simulator backend profile.
-  If unset, the script uses `rb_servo_server/config/dual_simulator.yaml`.
+- `RBSIM_SERVO_CONFIG` may point to a loopback-only direct simulator backend
+  profile. If unset, the script uses
+  `rb_servo_server/config/dual_simulator.yaml`.
+- `RBSIM_WORKER_SERVO_CONFIG` may point to a loopback-only worker simulator
+  backend profile. If unset, the script uses
+  `rb_servo_server/config/dual_simulator_worker.yaml`.
 - CMake can build `rb_servo_server` with `RB_SERVO_ENABLE_RBPODO=OFF` and
   `RB_SERVO_ALLOW_FETCHCONTENT=OFF`.
 
@@ -96,13 +110,25 @@ Smoke artifacts are written under
 `rb_simulator/artifacts/hardware_free_gate` by default:
 
 ```text
-state_stream.jsonl
-servo_log.csv
-left_simulator.log
-right_simulator.log
-rb_servo_server.log
-summary.json
+direct/state_stream.jsonl
+direct/servo_log.csv
+direct/left_simulator.log
+direct/right_simulator.log
+direct/rb_servo_server.log
+direct/summary.json
+worker/state_stream.jsonl
+worker/servo_log.csv
+worker/left_simulator.log
+worker/right_simulator.log
+worker/rb_servo_server.log
+worker/summary.json
 ```
+
+The state stream includes MIG-10 diagnostics for each arm:
+`state_age_us`, `send_result_age_us`, `send_deadline_hit`, and
+`worker_loop_read_duration_us`. Top-level fields include `command_seq`,
+`send_deadline_hit`, `send_skew_us`, and `dispatch_skew_us`. The CSV servo log
+records the same age, deadline, skew, and worker-read-duration metrics.
 
 Current compatibility assumption: the simulator process still binds loopback
 only. The hardware-free smoke therefore uses left `127.0.0.1:50200` and right
