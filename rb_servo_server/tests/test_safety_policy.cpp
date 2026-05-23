@@ -58,6 +58,10 @@ bool sameJointArray(const rb_servo::JointArray& a, const rb_servo::JointArray& b
     return true;
 }
 
+bool contains(const std::string& text, const std::string& needle) {
+    return text.find(needle) != std::string::npos;
+}
+
 bool jsonArrayHasSixFinite(const nlohmann::json& value) {
     if (!value.is_array() || value.size() != static_cast<size_t>(rb_servo::kDof)) return false;
     for (const auto& item : value) {
@@ -950,6 +954,39 @@ bool testRbsimPerArmDisconnectLatchesAndPublishesTruthfulSnapshot() {
     RB_CHECK(snapshot.left_state.connection_state == rb_servo::RobotConnectionState::Connected);
     RB_CHECK(snapshot.right_state.connection_state == rb_servo::RobotConnectionState::Disconnected);
     RB_CHECK(!snapshot.right_state.servo_enabled);
+    loop.stop();
+    return true;
+}
+
+bool testRbsimReadRobotFaultUsesFaultClassifierReason() {
+    std::unique_ptr<ScriptedRbsimServer> server;
+    try {
+        server = std::make_unique<ScriptedRbsimServer>();
+    } catch (const std::exception& exc) {
+        std::cerr << "[SKIP] rbsim socket fixture unavailable: " << exc.what() << "\n";
+        return true;
+    }
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmServoLoop loop(
+        makeRbsimBackend(rb_servo::ArmId::Left, server->endpoint(), "_read_robot_fault"),
+        makeRbsimBackend(rb_servo::ArmId::Right, server->endpoint(), "_read_robot_fault"),
+        testConfig(),
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    server->setFault("left", 2222);
+    RB_CHECK(waitUntil([&] { return loop.faultLatched(); }));
+
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    RB_CHECK(snapshot.fault_latched);
+    RB_CHECK(snapshot.latched_fault_reason == rb_servo::SafetyVerdict::RobotStateError);
+    RB_CHECK(snapshot.left_state.has_error);
+    RB_CHECK(snapshot.left_state.error_code == 2222);
+    RB_CHECK(contains(snapshot.fault_reason, "robot/controller fault"));
+    RB_CHECK(!contains(snapshot.fault_reason, "transport failure"));
     loop.stop();
     return true;
 }
@@ -2638,6 +2675,7 @@ int main() {
     if (!testRbsimBackendMapsStateAndFailureResponses()) return 1;
     if (!testRbsimInvalidJointStateLatchesAndHoldsPreviousTarget()) return 1;
     if (!testRbsimPerArmDisconnectLatchesAndPublishesTruthfulSnapshot()) return 1;
+    if (!testRbsimReadRobotFaultUsesFaultClassifierReason()) return 1;
     if (!testRbsimReadFailureLatchesFaultWithoutAdvancingHold()) return 1;
     if (!testRbsimSendFailureLatchesAndSnapshotsSendResult()) return 1;
     if (!testRbsimResetFailureKeepsEmergencyLatch()) return 1;

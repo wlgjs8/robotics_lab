@@ -228,9 +228,26 @@ void DualArmServoLoop::loopMain() {
         const double filter_dt_sec = computeFilterDtSec(actual_period_ns, nominal_period_ns);
         last_loop_start_ns_ = loop_start;
 
-        RobotState left_state;
-        RobotState right_state;
-        const bool state_ok = readRobotStates(left_state, right_state);
+        const BackendResult<RobotState> left_state_result = left_robot_
+            ? left_robot_->readState()
+            : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "left backend unavailable"));
+        const BackendResult<RobotState> right_state_result = right_robot_
+            ? right_robot_->readState()
+            : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "right backend unavailable"));
+
+        RobotState left_state = left_state_result.value;
+        RobotState right_state = right_state_result.value;
+        left_state.arm_id = ArmId::Left;
+        right_state.arm_id = ArmId::Right;
+        populateTcpPose(left_state, config_.left_mount);
+        populateTcpPose(right_state, config_.right_mount);
+
+        const FaultContext left_read_fault = classifyReadStateResult(left_state_result, ArmId::Left);
+        const FaultContext right_read_fault = classifyReadStateResult(right_state_result, ArmId::Right);
+        const FaultContext read_fault = left_read_fault.verdict != SafetyVerdict::Ok
+            ? left_read_fault
+            : right_read_fault;
+        const bool state_ok = read_fault.verdict == SafetyVerdict::Ok;
 
         DualArmCommand command = command_buffer_
             ? command_buffer_->latestOrHold(loop_start)
@@ -267,9 +284,12 @@ void DualArmServoLoop::loopMain() {
         SafetyVerdict safety_verdict = SafetyVerdict::Ok;
 
         if (!state_ok || !isValidJointState(left_state) || !isValidJointState(right_state)) {
-            safety_verdict = SafetyVerdict::RobotStateError;
+            safety_verdict = state_ok ? SafetyVerdict::RobotStateError : read_fault.verdict;
             if (isRealMode() || config_.safety.latch_fault_on_robot_state_error) {
-                latchFault(SafetyVerdict::RobotStateError, "robot state read failed or invalid", left_state, right_state);
+                const std::string reason = state_ok || read_fault.reason.empty()
+                    ? "robot state read failed or invalid"
+                    : read_fault.reason;
+                latchFault(safety_verdict, reason, left_state, right_state);
                 safe_target = currentFaultHoldTarget();
                 safety_verdict = SafetyVerdict::FaultLatched;
             } else {

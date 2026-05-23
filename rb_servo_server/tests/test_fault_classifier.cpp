@@ -68,6 +68,31 @@ bool testRobotFaultSendIsRobotStateFault() {
     return true;
 }
 
+bool testRobotFaultReadIsRobotStateFault() {
+    rb_servo::RobotState faulted;
+    faulted.arm_id = rb_servo::ArmId::Left;
+    faulted.connection_state = rb_servo::RobotConnectionState::Connected;
+    faulted.has_valid_joint_state = true;
+    faulted.has_error = true;
+    faulted.error_code = 2222;
+
+    rb_servo::BackendResult<rb_servo::RobotState> result;
+    result.ok = true;
+    result.op = rb_servo::BackendOp::ReadState;
+    result.value = faulted;
+
+    const rb_servo::FaultContext context =
+        rb_servo::classifyReadStateResult(result, rb_servo::ArmId::Left);
+    RB_CHECK(context.verdict == rb_servo::SafetyVerdict::RobotStateError);
+    RB_CHECK(context.domain == rb_servo::FaultDomain::RobotState);
+    RB_CHECK(context.backend_error.kind == rb_servo::BackendErrorKind::RobotFault);
+    RB_CHECK(context.robot_error_code == 2222);
+    RB_CHECK(context.state_after.has_value());
+    RB_CHECK(contains(context.reason, "robot/controller fault"));
+    RB_CHECK(!contains(context.reason, "transport failure"));
+    return true;
+}
+
 bool testTransportSendFailureStaysSendFailure() {
     const rb_servo::SendServoJResult result = rb_servo::rejectedSend(
         request(),
@@ -156,6 +181,7 @@ bool testCommandAndIkClassifiers() {
 int main() {
     if (!testFaultDomainToString()) return 1;
     if (!testRobotFaultSendIsRobotStateFault()) return 1;
+    if (!testRobotFaultReadIsRobotStateFault()) return 1;
     if (!testTransportSendFailureStaysSendFailure()) return 1;
     if (!testSuppressedByPolicyIsNotFailure()) return 1;
     if (!testDualSendPrefersRealFailureOverPolicySuppression()) return 1;

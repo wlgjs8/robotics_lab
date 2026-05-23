@@ -1,5 +1,6 @@
 #include "rb_servo/control/fault_classifier.hpp"
 
+#include <cmath>
 #include <cstdlib>
 #include <string>
 
@@ -159,6 +160,27 @@ bool isFailure(const FaultContext& context) {
     return context.verdict != SafetyVerdict::Ok;
 }
 
+BackendError stateError(
+    BackendErrorKind kind,
+    const RobotState& state,
+    const std::string& message,
+    const std::string& name
+) {
+    return backendError(
+        kind,
+        message,
+        state.error_code != 0 ? std::to_string(state.error_code) : "",
+        name
+    );
+}
+
+bool hasFiniteJointState(const RobotState& state) {
+    for (double q : state.q_actual_deg) {
+        if (!std::isfinite(q)) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 FaultContext classifyReadStateResult(
@@ -166,12 +188,54 @@ FaultContext classifyReadStateResult(
     ArmId arm
 ) {
     if (result.ok) {
+        if (result.value.has_error) {
+            return classifyBackendError(
+                BackendOp::ReadState,
+                arm,
+                stateError(
+                    BackendErrorKind::RobotFault,
+                    result.value,
+                    "robot/controller fault reported by read_state",
+                    "RobotFault"
+                ),
+                result.value
+            );
+        }
+        if (result.value.connection_state != RobotConnectionState::Connected) {
+            return classifyBackendError(
+                BackendOp::ReadState,
+                arm,
+                stateError(
+                    BackendErrorKind::RobotDisconnected,
+                    result.value,
+                    "robot/controller is disconnected",
+                    "RobotDisconnected"
+                ),
+                result.value
+            );
+        }
+        if (!result.value.has_valid_joint_state || !hasFiniteJointState(result.value)) {
+            return classifyBackendError(
+                BackendOp::ReadState,
+                arm,
+                stateError(
+                    BackendErrorKind::InvalidJointState,
+                    result.value,
+                    "robot/controller reported invalid joint state",
+                    "InvalidJointState"
+                ),
+                result.value
+            );
+        }
         return okContext(BackendOp::ReadState, arm);
     }
+    const BackendError error = result.error.kind == BackendErrorKind::None
+        ? backendError(BackendErrorKind::Unknown, "backend read_state failed without structured error")
+        : result.error;
     return classifyBackendError(
         BackendOp::ReadState,
         arm,
-        result.error,
+        error,
         result.value.has_valid_joint_state || result.value.has_error
             ? std::optional<RobotState>(result.value)
             : std::nullopt
