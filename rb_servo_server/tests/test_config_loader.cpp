@@ -57,6 +57,13 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(simulator.right_robot.run_mode == rb_servo::RunMode::Simulation);
     RB_CHECK(simulator.left_robot.simulator_control_endpoint == "tcp://127.0.0.1:50200");
     RB_CHECK(simulator.right_robot.simulator_control_endpoint == "tcp://127.0.0.1:50210");
+
+    const rb_servo::DualArmConfig tcp_acceptance =
+        rb_servo::loadConfigFromYaml((config_dir / "dual_simulator_tcp_acceptance.yaml").string());
+    RB_CHECK(tcp_acceptance.left_robot.backend_type == rb_servo::BackendType::Simulator);
+    RB_CHECK(tcp_acceptance.right_robot.backend_type == rb_servo::BackendType::Simulator);
+    RB_CHECK(tcp_acceptance.command_source.enforce_lease);
+    RB_CHECK(tcp_acceptance.network.command_source_enforce_lease);
     return true;
 }
 
@@ -187,6 +194,33 @@ bool testForceControlStaysDisabled() {
     return true;
 }
 
+bool testCommandSourceConfigParsesAndValidates() {
+    const std::string path = writeTempConfig(
+        "command-source",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "command_source:\n"
+        "  enforce_lease: true\n"
+        "  lease_timeout_sec: 1.25\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    ::unlink(path.c_str());
+    RB_CHECK(cfg.command_source.enforce_lease);
+    RB_CHECK(cfg.command_source.lease_timeout_sec == 1.25);
+    RB_CHECK(cfg.network.command_source_enforce_lease);
+    RB_CHECK(cfg.network.command_source_lease_timeout_sec == 1.25);
+
+    const std::string invalid_path = writeTempConfig(
+        "command-source-invalid",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "command_source:\n"
+        "  lease_timeout_sec: 0\n"
+    );
+    const bool invalid_rejected = loadRejects(invalid_path);
+    ::unlink(invalid_path.c_str());
+    RB_CHECK(invalid_rejected);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -195,5 +229,6 @@ int main() {
     if (!testUnknownKeysAndSchemaFail()) return 1;
     if (!testDeprecatedAliasesWarnAndParse()) return 1;
     if (!testForceControlStaysDisabled()) return 1;
+    if (!testCommandSourceConfigParsesAndValidates()) return 1;
     return 0;
 }

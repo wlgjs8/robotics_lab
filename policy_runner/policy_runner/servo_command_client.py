@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -84,9 +85,13 @@ class ServoCommandClient:
         endpoint: str,
         timeout_sec: float = 0.2,
         socket_factory: Callable[..., socket.socket] = socket.socket,
+        source_id: str = "policy_runner",
+        session_id: str | None = None,
     ):
         self.endpoint = endpoint
         self.timeout_sec = timeout_sec
+        self.source_id = source_id
+        self.session_id = session_id or uuid.uuid4().hex
         self._seq = 0
         self._socket = socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
         parsed = parse_udp_endpoint(endpoint)
@@ -112,6 +117,8 @@ class ServoCommandClient:
             "mode": intent.mode,
             "timeout_sec": intent.timeout_sec or self.timeout_sec,
             "coupled_timeout": intent.coupled_timeout,
+            "source_id": self.source_id,
+            "session_id": self.session_id,
         }
         if intent.left is not None:
             packet["left"] = intent.left

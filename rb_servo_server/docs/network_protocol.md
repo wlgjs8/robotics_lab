@@ -11,6 +11,10 @@ network:
   command_bind: "udp://127.0.0.1:50010"
   state_pub_endpoint: "udp://127.0.0.1:50110"
   command_source_allowlist: ["127.0.0.1/32"]
+
+command_source:
+  enforce_lease: false
+  lease_timeout_sec: 1.0
 ```
 
 `network.state_pub_bind` is a deprecated compatibility alias for
@@ -55,6 +59,8 @@ payload includes:
 
 - `schema_version`, `tick`, `host_time_ns`, `loop_start_time_ns`, `loop_end_time_ns`
 - `period_ms`, `jitter_ms`, `filter_dt_ms`, `command_seq`
+- `command_source` with accepted packet source metadata, active lease owner,
+  lease expiry, enforcement flag, and command lease verdict
 - `left` / `right` objects with `mode`, `q_actual_deg`, `q_sent_deg`,
   `q_previous_sent_deg`, send timestamps/status/duration, connection/error fields
 - `send_skew_us`, `safety_verdict`, `motion_state`, `fault_latched`,
@@ -74,8 +80,58 @@ The authoritative timestamp for timeout/staleness is the C++ receive time.
 Python may send `host_time_ns` for debugging, but `CommandServer` overwrites the command's internal timestamp with `nowSteadyNs()` at packet receive time.
 
 Every command packet must include an unsigned `seq`. Accepted sequence values
-must strictly increase for the life of the server process; missing, repeated,
-or stale `seq` values are dropped before the command buffer is updated.
+must strictly increase per `(source_id, session_id)` for the life of the server
+process. Commands without source metadata use a legacy process-wide sequence
+stream. Missing, repeated, or stale `seq` values are dropped before the command
+buffer is updated.
+
+## Command source metadata and lease
+
+Command packets may include command-source metadata:
+
+- `source_id`: optional string command source name, for example `rb_gui` or
+  `policy_runner`.
+- `session_id`: optional string process/session identifier. New client
+  processes should generate a fresh session id at startup so `seq` can restart
+  at 1 without colliding with an older session.
+- `lease_token`: optional opaque string. The server publishes the active token
+  in state JSON; when a client supplies a token under lease enforcement it must
+  match the active lease.
+- `source_priority`: optional integer reserved for future arbitration. It is
+  parsed and published, but it does not override the initial single-owner lease.
+
+`command_source.enforce_lease` defaults to `false` for backward compatibility.
+When it is `false`, source metadata is still parsed, sequence numbers are
+tracked per source/session, and `ArmMotion` or `AcquireLease` updates the
+published active lease, but non-owner commands are not rejected.
+Packets without source metadata use a legacy source identity so older
+hardware-free tools can still acquire and refresh a lease after enforcement is
+enabled in simulator acceptance profiles.
+
+When `command_source.enforce_lease` is `true`, normal motion commands require
+the active lease. A source acquires the lease by sending `ArmMotion` or a
+dedicated no-motion `AcquireLease` command:
+
+```json
+{
+  "seq": 1,
+  "mode": "AcquireLease",
+  "source_id": "rb_gui",
+  "session_id": "2c9818d8f5d24b31a9b7a96d6a6df89a"
+}
+```
+
+Lease-required commands are `ArmMotion`, `DisarmMotion`, `JointTarget`,
+`JointVelocity`, `TcpPoseTarget`, `TcpDeltaStand`, `TcpDeltaLocal`, and
+`ResetFault`. `EmergencyStop` bypasses the lease so any accepted UDP source can
+stop motion. `ResetFault` requires the active lease when enforcement is enabled;
+it is not an operator bypass and it does not implicitly resume motion.
+
+The lease expires using the server monotonic clock after
+`command_source.lease_timeout_sec` without an accepted lease-owning motion
+command. A non-owner lease-required command is rejected with a
+`command_source_lease_required`, `command_source_lease_conflict`, or
+`command_source_lease_token_mismatch` reason in command parser diagnostics.
 
 `coupled_timeout` is retained for protocol compatibility, but v3 treats dual-arm commands as coupled: the earliest per-arm timeout makes both arms Hold. Future per-arm command streams should use separate command channels or a binary protocol with explicit per-arm timestamps.
 

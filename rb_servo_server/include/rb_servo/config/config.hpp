@@ -115,6 +115,13 @@ struct NetworkConfig {
     int state_pub_rate_hz = 20;
     std::vector<std::string> command_source_allowlist{"127.0.0.1/32"};
     double command_timeout_sec = 0.2;
+    bool command_source_enforce_lease = false;
+    double command_source_lease_timeout_sec = 1.0;
+};
+
+struct CommandSourceConfig {
+    bool enforce_lease = false;
+    double lease_timeout_sec = 1.0;
 };
 
 struct LoggingConfig {
@@ -158,6 +165,7 @@ struct DualArmConfig {
     ServoConfig servo;
     SafetyConfig safety;
     NetworkConfig network;
+    CommandSourceConfig command_source;
     LoggingConfig logging;
     ForceControlConfig force_control;
     CartesianControlConfig cartesian_control;

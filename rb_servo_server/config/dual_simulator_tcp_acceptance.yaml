@@ -66,6 +66,10 @@ network:
   state_pub_rate_hz: 20
   command_source_allowlist: ["127.0.0.1/32"]
 
+command_source:
+  enforce_lease: true
+  lease_timeout_sec: 1.0
+
 logging:
   enable: true
   directory: "./logs"

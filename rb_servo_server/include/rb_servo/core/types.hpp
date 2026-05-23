@@ -206,9 +206,33 @@ struct ArmCommand {
     bool has_tcp_delta_local = false;
 };
 
+struct CommandSourceMetadata {
+    std::string source_id;
+    std::string session_id;
+    std::string lease_token;
+    std::optional<int> source_priority;
+};
+
+struct CommandSourceLeaseState {
+    bool enforce_lease = false;
+    bool active = false;
+    bool command_requires_lease = false;
+    bool command_has_lease = true;
+    std::string source_id;
+    std::string session_id;
+    std::string lease_token;
+    uint64_t acquired_time_ns = 0;
+    uint64_t expires_time_ns = 0;
+    std::string verdict = "Ok";
+    std::string reason;
+};
+
 struct DualArmCommand {
     uint64_t seq = 0;
     uint64_t host_time_ns = 0;
+
+    CommandSourceMetadata source;
+    CommandSourceLeaseState lease;
 
     ArmCommand left;
     ArmCommand right;

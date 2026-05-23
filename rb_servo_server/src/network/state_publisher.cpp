@@ -182,6 +182,35 @@ nlohmann::json faultContextJson(const ServoSnapshot& snapshot) {
     return out;
 }
 
+nlohmann::json commandSourceJson(const ServoSnapshot& snapshot, const DualArmConfig& config) {
+    const CommandSourceLeaseState& lease = snapshot.command.lease;
+    const bool lease_expired = lease.active &&
+        lease.expires_time_ns > 0 &&
+        snapshot.loop_end_time_ns > lease.expires_time_ns;
+    const bool active = lease.active && !lease_expired;
+    return {
+        {"source_id", optionalStringJson(snapshot.command.source.source_id)},
+        {"session_id", optionalStringJson(snapshot.command.source.session_id)},
+        {"lease_token", optionalStringJson(snapshot.command.source.lease_token)},
+        {"source_priority", snapshot.command.source.source_priority.has_value()
+            ? nlohmann::json(*snapshot.command.source.source_priority)
+            : nlohmann::json(nullptr)},
+        {"enforce_lease", config.command_source.enforce_lease || lease.enforce_lease},
+        {"lease_timeout_sec", config.command_source.lease_timeout_sec},
+        {"active", active},
+        {"expired", lease_expired},
+        {"active_source_id", optionalStringJson(lease.source_id)},
+        {"active_session_id", optionalStringJson(lease.session_id)},
+        {"active_lease_token", optionalStringJson(lease.lease_token)},
+        {"acquired_time_ns", lease.acquired_time_ns},
+        {"expires_time_ns", lease.expires_time_ns},
+        {"command_requires_lease", lease.command_requires_lease},
+        {"command_has_lease", lease.command_has_lease},
+        {"verdict", lease_expired ? "Expired" : lease.verdict},
+        {"reason", lease_expired ? "command source lease expired" : lease.reason},
+    };
+}
+
 std::string runModeString(RunMode mode) {
     switch (mode) {
         case RunMode::Real: return "real";
@@ -284,6 +313,8 @@ StatePublisher::StatePublisher(const DualArmConfig& config, SnapshotProvider pro
 
 StatePublisher::StatePublisher(const NetworkConfig& config) {
     config_.network = config;
+    config_.command_source.enforce_lease = config.command_source_enforce_lease;
+    config_.command_source.lease_timeout_sec = config.command_source_lease_timeout_sec;
 }
 
 StatePublisher::~StatePublisher() {
@@ -306,6 +337,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["jitter_ms"] = snapshot.jitter_ms;
     message["filter_dt_ms"] = snapshot.filter_dt_ms;
     message["command_seq"] = snapshot.command.seq;
+    message["command_source"] = commandSourceJson(snapshot, config_);
     message["observed_mode"] = observedModeString(config_);
     message["observed_backend"] = observedBackendString(config_);
     const bool worker_enabled = config_.servo.io_model == ServoIoModel::Worker;

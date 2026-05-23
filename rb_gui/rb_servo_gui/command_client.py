@@ -4,13 +4,23 @@ import json
 import math
 import socket
 import time
+import uuid
 from typing import Any, Mapping
 
 
 class CommandClient:
-    def __init__(self, host: str = "127.0.0.1", port: int = 50010) -> None:
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 50010,
+        *,
+        source_id: str = "rb_gui",
+        session_id: str | None = None,
+    ) -> None:
         self.host = host
         self.port = int(port)
+        self.source_id = source_id
+        self.session_id = session_id or uuid.uuid4().hex
         self._seq = time.monotonic_ns()
         self.sent_packets: list[Mapping[str, Any]] = []
 
@@ -28,7 +38,7 @@ class CommandClient:
         return parsed
 
     def build_lifecycle(self, mode: str, *, timeout_sec: float = 0.2) -> dict[str, Any]:
-        return {"seq": self.next_seq(), "mode": mode, "timeout_sec": timeout_sec, "left": {}, "right": {}}
+        return self._with_source({"seq": self.next_seq(), "mode": mode, "timeout_sec": timeout_sec, "left": {}, "right": {}})
 
     def build_joint_target(
         self,
@@ -39,14 +49,14 @@ class CommandClient:
     ) -> dict[str, Any]:
         if len(left_q) != 6 or len(right_q) != 6:
             raise ValueError("joint targets must have 6 values per arm")
-        return {
+        return self._with_source({
             "seq": self.next_seq(),
             "mode": "JointTarget",
             "timeout_sec": timeout_sec,
             "coupled_timeout": True,
             "left": {"q_target_deg": [float(v) for v in left_q]},
             "right": {"q_target_deg": [float(v) for v in right_q]},
-        }
+        })
 
     def build_tcp_pose_target(
         self,
@@ -71,7 +81,7 @@ class CommandClient:
             packet["left"] = {"mode": "TcpPoseTarget", "tcp_target_stand": self._finite_six(left_pose, "left TCP target")}
         if right_pose is not None:
             packet["right"] = {"mode": "TcpPoseTarget", "tcp_target_stand": self._finite_six(right_pose, "right TCP target")}
-        return packet
+        return self._with_source(packet)
 
     def build_tcp_delta_stand(
         self,
@@ -96,6 +106,11 @@ class CommandClient:
             packet["left"] = {"mode": "TcpDeltaStand", "tcp_delta_stand": self._finite_six(left_delta, "left TCP stand delta")}
         if right_delta is not None:
             packet["right"] = {"mode": "TcpDeltaStand", "tcp_delta_stand": self._finite_six(right_delta, "right TCP stand delta")}
+        return self._with_source(packet)
+
+    def _with_source(self, packet: dict[str, Any]) -> dict[str, Any]:
+        packet["source_id"] = self.source_id
+        packet["session_id"] = self.session_id
         return packet
 
     def send(self, packet: Mapping[str, Any]) -> None:

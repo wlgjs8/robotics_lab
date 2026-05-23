@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdint>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
@@ -209,6 +210,50 @@ bool hasRequiredPayload(const ArmCommand& command) {
     }
 }
 
+bool isAcquireLeaseModeString(const std::string& mode) {
+    return mode == "AcquireLease" || mode == "acquire_lease" || mode == "acquirelease";
+}
+
+bool commandRequiresLease(ControlMode mode) {
+    return mode == ControlMode::ArmMotion ||
+           mode == ControlMode::DisarmMotion ||
+           mode == ControlMode::JointTarget ||
+           mode == ControlMode::JointVelocity ||
+           mode == ControlMode::TcpPoseTarget ||
+           mode == ControlMode::TcpDeltaStand ||
+           mode == ControlMode::TcpDeltaLocal ||
+           mode == ControlMode::ResetFault;
+}
+
+bool dualCommandRequiresLease(const DualArmCommand& command) {
+    return commandRequiresLease(command.left.mode) || commandRequiresLease(command.right.mode);
+}
+
+bool isEmergencyStopCommand(const DualArmCommand& command) {
+    return command.left.mode == ControlMode::EmergencyStop || command.right.mode == ControlMode::EmergencyStop;
+}
+
+std::string sourceKey(const CommandSourceMetadata& source) {
+    if (source.source_id.empty() && source.session_id.empty()) return "__legacy__";
+    return source.source_id + "\n" + source.session_id;
+}
+
+bool sameSource(const CommandSourceLeaseState& lease, const CommandSourceMetadata& source) {
+    return lease.source_id == source.source_id && lease.session_id == source.session_id;
+}
+
+uint64_t timeoutNs(double timeout_sec) {
+    if (timeout_sec <= 0.0 || !std::isfinite(timeout_sec)) return 0;
+    return static_cast<uint64_t>(timeout_sec * 1e9);
+}
+
+std::string generatedLeaseToken(const CommandSourceMetadata& source, uint64_t now_ns, uint64_t counter) {
+    std::ostringstream out;
+    out << "lease-" << std::hex << now_ns << "-" << counter;
+    if (!source.source_id.empty()) out << "-" << source.source_id;
+    return out.str();
+}
+
 bool parseArmObject(
     const json& object,
     ArmId arm_id,
@@ -266,7 +311,11 @@ bool parseArmObject(
 CommandServer::CommandServer(
     const NetworkConfig& config,
     CommandBuffer* command_buffer
-) : config_(config), command_buffer_(command_buffer) {}
+) : config_(config), command_buffer_(command_buffer) {
+    command_source_config_.enforce_lease = config.command_source_enforce_lease;
+    command_source_config_.lease_timeout_sec = config.command_source_lease_timeout_sec;
+    active_lease_.enforce_lease = command_source_config_.enforce_lease;
+}
 
 CommandServer::~CommandServer() {
     stop();
@@ -372,7 +421,11 @@ void CommandServer::threadMain(std::promise<bool> startup_result) {
             if (parsed) {
                 if (command_buffer_) command_buffer_->setCommand(cmd);
             } else {
-                std::cerr << "[WARN] command packet dropped\n";
+                std::cerr << "[WARN] command packet dropped";
+                if (!last_reject_reason_.empty()) {
+                    std::cerr << ": " << last_reject_reason_;
+                }
+                std::cerr << "\n";
             }
         }
     } catch (const std::exception& e) {
@@ -389,6 +442,7 @@ bool CommandServer::parseMessage(
     DualArmCommand* out_command
 ) {
     if (!out_command) return false;
+    last_reject_reason_.clear();
 
     json root;
     try {
@@ -400,6 +454,7 @@ bool CommandServer::parseMessage(
 
     DualArmCommand cmd;
     cmd.host_time_ns = receive_time_ns;  // authoritative timestamp for timeout checks
+    cmd.lease.enforce_lease = command_source_config_.enforce_lease;
 
     uint64_t schema_version = 1;
     if (!readOptionalUint64(root, "schema_version", &schema_version)) return false;
@@ -408,12 +463,23 @@ bool CommandServer::parseMessage(
     if (!root.contains("seq")) return false;
     if (!readOptionalUint64(root, "seq", &cmd.seq)) return false;
     if (!readOptionalBool(root, "coupled_timeout", &cmd.coupled_timeout)) return false;
+    if (!readOptionalString(root, "source_id", &cmd.source.source_id)) return false;
+    if (!readOptionalString(root, "session_id", &cmd.source.session_id)) return false;
+    if (!readOptionalString(root, "lease_token", &cmd.source.lease_token)) return false;
+    const auto priority_it = root.find("source_priority");
+    if (priority_it != root.end()) {
+        if (!priority_it->is_number_integer()) return false;
+        cmd.source.source_priority = priority_it->get<int>();
+    }
 
     std::string mode_string = "Hold";
     if (!readOptionalString(root, "mode", &mode_string)) return false;
     ControlMode default_mode = ControlMode::Hold;
+    const bool acquire_lease_only = isAcquireLeaseModeString(mode_string);
     try {
-        default_mode = controlModeFromString(mode_string);
+        if (!acquire_lease_only) {
+            default_mode = controlModeFromString(mode_string);
+        }
     } catch (const std::exception&) {
         return false;
     }
@@ -463,10 +529,72 @@ bool CommandServer::parseMessage(
 
     if (requiresPayload(cmd.left.mode) && !hasRequiredPayload(cmd.left)) return false;
     if (requiresPayload(cmd.right.mode) && !hasRequiredPayload(cmd.right)) return false;
-    if (last_accepted_seq_ && cmd.seq <= *last_accepted_seq_) return false;
+
+    const std::string key = sourceKey(cmd.source);
+    const auto last_seq_it = last_accepted_seq_by_source_.find(key);
+    if (last_seq_it != last_accepted_seq_by_source_.end() && cmd.seq <= last_seq_it->second) return false;
+
+    CommandSourceLeaseState lease = currentLeaseState(receive_time_ns);
+    const bool source_can_own_active_lease = lease.active && sameSource(lease, cmd.source);
+    const bool provided_token_matches = cmd.source.lease_token.empty() ||
+        (lease.active && cmd.source.lease_token == lease.lease_token);
+    const bool requests_lease = acquire_lease_only ||
+        cmd.left.mode == ControlMode::ArmMotion ||
+        cmd.right.mode == ControlMode::ArmMotion;
+    const bool requires_lease = !isEmergencyStopCommand(cmd) && dualCommandRequiresLease(cmd);
+    cmd.lease = lease;
+    cmd.lease.command_requires_lease = requires_lease;
+    cmd.lease.command_has_lease = !requires_lease || (source_can_own_active_lease && provided_token_matches);
+
+    if (command_source_config_.enforce_lease && !isEmergencyStopCommand(cmd)) {
+        if (requests_lease && lease.active && !source_can_own_active_lease) {
+            last_reject_reason_ = "command_source_lease_conflict: active source_id=" +
+                lease.source_id + " session_id=" + lease.session_id;
+            return false;
+        }
+        if (requires_lease && !requests_lease && !cmd.lease.command_has_lease) {
+            last_reject_reason_ = "command_source_lease_required: active source_id=" +
+                lease.source_id + " session_id=" + lease.session_id;
+            return false;
+        }
+        if (requires_lease && source_can_own_active_lease && !provided_token_matches) {
+            last_reject_reason_ = "command_source_lease_token_mismatch";
+            return false;
+        }
+    }
+
+    if (requests_lease || (requires_lease && source_can_own_active_lease && provided_token_matches)) {
+        active_lease_.enforce_lease = command_source_config_.enforce_lease;
+        active_lease_.active = true;
+        active_lease_.command_requires_lease = requires_lease;
+        active_lease_.command_has_lease = true;
+        active_lease_.source_id = cmd.source.source_id;
+        active_lease_.session_id = cmd.source.session_id;
+        active_lease_.lease_token = cmd.source.lease_token.empty()
+            ? (lease.lease_token.empty() || !sameSource(lease, cmd.source)
+                ? generatedLeaseToken(cmd.source, receive_time_ns, ++lease_counter_)
+                : lease.lease_token)
+            : cmd.source.lease_token;
+        active_lease_.acquired_time_ns = active_lease_.acquired_time_ns == 0 || !lease.active || !sameSource(lease, cmd.source)
+            ? receive_time_ns
+            : active_lease_.acquired_time_ns;
+        active_lease_.expires_time_ns = receive_time_ns + timeoutNs(command_source_config_.lease_timeout_sec);
+        active_lease_.verdict = "Ok";
+        active_lease_.reason.clear();
+        cmd.lease = active_lease_;
+        cmd.lease.command_requires_lease = requires_lease;
+        cmd.lease.command_has_lease = true;
+        if (cmd.source.lease_token.empty()) {
+            cmd.source.lease_token = active_lease_.lease_token;
+        }
+    } else {
+        cmd.lease = currentLeaseState(receive_time_ns);
+        cmd.lease.command_requires_lease = requires_lease;
+        cmd.lease.command_has_lease = !requires_lease || (source_can_own_active_lease && provided_token_matches);
+    }
 
     *out_command = cmd;
-    last_accepted_seq_ = cmd.seq;
+    last_accepted_seq_by_source_[key] = cmd.seq;
     return true;
 }
 
@@ -477,6 +605,21 @@ bool CommandServer::acceptsCommandSource(const std::string& source_ip) const {
         if (allowlistEntryMatches(entry, parsed_source)) return true;
     }
     return false;
+}
+
+std::string CommandServer::lastRejectReason() const {
+    return last_reject_reason_;
+}
+
+CommandSourceLeaseState CommandServer::currentLeaseState(uint64_t now_ns) const {
+    CommandSourceLeaseState lease = active_lease_;
+    lease.enforce_lease = command_source_config_.enforce_lease;
+    if (lease.active && lease.expires_time_ns > 0 && now_ns > lease.expires_time_ns) {
+        lease.active = false;
+        lease.verdict = "Expired";
+        lease.reason = "command source lease expired";
+    }
+    return lease;
 }
 
 }  // namespace rb_servo

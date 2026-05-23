@@ -348,6 +348,7 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
     validatePositiveFinite(cfg.servo.filter_dt_max_ratio, "servo.filter_dt_max_ratio");
     validatePositiveFinite(static_cast<double>(cfg.network.state_pub_rate_hz), "network.state_pub_rate_hz");
+    validatePositiveFinite(cfg.command_source.lease_timeout_sec, "command_source.lease_timeout_sec");
     validatePositiveFinite(cfg.left_robot.rbsim_request_timeout_sec, "left_robot.simulator_request_timeout_sec");
     validatePositiveFinite(cfg.right_robot.rbsim_request_timeout_sec, "right_robot.simulator_request_timeout_sec");
     validatePositiveFinite(cfg.left_robot.rbsim_connect_timeout_sec, "left_robot.simulator_connect_timeout_sec");
@@ -543,6 +544,7 @@ void validateRootKeys(const YAML::Node& root) {
         "servo",
         "safety",
         "network",
+        "command_source",
         "logging",
         "force_control",
         "cartesian_control",
@@ -680,6 +682,22 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         cfg.network.state_pub_bind = cfg.network.state_pub_endpoint;
     }
     cfg.network.command_timeout_sec = cfg.servo.command_timeout_sec;
+
+    if (has(root, "command_source")) {
+        const YAML::Node sec = root["command_source"];
+        validateAllowedKeys(sec, {
+            "enforce_lease",
+            "lease_timeout_sec",
+        }, "command_source");
+        if (has(sec, "enforce_lease")) {
+            cfg.command_source.enforce_lease = asBool(sec["enforce_lease"], "command_source.enforce_lease");
+        }
+        if (has(sec, "lease_timeout_sec")) {
+            cfg.command_source.lease_timeout_sec = asDouble(sec["lease_timeout_sec"], "command_source.lease_timeout_sec");
+        }
+    }
+    cfg.network.command_source_enforce_lease = cfg.command_source.enforce_lease;
+    cfg.network.command_source_lease_timeout_sec = cfg.command_source.lease_timeout_sec;
 
     if (has(root, "logging")) {
         const YAML::Node sec = root["logging"];

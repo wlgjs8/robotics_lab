@@ -1398,6 +1398,94 @@ bool testCommandSequenceRequiredAndMonotonic() {
     return true;
 }
 
+bool testCommandSourceMetadataAndLeaseEnforcement() {
+    rb_servo::NetworkConfig permissive_network;
+    permissive_network.command_timeout_sec = 0.35;
+    rb_servo::CommandBuffer permissive_buffer;
+    rb_servo::CommandServer permissive(permissive_network, &permissive_buffer);
+    rb_servo::DualArmCommand out;
+    const uint64_t now = rb_servo::nowSteadyNs();
+
+    RB_CHECK(permissive.parseMessage(
+        R"({"seq":1,"mode":"ArmMotion","source_id":"gui","session_id":"gui-session","lease_token":"gui-token","source_priority":10})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.source.source_id == "gui");
+    RB_CHECK(out.source.session_id == "gui-session");
+    RB_CHECK(out.source.lease_token == "gui-token");
+    RB_CHECK(out.source.source_priority.has_value());
+    RB_CHECK(*out.source.source_priority == 10);
+    RB_CHECK(out.lease.active);
+    RB_CHECK(out.lease.source_id == "gui");
+    RB_CHECK(out.lease.session_id == "gui-session");
+    RB_CHECK(out.lease.lease_token == "gui-token");
+
+    RB_CHECK(permissive.parseMessage(R"({"seq":1,"mode":"Hold","source_id":"policy","session_id":"policy-session"})", now + 1, &out));
+    RB_CHECK(out.source.source_id == "policy");
+
+    rb_servo::NetworkConfig enforcing_network;
+    enforcing_network.command_source_enforce_lease = true;
+    enforcing_network.command_source_lease_timeout_sec = 1.0;
+    rb_servo::CommandBuffer enforcing_buffer;
+    rb_servo::CommandServer enforcing(enforcing_network, &enforcing_buffer);
+
+    RB_CHECK(enforcing.parseMessage(
+        R"({"seq":1,"mode":"AcquireLease","source_id":"gui","session_id":"gui-session"})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(out.right.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(out.lease.active);
+    RB_CHECK(out.lease.enforce_lease);
+    RB_CHECK(out.lease.source_id == "gui");
+    RB_CHECK(!out.lease.lease_token.empty());
+
+    RB_CHECK(enforcing.parseMessage(
+        R"({"seq":2,"mode":"JointTarget","source_id":"gui","session_id":"gui-session","q_target_deg":[1,2,3,4,5,6]})",
+        now + 1,
+        &out
+    ));
+    RB_CHECK(out.lease.command_requires_lease);
+    RB_CHECK(out.lease.command_has_lease);
+
+    RB_CHECK(!enforcing.parseMessage(
+        R"({"seq":1,"mode":"JointTarget","source_id":"policy","session_id":"policy-session","q_target_deg":[1,2,3,4,5,6]})",
+        now + 2,
+        &out
+    ));
+    RB_CHECK(contains(enforcing.lastRejectReason(), "command_source_lease_required"));
+
+    RB_CHECK(enforcing.parseMessage(
+        R"({"seq":1,"mode":"EmergencyStop","source_id":"policy","session_id":"policy-session"})",
+        now + 3,
+        &out
+    ));
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::EmergencyStop);
+
+    RB_CHECK(enforcing.parseMessage(
+        R"({"seq":2,"mode":"ArmMotion","source_id":"policy","session_id":"policy-session"})",
+        now + 1'100'000'000ULL,
+        &out
+    ));
+    RB_CHECK(out.lease.active);
+    RB_CHECK(out.lease.source_id == "policy");
+
+    rb_servo::CommandBuffer legacy_buffer;
+    rb_servo::CommandServer legacy_enforcing(enforcing_network, &legacy_buffer);
+    RB_CHECK(legacy_enforcing.parseMessage(R"({"seq":1,"mode":"ArmMotion"})", now, &out));
+    RB_CHECK(out.lease.active);
+    RB_CHECK(out.lease.source_id.empty());
+    RB_CHECK(legacy_enforcing.parseMessage(
+        R"({"seq":2,"mode":"JointTarget","q_target_deg":[1,2,3,4,5,6]})",
+        now + 1,
+        &out
+    ));
+    RB_CHECK(out.lease.command_has_lease);
+    return true;
+}
+
 bool testCommandSourceAllowlistMatching() {
     rb_servo::NetworkConfig network;
     network.command_source_allowlist = {"127.0.0.1/32", "192.168.10.0/24", "10.1.2.3"};
@@ -2250,6 +2338,18 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.jitter_ms = 0.1;
     snapshot.filter_dt_ms = 5.0;
     snapshot.command.seq = 42;
+    snapshot.command.source.source_id = "rb_gui";
+    snapshot.command.source.session_id = "session-1";
+    snapshot.command.source.lease_token = "lease-token";
+    snapshot.command.lease.enforce_lease = true;
+    snapshot.command.lease.active = true;
+    snapshot.command.lease.source_id = "rb_gui";
+    snapshot.command.lease.session_id = "session-1";
+    snapshot.command.lease.lease_token = "lease-token";
+    snapshot.command.lease.acquired_time_ns = 1'500;
+    snapshot.command.lease.expires_time_ns = 3'000;
+    snapshot.command.lease.command_requires_lease = true;
+    snapshot.command.lease.command_has_lease = true;
     snapshot.command.left.mode = rb_servo::ControlMode::JointTarget;
     snapshot.command.right.mode = rb_servo::ControlMode::Hold;
     snapshot.left_state.arm_id = rb_servo::ArmId::Left;
@@ -2335,7 +2435,7 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
 
     const char* top_keys[] = {
         "schema_version", "tick", "host_time_ns", "loop_start_time_ns", "loop_end_time_ns",
-        "period_ms", "jitter_ms", "filter_dt_ms", "command_seq", "observed_mode", "observed_backend", "left", "right",
+        "period_ms", "jitter_ms", "filter_dt_ms", "command_seq", "command_source", "observed_mode", "observed_backend", "left", "right",
         "send_skew_us", "send_suppressed", "send_policy", "safety_verdict", "motion_state", "fault_latched",
         "latched_fault_reason", "fault_reason", "logger_dropped_samples", "logger_health",
         "fault_context", "mount_transform_deferred", "mounts", "tcp_fields_deferred",
@@ -2366,6 +2466,12 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("jitter_ms").get<double>() == 0.1);
     RB_CHECK(json.at("filter_dt_ms").get<double>() == 5.0);
     RB_CHECK(json.at("command_seq").get<uint64_t>() == 42);
+    RB_CHECK(json.at("command_source").at("source_id").get<std::string>() == "rb_gui");
+    RB_CHECK(json.at("command_source").at("session_id").get<std::string>() == "session-1");
+    RB_CHECK(json.at("command_source").at("active").get<bool>());
+    RB_CHECK(json.at("command_source").at("command_requires_lease").get<bool>());
+    RB_CHECK(json.at("command_source").at("command_has_lease").get<bool>());
+    RB_CHECK(json.at("command_source").at("active_source_id").get<std::string>() == "rb_gui");
     RB_CHECK(json.at("observed_mode").get<std::string>() == "mock");
     RB_CHECK(json.at("observed_backend").get<std::string>() == "mock");
     RB_CHECK(json.at("left").at("mode").get<std::string>() == "JointTarget");
@@ -3315,6 +3421,7 @@ int main() {
     if (!testRbsimStopFailureDoesNotReportStoppedState()) return 1;
     if (!testRbsimTrackingErrorFaultLatchHoldsPreviousTarget()) return 1;
     if (!testCommandSequenceRequiredAndMonotonic()) return 1;
+    if (!testCommandSourceMetadataAndLeaseEnforcement()) return 1;
     if (!testCartesianCommandParser()) return 1;
     if (!testCommandSourceAllowlistMatching()) return 1;
     if (!testUdpCommandIngressAllowsOnlyTrustedSources()) return 1;

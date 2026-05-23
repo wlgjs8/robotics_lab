@@ -242,6 +242,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(ok, reason)
         packet = client.sent_packets[-1]
         self.assertEqual(packet["mode"], "JointTarget")
+        self.assertEqual(packet["source_id"], "rb_gui")
+        self.assertTrue(packet["session_id"])
         self.assertEqual(packet["left"]["q_target_deg"], [2.0, -30.0, 80.0, 0.0, 60.0, 0.0])
         self.assertEqual(packet["right"]["q_target_deg"], [0.0, -30.0, 80.0, 0.0, 60.0, 0.0])
         self.assertGreater(packet["timeout_sec"], 0.0)
@@ -307,6 +309,8 @@ class GuiContractsTest(unittest.TestCase):
         delta = (0.005, 0.0, 0.0, 0.0, 0.0, 0.0)
         packet = client.build_tcp_delta_stand(left_delta=delta)
         self.assertEqual(packet["schema_version"], 1)
+        self.assertEqual(packet["source_id"], "rb_gui")
+        self.assertTrue(packet["session_id"])
         self.assertEqual(packet["mode"], "Hold")
         self.assertEqual(packet["left"]["mode"], "TcpDeltaStand")
         self.assertEqual(packet["left"]["tcp_delta_stand"], list(delta))
@@ -330,6 +334,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(ok, reason)
         packet = client.sent_packets[-1]
         self.assertEqual(packet["mode"], "Hold")
+        self.assertEqual(packet["source_id"], "rb_gui")
+        self.assertTrue(packet["session_id"])
         self.assertEqual(packet["left"]["mode"], "TcpDeltaStand")
         self.assertEqual(packet["left"]["tcp_delta_stand"], [0.005, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.assertEqual(packet["right"], {})

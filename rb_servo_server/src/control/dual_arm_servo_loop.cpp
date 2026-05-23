@@ -437,6 +437,12 @@ void DualArmServoLoop::loopMain() {
         DualArmCommand command = command_buffer_
             ? command_buffer_->latestOrHold(loop_start)
             : makeHoldCommand(left_state, right_state, loop_start);
+        const auto metadata_hold = [&](const DualArmCommand& source_command) {
+            DualArmCommand hold = makeHoldCommand(left_state, right_state, loop_start);
+            hold.source = source_command.source;
+            hold.lease = source_command.lease;
+            return hold;
+        };
         const bool read_only_command_blocked = readOnlyMode() && commandBlockedByReadOnly(command);
 
         if (read_only_command_blocked) {
@@ -454,26 +460,26 @@ void DualArmServoLoop::loopMain() {
                 right_state,
                 emergency_context
             );
-            command = makeHoldCommand(left_state, right_state, loop_start);
+            command = metadata_hold(command);
         } else if (commandRequestsResetFault(command)) {
             if (readOnlyMode()) {
-                command = makeHoldCommand(left_state, right_state, loop_start);
+                command = metadata_hold(command);
             } else if (fault_latched_.load()) {
                 clearFaultLatch(left_state, right_state);
             } else {
                 setMotionState(ServerMotionState::ConnectedHold);
             }
-            command = makeHoldCommand(left_state, right_state, loop_start);
+            command = metadata_hold(command);
         } else if (commandRequestsDisarmMotion(command)) {
             setMotionState(ServerMotionState::ConnectedHold);
-            command = makeHoldCommand(left_state, right_state, loop_start);
+            command = metadata_hold(command);
         } else if (commandRequestsArmMotion(command)) {
             if (!fault_latched_.load()) {
                 setMotionState(ServerMotionState::ArmedHold);
             }
-            command = makeHoldCommand(left_state, right_state, loop_start);
+            command = metadata_hold(command);
         } else if (commandRequestsMotion(command) && !motionAllowed()) {
-            command = makeHoldCommand(left_state, right_state, loop_start);
+            command = metadata_hold(command);
         }
 
         ServoTarget safe_target;
