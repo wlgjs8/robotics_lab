@@ -13,14 +13,14 @@ public:
     RbpodoBackend(ArmId arm_id, const BackendConfig& config);
     ~RbpodoBackend() override;
 
-    bool connect() override;
-    bool initialize() override;
+    BackendResult<RobotState> connect() override;
+    BackendResult<RobotState> initialize() override;
 
-    bool readState(RobotState& out_state) override;
-    bool sendServoJ(const JointArray& q_target_deg) override;
+    BackendResult<RobotState> readState() override;
+    SendServoJResult sendServoJ(const SendServoJRequest& request) override;
 
-    bool stop() override;
-    bool resetFault() override;
+    BackendResult<RobotState> stop() override;
+    BackendResult<RobotState> resetFault() override;
 
     bool isConnected() const override;
     ArmId armId() const override;

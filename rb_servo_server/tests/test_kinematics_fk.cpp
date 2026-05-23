@@ -149,40 +149,54 @@ public:
     TestBackend(rb_servo::ArmId arm_id, rb_servo::JointArray q_actual)
         : arm_id_(arm_id), q_actual_(q_actual) {}
 
-    bool connect() override {
+    rb_servo::BackendResult<rb_servo::RobotState> connect() override {
         connected_ = true;
-        return true;
+        return result(rb_servo::BackendOp::Connect);
     }
 
-    bool initialize() override {
+    rb_servo::BackendResult<rb_servo::RobotState> initialize() override {
         initialized_ = true;
-        return true;
+        return result(rb_servo::BackendOp::Initialize);
     }
 
-    bool readState(rb_servo::RobotState& out_state) override {
-        out_state.arm_id = arm_id_;
-        out_state.q_actual_deg = q_actual_;
-        out_state.q_target_deg = q_actual_;
-        out_state.has_valid_joint_state = true;
-        out_state.connection_state = connected_
-            ? rb_servo::RobotConnectionState::Connected
-            : rb_servo::RobotConnectionState::Disconnected;
-        out_state.servo_enabled = initialized_;
-        return true;
+    rb_servo::BackendResult<rb_servo::RobotState> readState() override {
+        return result(rb_servo::BackendOp::ReadState);
     }
 
-    bool sendServoJ(const rb_servo::JointArray& q_target_deg) override {
-        q_actual_ = q_target_deg;
-        return true;
+    rb_servo::SendServoJResult sendServoJ(const rb_servo::SendServoJRequest& request) override {
+        q_actual_ = request.q_target_deg;
+        return rb_servo::acceptedSend(request, {}, currentState(), "cache");
     }
 
-    bool stop() override { return true; }
-    bool resetFault() override { return true; }
+    rb_servo::BackendResult<rb_servo::RobotState> stop() override { return result(rb_servo::BackendOp::Stop); }
+    rb_servo::BackendResult<rb_servo::RobotState> resetFault() override { return result(rb_servo::BackendOp::ResetFault); }
     bool isConnected() const override { return connected_; }
     rb_servo::ArmId armId() const override { return arm_id_; }
     std::string name() const override { return "test"; }
 
 private:
+    rb_servo::RobotState currentState() const {
+        rb_servo::RobotState state;
+        state.arm_id = arm_id_;
+        state.q_actual_deg = q_actual_;
+        state.q_target_deg = q_actual_;
+        state.has_valid_joint_state = true;
+        state.connection_state = connected_
+            ? rb_servo::RobotConnectionState::Connected
+            : rb_servo::RobotConnectionState::Disconnected;
+        state.servo_enabled = initialized_;
+        return state;
+    }
+
+    rb_servo::BackendResult<rb_servo::RobotState> result(rb_servo::BackendOp op) const {
+        rb_servo::BackendResult<rb_servo::RobotState> out;
+        out.ok = true;
+        out.op = op;
+        out.value = currentState();
+        out.error = rb_servo::noBackendError();
+        return out;
+    }
+
     rb_servo::ArmId arm_id_;
     rb_servo::JointArray q_actual_{};
     bool connected_ = false;

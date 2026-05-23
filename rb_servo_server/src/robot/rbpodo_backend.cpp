@@ -30,6 +30,38 @@ bool finiteJointArray(const JointArray& joints) {
     });
 }
 
+template <typename T>
+BackendResult<T> okResult(BackendOp op, const T& value, const BackendTiming& timing = BackendTiming{}) {
+    BackendResult<T> result;
+    result.ok = true;
+    result.op = op;
+    result.value = value;
+    result.error = noBackendError();
+    result.timing = timing;
+    return result;
+}
+
+template <typename T>
+BackendResult<T> failedResult(BackendOp op, const BackendError& error, const BackendTiming& timing = BackendTiming{}) {
+    BackendResult<T> result;
+    result.ok = false;
+    result.op = op;
+    result.error = error;
+    result.timing = timing;
+    return result;
+}
+
+RobotState basicState(ArmId arm_id, bool connected) {
+    RobotState state;
+    state.arm_id = arm_id;
+    state.host_time_ns = nowSteadyNs();
+    state.connection_state = connected
+        ? RobotConnectionState::Connected
+        : RobotConnectionState::Disconnected;
+    state.has_valid_joint_state = false;
+    return state;
+}
+
 #ifdef RB_SERVO_ENABLE_RBPODO
 constexpr double kDefaultCommandTimeoutSec = 0.5;
 constexpr double kDefaultStateTimeoutSec = 0.2;
@@ -108,20 +140,34 @@ RbpodoBackend::RbpodoBackend(ArmId arm_id, const BackendConfig& config)
 
 RbpodoBackend::~RbpodoBackend() = default;
 
-bool RbpodoBackend::connect() {
+BackendResult<RobotState> RbpodoBackend::connect() {
+    const uint64_t start = nowSteadyNs();
 #ifndef RB_SERVO_ENABLE_RBPODO
     std::cerr << "[ERROR] RbpodoBackend requested, but RB_SERVO_ENABLE_RBPODO=OFF.\n";
-    return false;
+    return failedResult<RobotState>(
+        BackendOp::Connect,
+        backendError(BackendErrorKind::DependencyUnavailable, "RbpodoBackend requested, but RB_SERVO_ENABLE_RBPODO=OFF"),
+        makeBackendTiming(start, nowSteadyNs())
+    );
 #else
     if (impl_->config.run_mode == RunMode::Real) {
         if (!envIsOne("RB_ALLOW_REAL_ROBOT")) {
-            throw std::runtime_error("Refusing real robot mode. Set RB_ALLOW_REAL_ROBOT=1.");
+            impl_->connected = false;
+            return failedResult<RobotState>(
+                BackendOp::Connect,
+                backendError(BackendErrorKind::SuppressedByPolicy, "Refusing real robot mode. Set RB_ALLOW_REAL_ROBOT=1."),
+                makeBackendTiming(start, nowSteadyNs())
+            );
         }
     }
     if (impl_->config.ip.empty()) {
         std::cerr << "[ERROR] RbpodoBackend requires a non-empty controller ip for "
                   << impl_->config.name << "\n";
-        return false;
+        return failedResult<RobotState>(
+            BackendOp::Connect,
+            backendError(BackendErrorKind::WrongEndpoint, "RbpodoBackend requires a non-empty controller ip"),
+            makeBackendTiming(start, nowSteadyNs())
+        );
     }
 
     try {
@@ -134,34 +180,59 @@ bool RbpodoBackend::connect() {
             impl_->robot.reset();
             impl_->data_channel.reset();
             impl_->connected = false;
-            return false;
+            return failedResult<RobotState>(
+                BackendOp::Connect,
+                backendError(BackendErrorKind::TransportReadFailed, "rbpodo connected sockets but did not receive state"),
+                makeBackendTiming(start, nowSteadyNs())
+            );
         }
         impl_->connected = true;
         std::cerr << "[INFO] RbpodoBackend connected to " << impl_->config.ip
                   << " for " << impl_->config.name << "\n";
-        return true;
+        RobotState mapped;
+        fillRobotStateFromSystemState(impl_->arm_id, *state, &mapped);
+        return okResult(BackendOp::Connect, mapped, makeBackendTiming(start, nowSteadyNs()));
     } catch (const std::exception& exc) {
         std::cerr << "[ERROR] RbpodoBackend connect failed for " << impl_->config.ip
                   << ": " << exc.what() << "\n";
         impl_->robot.reset();
         impl_->data_channel.reset();
         impl_->connected = false;
-        return false;
+        return failedResult<RobotState>(
+            BackendOp::Connect,
+            backendError(BackendErrorKind::TransportConnectFailed, exc.what()),
+            makeBackendTiming(start, nowSteadyNs())
+        );
     }
 #endif
 }
 
-bool RbpodoBackend::initialize() {
+BackendResult<RobotState> RbpodoBackend::initialize() {
+    const uint64_t start = nowSteadyNs();
 #ifndef RB_SERVO_ENABLE_RBPODO
-    return false;
+    return failedResult<RobotState>(
+        BackendOp::Initialize,
+        backendError(BackendErrorKind::DependencyUnavailable, "RbpodoBackend requested, but RB_SERVO_ENABLE_RBPODO=OFF"),
+        makeBackendTiming(start, nowSteadyNs())
+    );
 #else
-    if (!impl_->connected || !impl_->data_channel) return false;
+    if (!impl_->connected || !impl_->data_channel) {
+        return failedResult<RobotState>(
+            BackendOp::Initialize,
+            backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
+            makeBackendTiming(start, nowSteadyNs())
+        );
+    }
     try {
         const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
         if (!state) {
             std::cerr << "[ERROR] RbpodoBackend initialize failed: no state from "
                       << impl_->config.ip << "\n";
-            return false;
+            return failedResult<RobotState>(
+                BackendOp::Initialize,
+                backendError(BackendErrorKind::TransportReadFailed, "rbpodo initialize failed: no state"),
+                makeBackendTiming(start, nowSteadyNs())
+            );
         }
 
         if (impl_->config.run_mode == RunMode::Real && envIsOne("RB_ALLOW_REAL_MOTION")) {
@@ -175,7 +246,11 @@ bool RbpodoBackend::initialize() {
             if (!ret.is_success()) {
                 std::cerr << "[ERROR] RbpodoBackend set_operation_mode failed for "
                           << impl_->config.name << "\n";
-                return false;
+                return failedResult<RobotState>(
+                    BackendOp::Initialize,
+                    backendError(BackendErrorKind::ControllerRejected, "rbpodo set_operation_mode failed"),
+                    makeBackendTiming(start, nowSteadyNs())
+                );
             }
             responses.clear();
             ret = impl_->robot->set_speed_bar(
@@ -187,71 +262,118 @@ bool RbpodoBackend::initialize() {
             if (!ret.is_success()) {
                 std::cerr << "[ERROR] RbpodoBackend set_speed_bar failed for "
                           << impl_->config.name << "\n";
-                return false;
+                return failedResult<RobotState>(
+                    BackendOp::Initialize,
+                    backendError(BackendErrorKind::ControllerRejected, "rbpodo set_speed_bar failed"),
+                    makeBackendTiming(start, nowSteadyNs())
+                );
             }
         }
-        return true;
+        RobotState mapped;
+        fillRobotStateFromSystemState(impl_->arm_id, *state, &mapped);
+        return okResult(BackendOp::Initialize, mapped, makeBackendTiming(start, nowSteadyNs()));
     } catch (const std::exception& exc) {
         std::cerr << "[ERROR] RbpodoBackend initialize failed for " << impl_->config.name
                   << ": " << exc.what() << "\n";
-        return false;
+        return failedResult<RobotState>(
+            BackendOp::Initialize,
+            backendError(BackendErrorKind::Unknown, exc.what()),
+            makeBackendTiming(start, nowSteadyNs())
+        );
     }
 #endif
 }
 
-bool RbpodoBackend::readState(RobotState& out_state) {
+BackendResult<RobotState> RbpodoBackend::readState() {
+    const uint64_t start = nowSteadyNs();
 #ifndef RB_SERVO_ENABLE_RBPODO
-    (void)out_state;
-    return false;
+    return failedResult<RobotState>(
+        BackendOp::ReadState,
+        backendError(BackendErrorKind::DependencyUnavailable, "RbpodoBackend requested, but RB_SERVO_ENABLE_RBPODO=OFF"),
+        makeBackendTiming(start, nowSteadyNs())
+    );
 #else
+    RobotState out_state = basicState(impl_->arm_id, impl_->connected);
     out_state.arm_id = impl_->arm_id;
     out_state.host_time_ns = nowSteadyNs();
     out_state.connection_state = impl_->connected
         ? RobotConnectionState::Connected
         : RobotConnectionState::Disconnected;
     out_state.has_valid_joint_state = false;
-    if (!impl_->connected || !impl_->data_channel) return false;
+    if (!impl_->connected || !impl_->data_channel) {
+        return failedResult<RobotState>(
+            BackendOp::ReadState,
+            backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
+            makeBackendTiming(start, nowSteadyNs())
+        );
+    }
 
     try {
         const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
         if (!state) {
             out_state.connection_state = RobotConnectionState::Disconnected;
             impl_->connected = false;
-            return false;
+            return failedResult<RobotState>(
+                BackendOp::ReadState,
+                backendError(BackendErrorKind::TransportReadFailed, "rbpodo readState returned no state"),
+                makeBackendTiming(start, nowSteadyNs())
+            );
         }
         fillRobotStateFromSystemState(impl_->arm_id, *state, &out_state);
-        return true;
+        return okResult(BackendOp::ReadState, out_state, makeBackendTiming(start, nowSteadyNs()));
     } catch (const std::exception& exc) {
         std::cerr << "[WARN] RbpodoBackend readState failed for " << impl_->config.name
                   << ": " << exc.what() << "\n";
         out_state.connection_state = RobotConnectionState::Error;
         out_state.has_error = true;
         out_state.error_code = -1;
-        return false;
+        return failedResult<RobotState>(
+            BackendOp::ReadState,
+            backendError(BackendErrorKind::Unknown, exc.what()),
+            makeBackendTiming(start, nowSteadyNs())
+        );
     }
 #endif
 }
 
-bool RbpodoBackend::sendServoJ(const JointArray& q_target_deg) {
+SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
+    const uint64_t start = nowSteadyNs();
 #ifndef RB_SERVO_ENABLE_RBPODO
-    (void)q_target_deg;
-    return false;
+    return rejectedSend(
+        request,
+        backendError(BackendErrorKind::DependencyUnavailable, "RbpodoBackend requested, but RB_SERVO_ENABLE_RBPODO=OFF"),
+        makeBackendTiming(start, nowSteadyNs())
+    );
 #else
-    if (!impl_->connected || !impl_->robot) return false;
+    if (!impl_->connected || !impl_->robot) {
+        return rejectedSend(
+            request,
+            backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
+            makeBackendTiming(start, nowSteadyNs())
+        );
+    }
     if (impl_->config.run_mode == RunMode::Real && !envIsOne("RB_ALLOW_REAL_MOTION")) {
         std::cerr << "[ERROR] RbpodoBackend refused servo_j without RB_ALLOW_REAL_MOTION=1\n";
-        return false;
+        return rejectedSend(
+            request,
+            backendError(BackendErrorKind::SuppressedByPolicy, "RbpodoBackend refused servo_j without RB_ALLOW_REAL_MOTION=1"),
+            makeBackendTiming(start, nowSteadyNs())
+        );
     }
-    if (!finiteJointArray(q_target_deg)) {
+    if (!finiteJointArray(request.q_target_deg)) {
         std::cerr << "[ERROR] RbpodoBackend refused non-finite servo_j target\n";
-        return false;
+        return rejectedSend(
+            request,
+            backendError(BackendErrorKind::InvalidTarget, "RbpodoBackend refused non-finite servo_j target"),
+            makeBackendTiming(start, nowSteadyNs())
+        );
     }
 
     try {
         rb::podo::ResponseCollector responses;
         const auto ret = impl_->robot->move_servo_j(
             responses,
-            q_target_deg,
+            request.q_target_deg,
             impl_->config.servo_time_sec,
             impl_->config.servo_lookahead_sec,
             impl_->config.servo_gain,
@@ -262,39 +384,69 @@ bool RbpodoBackend::sendServoJ(const JointArray& q_target_deg) {
         if (!ret.is_success()) {
             std::cerr << "[WARN] RbpodoBackend move_servo_j was not accepted for "
                       << impl_->config.name << "\n";
-            return false;
+            return rejectedSend(
+                request,
+                backendError(BackendErrorKind::ControllerRejected, "rbpodo move_servo_j was not accepted"),
+                makeBackendTiming(start, nowSteadyNs())
+            );
         }
         if (responses.has_error()) {
             std::cerr << "[WARN] RbpodoBackend move_servo_j response contained an error for "
                       << impl_->config.name << ": " << responses << "\n";
-            return false;
+            return rejectedSend(
+                request,
+                backendError(BackendErrorKind::ControllerRejected, "rbpodo move_servo_j response contained an error"),
+                makeBackendTiming(start, nowSteadyNs())
+            );
         }
-        return true;
+        return acceptedSend(request, makeBackendTiming(start, nowSteadyNs()));
     } catch (const std::exception& exc) {
         std::cerr << "[WARN] RbpodoBackend move_servo_j failed for " << impl_->config.name
                   << ": " << exc.what() << "\n";
-        return false;
+        return rejectedSend(
+            request,
+            backendError(BackendErrorKind::Unknown, exc.what()),
+            makeBackendTiming(start, nowSteadyNs())
+        );
     }
 #endif
 }
 
-bool RbpodoBackend::stop() {
+BackendResult<RobotState> RbpodoBackend::stop() {
+    const uint64_t start = nowSteadyNs();
 #ifndef RB_SERVO_ENABLE_RBPODO
-    return false;
+    return failedResult<RobotState>(
+        BackendOp::Stop,
+        backendError(BackendErrorKind::DependencyUnavailable, "RbpodoBackend requested, but RB_SERVO_ENABLE_RBPODO=OFF"),
+        makeBackendTiming(start, nowSteadyNs())
+    );
 #else
     // No verified controller-level hold/stop API is wired for P1-B.
     // task_stop exists in rbpodo, but it stops task programs and is not treated
     // here as a safe servo hold primitive.
-    return false;
+    return failedResult<RobotState>(
+        BackendOp::Stop,
+        backendError(BackendErrorKind::DependencyUnavailable, "No verified rbpodo hold/stop API is wired"),
+        makeBackendTiming(start, nowSteadyNs())
+    );
 #endif
 }
 
-bool RbpodoBackend::resetFault() {
+BackendResult<RobotState> RbpodoBackend::resetFault() {
+    const uint64_t start = nowSteadyNs();
 #ifndef RB_SERVO_ENABLE_RBPODO
-    return false;
+    return failedResult<RobotState>(
+        BackendOp::ResetFault,
+        backendError(BackendErrorKind::DependencyUnavailable, "RbpodoBackend requested, but RB_SERVO_ENABLE_RBPODO=OFF"),
+        makeBackendTiming(start, nowSteadyNs())
+    );
 #else
     // No verified fault-reset API is exposed by the inspected rbpodo headers.
-    return false;
+    return failedResult<RobotState>(
+        BackendOp::ResetFault,
+        backendError(BackendErrorKind::DependencyUnavailable, "No verified rbpodo fault-reset API is exposed"),
+        makeBackendTiming(start, nowSteadyNs())
+    );
 #endif
 }
 

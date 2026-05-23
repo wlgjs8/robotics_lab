@@ -165,12 +165,20 @@ ServoSnapshot DualArmServoLoop::latestSnapshot() const {
 }
 
 bool DualArmServoLoop::initializeRobots() {
-    if (!left_robot_->connect() || !right_robot_->connect()) {
-        std::cerr << "[ERROR] failed to connect robots\n";
+    const BackendResult<RobotState> left_connect = left_robot_->connect();
+    const BackendResult<RobotState> right_connect = right_robot_->connect();
+    if (!left_connect.ok || !right_connect.ok) {
+        std::cerr << "[ERROR] failed to connect robots"
+                  << " left=" << left_connect.error.name << ":" << left_connect.error.message
+                  << " right=" << right_connect.error.name << ":" << right_connect.error.message << "\n";
         return false;
     }
-    if (!left_robot_->initialize() || !right_robot_->initialize()) {
-        std::cerr << "[ERROR] failed to initialize robots\n";
+    const BackendResult<RobotState> left_init = left_robot_->initialize();
+    const BackendResult<RobotState> right_init = right_robot_->initialize();
+    if (!left_init.ok || !right_init.ok) {
+        std::cerr << "[ERROR] failed to initialize robots"
+                  << " left=" << left_init.error.name << ":" << left_init.error.message
+                  << " right=" << right_init.error.name << ":" << right_init.error.message << "\n";
         return false;
     }
 
@@ -301,8 +309,8 @@ void DualArmServoLoop::loopMain() {
             }
         }
 
-        bool left_ok = false;
-        bool right_ok = false;
+        SendServoJResult left_send_result;
+        SendServoJResult right_send_result;
         uint64_t left_send_start_ns = 0;
         uint64_t left_send_end_ns = 0;
         uint64_t right_send_start_ns = 0;
@@ -313,17 +321,23 @@ void DualArmServoLoop::loopMain() {
         const std::string send_policy = send_suppressed ? "read_only" : "send_servo_j";
         sendTargets(
             attempted_target,
-            &left_ok,
-            &right_ok,
+            command.seq,
+            &left_send_result,
+            &right_send_result,
             &left_send_start_ns,
             &left_send_end_ns,
             &right_send_start_ns,
             &right_send_end_ns
         );
+        const bool left_ok = left_send_result.accepted;
+        const bool right_ok = right_send_result.accepted;
         if (!left_ok || !right_ok) {
             safety_verdict = SafetyVerdict::SendFailure;
             if (isRealMode() || config_.safety.stop_both_arms_on_single_arm_error) {
-                latchFault(SafetyVerdict::SendFailure, "sendServoJ failed", left_state, right_state);
+                std::string reason = "sendServoJ failed";
+                if (!left_ok) reason += " left=" + left_send_result.error.name + ":" + left_send_result.error.message;
+                if (!right_ok) reason += " right=" + right_send_result.error.name + ":" + right_send_result.error.message;
+                latchFault(SafetyVerdict::SendFailure, reason, left_state, right_state);
                 safe_target = currentFaultHoldTarget();
                 safety_verdict = SafetyVerdict::FaultLatched;
             }
@@ -354,6 +368,18 @@ void DualArmServoLoop::loopMain() {
         sample.right_sent_q_deg = attempted_target.right_q_target_deg;
         sample.left_send_ok = left_ok;
         sample.right_send_ok = right_ok;
+        if (!left_ok) {
+            sample.left_send_error_kind = toString(left_send_result.error.kind);
+            sample.left_send_error_name = left_send_result.error.name;
+            sample.left_send_error_code = left_send_result.error.code;
+            sample.left_send_error_message = left_send_result.error.message;
+        }
+        if (!right_ok) {
+            sample.right_send_error_kind = toString(right_send_result.error.kind);
+            sample.right_send_error_name = right_send_result.error.name;
+            sample.right_send_error_code = right_send_result.error.code;
+            sample.right_send_error_message = right_send_result.error.message;
+        }
         sample.send_suppressed = send_suppressed;
         sample.send_policy = send_policy;
         sample.left_send_start_ns = left_send_start_ns;
@@ -404,6 +430,14 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.fault_reason = fault_reason_;
             latest_snapshot_.left_send_ok = left_ok;
             latest_snapshot_.right_send_ok = right_ok;
+            latest_snapshot_.left_send_error_kind = sample.left_send_error_kind;
+            latest_snapshot_.left_send_error_name = sample.left_send_error_name;
+            latest_snapshot_.left_send_error_code = sample.left_send_error_code;
+            latest_snapshot_.left_send_error_message = sample.left_send_error_message;
+            latest_snapshot_.right_send_error_kind = sample.right_send_error_kind;
+            latest_snapshot_.right_send_error_name = sample.right_send_error_name;
+            latest_snapshot_.right_send_error_code = sample.right_send_error_code;
+            latest_snapshot_.right_send_error_message = sample.right_send_error_message;
             latest_snapshot_.send_suppressed = send_suppressed;
             latest_snapshot_.send_policy = send_policy;
             latest_snapshot_.left_send_start_ns = left_send_start_ns;
@@ -442,11 +476,27 @@ bool DualArmServoLoop::configureRealtimeForLoop() {
 }
 
 bool DualArmServoLoop::readRobotStates(RobotState& left, RobotState& right) {
-    const bool left_ok = left_robot_ && left_robot_->readState(left);
-    const bool right_ok = right_robot_ && right_robot_->readState(right);
+    const BackendResult<RobotState> left_result = left_robot_
+        ? left_robot_->readState()
+        : BackendResult<RobotState>{};
+    const BackendResult<RobotState> right_result = right_robot_
+        ? right_robot_->readState()
+        : BackendResult<RobotState>{};
+    if (left_result.ok) {
+        left = left_result.value;
+    } else {
+        left = left_result.value;
+        left.arm_id = ArmId::Left;
+    }
+    if (right_result.ok) {
+        right = right_result.value;
+    } else {
+        right = right_result.value;
+        right.arm_id = ArmId::Right;
+    }
     populateTcpPose(left, config_.left_mount);
     populateTcpPose(right, config_.right_mount);
-    return left_ok && right_ok;
+    return left_result.ok && right_result.ok;
 }
 
 void DualArmServoLoop::populateTcpPose(RobotState& state, const ArmMountConfig& mount) const {
@@ -654,16 +704,25 @@ ServoTarget DualArmServoLoop::applySafety(
 
 void DualArmServoLoop::sendTargets(
     const ServoTarget& target,
-    bool* left_ok,
-    bool* right_ok,
+    uint64_t command_seq,
+    SendServoJResult* left_result,
+    SendServoJResult* right_result,
     uint64_t* left_send_start_ns,
     uint64_t* left_send_end_ns,
     uint64_t* right_send_start_ns,
     uint64_t* right_send_end_ns
 ) {
     if (readOnlyMode()) {
-        if (left_ok) *left_ok = true;
-        if (right_ok) *right_ok = true;
+        SendServoJRequest left_request;
+        left_request.q_target_deg = target.left_q_target_deg;
+        left_request.command_seq = command_seq;
+        left_request.host_time_ns = nowSteadyNs();
+        SendServoJRequest right_request;
+        right_request.q_target_deg = target.right_q_target_deg;
+        right_request.command_seq = command_seq;
+        right_request.host_time_ns = left_request.host_time_ns;
+        if (left_result) *left_result = acceptedSend(left_request);
+        if (right_result) *right_result = acceptedSend(right_request);
         if (left_send_start_ns) *left_send_start_ns = 0;
         if (left_send_end_ns) *left_send_end_ns = 0;
         if (right_send_start_ns) *right_send_start_ns = 0;
@@ -672,14 +731,22 @@ void DualArmServoLoop::sendTargets(
     }
 
     if (left_send_start_ns) *left_send_start_ns = nowSteadyNs();
-    const bool left_result = left_robot_->sendServoJ(target.left_q_target_deg);
+    SendServoJRequest left_request;
+    left_request.q_target_deg = target.left_q_target_deg;
+    left_request.command_seq = command_seq;
+    left_request.host_time_ns = left_send_start_ns ? *left_send_start_ns : nowSteadyNs();
+    const SendServoJResult left_send_result = left_robot_->sendServoJ(left_request);
     if (left_send_end_ns) *left_send_end_ns = nowSteadyNs();
-    if (left_ok) *left_ok = left_result;
+    if (left_result) *left_result = left_send_result;
 
     if (right_send_start_ns) *right_send_start_ns = nowSteadyNs();
-    const bool right_result = right_robot_->sendServoJ(target.right_q_target_deg);
+    SendServoJRequest right_request;
+    right_request.q_target_deg = target.right_q_target_deg;
+    right_request.command_seq = command_seq;
+    right_request.host_time_ns = right_send_start_ns ? *right_send_start_ns : nowSteadyNs();
+    const SendServoJResult right_send_result = right_robot_->sendServoJ(right_request);
     if (right_send_end_ns) *right_send_end_ns = nowSteadyNs();
-    if (right_ok) *right_ok = right_result;
+    if (right_result) *right_result = right_send_result;
 }
 
 DualArmCommand DualArmServoLoop::makeHoldCommand(
@@ -736,12 +803,18 @@ bool DualArmServoLoop::isRealMode() const {
 }
 
 bool DualArmServoLoop::clearFaultLatch(RobotState& left_state, RobotState& right_state) {
-    const bool left_reset_ok = left_robot_ && left_robot_->resetFault();
-    const bool right_reset_ok = right_robot_ && right_robot_->resetFault();
+    const BackendResult<RobotState> left_reset = left_robot_
+        ? left_robot_->resetFault()
+        : BackendResult<RobotState>{};
+    const BackendResult<RobotState> right_reset = right_robot_
+        ? right_robot_->resetFault()
+        : BackendResult<RobotState>{};
+    const bool left_reset_ok = left_reset.ok;
+    const bool right_reset_ok = right_reset.ok;
     if (!left_reset_ok || !right_reset_ok) {
         std::cerr << "[WARN] fault latch remains: backend resetFault failed"
-                  << " left=" << left_reset_ok
-                  << " right=" << right_reset_ok << "\n";
+                  << " left=" << left_reset.error.name << ":" << left_reset.error.message
+                  << " right=" << right_reset.error.name << ":" << right_reset.error.message << "\n";
         return false;
     }
 

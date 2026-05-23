@@ -14,21 +14,26 @@ class RbsimBackend final : public IRobotBackend {
 public:
     RbsimBackend(ArmId arm_id, const BackendConfig& config);
 
-    bool connect() override;
-    bool initialize() override;
+    BackendResult<RobotState> connect() override;
+    BackendResult<RobotState> initialize() override;
 
-    bool readState(RobotState& out_state) override;
-    bool sendServoJ(const JointArray& q_target_deg) override;
+    BackendResult<RobotState> readState() override;
+    SendServoJResult sendServoJ(const SendServoJRequest& request) override;
 
-    bool stop() override;
-    bool resetFault() override;
+    BackendResult<RobotState> stop() override;
+    BackendResult<RobotState> resetFault() override;
 
     bool isConnected() const override;
     ArmId armId() const override;
     std::string name() const override;
 
 private:
-    bool controlRequest(const std::string& op, const nlohmann::json& params, RobotState* out_state);
+    BackendResult<RobotState> controlRequest(
+        const std::string& op,
+        BackendOp backend_op,
+        const nlohmann::json& params,
+        bool require_state
+    );
 
     ArmId arm_id_;
     BackendConfig config_;

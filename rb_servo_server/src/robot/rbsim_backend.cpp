@@ -199,48 +199,113 @@ std::string simulatorEndpoint(const BackendConfig& config) {
     return config.simulator_control_endpoint;
 }
 
+template <typename T>
+BackendResult<T> okResult(BackendOp op, const T& value, const BackendTiming& timing = BackendTiming{}) {
+    BackendResult<T> result;
+    result.ok = true;
+    result.op = op;
+    result.value = value;
+    result.error = noBackendError();
+    result.timing = timing;
+    return result;
+}
+
+template <typename T>
+BackendResult<T> failedResult(BackendOp op, const BackendError& error, const BackendTiming& timing = BackendTiming{}) {
+    BackendResult<T> result;
+    result.ok = false;
+    result.op = op;
+    result.error = error;
+    result.timing = timing;
+    return result;
+}
+
+std::string jsonCodeString(const json& object, const char* key) {
+    const auto it = object.find(key);
+    if (it == object.end()) return "";
+    if (it->is_string()) return it->get<std::string>();
+    if (it->is_number_integer()) return std::to_string(it->get<int>());
+    if (it->is_number_unsigned()) return std::to_string(it->get<uint64_t>());
+    return "";
+}
+
+BackendError protocolErrorFromResponse(const std::string& op, const json& response) {
+    const auto error_it = response.find("error");
+    if (error_it == response.end() || !error_it->is_object()) {
+        return backendError(BackendErrorKind::ProtocolError, "rbsim " + op + " failed without an error object");
+    }
+    const std::string name = error_it->value("name", "ProtocolError");
+    const std::string message = error_it->value("message", "rbsim " + op + " failed");
+    return backendError(
+        BackendErrorKind::ProtocolError,
+        message,
+        jsonCodeString(*error_it, "code"),
+        name
+    );
+}
+
 }  // namespace
 
 RbsimBackend::RbsimBackend(ArmId arm_id, const BackendConfig& config)
     : arm_id_(arm_id), config_(config) {}
 
-bool RbsimBackend::connect() {
-    RobotState state;
-    connected_ = controlRequest("connect", json::object(), &state) &&
-                 state.connection_state == RobotConnectionState::Connected;
-    return connected_;
+BackendResult<RobotState> RbsimBackend::connect() {
+    BackendResult<RobotState> result = controlRequest("connect", BackendOp::Connect, json::object(), true);
+    connected_ = result.ok && result.value.connection_state == RobotConnectionState::Connected;
+    if (!connected_ && result.ok) {
+        result.ok = false;
+        result.error = backendError(BackendErrorKind::RobotDisconnected, "rbsim connect did not report Connected state");
+    }
+    return result;
 }
 
-bool RbsimBackend::initialize() {
+BackendResult<RobotState> RbsimBackend::initialize() {
     json params;
     params["enable_servo"] = true;
-    RobotState state;
-    return controlRequest("initialize", params, &state) &&
-           state.connection_state == RobotConnectionState::Connected &&
-           state.has_valid_joint_state &&
-           !state.has_error;
-}
-
-bool RbsimBackend::readState(RobotState& out_state) {
-    return controlRequest("read_state", json::object(), &out_state);
-}
-
-bool RbsimBackend::sendServoJ(const JointArray& q_target_deg) {
-    json params;
-    params["q_target_deg"] = jointArrayJson(q_target_deg);
-    return controlRequest("send_servo_j", params, nullptr);
-}
-
-bool RbsimBackend::stop() {
-    return controlRequest("stop", json::object(), nullptr);
-}
-
-bool RbsimBackend::resetFault() {
-    RobotState reset_state;
-    if (!controlRequest("reset_fault", json::object(), &reset_state)) {
-        return false;
+    BackendResult<RobotState> result = controlRequest("initialize", BackendOp::Initialize, params, true);
+    if (!result.ok) return result;
+    if (result.value.connection_state != RobotConnectionState::Connected) {
+        result.ok = false;
+        result.error = backendError(BackendErrorKind::RobotDisconnected, "rbsim initialize did not report Connected state");
+    } else if (!result.value.has_valid_joint_state) {
+        result.ok = false;
+        result.error = backendError(BackendErrorKind::InvalidJointState, "rbsim initialize returned invalid joint state");
+    } else if (result.value.has_error) {
+        result.ok = false;
+        result.error = backendError(
+            BackendErrorKind::RobotFault,
+            "rbsim initialize returned robot error",
+            std::to_string(result.value.error_code),
+            "RobotFault"
+        );
     }
-    return initialize();
+    return result;
+}
+
+BackendResult<RobotState> RbsimBackend::readState() {
+    return controlRequest("read_state", BackendOp::ReadState, json::object(), true);
+}
+
+SendServoJResult RbsimBackend::sendServoJ(const SendServoJRequest& request) {
+    json params;
+    params["q_target_deg"] = jointArrayJson(request.q_target_deg);
+    BackendResult<RobotState> result = controlRequest("send_servo_j", BackendOp::SendServoJ, params, false);
+    if (!result.ok) {
+        return rejectedSend(request, result.error, result.timing);
+    }
+    return acceptedSend(request, result.timing, result.value, "response");
+}
+
+BackendResult<RobotState> RbsimBackend::stop() {
+    return controlRequest("stop", BackendOp::Stop, json::object(), false);
+}
+
+BackendResult<RobotState> RbsimBackend::resetFault() {
+    BackendResult<RobotState> result = controlRequest("reset_fault", BackendOp::ResetFault, json::object(), false);
+    if (!result.ok) return result;
+    BackendResult<RobotState> initialized = initialize();
+    initialized.op = BackendOp::ResetFault;
+    return initialized;
 }
 
 bool RbsimBackend::isConnected() const {
@@ -255,12 +320,31 @@ std::string RbsimBackend::name() const {
     return config_.name;
 }
 
-bool RbsimBackend::controlRequest(const std::string& op, const json& params, RobotState* out_state) {
-    const TcpEndpoint endpoint = parseTcpEndpoint(simulatorEndpoint(config_));
+BackendResult<RobotState> RbsimBackend::controlRequest(
+    const std::string& op,
+    BackendOp backend_op,
+    const json& params,
+    bool require_state
+) {
+    const uint64_t start = nowSteadyNs();
+    TcpEndpoint endpoint;
+    try {
+        endpoint = parseTcpEndpoint(simulatorEndpoint(config_));
+    } catch (const std::exception& exc) {
+        return failedResult<RobotState>(
+            backend_op,
+            backendError(BackendErrorKind::WrongEndpoint, exc.what()),
+            makeBackendTiming(start, nowSteadyNs())
+        );
+    }
     const int fd = openTcpConnection(endpoint, timeoutForOperation(config_, op));
     if (fd < 0) {
         connected_ = false;
-        return false;
+        return failedResult<RobotState>(
+            backend_op,
+            backendError(BackendErrorKind::TransportConnectFailed, "rbsim connect failed for " + simulatorEndpoint(config_)),
+            makeBackendTiming(start, nowSteadyNs())
+        );
     }
 
     json request;
@@ -272,11 +356,24 @@ bool RbsimBackend::controlRequest(const std::string& op, const json& params, Rob
 
     const std::string line = request.dump() + "\n";
     std::string response_line;
-    const bool io_ok = sendAll(fd, line) && recvLine(fd, &response_line);
+    const bool write_ok = sendAll(fd, line);
+    const bool read_ok = write_ok && recvLine(fd, &response_line);
     ::close(fd);
-    if (!io_ok) {
+    if (!write_ok) {
         connected_ = false;
-        return false;
+        return failedResult<RobotState>(
+            backend_op,
+            backendError(BackendErrorKind::TransportWriteFailed, "rbsim write failed for " + op),
+            makeBackendTiming(start, nowSteadyNs())
+        );
+    }
+    if (!read_ok) {
+        connected_ = false;
+        return failedResult<RobotState>(
+            backend_op,
+            backendError(BackendErrorKind::TransportReadFailed, "rbsim read failed for " + op),
+            makeBackendTiming(start, nowSteadyNs())
+        );
     }
 
     json response;
@@ -284,35 +381,46 @@ bool RbsimBackend::controlRequest(const std::string& op, const json& params, Rob
         response = json::parse(response_line);
     } catch (const json::exception& exc) {
         std::cerr << "[ERROR] RbsimBackend invalid JSON response: " << exc.what() << "\n";
-        return false;
+        return failedResult<RobotState>(
+            backend_op,
+            backendError(BackendErrorKind::ProtocolError, exc.what()),
+            makeBackendTiming(start, nowSteadyNs())
+        );
     }
 
     if (!jsonBool(response, "ok", false)) {
-        const auto error_it = response.find("error");
-        if (error_it != response.end() && error_it->is_object()) {
-            const std::string name = error_it->value("name", "unknown");
-            const int code = error_it->value("code", 0);
-            std::cerr << "[WARN] RbsimBackend " << op << " failed for "
-                      << toString(arm_id_) << ": " << name << " (" << code << ")\n";
-        }
-        return false;
+        const BackendError error = protocolErrorFromResponse(op, response);
+        std::cerr << "[WARN] RbsimBackend " << op << " failed for "
+                  << toString(arm_id_) << ": " << error.name << " (" << error.code
+                  << "): " << error.message << "\n";
+        return failedResult<RobotState>(backend_op, error, makeBackendTiming(start, nowSteadyNs()));
     }
 
     const auto state_it = response.find("state");
-    if (out_state) {
-        if (state_it == response.end() || !mapState(*state_it, arm_id_, out_state)) {
+    RobotState state;
+    state.arm_id = arm_id_;
+    state.host_time_ns = nowSteadyNs();
+    state.connection_state = connected_ ? RobotConnectionState::Connected : RobotConnectionState::Disconnected;
+    if (state_it != response.end()) {
+        if (!mapState(*state_it, arm_id_, &state)) {
             std::cerr << "[ERROR] RbsimBackend " << op << " response missing valid state\n";
-            return false;
+            return failedResult<RobotState>(
+                backend_op,
+                backendError(BackendErrorKind::UnsupportedSchema, "rbsim " + op + " response contained invalid state"),
+                makeBackendTiming(start, nowSteadyNs())
+            );
         }
-        connected_ = out_state->connection_state == RobotConnectionState::Connected;
-    } else if (state_it != response.end() && state_it->is_object()) {
-        RobotState mapped;
-        if (mapState(*state_it, arm_id_, &mapped)) {
-            connected_ = mapped.connection_state == RobotConnectionState::Connected;
-        }
+        connected_ = state.connection_state == RobotConnectionState::Connected;
+    } else if (require_state) {
+        std::cerr << "[ERROR] RbsimBackend " << op << " response missing state\n";
+        return failedResult<RobotState>(
+            backend_op,
+            backendError(BackendErrorKind::UnsupportedSchema, "rbsim " + op + " response missing state"),
+            makeBackendTiming(start, nowSteadyNs())
+        );
     }
 
-    return true;
+    return okResult(backend_op, state, makeBackendTiming(start, nowSteadyNs()));
 }
 
 }  // namespace rb_servo

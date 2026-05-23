@@ -208,6 +208,14 @@ struct ServoSample {
 
     bool left_send_ok = false;
     bool right_send_ok = false;
+    std::string left_send_error_kind;
+    std::string left_send_error_name;
+    std::string left_send_error_code;
+    std::string left_send_error_message;
+    std::string right_send_error_kind;
+    std::string right_send_error_name;
+    std::string right_send_error_code;
+    std::string right_send_error_message;
     bool send_suppressed = false;
     std::string send_policy = "send_servo_j";
     uint64_t left_send_start_ns = 0;
@@ -255,6 +263,14 @@ struct ServoSnapshot {
 
     bool left_send_ok = false;
     bool right_send_ok = false;
+    std::string left_send_error_kind;
+    std::string left_send_error_name;
+    std::string left_send_error_code;
+    std::string left_send_error_message;
+    std::string right_send_error_kind;
+    std::string right_send_error_name;
+    std::string right_send_error_code;
+    std::string right_send_error_message;
     bool send_suppressed = false;
     std::string send_policy = "send_servo_j";
     uint64_t left_send_start_ns = 0;

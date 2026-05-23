@@ -67,8 +67,9 @@ private:
 
     void sendTargets(
         const ServoTarget& target,
-        bool* left_ok,
-        bool* right_ok,
+        uint64_t command_seq,
+        SendServoJResult* left_result,
+        SendServoJResult* right_result,
         uint64_t* left_send_start_ns,
         uint64_t* left_send_end_ns,
         uint64_t* right_send_start_ns,

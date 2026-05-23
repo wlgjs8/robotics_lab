@@ -71,47 +71,56 @@ public:
     TestBackend(rb_servo::ArmId arm_id, rb_servo::JointArray initial, bool fail_send)
         : arm_id_(arm_id), q_actual_(initial), q_target_(initial), fail_send_(fail_send) {}
 
-    bool connect() override {
+    rb_servo::BackendResult<rb_servo::RobotState> connect() override {
         connected_ = true;
-        return true;
+        return result(rb_servo::BackendOp::Connect, currentState(), true);
     }
 
-    bool initialize() override {
+    rb_servo::BackendResult<rb_servo::RobotState> initialize() override {
         initialized_ = true;
-        return true;
+        return result(rb_servo::BackendOp::Initialize, currentState(), true);
     }
 
-    bool readState(rb_servo::RobotState& out_state) override {
+    rb_servo::BackendResult<rb_servo::RobotState> readState() override {
         ++read_count_;
-        if (!read_ok_) return false;
-        out_state.arm_id = arm_id_;
-        out_state.host_time_ns = rb_servo::nowSteadyNs();
-        out_state.q_actual_deg = q_actual_;
-        out_state.q_target_deg = q_target_;
-        out_state.has_valid_joint_state = valid_joint_state_;
-        out_state.connection_state = connected_
-            ? rb_servo::RobotConnectionState::Connected
-            : rb_servo::RobotConnectionState::Disconnected;
-        out_state.servo_enabled = initialized_;
-        out_state.has_error = has_error_;
-        return true;
+        if (!read_ok_) {
+            return result(
+                rb_servo::BackendOp::ReadState,
+                currentState(),
+                false,
+                rb_servo::backendError(rb_servo::BackendErrorKind::TransportReadFailed, "test read failed")
+            );
+        }
+        return result(rb_servo::BackendOp::ReadState, currentState(), true);
     }
 
-    bool sendServoJ(const rb_servo::JointArray& q_target_deg) override {
+    rb_servo::SendServoJResult sendServoJ(const rb_servo::SendServoJRequest& request) override {
         ++send_count_;
-        if (fail_send_) return false;
-        q_target_ = q_target_deg;
-        q_actual_ = q_target_deg;
-        return true;
+        if (fail_send_) {
+            return rb_servo::rejectedSend(
+                request,
+                rb_servo::backendError(rb_servo::BackendErrorKind::ControllerRejected, "test send failed")
+            );
+        }
+        q_target_ = request.q_target_deg;
+        q_actual_ = request.q_target_deg;
+        return rb_servo::acceptedSend(request, {}, currentState(), "cache");
     }
 
-    bool stop() override { return true; }
-    bool resetFault() override {
+    rb_servo::BackendResult<rb_servo::RobotState> stop() override {
+        return result(rb_servo::BackendOp::Stop, currentState(), true);
+    }
+    rb_servo::BackendResult<rb_servo::RobotState> resetFault() override {
         ++reset_count_;
         if (invalidate_joint_state_on_reset_) {
             valid_joint_state_ = false;
         }
-        return reset_ok_;
+        return result(
+            rb_servo::BackendOp::ResetFault,
+            currentState(),
+            reset_ok_,
+            rb_servo::backendError(rb_servo::BackendErrorKind::ControllerRejected, "test reset failed")
+        );
     }
     bool isConnected() const override { return connected_; }
     rb_servo::ArmId armId() const override { return arm_id_; }
@@ -128,6 +137,35 @@ public:
     int sendCount() const { return send_count_; }
 
 private:
+    rb_servo::RobotState currentState() const {
+        rb_servo::RobotState state;
+        state.arm_id = arm_id_;
+        state.host_time_ns = rb_servo::nowSteadyNs();
+        state.q_actual_deg = q_actual_;
+        state.q_target_deg = q_target_;
+        state.has_valid_joint_state = valid_joint_state_;
+        state.connection_state = connected_
+            ? rb_servo::RobotConnectionState::Connected
+            : rb_servo::RobotConnectionState::Disconnected;
+        state.servo_enabled = initialized_;
+        state.has_error = has_error_;
+        return state;
+    }
+
+    rb_servo::BackendResult<rb_servo::RobotState> result(
+        rb_servo::BackendOp op,
+        const rb_servo::RobotState& state,
+        bool ok,
+        const rb_servo::BackendError& error = rb_servo::noBackendError()
+    ) const {
+        rb_servo::BackendResult<rb_servo::RobotState> out;
+        out.ok = ok;
+        out.op = op;
+        out.value = state;
+        out.error = ok ? rb_servo::noBackendError() : error;
+        return out;
+    }
+
     rb_servo::ArmId arm_id_;
     rb_servo::JointArray q_actual_{};
     rb_servo::JointArray q_target_{};
@@ -712,12 +750,13 @@ bool testRbsimBackendMapsStateAndFailureResponses() {
     cfg.rbsim_request_timeout_sec = 0.2;
 
     rb_servo::RbsimBackend backend(rb_servo::ArmId::Left, cfg);
-    RB_CHECK(backend.connect());
+    RB_CHECK(backend.connect().ok);
     RB_CHECK(backend.isConnected());
-    RB_CHECK(backend.initialize());
+    RB_CHECK(backend.initialize().ok);
 
-    rb_servo::RobotState state;
-    RB_CHECK(backend.readState(state));
+    rb_servo::BackendResult<rb_servo::RobotState> state_result = backend.readState();
+    RB_CHECK(state_result.ok);
+    rb_servo::RobotState state = state_result.value;
     RB_CHECK(state.arm_id == rb_servo::ArmId::Left);
     RB_CHECK(state.connection_state == rb_servo::RobotConnectionState::Connected);
     RB_CHECK(state.has_valid_joint_state);
@@ -731,18 +770,30 @@ bool testRbsimBackendMapsStateAndFailureResponses() {
     rb_servo::JointArray target = state.q_actual_deg;
     target[0] += 1.25;
     target[5] -= 2.5;
-    RB_CHECK(backend.sendServoJ(target));
-    RB_CHECK(backend.readState(state));
+    rb_servo::SendServoJRequest request;
+    request.q_target_deg = target;
+    RB_CHECK(backend.sendServoJ(request).accepted);
+    state_result = backend.readState();
+    RB_CHECK(state_result.ok);
+    state = state_result.value;
     RB_CHECK(sameJointArray(state.q_target_deg, target));
 
     server->failNextSend();
     target[0] += 5.0;
-    RB_CHECK(!backend.sendServoJ(target));
-    RB_CHECK(backend.readState(state));
+    request.q_target_deg = target;
+    const rb_servo::SendServoJResult rejected = backend.sendServoJ(request);
+    RB_CHECK(!rejected.accepted);
+    RB_CHECK(rejected.error.kind == rb_servo::BackendErrorKind::ProtocolError);
+    RB_CHECK(rejected.error.name == "send_failure_injected");
+    RB_CHECK(rejected.error.code == "2101");
+    RB_CHECK(rejected.error.message == "send failure injected");
+    state_result = backend.readState();
+    RB_CHECK(state_result.ok);
+    state = state_result.value;
     RB_CHECK(state.q_target_deg[0] == 1.25);
 
-    RB_CHECK(backend.stop());
-    RB_CHECK(backend.resetFault());
+    RB_CHECK(backend.stop().ok);
+    RB_CHECK(backend.resetFault().ok);
     return true;
 }
 
@@ -936,13 +987,17 @@ bool testRbsimStopFailureDoesNotReportStoppedState() {
         rb_servo::ArmId::Left,
         rbsimBackendConfig(rb_servo::ArmId::Left, server->endpoint(), "_stop_failure")
     );
-    RB_CHECK(backend.connect());
-    RB_CHECK(backend.initialize());
+    RB_CHECK(backend.connect().ok);
+    RB_CHECK(backend.initialize().ok);
     server->setStopFailure("left", true);
-    RB_CHECK(!backend.stop());
+    const rb_servo::BackendResult<rb_servo::RobotState> stop_result = backend.stop();
+    RB_CHECK(!stop_result.ok);
+    RB_CHECK(stop_result.error.name == "stop_failure_injected");
+    RB_CHECK(stop_result.error.code == "2102");
 
-    rb_servo::RobotState state;
-    RB_CHECK(backend.readState(state));
+    const rb_servo::BackendResult<rb_servo::RobotState> state_result = backend.readState();
+    RB_CHECK(state_result.ok);
+    const rb_servo::RobotState state = state_result.value;
     RB_CHECK(state.connection_state == rb_servo::RobotConnectionState::Connected);
     RB_CHECK(state.servo_enabled);
     return true;
