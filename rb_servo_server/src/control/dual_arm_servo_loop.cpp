@@ -405,14 +405,14 @@ void DualArmServoLoop::loopMain() {
         last_loop_start_ns_ = loop_start;
 
         const uint64_t worker_state_max_age_ns = std::max<uint64_t>(2 * nominal_period_ns, 1'000'000);
-        const BackendResult<RobotState> left_state_result = workerIoMode()
+        BackendResult<RobotState> left_state_result = workerIoMode()
             ? (left_worker_
                 ? left_worker_->latestState(worker_state_max_age_ns)
                 : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "left worker unavailable")))
             : (left_robot_
                 ? left_robot_->readState()
                 : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "left backend unavailable")));
-        const BackendResult<RobotState> right_state_result = workerIoMode()
+        BackendResult<RobotState> right_state_result = workerIoMode()
             ? (right_worker_
                 ? right_worker_->latestState(worker_state_max_age_ns)
                 : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "right worker unavailable")))
@@ -427,12 +427,12 @@ void DualArmServoLoop::loopMain() {
         populateTcpPose(left_state, config_.left_mount);
         populateTcpPose(right_state, config_.right_mount);
 
-        const FaultContext left_read_fault = classifyReadStateResult(left_state_result, ArmId::Left);
-        const FaultContext right_read_fault = classifyReadStateResult(right_state_result, ArmId::Right);
-        const FaultContext read_fault = left_read_fault.verdict != SafetyVerdict::Ok
+        FaultContext left_read_fault = classifyReadStateResult(left_state_result, ArmId::Left);
+        FaultContext right_read_fault = classifyReadStateResult(right_state_result, ArmId::Right);
+        FaultContext read_fault = left_read_fault.verdict != SafetyVerdict::Ok
             ? left_read_fault
             : right_read_fault;
-        const bool state_ok = read_fault.verdict == SafetyVerdict::Ok;
+        bool state_ok = read_fault.verdict == SafetyVerdict::Ok;
 
         DualArmCommand command = command_buffer_
             ? command_buffer_->latestOrHold(loop_start)
@@ -465,7 +465,17 @@ void DualArmServoLoop::loopMain() {
             if (readOnlyMode()) {
                 command = metadata_hold(command);
             } else if (fault_latched_.load()) {
-                clearFaultLatch(left_state, right_state);
+                if (clearFaultLatch(left_state, right_state)) {
+                    const BackendTiming reset_read_timing = makeBackendTiming(loop_start, nowSteadyNs());
+                    left_state_result = okReadState(left_state, reset_read_timing);
+                    right_state_result = okReadState(right_state, reset_read_timing);
+                    left_read_fault = classifyReadStateResult(left_state_result, ArmId::Left);
+                    right_read_fault = classifyReadStateResult(right_state_result, ArmId::Right);
+                    read_fault = left_read_fault.verdict != SafetyVerdict::Ok
+                        ? left_read_fault
+                        : right_read_fault;
+                    state_ok = read_fault.verdict == SafetyVerdict::Ok;
+                }
             } else {
                 setMotionState(ServerMotionState::ConnectedHold);
             }

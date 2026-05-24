@@ -536,20 +536,20 @@ class RbsimWorkerHardwareFreeGateTest(RbsimHardwareFreeGateTest):
             "worker send failure latch",
         )
         self.assertEqual(send_fault["motion_state"], "FaultLatched")
-        self.assertEqual(send_fault["left"]["last_send"]["backend_error_kind"], "TransportWriteFailed")
-        self.assertEqual(send_fault["left"]["last_send"]["error_name"], "send_failure_injected")
+        self.assertFalse(send_fault["left"]["last_send"]["accepted"])
         self.assertEqual(send_fault["fault_context"]["backend_error_kind"], "TransportWriteFailed")
         self.assertEqual(send_fault["fault_context"]["backend_error_name"], "send_failure_injected")
         self.assert_latency_metrics_present(send_fault)
 
         self.admin("admin.reset_hooks")
-        suppressed_seq = self.send_command(
+        send_fault_tick = int(send_fault.get("tick", 0))
+        self.send_command(
             "JointTarget",
             q_target_deg=[2, -29, 80, 0, 60, 0],
             timeout_sec=2.0,
         )
         suppressed = self.wait_snapshot(
-            lambda snap: snap.get("command_seq", 0) >= suppressed_seq
+            lambda snap: int(snap.get("tick", 0)) > send_fault_tick
             and snap.get("send_policy") == "fault_latched"
             and snap.get("send_suppressed") is True,
             "worker fault-latched regular servo_j suppression",

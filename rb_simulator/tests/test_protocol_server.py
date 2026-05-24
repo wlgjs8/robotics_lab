@@ -230,6 +230,113 @@ class JsonlProtocolServerTest(unittest.TestCase):
         finally:
             service.stop()
 
+    def test_tcp_service_keeps_jsonl_connection_after_protocol_robot_errors(self) -> None:
+        config = load_simulator_config(CONFIG_LEFT)
+        service = RbsimService.with_binds(config, "tcp://127.0.0.1:0", "tcp://127.0.0.1:0")
+        try:
+            service.start(start_tick_loop=False)
+        except PermissionError as exc:
+            self.skipTest(f"loopback sockets are unavailable in this environment: {exc}")
+        try:
+            with socket.create_connection(service.control_address, timeout=1.0) as control_sock:
+                with control_sock.makefile("rwb") as control_file:
+                    connected = self.tcp_file_request(
+                        control_file,
+                        {
+                            "schema_version": PROTOCOL_VERSION,
+                            "request_id": "persist-connect",
+                            "op": "connect",
+                            "arm": "left",
+                        },
+                    )
+                    self.assertTrue(connected["ok"])
+
+                    initialized_disabled = self.tcp_file_request(
+                        control_file,
+                        {
+                            "schema_version": PROTOCOL_VERSION,
+                            "request_id": "persist-init-disabled",
+                            "op": "initialize",
+                            "arm": "left",
+                            "params": {"enable_servo": False},
+                        },
+                    )
+                    self.assertTrue(initialized_disabled["ok"])
+
+                    servo_disabled = self.tcp_file_request(
+                        control_file,
+                        {
+                            "schema_version": PROTOCOL_VERSION,
+                            "request_id": "persist-servo-disabled",
+                            "op": "send_servo_j",
+                            "arm": "left",
+                            "params": {"q_target_deg": [0, -30, 80, 0, 60, 0]},
+                        },
+                    )
+                    self.assertFalse(servo_disabled["ok"])
+                    self.assertEqual(servo_disabled["error"]["kind"], "ServoDisabled")
+
+                    wrong_arm = self.tcp_file_request(
+                        control_file,
+                        {
+                            "schema_version": PROTOCOL_VERSION,
+                            "request_id": "persist-wrong-arm",
+                            "op": "read_state",
+                            "arm": "right",
+                        },
+                    )
+                    self.assertFalse(wrong_arm["ok"])
+                    self.assertEqual(wrong_arm["error"]["kind"], "WrongArm")
+
+                    reinitialized = self.tcp_file_request(
+                        control_file,
+                        {
+                            "schema_version": PROTOCOL_VERSION,
+                            "request_id": "persist-reinit",
+                            "op": "initialize",
+                            "arm": "left",
+                        },
+                    )
+                    self.assertTrue(reinitialized["ok"])
+
+                    faulted = self.tcp_request(
+                        service.admin_address,
+                        {
+                            "schema_version": PROTOCOL_VERSION,
+                            "request_id": "persist-set-fault",
+                            "op": "admin.set_fault",
+                            "params": {"error_code": 4321},
+                        },
+                    )
+                    self.assertTrue(faulted["ok"])
+
+                    robot_fault = self.tcp_file_request(
+                        control_file,
+                        {
+                            "schema_version": PROTOCOL_VERSION,
+                            "request_id": "persist-robot-fault",
+                            "op": "send_servo_j",
+                            "arm": "left",
+                            "params": {"q_target_deg": [1, -30, 80, 0, 60, 0]},
+                        },
+                    )
+                    self.assertFalse(robot_fault["ok"])
+                    self.assertEqual(robot_fault["error"]["kind"], "RobotFault")
+
+                    still_open = self.tcp_file_request(
+                        control_file,
+                        {
+                            "schema_version": PROTOCOL_VERSION,
+                            "request_id": "persist-read-after-errors",
+                            "op": "read_state",
+                            "arm": "left",
+                        },
+                    )
+                    self.assertTrue(still_open["ok"])
+                    self.assertEqual(still_open["state"]["error_code"], 4321)
+        finally:
+            service.stop()
+
     def test_left_and_right_services_can_run_concurrently(self) -> None:
         left = RbsimService.with_binds(
             load_simulator_config(CONFIG_LEFT),
@@ -281,6 +388,17 @@ class JsonlProtocolServerTest(unittest.TestCase):
             response = sock.makefile("rb").readline()
         decoded = json.loads(response.decode("utf-8"))
         self.assertEqual(decoded["schema_version"], PROTOCOL_VERSION)
+        return decoded
+
+    def tcp_file_request(self, sock_file: Any, payload: dict[str, Any]) -> dict[str, Any]:
+        line = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+        sock_file.write(line)
+        sock_file.flush()
+        response = sock_file.readline()
+        self.assertNotEqual(response, b"", f"socket closed before response to {payload.get('request_id')}")
+        decoded = json.loads(response.decode("utf-8"))
+        self.assertEqual(decoded["schema_version"], PROTOCOL_VERSION)
+        self.assertEqual(decoded["request_id"], payload["request_id"])
         return decoded
 
 

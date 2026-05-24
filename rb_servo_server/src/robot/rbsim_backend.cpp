@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -369,6 +370,7 @@ private:
             return false;
         }
 
+        enableTcpNoDelay(opened_fd);
         if (counters_.connections_opened_total > 0) {
             counters_.reconnects_total += 1;
         }
@@ -386,6 +388,14 @@ private:
         timeval tv = timeoutValue(timeout_sec);
         (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
+
+    void enableTcpNoDelay(int fd) const {
+        const int enabled = 1;
+        if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)) != 0) {
+            std::cerr << "[WARN] RbsimBackend failed to set TCP_NODELAY for "
+                      << endpoint_text_ << ": " << std::strerror(errno) << "\n";
+        }
     }
 
     BackendError sendAll(const std::string& payload, const std::string& op) {
