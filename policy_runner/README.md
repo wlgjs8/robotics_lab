@@ -83,6 +83,20 @@ python3 -m policy_runner --config policy_runner/config/simulator_hold.yaml
 The default command endpoint is `udp://127.0.0.1:50010`. The state subscriber
 bind must match the `rb_servo_server` state publisher destination.
 
+Simulation-only example configs:
+
+- `policy_runner/config/simulator_hold.yaml`: no-op runner for state/command
+  wiring checks.
+- `policy_runner/config/simulator_spacemouse_joint_velocity.yaml`:
+  SpaceMouse joint velocity teleop.
+- `policy_runner/config/simulator_tcp_delta.yaml`: scripted stand-frame
+  `TcpDeltaStand`.
+- `policy_runner/config/simulator_spacemouse_cartesian.yaml`: SpaceMouse
+  stand-frame `TcpDeltaStand`.
+
+These examples use loopback simulator endpoints and do not enable real motion
+or real Cartesian motion.
+
 ## SpaceMouse Joint Velocity
 
 SpaceMouse support belongs in `policy_runner`, not `rb_gui`. P1 only maps the
@@ -139,10 +153,10 @@ Example config fields:
 action_source: spacemouse_cartesian
 runtime:
   startup_timeout_sec: 5.0
+command_rate_hz: 30
 spacemouse_cartesian:
   selected_arm: left
   frame: stand
-  command_rate_hz: 30
   max_linear_step_m: 0.002
   max_angular_step_rad: 0.01
   deadband: 0.08
