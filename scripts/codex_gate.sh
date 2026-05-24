@@ -324,6 +324,7 @@ run_p3f_gate() {
   run_shell_syntax_checks
   grep_existing "RB_ALLOW_REAL_CARTESIAN" docs/runbooks/tcp_pose_simulator_acceptance.md README.md rb_servo_server/docs
   run_optional_pinocchio_gate
+  run_optional_tcp_pose_acceptance
 }
 
 run_mig12_gate() {
@@ -500,9 +501,7 @@ case "$TASK" in
     check_tcp_pose_docs
     run_servo_gate_or_skip_missing_deps
     run_optional_pinocchio_gate
-    if [[ "${CODEX_RUN_TCP_ACCEPTANCE:-0}" == "1" ]]; then
-      run_optional_tcp_pose_acceptance
-    fi
+    run_optional_tcp_pose_acceptance
     ;;
   HARDEN-07)
     run_servo_gate_or_skip_missing_deps

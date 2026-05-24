@@ -108,3 +108,5 @@ cartesian_control:
   enable: true
   allow_in_simulation: true
   allow_in_real: false
+  warn_ik_duration_us: 3000
+  fail_ik_duration_us: 5000

@@ -303,6 +303,8 @@ bool testTcpAcceptanceConfigContract() {
     RB_CHECK(cfg.cartesian_control.enable);
     RB_CHECK(cfg.cartesian_control.allow_in_simulation);
     RB_CHECK(!cfg.cartesian_control.allow_in_real);
+    RB_CHECK(std::fabs(cfg.cartesian_control.warn_ik_duration_us - 3000.0) < 1e-12);
+    RB_CHECK(std::fabs(cfg.cartesian_control.fail_ik_duration_us - 5000.0) < 1e-12);
     RB_CHECK(cfg.force_control.provider == "null");
     RB_CHECK(!cfg.force_control.enable);
     return true;
@@ -407,7 +409,7 @@ bool testStatePublisherSerializesTcpPoseValidity() {
     snapshot.left_state.connection_state = rb_servo::RobotConnectionState::Connected;
     snapshot.left_state.tcp_base = rb_servo::Pose6D{0.1, 0.2, 0.3, 0.01, 0.02, 0.03};
     snapshot.left_state.tcp_stand = rb_servo::Pose6D{1.1, 1.2, 1.3, 0.11, 0.12, 0.13};
-    snapshot.left_state.tcp_base->quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 2.0};
+    snapshot.left_state.tcp_base->quaternion_xyzw = std::array<double, 4>{1.0, 2.0, 3.0, 4.0};
     snapshot.left_state.tcp_stand->quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
     snapshot.left_state.has_valid_tcp_pose = true;
     snapshot.left_state.tcp_deferred = false;
@@ -425,10 +427,19 @@ bool testStatePublisherSerializesTcpPoseValidity() {
     RB_CHECK(!json.at("left").at("tcp_base").is_null());
     RB_CHECK(!json.at("left").at("tcp_stand").is_null());
     RB_CHECK(json.at("left").at("tcp_base").at("x").get<double>() == 0.1);
+    RB_CHECK(json.at("left").at("tcp_base").at("rx").get<double>() == 0.01);
+    RB_CHECK(json.at("left").at("tcp_base").at("ry").get<double>() == 0.02);
+    RB_CHECK(json.at("left").at("tcp_base").at("rz").get<double>() == 0.03);
     RB_CHECK(json.at("left").at("tcp_base").at("quaternion_xyzw").is_array());
-    RB_CHECK(json.at("left").at("tcp_base").at("quaternion_xyzw").at(3).get<double>() == 1.0);
-    RB_CHECK(json.at("left").at("tcp_base").at("qx").get<double>() == 0.0);
-    RB_CHECK(json.at("left").at("tcp_base").at("qw").get<double>() == 1.0);
+    const double q_norm = std::sqrt(1.0 + 4.0 + 9.0 + 16.0);
+    RB_CHECK(std::fabs(json.at("left").at("tcp_base").at("quaternion_xyzw").at(0).get<double>() - 1.0 / q_norm) < 1e-12);
+    RB_CHECK(std::fabs(json.at("left").at("tcp_base").at("quaternion_xyzw").at(1).get<double>() - 2.0 / q_norm) < 1e-12);
+    RB_CHECK(std::fabs(json.at("left").at("tcp_base").at("quaternion_xyzw").at(2).get<double>() - 3.0 / q_norm) < 1e-12);
+    RB_CHECK(std::fabs(json.at("left").at("tcp_base").at("quaternion_xyzw").at(3).get<double>() - 4.0 / q_norm) < 1e-12);
+    RB_CHECK(std::fabs(json.at("left").at("tcp_base").at("qx").get<double>() - 1.0 / q_norm) < 1e-12);
+    RB_CHECK(std::fabs(json.at("left").at("tcp_base").at("qy").get<double>() - 2.0 / q_norm) < 1e-12);
+    RB_CHECK(std::fabs(json.at("left").at("tcp_base").at("qz").get<double>() - 3.0 / q_norm) < 1e-12);
+    RB_CHECK(std::fabs(json.at("left").at("tcp_base").at("qw").get<double>() - 4.0 / q_norm) < 1e-12);
     RB_CHECK(json.at("left").at("has_valid_tcp_pose").get<bool>());
     RB_CHECK(!json.at("left").at("tcp_deferred").get<bool>());
 

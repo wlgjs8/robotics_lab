@@ -2,10 +2,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <unistd.h>
 
 #include "rb_servo/config/config.hpp"
+#include "rb_servo/control/cartesian_controller.hpp"
 #include "rb_servo/kinematics/ik_solver.hpp"
 #include "rb_servo/kinematics/pinocchio_kinematics.hpp"
 
@@ -72,6 +74,13 @@ rb_servo::ArmMountConfig leftMount() {
     return mount;
 }
 
+rb_servo::ArmMountConfig rightMount() {
+    rb_servo::ArmMountConfig mount;
+    mount.arm_id = rb_servo::ArmId::Right;
+    mount.base_pose_in_stand = {-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0};
+    return mount;
+}
+
 rb_servo::JointArray seedJoints() {
     return {10.0, -20.0, 35.0, 5.0, 25.0, -15.0};
 }
@@ -125,6 +134,49 @@ std::string validIkYaml(const std::string& urdf_path) {
         "  fail_ik_duration_us: 4500\n";
 }
 
+class LatencyKinematics final : public rb_servo::IKinematics {
+public:
+    explicit LatencyKinematics(double duration_us) : duration_us_(duration_us) {}
+
+    rb_servo::Pose6D computeTcpBase(const rb_servo::JointArray& q_deg) const override {
+        return {q_deg[0] * 0.001, q_deg[1] * 0.001, 0.4, 0.0, 0.0, 0.0};
+    }
+
+    rb_servo::Pose6D computeTcpStand(
+        rb_servo::ArmId arm,
+        const rb_servo::JointArray& q_deg,
+        const rb_servo::ArmMountConfig& mount
+    ) const override {
+        (void)arm;
+        rb_servo::Pose6D pose = computeTcpBase(q_deg);
+        pose.x += mount.base_pose_in_stand.x;
+        pose.y += mount.base_pose_in_stand.y;
+        pose.z += mount.base_pose_in_stand.z;
+        return pose;
+    }
+
+    rb_servo::IkResult solveIk(
+        rb_servo::ArmId arm,
+        const rb_servo::Pose6D& target_tcp_stand,
+        const rb_servo::JointArray& seed_q_deg,
+        const rb_servo::ArmMountConfig& mount
+    ) const override {
+        (void)arm;
+        (void)target_tcp_stand;
+        (void)mount;
+        rb_servo::IkResult result;
+        result.success = true;
+        result.q_solution_deg = seed_q_deg;
+        result.duration_us = duration_us_;
+        result.iterations = 3;
+        result.reason = "ok";
+        return result;
+    }
+
+private:
+    double duration_us_;
+};
+
 bool testIkConfigParsing() {
     const std::string path = writeTempConfig("valid", validIkYaml(rb3Urdf().string()));
     const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
@@ -154,6 +206,87 @@ bool testIkConfigParsing() {
     const bool bad_iter_rejected = loadRejects(bad_iter_path);
     ::unlink(bad_iter_path.c_str());
     RB_CHECK(bad_iter_rejected);
+    return true;
+}
+
+bool testCartesianLatencyBudgetTelemetry() {
+    rb_servo::CartesianControlConfig cfg;
+    cfg.enable = true;
+    cfg.allow_in_simulation = true;
+    cfg.allow_in_real = false;
+    cfg.warn_ik_duration_us = 100.0;
+    cfg.fail_ik_duration_us = 200.0;
+
+    rb_servo::RobotState state;
+    state.arm_id = rb_servo::ArmId::Left;
+    state.has_valid_joint_state = true;
+    state.q_actual_deg = seedJoints();
+    state.fk_duration_us = 42.0;
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpPoseTarget;
+    command.has_tcp_target = true;
+    command.tcp_target_stand = {0.2, -0.1, 0.7, 0.01, 0.02, 0.03};
+
+    rb_servo::CartesianController slow_sim_controller(
+        leftMount(),
+        rightMount(),
+        cfg,
+        std::make_shared<LatencyKinematics>(250.0)
+    );
+    const rb_servo::CartesianArmTargetResult slow_sim = slow_sim_controller.computeArmJointTarget(
+        command,
+        state,
+        seedJoints(),
+        rb_servo::RunMode::Simulation
+    );
+    RB_CHECK(slow_sim.verdict == rb_servo::SafetyVerdict::IkFailed);
+    RB_CHECK(slow_sim.reason == "ik_duration_budget_exceeded");
+    RB_CHECK(slow_sim.telemetry.attempted);
+    RB_CHECK(!slow_sim.telemetry.success);
+    RB_CHECK(slow_sim.telemetry.status == "failed");
+    RB_CHECK(slow_sim.telemetry.fk_duration_us == 42.0);
+    RB_CHECK(slow_sim.telemetry.ik_duration_us == 250.0);
+    RB_CHECK(slow_sim.telemetry.ik_iterations == 3);
+    RB_CHECK(slow_sim.telemetry.ik_warn_duration_exceeded);
+    RB_CHECK(slow_sim.telemetry.ik_fail_duration_exceeded);
+    RB_CHECK(slow_sim.telemetry.warn_ik_duration_us == 100.0);
+    RB_CHECK(slow_sim.telemetry.fail_ik_duration_us == 200.0);
+    RB_CHECK(closeJoints(slow_sim.q_target_deg, seedJoints(), 1e-12));
+
+    rb_servo::CartesianController warned_controller(
+        leftMount(),
+        rightMount(),
+        cfg,
+        std::make_shared<LatencyKinematics>(150.0)
+    );
+    const rb_servo::CartesianArmTargetResult warned = warned_controller.computeArmJointTarget(
+        command,
+        state,
+        seedJoints(),
+        rb_servo::RunMode::Simulation
+    );
+    RB_CHECK(warned.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(warned.telemetry.success);
+    RB_CHECK(warned.telemetry.ik_warn_duration_exceeded);
+    RB_CHECK(!warned.telemetry.ik_fail_duration_exceeded);
+
+    rb_servo::CartesianController real_mode_controller(
+        leftMount(),
+        rightMount(),
+        cfg,
+        std::make_shared<LatencyKinematics>(250.0)
+    );
+    const rb_servo::CartesianArmTargetResult real_mode = real_mode_controller.computeArmJointTarget(
+        command,
+        state,
+        seedJoints(),
+        rb_servo::RunMode::Real
+    );
+    RB_CHECK(real_mode.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(real_mode.telemetry.ik_warn_duration_exceeded);
+    RB_CHECK(!real_mode.telemetry.ik_fail_duration_exceeded);
     return true;
 }
 
@@ -306,6 +439,7 @@ bool testInvalidTargetDoesNotThrow() {
 
 int main() {
     if (!testIkConfigParsing()) return 1;
+    if (!testCartesianLatencyBudgetTelemetry()) return 1;
     if (!testDisabledBuildReturnsUnavailable()) return 1;
     if (!testPinocchioIkIfEnabled()) return 1;
     if (!testInvalidTargetDoesNotThrow()) return 1;

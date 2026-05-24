@@ -37,7 +37,7 @@ cartesian_control:
   allow_in_simulation: true
   allow_in_real: false
   warn_ik_duration_us: 3000
-  fail_ik_duration_us: 0  # disabled by default; simulator-only when set
+  fail_ik_duration_us: 5000
 
 servo:
   send_servo_commands: true
@@ -55,8 +55,9 @@ default server path is
 
 For syntax-only environments where Pinocchio is not installed, pass
 `--allow-missing-pinocchio`. That mode still validates the script, command-tool
-dry runs, and selected config contract, then exits before launching the
-simulator/server FK/IK acceptance sequence.
+dry runs, and selected config contract, then prints that runtime FK/IK
+acceptance was skipped because Pinocchio is unavailable before launching any
+simulator/server processes.
 
 ## Start Per-Arm Simulator Stack
 
@@ -76,7 +77,7 @@ one left simulator process, one right simulator process, and one
 `rb_servo_server` process unless `--assume-running` is passed:
 
 ```bash
-bash scripts/codex_gate.sh P3-F
+bash scripts/codex_gate.sh HARDEN-06
 
 cmake -S rb_servo_server -B rb_servo_server/build/pinocchio_gate \
   -DCMAKE_BUILD_TYPE=Debug \
@@ -188,6 +189,8 @@ Default behavior:
 - verifies the selected server config declares simulator-only endpoints,
   Pinocchio FK/TCP, IK, Cartesian simulation gates, and
   `servo.send_servo_commands: true`
+- verifies published TCP poses retain finite RPY fields and publish normalized
+  `quaternion_xyzw: [qx, qy, qz, qw]` with scalar aliases that match the array
 - starts host-loopback left/right simulator processes and `rb_servo_server`
 - captures the state stream
 - sends `ArmMotion`
@@ -197,8 +200,7 @@ Default behavior:
   per-arm `cartesian_solve` state fields, including count, min, p50, p95, max,
   timeout count, and iteration min/max
 - fails simulator acceptance if p95 IK latency is above `3000 us` or max IK
-  latency is above one 200 Hz loop period (`5000 us`), unless the run is
-  explicitly marked latency-informational only
+  latency is above one 200 Hz loop period (`5000 us`)
 - sends an unreachable `TcpPoseTarget`
 - verifies `IkFailed`, previous safe q retention, and continued state stream
 - attempts simulator `EmergencyStop` / `ResetFault` unless skipped
@@ -225,16 +227,16 @@ right_simulator.log
 ```json
 {
   "ik_latency_us": {
-    "count": 0,
-    "min": 0,
-    "p50": 0,
-    "p95": 0,
-    "max": 0,
+    "count": 2,
+    "min": 120,
+    "p50": 130,
+    "p95": 140,
+    "max": 140,
     "threshold_p95": 3000,
     "threshold_max": 5000,
     "timed_out_count": 0,
-    "iterations_min": 0,
-    "iterations_max": 0
+    "iterations_min": 1,
+    "iterations_max": 4
   }
 }
 ```
