@@ -52,6 +52,35 @@ max_time_diff_ms = 10 for software sync
 max_time_diff_ms = 5 for hardware sync
 ```
 
+Camera-dependent action sources must declare:
+
+```python
+ActionRequirements(requires_camera=True, camera_stale_timeout_sec=0.1)
+```
+
+Geometry-dependent camera policies must also declare
+`requires_camera_geometry=True`. Joint-only action sources must not depend on
+camera readiness.
+
+If a camera-health bridge projects camera state into the robot state stream,
+publish a `camera_readiness` object:
+
+```json
+{
+  "camera_readiness": {
+    "available": true,
+    "required_present": true,
+    "latest_bundle_age_ms": 50,
+    "stale": false
+  }
+}
+```
+
+Missing required cameras fail closed when `required_missing: true`,
+`required_present: false`, or `complete: false` is present. Stale cameras fail
+closed when `stale: true` is present or the latest age exceeds the source's
+`camera_stale_timeout_sec`.
+
 ## 4. Robot state alignment
 
 `policy_runner` subscribes to `rb_servo_server` state.

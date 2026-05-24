@@ -12,7 +12,8 @@ Do not start `camera_server`, Docker with USB access, RealSense capture, shared
 memory production endpoints, or recording until all items below are true.
 
 - Human approval for this exact hardware session is recorded.
-- Three physical RealSense cameras are connected and reserved for this test.
+- Three physical RealSense cameras are connected and reserved for this test:
+  one D435f head camera and two D405 wrist cameras.
 - USB and udev access are approved for the test host.
 - Storage target, retention period, and cleanup owner are recorded.
 - Test endpoints are isolated from production policy and metadata consumers.
@@ -62,6 +63,15 @@ sudo apt install libzmq3-dev
 
 Use `rs-enumerate-devices` for P0 serial discovery. A dedicated
 `camera_server/tools/list_realsense_devices` helper is still a future task.
+Real-camera Docker startup must use the explicit `real_camera` profile or the
+`make camera-real-up` wrapper; this grants camera USB/shared-memory access only
+and does not enable robot connection or robot motion gates.
+
+```bash
+docker compose --profile real_camera up --build camera_server
+# or, from the repository root:
+make camera-real-up
+```
 
 ## 2. Hardware inventory
 
@@ -112,6 +122,7 @@ If the approved config changes `shared_memory.name`, use that value for
 Record:
 
 ```text
+artifact_dir: artifacts/camera_acceptance/<YYYYMMDD-HHMMSS>/10min/
 start_time:
 end_time:
 run_seconds:

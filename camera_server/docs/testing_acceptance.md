@@ -116,12 +116,25 @@ Initial milestone is done when:
 현재 repository에서 실행한 기본 검증은 다음과 같다.
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j2
-ctest --test-dir build --output-on-failure
-./build/camera_server --config config/mock_triple_realsense.yaml --run-seconds 2
-python3 tools/inspect_shm.py --shm /camera_server_frames_test
+cmake -S camera_server -B camera_server/build/hardware_free_gate \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCAMERA_SERVER_FORCE_MOCK_CAMERA=ON \
+  -DCAMERA_SERVER_FORCE_ZMQ_STUB=ON \
+  -DCAMERA_SERVER_BUILD_TESTS=ON
+cmake --build camera_server/build/hardware_free_gate -j
+ctest --test-dir camera_server/build/hardware_free_gate --output-on-failure
+camera_server/build/hardware_free_gate/camera_server \
+  --config camera_server/config/mock_triple_realsense.yaml \
+  --run-seconds 5 &
+server_pid=$!
+sleep 1
+python3 camera_server/tools/inspect_shm.py --shm /camera_server_frames_test
+wait "${server_pid}"
 ```
+
+Mock acceptance expects all three mock streams at 64x48 RGB and 30 FPS. Treat
+mock drop/skew metrics as schema and plumbing evidence only; they are not real
+camera hardware evidence.
 
 Hardware acceptance(실제 RealSense 3대 10분, Docker USB permission, disconnect test)는 실제 장비가 연결된 host에서 `config/triple_realsense_640x360.yaml` 또는 명시 승인된 `config/triple_realsense_640x480.yaml` variant를 복사하고 serial placeholder를 채운 뒤 수행해야 한다.
 The gated operator procedure and evidence template live in

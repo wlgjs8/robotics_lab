@@ -46,6 +46,37 @@ Hardware-free profile:
 bash scripts/check_deps.sh --profile hardware-free
 ```
 
+Mock-camera acceptance commands:
+
+```bash
+cmake -S camera_server -B camera_server/build/hardware_free_gate \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCAMERA_SERVER_FORCE_MOCK_CAMERA=ON \
+  -DCAMERA_SERVER_FORCE_ZMQ_STUB=ON \
+  -DCAMERA_SERVER_BUILD_TESTS=ON
+cmake --build camera_server/build/hardware_free_gate -j
+ctest --test-dir camera_server/build/hardware_free_gate --output-on-failure
+camera_server/build/hardware_free_gate/camera_server \
+  --config camera_server/config/mock_triple_realsense.yaml \
+  --run-seconds 5 &
+server_pid=$!
+sleep 1
+python3 camera_server/tools/inspect_shm.py --shm /camera_server_frames_test
+wait "${server_pid}"
+```
+
+Expected mock-camera profile:
+
+```text
+head mock:        64x48 RGB, 30 FPS
+left_wrist mock:  64x48 RGB, 30 FPS
+right_wrist mock: 64x48 RGB, 30 FPS
+drop/skew metrics: present in bundle and health telemetry, not used as real
+                   hardware acceptance evidence
+artifacts: camera_server/build/hardware_free_gate/Testing/Temporary/
+           plus any captured mock logs under artifacts/camera_acceptance/mock/
+```
+
 Real-camera profile:
 
 - Purpose: RealSense camera capture and metadata publishing.
@@ -55,6 +86,16 @@ Real-camera profile:
 
 ```bash
 bash scripts/check_deps.sh --profile real-camera
+```
+
+Real-camera startup must use an explicit profile and an approved local config
+copy. It is camera hardware only and does not set `RB_ALLOW_REAL_ROBOT`,
+`RB_ALLOW_REAL_MOTION`, or `RB_ALLOW_REAL_CARTESIAN`.
+
+```bash
+docker compose --profile real_camera up --build camera_server
+# or the repository wrapper:
+make camera-real-up
 ```
 
 Real-robot profile:
@@ -156,6 +197,7 @@ Run three stability windows:
 For each window, record:
 
 ```text
+artifact_dir: artifacts/camera_acceptance/<YYYYMMDD-HHMMSS>/<window_minutes>min/
 window_minutes:
 start_time:
 end_time:
@@ -227,6 +269,25 @@ observation source must declare `requires_camera: true` and a
 `camera_stale_timeout_sec`; geometry-dependent camera sources must also declare
 `requires_camera_geometry: true`.
 
+When camera readiness is bridged into the robot state stream, use the
+`camera_readiness` object so `policy_runner` can fail closed from state alone:
+
+```json
+{
+  "camera_readiness": {
+    "available": true,
+    "required_present": true,
+    "latest_bundle_age_ms": 50,
+    "stale": false
+  }
+}
+```
+
+Equivalent age fields ending in `_age_sec` are acceptable. Missing required
+cameras must set `required_missing: true` or `required_present: false`; stale
+camera data must either set `stale: true` or report an age greater than the
+action source `camera_stale_timeout_sec`.
+
 Acceptance:
 
 - Joint-only `policy_runner` actions remain allowed without camera readiness.
@@ -250,6 +311,30 @@ Attach these artifacts before marking real-camera acceptance complete:
 - Shared memory reader result.
 - USB disconnect and restart evidence.
 - Residual risks and follow-up tasks.
+
+Recommended artifact layout:
+
+```text
+artifacts/camera_acceptance/<YYYYMMDD-HHMMSS>/
+  approval.txt
+  deps/
+    hardware-free.txt
+    real-camera.txt
+  config/
+    approved_config.yaml
+    template_diff.patch
+  inventory/
+    rs-enumerate-devices.txt
+    rs-enumerate-devices-summary.txt
+    lsusb.txt
+  stability/
+    10min/
+    30min/
+    60min/
+  disconnect/
+  policy_runner/
+    readiness_checks.txt
+```
 
 Stop condition: if any required camera cannot hold the accepted profile, bundle
 rate/skew exceeds accepted limits without explanation, shared memory reads fail,

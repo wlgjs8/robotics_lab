@@ -84,7 +84,7 @@ class SafetyGate:
             and not _has_valid_joint_state(payload)
         ):
             return SafetyDecision(False, "invalid_joint_state")
-        camera_decision = self._evaluate_camera_requirements(requirements, now)
+        camera_decision = self._evaluate_camera_requirements(requirements, snapshot, now)
         if not camera_decision.allowed:
             return camera_decision
         if requirements.requires_kinematics and not self.config.kinematics_available:
@@ -118,12 +118,13 @@ class SafetyGate:
     def _evaluate_camera_requirements(
         self,
         requirements: ActionRequirements,
+        snapshot: StateSnapshot,
         now_monotonic: float,
     ) -> SafetyDecision:
         if not requirements.requires_camera:
             return SafetyDecision(True)
         timeout_sec = requirements.camera_stale_timeout_sec or self.config.camera_stale_timeout_sec
-        readiness = self.camera_readiness
+        readiness = camera_readiness_from_snapshot(snapshot, now_monotonic) or self.camera_readiness
         if readiness is None:
             if not self.config.camera_available:
                 return SafetyDecision(False, "camera_unavailable")
@@ -179,12 +180,67 @@ def _observed_mode(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def camera_readiness_from_snapshot(
+    snapshot: StateSnapshot,
+    now_monotonic: float | None = None,
+) -> CameraReadiness | None:
+    raw = snapshot.payload.get("camera_readiness")
+    if raw is None:
+        raw = snapshot.payload.get("camera")
+    if not isinstance(raw, dict):
+        return None
+    now = time.monotonic() if now_monotonic is None else now_monotonic
+    if _camera_readiness_missing(raw):
+        return CameraReadiness(available=False)
+    available = bool(raw.get("available", raw.get("healthy", False)))
+    stale = bool(raw.get("stale", False))
+    last_observed = _camera_last_observed_monotonic(raw, now)
+    return CameraReadiness(
+        available=available,
+        last_observed_monotonic_sec=last_observed,
+        stale=stale,
+    )
+
+
 def _observed_backend(payload: dict[str, Any]) -> str | None:
     for key in ("observed_backend", "backend_type", "backend"):
         value = payload.get(key)
         if isinstance(value, str) and value.lower() in {"mock", "simulator", "rbpodo"}:
             return value.lower()
     return None
+
+
+def _camera_readiness_missing(raw: dict[str, Any]) -> bool:
+    for key in ("missing", "required_missing", "required_camera_missing"):
+        value = raw.get(key)
+        if isinstance(value, bool) and value:
+            return True
+    complete = raw.get("complete")
+    if isinstance(complete, bool) and not complete:
+        return True
+    required_present = raw.get("required_present")
+    if isinstance(required_present, bool) and not required_present:
+        return True
+    return False
+
+
+def _camera_last_observed_monotonic(raw: dict[str, Any], now_monotonic: float) -> float | None:
+    value = raw.get("last_observed_monotonic_sec")
+    if _is_number(value):
+        return float(value)
+    for key in ("latest_observation_age_sec", "last_observation_age_sec", "bundle_age_sec", "latest_bundle_age_sec"):
+        value = raw.get(key)
+        if _is_number(value):
+            return now_monotonic - float(value)
+    for key in ("latest_observation_age_ms", "last_observation_age_ms", "bundle_age_ms", "latest_bundle_age_ms"):
+        value = raw.get(key)
+        if _is_number(value):
+            return now_monotonic - (float(value) / 1000.0)
+    return None
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _has_valid_joint_state(payload: dict[str, Any]) -> bool:

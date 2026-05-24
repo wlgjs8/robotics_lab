@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from policy_runner.config import SafetyConfig, config_from_mapping
 from policy_runner.geometry import geometry_status_from_mapping, load_geometry_status
 from policy_runner.robot_state_client import StateSnapshot
-from policy_runner.safety import ActionRequirements, CameraReadiness, SafetyGate
+from policy_runner.safety import ActionRequirements, CameraReadiness, SafetyGate, camera_readiness_from_snapshot
 from policy_runner.servo_command_client import CommandIntent
 
 
@@ -128,6 +128,38 @@ class GeometrySafetyTest(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "camera_unavailable")
 
+    def test_camera_dependent_action_uses_state_payload_readiness(self):
+        gate = SafetyGate("simulation", SafetyConfig(camera_available=False), stale_timeout_sec=0.5)
+        snapshot = sample_state(
+            camera_readiness={
+                "available": True,
+                "required_present": True,
+                "latest_bundle_age_ms": 50,
+            }
+        )
+
+        decision = gate.evaluate(
+            snapshot,
+            CommandIntent.hold(),
+            DummyCameraActionSource.requirements,
+            now_monotonic=20.0,
+        )
+
+        self.assertTrue(decision.allowed)
+
+    def test_camera_dependent_action_blocks_state_payload_missing_camera(self):
+        gate = SafetyGate("simulation", SafetyConfig(camera_available=True), stale_timeout_sec=0.5)
+
+        decision = gate.evaluate(
+            sample_state(camera_readiness={"available": True, "required_missing": True}),
+            CommandIntent.hold(),
+            DummyCameraActionSource.requirements,
+            now_monotonic=20.0,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "camera_unavailable")
+
     def test_camera_dependent_action_blocks_when_camera_readiness_is_stale(self):
         gate = SafetyGate(
             "simulation",
@@ -145,6 +177,29 @@ class GeometrySafetyTest(unittest.TestCase):
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "camera_stale")
+
+    def test_camera_dependent_action_blocks_state_payload_stale_camera(self):
+        gate = SafetyGate("simulation", SafetyConfig(camera_available=True), stale_timeout_sec=0.5)
+
+        decision = gate.evaluate(
+            sample_state(camera={"available": True, "latest_observation_age_sec": 0.25}),
+            CommandIntent.hold(),
+            DummyCameraActionSource.requirements,
+            now_monotonic=20.0,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "camera_stale")
+
+    def test_camera_readiness_parser_accepts_age_fields(self):
+        snapshot = sample_state(camera_readiness={"healthy": True, "bundle_age_sec": 0.1})
+
+        readiness = camera_readiness_from_snapshot(snapshot, now_monotonic=3.0)
+
+        self.assertIsNotNone(readiness)
+        assert readiness is not None
+        self.assertTrue(readiness.available)
+        self.assertEqual(readiness.last_observed_monotonic_sec, 2.9)
 
     def test_geometry_dependent_action_blocks_when_geometry_file_is_missing(self):
         missing = load_geometry_status(Path(__file__).resolve().parent / "missing_calibration.yaml")
