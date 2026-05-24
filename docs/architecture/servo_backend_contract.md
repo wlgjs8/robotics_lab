@@ -39,6 +39,7 @@ backend_type: simulator
 run_mode: simulation
 servo:
   io_model: worker
+  worker_read_period_sec: 0.01
   send_servo_commands: true
 ```
 
@@ -55,6 +56,8 @@ failures, and simulator robot faults.
 State snapshots and servo CSV logs expose MIG-10 diagnostics:
 
 - per-arm `state_age_us`
+- per-arm worker object `read_period_ns`, `read_period_sec`, `read_rate_hz`,
+  and `state_age_us`
 - per-arm `send_result_age_us`
 - top-level `command_seq`
 - per-arm and aggregate `send_deadline_hit`

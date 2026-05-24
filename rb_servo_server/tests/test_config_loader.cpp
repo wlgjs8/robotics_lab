@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -34,6 +35,10 @@ bool loadRejects(const std::string& path) {
     return false;
 }
 
+bool near(double a, double b) {
+    return std::abs(a - b) < 1e-12;
+}
+
 bool testRepositoryConfigsParse() {
     const std::filesystem::path config_dir =
         std::filesystem::path(__FILE__).parent_path().parent_path() / "config";
@@ -48,6 +53,7 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(mock.force_control.provider == "null");
     RB_CHECK(!mock.force_control.enable);
     RB_CHECK(mock.servo.io_model == rb_servo::ServoIoModel::Direct);
+    RB_CHECK(near(mock.servo.worker_read_period_sec, 0.01));
 
     const rb_servo::DualArmConfig simulator =
         rb_servo::loadConfigFromYaml((config_dir / "dual_simulator.yaml").string());
@@ -57,6 +63,11 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(simulator.right_robot.run_mode == rb_servo::RunMode::Simulation);
     RB_CHECK(simulator.left_robot.simulator_control_endpoint == "tcp://127.0.0.1:50200");
     RB_CHECK(simulator.right_robot.simulator_control_endpoint == "tcp://127.0.0.1:50210");
+
+    const rb_servo::DualArmConfig simulator_worker =
+        rb_servo::loadConfigFromYaml((config_dir / "dual_simulator_worker.yaml").string());
+    RB_CHECK(simulator_worker.servo.io_model == rb_servo::ServoIoModel::Worker);
+    RB_CHECK(near(simulator_worker.servo.worker_read_period_sec, 0.01));
 
     const rb_servo::DualArmConfig tcp_acceptance =
         rb_servo::loadConfigFromYaml((config_dir / "dual_simulator_tcp_acceptance.yaml").string());
@@ -73,10 +84,23 @@ bool testServoIoModelParsesAndValidates() {
         "schema: robotics_lab.rb_servo_server.v1\n"
         "servo:\n"
         "  io_model: worker\n"
+        "  worker_read_period_sec: 0.025\n"
     );
     const rb_servo::DualArmConfig worker = rb_servo::loadConfigFromYaml(worker_path);
     ::unlink(worker_path.c_str());
     RB_CHECK(worker.servo.io_model == rb_servo::ServoIoModel::Worker);
+    RB_CHECK(near(worker.servo.worker_read_period_sec, 0.025));
+
+    const std::string worker_rate_path = writeTempConfig(
+        "worker-read-rate",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  io_model: worker\n"
+        "  worker_read_rate_hz: 50\n"
+    );
+    const rb_servo::DualArmConfig worker_rate = rb_servo::loadConfigFromYaml(worker_rate_path);
+    ::unlink(worker_rate_path.c_str());
+    RB_CHECK(near(worker_rate.servo.worker_read_period_sec, 0.02));
 
     const std::string invalid_path = writeTempConfig(
         "invalid-io-model",
@@ -87,6 +111,27 @@ bool testServoIoModelParsesAndValidates() {
     const bool invalid_rejected = loadRejects(invalid_path);
     ::unlink(invalid_path.c_str());
     RB_CHECK(invalid_rejected);
+
+    const std::string invalid_period_path = writeTempConfig(
+        "invalid-worker-read-period",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  worker_read_period_sec: 0\n"
+    );
+    const bool invalid_period_rejected = loadRejects(invalid_period_path);
+    ::unlink(invalid_period_path.c_str());
+    RB_CHECK(invalid_period_rejected);
+
+    const std::string ambiguous_period_path = writeTempConfig(
+        "ambiguous-worker-read-period",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  worker_read_period_sec: 0.01\n"
+        "  worker_read_rate_hz: 100\n"
+    );
+    const bool ambiguous_period_rejected = loadRejects(ambiguous_period_path);
+    ::unlink(ambiguous_period_path.c_str());
+    RB_CHECK(ambiguous_period_rejected);
 
     const std::string real_worker_path = writeTempConfig(
         "real-worker-io-model",
@@ -101,6 +146,7 @@ bool testServoIoModelParsesAndValidates() {
         "  ip: \"172.28.60.201\"\n"
         "servo:\n"
         "  io_model: worker\n"
+        "  worker_read_period_sec: 0.01\n"
         "  send_servo_commands: false\n"
         "  enable_realtime_priority: true\n"
         "safety:\n"

@@ -15,7 +15,7 @@
 namespace rb_servo {
 
 struct ArmWorkerOptions {
-    uint64_t read_period_ns = 1'000'000;
+    uint64_t read_period_ns = 10'000'000;
     std::size_t lifecycle_queue_capacity = 4;
 };
 

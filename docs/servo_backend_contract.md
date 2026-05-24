@@ -293,7 +293,7 @@ overwrites an older pending request with a different command sequence, the
 older request is counted as dropped/superseded exactly once. Drops are
 diagnostic telemetry only and do not latch a fault by themselves.
 
-The per-arm worker telemetry fields are:
+The per-arm `ArmWorkerTelemetry` counters are:
 
 - `worker_queue_policy`, always `latest_wins`
 - `worker_command_drops_total`
@@ -303,12 +303,17 @@ The per-arm worker telemetry fields are:
 - `worker_last_dispatched_seq`
 - `worker_last_completed_seq`
 
-State JSON publishes the same data under each arm's `worker` object:
+State JSON publishes the same data under each arm's `worker` object and adds
+the configured worker read cadence plus cached-state age:
 
 ```json
 "worker": {
   "enabled": true,
   "queue_policy": "latest_wins",
+  "read_period_ns": 10000000,
+  "read_period_sec": 0.01,
+  "read_rate_hz": 100.0,
+  "state_age_us": 4300.0,
   "command_drops_total": 3,
   "pending_overwrites_total": 3,
   "last_dropped_seq": 1201,
@@ -317,6 +322,12 @@ State JSON publishes the same data under each arm's `worker` object:
   "last_completed_seq": 1204
 }
 ```
+
+The read cadence is configured under `servo.worker_read_period_sec` or,
+equivalently, `servo.worker_read_rate_hz`. The canonical stored value is the
+period, and configs must not set both forms. The default is 10 ms / 100 Hz so
+simulator worker mode does not poll at the servo loop's highest development
+rates by default.
 
 ## MIG-23 Worker Lifecycle Queue
 

@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -109,10 +110,38 @@ nlohmann::json backendCallJson(const BackendCallSnapshot& call, bool send_call) 
     return out;
 }
 
-nlohmann::json workerTelemetryJson(const ArmWorkerTelemetry& telemetry, bool enabled) {
+uint64_t workerReadPeriodNs(const ServoConfig& config, bool enabled) {
+    if (!enabled || config.worker_read_period_sec <= 0.0 || !std::isfinite(config.worker_read_period_sec)) {
+        return 0;
+    }
+    const double period_ns = config.worker_read_period_sec * 1'000'000'000.0;
+    if (!std::isfinite(period_ns) ||
+        period_ns >= static_cast<double>(std::numeric_limits<uint64_t>::max())) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return static_cast<uint64_t>(std::llround(period_ns));
+}
+
+double workerReadRateHz(const ServoConfig& config, bool enabled) {
+    if (!enabled || config.worker_read_period_sec <= 0.0 || !std::isfinite(config.worker_read_period_sec)) {
+        return 0.0;
+    }
+    return 1.0 / config.worker_read_period_sec;
+}
+
+nlohmann::json workerTelemetryJson(
+    const ArmWorkerTelemetry& telemetry,
+    bool enabled,
+    const ServoConfig& config,
+    double state_age_us
+) {
     return {
         {"enabled", enabled},
         {"queue_policy", telemetry.worker_queue_policy},
+        {"read_period_ns", workerReadPeriodNs(config, enabled)},
+        {"read_period_sec", enabled ? config.worker_read_period_sec : 0.0},
+        {"read_rate_hz", workerReadRateHz(config, enabled)},
+        {"state_age_us", enabled ? state_age_us : 0.0},
         {"command_drops_total", telemetry.worker_command_drops_total},
         {"pending_overwrites_total", telemetry.worker_pending_overwrites_total},
         {"last_dropped_seq", telemetry.worker_last_dropped_seq},
@@ -264,6 +293,7 @@ nlohmann::json armStateJson(
     double worker_loop_read_duration_us,
     const ArmWorkerTelemetry& worker_telemetry,
     bool worker_enabled,
+    const ServoConfig& servo_config,
     const CartesianSolveTelemetry& cartesian_solve
 ) {
     return {
@@ -283,7 +313,7 @@ nlohmann::json armStateJson(
         {"send_result_age_us", send_result_age_us},
         {"send_deadline_hit", send_deadline_hit},
         {"worker_loop_read_duration_us", worker_loop_read_duration_us},
-        {"worker", workerTelemetryJson(worker_telemetry, worker_enabled)},
+        {"worker", workerTelemetryJson(worker_telemetry, worker_enabled, servo_config, state_age_us)},
         {"has_valid_joint_state", state.has_valid_joint_state},
         {"connection_state", state.connection_state == RobotConnectionState::Connected
             ? "Connected"
@@ -363,6 +393,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         worker_enabled ? snapshot.left_last_read.duration_us : 0.0,
         snapshot.left_worker_telemetry,
         worker_enabled,
+        config_.servo,
         snapshot.left_cartesian_solve
     );
     message["right"] = armStateJson(
@@ -386,6 +417,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         worker_enabled ? snapshot.right_last_read.duration_us : 0.0,
         snapshot.right_worker_telemetry,
         worker_enabled,
+        config_.servo,
         snapshot.right_cartesian_solve
     );
     message["last_cartesian_solve"] = {

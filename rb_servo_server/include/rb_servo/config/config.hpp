@@ -100,6 +100,7 @@ struct ServoConfig {
     bool enable_realtime_priority = true;
     int realtime_priority = 80;
     int cpu_core = -1;
+    double worker_read_period_sec = 0.01;
 
     // Use actual period for logging, but cap filter dt so one late tick does not
     // create an unexpectedly large joint step.

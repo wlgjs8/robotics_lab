@@ -10,7 +10,7 @@ namespace rb_servo {
 namespace {
 
 std::chrono::nanoseconds readPeriod(const ArmWorkerOptions& options) {
-    const uint64_t period_ns = options.read_period_ns == 0 ? 1'000'000 : options.read_period_ns;
+    const uint64_t period_ns = options.read_period_ns == 0 ? 10'000'000 : options.read_period_ns;
     return std::chrono::nanoseconds(period_ns);
 }
 

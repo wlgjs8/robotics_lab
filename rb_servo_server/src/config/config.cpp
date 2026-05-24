@@ -340,6 +340,11 @@ void validatePositiveFiniteArray(const JointArray& values, const std::string& na
     }
 }
 
+double workerReadPeriodFromRate(double rate_hz, const std::string& name) {
+    validatePositiveFinite(rate_hz, name);
+    return 1.0 / rate_hz;
+}
+
 void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(static_cast<double>(cfg.servo.rate_hz), "servo.rate_hz");
     validatePositiveFinite(cfg.servo.command_timeout_sec, "servo.command_timeout_sec");
@@ -347,6 +352,7 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.safety.max_tracking_error_deg, "safety.max_tracking_error_deg");
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
     validatePositiveFinite(cfg.servo.filter_dt_max_ratio, "servo.filter_dt_max_ratio");
+    validatePositiveFinite(cfg.servo.worker_read_period_sec, "servo.worker_read_period_sec");
     validatePositiveFinite(static_cast<double>(cfg.network.state_pub_rate_hz), "network.state_pub_rate_hz");
     validatePositiveFinite(cfg.command_source.lease_timeout_sec, "command_source.lease_timeout_sec");
     validatePositiveFinite(cfg.left_robot.rbsim_request_timeout_sec, "left_robot.simulator_request_timeout_sec");
@@ -615,6 +621,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "enable_realtime_priority",
             "realtime_priority",
             "cpu_core",
+            "worker_read_period_sec",
+            "worker_read_rate_hz",
             "filter_dt_min_ratio",
             "filter_dt_max_ratio",
         }, "servo");
@@ -626,6 +634,15 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "enable_realtime_priority")) cfg.servo.enable_realtime_priority = asBool(sec["enable_realtime_priority"], "servo.enable_realtime_priority");
         if (has(sec, "realtime_priority")) cfg.servo.realtime_priority = asInt(sec["realtime_priority"], "servo.realtime_priority");
         if (has(sec, "cpu_core")) cfg.servo.cpu_core = asInt(sec["cpu_core"], "servo.cpu_core");
+        if (has(sec, "worker_read_period_sec") && has(sec, "worker_read_rate_hz")) {
+            fail("servo cannot set both worker_read_period_sec and worker_read_rate_hz", sec["worker_read_rate_hz"]);
+        }
+        if (has(sec, "worker_read_period_sec")) {
+            cfg.servo.worker_read_period_sec = asDouble(sec["worker_read_period_sec"], "servo.worker_read_period_sec");
+        } else if (has(sec, "worker_read_rate_hz")) {
+            cfg.servo.worker_read_period_sec =
+                workerReadPeriodFromRate(asDouble(sec["worker_read_rate_hz"], "servo.worker_read_rate_hz"), "servo.worker_read_rate_hz");
+        }
         if (has(sec, "filter_dt_min_ratio")) cfg.servo.filter_dt_min_ratio = asDouble(sec["filter_dt_min_ratio"], "servo.filter_dt_min_ratio");
         if (has(sec, "filter_dt_max_ratio")) cfg.servo.filter_dt_max_ratio = asDouble(sec["filter_dt_max_ratio"], "servo.filter_dt_max_ratio");
     }

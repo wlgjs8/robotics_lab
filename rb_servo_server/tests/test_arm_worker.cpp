@@ -269,6 +269,12 @@ bool testSuccessfulReadLoop() {
     return true;
 }
 
+bool testDefaultReadPeriodIsConservative() {
+    rb_servo::ArmWorkerOptions options;
+    RB_CHECK(options.read_period_ns == 10'000'000);
+    return true;
+}
+
 bool testLatestStateReportsStaleSample() {
     auto backend = std::make_unique<WorkerTestBackend>(rb_servo::ArmId::Left);
     WorkerTestBackend* raw_backend = backend.get();
@@ -584,6 +590,7 @@ bool testStopWithPendingCommandBehindReadDoesNotDeadlock() {
 
 int main() {
     if (!testSuccessfulReadLoop()) return 1;
+    if (!testDefaultReadPeriodIsConservative()) return 1;
     if (!testLatestStateReportsStaleSample()) return 1;
     if (!testSendRequestAccepted()) return 1;
     if (!testExpiredCommandDropped()) return 1;

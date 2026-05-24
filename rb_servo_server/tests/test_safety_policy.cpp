@@ -2448,7 +2448,7 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "mode", "q_actual_deg", "q_sent_deg", "q_previous_sent_deg", "send_ok",
         "send_start_ns", "send_end_ns", "send_duration_us", "has_valid_joint_state",
         "connection_state", "has_error", "servo_enabled", "fault_recoverable", "lifecycle_state",
-        "last_read", "last_send", "robot_time_ns", "host_time_ns", "error_code",
+        "last_read", "last_send", "robot_time_ns", "host_time_ns", "error_code", "state_age_us",
         "tcp_stand", "tcp_base", "tcp_deferred", "fk_duration_us", "cartesian_solve", "worker"
     };
     for (const char* arm_name : {"left", "right"}) {
@@ -2543,6 +2543,10 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("last_cartesian_solve").at("right").at("ik_reason").get<std::string>() == "timeout");
     RB_CHECK(!json.at("left").at("worker").at("enabled").get<bool>());
     RB_CHECK(json.at("left").at("worker").at("queue_policy").get<std::string>() == "latest_wins");
+    RB_CHECK(json.at("left").at("worker").at("read_period_ns").get<uint64_t>() == 0);
+    RB_CHECK(json.at("left").at("worker").at("read_period_sec").get<double>() == 0.0);
+    RB_CHECK(json.at("left").at("worker").at("read_rate_hz").get<double>() == 0.0);
+    RB_CHECK(json.at("left").at("worker").at("state_age_us").get<double>() == 0.0);
     RB_CHECK(json.at("left").at("worker").at("command_drops_total").get<uint64_t>() == 0);
     RB_CHECK(json.at("left").at("worker").at("pending_overwrites_total").get<uint64_t>() == 0);
     RB_CHECK(json.at("left").at("worker").at("last_dropped_seq").get<uint64_t>() == 0);
@@ -2588,7 +2592,9 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
 
     rb_servo::DualArmConfig worker_cfg = cfg;
     worker_cfg.servo.io_model = rb_servo::ServoIoModel::Worker;
+    worker_cfg.servo.worker_read_period_sec = 0.025;
     rb_servo::ServoSnapshot worker_snapshot = snapshot;
+    worker_snapshot.loop_end_time_ns = 20'000;
     worker_snapshot.left_worker_telemetry.worker_command_drops_total = 3;
     worker_snapshot.left_worker_telemetry.worker_pending_overwrites_total = 3;
     worker_snapshot.left_worker_telemetry.worker_last_dropped_seq = 1201;
@@ -2601,6 +2607,10 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     const nlohmann::json& worker = worker_json.at("left").at("worker");
     RB_CHECK(worker.at("enabled").get<bool>());
     RB_CHECK(worker.at("queue_policy").get<std::string>() == "latest_wins");
+    RB_CHECK(worker.at("read_period_ns").get<uint64_t>() == 25'000'000);
+    RB_CHECK(worker.at("read_period_sec").get<double>() == 0.025);
+    RB_CHECK(worker.at("read_rate_hz").get<double>() == 40.0);
+    RB_CHECK(worker.at("state_age_us").get<double>() == 9.0);
     RB_CHECK(worker.at("command_drops_total").get<uint64_t>() == 3);
     RB_CHECK(worker.at("pending_overwrites_total").get<uint64_t>() == 3);
     RB_CHECK(worker.at("last_dropped_seq").get<uint64_t>() == 1201);

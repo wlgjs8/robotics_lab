@@ -40,6 +40,7 @@ servo:
   rate_hz: 100
   command_timeout_sec: 0.2
   io_model: worker
+  worker_read_period_sec: 0.01
   startup_mode: Hold
   send_servo_commands: true
   enable_realtime_priority: false

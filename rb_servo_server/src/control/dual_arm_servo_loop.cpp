@@ -4,7 +4,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 
@@ -170,6 +172,26 @@ ArmWorkerTelemetry workerTelemetryOrDefault(const ArmWorker* worker) {
     return worker ? worker->telemetry() : ArmWorkerTelemetry{};
 }
 
+uint64_t workerReadPeriodNs(const ServoConfig& config) {
+    constexpr double kNsPerSecond = 1'000'000'000.0;
+    const double period_ns = config.worker_read_period_sec * kNsPerSecond;
+    if (!std::isfinite(period_ns) || period_ns <= 0.0) {
+        return 10'000'000;
+    }
+    constexpr double kMaxUint64AsDouble =
+        static_cast<double>(std::numeric_limits<uint64_t>::max());
+    if (period_ns >= kMaxUint64AsDouble) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(period_ns)));
+}
+
+ArmWorkerOptions workerOptions(const DualArmConfig& config) {
+    ArmWorkerOptions options;
+    options.read_period_ns = workerReadPeriodNs(config.servo);
+    return options;
+}
+
 LatchedFaultContextSnapshot faultContextSnapshot(const FaultContext& context) {
     LatchedFaultContextSnapshot snapshot;
     snapshot.verdict = toString(context.verdict);
@@ -323,14 +345,14 @@ bool DualArmServoLoop::initializeWorkers() {
             std::cerr << "[ERROR] worker io requested but left backend is unavailable\n";
             return false;
         }
-        left_worker_ = std::make_unique<ArmWorker>(std::move(left_robot_));
+        left_worker_ = std::make_unique<ArmWorker>(std::move(left_robot_), workerOptions(config_));
     }
     if (!right_worker_) {
         if (!right_robot_) {
             std::cerr << "[ERROR] worker io requested but right backend is unavailable\n";
             return false;
         }
-        right_worker_ = std::make_unique<ArmWorker>(std::move(right_robot_));
+        right_worker_ = std::make_unique<ArmWorker>(std::move(right_robot_), workerOptions(config_));
     }
 
     const bool left_started = left_worker_->start();
