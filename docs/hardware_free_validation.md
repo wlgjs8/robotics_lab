@@ -180,7 +180,7 @@ DNS. The simulator image does not rewrite YAML or run a socat proxy bridge.
 
 Skipped by design:
 
-- real robot and Rainbow rbsim motion
+- real robot and external Rainbow simulator motion
 - rbpodo dependency discovery and real read-only connection acceptance
 - external simulator or real robot timing acceptance; analyzer profiles here
   cover only hardware-free `rb_simulator` loopback logs

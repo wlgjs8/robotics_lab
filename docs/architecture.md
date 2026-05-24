@@ -231,5 +231,7 @@ Real robot config uses a tracked read-only template,
 under `rb_servo_server/config/local/`. Use
 `rb_servo_server/config/local/dual_real_readonly.yaml` for read-only state
 bring-up and `rb_servo_server/config/local/dual_real_motion.yaml` only for a
-separately approved motion procedure. Real connection, joint motion, and
-Cartesian motion remain gated by the environment variables above.
+separately approved motion procedure. There is no tracked runnable real robot
+config; the template and local split above are the only canonical real config
+names. Real connection, joint motion, and Cartesian motion remain gated by the
+environment variables above.

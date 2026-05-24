@@ -55,7 +55,7 @@ python3 tools/mock_gui_smoke.py
 ## Safety boundaries
 
 - Real robot motion is out of scope and disabled in the GUI. Real mode is connect/status visibility only.
-- Simulation motion is limited to the repo-local `rb_simulator` path until connect, valid state read, truthful `servo_j` send, stop/reset, hold, and low-amplitude jog tests pass with software-only artifacts. Rainbow Robotics rbsim/OVA and real robot validation remain out of scope.
+- Simulation motion is limited to the repo-local `rb_simulator` path until connect, valid state read, truthful `servo_j` send, stop/reset, hold, and low-amplitude jog tests pass with software-only artifacts. Rainbow Robotics external simulator/OVA and real robot validation remain out of scope.
 - The stand frame axes are hidden; the visible 6D controls are left/right TCP target gizmos. They initialize from `tcp_stand` when the state stream provides it, otherwise from URDF FK, and fall back to the old joint marker estimate only when TCP/FK data is unavailable.
 - TCP target buttons emit validated `TcpPoseTarget` UDP commands from the gizmo pose in mock/simulation-safe modes. The C++ Cartesian controller requires configured kinematics and Cartesian gates; when they are unavailable or disabled, it reports a safe failure and holds position.
 - Joint jog requires a fresh valid state snapshot, clamps per-command step size, sets a bounded timeout, and never synthesizes `[0,0,0,0,0,0]` when state is missing or invalid.

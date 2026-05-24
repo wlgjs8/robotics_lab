@@ -423,8 +423,8 @@ Acceptable simulator evidence includes:
   and the server does not synthesize a zero-joint target.
 - Reset failure: the latch remains active and motion commands stay blocked.
 
-These checks are not Rainbow rbsim/OVA, `rbpodo`, real robot, realtime, or
-production-network acceptance.
+These checks are not Rainbow external simulator/OVA, `rbpodo`, real robot,
+realtime, or production-network acceptance.
 
 ## Missing payload safety
 

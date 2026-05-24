@@ -26,7 +26,8 @@ The CSV should also contain send timing columns:
 - `send_skew_us`
 - `left_send_duration_us`, `right_send_duration_us`
 
-Use these columns as measurement evidence before changing the sender architecture or attempting rbsim/real bring-up.
+Use these columns as measurement evidence before changing the sender
+architecture or attempting simulator/real bring-up.
 
 Full milestone budget checks use the stdlib analyzer:
 
@@ -43,10 +44,10 @@ fails closed on missing send/timing/joint columns, malformed send timestamps,
 dropped samples, send failures, bad duration/rate/jitter/skew/send-duration
 budgets, and tracking error above 2 deg.
 
-The rbsim analyzer profiles validate only the hardware-free rb_simulator +
-rb_servo_server loopback logs. They do not prove Rainbow rbsim timing,
-network/host scheduling readiness, or real robot timing acceptance; those remain
-separate human-gated hardware tasks.
+The simulator analyzer profiles validate only the hardware-free rb_simulator +
+rb_servo_server loopback logs. They do not prove Rainbow external simulator
+timing, network/host scheduling readiness, or real robot timing acceptance;
+those remain separate human-gated hardware tasks.
 
 ## Hardware-free rb_simulator path
 
@@ -84,13 +85,13 @@ Stop/reset/fault evidence must come from local simulator hooks and artifacts:
 `ConnectedHold` and requires a new `ArmMotion`, and injected invalid state or
 send/stop/reset/disconnect failures produce explicit hold or latch behavior.
 
-This path does not validate Rainbow Robotics rbsim/OVA, `rbpodo`, real robot
-motion, realtime scheduling acceptance, privileged Docker, broad network
-exposure, or credentialed operations.
+This path does not validate Rainbow Robotics external simulator/OVA, `rbpodo`,
+real robot motion, realtime scheduling acceptance, privileged Docker, broad
+network exposure, or credentialed operations.
 
 ## Out-of-scope hardware gates
 
-Real-mode startup, Rainbow Robotics rbsim/OVA validation, `rbpodo` validation,
-privileged Docker, host networking, broad network exposure, and hardware-facing
-sender tools are intentionally outside this hardware-free test phase. Keep those
-under separate human-gated runbooks.
+Real-mode startup, Rainbow Robotics external simulator/OVA validation,
+`rbpodo` validation, privileged Docker, host networking, broad network
+exposure, and hardware-facing sender tools are intentionally outside this
+hardware-free test phase. Keep those under separate human-gated runbooks.

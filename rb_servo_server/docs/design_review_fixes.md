@@ -34,12 +34,13 @@ This makes tracking error, robot-state error, invalid command, and Cartesian-not
 `SafetyConfig` includes:
 
 ```yaml
-tracking_error_policy: snap_to_actual  # mock/rbsim default
+tracking_error_policy: snap_to_actual  # mock/simulator default
 # or
 tracking_error_policy: fault_latch     # real default
 ```
 
-- `snap_to_actual`: set the servo target to current actual q and continue. Useful for mock/rbsim iteration.
+- `snap_to_actual`: set the servo target to current actual q and continue.
+  Useful for mock/simulator iteration.
 - `fault_latch`: latch a fault hold pose and ignore motion commands until `ResetFault`. Safer for real hardware.
 
 ### 3. Fault latch path added
@@ -102,7 +103,7 @@ The acceleration limiter now prevents overshoot past the already velocity-limite
 
 ## Still pending
 
-- `RbpodoBackend` real/rbsim communication
+- `RbpodoBackend` real controller communication
 - fully implemented `StatePublisher`
 - lock-free or priority-inheritance command buffer
 - parallel left/right `sendServoJ`

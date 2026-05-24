@@ -124,5 +124,6 @@ Stop/reset/fault evidence must stay simulator-local and machine-testable:
   failure, or disconnect is visible in the state/log artifacts and causes the
   expected hold or latch behavior.
 
-These artifacts do not prove Rainbow Robotics rbsim, `rbpodo`, realtime
-scheduling, physical stop/reset behavior, or real robot readiness.
+These artifacts do not prove Rainbow Robotics external simulator behavior,
+`rbpodo`, realtime scheduling, physical stop/reset behavior, or real robot
+readiness.

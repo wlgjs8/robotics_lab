@@ -105,7 +105,7 @@ Tasks:
 - Add a CMake failure that explains the required `CMAKE_PREFIX_PATH`,
   `RBPODO_ROOT`, or package path when `RB_SERVO_ENABLE_RBPODO=ON` but the SDK is
   missing.
-- Link only the target that needs rbpodo symbols; do not make mock/rbsim tests
+- Link only the target that needs rbpodo symbols; do not make mock/simulator tests
   require the SDK.
 
 Acceptance:

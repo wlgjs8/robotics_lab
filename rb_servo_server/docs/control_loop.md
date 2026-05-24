@@ -24,7 +24,7 @@ Default mock target:
 11. TrajectoryFilter computes left/right joint target
 12. SafetyFilter clamps target and checks robot/tracking state
 13. safety failure policy:
-    - snap_to_actual for mock/rbsim tracking error
+    - snap_to_actual for mock/simulator tracking error
     - fault_latch for real tracking error
     - robot state error can latch fault
 14. send left/right target through IRobotBackend and record send timestamps
@@ -48,7 +48,8 @@ The logger records:
 - `left_send_start_ns`, `left_send_end_ns`, `right_send_start_ns`, `right_send_end_ns`
 - `send_skew_us`, `left_send_duration_us`, `right_send_duration_us`
 
-These are used to decide whether 100–200 Hz is stable enough before trying rbsim/real hardware.
+These are used to decide whether 100-200 Hz is stable enough before trying
+external simulator or real hardware.
 
 ## Snapshot ownership
 
@@ -94,7 +95,7 @@ abs(previous_sent_q - q_actual) <= max_tracking_error_deg
 Recommended policy:
 
 ```yaml
-# mock/rbsim
+# mock/simulator
 tracking_error_policy: snap_to_actual
 
 # real

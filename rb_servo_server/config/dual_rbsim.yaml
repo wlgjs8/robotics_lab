@@ -3,7 +3,8 @@
 # Use dual_simulator.yaml for the current per-arm host topology. This historical
 # filename remains only for migration compatibility and still targets the old
 # shared loopback endpoint shape. Do not use it for new acceptance evidence.
-# This profile must not be used as Rainbow rbsim/OVA or real robot evidence.
+# This profile must not be used as external Rainbow simulator/OVA or real robot
+# evidence.
 
 schema: robotics_lab.rb_servo_server.v1
 

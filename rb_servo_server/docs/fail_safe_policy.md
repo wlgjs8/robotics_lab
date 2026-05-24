@@ -24,14 +24,14 @@ No failure path may output [0, 0, 0, 0, 0, 0] unless that was a validated user c
 | joint command outside limits | clamp to configured limits |
 | one late servo tick | filter dt is capped |
 | invalid or missing robot joint state | Startup fails; runtime latches/holds last safe pose according to policy |
-| tracking error in mock/rbsim | snap target to actual by default |
+| tracking error in mock/simulator | snap target to actual by default |
 | tracking error in real | latch fault by default |
 | robot disconnected/error | latch current/last-safe pose by default |
 | EmergencyStop | latch current/last-safe pose |
 | ResetFault | clear fault only; return to ConnectedHold |
 | read-only mode (`servo.send_servo_commands=false`) | connect/read/publish state; suppress all `sendServoJ` calls |
 | motion command in read-only mode | reject and hold previous safe target |
-| sendServoJ failure in mock/rbsim | failed arm target is not recorded; optional stop-both latch |
+| sendServoJ failure in mock/simulator | failed arm target is not recorded; optional stop-both latch |
 | sendServoJ failure in real | fault latch |
 
 ## Motion state

@@ -191,11 +191,12 @@ Real robot config guidance uses this split:
 - user local motion config:
   `rb_servo_server/config/local/dual_real_motion.yaml`
 
-The tracked real template is read-only by default and documents the real
-controller IPs with the required gates. Local real configs are site-owned and
-must stay under `rb_servo_server/config/local/`. Read-only rbpodo state
-publishing can be healthy while `servo_enabled=false` if joint feedback is
-valid; that is not motion readiness. Real `servo_j` sends remain blocked by
+No tracked runnable real robot config is canonical. The tracked real template
+is read-only by default and documents the real controller IPs with the required
+gates. Local real configs are site-owned and must stay under
+`rb_servo_server/config/local/`. Read-only rbpodo state publishing can be
+healthy while `servo_enabled=false` if joint feedback is valid; that is not
+motion readiness. Real `servo_j` sends remain blocked by
 `servo.send_servo_commands=false` in the tracked template and by
 `RB_ALLOW_REAL_MOTION=1` in any motion config. Rbpodo stop/reset fault recovery
 still requires operator intervention until verified controller APIs are wired.
