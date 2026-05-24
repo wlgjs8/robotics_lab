@@ -116,16 +116,86 @@ dedicated no-motion `AcquireLease` command:
 {
   "seq": 1,
   "mode": "AcquireLease",
-  "source_id": "rb_gui",
-  "session_id": "2c9818d8f5d24b31a9b7a96d6a6df89a"
+  "source_id": "policy_runner",
+  "session_id": "7c6d9d26c9bc4d1d9e5f3f12a0d8d2d1"
 }
 ```
+
+There is no separate UDP ACK channel. Clients that need confirmation should
+listen to the state stream and wait until `command_source.active_source_id`,
+`command_source.active_session_id`, and `command_source.active_lease_token`
+reflect the acquired lease:
+
+```json
+{
+  "schema_version": 1,
+  "tick": 42,
+  "command_seq": 1,
+  "command_source": {
+    "source_id": "policy_runner",
+    "session_id": "7c6d9d26c9bc4d1d9e5f3f12a0d8d2d1",
+    "lease_token": "lease-11f71fb04cb-1-policy_runner",
+    "source_priority": null,
+    "enforce_lease": true,
+    "lease_timeout_sec": 1.0,
+    "active": true,
+    "expired": false,
+    "active_source_id": "policy_runner",
+    "active_session_id": "7c6d9d26c9bc4d1d9e5f3f12a0d8d2d1",
+    "active_lease_token": "lease-11f71fb04cb-1-policy_runner",
+    "acquired_time_ns": 123000000,
+    "expires_time_ns": 1123000000,
+    "command_requires_lease": false,
+    "command_has_lease": true,
+    "verdict": "Ok",
+    "reason": ""
+  }
+}
+```
+
+After readback, a client may include the token in later packets. Tokens are
+opaque; clients must copy them exactly:
+
+```json
+{
+  "seq": 2,
+  "mode": "JointVelocity",
+  "timeout_sec": 0.2,
+  "source_id": "policy_runner",
+  "session_id": "7c6d9d26c9bc4d1d9e5f3f12a0d8d2d1",
+  "lease_token": "lease-11f71fb04cb-1-policy_runner",
+  "left": {
+    "dq_target_deg_s": [1, 0, 0, 0, 0, 0]
+  },
+  "right": {
+    "dq_target_deg_s": [-1, 0, 0, 0, 0, 0]
+  }
+}
+```
+
+If the same source/session supplies a non-empty token that does not match the
+active token, the packet is rejected with
+`command_source_lease_token_mismatch`. A source may omit `lease_token`; the
+server still validates source/session ownership when lease enforcement is on.
 
 Lease-required commands are `ArmMotion`, `DisarmMotion`, `JointTarget`,
 `JointVelocity`, `TcpPoseTarget`, `TcpDeltaStand`, `TcpDeltaLocal`, and
 `ResetFault`. `EmergencyStop` bypasses the lease so any accepted UDP source can
 stop motion. `ResetFault` requires the active lease when enforcement is enabled;
 it is not an operator bypass and it does not implicitly resume motion.
+
+Emergency stop remains a safety override even when another source owns the
+lease:
+
+```json
+{
+  "seq": 1,
+  "mode": "EmergencyStop",
+  "timeout_sec": 0.2,
+  "source_id": "rb_gui",
+  "session_id": "operator-console-session"
+}
+```
 
 The lease expires using the server monotonic clock after
 `command_source.lease_timeout_sec` without an accepted lease-owning motion

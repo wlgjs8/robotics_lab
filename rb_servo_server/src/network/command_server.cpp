@@ -547,6 +547,10 @@ bool CommandServer::parseMessage(
     cmd.lease.command_has_lease = !requires_lease || (source_can_own_active_lease && provided_token_matches);
 
     if (command_source_config_.enforce_lease && !isEmergencyStopCommand(cmd)) {
+        if (lease.active && source_can_own_active_lease && !provided_token_matches) {
+            last_reject_reason_ = "command_source_lease_token_mismatch";
+            return false;
+        }
         if (requests_lease && lease.active && !source_can_own_active_lease) {
             last_reject_reason_ = "command_source_lease_conflict: active source_id=" +
                 lease.source_id + " session_id=" + lease.session_id;
@@ -555,10 +559,6 @@ bool CommandServer::parseMessage(
         if (requires_lease && !requests_lease && !cmd.lease.command_has_lease) {
             last_reject_reason_ = "command_source_lease_required: active source_id=" +
                 lease.source_id + " session_id=" + lease.session_id;
-            return false;
-        }
-        if (requires_lease && source_can_own_active_lease && !provided_token_matches) {
-            last_reject_reason_ = "command_source_lease_token_mismatch";
             return false;
         }
     }

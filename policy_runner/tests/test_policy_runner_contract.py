@@ -14,8 +14,13 @@ from policy_runner.action_sources.hold import HoldActionSource
 from policy_runner.action_sources.joint_sine import JointSineActionSource
 from policy_runner.action_sources.joint_velocity import JointVelocityActionSource
 from policy_runner.config import config_from_mapping, load_config
-from policy_runner.main import STARTUP_TIMEOUT_EXIT_CODE, make_action_source, run
-from policy_runner.robot_state_client import RobotStateClient, StateSnapshot
+from policy_runner.main import LEASE_READBACK_TIMEOUT_EXIT_CODE, STARTUP_TIMEOUT_EXIT_CODE, make_action_source, run
+from policy_runner.robot_state_client import (
+    RobotStateClient,
+    StateSnapshot,
+    StateStreamLeaseReadback,
+    command_source_lease_from_snapshot,
+)
 from policy_runner.safety import ActionRequirements, SafetyConfig, SafetyGate
 from policy_runner.servo_command_client import CommandIntent, ServoCommandClient
 
@@ -91,14 +96,35 @@ class FakeStateClient:
         self.closed = True
 
 
+class FakeLatestSequenceStateClient:
+    def __init__(self, snapshots):
+        self._snapshots = list(snapshots)
+        self.latest_reads = 0
+
+    @property
+    def latest(self):
+        self.latest_reads += 1
+        if not self._snapshots:
+            return None
+        if len(self._snapshots) == 1:
+            return self._snapshots[0]
+        return self._snapshots.pop(0)
+
+
 class FakeCommandClient:
     def __init__(self):
         self.sent = []
+        self.acquire_calls = []
         self.closed = False
 
     def send(self, intent):
         self.sent.append(intent)
         return len(self.sent)
+
+    def acquire_lease(self, readback, **kwargs):
+        self.acquire_calls.append((readback, kwargs))
+        self.sent.append(CommandIntent.acquire_lease())
+        return None
 
     def close(self):
         self.closed = True
@@ -186,13 +212,18 @@ class PolicyRunnerContractTest(unittest.TestCase):
     def test_runtime_config_defaults_and_parses_startup_timeout(self):
         default_cfg = config_from_mapping({"schema": "robotics_lab.policy_runner.v1"})
         self.assertEqual(default_cfg.runtime.startup_timeout_sec, 5.0)
+        self.assertFalse(default_cfg.servo_command.acquire_lease)
+        self.assertEqual(default_cfg.servo_command.lease_readback_timeout_sec, 1.0)
         cfg = config_from_mapping(
             {
                 "schema": "robotics_lab.policy_runner.v1",
                 "runtime": {"startup_timeout_sec": 0.25},
+                "servo_command": {"acquire_lease": True, "lease_readback_timeout_sec": 0.75},
             }
         )
         self.assertEqual(cfg.runtime.startup_timeout_sec, 0.25)
+        self.assertTrue(cfg.servo_command.acquire_lease)
+        self.assertEqual(cfg.servo_command.lease_readback_timeout_sec, 0.75)
 
     def test_make_action_source_accepts_all_configured_action_sources_without_hardware(self):
         for action_source in (
@@ -282,6 +313,79 @@ class PolicyRunnerContractTest(unittest.TestCase):
         velocity = client.build_packet(cases[-1], 7)
         self.assertEqual(velocity["right"]["mode"], "JointVelocity")
         self.assertEqual(velocity["right"]["dq_target_deg_s"], [0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+
+    def test_command_sender_emits_acquire_lease_and_reuses_readback_token(self):
+        fake_socket = FakeSendSocket()
+        client = ServoCommandClient(
+            "udp://127.0.0.1:50010",
+            socket_factory=lambda *_args: fake_socket,
+            source_id="policy_runner",
+            session_id="session-1",
+        )
+        state_client = FakeLatestSequenceStateClient(
+            [
+                sample_state(command_source={"active": False}),
+                sample_state(
+                    command_source={
+                        "enforce_lease": True,
+                        "active": True,
+                        "expired": False,
+                        "active_source_id": "policy_runner",
+                        "active_session_id": "session-1",
+                        "active_lease_token": "lease-token",
+                        "verdict": "Ok",
+                    }
+                ),
+            ]
+        )
+        clock = iter([0.0, 0.01, 0.02]).__next__
+        try:
+            result = client.acquire_lease(
+                StateStreamLeaseReadback(state_client),
+                timeout_sec=0.1,
+                monotonic_fn=clock,
+                sleep_fn=lambda _seconds: None,
+            )
+            self.assertEqual(result.seq, 1)
+            self.assertEqual(result.lease_token, "lease-token")
+            self.assertEqual(client.lease_token, "lease-token")
+
+            acquire_packet = json.loads(fake_socket.sent[0][0].decode("utf-8"))
+            self.assertEqual(acquire_packet["mode"], "AcquireLease")
+            self.assertEqual(acquire_packet["source_id"], "policy_runner")
+            self.assertEqual(acquire_packet["session_id"], "session-1")
+            self.assertNotIn("lease_token", acquire_packet)
+
+            client.send(CommandIntent.hold())
+            hold_packet = json.loads(fake_socket.sent[1][0].decode("utf-8"))
+            self.assertEqual(hold_packet["lease_token"], "lease-token")
+        finally:
+            client.close()
+
+    def test_state_stream_lease_readback_times_out_on_wrong_owner(self):
+        snapshot = sample_state(
+            command_source={
+                "enforce_lease": True,
+                "active": True,
+                "expired": False,
+                "active_source_id": "rb_gui",
+                "active_session_id": "gui-session",
+                "active_lease_token": "gui-token",
+                "verdict": "Ok",
+            }
+        )
+        readback = command_source_lease_from_snapshot(snapshot)
+        self.assertFalse(readback.matches("policy_runner", "policy-session"))
+
+        state_client = FakeLatestSequenceStateClient([snapshot])
+        with self.assertRaisesRegex(TimeoutError, "active_source_id=rb_gui"):
+            StateStreamLeaseReadback(state_client).wait_for_active_lease(
+                source_id="policy_runner",
+                session_id="policy-session",
+                timeout_sec=0.0,
+                monotonic_fn=lambda: 1.0,
+                sleep_fn=lambda _seconds: None,
+            )
 
     def test_hold_receives_state_and_sends_no_motion_by_default(self):
         source = HoldActionSource()
@@ -412,6 +516,64 @@ class PolicyRunnerContractTest(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual([intent.mode for intent in command_client.sent], ["ArmMotion", "TcpDeltaStand"])
+
+    def test_run_acquires_configured_lease_before_motion(self):
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "servo_command": {"acquire_lease": True, "lease_readback_timeout_sec": 0.1},
+                "geometry": {"path": ""},
+                "runtime": {"startup_timeout_sec": 0.1},
+            }
+        )
+        command_client = FakeCommandClient()
+        source = JointVelocityActionSource((1, 0, 0, 0, 0, 0))
+
+        result = run(
+            cfg,
+            state_client=FakeStateClient([sample_state()]),
+            command_client=command_client,
+            source=source,
+            monotonic_fn=lambda: time.monotonic(),
+            sleep_fn=lambda _period: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual([intent.mode for intent in command_client.sent], ["AcquireLease", "ArmMotion", "Hold"])
+        self.assertEqual(len(command_client.acquire_calls), 1)
+        self.assertEqual(command_client.acquire_calls[0][1]["timeout_sec"], 0.1)
+
+    def test_run_returns_lease_timeout_when_readback_missing(self):
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "servo_command": {"acquire_lease": True, "lease_readback_timeout_sec": 0.1},
+                "geometry": {"path": ""},
+                "runtime": {"startup_timeout_sec": 0.1},
+            }
+        )
+        state_client = FakeStateClient([sample_state()])
+        command_client = ServoCommandClient(
+            "udp://127.0.0.1:50010",
+            socket_factory=lambda *_args: FakeSendSocket(),
+            source_id="policy_runner",
+            session_id="session-1",
+        )
+        source = CloseableSource()
+        stderr = StringIO()
+
+        result = run(
+            cfg,
+            state_client=state_client,
+            command_client=command_client,
+            source=source,
+            monotonic_fn=iter([0.0, 0.0, 0.0, 0.2]).__next__,
+            sleep_fn=lambda _period: None,
+            stderr=stderr,
+        )
+
+        self.assertEqual(result, LEASE_READBACK_TIMEOUT_EXIT_CODE)
+        self.assertIn("lease_readback_timeout", stderr.getvalue())
 
     def test_missing_runtime_geometry_blocks_geometry_dependent_actions(self):
         cfg = config_from_mapping(

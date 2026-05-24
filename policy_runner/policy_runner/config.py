@@ -20,6 +20,8 @@ class RuntimeConfig:
 class ServoCommandConfig:
     endpoint: str = "udp://127.0.0.1:50010"
     timeout_sec: float = 0.2
+    acquire_lease: bool = False
+    lease_readback_timeout_sec: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -123,7 +125,7 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         runtime=_runtime_config(_section(raw, "runtime")),
         geometry=GeometryConfig(**_section(raw, "geometry")),
         robot_state=RobotStateConfig(**_section(raw, "robot_state")),
-        servo_command=ServoCommandConfig(**_section(raw, "servo_command")),
+        servo_command=_servo_command_config(_section(raw, "servo_command")),
         safety=_safety_config(_section(raw, "safety")),
         joint_sine=_joint_sine_config(_section(raw, "joint_sine")),
         joint_velocity=_joint_velocity_config(_section(raw, "joint_velocity")),
@@ -147,6 +149,19 @@ def _runtime_config(raw: dict[str, Any]) -> RuntimeConfig:
     if "startup_timeout_sec" in raw:
         raw["startup_timeout_sec"] = float(raw["startup_timeout_sec"])
     return RuntimeConfig(**raw)
+
+
+def _servo_command_config(raw: dict[str, Any]) -> ServoCommandConfig:
+    if "timeout_sec" in raw:
+        raw["timeout_sec"] = float(raw["timeout_sec"])
+    if "lease_readback_timeout_sec" in raw:
+        raw["lease_readback_timeout_sec"] = float(raw["lease_readback_timeout_sec"])
+    config = ServoCommandConfig(**raw)
+    if config.timeout_sec <= 0.0:
+        raise ValueError("servo_command.timeout_sec must be positive")
+    if config.lease_readback_timeout_sec <= 0.0:
+        raise ValueError("servo_command.lease_readback_timeout_sec must be positive")
+    return config
 
 
 def _safety_config(raw: dict[str, Any]) -> SafetyConfig:

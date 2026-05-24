@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .robot_state_client import parse_udp_endpoint
+from .robot_state_client import CommandSourceLeaseReadback, StateStreamLeaseReadback, parse_udp_endpoint
 
 
 MOTION_MODES = {"ArmMotion", "JointTarget", "JointVelocity"}
@@ -33,6 +33,10 @@ class CommandIntent:
     @classmethod
     def arm_motion(cls, timeout_sec: float = 0.2) -> "CommandIntent":
         return cls("ArmMotion", timeout_sec=timeout_sec)
+
+    @classmethod
+    def acquire_lease(cls, timeout_sec: float = 0.2) -> "CommandIntent":
+        return cls("AcquireLease", timeout_sec=timeout_sec)
 
     @classmethod
     def disarm_motion(cls, timeout_sec: float = 0.2) -> "CommandIntent":
@@ -77,6 +81,16 @@ class CommandIntent:
         )
 
 
+@dataclass(frozen=True)
+class LeaseAcquireResult:
+    seq: int
+    readback: CommandSourceLeaseReadback | None = None
+
+    @property
+    def lease_token(self) -> str | None:
+        return None if self.readback is None else self.readback.active_lease_token
+
+
 class ServoCommandClient:
     """UDP command sender compatible with rb_servo_server CommandServer."""
 
@@ -92,6 +106,7 @@ class ServoCommandClient:
         self.timeout_sec = timeout_sec
         self.source_id = source_id
         self.session_id = session_id or uuid.uuid4().hex
+        self.lease_token: str | None = None
         self._seq = 0
         self._socket = socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
         parsed = parse_udp_endpoint(endpoint)
@@ -111,6 +126,33 @@ class ServoCommandClient:
         self._socket.sendto(data, self._address)
         return self._seq
 
+    def acquire_lease(
+        self,
+        readback: StateStreamLeaseReadback | None = None,
+        *,
+        timeout_sec: float = 1.0,
+        poll_interval_sec: float = 0.01,
+        monotonic_fn: Callable[[], float] | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
+    ) -> LeaseAcquireResult:
+        seq = self.send(CommandIntent.acquire_lease(timeout_sec=self.timeout_sec))
+        if readback is None:
+            return LeaseAcquireResult(seq=seq)
+
+        kwargs: dict[str, Any] = {
+            "source_id": self.source_id,
+            "session_id": self.session_id,
+            "timeout_sec": timeout_sec,
+            "poll_interval_sec": poll_interval_sec,
+        }
+        if monotonic_fn is not None:
+            kwargs["monotonic_fn"] = monotonic_fn
+        if sleep_fn is not None:
+            kwargs["sleep_fn"] = sleep_fn
+        lease = readback.wait_for_active_lease(**kwargs)
+        self.lease_token = lease.active_lease_token
+        return LeaseAcquireResult(seq=seq, readback=lease)
+
     def build_packet(self, intent: CommandIntent, seq: int) -> dict[str, Any]:
         packet: dict[str, Any] = {
             "seq": seq,
@@ -124,6 +166,8 @@ class ServoCommandClient:
             packet["left"] = intent.left
         if intent.right is not None:
             packet["right"] = intent.right
+        if self.lease_token:
+            packet["lease_token"] = self.lease_token
         return packet
 
 

@@ -15,13 +15,14 @@ from .action_sources import (
 )
 from .config import PolicyRunnerConfig, load_config
 from .geometry import GeometryStatus, load_geometry_status
-from .robot_state_client import RobotStateClient
+from .robot_state_client import RobotStateClient, StateStreamLeaseReadback
 from .safety import SafetyGate
 from .servo_command_client import CommandIntent, ServoCommandClient
 from .spacemouse import HidSpaceMouseReader, SpaceMouseReader, SpaceMouseSample
 
 
 STARTUP_TIMEOUT_EXIT_CODE = 2
+LEASE_READBACK_TIMEOUT_EXIT_CODE = 3
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -56,6 +57,7 @@ def run(
     )
     state_client.start()
     armed_for_motion = False
+    lease_acquired = False
     period = 1.0 / max(config.command_rate_hz, 1.0)
     startup_deadline = monotonic_fn() + max(config.runtime.startup_timeout_sec, 0.0)
     try:
@@ -73,6 +75,18 @@ def run(
                     return STARTUP_TIMEOUT_EXIT_CODE
                 sleep_fn(period)
                 continue
+            if config.servo_command.acquire_lease and not lease_acquired:
+                try:
+                    command_client.acquire_lease(
+                        StateStreamLeaseReadback(state_client),
+                        timeout_sec=config.servo_command.lease_readback_timeout_sec,
+                        monotonic_fn=monotonic_fn,
+                        sleep_fn=sleep_fn,
+                    )
+                except TimeoutError as exc:
+                    print(f"policy_runner lease_readback_timeout: {exc}", file=stderr)
+                    return LEASE_READBACK_TIMEOUT_EXIT_CODE
+                lease_acquired = True
             intent = source.next_intent(snapshot, now)
             decision = safety_gate.evaluate(snapshot, intent, getattr(source, "requirements", None), now)
             if decision.allowed and intent is not None:
