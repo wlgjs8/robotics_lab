@@ -93,7 +93,10 @@ Real robot startup remains gated outside the hardware-free simulator workflow:
 `RB_ALLOW_REAL_ROBOT=1` is required for read-only real connection, and
 `RB_ALLOW_REAL_MOTION=1` plus `servo.send_servo_commands=true` is required for
 real `servo_j` motion. Real Cartesian/TCP motion additionally requires
-`RB_ALLOW_REAL_CARTESIAN=1`.
+`RB_ALLOW_REAL_CARTESIAN=1`. The rbpodo `disable_waiting_ack` arm option is
+wired to the SDK ACK-wait toggle and defaults to `false` in the tracked real
+template; only change it in site-local motion configs after command-path
+acceptance.
 
 ## Force control
 

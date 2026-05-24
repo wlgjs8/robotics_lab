@@ -37,7 +37,9 @@ struct BackendConfig {
     double servo_gain = 1.0;
     double servo_acc = 1.0;
 
-    bool disable_waiting_ack = true;
+    // rbpodo-only. When true, Cobot::disable_waiting_ack() makes command calls
+    // return after socket send instead of waiting for controller ACK.
+    bool disable_waiting_ack = false;
 };
 
 struct ArmMountConfig {

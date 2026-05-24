@@ -457,7 +457,6 @@ void validateConfig(const DualArmConfig& cfg) {
     validate_simulator_backend(cfg.left_robot, "left_robot");
     validate_simulator_backend(cfg.right_robot, "right_robot");
 
-#ifdef RB_SERVO_ENABLE_RBPODO
     const auto validate_rbpodo_backend = [](const BackendConfig& backend, const std::string& label) {
         if (backend.backend_type != BackendType::Rbpodo) return;
         if (backend.ip.empty()) {
@@ -477,7 +476,6 @@ void validateConfig(const DualArmConfig& cfg) {
     };
     validate_rbpodo_backend(cfg.left_robot, "left_robot");
     validate_rbpodo_backend(cfg.right_robot, "right_robot");
-#endif
 
     if (anyReal(cfg)) {
         if (cfg.servo.io_model == ServoIoModel::Worker) {

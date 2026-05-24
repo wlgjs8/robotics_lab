@@ -305,6 +305,27 @@ BackendError commandReturnError(
         "rbpodo_" + operation_name + "_rejected"
     );
 }
+
+std::optional<BackendError> configureWaitingAck(
+    rb::podo::Cobot<>& robot,
+    bool disable_waiting_ack
+) {
+    if (!disable_waiting_ack) {
+        return std::nullopt;
+    }
+
+    rb::podo::ResponseCollector responses;
+    if (robot.disable_waiting_ack(responses)) {
+        return std::nullopt;
+    }
+
+    return backendError(
+        BackendErrorKind::ControllerRejected,
+        "rbpodo disable_waiting_ack was not accepted by the SDK",
+        "",
+        "rbpodo_disable_waiting_ack_rejected"
+    );
+}
 #endif
 
 }  // namespace
@@ -372,6 +393,16 @@ BackendResult<RobotState> RbpodoBackend::connect() {
 
     try {
         impl_->robot = std::make_unique<rb::podo::Cobot<>>(impl_->config.ip);
+        if (const auto ack_error = configureWaitingAck(*impl_->robot, impl_->config.disable_waiting_ack)) {
+            impl_->robot.reset();
+            impl_->data_channel.reset();
+            impl_->connected = false;
+            return failedResult<RobotState>(
+                BackendOp::Connect,
+                *ack_error,
+                makeBackendTiming(start, nowSteadyNs())
+            );
+        }
         impl_->data_channel = std::make_unique<rb::podo::CobotData>(impl_->config.ip);
         const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
         if (!state) {
@@ -620,6 +651,15 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
             makeBackendTiming(start, nowSteadyNs()),
             cached_state,
             "cache"
+        );
+    }
+    if (!cached_state.has_value() && impl_->last_state_error.has_value()) {
+        return rejectedSend(
+            request,
+            *impl_->last_state_error,
+            makeBackendTiming(start, nowSteadyNs()),
+            std::nullopt,
+            "none"
         );
     }
 

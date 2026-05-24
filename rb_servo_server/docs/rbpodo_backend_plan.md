@@ -19,6 +19,10 @@ Current state after MIG-04:
 - `sendServoJ()` uses the verified `rb::podo::Cobot<>::move_servo_j()` API, but
   real sends remain blocked unless `RB_ALLOW_REAL_MOTION=1` is present and the
   servo loop calls it only when `servo.send_servo_commands=true`.
+- `disable_waiting_ack` is wired to the verified
+  `rb::podo::Cobot<>::disable_waiting_ack(ResponseCollector&)` SDK call. The
+  tracked real example keeps it `false` so command sends wait for controller
+  ACK by default; enabling it is a local motion-acceptance decision.
 - `initialize()` is read-only for MIG-04. It requests controller data and maps
   the resulting state, but does not set operation mode, speed bar, or any
   motion-enabling controller mode.
@@ -121,6 +125,7 @@ P1-B verification:
   - `rb::podo::Cobot<>::set_operation_mode(...)`
   - `rb::podo::Cobot<>::set_speed_bar(...)`
   - `rb::podo::Cobot<>::move_servo_j(...)`
+  - `rb::podo::Cobot<>::disable_waiting_ack(ResponseCollector&)`
 - `SystemState::sdata.jnt_ang` and `jnt_ref` are documented in degrees.
 - `SystemState` does not expose a dedicated `jnt_vel[6]` member in the data
   struct; P1-B publishes finite zero joint velocities until a verified velocity
@@ -243,7 +248,14 @@ P1-B behavior:
   mode never reaches `RbpodoBackend::sendServoJ()`.
 - MIG-04 additionally rejects a send before touching the command channel when a
   recent cached state already proves `RobotFault`, `WrongMode`,
-  `ServoDisabled`, or invalid joint state.
+  `ServoDisabled`, or invalid joint state. HARDEN-04 keeps that rejection even
+  after the diagnostic cache is too old to report as `state_after`; a stale
+  not-motion-ready state must be cleared by a fresh successful read before a
+  send is attempted.
+- `disable_waiting_ack=false` preserves the SDK default ACK wait. When a local
+  config sets `disable_waiting_ack=true`, the backend calls the verified SDK
+  toggle once after constructing the rbpodo command client; subsequent SDK
+  command calls return after socket send rather than ACK wait.
 - Command acknowledgement timeouts map to `CommandTimeout`, controller error
   responses map to `ControllerRejected`, and write exceptions map to
   `TransportWriteFailed`.

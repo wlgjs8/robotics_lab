@@ -18,6 +18,9 @@ joint-only acceptance run after read-only state publishing has been verified.
 - Read-only state publishing can be healthy with `servo_enabled=false` when
   `q_actual` is valid. Treat that as observation-only readiness, not permission
   to send `servo_j`.
+- The real example keeps `disable_waiting_ack=false`, so rbpodo command sends
+  wait for controller ACK by default. Only set it true in a site-local motion
+  config after supervised acceptance of the command path.
 - `RbpodoBackend::stop()` and `resetFault()` are not verified controller-level
   real-robot recovery APIs. They return `rbpodo_stop_unverified` and
   `rbpodo_reset_fault_unverified`; use the physical E-stop and operator

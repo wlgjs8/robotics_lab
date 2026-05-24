@@ -21,7 +21,9 @@ left_robot:
   servo_lookahead_sec: 0.1
   servo_gain: 1.0
   servo_acc: 1.0
-  disable_waiting_ack: true
+  # Keep controller ACK waiting enabled by default. Set true only in a local
+  # motion config after supervised acceptance of the rbpodo command path.
+  disable_waiting_ack: false
 
 right_robot:
   backend_type: rbpodo
@@ -35,7 +37,9 @@ right_robot:
   servo_lookahead_sec: 0.1
   servo_gain: 1.0
   servo_acc: 1.0
-  disable_waiting_ack: true
+  # Keep controller ACK waiting enabled by default. Set true only in a local
+  # motion config after supervised acceptance of the rbpodo command path.
+  disable_waiting_ack: false
 
 left_mount:
   base_pose_in_stand: [0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0]

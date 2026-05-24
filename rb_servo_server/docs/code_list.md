@@ -33,7 +33,7 @@
   First-order mock plant for no-robot development.
 
 - `include/rb_servo/robot/rbpodo_backend.hpp` / `src/robot/rbpodo_backend.cpp`  
-  Placeholder for real Rainbow/rbsim backend. It refuses to report valid joint state or accept servo targets until rbpodo state/servo integration is implemented.
+  Guarded rbpodo backend for real RB3-730 controllers. It supports gated connect/readState and gated joint `servo_j`, keeps read-only state acquisition separate from motion readiness, and leaves stop/reset fault recovery unimplemented until verified controller APIs are accepted.
 
 - `docs/rbpodo_backend_plan.md`  
   Implementation plan and hardware acceptance runbook for the real RB3-730 backend. It documents SDK/linking, connect/initialize/read/send/stop/reset TODOs, safety guards, and first-motion gates without enabling real mode.
