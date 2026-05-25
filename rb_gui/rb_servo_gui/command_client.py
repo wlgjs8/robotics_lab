@@ -37,6 +37,39 @@ class CommandClient:
             raise ValueError(f"{label} values must be finite")
         return parsed
 
+    @staticmethod
+    def _finite_quaternion_xyzw(values: tuple[float, ...], label: str) -> list[float]:
+        if len(values) != 4:
+            raise ValueError(f"{label} quaternion must have 4 values")
+        parsed = [float(v) for v in values]
+        if any(not math.isfinite(v) for v in parsed):
+            raise ValueError(f"{label} quaternion values must be finite")
+        norm = math.sqrt(sum(v * v for v in parsed))
+        if not math.isfinite(norm) or norm <= 0.0:
+            raise ValueError(f"{label} quaternion must be non-zero")
+        return parsed
+
+    def _tcp_pose_payload(
+        self,
+        pose: tuple[float, ...],
+        *,
+        quaternion_xyzw: tuple[float, ...] | None,
+        label: str,
+    ) -> list[float] | dict[str, Any]:
+        parsed_pose = self._finite_six(pose, label)
+        if quaternion_xyzw is None:
+            return parsed_pose
+        parsed_quaternion = self._finite_quaternion_xyzw(quaternion_xyzw, label)
+        return {
+            "x": parsed_pose[0],
+            "y": parsed_pose[1],
+            "z": parsed_pose[2],
+            "rx": parsed_pose[3],
+            "ry": parsed_pose[4],
+            "rz": parsed_pose[5],
+            "quaternion_xyzw": parsed_quaternion,
+        }
+
     def build_lifecycle(self, mode: str, *, timeout_sec: float = 0.2) -> dict[str, Any]:
         return self._with_source({"seq": self.next_seq(), "mode": mode, "timeout_sec": timeout_sec, "left": {}, "right": {}})
 
@@ -63,6 +96,8 @@ class CommandClient:
         *,
         left_pose: tuple[float, ...] | None = None,
         right_pose: tuple[float, ...] | None = None,
+        left_quaternion_xyzw: tuple[float, ...] | None = None,
+        right_quaternion_xyzw: tuple[float, ...] | None = None,
         timeout_sec: float = 0.2,
     ) -> dict[str, Any]:
         if left_pose is None and right_pose is None:
@@ -78,9 +113,23 @@ class CommandClient:
             "right": {},
         }
         if left_pose is not None:
-            packet["left"] = {"mode": "TcpPoseTarget", "tcp_target_stand": self._finite_six(left_pose, "left TCP target")}
+            packet["left"] = {
+                "mode": "TcpPoseTarget",
+                "tcp_target_stand": self._tcp_pose_payload(
+                    left_pose,
+                    quaternion_xyzw=left_quaternion_xyzw,
+                    label="left TCP target",
+                ),
+            }
         if right_pose is not None:
-            packet["right"] = {"mode": "TcpPoseTarget", "tcp_target_stand": self._finite_six(right_pose, "right TCP target")}
+            packet["right"] = {
+                "mode": "TcpPoseTarget",
+                "tcp_target_stand": self._tcp_pose_payload(
+                    right_pose,
+                    quaternion_xyzw=right_quaternion_xyzw,
+                    label="right TCP target",
+                ),
+            }
         return self._with_source(packet)
 
     def build_tcp_delta_stand(

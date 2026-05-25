@@ -65,6 +65,12 @@ bool readOptionalNumber(const json& object, const char* key, double* out) {
     return isFiniteNumber(*it, out);
 }
 
+bool readRequiredNumber(const json& object, const char* key, double* out) {
+    const auto it = object.find(key);
+    if (it == object.end()) return false;
+    return isFiniteNumber(*it, out);
+}
+
 bool readOptionalBool(const json& object, const char* key, bool* out) {
     const auto it = object.find(key);
     if (it == object.end()) return true;
@@ -143,9 +149,49 @@ bool readOptionalJointArray(const json& object, const char* key, JointArray* out
 }
 
 bool readOptionalPose6D(const json& object, const char* key, Pose6D* out, bool* present) {
-    return readOptionalArray6(object, key, out, present, [](const std::array<double, 6>& values, Pose6D* target) {
-        *target = Pose6D{values[0], values[1], values[2], values[3], values[4], values[5]};
-    });
+    const auto it = object.find(key);
+    if (present) *present = false;
+    if (it == object.end()) return true;
+
+    if (it->is_array()) {
+        if (it->size() != 6) return false;
+        std::array<double, 6> values{};
+        for (size_t i = 0; i < values.size(); ++i) {
+            if (!isFiniteNumber((*it)[i], &values[i])) return false;
+        }
+        if (out) {
+            *out = Pose6D{values[0], values[1], values[2], values[3], values[4], values[5]};
+        }
+        if (present) *present = true;
+        return true;
+    }
+
+    if (!it->is_object()) return false;
+    const json& pose = *it;
+    Pose6D parsed;
+    if (!readRequiredNumber(pose, "x", &parsed.x)) return false;
+    if (!readRequiredNumber(pose, "y", &parsed.y)) return false;
+    if (!readRequiredNumber(pose, "z", &parsed.z)) return false;
+    if (!readRequiredNumber(pose, "rx", &parsed.rx)) return false;
+    if (!readRequiredNumber(pose, "ry", &parsed.ry)) return false;
+    if (!readRequiredNumber(pose, "rz", &parsed.rz)) return false;
+
+    const auto quat_it = pose.find("quaternion_xyzw");
+    if (quat_it != pose.end()) {
+        if (!quat_it->is_array() || quat_it->size() != 4) return false;
+        std::array<double, 4> quaternion{};
+        double norm2 = 0.0;
+        for (size_t i = 0; i < quaternion.size(); ++i) {
+            if (!isFiniteNumber((*quat_it)[i], &quaternion[i])) return false;
+            norm2 += quaternion[i] * quaternion[i];
+        }
+        if (!std::isfinite(norm2) || norm2 <= 0.0) return false;
+        parsed.quaternion_xyzw = quaternion;
+    }
+
+    if (out) *out = parsed;
+    if (present) *present = true;
+    return true;
 }
 
 bool readOptionalWrench6D(const json& object, const char* key, Wrench6D* out, bool* present) {

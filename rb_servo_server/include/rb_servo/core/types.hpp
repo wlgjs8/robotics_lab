@@ -170,6 +170,8 @@ struct CartesianSolveTelemetry {
     double fk_duration_us = 0.0;
     double ik_duration_us = 0.0;
     int ik_iterations = 0;
+    double position_error_m = 0.0;
+    double orientation_error_rad = 0.0;
     bool ik_timed_out = false;
     bool ik_warn_duration_exceeded = false;
     bool ik_fail_duration_exceeded = false;

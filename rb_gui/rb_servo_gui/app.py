@@ -195,6 +195,11 @@ def _xyzw_to_wxyz(quaternion_xyzw: tuple[float, float, float, float]) -> tuple[f
     return (qw / norm, qx / norm, qy / norm, qz / norm)
 
 
+def _wxyz_to_xyzw(wxyz: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    w, x, y, z = _normalize_wxyz(wxyz)
+    return (x, y, z, w)
+
+
 def _normalize_wxyz(wxyz: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
     w, x, y, z = (float(wxyz[0]), float(wxyz[1]), float(wxyz[2]), float(wxyz[3]))
     norm = math.sqrt(w * w + x * x + y * y + z * z)
@@ -894,24 +899,14 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
             if pose is None:
                 handles["tcp_status"].value = f"BLOCKED: {arm} TCP target unavailable"
                 return
-            if _tcp_frame_mode(handles) == _TCP_FRAME_LOCAL:
-                latest = safety.latest_valid()
-                if latest is None:
-                    handles["tcp_status"].value = "BLOCKED: state stream missing or stale"
-                    return
-                arm_state = latest.left if arm == "left" else latest.right
-                target = _tcp_target_position_wxyz(handles["scene"], arm)
-                if arm_state.tcp_stand is None or target is None:
-                    handles["tcp_status"].value = f"BLOCKED: {arm} TCP target unavailable"
-                    return
-                position, wxyz = target
-                delta = _tcp_local_delta_from_target(arm_state.tcp_stand, position, wxyz)
-                ok, message = safety.send_tcp_delta_local(arm, delta)
-            else:
-                ok, message = safety.send_tcp_pose_target(
-                    left_pose=pose if arm == "left" else None,
-                    right_pose=pose if arm == "right" else None,
-                )
+            wxyz = _tcp_target_wxyz(handles["scene"], arm)
+            quaternion_xyzw = _wxyz_to_xyzw(wxyz) if wxyz is not None else None
+            ok, message = safety.send_tcp_pose_target(
+                left_pose=pose if arm == "left" else None,
+                right_pose=pose if arm == "right" else None,
+                left_quaternion_xyzw=quaternion_xyzw if arm == "left" else None,
+                right_quaternion_xyzw=quaternion_xyzw if arm == "right" else None,
+            )
             handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
         def _send_delta(delta: tuple[float, float, float, float, float, float]) -> None:

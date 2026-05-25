@@ -35,6 +35,7 @@ from rb_servo_gui.app import (
     _tcp_target_pose,
     _tcp_target_wxyz,
     _update_tcp_frame_buttons,
+    _wxyz_to_xyzw,
     update_scene_markers,
 )
 from rb_servo_gui.command_client import CommandClient
@@ -472,6 +473,23 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(packet["left"]["tcp_target_stand"], list(pose))
         self.assertEqual(packet["right"], {})
 
+        ok, reason = safety.send_tcp_pose_target(left_pose=pose, left_quaternion_xyzw=(0.0, 0.0, 1.0, 0.0))
+        self.assertTrue(ok, reason)
+        packet = client.sent_packets[-1]
+        self.assertEqual(packet["left"]["mode"], "TcpPoseTarget")
+        self.assertEqual(
+            packet["left"]["tcp_target_stand"],
+            {
+                "x": 0.31,
+                "y": 0.12,
+                "z": 0.44,
+                "rx": 0.0,
+                "ry": 0.0,
+                "rz": 0.0,
+                "quaternion_xyzw": [0.0, 0.0, 1.0, 0.0],
+            },
+        )
+
     def test_tcp_delta_stand_real_mode_disabled_even_with_feature_flag(self):
         _, client, safety = self.make_safety(
             self.tcp_available_state(),
@@ -583,6 +601,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertAlmostEqual(yaw_180[3], 1.0, places=7)
         quaternion_pose = Pose6D(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, quaternion_xyzw=(0.0, 0.0, 1.0, 0.0))
         self.assertEqual(_pose_orientation_wxyz(quaternion_pose), (0.0, 0.0, 0.0, 1.0))
+        self.assertEqual(_wxyz_to_xyzw((0.0, 0.0, 0.0, 2.0)), (0.0, 0.0, 1.0, 0.0))
         cfg = _joint_cfg_radians((0.0, 90.0, -90.0))
         self.assertEqual(len(cfg), 6)
         self.assertAlmostEqual(cfg[1], math.pi / 2)

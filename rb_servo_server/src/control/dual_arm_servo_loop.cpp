@@ -25,6 +25,11 @@ bool isCartesianMode(ControlMode mode) {
            mode == ControlMode::TcpDeltaLocal;
 }
 
+bool isCartesianDeltaMode(ControlMode mode) {
+    return mode == ControlMode::TcpDeltaStand ||
+           mode == ControlMode::TcpDeltaLocal;
+}
+
 bool isMotionMode(ControlMode mode) {
     return mode == ControlMode::JointTarget ||
            mode == ControlMode::JointVelocity ||
@@ -470,6 +475,7 @@ void DualArmServoLoop::loopMain() {
         if (read_only_command_blocked) {
             setMotionState(ServerMotionState::ConnectedHold);
         } else if (commandRequestsEmergencyStop(command)) {
+            clearLatchedCartesianTargets();
             const FaultContext emergency_context = classifyCommandValidation(
                 SafetyVerdict::EmergencyStop,
                 command.left.mode == ControlMode::EmergencyStop ? ArmId::Left : ArmId::Right,
@@ -484,6 +490,7 @@ void DualArmServoLoop::loopMain() {
             );
             command = metadata_hold(command);
         } else if (commandRequestsResetFault(command)) {
+            clearLatchedCartesianTargets();
             if (readOnlyMode()) {
                 command = metadata_hold(command);
             } else if (fault_latched_.load()) {
@@ -503,6 +510,7 @@ void DualArmServoLoop::loopMain() {
             }
             command = metadata_hold(command);
         } else if (commandRequestsDisarmMotion(command)) {
+            clearLatchedCartesianTargets();
             setMotionState(ServerMotionState::ConnectedHold);
             command = metadata_hold(command);
         } else if (commandRequestsArmMotion(command)) {
@@ -511,6 +519,7 @@ void DualArmServoLoop::loopMain() {
             }
             command = metadata_hold(command);
         } else if (commandRequestsMotion(command) && !motionAllowed()) {
+            clearLatchedCartesianTargets();
             command = metadata_hold(command);
         }
 
@@ -535,6 +544,7 @@ void DualArmServoLoop::loopMain() {
                 safe_target.right_q_target_deg = right_prev_sent_q_deg_;
             }
         } else if (fault_latched_.load()) {
+            clearLatchedCartesianTargets();
             safe_target = currentFaultHoldTarget();
             safety_verdict = SafetyVerdict::FaultLatched;
         } else if (read_only_command_blocked) {
@@ -543,6 +553,7 @@ void DualArmServoLoop::loopMain() {
             safety_verdict = SafetyVerdict::InvalidCommand;
         } else {
             SafetyVerdict command_verdict = SafetyVerdict::Ok;
+            command = resolveCartesianDeltaCommand(command, left_state, right_state);
             const bool motion_requested = commandRequestsMotion(command);
             ServoTarget desired = computeServoTarget(left_state, right_state, command, filter_dt_sec, &command_verdict);
 
@@ -847,6 +858,84 @@ bool DualArmServoLoop::isValidJointState(const RobotState& state) const {
 
 bool DualArmServoLoop::isValidRobotStateForStartup(const RobotState& state) const {
     return isValidJointState(state);
+}
+
+void DualArmServoLoop::clearLatchedCartesianTargets() {
+    left_latched_cartesian_target_ = LatchedCartesianTarget{};
+    right_latched_cartesian_target_ = LatchedCartesianTarget{};
+}
+
+void DualArmServoLoop::clearLatchedCartesianTarget(ArmId arm_id) {
+    if (arm_id == ArmId::Left) {
+        left_latched_cartesian_target_ = LatchedCartesianTarget{};
+    } else {
+        right_latched_cartesian_target_ = LatchedCartesianTarget{};
+    }
+}
+
+DualArmCommand DualArmServoLoop::resolveCartesianDeltaCommand(
+    const DualArmCommand& command,
+    const RobotState& left_state,
+    const RobotState& right_state
+) {
+    DualArmCommand resolved = command;
+    resolved.left = resolveArmCartesianDeltaCommand(command.left, left_state, command.seq, left_latched_cartesian_target_);
+    resolved.right = resolveArmCartesianDeltaCommand(command.right, right_state, command.seq, right_latched_cartesian_target_);
+    return resolved;
+}
+
+ArmCommand DualArmServoLoop::resolveArmCartesianDeltaCommand(
+    const ArmCommand& command,
+    const RobotState& state,
+    uint64_t command_seq,
+    LatchedCartesianTarget& latch
+) {
+    if (!isCartesianDeltaMode(command.mode)) {
+        clearLatchedCartesianTarget(command.arm_id);
+        return command;
+    }
+
+    ArmCommand resolved = command;
+    if (latch.valid && latch.seq == command_seq) {
+        resolved.mode = ControlMode::TcpPoseTarget;
+        resolved.tcp_target_stand = latch.target_tcp_stand;
+        resolved.has_tcp_target = true;
+        resolved.has_tcp_delta_stand = false;
+        resolved.has_tcp_delta_local = false;
+        return resolved;
+    }
+
+    latch = LatchedCartesianTarget{};
+    if (!state.has_valid_tcp_pose || !state.tcp_stand.has_value()) {
+        return command;
+    }
+    if (command.mode == ControlMode::TcpDeltaStand && !command.has_tcp_delta_stand) {
+        return command;
+    }
+    if (command.mode == ControlMode::TcpDeltaLocal && !command.has_tcp_delta_local) {
+        return command;
+    }
+
+    CartesianController cartesian(
+        config_.left_mount,
+        config_.right_mount,
+        config_.cartesian_control,
+        kinematics_
+    );
+    const Pose6D target_tcp_stand = command.mode == ControlMode::TcpDeltaStand
+        ? cartesian.applyTcpDeltaStand(*state.tcp_stand, command.tcp_delta_stand)
+        : cartesian.applyTcpDeltaLocal(*state.tcp_stand, command.tcp_delta_local);
+
+    latch.seq = command_seq;
+    latch.target_tcp_stand = target_tcp_stand;
+    latch.valid = true;
+
+    resolved.mode = ControlMode::TcpPoseTarget;
+    resolved.tcp_target_stand = target_tcp_stand;
+    resolved.has_tcp_target = true;
+    resolved.has_tcp_delta_stand = false;
+    resolved.has_tcp_delta_local = false;
+    return resolved;
 }
 
 ServoTarget DualArmServoLoop::computeServoTarget(
@@ -1167,6 +1256,7 @@ std::string DualArmServoLoop::currentSendPolicy() const {
 }
 
 bool DualArmServoLoop::clearFaultLatch(RobotState& left_state, RobotState& right_state) {
+    clearLatchedCartesianTargets();
     const uint64_t reset_start_ns = nowSteadyNs();
     const uint64_t reset_timeout_ns = timeoutNs(config_.servo.command_timeout_sec, 1'000'000'000);
     const uint64_t reset_deadline_ns = addDeadlineNs(reset_start_ns, reset_timeout_ns);
@@ -1260,6 +1350,7 @@ void DualArmServoLoop::latchFault(
     const RobotState& right_state,
     const std::optional<FaultContext>& context
 ) {
+    clearLatchedCartesianTargets();
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (fault_latched_.load()) return;
     fault_latched_.store(true);

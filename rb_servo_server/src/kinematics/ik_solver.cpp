@@ -8,12 +8,22 @@ namespace rb_servo {
 namespace ik_solver {
 
 bool isFinitePose(const Pose6D& pose) {
-    return std::isfinite(pose.x) &&
-           std::isfinite(pose.y) &&
-           std::isfinite(pose.z) &&
-           std::isfinite(pose.rx) &&
-           std::isfinite(pose.ry) &&
-           std::isfinite(pose.rz);
+    if (!std::isfinite(pose.x) ||
+        !std::isfinite(pose.y) ||
+        !std::isfinite(pose.z) ||
+        !std::isfinite(pose.rx) ||
+        !std::isfinite(pose.ry) ||
+        !std::isfinite(pose.rz)) {
+        return false;
+    }
+    if (!pose.quaternion_xyzw.has_value()) return true;
+    const auto& q = *pose.quaternion_xyzw;
+    double norm2 = 0.0;
+    for (double value : q) {
+        if (!std::isfinite(value)) return false;
+        norm2 += value * value;
+    }
+    return std::isfinite(norm2) && norm2 > 0.0;
 }
 
 bool isFiniteJoints(const JointArray& joints) {

@@ -20,6 +20,7 @@ STATE_PORT="50110"
 STARTUP_TIMEOUT_SEC="8.0"
 CAPTURE_SEC="1.0"
 TCP_TOLERANCE_M="0.004"
+TCP_ORIENTATION_TOLERANCE_RAD="0.005"
 
 usage() {
   cat <<'USAGE'
@@ -46,6 +47,8 @@ Options:
   --startup-timeout-sec SEC   Startup/state wait timeout. Default: 8.0
   --capture-sec SEC           Post-command capture duration. Default: 1.0
   --tcp-tolerance-m M         TCP x movement tolerance. Default: 0.004
+  --tcp-orientation-tolerance-rad RAD
+                              TCP quaternion angle tolerance for pure translations. Default: 0.005
   -h, --help                  Show this help.
 
 The selected server config must enable kinematics.publish_tcp, kinematics.ik,
@@ -162,6 +165,11 @@ while [[ $# -gt 0 ]]; do
       TCP_TOLERANCE_M="$2"
       shift 2
       ;;
+    --tcp-orientation-tolerance-rad)
+      [[ $# -ge 2 ]] || fail "--tcp-orientation-tolerance-rad requires a value"
+      TCP_ORIENTATION_TOLERANCE_RAD="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -212,6 +220,10 @@ python3 "${ROOT_DIR}/rb_servo_server/tools/send_tcp_delta.py" \
   --dry-run --frame stand \
   --left 0.005 0 0 0 0 0 \
   --right 0 0 0 0 0 0 >/dev/null
+python3 "${ROOT_DIR}/rb_servo_server/tools/send_tcp_delta.py" \
+  --dry-run --frame local \
+  --left 0.005 0 0 0 0 0 \
+  --right 0 0 0 0 0 0 >/dev/null
 python3 "${ROOT_DIR}/rb_servo_server/tools/send_tcp_pose_target.py" \
   --dry-run --left 10 0 10 0 0 0 >/dev/null
 
@@ -259,6 +271,13 @@ if "172.28.60.200" in text:
     unsafe.append("real left robot IP 172.28.60.200")
 if "172.28.60.201" in text:
     unsafe.append("real right robot IP 172.28.60.201")
+orientation_tolerance = re.search(r"(?m)^\s+orientation_tolerance_rad:\s+([0-9.]+)\s*$", text)
+if orientation_tolerance is None:
+    missing.append("kinematics.ik.orientation_tolerance_rad")
+else:
+    value = float(orientation_tolerance.group(1))
+    if value > 0.005:
+        missing.append("kinematics.ik.orientation_tolerance_rad <= 0.005")
 if missing:
     print(
         "tcp_pose_acceptance: FAIL: selected server config is not FK/IK TCP acceptance-ready: "
@@ -319,6 +338,7 @@ python3 - \
   --startup-timeout-sec "${STARTUP_TIMEOUT_SEC}" \
   --capture-sec "${CAPTURE_SEC}" \
   --tcp-tolerance-m "${TCP_TOLERANCE_M}" \
+  --tcp-orientation-tolerance-rad "${TCP_ORIENTATION_TOLERANCE_RAD}" \
   --run-estop-reset "${RUN_ESTOP_RESET}" <<'PY'
 from __future__ import annotations
 
@@ -418,6 +438,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--startup-timeout-sec", type=float, required=True)
     parser.add_argument("--capture-sec", type=float, required=True)
     parser.add_argument("--tcp-tolerance-m", type=float, required=True)
+    parser.add_argument("--tcp-orientation-tolerance-rad", type=float, required=True)
     parser.add_argument("--run-estop-reset", choices=("0", "1"), required=True)
     return parser.parse_args()
 
@@ -493,7 +514,7 @@ def finite_tcp_pose(value: Any, label: str) -> dict[str, float]:
     return out
 
 
-def finite_published_tcp_pose(value: Any, label: str) -> dict[str, float]:
+def finite_published_tcp_pose(value: Any, label: str) -> dict[str, float | list[float]]:
     pose = finite_tcp_pose(value, label)
     assert isinstance(value, dict)
     quaternion = value.get("quaternion_xyzw")
@@ -518,7 +539,34 @@ def finite_published_tcp_pose(value: Any, label: str) -> dict[str, float]:
             raise AcceptanceError(f"{label}.{key} alias is missing or non-numeric") from exc
         if not math.isfinite(alias) or abs(alias - q[index]) > 1e-9:
             raise AcceptanceError(f"{label}.{key} alias does not match quaternion_xyzw[{index}]")
+    pose["quaternion_xyzw"] = q
     return pose
+
+
+def quaternion_angle_distance(a: list[float], b: list[float]) -> float:
+    if len(a) != 4 or len(b) != 4:
+        raise AcceptanceError("quaternion angle distance requires two [qx, qy, qz, qw] arrays")
+    dot = abs(sum(float(x) * float(y) for x, y in zip(a, b)))
+    dot = min(1.0, max(-1.0, dot))
+    return 2.0 * math.acos(dot)
+
+
+def assert_quaternion_preserved(
+    before: dict[str, float | list[float]],
+    after: dict[str, float | list[float]],
+    label: str,
+    tolerance_rad: float,
+) -> float:
+    before_q = before.get("quaternion_xyzw")
+    after_q = after.get("quaternion_xyzw")
+    if not isinstance(before_q, list) or not isinstance(after_q, list):
+        raise AcceptanceError(f"{label} missing published quaternion for orientation preservation check")
+    angle = quaternion_angle_distance(before_q, after_q)
+    if angle > tolerance_rad:
+        raise AcceptanceError(
+            f"{label} pure translation changed TCP quaternion by {angle} rad, tolerance {tolerance_rad}"
+        )
+    return angle
 
 
 def close_enough(actual: list[float], expected: list[float], tolerance: float = 0.2) -> bool:
@@ -651,6 +699,20 @@ def tcp_delta_stand_command() -> dict[str, Any]:
     }
 
 
+def tcp_delta_local_command() -> dict[str, Any]:
+    seq = time.monotonic_ns()
+    return {
+        "schema_version": 1,
+        "seq": seq,
+        "mode": "TcpDeltaLocal",
+        "host_time_ns": seq,
+        "timeout_sec": 0.2,
+        "coupled_timeout": True,
+        "left": {"mode": "TcpDeltaLocal", "tcp_delta_local": [0.005, 0, 0, 0, 0, 0]},
+        "right": {"mode": "TcpDeltaLocal", "tcp_delta_local": [0, 0, 0, 0, 0, 0]},
+    }
+
+
 def unreachable_tcp_pose_command(current_left_pose: dict[str, float]) -> dict[str, Any]:
     seq = time.monotonic_ns()
     return {
@@ -727,7 +789,14 @@ def validate_cartesian_telemetry(
     for key in ("status", "reason", "ik_status", "ik_reason"):
         if key not in telemetry or not isinstance(telemetry[key], str):
             raise AcceptanceError(f"{label}.cartesian_solve.{key} must be a string")
-    for key in ("fk_duration_us", "ik_duration_us", "warn_ik_duration_us", "fail_ik_duration_us"):
+    for key in (
+        "fk_duration_us",
+        "ik_duration_us",
+        "position_error_m",
+        "orientation_error_rad",
+        "warn_ik_duration_us",
+        "fail_ik_duration_us",
+    ):
         telemetry[key] = nonnegative_number(telemetry.get(key), f"{label}.cartesian_solve.{key}")
     iterations = telemetry.get("ik_iterations")
     if not isinstance(iterations, int) or iterations < 0:
@@ -899,9 +968,66 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
             raise AcceptanceError(f"left TCP x delta {left_dx} exceeds bounded simulator acceptance limit")
         if abs(right_dx) > args.tcp_tolerance_m:
             raise AcceptanceError(f"right TCP x moved despite zero delta: dx={right_dx}")
+        stand_left_orientation_delta_rad = assert_quaternion_preserved(
+            initial_left_tcp,
+            final_left_tcp,
+            "left TcpDeltaStand",
+            args.tcp_orientation_tolerance_rad,
+        )
+        stand_right_orientation_delta_rad = assert_quaternion_preserved(
+            initial_right_tcp,
+            final_right_tcp,
+            "right zero TcpDeltaStand",
+            args.tcp_orientation_tolerance_rad,
+        )
 
-        previous_left_q = finite_joint_array(final["left"].get("q_sent_deg"), "left.safe.q_sent_deg")
-        previous_right_q = finite_joint_array(final["right"].get("q_sent_deg"), "right.safe.q_sent_deg")
+        local_arm_motion = lifecycle_command("ArmMotion")
+        send_udp_command(args.command_host, args.command_port, local_arm_motion)
+        wait_for_snapshot(
+            capture,
+            lambda snapshot: arm_motion_observed(snapshot, local_arm_motion),
+            args.startup_timeout_sec,
+            "ArmMotion refreshed before TcpDeltaLocal",
+        )
+        local_command = tcp_delta_local_command()
+        send_udp_command(args.command_host, args.command_port, local_command)
+        local_delta_snapshot = wait_for_snapshot(
+            capture,
+            lambda snapshot: (
+                int(snapshot.get("command_seq", -1)) >= int(local_command["seq"])
+                and snapshot.get("safety_verdict") == "Ok"
+                and snapshot.get("fault_latched") is False
+            ),
+            args.startup_timeout_sec,
+            "TcpDeltaLocal Ok verdict",
+        )
+        validate_cartesian_telemetry(local_delta_snapshot["left"], "left.local_delta", expected_attempted=True, expected_success=True)
+        validate_cartesian_telemetry(local_delta_snapshot["right"], "right.local_delta", expected_attempted=True, expected_success=True)
+        time.sleep(args.capture_sec)
+        local_final_after_ns = time.monotonic_ns()
+        local_final = wait_for_snapshot(
+            capture,
+            lambda snapshot: snapshot_at_or_after(snapshot, local_final_after_ns) and has_valid_tcp(snapshot),
+            args.startup_timeout_sec,
+            "final FK TCP pose after TcpDeltaLocal",
+        )
+        local_final_left_tcp = finite_published_tcp_pose(local_final["left"].get("tcp_stand"), "left.local_final.tcp_stand")
+        local_final_right_tcp = finite_published_tcp_pose(local_final["right"].get("tcp_stand"), "right.local_final.tcp_stand")
+        local_left_orientation_delta_rad = assert_quaternion_preserved(
+            final_left_tcp,
+            local_final_left_tcp,
+            "left TcpDeltaLocal",
+            args.tcp_orientation_tolerance_rad,
+        )
+        local_right_orientation_delta_rad = assert_quaternion_preserved(
+            final_right_tcp,
+            local_final_right_tcp,
+            "right zero TcpDeltaLocal",
+            args.tcp_orientation_tolerance_rad,
+        )
+
+        previous_left_q = finite_joint_array(local_final["left"].get("q_sent_deg"), "left.safe.q_sent_deg")
+        previous_right_q = finite_joint_array(local_final["right"].get("q_sent_deg"), "right.safe.q_sent_deg")
         ik_arm_motion = lifecycle_command("ArmMotion")
         send_udp_command(args.command_host, args.command_port, ik_arm_motion)
         wait_for_snapshot(
@@ -910,7 +1036,7 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
             args.startup_timeout_sec,
             "ArmMotion refreshed before unreachable TcpPoseTarget",
         )
-        ik_failure_command = unreachable_tcp_pose_command(final_left_tcp)
+        ik_failure_command = unreachable_tcp_pose_command(local_final_left_tcp)
         send_udp_command(args.command_host, args.command_port, ik_failure_command)
         ik_failure = wait_for_snapshot(
             capture,
@@ -993,7 +1119,13 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         "final_left_tcp_x": final_left_tcp["x"],
         "left_tcp_dx_m": left_dx,
         "right_tcp_dx_m": right_dx,
+        "tcp_orientation_tolerance_rad": args.tcp_orientation_tolerance_rad,
+        "stand_left_orientation_delta_rad": stand_left_orientation_delta_rad,
+        "stand_right_orientation_delta_rad": stand_right_orientation_delta_rad,
+        "local_left_orientation_delta_rad": local_left_orientation_delta_rad,
+        "local_right_orientation_delta_rad": local_right_orientation_delta_rad,
         "normal_delta_verdict": delta_snapshot.get("safety_verdict"),
+        "local_delta_verdict": local_delta_snapshot.get("safety_verdict"),
         "ik_failure_verdict": ik_failure.get("safety_verdict"),
         "ik_latency_us": ik_latency_us,
         "ik_failure_retained_previous_safe_target": True,

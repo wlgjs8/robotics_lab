@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <optional>
 #include <utility>
 
 namespace rb_servo {
@@ -85,8 +86,63 @@ Matrix3 rotationFromRpy(double rx, double ry, double rz) {
     }};
 }
 
+std::optional<Matrix3> rotationFromQuaternionXyzw(const std::optional<std::array<double, 4>>& quaternion_xyzw) {
+    if (!quaternion_xyzw.has_value()) return std::nullopt;
+    const auto& q = *quaternion_xyzw;
+    const double norm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (!std::isfinite(norm) || norm <= 0.0) return std::nullopt;
+
+    const double x = q[0] / norm;
+    const double y = q[1] / norm;
+    const double z = q[2] / norm;
+    const double w = q[3] / norm;
+
+    return Matrix3{{
+        {1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)},
+        {2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)},
+        {2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)},
+    }};
+}
+
+std::array<double, 4> quaternionXyzwFromRotation(const Matrix3& r) {
+    std::array<double, 4> q{};
+    const double trace = r[0][0] + r[1][1] + r[2][2];
+    if (trace > 0.0) {
+        const double s = std::sqrt(trace + 1.0) * 2.0;
+        q[3] = 0.25 * s;
+        q[0] = (r[2][1] - r[1][2]) / s;
+        q[1] = (r[0][2] - r[2][0]) / s;
+        q[2] = (r[1][0] - r[0][1]) / s;
+    } else if (r[0][0] > r[1][1] && r[0][0] > r[2][2]) {
+        const double s = std::sqrt(1.0 + r[0][0] - r[1][1] - r[2][2]) * 2.0;
+        q[3] = (r[2][1] - r[1][2]) / s;
+        q[0] = 0.25 * s;
+        q[1] = (r[0][1] + r[1][0]) / s;
+        q[2] = (r[0][2] + r[2][0]) / s;
+    } else if (r[1][1] > r[2][2]) {
+        const double s = std::sqrt(1.0 + r[1][1] - r[0][0] - r[2][2]) * 2.0;
+        q[3] = (r[0][2] - r[2][0]) / s;
+        q[0] = (r[0][1] + r[1][0]) / s;
+        q[1] = 0.25 * s;
+        q[2] = (r[1][2] + r[2][1]) / s;
+    } else {
+        const double s = std::sqrt(1.0 + r[2][2] - r[0][0] - r[1][1]) * 2.0;
+        q[3] = (r[1][0] - r[0][1]) / s;
+        q[0] = (r[0][2] + r[2][0]) / s;
+        q[1] = (r[1][2] + r[2][1]) / s;
+        q[2] = 0.25 * s;
+    }
+
+    const double norm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (!std::isfinite(norm) || norm <= 0.0) {
+        return {0.0, 0.0, 0.0, 1.0};
+    }
+    return {q[0] / norm, q[1] / norm, q[2] / norm, q[3] / norm};
+}
+
 Transform transformFromPose(const Pose6D& pose) {
-    return {rotationFromRpy(pose.rx, pose.ry, pose.rz), {pose.x, pose.y, pose.z}};
+    const std::optional<Matrix3> quaternion_rotation = rotationFromQuaternionXyzw(pose.quaternion_xyzw);
+    return {quaternion_rotation.value_or(rotationFromRpy(pose.rx, pose.ry, pose.rz)), {pose.x, pose.y, pose.z}};
 }
 
 Pose6D poseFromTransform(const Transform& transform) {
@@ -105,6 +161,7 @@ Pose6D poseFromTransform(const Transform& transform) {
         pose.rx = 0.0;
         pose.rz = std::atan2(-transform.r[0][1], transform.r[1][1]);
     }
+    pose.quaternion_xyzw = quaternionXyzwFromRotation(transform.r);
     return pose;
 }
 
@@ -265,6 +322,8 @@ CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
     );
     result.telemetry.ik_duration_us = ik.duration_us;
     result.telemetry.ik_iterations = ik.iterations;
+    result.telemetry.position_error_m = ik.position_error_m;
+    result.telemetry.orientation_error_rad = ik.orientation_error_rad;
     result.telemetry.ik_timed_out = ik.timed_out || ik.reason == ik_solver::kReasonTimeout;
     result.telemetry.ik_warn_duration_exceeded =
         config_.warn_ik_duration_us > 0.0 && ik.duration_us > config_.warn_ik_duration_us;

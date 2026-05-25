@@ -160,6 +160,8 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"fk_duration_us", telemetry.fk_duration_us},
         {"ik_duration_us", telemetry.ik_duration_us},
         {"ik_iterations", telemetry.ik_iterations},
+        {"position_error_m", telemetry.position_error_m},
+        {"orientation_error_rad", telemetry.orientation_error_rad},
         {"ik_status", telemetry.status},
         {"ik_reason", telemetry.reason},
         {"ik_timed_out", telemetry.ik_timed_out},

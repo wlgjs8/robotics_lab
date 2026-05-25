@@ -32,15 +32,6 @@ public:
         RunMode run_mode
     );
 
-private:
-    CartesianArmTargetResult solveIkFromTcpStandTarget(
-        ArmId arm_id,
-        const Pose6D& target_tcp_stand,
-        const RobotState& state,
-        const JointArray& previous_safe_sent_q_deg,
-        RunMode run_mode
-    );
-
     Pose6D applyTcpDeltaStand(
         const Pose6D& current_tcp_stand,
         const Pose6D& delta
@@ -50,6 +41,15 @@ private:
         const Pose6D& current_tcp_stand,
         const Pose6D& delta
     ) const;
+
+private:
+    CartesianArmTargetResult solveIkFromTcpStandTarget(
+        ArmId arm_id,
+        const Pose6D& target_tcp_stand,
+        const RobotState& state,
+        const JointArray& previous_safe_sent_q_deg,
+        RunMode run_mode
+    );
 
 private:
     ArmMountConfig left_mount_;

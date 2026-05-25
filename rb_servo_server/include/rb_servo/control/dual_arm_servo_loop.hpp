@@ -43,6 +43,12 @@ public:
     ServoSnapshot latestSnapshot() const;
 
 private:
+    struct LatchedCartesianTarget {
+        uint64_t seq = 0;
+        Pose6D target_tcp_stand;
+        bool valid = false;
+    };
+
     void loopMain();
     bool configureRealtimeForLoop();
 
@@ -52,6 +58,19 @@ private:
     void populateTcpPose(RobotState& state, const ArmMountConfig& mount) const;
     bool isValidRobotStateForStartup(const RobotState& state) const;
     bool isValidJointState(const RobotState& state) const;
+    void clearLatchedCartesianTargets();
+    void clearLatchedCartesianTarget(ArmId arm_id);
+    DualArmCommand resolveCartesianDeltaCommand(
+        const DualArmCommand& command,
+        const RobotState& left_state,
+        const RobotState& right_state
+    );
+    ArmCommand resolveArmCartesianDeltaCommand(
+        const ArmCommand& command,
+        const RobotState& state,
+        uint64_t command_seq,
+        LatchedCartesianTarget& latch
+    );
 
     ServoTarget computeServoTarget(
         const RobotState& left_state,
@@ -150,6 +169,8 @@ private:
     JointArray right_fault_hold_q_deg_{};
     CartesianSolveTelemetry left_last_cartesian_solve_;
     CartesianSolveTelemetry right_last_cartesian_solve_;
+    LatchedCartesianTarget left_latched_cartesian_target_;
+    LatchedCartesianTarget right_latched_cartesian_target_;
     ServoSnapshot latest_snapshot_;
 };
 

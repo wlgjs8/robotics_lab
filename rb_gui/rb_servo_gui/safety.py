@@ -323,6 +323,8 @@ class OperatorSafety:
         *,
         left_pose: tuple[float, ...] | None = None,
         right_pose: tuple[float, ...] | None = None,
+        left_quaternion_xyzw: tuple[float, ...] | None = None,
+        right_quaternion_xyzw: tuple[float, ...] | None = None,
     ) -> tuple[bool, str]:
         if not self.enable_tcp_pose_commands:
             return False, "TCP pose command disabled until FK/IK milestone is enabled"
@@ -331,17 +333,32 @@ class OperatorSafety:
             return False, reason
         if left_pose is None and right_pose is None:
             return False, "no TCP target selected"
-        values = list(left_pose or ()) + list(right_pose or ())
+        values = (
+            list(left_pose or ())
+            + list(right_pose or ())
+            + list(left_quaternion_xyzw or ())
+            + list(right_quaternion_xyzw or ())
+        )
         try:
             finite_values = [float(value) for value in values]
         except (TypeError, ValueError):
             return False, "non-finite TCP target rejected"
         if any(not math.isfinite(value) for value in finite_values):
             return False, "non-finite TCP target rejected"
+        for quaternion in (left_quaternion_xyzw, right_quaternion_xyzw):
+            if quaternion is None:
+                continue
+            if len(quaternion) != 4:
+                return False, "TCP target quaternion must have 4 values"
+            norm = math.sqrt(sum(float(value) * float(value) for value in quaternion))
+            if not math.isfinite(norm) or norm <= 0.0:
+                return False, "TCP target quaternion must be non-zero"
         try:
             packet = self.command_client.build_tcp_pose_target(
                 left_pose=left_pose,
                 right_pose=right_pose,
+                left_quaternion_xyzw=left_quaternion_xyzw,
+                right_quaternion_xyzw=right_quaternion_xyzw,
                 timeout_sec=self.command_timeout_sec,
             )
         except ValueError as exc:
