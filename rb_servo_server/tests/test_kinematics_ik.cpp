@@ -70,14 +70,14 @@ rb_servo::KinematicsConfig testKinematicsConfig() {
 rb_servo::ArmMountConfig leftMount() {
     rb_servo::ArmMountConfig mount;
     mount.arm_id = rb_servo::ArmId::Left;
-    mount.base_pose_in_stand = {0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0};
+    mount.base_pose_in_stand = {0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296};
     return mount;
 }
 
 rb_servo::ArmMountConfig rightMount() {
     rb_servo::ArmMountConfig mount;
     mount.arm_id = rb_servo::ArmId::Right;
-    mount.base_pose_in_stand = {-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0};
+    mount.base_pose_in_stand = {-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296};
     return mount;
 }
 

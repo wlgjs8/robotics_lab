@@ -1865,10 +1865,10 @@ geometry/active_setup.yaml
 
    robot:
      T_stand_left_base:
-       xyz_rpy: [0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0]
+       xyz_rpy: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
        status: configured_estimate
      T_stand_right_base:
-       xyz_rpy: [-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0]
+       xyz_rpy: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
        status: configured_estimate
 
    cameras:

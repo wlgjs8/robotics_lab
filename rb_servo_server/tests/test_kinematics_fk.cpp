@@ -86,6 +86,37 @@ bool normalizedQuaternion(const rb_servo::Pose6D& pose) {
     return std::isfinite(norm) && std::fabs(norm - 1.0) < 1e-9;
 }
 
+std::array<double, 3> baseZAxisInStand(const rb_servo::Pose6D& pose) {
+    const double cr = std::cos(pose.rx);
+    const double sr = std::sin(pose.rx);
+    const double cp = std::cos(pose.ry);
+    const double sp = std::sin(pose.ry);
+    const double cy = std::cos(pose.rz);
+    const double sy = std::sin(pose.rz);
+    return {
+        cy * sp * cr + sy * sr,
+        sy * sp * cr - cy * sr,
+        cp * cr,
+    };
+}
+
+std::array<double, 3> shoulderMountNormal(const rb_servo::Pose6D& pose, rb_servo::ArmId arm_id) {
+    std::array<double, 3> z_axis = baseZAxisInStand(pose);
+    if (arm_id == rb_servo::ArmId::Left) {
+        z_axis[0] = -z_axis[0];
+        z_axis[1] = -z_axis[1];
+        z_axis[2] = -z_axis[2];
+    }
+    return z_axis;
+}
+
+bool closeVector(const std::array<double, 3>& actual, const std::array<double, 3>& expected, double tolerance) {
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        if (std::fabs(actual[i] - expected[i]) > tolerance) return false;
+    }
+    return true;
+}
+
 rb_servo::JointArray joints(double value) {
     rb_servo::JointArray out{};
     out.fill(value);
@@ -374,7 +405,7 @@ bool testPinocchioFkIfEnabled() {
 
     rb_servo::ArmMountConfig mount;
     mount.arm_id = rb_servo::ArmId::Left;
-    mount.base_pose_in_stand = {0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0};
+    mount.base_pose_in_stand = {0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296};
     const rb_servo::Pose6D tcp_stand = kin.computeTcpStand(rb_servo::ArmId::Left, zero, mount);
     RB_CHECK(finitePose(tcp_stand));
     RB_CHECK(normalizedQuaternion(tcp_stand));
@@ -398,6 +429,16 @@ bool testPinocchioFkIfEnabled() {
     }
     RB_CHECK(bad_joint_threw);
 #endif
+    return true;
+}
+
+bool testConfiguredMountNormals() {
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml((servoRoot() / "config" / "dual_simulator.yaml").string());
+    const std::array<double, 3> left_normal = shoulderMountNormal(cfg.left_mount.base_pose_in_stand, rb_servo::ArmId::Left);
+    const std::array<double, 3> right_normal = shoulderMountNormal(cfg.right_mount.base_pose_in_stand, rb_servo::ArmId::Right);
+
+    RB_CHECK(closeVector(left_normal, {-0.709, -0.500, 0.498}, 0.01));
+    RB_CHECK(closeVector(right_normal, {-0.708, 0.499, -0.500}, 0.01));
     return true;
 }
 
@@ -524,6 +565,7 @@ int main() {
     if (!testTcpAcceptanceConfigContract()) return 1;
     if (!testIkRemainsUnavailable()) return 1;
     if (!testDisabledBuildBehavior()) return 1;
+    if (!testConfiguredMountNormals()) return 1;
     if (!testPinocchioFkIfEnabled()) return 1;
     if (!testStatePublisherSerializesTcpPoseValidity()) return 1;
     if (!testStatePublisherKeepsTcpDeferredWhenFkDisabled()) return 1;

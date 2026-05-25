@@ -10,7 +10,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rb_servo_gui.app import _angular_step_radians, _format_fk_status, _format_joints, _joint_cfg_radians, _joint_marker_position, _linear_step_meters, _mode_button_color, _mount_position, _pose6_from_mounts, _pose_wxyz, _sim_readiness_from_env, _tcp_target_pose, update_scene_markers
+from rb_servo_gui.app import (
+    _DEFAULT_LEFT_POSE,
+    _DEFAULT_RIGHT_POSE,
+    _angular_step_radians,
+    _format_fk_status,
+    _format_joints,
+    _joint_cfg_radians,
+    _joint_marker_position,
+    _linear_step_meters,
+    _mode_button_color,
+    _mount_position,
+    _mount_pose_from_mounts,
+    _pose6_from_mounts,
+    _pose_orientation_wxyz,
+    _pose_wxyz,
+    _quat_to_matrix,
+    _sim_readiness_from_env,
+    _tcp_target_pose,
+    update_scene_markers,
+)
 from rb_servo_gui.command_client import CommandClient
 from rb_servo_gui.models import Pose6D
 from rb_servo_gui.safety import OperatorSafety, Readiness, normalize_observed_mode_backend
@@ -507,6 +526,8 @@ class GuiContractsTest(unittest.TestCase):
         yaw_180 = _pose_wxyz((0.0, 0.0, 0.0, 0.0, 0.0, math.pi))
         self.assertAlmostEqual(yaw_180[0], 0.0, places=7)
         self.assertAlmostEqual(yaw_180[3], 1.0, places=7)
+        quaternion_pose = Pose6D(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, quaternion_xyzw=(0.0, 0.0, 1.0, 0.0))
+        self.assertEqual(_pose_orientation_wxyz(quaternion_pose), (0.0, 0.0, 0.0, 1.0))
         cfg = _joint_cfg_radians((0.0, 90.0, -90.0))
         self.assertEqual(len(cfg), 6)
         self.assertAlmostEqual(cfg[1], math.pi / 2)
@@ -514,6 +535,34 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(cfg[3:], (0.0, 0.0, 0.0))
         self.assertEqual(_format_joints(None), "invalid")
         self.assertEqual(_joint_cfg_radians(None), (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+
+    def test_default_mount_normals_match_stand_shoulder_faces(self):
+        left_matrix = _quat_to_matrix(_pose_orientation_wxyz(_DEFAULT_LEFT_POSE))
+        right_matrix = _quat_to_matrix(_pose_orientation_wxyz(_DEFAULT_RIGHT_POSE))
+        left_normal = tuple(-left_matrix[row][2] for row in range(3))
+        right_normal = tuple(right_matrix[row][2] for row in range(3))
+        for actual, expected in zip(left_normal, (-0.709, -0.500, 0.498)):
+            self.assertAlmostEqual(actual, expected, delta=0.01)
+        for actual, expected in zip(right_normal, (-0.708, 0.499, -0.500)):
+            self.assertAlmostEqual(actual, expected, delta=0.01)
+
+    def test_mount_parsing_preserves_future_quaternion_orientation(self):
+        mounts = {
+            "left": {
+                "base_pose_in_stand": {
+                    "x": 1.0,
+                    "y": 2.0,
+                    "z": 3.0,
+                    "rx": 0.0,
+                    "ry": 0.0,
+                    "rz": 0.0,
+                    "quaternion_xyzw": [0.0, 0.0, 1.0, 0.0],
+                }
+            }
+        }
+        pose = _mount_pose_from_mounts(mounts, "left", _DEFAULT_LEFT_POSE)
+        self.assertEqual(pose.as_tuple(), (1.0, 2.0, 3.0, 0.0, 0.0, 0.0))
+        self.assertEqual(_pose_orientation_wxyz(pose), (0.0, 0.0, 0.0, 1.0))
 
     def test_scene_update_sets_mount_pose_and_urdf_joint_config(self):
         store, _, _ = self.make_safety(
@@ -543,6 +592,30 @@ class GuiContractsTest(unittest.TestCase):
         self.assertAlmostEqual(left_urdf.configs[-1][1], math.radians(-30.0))
         self.assertAlmostEqual(right_urdf.configs[-1][2], math.radians(80.0))
 
+    def test_scene_update_uses_mount_quaternion_over_legacy_rpy(self):
+        store, _, _ = self.make_safety(
+            sample_state(
+                mounts={
+                    "left": {
+                        "base_pose_in_stand": {
+                            "x": 1.0,
+                            "y": 2.0,
+                            "z": 3.0,
+                            "rx": 0.0,
+                            "ry": 0.0,
+                            "rz": 0.0,
+                            "quaternion_xyzw": [0.0, 0.0, 1.0, 0.0],
+                        }
+                    }
+                }
+            )
+        )
+        left_base = RecordingSceneHandle()
+        handles = {"left_base": left_base}
+        update_scene_markers(handles, store.latest())
+        self.assertEqual(left_base.position, (1.0, 2.0, 3.0))
+        self.assertEqual(left_base.wxyz, (0.0, 0.0, 0.0, 1.0))
+
     def test_scene_update_sets_tcp_target_from_tcp_stand_without_base_axes(self):
         state = sample_state()
         state["left"]["tcp_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": math.pi}
@@ -566,6 +639,27 @@ class GuiContractsTest(unittest.TestCase):
         update_scene_markers(handles, store.latest())
         self.assertEqual(left_tcp.position, (0.5, 0.5, 0.5))
         self.assertEqual(left_target.position, (9.0, 9.0, 9.0))
+
+    def test_scene_update_uses_tcp_quaternion_over_legacy_rpy(self):
+        state = sample_state()
+        state["left"]["tcp_stand"] = {
+            "x": 0.31,
+            "y": 0.12,
+            "z": 0.44,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": 0.0,
+            "quaternion_xyzw": [0.0, 0.0, 1.0, 0.0],
+        }
+        state["left"]["has_valid_tcp_pose"] = True
+        state["left"]["tcp_deferred"] = False
+        store, _, _ = self.make_safety(state)
+        left_tcp = RecordingSceneHandle()
+        left_target = RecordingSceneHandle()
+        handles = {"left_tcp": left_tcp, "left_tcp_target": left_target}
+        update_scene_markers(handles, store.latest())
+        self.assertEqual(left_tcp.wxyz, (0.0, 0.0, 0.0, 1.0))
+        self.assertEqual(left_target.wxyz, (0.0, 0.0, 0.0, 1.0))
 
     def test_scene_update_hides_tcp_marker_when_pose_is_not_valid(self):
         state = sample_state()

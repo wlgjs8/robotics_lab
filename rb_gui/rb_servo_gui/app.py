@@ -20,8 +20,9 @@ _ROBOT_JOINT_NAMES = (
     "wrist3_joint",
 )
 _DESIRED_MODES = ("mock", "simulation", "real")
-_DEFAULT_LEFT_POSE = (0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0)
-_DEFAULT_RIGHT_POSE = (-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0)
+# Rotation values are canonical URDF/ROS RPY converted from MJCF euler xyz.
+_DEFAULT_LEFT_POSE = (0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296)
+_DEFAULT_RIGHT_POSE = (-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296)
 _DEFAULT_STAND_MESH_POSE = (0.0, 0.0, 0.01, 0.0, 0.0, -1.57078)
 _SELECTED_MODE_COLOR = "green"
 _INACTIVE_MODE_COLOR = "gray"
@@ -121,10 +122,13 @@ def _stand_mesh_path() -> Path:
     return _asset_path("RB_GUI_STAND_MESH", "meshes/stands/dual_rb3_730e/dual_rb3_730e_stand_ver3.stl")
 
 
-def _pose6_from_mounts(mounts: dict[str, Any], arm: str, fallback: tuple[float, float, float, float, float, float]) -> tuple[float, float, float, float, float, float]:
+def _mount_pose_from_mounts(mounts: dict[str, Any], arm: str, fallback: tuple[float, float, float, float, float, float]) -> Pose6D:
     try:
+        parsed = Pose6D.parse(mounts[arm]["base_pose_in_stand"])
+        if parsed is not None:
+            return parsed
         pose = mounts[arm]["base_pose_in_stand"]
-        return (
+        return Pose6D(
             float(pose.get("x", fallback[0])),
             float(pose.get("y", fallback[1])),
             float(pose.get("z", fallback[2])),
@@ -133,7 +137,11 @@ def _pose6_from_mounts(mounts: dict[str, Any], arm: str, fallback: tuple[float, 
             float(pose.get("rz", fallback[5])),
         )
     except Exception:
-        return fallback
+        return Pose6D(*fallback)
+
+
+def _pose6_from_mounts(mounts: dict[str, Any], arm: str, fallback: tuple[float, float, float, float, float, float]) -> tuple[float, float, float, float, float, float]:
+    return _mount_pose_from_mounts(mounts, arm, fallback).as_tuple()
 
 
 def _mount_position(mounts: dict[str, Any], arm: str, fallback: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -141,14 +149,10 @@ def _mount_position(mounts: dict[str, Any], arm: str, fallback: tuple[float, flo
     return (pose[0], pose[1], pose[2])
 
 
-def _pose_position(pose6: tuple[float, float, float, float, float, float]) -> tuple[float, float, float]:
-    return (pose6[0], pose6[1], pose6[2])
-
-
-def _pose6_tuple(pose6: Pose6D | tuple[float, float, float, float, float, float]) -> tuple[float, float, float, float, float, float]:
+def _pose_position(pose6: Pose6D | tuple[float, float, float, float, float, float]) -> tuple[float, float, float]:
     if isinstance(pose6, Pose6D):
-        return pose6.as_tuple()
-    return pose6
+        return (pose6.x, pose6.y, pose6.z)
+    return (pose6[0], pose6[1], pose6[2])
 
 
 def _rpy_to_wxyz(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
@@ -166,8 +170,26 @@ def _rpy_to_wxyz(roll: float, pitch: float, yaw: float) -> tuple[float, float, f
     )
 
 
-def _pose_wxyz(pose6: tuple[float, float, float, float, float, float]) -> tuple[float, float, float, float]:
-    return _rpy_to_wxyz(pose6[3], pose6[4], pose6[5])
+def _xyzw_to_wxyz(quaternion_xyzw: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    qx, qy, qz, qw = quaternion_xyzw
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if not math.isfinite(norm) or norm <= 0.0:
+        return (1.0, 0.0, 0.0, 0.0)
+    return (qw / norm, qx / norm, qy / norm, qz / norm)
+
+
+def _pose_orientation_wxyz(pose6: Pose6D | tuple[float, float, float, float, float, float]) -> tuple[float, float, float, float]:
+    if isinstance(pose6, Pose6D):
+        if pose6.quaternion_xyzw is not None:
+            return _xyzw_to_wxyz(pose6.quaternion_xyzw)
+        pose_tuple = pose6.as_tuple()
+    else:
+        pose_tuple = pose6
+    return _rpy_to_wxyz(pose_tuple[3], pose_tuple[4], pose_tuple[5])
+
+
+def _pose_wxyz(pose6: Pose6D | tuple[float, float, float, float, float, float]) -> tuple[float, float, float, float]:
+    return _pose_orientation_wxyz(pose6)
 
 
 def _wxyz_to_rpy(wxyz: tuple[float, float, float, float]) -> tuple[float, float, float]:
@@ -276,7 +298,7 @@ def _pose6_from_state_arm(arm_raw: Any, key: str) -> tuple[float, float, float, 
 
 def _tcp_pose_from_urdf(
     urdf_handle: Any,
-    base_pose: tuple[float, float, float, float, float, float],
+    base_pose: Pose6D | tuple[float, float, float, float, float, float],
 ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]] | None:
     try:
         urdf = urdf_handle._urdf
@@ -290,10 +312,11 @@ def _tcp_pose_from_urdf(
         )
         base_rotation = _quat_to_matrix(_pose_wxyz(base_pose))
         rotated_position = _rotate_vec(base_rotation, local_position)
+        base_position = _pose_position(base_pose)
         position = (
-            base_pose[0] + rotated_position[0],
-            base_pose[1] + rotated_position[1],
-            base_pose[2] + rotated_position[2],
+            base_position[0] + rotated_position[0],
+            base_position[1] + rotated_position[1],
+            base_position[2] + rotated_position[2],
         )
         rotation = _matrix_to_wxyz(_matmul3(base_rotation, transform[:3, :3]))
         return position, rotation
@@ -435,8 +458,8 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
 
 def update_scene_markers(scene_handles: dict[str, Any], latest: Any) -> None:
     mounts = latest.mounts if isinstance(latest.mounts, dict) else {}
-    left_pose = _pose6_from_mounts(mounts, "left", _DEFAULT_LEFT_POSE)
-    right_pose = _pose6_from_mounts(mounts, "right", _DEFAULT_RIGHT_POSE)
+    left_pose = _mount_pose_from_mounts(mounts, "left", _DEFAULT_LEFT_POSE)
+    right_pose = _mount_pose_from_mounts(mounts, "right", _DEFAULT_RIGHT_POSE)
     left_base = _pose_position(left_pose)
     right_base = _pose_position(right_pose)
 
@@ -459,8 +482,7 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any) -> None:
     for arm, arm_state in (("left", latest.left), ("right", latest.right)):
         tcp_pose = arm_state.tcp_stand
         if arm_state.has_valid_tcp_pose and tcp_pose is not None:
-            tcp_pose_tuple = _pose6_tuple(tcp_pose)
-            tcp_updates[arm] = (_pose_position(tcp_pose_tuple), _pose_wxyz(tcp_pose_tuple))
+            tcp_updates[arm] = (_pose_position(tcp_pose), _pose_orientation_wxyz(tcp_pose))
             continue
         for key in (f"{arm}_tcp", f"{arm}_tcp_target"):
             handle = scene_handles.get(key)

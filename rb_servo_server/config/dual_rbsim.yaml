@@ -35,10 +35,12 @@ right_robot:
   initial_q_deg: [0, -30, 80, 0, 60, 0]
 
 left_mount:
-  base_pose_in_stand: [0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0]
+  # Rotation is canonical URDF/ROS RPY converted from MJCF euler xyz.
+  base_pose_in_stand: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
 
 right_mount:
-  base_pose_in_stand: [-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0]
+  # Rotation is canonical URDF/ROS RPY converted from MJCF euler xyz.
+  base_pose_in_stand: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
 
 servo:
   rate_hz: 100

@@ -573,9 +573,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
     cfg.right_robot.initial_q_deg = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
 
     cfg.left_mount.arm_id = ArmId::Left;
-    cfg.left_mount.base_pose_in_stand = {0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0};
+    // Rotation is canonical URDF/ROS RPY converted from MJCF euler xyz.
+    cfg.left_mount.base_pose_in_stand = {0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296};
     cfg.right_mount.arm_id = ArmId::Right;
-    cfg.right_mount.base_pose_in_stand = {-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0};
+    cfg.right_mount.base_pose_in_stand = {-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296};
 
     cfg.servo.enable_realtime_priority = false;
     cfg.servo.filter_dt_min_ratio = 0.5;

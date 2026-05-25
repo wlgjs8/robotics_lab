@@ -29,8 +29,9 @@ p_parent = T_parent_child * p_child
 - Pose arrays use `[x, y, z, rx, ry, rz]`.
 - Translation units are meters.
 - Rotation units are radians.
-- `rx`, `ry`, `rz` are roll, pitch, yaw Euler angles using the same convention
-  currently used by `rb_servo_server` mount config and `rb_gui` display helpers.
+- `rx`, `ry`, `rz` are canonical URDF/ROS roll, pitch, yaw Euler angles with
+  `R = Rz(yaw) * Ry(pitch) * Rx(roll)`, matching `rb_servo_server` mount config
+  and `rb_gui` display helpers.
 - Runtime TCP state uses quaternion orientation as the canonical published
   orientation. The order is `xyzw`: `quaternion_xyzw: [qx, qy, qz, qw]`.
   The scalar component is `qw`; quaternions are normalized before publication.
@@ -89,15 +90,21 @@ as state-stream `mounts.left.base_pose_in_stand` and
 
 Current configured estimates:
 
+The mount rotations below were converted from MJCF `euler="x y z"` fields into
+canonical URDF/ROS RPY. The MJCF source values must not be copied directly into
+`base_pose_in_stand`.
+
 ```yaml
 T_stand_left_base:
   source: rb_servo_server/config/*.yaml left_mount.base_pose_in_stand
-  xyz_rpy: [0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0]
+  note: converted from MJCF euler xyz to canonical URDF/ROS RPY
+  xyz_rpy: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
   status: configured_estimate
 
 T_stand_right_base:
   source: rb_servo_server/config/*.yaml right_mount.base_pose_in_stand
-  xyz_rpy: [-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0]
+  note: converted from MJCF euler xyz to canonical URDF/ROS RPY
+  xyz_rpy: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
   status: configured_estimate
 ```
 
@@ -248,7 +255,7 @@ robot:
   T_stand_left_base:
     parent: stand
     child: left_base
-    xyz_rpy: [0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0]
+    xyz_rpy: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
     units:
       translation: m
       rotation: rad
@@ -257,7 +264,7 @@ robot:
   T_stand_right_base:
     parent: stand
     child: right_base
-    xyz_rpy: [-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0]
+    xyz_rpy: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
     units:
       translation: m
       rotation: rad
@@ -290,7 +297,7 @@ transforms:
   - name: T_stand_left_base
     parent: stand
     child: left_base
-    xyz_rpy: [0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0]
+    xyz_rpy: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
     units:
       translation: m
       rotation: rad
@@ -299,7 +306,7 @@ transforms:
   - name: T_stand_right_base
     parent: stand
     child: right_base
-    xyz_rpy: [-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0]
+    xyz_rpy: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
     units:
       translation: m
       rotation: rad

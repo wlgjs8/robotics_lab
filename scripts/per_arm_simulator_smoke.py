@@ -275,10 +275,12 @@ right_robot:
   simulator_request_timeout_sec: 0.2
 
 left_mount:
-  base_pose_in_stand: [0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0]
+  # Rotation is canonical URDF/ROS RPY converted from MJCF euler xyz.
+  base_pose_in_stand: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
 
 right_mount:
-  base_pose_in_stand: [-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0]
+  # Rotation is canonical URDF/ROS RPY converted from MJCF euler xyz.
+  base_pose_in_stand: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
 
 servo:
   rate_hz: 100
