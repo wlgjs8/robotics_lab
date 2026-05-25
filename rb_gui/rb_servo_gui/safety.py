@@ -248,6 +248,30 @@ class OperatorSafety:
     def tcp_jog_unavailable(self) -> tuple[bool, str]:
         return False, "TCP jog unavailable: FK/IK is deferred; no Cartesian motion command sent"
 
+    def _validated_tcp_delta(self, delta: tuple[float, ...], frame_label: str) -> tuple[bool, str | tuple[float, ...]]:
+        if len(delta) != 6:
+            return False, f"TCP {frame_label} delta must have 6 values"
+        try:
+            delta_values = tuple(float(value) for value in delta)
+        except (TypeError, ValueError):
+            return False, f"non-finite TCP {frame_label} delta rejected"
+        if any(not math.isfinite(value) for value in delta_values):
+            return False, f"non-finite TCP {frame_label} delta rejected"
+        if any(abs(value) > self.max_tcp_linear_step_m for value in delta_values[:3]):
+            return False, f"TCP linear delta exceeds {self.max_tcp_linear_step_m:.3f} m limit"
+        if any(abs(value) > self.max_tcp_angular_step_rad for value in delta_values[3:]):
+            return False, f"TCP angular delta exceeds {self.max_tcp_angular_step_rad:.3f} rad limit"
+        return True, delta_values
+
+    def _tcp_delta_label(self, delta_values: tuple[float, ...]) -> str:
+        axis_names = ("X", "Y", "Z", "roll", "pitch", "yaw")
+        moved = [
+            f"{'+' if value >= 0.0 else '-'}{axis_names[index]} {abs(value):.3f}{' m' if index < 3 else ' rad'}"
+            for index, value in enumerate(delta_values)
+            if abs(value) > 0.0
+        ]
+        return ", ".join(moved) if moved else "zero delta"
+
     def send_tcp_delta_stand(
         self,
         arm: Literal["left", "right"],
@@ -256,32 +280,40 @@ class OperatorSafety:
         reason = self.tcp_command_disabled_reason(arm)
         if reason:
             return False, reason
-        if len(delta) != 6:
-            return False, "TCP stand delta must have 6 values"
-        try:
-            delta_values = tuple(float(value) for value in delta)
-        except (TypeError, ValueError):
-            return False, "non-finite TCP stand delta rejected"
-        if any(not math.isfinite(value) for value in delta_values):
-            return False, "non-finite TCP stand delta rejected"
-        if any(abs(value) > self.max_tcp_linear_step_m for value in delta_values[:3]):
-            return False, f"TCP linear delta exceeds {self.max_tcp_linear_step_m:.3f} m limit"
-        if any(abs(value) > self.max_tcp_angular_step_rad for value in delta_values[3:]):
-            return False, f"TCP angular delta exceeds {self.max_tcp_angular_step_rad:.3f} rad limit"
+        ok, validated = self._validated_tcp_delta(delta, "stand")
+        if not ok:
+            return False, str(validated)
+        delta_values = validated  # type: ignore[assignment]
         packet = self.command_client.build_tcp_delta_stand(
             left_delta=delta_values if arm == "left" else None,
             right_delta=delta_values if arm == "right" else None,
             timeout_sec=self.command_timeout_sec,
         )
         self.command_client.send(packet)
-        axis_names = ("X", "Y", "Z", "roll", "pitch", "yaw")
-        moved = [
-            f"{'+' if value >= 0.0 else '-'}{axis_names[index]} {abs(value):.3f}{' m' if index < 3 else ' rad'}"
-            for index, value in enumerate(delta_values)
-            if abs(value) > 0.0
-        ]
-        delta_label = ", ".join(moved) if moved else "zero delta"
-        self.last_tcp_command = f"TcpDeltaStand {arm} {delta_label}"
+        self.last_tcp_command = f"TcpDeltaStand {arm} {self._tcp_delta_label(delta_values)}"
+        latest = self.latest_valid()
+        verdict = latest.safety_verdict if latest is not None else "unavailable"
+        return True, f"sent {self.last_tcp_command}; server verdict: {verdict}"
+
+    def send_tcp_delta_local(
+        self,
+        arm: Literal["left", "right"],
+        delta: tuple[float, ...],
+    ) -> tuple[bool, str]:
+        reason = self.tcp_command_disabled_reason(arm)
+        if reason:
+            return False, reason
+        ok, validated = self._validated_tcp_delta(delta, "local")
+        if not ok:
+            return False, str(validated)
+        delta_values = validated  # type: ignore[assignment]
+        packet = self.command_client.build_tcp_delta_local(
+            left_delta=delta_values if arm == "left" else None,
+            right_delta=delta_values if arm == "right" else None,
+            timeout_sec=self.command_timeout_sec,
+        )
+        self.command_client.send(packet)
+        self.last_tcp_command = f"TcpDeltaLocal {arm} {self._tcp_delta_label(delta_values)}"
         latest = self.latest_valid()
         verdict = latest.safety_verdict if latest is not None else "unavailable"
         return True, f"sent {self.last_tcp_command}; server verdict: {verdict}"

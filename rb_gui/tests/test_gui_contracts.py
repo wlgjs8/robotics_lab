@@ -13,6 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from rb_servo_gui.app import (
     _DEFAULT_LEFT_POSE,
     _DEFAULT_RIGHT_POSE,
+    _TCP_FRAME_LOCAL,
+    _TCP_FRAME_STAND,
+    _apply_tcp_delta_to_target,
     _angular_step_radians,
     _format_fk_status,
     _format_joints,
@@ -27,7 +30,11 @@ from rb_servo_gui.app import (
     _pose_wxyz,
     _quat_to_matrix,
     _sim_readiness_from_env,
+    _tcp_local_delta_from_target,
+    _tcp_frame_mode,
     _tcp_target_pose,
+    _tcp_target_wxyz,
+    _update_tcp_frame_buttons,
     update_scene_markers,
 )
 from rb_servo_gui.command_client import CommandClient
@@ -96,6 +103,11 @@ class RecordingSceneHandle:
         self.wxyz = None
         self.points = None
         self.visible = None
+
+
+class RecordingButton:
+    def __init__(self, color="gray"):
+        self.color = color
 
 
 class RecordingUrdf:
@@ -380,6 +392,15 @@ class GuiContractsTest(unittest.TestCase):
         handles["left_tcp_target_pose"] = (0.31, 0.12, float("nan"), 0.0, 0.0, 0.0)
         self.assertIsNone(_tcp_target_pose(handles, "left"))
 
+    def test_tcp_target_orientation_helper_prefers_marker_wxyz(self):
+        handles = {
+            "left_tcp_target_pose": (0.31, 0.12, 0.44, 0.0, 0.0, 0.0),
+            "left_tcp_target_wxyz": (0.0, 0.0, 0.0, 2.0),
+        }
+        self.assertEqual(_tcp_target_wxyz(handles, "left"), (0.0, 0.0, 0.0, 1.0))
+        handles.pop("left_tcp_target_wxyz")
+        self.assertEqual(_tcp_target_wxyz(handles, "left"), (1.0, 0.0, 0.0, 0.0))
+
     def test_tcp_delta_stand_packet_builder_holds_other_arm(self):
         client = RecordingClient()
         delta = (0.005, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -391,6 +412,18 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(packet["left"]["mode"], "TcpDeltaStand")
         self.assertEqual(packet["left"]["tcp_delta_stand"], list(delta))
         self.assertEqual(packet["right"], {})
+
+    def test_tcp_delta_local_packet_builder_holds_other_arm(self):
+        client = RecordingClient()
+        delta = (0.0, 0.0, 0.005, 0.0, 0.0, 0.01)
+        packet = client.build_tcp_delta_local(right_delta=delta)
+        self.assertEqual(packet["schema_version"], 1)
+        self.assertEqual(packet["source_id"], "rb_gui")
+        self.assertTrue(packet["session_id"])
+        self.assertEqual(packet["mode"], "Hold")
+        self.assertEqual(packet["left"], {})
+        self.assertEqual(packet["right"]["mode"], "TcpDeltaLocal")
+        self.assertEqual(packet["right"]["tcp_delta_local"], list(delta))
 
     def test_tcp_delta_stand_enabled_only_for_simulator_with_fk_and_feature_flag(self):
         state = self.tcp_available_state()
@@ -417,6 +450,19 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(packet["right"], {})
         self.assertIn("server verdict: Ok", reason)
 
+        ok, reason = safety.send_tcp_delta_local("left", (0.0, 0.005, 0.0, 0.0, 0.0, 0.0))
+        self.assertTrue(ok, reason)
+        packet = client.sent_packets[-1]
+        self.assertEqual(packet["mode"], "Hold")
+        self.assertEqual(packet["left"]["mode"], "TcpDeltaLocal")
+        self.assertEqual(packet["left"]["tcp_delta_local"], [0.0, 0.005, 0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(packet["right"], {})
+        self.assertIn("TcpDeltaLocal left", reason)
+
+        ok, reason = safety.send_tcp_delta_local("left", (0.006, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        self.assertIn("linear delta exceeds", reason)
+
         pose = (0.31, 0.12, 0.44, 0.0, 0.0, 0.0)
         ok, reason = safety.send_tcp_pose_target(left_pose=pose)
         self.assertTrue(ok, reason)
@@ -437,6 +483,9 @@ class GuiContractsTest(unittest.TestCase):
             enable_tcp_pose=True,
         )
         ok, reason = safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        self.assertIn("real mode TCP command disabled", reason)
+        ok, reason = safety.send_tcp_delta_local("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
         self.assertFalse(ok)
         self.assertIn("real mode TCP command disabled", reason)
         self.assertTrue(safety.control_disabled_states()["tcp_pose"])
@@ -493,6 +542,9 @@ class GuiContractsTest(unittest.TestCase):
         ok, reason = stale_safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
         self.assertFalse(ok)
         self.assertIn("state stream", reason)
+        ok, reason = stale_safety.send_tcp_delta_local("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        self.assertIn("state stream", reason)
         self.assertEqual(client.sent_packets, [])
 
         faulted = self.tcp_available_state(fault_latched=True, fault_reason="test fault")
@@ -506,6 +558,9 @@ class GuiContractsTest(unittest.TestCase):
             enable_tcp_pose=True,
         )
         ok, reason = fault_safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        self.assertIn("fault", reason)
+        ok, reason = fault_safety.send_tcp_delta_local("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
         self.assertFalse(ok)
         self.assertIn("fault", reason)
         self.assertEqual(client.sent_packets, [])
@@ -660,6 +715,56 @@ class GuiContractsTest(unittest.TestCase):
         update_scene_markers(handles, store.latest())
         self.assertEqual(left_tcp.wxyz, (0.0, 0.0, 0.0, 1.0))
         self.assertEqual(left_target.wxyz, (0.0, 0.0, 0.0, 1.0))
+        self.assertEqual(handles["left_tcp_target_wxyz"], (0.0, 0.0, 0.0, 1.0))
+
+    def test_tcp_local_delta_uses_current_tcp_quaternion_over_legacy_rpy(self):
+        yaw_90_xyzw = (0.0, 0.0, math.sin(math.pi / 4.0), math.cos(math.pi / 4.0))
+        current = Pose6D(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, quaternion_xyzw=yaw_90_xyzw)
+        target_wxyz = _pose_orientation_wxyz(current)
+        delta = _tcp_local_delta_from_target(current, (0.0, 1.0, 0.0), target_wxyz)
+        self.assertAlmostEqual(delta[0], 1.0, places=7)
+        self.assertAlmostEqual(delta[1], 0.0, places=7)
+        self.assertAlmostEqual(delta[2], 0.0, places=7)
+        self.assertAlmostEqual(delta[5], 0.0, places=7)
+
+    def test_tcp_target_marker_delta_follows_selected_frame(self):
+        stand_handle = RecordingSceneHandle()
+        stand_handles = {
+            "left_tcp_target": stand_handle,
+            "left_tcp_target_pose": (0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2.0),
+            "left_tcp_target_wxyz": _pose_wxyz((0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2.0)),
+        }
+        self.assertTrue(_apply_tcp_delta_to_target(stand_handles, "left", (1.0, 0.0, 0.0, 0.0, 0.0, 0.0), _TCP_FRAME_STAND))
+        self.assertAlmostEqual(stand_handles["left_tcp_target_pose"][0], 1.0, places=7)
+        self.assertAlmostEqual(stand_handles["left_tcp_target_pose"][1], 0.0, places=7)
+
+        local_handle = RecordingSceneHandle()
+        local_handles = {
+            "left_tcp_target": local_handle,
+            "left_tcp_target_pose": (0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2.0),
+            "left_tcp_target_wxyz": _pose_wxyz((0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2.0)),
+        }
+        self.assertTrue(_apply_tcp_delta_to_target(local_handles, "left", (1.0, 0.0, 0.0, 0.0, 0.0, 0.0), _TCP_FRAME_LOCAL))
+        self.assertAlmostEqual(local_handles["left_tcp_target_pose"][0], 0.0, places=7)
+        self.assertAlmostEqual(local_handles["left_tcp_target_pose"][1], 1.0, places=7)
+        self.assertEqual(local_handle.position, local_handles["left_tcp_target_pose"][:3])
+
+    def test_tcp_frame_defaults_to_local_and_updates_button_colors(self):
+        handles = {
+            "tcp_frame_buttons": {
+                _TCP_FRAME_STAND: RecordingButton(),
+                _TCP_FRAME_LOCAL: RecordingButton(),
+            }
+        }
+        self.assertEqual(_tcp_frame_mode(handles), _TCP_FRAME_LOCAL)
+        _update_tcp_frame_buttons(handles)
+        self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_STAND].color, "gray")
+        self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_LOCAL].color, "green")
+
+        handles["tcp_frame_mode"] = _TCP_FRAME_STAND
+        _update_tcp_frame_buttons(handles)
+        self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_STAND].color, "green")
+        self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_LOCAL].color, "gray")
 
     def test_scene_update_hides_tcp_marker_when_pose_is_not_valid(self):
         state = sample_state()

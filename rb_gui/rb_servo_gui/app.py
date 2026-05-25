@@ -26,6 +26,9 @@ _DEFAULT_RIGHT_POSE = (-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296)
 _DEFAULT_STAND_MESH_POSE = (0.0, 0.0, 0.01, 0.0, 0.0, -1.57078)
 _SELECTED_MODE_COLOR = "green"
 _INACTIVE_MODE_COLOR = "gray"
+_TCP_FRAME_STAND = "Stand/world"
+_TCP_FRAME_LOCAL = "TCP local"
+_TCP_FRAME_OPTIONS = (_TCP_FRAME_STAND, _TCP_FRAME_LOCAL)
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -87,6 +90,20 @@ def _update_desired_mode_buttons(handles: dict[str, Any], desired_mode: str) -> 
     for mode, button in handles.get("mode_buttons", {}).items():
         try:
             button.color = _mode_button_color(mode, desired_mode)
+        except Exception:
+            pass
+
+
+def _tcp_frame_mode(handles: dict[str, Any]) -> str:
+    mode = handles.get("tcp_frame_mode", _TCP_FRAME_LOCAL)
+    return mode if mode in _TCP_FRAME_OPTIONS else _TCP_FRAME_LOCAL
+
+
+def _update_tcp_frame_buttons(handles: dict[str, Any]) -> None:
+    selected = _tcp_frame_mode(handles)
+    for mode, button in handles.get("tcp_frame_buttons", {}).items():
+        try:
+            button.color = _mode_button_color(mode, selected)
         except Exception:
             pass
 
@@ -178,6 +195,14 @@ def _xyzw_to_wxyz(quaternion_xyzw: tuple[float, float, float, float]) -> tuple[f
     return (qw / norm, qx / norm, qy / norm, qz / norm)
 
 
+def _normalize_wxyz(wxyz: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    w, x, y, z = (float(wxyz[0]), float(wxyz[1]), float(wxyz[2]), float(wxyz[3]))
+    norm = math.sqrt(w * w + x * x + y * y + z * z)
+    if not math.isfinite(norm) or norm <= 0.0:
+        return (1.0, 0.0, 0.0, 0.0)
+    return (w / norm, x / norm, y / norm, z / norm)
+
+
 def _pose_orientation_wxyz(pose6: Pose6D | tuple[float, float, float, float, float, float]) -> tuple[float, float, float, float]:
     if isinstance(pose6, Pose6D):
         if pose6.quaternion_xyzw is not None:
@@ -252,7 +277,7 @@ def _matrix_to_wxyz(matrix: Any) -> tuple[float, float, float, float]:
 
 
 def _quat_to_matrix(wxyz: tuple[float, float, float, float]) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
-    w, x, y, z = wxyz
+    w, x, y, z = _normalize_wxyz(wxyz)
     return (
         (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)),
         (2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)),
@@ -270,11 +295,160 @@ def _matmul3(
     )  # type: ignore[return-value]
 
 
+def _identity3() -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
+    return ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+
+
+def _transpose3(
+    matrix: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
+) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
+    return tuple(tuple(matrix[col][row] for col in range(3)) for row in range(3))  # type: ignore[return-value]
+
+
+def _add_matrix3(
+    left: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
+    right: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
+) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
+    return tuple(tuple(left[row][col] + right[row][col] for col in range(3)) for row in range(3))  # type: ignore[return-value]
+
+
+def _scale_matrix3(
+    matrix: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
+    scale: float,
+) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
+    return tuple(tuple(matrix[row][col] * scale for col in range(3)) for row in range(3))  # type: ignore[return-value]
+
+
+def _skew3(vector: tuple[float, float, float]) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
+    x, y, z = vector
+    return ((0.0, -z, y), (z, 0.0, -x), (-y, x, 0.0))
+
+
 def _rotate_vec(
     matrix: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
     vector: tuple[float, float, float],
 ) -> tuple[float, float, float]:
     return tuple(sum(matrix[row][k] * vector[k] for k in range(3)) for row in range(3))  # type: ignore[return-value]
+
+
+def _add_vec3(left: tuple[float, float, float], right: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (left[0] + right[0], left[1] + right[1], left[2] + right[2])
+
+
+def _delta_transform(
+    delta: tuple[float, float, float, float, float, float],
+) -> tuple[
+    tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
+    tuple[float, float, float],
+]:
+    v = (float(delta[0]), float(delta[1]), float(delta[2]))
+    omega = (float(delta[3]), float(delta[4]), float(delta[5]))
+    theta2 = omega[0] * omega[0] + omega[1] * omega[1] + omega[2] * omega[2]
+    theta = math.sqrt(theta2)
+    omega_hat = _skew3(omega)
+    omega_hat2 = _matmul3(omega_hat, omega_hat)
+    a = 1.0
+    b = 0.5
+    c = 1.0 / 6.0
+    if theta > 1e-9:
+        a = math.sin(theta) / theta
+        b = (1.0 - math.cos(theta)) / theta2
+        c = (theta - math.sin(theta)) / (theta2 * theta)
+    identity = _identity3()
+    rotation = _add_matrix3(_add_matrix3(identity, _scale_matrix3(omega_hat, a)), _scale_matrix3(omega_hat2, b))
+    v_matrix = _add_matrix3(_add_matrix3(identity, _scale_matrix3(omega_hat, b)), _scale_matrix3(omega_hat2, c))
+    return rotation, _rotate_vec(v_matrix, v)
+
+
+def _multiply_transform(
+    left: tuple[
+        tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
+        tuple[float, float, float],
+    ],
+    right: tuple[
+        tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
+        tuple[float, float, float],
+    ],
+) -> tuple[
+    tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
+    tuple[float, float, float],
+]:
+    left_rotation, left_translation = left
+    right_rotation, right_translation = right
+    return (
+        _matmul3(left_rotation, right_rotation),
+        _add_vec3(_rotate_vec(left_rotation, right_translation), left_translation),
+    )
+
+
+def _pose_transform(
+    position: tuple[float, float, float],
+    wxyz: tuple[float, float, float, float],
+) -> tuple[
+    tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
+    tuple[float, float, float],
+]:
+    return _quat_to_matrix(wxyz), (float(position[0]), float(position[1]), float(position[2]))
+
+
+def _transform_to_pose6(
+    transform: tuple[
+        tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
+        tuple[float, float, float],
+    ],
+) -> tuple[tuple[float, float, float, float, float, float], tuple[float, float, float, float]]:
+    rotation, position = transform
+    wxyz = _matrix_to_wxyz(rotation)
+    return _pose6_from_transform(position, wxyz), wxyz
+
+
+def _rotation_vector_from_matrix(
+    matrix: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
+) -> tuple[float, float, float]:
+    w, x, y, z = _matrix_to_wxyz(matrix)
+    if w < 0.0:
+        w, x, y, z = (-w, -x, -y, -z)
+    sin_half = math.sqrt(x * x + y * y + z * z)
+    if sin_half < 1e-12:
+        return (0.0, 0.0, 0.0)
+    angle = 2.0 * math.atan2(sin_half, w)
+    scale = angle / sin_half
+    return (x * scale, y * scale, z * scale)
+
+
+def _se3_log_translation(
+    relative_translation: tuple[float, float, float],
+    rotation_vector: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    theta2 = rotation_vector[0] * rotation_vector[0] + rotation_vector[1] * rotation_vector[1] + rotation_vector[2] * rotation_vector[2]
+    theta = math.sqrt(theta2)
+    omega_hat = _skew3(rotation_vector)
+    omega_hat2 = _matmul3(omega_hat, omega_hat)
+    coefficient = 1.0 / 12.0
+    if theta > 1e-9:
+        coefficient = (1.0 / theta2) - ((1.0 + math.cos(theta)) / (2.0 * theta * math.sin(theta)))
+    inverse_v = _add_matrix3(_add_matrix3(_identity3(), _scale_matrix3(omega_hat, -0.5)), _scale_matrix3(omega_hat2, coefficient))
+    return _rotate_vec(inverse_v, relative_translation)
+
+
+def _tcp_local_delta_from_target(
+    current_tcp_stand: Pose6D,
+    target_position: tuple[float, float, float],
+    target_wxyz: tuple[float, float, float, float],
+) -> tuple[float, float, float, float, float, float]:
+    current_position = _pose_position(current_tcp_stand)
+    current_rotation = _quat_to_matrix(_pose_orientation_wxyz(current_tcp_stand))
+    target_rotation = _quat_to_matrix(target_wxyz)
+    current_rotation_inv = _transpose3(current_rotation)
+    translation_stand = (
+        float(target_position[0]) - current_position[0],
+        float(target_position[1]) - current_position[1],
+        float(target_position[2]) - current_position[2],
+    )
+    translation_local = _rotate_vec(current_rotation_inv, translation_stand)
+    rotation_local = _matmul3(current_rotation_inv, target_rotation)
+    rotation_vector = _rotation_vector_from_matrix(rotation_local)
+    return _se3_log_translation(translation_local, rotation_vector) + rotation_vector
 
 
 def _pose6_from_state_arm(arm_raw: Any, key: str) -> tuple[float, float, float, float, float, float] | None:
@@ -498,6 +672,7 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any) -> None:
         if target_key not in scene_handles or f"{arm}_tcp_target_user_moved" not in scene_handles:
             updates[target_key] = position
             scene_handles[f"{arm}_tcp_target_pose"] = _pose6_from_transform(position, wxyz)
+            scene_handles[f"{arm}_tcp_target_wxyz"] = _normalize_wxyz(wxyz)
         for key in (f"{arm}_tcp", f"{arm}_tcp_target"):
             handle = scene_handles.get(key)
             if handle is not None:
@@ -548,7 +723,8 @@ def _install_tcp_target_callbacks(scene_handles: dict[str, Any], status_handle: 
                 wxyz = tuple(float(value) for value in control.wxyz)
                 if len(position) != 3 or len(wxyz) != 4:
                     return
-                scene_handles[f"{arm}_tcp_target_pose"] = _pose6_from_transform(position, wxyz)
+                scene_handles[f"{arm}_tcp_target_wxyz"] = _normalize_wxyz(wxyz)  # type: ignore[arg-type]
+                scene_handles[f"{arm}_tcp_target_pose"] = _pose6_from_transform(position, scene_handles[f"{arm}_tcp_target_wxyz"])
                 scene_handles[f"{arm}_tcp_target_user_moved"] = True
                 if status_handle is not None:
                     status_handle.value = f"{arm} TCP target updated"
@@ -567,6 +743,65 @@ def _tcp_target_pose(scene_handles: dict[str, Any], arm: str) -> tuple[float, fl
     if len(values) != 6 or not all(math.isfinite(value) for value in values):
         return None
     return values  # type: ignore[return-value]
+
+
+def _tcp_target_wxyz(scene_handles: dict[str, Any], arm: str) -> tuple[float, float, float, float] | None:
+    wxyz = scene_handles.get(f"{arm}_tcp_target_wxyz")
+    try:
+        if wxyz is not None:
+            values = tuple(float(value) for value in wxyz)
+            if len(values) == 4 and all(math.isfinite(value) for value in values):
+                return _normalize_wxyz(values)  # type: ignore[arg-type]
+    except Exception:
+        pass
+    pose = _tcp_target_pose(scene_handles, arm)
+    if pose is None:
+        return None
+    return _pose_orientation_wxyz(pose)
+
+
+def _tcp_target_position_wxyz(
+    scene_handles: dict[str, Any],
+    arm: str,
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]] | None:
+    pose = _tcp_target_pose(scene_handles, arm)
+    wxyz = _tcp_target_wxyz(scene_handles, arm)
+    if pose is None or wxyz is None:
+        return None
+    return (pose[0], pose[1], pose[2]), wxyz
+
+
+def _apply_tcp_delta_to_target(
+    scene_handles: dict[str, Any],
+    arm: str,
+    delta: tuple[float, float, float, float, float, float],
+    frame_mode: str,
+) -> bool:
+    target = _tcp_target_position_wxyz(scene_handles, arm)
+    if target is None:
+        return False
+    position, wxyz = target
+    target_transform = _pose_transform(position, wxyz)
+    delta_transform = _delta_transform(delta)
+    if frame_mode == _TCP_FRAME_LOCAL:
+        next_transform = _multiply_transform(target_transform, delta_transform)
+    else:
+        next_transform = _multiply_transform(delta_transform, target_transform)
+    pose, next_wxyz = _transform_to_pose6(next_transform)
+    scene_handles[f"{arm}_tcp_target_pose"] = pose
+    scene_handles[f"{arm}_tcp_target_wxyz"] = next_wxyz
+    scene_handles[f"{arm}_tcp_target_user_moved"] = True
+    handle = scene_handles.get(f"{arm}_tcp_target")
+    if handle is not None:
+        try:
+            handle.position = pose[:3]
+        except Exception:
+            pass
+        try:
+            handle.wxyz = next_wxyz
+        except Exception:
+            pass
+    return True
 
 
 def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[str, Any]:
@@ -631,6 +866,18 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
         )
         _install_tcp_target_callbacks(handles["scene"], handles["tcp_status"])
         tcp_arm_group = server.gui.add_button_group("TCP arm", ("left", "right"))
+        handles["tcp_frame_mode"] = _TCP_FRAME_LOCAL
+        handles["tcp_frame_buttons"] = {}
+        for frame_mode in _TCP_FRAME_OPTIONS:
+            frame_button = server.gui.add_button(frame_mode, color=_mode_button_color(frame_mode, _tcp_frame_mode(handles)))
+            handles["tcp_frame_buttons"][frame_mode] = frame_button
+
+            @frame_button.on_click
+            def _(_: Any, frame_mode: str = frame_mode) -> None:
+                handles["tcp_frame_mode"] = frame_mode
+                _update_tcp_frame_buttons(handles)
+                handles["tcp_status"].value = f"TCP frame: {frame_mode}"
+
         linear_step = server.gui.add_slider("Linear step mm", min=0.1, max=10.0, step=0.1, initial_value=5.0)
         angular_step = server.gui.add_slider("Angular step deg", min=0.1, max=10.0, step=0.1, initial_value=1.0)
         handles["tcp_arm_group"] = tcp_arm_group
@@ -647,14 +894,35 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
             if pose is None:
                 handles["tcp_status"].value = f"BLOCKED: {arm} TCP target unavailable"
                 return
-            ok, message = safety.send_tcp_pose_target(
-                left_pose=pose if arm == "left" else None,
-                right_pose=pose if arm == "right" else None,
-            )
+            if _tcp_frame_mode(handles) == _TCP_FRAME_LOCAL:
+                latest = safety.latest_valid()
+                if latest is None:
+                    handles["tcp_status"].value = "BLOCKED: state stream missing or stale"
+                    return
+                arm_state = latest.left if arm == "left" else latest.right
+                target = _tcp_target_position_wxyz(handles["scene"], arm)
+                if arm_state.tcp_stand is None or target is None:
+                    handles["tcp_status"].value = f"BLOCKED: {arm} TCP target unavailable"
+                    return
+                position, wxyz = target
+                delta = _tcp_local_delta_from_target(arm_state.tcp_stand, position, wxyz)
+                ok, message = safety.send_tcp_delta_local(arm, delta)
+            else:
+                ok, message = safety.send_tcp_pose_target(
+                    left_pose=pose if arm == "left" else None,
+                    right_pose=pose if arm == "right" else None,
+                )
             handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
         def _send_delta(delta: tuple[float, float, float, float, float, float]) -> None:
-            ok, message = safety.send_tcp_delta_stand(tcp_arm_group.value, delta)
+            arm = tcp_arm_group.value
+            frame_mode = _tcp_frame_mode(handles)
+            if frame_mode == _TCP_FRAME_LOCAL:
+                ok, message = safety.send_tcp_delta_local(arm, delta)
+            else:
+                ok, message = safety.send_tcp_delta_stand(arm, delta)
+            if ok:
+                _apply_tcp_delta_to_target(handles["scene"], arm, delta, frame_mode)
             handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
         def _add_tcp_delta_button(label: str, axis_index: int, sign: float, angular: bool = False) -> None:
@@ -732,7 +1000,7 @@ def _format_tcp_command_status(safety: OperatorSafety, latest: StateSnapshot | N
     if reason:
         parts.append(f"disabled: {reason}")
     else:
-        parts.append("enabled: TcpDeltaStand small stand-frame steps")
+        parts.append("enabled: TCP target frame selectable (Stand/world or TCP local)")
     return "; ".join(parts)
 
 
@@ -747,6 +1015,8 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
 
     if "mode_buttons" in handles:
         _update_desired_mode_buttons(handles, safety.desired_mode)
+    if "tcp_frame_buttons" in handles:
+        _update_tcp_frame_buttons(handles)
     latest = store.latest()
     stale = store.is_stale()
     readiness = safety.readiness()

@@ -108,6 +108,31 @@ class CommandClient:
             packet["right"] = {"mode": "TcpDeltaStand", "tcp_delta_stand": self._finite_six(right_delta, "right TCP stand delta")}
         return self._with_source(packet)
 
+    def build_tcp_delta_local(
+        self,
+        *,
+        left_delta: tuple[float, ...] | None = None,
+        right_delta: tuple[float, ...] | None = None,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        if left_delta is None and right_delta is None:
+            raise ValueError("at least one TCP local delta is required")
+        packet: dict[str, Any] = {
+            "schema_version": 1,
+            "seq": self.next_seq(),
+            "mode": "TcpDeltaLocal" if left_delta is not None and right_delta is not None else "Hold",
+            "host_time_ns": time.monotonic_ns(),
+            "timeout_sec": timeout_sec,
+            "coupled_timeout": True,
+            "left": {},
+            "right": {},
+        }
+        if left_delta is not None:
+            packet["left"] = {"mode": "TcpDeltaLocal", "tcp_delta_local": self._finite_six(left_delta, "left TCP local delta")}
+        if right_delta is not None:
+            packet["right"] = {"mode": "TcpDeltaLocal", "tcp_delta_local": self._finite_six(right_delta, "right TCP local delta")}
+        return self._with_source(packet)
+
     def _with_source(self, packet: dict[str, Any]) -> dict[str, Any]:
         packet["source_id"] = self.source_id
         packet["session_id"] = self.session_id
