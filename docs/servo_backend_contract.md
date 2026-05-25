@@ -255,7 +255,9 @@ MIG-12 closes the migration baseline by making review surfaces explicit:
 which means one socket per configured simulator arm endpoint during healthy
 operation. The client sends multiple request lines over the same connection and
 uses buffered chunk reads to extract response lines, rather than opening a new
-TCP connection or issuing one-byte reads for each operation.
+TCP connection or issuing one-byte reads for each operation. After each
+successful TCP connect, the backend enables `TCP_NODELAY` so request/response
+latency is not shaped by Nagle buffering.
 
 The backend still increments `request_id` monotonically per `RbsimBackend`
 instance and preserves the MIG-03 structured result semantics. Simulator error

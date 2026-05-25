@@ -141,6 +141,10 @@ class RbsimHardwareFreeGateTest(unittest.TestCase):
         )
         self.left_service.start()
         self.right_service.start()
+        self._control_connection_counts = {"left": 0, "right": 0}
+        self._control_connection_count_locks = {"left": threading.Lock(), "right": threading.Lock()}
+        self._install_control_connection_counter(self.left_service, "left")
+        self._install_control_connection_counter(self.right_service, "right")
 
         self.server_bin = Path(os.environ.get("RB_SERVO_SERVER_BIN", SERVO_ROOT / "build" / "rb_servo_server"))
         if not self.server_bin.exists():
@@ -227,6 +231,25 @@ force_control:
   provider: null
   enable: false
 """
+
+    def _install_control_connection_counter(self, service: RbsimService, arm: str) -> None:
+        control_server = next(
+            server for server in service._servers if getattr(server, "endpoint_role", None) == "control"
+        )
+        original_process_request = control_server.process_request
+        lock = self._control_connection_count_locks[arm]
+
+        def counted_process_request(request: Any, client_address: Any) -> None:
+            with lock:
+                self._control_connection_counts[arm] += 1
+            original_process_request(request, client_address)
+
+        control_server.process_request = counted_process_request
+
+    def control_connection_count(self, arm: str) -> int:
+        lock = self._control_connection_count_locks[arm]
+        with lock:
+            return int(self._control_connection_counts[arm])
 
     def admin(self, op: str, arm: str | None = None, **params: Any) -> dict[str, Any]:
         self.seq += 1
@@ -355,6 +378,94 @@ force_control:
         self.assertFalse(left_to_right.get("ok"), left_to_right)
         self.assertEqual(left_to_right.get("error", {}).get("name"), "wrong_arm")
         self.assertEqual(left_to_right.get("error", {}).get("code"), 1005)
+
+    def test_persistent_transport_reuses_connection_and_reconnects_after_transport_fault(self) -> None:
+        first = self.wait_snapshot(self.connected_valid, "startup")
+        left_start = self.control_connection_count("left")
+        right_start = self.control_connection_count("right")
+        self.assertEqual(left_start, 1)
+        self.assertEqual(right_start, 1)
+
+        left_target = list(first["left"]["q_actual_deg"])
+        right_target = list(first["right"]["q_actual_deg"])
+        left_target[0] += 0.5
+        right_target[0] -= 0.5
+        self.send_command("ArmMotion")
+        target_seq = self.send_command(
+            "JointTarget",
+            left={"q_target_deg": left_target},
+            right={"q_target_deg": right_target},
+        )
+        self.wait_snapshot(
+            lambda snap: snap.get("command_seq", 0) >= target_seq
+            and snap.get("motion_state") == "Running",
+            "running on persistent simulator transport",
+        )
+        time.sleep(0.2)
+        self.assertEqual(self.control_connection_count("left"), left_start)
+        self.assertEqual(self.control_connection_count("right"), right_start)
+
+        self.admin("admin.inject", "left", hook="send_failure", enabled=True)
+        self.send_command(
+            "JointTarget",
+            left={"q_target_deg": [left_target[0] + 1.0, *left_target[1:]]},
+            right={"q_target_deg": right_target},
+            timeout_sec=2.0,
+        )
+        send_fault = self.wait_snapshot(
+            # StatePublisher can miss the transient command snapshot that first
+            # latched the send failure. The durable contract is the latched
+            # backend fault context, not the sampled command_seq.
+            lambda snap: snap.get("fault_latched") is True
+            and snap.get("latched_fault_reason") == "SendFailure"
+            and snap.get("fault_context", {}).get("backend_error_kind") == "TransportWriteFailed"
+            and snap.get("fault_context", {}).get("backend_error_name") == "send_failure_injected"
+            and snap.get("left", {}).get("send_ok") is False,
+            "transport write failure latch",
+        )
+        self.assertEqual(send_fault["fault_context"]["backend_error_kind"], "TransportWriteFailed")
+        self.assertEqual(send_fault["fault_context"]["backend_error_name"], "send_failure_injected")
+        self.assertEqual(self.control_connection_count("left"), left_start + 1)
+        self.assertEqual(self.control_connection_count("right"), right_start)
+
+        self.admin("admin.reset_hooks")
+        self.send_command("ResetFault")
+        send_fault_tick = int(send_fault.get("tick", 0))
+        self.wait_snapshot(
+            lambda snap: int(snap.get("tick", 0)) > send_fault_tick and self.connected_valid(snap),
+            "reset after transport write reconnect",
+        )
+        self.assertEqual(self.control_connection_count("left"), left_start + 1)
+        self.assertEqual(self.control_connection_count("right"), right_start)
+
+    def test_robot_fault_protocol_error_keeps_persistent_transport_open(self) -> None:
+        left_start = self.control_connection_count("left")
+        right_start = self.control_connection_count("right")
+        self.assertEqual(left_start, 1)
+        self.assertEqual(right_start, 1)
+
+        self.admin("admin.set_fault", "left", error_code=2222, recoverable=True)
+        fault = self.wait_snapshot(
+            lambda snap: snap.get("fault_latched") is True
+            and snap.get("latched_fault_reason") == "RobotStateError"
+            and snap.get("left", {}).get("last_read", {}).get("backend_error_kind") == "RobotFault"
+            and snap.get("left", {}).get("error_code") == 2222,
+            "robot fault on persistent simulator transport",
+        )
+        self.assertEqual(fault["fault_context"]["backend_error_kind"], "RobotFault")
+        self.assertEqual(fault["fault_context"]["backend_error_name"], "fault_latched")
+        self.assertFalse(fault["fault_context"]["transport_fault"])
+        self.assertEqual(self.control_connection_count("left"), left_start)
+        self.assertEqual(self.control_connection_count("right"), right_start)
+
+        self.send_command("ResetFault")
+        fault_tick = int(fault.get("tick", 0))
+        self.wait_snapshot(
+            lambda snap: int(snap.get("tick", 0)) > fault_tick and self.connected_valid(snap),
+            "reset after robot fault without reconnect",
+        )
+        self.assertEqual(self.control_connection_count("left"), left_start)
+        self.assertEqual(self.control_connection_count("right"), right_start)
 
     def test_nominal_motion_and_log_budget_gate(self) -> None:
         first = self.wait_snapshot(self.connected_valid, "startup")

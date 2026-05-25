@@ -273,6 +273,22 @@ def wait_for_snapshot(capture: StateCapture, predicate: Any, timeout_sec: float,
     raise SmokeError(f"timed out waiting for state snapshot: {label}")
 
 
+def snapshot_after_command(snapshot: dict[str, Any], command: dict[str, Any]) -> bool:
+    try:
+        return int(snapshot.get("host_time_ns", -1)) >= int(command["host_time_ns"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def arm_motion_observed(snapshot: dict[str, Any], command: dict[str, Any]) -> bool:
+    return (
+        snapshot_after_command(snapshot, command)
+        and snapshot.get("motion_state") in {"ArmedHold", "Running"}
+        and snapshot.get("safety_verdict") in {None, "Ok", "JointLimitClamped"}
+        and snapshot.get("fault_latched") is False
+    )
+
+
 def send_udp_command(host: str, port: int, message: dict[str, Any]) -> None:
     payload = json.dumps(message, separators=(",", ":")).encode("utf-8")
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -545,9 +561,9 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         send_udp_command(args.command_host, args.command_port, arm_motion)
         wait_for_snapshot(
             capture,
-            lambda snapshot: int(snapshot.get("command_seq", -1)) >= int(arm_motion["seq"]),
+            lambda snapshot: arm_motion_observed(snapshot, arm_motion),
             args.startup_timeout_sec,
-            "ArmMotion command_seq",
+            "ArmMotion armed state",
         )
 
         left_target = list(left_initial)

@@ -595,6 +595,7 @@ BackendResult<RobotState> RbsimBackend::controlRequest(
     } catch (const json::exception& exc) {
         std::cerr << "[ERROR] RbsimBackend invalid JSON response: " << exc.what() << "\n";
         client_->closeForBackendError(BackendErrorKind::ProtocolError);
+        connected_ = false;
         return failedResult<RobotState>(
             backend_op,
             backendError(BackendErrorKind::ProtocolError, exc.what()),
@@ -604,11 +605,15 @@ BackendResult<RobotState> RbsimBackend::controlRequest(
 
     if (!jsonBool(response, "ok", false)) {
         const BackendError error = protocolErrorFromResponse(op, response);
+        const bool closed_transport = closesPersistentTransport(error.kind);
         client_->closeForBackendError(error.kind);
+        if (closed_transport) {
+            connected_ = false;
+        }
         RobotState response_state;
         const auto state_it = response.find("state");
         if (state_it != response.end() && mapState(*state_it, arm_id_, &response_state)) {
-            connected_ = response_state.connection_state == RobotConnectionState::Connected;
+            connected_ = !closed_transport && response_state.connection_state == RobotConnectionState::Connected;
             BackendResult<RobotState> failed =
                 failedResult<RobotState>(backend_op, error, makeBackendTiming(start, nowSteadyNs()));
             failed.value = response_state;
