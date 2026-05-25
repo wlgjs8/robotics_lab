@@ -19,9 +19,12 @@ _ROBOT_JOINT_NAMES = (
     "wrist2_joint",
     "wrist3_joint",
 )
+_DESIRED_MODES = ("mock", "simulation", "real")
 _DEFAULT_LEFT_POSE = (0.1601, -0.1725, 0.5825, 0.785, 2.35619, 0.0)
 _DEFAULT_RIGHT_POSE = (-0.1601, -0.1725, 0.5825, 0.785, -2.35619, 0.0)
 _DEFAULT_STAND_MESH_POSE = (0.0, 0.0, 0.01, 0.0, 0.0, -1.57078)
+_SELECTED_MODE_COLOR = "green"
+_INACTIVE_MODE_COLOR = "gray"
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -29,6 +32,62 @@ def _env_int(name: str, fallback: int) -> int:
         return int(os.environ.get(name, str(fallback)))
     except ValueError:
         return fallback
+
+
+def _env_bool(name: str, fallback: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return fallback
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_optional_bool(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return None
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sim_readiness_from_env(observed: Any) -> Readiness:
+    ready = _env_bool("RB_GUI_SIM_READINESS_READY", False)
+    running = _env_bool("RB_GUI_SIM_READINESS_RUNNING", ready)
+    connected = _env_bool("RB_GUI_SIM_READINESS_CONNECTED", ready)
+    no_go_reason = os.environ.get("RB_GUI_SIM_READINESS_NO_GO", "simulator/rbpodo readiness tests have not passed")
+    if ready:
+        no_go_reason = ""
+    if observed.mode != "simulation" or observed.backend != "simulator":
+        ready = False
+        running = False
+        connected = False
+        no_go_reason = "observed server is not the simulator stack"
+    return Readiness(
+        running=running,
+        connected=connected,
+        ready=ready,
+        no_go_reason=no_go_reason,
+        cartesian_available=_env_optional_bool("RB_GUI_CARTESIAN_AVAILABLE"),
+        cartesian_no_go_reason=os.environ.get("RB_GUI_CARTESIAN_NO_GO", "server Cartesian/IK readiness not proven"),
+    )
+
+
+def _mode_button_color(mode: str, desired_mode: str) -> str:
+    return _SELECTED_MODE_COLOR if mode == desired_mode else _INACTIVE_MODE_COLOR
+
+
+def _linear_step_meters(step_mm: float) -> float:
+    return float(step_mm) * 0.001
+
+
+def _angular_step_radians(step_deg: float) -> float:
+    return math.radians(float(step_deg))
+
+
+def _update_desired_mode_buttons(handles: dict[str, Any], desired_mode: str) -> None:
+    for mode, button in handles.get("mode_buttons", {}).items():
+        try:
+            button.color = _mode_button_color(mode, desired_mode)
+        except Exception:
+            pass
 
 
 def _repo_descriptions_dir() -> Path:
@@ -470,9 +529,22 @@ def _install_tcp_target_callbacks(scene_handles: dict[str, Any], status_handle: 
                 scene_handles[f"{arm}_tcp_target_pose"] = _pose6_from_transform(position, wxyz)
                 scene_handles[f"{arm}_tcp_target_user_moved"] = True
                 if status_handle is not None:
-                    status_handle.value = f"{arm} TCP marker updated; commands use bounded stand-frame delta buttons"
+                    status_handle.value = f"{arm} TCP target updated"
             except Exception as exc:
                 scene_handles["tcp_target_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _tcp_target_pose(scene_handles: dict[str, Any], arm: str) -> tuple[float, float, float, float, float, float] | None:
+    pose = scene_handles.get(f"{arm}_tcp_target_pose")
+    if pose is None:
+        return None
+    try:
+        values = tuple(float(value) for value in pose)
+    except Exception:
+        return None
+    if len(values) != 6 or not all(math.isfinite(value) for value in values):
+        return None
+    return values  # type: ignore[return-value]
 
 
 def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[str, Any]:
@@ -492,18 +564,15 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
             initial_value="manual compose commands only; no Docker socket in GUI",
             disabled=True,
         )
-        mode_group = server.gui.add_button_group("Desired mode", ("mock", "simulation", "real"))
-        try:
-            mode_group.value = safety.desired_mode
-        except Exception:
-            pass
-        handles["mode_group_last_value"] = getattr(mode_group, "value", safety.desired_mode)
-        handles["mode_group"] = mode_group
+        handles["mode_buttons"] = {}
+        for mode in _DESIRED_MODES:
+            mode_button = server.gui.add_button(mode, color=_mode_button_color(mode, safety.desired_mode))
+            handles["mode_buttons"][mode] = mode_button
 
-        @mode_group.on_click
-        def _(_: Any) -> None:
-            safety.set_desired_mode(mode_group.value)
-            handles["mode_group_last_value"] = mode_group.value
+            @mode_button.on_click
+            def _(_: Any, mode: str = mode) -> None:
+                safety.set_desired_mode(mode)
+                _update_desired_mode_buttons(handles, safety.desired_mode)
 
     with tabs.add_tab("Lifecycle"):
         handles["lifecycle_buttons"] = {}
@@ -540,12 +609,27 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
         )
         _install_tcp_target_callbacks(handles["scene"], handles["tcp_status"])
         tcp_arm_group = server.gui.add_button_group("TCP arm", ("left", "right"))
-        linear_step = server.gui.add_slider("Linear step m", min=0.001, max=0.005, step=0.001, initial_value=0.005)
-        angular_step = server.gui.add_slider("Angular step rad", min=0.005, max=0.02, step=0.005, initial_value=0.02)
+        linear_step = server.gui.add_slider("Linear step mm", min=0.1, max=10.0, step=0.1, initial_value=5.0)
+        angular_step = server.gui.add_slider("Angular step deg", min=0.1, max=10.0, step=0.1, initial_value=1.0)
         handles["tcp_arm_group"] = tcp_arm_group
         handles["tcp_linear_step"] = linear_step
         handles["tcp_angular_step"] = angular_step
         handles["tcp_pose_buttons"] = []
+        send_target_button = server.gui.add_button("Send TCP target")
+        handles["tcp_pose_buttons"].append(send_target_button)
+
+        @send_target_button.on_click
+        def _(_: Any) -> None:
+            arm = tcp_arm_group.value
+            pose = _tcp_target_pose(handles["scene"], arm)
+            if pose is None:
+                handles["tcp_status"].value = f"BLOCKED: {arm} TCP target unavailable"
+                return
+            ok, message = safety.send_tcp_pose_target(
+                left_pose=pose if arm == "left" else None,
+                right_pose=pose if arm == "right" else None,
+            )
+            handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
         def _send_delta(delta: tuple[float, float, float, float, float, float]) -> None:
             ok, message = safety.send_tcp_delta_stand(tcp_arm_group.value, delta)
@@ -557,7 +641,7 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
 
             @button.on_click
             def _(_: Any, axis_index: int = axis_index, sign: float = sign, angular: bool = angular) -> None:
-                step = float(angular_step.value if angular else linear_step.value)
+                step = _angular_step_radians(float(angular_step.value)) if angular else _linear_step_meters(float(linear_step.value))
                 delta = [0.0] * 6
                 delta[axis_index] = sign * step
                 _send_delta(tuple(delta))  # type: ignore[arg-type]
@@ -639,11 +723,8 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
     for button in handles.get("tcp_pose_buttons", ()):
         _set_disabled(button, disabled_states.get("tcp_pose", True))
 
-    if "mode_group" in handles:
-        current_mode = handles["mode_group"].value
-        if current_mode != handles.get("mode_group_last_value"):
-            safety.set_desired_mode(current_mode)
-            handles["mode_group_last_value"] = current_mode
+    if "mode_buttons" in handles:
+        _update_desired_mode_buttons(handles, safety.desired_mode)
     latest = store.latest()
     stale = store.is_stale()
     readiness = safety.readiness()
@@ -736,7 +817,7 @@ def main() -> None:
         desired_mode=observed.mode,
         observed_server_mode=observed_mode_raw,
         observed_backend=observed_backend_raw,
-        sim_readiness=Readiness(no_go_reason="simulator/rbpodo readiness tests have not passed"),
+        sim_readiness=_sim_readiness_from_env(observed),
         ops_available=ops_available,
         enable_tcp_pose_commands=enable_tcp_pose_commands,
     )

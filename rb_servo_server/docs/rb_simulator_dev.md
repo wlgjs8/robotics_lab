@@ -100,6 +100,9 @@ The compose stack is intentionally bounded:
 - Each simulator service has its own network namespace, so both containers may
   use internal port `50200`; `rb_servo_server` reaches them through
   `tcp://rb_simulator_left:50200` and `tcp://rb_simulator_right:50200`.
+- The server image builds with Pinocchio enabled. The compose config publishes
+  FK TCP poses and enables simulator-only Cartesian IK for GUI TCP target tests;
+  real Cartesian motion remains disabled.
 - The default GUI/mock port mappings are pinned to `127.0.0.1`.
 
 The hardware-free validation gate and the local smoke runner above remain the

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 import time
 import unittest
@@ -9,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from rb_servo_gui.app import _format_fk_status, _format_joints, _joint_cfg_radians, _joint_marker_position, _mount_position, _pose6_from_mounts, _pose_wxyz, update_scene_markers
+from rb_servo_gui.app import _angular_step_radians, _format_fk_status, _format_joints, _joint_cfg_radians, _joint_marker_position, _linear_step_meters, _mode_button_color, _mount_position, _pose6_from_mounts, _pose_wxyz, _sim_readiness_from_env, _tcp_target_pose, update_scene_markers
 from rb_servo_gui.command_client import CommandClient
 from rb_servo_gui.models import Pose6D
 from rb_servo_gui.safety import OperatorSafety, Readiness, normalize_observed_mode_backend
@@ -289,6 +290,56 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("not reconfigured", safety.status_message)
         self.assertEqual(client.sent_packets, [])
 
+    def test_desired_mode_button_color_marks_active_mode(self):
+        self.assertEqual(_mode_button_color("simulation", "simulation"), "green")
+        self.assertEqual(_mode_button_color("mock", "simulation"), "gray")
+
+    def test_tcp_step_display_units_convert_to_command_units(self):
+        self.assertAlmostEqual(_linear_step_meters(0.1), 0.0001)
+        self.assertAlmostEqual(_linear_step_meters(10.0), 0.01)
+        self.assertAlmostEqual(_angular_step_radians(0.1), math.radians(0.1))
+        self.assertAlmostEqual(_angular_step_radians(10.0), math.radians(10.0))
+
+    def test_compose_sim_readiness_env_unlocks_simulator_lifecycle(self):
+        keys = (
+            "RB_GUI_SIM_READINESS_READY",
+            "RB_GUI_SIM_READINESS_RUNNING",
+            "RB_GUI_SIM_READINESS_CONNECTED",
+            "RB_GUI_CARTESIAN_AVAILABLE",
+        )
+        old_values = {key: os.environ.get(key) for key in keys}
+        try:
+            os.environ["RB_GUI_SIM_READINESS_READY"] = "1"
+            os.environ["RB_GUI_SIM_READINESS_RUNNING"] = "1"
+            os.environ["RB_GUI_SIM_READINESS_CONNECTED"] = "1"
+            os.environ["RB_GUI_CARTESIAN_AVAILABLE"] = "0"
+            observed = normalize_observed_mode_backend("simulation", "simulator")
+            readiness = _sim_readiness_from_env(observed)
+            self.assertTrue(readiness.ready)
+            self.assertTrue(readiness.running)
+            self.assertTrue(readiness.connected)
+            self.assertFalse(readiness.cartesian_available)
+
+            store = StateStore(stale_after_sec=0.5)
+            self.assertTrue(store.update_from_json_bytes(json.dumps(sample_state()).encode(), received_monotonic=time.monotonic()))
+            safety = OperatorSafety(
+                store,
+                RecordingClient(),
+                desired_mode="simulation",
+                observed_server_mode="simulation",
+                observed_backend="simulator",
+                sim_readiness=readiness,
+            )
+            states = safety.control_disabled_states()
+            self.assertFalse(states["lifecycle:ArmMotion"])
+            self.assertFalse(states["jog"])
+        finally:
+            for key, value in old_values.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
     def test_tcp_jog_never_sends_cartesian_motion(self):
         _, client, safety = self.make_safety(sample_state())
         ok, reason = safety.tcp_jog_unavailable()
@@ -303,6 +354,12 @@ class GuiContractsTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("TCP pose command disabled", reason)
         self.assertEqual(client.sent_packets, [])
+
+    def test_tcp_target_pose_helper_returns_finite_marker_pose(self):
+        handles = {"left_tcp_target_pose": (0.31, 0.12, 0.44, 0.0, 0.0, 0.0)}
+        self.assertEqual(_tcp_target_pose(handles, "left"), (0.31, 0.12, 0.44, 0.0, 0.0, 0.0))
+        handles["left_tcp_target_pose"] = (0.31, 0.12, float("nan"), 0.0, 0.0, 0.0)
+        self.assertIsNone(_tcp_target_pose(handles, "left"))
 
     def test_tcp_delta_stand_packet_builder_holds_other_arm(self):
         client = RecordingClient()
@@ -340,6 +397,15 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(packet["left"]["tcp_delta_stand"], [0.005, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.assertEqual(packet["right"], {})
         self.assertIn("server verdict: Ok", reason)
+
+        pose = (0.31, 0.12, 0.44, 0.0, 0.0, 0.0)
+        ok, reason = safety.send_tcp_pose_target(left_pose=pose)
+        self.assertTrue(ok, reason)
+        packet = client.sent_packets[-1]
+        self.assertEqual(packet["mode"], "Hold")
+        self.assertEqual(packet["left"]["mode"], "TcpPoseTarget")
+        self.assertEqual(packet["left"]["tcp_target_stand"], list(pose))
+        self.assertEqual(packet["right"], {})
 
     def test_tcp_delta_stand_real_mode_disabled_even_with_feature_flag(self):
         _, client, safety = self.make_safety(
@@ -576,8 +642,27 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn('RB_GUI_COMMAND_HOST: "rb_servo_server"', text)
         self.assertIn('RB_GUI_OBSERVED_MODE: "simulation"', text)
         self.assertIn('RB_GUI_OBSERVED_BACKEND: "simulator"', text)
-        self.assertIn('RB_GUI_ENABLE_TCP_POSE_COMMANDS: "0"', text)
+        self.assertIn('RB_GUI_SIM_READINESS_READY: "1"', text)
+        self.assertIn('RB_GUI_SIM_READINESS_CONNECTED: "1"', text)
+        self.assertIn('RB_GUI_CARTESIAN_AVAILABLE: "1"', text)
+        self.assertIn('RB_GUI_ENABLE_TCP_POSE_COMMANDS: "1"', text)
         self.assertNotIn('RB_GUI_OBSERVED_MODE: "rbsim_local"', text)
+
+        config = Path(__file__).resolve().parents[2] / "rb_servo_server" / "config" / "dual_simulator_compose.yaml"
+        config_text = config.read_text(encoding="utf-8")
+        self.assertIn("provider: pinocchio", config_text)
+        self.assertIn("publish_tcp: true", config_text)
+        self.assertIn("allow_in_simulation: true", config_text)
+        self.assertIn("allow_in_real: false", config_text)
+
+        dockerfile = Path(__file__).resolve().parents[2] / "scripts" / "docker" / "rb_servo_server.hardware_free.Dockerfile"
+        docker_text = dockerfile.read_text(encoding="utf-8")
+        self.assertIn("robotpkg-pinocchio", docker_text)
+        self.assertIn("-DRB_SERVO_ENABLE_PINOCCHIO=ON", docker_text)
+
+        cmake = Path(__file__).resolve().parents[2] / "rb_servo_server" / "CMakeLists.txt"
+        cmake_text = cmake.read_text(encoding="utf-8")
+        self.assertIn('option(RB_SERVO_ENABLE_PINOCCHIO "Enable Pinocchio FK/IK support" ON)', cmake_text)
 
 
 if __name__ == "__main__":

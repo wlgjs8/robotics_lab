@@ -239,6 +239,12 @@ Open the GUI at:
 http://127.0.0.1:8080
 ```
 
+The default simulator stack builds `rb_servo_server` with Pinocchio enabled.
+`dual_simulator_compose.yaml` publishes FK TCP poses and enables simulator-only
+Cartesian IK, so the GUI TCP target gizmos can send bounded `TcpPoseTarget`
+commands after `ArmMotion` is selected. Real Cartesian motion remains disabled
+by config.
+
 `make sim-up` runs in the foreground. Stop it with `Ctrl+C`, then clean up
 containers with:
 

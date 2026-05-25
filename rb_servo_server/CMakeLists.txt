@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(RB_SERVO_ENABLE_RBPODO "Enable rbpodo backend" OFF)
-option(RB_SERVO_ENABLE_PINOCCHIO "Enable Pinocchio FK support" OFF)
+option(RB_SERVO_ENABLE_PINOCCHIO "Enable Pinocchio FK/IK support" ON)
 option(RB_SERVO_ALLOW_FETCHCONTENT "Allow CMake to download missing build dependencies" ON)
 
 add_library(rb_servo_core
@@ -66,6 +66,9 @@ if(RB_SERVO_ENABLE_RBPODO)
 endif()
 
 if(RB_SERVO_ENABLE_PINOCCHIO)
+    if(IS_DIRECTORY "/opt/openrobots")
+        list(APPEND CMAKE_PREFIX_PATH "/opt/openrobots")
+    endif()
     find_package(pinocchio REQUIRED)
     target_link_libraries(rb_servo_core PUBLIC pinocchio::pinocchio)
     target_compile_definitions(rb_servo_core PUBLIC RB_SERVO_ENABLE_PINOCCHIO=1)

@@ -29,8 +29,10 @@ inside the container on `udp://0.0.0.0:50010`. State publishes to
 `udp://rb_gui:50110` through Docker Compose DNS. Static container IPs are not
 required.
 
-The compose server image targets the build stage so containerized regression
-checks can use the same build environment when container validation is in scope.
+The compose server image builds with Pinocchio enabled. The default simulator
+config publishes FK TCP poses and enables simulator-only Cartesian IK, so the GUI
+TCP target gizmos can send `TcpPoseTarget` commands after `ArmMotion` is active.
+`cartesian_control.allow_in_real` stays false.
 
 Host build/test remains:
 

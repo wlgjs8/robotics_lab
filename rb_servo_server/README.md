@@ -28,7 +28,7 @@ Implemented in this server:
 - servo period/jitter/filter-dt/safety logging
 - structured backend result taxonomy for mock, simulator, and rbpodo paths
 - direct and worker backend I/O models for simulator validation
-- optional Pinocchio FK/IK support when built with `RB_SERVO_ENABLE_PINOCCHIO=ON`
+- Pinocchio FK/IK support enabled by default
 - simulator-only Cartesian command routing when kinematics and Cartesian config
   gates are enabled
 - force-control design types, config, and optional controller scaffold
@@ -54,6 +54,10 @@ environment, and human acceptance gates.
 cmake -S . -B build
 cmake --build build -j
 ```
+
+The default build expects Pinocchio to be available, normally through
+`/opt/openrobots` from robotpkg. For mock-only hardware-free checks on a host
+without Pinocchio, configure with `-DRB_SERVO_ENABLE_PINOCCHIO=OFF`.
 
 ## Run mock mode
 
@@ -171,5 +175,7 @@ make sim-up
 It starts `rb_gui`, `rb_simulator_left`, `rb_simulator_right`, and
 `rb_servo_server` with `config/dual_simulator_compose.yaml`. Host GUI ports are
 pinned to loopback. The GUI receives UDP state snapshots and sends only
-validated UDP JSON commands. Real motion is disabled, and the GUI does not
-mount the raw Docker socket. See `docs/gui_operator_console.md`.
+validated UDP JSON commands. The compose image builds with Pinocchio enabled,
+and the compose config enables simulator-only FK/IK for GUI TCP target tests.
+Real motion is disabled, and the GUI does not mount the raw Docker socket. See
+`docs/gui_operator_console.md`.

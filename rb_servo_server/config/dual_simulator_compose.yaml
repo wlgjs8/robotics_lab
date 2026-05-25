@@ -40,6 +40,7 @@ servo:
   rate_hz: 100
   command_timeout_sec: 0.2
   startup_mode: Hold
+  send_servo_commands: true
   enable_realtime_priority: false
   realtime_priority: 80
   cpu_core: -1
@@ -72,3 +73,34 @@ logging:
 force_control:
   provider: null
   enable: false
+
+kinematics:
+  enable: true
+  provider: pinocchio
+  urdf: "../descriptions/urdf/rb3_730e.urdf"
+  base_link: "world"
+  tip_link: "tcp"
+  joint_names:
+    - base_joint
+    - shoulder_joint
+    - elbow_joint
+    - wrist1_joint
+    - wrist2_joint
+    - wrist3_joint
+  q_units: deg
+  publish_tcp: true
+  ik:
+    enable: true
+    max_iterations: 50
+    timeout_ms: 20.0
+    damping: 0.001
+    position_tolerance_m: 0.002
+    orientation_tolerance_rad: 0.03
+    max_step_deg: [2, 2, 2, 3, 3, 4]
+
+cartesian_control:
+  enable: true
+  allow_in_simulation: true
+  allow_in_real: false
+  warn_ik_duration_us: 3000
+  fail_ik_duration_us: 5000
