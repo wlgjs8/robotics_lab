@@ -1,45 +1,64 @@
 # robotics_lab Architecture
 
-This is the current source-of-truth architecture for `robotics_lab`. Component
-README files may describe local details, but public terminology and topology
-must match this document.
+This document is the current source of truth for the system architecture. Component READMEs may contain local details, but public terminology, safety boundaries, and topology must match this document.
+
+## Current Phase
+
+The repository is currently in **simulator-first Cartesian acceptance hardening**.
+
+The simulator stack should repeatedly validate:
+
+- per-arm simulator topology
+- structured backend result and fault telemetry
+- `JointTarget` and `JointVelocity`
+- `TcpPoseTarget`
+- `TcpLinearMove`
+- `TcpTwistLocal` and `TcpTwistStand`
+- GUI operator controls
+- policy_runner SpaceMouse command paths
+- command-source lease/arbitration
+- camera readiness contracts for future policy work
+
+This is not a real robot milestone.
 
 ## Maturity Boundary
 
-Supported today:
+Supported for mock/simulation work:
 
 - mock dual-arm servo control
-- per-arm local simulator backend
+- one local simulator endpoint per arm
+- persistent simulator JSON-line transport
+- simulator direct and worker I/O modes
+- FK/TCP state publication with quaternion fields
+- simulator-only Cartesian PTP, Linear, and Twist commands
 - mock camera server
 - GUI viewer/operator console for mock/simulation
-- hardware-free `policy_runner` action-source tests for joint and
-  simulator-only TCP commands
+- Python policy_runner with joint and Cartesian simulator action sources
+- simulator-only Cartesian acceptance scripts
 
 Not production-ready:
 
 - real RB3-730 motion
-- real-mode Cartesian TCP motion
+- real Cartesian/TCP motion
 - force control
 - gripper control
 - measured camera/robot calibration
+- real camera + policy + robot closed-loop behavior
 
-## Canonical Public Terms
+## Canonical Terms
 
-Use only these values in public config, docs, GUI labels, and operator-facing
-logs:
+Use only these values in public config, docs, GUI labels, and operator-facing logs:
 
 ```yaml
 run_mode: mock | simulation | real
 backend_type: mock | simulator | rbpodo
 ```
 
-`mock` is dependency-free local behavior. `simulation` uses local simulator
-processes. `real` targets physical RB3-730 controllers and requires explicit
-environment gates.
+`run_mode` describes the environment. `backend_type` describes the backend implementation. Deprecated terms such as `rbsim_local`, public `rbsim`, or mixed simulator aliases must not be introduced in new public docs/configs.
 
 ## Controller Topology
 
-The real system has one controller endpoint per arm:
+The physical system has one controller endpoint per arm:
 
 ```text
 rb_servo_server
@@ -55,10 +74,9 @@ rb_servo_server
   right_robot backend_type=simulator -> rb_simulator_right
 ```
 
-Each simulator instance owns one arm state machine and one control/admin
-endpoint pair.
+The simulator topology is isomorphic to the physical topology by endpoint count and ownership, not by IP address. Simulator configs must not default to the real controller IPs.
 
-Container topology:
+### Docker Compose Simulator Topology
 
 ```text
 rb_simulator_left container
@@ -72,11 +90,13 @@ rb_simulator_right container
   admin:   tcp://0.0.0.0:50201
 ```
 
-Docker Compose selects compose-specific simulator configs with these
-container-internal binds and sets `RB_SIMULATOR_ALLOW_NON_LOOPBACK=1`. There is
-no runtime YAML port rewrite or proxy bridge in the simulator image.
+Separate containers can reuse internal ports. Compose uses compose-specific configs and sets:
 
-Host-local topology:
+```bash
+RB_SIMULATOR_ALLOW_NON_LOOPBACK=1
+```
+
+### Host-Local Simulator Topology
 
 ```text
 left simulator
@@ -88,32 +108,41 @@ right simulator
   admin:   tcp://127.0.0.1:50211
 ```
 
-Simulation must not use the physical robot IP addresses as defaults.
+## Safety Gates
 
-## Motion Safety Contract
-
-Real robot connection requires:
+Real robot connection is closed unless:
 
 ```bash
 RB_ALLOW_REAL_ROBOT=1
 ```
 
-Real joint servo motion requires:
+Real joint servo motion is closed unless:
 
 ```bash
 RB_ALLOW_REAL_MOTION=1
 ```
 
-Real Cartesian/TCP motion requires:
+Real Cartesian/TCP motion is closed unless:
 
 ```bash
 RB_ALLOW_REAL_CARTESIAN=1
 ```
 
-P3 may validate Cartesian/TCP commands in simulation, but real Cartesian motion
-remains disabled until a separate real-hardware acceptance procedure approves
-it. GUI and policy components must fail closed rather than route Cartesian
-targets into real motion.
+These environment variables are necessary but not sufficient. Config and acceptance must also explicitly allow the operation.
+
+Tracked real config is a template only:
+
+```text
+rb_servo_server/config/dual_real.example.yaml
+```
+
+Site-owned real configs belong under:
+
+```text
+rb_servo_server/config/local/
+```
+
+No tracked runnable real robot config should exist.
 
 Force control is intentionally unavailable:
 
@@ -123,115 +152,103 @@ force_control:
   enable: false
 ```
 
-No component may activate force, admittance, or impedance control as a temporary
-stand-in.
+## Motion Primitive Contract
 
-## Component Responsibilities
+### `JointTarget`
 
-`rb_servo_server` owns dual-arm servo command ingestion, backend selection,
-safety gates, state publication, and robot mount estimates. It must preserve
-one backend instance per arm. The current command path is:
+Absolute joint-space target. This is a joint-space point-to-point command.
+
+### `JointVelocity`
+
+Streaming joint velocity command. Suitable for joint teleop/debug when safety gates allow it.
+
+### `TcpPoseTarget`
+
+Cartesian point-to-point final-pose target. It is MoveJ-like at the TCP level. Final TCP pose is targeted, but the intermediate TCP path is not guaranteed to be linear.
+
+### `TcpLinearMove`
+
+Simulator-only MoveL-like Cartesian path primitive. It plans a Cartesian path with explicit timing/speed semantics and orientation interpolation semantics. Current modes are:
+
+- `constant`: keep start orientation along the path
+- `slerp`: interpolate start orientation to target orientation
+
+Real mode remains blocked.
+
+### `TcpTwistLocal` / `TcpTwistStand`
+
+Streaming Cartesian velocity primitives. `TcpTwistLocal` is intended for SpaceMouse/local-frame teleop. `TcpTwistStand` is the stand-frame low-level API. Server-side Cartesian velocity limits, stale-state checks, deadman behavior, and command-source arbitration are required.
+
+### `TcpDeltaLocal` / `TcpDeltaStand`
+
+Low-level one-shot/debug jog commands. They are not the default GUI target-move primitive.
+
+## Servo Control Architecture
+
+The control path is moving toward this structure:
 
 ```text
-CommandBuffer -> ServoCoordinator/DualArmServoLoop -> Left ArmWorker  -> left IRobotBackend
-                                                \-> Right ArmWorker -> right IRobotBackend
+CommandBuffer
+  -> ServoCoordinator / DualArmServoLoop
+       -> Left ArmWorker  -> left IRobotBackend
+       -> Right ArmWorker -> right IRobotBackend
 ```
 
-`ServoCoordinator/DualArmServoLoop` owns timing policy, command freshness,
-fault latching, safety checks, hold-versus-command selection, and dual-arm
-result aggregation. In `servo.io_model: direct`, it still performs per-arm
-backend calls directly. In `servo.io_model: worker`, each `ArmWorker` owns one
-arm's blocking backend I/O and returns cached structured results to the loop.
-Real mode still keeps worker I/O disabled or experimental until separate
-read-only hardware acceptance proves it without motion.
+`DualArmServoLoop` owns:
 
-For `backend_type=rbpodo`, read-only state acquisition and motion readiness are
-separate. A controller can return valid joint feedback while servo motion is not
-enabled; `rb_servo_server` should publish that state with
-`servo_enabled=false` and a non-ready lifecycle, while `sendServoJ()` remains
-closed unless the real-motion gate and controller readiness are both true.
+- command freshness
+- command-source lease interpretation
+- lifecycle state
+- FK/IK and Cartesian target generation
+- safety filtering
+- fault latching
+- dual-arm result aggregation
+- state publication
 
-`rb_simulator` owns hardware-free simulator state. The current architecture is
-one simulator process/container per arm, with deterministic control and admin
-interfaces.
+`ArmWorker` owns blocking per-arm backend I/O in worker mode. Worker mode is simulator-only until separate real-hardware acceptance exists.
 
-`RbsimBackend` keeps one persistent JSON-lines TCP connection per simulator
-backend instance during healthy operation, matching the one endpoint per arm
-topology. It reuses that socket for connect, initialize, state reads,
-`servo_j`, stop, and reset requests; transport or protocol-corruption failures
-close the socket so a later request can reconnect. Robot/controller-level
-simulator responses such as `RobotFault` remain structured backend results and
-do not imply TCP transport corruption.
+## Backend Architecture
 
-`camera_server` owns camera capture, shared-memory frame transport, metadata,
-and health reporting. Mock camera operation is supported; measured RealSense
-calibration is still pending.
+Backends must return structured operation results:
 
-`rb_gui` owns visualization and operator controls for mock/simulation. It must
-not make real motion available unless the servo server has already accepted the
-required real-mode gates.
+- `BackendResult<RobotState>`
+- `SendServoJResult`
+- `BackendErrorKind`
+- `BackendTiming`
+- `FaultContext`
 
-`policy_runner` owns Python action sources, including SpaceMouse input. It
-consumes robot state, camera metadata, and calibration packages; it must not
-bypass servo safety gates. Joint-only action sources do not require camera
-observations. Camera-dependent action sources must declare `requires_camera`
-with a `camera_stale_timeout_sec` and fail closed when camera readiness is
-absent or stale. Camera geometry-dependent sources must also declare
-`requires_camera_geometry` and require measured, accepted camera geometry.
+Bool-only backend results must not be reintroduced.
 
-The backend-contract migration target is defined in
-[servo_backend_contract.md](servo_backend_contract.md). `IRobotBackend` has
-been moving from bool/log-string behavior to structured `BackendResult` and
-`SendServoJResult` diagnostics, while worker I/O moves blocking network work
-out of the servo loop. This is a diagnostics and loop architecture migration,
-not a real-motion enablement.
+`RbsimBackend` keeps one persistent JSON-lines TCP connection per simulator backend instance during healthy operation. Transport/protocol corruption closes the socket; robot/controller-level errors such as `RobotFault` remain structured backend results.
+
+`RbpodoBackend` separates state acquisition from motion readiness. Valid joint feedback with `servo_enabled=false` is a valid read state, not motion readiness. Real `servo_j` sends remain blocked unless real gates and controller readiness are satisfied. Real stop/reset API wiring remains conservative until verified.
+
+## GUI And Policy Roles
+
+`rb_gui` is a viewer/operator console for mock/simulation. It may send simulator-only TCP PTP and Linear commands when the server state, mode, backend, lease, and feature flags allow it. It must keep real motion disabled.
+
+`policy_runner` owns Python action sources, including SpaceMouse. SpaceMouse Cartesian uses `TcpTwistLocal`, not repeated TCP deltas. Joint-only action sources do not require camera observations. Camera-dependent sources must declare camera readiness and fail closed when camera state is stale.
+
+## Camera Role
+
+`camera_server` owns RealSense/mock capture, shared-memory image transport, metadata, and health. Real camera acceptance is separate from robot motion acceptance.
 
 ## Frame And Calibration Contract
 
-Shared frame names and transform direction are defined in
-[frame_contract.md](frame_contract.md). The active global setup registry is
-`calibration/active_calibration.yaml`.
+Shared frame names and transform directions are defined in `docs/frame_contract.md`. The active setup registry is:
 
-Current mount values are configured estimates, not measured calibration. Servo
-config mount transforms remain the current runtime source for
-`rb_servo_server`; the calibration registry is the cross-component geometry
-source of truth that future work should load or cross-check against runtime
-config.
+```text
+calibration/active_calibration.yaml
+```
 
-`configured_estimate` geometry is allowed for visualization and simulation. It
-is not valid for real geometry-dependent policy, and the active registry marks
-`geometry_valid_for_real_policy: false`. Joint-only control does not require
-measured calibration. TCP/Cartesian and camera-geometry policy paths require
-measured and accepted calibration in a later milestone.
+Current geometry is `configured_estimate`, not measured calibration. It may be used for visualization and simulation, but not for real geometry-dependent policy.
 
 ## Validation Contract
 
-The default local regression gate is
-[hardware_free_validation.md](hardware_free_validation.md). It validates mock,
-stub, and loopback simulator behavior only. It does not prove real robot,
-RealSense, external simulator, force-control, gripper, or real Cartesian
-readiness.
+Hardware-free validation is described in `docs/hardware_free_validation.md`.
 
-Hardware acceptance is a separate, human-gated workflow.
+Cartesian simulator acceptance is described in `docs/runbooks/tcp_pose_simulator_acceptance.md`.
 
-Real three-camera acceptance is defined in
-[runbooks/camera_acceptance.md](runbooks/camera_acceptance.md). The canonical
-profile is a D435f head camera at 1280x720@30 and D405 wrist cameras at
-640x360@30, with an explicitly approved 640x480 D405 variant.
+Real three-camera acceptance is described in `docs/runbooks/camera_acceptance.md`.
 
-## Config Naming Rebaseline
-
-Canonical simulator configs are documented in the root
-[README.md](../README.md#canonical-config-names). The recommended simulator
-paths are the per-arm host, compose, and worker configs listed there; no legacy
-dual-arm simulator config is recommended for new evidence.
-
-Real robot config uses a tracked read-only template,
-`rb_servo_server/config/dual_real.example.yaml`, and user-owned local configs
-under `rb_servo_server/config/local/`. Use
-`rb_servo_server/config/local/dual_real_readonly.yaml` for read-only state
-bring-up and `rb_servo_server/config/local/dual_real_motion.yaml` only for a
-separately approved motion procedure. There is no tracked runnable real robot
-config; the template and local split above are the only canonical real config
-names. Real connection, joint motion, and Cartesian motion remain gated by the
-environment variables above.
+Passing simulator acceptance is not permission to move hardware.

@@ -1,71 +1,78 @@
 # robotics_lab
 
-`robotics_lab` is the integration workspace for a dual-arm RB3-730 system with
-servo control, a topology-isomorphic local simulator, camera capture, and an
-operator GUI.
+한국어 기본 README입니다. 영어 원문은 [README.en.md](README.en.md)에 보존되어 있습니다.
 
-## Current Maturity
+`robotics_lab`는 dual-arm RB3-730 시스템을 통합하기 위한 작업 공간입니다. 서보 제어, 실제 토폴로지와 같은 형태의 로컬 시뮬레이터, 카메라 캡처, `policy_runner`, 운영자 GUI를 함께 다룹니다.
 
-Currently supported:
+## 현재 단계
+
+현재 프로젝트 단계는 **시뮬레이터 우선 Cartesian acceptance hardening**입니다.
+
+다음 마일스톤은 시뮬레이터 측 동작을 반복 검증하는 것입니다.
+
+- 팔별 독립 시뮬레이터 토폴로지
+- 구조화된 backend result 및 fault telemetry
+- `JointTarget` / `JointVelocity`
+- `TcpPoseTarget`
+- `TcpLinearMove`
+- `TcpTwistLocal` / `TcpTwistStand`
+- GUI 운영자 제어
+- `policy_runner` SpaceMouse 경로
+- command-source lease/arbitration
+- 카메라 readiness contract
+
+실제 로봇 구동은 현재 기본 마일스톤이 아닙니다.
+
+## 현재 성숙도
+
+mock/simulation에서 지원되는 항목:
 
 - mock dual-arm servo control
-- per-arm local simulator backend
+- 팔별 로컬 simulator backend
+- persistent simulator JSON-line transport
+- simulator direct 및 worker I/O mode
+- quaternion 필드를 포함한 FK/TCP state publication
+- simulator-only TCP PTP, Linear, Twist command
 - mock camera server
-- GUI viewer/operator console for mock/simulation
+- mock/simulation용 GUI viewer/operator console
+- `policy_runner` joint 및 Cartesian simulator action source
+- simulator-only Cartesian acceptance script
 
-Not production-ready yet:
+아직 production-ready가 아닌 항목:
 
-- real RB3-730 motion
-- Cartesian TCP motion in real mode
+- 실제 RB3-730 motion
+- 실제 Cartesian/TCP motion
 - force control
 - gripper control
-- measured camera/robot calibration
-
-Real robot motion remains explicitly gated. Do not treat a passing mock or
-simulation run as permission to move hardware.
+- 실측 camera/robot calibration
+- 실제 camera + policy + robot closed-loop behavior
 
 ## Source Of Truth
 
-Start here, then follow component docs only for implementation details:
+먼저 아래 문서부터 확인합니다.
 
-- [docs/architecture.md](docs/architecture.md): system topology, terms, safety
-  gates, and roadmap.
-- [docs/hardware_free_validation.md](docs/hardware_free_validation.md):
-  hardware-free build and test gate.
-- [docs/developer_environment.md](docs/developer_environment.md):
-  dependency installation profiles and the MIG-26 rebaseline command set.
-- [docs/frame_contract.md](docs/frame_contract.md): shared robot/camera frame
-  names and transform direction.
-- [docs/servo_backend_contract.md](docs/servo_backend_contract.md): MIG backend
-  result contract and non-blocking servo-loop migration target.
-- [docs/runbooks/tcp_pose_simulator_acceptance.md](docs/runbooks/tcp_pose_simulator_acceptance.md):
-  simulator-only Cartesian PTP, Linear, and Twist acceptance.
-- [docs/runbooks/camera_acceptance.md](docs/runbooks/camera_acceptance.md):
-  real three-camera acceptance and policy-runner camera readiness criteria.
-- [calibration/active_calibration.yaml](calibration/active_calibration.yaml):
-  configured-estimate robot/camera/stand setup registry.
-- [TODO.md](TODO.md): P0-P3 work packages and acceptance criteria.
+- `AGENTS.md`: Codex/Claude/기타 에이전트 작업 지침
+- `REVIEW.md`: 현재 review baseline 및 open item
+- `docs/architecture.md`: 시스템 토폴로지, 용어, motion primitive contract, safety boundary
+- `docs/servo_backend_contract.md`: backend result, fault, worker I/O, state telemetry contract
+- `docs/frame_contract.md`: 공통 frame 및 calibration 상태
+- `docs/hardware_free_validation.md`: hardware-free validation boundary
+- `docs/runbooks/tcp_pose_simulator_acceptance.md`: Cartesian simulator acceptance
+- `docs/runbooks/camera_acceptance.md`: 실제 3-camera acceptance
+- `calibration/active_calibration.yaml`: configured-estimate robot/camera/stand setup registry
 
-Historical review and planning notes may remain in the tree for audit context.
-When they disagree with this README or [docs/architecture.md](docs/architecture.md),
-the root source-of-truth docs win.
+과거 prompt/planning 파일은 감사용 맥락입니다. 위 문서들과 충돌하면 위 문서들이 우선입니다.
 
-## Canonical Terms
-
-Public config, docs, logs intended for operators, and GUI labels use these
-terms:
+## 표준 용어
 
 ```yaml
 run_mode: mock | simulation | real
 backend_type: mock | simulator | rbpodo
 ```
 
-`run_mode` describes the operating environment. `backend_type` describes the
-servo backend implementation selected for each arm.
+## 실제 및 시뮬레이터 토폴로지
 
-## Real And Simulator Topology
-
-The physical system has one controller endpoint per arm:
+실제 시스템:
 
 ```text
 rb_servo_server
@@ -73,71 +80,39 @@ rb_servo_server
   right_robot backend_type=rbpodo -> 172.28.60.201
 ```
 
-The simulator mirrors that shape with one independent simulator endpoint per
-arm:
+시뮬레이터:
 
 ```text
 rb_servo_server
   left_robot  backend_type=simulator -> rb_simulator_left
   right_robot backend_type=simulator -> rb_simulator_right
-
-rb_simulator_left
-  arm: left
-  control: tcp://0.0.0.0:50200 inside its container
-  admin:   tcp://0.0.0.0:50201 inside its container
-
-rb_simulator_right
-  arm: right
-  control: tcp://0.0.0.0:50200 inside its container
-  admin:   tcp://0.0.0.0:50201 inside its container
 ```
 
-Separate simulator containers may reuse the same internal ports because each
-container has its own network namespace. Compose uses explicit
-`rb_simulator/config/*_compose.yaml` profiles and sets
-`RB_SIMULATOR_ALLOW_NON_LOOPBACK=1`; host-run profiles remain loopback-only by
-default. Direct host execution must use separate loopback ports:
-
-```text
-left simulator:
-  control: tcp://127.0.0.1:50200
-  admin:   tcp://127.0.0.1:50201
-
-right simulator:
-  control: tcp://127.0.0.1:50210
-  admin:   tcp://127.0.0.1:50211
-```
-
-Simulator endpoints must not default to the real robot IP addresses. The
-isomorphism is one controller endpoint per arm, not reuse of physical network
-addresses.
+시뮬레이터는 팔마다 독립 controller endpoint를 갖는 실제 토폴로지를 반영해야 합니다. 기본값으로 실제 로봇 IP를 재사용하면 안 됩니다.
 
 ## Safety Gates
 
-Real robot connection is closed unless:
+실제 로봇 연결:
 
 ```bash
 RB_ALLOW_REAL_ROBOT=1
 ```
 
-Real joint servo motion is closed unless:
+실제 joint servo motion:
 
 ```bash
 RB_ALLOW_REAL_MOTION=1
 ```
 
-Real Cartesian/TCP motion is closed unless:
+실제 Cartesian/TCP motion:
 
 ```bash
 RB_ALLOW_REAL_CARTESIAN=1
 ```
 
-TCP Cartesian command support is simulation-only until P3 validation lands.
-Even after P3, real Cartesian motion stays closed until a separate real-hardware
-acceptance procedure approves it.
+이 gate들은 필요 조건일 뿐 충분 조건은 아닙니다. Config와 real-hardware acceptance도 해당 동작을 명시적으로 허용해야 합니다.
 
-Force/admittance/impedance control is not implemented. Force control must remain
-null:
+Force control은 비활성 상태를 유지합니다.
 
 ```yaml
 force_control:
@@ -145,280 +120,70 @@ force_control:
   enable: false
 ```
 
-## Component Map
+## Motion Primitive 요약
 
-```text
-rb_servo_server/   dual-arm servo control, backend selection, safety gates
-rb_simulator/      hardware-free per-arm simulator backend
-camera_server/     RealSense/mock camera capture and metadata publishing
-rb_gui/            operator viewer and console for mock/simulation workflows
-docs/              shared architecture, validation, and frame contracts
-scripts/           repository-level validation helpers
-```
+- `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target입니다. Cartesian path는 보장하지 않습니다.
+- `TcpLinearMove`: simulator-only MoveL-like Cartesian path primitive입니다.
+- `TcpTwistLocal` / `TcpTwistStand`: simulator-only streaming Cartesian velocity primitive입니다.
+- `TcpDeltaLocal` / `TcpDeltaStand`: low-level one-shot/debug jog primitive입니다.
 
-## Canonical Config Names
+## 자주 쓰는 명령
 
-Simulator operator paths use these current configs:
-
-- `rb_servo_server/config/dual_simulator.yaml`: host-loopback direct I/O.
-- `rb_servo_server/config/dual_simulator_compose.yaml`: Docker Compose service
-  DNS.
-- `rb_servo_server/config/dual_simulator_worker.yaml`: host-loopback worker I/O
-  evidence.
-- `rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`: simulator-only
-  TCP Pose/Delta acceptance with Pinocchio/FK/IK enabled and
-  `cartesian_control.allow_in_real: false`.
-- `rb_simulator/config/left_rb3_730e.yaml`: left simulator process.
-- `rb_simulator/config/right_rb3_730e.yaml`: right simulator process.
-- `rb_simulator/config/left_rb3_730e_compose.yaml`: left simulator container
-  bind profile.
-- `rb_simulator/config/right_rb3_730e_compose.yaml`: right simulator container
-  bind profile.
-
-Deprecated simulator compatibility names, including `dual_rbsim.yaml`,
-`dual_rb_simulator.yaml`, `dual_rb_simulator_compose.yaml`, `rbsim_local`, and
-public `rbsim`, are retained only for migration compatibility or internal
-package/protocol names. New operator docs and configs should use
-`run_mode: simulation`, `backend_type: simulator`, and the canonical files
-above; compatibility names should be removed after downstream configs stop
-referencing them.
-
-Real robot config guidance uses this split:
-
-- tracked template: `rb_servo_server/config/dual_real.example.yaml`
-- user local read-only config:
-  `rb_servo_server/config/local/dual_real_readonly.yaml`
-- user local motion config:
-  `rb_servo_server/config/local/dual_real_motion.yaml`
-
-No tracked runnable real robot config is canonical. The tracked real template
-is read-only by default and documents the real controller IPs with the required
-gates. Local real configs are site-owned and must stay under
-`rb_servo_server/config/local/`. Read-only rbpodo state publishing can be
-healthy while `servo_enabled=false` if joint feedback is valid; that is not
-motion readiness. Real `servo_j` sends remain blocked by
-`servo.send_servo_commands=false` in the tracked template and by
-`RB_ALLOW_REAL_MOTION=1` in any motion config. Rbpodo stop/reset fault recovery
-still requires operator intervention until verified controller APIs are wired.
-
-## Make Quick Starts
-
-Run all examples from the repository root:
+Python checks:
 
 ```bash
-cd /home/plaif/workspace/robotics_lab
+python3 -m unittest discover rb_gui/tests
+python3 -m unittest discover policy_runner/tests
+PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
 ```
 
-The root `Makefile` wraps the current Docker Compose and validation entry
-points. It does not enable real robot motion.
-
-### Build all Compose images
+Hardware-free gate:
 
 ```bash
-make build
+./scripts/codex_gate.sh HARDEN-10
 ```
 
-Equivalent command:
+Cartesian simulator acceptance:
 
 ```bash
-docker compose -p robotics_lab -f docker-compose.yml build
+CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 ```
 
-### Start the simulator operator stack
-
-This starts the browser GUI, one left simulator container, one right simulator
-container, and `rb_servo_server` with the per-arm simulator compose config:
+시뮬레이터 운영자 stack 시작:
 
 ```bash
 make sim-up
 ```
 
-Open the GUI at:
+접속:
 
 ```text
 http://127.0.0.1:8080
 ```
 
-The default simulator stack builds `rb_servo_server` with Pinocchio enabled.
-`dual_simulator_compose.yaml` publishes FK TCP poses and enables simulator-only
-Cartesian IK, so the GUI TCP target gizmos can send bounded `TcpPoseTarget`
-commands after `ArmMotion` is selected. Real Cartesian motion remains disabled
-by config.
+## 표준 Config
 
-`make sim-up` runs in the foreground. Stop it with `Ctrl+C`, then clean up
-containers with:
+Servo server simulation configs:
 
-```bash
-make sim-down
-```
+- `rb_servo_server/config/dual_simulator.yaml`
+- `rb_servo_server/config/dual_simulator_compose.yaml`
+- `rb_servo_server/config/dual_simulator_worker.yaml`
+- `rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`
 
-### Run the hardware-free validation gate
+Simulator configs:
 
-This builds and tests mock/stub paths, simulator unit tests, and per-arm
-loopback simulator smoke checks when local prerequisites are available:
+- `rb_simulator/config/left_rb3_730e.yaml`
+- `rb_simulator/config/right_rb3_730e.yaml`
+- `rb_simulator/config/left_rb3_730e_compose.yaml`
+- `rb_simulator/config/right_rb3_730e_compose.yaml`
 
-```bash
-make sim-smoke
-```
+Real robot template:
 
-Equivalent command:
+- `rb_servo_server/config/dual_real.example.yaml`
 
-```bash
-./scripts/hardware_free_validation.sh
-```
+Site-local real configs:
 
-For a final MIG-13+ developer rebaseline, including docs/shell checks, Python
-unit tests, mock/stub CMake gates, hardware-free validation, and optional
-Pinocchio/TCP acceptance when Pinocchio is installed, run:
+- `rb_servo_server/config/local/dual_real_readonly.yaml`
+- `rb_servo_server/config/local/dual_real_motion.yaml`
 
-```bash
-bash scripts/codex_gate.sh MIG-26
-```
-
-The TCP acceptance branch also requires local AF_INET loopback sockets. In
-sandboxed environments that deny loopback sockets, `MIG-26` reports that branch
-as skipped while keeping build, unit, and non-socket validation active.
-
-Install or inspect local dependencies with:
-
-```bash
-bash scripts/install_deps_ubuntu.sh --profile hardware-free
-bash scripts/check_deps.sh --profile hardware-free
-```
-
-To require the direct and worker simulator smokes instead of allowing an
-environment skip:
-
-```bash
-RBSIM_SMOKE_MODE=required RBSIM_WORKER_SMOKE_MODE=required make sim-smoke
-```
-
-### Start the mock camera server
-
-This starts only the mock camera service through the `mock_camera` compose
-profile:
-
-```bash
-make camera-mock-up
-```
-
-Stop it with:
-
-```bash
-make stop
-```
-
-### Start the real camera server
-
-This starts the RealSense camera container with host IPC/network and USB device
-access. It is camera hardware only; it does not enable robot motion:
-
-```bash
-make camera-real-up
-```
-
-Stop it with:
-
-```bash
-make stop
-```
-
-### Deploy or stop the default compose project
-
-Use these when you want the default compose lifecycle directly:
-
-```bash
-make deploy
-make stop
-```
-
-The Makefile variables are overrideable:
-
-```bash
-PROJECT=robotics_lab_dev COMPOSE_FILE=docker-compose.yml make sim-up
-```
-
-## Roadmap
-
-- P0 aligns architecture docs, simulator topology, public terminology, and the
-  hardware-free validation gate.
-- P1 stabilizes joint-only servo behavior across mock, simulator, and real
-  topology while preserving real-motion gates.
-- P2 adds truthful FK/TCP pose publication and measured calibration workflows
-  for visualization and policy inputs.
-- P3 enables simulator-only Cartesian/TCP command validation. Real Cartesian
-  motion remains separately gated after P3.
-- MIG migrates `IRobotBackend` bool/log-string operations toward structured
-  `BackendResult` and `SendServoJResult` diagnostics, then moves blocking
-  network I/O out of `ServoLoop` toward `CommandBuffer -> ServoCoordinator ->
-  Left/Right ArmWorker`. This migration is not a real-motion enablement and
-  does not weaken `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`, or
-  `RB_ALLOW_REAL_CARTESIAN`.
-
-## MIG-12 Migration Baseline
-
-The current review baseline is:
-
-- `CommandBuffer -> ServoCoordinator -> Left/Right ArmWorker` is the intended
-  backend I/O ownership architecture. Direct loop operation remains the stable
-  default until worker mode is promoted beyond simulator evidence.
-- Backend results use structured taxonomy. Important operator-visible classes
-  include `RobotFault` for controller/robot fault state,
-  `TransportWriteFailed` for command-channel write failures,
-  `SuppressedByPolicy` for environment gate or read-only suppression, and
-  `WrongMode` for controller mode/config mismatch.
-- Real read-only rbpodo connection requires `RB_ALLOW_REAL_ROBOT=1`. Real
-  `servo_j` transmission additionally requires `RB_ALLOW_REAL_MOTION=1`.
-  Real Cartesian/TCP motion additionally requires
-  `RB_ALLOW_REAL_CARTESIAN=1`.
-- Rbpodo state acquisition is separate from motion readiness. A real read-only
-  run can publish valid `q_actual` with `servo_enabled=false`; that is a
-  successful state read, while later `servo_j` attempts remain rejected until
-  the real-motion gate and controller readiness are both satisfied.
-- `stop()` and `resetFault()` for rbpodo controller recovery remain
-  unverified. On a real robot fault, treat them as a fail-closed result that
-  requires operator intervention, not as automatic recovery.
-- `network.state_pub_rate_hz` controls UDP state publication rate. The default
-  tracked configs use 20 Hz.
-- `servo.io_model: direct` is the stable default. `servo.io_model: worker` is
-  simulator-accepted when the MIG-10/MIG-11 worker smoke passes. Real +
-  `worker` remains disabled or experimental until a separate real read-only
-  acceptance task exists.
-
-## MIG-26 Rebaseline
-
-Current backend-contract architecture:
-
-```text
-CommandBuffer -> ServoCoordinator/DualArmServoLoop -> Left ArmWorker  -> simulator/rbpodo endpoint
-                                                \-> Right ArmWorker -> simulator/rbpodo endpoint
-```
-
-`ServoCoordinator/DualArmServoLoop` owns timing policy, command freshness,
-fault latching, safety checks, and result aggregation. In direct I/O mode it
-still calls the per-arm backends directly. In worker I/O mode each `ArmWorker`
-owns blocking connect/read/reset/`servo_j` work for one arm and publishes
-cached structured results.
-
-MIG-13+ status:
-
-- `RbsimBackend` uses one persistent JSON-lines TCP transport per simulator
-  backend instance during healthy operation. Transport/protocol failures close
-  the socket for later reconnect; structured robot/controller rejections such
-  as `RobotFault` do not by themselves corrupt the transport.
-- `ArmWorker` streaming `servo_j` queue policy is `latest_wins`. Per-arm state
-  publishes command drop/overwrite counters and last enqueued/dispatched/
-  completed sequence values under the `worker` object.
-- `FaultContext` is latched as structured state. Later suppression results
-  remain live telemetry but do not overwrite the first latched fault context.
-- Rbpodo read-only state can succeed while motion readiness is false.
-  `stop()` and `resetFault()` remain fail-closed for real controller recovery
-  and require operator intervention.
-- Command source lease enforcement defaults to off for compatibility. State
-  still publishes source/lease metadata, and simulator acceptance profiles may
-  enable enforcement explicitly.
-- TCP Pose/Delta acceptance is simulator-only and Pinocchio-gated. It does not
-  enable real Cartesian motion.
-- Camera acceptance is a separate real-camera hardware workflow. Joint-only
-  `policy_runner` actions remain allowed without camera readiness; camera and
-  camera-geometry sources fail closed when declared readiness is absent.
+실행 가능한 tracked real robot config는 추가하면 안 됩니다.

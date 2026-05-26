@@ -1,206 +1,110 @@
 # Camera Acceptance Runbook
 
-This runbook is the source-of-truth acceptance checklist for real three-camera
-operation. It is a hardware acceptance workflow, not a code-only regression
-gate. Do not use it to infer real robot or real motion readiness.
+This runbook defines real three-camera acceptance for `camera_server`. It is separate from robot motion acceptance.
 
-## Entry Gate
-
-Before starting RealSense capture, confirm and record:
-
-- Human approval for this exact real-camera session.
-- Three reserved cameras: one D435f head camera and two D405 wrist cameras.
-- USB access, udev rules, shared memory sizing, and storage target are approved
-  for the test host.
-- The camera server endpoints are isolated from production policy consumers.
-- A local config copy was made from `camera_server/config/triple_realsense.yaml`
-  or one of the explicit profile variants, and all serial placeholders were
-  replaced with approved physical serials.
-- `reconnect.enabled: false`; reconnect is not accepted until the runtime
-  implementation exists.
-
-Record:
-
-```text
-approval_owner:
-approval_time:
-test_host:
-operator:
-config_path:
-metadata_endpoint:
-shared_memory_name:
-storage_path:
-retention_plan:
-production_isolation_notes:
-```
-
-## Dependency Profiles
-
-Hardware-free profile:
-
-- Purpose: local mock/stub builds and tests.
-- Requires: CMake, C++17 compiler, Python 3, `yaml-cpp`, `nlohmann_json`.
-- Check:
-
-```bash
-bash scripts/check_deps.sh --profile hardware-free
-```
-
-Mock-camera acceptance commands:
-
-```bash
-cmake -S camera_server -B camera_server/build/hardware_free_gate \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DCAMERA_SERVER_FORCE_MOCK_CAMERA=ON \
-  -DCAMERA_SERVER_FORCE_ZMQ_STUB=ON \
-  -DCAMERA_SERVER_BUILD_TESTS=ON
-cmake --build camera_server/build/hardware_free_gate -j
-ctest --test-dir camera_server/build/hardware_free_gate --output-on-failure
-camera_server/build/hardware_free_gate/camera_server \
-  --config camera_server/config/mock_triple_realsense.yaml \
-  --run-seconds 5 &
-server_pid=$!
-sleep 1
-python3 camera_server/tools/inspect_shm.py --shm /camera_server_frames_test
-wait "${server_pid}"
-```
-
-Expected mock-camera profile:
-
-```text
-head mock:        64x48 RGB, 30 FPS
-left_wrist mock:  64x48 RGB, 30 FPS
-right_wrist mock: 64x48 RGB, 30 FPS
-drop/skew metrics: present in bundle and health telemetry, not used as real
-                   hardware acceptance evidence
-artifacts: camera_server/build/hardware_free_gate/Testing/Temporary/
-           plus any captured mock logs under artifacts/camera_acceptance/mock/
-```
-
-Real-camera profile:
-
-- Purpose: RealSense camera capture and metadata publishing.
-- Adds: `librealsense2-dev`, RealSense udev rules/tools, `libzmq3-dev`, USB
-  device access, and shared memory permissions.
-- Check:
-
-```bash
-bash scripts/check_deps.sh --profile real-camera
-```
-
-Real-camera startup must use an explicit profile and an approved local config
-copy. It is camera hardware only and does not set `RB_ALLOW_REAL_ROBOT`,
-`RB_ALLOW_REAL_MOTION`, or `RB_ALLOW_REAL_CARTESIAN`.
-
-```bash
-docker compose --profile real_camera up --build camera_server
-# or the repository wrapper:
-make camera-real-up
-```
-
-Real-robot profile:
-
-- Purpose: RB3-730 controller SDK readiness only.
-- Adds: rbpodo SDK/package.
-- Check:
-
-```bash
-bash scripts/check_deps.sh --profile real-robot
-```
-
-This does not open `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`, or
-`RB_ALLOW_REAL_CARTESIAN`.
-
-Kinematics profile:
-
-- Purpose: FK/IK and TCP pose acceptance paths.
-- Adds: Eigen3 and Pinocchio.
-- Check:
-
-```bash
-bash scripts/check_deps.sh --profile kinematics
-```
-
-## Camera Profiles
+## Camera Profile
 
 Canonical profile:
 
+- head: Intel RealSense D435f, color 1280x720@30
+- left wrist: Intel RealSense D405, color 640x360@30
+- right wrist: Intel RealSense D405, color 640x360@30
+
+A D405 640x480@30 variant may be used only when explicitly documented in the config and acceptance record.
+
+## Safety Boundary
+
+Camera acceptance does not enable robot motion. Do not set robot motion env gates during this runbook.
+
+## Config Requirements
+
+Real camera configs must not contain placeholder serials:
+
 ```text
-head D435f:  1280x720 RGB, 30 FPS
-left D405:   640x360 RGB, 30 FPS
-right D405:  640x360 RGB, 30 FPS
-depth:       disabled
+REPLACE_*
+TODO
+CHANGEME
+UNKNOWN
 ```
 
-Use `camera_server/config/triple_realsense_640x360.yaml` or
-`camera_server/config/triple_realsense.yaml` as the source template.
+Mock serials such as `MOCK_*` are only valid when mock/simulated cameras are enabled.
 
-Optional wrist variant:
+`reconnect.enabled: true` must remain rejected until reconnect is implemented and accepted.
 
-```text
-head D435f:  1280x720 RGB, 30 FPS
-left D405:   640x480 RGB, 30 FPS
-right D405:  640x480 RGB, 30 FPS
-depth:       disabled
-```
+## Dependency Preflight
 
-Use `camera_server/config/triple_realsense_640x480.yaml` only when the session
-explicitly accepts the larger D405 frame size.
-
-## Serial Identification
-
-Run before editing the local accepted config:
+Run:
 
 ```bash
-rs-enumerate-devices
-rs-enumerate-devices -s
-lsusb
+./scripts/check_deps.sh --profile real-camera
 ```
 
-Record:
+Real camera work may require RealSense packages, udev rules, USB permission, and host access to `/dev/bus/usb`.
 
-```text
-head_serial:
-left_wrist_serial:
-right_wrist_serial:
-firmware_versions:
-usb_bus_topology:
-configured_sync_mode:
-sync_cable_or_trigger_notes:
+## Acceptance Duration
+
+Minimum recommended test durations:
+
+- short smoke: 2 minutes
+- development acceptance: 10 minutes
+- pre-policy acceptance: 30 to 60 minutes
+
+## Metrics To Record
+
+Record for each camera:
+
+- serial
+- model
+- resolution
+- FPS mean/min
+- frame drops
+- timestamp jitter
+- USB disconnects
+- stream restart behavior
+
+Record for bundles:
+
+- complete bundle rate
+- incomplete bundle count
+- max bundle skew
+- shared-memory reader result
+- metadata subscriber result
+- CPU/memory usage, if available
+
+## Policy Runner Readiness
+
+Camera-dependent policy sources must declare:
+
+```yaml
+requires_camera: true
+camera_stale_timeout_sec: <seconds>
 ```
 
-Acceptance:
+Camera-geometry-dependent sources must also declare:
 
-- Each configured serial maps to the expected physical camera position.
-- No checked-in template with `REPLACE_*`, `TODO`, `CHANGEME`, `UNKNOWN`, empty
-  required serials, or `MOCK_*` real-mode serials is run directly.
-- Firmware versions and USB topology are attached to the evidence.
-
-## Stability Runs
-
-Build and start with the approved local config copy. Keep metadata and shared
-memory names non-production unless the approved session explicitly says
-otherwise.
-
-```bash
-cmake -S camera_server -B camera_server/build/real_camera_acceptance -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build camera_server/build/real_camera_acceptance -j2
-camera_server/build/real_camera_acceptance/camera_server --config <approved-config> --run-seconds 600
+```yaml
+requires_camera_geometry: true
 ```
 
-Run three stability windows:
+If camera metadata is stale, incomplete, or missing, policy_runner must fail closed and stop sending motion commands.
 
-- 10 minutes: initial acceptance.
-- 30 minutes: operator workflow confidence.
-- 60 minutes: extended soak before policy use.
+## Acceptance Record Template
 
-For each window, record:
-
-```text
-artifact_dir: artifacts/camera_acceptance/<YYYYMMDD-HHMMSS>/<window_minutes>min/
-window_minutes:
-start_time:
-end_time:
+```yaml
+camera_acceptance_id:
+date:
+operator:
+repo_commit:
+config_file:
+profile:
+  head: D435f 1280x720@30
+  left_wrist: D405 640x360@30
+  right_wrist: D405 640x360@30
+serials:
+  head:
+  left_wrist:
+  right_wrist:
+duration_min:
 head_fps_mean:
 left_wrist_fps_mean:
 right_wrist_fps_mean:
@@ -210,133 +114,24 @@ right_wrist_drop_count:
 complete_bundle_count:
 incomplete_bundle_count:
 bundle_publish_rate_hz_mean:
-bundle_publish_rate_hz_min:
-max_bundle_skew_ms_mean:
-max_bundle_skew_ms_max:
+max_bundle_skew_ms:
 shared_memory_reader_result:
 metadata_health_json_path:
 server_log_path:
+notes:
 ```
 
-Acceptance:
+## Pass Criteria
 
-- Head D435f holds 1280x720 at approximately 30 FPS.
-- Both D405 wrists hold the selected 640x360 canonical profile, or the approved
-  640x480 variant, at approximately 30 FPS.
-- Drop count remains zero, or every drop has a timestamp, affected camera,
-  suspected cause, and explicit operator acceptance.
-- Bundle publish rate remains approximately 30 Hz.
-- Maximum bundle skew remains inside `sync.max_bundle_time_diff_ms`, or every
-  excursion is explained and accepted.
-- Shared memory reads pass seqlock validation.
+A run is acceptable only if:
 
-## USB Disconnect And Restart
+- all configured cameras are found by serial
+- all streams maintain expected FPS within tolerance
+- complete bundles are produced at expected rate
+- shared-memory and metadata consumers can read data
+- no silent placeholder serials are accepted
+- failures are visible in health metadata
 
-Run only after the operator identifies the camera that may be unplugged. Do not
-unplug any device used by production workloads.
+## Not Robot Acceptance
 
-Record:
-
-```text
-camera_unplugged:
-disconnect_time:
-health_event_time:
-server_crashed: yes/no
-bundle_behavior_after_disconnect:
-metadata_error_observed:
-restart_command:
-restart_success: yes/no
-post_restart_serial_mapping_verified: yes/no
-post_restart_bundle_rate_hz:
-residual_errors:
-```
-
-Acceptance:
-
-- Disconnect produces explicit health/error telemetry.
-- The server does not crash silently.
-- Bundles become incomplete or stop according to config; stale frames are not
-  presented as fresh complete bundles.
-- A clean server restart with the same approved serial mapping restores complete
-  bundle publication.
-- Reconnect remains disabled unless a later accepted implementation changes
-  this runbook.
-
-## Policy Runner Readiness Evidence
-
-Policy code may run joint-only sources without cameras. Any future camera
-observation source must declare `requires_camera: true` and a
-`camera_stale_timeout_sec`; geometry-dependent camera sources must also declare
-`requires_camera_geometry: true`.
-
-When camera readiness is bridged into the robot state stream, use the
-`camera_readiness` object so `policy_runner` can fail closed from state alone:
-
-```json
-{
-  "camera_readiness": {
-    "available": true,
-    "required_present": true,
-    "latest_bundle_age_ms": 50,
-    "stale": false
-  }
-}
-```
-
-Equivalent age fields ending in `_age_sec` are acceptable. Missing required
-cameras must set `required_missing: true` or `required_present: false`; stale
-camera data must either set `stale: true` or report an age greater than the
-action source `camera_stale_timeout_sec`.
-
-Acceptance:
-
-- Joint-only `policy_runner` actions remain allowed without camera readiness.
-- Camera-dependent actions are blocked when camera readiness is absent.
-- Camera-dependent actions are blocked when the latest camera observation is
-  older than `camera_stale_timeout_sec`.
-- Camera geometry remains blocked unless measured camera intrinsics/extrinsics
-  are available and accepted for the configured mode.
-
-## Artifact List
-
-Attach these artifacts before marking real-camera acceptance complete:
-
-- Approval record and operator notes.
-- Exact dependency profile checks and output.
-- Exact local config file path and config diff from the checked-in template.
-- `rs-enumerate-devices`, `rs-enumerate-devices -s`, and `lsusb` output.
-- 10/30/60-minute server logs.
-- Health JSON snapshots or time series.
-- Drop, skew, and bundle-rate metrics for each stability window.
-- Shared memory reader result.
-- USB disconnect and restart evidence.
-- Residual risks and follow-up tasks.
-
-Recommended artifact layout:
-
-```text
-artifacts/camera_acceptance/<YYYYMMDD-HHMMSS>/
-  approval.txt
-  deps/
-    hardware-free.txt
-    real-camera.txt
-  config/
-    approved_config.yaml
-    template_diff.patch
-  inventory/
-    rs-enumerate-devices.txt
-    rs-enumerate-devices-summary.txt
-    lsusb.txt
-  stability/
-    10min/
-    30min/
-    60min/
-  disconnect/
-  policy_runner/
-    readiness_checks.txt
-```
-
-Stop condition: if any required camera cannot hold the accepted profile, bundle
-rate/skew exceeds accepted limits without explanation, shared memory reads fail,
-or disconnect/restart behavior is silent or unsafe, keep the hardware gate
-blocked and attach the evidence to a focused follow-up.
+Passing camera acceptance is not permission to move the robot.

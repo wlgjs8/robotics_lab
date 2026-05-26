@@ -1,72 +1,16 @@
-# Robotics Lab Frame Contract
+# Frame Contract
 
-This document is the shared coordinate-frame contract for `rb_servo_server`,
-`camera_server`, `rb_gui`, and the future `policy_runner`.
+This document defines shared frames, transform directions, and geometry validity. It is the cross-component frame source of truth.
 
-The system source of truth is [architecture.md](architecture.md). The active
-global setup registry is
-[`calibration/active_calibration.yaml`](../calibration/active_calibration.yaml).
-Frame data is for visualization, calibration, and policy inputs; it does not
-open any real motion path by itself.
+## Units
 
-It defines names, transform direction, calibration file locations, and the
-minimum schema needed before real calibration is available. Values already
-present in configs are treated as current configured estimates, not measured
-calibration.
-
-## Conventions
-
-- Frame names use lowercase snake case.
-- Arm prefixes are `left` and `right`.
-- Camera names are exactly `head`, `left_wrist`, and `right_wrist`.
-- Transforms are named `T_parent_child`.
-- `T_parent_child` maps coordinates expressed in `child` into `parent`:
-
-```text
-p_parent = T_parent_child * p_child
-```
-
-- Pose arrays use `[x, y, z, rx, ry, rz]`.
-- Translation units are meters.
-- Rotation units are radians.
-- `rx`, `ry`, `rz` are canonical URDF/ROS roll, pitch, yaw Euler angles with
-  `R = Rz(yaw) * Ry(pitch) * Rx(roll)`, matching `rb_servo_server` mount config
-  and `rb_gui` display helpers.
-- Runtime TCP state uses quaternion orientation as the canonical published
-  orientation. The order is `xyzw`: `quaternion_xyzw: [qx, qy, qz, qw]`.
-  The scalar component is `qw`; quaternions are normalized before publication.
-- TCP `rx`, `ry`, and `rz` remain display/legacy fields for operator UI and
-  backward compatibility. They are not the canonical control or dataset
-  orientation representation because Euler angles are ambiguous near
-  singularities.
-- Components must not silently invert transform direction based on field name.
-  If a component needs the inverse, it computes and names it explicitly.
+- translation: meters
+- rotation vectors / RPY: radians
+- quaternions: `xyzw`
+- joint positions in public robot commands/states: degrees
+- joint velocities in public robot commands/states: degrees/second
 
 ## Canonical Frames
-
-| Frame | Owner | Meaning |
-| --- | --- | --- |
-| `stand` | shared contract | World/root frame fixed to the dual-arm stand. |
-| `left_base` | `rb_servo_server` | Left robot base frame. |
-| `right_base` | `rb_servo_server` | Right robot base frame. |
-| `left_tcp` | `rb_servo_server` | Left tool-center-point frame from FK or robot state. |
-| `right_tcp` | `rb_servo_server` | Right tool-center-point frame from FK or robot state. |
-| `head_camera` | `camera_server` + calibration | Optical frame for the head camera. |
-| `left_wrist_camera` | `camera_server` + calibration | Optical frame for the left wrist camera. |
-| `right_wrist_camera` | `camera_server` + calibration | Optical frame for the right wrist camera. |
-
-For image streams, append stream names to camera names only for data routing,
-not geometry frames:
-
-```text
-head.color
-left_wrist.color
-right_wrist.color
-```
-
-Geometry uses `head_camera`, `left_wrist_camera`, and `right_wrist_camera`.
-
-The root frame tree is:
 
 ```text
 stand
@@ -79,320 +23,93 @@ stand
   head_camera
 ```
 
-`left_tcp` and `right_tcp` are dynamic frames derived from joint state and FK.
-The stand-to-base and camera transforms are setup/calibration data.
+`stand` is the physical steel frame / fixture reference. It is the common world frame for GUI visualization and dual-arm geometry.
 
-## Current Configured Mounts
+`left_base` and `right_base` are the robot base frames mounted to the stand shoulders.
 
-`rb_servo_server` publishes mount estimates from `left_mount` and `right_mount`
-as state-stream `mounts.left.base_pose_in_stand` and
-`mounts.right.base_pose_in_stand`.
+`left_tcp` and `right_tcp` are the robot tool center point frames defined by the URDF tip link.
 
-Current configured estimates:
+Camera frames are named by physical mounting location.
 
-The mount rotations below were converted from MJCF `euler="x y z"` fields into
-canonical URDF/ROS RPY. The MJCF source values must not be copied directly into
-`base_pose_in_stand`.
+## Transform Direction
+
+Use `T_parent_child` to mean:
+
+```text
+point_in_parent = T_parent_child * point_in_child
+```
+
+Examples:
+
+```text
+T_stand_left_base
+T_stand_right_base
+T_left_tcp_left_wrist_camera
+T_right_tcp_right_wrist_camera
+T_stand_head_camera
+```
+
+## Mount Orientation Convention
+
+Runtime `Pose6D` uses canonical URDF/ROS-style RPY:
+
+```text
+R = Rz(yaw) * Ry(pitch) * Rx(roll)
+```
+
+The original stand/robot mount rotations came from MJCF `euler xyz` values. MJCF Euler values must not be copied directly into canonical RPY fields. They must be converted first or represented as quaternions.
+
+The current configured-estimate mount values use canonical RPY converted from the original MJCF convention. If map-style pose configs with `quaternion_xyzw` are present, quaternion orientation is the canonical orientation and RPY is display/legacy only.
+
+## Calibration Registry
+
+The current setup registry is:
+
+```text
+calibration/active_calibration.yaml
+```
+
+Current status is expected to be:
 
 ```yaml
-T_stand_left_base:
-  source: rb_servo_server/config/*.yaml left_mount.base_pose_in_stand
-  note: converted from MJCF euler xyz to canonical URDF/ROS RPY
-  xyz_rpy: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
-  status: configured_estimate
-
-T_stand_right_base:
-  source: rb_servo_server/config/*.yaml right_mount.base_pose_in_stand
-  note: converted from MJCF euler xyz to canonical URDF/ROS RPY
-  xyz_rpy: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
-  status: configured_estimate
-```
-
-These are not measured acceptance calibration. Treat them as current setup
-values until a hardware calibration run produces a signed calibration file.
-
-## Runtime Source Of Truth Policy
-
-- Servo config mount transforms are the current runtime source for
-  `rb_servo_server`.
-- `calibration/active_calibration.yaml` is the global setup source of truth for
-  robot, camera, and stand frame relationships.
-- Future work should load the registry into runtime config or cross-check
-  runtime mount values against it, warning or failing on mismatch according to
-  the operating mode.
-- This registry does not change current `rb_servo_server` behavior.
-
-## Validity Semantics
-
-- `configured_estimate` means a value is a repository-configured setup estimate,
-  not a measured and accepted calibration.
-- `configured_estimate` is allowed for visualization, simulation, frame display,
-  and development of geometry-aware interfaces.
-- `configured_estimate` is not valid for real geometry-dependent policy.
-- `geometry_valid_for_real_policy: false` blocks real geometry-dependent policy
-  consumers once those checks are implemented.
-- Missing, unmeasured, or unknown camera calibration must not block joint-only
-  action sources.
-- TCP/Cartesian policies and camera-to-robot geometry policies require better
-  calibration in a later measured/accepted milestone.
-
-## Transform Chain
-
-Robot TCP in stand:
-
-```text
-T_stand_left_tcp(t)  = T_stand_left_base  * T_left_base_left_tcp(q_left(t))
-T_stand_right_tcp(t) = T_stand_right_base * T_right_base_right_tcp(q_right(t))
-```
-
-Wrist camera in stand:
-
-```text
-T_stand_left_wrist_camera(t) =
-  T_stand_left_tcp(t) * T_left_tcp_left_wrist_camera
-
-T_stand_right_wrist_camera(t) =
-  T_stand_right_tcp(t) * T_right_tcp_right_wrist_camera
-```
-
-Head camera in stand:
-
-```text
-T_stand_head_camera = calibrated fixed transform
-```
-
-TCP fields are published only when kinematics are configured and available for
-the running server. Otherwise `StatePublisher` marks TCP fields as deferred.
-`policy_runner` must not assume camera-to-robot geometry is available from live
-state unless the state stream reports valid TCP pose and the calibration package
-is accepted for the configured mode. Real Cartesian/TCP motion remains closed
-until a separate real-hardware acceptance procedure approves it, even after
-simulator validation.
-
-## Component Responsibilities
-
-### rb_servo_server
-
-- Owns `stand`, `left_base`, `right_base`, `left_tcp`, and `right_tcp` names.
-- Publishes `mounts.left.base_pose_in_stand` and
-  `mounts.right.base_pose_in_stand` as `T_stand_left_base` and
-  `T_stand_right_base`.
-- Publishes joint state plus `tcp_base` and `tcp_stand` when FK is configured
-  and available.
-- Must label `tcp_stand` as `T_stand_<arm>_tcp`.
-- Must label `tcp_base` as `T_<arm>_base_<arm>_tcp`.
-- Each TCP pose object keeps legacy `x`, `y`, `z`, `rx`, `ry`, and `rz` fields
-  and adds normalized `quaternion_xyzw` plus scalar aliases `qx`, `qy`, `qz`,
-  and `qw` when FK produced a valid orientation.
-- Must keep `tcp_fields_deferred=true` while TCP transforms are unavailable.
-
-### camera_server
-
-- Owns camera identity and stream metadata:
-  - `head`
-  - `left_wrist`
-  - `right_wrist`
-- Does not own robot or stand transforms.
-- Publishes frame metadata and bundles using stream keys such as
-  `head.color`, `left_wrist.color`, and `right_wrist.color`.
-- May publish camera serials and intrinsics after calibration support lands.
-- Must not invent extrinsics when calibration files are absent.
-
-### rb_gui
-
-- Displays `stand` as the scene root.
-- Uses state-stream mounts as current configured estimates.
-- Uses `tcp_stand` when present; otherwise it may show visual fallback markers,
-  but fallback markers are not calibration data.
-- Must not write calibration files.
-
-### future policy_runner
-
-- Consumes robot state, camera bundles, and calibration files.
-- Uses `T_parent_child` direction exactly as stored.
-- Refuses geometry-dependent policy execution if a required extrinsic is absent,
-  stale, or marked `configured_estimate` when a measured calibration is required.
-- Logs the calibration package id with every episode/action trace.
-- Does not route Cartesian/TCP targets into real motion unless the servo server
-  has accepted the explicit real Cartesian gate and a real-hardware acceptance
-  procedure has approved that path.
-
-## Calibration File Locations
-
-Active shared layout:
-
-```text
-calibration/
-  README.md
-  active_calibration.yaml
-  robot/
-    stand_mounts.yaml
-  cameras/
-    intrinsics.yaml
-    extrinsics.yaml
-  hand_eye/
-    wrist_cameras.yaml
-  snapshots/
-    YYYYMMDD_HHMMSS_<label>.yaml
-```
-
-Only `active_calibration.yaml` exists for P2-B. The subdirectories above are
-reserved for future measured artifacts. Repository configs may continue to carry
-default configured estimates. Measured calibration belongs under `calibration/`
-and should be copied into run artifacts for each hardware or dataset session.
-
-## Active Calibration Schema
-
-`calibration/active_calibration.yaml`:
-
-```yaml
-schema: robotics_lab.calibration.v1
-calibration_id: "CONFIG_ESTIMATE_001"
 status: configured_estimate
 geometry_valid_for_real_policy: false
-
-robot:
-  T_stand_left_base:
-    parent: stand
-    child: left_base
-    xyz_rpy: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
-    units:
-      translation: m
-      rotation: rad
-    status: configured_estimate
-    source: rb_servo_server mount config
-  T_stand_right_base:
-    parent: stand
-    child: right_base
-    xyz_rpy: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
-    units:
-      translation: m
-      rotation: rad
-    status: configured_estimate
-    source: rb_servo_server mount config
-
-cameras:
-  head:
-    frame: head_camera
-    serial: "REPLACE_HEAD_SERIAL"
-    intrinsics_status: unknown
-    extrinsics_status: unmeasured
-  left_wrist:
-    frame: left_wrist_camera
-    serial: "REPLACE_LEFT_SERIAL"
-    hand_eye_status: unmeasured
-  right_wrist:
-    frame: right_wrist_camera
-    serial: "REPLACE_RIGHT_SERIAL"
-    hand_eye_status: unmeasured
 ```
 
-Future measured calibration may split this into the following files:
+`configured_estimate` may be used for visualization and simulator work. It is not measured calibration and must not be used to justify real geometry-dependent policy.
 
-`calibration/robot/stand_mounts.yaml`:
+## Runtime Source Of Truth
 
-```yaml
-schema: robotics_lab.transforms.v1
-transforms:
-  - name: T_stand_left_base
-    parent: stand
-    child: left_base
-    xyz_rpy: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
-    units:
-      translation: m
-      rotation: rad
-    status: configured_estimate
-    source: rb_servo_server/config/dual_real.example.yaml
-  - name: T_stand_right_base
-    parent: stand
-    child: right_base
-    xyz_rpy: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
-    units:
-      translation: m
-      rotation: rad
-    status: configured_estimate
-    source: rb_servo_server/config/dual_real.example.yaml
-```
+`rb_servo_server` runtime mount config is the current active source for FK/IK state publication. `calibration/active_calibration.yaml` is the global setup registry that future work should load or cross-check against runtime config.
 
-`calibration/cameras/intrinsics.yaml`:
+If runtime config and calibration registry disagree, fail or warn explicitly. Do not silently mix frame definitions.
 
-```yaml
-schema: robotics_lab.camera_intrinsics.v1
-cameras:
-  head:
-    serial: "REPLACE_HEAD_SERIAL"
-    status: unmeasured
-    color: null
-    depth: null
-  left_wrist:
-    serial: "REPLACE_LEFT_SERIAL"
-    status: unmeasured
-    color: null
-    depth: null
-  right_wrist:
-    serial: "REPLACE_RIGHT_SERIAL"
-    status: unmeasured
-    color: null
-    depth: null
-```
+## Quaternion Policy
 
-`calibration/cameras/extrinsics.yaml`:
+State publishers and GUI markers should prefer `quaternion_xyzw` over RPY when both are available. RPY is useful for human display but should not be treated as the highest-fidelity orientation representation.
 
-```yaml
-schema: robotics_lab.transforms.v1
-transforms:
-  - name: T_stand_head_camera
-    parent: stand
-    child: head_camera
-    xyz_rpy: null
-    status: unmeasured
-```
+## Joint-Only Versus Geometry-Dependent Behavior
 
-`calibration/hand_eye/wrist_cameras.yaml`:
+Joint-only actions do not require measured calibration.
 
-```yaml
-schema: robotics_lab.transforms.v1
-transforms:
-  - name: T_left_tcp_left_wrist_camera
-    parent: left_tcp
-    child: left_wrist_camera
-    xyz_rpy: null
-    status: unmeasured
-  - name: T_right_tcp_right_wrist_camera
-    parent: right_tcp
-    child: right_wrist_camera
-    xyz_rpy: null
-    status: unmeasured
-```
+The following require stronger geometry validation before real use:
 
-Null transform values mean unavailable. Consumers must fail closed when a
-required transform is null or `status: unmeasured`.
+- Cartesian TCP policy based on camera geometry
+- wrist-camera-to-TCP transforms
+- head-camera-to-stand transforms
+- real camera-driven manipulation policies
+- dataset capture requiring metric replayability
 
-## State and Dataset Metadata Requirements
+## Measured Calibration Future Work
 
-Every recorded episode should include:
+Measured calibration should add:
 
-- `calibration_id`
-- copy or checksum of `active_calibration.yaml`
-- `T_stand_left_base` and `T_stand_right_base` source/status
-- camera serial mapping for `head`, `left_wrist`, `right_wrist`
-- whether `tcp_stand` came from live state, FK reconstruction, or was absent
-- timestamp basis used for robot/camera alignment
+- calibration ID
+- measurement date
+- method/tool used
+- robot serials and controller IPs
+- camera serials and stream profiles
+- transform covariance or quality flag, if available
+- acceptance artifact paths
 
-`policy_runner` should include the same calibration id in action logs so model
-inputs can be audited against the geometry used at runtime.
-
-Runtime state consumers should prefer the normalized TCP quaternion over RPY for
-GUI policy inputs and datasets. Legacy consumers may continue reading
-`[x, y, z, rx, ry, rz]`, but new geometry-dependent code should treat RPY as a
-display-only compatibility field.
-
-## Open Items
-
-- Measure real stand origin and axis convention against the physical fixture.
-- Keep FK coverage and simulator evidence current for
-  `T_<arm>_base_<arm>_tcp` and `T_stand_<arm>_tcp`.
-- Add camera intrinsics extraction from RealSense profiles.
-- Add hand-eye calibration for wrist cameras.
-- Add measured `T_stand_head_camera`.
-- Add validation tooling that rejects missing, inverted, or stale transforms.
+Until then, real geometry-dependent policy remains blocked.

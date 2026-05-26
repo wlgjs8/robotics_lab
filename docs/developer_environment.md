@@ -1,130 +1,106 @@
 # Developer Environment
 
-This page documents reproducible local setup for hardware-free development.
-It does not enable real robot connection, real robot motion, RealSense capture,
-or real Cartesian/TCP motion.
+This page documents reproducible local setup for simulator-first development. It does not enable real robot connection, real robot motion, RealSense capture, or real Cartesian/TCP motion.
 
-## Quick Start
+## Ubuntu Hardware-Free Dependencies
 
-From the repository root on Ubuntu:
+Install the base C++ and Python dependencies:
 
 ```bash
-bash scripts/install_deps_ubuntu.sh --profile hardware-free
-bash scripts/codex_gate.sh MIG-26
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential \
+  cmake \
+  git \
+  python3 \
+  python3-venv \
+  python3-pip \
+  libyaml-cpp-dev \
+  nlohmann-json3-dev
 ```
 
-`MIG-26` is the final rebaseline gate for MIG-13 and later. It runs shell and
-documentation checks, Python simulator tests, GUI tests, `policy_runner` tests,
-mock/stub CMake/CTest gates, and the full hardware-free validation helper. If
-Pinocchio is installed, it also runs the Pinocchio-enabled servo gate and the
-simulator-only TCP pose acceptance runner when local AF_INET loopback sockets
-are available.
-
-If dependencies are managed outside apt, run only the preflight:
+Then run:
 
 ```bash
-bash scripts/check_deps.sh --profile hardware-free
+./scripts/check_deps.sh --profile hardware-free
 ```
 
-The preflight reports missing packages without installing anything.
-
-## Dependency Profiles
-
-Hardware-free development:
-
-- CMake
-- C++17 compiler and build tools
-- Python 3.10 or newer
-- `yaml-cpp`
-- `nlohmann_json`
-
-Kinematics and simulator-only TCP acceptance:
-
-- hardware-free dependencies
-- Eigen3
-- Pinocchio CMake package
-
-Optional real-camera acceptance:
-
-- hardware-free dependencies
-- librealsense2 development package and tools
-- RealSense udev/device access
-- ZeroMQ development package
-
-Optional real-robot build readiness:
-
-- hardware-free dependencies
-- rbpodo SDK/package exposed through `CMAKE_PREFIX_PATH` or `RBPODO_ROOT`
-
-The optional profiles are dependency checks only. They do not open
-`RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`, or
-`RB_ALLOW_REAL_CARTESIAN`.
-
-## Python Packages
-
-The hardware-free Python tests use the standard library for `rb_simulator` and
-`policy_runner`. The GUI package declares its operator dependencies in
-`rb_gui/pyproject.toml`:
+If your CMake packages are installed in a non-standard prefix, set:
 
 ```bash
-python3 -m pip install -e rb_gui
+export CMAKE_PREFIX_PATH=/path/to/prefix:$CMAKE_PREFIX_PATH
 ```
 
-`policy_runner` has no required third-party package for the default tests.
-SpaceMouse support is optional:
+## Optional Kinematics Dependencies
+
+Pinocchio is required for FK/IK-enabled Cartesian runtime acceptance.
+
+Check availability:
 
 ```bash
-python3 -m pip install -e policy_runner[spacemouse]
+./scripts/check_deps.sh --profile kinematics
 ```
 
-Use a virtual environment when installing Python packages into a developer
-workstation:
+If Pinocchio is installed in a custom prefix, set `CMAKE_PREFIX_PATH` before building.
+
+## Python Checks
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install --upgrade pip
-python3 -m pip install -e rb_gui -e policy_runner
-```
-
-## Validation Command Set
-
-The one-command hardware-free rebaseline is:
-
-```bash
-bash scripts/codex_gate.sh MIG-26
-```
-
-Useful component checks are:
-
-```bash
-PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
 python3 -m unittest discover rb_gui/tests
 python3 -m unittest discover policy_runner/tests
-bash scripts/hardware_free_validation.sh
+PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
+python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner rb_simulator/src scripts
 ```
 
-Dependency and optional acceptance checks:
+## C++ Hardware-Free Gate
 
 ```bash
-bash scripts/check_deps.sh --profile hardware-free
-bash scripts/check_deps.sh --profile kinematics
-bash scripts/tcp_pose_simulator_acceptance.sh
+./scripts/codex_gate.sh HARDEN-10
 ```
 
-Run the TCP pose acceptance only when Pinocchio is installed and the
-Pinocchio-enabled `rb_servo_server` build is available. Without Pinocchio, use
-`--allow-missing-pinocchio` only for syntax/config validation; it skips runtime
-FK/IK simulator acceptance.
+When dependencies are missing, the gate may skip C++ checks only if explicitly configured to do so. Do not report skipped C++ checks as passed C++ acceptance.
 
-## Safety Boundary
+## Cartesian Simulator Acceptance
 
-Default runnable paths are hardware-free. Real hardware acceptance remains a
-separate human-gated workflow:
+After C++ and Pinocchio dependencies are available:
 
-- real robot connection requires `RB_ALLOW_REAL_ROBOT=1`
-- real `servo_j` motion requires `RB_ALLOW_REAL_MOTION=1`
-- real Cartesian/TCP motion requires `RB_ALLOW_REAL_CARTESIAN=1`
-- force/admittance/impedance control remains disabled
-- current calibration values are configured estimates, not measured acceptance
-  calibration
+```bash
+CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
+```
+
+This validates simulator-only PTP, Linear, and Twist primitives. It does not enable real robot motion.
+
+## Docker Compose Simulator Stack
+
+```bash
+make sim-up
+```
+
+Open:
+
+```text
+http://127.0.0.1:8080
+```
+
+Stop with `Ctrl+C`, then:
+
+```bash
+make sim-down
+```
+
+## Real Camera Dependencies
+
+Real camera work is separate from hardware-free robot work. Install RealSense and camera dependencies only for camera acceptance. See `docs/runbooks/camera_acceptance.md`.
+
+## Real Robot Dependencies
+
+Real robot work requires rbpodo and site-specific network access. Do not add or run tracked runnable real configs. Use `rb_servo_server/config/dual_real.example.yaml` only as a template and create site-local configs under `rb_servo_server/config/local/`.
+
+## Recommended Development Flow
+
+1. Run Python/unit checks.
+2. Run hardware-free C++ gate.
+3. Run simulator stack manually in GUI.
+4. Run Cartesian simulator acceptance.
+5. Repeat until simulator behavior is stable.
+6. Only then start a separate real robot read-only acceptance workflow.
