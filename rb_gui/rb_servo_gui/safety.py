@@ -69,7 +69,7 @@ class Readiness:
 
 class OperatorSafety:
     lifecycle_modes = {"ArmMotion", "DisarmMotion", "Hold", "EmergencyStop", "ResetFault"}
-    motion_modes = {"JointTarget", "JointVelocity", "TcpPoseTarget", "TcpDeltaStand", "TcpDeltaLocal"}
+    motion_modes = {"JointTarget", "JointVelocity", "TcpPoseTarget", "TcpDeltaStand", "TcpDeltaLocal", "TcpLinearMove"}
 
     def __init__(
         self,
@@ -208,6 +208,7 @@ class OperatorSafety:
             "jog": self.blocked_reason("JointTarget") is not None,
             "tcp_jog": True,
             "tcp_pose": self.tcp_command_disabled_reason() is not None,
+            "tcp_linear": self.tcp_command_disabled_reason() is not None,
         }
         for mode in self.lifecycle_modes:
             states[f"lifecycle:{mode}"] = self.blocked_reason(mode) is not None
@@ -370,6 +371,86 @@ class OperatorSafety:
         if right_pose is not None:
             arms.append("right")
         return True, f"sent {'+'.join(arms)} TCP pose target (server may report CartesianUnavailable until IK is implemented)"
+
+    def send_tcp_linear_move(
+        self,
+        *,
+        left_pose: tuple[float, ...] | None = None,
+        right_pose: tuple[float, ...] | None = None,
+        left_quaternion_xyzw: tuple[float, ...] | None = None,
+        right_quaternion_xyzw: tuple[float, ...] | None = None,
+        duration_sec: float | None = None,
+        linear_speed_m_s: float | None = None,
+        angular_speed_rad_s: float | None = None,
+        orientation_mode: str = "constant",
+    ) -> tuple[bool, str]:
+        if not self.enable_tcp_pose_commands:
+            return False, "TCP linear command disabled until FK/IK milestone is enabled"
+        reason = self.tcp_command_disabled_reason()
+        if reason:
+            return False, reason
+        if left_pose is None and right_pose is None:
+            return False, "no TCP linear target selected"
+        for arm, pose in (("left", left_pose), ("right", right_pose)):
+            if pose is None:
+                continue
+            arm_reason = self.tcp_command_disabled_reason(arm)  # type: ignore[arg-type]
+            if arm_reason:
+                return False, arm_reason
+        values = (
+            list(left_pose or ())
+            + list(right_pose or ())
+            + list(left_quaternion_xyzw or ())
+            + list(right_quaternion_xyzw or ())
+            + [value for value in (duration_sec, linear_speed_m_s, angular_speed_rad_s) if value is not None]
+        )
+        try:
+            finite_values = [float(value) for value in values]
+        except (TypeError, ValueError):
+            return False, "non-finite TCP linear target rejected"
+        if any(not math.isfinite(value) for value in finite_values):
+            return False, "non-finite TCP linear target rejected"
+        if duration_sec is None and linear_speed_m_s is None:
+            return False, "duration_sec or linear_speed_m_s is required"
+        for label, value in (
+            ("duration_sec", duration_sec),
+            ("linear_speed_m_s", linear_speed_m_s),
+            ("angular_speed_rad_s", angular_speed_rad_s),
+        ):
+            if value is not None and float(value) <= 0.0:
+                return False, f"{label} must be positive"
+        if str(orientation_mode).strip().lower() not in {"constant", "slerp"}:
+            return False, "orientation_mode must be constant or slerp"
+        for quaternion in (left_quaternion_xyzw, right_quaternion_xyzw):
+            if quaternion is None:
+                continue
+            if len(quaternion) != 4:
+                return False, "TCP linear target quaternion must have 4 values"
+            norm = math.sqrt(sum(float(value) * float(value) for value in quaternion))
+            if not math.isfinite(norm) or norm <= 0.0:
+                return False, "TCP linear target quaternion must be non-zero"
+        try:
+            packet = self.command_client.build_tcp_linear_move(
+                left_pose=left_pose,
+                right_pose=right_pose,
+                left_quaternion_xyzw=left_quaternion_xyzw,
+                right_quaternion_xyzw=right_quaternion_xyzw,
+                duration_sec=duration_sec,
+                linear_speed_m_s=linear_speed_m_s,
+                angular_speed_rad_s=angular_speed_rad_s,
+                orientation_mode=orientation_mode,
+                timeout_sec=self.command_timeout_sec,
+            )
+        except ValueError as exc:
+            return False, str(exc)
+        self.command_client.send(packet)
+        arms = []
+        if left_pose is not None:
+            arms.append("left")
+        if right_pose is not None:
+            arms.append("right")
+        self.last_tcp_command = f"TcpLinearMove {'+'.join(arms)} {str(orientation_mode).strip().lower()}"
+        return True, f"sent {'+'.join(arms)} TCP linear move"
 
     def set_recording_intent(self, active: bool) -> str:
         self.recording_intent = bool(active)

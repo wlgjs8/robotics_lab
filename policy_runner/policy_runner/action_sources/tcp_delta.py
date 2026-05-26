@@ -87,6 +87,20 @@ def tcp_twist_local_intent(
     )
 
 
+def tcp_twist_stand_intent(
+    *,
+    left: tuple[float, ...] | list[float] | None = None,
+    right: tuple[float, ...] | list[float] | None = None,
+    timeout_sec: float = 0.2,
+) -> CommandIntent:
+    return CartesianCommandIntent(
+        "TcpTwistStand",
+        timeout_sec=timeout_sec,
+        left=_arm_payload("TcpTwistStand", "tcp_twist_stand", left),
+        right=_arm_payload("TcpTwistStand", "tcp_twist_stand", right),
+    )
+
+
 def clamp_tcp_delta(
     delta: tuple[float, ...] | list[float],
     max_linear_step_m: float,
@@ -103,6 +117,24 @@ def clamp_tcp_delta(
         abs(float(max_angular_step_rad)),
     )
     return tuple(_clamp(float(value), limit) for value, limit in zip(delta, limits))
+
+
+def clamp_tcp_twist(
+    twist: tuple[float, ...] | list[float],
+    max_linear_velocity_m_s: float,
+    max_angular_velocity_rad_s: float,
+) -> tuple[float, ...]:
+    if len(twist) != 6:
+        raise ValueError("twist must contain 6 values")
+    limits = (
+        abs(float(max_linear_velocity_m_s)),
+        abs(float(max_linear_velocity_m_s)),
+        abs(float(max_linear_velocity_m_s)),
+        abs(float(max_angular_velocity_rad_s)),
+        abs(float(max_angular_velocity_rad_s)),
+        abs(float(max_angular_velocity_rad_s)),
+    )
+    return tuple(_clamp(float(value), limit) for value, limit in zip(twist, limits))
 
 
 def _arm_payload(mode: str, key: str, delta: tuple[float, ...] | list[float] | None) -> dict:

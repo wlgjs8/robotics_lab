@@ -17,6 +17,8 @@ struct CartesianServoPathState {
     uint64_t seq = 0;
     double elapsed_sec = 0.0;
     double duration_sec = 0.0;
+    bool lease_enforced = false;
+    uint64_t lease_expires_time_ns = 0;
     Pose6D start_tcp_stand;
     Pose6D target_tcp_stand;
     CartesianOrientationInterpolation orientation_mode = CartesianOrientationInterpolation::Constant;

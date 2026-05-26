@@ -12,7 +12,9 @@ Supported P1 action sources:
   joint velocity commands.
 - `tcp_delta`: small simulation-only `TcpDeltaStand` command.
 - `spacemouse_cartesian`: simulation-only SpaceMouse input mapped to
-  `TcpDeltaStand`.
+  `TcpTwistLocal`.
+- `dual_spacemouse_cartesian`: simulation-only two-SpaceMouse input mapped to
+  per-arm `TcpTwistLocal` commands.
 
 P1 joint actions remain joint-only. P2 adds geometry awareness for future
 Cartesian and camera policies. P3 enables Cartesian action sources for
@@ -92,7 +94,11 @@ Simulation-only example configs:
 - `policy_runner/config/simulator_tcp_delta.yaml`: scripted stand-frame
   `TcpDeltaStand`.
 - `policy_runner/config/simulator_spacemouse_cartesian.yaml`: SpaceMouse
-  stand-frame `TcpDeltaStand`.
+  local-frame `TcpTwistLocal`.
+- `policy_runner/config/simulator_tcp_twist_local.yaml`: same SpaceMouse
+  `TcpTwistLocal` path with velocity-unit field names called out.
+- `policy_runner/config/simulator_dual_spacemouse_cartesian.yaml`: two
+  SpaceMouse devices mapped to left/right simulator TCP twists.
 
 These examples use loopback simulator endpoints and do not enable real motion
 or real Cartesian motion.
@@ -136,15 +142,30 @@ Hardware-free tests use `FakeSpaceMouseReader`. Real HID support is optional:
 python3 -m pip install -e policy_runner[spacemouse]
 ```
 
+Probe attached devices without starting `rb_servo_server`:
+
+```bash
+python3 policy_runner/scripts/probe_spacemouse.py --list
+python3 policy_runner/scripts/probe_spacemouse.py
+python3 policy_runner/scripts/probe_spacemouse.py \
+  --left-path /dev/hidraw1 \
+  --right-path /dev/hidraw6
+```
+
+The probe defaults to `/dev/hidraw1` for the left SpaceMouse,
+`/dev/hidraw6` for the right SpaceMouse, and a 30 second duration.
+
 ## Cartesian TCP Commands
 
-`tcp_delta` emits a small scripted stand-frame TCP delta using the server
-`TcpDeltaStand` mode. `spacemouse_cartesian` maps SpaceMouse axes to a
-simulation-only local TCP twist using `TcpTwistLocal`:
+`tcp_delta` emits a small one-shot scripted stand-frame TCP delta using the
+server `TcpDeltaStand` mode. `TcpDelta*` commands use meters/radians and are
+debug jog primitives, not velocity streams. `spacemouse_cartesian` maps
+SpaceMouse axes to a simulation-only local TCP velocity command using
+`TcpTwistLocal`:
 
 ```text
-tx, ty, tz -> TCP local vx, vy, vz
-rx, ry, rz -> TCP local wx, wy, wz
+tx, ty, tz -> TCP local vx, vy, vz in m/s
+rx, ry, rz -> TCP local wx, wy, wz in rad/s
 ```
 
 Example config fields:
@@ -157,8 +178,8 @@ command_rate_hz: 30
 spacemouse_cartesian:
   selected_arm: left
   frame: local
-  max_linear_step_m: 0.002
-  max_angular_step_rad: 0.01
+  max_linear_velocity_m_s: 0.03
+  max_angular_velocity_rad_s: 0.2
   deadband: 0.08
   require_deadman: true
   deadman_button: 0
@@ -166,7 +187,37 @@ spacemouse_cartesian:
 
 Button 0 is the default deadman switch. When it is released, the source emits
 no command. The Cartesian SpaceMouse source always requires a deadman switch.
-Linear and angular twist components are clamped per command.
+Linear and angular twist components are clamped as velocities. Deprecated
+`max_linear_step_m` and `max_angular_step_rad` aliases still parse with a
+warning for migration only.
+
+`dual_spacemouse_cartesian` keeps one `policy_runner` command source and opens
+two SpaceMouse devices. The left and right samples are aggregated into one UDP
+command packet so the two arms are updated together:
+
+```yaml
+action_source: dual_spacemouse_cartesian
+command_rate_hz: 30
+spacemouse_cartesian_dual:
+  frame: local
+  max_linear_velocity_m_s: 0.03
+  max_angular_velocity_rad_s: 0.2
+  deadband: 0.08
+  left:
+    device_number: 0
+    deadman_button: 0
+  right:
+    device_number: 1
+    deadman_button: 0
+```
+
+Each arm has its own deadman. If one device has no fresh sample or its deadman
+is released, that arm is held while the other arm may continue. Use `path` or
+`device` under each side when stable HID selection is needed.
+
+`policy_runner` does not generate `TcpLinearMove` trajectories. Use
+`rb_servo_server/tools/send_tcp_linear_move.py` for simulator-only MoveL-style
+test packets.
 
 ## Runtime Startup
 
@@ -207,5 +258,6 @@ Joint actions use per-arm modes so either arm can hold independently:
 Supported P1-D modes are `Hold`, `ArmMotion`, `DisarmMotion`,
 `EmergencyStop`, `ResetFault`, `JointTarget`, and `JointVelocity`.
 P3 Cartesian packets additionally use `TcpDeltaStand` with per-arm
-`tcp_delta_stand` payloads and `TcpTwistLocal` with per-arm `tcp_twist_local`
-payloads in simulation only.
+`tcp_delta_stand` one-shot jog payloads and `TcpTwistLocal` with per-arm
+`tcp_twist_local` velocity payloads in simulation only. `TcpTwistLocal` units
+are `vx,vy,vz` in m/s and `wx,wy,wz` in rad/s.

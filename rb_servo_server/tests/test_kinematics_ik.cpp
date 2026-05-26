@@ -138,7 +138,17 @@ std::string validIkYaml(const std::string& urdf_path) {
         "    max_step_deg: [1, 1, 1, 2, 2, 3]\n"
         "cartesian_control:\n"
         "  warn_ik_duration_us: 2500\n"
-        "  fail_ik_duration_us: 4500\n";
+        "  fail_ik_duration_us: 4500\n"
+        "  path_kp: 7.0\n"
+        "  twist_orientation_hold_kp: 8.0\n"
+        "  velocity_damping: 0.02\n"
+        "  max_twist_linear_m_s: 0.04\n"
+        "  max_twist_angular_rad_s: 0.25\n"
+        "  max_linear_move_speed_m_s: 0.06\n"
+        "  max_angular_move_speed_rad_s: 0.35\n"
+        "  max_cartesian_step_m: 0.003\n"
+        "  max_cartesian_step_rad: 0.03\n"
+        "  exceed_limit_policy: reject\n";
 }
 
 class LatencyKinematics final : public rb_servo::IKinematics {
@@ -216,6 +226,18 @@ bool testIkConfigParsing() {
     RB_CHECK(cfg.kinematics.ik.max_step_deg[5] == 3.0);
     RB_CHECK(std::fabs(cfg.cartesian_control.warn_ik_duration_us - 2500.0) < 1e-12);
     RB_CHECK(std::fabs(cfg.cartesian_control.fail_ik_duration_us - 4500.0) < 1e-12);
+    RB_CHECK(std::fabs(cfg.cartesian_control.path_kp - 7.0) < 1e-12);
+    RB_CHECK(std::fabs(cfg.cartesian_control.twist_orientation_hold_kp - 8.0) < 1e-12);
+    RB_CHECK(std::fabs(cfg.cartesian_control.velocity_damping - 0.02) < 1e-12);
+    RB_CHECK(std::fabs(cfg.cartesian_control.max_twist_linear_m_s - 0.04) < 1e-12);
+    RB_CHECK(std::fabs(cfg.cartesian_control.max_twist_angular_rad_s - 0.25) < 1e-12);
+    RB_CHECK(std::fabs(cfg.cartesian_control.max_linear_move_speed_m_s - 0.06) < 1e-12);
+    RB_CHECK(std::fabs(cfg.cartesian_control.max_angular_move_speed_rad_s - 0.35) < 1e-12);
+    RB_CHECK(cfg.cartesian_control.max_cartesian_step_m.has_value());
+    RB_CHECK(std::fabs(*cfg.cartesian_control.max_cartesian_step_m - 0.003) < 1e-12);
+    RB_CHECK(cfg.cartesian_control.max_cartesian_step_rad.has_value());
+    RB_CHECK(std::fabs(*cfg.cartesian_control.max_cartesian_step_rad - 0.03) < 1e-12);
+    RB_CHECK(cfg.cartesian_control.exceed_limit_policy == rb_servo::CartesianLimitPolicy::Reject);
 
     const std::string bad_iter_path = writeTempConfig(
         "bad-iter",
@@ -230,6 +252,26 @@ bool testIkConfigParsing() {
     const bool bad_iter_rejected = loadRejects(bad_iter_path);
     ::unlink(bad_iter_path.c_str());
     RB_CHECK(bad_iter_rejected);
+
+    const std::string bad_cartesian_key_path = writeTempConfig(
+        "bad-cart-key",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  not_a_limit: 1.0\n"
+    );
+    const bool bad_cartesian_key_rejected = loadRejects(bad_cartesian_key_path);
+    ::unlink(bad_cartesian_key_path.c_str());
+    RB_CHECK(bad_cartesian_key_rejected);
+
+    const std::string bad_cartesian_limit_path = writeTempConfig(
+        "bad-cart-limit",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  max_twist_linear_m_s: -0.01\n"
+    );
+    const bool bad_cartesian_limit_rejected = loadRejects(bad_cartesian_limit_path);
+    ::unlink(bad_cartesian_limit_path.c_str());
+    RB_CHECK(bad_cartesian_limit_rejected);
     return true;
 }
 
@@ -411,6 +453,21 @@ bool testPinocchioIkIfEnabled() {
     RB_CHECK(finiteJoints(pure_translation.q_solution_deg));
     RB_CHECK(pure_translation.position_error_m <= testKinematicsConfig().ik.position_tolerance_m);
     RB_CHECK(pure_translation.orientation_error_rad <= testKinematicsConfig().ik.orientation_tolerance_rad);
+    RB_CHECK(pure_translation.orientation_error_rad <= 0.005);
+
+    rb_servo::Pose6D pure_orientation_pose = seed_pose;
+    pure_orientation_pose.quaternion_xyzw.reset();
+    pure_orientation_pose.rz += 0.005;
+    const rb_servo::IkResult pure_orientation = kin.solveIk(
+        rb_servo::ArmId::Left,
+        pure_orientation_pose,
+        seed,
+        mount
+    );
+    RB_CHECK(pure_orientation.success);
+    RB_CHECK(finiteJoints(pure_orientation.q_solution_deg));
+    RB_CHECK(pure_orientation.position_error_m <= testKinematicsConfig().ik.position_tolerance_m);
+    RB_CHECK(pure_orientation.orientation_error_rad <= testKinematicsConfig().ik.orientation_tolerance_rad);
 
     rb_servo::Pose6D unreachable = seed_pose;
     unreachable.x += 10.0;
@@ -474,6 +531,9 @@ bool testPinocchioIkIfEnabled() {
               << " pure_translation_duration_us=" << pure_translation.duration_us
               << " pure_translation_iterations=" << pure_translation.iterations
               << " pure_translation_orientation_error_rad=" << pure_translation.orientation_error_rad
+              << " pure_orientation_duration_us=" << pure_orientation.duration_us
+              << " pure_orientation_iterations=" << pure_orientation.iterations
+              << " pure_orientation_position_error_m=" << pure_orientation.position_error_m
               << " nearby_duration_us=" << nearby.duration_us
               << " nearby_iterations=" << nearby.iterations
               << " unreachable_duration_us=" << unreachable_result.duration_us

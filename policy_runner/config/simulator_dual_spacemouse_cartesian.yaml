@@ -1,6 +1,6 @@
 schema: robotics_lab.policy_runner.v1
 mode: simulation
-action_source: spacemouse_cartesian
+action_source: dual_spacemouse_cartesian
 runtime:
   startup_timeout_sec: 5.0
 geometry:
@@ -17,11 +17,18 @@ safety:
   allow_configured_estimate_geometry_in_simulation: true
   allow_configured_estimate_geometry_in_real: false
 command_rate_hz: 30
-spacemouse_cartesian:
-  selected_arm: left
+spacemouse_cartesian_dual:
   frame: local
   max_linear_velocity_m_s: 0.03
   max_angular_velocity_rad_s: 0.2
   deadband: 0.08
-  require_deadman: true
-  deadman_button: 0
+  left:
+    device: null
+    path: null
+    device_number: 0
+    deadman_button: 0
+  right:
+    device: null
+    path: null
+    device_number: 1
+    deadman_button: 0

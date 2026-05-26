@@ -69,6 +69,9 @@ payload includes:
 - stand-frame mount transforms from config
 - TCP pose fields when kinematics are configured and available; otherwise
   nullable/deferred TCP fields with `tcp_fields_deferred: true`
+- `cartesian_solve` telemetry, including IK errors, path tracking fields, and
+  twist limit fields such as `twist_clamped`,
+  `requested_twist_linear_norm_m_s`, and `applied_twist_linear_norm_m_s`
 
 Consumers should join this stream with external RealSense logs by host/loop
 timestamps. RealSense capture stays outside `rb_servo_server`.
@@ -179,10 +182,11 @@ active token, the packet is rejected with
 server still validates source/session ownership when lease enforcement is on.
 
 Lease-required commands are `ArmMotion`, `DisarmMotion`, `JointTarget`,
-`JointVelocity`, `TcpPoseTarget`, `TcpDeltaStand`, `TcpDeltaLocal`, and
-`ResetFault`. `EmergencyStop` bypasses the lease so any accepted UDP source can
-stop motion. `ResetFault` requires the active lease when enforcement is enabled;
-it is not an operator bypass and it does not implicitly resume motion.
+`JointVelocity`, `TcpPoseTarget`, `TcpDeltaStand`, `TcpDeltaLocal`,
+`TcpLinearMove`, `TcpTwistStand`, `TcpTwistLocal`, and `ResetFault`.
+`EmergencyStop` bypasses the lease so any accepted UDP source can stop motion.
+`ResetFault` requires the active lease when enforcement is enabled; it is not
+an operator bypass and it does not implicitly resume motion.
 
 Emergency stop remains a safety override even when another source owns the
 lease:
@@ -225,22 +229,35 @@ invalid and the packet is dropped.
 
 - `q_target_deg`: joint position target, degrees.
 - `dq_target_deg_s`: joint velocity target, degrees/second.
-- `tcp_target_stand`: `[x, y, z, rx, ry, rz]` TCP pose target in the `stand`
-  frame. `x,y,z` are meters. `rx,ry,rz` are radians as roll, pitch, yaw
-  Euler angles; the C++ transform convention is `Rz(rz) * Ry(ry) * Rx(rx)`.
+- `tcp_target_stand`: `[x, y, z, rx, ry, rz]` TCP final-pose target in the
+  `stand` frame for `TcpPoseTarget`. `x,y,z` are meters. `rx,ry,rz` are
+  radians as roll, pitch, yaw Euler angles; the C++ transform convention is
+  `Rz(rz) * Ry(ry) * Rx(rx)`. Object form may also carry
+  `quaternion_xyzw: [qx, qy, qz, qw]`, which is preferred over RPY.
 - `tcp_delta_stand`: `[dx, dy, dz, drx, dry, drz]` incremental TCP delta in
-  the `stand` frame. Translational components are meters. Rotational
-  components are radians as an so(3) rotation-vector increment. The delta
-  transform is pre-multiplied before the current stand-frame TCP pose.
+  the `stand` frame for a one-shot low-level jog/debug command. Translational
+  components are meters. Rotational components are radians as an so(3)
+  rotation-vector increment. The delta transform is pre-multiplied before the
+  current stand-frame TCP pose. Do not stream SpaceMouse teleop through delta
+  commands.
 - `tcp_delta_local`: `[dx, dy, dz, drx, dry, drz]` incremental TCP delta in
-  the current TCP local frame. Units match `tcp_delta_stand`. The delta
-  transform is post-multiplied after the current stand-frame TCP pose.
+  the current TCP local frame for a one-shot low-level jog/debug command.
+  Units match `tcp_delta_stand`. The delta transform is post-multiplied after
+  the current stand-frame TCP pose. Do not stream SpaceMouse teleop through
+  delta commands.
+- `tcp_twist_stand` / `tcp_twist_local`: `[vx, vy, vz, wx, wy, wz]`
+  streaming Cartesian velocity command. Translational components are
+  meters/second (`m/s`) and rotational components are radians/second
+  (`rad/s`). `TcpTwistStand` expresses both vectors in the `stand` frame.
+  `TcpTwistLocal` expresses both vectors in the current TCP local frame.
 
-The accepted Cartesian command modes are `TcpPoseTarget`, `TcpDeltaStand`, and
-`TcpDeltaLocal`. Runtime Cartesian verdicts include `Ok`,
-`CartesianUnavailable`, and `IkFailed`. Real Cartesian motion remains closed
-unless real mode is explicitly enabled, Cartesian control is configured for
-real, and `RB_ALLOW_REAL_CARTESIAN=1` is set.
+The accepted Cartesian command modes are `TcpPoseTarget`, `TcpDeltaStand`,
+`TcpDeltaLocal`, `TcpLinearMove`, `TcpTwistStand`, and `TcpTwistLocal`. Runtime
+Cartesian verdicts include `Ok`, `CartesianUnavailable`, `InvalidCommand`, and
+`IkFailed`. `TcpTwist*` and `TcpLinearMove` are bounded by server-side
+`cartesian_control` limits before Jacobian velocity solving. Real Cartesian
+motion remains closed unless real mode is explicitly enabled, Cartesian control
+is configured for real, and `RB_ALLOW_REAL_CARTESIAN=1` is set.
 
 ## Joint target command
 
@@ -297,8 +314,9 @@ TCP Cartesian commands use the same UDP JSON packet envelope as joint commands:
   top-level `mode`, which lets one arm receive a TCP command while the other
   remains `Hold`.
 
-`TcpPoseTarget` requires each Cartesian arm object to include
-`tcp_target_stand`:
+`TcpPoseTarget` is a point-to-point final TCP pose command. It requires each
+Cartesian arm object to include `tcp_target_stand`; the Cartesian path is not
+guaranteed:
 
 ```json
 {
@@ -316,7 +334,8 @@ TCP Cartesian commands use the same UDP JSON packet envelope as joint commands:
 }
 ```
 
-`TcpDeltaStand` requires `tcp_delta_stand`. The delta frame is `stand`:
+`TcpDeltaStand` requires `tcp_delta_stand`. The delta frame is `stand`. This is
+a one-shot jog/debug primitive, not a continuous velocity command:
 
 ```json
 {
@@ -334,7 +353,8 @@ TCP Cartesian commands use the same UDP JSON packet envelope as joint commands:
 ```
 
 `TcpDeltaLocal` requires `tcp_delta_local`. The delta frame is the current TCP
-local frame:
+local frame. This is a one-shot jog/debug primitive, not a continuous velocity
+command:
 
 ```json
 {
@@ -348,6 +368,60 @@ local frame:
   "right": {
     "tcp_delta_local": [0, 0, -0.001, 0, 0, 0]
   }
+}
+```
+
+`TcpTwistLocal` and `TcpTwistStand` are streaming Cartesian velocity commands.
+They require their matching twist array with `vx,vy,vz` in `m/s` and
+`wx,wy,wz` in `rad/s`. `TcpTwistLocal` is intended for SpaceMouse-style
+continuous teleop; `TcpTwistStand` is the stand-frame API variant. If a
+requested twist exceeds `cartesian_control.max_twist_linear_m_s` or
+`max_twist_angular_rad_s`, the server either clamps it or rejects it according
+to `cartesian_control.exceed_limit_policy`:
+
+```json
+{
+  "schema_version": 1,
+  "seq": 126,
+  "mode": "TcpTwistLocal",
+  "timeout_sec": 0.2,
+  "left": {
+    "tcp_twist_local": [0.01, 0, 0, 0, 0, 0]
+  }
+}
+```
+
+`TcpLinearMove` is a MoveL-like simulator-only Cartesian straight-line path
+primitive. The target pose is in the `stand` frame. `duration_sec` is seconds,
+`linear_speed_m_s` is meters/second (`m/s`), and `angular_speed_rad_s` is
+radians/second (`rad/s`). Explicit `duration_sec` takes precedence over
+speed-based timing; server limits can extend or reject the move if the implied
+linear or angular speed is excessive. `orientation_mode` is `constant` or
+`slerp`.
+
+```json
+{
+  "schema_version": 1,
+  "seq": 127,
+  "mode": "Hold",
+  "timeout_sec": 0.2,
+  "left": {
+    "mode": "TcpLinearMove",
+    "target_tcp_stand": {
+      "x": 0.35,
+      "y": 0.10,
+      "z": 0.45,
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": 0.0,
+      "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+    },
+    "duration_sec": 2.0,
+    "linear_speed_m_s": 0.03,
+    "angular_speed_rad_s": 0.2,
+    "orientation_mode": "constant"
+  },
+  "right": {}
 }
 ```
 
@@ -435,5 +509,7 @@ Motion modes require their payloads:
 - `TcpPoseTarget` requires `tcp_target_stand` with 6 values.
 - `TcpDeltaStand` requires `tcp_delta_stand` with 6 values.
 - `TcpDeltaLocal` requires `tcp_delta_local` with 6 values.
+- `TcpLinearMove` requires `target_tcp_stand` and either `duration_sec` or
+  `linear_speed_m_s`; `orientation_mode` is `constant` or `slerp`.
 
 If the required payload is absent or malformed, the packet is dropped and the command buffer remains unchanged.

@@ -19,9 +19,7 @@ struct Transform {
 };
 
 constexpr double kPi = 3.14159265358979323846;
-constexpr double kPathKp = 6.0;
-constexpr double kMinDurationSec = 0.01;
-constexpr double kDefaultDamping = 0.01;
+constexpr double kConstantOrientationToleranceRad = 1e-6;
 
 Matrix3 identityMatrix() {
     return {{{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}}};
@@ -137,6 +135,30 @@ Vec6 bodyError(const Pose6D& current, const Pose6D& reference) {
     return {p_error_local[0], p_error_local[1], p_error_local[2], r_error[0], r_error[1], r_error[2]};
 }
 
+double orientationDistanceRad(const Pose6D& start, const Pose6D& target) {
+    const Transform start_tf = transformFromPose(start);
+    const Transform target_tf = transformFromPose(target);
+    return normVector(logRotation(multiplyMatrix(transposeMatrix(start_tf.r), target_tf.r)));
+}
+
+double positionDistance(const Pose6D& start, const Pose6D& target) {
+    return normVector(Vector3{
+        target.x - start.x,
+        target.y - start.y,
+        target.z - start.z,
+    });
+}
+
+CartesianOrientationInterpolation plannerOrientationMode(LinearMoveOrientationMode mode) {
+    return mode == LinearMoveOrientationMode::Slerp
+        ? CartesianOrientationInterpolation::Slerp
+        : CartesianOrientationInterpolation::Constant;
+}
+
+std::string orientationModeName(CartesianOrientationInterpolation mode) {
+    return mode == CartesianOrientationInterpolation::Slerp ? "slerp" : "constant";
+}
+
 Vec6 referenceVelocityLocal(
     const CartesianServoPathState& path,
     const Pose6D& reference,
@@ -208,6 +230,49 @@ bool angularZero(const Vec6& value) {
            std::abs(value.rz) < 1e-12;
 }
 
+double linearNorm(const Vec6& value) {
+    return std::sqrt(value.x * value.x + value.y * value.y + value.z * value.z);
+}
+
+double angularNorm(const Vec6& value) {
+    return std::sqrt(value.rx * value.rx + value.ry * value.ry + value.rz * value.rz);
+}
+
+void scaleLinear(Vec6* value, double scale) {
+    value->x *= scale;
+    value->y *= scale;
+    value->z *= scale;
+}
+
+void scaleAngular(Vec6* value, double scale) {
+    value->rx *= scale;
+    value->ry *= scale;
+    value->rz *= scale;
+}
+
+bool limitTwist(
+    Vec6* value,
+    double max_linear_m_s,
+    double max_angular_rad_s,
+    CartesianLimitPolicy policy,
+    bool* clamped
+) {
+    const double lin = linearNorm(*value);
+    const double ang = angularNorm(*value);
+    const bool linear_exceeded = lin > max_linear_m_s + 1e-12;
+    const bool angular_exceeded = ang > max_angular_rad_s + 1e-12;
+    if (!linear_exceeded && !angular_exceeded) return true;
+    if (policy == CartesianLimitPolicy::Reject) return false;
+    if (linear_exceeded && lin > 0.0) {
+        scaleLinear(value, max_linear_m_s / lin);
+    }
+    if (angular_exceeded && ang > 0.0) {
+        scaleAngular(value, max_angular_rad_s / ang);
+    }
+    if (clamped) *clamped = true;
+    return true;
+}
+
 Vec6 twistStandToLocal(const Vec6& twist_stand, const Pose6D& current_tcp_stand) {
     const Transform current_tf = transformFromPose(current_tcp_stand);
     const Matrix3 stand_to_local = transposeMatrix(current_tf.r);
@@ -269,8 +334,13 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
         result.telemetry.reason = result.reason;
         return result;
     }
-    if (!path_state || !command.has_tcp_target || !state.tcp_stand || !state.has_valid_tcp_pose ||
-        !state.has_valid_joint_state || !ik_solver::isFinitePose(command.tcp_target_stand)) {
+    const bool continuing_active_path = command_seq == 0 && path_state && path_state->active;
+    if (!path_state ||
+        (!continuing_active_path && !command.has_tcp_target) ||
+        !state.tcp_stand ||
+        !state.has_valid_tcp_pose ||
+        !state.has_valid_joint_state ||
+        (!continuing_active_path && !ik_solver::isFinitePose(command.tcp_target_stand))) {
         result.verdict = SafetyVerdict::CartesianUnavailable;
         result.reason = "tcp_pose_unavailable";
         result.telemetry.status = "unavailable";
@@ -278,16 +348,111 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
         return result;
     }
 
-    if (!path_state->active || path_state->seq != command_seq) {
+    if (!continuing_active_path && !command.has_linear_move_duration && !command.has_linear_move_linear_speed) {
+        result.verdict = SafetyVerdict::InvalidCommand;
+        result.reason = "tcp_linear_move_timing_required";
+        result.telemetry.status = "failed";
+        result.telemetry.reason = result.reason;
+        return result;
+    }
+
+    if (!continuing_active_path && (!path_state->active || path_state->seq != command_seq)) {
         *path_state = CartesianServoPathState{};
         path_state->active = true;
         path_state->seq = command_seq;
-        // UDP commands are held only until timeout; finish the simulation-only
-        // path inside that hold window so a single packet can report completion.
-        path_state->duration_sec = std::max({command.timeout_sec * 0.5, dt_sec, kMinDurationSec});
         path_state->start_tcp_stand = *state.tcp_stand;
         path_state->target_tcp_stand = command.tcp_target_stand;
-        path_state->orientation_mode = CartesianOrientationInterpolation::Constant;
+        path_state->orientation_mode = plannerOrientationMode(
+            command.has_linear_move_orientation_mode
+                ? command.linear_move_orientation_mode
+                : config_.linear_move.default_orientation_mode
+        );
+
+        const double orientation_distance = orientationDistanceRad(
+            path_state->start_tcp_stand,
+            path_state->target_tcp_stand
+        );
+        if (path_state->orientation_mode == CartesianOrientationInterpolation::Constant &&
+            orientation_distance > kConstantOrientationToleranceRad) {
+            *path_state = CartesianServoPathState{};
+            result.verdict = SafetyVerdict::InvalidCommand;
+            result.reason = "tcp_linear_move_constant_orientation_mismatch";
+            result.telemetry.status = "failed";
+            result.telemetry.reason = result.reason;
+            return result;
+        }
+
+        const double position_distance = positionDistance(path_state->start_tcp_stand, path_state->target_tcp_stand);
+        double duration_sec = 0.0;
+        if (command.has_linear_move_duration) {
+            duration_sec = command.linear_move_duration_sec;
+        } else {
+            double linear_speed = command.has_linear_move_linear_speed
+                ? command.linear_move_linear_speed_m_s
+                : config_.linear_move.default_linear_speed_m_s;
+            if (linear_speed > config_.max_linear_move_speed_m_s + 1e-12) {
+                if (config_.exceed_limit_policy == CartesianLimitPolicy::Reject) {
+                    *path_state = CartesianServoPathState{};
+                    result.verdict = SafetyVerdict::InvalidCommand;
+                    result.reason = "tcp_linear_move_linear_speed_limit_exceeded";
+                    result.telemetry.status = "failed";
+                    result.telemetry.reason = result.reason;
+                    return result;
+                }
+                linear_speed = config_.max_linear_move_speed_m_s;
+            }
+            duration_sec = position_distance / linear_speed;
+        }
+        if (path_state->orientation_mode == CartesianOrientationInterpolation::Slerp) {
+            double angular_speed = command.has_linear_move_angular_speed
+                ? command.linear_move_angular_speed_rad_s
+                : config_.linear_move.default_angular_speed_rad_s;
+            if (angular_speed > config_.max_angular_move_speed_rad_s + 1e-12) {
+                if (config_.exceed_limit_policy == CartesianLimitPolicy::Reject) {
+                    *path_state = CartesianServoPathState{};
+                    result.verdict = SafetyVerdict::InvalidCommand;
+                    result.reason = "tcp_linear_move_angular_speed_limit_exceeded";
+                    result.telemetry.status = "failed";
+                    result.telemetry.reason = result.reason;
+                    return result;
+                }
+                angular_speed = config_.max_angular_move_speed_rad_s;
+            }
+            duration_sec = std::max(duration_sec, orientation_distance / angular_speed);
+        }
+        if (!std::isfinite(duration_sec) || duration_sec <= 0.0) {
+            *path_state = CartesianServoPathState{};
+            result.verdict = SafetyVerdict::InvalidCommand;
+            result.reason = "tcp_linear_move_invalid_duration";
+            result.telemetry.status = "failed";
+            result.telemetry.reason = result.reason;
+            return result;
+        }
+        const double limited_linear_duration = position_distance / config_.max_linear_move_speed_m_s;
+        const double limited_angular_duration =
+            path_state->orientation_mode == CartesianOrientationInterpolation::Slerp
+                ? orientation_distance / config_.max_angular_move_speed_rad_s
+                : 0.0;
+        const double speed_limited_duration =
+            std::max(duration_sec, std::max(limited_linear_duration, limited_angular_duration));
+        if (speed_limited_duration > duration_sec + 1e-12 &&
+            config_.exceed_limit_policy == CartesianLimitPolicy::Reject) {
+            *path_state = CartesianServoPathState{};
+            result.verdict = SafetyVerdict::InvalidCommand;
+            result.reason = "tcp_linear_move_speed_limit_exceeded";
+            result.telemetry.status = "failed";
+            result.telemetry.reason = result.reason;
+            return result;
+        }
+        path_state->duration_sec = std::max(speed_limited_duration, config_.linear_move.min_duration_sec);
+        if (path_state->duration_sec > config_.linear_move.max_duration_sec) {
+            *path_state = CartesianServoPathState{};
+            result.verdict = SafetyVerdict::InvalidCommand;
+            result.reason = "tcp_linear_move_duration_exceeds_max";
+            result.telemetry.status = "failed";
+            result.telemetry.reason = result.reason;
+            return result;
+        }
     }
 
     if (!path_state->done) {
@@ -307,17 +472,37 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     );
     const Vec6 error = bodyError(*state.tcp_stand, reference);
     const Vec6 v_ref = referenceVelocityLocal(*path_state, reference, path_s);
-    const Vec6 v_cmd{
-        v_ref.x + kPathKp * error.x,
-        v_ref.y + kPathKp * error.y,
-        v_ref.z + kPathKp * error.z,
-        v_ref.rx + kPathKp * error.rx,
-        v_ref.ry + kPathKp * error.ry,
-        v_ref.rz + kPathKp * error.rz,
+    Vec6 v_cmd{
+        v_ref.x + config_.path_kp * error.x,
+        v_ref.y + config_.path_kp * error.y,
+        v_ref.z + config_.path_kp * error.z,
+        v_ref.rx + config_.path_kp * error.rx,
+        v_ref.ry + config_.path_kp * error.ry,
+        v_ref.rz + config_.path_kp * error.rz,
     };
     if (!finiteVec6(v_cmd)) {
         result.verdict = SafetyVerdict::IkFailed;
         result.reason = "non_finite_cartesian_servo_command";
+        result.telemetry.status = "failed";
+        result.telemetry.reason = result.reason;
+        return result;
+    }
+    double max_linear_velocity = config_.max_linear_move_speed_m_s;
+    double max_angular_velocity = config_.max_angular_move_speed_rad_s;
+    if (dt_sec > 0.0 && config_.max_cartesian_step_m.has_value()) {
+        max_linear_velocity = std::min(max_linear_velocity, *config_.max_cartesian_step_m / dt_sec);
+    }
+    if (dt_sec > 0.0 && config_.max_cartesian_step_rad.has_value()) {
+        max_angular_velocity = std::min(max_angular_velocity, *config_.max_cartesian_step_rad / dt_sec);
+    }
+    if (!limitTwist(
+            &v_cmd,
+            max_linear_velocity,
+            max_angular_velocity,
+            config_.exceed_limit_policy,
+            nullptr)) {
+        result.verdict = SafetyVerdict::InvalidCommand;
+        result.reason = "cartesian_linear_move_limit_exceeded";
         result.telemetry.status = "failed";
         result.telemetry.reason = result.reason;
         return result;
@@ -328,7 +513,7 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
         state.q_actual_deg,
         mountForArm(command.arm_id, left_mount_, right_mount_),
         v_cmd,
-        kDefaultDamping
+        config_.velocity_damping
     );
     if (!velocity.success) {
         result.verdict = SafetyVerdict::IkFailed;
@@ -354,6 +539,7 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     result.q_target_deg = q_next;
     result.telemetry.success = true;
     result.telemetry.status = "ok";
+    result.telemetry.path_active = path_state->active && !path_state->done;
     result.telemetry.path_s = path_s;
     result.telemetry.path_position_error_m = std::sqrt(error.x * error.x + error.y * error.y + error.z * error.z);
     result.telemetry.path_orientation_error_rad = std::sqrt(error.rx * error.rx + error.ry * error.ry + error.rz * error.rz);
@@ -363,6 +549,9 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
         *state.tcp_stand
     );
     result.telemetry.path_done = path_state->done;
+    result.telemetry.linear_move_duration_sec = path_state->duration_sec;
+    result.telemetry.linear_move_elapsed_sec = path_state->elapsed_sec;
+    result.telemetry.orientation_mode = orientationModeName(path_state->orientation_mode);
     result.telemetry.position_error_m = result.telemetry.path_position_error_m;
     result.telemetry.orientation_error_rad = result.telemetry.path_orientation_error_rad;
     return result;
@@ -438,6 +627,23 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         result.telemetry.reason = result.reason;
         return result;
     }
+    result.telemetry.requested_twist_linear_norm_m_s = linearNorm(requested);
+    result.telemetry.requested_twist_angular_norm_rad_s = angularNorm(requested);
+    bool twist_clamped = false;
+    if (!limitTwist(
+            &requested,
+            config_.max_twist_linear_m_s,
+            config_.max_twist_angular_rad_s,
+            config_.exceed_limit_policy,
+            &twist_clamped)) {
+        result.verdict = SafetyVerdict::InvalidCommand;
+        result.reason = "cartesian_twist_limit_exceeded";
+        result.telemetry.status = "failed";
+        result.telemetry.reason = result.reason;
+        result.telemetry.applied_twist_linear_norm_m_s = 0.0;
+        result.telemetry.applied_twist_angular_norm_rad_s = 0.0;
+        return result;
+    }
 
     Vec6 orientation_error;
     if (angularZero(requested)) {
@@ -450,19 +656,36 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         orientation_reference.y = state.tcp_stand->y;
         orientation_reference.z = state.tcp_stand->z;
         orientation_error = bodyError(*state.tcp_stand, orientation_reference);
-        requested.rx = kPathKp * orientation_error.rx;
-        requested.ry = kPathKp * orientation_error.ry;
-        requested.rz = kPathKp * orientation_error.rz;
+        requested.rx = config_.twist_orientation_hold_kp * orientation_error.rx;
+        requested.ry = config_.twist_orientation_hold_kp * orientation_error.ry;
+        requested.rz = config_.twist_orientation_hold_kp * orientation_error.rz;
     } else {
         hold_state->orientation_hold_active = false;
     }
+    if (!limitTwist(
+            &requested,
+            config_.max_twist_linear_m_s,
+            config_.max_twist_angular_rad_s,
+            config_.exceed_limit_policy,
+            &twist_clamped)) {
+        result.verdict = SafetyVerdict::InvalidCommand;
+        result.reason = "cartesian_twist_limit_exceeded";
+        result.telemetry.status = "failed";
+        result.telemetry.reason = result.reason;
+        result.telemetry.applied_twist_linear_norm_m_s = 0.0;
+        result.telemetry.applied_twist_angular_norm_rad_s = 0.0;
+        return result;
+    }
+    result.telemetry.twist_clamped = twist_clamped;
+    result.telemetry.applied_twist_linear_norm_m_s = linearNorm(requested);
+    result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(requested);
 
     const CartesianVelocityResult velocity = kinematics_->solveCartesianVelocity(
         command.arm_id,
         state.q_actual_deg,
         mountForArm(command.arm_id, left_mount_, right_mount_),
         requested,
-        kDefaultDamping
+        config_.velocity_damping
     );
     if (!velocity.success) {
         result.verdict = SafetyVerdict::IkFailed;

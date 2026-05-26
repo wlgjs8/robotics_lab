@@ -547,11 +547,31 @@ def _optional_finite(value: Any) -> float | None:
 
 
 def _format_arm_cartesian_solve(arm: str, raw_arm: Any) -> str:
-    if not isinstance(raw_arm, Mapping):
-        return f"{arm}=n/a"
-    solve = raw_arm.get("cartesian_solve")
-    if not isinstance(solve, Mapping):
-        return f"{arm}=n/a"
+    if isinstance(raw_arm, ArmSnapshot):
+        solve_obj = raw_arm.cartesian_solve
+        if solve_obj is None:
+            return f"{arm}=unavailable"
+        solve: Mapping[str, Any] = {
+            "attempted": solve_obj.attempted,
+            "status": solve_obj.status,
+            "position_error_m": solve_obj.position_error_m,
+            "orientation_error_rad": solve_obj.orientation_error_rad,
+            "ik_iterations": solve_obj.ik_iterations,
+            "ik_duration_us": solve_obj.ik_duration_us,
+            "ik_timed_out": solve_obj.ik_timed_out,
+            "path_active": solve_obj.path_active,
+            "path_s": solve_obj.path_s,
+            "path_line_deviation_m": solve_obj.path_line_deviation_m,
+            "path_orientation_error_rad": solve_obj.path_orientation_error_rad,
+            "path_done": solve_obj.path_done,
+        }
+    elif isinstance(raw_arm, Mapping):
+        raw_solve = raw_arm.get("cartesian_solve")
+        if not isinstance(raw_solve, Mapping):
+            return f"{arm}=unavailable"
+        solve = raw_solve
+    else:
+        return f"{arm}=unavailable"
     parts: list[str] = [f"{arm}"]
     status = solve.get("status")
     if isinstance(status, str) and status:
@@ -573,6 +593,21 @@ def _format_arm_cartesian_solve(arm: str, raw_arm: Any) -> str:
     ik_timed_out = solve.get("ik_timed_out")
     if isinstance(ik_timed_out, bool):
         parts.append(f"timed_out={ik_timed_out}")
+    path_active = solve.get("path_active")
+    if isinstance(path_active, bool):
+        parts.append(f"path_active={path_active}")
+    path_s = _optional_finite(solve.get("path_s"))
+    if path_s is not None:
+        parts.append(f"path_s={path_s:.3f}")
+    path_line_deviation_m = _optional_finite(solve.get("path_line_deviation_m"))
+    if path_line_deviation_m is not None:
+        parts.append(f"line_dev={path_line_deviation_m:.6g} m")
+    path_orientation_error_rad = _optional_finite(solve.get("path_orientation_error_rad"))
+    if path_orientation_error_rad is not None:
+        parts.append(f"path_ori_err={path_orientation_error_rad:.6g} rad")
+    path_done = solve.get("path_done")
+    if isinstance(path_done, bool):
+        parts.append(f"path_done={path_done}")
     return " ".join(parts)
 
 
@@ -581,11 +616,10 @@ def _format_cartesian_solve_status(latest: StateSnapshot | None, *, stale: bool)
         return "IK: no state"
     if stale:
         return "State stream stale"
-    raw = latest.raw
     return "IK: " + "; ".join(
         (
-            _format_arm_cartesian_solve("left", raw.get("left")),
-            _format_arm_cartesian_solve("right", raw.get("right")),
+            _format_arm_cartesian_solve("left", latest.left),
+            _format_arm_cartesian_solve("right", latest.right),
         )
     )
 
@@ -878,6 +912,61 @@ def _send_tcp_pose_target_from_marker(
     )
 
 
+def _tcp_marker_payloads(
+    scene_handles: dict[str, Any],
+    arm_group: str,
+) -> tuple[
+    tuple[float, float, float, float, float, float] | None,
+    tuple[float, float, float, float, float, float] | None,
+    tuple[float, float, float, float] | None,
+    tuple[float, float, float, float] | None,
+    str | None,
+]:
+    selected_arms = ("left", "right") if arm_group == "both" else (arm_group,)
+    left_pose = right_pose = None
+    left_quaternion_xyzw = right_quaternion_xyzw = None
+    for arm in selected_arms:
+        if arm not in {"left", "right"}:
+            return None, None, None, None, f"unsupported TCP arm group {arm_group}"
+        pose = _tcp_target_pose(scene_handles, arm)
+        if pose is None:
+            return None, None, None, None, f"{arm} TCP target unavailable"
+        wxyz = _tcp_target_wxyz(scene_handles, arm)
+        quaternion_xyzw = _wxyz_to_xyzw(wxyz) if wxyz is not None else None
+        if arm == "left":
+            left_pose = pose
+            left_quaternion_xyzw = quaternion_xyzw
+        else:
+            right_pose = pose
+            right_quaternion_xyzw = quaternion_xyzw
+    return left_pose, right_pose, left_quaternion_xyzw, right_quaternion_xyzw, None
+
+
+def _send_tcp_linear_move_from_marker(
+    safety: OperatorSafety,
+    scene_handles: dict[str, Any],
+    arm_group: str,
+    *,
+    duration_sec: float | None,
+    linear_speed_m_s: float | None,
+    angular_speed_rad_s: float | None,
+    orientation_mode: str,
+) -> tuple[bool, str]:
+    left_pose, right_pose, left_quaternion_xyzw, right_quaternion_xyzw, error = _tcp_marker_payloads(scene_handles, arm_group)
+    if error:
+        return False, error
+    return safety.send_tcp_linear_move(
+        left_pose=left_pose,
+        right_pose=right_pose,
+        left_quaternion_xyzw=left_quaternion_xyzw,
+        right_quaternion_xyzw=right_quaternion_xyzw,
+        duration_sec=duration_sec,
+        linear_speed_m_s=linear_speed_m_s,
+        angular_speed_rad_s=angular_speed_rad_s,
+        orientation_mode=orientation_mode,
+    )
+
+
 def _apply_tcp_delta_and_send_pose_target(
     safety: OperatorSafety,
     scene_handles: dict[str, Any],
@@ -945,7 +1034,12 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
             ok, message = safety.jog_joint(arm_group.value, int(joint_slider.value) - 1, float(delta_slider.value))
             handles["jog_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-    with tabs.add_tab("TCP PTP target"):
+    with tabs.add_tab("TCP PTP"):
+        handles["tcp_ptp_note"] = server.gui.add_text(
+            "TCP PTP",
+            initial_value="Move to TCP target, point-to-point. Cartesian path is not guaranteed.",
+            disabled=True,
+        )
         handles["tcp_status"] = server.gui.add_text(
             "TCP status",
             initial_value="TCP PTP target disabled until RB_GUI_ENABLE_TCP_POSE_COMMANDS=1",
@@ -1016,15 +1110,59 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
         ):
             _add_tcp_ptp_delta_button(label, index, sign, angular=True)
 
-    with tabs.add_tab("Low-level delta debug"):
+    with tabs.add_tab("TCP Linear"):
+        handles["tcp_linear_note"] = server.gui.add_text(
+            "TCP Linear",
+            initial_value="Move linearly in Cartesian TCP space. Constant orientation keeps the start orientation.",
+            disabled=True,
+        )
+        handles["tcp_linear_status"] = server.gui.add_text(
+            "TCP Linear status",
+            initial_value="TCP Linear disabled until RB_GUI_ENABLE_TCP_POSE_COMMANDS=1",
+            disabled=True,
+        )
+        handles["tcp_linear_source"] = server.gui.add_text(
+            "Target marker source",
+            initial_value="current TCP target marker",
+            disabled=True,
+        )
+        tcp_linear_arm_group = server.gui.add_button_group("Arm", ("left", "right", "both"))
+        linear_duration = server.gui.add_slider("duration_sec", min=0.05, max=10.0, step=0.05, initial_value=2.0)
+        linear_speed = server.gui.add_slider("linear_speed_m_s", min=0.001, max=0.05, step=0.001, initial_value=0.03)
+        angular_speed = server.gui.add_slider("angular_speed_rad_s", min=0.01, max=0.3, step=0.01, initial_value=0.2)
+        orientation_mode_group = server.gui.add_button_group("orientation_mode", ("constant", "slerp"))
+        handles["tcp_linear_buttons"] = []
+        send_linear_button = server.gui.add_button("Send TCP Linear Move")
+        handles["tcp_linear_buttons"].append(send_linear_button)
+
+        @send_linear_button.on_click
+        def _(_: Any) -> None:
+            ok, message = _send_tcp_linear_move_from_marker(
+                safety,
+                handles["scene"],
+                tcp_linear_arm_group.value,
+                duration_sec=float(linear_duration.value),
+                linear_speed_m_s=float(linear_speed.value),
+                angular_speed_rad_s=float(angular_speed.value),
+                orientation_mode=orientation_mode_group.value,
+            )
+            handles["tcp_linear_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+    with tabs.add_tab("Low-level Delta Debug"):
+        handles["tcp_debug_note"] = server.gui.add_text(
+            "Low-level Delta Debug",
+            initial_value="Raw TcpDeltaLocal/Stand. Usually not used for normal GUI target moves.",
+            disabled=True,
+        )
         handles["tcp_debug_status"] = server.gui.add_text(
             "Delta debug status",
             initial_value="Raw TcpDeltaLocal/TcpDeltaStand debug controls",
             disabled=True,
         )
+        tcp_debug_arm_group = server.gui.add_button_group("Arm", ("left", "right"))
 
         def _send_low_level_delta(delta: tuple[float, float, float, float, float, float]) -> None:
-            arm = tcp_arm_group.value
+            arm = tcp_debug_arm_group.value
             frame_mode = _tcp_frame_mode(handles)
             if frame_mode == _TCP_FRAME_LOCAL:
                 ok, message = safety.send_tcp_delta_local(arm, delta)
@@ -1111,7 +1249,7 @@ def _format_tcp_command_status(safety: OperatorSafety, latest: StateSnapshot | N
     if reason:
         parts.append(f"disabled: {reason}")
     else:
-        parts.append("enabled: TCP PTP target; low-level delta debug available")
+        parts.append("enabled: TCP PTP, TCP Linear, and low-level delta debug available")
     return "; ".join(parts)
 
 
@@ -1123,6 +1261,8 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
         _set_disabled(handles["jog_button"], disabled_states.get("jog", True))
     for button in handles.get("tcp_pose_buttons", ()):
         _set_disabled(button, disabled_states.get("tcp_pose", True))
+    for button in handles.get("tcp_linear_buttons", ()):
+        _set_disabled(button, disabled_states.get("tcp_linear", True))
 
     if "mode_buttons" in handles:
         _update_desired_mode_buttons(handles, safety.desired_mode)
@@ -1140,6 +1280,8 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
             handles["cartesian_solve"].value = _format_cartesian_solve_status(None, stale=True)
         if "tcp_status" in handles:
             handles["tcp_status"].value = _format_tcp_command_status(safety, None, stale=True)
+        if "tcp_linear_status" in handles:
+            handles["tcp_linear_status"].value = _format_tcp_command_status(safety, None, stale=True)
         handles["packets"].value = f"{store.received_packets} received / {store.invalid_packets} invalid"
         return
 
@@ -1170,6 +1312,8 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
         handles["cartesian_solve"].value = _format_cartesian_solve_status(latest, stale=stale)
     if "tcp_status" in handles:
         handles["tcp_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
+    if "tcp_linear_status" in handles:
+        handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     update_scene_markers(handles.get("scene", {}), latest)
     if "scene_assets" in handles:
         scene_errors = [

@@ -390,6 +390,8 @@ IkResult PinocchioKinematics::solveIk(
         );
         const Eigen::Matrix<double, 6, 6> jlog =
             pinocchio::Jlog6(current_to_target.inverse());
+        // Pinocchio CLIK convention: body-frame log residual with LOCAL frame
+        // Jacobian requires the Jlog6 correction before the DLS update.
         const Eigen::MatrixXd task_jacobian = -jlog * jacobian;
         if (!task_jacobian.array().isFinite().all()) {
             return ik_solver::failureResult(

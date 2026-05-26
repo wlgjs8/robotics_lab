@@ -9,6 +9,7 @@
 #include <array>
 #include <algorithm>
 #include <cerrno>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <cstdint>
@@ -237,6 +238,79 @@ bool parseForceControlObject(const json& object, ForceControlCommand* cmd) {
     return true;
 }
 
+bool parseLinearMoveOrientationMode(const std::string& value, LinearMoveOrientationMode* out) {
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (normalized == "constant") {
+        if (out) *out = LinearMoveOrientationMode::Constant;
+        return true;
+    }
+    if (normalized == "slerp") {
+        if (out) *out = LinearMoveOrientationMode::Slerp;
+        return true;
+    }
+    return false;
+}
+
+bool readOptionalPositiveNumber(
+    const json& object,
+    const char* key,
+    double* out,
+    bool* present
+) {
+    if (present) *present = false;
+    const auto it = object.find(key);
+    if (it == object.end()) return true;
+    double value = 0.0;
+    if (!isFiniteNumber(*it, &value) || value <= 0.0) return false;
+    if (out) *out = value;
+    if (present) *present = true;
+    return true;
+}
+
+bool readOptionalLinearMoveFields(const json& object, ArmCommand* out) {
+    bool present = false;
+    if (!readOptionalPositiveNumber(
+            object,
+            "duration_sec",
+            &out->linear_move_duration_sec,
+            &present
+        )) {
+        return false;
+    }
+    out->has_linear_move_duration = out->has_linear_move_duration || present;
+
+    if (!readOptionalPositiveNumber(
+            object,
+            "linear_speed_m_s",
+            &out->linear_move_linear_speed_m_s,
+            &present
+        )) {
+        return false;
+    }
+    out->has_linear_move_linear_speed = out->has_linear_move_linear_speed || present;
+
+    if (!readOptionalPositiveNumber(
+            object,
+            "angular_speed_rad_s",
+            &out->linear_move_angular_speed_rad_s,
+            &present
+        )) {
+        return false;
+    }
+    out->has_linear_move_angular_speed = out->has_linear_move_angular_speed || present;
+
+    std::string orientation_mode;
+    if (!readOptionalString(object, "orientation_mode", &orientation_mode)) return false;
+    if (!orientation_mode.empty()) {
+        if (!parseLinearMoveOrientationMode(orientation_mode, &out->linear_move_orientation_mode)) return false;
+        out->has_linear_move_orientation_mode = true;
+    }
+    return true;
+}
+
 bool requiresPayload(ControlMode mode) {
     return mode == ControlMode::JointTarget ||
            mode == ControlMode::JointVelocity ||
@@ -255,8 +329,10 @@ bool hasRequiredPayload(const ArmCommand& command) {
         case ControlMode::JointVelocity:
             return command.has_joint_velocity;
         case ControlMode::TcpPoseTarget:
-        case ControlMode::TcpLinearMove:
             return command.has_tcp_target;
+        case ControlMode::TcpLinearMove:
+            return command.has_tcp_target &&
+                   (command.has_linear_move_duration || command.has_linear_move_linear_speed);
         case ControlMode::TcpDeltaStand:
             return command.has_tcp_delta_stand;
         case ControlMode::TcpDeltaLocal:
@@ -375,6 +451,7 @@ bool parseArmObject(
         out->has_tcp_twist_stand = present;
         if (!readOptionalVec6(object, "tcp_twist_local", &out->tcp_twist_local, &present)) return false;
         out->has_tcp_twist_local = present;
+        if (!readOptionalLinearMoveFields(object, out)) return false;
         if (!parseForceControlObject(object, &out->force_control)) return false;
     }
     if (out->timeout_sec <= 0.0 || !std::isfinite(out->timeout_sec)) return false;
@@ -618,6 +695,17 @@ bool CommandServer::parseMessage(
         cmd.left.has_tcp_twist_local = cmd.left.has_tcp_twist_local || present;
         cmd.right.tcp_twist_local = cmd.left.tcp_twist_local;
         cmd.right.has_tcp_twist_local = cmd.right.has_tcp_twist_local || present;
+
+        if (!readOptionalLinearMoveFields(root, &cmd.left)) return false;
+        cmd.right.linear_move_duration_sec = cmd.left.linear_move_duration_sec;
+        cmd.right.linear_move_linear_speed_m_s = cmd.left.linear_move_linear_speed_m_s;
+        cmd.right.linear_move_angular_speed_rad_s = cmd.left.linear_move_angular_speed_rad_s;
+        cmd.right.linear_move_orientation_mode = cmd.left.linear_move_orientation_mode;
+        cmd.right.has_linear_move_duration = cmd.right.has_linear_move_duration || cmd.left.has_linear_move_duration;
+        cmd.right.has_linear_move_linear_speed = cmd.right.has_linear_move_linear_speed || cmd.left.has_linear_move_linear_speed;
+        cmd.right.has_linear_move_angular_speed = cmd.right.has_linear_move_angular_speed || cmd.left.has_linear_move_angular_speed;
+        cmd.right.has_linear_move_orientation_mode =
+            cmd.right.has_linear_move_orientation_mode || cmd.left.has_linear_move_orientation_mode;
     }
 
     if (requiresPayload(cmd.left.mode) && !hasRequiredPayload(cmd.left)) return false;

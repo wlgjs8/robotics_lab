@@ -96,6 +96,11 @@ enum class TrackingErrorPolicy {
     FaultLatch
 };
 
+enum class LinearMoveOrientationMode {
+    Constant,
+    Slerp
+};
+
 struct Pose6D {
     double x = 0.0;
     double y = 0.0;
@@ -180,11 +185,20 @@ struct CartesianSolveTelemetry {
     bool ik_fail_duration_exceeded = false;
     double warn_ik_duration_us = 0.0;
     double fail_ik_duration_us = 0.0;
+    bool path_active = false;
     double path_s = 0.0;
     double path_position_error_m = 0.0;
     double path_orientation_error_rad = 0.0;
     double path_line_deviation_m = 0.0;
     bool path_done = false;
+    double linear_move_duration_sec = 0.0;
+    double linear_move_elapsed_sec = 0.0;
+    std::string orientation_mode;
+    bool twist_clamped = false;
+    double requested_twist_linear_norm_m_s = 0.0;
+    double requested_twist_angular_norm_rad_s = 0.0;
+    double applied_twist_linear_norm_m_s = 0.0;
+    double applied_twist_angular_norm_rad_s = 0.0;
 };
 
 struct ArmCommand {
@@ -203,6 +217,10 @@ struct ArmCommand {
     Pose6D tcp_delta_local;
     Vec6 tcp_twist_stand;
     Vec6 tcp_twist_local;
+    double linear_move_duration_sec = 0.0;
+    double linear_move_linear_speed_m_s = 0.0;
+    double linear_move_angular_speed_rad_s = 0.0;
+    LinearMoveOrientationMode linear_move_orientation_mode = LinearMoveOrientationMode::Constant;
 
     ForceControlCommand force_control;
 
@@ -218,6 +236,10 @@ struct ArmCommand {
     bool has_tcp_delta_local = false;
     bool has_tcp_twist_stand = false;
     bool has_tcp_twist_local = false;
+    bool has_linear_move_duration = false;
+    bool has_linear_move_linear_speed = false;
+    bool has_linear_move_angular_speed = false;
+    bool has_linear_move_orientation_mode = false;
 };
 
 struct CommandSourceMetadata {

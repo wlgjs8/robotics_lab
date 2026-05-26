@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from policy_runner.action_sources.dual_spacemouse_cartesian import DualSpaceMouseCartesianActionSource
 from policy_runner.action_sources.spacemouse_cartesian import SpaceMouseCartesianActionSource
 from policy_runner.action_sources.tcp_delta import TcpDeltaActionSource
 from policy_runner.config import SafetyConfig, config_from_mapping
@@ -138,7 +139,7 @@ class CartesianActionSourceTest(unittest.TestCase):
         packet = json.loads(fake_socket.sent[0][0].decode("utf-8"))
         self.assertEqual(packet["mode"], "TcpTwistLocal")
         self.assertEqual(packet["left"]["mode"], "TcpTwistLocal")
-        self.assertEqual(packet["left"]["tcp_twist_local"], [0.001, -0.002, 0.002, -0.01, 0.001, 0.0])
+        self.assertEqual(packet["left"]["tcp_twist_local"], [0.015, -0.03, 0.03, -0.2, 0.020000000000000004, 0.0])
         self.assertEqual(packet["right"]["mode"], "Hold")
 
     def test_deadman_false_sends_no_command(self):
@@ -147,25 +148,83 @@ class CartesianActionSourceTest(unittest.TestCase):
 
         self.assertIsNone(source.next_intent(sample_state(), time.monotonic()))
 
-    def test_spacemouse_cartesian_clamps_linear_and_angular_steps(self):
+    def test_spacemouse_cartesian_clamps_linear_and_angular_velocity(self):
         reader = FakeSpaceMouseReader([spacemouse_sample(tx=10.0, ty=-10.0, rz=10.0)])
         source = SpaceMouseCartesianActionSource(
             reader=reader,
-            max_linear_step_m=0.002,
-            max_angular_step_rad=0.01,
+            max_linear_velocity_m_s=0.03,
+            max_angular_velocity_rad_s=0.2,
         )
 
         intent = source.next_intent(sample_state(), time.monotonic())
 
         self.assertIsNotNone(intent)
         assert intent is not None
-        self.assertEqual(intent.left["tcp_twist_local"], [0.002, -0.002, 0.0, 0.0, 0.0, 0.01])
+        self.assertEqual(intent.left["tcp_twist_local"], [0.03, -0.03, 0.0, 0.0, 0.0, 0.2])
 
     def test_spacemouse_cartesian_deadman_cannot_be_disabled(self):
         reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
 
         with self.assertRaisesRegex(ValueError, "requires deadman"):
             SpaceMouseCartesianActionSource(reader=reader, require_deadman=False)
+
+    def test_dual_spacemouse_cartesian_sends_both_arms_in_one_packet(self):
+        left_reader = FakeSpaceMouseReader([spacemouse_sample(tx=0.5, ry=1.0)])
+        right_reader = FakeSpaceMouseReader([spacemouse_sample(ty=-1.0, rz=2.0)])
+        source = DualSpaceMouseCartesianActionSource(
+            left_reader=left_reader,
+            right_reader=right_reader,
+            max_linear_velocity_m_s=0.03,
+            max_angular_velocity_rad_s=0.2,
+        )
+
+        intent = source.next_intent(sample_state(), time.monotonic())
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.mode, "TcpTwistLocal")
+        self.assertEqual(intent.left["mode"], "TcpTwistLocal")
+        self.assertEqual(intent.right["mode"], "TcpTwistLocal")
+        self.assertEqual(intent.left["tcp_twist_local"], [0.015, 0.0, 0.0, 0.0, 0.2, 0.0])
+        self.assertEqual(intent.right["tcp_twist_local"], [0.0, -0.03, 0.0, 0.0, 0.0, 0.2])
+
+    def test_dual_spacemouse_cartesian_holds_inactive_arm(self):
+        left_reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
+        right_reader = FakeSpaceMouseReader([spacemouse_sample(ty=1.0, buttons=(False,))])
+        source = DualSpaceMouseCartesianActionSource(
+            left_reader=left_reader,
+            right_reader=right_reader,
+        )
+
+        intent = source.next_intent(sample_state(), time.monotonic())
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.left["tcp_twist_local"], [0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(intent.right["mode"], "Hold")
+
+    def test_dual_spacemouse_cartesian_sends_no_command_when_both_inactive(self):
+        source = DualSpaceMouseCartesianActionSource(
+            left_reader=FakeSpaceMouseReader([spacemouse_sample(tx=1.0, buttons=(False,))]),
+            right_reader=FakeSpaceMouseReader(),
+        )
+
+        self.assertIsNone(source.next_intent(sample_state(), time.monotonic()))
+
+    def test_dual_spacemouse_cartesian_clamps_per_arm(self):
+        source = DualSpaceMouseCartesianActionSource(
+            left_reader=FakeSpaceMouseReader([spacemouse_sample(tx=10.0, rx=-10.0)]),
+            right_reader=FakeSpaceMouseReader([spacemouse_sample(tz=-10.0, rz=10.0)]),
+            max_linear_velocity_m_s=0.03,
+            max_angular_velocity_rad_s=0.2,
+        )
+
+        intent = source.next_intent(sample_state(), time.monotonic())
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.left["tcp_twist_local"], [0.03, 0.0, 0.0, -0.2, 0.0, 0.0])
+        self.assertEqual(intent.right["tcp_twist_local"], [0.0, 0.0, -0.03, 0.0, 0.0, 0.2])
 
     def test_scripted_tcp_delta_is_stand_frame_and_clamped(self):
         source = TcpDeltaActionSource(
@@ -277,8 +336,8 @@ class CartesianActionSourceTest(unittest.TestCase):
                 "spacemouse_cartesian": {
                     "frame": "local",
                     "command_rate_hz": 30,
-                    "max_linear_step_m": 0.002,
-                    "max_angular_step_rad": 0.01,
+                    "max_linear_velocity_m_s": 0.03,
+                    "max_angular_velocity_rad_s": 0.2,
                     "deadband": 0.08,
                     "require_deadman": True,
                     "deadman_button": 0,
@@ -289,9 +348,67 @@ class CartesianActionSourceTest(unittest.TestCase):
         self.assertEqual(cfg.action_source, "spacemouse_cartesian")
         self.assertEqual(cfg.spacemouse_cartesian.frame, "local")
         self.assertEqual(cfg.spacemouse_cartesian.command_rate_hz, 30.0)
-        self.assertEqual(cfg.spacemouse_cartesian.max_linear_step_m, 0.002)
-        self.assertEqual(cfg.spacemouse_cartesian.max_angular_step_rad, 0.01)
+        self.assertEqual(cfg.spacemouse_cartesian.max_linear_velocity_m_s, 0.03)
+        self.assertEqual(cfg.spacemouse_cartesian.max_angular_velocity_rad_s, 0.2)
         self.assertTrue(cfg.spacemouse_cartesian.require_deadman)
+
+    def test_spacemouse_cartesian_deprecated_step_aliases_warn(self):
+        with self.assertWarns(DeprecationWarning):
+            cfg = config_from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.v1",
+                    "action_source": "spacemouse_cartesian",
+                    "spacemouse_cartesian": {
+                        "max_linear_step_m": 0.002,
+                        "max_angular_step_rad": 0.01,
+                    },
+                }
+            )
+
+        self.assertEqual(cfg.spacemouse_cartesian.max_linear_velocity_m_s, 0.002)
+        self.assertEqual(cfg.spacemouse_cartesian.max_angular_velocity_rad_s, 0.01)
+
+    def test_dual_spacemouse_cartesian_config_fields_parse(self):
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "action_source": "dual_spacemouse_cartesian",
+                "spacemouse_cartesian_dual": {
+                    "frame": "local",
+                    "max_linear_velocity_m_s": 0.03,
+                    "max_angular_velocity_rad_s": 0.2,
+                    "deadband": 0.05,
+                    "left": {
+                        "path": "/dev/hidraw-left",
+                        "device_number": 0,
+                        "deadman_button": 0,
+                    },
+                    "right": {
+                        "path": "/dev/hidraw-right",
+                        "device_number": 2,
+                        "deadman_button": 1,
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(cfg.action_source, "dual_spacemouse_cartesian")
+        self.assertEqual(cfg.spacemouse_cartesian_dual.frame, "local")
+        self.assertEqual(cfg.spacemouse_cartesian_dual.max_linear_velocity_m_s, 0.03)
+        self.assertEqual(cfg.spacemouse_cartesian_dual.max_angular_velocity_rad_s, 0.2)
+        self.assertEqual(cfg.spacemouse_cartesian_dual.deadband, 0.05)
+        self.assertEqual(cfg.spacemouse_cartesian_dual.left.path, "/dev/hidraw-left")
+        self.assertEqual(cfg.spacemouse_cartesian_dual.right.device_number, 2)
+        self.assertEqual(cfg.spacemouse_cartesian_dual.right.deadman_button, 1)
+
+    def test_dual_spacemouse_cartesian_invalid_device_config_fails(self):
+        with self.assertRaisesRegex(ValueError, "device_number"):
+            config_from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.v1",
+                    "spacemouse_cartesian_dual": {"left": {"device_number": -1}},
+                }
+            )
 
 
 if __name__ == "__main__":

@@ -1467,19 +1467,47 @@ bool testCartesianCommandParser() {
     RB_CHECK(std::abs(out.right.tcp_target_stand.quaternion_xyzw->at(3) - 1.0) < kEpsilon);
 
     RB_CHECK(server.parseMessage(
-        R"({"schema_version":1,"seq":5,"mode":"TcpLinearMove","timeout_sec":0.2,"left":{"target_tcp_stand":{"x":0.35,"y":0.11,"z":0.55,"rx":0,"ry":0,"rz":0,"quaternion_xyzw":[0,0,0.70710678118,0.70710678118]}},"right":{"mode":"Hold"}})",
+        R"({"schema_version":1,"seq":5,"mode":"TcpLinearMove","timeout_sec":0.2,"left":{"target_tcp_stand":{"x":0.35,"y":0.11,"z":0.55,"rx":0,"ry":0,"rz":0,"quaternion_xyzw":[0,0,0.70710678118,0.70710678118]},"duration_sec":2.0,"orientation_mode":"slerp"},"right":{"mode":"Hold"}})",
         now,
         &out
     ));
     RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpLinearMove);
     RB_CHECK(out.left.has_tcp_target);
+    RB_CHECK(out.left.has_linear_move_duration);
+    RB_CHECK(out.left.has_linear_move_orientation_mode);
+    RB_CHECK(out.left.linear_move_orientation_mode == rb_servo::LinearMoveOrientationMode::Slerp);
     RB_CHECK(std::abs(out.left.tcp_target_stand.x - 0.35) < kEpsilon);
     RB_CHECK(out.left.tcp_target_stand.quaternion_xyzw.has_value());
     RB_CHECK(std::abs(out.left.tcp_target_stand.quaternion_xyzw->at(2) - 0.70710678118) < kEpsilon);
     RB_CHECK(out.right.mode == rb_servo::ControlMode::Hold);
 
     RB_CHECK(server.parseMessage(
-        R"({"schema_version":1,"seq":6,"mode":"Hold","timeout_sec":0.2,"left":{"mode":"TcpTwistLocal","tcp_twist_local":[0.02,0,0,0,0,0]},"right":{"mode":"TcpTwistStand","tcp_twist_stand":[0,0.01,0,0,0,0.1]}})",
+        R"({"schema_version":1,"seq":6,"mode":"TcpLinearMove","timeout_sec":0.2,"left":{"target_tcp_stand":{"x":0.35,"y":0.11,"z":0.55,"rx":0,"ry":0,"rz":0,"quaternion_xyzw":[0,0,0,1]},"linear_speed_m_s":0.05},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpLinearMove);
+    RB_CHECK(out.left.has_linear_move_linear_speed);
+    RB_CHECK(std::abs(out.left.linear_move_linear_speed_m_s - 0.05) < kEpsilon);
+
+    RB_CHECK(!server.parseMessage(
+        R"({"schema_version":1,"seq":7,"mode":"TcpLinearMove","timeout_sec":0.2,"left":{"target_tcp_stand":{"x":0.35,"y":0.11,"z":0.55,"rx":0,"ry":0,"rz":0,"quaternion_xyzw":[0,0,0,1]},"duration_sec":0.0},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+    RB_CHECK(!server.parseMessage(
+        R"({"schema_version":1,"seq":8,"mode":"TcpLinearMove","timeout_sec":0.2,"left":{"target_tcp_stand":{"x":0.35,"y":0.11,"z":0.55,"rx":0,"ry":0,"rz":0,"quaternion_xyzw":[0,0,0,1]},"linear_speed_m_s":-0.05},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+    RB_CHECK(!server.parseMessage(
+        R"({"schema_version":1,"seq":9,"mode":"TcpLinearMove","timeout_sec":0.2,"left":{"target_tcp_stand":{"x":0.35,"y":0.11,"z":0.55,"rx":0,"ry":0,"rz":0,"quaternion_xyzw":[0,0,0,1]},"duration_sec":1.0,"orientation_mode":"bad"},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+
+    RB_CHECK(server.parseMessage(
+        R"({"schema_version":1,"seq":10,"mode":"Hold","timeout_sec":0.2,"left":{"mode":"TcpTwistLocal","tcp_twist_local":[0.02,0,0,0,0,0]},"right":{"mode":"TcpTwistStand","tcp_twist_stand":[0,0.01,0,0,0,0.1]}})",
         now,
         &out
     ));
@@ -2605,11 +2633,15 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.left_cartesian_solve.ik_iterations = 7;
     snapshot.left_cartesian_solve.position_error_m = 0.001;
     snapshot.left_cartesian_solve.orientation_error_rad = 0.002;
+    snapshot.left_cartesian_solve.path_active = true;
     snapshot.left_cartesian_solve.path_s = 0.5;
     snapshot.left_cartesian_solve.path_position_error_m = 0.003;
     snapshot.left_cartesian_solve.path_orientation_error_rad = 0.004;
     snapshot.left_cartesian_solve.path_line_deviation_m = 0.0005;
     snapshot.left_cartesian_solve.path_done = false;
+    snapshot.left_cartesian_solve.linear_move_duration_sec = 2.0;
+    snapshot.left_cartesian_solve.linear_move_elapsed_sec = 1.0;
+    snapshot.left_cartesian_solve.orientation_mode = "constant";
     snapshot.left_cartesian_solve.warn_ik_duration_us = 3000.0;
     snapshot.right_cartesian_solve.attempted = true;
     snapshot.right_cartesian_solve.success = false;
@@ -2745,11 +2777,15 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("left").at("cartesian_solve").at("ik_iterations").get<int>() == 7);
     RB_CHECK(json.at("left").at("cartesian_solve").at("position_error_m").get<double>() == 0.001);
     RB_CHECK(json.at("left").at("cartesian_solve").at("orientation_error_rad").get<double>() == 0.002);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("path_active").get<bool>());
     RB_CHECK(json.at("left").at("cartesian_solve").at("path_s").get<double>() == 0.5);
     RB_CHECK(json.at("left").at("cartesian_solve").at("path_position_error_m").get<double>() == 0.003);
     RB_CHECK(json.at("left").at("cartesian_solve").at("path_orientation_error_rad").get<double>() == 0.004);
     RB_CHECK(json.at("left").at("cartesian_solve").at("path_line_deviation_m").get<double>() == 0.0005);
     RB_CHECK(!json.at("left").at("cartesian_solve").at("path_done").get<bool>());
+    RB_CHECK(json.at("left").at("cartesian_solve").at("linear_move_duration_sec").get<double>() == 2.0);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("linear_move_elapsed_sec").get<double>() == 1.0);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("orientation_mode").get<std::string>() == "constant");
     RB_CHECK(json.at("right").at("tcp_stand").is_null());
     RB_CHECK(json.at("right").at("tcp_base").is_null());
     RB_CHECK(json.at("right").at("tcp_deferred").get<bool>());
@@ -3186,6 +3222,7 @@ bool testTcpLinearMoveUsesIkInSimulationOnly() {
     cfg.kinematics.enable = true;
     cfg.kinematics.ik.enable = true;
     cfg.kinematics.publish_tcp = true;
+    cfg.cartesian_control.max_linear_move_speed_m_s = 1.0;
     const rb_servo::JointArray initial = joints(0.0);
     auto kinematics = std::make_shared<FakeCartesianKinematics>();
     rb_servo::DualArmServoLoop loop(
@@ -3204,14 +3241,18 @@ bool testTcpLinearMoveUsesIkInSimulationOnly() {
     rb_servo::DualArmCommand linear = command(rb_servo::ControlMode::Hold);
     linear.left.mode = rb_servo::ControlMode::TcpLinearMove;
     linear.left.has_tcp_target = true;
+    linear.left.linear_move_duration_sec = 1.0;
+    linear.left.has_linear_move_duration = true;
     linear.left.tcp_target_stand = {0.05, 0.02, 0.01, 0.0, 0.0, 0.0};
     linear.left.tcp_target_stand.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
     linear.right.mode = rb_servo::ControlMode::Hold;
     buffer.setCommand(linear);
     double max_orientation_error = 0.0;
     double max_line_deviation = 0.0;
+    double observed_duration = 0.0;
     RB_CHECK(waitUntil([&] {
         const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        observed_duration = snapshot.left_cartesian_solve.linear_move_duration_sec;
         max_orientation_error = std::max(
             max_orientation_error,
             snapshot.left_cartesian_solve.path_orientation_error_rad
@@ -3226,9 +3267,48 @@ bool testTcpLinearMoveUsesIkInSimulationOnly() {
                snapshot.left_cartesian_solve.path_s > 0.0 &&
                kinematics->lastLeftTwist().has_value();
     }, std::chrono::milliseconds(1000)));
+    RB_CHECK(std::abs(observed_duration - 1.0) < 1e-9);
+    rb_servo::ServoSnapshot continued_snapshot;
+    const bool continued = waitUntil([&] {
+        continued_snapshot = loop.latestSnapshot();
+        return continued_snapshot.command.left.mode == rb_servo::ControlMode::Hold &&
+               continued_snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok &&
+               continued_snapshot.left_cartesian_solve.status == "ok" &&
+               continued_snapshot.left_cartesian_solve.path_active &&
+               continued_snapshot.left_cartesian_solve.path_s > 0.2 &&
+               continued_snapshot.left_cartesian_solve.path_s < 1.0;
+    }, std::chrono::milliseconds(1000));
+    RB_CHECK(continued);
+    RB_CHECK(std::abs(continued_snapshot.left_cartesian_solve.linear_move_duration_sec - 1.0) < 1e-9);
     RB_CHECK(max_orientation_error < 1e-9);
     RB_CHECK(max_line_deviation < 2e-3);
     RB_CHECK(std::abs(kinematics->lastLeftTwist()->rz) < 1e-9);
+    rb_servo::DualArmCommand replacement = command(rb_servo::ControlMode::Hold);
+    replacement.seq = 2;
+    replacement.left.mode = rb_servo::ControlMode::TcpLinearMove;
+    replacement.left.has_tcp_target = true;
+    replacement.left.linear_move_duration_sec = 0.5;
+    replacement.left.has_linear_move_duration = true;
+    replacement.left.tcp_target_stand = {0.08, 0.02, 0.01, 0.0, 0.0, 0.0};
+    replacement.left.tcp_target_stand.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+    replacement.right.mode = rb_servo::ControlMode::Hold;
+    buffer.setCommand(replacement);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.command.left.mode == rb_servo::ControlMode::TcpLinearMove &&
+               snapshot.left_cartesian_solve.status == "ok" &&
+               std::abs(snapshot.left_cartesian_solve.linear_move_duration_sec - 0.5) < 1e-9 &&
+               snapshot.left_cartesian_solve.path_s < continued_snapshot.left_cartesian_solve.path_s;
+    }));
+    rb_servo::DualArmCommand hold = command(rb_servo::ControlMode::Hold);
+    hold.seq = 3;
+    buffer.setCommand(hold);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.command.left.mode == rb_servo::ControlMode::Hold &&
+               snapshot.left_cartesian_solve.status == "not_attempted" &&
+               !snapshot.left_cartesian_solve.path_active;
+    }));
     loop.stop();
 
     rb_servo::CommandBuffer real_buffer;
@@ -3248,6 +3328,8 @@ bool testTcpLinearMoveUsesIkInSimulationOnly() {
     RB_CHECK(real_loop.start());
     real_buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
     sleepTicks();
+    linear.seq = 2;
+    linear.host_time_ns = rb_servo::nowSteadyNs();
     real_buffer.setCommand(linear);
     sleepTicks();
     const rb_servo::ServoSnapshot real_snapshot = real_loop.latestSnapshot();

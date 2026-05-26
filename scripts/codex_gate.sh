@@ -254,6 +254,23 @@ run_optional_tcp_pose_acceptance() {
   ./scripts/tcp_pose_simulator_acceptance.sh
 }
 
+run_cart_harden_05_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts rb_servo_server/tools
+  python3 rb_servo_server/tools/send_tcp_linear_move.py --help >/dev/null
+  python3 rb_servo_server/tools/send_tcp_twist.py --help >/dev/null
+  grep_existing "TcpPoseTarget|TcpLinearMove|TcpTwistLocal|TcpTwistStand|TcpDeltaLocal|TcpDeltaStand" \
+    rb_servo_server/docs/network_protocol.md docs/runbooks/tcp_pose_simulator_acceptance.md
+  grep_existing "path_s|path_line_deviation_m|orientation preservation|quaternion" \
+    docs/runbooks/tcp_pose_simulator_acceptance.md rb_servo_server/docs/network_protocol.md
+  if [[ "${CODEX_RUN_CARTESIAN_ACCEPTANCE:-0}" == "1" ]]; then
+    run_optional_pinocchio_gate
+    ./scripts/tcp_pose_simulator_acceptance.sh --all
+  else
+    echo "codex_gate: skipping full Cartesian simulator acceptance; set CODEX_RUN_CARTESIAN_ACCEPTANCE=1 to enable"
+  fi
+}
+
 check_real_config_safety_docs() {
   grep_existing "RB_ALLOW_REAL_ROBOT" README.md docs AGENTS.md rb_servo_server/docs rb_servo_server/config/dual_real.example.yaml
   grep_existing "RB_ALLOW_REAL_MOTION" README.md docs AGENTS.md rb_servo_server/docs rb_servo_server/config/dual_real.example.yaml
@@ -525,6 +542,9 @@ case "$TASK" in
     ;;
   HARDEN-10)
     run_mig26_gate
+    ;;
+  CART-HARDEN-05)
+    run_cart_harden_05_gate
     ;;
 
   *)

@@ -132,6 +132,78 @@ class CommandClient:
             }
         return self._with_source(packet)
 
+    @staticmethod
+    def _optional_positive_finite(value: float | None, label: str) -> float | None:
+        if value is None:
+            return None
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed <= 0.0:
+            raise ValueError(f"{label} must be finite and positive")
+        return parsed
+
+    @staticmethod
+    def _orientation_mode(value: str) -> str:
+        mode = str(value).strip().lower()
+        if mode not in {"constant", "slerp"}:
+            raise ValueError("orientation_mode must be constant or slerp")
+        return mode
+
+    def build_tcp_linear_move(
+        self,
+        *,
+        left_pose: tuple[float, ...] | None = None,
+        right_pose: tuple[float, ...] | None = None,
+        left_quaternion_xyzw: tuple[float, ...] | None = None,
+        right_quaternion_xyzw: tuple[float, ...] | None = None,
+        duration_sec: float | None = None,
+        linear_speed_m_s: float | None = None,
+        angular_speed_rad_s: float | None = None,
+        orientation_mode: str = "constant",
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        if left_pose is None and right_pose is None:
+            raise ValueError("at least one TCP linear target is required")
+        parsed_duration = self._optional_positive_finite(duration_sec, "duration_sec")
+        parsed_linear_speed = self._optional_positive_finite(linear_speed_m_s, "linear_speed_m_s")
+        parsed_angular_speed = self._optional_positive_finite(angular_speed_rad_s, "angular_speed_rad_s")
+        if parsed_duration is None and parsed_linear_speed is None:
+            raise ValueError("duration_sec or linear_speed_m_s is required")
+        parsed_orientation_mode = self._orientation_mode(orientation_mode)
+        packet: dict[str, Any] = {
+            "schema_version": 1,
+            "seq": self.next_seq(),
+            "mode": "TcpLinearMove" if left_pose is not None and right_pose is not None else "Hold",
+            "host_time_ns": time.monotonic_ns(),
+            "timeout_sec": timeout_sec,
+            "coupled_timeout": True,
+            "left": {},
+            "right": {},
+        }
+
+        def arm_payload(pose: tuple[float, ...], quaternion_xyzw: tuple[float, ...] | None, label: str) -> dict[str, Any]:
+            payload: dict[str, Any] = {
+                "mode": "TcpLinearMove",
+                "target_tcp_stand": self._tcp_pose_payload(
+                    pose,
+                    quaternion_xyzw=quaternion_xyzw,
+                    label=label,
+                ),
+                "orientation_mode": parsed_orientation_mode,
+            }
+            if parsed_duration is not None:
+                payload["duration_sec"] = parsed_duration
+            if parsed_linear_speed is not None:
+                payload["linear_speed_m_s"] = parsed_linear_speed
+            if parsed_angular_speed is not None:
+                payload["angular_speed_rad_s"] = parsed_angular_speed
+            return payload
+
+        if left_pose is not None:
+            packet["left"] = arm_payload(left_pose, left_quaternion_xyzw, "left TCP linear target")
+        if right_pose is not None:
+            packet["right"] = arm_payload(right_pose, right_quaternion_xyzw, "right TCP linear target")
+        return self._with_source(packet)
+
     def build_tcp_delta_stand(
         self,
         *,

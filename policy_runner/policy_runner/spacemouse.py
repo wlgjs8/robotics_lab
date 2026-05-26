@@ -47,7 +47,15 @@ class FakeSpaceMouseReader:
 class HidSpaceMouseReader:
     """Optional pyspacemouse-backed reader kept out of the test dependency path."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        device: str | None = None,
+        path: str | None = None,
+        device_number: int = 0,
+    ):
+        if device_number < 0:
+            raise ValueError("device_number must be non-negative")
         try:
             import pyspacemouse  # type: ignore
         except ModuleNotFoundError as exc:
@@ -56,14 +64,21 @@ class HidSpaceMouseReader:
                 "install policy_runner with the spacemouse extra"
             ) from exc
         self._pyspacemouse = pyspacemouse
-        opened = pyspacemouse.open()
-        if opened is False:
+        self._device = pyspacemouse.open(
+            device=device,
+            path=path,
+            DeviceNumber=device_number,
+        )
+        if self._device is None or self._device is False:
             raise RuntimeError("failed to open SpaceMouse HID device")
 
     def read(self, timeout_sec: float | None = None) -> SpaceMouseSample | None:
+        if self._device is None:
+            return None
         deadline = None if timeout_sec is None else time.monotonic() + max(timeout_sec, 0.0)
         while True:
-            state = self._pyspacemouse.read()
+            read = getattr(self._device, "read", None)
+            state = read() if callable(read) else self._pyspacemouse.read()
             if state is not None:
                 return _sample_from_pyspacemouse_state(state)
             if deadline is not None and time.monotonic() >= deadline:
@@ -71,9 +86,10 @@ class HidSpaceMouseReader:
             time.sleep(0.001)
 
     def close(self) -> None:
-        close = getattr(self._pyspacemouse, "close", None)
+        close = getattr(self._device, "close", None)
         if callable(close):
             close()
+        self._device = None
 
 
 def _sample_from_pyspacemouse_state(state: Any) -> SpaceMouseSample:

@@ -86,6 +86,7 @@ class ArmSnapshot:
     has_valid_tcp_pose: bool = False
     tcp_deferred: bool = True
     send_duration_us: float | None = None
+    cartesian_solve: "CartesianSolveSnapshot | None" = None
 
     @classmethod
     def parse(cls, data: Mapping[str, Any]) -> "ArmSnapshot | None":
@@ -113,7 +114,58 @@ class ArmSnapshot:
             has_valid_tcp_pose=has_valid_tcp_pose and tcp_stand is not None,
             tcp_deferred=tcp_deferred,
             send_duration_us=float(data["send_duration_us"]) if isinstance(data.get("send_duration_us"), int | float) else None,
+            cartesian_solve=CartesianSolveSnapshot.parse(data.get("cartesian_solve")),
         )
+
+
+@dataclass(frozen=True)
+class CartesianSolveSnapshot:
+    attempted: bool | None = None
+    success: bool | None = None
+    status: str | None = None
+    reason: str | None = None
+    position_error_m: float | None = None
+    orientation_error_rad: float | None = None
+    ik_iterations: int | None = None
+    ik_duration_us: float | None = None
+    ik_timed_out: bool | None = None
+    path_active: bool | None = None
+    path_s: float | None = None
+    path_line_deviation_m: float | None = None
+    path_orientation_error_rad: float | None = None
+    path_done: bool | None = None
+
+    @classmethod
+    def parse(cls, value: Any) -> "CartesianSolveSnapshot | None":
+        if not isinstance(value, Mapping):
+            return None
+        return cls(
+            attempted=_optional_bool(value.get("attempted")),
+            success=_optional_bool(value.get("success")),
+            status=str(value["status"]) if isinstance(value.get("status"), str) else None,
+            reason=str(value["reason"]) if isinstance(value.get("reason"), str) else None,
+            position_error_m=_optional_finite(value.get("position_error_m")),
+            orientation_error_rad=_optional_finite(value.get("orientation_error_rad")),
+            ik_iterations=int(value["ik_iterations"]) if isinstance(value.get("ik_iterations"), int) else None,
+            ik_duration_us=_optional_finite(value.get("ik_duration_us")),
+            ik_timed_out=_optional_bool(value.get("ik_timed_out")),
+            path_active=_optional_bool(value.get("path_active")),
+            path_s=_optional_finite(value.get("path_s")),
+            path_line_deviation_m=_optional_finite(value.get("path_line_deviation_m")),
+            path_orientation_error_rad=_optional_finite(value.get("path_orientation_error_rad")),
+            path_done=_optional_bool(value.get("path_done")),
+        )
+
+
+def _optional_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _optional_finite(value: Any) -> float | None:
+    if not isinstance(value, int | float):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) else None
 
 
 @dataclass(frozen=True)

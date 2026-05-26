@@ -1,84 +1,34 @@
-# TCP Pose Simulator Acceptance Runbook
+# Cartesian Simulator Acceptance Runbook
 
-This runbook validates simulator-only TCP Pose/Delta behavior for the per-arm
-RB3-730 simulator stack. It is not real robot evidence and it must not be used
-to enable real Cartesian motion.
+This runbook validates simulator-only Cartesian command behavior for the
+dual-arm RB3-730 stack. It covers:
 
-Do not set `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`, or
-`RB_ALLOW_REAL_CARTESIAN` for this runbook.
+- `TcpPoseTarget`: point-to-point final pose; Cartesian path is not guaranteed.
+- `TcpLinearMove`: MoveL-like Cartesian path primitive.
+- `TcpTwistLocal` / `TcpTwistStand`: streaming Cartesian velocity primitives.
 
-## Dependency Checklist
+This is not real robot evidence. Do not set `RB_ALLOW_REAL_ROBOT`,
+`RB_ALLOW_REAL_MOTION`, or `RB_ALLOW_REAL_CARTESIAN` for this runbook.
 
-P3-F depends on these earlier work packages:
+## Safety Contract
 
-- P1-C: per-arm simulator smoke exists and can run.
-- P2-C: state stream publishes FK TCP state with `tcp_stand` and
-  `has_valid_tcp_pose`.
-- P3-B: `CartesianController` can route simulator TCP commands through IK.
-- P3-C: TCP command protocol docs/tools exist, including
-  `rb_servo_server/tools/send_tcp_delta.py` and
-  `rb_servo_server/tools/send_tcp_pose_target.py`.
+The scripted runner refuses to continue when the selected config contains:
 
-The canonical simulator-only server config for this runbook is
-`rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`. It is the default
-used by `scripts/tcp_pose_simulator_acceptance.sh` and contains:
+- `run_mode: real`
+- `backend_type: rbpodo`
+- `cartesian_control.allow_in_real: true`
+- real controller IPs `172.28.60.200` or `172.28.60.201`
 
-```yaml
-kinematics:
-  enable: true
-  provider: pinocchio
-  urdf: path/to/rb3_730e.urdf
-  publish_tcp: true
-  ik:
-    enable: true
+The canonical config is
+`rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`. It enables
+Pinocchio FK/IK and simulator Cartesian control while keeping
+`cartesian_control.allow_in_real: false`.
 
-cartesian_control:
-  enable: true
-  allow_in_simulation: true
-  allow_in_real: false
-  warn_ik_duration_us: 3000
-  fail_ik_duration_us: 5000
+## Dependencies
 
-servo:
-  send_servo_commands: true
-```
-
-If those dependencies or config gates are missing, the scripted runner exits
-nonzero before motion commands and prints the missing item.
-
-The server binary must be built with `RB_SERVO_ENABLE_PINOCCHIO=ON`; the
-default hardware-free gate intentionally builds with Pinocchio off. The
-scripted runner checks `scripts/check_deps.sh --profile kinematics` and, for
-local starts, rejects a CMake build cache that shows Pinocchio was off. Its
-default server path is
-`rb_servo_server/build/pinocchio_gate/rb_servo_server`.
-
-For syntax-only environments where Pinocchio is not installed, pass
-`--allow-missing-pinocchio`. That mode still validates the script, command-tool
-dry runs, and selected config contract, then prints that runtime FK/IK
-acceptance was skipped because Pinocchio is unavailable before launching any
-simulator/server processes.
-
-## Start Per-Arm Simulator Stack
-
-For the compose operator stack:
+Build the Pinocchio-enabled server:
 
 ```bash
-make sim-up
-```
-
-The default compose stack does not publish the servo UDP command/state endpoints
-as a host-facing acceptance interface. Use it for operator-level simulator
-startup checks, or run the host-loopback sequence below when command/state
-artifacts are required.
-
-For artifact-producing host-loopback acceptance, use the script below. It starts
-one left simulator process, one right simulator process, and one
-`rb_servo_server` process unless `--assume-running` is passed:
-
-```bash
-bash scripts/codex_gate.sh HARDEN-06
-
 cmake -S rb_servo_server -B rb_servo_server/build/pinocchio_gate \
   -DCMAKE_BUILD_TYPE=Debug \
   -DRB_SERVO_ENABLE_RBPODO=OFF \
@@ -86,159 +36,153 @@ cmake -S rb_servo_server -B rb_servo_server/build/pinocchio_gate \
   -DRB_SERVO_ALLOW_FETCHCONTENT=OFF \
   -DBUILD_TESTING=ON
 cmake --build rb_servo_server/build/pinocchio_gate -j
-
-bash scripts/tcp_pose_simulator_acceptance.sh
 ```
 
-Use `--assume-running` only when a simulator stack is already reachable through
-the host-loopback command and state endpoints configured by the script.
+The script checks `scripts/check_deps.sh --profile hardware-free` and
+`scripts/check_deps.sh --profile kinematics`. If Pinocchio is unavailable, the
+runner fails before runtime acceptance. Use `--allow-missing-pinocchio` only for
+preflight-only validation; it does not fake a pass.
 
-## Manual Acceptance Sequence
+## Run
 
-The command examples in this section assume host-loopback command/state
-endpoints. For a manual host-loopback run, start the same three processes the
-script starts: left simulator, right simulator, and `rb_servo_server` with an
-FK/IK-enabled simulator config. Do not use a real-mode or `rbpodo` config.
-
-1. Start the per-arm host-loopback simulator stack with an FK/IK-enabled
-   simulator config, or let the scripted runner start it:
-
-   ```bash
-   bash scripts/tcp_pose_simulator_acceptance.sh
-   ```
-
-2. Verify the state stream reports FK TCP pose for both arms:
-
-   ```text
-   left.tcp_stand != null
-   right.tcp_stand != null
-   left.has_valid_tcp_pose == true
-   right.has_valid_tcp_pose == true
-   ```
-
-3. Send `ArmMotion` if required by the protocol:
-
-   ```bash
-   python3 rb_servo_server/tools/send_arm_motion.py --host 127.0.0.1 --port 50010
-   ```
-
-4. Send a small stand-frame TCP delta:
-
-   ```bash
-   python3 rb_servo_server/tools/send_tcp_delta.py \
-     --endpoint udp://127.0.0.1:50010 \
-     --frame stand \
-     --left 0.005 0 0 0 0 0 \
-     --right 0 0 0 0 0 0
-   ```
-
-5. Verify the normal-motion result:
-
-   - command verdict is `Ok`
-   - no fault latch is set
-   - `q_sent_deg` / target q values are finite
-   - q remains within configured joint limits
-   - `left.cartesian_solve.ik_duration_us`,
-     `left.cartesian_solve.ik_iterations`, and `left.fk_duration_us` are
-     finite in the state stream
-   - IK latency is below the acceptance threshold for the 200 Hz loop:
-     p95 `ik_duration_us <= 3000` and max `ik_duration_us <= 5000`
-   - final left FK TCP `x` moves in the positive direction within tolerance
-   - right FK TCP pose remains within the no-motion tolerance
-
-6. Run the IK failure test by sending an unreachable stand-frame target:
-
-   ```bash
-   python3 rb_servo_server/tools/send_tcp_pose_target.py \
-     --endpoint udp://127.0.0.1:50010 \
-     --left 10 0 10 0 0 0
-   ```
-
-   Verify:
-
-   - verdict is `IkFailed` or an explicitly documented equivalent failure
-     verdict for a Cartesian dependency that is unavailable
-   - state reports `cartesian_solve.status`, `cartesian_solve.reason`,
-     `ik_duration_us`, `ik_iterations`, and `ik_timed_out`
-   - previous safe target is retained; no zero/default q target is sent
-   - no crash occurs and the state stream continues
-
-7. If supported safely in the simulator, validate `EmergencyStop` /
-   `ResetFault`:
-
-   - send `EmergencyStop`
-   - verify the emergency/fault latch is visible in state
-   - send `ResetFault`
-   - verify the stack returns to a safe hold state
-   - send a fresh `ArmMotion` before any later motion command
-
-## Scripted Runner
+Run all scenarios:
 
 ```bash
-bash scripts/tcp_pose_simulator_acceptance.sh \
-  --artifact-dir artifacts/tcp_pose_acceptance/manual
+bash scripts/tcp_pose_simulator_acceptance.sh --all
 ```
 
-Default behavior:
+Run a single scenario:
 
-- runs `scripts/check_deps.sh --profile hardware-free`
-- runs `scripts/check_deps.sh --profile kinematics` so missing Pinocchio/Eigen
-  fails before processes start unless `--allow-missing-pinocchio` is provided
-- verifies required TCP command tools exist and parse dry-run packets
-- verifies the server binary and simulator configs exist
-- verifies the selected server config declares simulator-only endpoints,
-  Pinocchio FK/TCP, IK, Cartesian simulation gates, and
-  `servo.send_servo_commands: true`
-- verifies published TCP poses retain finite RPY fields and publish normalized
-  `quaternion_xyzw: [qx, qy, qz, qw]` with scalar aliases that match the array
-- starts host-loopback left/right simulator processes and `rb_servo_server`
-- captures the state stream
-- sends `ArmMotion`
-- sends left `TcpDeltaStand` `+0.005 m x` and right zero delta
-- verifies `Ok`, no fault latch, finite q, joint limits, and TCP x direction
-- records FK/IK latency summary from `last_cartesian_solve` /
-  per-arm `cartesian_solve` state fields, including count, min, p50, p95, max,
-  timeout count, and iteration min/max
-- fails simulator acceptance if p95 IK latency is above `3000 us` or max IK
-  latency is above one 200 Hz loop period (`5000 us`)
-- sends an unreachable `TcpPoseTarget`
-- verifies `IkFailed`, previous safe q retention, and continued state stream
-- attempts simulator `EmergencyStop` / `ResetFault` unless skipped
+```bash
+bash scripts/tcp_pose_simulator_acceptance.sh --run-linear \
+  --artifact-dir artifacts/cartesian_acceptance/linear_debug
+```
 
-If P3-B/P3-C tools are missing, the script exits nonzero before starting the
-stack.
+Useful flags:
+
+```text
+--run-ptp
+--run-linear
+--run-twist-local
+--run-twist-stand
+--all
+--allow-missing-pinocchio
+--skip-estop-reset
+--artifact-dir DIR
+--server-config PATH
+--linear-duration-sec SEC
+--orientation-tolerance-rad RAD
+--line-tolerance-m M
+```
+
+Default thresholds:
+
+- final TCP position tolerance: `0.004 m`
+- quaternion angle tolerance: `0.005 rad`
+- linear path line-deviation tolerance: `0.002 m`
+- linear move duration: `1.0 s`
+- twist stream: `30 Hz` for about `1.0 s`
+
+## Acceptance Scenarios
+
+### A. TcpPoseTarget PTP
+
+The runner waits for valid FK TCP state, arms motion, sends a small absolute
+left-arm `TcpPoseTarget`, and verifies:
+
+- command verdict is `Ok`
+- no fault latch
+- final position error is below threshold
+- final quaternion angle error is below threshold
+- `q_sent_deg` is finite and inside configured joint limits
+
+Path linearity is intentionally not checked for PTP.
+
+### B. TcpLinearMove Constant Orientation
+
+The runner captures the initial left TCP pose, sends a `TcpLinearMove` with the
+same quaternion and a small position offset, then samples state throughout the
+move. It verifies:
+
+- `cartesian_solve.path_s` increases toward `1.0`
+- `path_done` becomes true
+- final position and orientation errors are below thresholds
+- max distance to the start-target line is below `--line-tolerance-m`
+- max quaternion angle from the start orientation is below
+  `--orientation-tolerance-rad`
+- no fault latch
+
+### C. TcpLinearMove Slerp
+
+The runner sends a small target orientation change with `orientation_mode:
+slerp`. It verifies final orientation reaches the target within tolerance and
+intermediate orientation progress remains finite and monotonic within a small
+drop allowance.
+
+### D. TcpTwistLocal Orientation Hold
+
+The runner streams `TcpTwistLocal` at 30 Hz with positive local `vx` and zero
+angular velocity. It verifies:
+
+- TCP moves primarily along the initial TCP local +X direction
+- orientation remains within the quaternion angle threshold
+- no fault latch
+- command source stays valid through repeated twist packets
+
+### E. TcpTwistStand Frame Conversion
+
+The runner streams `TcpTwistStand` with stand-frame +X velocity and zero angular
+velocity. It verifies motion projects along stand +X and orientation remains
+within threshold. This covers the lower-level stand-frame twist API path.
 
 ## Artifacts
 
-The script writes artifacts under
-`artifacts/tcp_pose_acceptance/<timestamp>/` by default:
+Artifacts are written under `artifacts/cartesian_acceptance/<timestamp>/` unless
+`--artifact-dir` is supplied:
 
 ```text
+summary.json
 tcp_pose_acceptance_summary.json
 state_stream.jsonl
-servo_log.csv
+command_packets.jsonl
 rb_servo_server.log
 left_simulator.log
 right_simulator.log
+servo_log.csv
+path_samples_left.csv
+path_samples_right.csv
 ```
 
-`tcp_pose_acceptance_summary.json` should include:
+`summary.json` includes pass/fail per scenario, maximum position/orientation
+errors, maximum line deviation, maximum path tracking error, IK timing, detected
+faults, config path, and git commit.
 
-```json
-{
-  "ik_latency_us": {
-    "count": 2,
-    "min": 120,
-    "p50": 130,
-    "p95": 140,
-    "max": 140,
-    "threshold_p95": 3000,
-    "threshold_max": 5000,
-    "timed_out_count": 0,
-    "iterations_min": 1,
-    "iterations_max": 4
-  }
-}
+Use `command_packets.jsonl` to replay or inspect what was sent. Use
+`path_samples_left.csv` for plotting path shape and `state_stream.jsonl` for
+raw telemetry.
+
+## Codex Gate
+
+The lightweight gate runs syntax/tool/docs checks:
+
+```bash
+./scripts/codex_gate.sh CART-HARDEN-05
 ```
 
-These artifacts are for debugging only and are ignored by git.
+The full simulator acceptance is intentionally opt-in:
+
+```bash
+CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
+```
+
+## Rerun Failed Scenario
+
+Inspect `summary.json` for the failed scenario name, then rerun only that path:
+
+```bash
+bash scripts/tcp_pose_simulator_acceptance.sh --run-twist-local \
+  --artifact-dir artifacts/cartesian_acceptance/twist_local_retry
+```
+
+The retry still uses only simulator endpoints and must not be pointed at real
+robot configs.

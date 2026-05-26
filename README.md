@@ -39,7 +39,7 @@ Start here, then follow component docs only for implementation details:
 - [docs/servo_backend_contract.md](docs/servo_backend_contract.md): MIG backend
   result contract and non-blocking servo-loop migration target.
 - [docs/runbooks/tcp_pose_simulator_acceptance.md](docs/runbooks/tcp_pose_simulator_acceptance.md):
-  simulator-only TCP Pose/Delta acceptance.
+  simulator-only Cartesian PTP, Linear, and Twist acceptance.
 - [docs/runbooks/camera_acceptance.md](docs/runbooks/camera_acceptance.md):
   real three-camera acceptance and policy-runner camera readiness criteria.
 - [calibration/active_calibration.yaml](calibration/active_calibration.yaml):

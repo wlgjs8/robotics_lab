@@ -169,11 +169,20 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"ik_fail_duration_exceeded", telemetry.ik_fail_duration_exceeded},
         {"warn_ik_duration_us", telemetry.warn_ik_duration_us},
         {"fail_ik_duration_us", telemetry.fail_ik_duration_us},
+        {"path_active", telemetry.path_active},
         {"path_s", telemetry.path_s},
         {"path_position_error_m", telemetry.path_position_error_m},
         {"path_orientation_error_rad", telemetry.path_orientation_error_rad},
         {"path_line_deviation_m", telemetry.path_line_deviation_m},
         {"path_done", telemetry.path_done},
+        {"linear_move_duration_sec", telemetry.linear_move_duration_sec},
+        {"linear_move_elapsed_sec", telemetry.linear_move_elapsed_sec},
+        {"orientation_mode", telemetry.orientation_mode},
+        {"twist_clamped", telemetry.twist_clamped},
+        {"requested_twist_linear_norm_m_s", telemetry.requested_twist_linear_norm_m_s},
+        {"requested_twist_angular_norm_rad_s", telemetry.requested_twist_angular_norm_rad_s},
+        {"applied_twist_linear_norm_m_s", telemetry.applied_twist_linear_norm_m_s},
+        {"applied_twist_angular_norm_rad_s", telemetry.applied_twist_angular_norm_rad_s},
     };
 }
 

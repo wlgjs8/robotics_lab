@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 #include "rb_servo/core/types.hpp"
@@ -150,12 +151,36 @@ struct ForceControlConfig {
     double max_rot_step_rad = 0.01;
 };
 
+struct LinearMoveConfig {
+    double min_duration_sec = 0.05;
+    double max_duration_sec = 10.0;
+    double default_linear_speed_m_s = 0.03;
+    double default_angular_speed_rad_s = 0.2;
+    LinearMoveOrientationMode default_orientation_mode = LinearMoveOrientationMode::Constant;
+};
+
+enum class CartesianLimitPolicy {
+    Clamp,
+    Reject
+};
+
 struct CartesianControlConfig {
     bool enable = true;
     bool allow_in_simulation = true;
     bool allow_in_real = false;
     double warn_ik_duration_us = 3000.0;
     double fail_ik_duration_us = 0.0;
+    double path_kp = 6.0;
+    double twist_orientation_hold_kp = 6.0;
+    double velocity_damping = 0.01;
+    double max_twist_linear_m_s = 0.03;
+    double max_twist_angular_rad_s = 0.2;
+    double max_linear_move_speed_m_s = 0.05;
+    double max_angular_move_speed_rad_s = 0.3;
+    std::optional<double> max_cartesian_step_m;
+    std::optional<double> max_cartesian_step_rad;
+    CartesianLimitPolicy exceed_limit_policy = CartesianLimitPolicy::Clamp;
+    LinearMoveConfig linear_move;
 };
 
 struct DualArmConfig {

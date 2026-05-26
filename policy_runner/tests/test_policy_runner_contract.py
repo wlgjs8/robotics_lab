@@ -190,6 +190,8 @@ class PolicyRunnerContractTest(unittest.TestCase):
             "simulator_spacemouse_joint_velocity.yaml": "spacemouse_joint_velocity",
             "simulator_tcp_delta.yaml": "tcp_delta",
             "simulator_spacemouse_cartesian.yaml": "spacemouse_cartesian",
+            "simulator_tcp_twist_local.yaml": "spacemouse_cartesian",
+            "simulator_dual_spacemouse_cartesian.yaml": "dual_spacemouse_cartesian",
         }
         for filename, action_source in examples.items():
             with self.subTest(filename=filename):
@@ -233,6 +235,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
             "spacemouse_joint_velocity",
             "tcp_delta",
             "spacemouse_cartesian",
+            "dual_spacemouse_cartesian",
         ):
             with self.subTest(action_source=action_source):
                 cfg = config_from_mapping(

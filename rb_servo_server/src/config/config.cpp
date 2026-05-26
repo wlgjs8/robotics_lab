@@ -157,6 +157,20 @@ ServoIoModel parseServoIoModel(const YAML::Node& node, const std::string& path) 
     fail("Unknown servo.io_model: " + value, node);
 }
 
+LinearMoveOrientationMode parseLinearMoveOrientationMode(const YAML::Node& node, const std::string& path) {
+    const std::string value = lower(asString(node, path));
+    if (value == "constant") return LinearMoveOrientationMode::Constant;
+    if (value == "slerp") return LinearMoveOrientationMode::Slerp;
+    fail("Unknown cartesian_control.linear_move.default_orientation_mode: " + value, node);
+}
+
+CartesianLimitPolicy parseCartesianLimitPolicy(const YAML::Node& node, const std::string& path) {
+    const std::string value = lower(asString(node, path));
+    if (value == "clamp") return CartesianLimitPolicy::Clamp;
+    if (value == "reject") return CartesianLimitPolicy::Reject;
+    fail("Unknown cartesian_control.exceed_limit_policy: " + value, node);
+}
+
 std::string getString(const YAML::Node& sec, const std::string& key, const std::string& fallback, const std::string& path) {
     return has(sec, key) ? asString(sec[key], path + "." + key) : fallback;
 }
@@ -401,6 +415,26 @@ void validateConfig(const DualArmConfig& cfg) {
     }
     validateNonNegativeFinite(cfg.cartesian_control.warn_ik_duration_us, "cartesian_control.warn_ik_duration_us");
     validateNonNegativeFinite(cfg.cartesian_control.fail_ik_duration_us, "cartesian_control.fail_ik_duration_us");
+    validatePositiveFinite(cfg.cartesian_control.path_kp, "cartesian_control.path_kp");
+    validatePositiveFinite(cfg.cartesian_control.twist_orientation_hold_kp, "cartesian_control.twist_orientation_hold_kp");
+    validatePositiveFinite(cfg.cartesian_control.velocity_damping, "cartesian_control.velocity_damping");
+    validatePositiveFinite(cfg.cartesian_control.max_twist_linear_m_s, "cartesian_control.max_twist_linear_m_s");
+    validatePositiveFinite(cfg.cartesian_control.max_twist_angular_rad_s, "cartesian_control.max_twist_angular_rad_s");
+    validatePositiveFinite(cfg.cartesian_control.max_linear_move_speed_m_s, "cartesian_control.max_linear_move_speed_m_s");
+    validatePositiveFinite(cfg.cartesian_control.max_angular_move_speed_rad_s, "cartesian_control.max_angular_move_speed_rad_s");
+    if (cfg.cartesian_control.max_cartesian_step_m.has_value()) {
+        validatePositiveFinite(*cfg.cartesian_control.max_cartesian_step_m, "cartesian_control.max_cartesian_step_m");
+    }
+    if (cfg.cartesian_control.max_cartesian_step_rad.has_value()) {
+        validatePositiveFinite(*cfg.cartesian_control.max_cartesian_step_rad, "cartesian_control.max_cartesian_step_rad");
+    }
+    validatePositiveFinite(cfg.cartesian_control.linear_move.min_duration_sec, "cartesian_control.linear_move.min_duration_sec");
+    validatePositiveFinite(cfg.cartesian_control.linear_move.max_duration_sec, "cartesian_control.linear_move.max_duration_sec");
+    validatePositiveFinite(cfg.cartesian_control.linear_move.default_linear_speed_m_s, "cartesian_control.linear_move.default_linear_speed_m_s");
+    validatePositiveFinite(cfg.cartesian_control.linear_move.default_angular_speed_rad_s, "cartesian_control.linear_move.default_angular_speed_rad_s");
+    if (cfg.cartesian_control.linear_move.max_duration_sec < cfg.cartesian_control.linear_move.min_duration_sec) {
+        throw std::runtime_error("cartesian_control.linear_move.max_duration_sec must be >= min_duration_sec");
+    }
 
     if (cfg.kinematics.enable) {
         const std::string provider = lower(cfg.kinematics.provider);
@@ -750,6 +784,17 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "allow_in_real",
             "warn_ik_duration_us",
             "fail_ik_duration_us",
+            "path_kp",
+            "twist_orientation_hold_kp",
+            "velocity_damping",
+            "max_twist_linear_m_s",
+            "max_twist_angular_rad_s",
+            "max_linear_move_speed_m_s",
+            "max_angular_move_speed_rad_s",
+            "max_cartesian_step_m",
+            "max_cartesian_step_rad",
+            "exceed_limit_policy",
+            "linear_move",
         }, "cartesian_control");
         if (has(sec, "enable")) cfg.cartesian_control.enable = asBool(sec["enable"], "cartesian_control.enable");
         if (has(sec, "allow_in_simulation")) {
@@ -767,6 +812,74 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "fail_ik_duration_us")) {
             cfg.cartesian_control.fail_ik_duration_us =
                 asDouble(sec["fail_ik_duration_us"], "cartesian_control.fail_ik_duration_us");
+        }
+        if (has(sec, "path_kp")) {
+            cfg.cartesian_control.path_kp = asDouble(sec["path_kp"], "cartesian_control.path_kp");
+        }
+        if (has(sec, "twist_orientation_hold_kp")) {
+            cfg.cartesian_control.twist_orientation_hold_kp =
+                asDouble(sec["twist_orientation_hold_kp"], "cartesian_control.twist_orientation_hold_kp");
+        }
+        if (has(sec, "velocity_damping")) {
+            cfg.cartesian_control.velocity_damping = asDouble(sec["velocity_damping"], "cartesian_control.velocity_damping");
+        }
+        if (has(sec, "max_twist_linear_m_s")) {
+            cfg.cartesian_control.max_twist_linear_m_s =
+                asDouble(sec["max_twist_linear_m_s"], "cartesian_control.max_twist_linear_m_s");
+        }
+        if (has(sec, "max_twist_angular_rad_s")) {
+            cfg.cartesian_control.max_twist_angular_rad_s =
+                asDouble(sec["max_twist_angular_rad_s"], "cartesian_control.max_twist_angular_rad_s");
+        }
+        if (has(sec, "max_linear_move_speed_m_s")) {
+            cfg.cartesian_control.max_linear_move_speed_m_s =
+                asDouble(sec["max_linear_move_speed_m_s"], "cartesian_control.max_linear_move_speed_m_s");
+        }
+        if (has(sec, "max_angular_move_speed_rad_s")) {
+            cfg.cartesian_control.max_angular_move_speed_rad_s =
+                asDouble(sec["max_angular_move_speed_rad_s"], "cartesian_control.max_angular_move_speed_rad_s");
+        }
+        if (has(sec, "max_cartesian_step_m")) {
+            cfg.cartesian_control.max_cartesian_step_m =
+                asDouble(sec["max_cartesian_step_m"], "cartesian_control.max_cartesian_step_m");
+        }
+        if (has(sec, "max_cartesian_step_rad")) {
+            cfg.cartesian_control.max_cartesian_step_rad =
+                asDouble(sec["max_cartesian_step_rad"], "cartesian_control.max_cartesian_step_rad");
+        }
+        if (has(sec, "exceed_limit_policy")) {
+            cfg.cartesian_control.exceed_limit_policy =
+                parseCartesianLimitPolicy(sec["exceed_limit_policy"], "cartesian_control.exceed_limit_policy");
+        }
+        if (has(sec, "linear_move")) {
+            const YAML::Node linear = sec["linear_move"];
+            validateAllowedKeys(linear, {
+                "min_duration_sec",
+                "max_duration_sec",
+                "default_linear_speed_m_s",
+                "default_angular_speed_rad_s",
+                "default_orientation_mode",
+            }, "cartesian_control.linear_move");
+            if (has(linear, "min_duration_sec")) {
+                cfg.cartesian_control.linear_move.min_duration_sec =
+                    asDouble(linear["min_duration_sec"], "cartesian_control.linear_move.min_duration_sec");
+            }
+            if (has(linear, "max_duration_sec")) {
+                cfg.cartesian_control.linear_move.max_duration_sec =
+                    asDouble(linear["max_duration_sec"], "cartesian_control.linear_move.max_duration_sec");
+            }
+            if (has(linear, "default_linear_speed_m_s")) {
+                cfg.cartesian_control.linear_move.default_linear_speed_m_s =
+                    asDouble(linear["default_linear_speed_m_s"], "cartesian_control.linear_move.default_linear_speed_m_s");
+            }
+            if (has(linear, "default_angular_speed_rad_s")) {
+                cfg.cartesian_control.linear_move.default_angular_speed_rad_s =
+                    asDouble(linear["default_angular_speed_rad_s"], "cartesian_control.linear_move.default_angular_speed_rad_s");
+            }
+            if (has(linear, "default_orientation_mode")) {
+                cfg.cartesian_control.linear_move.default_orientation_mode =
+                    parseLinearMoveOrientationMode(linear["default_orientation_mode"], "cartesian_control.linear_move.default_orientation_mode");
+            }
         }
     }
 

@@ -31,6 +31,7 @@ from rb_servo_gui.app import (
     _pose_orientation_wxyz,
     _pose_wxyz,
     _quat_to_matrix,
+    _send_tcp_linear_move_from_marker,
     _sim_readiness_from_env,
     _tcp_local_delta_from_target,
     _tcp_frame_mode,
@@ -428,6 +429,39 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(packet["right"]["mode"], "TcpDeltaLocal")
         self.assertEqual(packet["right"]["tcp_delta_local"], list(delta))
 
+    def test_tcp_linear_move_packet_builder_uses_pose_object_with_quaternion(self):
+        client = RecordingClient()
+        pose = (0.35, 0.10, 0.45, 0.0, 0.0, 0.0)
+        quaternion = (0.0, 0.0, 0.0, 1.0)
+        packet = client.build_tcp_linear_move(
+            left_pose=pose,
+            left_quaternion_xyzw=quaternion,
+            duration_sec=2.0,
+            linear_speed_m_s=0.03,
+            angular_speed_rad_s=0.2,
+            orientation_mode="constant",
+        )
+        self.assertEqual(packet["schema_version"], 1)
+        self.assertEqual(packet["mode"], "Hold")
+        self.assertEqual(packet["left"]["mode"], "TcpLinearMove")
+        self.assertEqual(packet["right"], {})
+        self.assertEqual(packet["left"]["duration_sec"], 2.0)
+        self.assertEqual(packet["left"]["linear_speed_m_s"], 0.03)
+        self.assertEqual(packet["left"]["angular_speed_rad_s"], 0.2)
+        self.assertEqual(packet["left"]["orientation_mode"], "constant")
+        self.assertEqual(
+            packet["left"]["target_tcp_stand"],
+            {
+                "x": 0.35,
+                "y": 0.10,
+                "z": 0.45,
+                "rx": 0.0,
+                "ry": 0.0,
+                "rz": 0.0,
+                "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+        )
+
     def test_tcp_delta_stand_enabled_only_for_simulator_with_fk_and_feature_flag(self):
         state = self.tcp_available_state()
         _, client, safety = self.make_safety(
@@ -492,6 +526,21 @@ class GuiContractsTest(unittest.TestCase):
             },
         )
 
+        ok, reason = safety.send_tcp_linear_move(
+            left_pose=pose,
+            left_quaternion_xyzw=(0.0, 0.0, 1.0, 0.0),
+            duration_sec=2.0,
+            linear_speed_m_s=0.03,
+            angular_speed_rad_s=0.2,
+            orientation_mode="slerp",
+        )
+        self.assertTrue(ok, reason)
+        packet = client.sent_packets[-1]
+        self.assertEqual(packet["left"]["mode"], "TcpLinearMove")
+        self.assertEqual(packet["left"]["duration_sec"], 2.0)
+        self.assertEqual(packet["left"]["orientation_mode"], "slerp")
+        self.assertEqual(packet["left"]["target_tcp_stand"]["quaternion_xyzw"], [0.0, 0.0, 1.0, 0.0])
+
     def test_tcp_delta_stand_real_mode_disabled_even_with_feature_flag(self):
         _, client, safety = self.make_safety(
             self.tcp_available_state(),
@@ -508,7 +557,11 @@ class GuiContractsTest(unittest.TestCase):
         ok, reason = safety.send_tcp_delta_local("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
         self.assertFalse(ok)
         self.assertIn("real mode TCP command disabled", reason)
+        ok, reason = safety.send_tcp_linear_move(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0), duration_sec=1.0)
+        self.assertFalse(ok)
+        self.assertIn("real mode TCP command disabled", reason)
         self.assertTrue(safety.control_disabled_states()["tcp_pose"])
+        self.assertTrue(safety.control_disabled_states()["tcp_linear"])
         self.assertEqual(client.sent_packets, [])
 
     def test_tcp_delta_stand_requires_simulator_backend_fk_and_readiness(self):
@@ -535,6 +588,9 @@ class GuiContractsTest(unittest.TestCase):
             enable_tcp_pose=True,
         )
         self.assertIn("FK/TCP pose unavailable", fk_safety.tcp_command_disabled_reason("left"))
+        ok, reason = fk_safety.send_tcp_linear_move(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0), duration_sec=1.0)
+        self.assertFalse(ok)
+        self.assertIn("FK/TCP pose unavailable", reason)
 
         _, _, cart_safety = self.make_safety(
             state,
@@ -565,6 +621,9 @@ class GuiContractsTest(unittest.TestCase):
         ok, reason = stale_safety.send_tcp_delta_local("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
         self.assertFalse(ok)
         self.assertIn("state stream", reason)
+        ok, reason = stale_safety.send_tcp_linear_move(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0), duration_sec=1.0)
+        self.assertFalse(ok)
+        self.assertIn("state stream", reason)
         self.assertEqual(client.sent_packets, [])
 
         faulted = self.tcp_available_state(fault_latched=True, fault_reason="test fault")
@@ -581,6 +640,9 @@ class GuiContractsTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("fault", reason)
         ok, reason = fault_safety.send_tcp_delta_local("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        self.assertIn("fault", reason)
+        ok, reason = fault_safety.send_tcp_linear_move(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0), duration_sec=1.0)
         self.assertFalse(ok)
         self.assertIn("fault", reason)
         self.assertEqual(client.sent_packets, [])
@@ -809,6 +871,38 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(target["quaternion_xyzw"], list(_wxyz_to_xyzw(handles["left_tcp_target_wxyz"])))
         self.assertEqual(packet["right"], {})
 
+    def test_tcp_linear_marker_send_uses_absolute_target_with_quaternion(self):
+        state = self.tcp_available_state()
+        _, client, safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="simulator",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+        )
+        yaw_90_pose = (0.31, 0.12, 0.44, 0.0, 0.0, math.pi / 2.0)
+        handles = {
+            "left_tcp_target_pose": yaw_90_pose,
+            "left_tcp_target_wxyz": _pose_wxyz(yaw_90_pose),
+        }
+        ok, reason = _send_tcp_linear_move_from_marker(
+            safety,
+            handles,
+            "left",
+            duration_sec=2.0,
+            linear_speed_m_s=0.03,
+            angular_speed_rad_s=0.2,
+            orientation_mode="constant",
+        )
+        self.assertTrue(ok, reason)
+        packet = client.sent_packets[-1]
+        self.assertEqual(packet["mode"], "Hold")
+        self.assertEqual(packet["left"]["mode"], "TcpLinearMove")
+        self.assertNotIn("tcp_delta_local", packet["left"])
+        self.assertEqual(packet["left"]["target_tcp_stand"]["quaternion_xyzw"], list(_wxyz_to_xyzw(handles["left_tcp_target_wxyz"])))
+
     def test_tcp_frame_defaults_to_local_and_updates_button_colors(self):
         handles = {
             "tcp_frame_buttons": {
@@ -872,6 +966,11 @@ class GuiContractsTest(unittest.TestCase):
             "ik_iterations": 7,
             "ik_duration_us": 125.0,
             "ik_timed_out": False,
+            "path_active": True,
+            "path_s": 0.25,
+            "path_line_deviation_m": 0.0004,
+            "path_orientation_error_rad": 0.001,
+            "path_done": False,
         }
         state["right"]["cartesian_solve"] = {
             "attempted": True,
@@ -883,6 +982,10 @@ class GuiContractsTest(unittest.TestCase):
             "ik_timed_out": True,
         }
         store, _, _ = self.make_safety(state)
+        self.assertIsNotNone(store.latest().left.cartesian_solve)
+        self.assertEqual(store.latest().left.cartesian_solve.orientation_error_rad, 0.0025)
+        self.assertEqual(store.latest().left.cartesian_solve.path_line_deviation_m, 0.0004)
+        self.assertEqual(store.latest().left.cartesian_solve.path_s, 0.25)
         status = _format_cartesian_solve_status(store.latest(), stale=False)
         self.assertIn("left ok", status)
         self.assertIn("pos_err=0.0012 m", status)
@@ -890,15 +993,27 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("iter=7", status)
         self.assertIn("dur=125 us", status)
         self.assertIn("timed_out=False", status)
+        self.assertIn("path_active=True", status)
+        self.assertIn("path_s=0.250", status)
+        self.assertIn("line_dev=0.0004 m", status)
+        self.assertIn("path_ori_err=0.001 rad", status)
+        self.assertIn("path_done=False", status)
         self.assertIn("right failed", status)
         self.assertIn("timed_out=True", status)
         self.assertEqual(_format_cartesian_solve_status(store.latest(), stale=True), "State stream stale")
+
+    def test_cartesian_solve_parser_accepts_missing_fields(self):
+        store, _, _ = self.make_safety(sample_state())
+        latest = store.latest()
+        self.assertIsNone(latest.left.cartesian_solve)
+        self.assertIn("left=unavailable", _format_cartesian_solve_status(latest, stale=False))
 
     def test_visual_disabled_state_matches_safety_blocks(self):
         _, _, real_safety = self.make_safety(sample_state(), desired="real", observed="real")
         real_states = real_safety.control_disabled_states()
         self.assertTrue(real_states["jog"])
         self.assertTrue(real_states["tcp_jog"])
+        self.assertTrue(real_states["tcp_linear"])
         self.assertTrue(real_states["lifecycle:ArmMotion"])
         self.assertTrue(real_states["lifecycle:Hold"])
 
@@ -913,6 +1028,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertFalse(mock_states["lifecycle:ArmMotion"])
         self.assertTrue(mock_states["tcp_jog"])
         self.assertTrue(mock_states["tcp_pose"])
+        self.assertTrue(mock_states["tcp_linear"])
 
         _, _, sim_safety = self.make_safety(sample_state(), desired="simulation", observed="simulation", sim_ready=False)
         sim_states = sim_safety.control_disabled_states()

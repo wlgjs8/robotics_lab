@@ -77,3 +77,26 @@ logging:
 force_control:
   provider: null
   enable: false
+
+cartesian_control:
+  enable: true
+  allow_in_simulation: true
+  allow_in_real: false
+  warn_ik_duration_us: 3000
+  fail_ik_duration_us: 5000
+  path_kp: 6.0
+  twist_orientation_hold_kp: 6.0
+  velocity_damping: 0.01
+  max_twist_linear_m_s: 0.03
+  max_twist_angular_rad_s: 0.2
+  max_linear_move_speed_m_s: 0.05
+  max_angular_move_speed_rad_s: 0.3
+  max_cartesian_step_m: 0.002
+  max_cartesian_step_rad: 0.02
+  exceed_limit_policy: clamp
+  linear_move:
+    min_duration_sec: 0.05
+    max_duration_sec: 10.0
+    default_linear_speed_m_s: 0.03
+    default_angular_speed_rad_s: 0.2
+    default_orientation_mode: constant

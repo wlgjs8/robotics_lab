@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import warnings
 
 
 @dataclass(frozen=True)
@@ -85,11 +86,69 @@ class SpaceMouseCartesianConfig:
     selected_arm: str = "left"
     frame: str = "local"
     command_rate_hz: float = 30.0
-    max_linear_step_m: float = 0.002
-    max_angular_step_rad: float = 0.01
+    max_linear_velocity_m_s: float = 0.03
+    max_angular_velocity_rad_s: float = 0.2
     deadband: float = 0.08
     require_deadman: bool = True
     deadman_button: int = 0
+
+    def __post_init__(self) -> None:
+        if self.max_linear_velocity_m_s < 0.0:
+            raise ValueError("spacemouse_cartesian.max_linear_velocity_m_s must be non-negative")
+        if self.max_angular_velocity_rad_s < 0.0:
+            raise ValueError("spacemouse_cartesian.max_angular_velocity_rad_s must be non-negative")
+        if self.deadband < 0.0:
+            raise ValueError("spacemouse_cartesian.deadband must be non-negative")
+
+    @property
+    def max_linear_step_m(self) -> float:
+        return self.max_linear_velocity_m_s
+
+    @property
+    def max_angular_step_rad(self) -> float:
+        return self.max_angular_velocity_rad_s
+
+
+@dataclass(frozen=True)
+class SpaceMouseDeviceConfig:
+    device: str | None = None
+    path: str | None = None
+    device_number: int = 0
+    deadman_button: int = 0
+
+    def __post_init__(self) -> None:
+        if self.device_number < 0:
+            raise ValueError("spacemouse device_number must be non-negative")
+        if self.deadman_button < 0:
+            raise ValueError("spacemouse deadman_button must be non-negative")
+
+
+@dataclass(frozen=True)
+class DualSpaceMouseCartesianConfig:
+    left: SpaceMouseDeviceConfig = field(default_factory=SpaceMouseDeviceConfig)
+    right: SpaceMouseDeviceConfig = field(
+        default_factory=lambda: SpaceMouseDeviceConfig(device_number=1)
+    )
+    frame: str = "local"
+    max_linear_velocity_m_s: float = 0.03
+    max_angular_velocity_rad_s: float = 0.2
+    deadband: float = 0.08
+
+    def __post_init__(self) -> None:
+        if self.max_linear_velocity_m_s < 0.0:
+            raise ValueError("spacemouse_cartesian_dual.max_linear_velocity_m_s must be non-negative")
+        if self.max_angular_velocity_rad_s < 0.0:
+            raise ValueError("spacemouse_cartesian_dual.max_angular_velocity_rad_s must be non-negative")
+        if self.deadband < 0.0:
+            raise ValueError("spacemouse_cartesian_dual.deadband must be non-negative")
+
+    @property
+    def max_linear_step_m(self) -> float:
+        return self.max_linear_velocity_m_s
+
+    @property
+    def max_angular_step_rad(self) -> float:
+        return self.max_angular_velocity_rad_s
 
 
 @dataclass(frozen=True)
@@ -107,6 +166,9 @@ class PolicyRunnerConfig:
     tcp_delta: TcpDeltaConfig = field(default_factory=TcpDeltaConfig)
     spacemouse: SpaceMouseConfig = field(default_factory=SpaceMouseConfig)
     spacemouse_cartesian: SpaceMouseCartesianConfig = field(default_factory=SpaceMouseCartesianConfig)
+    spacemouse_cartesian_dual: DualSpaceMouseCartesianConfig = field(
+        default_factory=DualSpaceMouseCartesianConfig
+    )
     command_rate_hz: float = 30.0
 
 
@@ -132,6 +194,9 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         tcp_delta=_tcp_delta_config(_section(raw, "tcp_delta")),
         spacemouse=_spacemouse_config(_section(raw, "spacemouse")),
         spacemouse_cartesian=_spacemouse_cartesian_config(_section(raw, "spacemouse_cartesian")),
+        spacemouse_cartesian_dual=_spacemouse_cartesian_dual_config(
+            _section(raw, "spacemouse_cartesian_dual")
+        ),
         command_rate_hz=float(raw.get("command_rate_hz", 30.0)),
     )
 
@@ -198,7 +263,45 @@ def _spacemouse_config(raw: dict[str, Any]) -> SpaceMouseConfig:
 
 
 def _spacemouse_cartesian_config(raw: dict[str, Any]) -> SpaceMouseCartesianConfig:
+    _apply_spacemouse_cartesian_velocity_aliases(raw, "spacemouse_cartesian")
     return SpaceMouseCartesianConfig(**raw)
+
+
+def _spacemouse_cartesian_dual_config(raw: dict[str, Any]) -> DualSpaceMouseCartesianConfig:
+    left = _spacemouse_device_config(_section(raw, "left"))
+    right_raw = _section(raw, "right")
+    if "device_number" not in right_raw:
+        right_raw["device_number"] = 1
+    right = _spacemouse_device_config(right_raw)
+    top_level = {key: value for key, value in raw.items() if key not in {"left", "right"}}
+    _apply_spacemouse_cartesian_velocity_aliases(top_level, "spacemouse_cartesian_dual")
+    return DualSpaceMouseCartesianConfig(left=left, right=right, **top_level)
+
+
+def _spacemouse_device_config(raw: dict[str, Any]) -> SpaceMouseDeviceConfig:
+    if "device_number" in raw:
+        raw["device_number"] = int(raw["device_number"])
+    if "deadman_button" in raw:
+        raw["deadman_button"] = int(raw["deadman_button"])
+    return SpaceMouseDeviceConfig(**raw)
+
+
+def _apply_spacemouse_cartesian_velocity_aliases(raw: dict[str, Any], section: str) -> None:
+    aliases = (
+        ("max_linear_step_m", "max_linear_velocity_m_s"),
+        ("max_angular_step_rad", "max_angular_velocity_rad_s"),
+    )
+    for old_key, new_key in aliases:
+        if old_key not in raw:
+            continue
+        value = raw.pop(old_key)
+        warnings.warn(
+            f"{section}.{old_key} is deprecated; use {section}.{new_key} "
+            "because TcpTwistLocal/Stand fields are velocities, not one-shot deltas",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        raw.setdefault(new_key, value)
 
 
 def _tuple6(value: Any, label: str) -> tuple[float, ...]:

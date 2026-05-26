@@ -9,7 +9,17 @@ from typing import Any, Callable
 from .robot_state_client import CommandSourceLeaseReadback, StateStreamLeaseReadback, parse_udp_endpoint
 
 
-MOTION_MODES = {"ArmMotion", "JointTarget", "JointVelocity"}
+MOTION_MODES = {
+    "ArmMotion",
+    "JointTarget",
+    "JointVelocity",
+    "TcpPoseTarget",
+    "TcpDeltaStand",
+    "TcpDeltaLocal",
+    "TcpLinearMove",
+    "TcpTwistStand",
+    "TcpTwistLocal",
+}
 
 
 @dataclass(frozen=True)

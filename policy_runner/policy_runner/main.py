@@ -6,6 +6,7 @@ import time
 from typing import TextIO
 
 from .action_sources import (
+    DualSpaceMouseCartesianActionSource,
     HoldActionSource,
     JointSineActionSource,
     JointVelocityActionSource,
@@ -150,11 +151,33 @@ def make_action_source(config: PolicyRunnerConfig):
             reader=_LazyHidSpaceMouseReader(),
             selected_arm=config.spacemouse_cartesian.selected_arm,
             frame=config.spacemouse_cartesian.frame,
-            max_linear_step_m=config.spacemouse_cartesian.max_linear_step_m,
-            max_angular_step_rad=config.spacemouse_cartesian.max_angular_step_rad,
+            max_linear_velocity_m_s=config.spacemouse_cartesian.max_linear_velocity_m_s,
+            max_angular_velocity_rad_s=config.spacemouse_cartesian.max_angular_velocity_rad_s,
             deadband=config.spacemouse_cartesian.deadband,
             require_deadman=config.spacemouse_cartesian.require_deadman,
             deadman_button=config.spacemouse_cartesian.deadman_button,
+            timeout_sec=config.servo_command.timeout_sec,
+        )
+    if config.action_source == "dual_spacemouse_cartesian":
+        left = config.spacemouse_cartesian_dual.left
+        right = config.spacemouse_cartesian_dual.right
+        return DualSpaceMouseCartesianActionSource(
+            left_reader=_LazyHidSpaceMouseReader(
+                device=left.device,
+                path=left.path,
+                device_number=left.device_number,
+            ),
+            right_reader=_LazyHidSpaceMouseReader(
+                device=right.device,
+                path=right.path,
+                device_number=right.device_number,
+            ),
+            frame=config.spacemouse_cartesian_dual.frame,
+            max_linear_velocity_m_s=config.spacemouse_cartesian_dual.max_linear_velocity_m_s,
+            max_angular_velocity_rad_s=config.spacemouse_cartesian_dual.max_angular_velocity_rad_s,
+            deadband=config.spacemouse_cartesian_dual.deadband,
+            left_deadman_button=left.deadman_button,
+            right_deadman_button=right.deadman_button,
             timeout_sec=config.servo_command.timeout_sec,
         )
     raise ValueError(f"unknown action_source: {config.action_source}")
@@ -173,12 +196,25 @@ def _close_if_supported(value: object) -> None:
 
 
 class _LazyHidSpaceMouseReader(SpaceMouseReader):
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        device: str | None = None,
+        path: str | None = None,
+        device_number: int = 0,
+    ):
+        self._device = device
+        self._path = path
+        self._device_number = device_number
         self._reader: HidSpaceMouseReader | None = None
 
     def read(self, timeout_sec: float | None = None) -> SpaceMouseSample | None:
         if self._reader is None:
-            self._reader = HidSpaceMouseReader()
+            self._reader = HidSpaceMouseReader(
+                device=self._device,
+                path=self._path,
+                device_number=self._device_number,
+            )
         return self._reader.read(timeout_sec=timeout_sec)
 
     def close(self) -> None:

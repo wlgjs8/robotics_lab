@@ -44,6 +44,19 @@ bool isMotionMode(ControlMode mode) {
            mode == ControlMode::TcpTwistLocal;
 }
 
+bool isSyntheticHoldCommand(const DualArmCommand& command) {
+    return command.seq == 0 &&
+           command.left.mode == ControlMode::Hold &&
+           command.right.mode == ControlMode::Hold;
+}
+
+bool linearPathLeaseExpired(const CartesianServoPathState& path, uint64_t now_ns) {
+    return path.active &&
+           path.lease_enforced &&
+           path.lease_expires_time_ns > 0 &&
+           now_ns > path.lease_expires_time_ns;
+}
+
 bool isReadOnlyBlockedMode(ControlMode mode) {
     return mode == ControlMode::ArmMotion || isMotionMode(mode);
 }
@@ -55,8 +68,10 @@ bool isCommandModeMissingPayload(const ArmCommand& command) {
         case ControlMode::JointVelocity:
             return !command.has_joint_velocity;
         case ControlMode::TcpPoseTarget:
-        case ControlMode::TcpLinearMove:
             return !command.has_tcp_target;
+        case ControlMode::TcpLinearMove:
+            return !command.has_tcp_target ||
+                   (!command.has_linear_move_duration && !command.has_linear_move_linear_speed);
         case ControlMode::TcpDeltaStand:
             return !command.has_tcp_delta_stand;
         case ControlMode::TcpDeltaLocal:
@@ -115,6 +130,19 @@ CartesianSolveTelemetry cartesianUnavailableTelemetry(
     telemetry.warn_ik_duration_us = config.warn_ik_duration_us;
     telemetry.fail_ik_duration_us = config.fail_ik_duration_us;
     return telemetry;
+}
+
+ArmCommand linearMoveContinuationCommand(
+    const ArmCommand& hold_command,
+    const CartesianServoPathState& path
+) {
+    ArmCommand command = hold_command;
+    command.mode = ControlMode::TcpLinearMove;
+    command.tcp_target_stand = path.target_tcp_stand;
+    command.has_tcp_target = true;
+    command.linear_move_duration_sec = path.duration_sec;
+    command.has_linear_move_duration = true;
+    return command;
 }
 
 BackendCallSnapshot readCallSnapshot(
@@ -910,7 +938,7 @@ ArmCommand DualArmServoLoop::resolveArmCartesianDeltaCommand(
     LatchedCartesianTarget& latch
 ) {
     if (!isCartesianDeltaMode(command.mode)) {
-        clearLatchedCartesianTarget(command.arm_id);
+        latch = LatchedCartesianTarget{};
         return command;
     }
 
@@ -976,14 +1004,51 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         return target;
     }
 
-    if (isCartesianMode(command.left.mode) || isCartesianMode(command.right.mode)) {
+    const bool synthetic_hold = isSyntheticHoldCommand(command);
+    if (left_cartesian_servo_path_.active && !isValidJointState(left_state)) {
+        left_cartesian_servo_path_ = CartesianServoPathState{};
+    }
+    if (right_cartesian_servo_path_.active && !isValidJointState(right_state)) {
+        right_cartesian_servo_path_ = CartesianServoPathState{};
+    }
+    if (linearPathLeaseExpired(left_cartesian_servo_path_, command.host_time_ns)) {
+        left_cartesian_servo_path_ = CartesianServoPathState{};
+    }
+    if (linearPathLeaseExpired(right_cartesian_servo_path_, command.host_time_ns)) {
+        right_cartesian_servo_path_ = CartesianServoPathState{};
+    }
+    const bool continue_left_linear = synthetic_hold &&
+        left_cartesian_servo_path_.active &&
+        !left_cartesian_servo_path_.done;
+    const bool continue_right_linear = synthetic_hold &&
+        right_cartesian_servo_path_.active &&
+        !right_cartesian_servo_path_.done;
+
+    DualArmCommand effective_command = command;
+    if (continue_left_linear) {
+        effective_command.left = linearMoveContinuationCommand(command.left, left_cartesian_servo_path_);
+    }
+    if (continue_right_linear) {
+        effective_command.right = linearMoveContinuationCommand(command.right, right_cartesian_servo_path_);
+    }
+
+    if (!synthetic_hold) {
+        if (command.left.mode != ControlMode::TcpLinearMove) {
+            left_cartesian_servo_path_ = CartesianServoPathState{};
+        }
+        if (command.right.mode != ControlMode::TcpLinearMove) {
+            right_cartesian_servo_path_ = CartesianServoPathState{};
+        }
+    }
+
+    if (isCartesianMode(effective_command.left.mode) || isCartesianMode(effective_command.right.mode)) {
         bool cartesian_available =
             config_.cartesian_control.enable &&
             config_.kinematics.enable &&
             config_.kinematics.ik.enable &&
             kinematics_ != nullptr;
         if (cartesian_available) {
-            for (const ArmCommand* arm_command : {&command.left, &command.right}) {
+            for (const ArmCommand* arm_command : {&effective_command.left, &effective_command.right}) {
                 if (!isCartesianMode(arm_command->mode)) continue;
                 const RunMode run_mode = runModeForArm(config_, arm_command->arm_id);
                 if (arm_command->mode == ControlMode::TcpLinearMove ||
@@ -1005,14 +1070,14 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         }
         if (!cartesian_available) {
             if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
-            if (isCartesianMode(command.left.mode)) {
+            if (isCartesianMode(effective_command.left.mode)) {
                 left_last_cartesian_solve_ = cartesianUnavailableTelemetry(
                     left_state,
                     config_.cartesian_control,
                     "cartesian_control_unavailable"
                 );
             }
-            if (isCartesianMode(command.right.mode)) {
+            if (isCartesianMode(effective_command.right.mode)) {
                 right_last_cartesian_solve_ = cartesianUnavailableTelemetry(
                     right_state,
                     config_.cartesian_control,
@@ -1037,41 +1102,35 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             kinematics_
         );
 
-        if (command.left.mode != ControlMode::TcpLinearMove) {
-            left_cartesian_servo_path_ = CartesianServoPathState{};
-        }
-        if (command.right.mode != ControlMode::TcpLinearMove) {
-            right_cartesian_servo_path_ = CartesianServoPathState{};
-        }
-        if (command.left.mode != ControlMode::TcpTwistStand && command.left.mode != ControlMode::TcpTwistLocal) {
+        if (effective_command.left.mode != ControlMode::TcpTwistStand && effective_command.left.mode != ControlMode::TcpTwistLocal) {
             left_cartesian_twist_hold_ = CartesianTwistHoldState{};
         }
-        if (command.right.mode != ControlMode::TcpTwistStand && command.right.mode != ControlMode::TcpTwistLocal) {
+        if (effective_command.right.mode != ControlMode::TcpTwistStand && effective_command.right.mode != ControlMode::TcpTwistLocal) {
             right_cartesian_twist_hold_ = CartesianTwistHoldState{};
         }
 
-        const CartesianArmTargetResult left_cartesian_result = command.left.mode == ControlMode::TcpLinearMove
+        const CartesianArmTargetResult left_cartesian_result = effective_command.left.mode == ControlMode::TcpLinearMove
             ? cartesian_servo.computeLinearMoveTarget(
-                command.left,
+                effective_command.left,
                 left_state,
                 left_prev_sent_q_deg_,
                 runModeForArm(config_, ArmId::Left),
                 dt_sec,
-                command.seq,
+                continue_left_linear ? 0 : command.seq,
                 &left_cartesian_servo_path_
             )
-            : (command.left.mode == ControlMode::TcpTwistStand || command.left.mode == ControlMode::TcpTwistLocal)
+            : (effective_command.left.mode == ControlMode::TcpTwistStand || effective_command.left.mode == ControlMode::TcpTwistLocal)
             ? cartesian_servo.computeTwistTarget(
-                command.left,
+                effective_command.left,
                 left_state,
                 left_prev_sent_q_deg_,
                 runModeForArm(config_, ArmId::Left),
                 dt_sec,
                 &left_cartesian_twist_hold_
             )
-            : isCartesianMode(command.left.mode)
+            : isCartesianMode(effective_command.left.mode)
             ? cartesian.computeArmJointTarget(
-                command.left,
+                effective_command.left,
                 left_state,
                 left_prev_sent_q_deg_,
                 runModeForArm(config_, ArmId::Left)
@@ -1084,29 +1143,33 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             };
         target.left_q_target_deg = left_cartesian_result.q_target_deg;
         left_last_cartesian_solve_ = left_cartesian_result.telemetry;
+        if (command.left.mode == ControlMode::TcpLinearMove && left_cartesian_servo_path_.active) {
+            left_cartesian_servo_path_.lease_enforced = command.lease.enforce_lease;
+            left_cartesian_servo_path_.lease_expires_time_ns = command.lease.expires_time_ns;
+        }
 
-        const CartesianArmTargetResult right_cartesian_result = command.right.mode == ControlMode::TcpLinearMove
+        const CartesianArmTargetResult right_cartesian_result = effective_command.right.mode == ControlMode::TcpLinearMove
             ? cartesian_servo.computeLinearMoveTarget(
-                command.right,
+                effective_command.right,
                 right_state,
                 right_prev_sent_q_deg_,
                 runModeForArm(config_, ArmId::Right),
                 dt_sec,
-                command.seq,
+                continue_right_linear ? 0 : command.seq,
                 &right_cartesian_servo_path_
             )
-            : (command.right.mode == ControlMode::TcpTwistStand || command.right.mode == ControlMode::TcpTwistLocal)
+            : (effective_command.right.mode == ControlMode::TcpTwistStand || effective_command.right.mode == ControlMode::TcpTwistLocal)
             ? cartesian_servo.computeTwistTarget(
-                command.right,
+                effective_command.right,
                 right_state,
                 right_prev_sent_q_deg_,
                 runModeForArm(config_, ArmId::Right),
                 dt_sec,
                 &right_cartesian_twist_hold_
             )
-            : isCartesianMode(command.right.mode)
+            : isCartesianMode(effective_command.right.mode)
             ? cartesian.computeArmJointTarget(
-                command.right,
+                effective_command.right,
                 right_state,
                 right_prev_sent_q_deg_,
                 runModeForArm(config_, ArmId::Right)
@@ -1119,6 +1182,10 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             };
         target.right_q_target_deg = right_cartesian_result.q_target_deg;
         right_last_cartesian_solve_ = right_cartesian_result.telemetry;
+        if (command.right.mode == ControlMode::TcpLinearMove && right_cartesian_servo_path_.active) {
+            right_cartesian_servo_path_.lease_enforced = command.lease.enforce_lease;
+            right_cartesian_servo_path_.lease_expires_time_ns = command.lease.expires_time_ns;
+        }
 
         if (left_cartesian_result.verdict != SafetyVerdict::Ok ||
             right_cartesian_result.verdict != SafetyVerdict::Ok) {

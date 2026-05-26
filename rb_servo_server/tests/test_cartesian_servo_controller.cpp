@@ -73,7 +73,9 @@ public:
         (void)arm;
         (void)q_deg;
         (void)mount;
-        (void)damping;
+        last_twist_local = tcp_twist_local;
+        last_damping = damping;
+        ++velocity_call_count;
         rb_servo::CartesianVelocityResult result;
         result.success = true;
         result.qdot_deg_s[0] = tcp_twist_local.x * 100.0;
@@ -82,6 +84,10 @@ public:
         result.qdot_deg_s[5] = tcp_twist_local.rz * 100.0;
         return result;
     }
+
+    mutable rb_servo::Vec6 last_twist_local;
+    mutable double last_damping = 0.0;
+    mutable int velocity_call_count = 0;
 };
 
 rb_servo::RobotState stateFromJoints(
@@ -105,6 +111,8 @@ bool testPureTranslationTracksLineAndKeepsOrientation() {
     rb_servo::ArmMountConfig right_mount;
     right_mount.arm_id = rb_servo::ArmId::Right;
     rb_servo::CartesianControlConfig config;
+    config.max_linear_move_speed_m_s = 1.0;
+    config.max_angular_move_speed_rad_s = 1.0;
     rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
 
     rb_servo::ArmCommand command;
@@ -112,6 +120,8 @@ bool testPureTranslationTracksLineAndKeepsOrientation() {
     command.mode = rb_servo::ControlMode::TcpLinearMove;
     command.has_tcp_target = true;
     command.timeout_sec = 0.2;
+    command.linear_move_duration_sec = 0.2;
+    command.has_linear_move_duration = true;
     command.tcp_target_stand = {0.05, 0.0, 0.0, 0.0, 0.0, 0.0};
     command.tcp_target_stand.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
 
@@ -156,6 +166,8 @@ bool testRealModeBlocked() {
     command.arm_id = rb_servo::ArmId::Left;
     command.mode = rb_servo::ControlMode::TcpLinearMove;
     command.has_tcp_target = true;
+    command.linear_move_duration_sec = 1.0;
+    command.has_linear_move_duration = true;
     command.tcp_target_stand = {0.05, 0.0, 0.0, 0.0, 0.0, 0.0};
     rb_servo::CartesianServoPathState path;
     rb_servo::JointArray q = zeroJoints();
@@ -237,6 +249,86 @@ bool testTcpTwistRealModeBlocked() {
     return true;
 }
 
+bool testTcpTwistClampTelemetryAndDamping() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.max_twist_linear_m_s = 0.03;
+    config.max_twist_angular_rad_s = 0.2;
+    config.velocity_damping = 0.123;
+    config.exceed_limit_policy = rb_servo::CartesianLimitPolicy::Clamp;
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.3, 0.0, 0.0, 0.0, 0.0, 1.0};
+
+    rb_servo::CartesianTwistHoldState hold;
+    rb_servo::JointArray q = zeroJoints();
+    const rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q, left_mount),
+        q,
+        rb_servo::RunMode::Simulation,
+        0.01,
+        &hold
+    );
+
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(result.telemetry.twist_clamped);
+    RB_CHECK(std::abs(result.telemetry.requested_twist_linear_norm_m_s - 0.3) < kEpsilon);
+    RB_CHECK(std::abs(result.telemetry.requested_twist_angular_norm_rad_s - 1.0) < kEpsilon);
+    RB_CHECK(result.telemetry.applied_twist_linear_norm_m_s <= config.max_twist_linear_m_s + kEpsilon);
+    RB_CHECK(result.telemetry.applied_twist_angular_norm_rad_s <= config.max_twist_angular_rad_s + kEpsilon);
+    RB_CHECK(std::abs(kinematics->last_twist_local.x - config.max_twist_linear_m_s) < kEpsilon);
+    RB_CHECK(std::abs(kinematics->last_twist_local.rz - config.max_twist_angular_rad_s) < kEpsilon);
+    RB_CHECK(std::abs(kinematics->last_damping - config.velocity_damping) < kEpsilon);
+    RB_CHECK(kinematics->velocity_call_count == 1);
+    return true;
+}
+
+bool testTcpTwistRejectPolicy() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.max_twist_linear_m_s = 0.03;
+    config.max_twist_angular_rad_s = 0.2;
+    config.exceed_limit_policy = rb_servo::CartesianLimitPolicy::Reject;
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.031, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    rb_servo::CartesianTwistHoldState hold;
+    rb_servo::JointArray q = zeroJoints();
+    const rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q, left_mount),
+        q,
+        rb_servo::RunMode::Simulation,
+        0.01,
+        &hold
+    );
+
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::InvalidCommand);
+    RB_CHECK(result.reason == "cartesian_twist_limit_exceeded");
+    RB_CHECK(result.telemetry.requested_twist_linear_norm_m_s > config.max_twist_linear_m_s);
+    RB_CHECK(result.telemetry.applied_twist_linear_norm_m_s == 0.0);
+    RB_CHECK(kinematics->velocity_call_count == 0);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -244,5 +336,7 @@ int main() {
     if (!testRealModeBlocked()) return 1;
     if (!testTcpTwistLocalMovesLocalXAndHoldsOrientation()) return 1;
     if (!testTcpTwistRealModeBlocked()) return 1;
+    if (!testTcpTwistClampTelemetryAndDamping()) return 1;
+    if (!testTcpTwistRejectPolicy()) return 1;
     return 0;
 }
