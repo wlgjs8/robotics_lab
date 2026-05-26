@@ -157,6 +157,7 @@ struct LinearMoveConfig {
     double max_duration_sec = 10.0;
     double default_linear_speed_m_s = 0.03;
     double default_angular_speed_rad_s = 0.2;
+    double constant_orientation_tolerance_rad = 0.005;
     LinearMoveOrientationMode default_orientation_mode = LinearMoveOrientationMode::Constant;
 };
 

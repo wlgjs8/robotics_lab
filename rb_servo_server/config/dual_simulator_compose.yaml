@@ -125,4 +125,5 @@ cartesian_control:
     max_duration_sec: 10.0
     default_linear_speed_m_s: 0.03
     default_angular_speed_rad_s: 0.2
+    constant_orientation_tolerance_rad: 0.005
     default_orientation_mode: constant

@@ -39,6 +39,29 @@ bool near(double a, double b) {
     return std::abs(a - b) < 1e-12;
 }
 
+bool assertSimulatorCartesianConfig(const rb_servo::DualArmConfig& cfg) {
+    RB_CHECK(cfg.left_robot.backend_type == rb_servo::BackendType::Simulator);
+    RB_CHECK(cfg.right_robot.backend_type == rb_servo::BackendType::Simulator);
+    RB_CHECK(cfg.left_robot.run_mode == rb_servo::RunMode::Simulation);
+    RB_CHECK(cfg.right_robot.run_mode == rb_servo::RunMode::Simulation);
+    RB_CHECK(cfg.kinematics.enable);
+    RB_CHECK(cfg.kinematics.provider == "pinocchio");
+    RB_CHECK(std::filesystem::is_regular_file(cfg.kinematics.urdf));
+    RB_CHECK(cfg.kinematics.base_link == "world");
+    RB_CHECK(cfg.kinematics.tip_link == "tcp");
+    RB_CHECK(cfg.kinematics.joint_names.size() == rb_servo::kDof);
+    RB_CHECK(cfg.kinematics.q_units == "deg");
+    RB_CHECK(cfg.kinematics.publish_tcp);
+    RB_CHECK(cfg.kinematics.ik.enable);
+    RB_CHECK(cfg.cartesian_control.enable);
+    RB_CHECK(cfg.cartesian_control.allow_in_simulation);
+    RB_CHECK(!cfg.cartesian_control.allow_in_real);
+    RB_CHECK(near(cfg.cartesian_control.linear_move.constant_orientation_tolerance_rad, 0.005));
+    RB_CHECK(cfg.force_control.provider == "null");
+    RB_CHECK(!cfg.force_control.enable);
+    return true;
+}
+
 bool testRepositoryConfigsParse() {
     const std::filesystem::path config_dir =
         std::filesystem::path(__FILE__).parent_path().parent_path() / "config";
@@ -57,10 +80,7 @@ bool testRepositoryConfigsParse() {
 
     const rb_servo::DualArmConfig simulator =
         rb_servo::loadConfigFromYaml((config_dir / "dual_simulator.yaml").string());
-    RB_CHECK(simulator.left_robot.backend_type == rb_servo::BackendType::Simulator);
-    RB_CHECK(simulator.right_robot.backend_type == rb_servo::BackendType::Simulator);
-    RB_CHECK(simulator.left_robot.run_mode == rb_servo::RunMode::Simulation);
-    RB_CHECK(simulator.right_robot.run_mode == rb_servo::RunMode::Simulation);
+    RB_CHECK(assertSimulatorCartesianConfig(simulator));
     RB_CHECK(simulator.left_robot.simulator_control_endpoint == "tcp://127.0.0.1:50200");
     RB_CHECK(simulator.right_robot.simulator_control_endpoint == "tcp://127.0.0.1:50210");
     RB_CHECK(near(simulator.cartesian_control.path_kp_pos, 6.0));
@@ -69,6 +89,7 @@ bool testRepositoryConfigsParse() {
 
     const rb_servo::DualArmConfig simulator_worker =
         rb_servo::loadConfigFromYaml((config_dir / "dual_simulator_worker.yaml").string());
+    RB_CHECK(assertSimulatorCartesianConfig(simulator_worker));
     RB_CHECK(simulator_worker.servo.io_model == rb_servo::ServoIoModel::Worker);
     RB_CHECK(near(simulator_worker.servo.worker_read_period_sec, 0.01));
 
@@ -312,6 +333,8 @@ bool testCartesianControlTuningParsesAndValidates() {
         "  path_kp_ori: 7.5\n"
         "  twist_orientation_hold_kp: 8.0\n"
         "  twist_angular_deadband_rad_s: 0.002\n"
+        "  linear_move:\n"
+        "    constant_orientation_tolerance_rad: 0.004\n"
     );
     const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
     ::unlink(path.c_str());
@@ -319,6 +342,7 @@ bool testCartesianControlTuningParsesAndValidates() {
     RB_CHECK(near(cfg.cartesian_control.path_kp_ori, 7.5));
     RB_CHECK(near(cfg.cartesian_control.twist_orientation_hold_kp, 8.0));
     RB_CHECK(near(cfg.cartesian_control.twist_angular_deadband_rad_s, 0.002));
+    RB_CHECK(near(cfg.cartesian_control.linear_move.constant_orientation_tolerance_rad, 0.004));
 
     const std::string legacy_path = writeTempConfig(
         "cartesian-legacy-path-kp",
@@ -366,6 +390,18 @@ bool testCartesianControlTuningParsesAndValidates() {
     const bool bad_deadband_rejected = loadRejects(bad_deadband_path);
     ::unlink(bad_deadband_path.c_str());
     RB_CHECK(bad_deadband_rejected);
+
+    const std::string bad_constant_orientation_tolerance_path = writeTempConfig(
+        "cartesian-bad-constant-orientation-tolerance",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  linear_move:\n"
+        "    constant_orientation_tolerance_rad: 0\n"
+    );
+    const bool bad_constant_orientation_tolerance_rejected =
+        loadRejects(bad_constant_orientation_tolerance_path);
+    ::unlink(bad_constant_orientation_tolerance_path.c_str());
+    RB_CHECK(bad_constant_orientation_tolerance_rejected);
     return true;
 }
 

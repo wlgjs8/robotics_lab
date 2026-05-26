@@ -253,6 +253,59 @@ bool testLinearMoveUsesSeparatePositionAndOrientationGains() {
     return true;
 }
 
+bool testLinearMoveConstantOrientationToleranceIsConfigurable() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.linear_move.constant_orientation_tolerance_rad = 0.005;
+    config.max_linear_move_speed_m_s = 1.0;
+    config.max_angular_move_speed_rad_s = 1.0;
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpLinearMove;
+    command.has_tcp_target = true;
+    command.timeout_sec = 0.2;
+    command.linear_move_duration_sec = 0.2;
+    command.has_linear_move_duration = true;
+    command.tcp_target_stand = {0.01, 0.0, 0.0, 0.0, 0.0, 0.0};
+    command.tcp_target_stand.quaternion_xyzw = yawQuaternion(0.004);
+
+    rb_servo::CartesianServoPathState path;
+    rb_servo::JointArray q = zeroJoints();
+    rb_servo::CartesianArmTargetResult result = controller.computeLinearMoveTarget(
+        command,
+        stateFromJoints(*kinematics, q, left_mount),
+        q,
+        rb_servo::RunMode::Simulation,
+        0.005,
+        50,
+        &path
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(path.active);
+
+    command.tcp_target_stand.quaternion_xyzw = yawQuaternion(0.006);
+    rb_servo::CartesianServoPathState reject_path;
+    result = controller.computeLinearMoveTarget(
+        command,
+        stateFromJoints(*kinematics, q, left_mount),
+        q,
+        rb_servo::RunMode::Simulation,
+        0.005,
+        51,
+        &reject_path
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::InvalidCommand);
+    RB_CHECK(result.reason == "tcp_linear_move_constant_orientation_mismatch");
+    RB_CHECK(!reject_path.active);
+    return true;
+}
+
 bool testTcpTwistLocalMovesLocalXAndHoldsOrientation() {
     auto kinematics = std::make_shared<LinearFakeKinematics>();
     rb_servo::ArmMountConfig left_mount;
@@ -559,6 +612,7 @@ int main() {
     if (!testPureTranslationTracksLineAndKeepsOrientation()) return 1;
     if (!testRealModeBlocked()) return 1;
     if (!testLinearMoveUsesSeparatePositionAndOrientationGains()) return 1;
+    if (!testLinearMoveConstantOrientationToleranceIsConfigurable()) return 1;
     if (!testTcpTwistLocalMovesLocalXAndHoldsOrientation()) return 1;
     if (!testTcpTwistAngularDeadbandMaintainsHoldForNoise()) return 1;
     if (!testLinearMoveConstantOrientationNearPiStaysFinite()) return 1;

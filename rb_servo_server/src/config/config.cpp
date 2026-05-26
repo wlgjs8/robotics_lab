@@ -441,6 +441,10 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.cartesian_control.linear_move.max_duration_sec, "cartesian_control.linear_move.max_duration_sec");
     validatePositiveFinite(cfg.cartesian_control.linear_move.default_linear_speed_m_s, "cartesian_control.linear_move.default_linear_speed_m_s");
     validatePositiveFinite(cfg.cartesian_control.linear_move.default_angular_speed_rad_s, "cartesian_control.linear_move.default_angular_speed_rad_s");
+    validatePositiveFinite(
+        cfg.cartesian_control.linear_move.constant_orientation_tolerance_rad,
+        "cartesian_control.linear_move.constant_orientation_tolerance_rad"
+    );
     if (cfg.cartesian_control.linear_move.max_duration_sec < cfg.cartesian_control.linear_move.min_duration_sec) {
         throw std::runtime_error("cartesian_control.linear_move.max_duration_sec must be >= min_duration_sec");
     }
@@ -912,6 +916,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "max_duration_sec",
                 "default_linear_speed_m_s",
                 "default_angular_speed_rad_s",
+                "constant_orientation_tolerance_rad",
                 "default_orientation_mode",
             }, "cartesian_control.linear_move");
             if (has(linear, "min_duration_sec")) {
@@ -929,6 +934,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(linear, "default_angular_speed_rad_s")) {
                 cfg.cartesian_control.linear_move.default_angular_speed_rad_s =
                     asDouble(linear["default_angular_speed_rad_s"], "cartesian_control.linear_move.default_angular_speed_rad_s");
+            }
+            if (has(linear, "constant_orientation_tolerance_rad")) {
+                cfg.cartesian_control.linear_move.constant_orientation_tolerance_rad =
+                    asDouble(
+                        linear["constant_orientation_tolerance_rad"],
+                        "cartesian_control.linear_move.constant_orientation_tolerance_rad"
+                    );
             }
             if (has(linear, "default_orientation_mode")) {
                 cfg.cartesian_control.linear_move.default_orientation_mode =

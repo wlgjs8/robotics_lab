@@ -146,6 +146,8 @@ std::string validIkYaml(const std::string& urdf_path) {
         "  max_twist_angular_rad_s: 0.25\n"
         "  max_linear_move_speed_m_s: 0.06\n"
         "  max_angular_move_speed_rad_s: 0.35\n"
+        "  linear_move:\n"
+        "    constant_orientation_tolerance_rad: 0.004\n"
         "  max_cartesian_step_m: 0.003\n"
         "  max_cartesian_step_rad: 0.03\n"
         "  exceed_limit_policy: reject\n";
@@ -233,6 +235,7 @@ bool testIkConfigParsing() {
     RB_CHECK(std::fabs(cfg.cartesian_control.max_twist_angular_rad_s - 0.25) < 1e-12);
     RB_CHECK(std::fabs(cfg.cartesian_control.max_linear_move_speed_m_s - 0.06) < 1e-12);
     RB_CHECK(std::fabs(cfg.cartesian_control.max_angular_move_speed_rad_s - 0.35) < 1e-12);
+    RB_CHECK(std::fabs(cfg.cartesian_control.linear_move.constant_orientation_tolerance_rad - 0.004) < 1e-12);
     RB_CHECK(cfg.cartesian_control.max_cartesian_step_m.has_value());
     RB_CHECK(std::fabs(*cfg.cartesian_control.max_cartesian_step_m - 0.003) < 1e-12);
     RB_CHECK(cfg.cartesian_control.max_cartesian_step_rad.has_value());

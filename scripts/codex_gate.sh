@@ -321,6 +321,10 @@ run_doc_hygiene_gate() {
     echo "ERROR: README_DOCS_UPDATE.md must not exist; fold doc-update notes into source-of-truth docs" >&2
     return 1
   fi
+  if [[ -e rb_servo_server/docker-compose.yml ]]; then
+    echo "ERROR: rb_servo_server/docker-compose.yml must not exist; use repository-root docker-compose.yml via make sim-up" >&2
+    return 1
+  fi
 
   grep_existing "source-of-truth current review" docs/current_review.md
   grep_existing "REVIEW\.md" docs/current_review.md

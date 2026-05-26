@@ -39,6 +39,16 @@ class RbsimWorkerConfigContractTest(unittest.TestCase):
         self.assertRegex(text, r"io_model:\s*worker")
         self.assertRegex(text, r"send_servo_commands:\s*true")
         self.assertRegex(text, r"force_control:\s*\n\s*provider:\s*null\s*\n\s*enable:\s*false")
+        self.assertRegex(
+            text,
+            r"kinematics:\s*\n\s*enable:\s*true\s*\n\s*provider:\s*pinocchio",
+        )
+        self.assertRegex(text, r"publish_tcp:\s*true")
+        self.assertRegex(text, r"ik:\s*\n\s*enable:\s*true")
+        self.assertRegex(
+            text,
+            r"cartesian_control:\s*\n\s*enable:\s*true\s*\n\s*allow_in_simulation:\s*true\s*\n\s*allow_in_real:\s*false",
+        )
         self.assertNotRegex(text, r"172\.28\.60\.20[01]")
 
 

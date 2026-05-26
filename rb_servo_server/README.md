@@ -181,3 +181,6 @@ validated UDP JSON commands. The compose image builds with Pinocchio enabled,
 and the compose config enables simulator-only FK/IK for GUI TCP target tests.
 Real motion is disabled, and the GUI does not mount the raw Docker socket. See
 `docs/gui_operator_console.md`.
+
+The old component-local `rb_servo_server/docker-compose.yml` has been removed;
+use the repository-root `docker-compose.yml` through `make sim-up`.

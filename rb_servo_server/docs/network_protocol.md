@@ -257,9 +257,12 @@ Cartesian verdicts include `Ok`, `CartesianUnavailable`, `InvalidCommand`, and
 `IkFailed`. `TcpTwist*` and `TcpLinearMove` are bounded by server-side
 `cartesian_control` limits before Jacobian velocity solving. `TcpLinearMove`
 path feedback uses `cartesian_control.path_kp_pos` for position error and
-`cartesian_control.path_kp_ori` for orientation error. Real Cartesian motion
-remains closed unless real mode is explicitly enabled, Cartesian control is
-configured for real, and `RB_ALLOW_REAL_CARTESIAN=1` is set.
+`cartesian_control.path_kp_ori` for orientation error. Constant-orientation
+linear moves reject target orientation mismatch greater than
+`cartesian_control.linear_move.constant_orientation_tolerance_rad`; simulator
+configs set this to `0.005` rad. Real Cartesian motion remains closed unless
+real mode is explicitly enabled, Cartesian control is configured for real, and
+`RB_ALLOW_REAL_CARTESIAN=1` is set.
 
 ## Joint target command
 

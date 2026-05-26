@@ -10,8 +10,6 @@
 namespace rb_servo {
 namespace {
 
-constexpr double kConstantOrientationToleranceRad = 1e-6;
-
 CartesianOrientationInterpolation plannerOrientationMode(LinearMoveOrientationMode mode) {
     return mode == LinearMoveOrientationMode::Slerp
         ? CartesianOrientationInterpolation::Slerp
@@ -201,7 +199,7 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
             path_state->target_tcp_stand
         );
         if (path_state->orientation_mode == CartesianOrientationInterpolation::Constant &&
-            orientation_distance > kConstantOrientationToleranceRad) {
+            orientation_distance > config_.linear_move.constant_orientation_tolerance_rad) {
             *path_state = CartesianServoPathState{};
             result.verdict = SafetyVerdict::InvalidCommand;
             result.reason = "tcp_linear_move_constant_orientation_mismatch";
