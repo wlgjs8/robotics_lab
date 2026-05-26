@@ -30,6 +30,8 @@ _TCP_FRAME_STAND = "Stand/world"
 _TCP_FRAME_LOCAL = "TCP local"
 _TCP_FRAME_OPTIONS = (_TCP_FRAME_STAND, _TCP_FRAME_LOCAL)
 _JOINT_MONITOR_UNITS = ("deg", "rad")
+_TCP_LINEAR_ARM_OPTIONS = ("left", "right", "both")
+_TCP_LINEAR_ORIENTATION_MODES = ("constant", "slerp")
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -105,6 +107,31 @@ def _update_tcp_frame_buttons(handles: dict[str, Any]) -> None:
     for mode, button in handles.get("tcp_frame_buttons", {}).items():
         try:
             button.color = _mode_button_color(mode, selected)
+        except Exception:
+            pass
+
+
+def _tcp_linear_arm(handles: dict[str, Any]) -> str:
+    selected = handles.get("tcp_linear_arm", "both")
+    return selected if selected in _TCP_LINEAR_ARM_OPTIONS else "both"
+
+
+def _tcp_linear_orientation_mode(handles: dict[str, Any]) -> str:
+    selected = handles.get("tcp_linear_orientation_mode", "slerp")
+    return selected if selected in _TCP_LINEAR_ORIENTATION_MODES else "slerp"
+
+
+def _update_tcp_linear_selection_buttons(handles: dict[str, Any]) -> None:
+    selected_arm = _tcp_linear_arm(handles)
+    for arm, button in handles.get("tcp_linear_arm_buttons", {}).items():
+        try:
+            button.color = _mode_button_color(arm, selected_arm)
+        except Exception:
+            pass
+    selected_mode = _tcp_linear_orientation_mode(handles)
+    for mode, button in handles.get("tcp_linear_orientation_buttons", {}).items():
+        try:
+            button.color = _mode_button_color(mode, selected_mode)
         except Exception:
             pass
 
@@ -1174,11 +1201,36 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
             initial_value="current TCP target marker",
             disabled=True,
         )
-        tcp_linear_arm_group = server.gui.add_button_group("Arm", ("left", "right", "both"))
+        handles["tcp_linear_arm"] = "both"
+        handles["tcp_linear_arm_buttons"] = {}
+        for arm in _TCP_LINEAR_ARM_OPTIONS:
+            arm_button = server.gui.add_button(arm, color=_mode_button_color(arm, _tcp_linear_arm(handles)))
+            handles["tcp_linear_arm_buttons"][arm] = arm_button
+
+            @arm_button.on_click
+            def _(_: Any, arm: str = arm) -> None:
+                handles["tcp_linear_arm"] = arm
+                _update_tcp_linear_selection_buttons(handles)
+                handles["tcp_linear_status"].value = f"TCP Linear arm: {arm}"
+
         linear_duration = server.gui.add_slider("duration_sec", min=0.05, max=10.0, step=0.05, initial_value=2.0)
         linear_speed = server.gui.add_slider("linear_speed_m_s", min=0.001, max=0.05, step=0.001, initial_value=0.03)
         angular_speed = server.gui.add_slider("angular_speed_rad_s", min=0.01, max=0.3, step=0.01, initial_value=0.2)
-        orientation_mode_group = server.gui.add_button_group("orientation_mode", ("constant", "slerp"))
+        handles["tcp_linear_orientation_mode"] = "slerp"
+        handles["tcp_linear_orientation_buttons"] = {}
+        for orientation_mode in _TCP_LINEAR_ORIENTATION_MODES:
+            orientation_button = server.gui.add_button(
+                orientation_mode,
+                color=_mode_button_color(orientation_mode, _tcp_linear_orientation_mode(handles)),
+            )
+            handles["tcp_linear_orientation_buttons"][orientation_mode] = orientation_button
+
+            @orientation_button.on_click
+            def _(_: Any, orientation_mode: str = orientation_mode) -> None:
+                handles["tcp_linear_orientation_mode"] = orientation_mode
+                _update_tcp_linear_selection_buttons(handles)
+                handles["tcp_linear_status"].value = f"TCP Linear orientation_mode: {orientation_mode}"
+
         handles["tcp_linear_buttons"] = []
         send_linear_button = server.gui.add_button("Send TCP Linear Move")
         handles["tcp_linear_buttons"].append(send_linear_button)
@@ -1188,11 +1240,11 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
             ok, message = _send_tcp_linear_move_from_marker(
                 safety,
                 handles["scene"],
-                tcp_linear_arm_group.value,
+                _tcp_linear_arm(handles),
                 duration_sec=float(linear_duration.value),
                 linear_speed_m_s=float(linear_speed.value),
                 angular_speed_rad_s=float(angular_speed.value),
-                orientation_mode=orientation_mode_group.value,
+                orientation_mode=_tcp_linear_orientation_mode(handles),
             )
             handles["tcp_linear_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
@@ -1340,6 +1392,8 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
         _update_desired_mode_buttons(handles, safety.desired_mode)
     if "tcp_frame_buttons" in handles:
         _update_tcp_frame_buttons(handles)
+    if "tcp_linear_arm_buttons" in handles or "tcp_linear_orientation_buttons" in handles:
+        _update_tcp_linear_selection_buttons(handles)
     latest = store.latest()
     stale = store.is_stale()
     readiness = safety.readiness()

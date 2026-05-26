@@ -23,6 +23,12 @@ struct FaultContext {
     std::string state_after_source = "none";
 };
 
+struct LatchedDualFaultContext {
+    std::optional<FaultContext> top_level;
+    std::optional<FaultContext> left;
+    std::optional<FaultContext> right;
+};
+
 FaultContext classifyReadStateResult(
     const BackendResult<RobotState>& result,
     ArmId arm
@@ -34,6 +40,8 @@ FaultContext classifySendServoJResult(
 );
 
 FaultContext classifyDualSendResult(const DualSendResult& result);
+
+LatchedDualFaultContext classifyDualSendResultContexts(const DualSendResult& result);
 
 FaultContext classifyCommandValidation(
     SafetyVerdict verdict,

@@ -352,7 +352,7 @@ private:
 
 class ScriptedRbsimServer {
 public:
-    ScriptedRbsimServer() {
+    explicit ScriptedRbsimServer(int requested_port = 0) {
         listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fd_ < 0) throw std::runtime_error("socket failed");
 
@@ -362,7 +362,7 @@ public:
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = 0;
+        addr.sin_port = htons(static_cast<uint16_t>(requested_port));
         if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
             ::close(listen_fd_);
             throw std::runtime_error("bind failed");
@@ -788,6 +788,32 @@ int reserveLoopbackUdpPort() {
     return port;
 }
 
+int reserveLoopbackTcpPort() {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    int reuse = 1;
+    (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        ::close(fd);
+        return -1;
+    }
+
+    socklen_t len = sizeof(addr);
+    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+        ::close(fd);
+        return -1;
+    }
+    const int port = ntohs(addr.sin_port);
+    ::close(fd);
+    return port;
+}
+
 bool sendUdpJson(const std::string& host, int port, const std::string& payload) {
     const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return false;
@@ -990,10 +1016,14 @@ bool testRbsimBackendMapsStateAndFailureResponses() {
     }
     RB_CHECK(server->connectionCount() == 1);
     rb_servo::RbsimTransportCounters counters = backend.transportCounters();
+    RB_CHECK(counters.connect_attempts_total == 1);
+    RB_CHECK(counters.connect_failures_total == 0);
+    RB_CHECK(counters.connect_attempts_suppressed_total == 0);
     RB_CHECK(counters.connections_opened_total == 1);
     RB_CHECK(counters.reconnects_total == 0);
     RB_CHECK(counters.requests_total >= 20);
     RB_CHECK(counters.read_syscalls_total < counters.requests_total * 2);
+    RB_CHECK(counters.next_connect_attempt_delay_ms == 0);
     const double last_accepted_target0 = target[0];
 
     server->failNextSend();
@@ -1010,6 +1040,17 @@ bool testRbsimBackendMapsStateAndFailureResponses() {
     RB_CHECK(!rejected.state_after.has_value());
     RB_CHECK(rejected.state_after_source == "none");
     state_result = backend.readState();
+    RB_CHECK(!state_result.ok);
+    RB_CHECK(state_result.error.kind == rb_servo::BackendErrorKind::TransportConnectFailed);
+    RB_CHECK(state_result.error.name == "rbsim_connect_backoff");
+    RB_CHECK(state_result.error.retryable);
+    RB_CHECK(state_result.error.transport_fault);
+    counters = backend.transportCounters();
+    RB_CHECK(counters.connect_attempts_suppressed_total >= 1);
+    RB_CHECK(counters.last_connect_error_name == "rbsim_connect_backoff");
+    RB_CHECK(counters.next_connect_attempt_delay_ms > 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    state_result = backend.readState();
     RB_CHECK(state_result.ok);
     state = state_result.value;
     RB_CHECK(state.q_target_deg[0] == last_accepted_target0);
@@ -1017,6 +1058,9 @@ bool testRbsimBackendMapsStateAndFailureResponses() {
     counters = backend.transportCounters();
     RB_CHECK(counters.connections_opened_total == 2);
     RB_CHECK(counters.reconnects_total == 1);
+    RB_CHECK(counters.connect_attempts_total == 2);
+    RB_CHECK(counters.connect_failures_total == 0);
+    RB_CHECK(counters.next_connect_attempt_delay_ms == 0);
     RB_CHECK(counters.last_transport_error_kind.has_value());
     RB_CHECK(*counters.last_transport_error_kind == rb_servo::BackendErrorKind::TransportWriteFailed);
 
@@ -1074,13 +1118,95 @@ bool testRbsimPersistentTransportReconnectsAfterSocketDrop() {
     RB_CHECK(counters.reconnects_total == 0);
     RB_CHECK(counters.last_transport_error_kind.has_value());
     RB_CHECK(*counters.last_transport_error_kind == rb_servo::BackendErrorKind::TransportReadFailed);
+    RB_CHECK(counters.next_connect_attempt_delay_ms > 0);
 
+    const rb_servo::BackendResult<rb_servo::RobotState> suppressed = backend.readState();
+    RB_CHECK(!suppressed.ok);
+    RB_CHECK(suppressed.error.kind == rb_servo::BackendErrorKind::TransportConnectFailed);
+    RB_CHECK(suppressed.error.name == "rbsim_connect_backoff");
+    counters = backend.transportCounters();
+    RB_CHECK(counters.connect_attempts_suppressed_total >= 1);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
     const rb_servo::BackendResult<rb_servo::RobotState> recovered = backend.readState();
     RB_CHECK(recovered.ok);
     RB_CHECK(server->connectionCount() == 2);
     counters = backend.transportCounters();
     RB_CHECK(counters.connections_opened_total == 2);
     RB_CHECK(counters.reconnects_total == 1);
+    return true;
+}
+
+bool testRbsimReconnectBackoffSuppressesStormAndResetsAfterSuccess() {
+    const int port = reserveLoopbackTcpPort();
+    if (port <= 0) {
+        std::cerr << "[SKIP] loopback TCP port fixture unavailable\n";
+        return true;
+    }
+
+    rb_servo::BackendConfig cfg;
+    cfg.backend_type = rb_servo::BackendType::Rbsim;
+    cfg.run_mode = rb_servo::RunMode::Simulation;
+    cfg.name = "left_rbsim_backoff_test";
+    cfg.rbsim_control_endpoint = "tcp://127.0.0.1:" + std::to_string(port);
+    cfg.simulator_control_endpoint = cfg.rbsim_control_endpoint;
+    cfg.rbsim_request_timeout_sec = 0.05;
+    cfg.rbsim_connect_timeout_sec = 0.05;
+    cfg.rbsim_read_timeout_sec = 0.05;
+
+    rb_servo::RbsimBackend backend(rb_servo::ArmId::Left, cfg);
+    rb_servo::BackendResult<rb_servo::RobotState> first = backend.readState();
+    RB_CHECK(!first.ok);
+    RB_CHECK(first.error.kind == rb_servo::BackendErrorKind::TransportConnectFailed);
+    RB_CHECK(first.error.name == "rbsim_connect_failed");
+    RB_CHECK(first.error.retryable);
+    RB_CHECK(first.error.transport_fault);
+
+    rb_servo::RbsimTransportCounters counters = backend.transportCounters();
+    RB_CHECK(counters.connect_attempts_total == 1);
+    RB_CHECK(counters.connect_failures_total == 1);
+    RB_CHECK(counters.connect_attempts_suppressed_total == 0);
+    RB_CHECK(counters.connections_opened_total == 0);
+    RB_CHECK(counters.last_connect_error_name == "rbsim_connect_failed");
+    RB_CHECK(!counters.last_connect_error_message.empty());
+    RB_CHECK(counters.next_connect_attempt_delay_ms > 0);
+    RB_CHECK(counters.next_connect_attempt_delay_ms <= 50);
+
+    rb_servo::BackendResult<rb_servo::RobotState> second = backend.readState();
+    RB_CHECK(!second.ok);
+    RB_CHECK(second.error.kind == rb_servo::BackendErrorKind::TransportConnectFailed);
+    RB_CHECK(second.error.name == "rbsim_connect_backoff");
+    RB_CHECK(second.error.retryable);
+    RB_CHECK(second.error.transport_fault);
+
+    rb_servo::RbsimTransportCounters after_suppressed = backend.transportCounters();
+    RB_CHECK(after_suppressed.connect_attempts_total == counters.connect_attempts_total);
+    RB_CHECK(after_suppressed.connect_failures_total == counters.connect_failures_total);
+    RB_CHECK(after_suppressed.connect_attempts_suppressed_total == counters.connect_attempts_suppressed_total + 1);
+    RB_CHECK(after_suppressed.last_connect_error_name == "rbsim_connect_backoff");
+    RB_CHECK(contains(after_suppressed.last_connect_error_message, "next retry"));
+    RB_CHECK(after_suppressed.next_connect_attempt_delay_ms <= counters.next_connect_attempt_delay_ms);
+
+    std::unique_ptr<ScriptedRbsimServer> server;
+    try {
+        server = std::make_unique<ScriptedRbsimServer>(port);
+    } catch (const std::exception& exc) {
+        std::cerr << "[SKIP] rbsim fixed-port fixture unavailable: " << exc.what() << "\n";
+        return true;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    rb_servo::BackendResult<rb_servo::RobotState> recovered = backend.readState();
+    RB_CHECK(recovered.ok);
+    RB_CHECK(server->connectionCount() == 1);
+
+    rb_servo::RbsimTransportCounters recovered_counters = backend.transportCounters();
+    RB_CHECK(recovered_counters.connect_attempts_total == after_suppressed.connect_attempts_total + 1);
+    RB_CHECK(recovered_counters.connect_failures_total == after_suppressed.connect_failures_total);
+    RB_CHECK(recovered_counters.connections_opened_total == 1);
+    RB_CHECK(recovered_counters.reconnects_total == 0);
+    RB_CHECK(recovered_counters.next_connect_attempt_delay_ms == 0);
+    RB_CHECK(recovered_counters.read_syscalls_total > 0);
     return true;
 }
 
@@ -1255,7 +1381,7 @@ bool testRbsimSendFailureLatchesAndSnapshotsSendResult() {
     RB_CHECK(snapshot.fault_latched);
     RB_CHECK(snapshot.latched_fault_reason == rb_servo::SafetyVerdict::SendFailure);
     RB_CHECK(!snapshot.left_send_ok);
-    RB_CHECK(snapshot.right_send_ok);
+    RB_CHECK(snapshot.right_send_ok || snapshot.right_send_error_kind == "SuppressedByPolicy");
     RB_CHECK(loop.motionState() == rb_servo::ServerMotionState::FaultLatched);
     loop.stop();
     return true;
@@ -1315,7 +1441,11 @@ bool testRbsimStopFailureDoesNotReportStoppedState() {
     RB_CHECK(stop_result.error.name == "stop_failure_injected");
     RB_CHECK(stop_result.error.code == "2102");
 
-    const rb_servo::BackendResult<rb_servo::RobotState> state_result = backend.readState();
+    rb_servo::BackendResult<rb_servo::RobotState> state_result = backend.readState();
+    RB_CHECK(!state_result.ok);
+    RB_CHECK(state_result.error.name == "rbsim_connect_backoff");
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    state_result = backend.readState();
     RB_CHECK(state_result.ok);
     const rb_servo::RobotState state = state_result.value;
     RB_CHECK(state.connection_state == rb_servo::RobotConnectionState::Connected);
@@ -2760,6 +2890,9 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(!json.at("fault_context").at("latched").get<bool>());
     RB_CHECK(json.at("fault_context").at("motion_state").get<std::string>() == "Running");
     RB_CHECK(json.at("fault_context").at("backend_error_kind").is_null());
+    RB_CHECK(json.at("fault_context").at("top_level").is_null());
+    RB_CHECK(json.at("fault_context").at("left").is_null());
+    RB_CHECK(json.at("fault_context").at("right").is_null());
     RB_CHECK(json.at("logger_dropped_samples").get<uint64_t>() == 0);
     RB_CHECK(json.at("logger_health").at("ok").get<bool>());
     RB_CHECK(!json.at("mount_transform_deferred").get<bool>());
@@ -2783,6 +2916,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("left").at("cartesian_solve").at("path_orientation_error_rad").get<double>() == 0.004);
     RB_CHECK(json.at("left").at("cartesian_solve").at("path_line_deviation_m").get<double>() == 0.0005);
     RB_CHECK(!json.at("left").at("cartesian_solve").at("path_done").get<bool>());
+    RB_CHECK(!json.at("left").at("cartesian_solve").at("path_completion_hold").get<bool>());
+    RB_CHECK(json.at("left").at("cartesian_solve").at("path_elapsed_sec").get<double>() == 1.0);
     RB_CHECK(json.at("left").at("cartesian_solve").at("linear_move_duration_sec").get<double>() == 2.0);
     RB_CHECK(json.at("left").at("cartesian_solve").at("linear_move_elapsed_sec").get<double>() == 1.0);
     RB_CHECK(json.at("left").at("cartesian_solve").at("orientation_mode").get<std::string>() == "constant");
@@ -2826,6 +2961,20 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     latched_context.state_after_source = "response";
     latched_context.reason = "robot/controller fault during ReadState on left";
     snapshot.latched_fault_context = latched_context;
+    snapshot.left_latched_fault_context = latched_context;
+    rb_servo::LatchedFaultContextSnapshot right_latched_context;
+    right_latched_context.verdict = "SendFailure";
+    right_latched_context.domain = "Backend";
+    right_latched_context.arm = "right";
+    right_latched_context.backend_op = "SendServoJ";
+    right_latched_context.backend_error_kind = "TransportTimeout";
+    right_latched_context.backend_error_name = "send_timeout";
+    right_latched_context.retryable = true;
+    right_latched_context.recoverable = true;
+    right_latched_context.transport_fault = true;
+    right_latched_context.state_after_source = "none";
+    right_latched_context.reason = "transport failure during SendServoJ on right";
+    snapshot.right_latched_fault_context = right_latched_context;
 
     const nlohmann::json latched_json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
     RB_CHECK(latched_json.at("fault_context").at("latched").get<bool>());
@@ -2841,6 +2990,12 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(latched_json.at("fault_context").at("robot_fault").get<bool>());
     RB_CHECK(!latched_json.at("fault_context").at("transport_fault").get<bool>());
     RB_CHECK(latched_json.at("fault_context").at("state_after_source").get<std::string>() == "response");
+    RB_CHECK(latched_json.at("fault_context").at("top_level").at("backend_error_kind").get<std::string>() == "RobotFault");
+    RB_CHECK(latched_json.at("fault_context").at("left").at("backend_error_kind").get<std::string>() == "RobotFault");
+    RB_CHECK(latched_json.at("fault_context").at("left").at("arm").get<std::string>() == "left");
+    RB_CHECK(latched_json.at("fault_context").at("right").at("backend_error_kind").get<std::string>() == "TransportTimeout");
+    RB_CHECK(latched_json.at("fault_context").at("right").at("arm").get<std::string>() == "right");
+    RB_CHECK(latched_json.at("fault_context").at("right").at("transport_fault").get<bool>());
     RB_CHECK(latched_json.at("left").at("last_send").at("backend_error_kind").get<std::string>() == "SuppressedByPolicy");
 
     rb_servo::DualArmConfig worker_cfg = cfg;
@@ -3283,6 +3438,23 @@ bool testTcpLinearMoveUsesIkInSimulationOnly() {
     RB_CHECK(max_orientation_error < 1e-9);
     RB_CHECK(max_line_deviation < 2e-3);
     RB_CHECK(std::abs(kinematics->lastLeftTwist()->rz) < 1e-9);
+    rb_servo::ServoSnapshot done_snapshot;
+    RB_CHECK(waitUntil([&] {
+        done_snapshot = loop.latestSnapshot();
+        return done_snapshot.command.left.mode == rb_servo::ControlMode::Hold &&
+               done_snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok &&
+               done_snapshot.left_cartesian_solve.status == "ok" &&
+               done_snapshot.left_cartesian_solve.path_done &&
+               !done_snapshot.left_cartesian_solve.path_active &&
+               done_snapshot.left_cartesian_solve.path_s >= 1.0;
+    }, std::chrono::milliseconds(1500)));
+    sleepTicks();
+    const rb_servo::ServoSnapshot held_done_snapshot = loop.latestSnapshot();
+    RB_CHECK(held_done_snapshot.command.left.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(held_done_snapshot.left_cartesian_solve.status == "ok");
+    RB_CHECK(held_done_snapshot.left_cartesian_solve.path_done);
+    RB_CHECK(!held_done_snapshot.left_cartesian_solve.path_active);
+    RB_CHECK(held_done_snapshot.left_cartesian_solve.path_s >= 1.0);
     rb_servo::DualArmCommand replacement = command(rb_servo::ControlMode::Hold);
     replacement.seq = 2;
     replacement.left.mode = rb_servo::ControlMode::TcpLinearMove;
@@ -3836,6 +4008,65 @@ bool testRobotFaultSendClassifiesAsRobotStateFault() {
     return true;
 }
 
+bool testDualArmSendFaultLatchPreservesPerArmContexts() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.safety.stop_both_arms_on_single_arm_error = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left,
+            initial,
+            true,
+            rb_servo::BackendErrorKind::RobotFault
+        ),
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Right,
+            initial,
+            true,
+            rb_servo::BackendErrorKind::TransportTimeout
+        ),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.left.q_target_deg = joints(7.0);
+    target.right.q_target_deg = joints(7.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    buffer.setCommand(target);
+
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot current = loop.latestSnapshot();
+        return current.fault_latched &&
+               current.latched_fault_context.has_value() &&
+               current.left_latched_fault_context.has_value() &&
+               current.right_latched_fault_context.has_value();
+    }));
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+
+    RB_CHECK(snapshot.latched_fault_reason == rb_servo::SafetyVerdict::RobotStateError);
+    RB_CHECK(snapshot.latched_fault_context->arm == "left");
+    RB_CHECK(snapshot.latched_fault_context->backend_error_kind == "RobotFault");
+    RB_CHECK(snapshot.left_latched_fault_context->arm == "left");
+    RB_CHECK(snapshot.left_latched_fault_context->verdict == "RobotStateError");
+    RB_CHECK(snapshot.left_latched_fault_context->backend_error_kind == "RobotFault");
+    RB_CHECK(snapshot.left_latched_fault_context->backend_error_code == "2222");
+    RB_CHECK(snapshot.right_latched_fault_context->arm == "right");
+    RB_CHECK(snapshot.right_latched_fault_context->verdict == "SendFailure");
+    RB_CHECK(snapshot.right_latched_fault_context->domain == "Backend");
+    RB_CHECK(snapshot.right_latched_fault_context->backend_error_kind == "TransportTimeout");
+    RB_CHECK(snapshot.right_latched_fault_context->transport_fault);
+    return true;
+}
+
 bool testSuppressedByPolicySendDoesNotLatchFault() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
@@ -3883,6 +4114,7 @@ int main() {
     if (!testSimulatorConfigParsesCanonicalAndAliases()) return 1;
     if (!testRbsimBackendMapsStateAndFailureResponses()) return 1;
     if (!testRbsimPersistentTransportReconnectsAfterSocketDrop()) return 1;
+    if (!testRbsimReconnectBackoffSuppressesStormAndResetsAfterSuccess()) return 1;
     if (!testRbsimInvalidJointStateLatchesAndHoldsPreviousTarget()) return 1;
     if (!testRbsimPerArmDisconnectLatchesAndPublishesTruthfulSnapshot()) return 1;
     if (!testRbsimReadRobotFaultUsesFaultClassifierReason()) return 1;
@@ -3939,6 +4171,7 @@ int main() {
     if (!testSendFailureDoesNotAdvancePreviousTarget()) return 1;
     if (!testStopBothOnSendFailureLatchesFault()) return 1;
     if (!testRobotFaultSendClassifiesAsRobotStateFault()) return 1;
+    if (!testDualArmSendFaultLatchPreservesPerArmContexts()) return 1;
     if (!testSuppressedByPolicySendDoesNotLatchFault()) return 1;
     return 0;
 }

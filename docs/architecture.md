@@ -178,7 +178,7 @@ Real mode remains blocked.
 
 ### `TcpTwistLocal` / `TcpTwistStand`
 
-Streaming Cartesian velocity primitives. `TcpTwistLocal` is intended for SpaceMouse/local-frame teleop. `TcpTwistStand` is the stand-frame low-level API. Server-side Cartesian velocity limits, stale-state checks, deadman behavior, and command-source arbitration are required.
+Streaming Cartesian velocity primitives. `TcpTwistLocal` is intended for SpaceMouse/local-frame teleop. `TcpTwistStand` is the stand-frame low-level API. Server-side Cartesian velocity limits, the server-side angular deadband for orientation hold, stale-state checks, deadman behavior, and command-source arbitration are required.
 
 ### `TcpDeltaLocal` / `TcpDeltaStand`
 

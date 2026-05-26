@@ -152,7 +152,7 @@ Example config fields:
 
 ```yaml
 action_source: spacemouse_joint_velocity
-command_rate_hz: 30
+command_rate_hz: 100
 spacemouse:
   selected_arm: left
   max_joint_velocity_deg_s: [5, 5, 5, 8, 8, 10]
@@ -162,8 +162,8 @@ spacemouse:
   deadman_button: 0
 ```
 
-Keep `command_rate_hz` in the 30-60 Hz range. The servo loop runs faster; the
-policy runner should not attempt to publish at servo-loop frequency.
+The default `command_rate_hz` is 100 Hz. Valid values are 1-500 Hz; the policy
+runner should not attempt to publish above the servo-loop frequency.
 
 Hardware-free tests use `FakeSpaceMouseReader`. Real HID support is optional:
 
@@ -203,22 +203,26 @@ Example config fields:
 action_source: spacemouse_cartesian
 runtime:
   startup_timeout_sec: 5.0
-command_rate_hz: 30
+command_rate_hz: 100
 spacemouse_cartesian:
   selected_arm: left
   frame: local
   max_linear_velocity_m_s: 0.03
   max_angular_velocity_rad_s: 0.2
   deadband: 0.08
+  response_curve_gamma: 3.0
   require_deadman: true
   deadman_button: 0
 ```
 
-Button 0 is the default deadman switch. When it is released, the source emits
-no command. The Cartesian SpaceMouse source always requires a deadman switch.
-Linear and angular twist components are clamped as velocities. Deprecated
-`max_linear_step_m` and `max_angular_step_rad` aliases still parse with a
-warning for migration only.
+Button 0 is the default deadman switch. When an armed source is released, it
+emits one explicit zero `TcpTwistLocal` before returning to no-command idle.
+The Cartesian SpaceMouse source always requires a deadman switch.
+`response_curve_gamma` controls the soft deadband response; the default 3.0 is
+cubic, lower values approach linear, and higher values give more precision near
+center. Linear and angular twist components are clamped as velocities.
+Deprecated `max_linear_step_m` and `max_angular_step_rad` aliases still parse
+with a warning for migration only.
 
 `dual_spacemouse_cartesian` keeps one `policy_runner` command source and opens
 two SpaceMouse devices. The left and right samples are aggregated into one UDP
@@ -226,22 +230,26 @@ command packet so the two arms are updated together:
 
 ```yaml
 action_source: dual_spacemouse_cartesian
-command_rate_hz: 30
+command_rate_hz: 100
 spacemouse_cartesian_dual:
   frame: local
   max_linear_velocity_m_s: 0.03
   max_angular_velocity_rad_s: 0.2
   deadband: 0.08
+  response_curve_gamma: 3.0
   left:
     device_number: 0
+    deadman_button: 0
   right:
     device_number: 1
+    deadman_button: 0
 ```
 
-Dual SpaceMouse Cartesian control does not use a deadman button; axis motion
-alone emits TCP twist commands. If one device has no fresh sample or only
-deadbanded axes, that arm is held while the other arm may continue. Use `path`
-or `device` under each side when stable HID selection is needed.
+Each arm has its own deadman button. When an armed arm is released, the source
+emits one explicit zero `TcpTwistLocal` for that arm so the server stops
+without waiting for command timeout. Already released arms emit no repeated
+commands. Use `path` or `device` under each side when stable HID selection is
+needed.
 
 `policy_runner` does not generate `TcpLinearMove` trajectories. Use
 `rb_servo_server/tools/send_tcp_linear_move.py` for simulator-only MoveL-style

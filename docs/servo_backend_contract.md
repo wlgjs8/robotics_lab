@@ -62,6 +62,14 @@ Each backend error should preserve:
 
 The state stream should preserve both the current send policy and the original latched fault context. `last_send=SuppressedByPolicy` must not erase the first fault cause.
 
+Dual-arm latches preserve per-arm context as well as the top-level summary. If both
+arms report different failures in the same tick, `fault_context.top_level` remains
+the deterministic summary used for the existing `latched_fault_reason`, while
+`fault_context.left` and `fault_context.right` preserve each arm's classified
+cause. Policy suppression is still not a fault by itself and must not override a
+real backend, robot-state, emergency, command, or kinematics failure as the
+top-level cause.
+
 ## Send Suppression
 
 The servo loop must not keep sending regular `servo_j` while fault-latched, emergency-latched, or read-only. Suppression is explicit state, not a send failure.
@@ -74,7 +82,16 @@ Expected fields include:
   "send_policy": "fault_latched",
   "fault_context": {
     "backend_error_kind": "RobotFault",
-    "backend_error_name": "fault_latched"
+    "backend_error_name": "fault_latched",
+    "top_level": {
+      "backend_error_kind": "RobotFault",
+      "backend_error_name": "fault_latched"
+    },
+    "left": {
+      "backend_error_kind": "RobotFault",
+      "backend_error_name": "fault_latched"
+    },
+    "right": null
   }
 }
 ```
@@ -102,9 +119,14 @@ Lifecycle commands such as reset/stop should not be silently overwritten by stre
 `RbsimBackend` keeps a persistent JSON-lines TCP socket per simulator backend during healthy operation.
 
 - Transport/protocol corruption closes the socket.
-- A later request may reconnect.
+- A later request may reconnect, but reconnect attempts are rate-limited with exponential backoff to avoid a retry storm while the simulator is restarting or down.
+- Simulator reconnect backoff starts at 50 ms and caps at 1000 ms. Calls made before the next retry window do not call `getaddrinfo()`, `socket()`, or `connect()`.
+- Suppressed reconnects are reported as retryable transport failures with error name `rbsim_connect_backoff`; they are not robot/controller faults and must not be treated as successful reads.
 - Robot/controller-level simulator errors such as `RobotFault` or `ServoDisabled` are structured backend results and do not imply TCP transport corruption.
-- Transport counters should be available for diagnostics.
+- Transport counters should be available for diagnostics, including connect attempts, connect failures, suppressed connect attempts, last connect error name/message, and next retry timing.
+- Simulator sockets use `TCP_NODELAY` and `SO_KEEPALIVE`. Linux builds also request conservative TCP keepalive probe timing for development use; keepalive option failures are warnings and do not fail an otherwise healthy simulator connection.
+
+This hardening applies to the simulator backend only. It does not change rbpodo transport behavior or authorize real robot motion.
 
 ## RbpodoBackend Semantics
 
@@ -128,7 +150,7 @@ State JSON should expose:
 
 - top-level observed mode/backend
 - command source state
-- fault context
+- fault context, including a backward-compatible top-level summary and optional per-arm latched contexts
 - send policy
 - per-arm read result
 - per-arm send result

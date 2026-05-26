@@ -122,6 +122,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-twist-stand", action="store_true")
     parser.add_argument("--run-near-pi-ptp", action="store_true")
     parser.add_argument("--all", action="store_true")
+    parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--record-run-label", default="")
+    parser.add_argument("--require-slerp", action="store_true")
+    parser.add_argument("--skip-slerp", action="store_true")
     parser.add_argument("--skip-estop-reset", action="store_true")
     parser.add_argument("--near-pi-math-tests-run", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
@@ -158,6 +162,10 @@ def read_text(path: Path, label: str) -> str:
 
 
 def preflight(args: argparse.Namespace) -> None:
+    if args.repeat < 1:
+        raise AcceptanceError("--repeat must be >= 1")
+    if args.skip_slerp and args.require_slerp:
+        raise AcceptanceError("--skip-slerp and --require-slerp are mutually exclusive")
     server_text = read_text(args.server_config, "server config")
     left_text = read_text(args.left_config, "left simulator config")
     right_text = read_text(args.right_config, "right simulator config")
@@ -539,13 +547,16 @@ def run_ptp(ctx: Context) -> None:
     if orientation_error > ctx.args.orientation_tolerance_rad:
         raise AcceptanceError(f"PTP final orientation error {orientation_error} > {ctx.args.orientation_tolerance_rad}")
     no_fault(final, "PTP")
-    ctx.scenario_results["ptp"] = {
-        "result": "pass",
-        "final_position_error_m": position_error,
-        "final_orientation_error_rad": orientation_error,
-        "max_orientation_error_rad": orientation_error,
-        "command_seq": packet["seq"],
-    }
+    samples = collect_path_samples(ctx.capture, int(packet["host_time_ns"]), int(final.get("host_time_ns", seq())), "left")
+    ctx.scenario_results["ptp"] = scenario_result(
+        command_seq=int(packet["seq"]),
+        max_position_error_m=position_error,
+        max_orientation_error_rad=orientation_error,
+        max_ik_duration_us=sample_metric_max(samples, "ik_duration_us"),
+        sample_count=len(samples),
+        final_position_error_m=position_error,
+        final_orientation_error_rad=orientation_error,
+    )
 
 
 def run_near_pi_ptp(ctx: Context) -> None:
@@ -574,14 +585,17 @@ def run_near_pi_ptp(ctx: Context) -> None:
     if final_orientation_error > ctx.args.orientation_tolerance_rad:
         raise AcceptanceError(f"Near-pi PTP final orientation error {final_orientation_error}")
     no_fault(final, "Near-pi PTP")
-    ctx.scenario_results["near_pi_ptp"] = {
-        "result": "pass",
-        "target_rotation_angle_rad": math.pi - 1e-6,
-        "final_position_error_m": final_position_error,
-        "final_orientation_error_rad": final_orientation_error,
-        "max_orientation_error_rad": final_orientation_error,
-        "command_seq": packet["seq"],
-    }
+    samples = collect_path_samples(ctx.capture, int(packet["host_time_ns"]), int(final.get("host_time_ns", seq())), "left")
+    ctx.scenario_results["near_pi_ptp"] = scenario_result(
+        command_seq=int(packet["seq"]),
+        max_position_error_m=final_position_error,
+        max_orientation_error_rad=final_orientation_error,
+        max_ik_duration_us=sample_metric_max(samples, "ik_duration_us"),
+        sample_count=len(samples),
+        target_rotation_angle_rad=math.pi - 1e-6,
+        final_position_error_m=final_position_error,
+        final_orientation_error_rad=final_orientation_error,
+    )
 
 
 def collect_path_samples(capture: StateCapture, start_ns: int, end_ns: int, arm: str) -> list[dict[str, Any]]:
@@ -695,17 +709,22 @@ def run_linear_constant(ctx: Context) -> None:
     if max_q > ctx.args.orientation_tolerance_rad:
         raise AcceptanceError(f"Linear constant changed orientation by {max_q}")
     no_fault(final, "Linear constant")
-    ctx.scenario_results["linear_constant"] = {
-        "result": "pass",
-        "max_path_s_drop": max_drop,
-        "final_position_error_m": final_position_error,
-        "final_orientation_error_rad": final_orientation_error,
-        "max_line_deviation_m": max_line,
-        "max_path_orientation_error_rad": max(max_q, max_path_orientation_error),
-        "max_quaternion_angle_from_start_rad": max_q,
-        "max_path_tracking_error_m": max_tracking,
-        "command_seq": packet["seq"],
-    }
+    ctx.scenario_results["linear_constant"] = scenario_result(
+        command_seq=int(packet["seq"]),
+        max_position_error_m=final_position_error,
+        max_orientation_error_rad=final_orientation_error,
+        max_line_deviation_m=max_line,
+        max_path_orientation_error_rad=max(max_q, max_path_orientation_error),
+        max_ik_duration_us=sample_metric_max(samples, "ik_duration_us"),
+        path_done_observed=True,
+        path_done_time_ns=done_ns,
+        sample_count=len(samples),
+        max_path_s_drop=max_drop,
+        final_position_error_m=final_position_error,
+        final_orientation_error_rad=final_orientation_error,
+        max_quaternion_angle_from_start_rad=max_q,
+        max_path_tracking_error_m=max_tracking,
+    )
 
 
 def run_linear_slerp(ctx: Context) -> None:
@@ -749,13 +768,20 @@ def run_linear_slerp(ctx: Context) -> None:
     if final_orientation_error > max(ctx.args.orientation_tolerance_rad, 0.01):
         raise AcceptanceError(f"Linear slerp final orientation error {final_orientation_error}")
     no_fault(final, "Linear slerp")
-    ctx.scenario_results["linear_slerp"] = {
-        "result": "pass",
-        "final_position_error_m": final_position_error,
-        "final_orientation_error_rad": final_orientation_error,
-        "max_orientation_progress_drop_rad": max_drop,
-        "command_seq": packet["seq"],
-    }
+    ctx.scenario_results["linear_slerp"] = scenario_result(
+        command_seq=int(packet["seq"]),
+        max_position_error_m=final_position_error,
+        max_orientation_error_rad=final_orientation_error,
+        max_line_deviation_m=sample_metric_max(samples, "path_line_deviation_m"),
+        max_path_orientation_error_rad=sample_metric_max(samples, "path_orientation_error_rad"),
+        max_ik_duration_us=sample_metric_max(samples, "ik_duration_us"),
+        path_done_observed=True,
+        path_done_time_ns=done_ns,
+        sample_count=len(samples),
+        final_position_error_m=final_position_error,
+        final_orientation_error_rad=final_orientation_error,
+        max_orientation_progress_drop_rad=max_drop,
+    )
 
 
 def stream_twist(ctx: Context, frame: str, twist: list[float], duration_sec: float, rate_hz: float) -> tuple[int, int]:
@@ -806,13 +832,16 @@ def run_twist(ctx: Context, frame: str) -> None:
     if max_orientation_drift > ctx.args.orientation_tolerance_rad:
         raise AcceptanceError(f"{label} orientation drift {max_orientation_drift} > {ctx.args.orientation_tolerance_rad}")
     no_fault(final, label)
-    ctx.scenario_results[label] = {
-        "result": "pass",
-        "projected_translation_m": along,
-        "off_axis_translation_m": off_axis,
-        "orientation_error_rad": orientation_error,
-        "max_twist_orientation_drift_rad": max_orientation_drift,
-    }
+    ctx.scenario_results[label] = scenario_result(
+        max_position_error_m=off_axis,
+        max_orientation_error_rad=max_orientation_drift,
+        max_twist_orientation_drift_rad=max_orientation_drift,
+        max_ik_duration_us=sample_metric_max(samples, "ik_duration_us"),
+        sample_count=len(samples),
+        projected_translation_m=along,
+        off_axis_translation_m=off_axis,
+        orientation_error_rad=orientation_error,
+    )
 
 
 def run_estop_reset(ctx: Context) -> dict[str, Any]:
@@ -868,6 +897,53 @@ def scenario_metric_max(results: dict[str, dict[str, Any]], key: str) -> float:
         if isinstance(value, (int, float)) and math.isfinite(float(value)):
             values.append(float(value))
     return max(values) if values else 0.0
+
+
+def sample_metric_max(samples: list[dict[str, Any]], key: str) -> float:
+    values: list[float] = []
+    for sample in samples:
+        telemetry_value = sample.get("telemetry")
+        if not isinstance(telemetry_value, dict):
+            continue
+        value = telemetry_value.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            values.append(float(value))
+    return max(values) if values else 0.0
+
+
+def scenario_result(
+    *,
+    command_seq: int | None = None,
+    max_position_error_m: float = 0.0,
+    max_orientation_error_rad: float = 0.0,
+    max_line_deviation_m: float = 0.0,
+    max_path_orientation_error_rad: float = 0.0,
+    max_twist_orientation_drift_rad: float = 0.0,
+    max_ik_duration_us: float = 0.0,
+    max_cartesian_servo_duration_us: float | None = None,
+    path_done_observed: bool = False,
+    path_done_time_ns: int | None = None,
+    sample_count: int = 0,
+    **extra: Any,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "result": "pass",
+        "passed": True,
+        "max_position_error_m": max_position_error_m,
+        "max_orientation_error_rad": max_orientation_error_rad,
+        "max_line_deviation_m": max_line_deviation_m,
+        "max_path_orientation_error_rad": max_path_orientation_error_rad,
+        "max_twist_orientation_drift_rad": max_twist_orientation_drift_rad,
+        "max_ik_duration_us": max_ik_duration_us,
+        "max_cartesian_servo_duration_us": max_cartesian_servo_duration_us,
+        "path_done_observed": path_done_observed,
+        "path_done_time_ns": path_done_time_ns,
+        "sample_count": sample_count,
+    }
+    if command_seq is not None:
+        result["command_seq"] = command_seq
+    result.update(extra)
+    return result
 
 
 def fault_list(snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:

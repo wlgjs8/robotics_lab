@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -23,6 +24,9 @@ namespace rb_servo {
 namespace {
 
 using json = nlohmann::json;
+
+constexpr uint64_t kInitialReconnectBackoffNs = 50ULL * 1000ULL * 1000ULL;
+constexpr uint64_t kMaxReconnectBackoffNs = 1000ULL * 1000ULL * 1000ULL;
 
 struct TcpEndpoint {
     std::string host;
@@ -289,11 +293,9 @@ public:
 
     JsonLineRequestResult request(const std::string& line, double timeout_sec, const std::string& op) {
         counters_.requests_total += 1;
-        if (!connectIfNeeded(timeout_sec)) {
-            return failure(
-                BackendErrorKind::TransportConnectFailed,
-                "rbsim connect failed for " + endpoint_text_
-            );
+        const BackendError connect_error = connectIfNeeded(timeout_sec);
+        if (connect_error.kind != BackendErrorKind::None) {
+            return JsonLineRequestResult{false, {}, connect_error};
         }
 
         setSocketTimeouts(timeout_sec);
@@ -330,12 +332,39 @@ public:
     }
 
     RbsimTransportCounters counters() const {
-        return counters_;
+        RbsimTransportCounters out = counters_;
+        const uint64_t now = nowSteadyNs();
+        out.next_connect_attempt_ns = next_allowed_connect_attempt_ns_;
+        out.next_connect_attempt_delay_ms =
+            next_allowed_connect_attempt_ns_ > now
+                ? ceilDiv(next_allowed_connect_attempt_ns_ - now, 1000ULL * 1000ULL)
+                : 0;
+        return out;
     }
 
 private:
-    bool connectIfNeeded(double timeout_sec) {
-        if (fd_ >= 0) return true;
+    BackendError connectIfNeeded(double timeout_sec) {
+        if (fd_ >= 0) return noBackendError();
+
+        const uint64_t now = nowSteadyNs();
+        if (next_allowed_connect_attempt_ns_ > now) {
+            counters_.connect_attempts_suppressed_total += 1;
+            const uint64_t remaining_ms = ceilDiv(next_allowed_connect_attempt_ns_ - now, 1000ULL * 1000ULL);
+            const std::string message =
+                "rbsim connect suppressed by reconnect backoff for " + endpoint_text_ +
+                "; next retry in " + std::to_string(remaining_ms) + " ms";
+            recordConnectError("rbsim_connect_backoff", message);
+            return backendError(
+                BackendErrorKind::TransportConnectFailed,
+                message,
+                "",
+                "rbsim_connect_backoff",
+                true,
+                true
+            );
+        }
+
+        counters_.connect_attempts_total += 1;
 
         addrinfo hints{};
         hints.ai_family = AF_INET;
@@ -346,38 +375,61 @@ private:
         const std::string port = std::to_string(endpoint_.port);
         const int gai = ::getaddrinfo(endpoint_.host.c_str(), port.c_str(), &hints, &results);
         if (gai != 0 || results == nullptr) {
-            std::cerr << "[ERROR] RbsimBackend resolve failed for " << endpoint_.host
-                      << ": " << ::gai_strerror(gai) << "\n";
-            counters_.last_transport_error_kind = BackendErrorKind::TransportConnectFailed;
-            return false;
+            const std::string message = "rbsim resolve failed for " + endpoint_.host + ": " + ::gai_strerror(gai);
+            std::cerr << "[ERROR] RbsimBackend " << message << "\n";
+            noteConnectFailure("rbsim_resolve_failed", message);
+            return backendError(
+                BackendErrorKind::TransportConnectFailed,
+                message,
+                "",
+                "rbsim_resolve_failed",
+                true,
+                true
+            );
         }
 
         int opened_fd = -1;
+        std::string last_connect_error = "no address candidates";
         for (addrinfo* item = results; item != nullptr; item = item->ai_next) {
             opened_fd = ::socket(item->ai_family, item->ai_socktype, item->ai_protocol);
-            if (opened_fd < 0) continue;
+            if (opened_fd < 0) {
+                last_connect_error = std::string("socket failed: ") + std::strerror(errno);
+                continue;
+            }
 
             setSocketTimeouts(opened_fd, timeout_sec);
             if (::connect(opened_fd, item->ai_addr, item->ai_addrlen) == 0) break;
 
+            last_connect_error = std::string("connect failed: ") + std::strerror(errno);
             ::close(opened_fd);
             opened_fd = -1;
         }
 
         ::freeaddrinfo(results);
         if (opened_fd < 0) {
-            counters_.last_transport_error_kind = BackendErrorKind::TransportConnectFailed;
-            return false;
+            const std::string message = "rbsim connect failed for " + endpoint_text_ + ": " + last_connect_error;
+            noteConnectFailure("rbsim_connect_failed", message);
+            return backendError(
+                BackendErrorKind::TransportConnectFailed,
+                message,
+                "",
+                "rbsim_connect_failed",
+                true,
+                true
+            );
         }
 
-        enableTcpNoDelay(opened_fd);
+        configureConnectedSocket(opened_fd);
         if (counters_.connections_opened_total > 0) {
             counters_.reconnects_total += 1;
         }
         counters_.connections_opened_total += 1;
+        current_connect_backoff_ns_ = kInitialReconnectBackoffNs;
+        next_allowed_connect_attempt_ns_ = nowSteadyNs();
+        counters_.next_connect_attempt_ns = next_allowed_connect_attempt_ns_;
         fd_ = opened_fd;
         read_buffer_.clear();
-        return true;
+        return noBackendError();
     }
 
     void setSocketTimeouts(double timeout_sec) {
@@ -390,10 +442,32 @@ private:
         (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     }
 
-    void enableTcpNoDelay(int fd) const {
+    void configureConnectedSocket(int fd) const {
         const int enabled = 1;
         if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)) != 0) {
             std::cerr << "[WARN] RbsimBackend failed to set TCP_NODELAY for "
+                      << endpoint_text_ << ": " << std::strerror(errno) << "\n";
+        }
+        if (::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enabled, sizeof(enabled)) != 0) {
+            std::cerr << "[WARN] RbsimBackend failed to set SO_KEEPALIVE for "
+                      << endpoint_text_ << ": " << std::strerror(errno) << "\n";
+        }
+#ifdef __linux__
+#ifdef TCP_KEEPIDLE
+        setTcpKeepaliveInt(fd, TCP_KEEPIDLE, 5, "TCP_KEEPIDLE");
+#endif
+#ifdef TCP_KEEPINTVL
+        setTcpKeepaliveInt(fd, TCP_KEEPINTVL, 2, "TCP_KEEPINTVL");
+#endif
+#ifdef TCP_KEEPCNT
+        setTcpKeepaliveInt(fd, TCP_KEEPCNT, 3, "TCP_KEEPCNT");
+#endif
+#endif
+    }
+
+    void setTcpKeepaliveInt(int fd, int option, int value, const char* option_name) const {
+        if (::setsockopt(fd, IPPROTO_TCP, option, &value, sizeof(value)) != 0) {
+            std::cerr << "[WARN] RbsimBackend failed to set " << option_name << " for "
                       << endpoint_text_ << ": " << std::strerror(errno) << "\n";
         }
     }
@@ -456,10 +530,33 @@ private:
     void closeForTransportError(BackendErrorKind kind) {
         counters_.last_transport_error_kind = kind;
         close();
+        scheduleReconnectBackoff();
     }
 
-    JsonLineRequestResult failure(BackendErrorKind kind, const std::string& message) {
-        return JsonLineRequestResult{false, {}, backendError(kind, message)};
+    void noteConnectFailure(const std::string& name, const std::string& message) {
+        counters_.connect_failures_total += 1;
+        counters_.last_transport_error_kind = BackendErrorKind::TransportConnectFailed;
+        recordConnectError(name, message);
+        scheduleReconnectBackoff();
+    }
+
+    void recordConnectError(const std::string& name, const std::string& message) {
+        counters_.last_connect_error_name = name;
+        counters_.last_connect_error_message = message;
+    }
+
+    void scheduleReconnectBackoff() {
+        const uint64_t now = nowSteadyNs();
+        next_allowed_connect_attempt_ns_ = now + current_connect_backoff_ns_;
+        counters_.next_connect_attempt_ns = next_allowed_connect_attempt_ns_;
+        if (current_connect_backoff_ns_ < kMaxReconnectBackoffNs) {
+            current_connect_backoff_ns_ =
+                std::min<uint64_t>(current_connect_backoff_ns_ * 2ULL, kMaxReconnectBackoffNs);
+        }
+    }
+
+    static uint64_t ceilDiv(uint64_t numerator, uint64_t denominator) {
+        return denominator == 0 ? 0 : (numerator + denominator - 1ULL) / denominator;
     }
 
     std::string endpoint_text_;
@@ -467,6 +564,8 @@ private:
     int fd_ = -1;
     std::string read_buffer_;
     RbsimTransportCounters counters_;
+    uint64_t current_connect_backoff_ns_ = kInitialReconnectBackoffNs;
+    uint64_t next_allowed_connect_attempt_ns_ = 0;
 };
 
 RbsimBackend::RbsimBackend(ArmId arm_id, const BackendConfig& config)

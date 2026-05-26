@@ -371,6 +371,8 @@ struct ServoSample {
     bool fault_latched = false;
     std::string fault_reason;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
+    std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
+    std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;
 };
 
 struct ServoSnapshot {
@@ -398,6 +400,8 @@ struct ServoSnapshot {
     SafetyVerdict latched_fault_reason = SafetyVerdict::Ok;
     std::string fault_reason;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
+    std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
+    std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;
 
     bool left_send_ok = false;
     bool right_send_ok = false;

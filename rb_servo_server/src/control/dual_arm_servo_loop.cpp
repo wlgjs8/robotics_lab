@@ -57,6 +57,16 @@ bool linearPathLeaseExpired(const CartesianServoPathState& path, uint64_t now_ns
            now_ns > path.lease_expires_time_ns;
 }
 
+bool retainCompletedPathTelemetry(
+    const CartesianServoPathState& path,
+    const CartesianSolveTelemetry& telemetry
+) {
+    return path.active &&
+           path.done &&
+           telemetry.status == "ok" &&
+           telemetry.path_done;
+}
+
 bool isReadOnlyBlockedMode(ControlMode mode) {
     return mode == ControlMode::ArmMotion || isMotionMode(mode);
 }
@@ -248,6 +258,32 @@ LatchedFaultContextSnapshot faultContextSnapshot(const FaultContext& context) {
     snapshot.state_after_source = context.state_after_source;
     snapshot.reason = context.reason;
     return snapshot;
+}
+
+LatchedDualFaultContext dualReadFaultContext(
+    const FaultContext& left,
+    const FaultContext& right
+) {
+    LatchedDualFaultContext contexts;
+    if (left.verdict != SafetyVerdict::Ok) {
+        contexts.left = left;
+    }
+    if (right.verdict != SafetyVerdict::Ok) {
+        contexts.right = right;
+    }
+    if (contexts.left.has_value()) {
+        contexts.top_level = contexts.left;
+    } else if (contexts.right.has_value()) {
+        contexts.top_level = contexts.right;
+    }
+    return contexts;
+}
+
+FaultContext contextWithReason(FaultContext context, const std::string& reason) {
+    if (context.reason.empty()) {
+        context.reason = reason;
+    }
+    return context;
 }
 }
 
@@ -494,6 +530,8 @@ void DualArmServoLoop::loopMain() {
         FaultContext read_fault = left_read_fault.verdict != SafetyVerdict::Ok
             ? left_read_fault
             : right_read_fault;
+        LatchedDualFaultContext read_fault_contexts =
+            dualReadFaultContext(left_read_fault, right_read_fault);
         bool state_ok = read_fault.verdict == SafetyVerdict::Ok;
 
         DualArmCommand command = command_buffer_
@@ -538,6 +576,7 @@ void DualArmServoLoop::loopMain() {
                     read_fault = left_read_fault.verdict != SafetyVerdict::Ok
                         ? left_read_fault
                         : right_read_fault;
+                    read_fault_contexts = dualReadFaultContext(left_read_fault, right_read_fault);
                     state_ok = read_fault.verdict == SafetyVerdict::Ok;
                 }
             } else {
@@ -571,7 +610,11 @@ void DualArmServoLoop::loopMain() {
                     read_fault.verdict != SafetyVerdict::Ok
                         ? std::optional<FaultContext>(read_fault)
                         : std::nullopt;
-                latchFault(safety_verdict, reason, left_state, right_state, context);
+                if (read_fault_contexts.top_level.has_value()) {
+                    latchFault(safety_verdict, reason, left_state, right_state, read_fault_contexts);
+                } else {
+                    latchFault(safety_verdict, reason, left_state, right_state, context);
+                }
                 safe_target = currentFaultHoldTarget();
                 safety_verdict = SafetyVerdict::FaultLatched;
             } else {
@@ -655,14 +698,18 @@ void DualArmServoLoop::loopMain() {
             populateTcpPose(right_state, config_.right_mount);
         }
 
-        const FaultContext send_fault = classifyDualSendResult(dual_send_result);
+        const LatchedDualFaultContext send_fault_contexts =
+            classifyDualSendResultContexts(dual_send_result);
+        const FaultContext send_fault = send_fault_contexts.top_level.has_value()
+            ? *send_fault_contexts.top_level
+            : classifyDualSendResult(dual_send_result);
         if (send_fault.verdict != SafetyVerdict::Ok) {
             safety_verdict = send_fault.verdict;
             if (isRealMode() || config_.safety.stop_both_arms_on_single_arm_error) {
                 std::string reason = send_fault.reason.empty()
                     ? "sendServoJ failed"
                     : send_fault.reason;
-                latchFault(send_fault.verdict, reason, left_state, right_state, send_fault);
+                latchFault(send_fault.verdict, reason, left_state, right_state, send_fault_contexts);
                 safe_target = currentFaultHoldTarget();
                 safety_verdict = SafetyVerdict::FaultLatched;
             }
@@ -744,6 +791,18 @@ void DualArmServoLoop::loopMain() {
             } else {
                 sample.latched_fault_context.reset();
             }
+            if (left_latched_fault_context_) {
+                sample.left_latched_fault_context =
+                    faultContextSnapshot(*left_latched_fault_context_);
+            } else {
+                sample.left_latched_fault_context.reset();
+            }
+            if (right_latched_fault_context_) {
+                sample.right_latched_fault_context =
+                    faultContextSnapshot(*right_latched_fault_context_);
+            } else {
+                sample.right_latched_fault_context.reset();
+            }
 
             latest_snapshot_.tick = sample.tick;
             latest_snapshot_.loop_start_time_ns = loop_start;
@@ -764,6 +823,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.latched_fault_reason = latched_fault_reason_.load();
             latest_snapshot_.fault_reason = fault_reason_;
             latest_snapshot_.latched_fault_context = sample.latched_fault_context;
+            latest_snapshot_.left_latched_fault_context = sample.left_latched_fault_context;
+            latest_snapshot_.right_latched_fault_context = sample.right_latched_fault_context;
             latest_snapshot_.left_send_ok = left_ok;
             latest_snapshot_.right_send_ok = right_ok;
             latest_snapshot_.left_last_read = sample.left_last_read;
@@ -902,6 +963,8 @@ void DualArmServoLoop::clearLatchedCartesianTargets() {
     right_cartesian_servo_path_ = CartesianServoPathState{};
     left_cartesian_twist_hold_ = CartesianTwistHoldState{};
     right_cartesian_twist_hold_ = CartesianTwistHoldState{};
+    left_last_cartesian_solve_ = CartesianSolveTelemetry{};
+    right_last_cartesian_solve_ = CartesianSolveTelemetry{};
 }
 
 void DualArmServoLoop::clearLatchedCartesianTarget(ArmId arm_id) {
@@ -909,10 +972,12 @@ void DualArmServoLoop::clearLatchedCartesianTarget(ArmId arm_id) {
         left_latched_cartesian_target_ = LatchedCartesianTarget{};
         left_cartesian_servo_path_ = CartesianServoPathState{};
         left_cartesian_twist_hold_ = CartesianTwistHoldState{};
+        left_last_cartesian_solve_ = CartesianSolveTelemetry{};
     } else {
         right_latched_cartesian_target_ = LatchedCartesianTarget{};
         right_cartesian_servo_path_ = CartesianServoPathState{};
         right_cartesian_twist_hold_ = CartesianTwistHoldState{};
+        right_last_cartesian_solve_ = CartesianSolveTelemetry{};
     }
 }
 
@@ -990,8 +1055,39 @@ ServoTarget DualArmServoLoop::computeServoTarget(
 ) {
     if (command_verdict) *command_verdict = SafetyVerdict::Ok;
     ServoTarget target;
-    left_last_cartesian_solve_ = CartesianSolveTelemetry{};
-    right_last_cartesian_solve_ = CartesianSolveTelemetry{};
+    const bool synthetic_hold = isSyntheticHoldCommand(command);
+
+    if (left_cartesian_servo_path_.active && !isValidJointState(left_state)) {
+        clearLatchedCartesianTarget(ArmId::Left);
+    }
+    if (right_cartesian_servo_path_.active && !isValidJointState(right_state)) {
+        clearLatchedCartesianTarget(ArmId::Right);
+    }
+    if (linearPathLeaseExpired(left_cartesian_servo_path_, command.host_time_ns)) {
+        clearLatchedCartesianTarget(ArmId::Left);
+    }
+    if (linearPathLeaseExpired(right_cartesian_servo_path_, command.host_time_ns)) {
+        clearLatchedCartesianTarget(ArmId::Right);
+    }
+    if (!synthetic_hold) {
+        if (command.left.mode != ControlMode::TcpLinearMove) {
+            clearLatchedCartesianTarget(ArmId::Left);
+        }
+        if (command.right.mode != ControlMode::TcpLinearMove) {
+            clearLatchedCartesianTarget(ArmId::Right);
+        }
+    }
+
+    const CartesianSolveTelemetry previous_left_cartesian_solve = left_last_cartesian_solve_;
+    const CartesianSolveTelemetry previous_right_cartesian_solve = right_last_cartesian_solve_;
+    left_last_cartesian_solve_ = retainCompletedPathTelemetry(
+        left_cartesian_servo_path_,
+        previous_left_cartesian_solve
+    ) ? previous_left_cartesian_solve : CartesianSolveTelemetry{};
+    right_last_cartesian_solve_ = retainCompletedPathTelemetry(
+        right_cartesian_servo_path_,
+        previous_right_cartesian_solve
+    ) ? previous_right_cartesian_solve : CartesianSolveTelemetry{};
 
     if (isCommandModeMissingPayload(command.left) || isCommandModeMissingPayload(command.right)) {
         if (command_verdict) *command_verdict = SafetyVerdict::InvalidCommand;
@@ -1000,19 +1096,6 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         return target;
     }
 
-    const bool synthetic_hold = isSyntheticHoldCommand(command);
-    if (left_cartesian_servo_path_.active && !isValidJointState(left_state)) {
-        left_cartesian_servo_path_ = CartesianServoPathState{};
-    }
-    if (right_cartesian_servo_path_.active && !isValidJointState(right_state)) {
-        right_cartesian_servo_path_ = CartesianServoPathState{};
-    }
-    if (linearPathLeaseExpired(left_cartesian_servo_path_, command.host_time_ns)) {
-        left_cartesian_servo_path_ = CartesianServoPathState{};
-    }
-    if (linearPathLeaseExpired(right_cartesian_servo_path_, command.host_time_ns)) {
-        right_cartesian_servo_path_ = CartesianServoPathState{};
-    }
     const bool continue_left_linear = synthetic_hold &&
         left_cartesian_servo_path_.active &&
         !left_cartesian_servo_path_.done;
@@ -1026,15 +1109,6 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     }
     if (continue_right_linear) {
         effective_command.right = linearMoveContinuationCommand(command.right, right_cartesian_servo_path_);
-    }
-
-    if (!synthetic_hold) {
-        if (command.left.mode != ControlMode::TcpLinearMove) {
-            left_cartesian_servo_path_ = CartesianServoPathState{};
-        }
-        if (command.right.mode != ControlMode::TcpLinearMove) {
-            right_cartesian_servo_path_ = CartesianServoPathState{};
-        }
     }
 
     if (isCartesianMode(effective_command.left.mode) || isCartesianMode(effective_command.right.mode)) {
@@ -1476,6 +1550,8 @@ bool DualArmServoLoop::clearFaultLatch(RobotState& left_state, RobotState& right
     latched_fault_reason_.store(SafetyVerdict::Ok);
     fault_reason_.clear();
     latched_fault_context_.reset();
+    left_latched_fault_context_.reset();
+    right_latched_fault_context_.reset();
     left_prev_sent_q_deg_ = chooseSafeHoldTarget(left_state, left_prev_sent_q_deg_);
     right_prev_sent_q_deg_ = chooseSafeHoldTarget(right_state, right_prev_sent_q_deg_);
     left_prevprev_sent_q_deg_ = left_prev_sent_q_deg_;
@@ -1494,6 +1570,25 @@ void DualArmServoLoop::latchFault(
     const RobotState& right_state,
     const std::optional<FaultContext>& context
 ) {
+    LatchedDualFaultContext contexts;
+    contexts.top_level = context;
+    if (context.has_value()) {
+        if (context->arm == ArmId::Left) {
+            contexts.left = context;
+        } else {
+            contexts.right = context;
+        }
+    }
+    latchFault(verdict, reason, left_state, right_state, contexts);
+}
+
+void DualArmServoLoop::latchFault(
+    SafetyVerdict verdict,
+    const std::string& reason,
+    const RobotState& left_state,
+    const RobotState& right_state,
+    const LatchedDualFaultContext& contexts
+) {
     clearLatchedCartesianTargets();
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (fault_latched_.load()) return;
@@ -1501,11 +1596,8 @@ void DualArmServoLoop::latchFault(
     fault_verdict_.store(verdict);
     latched_fault_reason_.store(verdict);
     fault_reason_ = reason;
-    if (context.has_value()) {
-        latched_fault_context_ = context;
-        if (latched_fault_context_->reason.empty()) {
-            latched_fault_context_->reason = reason;
-        }
+    if (contexts.top_level.has_value()) {
+        latched_fault_context_ = contextWithReason(*contexts.top_level, reason);
     } else {
         FaultContext fallback;
         fallback.verdict = verdict;
@@ -1514,6 +1606,12 @@ void DualArmServoLoop::latchFault(
         fallback.suppress_regular_servo = true;
         latched_fault_context_ = fallback;
     }
+    left_latched_fault_context_ = contexts.left.has_value()
+        ? std::optional<FaultContext>(contextWithReason(*contexts.left, reason))
+        : std::nullopt;
+    right_latched_fault_context_ = contexts.right.has_value()
+        ? std::optional<FaultContext>(contextWithReason(*contexts.right, reason))
+        : std::nullopt;
     left_fault_hold_q_deg_ = chooseSafeHoldTarget(left_state, left_prev_sent_q_deg_);
     right_fault_hold_q_deg_ = chooseSafeHoldTarget(right_state, right_prev_sent_q_deg_);
     setMotionState(verdict == SafetyVerdict::EmergencyStop

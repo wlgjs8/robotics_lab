@@ -171,8 +171,12 @@ struct CartesianControlConfig {
     bool allow_in_real = false;
     double warn_ik_duration_us = 3000.0;
     double fail_ik_duration_us = 0.0;
+    // Deprecated compatibility field. New control code uses path_kp_pos/path_kp_ori.
     double path_kp = 6.0;
+    double path_kp_pos = 6.0;
+    double path_kp_ori = 6.0;
     double twist_orientation_hold_kp = 6.0;
+    double twist_angular_deadband_rad_s = 0.0001;
     double velocity_damping = 0.01;
     double max_twist_linear_m_s = 0.03;
     double max_twist_angular_rad_s = 0.2;

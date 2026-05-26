@@ -24,5 +24,7 @@ spacemouse_cartesian_dual:
   deadband: 0.08
   left:
     path: "/dev/hidraw1"
+    deadman_button: 0
   right:
     path: "/dev/hidraw6"
+    deadman_button: 0

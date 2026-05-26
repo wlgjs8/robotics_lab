@@ -296,6 +296,50 @@ run_cart_math_gate() {
   fi
 }
 
+run_cart_accept_gate() {
+  run_shell_syntax_checks
+  if [[ -f scripts/cartesian_acceptance.py ]]; then
+    python3 -m compileall -q scripts
+  fi
+  if [[ -f rb_servo_server/tools/send_tcp_linear_move.py ]]; then
+    python3 rb_servo_server/tools/send_tcp_linear_move.py --help >/dev/null
+  fi
+  if [[ -f rb_servo_server/tools/send_tcp_twist.py ]]; then
+    python3 rb_servo_server/tools/send_tcp_twist.py --help >/dev/null
+  fi
+  if [[ "${CODEX_RUN_CARTESIAN_ACCEPTANCE:-0}" == "1" ]]; then
+    run_servo_pinocchio_gate
+    ./scripts/tcp_pose_simulator_acceptance.sh --all
+  else
+    echo "codex_gate: skipping full Cartesian simulator acceptance; set CODEX_RUN_CARTESIAN_ACCEPTANCE=1 to enable"
+  fi
+}
+
+run_doc_hygiene_gate() {
+  run_shell_syntax_checks
+  if [[ -e README_DOCS_UPDATE.md ]]; then
+    echo "ERROR: README_DOCS_UPDATE.md must not exist; fold doc-update notes into source-of-truth docs" >&2
+    return 1
+  fi
+  grep_existing "REVIEW\.md" docs/current_review.md
+
+  local legacy_config
+  for legacy_config in \
+    rb_servo_server/config/dual_rbsim.yaml \
+    rb_servo_server/config/dual_rb_simulator.yaml \
+    rb_servo_server/config/dual_rb_simulator_compose.yaml
+  do
+    if [[ -e "${legacy_config}" ]]; then
+      grep_existing "Deprecated|deprecated|historical|compatibility|archived" "${legacy_config}"
+    fi
+  done
+}
+
+run_gui_split_gate() {
+  run_gui_tests
+  python3 -m compileall -q rb_gui/rb_servo_gui
+}
+
 check_real_config_safety_docs() {
   grep_existing "RB_ALLOW_REAL_ROBOT" README.md docs AGENTS.md rb_servo_server/docs rb_servo_server/config/dual_real.example.yaml
   grep_existing "RB_ALLOW_REAL_MOTION" README.md docs AGENTS.md rb_servo_server/docs rb_servo_server/config/dual_real.example.yaml
@@ -573,6 +617,22 @@ case "$TASK" in
     ;;
   CART-MATH-01|CART-MATH-02|CART-MATH-03)
     run_cart_math_gate
+    ;;
+  SIM-HARDEN-01)
+    run_simulator_tests
+    run_servo_gate_or_skip_missing_deps
+    ;;
+  CART-TUNE-01|FAULT-DIAG-01)
+    run_servo_gate_or_skip_missing_deps
+    ;;
+  CART-ACCEPT-01)
+    run_cart_accept_gate
+    ;;
+  DOC-HYGIENE-01)
+    run_doc_hygiene_gate
+    ;;
+  GUI-SPLIT-01)
+    run_gui_split_gate
     ;;
 
   *)

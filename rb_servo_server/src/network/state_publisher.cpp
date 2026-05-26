@@ -185,6 +185,8 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"path_orientation_error_rad", telemetry.path_orientation_error_rad},
         {"path_line_deviation_m", telemetry.path_line_deviation_m},
         {"path_done", telemetry.path_done},
+        {"path_completion_hold", telemetry.path_done && !telemetry.path_active},
+        {"path_elapsed_sec", telemetry.linear_move_elapsed_sec},
         {"linear_move_duration_sec", telemetry.linear_move_duration_sec},
         {"linear_move_elapsed_sec", telemetry.linear_move_elapsed_sec},
         {"orientation_mode", telemetry.orientation_mode},
@@ -196,6 +198,31 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
     };
 }
 
+nlohmann::json faultContextDetailJson(const LatchedFaultContextSnapshot& context) {
+    return {
+        {"verdict", context.verdict},
+        {"domain", context.domain},
+        {"arm", context.arm},
+        {"backend_op", context.backend_op},
+        {"backend_error_kind", context.backend_error_kind},
+        {"backend_error_name", context.backend_error_name},
+        {"backend_error_code", context.backend_error_code},
+        {"retryable", context.retryable},
+        {"recoverable", context.recoverable},
+        {"robot_fault", context.robot_fault},
+        {"transport_fault", context.transport_fault},
+        {"state_after_source", context.state_after_source},
+        {"reason", context.reason},
+    };
+}
+
+nlohmann::json optionalFaultContextDetailJson(
+    const std::optional<LatchedFaultContextSnapshot>& context
+) {
+    if (!context.has_value()) return nullptr;
+    return faultContextDetailJson(*context);
+}
+
 nlohmann::json faultContextJson(const ServoSnapshot& snapshot) {
     nlohmann::json out = {
         {"latched", snapshot.fault_latched},
@@ -203,6 +230,9 @@ nlohmann::json faultContextJson(const ServoSnapshot& snapshot) {
         {"safety_verdict", toString(snapshot.safety_verdict)},
         {"latched_fault_reason", toString(snapshot.latched_fault_reason)},
         {"reason", snapshot.fault_reason},
+        {"top_level", optionalFaultContextDetailJson(snapshot.latched_fault_context)},
+        {"left", optionalFaultContextDetailJson(snapshot.left_latched_fault_context)},
+        {"right", optionalFaultContextDetailJson(snapshot.right_latched_fault_context)},
     };
     if (!snapshot.latched_fault_context.has_value()) {
         out["verdict"] = nullptr;
@@ -221,19 +251,8 @@ nlohmann::json faultContextJson(const ServoSnapshot& snapshot) {
     }
 
     const LatchedFaultContextSnapshot& context = *snapshot.latched_fault_context;
-    out["verdict"] = context.verdict;
-    out["domain"] = context.domain;
-    out["arm"] = context.arm;
-    out["backend_op"] = context.backend_op;
-    out["backend_error_kind"] = context.backend_error_kind;
-    out["backend_error_name"] = context.backend_error_name;
-    out["backend_error_code"] = context.backend_error_code;
-    out["retryable"] = context.retryable;
-    out["recoverable"] = context.recoverable;
-    out["robot_fault"] = context.robot_fault;
-    out["transport_fault"] = context.transport_fault;
-    out["state_after_source"] = context.state_after_source;
-    out["reason"] = context.reason;
+    const nlohmann::json detail = faultContextDetailJson(context);
+    out.update(detail);
     return out;
 }
 

@@ -123,6 +123,13 @@ private:
         const RobotState& right_state,
         const std::optional<FaultContext>& context = std::nullopt
     );
+    void latchFault(
+        SafetyVerdict verdict,
+        const std::string& reason,
+        const RobotState& left_state,
+        const RobotState& right_state,
+        const LatchedDualFaultContext& contexts
+    );
     void setMotionState(ServerMotionState state);
     ServoTarget currentFaultHoldTarget() const;
     JointArray chooseSafeHoldTarget(const RobotState& state, const JointArray& previous_sent) const;
@@ -166,6 +173,8 @@ private:
     std::atomic<SafetyVerdict> latched_fault_reason_{SafetyVerdict::Ok};
     std::string fault_reason_;
     std::optional<FaultContext> latched_fault_context_;
+    std::optional<FaultContext> left_latched_fault_context_;
+    std::optional<FaultContext> right_latched_fault_context_;
     JointArray left_fault_hold_q_deg_{};
     JointArray right_fault_hold_q_deg_{};
     CartesianSolveTelemetry left_last_cartesian_solve_;

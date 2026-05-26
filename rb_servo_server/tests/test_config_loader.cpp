@@ -63,6 +63,9 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(simulator.right_robot.run_mode == rb_servo::RunMode::Simulation);
     RB_CHECK(simulator.left_robot.simulator_control_endpoint == "tcp://127.0.0.1:50200");
     RB_CHECK(simulator.right_robot.simulator_control_endpoint == "tcp://127.0.0.1:50210");
+    RB_CHECK(near(simulator.cartesian_control.path_kp_pos, 6.0));
+    RB_CHECK(near(simulator.cartesian_control.path_kp_ori, 6.0));
+    RB_CHECK(near(simulator.cartesian_control.twist_angular_deadband_rad_s, 0.0001));
 
     const rb_servo::DualArmConfig simulator_worker =
         rb_servo::loadConfigFromYaml((config_dir / "dual_simulator_worker.yaml").string());
@@ -300,6 +303,72 @@ bool testCommandSourceConfigParsesAndValidates() {
     return true;
 }
 
+bool testCartesianControlTuningParsesAndValidates() {
+    const std::string path = writeTempConfig(
+        "cartesian-tuning",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  path_kp_pos: 2.5\n"
+        "  path_kp_ori: 7.5\n"
+        "  twist_orientation_hold_kp: 8.0\n"
+        "  twist_angular_deadband_rad_s: 0.002\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    ::unlink(path.c_str());
+    RB_CHECK(near(cfg.cartesian_control.path_kp_pos, 2.5));
+    RB_CHECK(near(cfg.cartesian_control.path_kp_ori, 7.5));
+    RB_CHECK(near(cfg.cartesian_control.twist_orientation_hold_kp, 8.0));
+    RB_CHECK(near(cfg.cartesian_control.twist_angular_deadband_rad_s, 0.002));
+
+    const std::string legacy_path = writeTempConfig(
+        "cartesian-legacy-path-kp",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  path_kp: 4.0\n"
+    );
+    std::ostringstream warnings;
+    auto* const old_cerr = std::cerr.rdbuf(warnings.rdbuf());
+    const rb_servo::DualArmConfig legacy = rb_servo::loadConfigFromYaml(legacy_path);
+    std::cerr.rdbuf(old_cerr);
+    ::unlink(legacy_path.c_str());
+    RB_CHECK(near(legacy.cartesian_control.path_kp, 4.0));
+    RB_CHECK(near(legacy.cartesian_control.path_kp_pos, 4.0));
+    RB_CHECK(near(legacy.cartesian_control.path_kp_ori, 4.0));
+    RB_CHECK(warnings.str().find("deprecated") != std::string::npos);
+
+    const std::string ambiguous_path = writeTempConfig(
+        "cartesian-ambiguous-path-kp",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  path_kp: 4.0\n"
+        "  path_kp_pos: 5.0\n"
+    );
+    const bool ambiguous_rejected = loadRejects(ambiguous_path);
+    ::unlink(ambiguous_path.c_str());
+    RB_CHECK(ambiguous_rejected);
+
+    const std::string bad_gain_path = writeTempConfig(
+        "cartesian-bad-gain",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  path_kp_ori: 0\n"
+    );
+    const bool bad_gain_rejected = loadRejects(bad_gain_path);
+    ::unlink(bad_gain_path.c_str());
+    RB_CHECK(bad_gain_rejected);
+
+    const std::string bad_deadband_path = writeTempConfig(
+        "cartesian-bad-deadband",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  twist_angular_deadband_rad_s: 0\n"
+    );
+    const bool bad_deadband_rejected = loadRejects(bad_deadband_path);
+    ::unlink(bad_deadband_path.c_str());
+    RB_CHECK(bad_deadband_rejected);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -310,5 +379,6 @@ int main() {
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;
     if (!testForceControlStaysDisabled()) return 1;
     if (!testCommandSourceConfigParsesAndValidates()) return 1;
+    if (!testCartesianControlTuningParsesAndValidates()) return 1;
     return 0;
 }

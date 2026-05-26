@@ -87,6 +87,12 @@ def configured_estimate_geometry():
     )
 
 
+def assert_float_list_almost_equal(testcase, actual, expected, places=12):
+    testcase.assertEqual(len(actual), len(expected))
+    for actual_value, expected_value in zip(actual, expected):
+        testcase.assertAlmostEqual(actual_value, expected_value, places=places)
+
+
 class FakeSendSocket:
     def __init__(self):
         self.sent = []
@@ -139,13 +145,53 @@ class CartesianActionSourceTest(unittest.TestCase):
         packet = json.loads(fake_socket.sent[0][0].decode("utf-8"))
         self.assertEqual(packet["mode"], "TcpTwistLocal")
         self.assertEqual(packet["left"]["mode"], "TcpTwistLocal")
-        self.assertEqual(packet["left"]["tcp_twist_local"], [0.015, -0.03, 0.03, -0.2, 0.020000000000000004, 0.0])
+        assert_float_list_almost_equal(
+            self,
+            packet["left"]["tcp_twist_local"],
+            [0.0026259924385633264, -0.0276, 0.0276, -0.184, 1.8903591682419669e-06, 0.0],
+        )
         self.assertEqual(packet["right"]["mode"], "Hold")
 
     def test_deadman_false_sends_no_command(self):
         reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0, buttons=(False,))])
         source = SpaceMouseCartesianActionSource(reader=reader, require_deadman=True)
 
+        self.assertIsNone(source.next_intent(sample_state(), time.monotonic()))
+
+    def test_zero_twist_emitted_once_on_deadman_release(self):
+        reader = FakeSpaceMouseReader(
+            [
+                spacemouse_sample(tx=1.0),
+                spacemouse_sample(tx=1.0),
+                spacemouse_sample(buttons=(False,)),
+                spacemouse_sample(buttons=(False,)),
+            ]
+        )
+        source = SpaceMouseCartesianActionSource(reader=reader, selected_arm="both")
+
+        self.assertIsNotNone(source.next_intent(sample_state(), time.monotonic()))
+        self.assertIsNotNone(source.next_intent(sample_state(), time.monotonic()))
+        released = source.next_intent(sample_state(), time.monotonic())
+        idle = source.next_intent(sample_state(), time.monotonic())
+
+        self.assertIsNotNone(released)
+        assert released is not None
+        self.assertEqual(released.left["tcp_twist_local"], [0.0] * 6)
+        self.assertEqual(released.right["tcp_twist_local"], [0.0] * 6)
+        self.assertIsNone(idle)
+
+    def test_no_zero_twist_if_never_armed(self):
+        reader = FakeSpaceMouseReader(
+            [
+                spacemouse_sample(tx=1.0, buttons=(False,)),
+                spacemouse_sample(tx=1.0, buttons=(False,)),
+                spacemouse_sample(tx=1.0, buttons=(False,)),
+            ]
+        )
+        source = SpaceMouseCartesianActionSource(reader=reader)
+
+        self.assertIsNone(source.next_intent(sample_state(), time.monotonic()))
+        self.assertIsNone(source.next_intent(sample_state(), time.monotonic()))
         self.assertIsNone(source.next_intent(sample_state(), time.monotonic()))
 
     def test_spacemouse_cartesian_clamps_linear_and_angular_velocity(self):
@@ -160,7 +206,11 @@ class CartesianActionSourceTest(unittest.TestCase):
 
         self.assertIsNotNone(intent)
         assert intent is not None
-        self.assertEqual(intent.left["tcp_twist_local"], [0.03, -0.03, 0.0, 0.0, 0.0, 0.2])
+        assert_float_list_almost_equal(
+            self,
+            intent.left["tcp_twist_local"],
+            [0.0276, -0.0276, 0.0, 0.0, 0.0, 0.184],
+        )
 
     def test_spacemouse_cartesian_deadman_cannot_be_disabled(self):
         reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
@@ -185,8 +235,16 @@ class CartesianActionSourceTest(unittest.TestCase):
         self.assertEqual(intent.mode, "TcpTwistLocal")
         self.assertEqual(intent.left["mode"], "TcpTwistLocal")
         self.assertEqual(intent.right["mode"], "TcpTwistLocal")
-        self.assertEqual(intent.left["tcp_twist_local"], [0.015, 0.0, 0.0, 0.0, 0.2, 0.0])
-        self.assertEqual(intent.right["tcp_twist_local"], [0.0, -0.03, 0.0, 0.0, 0.0, 0.2])
+        assert_float_list_almost_equal(
+            self,
+            intent.left["tcp_twist_local"],
+            [0.0026259924385633264, 0.0, 0.0, 0.0, 0.184, 0.0],
+        )
+        assert_float_list_almost_equal(
+            self,
+            intent.right["tcp_twist_local"],
+            [0.0, -0.0276, 0.0, 0.0, 0.0, 0.184],
+        )
 
     def test_dual_spacemouse_cartesian_holds_inactive_arm(self):
         left_reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
@@ -200,21 +258,68 @@ class CartesianActionSourceTest(unittest.TestCase):
 
         self.assertIsNotNone(intent)
         assert intent is not None
-        self.assertEqual(intent.left["tcp_twist_local"], [0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
+        assert_float_list_almost_equal(
+            self,
+            intent.left["tcp_twist_local"],
+            [0.0276, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
         self.assertEqual(intent.right["mode"], "Hold")
 
-    def test_dual_spacemouse_cartesian_ignores_buttons(self):
+    def test_dual_source_independent_arm_release(self):
         source = DualSpaceMouseCartesianActionSource(
-            left_reader=FakeSpaceMouseReader([spacemouse_sample(tx=1.0, buttons=(False,))]),
-            right_reader=FakeSpaceMouseReader([spacemouse_sample(ty=-1.0, buttons=())]),
+            left_reader=FakeSpaceMouseReader(
+                [
+                    spacemouse_sample(tx=1.0),
+                    spacemouse_sample(buttons=(False,)),
+                ]
+            ),
+            right_reader=FakeSpaceMouseReader(
+                [
+                    spacemouse_sample(ty=-1.0),
+                    spacemouse_sample(ty=-1.0),
+                ]
+            ),
         )
 
+        self.assertIsNotNone(source.next_intent(sample_state(), time.monotonic()))
         intent = source.next_intent(sample_state(), time.monotonic())
 
         self.assertIsNotNone(intent)
         assert intent is not None
-        self.assertEqual(intent.left["tcp_twist_local"], [0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
-        self.assertEqual(intent.right["tcp_twist_local"], [0.0, -0.03, 0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(intent.left["tcp_twist_local"], [0.0] * 6)
+        assert_float_list_almost_equal(
+            self,
+            intent.right["tcp_twist_local"],
+            [0.0, -0.0276, 0.0, 0.0, 0.0, 0.0],
+        )
+
+    def test_dual_source_simultaneous_release(self):
+        source = DualSpaceMouseCartesianActionSource(
+            left_reader=FakeSpaceMouseReader(
+                [
+                    spacemouse_sample(tx=1.0),
+                    spacemouse_sample(buttons=(False,)),
+                    spacemouse_sample(buttons=(False,)),
+                ]
+            ),
+            right_reader=FakeSpaceMouseReader(
+                [
+                    spacemouse_sample(ty=-1.0),
+                    spacemouse_sample(buttons=(False,)),
+                    spacemouse_sample(buttons=(False,)),
+                ]
+            ),
+        )
+
+        self.assertIsNotNone(source.next_intent(sample_state(), time.monotonic()))
+        released = source.next_intent(sample_state(), time.monotonic())
+        idle = source.next_intent(sample_state(), time.monotonic())
+
+        self.assertIsNotNone(released)
+        assert released is not None
+        self.assertEqual(released.left["tcp_twist_local"], [0.0] * 6)
+        self.assertEqual(released.right["tcp_twist_local"], [0.0] * 6)
+        self.assertIsNone(idle)
 
     def test_dual_spacemouse_cartesian_sends_no_command_when_both_inactive(self):
         source = DualSpaceMouseCartesianActionSource(
@@ -236,8 +341,16 @@ class CartesianActionSourceTest(unittest.TestCase):
 
         self.assertIsNotNone(intent)
         assert intent is not None
-        self.assertEqual(intent.left["tcp_twist_local"], [0.03, 0.0, 0.0, -0.2, 0.0, 0.0])
-        self.assertEqual(intent.right["tcp_twist_local"], [0.0, 0.0, -0.03, 0.0, 0.0, 0.2])
+        assert_float_list_almost_equal(
+            self,
+            intent.left["tcp_twist_local"],
+            [0.0276, 0.0, 0.0, -0.184, 0.0, 0.0],
+        )
+        assert_float_list_almost_equal(
+            self,
+            intent.right["tcp_twist_local"],
+            [0.0, 0.0, -0.0276, 0.0, 0.0, 0.184],
+        )
 
     def test_scripted_tcp_delta_is_stand_frame_and_clamped(self):
         source = TcpDeltaActionSource(
@@ -365,6 +478,47 @@ class CartesianActionSourceTest(unittest.TestCase):
         self.assertEqual(cfg.spacemouse_cartesian.max_angular_velocity_rad_s, 0.2)
         self.assertTrue(cfg.spacemouse_cartesian.require_deadman)
 
+    def test_default_command_rate_hz_is_100(self):
+        cfg = config_from_mapping({"schema": "robotics_lab.policy_runner.v1"})
+
+        self.assertEqual(cfg.command_rate_hz, 100.0)
+        self.assertEqual(cfg.spacemouse_cartesian.command_rate_hz, 100.0)
+
+    def test_command_rate_hz_below_one_rejected(self):
+        with self.assertRaisesRegex(ValueError, "command_rate_hz must be in"):
+            config_from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.v1",
+                    "command_rate_hz": 0.5,
+                }
+            )
+
+    def test_command_rate_hz_above_500_rejected(self):
+        with self.assertRaisesRegex(ValueError, "command_rate_hz must be in"):
+            config_from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.v1",
+                    "command_rate_hz": 600.0,
+                }
+            )
+
+    def test_command_rate_hz_at_bounds(self):
+        low = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "command_rate_hz": 1.0,
+            }
+        )
+        high = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "command_rate_hz": 500.0,
+            }
+        )
+
+        self.assertEqual(low.command_rate_hz, 1.0)
+        self.assertEqual(high.command_rate_hz, 500.0)
+
     def test_spacemouse_cartesian_deprecated_step_aliases_warn(self):
         with self.assertWarns(DeprecationWarning):
             cfg = config_from_mapping(
@@ -394,10 +548,12 @@ class CartesianActionSourceTest(unittest.TestCase):
                     "left": {
                         "path": "/dev/hidraw-left",
                         "device_number": 0,
+                        "deadman_button": 0,
                     },
                     "right": {
                         "path": "/dev/hidraw-right",
                         "device_number": 2,
+                        "deadman_button": 1,
                     },
                 },
             }
@@ -410,6 +566,7 @@ class CartesianActionSourceTest(unittest.TestCase):
         self.assertEqual(cfg.spacemouse_cartesian_dual.deadband, 0.05)
         self.assertEqual(cfg.spacemouse_cartesian_dual.left.path, "/dev/hidraw-left")
         self.assertEqual(cfg.spacemouse_cartesian_dual.right.device_number, 2)
+        self.assertEqual(cfg.spacemouse_cartesian_dual.right.deadman_button, 1)
 
     def test_dual_spacemouse_cartesian_invalid_device_config_fails(self):
         with self.assertRaisesRegex(ValueError, "device_number"):

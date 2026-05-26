@@ -161,6 +161,115 @@ bool testDualSendPrefersRealFailureOverPolicySuppression() {
     return true;
 }
 
+bool testDualSendContextsPreserveBothArmFailures() {
+    rb_servo::RobotState left_state_after;
+    left_state_after.arm_id = rb_servo::ArmId::Left;
+    left_state_after.connection_state = rb_servo::RobotConnectionState::Connected;
+    left_state_after.has_valid_joint_state = true;
+    left_state_after.has_error = true;
+    left_state_after.error_code = 2222;
+
+    rb_servo::DualSendResult dual;
+    dual.left.arm_id = rb_servo::ArmId::Left;
+    dual.left.request = request();
+    dual.left.result = rb_servo::rejectedSend(
+        dual.left.request,
+        rb_servo::backendError(
+            rb_servo::BackendErrorKind::RobotFault,
+            "controller fault latched",
+            "2222",
+            "fault_latched"
+        ),
+        {},
+        left_state_after,
+        "response"
+    );
+    dual.right.arm_id = rb_servo::ArmId::Right;
+    dual.right.request = request();
+    dual.right.result = rb_servo::rejectedSend(
+        dual.right.request,
+        rb_servo::backendError(
+            rb_servo::BackendErrorKind::TransportTimeout,
+            "send timed out",
+            "",
+            "send_timeout"
+        )
+    );
+
+    const rb_servo::LatchedDualFaultContext contexts =
+        rb_servo::classifyDualSendResultContexts(dual);
+    RB_CHECK(contexts.top_level.has_value());
+    RB_CHECK(contexts.left.has_value());
+    RB_CHECK(contexts.right.has_value());
+    RB_CHECK(contexts.top_level->arm == rb_servo::ArmId::Left);
+    RB_CHECK(contexts.top_level->backend_error.kind == rb_servo::BackendErrorKind::RobotFault);
+    RB_CHECK(contexts.left->verdict == rb_servo::SafetyVerdict::RobotStateError);
+    RB_CHECK(contexts.left->domain == rb_servo::FaultDomain::RobotState);
+    RB_CHECK(contexts.left->backend_error.kind == rb_servo::BackendErrorKind::RobotFault);
+    RB_CHECK(contexts.right->verdict == rb_servo::SafetyVerdict::SendFailure);
+    RB_CHECK(contexts.right->domain == rb_servo::FaultDomain::Backend);
+    RB_CHECK(contexts.right->backend_error.kind == rb_servo::BackendErrorKind::TransportTimeout);
+    return true;
+}
+
+bool testDualSendContextsPreserveSuppressionBesideFailure() {
+    rb_servo::DualSendResult dual;
+    dual.left.arm_id = rb_servo::ArmId::Left;
+    dual.left.request = request();
+    dual.left.result = rb_servo::rejectedSend(
+        dual.left.request,
+        rb_servo::backendError(
+            rb_servo::BackendErrorKind::SuppressedByPolicy,
+            "motion gate closed",
+            "",
+            "rbpodo_motion_gate_closed"
+        )
+    );
+    dual.right.arm_id = rb_servo::ArmId::Right;
+    dual.right.request = request();
+    dual.right.result = rb_servo::rejectedSend(
+        dual.right.request,
+        rb_servo::backendError(
+            rb_servo::BackendErrorKind::TransportWriteFailed,
+            "socket write failed",
+            "",
+            "send_failure_injected"
+        )
+    );
+
+    const rb_servo::LatchedDualFaultContext contexts =
+        rb_servo::classifyDualSendResultContexts(dual);
+    RB_CHECK(contexts.top_level.has_value());
+    RB_CHECK(contexts.left.has_value());
+    RB_CHECK(contexts.right.has_value());
+    RB_CHECK(contexts.top_level->arm == rb_servo::ArmId::Right);
+    RB_CHECK(contexts.top_level->verdict == rb_servo::SafetyVerdict::SendFailure);
+    RB_CHECK(contexts.left->verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(contexts.left->domain == rb_servo::FaultDomain::SafetyPolicy);
+    RB_CHECK(contexts.left->suppress_regular_servo);
+    RB_CHECK(contexts.right->backend_error.kind == rb_servo::BackendErrorKind::TransportWriteFailed);
+    return true;
+}
+
+bool testDualSendContextsEmptyWhenBothArmsOk() {
+    rb_servo::DualSendResult dual;
+    dual.left.arm_id = rb_servo::ArmId::Left;
+    dual.left.request = request();
+    dual.left.result = rb_servo::acceptedSend(dual.left.request);
+    dual.right.arm_id = rb_servo::ArmId::Right;
+    dual.right.request = request();
+    dual.right.result = rb_servo::acceptedSend(dual.right.request);
+
+    const rb_servo::LatchedDualFaultContext contexts =
+        rb_servo::classifyDualSendResultContexts(dual);
+    RB_CHECK(!contexts.top_level.has_value());
+    RB_CHECK(!contexts.left.has_value());
+    RB_CHECK(!contexts.right.has_value());
+    const rb_servo::FaultContext top = rb_servo::classifyDualSendResult(dual);
+    RB_CHECK(top.verdict == rb_servo::SafetyVerdict::Ok);
+    return true;
+}
+
 bool testCommandAndIkClassifiers() {
     const rb_servo::FaultContext invalid = rb_servo::classifyCommandValidation(
         rb_servo::SafetyVerdict::InvalidCommand,
@@ -188,6 +297,9 @@ int main() {
     if (!testTransportSendFailureStaysSendFailure()) return 1;
     if (!testSuppressedByPolicyIsNotFailure()) return 1;
     if (!testDualSendPrefersRealFailureOverPolicySuppression()) return 1;
+    if (!testDualSendContextsPreserveBothArmFailures()) return 1;
+    if (!testDualSendContextsPreserveSuppressionBesideFailure()) return 1;
+    if (!testDualSendContextsEmptyWhenBothArmsOk()) return 1;
     if (!testCommandAndIkClassifiers()) return 1;
     return 0;
 }

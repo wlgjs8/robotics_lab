@@ -425,10 +425,11 @@ force_control:
         )
         self.assertEqual(send_fault["fault_context"]["backend_error_kind"], "TransportWriteFailed")
         self.assertEqual(send_fault["fault_context"]["backend_error_name"], "send_failure_injected")
-        self.assertEqual(self.control_connection_count("left"), left_start + 1)
+        self.assertLessEqual(self.control_connection_count("left"), left_start + 1)
         self.assertEqual(self.control_connection_count("right"), right_start)
 
         self.admin("admin.reset_hooks")
+        time.sleep(0.08)
         self.send_command("ResetFault")
         send_fault_tick = int(send_fault.get("tick", 0))
         self.wait_snapshot(
@@ -542,6 +543,7 @@ force_control:
         self.assertEqual(send_fault["fault_context"]["arm"], "left")
         self.assertEqual(send_fault["fault_context"]["backend_op"], "SendServoJ")
         self.admin("admin.reset_hooks")
+        time.sleep(0.08)
         self.send_command("ResetFault")
         send_fault_tick = int(send_fault.get("tick", 0))
         self.wait_snapshot(

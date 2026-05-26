@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import warnings
 
 from policy_runner.action_sources.tcp_delta import (
@@ -23,6 +24,7 @@ class SpaceMouseCartesianActionSource:
         max_linear_velocity_m_s: float = 0.03,
         max_angular_velocity_rad_s: float = 0.2,
         deadband: float = 0.08,
+        response_curve_gamma: float = 3.0,
         require_deadman: bool = True,
         deadman_button: int = 0,
         timeout_sec: float = 0.2,
@@ -45,6 +47,8 @@ class SpaceMouseCartesianActionSource:
             raise ValueError("max_angular_velocity_rad_s must be non-negative")
         if deadband < 0.0:
             raise ValueError("deadband must be non-negative")
+        if response_curve_gamma < 1.0:
+            raise ValueError("response_curve_gamma must be >= 1.0")
         if deadman_button < 0:
             raise ValueError("deadman_button must be non-negative")
         if not require_deadman:
@@ -55,17 +59,24 @@ class SpaceMouseCartesianActionSource:
         self.max_linear_velocity_m_s = float(max_linear_velocity_m_s)
         self.max_angular_velocity_rad_s = float(max_angular_velocity_rad_s)
         self.deadband = float(deadband)
+        self.response_curve_gamma = float(response_curve_gamma)
         self.require_deadman = bool(require_deadman)
         self.deadman_button = int(deadman_button)
         self.timeout_sec = timeout_sec
+        self._was_armed = False
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         _ = snapshot, now_monotonic
         sample = self.reader.read(timeout_sec=0.0)
         if sample is None:
             return None
-        if not self._deadman_active(sample):
+        armed = self._deadman_active(sample)
+        if not armed:
+            if self._was_armed:
+                self._was_armed = False
+                return self._zero_twist_intent()
             return None
+        self._was_armed = True
         twist = self._twist_from_sample(sample)
         if all(value == 0.0 for value in twist):
             return None
@@ -83,15 +94,27 @@ class SpaceMouseCartesianActionSource:
             return False
         return sample.buttons[self.deadman_button]
 
+    def _zero_twist_intent(self) -> CommandIntent:
+        zero = (0.0,) * 6
+        left = zero if self.selected_arm in {"left", "both"} else None
+        right = zero if self.selected_arm in {"right", "both"} else None
+        return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
+
     def _twist_from_sample(self, sample: SpaceMouseSample) -> tuple[float, ...]:
         axes = (sample.tx, sample.ty, sample.tz, sample.rx, sample.ry, sample.rz)
         scaled = (
-            _apply_deadband(axes[0], self.deadband) * self.max_linear_velocity_m_s,
-            _apply_deadband(axes[1], self.deadband) * self.max_linear_velocity_m_s,
-            _apply_deadband(axes[2], self.deadband) * self.max_linear_velocity_m_s,
-            _apply_deadband(axes[3], self.deadband) * self.max_angular_velocity_rad_s,
-            _apply_deadband(axes[4], self.deadband) * self.max_angular_velocity_rad_s,
-            _apply_deadband(axes[5], self.deadband) * self.max_angular_velocity_rad_s,
+            _apply_soft_deadband(axes[0], self.deadband, self.response_curve_gamma)
+            * self.max_linear_velocity_m_s,
+            _apply_soft_deadband(axes[1], self.deadband, self.response_curve_gamma)
+            * self.max_linear_velocity_m_s,
+            _apply_soft_deadband(axes[2], self.deadband, self.response_curve_gamma)
+            * self.max_linear_velocity_m_s,
+            _apply_soft_deadband(axes[3], self.deadband, self.response_curve_gamma)
+            * self.max_angular_velocity_rad_s,
+            _apply_soft_deadband(axes[4], self.deadband, self.response_curve_gamma)
+            * self.max_angular_velocity_rad_s,
+            _apply_soft_deadband(axes[5], self.deadband, self.response_curve_gamma)
+            * self.max_angular_velocity_rad_s,
         )
         return clamp_tcp_twist(
             scaled,
@@ -126,8 +149,12 @@ def _resolve_velocity_limits(
     return float(max_linear_velocity_m_s), float(max_angular_velocity_rad_s)
 
 
-def _apply_deadband(value: float, deadband: float) -> float:
+def _apply_soft_deadband(value: float, deadband: float, gamma: float) -> float:
     value = float(value)
     if abs(value) <= deadband:
         return 0.0
-    return value
+    sign = math.copysign(1.0, value)
+    magnitude = (abs(value) - deadband) / (1.0 - deadband)
+    magnitude = max(0.0, min(1.0, magnitude))
+    remapped = magnitude ** gamma
+    return sign * remapped * (1.0 - deadband)

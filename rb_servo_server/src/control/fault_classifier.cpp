@@ -162,6 +162,23 @@ bool isFailure(const FaultContext& context) {
     return context.verdict != SafetyVerdict::Ok;
 }
 
+bool shouldPreserveLatchedContext(const FaultContext& context) {
+    return isFailure(context) || context.suppress_regular_servo;
+}
+
+std::optional<FaultContext> preservedContext(const FaultContext& context) {
+    if (!shouldPreserveLatchedContext(context)) return std::nullopt;
+    return context;
+}
+
+FaultContext chooseDualSendTopLevel(const FaultContext& left, const FaultContext& right) {
+    if (isFailure(left)) return left;
+    if (isFailure(right)) return right;
+    if (left.suppress_regular_servo) return left;
+    if (right.suppress_regular_servo) return right;
+    return left;
+}
+
 BackendError stateError(
     BackendErrorKind kind,
     const RobotState& state,
@@ -268,13 +285,25 @@ FaultContext classifySendServoJResult(
 }
 
 FaultContext classifyDualSendResult(const DualSendResult& result) {
+    const LatchedDualFaultContext contexts = classifyDualSendResultContexts(result);
+    if (contexts.top_level.has_value()) {
+        return *contexts.top_level;
+    }
+    const FaultContext left = classifySendServoJResult(result.left.result, result.left.arm_id);
+    return left;
+}
+
+LatchedDualFaultContext classifyDualSendResultContexts(const DualSendResult& result) {
     const FaultContext left = classifySendServoJResult(result.left.result, result.left.arm_id);
     const FaultContext right = classifySendServoJResult(result.right.result, result.right.arm_id);
-    if (isFailure(left)) return left;
-    if (isFailure(right)) return right;
-    if (left.suppress_regular_servo) return left;
-    if (right.suppress_regular_servo) return right;
-    return left;
+
+    LatchedDualFaultContext contexts;
+    contexts.left = preservedContext(left);
+    contexts.right = preservedContext(right);
+
+    const FaultContext top_level = chooseDualSendTopLevel(left, right);
+    contexts.top_level = preservedContext(top_level);
+    return contexts;
 }
 
 FaultContext classifyCommandValidation(

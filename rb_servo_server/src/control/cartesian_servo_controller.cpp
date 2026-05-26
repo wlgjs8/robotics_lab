@@ -72,12 +72,6 @@ bool finiteVec6(const Vec6& value) {
            std::isfinite(value.rz);
 }
 
-bool angularZero(const Vec6& value) {
-    return std::abs(value.rx) < 1e-12 &&
-           std::abs(value.ry) < 1e-12 &&
-           std::abs(value.rz) < 1e-12;
-}
-
 double linearNorm(const Vec6& value) {
     return std::sqrt(value.x * value.x + value.y * value.y + value.z * value.z);
 }
@@ -308,12 +302,12 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     const Vec6 error = math::bodyErrorLocal(*state.tcp_stand, reference);
     const Vec6 v_ref = referenceVelocityLocal(*path_state, reference, path_s);
     Vec6 v_cmd{
-        v_ref.x + config_.path_kp * error.x,
-        v_ref.y + config_.path_kp * error.y,
-        v_ref.z + config_.path_kp * error.z,
-        v_ref.rx + config_.path_kp * error.rx,
-        v_ref.ry + config_.path_kp * error.ry,
-        v_ref.rz + config_.path_kp * error.rz,
+        v_ref.x + config_.path_kp_pos * error.x,
+        v_ref.y + config_.path_kp_pos * error.y,
+        v_ref.z + config_.path_kp_pos * error.z,
+        v_ref.rx + config_.path_kp_ori * error.rx,
+        v_ref.ry + config_.path_kp_ori * error.ry,
+        v_ref.rz + config_.path_kp_ori * error.rz,
     };
     if (!finiteVec6(v_cmd)) {
         result.verdict = SafetyVerdict::IkFailed;
@@ -481,7 +475,7 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
     }
 
     Vec6 orientation_error;
-    if (angularZero(requested)) {
+    if (angularNorm(requested) <= config_.twist_angular_deadband_rad_s) {
         if (!hold_state->orientation_hold_active) {
             hold_state->hold_tcp_stand = *state.tcp_stand;
             hold_state->orientation_hold_active = true;

@@ -15,11 +15,18 @@ namespace rb_servo {
 class JsonLineTcpClient;
 
 struct RbsimTransportCounters {
+    uint64_t connect_attempts_total = 0;
+    uint64_t connect_failures_total = 0;
+    uint64_t connect_attempts_suppressed_total = 0;
     uint64_t connections_opened_total = 0;
     uint64_t reconnects_total = 0;
     uint64_t requests_total = 0;
     uint64_t read_syscalls_total = 0;
     uint64_t write_syscalls_total = 0;
+    std::string last_connect_error_name;
+    std::string last_connect_error_message;
+    uint64_t next_connect_attempt_ns = 0;
+    uint64_t next_connect_attempt_delay_ms = 0;
     std::optional<BackendErrorKind> last_transport_error_kind;
 };
 

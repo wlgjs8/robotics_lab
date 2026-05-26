@@ -160,6 +160,7 @@ def make_action_source(config: PolicyRunnerConfig):
             max_linear_velocity_m_s=config.spacemouse_cartesian.max_linear_velocity_m_s,
             max_angular_velocity_rad_s=config.spacemouse_cartesian.max_angular_velocity_rad_s,
             deadband=config.spacemouse_cartesian.deadband,
+            response_curve_gamma=config.spacemouse_cartesian.response_curve_gamma,
             require_deadman=config.spacemouse_cartesian.require_deadman,
             deadman_button=config.spacemouse_cartesian.deadman_button,
             timeout_sec=config.servo_command.timeout_sec,
@@ -182,6 +183,9 @@ def make_action_source(config: PolicyRunnerConfig):
             max_linear_velocity_m_s=config.spacemouse_cartesian_dual.max_linear_velocity_m_s,
             max_angular_velocity_rad_s=config.spacemouse_cartesian_dual.max_angular_velocity_rad_s,
             deadband=config.spacemouse_cartesian_dual.deadband,
+            response_curve_gamma=config.spacemouse_cartesian_dual.response_curve_gamma,
+            left_deadman_button=left.deadman_button,
+            right_deadman_button=right.deadman_button,
             timeout_sec=config.servo_command.timeout_sec,
         )
     raise ValueError(f"unknown action_source: {config.action_source}")

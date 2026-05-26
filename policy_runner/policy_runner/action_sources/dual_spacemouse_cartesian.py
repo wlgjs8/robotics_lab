@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import warnings
 
 from policy_runner.action_sources.tcp_delta import (
@@ -23,6 +24,9 @@ class DualSpaceMouseCartesianActionSource:
         max_linear_velocity_m_s: float = 0.03,
         max_angular_velocity_rad_s: float = 0.2,
         deadband: float = 0.08,
+        response_curve_gamma: float = 3.0,
+        left_deadman_button: int = 0,
+        right_deadman_button: int = 0,
         timeout_sec: float = 0.2,
         max_linear_step_m: float | None = None,
         max_angular_step_rad: float | None = None,
@@ -41,18 +45,38 @@ class DualSpaceMouseCartesianActionSource:
             raise ValueError("max_angular_velocity_rad_s must be non-negative")
         if deadband < 0.0:
             raise ValueError("deadband must be non-negative")
+        if response_curve_gamma < 1.0:
+            raise ValueError("response_curve_gamma must be >= 1.0")
+        if left_deadman_button < 0 or right_deadman_button < 0:
+            raise ValueError("deadman buttons must be non-negative")
         self.left_reader = left_reader if left_reader is not None else HidSpaceMouseReader(device_number=0)
         self.right_reader = right_reader if right_reader is not None else HidSpaceMouseReader(device_number=1)
         self.frame = frame
         self.max_linear_velocity_m_s = float(max_linear_velocity_m_s)
         self.max_angular_velocity_rad_s = float(max_angular_velocity_rad_s)
         self.deadband = float(deadband)
+        self.response_curve_gamma = float(response_curve_gamma)
+        self.left_deadman_button = int(left_deadman_button)
+        self.right_deadman_button = int(right_deadman_button)
         self.timeout_sec = timeout_sec
+        self._left_was_armed = False
+        self._right_was_armed = False
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         _ = snapshot, now_monotonic
-        left = self._twist_from_reader(self.left_reader)
-        right = self._twist_from_reader(self.right_reader)
+        left, self._left_was_armed, left_released, left_armed = self._twist_from_reader(
+            self.left_reader,
+            self.left_deadman_button,
+            self._left_was_armed,
+        )
+        right, self._right_was_armed, right_released, right_armed = self._twist_from_reader(
+            self.right_reader,
+            self.right_deadman_button,
+            self._right_was_armed,
+        )
+        if left_armed is False and right_armed is False and (left_released or right_released):
+            left = _ZERO_TWIST
+            right = _ZERO_TWIST
         if left is None and right is None:
             return None
         return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
@@ -64,19 +88,36 @@ class DualSpaceMouseCartesianActionSource:
     def _twist_from_reader(
         self,
         reader: SpaceMouseReader,
-    ) -> tuple[float, ...] | None:
+        deadman_button: int,
+        was_armed: bool,
+    ) -> tuple[tuple[float, ...] | None, bool, bool, bool | None]:
         sample = reader.read(timeout_sec=0.0)
         if sample is None:
-            return None
+            return None, was_armed, False, None
+        armed = _deadman_active(sample, deadman_button)
+        if not armed:
+            if was_armed:
+                return _ZERO_TWIST, False, True, False
+            return None, False, False, False
         twist = _twist_from_sample(
             sample,
             max_linear_velocity_m_s=self.max_linear_velocity_m_s,
             max_angular_velocity_rad_s=self.max_angular_velocity_rad_s,
             deadband=self.deadband,
+            response_curve_gamma=self.response_curve_gamma,
         )
         if all(value == 0.0 for value in twist):
-            return None
-        return twist
+            return None, True, False, True
+        return twist, True, False, True
+
+
+_ZERO_TWIST = (0.0,) * 6
+
+
+def _deadman_active(sample: SpaceMouseSample, deadman_button: int) -> bool:
+    if deadman_button >= len(sample.buttons):
+        return False
+    return sample.buttons[deadman_button]
 
 
 def _twist_from_sample(
@@ -85,15 +126,22 @@ def _twist_from_sample(
     max_linear_velocity_m_s: float,
     max_angular_velocity_rad_s: float,
     deadband: float,
+    response_curve_gamma: float,
 ) -> tuple[float, ...]:
     axes = (sample.tx, sample.ty, sample.tz, sample.rx, sample.ry, sample.rz)
     scaled = (
-        _apply_deadband(axes[0], deadband) * max_linear_velocity_m_s,
-        _apply_deadband(axes[1], deadband) * max_linear_velocity_m_s,
-        _apply_deadband(axes[2], deadband) * max_linear_velocity_m_s,
-        _apply_deadband(axes[3], deadband) * max_angular_velocity_rad_s,
-        _apply_deadband(axes[4], deadband) * max_angular_velocity_rad_s,
-        _apply_deadband(axes[5], deadband) * max_angular_velocity_rad_s,
+        _apply_soft_deadband(axes[0], deadband, response_curve_gamma)
+        * max_linear_velocity_m_s,
+        _apply_soft_deadband(axes[1], deadband, response_curve_gamma)
+        * max_linear_velocity_m_s,
+        _apply_soft_deadband(axes[2], deadband, response_curve_gamma)
+        * max_linear_velocity_m_s,
+        _apply_soft_deadband(axes[3], deadband, response_curve_gamma)
+        * max_angular_velocity_rad_s,
+        _apply_soft_deadband(axes[4], deadband, response_curve_gamma)
+        * max_angular_velocity_rad_s,
+        _apply_soft_deadband(axes[5], deadband, response_curve_gamma)
+        * max_angular_velocity_rad_s,
     )
     return clamp_tcp_twist(
         scaled,
@@ -128,8 +176,12 @@ def _resolve_velocity_limits(
     return float(max_linear_velocity_m_s), float(max_angular_velocity_rad_s)
 
 
-def _apply_deadband(value: float, deadband: float) -> float:
+def _apply_soft_deadband(value: float, deadband: float, gamma: float) -> float:
     value = float(value)
     if abs(value) <= deadband:
         return 0.0
-    return value
+    sign = math.copysign(1.0, value)
+    magnitude = (abs(value) - deadband) / (1.0 - deadband)
+    magnitude = max(0.0, min(1.0, magnitude))
+    remapped = magnitude ** gamma
+    return sign * remapped * (1.0 - deadband)

@@ -36,10 +36,13 @@ from rb_servo_gui.app import (
     _sim_readiness_from_env,
     _tcp_local_delta_from_target,
     _tcp_frame_mode,
+    _tcp_linear_arm,
+    _tcp_linear_orientation_mode,
     _tcp_target_pose,
     _tcp_target_wxyz,
     _update_joint_monitor,
     _update_joint_monitor_unit_buttons,
+    _update_tcp_linear_selection_buttons,
     _update_tcp_frame_buttons,
     _wxyz_to_xyzw,
     update_scene_markers,
@@ -983,6 +986,35 @@ class GuiContractsTest(unittest.TestCase):
         _update_tcp_frame_buttons(handles)
         self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_STAND].color, "green")
         self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_LOCAL].color, "gray")
+
+    def test_tcp_linear_defaults_to_both_and_slerp_with_active_button_colors(self):
+        handles = {
+            "tcp_linear_arm_buttons": {
+                "left": RecordingButton(),
+                "right": RecordingButton(),
+                "both": RecordingButton(),
+            },
+            "tcp_linear_orientation_buttons": {
+                "constant": RecordingButton(),
+                "slerp": RecordingButton(),
+            },
+        }
+        self.assertEqual(_tcp_linear_arm(handles), "both")
+        self.assertEqual(_tcp_linear_orientation_mode(handles), "slerp")
+        _update_tcp_linear_selection_buttons(handles)
+        self.assertEqual(handles["tcp_linear_arm_buttons"]["left"].color, "gray")
+        self.assertEqual(handles["tcp_linear_arm_buttons"]["right"].color, "gray")
+        self.assertEqual(handles["tcp_linear_arm_buttons"]["both"].color, "green")
+        self.assertEqual(handles["tcp_linear_orientation_buttons"]["constant"].color, "gray")
+        self.assertEqual(handles["tcp_linear_orientation_buttons"]["slerp"].color, "green")
+
+        handles["tcp_linear_arm"] = "left"
+        handles["tcp_linear_orientation_mode"] = "constant"
+        _update_tcp_linear_selection_buttons(handles)
+        self.assertEqual(handles["tcp_linear_arm_buttons"]["left"].color, "green")
+        self.assertEqual(handles["tcp_linear_arm_buttons"]["both"].color, "gray")
+        self.assertEqual(handles["tcp_linear_orientation_buttons"]["constant"].color, "green")
+        self.assertEqual(handles["tcp_linear_orientation_buttons"]["slerp"].color, "gray")
 
     def test_scene_update_hides_tcp_marker_when_pose_is_not_valid(self):
         state = sample_state()

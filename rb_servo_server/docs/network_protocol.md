@@ -255,9 +255,11 @@ The accepted Cartesian command modes are `TcpPoseTarget`, `TcpDeltaStand`,
 `TcpDeltaLocal`, `TcpLinearMove`, `TcpTwistStand`, and `TcpTwistLocal`. Runtime
 Cartesian verdicts include `Ok`, `CartesianUnavailable`, `InvalidCommand`, and
 `IkFailed`. `TcpTwist*` and `TcpLinearMove` are bounded by server-side
-`cartesian_control` limits before Jacobian velocity solving. Real Cartesian
-motion remains closed unless real mode is explicitly enabled, Cartesian control
-is configured for real, and `RB_ALLOW_REAL_CARTESIAN=1` is set.
+`cartesian_control` limits before Jacobian velocity solving. `TcpLinearMove`
+path feedback uses `cartesian_control.path_kp_pos` for position error and
+`cartesian_control.path_kp_ori` for orientation error. Real Cartesian motion
+remains closed unless real mode is explicitly enabled, Cartesian control is
+configured for real, and `RB_ALLOW_REAL_CARTESIAN=1` is set.
 
 ## Joint target command
 
@@ -377,7 +379,9 @@ They require their matching twist array with `vx,vy,vz` in `m/s` and
 continuous teleop; `TcpTwistStand` is the stand-frame API variant. If a
 requested twist exceeds `cartesian_control.max_twist_linear_m_s` or
 `max_twist_angular_rad_s`, the server either clamps it or rejects it according
-to `cartesian_control.exceed_limit_policy`:
+to `cartesian_control.exceed_limit_policy`. Requested angular velocity with
+norm less than or equal to `cartesian_control.twist_angular_deadband_rad_s`
+engages or maintains server-side orientation hold:
 
 ```json
 {

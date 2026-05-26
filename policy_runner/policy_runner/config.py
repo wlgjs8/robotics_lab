@@ -85,10 +85,11 @@ class SpaceMouseConfig:
 class SpaceMouseCartesianConfig:
     selected_arm: str = "left"
     frame: str = "local"
-    command_rate_hz: float = 30.0
+    command_rate_hz: float = 100.0
     max_linear_velocity_m_s: float = 0.03
     max_angular_velocity_rad_s: float = 0.2
     deadband: float = 0.08
+    response_curve_gamma: float = 3.0
     require_deadman: bool = True
     deadman_button: int = 0
 
@@ -99,6 +100,9 @@ class SpaceMouseCartesianConfig:
             raise ValueError("spacemouse_cartesian.max_angular_velocity_rad_s must be non-negative")
         if self.deadband < 0.0:
             raise ValueError("spacemouse_cartesian.deadband must be non-negative")
+        if self.response_curve_gamma < 1.0:
+            raise ValueError("spacemouse_cartesian.response_curve_gamma must be >= 1.0")
+        _validate_command_rate_hz(float(self.command_rate_hz))
 
     @property
     def max_linear_step_m(self) -> float:
@@ -114,10 +118,13 @@ class SpaceMouseDeviceConfig:
     device: str | None = None
     path: str | None = None
     device_number: int = 0
+    deadman_button: int = 0
 
     def __post_init__(self) -> None:
         if self.device_number < 0:
             raise ValueError("spacemouse device_number must be non-negative")
+        if self.deadman_button < 0:
+            raise ValueError("spacemouse deadman_button must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -130,6 +137,7 @@ class DualSpaceMouseCartesianConfig:
     max_linear_velocity_m_s: float = 0.03
     max_angular_velocity_rad_s: float = 0.2
     deadband: float = 0.08
+    response_curve_gamma: float = 3.0
 
     def __post_init__(self) -> None:
         if self.max_linear_velocity_m_s < 0.0:
@@ -138,6 +146,8 @@ class DualSpaceMouseCartesianConfig:
             raise ValueError("spacemouse_cartesian_dual.max_angular_velocity_rad_s must be non-negative")
         if self.deadband < 0.0:
             raise ValueError("spacemouse_cartesian_dual.deadband must be non-negative")
+        if self.response_curve_gamma < 1.0:
+            raise ValueError("spacemouse_cartesian_dual.response_curve_gamma must be >= 1.0")
 
     @property
     def max_linear_step_m(self) -> float:
@@ -166,7 +176,10 @@ class PolicyRunnerConfig:
     spacemouse_cartesian_dual: DualSpaceMouseCartesianConfig = field(
         default_factory=DualSpaceMouseCartesianConfig
     )
-    command_rate_hz: float = 30.0
+    command_rate_hz: float = 100.0
+
+    def __post_init__(self) -> None:
+        _validate_command_rate_hz(float(self.command_rate_hz))
 
 
 def load_config(path: str | Path) -> PolicyRunnerConfig:
@@ -194,7 +207,7 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         spacemouse_cartesian_dual=_spacemouse_cartesian_dual_config(
             _section(raw, "spacemouse_cartesian_dual")
         ),
-        command_rate_hz=float(raw.get("command_rate_hz", 30.0)),
+        command_rate_hz=float(raw.get("command_rate_hz", 100.0)),
     )
 
 
@@ -261,6 +274,10 @@ def _spacemouse_config(raw: dict[str, Any]) -> SpaceMouseConfig:
 
 def _spacemouse_cartesian_config(raw: dict[str, Any]) -> SpaceMouseCartesianConfig:
     _apply_spacemouse_cartesian_velocity_aliases(raw, "spacemouse_cartesian")
+    if "command_rate_hz" in raw:
+        raw["command_rate_hz"] = float(raw["command_rate_hz"])
+    if "response_curve_gamma" in raw:
+        raw["response_curve_gamma"] = float(raw["response_curve_gamma"])
     return SpaceMouseCartesianConfig(**raw)
 
 
@@ -272,12 +289,16 @@ def _spacemouse_cartesian_dual_config(raw: dict[str, Any]) -> DualSpaceMouseCart
     right = _spacemouse_device_config(right_raw)
     top_level = {key: value for key, value in raw.items() if key not in {"left", "right"}}
     _apply_spacemouse_cartesian_velocity_aliases(top_level, "spacemouse_cartesian_dual")
+    if "response_curve_gamma" in top_level:
+        top_level["response_curve_gamma"] = float(top_level["response_curve_gamma"])
     return DualSpaceMouseCartesianConfig(left=left, right=right, **top_level)
 
 
 def _spacemouse_device_config(raw: dict[str, Any]) -> SpaceMouseDeviceConfig:
     if "device_number" in raw:
         raw["device_number"] = int(raw["device_number"])
+    if "deadman_button" in raw:
+        raw["deadman_button"] = int(raw["deadman_button"])
     return SpaceMouseDeviceConfig(**raw)
 
 
@@ -303,6 +324,11 @@ def _tuple6(value: Any, label: str) -> tuple[float, ...]:
     if not isinstance(value, (list, tuple)) or len(value) != 6:
         raise ValueError(f"{label} must contain 6 numbers")
     return tuple(float(v) for v in value)
+
+
+def _validate_command_rate_hz(command_rate_hz: float) -> None:
+    if command_rate_hz < 1.0 or command_rate_hz > 500.0:
+        raise ValueError("command_rate_hz must be in [1.0, 500.0]")
 
 
 def _load_mapping(path: Path) -> dict[str, Any]:

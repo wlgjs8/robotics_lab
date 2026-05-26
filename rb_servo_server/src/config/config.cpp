@@ -422,7 +422,10 @@ void validateConfig(const DualArmConfig& cfg) {
     validateNonNegativeFinite(cfg.cartesian_control.warn_ik_duration_us, "cartesian_control.warn_ik_duration_us");
     validateNonNegativeFinite(cfg.cartesian_control.fail_ik_duration_us, "cartesian_control.fail_ik_duration_us");
     validatePositiveFinite(cfg.cartesian_control.path_kp, "cartesian_control.path_kp");
+    validatePositiveFinite(cfg.cartesian_control.path_kp_pos, "cartesian_control.path_kp_pos");
+    validatePositiveFinite(cfg.cartesian_control.path_kp_ori, "cartesian_control.path_kp_ori");
     validatePositiveFinite(cfg.cartesian_control.twist_orientation_hold_kp, "cartesian_control.twist_orientation_hold_kp");
+    validatePositiveFinite(cfg.cartesian_control.twist_angular_deadband_rad_s, "cartesian_control.twist_angular_deadband_rad_s");
     validatePositiveFinite(cfg.cartesian_control.velocity_damping, "cartesian_control.velocity_damping");
     validatePositiveFinite(cfg.cartesian_control.max_twist_linear_m_s, "cartesian_control.max_twist_linear_m_s");
     validatePositiveFinite(cfg.cartesian_control.max_twist_angular_rad_s, "cartesian_control.max_twist_angular_rad_s");
@@ -809,7 +812,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "warn_ik_duration_us",
             "fail_ik_duration_us",
             "path_kp",
+            "path_kp_pos",
+            "path_kp_ori",
             "twist_orientation_hold_kp",
+            "twist_angular_deadband_rad_s",
             "velocity_damping",
             "max_twist_linear_m_s",
             "max_twist_angular_rad_s",
@@ -837,12 +843,36 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             cfg.cartesian_control.fail_ik_duration_us =
                 asDouble(sec["fail_ik_duration_us"], "cartesian_control.fail_ik_duration_us");
         }
+        const bool has_legacy_path_kp = has(sec, "path_kp");
+        const bool has_path_kp_pos = has(sec, "path_kp_pos");
+        const bool has_path_kp_ori = has(sec, "path_kp_ori");
+        if (has_legacy_path_kp && (has_path_kp_pos || has_path_kp_ori)) {
+            fail(
+                "cartesian_control cannot set deprecated path_kp together with path_kp_pos/path_kp_ori",
+                sec["path_kp"]
+            );
+        }
         if (has(sec, "path_kp")) {
-            cfg.cartesian_control.path_kp = asDouble(sec["path_kp"], "cartesian_control.path_kp");
+            warnDeprecatedKey("cartesian_control.path_kp", "cartesian_control.path_kp_pos and cartesian_control.path_kp_ori");
+            const double path_kp = asDouble(sec["path_kp"], "cartesian_control.path_kp");
+            cfg.cartesian_control.path_kp = path_kp;
+            cfg.cartesian_control.path_kp_pos = path_kp;
+            cfg.cartesian_control.path_kp_ori = path_kp;
+        } else {
+            if (has(sec, "path_kp_pos")) {
+                cfg.cartesian_control.path_kp_pos = asDouble(sec["path_kp_pos"], "cartesian_control.path_kp_pos");
+            }
+            if (has(sec, "path_kp_ori")) {
+                cfg.cartesian_control.path_kp_ori = asDouble(sec["path_kp_ori"], "cartesian_control.path_kp_ori");
+            }
         }
         if (has(sec, "twist_orientation_hold_kp")) {
             cfg.cartesian_control.twist_orientation_hold_kp =
                 asDouble(sec["twist_orientation_hold_kp"], "cartesian_control.twist_orientation_hold_kp");
+        }
+        if (has(sec, "twist_angular_deadband_rad_s")) {
+            cfg.cartesian_control.twist_angular_deadband_rad_s =
+                asDouble(sec["twist_angular_deadband_rad_s"], "cartesian_control.twist_angular_deadband_rad_s");
         }
         if (has(sec, "velocity_damping")) {
             cfg.cartesian_control.velocity_damping = asDouble(sec["velocity_damping"], "cartesian_control.velocity_damping");
