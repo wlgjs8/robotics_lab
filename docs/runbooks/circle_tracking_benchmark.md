@@ -27,10 +27,14 @@ circumference = 2 * pi * 0.075 ~= 0.471 m
 speed = 0.471 / 4 ~= 0.118 m/s
 ```
 
-The current simulator TCP acceptance config may limit twist speed to about
+The current simulator TCP acceptance config limits twist speed to about
 0.03 m/s, so BENCH-CIRCLE-01 defaults to a slower conservative profile. The
-15 cm / 4 s stress profile requires explicit opt-in and a compatible simulator
-config.
+15 cm / 4 s stress profile requires explicit opt-in and the dedicated
+simulator-only stress config:
+
+```text
+rb_servo_server/config/dual_simulator_circle_stress.yaml
+```
 
 ## Safe Baseline
 
@@ -92,15 +96,24 @@ python3 scripts/circle_tracking_benchmark.py \
 
 ## 15 cm / 4 s Stress
 
-Use this only with a simulator config whose Cartesian speed limits are
-compatible:
+GENE-style stress requires `dual_simulator_circle_stress.yaml`. This config is
+simulator-only, keeps `allow_in_real: false`, and raises only simulator
+Cartesian speed limits enough for the 15 cm / 4 s profile:
+
+```yaml
+cartesian_control:
+  max_twist_linear_m_s: 0.15
+  max_linear_move_speed_m_s: 0.15
+  max_twist_angular_rad_s: 0.4
+  exceed_limit_policy: clamp
+```
 
 ```bash
 python3 scripts/circle_tracking_benchmark.py \
   --root . \
   --mode start-local \
   --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-  --server-config rb_servo_server/config/dual_simulator_tcp_acceptance.yaml \
+  --server-config rb_servo_server/config/dual_simulator_circle_stress.yaml \
   --left-config rb_simulator/config/left_rb3_730e.yaml \
   --right-config rb_simulator/config/right_rb3_730e.yaml \
   --arm left \
@@ -114,7 +127,8 @@ python3 scripts/circle_tracking_benchmark.py \
 ```
 
 The default `dual_simulator_tcp_acceptance.yaml` speed limit is not intended to
-run this profile unchanged.
+run this profile unchanged; preflight should reject that default config for
+`gene_15cm_4s`.
 
 ## Controllers
 
@@ -191,5 +205,7 @@ Run the GENE-style stress only with explicit opt-in and compatible speed limits:
 ```bash
 CODEX_RUN_GENE_STYLE_CIRCLE=1 ./scripts/codex_gate.sh BENCH-CIRCLE-01
 ```
+
+The GENE-style gate path uses `dual_simulator_circle_stress.yaml`.
 
 Passing this simulator benchmark does not permit real robot motion.

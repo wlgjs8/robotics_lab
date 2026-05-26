@@ -194,6 +194,15 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def ensure_rbsim_import_path(root: Path) -> None:
+    sim_src = (root / "rb_simulator" / "src").resolve()
+    if not sim_src.is_dir():
+        raise AcceptanceError(f"missing rb_simulator source path: {sim_src}")
+    sim_src_text = str(sim_src)
+    if sim_src_text not in sys.path:
+        sys.path.insert(0, sim_src_text)
+
+
 def git_commit(root: Path) -> str | None:
     try:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(root), text=True).strip()
@@ -813,6 +822,18 @@ def plot_artifacts(artifact_dir: Path, args: argparse.Namespace, traj: Trajector
     return skipped
 
 
+def generated_plot_paths(artifact_dir: Path) -> list[str]:
+    plot_names = [
+        "circle_trajectory.png",
+        "tracking_error_time.png",
+        "orientation_drift_time.png",
+        "phase_lag_time.png",
+        "radial_error_time.png",
+        "axis_positions_time.png",
+    ]
+    return [str((artifact_dir / name).resolve()) for name in plot_names if (artifact_dir / name).is_file()]
+
+
 def threshold_failures(args: argparse.Namespace, summary: dict[str, Any]) -> list[str]:
     checks = [
         ("rms_error_m", args.max_allowed_rms_error_m),
@@ -890,6 +911,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         if args.mode == "start-local":
             if not args.server.is_file() or not os.access(args.server, os.X_OK):
                 raise AcceptanceError(f"server binary missing or not executable: {args.server}")
+            ensure_rbsim_import_path(args.root)
             left_config = load_simulator_config(args.left_config)
             right_config = load_simulator_config(args.right_config)
             if left_config.arm != "left" or right_config.arm != "right":
@@ -973,6 +995,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "benchmark_start_ns": benchmark_start_ns,
             "benchmark_end_ns": benchmark_end_ns,
             "duration_sec": duration_sec,
+            "generated_plots": generated_plot_paths(artifact_dir),
             "skipped_plots": skipped_plots,
             "servo_log": servo_log,
             "threshold_failures": [],

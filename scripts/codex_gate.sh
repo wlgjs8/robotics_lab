@@ -345,6 +345,17 @@ run_circle_benchmark_gate() {
     --profile safe_5cm_10s \
     --artifact-dir artifacts/circle_tracking/preflight_gate \
     --preflight-only >/dev/null
+  PYTHONPATH=rb_simulator/src python3 scripts/circle_tracking_benchmark.py \
+    --root . \
+    --mode start-local \
+    --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
+    --server-config rb_servo_server/config/dual_simulator_circle_stress.yaml \
+    --left-config rb_simulator/config/left_rb3_730e.yaml \
+    --right-config rb_simulator/config/right_rb3_730e.yaml \
+    --profile gene_15cm_4s \
+    --allow-fast-stress \
+    --artifact-dir artifacts/circle_tracking/gene_preflight_gate \
+    --preflight-only >/dev/null
   run_gui_tests
   run_policy_runner_tests
   run_simulator_tests
@@ -370,7 +381,7 @@ run_circle_benchmark_gate() {
       --root . \
       --mode start-local \
       --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-      --server-config rb_servo_server/config/dual_simulator_tcp_acceptance.yaml \
+      --server-config rb_servo_server/config/dual_simulator_circle_stress.yaml \
       --left-config rb_simulator/config/left_rb3_730e.yaml \
       --right-config rb_simulator/config/right_rb3_730e.yaml \
       --arm left \
@@ -389,7 +400,7 @@ run_circle_benchmark_gate() {
       --root . \
       --mode start-local \
       --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-      --server-config rb_servo_server/config/dual_simulator_tcp_acceptance.yaml \
+      --server-config rb_servo_server/config/dual_simulator_circle_stress.yaml \
       --left-config rb_simulator/config/left_rb3_730e.yaml \
       --right-config rb_simulator/config/right_rb3_730e.yaml \
       --arm left \

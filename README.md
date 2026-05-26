@@ -203,6 +203,7 @@ Servo server simulation configs:
 - `rb_servo_server/config/dual_simulator_compose.yaml`
 - `rb_servo_server/config/dual_simulator_worker.yaml`
 - `rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`
+- `rb_servo_server/config/dual_simulator_circle_stress.yaml`
 
 Simulator configs:
 
