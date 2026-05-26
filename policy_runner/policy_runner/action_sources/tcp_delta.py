@@ -73,6 +73,20 @@ def tcp_delta_stand_intent(
     )
 
 
+def tcp_twist_local_intent(
+    *,
+    left: tuple[float, ...] | list[float] | None = None,
+    right: tuple[float, ...] | list[float] | None = None,
+    timeout_sec: float = 0.2,
+) -> CommandIntent:
+    return CartesianCommandIntent(
+        "TcpTwistLocal",
+        timeout_sec=timeout_sec,
+        left=_arm_payload("TcpTwistLocal", "tcp_twist_local", left),
+        right=_arm_payload("TcpTwistLocal", "tcp_twist_local", right),
+    )
+
+
 def clamp_tcp_delta(
     delta: tuple[float, ...] | list[float],
     max_linear_step_m: float,

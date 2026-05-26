@@ -200,6 +200,12 @@ bool readOptionalWrench6D(const json& object, const char* key, Wrench6D* out, bo
     });
 }
 
+bool readOptionalVec6(const json& object, const char* key, Vec6* out, bool* present) {
+    return readOptionalArray6(object, key, out, present, [](const std::array<double, 6>& values, Vec6* target) {
+        *target = Vec6{values[0], values[1], values[2], values[3], values[4], values[5]};
+    });
+}
+
 bool parseForceControlObject(const json& object, ForceControlCommand* cmd) {
     const auto force_it = object.find("force_control");
     if (force_it == object.end()) return true;
@@ -235,8 +241,11 @@ bool requiresPayload(ControlMode mode) {
     return mode == ControlMode::JointTarget ||
            mode == ControlMode::JointVelocity ||
            mode == ControlMode::TcpPoseTarget ||
+           mode == ControlMode::TcpLinearMove ||
            mode == ControlMode::TcpDeltaStand ||
-           mode == ControlMode::TcpDeltaLocal;
+           mode == ControlMode::TcpDeltaLocal ||
+           mode == ControlMode::TcpTwistStand ||
+           mode == ControlMode::TcpTwistLocal;
 }
 
 bool hasRequiredPayload(const ArmCommand& command) {
@@ -246,11 +255,16 @@ bool hasRequiredPayload(const ArmCommand& command) {
         case ControlMode::JointVelocity:
             return command.has_joint_velocity;
         case ControlMode::TcpPoseTarget:
+        case ControlMode::TcpLinearMove:
             return command.has_tcp_target;
         case ControlMode::TcpDeltaStand:
             return command.has_tcp_delta_stand;
         case ControlMode::TcpDeltaLocal:
             return command.has_tcp_delta_local;
+        case ControlMode::TcpTwistStand:
+            return command.has_tcp_twist_stand;
+        case ControlMode::TcpTwistLocal:
+            return command.has_tcp_twist_local;
         default:
             return true;
     }
@@ -266,8 +280,11 @@ bool commandRequiresLease(ControlMode mode) {
            mode == ControlMode::JointTarget ||
            mode == ControlMode::JointVelocity ||
            mode == ControlMode::TcpPoseTarget ||
+           mode == ControlMode::TcpLinearMove ||
            mode == ControlMode::TcpDeltaStand ||
            mode == ControlMode::TcpDeltaLocal ||
+           mode == ControlMode::TcpTwistStand ||
+           mode == ControlMode::TcpTwistLocal ||
            mode == ControlMode::ResetFault;
 }
 
@@ -342,10 +359,22 @@ bool parseArmObject(
         out->has_joint_velocity = present;
         if (!readOptionalPose6D(object, "tcp_target_stand", &out->tcp_target_stand, &present)) return false;
         out->has_tcp_target = present;
+        bool alias_present = false;
+        Pose6D alias_target;
+        if (!readOptionalPose6D(object, "target_tcp_stand", &alias_target, &alias_present)) return false;
+        if (out->has_tcp_target && alias_present) return false;
+        if (alias_present) {
+            out->tcp_target_stand = alias_target;
+            out->has_tcp_target = true;
+        }
         if (!readOptionalPose6D(object, "tcp_delta_stand", &out->tcp_delta_stand, &present)) return false;
         out->has_tcp_delta_stand = present;
         if (!readOptionalPose6D(object, "tcp_delta_local", &out->tcp_delta_local, &present)) return false;
         out->has_tcp_delta_local = present;
+        if (!readOptionalVec6(object, "tcp_twist_stand", &out->tcp_twist_stand, &present)) return false;
+        out->has_tcp_twist_stand = present;
+        if (!readOptionalVec6(object, "tcp_twist_local", &out->tcp_twist_local, &present)) return false;
+        out->has_tcp_twist_local = present;
         if (!parseForceControlObject(object, &out->force_control)) return false;
     }
     if (out->timeout_sec <= 0.0 || !std::isfinite(out->timeout_sec)) return false;
@@ -559,8 +588,16 @@ bool CommandServer::parseMessage(
 
         if (!readOptionalPose6D(root, "tcp_target_stand", &cmd.left.tcp_target_stand, &present)) return false;
         cmd.left.has_tcp_target = cmd.left.has_tcp_target || present;
+        bool alias_present = false;
+        Pose6D alias_target;
+        if (!readOptionalPose6D(root, "target_tcp_stand", &alias_target, &alias_present)) return false;
+        if (present && alias_present) return false;
+        if (alias_present) {
+            cmd.left.tcp_target_stand = alias_target;
+            cmd.left.has_tcp_target = true;
+        }
         cmd.right.tcp_target_stand = cmd.left.tcp_target_stand;
-        cmd.right.has_tcp_target = cmd.right.has_tcp_target || present;
+        cmd.right.has_tcp_target = cmd.right.has_tcp_target || present || alias_present;
 
         if (!readOptionalPose6D(root, "tcp_delta_stand", &cmd.left.tcp_delta_stand, &present)) return false;
         cmd.left.has_tcp_delta_stand = cmd.left.has_tcp_delta_stand || present;
@@ -571,6 +608,16 @@ bool CommandServer::parseMessage(
         cmd.left.has_tcp_delta_local = cmd.left.has_tcp_delta_local || present;
         cmd.right.tcp_delta_local = cmd.left.tcp_delta_local;
         cmd.right.has_tcp_delta_local = cmd.right.has_tcp_delta_local || present;
+
+        if (!readOptionalVec6(root, "tcp_twist_stand", &cmd.left.tcp_twist_stand, &present)) return false;
+        cmd.left.has_tcp_twist_stand = cmd.left.has_tcp_twist_stand || present;
+        cmd.right.tcp_twist_stand = cmd.left.tcp_twist_stand;
+        cmd.right.has_tcp_twist_stand = cmd.right.has_tcp_twist_stand || present;
+
+        if (!readOptionalVec6(root, "tcp_twist_local", &cmd.left.tcp_twist_local, &present)) return false;
+        cmd.left.has_tcp_twist_local = cmd.left.has_tcp_twist_local || present;
+        cmd.right.tcp_twist_local = cmd.left.tcp_twist_local;
+        cmd.right.has_tcp_twist_local = cmd.right.has_tcp_twist_local || present;
     }
 
     if (requiresPayload(cmd.left.mode) && !hasRequiredPayload(cmd.left)) return false;

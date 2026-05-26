@@ -136,15 +136,15 @@ Hardware-free tests use `FakeSpaceMouseReader`. Real HID support is optional:
 python3 -m pip install -e policy_runner[spacemouse]
 ```
 
-## Cartesian TCP Delta
+## Cartesian TCP Commands
 
 `tcp_delta` emits a small scripted stand-frame TCP delta using the server
-`TcpDeltaStand` mode. `spacemouse_cartesian` maps SpaceMouse axes to the same
-stand-frame TCP delta mode:
+`TcpDeltaStand` mode. `spacemouse_cartesian` maps SpaceMouse axes to a
+simulation-only local TCP twist using `TcpTwistLocal`:
 
 ```text
-tx, ty, tz -> TCP dx, dy, dz in meters
-rx, ry, rz -> TCP drx, dry, drz in radians
+tx, ty, tz -> TCP local vx, vy, vz
+rx, ry, rz -> TCP local wx, wy, wz
 ```
 
 Example config fields:
@@ -156,7 +156,7 @@ runtime:
 command_rate_hz: 30
 spacemouse_cartesian:
   selected_arm: left
-  frame: stand
+  frame: local
   max_linear_step_m: 0.002
   max_angular_step_rad: 0.01
   deadband: 0.08
@@ -165,8 +165,8 @@ spacemouse_cartesian:
 ```
 
 Button 0 is the default deadman switch. When it is released, the source emits
-no command. Linear and angular deltas are clamped per command. `TcpDeltaLocal`
-is intentionally not enabled by policy_runner yet.
+no command. The Cartesian SpaceMouse source always requires a deadman switch.
+Linear and angular twist components are clamped per command.
 
 ## Runtime Startup
 
@@ -207,4 +207,5 @@ Joint actions use per-arm modes so either arm can hold independently:
 Supported P1-D modes are `Hold`, `ArmMotion`, `DisarmMotion`,
 `EmergencyStop`, `ResetFault`, `JointTarget`, and `JointVelocity`.
 P3 Cartesian packets additionally use `TcpDeltaStand` with per-arm
-`tcp_delta_stand` payloads in simulation only.
+`tcp_delta_stand` payloads and `TcpTwistLocal` with per-arm `tcp_twist_local`
+payloads in simulation only.

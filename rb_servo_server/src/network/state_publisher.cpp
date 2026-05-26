@@ -169,6 +169,11 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"ik_fail_duration_exceeded", telemetry.ik_fail_duration_exceeded},
         {"warn_ik_duration_us", telemetry.warn_ik_duration_us},
         {"fail_ik_duration_us", telemetry.fail_ik_duration_us},
+        {"path_s", telemetry.path_s},
+        {"path_position_error_m", telemetry.path_position_error_m},
+        {"path_orientation_error_rad", telemetry.path_orientation_error_rad},
+        {"path_line_deviation_m", telemetry.path_line_deviation_m},
+        {"path_done", telemetry.path_done},
     };
 }
 

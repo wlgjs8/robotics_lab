@@ -36,8 +36,11 @@ enum class ControlMode {
     JointTarget,
     JointVelocity,
     TcpPoseTarget,
+    TcpLinearMove,
     TcpDeltaStand,
     TcpDeltaLocal,
+    TcpTwistStand,
+    TcpTwistLocal,
     EmergencyStop,
     ResetFault
 };
@@ -177,6 +180,11 @@ struct CartesianSolveTelemetry {
     bool ik_fail_duration_exceeded = false;
     double warn_ik_duration_us = 0.0;
     double fail_ik_duration_us = 0.0;
+    double path_s = 0.0;
+    double path_position_error_m = 0.0;
+    double path_orientation_error_rad = 0.0;
+    double path_line_deviation_m = 0.0;
+    bool path_done = false;
 };
 
 struct ArmCommand {
@@ -193,6 +201,8 @@ struct ArmCommand {
     Pose6D tcp_target_stand;
     Pose6D tcp_delta_stand;
     Pose6D tcp_delta_local;
+    Vec6 tcp_twist_stand;
+    Vec6 tcp_twist_local;
 
     ForceControlCommand force_control;
 
@@ -206,6 +216,8 @@ struct ArmCommand {
     bool has_tcp_target = false;
     bool has_tcp_delta_stand = false;
     bool has_tcp_delta_local = false;
+    bool has_tcp_twist_stand = false;
+    bool has_tcp_twist_local = false;
 };
 
 struct CommandSourceMetadata {

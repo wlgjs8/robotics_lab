@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rb_servo/config/config.hpp"
+#include "rb_servo/control/cartesian_trajectory_planner.hpp"
 #include "rb_servo/core/types.hpp"
 #include "rb_servo/kinematics/i_kinematics.hpp"
 

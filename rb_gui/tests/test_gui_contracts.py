@@ -15,8 +15,10 @@ from rb_servo_gui.app import (
     _DEFAULT_RIGHT_POSE,
     _TCP_FRAME_LOCAL,
     _TCP_FRAME_STAND,
+    _apply_tcp_delta_and_send_pose_target,
     _apply_tcp_delta_to_target,
     _angular_step_radians,
+    _format_cartesian_solve_status,
     _format_fk_status,
     _format_joints,
     _joint_cfg_radians,
@@ -768,6 +770,45 @@ class GuiContractsTest(unittest.TestCase):
         self.assertAlmostEqual(local_handles["left_tcp_target_pose"][1], 1.0, places=7)
         self.assertEqual(local_handle.position, local_handles["left_tcp_target_pose"][:3])
 
+    def test_tcp_ptp_delta_sends_absolute_pose_target_with_quaternion(self):
+        state = self.tcp_available_state()
+        _, client, safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="simulator",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+        )
+        yaw_90_pose = (0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2.0)
+        handles = {
+            "left_tcp_target": RecordingSceneHandle(),
+            "left_tcp_target_pose": yaw_90_pose,
+            "left_tcp_target_wxyz": _pose_wxyz(yaw_90_pose),
+        }
+
+        ok, reason = _apply_tcp_delta_and_send_pose_target(
+            safety,
+            handles,
+            "left",
+            (0.005, 0.0, 0.0, 0.0, 0.0, 0.0),
+            _TCP_FRAME_LOCAL,
+        )
+        self.assertTrue(ok, reason)
+        self.assertAlmostEqual(handles["left_tcp_target_pose"][0], 0.0, places=7)
+        self.assertAlmostEqual(handles["left_tcp_target_pose"][1], 0.005, places=7)
+
+        packet = client.sent_packets[-1]
+        self.assertEqual(packet["mode"], "Hold")
+        self.assertEqual(packet["left"]["mode"], "TcpPoseTarget")
+        self.assertNotIn("tcp_delta_local", packet["left"])
+        self.assertNotIn("tcp_delta_stand", packet["left"])
+        target = packet["left"]["tcp_target_stand"]
+        self.assertIsInstance(target, dict)
+        self.assertEqual(target["quaternion_xyzw"], list(_wxyz_to_xyzw(handles["left_tcp_target_wxyz"])))
+        self.assertEqual(packet["right"], {})
+
     def test_tcp_frame_defaults_to_local_and_updates_button_colors(self):
         handles = {
             "tcp_frame_buttons": {
@@ -821,6 +862,38 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("left invalid joint state", _format_fk_status(invalid_store.latest(), stale=False))
         self.assertIn("right invalid TCP pose", _format_fk_status(invalid_store.latest(), stale=False))
 
+    def test_cartesian_solve_status_displays_ik_error_and_timing(self):
+        state = sample_state()
+        state["left"]["cartesian_solve"] = {
+            "attempted": True,
+            "status": "ok",
+            "position_error_m": 0.0012,
+            "orientation_error_rad": 0.0025,
+            "ik_iterations": 7,
+            "ik_duration_us": 125.0,
+            "ik_timed_out": False,
+        }
+        state["right"]["cartesian_solve"] = {
+            "attempted": True,
+            "status": "failed",
+            "position_error_m": 0.03,
+            "orientation_error_rad": 0.04,
+            "ik_iterations": 50,
+            "ik_duration_us": 5000.0,
+            "ik_timed_out": True,
+        }
+        store, _, _ = self.make_safety(state)
+        status = _format_cartesian_solve_status(store.latest(), stale=False)
+        self.assertIn("left ok", status)
+        self.assertIn("pos_err=0.0012 m", status)
+        self.assertIn("ori_err=0.0025 rad", status)
+        self.assertIn("iter=7", status)
+        self.assertIn("dur=125 us", status)
+        self.assertIn("timed_out=False", status)
+        self.assertIn("right failed", status)
+        self.assertIn("timed_out=True", status)
+        self.assertEqual(_format_cartesian_solve_status(store.latest(), stale=True), "State stream stale")
+
     def test_visual_disabled_state_matches_safety_blocks(self):
         _, _, real_safety = self.make_safety(sample_state(), desired="real", observed="real")
         real_states = real_safety.control_disabled_states()
@@ -870,6 +943,7 @@ class GuiContractsTest(unittest.TestCase):
         config_text = config.read_text(encoding="utf-8")
         self.assertIn("provider: pinocchio", config_text)
         self.assertIn("publish_tcp: true", config_text)
+        self.assertIn("orientation_tolerance_rad: 0.005", config_text)
         self.assertIn("allow_in_simulation: true", config_text)
         self.assertIn("allow_in_real: false", config_text)
 

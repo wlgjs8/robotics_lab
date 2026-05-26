@@ -264,6 +264,31 @@ CartesianArmTargetResult CartesianController::computeArmJointTarget(
             }
             target_tcp_stand = command.tcp_target_stand;
             break;
+        case ControlMode::TcpLinearMove:
+            if (run_mode != RunMode::Simulation) {
+                result.verdict = SafetyVerdict::CartesianUnavailable;
+                result.reason = "tcp_linear_move_simulation_only";
+                result.telemetry.status = "unavailable";
+                result.telemetry.reason = result.reason;
+                return result;
+            }
+            if (!command.has_tcp_target || !state.tcp_stand || !state.has_valid_tcp_pose ||
+                !ik_solver::isFinitePose(command.tcp_target_stand)) {
+                result.verdict = SafetyVerdict::CartesianUnavailable;
+                result.reason = "tcp_pose_unavailable";
+                result.telemetry.status = "unavailable";
+                result.telemetry.reason = result.reason;
+                return result;
+            }
+            target_tcp_stand = LinearCartesianPlanner{}.sample(
+                CartesianTrajectoryRequest{
+                    *state.tcp_stand,
+                    command.tcp_target_stand,
+                    CartesianOrientationInterpolation::Slerp,
+                },
+                1.0
+            );
+            break;
         case ControlMode::TcpDeltaStand:
             if (!command.has_tcp_delta_stand || !state.tcp_stand || !state.has_valid_tcp_pose ||
                 !ik_solver::isFinitePose(command.tcp_delta_stand)) {

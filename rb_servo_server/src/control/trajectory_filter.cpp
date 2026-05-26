@@ -26,8 +26,11 @@ JointArray TrajectoryFilter::computeJointTarget(
         case ControlMode::JointVelocity:
             return integrateJointVelocity(command.dq_target_deg_s, previous_sent_target, dt_sec);
         case ControlMode::TcpPoseTarget:
+        case ControlMode::TcpLinearMove:
         case ControlMode::TcpDeltaStand:
         case ControlMode::TcpDeltaLocal:
+        case ControlMode::TcpTwistStand:
+        case ControlMode::TcpTwistLocal:
             // Cartesian modes are intentionally deferred.
             return holdTarget(previous_sent_target);
     }

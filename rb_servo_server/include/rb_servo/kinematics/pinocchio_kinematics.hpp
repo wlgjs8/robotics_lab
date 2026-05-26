@@ -30,6 +30,13 @@ public:
         const JointArray& seed_q_deg,
         const ArmMountConfig& mount
     ) const override;
+    CartesianVelocityResult solveCartesianVelocity(
+        ArmId arm,
+        const JointArray& q_deg,
+        const ArmMountConfig& mount,
+        const Vec6& tcp_twist_local,
+        double damping
+    ) const override;
 
 private:
     struct Impl;

@@ -83,7 +83,7 @@ class SpaceMouseConfig:
 @dataclass(frozen=True)
 class SpaceMouseCartesianConfig:
     selected_arm: str = "left"
-    frame: str = "stand"
+    frame: str = "local"
     command_rate_hz: float = 30.0
     max_linear_step_m: float = 0.002
     max_angular_step_rad: float = 0.01

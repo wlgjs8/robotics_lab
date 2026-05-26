@@ -28,6 +28,8 @@ add_library(rb_servo_core
     src/control/servo_dispatcher.cpp
     src/control/arm_worker.cpp
     src/control/cartesian_controller.cpp
+    src/control/cartesian_servo_controller.cpp
+    src/control/cartesian_trajectory_planner.cpp
     src/control/force_controller.cpp
     src/control/dual_arm_servo_loop.cpp
     src/network/command_server.cpp
@@ -110,6 +112,14 @@ if(BUILD_TESTING)
     add_executable(test_kinematics_ik tests/test_kinematics_ik.cpp)
     target_link_libraries(test_kinematics_ik PRIVATE rb_servo_core)
     add_test(NAME kinematics_ik COMMAND test_kinematics_ik)
+
+    add_executable(test_cartesian_planner tests/test_cartesian_planner.cpp)
+    target_link_libraries(test_cartesian_planner PRIVATE rb_servo_core)
+    add_test(NAME cartesian_planner COMMAND test_cartesian_planner)
+
+    add_executable(test_cartesian_servo_controller tests/test_cartesian_servo_controller.cpp)
+    target_link_libraries(test_cartesian_servo_controller PRIVATE rb_servo_core)
+    add_test(NAME cartesian_servo_controller COMMAND test_cartesian_servo_controller)
 
     set(RB_GUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rb_gui")
     find_package(Python3 COMPONENTS Interpreter)

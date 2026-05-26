@@ -295,6 +295,37 @@ public:
         return result;
     }
 
+    rb_servo::CartesianVelocityResult solveCartesianVelocity(
+        rb_servo::ArmId arm,
+        const rb_servo::JointArray& q_deg,
+        const rb_servo::ArmMountConfig& mount,
+        const rb_servo::Vec6& tcp_twist_local,
+        double damping
+    ) const override {
+        (void)q_deg;
+        (void)mount;
+        (void)damping;
+        if (arm == rb_servo::ArmId::Left) {
+            last_left_twist_ = tcp_twist_local;
+        } else {
+            last_right_twist_ = tcp_twist_local;
+        }
+        rb_servo::CartesianVelocityResult result;
+        if (fail_) {
+            result.success = false;
+            result.reason = "injected_failure";
+            return result;
+        }
+        result.success = true;
+        result.qdot_deg_s[0] = tcp_twist_local.x * 100.0;
+        result.qdot_deg_s[1] = tcp_twist_local.y * 100.0;
+        result.qdot_deg_s[2] = tcp_twist_local.z * 100.0;
+        if (orientation_from_joint_) {
+            result.qdot_deg_s[5] = tcp_twist_local.rz * 100.0;
+        }
+        return result;
+    }
+
     void setFail(bool fail) { fail_ = fail; }
     void setOrientationFromJoint(bool enabled) { orientation_from_joint_ = enabled; }
     void setOrientationSolveBiasRad(double bias_rad) { orientation_solve_bias_rad_ = bias_rad; }
@@ -304,6 +335,8 @@ public:
     }
     std::optional<rb_servo::Pose6D> lastLeftTarget() const { return last_left_target_; }
     std::optional<rb_servo::Pose6D> lastRightTarget() const { return last_right_target_; }
+    std::optional<rb_servo::Vec6> lastLeftTwist() const { return last_left_twist_; }
+    std::optional<rb_servo::Vec6> lastRightTwist() const { return last_right_twist_; }
 
 private:
     bool fail_ = false;
@@ -313,6 +346,8 @@ private:
     double orientation_error_rad_ = 0.0;
     mutable std::optional<rb_servo::Pose6D> last_left_target_;
     mutable std::optional<rb_servo::Pose6D> last_right_target_;
+    mutable std::optional<rb_servo::Vec6> last_left_twist_;
+    mutable std::optional<rb_servo::Vec6> last_right_twist_;
 };
 
 class ScriptedRbsimServer {
@@ -1341,8 +1376,11 @@ bool testCommandValidation() {
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"JointTarget","timeout_sec":0,"q_target_deg":[0,0,0,0,0,0]})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"JointVelocity"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpPoseTarget"})", now, &out));
+    RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpLinearMove"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpDeltaStand"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpDeltaLocal"})", now, &out));
+    RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpTwistStand"})", now, &out));
+    RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpTwistLocal"})", now, &out));
 
     RB_CHECK(server.parseMessage(R"({"seq":1,"mode":"EmergencyStop"})", now, &out));
     RB_CHECK(out.left.mode == rb_servo::ControlMode::EmergencyStop);
@@ -1427,6 +1465,31 @@ bool testCartesianCommandParser() {
     RB_CHECK(std::abs(out.left.tcp_target_stand.quaternion_xyzw->at(2) - 1.0) < kEpsilon);
     RB_CHECK(out.right.tcp_target_stand.quaternion_xyzw.has_value());
     RB_CHECK(std::abs(out.right.tcp_target_stand.quaternion_xyzw->at(3) - 1.0) < kEpsilon);
+
+    RB_CHECK(server.parseMessage(
+        R"({"schema_version":1,"seq":5,"mode":"TcpLinearMove","timeout_sec":0.2,"left":{"target_tcp_stand":{"x":0.35,"y":0.11,"z":0.55,"rx":0,"ry":0,"rz":0,"quaternion_xyzw":[0,0,0.70710678118,0.70710678118]}},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpLinearMove);
+    RB_CHECK(out.left.has_tcp_target);
+    RB_CHECK(std::abs(out.left.tcp_target_stand.x - 0.35) < kEpsilon);
+    RB_CHECK(out.left.tcp_target_stand.quaternion_xyzw.has_value());
+    RB_CHECK(std::abs(out.left.tcp_target_stand.quaternion_xyzw->at(2) - 0.70710678118) < kEpsilon);
+    RB_CHECK(out.right.mode == rb_servo::ControlMode::Hold);
+
+    RB_CHECK(server.parseMessage(
+        R"({"schema_version":1,"seq":6,"mode":"Hold","timeout_sec":0.2,"left":{"mode":"TcpTwistLocal","tcp_twist_local":[0.02,0,0,0,0,0]},"right":{"mode":"TcpTwistStand","tcp_twist_stand":[0,0.01,0,0,0,0.1]}})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpTwistLocal);
+    RB_CHECK(out.left.has_tcp_twist_local);
+    RB_CHECK(std::abs(out.left.tcp_twist_local.x - 0.02) < kEpsilon);
+    RB_CHECK(out.right.mode == rb_servo::ControlMode::TcpTwistStand);
+    RB_CHECK(out.right.has_tcp_twist_stand);
+    RB_CHECK(std::abs(out.right.tcp_twist_stand.y - 0.01) < kEpsilon);
+    RB_CHECK(std::abs(out.right.tcp_twist_stand.rz - 0.1) < kEpsilon);
     return true;
 }
 
@@ -2542,6 +2605,11 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.left_cartesian_solve.ik_iterations = 7;
     snapshot.left_cartesian_solve.position_error_m = 0.001;
     snapshot.left_cartesian_solve.orientation_error_rad = 0.002;
+    snapshot.left_cartesian_solve.path_s = 0.5;
+    snapshot.left_cartesian_solve.path_position_error_m = 0.003;
+    snapshot.left_cartesian_solve.path_orientation_error_rad = 0.004;
+    snapshot.left_cartesian_solve.path_line_deviation_m = 0.0005;
+    snapshot.left_cartesian_solve.path_done = false;
     snapshot.left_cartesian_solve.warn_ik_duration_us = 3000.0;
     snapshot.right_cartesian_solve.attempted = true;
     snapshot.right_cartesian_solve.success = false;
@@ -2677,6 +2745,11 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("left").at("cartesian_solve").at("ik_iterations").get<int>() == 7);
     RB_CHECK(json.at("left").at("cartesian_solve").at("position_error_m").get<double>() == 0.001);
     RB_CHECK(json.at("left").at("cartesian_solve").at("orientation_error_rad").get<double>() == 0.002);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("path_s").get<double>() == 0.5);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("path_position_error_m").get<double>() == 0.003);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("path_orientation_error_rad").get<double>() == 0.004);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("path_line_deviation_m").get<double>() == 0.0005);
+    RB_CHECK(!json.at("left").at("cartesian_solve").at("path_done").get<bool>());
     RB_CHECK(json.at("right").at("tcp_stand").is_null());
     RB_CHECK(json.at("right").at("tcp_base").is_null());
     RB_CHECK(json.at("right").at("tcp_deferred").get<bool>());
@@ -3100,6 +3173,88 @@ bool testCartesianPoseTargetUsesIkInSimulation() {
     RB_CHECK(std::abs(previous.left_q_target_deg[1] - 2.0) < kEpsilon);
     RB_CHECK(std::abs(previous.left_q_target_deg[2] - 1.0) < kEpsilon);
     RB_CHECK(sameJointArray(previous.right_q_target_deg, joints(3.0)));
+    return true;
+}
+
+bool testTcpLinearMoveUsesIkInSimulationOnly() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.right_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.left_mount.arm_id = rb_servo::ArmId::Left;
+    cfg.right_mount.arm_id = rb_servo::ArmId::Right;
+    cfg.kinematics.enable = true;
+    cfg.kinematics.ik.enable = true;
+    cfg.kinematics.publish_tcp = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    rb_servo::DualArmCommand linear = command(rb_servo::ControlMode::Hold);
+    linear.left.mode = rb_servo::ControlMode::TcpLinearMove;
+    linear.left.has_tcp_target = true;
+    linear.left.tcp_target_stand = {0.05, 0.02, 0.01, 0.0, 0.0, 0.0};
+    linear.left.tcp_target_stand.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+    linear.right.mode = rb_servo::ControlMode::Hold;
+    buffer.setCommand(linear);
+    double max_orientation_error = 0.0;
+    double max_line_deviation = 0.0;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        max_orientation_error = std::max(
+            max_orientation_error,
+            snapshot.left_cartesian_solve.path_orientation_error_rad
+        );
+        max_line_deviation = std::max(
+            max_line_deviation,
+            snapshot.left_cartesian_solve.path_line_deviation_m
+        );
+        return snapshot.command.left.mode == rb_servo::ControlMode::TcpLinearMove &&
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok &&
+               snapshot.left_cartesian_solve.status == "ok" &&
+               snapshot.left_cartesian_solve.path_s > 0.0 &&
+               kinematics->lastLeftTwist().has_value();
+    }, std::chrono::milliseconds(1000)));
+    RB_CHECK(max_orientation_error < 1e-9);
+    RB_CHECK(max_line_deviation < 2e-3);
+    RB_CHECK(std::abs(kinematics->lastLeftTwist()->rz) < 1e-9);
+    loop.stop();
+
+    rb_servo::CommandBuffer real_buffer;
+    rb_servo::DualArmConfig real_cfg = cfg;
+    real_cfg.left_robot.run_mode = rb_servo::RunMode::Real;
+    real_cfg.right_robot.run_mode = rb_servo::RunMode::Real;
+    real_cfg.cartesian_control.allow_in_real = true;
+    auto real_kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop real_loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        real_cfg,
+        &real_buffer,
+        nullptr,
+        real_kinematics
+    );
+    RB_CHECK(real_loop.start());
+    real_buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    real_buffer.setCommand(linear);
+    sleepTicks();
+    const rb_servo::ServoSnapshot real_snapshot = real_loop.latestSnapshot();
+    RB_CHECK(real_snapshot.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand ||
+             real_snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
+    RB_CHECK(!real_kinematics->lastLeftTwist().has_value());
+    real_loop.stop();
     return true;
 }
 
@@ -3691,6 +3846,7 @@ int main() {
     if (!testResetFaultRequiresFreshValidState()) return 1;
     if (!testDisarmAndCartesianHoldPreviousTarget()) return 1;
     if (!testCartesianPoseTargetUsesIkInSimulation()) return 1;
+    if (!testTcpLinearMoveUsesIkInSimulationOnly()) return 1;
     if (!testCartesianDeltaStandAndLocalUseIkInSimulation()) return 1;
     if (!testCartesianDeltaCommandsAreOneShotPerSeq()) return 1;
     if (!testCartesianIkFailureHoldsPreviousSafeTarget()) return 1;

@@ -100,7 +100,7 @@ class FakeSendSocket:
 
 
 class CartesianActionSourceTest(unittest.TestCase):
-    def test_fake_spacemouse_input_creates_deterministic_tcp_delta_stand_packet(self):
+    def test_fake_spacemouse_input_creates_deterministic_tcp_twist_local_packet(self):
         reader = FakeSpaceMouseReader(
             [
                 spacemouse_sample(
@@ -136,9 +136,9 @@ class CartesianActionSourceTest(unittest.TestCase):
         finally:
             client.close()
         packet = json.loads(fake_socket.sent[0][0].decode("utf-8"))
-        self.assertEqual(packet["mode"], "TcpDeltaStand")
-        self.assertEqual(packet["left"]["mode"], "TcpDeltaStand")
-        self.assertEqual(packet["left"]["tcp_delta_stand"], [0.001, -0.002, 0.002, -0.01, 0.001, 0.0])
+        self.assertEqual(packet["mode"], "TcpTwistLocal")
+        self.assertEqual(packet["left"]["mode"], "TcpTwistLocal")
+        self.assertEqual(packet["left"]["tcp_twist_local"], [0.001, -0.002, 0.002, -0.01, 0.001, 0.0])
         self.assertEqual(packet["right"]["mode"], "Hold")
 
     def test_deadman_false_sends_no_command(self):
@@ -159,7 +159,13 @@ class CartesianActionSourceTest(unittest.TestCase):
 
         self.assertIsNotNone(intent)
         assert intent is not None
-        self.assertEqual(intent.left["tcp_delta_stand"], [0.002, -0.002, 0.0, 0.0, 0.0, 0.01])
+        self.assertEqual(intent.left["tcp_twist_local"], [0.002, -0.002, 0.0, 0.0, 0.0, 0.01])
+
+    def test_spacemouse_cartesian_deadman_cannot_be_disabled(self):
+        reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
+
+        with self.assertRaisesRegex(ValueError, "requires deadman"):
+            SpaceMouseCartesianActionSource(reader=reader, require_deadman=False)
 
     def test_scripted_tcp_delta_is_stand_frame_and_clamped(self):
         source = TcpDeltaActionSource(
@@ -269,7 +275,7 @@ class CartesianActionSourceTest(unittest.TestCase):
                 "schema": "robotics_lab.policy_runner.v1",
                 "action_source": "spacemouse_cartesian",
                 "spacemouse_cartesian": {
-                    "frame": "stand",
+                    "frame": "local",
                     "command_rate_hz": 30,
                     "max_linear_step_m": 0.002,
                     "max_angular_step_rad": 0.01,
@@ -281,7 +287,7 @@ class CartesianActionSourceTest(unittest.TestCase):
         )
 
         self.assertEqual(cfg.action_source, "spacemouse_cartesian")
-        self.assertEqual(cfg.spacemouse_cartesian.frame, "stand")
+        self.assertEqual(cfg.spacemouse_cartesian.frame, "local")
         self.assertEqual(cfg.spacemouse_cartesian.command_rate_hz, 30.0)
         self.assertEqual(cfg.spacemouse_cartesian.max_linear_step_m, 0.002)
         self.assertEqual(cfg.spacemouse_cartesian.max_angular_step_rad, 0.01)

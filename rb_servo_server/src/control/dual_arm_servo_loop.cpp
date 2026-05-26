@@ -21,8 +21,11 @@ namespace rb_servo {
 namespace {
 bool isCartesianMode(ControlMode mode) {
     return mode == ControlMode::TcpPoseTarget ||
+           mode == ControlMode::TcpLinearMove ||
            mode == ControlMode::TcpDeltaStand ||
-           mode == ControlMode::TcpDeltaLocal;
+           mode == ControlMode::TcpDeltaLocal ||
+           mode == ControlMode::TcpTwistStand ||
+           mode == ControlMode::TcpTwistLocal;
 }
 
 bool isCartesianDeltaMode(ControlMode mode) {
@@ -34,8 +37,11 @@ bool isMotionMode(ControlMode mode) {
     return mode == ControlMode::JointTarget ||
            mode == ControlMode::JointVelocity ||
            mode == ControlMode::TcpPoseTarget ||
+           mode == ControlMode::TcpLinearMove ||
            mode == ControlMode::TcpDeltaStand ||
-           mode == ControlMode::TcpDeltaLocal;
+           mode == ControlMode::TcpDeltaLocal ||
+           mode == ControlMode::TcpTwistStand ||
+           mode == ControlMode::TcpTwistLocal;
 }
 
 bool isReadOnlyBlockedMode(ControlMode mode) {
@@ -49,11 +55,16 @@ bool isCommandModeMissingPayload(const ArmCommand& command) {
         case ControlMode::JointVelocity:
             return !command.has_joint_velocity;
         case ControlMode::TcpPoseTarget:
+        case ControlMode::TcpLinearMove:
             return !command.has_tcp_target;
         case ControlMode::TcpDeltaStand:
             return !command.has_tcp_delta_stand;
         case ControlMode::TcpDeltaLocal:
             return !command.has_tcp_delta_local;
+        case ControlMode::TcpTwistStand:
+            return !command.has_tcp_twist_stand;
+        case ControlMode::TcpTwistLocal:
+            return !command.has_tcp_twist_local;
         default:
             return false;
     }
@@ -863,13 +874,21 @@ bool DualArmServoLoop::isValidRobotStateForStartup(const RobotState& state) cons
 void DualArmServoLoop::clearLatchedCartesianTargets() {
     left_latched_cartesian_target_ = LatchedCartesianTarget{};
     right_latched_cartesian_target_ = LatchedCartesianTarget{};
+    left_cartesian_servo_path_ = CartesianServoPathState{};
+    right_cartesian_servo_path_ = CartesianServoPathState{};
+    left_cartesian_twist_hold_ = CartesianTwistHoldState{};
+    right_cartesian_twist_hold_ = CartesianTwistHoldState{};
 }
 
 void DualArmServoLoop::clearLatchedCartesianTarget(ArmId arm_id) {
     if (arm_id == ArmId::Left) {
         left_latched_cartesian_target_ = LatchedCartesianTarget{};
+        left_cartesian_servo_path_ = CartesianServoPathState{};
+        left_cartesian_twist_hold_ = CartesianTwistHoldState{};
     } else {
         right_latched_cartesian_target_ = LatchedCartesianTarget{};
+        right_cartesian_servo_path_ = CartesianServoPathState{};
+        right_cartesian_twist_hold_ = CartesianTwistHoldState{};
     }
 }
 
@@ -967,7 +986,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             for (const ArmCommand* arm_command : {&command.left, &command.right}) {
                 if (!isCartesianMode(arm_command->mode)) continue;
                 const RunMode run_mode = runModeForArm(config_, arm_command->arm_id);
-                if (run_mode == RunMode::Simulation) {
+                if (arm_command->mode == ControlMode::TcpLinearMove ||
+                    arm_command->mode == ControlMode::TcpTwistStand ||
+                    arm_command->mode == ControlMode::TcpTwistLocal) {
+                    cartesian_available = run_mode == RunMode::Simulation &&
+                        config_.cartesian_control.allow_in_simulation;
+                } else if (run_mode == RunMode::Simulation) {
                     cartesian_available = config_.cartesian_control.allow_in_simulation;
                 } else if (run_mode == RunMode::Real) {
                     cartesian_available =
@@ -1006,8 +1030,46 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             config_.cartesian_control,
             kinematics_
         );
+        CartesianServoController cartesian_servo(
+            config_.left_mount,
+            config_.right_mount,
+            config_.cartesian_control,
+            kinematics_
+        );
 
-        const CartesianArmTargetResult left_cartesian_result = isCartesianMode(command.left.mode)
+        if (command.left.mode != ControlMode::TcpLinearMove) {
+            left_cartesian_servo_path_ = CartesianServoPathState{};
+        }
+        if (command.right.mode != ControlMode::TcpLinearMove) {
+            right_cartesian_servo_path_ = CartesianServoPathState{};
+        }
+        if (command.left.mode != ControlMode::TcpTwistStand && command.left.mode != ControlMode::TcpTwistLocal) {
+            left_cartesian_twist_hold_ = CartesianTwistHoldState{};
+        }
+        if (command.right.mode != ControlMode::TcpTwistStand && command.right.mode != ControlMode::TcpTwistLocal) {
+            right_cartesian_twist_hold_ = CartesianTwistHoldState{};
+        }
+
+        const CartesianArmTargetResult left_cartesian_result = command.left.mode == ControlMode::TcpLinearMove
+            ? cartesian_servo.computeLinearMoveTarget(
+                command.left,
+                left_state,
+                left_prev_sent_q_deg_,
+                runModeForArm(config_, ArmId::Left),
+                dt_sec,
+                command.seq,
+                &left_cartesian_servo_path_
+            )
+            : (command.left.mode == ControlMode::TcpTwistStand || command.left.mode == ControlMode::TcpTwistLocal)
+            ? cartesian_servo.computeTwistTarget(
+                command.left,
+                left_state,
+                left_prev_sent_q_deg_,
+                runModeForArm(config_, ArmId::Left),
+                dt_sec,
+                &left_cartesian_twist_hold_
+            )
+            : isCartesianMode(command.left.mode)
             ? cartesian.computeArmJointTarget(
                 command.left,
                 left_state,
@@ -1023,7 +1085,26 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         target.left_q_target_deg = left_cartesian_result.q_target_deg;
         left_last_cartesian_solve_ = left_cartesian_result.telemetry;
 
-        const CartesianArmTargetResult right_cartesian_result = isCartesianMode(command.right.mode)
+        const CartesianArmTargetResult right_cartesian_result = command.right.mode == ControlMode::TcpLinearMove
+            ? cartesian_servo.computeLinearMoveTarget(
+                command.right,
+                right_state,
+                right_prev_sent_q_deg_,
+                runModeForArm(config_, ArmId::Right),
+                dt_sec,
+                command.seq,
+                &right_cartesian_servo_path_
+            )
+            : (command.right.mode == ControlMode::TcpTwistStand || command.right.mode == ControlMode::TcpTwistLocal)
+            ? cartesian_servo.computeTwistTarget(
+                command.right,
+                right_state,
+                right_prev_sent_q_deg_,
+                runModeForArm(config_, ArmId::Right),
+                dt_sec,
+                &right_cartesian_twist_hold_
+            )
+            : isCartesianMode(command.right.mode)
             ? cartesian.computeArmJointTarget(
                 command.right,
                 right_state,

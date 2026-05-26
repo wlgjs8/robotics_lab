@@ -3,7 +3,7 @@ from __future__ import annotations
 from policy_runner.action_sources.tcp_delta import (
     CARTESIAN_ACTION_REQUIREMENTS,
     clamp_tcp_delta,
-    tcp_delta_stand_intent,
+    tcp_twist_local_intent,
 )
 from policy_runner.robot_state_client import StateSnapshot
 from policy_runner.servo_command_client import CommandIntent
@@ -17,7 +17,7 @@ class SpaceMouseCartesianActionSource:
         self,
         reader: SpaceMouseReader | None = None,
         selected_arm: str = "left",
-        frame: str = "stand",
+        frame: str = "local",
         max_linear_step_m: float = 0.002,
         max_angular_step_rad: float = 0.01,
         deadband: float = 0.08,
@@ -27,8 +27,8 @@ class SpaceMouseCartesianActionSource:
     ):
         if selected_arm not in {"left", "right", "both"}:
             raise ValueError("selected_arm must be left, right, or both")
-        if frame != "stand":
-            raise ValueError("only stand-frame TcpDeltaStand is enabled")
+        if frame != "local":
+            raise ValueError("only local-frame TcpTwistLocal is enabled")
         if max_linear_step_m < 0.0:
             raise ValueError("max_linear_step_m must be non-negative")
         if max_angular_step_rad < 0.0:
@@ -37,6 +37,8 @@ class SpaceMouseCartesianActionSource:
             raise ValueError("deadband must be non-negative")
         if deadman_button < 0:
             raise ValueError("deadman_button must be non-negative")
+        if not require_deadman:
+            raise ValueError("spacemouse Cartesian control requires deadman")
         self.reader = reader if reader is not None else HidSpaceMouseReader()
         self.selected_arm = selected_arm
         self.frame = frame
@@ -59,7 +61,7 @@ class SpaceMouseCartesianActionSource:
             return None
         left = delta if self.selected_arm in {"left", "both"} else None
         right = delta if self.selected_arm in {"right", "both"} else None
-        return tcp_delta_stand_intent(left=left, right=right, timeout_sec=self.timeout_sec)
+        return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
 
     def close(self) -> None:
         self.reader.close()

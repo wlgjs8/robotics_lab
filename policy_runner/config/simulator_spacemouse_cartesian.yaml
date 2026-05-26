@@ -19,7 +19,7 @@ safety:
 command_rate_hz: 30
 spacemouse_cartesian:
   selected_arm: left
-  frame: stand
+  frame: local
   max_linear_step_m: 0.002
   max_angular_step_rad: 0.01
   deadband: 0.08

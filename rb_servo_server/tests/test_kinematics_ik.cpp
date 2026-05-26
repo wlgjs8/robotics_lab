@@ -110,6 +110,13 @@ bool withinUrdfLimits(const rb_servo::JointArray& q_deg) {
            std::fabs(q_deg[5]) <= kWideLimitDeg;
 }
 
+double positionDistance(const rb_servo::Pose6D& a, const rb_servo::Pose6D& b) {
+    const double dx = a.x - b.x;
+    const double dy = a.y - b.y;
+    const double dz = a.z - b.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
 std::string validIkYaml(const std::string& urdf_path) {
     return
         "schema: robotics_lab.rb_servo_server.v1\n"
@@ -170,6 +177,23 @@ public:
         result.duration_us = duration_us_;
         result.iterations = 3;
         result.reason = "ok";
+        return result;
+    }
+
+    rb_servo::CartesianVelocityResult solveCartesianVelocity(
+        rb_servo::ArmId arm,
+        const rb_servo::JointArray& q_deg,
+        const rb_servo::ArmMountConfig& mount,
+        const rb_servo::Vec6& tcp_twist_local,
+        double damping
+    ) const override {
+        (void)arm;
+        (void)q_deg;
+        (void)mount;
+        (void)tcp_twist_local;
+        (void)damping;
+        rb_servo::CartesianVelocityResult result;
+        result.success = true;
         return result;
     }
 
@@ -334,6 +358,32 @@ bool testPinocchioIkIfEnabled() {
     RB_CHECK(same_pose.position_error_m <= testKinematicsConfig().ik.position_tolerance_m);
     RB_CHECK(same_pose.orientation_error_rad <= testKinematicsConfig().ik.orientation_tolerance_rad);
 
+    rb_servo::JointArray roundtrip_target_q = seed;
+    roundtrip_target_q[0] += 0.5;
+    roundtrip_target_q[1] -= 0.5;
+    roundtrip_target_q[2] += 0.5;
+    const rb_servo::Pose6D roundtrip_target_pose = kin.computeTcpStand(
+        rb_servo::ArmId::Left,
+        roundtrip_target_q,
+        mount
+    );
+    const rb_servo::IkResult roundtrip = kin.solveIk(
+        rb_servo::ArmId::Left,
+        roundtrip_target_pose,
+        seed,
+        mount
+    );
+    RB_CHECK(roundtrip.success);
+    RB_CHECK(finiteJoints(roundtrip.q_solution_deg));
+    RB_CHECK(roundtrip.position_error_m <= testKinematicsConfig().ik.position_tolerance_m);
+    RB_CHECK(roundtrip.orientation_error_rad <= testKinematicsConfig().ik.orientation_tolerance_rad);
+    const rb_servo::Pose6D roundtrip_solution_pose = kin.computeTcpStand(
+        rb_servo::ArmId::Left,
+        roundtrip.q_solution_deg,
+        mount
+    );
+    RB_CHECK(positionDistance(roundtrip_solution_pose, roundtrip_target_pose) <= testKinematicsConfig().ik.position_tolerance_m);
+
     rb_servo::JointArray nearby_target_q = seed;
     nearby_target_q[0] += 1.0;
     nearby_target_q[2] += 1.0;
@@ -347,6 +397,20 @@ bool testPinocchioIkIfEnabled() {
     RB_CHECK(nearby.success);
     RB_CHECK(finiteJoints(nearby.q_solution_deg));
     RB_CHECK(withinUrdfLimits(nearby.q_solution_deg));
+    RB_CHECK(nearby.orientation_error_rad <= testKinematicsConfig().ik.orientation_tolerance_rad);
+
+    rb_servo::Pose6D translated_pose = seed_pose;
+    translated_pose.x += 0.005;
+    const rb_servo::IkResult pure_translation = kin.solveIk(
+        rb_servo::ArmId::Left,
+        translated_pose,
+        seed,
+        mount
+    );
+    RB_CHECK(pure_translation.success);
+    RB_CHECK(finiteJoints(pure_translation.q_solution_deg));
+    RB_CHECK(pure_translation.position_error_m <= testKinematicsConfig().ik.position_tolerance_m);
+    RB_CHECK(pure_translation.orientation_error_rad <= testKinematicsConfig().ik.orientation_tolerance_rad);
 
     rb_servo::Pose6D unreachable = seed_pose;
     unreachable.x += 10.0;
@@ -362,6 +426,8 @@ bool testPinocchioIkIfEnabled() {
     RB_CHECK(unreachable_result.duration_us >= 0.0);
     RB_CHECK(unreachable_result.iterations >= 0);
     RB_CHECK(finiteJoints(unreachable_result.q_solution_deg));
+    RB_CHECK(std::isfinite(unreachable_result.position_error_m));
+    RB_CHECK(std::isfinite(unreachable_result.orientation_error_rad));
 
     rb_servo::KinematicsConfig one_iter_cfg = testKinematicsConfig();
     one_iter_cfg.ik.max_iterations = 1;
@@ -403,6 +469,11 @@ bool testPinocchioIkIfEnabled() {
 
     std::cout << "[IK_LATENCY] same_pose_duration_us=" << same_pose.duration_us
               << " same_pose_iterations=" << same_pose.iterations
+              << " roundtrip_duration_us=" << roundtrip.duration_us
+              << " roundtrip_iterations=" << roundtrip.iterations
+              << " pure_translation_duration_us=" << pure_translation.duration_us
+              << " pure_translation_iterations=" << pure_translation.iterations
+              << " pure_translation_orientation_error_rad=" << pure_translation.orientation_error_rad
               << " nearby_duration_us=" << nearby.duration_us
               << " nearby_iterations=" << nearby.iterations
               << " unreachable_duration_us=" << unreachable_result.duration_us

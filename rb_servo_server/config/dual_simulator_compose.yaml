@@ -97,7 +97,7 @@ kinematics:
     timeout_ms: 20.0
     damping: 0.001
     position_tolerance_m: 0.002
-    orientation_tolerance_rad: 0.03
+    orientation_tolerance_rad: 0.005
     max_step_deg: [2, 2, 2, 3, 3, 4]
 
 cartesian_control:

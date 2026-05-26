@@ -9,6 +9,7 @@
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/arm_worker.hpp"
+#include "rb_servo/control/cartesian_servo_controller.hpp"
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/safety_filter.hpp"
@@ -171,6 +172,10 @@ private:
     CartesianSolveTelemetry right_last_cartesian_solve_;
     LatchedCartesianTarget left_latched_cartesian_target_;
     LatchedCartesianTarget right_latched_cartesian_target_;
+    CartesianServoPathState left_cartesian_servo_path_;
+    CartesianServoPathState right_cartesian_servo_path_;
+    CartesianTwistHoldState left_cartesian_twist_hold_;
+    CartesianTwistHoldState right_cartesian_twist_hold_;
     ServoSnapshot latest_snapshot_;
 };
 
