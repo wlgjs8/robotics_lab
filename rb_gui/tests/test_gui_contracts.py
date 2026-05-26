@@ -48,6 +48,7 @@ from rb_servo_gui.app import (
     update_scene_markers,
 )
 from rb_servo_gui.command_client import CommandClient
+from rb_servo_gui import geometry as gui_geometry
 from rb_servo_gui.models import Pose6D
 from rb_servo_gui.safety import OperatorSafety, Readiness, normalize_observed_mode_backend
 from rb_servo_gui.state_receiver import StateStore
@@ -684,6 +685,24 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(cfg[3:], (0.0, 0.0, 0.0))
         self.assertEqual(_format_joints(None), "invalid")
         self.assertEqual(_joint_cfg_radians(None), (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+
+    def test_geometry_module_preserves_quaternion_priority(self):
+        pose = Pose6D(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, quaternion_xyzw=(0.0, 0.0, 1.0, 0.0))
+        self.assertEqual(gui_geometry._pose_orientation_wxyz(pose), (0.0, 0.0, 0.0, 1.0))
+        self.assertEqual(gui_geometry._wxyz_to_xyzw((0.0, 0.0, 0.0, 2.0)), (0.0, 0.0, 1.0, 0.0))
+
+    def test_geometry_module_applies_stand_and_local_deltas(self):
+        yaw_90_pose = (0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2.0)
+        target_transform = gui_geometry._pose_transform(yaw_90_pose[:3], gui_geometry._pose_wxyz(yaw_90_pose))
+        delta_transform = gui_geometry._delta_transform((1.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+
+        stand_pose, _ = gui_geometry._transform_to_pose6(gui_geometry._multiply_transform(delta_transform, target_transform))
+        local_pose, _ = gui_geometry._transform_to_pose6(gui_geometry._multiply_transform(target_transform, delta_transform))
+
+        self.assertAlmostEqual(stand_pose[0], 1.0, places=7)
+        self.assertAlmostEqual(stand_pose[1], 0.0, places=7)
+        self.assertAlmostEqual(local_pose[0], 0.0, places=7)
+        self.assertAlmostEqual(local_pose[1], 1.0, places=7)
 
     def test_joint_monitor_formats_actual_joints_in_degrees_or_radians(self):
         q_actual_deg = (0.0, -30.0, 90.0, 180.0, -180.0, 45.0)

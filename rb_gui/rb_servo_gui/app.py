@@ -7,29 +7,84 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .command_client import CommandClient
+from .geometry import (
+    _add_matrix3,
+    _add_vec3,
+    _angular_step_radians,
+    _delta_transform,
+    _identity3,
+    _linear_step_meters,
+    _matmul3,
+    _matrix_to_wxyz,
+    _mount_position,
+    _mount_pose_from_mounts,
+    _multiply_transform,
+    _normalize_wxyz,
+    _pose6_from_mounts,
+    _pose6_from_state_arm,
+    _pose6_from_transform,
+    _pose_orientation_wxyz,
+    _pose_position,
+    _pose_transform,
+    _pose_wxyz,
+    _quat_to_matrix,
+    _rotate_vec,
+    _rotation_vector_from_matrix,
+    _rpy_to_wxyz,
+    _scale_matrix3,
+    _se3_log_translation,
+    _skew3,
+    _tcp_local_delta_from_target,
+    _tcp_pose_from_urdf,
+    _transform_to_pose6,
+    _transpose3,
+    _wxyz_to_rpy,
+    _wxyz_to_xyzw,
+    _xyzw_to_wxyz,
+)
 from .models import ArmSnapshot, Pose6D, StateSnapshot
 from .safety import OperatorSafety, Readiness, normalize_observed_mode_backend
-from .state_receiver import StateReceiver, StateStore
-
-_ROBOT_JOINT_NAMES = (
-    "base_joint",
-    "shoulder_joint",
-    "elbow_joint",
-    "wrist1_joint",
-    "wrist2_joint",
-    "wrist3_joint",
+from .scene import (
+    _DEFAULT_LEFT_POSE,
+    _DEFAULT_RIGHT_POSE,
+    _DEFAULT_STAND_MESH_POSE,
+    _ROBOT_JOINT_NAMES,
+    _add_robot_urdfs,
+    _add_scene_fallback,
+    _add_stand_mesh,
+    _asset_path,
+    _descriptions_dir,
+    _install_tcp_target_callbacks,
+    _joint_cfg_radians,
+    _joint_marker_position,
+    _repo_descriptions_dir,
+    _robot_urdf_path,
+    _stand_mesh_path,
+    _update_urdf_config,
+    update_scene_markers,
 )
+from .state_receiver import StateReceiver, StateStore
+from .status_panel import (
+    _JOINT_MONITOR_UNITS,
+    _arm_fk_status,
+    _format_arm_cartesian_solve,
+    _format_cartesian_solve_status,
+    _format_fk_status,
+    _format_joint_monitor_value,
+    _format_joints,
+    _format_tcp_command_status,
+    _joint_monitor_unit,
+    _mode_button_color,
+    _optional_finite,
+    _set_disabled,
+    _update_joint_monitor,
+    _update_joint_monitor_unit_buttons,
+)
+
 _DESIRED_MODES = ("mock", "simulation", "real")
-# Rotation values are canonical URDF/ROS RPY converted from MJCF euler xyz.
-_DEFAULT_LEFT_POSE = (0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296)
-_DEFAULT_RIGHT_POSE = (-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296)
-_DEFAULT_STAND_MESH_POSE = (0.0, 0.0, 0.01, 0.0, 0.0, -1.57078)
-_SELECTED_MODE_COLOR = "green"
-_INACTIVE_MODE_COLOR = "gray"
 _TCP_FRAME_STAND = "Stand/world"
 _TCP_FRAME_LOCAL = "TCP local"
 _TCP_FRAME_OPTIONS = (_TCP_FRAME_STAND, _TCP_FRAME_LOCAL)
-_JOINT_MONITOR_UNITS = ("deg", "rad")
 _TCP_LINEAR_ARM_OPTIONS = ("left", "right", "both")
 _TCP_LINEAR_ORIENTATION_MODES = ("constant", "slerp")
 
@@ -77,18 +132,6 @@ def _sim_readiness_from_env(observed: Any) -> Readiness:
     )
 
 
-def _mode_button_color(mode: str, desired_mode: str) -> str:
-    return _SELECTED_MODE_COLOR if mode == desired_mode else _INACTIVE_MODE_COLOR
-
-
-def _linear_step_meters(step_mm: float) -> float:
-    return float(step_mm) * 0.001
-
-
-def _angular_step_radians(step_deg: float) -> float:
-    return math.radians(float(step_deg))
-
-
 def _update_desired_mode_buttons(handles: dict[str, Any], desired_mode: str) -> None:
     for mode, button in handles.get("mode_buttons", {}).items():
         try:
@@ -134,747 +177,6 @@ def _update_tcp_linear_selection_buttons(handles: dict[str, Any]) -> None:
             button.color = _mode_button_color(mode, selected_mode)
         except Exception:
             pass
-
-
-def _repo_descriptions_dir() -> Path:
-    workspace_root = Path(__file__).resolve().parents[2]
-    candidates = (
-        workspace_root / "rb_servo_server" / "descriptions",
-        workspace_root / "descriptions",
-    )
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0]
-
-
-def _descriptions_dir() -> Path:
-    return Path(os.environ.get("RB_GUI_DESCRIPTIONS_DIR", str(_repo_descriptions_dir())))
-
-
-def _asset_path(env_name: str, relative_default: str) -> Path:
-    configured = os.environ.get(env_name)
-    if configured:
-        return Path(configured)
-    return _descriptions_dir() / relative_default
-
-
-def _robot_urdf_path() -> Path:
-    return _asset_path("RB_GUI_ROBOT_URDF", "urdf/rb3_730e.urdf")
-
-
-def _stand_mesh_path() -> Path:
-    return _asset_path("RB_GUI_STAND_MESH", "meshes/stands/dual_rb3_730e/dual_rb3_730e_stand_ver3.stl")
-
-
-def _mount_pose_from_mounts(mounts: dict[str, Any], arm: str, fallback: tuple[float, float, float, float, float, float]) -> Pose6D:
-    try:
-        parsed = Pose6D.parse(mounts[arm]["base_pose_in_stand"])
-        if parsed is not None:
-            return parsed
-        pose = mounts[arm]["base_pose_in_stand"]
-        return Pose6D(
-            float(pose.get("x", fallback[0])),
-            float(pose.get("y", fallback[1])),
-            float(pose.get("z", fallback[2])),
-            float(pose.get("rx", fallback[3])),
-            float(pose.get("ry", fallback[4])),
-            float(pose.get("rz", fallback[5])),
-        )
-    except Exception:
-        return Pose6D(*fallback)
-
-
-def _pose6_from_mounts(mounts: dict[str, Any], arm: str, fallback: tuple[float, float, float, float, float, float]) -> tuple[float, float, float, float, float, float]:
-    return _mount_pose_from_mounts(mounts, arm, fallback).as_tuple()
-
-
-def _mount_position(mounts: dict[str, Any], arm: str, fallback: tuple[float, float, float]) -> tuple[float, float, float]:
-    pose = _pose6_from_mounts(mounts, arm, (fallback[0], fallback[1], fallback[2], 0.0, 0.0, 0.0))
-    return (pose[0], pose[1], pose[2])
-
-
-def _pose_position(pose6: Pose6D | tuple[float, float, float, float, float, float]) -> tuple[float, float, float]:
-    if isinstance(pose6, Pose6D):
-        return (pose6.x, pose6.y, pose6.z)
-    return (pose6[0], pose6[1], pose6[2])
-
-
-def _rpy_to_wxyz(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
-    cr = math.cos(roll * 0.5)
-    sr = math.sin(roll * 0.5)
-    cp = math.cos(pitch * 0.5)
-    sp = math.sin(pitch * 0.5)
-    cy = math.cos(yaw * 0.5)
-    sy = math.sin(yaw * 0.5)
-    return (
-        cr * cp * cy + sr * sp * sy,
-        sr * cp * cy - cr * sp * sy,
-        cr * sp * cy + sr * cp * sy,
-        cr * cp * sy - sr * sp * cy,
-    )
-
-
-def _xyzw_to_wxyz(quaternion_xyzw: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
-    qx, qy, qz, qw = quaternion_xyzw
-    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
-    if not math.isfinite(norm) or norm <= 0.0:
-        return (1.0, 0.0, 0.0, 0.0)
-    return (qw / norm, qx / norm, qy / norm, qz / norm)
-
-
-def _wxyz_to_xyzw(wxyz: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
-    w, x, y, z = _normalize_wxyz(wxyz)
-    return (x, y, z, w)
-
-
-def _normalize_wxyz(wxyz: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
-    w, x, y, z = (float(wxyz[0]), float(wxyz[1]), float(wxyz[2]), float(wxyz[3]))
-    norm = math.sqrt(w * w + x * x + y * y + z * z)
-    if not math.isfinite(norm) or norm <= 0.0:
-        return (1.0, 0.0, 0.0, 0.0)
-    return (w / norm, x / norm, y / norm, z / norm)
-
-
-def _pose_orientation_wxyz(pose6: Pose6D | tuple[float, float, float, float, float, float]) -> tuple[float, float, float, float]:
-    if isinstance(pose6, Pose6D):
-        if pose6.quaternion_xyzw is not None:
-            return _xyzw_to_wxyz(pose6.quaternion_xyzw)
-        pose_tuple = pose6.as_tuple()
-    else:
-        pose_tuple = pose6
-    return _rpy_to_wxyz(pose_tuple[3], pose_tuple[4], pose_tuple[5])
-
-
-def _pose_wxyz(pose6: Pose6D | tuple[float, float, float, float, float, float]) -> tuple[float, float, float, float]:
-    return _pose_orientation_wxyz(pose6)
-
-
-def _wxyz_to_rpy(wxyz: tuple[float, float, float, float]) -> tuple[float, float, float]:
-    w, x, y, z = wxyz
-    sinr_cosp = 2.0 * (w * x + y * z)
-    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-    roll = math.atan2(sinr_cosp, cosr_cosp)
-
-    sinp = 2.0 * (w * y - z * x)
-    if abs(sinp) >= 1.0:
-        pitch = math.copysign(math.pi / 2.0, sinp)
-    else:
-        pitch = math.asin(sinp)
-
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
-    return (roll, pitch, yaw)
-
-
-def _matrix_to_wxyz(matrix: Any) -> tuple[float, float, float, float]:
-    m00 = float(matrix[0][0])
-    m01 = float(matrix[0][1])
-    m02 = float(matrix[0][2])
-    m10 = float(matrix[1][0])
-    m11 = float(matrix[1][1])
-    m12 = float(matrix[1][2])
-    m20 = float(matrix[2][0])
-    m21 = float(matrix[2][1])
-    m22 = float(matrix[2][2])
-    trace = m00 + m11 + m22
-    if trace > 0.0:
-        scale = math.sqrt(trace + 1.0) * 2.0
-        w = 0.25 * scale
-        x = (m21 - m12) / scale
-        y = (m02 - m20) / scale
-        z = (m10 - m01) / scale
-    elif m00 > m11 and m00 > m22:
-        scale = math.sqrt(1.0 + m00 - m11 - m22) * 2.0
-        w = (m21 - m12) / scale
-        x = 0.25 * scale
-        y = (m01 + m10) / scale
-        z = (m02 + m20) / scale
-    elif m11 > m22:
-        scale = math.sqrt(1.0 + m11 - m00 - m22) * 2.0
-        w = (m02 - m20) / scale
-        x = (m01 + m10) / scale
-        y = 0.25 * scale
-        z = (m12 + m21) / scale
-    else:
-        scale = math.sqrt(1.0 + m22 - m00 - m11) * 2.0
-        w = (m10 - m01) / scale
-        x = (m02 + m20) / scale
-        y = (m12 + m21) / scale
-        z = 0.25 * scale
-    norm = math.sqrt(w * w + x * x + y * y + z * z)
-    if norm <= 0.0 or not math.isfinite(norm):
-        return (1.0, 0.0, 0.0, 0.0)
-    return (w / norm, x / norm, y / norm, z / norm)
-
-
-def _quat_to_matrix(wxyz: tuple[float, float, float, float]) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
-    w, x, y, z = _normalize_wxyz(wxyz)
-    return (
-        (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)),
-        (2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)),
-        (2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)),
-    )
-
-
-def _matmul3(
-    left: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-    right: Any,
-) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
-    return tuple(
-        tuple(sum(left[row][k] * float(right[k][col]) for k in range(3)) for col in range(3))
-        for row in range(3)
-    )  # type: ignore[return-value]
-
-
-def _identity3() -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
-    return ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
-
-
-def _transpose3(
-    matrix: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
-    return tuple(tuple(matrix[col][row] for col in range(3)) for row in range(3))  # type: ignore[return-value]
-
-
-def _add_matrix3(
-    left: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-    right: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
-    return tuple(tuple(left[row][col] + right[row][col] for col in range(3)) for row in range(3))  # type: ignore[return-value]
-
-
-def _scale_matrix3(
-    matrix: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-    scale: float,
-) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
-    return tuple(tuple(matrix[row][col] * scale for col in range(3)) for row in range(3))  # type: ignore[return-value]
-
-
-def _skew3(vector: tuple[float, float, float]) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
-    x, y, z = vector
-    return ((0.0, -z, y), (z, 0.0, -x), (-y, x, 0.0))
-
-
-def _rotate_vec(
-    matrix: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-    vector: tuple[float, float, float],
-) -> tuple[float, float, float]:
-    return tuple(sum(matrix[row][k] * vector[k] for k in range(3)) for row in range(3))  # type: ignore[return-value]
-
-
-def _add_vec3(left: tuple[float, float, float], right: tuple[float, float, float]) -> tuple[float, float, float]:
-    return (left[0] + right[0], left[1] + right[1], left[2] + right[2])
-
-
-def _delta_transform(
-    delta: tuple[float, float, float, float, float, float],
-) -> tuple[
-    tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-    tuple[float, float, float],
-]:
-    v = (float(delta[0]), float(delta[1]), float(delta[2]))
-    omega = (float(delta[3]), float(delta[4]), float(delta[5]))
-    theta2 = omega[0] * omega[0] + omega[1] * omega[1] + omega[2] * omega[2]
-    theta = math.sqrt(theta2)
-    omega_hat = _skew3(omega)
-    omega_hat2 = _matmul3(omega_hat, omega_hat)
-    a = 1.0
-    b = 0.5
-    c = 1.0 / 6.0
-    if theta > 1e-9:
-        a = math.sin(theta) / theta
-        b = (1.0 - math.cos(theta)) / theta2
-        c = (theta - math.sin(theta)) / (theta2 * theta)
-    identity = _identity3()
-    rotation = _add_matrix3(_add_matrix3(identity, _scale_matrix3(omega_hat, a)), _scale_matrix3(omega_hat2, b))
-    v_matrix = _add_matrix3(_add_matrix3(identity, _scale_matrix3(omega_hat, b)), _scale_matrix3(omega_hat2, c))
-    return rotation, _rotate_vec(v_matrix, v)
-
-
-def _multiply_transform(
-    left: tuple[
-        tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-        tuple[float, float, float],
-    ],
-    right: tuple[
-        tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-        tuple[float, float, float],
-    ],
-) -> tuple[
-    tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-    tuple[float, float, float],
-]:
-    left_rotation, left_translation = left
-    right_rotation, right_translation = right
-    return (
-        _matmul3(left_rotation, right_rotation),
-        _add_vec3(_rotate_vec(left_rotation, right_translation), left_translation),
-    )
-
-
-def _pose_transform(
-    position: tuple[float, float, float],
-    wxyz: tuple[float, float, float, float],
-) -> tuple[
-    tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-    tuple[float, float, float],
-]:
-    return _quat_to_matrix(wxyz), (float(position[0]), float(position[1]), float(position[2]))
-
-
-def _transform_to_pose6(
-    transform: tuple[
-        tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-        tuple[float, float, float],
-    ],
-) -> tuple[tuple[float, float, float, float, float, float], tuple[float, float, float, float]]:
-    rotation, position = transform
-    wxyz = _matrix_to_wxyz(rotation)
-    return _pose6_from_transform(position, wxyz), wxyz
-
-
-def _rotation_vector_from_matrix(
-    matrix: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]],
-) -> tuple[float, float, float]:
-    w, x, y, z = _matrix_to_wxyz(matrix)
-    if w < 0.0:
-        w, x, y, z = (-w, -x, -y, -z)
-    sin_half = math.sqrt(x * x + y * y + z * z)
-    if sin_half < 1e-12:
-        return (0.0, 0.0, 0.0)
-    angle = 2.0 * math.atan2(sin_half, w)
-    scale = angle / sin_half
-    return (x * scale, y * scale, z * scale)
-
-
-def _se3_log_translation(
-    relative_translation: tuple[float, float, float],
-    rotation_vector: tuple[float, float, float],
-) -> tuple[float, float, float]:
-    theta2 = rotation_vector[0] * rotation_vector[0] + rotation_vector[1] * rotation_vector[1] + rotation_vector[2] * rotation_vector[2]
-    theta = math.sqrt(theta2)
-    omega_hat = _skew3(rotation_vector)
-    omega_hat2 = _matmul3(omega_hat, omega_hat)
-    coefficient = 1.0 / 12.0
-    if theta > 1e-9:
-        coefficient = (1.0 / theta2) - ((1.0 + math.cos(theta)) / (2.0 * theta * math.sin(theta)))
-    inverse_v = _add_matrix3(_add_matrix3(_identity3(), _scale_matrix3(omega_hat, -0.5)), _scale_matrix3(omega_hat2, coefficient))
-    return _rotate_vec(inverse_v, relative_translation)
-
-
-def _tcp_local_delta_from_target(
-    current_tcp_stand: Pose6D,
-    target_position: tuple[float, float, float],
-    target_wxyz: tuple[float, float, float, float],
-) -> tuple[float, float, float, float, float, float]:
-    current_position = _pose_position(current_tcp_stand)
-    current_rotation = _quat_to_matrix(_pose_orientation_wxyz(current_tcp_stand))
-    target_rotation = _quat_to_matrix(target_wxyz)
-    current_rotation_inv = _transpose3(current_rotation)
-    translation_stand = (
-        float(target_position[0]) - current_position[0],
-        float(target_position[1]) - current_position[1],
-        float(target_position[2]) - current_position[2],
-    )
-    translation_local = _rotate_vec(current_rotation_inv, translation_stand)
-    rotation_local = _matmul3(current_rotation_inv, target_rotation)
-    rotation_vector = _rotation_vector_from_matrix(rotation_local)
-    return _se3_log_translation(translation_local, rotation_vector) + rotation_vector
-
-
-def _pose6_from_state_arm(arm_raw: Any, key: str) -> tuple[float, float, float, float, float, float] | None:
-    if not isinstance(arm_raw, dict):
-        return None
-    pose = arm_raw.get(key)
-    try:
-        if isinstance(pose, dict):
-            values = (pose["x"], pose["y"], pose["z"], pose["rx"], pose["ry"], pose["rz"])
-        elif isinstance(pose, list | tuple) and len(pose) == 6:
-            values = tuple(pose)
-        else:
-            return None
-        parsed = tuple(float(value) for value in values)
-    except Exception:
-        return None
-    if not all(math.isfinite(value) for value in parsed):
-        return None
-    return parsed  # type: ignore[return-value]
-
-
-def _tcp_pose_from_urdf(
-    urdf_handle: Any,
-    base_pose: Pose6D | tuple[float, float, float, float, float, float],
-) -> tuple[tuple[float, float, float], tuple[float, float, float, float]] | None:
-    try:
-        urdf = urdf_handle._urdf
-        base_frame = urdf.scene.graph.base_frame
-        transform = urdf.get_transform("tcp", base_frame)
-        scale = float(getattr(urdf_handle, "_scale", 1.0))
-        local_position = (
-            float(transform[0][3]) * scale,
-            float(transform[1][3]) * scale,
-            float(transform[2][3]) * scale,
-        )
-        base_rotation = _quat_to_matrix(_pose_wxyz(base_pose))
-        rotated_position = _rotate_vec(base_rotation, local_position)
-        base_position = _pose_position(base_pose)
-        position = (
-            base_position[0] + rotated_position[0],
-            base_position[1] + rotated_position[1],
-            base_position[2] + rotated_position[2],
-        )
-        rotation = _matrix_to_wxyz(_matmul3(base_rotation, transform[:3, :3]))
-        return position, rotation
-    except Exception:
-        return None
-
-
-def _pose6_from_transform(
-    position: tuple[float, float, float],
-    wxyz: tuple[float, float, float, float],
-) -> tuple[float, float, float, float, float, float]:
-    roll, pitch, yaw = _wxyz_to_rpy(wxyz)
-    return (float(position[0]), float(position[1]), float(position[2]), roll, pitch, yaw)
-
-
-def _format_joints(q_values: tuple[float, ...] | None) -> str:
-    if q_values is None:
-        return "invalid"
-    return ", ".join(f"{value:.2f}" for value in q_values)
-
-
-def _joint_monitor_unit(handles: dict[str, Any]) -> str:
-    selector = handles.get("joint_monitor_unit", "deg")
-    unit = selector if isinstance(selector, str) else getattr(selector, "value", "deg")
-    return unit if unit in _JOINT_MONITOR_UNITS else "deg"
-
-
-def _update_joint_monitor_unit_buttons(handles: dict[str, Any]) -> None:
-    selected = _joint_monitor_unit(handles)
-    for unit, button in handles.get("joint_monitor_unit_buttons", {}).items():
-        try:
-            button.color = _mode_button_color(unit, selected)
-        except Exception:
-            pass
-
-
-def _format_joint_monitor_value(q_values: tuple[float, ...] | None, index: int, *, valid: bool, unit: str) -> str:
-    if not valid or q_values is None:
-        return "invalid"
-    if len(q_values) != len(_ROBOT_JOINT_NAMES) or not all(math.isfinite(float(value)) for value in q_values):
-        return "invalid"
-    if index < 0 or index >= len(_ROBOT_JOINT_NAMES):
-        return "invalid"
-    if unit == "rad":
-        return f"{math.radians(q_values[index]):.4f} rad"
-    return f"{q_values[index]:.2f} deg"
-
-
-def _arm_fk_status(arm: ArmSnapshot) -> str:
-    if not arm.has_valid_joint_state:
-        return "invalid joint state"
-    if arm.tcp_deferred:
-        return "deferred"
-    if not arm.has_valid_tcp_pose:
-        return "invalid TCP pose"
-    return "available"
-
-
-def _format_fk_status(latest: StateSnapshot | None, *, stale: bool) -> str:
-    if latest is None:
-        return "FK: no state"
-    if stale:
-        return "State stream stale"
-    left = _arm_fk_status(latest.left)
-    right = _arm_fk_status(latest.right)
-    if left == right:
-        return f"FK: {left}"
-    return f"FK: left {left}, right {right}"
-
-
-def _optional_finite(value: Any) -> float | None:
-    if not isinstance(value, int | float):
-        return None
-    parsed = float(value)
-    return parsed if math.isfinite(parsed) else None
-
-
-def _format_arm_cartesian_solve(arm: str, raw_arm: Any) -> str:
-    if isinstance(raw_arm, ArmSnapshot):
-        solve_obj = raw_arm.cartesian_solve
-        if solve_obj is None:
-            return f"{arm}=unavailable"
-        solve: Mapping[str, Any] = {
-            "attempted": solve_obj.attempted,
-            "status": solve_obj.status,
-            "position_error_m": solve_obj.position_error_m,
-            "orientation_error_rad": solve_obj.orientation_error_rad,
-            "ik_iterations": solve_obj.ik_iterations,
-            "ik_duration_us": solve_obj.ik_duration_us,
-            "ik_timed_out": solve_obj.ik_timed_out,
-            "path_active": solve_obj.path_active,
-            "path_s": solve_obj.path_s,
-            "path_line_deviation_m": solve_obj.path_line_deviation_m,
-            "path_orientation_error_rad": solve_obj.path_orientation_error_rad,
-            "path_done": solve_obj.path_done,
-        }
-    elif isinstance(raw_arm, Mapping):
-        raw_solve = raw_arm.get("cartesian_solve")
-        if not isinstance(raw_solve, Mapping):
-            return f"{arm}=unavailable"
-        solve = raw_solve
-    else:
-        return f"{arm}=unavailable"
-    parts: list[str] = [f"{arm}"]
-    status = solve.get("status")
-    if isinstance(status, str) and status:
-        parts.append(status)
-    if isinstance(solve.get("attempted"), bool):
-        parts.append(f"attempted={solve['attempted']}")
-    position_error_m = _optional_finite(solve.get("position_error_m"))
-    if position_error_m is not None:
-        parts.append(f"pos_err={position_error_m:.6g} m")
-    orientation_error_rad = _optional_finite(solve.get("orientation_error_rad"))
-    if orientation_error_rad is not None:
-        parts.append(f"ori_err={orientation_error_rad:.6g} rad")
-    ik_iterations = solve.get("ik_iterations")
-    if isinstance(ik_iterations, int):
-        parts.append(f"iter={ik_iterations}")
-    ik_duration_us = _optional_finite(solve.get("ik_duration_us"))
-    if ik_duration_us is not None:
-        parts.append(f"dur={ik_duration_us:.3g} us")
-    ik_timed_out = solve.get("ik_timed_out")
-    if isinstance(ik_timed_out, bool):
-        parts.append(f"timed_out={ik_timed_out}")
-    path_active = solve.get("path_active")
-    if isinstance(path_active, bool):
-        parts.append(f"path_active={path_active}")
-    path_s = _optional_finite(solve.get("path_s"))
-    if path_s is not None:
-        parts.append(f"path_s={path_s:.3f}")
-    path_line_deviation_m = _optional_finite(solve.get("path_line_deviation_m"))
-    if path_line_deviation_m is not None:
-        parts.append(f"line_dev={path_line_deviation_m:.6g} m")
-    path_orientation_error_rad = _optional_finite(solve.get("path_orientation_error_rad"))
-    if path_orientation_error_rad is not None:
-        parts.append(f"path_ori_err={path_orientation_error_rad:.6g} rad")
-    path_done = solve.get("path_done")
-    if isinstance(path_done, bool):
-        parts.append(f"path_done={path_done}")
-    return " ".join(parts)
-
-
-def _format_cartesian_solve_status(latest: StateSnapshot | None, *, stale: bool) -> str:
-    if latest is None:
-        return "IK: no state"
-    if stale:
-        return "State stream stale"
-    return "IK: " + "; ".join(
-        (
-            _format_arm_cartesian_solve("left", latest.left),
-            _format_arm_cartesian_solve("right", latest.right),
-        )
-    )
-
-
-def _joint_cfg_radians(q_values: tuple[float, ...] | None) -> tuple[float, ...]:
-    if q_values is None:
-        return tuple(0.0 for _ in _ROBOT_JOINT_NAMES)
-    padded = tuple(float(q_values[index]) if index < len(q_values) else 0.0 for index in range(len(_ROBOT_JOINT_NAMES)))
-    return tuple(math.radians(value) for value in padded)
-
-
-def _joint_marker_position(base: tuple[float, float, float], q_values: tuple[float, ...] | None) -> tuple[float, float, float]:
-    # Marker-only fallback: not FK. It gives operators visible left/right state
-    # changes without pretending Cartesian kinematics are available.
-    if q_values is None:
-        return (base[0], base[1], base[2] + 0.04)
-    shoulder = q_values[0] / 180.0 if q_values else 0.0
-    elbow = q_values[1] / 180.0 if len(q_values) > 1 else 0.0
-    wrist = q_values[2] / 180.0 if len(q_values) > 2 else 0.0
-    return (base[0] + 0.08 * shoulder, base[1] + 0.08 * elbow, base[2] + 0.04 + 0.06 * wrist)
-
-
-def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
-    stand_mesh_path = _stand_mesh_path()
-    if not stand_mesh_path.exists():
-        handles["stand_mesh_error"] = f"stand mesh not found: {stand_mesh_path}"
-        return
-    try:
-        import trimesh
-
-        mesh = trimesh.load_mesh(str(stand_mesh_path))
-        mesh.apply_scale(0.001)
-        handles["stand_mesh"] = server.scene.add_mesh_trimesh(
-            "/stand/mesh",
-            mesh=mesh,
-            position=_pose_position(_DEFAULT_STAND_MESH_POSE),
-            wxyz=_pose_wxyz(_DEFAULT_STAND_MESH_POSE),
-        )
-    except Exception as exc:
-        handles["stand_mesh_error"] = f"{type(exc).__name__}: {exc}"
-
-
-def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
-    urdf_path = _robot_urdf_path()
-    if not urdf_path.exists():
-        handles["urdf_error"] = f"robot URDF not found: {urdf_path}"
-        return
-    try:
-        from viser.extras import ViserUrdf
-
-        handles["left_urdf"] = ViserUrdf(server, urdf_path, root_node_name="/stand/left_base")
-        handles["right_urdf"] = ViserUrdf(server, urdf_path, root_node_name="/stand/right_base")
-        handles["urdf_joint_names"] = tuple(handles["left_urdf"].get_actuated_joint_names())
-    except Exception as exc:
-        handles["urdf_error"] = f"{type(exc).__name__}: {exc}"
-
-
-def _update_urdf_config(urdf_handle: Any, cfg_radians: tuple[float, ...]) -> None:
-    try:
-        import numpy as np
-
-        payload: Any = np.array(cfg_radians)
-    except Exception:
-        payload = cfg_radians
-    urdf_handle.update_cfg(payload)
-
-
-def _add_scene_fallback(server: Any) -> dict[str, Any]:
-    """Add stand/base frames, URDF assets, and marker fallback for degraded mode."""
-    handles: dict[str, Any] = {}
-    try:
-        handles["stand"] = server.scene.add_frame("/stand", show_axes=False)
-        handles["left_base"] = server.scene.add_frame("/stand/left_base", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False)
-        handles["right_base"] = server.scene.add_frame("/stand/right_base", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False)
-        has_transform_controls = hasattr(server.scene, "add_transform_controls")
-        handles["left_tcp"] = server.scene.add_frame("/stand/left_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(0.1601, -0.1725, 0.78))
-        handles["right_tcp"] = server.scene.add_frame("/stand/right_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(-0.1601, -0.1725, 0.78))
-        if has_transform_controls:
-            handles["left_tcp_target"] = server.scene.add_transform_controls(
-                "/stand/left_tcp_target", scale=0.16, line_width=3.0, position=(0.1601, -0.1725, 0.78)
-            )
-            handles["right_tcp_target"] = server.scene.add_transform_controls(
-                "/stand/right_tcp_target", scale=0.16, line_width=3.0, position=(-0.1601, -0.1725, 0.78)
-            )
-        _add_stand_mesh(server, handles)
-        _add_robot_urdfs(server, handles)
-        urdf_loaded = "left_urdf" in handles and "right_urdf" in handles
-        if urdf_loaded:
-            return handles
-        if hasattr(server.scene, "add_icosphere"):
-            handles["left_marker"] = server.scene.add_icosphere("/stand/left_state_marker", radius=0.025, color=(80, 160, 255), position=(0.1601, -0.1725, 0.68))
-            handles["right_marker"] = server.scene.add_icosphere("/stand/right_state_marker", radius=0.025, color=(255, 160, 80), position=(-0.1601, -0.1725, 0.68))
-        elif hasattr(server.scene, "add_point_cloud"):
-            handles["left_marker"] = server.scene.add_point_cloud("/stand/left_state_marker", points=((0.1601, -0.1725, 0.68),), colors=((80, 160, 255),), point_size=0.04)
-            handles["right_marker"] = server.scene.add_point_cloud("/stand/right_state_marker", points=((-0.1601, -0.1725, 0.68),), colors=((255, 160, 80),), point_size=0.04)
-    except Exception as exc:
-        handles["scene_error"] = str(exc)
-    return handles
-
-
-def update_scene_markers(scene_handles: dict[str, Any], latest: Any) -> None:
-    mounts = latest.mounts if isinstance(latest.mounts, dict) else {}
-    left_pose = _mount_pose_from_mounts(mounts, "left", _DEFAULT_LEFT_POSE)
-    right_pose = _mount_pose_from_mounts(mounts, "right", _DEFAULT_RIGHT_POSE)
-    left_base = _pose_position(left_pose)
-    right_base = _pose_position(right_pose)
-
-    for key, arm_state in (("left_urdf", latest.left), ("right_urdf", latest.right)):
-        urdf_handle = scene_handles.get(key)
-        if urdf_handle is None:
-            continue
-        try:
-            _update_urdf_config(urdf_handle, _joint_cfg_radians(arm_state.q_actual_deg))
-        except Exception as exc:
-            scene_handles["urdf_update_error"] = f"{type(exc).__name__}: {exc}"
-
-    updates = {
-        "left_base": left_base,
-        "right_base": right_base,
-        "left_marker": _joint_marker_position(left_base, latest.left.q_actual_deg),
-        "right_marker": _joint_marker_position(right_base, latest.right.q_actual_deg),
-    }
-    tcp_updates: dict[str, tuple[tuple[float, float, float], tuple[float, float, float, float]]] = {}
-    for arm, arm_state in (("left", latest.left), ("right", latest.right)):
-        tcp_pose = arm_state.tcp_stand
-        if arm_state.has_valid_tcp_pose and tcp_pose is not None:
-            tcp_updates[arm] = (_pose_position(tcp_pose), _pose_orientation_wxyz(tcp_pose))
-            continue
-        for key in (f"{arm}_tcp", f"{arm}_tcp_target"):
-            handle = scene_handles.get(key)
-            if handle is not None:
-                try:
-                    handle.visible = False
-                except Exception:
-                    pass
-
-    for arm, (position, wxyz) in tcp_updates.items():
-        updates[f"{arm}_tcp"] = position
-        target_key = f"{arm}_tcp_target"
-        if target_key not in scene_handles or f"{arm}_tcp_target_user_moved" not in scene_handles:
-            updates[target_key] = position
-            scene_handles[f"{arm}_tcp_target_pose"] = _pose6_from_transform(position, wxyz)
-            scene_handles[f"{arm}_tcp_target_wxyz"] = _normalize_wxyz(wxyz)
-        for key in (f"{arm}_tcp", f"{arm}_tcp_target"):
-            handle = scene_handles.get(key)
-            if handle is not None:
-                try:
-                    handle.visible = True
-                except Exception:
-                    pass
-
-    for key, position in updates.items():
-        handle = scene_handles.get(key)
-        if handle is None:
-            continue
-        try:
-            handle.position = position
-        except Exception:
-            try:
-                handle.points = (position,)
-            except Exception:
-                pass
-    rotations = {
-        "left_base": _pose_wxyz(left_pose),
-        "right_base": _pose_wxyz(right_pose),
-    }
-    for arm, (_, wxyz) in tcp_updates.items():
-        rotations[f"{arm}_tcp"] = wxyz
-        if f"{arm}_tcp_target_user_moved" not in scene_handles:
-            rotations[f"{arm}_tcp_target"] = wxyz
-    for key, wxyz in rotations.items():
-        handle = scene_handles.get(key)
-        if handle is None:
-            continue
-        try:
-            handle.wxyz = wxyz
-        except Exception:
-            pass
-
-
-def _install_tcp_target_callbacks(scene_handles: dict[str, Any], status_handle: Any | None = None) -> None:
-    for arm in ("left", "right"):
-        control = scene_handles.get(f"{arm}_tcp_target")
-        if control is None or not hasattr(control, "on_update"):
-            continue
-
-        @control.on_update
-        def _(_: Any, arm: str = arm, control: Any = control) -> None:
-            try:
-                position = tuple(float(value) for value in control.position)
-                wxyz = tuple(float(value) for value in control.wxyz)
-                if len(position) != 3 or len(wxyz) != 4:
-                    return
-                scene_handles[f"{arm}_tcp_target_wxyz"] = _normalize_wxyz(wxyz)  # type: ignore[arg-type]
-                scene_handles[f"{arm}_tcp_target_pose"] = _pose6_from_transform(position, scene_handles[f"{arm}_tcp_target_wxyz"])
-                scene_handles[f"{arm}_tcp_target_user_moved"] = True
-                if status_handle is not None:
-                    status_handle.value = f"{arm} TCP target updated"
-            except Exception as exc:
-                scene_handles["tcp_target_error"] = f"{type(exc).__name__}: {exc}"
 
 
 def _tcp_target_pose(scene_handles: dict[str, Any], arm: str) -> tuple[float, float, float, float, float, float] | None:
@@ -1330,51 +632,6 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
         handles["packets"] = server.gui.add_text("state packets", initial_value="0 received / 0 invalid", disabled=True)
 
     return handles
-
-
-def _set_disabled(handle: Any, disabled: bool) -> None:
-    try:
-        handle.disabled = disabled
-    except Exception:
-        pass
-
-
-def _format_tcp_command_status(safety: OperatorSafety, latest: StateSnapshot | None, *, stale: bool) -> str:
-    parts: list[str] = []
-    if safety.last_tcp_command != "none":
-        parts.append(f"last sent: {safety.last_tcp_command}")
-    if latest is not None and not stale:
-        parts.append(f"server verdict: {latest.safety_verdict}")
-    reason = safety.tcp_command_disabled_reason()
-    if reason:
-        parts.append(f"disabled: {reason}")
-    else:
-        parts.append("enabled: TCP PTP, TCP Linear, and low-level delta debug available")
-    return "; ".join(parts)
-
-
-def _update_joint_monitor(handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool) -> None:
-    if "joint_monitor_status" not in handles:
-        return
-    unit = _joint_monitor_unit(handles)
-    _update_joint_monitor_unit_buttons(handles)
-    value_handles = handles.get("joint_monitor_values", {})
-    if latest is None:
-        handles["joint_monitor_status"].value = f"No state stream, unit={unit}"
-        for arm in ("left", "right"):
-            for handle in value_handles.get(arm, ()):
-                handle.value = "invalid"
-        return
-    state = "stale" if stale else "live"
-    handles["joint_monitor_status"].value = f"{state}, unit={unit}, tick={latest.tick}"
-    for arm, arm_state in (("left", latest.left), ("right", latest.right)):
-        for index, handle in enumerate(value_handles.get(arm, ())):
-            handle.value = _format_joint_monitor_value(
-                arm_state.q_actual_deg,
-                index,
-                valid=arm_state.has_valid_joint_state,
-                unit=unit,
-            )
 
 
 def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStore) -> None:
