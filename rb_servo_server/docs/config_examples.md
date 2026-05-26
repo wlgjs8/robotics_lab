@@ -8,7 +8,9 @@ section:
   array_key: [1, 2, 3]
 ```
 
-It is intentionally minimal. Replace with `yaml-cpp` before adding complex nested structures.
+The parser is implemented with `yaml-cpp` and validates known keys strictly.
+When adding nested structures, update the parser allowlists, validation, and
+config-loader tests together.
 
 ## Mock
 

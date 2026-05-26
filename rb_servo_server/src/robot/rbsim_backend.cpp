@@ -647,6 +647,27 @@ std::string RbsimBackend::name() const {
     return config_.name;
 }
 
+std::optional<BackendTransportTelemetry> RbsimBackend::transportTelemetry() const {
+    const RbsimTransportCounters counters = transportCounters();
+    BackendTransportTelemetry telemetry;
+    telemetry.connect_attempts_total = counters.connect_attempts_total;
+    telemetry.connect_failures_total = counters.connect_failures_total;
+    telemetry.connect_attempts_suppressed_total = counters.connect_attempts_suppressed_total;
+    telemetry.connections_opened_total = counters.connections_opened_total;
+    telemetry.reconnects_total = counters.reconnects_total;
+    telemetry.requests_total = counters.requests_total;
+    telemetry.read_syscalls_total = counters.read_syscalls_total;
+    telemetry.write_syscalls_total = counters.write_syscalls_total;
+    telemetry.last_connect_error_name = counters.last_connect_error_name;
+    telemetry.last_connect_error_message = counters.last_connect_error_message;
+    telemetry.next_connect_attempt_ns = counters.next_connect_attempt_ns;
+    telemetry.next_connect_attempt_delay_ms = counters.next_connect_attempt_delay_ms;
+    telemetry.last_transport_error_kind = counters.last_transport_error_kind.has_value()
+        ? toString(*counters.last_transport_error_kind)
+        : "None";
+    return telemetry;
+}
+
 RbsimTransportCounters RbsimBackend::transportCounters() const {
     return client_ ? client_->counters() : RbsimTransportCounters{};
 }

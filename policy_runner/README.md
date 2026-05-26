@@ -3,7 +3,7 @@
 `policy_runner` is the Python action-source layer for `robotics_lab`. It sends
 UDP JSON commands to `rb_servo_server` and consumes the UDP JSON state stream.
 
-Supported P1 action sources:
+Supported action sources:
 
 - `hold`: receive state and keep policy output as no-op by default.
 - `joint_sine`: small simulation-only joint target motion.
@@ -16,9 +16,8 @@ Supported P1 action sources:
 - `dual_spacemouse_cartesian`: simulation-only two-SpaceMouse input mapped to
   per-arm `TcpTwistLocal` commands.
 
-P1 joint actions remain joint-only. P2 adds geometry awareness for future
-Cartesian and camera policies. P3 enables Cartesian action sources for
-simulation only.
+Joint actions remain joint-only. Geometry-aware safety gates protect Cartesian
+and camera-related action sources. Cartesian action sources are simulation-only.
 
 ## Safety
 
@@ -185,8 +184,8 @@ fixed subset; missing frames after a shape has been observed are zero-filled and
 
 ## SpaceMouse Joint Velocity
 
-SpaceMouse support belongs in `policy_runner`, not `rb_gui`. P1 only maps the
-device axes to joint velocities:
+SpaceMouse support belongs in `policy_runner`, not `rb_gui`. The joint-velocity
+source maps the device axes to joint velocities:
 
 ```text
 tx -> J1 velocity
@@ -347,9 +346,9 @@ Joint actions use per-arm modes so either arm can hold independently:
 }
 ```
 
-Supported P1-D modes are `Hold`, `ArmMotion`, `DisarmMotion`,
+Supported command modes are `Hold`, `ArmMotion`, `DisarmMotion`,
 `EmergencyStop`, `ResetFault`, `JointTarget`, and `JointVelocity`.
-P3 Cartesian packets additionally use `TcpDeltaStand` with per-arm
+Cartesian packets additionally use `TcpDeltaStand` with per-arm
 `tcp_delta_stand` one-shot jog payloads and `TcpTwistLocal` with per-arm
 `tcp_twist_local` velocity payloads in simulation only. `TcpTwistLocal` units
 are `vx,vy,vz` in m/s and `wx,wy,wz` in rad/s.

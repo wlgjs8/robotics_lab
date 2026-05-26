@@ -2,7 +2,7 @@
 
 This file records the `rb_servo_server` side of the MIG backend-contract and
 non-blocking servo-loop migration. The root source of truth remains
-`../../docs/servo_backend_contract.md`; this component note documents the
+`../../servo_backend_contract.md`; this component note documents the
 MIG-01 result vocabulary added inside `rb_servo_server`.
 
 MIG-01 adds the vocabulary only. It does not change `IRobotBackend` method

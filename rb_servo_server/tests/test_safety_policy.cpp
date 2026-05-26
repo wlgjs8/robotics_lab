@@ -2835,7 +2835,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "send_start_ns", "send_end_ns", "send_duration_us", "has_valid_joint_state",
         "connection_state", "has_error", "servo_enabled", "fault_recoverable", "lifecycle_state",
         "last_read", "last_send", "robot_time_ns", "host_time_ns", "error_code", "state_age_us",
-        "tcp_stand", "tcp_base", "tcp_deferred", "fk_duration_us", "cartesian_solve", "worker"
+        "tcp_stand", "tcp_base", "tcp_deferred", "fk_duration_us", "cartesian_solve", "worker",
+        "transport"
     };
     for (const char* arm_name : {"left", "right"}) {
         for (const char* key : arm_keys) {
@@ -2977,6 +2978,7 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("left").at("worker").at("last_enqueued_seq").get<uint64_t>() == 0);
     RB_CHECK(json.at("left").at("worker").at("last_dispatched_seq").get<uint64_t>() == 0);
     RB_CHECK(json.at("left").at("worker").at("last_completed_seq").get<uint64_t>() == 0);
+    RB_CHECK(json.at("left").at("transport").is_null());
 
     snapshot.fault_latched = true;
     snapshot.motion_state = rb_servo::ServerMotionState::FaultLatched;
@@ -3045,6 +3047,21 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     worker_snapshot.left_worker_telemetry.worker_last_enqueued_seq = 1204;
     worker_snapshot.left_worker_telemetry.worker_last_dispatched_seq = 1204;
     worker_snapshot.left_worker_telemetry.worker_last_completed_seq = 1204;
+    rb_servo::BackendTransportTelemetry transport;
+    transport.connect_attempts_total = 2;
+    transport.connect_failures_total = 1;
+    transport.connect_attempts_suppressed_total = 3;
+    transport.connections_opened_total = 1;
+    transport.reconnects_total = 1;
+    transport.requests_total = 12;
+    transport.read_syscalls_total = 13;
+    transport.write_syscalls_total = 14;
+    transport.last_connect_error_name = "rbsim_connect_backoff";
+    transport.last_connect_error_message = "next retry in 50 ms";
+    transport.next_connect_attempt_ns = 123456;
+    transport.next_connect_attempt_delay_ms = 50;
+    transport.last_transport_error_kind = "TransportReadFailed";
+    worker_snapshot.left_transport_telemetry = transport;
     rb_servo::StatePublisher worker_publisher(worker_cfg);
     const nlohmann::json worker_json =
         nlohmann::json::parse(worker_publisher.serializeSnapshot(worker_snapshot));
@@ -3061,6 +3078,20 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(worker.at("last_enqueued_seq").get<uint64_t>() == 1204);
     RB_CHECK(worker.at("last_dispatched_seq").get<uint64_t>() == 1204);
     RB_CHECK(worker.at("last_completed_seq").get<uint64_t>() == 1204);
+    const nlohmann::json& transport_json = worker_json.at("left").at("transport");
+    RB_CHECK(transport_json.at("connect_attempts_total").get<uint64_t>() == 2);
+    RB_CHECK(transport_json.at("connect_failures_total").get<uint64_t>() == 1);
+    RB_CHECK(transport_json.at("connect_attempts_suppressed_total").get<uint64_t>() == 3);
+    RB_CHECK(transport_json.at("connections_opened_total").get<uint64_t>() == 1);
+    RB_CHECK(transport_json.at("reconnects_total").get<uint64_t>() == 1);
+    RB_CHECK(transport_json.at("requests_total").get<uint64_t>() == 12);
+    RB_CHECK(transport_json.at("read_syscalls_total").get<uint64_t>() == 13);
+    RB_CHECK(transport_json.at("write_syscalls_total").get<uint64_t>() == 14);
+    RB_CHECK(transport_json.at("last_connect_error_name").get<std::string>() == "rbsim_connect_backoff");
+    RB_CHECK(transport_json.at("last_connect_error_message").get<std::string>() == "next retry in 50 ms");
+    RB_CHECK(transport_json.at("next_connect_attempt_ns").get<uint64_t>() == 123456);
+    RB_CHECK(transport_json.at("next_connect_attempt_delay_ms").get<uint64_t>() == 50);
+    RB_CHECK(transport_json.at("last_transport_error_kind").get<std::string>() == "TransportReadFailed");
     return true;
 }
 

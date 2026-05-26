@@ -35,8 +35,8 @@
 - `include/rb_servo/robot/rbpodo_backend.hpp` / `src/robot/rbpodo_backend.cpp`  
   Guarded rbpodo backend for real RB3-730 controllers. It supports gated connect/readState and gated joint `servo_j`, keeps read-only state acquisition separate from motion readiness, and leaves stop/reset fault recovery unimplemented until verified controller APIs are accepted.
 
-- `docs/rbpodo_backend_plan.md`  
-  Implementation plan and hardware acceptance runbook for the real RB3-730 backend. It documents SDK/linking, connect/initialize/read/send/stop/reset TODOs, safety guards, and first-motion gates without enabling real mode.
+- `../../docs/archive/planning/rb_servo_server_rbpodo_backend_plan.md`
+  Archived implementation plan and hardware acceptance runbook for the real RB3-730 backend. It is historical planning context, not runnable operator guidance.
 
 - `include/rb_servo/robot/backend_factory.hpp` / `src/robot/backend_factory.cpp`  
   Creates backend from config.

@@ -4,21 +4,12 @@ This page documents reproducible local setup for simulator-first development. It
 
 ## Ubuntu Hardware-Free Dependencies
 
-Install the base C++ and Python dependencies:
+Install the base C++ and Python dependencies. This helper follows the
+hardware-free Dockerfile and installs Pinocchio from robotpkg as
+`robotpkg-pinocchio` under `/opt/openrobots`:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y \
-  build-essential \
-  cmake \
-  git \
-  python3 \
-  python3-venv \
-  python3-pip \
-  libyaml-cpp-dev \
-  nlohmann-json3-dev \
-  libeigen3-dev \
-  pinocchio-dev
+./scripts/install_deps_ubuntu.sh --profile hardware-free
 ```
 
 Then run:
@@ -27,10 +18,11 @@ Then run:
 ./scripts/check_deps.sh --profile hardware-free
 ```
 
-If your CMake packages are installed in a non-standard prefix, set:
+The robotpkg install prefix is `/opt/openrobots`. If CMake does not find it
+automatically, set:
 
 ```bash
-export CMAKE_PREFIX_PATH=/path/to/prefix:$CMAKE_PREFIX_PATH
+export CMAKE_PREFIX_PATH=/opt/openrobots${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}
 ```
 
 ## Cartesian Math Dependencies
@@ -46,9 +38,10 @@ Check availability:
 ./scripts/check_deps.sh --profile hardware-free
 ```
 
-If `pinocchio-dev` is not available through apt, install Pinocchio through
-conda/mamba, robotpkg, or from source. If Pinocchio is installed in a custom
-prefix, set `CMAKE_PREFIX_PATH` before building.
+The supported Ubuntu helper path is robotpkg, matching
+`scripts/docker/rb_servo_server.hardware_free.Dockerfile`. Conda/mamba or
+source installs are also acceptable when they expose the `pinocchio` CMake
+package through `CMAKE_PREFIX_PATH`.
 
 ## Python Checks
 

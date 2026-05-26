@@ -22,6 +22,7 @@ public:
     virtual bool isConnected() const = 0;
     virtual ArmId armId() const = 0;
     virtual std::string name() const = 0;
+    virtual std::optional<BackendTransportTelemetry> transportTelemetry() const { return std::nullopt; }
 };
 
 }  // namespace rb_servo

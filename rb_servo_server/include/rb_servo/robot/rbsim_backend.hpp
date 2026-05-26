@@ -47,6 +47,7 @@ public:
     bool isConnected() const override;
     ArmId armId() const override;
     std::string name() const override;
+    std::optional<BackendTransportTelemetry> transportTelemetry() const override;
     RbsimTransportCounters transportCounters() const;
 
 private:

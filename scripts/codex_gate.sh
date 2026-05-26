@@ -90,8 +90,8 @@ run_servo_gate_or_skip_missing_deps() {
   fi
 
   echo "ERROR: missing rb_servo_server C++ dependencies: yaml-cpp, nlohmann_json, Eigen3, and pinocchio are required" >&2
-  echo "Install on Ubuntu when packages are available: sudo apt-get install -y libyaml-cpp-dev nlohmann-json3-dev libeigen3-dev pinocchio-dev" >&2
-  echo "For Pinocchio from conda/mamba, robotpkg, or source, set CMAKE_PREFIX_PATH to the install prefix." >&2
+  echo "Install on Ubuntu with: scripts/install_deps_ubuntu.sh --profile hardware-free" >&2
+  echo "That installs robotpkg-pinocchio under /opt/openrobots; for conda/mamba/source installs, set CMAKE_PREFIX_PATH to the install prefix." >&2
   echo "Or rerun with CODEX_SKIP_MISSING_CPP_DEPS=1 to skip C++ gates temporarily." >&2
   return 1
 }

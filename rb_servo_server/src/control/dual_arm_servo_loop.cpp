@@ -222,6 +222,14 @@ ArmWorkerTelemetry workerTelemetryOrDefault(const ArmWorker* worker) {
     return worker ? worker->telemetry() : ArmWorkerTelemetry{};
 }
 
+std::optional<BackendTransportTelemetry> workerTransportTelemetry(const ArmWorker* worker) {
+    return worker ? worker->transportTelemetry() : std::nullopt;
+}
+
+std::optional<BackendTransportTelemetry> backendTransportTelemetry(const IRobotBackend* backend) {
+    return backend ? backend->transportTelemetry() : std::nullopt;
+}
+
 uint64_t workerReadPeriodNs(const ServoConfig& config) {
     constexpr double kNsPerSecond = 1'000'000'000.0;
     const double period_ns = config.worker_read_period_sec * kNsPerSecond;
@@ -774,6 +782,11 @@ void DualArmServoLoop::loopMain() {
         if (workerIoMode()) {
             sample.left_worker_telemetry = workerTelemetryOrDefault(left_worker_.get());
             sample.right_worker_telemetry = workerTelemetryOrDefault(right_worker_.get());
+            sample.left_transport_telemetry = workerTransportTelemetry(left_worker_.get());
+            sample.right_transport_telemetry = workerTransportTelemetry(right_worker_.get());
+        } else {
+            sample.left_transport_telemetry = backendTransportTelemetry(left_robot_.get());
+            sample.right_transport_telemetry = backendTransportTelemetry(right_robot_.get());
         }
         sample.period_ms = nsToMs(actual_period_ns);
         sample.filter_dt_ms = filter_dt_sec * 1000.0;
@@ -852,6 +865,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.right_send_duration_us = sample.right_send_duration_us;
             latest_snapshot_.left_worker_telemetry = sample.left_worker_telemetry;
             latest_snapshot_.right_worker_telemetry = sample.right_worker_telemetry;
+            latest_snapshot_.left_transport_telemetry = sample.left_transport_telemetry;
+            latest_snapshot_.right_transport_telemetry = sample.right_transport_telemetry;
             latest_snapshot_.logger_dropped_samples = logger_ ? logger_->droppedSamples() : 0;
         }
 

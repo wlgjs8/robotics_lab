@@ -4,6 +4,11 @@ set -euo pipefail
 PROFILE="hardware-free"
 DRY_RUN=0
 WITH_PYTHON_DEV=0
+ROBOTPKG_DIST="${ROBOTPKG_DIST:-}"
+ROBOTPKG_LIST="/etc/apt/sources.list.d/robotpkg.list"
+ROBOTPKG_KEYRING="/etc/apt/keyrings/robotpkg.asc"
+ROBOTPKG_URL="http://robotpkg.openrobots.org/packages/debian/pub"
+ROBOTPKG_KEY_URL="http://robotpkg.openrobots.org/packages/debian/robotpkg.asc"
 
 usage() {
   cat <<'USAGE'
@@ -59,7 +64,9 @@ common_packages=(
   build-essential
   ca-certificates
   cmake
+  curl
   git
+  gnupg
   make
   pkg-config
   python3
@@ -68,7 +75,7 @@ common_packages=(
   libyaml-cpp-dev
   nlohmann-json3-dev
   libeigen3-dev
-  pinocchio-dev
+  robotpkg-pinocchio
 )
 
 python_dev_packages=(
@@ -96,6 +103,46 @@ add_common() {
   if [[ "${WITH_PYTHON_DEV}" -eq 1 ]]; then
     add_packages "${python_dev_packages[@]}"
   fi
+}
+
+ubuntu_codename() {
+  if [[ -n "${ROBOTPKG_DIST}" ]]; then
+    printf '%s\n' "${ROBOTPKG_DIST}"
+    return
+  fi
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    printf '%s\n' "${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+    return
+  fi
+  printf '\n'
+}
+
+configure_robotpkg_repo() {
+  local codename="$1"
+  if [[ -z "${codename}" ]]; then
+    echo "install_deps_ubuntu: cannot determine Ubuntu codename; set ROBOTPKG_DIST=jammy to use robotpkg." >&2
+    exit 2
+  fi
+  if [[ "${codename}" != "jammy" && -z "${ROBOTPKG_DIST:-}" ]]; then
+    echo "install_deps_ubuntu: robotpkg auto-setup is pinned to jammy to match scripts/docker/rb_servo_server.hardware_free.Dockerfile." >&2
+    echo "install_deps_ubuntu: set ROBOTPKG_DIST=${codename} explicitly if robotpkg supports your distribution." >&2
+    exit 2
+  fi
+
+  echo "install_deps_ubuntu: configuring robotpkg (${codename}) for robotpkg-pinocchio"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "install_deps_ubuntu: dry run; would install ca-certificates curl gnupg, write ${ROBOTPKG_LIST}, and import ${ROBOTPKG_KEY_URL}"
+    return
+  fi
+
+  sudo apt-get update
+  sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg
+  sudo install -d -m 0755 /etc/apt/keyrings
+  curl -fsSL "${ROBOTPKG_KEY_URL}" | sudo tee "${ROBOTPKG_KEYRING}" >/dev/null
+  echo "deb [arch=amd64 signed-by=${ROBOTPKG_KEYRING}] ${ROBOTPKG_URL} ${codename} robotpkg" | \
+    sudo tee "${ROBOTPKG_LIST}" >/dev/null
 }
 
 case "${PROFILE}" in
@@ -135,10 +182,13 @@ for package in "${packages[@]}"; do
 done
 
 echo "install_deps_ubuntu: profile ${PROFILE}"
+robotpkg_dist="$(ubuntu_codename)"
+configure_robotpkg_repo "${robotpkg_dist}"
 printf 'install_deps_ubuntu: apt packages:'
 printf ' %s' "${unique_packages[@]}"
 printf '\n'
-echo "install_deps_ubuntu: Pinocchio package names vary by Ubuntu/robotpkg/conda setup; if apt cannot install pinocchio-dev, install Pinocchio via conda/mamba or from source and expose it with CMAKE_PREFIX_PATH."
+echo "install_deps_ubuntu: Pinocchio is installed through robotpkg as robotpkg-pinocchio under /opt/openrobots."
+echo "install_deps_ubuntu: export CMAKE_PREFIX_PATH=/opt/openrobots\${CMAKE_PREFIX_PATH:+:\${CMAKE_PREFIX_PATH}} before local CMake builds if auto-detection is unavailable."
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   echo "install_deps_ubuntu: dry run; not invoking apt-get"

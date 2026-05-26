@@ -246,6 +246,25 @@ nlohmann::json workerTelemetryJson(
     };
 }
 
+nlohmann::json transportTelemetryJson(const std::optional<BackendTransportTelemetry>& telemetry) {
+    if (!telemetry) return nullptr;
+    return {
+        {"connect_attempts_total", telemetry->connect_attempts_total},
+        {"connect_failures_total", telemetry->connect_failures_total},
+        {"connect_attempts_suppressed_total", telemetry->connect_attempts_suppressed_total},
+        {"connections_opened_total", telemetry->connections_opened_total},
+        {"reconnects_total", telemetry->reconnects_total},
+        {"requests_total", telemetry->requests_total},
+        {"read_syscalls_total", telemetry->read_syscalls_total},
+        {"write_syscalls_total", telemetry->write_syscalls_total},
+        {"last_connect_error_name", telemetry->last_connect_error_name},
+        {"last_connect_error_message", telemetry->last_connect_error_message},
+        {"next_connect_attempt_ns", telemetry->next_connect_attempt_ns},
+        {"next_connect_attempt_delay_ms", telemetry->next_connect_attempt_delay_ms},
+        {"last_transport_error_kind", telemetry->last_transport_error_kind},
+    };
+}
+
 nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
     return {
         {"attempted", telemetry.attempted},
@@ -422,6 +441,7 @@ nlohmann::json armStateJson(
     bool send_deadline_hit,
     double worker_loop_read_duration_us,
     const ArmWorkerTelemetry& worker_telemetry,
+    const std::optional<BackendTransportTelemetry>& transport_telemetry,
     bool worker_enabled,
     const ServoConfig& servo_config,
     const CartesianSolveTelemetry& cartesian_solve
@@ -444,6 +464,7 @@ nlohmann::json armStateJson(
         {"send_deadline_hit", send_deadline_hit},
         {"worker_loop_read_duration_us", worker_loop_read_duration_us},
         {"worker", workerTelemetryJson(worker_telemetry, worker_enabled, servo_config, state_age_us)},
+        {"transport", transportTelemetryJson(transport_telemetry)},
         {"has_valid_joint_state", state.has_valid_joint_state},
         {"connection_state", state.connection_state == RobotConnectionState::Connected
             ? "Connected"
@@ -611,6 +632,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.left_send_end_ns),
         worker_enabled ? snapshot.left_last_read.duration_us : 0.0,
         snapshot.left_worker_telemetry,
+        snapshot.left_transport_telemetry,
         worker_enabled,
         config_.servo,
         snapshot.left_cartesian_solve
@@ -635,6 +657,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.right_send_end_ns),
         worker_enabled ? snapshot.right_last_read.duration_us : 0.0,
         snapshot.right_worker_telemetry,
+        snapshot.right_transport_telemetry,
         worker_enabled,
         config_.servo,
         snapshot.right_cartesian_solve

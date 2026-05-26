@@ -65,20 +65,15 @@ CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 Install missing base packages on Ubuntu:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y \
-  build-essential \
-  cmake \
-  libyaml-cpp-dev \
-  nlohmann-json3-dev \
-  libeigen3-dev \
-  pinocchio-dev
+./scripts/install_deps_ubuntu.sh --profile hardware-free
 ```
 
 `rb_servo_server` hardware-free C++ gates require valid Eigen3 and Pinocchio
-CMake packages. Missing Pinocchio is reported as `Missing CMake package:
-pinocchio`; it may be skipped only when `CODEX_SKIP_MISSING_CPP_DEPS=1` is
-explicitly set, and skipped C++ gates are not acceptance evidence.
+CMake packages. The Ubuntu helper installs `robotpkg-pinocchio` under
+`/opt/openrobots`, matching the hardware-free Dockerfile. Missing Pinocchio is
+reported as `Missing CMake package: pinocchio`; it may be skipped only when
+`CODEX_SKIP_MISSING_CPP_DEPS=1` is explicitly set, and skipped C++ gates are not
+acceptance evidence.
 
 ## Simulator Smoke
 

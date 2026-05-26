@@ -43,10 +43,10 @@ Still pending:
 - measured camera/robot calibration
 - production promotion of worker I/O for real hardware
 
-The real RB3-730 backend implementation plan and hardware acceptance runbook
-are in `docs/rbpodo_backend_plan.md`. Treat that document as a planning gate;
-it does not make real robot motion runnable without the documented build,
-environment, and human acceptance gates.
+The active real-mode safety source of truth is the root `README.md`,
+`AGENTS.md`, and `docs/servo_backend_contract.md`. Historical rbpodo planning
+notes are archived under `docs/archive/planning/`; they are not runnable
+operator instructions.
 
 ## Build
 
@@ -58,7 +58,8 @@ cmake --build build -j
 The build requires Eigen3 and Pinocchio. Cartesian FK, IK, orientation
 interpolation, frame conversion, and SE(3) delta math delegate to
 Eigen/Pinocchio rather than local fallback math. Install Pinocchio through an
-apt package when available, conda/mamba, robotpkg under `/opt/openrobots`, or a
+Ubuntu robotpkg package under `/opt/openrobots` using
+`../scripts/install_deps_ubuntu.sh --profile hardware-free`, conda/mamba, or a
 source install exposed through `CMAKE_PREFIX_PATH`.
 
 ## Run mock mode

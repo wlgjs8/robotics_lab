@@ -311,6 +311,10 @@ ArmWorkerTelemetry ArmWorker::telemetry() const {
     return telemetry_;
 }
 
+std::optional<BackendTransportTelemetry> ArmWorker::transportTelemetry() const {
+    return backend_ ? backend_->transportTelemetry() : std::nullopt;
+}
+
 ArmId ArmWorker::armId() const {
     return arm_id_;
 }

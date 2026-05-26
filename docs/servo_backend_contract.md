@@ -111,7 +111,13 @@ Worker mode is simulator-only until separately accepted on hardware.
 ## ArmWorker Command Policy
 
 Streaming servo requests are latest-wins. If a pending command is overwritten before dispatch, the worker must expose drop/overwrite telemetry. This is intentional for servo targets but must not be silent.
-The public telemetry field for overwritten commands is `worker_command_drops_total`, mirrored in state JSON as `command_drops_total`.
+The internal telemetry field for overwritten commands is
+`worker_command_drops_total`, mirrored in state JSON as
+`command_drops_total`. Per-arm state JSON also exposes
+`pending_overwrites_total`, `last_dropped_seq`, `last_enqueued_seq`,
+`last_dispatched_seq`, `last_completed_seq`, `queue_policy`,
+`read_period_sec`, `read_rate_hz`, and `state_age_us` under the `worker`
+object.
 
 Lifecycle commands such as reset/stop should not be silently overwritten by streaming servo targets. They should use a separate lane or explicit policy.
 
@@ -155,7 +161,13 @@ State JSON should expose:
 - send policy
 - per-arm read result
 - per-arm send result
-- worker telemetry
+- worker telemetry, including `command_drops_total`,
+  `pending_overwrites_total`, `last_dropped_seq`, `last_enqueued_seq`,
+  `last_dispatched_seq`, and `last_completed_seq`
+- simulator transport telemetry, including connect attempts, failures,
+  suppressed attempts, reconnect counts, request/syscall counters, last connect
+  error, next retry timing, and last transport error kind when using
+  `RbsimBackend`
 - TCP pose and quaternion when FK is available
 - Cartesian solve/path telemetry when Cartesian modes are active
 

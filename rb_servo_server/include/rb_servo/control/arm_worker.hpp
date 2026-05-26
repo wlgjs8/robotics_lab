@@ -70,6 +70,7 @@ public:
         uint64_t wait_until_ns
     );
     ArmWorkerTelemetry telemetry() const;
+    std::optional<BackendTransportTelemetry> transportTelemetry() const;
 
     ArmId armId() const;
     std::string name() const;

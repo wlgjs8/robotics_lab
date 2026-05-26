@@ -8,6 +8,7 @@ import csv
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -237,6 +238,74 @@ def start_process(command: list[str], cwd: Path, output_path: Path, env: dict[st
     except Exception:
         output.close()
         raise
+
+
+def udp_bind_available(host: str, port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+            return True
+    except OSError:
+        return False
+
+
+def select_udp_port(host: str, requested: int, label: str) -> int:
+    if udp_bind_available(host, requested):
+        return requested
+    for port in range(requested + 1, requested + 100):
+        if udp_bind_available(host, port):
+            print(
+                f"cartesian_acceptance: {label} UDP port {requested} unavailable; using {host}:{port}",
+                file=sys.stderr,
+            )
+            return port
+    raise AcceptanceError(f"no available UDP {label} port near {host}:{requested}")
+
+
+def replace_udp_endpoint(config_text: str, key: str, host: str, port: int) -> str:
+    pattern = rf'(^\s*{re.escape(key)}:\s*")udp://[^"]+(".*$)'
+    replacement = rf"\1udp://{host}:{port}\2"
+    updated, count = re.subn(pattern, replacement, config_text, count=1, flags=re.MULTILINE)
+    if count != 1:
+        raise AcceptanceError(f"server config does not contain scalar network.{key} endpoint")
+    return updated
+
+
+def replace_scalar_string(config_text: str, key: str, value: str) -> str:
+    pattern = rf'(^\s*{re.escape(key)}:\s*")[^"]+(".*$)'
+    replacement = rf"\1{value}\2"
+    updated, count = re.subn(pattern, replacement, config_text, count=1, flags=re.MULTILINE)
+    if count != 1:
+        raise AcceptanceError(f"server config does not contain scalar {key} value")
+    return updated
+
+
+def scalar_string_value(config_text: str, key: str) -> str | None:
+    match = re.search(rf'^\s*{re.escape(key)}:\s*"([^"]+)"', config_text, flags=re.MULTILINE)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def prepare_start_local_server_config(args: argparse.Namespace, artifact_dir: Path) -> None:
+    command_port = select_udp_port(args.command_host, args.command_port, "command")
+    state_port = select_udp_port(args.state_host, args.state_port, "state capture")
+    config_text = args.server_config.read_text(encoding="utf-8")
+    urdf_value = scalar_string_value(config_text, "urdf")
+    if urdf_value:
+        urdf_path = Path(urdf_value)
+        if not urdf_path.is_absolute():
+            urdf_path = (args.server_config.parent / urdf_path).resolve()
+        if urdf_path.is_file():
+            config_text = replace_scalar_string(config_text, "urdf", str(urdf_path))
+    config_text = replace_udp_endpoint(config_text, "command_bind", args.command_host, command_port)
+    config_text = replace_udp_endpoint(config_text, "state_pub_endpoint", args.state_host, state_port)
+    runtime_config = artifact_dir / "runtime_server_config.yaml"
+    runtime_config.write_text(config_text, encoding="utf-8")
+    args.command_port = command_port
+    args.state_port = state_port
+    args.server_config = runtime_config
 
 
 def terminate_process(proc: subprocess.Popen[str] | None) -> None:
@@ -1079,6 +1148,8 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         }
         write_summaries(artifact_dir, summary)
         return summary
+    if args.mode == "start-local":
+        prepare_start_local_server_config(args, artifact_dir)
 
     left_proc: subprocess.Popen[str] | None = None
     right_proc: subprocess.Popen[str] | None = None
