@@ -232,3 +232,10 @@ path_samples_right.csv
 ## Not Real Robot Evidence
 
 Even if all scenarios pass, real Cartesian motion remains blocked until a separate real-hardware acceptance workflow exists.
+
+## Related Benchmark
+
+BENCH-CIRCLE-01 is a simulator-only circular TCP tracking benchmark for
+performance comparison after acceptance behavior is stable. See
+`docs/runbooks/circle_tracking_benchmark.md`. It generates tracking metrics and
+plots, but passing it is still not real robot evidence.

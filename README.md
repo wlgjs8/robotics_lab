@@ -162,6 +162,15 @@ Cartesian simulator acceptance:
 CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 ```
 
+Circle tracking benchmark:
+
+```bash
+./scripts/codex_gate.sh BENCH-CIRCLE-01
+```
+
+See `docs/runbooks/circle_tracking_benchmark.md` for simulator-only benchmark
+profiles and artifact interpretation.
+
 시뮬레이터 운영자 stack 시작:
 
 ```bash

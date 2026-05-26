@@ -150,6 +150,7 @@ CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 8. Real motion remains blocked.
 9. Real camera acceptance remains separate.
 10. Measured calibration is still absent.
+11. Run BENCH-CIRCLE-01 simulator benchmark and record artifacts before real robot Cartesian testing.
 
 ## Reviewer Checklist
 
