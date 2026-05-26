@@ -27,6 +27,7 @@ RUN_PTP=0
 RUN_LINEAR=0
 RUN_TWIST_LOCAL=0
 RUN_TWIST_STAND=0
+RUN_NEAR_PI_PTP=0
 RUN_ALL=0
 
 usage() {
@@ -40,6 +41,7 @@ Scenario selection:
   --run-linear               Run TcpLinearMove constant and slerp acceptance.
   --run-twist-local          Run TcpTwistLocal local +X orientation-hold acceptance.
   --run-twist-stand          Run TcpTwistStand stand +X orientation-hold acceptance.
+  --run-near-pi-ptp          Run optional near-pi TcpPoseTarget orientation acceptance.
   --all                      Run all scenarios. Default when no scenario flag is supplied.
 
 Runtime/options:
@@ -117,13 +119,14 @@ while [[ $# -gt 0 ]]; do
     --run-linear) RUN_LINEAR=1; shift ;;
     --run-twist-local) RUN_TWIST_LOCAL=1; shift ;;
     --run-twist-stand) RUN_TWIST_STAND=1; shift ;;
+    --run-near-pi-ptp) RUN_NEAR_PI_PTP=1; shift ;;
     --all) RUN_ALL=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
 
-if [[ "${RUN_ALL}" -eq 0 && "${RUN_PTP}" -eq 0 && "${RUN_LINEAR}" -eq 0 && "${RUN_TWIST_LOCAL}" -eq 0 && "${RUN_TWIST_STAND}" -eq 0 ]]; then
+if [[ "${RUN_ALL}" -eq 0 && "${RUN_PTP}" -eq 0 && "${RUN_LINEAR}" -eq 0 && "${RUN_TWIST_LOCAL}" -eq 0 && "${RUN_TWIST_STAND}" -eq 0 && "${RUN_NEAR_PI_PTP}" -eq 0 ]]; then
   RUN_ALL=1
 fi
 
@@ -169,6 +172,7 @@ PY_ARGS=(
 [[ "${RUN_LINEAR}" -eq 1 ]] && PY_ARGS+=(--run-linear)
 [[ "${RUN_TWIST_LOCAL}" -eq 1 ]] && PY_ARGS+=(--run-twist-local)
 [[ "${RUN_TWIST_STAND}" -eq 1 ]] && PY_ARGS+=(--run-twist-stand)
+[[ "${RUN_NEAR_PI_PTP}" -eq 1 ]] && PY_ARGS+=(--run-near-pi-ptp)
 [[ "${SKIP_ESTOP_RESET}" -eq 1 ]] && PY_ARGS+=(--skip-estop-reset)
 
 PYTHONPATH="${ROOT_DIR}/rb_simulator/src${PYTHONPATH:+:${PYTHONPATH}}" \
@@ -189,6 +193,11 @@ if [[ "${STACK_MODE}" == "start-local" ]]; then
     fail "rb_servo_server binary was not built with RB_SERVO_ENABLE_PINOCCHIO=ON: ${SERVER}"
   fi
 fi
+
+MATH_TEST="$(dirname "${SERVER}")/test_se3_math"
+[[ -x "${MATH_TEST}" ]] || fail "near-pi Cartesian math test binary is missing: ${MATH_TEST}"
+"${MATH_TEST}"
+PY_ARGS+=(--near-pi-math-tests-run)
 
 PYTHONPATH="${ROOT_DIR}/rb_simulator/src${PYTHONPATH:+:${PYTHONPATH}}" \
 python3 "${ROOT_DIR}/scripts/cartesian_acceptance.py" "${PY_ARGS[@]}"

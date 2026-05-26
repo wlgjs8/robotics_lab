@@ -28,7 +28,7 @@ Implemented in this server:
 - servo period/jitter/filter-dt/safety logging
 - structured backend result taxonomy for mock, simulator, and rbpodo paths
 - direct and worker backend I/O models for simulator validation
-- Pinocchio FK/IK support enabled by default
+- mandatory Pinocchio/Eigen FK, IK, and Cartesian math support
 - simulator-only Cartesian command routing when kinematics and Cartesian config
   gates are enabled
 - force-control design types, config, and optional controller scaffold
@@ -55,9 +55,11 @@ cmake -S . -B build
 cmake --build build -j
 ```
 
-The default build expects Pinocchio to be available, normally through
-`/opt/openrobots` from robotpkg. For mock-only hardware-free checks on a host
-without Pinocchio, configure with `-DRB_SERVO_ENABLE_PINOCCHIO=OFF`.
+The build requires Eigen3 and Pinocchio. Cartesian FK, IK, orientation
+interpolation, frame conversion, and SE(3) delta math delegate to
+Eigen/Pinocchio rather than local fallback math. Install Pinocchio through an
+apt package when available, conda/mamba, robotpkg under `/opt/openrobots`, or a
+source install exposed through `CMAKE_PREFIX_PATH`.
 
 ## Run mock mode
 

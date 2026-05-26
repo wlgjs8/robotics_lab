@@ -23,8 +23,6 @@ class DualSpaceMouseCartesianActionSource:
         max_linear_velocity_m_s: float = 0.03,
         max_angular_velocity_rad_s: float = 0.2,
         deadband: float = 0.08,
-        left_deadman_button: int = 0,
-        right_deadman_button: int = 0,
         timeout_sec: float = 0.2,
         max_linear_step_m: float | None = None,
         max_angular_step_rad: float | None = None,
@@ -43,22 +41,18 @@ class DualSpaceMouseCartesianActionSource:
             raise ValueError("max_angular_velocity_rad_s must be non-negative")
         if deadband < 0.0:
             raise ValueError("deadband must be non-negative")
-        if left_deadman_button < 0 or right_deadman_button < 0:
-            raise ValueError("deadman buttons must be non-negative")
         self.left_reader = left_reader if left_reader is not None else HidSpaceMouseReader(device_number=0)
         self.right_reader = right_reader if right_reader is not None else HidSpaceMouseReader(device_number=1)
         self.frame = frame
         self.max_linear_velocity_m_s = float(max_linear_velocity_m_s)
         self.max_angular_velocity_rad_s = float(max_angular_velocity_rad_s)
         self.deadband = float(deadband)
-        self.left_deadman_button = int(left_deadman_button)
-        self.right_deadman_button = int(right_deadman_button)
         self.timeout_sec = timeout_sec
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         _ = snapshot, now_monotonic
-        left = self._twist_from_reader(self.left_reader, self.left_deadman_button)
-        right = self._twist_from_reader(self.right_reader, self.right_deadman_button)
+        left = self._twist_from_reader(self.left_reader)
+        right = self._twist_from_reader(self.right_reader)
         if left is None and right is None:
             return None
         return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
@@ -70,10 +64,9 @@ class DualSpaceMouseCartesianActionSource:
     def _twist_from_reader(
         self,
         reader: SpaceMouseReader,
-        deadman_button: int,
     ) -> tuple[float, ...] | None:
         sample = reader.read(timeout_sec=0.0)
-        if sample is None or not _deadman_active(sample, deadman_button):
+        if sample is None:
             return None
         twist = _twist_from_sample(
             sample,
@@ -84,12 +77,6 @@ class DualSpaceMouseCartesianActionSource:
         if all(value == 0.0 for value in twist):
             return None
         return twist
-
-
-def _deadman_active(sample: SpaceMouseSample, deadman_button: int) -> bool:
-    if deadman_button >= len(sample.buttons):
-        return False
-    return sample.buttons[deadman_button]
 
 
 def _twist_from_sample(

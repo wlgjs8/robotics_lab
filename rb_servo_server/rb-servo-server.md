@@ -1,7 +1,7 @@
 # Codex Implementation Spec: rb_servo_server
 
 > Historical implementation spec. Some milestone text predates the current
-> per-arm simulator, rbpodo backend, and optional Pinocchio FK/IK work. The
+> per-arm simulator, rbpodo backend, and mandatory Pinocchio/Eigen FK/IK work. The
 > current source of truth is the root `README.md`,
 > `docs/architecture.md`, and `rb_servo_server/README.md`.
 

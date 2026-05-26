@@ -356,30 +356,7 @@ bool testCartesianLatencyBudgetTelemetry() {
     return true;
 }
 
-bool testDisabledBuildReturnsUnavailable() {
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
-    return true;
-#else
-    RB_CHECK(!rb_servo::PinocchioKinematics::isAvailable());
-    rb_servo::PinocchioKinematics kin(testKinematicsConfig());
-    const rb_servo::IkResult result = kin.solveIk(
-        rb_servo::ArmId::Left,
-        rb_servo::Pose6D{},
-        seedJoints(),
-        leftMount()
-    );
-    RB_CHECK(!result.success);
-    RB_CHECK(result.reason == rb_servo::ik_solver::kReasonKinematicsUnavailable);
-    RB_CHECK(std::isfinite(result.duration_us));
-    RB_CHECK(result.duration_us >= 0.0);
-    RB_CHECK(result.iterations == 0);
-    return true;
-#endif
-}
-
-bool testPinocchioIkIfEnabled() {
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
-    RB_CHECK(rb_servo::PinocchioKinematics::isAvailable());
+bool testPinocchioIk() {
     rb_servo::PinocchioKinematics kin(testKinematicsConfig());
     const rb_servo::ArmMountConfig mount = leftMount();
     const rb_servo::JointArray seed = seedJoints();
@@ -541,7 +518,6 @@ bool testPinocchioIkIfEnabled() {
               << " non_converged_duration_us=" << non_converged.duration_us
               << " non_converged_iterations=" << non_converged.iterations
               << "\n";
-#endif
     return true;
 }
 
@@ -556,11 +532,7 @@ bool testInvalidTargetDoesNotThrow() {
         leftMount()
     );
     RB_CHECK(!result.success);
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
     RB_CHECK(result.reason == rb_servo::ik_solver::kReasonInvalidTarget);
-#else
-    RB_CHECK(result.reason == rb_servo::ik_solver::kReasonKinematicsUnavailable);
-#endif
     RB_CHECK(std::isfinite(result.duration_us));
     RB_CHECK(result.duration_us >= 0.0);
     return true;
@@ -571,8 +543,7 @@ bool testInvalidTargetDoesNotThrow() {
 int main() {
     if (!testIkConfigParsing()) return 1;
     if (!testCartesianLatencyBudgetTelemetry()) return 1;
-    if (!testDisabledBuildReturnsUnavailable()) return 1;
-    if (!testPinocchioIkIfEnabled()) return 1;
+    if (!testPinocchioIk()) return 1;
     if (!testInvalidTargetDoesNotThrow()) return 1;
     return 0;
 }

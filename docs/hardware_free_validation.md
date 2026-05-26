@@ -70,10 +70,15 @@ sudo apt-get install -y \
   build-essential \
   cmake \
   libyaml-cpp-dev \
-  nlohmann-json3-dev
+  nlohmann-json3-dev \
+  libeigen3-dev \
+  pinocchio-dev
 ```
 
-Pinocchio-enabled gates require a valid Pinocchio CMake package. Missing Pinocchio may skip optional kinematics acceptance only when the gate explicitly says it was skipped.
+`rb_servo_server` hardware-free C++ gates require valid Eigen3 and Pinocchio
+CMake packages. Missing Pinocchio is reported as `Missing CMake package:
+pinocchio`; it may be skipped only when `CODEX_SKIP_MISSING_CPP_DEPS=1` is
+explicitly set, and skipped C++ gates are not acceptance evidence.
 
 ## Simulator Smoke
 

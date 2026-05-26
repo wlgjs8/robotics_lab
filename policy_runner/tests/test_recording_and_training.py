@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from policy_runner.recording import EpisodeRecorder
+from policy_runner.robot_state_client import StateSnapshot
+from policy_runner.training import action_vector, load_dataset, state_vector
+
+
+def state_payload(tick: int = 1) -> dict:
+    arm = {
+        "q_actual_deg": [1, 2, 3, 4, 5, 6],
+        "q_sent_deg": [1, 2, 3, 4, 5, 6],
+        "tcp_stand": {"x": 0.1, "y": 0.2, "z": 0.3, "rx": 0, "ry": 0, "rz": 0, "qw": 1},
+    }
+    return {
+        "tick": tick,
+        "host_time_ns": 123,
+        "period_ms": 50,
+        "jitter_ms": 0,
+        "motion_state": "Running",
+        "fault_latched": False,
+        "left": dict(arm),
+        "right": dict(arm),
+    }
+
+
+class RecordingAndTrainingTest(unittest.TestCase):
+    def test_episode_recorder_writes_state_and_action_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = EpisodeRecorder(tmp, episode_name="episode_test")
+            try:
+                recorder.record_state(StateSnapshot(state_payload(), 1.0))
+                recorder.record_action(
+                    {
+                        "seq": 1,
+                        "mode": "TcpTwistLocal",
+                        "left": {"mode": "TcpTwistLocal", "tcp_twist_local": [0.01, 0, 0, 0, 0, 0]},
+                        "right": {"mode": "Hold"},
+                    }
+                )
+            finally:
+                recorder.close()
+
+            root = Path(tmp) / "episode_test"
+            self.assertTrue((root / "episode_metadata.json").exists())
+            state_rows = [json.loads(line) for line in (root / "robot_state.jsonl").read_text().splitlines()]
+            action_rows = [json.loads(line) for line in (root / "actions.jsonl").read_text().splitlines()]
+            self.assertEqual(state_rows[0]["payload"]["tick"], 1)
+            self.assertEqual(action_rows[0]["nearest_state_tick"], 1)
+
+    def test_training_extracts_fixed_width_state_and_twist_action(self) -> None:
+        packet = {
+            "left": {"mode": "TcpTwistLocal", "tcp_twist_local": [0.01, 0.02, 0, 0, 0, 0]},
+            "right": {"mode": "TcpTwistLocal", "tcp_twist_local": [0, 0, 0, 0.1, 0, 0]},
+        }
+        self.assertEqual(len(state_vector(state_payload())), 40)
+        self.assertEqual(len(action_vector(packet) or []), 12)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = EpisodeRecorder(tmp, episode_name="episode_train")
+            try:
+                recorder.record_state(StateSnapshot(state_payload(), 1.0))
+                recorder.record_action({"seq": 1, "mode": "TcpTwistLocal", **packet})
+            finally:
+                recorder.close()
+            obs, actions = load_dataset(tmp)
+            self.assertEqual(len(obs), 1)
+            self.assertEqual(len(actions), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

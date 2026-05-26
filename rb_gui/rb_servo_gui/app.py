@@ -29,6 +29,7 @@ _INACTIVE_MODE_COLOR = "gray"
 _TCP_FRAME_STAND = "Stand/world"
 _TCP_FRAME_LOCAL = "TCP local"
 _TCP_FRAME_OPTIONS = (_TCP_FRAME_STAND, _TCP_FRAME_LOCAL)
+_JOINT_MONITOR_UNITS = ("deg", "rad")
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -517,6 +518,33 @@ def _format_joints(q_values: tuple[float, ...] | None) -> str:
     return ", ".join(f"{value:.2f}" for value in q_values)
 
 
+def _joint_monitor_unit(handles: dict[str, Any]) -> str:
+    selector = handles.get("joint_monitor_unit", "deg")
+    unit = selector if isinstance(selector, str) else getattr(selector, "value", "deg")
+    return unit if unit in _JOINT_MONITOR_UNITS else "deg"
+
+
+def _update_joint_monitor_unit_buttons(handles: dict[str, Any]) -> None:
+    selected = _joint_monitor_unit(handles)
+    for unit, button in handles.get("joint_monitor_unit_buttons", {}).items():
+        try:
+            button.color = _mode_button_color(unit, selected)
+        except Exception:
+            pass
+
+
+def _format_joint_monitor_value(q_values: tuple[float, ...] | None, index: int, *, valid: bool, unit: str) -> str:
+    if not valid or q_values is None:
+        return "invalid"
+    if len(q_values) != len(_ROBOT_JOINT_NAMES) or not all(math.isfinite(float(value)) for value in q_values):
+        return "invalid"
+    if index < 0 or index >= len(_ROBOT_JOINT_NAMES):
+        return "invalid"
+    if unit == "rad":
+        return f"{math.radians(q_values[index]):.4f} rad"
+    return f"{q_values[index]:.2f} deg"
+
+
 def _arm_fk_status(arm: ArmSnapshot) -> str:
     if not arm.has_valid_joint_state:
         return "invalid joint state"
@@ -983,6 +1011,26 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
     handles: dict[str, Any] = {}
     handles["scene"] = _add_scene_fallback(server)
 
+    with server.gui.add_folder("Joint monitor", expand_by_default=True, order=0.0):
+        handles["joint_monitor_unit"] = "deg"
+        handles["joint_monitor_unit_buttons"] = {}
+        for unit in _JOINT_MONITOR_UNITS:
+            unit_button = server.gui.add_button(unit, color=_mode_button_color(unit, _joint_monitor_unit(handles)))
+            handles["joint_monitor_unit_buttons"][unit] = unit_button
+
+            @unit_button.on_click
+            def _(_: Any, unit: str = unit) -> None:
+                handles["joint_monitor_unit"] = unit
+                _update_joint_monitor_unit_buttons(handles)
+
+        handles["joint_monitor_status"] = server.gui.add_text("Status", initial_value="No state stream", disabled=True)
+        handles["joint_monitor_values"] = {"left": [], "right": []}
+        for arm in ("left", "right"):
+            with server.gui.add_folder(arm, expand_by_default=True):
+                for index, joint_name in enumerate(_ROBOT_JOINT_NAMES):
+                    handle = server.gui.add_text(f"{arm} J{index + 1} {joint_name}", initial_value="invalid", disabled=True)
+                    handles["joint_monitor_values"][arm].append(handle)
+
     tabs = server.gui.add_tab_group()
     with tabs.add_tab("Status"):
         handles["connection"] = server.gui.add_text("Connection", initial_value="disconnected", disabled=True)
@@ -1253,6 +1301,30 @@ def _format_tcp_command_status(safety: OperatorSafety, latest: StateSnapshot | N
     return "; ".join(parts)
 
 
+def _update_joint_monitor(handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool) -> None:
+    if "joint_monitor_status" not in handles:
+        return
+    unit = _joint_monitor_unit(handles)
+    _update_joint_monitor_unit_buttons(handles)
+    value_handles = handles.get("joint_monitor_values", {})
+    if latest is None:
+        handles["joint_monitor_status"].value = f"No state stream, unit={unit}"
+        for arm in ("left", "right"):
+            for handle in value_handles.get(arm, ()):
+                handle.value = "invalid"
+        return
+    state = "stale" if stale else "live"
+    handles["joint_monitor_status"].value = f"{state}, unit={unit}, tick={latest.tick}"
+    for arm, arm_state in (("left", latest.left), ("right", latest.right)):
+        for index, handle in enumerate(value_handles.get(arm, ())):
+            handle.value = _format_joint_monitor_value(
+                arm_state.q_actual_deg,
+                index,
+                valid=arm_state.has_valid_joint_state,
+                unit=unit,
+            )
+
+
 def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStore) -> None:
     disabled_states = safety.control_disabled_states()
     for mode, button in handles.get("lifecycle_buttons", {}).items():
@@ -1272,6 +1344,7 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
     stale = store.is_stale()
     readiness = safety.readiness()
     if latest is None:
+        _update_joint_monitor(handles, None, stale=True)
         handles["connection"].value = "disconnected/stale"
         handles["readiness"].value = readiness.no_go_reason or "No-Go: no state stream"
         if "fk_status" in handles:
@@ -1314,6 +1387,7 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
         handles["tcp_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     if "tcp_linear_status" in handles:
         handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
+    _update_joint_monitor(handles, latest, stale=stale)
     update_scene_markers(handles.get("scene", {}), latest)
     if "scene_assets" in handles:
         scene_errors = [

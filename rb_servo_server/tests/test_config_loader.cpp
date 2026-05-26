@@ -210,8 +210,41 @@ bool testDeprecatedAliasesWarnAndParse() {
     RB_CHECK(cfg.left_robot.rbsim_control_endpoint == cfg.left_robot.simulator_control_endpoint);
     RB_CHECK(cfg.network.state_pub_endpoint == "udp://127.0.0.1:55110");
     RB_CHECK(cfg.network.state_pub_bind == cfg.network.state_pub_endpoint);
+    RB_CHECK(cfg.network.state_pub_endpoints.size() == 1);
+    RB_CHECK(cfg.network.state_pub_endpoints.front() == cfg.network.state_pub_endpoint);
     RB_CHECK(cfg.network.state_pub_rate_hz == 33);
     RB_CHECK(warnings.str().find("deprecated") != std::string::npos);
+    return true;
+}
+
+bool testStatePublisherEndpointsParseAndValidate() {
+    const std::string path = writeTempConfig(
+        "state-pub-endpoints",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  state_pub_endpoints:\n"
+        "    - \"udp://rb_gui:50110\"\n"
+        "    - \"udp://policy_runner_state_sink:50120\"\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    ::unlink(path.c_str());
+    RB_CHECK(cfg.network.state_pub_endpoint == "udp://rb_gui:50110");
+    RB_CHECK(cfg.network.state_pub_bind == cfg.network.state_pub_endpoint);
+    RB_CHECK(cfg.network.state_pub_endpoints.size() == 2);
+    RB_CHECK(cfg.network.state_pub_endpoints[0] == "udp://rb_gui:50110");
+    RB_CHECK(cfg.network.state_pub_endpoints[1] == "udp://policy_runner_state_sink:50120");
+
+    const std::string ambiguous_path = writeTempConfig(
+        "state-pub-ambiguous",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  state_pub_endpoint: \"udp://rb_gui:50110\"\n"
+        "  state_pub_endpoints:\n"
+        "    - \"udp://policy_runner_state_sink:50120\"\n"
+    );
+    const bool ambiguous_rejected = loadRejects(ambiguous_path);
+    ::unlink(ambiguous_path.c_str());
+    RB_CHECK(ambiguous_rejected);
     return true;
 }
 
@@ -274,6 +307,7 @@ int main() {
     if (!testServoIoModelParsesAndValidates()) return 1;
     if (!testUnknownKeysAndSchemaFail()) return 1;
     if (!testDeprecatedAliasesWarnAndParse()) return 1;
+    if (!testStatePublisherEndpointsParseAndValidate()) return 1;
     if (!testForceControlStaysDisabled()) return 1;
     if (!testCommandSourceConfigParsesAndValidates()) return 1;
     return 0;

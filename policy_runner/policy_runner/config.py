@@ -114,13 +114,10 @@ class SpaceMouseDeviceConfig:
     device: str | None = None
     path: str | None = None
     device_number: int = 0
-    deadman_button: int = 0
 
     def __post_init__(self) -> None:
         if self.device_number < 0:
             raise ValueError("spacemouse device_number must be non-negative")
-        if self.deadman_button < 0:
-            raise ValueError("spacemouse deadman_button must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -281,8 +278,6 @@ def _spacemouse_cartesian_dual_config(raw: dict[str, Any]) -> DualSpaceMouseCart
 def _spacemouse_device_config(raw: dict[str, Any]) -> SpaceMouseDeviceConfig:
     if "device_number" in raw:
         raw["device_number"] = int(raw["device_number"])
-    if "deadman_button" in raw:
-        raw["deadman_button"] = int(raw["deadman_button"])
     return SpaceMouseDeviceConfig(**raw)
 
 

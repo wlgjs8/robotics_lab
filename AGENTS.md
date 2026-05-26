@@ -184,6 +184,8 @@ Use `docs/frame_contract.md` and `calibration/active_calibration.yaml` as the fr
 - Do not fake external APIs for rbpodo, Pinocchio, RealSense, SpaceMouse, or camera devices.
 - If a dependency is missing, report it clearly and do not claim the gate passed.
 - Do not claim C++ or Pinocchio runtime acceptance passed unless the command was actually run.
+- Do not introduce custom SO(3), SE(3), quaternion interpolation, or frame-conversion math in production Cartesian control when Eigen/Pinocchio can provide it.
+- Do not create production fallback math paths that bypass mandatory Eigen/Pinocchio Cartesian math.
 - Do not weaken command-source lease, deadman, stale-state, fault, or real-mode checks.
 - Do not enable real robot motion, real Cartesian motion, grippers, or force control as part of simulator hardening.
 

@@ -12,8 +12,8 @@ Usage: scripts/install_deps_ubuntu.sh [--profile <hardware-free|kinematics|real-
 Installs Ubuntu apt packages for robotics_lab development profiles.
 
 Profiles:
-  hardware-free  CMake, C++17 toolchain, Python, yaml-cpp, nlohmann_json
-  kinematics     hardware-free plus Eigen3 and Pinocchio packages when available
+  hardware-free  CMake, C++17 toolchain, Python, yaml-cpp, nlohmann_json, Eigen3, Pinocchio
+  kinematics     alias for hardware-free Cartesian math dependencies
   real-camera    hardware-free plus RealSense/ZMQ development packages
   real-robot     hardware-free basics; rbpodo SDK still requires vendor install
   all            all apt-managed packages from the profiles above
@@ -67,16 +67,15 @@ common_packages=(
   python3-venv
   libyaml-cpp-dev
   nlohmann-json3-dev
+  libeigen3-dev
+  pinocchio-dev
 )
 
 python_dev_packages=(
   python3-dev
 )
 
-kinematics_packages=(
-  libeigen3-dev
-  pinocchio-dev
-)
+kinematics_packages=()
 
 real_camera_packages=(
   libzmq3-dev
@@ -105,7 +104,6 @@ case "${PROFILE}" in
     ;;
   kinematics)
     add_common
-    add_packages "${kinematics_packages[@]}"
     ;;
   real-camera)
     add_common
@@ -140,6 +138,7 @@ echo "install_deps_ubuntu: profile ${PROFILE}"
 printf 'install_deps_ubuntu: apt packages:'
 printf ' %s' "${unique_packages[@]}"
 printf '\n'
+echo "install_deps_ubuntu: Pinocchio package names vary by Ubuntu/robotpkg/conda setup; if apt cannot install pinocchio-dev, install Pinocchio via conda/mamba or from source and expose it with CMAKE_PREFIX_PATH."
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   echo "install_deps_ubuntu: dry run; not invoking apt-get"

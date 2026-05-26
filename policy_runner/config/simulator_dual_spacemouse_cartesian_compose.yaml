@@ -6,10 +6,10 @@ runtime:
 geometry:
   path: "calibration/active_calibration.yaml"
 robot_state:
-  bind: "udp://127.0.0.1:50120"
+  bind: "udp://0.0.0.0:50120"
   stale_timeout_sec: 0.5
 servo_command:
-  endpoint: "udp://127.0.0.1:50010"
+  endpoint: "udp://rb_servo_server:50010"
   timeout_sec: 0.2
 safety:
   allow_real_motion: false
@@ -23,10 +23,6 @@ spacemouse_cartesian_dual:
   max_angular_velocity_rad_s: 0.2
   deadband: 0.08
   left:
-    device: null
-    path: null
-    device_number: 0
+    path: "/dev/hidraw1"
   right:
-    device: null
-    path: null
-    device_number: 1
+    path: "/dev/hidraw6"

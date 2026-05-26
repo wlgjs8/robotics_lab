@@ -190,7 +190,7 @@ class CartesianActionSourceTest(unittest.TestCase):
 
     def test_dual_spacemouse_cartesian_holds_inactive_arm(self):
         left_reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
-        right_reader = FakeSpaceMouseReader([spacemouse_sample(ty=1.0, buttons=(False,))])
+        right_reader = FakeSpaceMouseReader()
         source = DualSpaceMouseCartesianActionSource(
             left_reader=left_reader,
             right_reader=right_reader,
@@ -203,9 +203,22 @@ class CartesianActionSourceTest(unittest.TestCase):
         self.assertEqual(intent.left["tcp_twist_local"], [0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.assertEqual(intent.right["mode"], "Hold")
 
-    def test_dual_spacemouse_cartesian_sends_no_command_when_both_inactive(self):
+    def test_dual_spacemouse_cartesian_ignores_buttons(self):
         source = DualSpaceMouseCartesianActionSource(
             left_reader=FakeSpaceMouseReader([spacemouse_sample(tx=1.0, buttons=(False,))]),
+            right_reader=FakeSpaceMouseReader([spacemouse_sample(ty=-1.0, buttons=())]),
+        )
+
+        intent = source.next_intent(sample_state(), time.monotonic())
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.left["tcp_twist_local"], [0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(intent.right["tcp_twist_local"], [0.0, -0.03, 0.0, 0.0, 0.0, 0.0])
+
+    def test_dual_spacemouse_cartesian_sends_no_command_when_both_inactive(self):
+        source = DualSpaceMouseCartesianActionSource(
+            left_reader=FakeSpaceMouseReader([spacemouse_sample(tx=0.01, buttons=(False,))]),
             right_reader=FakeSpaceMouseReader(),
         )
 
@@ -381,12 +394,10 @@ class CartesianActionSourceTest(unittest.TestCase):
                     "left": {
                         "path": "/dev/hidraw-left",
                         "device_number": 0,
-                        "deadman_button": 0,
                     },
                     "right": {
                         "path": "/dev/hidraw-right",
                         "device_number": 2,
-                        "deadman_button": 1,
                     },
                 },
             }
@@ -399,7 +410,6 @@ class CartesianActionSourceTest(unittest.TestCase):
         self.assertEqual(cfg.spacemouse_cartesian_dual.deadband, 0.05)
         self.assertEqual(cfg.spacemouse_cartesian_dual.left.path, "/dev/hidraw-left")
         self.assertEqual(cfg.spacemouse_cartesian_dual.right.device_number, 2)
-        self.assertEqual(cfg.spacemouse_cartesian_dual.right.deadman_button, 1)
 
     def test_dual_spacemouse_cartesian_invalid_device_config_fails(self):
         with self.assertRaisesRegex(ValueError, "device_number"):

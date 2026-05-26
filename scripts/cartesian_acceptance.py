@@ -120,14 +120,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-linear", action="store_true")
     parser.add_argument("--run-twist-local", action="store_true")
     parser.add_argument("--run-twist-stand", action="store_true")
+    parser.add_argument("--run-near-pi-ptp", action="store_true")
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--skip-estop-reset", action="store_true")
+    parser.add_argument("--near-pi-math-tests-run", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
     return parser.parse_args()
 
 
 def selected_scenarios(args: argparse.Namespace) -> set[str]:
-    if args.all or not any((args.run_ptp, args.run_linear, args.run_twist_local, args.run_twist_stand)):
+    if args.all or not any((
+        args.run_ptp,
+        args.run_linear,
+        args.run_twist_local,
+        args.run_twist_stand,
+        args.run_near_pi_ptp,
+    )):
         return {"ptp", "linear", "twist_local", "twist_stand"}
     out: set[str] = set()
     if args.run_ptp:
@@ -138,6 +146,8 @@ def selected_scenarios(args: argparse.Namespace) -> set[str]:
         out.add("twist_local")
     if args.run_twist_stand:
         out.add("twist_stand")
+    if args.run_near_pi_ptp:
+        out.add("near_pi_ptp")
     return out
 
 
@@ -533,6 +543,43 @@ def run_ptp(ctx: Context) -> None:
         "result": "pass",
         "final_position_error_m": position_error,
         "final_orientation_error_rad": orientation_error,
+        "max_orientation_error_rad": orientation_error,
+        "command_seq": packet["seq"],
+    }
+
+
+def run_near_pi_ptp(ctx: Context) -> None:
+    start = arm_motion(ctx)
+    start_pose = arm_pose(start, "left", "near_pi_ptp.start")
+    target = pose_payload(start_pose)
+    target["quaternion_xyzw"] = quat_multiply(start_pose["quaternion_xyzw"], yaw_quat(math.pi - 1e-6))
+    packet = pose_target_command(target)
+    send_udp(ctx.args.command_host, ctx.args.command_port, packet, ctx.commands)
+    observed = wait_for(
+        ctx.capture,
+        lambda s: snapshot_after(packet)(s) and s.get("safety_verdict") == "Ok" and s.get("fault_latched") is False,
+        ctx.args.startup_timeout_sec,
+        "TcpPoseTarget near-pi accepted",
+    )
+    assert_joint_limits(observed, "near_pi_ptp")
+    final, final_position_error, final_orientation_error = wait_for_pose_tolerance(
+        ctx,
+        packet,
+        vec(target),
+        target["quaternion_xyzw"],
+        "near_pi_ptp",
+    )
+    if final_position_error > ctx.args.position_tolerance_m:
+        raise AcceptanceError(f"Near-pi PTP final position error {final_position_error}")
+    if final_orientation_error > ctx.args.orientation_tolerance_rad:
+        raise AcceptanceError(f"Near-pi PTP final orientation error {final_orientation_error}")
+    no_fault(final, "Near-pi PTP")
+    ctx.scenario_results["near_pi_ptp"] = {
+        "result": "pass",
+        "target_rotation_angle_rad": math.pi - 1e-6,
+        "final_position_error_m": final_position_error,
+        "final_orientation_error_rad": final_orientation_error,
+        "max_orientation_error_rad": final_orientation_error,
         "command_seq": packet["seq"],
     }
 
@@ -621,6 +668,7 @@ def run_linear_constant(ctx: Context) -> None:
     target_pos = vec(target)
     max_line = 0.0
     max_q = 0.0
+    max_path_orientation_error = 0.0
     max_tracking = 0.0
     for sample in samples:
         p = sample["pose"]
@@ -629,6 +677,8 @@ def run_linear_constant(ctx: Context) -> None:
         tel = sample["telemetry"]
         if isinstance(tel.get("path_position_error_m"), (int, float)):
             max_tracking = max(max_tracking, float(tel["path_position_error_m"]))
+        if isinstance(tel.get("path_orientation_error_rad"), (int, float)):
+            max_path_orientation_error = max(max_path_orientation_error, float(tel["path_orientation_error_rad"]))
     final, final_position_error, final_orientation_error = wait_for_pose_tolerance(
         ctx,
         packet,
@@ -651,6 +701,7 @@ def run_linear_constant(ctx: Context) -> None:
         "final_position_error_m": final_position_error,
         "final_orientation_error_rad": final_orientation_error,
         "max_line_deviation_m": max_line,
+        "max_path_orientation_error_rad": max(max_q, max_path_orientation_error),
         "max_quaternion_angle_from_start_rad": max_q,
         "max_path_tracking_error_m": max_tracking,
         "command_seq": packet["seq"],
@@ -736,22 +787,31 @@ def run_twist(ctx: Context, frame: str) -> None:
     time.sleep(0.3)
     final = latest_valid_after(ctx.capture, start_ns, f"{label} stream")
     final_pose = arm_pose(final, "left", f"{label}.final")
+    final_ns = int(final.get("host_time_ns", seq()))
+    samples = collect_path_samples(ctx.capture, start_ns, final_ns, "left")
     delta = sub(vec(final_pose), vec(start_pose))
     along = dot(delta, direction)
     off_axis = norm(sub(delta, [along * direction[i] for i in range(3)]))
     orientation_error = quat_angle(final_pose["quaternion_xyzw"], start_pose["quaternion_xyzw"])
+    max_orientation_drift = orientation_error
+    for sample in samples:
+        max_orientation_drift = max(
+            max_orientation_drift,
+            quat_angle(sample["pose"]["quaternion_xyzw"], start_pose["quaternion_xyzw"]),
+        )
     if along < 0.003:
         raise AcceptanceError(f"{label} did not move primarily forward, projected distance {along}")
     if off_axis > 0.01:
         raise AcceptanceError(f"{label} off-axis movement {off_axis} too large")
-    if orientation_error > ctx.args.orientation_tolerance_rad:
-        raise AcceptanceError(f"{label} orientation drift {orientation_error} > {ctx.args.orientation_tolerance_rad}")
+    if max_orientation_drift > ctx.args.orientation_tolerance_rad:
+        raise AcceptanceError(f"{label} orientation drift {max_orientation_drift} > {ctx.args.orientation_tolerance_rad}")
     no_fault(final, label)
     ctx.scenario_results[label] = {
         "result": "pass",
         "projected_translation_m": along,
         "off_axis_translation_m": off_axis,
         "orientation_error_rad": orientation_error,
+        "max_twist_orientation_drift_rad": max_orientation_drift,
     }
 
 
@@ -798,6 +858,15 @@ def metric_max(snapshots: list[dict[str, Any]], key: str) -> float:
                 number = float(tel[key])
                 if math.isfinite(number):
                     values.append(number)
+    return max(values) if values else 0.0
+
+
+def scenario_metric_max(results: dict[str, dict[str, Any]], key: str) -> float:
+    values: list[float] = []
+    for result in results.values():
+        value = result.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            values.append(float(value))
     return max(values) if values else 0.0
 
 
@@ -890,6 +959,7 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
             "preflight_only": True,
             "config_file": str(args.server_config.resolve()),
             "git_commit": git_commit(args.root),
+            "near_pi_math_tests_run": bool(args.near_pi_math_tests_run),
         }
         write_summaries(artifact_dir, summary)
         return summary
@@ -942,6 +1012,8 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         scenarios = selected_scenarios(args)
         if "ptp" in scenarios:
             run_ptp(ctx)
+        if "near_pi_ptp" in scenarios:
+            run_near_pi_ptp(ctx)
         if "linear" in scenarios:
             run_linear_constant(ctx)
             run_linear_slerp(ctx)
@@ -978,7 +1050,16 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         "estop_reset": estop_reset,
         "max_position_error_m": metric_max(capture.snapshots, "position_error_m"),
         "max_orientation_error_rad": metric_max(capture.snapshots, "orientation_error_rad"),
+        "max_path_orientation_error_rad": max(
+            metric_max(capture.snapshots, "path_orientation_error_rad"),
+            scenario_metric_max(ctx.scenario_results, "max_path_orientation_error_rad"),
+        ),
         "max_line_deviation_m": metric_max(capture.snapshots, "path_line_deviation_m"),
+        "max_twist_orientation_drift_rad": scenario_metric_max(
+            ctx.scenario_results,
+            "max_twist_orientation_drift_rad",
+        ),
+        "near_pi_math_tests_run": bool(args.near_pi_math_tests_run),
         "max_path_tracking_error_m": metric_max(capture.snapshots, "path_position_error_m"),
         "max_ik_duration_us": metric_max(capture.snapshots, "ik_duration_us"),
         "max_cartesian_servo_duration_us": None,
@@ -1016,6 +1097,7 @@ def main() -> int:
             "rb_servo_server_log": str(artifact_dir / "rb_servo_server.log"),
             "left_simulator_log": str(artifact_dir / "left_simulator.log"),
             "right_simulator_log": str(artifact_dir / "right_simulator.log"),
+            "near_pi_math_tests_run": bool(getattr(args, "near_pi_math_tests_run", False)),
             "caveat": "simulator-only evidence; not real robot readiness",
         }
         write_summaries(artifact_dir, failure)

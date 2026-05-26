@@ -24,6 +24,16 @@ namespace {
 
 constexpr int kStateSchemaVersion = 1;
 
+struct UdpDestination {
+    std::string endpoint;
+    std::vector<char> storage;
+    socklen_t len{0};
+
+    const sockaddr* addr() const {
+        return reinterpret_cast<const sockaddr*>(storage.data());
+    }
+};
+
 std::chrono::nanoseconds publishPeriod(int state_pub_rate_hz) {
     const int rate_hz = state_pub_rate_hz > 0 ? state_pub_rate_hz : 20;
     return std::chrono::nanoseconds(1'000'000'000LL / rate_hz);
@@ -352,13 +362,100 @@ nlohmann::json armStateJson(
     };
 }
 
+bool resolveUdpEndpoint(const std::string& endpoint, UdpDestination* destination) {
+    std::string host;
+    int port = 0;
+    if (!StatePublisher::parseUdpEndpointUri(endpoint, &host, &port)) {
+        std::cerr << "[ERROR] StatePublisher only supports udp://host:port endpoints, got "
+                  << endpoint << "\n";
+        return false;
+    }
+
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
+
+    addrinfo* results = nullptr;
+    const std::string port_string = std::to_string(port);
+    const int gai = ::getaddrinfo(host.c_str(), port_string.c_str(), &hints, &results);
+    if (gai != 0 || results == nullptr) {
+        std::cerr << "[ERROR] StatePublisher failed to resolve host '" << host
+                  << "': " << ::gai_strerror(gai) << "\n";
+        return false;
+    }
+
+    for (addrinfo* item = results; item != nullptr; item = item->ai_next) {
+        if (!item->ai_addr || item->ai_addrlen <= 0) continue;
+        destination->endpoint = endpoint;
+        destination->storage.assign(
+            reinterpret_cast<const char*>(item->ai_addr),
+            reinterpret_cast<const char*>(item->ai_addr) + item->ai_addrlen
+        );
+        destination->len = static_cast<socklen_t>(item->ai_addrlen);
+        ::freeaddrinfo(results);
+        return true;
+    }
+    ::freeaddrinfo(results);
+
+    std::cerr << "[ERROR] StatePublisher found no UDP address for host '" << host << "'\n";
+    return false;
+}
+
+std::vector<UdpDestination> resolveUdpDestinations(const NetworkConfig& config) {
+    std::vector<std::string> endpoints = config.state_pub_endpoints;
+    if (endpoints.empty()) {
+        endpoints.push_back(config.state_pub_bind);
+    }
+    std::vector<UdpDestination> destinations;
+    destinations.reserve(endpoints.size());
+    for (const std::string& endpoint : endpoints) {
+        UdpDestination destination;
+        if (!resolveUdpEndpoint(endpoint, &destination)) {
+            continue;
+        }
+        destinations.push_back(std::move(destination));
+    }
+    return destinations;
+}
+
+bool validateUdpEndpointSyntax(const NetworkConfig& config) {
+    std::vector<std::string> endpoints = config.state_pub_endpoints;
+    if (endpoints.empty()) {
+        endpoints.push_back(config.state_pub_bind);
+    }
+    for (const std::string& endpoint : endpoints) {
+        if (!StatePublisher::parseUdpEndpointUri(endpoint, nullptr, nullptr)) {
+            std::cerr << "[ERROR] StatePublisher only supports udp://host:port endpoints, got "
+                      << endpoint << "\n";
+            return false;
+        }
+    }
+    return true;
+}
+
+void normalizeStatePublisherNetworkConfig(NetworkConfig* config) {
+    if (!config) return;
+    if (config->state_pub_bind != config->state_pub_endpoint) {
+        config->state_pub_endpoint = config->state_pub_bind;
+        config->state_pub_endpoints = {config->state_pub_bind};
+        return;
+    }
+    if (config->state_pub_endpoints.empty() || config->state_pub_endpoints.front() != config->state_pub_endpoint) {
+        config->state_pub_endpoints = {config->state_pub_endpoint};
+    }
+}
+
 }  // namespace
 
 StatePublisher::StatePublisher(const DualArmConfig& config, SnapshotProvider provider)
-    : config_(config), snapshot_provider_(std::move(provider)) {}
+    : config_(config), snapshot_provider_(std::move(provider)) {
+    normalizeStatePublisherNetworkConfig(&config_.network);
+}
 
 StatePublisher::StatePublisher(const NetworkConfig& config) {
     config_.network = config;
+    normalizeStatePublisherNetworkConfig(&config_.network);
     config_.command_source.enforce_lease = config.command_source_enforce_lease;
     config_.command_source.lease_timeout_sec = config.command_source_lease_timeout_sec;
 }
@@ -478,11 +575,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
 bool StatePublisher::start() {
     if (running_) return true;
 
-    std::string host;
-    int port = 0;
-    if (!parseEndpoint(&host, &port)) {
-        std::cerr << "[ERROR] StatePublisher only supports udp://host:port endpoints, got "
-                  << config_.network.state_pub_bind << "\n";
+    if (!validateUdpEndpointSyntax(config_.network)) {
         return false;
     }
 
@@ -499,13 +592,6 @@ void StatePublisher::stop() {
 }
 
 void StatePublisher::threadMain() {
-    std::string host;
-    int port = 0;
-    if (!parseEndpoint(&host, &port)) {
-        running_ = false;
-        return;
-    }
-
     const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
         std::cerr << "[ERROR] StatePublisher socket failed: " << std::strerror(errno) << "\n";
@@ -513,47 +599,17 @@ void StatePublisher::threadMain() {
         return;
     }
 
-    addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-    hints.ai_protocol = IPPROTO_UDP;
-
-    addrinfo* results = nullptr;
-    const std::string port_string = std::to_string(port);
-    const int gai = ::getaddrinfo(host.c_str(), port_string.c_str(), &hints, &results);
-    if (gai != 0 || results == nullptr) {
-        std::cerr << "[ERROR] StatePublisher failed to resolve host '" << host
-                  << "': " << ::gai_strerror(gai) << "\n";
-        ::close(fd);
-        running_ = false;
-        return;
-    }
-
-    std::vector<char> dest_storage;
-    const sockaddr* dest_addr = nullptr;
-    socklen_t dest_len = 0;
-    for (addrinfo* item = results; item != nullptr; item = item->ai_next) {
-        if (!item->ai_addr || item->ai_addrlen <= 0) continue;
-        dest_storage.assign(
-            reinterpret_cast<const char*>(item->ai_addr),
-            reinterpret_cast<const char*>(item->ai_addr) + item->ai_addrlen
-        );
-        dest_addr = reinterpret_cast<const sockaddr*>(dest_storage.data());
-        dest_len = static_cast<socklen_t>(item->ai_addrlen);
-        break;
-    }
-    ::freeaddrinfo(results);
-
-    if (!dest_addr || dest_len == 0) {
-        std::cerr << "[ERROR] StatePublisher found no UDP address for host '" << host << "'\n";
-        ::close(fd);
-        running_ = false;
-        return;
-    }
-
     const auto publish_period = publishPeriod(config_.network.state_pub_rate_hz);
+    std::vector<UdpDestination> destinations;
+    auto next_resolve = std::chrono::steady_clock::time_point{};
     bool send_warned = false;
     while (running_) {
+        const auto now = std::chrono::steady_clock::now();
+        if (destinations.empty() || now >= next_resolve) {
+            destinations = resolveUdpDestinations(config_.network);
+            next_resolve = now + std::chrono::seconds(1);
+        }
+
         ServoSnapshot snapshot;
         if (snapshot_provider_) {
             snapshot = snapshot_provider_();
@@ -564,17 +620,20 @@ void StatePublisher::threadMain() {
         }
 
         const std::string payload = serializeSnapshot(snapshot);
-        const ssize_t sent = ::sendto(
-            fd,
-            payload.data(),
-            payload.size(),
-            0,
-            dest_addr,
-            dest_len
-        );
-        if (sent < 0 && !send_warned) {
-            std::cerr << "[WARN] StatePublisher send failed: " << std::strerror(errno) << "\n";
-            send_warned = true;
+        for (const UdpDestination& destination : destinations) {
+            const ssize_t sent = ::sendto(
+                fd,
+                payload.data(),
+                payload.size(),
+                0,
+                destination.addr(),
+                destination.len
+            );
+            if (sent < 0 && !send_warned) {
+                std::cerr << "[WARN] StatePublisher send failed to "
+                          << destination.endpoint << ": " << std::strerror(errno) << "\n";
+                send_warned = true;
+            }
         }
         std::this_thread::sleep_for(publish_period);
     }

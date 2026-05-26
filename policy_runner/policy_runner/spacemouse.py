@@ -64,10 +64,11 @@ class HidSpaceMouseReader:
                 "install policy_runner with the spacemouse extra"
             ) from exc
         self._pyspacemouse = pyspacemouse
-        self._device = pyspacemouse.open(
+        self._device = _open_pyspacemouse_device(
+            pyspacemouse,
             device=device,
             path=path,
-            DeviceNumber=device_number,
+            device_number=device_number,
         )
         if self._device is None or self._device is False:
             raise RuntimeError("failed to open SpaceMouse HID device")
@@ -103,6 +104,26 @@ def _sample_from_pyspacemouse_state(state: Any) -> SpaceMouseSample:
         buttons=_buttons_attr(state),
         timestamp_monotonic=time.monotonic(),
     )
+
+
+def _open_pyspacemouse_device(
+    pyspacemouse: Any,
+    *,
+    device: str | None,
+    path: str | None,
+    device_number: int,
+) -> Any:
+    if path:
+        open_by_path = getattr(pyspacemouse, "open_by_path", None)
+        if callable(open_by_path):
+            return open_by_path(path)
+        return pyspacemouse.open(device=device, path=path, DeviceNumber=device_number)
+    try:
+        return pyspacemouse.open(device=device, device_index=device_number)
+    except TypeError as exc:
+        if "device_index" not in str(exc):
+            raise
+        return pyspacemouse.open(device=device, DeviceNumber=device_number)
 
 
 def _float_attr(state: Any, *names: str) -> float:

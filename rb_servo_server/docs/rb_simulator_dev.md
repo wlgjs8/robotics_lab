@@ -42,7 +42,6 @@ PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
 cmake -S rb_servo_server -B rb_servo_server/build/hardware_free_gate \
   -DCMAKE_BUILD_TYPE=Debug \
   -DRB_SERVO_ENABLE_RBPODO=OFF \
-  -DRB_SERVO_ENABLE_PINOCCHIO=OFF \
   -DRB_SERVO_ALLOW_FETCHCONTENT=OFF \
   -DBUILD_TESTING=ON
 cmake --build rb_servo_server/build/hardware_free_gate -j
@@ -100,7 +99,7 @@ The compose stack is intentionally bounded:
 - Each simulator service has its own network namespace, so both containers may
   use internal port `50200`; `rb_servo_server` reaches them through
   `tcp://rb_simulator_left:50200` and `tcp://rb_simulator_right:50200`.
-- The server image builds with Pinocchio enabled. The compose config publishes
+- The server image builds with mandatory Pinocchio/Eigen support. The compose config publishes
   FK TCP poses and enables simulator-only Cartesian IK for GUI TCP target tests;
   real Cartesian motion remains disabled.
 - The default GUI/mock port mappings are pinned to `127.0.0.1`.

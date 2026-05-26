@@ -16,8 +16,6 @@ public:
     PinocchioKinematics(PinocchioKinematics&&) noexcept;
     PinocchioKinematics& operator=(PinocchioKinematics&&) noexcept;
 
-    static bool isAvailable();
-
     Pose6D computeTcpBase(const JointArray& q_deg) const override;
     Pose6D computeTcpStand(
         ArmId arm,

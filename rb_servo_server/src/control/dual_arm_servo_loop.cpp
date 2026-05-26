@@ -92,10 +92,6 @@ std::shared_ptr<IKinematics> makeKinematicsProvider(const DualArmConfig& config)
     if (config.kinematics.provider != "pinocchio") {
         return nullptr;
     }
-    if (!PinocchioKinematics::isAvailable()) {
-        std::cerr << "[WARN] FK TCP publish deferred: Pinocchio kinematics is not available in this build\n";
-        return nullptr;
-    }
     try {
         return std::make_shared<PinocchioKinematics>(config.kinematics);
     } catch (const std::exception& exc) {

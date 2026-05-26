@@ -36,13 +36,22 @@ rb_servo_server/config/dual_simulator_tcp_acceptance.yaml
 
 ## Dependencies
 
-Build the Pinocchio-enabled server:
+Eigen3 and Pinocchio are mandatory for `rb_servo_server` Cartesian math. The
+C++ math gate includes near-pi SO(3) log, quaternion convention, body-error, and
+stand/local frame-conversion invariants.
+
+Run the math rebaseline gate:
+
+```bash
+./scripts/codex_gate.sh CART-MATH-03
+```
+
+Build the server with mandatory Eigen3/Pinocchio support:
 
 ```bash
 cmake -S rb_servo_server -B rb_servo_server/build/pinocchio_gate \
   -DCMAKE_BUILD_TYPE=Debug \
   -DRB_SERVO_ENABLE_RBPODO=OFF \
-  -DRB_SERVO_ENABLE_PINOCCHIO=ON \
   -DRB_SERVO_ALLOW_FETCHCONTENT=OFF \
   -DBUILD_TESTING=ON
 cmake --build rb_servo_server/build/pinocchio_gate -j
@@ -52,7 +61,6 @@ Run dependency preflight:
 
 ```bash
 ./scripts/check_deps.sh --profile hardware-free
-./scripts/check_deps.sh --profile kinematics
 ```
 
 ## Run All Scenarios
@@ -74,6 +82,7 @@ bash scripts/tcp_pose_simulator_acceptance.sh --run-ptp
 bash scripts/tcp_pose_simulator_acceptance.sh --run-linear
 bash scripts/tcp_pose_simulator_acceptance.sh --run-twist-local
 bash scripts/tcp_pose_simulator_acceptance.sh --run-twist-stand
+bash scripts/tcp_pose_simulator_acceptance.sh --run-near-pi-ptp
 ```
 
 Useful flags:
@@ -84,6 +93,7 @@ Useful flags:
 --linear-duration-sec SEC
 --orientation-tolerance-rad RAD
 --line-tolerance-m M
+--run-near-pi-ptp          # optional near-pi TcpPoseTarget orientation scenario
 --skip-estop-reset
 --allow-missing-pinocchio   # preflight only; does not fake runtime acceptance
 ```
@@ -99,6 +109,9 @@ Expected behavior:
 - no fault latch
 
 This scenario verifies final-pose targeting, not MoveL behavior.
+
+Optional near-pi PTP acceptance can be run with `--run-near-pi-ptp`. It targets
+a rotation of approximately `pi - 1e-6` radians and is simulator-only evidence.
 
 ## Scenario B: `TcpLinearMove` Constant Orientation
 
@@ -178,7 +191,10 @@ path_samples_right.csv
 - pass/fail per scenario
 - max position error
 - max orientation error
+- max path orientation error
 - max line deviation
+- max twist orientation drift
+- whether near-pi C++ math tests ran
 - max path tracking error
 - max IK / Cartesian duration
 - faults, if any

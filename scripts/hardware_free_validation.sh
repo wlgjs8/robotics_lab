@@ -65,13 +65,12 @@ cmake \
 cmake --build "${CAMERA_BUILD_DIR}" -j "${JOBS}"
 run_ctest_with_retry "${CAMERA_BUILD_DIR}"
 
-echo "hardware-free gate: rb_servo mock-only CMake + CTest, including GUI unittest discovery"
+echo "hardware-free gate: rb_servo mandatory Pinocchio/Eigen CMake + CTest, including GUI unittest discovery"
 cmake \
   -S "${ROOT_DIR}/rb_servo_server" \
   -B "${RB_SERVO_BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE=Debug \
   -DRB_SERVO_ENABLE_RBPODO=OFF \
-  -DRB_SERVO_ENABLE_PINOCCHIO=OFF \
   -DRB_SERVO_ALLOW_FETCHCONTENT=OFF \
   -DBUILD_TESTING=ON \
   "${cmake_prefix_args[@]}"

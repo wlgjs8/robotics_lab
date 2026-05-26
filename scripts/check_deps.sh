@@ -9,10 +9,10 @@ usage() {
 Usage: scripts/check_deps.sh --profile <hardware-free|real-camera|real-robot|kinematics>
 
 Profiles:
-  hardware-free  local mock/stub validation: CMake, C++17, Python, yaml-cpp, nlohmann_json
+  hardware-free  local mock/stub validation: CMake, C++17, Python, yaml-cpp, nlohmann_json, Eigen3, Pinocchio
   real-camera    RealSense capture readiness: CMake, C++17, yaml-cpp, librealsense2, libzmq
   real-robot     RB controller SDK readiness: hardware-free basics plus rbpodo SDK/package
-  kinematics     FK/IK readiness: CMake, C++17, Eigen3, Pinocchio
+  kinematics     alias for rb_servo_server Cartesian math readiness: Eigen3, Pinocchio
 
 These profiles check dependencies only. They do not enable real robot
 connection, real motion, RealSense capture, or Cartesian motion gates.
@@ -69,6 +69,8 @@ if [[ -n "${CMAKE_PREFIX_PATH:-}" ]]; then
   cmake_prefix_args=(-DCMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}")
 elif [[ -d "${HOME}/miniconda3/share/cmake/nlohmann_json" || -d "${HOME}/miniconda3/lib/cmake/nlohmann_json" ]]; then
   cmake_prefix_args=(-DCMAKE_PREFIX_PATH="${HOME}/miniconda3")
+elif [[ -d "/opt/openrobots" ]]; then
+  cmake_prefix_args=(-DCMAKE_PREFIX_PATH="/opt/openrobots")
 fi
 
 check_cxx17() {
@@ -110,7 +112,7 @@ project(check_${package_name} LANGUAGES CXX)
 find_package(${package_name} REQUIRED)
 EOF
   if ! cmake -S "${tmpdir}" -B "${tmpdir}/build" "${cmake_prefix_args[@]}" >/dev/null 2>&1; then
-    add_failure "missing CMake package '${package_name}'. ${hint}"
+    add_failure "Missing CMake package: ${package_name}. ${hint}"
   fi
   rm -rf "${tmpdir}"
 }
@@ -150,6 +152,8 @@ check_hardware_free() {
   check_python
   check_cmake_package yaml-cpp "Ubuntu: sudo apt-get install libyaml-cpp-dev"
   check_cmake_package nlohmann_json "Ubuntu: sudo apt-get install nlohmann-json3-dev, or set CMAKE_PREFIX_PATH."
+  check_cmake_package Eigen3 "Ubuntu: sudo apt-get install libeigen3-dev"
+  check_cmake_package pinocchio "Ubuntu apt package if available: sudo apt-get install pinocchio-dev. Otherwise install via conda/mamba or from source, then set CMAKE_PREFIX_PATH."
 }
 
 check_real_camera() {
@@ -170,10 +174,7 @@ check_real_robot() {
 }
 
 check_kinematics() {
-  require_command cmake "Install cmake."
-  check_cxx17
-  check_cmake_package Eigen3 "Ubuntu: sudo apt-get install libeigen3-dev"
-  check_cmake_package pinocchio "Install Pinocchio and set CMAKE_PREFIX_PATH when it is outside the system prefix."
+  check_hardware_free
 }
 
 case "${PROFILE}" in

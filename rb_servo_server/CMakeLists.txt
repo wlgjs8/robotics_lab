@@ -9,6 +9,10 @@ option(RB_SERVO_ENABLE_RBPODO "Enable rbpodo backend" OFF)
 option(RB_SERVO_ENABLE_PINOCCHIO "Enable Pinocchio FK/IK support" ON)
 option(RB_SERVO_ALLOW_FETCHCONTENT "Allow CMake to download missing build dependencies" ON)
 
+if(NOT RB_SERVO_ENABLE_PINOCCHIO)
+    message(FATAL_ERROR "Disabling Pinocchio is no longer supported. rb_servo_server Cartesian math requires Eigen3 and Pinocchio.")
+endif()
+
 add_library(rb_servo_core
     src/core/types.cpp
     src/core/clock.cpp
@@ -30,6 +34,7 @@ add_library(rb_servo_core
     src/control/cartesian_controller.cpp
     src/control/cartesian_servo_controller.cpp
     src/control/cartesian_trajectory_planner.cpp
+    src/math/se3.cpp
     src/control/force_controller.cpp
     src/control/dual_arm_servo_loop.cpp
     src/network/command_server.cpp
@@ -60,20 +65,25 @@ endif()
 
 find_package(yaml-cpp REQUIRED)
 find_package(Threads REQUIRED)
-target_link_libraries(rb_servo_core PUBLIC Threads::Threads nlohmann_json::nlohmann_json yaml-cpp)
+if(IS_DIRECTORY "/opt/openrobots")
+    list(APPEND CMAKE_PREFIX_PATH "/opt/openrobots")
+endif()
+find_package(Eigen3 REQUIRED)
+find_package(pinocchio REQUIRED)
+target_link_libraries(
+    rb_servo_core
+    PUBLIC
+        Threads::Threads
+        nlohmann_json::nlohmann_json
+        yaml-cpp
+        Eigen3::Eigen
+        pinocchio::pinocchio
+)
+target_compile_definitions(rb_servo_core PUBLIC RB_SERVO_ENABLE_PINOCCHIO=1)
 
 if(RB_SERVO_ENABLE_RBPODO)
     find_package(rbpodo REQUIRED)
     target_link_libraries(rb_servo_core PUBLIC rbpodo::rbpodo)
-endif()
-
-if(RB_SERVO_ENABLE_PINOCCHIO)
-    if(IS_DIRECTORY "/opt/openrobots")
-        list(APPEND CMAKE_PREFIX_PATH "/opt/openrobots")
-    endif()
-    find_package(pinocchio REQUIRED)
-    target_link_libraries(rb_servo_core PUBLIC pinocchio::pinocchio)
-    target_compile_definitions(rb_servo_core PUBLIC RB_SERVO_ENABLE_PINOCCHIO=1)
 endif()
 
 add_executable(rb_servo_server src/main.cpp)
@@ -112,6 +122,10 @@ if(BUILD_TESTING)
     add_executable(test_kinematics_ik tests/test_kinematics_ik.cpp)
     target_link_libraries(test_kinematics_ik PRIVATE rb_servo_core)
     add_test(NAME kinematics_ik COMMAND test_kinematics_ik)
+
+    add_executable(test_se3_math tests/test_se3_math.cpp)
+    target_link_libraries(test_se3_math PRIVATE rb_servo_core)
+    add_test(NAME se3_math COMMAND test_se3_math)
 
     add_executable(test_cartesian_planner tests/test_cartesian_planner.cpp)
     target_link_libraries(test_cartesian_planner PRIVATE rb_servo_core)

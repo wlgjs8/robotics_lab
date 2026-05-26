@@ -11,6 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 spacemouse = ["hidapi", "pyspacemouse"]
+ml = ["torch>=2.0"]
 
 [project.scripts]
 policy-runner = "policy_runner.main:main"

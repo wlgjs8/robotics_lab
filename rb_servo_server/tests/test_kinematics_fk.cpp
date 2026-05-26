@@ -364,31 +364,7 @@ bool testIkRemainsUnavailable() {
     return true;
 }
 
-bool testDisabledBuildBehavior() {
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
-    return true;
-#else
-    RB_CHECK(!rb_servo::PinocchioKinematics::isAvailable());
-    rb_servo::KinematicsConfig cfg;
-    cfg.enable = true;
-    cfg.provider = "pinocchio";
-    cfg.urdf = rb3Urdf().string();
-    rb_servo::PinocchioKinematics kin(cfg);
-    bool threw = false;
-    try {
-        (void)kin.computeTcpBase(rb_servo::JointArray{});
-    } catch (const std::exception&) {
-        threw = true;
-    }
-    RB_CHECK(threw);
-    return true;
-#endif
-}
-
-bool testPinocchioFkIfEnabled() {
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
-    RB_CHECK(rb_servo::PinocchioKinematics::isAvailable());
-
+bool testPinocchioFk() {
     rb_servo::KinematicsConfig cfg;
     cfg.enable = true;
     cfg.provider = "pinocchio";
@@ -445,7 +421,6 @@ bool testPinocchioFkIfEnabled() {
         bad_joint_threw = true;
     }
     RB_CHECK(bad_joint_threw);
-#endif
     return true;
 }
 
@@ -581,9 +556,8 @@ int main() {
     if (!testKinematicsConfigValidation()) return 1;
     if (!testTcpAcceptanceConfigContract()) return 1;
     if (!testIkRemainsUnavailable()) return 1;
-    if (!testDisabledBuildBehavior()) return 1;
     if (!testConfiguredMountNormals()) return 1;
-    if (!testPinocchioFkIfEnabled()) return 1;
+    if (!testPinocchioFk()) return 1;
     if (!testStatePublisherSerializesTcpPoseValidity()) return 1;
     if (!testStatePublisherKeepsTcpDeferredWhenFkDisabled()) return 1;
     if (!testServoLoopPublishesInjectedFkForValidJointState()) return 1;

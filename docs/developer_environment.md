@@ -16,7 +16,9 @@ sudo apt-get install -y \
   python3-venv \
   python3-pip \
   libyaml-cpp-dev \
-  nlohmann-json3-dev
+  nlohmann-json3-dev \
+  libeigen3-dev \
+  pinocchio-dev
 ```
 
 Then run:
@@ -31,17 +33,22 @@ If your CMake packages are installed in a non-standard prefix, set:
 export CMAKE_PREFIX_PATH=/path/to/prefix:$CMAKE_PREFIX_PATH
 ```
 
-## Optional Kinematics Dependencies
+## Cartesian Math Dependencies
 
-Pinocchio is required for FK/IK-enabled Cartesian runtime acceptance.
+Eigen3 and Pinocchio are mandatory for `rb_servo_server` C++ builds.
+Cartesian FK/IK, orientation interpolation, frame conversion, and SE(3) delta
+math delegate to Eigen/Pinocchio. There is no supported custom-math fallback
+when Pinocchio is missing.
 
 Check availability:
 
 ```bash
-./scripts/check_deps.sh --profile kinematics
+./scripts/check_deps.sh --profile hardware-free
 ```
 
-If Pinocchio is installed in a custom prefix, set `CMAKE_PREFIX_PATH` before building.
+If `pinocchio-dev` is not available through apt, install Pinocchio through
+conda/mamba, robotpkg, or from source. If Pinocchio is installed in a custom
+prefix, set `CMAKE_PREFIX_PATH` before building.
 
 ## Python Checks
 
@@ -60,9 +67,22 @@ python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner rb_simu
 
 When dependencies are missing, the gate may skip C++ checks only if explicitly configured to do so. Do not report skipped C++ checks as passed C++ acceptance.
 
+## Cartesian Math Acceptance
+
+Run the Pinocchio-backed Cartesian math rebaseline gate:
+
+```bash
+./scripts/codex_gate.sh CART-MATH-03
+```
+
+This runs the Python suites and the mandatory `rb_servo_server` C++ Pinocchio
+gate, including near-pi SO(3), quaternion convention, body-error convention, and
+stand/local frame-conversion tests. Missing Pinocchio is a dependency failure
+unless an explicit temporary skip variable is set.
+
 ## Cartesian Simulator Acceptance
 
-After C++ and Pinocchio dependencies are available:
+After C++ dependencies are available:
 
 ```bash
 CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05

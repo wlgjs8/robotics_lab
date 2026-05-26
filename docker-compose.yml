@@ -119,6 +119,121 @@ services:
       rb-servo.hardware: "none"
       rb-servo.ova: "not-used"
 
+  policy_runner_record:
+    build:
+      context: .
+      dockerfile: policy_runner/docker/policy_runner.Dockerfile
+      target: runtime
+    image: robotics_lab/policy_runner:dev
+    command:
+      [
+        "record",
+        "--state-bind",
+        "udp://0.0.0.0:50120",
+        "--output-dir",
+        "/data/policy_episodes",
+      ]
+    init: true
+    networks:
+      rb_servo_net:
+        aliases:
+          - policy_runner_state_sink
+    depends_on:
+      rb_servo_server:
+        condition: service_started
+    volumes:
+      - ./policy_runner/episodes:/data/policy_episodes
+    labels:
+      rb-servo.role: "hardware-free-policy-recorder"
+      rb-servo.hardware: "none"
+
+  policy_runner_teleop_record:
+    profiles: ["teleop"]
+    build:
+      context: .
+      dockerfile: policy_runner/docker/policy_runner.Dockerfile
+      target: runtime
+    image: robotics_lab/policy_runner:dev
+    command:
+      [
+        "teleop-record",
+        "--config",
+        "policy_runner/config/simulator_dual_spacemouse_cartesian_compose.yaml",
+        "--output-dir",
+        "/data/policy_episodes",
+      ]
+    init: true
+    networks:
+      rb_servo_net:
+        aliases:
+          - policy_runner_state_sink
+    depends_on:
+      rb_servo_server:
+        condition: service_started
+    devices:
+      - /dev/hidraw1:/dev/hidraw1
+      - /dev/hidraw6:/dev/hidraw6
+    volumes:
+      - ./policy_runner/episodes:/data/policy_episodes
+    labels:
+      rb-servo.role: "hardware-free-policy-teleop-recorder"
+      rb-servo.hardware: "spacemouse"
+
+  policy_train:
+    profiles: ["ml"]
+    build:
+      context: .
+      dockerfile: policy_runner/docker/policy_runner.Dockerfile
+      target: cuda-ml
+    image: robotics_lab/policy_runner:cuda-ml
+    command:
+      [
+        "train",
+        "--episodes-dir",
+        "/data/policy_episodes",
+        "--checkpoint",
+        "/data/checkpoints/bc_state_to_twist.pt",
+      ]
+    init: true
+    gpus: all
+    networks: [rb_servo_net]
+    volumes:
+      - ./policy_runner/episodes:/data/policy_episodes:ro
+      - ./policy_runner/checkpoints:/data/checkpoints
+    labels:
+      rb-servo.role: "hardware-free-policy-train"
+      rb-servo.hardware: "gpu"
+
+  policy_runner_infer:
+    profiles: ["infer"]
+    build:
+      context: .
+      dockerfile: policy_runner/docker/policy_runner.Dockerfile
+      target: cuda-ml
+    image: robotics_lab/policy_runner:cuda-ml
+    command:
+      [
+        "infer",
+        "--config",
+        "policy_runner/config/simulator_dual_spacemouse_cartesian_compose.yaml",
+        "--checkpoint",
+        "/data/checkpoints/bc_state_to_twist.pt",
+      ]
+    init: true
+    gpus: all
+    networks:
+      rb_servo_net:
+        aliases:
+          - policy_runner_state_sink
+    depends_on:
+      rb_servo_server:
+        condition: service_started
+    volumes:
+      - ./policy_runner/checkpoints:/data/checkpoints:ro
+    labels:
+      rb-servo.role: "hardware-free-policy-infer"
+      rb-servo.hardware: "gpu"
+
   camera_server_mock:
     profiles: ["mock_camera"]
     build:

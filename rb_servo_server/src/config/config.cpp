@@ -398,6 +398,12 @@ void validateConfig(const DualArmConfig& cfg) {
     if (cfg.network.state_pub_endpoint != cfg.network.state_pub_bind) {
         throw std::runtime_error("network.state_pub_endpoint and deprecated state_pub_bind must be synchronized");
     }
+    if (cfg.network.state_pub_endpoints.empty()) {
+        throw std::runtime_error("network.state_pub_endpoints must not be empty");
+    }
+    if (cfg.network.state_pub_endpoints.front() != cfg.network.state_pub_endpoint) {
+        throw std::runtime_error("network.state_pub_endpoint must match first network.state_pub_endpoints entry");
+    }
 
     const std::string force_provider = lower(cfg.force_control.provider);
     if (!(force_provider == "null" || force_provider == "none" || force_provider.empty())) {
@@ -537,8 +543,11 @@ void validateConfig(const DualArmConfig& cfg) {
         if (!cfg.safety.latch_fault_on_robot_state_error) {
             throw std::runtime_error("Refusing real mode without latch_fault_on_robot_state_error=true.");
         }
-        if (bindRequiresExposureOverride(cfg.network.command_bind) ||
-            bindRequiresExposureOverride(cfg.network.state_pub_endpoint)) {
+        bool exposed_network = bindRequiresExposureOverride(cfg.network.command_bind);
+        for (const std::string& endpoint : cfg.network.state_pub_endpoints) {
+            exposed_network = exposed_network || bindRequiresExposureOverride(endpoint);
+        }
+        if (exposed_network) {
             const char* allow_network = std::getenv("RB_ALLOW_NETWORK_EXPOSURE");
             if (!allow_network || std::string(allow_network) != "1") {
                 throw std::runtime_error("Refusing exposed network bind in real mode. Set RB_ALLOW_NETWORK_EXPOSURE=1.");
@@ -709,19 +718,33 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         validateAllowedKeys(sec, {
             "command_bind",
             "state_pub_endpoint",
+            "state_pub_endpoints",
             "state_pub_bind",
             "state_pub_rate_hz",
             "command_source_allowlist",
         }, "network");
         cfg.network.command_bind = getString(sec, "command_bind", cfg.network.command_bind, "network");
+        if (has(sec, "state_pub_endpoints") && (has(sec, "state_pub_endpoint") || has(sec, "state_pub_bind"))) {
+            fail("network.state_pub_endpoints cannot be combined with state_pub_endpoint or deprecated state_pub_bind", sec["state_pub_endpoints"]);
+        }
         if (has(sec, "state_pub_endpoint") && has(sec, "state_pub_bind")) {
             fail("network cannot set both state_pub_endpoint and deprecated state_pub_bind", sec["state_pub_bind"]);
         }
-        if (has(sec, "state_pub_endpoint")) {
+        if (has(sec, "state_pub_endpoints")) {
+            cfg.network.state_pub_endpoints = asStringArray(sec["state_pub_endpoints"], "network.state_pub_endpoints");
+            if (cfg.network.state_pub_endpoints.empty()) {
+                fail("network.state_pub_endpoints must not be empty", sec["state_pub_endpoints"]);
+            }
+            cfg.network.state_pub_endpoint = cfg.network.state_pub_endpoints.front();
+        } else if (has(sec, "state_pub_endpoint")) {
             cfg.network.state_pub_endpoint = asString(sec["state_pub_endpoint"], "network.state_pub_endpoint");
+            cfg.network.state_pub_endpoints = {cfg.network.state_pub_endpoint};
         } else if (has(sec, "state_pub_bind")) {
             warnDeprecatedKey("network.state_pub_bind", "network.state_pub_endpoint");
             cfg.network.state_pub_endpoint = asString(sec["state_pub_bind"], "network.state_pub_bind");
+            cfg.network.state_pub_endpoints = {cfg.network.state_pub_endpoint};
+        } else {
+            cfg.network.state_pub_endpoints = {cfg.network.state_pub_endpoint};
         }
         cfg.network.state_pub_bind = cfg.network.state_pub_endpoint;
         if (has(sec, "state_pub_rate_hz")) cfg.network.state_pub_rate_hz = asInt(sec["state_pub_rate_hz"], "network.state_pub_rate_hz");
@@ -730,6 +753,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         }
     } else {
         cfg.network.state_pub_bind = cfg.network.state_pub_endpoint;
+        cfg.network.state_pub_endpoints = {cfg.network.state_pub_endpoint};
     }
     cfg.network.command_timeout_sec = cfg.servo.command_timeout_sec;
 

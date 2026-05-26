@@ -37,6 +37,7 @@ mock/simulation에서 지원되는 항목:
 - mock/simulation용 GUI viewer/operator console
 - `policy_runner` joint 및 Cartesian simulator action source
 - simulator-only Cartesian acceptance script
+- mandatory Eigen3/Pinocchio C++ Cartesian math path for `rb_servo_server`
 
 아직 production-ready가 아닌 항목:
 
@@ -143,6 +144,17 @@ Hardware-free gate:
 ./scripts/codex_gate.sh HARDEN-10
 ```
 
+`rb_servo_server` C++ builds require Eigen3 and Pinocchio. Cartesian FK/IK,
+orientation interpolation, frame conversion, and SE(3) delta math delegate to
+Eigen/Pinocchio. Missing Pinocchio is a missing C++ dependency, not a fallback
+runtime mode.
+
+Cartesian math rebaseline:
+
+```bash
+./scripts/codex_gate.sh CART-MATH-03
+```
+
 Cartesian simulator acceptance:
 
 ```bash
@@ -153,6 +165,18 @@ CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 
 ```bash
 make sim-up
+```
+
+`make sim-up` also starts a passive `policy_runner` recorder. It writes
+robot-state JSONL episodes to `policy_runner/episodes` and does not send motion
+commands.
+
+SpaceMouse teleop data collection and policy inference are explicit modes:
+
+```bash
+make sim-teleop-up
+make policy-train
+make sim-infer-up
 ```
 
 접속:

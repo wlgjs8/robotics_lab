@@ -111,12 +111,14 @@ class ServoCommandClient:
         socket_factory: Callable[..., socket.socket] = socket.socket,
         source_id: str = "policy_runner",
         session_id: str | None = None,
+        packet_sink: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.endpoint = endpoint
         self.timeout_sec = timeout_sec
         self.source_id = source_id
         self.session_id = session_id or uuid.uuid4().hex
         self.lease_token: str | None = None
+        self._packet_sink = packet_sink
         self._seq = 0
         self._socket = socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
         parsed = parse_udp_endpoint(endpoint)
@@ -134,6 +136,8 @@ class ServoCommandClient:
         payload = self.build_packet(intent, self._seq)
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self._socket.sendto(data, self._address)
+        if self._packet_sink is not None:
+            self._packet_sink(payload)
         return self._seq
 
     def acquire_lease(

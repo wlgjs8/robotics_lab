@@ -31,6 +31,7 @@ Supported for mock/simulation work:
 - simulator direct and worker I/O modes
 - FK/TCP state publication with quaternion fields
 - simulator-only Cartesian PTP, Linear, and Twist commands
+- mandatory Eigen3/Pinocchio-backed Cartesian math in `rb_servo_server`
 - mock camera server
 - GUI viewer/operator console for mock/simulation
 - Python policy_runner with joint and Cartesian simulator action sources
@@ -204,6 +205,10 @@ CommandBuffer
 - fault latching
 - dual-arm result aggregation
 - state publication
+
+`rb_servo_server` C++ builds require Eigen3 and Pinocchio. Cartesian FK/IK,
+orientation interpolation, frame conversion, and nontrivial SO(3)/SE(3)
+operations must use Eigen/Pinocchio instead of local fallback math.
 
 `ArmWorker` owns blocking per-arm backend I/O in worker mode. Worker mode is simulator-only until separate real-hardware acceptance exists.
 

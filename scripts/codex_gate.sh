@@ -20,6 +20,8 @@ cmake_prefix_args() {
     printf '%s\n' "-DCMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}"
   elif [[ -d "${HOME}/miniconda3/share/cmake/nlohmann_json" || -d "${HOME}/miniconda3/lib/cmake/nlohmann_json" ]]; then
     printf '%s\n' "-DCMAKE_PREFIX_PATH=${HOME}/miniconda3"
+  elif [[ -d "/opt/openrobots" ]]; then
+    printf '%s\n' "-DCMAKE_PREFIX_PATH=/opt/openrobots"
   fi
 }
 
@@ -44,8 +46,12 @@ EOF_CMAKE
   return 1
 }
 
-cpp_hardware_free_deps_available() {
+cpp_base_deps_available() {
   cmake_package_available yaml-cpp && cmake_package_available nlohmann_json
+}
+
+rb_servo_cpp_deps_available() {
+  cpp_base_deps_available && cmake_package_available Eigen3 && cmake_package_available pinocchio
 }
 
 run_ctest_with_retry() {
@@ -64,7 +70,6 @@ run_servo_gate() {
   cmake -S rb_servo_server -B rb_servo_server/build/hardware_free_gate \
     -DCMAKE_BUILD_TYPE=Debug \
     -DRB_SERVO_ENABLE_RBPODO=OFF \
-    -DRB_SERVO_ENABLE_PINOCCHIO=OFF \
     -DRB_SERVO_ALLOW_FETCHCONTENT=OFF \
     -DBUILD_TESTING=ON \
     "${args[@]}"
@@ -74,35 +79,32 @@ run_servo_gate() {
 }
 
 run_servo_gate_or_skip_missing_deps() {
-  if cpp_hardware_free_deps_available; then
+  if rb_servo_cpp_deps_available; then
     run_servo_gate
     return 0
   fi
 
   if [[ "${CODEX_SKIP_MISSING_CPP_DEPS:-0}" == "1" ]]; then
-    echo "codex_gate: skipping rb_servo_server C++ gate; yaml-cpp or nlohmann_json CMake package is missing"
+    echo "codex_gate: skipping rb_servo_server C++ gate; required CMake package missing: yaml-cpp, nlohmann_json, Eigen3, or pinocchio"
     return 0
   fi
 
-  echo "ERROR: missing rb_servo_server C++ dependencies: yaml-cpp and/or nlohmann_json" >&2
-  echo "Install on Ubuntu: sudo apt-get install -y libyaml-cpp-dev nlohmann-json3-dev" >&2
+  echo "ERROR: missing rb_servo_server C++ dependencies: yaml-cpp, nlohmann_json, Eigen3, and pinocchio are required" >&2
+  echo "Install on Ubuntu when packages are available: sudo apt-get install -y libyaml-cpp-dev nlohmann-json3-dev libeigen3-dev pinocchio-dev" >&2
+  echo "For Pinocchio from conda/mamba, robotpkg, or source, set CMAKE_PREFIX_PATH to the install prefix." >&2
   echo "Or rerun with CODEX_SKIP_MISSING_CPP_DEPS=1 to skip C++ gates temporarily." >&2
   return 1
 }
 
-run_optional_pinocchio_gate() {
-  if ! cpp_hardware_free_deps_available; then
+run_servo_pinocchio_gate() {
+  if ! rb_servo_cpp_deps_available; then
     if [[ "${CODEX_SKIP_MISSING_CPP_DEPS:-0}" == "1" ]]; then
-      echo "codex_gate: skipping optional Pinocchio gate; base C++ deps missing"
+      echo "codex_gate: skipping mandatory rb_servo_server Pinocchio gate; required CMake package missing"
       return 0
     fi
-    echo "ERROR: cannot run Pinocchio gate because base C++ deps are missing" >&2
+    echo "ERROR: cannot run rb_servo_server Pinocchio gate because required C++ deps are missing" >&2
+    echo "Missing CMake package: pinocchio" >&2
     return 1
-  fi
-
-  if ! cmake_package_available pinocchio; then
-    echo "codex_gate: skipping optional Pinocchio ON gate; CMake package pinocchio not found"
-    return 0
   fi
 
   local args=()
@@ -111,7 +113,6 @@ run_optional_pinocchio_gate() {
   cmake -S rb_servo_server -B rb_servo_server/build/pinocchio_gate \
     -DCMAKE_BUILD_TYPE=Debug \
     -DRB_SERVO_ENABLE_RBPODO=OFF \
-    -DRB_SERVO_ENABLE_PINOCCHIO=ON \
     -DRB_SERVO_ALLOW_FETCHCONTENT=OFF \
     -DBUILD_TESTING=ON \
     "${args[@]}"
@@ -132,7 +133,7 @@ run_camera_gate() {
 }
 
 run_camera_gate_or_skip_missing_deps() {
-  if cpp_hardware_free_deps_available; then
+  if cpp_base_deps_available; then
     run_camera_gate
     return 0
   fi
@@ -242,8 +243,13 @@ grep_absent() {
 
 run_optional_tcp_pose_acceptance() {
   if ! cmake_package_available pinocchio; then
-    echo "codex_gate: skipping simulator TCP pose acceptance; CMake package pinocchio not found"
-    return 0
+    if [[ "${CODEX_SKIP_MISSING_CPP_DEPS:-0}" == "1" ]]; then
+      echo "codex_gate: skipping simulator TCP pose acceptance; Missing CMake package: pinocchio"
+      return 0
+    fi
+    echo "ERROR: simulator TCP pose acceptance requires Pinocchio" >&2
+    echo "Missing CMake package: pinocchio" >&2
+    return 1
   fi
 
   if ! loopback_socket_available; then
@@ -264,7 +270,26 @@ run_cart_harden_05_gate() {
   grep_existing "path_s|path_line_deviation_m|orientation preservation|quaternion" \
     docs/runbooks/tcp_pose_simulator_acceptance.md rb_servo_server/docs/network_protocol.md
   if [[ "${CODEX_RUN_CARTESIAN_ACCEPTANCE:-0}" == "1" ]]; then
-    run_optional_pinocchio_gate
+    run_servo_pinocchio_gate
+    ./scripts/tcp_pose_simulator_acceptance.sh --all
+  else
+    echo "codex_gate: skipping full Cartesian simulator acceptance; set CODEX_RUN_CARTESIAN_ACCEPTANCE=1 to enable"
+  fi
+}
+
+run_cart_math_gate() {
+  run_shell_syntax_checks
+  run_python_compile_checks
+  run_simulator_tests
+  run_gui_tests
+  run_policy_runner_tests
+  local pinocchio_var
+  local forbidden_pinocchio_off
+  pinocchio_var='RB_SERVO_ENABLE_PINOCCHIO'
+  forbidden_pinocchio_off="-D${pinocchio_var}=OFF"
+  grep_absent "${forbidden_pinocchio_off}" scripts rb_servo_server README.md docs AGENTS.md REVIEW.md
+  run_servo_pinocchio_gate
+  if [[ "${CODEX_RUN_CARTESIAN_ACCEPTANCE:-0}" == "1" ]]; then
     ./scripts/tcp_pose_simulator_acceptance.sh --all
   else
     echo "codex_gate: skipping full Cartesian simulator acceptance; set CODEX_RUN_CARTESIAN_ACCEPTANCE=1 to enable"
@@ -340,7 +365,7 @@ check_dev_env_docs() {
 run_p3f_gate() {
   run_shell_syntax_checks
   grep_existing "RB_ALLOW_REAL_CARTESIAN" docs/runbooks/tcp_pose_simulator_acceptance.md README.md rb_servo_server/docs
-  run_optional_pinocchio_gate
+  run_servo_pinocchio_gate
   run_optional_tcp_pose_acceptance
 }
 
@@ -353,7 +378,7 @@ run_mig12_gate() {
   run_gui_tests
   run_policy_runner_tests
   run_servo_gate_or_skip_missing_deps
-  run_optional_pinocchio_gate
+  run_servo_pinocchio_gate
 }
 
 run_mig13_gate() {
@@ -365,7 +390,7 @@ run_mig13_gate() {
 run_mig20_gate() {
   run_shell_syntax_checks
   run_servo_gate_or_skip_missing_deps
-  run_optional_pinocchio_gate
+  run_servo_pinocchio_gate
 }
 
 run_mig26_gate() {
@@ -394,7 +419,7 @@ run_mig26_gate() {
   else
     echo "codex_gate: skipping full hardware_free_validation.sh; set CODEX_RUN_FULL_SMOKE=1 to enable"
   fi
-  run_optional_pinocchio_gate
+  run_servo_pinocchio_gate
   if [[ "${CODEX_RUN_TCP_ACCEPTANCE:-0}" == "1" ]]; then
     run_optional_tcp_pose_acceptance
   else
@@ -517,7 +542,7 @@ case "$TASK" in
     run_shell_syntax_checks
     check_tcp_pose_docs
     run_servo_gate_or_skip_missing_deps
-    run_optional_pinocchio_gate
+    run_servo_pinocchio_gate
     run_optional_tcp_pose_acceptance
     ;;
   HARDEN-07)
@@ -545,6 +570,9 @@ case "$TASK" in
     ;;
   CART-HARDEN-05)
     run_cart_harden_05_gate
+    ;;
+  CART-MATH-01|CART-MATH-02|CART-MATH-03)
+    run_cart_math_gate
     ;;
 
   *)

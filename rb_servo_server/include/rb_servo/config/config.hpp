@@ -116,6 +116,7 @@ struct NetworkConfig {
     std::string state_pub_endpoint = "udp://127.0.0.1:50110";
     // Deprecated compatibility alias. Keep synchronized with state_pub_endpoint.
     std::string state_pub_bind = "udp://127.0.0.1:50110";
+    std::vector<std::string> state_pub_endpoints{"udp://127.0.0.1:50110"};
     int state_pub_rate_hz = 20;
     std::vector<std::string> command_source_allowlist{"127.0.0.1/32"};
     double command_timeout_sec = 0.2;

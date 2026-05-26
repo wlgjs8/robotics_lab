@@ -103,6 +103,35 @@ Simulation-only example configs:
 These examples use loopback simulator endpoints and do not enable real motion
 or real Cartesian motion.
 
+## Imitation Data Collection
+
+The Docker simulator stack can run a passive policy recorder with `make sim-up`.
+The recorder receives the `rb_servo_server` state stream and writes JSONL
+episodes under `policy_runner/episodes` without sending commands.
+
+SpaceMouse teleop collection is an explicit mode because it sends simulator
+motion commands:
+
+```bash
+make sim-teleop-up
+```
+
+This uses `policy_runner/config/simulator_dual_spacemouse_cartesian_compose.yaml`
+and records both `robot_state.jsonl` and `actions.jsonl` in the same episode.
+The default HID paths are `/dev/hidraw1` for the left SpaceMouse and
+`/dev/hidraw6` for the right SpaceMouse.
+
+Train and run the V1 behavior-cloning baseline with:
+
+```bash
+make policy-train
+make sim-infer-up
+```
+
+The V1 dataset is robot-state plus policy-command JSONL only. Camera/image
+episodes remain a later merge step using camera timestamps and robot state
+timestamps.
+
 ## SpaceMouse Joint Velocity
 
 SpaceMouse support belongs in `policy_runner`, not `rb_gui`. P1 only maps the
@@ -205,15 +234,14 @@ spacemouse_cartesian_dual:
   deadband: 0.08
   left:
     device_number: 0
-    deadman_button: 0
   right:
     device_number: 1
-    deadman_button: 0
 ```
 
-Each arm has its own deadman. If one device has no fresh sample or its deadman
-is released, that arm is held while the other arm may continue. Use `path` or
-`device` under each side when stable HID selection is needed.
+Dual SpaceMouse Cartesian control does not use a deadman button; axis motion
+alone emits TCP twist commands. If one device has no fresh sample or only
+deadbanded axes, that arm is held while the other arm may continue. Use `path`
+or `device` under each side when stable HID selection is needed.
 
 `policy_runner` does not generate `TcpLinearMove` trajectories. Use
 `rb_servo_server/tools/send_tcp_linear_move.py` for simulator-only MoveL-style

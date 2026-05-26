@@ -23,6 +23,7 @@ This review reflects the repository after the simulator-first Cartesian hardenin
 - policy_runner SpaceMouse Cartesian through `TcpTwistLocal`
 - simulator-only Cartesian acceptance scripts
 - mock camera and camera acceptance runbooks
+- mandatory Eigen3/Pinocchio-backed Cartesian math in `rb_servo_server`
 
 ### Not Production-Ready
 
@@ -81,7 +82,7 @@ Meaning: MoveL-like Cartesian path primitive. The TCP position reference should 
 
 Review requirements before real work:
 
-- full Pinocchio-enabled simulator acceptance must pass
+- full mandatory-Pinocchio simulator acceptance must pass
 - `path_done` telemetry must remain visible long enough for state subscribers
 - path line deviation must be checked over sampled state, not only final pose
 - orientation deviation must be checked over sampled state
@@ -122,6 +123,12 @@ Expected C++ hardware-free gate after dependencies are installed:
 ./scripts/codex_gate.sh HARDEN-10
 ```
 
+Expected Cartesian math rebaseline after Pinocchio is installed:
+
+```bash
+./scripts/codex_gate.sh CART-MATH-03
+```
+
 Expected Cartesian simulator acceptance after Pinocchio is installed:
 
 ```bash
@@ -131,7 +138,7 @@ CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 ## Open Review Items Before Real Robot
 
 1. Full C++ hardware-free gate must pass on the development machine.
-2. Pinocchio-enabled C++ gate must pass.
+2. Mandatory Eigen3/Pinocchio Cartesian math gate must pass.
 3. Full Cartesian simulator acceptance must pass repeatedly.
 4. `TcpLinearMove path_done` telemetry must be robust against state publish rate.
 5. Constant-orientation mismatch semantics must be explicit and tested.

@@ -20,6 +20,7 @@ from rb_servo_gui.app import (
     _angular_step_radians,
     _format_cartesian_solve_status,
     _format_fk_status,
+    _format_joint_monitor_value,
     _format_joints,
     _joint_cfg_radians,
     _joint_marker_position,
@@ -37,6 +38,8 @@ from rb_servo_gui.app import (
     _tcp_frame_mode,
     _tcp_target_pose,
     _tcp_target_wxyz,
+    _update_joint_monitor,
+    _update_joint_monitor_unit_buttons,
     _update_tcp_frame_buttons,
     _wxyz_to_xyzw,
     update_scene_markers,
@@ -112,6 +115,11 @@ class RecordingSceneHandle:
 class RecordingButton:
     def __init__(self, color="gray"):
         self.color = color
+
+
+class RecordingText:
+    def __init__(self, value=""):
+        self.value = value
 
 
 class RecordingUrdf:
@@ -673,6 +681,62 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(cfg[3:], (0.0, 0.0, 0.0))
         self.assertEqual(_format_joints(None), "invalid")
         self.assertEqual(_joint_cfg_radians(None), (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+
+    def test_joint_monitor_formats_actual_joints_in_degrees_or_radians(self):
+        q_actual_deg = (0.0, -30.0, 90.0, 180.0, -180.0, 45.0)
+        self.assertEqual(_format_joint_monitor_value(q_actual_deg, 0, valid=True, unit="deg"), "0.00 deg")
+        self.assertEqual(_format_joint_monitor_value(q_actual_deg, 1, valid=True, unit="deg"), "-30.00 deg")
+        self.assertEqual(_format_joint_monitor_value(q_actual_deg, 5, valid=True, unit="deg"), "45.00 deg")
+
+        self.assertEqual(_format_joint_monitor_value(q_actual_deg, 1, valid=True, unit="rad"), "-0.5236 rad")
+        self.assertEqual(_format_joint_monitor_value(q_actual_deg, 2, valid=True, unit="rad"), "1.5708 rad")
+        self.assertEqual(_format_joint_monitor_value(q_actual_deg, 3, valid=True, unit="rad"), "3.1416 rad")
+
+    def test_joint_monitor_invalid_state_does_not_fallback_to_zero(self):
+        self.assertEqual(_format_joint_monitor_value(None, 0, valid=True, unit="deg"), "invalid")
+        self.assertEqual(_format_joint_monitor_value((0.0, 1.0, 2.0), 0, valid=True, unit="deg"), "invalid")
+        self.assertEqual(_format_joint_monitor_value((0.0, 1.0, 2.0, 3.0, 4.0, 5.0), 0, valid=False, unit="rad"), "invalid")
+        self.assertEqual(_format_joint_monitor_value((0.0, 1.0, 2.0, 3.0, 4.0, 5.0), 6, valid=True, unit="deg"), "invalid")
+
+    def test_joint_monitor_unit_buttons_highlight_selected_unit(self):
+        handles = {
+            "joint_monitor_unit": "deg",
+            "joint_monitor_unit_buttons": {
+                "deg": RecordingButton(),
+                "rad": RecordingButton(),
+            },
+        }
+        _update_joint_monitor_unit_buttons(handles)
+        self.assertEqual(handles["joint_monitor_unit_buttons"]["deg"].color, "green")
+        self.assertEqual(handles["joint_monitor_unit_buttons"]["rad"].color, "gray")
+
+        handles["joint_monitor_unit"] = "rad"
+        _update_joint_monitor_unit_buttons(handles)
+        self.assertEqual(handles["joint_monitor_unit_buttons"]["deg"].color, "gray")
+        self.assertEqual(handles["joint_monitor_unit_buttons"]["rad"].color, "green")
+
+    def test_joint_monitor_updates_six_rows_per_arm(self):
+        store, _, _ = self.make_safety(sample_state())
+        handles = {
+            "joint_monitor_unit": "deg",
+            "joint_monitor_status": RecordingText(),
+            "joint_monitor_values": {
+                "left": [RecordingText() for _ in range(6)],
+                "right": [RecordingText() for _ in range(6)],
+            },
+        }
+        _update_joint_monitor(handles, store.latest(), stale=False)
+        self.assertEqual(handles["joint_monitor_status"].value, "live, unit=deg, tick=1")
+        self.assertEqual(handles["joint_monitor_values"]["left"][0].value, "0.00 deg")
+        self.assertEqual(handles["joint_monitor_values"]["left"][1].value, "-30.00 deg")
+        self.assertEqual(handles["joint_monitor_values"]["right"][2].value, "80.00 deg")
+        self.assertEqual(len(handles["joint_monitor_values"]["left"]), 6)
+        self.assertEqual(len(handles["joint_monitor_values"]["right"]), 6)
+
+        handles["joint_monitor_unit"] = "rad"
+        _update_joint_monitor(handles, store.latest(), stale=True)
+        self.assertEqual(handles["joint_monitor_status"].value, "stale, unit=rad, tick=1")
+        self.assertEqual(handles["joint_monitor_values"]["left"][1].value, "-0.5236 rad")
 
     def test_default_mount_normals_match_stand_shoulder_faces(self):
         left_matrix = _quat_to_matrix(_pose_orientation_wxyz(_DEFAULT_LEFT_POSE))

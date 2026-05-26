@@ -1,153 +1,16 @@
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 
 #include "rb_servo/kinematics/ik_solver.hpp"
+#include "rb_servo/math/se3.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <utility>
 
 namespace rb_servo {
 namespace {
 
-using Matrix3 = std::array<std::array<double, 3>, 3>;
-using Vector3 = std::array<double, 3>;
-
-struct Transform {
-    Matrix3 r{};
-    Vector3 t{};
-};
-
-constexpr double kPi = 3.14159265358979323846;
 constexpr double kConstantOrientationToleranceRad = 1e-6;
-
-Matrix3 identityMatrix() {
-    return {{{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}}};
-}
-
-Matrix3 multiplyMatrix(const Matrix3& a, const Matrix3& b) {
-    Matrix3 out{};
-    for (int row = 0; row < 3; ++row) {
-        for (int col = 0; col < 3; ++col) {
-            out[row][col] = a[row][0] * b[0][col] +
-                            a[row][1] * b[1][col] +
-                            a[row][2] * b[2][col];
-        }
-    }
-    return out;
-}
-
-Matrix3 transposeMatrix(const Matrix3& a) {
-    Matrix3 out{};
-    for (int row = 0; row < 3; ++row) {
-        for (int col = 0; col < 3; ++col) {
-            out[row][col] = a[col][row];
-        }
-    }
-    return out;
-}
-
-Vector3 multiplyMatrixVector(const Matrix3& a, const Vector3& v) {
-    return {
-        a[0][0] * v[0] + a[0][1] * v[1] + a[0][2] * v[2],
-        a[1][0] * v[0] + a[1][1] * v[1] + a[1][2] * v[2],
-        a[2][0] * v[0] + a[2][1] * v[1] + a[2][2] * v[2],
-    };
-}
-
-Vector3 subtractVector(const Vector3& a, const Vector3& b) {
-    return {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
-}
-
-double normVector(const Vector3& v) {
-    return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-}
-
-double dotVector(const Vector3& a, const Vector3& b) {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-Matrix3 rotationFromRpy(double rx, double ry, double rz) {
-    const double cr = std::cos(rx);
-    const double sr = std::sin(rx);
-    const double cp = std::cos(ry);
-    const double sp = std::sin(ry);
-    const double cy = std::cos(rz);
-    const double sy = std::sin(rz);
-
-    return {{
-        {cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr},
-        {sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr},
-        {-sp, cp * sr, cp * cr},
-    }};
-}
-
-Matrix3 rotationFromQuaternionOrRpy(const Pose6D& pose) {
-    if (pose.quaternion_xyzw.has_value()) {
-        const auto& q = *pose.quaternion_xyzw;
-        const double norm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
-        if (std::isfinite(norm) && norm > 0.0) {
-            const double x = q[0] / norm;
-            const double y = q[1] / norm;
-            const double z = q[2] / norm;
-            const double w = q[3] / norm;
-            return {{
-                {1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)},
-                {2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)},
-                {2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)},
-            }};
-        }
-    }
-    return rotationFromRpy(pose.rx, pose.ry, pose.rz);
-}
-
-Transform transformFromPose(const Pose6D& pose) {
-    return {rotationFromQuaternionOrRpy(pose), {pose.x, pose.y, pose.z}};
-}
-
-Vector3 logRotation(const Matrix3& r) {
-    const double cos_theta = std::clamp((r[0][0] + r[1][1] + r[2][2] - 1.0) * 0.5, -1.0, 1.0);
-    const double theta = std::acos(cos_theta);
-    if (theta < 1e-9) {
-        return {
-            0.5 * (r[2][1] - r[1][2]),
-            0.5 * (r[0][2] - r[2][0]),
-            0.5 * (r[1][0] - r[0][1]),
-        };
-    }
-    const double scale = theta / (2.0 * std::sin(theta));
-    return {
-        scale * (r[2][1] - r[1][2]),
-        scale * (r[0][2] - r[2][0]),
-        scale * (r[1][0] - r[0][1]),
-    };
-}
-
-Vec6 bodyError(const Pose6D& current, const Pose6D& reference) {
-    const Transform current_tf = transformFromPose(current);
-    const Transform ref_tf = transformFromPose(reference);
-    const Matrix3 current_r_t = transposeMatrix(current_tf.r);
-    const Vector3 p_error_local = multiplyMatrixVector(
-        current_r_t,
-        subtractVector(ref_tf.t, current_tf.t)
-    );
-    const Vector3 r_error = logRotation(multiplyMatrix(current_r_t, ref_tf.r));
-    return {p_error_local[0], p_error_local[1], p_error_local[2], r_error[0], r_error[1], r_error[2]};
-}
-
-double orientationDistanceRad(const Pose6D& start, const Pose6D& target) {
-    const Transform start_tf = transformFromPose(start);
-    const Transform target_tf = transformFromPose(target);
-    return normVector(logRotation(multiplyMatrix(transposeMatrix(start_tf.r), target_tf.r)));
-}
-
-double positionDistance(const Pose6D& start, const Pose6D& target) {
-    return normVector(Vector3{
-        target.x - start.x,
-        target.y - start.y,
-        target.z - start.z,
-    });
-}
 
 CartesianOrientationInterpolation plannerOrientationMode(LinearMoveOrientationMode mode) {
     return mode == LinearMoveOrientationMode::Slerp
@@ -166,16 +29,18 @@ Vec6 referenceVelocityLocal(
 ) {
     Vec6 out;
     if (path.done || path.duration_sec <= 0.0) return out;
-    const Transform reference_tf = transformFromPose(reference);
-    const Vector3 velocity_stand{
+    const Vec6 velocity_stand{
         (path.target_tcp_stand.x - path.start_tcp_stand.x) / path.duration_sec,
         (path.target_tcp_stand.y - path.start_tcp_stand.y) / path.duration_sec,
         (path.target_tcp_stand.z - path.start_tcp_stand.z) / path.duration_sec,
+        0.0,
+        0.0,
+        0.0,
     };
-    const Vector3 velocity_local = multiplyMatrixVector(transposeMatrix(reference_tf.r), velocity_stand);
-    out.x = velocity_local[0];
-    out.y = velocity_local[1];
-    out.z = velocity_local[2];
+    const Vec6 velocity_local = math::twistStandToLocal(velocity_stand, reference);
+    out.x = velocity_local.x;
+    out.y = velocity_local.y;
+    out.z = velocity_local.z;
 
     if (path.orientation_mode == CartesianOrientationInterpolation::Slerp) {
         const double ds = std::min(1.0 - s, std::max(1e-4, 1e-3));
@@ -189,30 +54,13 @@ Vec6 referenceVelocityLocal(
                 },
                 s + ds
             );
-            const Vec6 delta = bodyError(reference, next);
+            const Vec6 delta = math::bodyErrorLocal(reference, next);
             out.rx = delta.rx / dt;
             out.ry = delta.ry / dt;
             out.rz = delta.rz / dt;
         }
     }
     return out;
-}
-
-double lineDeviation(
-    const Pose6D& start,
-    const Pose6D& target,
-    const Pose6D& current
-) {
-    const Vector3 a{start.x, start.y, start.z};
-    const Vector3 b{target.x, target.y, target.z};
-    const Vector3 p{current.x, current.y, current.z};
-    const Vector3 ab = subtractVector(b, a);
-    const Vector3 ap = subtractVector(p, a);
-    const double ab2 = dotVector(ab, ab);
-    if (ab2 <= 1e-12) return normVector(ap);
-    const double u = std::clamp(dotVector(ap, ab) / ab2, 0.0, 1.0);
-    const Vector3 projection{a[0] + u * ab[0], a[1] + u * ab[1], a[2] + u * ab[2]};
-    return normVector(subtractVector(p, projection));
 }
 
 bool finiteVec6(const Vec6& value) {
@@ -271,20 +119,6 @@ bool limitTwist(
     }
     if (clamped) *clamped = true;
     return true;
-}
-
-Vec6 twistStandToLocal(const Vec6& twist_stand, const Pose6D& current_tcp_stand) {
-    const Transform current_tf = transformFromPose(current_tcp_stand);
-    const Matrix3 stand_to_local = transposeMatrix(current_tf.r);
-    const Vector3 linear = multiplyMatrixVector(
-        stand_to_local,
-        Vector3{twist_stand.x, twist_stand.y, twist_stand.z}
-    );
-    const Vector3 angular = multiplyMatrixVector(
-        stand_to_local,
-        Vector3{twist_stand.rx, twist_stand.ry, twist_stand.rz}
-    );
-    return {linear[0], linear[1], linear[2], angular[0], angular[1], angular[2]};
 }
 
 const ArmMountConfig& mountForArm(
@@ -368,7 +202,7 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
                 : config_.linear_move.default_orientation_mode
         );
 
-        const double orientation_distance = orientationDistanceRad(
+        const double orientation_distance = math::orientationDistanceRad(
             path_state->start_tcp_stand,
             path_state->target_tcp_stand
         );
@@ -382,7 +216,8 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
             return result;
         }
 
-        const double position_distance = positionDistance(path_state->start_tcp_stand, path_state->target_tcp_stand);
+        const double position_distance =
+            math::positionDistance(path_state->start_tcp_stand, path_state->target_tcp_stand);
         double duration_sec = 0.0;
         if (command.has_linear_move_duration) {
             duration_sec = command.linear_move_duration_sec;
@@ -470,7 +305,7 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
         },
         path_s
     );
-    const Vec6 error = bodyError(*state.tcp_stand, reference);
+    const Vec6 error = math::bodyErrorLocal(*state.tcp_stand, reference);
     const Vec6 v_ref = referenceVelocityLocal(*path_state, reference, path_s);
     Vec6 v_cmd{
         v_ref.x + config_.path_kp * error.x,
@@ -543,7 +378,7 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     result.telemetry.path_s = path_s;
     result.telemetry.path_position_error_m = std::sqrt(error.x * error.x + error.y * error.y + error.z * error.z);
     result.telemetry.path_orientation_error_rad = std::sqrt(error.rx * error.rx + error.ry * error.ry + error.rz * error.rz);
-    result.telemetry.path_line_deviation_m = lineDeviation(
+    result.telemetry.path_line_deviation_m = math::lineDeviation(
         path_state->start_tcp_stand,
         path_state->target_tcp_stand,
         *state.tcp_stand
@@ -612,7 +447,7 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
             result.telemetry.reason = result.reason;
             return result;
         }
-        requested = twistStandToLocal(command.tcp_twist_stand, *state.tcp_stand);
+        requested = math::twistStandToLocal(command.tcp_twist_stand, *state.tcp_stand);
     } else {
         result.verdict = SafetyVerdict::CartesianUnavailable;
         result.reason = "not_tcp_twist_mode";
@@ -655,7 +490,7 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         orientation_reference.x = state.tcp_stand->x;
         orientation_reference.y = state.tcp_stand->y;
         orientation_reference.z = state.tcp_stand->z;
-        orientation_error = bodyError(*state.tcp_stand, orientation_reference);
+        orientation_error = math::bodyErrorLocal(*state.tcp_stand, orientation_reference);
         requested.rx = config_.twist_orientation_hold_kp * orientation_error.rx;
         requested.ry = config_.twist_orientation_hold_kp * orientation_error.ry;
         requested.rz = config_.twist_orientation_hold_kp * orientation_error.rz;

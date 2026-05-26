@@ -62,7 +62,9 @@ safety:
 
 network:
   command_bind: "udp://0.0.0.0:50010"
-  state_pub_endpoint: "udp://rb_gui:50110"
+  state_pub_endpoints:
+    - "udp://rb_gui:50110"
+    - "udp://policy_runner_state_sink:50120"
   state_pub_rate_hz: 20
   command_source_allowlist: ["127.0.0.1/32", "172.16.0.0/12"]
 

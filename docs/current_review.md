@@ -34,7 +34,7 @@ Real robot and real Cartesian motion remain blocked.
 ## Main Open Items
 
 1. C++ hardware-free gate must pass on the target development machine.
-2. Pinocchio-enabled C++ gate must pass.
+2. Mandatory Eigen3/Pinocchio C++ gate must pass.
 3. Full Cartesian simulator acceptance must pass repeatedly.
 4. `TcpLinearMove path_done` telemetry should be robust across state publish rates.
 5. Constant-orientation mismatch semantics should be explicit and tested.

@@ -1,6 +1,7 @@
 #include "rb_servo/kinematics/pinocchio_kinematics.hpp"
 
 #include "rb_servo/kinematics/ik_solver.hpp"
+#include "rb_servo/math/se3.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -9,10 +10,8 @@
 #include <string>
 #include <utility>
 
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
 #include <Eigen/Core>
 #include <Eigen/Cholesky>
-#include <Eigen/Geometry>
 #include <Eigen/SVD>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
@@ -21,7 +20,6 @@
 #include <pinocchio/parsers/urdf.hpp>
 #include <pinocchio/spatial/explog.hpp>
 #include <pinocchio/spatial/se3.hpp>
-#endif
 
 namespace rb_servo {
 namespace {
@@ -55,8 +53,6 @@ bool finiteTwist(const Vec6& twist) {
 }
 
 }  // namespace
-
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
 
 struct PinocchioKinematics::Impl {
     explicit Impl(pinocchio::Model model_in)
@@ -114,52 +110,6 @@ JointArray fromPinocchioQ(
     return out;
 }
 
-Eigen::Matrix3d rotationFromPose(const Pose6D& pose) {
-    if (pose.quaternion_xyzw.has_value()) {
-        const auto& q = *pose.quaternion_xyzw;
-        const double norm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
-        if (!std::isfinite(norm) || norm <= 0.0) {
-            throw std::runtime_error("Pose6D quaternion is non-finite or zero length");
-        }
-        Eigen::Quaterniond quaternion(q[3] / norm, q[0] / norm, q[1] / norm, q[2] / norm);
-        return quaternion.toRotationMatrix();
-    }
-    const Eigen::AngleAxisd roll(pose.rx, Eigen::Vector3d::UnitX());
-    const Eigen::AngleAxisd pitch(pose.ry, Eigen::Vector3d::UnitY());
-    const Eigen::AngleAxisd yaw(pose.rz, Eigen::Vector3d::UnitZ());
-    return (yaw * pitch * roll).toRotationMatrix();
-}
-
-pinocchio::SE3 se3FromPose(const Pose6D& pose) {
-    return pinocchio::SE3(
-        rotationFromPose(pose),
-        Eigen::Vector3d(pose.x, pose.y, pose.z)
-    );
-}
-
-Pose6D poseFromSe3(const pinocchio::SE3& placement) {
-    const Eigen::Vector3d ypr = placement.rotation().eulerAngles(2, 1, 0);
-    Eigen::Quaterniond quaternion(placement.rotation());
-    quaternion.normalize();
-    Pose6D pose;
-    pose.x = placement.translation().x();
-    pose.y = placement.translation().y();
-    pose.z = placement.translation().z();
-    pose.rx = ypr.z();
-    pose.ry = ypr.y();
-    pose.rz = ypr.x();
-    pose.quaternion_xyzw = std::array<double, 4>{
-        quaternion.x(),
-        quaternion.y(),
-        quaternion.z(),
-        quaternion.w(),
-    };
-    if (!finitePose(pose)) {
-        throw std::runtime_error("Pinocchio FK produced a non-finite TCP pose");
-    }
-    return pose;
-}
-
 bool clampJointLimits(
     Eigen::VectorXd* q,
     const pinocchio::Model& model,
@@ -215,15 +165,8 @@ void applyJointStep(
     *q = integrated;
 }
 
-#else
-
-struct PinocchioKinematics::Impl {};
-
-#endif
-
 PinocchioKinematics::PinocchioKinematics(KinematicsConfig config)
     : config_(std::move(config)) {
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
     pinocchio::Model model;
     pinocchio::urdf::buildModel(config_.urdf, model);
 
@@ -236,23 +179,13 @@ PinocchioKinematics::PinocchioKinematics(KinematicsConfig config)
     for (std::size_t i = 0; i < config_.joint_names.size(); ++i) {
         impl_->joints[i] = requireSingleDofJoint(impl_->model, config_.joint_names[i]);
     }
-#endif
 }
 
 PinocchioKinematics::~PinocchioKinematics() = default;
 PinocchioKinematics::PinocchioKinematics(PinocchioKinematics&&) noexcept = default;
 PinocchioKinematics& PinocchioKinematics::operator=(PinocchioKinematics&&) noexcept = default;
 
-bool PinocchioKinematics::isAvailable() {
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
-    return true;
-#else
-    return false;
-#endif
-}
-
 Pose6D PinocchioKinematics::computeTcpBase(const JointArray& q_deg) const {
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
     if (!impl_) {
         throw std::runtime_error("Pinocchio kinematics is not initialized");
     }
@@ -262,11 +195,11 @@ Pose6D PinocchioKinematics::computeTcpBase(const JointArray& q_deg) const {
 
     const pinocchio::SE3& world_base = impl_->data.oMf[impl_->base_frame];
     const pinocchio::SE3& world_tip = impl_->data.oMf[impl_->tip_frame];
-    return poseFromSe3(world_base.inverse() * world_tip);
-#else
-    (void)q_deg;
-    throw std::runtime_error("Pinocchio kinematics is unavailable; rebuild with RB_SERVO_ENABLE_PINOCCHIO=ON");
-#endif
+    Pose6D pose = math::poseFromSe3(world_base.inverse() * world_tip);
+    if (!finitePose(pose)) {
+        throw std::runtime_error("Pinocchio FK produced a non-finite TCP pose");
+    }
+    return pose;
 }
 
 Pose6D PinocchioKinematics::computeTcpStand(
@@ -275,14 +208,8 @@ Pose6D PinocchioKinematics::computeTcpStand(
     const ArmMountConfig& mount
 ) const {
     (void)arm;
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
     const Pose6D tcp_base = computeTcpBase(q_deg);
-    return poseFromSe3(se3FromPose(mount.base_pose_in_stand) * se3FromPose(tcp_base));
-#else
-    (void)q_deg;
-    (void)mount;
-    throw std::runtime_error("Pinocchio kinematics is unavailable; rebuild with RB_SERVO_ENABLE_PINOCCHIO=ON");
-#endif
+    return math::poseFromSe3(math::se3FromPose(mount.base_pose_in_stand) * math::se3FromPose(tcp_base));
 }
 
 IkResult PinocchioKinematics::solveIk(
@@ -298,7 +225,6 @@ IkResult PinocchioKinematics::solveIk(
             std::chrono::steady_clock::now() - started
         ).count();
     };
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
     if (!config_.enable || !config_.ik.enable || !impl_) {
         return ik_solver::failureResult(
             ik_solver::kReasonKinematicsUnavailable,
@@ -323,7 +249,7 @@ IkResult PinocchioKinematics::solveIk(
     Eigen::VectorXd q = toPinocchioQ(seed_q_deg, impl_->model, impl_->joints);
     bool hit_joint_limit = clampJointLimits(&q, impl_->model, impl_->joints);
     const pinocchio::SE3 target_base =
-        se3FromPose(mount.base_pose_in_stand).inverse() * se3FromPose(target_tcp_stand);
+        math::se3FromPose(mount.base_pose_in_stand).inverse() * math::se3FromPose(target_tcp_stand);
     double position_error_m = 0.0;
     double orientation_error_rad = 0.0;
     int iterations = 0;
@@ -352,7 +278,7 @@ IkResult PinocchioKinematics::solveIk(
         const pinocchio::SE3& world_tip = impl_->data.oMf[impl_->tip_frame];
         const pinocchio::SE3 current_base = world_base.inverse() * world_tip;
         const pinocchio::SE3 current_to_target = current_base.actInv(target_base);
-        const Eigen::Matrix<double, 6, 1> error = pinocchio::log6(current_to_target).toVector();
+        const Eigen::Matrix<double, 6, 1> error = math::log6Local(current_base, target_base);
         position_error_m = error.head<3>().norm();
         orientation_error_rad = error.tail<3>().norm();
 
@@ -458,18 +384,6 @@ IkResult PinocchioKinematics::solveIk(
         iterations,
         elapsedUs()
     );
-#else
-    (void)target_tcp_stand;
-    (void)mount;
-    return ik_solver::failureResult(
-        ik_solver::kReasonKinematicsUnavailable,
-        seed_q_deg,
-        0.0,
-        0.0,
-        0,
-        elapsedUs()
-    );
-#endif
 }
 
 CartesianVelocityResult PinocchioKinematics::solveCartesianVelocity(
@@ -482,7 +396,6 @@ CartesianVelocityResult PinocchioKinematics::solveCartesianVelocity(
     (void)arm;
     (void)mount;
     CartesianVelocityResult result;
-#if defined(RB_SERVO_ENABLE_PINOCCHIO) && RB_SERVO_ENABLE_PINOCCHIO
     if (!config_.enable || !config_.ik.enable || !impl_) {
         result.reason = ik_solver::kReasonKinematicsUnavailable;
         return result;
@@ -543,13 +456,6 @@ CartesianVelocityResult PinocchioKinematics::solveCartesianVelocity(
     }
     result.success = true;
     return result;
-#else
-    (void)q_deg;
-    (void)tcp_twist_local;
-    (void)damping;
-    result.reason = ik_solver::kReasonKinematicsUnavailable;
-    return result;
-#endif
 }
 
 }  // namespace rb_servo

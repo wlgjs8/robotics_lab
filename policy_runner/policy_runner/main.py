@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from typing import TextIO
+from typing import Callable, TextIO
 
 from .action_sources import (
     DualSpaceMouseCartesianActionSource,
@@ -16,7 +16,7 @@ from .action_sources import (
 )
 from .config import PolicyRunnerConfig, load_config
 from .geometry import GeometryStatus, load_geometry_status
-from .robot_state_client import RobotStateClient, StateStreamLeaseReadback
+from .robot_state_client import RobotStateClient, StateSnapshot, StateStreamLeaseReadback
 from .safety import SafetyGate
 from .servo_command_client import CommandIntent, ServoCommandClient
 from .spacemouse import HidSpaceMouseReader, SpaceMouseReader, SpaceMouseSample
@@ -27,11 +27,14 @@ LEASE_READBACK_TIMEOUT_EXIT_CODE = 3
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="robotics_lab policy_runner")
-    parser.add_argument("--config", required=True, help="policy_runner YAML config")
-    args = parser.parse_args(argv)
-    config = load_config(args.config)
-    return run(config)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0].startswith("-"):
+        parser = argparse.ArgumentParser(description="robotics_lab policy_runner")
+        parser.add_argument("--config", required=True, help="policy_runner YAML config")
+        args = parser.parse_args(argv)
+        config = load_config(args.config)
+        return run(config)
+    return _main_with_subcommands(argv)
 
 
 def run(
@@ -43,6 +46,7 @@ def run(
     sleep_fn=time.sleep,
     monotonic_fn=time.monotonic,
     stderr: TextIO = sys.stderr,
+    state_sink: Callable[[StateSnapshot], None] | None = None,
 ) -> int:
     state_client = state_client or RobotStateClient(config.robot_state.bind, config.robot_state.stale_timeout_sec)
     command_client = command_client or ServoCommandClient(
@@ -76,6 +80,8 @@ def run(
                     return STARTUP_TIMEOUT_EXIT_CODE
                 sleep_fn(period)
                 continue
+            if state_sink is not None:
+                state_sink(snapshot)
             if config.servo_command.acquire_lease and not lease_acquired:
                 try:
                     command_client.acquire_lease(
@@ -176,8 +182,6 @@ def make_action_source(config: PolicyRunnerConfig):
             max_linear_velocity_m_s=config.spacemouse_cartesian_dual.max_linear_velocity_m_s,
             max_angular_velocity_rad_s=config.spacemouse_cartesian_dual.max_angular_velocity_rad_s,
             deadband=config.spacemouse_cartesian_dual.deadband,
-            left_deadman_button=left.deadman_button,
-            right_deadman_button=right.deadman_button,
             timeout_sec=config.servo_command.timeout_sec,
         )
     raise ValueError(f"unknown action_source: {config.action_source}")
@@ -221,3 +225,86 @@ class _LazyHidSpaceMouseReader(SpaceMouseReader):
         if self._reader is not None:
             self._reader.close()
             self._reader = None
+
+
+def _main_with_subcommands(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="robotics_lab policy_runner")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    record = sub.add_parser("record", help="Record rb_servo_server state stream without sending commands.")
+    record.add_argument("--state-bind", default="udp://0.0.0.0:50120")
+    record.add_argument("--output-dir", default="/data/policy_episodes")
+    record.add_argument("--duration-sec", type=float, default=0.0)
+    record.add_argument("--stale-timeout-sec", type=float, default=0.5)
+
+    teleop = sub.add_parser("teleop-record", help="Run a policy action source and record state/action JSONL.")
+    teleop.add_argument("--config", required=True, help="policy_runner YAML config")
+    teleop.add_argument("--output-dir", default="/data/policy_episodes")
+
+    train = sub.add_parser("train", help="Train a small V1 behavior-cloning baseline from JSONL episodes.")
+    train.add_argument("--episodes-dir", default="/data/policy_episodes")
+    train.add_argument("--checkpoint", default="/data/checkpoints/bc_state_to_twist.pt")
+    train.add_argument("--epochs", type=int, default=50)
+    train.add_argument("--batch-size", type=int, default=64)
+    train.add_argument("--lr", type=float, default=1e-3)
+
+    infer = sub.add_parser("infer", help="Run a trained V1 behavior-cloning checkpoint in simulation.")
+    infer.add_argument("--config", required=True, help="policy_runner YAML config")
+    infer.add_argument("--checkpoint", default="/data/checkpoints/bc_state_to_twist.pt")
+
+    args = parser.parse_args(argv)
+    if args.command == "record":
+        from .recording import record_state_stream
+
+        path = record_state_stream(
+            bind=args.state_bind,
+            output_dir=args.output_dir,
+            duration_sec=args.duration_sec,
+            stale_timeout_sec=args.stale_timeout_sec,
+        )
+        print(f"policy_runner recorded state episode: {path}", flush=True)
+        return 0
+    if args.command == "teleop-record":
+        from .recording import EpisodeRecorder
+
+        config = load_config(args.config)
+        recorder = EpisodeRecorder(
+            args.output_dir,
+            metadata={
+                "recording_mode": "teleop_record",
+                "policy_config": args.config,
+                "action_source": config.action_source,
+            },
+        )
+        state_client = RobotStateClient(config.robot_state.bind, config.robot_state.stale_timeout_sec)
+        command_client = ServoCommandClient(
+            config.servo_command.endpoint,
+            config.servo_command.timeout_sec,
+            packet_sink=recorder.record_action,
+        )
+        try:
+            return run(
+                config,
+                state_client=state_client,
+                command_client=command_client,
+                state_sink=recorder.record_state,
+            )
+        finally:
+            recorder.close()
+    if args.command == "train":
+        from .training import train_behavior_cloning
+
+        train_behavior_cloning(
+            episodes_dir=args.episodes_dir,
+            checkpoint_path=args.checkpoint,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+        )
+        return 0
+    if args.command == "infer":
+        from .training import BehaviorCloningActionSource
+
+        config = load_config(args.config)
+        return run(config, source=BehaviorCloningActionSource(args.checkpoint, config.servo_command.timeout_sec))
+    raise ValueError(f"unknown policy_runner command: {args.command}")
