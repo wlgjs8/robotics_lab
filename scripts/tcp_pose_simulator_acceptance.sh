@@ -23,6 +23,10 @@ LINEAR_DURATION_SEC="1.0"
 POSITION_TOLERANCE_M="0.004"
 ORIENTATION_TOLERANCE_RAD="0.005"
 LINE_TOLERANCE_M="0.002"
+REPEAT="${CODEX_CARTESIAN_ACCEPTANCE_REPEAT:-1}"
+RECORD_RUN_LABEL="${CODEX_CARTESIAN_ACCEPTANCE_LABEL:-}"
+SKIP_SLERP=0
+REQUIRE_SLERP=0
 RUN_PTP=0
 RUN_LINEAR=0
 RUN_TWIST_LOCAL=0
@@ -68,6 +72,10 @@ Runtime/options:
   --line-tolerance-m M       Linear path line-deviation tolerance. Default: 0.002
   --tcp-tolerance-m M        Alias for --position-tolerance-m. Default: 0.004
   --position-tolerance-m M   Final TCP position tolerance. Default: 0.004
+  --repeat N                 Repeat selected scenarios N times. Default: ${CODEX_CARTESIAN_ACCEPTANCE_REPEAT:-1}
+  --record-run-label LABEL   Add a label to summary/artifact files.
+  --require-slerp            Fail if slerp linear acceptance is skipped.
+  --skip-slerp               Run constant Linear acceptance without slerp.
   -h, --help                 Show this help.
 
 This runner refuses real/rbpodo configs, cartesian_control.allow_in_real=true,
@@ -115,6 +123,10 @@ while [[ $# -gt 0 ]]; do
     --line-tolerance-m) [[ $# -ge 2 ]] || fail "--line-tolerance-m requires a value"; LINE_TOLERANCE_M="$2"; shift 2 ;;
     --position-tolerance-m|--tcp-tolerance-m)
       [[ $# -ge 2 ]] || fail "$1 requires a value"; POSITION_TOLERANCE_M="$2"; shift 2 ;;
+    --repeat) [[ $# -ge 2 ]] || fail "--repeat requires a value"; REPEAT="$2"; shift 2 ;;
+    --record-run-label) [[ $# -ge 2 ]] || fail "--record-run-label requires a value"; RECORD_RUN_LABEL="$2"; shift 2 ;;
+    --require-slerp) REQUIRE_SLERP=1; shift ;;
+    --skip-slerp) SKIP_SLERP=1; shift ;;
     --run-ptp) RUN_PTP=1; shift ;;
     --run-linear) RUN_LINEAR=1; shift ;;
     --run-twist-local) RUN_TWIST_LOCAL=1; shift ;;
@@ -165,7 +177,12 @@ PY_ARGS=(
   --position-tolerance-m "${POSITION_TOLERANCE_M}"
   --orientation-tolerance-rad "${ORIENTATION_TOLERANCE_RAD}"
   --line-tolerance-m "${LINE_TOLERANCE_M}"
+  --repeat "${REPEAT}"
 )
+
+[[ -n "${RECORD_RUN_LABEL}" ]] && PY_ARGS+=(--record-run-label "${RECORD_RUN_LABEL}")
+[[ "${REQUIRE_SLERP}" -eq 1 ]] && PY_ARGS+=(--require-slerp)
+[[ "${SKIP_SLERP}" -eq 1 ]] && PY_ARGS+=(--skip-slerp)
 
 [[ "${RUN_ALL}" -eq 1 ]] && PY_ARGS+=(--all)
 [[ "${RUN_PTP}" -eq 1 ]] && PY_ARGS+=(--run-ptp)

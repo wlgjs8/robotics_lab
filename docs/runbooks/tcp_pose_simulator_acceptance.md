@@ -73,6 +73,7 @@ Through Codex gate:
 
 ```bash
 CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
+CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-ACCEPT-01
 ```
 
 ## Run Selected Scenarios
@@ -93,6 +94,10 @@ Useful flags:
 --linear-duration-sec SEC
 --orientation-tolerance-rad RAD
 --line-tolerance-m M
+--repeat N                  # repeat selected scenarios and fail on any iteration
+--record-run-label LABEL    # add a label to summary/artifact files
+--require-slerp
+--skip-slerp                # constant Linear only; use only for scoped debugging
 --run-near-pi-ptp          # optional near-pi TcpPoseTarget orientation scenario
 --skip-estop-reset
 --allow-missing-pinocchio   # preflight only; does not fake runtime acceptance
@@ -120,7 +125,7 @@ Expected behavior:
 - TCP position follows a straight line from start to goal
 - orientation remains close to start orientation
 - `path_s` progresses toward `1.0`
-- `path_done` becomes visible
+- `path_done` remains visible after completion until an explicit cancel/Hold, a new same-arm command, fault latch, emergency stop, disarm, or reset clears the path state
 - max line deviation below threshold
 - no fault latch
 
@@ -176,6 +181,8 @@ Expected files:
 
 ```text
 summary.json
+acceptance_results.json
+acceptance_results.csv
 state_stream.jsonl
 command_packets.jsonl
 rb_servo_server.log
@@ -189,6 +196,8 @@ path_samples_right.csv
 `summary.json` should contain:
 
 - pass/fail per scenario
+- per-iteration results when `--repeat N` is used
+- separate `linear_constant` and `linear_slerp` scenario records
 - max position error
 - max orientation error
 - max path orientation error
@@ -200,6 +209,7 @@ path_samples_right.csv
 - faults, if any
 - config path
 - git commit, if available
+- optional run label
 
 ## Common Failure Interpretation
 

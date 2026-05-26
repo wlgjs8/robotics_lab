@@ -4,6 +4,9 @@
 
 This review reflects the repository after the simulator-first Cartesian hardening work. The current milestone is not real robot motion. The current milestone is repeated simulator validation of all motion primitives and operator interfaces before any real RB3-730 bring-up.
 
+This root file is the current review source of truth. `docs/current_review.md`
+is only a short redirect here so review status does not drift across copies.
+
 ## Current Maturity
 
 ### Supported For Hardware-Free / Simulator Validation
@@ -83,7 +86,7 @@ Meaning: MoveL-like Cartesian path primitive. The TCP position reference should 
 Review requirements before real work:
 
 - full mandatory-Pinocchio simulator acceptance must pass
-- `path_done` telemetry must remain visible long enough for state subscribers
+- `path_done` telemetry must remain visible long enough for state subscribers and acceptance capture
 - path line deviation must be checked over sampled state, not only final pose
 - orientation deviation must be checked over sampled state
 - real mode must remain blocked
@@ -139,8 +142,8 @@ CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 
 1. Full C++ hardware-free gate must pass on the development machine.
 2. Mandatory Eigen3/Pinocchio Cartesian math gate must pass.
-3. Full Cartesian simulator acceptance must pass repeatedly.
-4. `TcpLinearMove path_done` telemetry must be robust against state publish rate.
+3. Full Cartesian simulator acceptance must pass repeatedly and preserve `acceptance_results.json` / `.csv` artifacts.
+4. `TcpLinearMove path_done` telemetry persistence must remain covered by C++ tests.
 5. Constant-orientation mismatch semantics must be explicit and tested.
 6. Real rbpodo read-only acceptance must be run separately.
 7. Real rbpodo stop/reset behavior remains operator-intervention-only until verified API wiring exists.

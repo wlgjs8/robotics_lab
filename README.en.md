@@ -35,6 +35,7 @@ Supported for mock/simulation:
 - GUI viewer/operator console for mock/simulation
 - policy_runner joint and Cartesian simulator action sources
 - simulator-only Cartesian acceptance scripts
+- mandatory Eigen3/Pinocchio C++ Cartesian math path for `rb_servo_server`
 
 Not production-ready:
 
@@ -51,6 +52,7 @@ Start here:
 
 - `AGENTS.md`: instructions for Codex/Claude/other agents
 - `REVIEW.md`: current review baseline and open items
+- `docs/current_review.md`: short redirect to `REVIEW.md`; do not duplicate review content there
 - `docs/architecture.md`: system topology, terminology, motion primitive contract, safety boundaries
 - `docs/servo_backend_contract.md`: backend result, fault, worker I/O, and state telemetry contract
 - `docs/frame_contract.md`: shared frames and calibration status
@@ -141,6 +143,17 @@ Hardware-free gate:
 ./scripts/codex_gate.sh HARDEN-10
 ```
 
+`rb_servo_server` C++ builds require Eigen3 and Pinocchio. Cartesian FK/IK,
+orientation interpolation, frame conversion, and SE(3) delta math delegate to
+Eigen/Pinocchio. Missing Pinocchio is a missing C++ dependency, not a fallback
+runtime mode.
+
+Cartesian math rebaseline:
+
+```bash
+./scripts/codex_gate.sh CART-MATH-03
+```
+
 Cartesian simulator acceptance:
 
 ```bash
@@ -185,3 +198,8 @@ Site-local real configs:
 - `rb_servo_server/config/local/dual_real_motion.yaml`
 
 No tracked runnable real robot config should be added.
+
+Deprecated simulator config names are archived under `docs/archive/configs/`
+for historical reference only. They are not runnable source-of-truth configs
+and must not be used for new smoke or acceptance evidence. `README.md` is the
+canonical root README; this English README is a best-effort translation.

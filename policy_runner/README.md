@@ -217,6 +217,8 @@ spacemouse_cartesian:
 
 Button 0 is the default deadman switch. When an armed source is released, it
 emits one explicit zero `TcpTwistLocal` before returning to no-command idle.
+While armed, a centered puck still emits explicit zero twist instead of going
+silent, so the robot does not coast until command timeout.
 The Cartesian SpaceMouse source always requires a deadman switch.
 `response_curve_gamma` controls the soft deadband response; the default 3.0 is
 cubic, lower values approach linear, and higher values give more precision near
@@ -250,6 +252,9 @@ emits one explicit zero `TcpTwistLocal` for that arm so the server stops
 without waiting for command timeout. Already released arms emit no repeated
 commands. Use `path` or `device` under each side when stable HID selection is
 needed.
+The HID reader drains a bounded batch of queued events on each read and returns
+only the latest sample, avoiding stale FIFO backlog during high-rate SpaceMouse
+input.
 
 `policy_runner` does not generate `TcpLinearMove` trajectories. Use
 `rb_servo_server/tools/send_tcp_linear_move.py` for simulator-only MoveL-style

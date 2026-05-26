@@ -145,6 +145,10 @@ rb_servo_server/config/local/
 
 No tracked runnable real robot config should exist.
 
+Deprecated simulator config names are archived under `docs/archive/configs/`
+for historical reference only. They are not runnable source-of-truth profiles
+and must not be used for new smoke or acceptance evidence.
+
 Force control is intentionally unavailable:
 
 ```yaml

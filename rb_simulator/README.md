@@ -39,7 +39,6 @@ rb_simulator/
     right_rb3_730e.yaml
     left_rb3_730e_compose.yaml
     right_rb3_730e_compose.yaml
-    dual_rb3_730e.yaml    # historical only, not runnable for current topology
   docs/
     architecture.md
     protocol_v1.md
@@ -114,6 +113,6 @@ and `run_mode: simulation`.
 PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
 ```
 
-The deprecated `config/dual_rb3_730e.yaml` is kept only as a historical
-dual-arm fixture for the old single-process schema. It is not a supported
-runtime profile and must not be used for operator runs or smoke evidence.
+The deprecated `dual_rb3_730e.yaml` fixture for the old single-process schema
+has been moved to `docs/archive/configs/`. It is not a supported runtime
+profile and must not be used for operator runs or smoke evidence.

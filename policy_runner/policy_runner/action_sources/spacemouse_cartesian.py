@@ -78,8 +78,6 @@ class SpaceMouseCartesianActionSource:
             return None
         self._was_armed = True
         twist = self._twist_from_sample(sample)
-        if all(value == 0.0 for value in twist):
-            return None
         left = twist if self.selected_arm in {"left", "both"} else None
         right = twist if self.selected_arm in {"right", "both"} else None
         return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)

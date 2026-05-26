@@ -47,6 +47,8 @@ class FakeSpaceMouseReader:
 class HidSpaceMouseReader:
     """Optional pyspacemouse-backed reader kept out of the test dependency path."""
 
+    _MAX_DRAIN_STATES = 64
+
     def __init__(
         self,
         *,
@@ -76,15 +78,32 @@ class HidSpaceMouseReader:
     def read(self, timeout_sec: float | None = None) -> SpaceMouseSample | None:
         if self._device is None:
             return None
-        deadline = None if timeout_sec is None else time.monotonic() + max(timeout_sec, 0.0)
-        while True:
+
+        latest_state = self._drain_buffered_states()
+        if latest_state is not None:
+            return _sample_from_pyspacemouse_state(latest_state)
+        if timeout_sec is None or timeout_sec <= 0.0:
+            return None
+
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
             read = getattr(self._device, "read", None)
             state = read() if callable(read) else self._pyspacemouse.read()
             if state is not None:
-                return _sample_from_pyspacemouse_state(state)
-            if deadline is not None and time.monotonic() >= deadline:
-                return None
+                tail = self._drain_buffered_states()
+                return _sample_from_pyspacemouse_state(tail if tail is not None else state)
             time.sleep(0.001)
+        return None
+
+    def _drain_buffered_states(self) -> Any:
+        latest = None
+        for _ in range(self._MAX_DRAIN_STATES):
+            read = getattr(self._device, "read", None)
+            state = read() if callable(read) else self._pyspacemouse.read()
+            if state is None:
+                break
+            latest = state
+        return latest
 
     def close(self) -> None:
         close = getattr(self._device, "close", None)

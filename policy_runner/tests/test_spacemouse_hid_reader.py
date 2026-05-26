@@ -9,11 +9,29 @@ from policy_runner.spacemouse import HidSpaceMouseReader
 
 
 class _FakeDevice:
-    def __init__(self):
+    def __init__(self, states=()):
+        self._states = list(states)
         self.closed = False
+
+    def read(self):
+        if not self._states:
+            return None
+        return self._states.pop(0)
 
     def close(self) -> None:
         self.closed = True
+
+
+def _fake_state(tx=0.0):
+    return SimpleNamespace(
+        tx=tx,
+        ty=0.0,
+        tz=0.0,
+        rx=0.0,
+        ry=0.0,
+        rz=0.0,
+        buttons=(True,),
+    )
 
 
 class HidSpaceMouseReaderTests(unittest.TestCase):
@@ -68,6 +86,70 @@ class HidSpaceMouseReaderTests(unittest.TestCase):
                 {"device": None, "DeviceNumber": 3},
             ],
         )
+
+    def _make_reader_with_states(self, states):
+        device = _FakeDevice(states)
+        fake_pyspacemouse = SimpleNamespace(open=lambda **_kwargs: device)
+
+        with patch.dict(sys.modules, {"pyspacemouse": fake_pyspacemouse}):
+            reader = HidSpaceMouseReader()
+        return reader
+
+    def test_read_drains_buffered_events_and_returns_latest(self):
+        reader = self._make_reader_with_states(
+            [
+                _fake_state(tx=0.1),
+                _fake_state(tx=0.5),
+                _fake_state(tx=0.9),
+                None,
+            ]
+        )
+
+        sample = reader.read(timeout_sec=0.0)
+
+        self.assertIsNotNone(sample)
+        assert sample is not None
+        self.assertAlmostEqual(sample.tx, 0.9)
+
+    def test_read_returns_none_immediately_when_buffer_empty(self):
+        reader = self._make_reader_with_states([None])
+
+        sample = reader.read(timeout_sec=0.0)
+
+        self.assertIsNone(sample)
+
+    def test_read_with_positive_timeout_waits_then_returns_latest_of_burst(self):
+        reader = self._make_reader_with_states(
+            [
+                None,
+                _fake_state(tx=0.2),
+                _fake_state(tx=0.8),
+                None,
+            ]
+        )
+
+        sample = reader.read(timeout_sec=0.05)
+
+        self.assertIsNotNone(sample)
+        assert sample is not None
+        self.assertAlmostEqual(sample.tx, 0.8)
+
+    def test_drain_terminates_when_device_returns_none(self):
+        reader = self._make_reader_with_states([None, None, None])
+
+        sample = reader.read(timeout_sec=0.0)
+
+        self.assertIsNone(sample)
+
+    def test_drain_is_bounded_when_device_keeps_returning_states(self):
+        states = [_fake_state(tx=float(index)) for index in range(100)]
+        reader = self._make_reader_with_states(states)
+
+        sample = reader.read(timeout_sec=0.0)
+
+        self.assertIsNotNone(sample)
+        assert sample is not None
+        self.assertEqual(sample.tx, 63.0)
 
 
 if __name__ == "__main__":

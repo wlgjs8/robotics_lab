@@ -1025,6 +1025,44 @@ def copy_servo_log(artifact_dir: Path) -> dict[str, Any] | None:
     return {"path": str(target), "rows": rows}
 
 
+def aggregate_scenario_results(iterations: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    aggregate: dict[str, dict[str, Any]] = {}
+    for iteration in iterations:
+        scenarios = iteration.get("scenarios", {})
+        if not isinstance(scenarios, dict):
+            continue
+        for name, result in scenarios.items():
+            if not isinstance(result, dict):
+                continue
+            current = aggregate.setdefault(
+                name,
+                {
+                    "result": "pass",
+                    "passed": True,
+                    "iterations": 0,
+                    "path_done_observed": False,
+                    "path_done_time_ns": None,
+                    "sample_count": 0,
+                },
+            )
+            current["iterations"] = int(current["iterations"]) + 1
+            current["passed"] = bool(current["passed"]) and bool(result.get("passed", result.get("result") == "pass"))
+            current["result"] = "pass" if current["passed"] else "fail"
+            current["path_done_observed"] = bool(current["path_done_observed"]) or bool(result.get("path_done_observed"))
+            if result.get("path_done_time_ns") is not None:
+                current["path_done_time_ns"] = result.get("path_done_time_ns")
+            current["sample_count"] = int(current["sample_count"]) + int(result.get("sample_count", 0) or 0)
+            for key, value in result.items():
+                if key in {"result", "passed", "path_done_observed", "path_done_time_ns", "sample_count"}:
+                    continue
+                if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    existing = current.get(key)
+                    current[key] = max(float(existing), float(value)) if isinstance(existing, (int, float)) else value
+                elif key not in current:
+                    current[key] = value
+    return aggregate
+
+
 def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
     preflight(args)
     artifact_dir = args.artifact_dir.resolve()
@@ -1033,6 +1071,8 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         summary = {
             "result": "pass",
             "preflight_only": True,
+            "record_run_label": args.record_run_label,
+            "repeat": args.repeat,
             "config_file": str(args.server_config.resolve()),
             "git_commit": git_commit(args.root),
             "near_pi_math_tests_run": bool(args.near_pi_math_tests_run),
@@ -1084,19 +1124,25 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
                 (artifact_dir / name).write_text("not captured: --assume-running was used\n", encoding="utf-8")
 
         wait_for(capture, valid_state, args.startup_timeout_sec, "valid FK TCP state")
-        ctx = Context(args, capture, commands)
         scenarios = selected_scenarios(args)
-        if "ptp" in scenarios:
-            run_ptp(ctx)
-        if "near_pi_ptp" in scenarios:
-            run_near_pi_ptp(ctx)
-        if "linear" in scenarios:
-            run_linear_constant(ctx)
-            run_linear_slerp(ctx)
-        if "twist_local" in scenarios:
-            run_twist(ctx, "local")
-        if "twist_stand" in scenarios:
-            run_twist(ctx, "stand")
+        iteration_results: list[dict[str, Any]] = []
+        for iteration in range(1, args.repeat + 1):
+            ctx = Context(args, capture, commands)
+            if "ptp" in scenarios:
+                run_ptp(ctx)
+            if "near_pi_ptp" in scenarios:
+                run_near_pi_ptp(ctx)
+            if "linear" in scenarios:
+                run_linear_constant(ctx)
+                if not args.skip_slerp:
+                    run_linear_slerp(ctx)
+                elif args.require_slerp:
+                    raise AcceptanceError("--require-slerp was set but slerp was skipped")
+            if "twist_local" in scenarios:
+                run_twist(ctx, "local")
+            if "twist_stand" in scenarios:
+                run_twist(ctx, "stand")
+            iteration_results.append({"iteration": iteration, "scenarios": ctx.scenario_results})
         estop_reset = run_estop_reset(ctx)
     finally:
         commands.close()
@@ -1108,8 +1154,11 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
     write_path_csv(artifact_dir, capture.snapshots, "left")
     write_path_csv(artifact_dir, capture.snapshots, "right")
     servo_log = copy_servo_log(artifact_dir)
+    scenario_results = aggregate_scenario_results(iteration_results)
     summary = {
         "result": "pass",
+        "record_run_label": args.record_run_label,
+        "repeat": args.repeat,
         "config_file": str(args.server_config.resolve()),
         "git_commit": git_commit(args.root),
         "artifacts_dir": str(artifact_dir),
@@ -1122,17 +1171,18 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         "path_samples_right": str(artifact_dir / "path_samples_right.csv"),
         "state_packets": len(capture.snapshots),
         "invalid_state_packets": capture.invalid_packets,
-        "scenarios": ctx.scenario_results,
+        "scenarios": scenario_results,
+        "iterations": iteration_results,
         "estop_reset": estop_reset,
         "max_position_error_m": metric_max(capture.snapshots, "position_error_m"),
         "max_orientation_error_rad": metric_max(capture.snapshots, "orientation_error_rad"),
         "max_path_orientation_error_rad": max(
             metric_max(capture.snapshots, "path_orientation_error_rad"),
-            scenario_metric_max(ctx.scenario_results, "max_path_orientation_error_rad"),
+            scenario_metric_max(scenario_results, "max_path_orientation_error_rad"),
         ),
         "max_line_deviation_m": metric_max(capture.snapshots, "path_line_deviation_m"),
         "max_twist_orientation_drift_rad": scenario_metric_max(
-            ctx.scenario_results,
+            scenario_results,
             "max_twist_orientation_drift_rad",
         ),
         "near_pi_math_tests_run": bool(args.near_pi_math_tests_run),
@@ -1153,6 +1203,87 @@ def write_summaries(artifact_dir: Path, summary: dict[str, Any]) -> None:
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    compact = {
+        "result": summary.get("result"),
+        "record_run_label": summary.get("record_run_label", ""),
+        "repeat": summary.get("repeat", 1),
+        "git_commit": summary.get("git_commit"),
+        "config_file": summary.get("config_file"),
+        "near_pi_math_tests_run": summary.get("near_pi_math_tests_run", False),
+        "scenarios": summary.get("scenarios", {}),
+        "iterations": summary.get("iterations", []),
+        "caveat": summary.get("caveat", "simulator-only evidence; not real robot readiness"),
+    }
+    (artifact_dir / "acceptance_results.json").write_text(
+        json.dumps(compact, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with (artifact_dir / "acceptance_results.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "iteration",
+                "scenario",
+                "passed",
+                "max_position_error_m",
+                "max_orientation_error_rad",
+                "max_line_deviation_m",
+                "max_path_orientation_error_rad",
+                "max_twist_orientation_drift_rad",
+                "max_ik_duration_us",
+                "max_cartesian_servo_duration_us",
+                "path_done_observed",
+                "path_done_time_ns",
+                "sample_count",
+            ]
+        )
+        iterations = summary.get("iterations")
+        if isinstance(iterations, list) and iterations:
+            for iteration in iterations:
+                if not isinstance(iteration, dict):
+                    continue
+                scenarios = iteration.get("scenarios")
+                if not isinstance(scenarios, dict):
+                    continue
+                for name, result in scenarios.items():
+                    if not isinstance(result, dict):
+                        continue
+                    writer.writerow([
+                        iteration.get("iteration"),
+                        name,
+                        result.get("passed", result.get("result") == "pass"),
+                        result.get("max_position_error_m", 0.0),
+                        result.get("max_orientation_error_rad", 0.0),
+                        result.get("max_line_deviation_m", 0.0),
+                        result.get("max_path_orientation_error_rad", 0.0),
+                        result.get("max_twist_orientation_drift_rad", 0.0),
+                        result.get("max_ik_duration_us", 0.0),
+                        result.get("max_cartesian_servo_duration_us"),
+                        result.get("path_done_observed", False),
+                        result.get("path_done_time_ns"),
+                        result.get("sample_count", 0),
+                    ])
+        else:
+            scenarios = summary.get("scenarios")
+            if isinstance(scenarios, dict):
+                for name, result in scenarios.items():
+                    if not isinstance(result, dict):
+                        continue
+                    writer.writerow([
+                        "",
+                        name,
+                        result.get("passed", result.get("result") == "pass"),
+                        result.get("max_position_error_m", 0.0),
+                        result.get("max_orientation_error_rad", 0.0),
+                        result.get("max_line_deviation_m", 0.0),
+                        result.get("max_path_orientation_error_rad", 0.0),
+                        result.get("max_twist_orientation_drift_rad", 0.0),
+                        result.get("max_ik_duration_us", 0.0),
+                        result.get("max_cartesian_servo_duration_us"),
+                        result.get("path_done_observed", False),
+                        result.get("path_done_time_ns"),
+                        result.get("sample_count", 0),
+                    ])
 
 
 def main() -> int:
@@ -1165,9 +1296,13 @@ def main() -> int:
         failure = {
             "result": "fail",
             "error": str(exc),
+            "record_run_label": getattr(args, "record_run_label", ""),
+            "repeat": getattr(args, "repeat", 1),
             "config_file": str(args.server_config.resolve()) if hasattr(args, "server_config") else None,
             "git_commit": git_commit(args.root) if hasattr(args, "root") else None,
             "artifacts_dir": str(artifact_dir),
+            "scenarios": {},
+            "iterations": [],
             "state_stream": str(artifact_dir / "state_stream.jsonl"),
             "command_packets": str(artifact_dir / "command_packets.jsonl"),
             "rb_servo_server_log": str(artifact_dir / "rb_servo_server.log"),

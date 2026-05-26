@@ -56,11 +56,11 @@ right_robot:
 ```
 
 The deprecated `dual_rb_simulator.yaml`, `dual_rb_simulator_compose.yaml`, and
-`dual_rbsim.yaml` profiles are compatibility aliases only. They are not
-recommended for new operator runs or acceptance evidence. New configs should
-use `backend_type: simulator`, `run_mode: simulation`, and
-`simulator_control_endpoint`. Remove these compatibility names after downstream
-configs no longer reference them.
+`dual_rbsim.yaml` names have been moved out of the active config directory to
+`docs/archive/configs/` for historical reference only. They are not runnable
+source-of-truth profiles and must not be used for new operator runs or
+acceptance evidence. New configs should use `backend_type: simulator`,
+`run_mode: simulation`, and `simulator_control_endpoint`.
 
 See `docs/rb_simulator_dev.md` for the supported unit and local-smoke evidence.
 

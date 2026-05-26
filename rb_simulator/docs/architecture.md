@@ -91,7 +91,7 @@ Supported runtime profiles:
 
 Deprecated historical fixture, not runnable for the current per-arm topology:
 
-- `rb_simulator/config/dual_rb3_730e.yaml`
+- `docs/archive/configs/rb_simulator_dual_rb3_730e.legacy.yaml`
 
 Public servo-server configuration should use:
 

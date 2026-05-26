@@ -54,6 +54,7 @@ mock/simulation에서 지원되는 항목:
 
 - `AGENTS.md`: Codex/Claude/기타 에이전트 작업 지침
 - `REVIEW.md`: 현재 review baseline 및 open item
+- `docs/current_review.md`: `REVIEW.md`로 가는 짧은 redirect입니다. 내용을 중복하지 않습니다.
 - `docs/architecture.md`: 시스템 토폴로지, 용어, motion primitive contract, safety boundary
 - `docs/servo_backend_contract.md`: backend result, fault, worker I/O, state telemetry contract
 - `docs/frame_contract.md`: 공통 frame 및 calibration 상태
@@ -211,3 +212,7 @@ Site-local real configs:
 - `rb_servo_server/config/local/dual_real_motion.yaml`
 
 실행 가능한 tracked real robot config는 추가하면 안 됩니다.
+
+Deprecated simulator config names are archived under `docs/archive/configs/`
+for historical reference only. They are not runnable source-of-truth configs
+and must not be used for new smoke or acceptance evidence.

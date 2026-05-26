@@ -321,18 +321,45 @@ run_doc_hygiene_gate() {
     echo "ERROR: README_DOCS_UPDATE.md must not exist; fold doc-update notes into source-of-truth docs" >&2
     return 1
   fi
-  grep_existing "REVIEW\.md" docs/current_review.md
 
-  local legacy_config
-  for legacy_config in \
+  grep_existing "source-of-truth current review" docs/current_review.md
+  grep_existing "REVIEW\.md" docs/current_review.md
+  local current_review_lines
+  current_review_lines="$(wc -l < docs/current_review.md)"
+  if [[ "${current_review_lines}" -gt 12 ]]; then
+    echo "ERROR: docs/current_review.md must be a short redirect to REVIEW.md, not a mirrored review" >&2
+    return 1
+  fi
+
+  local forbidden_config
+  for forbidden_config in \
     rb_servo_server/config/dual_rbsim.yaml \
     rb_servo_server/config/dual_rb_simulator.yaml \
-    rb_servo_server/config/dual_rb_simulator_compose.yaml
+    rb_servo_server/config/dual_rb_simulator_compose.yaml \
+    rb_simulator/config/dual_rb3_730e.yaml
   do
-    if [[ -e "${legacy_config}" ]]; then
-      grep_existing "Deprecated|deprecated|historical|compatibility|archived" "${legacy_config}"
+    if [[ -e "${forbidden_config}" ]]; then
+      echo "ERROR: deprecated config remains in active config directory: ${forbidden_config}" >&2
+      return 1
     fi
   done
+
+  local archived_config
+  for archived_config in \
+    docs/archive/configs/rb_servo_server_dual_rbsim.legacy.yaml \
+    docs/archive/configs/rb_servo_server_dual_rb_simulator.legacy.yaml \
+    docs/archive/configs/rb_servo_server_dual_rb_simulator_compose.legacy.yaml \
+    docs/archive/configs/rb_simulator_dual_rb3_730e.legacy.yaml
+  do
+    if [[ ! -f "${archived_config}" ]]; then
+      echo "ERROR: missing archived deprecated config: ${archived_config}" >&2
+      return 1
+    fi
+    grep_existing "Deprecated|deprecated|HISTORICAL|historical|archive|archived" "${archived_config}"
+  done
+
+  grep_existing "historical reference only|not runnable source-of-truth" docs/archive/configs/README.md README.md README.en.md
+  grep_absent '(^|[^[:alnum:]_.-])dual_real\.yaml([^[:alnum:]_.-]|$)' README.md docs AGENTS.md rb_servo_server/docs
 }
 
 run_gui_split_gate() {

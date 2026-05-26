@@ -21,12 +21,12 @@ Use these files together:
   `tcp://127.0.0.1:50210`, binds UDP command/state ports to loopback, and
   keeps realtime priority off.
 
-`config/dual_rbsim.yaml`, `config/dual_rb_simulator.yaml`, and
-`config/dual_rb_simulator_compose.yaml` are compatibility aliases only. Do not
-use them for new evidence. New docs and configs should use
-`run_mode: simulation`, `backend_type: simulator`, and
-`simulator_control_endpoint`. Remove the compatibility names after downstream
-configs stop depending on them.
+The historical `dual_rbsim.yaml`, `dual_rb_simulator.yaml`, and
+`dual_rb_simulator_compose.yaml` names have been moved to
+`docs/archive/configs/`. They are archived references only, not runnable
+source-of-truth profiles, and must not be used for new evidence. New docs and
+configs should use `run_mode: simulation`, `backend_type: simulator`, and
+`simulator_control_endpoint`.
 
 The per-arm endpoint split is the supported topology. Each simulator process
 owns exactly one arm and rejects wrong-arm requests fail-closed.

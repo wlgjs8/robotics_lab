@@ -1056,25 +1056,33 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     if (command_verdict) *command_verdict = SafetyVerdict::Ok;
     ServoTarget target;
     const bool synthetic_hold = isSyntheticHoldCommand(command);
+    const auto clear_left_linear_path = [&]() {
+        left_cartesian_servo_path_ = CartesianServoPathState{};
+        left_last_cartesian_solve_ = CartesianSolveTelemetry{};
+    };
+    const auto clear_right_linear_path = [&]() {
+        right_cartesian_servo_path_ = CartesianServoPathState{};
+        right_last_cartesian_solve_ = CartesianSolveTelemetry{};
+    };
 
     if (left_cartesian_servo_path_.active && !isValidJointState(left_state)) {
-        clearLatchedCartesianTarget(ArmId::Left);
+        clear_left_linear_path();
     }
     if (right_cartesian_servo_path_.active && !isValidJointState(right_state)) {
-        clearLatchedCartesianTarget(ArmId::Right);
+        clear_right_linear_path();
     }
     if (linearPathLeaseExpired(left_cartesian_servo_path_, command.host_time_ns)) {
-        clearLatchedCartesianTarget(ArmId::Left);
+        clear_left_linear_path();
     }
     if (linearPathLeaseExpired(right_cartesian_servo_path_, command.host_time_ns)) {
-        clearLatchedCartesianTarget(ArmId::Right);
+        clear_right_linear_path();
     }
     if (!synthetic_hold) {
         if (command.left.mode != ControlMode::TcpLinearMove) {
-            clearLatchedCartesianTarget(ArmId::Left);
+            clear_left_linear_path();
         }
         if (command.right.mode != ControlMode::TcpLinearMove) {
-            clearLatchedCartesianTarget(ArmId::Right);
+            clear_right_linear_path();
         }
     }
 

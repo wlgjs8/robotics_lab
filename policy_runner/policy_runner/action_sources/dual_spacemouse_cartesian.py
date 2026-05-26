@@ -77,7 +77,7 @@ class DualSpaceMouseCartesianActionSource:
         if left_armed is False and right_armed is False and (left_released or right_released):
             left = _ZERO_TWIST
             right = _ZERO_TWIST
-        if left is None and right is None:
+        if left is None and right is None and left_armed is not True and right_armed is not True:
             return None
         return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
 

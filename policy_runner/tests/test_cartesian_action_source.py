@@ -194,6 +194,30 @@ class CartesianActionSourceTest(unittest.TestCase):
         self.assertIsNone(source.next_intent(sample_state(), time.monotonic()))
         self.assertIsNone(source.next_intent(sample_state(), time.monotonic()))
 
+    def test_armed_with_centered_puck_still_emits_zero_twist(self):
+        reader = FakeSpaceMouseReader(
+            [
+                spacemouse_sample(tx=0.5, buttons=(True,)),
+                spacemouse_sample(tx=0.0, buttons=(True,)),
+            ]
+        )
+        source = SpaceMouseCartesianActionSource(
+            reader=reader,
+            selected_arm="left",
+            deadband=0.10,
+            max_linear_velocity_m_s=0.03,
+        )
+
+        pushed = source.next_intent(sample_state(), time.monotonic())
+        centered = source.next_intent(sample_state(), time.monotonic())
+
+        self.assertIsNotNone(pushed)
+        self.assertIsNotNone(centered, "armed-but-centered must emit intent, not None")
+        assert centered is not None
+        self.assertEqual(centered.mode, "TcpTwistLocal")
+        self.assertEqual(tuple(centered.left["tcp_twist_local"]), (0.0,) * 6)
+        self.assertEqual(centered.right["mode"], "Hold")
+
     def test_spacemouse_cartesian_clamps_linear_and_angular_velocity(self):
         reader = FakeSpaceMouseReader([spacemouse_sample(tx=10.0, ty=-10.0, rz=10.0)])
         source = SpaceMouseCartesianActionSource(
@@ -320,6 +344,35 @@ class CartesianActionSourceTest(unittest.TestCase):
         self.assertEqual(released.left["tcp_twist_local"], [0.0] * 6)
         self.assertEqual(released.right["tcp_twist_local"], [0.0] * 6)
         self.assertIsNone(idle)
+
+    def test_both_armed_both_centered_emits_hold_intent(self):
+        left_reader = FakeSpaceMouseReader(
+            [
+                spacemouse_sample(tx=0.5, buttons=(True,)),
+                spacemouse_sample(tx=0.0, buttons=(True,)),
+            ]
+        )
+        right_reader = FakeSpaceMouseReader(
+            [
+                spacemouse_sample(tx=0.5, buttons=(True,)),
+                spacemouse_sample(tx=0.0, buttons=(True,)),
+            ]
+        )
+        source = DualSpaceMouseCartesianActionSource(
+            left_reader=left_reader,
+            right_reader=right_reader,
+            deadband=0.10,
+            max_linear_velocity_m_s=0.03,
+        )
+
+        pushed = source.next_intent(sample_state(), time.monotonic())
+        centered = source.next_intent(sample_state(), time.monotonic())
+
+        self.assertIsNotNone(pushed)
+        self.assertIsNotNone(centered, "both armed + both centered must emit, not None")
+        assert centered is not None
+        self.assertEqual(centered.left["mode"], "Hold")
+        self.assertEqual(centered.right["mode"], "Hold")
 
     def test_dual_spacemouse_cartesian_sends_no_command_when_both_inactive(self):
         source = DualSpaceMouseCartesianActionSource(
