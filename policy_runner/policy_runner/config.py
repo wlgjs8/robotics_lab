@@ -47,6 +47,35 @@ class GeometryConfig:
 
 
 @dataclass(frozen=True)
+class RecordingConfig:
+    output_dir: str = "/data/episodes"
+    rate_hz: float = 30.0
+    format: str = "hdf5"
+
+    def __post_init__(self) -> None:
+        if self.rate_hz < 1.0 or self.rate_hz > 100.0:
+            raise ValueError("recording.rate_hz must be in [1.0, 100.0]")
+        if self.format not in {"hdf5", "jsonl"}:
+            raise ValueError(
+                f"recording.format must be 'hdf5' or 'jsonl', got: {self.format}"
+            )
+
+
+@dataclass(frozen=True)
+class CameraConfig:
+    enable: bool = False
+    zmq_endpoint: str = "tcp://127.0.0.1:5600"
+    bundle_topic: str = "camera.bundle"
+    max_age_ms: float = 100.0
+    expected_cameras: list[str] = field(default_factory=list)
+    record_zero_on_missing: bool = True
+
+    def __post_init__(self) -> None:
+        if self.max_age_ms <= 0.0:
+            raise ValueError("camera.max_age_ms must be positive")
+
+
+@dataclass(frozen=True)
 class JointSineConfig:
     selected_arm: str = "both"
     amplitude_deg: tuple[float, ...] = (1.0, 1.0, 1.0, 0.5, 0.5, 0.5)
@@ -165,6 +194,8 @@ class PolicyRunnerConfig:
     action_source: str = "hold"
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     geometry: GeometryConfig = field(default_factory=GeometryConfig)
+    recording: RecordingConfig = field(default_factory=RecordingConfig)
+    camera: CameraConfig = field(default_factory=CameraConfig)
     robot_state: RobotStateConfig = field(default_factory=RobotStateConfig)
     servo_command: ServoCommandConfig = field(default_factory=ServoCommandConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
@@ -181,6 +212,10 @@ class PolicyRunnerConfig:
     def __post_init__(self) -> None:
         _validate_command_rate_hz(float(self.command_rate_hz))
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "PolicyRunnerConfig":
+        return config_from_mapping(raw)
+
 
 def load_config(path: str | Path) -> PolicyRunnerConfig:
     raw = _load_mapping(Path(path))
@@ -196,6 +231,8 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         action_source=str(raw.get("action_source", "hold")),
         runtime=_runtime_config(_section(raw, "runtime")),
         geometry=GeometryConfig(**_section(raw, "geometry")),
+        recording=_recording_config(_section(raw, "recording")),
+        camera=_camera_config(_section(raw, "camera")),
         robot_state=RobotStateConfig(**_section(raw, "robot_state")),
         servo_command=_servo_command_config(_section(raw, "servo_command")),
         safety=_safety_config(_section(raw, "safety")),
@@ -224,6 +261,27 @@ def _runtime_config(raw: dict[str, Any]) -> RuntimeConfig:
     if "startup_timeout_sec" in raw:
         raw["startup_timeout_sec"] = float(raw["startup_timeout_sec"])
     return RuntimeConfig(**raw)
+
+
+def _recording_config(raw: dict[str, Any]) -> RecordingConfig:
+    if "rate_hz" in raw:
+        raw["rate_hz"] = float(raw["rate_hz"])
+    if "format" in raw:
+        raw["format"] = str(raw["format"])
+    if "output_dir" in raw:
+        raw["output_dir"] = str(raw["output_dir"])
+    return RecordingConfig(**raw)
+
+
+def _camera_config(raw: dict[str, Any]) -> CameraConfig:
+    if "max_age_ms" in raw:
+        raw["max_age_ms"] = float(raw["max_age_ms"])
+    if "expected_cameras" in raw:
+        value = raw["expected_cameras"]
+        if not isinstance(value, list):
+            raise ValueError("camera.expected_cameras must be a list")
+        raw["expected_cameras"] = [str(item) for item in value]
+    return CameraConfig(**raw)
 
 
 def _servo_command_config(raw: dict[str, Any]) -> ServoCommandConfig:

@@ -245,16 +245,38 @@ def _main_with_subcommands(argv: list[str]) -> int:
     teleop.add_argument("--config", required=True, help="policy_runner YAML config")
     teleop.add_argument("--output-dir", default="/data/policy_episodes")
 
+    hdf5_record = sub.add_parser(
+        "hdf5-record",
+        help="Teleop and record episodes to ACT-compatible HDF5 files.",
+    )
+    hdf5_record.add_argument("--config", required=True, help="policy_runner YAML config")
+    hdf5_record.add_argument("--output-dir", default=None, help="Override recording.output_dir from config")
+    hdf5_record.add_argument("--task", required=True, help="Task description for this batch")
+    hdf5_record.add_argument("--operator", default=None, help="Operator ID")
+    hdf5_record.add_argument("--rate", type=float, default=None, help="Override recording.rate_hz from config")
+    hdf5_record.add_argument("--with-camera", action="store_true", help="Record camera.bundle images")
+    hdf5_record.add_argument("--zmq-endpoint", default=None, help="Override camera.zmq_endpoint")
+
     train = sub.add_parser("train", help="Train a small V1 behavior-cloning baseline from JSONL episodes.")
     train.add_argument("--episodes-dir", default="/data/policy_episodes")
     train.add_argument("--checkpoint", default="/data/checkpoints/bc_state_to_twist.pt")
     train.add_argument("--epochs", type=int, default=50)
     train.add_argument("--batch-size", type=int, default=64)
     train.add_argument("--lr", type=float, default=1e-3)
+    train.add_argument(
+        "--strict-config-check",
+        action="store_true",
+        help="Abort training if HDF5 episodes carry different config hashes.",
+    )
 
-    infer = sub.add_parser("infer", help="Run a trained V1 behavior-cloning checkpoint in simulation.")
+    infer = sub.add_parser("infer", help="Run a trained behavior-cloning checkpoint in simulation.")
     infer.add_argument("--config", required=True, help="policy_runner YAML config")
     infer.add_argument("--checkpoint", default="/data/checkpoints/bc_state_to_twist.pt")
+    infer.add_argument(
+        "--ignore-config-drift",
+        action="store_true",
+        help="Suppress one-shot checkpoint/runtime config hash drift warnings.",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "record":
@@ -295,6 +317,101 @@ def _main_with_subcommands(argv: list[str]) -> int:
             )
         finally:
             recorder.close()
+    if args.command == "hdf5-record":
+        from .recording import Hdf5EpisodeRecorder
+
+        config = load_config(args.config)
+        output_dir = args.output_dir if args.output_dir is not None else config.recording.output_dir
+        rate_hz = args.rate if args.rate is not None else config.recording.rate_hz
+        camera_client = None
+        if args.with_camera or config.camera.enable:
+            from .camera_bundle_client import CameraBundleClient
+
+            camera_client = CameraBundleClient(
+                zmq_endpoint=args.zmq_endpoint or config.camera.zmq_endpoint,
+                topic=config.camera.bundle_topic,
+                max_age_ms=config.camera.max_age_ms,
+            )
+        recorder = Hdf5EpisodeRecorder(
+            output_dir,
+            recording_rate_hz=rate_hz,
+            camera_client=camera_client,
+            expected_cameras=config.camera.expected_cameras,
+            record_zero_on_missing=config.camera.record_zero_on_missing,
+        )
+        state_client = RobotStateClient(config.robot_state.bind, config.robot_state.stale_timeout_sec)
+
+        print("Waiting for robot state to anchor reset_pose...", flush=True)
+        reset_snapshot = None
+        deadline = time.monotonic() + max(config.runtime.startup_timeout_sec, 0.0)
+        while time.monotonic() < deadline:
+            reset_snapshot = state_client.poll_once(timeout_sec=0.2)
+            if reset_snapshot is not None:
+                break
+        if reset_snapshot is None:
+            print("ERROR: did not receive robot state within startup timeout", flush=True)
+            state_client.close()
+            if camera_client is not None:
+                camera_client.close()
+            return STARTUP_TIMEOUT_EXIT_CODE
+
+        recorder.start_episode(
+            reset_snapshot=reset_snapshot,
+            task_description=args.task,
+            action_source=config.action_source,
+            operator_id=args.operator,
+        )
+        print("Started episode; reset anchored. Press Ctrl-C to end.", flush=True)
+
+        last_packet: dict[str, object] | None = None
+        last_packet_time_ns = 0
+        last_packet_seq = 0
+
+        def packet_sink(packet: dict[str, object]) -> None:
+            nonlocal last_packet, last_packet_time_ns, last_packet_seq
+            last_packet = packet
+            last_packet_time_ns = time.time_ns()
+            last_packet_seq = int(packet.get("seq", 0) or 0)
+
+        def state_sink(snapshot: StateSnapshot) -> None:
+            recorder.record_frame(
+                state_snapshot=snapshot,
+                action_packet=last_packet,
+                action_host_time_ns=last_packet_time_ns,
+                action_seq=last_packet_seq,
+            )
+
+        command_client = ServoCommandClient(
+            config.servo_command.endpoint,
+            config.servo_command.timeout_sec,
+            packet_sink=packet_sink,
+        )
+        try:
+            rc = run(
+                config,
+                state_client=state_client,
+                command_client=command_client,
+                state_sink=state_sink,
+            )
+        finally:
+            if recorder.has_active_episode:
+                if "rc" not in locals():
+                    end_reason = "operator_abort"
+                    success = False
+                elif rc == 0:
+                    end_reason = "operator_abort"
+                    success = False
+                elif rc == STARTUP_TIMEOUT_EXIT_CODE:
+                    end_reason = "timeout"
+                    success = False
+                else:
+                    end_reason = "other"
+                    success = False
+                path = recorder.end_episode(success=success, end_reason=end_reason)
+                print(f"Episode written: {path}", flush=True)
+            if camera_client is not None:
+                camera_client.close()
+        return rc
     if args.command == "train":
         from .training import train_behavior_cloning
 
@@ -304,11 +421,19 @@ def _main_with_subcommands(argv: list[str]) -> int:
             epochs=args.epochs,
             batch_size=args.batch_size,
             lr=args.lr,
+            strict_config_check=args.strict_config_check,
         )
         return 0
     if args.command == "infer":
         from .training import BehaviorCloningActionSource
 
         config = load_config(args.config)
-        return run(config, source=BehaviorCloningActionSource(args.checkpoint, config.servo_command.timeout_sec))
+        return run(
+            config,
+            source=BehaviorCloningActionSource(
+                args.checkpoint,
+                config.servo_command.timeout_sec,
+                ignore_config_drift=args.ignore_config_drift,
+            ),
+        )
     raise ValueError(f"unknown policy_runner command: {args.command}")

@@ -45,6 +45,91 @@ nlohmann::json jointArrayJson(const JointArray& joints) {
     return out;
 }
 
+nlohmann::json stringArrayJson(const std::vector<std::string>& values) {
+    nlohmann::json out = nlohmann::json::array();
+    for (const std::string& value : values) out.push_back(value);
+    return out;
+}
+
+nlohmann::json optionalDoubleJson(const std::optional<double>& value) {
+    if (!value.has_value()) return nullptr;
+    return *value;
+}
+
+std::string orientationModeString(LinearMoveOrientationMode mode) {
+    switch (mode) {
+        case LinearMoveOrientationMode::Constant:
+            return "constant";
+        case LinearMoveOrientationMode::Slerp:
+            return "slerp";
+    }
+    return "unknown";
+}
+
+std::string cartesianLimitPolicyString(CartesianLimitPolicy policy) {
+    switch (policy) {
+        case CartesianLimitPolicy::Clamp:
+            return "clamp";
+        case CartesianLimitPolicy::Reject:
+            return "reject";
+    }
+    return "unknown";
+}
+
+nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config) {
+    return {
+        {"schema", "robotics_lab.cartesian_control_snapshot.v1"},
+        {"enable", config.enable},
+        {"allow_in_simulation", config.allow_in_simulation},
+        {"allow_in_real", config.allow_in_real},
+        {"warn_ik_duration_us", config.warn_ik_duration_us},
+        {"fail_ik_duration_us", config.fail_ik_duration_us},
+        {"path_kp", config.path_kp},
+        {"path_kp_pos", config.path_kp_pos},
+        {"path_kp_ori", config.path_kp_ori},
+        {"twist_orientation_hold_kp", config.twist_orientation_hold_kp},
+        {"twist_angular_deadband_rad_s", config.twist_angular_deadband_rad_s},
+        {"velocity_damping", config.velocity_damping},
+        {"max_twist_linear_m_s", config.max_twist_linear_m_s},
+        {"max_twist_angular_rad_s", config.max_twist_angular_rad_s},
+        {"max_linear_move_speed_m_s", config.max_linear_move_speed_m_s},
+        {"max_angular_move_speed_rad_s", config.max_angular_move_speed_rad_s},
+        {"max_cartesian_step_m", optionalDoubleJson(config.max_cartesian_step_m)},
+        {"max_cartesian_step_rad", optionalDoubleJson(config.max_cartesian_step_rad)},
+        {"exceed_limit_policy", cartesianLimitPolicyString(config.exceed_limit_policy)},
+        {"linear_move", {
+            {"min_duration_sec", config.linear_move.min_duration_sec},
+            {"max_duration_sec", config.linear_move.max_duration_sec},
+            {"default_linear_speed_m_s", config.linear_move.default_linear_speed_m_s},
+            {"default_angular_speed_rad_s", config.linear_move.default_angular_speed_rad_s},
+            {"constant_orientation_tolerance_rad", config.linear_move.constant_orientation_tolerance_rad},
+            {"default_orientation_mode", orientationModeString(config.linear_move.default_orientation_mode)},
+        }},
+    };
+}
+
+nlohmann::json kinematicsSnapshotJson(const KinematicsConfig& config) {
+    return {
+        {"schema", "robotics_lab.kinematics_snapshot.v1"},
+        {"enable", config.enable},
+        {"provider", config.provider},
+        {"urdf", config.urdf},
+        {"base_link", config.base_link},
+        {"tip_link", config.tip_link},
+        {"joint_names", stringArrayJson(config.joint_names)},
+        {"q_units", config.q_units},
+        {"publish_tcp", config.publish_tcp},
+        {"ik", {
+            {"max_iterations", config.ik.max_iterations},
+            {"timeout_ms", config.ik.timeout_ms},
+            {"damping", config.ik.damping},
+            {"position_tolerance_m", config.ik.position_tolerance_m},
+            {"orientation_tolerance_rad", config.ik.orientation_tolerance_rad},
+            {"max_step_deg", jointArrayJson(config.ik.max_step_deg)},
+        }},
+    };
+}
+
 nlohmann::json quaternionJson(const std::optional<std::array<double, 4>>& quaternion_xyzw) {
     if (!quaternion_xyzw) return nullptr;
     const auto& q = *quaternion_xyzw;
@@ -502,6 +587,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["command_source"] = commandSourceJson(snapshot, config_);
     message["observed_mode"] = observedModeString(config_);
     message["observed_backend"] = observedBackendString(config_);
+    message["cartesian_control_snapshot"] = cartesianControlSnapshotJson(config_.cartesian_control);
+    message["kinematics_snapshot"] = kinematicsSnapshotJson(config_.kinematics);
     const bool worker_enabled = config_.servo.io_model == ServoIoModel::Worker;
 
     message["left"] = armStateJson(

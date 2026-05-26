@@ -132,6 +132,57 @@ The V1 dataset is robot-state plus policy-command JSONL only. Camera/image
 episodes remain a later merge step using camera timestamps and robot state
 timestamps.
 
+## HDF5 Episode Recording
+
+Record teleop episodes to ACT-compatible HDF5 files, one file per episode:
+
+```bash
+python3 -m policy_runner hdf5-record \
+  --config policy_runner/config/simulator_dual_spacemouse_cartesian.yaml \
+  --task "pick up cup with left arm" \
+  --operator user_a
+```
+
+The episode reset pose is anchored to the robot joint/TCP state from the first
+state packet received by this command. Move the robot to the desired reset
+configuration before launching the recorder. Press `Ctrl-C` to end the current
+episode and flush it to disk.
+
+Schema: `robotics_lab.episode.v1`. Actions are recorded as `TcpTwistLocal`
+twists. States are absolute `q_actual`, `q_sent`, and `tcp_stand` with
+quaternion. `reset_qpos_left/right` and `reset_tcp_stand_left/right` are stored
+as HDF5 root attributes so training code can compute reset-anchored deltas.
+The server `cartesian_control_snapshot` and `kinematics_snapshot` are stored
+under `/config` with SHA-256 root attributes. Training copies those hashes into
+behavior-cloning checkpoints and warns, or aborts with
+`--strict-config-check`, if HDF5 episodes disagree. Inference compares the
+checkpoint hashes with the live state stream once at startup and warns on
+drift unless `--ignore-config-drift` is supplied.
+
+Install the optional recorder dependencies first:
+
+```bash
+python3 -m pip install -e "policy_runner[recording]"
+```
+
+To include camera images from `camera_server` bundles, install the camera extra
+and pass `--with-camera`:
+
+```bash
+python3 -m pip install -e "policy_runner[camera]"
+python3 -m policy_runner hdf5-record \
+  --config policy_runner/config/simulator_dual_spacemouse_cartesian.yaml \
+  --task "pick up cup with left arm" \
+  --with-camera
+```
+
+Camera frames are read from the latest complete `camera.bundle` metadata and
+POSIX shared memory slots, then stored under
+`/observations/images/<camera_name>` as `uint8` RGB datasets with one-frame
+chunks and gzip compression. Configure `camera.expected_cameras` to record a
+fixed subset; missing frames after a shape has been observed are zero-filled and
+`bundle_age_us` marks missing bundles.
+
 ## SpaceMouse Joint Velocity
 
 SpaceMouse support belongs in `policy_runner`, not `rb_gui`. P1 only maps the

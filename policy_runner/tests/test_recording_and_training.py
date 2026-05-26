@@ -1,13 +1,25 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 
-from policy_runner.recording import EpisodeRecorder
+from policy_runner.recording import EpisodeRecorder, _hash_canonical_json
 from policy_runner.robot_state_client import StateSnapshot
-from policy_runner.training import action_vector, load_dataset, state_vector
+from policy_runner.training import action_vector, load_dataset, state_vector, train_behavior_cloning
+
+try:
+    import h5py
+except ModuleNotFoundError:
+    h5py = None
+
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
 
 
 def state_payload(tick: int = 1) -> dict:
@@ -26,6 +38,20 @@ def state_payload(tick: int = 1) -> dict:
         "left": dict(arm),
         "right": dict(arm),
     }
+
+
+def config_snapshots(path_kp_pos: float = 6.0, damping: float = 0.001) -> tuple[dict, dict]:
+    cartesian = {
+        "schema": "robotics_lab.cartesian_control_snapshot.v1",
+        "enable": True,
+        "path_kp_pos": path_kp_pos,
+    }
+    kinematics = {
+        "schema": "robotics_lab.kinematics_snapshot.v1",
+        "provider": "pinocchio",
+        "ik": {"damping": damping},
+    }
+    return cartesian, kinematics
 
 
 class RecordingAndTrainingTest(unittest.TestCase):
@@ -70,6 +96,84 @@ class RecordingAndTrainingTest(unittest.TestCase):
             obs, actions = load_dataset(tmp)
             self.assertEqual(len(obs), 1)
             self.assertEqual(len(actions), 1)
+
+    @unittest.skipIf(h5py is None or torch is None, "training extras not installed")
+    def test_training_records_config_hashes_in_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_jsonl_episode(tmp)
+            cartesian, kinematics = config_snapshots()
+            self._write_hdf5_hashes(Path(tmp) / "ep_001.hdf5", cartesian, kinematics)
+
+            checkpoint = Path(tmp) / "bc.pt"
+            train_behavior_cloning(
+                episodes_dir=tmp,
+                checkpoint_path=checkpoint,
+                epochs=1,
+                batch_size=1,
+            )
+
+            saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
+            self.assertEqual(saved["schema"], "robotics_lab.policy_runner.bc_checkpoint.v2")
+            self.assertEqual(saved["cartesian_control_hash"], _hash_canonical_json(cartesian))
+            self.assertEqual(saved["kinematics_hash"], _hash_canonical_json(kinematics))
+
+    @unittest.skipIf(h5py is None or torch is None, "training extras not installed")
+    def test_training_warns_on_hdf5_config_hash_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_jsonl_episode(tmp)
+            cartesian, kinematics = config_snapshots(path_kp_pos=6.0)
+            changed, _ = config_snapshots(path_kp_pos=9.0)
+            self._write_hdf5_hashes(Path(tmp) / "ep_001.hdf5", cartesian, kinematics)
+            self._write_hdf5_hashes(Path(tmp) / "ep_002.hdf5", changed, kinematics)
+
+            stderr = StringIO()
+            with contextlib.redirect_stderr(stderr):
+                train_behavior_cloning(
+                    episodes_dir=tmp,
+                    checkpoint_path=Path(tmp) / "bc.pt",
+                    epochs=1,
+                    batch_size=1,
+                    strict_config_check=False,
+                )
+
+            self.assertIn("config hash mismatch", stderr.getvalue())
+            self.assertIn("cartesian_control_hash", stderr.getvalue())
+
+    @unittest.skipIf(h5py is None or torch is None, "training extras not installed")
+    def test_training_aborts_on_hdf5_config_hash_mismatch_in_strict_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_jsonl_episode(tmp)
+            cartesian, kinematics = config_snapshots(path_kp_pos=6.0)
+            changed, _ = config_snapshots(path_kp_pos=9.0)
+            self._write_hdf5_hashes(Path(tmp) / "ep_001.hdf5", cartesian, kinematics)
+            self._write_hdf5_hashes(Path(tmp) / "ep_002.hdf5", changed, kinematics)
+
+            with self.assertRaises(RuntimeError):
+                train_behavior_cloning(
+                    episodes_dir=tmp,
+                    checkpoint_path=Path(tmp) / "bc.pt",
+                    epochs=1,
+                    batch_size=1,
+                    strict_config_check=True,
+                )
+
+    def _write_jsonl_episode(self, root: str | Path) -> None:
+        packet = {
+            "left": {"mode": "TcpTwistLocal", "tcp_twist_local": [0.01, 0.02, 0, 0, 0, 0]},
+            "right": {"mode": "TcpTwistLocal", "tcp_twist_local": [0, 0, 0, 0.1, 0, 0]},
+        }
+        recorder = EpisodeRecorder(root, episode_name="episode_train")
+        try:
+            recorder.record_state(StateSnapshot(state_payload(), 1.0))
+            recorder.record_action({"seq": 1, "mode": "TcpTwistLocal", **packet})
+        finally:
+            recorder.close()
+
+    def _write_hdf5_hashes(self, path: Path, cartesian: dict, kinematics: dict) -> None:
+        assert h5py is not None
+        with h5py.File(path, "w") as handle:
+            handle.attrs["cartesian_control_hash"] = _hash_canonical_json(cartesian)
+            handle.attrs["kinematics_hash"] = _hash_canonical_json(kinematics)
 
 
 if __name__ == "__main__":

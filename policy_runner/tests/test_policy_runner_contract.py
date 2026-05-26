@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
+import tempfile
 import time
 import unittest
 from io import StringIO
@@ -15,6 +17,7 @@ from policy_runner.action_sources.joint_sine import JointSineActionSource
 from policy_runner.action_sources.joint_velocity import JointVelocityActionSource
 from policy_runner.config import config_from_mapping, load_config
 from policy_runner.main import LEASE_READBACK_TIMEOUT_EXIT_CODE, STARTUP_TIMEOUT_EXIT_CODE, make_action_source, run
+from policy_runner.recording import _hash_canonical_json
 from policy_runner.robot_state_client import (
     RobotStateClient,
     StateSnapshot,
@@ -23,6 +26,17 @@ from policy_runner.robot_state_client import (
 )
 from policy_runner.safety import ActionRequirements, SafetyConfig, SafetyGate
 from policy_runner.servo_command_client import CommandIntent, ServoCommandClient
+from policy_runner.training import (
+    ACTION_DIM,
+    STATE_DIM,
+    BehaviorCloningActionSource,
+    _PolicyNet,
+)
+
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
 
 
 def sample_state(**overrides):
@@ -36,6 +50,21 @@ def sample_state(**overrides):
     }
     payload.update(overrides)
     return StateSnapshot(payload=payload, received_monotonic=time.monotonic())
+
+
+def sample_config_snapshots(path_kp_pos=6.0):
+    return {
+        "cartesian_control_snapshot": {
+            "schema": "robotics_lab.cartesian_control_snapshot.v1",
+            "enable": True,
+            "path_kp_pos": path_kp_pos,
+        },
+        "kinematics_snapshot": {
+            "schema": "robotics_lab.kinematics_snapshot.v1",
+            "provider": "pinocchio",
+            "ik": {"damping": 0.001},
+        },
+    }
 
 
 class FakeRecvSocket:
@@ -613,6 +642,80 @@ class PolicyRunnerContractTest(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(command_client.sent, [])
+
+    @unittest.skipIf(torch is None, "torch not installed")
+    def test_behavior_cloning_warns_once_on_runtime_config_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "bc.pt"
+            self._write_bc_checkpoint(
+                checkpoint,
+                cartesian_control_hash="a" * 64,
+                kinematics_hash="b" * 64,
+            )
+            source = BehaviorCloningActionSource(checkpoint)
+            snapshot = sample_state(**sample_config_snapshots(path_kp_pos=7.0))
+
+            stderr = StringIO()
+            with contextlib.redirect_stderr(stderr):
+                source.next_intent(snapshot, time.monotonic())
+                source.next_intent(snapshot, time.monotonic())
+
+            self.assertEqual(stderr.getvalue().count("config drift detected"), 1)
+            self.assertIn("cartesian_control", stderr.getvalue())
+            self.assertIn("kinematics", stderr.getvalue())
+
+    @unittest.skipIf(torch is None, "torch not installed")
+    def test_behavior_cloning_silent_when_runtime_config_hashes_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots = sample_config_snapshots(path_kp_pos=7.0)
+            checkpoint = Path(tmp) / "bc.pt"
+            self._write_bc_checkpoint(
+                checkpoint,
+                cartesian_control_hash=_hash_canonical_json(snapshots["cartesian_control_snapshot"]),
+                kinematics_hash=_hash_canonical_json(snapshots["kinematics_snapshot"]),
+            )
+            source = BehaviorCloningActionSource(checkpoint)
+
+            stderr = StringIO()
+            with contextlib.redirect_stderr(stderr):
+                source.next_intent(sample_state(**snapshots), time.monotonic())
+
+            self.assertEqual(stderr.getvalue(), "")
+
+    @unittest.skipIf(torch is None, "torch not installed")
+    def test_behavior_cloning_v1_checkpoint_without_config_hashes_is_silent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "bc.pt"
+            self._write_bc_checkpoint(checkpoint)
+            source = BehaviorCloningActionSource(checkpoint)
+
+            stderr = StringIO()
+            with contextlib.redirect_stderr(stderr):
+                source.next_intent(sample_state(**sample_config_snapshots(path_kp_pos=9.0)), time.monotonic())
+
+            self.assertEqual(stderr.getvalue(), "")
+
+    def _write_bc_checkpoint(
+        self,
+        path: Path,
+        *,
+        cartesian_control_hash: str | None = None,
+        kinematics_hash: str | None = None,
+    ) -> None:
+        assert torch is not None
+        checkpoint = {
+            "schema": "robotics_lab.policy_runner.bc_checkpoint.v1",
+            "input_dim": STATE_DIM,
+            "output_dim": ACTION_DIM,
+            "obs_mean": [0.0] * STATE_DIM,
+            "obs_std": [1.0] * STATE_DIM,
+            "model_state": _PolicyNet(STATE_DIM, ACTION_DIM).state_dict(),
+        }
+        if cartesian_control_hash is not None:
+            checkpoint["cartesian_control_hash"] = cartesian_control_hash
+        if kinematics_hash is not None:
+            checkpoint["kinematics_hash"] = kinematics_hash
+        torch.save(checkpoint, path)
 
 
 if __name__ == "__main__":

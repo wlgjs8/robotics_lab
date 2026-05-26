@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 from .action_sources.tcp_delta import CARTESIAN_ACTION_REQUIREMENTS, clamp_tcp_twist, tcp_twist_local_intent
+from .recording import _hash_canonical_json
 from .robot_state_client import StateSnapshot
 from .servo_command_client import CommandIntent
 
@@ -16,11 +18,18 @@ ACTION_DIM = 12
 class BehaviorCloningActionSource:
     requirements = CARTESIAN_ACTION_REQUIREMENTS
 
-    def __init__(self, checkpoint_path: str | Path, timeout_sec: float = 0.2):
+    def __init__(
+        self,
+        checkpoint_path: str | Path,
+        timeout_sec: float = 0.2,
+        ignore_config_drift: bool = False,
+    ):
         import torch
 
         self.torch = torch
         self.timeout_sec = timeout_sec
+        self.ignore_config_drift = bool(ignore_config_drift)
+        self._config_drift_checked = False
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         self.model = _PolicyNet(int(checkpoint["input_dim"]), int(checkpoint["output_dim"]))
@@ -29,9 +38,12 @@ class BehaviorCloningActionSource:
         self.model.eval()
         self.obs_mean = torch.tensor(checkpoint["obs_mean"], dtype=torch.float32, device=self.device)
         self.obs_std = torch.tensor(checkpoint["obs_std"], dtype=torch.float32, device=self.device)
+        self.training_cartesian_control_hash = str(checkpoint.get("cartesian_control_hash", "") or "")
+        self.training_kinematics_hash = str(checkpoint.get("kinematics_hash", "") or "")
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         _ = now_monotonic
+        self._warn_once_on_config_drift(snapshot.payload)
         obs = self.torch.tensor(state_vector(snapshot.payload), dtype=self.torch.float32, device=self.device)
         obs = (obs - self.obs_mean) / self.obs_std.clamp_min(1e-6)
         with self.torch.no_grad():
@@ -42,6 +54,35 @@ class BehaviorCloningActionSource:
             return None
         return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
 
+    def _warn_once_on_config_drift(self, payload: dict[str, Any]) -> None:
+        if self.ignore_config_drift or self._config_drift_checked:
+            return
+        self._config_drift_checked = True
+        checks = (
+            (
+                "cartesian_control",
+                self.training_cartesian_control_hash,
+                _hash_canonical_json(_dict_or_empty(payload.get("cartesian_control_snapshot"))),
+            ),
+            (
+                "kinematics",
+                self.training_kinematics_hash,
+                _hash_canonical_json(_dict_or_empty(payload.get("kinematics_snapshot"))),
+            ),
+        )
+        mismatches = [
+            f"{name}: checkpoint={expected or '<empty>'} runtime={actual or '<empty>'}"
+            for name, expected, actual in checks
+            if expected and expected != actual
+        ]
+        if mismatches:
+            print(
+                "WARNING: policy_runner config drift detected; "
+                + "; ".join(mismatches)
+                + ". Use --ignore-config-drift only for deliberate replay/debug.",
+                file=sys.stderr,
+            )
+
 
 def train_behavior_cloning(
     *,
@@ -50,6 +91,7 @@ def train_behavior_cloning(
     epochs: int = 50,
     batch_size: int = 64,
     lr: float = 1e-3,
+    strict_config_check: bool = False,
 ) -> None:
     import torch
     from torch import nn
@@ -58,6 +100,20 @@ def train_behavior_cloning(
     obs, act = load_dataset(episodes_dir)
     if not obs:
         raise ValueError(f"no TcpTwistLocal action samples found under {episodes_dir}")
+    cartesian_control_hash, kinematics_hash = _read_training_config_hashes(episodes_dir)
+    mismatches = _config_hash_mismatches(
+        episodes_dir,
+        cartesian_control_hash=cartesian_control_hash,
+        kinematics_hash=kinematics_hash,
+    )
+    if mismatches:
+        message = (
+            "config hash mismatch across HDF5 episodes: "
+            + "; ".join(mismatches)
+        )
+        if strict_config_check:
+            raise RuntimeError(message)
+        print(f"WARNING: {message}", file=sys.stderr)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     x = torch.tensor(obs, dtype=torch.float32)
@@ -89,12 +145,14 @@ def train_behavior_cloning(
         print(f"epoch={epoch + 1} loss={total / max(count, 1):.8f}", flush=True)
 
     checkpoint = {
-        "schema": "robotics_lab.policy_runner.bc_checkpoint.v1",
+        "schema": "robotics_lab.policy_runner.bc_checkpoint.v2",
         "input_dim": x.shape[1],
         "output_dim": y.shape[1],
         "obs_mean": obs_mean.tolist(),
         "obs_std": obs_std.tolist(),
         "model_state": model.cpu().state_dict(),
+        "cartesian_control_hash": cartesian_control_hash,
+        "kinematics_hash": kinematics_hash,
     }
     path = Path(checkpoint_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +228,57 @@ def _load_states_by_tick(path: Path) -> dict[Any, dict[str, Any]]:
         if isinstance(payload, dict):
             states[payload.get("tick")] = payload
     return states
+
+
+def _read_training_config_hashes(episodes_dir: str | Path) -> tuple[str, str]:
+    first = _first_hdf5_episode(episodes_dir)
+    if first is None:
+        return "", ""
+    try:
+        import h5py
+    except ModuleNotFoundError:
+        return "", ""
+    with h5py.File(first, "r") as handle:
+        return (
+            str(handle.attrs.get("cartesian_control_hash", "") or ""),
+            str(handle.attrs.get("kinematics_hash", "") or ""),
+        )
+
+
+def _config_hash_mismatches(
+    episodes_dir: str | Path,
+    *,
+    cartesian_control_hash: str,
+    kinematics_hash: str,
+) -> list[str]:
+    root = Path(episodes_dir)
+    try:
+        import h5py
+    except ModuleNotFoundError:
+        return []
+    mismatches: list[str] = []
+    expected = {
+        "cartesian_control_hash": cartesian_control_hash,
+        "kinematics_hash": kinematics_hash,
+    }
+    for path in sorted(root.rglob("*.hdf5")):
+        with h5py.File(path, "r") as handle:
+            for key, expected_hash in expected.items():
+                actual = str(handle.attrs.get(key, "") or "")
+                if actual != expected_hash:
+                    mismatches.append(f"{path.name}:{key}={actual}")
+    return mismatches
+
+
+def _first_hdf5_episode(episodes_dir: str | Path) -> Path | None:
+    root = Path(episodes_dir)
+    for path in sorted(root.rglob("*.hdf5")):
+        return path
+    return None
+
+
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _float_list(value: Any, length: int) -> list[float]:

@@ -175,7 +175,7 @@ run_gui_tests() {
 }
 
 run_policy_runner_tests() {
-  python3 -m unittest discover policy_runner/tests
+  PYTHONPATH=policy_runner python3 -m unittest discover policy_runner/tests
 }
 
 run_python_compile_checks() {

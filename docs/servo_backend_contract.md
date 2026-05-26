@@ -111,6 +111,7 @@ Worker mode is simulator-only until separately accepted on hardware.
 ## ArmWorker Command Policy
 
 Streaming servo requests are latest-wins. If a pending command is overwritten before dispatch, the worker must expose drop/overwrite telemetry. This is intentional for servo targets but must not be silent.
+The public telemetry field for overwritten commands is `worker_command_drops_total`, mirrored in state JSON as `command_drops_total`.
 
 Lifecycle commands such as reset/stop should not be silently overwritten by streaming servo targets. They should use a separate lane or explicit policy.
 

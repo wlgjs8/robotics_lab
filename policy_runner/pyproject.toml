@@ -11,6 +11,8 @@ dependencies = []
 
 [project.optional-dependencies]
 spacemouse = ["hidapi", "pyspacemouse"]
+recording = ["h5py>=3.10.0", "numpy>=1.24.0"]
+camera = ["pyzmq>=25.0.0", "numpy>=1.24.0"]
 ml = ["torch>=2.0"]
 
 [project.scripts]

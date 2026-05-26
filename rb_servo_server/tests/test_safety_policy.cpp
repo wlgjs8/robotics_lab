@@ -2687,6 +2687,20 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     cfg.right_robot.backend_type = rb_servo::BackendType::Mock;
     cfg.left_mount.base_pose_in_stand = {0.1, 0.2, 0.3, 0.4, 0.5, 0.6};
     cfg.right_mount.base_pose_in_stand = {-0.1, -0.2, 0.3, -0.4, -0.5, 0.6};
+    cfg.cartesian_control.path_kp_pos = 7.5;
+    cfg.cartesian_control.path_kp_ori = 8.5;
+    cfg.cartesian_control.max_twist_linear_m_s = 0.045;
+    cfg.cartesian_control.max_cartesian_step_m = 0.012;
+    cfg.cartesian_control.exceed_limit_policy = rb_servo::CartesianLimitPolicy::Reject;
+    cfg.cartesian_control.linear_move.default_linear_speed_m_s = 0.022;
+    cfg.cartesian_control.linear_move.default_orientation_mode = rb_servo::LinearMoveOrientationMode::Slerp;
+    cfg.kinematics.enable = true;
+    cfg.kinematics.provider = "pinocchio";
+    cfg.kinematics.base_link = "left_base";
+    cfg.kinematics.tip_link = "left_tcp";
+    cfg.kinematics.publish_tcp = true;
+    cfg.kinematics.ik.damping = 0.004;
+    cfg.kinematics.ik.max_iterations = 31;
 
     rb_servo::ServoSnapshot snapshot;
     snapshot.tick = 123;
@@ -2806,7 +2820,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
 
     const char* top_keys[] = {
         "schema_version", "tick", "host_time_ns", "loop_start_time_ns", "loop_end_time_ns",
-        "period_ms", "jitter_ms", "filter_dt_ms", "command_seq", "command_source", "observed_mode", "observed_backend", "left", "right",
+        "period_ms", "jitter_ms", "filter_dt_ms", "command_seq", "command_source", "observed_mode", "observed_backend",
+        "cartesian_control_snapshot", "kinematics_snapshot", "left", "right",
         "send_skew_us", "send_suppressed", "send_policy", "safety_verdict", "motion_state", "fault_latched",
         "latched_fault_reason", "fault_reason", "logger_dropped_samples", "logger_health",
         "fault_context", "mount_transform_deferred", "mounts", "tcp_fields_deferred",
@@ -2845,6 +2860,27 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("command_source").at("active_source_id").get<std::string>() == "rb_gui");
     RB_CHECK(json.at("observed_mode").get<std::string>() == "mock");
     RB_CHECK(json.at("observed_backend").get<std::string>() == "mock");
+    RB_CHECK(json.at("cartesian_control_snapshot").at("schema").get<std::string>() == "robotics_lab.cartesian_control_snapshot.v1");
+    RB_CHECK(json.at("cartesian_control_snapshot").at("enable").get<bool>());
+    RB_CHECK(json.at("cartesian_control_snapshot").at("allow_in_simulation").get<bool>());
+    RB_CHECK(!json.at("cartesian_control_snapshot").at("allow_in_real").get<bool>());
+    RB_CHECK(json.at("cartesian_control_snapshot").at("path_kp_pos").get<double>() == 7.5);
+    RB_CHECK(json.at("cartesian_control_snapshot").at("path_kp_ori").get<double>() == 8.5);
+    RB_CHECK(json.at("cartesian_control_snapshot").at("max_twist_linear_m_s").get<double>() == 0.045);
+    RB_CHECK(json.at("cartesian_control_snapshot").at("max_cartesian_step_m").get<double>() == 0.012);
+    RB_CHECK(json.at("cartesian_control_snapshot").at("max_cartesian_step_rad").is_null());
+    RB_CHECK(json.at("cartesian_control_snapshot").at("exceed_limit_policy").get<std::string>() == "reject");
+    RB_CHECK(json.at("cartesian_control_snapshot").at("linear_move").at("default_linear_speed_m_s").get<double>() == 0.022);
+    RB_CHECK(json.at("cartesian_control_snapshot").at("linear_move").at("default_orientation_mode").get<std::string>() == "slerp");
+    RB_CHECK(json.at("kinematics_snapshot").at("schema").get<std::string>() == "robotics_lab.kinematics_snapshot.v1");
+    RB_CHECK(json.at("kinematics_snapshot").at("enable").get<bool>());
+    RB_CHECK(json.at("kinematics_snapshot").at("provider").get<std::string>() == "pinocchio");
+    RB_CHECK(json.at("kinematics_snapshot").at("base_link").get<std::string>() == "left_base");
+    RB_CHECK(json.at("kinematics_snapshot").at("tip_link").get<std::string>() == "left_tcp");
+    RB_CHECK(json.at("kinematics_snapshot").at("publish_tcp").get<bool>());
+    RB_CHECK(json.at("kinematics_snapshot").at("joint_names").size() == 6);
+    RB_CHECK(json.at("kinematics_snapshot").at("ik").at("damping").get<double>() == 0.004);
+    RB_CHECK(json.at("kinematics_snapshot").at("ik").at("max_iterations").get<int>() == 31);
     RB_CHECK(json.at("left").at("mode").get<std::string>() == "JointTarget");
     RB_CHECK(json.at("right").at("mode").get<std::string>() == "Hold");
     RB_CHECK(jsonArrayHasSixFinite(json.at("left").at("q_actual_deg")));
