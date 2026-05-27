@@ -83,6 +83,10 @@ struct SendServoJResult {
     std::string state_after_source = "none";
     BackendAckPolicy ack_policy = BackendAckPolicy::BackendDefault;
     bool ack_observed = false;
+    bool controller_acceptance_observed = false;
+    double ack_wait_duration_us = 0.0;
+    bool rbpodo_waiting_ack = false;
+    std::string acceptance_semantics = "unknown";
     JointArray requested_q_deg{};
 };
 

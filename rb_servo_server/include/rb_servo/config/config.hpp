@@ -43,10 +43,16 @@ struct BackendConfig {
 
     double speed_bar = 0.1;
 
-    double servo_time_sec = 0.01;
-    double servo_lookahead_sec = 0.1;
+    double servo_t1_sec = 0.01;
+    double servo_t2_sec = 0.05;
     double servo_gain = 1.0;
-    double servo_acc = 1.0;
+    double servo_alpha = 0.5;
+
+    // Deprecated rbpodo aliases. Kept synchronized with canonical fields while
+    // old configs migrate.
+    double servo_time_sec = 0.01;
+    double servo_lookahead_sec = 0.05;
+    double servo_acc = 0.5;
 
     // rbpodo-only. When true, Cobot::disable_waiting_ack() makes command calls
     // return after socket send instead of waiting for controller ACK.
@@ -119,6 +125,9 @@ struct ServoConfig {
     // create an unexpectedly large joint step.
     double filter_dt_min_ratio = 0.5;
     double filter_dt_max_ratio = 1.5;
+
+    double servo_t1_rate_match_tolerance_ratio = 0.2;
+    bool allow_servo_t1_rate_mismatch = false;
 };
 
 struct NetworkConfig {

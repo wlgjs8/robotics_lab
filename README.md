@@ -112,6 +112,14 @@ RB_ALLOW_REAL_ROBOT=1
 RB_ALLOW_REAL_MOTION=1
 ```
 
+`rbpodo`에서 controller ACK 대기를 끈 상태로 Servo J motion을 테스트하려면
+추가 gate가 필요합니다. ACK-off 성공은 controller acceptance가 아니라
+socket/API send evidence입니다.
+
+```bash
+RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
+```
+
 실제 Cartesian/TCP motion:
 
 ```bash
@@ -132,6 +140,19 @@ RB_ALLOW_RBSCRIPT_TCP_MOTION=1
 ```
 
 이 gate들은 필요 조건일 뿐 충분 조건은 아닙니다. Config와 real-hardware acceptance도 해당 동작을 명시적으로 허용해야 합니다.
+
+`rbpodo` real config의 Rainbow Servo J parameter는 새 이름만 사용합니다.
+
+- `servo_t1_sec` -> `move_servo_j` `t1`
+- `servo_t2_sec` -> `move_servo_j` `t2`
+- `servo_gain` -> `gain`
+- `servo_alpha` -> `alpha`
+
+새 config에서 `servo_acc`나 `servo_lookahead_sec`를 쓰지 마세요. 기존 alias는
+deprecated입니다. 100Hz profile은 `servo_t1_sec: 0.01`, 200Hz profile은
+`servo_t1_sec: 0.005`가 command period와 맞아야 합니다. 자세한 절차는
+`docs/runbooks/rbpodo_servo_acceptance.md`와
+`docs/runbooks/real_robot_readonly.md`를 봅니다.
 
 Force control은 비활성 상태를 유지합니다.
 
@@ -200,6 +221,16 @@ python3 scripts/rainbow_rate_probe.py --help
 See `docs/runbooks/rbscript_tcp_ablation.md`. These probes measure ACK/read
 latency, success/error counts, state age, achieved rate, and reconnect behavior.
 They do not approve real motion.
+
+rbpodo Servo J supervised acceptance:
+
+```bash
+python3 scripts/rbpodo_servo_acceptance.py --help
+```
+
+Start with read-only. Do not copy `dual_real.example.yaml` directly as a
+ready-to-run real motion config; site-specific real configs live under
+`rb_servo_server/config/local/` and are gitignored.
 
 시뮬레이터 운영자 stack 시작:
 

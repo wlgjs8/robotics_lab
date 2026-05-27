@@ -222,6 +222,26 @@ void applySimulatorTimeoutAlias(
     }
 }
 
+void applyDeprecatedDoubleAlias(
+    const YAML::Node& sec,
+    const std::string& canonical,
+    const std::string& deprecated,
+    const std::string& path,
+    double* target
+) {
+    const bool has_canonical = has(sec, canonical);
+    const bool has_deprecated = has(sec, deprecated);
+    if (has_canonical && has_deprecated) {
+        fail(path + " cannot set both " + canonical + " and deprecated " + deprecated, sec[deprecated]);
+    }
+    if (has_canonical) {
+        *target = asDouble(sec[canonical], path + "." + canonical);
+    } else if (has_deprecated) {
+        warnDeprecatedKey(path + "." + deprecated, path + "." + canonical);
+        *target = asDouble(sec[deprecated], path + "." + deprecated);
+    }
+}
+
 void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::string& path) {
     validateAllowedKeys(sec, {
         "backend_type",
@@ -254,9 +274,12 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
         "script_alpha",
         "initial_q_deg",
         "speed_bar",
+        "servo_t1_sec",
+        "servo_t2_sec",
         "servo_time_sec",
         "servo_lookahead_sec",
         "servo_gain",
+        "servo_alpha",
         "servo_acc",
         "disable_waiting_ack",
     }, path);
@@ -312,10 +335,13 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
 
     if (has(sec, "initial_q_deg")) cfg->initial_q_deg = parseJointArray(sec["initial_q_deg"], path + ".initial_q_deg");
     if (has(sec, "speed_bar")) cfg->speed_bar = asDouble(sec["speed_bar"], path + ".speed_bar");
-    if (has(sec, "servo_time_sec")) cfg->servo_time_sec = asDouble(sec["servo_time_sec"], path + ".servo_time_sec");
-    if (has(sec, "servo_lookahead_sec")) cfg->servo_lookahead_sec = asDouble(sec["servo_lookahead_sec"], path + ".servo_lookahead_sec");
+    applyDeprecatedDoubleAlias(sec, "servo_t1_sec", "servo_time_sec", path, &cfg->servo_t1_sec);
+    applyDeprecatedDoubleAlias(sec, "servo_t2_sec", "servo_lookahead_sec", path, &cfg->servo_t2_sec);
     if (has(sec, "servo_gain")) cfg->servo_gain = asDouble(sec["servo_gain"], path + ".servo_gain");
-    if (has(sec, "servo_acc")) cfg->servo_acc = asDouble(sec["servo_acc"], path + ".servo_acc");
+    applyDeprecatedDoubleAlias(sec, "servo_alpha", "servo_acc", path, &cfg->servo_alpha);
+    cfg->servo_time_sec = cfg->servo_t1_sec;
+    cfg->servo_lookahead_sec = cfg->servo_t2_sec;
+    cfg->servo_acc = cfg->servo_alpha;
     if (has(sec, "disable_waiting_ack")) cfg->disable_waiting_ack = asBool(sec["disable_waiting_ack"], path + ".disable_waiting_ack");
 }
 
@@ -413,6 +439,10 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
     validatePositiveFinite(cfg.servo.filter_dt_max_ratio, "servo.filter_dt_max_ratio");
     validatePositiveFinite(cfg.servo.worker_read_period_sec, "servo.worker_read_period_sec");
+    validateNonNegativeFinite(
+        cfg.servo.servo_t1_rate_match_tolerance_ratio,
+        "servo.servo_t1_rate_match_tolerance_ratio"
+    );
     validatePositiveFinite(static_cast<double>(cfg.network.state_pub_rate_hz), "network.state_pub_rate_hz");
     validatePositiveFinite(cfg.command_source.lease_timeout_sec, "command_source.lease_timeout_sec");
     validatePositiveFinite(cfg.left_robot.rbsim_request_timeout_sec, "left_robot.simulator_request_timeout_sec");
@@ -563,7 +593,7 @@ void validateConfig(const DualArmConfig& cfg) {
     validate_simulator_backend(cfg.left_robot, "left_robot");
     validate_simulator_backend(cfg.right_robot, "right_robot");
 
-    const auto validate_rbpodo_backend = [](const BackendConfig& backend, const std::string& label) {
+    const auto validate_rbpodo_backend = [&cfg](const BackendConfig& backend, const std::string& label) {
         if (backend.backend_type != BackendType::Rbpodo) return;
         if (backend.ip.empty()) {
             throw std::runtime_error(label + ".ip must be set for backend_type=rbpodo");
@@ -575,10 +605,38 @@ void validateConfig(const DualArmConfig& cfg) {
         if (!std::isfinite(backend.speed_bar) || backend.speed_bar < 0.0 || backend.speed_bar > 1.0) {
             throw std::runtime_error(label + ".speed_bar must be finite and in [0, 1] for backend_type=rbpodo");
         }
-        validatePositiveFinite(backend.servo_time_sec, label + ".servo_time_sec");
-        validatePositiveFinite(backend.servo_lookahead_sec, label + ".servo_lookahead_sec");
+        validatePositiveFinite(backend.command_timeout_sec, label + ".command_timeout_sec");
+        if (!(backend.servo_t1_sec >= 0.002) || !std::isfinite(backend.servo_t1_sec)) {
+            throw std::runtime_error(label + ".servo_t1_sec must be finite and >= 0.002 for backend_type=rbpodo");
+        }
+        if (!(backend.servo_t2_sec > 0.02 && backend.servo_t2_sec < 0.2) || !std::isfinite(backend.servo_t2_sec)) {
+            throw std::runtime_error(label + ".servo_t2_sec must be finite and in (0.02, 0.2) for backend_type=rbpodo");
+        }
         validatePositiveFinite(backend.servo_gain, label + ".servo_gain");
-        validatePositiveFinite(backend.servo_acc, label + ".servo_acc");
+        if (!(backend.servo_alpha > 0.0 && backend.servo_alpha < 1.0) || !std::isfinite(backend.servo_alpha)) {
+            throw std::runtime_error(label + ".servo_alpha must be finite and in (0, 1) for backend_type=rbpodo");
+        }
+        const double servo_dt_sec = 1.0 / static_cast<double>(cfg.servo.rate_hz);
+        const double tolerance_sec = cfg.servo.servo_t1_rate_match_tolerance_ratio * servo_dt_sec;
+        const bool t1_matches_rate = std::abs(backend.servo_t1_sec - servo_dt_sec) <= tolerance_sec;
+        if (!t1_matches_rate && backend.run_mode == RunMode::Real) {
+            const std::string message =
+                label + ".servo_t1_sec must match servo.rate_hz period for real rbpodo motion: servo_t1_sec=" +
+                std::to_string(backend.servo_t1_sec) + ", period=" + std::to_string(servo_dt_sec);
+            if (cfg.servo.send_servo_commands && !cfg.servo.allow_servo_t1_rate_mismatch) {
+                throw std::runtime_error(message + ". Set servo.allow_servo_t1_rate_mismatch=true only after explicit acceptance.");
+            }
+            warn(message + "; send_servo_commands=false so this is a warning");
+        }
+        if (backend.run_mode == RunMode::Real &&
+            backend.disable_waiting_ack &&
+            cfg.servo.send_servo_commands &&
+            !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")) {
+            throw std::runtime_error(
+                "Refusing rbpodo real motion with disable_waiting_ack=true. "
+                "Set RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 only after explicit ACK-off acceptance."
+            );
+        }
     };
     validate_rbpodo_backend(cfg.left_robot, "left_robot");
     validate_rbpodo_backend(cfg.right_robot, "right_robot");
@@ -770,6 +828,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "worker_read_rate_hz",
             "filter_dt_min_ratio",
             "filter_dt_max_ratio",
+            "servo_t1_rate_match_tolerance_ratio",
+            "allow_servo_t1_rate_mismatch",
         }, "servo");
         if (has(sec, "rate_hz")) cfg.servo.rate_hz = asInt(sec["rate_hz"], "servo.rate_hz");
         if (has(sec, "command_timeout_sec")) cfg.servo.command_timeout_sec = asDouble(sec["command_timeout_sec"], "servo.command_timeout_sec");
@@ -790,6 +850,14 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         }
         if (has(sec, "filter_dt_min_ratio")) cfg.servo.filter_dt_min_ratio = asDouble(sec["filter_dt_min_ratio"], "servo.filter_dt_min_ratio");
         if (has(sec, "filter_dt_max_ratio")) cfg.servo.filter_dt_max_ratio = asDouble(sec["filter_dt_max_ratio"], "servo.filter_dt_max_ratio");
+        if (has(sec, "servo_t1_rate_match_tolerance_ratio")) {
+            cfg.servo.servo_t1_rate_match_tolerance_ratio =
+                asDouble(sec["servo_t1_rate_match_tolerance_ratio"], "servo.servo_t1_rate_match_tolerance_ratio");
+        }
+        if (has(sec, "allow_servo_t1_rate_mismatch")) {
+            cfg.servo.allow_servo_t1_rate_mismatch =
+                asBool(sec["allow_servo_t1_rate_mismatch"], "servo.allow_servo_t1_rate_mismatch");
+        }
     }
 
     if (has(root, "safety")) {

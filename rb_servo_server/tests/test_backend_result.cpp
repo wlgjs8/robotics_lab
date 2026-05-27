@@ -140,6 +140,12 @@ bool testSendHelpersKeepStateAfterExplicit() {
     RB_CHECK(accepted.state_after.has_value());
     RB_CHECK(accepted.state_after_source == "response");
     RB_CHECK(accepted.requested_q_deg[5] == 6.0);
+    RB_CHECK(accepted.ack_policy == rb_servo::BackendAckPolicy::BackendDefault);
+    RB_CHECK(!accepted.ack_observed);
+    RB_CHECK(!accepted.controller_acceptance_observed);
+    RB_CHECK(accepted.ack_wait_duration_us == 0.0);
+    RB_CHECK(!accepted.rbpodo_waiting_ack);
+    RB_CHECK(accepted.acceptance_semantics == "unknown");
 
     const rb_servo::SendServoJResult rejected = rb_servo::rejectedSend(
         request,
@@ -152,6 +158,7 @@ bool testSendHelpersKeepStateAfterExplicit() {
     RB_CHECK(!rejected.state_after.has_value());
     RB_CHECK(rejected.state_after_source == "none");
     RB_CHECK(rejected.requested_q_deg[0] == 1.0);
+    RB_CHECK(rejected.acceptance_semantics == "unknown");
     return true;
 }
 

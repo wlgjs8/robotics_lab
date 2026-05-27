@@ -100,6 +100,28 @@ bool operationModeMatchesConfig(const BackendConfig& config, const RbpodoSystemS
     return expectedSimulationMode(config) == actual_simulation;
 }
 
+void annotateRbpodoAckResult(
+    SendServoJResult* result,
+    const BackendConfig& config,
+    double ack_wait_duration_us,
+    bool ack_observed
+) {
+    result->ack_policy = config.disable_waiting_ack ? BackendAckPolicy::Disabled : BackendAckPolicy::Wait;
+    result->rbpodo_waiting_ack = !config.disable_waiting_ack;
+    result->ack_wait_duration_us = config.disable_waiting_ack ? 0.0 : ack_wait_duration_us;
+    if (config.disable_waiting_ack) {
+        result->ack_observed = false;
+        result->controller_acceptance_observed = false;
+        result->acceptance_semantics = result->accepted ? "socket_send_only" : "not_sent";
+        return;
+    }
+
+    result->ack_observed = ack_observed;
+    result->controller_acceptance_observed = result->accepted && ack_observed;
+    result->acceptance_semantics =
+        result->controller_acceptance_observed ? "controller_ack_observed" : "controller_ack_not_observed";
+}
+
 int firstNonZeroErrorCode(const RbpodoSystemStateSnapshot& snapshot) {
     if (snapshot.op_stat_sos_flag != 0) return snapshot.op_stat_sos_flag;
     if (snapshot.init_error != 0) return snapshot.init_error;
@@ -202,7 +224,6 @@ std::optional<BackendError> rbpodoMotionReadinessError(
 namespace {
 
 #ifdef RB_SERVO_ENABLE_RBPODO
-constexpr double kDefaultCommandTimeoutSec = 0.5;
 constexpr double kDefaultStateTimeoutSec = 0.2;
 constexpr uint64_t kRecentStateCacheMaxAgeNs = 1'000'000'000ULL;
 
@@ -289,7 +310,7 @@ BackendError commandReturnError(
 ) {
     if (ret.is_timeout()) {
         return backendError(
-            BackendErrorKind::CommandTimeout,
+            BackendErrorKind::TransportTimeout,
             "rbpodo " + operation_name + " timed out waiting for command acknowledgement",
             "",
             "rbpodo_" + operation_name + "_timeout"
@@ -310,20 +331,20 @@ std::optional<BackendError> configureWaitingAck(
     rb::podo::Cobot<>& robot,
     bool disable_waiting_ack
 ) {
-    if (!disable_waiting_ack) {
-        return std::nullopt;
-    }
-
     rb::podo::ResponseCollector responses;
-    if (robot.disable_waiting_ack(responses)) {
+    const bool configured = disable_waiting_ack
+        ? robot.disable_waiting_ack(responses)
+        : robot.enable_waiting_ack(responses);
+    if (configured) {
         return std::nullopt;
     }
 
+    const std::string operation = disable_waiting_ack ? "disable_waiting_ack" : "enable_waiting_ack";
     return backendError(
         BackendErrorKind::ControllerRejected,
-        "rbpodo disable_waiting_ack was not accepted by the SDK",
+        "rbpodo " + operation + " was not accepted by the SDK",
         "",
-        "rbpodo_disable_waiting_ack_rejected"
+        "rbpodo_" + operation + "_rejected"
     );
 }
 #endif
@@ -605,113 +626,179 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
 #else
     const std::optional<RobotState> cached_state = recentStateCache(impl_->last_state_cache, nowSteadyNs());
     const char* cached_source = cached_state.has_value() ? "cache" : "none";
+    const auto with_ack_metadata = [&](SendServoJResult result, bool ack_observed, double ack_wait_duration_us) {
+        annotateRbpodoAckResult(&result, impl_->config, ack_wait_duration_us, ack_observed);
+        return result;
+    };
     if (impl_->config.run_mode == RunMode::Real && !envIsOne("RB_ALLOW_REAL_MOTION")) {
         std::cerr << "[ERROR] RbpodoBackend refused servo_j without RB_ALLOW_REAL_MOTION=1\n";
-        return rejectedSend(
-            request,
-            backendError(
-                BackendErrorKind::SuppressedByPolicy,
-                "RbpodoBackend refused servo_j without RB_ALLOW_REAL_MOTION=1",
-                "",
-                "rbpodo_motion_gate_closed"
+        return with_ack_metadata(
+            rejectedSend(
+                request,
+                backendError(
+                    BackendErrorKind::SuppressedByPolicy,
+                    "RbpodoBackend refused servo_j without RB_ALLOW_REAL_MOTION=1",
+                    "",
+                    "rbpodo_motion_gate_closed"
+                ),
+                makeBackendTiming(start, nowSteadyNs()),
+                cached_state,
+                cached_source
             ),
-            makeBackendTiming(start, nowSteadyNs()),
-            cached_state,
-            cached_source
+            false,
+            0.0
+        );
+    }
+    if (impl_->config.run_mode == RunMode::Real &&
+        impl_->config.disable_waiting_ack &&
+        !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")) {
+        std::cerr << "[ERROR] RbpodoBackend refused ACK-disabled servo_j without "
+                     "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1\n";
+        return with_ack_metadata(
+            rejectedSend(
+                request,
+                backendError(
+                    BackendErrorKind::SuppressedByPolicy,
+                    "RbpodoBackend refused ACK-disabled servo_j without RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1",
+                    "",
+                    "rbpodo_ack_disabled_motion_gate_closed"
+                ),
+                makeBackendTiming(start, nowSteadyNs()),
+                cached_state,
+                cached_source
+            ),
+            false,
+            0.0
         );
     }
     if (!impl_->connected || !impl_->robot) {
-        return rejectedSend(
-            request,
-            backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
-            makeBackendTiming(start, nowSteadyNs()),
-            cached_state,
-            cached_source
+        return with_ack_metadata(
+            rejectedSend(
+                request,
+                backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
+                makeBackendTiming(start, nowSteadyNs()),
+                cached_state,
+                cached_source
+            ),
+            false,
+            0.0
         );
     }
     if (!finiteJointArray(request.q_target_deg)) {
         std::cerr << "[ERROR] RbpodoBackend refused non-finite servo_j target\n";
-        return rejectedSend(
-            request,
-            backendError(
-                BackendErrorKind::InvalidTarget,
-                "RbpodoBackend refused non-finite servo_j target",
-                "",
-                "rbpodo_invalid_servo_j_target"
+        return with_ack_metadata(
+            rejectedSend(
+                request,
+                backendError(
+                    BackendErrorKind::InvalidTarget,
+                    "RbpodoBackend refused non-finite servo_j target",
+                    "",
+                    "rbpodo_invalid_servo_j_target"
+                ),
+                makeBackendTiming(start, nowSteadyNs()),
+                cached_state,
+                cached_source
             ),
-            makeBackendTiming(start, nowSteadyNs()),
-            cached_state,
-            cached_source
+            false,
+            0.0
         );
     }
     if (cached_state.has_value() && impl_->last_state_error.has_value()) {
-        return rejectedSend(
-            request,
-            *impl_->last_state_error,
-            makeBackendTiming(start, nowSteadyNs()),
-            cached_state,
-            "cache"
+        return with_ack_metadata(
+            rejectedSend(
+                request,
+                *impl_->last_state_error,
+                makeBackendTiming(start, nowSteadyNs()),
+                cached_state,
+                "cache"
+            ),
+            false,
+            0.0
         );
     }
     if (!cached_state.has_value() && impl_->last_state_error.has_value()) {
-        return rejectedSend(
-            request,
-            *impl_->last_state_error,
-            makeBackendTiming(start, nowSteadyNs()),
-            std::nullopt,
-            "none"
+        return with_ack_metadata(
+            rejectedSend(
+                request,
+                *impl_->last_state_error,
+                makeBackendTiming(start, nowSteadyNs()),
+                std::nullopt,
+                "none"
+            ),
+            false,
+            0.0
         );
     }
 
     try {
         rb::podo::ResponseCollector responses;
+        const uint64_t ack_start = nowSteadyNs();
         const auto ret = impl_->robot->move_servo_j(
             responses,
             request.q_target_deg,
-            impl_->config.servo_time_sec,
-            impl_->config.servo_lookahead_sec,
+            impl_->config.servo_t1_sec,
+            impl_->config.servo_t2_sec,
             impl_->config.servo_gain,
-            impl_->config.servo_acc,
-            kDefaultCommandTimeoutSec,
+            impl_->config.servo_alpha,
+            impl_->config.command_timeout_sec,
             true
         );
+        const uint64_t ack_end = nowSteadyNs();
+        const double ack_wait_duration_us =
+            impl_->config.disable_waiting_ack ? 0.0 : makeBackendTiming(ack_start, ack_end).duration_us;
         if (!ret.is_success()) {
             std::cerr << "[WARN] RbpodoBackend move_servo_j was not accepted for "
                       << impl_->config.name << "\n";
-            return rejectedSend(
-                request,
-                commandReturnError("move_servo_j", ret, responses),
-                makeBackendTiming(start, nowSteadyNs()),
-                cached_state,
-                cached_source
+            return with_ack_metadata(
+                rejectedSend(
+                    request,
+                    commandReturnError("move_servo_j", ret, responses),
+                    makeBackendTiming(start, nowSteadyNs()),
+                    cached_state,
+                    cached_source
+                ),
+                responses.has_error(),
+                ack_wait_duration_us
             );
         }
         if (responses.has_error()) {
             std::cerr << "[WARN] RbpodoBackend move_servo_j response contained an error for "
                       << impl_->config.name << ": " << responses << "\n";
-            return rejectedSend(
-                request,
-                controllerResponseError("move_servo_j", responses),
-                makeBackendTiming(start, nowSteadyNs()),
-                cached_state,
-                cached_source
+            return with_ack_metadata(
+                rejectedSend(
+                    request,
+                    controllerResponseError("move_servo_j", responses),
+                    makeBackendTiming(start, nowSteadyNs()),
+                    cached_state,
+                    cached_source
+                ),
+                !impl_->config.disable_waiting_ack,
+                ack_wait_duration_us
             );
         }
-        return acceptedSend(request, makeBackendTiming(start, nowSteadyNs()));
+        return with_ack_metadata(
+            acceptedSend(request, makeBackendTiming(start, nowSteadyNs())),
+            !impl_->config.disable_waiting_ack,
+            ack_wait_duration_us
+        );
     } catch (const std::exception& exc) {
         std::cerr << "[WARN] RbpodoBackend move_servo_j failed for " << impl_->config.name
                   << ": " << exc.what() << "\n";
-        return rejectedSend(
-            request,
-            backendError(
-                BackendErrorKind::TransportWriteFailed,
-                exc.what(),
-                "",
-                "rbpodo_move_servo_j_exception"
+        return with_ack_metadata(
+            rejectedSend(
+                request,
+                backendError(
+                    BackendErrorKind::TransportWriteFailed,
+                    exc.what(),
+                    "",
+                    "rbpodo_move_servo_j_exception"
+                ),
+                makeBackendTiming(start, nowSteadyNs()),
+                cached_state,
+                cached_source
             ),
-            makeBackendTiming(start, nowSteadyNs()),
-            cached_state,
-            cached_source
+            false,
+            0.0
         );
     }
 #endif

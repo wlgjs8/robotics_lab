@@ -187,6 +187,11 @@ Simulator-only; not real-ready.
 15. RBSCRIPT-ABLATION-01 adds no-motion backend ablation tooling for rbpodo vs experimental rbscript_tcp connection/read/ACK timing. It requires explicit real-controller confirmation and env gates for read-only real access; motion probes remain out of scope.
 16. RBSCRIPT-RATE-PROBE-01 adds an explicit Rainbow rate sweep for ACK/read-state behavior at 50-200 Hz style rates. It remains no-motion by default, requires explicit real-controller confirmation and env gates, refuses motion-looking no-motion commands, and does not prove high-rate motion readiness.
 17. RBSCRIPT-DOC-01 documents the rbpodo vs experimental rbscript_tcp comparison plan. `rbscript_tcp` must pass no-motion connect, read-only state acquisition, and no-motion ACK/rate evidence before any future real motion task; raw TCP is not a replacement for rbpodo yet, and `rt_script` remains future work.
+18. GATE-RBPODO-00 registers rbpodo servo parameter, ACK semantics, acceptance, and docs task names. This is gate registration only; it does not change rbpodo behavior or enable real robot motion.
+19. RBPODO-SERVO-PARAM-01 makes rbpodo `move_servo_j` parameters explicit as `servo_t1_sec`, `servo_t2_sec`, `servo_gain`, and `servo_alpha`; deprecated aliases warn, duplicate old/new keys fail, and real motion configs must align `servo_t1_sec` with `servo.rate_hz` unless explicitly accepted.
+20. RBPODO-ACK-01 makes rbpodo ACK-on/off semantics observable. ACK-off remains non-default, requires `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1` for real motion, and must be treated as socket-send evidence rather than controller-acceptance evidence.
+21. RBPODO-ACCEPT-01 adds supervised rbpodo 100 Hz / 200 Hz ACK-on/off acceptance tooling and a runbook. Real execution remains pending; default mode is read-only, ACK-off requires explicit acknowledgement, and tiny real motion is reserved for a future approval task.
+22. RBPODO-DOC-01 documents rbpodo Servo J parameter mapping, 100/200 Hz rate matching, ACK-on/off interpretation, and the staged real acceptance sequence. The pending real items are: rbpodo 100/200 Hz ACK-on acceptance, 200 Hz ACK-off acceptance, and a separately approved tiny real joint motion task.
 
 ## Reviewer Checklist
 

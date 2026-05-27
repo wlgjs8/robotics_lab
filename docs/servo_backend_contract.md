@@ -151,6 +151,124 @@ Real `sendServoJ()` requires:
 
 Real stop/reset APIs remain conservative until verified. If no verified API is wired, return `DependencyUnavailable` and require operator intervention.
 
+Rbpodo is the primary vendor-library real backend. `dual_real.example.yaml` and
+the `dual_real_*_ack.example.yaml` files are tracked templates, not
+ready-to-run real motion configs. Site-specific real configs belong under
+`rb_servo_server/config/local/`, which is intentionally user-owned and
+gitignored.
+
+### Rbpodo ACK Semantics
+
+`disable_waiting_ack: false` is the default and required baseline. In this
+ACK-on mode, `sendServoJ().accepted=true` means rbpodo observed controller ACK
+for the `move_servo_j` command. State JSON and servo logs expose this as:
+
+- `ack_policy: "wait"`
+- `ack_observed: true`
+- `controller_acceptance_observed: true`
+- `send_acceptance_semantics: "controller_ack_observed"`
+- `rbpodo_waiting_ack: true`
+- `ack_wait_duration_us`
+
+`disable_waiting_ack: true` changes the meaning of a successful send. rbpodo's
+SDK returns after the socket/API send path instead of waiting for immediate
+controller ACK. In this ACK-off mode, `accepted=true` means the command was
+sent through the client path; it does not prove the controller accepted it. The
+telemetry must show:
+
+- `ack_policy: "disabled"`
+- `ack_observed: false`
+- `controller_acceptance_observed: false`
+- `send_acceptance_semantics: "socket_send_only"`
+- `rbpodo_waiting_ack: false`
+
+ACK-off is an experimental supervised acceptance mode, not a safe mode. Real
+motion with ACK waiting disabled requires the normal real gates plus:
+
+```bash
+RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
+```
+
+ACK-off runs need stronger monitoring because immediate controller rejection is
+not observed on the command call. At minimum, review `readState()`, controller
+`error_code`, state staleness, `q_ref`/`q_actual` tracking, and Rainbow system
+codes such as M561/M568/M569/M570 when they are observable.
+
+`command_timeout_sec` is the rbpodo command/ACK timeout used by
+`move_servo_j`. The 100 Hz example uses `0.05`; the 200 Hz examples use `0.02`
+so command stalls are visible quickly during acceptance. Values must be finite
+and positive.
+
+### Rbpodo Servo J Parameters
+
+`RbpodoBackend::sendServoJ()` maps rbpodo config fields directly to Rainbow
+UI Script `move_servo_j(jnt, t1, t2, gain, alpha)`:
+
+- `servo_t1_sec` -> `t1`, the controller arrival/command time. For streaming
+  Servo J this should match the server command period, `1 / servo.rate_hz`.
+- `servo_t2_sec` -> `t2`, the controller hold time. This is not UR-style
+  lookahead.
+- `servo_gain` -> `gain`.
+- `servo_alpha` -> `alpha`, the low-pass-filter gain. This is not
+  acceleration.
+
+Rainbow joint targets are in degrees. Config validation enforces the documented
+Servo J ranges before the backend is used:
+
+- `servo_t1_sec >= 0.002`
+- `0.02 < servo_t2_sec < 0.2`
+- `servo_gain > 0`
+- `0 < servo_alpha < 1`
+
+Deprecated aliases remain accepted with warnings while configs migrate:
+
+- `servo_time_sec` -> `servo_t1_sec`
+- `servo_lookahead_sec` -> `servo_t2_sec`
+- `servo_acc` -> `servo_alpha`
+
+Setting both a canonical key and its deprecated alias is refused to avoid
+ambiguous real-controller parameters. For real rbpodo configs with
+`servo.send_servo_commands=true`, `servo_t1_sec` must match the configured
+`servo.rate_hz` period within `servo.servo_t1_rate_match_tolerance_ratio`
+unless `servo.allow_servo_t1_rate_mismatch=true` is set after explicit
+acceptance. Read-only configs with `send_servo_commands=false` may load with a
+mismatch warning, but the warning is not motion approval.
+
+New configs must not use `servo_acc`; use `servo_alpha`. New configs must not
+use `servo_lookahead_sec`; use `servo_t2_sec`. The old names are compatibility
+aliases only.
+
+### Rbpodo Real Acceptance Sequence
+
+Real rbpodo acceptance is staged. Later stages depend on clean artifacts from
+earlier stages:
+
+1. `read_only`: connect with `send_servo_commands: false`, verify valid joint
+   state, low `state_age_us`, no fault latch, expected rbpodo backend, and no
+   Servo J sends.
+2. 100 Hz ACK-on no-op or controller simulation-mode Servo J: `servo.rate_hz:
+   100`, `servo_t1_sec: 0.01`, `disable_waiting_ack: false`.
+3. 200 Hz ACK-on: `servo.rate_hz: 200`, `servo_t1_sec: 0.005`,
+   `disable_waiting_ack: false`.
+4. 200 Hz ACK-off: same 200 Hz timing, `disable_waiting_ack: true`, with
+   explicit ACK-off acceptance. Success is socket/API send evidence only.
+5. Tiny real joint motion: not authorized by the documentation above. It
+   requires a future explicit motion approval task and operator supervision.
+
+Do not copy aggressive ACK-off or high-rate settings into a real baseline until
+the matching acceptance artifacts have been reviewed.
+
+Required log and state fields for review include:
+
+- `send_duration_us`
+- `ack_wait_duration_us`
+- `ack_observed`
+- `controller_acceptance_observed`
+- `state_age_us`
+- `error_code`
+- M561/M568/M569/M570 when available
+- `q_ref` and `q_actual`
+
 ## RbscriptTcpBackend Experimental Semantics
 
 `backend_type: rbscript_tcp` is an experimental comparison backend for raw

@@ -739,6 +739,46 @@ run_rbscript_doc_gate() {
   grep_existing "no UDP direct-to-controller|no UDP.*controller|UDP direct-to-controller" README.md REVIEW.md docs rb_servo_server/docs
 }
 
+run_rbpodo_accept_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  run_optional_python_help scripts/rbpodo_servo_acceptance.py
+  if [[ -f scripts/rbpodo_servo_acceptance.py ]]; then
+    python3 scripts/rbpodo_servo_acceptance.py --self-test
+  fi
+  run_optional_python_help scripts/rbpodo_ack_rate_probe.py
+  if [[ "${CODEX_RUN_RBPODO_ACCEPTANCE:-0}" == "1" ]]; then
+    if [[ -z "${CODEX_RBPODO_ACCEPTANCE_ARGS:-}" ]]; then
+      echo "ERROR: CODEX_RUN_RBPODO_ACCEPTANCE=1 requires CODEX_RBPODO_ACCEPTANCE_ARGS with explicit script arguments and safety preflight flags" >&2
+      return 1
+    fi
+    if [[ -f scripts/rbpodo_servo_acceptance.py ]]; then
+      # shellcheck disable=SC2086
+      python3 scripts/rbpodo_servo_acceptance.py ${CODEX_RBPODO_ACCEPTANCE_ARGS}
+    elif [[ -f scripts/rbpodo_ack_rate_probe.py ]]; then
+      # shellcheck disable=SC2086
+      python3 scripts/rbpodo_ack_rate_probe.py ${CODEX_RBPODO_ACCEPTANCE_ARGS}
+    else
+      echo "ERROR: CODEX_RUN_RBPODO_ACCEPTANCE=1 but no rbpodo acceptance script is present" >&2
+      return 1
+    fi
+  else
+    echo "codex_gate: skipping rbpodo real/controller acceptance; set CODEX_RUN_RBPODO_ACCEPTANCE=1 with explicit args to enable"
+  fi
+}
+
+run_rbpodo_doc_gate() {
+  run_shell_syntax_checks
+  grep_existing "servo_t1_sec" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "servo_t2_sec" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "servo_alpha" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "disable_waiting_ack" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "ACK disabled" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "100[[:space:]]*Hz|100Hz" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "200[[:space:]]*Hz|200Hz" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "RB_ALLOW_REAL_MOTION" README.md REVIEW.md AGENTS.md docs rb_servo_server/docs rb_servo_server/config
+}
+
 run_doc_hygiene_gate() {
   run_shell_syntax_checks
   if [[ -e README_DOCS_UPDATE.md ]]; then
@@ -1127,6 +1167,25 @@ case "$TASK" in
     ;;
   RBSCRIPT-DOC-01)
     run_rbscript_doc_gate
+    ;;
+  GATE-RBPODO-00)
+    run_shell_syntax_checks
+    ;;
+  RBPODO-SERVO-PARAM-01)
+    run_shell_syntax_checks
+    run_servo_gate_or_skip_missing_deps
+    run_python_surface_tests
+    ;;
+  RBPODO-ACK-01)
+    run_shell_syntax_checks
+    run_servo_gate_or_skip_missing_deps
+    run_python_surface_tests
+    ;;
+  RBPODO-ACCEPT-01)
+    run_rbpodo_accept_gate
+    ;;
+  RBPODO-DOC-01)
+    run_rbpodo_doc_gate
     ;;
   DOC-HYGIENE-01)
     run_doc_hygiene_gate

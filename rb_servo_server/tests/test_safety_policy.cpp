@@ -2227,10 +2227,16 @@ bool testRealModeReadOnlyAndMotionEnvGates() {
              << "  backend_type: rbpodo\n"
              << "  run_mode: real\n"
              << "  ip: 172.28.60.200\n"
+             << "  servo_t1_sec: 0.005\n"
+             << "  servo_t2_sec: 0.05\n"
+             << "  servo_alpha: 0.5\n"
              << "right_robot:\n"
              << "  backend_type: rbpodo\n"
              << "  run_mode: real\n"
              << "  ip: 172.28.60.201\n"
+             << "  servo_t1_sec: 0.005\n"
+             << "  servo_t2_sec: 0.05\n"
+             << "  servo_alpha: 0.5\n"
              << "servo:\n"
              << "  enable_realtime_priority: true\n"
              << "  send_servo_commands: false\n"
@@ -2258,10 +2264,16 @@ bool testRealModeReadOnlyAndMotionEnvGates() {
              << "  backend_type: rbpodo\n"
              << "  run_mode: real\n"
              << "  ip: 172.28.60.200\n"
+             << "  servo_t1_sec: 0.005\n"
+             << "  servo_t2_sec: 0.05\n"
+             << "  servo_alpha: 0.5\n"
              << "right_robot:\n"
              << "  backend_type: rbpodo\n"
              << "  run_mode: real\n"
              << "  ip: 172.28.60.201\n"
+             << "  servo_t1_sec: 0.005\n"
+             << "  servo_t2_sec: 0.05\n"
+             << "  servo_alpha: 0.5\n"
              << "servo:\n"
              << "  enable_realtime_priority: true\n"
              << "  send_servo_commands: true\n"
@@ -2800,12 +2812,24 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.left_last_send.error_name = "read_only";
     snapshot.left_last_send.duration_us = 0.0;
     snapshot.left_last_send.state_after_source = "none";
+    snapshot.left_last_send.ack_policy = rb_servo::BackendAckPolicy::Disabled;
+    snapshot.left_last_send.ack_observed = false;
+    snapshot.left_last_send.controller_acceptance_observed = false;
+    snapshot.left_last_send.ack_wait_duration_us = 0.0;
+    snapshot.left_last_send.rbpodo_waiting_ack = false;
+    snapshot.left_last_send.acceptance_semantics = "not_sent";
     snapshot.right_last_send.ok = true;
     snapshot.right_last_send.accepted = true;
     snapshot.right_last_send.backend_error_kind = "None";
     snapshot.right_last_send.error_name = "None";
     snapshot.right_last_send.duration_us = 10.0;
     snapshot.right_last_send.state_after_source = "response";
+    snapshot.right_last_send.ack_policy = rb_servo::BackendAckPolicy::Wait;
+    snapshot.right_last_send.ack_observed = true;
+    snapshot.right_last_send.controller_acceptance_observed = true;
+    snapshot.right_last_send.ack_wait_duration_us = 123.0;
+    snapshot.right_last_send.rbpodo_waiting_ack = true;
+    snapshot.right_last_send.acceptance_semantics = "controller_ack_observed";
     snapshot.left_cartesian_solve.attempted = true;
     snapshot.left_cartesian_solve.success = true;
     snapshot.left_cartesian_solve.status = "ok";
@@ -2948,8 +2972,18 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("left").at("last_send").at("backend_error_kind").get<std::string>() == "SuppressedByPolicy");
     RB_CHECK(json.at("left").at("last_send").at("error_name").get<std::string>() == "read_only");
     RB_CHECK(json.at("left").at("last_send").at("state_after_source").get<std::string>() == "none");
+    RB_CHECK(json.at("left").at("last_send").at("ack_policy").get<std::string>() == "disabled");
+    RB_CHECK(!json.at("left").at("last_send").at("ack_observed").get<bool>());
+    RB_CHECK(!json.at("left").at("last_send").at("controller_acceptance_observed").get<bool>());
+    RB_CHECK(json.at("left").at("last_send").at("send_acceptance_semantics").get<std::string>() == "not_sent");
     RB_CHECK(json.at("right").at("last_send").at("accepted").get<bool>());
     RB_CHECK(json.at("right").at("last_send").at("state_after_source").get<std::string>() == "response");
+    RB_CHECK(json.at("right").at("last_send").at("ack_policy").get<std::string>() == "wait");
+    RB_CHECK(json.at("right").at("last_send").at("ack_observed").get<bool>());
+    RB_CHECK(json.at("right").at("last_send").at("controller_acceptance_observed").get<bool>());
+    RB_CHECK(json.at("right").at("last_send").at("ack_wait_duration_us").get<double>() == 123.0);
+    RB_CHECK(json.at("right").at("last_send").at("rbpodo_waiting_ack").get<bool>());
+    RB_CHECK(json.at("right").at("last_send").at("send_acceptance_semantics").get<std::string>() == "controller_ack_observed");
     RB_CHECK(json.at("left").at("send_start_ns").get<uint64_t>() == 10);
     RB_CHECK(json.at("left").at("send_end_ns").get<uint64_t>() == 20);
     RB_CHECK(json.at("right").at("send_start_ns").get<uint64_t>() == 30);

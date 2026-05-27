@@ -1,64 +1,52 @@
 schema: robotics_lab.rb_servo_server.v1
 
-# Template only. Do not run this file as a site-specific real robot config.
-# Copy to one of these user-owned local paths before hardware use:
-# - rb_servo_server/config/local/dual_real_readonly.yaml
-# - rb_servo_server/config/local/dual_real_motion.yaml
-# Read-only real connection requires RB_ALLOW_REAL_ROBOT=1.
-# Real servo_j motion additionally requires RB_ALLOW_REAL_MOTION=1 and
-# servo.send_servo_commands=true.
-# ACK-off rbpodo motion additionally requires
-# RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 and supervised acceptance evidence.
-# Real Cartesian/TCP motion additionally requires RB_ALLOW_REAL_CARTESIAN=1.
-# Use canonical Servo J fields only in new configs:
-# servo_t1_sec, servo_t2_sec, servo_gain, servo_alpha.
-# Do not use deprecated aliases servo_time_sec, servo_lookahead_sec, or
-# servo_acc in new real configs.
+# RBPODO-SERVO-PARAM-01 / RBPODO-ACCEPT-01 example only. Not a site-specific runnable config.
+# Copy to rb_servo_server/config/local/ only after read-only acceptance and
+# supervised motion approval. Motion remains disabled here by default.
+# 200 Hz ACK-on profile:
+# - servo.rate_hz: 200
+# - move_servo_j t1 / servo_t1_sec: 0.005 s
+# - move_servo_j t2 / servo_t2_sec: 0.05 s
+# - move_servo_j alpha / servo_alpha: 0.5
+# - command_timeout_sec: 0.02 s
+# - disable_waiting_ack: false
+# New configs must not use deprecated aliases servo_acc or
+# servo_lookahead_sec; use servo_alpha and servo_t2_sec.
 
 left_robot:
   backend_type: rbpodo
   run_mode: real
-  name: left_rb3
+  name: left_rb3_200hz_ack
   ip: "172.28.60.200"
   operation_mode: real
   command_timeout_sec: 0.02
   initial_q_deg: [0, -30, 80, 0, 60, 0]
   speed_bar: 0.1
-  # Rainbow move_servo_j(jnt, t1, t2, gain, alpha). At 200 Hz, t1 matches
-  # the 0.005 s server command period. t2 is hold time, not UR lookahead.
   servo_t1_sec: 0.005
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
-  # Keep controller ACK waiting enabled by default. Set true only in a local
-  # motion config after supervised acceptance of the rbpodo command path.
   disable_waiting_ack: false
 
 right_robot:
   backend_type: rbpodo
   run_mode: real
-  name: right_rb3
+  name: right_rb3_200hz_ack
   ip: "172.28.60.201"
   operation_mode: real
   command_timeout_sec: 0.02
   initial_q_deg: [0, -30, 80, 0, 60, 0]
   speed_bar: 0.1
-  # Rainbow move_servo_j(jnt, t1, t2, gain, alpha). At 200 Hz, t1 matches
-  # the 0.005 s server command period. t2 is hold time, not UR lookahead.
   servo_t1_sec: 0.005
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
-  # Keep controller ACK waiting enabled by default. Set true only in a local
-  # motion config after supervised acceptance of the rbpodo command path.
   disable_waiting_ack: false
 
 left_mount:
-  # Rotation is canonical URDF/ROS RPY converted from MJCF euler xyz.
   base_pose_in_stand: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
 
 right_mount:
-  # Rotation is canonical URDF/ROS RPY converted from MJCF euler xyz.
   base_pose_in_stand: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
 
 servo:

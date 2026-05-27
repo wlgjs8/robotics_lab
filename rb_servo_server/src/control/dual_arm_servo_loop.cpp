@@ -227,6 +227,10 @@ BackendCallSnapshot sendCallSnapshot(const SendServoJResult& result) {
     snapshot.state_after_source = result.state_after_source;
     snapshot.ack_policy = result.ack_policy;
     snapshot.ack_observed = result.ack_observed;
+    snapshot.controller_acceptance_observed = result.controller_acceptance_observed;
+    snapshot.ack_wait_duration_us = result.ack_wait_duration_us;
+    snapshot.rbpodo_waiting_ack = result.rbpodo_waiting_ack;
+    snapshot.acceptance_semantics = result.acceptance_semantics;
     return snapshot;
 }
 

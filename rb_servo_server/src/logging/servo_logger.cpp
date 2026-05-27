@@ -87,6 +87,7 @@ void ServoLogger::writeHeader() {
     file_ << "tick,loop_start_time_ns,loop_end_time_ns,period_ms,jitter_ms,filter_dt_ms,safety_verdict,motion_state,fault_latched,fault_reason,logger_dropped_samples,command_seq,left_mode,right_mode,left_send_ok,right_send_ok";
     file_ << ",fault_context_verdict,fault_context_domain,fault_context_arm,fault_context_backend_op,fault_context_backend_error_kind,fault_context_backend_error_name,fault_context_backend_error_code,fault_context_retryable,fault_context_recoverable,fault_context_robot_fault,fault_context_transport_fault,fault_context_state_after_source,fault_context_reason";
     file_ << ",left_send_start_ns,left_send_end_ns,right_send_start_ns,right_send_end_ns,send_skew_us,left_send_duration_us,right_send_duration_us";
+    file_ << ",left_ack_policy,right_ack_policy,left_ack_observed,right_ack_observed,left_controller_acceptance_observed,right_controller_acceptance_observed,left_ack_wait_duration_us,right_ack_wait_duration_us,left_rbpodo_waiting_ack,right_rbpodo_waiting_ack,left_send_acceptance_semantics,right_send_acceptance_semantics";
     file_ << ",left_state_age_us,right_state_age_us,left_send_result_age_us,right_send_result_age_us";
     file_ << ",left_send_within_period,right_send_within_period,left_send_period_overrun,right_send_period_overrun,left_send_command_deadline_missed,right_send_command_deadline_missed";
     file_ << ",left_send_deadline_hit,right_send_deadline_hit,dispatch_skew_us,left_worker_loop_read_duration_us,right_worker_loop_read_duration_us";
@@ -176,6 +177,18 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << sample.send_skew_us << ','
           << sample.left_send_duration_us << ','
           << sample.right_send_duration_us << ','
+          << toString(sample.left_last_send.ack_policy) << ','
+          << toString(sample.right_last_send.ack_policy) << ','
+          << sample.left_last_send.ack_observed << ','
+          << sample.right_last_send.ack_observed << ','
+          << sample.left_last_send.controller_acceptance_observed << ','
+          << sample.right_last_send.controller_acceptance_observed << ','
+          << sample.left_last_send.ack_wait_duration_us << ','
+          << sample.right_last_send.ack_wait_duration_us << ','
+          << sample.left_last_send.rbpodo_waiting_ack << ','
+          << sample.right_last_send.rbpodo_waiting_ack << ','
+          << csvEscape(sample.left_last_send.acceptance_semantics) << ','
+          << csvEscape(sample.right_last_send.acceptance_semantics) << ','
           << ageUs(sample.loop_end_time_ns, sample.left_state.host_time_ns) << ','
           << ageUs(sample.loop_end_time_ns, sample.right_state.host_time_ns) << ','
           << ageUs(sample.loop_end_time_ns, sample.left_send_end_ns) << ','

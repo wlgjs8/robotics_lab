@@ -240,6 +240,10 @@ nlohmann::json backendCallJson(const BackendCallSnapshot& call, bool send_call) 
         out["state_after_source"] = call.state_after_source;
         out["ack_policy"] = toString(call.ack_policy);
         out["ack_observed"] = call.ack_observed;
+        out["controller_acceptance_observed"] = call.controller_acceptance_observed;
+        out["ack_wait_duration_us"] = call.ack_wait_duration_us;
+        out["rbpodo_waiting_ack"] = call.rbpodo_waiting_ack;
+        out["send_acceptance_semantics"] = call.acceptance_semantics;
     } else {
         out["ok"] = call.ok;
     }

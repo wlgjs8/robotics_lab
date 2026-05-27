@@ -128,6 +128,13 @@ Real joint servo motion is closed unless:
 RB_ALLOW_REAL_MOTION=1
 ```
 
+Rbpodo Servo J motion with controller ACK waiting disabled is additionally
+closed unless:
+
+```bash
+RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
+```
+
 Real Cartesian/TCP motion is closed unless:
 
 ```bash
@@ -165,6 +172,20 @@ rb_servo_server/config/local/
 ```
 
 No tracked runnable real robot config should exist.
+
+Rbpodo is the primary vendor-library real backend. Its Rainbow Servo J fields
+must use canonical names in new configs:
+
+- `servo_t1_sec` maps to `move_servo_j` `t1`
+- `servo_t2_sec` maps to `move_servo_j` `t2`
+- `servo_gain` maps to `gain`
+- `servo_alpha` maps to `alpha`
+
+Do not introduce new uses of deprecated aliases `servo_time_sec`,
+`servo_lookahead_sec`, or `servo_acc`. `servo_t1_sec` must match the streaming
+period for real motion configs: `0.01` at 100 Hz and `0.005` at 200 Hz. ACK-off
+rbpodo settings are not a real baseline until the supervised acceptance sequence
+passes with state-age, ACK, error-code, and q_ref/q_actual evidence.
 
 Deprecated simulator config names are archived under `docs/archive/configs/`
 for historical reference only. They are not runnable source-of-truth profiles

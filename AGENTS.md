@@ -85,6 +85,12 @@ Real joint servo motion requires:
 RB_ALLOW_REAL_MOTION=1
 ```
 
+Real rbpodo Servo J motion with controller ACK waiting disabled additionally requires:
+
+```bash
+RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
+```
+
 Real Cartesian/TCP motion requires:
 
 ```bash
@@ -104,6 +110,14 @@ RB_ALLOW_RBSCRIPT_TCP_MOTION=1
 ```
 
 Even with these environment variables, real motion must also be explicitly allowed by config and by the relevant real-hardware acceptance task. Simulator acceptance is not real-hardware acceptance.
+
+For new rbpodo configs, use canonical Rainbow Servo J fields only:
+`servo_t1_sec`, `servo_t2_sec`, `servo_gain`, and `servo_alpha`.
+Do not add new uses of deprecated aliases `servo_time_sec`,
+`servo_lookahead_sec`, or `servo_acc`. `servo_t1_sec` must match the streaming
+command period for real motion configs, for example `0.01` at 100 Hz and
+`0.005` at 200 Hz. ACK-off rbpodo settings are acceptance evidence only until a
+future real-motion task promotes them.
 
 Tracked real robot config must remain a template only:
 

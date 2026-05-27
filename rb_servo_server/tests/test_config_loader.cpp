@@ -138,6 +138,41 @@ bool testRepositoryConfigsParse() {
 
     {
         EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", nullptr);
+        const rb_servo::DualArmConfig real_default =
+            rb_servo::loadConfigFromYaml((config_dir / "dual_real.example.yaml").string());
+        RB_CHECK(real_default.left_robot.backend_type == rb_servo::BackendType::Rbpodo);
+        RB_CHECK(near(real_default.left_robot.servo_t1_sec, 0.005));
+        RB_CHECK(near(real_default.left_robot.servo_t2_sec, 0.05));
+        RB_CHECK(near(real_default.left_robot.servo_alpha, 0.5));
+        RB_CHECK(near(real_default.left_robot.command_timeout_sec, 0.02));
+        RB_CHECK(!real_default.servo.send_servo_commands);
+
+        const rb_servo::DualArmConfig real_100 =
+            rb_servo::loadConfigFromYaml((config_dir / "dual_real_100hz_ack.example.yaml").string());
+        RB_CHECK(real_100.servo.rate_hz == 100);
+        RB_CHECK(near(real_100.left_robot.servo_t1_sec, 0.01));
+        RB_CHECK(near(real_100.left_robot.command_timeout_sec, 0.05));
+        RB_CHECK(!real_100.left_robot.disable_waiting_ack);
+
+        const rb_servo::DualArmConfig real_200 =
+            rb_servo::loadConfigFromYaml((config_dir / "dual_real_200hz_ack.example.yaml").string());
+        RB_CHECK(real_200.servo.rate_hz == 200);
+        RB_CHECK(near(real_200.left_robot.servo_t1_sec, 0.005));
+        RB_CHECK(near(real_200.left_robot.command_timeout_sec, 0.02));
+        RB_CHECK(!real_200.left_robot.disable_waiting_ack);
+
+        const rb_servo::DualArmConfig real_200_no_ack =
+            rb_servo::loadConfigFromYaml((config_dir / "dual_real_200hz_no_ack.example.yaml").string());
+        RB_CHECK(real_200_no_ack.servo.rate_hz == 200);
+        RB_CHECK(near(real_200_no_ack.left_robot.servo_t1_sec, 0.005));
+        RB_CHECK(near(real_200_no_ack.left_robot.command_timeout_sec, 0.02));
+        RB_CHECK(real_200_no_ack.left_robot.disable_waiting_ack);
+        RB_CHECK(!real_200_no_ack.servo.send_servo_commands);
+    }
+
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
         EnvGuard rbscript_gate("RB_ALLOW_RBSCRIPT_TCP", "1");
         EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", nullptr);
         EnvGuard rbscript_motion_gate("RB_ALLOW_RBSCRIPT_TCP_MOTION", nullptr);
@@ -643,6 +678,229 @@ bool testRbscriptTcpConfigParsesAndValidates() {
     return true;
 }
 
+std::string rbpodoConfigBody(
+    const std::string& left_fields,
+    int rate_hz,
+    bool send_servo_commands
+) {
+    return
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.200\"\n"
+        "  operation_mode: real\n" +
+        left_fields +
+        "right_robot:\n"
+        "  backend_type: mock\n"
+        "  run_mode: mock\n"
+        "servo:\n"
+        "  rate_hz: " + std::to_string(rate_hz) + "\n"
+        "  send_servo_commands: " + std::string(send_servo_commands ? "true\n" : "false\n") +
+        "  enable_realtime_priority: true\n"
+        "  servo_t1_rate_match_tolerance_ratio: 0.2\n"
+        "  allow_servo_t1_rate_mismatch: false\n" +
+        "safety:\n"
+        "  tracking_error_policy: fault_latch\n"
+        "  stop_both_arms_on_single_arm_error: true\n"
+        "  latch_fault_on_robot_state_error: true\n";
+}
+
+bool testRbpodoServoJParametersParseAndValidate() {
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", nullptr);
+        const std::string path = writeTempConfig(
+            "rbpodo-servo-canonical",
+            rbpodoConfigBody(
+                "  servo_t1_sec: 0.005\n"
+                "  servo_t2_sec: 0.05\n"
+                "  servo_gain: 1.25\n"
+                "  servo_alpha: 0.5\n",
+                200,
+                false
+            )
+        );
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        RB_CHECK(near(cfg.left_robot.servo_t1_sec, 0.005));
+        RB_CHECK(near(cfg.left_robot.servo_t2_sec, 0.05));
+        RB_CHECK(near(cfg.left_robot.servo_gain, 1.25));
+        RB_CHECK(near(cfg.left_robot.servo_alpha, 0.5));
+        RB_CHECK(near(cfg.left_robot.command_timeout_sec, 0.2));
+        RB_CHECK(near(cfg.left_robot.servo_time_sec, cfg.left_robot.servo_t1_sec));
+        RB_CHECK(near(cfg.left_robot.servo_lookahead_sec, cfg.left_robot.servo_t2_sec));
+        RB_CHECK(near(cfg.left_robot.servo_acc, cfg.left_robot.servo_alpha));
+    }
+
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        std::ostringstream warnings;
+        auto* const old_cerr = std::cerr.rdbuf(warnings.rdbuf());
+        const std::string path = writeTempConfig(
+            "rbpodo-servo-deprecated",
+            rbpodoConfigBody(
+                "  servo_time_sec: 0.005\n"
+                "  servo_lookahead_sec: 0.05\n"
+                "  servo_gain: 1.0\n"
+                "  servo_acc: 0.5\n",
+                200,
+                false
+            )
+        );
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        std::cerr.rdbuf(old_cerr);
+        ::unlink(path.c_str());
+        RB_CHECK(near(cfg.left_robot.servo_t1_sec, 0.005));
+        RB_CHECK(near(cfg.left_robot.servo_t2_sec, 0.05));
+        RB_CHECK(near(cfg.left_robot.servo_alpha, 0.5));
+        RB_CHECK(warnings.str().find("deprecated") != std::string::npos);
+    }
+
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        const std::string path = writeTempConfig(
+            "rbpodo-servo-duplicate",
+            rbpodoConfigBody(
+                "  servo_t1_sec: 0.005\n"
+                "  servo_time_sec: 0.005\n"
+                "  servo_t2_sec: 0.05\n"
+                "  servo_gain: 1.0\n"
+                "  servo_alpha: 0.5\n",
+                200,
+                false
+            )
+        );
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    const std::string invalid_cases[] = {
+        "  command_timeout_sec: 0.0\n  servo_t1_sec: 0.005\n  servo_t2_sec: 0.05\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
+        "  servo_t1_sec: 0.001\n  servo_t2_sec: 0.05\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
+        "  servo_t1_sec: 0.005\n  servo_t2_sec: 0.02\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
+        "  servo_t1_sec: 0.005\n  servo_t2_sec: 0.2\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
+        "  servo_t1_sec: 0.005\n  servo_t2_sec: 0.05\n  servo_gain: 0.0\n  servo_alpha: 0.5\n",
+        "  servo_t1_sec: 0.005\n  servo_t2_sec: 0.05\n  servo_gain: 1.0\n  servo_alpha: 0.0\n",
+        "  servo_t1_sec: 0.005\n  servo_t2_sec: 0.05\n  servo_gain: 1.0\n  servo_alpha: 1.0\n",
+    };
+    for (std::size_t i = 0; i < sizeof(invalid_cases) / sizeof(invalid_cases[0]); ++i) {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        const std::string path = writeTempConfig(
+            "rbpodo-servo-invalid-" + std::to_string(i),
+            rbpodoConfigBody(invalid_cases[i], 200, false)
+        );
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
+        const std::string path = writeTempConfig(
+            "rbpodo-servo-rate-mismatch",
+            rbpodoConfigBody(
+                "  servo_t1_sec: 0.01\n"
+                "  servo_t2_sec: 0.05\n"
+                "  servo_gain: 1.0\n"
+                "  servo_alpha: 0.5\n",
+                200,
+                true
+            )
+        );
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
+        const std::string path = writeTempConfig(
+            "rbpodo-servo-rate-100hz",
+            rbpodoConfigBody(
+                "  servo_t1_sec: 0.01\n"
+                "  servo_t2_sec: 0.05\n"
+                "  servo_gain: 1.0\n"
+                "  servo_alpha: 0.5\n",
+                100,
+                true
+            )
+        );
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        RB_CHECK(cfg.servo.rate_hz == 100);
+        RB_CHECK(near(cfg.left_robot.servo_t1_sec, 0.01));
+    }
+
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
+        const std::string path = writeTempConfig(
+            "rbpodo-servo-rate-200hz",
+            rbpodoConfigBody(
+                "  servo_t1_sec: 0.005\n"
+                "  servo_t2_sec: 0.05\n"
+                "  servo_gain: 1.0\n"
+                "  servo_alpha: 0.5\n",
+                200,
+                true
+            )
+        );
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        RB_CHECK(cfg.servo.rate_hz == 200);
+        RB_CHECK(near(cfg.left_robot.servo_t1_sec, 0.005));
+    }
+
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
+        EnvGuard ack_disabled_motion_gate("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION", nullptr);
+        const std::string path = writeTempConfig(
+            "rbpodo-ack-disabled-motion-gate",
+            rbpodoConfigBody(
+                "  servo_t1_sec: 0.005\n"
+                "  servo_t2_sec: 0.05\n"
+                "  servo_gain: 1.0\n"
+                "  servo_alpha: 0.5\n"
+                "  disable_waiting_ack: true\n",
+                200,
+                true
+            )
+        );
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
+        EnvGuard ack_disabled_motion_gate("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION", "1");
+        const std::string path = writeTempConfig(
+            "rbpodo-ack-disabled-motion-explicit",
+            rbpodoConfigBody(
+                "  command_timeout_sec: 0.02\n"
+                "  servo_t1_sec: 0.005\n"
+                "  servo_t2_sec: 0.05\n"
+                "  servo_gain: 1.0\n"
+                "  servo_alpha: 0.5\n"
+                "  disable_waiting_ack: true\n",
+                200,
+                true
+            )
+        );
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        RB_CHECK(cfg.left_robot.disable_waiting_ack);
+        RB_CHECK(near(cfg.left_robot.command_timeout_sec, 0.02));
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -655,5 +913,6 @@ int main() {
     if (!testCommandSourceConfigParsesAndValidates()) return 1;
     if (!testCartesianControlTuningParsesAndValidates()) return 1;
     if (!testRbscriptTcpConfigParsesAndValidates()) return 1;
+    if (!testRbpodoServoJParametersParseAndValidate()) return 1;
     return 0;
 }
