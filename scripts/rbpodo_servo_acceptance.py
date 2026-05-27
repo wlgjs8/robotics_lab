@@ -403,7 +403,17 @@ def bind_state_socket(endpoint: str) -> socket.socket:
     bind_host = "127.0.0.1" if host in {"localhost", "127.0.0.1"} else host
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((bind_host, port))
+    # sock.bind((bind_host, port))
+    try:
+        sock.bind((bind_host, port))
+    except OSError as exc:
+        if exc.errno == 98:
+            raise AcceptanceError(
+                f"state endpoint udp://{bind_host}:{port} is already in use. "
+                "Stop existing rb_servo_server/GUI/policy_runner/acceptance processes "
+                "or use a config with a unique network.state_pub_endpoint."
+            ) from exc
+        raise
     sock.settimeout(0.1)
     return sock
 
