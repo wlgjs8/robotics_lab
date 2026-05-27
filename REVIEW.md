@@ -150,7 +150,7 @@ CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 8. Real motion remains blocked.
 9. Real camera acceptance remains separate.
 10. Measured calibration is still absent.
-11. Run BENCH-CIRCLE-01 simulator benchmark and record artifacts before real robot Cartesian testing.
+11. Run BENCH-CIRCLE-01 simulator benchmark and record artifacts before real robot Cartesian testing. Latest CART-SERVO-01 conservative gate evidence: `artifacts/circle_tracking/bench_circle_01` safe 5 cm / 10 s threshold pass; repeated/profile-specific benchmark evidence is still required before any real Cartesian testing. CART-SERVO-02 changes benchmark runs without thresholds from `pass` to `completed` so poor tracking cannot be mislabeled as a performance pass. CART-SERVO-03 adds the four-profile regression sequence and `scripts/compare_circle_benchmarks.py` for before/after summaries.
 
 ## Reviewer Checklist
 

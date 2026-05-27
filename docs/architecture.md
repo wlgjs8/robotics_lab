@@ -184,6 +184,16 @@ Real mode remains blocked.
 
 Streaming Cartesian velocity primitives. `TcpTwistLocal` is intended for SpaceMouse/local-frame teleop. `TcpTwistStand` is the stand-frame low-level API. Server-side Cartesian velocity limits, the server-side angular deadband for orientation hold, stale-state checks, deadman behavior, and command-source arbitration are required.
 
+Velocity-level Cartesian servo targets use an explicit joint target integration
+mode. The simulator acceptance default is `previous_command`: the controller
+integrates Cartesian velocity from the last safe joint target accepted after
+SafetyFilter, rather than repeatedly generating a one-tick target from measured
+`q_actual`. The legacy `measured_actual` mode remains available for debugging,
+and `measured_actual_lookahead` can model fixed lookahead. The integrator is
+reset on holds, faults, stale/invalid state, lease loss, velocity-mode exit,
+and excessive command-vs-actual joint divergence. Real Cartesian motion remains
+blocked by the existing real-mode gates.
+
 ### `TcpDeltaLocal` / `TcpDeltaStand`
 
 Low-level one-shot/debug jog commands. They are not the default GUI target-move primitive.

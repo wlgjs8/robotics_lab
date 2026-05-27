@@ -87,7 +87,9 @@ void ServoLogger::writeHeader() {
     file_ << "tick,loop_start_time_ns,loop_end_time_ns,period_ms,jitter_ms,filter_dt_ms,safety_verdict,motion_state,fault_latched,fault_reason,logger_dropped_samples,command_seq,left_mode,right_mode,left_send_ok,right_send_ok";
     file_ << ",fault_context_verdict,fault_context_domain,fault_context_arm,fault_context_backend_op,fault_context_backend_error_kind,fault_context_backend_error_name,fault_context_backend_error_code,fault_context_retryable,fault_context_recoverable,fault_context_robot_fault,fault_context_transport_fault,fault_context_state_after_source,fault_context_reason";
     file_ << ",left_send_start_ns,left_send_end_ns,right_send_start_ns,right_send_end_ns,send_skew_us,left_send_duration_us,right_send_duration_us";
-    file_ << ",left_state_age_us,right_state_age_us,left_send_result_age_us,right_send_result_age_us,left_send_deadline_hit,right_send_deadline_hit,dispatch_skew_us,left_worker_loop_read_duration_us,right_worker_loop_read_duration_us";
+    file_ << ",left_state_age_us,right_state_age_us,left_send_result_age_us,right_send_result_age_us";
+    file_ << ",left_send_within_period,right_send_within_period,left_send_period_overrun,right_send_period_overrun,left_send_command_deadline_missed,right_send_command_deadline_missed";
+    file_ << ",left_send_deadline_hit,right_send_deadline_hit,dispatch_skew_us,left_worker_loop_read_duration_us,right_worker_loop_read_duration_us";
     for (int i = 0; i < kDof; ++i) file_ << ",left_q_actual_" << i;
     for (int i = 0; i < kDof; ++i) file_ << ",right_q_actual_" << i;
     for (int i = 0; i < kDof; ++i) file_ << ",left_q_sent_" << i;
@@ -101,10 +103,15 @@ double ageUs(uint64_t newer_ns, uint64_t older_ns) {
     return static_cast<double>(newer_ns - older_ns) / 1000.0;
 }
 
-bool sendDeadlineHit(const ServoSample& sample, uint64_t send_end_ns) {
+bool sendWithinPeriod(const ServoSample& sample, uint64_t send_end_ns) {
     if (sample.loop_start_time_ns == 0 || send_end_ns == 0 || sample.period_ms <= 0.0) return false;
     const auto period_ns = static_cast<uint64_t>(sample.period_ms * 1'000'000.0);
     return send_end_ns <= sample.loop_start_time_ns + period_ns;
+}
+
+bool sendPeriodOverrun(const ServoSample& sample, uint64_t send_end_ns) {
+    if (sample.loop_start_time_ns == 0 || send_end_ns == 0 || sample.period_ms <= 0.0) return false;
+    return !sendWithinPeriod(sample, send_end_ns);
 }
 
 std::string csvEscape(const std::string& value) {
@@ -173,8 +180,14 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ageUs(sample.loop_end_time_ns, sample.right_state.host_time_ns) << ','
           << ageUs(sample.loop_end_time_ns, sample.left_send_end_ns) << ','
           << ageUs(sample.loop_end_time_ns, sample.right_send_end_ns) << ','
-          << sendDeadlineHit(sample, sample.left_send_end_ns) << ','
-          << sendDeadlineHit(sample, sample.right_send_end_ns) << ','
+          << sendWithinPeriod(sample, sample.left_send_end_ns) << ','
+          << sendWithinPeriod(sample, sample.right_send_end_ns) << ','
+          << sendPeriodOverrun(sample, sample.left_send_end_ns) << ','
+          << sendPeriodOverrun(sample, sample.right_send_end_ns) << ','
+          << "" << ','
+          << "" << ','
+          << sendWithinPeriod(sample, sample.left_send_end_ns) << ','
+          << sendWithinPeriod(sample, sample.right_send_end_ns) << ','
           << sample.send_skew_us << ','
           << sample.left_last_read.duration_us << ','
           << sample.right_last_read.duration_us;

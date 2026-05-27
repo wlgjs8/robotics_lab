@@ -33,6 +33,12 @@ bool isCartesianDeltaMode(ControlMode mode) {
            mode == ControlMode::TcpDeltaLocal;
 }
 
+bool isCartesianVelocityServoMode(ControlMode mode) {
+    return mode == ControlMode::TcpLinearMove ||
+           mode == ControlMode::TcpTwistStand ||
+           mode == ControlMode::TcpTwistLocal;
+}
+
 bool isMotionMode(ControlMode mode) {
     return mode == ControlMode::JointTarget ||
            mode == ControlMode::JointVelocity ||
@@ -42,6 +48,25 @@ bool isMotionMode(ControlMode mode) {
            mode == ControlMode::TcpDeltaLocal ||
            mode == ControlMode::TcpTwistStand ||
            mode == ControlMode::TcpTwistLocal;
+}
+
+std::string velocityIntegrationModeName(CartesianVelocityTargetIntegrationMode mode) {
+    switch (mode) {
+        case CartesianVelocityTargetIntegrationMode::MeasuredActual:
+            return "measured_actual";
+        case CartesianVelocityTargetIntegrationMode::MeasuredActualLookahead:
+            return "measured_actual_lookahead";
+        case CartesianVelocityTargetIntegrationMode::PreviousCommand:
+            return "previous_command";
+    }
+    return "unknown";
+}
+
+bool jointArraysDiffer(const JointArray& a, const JointArray& b, double tolerance = 1e-9) {
+    for (int i = 0; i < kDof; ++i) {
+        if (std::abs(a[i] - b[i]) > tolerance) return true;
+    }
+    return false;
 }
 
 bool isSyntheticHoldCommand(const DualArmCommand& command) {
@@ -606,6 +631,8 @@ void DualArmServoLoop::loopMain() {
         }
 
         ServoTarget safe_target;
+        ServoTarget desired_target;
+        bool have_desired_target = false;
         SafetyVerdict safety_verdict = SafetyVerdict::Ok;
 
         if (!state_ok || !isValidJointState(left_state) || !isValidJointState(right_state)) {
@@ -642,6 +669,8 @@ void DualArmServoLoop::loopMain() {
             command = resolveCartesianDeltaCommand(command, left_state, right_state);
             const bool motion_requested = commandRequestsMotion(command);
             ServoTarget desired = computeServoTarget(left_state, right_state, command, filter_dt_sec, &command_verdict);
+            desired_target = desired;
+            have_desired_target = true;
 
             if (command_verdict != SafetyVerdict::Ok) {
                 // Missing payload, unsupported Cartesian/IK, or other command generation failure.
@@ -722,6 +751,48 @@ void DualArmServoLoop::loopMain() {
                 safety_verdict = SafetyVerdict::FaultLatched;
             }
         }
+
+        CartesianServoController cartesian_servo_post_safety(
+            config_.left_mount,
+            config_.right_mount,
+            config_.cartesian_control,
+            kinematics_
+        );
+        const bool safety_allows_integrator_update =
+            safety_verdict == SafetyVerdict::Ok ||
+            safety_verdict == SafetyVerdict::JointLimitClamped;
+        const bool left_integrator_update_ok =
+            left_ok && safety_allows_integrator_update &&
+            !fault_latched_before_send && !send_suppressed && !fault_latched_.load();
+        const bool right_integrator_update_ok =
+            right_ok && safety_allows_integrator_update &&
+            !fault_latched_before_send && !send_suppressed && !fault_latched_.load();
+        const bool left_target_clamped = have_desired_target &&
+            jointArraysDiffer(desired_target.left_q_target_deg, attempted_target.left_q_target_deg);
+        const bool right_target_clamped = have_desired_target &&
+            jointArraysDiffer(desired_target.right_q_target_deg, attempted_target.right_q_target_deg);
+        cartesian_servo_post_safety.updateVelocityIntegratorAfterSafety(
+            &left_cartesian_velocity_integrator_,
+            attempted_target.left_q_target_deg,
+            left_integrator_update_ok,
+            left_target_clamped,
+            left_ok ? "send_suppressed_or_fault" : "send_failed"
+        );
+        cartesian_servo_post_safety.updateVelocityIntegratorAfterSafety(
+            &right_cartesian_velocity_integrator_,
+            attempted_target.right_q_target_deg,
+            right_integrator_update_ok,
+            right_target_clamped,
+            right_ok ? "send_suppressed_or_fault" : "send_failed"
+        );
+        if (left_cartesian_servo_path_.active && left_cartesian_servo_path_.done) {
+            resetCartesianVelocityIntegrator(ArmId::Left, "linear_path_done");
+        }
+        if (right_cartesian_servo_path_.active && right_cartesian_servo_path_.done) {
+            resetCartesianVelocityIntegrator(ArmId::Right, "linear_path_done");
+        }
+        refreshCartesianVelocityIntegratorTelemetry(ArmId::Left);
+        refreshCartesianVelocityIntegratorTelemetry(ArmId::Right);
 
         const uint64_t loop_end = nowSteadyNs();
 
@@ -978,6 +1049,8 @@ void DualArmServoLoop::clearLatchedCartesianTargets() {
     right_cartesian_servo_path_ = CartesianServoPathState{};
     left_cartesian_twist_hold_ = CartesianTwistHoldState{};
     right_cartesian_twist_hold_ = CartesianTwistHoldState{};
+    resetCartesianVelocityIntegrator(ArmId::Left, "cartesian_target_clear");
+    resetCartesianVelocityIntegrator(ArmId::Right, "cartesian_target_clear");
     left_last_cartesian_solve_ = CartesianSolveTelemetry{};
     right_last_cartesian_solve_ = CartesianSolveTelemetry{};
 }
@@ -987,13 +1060,48 @@ void DualArmServoLoop::clearLatchedCartesianTarget(ArmId arm_id) {
         left_latched_cartesian_target_ = LatchedCartesianTarget{};
         left_cartesian_servo_path_ = CartesianServoPathState{};
         left_cartesian_twist_hold_ = CartesianTwistHoldState{};
+        resetCartesianVelocityIntegrator(ArmId::Left, "cartesian_target_clear");
         left_last_cartesian_solve_ = CartesianSolveTelemetry{};
     } else {
         right_latched_cartesian_target_ = LatchedCartesianTarget{};
         right_cartesian_servo_path_ = CartesianServoPathState{};
         right_cartesian_twist_hold_ = CartesianTwistHoldState{};
+        resetCartesianVelocityIntegrator(ArmId::Right, "cartesian_target_clear");
         right_last_cartesian_solve_ = CartesianSolveTelemetry{};
     }
+}
+
+void DualArmServoLoop::resetCartesianVelocityIntegrator(ArmId arm_id, const std::string& reason) {
+    CartesianVelocityIntegratorState& state = arm_id == ArmId::Left
+        ? left_cartesian_velocity_integrator_
+        : right_cartesian_velocity_integrator_;
+    if (state.valid) {
+        state.valid = false;
+        ++state.resets_total;
+    }
+    state.reset_reason = reason;
+    refreshCartesianVelocityIntegratorTelemetry(arm_id);
+}
+
+void DualArmServoLoop::refreshCartesianVelocityIntegratorTelemetry(ArmId arm_id) {
+    const CartesianVelocityIntegratorState& state = arm_id == ArmId::Left
+        ? left_cartesian_velocity_integrator_
+        : right_cartesian_velocity_integrator_;
+    CartesianSolveTelemetry& telemetry = arm_id == ArmId::Left
+        ? left_last_cartesian_solve_
+        : right_last_cartesian_solve_;
+    if (!telemetry.attempted) return;
+    telemetry.cartesian_velocity_integration_mode =
+        velocityIntegrationModeName(config_.cartesian_control.velocity_target_integration);
+    telemetry.q_integrator_valid = state.valid;
+    telemetry.integrator_reset_reason = state.reset_reason;
+    telemetry.integrator_resets_total = state.resets_total;
+    telemetry.integrator_clamps_total = state.clamps_total;
+    telemetry.integrator_divergence_total = state.divergence_total;
+    telemetry.max_command_actual_error_deg_observed =
+        state.max_command_actual_error_deg_observed;
+    telemetry.velocity_target_lookahead_sec =
+        config_.cartesian_control.velocity_target_lookahead_sec;
 }
 
 DualArmCommand DualArmServoLoop::resolveCartesianDeltaCommand(
@@ -1099,6 +1207,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         if (command.right.mode != ControlMode::TcpLinearMove) {
             clear_right_linear_path();
         }
+        if (!isCartesianVelocityServoMode(command.left.mode)) {
+            resetCartesianVelocityIntegrator(ArmId::Left, "velocity_mode_exit");
+        }
+        if (!isCartesianVelocityServoMode(command.right.mode)) {
+            resetCartesianVelocityIntegrator(ArmId::Right, "velocity_mode_exit");
+        }
     }
 
     const CartesianSolveTelemetry previous_left_cartesian_solve = left_last_cartesian_solve_;
@@ -1125,6 +1239,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     const bool continue_right_linear = synthetic_hold &&
         right_cartesian_servo_path_.active &&
         !right_cartesian_servo_path_.done;
+    if (synthetic_hold && left_cartesian_servo_path_.active && left_cartesian_servo_path_.done) {
+        resetCartesianVelocityIntegrator(ArmId::Left, "linear_path_done");
+    }
+    if (synthetic_hold && right_cartesian_servo_path_.active && right_cartesian_servo_path_.done) {
+        resetCartesianVelocityIntegrator(ArmId::Right, "linear_path_done");
+    }
 
     DualArmCommand effective_command = command;
     if (continue_left_linear) {
@@ -1210,7 +1330,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 runModeForArm(config_, ArmId::Left),
                 dt_sec,
                 continue_left_linear ? 0 : command.seq,
-                &left_cartesian_servo_path_
+                &left_cartesian_servo_path_,
+                &left_cartesian_velocity_integrator_
             )
             : (effective_command.left.mode == ControlMode::TcpTwistStand || effective_command.left.mode == ControlMode::TcpTwistLocal)
             ? cartesian_servo.computeTwistTarget(
@@ -1219,7 +1340,9 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 left_prev_sent_q_deg_,
                 runModeForArm(config_, ArmId::Left),
                 dt_sec,
-                &left_cartesian_twist_hold_
+                command.seq,
+                &left_cartesian_twist_hold_,
+                &left_cartesian_velocity_integrator_
             )
             : isCartesianMode(effective_command.left.mode)
             ? cartesian.computeArmJointTarget(
@@ -1249,7 +1372,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 runModeForArm(config_, ArmId::Right),
                 dt_sec,
                 continue_right_linear ? 0 : command.seq,
-                &right_cartesian_servo_path_
+                &right_cartesian_servo_path_,
+                &right_cartesian_velocity_integrator_
             )
             : (effective_command.right.mode == ControlMode::TcpTwistStand || effective_command.right.mode == ControlMode::TcpTwistLocal)
             ? cartesian_servo.computeTwistTarget(
@@ -1258,7 +1382,9 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 right_prev_sent_q_deg_,
                 runModeForArm(config_, ArmId::Right),
                 dt_sec,
-                &right_cartesian_twist_hold_
+                command.seq,
+                &right_cartesian_twist_hold_,
+                &right_cartesian_velocity_integrator_
             )
             : isCartesianMode(effective_command.right.mode)
             ? cartesian.computeArmJointTarget(
@@ -1286,6 +1412,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             if (left_cartesian_result.verdict == SafetyVerdict::IkFailed ||
                 right_cartesian_result.verdict == SafetyVerdict::IkFailed) {
                 verdict = SafetyVerdict::IkFailed;
+            } else if (left_cartesian_result.verdict == SafetyVerdict::TrackingError ||
+                       right_cartesian_result.verdict == SafetyVerdict::TrackingError) {
+                verdict = SafetyVerdict::TrackingError;
+            } else if (left_cartesian_result.verdict == SafetyVerdict::InvalidCommand ||
+                       right_cartesian_result.verdict == SafetyVerdict::InvalidCommand) {
+                verdict = SafetyVerdict::InvalidCommand;
             }
             if (command_verdict) *command_verdict = verdict;
             if (left_cartesian_result.verdict != SafetyVerdict::Ok) {

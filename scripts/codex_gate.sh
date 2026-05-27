@@ -332,7 +332,9 @@ run_cart_accept_gate() {
 run_circle_benchmark_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_tracking_benchmark.py'
   python3 scripts/circle_tracking_benchmark.py --help >/dev/null
+  python3 scripts/compare_circle_benchmarks.py --help >/dev/null
   grep_existing "circle_tracking_benchmark.py|BENCH-CIRCLE-01|GENE-style|15 cm" \
     docs/runbooks/circle_tracking_benchmark.md docs/runbooks/tcp_pose_simulator_acceptance.md README.md REVIEW.md
   PYTHONPATH=rb_simulator/src python3 scripts/circle_tracking_benchmark.py \
@@ -381,7 +383,7 @@ run_circle_benchmark_gate() {
       --root . \
       --mode start-local \
       --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-      --server-config rb_servo_server/config/dual_simulator_circle_stress.yaml \
+      --server-config rb_servo_server/config/dual_simulator_tcp_acceptance.yaml \
       --left-config rb_simulator/config/left_rb3_730e.yaml \
       --right-config rb_simulator/config/right_rb3_730e.yaml \
       --arm left \
@@ -390,6 +392,9 @@ run_circle_benchmark_gate() {
       --profile safe_5cm_10s \
       --repeat 1 \
       --command-rate-hz 50 \
+      --max-allowed-rms-error-m 0.01 \
+      --max-allowed-p95-error-m 0.02 \
+      --max-allowed-orientation-drift-rad 0.1 \
       --artifact-dir artifacts/circle_tracking/bench_circle_01
   else
     echo "codex_gate: skipping full circle tracking benchmark; set CODEX_RUN_CIRCLE_BENCHMARK=1 to enable"
@@ -413,6 +418,82 @@ run_circle_benchmark_gate() {
       --artifact-dir artifacts/circle_tracking/gene_15cm_4s
   else
     echo "codex_gate: skipping GENE-style 15 cm / 4 s circle stress; set CODEX_RUN_GENE_STYLE_CIRCLE=1 to enable"
+  fi
+}
+
+run_conservative_circle_benchmark_runtime() {
+  if ! rb_servo_cpp_deps_available; then
+    if [[ "${CODEX_SKIP_MISSING_CPP_DEPS:-0}" == "1" ]]; then
+      echo "codex_gate: skipping circle benchmark runtime; required C++ deps are missing"
+      return 0
+    fi
+    echo "ERROR: circle benchmark runtime requires yaml-cpp, nlohmann_json, Eigen3, and pinocchio" >&2
+    return 1
+  fi
+  if ! loopback_socket_available; then
+    echo "codex_gate: skipping circle benchmark runtime; AF_INET loopback sockets are unavailable"
+    return 0
+  fi
+
+  build_servo_server_only
+  PYTHONPATH=rb_simulator/src python3 scripts/circle_tracking_benchmark.py \
+    --root . \
+    --mode start-local \
+    --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
+    --server-config rb_servo_server/config/dual_simulator_tcp_acceptance.yaml \
+    --left-config rb_simulator/config/left_rb3_730e.yaml \
+    --right-config rb_simulator/config/right_rb3_730e.yaml \
+    --arm left \
+    --controller twist_stand \
+    --plane xy \
+    --profile safe_5cm_10s \
+    --repeat 1 \
+    --command-rate-hz 50 \
+    --max-allowed-rms-error-m 0.01 \
+    --max-allowed-p95-error-m 0.02 \
+    --max-allowed-orientation-drift-rad 0.1 \
+    --artifact-dir artifacts/circle_tracking/bench_circle_01
+}
+
+run_cart_servo_01_gate() {
+  run_shell_syntax_checks
+  run_servo_gate_or_skip_missing_deps
+  run_simulator_tests
+  run_gui_tests
+  run_policy_runner_tests
+}
+
+run_cart_servo_02_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_tracking_benchmark.py'
+  python3 scripts/circle_tracking_benchmark.py --help >/dev/null
+  python3 scripts/compare_circle_benchmarks.py --help >/dev/null
+  run_simulator_tests
+  run_gui_tests
+  run_policy_runner_tests
+  if [[ "${CODEX_RUN_CIRCLE_BENCHMARK:-0}" == "1" ]]; then
+    run_conservative_circle_benchmark_runtime
+  else
+    echo "codex_gate: skipping full circle tracking benchmark; set CODEX_RUN_CIRCLE_BENCHMARK=1 to enable"
+  fi
+}
+
+run_cart_servo_03_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  python3 scripts/circle_tracking_benchmark.py --help >/dev/null
+  python3 scripts/compare_circle_benchmarks.py --help >/dev/null
+  run_servo_gate_or_skip_missing_deps
+  if [[ "${CODEX_RUN_CARTESIAN_ACCEPTANCE:-0}" == "1" ]]; then
+    run_cart_harden_05_gate
+  else
+    echo "codex_gate: skipping full Cartesian simulator acceptance; set CODEX_RUN_CARTESIAN_ACCEPTANCE=1 to enable"
+  fi
+  if [[ "${CODEX_RUN_CIRCLE_BENCHMARK:-0}" == "1" ]]; then
+    run_conservative_circle_benchmark_runtime
+  else
+    echo "codex_gate: skipping full circle tracking benchmark; set CODEX_RUN_CIRCLE_BENCHMARK=1 to enable"
   fi
 }
 
@@ -759,6 +840,15 @@ case "$TASK" in
     ;;
   CART-ACCEPT-01)
     run_cart_accept_gate
+    ;;
+  CART-SERVO-01)
+    run_cart_servo_01_gate
+    ;;
+  CART-SERVO-02)
+    run_cart_servo_02_gate
+    ;;
+  CART-SERVO-03)
+    run_cart_servo_03_gate
     ;;
   BENCH-CIRCLE-01)
     run_circle_benchmark_gate

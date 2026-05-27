@@ -2822,7 +2822,9 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "schema_version", "tick", "host_time_ns", "loop_start_time_ns", "loop_end_time_ns",
         "period_ms", "jitter_ms", "filter_dt_ms", "command_seq", "command_source", "observed_mode", "observed_backend",
         "cartesian_control_snapshot", "kinematics_snapshot", "left", "right",
-        "send_skew_us", "send_suppressed", "send_policy", "safety_verdict", "motion_state", "fault_latched",
+        "send_skew_us", "send_within_period", "send_period_overrun", "send_command_deadline_missed",
+        "send_deadline_hit", "send_deadline_hit_deprecated_alias_for",
+        "send_suppressed", "send_policy", "safety_verdict", "motion_state", "fault_latched",
         "latched_fault_reason", "fault_reason", "logger_dropped_samples", "logger_health",
         "fault_context", "mount_transform_deferred", "mounts", "tcp_fields_deferred",
         "last_cartesian_solve"
@@ -2835,6 +2837,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "send_start_ns", "send_end_ns", "send_duration_us", "has_valid_joint_state",
         "connection_state", "has_error", "servo_enabled", "fault_recoverable", "lifecycle_state",
         "last_read", "last_send", "robot_time_ns", "host_time_ns", "error_code", "state_age_us",
+        "send_within_period", "send_period_overrun", "send_command_deadline_missed",
+        "send_deadline_hit", "send_deadline_hit_deprecated_alias_for",
         "tcp_stand", "tcp_base", "tcp_deferred", "fk_duration_us", "cartesian_solve", "worker",
         "transport"
     };
@@ -2915,10 +2919,20 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("left").at("host_time_ns").get<uint64_t>() == 11'000);
     RB_CHECK(json.at("right").at("robot_time_ns").get<uint64_t>() == 22'000);
     RB_CHECK(json.at("send_skew_us").get<double>() == 20.0);
+    RB_CHECK(json.at("send_within_period").get<bool>());
+    RB_CHECK(!json.at("send_period_overrun").get<bool>());
+    RB_CHECK(json.at("send_command_deadline_missed").is_null());
+    RB_CHECK(json.at("send_deadline_hit").get<bool>());
+    RB_CHECK(json.at("send_deadline_hit_deprecated_alias_for").get<std::string>() == "send_within_period");
     RB_CHECK(json.at("send_suppressed").get<bool>());
     RB_CHECK(json.at("send_policy").get<std::string>() == "read_only");
     RB_CHECK(json.at("left").at("send_duration_us").get<double>() == 10.0);
     RB_CHECK(json.at("right").at("send_duration_us").get<double>() == 10.0);
+    RB_CHECK(json.at("left").at("send_within_period").get<bool>());
+    RB_CHECK(!json.at("left").at("send_period_overrun").get<bool>());
+    RB_CHECK(json.at("left").at("send_command_deadline_missed").is_null());
+    RB_CHECK(json.at("left").at("send_deadline_hit").get<bool>());
+    RB_CHECK(json.at("left").at("send_deadline_hit_deprecated_alias_for").get<std::string>() == "send_within_period");
     RB_CHECK(json.at("safety_verdict").get<std::string>() == "Ok");
     RB_CHECK(json.at("motion_state").get<std::string>() == "Running");
     RB_CHECK(!json.at("fault_latched").get<bool>());

@@ -29,6 +29,18 @@ struct CartesianTwistHoldState {
     Pose6D hold_tcp_stand;
 };
 
+struct CartesianVelocityIntegratorState {
+    bool valid = false;
+    JointArray q_command_deg{};
+    uint64_t last_seq = 0;
+    ControlMode last_mode = ControlMode::Hold;
+    uint64_t resets_total = 0;
+    uint64_t clamps_total = 0;
+    uint64_t divergence_total = 0;
+    double max_command_actual_error_deg_observed = 0.0;
+    std::string reset_reason;
+};
+
 class CartesianServoController {
 public:
     CartesianServoController(
@@ -45,7 +57,8 @@ public:
         RunMode run_mode,
         double dt_sec,
         uint64_t command_seq,
-        CartesianServoPathState* path_state
+        CartesianServoPathState* path_state,
+        CartesianVelocityIntegratorState* velocity_integrator_state = nullptr
     );
 
     CartesianArmTargetResult computeTwistTarget(
@@ -54,7 +67,17 @@ public:
         const JointArray& previous_safe_sent_q_deg,
         RunMode run_mode,
         double dt_sec,
-        CartesianTwistHoldState* hold_state
+        uint64_t command_seq,
+        CartesianTwistHoldState* hold_state,
+        CartesianVelocityIntegratorState* velocity_integrator_state = nullptr
+    );
+
+    void updateVelocityIntegratorAfterSafety(
+        CartesianVelocityIntegratorState* velocity_integrator_state,
+        const JointArray& safe_q_target_deg,
+        bool was_sent_or_intended,
+        bool target_was_clamped,
+        const std::string& reset_reason
     );
 
 private:

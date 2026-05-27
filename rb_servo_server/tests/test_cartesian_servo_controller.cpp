@@ -330,6 +330,7 @@ bool testTcpTwistLocalMovesLocalXAndHoldsOrientation() {
             q,
             rb_servo::RunMode::Simulation,
             0.005,
+            1,
             &hold
         );
         RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
@@ -372,6 +373,7 @@ bool testTcpTwistAngularDeadbandMaintainsHoldForNoise() {
         q,
         rb_servo::RunMode::Simulation,
         0.005,
+        1,
         &hold
     );
     RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
@@ -387,6 +389,7 @@ bool testTcpTwistAngularDeadbandMaintainsHoldForNoise() {
         q,
         rb_servo::RunMode::Simulation,
         0.005,
+        1,
         &hold
     );
     RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
@@ -401,6 +404,7 @@ bool testTcpTwistAngularDeadbandMaintainsHoldForNoise() {
         q,
         rb_servo::RunMode::Simulation,
         0.005,
+        1,
         &hold
     );
     RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
@@ -488,6 +492,7 @@ bool testTcpTwistOrientationHoldNearPiStaysBounded() {
         q,
         rb_servo::RunMode::Simulation,
         0.005,
+        1,
         &hold
     );
 
@@ -519,6 +524,7 @@ bool testTcpTwistRealModeBlocked() {
         q,
         rb_servo::RunMode::Real,
         0.005,
+        1,
         &hold
     );
     RB_CHECK(result.verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
@@ -553,6 +559,7 @@ bool testTcpTwistClampTelemetryAndDamping() {
         q,
         rb_servo::RunMode::Simulation,
         0.01,
+        1,
         &hold
     );
 
@@ -595,6 +602,7 @@ bool testTcpTwistRejectPolicy() {
         q,
         rb_servo::RunMode::Simulation,
         0.01,
+        1,
         &hold
     );
 
@@ -603,6 +611,237 @@ bool testTcpTwistRejectPolicy() {
     RB_CHECK(result.telemetry.requested_twist_linear_norm_m_s > config.max_twist_linear_m_s);
     RB_CHECK(result.telemetry.applied_twist_linear_norm_m_s == 0.0);
     RB_CHECK(kinematics->velocity_call_count == 0);
+    return true;
+}
+
+bool testScalarFirstOrderPlantShowsMeasuredActualAttenuation() {
+    constexpr double dt = 0.01;
+    constexpr double tau = 0.04;
+    constexpr double velocity = 1.0;
+    double measured_actual = 0.0;
+    double previous_command_actual = 0.0;
+    double command_state = 0.0;
+    for (int tick = 0; tick < 100; ++tick) {
+        const double measured_target = measured_actual + velocity * dt;
+        command_state += velocity * dt;
+        measured_actual += (dt / tau) * (measured_target - measured_actual);
+        previous_command_actual += (dt / tau) * (command_state - previous_command_actual);
+    }
+    const double reference = velocity * dt * 100.0;
+    const double measured_gain = measured_actual / reference;
+    const double previous_command_gain = previous_command_actual / reference;
+    RB_CHECK(measured_gain > 0.20 && measured_gain < 0.30);
+    RB_CHECK(previous_command_gain > 0.95);
+    return true;
+}
+
+bool testVelocityIntegrationModesGenerateExpectedTargets() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.01, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    rb_servo::CartesianTwistHoldState hold;
+    rb_servo::JointArray q_actual = zeroJoints();
+    q_actual[0] = 10.0;
+
+    rb_servo::CartesianControlConfig measured_config;
+    measured_config.max_twist_linear_m_s = 1.0;
+    measured_config.velocity_target_integration =
+        rb_servo::CartesianVelocityTargetIntegrationMode::MeasuredActual;
+    rb_servo::CartesianServoController measured_controller(
+        left_mount,
+        right_mount,
+        measured_config,
+        kinematics
+    );
+    rb_servo::CartesianArmTargetResult result = measured_controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q_actual, left_mount),
+        q_actual,
+        rb_servo::RunMode::Simulation,
+        0.01,
+        10,
+        &hold
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(std::abs(result.q_target_deg[0] - 10.01) < 1e-12);
+
+    rb_servo::CartesianControlConfig lookahead_config = measured_config;
+    lookahead_config.velocity_target_integration =
+        rb_servo::CartesianVelocityTargetIntegrationMode::MeasuredActualLookahead;
+    lookahead_config.velocity_target_lookahead_sec = 0.04;
+    rb_servo::CartesianServoController lookahead_controller(
+        left_mount,
+        right_mount,
+        lookahead_config,
+        kinematics
+    );
+    result = lookahead_controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q_actual, left_mount),
+        q_actual,
+        rb_servo::RunMode::Simulation,
+        0.01,
+        11,
+        &hold
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(std::abs(result.q_target_deg[0] - 10.04) < 1e-12);
+
+    rb_servo::CartesianControlConfig previous_config = measured_config;
+    previous_config.velocity_target_integration =
+        rb_servo::CartesianVelocityTargetIntegrationMode::PreviousCommand;
+    rb_servo::CartesianServoController previous_controller(
+        left_mount,
+        right_mount,
+        previous_config,
+        kinematics
+    );
+    rb_servo::CartesianVelocityIntegratorState integrator;
+    result = previous_controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q_actual, left_mount),
+        q_actual,
+        rb_servo::RunMode::Simulation,
+        0.01,
+        12,
+        &hold,
+        &integrator
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    previous_controller.updateVelocityIntegratorAfterSafety(
+        &integrator,
+        result.q_target_deg,
+        true,
+        false,
+        ""
+    );
+    q_actual[0] = 10.0;
+    result = previous_controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q_actual, left_mount),
+        q_actual,
+        rb_servo::RunMode::Simulation,
+        0.01,
+        13,
+        &hold,
+        &integrator
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(std::abs(result.q_target_deg[0] - 10.02) < 1e-12);
+    return true;
+}
+
+bool testVelocityIntegratorUsesClampedSafeTarget() {
+    rb_servo::CartesianControlConfig config;
+    config.velocity_target_integration =
+        rb_servo::CartesianVelocityTargetIntegrationMode::PreviousCommand;
+    rb_servo::CartesianServoController controller(
+        rb_servo::ArmMountConfig{},
+        rb_servo::ArmMountConfig{},
+        config,
+        std::make_shared<LinearFakeKinematics>()
+    );
+    rb_servo::CartesianVelocityIntegratorState integrator;
+    integrator.valid = true;
+    integrator.q_command_deg = zeroJoints();
+    rb_servo::JointArray clamped = zeroJoints();
+    clamped[0] = 0.2;
+    controller.updateVelocityIntegratorAfterSafety(
+        &integrator,
+        clamped,
+        true,
+        true,
+        ""
+    );
+    RB_CHECK(integrator.valid);
+    RB_CHECK(std::abs(integrator.q_command_deg[0] - 0.2) < kEpsilon);
+    RB_CHECK(integrator.clamps_total == 1);
+    return true;
+}
+
+bool testVelocityIntegratorDivergenceResetsOrFaults() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.01, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    rb_servo::CartesianControlConfig reset_config;
+    reset_config.max_twist_linear_m_s = 1.0;
+    reset_config.velocity_target_integration =
+        rb_servo::CartesianVelocityTargetIntegrationMode::PreviousCommand;
+    reset_config.max_command_actual_error_deg = {1, 1, 1, 1, 1, 1};
+    reset_config.command_actual_error_policy =
+        rb_servo::CartesianCommandActualErrorPolicy::Reset;
+    rb_servo::CartesianServoController reset_controller(
+        left_mount,
+        right_mount,
+        reset_config,
+        kinematics
+    );
+    rb_servo::CartesianVelocityIntegratorState integrator;
+    integrator.valid = true;
+    integrator.last_mode = rb_servo::ControlMode::TcpTwistLocal;
+    integrator.q_command_deg = zeroJoints();
+    integrator.q_command_deg[0] = 20.0;
+    rb_servo::CartesianTwistHoldState hold;
+    const rb_servo::JointArray q_actual = zeroJoints();
+    rb_servo::CartesianArmTargetResult result = reset_controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q_actual, left_mount),
+        q_actual,
+        rb_servo::RunMode::Simulation,
+        0.01,
+        20,
+        &hold,
+        &integrator
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(integrator.divergence_total == 1);
+    RB_CHECK(integrator.reset_reason == "command_actual_divergence_reset");
+    RB_CHECK(std::abs(result.q_target_deg[0] - 0.01) < 1e-12);
+
+    rb_servo::CartesianControlConfig fault_config = reset_config;
+    fault_config.command_actual_error_policy =
+        rb_servo::CartesianCommandActualErrorPolicy::Fault;
+    rb_servo::CartesianServoController fault_controller(
+        left_mount,
+        right_mount,
+        fault_config,
+        kinematics
+    );
+    integrator.valid = true;
+    integrator.last_mode = rb_servo::ControlMode::TcpTwistLocal;
+    integrator.q_command_deg = zeroJoints();
+    integrator.q_command_deg[0] = 20.0;
+    result = fault_controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q_actual, left_mount),
+        q_actual,
+        rb_servo::RunMode::Simulation,
+        0.01,
+        21,
+        &hold,
+        &integrator
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::TrackingError);
+    RB_CHECK(result.reason == "cartesian_velocity_integrator_divergence");
+    RB_CHECK(!integrator.valid);
     return true;
 }
 
@@ -620,5 +859,9 @@ int main() {
     if (!testTcpTwistRealModeBlocked()) return 1;
     if (!testTcpTwistClampTelemetryAndDamping()) return 1;
     if (!testTcpTwistRejectPolicy()) return 1;
+    if (!testScalarFirstOrderPlantShowsMeasuredActualAttenuation()) return 1;
+    if (!testVelocityIntegrationModesGenerateExpectedTargets()) return 1;
+    if (!testVelocityIntegratorUsesClampedSafeTarget()) return 1;
+    if (!testVelocityIntegratorDivergenceResetsOrFaults()) return 1;
     return 0;
 }

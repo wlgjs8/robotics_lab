@@ -61,6 +61,8 @@ private:
     bool isValidJointState(const RobotState& state) const;
     void clearLatchedCartesianTargets();
     void clearLatchedCartesianTarget(ArmId arm_id);
+    void resetCartesianVelocityIntegrator(ArmId arm_id, const std::string& reason);
+    void refreshCartesianVelocityIntegratorTelemetry(ArmId arm_id);
     DualArmCommand resolveCartesianDeltaCommand(
         const DualArmCommand& command,
         const RobotState& left_state,
@@ -185,6 +187,8 @@ private:
     CartesianServoPathState right_cartesian_servo_path_;
     CartesianTwistHoldState left_cartesian_twist_hold_;
     CartesianTwistHoldState right_cartesian_twist_hold_;
+    CartesianVelocityIntegratorState left_cartesian_velocity_integrator_;
+    CartesianVelocityIntegratorState right_cartesian_velocity_integrator_;
     ServoSnapshot latest_snapshot_;
 };
 

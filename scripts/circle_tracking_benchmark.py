@@ -35,12 +35,20 @@ from cartesian_acceptance import (
 
 REAL_ROBOT_IPS = ("172.28.60.200", "172.28.60.201")
 REAL_GATE_ENV = ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN")
-PROFILE_DEFAULTS = {
+PROFILE_DEFAULTS: dict[str, tuple[float, float]] = {
     "safe_5cm_10s": (0.05, 10.0),
     "circle_15cm_16s": (0.15, 16.0),
     "circle_15cm_8s": (0.15, 8.0),
     "gene_15cm_4s": (0.15, 4.0),
 }
+PROFILE_USE_CASES = {
+    "safe_5cm_10s": "conservative simulator smoke/regression baseline",
+    "circle_15cm_16s": "15 cm circle within the default 0.03 m/s twist speed limit",
+    "circle_15cm_8s": "15 cm simulator stress below GENE-style speed",
+    "gene_15cm_4s": "explicit GENE-style 15 cm / 4 s simulator-only stress",
+}
+DEFAULT_ORIENTATION_DRIFT_WARNING_RAD = 0.1
+RADIUS_GAIN_WARNING_MIN = 0.8
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,6 +109,25 @@ def parse_scalar_float(config_text: str, key: str) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def benchmark_profile_label(profile: str) -> str:
+    if profile == "gene_15cm_4s":
+        return "GENE-style 15 cm / 4 s stress"
+    if profile == "safe_5cm_10s":
+        return "safe baseline"
+    return profile
+
+
+def benchmark_profile_metadata(profile: str) -> dict[str, Any]:
+    diameter_m, period_sec = PROFILE_DEFAULTS[profile]
+    return {
+        "name": profile,
+        "diameter_m": diameter_m,
+        "period_sec": period_sec,
+        "required_tangential_speed_m_s": math.pi * diameter_m / period_sec,
+        "expected_use_case": PROFILE_USE_CASES[profile],
+    }
+
+
 def apply_profile(args: argparse.Namespace) -> None:
     default_diameter, default_period = PROFILE_DEFAULTS[args.profile]
     if args.diameter_m is None:
@@ -112,6 +139,33 @@ def apply_profile(args: argparse.Namespace) -> None:
 def required_speed(args: argparse.Namespace) -> float:
     assert args.diameter_m is not None and args.period_sec is not None
     return math.pi * args.diameter_m / args.period_sec
+
+
+def benchmark_context(args: argparse.Namespace, safety: dict[str, Any]) -> dict[str, Any]:
+    server_text = read_text(args.server_config, "server config")
+    simulator_config = args.left_config if args.arm == "left" else args.right_config
+    simulator_text = read_text(simulator_config, f"{args.arm} simulator config")
+    servo_rate_hz = parse_scalar_float(server_text, "rate_hz")
+    motion_time_constant_sec = parse_scalar_float(simulator_text, "motion_time_constant_sec")
+    servo_dt_sec = 1.0 / servo_rate_hz if servo_rate_hz and servo_rate_hz > 0.0 else None
+    dt_over_tau = (
+        servo_dt_sec / motion_time_constant_sec
+        if servo_dt_sec is not None and motion_time_constant_sec and motion_time_constant_sec > 0.0
+        else None
+    )
+    return {
+        "profile": args.profile,
+        "profile_label": benchmark_profile_label(args.profile),
+        "profile_expected_use_case": PROFILE_USE_CASES[args.profile],
+        "profile_catalog_entry": benchmark_profile_metadata(args.profile),
+        "stress_profile": args.profile == "gene_15cm_4s",
+        "configured_max_twist_linear_m_s": safety.get("max_twist_linear_m_s"),
+        "configured_max_linear_move_speed_m_s": safety.get("max_linear_move_speed_m_s"),
+        "simulator_motion_time_constant_sec": motion_time_constant_sec,
+        "servo_rate_hz": servo_rate_hz,
+        "servo_dt_sec": servo_dt_sec,
+        "simulator_dt_over_tau": dt_over_tau,
+    }
 
 
 def preflight(args: argparse.Namespace) -> dict[str, Any]:
@@ -660,13 +714,29 @@ def compute_metrics(
     radius_error = abs(fit_radius - traj.radius) if isinstance(fit_radius, (int, float)) else None
     fit_center_error = math.sqrt(fit_center[0] * fit_center[0] + fit_center[1] * fit_center[1]) if isinstance(fit_center, list) else None
     fault_latched = any(sample["snapshot"].get("fault_latched") is True for sample in samples)
-    send_deadline_hits = sum(
+    send_within_period = sum(
         1
         for sample in samples
-        if sample["snapshot"].get("send_deadline_hit") is True
+        if sample["snapshot"].get("send_within_period") is True
+        or sample.get("arm_state", {}).get("send_within_period") is True
+        or sample["snapshot"].get("send_deadline_hit") is True
         or sample.get("arm_state", {}).get("send_deadline_hit") is True
     )
+    send_period_overruns = sum(
+        1
+        for sample in samples
+        if sample["snapshot"].get("send_period_overrun") is True
+        or sample.get("arm_state", {}).get("send_period_overrun") is True
+    )
+    send_command_deadline_missed = sum(
+        1
+        for sample in samples
+        if sample["snapshot"].get("send_command_deadline_missed") is True
+        or sample.get("arm_state", {}).get("send_command_deadline_missed") is True
+    )
+    radius_gain = fit_radius / traj.radius if isinstance(fit_radius, (int, float)) and traj.radius > 0.0 else None
     metrics = {
+        "reference_radius_m": traj.radius,
         "mean_error_m": sum(errors) / len(errors) if errors else None,
         "rms_error_m": math.sqrt(sum(v * v for v in errors) / len(errors)) if errors else None,
         "median_error_m": percentile(errors, 50.0),
@@ -679,6 +749,8 @@ def compute_metrics(
         "estimated_latency_ms": estimated_latency_ms,
         "phase_lag_reliability_reason": phase_reliability_reason,
         "fit_radius_m": fit_radius,
+        "radius_gain": radius_gain,
+        "amplitude_gain": radius_gain,
         "radius_error_m": radius_error,
         "fit_center_error_m": fit_center_error,
         "fit_center_plane_m": fit_center,
@@ -687,7 +759,11 @@ def compute_metrics(
         "fault_latched": fault_latched,
         "worker_command_drops_total": metric_max(samples, "command_drops_total", "worker"),
         "worker_pending_overwrites_total": metric_max(samples, "pending_overwrites_total", "worker"),
-        "send_deadline_hit_count": send_deadline_hits,
+        "send_within_period_count": send_within_period,
+        "send_period_overrun_count": send_period_overruns,
+        "send_command_deadline_missed_count": send_command_deadline_missed,
+        "send_deadline_hit_count": send_within_period,
+        "send_deadline_hit_count_deprecated_alias_for": "send_within_period_count",
         "max_state_age_us": metric_max(samples, "state_age_us", "arm_state"),
         "max_send_result_age_us": metric_max(samples, "send_result_age_us", "arm_state"),
         "max_cartesian_servo_duration_us": None,
@@ -734,14 +810,24 @@ def write_actual_csv(path: Path, samples: list[dict[str, Any]], benchmark_start_
 def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
     fields = [
         "result",
+        "result_reason",
         "controller",
         "arm",
         "plane",
+        "profile",
+        "profile_label",
         "diameter_m",
+        "reference_radius_m",
         "period_sec",
         "repeat",
         "command_rate_hz",
         "required_tangential_speed_m_s",
+        "configured_max_twist_linear_m_s",
+        "configured_max_linear_move_speed_m_s",
+        "simulator_motion_time_constant_sec",
+        "servo_rate_hz",
+        "servo_dt_sec",
+        "simulator_dt_over_tau",
         "mean_error_m",
         "rms_error_m",
         "p95_error_m",
@@ -749,6 +835,8 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "p95_orientation_drift_rad",
         "estimated_latency_ms",
         "fit_radius_m",
+        "radius_gain",
+        "amplitude_gain",
         "radius_error_m",
         "fit_center_error_m",
         "sample_count",
@@ -759,6 +847,50 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerow({field: summary.get(field) for field in fields})
+
+
+def thresholds_requested(args: argparse.Namespace) -> bool:
+    return any(
+        value is not None
+        for value in (
+            args.max_allowed_rms_error_m,
+            args.max_allowed_p95_error_m,
+            args.max_allowed_orientation_drift_rad,
+            args.max_allowed_latency_ms,
+        )
+    )
+
+
+def benchmark_result(thresholds_were_requested: bool, failures: list[str]) -> tuple[str, str]:
+    if failures:
+        return "fail", "thresholds applied and failed"
+    if thresholds_were_requested:
+        return "pass", "thresholds applied and satisfied"
+    return "completed", "run completed without thresholds; performance pass/fail was not evaluated"
+
+
+def performance_warnings(summary: dict[str, Any], orientation_warning_rad: float = DEFAULT_ORIENTATION_DRIFT_WARNING_RAD) -> list[str]:
+    warnings: list[str] = []
+    radius = summary.get("reference_radius_m", summary.get("radius_m"))
+    radius_gain = summary.get("radius_gain")
+    if isinstance(radius_gain, (int, float)) and radius_gain < RADIUS_GAIN_WARNING_MIN:
+        warnings.append(
+            f"radius_gain {radius_gain:.3f} below {RADIUS_GAIN_WARNING_MIN:.3f}; actual circle amplitude is attenuated"
+        )
+    rms_error = summary.get("rms_error_m")
+    if isinstance(rms_error, (int, float)) and isinstance(radius, (int, float)) and rms_error > 0.5 * radius:
+        warnings.append(f"rms_error_m {rms_error:.6f} exceeds half the reference radius {0.5 * radius:.6f}")
+    p95_error = summary.get("p95_error_m")
+    if isinstance(p95_error, (int, float)) and isinstance(radius, (int, float)) and p95_error > radius:
+        warnings.append(f"p95_error_m {p95_error:.6f} exceeds reference radius {radius:.6f}")
+    orientation_drift = summary.get("max_orientation_drift_rad")
+    if isinstance(orientation_drift, (int, float)) and orientation_drift > orientation_warning_rad:
+        warnings.append(
+            f"max_orientation_drift_rad {orientation_drift:.6f} exceeds warning threshold {orientation_warning_rad:.6f}"
+        )
+    if summary.get("fault_latched") is True:
+        warnings.append("fault_latched was true during benchmark")
+    return warnings
 
 
 def plot_artifacts(artifact_dir: Path, args: argparse.Namespace, traj: Trajectory, merged: list[dict[str, Any]]) -> list[str]:
@@ -859,6 +991,7 @@ def write_json(path: Path, value: Any) -> None:
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     safety = preflight(args)
+    context = benchmark_context(args, safety)
     artifact_dir = args.artifact_dir.resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
     radius = float(args.diameter_m) * 0.5
@@ -873,6 +1006,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "plane": args.plane,
         "diameter_m": args.diameter_m,
         "radius_m": radius,
+        "reference_radius_m": radius,
         "period_sec": args.period_sec,
         "repeat": args.repeat,
         "command_rate_hz": args.command_rate_hz,
@@ -886,8 +1020,16 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "right_simulator_log": str(artifact_dir / "right_simulator.log"),
         "caveat": "simulator-only benchmark evidence; not real robot readiness",
     }
+    base_summary.update(context)
     if args.preflight_only:
-        base_summary.update({"result": "pass", "preflight_only": True, "skipped_plots": ["preflight only"]})
+        base_summary.update({
+            "result": "completed",
+            "result_reason": "simulator-only safety preflight completed; no tracking run or performance thresholds were evaluated",
+            "preflight_only": True,
+            "performance_warnings": [],
+            "threshold_failures": [],
+            "skipped_plots": ["preflight only"],
+        })
         write_json(artifact_dir / "summary.json", base_summary)
         write_summary_csv(artifact_dir / "summary.csv", base_summary)
         return base_summary
@@ -985,9 +1127,15 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
 
     summary = dict(base_summary)
     summary.update(metrics)
+    thresholds_were_requested = thresholds_requested(args)
+    failures = threshold_failures(args, summary)
+    if thresholds_were_requested and summary.get("fault_latched") is True:
+        failures.append("fault_latched was true during benchmark")
+    result, result_reason = benchmark_result(thresholds_were_requested, failures)
     summary.update(
         {
-            "result": "pass",
+            "result": result,
+            "result_reason": result_reason,
             "preflight_only": False,
             "command_count": command_count,
             "invalid_state_packets": capture.invalid_packets,
@@ -998,15 +1146,11 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "generated_plots": generated_plot_paths(artifact_dir),
             "skipped_plots": skipped_plots,
             "servo_log": servo_log,
-            "threshold_failures": [],
+            "threshold_failures": failures,
+            "performance_warnings": performance_warnings(summary),
+            "orientation_drift_warning_threshold_rad": DEFAULT_ORIENTATION_DRIFT_WARNING_RAD,
         }
     )
-    failures = threshold_failures(args, summary)
-    if summary.get("fault_latched") is True:
-        failures.append("fault_latched was true during benchmark")
-    if failures:
-        summary["result"] = "fail"
-        summary["threshold_failures"] = failures
     write_json(artifact_dir / "summary.json", summary)
     write_summary_csv(artifact_dir / "summary.csv", summary)
     return summary
@@ -1035,13 +1179,16 @@ def main() -> int:
     except Exception as exc:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         failure = {
-            "result": "fail",
+            "result": "error",
+            "result_reason": "benchmark could not run",
             "error": str(exc),
             "repo_git_commit": git_commit(args.root) if hasattr(args, "root") else None,
             "server_config": str(args.server_config.resolve()) if hasattr(args, "server_config") else None,
             "left_config": str(args.left_config.resolve()) if hasattr(args, "left_config") else None,
             "right_config": str(args.right_config.resolve()) if hasattr(args, "right_config") else None,
             "safety_preflight": {"passed": False, "error": str(exc)},
+            "performance_warnings": [],
+            "threshold_failures": [str(exc)],
             "caveat": "simulator-only benchmark evidence; not real robot readiness",
         }
         write_json(artifact_dir / "summary.json", failure)
@@ -1049,7 +1196,7 @@ def main() -> int:
         print(f"circle_tracking_benchmark: FAIL: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(summary, indent=2, sort_keys=True))
-    return 0 if summary.get("result") == "pass" else 2
+    return 0 if summary.get("result") in {"pass", "completed"} else 2
 
 
 if __name__ == "__main__":

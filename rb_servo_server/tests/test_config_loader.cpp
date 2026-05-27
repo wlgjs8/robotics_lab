@@ -333,6 +333,11 @@ bool testCartesianControlTuningParsesAndValidates() {
         "  path_kp_ori: 7.5\n"
         "  twist_orientation_hold_kp: 8.0\n"
         "  twist_angular_deadband_rad_s: 0.002\n"
+        "  velocity_target_integration: measured_actual_lookahead\n"
+        "  velocity_target_lookahead_sec: 0.05\n"
+        "  max_command_actual_error_deg: [1, 2, 3, 4, 5, 6]\n"
+        "  reset_velocity_integrator_on_mode_change: false\n"
+        "  command_actual_error_policy: fault\n"
         "  linear_move:\n"
         "    constant_orientation_tolerance_rad: 0.004\n"
     );
@@ -342,6 +347,14 @@ bool testCartesianControlTuningParsesAndValidates() {
     RB_CHECK(near(cfg.cartesian_control.path_kp_ori, 7.5));
     RB_CHECK(near(cfg.cartesian_control.twist_orientation_hold_kp, 8.0));
     RB_CHECK(near(cfg.cartesian_control.twist_angular_deadband_rad_s, 0.002));
+    RB_CHECK(cfg.cartesian_control.velocity_target_integration ==
+             rb_servo::CartesianVelocityTargetIntegrationMode::MeasuredActualLookahead);
+    RB_CHECK(near(cfg.cartesian_control.velocity_target_lookahead_sec, 0.05));
+    RB_CHECK(near(cfg.cartesian_control.max_command_actual_error_deg[0], 1.0));
+    RB_CHECK(near(cfg.cartesian_control.max_command_actual_error_deg[5], 6.0));
+    RB_CHECK(!cfg.cartesian_control.reset_velocity_integrator_on_mode_change);
+    RB_CHECK(cfg.cartesian_control.command_actual_error_policy ==
+             rb_servo::CartesianCommandActualErrorPolicy::Fault);
     RB_CHECK(near(cfg.cartesian_control.linear_move.constant_orientation_tolerance_rad, 0.004));
 
     const std::string legacy_path = writeTempConfig(
@@ -390,6 +403,26 @@ bool testCartesianControlTuningParsesAndValidates() {
     const bool bad_deadband_rejected = loadRejects(bad_deadband_path);
     ::unlink(bad_deadband_path.c_str());
     RB_CHECK(bad_deadband_rejected);
+
+    const std::string bad_velocity_integration_path = writeTempConfig(
+        "cartesian-bad-velocity-integration",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  velocity_target_integration: nope\n"
+    );
+    const bool bad_velocity_integration_rejected = loadRejects(bad_velocity_integration_path);
+    ::unlink(bad_velocity_integration_path.c_str());
+    RB_CHECK(bad_velocity_integration_rejected);
+
+    const std::string bad_command_actual_error_path = writeTempConfig(
+        "cartesian-bad-command-actual-error",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  max_command_actual_error_deg: [1, 1, 1, 1, 1, 0]\n"
+    );
+    const bool bad_command_actual_error_rejected = loadRejects(bad_command_actual_error_path);
+    ::unlink(bad_command_actual_error_path.c_str());
+    RB_CHECK(bad_command_actual_error_rejected);
 
     const std::string bad_constant_orientation_tolerance_path = writeTempConfig(
         "cartesian-bad-constant-orientation-tolerance",

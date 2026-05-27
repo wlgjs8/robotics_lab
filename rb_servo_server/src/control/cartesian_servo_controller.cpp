@@ -70,6 +70,158 @@ bool finiteVec6(const Vec6& value) {
            std::isfinite(value.rz);
 }
 
+std::string integrationModeName(CartesianVelocityTargetIntegrationMode mode) {
+    switch (mode) {
+        case CartesianVelocityTargetIntegrationMode::MeasuredActual:
+            return "measured_actual";
+        case CartesianVelocityTargetIntegrationMode::MeasuredActualLookahead:
+            return "measured_actual_lookahead";
+        case CartesianVelocityTargetIntegrationMode::PreviousCommand:
+            return "previous_command";
+    }
+    return "unknown";
+}
+
+bool isTwistMode(ControlMode mode) {
+    return mode == ControlMode::TcpTwistStand || mode == ControlMode::TcpTwistLocal;
+}
+
+bool sameVelocityIntegrationCategory(ControlMode a, ControlMode b) {
+    if (isTwistMode(a) && isTwistMode(b)) return true;
+    return a == ControlMode::TcpLinearMove && b == ControlMode::TcpLinearMove;
+}
+
+void resetVelocityIntegrator(
+    CartesianVelocityIntegratorState* state,
+    const JointArray& q_actual_deg,
+    ControlMode mode,
+    uint64_t seq,
+    const std::string& reason
+) {
+    if (!state) return;
+    state->valid = true;
+    state->q_command_deg = q_actual_deg;
+    state->last_mode = mode;
+    state->last_seq = seq;
+    state->reset_reason = reason;
+    ++state->resets_total;
+}
+
+bool commandActualDiverged(
+    const JointArray& q_command_deg,
+    const JointArray& q_actual_deg,
+    const JointArray& max_error_deg,
+    double* max_observed
+) {
+    bool diverged = false;
+    double observed = 0.0;
+    for (int i = 0; i < kDof; ++i) {
+        const double error = std::abs(q_command_deg[i] - q_actual_deg[i]);
+        observed = std::max(observed, error);
+        if (error > max_error_deg[i]) {
+            diverged = true;
+        }
+    }
+    if (max_observed) *max_observed = observed;
+    return diverged;
+}
+
+void populateIntegratorTelemetry(
+    CartesianSolveTelemetry* telemetry,
+    const CartesianControlConfig& config,
+    const CartesianVelocityIntegratorState* state
+) {
+    if (!telemetry) return;
+    telemetry->cartesian_velocity_integration_mode =
+        integrationModeName(config.velocity_target_integration);
+    telemetry->velocity_target_lookahead_sec = config.velocity_target_lookahead_sec;
+    if (!state) return;
+    telemetry->q_integrator_valid = state->valid;
+    telemetry->integrator_reset_reason = state->reset_reason;
+    telemetry->integrator_resets_total = state->resets_total;
+    telemetry->integrator_clamps_total = state->clamps_total;
+    telemetry->integrator_divergence_total = state->divergence_total;
+    telemetry->max_command_actual_error_deg_observed =
+        state->max_command_actual_error_deg_observed;
+}
+
+CartesianArmTargetResult integrateVelocityTarget(
+    const CartesianArmTargetResult& input,
+    const CartesianControlConfig& config,
+    const JointArray& q_actual_deg,
+    const CartesianVelocityResult& velocity,
+    double dt_sec,
+    ControlMode mode,
+    uint64_t seq,
+    CartesianVelocityIntegratorState* state
+) {
+    CartesianArmTargetResult result = input;
+    populateIntegratorTelemetry(&result.telemetry, config, state);
+
+    const double safe_dt_sec = std::max(0.0, dt_sec);
+    double integration_dt_sec = safe_dt_sec;
+    JointArray base_q = q_actual_deg;
+
+    if (config.velocity_target_integration == CartesianVelocityTargetIntegrationMode::MeasuredActualLookahead) {
+        integration_dt_sec = config.velocity_target_lookahead_sec;
+    } else if (config.velocity_target_integration == CartesianVelocityTargetIntegrationMode::PreviousCommand) {
+        if (!state) {
+            base_q = q_actual_deg;
+        } else if (!state->valid) {
+            resetVelocityIntegrator(state, q_actual_deg, mode, seq, "seed_from_actual");
+        } else if (config.reset_velocity_integrator_on_mode_change &&
+                   !sameVelocityIntegrationCategory(state->last_mode, mode)) {
+            resetVelocityIntegrator(state, q_actual_deg, mode, seq, "mode_change");
+        }
+
+        if (state) {
+            double observed_error = 0.0;
+            if (commandActualDiverged(
+                    state->q_command_deg,
+                    q_actual_deg,
+                    config.max_command_actual_error_deg,
+                    &observed_error)) {
+                ++state->divergence_total;
+                state->max_command_actual_error_deg_observed =
+                    std::max(state->max_command_actual_error_deg_observed, observed_error);
+                if (config.command_actual_error_policy == CartesianCommandActualErrorPolicy::Fault) {
+                    state->valid = false;
+                    state->reset_reason = "command_actual_divergence_fault";
+                    populateIntegratorTelemetry(&result.telemetry, config, state);
+                    result.verdict = SafetyVerdict::TrackingError;
+                    result.reason = "cartesian_velocity_integrator_divergence";
+                    result.telemetry.status = "failed";
+                    result.telemetry.reason = result.reason;
+                    return result;
+                }
+                resetVelocityIntegrator(state, q_actual_deg, mode, seq, "command_actual_divergence_reset");
+            } else {
+                state->max_command_actual_error_deg_observed =
+                    std::max(state->max_command_actual_error_deg_observed, observed_error);
+            }
+            state->last_mode = mode;
+            state->last_seq = seq;
+            base_q = state->q_command_deg;
+        }
+    }
+
+    JointArray q_next = base_q;
+    for (int i = 0; i < kDof; ++i) {
+        q_next[i] += velocity.qdot_deg_s[i] * integration_dt_sec;
+        if (!std::isfinite(q_next[i])) {
+            result.verdict = SafetyVerdict::IkFailed;
+            result.reason = "non_finite_cartesian_servo_joint_target";
+            result.telemetry.status = "failed";
+            result.telemetry.reason = result.reason;
+            return result;
+        }
+    }
+
+    result.q_target_deg = q_next;
+    populateIntegratorTelemetry(&result.telemetry, config, state);
+    return result;
+}
+
 double linearNorm(const Vec6& value) {
     return std::sqrt(value.x * value.x + value.y * value.y + value.z * value.z);
 }
@@ -137,7 +289,8 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     RunMode run_mode,
     double dt_sec,
     uint64_t command_seq,
-    CartesianServoPathState* path_state
+    CartesianServoPathState* path_state,
+    CartesianVelocityIntegratorState* velocity_integrator_state
 ) {
     CartesianArmTargetResult result;
     result.q_target_deg = previous_safe_sent_q_deg;
@@ -350,20 +503,7 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
         return result;
     }
 
-    JointArray q_next = state.q_actual_deg;
-    for (int i = 0; i < kDof; ++i) {
-        q_next[i] += velocity.qdot_deg_s[i] * std::max(0.0, dt_sec);
-        if (!std::isfinite(q_next[i])) {
-            result.verdict = SafetyVerdict::IkFailed;
-            result.reason = "non_finite_cartesian_servo_joint_target";
-            result.telemetry.status = "failed";
-            result.telemetry.reason = result.reason;
-            return result;
-        }
-    }
-
     result.verdict = SafetyVerdict::Ok;
-    result.q_target_deg = q_next;
     result.telemetry.success = true;
     result.telemetry.status = "ok";
     result.telemetry.path_active = path_state->active && !path_state->done;
@@ -381,7 +521,16 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     result.telemetry.orientation_mode = orientationModeName(path_state->orientation_mode);
     result.telemetry.position_error_m = result.telemetry.path_position_error_m;
     result.telemetry.orientation_error_rad = result.telemetry.path_orientation_error_rad;
-    return result;
+    return integrateVelocityTarget(
+        result,
+        config_,
+        state.q_actual_deg,
+        velocity,
+        dt_sec,
+        ControlMode::TcpLinearMove,
+        command_seq,
+        velocity_integrator_state
+    );
 }
 
 CartesianArmTargetResult CartesianServoController::computeTwistTarget(
@@ -390,7 +539,9 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
     const JointArray& previous_safe_sent_q_deg,
     RunMode run_mode,
     double dt_sec,
-    CartesianTwistHoldState* hold_state
+    uint64_t command_seq,
+    CartesianTwistHoldState* hold_state,
+    CartesianVelocityIntegratorState* velocity_integrator_state
 ) {
     CartesianArmTargetResult result;
     result.q_target_deg = previous_safe_sent_q_deg;
@@ -522,20 +673,7 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         return result;
     }
 
-    JointArray q_next = state.q_actual_deg;
-    for (int i = 0; i < kDof; ++i) {
-        q_next[i] += velocity.qdot_deg_s[i] * std::max(0.0, dt_sec);
-        if (!std::isfinite(q_next[i])) {
-            result.verdict = SafetyVerdict::IkFailed;
-            result.reason = "non_finite_cartesian_servo_joint_target";
-            result.telemetry.status = "failed";
-            result.telemetry.reason = result.reason;
-            return result;
-        }
-    }
-
     result.verdict = SafetyVerdict::Ok;
-    result.q_target_deg = q_next;
     result.telemetry.success = true;
     result.telemetry.status = "ok";
     result.telemetry.path_orientation_error_rad =
@@ -543,7 +681,44 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
                   orientation_error.ry * orientation_error.ry +
                   orientation_error.rz * orientation_error.rz);
     result.telemetry.orientation_error_rad = result.telemetry.path_orientation_error_rad;
-    return result;
+    return integrateVelocityTarget(
+        result,
+        config_,
+        state.q_actual_deg,
+        velocity,
+        dt_sec,
+        command.mode,
+        command_seq,
+        velocity_integrator_state
+    );
+}
+
+void CartesianServoController::updateVelocityIntegratorAfterSafety(
+    CartesianVelocityIntegratorState* velocity_integrator_state,
+    const JointArray& safe_q_target_deg,
+    bool was_sent_or_intended,
+    bool target_was_clamped,
+    const std::string& reset_reason
+) {
+    if (!velocity_integrator_state ||
+        config_.velocity_target_integration != CartesianVelocityTargetIntegrationMode::PreviousCommand) {
+        return;
+    }
+    if (!was_sent_or_intended) {
+        if (velocity_integrator_state->valid) {
+            velocity_integrator_state->valid = false;
+            velocity_integrator_state->reset_reason = reset_reason;
+            ++velocity_integrator_state->resets_total;
+        }
+        return;
+    }
+    if (!velocity_integrator_state->valid) {
+        return;
+    }
+    velocity_integrator_state->q_command_deg = safe_q_target_deg;
+    if (target_was_clamped) {
+        ++velocity_integrator_state->clamps_total;
+    }
 }
 
 }  // namespace rb_servo

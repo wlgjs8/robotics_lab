@@ -76,6 +76,28 @@ std::string cartesianLimitPolicyString(CartesianLimitPolicy policy) {
     return "unknown";
 }
 
+std::string velocityIntegrationModeString(CartesianVelocityTargetIntegrationMode mode) {
+    switch (mode) {
+        case CartesianVelocityTargetIntegrationMode::MeasuredActual:
+            return "measured_actual";
+        case CartesianVelocityTargetIntegrationMode::MeasuredActualLookahead:
+            return "measured_actual_lookahead";
+        case CartesianVelocityTargetIntegrationMode::PreviousCommand:
+            return "previous_command";
+    }
+    return "unknown";
+}
+
+std::string commandActualErrorPolicyString(CartesianCommandActualErrorPolicy policy) {
+    switch (policy) {
+        case CartesianCommandActualErrorPolicy::Reset:
+            return "reset";
+        case CartesianCommandActualErrorPolicy::Fault:
+            return "fault";
+    }
+    return "unknown";
+}
+
 nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config) {
     return {
         {"schema", "robotics_lab.cartesian_control_snapshot.v1"},
@@ -97,6 +119,11 @@ nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config
         {"max_cartesian_step_m", optionalDoubleJson(config.max_cartesian_step_m)},
         {"max_cartesian_step_rad", optionalDoubleJson(config.max_cartesian_step_rad)},
         {"exceed_limit_policy", cartesianLimitPolicyString(config.exceed_limit_policy)},
+        {"velocity_target_integration", velocityIntegrationModeString(config.velocity_target_integration)},
+        {"velocity_target_lookahead_sec", config.velocity_target_lookahead_sec},
+        {"max_command_actual_error_deg", jointArrayJson(config.max_command_actual_error_deg)},
+        {"reset_velocity_integrator_on_mode_change", config.reset_velocity_integrator_on_mode_change},
+        {"command_actual_error_policy", commandActualErrorPolicyString(config.command_actual_error_policy)},
         {"linear_move", {
             {"min_duration_sec", config.linear_move.min_duration_sec},
             {"max_duration_sec", config.linear_move.max_duration_sec},
@@ -183,10 +210,15 @@ double ageUs(uint64_t newer_ns, uint64_t older_ns) {
     return static_cast<double>(newer_ns - older_ns) / 1000.0;
 }
 
-bool sendDeadlineHit(uint64_t loop_start_ns, double period_ms, uint64_t send_end_ns) {
+bool sendWithinPeriod(uint64_t loop_start_ns, double period_ms, uint64_t send_end_ns) {
     if (loop_start_ns == 0 || send_end_ns == 0 || period_ms <= 0.0) return false;
     const auto period_ns = static_cast<uint64_t>(period_ms * 1'000'000.0);
     return send_end_ns <= loop_start_ns + period_ns;
+}
+
+bool sendPeriodOverrun(uint64_t loop_start_ns, double period_ms, uint64_t send_end_ns) {
+    if (loop_start_ns == 0 || send_end_ns == 0 || period_ms <= 0.0) return false;
+    return !sendWithinPeriod(loop_start_ns, period_ms, send_end_ns);
 }
 
 nlohmann::json backendCallJson(const BackendCallSnapshot& call, bool send_call) {
@@ -299,6 +331,14 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"requested_twist_angular_norm_rad_s", telemetry.requested_twist_angular_norm_rad_s},
         {"applied_twist_linear_norm_m_s", telemetry.applied_twist_linear_norm_m_s},
         {"applied_twist_angular_norm_rad_s", telemetry.applied_twist_angular_norm_rad_s},
+        {"cartesian_velocity_integration_mode", telemetry.cartesian_velocity_integration_mode},
+        {"q_integrator_valid", telemetry.q_integrator_valid},
+        {"integrator_reset_reason", telemetry.integrator_reset_reason},
+        {"integrator_resets_total", telemetry.integrator_resets_total},
+        {"integrator_clamps_total", telemetry.integrator_clamps_total},
+        {"integrator_divergence_total", telemetry.integrator_divergence_total},
+        {"max_command_actual_error_deg_observed", telemetry.max_command_actual_error_deg_observed},
+        {"velocity_target_lookahead_sec", telemetry.velocity_target_lookahead_sec},
     };
 }
 
@@ -438,7 +478,8 @@ nlohmann::json armStateJson(
     double send_duration_us,
     double state_age_us,
     double send_result_age_us,
-    bool send_deadline_hit,
+    bool send_within_period,
+    bool send_period_overrun,
     double worker_loop_read_duration_us,
     const ArmWorkerTelemetry& worker_telemetry,
     const std::optional<BackendTransportTelemetry>& transport_telemetry,
@@ -461,7 +502,11 @@ nlohmann::json armStateJson(
         {"send_duration_us", send_duration_us},
         {"state_age_us", state_age_us},
         {"send_result_age_us", send_result_age_us},
-        {"send_deadline_hit", send_deadline_hit},
+        {"send_within_period", send_within_period},
+        {"send_period_overrun", send_period_overrun},
+        {"send_command_deadline_missed", nlohmann::json(nullptr)},
+        {"send_deadline_hit", send_within_period},
+        {"send_deadline_hit_deprecated_alias_for", "send_within_period"},
         {"worker_loop_read_duration_us", worker_loop_read_duration_us},
         {"worker", workerTelemetryJson(worker_telemetry, worker_enabled, servo_config, state_age_us)},
         {"transport", transportTelemetryJson(transport_telemetry)},
@@ -629,7 +674,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.left_send_duration_us,
         ageUs(snapshot.loop_end_time_ns, snapshot.left_state.host_time_ns),
         ageUs(snapshot.loop_end_time_ns, snapshot.left_send_end_ns),
-        sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.left_send_end_ns),
+        sendWithinPeriod(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.left_send_end_ns),
+        sendPeriodOverrun(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.left_send_end_ns),
         worker_enabled ? snapshot.left_last_read.duration_us : 0.0,
         snapshot.left_worker_telemetry,
         snapshot.left_transport_telemetry,
@@ -654,7 +700,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.right_send_duration_us,
         ageUs(snapshot.loop_end_time_ns, snapshot.right_state.host_time_ns),
         ageUs(snapshot.loop_end_time_ns, snapshot.right_send_end_ns),
-        sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.right_send_end_ns),
+        sendWithinPeriod(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.right_send_end_ns),
+        sendPeriodOverrun(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.right_send_end_ns),
         worker_enabled ? snapshot.right_last_read.duration_us : 0.0,
         snapshot.right_worker_telemetry,
         snapshot.right_transport_telemetry,
@@ -669,9 +716,19 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
 
     message["send_skew_us"] = snapshot.send_skew_us;
     message["dispatch_skew_us"] = snapshot.send_skew_us;
-    message["send_deadline_hit"] =
-        sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.left_send_end_ns) &&
-        sendDeadlineHit(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.right_send_end_ns);
+    const bool left_send_within_period =
+        sendWithinPeriod(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.left_send_end_ns);
+    const bool right_send_within_period =
+        sendWithinPeriod(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.right_send_end_ns);
+    const bool left_send_period_overrun =
+        sendPeriodOverrun(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.left_send_end_ns);
+    const bool right_send_period_overrun =
+        sendPeriodOverrun(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.right_send_end_ns);
+    message["send_within_period"] = left_send_within_period && right_send_within_period;
+    message["send_period_overrun"] = left_send_period_overrun || right_send_period_overrun;
+    message["send_command_deadline_missed"] = nullptr;
+    message["send_deadline_hit"] = message["send_within_period"];
+    message["send_deadline_hit_deprecated_alias_for"] = "send_within_period";
     message["send_suppressed"] = snapshot.send_suppressed;
     message["send_policy"] = snapshot.send_policy;
     message["safety_verdict"] = toString(snapshot.safety_verdict);

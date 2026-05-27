@@ -350,12 +350,22 @@ force_control:
         self.assertIn("command_seq", snapshot)
         self.assertIn("send_skew_us", snapshot)
         self.assertIn("dispatch_skew_us", snapshot)
+        self.assertIn("send_within_period", snapshot)
+        self.assertIn("send_period_overrun", snapshot)
+        self.assertIn("send_command_deadline_missed", snapshot)
         self.assertIn("send_deadline_hit", snapshot)
+        self.assertIsInstance(snapshot["send_within_period"], bool)
+        self.assertIsInstance(snapshot["send_period_overrun"], bool)
+        self.assertIn(snapshot["send_command_deadline_missed"], (None, True, False))
+        self.assertEqual(snapshot["send_deadline_hit"], snapshot["send_within_period"])
         for arm in ("left", "right"):
             arm_state = snapshot[arm]
             for key in (
                 "state_age_us",
                 "send_result_age_us",
+                "send_within_period",
+                "send_period_overrun",
+                "send_command_deadline_missed",
                 "send_deadline_hit",
                 "worker_loop_read_duration_us",
                 "worker",
@@ -363,7 +373,11 @@ force_control:
                 self.assertIn(key, arm_state)
             self.assertGreaterEqual(float(arm_state["state_age_us"]), 0.0)
             self.assertGreaterEqual(float(arm_state["send_result_age_us"]), 0.0)
+            self.assertIsInstance(arm_state["send_within_period"], bool)
+            self.assertIsInstance(arm_state["send_period_overrun"], bool)
+            self.assertIn(arm_state["send_command_deadline_missed"], (None, True, False))
             self.assertIsInstance(arm_state["send_deadline_hit"], bool)
+            self.assertEqual(arm_state["send_deadline_hit"], arm_state["send_within_period"])
             self.assertGreaterEqual(float(arm_state["worker_loop_read_duration_us"]), 0.0)
             worker = arm_state["worker"]
             self.assertEqual(worker["queue_policy"], "latest_wins")
@@ -515,6 +529,12 @@ force_control:
             "right_state_age_us",
             "left_send_result_age_us",
             "right_send_result_age_us",
+            "left_send_within_period",
+            "right_send_within_period",
+            "left_send_period_overrun",
+            "right_send_period_overrun",
+            "left_send_command_deadline_missed",
+            "right_send_command_deadline_missed",
             "left_send_deadline_hit",
             "right_send_deadline_hit",
             "dispatch_skew_us",

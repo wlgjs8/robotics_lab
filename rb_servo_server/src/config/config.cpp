@@ -171,6 +171,27 @@ CartesianLimitPolicy parseCartesianLimitPolicy(const YAML::Node& node, const std
     fail("Unknown cartesian_control.exceed_limit_policy: " + value, node);
 }
 
+CartesianVelocityTargetIntegrationMode parseCartesianVelocityTargetIntegrationMode(
+    const YAML::Node& node,
+    const std::string& path
+) {
+    const std::string value = lower(asString(node, path));
+    if (value == "measured_actual") return CartesianVelocityTargetIntegrationMode::MeasuredActual;
+    if (value == "measured_actual_lookahead") return CartesianVelocityTargetIntegrationMode::MeasuredActualLookahead;
+    if (value == "previous_command") return CartesianVelocityTargetIntegrationMode::PreviousCommand;
+    fail("Unknown cartesian_control.velocity_target_integration: " + value, node);
+}
+
+CartesianCommandActualErrorPolicy parseCartesianCommandActualErrorPolicy(
+    const YAML::Node& node,
+    const std::string& path
+) {
+    const std::string value = lower(asString(node, path));
+    if (value == "reset") return CartesianCommandActualErrorPolicy::Reset;
+    if (value == "fault") return CartesianCommandActualErrorPolicy::Fault;
+    fail("Unknown cartesian_control.command_actual_error_policy: " + value, node);
+}
+
 std::string getString(const YAML::Node& sec, const std::string& key, const std::string& fallback, const std::string& path) {
     return has(sec, key) ? asString(sec[key], path + "." + key) : fallback;
 }
@@ -431,6 +452,11 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.cartesian_control.max_twist_angular_rad_s, "cartesian_control.max_twist_angular_rad_s");
     validatePositiveFinite(cfg.cartesian_control.max_linear_move_speed_m_s, "cartesian_control.max_linear_move_speed_m_s");
     validatePositiveFinite(cfg.cartesian_control.max_angular_move_speed_rad_s, "cartesian_control.max_angular_move_speed_rad_s");
+    validatePositiveFinite(cfg.cartesian_control.velocity_target_lookahead_sec, "cartesian_control.velocity_target_lookahead_sec");
+    validatePositiveFiniteArray(
+        cfg.cartesian_control.max_command_actual_error_deg,
+        "cartesian_control.max_command_actual_error_deg"
+    );
     if (cfg.cartesian_control.max_cartesian_step_m.has_value()) {
         validatePositiveFinite(*cfg.cartesian_control.max_cartesian_step_m, "cartesian_control.max_cartesian_step_m");
     }
@@ -828,6 +854,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "max_cartesian_step_m",
             "max_cartesian_step_rad",
             "exceed_limit_policy",
+            "velocity_target_integration",
+            "velocity_target_lookahead_sec",
+            "max_command_actual_error_deg",
+            "reset_velocity_integrator_on_mode_change",
+            "command_actual_error_policy",
             "linear_move",
         }, "cartesian_control");
         if (has(sec, "enable")) cfg.cartesian_control.enable = asBool(sec["enable"], "cartesian_control.enable");
@@ -908,6 +939,35 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "exceed_limit_policy")) {
             cfg.cartesian_control.exceed_limit_policy =
                 parseCartesianLimitPolicy(sec["exceed_limit_policy"], "cartesian_control.exceed_limit_policy");
+        }
+        if (has(sec, "velocity_target_integration")) {
+            cfg.cartesian_control.velocity_target_integration =
+                parseCartesianVelocityTargetIntegrationMode(
+                    sec["velocity_target_integration"],
+                    "cartesian_control.velocity_target_integration"
+                );
+        }
+        if (has(sec, "velocity_target_lookahead_sec")) {
+            cfg.cartesian_control.velocity_target_lookahead_sec =
+                asDouble(sec["velocity_target_lookahead_sec"], "cartesian_control.velocity_target_lookahead_sec");
+        }
+        if (has(sec, "max_command_actual_error_deg")) {
+            cfg.cartesian_control.max_command_actual_error_deg =
+                parseJointArray(sec["max_command_actual_error_deg"], "cartesian_control.max_command_actual_error_deg");
+        }
+        if (has(sec, "reset_velocity_integrator_on_mode_change")) {
+            cfg.cartesian_control.reset_velocity_integrator_on_mode_change =
+                asBool(
+                    sec["reset_velocity_integrator_on_mode_change"],
+                    "cartesian_control.reset_velocity_integrator_on_mode_change"
+                );
+        }
+        if (has(sec, "command_actual_error_policy")) {
+            cfg.cartesian_control.command_actual_error_policy =
+                parseCartesianCommandActualErrorPolicy(
+                    sec["command_actual_error_policy"],
+                    "cartesian_control.command_actual_error_policy"
+                );
         }
         if (has(sec, "linear_move")) {
             const YAML::Node linear = sec["linear_move"];
