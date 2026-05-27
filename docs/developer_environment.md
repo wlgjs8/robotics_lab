@@ -86,7 +86,7 @@ This validates simulator-only PTP, Linear, and Twist primitives. It does not ena
 ## Docker Compose Simulator Stack
 
 ```bash
-make sim-up
+make sim-local-up
 ```
 
 Open:
@@ -99,6 +99,18 @@ Stop with `Ctrl+C`, then:
 
 ```bash
 make sim-down
+```
+
+For a split-PC simulator stack, run the simulator backend on `172.28.60.36`:
+
+```bash
+make sim-backend-up
+```
+
+Then run the GUI/control stack on the control PC:
+
+```bash
+make sim-control-up
 ```
 
 ## Real Camera Dependencies

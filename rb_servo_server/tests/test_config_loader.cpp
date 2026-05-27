@@ -87,6 +87,13 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(near(simulator.cartesian_control.path_kp_ori, 6.0));
     RB_CHECK(near(simulator.cartesian_control.twist_angular_deadband_rad_s, 0.0001));
 
+    const rb_servo::DualArmConfig remote_simulator =
+        rb_servo::loadConfigFromYaml((config_dir / "dual_simulator_remote_172_28_60_36.yaml").string());
+    RB_CHECK(assertSimulatorCartesianConfig(remote_simulator));
+    RB_CHECK(remote_simulator.left_robot.simulator_control_endpoint == "tcp://172.28.60.36:50200");
+    RB_CHECK(remote_simulator.right_robot.simulator_control_endpoint == "tcp://172.28.60.36:50210");
+    RB_CHECK(!remote_simulator.cartesian_control.allow_in_real);
+
     const rb_servo::DualArmConfig simulator_worker =
         rb_servo::loadConfigFromYaml((config_dir / "dual_simulator_worker.yaml").string());
     RB_CHECK(assertSimulatorCartesianConfig(simulator_worker));

@@ -1,8 +1,10 @@
 COMPOSE ?= docker compose
 COMPOSE_FILE ?= docker-compose.yml
 PROJECT ?= robotics_lab
+SIM_BACKEND_COMPOSE_FILE ?= docker-compose.sim-backend.yml
+SIM_CONTROL_COMPOSE_FILE ?= docker-compose.sim-control.yml
 
-.PHONY: build deploy stop sim-up sim-down sim-smoke sim-teleop-up sim-infer-up policy-train mig-rebaseline deps-hardware-free camera-mock-up camera-real-up
+.PHONY: build deploy stop sim-local-up sim-up sim-backend-up sim-control-up sim-down sim-smoke sim-teleop-up sim-infer-up policy-train mig-rebaseline deps-hardware-free camera-mock-up camera-real-up
 
 build:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) build
@@ -13,8 +15,16 @@ deploy:
 stop:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) down --remove-orphans
 
-sim-up:
+sim-local-up:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) up --build rb_gui rb_simulator_left rb_simulator_right policy_runner_record rb_servo_server
+
+sim-up: sim-local-up
+
+sim-backend-up:
+	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) -f $(SIM_BACKEND_COMPOSE_FILE) up --build rb_simulator_left rb_simulator_right
+
+sim-control-up:
+	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) -f $(SIM_CONTROL_COMPOSE_FILE) up --build rb_gui policy_runner_record rb_servo_server
 
 sim-down:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) down --remove-orphans

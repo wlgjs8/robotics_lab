@@ -21,13 +21,19 @@ operator use:
 
 ```bash
 cd /home/plaif/workspace/robotics_lab
-make sim-up
+make sim-local-up
 ```
 
-The server uses `config/dual_simulator_compose.yaml`, which binds commands
+`make sim-up` remains a compatibility alias for `make sim-local-up`.
+
+The same-PC server uses `config/dual_simulator_compose.yaml`, which binds commands
 inside the container on `udp://0.0.0.0:50010`. State publishes to
 `udp://rb_gui:50110` through Docker Compose DNS. Static container IPs are not
 required.
+
+For split-PC simulator operation, run `make sim-backend-up` on simulator PC
+`172.28.60.36`, then `make sim-control-up` on the control/GUI PC. The control
+profile uses `config/dual_simulator_remote_172_28_60_36.yaml`.
 
 The compose server image builds with Pinocchio enabled. The default simulator
 config publishes FK TCP poses and enables simulator-only Cartesian IK, so the GUI

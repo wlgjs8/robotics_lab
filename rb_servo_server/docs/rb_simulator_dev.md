@@ -81,7 +81,7 @@ stack:
 Run it from the repository root:
 
 ```bash
-make sim-up
+make sim-local-up
 ```
 
 Stop and clean up:
@@ -89,6 +89,29 @@ Stop and clean up:
 ```bash
 make sim-down
 ```
+
+`make sim-up` remains a compatibility alias for `make sim-local-up`.
+
+For a split-PC simulator stack, run this on simulator PC `172.28.60.36`:
+
+```bash
+make sim-backend-up
+```
+
+Then run this on the control/GUI PC:
+
+```bash
+make sim-control-up
+```
+
+By default `sim-backend-up` publishes simulator TCP ports on all simulator-PC
+interfaces. To bind only the simulator LAN NIC, run
+`SIM_BACKEND_BIND=172.28.60.36 make sim-backend-up`.
+
+The split-PC server profile uses
+`config/dual_simulator_remote_172_28_60_36.yaml`; left simulator traffic goes to
+`tcp://172.28.60.36:50200`, and right simulator traffic goes to
+`tcp://172.28.60.36:50210`.
 
 The compose stack is intentionally bounded:
 

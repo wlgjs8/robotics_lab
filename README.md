@@ -174,12 +174,27 @@ profiles and artifact interpretation.
 시뮬레이터 운영자 stack 시작:
 
 ```bash
-make sim-up
+make sim-local-up
 ```
 
-`make sim-up` also starts a passive `policy_runner` recorder. It writes
+`make sim-local-up` starts the same-PC GUI, servo server, per-arm simulators,
+and a passive `policy_runner` recorder. `make sim-up` remains a compatibility
+alias for this same-PC stack. The recorder writes
 robot-state JSONL episodes to `policy_runner/episodes` and does not send motion
 commands.
+
+Split-PC simulator stack:
+
+```bash
+# On simulator PC 172.28.60.36:
+make sim-backend-up
+
+# On the control/GUI PC:
+make sim-control-up
+```
+
+`sim-backend-up` publishes simulator TCP ports on all interfaces by default.
+Use `SIM_BACKEND_BIND=172.28.60.36 make sim-backend-up` to bind only that NIC.
 
 SpaceMouse teleop data collection and policy inference are explicit modes:
 
@@ -204,6 +219,7 @@ Servo server simulation configs:
 - `rb_servo_server/config/dual_simulator_worker.yaml`
 - `rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`
 - `rb_servo_server/config/dual_simulator_circle_stress.yaml`
+- `rb_servo_server/config/dual_simulator_remote_172_28_60_36.yaml`
 - `rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml`
 - `rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml`
 - `rb_servo_server/config/dual_simulator_circle_real_candidate_conservative.yaml`
