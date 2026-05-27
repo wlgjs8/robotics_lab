@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import time
+from html import escape
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -66,19 +67,25 @@ from .scene import (
 from .state_receiver import StateReceiver, StateStore
 from .status_panel import (
     _JOINT_MONITOR_UNITS,
+    _STAND_WORLD_MONITOR_UNITS,
+    _STAND_WORLD_POSE_FIELDS,
     _arm_fk_status,
     _format_arm_cartesian_solve,
     _format_cartesian_solve_status,
     _format_fk_status,
     _format_joint_monitor_value,
     _format_joints,
+    _format_stand_world_pose_value,
     _format_tcp_command_status,
     _joint_monitor_unit,
     _mode_button_color,
     _optional_finite,
     _set_disabled,
+    _stand_world_monitor_unit,
     _update_joint_monitor,
     _update_joint_monitor_unit_buttons,
+    _update_stand_world_monitor,
+    _update_stand_world_monitor_unit_buttons,
 )
 
 _DESIRED_MODES = ("mock", "simulation", "real")
@@ -89,6 +96,8 @@ _TCP_LINEAR_ARM_OPTIONS = ("left", "right", "both")
 _TCP_LINEAR_ORIENTATION_MODES = ("constant", "slerp")
 _DEFAULT_INIT_LEFT_JOINTS_DEG = (-124.660, 32.485, 119.074, -96.294, -81.798, -30.615)
 _DEFAULT_INIT_RIGHT_JOINTS_DEG = (111.949, -49.304, -120.057, 75.305, 87.436, 49.983)
+_OPERATOR_MONITOR_WIDTH_EM = 18.0
+_OPERATOR_MONITOR_GAP_EM = 1.0
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -118,6 +127,11 @@ def _env_float(name: str, fallback: float) -> float:
     except ValueError:
         return fallback
     return value if math.isfinite(value) else fallback
+
+
+def _env_positive_float(name: str, fallback: float) -> float:
+    value = _env_float(name, fallback)
+    return value if value > 0.0 else fallback
 
 
 def _env_joint6(name: str, fallback: tuple[float, ...]) -> tuple[float, ...] | None:
@@ -375,11 +389,8 @@ def _apply_tcp_delta_and_send_pose_target(
     return _send_tcp_pose_target_from_marker(safety, scene_handles, arm)
 
 
-def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[str, Any]:
-    handles: dict[str, Any] = {}
-    handles["scene"] = _add_scene_fallback(server)
-
-    with server.gui.add_folder("Joint monitor", expand_by_default=True, order=0.0):
+def _build_joint_monitor(server: Any, handles: dict[str, Any], *, order: float | None = None) -> None:
+    with server.gui.add_folder("Joint Monitor", expand_by_default=True, order=order):
         handles["joint_monitor_unit"] = "deg"
         handles["joint_monitor_unit_buttons"] = {}
         for unit in _JOINT_MONITOR_UNITS:
@@ -399,7 +410,289 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
                     handle = server.gui.add_text(f"{arm} J{index + 1} {joint_name}", initial_value="invalid", disabled=True)
                     handles["joint_monitor_values"][arm].append(handle)
 
-    tabs = server.gui.add_tab_group()
+
+def _build_stand_world_monitor(server: Any, handles: dict[str, Any], *, order: float | None = None) -> None:
+    with server.gui.add_folder("Stand/World Monitor", expand_by_default=True, order=order):
+        handles["stand_world_monitor_unit"] = "deg"
+        handles["stand_world_monitor_unit_buttons"] = {}
+        for unit in _STAND_WORLD_MONITOR_UNITS:
+            unit_button = server.gui.add_button(unit, color=_mode_button_color(unit, _stand_world_monitor_unit(handles)))
+            handles["stand_world_monitor_unit_buttons"][unit] = unit_button
+
+            @unit_button.on_click
+            def _(_: Any, unit: str = unit) -> None:
+                handles["stand_world_monitor_unit"] = unit
+                _update_stand_world_monitor_unit_buttons(handles)
+
+        handles["stand_world_monitor_status"] = server.gui.add_text(
+            "Status",
+            initial_value="No state stream",
+            disabled=True,
+        )
+        handles["stand_world_monitor_values"] = {"left": {}, "right": {}}
+        for arm in ("left", "right"):
+            with server.gui.add_folder(arm, expand_by_default=True):
+                for field in _STAND_WORLD_POSE_FIELDS:
+                    handle = server.gui.add_text(f"{arm} {field}", initial_value="invalid", disabled=True)
+                    handles["stand_world_monitor_values"][arm][field] = handle
+
+
+def _operator_monitor_layout() -> tuple[float, float]:
+    return (
+        _env_positive_float("RB_GUI_MONITOR_WIDTH_EM", _OPERATOR_MONITOR_WIDTH_EM),
+        _env_positive_float("RB_GUI_MONITOR_GAP_EM", _OPERATOR_MONITOR_GAP_EM),
+    )
+
+
+def _operator_monitor_static_html(monitor_width_em: float, gap_em: float) -> str:
+    return f"""
+<style>
+  :root {{
+    --rb-monitor-gap: {gap_em:.3f}em;
+    --rb-monitor-target-width: {monitor_width_em:.3f}em;
+    --rb-monitor-width: min(
+      var(--rb-monitor-target-width),
+      max(13.5em, calc((100vw - (3 * var(--rb-monitor-gap))) / 2))
+    );
+  }}
+  .rb-monitor-card {{
+    position: fixed;
+    width: var(--rb-monitor-width);
+    box-sizing: border-box;
+    z-index: 19;
+    background: rgba(255, 255, 255, 0.96);
+    color: #1f2933;
+    border: 1px solid rgba(15, 23, 42, 0.18);
+    box-shadow: 0 0.35em 1.2em rgba(15, 23, 42, 0.16);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+  }}
+  .rb-monitor-header-card {{
+    top: 1em;
+    min-height: 4.45em;
+    padding: 0.65em 0.8em 0.55em;
+    border-radius: 0.45em 0.45em 0 0;
+    border-bottom: 0;
+  }}
+  .rb-monitor-body-card {{
+    top: 5.45em;
+    max-height: calc(100vh - 6.45em);
+    overflow: auto;
+    padding: 0.6em 0.8em 0.75em;
+    border-radius: 0 0 0.45em 0.45em;
+  }}
+  .rb-monitor-joint-card {{ left: var(--rb-monitor-gap); }}
+  .rb-monitor-stand-card {{ left: calc((2 * var(--rb-monitor-gap)) + var(--rb-monitor-width)); }}
+  .rb-monitor-title {{
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-weight: 650;
+    font-size: 13px;
+    margin-bottom: 0.45em;
+  }}
+  .rb-monitor-units {{
+    display: flex;
+    gap: 0.45em;
+    align-items: center;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 12px;
+  }}
+  .rb-monitor-units label {{
+    display: inline-flex;
+    gap: 0.2em;
+    align-items: center;
+    cursor: pointer;
+  }}
+  .rb-monitor-status {{
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 11px;
+    color: #52606d;
+    margin-bottom: 0.6em;
+  }}
+  .rb-monitor-arm {{
+    margin-top: 0.45em;
+    padding-top: 0.45em;
+    border-top: 1px solid rgba(15, 23, 42, 0.1);
+  }}
+  .rb-monitor-arm:first-of-type {{
+    border-top: 0;
+    margin-top: 0;
+    padding-top: 0;
+  }}
+  .rb-monitor-arm-title {{
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-weight: 600;
+    margin-bottom: 0.25em;
+  }}
+  .rb-monitor-row {{
+    display: grid;
+    grid-template-columns: minmax(7.5em, 1fr) auto;
+    column-gap: 0.8em;
+    line-height: 1.55;
+    white-space: nowrap;
+  }}
+  .rb-rad {{ display: none; }}
+  body:has(#rb-joint-unit-rad:checked) .rb-monitor-joint-card .rb-deg {{ display: none; }}
+  body:has(#rb-joint-unit-rad:checked) .rb-monitor-joint-card .rb-rad {{ display: inline; }}
+  body:has(#rb-stand-unit-rad:checked) .rb-monitor-stand-card .rb-deg {{ display: none; }}
+  body:has(#rb-stand-unit-rad:checked) .rb-monitor-stand-card .rb-rad {{ display: inline; }}
+  @media (max-width: 960px) {{
+    .rb-monitor-card {{ font-size: 11px; }}
+    .rb-monitor-header-card {{
+      min-height: 4.0em;
+      padding: 0.55em 0.65em 0.45em;
+    }}
+    .rb-monitor-body-card {{
+      top: 5.0em;
+      max-height: calc(100vh - 6.0em);
+      padding: 0.5em 0.65em 0.65em;
+    }}
+    .rb-monitor-title {{ font-size: 12px; }}
+    .rb-monitor-row {{
+      grid-template-columns: minmax(5.6em, 1fr) auto;
+      column-gap: 0.45em;
+    }}
+  }}
+</style>
+<div class="rb-monitor-card rb-monitor-header-card rb-monitor-joint-card">
+  <div class="rb-monitor-title">Joint Monitor</div>
+  <div class="rb-monitor-units">
+    <label><input id="rb-joint-unit-deg" name="rb-joint-unit" type="radio" checked> deg</label>
+    <label><input id="rb-joint-unit-rad" name="rb-joint-unit" type="radio"> rad</label>
+  </div>
+</div>
+<div class="rb-monitor-card rb-monitor-header-card rb-monitor-stand-card">
+  <div class="rb-monitor-title">Pose Monitor</div>
+  <div class="rb-monitor-units">
+    <label><input id="rb-stand-unit-deg" name="rb-stand-unit" type="radio" checked> deg</label>
+    <label><input id="rb-stand-unit-rad" name="rb-stand-unit" type="radio"> rad</label>
+  </div>
+</div>
+"""
+
+
+def _operator_monitor_value_pair(deg_value: str, rad_value: str) -> str:
+    return f'<span class="rb-deg">{escape(deg_value)}</span><span class="rb-rad">{escape(rad_value)}</span>'
+
+
+def _operator_monitor_invalid_pair() -> str:
+    return _operator_monitor_value_pair("invalid", "invalid")
+
+
+def _operator_monitor_row(label: str, value_html: str) -> str:
+    return f'<div class="rb-monitor-row"><span>{escape(label)}</span><span>{value_html}</span></div>'
+
+
+def _render_joint_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str:
+    if latest is None:
+        status = "No state stream"
+        arms = (("left", None), ("right", None))
+    else:
+        status = f"{'stale' if stale else 'live'}, tick={latest.tick}"
+        arms = (("left", latest.left), ("right", latest.right))
+    parts = [f'<div class="rb-monitor-status">{escape(status)}</div>']
+    for arm, arm_state in arms:
+        parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(arm)}</div>')
+        for index, joint_name in enumerate(_ROBOT_JOINT_NAMES):
+            if arm_state is None:
+                value_html = _operator_monitor_invalid_pair()
+            else:
+                value_html = _operator_monitor_value_pair(
+                    _format_joint_monitor_value(
+                        arm_state.q_actual_deg,
+                        index,
+                        valid=arm_state.has_valid_joint_state,
+                        unit="deg",
+                    ),
+                    _format_joint_monitor_value(
+                        arm_state.q_actual_deg,
+                        index,
+                        valid=arm_state.has_valid_joint_state,
+                        unit="rad",
+                    ),
+                )
+            parts.append(_operator_monitor_row(f"J{index + 1} {joint_name}", value_html))
+        parts.append("</div>")
+    return "".join(parts)
+
+
+def _render_stand_world_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str:
+    if latest is None:
+        status = "No state stream, xyz=mm"
+        arms = (("left", None), ("right", None))
+    else:
+        status = f"{'stale' if stale else 'live'}, xyz=mm, tick={latest.tick}"
+        arms = (("left", latest.left), ("right", latest.right))
+    parts = [f'<div class="rb-monitor-status">{escape(status)}</div>']
+    for arm, arm_state in arms:
+        parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(arm)}</div>')
+        valid = bool(
+            arm_state is not None
+            and not stale
+            and arm_state.has_valid_tcp_pose
+            and arm_state.tcp_stand is not None
+            and not arm_state.tcp_deferred
+        )
+        pose = arm_state.tcp_stand if arm_state is not None else None
+        for field in _STAND_WORLD_POSE_FIELDS:
+            if field in ("x", "y", "z"):
+                value_html = escape(_format_stand_world_pose_value(pose, field, valid=valid, unit="deg"))
+            else:
+                value_html = _operator_monitor_value_pair(
+                    _format_stand_world_pose_value(pose, field, valid=valid, unit="deg"),
+                    _format_stand_world_pose_value(pose, field, valid=valid, unit="rad"),
+                )
+            parts.append(_operator_monitor_row(field, value_html))
+        parts.append("</div>")
+    return "".join(parts)
+
+
+def _operator_monitor_dynamic_html(latest: StateSnapshot | None, *, stale: bool) -> str:
+    return (
+        '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-joint-card">'
+        + _render_joint_monitor_rows(latest, stale=stale)
+        + "</div>"
+        + '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-stand-card">'
+        + _render_stand_world_monitor_rows(latest, stale=stale)
+        + "</div>"
+    )
+
+
+def _build_operator_monitors(server: Any, handles: dict[str, Any]) -> None:
+    add_html = getattr(server.gui, "add_html", None)
+    if callable(add_html):
+        monitor_width_em, gap_em = _operator_monitor_layout()
+        handles["operator_monitor_panel_mode"] = "fixed_html_overlay"
+        handles["operator_monitor_style"] = add_html(
+            _operator_monitor_static_html(monitor_width_em, gap_em),
+            order=0.0,
+        )
+        handles["operator_monitor_content"] = add_html(_operator_monitor_dynamic_html(None, stale=True), order=0.1)
+        return
+    handles["operator_monitor_panel_mode"] = "root_gui_fallback"
+    with server.gui.add_folder("Operator Monitors", expand_by_default=True, order=0.0):
+        _build_joint_monitor(server, handles, order=0.0)
+        _build_stand_world_monitor(server, handles, order=0.1)
+
+
+def _update_operator_monitors(handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool) -> None:
+    content = handles.get("operator_monitor_content")
+    if content is not None:
+        try:
+            content.content = _operator_monitor_dynamic_html(latest, stale=stale)
+            return
+        except Exception:
+            pass
+    _update_joint_monitor(handles, latest, stale=stale)
+    _update_stand_world_monitor(handles, latest, stale=stale)
+
+
+def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[str, Any]:
+    handles: dict[str, Any] = {}
+    handles["scene"] = _add_scene_fallback(server)
+
+    _build_operator_monitors(server, handles)
+
+    tabs = server.gui.add_tab_group(order=1.0)
     with tabs.add_tab("Status"):
         handles["connection"] = server.gui.add_text("Connection", initial_value="disconnected", disabled=True)
         handles["mode"] = server.gui.add_text("Observed mode/backend", initial_value=f"{safety.observed_server_mode}/{safety.observed_backend}", disabled=True)
@@ -704,7 +997,7 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
     stale = store.is_stale()
     readiness = safety.readiness()
     if latest is None:
-        _update_joint_monitor(handles, None, stale=True)
+        _update_operator_monitors(handles, None, stale=True)
         handles["connection"].value = "disconnected/stale"
         handles["readiness"].value = readiness.no_go_reason or "No-Go: no state stream"
         if "fk_status" in handles:
@@ -747,7 +1040,7 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
         handles["tcp_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     if "tcp_linear_status" in handles:
         handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
-    _update_joint_monitor(handles, latest, stale=stale)
+    _update_operator_monitors(handles, latest, stale=stale)
     update_scene_markers(handles.get("scene", {}), latest)
     if "scene_assets" in handles:
         scene_errors = [

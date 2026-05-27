@@ -72,6 +72,12 @@ run_mode: mock | simulation | real
 backend_type: mock | simulator | rbpodo
 ```
 
+`rbscript_tcp`는 표준 production backend가 아니라 실험용 비교 backend입니다.
+Rainbow script TCP command port 5000과 data port 5001을 사용해 `rbpodo`
+경로와 raw script TCP 경로의 overhead를 비교하기 위한 것이며, UDP
+direct-to-controller 경로가 아닙니다. 자세한 no-motion/read-only 비교 절차는
+`docs/runbooks/rbscript_tcp_ablation.md`를 봅니다.
+
 ## 실제 및 시뮬레이터 토폴로지
 
 실제 시스템:
@@ -110,6 +116,19 @@ RB_ALLOW_REAL_MOTION=1
 
 ```bash
 RB_ALLOW_REAL_CARTESIAN=1
+```
+
+실험용 `rbscript_tcp` real-controller 접속은 추가 gate가 필요합니다.
+
+```bash
+RB_ALLOW_RBSCRIPT_TCP=1
+```
+
+`rbscript_tcp` servo motion은 별도 승인 전까지 금지이며, 미래 motion
+acceptance가 생기더라도 추가로 다음 gate가 필요합니다.
+
+```bash
+RB_ALLOW_RBSCRIPT_TCP_MOTION=1
 ```
 
 이 gate들은 필요 조건일 뿐 충분 조건은 아닙니다. Config와 real-hardware acceptance도 해당 동작을 명시적으로 허용해야 합니다.
@@ -170,6 +189,17 @@ Circle tracking benchmark:
 
 See `docs/runbooks/circle_tracking_benchmark.md` for simulator-only benchmark
 profiles and artifact interpretation.
+
+rbpodo vs rbscript TCP no-motion/read-only comparison:
+
+```bash
+python3 scripts/rb_backend_ablation.py --help
+python3 scripts/rainbow_rate_probe.py --help
+```
+
+See `docs/runbooks/rbscript_tcp_ablation.md`. These probes measure ACK/read
+latency, success/error counts, state age, achieved rate, and reconnect behavior.
+They do not approve real motion.
 
 시뮬레이터 운영자 stack 시작:
 

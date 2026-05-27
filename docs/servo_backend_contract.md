@@ -151,6 +151,89 @@ Real `sendServoJ()` requires:
 
 Real stop/reset APIs remain conservative until verified. If no verified API is wired, return `DependencyUnavailable` and require operator intervention.
 
+## RbscriptTcpBackend Experimental Semantics
+
+`backend_type: rbscript_tcp` is an experimental comparison backend for raw
+Rainbow UI Script over TCP. It does not replace `RbpodoBackend`, which remains
+the primary real backend until a separate rbscript acceptance plan passes.
+The validation order is simulator/read-only first; stress or motion probing is
+not a real-ready signal.
+
+The command transport is a persistent TCP socket to the Rainbow script command
+port. The command port 5000 carries UI Script text. It is not UDP and must not
+send commands directly to the controller over UDP; no UDP direct-to-controller
+path is allowed.
+
+The data transport uses a separate bounded TCP connection to the Rainbow data
+port 5001 and sends `reqdata`. `RBSCRIPT-TCP-02` wires this into
+`readState()`, but only publishes valid joint state for a recognized
+`rbscript_tcp_state_v1` JSON fixture carrying six finite `q_actual_deg` values
+in degrees. This conservative fixture parser exists to exercise the transport
+and structured backend result path without guessing undocumented Rainbow binary
+offsets. Unknown, short, malformed, binary, or otherwise unsupported responses
+fail closed with `ProtocolError`, `UnsupportedSchema`, or
+`InvalidJointState`; `has_valid_joint_state` remains false on failure.
+
+Real controller binary data-port parsing is not production-ready until the
+payload layout is documented and validated against a controller fixture. Until
+then, `RbpodoBackend` remains the reference state backend.
+
+Real rbscript TCP connection requires all normal real gates plus an additional
+backend-specific gate:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1
+RB_ALLOW_RBSCRIPT_TCP=1
+```
+
+`sendServoJ()` is stricter still:
+
+```bash
+RB_ALLOW_REAL_MOTION=1
+RB_ALLOW_RBSCRIPT_TCP_MOTION=1
+```
+
+Real Cartesian motion remains separately closed unless:
+
+```bash
+RB_ALLOW_REAL_CARTESIAN=1
+```
+
+No current rbscript task accepts real Cartesian motion.
+
+The initial command formatter emits Rainbow script text:
+
+```text
+move_servo_j(jnt[j0,j1,j2,j3,j4,j5],t1,t2,gain,alpha)
+```
+
+Joint units are degrees. By default the backend waits for an ACK and accepts a
+command only when the controller response contains a documented success phrase
+such as `The command was executed`. Rejections such as `The command is not
+allowed` map to `ControllerRejected`; timeouts and socket failures map to the
+structured transport error taxonomy. `disable_waiting_ack` defaults to false and
+must remain an explicit, separately gated choice. Send result telemetry exposes
+`ack_policy` and `ack_observed` so no-ACK sends cannot be confused with
+controller-acknowledged sends.
+
+The staged acceptance order is:
+
+1. no-motion connect
+2. read-only state acquisition
+3. no-motion command ACK timing
+4. simulation-mode `servo_j` probe, only if an explicit future task accepts it
+5. tiny real joint motion, only after separate approval and a motion runbook
+
+Comparison reports should include ACK latency, command success/error counts,
+M561/M568/M569/M570 counts when observed, state age, achieved rate, reconnect
+count, timeout count, and parse failure count. A lower `rbscript_tcp` latency
+does not bypass controller limits or make 100 Hz or 200 Hz motion safe.
+`disable_waiting_ack` can improve apparent throughput but hides immediate ACK
+errors and must not be used as proof of controller acceptance.
+
+`rt_script` is future work. It is not part of the current backend contract and
+must not be introduced as an undocumented controller setting or hidden bypass.
+
 ## State Publication
 
 State JSON should expose:

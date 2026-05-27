@@ -655,6 +655,90 @@ run_bench_report_gate() {
   echo "codex_gate: skipping full benchmark reporting run by default"
 }
 
+run_optional_rbscript_helper_tests() {
+  local ran_any=0
+  local pattern
+  for pattern in 'test_rbscript*.py' 'test_rainbow*.py' 'test_rb_backend*.py'; do
+    if find scripts -maxdepth 1 -name "${pattern}" -print -quit | grep -q .; then
+      PYTHONPATH=scripts python3 -m unittest discover scripts -p "${pattern}"
+      ran_any=1
+    fi
+  done
+  if [[ "${ran_any}" != "1" ]]; then
+    echo "codex_gate: optional rbscript/rainbow Python helper tests not present"
+  fi
+}
+
+run_rbscript_tcp_01_gate() {
+  run_shell_syntax_checks
+  run_servo_gate_or_skip_missing_deps
+  run_python_surface_tests
+}
+
+run_rbscript_tcp_02_gate() {
+  run_shell_syntax_checks
+  run_servo_gate_or_skip_missing_deps
+  run_optional_rbscript_helper_tests
+}
+
+run_rbscript_ablation_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  python3 scripts/rb_backend_ablation.py --help >/dev/null
+  run_optional_python_help scripts/compare_backend_ablation.py
+  run_optional_rbscript_helper_tests
+  grep_existing "rb_backend_ablation.py|rbscript_tcp|command port.*5000|data port.*5001|no-motion" \
+    docs/runbooks/rbscript_tcp_ablation.md REVIEW.md
+  run_python_surface_tests
+  if [[ "${CODEX_RUN_RBSCRIPT_ABLATION:-0}" == "1" ]]; then
+    if [[ ! -f scripts/rb_backend_ablation.py ]]; then
+      echo "ERROR: CODEX_RUN_RBSCRIPT_ABLATION=1 but scripts/rb_backend_ablation.py is missing" >&2
+      return 1
+    fi
+    if [[ -z "${CODEX_RBSCRIPT_ABLATION_ARGS:-}" ]]; then
+      echo "ERROR: CODEX_RUN_RBSCRIPT_ABLATION=1 requires CODEX_RBSCRIPT_ABLATION_ARGS with explicit simulator/read-only config" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2086
+    python3 scripts/rb_backend_ablation.py ${CODEX_RBSCRIPT_ABLATION_ARGS}
+  else
+    echo "codex_gate: skipping rbscript backend ablation; set CODEX_RUN_RBSCRIPT_ABLATION=1 with explicit args to enable"
+  fi
+}
+
+run_rbscript_rate_probe_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  python3 scripts/rainbow_rate_probe.py --help >/dev/null
+  run_optional_rbscript_helper_tests
+  grep_existing "rainbow_rate_probe.py|M561|M568|M569|M570|disable_waiting_ack|200 Hz|200Hz" \
+    docs/runbooks/rbscript_tcp_ablation.md REVIEW.md
+  run_python_surface_tests
+  if [[ "${CODEX_RUN_REAL_RATE_PROBE:-0}" == "1" ]]; then
+    if [[ ! -f scripts/rainbow_rate_probe.py ]]; then
+      echo "ERROR: CODEX_RUN_REAL_RATE_PROBE=1 but scripts/rainbow_rate_probe.py is missing" >&2
+      return 1
+    fi
+    if [[ -z "${CODEX_RAINBOW_RATE_PROBE_ARGS:-}" ]]; then
+      echo "ERROR: CODEX_RUN_REAL_RATE_PROBE=1 requires CODEX_RAINBOW_RATE_PROBE_ARGS with explicit config and safety preflight flags" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2086
+    python3 scripts/rainbow_rate_probe.py ${CODEX_RAINBOW_RATE_PROBE_ARGS}
+  else
+    echo "codex_gate: skipping real Rainbow rate probe; set CODEX_RUN_REAL_RATE_PROBE=1 with explicit args to enable"
+  fi
+}
+
+run_rbscript_doc_gate() {
+  run_shell_syntax_checks
+  grep_existing "rbscript_tcp" README.md REVIEW.md docs rb_servo_server/docs
+  grep_existing "command[[:space:]_-]*port[^0-9]*5000" README.md REVIEW.md docs rb_servo_server/docs
+  grep_existing "data[[:space:]_-]*port[^0-9]*5001" README.md REVIEW.md docs rb_servo_server/docs
+  grep_existing "simulator/read-only first|simulator.*read-only.*first|read-only.*simulator" README.md REVIEW.md docs rb_servo_server/docs
+  grep_existing "no UDP direct-to-controller|no UDP.*controller|UDP direct-to-controller" README.md REVIEW.md docs rb_servo_server/docs
+}
+
 run_doc_hygiene_gate() {
   run_shell_syntax_checks
   if [[ -e README_DOCS_UPDATE.md ]]; then
@@ -1025,6 +1109,24 @@ case "$TASK" in
     ;;
   BENCH-REPORT-01)
     run_bench_report_gate
+    ;;
+  GATE-RBSCRIPT-00)
+    run_shell_syntax_checks
+    ;;
+  RBSCRIPT-TCP-01)
+    run_rbscript_tcp_01_gate
+    ;;
+  RBSCRIPT-TCP-02)
+    run_rbscript_tcp_02_gate
+    ;;
+  RBSCRIPT-ABLATION-01)
+    run_rbscript_ablation_gate
+    ;;
+  RBSCRIPT-RATE-PROBE-01)
+    run_rbscript_rate_probe_gate
+    ;;
+  RBSCRIPT-DOC-01)
+    run_rbscript_doc_gate
     ;;
   DOC-HYGIENE-01)
     run_doc_hygiene_gate

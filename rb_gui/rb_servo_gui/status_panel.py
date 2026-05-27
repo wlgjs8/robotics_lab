@@ -3,13 +3,15 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
-from .models import ArmSnapshot, StateSnapshot
+from .models import ArmSnapshot, Pose6D, StateSnapshot
 from .safety import OperatorSafety
 from .scene import _ROBOT_JOINT_NAMES
 
 _SELECTED_MODE_COLOR = "green"
 _INACTIVE_MODE_COLOR = "gray"
 _JOINT_MONITOR_UNITS = ("deg", "rad")
+_STAND_WORLD_MONITOR_UNITS = ("deg", "rad")
+_STAND_WORLD_POSE_FIELDS = ("x", "y", "z", "rx", "ry", "rz")
 
 
 def _mode_button_color(mode: str, desired_mode: str) -> str:
@@ -37,6 +39,21 @@ def _update_joint_monitor_unit_buttons(handles: dict[str, Any]) -> None:
             pass
 
 
+def _stand_world_monitor_unit(handles: dict[str, Any]) -> str:
+    selector = handles.get("stand_world_monitor_unit", "deg")
+    unit = selector if isinstance(selector, str) else getattr(selector, "value", "deg")
+    return unit if unit in _STAND_WORLD_MONITOR_UNITS else "deg"
+
+
+def _update_stand_world_monitor_unit_buttons(handles: dict[str, Any]) -> None:
+    selected = _stand_world_monitor_unit(handles)
+    for unit, button in handles.get("stand_world_monitor_unit_buttons", {}).items():
+        try:
+            button.color = _mode_button_color(unit, selected)
+        except Exception:
+            pass
+
+
 def _format_joint_monitor_value(q_values: tuple[float, ...] | None, index: int, *, valid: bool, unit: str) -> str:
     if not valid or q_values is None:
         return "invalid"
@@ -47,6 +64,20 @@ def _format_joint_monitor_value(q_values: tuple[float, ...] | None, index: int, 
     if unit == "rad":
         return f"{math.radians(q_values[index]):.4f} rad"
     return f"{q_values[index]:.2f} deg"
+
+
+def _format_stand_world_pose_value(pose: Pose6D | None, field: str, *, valid: bool, unit: str) -> str:
+    if not valid or pose is None or field not in _STAND_WORLD_POSE_FIELDS:
+        return "invalid"
+    value = getattr(pose, field, None)
+    if not isinstance(value, int | float) or not math.isfinite(float(value)):
+        return "invalid"
+    parsed = float(value)
+    if field in ("x", "y", "z"):
+        return f"{parsed * 1000.0:.1f} mm"
+    if unit == "rad":
+        return f"{parsed:.4f} rad"
+    return f"{math.degrees(parsed):.2f} deg"
 
 
 def _arm_fk_status(arm: ArmSnapshot) -> str:
@@ -197,5 +228,35 @@ def _update_joint_monitor(handles: dict[str, Any], latest: StateSnapshot | None,
                 arm_state.q_actual_deg,
                 index,
                 valid=arm_state.has_valid_joint_state,
+                unit=unit,
+            )
+
+
+def _update_stand_world_monitor(handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool) -> None:
+    if "stand_world_monitor_status" not in handles:
+        return
+    unit = _stand_world_monitor_unit(handles)
+    _update_stand_world_monitor_unit_buttons(handles)
+    value_handles = handles.get("stand_world_monitor_values", {})
+    if latest is None:
+        handles["stand_world_monitor_status"].value = f"No state stream, xyz=mm, rpy={unit}"
+        for arm in ("left", "right"):
+            for handle in value_handles.get(arm, {}).values():
+                handle.value = "invalid"
+        return
+    state = "stale" if stale else "live"
+    handles["stand_world_monitor_status"].value = f"{state}, xyz=mm, rpy={unit}, tick={latest.tick}"
+    if stale:
+        for arm in ("left", "right"):
+            for handle in value_handles.get(arm, {}).values():
+                handle.value = "invalid"
+        return
+    for arm, arm_state in (("left", latest.left), ("right", latest.right)):
+        valid = bool(arm_state.has_valid_tcp_pose and arm_state.tcp_stand is not None and not arm_state.tcp_deferred)
+        for field, handle in value_handles.get(arm, {}).items():
+            handle.value = _format_stand_world_pose_value(
+                arm_state.tcp_stand,
+                field,
+                valid=valid,
                 unit=unit,
             )

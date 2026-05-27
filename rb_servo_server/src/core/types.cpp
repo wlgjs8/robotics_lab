@@ -61,6 +61,15 @@ std::string toString(ForceControlMode mode) {
     return "Unknown";
 }
 
+std::string toString(BackendAckPolicy policy) {
+    switch (policy) {
+        case BackendAckPolicy::BackendDefault: return "backend_default";
+        case BackendAckPolicy::Wait: return "wait";
+        case BackendAckPolicy::Disabled: return "disabled";
+    }
+    return "unknown";
+}
+
 std::string toString(SafetyVerdict verdict) {
     switch (verdict) {
         case SafetyVerdict::Ok: return "Ok";

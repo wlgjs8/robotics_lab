@@ -39,6 +39,35 @@ bool near(double a, double b) {
     return std::abs(a - b) < 1e-12;
 }
 
+class EnvGuard {
+public:
+    EnvGuard(const char* name, const char* value) : name_(name) {
+        const char* previous = std::getenv(name);
+        if (previous) {
+            had_previous_ = true;
+            previous_ = previous;
+        }
+        if (value) {
+            ::setenv(name, value, 1);
+        } else {
+            ::unsetenv(name);
+        }
+    }
+
+    ~EnvGuard() {
+        if (had_previous_) {
+            ::setenv(name_.c_str(), previous_.c_str(), 1);
+        } else {
+            ::unsetenv(name_.c_str());
+        }
+    }
+
+private:
+    std::string name_;
+    bool had_previous_ = false;
+    std::string previous_;
+};
+
 bool assertSimulatorCartesianConfig(const rb_servo::DualArmConfig& cfg) {
     RB_CHECK(cfg.left_robot.backend_type == rb_servo::BackendType::Simulator);
     RB_CHECK(cfg.right_robot.backend_type == rb_servo::BackendType::Simulator);
@@ -106,6 +135,26 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(tcp_acceptance.right_robot.backend_type == rb_servo::BackendType::Simulator);
     RB_CHECK(tcp_acceptance.command_source.enforce_lease);
     RB_CHECK(tcp_acceptance.network.command_source_enforce_lease);
+
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard rbscript_gate("RB_ALLOW_RBSCRIPT_TCP", "1");
+        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", nullptr);
+        EnvGuard rbscript_motion_gate("RB_ALLOW_RBSCRIPT_TCP_MOTION", nullptr);
+        const rb_servo::DualArmConfig rbscript =
+            rb_servo::loadConfigFromYaml((config_dir / "dual_real_rbscript.example.yaml").string());
+        RB_CHECK(rbscript.left_robot.backend_type == rb_servo::BackendType::RbscriptTcp);
+        RB_CHECK(rbscript.right_robot.backend_type == rb_servo::BackendType::RbscriptTcp);
+        RB_CHECK(rbscript.left_robot.run_mode == rb_servo::RunMode::Real);
+        RB_CHECK(rbscript.right_robot.run_mode == rb_servo::RunMode::Real);
+        RB_CHECK(rbscript.left_robot.command_port == 5000);
+        RB_CHECK(rbscript.left_robot.data_port == 5001);
+        RB_CHECK(near(rbscript.left_robot.script_t1_sec, 0.008));
+        RB_CHECK(near(rbscript.left_robot.script_t2_sec, 0.05));
+        RB_CHECK(near(rbscript.left_robot.script_gain, 1.0));
+        RB_CHECK(near(rbscript.left_robot.script_alpha, 0.5));
+        RB_CHECK(!rbscript.servo.send_servo_commands);
+    }
     return true;
 }
 
@@ -445,6 +494,155 @@ bool testCartesianControlTuningParsesAndValidates() {
     return true;
 }
 
+bool testRbscriptTcpConfigParsesAndValidates() {
+    const std::string valid_body =
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbscript_tcp\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.200\"\n"
+        "  command_port: 5000\n"
+        "  data_port: 5001\n"
+        "  command_timeout_sec: 0.2\n"
+        "  read_timeout_sec: 0.2\n"
+        "  connect_timeout_sec: 1.0\n"
+        "  disable_waiting_ack: false\n"
+        "  script_t1_sec: 0.008\n"
+        "  script_t2_sec: 0.05\n"
+        "  script_gain: 1.0\n"
+        "  script_alpha: 0.5\n"
+        "right_robot:\n"
+        "  backend_type: mock\n"
+        "  run_mode: mock\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "  enable_realtime_priority: true\n"
+        "safety:\n"
+        "  tracking_error_policy: fault_latch\n"
+        "  stop_both_arms_on_single_arm_error: true\n"
+        "  latch_fault_on_robot_state_error: true\n";
+
+    const std::string missing_env_path = writeTempConfig("rbscript-missing-env", valid_body);
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard rbscript_gate("RB_ALLOW_RBSCRIPT_TCP", nullptr);
+        const bool missing_env_rejected = loadRejects(missing_env_path);
+        RB_CHECK(missing_env_rejected);
+    }
+    ::unlink(missing_env_path.c_str());
+
+    const std::string valid_path = writeTempConfig("rbscript-valid", valid_body);
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard rbscript_gate("RB_ALLOW_RBSCRIPT_TCP", "1");
+        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", nullptr);
+        EnvGuard rbscript_motion_gate("RB_ALLOW_RBSCRIPT_TCP_MOTION", nullptr);
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(valid_path);
+        RB_CHECK(cfg.left_robot.backend_type == rb_servo::BackendType::RbscriptTcp);
+        RB_CHECK(cfg.left_robot.command_port == 5000);
+        RB_CHECK(cfg.left_robot.data_port == 5001);
+        RB_CHECK(near(cfg.left_robot.command_timeout_sec, 0.2));
+        RB_CHECK(near(cfg.left_robot.read_timeout_sec, 0.2));
+        RB_CHECK(near(cfg.left_robot.connect_timeout_sec, 1.0));
+        RB_CHECK(!cfg.left_robot.disable_waiting_ack);
+    }
+    ::unlink(valid_path.c_str());
+
+    const std::string simulation_path = writeTempConfig(
+        "rbscript-simulation",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbscript_tcp\n"
+        "  run_mode: simulation\n"
+        "  ip: \"127.0.0.1\"\n"
+    );
+    {
+        EnvGuard rbscript_gate("RB_ALLOW_RBSCRIPT_TCP", "1");
+        const bool simulation_rejected = loadRejects(simulation_path);
+        RB_CHECK(simulation_rejected);
+    }
+    ::unlink(simulation_path.c_str());
+
+    const std::string bad_t1_path = writeTempConfig(
+        "rbscript-bad-t1",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbscript_tcp\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.200\"\n"
+        "  script_t1_sec: 0.001\n"
+        "right_robot:\n"
+        "  backend_type: mock\n"
+        "  run_mode: mock\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "  enable_realtime_priority: true\n"
+        "safety:\n"
+        "  tracking_error_policy: fault_latch\n"
+    );
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard rbscript_gate("RB_ALLOW_RBSCRIPT_TCP", "1");
+        const bool bad_t1_rejected = loadRejects(bad_t1_path);
+        RB_CHECK(bad_t1_rejected);
+    }
+    ::unlink(bad_t1_path.c_str());
+
+    const std::string bad_values_path = writeTempConfig(
+        "rbscript-bad-values",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbscript_tcp\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.200\"\n"
+        "  script_t2_sec: 0.2\n"
+        "right_robot:\n"
+        "  backend_type: mock\n"
+        "  run_mode: mock\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "  enable_realtime_priority: true\n"
+        "safety:\n"
+        "  tracking_error_policy: fault_latch\n"
+    );
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard rbscript_gate("RB_ALLOW_RBSCRIPT_TCP", "1");
+        const bool bad_values_rejected = loadRejects(bad_values_path);
+        RB_CHECK(bad_values_rejected);
+    }
+    ::unlink(bad_values_path.c_str());
+
+    const std::string motion_path = writeTempConfig(
+        "rbscript-motion-missing-env",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbscript_tcp\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.200\"\n"
+        "right_robot:\n"
+        "  backend_type: mock\n"
+        "  run_mode: mock\n"
+        "servo:\n"
+        "  send_servo_commands: true\n"
+        "  enable_realtime_priority: true\n"
+        "safety:\n"
+        "  tracking_error_policy: fault_latch\n"
+        "  stop_both_arms_on_single_arm_error: true\n"
+        "  latch_fault_on_robot_state_error: true\n"
+    );
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard rbscript_gate("RB_ALLOW_RBSCRIPT_TCP", "1");
+        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
+        EnvGuard rbscript_motion_gate("RB_ALLOW_RBSCRIPT_TCP_MOTION", nullptr);
+        const bool motion_rejected = loadRejects(motion_path);
+        RB_CHECK(motion_rejected);
+    }
+    ::unlink(motion_path.c_str());
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -456,5 +654,6 @@ int main() {
     if (!testForceControlStaysDisabled()) return 1;
     if (!testCommandSourceConfigParsesAndValidates()) return 1;
     if (!testCartesianControlTuningParsesAndValidates()) return 1;
+    if (!testRbscriptTcpConfigParsesAndValidates()) return 1;
     return 0;
 }

@@ -238,6 +238,8 @@ nlohmann::json backendCallJson(const BackendCallSnapshot& call, bool send_call) 
     if (send_call) {
         out["accepted"] = call.accepted;
         out["state_after_source"] = call.state_after_source;
+        out["ack_policy"] = toString(call.ack_policy);
+        out["ack_observed"] = call.ack_observed;
     } else {
         out["ok"] = call.ok;
     }
@@ -458,6 +460,7 @@ std::string backendTypeString(BackendType backend_type) {
         case BackendType::Rbpodo: return "rbpodo";
         case BackendType::Mock: return "mock";
         case BackendType::Simulator: return "simulator";
+        case BackendType::RbscriptTcp: return "rbscript_tcp";
     }
     return "unknown";
 }

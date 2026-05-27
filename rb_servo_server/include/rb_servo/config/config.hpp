@@ -29,6 +29,16 @@ struct BackendConfig {
     double rbsim_stop_timeout_sec = 0.2;
     double rbsim_reset_timeout_sec = 0.2;
 
+    int command_port = 5000;
+    int data_port = 5001;
+    double command_timeout_sec = 0.2;
+    double read_timeout_sec = 0.2;
+    double connect_timeout_sec = 1.0;
+    double script_t1_sec = 0.008;
+    double script_t2_sec = 0.05;
+    double script_gain = 1.0;
+    double script_alpha = 0.5;
+
     JointArray initial_q_deg{};
 
     double speed_bar = 0.1;

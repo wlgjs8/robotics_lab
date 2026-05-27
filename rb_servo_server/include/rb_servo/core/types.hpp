@@ -25,6 +25,7 @@ enum class BackendType {
     Rbpodo,
     Mock,
     Simulator,
+    RbscriptTcp,
     Rbsim = Simulator  // Deprecated compatibility name.
 };
 
@@ -66,6 +67,12 @@ enum class RobotConnectionState {
     Disconnected,
     Connected,
     Error
+};
+
+enum class BackendAckPolicy {
+    BackendDefault,
+    Wait,
+    Disabled
 };
 
 enum class SafetyVerdict {
@@ -336,6 +343,8 @@ struct BackendCallSnapshot {
     std::string error_message;
     double duration_us = 0.0;
     std::string state_after_source = "none";
+    BackendAckPolicy ack_policy = BackendAckPolicy::BackendDefault;
+    bool ack_observed = false;
 };
 
 struct ArmWorkerTelemetry {
@@ -501,6 +510,7 @@ std::string toString(ArmId arm_id);
 std::string toString(ControlMode mode);
 std::string toString(ServerMotionState state);
 std::string toString(ForceControlMode mode);
+std::string toString(BackendAckPolicy policy);
 std::string toString(SafetyVerdict verdict);
 std::string toString(FaultDomain domain);
 std::string toString(TrackingErrorPolicy policy);

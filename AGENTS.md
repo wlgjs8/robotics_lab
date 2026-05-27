@@ -44,6 +44,11 @@ backend_type: mock | simulator | rbpodo
 
 Do not introduce new public terms such as `rbsim_local`, public `rbsim`, or mixed simulator aliases. Legacy filenames may exist for compatibility, but new work should use `simulator`.
 
+`backend_type: rbscript_tcp` is an experimental, explicitly gated comparison
+backend for Rainbow script TCP overhead studies only. It is not a promoted
+production backend and must not be treated as a replacement for `rbpodo` unless
+a future acceptance task updates this contract.
+
 ## Target Topology
 
 Physical robot topology:
@@ -84,6 +89,18 @@ Real Cartesian/TCP motion requires:
 
 ```bash
 RB_ALLOW_REAL_CARTESIAN=1
+```
+
+Experimental `rbscript_tcp` real-controller connection additionally requires:
+
+```bash
+RB_ALLOW_RBSCRIPT_TCP=1
+```
+
+Experimental `rbscript_tcp` servo motion additionally requires:
+
+```bash
+RB_ALLOW_RBSCRIPT_TCP_MOTION=1
 ```
 
 Even with these environment variables, real motion must also be explicitly allowed by config and by the relevant real-hardware acceptance task. Simulator acceptance is not real-hardware acceptance.
@@ -155,6 +172,11 @@ Backend APIs must preserve structured results:
 - `FaultContext`
 
 Do not parse backend error strings to infer safety behavior if structured fields are available. Simulator, mock, and rbpodo backends should all map failures to the shared backend taxonomy.
+
+`rbscript_tcp` uses Rainbow script TCP command port 5000 and data port 5001 for
+experimental comparison. It is not UDP, must not add a UDP direct-to-controller
+path, and remains no-motion/read-only first until separate real-motion
+acceptance exists.
 
 ## Servo Loop And I/O Architecture
 

@@ -57,6 +57,11 @@ backend_type: mock | simulator | rbpodo
 
 `run_mode` describes the environment. `backend_type` describes the backend implementation. Deprecated terms such as `rbsim_local`, public `rbsim`, or mixed simulator aliases must not be introduced in new public docs/configs.
 
+`backend_type: rbscript_tcp` is an experimental comparison backend name, not a
+production backend. It exists to compare the primary vendor-library `rbpodo`
+path with raw Rainbow script TCP overhead under explicit gates. Do not present
+it as a replacement for `rbpodo` until a future acceptance task promotes it.
+
 ## Controller Topology
 
 The physical system has one controller endpoint per arm:
@@ -130,6 +135,22 @@ RB_ALLOW_REAL_CARTESIAN=1
 ```
 
 These environment variables are necessary but not sufficient. Config and acceptance must also explicitly allow the operation.
+
+Experimental `rbscript_tcp` real-controller connection is additionally closed
+unless:
+
+```bash
+RB_ALLOW_RBSCRIPT_TCP=1
+```
+
+Experimental `rbscript_tcp` servo motion is additionally closed unless:
+
+```bash
+RB_ALLOW_RBSCRIPT_TCP_MOTION=1
+```
+
+These gates do not make `rbscript_tcp` real-motion-ready; they only permit the
+next explicitly accepted stage to run.
 
 Tracked real config is a template only:
 
@@ -241,6 +262,20 @@ Bool-only backend results must not be reintroduced.
 `RbsimBackend` keeps one persistent JSON-lines TCP connection per simulator backend instance during healthy operation. Transport/protocol corruption closes the socket; robot/controller-level errors such as `RobotFault` remain structured backend results.
 
 `RbpodoBackend` separates state acquisition from motion readiness. Valid joint feedback with `servo_enabled=false` is a valid read state, not motion readiness. Real `servo_j` sends remain blocked unless real gates and controller readiness are satisfied. Real stop/reset API wiring remains conservative until verified.
+
+`RbscriptTcpBackend` is experimental. It sends Rainbow UI Script text over the
+controller TCP command port 5000 and reads bounded data from TCP data port 5001
+when supported. It is not UDP and must not introduce a UDP direct-to-controller
+path. The intended use is staged overhead comparison:
+
+- no-motion connect
+- read-only `readState()`
+- no-motion command ACK timing
+- simulation-mode `servo_j` probing only when explicitly accepted
+- tiny real joint motion only in a future motion runbook
+
+Lower raw TCP client overhead does not bypass controller parser, ACK, motion,
+or safety limits. `rt_script` is future work and remains out of scope.
 
 ## GUI And Policy Roles
 

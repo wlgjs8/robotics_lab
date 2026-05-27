@@ -225,6 +225,8 @@ BackendCallSnapshot sendCallSnapshot(const SendServoJResult& result) {
     snapshot.error_message = result.error.message;
     snapshot.duration_us = result.timing.duration_us;
     snapshot.state_after_source = result.state_after_source;
+    snapshot.ack_policy = result.ack_policy;
+    snapshot.ack_observed = result.ack_observed;
     return snapshot;
 }
 

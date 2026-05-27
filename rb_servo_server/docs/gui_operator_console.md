@@ -40,6 +40,20 @@ config publishes FK TCP poses and enables simulator-only Cartesian IK, so the GU
 TCP target gizmos can send `TcpPoseTarget` commands after `ArmMotion` is active.
 `cartesian_control.allow_in_real` stays false.
 
+## Operator monitors
+
+The GUI exposes live monitors as responsive fixed HTML overlays on the left side
+of the viewport. This keeps monitoring out of the scrollable right-side control
+tab panel. Older viser builds without `add_html()` fall back to a top-level
+`Operator Monitors` folder in the root GUI panel.
+
+- `Joint Monitor` shows per-arm actual joints in selectable `deg` or `rad`.
+- `Pose Monitor` shows per-arm current `tcp_stand` pose. Position is
+  displayed in `mm`; orientation is selectable as `deg` or `rad`.
+- Overlay layout can be tuned with `RB_GUI_MONITOR_WIDTH_EM` and
+  `RB_GUI_MONITOR_GAP_EM`. The width is a target maximum; narrow browser
+  windows shrink the monitor cards instead of hiding them.
+
 Host build/test remains:
 
 ```bash

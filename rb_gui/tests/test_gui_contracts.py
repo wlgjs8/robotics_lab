@@ -20,17 +20,21 @@ from rb_servo_gui.app import (
     _apply_tcp_delta_and_send_pose_target,
     _apply_tcp_delta_to_target,
     _angular_step_radians,
+    _build_operator_monitors,
     _env_joint6,
     _format_cartesian_solve_status,
     _format_fk_status,
     _format_joint_monitor_value,
     _format_joints,
+    _format_stand_world_pose_value,
     _joint_cfg_radians,
     _joint_marker_position,
     _linear_step_meters,
     _mode_button_color,
     _mount_position,
     _mount_pose_from_mounts,
+    _operator_monitor_dynamic_html,
+    _operator_monitor_static_html,
     _pose6_from_mounts,
     _pose_orientation_wxyz,
     _pose_wxyz,
@@ -47,6 +51,9 @@ from rb_servo_gui.app import (
     _tcp_target_wxyz,
     _update_joint_monitor,
     _update_joint_monitor_unit_buttons,
+    _update_operator_monitors,
+    _update_stand_world_monitor,
+    _update_stand_world_monitor_unit_buttons,
     _update_tcp_linear_selection_buttons,
     _update_tcp_frame_buttons,
     _wxyz_to_xyzw,
@@ -125,10 +132,74 @@ class RecordingButton:
     def __init__(self, color="gray"):
         self.color = color
 
+    def on_click(self, callback):
+        self.callback = callback
+        return callback
+
 
 class RecordingText:
     def __init__(self, value=""):
         self.value = value
+
+
+class RecordingHtml:
+    def __init__(self, content=""):
+        self.content = content
+
+
+class RecordingContext:
+    def __init__(self, label=None):
+        self.label = label
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+
+class RecordingGui:
+    def __init__(self, *, has_html=True):
+        self.folders = []
+        self.buttons = []
+        self.html = []
+        self.texts = []
+        if has_html:
+            self.add_html = self._add_html
+
+    def add_folder(self, label, **kwargs):
+        self.folders.append((label, kwargs))
+        return RecordingContext(label)
+
+    def add_button(self, label, **kwargs):
+        button = RecordingButton(color=kwargs.get("color", "gray"))
+        self.buttons.append((label, kwargs, button))
+        return button
+
+    def add_text(self, label, **kwargs):
+        text = RecordingText(kwargs.get("initial_value", ""))
+        self.texts.append((label, kwargs, text))
+        return text
+
+    def _add_html(self, content, **kwargs):
+        html = RecordingHtml(content)
+        self.html.append((content, kwargs, html))
+        return html
+
+
+class RecordingScene:
+    def __init__(self):
+        self.containers = []
+
+    def add_3d_gui_container(self, name, **kwargs):
+        self.containers.append((name, kwargs))
+        return RecordingContext(name)
+
+
+class RecordingServer:
+    def __init__(self, *, scene=None, has_html=True):
+        self.gui = RecordingGui(has_html=has_html)
+        self.scene = scene
 
 
 class RecordingUrdf:
@@ -882,6 +953,177 @@ class GuiContractsTest(unittest.TestCase):
         _update_joint_monitor(handles, store.latest(), stale=True)
         self.assertEqual(handles["joint_monitor_status"].value, "stale, unit=rad, tick=1")
         self.assertEqual(handles["joint_monitor_values"]["left"][1].value, "-0.5236 rad")
+
+    def test_stand_world_monitor_formats_pose_in_mm_and_degrees_or_radians(self):
+        pose = Pose6D(0.31, -0.12, 0.44, 0.0, -math.pi / 4.0, math.pi / 2.0)
+        self.assertEqual(_format_stand_world_pose_value(pose, "x", valid=True, unit="deg"), "310.0 mm")
+        self.assertEqual(_format_stand_world_pose_value(pose, "y", valid=True, unit="deg"), "-120.0 mm")
+        self.assertEqual(_format_stand_world_pose_value(pose, "z", valid=True, unit="deg"), "440.0 mm")
+        self.assertEqual(_format_stand_world_pose_value(pose, "ry", valid=True, unit="deg"), "-45.00 deg")
+        self.assertEqual(_format_stand_world_pose_value(pose, "rz", valid=True, unit="rad"), "1.5708 rad")
+
+    def test_stand_world_monitor_invalid_state_does_not_fallback_to_zero(self):
+        pose = Pose6D(0.31, -0.12, 0.44, 0.0, -math.pi / 4.0, math.pi / 2.0)
+        self.assertEqual(_format_stand_world_pose_value(None, "x", valid=True, unit="deg"), "invalid")
+        self.assertEqual(_format_stand_world_pose_value(pose, "x", valid=False, unit="deg"), "invalid")
+        self.assertEqual(_format_stand_world_pose_value(pose, "bad", valid=True, unit="deg"), "invalid")
+
+    def test_stand_world_monitor_unit_buttons_highlight_selected_unit(self):
+        handles = {
+            "stand_world_monitor_unit": "deg",
+            "stand_world_monitor_unit_buttons": {
+                "deg": RecordingButton(),
+                "rad": RecordingButton(),
+            },
+        }
+        _update_stand_world_monitor_unit_buttons(handles)
+        self.assertEqual(handles["stand_world_monitor_unit_buttons"]["deg"].color, "green")
+        self.assertEqual(handles["stand_world_monitor_unit_buttons"]["rad"].color, "gray")
+
+        handles["stand_world_monitor_unit"] = "rad"
+        _update_stand_world_monitor_unit_buttons(handles)
+        self.assertEqual(handles["stand_world_monitor_unit_buttons"]["deg"].color, "gray")
+        self.assertEqual(handles["stand_world_monitor_unit_buttons"]["rad"].color, "green")
+
+    def test_stand_world_monitor_updates_pose_rows_per_arm(self):
+        state = self.tcp_available_state()
+        state["left"]["tcp_stand"] = {
+            "x": 0.31,
+            "y": 0.12,
+            "z": 0.44,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": math.pi / 2.0,
+        }
+        state["right"]["tcp_stand"] = {
+            "x": -0.2,
+            "y": 0.15,
+            "z": 0.5,
+            "rx": math.pi,
+            "ry": 0.0,
+            "rz": -math.pi / 2.0,
+        }
+        store, _, _ = self.make_safety(state)
+        handles = {
+            "stand_world_monitor_unit": "deg",
+            "stand_world_monitor_status": RecordingText(),
+            "stand_world_monitor_values": {
+                "left": {field: RecordingText() for field in ("x", "y", "z", "rx", "ry", "rz")},
+                "right": {field: RecordingText() for field in ("x", "y", "z", "rx", "ry", "rz")},
+            },
+        }
+        _update_stand_world_monitor(handles, store.latest(), stale=False)
+        self.assertEqual(handles["stand_world_monitor_status"].value, "live, xyz=mm, rpy=deg, tick=1")
+        self.assertEqual(handles["stand_world_monitor_values"]["left"]["x"].value, "310.0 mm")
+        self.assertEqual(handles["stand_world_monitor_values"]["left"]["rz"].value, "90.00 deg")
+        self.assertEqual(handles["stand_world_monitor_values"]["right"]["x"].value, "-200.0 mm")
+        self.assertEqual(handles["stand_world_monitor_values"]["right"]["rx"].value, "180.00 deg")
+
+        handles["stand_world_monitor_unit"] = "rad"
+        _update_stand_world_monitor(handles, store.latest(), stale=False)
+        self.assertEqual(handles["stand_world_monitor_status"].value, "live, xyz=mm, rpy=rad, tick=1")
+        self.assertEqual(handles["stand_world_monitor_values"]["left"]["rz"].value, "1.5708 rad")
+
+    def test_stand_world_monitor_marks_unavailable_pose_invalid(self):
+        store, _, _ = self.make_safety(sample_state())
+        handles = {
+            "stand_world_monitor_unit": "deg",
+            "stand_world_monitor_status": RecordingText(),
+            "stand_world_monitor_values": {
+                "left": {field: RecordingText() for field in ("x", "y", "z", "rx", "ry", "rz")},
+                "right": {field: RecordingText() for field in ("x", "y", "z", "rx", "ry", "rz")},
+            },
+        }
+        _update_stand_world_monitor(handles, store.latest(), stale=False)
+        self.assertEqual(handles["stand_world_monitor_status"].value, "live, xyz=mm, rpy=deg, tick=1")
+        self.assertEqual(handles["stand_world_monitor_values"]["left"]["x"].value, "invalid")
+
+        _update_stand_world_monitor(handles, None, stale=True)
+        self.assertEqual(handles["stand_world_monitor_status"].value, "No state stream, xyz=mm, rpy=deg")
+        self.assertEqual(handles["stand_world_monitor_values"]["right"]["rz"].value, "invalid")
+
+        state = self.tcp_available_state()
+        store, _, _ = self.make_safety(state)
+        _update_stand_world_monitor(handles, store.latest(), stale=True)
+        self.assertEqual(handles["stand_world_monitor_status"].value, "stale, xyz=mm, rpy=deg, tick=1")
+        self.assertEqual(handles["stand_world_monitor_values"]["left"]["x"].value, "invalid")
+
+    def test_operator_monitor_static_html_places_cards_on_left(self):
+        html = _operator_monitor_static_html(18.0, 1.0)
+        self.assertIn("--rb-monitor-gap: 1.000em;", html)
+        self.assertIn("--rb-monitor-target-width: 18.000em;", html)
+        self.assertIn("calc((100vw - (3 * var(--rb-monitor-gap))) / 2)", html)
+        self.assertIn(".rb-monitor-joint-card { left: var(--rb-monitor-gap); }", html)
+        self.assertIn(".rb-monitor-stand-card { left: calc((2 * var(--rb-monitor-gap)) + var(--rb-monitor-width)); }", html)
+        self.assertIn("Pose Monitor", html)
+        self.assertIn('id="rb-joint-unit-rad"', html)
+        self.assertIn('id="rb-stand-unit-rad"', html)
+        self.assertIn("body:has(#rb-joint-unit-rad:checked)", html)
+        self.assertNotIn(".rb-monitor-card { display: none", html)
+
+    def test_operator_monitor_dynamic_html_renders_joint_and_stand_values(self):
+        state = self.tcp_available_state()
+        state["left"]["tcp_stand"] = {
+            "x": 0.31,
+            "y": 0.12,
+            "z": 0.44,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": math.pi / 2.0,
+        }
+        store, _, _ = self.make_safety(state)
+        html = _operator_monitor_dynamic_html(store.latest(), stale=False)
+        self.assertIn("live, tick=1", html)
+        self.assertIn("J1 base_joint", html)
+        self.assertIn("0.00 deg", html)
+        self.assertIn("0.0000 rad", html)
+        self.assertIn("live, xyz=mm, tick=1", html)
+        self.assertIn("310.0 mm", html)
+        self.assertIn("90.00 deg", html)
+        self.assertIn("1.5708 rad", html)
+
+    def test_operator_monitor_dynamic_html_marks_unavailable_pose_invalid(self):
+        store, _, _ = self.make_safety(sample_state())
+        html = _operator_monitor_dynamic_html(store.latest(), stale=False)
+        self.assertIn("live, xyz=mm, tick=1", html)
+        self.assertIn("invalid", html)
+
+        state = self.tcp_available_state()
+        store, _, _ = self.make_safety(state)
+        stale_html = _operator_monitor_dynamic_html(store.latest(), stale=True)
+        self.assertIn("stale, xyz=mm, tick=1", stale_html)
+        self.assertIn("invalid", stale_html)
+
+    def test_operator_monitors_use_fixed_html_overlay_when_available(self):
+        server = RecordingServer(scene=RecordingScene())
+        handles = {}
+        _build_operator_monitors(server, handles)
+        self.assertEqual(handles["operator_monitor_panel_mode"], "fixed_html_overlay")
+        self.assertEqual(len(server.gui.html), 2)
+        self.assertIn("rb-monitor-header-card", server.gui.html[0][0])
+        self.assertIn("rb-monitor-body-card", server.gui.html[1][0])
+        self.assertEqual(server.scene.containers, [])
+        self.assertEqual(server.gui.folders, [])
+
+    def test_operator_monitors_fallback_to_root_gui_without_html(self):
+        server = RecordingServer(scene=RecordingScene(), has_html=False)
+        handles = {}
+        _build_operator_monitors(server, handles)
+        self.assertEqual(handles["operator_monitor_panel_mode"], "root_gui_fallback")
+        folder_labels = [label for label, _kwargs in server.gui.folders]
+        self.assertEqual(folder_labels[0], "Operator Monitors")
+        self.assertIn("Joint Monitor", folder_labels)
+        self.assertIn("Stand/World Monitor", folder_labels)
+
+    def test_update_operator_monitors_updates_html_content_handle(self):
+        server = RecordingServer()
+        handles = {}
+        _build_operator_monitors(server, handles)
+        state = self.tcp_available_state()
+        store, _, _ = self.make_safety(state)
+        _update_operator_monitors(handles, store.latest(), stale=False)
+        self.assertIn("live, tick=1", handles["operator_monitor_content"].content)
+        self.assertIn("live, xyz=mm, tick=1", handles["operator_monitor_content"].content)
 
     def test_default_mount_normals_match_stand_shoulder_faces(self):
         left_matrix = _quat_to_matrix(_pose_orientation_wxyz(_DEFAULT_LEFT_POSE))

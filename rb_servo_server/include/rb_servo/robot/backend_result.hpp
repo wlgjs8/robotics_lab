@@ -81,6 +81,8 @@ struct SendServoJResult {
     BackendTiming timing;
     std::optional<RobotState> state_after;
     std::string state_after_source = "none";
+    BackendAckPolicy ack_policy = BackendAckPolicy::BackendDefault;
+    bool ack_observed = false;
     JointArray requested_q_deg{};
 };
 
