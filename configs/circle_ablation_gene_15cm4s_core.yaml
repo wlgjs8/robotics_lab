@@ -1,0 +1,90 @@
+experiments:
+  - name: gene_4s_base_100cmd_100servo
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+
+  - name: gene_4s_200cmd_100servo
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 200
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+
+  - name: gene_4s_200cmd_200servo
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 200
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    server_config_overrides:
+      servo.rate_hz: 200
+      network.state_pub_rate_hz: 50
+      servo.worker_read_rate_hz: 500
+
+  - name: gene_4s_100cmd_200servo
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    server_config_overrides:
+      servo.rate_hz: 200
+      network.state_pub_rate_hz: 50
+      servo.worker_read_rate_hz: 500
+
+  - name: gene_4s_gain_4_4
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    server_config_overrides:
+      cartesian_control.path_kp_pos: 4.0
+      cartesian_control.path_kp_ori: 4.0
+
+  - name: gene_4s_gain_8_8
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    server_config_overrides:
+      cartesian_control.path_kp_pos: 8.0
+      cartesian_control.path_kp_ori: 8.0
+
+  - name: gene_4s_damping_0005
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    server_config_overrides:
+      cartesian_control.velocity_damping: 0.005
+
+  - name: gene_4s_damping_002
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    server_config_overrides:
+      cartesian_control.velocity_damping: 0.02

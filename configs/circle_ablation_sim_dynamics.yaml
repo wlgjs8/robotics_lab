@@ -1,0 +1,52 @@
+experiments:
+  - name: gene_4s_tau_004
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    left_config_overrides:
+      simulator.motion_time_constant_sec: 0.04
+    right_config_overrides:
+      simulator.motion_time_constant_sec: 0.04
+
+  - name: gene_4s_tau_002
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    left_config_overrides:
+      simulator.motion_time_constant_sec: 0.02
+    right_config_overrides:
+      simulator.motion_time_constant_sec: 0.02
+
+  - name: gene_4s_tau_001
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    left_config_overrides:
+      simulator.motion_time_constant_sec: 0.01
+    right_config_overrides:
+      simulator.motion_time_constant_sec: 0.01
+
+  - name: gene_4s_tau_006
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    left_config_overrides:
+      simulator.motion_time_constant_sec: 0.06
+    right_config_overrides:
+      simulator.motion_time_constant_sec: 0.06

@@ -1,0 +1,68 @@
+experiments:
+  - name: baseline_16s_previous_command
+    profile: circle_15cm_16s
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    server_config: rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml
+    server_config_overrides:
+      cartesian_control.velocity_target_integration: previous_command
+
+  - name: baseline_16s_measured_lookahead_004
+    profile: circle_15cm_16s
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    server_config: rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml
+    server_config_overrides:
+      cartesian_control.velocity_target_integration: measured_actual_lookahead
+      cartesian_control.velocity_target_lookahead_sec: 0.04
+
+  - name: gene_4s_previous_command
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    server_config_overrides:
+      cartesian_control.velocity_target_integration: previous_command
+
+  - name: gene_4s_measured_lookahead_004
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    server_config_overrides:
+      cartesian_control.velocity_target_integration: measured_actual_lookahead
+      cartesian_control.velocity_target_lookahead_sec: 0.04
+
+  - name: gene_4s_measured_lookahead_002
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    server_config_overrides:
+      cartesian_control.velocity_target_integration: measured_actual_lookahead
+      cartesian_control.velocity_target_lookahead_sec: 0.02
+
+  - name: gene_4s_measured_lookahead_006
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    server_config_overrides:
+      cartesian_control.velocity_target_integration: measured_actual_lookahead
+      cartesian_control.velocity_target_lookahead_sec: 0.06
