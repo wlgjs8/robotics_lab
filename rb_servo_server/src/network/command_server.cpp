@@ -254,6 +254,50 @@ bool parseLinearMoveOrientationMode(const std::string& value, LinearMoveOrientat
     return false;
 }
 
+bool parseCirclePlane(const std::string& value, TcpCirclePlane* out) {
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (normalized == "xy") {
+        if (out) *out = TcpCirclePlane::XY;
+        return true;
+    }
+    if (normalized == "xz") {
+        if (out) *out = TcpCirclePlane::XZ;
+        return true;
+    }
+    if (normalized == "yz") {
+        if (out) *out = TcpCirclePlane::YZ;
+        return true;
+    }
+    return false;
+}
+
+bool parseCircleCenterMode(const std::string& value, TcpCircleCenterMode* out) {
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (normalized == "start_on_circle") {
+        if (out) *out = TcpCircleCenterMode::StartOnCircle;
+        return true;
+    }
+    return false;
+}
+
+bool parseCircleFrame(const std::string& value, TcpCircleFrame* out) {
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (normalized == "stand") {
+        if (out) *out = TcpCircleFrame::Stand;
+        return true;
+    }
+    return false;
+}
+
 bool readOptionalPositiveNumber(
     const json& object,
     const char* key,
@@ -311,11 +355,77 @@ bool readOptionalLinearMoveFields(const json& object, ArmCommand* out) {
     return true;
 }
 
+bool readOptionalCircleMoveFields(const json& object, ArmCommand* out) {
+    const bool circle_fields_present =
+        object.contains("diameter_m") ||
+        object.contains("period_sec") ||
+        object.contains("repeat") ||
+        object.contains("plane") ||
+        object.contains("center_mode") ||
+        object.contains("frame");
+    if (!circle_fields_present) return true;
+
+    bool present = false;
+    double number = out->tcp_circle_move.diameter_m;
+    if (!readOptionalPositiveNumber(object, "diameter_m", &number, &present)) return false;
+    if (present) {
+        out->tcp_circle_move.diameter_m = number;
+        out->has_tcp_circle_move = true;
+    }
+    number = out->tcp_circle_move.period_sec;
+    if (!readOptionalPositiveNumber(object, "period_sec", &number, &present)) return false;
+    if (present) {
+        out->tcp_circle_move.period_sec = number;
+        out->has_tcp_circle_move = true;
+    }
+
+    const auto repeat_it = object.find("repeat");
+    if (repeat_it != object.end()) {
+        if (!repeat_it->is_number_integer()) return false;
+        const int repeat = repeat_it->get<int>();
+        if (repeat <= 0) return false;
+        out->tcp_circle_move.repeat = repeat;
+        out->has_tcp_circle_move = true;
+    }
+
+    std::string value;
+    if (!readOptionalString(object, "plane", &value)) return false;
+    if (!value.empty()) {
+        if (!parseCirclePlane(value, &out->tcp_circle_move.plane)) return false;
+        out->has_tcp_circle_move = true;
+    }
+    value.clear();
+    if (!readOptionalString(object, "center_mode", &value)) return false;
+    if (!value.empty()) {
+        if (!parseCircleCenterMode(value, &out->tcp_circle_move.center_mode)) return false;
+        out->has_tcp_circle_move = true;
+    }
+    value.clear();
+    if (!readOptionalString(object, "orientation_mode", &value)) return false;
+    if (!value.empty()) {
+        if (!parseLinearMoveOrientationMode(value, &out->tcp_circle_move.orientation_mode)) return false;
+        out->has_tcp_circle_move = true;
+    }
+    value.clear();
+    if (!readOptionalString(object, "frame", &value)) return false;
+    if (!value.empty()) {
+        if (!parseCircleFrame(value, &out->tcp_circle_move.frame)) return false;
+        out->has_tcp_circle_move = true;
+    }
+    if (out->has_tcp_circle_move) {
+        return out->tcp_circle_move.diameter_m > 0.0 &&
+               out->tcp_circle_move.period_sec > 0.0 &&
+               out->tcp_circle_move.repeat > 0;
+    }
+    return true;
+}
+
 bool requiresPayload(ControlMode mode) {
     return mode == ControlMode::JointTarget ||
            mode == ControlMode::JointVelocity ||
            mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
+           mode == ControlMode::TcpCircleMove ||
            mode == ControlMode::TcpDeltaStand ||
            mode == ControlMode::TcpDeltaLocal ||
            mode == ControlMode::TcpTwistStand ||
@@ -333,6 +443,8 @@ bool hasRequiredPayload(const ArmCommand& command) {
         case ControlMode::TcpLinearMove:
             return command.has_tcp_target &&
                    (command.has_linear_move_duration || command.has_linear_move_linear_speed);
+        case ControlMode::TcpCircleMove:
+            return command.has_tcp_circle_move;
         case ControlMode::TcpDeltaStand:
             return command.has_tcp_delta_stand;
         case ControlMode::TcpDeltaLocal:
@@ -357,6 +469,7 @@ bool commandRequiresLease(ControlMode mode) {
            mode == ControlMode::JointVelocity ||
            mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
+           mode == ControlMode::TcpCircleMove ||
            mode == ControlMode::TcpDeltaStand ||
            mode == ControlMode::TcpDeltaLocal ||
            mode == ControlMode::TcpTwistStand ||
@@ -452,6 +565,7 @@ bool parseArmObject(
         if (!readOptionalVec6(object, "tcp_twist_local", &out->tcp_twist_local, &present)) return false;
         out->has_tcp_twist_local = present;
         if (!readOptionalLinearMoveFields(object, out)) return false;
+        if (!readOptionalCircleMoveFields(object, out)) return false;
         if (!parseForceControlObject(object, &out->force_control)) return false;
     }
     if (out->timeout_sec <= 0.0 || !std::isfinite(out->timeout_sec)) return false;
@@ -706,6 +820,10 @@ bool CommandServer::parseMessage(
         cmd.right.has_linear_move_angular_speed = cmd.right.has_linear_move_angular_speed || cmd.left.has_linear_move_angular_speed;
         cmd.right.has_linear_move_orientation_mode =
             cmd.right.has_linear_move_orientation_mode || cmd.left.has_linear_move_orientation_mode;
+
+        if (!readOptionalCircleMoveFields(root, &cmd.left)) return false;
+        cmd.right.tcp_circle_move = cmd.left.tcp_circle_move;
+        cmd.right.has_tcp_circle_move = cmd.right.has_tcp_circle_move || cmd.left.has_tcp_circle_move;
     }
 
     if (requiresPayload(cmd.left.mode) && !hasRequiredPayload(cmd.left)) return false;

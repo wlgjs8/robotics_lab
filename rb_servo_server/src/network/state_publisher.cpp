@@ -104,6 +104,7 @@ nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config
         {"enable", config.enable},
         {"allow_in_simulation", config.allow_in_simulation},
         {"allow_in_real", config.allow_in_real},
+        {"enable_benchmark_primitives", config.enable_benchmark_primitives},
         {"warn_ik_duration_us", config.warn_ik_duration_us},
         {"fail_ik_duration_us", config.fail_ik_duration_us},
         {"path_kp", config.path_kp},
@@ -131,6 +132,12 @@ nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config
             {"default_angular_speed_rad_s", config.linear_move.default_angular_speed_rad_s},
             {"constant_orientation_tolerance_rad", config.linear_move.constant_orientation_tolerance_rad},
             {"default_orientation_mode", orientationModeString(config.linear_move.default_orientation_mode)},
+        }},
+        {"circle_move", {
+            {"allow_in_simulation", config.circle_move.allow_in_simulation},
+            {"allow_in_real", config.circle_move.allow_in_real},
+            {"max_diameter_m", config.circle_move.max_diameter_m},
+            {"min_period_sec", config.circle_move.min_period_sec},
         }},
     };
 }
@@ -339,6 +346,14 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"integrator_divergence_total", telemetry.integrator_divergence_total},
         {"max_command_actual_error_deg_observed", telemetry.max_command_actual_error_deg_observed},
         {"velocity_target_lookahead_sec", telemetry.velocity_target_lookahead_sec},
+        {"circle_active", telemetry.circle_active},
+        {"circle_phase", telemetry.circle_phase},
+        {"circle_repeat_index", telemetry.circle_repeat_index},
+        {"circle_radius_m", telemetry.circle_radius_m},
+        {"circle_period_sec", telemetry.circle_period_sec},
+        {"circle_position_error_m", telemetry.circle_position_error_m},
+        {"circle_orientation_error_rad", telemetry.circle_orientation_error_rad},
+        {"circle_done", telemetry.circle_done},
     };
 }
 

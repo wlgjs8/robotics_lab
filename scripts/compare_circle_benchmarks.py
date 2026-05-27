@@ -27,7 +27,17 @@ COLUMNS = [
     ("max_orientation_drift_mrad", "max_orientation_drift_mrad"),
     ("estimated_latency_ms", "estimated_latency_ms"),
     ("worker_command_drops_total", "worker_command_drops_total"),
+    ("integrator_clamps_total", "integrator_clamps_total"),
+    ("integrator_divergence_total", "integrator_divergence_total"),
+    ("send_command_deadline_missed_count", "send_command_deadline_missed_count"),
+    ("command_interval_max_ms", "command_interval_max_ms"),
+    ("servo_jitter_max_ms", "servo_jitter_max_ms"),
+    ("mean_feedback_linear_norm_m_s", "mean_feedback_linear_norm_m_s"),
+    ("max_feedback_linear_norm_m_s", "max_feedback_linear_norm_m_s"),
+    ("feedback_saturation_count", "feedback_saturation_count"),
+    ("stale_state_feedback_skips", "stale_state_feedback_skips"),
     ("result", "result"),
+    ("performance_warnings", "performance_warnings"),
 ]
 
 PROFILE_BY_DIMENSION = {
@@ -70,6 +80,12 @@ def finite_number(value: Any) -> float | None:
         return None
     if isinstance(value, (int, float)):
         number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, str):
+        try:
+            number = float(value)
+        except ValueError:
+            return None
         return number if math.isfinite(number) else None
     return None
 
@@ -114,6 +130,92 @@ def radius_gain(summary: dict[str, Any]) -> float | None:
     return fit_radius / reference_radius
 
 
+def artifact_path(summary: dict[str, Any], filename: str) -> Path:
+    artifact_dir = summary.get("artifact_dir")
+    if isinstance(artifact_dir, str) and artifact_dir:
+        return Path(artifact_dir) / filename
+    summary_path = Path(str(summary.get("_summary_path", "summary.json")))
+    return summary_path.parent / filename
+
+
+def command_interval_max_ms(summary: dict[str, Any]) -> float | None:
+    existing = finite_number(summary.get("command_interval_max_ms"))
+    if existing is not None:
+        return existing
+    path_text = summary.get("command_packets")
+    path = Path(path_text) if isinstance(path_text, str) and path_text else artifact_path(summary, "command_packets.jsonl")
+    if not path.is_file():
+        return None
+    host_times: list[int] = []
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                packet = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            mode = (
+                packet.get("left", {}).get("mode")
+                if isinstance(packet.get("left"), dict)
+                else None
+            ) or (
+                packet.get("right", {}).get("mode")
+                if isinstance(packet.get("right"), dict)
+                else None
+            ) or packet.get("mode")
+            if mode not in {
+                "TcpTwistStand",
+                "TcpTwistLocal",
+                "TcpLinearMove",
+                "TcpCircleMove",
+            }:
+                continue
+            host_time_ns = packet.get("host_time_ns")
+            if isinstance(host_time_ns, int):
+                host_times.append(host_time_ns)
+    if len(host_times) < 2:
+        return None
+    return max((b - a) / 1e6 for a, b in zip(host_times, host_times[1:]))
+
+
+def csv_max(path: Path, field: str) -> float | None:
+    if not path.is_file():
+        return None
+    values: list[float] = []
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            value = finite_number(row.get(field))
+            if value is not None:
+                values.append(value)
+    return max(values) if values else None
+
+
+def servo_jitter_max_ms(summary: dict[str, Any]) -> float | None:
+    existing = finite_number(summary.get("servo_jitter_max_ms"))
+    if existing is not None:
+        return existing
+    servo_log = summary.get("servo_log")
+    path: Path | None = None
+    if isinstance(servo_log, dict) and isinstance(servo_log.get("path"), str):
+        path = Path(servo_log["path"])
+    if path is None:
+        path = artifact_path(summary, "servo_log.csv")
+    for field in ("jitter_ms", "servo_jitter_ms"):
+        value = csv_max(path, field)
+        if value is not None:
+            return value
+    return None
+
+
+def warning_text(summary: dict[str, Any]) -> str:
+    warnings = summary.get("performance_warnings")
+    if isinstance(warnings, list):
+        return "; ".join(str(item) for item in warnings)
+    if isinstance(warnings, str):
+        return warnings
+    return ""
+
+
 def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "run_name": run_name(summary),
@@ -122,6 +224,7 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "profile": inferred_profile(summary),
         "diameter_m": summary.get("diameter_m"),
         "period_sec": summary.get("period_sec"),
+        "repeat": summary.get("repeat"),
         "radius_gain": radius_gain(summary),
         "mean_error_mm": scaled(summary, "mean_error_m", 1000.0),
         "rms_error_mm": scaled(summary, "rms_error_m", 1000.0),
@@ -131,7 +234,18 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "max_orientation_drift_mrad": scaled(summary, "max_orientation_drift_rad", 1000.0),
         "estimated_latency_ms": summary.get("estimated_latency_ms"),
         "worker_command_drops_total": summary.get("worker_command_drops_total"),
+        "integrator_clamps_total": summary.get("integrator_clamps_total"),
+        "integrator_divergence_total": summary.get("integrator_divergence_total"),
+        "send_command_deadline_missed_count": summary.get("send_command_deadline_missed_count"),
+        "command_interval_max_ms": command_interval_max_ms(summary),
+        "servo_jitter_max_ms": servo_jitter_max_ms(summary),
+        "mean_feedback_linear_norm_m_s": summary.get("mean_feedback_linear_norm_m_s"),
+        "max_feedback_linear_norm_m_s": summary.get("max_feedback_linear_norm_m_s"),
+        "feedback_saturation_count": summary.get("feedback_saturation_count"),
+        "stale_state_feedback_skips": summary.get("stale_state_feedback_skips"),
+        "fault_latched": summary.get("fault_latched"),
         "result": summary.get("result"),
+        "performance_warnings": warning_text(summary),
     }
 
 

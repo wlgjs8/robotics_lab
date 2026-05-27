@@ -1507,6 +1507,7 @@ bool testCommandValidation() {
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"JointVelocity"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpPoseTarget"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpLinearMove"})", now, &out));
+    RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpCircleMove"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpDeltaStand"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpDeltaLocal"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpTwistStand"})", now, &out));
@@ -1648,6 +1649,43 @@ bool testCartesianCommandParser() {
     RB_CHECK(out.right.has_tcp_twist_stand);
     RB_CHECK(std::abs(out.right.tcp_twist_stand.y - 0.01) < kEpsilon);
     RB_CHECK(std::abs(out.right.tcp_twist_stand.rz - 0.1) < kEpsilon);
+
+    RB_CHECK(server.parseMessage(
+        R"({"schema_version":1,"seq":11,"mode":"Hold","timeout_sec":0.2,"left":{"mode":"TcpCircleMove","plane":"xy","diameter_m":0.15,"period_sec":4.0,"repeat":2,"center_mode":"start_on_circle","orientation_mode":"constant","frame":"stand"},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpCircleMove);
+    RB_CHECK(out.left.has_tcp_circle_move);
+    RB_CHECK(out.left.tcp_circle_move.plane == rb_servo::TcpCirclePlane::XY);
+    RB_CHECK(std::abs(out.left.tcp_circle_move.diameter_m - 0.15) < kEpsilon);
+    RB_CHECK(std::abs(out.left.tcp_circle_move.period_sec - 4.0) < kEpsilon);
+    RB_CHECK(out.left.tcp_circle_move.repeat == 2);
+    RB_CHECK(out.left.tcp_circle_move.center_mode == rb_servo::TcpCircleCenterMode::StartOnCircle);
+    RB_CHECK(out.left.tcp_circle_move.orientation_mode == rb_servo::LinearMoveOrientationMode::Constant);
+    RB_CHECK(out.left.tcp_circle_move.frame == rb_servo::TcpCircleFrame::Stand);
+    RB_CHECK(out.right.mode == rb_servo::ControlMode::Hold);
+
+    RB_CHECK(!server.parseMessage(
+        R"({"schema_version":1,"seq":12,"mode":"TcpCircleMove","timeout_sec":0.2,"left":{"plane":"bad","diameter_m":0.15,"period_sec":4.0,"repeat":1},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+    RB_CHECK(!server.parseMessage(
+        R"({"schema_version":1,"seq":13,"mode":"TcpCircleMove","timeout_sec":0.2,"left":{"plane":"xy","diameter_m":0.0,"period_sec":4.0,"repeat":1},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+    RB_CHECK(!server.parseMessage(
+        R"({"schema_version":1,"seq":14,"mode":"TcpCircleMove","timeout_sec":0.2,"left":{"plane":"xy","diameter_m":0.15,"period_sec":0.0,"repeat":1},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+    RB_CHECK(!server.parseMessage(
+        R"({"schema_version":1,"seq":15,"mode":"TcpCircleMove","timeout_sec":0.2,"left":{"plane":"xy","diameter_m":0.15,"period_sec":4.0,"repeat":0},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
     return true;
 }
 
@@ -3593,6 +3631,107 @@ bool testTcpLinearMoveUsesIkInSimulationOnly() {
     return true;
 }
 
+bool testTcpCircleMoveSimulationOnlyAndConfigGated() {
+    rb_servo::CommandBuffer disabled_buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.right_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.left_mount.arm_id = rb_servo::ArmId::Left;
+    cfg.right_mount.arm_id = rb_servo::ArmId::Right;
+    cfg.kinematics.enable = true;
+    cfg.kinematics.ik.enable = true;
+    cfg.kinematics.publish_tcp = true;
+    cfg.cartesian_control.enable_benchmark_primitives = false;
+    cfg.cartesian_control.circle_move.min_period_sec = 0.1;
+    cfg.cartesian_control.max_twist_linear_m_s = 10.0;
+    cfg.cartesian_control.max_twist_angular_rad_s = 10.0;
+    const rb_servo::JointArray initial = joints(0.0);
+
+    auto disabled_kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop disabled_loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &disabled_buffer,
+        nullptr,
+        disabled_kinematics
+    );
+    RB_CHECK(disabled_loop.start());
+    disabled_buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    rb_servo::DualArmCommand circle = command(rb_servo::ControlMode::Hold);
+    circle.left.mode = rb_servo::ControlMode::TcpCircleMove;
+    circle.left.has_tcp_circle_move = true;
+    circle.left.tcp_circle_move.plane = rb_servo::TcpCirclePlane::XY;
+    circle.left.tcp_circle_move.diameter_m = 0.10;
+    circle.left.tcp_circle_move.period_sec = 0.50;
+    circle.left.tcp_circle_move.repeat = 1;
+    circle.right.mode = rb_servo::ControlMode::Hold;
+    disabled_buffer.setCommand(circle);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = disabled_loop.latestSnapshot();
+        return snapshot.command.left.mode == rb_servo::ControlMode::TcpCircleMove &&
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable &&
+               snapshot.left_cartesian_solve.reason == "tcp_circle_move_benchmark_primitives_disabled";
+    }));
+    RB_CHECK(!disabled_kinematics->lastLeftTwist().has_value());
+    disabled_loop.stop();
+
+    rb_servo::CommandBuffer enabled_buffer;
+    rb_servo::DualArmConfig enabled_cfg = cfg;
+    enabled_cfg.cartesian_control.enable_benchmark_primitives = true;
+    auto enabled_kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop enabled_loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        enabled_cfg,
+        &enabled_buffer,
+        nullptr,
+        enabled_kinematics
+    );
+    RB_CHECK(enabled_loop.start());
+    enabled_buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    enabled_buffer.setCommand(circle);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = enabled_loop.latestSnapshot();
+        return snapshot.command.left.mode == rb_servo::ControlMode::TcpCircleMove &&
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok &&
+               snapshot.left_cartesian_solve.status == "ok" &&
+               snapshot.left_cartesian_solve.circle_active &&
+               enabled_kinematics->lastLeftTwist().has_value();
+    }));
+    const rb_servo::ServoSnapshot enabled_snapshot = enabled_loop.latestSnapshot();
+    RB_CHECK(std::abs(enabled_snapshot.left_cartesian_solve.circle_radius_m - 0.05) < 1e-9);
+    enabled_loop.stop();
+
+    rb_servo::CommandBuffer real_buffer;
+    rb_servo::DualArmConfig real_cfg = enabled_cfg;
+    real_cfg.left_robot.run_mode = rb_servo::RunMode::Real;
+    real_cfg.right_robot.run_mode = rb_servo::RunMode::Real;
+    auto real_kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop real_loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        real_cfg,
+        &real_buffer,
+        nullptr,
+        real_kinematics
+    );
+    RB_CHECK(real_loop.start());
+    real_buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    real_buffer.setCommand(circle);
+    sleepTicks();
+    const rb_servo::ServoSnapshot real_snapshot = real_loop.latestSnapshot();
+    RB_CHECK(real_snapshot.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand ||
+             real_snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
+    RB_CHECK(!real_kinematics->lastLeftTwist().has_value());
+    real_loop.stop();
+    return true;
+}
+
 bool testCartesianDeltaStandAndLocalUseIkInSimulation() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
@@ -4242,6 +4381,7 @@ int main() {
     if (!testDisarmAndCartesianHoldPreviousTarget()) return 1;
     if (!testCartesianPoseTargetUsesIkInSimulation()) return 1;
     if (!testTcpLinearMoveUsesIkInSimulationOnly()) return 1;
+    if (!testTcpCircleMoveSimulationOnlyAndConfigGated()) return 1;
     if (!testCartesianDeltaStandAndLocalUseIkInSimulation()) return 1;
     if (!testCartesianDeltaCommandsAreOneShotPerSeq()) return 1;
     if (!testCartesianIkFailureHoldsPreviousSafeTarget()) return 1;

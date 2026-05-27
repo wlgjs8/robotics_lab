@@ -12,12 +12,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from rb_servo_gui.app import (
     _DEFAULT_LEFT_POSE,
+    _DEFAULT_INIT_LEFT_JOINTS_DEG,
+    _DEFAULT_INIT_RIGHT_JOINTS_DEG,
     _DEFAULT_RIGHT_POSE,
     _TCP_FRAME_LOCAL,
     _TCP_FRAME_STAND,
     _apply_tcp_delta_and_send_pose_target,
     _apply_tcp_delta_to_target,
     _angular_step_radians,
+    _env_joint6,
     _format_cartesian_solve_status,
     _format_fk_status,
     _format_joint_monitor_value,
@@ -32,7 +35,9 @@ from rb_servo_gui.app import (
     _pose_orientation_wxyz,
     _pose_wxyz,
     _quat_to_matrix,
+    _clear_tcp_target_user_moved,
     _send_tcp_linear_move_from_marker,
+    _send_init_motion_and_reset_targets,
     _sim_readiness_from_env,
     _tcp_local_delta_from_target,
     _tcp_frame_mode,
@@ -146,6 +151,9 @@ class GuiContractsTest(unittest.TestCase):
         cartesian_available=None,
         enable_tcp_pose=False,
         stale=False,
+        init_left_joint_deg=None,
+        init_right_joint_deg=None,
+        init_motion_timeout_sec=10.0,
     ):
         store = StateStore(stale_after_sec=0.5)
         if state is not None:
@@ -167,6 +175,9 @@ class GuiContractsTest(unittest.TestCase):
                 cartesian_no_go_reason="cartesian readiness not proven",
             ),
             enable_tcp_pose_commands=enable_tcp_pose,
+            init_left_joint_deg=init_left_joint_deg,
+            init_right_joint_deg=init_right_joint_deg,
+            init_motion_timeout_sec=init_motion_timeout_sec,
         )
         return store, client, safety
 
@@ -295,6 +306,118 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(packet["left"]["q_target_deg"], [2.0, -30.0, 80.0, 0.0, 60.0, 0.0])
         self.assertEqual(packet["right"]["q_target_deg"], [0.0, -30.0, 80.0, 0.0, 60.0, 0.0])
         self.assertGreater(packet["timeout_sec"], 0.0)
+
+    def test_env_joint6_parser_accepts_csv_and_rejects_invalid_values(self):
+        old_value = os.environ.get("RB_GUI_INIT_LEFT_JOINTS")
+        try:
+            os.environ["RB_GUI_INIT_LEFT_JOINTS"] = "1, 2, 3, 4, 5, 6"
+            self.assertEqual(_env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG), (1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+            os.environ["RB_GUI_INIT_LEFT_JOINTS"] = "1, 2, 3"
+            self.assertIsNone(_env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG))
+            os.environ["RB_GUI_INIT_LEFT_JOINTS"] = "1, 2, nan, 4, 5, 6"
+            self.assertIsNone(_env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG))
+            os.environ.pop("RB_GUI_INIT_LEFT_JOINTS")
+            self.assertEqual(_env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG), _DEFAULT_INIT_LEFT_JOINTS_DEG)
+        finally:
+            if old_value is None:
+                os.environ.pop("RB_GUI_INIT_LEFT_JOINTS", None)
+            else:
+                os.environ["RB_GUI_INIT_LEFT_JOINTS"] = old_value
+
+    def test_init_motion_requires_configured_targets_and_armed_state(self):
+        _, client, unconfigured = self.make_safety(sample_state(motion_state="ArmedHold"))
+        ok, reason = unconfigured.send_init_motion()
+        self.assertFalse(ok)
+        self.assertIn("not configured", reason)
+        self.assertEqual(client.sent_packets, [])
+
+        _, client, safety = self.make_safety(
+            sample_state(motion_state="ConnectedHold"),
+            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+        )
+        ok, reason = safety.send_init_motion()
+        self.assertFalse(ok)
+        self.assertIn("ArmMotion first", reason)
+        self.assertEqual(client.sent_packets, [])
+
+    def test_init_motion_blocks_real_mode_and_readiness_no_go(self):
+        _, client, real_safety = self.make_safety(
+            sample_state(motion_state="ArmedHold"),
+            desired="real",
+            observed="real",
+            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+        )
+        ok, reason = real_safety.send_init_motion()
+        self.assertFalse(ok)
+        self.assertIn("connect/status only", reason)
+        self.assertEqual(client.sent_packets, [])
+
+        _, client, sim_safety = self.make_safety(
+            sample_state(motion_state="ArmedHold"),
+            desired="simulation",
+            observed="simulation",
+            sim_ready=False,
+            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+        )
+        ok, reason = sim_safety.send_init_motion()
+        self.assertFalse(ok)
+        self.assertIn("sim readiness", reason)
+        self.assertEqual(client.sent_packets, [])
+
+    def test_init_motion_sends_joint_target_with_long_timeout(self):
+        _, client, safety = self.make_safety(
+            sample_state(motion_state="ArmedHold"),
+            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+            init_motion_timeout_sec=10.0,
+        )
+        ok, reason = safety.send_init_motion()
+        self.assertTrue(ok, reason)
+        packet = client.sent_packets[-1]
+        self.assertEqual(packet["mode"], "JointTarget")
+        self.assertEqual(packet["left"]["q_target_deg"], list(_DEFAULT_INIT_LEFT_JOINTS_DEG))
+        self.assertEqual(packet["right"]["q_target_deg"], list(_DEFAULT_INIT_RIGHT_JOINTS_DEG))
+        self.assertEqual(packet["timeout_sec"], 10.0)
+        self.assertTrue(packet["coupled_timeout"])
+
+    def test_init_motion_success_resets_tcp_target_follow_flags(self):
+        _, client, safety = self.make_safety(
+            sample_state(motion_state="ArmedHold"),
+            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+        )
+        handles = {
+            "left_tcp_target_user_moved": True,
+            "right_tcp_target_user_moved": True,
+            "left_tcp_target_pose": (1.0, 2.0, 3.0, 0.0, 0.0, 0.0),
+        }
+        ok, reason = _send_init_motion_and_reset_targets(safety, handles)
+        self.assertTrue(ok, reason)
+        self.assertNotIn("left_tcp_target_user_moved", handles)
+        self.assertNotIn("right_tcp_target_user_moved", handles)
+        self.assertEqual(handles["left_tcp_target_pose"], (1.0, 2.0, 3.0, 0.0, 0.0, 0.0))
+        self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
+        self.assertIn("follow current TCP", reason)
+
+    def test_init_motion_blocked_preserves_tcp_target_follow_flags(self):
+        _, client, safety = self.make_safety(
+            sample_state(motion_state="ConnectedHold"),
+            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+        )
+        handles = {
+            "left_tcp_target_user_moved": True,
+            "right_tcp_target_user_moved": True,
+        }
+        ok, reason = _send_init_motion_and_reset_targets(safety, handles)
+        self.assertFalse(ok)
+        self.assertIn("ArmMotion first", reason)
+        self.assertIn("left_tcp_target_user_moved", handles)
+        self.assertIn("right_tcp_target_user_moved", handles)
+        self.assertEqual(client.sent_packets, [])
 
     def test_real_mode_blocks_lifecycle_and_motion(self):
         _, client, safety = self.make_safety(sample_state(), desired="real", observed="real")
@@ -864,6 +987,11 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(left_tcp.position, (0.5, 0.5, 0.5))
         self.assertEqual(left_target.position, (9.0, 9.0, 9.0))
 
+        _clear_tcp_target_user_moved(handles, ("left",))
+        update_scene_markers(handles, store.latest())
+        self.assertEqual(left_target.position, (0.5, 0.5, 0.5))
+        self.assertEqual(handles["left_tcp_target_pose"][:3], (0.5, 0.5, 0.5))
+
     def test_scene_update_uses_tcp_quaternion_over_legacy_rpy(self):
         state = sample_state()
         state["left"]["tcp_stand"] = {
@@ -1168,6 +1296,9 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn('RB_GUI_SIM_READINESS_CONNECTED: "1"', text)
         self.assertIn('RB_GUI_CARTESIAN_AVAILABLE: "1"', text)
         self.assertIn('RB_GUI_ENABLE_TCP_POSE_COMMANDS: "1"', text)
+        self.assertIn('RB_GUI_INIT_LEFT_JOINTS: "-124.660, 32.485, 119.074, -96.294, -81.798, -30.615"', text)
+        self.assertIn('RB_GUI_INIT_RIGHT_JOINTS: "111.949, -49.304, -120.057, 75.305, 87.436, 49.983"', text)
+        self.assertIn('RB_GUI_INIT_MOTION_TIMEOUT_SEC: "10.0"', text)
         self.assertNotIn('RB_GUI_OBSERVED_MODE: "rbsim_local"', text)
 
         config = Path(__file__).resolve().parents[2] / "rb_servo_server" / "config" / "dual_simulator_compose.yaml"

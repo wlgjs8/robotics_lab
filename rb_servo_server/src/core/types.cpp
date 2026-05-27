@@ -28,6 +28,7 @@ std::string toString(ControlMode mode) {
         case ControlMode::JointVelocity: return "JointVelocity";
         case ControlMode::TcpPoseTarget: return "TcpPoseTarget";
         case ControlMode::TcpLinearMove: return "TcpLinearMove";
+        case ControlMode::TcpCircleMove: return "TcpCircleMove";
         case ControlMode::TcpDeltaStand: return "TcpDeltaStand";
         case ControlMode::TcpDeltaLocal: return "TcpDeltaLocal";
         case ControlMode::TcpTwistStand: return "TcpTwistStand";
@@ -108,6 +109,9 @@ ControlMode controlModeFromString(const std::string& mode) {
     if (m == "jointvelocity" || m == "joint_velocity") return ControlMode::JointVelocity;
     if (m == "tcpposetarget" || m == "tcp_pose_target") return ControlMode::TcpPoseTarget;
     if (m == "tcplinearmove" || m == "tcp_linear_move") return ControlMode::TcpLinearMove;
+    if (m == "tcpcirclemove" || m == "tcp_circle_move" || m == "tcpbenchmarkcirclemove" || m == "tcp_benchmark_circle_move") {
+        return ControlMode::TcpCircleMove;
+    }
     if (m == "tcpdeltastand" || m == "tcp_delta_stand") return ControlMode::TcpDeltaStand;
     if (m == "tcpdeltalocal" || m == "tcp_delta_local") return ControlMode::TcpDeltaLocal;
     if (m == "tcptwiststand" || m == "tcp_twist_stand") return ControlMode::TcpTwistStand;

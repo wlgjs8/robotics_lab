@@ -69,7 +69,8 @@ payload includes:
 - stand-frame mount transforms from config
 - TCP pose fields when kinematics are configured and available; otherwise
   nullable/deferred TCP fields with `tcp_fields_deferred: true`
-- `cartesian_solve` telemetry, including IK errors, path tracking fields, and
+- `cartesian_solve` telemetry, including IK errors, path tracking fields,
+  optional server-side circle benchmark fields, and
   twist limit fields such as `twist_clamped`,
   `requested_twist_linear_norm_m_s`, and `applied_twist_linear_norm_m_s`
 
@@ -183,7 +184,7 @@ server still validates source/session ownership when lease enforcement is on.
 
 Lease-required commands are `ArmMotion`, `DisarmMotion`, `JointTarget`,
 `JointVelocity`, `TcpPoseTarget`, `TcpDeltaStand`, `TcpDeltaLocal`,
-`TcpLinearMove`, `TcpTwistStand`, `TcpTwistLocal`, and `ResetFault`.
+`TcpLinearMove`, `TcpCircleMove`, `TcpTwistStand`, `TcpTwistLocal`, and `ResetFault`.
 `EmergencyStop` bypasses the lease so any accepted UDP source can stop motion.
 `ResetFault` requires the active lease when enforcement is enabled; it is not
 an operator bypass and it does not implicitly resume motion.
@@ -252,11 +253,15 @@ invalid and the packet is dropped.
   `TcpTwistLocal` expresses both vectors in the current TCP local frame.
 
 The accepted Cartesian command modes are `TcpPoseTarget`, `TcpDeltaStand`,
-`TcpDeltaLocal`, `TcpLinearMove`, `TcpTwistStand`, and `TcpTwistLocal`. Runtime
-Cartesian verdicts include `Ok`, `CartesianUnavailable`, `InvalidCommand`, and
-`IkFailed`. `TcpTwist*` and `TcpLinearMove` are bounded by server-side
-`cartesian_control` limits before Jacobian velocity solving. `TcpLinearMove`
-path feedback uses `cartesian_control.path_kp_pos` for position error and
+`TcpDeltaLocal`, `TcpLinearMove`, `TcpCircleMove`, `TcpTwistStand`, and
+`TcpTwistLocal`. Runtime Cartesian verdicts include `Ok`,
+`CartesianUnavailable`, `InvalidCommand`, and `IkFailed`. `TcpCircleMove` is a
+simulation-only diagnostic benchmark primitive and is rejected unless
+`cartesian_control.enable_benchmark_primitives: true` is set in a simulator
+config. `TcpTwist*`, `TcpLinearMove`, and `TcpCircleMove` are bounded by
+server-side `cartesian_control` limits before Jacobian velocity solving.
+`TcpLinearMove` and `TcpCircleMove` path feedback use
+`cartesian_control.path_kp_pos` for position error and
 `cartesian_control.path_kp_ori` for orientation error. Constant-orientation
 linear moves reject target orientation mismatch greater than
 `cartesian_control.linear_move.constant_orientation_tolerance_rad`; simulator
@@ -432,6 +437,49 @@ linear or angular speed is excessive. `orientation_mode` is `constant` or
 }
 ```
 
+`TcpCircleMove` is an optional simulation-only benchmark primitive. It starts
+from the current TCP pose without an initial jump, chooses the circle center so
+the current pose is on the circle at phase zero, generates reference position
+and velocity inside the servo loop, and holds the initial orientation. It is
+for isolating server/controller behavior from Python UDP command streaming
+jitter; it is not a real robot feature and remains rejected in real mode even
+when real Cartesian environment gates are set.
+
+It requires `cartesian_control.enable_benchmark_primitives: true`,
+`cartesian_control.circle_move.allow_in_simulation: true`, and
+`cartesian_control.circle_move.allow_in_real: false`. Supported command
+options are currently `frame: "stand"`, `center_mode: "start_on_circle"`,
+and `orientation_mode: "constant"`.
+
+```json
+{
+  "schema_version": 1,
+  "seq": 128,
+  "mode": "Hold",
+  "timeout_sec": 4.2,
+  "left": {
+    "mode": "TcpCircleMove",
+    "plane": "xy",
+    "diameter_m": 0.15,
+    "period_sec": 4.0,
+    "repeat": 1,
+    "center_mode": "start_on_circle",
+    "orientation_mode": "constant",
+    "frame": "stand"
+  },
+  "right": {
+    "mode": "Hold"
+  }
+}
+```
+
+State telemetry for active or recently completed circle moves includes
+`circle_active`, `circle_phase`, `circle_repeat_index`, `circle_radius_m`,
+`circle_period_sec`, `circle_position_error_m`,
+`circle_orientation_error_rad`, and `circle_done` under `cartesian_solve`.
+The primitive cancels through the same command/fault/stale-state paths as the
+other Cartesian velocity-servo modes, including lease loss.
+
 If a top-level Cartesian `mode` applies to both arms, both arm objects must
 carry the matching payload. To command only one arm, set top-level `mode` to
 `Hold` and put the Cartesian `mode` plus payload inside the selected arm object.
@@ -518,5 +566,9 @@ Motion modes require their payloads:
 - `TcpDeltaLocal` requires `tcp_delta_local` with 6 values.
 - `TcpLinearMove` requires `target_tcp_stand` and either `duration_sec` or
   `linear_speed_m_s`; `orientation_mode` is `constant` or `slerp`.
+- `TcpCircleMove` requires `plane`, positive `diameter_m`, positive
+  `period_sec`, and positive integer `repeat`; only `frame: "stand"`,
+  `center_mode: "start_on_circle"`, and `orientation_mode: "constant"` are
+  currently supported at runtime.
 
 If the required payload is absent or malformed, the packet is dropped and the command buffer remains unchanged.

@@ -204,6 +204,14 @@ Servo server simulation configs:
 - `rb_servo_server/config/dual_simulator_worker.yaml`
 - `rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`
 - `rb_servo_server/config/dual_simulator_circle_stress.yaml`
+- `rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml`
+- `rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml`
+- `rb_servo_server/config/dual_simulator_circle_real_candidate_conservative.yaml`
+
+Circle benchmark profiles are simulator-only. Use the baseline profile for
+15 cm / 16 s evidence, the stress profile only for explicit 15 cm / 4 s stress,
+and the real-candidate conservative profile only as a simulator seed for future
+low-speed planning.
 
 Simulator configs:
 

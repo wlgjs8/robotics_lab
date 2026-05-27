@@ -86,6 +86,9 @@ class OperatorSafety:
         max_tcp_linear_step_m: float = 0.005,
         max_tcp_angular_step_rad: float = 0.02,
         command_timeout_sec: float = 0.2,
+        init_left_joint_deg: tuple[float, ...] | None = None,
+        init_right_joint_deg: tuple[float, ...] | None = None,
+        init_motion_timeout_sec: float = 10.0,
     ) -> None:
         desired = normalize_observed_mode_backend(str(desired_mode), None)
         observed = normalize_observed_mode_backend(str(observed_server_mode), None if observed_backend is None else str(observed_backend))
@@ -102,6 +105,9 @@ class OperatorSafety:
         self.max_tcp_linear_step_m = float(max_tcp_linear_step_m)
         self.max_tcp_angular_step_rad = float(max_tcp_angular_step_rad)
         self.command_timeout_sec = float(command_timeout_sec)
+        self.init_left_joint_deg = self._validated_joint6(init_left_joint_deg)
+        self.init_right_joint_deg = self._validated_joint6(init_right_joint_deg)
+        self.init_motion_timeout_sec = float(init_motion_timeout_sec)
         self.status_message = "; ".join(self.config_warnings) if self.config_warnings else "starting"
         self.recording_intent = False
         self.last_tcp_command = "none"
@@ -117,6 +123,18 @@ class OperatorSafety:
         if latest is None or self.store.is_stale():
             return None
         return latest
+
+    @staticmethod
+    def _validated_joint6(values: tuple[float, ...] | None) -> tuple[float, ...] | None:
+        if values is None or len(values) != 6:
+            return None
+        try:
+            parsed = tuple(float(value) for value in values)
+        except (TypeError, ValueError):
+            return None
+        if not all(math.isfinite(value) for value in parsed):
+            return None
+        return parsed
 
     def readiness(self) -> Readiness:
         latest = self.latest_valid()
@@ -206,6 +224,7 @@ class OperatorSafety:
         """
         states: dict[str, bool] = {
             "jog": self.blocked_reason("JointTarget") is not None,
+            "init_motion": self.init_motion_disabled_reason() is not None,
             "tcp_jog": True,
             "tcp_pose": self.tcp_command_disabled_reason() is not None,
             "tcp_linear": self.tcp_command_disabled_reason() is not None,
@@ -222,6 +241,36 @@ class OperatorSafety:
             return False, reason
         self.command_client.send_lifecycle(mode, timeout_sec=self.command_timeout_sec)
         return True, f"sent {mode}"
+
+    def init_motion_disabled_reason(self) -> str | None:
+        reason = self.blocked_reason("JointTarget")
+        if reason:
+            return reason
+        if self.init_left_joint_deg is None or self.init_right_joint_deg is None:
+            return "init motion target not configured"
+        if self.init_motion_timeout_sec <= 0.0 or not math.isfinite(self.init_motion_timeout_sec):
+            return "init motion timeout must be positive and finite"
+        latest = self.latest_valid()
+        if latest is None:
+            return "state stream missing or stale"
+        if latest.motion_state not in {"ArmedHold", "Running"}:
+            return "ArmMotion first; init motion requires ArmedHold or Running"
+        return None
+
+    def send_init_motion(self) -> tuple[bool, str]:
+        reason = self.init_motion_disabled_reason()
+        if reason:
+            return False, reason
+        assert self.init_left_joint_deg is not None
+        assert self.init_right_joint_deg is not None
+        self.command_client.send(
+            self.command_client.build_joint_target(
+                self.init_left_joint_deg,
+                self.init_right_joint_deg,
+                timeout_sec=self.init_motion_timeout_sec,
+            )
+        )
+        return True, "sent InitMotion JointTarget"
 
     def jog_joint(self, arm: Literal["left", "right"], joint_index: int, delta_deg: float) -> tuple[bool, str]:
         reason = self.blocked_reason("JointTarget")

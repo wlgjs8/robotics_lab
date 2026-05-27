@@ -185,6 +185,8 @@ private:
     LatchedCartesianTarget right_latched_cartesian_target_;
     CartesianServoPathState left_cartesian_servo_path_;
     CartesianServoPathState right_cartesian_servo_path_;
+    CartesianCircleMoveState left_cartesian_circle_move_;
+    CartesianCircleMoveState right_cartesian_circle_move_;
     CartesianTwistHoldState left_cartesian_twist_hold_;
     CartesianTwistHoldState right_cartesian_twist_hold_;
     CartesianVelocityIntegratorState left_cartesian_velocity_integrator_;

@@ -37,6 +37,7 @@ enum class ControlMode {
     JointVelocity,
     TcpPoseTarget,
     TcpLinearMove,
+    TcpCircleMove,
     TcpDeltaStand,
     TcpDeltaLocal,
     TcpTwistStand,
@@ -99,6 +100,20 @@ enum class TrackingErrorPolicy {
 enum class LinearMoveOrientationMode {
     Constant,
     Slerp
+};
+
+enum class TcpCirclePlane {
+    XY,
+    XZ,
+    YZ
+};
+
+enum class TcpCircleCenterMode {
+    StartOnCircle
+};
+
+enum class TcpCircleFrame {
+    Stand
 };
 
 struct Pose6D {
@@ -207,6 +222,24 @@ struct CartesianSolveTelemetry {
     uint64_t integrator_divergence_total = 0;
     double max_command_actual_error_deg_observed = 0.0;
     double velocity_target_lookahead_sec = 0.0;
+    bool circle_active = false;
+    double circle_phase = 0.0;
+    int circle_repeat_index = 0;
+    double circle_radius_m = 0.0;
+    double circle_period_sec = 0.0;
+    double circle_position_error_m = 0.0;
+    double circle_orientation_error_rad = 0.0;
+    bool circle_done = false;
+};
+
+struct TcpCircleMoveCommand {
+    TcpCirclePlane plane = TcpCirclePlane::XY;
+    double diameter_m = 0.0;
+    double period_sec = 0.0;
+    int repeat = 1;
+    TcpCircleCenterMode center_mode = TcpCircleCenterMode::StartOnCircle;
+    LinearMoveOrientationMode orientation_mode = LinearMoveOrientationMode::Constant;
+    TcpCircleFrame frame = TcpCircleFrame::Stand;
 };
 
 struct ArmCommand {
@@ -225,6 +258,7 @@ struct ArmCommand {
     Pose6D tcp_delta_local;
     Vec6 tcp_twist_stand;
     Vec6 tcp_twist_local;
+    TcpCircleMoveCommand tcp_circle_move;
     double linear_move_duration_sec = 0.0;
     double linear_move_linear_speed_m_s = 0.0;
     double linear_move_angular_speed_rad_s = 0.0;
@@ -244,6 +278,7 @@ struct ArmCommand {
     bool has_tcp_delta_local = false;
     bool has_tcp_twist_stand = false;
     bool has_tcp_twist_local = false;
+    bool has_tcp_circle_move = false;
     bool has_linear_move_duration = false;
     bool has_linear_move_linear_speed = false;
     bool has_linear_move_angular_speed = false;

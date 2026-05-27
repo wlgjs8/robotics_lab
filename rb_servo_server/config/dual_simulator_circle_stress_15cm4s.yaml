@@ -1,18 +1,14 @@
 schema: robotics_lab.rb_servo_server.v1
 
-# Simulator-only circular TCP tracking stress profile.
-# This profile is intended for BENCH-CIRCLE-01 GENE-style 15 cm / 4 s stress
-# runs. It intentionally raises simulator Cartesian speed limits above the
-# conservative TCP acceptance profile, but it remains simulation-only and must
-# not be used as real robot evidence.
-# scripts/circle_tracking_benchmark.py refuses this file if real-mode markers,
-# rbpodo backend markers, real Cartesian allowance, or known real robot IPs are
-# added.
+# Simulator-only named profile: simulator_stress / 15 cm circle / 4 s.
+# Intended benchmark: gene_15cm_4s with required TCP speed about 0.118 m/s.
+# Purpose: stress, jitter, clamp, and repeatability analysis. This is not a
+# pass/fail acceptance profile by default and is not hardware-ready.
 
 left_robot:
   backend_type: simulator
   run_mode: simulation
-  name: left_simulator_circle_stress
+  name: left_simulator_circle_stress_15cm4s
   simulator_control_endpoint: "tcp://127.0.0.1:50200"
   simulator_request_timeout_sec: 0.2
   simulator_connect_timeout_sec: 0.2
@@ -25,7 +21,7 @@ left_robot:
 right_robot:
   backend_type: simulator
   run_mode: simulation
-  name: right_simulator_circle_stress
+  name: right_simulator_circle_stress_15cm4s
   simulator_control_endpoint: "tcp://127.0.0.1:50210"
   simulator_request_timeout_sec: 0.2
   simulator_connect_timeout_sec: 0.2

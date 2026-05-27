@@ -22,6 +22,7 @@ namespace {
 bool isCartesianMode(ControlMode mode) {
     return mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
+           mode == ControlMode::TcpCircleMove ||
            mode == ControlMode::TcpDeltaStand ||
            mode == ControlMode::TcpDeltaLocal ||
            mode == ControlMode::TcpTwistStand ||
@@ -35,6 +36,7 @@ bool isCartesianDeltaMode(ControlMode mode) {
 
 bool isCartesianVelocityServoMode(ControlMode mode) {
     return mode == ControlMode::TcpLinearMove ||
+           mode == ControlMode::TcpCircleMove ||
            mode == ControlMode::TcpTwistStand ||
            mode == ControlMode::TcpTwistLocal;
 }
@@ -44,6 +46,7 @@ bool isMotionMode(ControlMode mode) {
            mode == ControlMode::JointVelocity ||
            mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
+           mode == ControlMode::TcpCircleMove ||
            mode == ControlMode::TcpDeltaStand ||
            mode == ControlMode::TcpDeltaLocal ||
            mode == ControlMode::TcpTwistStand ||
@@ -82,6 +85,13 @@ bool linearPathLeaseExpired(const CartesianServoPathState& path, uint64_t now_ns
            now_ns > path.lease_expires_time_ns;
 }
 
+bool circlePathLeaseExpired(const CartesianCircleMoveState& path, uint64_t now_ns) {
+    return path.active &&
+           path.lease_enforced &&
+           path.lease_expires_time_ns > 0 &&
+           now_ns > path.lease_expires_time_ns;
+}
+
 bool retainCompletedPathTelemetry(
     const CartesianServoPathState& path,
     const CartesianSolveTelemetry& telemetry
@@ -107,6 +117,8 @@ bool isCommandModeMissingPayload(const ArmCommand& command) {
         case ControlMode::TcpLinearMove:
             return !command.has_tcp_target ||
                    (!command.has_linear_move_duration && !command.has_linear_move_linear_speed);
+        case ControlMode::TcpCircleMove:
+            return !command.has_tcp_circle_move;
         case ControlMode::TcpDeltaStand:
             return !command.has_tcp_delta_stand;
         case ControlMode::TcpDeltaLocal:
@@ -173,6 +185,17 @@ ArmCommand linearMoveContinuationCommand(
     command.has_tcp_target = true;
     command.linear_move_duration_sec = path.duration_sec;
     command.has_linear_move_duration = true;
+    return command;
+}
+
+ArmCommand circleMoveContinuationCommand(
+    const ArmCommand& hold_command,
+    const CartesianCircleMoveState& circle
+) {
+    ArmCommand command = hold_command;
+    command.mode = ControlMode::TcpCircleMove;
+    command.tcp_circle_move = circle.command;
+    command.has_tcp_circle_move = true;
     return command;
 }
 
@@ -791,6 +814,12 @@ void DualArmServoLoop::loopMain() {
         if (right_cartesian_servo_path_.active && right_cartesian_servo_path_.done) {
             resetCartesianVelocityIntegrator(ArmId::Right, "linear_path_done");
         }
+        if (left_cartesian_circle_move_.active && left_cartesian_circle_move_.done) {
+            resetCartesianVelocityIntegrator(ArmId::Left, "circle_move_done");
+        }
+        if (right_cartesian_circle_move_.active && right_cartesian_circle_move_.done) {
+            resetCartesianVelocityIntegrator(ArmId::Right, "circle_move_done");
+        }
         refreshCartesianVelocityIntegratorTelemetry(ArmId::Left);
         refreshCartesianVelocityIntegratorTelemetry(ArmId::Right);
 
@@ -1047,6 +1076,8 @@ void DualArmServoLoop::clearLatchedCartesianTargets() {
     right_latched_cartesian_target_ = LatchedCartesianTarget{};
     left_cartesian_servo_path_ = CartesianServoPathState{};
     right_cartesian_servo_path_ = CartesianServoPathState{};
+    left_cartesian_circle_move_ = CartesianCircleMoveState{};
+    right_cartesian_circle_move_ = CartesianCircleMoveState{};
     left_cartesian_twist_hold_ = CartesianTwistHoldState{};
     right_cartesian_twist_hold_ = CartesianTwistHoldState{};
     resetCartesianVelocityIntegrator(ArmId::Left, "cartesian_target_clear");
@@ -1059,12 +1090,14 @@ void DualArmServoLoop::clearLatchedCartesianTarget(ArmId arm_id) {
     if (arm_id == ArmId::Left) {
         left_latched_cartesian_target_ = LatchedCartesianTarget{};
         left_cartesian_servo_path_ = CartesianServoPathState{};
+        left_cartesian_circle_move_ = CartesianCircleMoveState{};
         left_cartesian_twist_hold_ = CartesianTwistHoldState{};
         resetCartesianVelocityIntegrator(ArmId::Left, "cartesian_target_clear");
         left_last_cartesian_solve_ = CartesianSolveTelemetry{};
     } else {
         right_latched_cartesian_target_ = LatchedCartesianTarget{};
         right_cartesian_servo_path_ = CartesianServoPathState{};
+        right_cartesian_circle_move_ = CartesianCircleMoveState{};
         right_cartesian_twist_hold_ = CartesianTwistHoldState{};
         resetCartesianVelocityIntegrator(ArmId::Right, "cartesian_target_clear");
         right_last_cartesian_solve_ = CartesianSolveTelemetry{};
@@ -1187,6 +1220,14 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         right_cartesian_servo_path_ = CartesianServoPathState{};
         right_last_cartesian_solve_ = CartesianSolveTelemetry{};
     };
+    const auto clear_left_circle_move = [&]() {
+        left_cartesian_circle_move_ = CartesianCircleMoveState{};
+        left_last_cartesian_solve_ = CartesianSolveTelemetry{};
+    };
+    const auto clear_right_circle_move = [&]() {
+        right_cartesian_circle_move_ = CartesianCircleMoveState{};
+        right_last_cartesian_solve_ = CartesianSolveTelemetry{};
+    };
 
     if (left_cartesian_servo_path_.active && !isValidJointState(left_state)) {
         clear_left_linear_path();
@@ -1194,11 +1235,23 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     if (right_cartesian_servo_path_.active && !isValidJointState(right_state)) {
         clear_right_linear_path();
     }
+    if (left_cartesian_circle_move_.active && !isValidJointState(left_state)) {
+        clear_left_circle_move();
+    }
+    if (right_cartesian_circle_move_.active && !isValidJointState(right_state)) {
+        clear_right_circle_move();
+    }
     if (linearPathLeaseExpired(left_cartesian_servo_path_, command.host_time_ns)) {
         clear_left_linear_path();
     }
     if (linearPathLeaseExpired(right_cartesian_servo_path_, command.host_time_ns)) {
         clear_right_linear_path();
+    }
+    if (circlePathLeaseExpired(left_cartesian_circle_move_, command.host_time_ns)) {
+        clear_left_circle_move();
+    }
+    if (circlePathLeaseExpired(right_cartesian_circle_move_, command.host_time_ns)) {
+        clear_right_circle_move();
     }
     if (!synthetic_hold) {
         if (command.left.mode != ControlMode::TcpLinearMove) {
@@ -1206,6 +1259,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         }
         if (command.right.mode != ControlMode::TcpLinearMove) {
             clear_right_linear_path();
+        }
+        if (command.left.mode != ControlMode::TcpCircleMove) {
+            clear_left_circle_move();
+        }
+        if (command.right.mode != ControlMode::TcpCircleMove) {
+            clear_right_circle_move();
         }
         if (!isCartesianVelocityServoMode(command.left.mode)) {
             resetCartesianVelocityIntegrator(ArmId::Left, "velocity_mode_exit");
@@ -1239,11 +1298,23 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     const bool continue_right_linear = synthetic_hold &&
         right_cartesian_servo_path_.active &&
         !right_cartesian_servo_path_.done;
+    const bool continue_left_circle = synthetic_hold &&
+        left_cartesian_circle_move_.active &&
+        !left_cartesian_circle_move_.done;
+    const bool continue_right_circle = synthetic_hold &&
+        right_cartesian_circle_move_.active &&
+        !right_cartesian_circle_move_.done;
     if (synthetic_hold && left_cartesian_servo_path_.active && left_cartesian_servo_path_.done) {
         resetCartesianVelocityIntegrator(ArmId::Left, "linear_path_done");
     }
     if (synthetic_hold && right_cartesian_servo_path_.active && right_cartesian_servo_path_.done) {
         resetCartesianVelocityIntegrator(ArmId::Right, "linear_path_done");
+    }
+    if (synthetic_hold && left_cartesian_circle_move_.active && left_cartesian_circle_move_.done) {
+        resetCartesianVelocityIntegrator(ArmId::Left, "circle_move_done");
+    }
+    if (synthetic_hold && right_cartesian_circle_move_.active && right_cartesian_circle_move_.done) {
+        resetCartesianVelocityIntegrator(ArmId::Right, "circle_move_done");
     }
 
     DualArmCommand effective_command = command;
@@ -1252,6 +1323,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     }
     if (continue_right_linear) {
         effective_command.right = linearMoveContinuationCommand(command.right, right_cartesian_servo_path_);
+    }
+    if (continue_left_circle) {
+        effective_command.left = circleMoveContinuationCommand(command.left, left_cartesian_circle_move_);
+    }
+    if (continue_right_circle) {
+        effective_command.right = circleMoveContinuationCommand(command.right, right_cartesian_circle_move_);
     }
 
     if (isCartesianMode(effective_command.left.mode) || isCartesianMode(effective_command.right.mode)) {
@@ -1265,6 +1342,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 if (!isCartesianMode(arm_command->mode)) continue;
                 const RunMode run_mode = runModeForArm(config_, arm_command->arm_id);
                 if (arm_command->mode == ControlMode::TcpLinearMove ||
+                    arm_command->mode == ControlMode::TcpCircleMove ||
                     arm_command->mode == ControlMode::TcpTwistStand ||
                     arm_command->mode == ControlMode::TcpTwistLocal) {
                     cartesian_available = run_mode == RunMode::Simulation &&
@@ -1333,6 +1411,17 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 &left_cartesian_servo_path_,
                 &left_cartesian_velocity_integrator_
             )
+            : effective_command.left.mode == ControlMode::TcpCircleMove
+            ? cartesian_servo.computeCircleMoveTarget(
+                effective_command.left,
+                left_state,
+                left_prev_sent_q_deg_,
+                runModeForArm(config_, ArmId::Left),
+                dt_sec,
+                continue_left_circle ? 0 : command.seq,
+                &left_cartesian_circle_move_,
+                &left_cartesian_velocity_integrator_
+            )
             : (effective_command.left.mode == ControlMode::TcpTwistStand || effective_command.left.mode == ControlMode::TcpTwistLocal)
             ? cartesian_servo.computeTwistTarget(
                 effective_command.left,
@@ -1363,6 +1452,10 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             left_cartesian_servo_path_.lease_enforced = command.lease.enforce_lease;
             left_cartesian_servo_path_.lease_expires_time_ns = command.lease.expires_time_ns;
         }
+        if (command.left.mode == ControlMode::TcpCircleMove && left_cartesian_circle_move_.active) {
+            left_cartesian_circle_move_.lease_enforced = command.lease.enforce_lease;
+            left_cartesian_circle_move_.lease_expires_time_ns = command.lease.expires_time_ns;
+        }
 
         const CartesianArmTargetResult right_cartesian_result = effective_command.right.mode == ControlMode::TcpLinearMove
             ? cartesian_servo.computeLinearMoveTarget(
@@ -1373,6 +1466,17 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 dt_sec,
                 continue_right_linear ? 0 : command.seq,
                 &right_cartesian_servo_path_,
+                &right_cartesian_velocity_integrator_
+            )
+            : effective_command.right.mode == ControlMode::TcpCircleMove
+            ? cartesian_servo.computeCircleMoveTarget(
+                effective_command.right,
+                right_state,
+                right_prev_sent_q_deg_,
+                runModeForArm(config_, ArmId::Right),
+                dt_sec,
+                continue_right_circle ? 0 : command.seq,
+                &right_cartesian_circle_move_,
                 &right_cartesian_velocity_integrator_
             )
             : (effective_command.right.mode == ControlMode::TcpTwistStand || effective_command.right.mode == ControlMode::TcpTwistLocal)
@@ -1404,6 +1508,10 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         if (command.right.mode == ControlMode::TcpLinearMove && right_cartesian_servo_path_.active) {
             right_cartesian_servo_path_.lease_enforced = command.lease.enforce_lease;
             right_cartesian_servo_path_.lease_expires_time_ns = command.lease.expires_time_ns;
+        }
+        if (command.right.mode == ControlMode::TcpCircleMove && right_cartesian_circle_move_.active) {
+            right_cartesian_circle_move_.lease_enforced = command.lease.enforce_lease;
+            right_cartesian_circle_move_.lease_expires_time_ns = command.lease.expires_time_ns;
         }
 
         if (left_cartesian_result.verdict != SafetyVerdict::Ok ||

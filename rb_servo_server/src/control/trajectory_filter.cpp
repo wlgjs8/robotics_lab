@@ -27,6 +27,7 @@ JointArray TrajectoryFilter::computeJointTarget(
             return integrateJointVelocity(command.dq_target_deg_s, previous_sent_target, dt_sec);
         case ControlMode::TcpPoseTarget:
         case ControlMode::TcpLinearMove:
+        case ControlMode::TcpCircleMove:
         case ControlMode::TcpDeltaStand:
         case ControlMode::TcpDeltaLocal:
         case ControlMode::TcpTwistStand:

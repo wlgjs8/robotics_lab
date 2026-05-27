@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +25,17 @@ def args_with_thresholds(**overrides: float | None) -> argparse.Namespace:
 
 
 class CircleTrackingBenchmarkHelpersTest(unittest.TestCase):
+    def test_feedback_controller_appears_in_help(self) -> None:
+        script = Path(__file__).with_name("circle_tracking_benchmark.py")
+        completed = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        self.assertIn("twist_stand_feedback", completed.stdout)
+        self.assertIn("--feedback-kp-pos", completed.stdout)
+
     def test_result_semantics_without_thresholds_completed(self) -> None:
         args = args_with_thresholds()
         result, reason = bench.benchmark_result(
@@ -109,6 +122,87 @@ simulator:
         self.assertEqual(context["simulator_motion_time_constant_sec"], 0.04)
         self.assertAlmostEqual(context["simulator_dt_over_tau"], 0.25)
         self.assertTrue(context["stress_profile"])
+
+    def test_feedback_formula_adds_position_error(self) -> None:
+        result = bench.compute_feedback_twist_stand(
+            feedforward_linear_stand=[0.1, 0.0, 0.0],
+            position_error_stand=[0.01, -0.02, 0.0],
+            orientation_error_stand=[0.0, 0.0, 0.1],
+            kp_pos=2.0,
+            kp_ori=3.0,
+            max_linear_m_s=1.0,
+            max_angular_rad_s=1.0,
+        )
+        self.assertEqual(result["feedback_twist_stand"][:3], [0.02, -0.04, 0.0])
+        self.assertEqual(result["applied_twist_stand"][:3], [0.12000000000000001, -0.04, 0.0])
+        self.assertEqual(result["applied_twist_stand"][3:], [0.0, 0.0, 0.30000000000000004])
+        self.assertFalse(result["saturated"])
+
+    def test_feedback_clamps_total_command(self) -> None:
+        result = bench.compute_feedback_twist_stand(
+            feedforward_linear_stand=[1.0, 0.0, 0.0],
+            position_error_stand=[1.0, 0.0, 0.0],
+            orientation_error_stand=[0.0, 0.0, 1.0],
+            kp_pos=1.0,
+            kp_ori=1.0,
+            max_linear_m_s=0.5,
+            max_angular_rad_s=0.2,
+        )
+        self.assertAlmostEqual(bench.norm(result["applied_twist_stand"][:3]), 0.5)
+        self.assertAlmostEqual(bench.norm(result["applied_twist_stand"][3:]), 0.2)
+        self.assertTrue(result["saturated"])
+
+    def test_stale_feedback_record_uses_zero_twist(self) -> None:
+        row = bench.zero_feedback_record(0.1, "stale feedback state", "stand")
+        self.assertEqual(row["applied_twist"], [0.0] * 6)
+        self.assertTrue(row["stale_or_invalid_state"])
+        metrics = bench.feedback_metrics([row])
+        self.assertEqual(metrics["stale_state_feedback_skips"], 1)
+
+    def test_preflight_rejects_real_config_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            server_config = root / "server.yaml"
+            left_config = root / "left.yaml"
+            right_config = root / "right.yaml"
+            server_config.write_text(
+                """
+left_robot:
+  backend_type: simulator
+  run_mode: real
+cartesian_control:
+  allow_in_simulation: true
+  allow_in_real: false
+  max_twist_linear_m_s: 0.03
+  max_twist_angular_rad_s: 0.2
+  max_linear_move_speed_m_s: 0.05
+""",
+                encoding="utf-8",
+            )
+            left_config.write_text("simulator:\n  motion_time_constant_sec: 0.04\n", encoding="utf-8")
+            right_config.write_text("simulator:\n  motion_time_constant_sec: 0.04\n", encoding="utf-8")
+            args = argparse.Namespace(
+                root=root,
+                server_config=server_config,
+                left_config=left_config,
+                right_config=right_config,
+                arm="left",
+                controller="twist_stand_feedback",
+                profile="safe_5cm_10s",
+                diameter_m=None,
+                period_sec=None,
+                repeat=1,
+                command_rate_hz=100.0,
+                warmup_sec=0.0,
+                settle_sec=0.0,
+                allow_fast_stress=False,
+                feedback_kp_pos=2.0,
+                feedback_kp_ori=2.0,
+                feedback_max_linear_m_s=None,
+                feedback_max_angular_rad_s=None,
+            )
+            with self.assertRaisesRegex(bench.AcceptanceError, "run_mode: real"):
+                bench.preflight(args)
 
 
 if __name__ == "__main__":

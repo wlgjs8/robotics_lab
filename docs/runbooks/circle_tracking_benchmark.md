@@ -30,10 +30,35 @@ Run profiles from slowest/safest to fastest/stress:
 Recommended regression sequence:
 
 1. Run `safe_5cm_10s`.
-2. Run `circle_15cm_16s`.
+2. Run `circle_15cm_16s` with
+   `rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml`.
 3. Run `circle_15cm_8s` with a config whose simulator speed limits allow it.
-4. Run `gene_15cm_4s` only with `dual_simulator_circle_stress.yaml` and
+4. Run `gene_15cm_4s` only with
+   `rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml` and
    `--allow-fast-stress`.
+
+## Named Server Config Profiles
+
+Use named simulator profiles when recording benchmark evidence so later runs
+can reproduce the same parameter set.
+
+| Config profile | Purpose | Speed envelope | Use before real? |
+| --- | --- | --- | --- |
+| `dual_simulator_circle_baseline_15cm16s.yaml` | `simulator_baseline` for `circle_15cm_16s` | 15 cm / 16 s, about 0.029 m/s | Yes, as simulator evidence only |
+| `dual_simulator_circle_stress_15cm4s.yaml` | `simulator_stress` for `gene_15cm_4s` | 15 cm / 4 s, about 0.118 m/s | No; stress and repeatability evidence only |
+| `dual_simulator_circle_real_candidate_conservative.yaml` | `real_candidate_conservative` seed profile, still simulator-only | Low-speed candidate, not faster than the baseline limit | Only as a starting guess after separate real acceptance |
+
+All three configs use simulator backends, simulation run mode, local simulator
+endpoints, and `cartesian_control.allow_in_real: false`. None of them is a
+real robot config. These named circle configs also enable
+`cartesian_control.enable_benchmark_primitives` so the optional `server_circle`
+diagnostic can run in simulation. The general TCP acceptance config keeps
+benchmark primitives disabled.
+
+The older `dual_simulator_tcp_acceptance.yaml` remains the general Cartesian
+acceptance config. The older `dual_simulator_circle_stress.yaml` remains for
+compatibility, but new circle tracking evidence should prefer the named
+profiles above.
 
 ## GENE-Style Context
 
@@ -52,7 +77,7 @@ The current simulator TCP acceptance config limits twist speed to about
 simulator-only stress config:
 
 ```text
-rb_servo_server/config/dual_simulator_circle_stress.yaml
+rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
 ```
 
 ## Safe Baseline
@@ -62,7 +87,7 @@ python3 scripts/circle_tracking_benchmark.py \
   --root . \
   --mode start-local \
   --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-  --server-config rb_servo_server/config/dual_simulator_tcp_acceptance.yaml \
+  --server-config rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml \
   --left-config rb_simulator/config/left_rb3_730e.yaml \
   --right-config rb_simulator/config/right_rb3_730e.yaml \
   --arm left \
@@ -81,7 +106,7 @@ python3 scripts/circle_tracking_benchmark.py \
   --root . \
   --mode start-local \
   --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-  --server-config rb_servo_server/config/dual_simulator_tcp_acceptance.yaml \
+  --server-config rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml \
   --left-config rb_simulator/config/left_rb3_730e.yaml \
   --right-config rb_simulator/config/right_rb3_730e.yaml \
   --arm left \
@@ -134,14 +159,14 @@ python3 scripts/circle_tracking_benchmark.py \
 
 This profile requires about 0.059 m/s, above the default
 `dual_simulator_tcp_acceptance.yaml` twist limit. Use a simulator-only config
-whose speed limits allow it, such as `dual_simulator_circle_stress.yaml`:
+whose speed limits allow it, such as `dual_simulator_circle_stress_15cm4s.yaml`:
 
 ```bash
 python3 scripts/circle_tracking_benchmark.py \
   --root . \
   --mode start-local \
   --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-  --server-config rb_servo_server/config/dual_simulator_circle_stress.yaml \
+  --server-config rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml \
   --left-config rb_simulator/config/left_rb3_730e.yaml \
   --right-config rb_simulator/config/right_rb3_730e.yaml \
   --arm left \
@@ -154,9 +179,9 @@ python3 scripts/circle_tracking_benchmark.py \
 
 ## 15 cm / 4 s Stress
 
-GENE-style stress requires `dual_simulator_circle_stress.yaml`. This config is
-simulator-only, keeps `allow_in_real: false`, and raises only simulator
-Cartesian speed limits enough for the 15 cm / 4 s profile:
+GENE-style stress requires `dual_simulator_circle_stress_15cm4s.yaml`. This
+config is simulator-only, keeps `allow_in_real: false`, and raises only
+simulator Cartesian speed limits enough for the 15 cm / 4 s profile:
 
 ```yaml
 cartesian_control:
@@ -171,7 +196,7 @@ python3 scripts/circle_tracking_benchmark.py \
   --root . \
   --mode start-local \
   --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-  --server-config rb_servo_server/config/dual_simulator_circle_stress.yaml \
+  --server-config rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml \
   --left-config rb_simulator/config/left_rb3_730e.yaml \
   --right-config rb_simulator/config/right_rb3_730e.yaml \
   --arm left \
@@ -195,7 +220,7 @@ python3 scripts/circle_tracking_benchmark.py \
   --root . \
   --mode start-local \
   --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-  --server-config rb_servo_server/config/dual_simulator_circle_stress.yaml \
+  --server-config rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml \
   --left-config rb_simulator/config/left_rb3_730e.yaml \
   --right-config rb_simulator/config/right_rb3_730e.yaml \
   --arm left \
@@ -212,8 +237,92 @@ python3 scripts/circle_tracking_benchmark.py \
   stand-frame plane.
 - `twist_local`: streams `TcpTwistLocal` circular velocity in the initial TCP
   local plane and compares against the corresponding stand-frame reference.
+- `twist_stand_feedback`: streams `TcpTwistStand` with command-source position
+  feedback added to the feedforward circular velocity.
+- `twist_local_feedback`: streams `TcpTwistLocal` with the same stand-frame
+  feedback law, then converts the command to the current TCP local frame using
+  `R_current^T`.
+- `server_circle`: sends one simulation-only `TcpCircleMove` command, then
+  observes the server-generated circular trajectory. This isolates the servo
+  loop and Cartesian controller from Python UDP streaming jitter.
 - `linear_segments`: approximates the circle with `TcpLinearMove` waypoints and
   evaluates MoveL-like polyline tracking.
+
+Open-loop twist modes benchmark server-side velocity tracking and plant
+integration. Feedback twist modes benchmark closed-loop command-source
+compensation. Feedback can reduce center drift, but it can also hide
+server/controller limitations, so compare feedback runs against matching
+open-loop runs instead of replacing them.
+
+`server_circle` is a diagnostic benchmark primitive, not a robot command for
+hardware. It requires `cartesian_control.enable_benchmark_primitives: true`,
+`cartesian_control.circle_move.allow_in_simulation: true`, and
+`cartesian_control.circle_move.allow_in_real: false`. Real mode rejects
+`TcpCircleMove` even if Cartesian real-motion environment gates are set. The
+primitive captures the current TCP pose, chooses the circle center so the
+reference starts at that pose, holds the initial orientation, and generates the
+circle reference once per servo tick.
+
+Feedback command law:
+
+```text
+v_cmd_stand = v_ref_stand + feedback_kp_pos * (p_ref_stand - p_actual_stand)
+w_cmd_stand = feedback_kp_ori * orientation_error_stand
+```
+
+The reference orientation is the initial TCP orientation. `twist_local_feedback`
+computes the reference and feedback error in stand frame, then converts the
+linear and angular command vectors to the current local frame. If state is stale
+or invalid, the benchmark sends zero twist for that tick and increments
+`stale_state_feedback_skips`.
+
+Conservative feedback defaults:
+
+```text
+--feedback-kp-pos 2.0
+--feedback-kp-ori 2.0
+```
+
+By default, feedback command clamp limits are taken from the server config
+`max_twist_linear_m_s` and `max_twist_angular_rad_s`. They can be narrowed with
+`--feedback-max-linear-m-s` and `--feedback-max-angular-rad-s`.
+
+Example closed-loop baseline:
+
+```bash
+python3 scripts/circle_tracking_benchmark.py \
+  --root . \
+  --mode start-local \
+  --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
+  --server-config rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml \
+  --left-config rb_simulator/config/left_rb3_730e.yaml \
+  --right-config rb_simulator/config/right_rb3_730e.yaml \
+  --arm left \
+  --controller twist_stand_feedback \
+  --plane xy \
+  --profile circle_15cm_16s \
+  --repeat 3 \
+  --command-rate-hz 100 \
+  --artifact-dir artifacts/circle_tracking/left_twist_stand_feedback_15cm_16s
+```
+
+Example server-side circle diagnostic:
+
+```bash
+python3 scripts/circle_tracking_benchmark.py \
+  --root . \
+  --mode start-local \
+  --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
+  --server-config rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml \
+  --left-config rb_simulator/config/left_rb3_730e.yaml \
+  --right-config rb_simulator/config/right_rb3_730e.yaml \
+  --arm left \
+  --controller server_circle \
+  --plane xy \
+  --profile circle_15cm_16s \
+  --repeat 3 \
+  --artifact-dir artifacts/circle_tracking/left_server_circle_15cm_16s
+```
 
 ## Artifacts
 
@@ -222,6 +331,7 @@ The artifact directory contains:
 - `summary.json` and `summary.csv`
 - `reference.csv`, `actual.csv`, and `merged_samples.csv`
 - `command_packets.jsonl` and `state_stream.jsonl`
+- `feedback_terms.jsonl` and `feedback_terms.csv` for feedback controllers
 - `circle_trajectory.png`
 - `tracking_error_time.png`
 - `orientation_drift_time.png`
@@ -237,6 +347,30 @@ drift mean/p95/max, estimated phase lag and latency, least-squares fitted
 circle radius/center, sample and command counts, worker drop/overwrite telemetry
 when present, state age, send result age, IK timing, fault state, and threshold
 pass/fail if threshold flags were supplied.
+
+Feedback runs also record:
+
+- `mean_feedback_linear_norm_m_s`
+- `max_feedback_linear_norm_m_s`
+- `mean_total_command_linear_norm_m_s`
+- `feedback_saturation_count`
+- `stale_state_feedback_skips`
+
+Each feedback tick records `feedforward_twist`, `feedback_twist`,
+`applied_twist`, `position_error_vector`, and `orientation_error_vector` fields
+in `feedback_terms.jsonl` / `.csv`.
+
+Server-side circle runs publish circle debug telemetry in `state_stream.jsonl`
+and summary samples when available:
+
+- `circle_active`
+- `circle_phase`
+- `circle_repeat_index`
+- `circle_radius_m`
+- `circle_period_sec`
+- `circle_position_error_m`
+- `circle_orientation_error_rad`
+- `circle_done`
 
 Result semantics:
 
@@ -290,6 +424,26 @@ server config. Track at least:
 - `worker_command_drops_total`
 - `fault_latched`
 
+To separate open-loop velocity drift from command-source feedback compensation,
+compare matched pairs such as:
+
+```bash
+python3 scripts/compare_circle_benchmarks.py \
+  artifacts/circle_tracking/left_twist_stand_15cm_16s/summary.json \
+  artifacts/circle_tracking/left_twist_stand_feedback_15cm_16s/summary.json
+```
+
+If feedback reduces center drift but requires frequent saturation, the issue is
+not solved; the run is showing that command-source feedback is masking a limit
+or timing problem.
+
+To separate Python command-stream timing from server-side trajectory tracking,
+compare `twist_stand` and `server_circle` with the same profile and server
+config. If `server_circle` is materially better than `twist_stand`, command
+interval jitter or UDP sender timing is a likely contributor. If both runs show
+similar error, focus on server-side controller gains, limits, simulator dynamics,
+and SafetyFilter clamp telemetry.
+
 Use the comparison helper to summarize multiple `summary.json` artifacts:
 
 ```bash
@@ -306,6 +460,209 @@ python3 scripts/compare_circle_benchmarks.py \
   --csv artifacts/circle_tracking/comparison.csv \
   artifacts/circle_tracking/*/summary.json
 ```
+
+## Reporting Workflow
+
+BENCH-REPORT-01 turns `summary.json` artifacts into a markdown report, CSV
+table, and promotion classification. Use it when a run is meant to influence
+controller parameters or `REVIEW.md`.
+
+```bash
+python3 scripts/generate_circle_benchmark_report.py \
+  artifacts/circle_tracking/left_twist_stand_15cm_16s_after/summary.json \
+  artifacts/circle_tracking/gene_15cm_4s_after/summary.json \
+  --output-md artifacts/circle_tracking/circle_benchmark_report.md \
+  --csv artifacts/circle_tracking/circle_benchmark_report.csv
+```
+
+The report includes controller/profile metadata, radius gain, position error,
+orientation drift, estimated latency, worker drops, integrator clamp/divergence
+counts, timing jitter when available, benchmark result, performance warnings,
+and a classification:
+
+- `stable_simulator_baseline_candidate`
+- `stress_benchmark_candidate`
+- `not_baseline_candidate`
+- `stress_rejected_or_incomplete`
+- `informational`
+
+`completed` still means the run finished without performance thresholds. It is
+not the same as `pass`. `pass` requires explicit thresholds supplied to the
+benchmark and satisfied by the artifact.
+
+## Baseline Promotion Rules
+
+A stable simulator baseline candidate must satisfy all of:
+
+- profile `circle_15cm_16s`
+- `radius_gain >= 0.98`
+- `rms_error_m <= 0.005`
+- `p95_error_m <= 0.006`
+- `max_orientation_drift_rad <= 0.005`
+- `worker_command_drops_total == 0`
+- `send_command_deadline_missed_count == 0`
+- `fault_latched == false`
+- repeated at least three times, either as `repeat >= 3` in one artifact or as
+  matching repeated artifacts
+
+Record baseline candidates in `REVIEW.md` with the artifact path, controller,
+profile, repeat evidence, radius gain, RMS error, p95 error, result, and a
+simulator-only caveat. Do not claim a benchmark passed unless the artifact
+result is `pass` or the note explicitly says it is only a completed run that
+meets promotion criteria.
+
+## Stress Interpretation
+
+The `gene_15cm_4s` profile is stress evidence: stress is not real-ready.
+
+A stress benchmark candidate should have:
+
+- profile `gene_15cm_4s`
+- `radius_gain >= 0.90`
+- `fault_latched == false`
+- `worker_command_drops_total == 0`
+- `integrator_divergence_total == 0`
+
+Stress runs keep error metrics for comparison and tuning, but those metrics do
+not make the parameter set real-ready. A good 15 cm / 4 s plot can show that the
+simulator/controller stack is improving; it cannot authorize hardware speed,
+aggressive gains, or real Cartesian motion.
+
+## Real-Candidate Policy
+
+Simulator parameters can seed real testing only if:
+
+- they come from a stable simulator baseline, not the stress profile
+- speeds are scaled down for real
+- real read-only acceptance has passed
+- real tiny joint motion acceptance has passed
+- real tiny Cartesian PTP acceptance has passed
+
+Do not copy directly to hardware:
+
+- simulator `motion_time_constant_sec`
+- aggressive stress gains
+- GENE-style 4 s speed
+- Python sender timing assumptions
+
+Copy cautiously:
+
+- frame conventions
+- conservative path gains
+- command-source lease/deadman requirements
+- telemetry thresholds
+- safety gates
+
+## Ablation Workflow
+
+BENCH-ABLATION-01 runs factor-separated simulator-only experiments from a YAML
+matrix. Use it to understand which settings improve or degrade tracking rather
+than to tune the 15 cm / 4 s stress case by accident.
+
+The current stable simulator baseline is `circle_15cm_16s`: it uses the same
+15 cm diameter as the GENE-style stress but stays within the default
+0.03 m/s twist limit. The `gene_15cm_4s` profile is a stress case and requires
+`dual_simulator_circle_stress_15cm4s.yaml` plus explicit
+`allow_fast_stress: true`.
+
+Example matrix:
+
+```yaml
+experiments:
+  - name: baseline_15cm_16s_twist_stand
+    profile: circle_15cm_16s
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    server_config: rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml
+
+  - name: stress_15cm_4s_twist_stand
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+
+  - name: stress_15cm_4s_twist_stand_200hz
+    profile: gene_15cm_4s
+    allow_fast_stress: true
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 200
+    server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    server_config_overrides:
+      servo.rate_hz: 200
+      network.state_pub_rate_hz: 50
+      cartesian_control.velocity_target_integration: previous_command
+```
+
+Run the matrix:
+
+```bash
+python3 scripts/run_circle_ablation.py \
+  --root . \
+  --matrix configs/circle_ablation_15cm.yaml \
+  --artifact-root artifacts/circle_tracking/ablation_001 \
+  --max-workers 1
+```
+
+The ablation runner writes one benchmark artifact directory per experiment and
+aggregate files at the artifact root:
+
+- `ablation_summary.csv`
+- `ablation_summary.json`
+- `ablation_report.md`
+- `rms_error_by_experiment.png`
+- `radius_gain_by_experiment.png`
+- `p95_error_by_experiment.png`
+- `latency_by_experiment.png`
+- optional jitter and center-drift plots when those fields exist
+
+Supported matrix factors include controller/profile/arm/command rate/repeat,
+temporary server config overlays for `servo.rate_hz`,
+`network.state_pub_rate_hz`, Cartesian velocity integration mode, lookahead,
+path gains, damping, twist limits, and command-actual error limits. Simulator
+config overlays can vary `simulator.motion_time_constant_sec` when needed. The
+runner saves generated configs inside each experiment artifact directory and
+does not modify source configs.
+
+Interpretation rules:
+
+- An experiment is not a performance `pass` unless thresholds were supplied.
+- `radius_gain < 0.95` is an ablation warning.
+- For `gene_15cm_4s`, `rms_error_mm > 10` or `p95_error_mm > 20` is a stress
+  warning.
+- Any command drop, deadline miss, safety clamp, fault, or large timing jitter
+  should reject that parameter set as a stable candidate.
+
+Promoting a parameter set toward a real-candidate discussion requires more than
+a good stress plot: it must pass the `circle_15cm_16s` baseline, show no drops,
+faults, or command deadline misses, keep clamp counts low, and be scaled down
+before any real robot plan. Passing simulator ablation does not authorize real
+robot motion.
+
+## Parameter Transfer Policy
+
+Transferable from simulator evidence only as initial guesses:
+
+- controller structure, command sequencing, and telemetry fields
+- conservative gains from `dual_simulator_circle_real_candidate_conservative.yaml`
+- speed limits after scaling down for a future real test plan
+- benchmark thresholds used to decide whether a simulator run is repeatable
+
+Not directly transferable to hardware:
+
+- simulator `motion_time_constant_sec`
+- aggressive `gene_15cm_4s` stress speed
+- lookahead values tuned specifically to simulator lag
+- Python sender timing artifacts, command interval jitter, or host scheduling
+  quirks
+
+Real testing still requires separate real read-only acceptance, real motion
+acceptance, and a future task that explicitly opens tiny Cartesian motion.
 
 For CART-SERVO-01 and later, `TcpTwist*` and `TcpLinearMove` velocity-level
 targets should use `cartesian_control.velocity_target_integration:
@@ -341,6 +698,6 @@ Run the GENE-style stress only with explicit opt-in and compatible speed limits:
 CODEX_RUN_GENE_STYLE_CIRCLE=1 ./scripts/codex_gate.sh BENCH-CIRCLE-01
 ```
 
-The GENE-style gate path uses `dual_simulator_circle_stress.yaml`.
+The GENE-style gate path uses `dual_simulator_circle_stress_15cm4s.yaml`.
 
 Passing this simulator benchmark does not permit real robot motion.

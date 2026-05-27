@@ -49,6 +49,14 @@ PROFILE_USE_CASES = {
 }
 DEFAULT_ORIENTATION_DRIFT_WARNING_RAD = 0.1
 RADIUS_GAIN_WARNING_MIN = 0.8
+CONTROLLER_CHOICES = (
+    "twist_stand",
+    "twist_local",
+    "twist_stand_feedback",
+    "twist_local_feedback",
+    "server_circle",
+    "linear_segments",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-host", default="127.0.0.1")
     parser.add_argument("--state-port", type=int, default=50110)
     parser.add_argument("--arm", choices=("left", "right"), default="left")
-    parser.add_argument("--controller", choices=("twist_stand", "twist_local", "linear_segments"), default="twist_stand")
+    parser.add_argument("--controller", choices=CONTROLLER_CHOICES, default="twist_stand")
     parser.add_argument("--plane", choices=("xy", "xz", "yz"), default="xy")
     parser.add_argument("--diameter-m", type=float)
     parser.add_argument("--period-sec", type=float)
@@ -85,6 +93,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-dir", type=Path, required=True)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
+    parser.add_argument("--feedback-kp-pos", type=float, default=2.0)
+    parser.add_argument("--feedback-kp-ori", type=float, default=2.0)
+    parser.add_argument("--feedback-max-linear-m-s", type=float)
+    parser.add_argument("--feedback-max-angular-rad-s", type=float)
+    parser.add_argument("--feedback-use-current-state-time", action="store_true")
     parser.add_argument("--max-allowed-rms-error-m", type=float)
     parser.add_argument("--max-allowed-p95-error-m", type=float)
     parser.add_argument("--max-allowed-orientation-drift-rad", type=float)
@@ -107,6 +120,13 @@ def parse_scalar_float(config_text: str, key: str) -> float | None:
     except ValueError:
         return None
     return value if math.isfinite(value) else None
+
+
+def parse_scalar_bool(config_text: str, key: str) -> bool | None:
+    match = re.search(rf"^\s*{re.escape(key)}:\s*(true|false)\s*(?:#.*)?$", config_text, flags=re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).lower() == "true"
 
 
 def benchmark_profile_label(profile: str) -> str:
@@ -179,6 +199,8 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         ("--command-rate-hz", args.command_rate_hz),
         ("--warmup-sec", args.warmup_sec),
         ("--settle-sec", args.settle_sec),
+        ("--feedback-kp-pos", args.feedback_kp_pos),
+        ("--feedback-kp-ori", args.feedback_kp_ori),
     ):
         if not math.isfinite(value) or value <= 0.0 and name not in {"--warmup-sec", "--settle-sec"}:
             raise AcceptanceError(f"{name} must be finite and positive")
@@ -218,17 +240,32 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
 
     speed = required_speed(args)
     max_twist = parse_scalar_float(server_text, "max_twist_linear_m_s")
+    max_twist_angular = parse_scalar_float(server_text, "max_twist_angular_rad_s")
     max_linear = parse_scalar_float(server_text, "max_linear_move_speed_m_s")
+    benchmark_primitives_enabled = parse_scalar_bool(server_text, "enable_benchmark_primitives")
     profile_is_gene = args.profile == "gene_15cm_4s" or (args.diameter_m >= 0.149 and args.period_sec <= 4.01)
     if profile_is_gene and not args.allow_fast_stress:
         raise AcceptanceError("GENE-style 15 cm / 4 s stress requires --allow-fast-stress")
-    if args.controller in {"twist_stand", "twist_local"}:
+    if args.controller in {"twist_stand", "twist_local", "twist_stand_feedback", "twist_local_feedback", "server_circle"}:
         if max_twist is None:
             raise AcceptanceError("server config must expose max_twist_linear_m_s for twist benchmark preflight")
         if speed > max_twist + 1e-9:
             raise AcceptanceError(
                 f"required tangential speed {speed:.6f} m/s exceeds max_twist_linear_m_s {max_twist:.6f}"
             )
+        if args.controller.endswith("_feedback"):
+            if max_twist_angular is None:
+                raise AcceptanceError("server config must expose max_twist_angular_rad_s for feedback benchmark preflight")
+            if args.feedback_max_linear_m_s is None:
+                args.feedback_max_linear_m_s = max_twist
+            if args.feedback_max_angular_rad_s is None:
+                args.feedback_max_angular_rad_s = max_twist_angular
+            for name, value in (
+                ("--feedback-max-linear-m-s", args.feedback_max_linear_m_s),
+                ("--feedback-max-angular-rad-s", args.feedback_max_angular_rad_s),
+            ):
+                if value is None or not math.isfinite(value) or value <= 0.0:
+                    raise AcceptanceError(f"{name} must be finite and positive")
     if args.controller == "linear_segments":
         if max_linear is None:
             raise AcceptanceError("server config must expose max_linear_move_speed_m_s for linear benchmark preflight")
@@ -236,6 +273,8 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
             raise AcceptanceError(
                 f"required tangential speed {speed:.6f} m/s exceeds max_linear_move_speed_m_s {max_linear:.6f}"
             )
+    if args.controller == "server_circle" and benchmark_primitives_enabled is not True:
+        raise AcceptanceError("server_circle requires cartesian_control.enable_benchmark_primitives: true")
 
     return {
         "passed": True,
@@ -243,7 +282,9 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         "refused_markers": ["run_mode: real", "backend_type: rbpodo", "allow_in_real: true", *REAL_ROBOT_IPS],
         "real_gate_env_checked": list(REAL_GATE_ENV),
         "max_twist_linear_m_s": max_twist,
+        "max_twist_angular_rad_s": max_twist_angular,
         "max_linear_move_speed_m_s": max_linear,
+        "enable_benchmark_primitives": benchmark_primitives_enabled,
         "required_tangential_speed_m_s": speed,
     }
 
@@ -311,6 +352,28 @@ def linear_move_command(arm: str, target: dict[str, Any], duration_sec: float, o
         "duration_sec": duration_sec,
         "orientation_mode": orientation_mode,
     }
+
+
+def circle_move_command(args: argparse.Namespace, duration_sec: float) -> dict[str, Any]:
+    s = seq()
+    payload = {
+        "mode": "TcpCircleMove",
+        "plane": args.plane,
+        "diameter_m": float(args.diameter_m),
+        "period_sec": float(args.period_sec),
+        "repeat": int(args.repeat),
+        "center_mode": "start_on_circle",
+        "orientation_mode": "constant",
+        "frame": "stand",
+    }
+    return {
+        "seq": s,
+        "mode": "Hold",
+        "host_time_ns": s,
+        "timeout_sec": max(0.2, duration_sec + 0.2),
+        "left": payload if args.arm == "left" else {"mode": "Hold"},
+        "right": payload if args.arm == "right" else {"mode": "Hold"},
+    }
     return {
         "seq": s,
         "mode": "Hold",
@@ -364,9 +427,44 @@ def vec(p: dict[str, Any]) -> list[float]:
     return [float(p["x"]), float(p["y"]), float(p["z"])]
 
 
+def twist_linear(twist: list[float]) -> list[float]:
+    return [float(twist[0]), float(twist[1]), float(twist[2])]
+
+
+def twist_angular(twist: list[float]) -> list[float]:
+    return [float(twist[3]), float(twist[4]), float(twist[5])]
+
+
 def quat_angle(a: list[float], b: list[float]) -> float:
     d = abs(sum(float(x) * float(y) for x, y in zip(a, b)))
     return 2.0 * math.acos(max(-1.0, min(1.0, d)))
+
+
+def quat_conjugate(q: list[float]) -> list[float]:
+    return [-q[0], -q[1], -q[2], q[3]]
+
+
+def quat_multiply(a: list[float], b: list[float]) -> list[float]:
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
+
+
+def quat_error_vector(q_ref: list[float], q_actual: list[float]) -> list[float]:
+    q_err = quat_multiply(q_ref, quat_conjugate(q_actual))
+    if q_err[3] < 0.0:
+        q_err = [-q_err[0], -q_err[1], -q_err[2], -q_err[3]]
+    vector_norm = norm([q_err[0], q_err[1], q_err[2]])
+    if vector_norm < 1e-12:
+        return [0.0, 0.0, 0.0]
+    angle = 2.0 * math.atan2(vector_norm, max(-1.0, min(1.0, q_err[3])))
+    axis = [q_err[0] / vector_norm, q_err[1] / vector_norm, q_err[2] / vector_norm]
+    return scale(axis, angle)
 
 
 def quat_to_matrix(q: list[float]) -> list[list[float]]:
@@ -383,6 +481,10 @@ def quat_to_matrix(q: list[float]) -> list[list[float]]:
 
 def mat_vec(m: list[list[float]], v: list[float]) -> list[float]:
     return [sum(m[row][col] * v[col] for col in range(3)) for row in range(3)]
+
+
+def mat_transpose_vec(m: list[list[float]], v: list[float]) -> list[float]:
+    return [sum(m[row][col] * v[row] for row in range(3)) for col in range(3)]
 
 
 def add(a: list[float], b: list[float]) -> list[float]:
@@ -403,6 +505,59 @@ def dot(a: list[float], b: list[float]) -> float:
 
 def norm(a: list[float]) -> float:
     return math.sqrt(dot(a, a))
+
+
+def clamp_vector_norm(v: list[float], max_norm: float) -> tuple[list[float], bool]:
+    value_norm = norm(v)
+    if value_norm <= max_norm or value_norm <= 1e-12:
+        return list(v), False
+    return scale(v, max_norm / value_norm), True
+
+
+def compute_feedback_twist_stand(
+    *,
+    feedforward_linear_stand: list[float],
+    position_error_stand: list[float],
+    orientation_error_stand: list[float],
+    kp_pos: float,
+    kp_ori: float,
+    max_linear_m_s: float,
+    max_angular_rad_s: float,
+) -> dict[str, Any]:
+    feedback_linear = scale(position_error_stand, kp_pos)
+    feedback_angular = scale(orientation_error_stand, kp_ori)
+    raw_linear = add(feedforward_linear_stand, feedback_linear)
+    raw_angular = feedback_angular
+    applied_linear, linear_saturated = clamp_vector_norm(raw_linear, max_linear_m_s)
+    applied_angular, angular_saturated = clamp_vector_norm(raw_angular, max_angular_rad_s)
+    return {
+        "feedforward_twist_stand": [*feedforward_linear_stand, 0.0, 0.0, 0.0],
+        "feedback_twist_stand": [*feedback_linear, *feedback_angular],
+        "raw_twist_stand": [*raw_linear, *raw_angular],
+        "applied_twist_stand": [*applied_linear, *applied_angular],
+        "saturated": linear_saturated or angular_saturated,
+    }
+
+
+def zero_feedback_record(t_sec: float, reason: str, frame: str) -> dict[str, Any]:
+    return {
+        "t_sec": t_sec,
+        "frame": frame,
+        "feedback_skip_reason": reason,
+        "position_error_x": None,
+        "position_error_y": None,
+        "position_error_z": None,
+        "position_error_vector": [0.0, 0.0, 0.0],
+        "orientation_error_x": None,
+        "orientation_error_y": None,
+        "orientation_error_z": None,
+        "orientation_error_vector": [0.0, 0.0, 0.0],
+        "feedforward_twist": [0.0] * 6,
+        "feedback_twist": [0.0] * 6,
+        "applied_twist": [0.0] * 6,
+        "saturated": False,
+        "stale_or_invalid_state": True,
+    }
 
 
 def axes_for_plane(plane: str) -> tuple[list[float], list[float]]:
@@ -434,6 +589,23 @@ class Trajectory:
     def plane_coords(self, point: list[float]) -> tuple[float, float]:
         rel = sub(point, self.center)
         return dot(rel, self.axis1), dot(rel, self.axis2)
+
+
+def trajectory_velocity_stand(traj: Trajectory, t: float) -> list[float]:
+    v1, v2 = traj.velocity_components(t)
+    return add(scale(traj.axis1, v1), scale(traj.axis2, v2))
+
+
+def feedback_state_latest(capture: StateCapture, arm: str) -> dict[str, Any] | None:
+    for snapshot in reversed(capture.snapshots):
+        if not valid_state(snapshot):
+            continue
+        try:
+            arm_pose(snapshot, arm, "feedback.latest")
+        except Exception:
+            continue
+        return snapshot
+    return None
 
 
 def wait_for_arm_motion(args: argparse.Namespace, capture: StateCapture, commands: CommandRecorder) -> dict[str, Any]:
@@ -496,6 +668,115 @@ def stream_twist(args: argparse.Namespace, commands: CommandRecorder, traj: Traj
     return first_ns, last_ns, command_count + 1
 
 
+def stream_twist_feedback(
+    args: argparse.Namespace,
+    capture: StateCapture,
+    commands: CommandRecorder,
+    traj: Trajectory,
+    frame: str,
+    q0: list[float],
+    duration_sec: float,
+) -> tuple[int, int, int, list[dict[str, Any]]]:
+    period = 1.0 / args.command_rate_hz
+    timeout = max(0.2, 3.0 * period)
+    stale_limit_ns = int(max(0.2, 3.0 * period) * 1e9)
+    command_count = 0
+    first_ns = 0
+    last_ns = 0
+    rows: list[dict[str, Any]] = []
+    start_monotonic = time.monotonic()
+    next_send = start_monotonic
+    while True:
+        now = time.monotonic()
+        elapsed = now - start_monotonic
+        if elapsed >= duration_sec:
+            break
+        now_ns = time.monotonic_ns()
+        t = elapsed
+        snapshot = feedback_state_latest(capture, args.arm)
+        stale_or_invalid = True
+        skip_reason = "missing valid feedback state"
+        if snapshot is not None:
+            state_ns = int(snapshot.get("host_time_ns", -1))
+            stale_or_invalid = state_ns < 0 or now_ns - state_ns > stale_limit_ns
+            skip_reason = "stale feedback state" if stale_or_invalid else ""
+            if args.feedback_use_current_state_time and first_ns:
+                t = max(0.0, (state_ns - first_ns) / 1e9)
+        if snapshot is None or stale_or_invalid:
+            applied_twist = [0.0] * 6
+            row = zero_feedback_record(t, skip_reason, frame)
+        else:
+            actual_pose = arm_pose(snapshot, args.arm, "feedback.actual")
+            p_actual = vec(actual_pose)
+            q_actual = actual_pose["quaternion_xyzw"]
+            p_ref = traj.position(t)
+            position_error_stand = sub(p_ref, p_actual)
+            orientation_error_stand = quat_error_vector(q0, q_actual)
+            feedback = compute_feedback_twist_stand(
+                feedforward_linear_stand=trajectory_velocity_stand(traj, t),
+                position_error_stand=position_error_stand,
+                orientation_error_stand=orientation_error_stand,
+                kp_pos=args.feedback_kp_pos,
+                kp_ori=args.feedback_kp_ori,
+                max_linear_m_s=float(args.feedback_max_linear_m_s),
+                max_angular_rad_s=float(args.feedback_max_angular_rad_s),
+            )
+            if frame == "local":
+                rot_current = quat_to_matrix(q_actual)
+                feedforward_linear = mat_transpose_vec(rot_current, twist_linear(feedback["feedforward_twist_stand"]))
+                feedback_linear = mat_transpose_vec(rot_current, twist_linear(feedback["feedback_twist_stand"]))
+                feedback_angular = mat_transpose_vec(rot_current, twist_angular(feedback["feedback_twist_stand"]))
+                applied_linear = mat_transpose_vec(rot_current, twist_linear(feedback["applied_twist_stand"]))
+                applied_angular = mat_transpose_vec(rot_current, twist_angular(feedback["applied_twist_stand"]))
+                feedforward_twist = [*feedforward_linear, 0.0, 0.0, 0.0]
+                feedback_twist = [*feedback_linear, *feedback_angular]
+                applied_twist = [*applied_linear, *applied_angular]
+            else:
+                feedforward_twist = feedback["feedforward_twist_stand"]
+                feedback_twist = feedback["feedback_twist_stand"]
+                applied_twist = feedback["applied_twist_stand"]
+            row = {
+                "t_sec": t,
+                "frame": frame,
+                "feedback_skip_reason": "",
+                "actual_x": p_actual[0],
+                "actual_y": p_actual[1],
+                "actual_z": p_actual[2],
+                "reference_x": p_ref[0],
+                "reference_y": p_ref[1],
+                "reference_z": p_ref[2],
+                "position_error_x": position_error_stand[0],
+                "position_error_y": position_error_stand[1],
+                "position_error_z": position_error_stand[2],
+                "position_error_vector": position_error_stand,
+                "orientation_error_x": orientation_error_stand[0],
+                "orientation_error_y": orientation_error_stand[1],
+                "orientation_error_z": orientation_error_stand[2],
+                "orientation_error_vector": orientation_error_stand,
+                "feedforward_twist": feedforward_twist,
+                "feedback_twist": feedback_twist,
+                "applied_twist": applied_twist,
+                "feedforward_twist_stand": feedback["feedforward_twist_stand"],
+                "feedback_twist_stand": feedback["feedback_twist_stand"],
+                "applied_twist_stand": feedback["applied_twist_stand"],
+                "saturated": bool(feedback["saturated"]),
+                "stale_or_invalid_state": False,
+            }
+        packet = twist_command(args.arm, frame, applied_twist, timeout)
+        if first_ns == 0:
+            first_ns = int(packet["host_time_ns"])
+        last_ns = int(packet["host_time_ns"])
+        row["host_time_ns"] = int(packet["host_time_ns"])
+        rows.append(row)
+        send_udp(args.command_host, args.command_port, packet, commands)
+        command_count += 1
+        next_send += period
+        time.sleep(max(0.0, next_send - time.monotonic()))
+    stop = hold_command()
+    send_udp(args.command_host, args.command_port, stop, commands)
+    return first_ns, last_ns, command_count + 1, rows
+
+
 def stream_linear_segments(args: argparse.Namespace, commands: CommandRecorder, traj: Trajectory, q0: list[float], duration_sec: float) -> tuple[int, int, int]:
     min_segment_sec = 0.05
     segment_sec = max(min_segment_sec, 1.0 / args.command_rate_hz)
@@ -519,6 +800,16 @@ def stream_linear_segments(args: argparse.Namespace, commands: CommandRecorder, 
     stop = hold_command()
     send_udp(args.command_host, args.command_port, stop, commands)
     return first_ns, last_ns, command_count + 1
+
+
+def run_server_circle(args: argparse.Namespace, commands: CommandRecorder, duration_sec: float) -> tuple[int, int, int]:
+    packet = circle_move_command(args, duration_sec)
+    first_ns = int(packet["host_time_ns"])
+    send_udp(args.command_host, args.command_port, packet, commands)
+    time.sleep(duration_sec)
+    stop = hold_command()
+    send_udp(args.command_host, args.command_port, stop, commands)
+    return first_ns, int(stop["host_time_ns"]), 2
 
 
 def collect_actual_samples(capture: StateCapture, args: argparse.Namespace, start_ns: int, end_ns: int) -> list[dict[str, Any]]:
@@ -632,6 +923,59 @@ def metric_max(samples: list[dict[str, Any]], key: str, location: str) -> float 
         if isinstance(value, (int, float)) and math.isfinite(float(value)):
             values.append(float(value))
     return max(values) if values else None
+
+
+def feedback_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    feedback_linear_norms: list[float] = []
+    total_linear_norms: list[float] = []
+    for row in rows:
+        feedback_twist = row.get("feedback_twist")
+        applied_twist = row.get("applied_twist")
+        if isinstance(feedback_twist, list) and len(feedback_twist) >= 3:
+            feedback_linear_norms.append(norm([float(feedback_twist[0]), float(feedback_twist[1]), float(feedback_twist[2])]))
+        if isinstance(applied_twist, list) and len(applied_twist) >= 3:
+            total_linear_norms.append(norm([float(applied_twist[0]), float(applied_twist[1]), float(applied_twist[2])]))
+    return {
+        "mean_feedback_linear_norm_m_s": (
+            sum(feedback_linear_norms) / len(feedback_linear_norms) if feedback_linear_norms else None
+        ),
+        "max_feedback_linear_norm_m_s": max(feedback_linear_norms) if feedback_linear_norms else None,
+        "mean_total_command_linear_norm_m_s": (
+            sum(total_linear_norms) / len(total_linear_norms) if total_linear_norms else None
+        ),
+        "feedback_saturation_count": sum(1 for row in rows if row.get("saturated") is True),
+        "stale_state_feedback_skips": sum(1 for row in rows if row.get("stale_or_invalid_state") is True),
+    }
+
+
+def write_feedback_artifacts(artifact_dir: Path, rows: list[dict[str, Any]]) -> dict[str, str] | None:
+    if not rows:
+        return None
+    jsonl_path = artifact_dir / "feedback_terms.jsonl"
+    with jsonl_path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+    csv_rows = []
+    for row in rows:
+        csv_row = dict(row)
+        for key in (
+            "feedforward_twist",
+            "feedback_twist",
+            "applied_twist",
+            "feedforward_twist_stand",
+            "feedback_twist_stand",
+            "applied_twist_stand",
+            "position_error_vector",
+            "orientation_error_vector",
+        ):
+            value = csv_row.get(key)
+            if isinstance(value, list):
+                for index, item in enumerate(value):
+                    csv_row[f"{key}_{index}"] = item
+                del csv_row[key]
+        csv_rows.append(csv_row)
+    write_csv(artifact_dir / "feedback_terms.csv", csv_rows)
+    return {"jsonl": str(jsonl_path.resolve()), "csv": str((artifact_dir / "feedback_terms.csv").resolve())}
 
 
 def compute_metrics(
@@ -768,6 +1112,10 @@ def compute_metrics(
         "max_send_result_age_us": metric_max(samples, "send_result_age_us", "arm_state"),
         "max_cartesian_servo_duration_us": None,
         "max_ik_duration_us": metric_max(samples, "ik_duration_us", "telemetry"),
+        "integrator_resets_total": metric_max(samples, "integrator_resets_total", "telemetry"),
+        "integrator_clamps_total": metric_max(samples, "integrator_clamps_total", "telemetry"),
+        "integrator_divergence_total": metric_max(samples, "integrator_divergence_total", "telemetry"),
+        "max_command_actual_error_deg_observed": metric_max(samples, "max_command_actual_error_deg_observed", "telemetry"),
     }
     return metrics, merged
 
@@ -841,6 +1189,15 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "fit_center_error_m",
         "sample_count",
         "command_count",
+        "worker_command_drops_total",
+        "integrator_resets_total",
+        "integrator_clamps_total",
+        "integrator_divergence_total",
+        "mean_feedback_linear_norm_m_s",
+        "max_feedback_linear_norm_m_s",
+        "mean_total_command_linear_norm_m_s",
+        "feedback_saturation_count",
+        "stale_state_feedback_skips",
         "fault_latched",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -890,6 +1247,12 @@ def performance_warnings(summary: dict[str, Any], orientation_warning_rad: float
         )
     if summary.get("fault_latched") is True:
         warnings.append("fault_latched was true during benchmark")
+    stale_skips = summary.get("stale_state_feedback_skips")
+    if isinstance(stale_skips, (int, float)) and stale_skips > 0:
+        warnings.append(f"stale_state_feedback_skips was {stale_skips}")
+    saturation_count = summary.get("feedback_saturation_count")
+    if isinstance(saturation_count, (int, float)) and saturation_count > 0:
+        warnings.append(f"feedback_saturation_count was {saturation_count}")
     return warnings
 
 
@@ -1020,6 +1383,17 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "right_simulator_log": str(artifact_dir / "right_simulator.log"),
         "caveat": "simulator-only benchmark evidence; not real robot readiness",
     }
+    if args.controller.endswith("_feedback"):
+        base_summary.update(
+            {
+                "feedback_kp_pos": args.feedback_kp_pos,
+                "feedback_kp_ori": args.feedback_kp_ori,
+                "feedback_max_linear_m_s": args.feedback_max_linear_m_s,
+                "feedback_max_angular_rad_s": args.feedback_max_angular_rad_s,
+                "feedback_use_current_state_time": args.feedback_use_current_state_time,
+                "feedback_mode_caveat": "closed-loop command-source benchmark compensation; not production policy or real robot readiness",
+            }
+        )
     base_summary.update(context)
     if args.preflight_only:
         base_summary.update({
@@ -1048,6 +1422,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     command_count = 0
     traj: Trajectory | None = None
     q0: list[float] | None = None
+    feedback_rows: list[dict[str, Any]] = []
     try:
         capture.start()
         if args.mode == "start-local":
@@ -1084,7 +1459,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         p0 = vec(start_pose)
         q0 = start_pose["quaternion_xyzw"]
         local_axis1, local_axis2 = axes_for_plane(args.plane)
-        if args.controller == "twist_local":
+        if args.controller in {"twist_local", "twist_local_feedback"}:
             rot = quat_to_matrix(q0)
             axis1 = mat_vec(rot, local_axis1)
             axis2 = mat_vec(rot, local_axis2)
@@ -1098,6 +1473,16 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             benchmark_start_ns, benchmark_end_ns, command_count = stream_twist(args, commands, traj, "stand", duration_sec)
         elif args.controller == "twist_local":
             benchmark_start_ns, benchmark_end_ns, command_count = stream_twist(args, commands, traj, "local", duration_sec)
+        elif args.controller == "twist_stand_feedback":
+            benchmark_start_ns, benchmark_end_ns, command_count, feedback_rows = stream_twist_feedback(
+                args, capture, commands, traj, "stand", q0, duration_sec
+            )
+        elif args.controller == "twist_local_feedback":
+            benchmark_start_ns, benchmark_end_ns, command_count, feedback_rows = stream_twist_feedback(
+                args, capture, commands, traj, "local", q0, duration_sec
+            )
+        elif args.controller == "server_circle":
+            benchmark_start_ns, benchmark_end_ns, command_count = run_server_circle(args, commands, duration_sec)
         else:
             benchmark_start_ns, benchmark_end_ns, command_count = stream_linear_segments(args, commands, traj, q0, duration_sec)
         if args.settle_sec > 0.0:
@@ -1118,6 +1503,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     if traj is None or q0 is None:
         raise AcceptanceError("benchmark reference trajectory was not initialized")
     metrics, merged = compute_metrics(args=args, traj=traj, q0=q0, samples=actual_samples, benchmark_start_ns=benchmark_start_ns)
+    feedback_artifacts = write_feedback_artifacts(artifact_dir, feedback_rows)
+    if feedback_rows:
+        metrics.update(feedback_metrics(feedback_rows))
     skipped_plots = plot_artifacts(artifact_dir, args, traj, merged)
 
     write_csv(artifact_dir / "reference.csv", reference_rows(traj, q0, duration_sec, args.command_rate_hz))
@@ -1146,6 +1534,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "generated_plots": generated_plot_paths(artifact_dir),
             "skipped_plots": skipped_plots,
             "servo_log": servo_log,
+            "feedback_terms": feedback_artifacts,
             "threshold_failures": failures,
             "performance_warnings": performance_warnings(summary),
             "orientation_drift_warning_threshold_rad": DEFAULT_ORIENTATION_DRIFT_WARNING_RAD,

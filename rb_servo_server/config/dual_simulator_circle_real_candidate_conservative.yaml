@@ -1,18 +1,15 @@
 schema: robotics_lab.rb_servo_server.v1
 
-# Simulator-only circular TCP tracking stress profile.
-# This profile is intended for BENCH-CIRCLE-01 GENE-style 15 cm / 4 s stress
-# runs. It intentionally raises simulator Cartesian speed limits above the
-# conservative TCP acceptance profile, but it remains simulation-only and must
-# not be used as real robot evidence.
-# scripts/circle_tracking_benchmark.py refuses this file if real-mode markers,
-# rbpodo backend markers, real Cartesian allowance, or known real robot IPs are
-# added.
+# Simulator-only named profile: real_candidate_conservative.
+# Intended benchmark: low-speed simulator repeatability, typically
+# circle_15cm_16s or slower. This marks parameters that may seed a future
+# hardware plan only after separate real read-only and tiny-motion acceptance.
+# This file is not a hardware config.
 
 left_robot:
   backend_type: simulator
   run_mode: simulation
-  name: left_simulator_circle_stress
+  name: left_simulator_circle_real_candidate_conservative
   simulator_control_endpoint: "tcp://127.0.0.1:50200"
   simulator_request_timeout_sec: 0.2
   simulator_connect_timeout_sec: 0.2
@@ -25,7 +22,7 @@ left_robot:
 right_robot:
   backend_type: simulator
   run_mode: simulation
-  name: right_simulator_circle_stress
+  name: right_simulator_circle_real_candidate_conservative
   simulator_control_endpoint: "tcp://127.0.0.1:50210"
   simulator_request_timeout_sec: 0.2
   simulator_connect_timeout_sec: 0.2
@@ -116,21 +113,21 @@ cartesian_control:
   enable_benchmark_primitives: true
   warn_ik_duration_us: 3000
   fail_ik_duration_us: 5000
-  path_kp_pos: 6.0
-  path_kp_ori: 6.0
-  twist_orientation_hold_kp: 6.0
+  path_kp_pos: 4.0
+  path_kp_ori: 4.0
+  twist_orientation_hold_kp: 4.0
   twist_angular_deadband_rad_s: 0.0001
-  velocity_damping: 0.01
-  max_twist_linear_m_s: 0.15
-  max_twist_angular_rad_s: 0.4
-  max_linear_move_speed_m_s: 0.15
-  max_angular_move_speed_rad_s: 0.4
-  max_cartesian_step_m: 0.002
-  max_cartesian_step_rad: 0.02
+  velocity_damping: 0.02
+  max_twist_linear_m_s: 0.03
+  max_twist_angular_rad_s: 0.15
+  max_linear_move_speed_m_s: 0.03
+  max_angular_move_speed_rad_s: 0.15
+  max_cartesian_step_m: 0.001
+  max_cartesian_step_rad: 0.01
   exceed_limit_policy: clamp
   velocity_target_integration: previous_command
   velocity_target_lookahead_sec: 0.04
-  max_command_actual_error_deg: [5, 5, 5, 8, 8, 10]
+  max_command_actual_error_deg: [3, 3, 3, 5, 5, 6]
   reset_velocity_integrator_on_mode_change: true
   command_actual_error_policy: reset
   circle_move:
@@ -141,7 +138,7 @@ cartesian_control:
   linear_move:
     min_duration_sec: 0.05
     max_duration_sec: 10.0
-    default_linear_speed_m_s: 0.03
-    default_angular_speed_rad_s: 0.2
+    default_linear_speed_m_s: 0.02
+    default_angular_speed_rad_s: 0.12
     constant_orientation_tolerance_rad: 0.005
     default_orientation_mode: constant

@@ -448,7 +448,7 @@
   </link>
   <link name="tool">
     <visual>
-      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 3.141592653589793"/>
+      <origin xyz="0.0 0.0 0.0" rpy="3.141592653589793 0.0 1.5707963267948966"/>
       <geometry>
         <mesh filename="../meshes/robots/rb3_730e/visual/tool/tool.STL" scale="0.001 0.001 0.001"/>
       </geometry>
@@ -461,7 +461,7 @@
     <origin xyz="0.0 0.0 0.1" rpy="0.0 0.0 0.0"/>
   </joint>
   <joint name="tool_joint" type="fixed">
-    <parent link="tcp"/>
+    <parent link="attachment_site"/>
     <child link="tool"/>
     <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
   </joint>

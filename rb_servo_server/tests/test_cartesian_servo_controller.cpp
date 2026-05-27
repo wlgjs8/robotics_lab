@@ -845,6 +845,127 @@ bool testVelocityIntegratorDivergenceResetsOrFaults() {
     return true;
 }
 
+bool testTcpCircleMoveStartsWithoutJumpAndCompletes() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.enable_benchmark_primitives = true;
+    config.circle_move.min_period_sec = 0.1;
+    config.circle_move.max_diameter_m = 0.2;
+    config.max_twist_linear_m_s = 10.0;
+    config.max_twist_angular_rad_s = 10.0;
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpCircleMove;
+    command.has_tcp_circle_move = true;
+    command.tcp_circle_move.plane = rb_servo::TcpCirclePlane::XY;
+    command.tcp_circle_move.diameter_m = 0.10;
+    command.tcp_circle_move.period_sec = 0.40;
+    command.tcp_circle_move.repeat = 2;
+    command.tcp_circle_move.center_mode = rb_servo::TcpCircleCenterMode::StartOnCircle;
+    command.tcp_circle_move.orientation_mode = rb_servo::LinearMoveOrientationMode::Constant;
+    command.tcp_circle_move.frame = rb_servo::TcpCircleFrame::Stand;
+
+    rb_servo::CartesianCircleMoveState circle;
+    rb_servo::CartesianVelocityIntegratorState integrator;
+    const rb_servo::JointArray q_actual = zeroJoints();
+    rb_servo::CartesianArmTargetResult result = controller.computeCircleMoveTarget(
+        command,
+        stateFromJoints(*kinematics, q_actual, left_mount),
+        q_actual,
+        rb_servo::RunMode::Simulation,
+        0.0,
+        42,
+        &circle,
+        &integrator
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(circle.active);
+    RB_CHECK(!circle.done);
+    RB_CHECK(std::abs(circle.reference_tcp_stand.x - circle.start_tcp_stand.x) < 1e-12);
+    RB_CHECK(std::abs(circle.reference_tcp_stand.y - circle.start_tcp_stand.y) < 1e-12);
+    RB_CHECK(result.telemetry.circle_active);
+    RB_CHECK(std::abs(result.telemetry.circle_position_error_m) < 1e-12);
+    RB_CHECK(std::abs(result.telemetry.circle_orientation_error_rad) < 1e-12);
+    RB_CHECK(std::abs(result.telemetry.circle_radius_m - 0.05) < 1e-12);
+
+    result = controller.computeCircleMoveTarget(
+        command,
+        stateFromJoints(*kinematics, q_actual, left_mount),
+        q_actual,
+        rb_servo::RunMode::Simulation,
+        0.8,
+        0,
+        &circle,
+        &integrator
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(circle.done);
+    RB_CHECK(result.telemetry.circle_done);
+    RB_CHECK(result.telemetry.circle_repeat_index == 1);
+    RB_CHECK(std::abs(result.telemetry.circle_period_sec - 0.40) < 1e-12);
+    return true;
+}
+
+bool testTcpCircleMoveSafetyGates() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpCircleMove;
+    command.has_tcp_circle_move = true;
+    command.tcp_circle_move.diameter_m = 0.10;
+    command.tcp_circle_move.period_sec = 1.0;
+    command.tcp_circle_move.repeat = 1;
+
+    rb_servo::CartesianCircleMoveState circle;
+    rb_servo::CartesianVelocityIntegratorState integrator;
+    const rb_servo::JointArray q_actual = zeroJoints();
+
+    rb_servo::CartesianControlConfig disabled_config;
+    disabled_config.circle_move.min_period_sec = 0.1;
+    rb_servo::CartesianServoController disabled_controller(left_mount, right_mount, disabled_config, kinematics);
+    rb_servo::CartesianArmTargetResult result = disabled_controller.computeCircleMoveTarget(
+        command,
+        stateFromJoints(*kinematics, q_actual, left_mount),
+        q_actual,
+        rb_servo::RunMode::Simulation,
+        0.01,
+        1,
+        &circle,
+        &integrator
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
+    RB_CHECK(result.reason == "tcp_circle_move_benchmark_primitives_disabled");
+
+    rb_servo::CartesianControlConfig enabled_config;
+    enabled_config.enable_benchmark_primitives = true;
+    enabled_config.circle_move.min_period_sec = 0.1;
+    rb_servo::CartesianServoController enabled_controller(left_mount, right_mount, enabled_config, kinematics);
+    result = enabled_controller.computeCircleMoveTarget(
+        command,
+        stateFromJoints(*kinematics, q_actual, left_mount),
+        q_actual,
+        rb_servo::RunMode::Real,
+        0.01,
+        2,
+        &circle,
+        &integrator
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
+    RB_CHECK(result.reason == "tcp_circle_move_simulation_only");
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -863,5 +984,7 @@ int main() {
     if (!testVelocityIntegrationModesGenerateExpectedTargets()) return 1;
     if (!testVelocityIntegratorUsesClampedSafeTarget()) return 1;
     if (!testVelocityIntegratorDivergenceResetsOrFaults()) return 1;
+    if (!testTcpCircleMoveStartsWithoutJumpAndCompletes()) return 1;
+    if (!testTcpCircleMoveSafetyGates()) return 1;
     return 0;
 }

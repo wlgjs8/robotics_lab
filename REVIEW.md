@@ -138,6 +138,36 @@ Expected Cartesian simulator acceptance after Pinocchio is installed:
 CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 ```
 
+## Current Circle Tracking Simulator Baseline
+
+Circle tracking evidence is simulator-only and is not permission for real robot
+motion. Use `scripts/generate_circle_benchmark_report.py` to produce a markdown
+report and CSV table before changing this section.
+
+Current recorded baseline candidate:
+
+- Artifact: `artifacts/circle_tracking/left_twist_stand_15cm_16s_after/summary.json`
+- Profile/controller: `circle_15cm_16s`, `twist_stand`, left arm
+- Evidence: `repeat=3`, `radius_gain=0.994`, `rms_error_m=0.00222`,
+  `p95_error_m=0.00337`, `fault_latched=false`, worker drops `0`
+- Result semantics: artifact result is `completed`, not `pass`, because no
+  explicit benchmark thresholds were supplied. It meets the current simulator
+  baseline promotion criteria but should not be described as a threshold pass.
+
+Stress evidence is not real-ready. The latest local GENE-style stress artifact
+`artifacts/circle_tracking/gene_15cm_4s_after/summary.json` is useful for
+tuning comparison only and must not be copied directly to hardware speed or
+gain settings.
+
+When replacing this baseline, record:
+
+```text
+Current circle tracking simulator baseline: <artifact path>, profile
+circle_15cm_16s, controller <controller>, repeat <N>, radius_gain <value>,
+rms_error_m <value>, p95_error_m <value>, result <completed/pass>.
+Simulator-only; not real-ready.
+```
+
 ## Open Review Items Before Real Robot
 
 1. Full C++ hardware-free gate must pass on the development machine.
@@ -150,7 +180,7 @@ CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 8. Real motion remains blocked.
 9. Real camera acceptance remains separate.
 10. Measured calibration is still absent.
-11. Run BENCH-CIRCLE-01 simulator benchmark and record artifacts before real robot Cartesian testing. Latest CART-SERVO-01 conservative gate evidence: `artifacts/circle_tracking/bench_circle_01` safe 5 cm / 10 s threshold pass; repeated/profile-specific benchmark evidence is still required before any real Cartesian testing. CART-SERVO-02 changes benchmark runs without thresholds from `pass` to `completed` so poor tracking cannot be mislabeled as a performance pass. CART-SERVO-03 adds the four-profile regression sequence and `scripts/compare_circle_benchmarks.py` for before/after summaries.
+11. Run BENCH-CIRCLE-01 simulator benchmark and record artifacts before real robot Cartesian testing. Latest CART-SERVO-01 conservative gate evidence: `artifacts/circle_tracking/bench_circle_01` safe 5 cm / 10 s threshold pass; `artifacts/circle_tracking/left_twist_stand_15cm_16s_after/summary.json` is the current 15 cm / 16 s simulator baseline candidate but is `completed`, not threshold `pass`. CART-SERVO-02 changes benchmark runs without thresholds from `pass` to `completed` so poor tracking cannot be mislabeled as a performance pass. CART-SERVO-03 adds the four-profile regression sequence and `scripts/compare_circle_benchmarks.py` for before/after summaries. GATE-BENCH-00 registers follow-on gate names for circle ablation, tuning, feedback comparison, server-side circle experiments, and reporting. BENCH-ABLATION-01 adds the matrix runner for factor-separated simulator-only circle tracking experiments; run and archive ablation artifacts before promoting any stress settings. CART-TUNE-02 adds named simulator circle profiles for baseline, stress, and conservative real-candidate separation; none is real-ready. BENCH-CIRCLE-FEEDBACK-01 adds simulator-only closed-loop benchmark modes to compare open-loop twist drift against command-source feedback compensation. BENCH-REPORT-01 defines baseline promotion rules, stress interpretation, and the real-candidate parameter policy.
 
 ## Reviewer Checklist
 

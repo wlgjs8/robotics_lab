@@ -474,6 +474,14 @@ void validateConfig(const DualArmConfig& cfg) {
     if (cfg.cartesian_control.linear_move.max_duration_sec < cfg.cartesian_control.linear_move.min_duration_sec) {
         throw std::runtime_error("cartesian_control.linear_move.max_duration_sec must be >= min_duration_sec");
     }
+    if (cfg.cartesian_control.enable_benchmark_primitives && anyReal(cfg)) {
+        throw std::runtime_error("Refusing cartesian_control.enable_benchmark_primitives in real mode");
+    }
+    if (cfg.cartesian_control.circle_move.allow_in_real) {
+        throw std::runtime_error("cartesian_control.circle_move.allow_in_real must remain false");
+    }
+    validatePositiveFinite(cfg.cartesian_control.circle_move.max_diameter_m, "cartesian_control.circle_move.max_diameter_m");
+    validatePositiveFinite(cfg.cartesian_control.circle_move.min_period_sec, "cartesian_control.circle_move.min_period_sec");
 
     if (cfg.kinematics.enable) {
         const std::string provider = lower(cfg.kinematics.provider);
@@ -839,6 +847,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "enable",
             "allow_in_simulation",
             "allow_in_real",
+            "enable_benchmark_primitives",
             "warn_ik_duration_us",
             "fail_ik_duration_us",
             "path_kp",
@@ -860,6 +869,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "reset_velocity_integrator_on_mode_change",
             "command_actual_error_policy",
             "linear_move",
+            "circle_move",
         }, "cartesian_control");
         if (has(sec, "enable")) cfg.cartesian_control.enable = asBool(sec["enable"], "cartesian_control.enable");
         if (has(sec, "allow_in_simulation")) {
@@ -869,6 +879,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "allow_in_real")) {
             cfg.cartesian_control.allow_in_real =
                 asBool(sec["allow_in_real"], "cartesian_control.allow_in_real");
+        }
+        if (has(sec, "enable_benchmark_primitives")) {
+            cfg.cartesian_control.enable_benchmark_primitives =
+                asBool(sec["enable_benchmark_primitives"], "cartesian_control.enable_benchmark_primitives");
         }
         if (has(sec, "warn_ik_duration_us")) {
             cfg.cartesian_control.warn_ik_duration_us =
@@ -1005,6 +1019,31 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(linear, "default_orientation_mode")) {
                 cfg.cartesian_control.linear_move.default_orientation_mode =
                     parseLinearMoveOrientationMode(linear["default_orientation_mode"], "cartesian_control.linear_move.default_orientation_mode");
+            }
+        }
+        if (has(sec, "circle_move")) {
+            const YAML::Node circle = sec["circle_move"];
+            validateAllowedKeys(circle, {
+                "allow_in_simulation",
+                "allow_in_real",
+                "max_diameter_m",
+                "min_period_sec",
+            }, "cartesian_control.circle_move");
+            if (has(circle, "allow_in_simulation")) {
+                cfg.cartesian_control.circle_move.allow_in_simulation =
+                    asBool(circle["allow_in_simulation"], "cartesian_control.circle_move.allow_in_simulation");
+            }
+            if (has(circle, "allow_in_real")) {
+                cfg.cartesian_control.circle_move.allow_in_real =
+                    asBool(circle["allow_in_real"], "cartesian_control.circle_move.allow_in_real");
+            }
+            if (has(circle, "max_diameter_m")) {
+                cfg.cartesian_control.circle_move.max_diameter_m =
+                    asDouble(circle["max_diameter_m"], "cartesian_control.circle_move.max_diameter_m");
+            }
+            if (has(circle, "min_period_sec")) {
+                cfg.cartesian_control.circle_move.min_period_sec =
+                    asDouble(circle["min_period_sec"], "cartesian_control.circle_move.min_period_sec");
             }
         }
     }

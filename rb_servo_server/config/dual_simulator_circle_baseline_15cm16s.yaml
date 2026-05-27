@@ -1,18 +1,14 @@
 schema: robotics_lab.rb_servo_server.v1
 
-# Simulator-only circular TCP tracking stress profile.
-# This profile is intended for BENCH-CIRCLE-01 GENE-style 15 cm / 4 s stress
-# runs. It intentionally raises simulator Cartesian speed limits above the
-# conservative TCP acceptance profile, but it remains simulation-only and must
-# not be used as real robot evidence.
-# scripts/circle_tracking_benchmark.py refuses this file if real-mode markers,
-# rbpodo backend markers, real Cartesian allowance, or known real robot IPs are
-# added.
+# Simulator-only named profile: simulator_baseline / 15 cm circle / 16 s.
+# Intended benchmark: circle_15cm_16s with required TCP speed about 0.029 m/s.
+# Purpose: conservative repeatable simulator baseline and acceptance candidate.
+# This is not a hardware-ready config and must not be used as real robot evidence.
 
 left_robot:
   backend_type: simulator
   run_mode: simulation
-  name: left_simulator_circle_stress
+  name: left_simulator_circle_baseline_15cm16s
   simulator_control_endpoint: "tcp://127.0.0.1:50200"
   simulator_request_timeout_sec: 0.2
   simulator_connect_timeout_sec: 0.2
@@ -25,7 +21,7 @@ left_robot:
 right_robot:
   backend_type: simulator
   run_mode: simulation
-  name: right_simulator_circle_stress
+  name: right_simulator_circle_baseline_15cm16s
   simulator_control_endpoint: "tcp://127.0.0.1:50210"
   simulator_request_timeout_sec: 0.2
   simulator_connect_timeout_sec: 0.2
@@ -121,10 +117,10 @@ cartesian_control:
   twist_orientation_hold_kp: 6.0
   twist_angular_deadband_rad_s: 0.0001
   velocity_damping: 0.01
-  max_twist_linear_m_s: 0.15
-  max_twist_angular_rad_s: 0.4
-  max_linear_move_speed_m_s: 0.15
-  max_angular_move_speed_rad_s: 0.4
+  max_twist_linear_m_s: 0.03
+  max_twist_angular_rad_s: 0.2
+  max_linear_move_speed_m_s: 0.05
+  max_angular_move_speed_rad_s: 0.3
   max_cartesian_step_m: 0.002
   max_cartesian_step_rad: 0.02
   exceed_limit_policy: clamp

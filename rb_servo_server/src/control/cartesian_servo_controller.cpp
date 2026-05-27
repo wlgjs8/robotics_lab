@@ -10,6 +10,8 @@
 namespace rb_servo {
 namespace {
 
+constexpr double kPi = 3.141592653589793238462643383279502884;
+
 CartesianOrientationInterpolation plannerOrientationMode(LinearMoveOrientationMode mode) {
     return mode == LinearMoveOrientationMode::Slerp
         ? CartesianOrientationInterpolation::Slerp
@@ -88,6 +90,7 @@ bool isTwistMode(ControlMode mode) {
 
 bool sameVelocityIntegrationCategory(ControlMode a, ControlMode b) {
     if (isTwistMode(a) && isTwistMode(b)) return true;
+    if (a == ControlMode::TcpCircleMove && b == ControlMode::TcpCircleMove) return true;
     return a == ControlMode::TcpLinearMove && b == ControlMode::TcpLinearMove;
 }
 
@@ -271,6 +274,66 @@ const ArmMountConfig& mountForArm(
     const ArmMountConfig& right_mount
 ) {
     return arm_id == ArmId::Left ? left_mount : right_mount;
+}
+
+bool circleAxes(TcpCirclePlane plane, int* axis1, int* axis2) {
+    if (!axis1 || !axis2) return false;
+    switch (plane) {
+        case TcpCirclePlane::XY:
+            *axis1 = 0;
+            *axis2 = 1;
+            return true;
+        case TcpCirclePlane::XZ:
+            *axis1 = 0;
+            *axis2 = 2;
+            return true;
+        case TcpCirclePlane::YZ:
+            *axis1 = 1;
+            *axis2 = 2;
+            return true;
+    }
+    return false;
+}
+
+double poseAxisValue(const Pose6D& pose, int axis) {
+    switch (axis) {
+        case 0:
+            return pose.x;
+        case 1:
+            return pose.y;
+        default:
+            return pose.z;
+    }
+}
+
+void setPoseAxisValue(Pose6D* pose, int axis, double value) {
+    if (!pose) return;
+    switch (axis) {
+        case 0:
+            pose->x = value;
+            break;
+        case 1:
+            pose->y = value;
+            break;
+        default:
+            pose->z = value;
+            break;
+    }
+}
+
+void setVecAxisValue(Vec6* vec, int axis, double value) {
+    if (!vec) return;
+    switch (axis) {
+        case 0:
+            vec->x = value;
+            break;
+        case 1:
+            vec->y = value;
+            break;
+        default:
+            vec->z = value;
+            break;
+    }
 }
 
 }  // namespace
@@ -688,6 +751,250 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         velocity,
         dt_sec,
         command.mode,
+        command_seq,
+        velocity_integrator_state
+    );
+}
+
+CartesianArmTargetResult CartesianServoController::computeCircleMoveTarget(
+    const ArmCommand& command,
+    const RobotState& state,
+    const JointArray& previous_safe_sent_q_deg,
+    RunMode run_mode,
+    double dt_sec,
+    uint64_t command_seq,
+    CartesianCircleMoveState* circle_state,
+    CartesianVelocityIntegratorState* velocity_integrator_state
+) {
+    CartesianArmTargetResult result;
+    result.q_target_deg = previous_safe_sent_q_deg;
+    result.telemetry.attempted = true;
+    result.telemetry.fk_duration_us = state.fk_duration_us;
+    result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
+    result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
+
+    if (run_mode != RunMode::Simulation) {
+        result.verdict = SafetyVerdict::CartesianUnavailable;
+        result.reason = "tcp_circle_move_simulation_only";
+        result.telemetry.status = "unavailable";
+        result.telemetry.reason = result.reason;
+        return result;
+    }
+    if (!config_.enable_benchmark_primitives ||
+        !config_.circle_move.allow_in_simulation ||
+        config_.circle_move.allow_in_real) {
+        result.verdict = SafetyVerdict::CartesianUnavailable;
+        result.reason = "tcp_circle_move_benchmark_primitives_disabled";
+        result.telemetry.status = "unavailable";
+        result.telemetry.reason = result.reason;
+        return result;
+    }
+    if (!kinematics_) {
+        result.verdict = SafetyVerdict::CartesianUnavailable;
+        result.reason = "kinematics_unavailable";
+        result.telemetry.status = "unavailable";
+        result.telemetry.reason = result.reason;
+        return result;
+    }
+    if (!circle_state || !state.tcp_stand || !state.has_valid_tcp_pose || !state.has_valid_joint_state) {
+        result.verdict = SafetyVerdict::CartesianUnavailable;
+        result.reason = "tcp_pose_unavailable";
+        result.telemetry.status = "unavailable";
+        result.telemetry.reason = result.reason;
+        return result;
+    }
+    if (!command.has_tcp_circle_move) {
+        result.verdict = SafetyVerdict::InvalidCommand;
+        result.reason = "missing_tcp_circle_move";
+        result.telemetry.status = "failed";
+        result.telemetry.reason = result.reason;
+        return result;
+    }
+
+    const bool continuing_active_circle = command_seq == 0 && circle_state->active;
+    if (!continuing_active_circle && (!circle_state->active || circle_state->seq != command_seq)) {
+        if (command.tcp_circle_move.frame != TcpCircleFrame::Stand ||
+            command.tcp_circle_move.center_mode != TcpCircleCenterMode::StartOnCircle ||
+            command.tcp_circle_move.orientation_mode != LinearMoveOrientationMode::Constant) {
+            result.verdict = SafetyVerdict::InvalidCommand;
+            result.reason = "tcp_circle_move_unsupported_option";
+            result.telemetry.status = "failed";
+            result.telemetry.reason = result.reason;
+            return result;
+        }
+        if (!std::isfinite(command.tcp_circle_move.diameter_m) ||
+            !std::isfinite(command.tcp_circle_move.period_sec) ||
+            command.tcp_circle_move.diameter_m <= 0.0 ||
+            command.tcp_circle_move.period_sec <= 0.0 ||
+            command.tcp_circle_move.repeat <= 0) {
+            result.verdict = SafetyVerdict::InvalidCommand;
+            result.reason = "tcp_circle_move_invalid_parameter";
+            result.telemetry.status = "failed";
+            result.telemetry.reason = result.reason;
+            return result;
+        }
+        if (command.tcp_circle_move.diameter_m > config_.circle_move.max_diameter_m + 1e-12) {
+            result.verdict = SafetyVerdict::InvalidCommand;
+            result.reason = "tcp_circle_move_diameter_limit_exceeded";
+            result.telemetry.status = "failed";
+            result.telemetry.reason = result.reason;
+            return result;
+        }
+        if (command.tcp_circle_move.period_sec < config_.circle_move.min_period_sec - 1e-12) {
+            result.verdict = SafetyVerdict::InvalidCommand;
+            result.reason = "tcp_circle_move_period_limit_exceeded";
+            result.telemetry.status = "failed";
+            result.telemetry.reason = result.reason;
+            return result;
+        }
+
+        int axis1 = 0;
+        int axis2 = 1;
+        if (!circleAxes(command.tcp_circle_move.plane, &axis1, &axis2)) {
+            result.verdict = SafetyVerdict::InvalidCommand;
+            result.reason = "tcp_circle_move_invalid_plane";
+            result.telemetry.status = "failed";
+            result.telemetry.reason = result.reason;
+            return result;
+        }
+
+        *circle_state = CartesianCircleMoveState{};
+        circle_state->active = true;
+        circle_state->seq = command_seq;
+        circle_state->command = command.tcp_circle_move;
+        circle_state->start_tcp_stand = *state.tcp_stand;
+        circle_state->reference_tcp_stand = *state.tcp_stand;
+        circle_state->radius_m = 0.5 * command.tcp_circle_move.diameter_m;
+        circle_state->duration_sec = command.tcp_circle_move.period_sec *
+            static_cast<double>(command.tcp_circle_move.repeat);
+        circle_state->axis1 = axis1;
+        circle_state->axis2 = axis2;
+        circle_state->center_x = state.tcp_stand->x;
+        circle_state->center_y = state.tcp_stand->y;
+        circle_state->center_z = state.tcp_stand->z;
+        switch (axis1) {
+            case 0:
+                circle_state->center_x -= circle_state->radius_m;
+                break;
+            case 1:
+                circle_state->center_y -= circle_state->radius_m;
+                break;
+            default:
+                circle_state->center_z -= circle_state->radius_m;
+                break;
+        }
+    }
+
+    if (!circle_state->done) {
+        circle_state->elapsed_sec = std::min(
+            circle_state->elapsed_sec + std::max(0.0, dt_sec),
+            circle_state->duration_sec
+        );
+        circle_state->done = circle_state->elapsed_sec >= circle_state->duration_sec - 1e-12;
+    }
+
+    const TcpCircleMoveCommand& circle = circle_state->command;
+    const double radius = circle_state->radius_m;
+    const double omega = 2.0 * kPi / circle.period_sec;
+    const double theta = omega * circle_state->elapsed_sec;
+    Pose6D reference = circle_state->start_tcp_stand;
+    reference.x = circle_state->center_x;
+    reference.y = circle_state->center_y;
+    reference.z = circle_state->center_z;
+    setPoseAxisValue(&reference, circle_state->axis1, poseAxisValue(reference, circle_state->axis1) + radius * std::cos(theta));
+    setPoseAxisValue(&reference, circle_state->axis2, poseAxisValue(reference, circle_state->axis2) + radius * std::sin(theta));
+    circle_state->reference_tcp_stand = reference;
+
+    const Vec6 error = math::bodyErrorLocal(*state.tcp_stand, reference);
+    Vec6 v_ref_stand;
+    setVecAxisValue(&v_ref_stand, circle_state->axis1, -radius * omega * std::sin(theta));
+    setVecAxisValue(&v_ref_stand, circle_state->axis2, radius * omega * std::cos(theta));
+    const Vec6 v_ref_local = math::twistStandToLocal(v_ref_stand, *state.tcp_stand);
+    Vec6 v_cmd{
+        v_ref_local.x + config_.path_kp_pos * error.x,
+        v_ref_local.y + config_.path_kp_pos * error.y,
+        v_ref_local.z + config_.path_kp_pos * error.z,
+        v_ref_local.rx + config_.path_kp_ori * error.rx,
+        v_ref_local.ry + config_.path_kp_ori * error.ry,
+        v_ref_local.rz + config_.path_kp_ori * error.rz,
+    };
+    if (!finiteVec6(v_cmd)) {
+        result.verdict = SafetyVerdict::IkFailed;
+        result.reason = "non_finite_cartesian_servo_command";
+        result.telemetry.status = "failed";
+        result.telemetry.reason = result.reason;
+        return result;
+    }
+    bool twist_clamped = false;
+    if (!limitTwist(
+            &v_cmd,
+            config_.max_twist_linear_m_s,
+            config_.max_twist_angular_rad_s,
+            config_.exceed_limit_policy,
+            &twist_clamped)) {
+        result.verdict = SafetyVerdict::InvalidCommand;
+        result.reason = "cartesian_circle_move_limit_exceeded";
+        result.telemetry.status = "failed";
+        result.telemetry.reason = result.reason;
+        return result;
+    }
+
+    const CartesianVelocityResult velocity = kinematics_->solveCartesianVelocity(
+        command.arm_id,
+        state.q_actual_deg,
+        mountForArm(command.arm_id, left_mount_, right_mount_),
+        v_cmd,
+        config_.velocity_damping
+    );
+    if (!velocity.success) {
+        result.verdict = SafetyVerdict::IkFailed;
+        result.reason = velocity.reason.empty() ? "cartesian_velocity_solve_failed" : velocity.reason;
+        result.telemetry.status = "failed";
+        result.telemetry.reason = result.reason;
+        return result;
+    }
+
+    const double path_s = circle_state->duration_sec > 0.0
+        ? std::clamp(circle_state->elapsed_sec / circle_state->duration_sec, 0.0, 1.0)
+        : 1.0;
+    const int repeat_index = std::min(
+        circle.repeat - 1,
+        static_cast<int>(std::floor(circle_state->elapsed_sec / circle.period_sec))
+    );
+    result.verdict = SafetyVerdict::Ok;
+    result.telemetry.success = true;
+    result.telemetry.status = "ok";
+    result.telemetry.path_active = circle_state->active && !circle_state->done;
+    result.telemetry.path_s = path_s;
+    result.telemetry.path_done = circle_state->done;
+    result.telemetry.linear_move_duration_sec = circle_state->duration_sec;
+    result.telemetry.linear_move_elapsed_sec = circle_state->elapsed_sec;
+    result.telemetry.orientation_mode = "constant";
+    result.telemetry.twist_clamped = twist_clamped;
+    result.telemetry.applied_twist_linear_norm_m_s = linearNorm(v_cmd);
+    result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(v_cmd);
+    result.telemetry.path_position_error_m =
+        std::sqrt(error.x * error.x + error.y * error.y + error.z * error.z);
+    result.telemetry.path_orientation_error_rad =
+        std::sqrt(error.rx * error.rx + error.ry * error.ry + error.rz * error.rz);
+    result.telemetry.position_error_m = result.telemetry.path_position_error_m;
+    result.telemetry.orientation_error_rad = result.telemetry.path_orientation_error_rad;
+    result.telemetry.circle_active = result.telemetry.path_active;
+    result.telemetry.circle_phase = theta;
+    result.telemetry.circle_repeat_index = repeat_index;
+    result.telemetry.circle_radius_m = radius;
+    result.telemetry.circle_period_sec = circle.period_sec;
+    result.telemetry.circle_position_error_m = result.telemetry.path_position_error_m;
+    result.telemetry.circle_orientation_error_rad = result.telemetry.path_orientation_error_rad;
+    result.telemetry.circle_done = circle_state->done;
+
+    return integrateVelocityTarget(
+        result,
+        config_,
+        state.q_actual_deg,
+        velocity,
+        dt_sec,
+        ControlMode::TcpCircleMove,
         command_seq,
         velocity_integrator_state
     );

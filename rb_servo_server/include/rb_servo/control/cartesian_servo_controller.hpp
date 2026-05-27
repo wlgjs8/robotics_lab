@@ -24,6 +24,25 @@ struct CartesianServoPathState {
     CartesianOrientationInterpolation orientation_mode = CartesianOrientationInterpolation::Constant;
 };
 
+struct CartesianCircleMoveState {
+    bool active = false;
+    bool done = false;
+    uint64_t seq = 0;
+    double elapsed_sec = 0.0;
+    double duration_sec = 0.0;
+    bool lease_enforced = false;
+    uint64_t lease_expires_time_ns = 0;
+    TcpCircleMoveCommand command;
+    Pose6D start_tcp_stand;
+    Pose6D reference_tcp_stand;
+    double center_x = 0.0;
+    double center_y = 0.0;
+    double center_z = 0.0;
+    double radius_m = 0.0;
+    int axis1 = 0;
+    int axis2 = 1;
+};
+
 struct CartesianTwistHoldState {
     bool orientation_hold_active = false;
     Pose6D hold_tcp_stand;
@@ -69,6 +88,17 @@ public:
         double dt_sec,
         uint64_t command_seq,
         CartesianTwistHoldState* hold_state,
+        CartesianVelocityIntegratorState* velocity_integrator_state = nullptr
+    );
+
+    CartesianArmTargetResult computeCircleMoveTarget(
+        const ArmCommand& command,
+        const RobotState& state,
+        const JointArray& previous_safe_sent_q_deg,
+        RunMode run_mode,
+        double dt_sec,
+        uint64_t command_seq,
+        CartesianCircleMoveState* circle_state,
         CartesianVelocityIntegratorState* velocity_integrator_state = nullptr
     );
 

@@ -87,6 +87,8 @@ _TCP_FRAME_LOCAL = "TCP local"
 _TCP_FRAME_OPTIONS = (_TCP_FRAME_STAND, _TCP_FRAME_LOCAL)
 _TCP_LINEAR_ARM_OPTIONS = ("left", "right", "both")
 _TCP_LINEAR_ORIENTATION_MODES = ("constant", "slerp")
+_DEFAULT_INIT_LEFT_JOINTS_DEG = (-124.660, 32.485, 119.074, -96.294, -81.798, -30.615)
+_DEFAULT_INIT_RIGHT_JOINTS_DEG = (111.949, -49.304, -120.057, 75.305, 87.436, 49.983)
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -108,6 +110,27 @@ def _env_optional_bool(name: str) -> bool | None:
     if raw is None or raw.strip() == "":
         return None
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, fallback: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(fallback)))
+    except ValueError:
+        return fallback
+    return value if math.isfinite(value) else fallback
+
+
+def _env_joint6(name: str, fallback: tuple[float, ...]) -> tuple[float, ...] | None:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return fallback
+    try:
+        values = tuple(float(part.strip()) for part in raw.split(","))
+    except ValueError:
+        return None
+    if len(values) != 6 or not all(math.isfinite(value) for value in values):
+        return None
+    return values
 
 
 def _sim_readiness_from_env(observed: Any) -> Readiness:
@@ -249,6 +272,22 @@ def _apply_tcp_delta_to_target(
         except Exception:
             pass
     return True
+
+
+def _clear_tcp_target_user_moved(scene_handles: dict[str, Any], arms: tuple[str, ...] = ("left", "right")) -> None:
+    for arm in arms:
+        scene_handles.pop(f"{arm}_tcp_target_user_moved", None)
+
+
+def _send_init_motion_and_reset_targets(
+    safety: OperatorSafety,
+    scene_handles: dict[str, Any],
+) -> tuple[bool, str]:
+    ok, message = safety.send_init_motion()
+    if ok:
+        _clear_tcp_target_user_moved(scene_handles)
+        message = f"{message}; TCP targets will follow current TCP"
+    return ok, message
 
 
 def _send_tcp_pose_target_from_marker(
@@ -395,6 +434,14 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
             def _(_: Any, mode: str = mode) -> None:
                 ok, message = safety.send_lifecycle(mode)
                 handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+        init_button = server.gui.add_button("InitMotion")
+        handles["init_motion_button"] = init_button
+
+        @init_button.on_click
+        def _(_: Any) -> None:
+            ok, message = _send_init_motion_and_reset_targets(safety, handles["scene"])
+            handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
 
         handles["last_action"] = server.gui.add_text("Last action", initial_value="none", disabled=True)
 
@@ -638,6 +685,8 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
     disabled_states = safety.control_disabled_states()
     for mode, button in handles.get("lifecycle_buttons", {}).items():
         _set_disabled(button, disabled_states.get(f"lifecycle:{mode}", True))
+    if "init_motion_button" in handles:
+        _set_disabled(handles["init_motion_button"], disabled_states.get("init_motion", True))
     if "jog_button" in handles:
         _set_disabled(handles["jog_button"], disabled_states.get("jog", True))
     for button in handles.get("tcp_pose_buttons", ()):
@@ -743,6 +792,9 @@ def main() -> None:
     observed = normalize_observed_mode_backend(observed_mode_raw, observed_backend_raw)
     ops_available = os.environ.get("RB_GUI_OPS_AVAILABLE", "0") == "1"
     enable_tcp_pose_commands = os.environ.get("RB_GUI_ENABLE_TCP_POSE_COMMANDS", "0") == "1"
+    init_left_joints = _env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG)
+    init_right_joints = _env_joint6("RB_GUI_INIT_RIGHT_JOINTS", _DEFAULT_INIT_RIGHT_JOINTS_DEG)
+    init_motion_timeout_sec = _env_float("RB_GUI_INIT_MOTION_TIMEOUT_SEC", 10.0)
 
     store = StateStore()
     receiver = StateReceiver(store, host=state_host, port=state_port)
@@ -756,6 +808,9 @@ def main() -> None:
         sim_readiness=_sim_readiness_from_env(observed),
         ops_available=ops_available,
         enable_tcp_pose_commands=enable_tcp_pose_commands,
+        init_left_joint_deg=init_left_joints,
+        init_right_joint_deg=init_right_joints,
+        init_motion_timeout_sec=init_motion_timeout_sec,
     )
     server = viser.ViserServer(host=host, port=port)
     handles = build_gui(server, safety, store)

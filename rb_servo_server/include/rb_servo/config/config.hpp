@@ -161,6 +161,13 @@ struct LinearMoveConfig {
     LinearMoveOrientationMode default_orientation_mode = LinearMoveOrientationMode::Constant;
 };
 
+struct CircleMoveConfig {
+    bool allow_in_simulation = true;
+    bool allow_in_real = false;
+    double max_diameter_m = 0.20;
+    double min_period_sec = 3.0;
+};
+
 enum class CartesianLimitPolicy {
     Clamp,
     Reject
@@ -181,6 +188,7 @@ struct CartesianControlConfig {
     bool enable = true;
     bool allow_in_simulation = true;
     bool allow_in_real = false;
+    bool enable_benchmark_primitives = false;
     double warn_ik_duration_us = 3000.0;
     double fail_ik_duration_us = 0.0;
     // Deprecated compatibility field. New control code uses path_kp_pos/path_kp_ori.
@@ -205,6 +213,7 @@ struct CartesianControlConfig {
     CartesianCommandActualErrorPolicy command_actual_error_policy =
         CartesianCommandActualErrorPolicy::Reset;
     LinearMoveConfig linear_move;
+    CircleMoveConfig circle_move;
 };
 
 struct DualArmConfig {

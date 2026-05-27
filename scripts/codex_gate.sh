@@ -192,6 +192,21 @@ run_policy_runner_tests() {
   PYTHONPATH=policy_runner python3 -m unittest discover policy_runner/tests
 }
 
+run_python_surface_tests() {
+  run_gui_tests
+  run_policy_runner_tests
+  run_simulator_tests
+}
+
+run_optional_python_help() {
+  local script="$1"
+  if [[ -f "${script}" ]]; then
+    python3 "${script}" --help >/dev/null
+  else
+    echo "codex_gate: optional script not present: ${script}"
+  fi
+}
+
 run_python_compile_checks() {
   python3 -m compileall -q \
     rb_simulator/src \
@@ -495,6 +510,149 @@ run_cart_servo_03_gate() {
   else
     echo "codex_gate: skipping full circle tracking benchmark; set CODEX_RUN_CIRCLE_BENCHMARK=1 to enable"
   fi
+}
+
+run_bench_ablation_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  python3 scripts/run_circle_ablation.py --help >/dev/null
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_run_circle_ablation.py'
+  python3 scripts/circle_tracking_benchmark.py --help >/dev/null
+  run_optional_python_help scripts/compare_circle_benchmarks.py
+  run_python_surface_tests
+  if [[ "${CODEX_RUN_CIRCLE_ABLATION:-0}" == "1" ]]; then
+    local matrix
+    matrix="${CODEX_CIRCLE_ABLATION_MATRIX:-configs/circle_ablation_15cm.yaml}"
+    if [[ -f "${matrix}" ]]; then
+      PYTHONPATH=rb_simulator/src python3 scripts/run_circle_ablation.py \
+        --root . \
+        --matrix "${matrix}" \
+        --artifact-root artifacts/circle_tracking/ablation_gate \
+        --max-workers 1
+    else
+      echo "codex_gate: skipping full circle ablation; matrix not found: ${matrix}"
+    fi
+  else
+    echo "codex_gate: skipping full circle ablation; set CODEX_RUN_CIRCLE_ABLATION=1 to enable"
+  fi
+}
+
+run_cart_tune_02_gate() {
+  run_shell_syntax_checks
+  run_servo_gate_or_skip_missing_deps
+  run_python_surface_tests
+  grep_existing "safe_5cm_10s|circle_15cm_16s|circle_15cm_8s|gene_15cm_4s" \
+    scripts/circle_tracking_benchmark.py docs/runbooks/circle_tracking_benchmark.md rb_servo_server/config
+  local circle_profiles=(
+    rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml
+    rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
+    rb_servo_server/config/dual_simulator_circle_real_candidate_conservative.yaml
+  )
+  local profile
+  for profile in "${circle_profiles[@]}"; do
+    if [[ ! -f "${profile}" ]]; then
+      echo "ERROR: missing circle tuning profile: ${profile}" >&2
+      return 1
+    fi
+    grep_existing "backend_type:[[:space:]]*simulator" "${profile}"
+    grep_existing "run_mode:[[:space:]]*simulation" "${profile}"
+    grep_existing "allow_in_simulation:[[:space:]]*true" "${profile}"
+    grep_existing "allow_in_real:[[:space:]]*false" "${profile}"
+    local required_key
+    for required_key in \
+      "servo:" \
+      "rate_hz:" \
+      "state_pub_rate_hz:" \
+      "velocity_target_integration:" \
+      "path_kp_pos:" \
+      "path_kp_ori:" \
+      "twist_orientation_hold_kp:" \
+      "twist_angular_deadband_rad_s:" \
+      "velocity_damping:" \
+      "max_twist_linear_m_s:" \
+      "max_twist_angular_rad_s:" \
+      "max_command_actual_error_deg:" \
+      "command_actual_error_policy:"
+    do
+      grep_existing "${required_key}" "${profile}"
+    done
+  done
+  grep_existing "simulator_baseline|simulator_stress|real_candidate_conservative" "${circle_profiles[@]}" docs/runbooks/circle_tracking_benchmark.md REVIEW.md README.md
+  grep_absent "run_mode:[[:space:]]*real|backend_type:[[:space:]]*rbpodo|allow_in_real:[[:space:]]*true|172\\.28\\.60\\.200|172\\.28\\.60\\.201" "${circle_profiles[@]}"
+  grep_existing "dual_simulator_circle_baseline_15cm16s|dual_simulator_circle_stress_15cm4s|dual_simulator_circle_real_candidate_conservative" \
+    docs/runbooks/circle_tracking_benchmark.md README.md REVIEW.md
+}
+
+run_bench_circle_feedback_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_tracking_benchmark.py'
+  python3 scripts/circle_tracking_benchmark.py --help >/dev/null
+  grep_existing "twist_stand_feedback|twist_local_feedback|feedback-kp-pos" \
+    scripts/circle_tracking_benchmark.py docs/runbooks/circle_tracking_benchmark.md
+  run_python_surface_tests
+  if [[ "${CODEX_RUN_CIRCLE_BENCHMARK:-0}" == "1" ]]; then
+    if ! rb_servo_cpp_deps_available; then
+      if [[ "${CODEX_SKIP_MISSING_CPP_DEPS:-0}" == "1" ]]; then
+        echo "codex_gate: skipping circle feedback benchmark runtime; required C++ deps are missing"
+        return 0
+      fi
+      echo "ERROR: circle feedback benchmark runtime requires yaml-cpp, nlohmann_json, Eigen3, and pinocchio" >&2
+      return 1
+    fi
+    if ! loopback_socket_available; then
+      echo "codex_gate: skipping circle feedback benchmark runtime; AF_INET loopback sockets are unavailable"
+      return 0
+    fi
+    build_servo_server_only
+    PYTHONPATH=rb_simulator/src python3 scripts/circle_tracking_benchmark.py \
+      --root . \
+      --mode start-local \
+      --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
+      --server-config rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml \
+      --left-config rb_simulator/config/left_rb3_730e.yaml \
+      --right-config rb_simulator/config/right_rb3_730e.yaml \
+      --arm left \
+      --controller twist_stand_feedback \
+      --plane xy \
+      --profile safe_5cm_10s \
+      --repeat 1 \
+      --command-rate-hz 50 \
+      --max-allowed-rms-error-m 0.01 \
+      --max-allowed-p95-error-m 0.02 \
+      --max-allowed-orientation-drift-rad 0.1 \
+      --artifact-dir artifacts/circle_tracking/bench_circle_feedback_01
+  else
+    echo "codex_gate: skipping full circle feedback benchmark; set CODEX_RUN_CIRCLE_BENCHMARK=1 to enable"
+  fi
+}
+
+run_cart_circle_server_gate() {
+  run_servo_gate_or_skip_missing_deps
+  run_shell_syntax_checks
+  run_python_surface_tests
+  if [[ "${CODEX_RUN_CIRCLE_SERVER:-0}" == "1" ]]; then
+    if [[ -f scripts/run_circle_server_benchmark.py ]]; then
+      PYTHONPATH=rb_simulator/src python3 scripts/run_circle_server_benchmark.py \
+        --root . \
+        --artifact-dir artifacts/circle_tracking/server_circle_gate
+    else
+      echo "codex_gate: skipping server-side circle benchmark; scripts/run_circle_server_benchmark.py is not present"
+    fi
+  else
+    echo "codex_gate: skipping server-side circle benchmark; set CODEX_RUN_CIRCLE_SERVER=1 to enable"
+  fi
+}
+
+run_bench_report_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  run_optional_python_help scripts/report_circle_benchmarks.py
+  run_optional_python_help scripts/circle_benchmark_report.py
+  run_optional_python_help scripts/generate_circle_benchmark_report.py
+  grep_existing "baseline|stress|safe_5cm_10s|gene_15cm_4s" \
+    docs/runbooks/circle_tracking_benchmark.md REVIEW.md
+  echo "codex_gate: skipping full benchmark reporting run by default"
 }
 
 run_doc_hygiene_gate() {
@@ -838,6 +996,9 @@ case "$TASK" in
   CART-TUNE-01|FAULT-DIAG-01)
     run_servo_gate_or_skip_missing_deps
     ;;
+  CART-TUNE-02)
+    run_cart_tune_02_gate
+    ;;
   CART-ACCEPT-01)
     run_cart_accept_gate
     ;;
@@ -852,6 +1013,18 @@ case "$TASK" in
     ;;
   BENCH-CIRCLE-01)
     run_circle_benchmark_gate
+    ;;
+  BENCH-ABLATION-01)
+    run_bench_ablation_gate
+    ;;
+  BENCH-CIRCLE-FEEDBACK-01)
+    run_bench_circle_feedback_gate
+    ;;
+  CART-CIRCLE-SERVER-01)
+    run_cart_circle_server_gate
+    ;;
+  BENCH-REPORT-01)
+    run_bench_report_gate
     ;;
   DOC-HYGIENE-01)
     run_doc_hygiene_gate
