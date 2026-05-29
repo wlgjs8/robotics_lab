@@ -7,8 +7,10 @@
 #include <unistd.h>
 
 #include <array>
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -572,6 +574,111 @@ std::string observedBackendString(const DualArmConfig& config) {
     return "mixed";
 }
 
+std::string lowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+struct TcpPublication {
+    std::optional<Pose6D> actual_base;
+    std::optional<Pose6D> actual_stand;
+    std::optional<Pose6D> ref_base;
+    std::optional<Pose6D> ref_stand;
+    bool actual_valid = false;
+    bool ref_valid = false;
+};
+
+TcpPublication tcpPublicationForState(const RobotState& state) {
+    TcpPublication out;
+    out.actual_base = state.tcp_actual_base.has_value() ? state.tcp_actual_base : state.tcp_base;
+    out.actual_stand = state.tcp_actual_stand.has_value() ? state.tcp_actual_stand : state.tcp_stand;
+    out.ref_base = state.tcp_ref_base;
+    out.ref_stand = state.tcp_ref_stand;
+    out.actual_valid =
+        (state.tcp_actual_valid || state.has_valid_tcp_pose) &&
+        out.actual_base.has_value() &&
+        out.actual_stand.has_value();
+    out.ref_valid =
+        state.tcp_ref_valid &&
+        out.ref_base.has_value() &&
+        out.ref_stand.has_value();
+    return out;
+}
+
+bool isRbpodoControllerSimulation(const BackendConfig& backend_config) {
+    if (backend_config.backend_type != BackendType::Rbpodo) return false;
+    const std::string operation_mode = lowerAscii(backend_config.operation_mode);
+    return operation_mode == "simulation" || operation_mode == "sim";
+}
+
+bool controllerSimulationDiagnosticOverrideActive(
+    const ServoConfig& servo_config,
+    const BackendConfig& backend_config,
+    const ArmStartupValidationSnapshot& startup_validation
+) {
+    return servo_config.send_servo_commands &&
+        servo_config.allow_controller_simulation_motion &&
+        servo_config.allow_controller_simulation_diagnostics_suspect &&
+        isRbpodoControllerSimulation(backend_config) &&
+        startup_validation.allowed_unsafe_startup &&
+        startup_validation.diagnostic_error_source == "rbpodo_diagnostics_suspect";
+}
+
+std::string tcpTrackingSource(
+    const TcpPublication& tcp,
+    const BackendConfig& backend_config
+) {
+    if (isRbpodoControllerSimulation(backend_config) && tcp.ref_valid) {
+        return "tcp_ref_stand";
+    }
+    if (tcp.actual_valid) {
+        return "tcp_actual_stand";
+    }
+    if (tcp.ref_valid) {
+        return "tcp_ref_stand";
+    }
+    return "none";
+}
+
+std::string tcpTrackingSourceRecommendation(
+    const TcpPublication& tcp,
+    const BackendConfig& backend_config
+) {
+    if (isRbpodoControllerSimulation(backend_config)) {
+        if (tcp.ref_valid) {
+            return "reference_for_controller_simulation";
+        }
+        return tcp.actual_valid
+            ? "actual_fallback_reference_unavailable"
+            : "unavailable";
+    }
+    return tcp.actual_valid ? "actual" : "unavailable";
+}
+
+nlohmann::json controllerSimulationModeJson(
+    const TcpPublication& tcp,
+    const BackendConfig& backend_config,
+    bool diagnostic_override_active
+) {
+    if (!isRbpodoControllerSimulation(backend_config)) return nullptr;
+    const bool use_ref = tcp.ref_valid;
+    const std::string recommended_pose = use_ref
+        ? "tcp_ref_stand"
+        : (tcp.actual_valid ? "tcp_actual_stand" : "none");
+    return {
+        {"operation_mode", backend_config.operation_mode},
+        {"recommended_tracking_pose", recommended_pose},
+        {"physical_motion_expected", false},
+        {"controller_simulation_diagnostic_override_active", diagnostic_override_active},
+        {"tcp_ref_valid", tcp.ref_valid},
+        {"reason", use_ref
+            ? "reference_for_controller_simulation"
+            : "reference_unavailable_actual_fallback"},
+    };
+}
+
 nlohmann::json armStateJson(
     const RobotState& state,
     const ArmCommand& command,
@@ -596,9 +703,16 @@ nlohmann::json armStateJson(
     const std::optional<BackendTransportTelemetry>& transport_telemetry,
     bool worker_enabled,
     const ServoConfig& servo_config,
+    const BackendConfig& backend_config,
     const CartesianSolveTelemetry& cartesian_solve,
     const ArmStartupValidationSnapshot& startup_validation
 ) {
+    const TcpPublication tcp = tcpPublicationForState(state);
+    const bool diagnostic_override_active = controllerSimulationDiagnosticOverrideActive(
+        servo_config,
+        backend_config,
+        startup_validation
+    );
     return {
         {"mode", toString(command.mode)},
         {"q_actual_deg", jointArrayJson(state.q_actual_deg)},
@@ -647,9 +761,26 @@ nlohmann::json armStateJson(
         {"robot_time_ns", state.robot_time_ns},
         {"host_time_ns", state.host_time_ns},
         {"error_code", state.error_code},
-        {"tcp_stand", optionalPoseJson(state.tcp_stand)},
-        {"tcp_base", optionalPoseJson(state.tcp_base)},
-        {"has_valid_tcp_pose", state.has_valid_tcp_pose},
+        {"tcp_stand", optionalPoseJson(tcp.actual_stand)},
+        {"tcp_base", optionalPoseJson(tcp.actual_base)},
+        {"tcp_actual_stand", optionalPoseJson(tcp.actual_stand)},
+        {"tcp_actual_base", optionalPoseJson(tcp.actual_base)},
+        {"tcp_ref_stand", optionalPoseJson(tcp.ref_stand)},
+        {"tcp_ref_base", optionalPoseJson(tcp.ref_base)},
+        {"has_valid_tcp_pose", tcp.actual_valid},
+        {"tcp_actual_valid", tcp.actual_valid},
+        {"tcp_ref_valid", tcp.ref_valid},
+        {"tcp_tracking_source", tcpTrackingSource(tcp, backend_config)},
+        {"tcp_tracking_source_recommendation", tcpTrackingSourceRecommendation(tcp, backend_config)},
+        {"controller_simulation_diagnostic_override_active", diagnostic_override_active},
+        {"physical_motion_expected", isRbpodoControllerSimulation(backend_config)
+            ? nlohmann::json(false)
+            : nlohmann::json(nullptr)},
+        {"controller_simulation_mode", controllerSimulationModeJson(
+            tcp,
+            backend_config,
+            diagnostic_override_active
+        )},
         {"tcp_deferred", state.tcp_deferred},
         {"fk_duration_us", state.fk_duration_us},
         {"cartesian_solve", cartesianSolveJson(cartesian_solve)},
@@ -806,6 +937,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.left_transport_telemetry,
         worker_enabled,
         config_.servo,
+        config_.left_robot,
         snapshot.left_cartesian_solve,
         snapshot.startup_validation.left
     );
@@ -833,6 +965,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.right_transport_telemetry,
         worker_enabled,
         config_.servo,
+        config_.right_robot,
         snapshot.right_cartesian_solve,
         snapshot.startup_validation.right
     );

@@ -30,6 +30,9 @@ ENV_KEYS = (
     "RB_ALLOW_REAL_ROBOT",
     "RB_ALLOW_REAL_MOTION",
     "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION",
+    "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
+    "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
+    "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED",
     "RB_ALLOW_REAL_CARTESIAN",
 )
 PROFILES = {
@@ -98,6 +101,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-right-ip", default="172.28.60.201")
     parser.add_argument("--allow-motion", action="store_true")
     parser.add_argument("--allow-ack-disabled", action="store_true")
+    parser.add_argument(
+        "--set-pgmode-simulation",
+        action="store_true",
+        help="Send pgmode simulation to both configured controllers during preflight.",
+    )
+    parser.add_argument(
+        "--verify-pgmode-simulation",
+        action="store_true",
+        help="Verify CobotData.real_vs_simulation_mode without sending pgmode.",
+    )
+    parser.add_argument("--pgmode-timeout-sec", type=float, default=1.0)
+    parser.add_argument("--pgmode-command-port", type=int, default=5000)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
     parser.add_argument(
@@ -249,6 +264,41 @@ def selected_arm(config: ParsedConfig, arm: str) -> ArmConfig:
     return config.left if arm == "left" else config.right
 
 
+def ensure_pgmode_simulation(args: argparse.Namespace, config: ParsedConfig) -> dict[str, Any] | None:
+    set_pgmode = bool(getattr(args, "set_pgmode_simulation", False))
+    verify_pgmode = bool(getattr(args, "verify_pgmode_simulation", False))
+    if set_pgmode and verify_pgmode:
+        raise AcceptanceError("--set-pgmode-simulation and --verify-pgmode-simulation are mutually exclusive")
+    if not set_pgmode and not verify_pgmode:
+        return None
+    try:
+        from rainbow_pgmode import RainbowPgmodeError, ensure_controller_simulation_mode
+    except Exception as exc:
+        raise AcceptanceError("scripts/rainbow_pgmode.py helper is unavailable") from exc
+    try:
+        return ensure_controller_simulation_mode(
+            [config.left.ip, config.right.ip],
+            getattr(args, "pgmode_timeout_sec", 1.0),
+            port=getattr(args, "pgmode_command_port", 5000),
+            confirmation=args.i_understand_this_connects_to_real_controller,
+            set_simulation=set_pgmode,
+            verify_only=verify_pgmode,
+        )
+    except RainbowPgmodeError as exc:
+        raise AcceptanceError(
+            f"controller not confirmed in pgmode simulation; refusing controller-simulation benchmark: {exc}"
+        ) from exc
+
+
+def require_controller_simulation_config(config: ParsedConfig) -> None:
+    for label, arm_cfg in (("left", config.left), ("right", config.right)):
+        if arm_cfg.operation_mode not in {"simulation", "sim"}:
+            actual = arm_cfg.operation_mode or "<missing>"
+            raise AcceptanceError(
+                f"config operation_mode is {actual} for {label}_robot; refusing controller-simulation benchmark"
+            )
+
+
 def validate_profile(config: ParsedConfig, args: argparse.Namespace) -> str:
     rate = int(config.servo.get("rate_hz", 0) or 0)
     tolerance_ratio = as_float(config.servo.get("servo_t1_rate_match_tolerance_ratio"), 0.2) or 0.2
@@ -311,6 +361,12 @@ def preflight(args: argparse.Namespace, config: ParsedConfig) -> dict[str, Any]:
         raise AcceptanceError("rbpodo real acceptance requires RB_ALLOW_REAL_ROBOT=1")
     if env_enabled("RB_ALLOW_REAL_CARTESIAN"):
         raise AcceptanceError("RB_ALLOW_REAL_CARTESIAN must not be set for rbpodo Servo J acceptance")
+    pgmode_timeout_sec = getattr(args, "pgmode_timeout_sec", 1.0)
+    pgmode_command_port = getattr(args, "pgmode_command_port", 5000)
+    if not math.isfinite(pgmode_timeout_sec) or pgmode_timeout_sec <= 0.0:
+        raise AcceptanceError("--pgmode-timeout-sec must be finite and positive")
+    if pgmode_command_port < 1 or pgmode_command_port > 65535:
+        raise AcceptanceError("--pgmode-command-port must be in [1, 65535]")
 
     send_servo_commands = as_bool(config.servo.get("send_servo_commands"), True)
     selected = selected_arm(config, args.arm)
@@ -326,12 +382,29 @@ def preflight(args: argparse.Namespace, config: ParsedConfig) -> dict[str, Any]:
             raise AcceptanceError(f"{args.mode} requires servo.send_servo_commands=true")
         if not env_enabled("RB_ALLOW_REAL_MOTION"):
             raise AcceptanceError(f"{args.mode} requires RB_ALLOW_REAL_MOTION=1")
+        if not env_enabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"):
+            raise AcceptanceError(f"{args.mode} requires RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1")
+        if not as_bool(config.servo.get("allow_controller_simulation_motion"), False):
+            raise AcceptanceError(
+                f"{args.mode} requires servo.allow_controller_simulation_motion=true"
+            )
+        if as_bool(config.servo.get("allow_controller_simulation_diagnostics_suspect"), False) and not env_enabled(
+            "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM"
+        ):
+            raise AcceptanceError(
+                "diagnostics-suspect controller-simulation override requires "
+                "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1"
+            )
         if selected.disable_waiting_ack and not env_enabled("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION"):
             raise AcceptanceError("ACK-off motion requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1")
         if not args.i_understand_this_connects_to_real_controller:
             raise AcceptanceError(f"{args.mode} requires explicit real-controller confirmation")
-    if args.mode == "servo_j_noop" and selected.operation_mode not in {"simulation", "sim"}:
-        raise AcceptanceError("servo_j_noop requires selected arm operation_mode=simulation")
+        require_controller_simulation_config(config)
+        if not getattr(args, "set_pgmode_simulation", False) and not getattr(args, "verify_pgmode_simulation", False):
+            raise AcceptanceError(
+                "controller not confirmed in pgmode simulation; refusing controller-simulation benchmark"
+            )
+    pgmode_preflight = ensure_pgmode_simulation(args, config)
     if args.mode == "tiny_joint_motion":
         raise AcceptanceError("tiny_joint_motion is reserved for a future explicit motion runbook")
 
@@ -351,6 +424,17 @@ def preflight(args: argparse.Namespace, config: ParsedConfig) -> dict[str, Any]:
         "env": env_snapshot(),
         "real_robot_ips_checked": sorted(REAL_ROBOT_IPS),
         "confirmation_flag": args.i_understand_this_connects_to_real_controller,
+        "pgmode_simulation_preflight": pgmode_preflight,
+        "pgmode_simulation_confirmed": (
+            pgmode_preflight is not None and pgmode_preflight.get("overall_result") == "ok"
+        ),
+        "server_env_overrides": {
+            "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED": "1"
+        } if (
+            args.mode in MOTION_MODES and
+            pgmode_preflight is not None and
+            pgmode_preflight.get("overall_result") == "ok"
+        ) else {},
     }
 
 
@@ -624,18 +708,25 @@ def latest_q_actual(states: list[dict[str, Any]], arm: str) -> list[float] | Non
     return None
 
 
-def start_server(args: argparse.Namespace, log_path: Path) -> subprocess.Popen[str]:
+def start_server(
+    args: argparse.Namespace,
+    log_path: Path,
+    preflight_result: dict[str, Any],
+) -> subprocess.Popen[str]:
     server = (args.root / args.server).resolve() if not args.server.is_absolute() else args.server
     if not server.is_file():
         raise AcceptanceError(f"server binary not found: {server}")
     command = [str(server), "--config", str(args.config.resolve())]
     log = log_path.open("w", encoding="utf-8")
+    server_env = os.environ.copy()
+    server_env.update(preflight_result.get("server_env_overrides") or {})
     return subprocess.Popen(
         command,
         cwd=str(args.root.resolve()),
         stdout=log,
         stderr=subprocess.STDOUT,
         text=True,
+        env=server_env,
         start_new_session=True,
     )
 
@@ -914,7 +1005,7 @@ def run_acceptance(args: argparse.Namespace) -> int:
     command_count = 0
     server_log_path = artifact_dir / "rb_servo_server.log"
     try:
-        server_proc = start_server(args, server_log_path)
+        server_proc = start_server(args, server_log_path, preflight_result)
         first_state = wait_for_first_state(
             state_sock,
             args.startup_timeout_sec,
@@ -1027,6 +1118,10 @@ logging:
             expected_right_ip="172.28.60.201",
             allow_motion=False,
             allow_ack_disabled=False,
+            set_pgmode_simulation=False,
+            verify_pgmode_simulation=False,
+            pgmode_timeout_sec=1.0,
+            pgmode_command_port=5000,
             preflight_only=False,
             skip_plots=True,
             i_understand_this_connects_to_real_controller=True,
@@ -1036,6 +1131,9 @@ logging:
             os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
             os.environ.pop("RB_ALLOW_REAL_MOTION", None)
             os.environ.pop("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION", None)
+            os.environ.pop("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION", None)
+            os.environ.pop("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM", None)
+            os.environ.pop("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED", None)
             os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
             result = preflight(base, config)
             assert result["profile"] == "200hz_ack"
@@ -1043,6 +1141,21 @@ logging:
             motion = argparse.Namespace(**vars(base))
             motion.mode = "servo_j_noop"
             expect_error(lambda: preflight(motion, config))
+
+            controller_sim_config = load_config(path)
+            controller_sim_config.left.operation_mode = "simulation"
+            controller_sim_config.right.operation_mode = "simulation"
+            controller_sim_config.servo["send_servo_commands"] = True
+            controller_sim_config.servo["allow_controller_simulation_motion"] = True
+            controller_sim_motion = argparse.Namespace(**vars(base))
+            controller_sim_motion.mode = "servo_j_noop"
+            controller_sim_motion.allow_motion = True
+            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
+            expect_error(lambda: preflight(controller_sim_motion, controller_sim_config))
+            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
+            expect_error(lambda: preflight(controller_sim_motion, controller_sim_config))
+            os.environ.pop("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION", None)
+            os.environ.pop("RB_ALLOW_REAL_MOTION", None)
 
             config.servo["send_servo_commands"] = True
             expect_error(lambda: preflight(base, config))

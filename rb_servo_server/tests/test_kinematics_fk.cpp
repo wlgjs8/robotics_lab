@@ -4,7 +4,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -207,8 +209,11 @@ public:
 
 class TestBackend final : public rb_servo::IRobotBackend {
 public:
-    TestBackend(rb_servo::ArmId arm_id, rb_servo::JointArray q_actual)
-        : arm_id_(arm_id), q_actual_(q_actual) {}
+    TestBackend(
+        rb_servo::ArmId arm_id,
+        rb_servo::JointArray q_actual,
+        std::optional<rb_servo::JointArray> q_target = std::nullopt
+    ) : arm_id_(arm_id), q_actual_(q_actual), q_target_(q_target.value_or(q_actual)) {}
 
     rb_servo::BackendResult<rb_servo::RobotState> connect() override {
         connected_ = true;
@@ -225,6 +230,7 @@ public:
     }
 
     rb_servo::SendServoJResult sendServoJ(const rb_servo::SendServoJRequest& request) override {
+        q_target_ = request.q_target_deg;
         q_actual_ = request.q_target_deg;
         return rb_servo::acceptedSend(request, {}, currentState(), "cache");
     }
@@ -240,7 +246,7 @@ private:
         rb_servo::RobotState state;
         state.arm_id = arm_id_;
         state.q_actual_deg = q_actual_;
-        state.q_target_deg = q_actual_;
+        state.q_target_deg = q_target_;
         state.has_valid_joint_state = true;
         state.connection_state = connected_
             ? rb_servo::RobotConnectionState::Connected
@@ -260,6 +266,7 @@ private:
 
     rb_servo::ArmId arm_id_;
     rb_servo::JointArray q_actual_{};
+    rb_servo::JointArray q_target_{};
     bool connected_ = false;
     bool initialized_ = false;
 };
@@ -463,6 +470,10 @@ bool testStatePublisherSerializesTcpPoseValidity() {
     RB_CHECK(json.at("left").at("tcp_base").at("rx").get<double>() == 0.01);
     RB_CHECK(json.at("left").at("tcp_base").at("ry").get<double>() == 0.02);
     RB_CHECK(json.at("left").at("tcp_base").at("rz").get<double>() == 0.03);
+    RB_CHECK(json.at("left").at("tcp_actual_base").at("x").get<double>() == 0.1);
+    RB_CHECK(json.at("left").at("tcp_actual_stand").at("x").get<double>() == 1.1);
+    RB_CHECK(json.at("left").at("tcp_ref_base").is_null());
+    RB_CHECK(json.at("left").at("tcp_ref_stand").is_null());
     RB_CHECK(json.at("left").at("tcp_base").at("quaternion_xyzw").is_array());
     const double q_norm = std::sqrt(1.0 + 4.0 + 9.0 + 16.0);
     RB_CHECK(std::fabs(json.at("left").at("tcp_base").at("quaternion_xyzw").at(0).get<double>() - 1.0 / q_norm) < 1e-12);
@@ -474,11 +485,24 @@ bool testStatePublisherSerializesTcpPoseValidity() {
     RB_CHECK(std::fabs(json.at("left").at("tcp_base").at("qz").get<double>() - 3.0 / q_norm) < 1e-12);
     RB_CHECK(std::fabs(json.at("left").at("tcp_base").at("qw").get<double>() - 4.0 / q_norm) < 1e-12);
     RB_CHECK(json.at("left").at("has_valid_tcp_pose").get<bool>());
+    RB_CHECK(json.at("left").at("tcp_actual_valid").get<bool>());
+    RB_CHECK(!json.at("left").at("tcp_ref_valid").get<bool>());
+    RB_CHECK(json.at("left").at("tcp_tracking_source").get<std::string>() == "tcp_actual_stand");
+    RB_CHECK(json.at("left").at("tcp_tracking_source_recommendation").get<std::string>() == "actual");
+    RB_CHECK(json.at("left").at("controller_simulation_mode").is_null());
     RB_CHECK(!json.at("left").at("tcp_deferred").get<bool>());
 
     RB_CHECK(json.at("right").at("tcp_base").is_null());
     RB_CHECK(json.at("right").at("tcp_stand").is_null());
+    RB_CHECK(json.at("right").at("tcp_actual_base").is_null());
+    RB_CHECK(json.at("right").at("tcp_actual_stand").is_null());
+    RB_CHECK(json.at("right").at("tcp_ref_base").is_null());
+    RB_CHECK(json.at("right").at("tcp_ref_stand").is_null());
     RB_CHECK(!json.at("right").at("has_valid_tcp_pose").get<bool>());
+    RB_CHECK(!json.at("right").at("tcp_actual_valid").get<bool>());
+    RB_CHECK(!json.at("right").at("tcp_ref_valid").get<bool>());
+    RB_CHECK(json.at("right").at("tcp_tracking_source").get<std::string>() == "none");
+    RB_CHECK(json.at("right").at("tcp_tracking_source_recommendation").get<std::string>() == "unavailable");
     RB_CHECK(!json.at("right").at("tcp_deferred").get<bool>());
     return true;
 }
@@ -495,11 +519,23 @@ bool testStatePublisherKeepsTcpDeferredWhenFkDisabled() {
     RB_CHECK(json.at("tcp_fields_deferred").get<bool>());
     RB_CHECK(json.at("left").at("tcp_base").is_null());
     RB_CHECK(json.at("left").at("tcp_stand").is_null());
+    RB_CHECK(json.at("left").at("tcp_actual_base").is_null());
+    RB_CHECK(json.at("left").at("tcp_actual_stand").is_null());
+    RB_CHECK(json.at("left").at("tcp_ref_base").is_null());
+    RB_CHECK(json.at("left").at("tcp_ref_stand").is_null());
     RB_CHECK(!json.at("left").at("has_valid_tcp_pose").get<bool>());
+    RB_CHECK(!json.at("left").at("tcp_actual_valid").get<bool>());
+    RB_CHECK(!json.at("left").at("tcp_ref_valid").get<bool>());
     RB_CHECK(json.at("left").at("tcp_deferred").get<bool>());
     RB_CHECK(json.at("right").at("tcp_base").is_null());
     RB_CHECK(json.at("right").at("tcp_stand").is_null());
+    RB_CHECK(json.at("right").at("tcp_actual_base").is_null());
+    RB_CHECK(json.at("right").at("tcp_actual_stand").is_null());
+    RB_CHECK(json.at("right").at("tcp_ref_base").is_null());
+    RB_CHECK(json.at("right").at("tcp_ref_stand").is_null());
     RB_CHECK(!json.at("right").at("has_valid_tcp_pose").get<bool>());
+    RB_CHECK(!json.at("right").at("tcp_actual_valid").get<bool>());
+    RB_CHECK(!json.at("right").at("tcp_ref_valid").get<bool>());
     RB_CHECK(json.at("right").at("tcp_deferred").get<bool>());
     return true;
 }
@@ -550,6 +586,121 @@ bool testServoLoopPublishesInjectedFkForValidJointState() {
     return true;
 }
 
+bool testServoLoopPublishesActualAndReferenceTcpForControllerSimulation() {
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_robot.backend_type = rb_servo::BackendType::Rbpodo;
+    cfg.right_robot.backend_type = rb_servo::BackendType::Rbpodo;
+    cfg.left_robot.operation_mode = "simulation";
+    cfg.right_robot.operation_mode = "simulation";
+    rb_servo::CommandBuffer buffer;
+    auto kinematics = std::make_shared<FakeKinematics>();
+
+    rb_servo::JointArray left_actual = joints(10.0);
+    rb_servo::JointArray left_ref = joints(10.0);
+    left_ref[0] = 20.0;
+    left_ref[1] = 30.0;
+    rb_servo::JointArray right_actual = joints(20.0);
+    rb_servo::JointArray right_ref = joints(20.0);
+    right_ref[0] = 25.0;
+    right_ref[1] = 35.0;
+
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, left_actual, left_ref),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, right_actual, right_ref),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+
+    RB_CHECK(loop.start());
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+
+    RB_CHECK(snapshot.left_state.tcp_actual_valid);
+    RB_CHECK(snapshot.left_state.tcp_ref_valid);
+    RB_CHECK(snapshot.left_state.tcp_base.has_value());
+    RB_CHECK(snapshot.left_state.tcp_stand.has_value());
+    RB_CHECK(snapshot.left_state.tcp_actual_base.has_value());
+    RB_CHECK(snapshot.left_state.tcp_actual_stand.has_value());
+    RB_CHECK(snapshot.left_state.tcp_ref_base.has_value());
+    RB_CHECK(snapshot.left_state.tcp_ref_stand.has_value());
+    RB_CHECK(differentPose(*snapshot.left_state.tcp_actual_stand, *snapshot.left_state.tcp_ref_stand));
+    RB_CHECK(std::fabs(snapshot.left_state.tcp_stand->x - snapshot.left_state.tcp_actual_stand->x) < 1e-12);
+    RB_CHECK(std::fabs(snapshot.left_state.tcp_base->x - snapshot.left_state.tcp_actual_base->x) < 1e-12);
+    RB_CHECK(normalizedQuaternion(*snapshot.left_state.tcp_actual_stand));
+    RB_CHECK(normalizedQuaternion(*snapshot.left_state.tcp_ref_stand));
+
+    rb_servo::StatePublisher publisher(cfg);
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    RB_CHECK(json.at("left").at("tcp_actual_valid").get<bool>());
+    RB_CHECK(json.at("left").at("tcp_ref_valid").get<bool>());
+    RB_CHECK(!json.at("left").at("tcp_actual_stand").is_null());
+    RB_CHECK(!json.at("left").at("tcp_ref_stand").is_null());
+    RB_CHECK(json.at("left").at("tcp_actual_stand").contains("quaternion_xyzw"));
+    RB_CHECK(json.at("left").at("tcp_ref_stand").contains("quaternion_xyzw"));
+    RB_CHECK(json.at("left").at("tcp_stand").at("x").get<double>() ==
+             json.at("left").at("tcp_actual_stand").at("x").get<double>());
+    RB_CHECK(json.at("left").at("tcp_ref_stand").at("x").get<double>() !=
+             json.at("left").at("tcp_actual_stand").at("x").get<double>());
+    RB_CHECK(json.at("left").at("tcp_tracking_source").get<std::string>() == "tcp_ref_stand");
+    RB_CHECK(
+        json.at("left").at("tcp_tracking_source_recommendation").get<std::string>() ==
+        "reference_for_controller_simulation"
+    );
+    RB_CHECK(json.at("left").at("controller_simulation_mode").at("recommended_tracking_pose").get<std::string>() == "tcp_ref_stand");
+    RB_CHECK(!json.at("left").at("controller_simulation_mode").at("physical_motion_expected").get<bool>());
+    return true;
+}
+
+bool testServoLoopOmitsReferenceTcpForInvalidReferenceJoints() {
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_robot.backend_type = rb_servo::BackendType::Rbpodo;
+    cfg.left_robot.operation_mode = "simulation";
+    rb_servo::CommandBuffer buffer;
+    auto kinematics = std::make_shared<FakeKinematics>();
+
+    rb_servo::JointArray actual = joints(10.0);
+    rb_servo::JointArray invalid_ref = joints(10.0);
+    invalid_ref[2] = std::numeric_limits<double>::quiet_NaN();
+
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, actual, invalid_ref),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, actual, actual),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+
+    RB_CHECK(loop.start());
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+
+    RB_CHECK(snapshot.left_state.tcp_actual_valid);
+    RB_CHECK(!snapshot.left_state.tcp_ref_valid);
+    RB_CHECK(snapshot.left_state.tcp_actual_stand.has_value());
+    RB_CHECK(!snapshot.left_state.tcp_ref_stand.has_value());
+
+    rb_servo::StatePublisher publisher(cfg);
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    RB_CHECK(json.at("left").at("tcp_actual_valid").get<bool>());
+    RB_CHECK(!json.at("left").at("tcp_ref_valid").get<bool>());
+    RB_CHECK(!json.at("left").at("tcp_actual_stand").is_null());
+    RB_CHECK(json.at("left").at("tcp_ref_base").is_null());
+    RB_CHECK(json.at("left").at("tcp_ref_stand").is_null());
+    RB_CHECK(json.at("left").at("tcp_tracking_source").get<std::string>() == "tcp_actual_stand");
+    RB_CHECK(
+        json.at("left").at("tcp_tracking_source_recommendation").get<std::string>() ==
+        "actual_fallback_reference_unavailable"
+    );
+    RB_CHECK(json.at("left").at("controller_simulation_mode").at("recommended_tracking_pose").get<std::string>() == "tcp_actual_stand");
+    RB_CHECK(!json.at("left").at("controller_simulation_mode").at("tcp_ref_valid").get<bool>());
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -561,5 +712,7 @@ int main() {
     if (!testStatePublisherSerializesTcpPoseValidity()) return 1;
     if (!testStatePublisherKeepsTcpDeferredWhenFkDisabled()) return 1;
     if (!testServoLoopPublishesInjectedFkForValidJointState()) return 1;
+    if (!testServoLoopPublishesActualAndReferenceTcpForControllerSimulation()) return 1;
+    if (!testServoLoopOmitsReferenceTcpForInvalidReferenceJoints()) return 1;
     return 0;
 }

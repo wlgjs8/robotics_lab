@@ -253,9 +253,17 @@ struct RobotState {
     JointArray dq_actual_deg_s{};
     bool has_valid_joint_state = false;
 
+    // Legacy aliases for actual TCP FK from q_actual_deg.
     std::optional<Pose6D> tcp_base;
     std::optional<Pose6D> tcp_stand;
+    std::optional<Pose6D> tcp_actual_base;
+    std::optional<Pose6D> tcp_actual_stand;
+    // Controller/internal reference TCP FK from q_target_deg / rbpodo jnt_ref.
+    std::optional<Pose6D> tcp_ref_base;
+    std::optional<Pose6D> tcp_ref_stand;
     bool has_valid_tcp_pose = false;
+    bool tcp_actual_valid = false;
+    bool tcp_ref_valid = false;
     bool tcp_deferred = true;
     double fk_duration_us = 0.0;
     Wrench6D wrench_tcp;

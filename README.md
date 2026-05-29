@@ -211,6 +211,15 @@ Circle tracking benchmark:
 See `docs/runbooks/circle_tracking_benchmark.md` for simulator-only benchmark
 profiles and artifact interpretation.
 
+rbpodo controller-simulation circle templates:
+
+```bash
+less docs/runbooks/rbpodo_controller_sim_circle.md
+```
+
+These configs target Rainbow controller boxes in `pgmode` simulation only; they
+do not approve physical Cartesian motion.
+
 rbpodo vs rbscript TCP no-motion/read-only comparison:
 
 ```bash

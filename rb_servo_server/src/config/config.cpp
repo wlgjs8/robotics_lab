@@ -349,6 +349,18 @@ bool anyReal(const DualArmConfig& cfg) {
     return cfg.left_robot.run_mode == RunMode::Real || cfg.right_robot.run_mode == RunMode::Real;
 }
 
+bool isRbpodoControllerSimulationBackend(const BackendConfig& backend) {
+    if (backend.backend_type != BackendType::Rbpodo) return false;
+    if (backend.run_mode != RunMode::Real) return false;
+    const std::string operation_mode = lower(backend.operation_mode);
+    return operation_mode == "simulation" || operation_mode == "sim";
+}
+
+bool bothBackendsAreRbpodoControllerSimulation(const DualArmConfig& cfg) {
+    return isRbpodoControllerSimulationBackend(cfg.left_robot) &&
+        isRbpodoControllerSimulationBackend(cfg.right_robot);
+}
+
 std::string resolvePathForConfig(const std::string& value, const std::string& config_path) {
     namespace fs = std::filesystem;
     fs::path raw(value);
@@ -496,6 +508,46 @@ void validateConfig(const DualArmConfig& cfg) {
         throw std::runtime_error(
             "servo.allow_readonly_*_startup options require servo.send_servo_commands=false"
         );
+    }
+    if (cfg.servo.allow_controller_simulation_diagnostics_suspect &&
+        !cfg.servo.allow_controller_simulation_motion) {
+        throw std::runtime_error(
+            "servo.allow_controller_simulation_diagnostics_suspect requires "
+            "servo.allow_controller_simulation_motion=true"
+        );
+    }
+    if (cfg.servo.allow_controller_simulation_motion ||
+        cfg.servo.allow_controller_simulation_diagnostics_suspect) {
+        if (!cfg.servo.send_servo_commands) {
+            throw std::runtime_error(
+                "servo.allow_controller_simulation_* options require servo.send_servo_commands=true"
+            );
+        }
+        if (!bothBackendsAreRbpodoControllerSimulation(cfg)) {
+            throw std::runtime_error(
+                "servo.allow_controller_simulation_* options require both rbpodo backends "
+                "to use run_mode=real and operation_mode=simulation"
+            );
+        }
+        if (!envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION")) {
+            throw std::runtime_error(
+                "Refusing rbpodo controller-simulation motion without "
+                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1."
+            );
+        }
+        if (!envIsOne("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")) {
+            throw std::runtime_error(
+                "Refusing rbpodo controller-simulation motion before pgmode simulation "
+                "is confirmed by the acceptance tool."
+            );
+        }
+        if (cfg.servo.allow_controller_simulation_diagnostics_suspect &&
+            !envIsOne("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM")) {
+            throw std::runtime_error(
+                "Refusing rbpodo diagnostics-suspect controller-simulation override without "
+                "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1."
+            );
+        }
     }
     if (cfg.safety.joint_wrap_for_motion_safety) {
         throw std::runtime_error(
@@ -852,6 +904,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "allow_readonly_faulted_startup",
             "allow_readonly_q_range_violation_startup",
             "allow_readonly_wrong_mode_startup",
+            "allow_controller_simulation_motion",
+            "allow_controller_simulation_diagnostics_suspect",
             "enable_realtime_priority",
             "realtime_priority",
             "cpu_core",
@@ -881,6 +935,17 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "allow_readonly_wrong_mode_startup")) {
             cfg.servo.allow_readonly_wrong_mode_startup =
                 asBool(sec["allow_readonly_wrong_mode_startup"], "servo.allow_readonly_wrong_mode_startup");
+        }
+        if (has(sec, "allow_controller_simulation_motion")) {
+            cfg.servo.allow_controller_simulation_motion =
+                asBool(sec["allow_controller_simulation_motion"], "servo.allow_controller_simulation_motion");
+        }
+        if (has(sec, "allow_controller_simulation_diagnostics_suspect")) {
+            cfg.servo.allow_controller_simulation_diagnostics_suspect =
+                asBool(
+                    sec["allow_controller_simulation_diagnostics_suspect"],
+                    "servo.allow_controller_simulation_diagnostics_suspect"
+                );
         }
         if (has(sec, "enable_realtime_priority")) cfg.servo.enable_realtime_priority = asBool(sec["enable_realtime_priority"], "servo.enable_realtime_priority");
         if (has(sec, "realtime_priority")) cfg.servo.realtime_priority = asInt(sec["realtime_priority"], "servo.realtime_priority");

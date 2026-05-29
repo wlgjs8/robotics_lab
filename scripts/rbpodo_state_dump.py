@@ -262,6 +262,24 @@ def diagnostic_interpretation(raw: dict[str, Any]) -> tuple[bool, list[str], lis
     return bool(suspect_reasons), suspect_reasons, sorted(set(clear_errors))
 
 
+def controller_mode_name(raw_mode: Any) -> str:
+    value = integer(raw_mode)
+    if value == 1:
+        return "simulation"
+    if value == 0:
+        return "real"
+    return "unknown"
+
+
+def controller_mode_warning(raw_mode: Any) -> str | None:
+    name = controller_mode_name(raw_mode)
+    if name == "simulation":
+        return None
+    if name == "real":
+        return "controller not confirmed in pgmode simulation: real_vs_simulation_mode=0"
+    return f"controller not confirmed in pgmode simulation: real_vs_simulation_mode={raw_mode}"
+
+
 def first_nonzero_error(raw: dict[str, Any]) -> tuple[str | None, int | None]:
     for field in ERROR_FIELD_ORDER:
         value = integer(raw.get(field))
@@ -305,15 +323,33 @@ def build_report_for_sdata(
     wrap_period_deg: list[float] | None,
 ) -> dict[str, Any]:
     raw = extract_raw_fields(sdata)
+    raw_mode = raw.get("real_vs_simulation_mode")
+    mode_warning = controller_mode_warning(raw_mode)
     q_actual, q_actual_finite, q_actual_all_finite = finite_joint_array(getattr(sdata, "jnt_ang", []))
     q_ref, q_ref_finite, q_ref_all_finite = finite_joint_array(getattr(sdata, "jnt_ref", []))
     violations, wrapped, wrap_cleared = q_range_diagnostics(q_actual, q_min_deg, q_max_deg, wrap_period_deg)
     diagnostics_suspect, suspect_reasons, clear_errors = diagnostic_interpretation(raw)
     first_name, first_code = first_nonzero_error(raw)
+    next_steps = recommendations(
+        q_actual_all_finite,
+        diagnostics_suspect,
+        clear_errors,
+        violations,
+        wrap_cleared,
+        True,
+    )
+    if mode_warning:
+        next_steps.append(
+            "Verify controller pgmode simulation with scripts/rainbow_pgmode.py before controller-simulation benchmarks."
+        )
     return {
         "ip": ip,
         "ok": True,
         "raw": raw,
+        "real_vs_simulation_mode": raw_mode,
+        "controller_mode": controller_mode_name(raw_mode),
+        "controller_mode_is_simulation": controller_mode_name(raw_mode) == "simulation",
+        "controller_mode_warning": mode_warning,
         "first_nonzero_error_name": first_name,
         "first_nonzero_error_code": first_code,
         "diagnostics_suspect": diagnostics_suspect,
@@ -327,14 +363,7 @@ def build_report_for_sdata(
         "q_ref_all_finite": q_ref_all_finite,
         "q_range_violations": violations,
         "q_range_wrapped": wrapped,
-        "recommended_next_steps": recommendations(
-            q_actual_all_finite,
-            diagnostics_suspect,
-            clear_errors,
-            violations,
-            wrap_cleared,
-            True,
-        ),
+        "recommended_next_steps": next_steps,
     }
 
 
@@ -407,6 +436,10 @@ def human_summary(report: dict[str, Any]) -> str:
         else:
             lines.append(f"  q_actual_deg: {item.get('q_actual_deg')}")
             lines.append(f"  q_ref_deg: {item.get('q_ref_deg')}")
+            lines.append(f"  real_vs_simulation_mode: {item.get('real_vs_simulation_mode')}")
+            lines.append(f"  controller_mode: {item.get('controller_mode')}")
+            if item.get("controller_mode_warning"):
+                lines.append(f"  WARNING: {item.get('controller_mode_warning')}")
             lines.append(f"  q_actual_all_finite: {item.get('q_actual_all_finite')}")
             lines.append(f"  diagnostics_suspect: {item.get('diagnostics_suspect')}")
             if item.get("diagnostics_suspect_reasons"):
@@ -444,6 +477,10 @@ def run_self_test() -> int:
     assert suspect
     assert not clear
     assert any("op_stat_self_collision" in reason for reason in reasons)
+    assert controller_mode_name(1) == "simulation"
+    assert controller_mode_name(0) == "real"
+    assert controller_mode_warning(0) == "controller not confirmed in pgmode simulation: real_vs_simulation_mode=0"
+    assert controller_mode_warning(1) is None
 
     normalized = normalize_joint_for_range(-317.0, -190.0, 190.0, 360.0)
     assert normalized.was_wrapped

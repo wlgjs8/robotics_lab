@@ -168,6 +168,28 @@ rms_error_m <value>, p95_error_m <value>, result <completed/pass>.
 Simulator-only; not real-ready.
 ```
 
+## Current rbpodo Controller-Simulation Circle Status
+
+rbpodo controller-simulation circle reporting is available through
+`scripts/generate_rbpodo_circle_report.py`. This evidence category is distinct
+from `rb_simulator`: it connects to real Rainbow controller boxes in `pgmode`
+simulation and should normally score `tcp_ref_stand`, not physical
+`tcp_actual_stand`.
+
+Current recorded rbpodo controller-simulation baseline:
+
+- Best stable baseline: pending; no reviewed `circle_15cm_16s`
+  `tcp_ref_stand` artifact is recorded here.
+- Best GENE-style stress result: pending; no reviewed `gene_15cm_4s`
+  rbpodo controller-simulation artifact is recorded here.
+- Real physical circle benchmark: not run and not approved.
+
+Before any physical circle discussion, record a rbpodo controller-simulation
+report with `physical_motion_expected=false`, `physical_motion_detected=false`,
+`tracking_source=tcp_ref_stand`, pgmode simulation confirmation, ACK semantics,
+and q_ref/q_actual update rates. Controller-simulation results may guide future
+low-speed parameter selection, but cannot be copied directly to real motion.
+
 ## Open Review Items Before Real Robot
 
 1. Full C++ hardware-free gate must pass on the development machine.
@@ -203,6 +225,13 @@ Simulator-only; not real-ready.
 31. RBSCRIPT-DATA-PORT-01 keeps rbscript TCP data-port state fail-closed: the JSON fixture parser remains available for tests, real Rainbow 5001 payloads are classified as `rbscript_tcp_real_data_port_unsupported`, comparison output marks unsupported rbscript `read_state` as not comparable to `rbpodo`, and raw 5001 capture is read-only evidence for a future verified parser.
 32. BACKEND-COMPARE-MATRIX-01 adds a serial matrix runner that invokes existing gated rbpodo/rbscript comparison scripts, writes per-experiment status plus aggregate CSV/JSON/Markdown reports, treats capability mismatches as unsupported instead of failed performance, and keeps ServoJ no-op controller simulation behind an explicit matrix flag and child-script safety gates.
 33. BACKEND-COMPARE-REPORT-01 adds decision-oriented backend comparison reporting that classifies evidence as measured/comparable, measured/not-comparable, unsupported, or not-yet-run. Current interpretation remains: `rbpodo` is the primary real-backend candidate when read-state/read-only diagnostic evidence passes the documented rules; `rbscript_tcp` remains experimental while real data-port read_state and ServoJ no-op apples-to-apples evidence are incomplete.
+34. GATE-RBPODO-CIRCLE-00 registers the rbpodo controller-simulation circle benchmark task names. This is gate registration only; controller pgmode simulation runs remain opt-in through explicit `CODEX_RUN_RBPODO_*` variables and tool-level confirmation flags, future 15cm/4s reports must keep `q_ref` and `tcp_reference` evidence explicit, and real physical motion gates remain unchanged.
+35. RBPODO-CIRCLE-CONFIG-01 adds rbpodo controller-simulation templates for read-only diagnostics, Servo J no-op, stable 15 cm / 16 s circle tracking, and GENE-style 15 cm / 4 s stress. The templates use `operation_mode: simulation` for Rainbow pgmode simulation, keep `allow_in_real: false` for Cartesian control, leave local YAML out of git, and do not approve physical robot motion.
+36. RBPODO-REFERENCE-TCP-01 publishes explicit actual/reference TCP telemetry: legacy `tcp_base`/`tcp_stand` remain actual aliases, `tcp_ref_*` is computed from controller reference joints when valid, and controller pgmode simulation reports should use `tcp_ref_stand` only as measurement telemetry, not as a physical safety signal.
+37. RBPODO-CONTROLLER-SIM-GATE-01 adds explicit rbpodo controller-simulation motion gates. Servo J commands in `operation_mode: simulation` now require YAML opt-in, normal real-controller/motion env gates, `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1`, and same-run pgmode confirmation; diagnostics-suspect startup override is narrower and separately gated by `RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1`.
+38. RBPODO-CIRCLE-BENCH-01 adds a gated rbpodo controller-simulation circle benchmark runner. It requires real-controller/motion env gates, `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1`, explicit controller confirmation, pgmode simulation confirmation, and `operation_mode: simulation`; default scoring uses `tcp_ref_stand` and physical `q_actual` drift is reported as a pgmode warning rather than motion success. No physical real circle acceptance is claimed.
+39. RBPODO-CIRCLE-ABLATION-01 adds a rbpodo-only controller-simulation circle ablation matrix runner. It aggregates stable 15 cm / 16 s and GENE-style 15 cm / 4 s factors across controller, gain, ACK, and command-rate settings, but still requires pgmode simulation confirmation plus real-controller/motion env gates and stops on safety preflight or child benchmark errors.
+40. RBPODO-CIRCLE-REPORT-01 adds reporting and decision policy for rbpodo controller-simulation circle evidence. Reports separate `rb_simulator`, `rbpodo_controller_simulation`, and future real physical categories, require explicit tracking-source and physical-motion fields, and keep GENE-style 15 cm / 4 s evidence marked stress/not-real-ready.
 
 ## Reviewer Checklist
 

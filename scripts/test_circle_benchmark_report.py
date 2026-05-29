@@ -29,6 +29,7 @@ class CircleBenchmarkReportTest(unittest.TestCase):
         self.assertEqual(row["profile"], "circle_15cm_16s")
         self.assertAlmostEqual(row["radius_gain"], 1.0)
         self.assertIsNone(row["integrator_clamps_total"])
+        self.assertEqual(row["benchmark_category"], "unknown")
 
     def test_good_15cm16s_classifies_as_baseline_candidate(self) -> None:
         rows = report.classify_rows(
@@ -54,6 +55,7 @@ class CircleBenchmarkReportTest(unittest.TestCase):
         )
         self.assertEqual(rows[0]["classification"], "stable_simulator_baseline_candidate")
         self.assertEqual(rows[0]["real_candidate_policy"], "simulator_seed_only_after_real_acceptance")
+        self.assertEqual(rows[0]["benchmark_category"], "unknown")
 
     def test_gene_15cm4s_classifies_as_stress_only(self) -> None:
         rows = report.classify_rows(
@@ -78,6 +80,126 @@ class CircleBenchmarkReportTest(unittest.TestCase):
         )
         self.assertEqual(rows[0]["classification"], "stress_benchmark_candidate")
         self.assertEqual(rows[0]["real_candidate_policy"], "stress_only_not_real_ready")
+
+    def test_report_distinguishes_simulator_and_rbpodo_controller_simulation(self) -> None:
+        simulator = compare.comparison_row(
+            {
+                "artifact_dir": "/tmp/sim_circle",
+                "left_simulator_log": "/tmp/left.log",
+                "controller": "twist_stand",
+                "arm": "left",
+                "profile": "circle_15cm_16s",
+                "diameter_m": 0.15,
+                "period_sec": 16.0,
+            }
+        )
+        rbpodo = compare.comparison_row(
+            {
+                "schema": "robotics_lab.rbpodo_circle_tracking_benchmark.v1",
+                "artifact_dir": "/tmp/rbpodo_circle",
+                "controller": "twist_stand_feedback",
+                "arm": "left",
+                "profile": "circle_15cm_16s",
+                "tracking_source_used": "tcp_ref_stand",
+                "safety_preflight": {
+                    "backend": "rbpodo",
+                    "controller_simulation_only": True,
+                    "physical_motion_expected": False,
+                    "pgmode_simulation_confirmed": True,
+                    "disable_waiting_ack": False,
+                },
+                "physical_motion_detected": False,
+                "fault_latched": False,
+            }
+        )
+        rows = report.classify_rows([simulator, rbpodo])
+        self.assertEqual(rows[0]["benchmark_category"], "rb_simulator")
+        self.assertEqual(rows[1]["benchmark_category"], "rbpodo_controller_simulation")
+        self.assertEqual(rows[1]["controller_mode"], "pgmode_simulation")
+        self.assertEqual(rows[1]["backend"], "rbpodo")
+
+    def test_rbpodo_stable_baseline_uses_tcp_ref_tracking_source(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "rbpodo_stable",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "controller": "twist_stand_feedback",
+                    "arm": "left",
+                    "profile": "circle_15cm_16s",
+                    "tracking_source": "tcp_ref_stand",
+                    "radius_gain": 1.0,
+                    "rms_error_mm": 4.0,
+                    "p95_error_mm": 6.0,
+                    "physical_motion_expected": False,
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                    "ack_policy": "ack_on",
+                    "controller_acceptance_observed_count": 100,
+                    "command_timeout_count": 0,
+                    "controller_rejected_count": 0,
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertEqual(rows[0]["classification"], "stable_rbpodo_controller_sim_baseline_candidate")
+        self.assertEqual(rows[0]["real_candidate_policy"], "future_low_speed_seed_only_not_real_ready")
+
+    def test_rbpodo_stress_is_not_real_ready(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "rbpodo_gene",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "controller": "twist_stand_feedback",
+                    "arm": "left",
+                    "profile": "gene_15cm_4s",
+                    "tracking_source": "tcp_ref_stand",
+                    "radius_gain": 0.97,
+                    "rms_error_mm": 8.0,
+                    "p95_error_mm": 14.0,
+                    "feedback_saturation_count": 3,
+                    "physical_motion_expected": False,
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertEqual(rows[0]["classification"], "rbpodo_controller_sim_stress_candidate")
+        self.assertEqual(rows[0]["real_candidate_policy"], "controller_sim_stress_not_real_ready")
+        self.assertIn("not real-ready", rows[0]["promotion_notes"].lower())
+
+    def test_rbpodo_compare_handles_missing_physical_actual_path(self) -> None:
+        row = compare.comparison_row(
+            {
+                "schema": "robotics_lab.rbpodo_circle_tracking_benchmark.v1",
+                "artifact_dir": "/tmp/rbpodo_circle",
+                "controller": "twist_stand_feedback",
+                "arm": "left",
+                "profile": "circle_15cm_16s",
+                "tracking_source_used": "tcp_ref_stand",
+                "physical_actual_csv": None,
+                "physical_motion_detected": False,
+                "q_ref_update_rate_hz": 100.0,
+                "q_actual_update_rate_hz": 0.0,
+                "safety_preflight": {
+                    "backend": "rbpodo",
+                    "controller_simulation_only": True,
+                    "physical_motion_expected": False,
+                    "pgmode_simulation_confirmed": True,
+                    "disable_waiting_ack": False,
+                },
+            }
+        )
+        self.assertEqual(row["benchmark_category"], "rbpodo_controller_simulation")
+        self.assertEqual(row["tracking_source"], "tcp_ref_stand")
+        self.assertIsNone(row["physical_actual_csv"])
+        self.assertFalse(row["physical_motion_detected"])
 
     def test_report_cli_writes_markdown_and_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -115,6 +237,16 @@ class CircleBenchmarkReportTest(unittest.TestCase):
             self.assertIn("stable_simulator_baseline_candidate", md.read_text(encoding="utf-8"))
             self.assertIn("stress evidence is not real-ready", md.read_text(encoding="utf-8").lower())
             self.assertIn("classification", csv_path.read_text(encoding="utf-8"))
+
+    def test_rbpodo_report_cli_help_works(self) -> None:
+        script = Path(__file__).with_name("generate_rbpodo_circle_report.py")
+        completed = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.assertIn("pgmode-simulation", completed.stdout)
 
 
 if __name__ == "__main__":

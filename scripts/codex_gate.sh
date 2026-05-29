@@ -800,6 +800,130 @@ run_rbpodo_doc_gate() {
   grep_existing "RB_ALLOW_REAL_MOTION" README.md REVIEW.md AGENTS.md docs rb_servo_server/docs rb_servo_server/config
 }
 
+run_rbpodo_circle_config_gate() {
+  run_shell_syntax_checks
+  grep_existing "rbpodo" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config configs
+  grep_existing "pgmode simulation|controller simulation|operation_mode:[[:space:]]*simulation" \
+    README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config configs
+  grep_existing "send_servo_commands:[[:space:]]*false|send_servo_commands:[[:space:]]*true" \
+    rb_servo_server/config configs docs/runbooks REVIEW.md
+  grep_existing "RB_ALLOW_REAL_ROBOT" README.md REVIEW.md AGENTS.md docs rb_servo_server/docs rb_servo_server/config configs
+  grep_existing "RB_ALLOW_REAL_MOTION" README.md REVIEW.md AGENTS.md docs rb_servo_server/docs rb_servo_server/config configs
+  run_python_surface_tests
+  run_servo_gate_or_skip_missing_deps
+}
+
+run_rbpodo_pgmode_sim_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts tools
+  if [[ -f tools/simulation_mode.sh ]]; then
+    bash -n tools/simulation_mode.sh
+  else
+    echo "codex_gate: optional pgmode helper not present: tools/simulation_mode.sh"
+  fi
+  run_optional_python_help scripts/rainbow_pgmode.py
+  if [[ "${CODEX_RUN_RBPODO_PGMODE_CHECK:-0}" == "1" ]]; then
+    if [[ ! -f scripts/rainbow_pgmode.py ]]; then
+      echo "ERROR: CODEX_RUN_RBPODO_PGMODE_CHECK=1 but scripts/rainbow_pgmode.py is missing" >&2
+      return 1
+    fi
+    if [[ -z "${CODEX_RBPODO_PGMODE_CHECK_ARGS:-}" ]]; then
+      echo "ERROR: CODEX_RUN_RBPODO_PGMODE_CHECK=1 requires CODEX_RBPODO_PGMODE_CHECK_ARGS with explicit controller IP, pgmode, and confirmation flags" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2086
+    python3 scripts/rainbow_pgmode.py ${CODEX_RBPODO_PGMODE_CHECK_ARGS}
+  else
+    echo "codex_gate: skipping rbpodo pgmode simulation controller check; set CODEX_RUN_RBPODO_PGMODE_CHECK=1 with explicit args to enable"
+  fi
+}
+
+run_rbpodo_reference_tcp_gate() {
+  run_servo_gate_or_skip_missing_deps
+  run_python_surface_tests
+}
+
+run_rbpodo_controller_sim_gate() {
+  run_shell_syntax_checks
+  run_servo_gate_or_skip_missing_deps
+  run_optional_python_help scripts/rbpodo_servo_acceptance.py
+  run_optional_python_help scripts/rbpodo_circle_tracking_benchmark.py
+  if [[ "${CODEX_RUN_RBPODO_CONTROLLER_SIM:-0}" == "1" ]]; then
+    if [[ -z "${CODEX_RBPODO_CONTROLLER_SIM_ARGS:-}" ]]; then
+      echo "ERROR: CODEX_RUN_RBPODO_CONTROLLER_SIM=1 requires CODEX_RBPODO_CONTROLLER_SIM_ARGS with explicit script arguments and safety preflight flags" >&2
+      return 1
+    fi
+    if [[ -f scripts/rbpodo_circle_tracking_benchmark.py ]]; then
+      # shellcheck disable=SC2086
+      python3 scripts/rbpodo_circle_tracking_benchmark.py ${CODEX_RBPODO_CONTROLLER_SIM_ARGS}
+    elif [[ -f scripts/rbpodo_servo_acceptance.py ]]; then
+      # shellcheck disable=SC2086
+      python3 scripts/rbpodo_servo_acceptance.py ${CODEX_RBPODO_CONTROLLER_SIM_ARGS}
+    else
+      echo "ERROR: CODEX_RUN_RBPODO_CONTROLLER_SIM=1 but no rbpodo controller-simulation script is present" >&2
+      return 1
+    fi
+  else
+    echo "codex_gate: skipping rbpodo controller-simulation run; set CODEX_RUN_RBPODO_CONTROLLER_SIM=1 with explicit args to enable"
+  fi
+}
+
+run_rbpodo_circle_bench_gate() {
+  python3 -m compileall -q scripts
+  run_optional_python_help scripts/rbpodo_circle_tracking_benchmark.py
+  python3 scripts/circle_tracking_benchmark.py --help >/dev/null
+  if [[ "${CODEX_RUN_RBPODO_CIRCLE:-0}" == "1" ]]; then
+    if [[ ! -f scripts/rbpodo_circle_tracking_benchmark.py ]]; then
+      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE=1 but scripts/rbpodo_circle_tracking_benchmark.py is missing" >&2
+      return 1
+    fi
+    if [[ -z "${CODEX_RBPODO_CIRCLE_ARGS:-}" ]]; then
+      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE=1 requires CODEX_RBPODO_CIRCLE_ARGS with explicit controller-simulation script arguments and safety preflight flags" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2086
+    python3 scripts/rbpodo_circle_tracking_benchmark.py ${CODEX_RBPODO_CIRCLE_ARGS}
+  else
+    echo "codex_gate: skipping rbpodo controller-simulation circle benchmark; set CODEX_RUN_RBPODO_CIRCLE=1 with explicit args to enable"
+  fi
+}
+
+run_rbpodo_circle_ablation_gate() {
+  python3 -m compileall -q scripts
+  run_optional_python_help scripts/run_rbpodo_circle_ablation.py
+  if [[ "${CODEX_RUN_RBPODO_CIRCLE_ABLATION:-0}" == "1" ]]; then
+    if [[ ! -f scripts/run_rbpodo_circle_ablation.py ]]; then
+      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 but scripts/run_rbpodo_circle_ablation.py is missing" >&2
+      return 1
+    fi
+    if [[ -z "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS:-}" ]]; then
+      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 requires CODEX_RBPODO_CIRCLE_ABLATION_ARGS with explicit matrix/script arguments and safety preflight flags" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2086
+    python3 scripts/run_rbpodo_circle_ablation.py ${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}
+  else
+    echo "codex_gate: skipping rbpodo controller-simulation circle ablation; set CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 with explicit args to enable"
+  fi
+}
+
+run_rbpodo_circle_report_gate() {
+  run_optional_python_help scripts/generate_rbpodo_circle_report.py
+  run_optional_python_help scripts/rbpodo_circle_report.py
+  python3 scripts/generate_circle_benchmark_report.py --help >/dev/null
+  for token in \
+    "rbpodo" \
+    "pgmode simulation" \
+    "controller simulation" \
+    "q_ref" \
+    "tcp_reference" \
+    "15cm" \
+    "4s"
+  do
+    grep_existing "${token}" README.md REVIEW.md docs rb_servo_server/docs
+  done
+}
+
 run_backend_compare_python_tests() {
   run_python_surface_tests
   run_optional_rbscript_helper_tests
@@ -1338,6 +1462,30 @@ case "$TASK" in
     ;;
   RBPODO-DOC-01)
     run_rbpodo_doc_gate
+    ;;
+  GATE-RBPODO-CIRCLE-00)
+    run_shell_syntax_checks
+    ;;
+  RBPODO-CIRCLE-CONFIG-01)
+    run_rbpodo_circle_config_gate
+    ;;
+  RBPODO-PGMODE-SIM-01)
+    run_rbpodo_pgmode_sim_gate
+    ;;
+  RBPODO-REFERENCE-TCP-01)
+    run_rbpodo_reference_tcp_gate
+    ;;
+  RBPODO-CONTROLLER-SIM-GATE-01)
+    run_rbpodo_controller_sim_gate
+    ;;
+  RBPODO-CIRCLE-BENCH-01)
+    run_rbpodo_circle_bench_gate
+    ;;
+  RBPODO-CIRCLE-ABLATION-01)
+    run_rbpodo_circle_ablation_gate
+    ;;
+  RBPODO-CIRCLE-REPORT-01)
+    run_rbpodo_circle_report_gate
     ;;
   GATE-BACKEND-COMPARE-00)
     run_shell_syntax_checks

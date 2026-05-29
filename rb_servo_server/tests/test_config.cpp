@@ -37,6 +37,34 @@ bool near(double a, double b) {
     return std::abs(a - b) < 1e-12;
 }
 
+class EnvVarGuard {
+public:
+    explicit EnvVarGuard(const char* name)
+        : name_(name) {
+        const char* value = std::getenv(name_.c_str());
+        if (value) {
+            had_value_ = true;
+            old_value_ = value;
+        }
+    }
+
+    ~EnvVarGuard() {
+        if (had_value_) {
+            setenv(name_.c_str(), old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+    }
+
+    void set(const char* value) const { setenv(name_.c_str(), value, 1); }
+    void unset() const { unsetenv(name_.c_str()); }
+
+private:
+    std::string name_;
+    bool had_value_ = false;
+    std::string old_value_;
+};
+
 bool testJointWrapConfigParses() {
     const std::string path = writeTempConfig(
         "valid",
@@ -112,10 +140,100 @@ bool testInvalidJointWrapConfigRejects() {
     return true;
 }
 
+bool testControllerSimulationGateConfig() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard allow_diag("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+
+    allow_real.unset();
+    allow_motion.unset();
+    allow_controller_sim.unset();
+    allow_diag.unset();
+    pgmode_confirmed.unset();
+
+    const std::string valid_body =
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: 172.28.60.200\n"
+        "  operation_mode: simulation\n"
+        "  servo_t1_sec: 0.005\n"
+        "  servo_t2_sec: 0.05\n"
+        "  servo_alpha: 0.5\n"
+        "right_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: 172.28.60.201\n"
+        "  operation_mode: simulation\n"
+        "  servo_t1_sec: 0.005\n"
+        "  servo_t2_sec: 0.05\n"
+        "  servo_alpha: 0.5\n"
+        "servo:\n"
+        "  rate_hz: 200\n"
+        "  enable_realtime_priority: true\n"
+        "  send_servo_commands: true\n"
+        "  allow_controller_simulation_motion: true\n"
+        "  allow_controller_simulation_diagnostics_suspect: true\n"
+        "safety:\n"
+        "  tracking_error_policy: fault_latch\n";
+
+    const std::string missing_env_path = writeTempConfig("controller-sim-missing-env", valid_body);
+    RB_CHECK(loadRejects(missing_env_path));
+    ::unlink(missing_env_path.c_str());
+
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    allow_diag.set("1");
+    pgmode_confirmed.set("1");
+
+    const std::string valid_path = writeTempConfig("controller-sim-valid", valid_body);
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(valid_path);
+    ::unlink(valid_path.c_str());
+    RB_CHECK(cfg.servo.allow_controller_simulation_motion);
+    RB_CHECK(cfg.servo.allow_controller_simulation_diagnostics_suspect);
+    RB_CHECK(cfg.left_robot.operation_mode == "simulation");
+    RB_CHECK(cfg.right_robot.operation_mode == "simulation");
+
+    std::string real_body = valid_body;
+    const std::size_t pos = real_body.find("operation_mode: simulation");
+    RB_CHECK(pos != std::string::npos);
+    real_body.replace(pos, std::string("operation_mode: simulation").size(), "operation_mode: real");
+    const std::string real_path = writeTempConfig("controller-sim-real", real_body);
+    RB_CHECK(loadRejects(real_path));
+    ::unlink(real_path.c_str());
+
+    std::string diag_without_motion_body = valid_body;
+    const std::string motion_key = "  allow_controller_simulation_motion: true\n";
+    const std::size_t motion_pos = diag_without_motion_body.find(motion_key);
+    RB_CHECK(motion_pos != std::string::npos);
+    diag_without_motion_body.erase(motion_pos, motion_key.size());
+    const std::string diag_without_motion_path =
+        writeTempConfig("controller-sim-diag-without-motion", diag_without_motion_body);
+    RB_CHECK(loadRejects(diag_without_motion_path));
+    ::unlink(diag_without_motion_path.c_str());
+
+    std::string read_only_body = valid_body;
+    const std::string send_true = "  send_servo_commands: true\n";
+    const std::size_t send_pos = read_only_body.find(send_true);
+    RB_CHECK(send_pos != std::string::npos);
+    read_only_body.replace(send_pos, send_true.size(), "  send_servo_commands: false\n");
+    const std::string read_only_path =
+        writeTempConfig("controller-sim-read-only", read_only_body);
+    RB_CHECK(loadRejects(read_only_path));
+    ::unlink(read_only_path.c_str());
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
     if (!testJointWrapConfigParses()) return 1;
     if (!testInvalidJointWrapConfigRejects()) return 1;
+    if (!testControllerSimulationGateConfig()) return 1;
     return 0;
 }

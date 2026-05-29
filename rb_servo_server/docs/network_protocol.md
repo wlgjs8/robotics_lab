@@ -68,11 +68,24 @@ payload includes:
 - `logger_dropped_samples` / `logger_health`
 - stand-frame mount transforms from config
 - TCP pose fields when kinematics are configured and available; otherwise
-  nullable/deferred TCP fields with `tcp_fields_deferred: true`
+  nullable/deferred TCP fields with `tcp_fields_deferred: true`.
+  `tcp_base` and `tcp_stand` remain aliases for actual TCP FK from
+  `q_actual_deg`. New consumers should prefer the explicit fields:
+  `tcp_actual_base`, `tcp_actual_stand`, `tcp_ref_base`, and `tcp_ref_stand`.
+  Actual TCP is measured from `q_actual_deg`; reference TCP is computed from
+  controller reference joints (`q_target_deg` / rbpodo `jnt_ref`) when finite.
+  `tcp_actual_valid` and `tcp_ref_valid` report pose availability.
 - `cartesian_solve` telemetry, including IK errors, path tracking fields,
   optional server-side circle benchmark fields, and
   twist limit fields such as `twist_clamped`,
   `requested_twist_linear_norm_m_s`, and `applied_twist_linear_norm_m_s`
+
+For rbpodo controller `pgmode` simulation (`operation_mode: simulation`), the
+per-arm `controller_simulation_mode` object recommends
+`recommended_tracking_pose: "tcp_ref_stand"` when reference FK is valid and
+sets `physical_motion_expected: false`. This is reporting guidance only. Real
+physical safety decisions must continue to use actual robot state and the
+existing safety gates.
 
 Consumers should join this stream with external RealSense logs by host/loop
 timestamps. RealSense capture stays outside `rb_servo_server`.

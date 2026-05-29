@@ -121,6 +121,8 @@ struct ServoConfig {
     bool allow_readonly_faulted_startup = false;
     bool allow_readonly_q_range_violation_startup = false;
     bool allow_readonly_wrong_mode_startup = false;
+    bool allow_controller_simulation_motion = false;
+    bool allow_controller_simulation_diagnostics_suspect = false;
 
     bool enable_realtime_priority = true;
     int realtime_priority = 80;

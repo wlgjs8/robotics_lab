@@ -105,6 +105,24 @@ bool operationModeMatchesConfig(const BackendConfig& config, const RbpodoSystemS
     return expectedSimulationMode(config) == actual_simulation;
 }
 
+bool rbpodoControllerSimulationMotionGateOpen(const BackendConfig& config) {
+    return config.run_mode == RunMode::Real &&
+        expectedSimulationMode(config) &&
+        envIsOne("RB_ALLOW_REAL_ROBOT") &&
+        envIsOne("RB_ALLOW_REAL_MOTION") &&
+        envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
+        envIsOne("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+}
+
+bool diagnosticsSuspectControllerSimulationOverrideAllowed(
+    const BackendConfig& config,
+    const BackendError& error
+) {
+    return error.name == "rbpodo_diagnostics_suspect" &&
+        rbpodoControllerSimulationMotionGateOpen(config) &&
+        envIsOne("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
+}
+
 void annotateRbpodoAckResult(
     SendServoJResult* result,
     const BackendConfig& config,
@@ -882,7 +900,12 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
             0.0
         );
     }
-    if (cached_state.has_value() && impl_->last_state_error.has_value()) {
+    if (cached_state.has_value() &&
+        impl_->last_state_error.has_value() &&
+        !diagnosticsSuspectControllerSimulationOverrideAllowed(
+            impl_->config,
+            *impl_->last_state_error
+        )) {
         return with_ack_metadata(
             rejectedSend(
                 request,
@@ -895,7 +918,12 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
             0.0
         );
     }
-    if (!cached_state.has_value() && impl_->last_state_error.has_value()) {
+    if (!cached_state.has_value() &&
+        impl_->last_state_error.has_value() &&
+        !diagnosticsSuspectControllerSimulationOverrideAllowed(
+            impl_->config,
+            *impl_->last_state_error
+        )) {
         return with_ack_metadata(
             rejectedSend(
                 request,

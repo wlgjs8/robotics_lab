@@ -88,6 +88,24 @@ If runtime config and calibration registry disagree, fail or warn explicitly. Do
 
 State publishers and GUI markers should prefer `quaternion_xyzw` over RPY when both are available. RPY is useful for human display but should not be treated as the highest-fidelity orientation representation.
 
+## TCP State Terminology
+
+State JSON distinguishes three TCP concepts:
+
+- actual: FK from measured `q_actual_deg`; published as `tcp_actual_base` and
+  `tcp_actual_stand`.
+- reference: FK from controller/internal reference joints such as rbpodo
+  `jnt_ref`; published as `tcp_ref_base` and `tcp_ref_stand` only when finite.
+- desired: the benchmark or command trajectory target; this is not the same as
+  actual or controller reference.
+
+Legacy `tcp_base` and `tcp_stand` remain actual-pose aliases. In Rainbow
+controller `pgmode` simulation, the physical arm may remain stationary while
+the controller reference evolves, so tracking reports should compare the
+desired trajectory against `tcp_ref_stand` when the state stream recommends it.
+Physical real-motion reports should compare desired trajectory against
+`tcp_actual_stand`.
+
 ## Joint-Only Versus Geometry-Dependent Behavior
 
 Joint-only actions do not require measured calibration.

@@ -1,0 +1,83 @@
+# Example rbpodo controller-simulation circle ablation matrix.
+# Copy the referenced templates to rb_servo_server/config/local/ and verify the
+# Rainbow controllers are in pgmode simulation before running. This matrix is
+# not run by codex gates unless CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 and explicit
+# script arguments are provided.
+
+experiments:
+  - name: rbpodo_15cm16s_twist_stand_100hz_ack
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm16s.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+
+  - name: rbpodo_15cm16s_feedback_kp2_100hz_ack
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm16s.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    feedback_kp_pos: 2.0
+    feedback_kp_ori: 2.0
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+
+  - name: rbpodo_gene4s_feedback_kp2_100hz_ack
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    feedback_kp_pos: 2.0
+    feedback_kp_ori: 2.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+
+  - name: rbpodo_gene4s_feedback_kp15_100hz_ack
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    feedback_kp_pos: 1.5
+    feedback_kp_ori: 2.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+
+  - name: rbpodo_gene4s_feedback_200hz_ack
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s_200hz_ack.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    feedback_kp_pos: 2.0
+    feedback_kp_ori: 2.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    command_rate_hz: 200
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    enabled: false
+
+  - name: rbpodo_gene4s_feedback_200hz_no_ack
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s_200hz_no_ack.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    feedback_kp_pos: 2.0
+    feedback_kp_ori: 2.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    command_rate_hz: 200
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    env_requirements: [RB_ALLOW_RBPODO_ACK_DISABLED_MOTION]
+    enabled: false

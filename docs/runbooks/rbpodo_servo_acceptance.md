@@ -19,6 +19,18 @@ The current rbpodo comparison profiles are:
 | `200hz_ack` | `rb_servo_server/config/dual_real_200hz_ack.example.yaml` | 200 Hz | 0.005 s | ACK-on | `50032` / `50132` | disabled |
 | `200hz_no_ack` | `rb_servo_server/config/dual_real_200hz_no_ack.example.yaml` | 200 Hz | 0.005 s | ACK-off | `50033` / `50133` | disabled |
 
+The controller-simulation no-op templates for supervised `pgmode` simulation
+are separate:
+
+| Profile | Template | Rate | ACK policy | Command/state endpoints |
+| --- | --- | ---: | --- | --- |
+| `100hz_ack` | `rb_servo_server/config/dual_real_rbpodo_sim_noop_100hz_ack.example.yaml` | 100 Hz | ACK-on | `50041` / `50141` |
+| `200hz_ack` | `rb_servo_server/config/dual_real_rbpodo_sim_noop_200hz_ack.example.yaml` | 200 Hz | ACK-on | `50042` / `50142` |
+| `200hz_no_ack` | `rb_servo_server/config/dual_real_rbpodo_sim_noop_200hz_no_ack.example.yaml` | 200 Hz | ACK-off | `50043` / `50143` |
+
+Circle controller-simulation templates are documented in
+`docs/runbooks/rbpodo_controller_sim_circle.md`.
+
 `servo_t1_sec` must match the command period. For 100 Hz the period is
 0.01 s; for 200 Hz it is 0.005 s.
 
@@ -89,6 +101,29 @@ Real joint Servo J motion requires:
 RB_ALLOW_REAL_MOTION=1
 ```
 
+Rbpodo controller `pgmode` simulation Servo J commands additionally require:
+
+```bash
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
+```
+
+The acceptance tool sets `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1` only for the
+server process after the same run successfully sends or verifies controller
+`pgmode` simulation. Do not set this variable by hand for ordinary runs.
+
+The temporary diagnostics-suspect bridge for controller simulation additionally
+requires both the YAML opt-in
+`servo.allow_controller_simulation_diagnostics_suspect: true` and:
+
+```bash
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
+```
+
+This is not real motion approval. It is limited to `operation_mode:
+simulation`, known rbpodo suspicious status layouts, finite joint state, no
+range violation, no explicit E-stop/SOS/soft E-stop/collision fault, and a
+confirmed controller `pgmode` simulation run.
+
 ACK-off real joint Servo J motion additionally requires:
 
 ```bash
@@ -110,7 +145,9 @@ RB_ALLOW_REAL_CARTESIAN=1
 2. `hold_no_motion`: send `Hold` packets only. This is a command-channel smoke
    step and must not command joint deltas.
 3. `servo_j_noop`: only for explicitly confirmed controller simulation mode.
-   It sends a target equal to current `q_actual_deg`.
+   It sends a target equal to current `q_actual_deg`. The same tool run must
+   use `--set-pgmode-simulation` or `--verify-pgmode-simulation`, and the config
+   must set `operation_mode: simulation`.
 4. 100 Hz ACK-on no-op / tiny simulation-mode evidence.
 5. 200 Hz ACK-on evidence.
 6. 200 Hz ACK-off evidence, with `--allow-ack-disabled`.
@@ -165,11 +202,36 @@ near `-317 deg` with range `[-190, 190]` and period `360` is equivalent to about
 to avoid discontinuities.
 
 Controller-simulation no-op comparison is separate from the read-only templates.
-Use `configs/backend_compare/rbpodo_200hz_ack_sim_noop.yaml` only after
-controller `pgmode` simulation has been verified by the acceptance tool and the
-normal real-controller/motion env gates are set. That file intentionally sets
-`send_servo_commands: true`, but it is still not a real motion acceptance config
-and does not approve ACK-off or Cartesian motion.
+Use a local copy of
+`rb_servo_server/config/dual_real_rbpodo_sim_noop_200hz_ack.example.yaml` only
+after controller `pgmode` simulation has been verified by the acceptance tool
+and the normal real-controller/motion env gates are set. The local copy must
+explicitly set:
+
+```yaml
+servo:
+  send_servo_commands: true
+  allow_controller_simulation_motion: true
+```
+
+Set `allow_controller_simulation_diagnostics_suspect: true` only for the
+temporary diagnostics-suspect bridge described above. These files intentionally
+send Servo J to the controller box, but they are still not physical motion
+acceptance configs and do not approve ACK-off or Cartesian motion.
+
+`scripts/rainbow_pgmode.py` is the first-class pgmode helper. It sends only
+`pgmode simulation` or reads `real_vs_simulation_mode`; it must not set
+`pgmode real`, reset faults, change collision thresholds, enable servo power, or
+send motion:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+python3 scripts/rainbow_pgmode.py \
+  --ips 172.28.60.200 172.28.60.201 \
+  --set-simulation \
+  --summary-json artifacts/rbpodo_acceptance/pgmode_simulation.json \
+  --i-understand-this-connects-to-real-controller
+```
 
 ## State Dump Bring-Up Tool
 
@@ -179,9 +241,9 @@ read-only rbpodo dump:
 ```bash
 python3 scripts/rbpodo_state_dump.py \
   --ips 172.28.60.200 172.28.60.201 \
-  --q-min -170,-120,-170,-360,-120,-360 \
-  --q-max 170,120,170,360,120,360 \
-  --wrap-period-deg 0,0,0,360,0,360 \
+  --q-min=-170,-120,-170,-190,-120,-360 \
+  --q-max=170,120,170,190,120,360 \
+  --wrap-period-deg=0,0,0,360,0,360 \
   --output artifacts/rbpodo_acceptance/state_dump.json \
   --pretty \
   --i-understand-this-connects-to-real-controller
@@ -190,7 +252,8 @@ python3 scripts/rbpodo_state_dump.py \
 The tool only reads `rbpodo.CobotData`. It must not be used to set `pgmode`,
 reset faults, activate motion, or modify controller state. The JSON artifact
 includes raw status fields, `q_actual_deg`, `q_ref_deg`, finite flags, range
-violations, optional wrap diagnostics, and recommended next steps.
+violations, optional wrap diagnostics, `real_vs_simulation_mode`, controller
+mode warnings, and recommended next steps.
 
 If `rbpodo_servo_acceptance.py` times out waiting for the server state stream,
 the failure message includes the server return code, the last 120 lines of

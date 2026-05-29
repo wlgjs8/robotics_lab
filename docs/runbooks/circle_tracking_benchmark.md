@@ -12,6 +12,13 @@ RB_ALLOW_REAL_MOTION=1
 RB_ALLOW_REAL_CARTESIAN=1
 ```
 
+For rbpodo controller-box pgmode simulation, use
+`scripts/rbpodo_circle_tracking_benchmark.py` and
+`docs/runbooks/rbpodo_controller_sim_circle.md` instead. That runner connects to
+real Rainbow controller boxes, requires explicit pgmode simulation
+confirmation, and scores controller-reference `tcp_ref_stand` telemetry rather
+than hardware-free simulator TCP state.
+
 The runner refuses configs containing `run_mode: real`, `backend_type: rbpodo`,
 `allow_in_real: true`, or the real robot IPs `172.28.60.200` /
 `172.28.60.201`.

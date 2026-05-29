@@ -13,9 +13,13 @@ from typing import Any
 
 COLUMNS = [
     ("run name", "run_name"),
+    ("category", "benchmark_category"),
+    ("backend", "backend"),
+    ("controller_mode", "controller_mode"),
     ("controller", "controller"),
     ("arm", "arm"),
     ("profile", "profile"),
+    ("tracking_source", "tracking_source"),
     ("diameter_m", "diameter_m"),
     ("period_sec", "period_sec"),
     ("radius_gain", "radius_gain"),
@@ -36,6 +40,16 @@ COLUMNS = [
     ("max_feedback_linear_norm_m_s", "max_feedback_linear_norm_m_s"),
     ("feedback_saturation_count", "feedback_saturation_count"),
     ("stale_state_feedback_skips", "stale_state_feedback_skips"),
+    ("physical_motion_expected", "physical_motion_expected"),
+    ("physical_motion_detected", "physical_motion_detected"),
+    ("q_ref_update_rate_hz", "q_ref_update_rate_hz"),
+    ("q_actual_update_rate_hz", "q_actual_update_rate_hz"),
+    ("ack_policy", "ack_policy"),
+    ("controller_acceptance_observed_count", "controller_acceptance_observed_count"),
+    ("command_timeout_count", "command_timeout_count"),
+    ("controller_rejected_count", "controller_rejected_count"),
+    ("tcp_ref_valid_ratio", "tcp_ref_valid_ratio"),
+    ("tcp_actual_valid_ratio", "tcp_actual_valid_ratio"),
     ("result", "result"),
     ("performance_warnings", "performance_warnings"),
 ]
@@ -130,6 +144,91 @@ def radius_gain(summary: dict[str, Any]) -> float | None:
     return fit_radius / reference_radius
 
 
+def safety_preflight(summary: dict[str, Any]) -> dict[str, Any]:
+    value = summary.get("safety_preflight")
+    return value if isinstance(value, dict) else {}
+
+
+def infer_backend(summary: dict[str, Any]) -> str:
+    preflight = safety_preflight(summary)
+    backend = summary.get("backend") or preflight.get("backend")
+    if isinstance(backend, str) and backend:
+        return backend
+    schema = str(summary.get("schema") or "")
+    if "rbpodo_circle_tracking_benchmark" in schema:
+        return "rbpodo"
+    if any(summary.get(key) for key in ("left_simulator_log", "right_simulator_log", "simulator_motion_time_constant_sec")):
+        return "simulator"
+    return ""
+
+
+def infer_category(summary: dict[str, Any]) -> str:
+    preflight = safety_preflight(summary)
+    backend = infer_backend(summary)
+    physical_expected = summary.get("physical_motion_expected")
+    if physical_expected is None:
+        physical_expected = preflight.get("physical_motion_expected")
+    if physical_expected is True:
+        return "real_physical_benchmark"
+    if backend == "rbpodo" and (
+        summary.get("controller_simulation_only") is True
+        or preflight.get("controller_simulation_only") is True
+        or preflight.get("pgmode_simulation_confirmed") is True
+    ):
+        return "rbpodo_controller_simulation"
+    if backend in {"simulator", "mock"} or any(
+        summary.get(key) for key in ("left_simulator_log", "right_simulator_log", "simulator_motion_time_constant_sec")
+    ):
+        return "rb_simulator"
+    return "unknown"
+
+
+def infer_controller_mode(summary: dict[str, Any]) -> str:
+    preflight = safety_preflight(summary)
+    category = infer_category(summary)
+    if category == "rbpodo_controller_simulation":
+        return "pgmode_simulation"
+    if category == "rb_simulator":
+        return "rb_simulator"
+    if category == "real_physical_benchmark":
+        return "real_physical"
+    value = summary.get("controller_mode") or preflight.get("controller_mode")
+    return str(value) if value is not None else ""
+
+
+def infer_tracking_source(summary: dict[str, Any]) -> str:
+    source = summary.get("tracking_source_used") or summary.get("tracking_source") or summary.get("tracking_source_requested")
+    if source:
+        return str(source)
+    if infer_category(summary) == "rb_simulator":
+        return "simulator_tcp_actual"
+    return ""
+
+
+def infer_physical_motion_expected(summary: dict[str, Any]) -> Any:
+    preflight = safety_preflight(summary)
+    if "physical_motion_expected" in summary:
+        return summary.get("physical_motion_expected")
+    return preflight.get("physical_motion_expected")
+
+
+def infer_ack_policy(summary: dict[str, Any]) -> str:
+    preflight = safety_preflight(summary)
+    if "ack_policy" in summary:
+        return str(summary.get("ack_policy"))
+    distribution = summary.get("ack_policy_distribution")
+    if isinstance(distribution, dict) and distribution:
+        keys = sorted(str(key) for key in distribution)
+        if any("disabled" in key or "no_ack" in key or "ack_off" in key for key in keys):
+            return "ack_off"
+        return "ack_on"
+    if preflight.get("disable_waiting_ack") is True:
+        return "ack_off"
+    if preflight.get("disable_waiting_ack") is False:
+        return "ack_on"
+    return ""
+
+
 def artifact_path(summary: dict[str, Any], filename: str) -> Path:
     artifact_dir = summary.get("artifact_dir")
     if isinstance(artifact_dir, str) and artifact_dir:
@@ -217,11 +316,17 @@ def warning_text(summary: dict[str, Any]) -> str:
 
 
 def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
+    category = infer_category(summary)
+    backend = infer_backend(summary)
     return {
         "run_name": run_name(summary),
+        "benchmark_category": category,
+        "backend": backend,
+        "controller_mode": infer_controller_mode(summary),
         "controller": summary.get("controller"),
         "arm": summary.get("arm"),
         "profile": inferred_profile(summary),
+        "tracking_source": infer_tracking_source(summary),
         "diameter_m": summary.get("diameter_m"),
         "period_sec": summary.get("period_sec"),
         "repeat": summary.get("repeat"),
@@ -243,6 +348,17 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "max_feedback_linear_norm_m_s": summary.get("max_feedback_linear_norm_m_s"),
         "feedback_saturation_count": summary.get("feedback_saturation_count"),
         "stale_state_feedback_skips": summary.get("stale_state_feedback_skips"),
+        "physical_motion_expected": infer_physical_motion_expected(summary),
+        "physical_motion_detected": summary.get("physical_motion_detected"),
+        "q_ref_update_rate_hz": summary.get("q_ref_update_rate_hz"),
+        "q_actual_update_rate_hz": summary.get("q_actual_update_rate_hz"),
+        "ack_policy": infer_ack_policy(summary),
+        "controller_acceptance_observed_count": summary.get("controller_acceptance_observed_count"),
+        "command_timeout_count": summary.get("command_timeout_count"),
+        "controller_rejected_count": summary.get("controller_rejected_count"),
+        "tcp_ref_valid_ratio": summary.get("tcp_ref_valid_ratio"),
+        "tcp_actual_valid_ratio": summary.get("tcp_actual_valid_ratio"),
+        "physical_actual_csv": summary.get("physical_actual_csv"),
         "fault_latched": summary.get("fault_latched"),
         "result": summary.get("result"),
         "performance_warnings": warning_text(summary),
