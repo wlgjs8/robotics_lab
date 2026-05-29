@@ -141,6 +141,53 @@ State acquisition and motion readiness are separate.
 
 A controller can return valid joint feedback while `servo_enabled=false`. That is a valid state read, not permission to send motion.
 
+Read-only diagnostic startup is a controller bring-up mode, not a
+motion-ready mode. When `servo.send_servo_commands: false` and the explicit
+`servo.allow_readonly_*_startup` flags are set, startup may continue after
+state acquisition succeeds even if motion readiness fails because of a robot
+fault, controller-not-ready state, or configured joint-range violation. The
+state stream must still publish the state as unsafe, including
+`startup_validation`, per-arm `startup_invalid_reasons`,
+`q_range_violations`, and backend readiness diagnostics such as
+`motion_readiness_error_kind` / `motion_readiness_error_name`. This mode exists
+only to surface raw controller diagnostics such as rbpodo status flags and
+joint feedback in JSON; it must not send `servo_j`.
+
+Rbpodo status fields are treated as firmware/SDK-layout-dependent diagnostics.
+The backend preserves the raw values in per-arm state JSON under
+`rbpodo_diagnostics.raw`, including `time`, `real_vs_simulation_mode`,
+`init_state_info`, `init_error`, `op_stat_sos_flag`, `op_stat_ems_flag`,
+`op_stat_soft_estop_occur`, `op_stat_collision_occur`, and
+`op_stat_self_collision`. Boolean status flags with values other than `0` or
+`1`, non-finite or implausibly tiny nonzero controller time, and unknown
+`real_vs_simulation_mode` values mark `diagnostics_suspect=true`.
+Suspicious diagnostics do not make `readState()` fail when joint acquisition is
+otherwise valid, but they do make the state motion-unsafe and block
+`sendServoJ()` with a `RobotFault` named `rbpodo_diagnostics_suspect`.
+Garbage-looking raw flag values must be kept in `rbpodo_diagnostics.raw` rather
+than used as the sole controller `error_code`.
+
+Raw controller joint angles may use continuous or wrapped representations. When
+`safety.joint_wrap_for_startup_validation: true`, startup range diagnostics may
+normalize configured joints using `safety.joint_wrap_period_deg`; `0` disables
+wrapping for that joint and `360` treats values separated by a full revolution
+as equivalent for range diagnostics. For example, raw `-317 deg` with range
+`[-190, 190]` and period `360` normalizes to `43 deg`.
+
+This wrapping policy is for startup diagnostics only by default. State JSON must
+keep raw `q_actual_deg`, publish any `q_range_wrapped` entries, and may publish
+`q_actual_normalized_for_safety_deg` for the validation view. If the raw value
+is already in range, it is left unchanged. If the configured range width is
+greater than or equal to the wrap period, the normalized value is only a
+deterministic diagnostic representative, not motion-ready evidence.
+`safety.joint_wrap_for_motion_safety` is refused until a future task implements
+continuous motion-safe unwrapping, because silently wrapping command targets can
+create joint discontinuities.
+
+If `servo.send_servo_commands: true`, startup remains strict. Robot faults,
+wrong mode/not-ready state, and joint-range violations must fail startup rather
+than being converted into a healthy condition.
+
 Real `sendServoJ()` requires:
 
 - valid state acquisition
@@ -369,6 +416,10 @@ State JSON should expose:
   suppressed attempts, reconnect counts, request/syscall counters, last connect
   error, next retry timing, and last transport error kind when using
   `RbsimBackend`
+- rbpodo raw diagnostics and interpretation status under
+  `rbpodo_diagnostics` when using `RbpodoBackend`
+- startup joint wrapping diagnostics, including raw-preserving
+  `q_range_wrapped` and optional `q_actual_normalized_for_safety_deg`
 - TCP pose and quaternion when FK is available
 - Cartesian solve/path telemetry when Cartesian modes are active
 

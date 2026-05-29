@@ -125,6 +125,60 @@ ready-to-run real motion config. Copy one of the tracked examples to
 `send_servo_commands: false` for read-only acceptance. The `config/local`
 directory is user-owned and gitignored.
 
+For controller bring-up diagnostics, the ACK-on read-only examples enable:
+
+```yaml
+servo:
+  send_servo_commands: false
+  allow_readonly_faulted_startup: true
+  allow_readonly_q_range_violation_startup: true
+  allow_readonly_wrong_mode_startup: true
+safety:
+  joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
+  joint_wrap_for_startup_validation: true
+  joint_wrap_for_motion_safety: false
+```
+
+These flags only allow the server to publish state JSON after valid state
+acquisition. They do not mark the robot as motion-ready, do not suppress fault
+or range telemetry, and are refused for `send_servo_commands: true` motion
+configs.
+
+Startup joint wrapping exists only to interpret controller bring-up diagnostics.
+Raw `q_actual_deg` remains the controller value. Inspect `q_range_wrapped` and
+`q_actual_normalized_for_safety_deg` when a raw joint value is outside the
+configured range but may be equivalent modulo a wrap period. A right-arm report
+near `-317 deg` with range `[-190, 190]` and period `360` is equivalent to about
+`43 deg` for startup range diagnostics. Motion target wrapping remains disabled
+to avoid discontinuities.
+
+## State Dump Bring-Up Tool
+
+Before starting the server, or after an acceptance startup timeout, capture a
+read-only rbpodo dump:
+
+```bash
+python3 scripts/rbpodo_state_dump.py \
+  --ips 172.28.60.200 172.28.60.201 \
+  --q-min -170,-120,-170,-360,-120,-360 \
+  --q-max 170,120,170,360,120,360 \
+  --wrap-period-deg 0,0,0,360,0,360 \
+  --output artifacts/rbpodo_acceptance/state_dump.json \
+  --pretty \
+  --i-understand-this-connects-to-real-controller
+```
+
+The tool only reads `rbpodo.CobotData`. It must not be used to set `pgmode`,
+reset faults, activate motion, or modify controller state. The JSON artifact
+includes raw status fields, `q_actual_deg`, `q_ref_deg`, finite flags, range
+violations, optional wrap diagnostics, and recommended next steps.
+
+If `rbpodo_servo_acceptance.py` times out waiting for the server state stream,
+the failure message includes the server return code, the last 120 lines of
+`rb_servo_server.log`, and likely causes. If the log shows
+`invalid robot startup state`, run `scripts/rbpodo_state_dump.py` and compare
+its diagnostics with the server startup validation.
+
 ## Read-Only Example
 
 Use a local copy under `rb_servo_server/config/local/`, not a tracked template.
@@ -198,7 +252,20 @@ For read-only promotion, require:
 - low state age
 - `fault_latched == false`
 - no unexpected controller `error_code`
+- inspect `rbpodo_diagnostics` for each arm; suspicious diagnostics block
+  motion promotion even when read-only state acquisition succeeds
+- inspect `q_range_wrapped`; it explains startup range normalization while raw
+  `q_actual_deg` remains unchanged
 - no `sendServoJ` acceptance in read-only mode
+
+`rbpodo_diagnostics.raw` preserves firmware/SDK-layout-dependent fields such as
+`time`, `real_vs_simulation_mode`, `init_state_info`, `init_error`,
+`op_stat_sos_flag`, `op_stat_ems_flag`, `op_stat_soft_estop_occur`,
+`op_stat_collision_occur`, and `op_stat_self_collision`. If a status flag that
+is expected to be boolean appears as a large value, or if controller `time` is
+non-finite/implausibly tiny, the state should show
+`diagnostics_suspect: true`. That is useful bring-up evidence, not a
+motion-ready condition.
 
 For ACK-on send tests, `controller_acceptance_observed_count` is the key count.
 For ACK-off send tests, `send_success_count` must be treated as socket/API send

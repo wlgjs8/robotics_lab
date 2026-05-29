@@ -2,13 +2,69 @@
 
 #include <array>
 #include <cstdint>
+#include <cmath>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace rb_servo {
 
 constexpr int kDof = 6;
 using JointArray = std::array<double, kDof>;
+
+struct JointRangeNormalization {
+    double normalized_value_deg = 0.0;
+    bool was_wrapped = false;
+    bool equivalent_in_range = false;
+};
+
+inline bool jointValueInRange(double value_deg, double min_deg, double max_deg) {
+    return std::isfinite(value_deg) &&
+           std::isfinite(min_deg) &&
+           std::isfinite(max_deg) &&
+           value_deg >= min_deg &&
+           value_deg <= max_deg;
+}
+
+inline JointRangeNormalization normalizeJointForRange(
+    double value_deg,
+    double min_deg,
+    double max_deg,
+    double wrap_period_deg
+) {
+    JointRangeNormalization result;
+    result.normalized_value_deg = value_deg;
+    result.equivalent_in_range = jointValueInRange(value_deg, min_deg, max_deg);
+    if (result.equivalent_in_range) {
+        return result;
+    }
+
+    if (!std::isfinite(value_deg) ||
+        !std::isfinite(min_deg) ||
+        !std::isfinite(max_deg) ||
+        !std::isfinite(wrap_period_deg) ||
+        wrap_period_deg <= 0.0 ||
+        max_deg < min_deg) {
+        return result;
+    }
+
+    double normalized = value_deg -
+        std::floor((value_deg - min_deg) / wrap_period_deg) * wrap_period_deg;
+    if (normalized < min_deg) {
+        normalized += wrap_period_deg;
+    }
+    if (normalized >= min_deg + wrap_period_deg) {
+        normalized -= wrap_period_deg;
+    }
+
+    constexpr double kWrapEpsilon = 1e-9;
+    result.normalized_value_deg = normalized;
+    result.was_wrapped = std::abs(normalized - value_deg) > kWrapEpsilon;
+    result.equivalent_in_range =
+        normalized >= min_deg - kWrapEpsilon &&
+        normalized <= max_deg + kWrapEpsilon;
+    return result;
+}
 
 struct Vec6 {
     double x = 0.0;
@@ -144,6 +200,27 @@ struct Wrench6D {
     double tz = 0.0;
 };
 
+struct RbpodoRawDiagnostics {
+    double time_sec = 0.0;
+    int real_vs_simulation_mode = 0;
+    int init_state_info = 0;
+    int init_error = 0;
+    int op_stat_sos_flag = 0;
+    int op_stat_ems_flag = 0;
+    int op_stat_soft_estop_occur = 0;
+    int op_stat_collision_occur = 0;
+    int op_stat_self_collision = 0;
+};
+
+struct RbpodoDiagnosticsSnapshot {
+    bool diagnostics_valid = true;
+    bool diagnostics_suspect = false;
+    std::string reason;
+    std::string error_name;
+    int stable_error_code = 0;
+    RbpodoRawDiagnostics raw;
+};
+
 struct ForceControlAxis {
     bool x = false;
     bool y = false;
@@ -190,6 +267,10 @@ struct RobotState {
     std::optional<bool> fault_recoverable;
     std::string lifecycle_state;
     int error_code = 0;
+    std::string motion_readiness_error_kind;
+    std::string motion_readiness_error_name;
+    std::string diagnostic_error_source;
+    std::optional<RbpodoDiagnosticsSnapshot> rbpodo_diagnostics;
 };
 
 struct CartesianSolveTelemetry {
@@ -393,6 +474,41 @@ struct LatchedFaultContextSnapshot {
     std::string reason;
 };
 
+struct JointRangeViolation {
+    int joint = 0;
+    double value_deg = 0.0;
+    double min_deg = 0.0;
+    double max_deg = 0.0;
+};
+
+struct JointRangeWrapped {
+    int joint = 0;
+    double raw_deg = 0.0;
+    double normalized_deg = 0.0;
+    double period_deg = 0.0;
+};
+
+struct ArmStartupValidationSnapshot {
+    bool acquisition_ok = false;
+    bool motion_ready = false;
+    bool read_only_diagnostic = false;
+    bool allowed_unsafe_startup = false;
+    std::vector<std::string> invalid_reasons;
+    std::vector<JointRangeViolation> q_range_violations;
+    std::vector<JointRangeWrapped> q_range_wrapped;
+    std::optional<JointArray> q_actual_normalized_for_safety_deg;
+    std::string diagnostic_error_source;
+};
+
+struct StartupValidationSnapshot {
+    bool acquisition_ok = false;
+    bool motion_ready = false;
+    bool read_only_diagnostic = false;
+    bool allowed_unsafe_startup = false;
+    ArmStartupValidationSnapshot left;
+    ArmStartupValidationSnapshot right;
+};
+
 struct ServoSample {
     uint64_t tick = 0;
     uint64_t loop_start_time_ns = 0;
@@ -506,6 +622,7 @@ struct ServoSnapshot {
     ArmWorkerTelemetry right_worker_telemetry;
     std::optional<BackendTransportTelemetry> left_transport_telemetry;
     std::optional<BackendTransportTelemetry> right_transport_telemetry;
+    StartupValidationSnapshot startup_validation;
 
     uint64_t logger_dropped_samples = 0;
 };

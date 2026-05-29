@@ -98,6 +98,7 @@ struct SafetyConfig {
     JointArray q_max_deg{};
     JointArray dq_max_deg_s{};
     JointArray ddq_max_deg_s2{};
+    JointArray joint_wrap_period_deg{};
 
     double command_timeout_sec = 0.2;
     double max_tracking_error_deg = 10.0;
@@ -107,6 +108,8 @@ struct SafetyConfig {
 
     bool stop_both_arms_on_single_arm_error = true;
     bool latch_fault_on_robot_state_error = true;
+    bool joint_wrap_for_startup_validation = false;
+    bool joint_wrap_for_motion_safety = false;
 };
 
 struct ServoConfig {
@@ -115,6 +118,9 @@ struct ServoConfig {
     ServoIoModel io_model = ServoIoModel::Direct;
     ControlMode startup_mode = ControlMode::Hold;
     bool send_servo_commands = true;
+    bool allow_readonly_faulted_startup = false;
+    bool allow_readonly_q_range_violation_startup = false;
+    bool allow_readonly_wrong_mode_startup = false;
 
     bool enable_realtime_priority = true;
     int realtime_priority = 80;

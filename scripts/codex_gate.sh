@@ -767,6 +767,27 @@ run_rbpodo_accept_gate() {
   fi
 }
 
+run_rbpodo_readonly_diag_gate() {
+  run_shell_syntax_checks
+  run_servo_gate_or_skip_missing_deps
+  run_python_surface_tests
+}
+
+run_rbpodo_status_fields_gate() {
+  run_servo_gate_or_skip_missing_deps
+}
+
+run_rbpodo_joint_wrap_gate() {
+  run_servo_gate_or_skip_missing_deps
+}
+
+run_rbpodo_bringup_tools_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  run_optional_python_help scripts/rbpodo_state_dump.py
+  run_optional_python_help scripts/rbpodo_servo_acceptance.py
+}
+
 run_rbpodo_doc_gate() {
   run_shell_syntax_checks
   grep_existing "servo_t1_sec" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
@@ -1183,6 +1204,18 @@ case "$TASK" in
     ;;
   RBPODO-ACCEPT-01)
     run_rbpodo_accept_gate
+    ;;
+  RBPODO-READONLY-DIAG-01)
+    run_rbpodo_readonly_diag_gate
+    ;;
+  RBPODO-STATUS-FIELDS-01)
+    run_rbpodo_status_fields_gate
+    ;;
+  RBPODO-JOINT-WRAP-01)
+    run_rbpodo_joint_wrap_gate
+    ;;
+  RBPODO-BRINGUP-TOOLS-01)
+    run_rbpodo_bringup_tools_gate
     ;;
   RBPODO-DOC-01)
     run_rbpodo_doc_gate

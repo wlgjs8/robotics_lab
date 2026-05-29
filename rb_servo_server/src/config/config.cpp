@@ -426,6 +426,12 @@ void validatePositiveFiniteArray(const JointArray& values, const std::string& na
     }
 }
 
+void validateNonNegativeFiniteArray(const JointArray& values, const std::string& name) {
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        validateNonNegativeFinite(values[i], name + "[" + std::to_string(i) + "]");
+    }
+}
+
 double workerReadPeriodFromRate(double rate_hz, const std::string& name) {
     validatePositiveFinite(rate_hz, name);
     return 1.0 / rate_hz;
@@ -436,6 +442,7 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.servo.command_timeout_sec, "servo.command_timeout_sec");
     validatePositiveFinite(cfg.safety.command_timeout_sec, "safety.command_timeout_sec");
     validatePositiveFinite(cfg.safety.max_tracking_error_deg, "safety.max_tracking_error_deg");
+    validateNonNegativeFiniteArray(cfg.safety.joint_wrap_period_deg, "safety.joint_wrap_period_deg");
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
     validatePositiveFinite(cfg.servo.filter_dt_max_ratio, "servo.filter_dt_max_ratio");
     validatePositiveFinite(cfg.servo.worker_read_period_sec, "servo.worker_read_period_sec");
@@ -479,6 +486,27 @@ void validateConfig(const DualArmConfig& cfg) {
     }
     if (cfg.network.state_pub_endpoints.front() != cfg.network.state_pub_endpoint) {
         throw std::runtime_error("network.state_pub_endpoint must match first network.state_pub_endpoints entry");
+    }
+
+    const bool readonly_diagnostic_startup_allowed =
+        cfg.servo.allow_readonly_faulted_startup ||
+        cfg.servo.allow_readonly_q_range_violation_startup ||
+        cfg.servo.allow_readonly_wrong_mode_startup;
+    if (cfg.servo.send_servo_commands && readonly_diagnostic_startup_allowed) {
+        throw std::runtime_error(
+            "servo.allow_readonly_*_startup options require servo.send_servo_commands=false"
+        );
+    }
+    if (cfg.safety.joint_wrap_for_motion_safety) {
+        throw std::runtime_error(
+            "safety.joint_wrap_for_motion_safety is not implemented for motion targets"
+        );
+    }
+    if (cfg.servo.send_servo_commands && cfg.safety.joint_wrap_for_startup_validation) {
+        throw std::runtime_error(
+            "safety.joint_wrap_for_startup_validation requires servo.send_servo_commands=false "
+            "until motion-safe joint unwrapping is implemented"
+        );
     }
 
     const std::string force_provider = lower(cfg.force_control.provider);
@@ -821,6 +849,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "io_model",
             "startup_mode",
             "send_servo_commands",
+            "allow_readonly_faulted_startup",
+            "allow_readonly_q_range_violation_startup",
+            "allow_readonly_wrong_mode_startup",
             "enable_realtime_priority",
             "realtime_priority",
             "cpu_core",
@@ -836,6 +867,21 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "io_model")) cfg.servo.io_model = parseServoIoModel(sec["io_model"], "servo.io_model");
         if (has(sec, "startup_mode")) cfg.servo.startup_mode = controlModeFromString(asString(sec["startup_mode"], "servo.startup_mode"));
         if (has(sec, "send_servo_commands")) cfg.servo.send_servo_commands = asBool(sec["send_servo_commands"], "servo.send_servo_commands");
+        if (has(sec, "allow_readonly_faulted_startup")) {
+            cfg.servo.allow_readonly_faulted_startup =
+                asBool(sec["allow_readonly_faulted_startup"], "servo.allow_readonly_faulted_startup");
+        }
+        if (has(sec, "allow_readonly_q_range_violation_startup")) {
+            cfg.servo.allow_readonly_q_range_violation_startup =
+                asBool(
+                    sec["allow_readonly_q_range_violation_startup"],
+                    "servo.allow_readonly_q_range_violation_startup"
+                );
+        }
+        if (has(sec, "allow_readonly_wrong_mode_startup")) {
+            cfg.servo.allow_readonly_wrong_mode_startup =
+                asBool(sec["allow_readonly_wrong_mode_startup"], "servo.allow_readonly_wrong_mode_startup");
+        }
         if (has(sec, "enable_realtime_priority")) cfg.servo.enable_realtime_priority = asBool(sec["enable_realtime_priority"], "servo.enable_realtime_priority");
         if (has(sec, "realtime_priority")) cfg.servo.realtime_priority = asInt(sec["realtime_priority"], "servo.realtime_priority");
         if (has(sec, "cpu_core")) cfg.servo.cpu_core = asInt(sec["cpu_core"], "servo.cpu_core");
@@ -867,21 +913,27 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "q_max_deg",
             "dq_max_deg_s",
             "ddq_max_deg_s2",
+            "joint_wrap_period_deg",
             "command_timeout_sec",
             "max_tracking_error_deg",
             "stop_both_arms_on_single_arm_error",
             "tracking_error_policy",
             "latch_fault_on_robot_state_error",
+            "joint_wrap_for_startup_validation",
+            "joint_wrap_for_motion_safety",
         }, "safety");
         if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
         if (has(sec, "q_max_deg")) cfg.safety.q_max_deg = parseJointArray(sec["q_max_deg"], "safety.q_max_deg");
         if (has(sec, "dq_max_deg_s")) cfg.safety.dq_max_deg_s = parseJointArray(sec["dq_max_deg_s"], "safety.dq_max_deg_s");
         if (has(sec, "ddq_max_deg_s2")) cfg.safety.ddq_max_deg_s2 = parseJointArray(sec["ddq_max_deg_s2"], "safety.ddq_max_deg_s2");
+        if (has(sec, "joint_wrap_period_deg")) cfg.safety.joint_wrap_period_deg = parseJointArray(sec["joint_wrap_period_deg"], "safety.joint_wrap_period_deg");
         if (has(sec, "command_timeout_sec")) cfg.safety.command_timeout_sec = asDouble(sec["command_timeout_sec"], "safety.command_timeout_sec");
         if (has(sec, "max_tracking_error_deg")) cfg.safety.max_tracking_error_deg = asDouble(sec["max_tracking_error_deg"], "safety.max_tracking_error_deg");
         if (has(sec, "stop_both_arms_on_single_arm_error")) cfg.safety.stop_both_arms_on_single_arm_error = asBool(sec["stop_both_arms_on_single_arm_error"], "safety.stop_both_arms_on_single_arm_error");
         if (has(sec, "tracking_error_policy")) cfg.safety.tracking_error_policy = trackingErrorPolicyFromString(asString(sec["tracking_error_policy"], "safety.tracking_error_policy"));
         if (has(sec, "latch_fault_on_robot_state_error")) cfg.safety.latch_fault_on_robot_state_error = asBool(sec["latch_fault_on_robot_state_error"], "safety.latch_fault_on_robot_state_error");
+        if (has(sec, "joint_wrap_for_startup_validation")) cfg.safety.joint_wrap_for_startup_validation = asBool(sec["joint_wrap_for_startup_validation"], "safety.joint_wrap_for_startup_validation");
+        if (has(sec, "joint_wrap_for_motion_safety")) cfg.safety.joint_wrap_for_motion_safety = asBool(sec["joint_wrap_for_motion_safety"], "safety.joint_wrap_for_motion_safety");
     }
 
     if (has(root, "network")) {

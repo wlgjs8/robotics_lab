@@ -1,4 +1,5 @@
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cerrno>
 #include <cstdlib>
@@ -6,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -61,6 +63,10 @@ bool sameJointArray(const rb_servo::JointArray& a, const rb_servo::JointArray& b
 
 bool contains(const std::string& text, const std::string& needle) {
     return text.find(needle) != std::string::npos;
+}
+
+bool containsValue(const std::vector<std::string>& values, const std::string& needle) {
+    return std::find(values.begin(), values.end(), needle) != values.end();
 }
 
 bool jsonArrayHasSixFinite(const nlohmann::json& value) {
@@ -170,6 +176,16 @@ public:
     void setReadOk(bool ok) { read_ok_ = ok; }
     void setConnected(bool connected) { connected_ = connected; }
     void setHasError(bool has_error) { has_error_ = has_error; }
+    void setErrorCode(int error_code) { error_code_ = error_code; }
+    void setMotionReadinessError(
+        const std::string& kind,
+        const std::string& name,
+        const std::string& source
+    ) {
+        motion_readiness_error_kind_ = kind;
+        motion_readiness_error_name_ = name;
+        diagnostic_error_source_ = source;
+    }
     void setResetOk(bool ok) { reset_ok_ = ok; }
     void setInvalidateJointStateOnReset(bool invalidate) { invalidate_joint_state_on_reset_ = invalidate; }
     void setReadSleepMs(int sleep_ms) { read_sleep_ms_.store(sleep_ms); }
@@ -192,6 +208,9 @@ private:
         state.servo_enabled = initialized_;
         state.has_error = has_error_;
         state.error_code = error_code_;
+        state.motion_readiness_error_kind = motion_readiness_error_kind_;
+        state.motion_readiness_error_name = motion_readiness_error_name_;
+        state.diagnostic_error_source = diagnostic_error_source_;
         return state;
     }
 
@@ -220,6 +239,9 @@ private:
     bool invalidate_joint_state_on_reset_ = false;
     bool has_error_ = false;
     int error_code_ = 0;
+    std::string motion_readiness_error_kind_;
+    std::string motion_readiness_error_name_;
+    std::string diagnostic_error_source_;
     bool connected_ = false;
     bool initialized_ = false;
     std::atomic<int> read_sleep_ms_{0};
@@ -2240,6 +2262,9 @@ bool testRealModeReadOnlyAndMotionEnvGates() {
              << "servo:\n"
              << "  enable_realtime_priority: true\n"
              << "  send_servo_commands: false\n"
+             << "  allow_readonly_faulted_startup: true\n"
+             << "  allow_readonly_q_range_violation_startup: true\n"
+             << "  allow_readonly_wrong_mode_startup: true\n"
              << "safety:\n"
              << "  tracking_error_policy: fault_latch\n";
     }
@@ -2255,6 +2280,9 @@ bool testRealModeReadOnlyAndMotionEnvGates() {
     allow_real.set("1");
     const rb_servo::DualArmConfig read_only_cfg = rb_servo::loadConfigFromYaml(read_only_path);
     RB_CHECK(!read_only_cfg.servo.send_servo_commands);
+    RB_CHECK(read_only_cfg.servo.allow_readonly_faulted_startup);
+    RB_CHECK(read_only_cfg.servo.allow_readonly_q_range_violation_startup);
+    RB_CHECK(read_only_cfg.servo.allow_readonly_wrong_mode_startup);
     ::unlink(read_only_path.c_str());
 
     const std::string motion_path = "/tmp/rb-servo-real-motion-" + std::to_string(getpid()) + ".yaml";
@@ -2293,6 +2321,40 @@ bool testRealModeReadOnlyAndMotionEnvGates() {
     const rb_servo::DualArmConfig motion_cfg = rb_servo::loadConfigFromYaml(motion_path);
     RB_CHECK(motion_cfg.servo.send_servo_commands);
     ::unlink(motion_path.c_str());
+
+    const std::string diagnostic_motion_path =
+        "/tmp/rb-servo-read-only-diagnostic-motion-" + std::to_string(getpid()) + ".yaml";
+    {
+        std::ofstream file(diagnostic_motion_path);
+        file << "left_robot:\n"
+             << "  backend_type: rbpodo\n"
+             << "  run_mode: real\n"
+             << "  ip: 172.28.60.200\n"
+             << "  servo_t1_sec: 0.005\n"
+             << "  servo_t2_sec: 0.05\n"
+             << "  servo_alpha: 0.5\n"
+             << "right_robot:\n"
+             << "  backend_type: rbpodo\n"
+             << "  run_mode: real\n"
+             << "  ip: 172.28.60.201\n"
+             << "  servo_t1_sec: 0.005\n"
+             << "  servo_t2_sec: 0.05\n"
+             << "  servo_alpha: 0.5\n"
+             << "servo:\n"
+             << "  enable_realtime_priority: true\n"
+             << "  send_servo_commands: true\n"
+             << "  allow_readonly_faulted_startup: true\n"
+             << "safety:\n"
+             << "  tracking_error_policy: fault_latch\n";
+    }
+    bool rejected_motion_diagnostic = false;
+    try {
+        (void)rb_servo::loadConfigFromYaml(diagnostic_motion_path);
+    } catch (const std::exception& exc) {
+        rejected_motion_diagnostic = contains(exc.what(), "allow_readonly");
+    }
+    ::unlink(diagnostic_motion_path.c_str());
+    RB_CHECK(rejected_motion_diagnostic);
     return true;
 }
 
@@ -2794,6 +2856,9 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.left_state.error_code = 2222;
     snapshot.left_state.fault_recoverable = true;
     snapshot.left_state.lifecycle_state = "faulted";
+    snapshot.left_state.motion_readiness_error_kind = "RobotFault";
+    snapshot.left_state.motion_readiness_error_name = "rbpodo_robot_fault";
+    snapshot.left_state.diagnostic_error_source = "rbpodo_robot_fault";
     snapshot.left_sent_q_deg = joints(3.0);
     snapshot.right_sent_q_deg = joints(4.0);
     snapshot.left_prev_sent_q_deg = joints(5.0);
@@ -2875,6 +2940,20 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.fault_latched = false;
     snapshot.latched_fault_reason = rb_servo::SafetyVerdict::Ok;
     snapshot.fault_reason = "";
+    snapshot.startup_validation.acquisition_ok = true;
+    snapshot.startup_validation.motion_ready = false;
+    snapshot.startup_validation.read_only_diagnostic = true;
+    snapshot.startup_validation.allowed_unsafe_startup = true;
+    snapshot.startup_validation.left.acquisition_ok = true;
+    snapshot.startup_validation.left.motion_ready = false;
+    snapshot.startup_validation.left.read_only_diagnostic = true;
+    snapshot.startup_validation.left.allowed_unsafe_startup = true;
+    snapshot.startup_validation.left.invalid_reasons = {"robot_fault", "q_range_violation"};
+    snapshot.startup_validation.left.diagnostic_error_source = "error_code:2222";
+    snapshot.startup_validation.left.q_range_violations.push_back({3, 250.0, -180.0, 180.0});
+    snapshot.startup_validation.right.acquisition_ok = true;
+    snapshot.startup_validation.right.motion_ready = true;
+    snapshot.startup_validation.right.read_only_diagnostic = true;
     snapshot.logger_dropped_samples = 0;
 
     rb_servo::StatePublisher publisher(cfg);
@@ -2883,7 +2962,7 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     const char* top_keys[] = {
         "schema_version", "tick", "host_time_ns", "loop_start_time_ns", "loop_end_time_ns",
         "period_ms", "jitter_ms", "filter_dt_ms", "command_seq", "command_source", "observed_mode", "observed_backend",
-        "cartesian_control_snapshot", "kinematics_snapshot", "left", "right",
+        "cartesian_control_snapshot", "kinematics_snapshot", "startup_validation", "left", "right",
         "send_skew_us", "send_within_period", "send_period_overrun", "send_command_deadline_missed",
         "send_deadline_hit", "send_deadline_hit_deprecated_alias_for",
         "send_suppressed", "send_policy", "safety_verdict", "motion_state", "fault_latched",
@@ -2897,7 +2976,11 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     const char* arm_keys[] = {
         "mode", "q_actual_deg", "q_sent_deg", "q_previous_sent_deg", "send_ok",
         "send_start_ns", "send_end_ns", "send_duration_us", "has_valid_joint_state",
-        "connection_state", "has_error", "servo_enabled", "fault_recoverable", "lifecycle_state",
+        "startup_acquisition_ok", "startup_motion_ready", "startup_invalid_reasons",
+        "q_range_violations", "read_only_diagnostic", "allowed_unsafe_startup",
+        "diagnostic_error_source", "connection_state", "has_error", "servo_enabled",
+        "fault_recoverable", "lifecycle_state", "motion_readiness_error_kind",
+        "motion_readiness_error_name",
         "last_read", "last_send", "robot_time_ns", "host_time_ns", "error_code", "state_age_us",
         "send_within_period", "send_period_overrun", "send_command_deadline_missed",
         "send_deadline_hit", "send_deadline_hit_deprecated_alias_for",
@@ -2959,11 +3042,29 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(!json.at("left").at("send_ok").get<bool>());
     RB_CHECK(json.at("right").at("send_ok").get<bool>());
     RB_CHECK(json.at("left").at("has_error").get<bool>());
+    RB_CHECK(json.at("startup_validation").at("acquisition_ok").get<bool>());
+    RB_CHECK(!json.at("startup_validation").at("motion_ready").get<bool>());
+    RB_CHECK(json.at("startup_validation").at("read_only_diagnostic").get<bool>());
+    RB_CHECK(json.at("startup_validation").at("allowed_unsafe_startup").get<bool>());
+    RB_CHECK(!json.at("startup_validation").at("left").at("motion_ready").get<bool>());
+    RB_CHECK(json.at("left").at("startup_acquisition_ok").get<bool>());
+    RB_CHECK(!json.at("left").at("startup_motion_ready").get<bool>());
+    RB_CHECK(json.at("left").at("read_only_diagnostic").get<bool>());
+    RB_CHECK(json.at("left").at("allowed_unsafe_startup").get<bool>());
+    RB_CHECK(json.at("left").at("startup_invalid_reasons").size() == 2);
+    RB_CHECK(json.at("left").at("q_range_violations").size() == 1);
+    RB_CHECK(json.at("left").at("q_range_violations").at(0).at("joint").get<int>() == 3);
+    RB_CHECK(json.at("left").at("diagnostic_error_source").get<std::string>() == "error_code:2222");
+    RB_CHECK(json.at("right").at("startup_motion_ready").get<bool>());
+    RB_CHECK(json.at("right").at("q_range_violations").empty());
     RB_CHECK(json.at("left").at("servo_enabled").get<bool>());
     RB_CHECK(json.at("left").at("fault_recoverable").get<bool>());
     RB_CHECK(json.at("left").at("lifecycle_state").get<std::string>() == "faulted");
+    RB_CHECK(json.at("left").at("motion_readiness_error_kind").get<std::string>() == "RobotFault");
+    RB_CHECK(json.at("left").at("motion_readiness_error_name").get<std::string>() == "rbpodo_robot_fault");
     RB_CHECK(json.at("right").at("fault_recoverable").is_null());
     RB_CHECK(json.at("right").at("lifecycle_state").is_null());
+    RB_CHECK(json.at("right").at("motion_readiness_error_kind").is_null());
     RB_CHECK(!json.at("left").at("last_read").at("ok").get<bool>());
     RB_CHECK(json.at("left").at("last_read").at("backend_error_kind").get<std::string>() == "RobotFault");
     RB_CHECK(json.at("left").at("last_read").at("error_name").get<std::string>() == "fault_latched");
@@ -3282,6 +3383,223 @@ bool testLoggerZeroCapacityDropsWithoutBlocking() {
     logger.stop();
     std::filesystem::remove_all(cfg.directory);
     RB_CHECK(logger.droppedSamples() == 1);
+    return true;
+}
+
+bool testReadOnlyDiagnosticStartupAllowsFaultedStateAndPublishesUnsafeSnapshot() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.servo.send_servo_commands = false;
+    cfg.servo.allow_readonly_faulted_startup = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    right->setHasError(true);
+    right->setErrorCode(1977952848);
+
+    rb_servo::DualArmServoLoop loop(
+        std::move(left),
+        std::move(right),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    RB_CHECK(waitUntil([&] { return loop.latestSnapshot().loop_end_time_ns > 0; }));
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    RB_CHECK(snapshot.right_state.has_error);
+    RB_CHECK(snapshot.right_state.error_code == 1977952848);
+    RB_CHECK(snapshot.send_suppressed);
+    RB_CHECK(snapshot.send_policy == "read_only");
+    RB_CHECK(snapshot.startup_validation.acquisition_ok);
+    RB_CHECK(!snapshot.startup_validation.motion_ready);
+    RB_CHECK(snapshot.startup_validation.read_only_diagnostic);
+    RB_CHECK(snapshot.startup_validation.allowed_unsafe_startup);
+    RB_CHECK(snapshot.startup_validation.right.acquisition_ok);
+    RB_CHECK(!snapshot.startup_validation.right.motion_ready);
+    RB_CHECK(snapshot.startup_validation.right.allowed_unsafe_startup);
+    RB_CHECK(containsValue(snapshot.startup_validation.right.invalid_reasons, "robot_fault"));
+    RB_CHECK(snapshot.startup_validation.right.diagnostic_error_source == "error_code:1977952848");
+    loop.stop();
+    return true;
+}
+
+bool testMotionStartupRejectsFaultedState() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.servo.send_servo_commands = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    left->setHasError(true);
+    left->setErrorCode(2222);
+
+    rb_servo::DualArmServoLoop loop(
+        std::move(left),
+        std::move(right),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(!loop.start());
+    return true;
+}
+
+bool testReadOnlyDiagnosticStartupAllowsRangeViolationOnlyWhenConfigured() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.servo.send_servo_commands = false;
+    rb_servo::JointArray out_of_range = joints(0.0);
+    out_of_range[2] = 250.0;
+    {
+        rb_servo::DualArmServoLoop loop(
+            std::make_unique<TestBackend>(rb_servo::ArmId::Left, out_of_range, false),
+            std::make_unique<TestBackend>(rb_servo::ArmId::Right, joints(0.0), false),
+            cfg,
+            &buffer,
+            nullptr
+        );
+        RB_CHECK(!loop.start());
+    }
+
+    cfg.servo.allow_readonly_q_range_violation_startup = true;
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, out_of_range, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, joints(0.0), false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    RB_CHECK(waitUntil([&] { return loop.latestSnapshot().loop_end_time_ns > 0; }));
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    RB_CHECK(snapshot.startup_validation.acquisition_ok);
+    RB_CHECK(!snapshot.startup_validation.motion_ready);
+    RB_CHECK(snapshot.startup_validation.allowed_unsafe_startup);
+    RB_CHECK(containsValue(snapshot.startup_validation.left.invalid_reasons, "q_range_violation"));
+    RB_CHECK(snapshot.startup_validation.left.q_range_violations.size() == 1);
+    RB_CHECK(snapshot.startup_validation.left.q_range_violations.front().joint == 3);
+    RB_CHECK(snapshot.startup_validation.left.q_range_violations.front().value_deg == 250.0);
+    RB_CHECK(snapshot.send_suppressed);
+    RB_CHECK(snapshot.send_policy == "read_only");
+    loop.stop();
+    return true;
+}
+
+bool testMotionStartupRejectsRangeViolation() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.servo.send_servo_commands = true;
+    rb_servo::JointArray out_of_range = joints(0.0);
+    out_of_range[2] = 250.0;
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, out_of_range, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, joints(0.0), false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(!loop.start());
+    return true;
+}
+
+bool testReadOnlyDiagnosticStartupAllowsWrongModeOnlyWhenConfigured() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.servo.send_servo_commands = false;
+    const rb_servo::JointArray initial = joints(0.0);
+    {
+        auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+        auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+        left->setMotionReadinessError(
+            "WrongMode",
+            "rbpodo_wrong_operation_mode",
+            "rbpodo_wrong_operation_mode"
+        );
+        rb_servo::DualArmServoLoop loop(
+            std::move(left),
+            std::move(right),
+            cfg,
+            &buffer,
+            nullptr
+        );
+        RB_CHECK(!loop.start());
+    }
+
+    cfg.servo.allow_readonly_wrong_mode_startup = true;
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    left->setMotionReadinessError(
+        "WrongMode",
+        "rbpodo_wrong_operation_mode",
+        "rbpodo_wrong_operation_mode"
+    );
+    rb_servo::DualArmServoLoop loop(
+        std::move(left),
+        std::move(right),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    RB_CHECK(waitUntil([&] { return loop.latestSnapshot().loop_end_time_ns > 0; }));
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    RB_CHECK(!snapshot.startup_validation.motion_ready);
+    RB_CHECK(snapshot.startup_validation.allowed_unsafe_startup);
+    RB_CHECK(containsValue(snapshot.startup_validation.left.invalid_reasons, "wrong_mode"));
+    RB_CHECK(snapshot.startup_validation.left.diagnostic_error_source == "rbpodo_wrong_operation_mode");
+    RB_CHECK(snapshot.send_suppressed);
+    RB_CHECK(snapshot.send_policy == "read_only");
+    loop.stop();
+    return true;
+}
+
+bool testMotionStartupRejectsWrongMode() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.servo.send_servo_commands = true;
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, joints(0.0), false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, joints(0.0), false);
+    left->setMotionReadinessError(
+        "WrongMode",
+        "rbpodo_wrong_operation_mode",
+        "rbpodo_wrong_operation_mode"
+    );
+    rb_servo::DualArmServoLoop loop(
+        std::move(left),
+        std::move(right),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(!loop.start());
+    return true;
+}
+
+bool testReadOnlyDiagnosticStartupRejectsAcquisitionFailure() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.servo.send_servo_commands = false;
+    cfg.servo.allow_readonly_faulted_startup = true;
+    cfg.servo.allow_readonly_q_range_violation_startup = true;
+    cfg.servo.allow_readonly_wrong_mode_startup = true;
+    rb_servo::JointArray non_finite = joints(0.0);
+    non_finite[0] = std::numeric_limits<double>::quiet_NaN();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, non_finite, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, joints(0.0), false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(!loop.start());
     return true;
 }
 
@@ -4408,6 +4726,13 @@ int main() {
     if (!testStatePublisherUsesLatestSnapshotWithoutBackendReadsAndDoesNotStallLoop()) return 1;
     if (!testStatePublisherUsesConfiguredPublishRate()) return 1;
     if (!testLoggerZeroCapacityDropsWithoutBlocking()) return 1;
+    if (!testReadOnlyDiagnosticStartupAllowsFaultedStateAndPublishesUnsafeSnapshot()) return 1;
+    if (!testMotionStartupRejectsFaultedState()) return 1;
+    if (!testReadOnlyDiagnosticStartupAllowsRangeViolationOnlyWhenConfigured()) return 1;
+    if (!testMotionStartupRejectsRangeViolation()) return 1;
+    if (!testReadOnlyDiagnosticStartupAllowsWrongModeOnlyWhenConfigured()) return 1;
+    if (!testMotionStartupRejectsWrongMode()) return 1;
+    if (!testReadOnlyDiagnosticStartupRejectsAcquisitionFailure()) return 1;
     if (!testInvalidStartupRobotStateFailsStart()) return 1;
     if (!testEmergencyWinsAndResetDoesNotRun()) return 1;
     if (!testResetFaultFailureKeepsFaultLatched()) return 1;

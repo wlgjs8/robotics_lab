@@ -57,6 +57,19 @@ private:
     bool initializeWorkers();
     bool readRobotStates(RobotState& left, RobotState& right);
     void populateTcpPose(RobotState& state, const ArmMountConfig& mount) const;
+    ArmStartupValidationSnapshot validateStartupArm(const RobotState& state) const;
+    StartupValidationSnapshot validateStartupStates(
+        const RobotState& left,
+        const RobotState& right
+    ) const;
+    bool startupValidationAllowsStart(const StartupValidationSnapshot& validation) const;
+    bool readOnlyDiagnosticStartupEnabled() const;
+    void logStartupValidation(
+        const StartupValidationSnapshot& validation,
+        const RobotState& left,
+        const RobotState& right
+    ) const;
+    void storeStartupValidation(const StartupValidationSnapshot& validation);
     bool isValidRobotStateForStartup(const RobotState& state) const;
     bool isValidJointState(const RobotState& state) const;
     void clearLatchedCartesianTargets();
@@ -191,6 +204,7 @@ private:
     CartesianTwistHoldState right_cartesian_twist_hold_;
     CartesianVelocityIntegratorState left_cartesian_velocity_integrator_;
     CartesianVelocityIntegratorState right_cartesian_velocity_integrator_;
+    StartupValidationSnapshot startup_validation_;
     ServoSnapshot latest_snapshot_;
 };
 

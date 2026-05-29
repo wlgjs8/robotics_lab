@@ -45,9 +45,40 @@ nlohmann::json jointArrayJson(const JointArray& joints) {
     return out;
 }
 
+nlohmann::json optionalJointArrayJson(const std::optional<JointArray>& joints) {
+    if (!joints.has_value()) return nullptr;
+    return jointArrayJson(*joints);
+}
+
 nlohmann::json stringArrayJson(const std::vector<std::string>& values) {
     nlohmann::json out = nlohmann::json::array();
     for (const std::string& value : values) out.push_back(value);
+    return out;
+}
+
+nlohmann::json qRangeViolationsJson(const std::vector<JointRangeViolation>& violations) {
+    nlohmann::json out = nlohmann::json::array();
+    for (const JointRangeViolation& violation : violations) {
+        out.push_back({
+            {"joint", violation.joint},
+            {"value_deg", violation.value_deg},
+            {"min_deg", violation.min_deg},
+            {"max_deg", violation.max_deg},
+        });
+    }
+    return out;
+}
+
+nlohmann::json qRangeWrappedJson(const std::vector<JointRangeWrapped>& wrapped_joints) {
+    nlohmann::json out = nlohmann::json::array();
+    for (const JointRangeWrapped& wrapped : wrapped_joints) {
+        out.push_back({
+            {"joint", wrapped.joint},
+            {"raw_deg", wrapped.raw_deg},
+            {"normalized_deg", wrapped.normalized_deg},
+            {"period_deg", wrapped.period_deg},
+        });
+    }
     return out;
 }
 
@@ -212,6 +243,39 @@ nlohmann::json optionalStringJson(const std::string& value) {
     return value;
 }
 
+nlohmann::json rbpodoTimeJson(double value) {
+    if (!std::isfinite(value)) return nullptr;
+    return value;
+}
+
+nlohmann::json rbpodoRawDiagnosticsJson(const RbpodoRawDiagnostics& raw) {
+    return {
+        {"time", rbpodoTimeJson(raw.time_sec)},
+        {"real_vs_simulation_mode", raw.real_vs_simulation_mode},
+        {"init_state_info", raw.init_state_info},
+        {"init_error", raw.init_error},
+        {"op_stat_sos_flag", raw.op_stat_sos_flag},
+        {"op_stat_ems_flag", raw.op_stat_ems_flag},
+        {"op_stat_soft_estop_occur", raw.op_stat_soft_estop_occur},
+        {"op_stat_collision_occur", raw.op_stat_collision_occur},
+        {"op_stat_self_collision", raw.op_stat_self_collision},
+    };
+}
+
+nlohmann::json optionalRbpodoDiagnosticsJson(
+    const std::optional<RbpodoDiagnosticsSnapshot>& diagnostics
+) {
+    if (!diagnostics.has_value()) return nullptr;
+    return {
+        {"diagnostics_valid", diagnostics->diagnostics_valid},
+        {"diagnostics_suspect", diagnostics->diagnostics_suspect},
+        {"reason", optionalStringJson(diagnostics->reason)},
+        {"error_name", optionalStringJson(diagnostics->error_name)},
+        {"stable_error_code", diagnostics->stable_error_code},
+        {"raw", rbpodoRawDiagnosticsJson(diagnostics->raw)},
+    };
+}
+
 double ageUs(uint64_t newer_ns, uint64_t older_ns) {
     if (newer_ns == 0 || older_ns == 0 || newer_ns < older_ns) return 0.0;
     return static_cast<double>(newer_ns - older_ns) / 1000.0;
@@ -248,6 +312,31 @@ nlohmann::json backendCallJson(const BackendCallSnapshot& call, bool send_call) 
         out["ok"] = call.ok;
     }
     return out;
+}
+
+nlohmann::json startupArmValidationJson(const ArmStartupValidationSnapshot& validation) {
+    return {
+        {"acquisition_ok", validation.acquisition_ok},
+        {"motion_ready", validation.motion_ready},
+        {"read_only_diagnostic", validation.read_only_diagnostic},
+        {"allowed_unsafe_startup", validation.allowed_unsafe_startup},
+        {"invalid_reasons", stringArrayJson(validation.invalid_reasons)},
+        {"q_range_violations", qRangeViolationsJson(validation.q_range_violations)},
+        {"q_range_wrapped", qRangeWrappedJson(validation.q_range_wrapped)},
+        {"q_actual_normalized_for_safety_deg", optionalJointArrayJson(validation.q_actual_normalized_for_safety_deg)},
+        {"diagnostic_error_source", optionalStringJson(validation.diagnostic_error_source)},
+    };
+}
+
+nlohmann::json startupValidationJson(const StartupValidationSnapshot& validation) {
+    return {
+        {"acquisition_ok", validation.acquisition_ok},
+        {"motion_ready", validation.motion_ready},
+        {"read_only_diagnostic", validation.read_only_diagnostic},
+        {"allowed_unsafe_startup", validation.allowed_unsafe_startup},
+        {"left", startupArmValidationJson(validation.left)},
+        {"right", startupArmValidationJson(validation.right)},
+    };
 }
 
 uint64_t workerReadPeriodNs(const ServoConfig& config, bool enabled) {
@@ -507,7 +596,8 @@ nlohmann::json armStateJson(
     const std::optional<BackendTransportTelemetry>& transport_telemetry,
     bool worker_enabled,
     const ServoConfig& servo_config,
-    const CartesianSolveTelemetry& cartesian_solve
+    const CartesianSolveTelemetry& cartesian_solve,
+    const ArmStartupValidationSnapshot& startup_validation
 ) {
     return {
         {"mode", toString(command.mode)},
@@ -533,6 +623,15 @@ nlohmann::json armStateJson(
         {"worker", workerTelemetryJson(worker_telemetry, worker_enabled, servo_config, state_age_us)},
         {"transport", transportTelemetryJson(transport_telemetry)},
         {"has_valid_joint_state", state.has_valid_joint_state},
+        {"startup_acquisition_ok", startup_validation.acquisition_ok},
+        {"startup_motion_ready", startup_validation.motion_ready},
+        {"startup_invalid_reasons", stringArrayJson(startup_validation.invalid_reasons)},
+        {"q_range_violations", qRangeViolationsJson(startup_validation.q_range_violations)},
+        {"q_range_wrapped", qRangeWrappedJson(startup_validation.q_range_wrapped)},
+        {"q_actual_normalized_for_safety_deg", optionalJointArrayJson(startup_validation.q_actual_normalized_for_safety_deg)},
+        {"read_only_diagnostic", startup_validation.read_only_diagnostic},
+        {"allowed_unsafe_startup", startup_validation.allowed_unsafe_startup},
+        {"diagnostic_error_source", optionalStringJson(startup_validation.diagnostic_error_source)},
         {"connection_state", state.connection_state == RobotConnectionState::Connected
             ? "Connected"
             : state.connection_state == RobotConnectionState::Error ? "Error" : "Disconnected"},
@@ -540,6 +639,9 @@ nlohmann::json armStateJson(
         {"servo_enabled", state.servo_enabled},
         {"fault_recoverable", optionalBoolJson(state.fault_recoverable)},
         {"lifecycle_state", optionalStringJson(state.lifecycle_state)},
+        {"motion_readiness_error_kind", optionalStringJson(state.motion_readiness_error_kind)},
+        {"motion_readiness_error_name", optionalStringJson(state.motion_readiness_error_name)},
+        {"rbpodo_diagnostics", optionalRbpodoDiagnosticsJson(state.rbpodo_diagnostics)},
         {"last_read", backendCallJson(last_read, false)},
         {"last_send", backendCallJson(last_send, true)},
         {"robot_time_ns", state.robot_time_ns},
@@ -677,6 +779,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["observed_backend"] = observedBackendString(config_);
     message["cartesian_control_snapshot"] = cartesianControlSnapshotJson(config_.cartesian_control);
     message["kinematics_snapshot"] = kinematicsSnapshotJson(config_.kinematics);
+    message["startup_validation"] = startupValidationJson(snapshot.startup_validation);
     const bool worker_enabled = config_.servo.io_model == ServoIoModel::Worker;
 
     message["left"] = armStateJson(
@@ -703,7 +806,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.left_transport_telemetry,
         worker_enabled,
         config_.servo,
-        snapshot.left_cartesian_solve
+        snapshot.left_cartesian_solve,
+        snapshot.startup_validation.left
     );
     message["right"] = armStateJson(
         snapshot.right_state,
@@ -729,7 +833,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.right_transport_telemetry,
         worker_enabled,
         config_.servo,
-        snapshot.right_cartesian_solve
+        snapshot.right_cartesian_solve,
+        snapshot.startup_validation.right
     );
     message["last_cartesian_solve"] = {
         {"left", cartesianSolveJson(snapshot.left_cartesian_solve)},

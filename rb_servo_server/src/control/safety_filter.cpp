@@ -86,6 +86,8 @@ JointArray SafetyFilter::clampJointLimits(const JointArray& q, bool* clamped) co
     bool did_clamp = false;
     for (int i = 0; i < kDof; ++i) {
         const double before = out[i];
+        // Command targets are intentionally not wrapped here; raw targets clamp
+        // conservatively until continuous motion-safe unwrapping is implemented.
         out[i] = std::clamp(out[i], config_.q_min_deg[i], config_.q_max_deg[i]);
         did_clamp = did_clamp || (out[i] != before);
     }

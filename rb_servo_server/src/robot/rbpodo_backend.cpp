@@ -95,7 +95,12 @@ std::string rbpodoModeName(bool simulation_mode) {
     return simulation_mode ? "simulation" : "real";
 }
 
+bool rbpodoModeFieldIsKnown(int real_vs_simulation_mode) {
+    return real_vs_simulation_mode == 0 || real_vs_simulation_mode == 1;
+}
+
 bool operationModeMatchesConfig(const BackendConfig& config, const RbpodoSystemStateSnapshot& snapshot) {
+    if (!rbpodoModeFieldIsKnown(snapshot.real_vs_simulation_mode)) return false;
     const bool actual_simulation = snapshot.real_vs_simulation_mode == 1;
     return expectedSimulationMode(config) == actual_simulation;
 }
@@ -122,14 +127,149 @@ void annotateRbpodoAckResult(
         result->controller_acceptance_observed ? "controller_ack_observed" : "controller_ack_not_observed";
 }
 
-int firstNonZeroErrorCode(const RbpodoSystemStateSnapshot& snapshot) {
-    if (snapshot.op_stat_sos_flag != 0) return snapshot.op_stat_sos_flag;
-    if (snapshot.init_error != 0) return snapshot.init_error;
-    if (snapshot.op_stat_ems_flag != 0) return snapshot.op_stat_ems_flag;
-    if (snapshot.op_stat_soft_estop_occur != 0) return snapshot.op_stat_soft_estop_occur;
-    if (snapshot.op_stat_collision_occur != 0) return snapshot.op_stat_collision_occur;
-    if (snapshot.op_stat_self_collision != 0) return snapshot.op_stat_self_collision;
-    return 0;
+constexpr int kRbpodoDiagnosticsSuspectCode = -2001;
+constexpr int kRbpodoSosFlagCode = 1001;
+constexpr int kRbpodoEmsFlagCode = 1002;
+constexpr int kRbpodoSoftEstopCode = 1003;
+constexpr int kRbpodoCollisionCode = 1004;
+constexpr int kRbpodoSelfCollisionCode = 1005;
+constexpr int kRbpodoSuspiciousRawCodeCutoff = 1'000'000;
+constexpr double kRbpodoMinPlausibleNonZeroTimeSec = 1e-6;
+
+struct RbpodoInterpretedFault {
+    int code = 0;
+    std::string name;
+};
+
+void appendDiagnosticReason(std::string* reason, const std::string& item) {
+    if (!reason) return;
+    if (!reason->empty()) reason->append("; ");
+    reason->append(item);
+}
+
+bool rbpodoBooleanFlagValue(int value) {
+    return value == 0 || value == 1;
+}
+
+bool rbpodoSuspiciousRawCode(int value) {
+    return value >= kRbpodoSuspiciousRawCodeCutoff ||
+        value <= -kRbpodoSuspiciousRawCodeCutoff;
+}
+
+RbpodoRawDiagnostics rawDiagnosticsFromSnapshot(const RbpodoSystemStateSnapshot& snapshot) {
+    RbpodoRawDiagnostics raw;
+    raw.time_sec = snapshot.robot_time_sec;
+    raw.real_vs_simulation_mode = snapshot.real_vs_simulation_mode;
+    raw.init_state_info = snapshot.init_state_info;
+    raw.init_error = snapshot.init_error;
+    raw.op_stat_sos_flag = snapshot.op_stat_sos_flag;
+    raw.op_stat_ems_flag = snapshot.op_stat_ems_flag;
+    raw.op_stat_soft_estop_occur = snapshot.op_stat_soft_estop_occur;
+    raw.op_stat_collision_occur = snapshot.op_stat_collision_occur;
+    raw.op_stat_self_collision = snapshot.op_stat_self_collision;
+    return raw;
+}
+
+void markSuspiciousFlag(
+    RbpodoDiagnosticsSnapshot* diagnostics,
+    const std::string& field_name,
+    int value
+) {
+    if (!diagnostics || rbpodoBooleanFlagValue(value)) return;
+    diagnostics->diagnostics_valid = false;
+    diagnostics->diagnostics_suspect = true;
+    appendDiagnosticReason(
+        &diagnostics->reason,
+        field_name + " expected 0/1 but was " + std::to_string(value)
+    );
+}
+
+RbpodoDiagnosticsSnapshot interpretRbpodoDiagnostics(const RbpodoSystemStateSnapshot& snapshot) {
+    RbpodoDiagnosticsSnapshot diagnostics;
+    diagnostics.raw = rawDiagnosticsFromSnapshot(snapshot);
+
+    markSuspiciousFlag(&diagnostics, "op_stat_sos_flag", snapshot.op_stat_sos_flag);
+    markSuspiciousFlag(&diagnostics, "op_stat_ems_flag", snapshot.op_stat_ems_flag);
+    markSuspiciousFlag(&diagnostics, "op_stat_soft_estop_occur", snapshot.op_stat_soft_estop_occur);
+    markSuspiciousFlag(&diagnostics, "op_stat_collision_occur", snapshot.op_stat_collision_occur);
+    markSuspiciousFlag(&diagnostics, "op_stat_self_collision", snapshot.op_stat_self_collision);
+
+    if (!std::isfinite(snapshot.robot_time_sec)) {
+        diagnostics.diagnostics_valid = false;
+        diagnostics.diagnostics_suspect = true;
+        appendDiagnosticReason(&diagnostics.reason, "time was non-finite");
+    } else if (snapshot.robot_time_sec < 0.0 ||
+               (snapshot.robot_time_sec > 0.0 &&
+                snapshot.robot_time_sec < kRbpodoMinPlausibleNonZeroTimeSec)) {
+        diagnostics.diagnostics_valid = false;
+        diagnostics.diagnostics_suspect = true;
+        appendDiagnosticReason(
+            &diagnostics.reason,
+            "time was implausible: " + std::to_string(snapshot.robot_time_sec)
+        );
+    }
+
+    if (!rbpodoModeFieldIsKnown(snapshot.real_vs_simulation_mode)) {
+        diagnostics.diagnostics_valid = false;
+        diagnostics.diagnostics_suspect = true;
+        appendDiagnosticReason(
+            &diagnostics.reason,
+            "real_vs_simulation_mode unknown: " + std::to_string(snapshot.real_vs_simulation_mode)
+        );
+    }
+
+    if (diagnostics.diagnostics_suspect) {
+        diagnostics.error_name = "rbpodo_diagnostics_suspect";
+        diagnostics.stable_error_code = kRbpodoDiagnosticsSuspectCode;
+    }
+    return diagnostics;
+}
+
+std::optional<RbpodoInterpretedFault> firstClearRbpodoFault(
+    const RbpodoSystemStateSnapshot& snapshot,
+    const RbpodoDiagnosticsSnapshot& diagnostics
+) {
+    if (snapshot.op_stat_sos_flag == 1) {
+        return RbpodoInterpretedFault{kRbpodoSosFlagCode, "rbpodo_sos_flag"};
+    }
+    if (snapshot.init_error != 0) {
+        return RbpodoInterpretedFault{snapshot.init_error, "rbpodo_init_error"};
+    }
+    if (snapshot.op_stat_ems_flag == 1) {
+        return RbpodoInterpretedFault{kRbpodoEmsFlagCode, "rbpodo_ems_flag"};
+    }
+    if (snapshot.op_stat_soft_estop_occur == 1) {
+        return RbpodoInterpretedFault{kRbpodoSoftEstopCode, "rbpodo_soft_estop"};
+    }
+    if (snapshot.op_stat_collision_occur == 1) {
+        return RbpodoInterpretedFault{kRbpodoCollisionCode, "rbpodo_collision"};
+    }
+    if (snapshot.op_stat_self_collision == 1) {
+        return RbpodoInterpretedFault{kRbpodoSelfCollisionCode, "rbpodo_self_collision"};
+    }
+
+    if (diagnostics.diagnostics_suspect) {
+        if (snapshot.op_stat_sos_flag != 0 && !rbpodoSuspiciousRawCode(snapshot.op_stat_sos_flag)) {
+            return RbpodoInterpretedFault{snapshot.op_stat_sos_flag, "rbpodo_sos_flag_suspect"};
+        }
+        if (snapshot.op_stat_ems_flag != 0 && !rbpodoSuspiciousRawCode(snapshot.op_stat_ems_flag)) {
+            return RbpodoInterpretedFault{snapshot.op_stat_ems_flag, "rbpodo_ems_flag_suspect"};
+        }
+        if (snapshot.op_stat_soft_estop_occur != 0 &&
+            !rbpodoSuspiciousRawCode(snapshot.op_stat_soft_estop_occur)) {
+            return RbpodoInterpretedFault{snapshot.op_stat_soft_estop_occur, "rbpodo_soft_estop_suspect"};
+        }
+        if (snapshot.op_stat_collision_occur != 0 &&
+            !rbpodoSuspiciousRawCode(snapshot.op_stat_collision_occur)) {
+            return RbpodoInterpretedFault{snapshot.op_stat_collision_occur, "rbpodo_collision_suspect"};
+        }
+        if (snapshot.op_stat_self_collision != 0 &&
+            !rbpodoSuspiciousRawCode(snapshot.op_stat_self_collision)) {
+            return RbpodoInterpretedFault{snapshot.op_stat_self_collision, "rbpodo_self_collision_suspect"};
+        }
+    }
+
+    return std::nullopt;
 }
 
 }  // namespace
@@ -149,16 +289,27 @@ RobotState mapRbpodoSystemStateSnapshot(
     out_state.q_target_deg = snapshot.q_target_deg;
     out_state.dq_actual_deg_s.fill(0.0);
 
-    const int error_code = firstNonZeroErrorCode(snapshot);
+    RbpodoDiagnosticsSnapshot diagnostics = interpretRbpodoDiagnostics(snapshot);
+    const std::optional<RbpodoInterpretedFault> clear_fault =
+        firstClearRbpodoFault(snapshot, diagnostics);
     out_state.connection_state = RobotConnectionState::Connected;
     out_state.servo_enabled = snapshot.init_state_info == 6;
-    out_state.has_error = error_code != 0;
-    out_state.error_code = error_code;
+    out_state.has_error = clear_fault.has_value() || diagnostics.diagnostics_suspect;
+    out_state.error_code = clear_fault.has_value()
+        ? clear_fault->code
+        : (diagnostics.diagnostics_suspect ? diagnostics.stable_error_code : 0);
+    out_state.diagnostic_error_source = clear_fault.has_value()
+        ? clear_fault->name
+        : diagnostics.error_name;
+    out_state.rbpodo_diagnostics = diagnostics;
     out_state.has_valid_joint_state =
         finiteJointArray(out_state.q_actual_deg) &&
         finiteJointArray(out_state.q_target_deg);
     if (!out_state.has_valid_joint_state) {
         out_state.lifecycle_state = "invalid_joint_state";
+    } else if (diagnostics.diagnostics_suspect && !clear_fault.has_value()) {
+        out_state.lifecycle_state = "diagnostics_suspect";
+        out_state.fault_recoverable = true;
     } else if (out_state.has_error) {
         out_state.lifecycle_state = "faulted";
         out_state.fault_recoverable = true;
@@ -190,12 +341,23 @@ std::optional<BackendError> rbpodoMotionReadinessError(
     if (const auto acquisition_error = rbpodoStateAcquisitionError(mapped)) {
         return acquisition_error;
     }
+    if (mapped.rbpodo_diagnostics.has_value() &&
+        mapped.rbpodo_diagnostics->diagnostics_suspect) {
+        return backendError(
+            BackendErrorKind::RobotFault,
+            "rbpodo diagnostics suspect: " + mapped.rbpodo_diagnostics->reason,
+            std::to_string(mapped.error_code),
+            "rbpodo_diagnostics_suspect"
+        );
+    }
     if (mapped.has_error) {
         return backendError(
             BackendErrorKind::RobotFault,
             "rbpodo SystemState reported a robot/controller fault",
             std::to_string(mapped.error_code),
-            "rbpodo_robot_fault"
+            mapped.diagnostic_error_source.empty()
+                ? "rbpodo_robot_fault"
+                : mapped.diagnostic_error_source
         );
     }
     if (!operationModeMatchesConfig(config, snapshot)) {
@@ -219,6 +381,20 @@ std::optional<BackendError> rbpodoMotionReadinessError(
         );
     }
     return std::nullopt;
+}
+
+void attachMotionReadinessDiagnostic(
+    RobotState* state,
+    const std::optional<BackendError>& error
+) {
+    if (!state || !error.has_value()) return;
+    state->motion_readiness_error_kind = toString(error->kind);
+    state->motion_readiness_error_name = error->name;
+    if (state->diagnostic_error_source.empty()) {
+        state->diagnostic_error_source = error->name.empty()
+            ? toString(error->kind)
+            : error->name;
+    }
 }
 
 namespace {
@@ -448,8 +624,9 @@ BackendResult<RobotState> RbpodoBackend::connect() {
                   << " for " << impl_->config.name << "\n";
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
-        impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
+        attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);
+        impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
         if (const auto acquisition_error = rbpodoStateAcquisitionError(mapped)) {
             return failedResultWithValue(
                 BackendOp::Connect,
@@ -514,8 +691,9 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
 
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
-        impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
+        attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);
+        impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
         if (const auto acquisition_error = rbpodoStateAcquisitionError(mapped)) {
             return failedResultWithValue(
                 BackendOp::Initialize,
@@ -584,8 +762,9 @@ BackendResult<RobotState> RbpodoBackend::readState() {
         }
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
-        impl_->last_state_cache = out_state.has_valid_joint_state ? std::make_optional(out_state) : std::nullopt;
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, out_state);
+        attachMotionReadinessDiagnostic(&out_state, impl_->last_state_error);
+        impl_->last_state_cache = out_state.has_valid_joint_state ? std::make_optional(out_state) : std::nullopt;
         if (const auto acquisition_error = rbpodoStateAcquisitionError(out_state)) {
             return failedResultWithValue(
                 BackendOp::ReadState,

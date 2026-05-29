@@ -431,6 +431,93 @@ def recv_state(sock: socket.socket, deadline: float) -> dict[str, Any] | None:
     return None
 
 
+def tail_lines(path: Path, line_count: int = 120) -> list[str]:
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return lines[-line_count:]
+
+
+def likely_startup_causes(log_text: str) -> list[str]:
+    lower_log = log_text.lower()
+    causes: list[str] = []
+    if "invalid robot startup state" in lower_log:
+        causes.append(
+            "invalid robot startup state; run scripts/rbpodo_state_dump.py to inspect q_actual, q_ref, status flags, range violations, and wrap diagnostics"
+        )
+    if "rb_servo_enable_rbpodo=off" in lower_log or ("rbpodo" in lower_log and "disabled" in lower_log):
+        causes.append(
+            "rbpodo backend appears disabled; use --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
+        )
+    if "realtime" in lower_log and (
+        "fail" in lower_log or "permission" in lower_log or "operation not permitted" in lower_log or "sched" in lower_log
+    ):
+        causes.append("realtime setup failure; run with appropriate privileges or setcap for realtime scheduling")
+    if "failed to connect" in lower_log or "connect failed" in lower_log or "transportconnectfailed" in lower_log:
+        causes.append("controller connection failed; check left/right IPs and TCP command/data ports 5000/5001")
+    if "5001" in lower_log or "data port" in lower_log or "request_data" in lower_log or "cobotdata" in lower_log:
+        causes.append("rbpodo data channel may be unavailable; check controller TCP data port 5001")
+
+    defaults = [
+        "server binary may not include rbpodo support",
+        "realtime scheduling may lack permission",
+        "robot startup state may be invalid before state publication",
+        "controller data port 5001 may be unreachable or blocked",
+        "network.state_pub_endpoint may not match the acceptance listener endpoint",
+    ]
+    for cause in defaults:
+        if cause not in causes:
+            causes.append(cause)
+    return causes
+
+
+def state_stream_timeout_message(
+    proc: subprocess.Popen[str] | None,
+    log_path: Path,
+    endpoint: str,
+) -> str:
+    returncode: int | None = None
+    if proc is not None:
+        returncode = proc.poll()
+    log_tail = tail_lines(log_path, 120)
+    log_text = "\n".join(log_tail)
+    causes = likely_startup_causes(log_text)
+    parts = [
+        "timed out waiting for rb_servo_server state stream",
+        f"state_endpoint={endpoint}",
+        f"server_returncode={returncode if returncode is not None else 'still running'}",
+        "likely_causes:",
+    ]
+    parts.extend(f"- {cause}" for cause in causes)
+    if log_tail:
+        parts.append("last_120_lines_of_rb_servo_server.log:")
+        parts.extend(log_tail)
+    else:
+        parts.append(f"rb_servo_server.log was empty or unavailable: {log_path}")
+    return "\n".join(parts)
+
+
+def wait_for_first_state(
+    sock: socket.socket,
+    timeout_sec: float,
+    proc: subprocess.Popen[str] | None,
+    log_path: Path,
+    endpoint: str,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        state = recv_state(sock, min(time.monotonic() + 0.2, deadline))
+        if state is not None:
+            return state
+        if proc is not None and proc.poll() is not None:
+            time.sleep(0.1)
+            break
+    raise AcceptanceError(state_stream_timeout_message(proc, log_path, endpoint))
+
+
 def drain_states(sock: socket.socket, duration_sec: float, artifact_path: Path) -> list[dict[str, Any]]:
     deadline = time.monotonic() + duration_sec
     states: list[dict[str, Any]] = []
@@ -820,15 +907,21 @@ def run_acceptance(args: argparse.Namespace) -> int:
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
 
-    state_sock = bind_state_socket(state_endpoint(config))
+    endpoint = state_endpoint(config)
+    state_sock = bind_state_socket(endpoint)
     server_proc: subprocess.Popen[str] | None = None
     states: list[dict[str, Any]] = []
     command_count = 0
+    server_log_path = artifact_dir / "rb_servo_server.log"
     try:
-        server_proc = start_server(args, artifact_dir / "rb_servo_server.log")
-        first_state = recv_state(state_sock, time.monotonic() + args.startup_timeout_sec)
-        if first_state is None:
-            raise AcceptanceError("timed out waiting for rb_servo_server state stream")
+        server_proc = start_server(args, server_log_path)
+        first_state = wait_for_first_state(
+            state_sock,
+            args.startup_timeout_sec,
+            server_proc,
+            server_log_path,
+            endpoint,
+        )
         states.append(first_state)
         state_stream_path = artifact_dir / "state_stream.jsonl"
         with state_stream_path.open("w", encoding="utf-8") as handle:
@@ -1013,6 +1106,34 @@ logging:
             assert summary["ack_observed_count"] == 2
             assert abs(summary["q_actual_drift_from_start_deg"] - 0.1) < 1e-9
             write_plots(Path(tmp), fake_states, "left")
+
+            log_path = Path(tmp) / "rb_servo_server.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "[ERROR] invalid robot startup state: right",
+                        "  has_valid_joint_state=true",
+                        "  op_stat_self_collision=1977953904",
+                        "[ERROR] failed to start servo loop",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            class ExitedProcess:
+                returncode = 7
+
+                def poll(self) -> int:
+                    return self.returncode
+
+            diagnostic = state_stream_timeout_message(
+                ExitedProcess(), log_path, "udp://127.0.0.1:50110"
+            )
+            assert "server_returncode=7" in diagnostic
+            assert "last_120_lines_of_rb_servo_server.log" in diagnostic
+            assert "scripts/rbpodo_state_dump.py" in diagnostic
+            assert "invalid robot startup state" in diagnostic
         finally:
             for key, value in old_env.items():
                 if value is None:

@@ -9,6 +9,8 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
+#include <vector>
 
 #include "rb_servo/control/cartesian_controller.hpp"
 #include "rb_servo/control/fault_classifier.hpp"
@@ -151,6 +153,33 @@ std::shared_ptr<IKinematics> makeKinematicsProvider(const DualArmConfig& config)
 bool envFlagEnabled(const char* name) {
     const char* value = std::getenv(name);
     return value && std::string(value) == "1";
+}
+
+std::string jointArrayDebugString(const JointArray& joints) {
+    std::ostringstream out;
+    out << "[";
+    for (int i = 0; i < kDof; ++i) {
+        if (i > 0) out << ",";
+        out << joints[i];
+    }
+    out << "]";
+    return out.str();
+}
+
+bool containsReason(
+    const ArmStartupValidationSnapshot& validation,
+    const std::string& reason
+) {
+    return std::find(
+        validation.invalid_reasons.begin(),
+        validation.invalid_reasons.end(),
+        reason
+    ) != validation.invalid_reasons.end();
+}
+
+void appendReason(ArmStartupValidationSnapshot* validation, const std::string& reason) {
+    if (!validation || containsReason(*validation, reason)) return;
+    validation->invalid_reasons.push_back(reason);
 }
 
 RunMode runModeForArm(const DualArmConfig& config, ArmId arm_id) {
@@ -458,12 +487,13 @@ bool DualArmServoLoop::initializeRobots() {
     }
 
     RobotState left, right;
-    if (!readRobotStates(left, right) ||
-        !isValidRobotStateForStartup(left) ||
-        !isValidRobotStateForStartup(right)) {
-        std::cerr << "[ERROR] invalid robot startup state\n";
+    const bool states_read = readRobotStates(left, right);
+    const StartupValidationSnapshot startup_validation = validateStartupStates(left, right);
+    logStartupValidation(startup_validation, left, right);
+    if (!states_read || !startupValidationAllowsStart(startup_validation)) {
         return false;
     }
+    storeStartupValidation(startup_validation);
     left_prev_sent_q_deg_ = left.q_actual_deg;
     left_prevprev_sent_q_deg_ = left.q_actual_deg;
     right_prev_sent_q_deg_ = right.q_actual_deg;
@@ -510,9 +540,14 @@ bool DualArmServoLoop::initializeWorkers() {
     RobotState left;
     RobotState right;
     while (nowSteadyNs() < deadline_ns) {
-        if (readRobotStates(left, right) &&
-            isValidRobotStateForStartup(left) &&
-            isValidRobotStateForStartup(right)) {
+        if (readRobotStates(left, right)) {
+            const StartupValidationSnapshot startup_validation = validateStartupStates(left, right);
+            if (!startupValidationAllowsStart(startup_validation)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            logStartupValidation(startup_validation, left, right);
+            storeStartupValidation(startup_validation);
             left_prev_sent_q_deg_ = left.q_actual_deg;
             left_prevprev_sent_q_deg_ = left.q_actual_deg;
             right_prev_sent_q_deg_ = right.q_actual_deg;
@@ -973,6 +1008,7 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.right_worker_telemetry = sample.right_worker_telemetry;
             latest_snapshot_.left_transport_telemetry = sample.left_transport_telemetry;
             latest_snapshot_.right_transport_telemetry = sample.right_transport_telemetry;
+            latest_snapshot_.startup_validation = startup_validation_;
             latest_snapshot_.logger_dropped_samples = logger_ ? logger_->droppedSamples() : 0;
         }
 
@@ -1061,6 +1097,240 @@ void DualArmServoLoop::populateTcpPose(RobotState& state, const ArmMountConfig& 
     }
 }
 
+ArmStartupValidationSnapshot DualArmServoLoop::validateStartupArm(const RobotState& state) const {
+    ArmStartupValidationSnapshot validation;
+    validation.read_only_diagnostic = readOnlyDiagnosticStartupEnabled();
+
+    if (state.connection_state != RobotConnectionState::Connected) {
+        appendReason(&validation, "not_connected");
+    }
+    if (!state.has_valid_joint_state) {
+        appendReason(&validation, "invalid_joint_state");
+    }
+
+    bool finite_q_actual = true;
+    bool any_startup_wrapped = false;
+    JointArray normalized_q_actual = state.q_actual_deg;
+    for (int i = 0; i < kDof; ++i) {
+        const double q = state.q_actual_deg[i];
+        if (!std::isfinite(q)) {
+            finite_q_actual = false;
+            continue;
+        }
+        double q_for_range = q;
+        if (config_.safety.joint_wrap_for_startup_validation) {
+            const JointRangeNormalization normalization = normalizeJointForRange(
+                q,
+                config_.safety.q_min_deg[i],
+                config_.safety.q_max_deg[i],
+                config_.safety.joint_wrap_period_deg[i]
+            );
+            q_for_range = normalization.normalized_value_deg;
+            normalized_q_actual[i] = q_for_range;
+            if (normalization.was_wrapped) {
+                any_startup_wrapped = true;
+                validation.q_range_wrapped.push_back({
+                    i + 1,
+                    q,
+                    normalization.normalized_value_deg,
+                    config_.safety.joint_wrap_period_deg[i],
+                });
+            }
+        }
+        if (q_for_range < config_.safety.q_min_deg[i] ||
+            q_for_range > config_.safety.q_max_deg[i]) {
+            validation.q_range_violations.push_back({
+                i + 1,
+                q_for_range,
+                config_.safety.q_min_deg[i],
+                config_.safety.q_max_deg[i],
+            });
+        }
+    }
+    if (any_startup_wrapped) {
+        validation.q_actual_normalized_for_safety_deg = normalized_q_actual;
+    }
+    if (!finite_q_actual) {
+        appendReason(&validation, "non_finite_q_actual");
+    }
+
+    validation.acquisition_ok =
+        state.connection_state == RobotConnectionState::Connected &&
+        state.has_valid_joint_state &&
+        finite_q_actual;
+
+    if (state.has_error) {
+        appendReason(&validation, "robot_fault");
+        validation.diagnostic_error_source = state.diagnostic_error_source.empty()
+            ? "error_code:" + std::to_string(state.error_code)
+            : state.diagnostic_error_source;
+    }
+    if (!validation.q_range_violations.empty()) {
+        appendReason(&validation, "q_range_violation");
+    }
+    if (state.motion_readiness_error_kind == "WrongMode") {
+        appendReason(&validation, "wrong_mode");
+    } else if (state.motion_readiness_error_kind == "ServoDisabled") {
+        appendReason(&validation, "servo_disabled");
+    } else if (!state.motion_readiness_error_kind.empty() &&
+               state.motion_readiness_error_kind != "None" &&
+               state.motion_readiness_error_kind != "RobotFault") {
+        appendReason(&validation, "motion_readiness_error");
+    }
+    if (validation.diagnostic_error_source.empty() && !state.diagnostic_error_source.empty()) {
+        validation.diagnostic_error_source = state.diagnostic_error_source;
+    }
+    if (!state.servo_enabled) {
+        appendReason(&validation, "servo_disabled");
+    }
+
+    validation.motion_ready =
+        validation.acquisition_ok &&
+        !state.has_error &&
+        validation.q_range_violations.empty() &&
+        (state.motion_readiness_error_kind.empty() ||
+         state.motion_readiness_error_kind == "None") &&
+        state.servo_enabled;
+    return validation;
+}
+
+StartupValidationSnapshot DualArmServoLoop::validateStartupStates(
+    const RobotState& left,
+    const RobotState& right
+) const {
+    StartupValidationSnapshot validation;
+    validation.left = validateStartupArm(left);
+    validation.right = validateStartupArm(right);
+    validation.acquisition_ok = validation.left.acquisition_ok && validation.right.acquisition_ok;
+    validation.motion_ready = validation.left.motion_ready && validation.right.motion_ready;
+    validation.read_only_diagnostic =
+        validation.left.read_only_diagnostic || validation.right.read_only_diagnostic;
+    validation.allowed_unsafe_startup =
+        validation.acquisition_ok &&
+        !validation.motion_ready &&
+        startupValidationAllowsStart(validation);
+    validation.left.allowed_unsafe_startup =
+        validation.left.acquisition_ok &&
+        !validation.left.motion_ready &&
+        validation.allowed_unsafe_startup;
+    validation.right.allowed_unsafe_startup =
+        validation.right.acquisition_ok &&
+        !validation.right.motion_ready &&
+        validation.allowed_unsafe_startup;
+    return validation;
+}
+
+bool DualArmServoLoop::startupValidationAllowsStart(
+    const StartupValidationSnapshot& validation
+) const {
+    if (!validation.acquisition_ok) return false;
+    if (validation.motion_ready) return true;
+    if (!readOnlyDiagnosticStartupEnabled()) return false;
+    if (config_.servo.send_servo_commands) return false;
+
+    const auto arm_allowed = [&](const ArmStartupValidationSnapshot& arm) {
+        if (arm.motion_ready) return true;
+        if (!arm.acquisition_ok) return false;
+        if (containsReason(arm, "robot_fault") &&
+            !config_.servo.allow_readonly_faulted_startup) {
+            return false;
+        }
+        if (containsReason(arm, "q_range_violation") &&
+            !config_.servo.allow_readonly_q_range_violation_startup) {
+            return false;
+        }
+        if ((containsReason(arm, "servo_disabled") || containsReason(arm, "wrong_mode")) &&
+            !config_.servo.allow_readonly_wrong_mode_startup) {
+            return false;
+        }
+        for (const std::string& reason : arm.invalid_reasons) {
+            if (reason == "robot_fault" ||
+                reason == "q_range_violation" ||
+                reason == "servo_disabled" ||
+                reason == "wrong_mode") {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    };
+
+    return arm_allowed(validation.left) && arm_allowed(validation.right);
+}
+
+bool DualArmServoLoop::readOnlyDiagnosticStartupEnabled() const {
+    return readOnlyMode() &&
+        (config_.servo.allow_readonly_faulted_startup ||
+         config_.servo.allow_readonly_q_range_violation_startup ||
+         config_.servo.allow_readonly_wrong_mode_startup);
+}
+
+void DualArmServoLoop::logStartupValidation(
+    const StartupValidationSnapshot& validation,
+    const RobotState& left,
+    const RobotState& right
+) const {
+    const bool start_allowed = startupValidationAllowsStart(validation);
+    const auto log_arm = [&](const char* name,
+                             const RobotState& state,
+                             const ArmStartupValidationSnapshot& arm) {
+        if (arm.motion_ready) return;
+        std::cerr << "[ERROR] invalid robot startup state: " << name << "\n"
+                  << "  has_valid_joint_state=" << (state.has_valid_joint_state ? "true" : "false") << "\n"
+                  << "  has_error=" << (state.has_error ? "true" : "false") << "\n"
+                  << "  error_code=" << state.error_code << "\n"
+                  << "  lifecycle_state=" << (state.lifecycle_state.empty() ? "null" : state.lifecycle_state) << "\n"
+                  << "  q_actual_deg=" << jointArrayDebugString(state.q_actual_deg) << "\n"
+                  << "  q_target_deg=" << jointArrayDebugString(state.q_target_deg) << "\n";
+        if (arm.q_actual_normalized_for_safety_deg.has_value()) {
+            std::cerr << "  q_actual_normalized_for_safety_deg="
+                      << jointArrayDebugString(*arm.q_actual_normalized_for_safety_deg) << "\n";
+        }
+        std::cerr
+                  << "  startup_invalid_reasons=";
+        for (std::size_t i = 0; i < arm.invalid_reasons.size(); ++i) {
+            if (i > 0) std::cerr << ",";
+            std::cerr << arm.invalid_reasons[i];
+        }
+        std::cerr << "\n  q_range_violations=[";
+        for (std::size_t i = 0; i < arm.q_range_violations.size(); ++i) {
+            const JointRangeViolation& violation = arm.q_range_violations[i];
+            if (i > 0) std::cerr << ",";
+            std::cerr << "{joint:" << violation.joint
+                      << ",value_deg:" << violation.value_deg
+                      << ",min:" << violation.min_deg
+                      << ",max:" << violation.max_deg << "}";
+        }
+        std::cerr << "]\n  q_range_wrapped=[";
+        for (std::size_t i = 0; i < arm.q_range_wrapped.size(); ++i) {
+            const JointRangeWrapped& wrapped = arm.q_range_wrapped[i];
+            if (i > 0) std::cerr << ",";
+            std::cerr << "{joint:" << wrapped.joint
+                      << ",raw_deg:" << wrapped.raw_deg
+                      << ",normalized_deg:" << wrapped.normalized_deg
+                      << ",period_deg:" << wrapped.period_deg << "}";
+        }
+        std::cerr << "]\n"
+                  << "  read_only_diagnostic_allowed="
+                  << (start_allowed && arm.allowed_unsafe_startup ? "true" : "false") << "\n"
+                  << "  send_servo_commands="
+                  << (config_.servo.send_servo_commands ? "true" : "false") << "\n";
+        if (start_allowed && arm.allowed_unsafe_startup) {
+            std::cerr << "[WARN] read-only diagnostic startup allowed unsafe robot state for "
+                      << name << "; motion remains suppressed.\n";
+        }
+    };
+
+    log_arm("left", left, validation.left);
+    log_arm("right", right, validation.right);
+}
+
+void DualArmServoLoop::storeStartupValidation(const StartupValidationSnapshot& validation) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    startup_validation_ = validation;
+    latest_snapshot_.startup_validation = validation;
+}
+
 bool DualArmServoLoop::isValidJointState(const RobotState& state) const {
     if (state.connection_state != RobotConnectionState::Connected) return false;
     if (!state.has_valid_joint_state) return false;
@@ -1074,7 +1344,7 @@ bool DualArmServoLoop::isValidJointState(const RobotState& state) const {
 }
 
 bool DualArmServoLoop::isValidRobotStateForStartup(const RobotState& state) const {
-    return isValidJointState(state);
+    return validateStartupArm(state).motion_ready;
 }
 
 void DualArmServoLoop::clearLatchedCartesianTargets() {
@@ -1733,11 +2003,11 @@ std::string DualArmServoLoop::currentSendPolicy() const {
     if (state == ServerMotionState::EmergencyLatched) {
         return "emergency_latched";
     }
-    if (fault_latched_.load() || state == ServerMotionState::FaultLatched) {
-        return "fault_latched";
-    }
     if (readOnlyMode()) {
         return "read_only";
+    }
+    if (fault_latched_.load() || state == ServerMotionState::FaultLatched) {
+        return "fault_latched";
     }
     return "send_servo_j";
 }

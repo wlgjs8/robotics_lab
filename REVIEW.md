@@ -192,6 +192,10 @@ Simulator-only; not real-ready.
 20. RBPODO-ACK-01 makes rbpodo ACK-on/off semantics observable. ACK-off remains non-default, requires `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1` for real motion, and must be treated as socket-send evidence rather than controller-acceptance evidence.
 21. RBPODO-ACCEPT-01 adds supervised rbpodo 100 Hz / 200 Hz ACK-on/off acceptance tooling and a runbook. Real execution remains pending; default mode is read-only, ACK-off requires explicit acknowledgement, and tiny real motion is reserved for a future approval task.
 22. RBPODO-DOC-01 documents rbpodo Servo J parameter mapping, 100/200 Hz rate matching, ACK-on/off interpretation, and the staged real acceptance sequence. The pending real items are: rbpodo 100/200 Hz ACK-on acceptance, 200 Hz ACK-off acceptance, and a separately approved tiny real joint motion task.
+23. RBPODO-READONLY-DIAG-01 allows explicitly configured read-only rbpodo diagnostic startup to publish unsafe/faulted controller state after valid state acquisition. This is not motion readiness; `send_servo_commands=true` startup remains strict and real motion gates remain unchanged.
+24. RBPODO-STATUS-FIELDS-01 preserves raw rbpodo status fields in state JSON and treats suspicious status layouts as motion-blocking diagnostics. Read-only bring-up may publish the raw fields after valid joint acquisition, but suspicious diagnostics remain unsafe and real motion gates are unchanged.
+25. RBPODO-JOINT-WRAP-01 adds explicit startup-only joint wrapping diagnostics for rbpodo bring-up. Raw controller joint values remain published, motion target wrapping is refused, and real motion gates remain unchanged.
+26. RBPODO-BRINGUP-TOOLS-01 adds a read-only rbpodo state dump tool and improves acceptance startup timeout diagnostics with server return code, log tail, and likely causes. It does not send motion or modify controller state.
 
 ## Reviewer Checklist
 
