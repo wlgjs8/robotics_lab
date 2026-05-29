@@ -43,14 +43,30 @@ struct RbscriptDataState {
     std::string lifecycle_state;
 };
 
+enum class RbscriptDataPortMode {
+    JsonFixture,
+    RealControllerUnsupported,
+    RealControllerParsed,
+};
+
+enum class RbscriptReadStateCapability {
+    Supported,
+    Unsupported,
+    Experimental,
+};
+
 struct RbscriptDataParseResult {
     bool ok = false;
     RbscriptDataState state;
     BackendError error;
+    RbscriptDataPortMode data_port_mode = RbscriptDataPortMode::RealControllerUnsupported;
+    RbscriptReadStateCapability read_state_capability = RbscriptReadStateCapability::Unsupported;
 };
 
 std::string formatRbscriptServoJ(const JointArray& q_target_deg, const BackendConfig& config);
 std::string formatRbscriptReqdata();
+std::string toString(RbscriptDataPortMode mode);
+std::string toString(RbscriptReadStateCapability capability);
 RbscriptDataParseResult parseRbscriptDataPayload(const std::string& payload);
 
 class RbscriptTcpBackend final : public IRobotBackend {

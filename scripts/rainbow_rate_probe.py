@@ -65,6 +65,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--read-timeout-sec", type=float, default=0.2)
     parser.add_argument("--command-timeout-sec", type=float, default=0.2)
     parser.add_argument(
+        "--persistent-socket",
+        action="store_true",
+        help=(
+            "Keep one rbscript_tcp socket open per rate run and reconnect only "
+            "after transport errors. Recommended for C++ backend comparison."
+        ),
+    )
+    parser.add_argument(
         "--rbscript-no-motion-command",
         help="Explicit verified no-motion Rainbow script command for ack_no_motion.",
     )
@@ -82,6 +90,14 @@ def parse_args() -> argparse.Namespace:
         "--disable-waiting-ack",
         action="store_true",
         help="Rejected by default; included to document that no-ACK rate probes lose immediate ACK/error data.",
+    )
+    parser.add_argument(
+        "--capture-raw-data-port",
+        action="store_true",
+        help=(
+            "Read-only rbscript_tcp data-port capture mode: send reqdata to TCP 5001 "
+            "and store raw bytes/text without parsing or marking state valid."
+        ),
     )
     parser.add_argument("--skip-plots", action="store_true")
     return parser.parse_args()
@@ -110,6 +126,9 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
             raise RateProbeError("ack_no_motion requires explicit --rbscript-no-motion-command")
         if backend_probe.command_text_looks_motion_capable(args.rbscript_no_motion_command):
             raise RateProbeError("refusing ack_no_motion command text with motion-capable token")
+    if args.capture_raw_data_port:
+        if args.backend != "rbscript_tcp" or args.mode != "read_state":
+            raise RateProbeError("--capture-raw-data-port requires --backend rbscript_tcp --mode read_state")
 
     adapter = SimpleNamespace(
         left_ip=args.ip,
@@ -125,7 +144,9 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         connect_timeout_sec=args.connect_timeout_sec,
         read_timeout_sec=args.read_timeout_sec,
         command_timeout_sec=args.command_timeout_sec,
+        persistent_socket=getattr(args, "persistent_socket", False),
         rbscript_no_motion_command=args.rbscript_no_motion_command,
+        capture_raw_data_port=getattr(args, "capture_raw_data_port", False),
         allow_motion=False,
         max_delta_deg=None,
         i_understand_this_connects_to_real_controller=args.i_understand_this_connects_to_real_controller,
@@ -138,6 +159,8 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
     safety["rates"] = rates
     safety["rate_probe_mode"] = args.mode
     safety["disable_waiting_ack"] = False
+    safety["persistent_socket"] = bool(getattr(args, "persistent_socket", False) and args.backend == "rbscript_tcp")
+    safety["capture_raw_data_port"] = bool(getattr(args, "capture_raw_data_port", False))
     return safety
 
 
@@ -156,7 +179,9 @@ def adapter_for_rate(args: argparse.Namespace, rate: float) -> argparse.Namespac
         connect_timeout_sec=args.connect_timeout_sec,
         read_timeout_sec=args.read_timeout_sec,
         command_timeout_sec=args.command_timeout_sec,
+        persistent_socket=getattr(args, "persistent_socket", False),
         rbscript_no_motion_command=args.rbscript_no_motion_command,
+        capture_raw_data_port=getattr(args, "capture_raw_data_port", False),
         allow_motion=False,
         max_delta_deg=None,
         i_understand_this_connects_to_real_controller=args.i_understand_this_connects_to_real_controller,
@@ -177,6 +202,67 @@ def run_rate(args: argparse.Namespace, rate: float) -> tuple[list[backend_probe.
     return samples, summary
 
 
+def capture_raw_data_port(args: argparse.Namespace, artifact_dir: Path) -> dict[str, Any]:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    started_ns = backend_probe.now_ns()
+    raw = b""
+    error_name = ""
+    error_message = ""
+    try:
+        with backend_probe.tcp_connect(args.ip, args.data_port, args.connect_timeout_sec) as sock:
+            sock.settimeout(args.read_timeout_sec)
+            sock.sendall(b"reqdata\n")
+            while len(raw) < 65536:
+                try:
+                    chunk = sock.recv(min(4096, 65536 - len(raw)))
+                except TimeoutError:
+                    if raw:
+                        break
+                    raise
+                if not chunk:
+                    break
+                raw += chunk
+                if b"\n" in chunk:
+                    break
+    except TimeoutError as exc:
+        error_name = "TransportTimeout"
+        error_message = str(exc)
+    except OSError as exc:
+        error_name = type(exc).__name__
+        error_message = str(exc)
+    ended_ns = backend_probe.now_ns()
+
+    binary_path = artifact_dir / "raw_data_port_capture.bin"
+    text_path = artifact_dir / "raw_data_port_capture.txt"
+    metadata_path = artifact_dir / "raw_data_port_capture.json"
+    binary_path.write_bytes(raw)
+    text_path.write_text(raw.decode("utf-8", errors="replace"), encoding="utf-8")
+    metadata = {
+        "backend": args.backend,
+        "mode": args.mode,
+        "ip": args.ip,
+        "data_port": args.data_port,
+        "request": "reqdata",
+        "byte_count": len(raw),
+        "started_ns": started_ns,
+        "ended_ns": ended_ns,
+        "duration_us": (ended_ns - started_ns) / 1000.0,
+        "error_name": error_name,
+        "error_message": error_message,
+        "state_valid": False,
+        "read_state_capability": backend_probe.READ_STATE_CAPABILITY_UNSUPPORTED,
+        "rbscript_tcp_data_port_mode": backend_probe.RBSCRIPT_DATA_PORT_MODE_REAL_UNSUPPORTED,
+        "comparable": False,
+        "not_comparable_reason": backend_probe.RBSCRIPT_READ_STATE_NOT_COMPARABLE_REASON,
+        "artifacts": {
+            "raw_bytes": str(binary_path),
+            "raw_text": str(text_path),
+        },
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return metadata
+
+
 def rate_summary_row(summary: dict[str, Any]) -> dict[str, Any]:
     ack = summary.get("command_ack_latency_us")
     read = summary.get("read_duration_us")
@@ -194,9 +280,13 @@ def rate_summary_row(summary: dict[str, Any]) -> dict[str, Any]:
     success_count = int(summary.get("success_count") or 0)
     error_count = max(send_count - success_count - timeout_count, 0)
     loop = summary.get("loop_interval_ms") if isinstance(summary.get("loop_interval_ms"), dict) else {}
+    response_lines = summary.get("response_lines_per_command") if isinstance(summary.get("response_lines_per_command"), dict) else {}
+    write_duration = summary.get("command_write_duration_us") if isinstance(summary.get("command_write_duration_us"), dict) else {}
+    ack_read_duration = summary.get("ack_read_duration_us") if isinstance(summary.get("ack_read_duration_us"), dict) else {}
     return {
         "requested_rate_hz": summary.get("requested_rate_hz"),
         "achieved_rate_hz": summary.get("achieved_rate_hz"),
+        "persistent_socket": summary.get("persistent_socket"),
         "send_count": send_count,
         "ack_success_count": success_count if summary.get("mode") == "command_ack_no_motion" else 0,
         "ack_timeout_count": timeout_count if summary.get("mode") == "command_ack_no_motion" else 0,
@@ -214,9 +304,25 @@ def rate_summary_row(summary: dict[str, Any]) -> dict[str, Any]:
         "m570_count": m_counts.get("M570", 0),
         "other_error_counts": other_error_counts,
         "reconnect_count": summary.get("reconnect_count"),
+        "stale_response_count": summary.get("stale_response_count"),
+        "extra_response_count": summary.get("extra_response_count"),
+        "unrecognized_response_count": summary.get("unrecognized_response_count"),
+        "response_lines_per_command_p50": response_lines.get("p50"),
+        "response_lines_per_command_p95": response_lines.get("p95"),
+        "response_lines_per_command_max": response_lines.get("max"),
+        "command_write_duration_us_p50": write_duration.get("p50"),
+        "command_write_duration_us_p95": write_duration.get("p95"),
+        "command_write_duration_us_max": write_duration.get("max"),
+        "ack_read_duration_us_p50": ack_read_duration.get("p50"),
+        "ack_read_duration_us_p95": ack_read_duration.get("p95"),
+        "ack_read_duration_us_max": ack_read_duration.get("max"),
         "data_success_count": summary.get("state_valid_count") if summary.get("mode") == "read_state" else 0,
         "data_timeout_count": summary.get("data_port_timeout_count") if summary.get("mode") == "read_state" else 0,
         "success_rate": summary.get("success_rate"),
+        "read_state_capability": summary.get("read_state_capability"),
+        "rbscript_tcp_data_port_mode": summary.get("rbscript_tcp_data_port_mode"),
+        "comparable": summary.get("comparable"),
+        "not_comparable_reason": summary.get("not_comparable_reason"),
     }
 
 
@@ -224,6 +330,10 @@ def write_samples_csv(path: Path, samples: list[backend_probe.Sample]) -> None:
     fieldnames = [
         "index", "mode", "backend", "success", "duration_us", "start_ns", "end_ns",
         "error_name", "error_message", "state_valid", "q_actual_finite", "state_age_ms",
+        "response_line_count", "extra_response_count", "stale_response",
+        "unrecognized_response_count", "command_write_duration_us", "ack_read_duration_us",
+        "reconnect_count", "persistent_socket", "rbscript_tcp_data_port_mode",
+        "read_state_capability", "comparable", "not_comparable_reason",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -235,25 +345,39 @@ def write_samples_csv(path: Path, samples: list[backend_probe.Sample]) -> None:
 def write_responses_jsonl(path: Path, samples: list[backend_probe.Sample]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for sample in samples:
-            if sample.response or sample.error_name:
+            if sample.response or sample.response_lines or sample.extra_response_lines or sample.stale_response_lines or sample.error_name:
                 handle.write(json.dumps({
                     "index": sample.index,
                     "success": sample.success,
                     "response": sample.response,
+                    "response_lines": sample.response_lines,
+                    "extra_response_lines": sample.extra_response_lines,
+                    "stale_response_lines": sample.stale_response_lines,
+                    "stale_response": sample.stale_response,
                     "error_name": sample.error_name,
                     "error_message": sample.error_message,
                     "response_error_names": sample.response_error_names,
+                    "rbscript_tcp_data_port_mode": sample.rbscript_tcp_data_port_mode,
+                    "read_state_capability": sample.read_state_capability,
+                    "comparable": sample.comparable,
+                    "not_comparable_reason": sample.not_comparable_reason,
                 }) + "\n")
 
 
 def write_summary_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = [
-        "requested_rate_hz", "achieved_rate_hz", "send_count", "ack_success_count",
+        "requested_rate_hz", "achieved_rate_hz", "persistent_socket", "send_count", "ack_success_count",
         "ack_timeout_count", "ack_error_count", "p50_ack_us", "p95_ack_us",
         "p99_ack_us", "max_ack_us", "loop_interval_p50_ms", "loop_interval_p95_ms",
         "loop_interval_max_ms", "m561_count", "m568_count", "m569_count",
-        "m570_count", "other_error_counts", "reconnect_count", "data_success_count",
-        "data_timeout_count", "success_rate",
+        "m570_count", "other_error_counts", "reconnect_count", "stale_response_count",
+        "extra_response_count", "unrecognized_response_count", "response_lines_per_command_p50",
+        "response_lines_per_command_p95", "response_lines_per_command_max",
+        "command_write_duration_us_p50", "command_write_duration_us_p95",
+        "command_write_duration_us_max", "ack_read_duration_us_p50",
+        "ack_read_duration_us_p95", "ack_read_duration_us_max", "data_success_count",
+        "data_timeout_count", "success_rate", "read_state_capability",
+        "rbscript_tcp_data_port_mode", "comparable", "not_comparable_reason",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -309,6 +433,7 @@ def write_artifacts(
     safety: dict[str, Any],
     per_rate: list[dict[str, Any]],
     rows: list[dict[str, Any]],
+    raw_capture: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     artifact_dir = args.artifact_dir.resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -326,6 +451,7 @@ def write_artifacts(
         "artifact_dir": str(artifact_dir),
         "safety_preflight": safety,
         "rate_results": rows,
+        "raw_data_port_capture": raw_capture,
         "result": "completed",
         "caveat": "ACK/read-state rate evidence only; not motion readiness",
     }
@@ -338,12 +464,13 @@ def write_artifacts(
             "command: " + " ".join(sys.argv),
             f"backend: {args.backend}",
             f"mode: {args.mode}",
+            f"raw_data_port_capture: {bool(raw_capture)}",
             "No motion is commanded by default. ACK/read success is not motion readiness.",
             "",
         ]),
         encoding="utf-8",
     )
-    if not args.skip_plots:
+    if not args.skip_plots and rows:
         write_plots(artifact_dir, rows)
     return summary
 
@@ -353,6 +480,12 @@ def main() -> int:
     try:
         safety = preflight(args)
         print(json.dumps({"event": "safety_preflight", **safety}, indent=2, sort_keys=True))
+        if safety.get("capture_raw_data_port"):
+            raw_capture = capture_raw_data_port(args, args.artifact_dir.resolve())
+            summary = write_artifacts(args, safety, [], [], raw_capture=raw_capture)
+            print(json.dumps({"event": "raw_data_port_capture", **raw_capture}, sort_keys=True))
+            print(json.dumps(summary, indent=2, sort_keys=True))
+            return 0 if not raw_capture.get("error_name") else 1
         per_rate: list[dict[str, Any]] = []
         rows: list[dict[str, Any]] = []
         for rate in safety["rates"]:

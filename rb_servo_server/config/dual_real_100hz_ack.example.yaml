@@ -1,15 +1,21 @@
 schema: robotics_lab.rb_servo_server.v1
 
-# RBPODO-SERVO-PARAM-01 / RBPODO-ACCEPT-01 example only. Not a site-specific runnable config.
+# BACKEND-COMPARE-CONFIG-01 / RBPODO-ACCEPT-01 read-only example only.
+# Not a site-specific runnable config.
 # Copy to rb_servo_server/config/local/ only after read-only acceptance and
 # supervised motion approval. Motion remains disabled here by default.
 # 100 Hz ACK-on profile:
+# - backend_type: rbpodo
+# - run_mode / operation_mode: real
+# - controller command/data ports: 5000 / 5001
+# - command_bind / state_pub_endpoint: 50031 / 50131
 # - servo.rate_hz: 100
 # - move_servo_j t1 / servo_t1_sec: 0.01 s
 # - move_servo_j t2 / servo_t2_sec: 0.05 s
 # - move_servo_j alpha / servo_alpha: 0.5
 # - command_timeout_sec: 0.05 s
 # - disable_waiting_ack: false
+# - send_servo_commands: false, read-only diagnostic startup only
 # New configs must not use deprecated aliases servo_acc or
 # servo_lookahead_sec; use servo_alpha and servo_t2_sec.
 
@@ -19,6 +25,8 @@ left_robot:
   name: left_rb3_100hz_ack
   ip: "172.28.60.200"
   operation_mode: real
+  command_port: 5000
+  data_port: 5001
   command_timeout_sec: 0.05
   initial_q_deg: [0, -30, 80, 0, 60, 0]
   speed_bar: 0.1
@@ -34,6 +42,8 @@ right_robot:
   name: right_rb3_100hz_ack
   ip: "172.28.60.201"
   operation_mode: real
+  command_port: 5000
+  data_port: 5001
   command_timeout_sec: 0.05
   initial_q_deg: [0, -30, 80, 0, 60, 0]
   speed_bar: 0.1
@@ -83,8 +93,8 @@ safety:
   stop_both_arms_on_single_arm_error: true
 
 network:
-  command_bind: "udp://127.0.0.1:50010"
-  state_pub_endpoint: "udp://127.0.0.1:50110"
+  command_bind: "udp://127.0.0.1:50031"
+  state_pub_endpoint: "udp://127.0.0.1:50131"
   state_pub_rate_hz: 20
   command_source_allowlist: ["127.0.0.1/32"]
 

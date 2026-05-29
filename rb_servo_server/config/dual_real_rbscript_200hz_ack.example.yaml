@@ -1,57 +1,48 @@
+# BACKEND-COMPARE-CONFIG-01 read-only rbscript_tcp comparison template.
+# Tracked example only; copy to rb_servo_server/config/local/ before editing.
+# rbscript_tcp is experimental and not a primary real backend.
+# Command path: Rainbow script TCP command port 5000.
+# Data path: Rainbow data TCP port 5001.
+# Network command/state endpoints for this comparison: 50042 / 50142.
+# script_t1_sec maps to Rainbow Servo J t1 and is the rbscript equivalent of
+# servo_t1_sec for the comparison matrix.
 schema: robotics_lab.rb_servo_server.v1
 
-# BACKEND-COMPARE-CONFIG-01 / RBPODO-ACCEPT-01 read-only example only.
-# Not a site-specific runnable config.
-# Copy to rb_servo_server/config/local/ only after read-only acceptance and
-# supervised motion approval. Motion remains disabled here by default.
-# 200 Hz ACK-on profile:
-# - backend_type: rbpodo
-# - run_mode / operation_mode: real
-# - controller command/data ports: 5000 / 5001
-# - command_bind / state_pub_endpoint: 50032 / 50132
-# - servo.rate_hz: 200
-# - move_servo_j t1 / servo_t1_sec: 0.005 s
-# - move_servo_j t2 / servo_t2_sec: 0.05 s
-# - move_servo_j alpha / servo_alpha: 0.5
-# - command_timeout_sec: 0.02 s
-# - disable_waiting_ack: false
-# - send_servo_commands: false, read-only diagnostic startup only
-# New configs must not use deprecated aliases servo_acc or
-# servo_lookahead_sec; use servo_alpha and servo_t2_sec.
-
 left_robot:
-  backend_type: rbpodo
+  name: left_rbscript_tcp_200hz_ack
+  backend_type: rbscript_tcp
   run_mode: real
-  name: left_rb3_200hz_ack
   ip: "172.28.60.200"
   operation_mode: real
   command_port: 5000
   data_port: 5001
   command_timeout_sec: 0.02
-  initial_q_deg: [0, -30, 80, 0, 60, 0]
-  speed_bar: 0.1
-  servo_t1_sec: 0.005
-  servo_t2_sec: 0.05
-  servo_gain: 1.0
-  servo_alpha: 0.5
+  read_timeout_sec: 0.2
+  connect_timeout_sec: 1.0
   disable_waiting_ack: false
+  script_t1_sec: 0.005
+  script_t2_sec: 0.05
+  script_gain: 1.0
+  script_alpha: 0.5
+  initial_q_deg: [0, -30, 80, 0, 60, 0]
 
 right_robot:
-  backend_type: rbpodo
+  name: right_rbscript_tcp_200hz_ack
+  backend_type: rbscript_tcp
   run_mode: real
-  name: right_rb3_200hz_ack
   ip: "172.28.60.201"
   operation_mode: real
   command_port: 5000
   data_port: 5001
   command_timeout_sec: 0.02
-  initial_q_deg: [0, -30, 80, 0, 60, 0]
-  speed_bar: 0.1
-  servo_t1_sec: 0.005
-  servo_t2_sec: 0.05
-  servo_gain: 1.0
-  servo_alpha: 0.5
+  read_timeout_sec: 0.2
+  connect_timeout_sec: 1.0
   disable_waiting_ack: false
+  script_t1_sec: 0.005
+  script_t2_sec: 0.05
+  script_gain: 1.0
+  script_alpha: 0.5
+  initial_q_deg: [0, -30, 80, 0, 60, 0]
 
 left_mount:
   base_pose_in_stand: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
@@ -81,8 +72,6 @@ safety:
   q_max_deg: [170, 120, 170, 190, 120, 360]
   dq_max_deg_s: [60, 60, 60, 90, 90, 120]
   ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]
-  # Startup diagnostics may normalize wrap-capable controller reports for range
-  # checks only. Raw q_actual remains published and motion wrapping stays off.
   joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
   joint_wrap_for_startup_validation: true
   joint_wrap_for_motion_safety: false
@@ -93,10 +82,19 @@ safety:
   stop_both_arms_on_single_arm_error: true
 
 network:
-  command_bind: "udp://127.0.0.1:50032"
-  state_pub_endpoint: "udp://127.0.0.1:50132"
+  command_bind: "udp://127.0.0.1:50042"
+  state_pub_endpoint: "udp://127.0.0.1:50142"
   state_pub_rate_hz: 20
   command_source_allowlist: ["127.0.0.1/32"]
+
+command_source:
+  enforce_lease: true
+  lease_timeout_sec: 1.0
+
+cartesian_control:
+  enable: false
+  allow_in_simulation: false
+  allow_in_real: false
 
 logging:
   enable: true

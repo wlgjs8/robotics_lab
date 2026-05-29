@@ -523,6 +523,44 @@ std::string formatRbscriptReqdata() {
     return "reqdata\n";
 }
 
+std::string toString(RbscriptDataPortMode mode) {
+    switch (mode) {
+        case RbscriptDataPortMode::JsonFixture:
+            return "json_fixture";
+        case RbscriptDataPortMode::RealControllerUnsupported:
+            return "real_controller_unsupported";
+        case RbscriptDataPortMode::RealControllerParsed:
+            return "real_controller_parsed";
+    }
+    return "real_controller_unsupported";
+}
+
+std::string toString(RbscriptReadStateCapability capability) {
+    switch (capability) {
+        case RbscriptReadStateCapability::Supported:
+            return "supported";
+        case RbscriptReadStateCapability::Unsupported:
+            return "unsupported";
+        case RbscriptReadStateCapability::Experimental:
+            return "experimental";
+    }
+    return "unsupported";
+}
+
+namespace {
+
+BackendError rbscriptRealDataPortUnsupported(const std::string& detail) {
+    return backendError(
+        BackendErrorKind::UnsupportedSchema,
+        "rbscript_tcp real Rainbow data port 5001 payload is unsupported; " +
+            detail + "; refusing to guess binary offsets",
+        "",
+        "rbscript_tcp_real_data_port_unsupported"
+    );
+}
+
+}  // namespace
+
 RbscriptDataParseResult parseRbscriptDataPayload(const std::string& payload) {
     RbscriptDataParseResult result;
     if (payload.empty()) {
@@ -539,11 +577,8 @@ RbscriptDataParseResult parseRbscriptDataPayload(const std::string& payload) {
     try {
         doc = nlohmann::json::parse(payload);
     } catch (const nlohmann::json::exception& ex) {
-        result.error = backendError(
-            BackendErrorKind::ProtocolError,
-            std::string("rbscript_tcp data response is not a recognized JSON state fixture: ") + ex.what(),
-            "",
-            "rbscript_tcp_data_unrecognized_format"
+        result.error = rbscriptRealDataPortUnsupported(
+            std::string("payload is not the documented rbscript_tcp_state_v1 JSON fixture: ") + ex.what()
         );
         return result;
     }
@@ -552,14 +587,13 @@ RbscriptDataParseResult parseRbscriptDataPayload(const std::string& payload) {
         !doc.contains("schema") ||
         !doc.at("schema").is_string() ||
         doc.at("schema").get<std::string>() != "rbscript_tcp_state_v1") {
-        result.error = backendError(
-            BackendErrorKind::UnsupportedSchema,
-            "rbscript_tcp data response schema is not supported; refusing to guess Rainbow binary offsets",
-            "",
-            "rbscript_tcp_data_unsupported_schema"
+        result.error = rbscriptRealDataPortUnsupported(
+            "payload schema is not the documented rbscript_tcp_state_v1 JSON fixture"
         );
         return result;
     }
+    result.data_port_mode = RbscriptDataPortMode::JsonFixture;
+    result.read_state_capability = RbscriptReadStateCapability::Experimental;
 
     JointArray q_actual{};
     if (!doc.contains("q_actual_deg") || !jsonJointArray(doc.at("q_actual_deg"), &q_actual)) {

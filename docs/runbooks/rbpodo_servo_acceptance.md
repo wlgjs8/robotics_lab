@@ -11,13 +11,13 @@ evidence for the primary vendor-library real backend. It does not authorize
 real Cartesian motion, `rt_script`, collision-threshold changes, or unattended
 robot motion.
 
-The current profiles are:
+The current rbpodo comparison profiles are:
 
-| Profile | Rate | `servo_t1_sec` | ACK policy | Default motion |
-| --- | ---: | ---: | --- | --- |
-| `100hz_ack` | 100 Hz | 0.01 s | ACK-on | disabled |
-| `200hz_ack` | 200 Hz | 0.005 s | ACK-on | disabled |
-| `200hz_no_ack` | 200 Hz | 0.005 s | ACK-off | disabled |
+| Profile | Template | Rate | `servo_t1_sec` | ACK policy | Command/state endpoints | Default motion |
+| --- | --- | ---: | ---: | --- | --- | --- |
+| `100hz_ack` | `rb_servo_server/config/dual_real_100hz_ack.example.yaml` | 100 Hz | 0.01 s | ACK-on | `50031` / `50131` | disabled |
+| `200hz_ack` | `rb_servo_server/config/dual_real_200hz_ack.example.yaml` | 200 Hz | 0.005 s | ACK-on | `50032` / `50132` | disabled |
+| `200hz_no_ack` | `rb_servo_server/config/dual_real_200hz_no_ack.example.yaml` | 200 Hz | 0.005 s | ACK-off | `50033` / `50133` | disabled |
 
 `servo_t1_sec` must match the command period. For 100 Hz the period is
 0.01 s; for 200 Hz it is 0.005 s.
@@ -119,11 +119,23 @@ RB_ALLOW_REAL_CARTESIAN=1
 
 ## Config Handling
 
-`rb_servo_server/config/dual_real.example.yaml` is a template, not a
-ready-to-run real motion config. Copy one of the tracked examples to
-`rb_servo_server/config/local/`, review the local values, and keep
-`send_servo_commands: false` for read-only acceptance. The `config/local`
-directory is user-owned and gitignored.
+`rb_servo_server/config/dual_real.example.yaml` and the named
+`dual_real_*_ack.example.yaml` files are templates, not ready-to-run real motion
+configs. Copy one tracked example to `rb_servo_server/config/local/`, review the
+local values, and keep `send_servo_commands: false` for read-only acceptance.
+The `config/local` directory is user-owned; tracked local YAML samples are not
+production configuration.
+
+Example copy commands:
+
+```bash
+cp rb_servo_server/config/dual_real_100hz_ack.example.yaml \
+  rb_servo_server/config/local/dual_real_100hz_ack.yaml
+cp rb_servo_server/config/dual_real_200hz_ack.example.yaml \
+  rb_servo_server/config/local/dual_real_200hz_ack.yaml
+cp rb_servo_server/config/dual_real_200hz_no_ack.example.yaml \
+  rb_servo_server/config/local/dual_real_200hz_no_ack.yaml
+```
 
 For controller bring-up diagnostics, the ACK-on read-only examples enable:
 
@@ -151,6 +163,13 @@ configured range but may be equivalent modulo a wrap period. A right-arm report
 near `-317 deg` with range `[-190, 190]` and period `360` is equivalent to about
 `43 deg` for startup range diagnostics. Motion target wrapping remains disabled
 to avoid discontinuities.
+
+Controller-simulation no-op comparison is separate from the read-only templates.
+Use `configs/backend_compare/rbpodo_200hz_ack_sim_noop.yaml` only after
+controller `pgmode` simulation has been verified by the acceptance tool and the
+normal real-controller/motion env gates are set. That file intentionally sets
+`send_servo_commands: true`, but it is still not a real motion acceptance config
+and does not approve ACK-off or Cartesian motion.
 
 ## State Dump Bring-Up Tool
 

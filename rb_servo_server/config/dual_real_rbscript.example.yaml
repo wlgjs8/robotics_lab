@@ -5,6 +5,7 @@
 # rbscript_tcp is for rbpodo-overhead comparison and read-only/no-motion
 # acceptance first. It is not a replacement for rbpodo, does not enable
 # rt_script, and must not rely on undocumented controller settings.
+# Prefer the named dual_real_rbscript_* templates for backend comparison runs.
 schema: robotics_lab.rb_servo_server.v1
 
 left_robot:
@@ -12,6 +13,7 @@ left_robot:
   backend_type: rbscript_tcp
   run_mode: real
   ip: "172.28.60.200"
+  operation_mode: real
   command_port: 5000
   data_port: 5001
   command_timeout_sec: 0.2
@@ -29,6 +31,7 @@ right_robot:
   backend_type: rbscript_tcp
   run_mode: real
   ip: "172.28.60.201"
+  operation_mode: real
   command_port: 5000
   data_port: 5001
   command_timeout_sec: 0.2
@@ -44,8 +47,11 @@ right_robot:
 servo:
   rate_hz: 200
   io_model: direct
-  startup_mode: hold
+  startup_mode: Hold
   send_servo_commands: false
+  allow_readonly_faulted_startup: true
+  allow_readonly_q_range_violation_startup: true
+  allow_readonly_wrong_mode_startup: true
   enable_realtime_priority: true
   realtime_priority: 80
 
@@ -54,6 +60,9 @@ safety:
   q_max_deg: [170, 120, 170, 190, 120, 360]
   dq_max_deg_s: [30, 30, 30, 45, 45, 60]
   ddq_max_deg_s2: [150, 150, 150, 250, 250, 350]
+  joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
+  joint_wrap_for_startup_validation: true
+  joint_wrap_for_motion_safety: false
   command_timeout_sec: 0.2
   max_tracking_error_deg: 5.0
   tracking_error_policy: fault_latch

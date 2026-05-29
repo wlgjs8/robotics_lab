@@ -1,24 +1,18 @@
+# BACKEND-COMPARE-CONFIG-01 controller-simulation no-op template.
+# This file is not a default real-motion config. It is only for a controller
+# pgmode simulation Servo J no-op comparison after tool-level safety preflight.
+# The filename contains sim_noop because send_servo_commands is intentionally
+# true for this controller-simulation-only profile.
 schema: robotics_lab.rb_servo_server.v1
-
-# RBPODO-SERVO-PARAM-01 / RBPODO-ACCEPT-01 example only. Not a site-specific runnable config.
-# Copy to rb_servo_server/config/local/ only after read-only acceptance and
-# supervised motion approval. Motion remains disabled here by default.
-# 200 Hz ACK-on profile:
-# - servo.rate_hz: 200
-# - move_servo_j t1 / servo_t1_sec: 0.005 s
-# - move_servo_j t2 / servo_t2_sec: 0.05 s
-# - move_servo_j alpha / servo_alpha: 0.5
-# - command_timeout_sec: 0.02 s
-# - disable_waiting_ack: false
-# New configs must not use deprecated aliases servo_acc or
-# servo_lookahead_sec; use servo_alpha and servo_t2_sec.
 
 left_robot:
   backend_type: rbpodo
   run_mode: real
-  name: left_rb3_200hz_ack
+  name: left_rb3_200hz_ack_sim_noop
   ip: "172.28.60.200"
   operation_mode: simulation
+  command_port: 5000
+  data_port: 5001
   command_timeout_sec: 0.02
   initial_q_deg: [0, -30, 80, 0, 60, 0]
   speed_bar: 0.1
@@ -31,9 +25,11 @@ left_robot:
 right_robot:
   backend_type: rbpodo
   run_mode: real
-  name: right_rb3_200hz_ack
+  name: right_rb3_200hz_ack_sim_noop
   ip: "172.28.60.201"
   operation_mode: simulation
+  command_port: 5000
+  data_port: 5001
   command_timeout_sec: 0.02
   initial_q_deg: [0, -30, 80, 0, 60, 0]
   speed_bar: 0.1
@@ -68,20 +64,29 @@ safety:
   q_max_deg: [170, 120, 170, 190, 120, 360]
   dq_max_deg_s: [60, 60, 60, 90, 90, 120]
   ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]
+  joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
+  joint_wrap_for_startup_validation: false
+  joint_wrap_for_motion_safety: false
   command_timeout_sec: 0.2
   max_tracking_error_deg: 10.0
   tracking_error_policy: fault_latch
   latch_fault_on_robot_state_error: true
   stop_both_arms_on_single_arm_error: true
-  # joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
-  # joint_wrap_for_startup_validation: true
-  # joint_wrap_for_motion_safety: false
 
 network:
-  command_bind: "udp://127.0.0.1:50010"
-  state_pub_endpoint: "udp://127.0.0.1:50110"
+  command_bind: "udp://127.0.0.1:50034"
+  state_pub_endpoint: "udp://127.0.0.1:50134"
   state_pub_rate_hz: 20
   command_source_allowlist: ["127.0.0.1/32"]
+
+command_source:
+  enforce_lease: true
+  lease_timeout_sec: 1.0
+
+cartesian_control:
+  enable: false
+  allow_in_simulation: false
+  allow_in_real: false
 
 logging:
   enable: true

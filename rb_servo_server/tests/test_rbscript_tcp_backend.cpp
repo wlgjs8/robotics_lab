@@ -188,6 +188,8 @@ bool testParseDataFixture() {
         rb_servo::parseRbscriptDataPayload(validStateFixture());
     RB_CHECK(result.ok);
     RB_CHECK(result.error.kind == rb_servo::BackendErrorKind::None);
+    RB_CHECK(rb_servo::toString(result.data_port_mode) == "json_fixture");
+    RB_CHECK(rb_servo::toString(result.read_state_capability) == "experimental");
     RB_CHECK(result.state.q_actual_deg[0] == 1.0);
     RB_CHECK(result.state.q_actual_deg[5] == 6.0);
     RB_CHECK(result.state.has_q_target_deg);
@@ -211,7 +213,10 @@ bool testParseRejectsUnknownFormat() {
     const rb_servo::RbscriptDataParseResult result =
         rb_servo::parseRbscriptDataPayload("not a documented state payload");
     RB_CHECK(!result.ok);
-    RB_CHECK(result.error.kind == rb_servo::BackendErrorKind::ProtocolError);
+    RB_CHECK(result.error.kind == rb_servo::BackendErrorKind::UnsupportedSchema);
+    RB_CHECK(result.error.name == "rbscript_tcp_real_data_port_unsupported");
+    RB_CHECK(rb_servo::toString(result.data_port_mode) == "real_controller_unsupported");
+    RB_CHECK(rb_servo::toString(result.read_state_capability) == "unsupported");
     return true;
 }
 
@@ -220,6 +225,9 @@ bool testParseRejectsUnknownSchema() {
         rb_servo::parseRbscriptDataPayload(R"({"schema":"rainbow_binary_blob","q_actual_deg":[1,2,3,4,5,6]})");
     RB_CHECK(!result.ok);
     RB_CHECK(result.error.kind == rb_servo::BackendErrorKind::UnsupportedSchema);
+    RB_CHECK(result.error.name == "rbscript_tcp_real_data_port_unsupported");
+    RB_CHECK(rb_servo::toString(result.data_port_mode) == "real_controller_unsupported");
+    RB_CHECK(rb_servo::toString(result.read_state_capability) == "unsupported");
     return true;
 }
 
@@ -230,9 +238,9 @@ bool testParseRejectsInvalidJointData() {
     RB_CHECK(result.error.kind == rb_servo::BackendErrorKind::InvalidJointState);
 
     const rb_servo::RbscriptDataParseResult nan_result =
-        rb_servo::parseRbscriptDataPayload(R"({"schema":"rbscript_tcp_state_v1","q_actual_deg":[1,2,3,4,5,NaN]})");
+        rb_servo::parseRbscriptDataPayload(R"({"schema":"rbscript_tcp_state_v1","q_actual_deg":[1,2,3,4,5,"nan"]})");
     RB_CHECK(!nan_result.ok);
-    RB_CHECK(nan_result.error.kind == rb_servo::BackendErrorKind::ProtocolError);
+    RB_CHECK(nan_result.error.kind == rb_servo::BackendErrorKind::InvalidJointState);
     return true;
 }
 
@@ -263,7 +271,8 @@ bool testReadStateParseFailure() {
     rb_servo::RbscriptTcpBackend backend(rb_servo::ArmId::Left, testDataConfig(data_server.port()));
     const auto result = backend.readState();
     RB_CHECK(!result.ok);
-    RB_CHECK(result.error.kind == rb_servo::BackendErrorKind::ProtocolError);
+    RB_CHECK(result.error.kind == rb_servo::BackendErrorKind::UnsupportedSchema);
+    RB_CHECK(result.error.name == "rbscript_tcp_real_data_port_unsupported");
     RB_CHECK(data_server.command() == "reqdata\n");
     const auto counters = backend.transportCounters();
     RB_CHECK(counters.data_requests_total == 1);

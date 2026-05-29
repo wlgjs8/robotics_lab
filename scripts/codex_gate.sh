@@ -800,6 +800,125 @@ run_rbpodo_doc_gate() {
   grep_existing "RB_ALLOW_REAL_MOTION" README.md REVIEW.md AGENTS.md docs rb_servo_server/docs rb_servo_server/config
 }
 
+run_backend_compare_python_tests() {
+  run_python_surface_tests
+  run_optional_rbscript_helper_tests
+}
+
+run_backend_compare_doc_config_checks() {
+  grep_existing "rbpodo" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "rbscript_tcp" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "RB_ALLOW_REAL_ROBOT" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "RB_ALLOW_RBSCRIPT_TCP" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "RB_ALLOW_RBSCRIPT_TCP_MOTION" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "send_servo_commands:[[:space:]]*false" rb_servo_server/config docs/runbooks
+  grep_existing "read-only|no-motion" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+}
+
+run_backend_compare_config_gate() {
+  run_shell_syntax_checks
+  run_backend_compare_doc_config_checks
+  run_backend_compare_python_tests
+}
+
+run_backend_compare_probe_if_requested() {
+  if [[ "${CODEX_RUN_BACKEND_COMPARE:-0}" == "1" ]]; then
+    if [[ ! -f scripts/rb_backend_ablation.py ]]; then
+      echo "ERROR: CODEX_RUN_BACKEND_COMPARE=1 but scripts/rb_backend_ablation.py is missing" >&2
+      return 1
+    fi
+    local args="${CODEX_BACKEND_COMPARE_ABLATION_ARGS:-${CODEX_BACKEND_COMPARE_ARGS:-}}"
+    if [[ -z "${args}" ]]; then
+      echo "ERROR: CODEX_RUN_BACKEND_COMPARE=1 requires CODEX_BACKEND_COMPARE_ABLATION_ARGS or CODEX_BACKEND_COMPARE_ARGS with explicit tool arguments and safety preflight flags" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2086
+    python3 scripts/rb_backend_ablation.py ${args}
+  else
+    echo "codex_gate: skipping full backend comparison probe; set CODEX_RUN_BACKEND_COMPARE=1 with explicit args to enable"
+  fi
+}
+
+run_rbscript_persistent_probe_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  python3 scripts/rb_backend_ablation.py --help >/dev/null
+  python3 scripts/rainbow_rate_probe.py --help >/dev/null
+  python3 scripts/compare_backend_ablation.py --help >/dev/null
+  run_backend_compare_python_tests
+  run_backend_compare_probe_if_requested
+}
+
+run_rbscript_servo_noop_gate() {
+  run_shell_syntax_checks
+  run_servo_gate_or_skip_missing_deps
+  run_optional_python_help scripts/rbscript_servo_acceptance.py
+  if [[ -f scripts/rbscript_servo_acceptance.py ]]; then
+    python3 scripts/rbscript_servo_acceptance.py --self-test
+  fi
+  run_backend_compare_python_tests
+  if [[ "${CODEX_RUN_RBSCRIPT_SERVO_ACCEPTANCE:-0}" == "1" ]]; then
+    if [[ ! -f scripts/rbscript_servo_acceptance.py ]]; then
+      echo "ERROR: CODEX_RUN_RBSCRIPT_SERVO_ACCEPTANCE=1 but scripts/rbscript_servo_acceptance.py is missing" >&2
+      return 1
+    fi
+    if [[ -z "${CODEX_RBSCRIPT_SERVO_ACCEPTANCE_ARGS:-}" ]]; then
+      echo "ERROR: CODEX_RUN_RBSCRIPT_SERVO_ACCEPTANCE=1 requires CODEX_RBSCRIPT_SERVO_ACCEPTANCE_ARGS with explicit script arguments and safety preflight flags" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2086
+    python3 scripts/rbscript_servo_acceptance.py ${CODEX_RBSCRIPT_SERVO_ACCEPTANCE_ARGS}
+  else
+    echo "codex_gate: skipping rbscript ServoJ no-op acceptance; set CODEX_RUN_RBSCRIPT_SERVO_ACCEPTANCE=1 with explicit args to enable"
+  fi
+}
+
+run_rbscript_data_port_gate() {
+  run_shell_syntax_checks
+  run_servo_gate_or_skip_missing_deps
+  run_optional_rbscript_helper_tests
+  grep_existing "data[[:space:]_-]*port[^0-9]*5001|reqdata|rbscript_tcp_state_v1" \
+    docs/runbooks/rbscript_tcp_ablation.md docs/servo_backend_contract.md scripts/rb_backend_ablation.py
+  echo "codex_gate: skipping real rbscript data-port probe by default"
+}
+
+run_backend_compare_matrix_gate() {
+  python3 -m compileall -q scripts
+  run_optional_python_help scripts/run_backend_comparison_matrix.py
+  if [[ "${CODEX_RUN_BACKEND_COMPARE:-0}" == "1" ]]; then
+    if [[ ! -f scripts/run_backend_comparison_matrix.py ]]; then
+      echo "ERROR: CODEX_RUN_BACKEND_COMPARE=1 but scripts/run_backend_comparison_matrix.py is missing" >&2
+      return 1
+    fi
+    if [[ -z "${CODEX_BACKEND_COMPARE_MATRIX_ARGS:-}" ]]; then
+      echo "ERROR: CODEX_RUN_BACKEND_COMPARE=1 requires CODEX_BACKEND_COMPARE_MATRIX_ARGS with explicit script arguments and safety preflight flags" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2086
+    python3 scripts/run_backend_comparison_matrix.py ${CODEX_BACKEND_COMPARE_MATRIX_ARGS}
+  else
+    echo "codex_gate: skipping full backend comparison matrix; set CODEX_RUN_BACKEND_COMPARE=1 with explicit matrix args to enable"
+  fi
+}
+
+run_backend_compare_report_gate() {
+  python3 -m compileall -q scripts
+  python3 scripts/compare_backend_ablation.py --help >/dev/null
+  run_optional_python_help scripts/report_backend_comparison.py
+  run_optional_python_help scripts/backend_comparison_report.py
+  for token in \
+    "rbpodo" \
+    "rbscript_tcp" \
+    "apples-to-apples" \
+    "read_state" \
+    "servo_j_noop" \
+    "ACK-on" \
+    "ACK-off"
+  do
+    grep_existing "${token}" README.md REVIEW.md docs rb_servo_server/docs
+  done
+}
+
 run_doc_hygiene_gate() {
   run_shell_syntax_checks
   if [[ -e README_DOCS_UPDATE.md ]]; then
@@ -1219,6 +1338,27 @@ case "$TASK" in
     ;;
   RBPODO-DOC-01)
     run_rbpodo_doc_gate
+    ;;
+  GATE-BACKEND-COMPARE-00)
+    run_shell_syntax_checks
+    ;;
+  BACKEND-COMPARE-CONFIG-01)
+    run_backend_compare_config_gate
+    ;;
+  RBSCRIPT-PERSISTENT-PROBE-01)
+    run_rbscript_persistent_probe_gate
+    ;;
+  RBSCRIPT-SERVO-NOOP-01)
+    run_rbscript_servo_noop_gate
+    ;;
+  RBSCRIPT-DATA-PORT-01)
+    run_rbscript_data_port_gate
+    ;;
+  BACKEND-COMPARE-MATRIX-01)
+    run_backend_compare_matrix_gate
+    ;;
+  BACKEND-COMPARE-REPORT-01)
+    run_backend_compare_report_gate
     ;;
   DOC-HYGIENE-01)
     run_doc_hygiene_gate
