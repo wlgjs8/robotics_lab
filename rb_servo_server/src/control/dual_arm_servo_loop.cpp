@@ -351,6 +351,16 @@ std::string controllerSimulationStateSourceName(CartesianControllerSimulationSta
     return "unknown";
 }
 
+std::string controllerSimulationTrackingSourceName(ControllerSimulationTrackingErrorSource source) {
+    switch (source) {
+        case ControllerSimulationTrackingErrorSource::Actual:
+            return "actual";
+        case ControllerSimulationTrackingErrorSource::Reference:
+            return "reference";
+    }
+    return "unknown";
+}
+
 bool controllerSimulationReferenceSourceActive(
     const DualArmConfig& config,
     const ArmCommand& command,
@@ -361,6 +371,70 @@ bool controllerSimulationReferenceSourceActive(
     return backend.run_mode == RunMode::Real &&
         isStreamingCartesianMode(command.mode) &&
         controllerSimulationCartesianGateOpen(config, backend);
+}
+
+bool controllerSimulationTrackingReferenceActive(
+    const DualArmConfig& config,
+    ArmId arm_id
+) {
+    if (config.safety.controller_simulation_tracking_error_source !=
+        ControllerSimulationTrackingErrorSource::Reference) {
+        return false;
+    }
+    const BackendConfig& backend = backendConfigForArm(config, arm_id);
+    return isRbpodoControllerSimulationBackend(backend) &&
+        controllerSimulationMotionGateOpen(config);
+}
+
+double maxAbsJointDelta(const JointArray& a, const JointArray& b) {
+    double max_delta = 0.0;
+    for (int i = 0; i < kDof; ++i) {
+        if (!std::isfinite(a[i]) || !std::isfinite(b[i])) {
+            return std::numeric_limits<double>::infinity();
+        }
+        max_delta = std::max(max_delta, std::abs(a[i] - b[i]));
+    }
+    return max_delta;
+}
+
+SafetyTrackingState trackingStateForArm(
+    const DualArmConfig& config,
+    ArmId arm_id,
+    const RobotState& state,
+    const JointArray& physical_baseline_q_deg
+) {
+    SafetyTrackingState tracking;
+    tracking.source =
+        controllerSimulationTrackingSourceName(config.safety.controller_simulation_tracking_error_source);
+    if (!controllerSimulationTrackingReferenceActive(config, arm_id)) {
+        tracking.source = "actual";
+        return tracking;
+    }
+
+    tracking.override_tracking_q = true;
+    tracking.tracking_q_deg = state.q_target_deg;
+    tracking.source = "reference";
+    if (!state.has_valid_joint_state || !finiteJointArray(state.q_target_deg)) {
+        tracking.source_valid = false;
+        tracking.reason = "controller_simulation_reference_state_unavailable";
+        return tracking;
+    }
+    if (!finiteJointArray(physical_baseline_q_deg) || !finiteJointArray(state.q_actual_deg)) {
+        tracking.source_valid = false;
+        tracking.reason = "controller_simulation_physical_baseline_unavailable";
+        return tracking;
+    }
+
+    const double physical_motion_deg = maxAbsJointDelta(state.q_actual_deg, physical_baseline_q_deg);
+    tracking.controller_simulation_physical_motion_detected =
+        physical_motion_deg > config.safety.controller_simulation_physical_motion_threshold_deg;
+    if (tracking.controller_simulation_physical_motion_detected &&
+        config.safety.controller_simulation_physical_motion_policy ==
+            ControllerSimulationPhysicalMotionPolicy::FaultLatch) {
+        tracking.controller_simulation_physical_motion_fault = true;
+        tracking.reason = "controller_simulation_physical_motion_detected";
+    }
+    return tracking;
 }
 
 struct CartesianServoStateSelection {
@@ -791,6 +865,8 @@ bool DualArmServoLoop::initializeRobots() {
     left_prevprev_sent_q_deg_ = left.q_actual_deg;
     right_prev_sent_q_deg_ = right.q_actual_deg;
     right_prevprev_sent_q_deg_ = right.q_actual_deg;
+    left_controller_sim_physical_baseline_q_deg_ = left.q_actual_deg;
+    right_controller_sim_physical_baseline_q_deg_ = right.q_actual_deg;
     left_fault_hold_q_deg_ = left.q_actual_deg;
     right_fault_hold_q_deg_ = right.q_actual_deg;
     setMotionState(ServerMotionState::ConnectedHold);
@@ -845,6 +921,8 @@ bool DualArmServoLoop::initializeWorkers() {
             left_prevprev_sent_q_deg_ = left.q_actual_deg;
             right_prev_sent_q_deg_ = right.q_actual_deg;
             right_prevprev_sent_q_deg_ = right.q_actual_deg;
+            left_controller_sim_physical_baseline_q_deg_ = left.q_actual_deg;
+            right_controller_sim_physical_baseline_q_deg_ = right.q_actual_deg;
             left_fault_hold_q_deg_ = left.q_actual_deg;
             right_fault_hold_q_deg_ = right.q_actual_deg;
             setMotionState(ServerMotionState::ConnectedHold);
@@ -1015,6 +1093,10 @@ void DualArmServoLoop::loopMain() {
         ServoTarget desired_target;
         bool have_desired_target = false;
         SafetyVerdict safety_verdict = SafetyVerdict::Ok;
+        if (!fault_latched_.load()) {
+            left_safety_tracking_ = SafetyTrackingTelemetry{};
+            right_safety_tracking_ = SafetyTrackingTelemetry{};
+        }
 
         if (!state_ok || !isValidJointState(left_state) || !isValidJointState(right_state)) {
             safety_verdict = state_ok ? SafetyVerdict::RobotStateError : read_fault.verdict;
@@ -1212,6 +1294,8 @@ void DualArmServoLoop::loopMain() {
         sample.right_last_send = sendCallSnapshot(right_send_result);
         sample.left_cartesian_solve = left_last_cartesian_solve_;
         sample.right_cartesian_solve = right_last_cartesian_solve_;
+        sample.left_safety_tracking = left_safety_tracking_;
+        sample.right_safety_tracking = right_safety_tracking_;
         if (!left_ok) {
             sample.left_send_error_kind = toString(left_send_result.error.kind);
             sample.left_send_error_name = left_send_result.error.name;
@@ -1304,6 +1388,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.right_last_send = sample.right_last_send;
             latest_snapshot_.left_cartesian_solve = sample.left_cartesian_solve;
             latest_snapshot_.right_cartesian_solve = sample.right_cartesian_solve;
+            latest_snapshot_.left_safety_tracking = sample.left_safety_tracking;
+            latest_snapshot_.right_safety_tracking = sample.right_safety_tracking;
             latest_snapshot_.left_send_error_kind = sample.left_send_error_kind;
             latest_snapshot_.left_send_error_name = sample.left_send_error_name;
             latest_snapshot_.left_send_error_code = sample.left_send_error_code;
@@ -2295,20 +2381,36 @@ ServoTarget DualArmServoLoop::applySafety(
         right_filter_state.has_error = false;
         right_filter_state.error_code = 0;
     }
+    const SafetyTrackingState left_tracking_state = trackingStateForArm(
+        config_,
+        ArmId::Left,
+        left_filter_state,
+        left_controller_sim_physical_baseline_q_deg_
+    );
+    const SafetyTrackingState right_tracking_state = trackingStateForArm(
+        config_,
+        ArmId::Right,
+        right_filter_state,
+        right_controller_sim_physical_baseline_q_deg_
+    );
     const SafetyCheckResult left_result = safety_filter_.filterJointTarget(
         desired.left_q_target_deg,
         left_prev_sent_q_deg_,
         left_prevprev_sent_q_deg_,
         left_filter_state,
-        dt_sec
+        dt_sec,
+        left_tracking_state
     );
     const SafetyCheckResult right_result = safety_filter_.filterJointTarget(
         desired.right_q_target_deg,
         right_prev_sent_q_deg_,
         right_prevprev_sent_q_deg_,
         right_filter_state,
-        dt_sec
+        dt_sec,
+        right_tracking_state
     );
+    left_safety_tracking_ = left_result.tracking;
+    right_safety_tracking_ = right_result.tracking;
 
     out.left_q_target_deg = left_result.filtered_q_deg;
     out.right_q_target_deg = right_result.filtered_q_deg;
@@ -2319,6 +2421,9 @@ ServoTarget DualArmServoLoop::applySafety(
     if ((left_result.joint_limit_clamped || right_result.joint_limit_clamped) && combined == SafetyVerdict::Ok) {
         combined = SafetyVerdict::JointLimitClamped;
     }
+    const std::string combined_reason = !left_result.ok && !left_result.reason.empty()
+        ? left_result.reason
+        : (!right_result.ok && !right_result.reason.empty() ? right_result.reason : "");
 
     if (combined == SafetyVerdict::TrackingError) {
         if (config_.safety.tracking_error_policy == TrackingErrorPolicy::SnapToActual) {
@@ -2326,13 +2431,23 @@ ServoTarget DualArmServoLoop::applySafety(
             out.left_q_target_deg = left_state.q_actual_deg;
             out.right_q_target_deg = right_state.q_actual_deg;
         } else {
-            latchFault(SafetyVerdict::TrackingError, "tracking error exceeded threshold", left_state, right_state);
+            latchFault(
+                SafetyVerdict::TrackingError,
+                combined_reason.empty() ? "tracking error exceeded threshold" : combined_reason,
+                left_state,
+                right_state
+            );
             out = currentFaultHoldTarget();
             combined = SafetyVerdict::FaultLatched;
         }
     } else if (combined == SafetyVerdict::RobotStateError) {
         if (config_.safety.latch_fault_on_robot_state_error) {
-            latchFault(SafetyVerdict::RobotStateError, "robot state error or disconnected", left_state, right_state);
+            latchFault(
+                SafetyVerdict::RobotStateError,
+                combined_reason.empty() ? "robot state error or disconnected" : combined_reason,
+                left_state,
+                right_state
+            );
             out = currentFaultHoldTarget();
             combined = SafetyVerdict::FaultLatched;
         } else {
@@ -2557,6 +2672,8 @@ bool DualArmServoLoop::clearFaultLatch(RobotState& left_state, RobotState& right
     right_prev_sent_q_deg_ = chooseSafeHoldTarget(right_state, right_prev_sent_q_deg_);
     left_prevprev_sent_q_deg_ = left_prev_sent_q_deg_;
     right_prevprev_sent_q_deg_ = right_prev_sent_q_deg_;
+    left_controller_sim_physical_baseline_q_deg_ = left_state.q_actual_deg;
+    right_controller_sim_physical_baseline_q_deg_ = right_state.q_actual_deg;
     left_fault_hold_q_deg_ = left_prev_sent_q_deg_;
     right_fault_hold_q_deg_ = right_prev_sent_q_deg_;
     setMotionState(ServerMotionState::ConnectedHold);

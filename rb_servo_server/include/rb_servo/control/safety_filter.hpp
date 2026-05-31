@@ -5,11 +5,25 @@
 
 namespace rb_servo {
 
+struct SafetyTrackingState {
+    bool override_tracking_q = false;
+    JointArray tracking_q_deg{};
+    std::string source = "actual";
+    bool source_valid = true;
+    std::string reason;
+    double command_reference_tracking_error_deg = 0.0;
+    double physical_command_actual_error_deg = 0.0;
+    bool controller_simulation_physical_motion_detected = false;
+    bool controller_simulation_physical_motion_fault = false;
+};
+
 struct SafetyCheckResult {
     JointArray filtered_q_deg{};
     SafetyVerdict verdict = SafetyVerdict::Ok;
     bool ok = true;
     bool joint_limit_clamped = false;
+    std::string reason;
+    SafetyTrackingTelemetry tracking;
 };
 
 class SafetyFilter {
@@ -21,11 +35,16 @@ public:
         const JointArray& previous_q_deg,
         const JointArray& previous_previous_q_deg,
         const RobotState& state,
-        double dt_sec
+        double dt_sec,
+        const SafetyTrackingState& tracking_state = SafetyTrackingState{}
     ) const;
 
     SafetyVerdict checkState(const RobotState& state) const;
-    bool hasTrackingError(const JointArray& previous_q_deg, const RobotState& state) const;
+    bool hasTrackingError(
+        const JointArray& previous_q_deg,
+        const RobotState& state,
+        const SafetyTrackingState& tracking_state = SafetyTrackingState{}
+    ) const;
 
     bool isStateSafe(const RobotState& state) const;
 

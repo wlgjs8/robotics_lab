@@ -180,6 +180,8 @@ private:
 
     JointArray left_prevprev_sent_q_deg_{};
     JointArray right_prevprev_sent_q_deg_{};
+    JointArray left_controller_sim_physical_baseline_q_deg_{};
+    JointArray right_controller_sim_physical_baseline_q_deg_{};
 
     std::atomic<ServerMotionState> motion_state_{ServerMotionState::Disconnected};
     mutable std::mutex state_mutex_;
@@ -194,6 +196,8 @@ private:
     JointArray right_fault_hold_q_deg_{};
     CartesianSolveTelemetry left_last_cartesian_solve_;
     CartesianSolveTelemetry right_last_cartesian_solve_;
+    SafetyTrackingTelemetry left_safety_tracking_;
+    SafetyTrackingTelemetry right_safety_tracking_;
     LatchedCartesianTarget left_latched_cartesian_target_;
     LatchedCartesianTarget right_latched_cartesian_target_;
     CartesianServoPathState left_cartesian_servo_path_;

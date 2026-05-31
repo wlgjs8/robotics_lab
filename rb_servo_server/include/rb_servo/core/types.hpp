@@ -333,6 +333,15 @@ struct CartesianSolveTelemetry {
     bool circle_done = false;
 };
 
+struct SafetyTrackingTelemetry {
+    std::string tracking_error_source = "actual";
+    bool tracking_error_source_valid = true;
+    std::string tracking_error_reason;
+    double command_reference_tracking_error_deg = 0.0;
+    double physical_command_actual_error_deg = 0.0;
+    bool controller_simulation_physical_motion_detected = false;
+};
+
 struct TcpCircleMoveCommand {
     TcpCirclePlane plane = TcpCirclePlane::XY;
     double diameter_m = 0.0;
@@ -551,6 +560,8 @@ struct ServoSample {
     std::string right_send_error_message;
     CartesianSolveTelemetry left_cartesian_solve;
     CartesianSolveTelemetry right_cartesian_solve;
+    SafetyTrackingTelemetry left_safety_tracking;
+    SafetyTrackingTelemetry right_safety_tracking;
     bool send_suppressed = false;
     std::string send_policy = "send_servo_j";
     uint64_t left_send_start_ns = 0;
@@ -622,6 +633,8 @@ struct ServoSnapshot {
     std::string right_send_error_message;
     CartesianSolveTelemetry left_cartesian_solve;
     CartesianSolveTelemetry right_cartesian_solve;
+    SafetyTrackingTelemetry left_safety_tracking;
+    SafetyTrackingTelemetry right_safety_tracking;
     bool send_suppressed = false;
     std::string send_policy = "send_servo_j";
     uint64_t left_send_start_ns = 0;

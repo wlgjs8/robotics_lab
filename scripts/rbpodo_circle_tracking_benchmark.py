@@ -1309,6 +1309,32 @@ def result_from_thresholds(args: argparse.Namespace, summary: dict[str, Any]) ->
     return result, reason, failures
 
 
+def first_fault_details(states: list[dict[str, Any]], benchmark_start_ns: int) -> dict[str, Any]:
+    for snapshot in states:
+        if snapshot.get("fault_latched") is not True:
+            continue
+        fault_time_ns = snapshot.get("host_time_ns")
+        if not isinstance(fault_time_ns, int):
+            fault_time_ns = snapshot.get("loop_end_time_ns")
+        first_fault_time_sec = None
+        if isinstance(fault_time_ns, int) and fault_time_ns >= benchmark_start_ns:
+            first_fault_time_sec = (fault_time_ns - benchmark_start_ns) / 1e9
+        return {
+            "fault_latched": True,
+            "first_fault_time_sec": first_fault_time_sec,
+            "latched_fault_reason": snapshot.get("latched_fault_reason"),
+            "fault_reason": snapshot.get("fault_reason"),
+            "fault_context": snapshot.get("fault_context"),
+        }
+    return {
+        "fault_latched": False,
+        "first_fault_time_sec": None,
+        "latched_fault_reason": None,
+        "fault_reason": None,
+        "fault_context": None,
+    }
+
+
 def classify_cartesian_runtime(summary: dict[str, Any], command_count: int) -> dict[str, Any]:
     sample_count = int(summary.get("sample_count") or 0)
     unavailable_count = int(summary.get("cartesian_unavailable_count") or 0)
@@ -1667,6 +1693,7 @@ def summarize_run(
         performance_warnings.append(
             "controller-simulation q_actual is stationary; Cartesian integration may need reference-state source."
         )
+    fault_details = first_fault_details(states, benchmark_start_ns)
 
     summary: dict[str, Any] = {
         "schema": SCHEMA,
@@ -1736,6 +1763,11 @@ def summarize_run(
         "physical_actual_csv": str((artifact_dir / "physical_actual.csv").resolve()) if physical_rows else None,
         "feedback_terms": feedback_artifacts,
         "server_returncode": server_returncode,
+        "fault_latched": fault_details["fault_latched"],
+        "first_fault_time_sec": fault_details["first_fault_time_sec"],
+        "latched_fault_reason": fault_details["latched_fault_reason"],
+        "fault_reason": fault_details["fault_reason"],
+        "fault_context": fault_details["fault_context"],
         "caveat": (
             "rbpodo controller-simulation benchmark evidence; controller boxes are real, "
             "physical robot motion is not expected or approved"
@@ -1745,6 +1777,7 @@ def summarize_run(
     summary.update(telemetry_metrics(states, args.arm))
     summary.update(runtime_diagnostics)
     summary.update(command_interval_metrics(artifact_dir / "command_packets.jsonl"))
+    summary.update(fault_details)
     summary.update(classify_cartesian_runtime(summary, command_count))
     no_circle_reason = (
         "No circle attempted: Cartesian unavailable"
@@ -1757,7 +1790,13 @@ def summarize_run(
         write_csv(artifact_dir / "physical_actual.csv", physical_rows)
     write_csv(artifact_dir / "samples.csv", merged)
     skipped_plots = plot_artifacts(artifact_dir, args, traj, merged, controller_rows, physical_rows, no_circle_reason)
-    if summary.get("server_rejected_cartesian") is True:
+    if summary.get("fault_latched") is True:
+        fault_name = summary.get("latched_fault_reason") or "unknown"
+        fault_text = summary.get("fault_reason") or "no fault reason reported"
+        result = "faulted"
+        result_reason = f"server fault latched: {fault_name}: {fault_text}"
+        failures = [result_reason]
+    elif summary.get("server_rejected_cartesian") is True:
         result = "blocked"
         result_reason = "cartesian_commands_rejected_by_server"
         failures = [
@@ -1780,7 +1819,6 @@ def summarize_run(
             "performance_warnings": performance_warnings,
             "generated_plots": generated_plot_paths(artifact_dir),
             "skipped_plots": skipped_plots,
-            "fault_latched": any(state.get("fault_latched") is True for state in states),
         }
     )
     write_json(artifact_dir / "summary.json", summary)

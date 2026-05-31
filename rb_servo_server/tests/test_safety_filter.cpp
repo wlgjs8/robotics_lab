@@ -86,6 +86,96 @@ bool testMotionSafetyDoesNotWrapTargetsByDefault() {
     return true;
 }
 
+rb_servo::SafetyConfig trackingTestConfig() {
+    rb_servo::SafetyConfig config;
+    config.q_min_deg.fill(-190.0);
+    config.q_max_deg.fill(190.0);
+    config.dq_max_deg_s.fill(1000.0);
+    config.ddq_max_deg_s2.fill(1000.0);
+    config.max_tracking_error_deg = 2.0;
+    return config;
+}
+
+rb_servo::RobotState connectedState(rb_servo::JointArray q_actual) {
+    rb_servo::RobotState state;
+    state.q_actual_deg = q_actual;
+    state.q_target_deg = q_actual;
+    state.has_valid_joint_state = true;
+    state.connection_state = rb_servo::RobotConnectionState::Connected;
+    return state;
+}
+
+bool testTrackingErrorUsesActualByDefault() {
+    rb_servo::SafetyFilter filter(trackingTestConfig());
+    rb_servo::RobotState state = connectedState(joints(0.0));
+    rb_servo::JointArray previous = joints(0.0);
+    previous[0] = 5.0;
+    RB_CHECK(filter.hasTrackingError(previous, state));
+    const rb_servo::SafetyCheckResult result =
+        filter.filterJointTarget(previous, previous, previous, state, 0.01);
+    RB_CHECK(!result.ok);
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::TrackingError);
+    RB_CHECK(result.tracking.tracking_error_source == "actual");
+    return true;
+}
+
+bool testReferenceTrackingOverrideCanPassWithStaticActual() {
+    rb_servo::SafetyFilter filter(trackingTestConfig());
+    rb_servo::RobotState state = connectedState(joints(0.0));
+    rb_servo::JointArray previous = joints(0.0);
+    previous[0] = 5.0;
+    state.q_target_deg = previous;
+
+    rb_servo::SafetyTrackingState tracking;
+    tracking.override_tracking_q = true;
+    tracking.tracking_q_deg = state.q_target_deg;
+    tracking.source = "reference";
+    const rb_servo::SafetyCheckResult result =
+        filter.filterJointTarget(previous, previous, previous, state, 0.01, tracking);
+    RB_CHECK(result.ok);
+    RB_CHECK(result.tracking.tracking_error_source == "reference");
+    RB_CHECK(!result.tracking.controller_simulation_physical_motion_detected);
+    RB_CHECK(result.tracking.command_reference_tracking_error_deg < kEpsilon);
+    RB_CHECK(result.tracking.physical_command_actual_error_deg > 4.0);
+    return true;
+}
+
+bool testReferenceTrackingInvalidFailsClosed() {
+    rb_servo::SafetyFilter filter(trackingTestConfig());
+    rb_servo::RobotState state = connectedState(joints(0.0));
+    rb_servo::SafetyTrackingState tracking;
+    tracking.override_tracking_q = true;
+    tracking.source = "reference";
+    tracking.source_valid = false;
+    tracking.reason = "controller_simulation_reference_state_unavailable";
+    const rb_servo::SafetyCheckResult result =
+        filter.filterJointTarget(joints(0.0), joints(0.0), joints(0.0), state, 0.01, tracking);
+    RB_CHECK(!result.ok);
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::RobotStateError);
+    RB_CHECK(result.reason == "controller_simulation_reference_state_unavailable");
+    RB_CHECK(!result.tracking.tracking_error_source_valid);
+    return true;
+}
+
+bool testControllerSimulationPhysicalMotionFaultsClosed() {
+    rb_servo::SafetyFilter filter(trackingTestConfig());
+    rb_servo::RobotState state = connectedState(joints(0.0));
+    rb_servo::SafetyTrackingState tracking;
+    tracking.override_tracking_q = true;
+    tracking.tracking_q_deg = joints(0.0);
+    tracking.source = "reference";
+    tracking.controller_simulation_physical_motion_detected = true;
+    tracking.controller_simulation_physical_motion_fault = true;
+    tracking.reason = "controller_simulation_physical_motion_detected";
+    const rb_servo::SafetyCheckResult result =
+        filter.filterJointTarget(joints(0.0), joints(0.0), joints(0.0), state, 0.01, tracking);
+    RB_CHECK(!result.ok);
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::TrackingError);
+    RB_CHECK(result.reason == "controller_simulation_physical_motion_detected");
+    RB_CHECK(result.tracking.controller_simulation_physical_motion_detected);
+    return true;
+}
+
 bool testStatePublisherSerializesWrapDiagnostics() {
     rb_servo::ServoSnapshot snapshot;
     snapshot.left_state.q_actual_deg = joints(0.0);
@@ -125,6 +215,10 @@ int main() {
     if (!testNoWrappingWhenPeriodZero()) return 1;
     if (!testAmbiguousFullPeriodRangeDoesNotNormalize()) return 1;
     if (!testMotionSafetyDoesNotWrapTargetsByDefault()) return 1;
+    if (!testTrackingErrorUsesActualByDefault()) return 1;
+    if (!testReferenceTrackingOverrideCanPassWithStaticActual()) return 1;
+    if (!testReferenceTrackingInvalidFailsClosed()) return 1;
+    if (!testControllerSimulationPhysicalMotionFaultsClosed()) return 1;
     if (!testStatePublisherSerializesWrapDiagnostics()) return 1;
     return 0;
 }

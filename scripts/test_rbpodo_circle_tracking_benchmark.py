@@ -163,6 +163,9 @@ def state(
     q_sent: list[float] | None = None,
     q_ref: list[float] | object | None = _MISSING,
     cartesian_solve: dict[str, object] | None = None,
+    fault_latched: bool = False,
+    latched_fault_reason: str | None = None,
+    fault_reason: str | None = None,
 ) -> dict[str, object]:
     arm_state: dict[str, object] = {
         "has_valid_joint_state": True,
@@ -184,7 +187,9 @@ def state(
     return {
         "schema_version": 1,
         "host_time_ns": host_time_ns,
-        "fault_latched": False,
+        "fault_latched": fault_latched,
+        "latched_fault_reason": latched_fault_reason,
+        "fault_reason": fault_reason,
         "left": arm_state,
     }
 
@@ -415,6 +420,61 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
                 "controller-simulation q_actual is stationary; Cartesian integration may need reference-state source.",
                 summary["performance_warnings"],
             )
+
+    def test_summary_marks_latched_tracking_error_as_faulted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            args = make_args(
+                tmp,
+                tmp / "config.yaml",
+                tmp / "pgmode.json",
+                diameter_m=0.15,
+                period_sec=4.0,
+                artifact_dir=tmp / "artifacts",
+                skip_plots=True,
+                controller="twist_stand",
+            )
+            traj = sim_bench.Trajectory(
+                start=[0.075, 0.0, 0.0],
+                axis1=[1.0, 0.0, 0.0],
+                axis2=[0.0, 1.0, 0.0],
+                radius=0.075,
+                period_sec=4.0,
+            )
+            states = [
+                state(1_000_000_000, ref=pose(0.075, 0.0), actual=pose(0.0, 0.0)),
+                state(2_000_000_000, ref=pose(0.0, 0.075), actual=pose(0.0, 0.0)),
+                state(
+                    3_000_000_000,
+                    ref=pose(-0.075, 0.0),
+                    actual=pose(0.0, 0.0),
+                    fault_latched=True,
+                    latched_fault_reason="TrackingError",
+                    fault_reason="reference tracking error exceeded threshold",
+                ),
+            ]
+            summary = bench.summarize_run(
+                args,
+                None,  # type: ignore[arg-type]
+                {"required_tangential_speed_m_s": 0.1178},
+                states,
+                traj,
+                [0.0, 0.0, 0.0, 1.0],
+                "tcp_ref_stand",
+                None,
+                1_000_000_000,
+                5_000_000_000,
+                200,
+                [],
+                tmp / "artifacts",
+                1,
+                {},
+            )
+            self.assertEqual(summary["result"], "faulted")
+            self.assertTrue(summary["fault_latched"])
+            self.assertEqual(summary["latched_fault_reason"], "TrackingError")
+            self.assertEqual(summary["first_fault_time_sec"], 2.0)
+            self.assertIn("server fault latched", summary["result_reason"])
 
 
 if __name__ == "__main__":

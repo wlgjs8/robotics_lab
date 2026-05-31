@@ -927,6 +927,22 @@ produces the warning that Cartesian integration may need a reference-state
 source; this warning is about controller-simulation diagnostics, not physical
 motion.
 
+For rbpodo controller pgmode simulation, the circle templates also set:
+
+```yaml
+safety:
+  controller_simulation_tracking_error_source: reference
+  controller_simulation_physical_motion_policy: fault_latch
+  controller_simulation_physical_motion_threshold_deg: 0.05
+```
+
+This makes the server-side tracking-error guard compare the previous Servo J
+target against the controller reference joint state instead of physical
+`q_actual`, which is expected to remain stationary in pgmode simulation. This
+is not a physical-real relaxation: `operation_mode: real` still uses
+`q_actual`, and any physical `q_actual` movement beyond the configured
+controller-simulation threshold is latched as a fault.
+
 ## Artifacts
 
 Each run writes:
@@ -953,5 +969,6 @@ Each run writes:
 Result semantics match the simulator benchmark where possible: `completed`
 means the run finished without thresholds, `pass`/`fail` require explicit
 threshold flags, `blocked` means server-side gates prevented the requested
-Cartesian path from being attempted, and `error` means safety preflight or
-execution failed.
+Cartesian path from being attempted, `faulted` means the server latched a
+safety fault during the run, and `error` means safety preflight or execution
+failed. Faulted partial runs are not scored as completed tracking evidence.

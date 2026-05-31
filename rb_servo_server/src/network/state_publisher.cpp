@@ -143,6 +143,28 @@ std::string controllerSimulationStateSourceString(CartesianControllerSimulationS
     return "unknown";
 }
 
+std::string controllerSimulationTrackingSourceString(ControllerSimulationTrackingErrorSource source) {
+    switch (source) {
+        case ControllerSimulationTrackingErrorSource::Actual:
+            return "actual";
+        case ControllerSimulationTrackingErrorSource::Reference:
+            return "reference";
+    }
+    return "unknown";
+}
+
+std::string controllerSimulationPhysicalMotionPolicyString(
+    ControllerSimulationPhysicalMotionPolicy policy
+) {
+    switch (policy) {
+        case ControllerSimulationPhysicalMotionPolicy::WarnOnly:
+            return "warn_only";
+        case ControllerSimulationPhysicalMotionPolicy::FaultLatch:
+            return "fault_latch";
+    }
+    return "unknown";
+}
+
 nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config) {
     return {
         {"schema", "robotics_lab.cartesian_control_snapshot.v1"},
@@ -703,6 +725,7 @@ std::string cartesianGateUnavailableReason(
 
 nlohmann::json cartesianGateJson(
     const CartesianControlConfig& cartesian_config,
+    const SafetyConfig& safety_config,
     const BackendConfig& backend_config,
     ControlMode command_mode,
     const CartesianSolveTelemetry& cartesian_solve
@@ -735,6 +758,12 @@ nlohmann::json cartesianGateJson(
             controllerSimulationStateSourceString(cartesian_config.controller_simulation_servo_state_source)},
         {"controller_simulation_divergence_source",
             controllerSimulationStateSourceString(cartesian_config.controller_simulation_divergence_source)},
+        {"controller_simulation_tracking_error_source",
+            controllerSimulationTrackingSourceString(safety_config.controller_simulation_tracking_error_source)},
+        {"controller_simulation_physical_motion_policy",
+            controllerSimulationPhysicalMotionPolicyString(safety_config.controller_simulation_physical_motion_policy)},
+        {"controller_simulation_physical_motion_threshold_deg",
+            safety_config.controller_simulation_physical_motion_threshold_deg},
         {"env_RB_ALLOW_REAL_ROBOT", envFlagEnabled("RB_ALLOW_REAL_ROBOT")},
         {"env_RB_ALLOW_REAL_MOTION", envFlagEnabled("RB_ALLOW_REAL_MOTION")},
         {"env_RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION", envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION")},
@@ -844,7 +873,9 @@ nlohmann::json armStateJson(
     const ServoConfig& servo_config,
     const BackendConfig& backend_config,
     const CartesianControlConfig& cartesian_config,
+    const SafetyConfig& safety_config,
     const CartesianSolveTelemetry& cartesian_solve,
+    const SafetyTrackingTelemetry& safety_tracking,
     const ArmStartupValidationSnapshot& startup_validation
 ) {
     const TcpPublication tcp = tcpPublicationForState(state);
@@ -854,7 +885,7 @@ nlohmann::json armStateJson(
         startup_validation
     );
     const nlohmann::json cartesian_gate =
-        cartesianGateJson(cartesian_config, backend_config, command.mode, cartesian_solve);
+        cartesianGateJson(cartesian_config, safety_config, backend_config, command.mode, cartesian_solve);
     return {
         {"mode", toString(command.mode)},
         {"q_actual_deg", jointArrayJson(state.q_actual_deg)},
@@ -914,6 +945,15 @@ nlohmann::json armStateJson(
         {"tcp_ref_valid", tcp.ref_valid},
         {"tcp_tracking_source", tcpTrackingSource(tcp, backend_config)},
         {"tcp_tracking_source_recommendation", tcpTrackingSourceRecommendation(tcp, backend_config)},
+        {"tracking_error_source", safety_tracking.tracking_error_source},
+        {"tracking_error_source_valid", safety_tracking.tracking_error_source_valid},
+        {"tracking_error_reason", optionalStringJson(safety_tracking.tracking_error_reason)},
+        {"command_reference_tracking_error_deg",
+            safety_tracking.command_reference_tracking_error_deg},
+        {"physical_command_actual_error_deg",
+            safety_tracking.physical_command_actual_error_deg},
+        {"controller_simulation_physical_motion_detected",
+            safety_tracking.controller_simulation_physical_motion_detected},
         {"controller_simulation_diagnostic_override_active", diagnostic_override_active},
         {"cartesian_available", cartesian_gate.at("cartesian_available")},
         {"cartesian_unavailable_reason", cartesian_gate.at("cartesian_unavailable_reason")},
@@ -1118,7 +1158,9 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         config_.servo,
         config_.left_robot,
         config_.cartesian_control,
+        config_.safety,
         snapshot.left_cartesian_solve,
+        snapshot.left_safety_tracking,
         snapshot.startup_validation.left
     );
     message["right"] = armStateJson(
@@ -1147,7 +1189,9 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         config_.servo,
         config_.right_robot,
         config_.cartesian_control,
+        config_.safety,
         snapshot.right_cartesian_solve,
+        snapshot.right_safety_tracking,
         snapshot.startup_validation.right
     );
     message["last_cartesian_solve"] = {

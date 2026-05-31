@@ -246,6 +246,26 @@ CartesianControllerSimulationStateSource parseCartesianControllerSimulationState
     fail("Unknown " + path + ": " + value, node);
 }
 
+ControllerSimulationTrackingErrorSource parseControllerSimulationTrackingErrorSource(
+    const YAML::Node& node,
+    const std::string& path
+) {
+    const std::string value = lower(asString(node, path));
+    if (value == "actual") return ControllerSimulationTrackingErrorSource::Actual;
+    if (value == "reference") return ControllerSimulationTrackingErrorSource::Reference;
+    fail("Unknown " + path + ": " + value, node);
+}
+
+ControllerSimulationPhysicalMotionPolicy parseControllerSimulationPhysicalMotionPolicy(
+    const YAML::Node& node,
+    const std::string& path
+) {
+    const std::string value = lower(asString(node, path));
+    if (value == "warn_only") return ControllerSimulationPhysicalMotionPolicy::WarnOnly;
+    if (value == "fault_latch") return ControllerSimulationPhysicalMotionPolicy::FaultLatch;
+    fail("Unknown " + path + ": " + value, node);
+}
+
 std::string getString(const YAML::Node& sec, const std::string& key, const std::string& fallback, const std::string& path) {
     return has(sec, key) ? asString(sec[key], path + "." + key) : fallback;
 }
@@ -502,6 +522,10 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.servo.command_timeout_sec, "servo.command_timeout_sec");
     validatePositiveFinite(cfg.safety.command_timeout_sec, "safety.command_timeout_sec");
     validatePositiveFinite(cfg.safety.max_tracking_error_deg, "safety.max_tracking_error_deg");
+    validateNonNegativeFinite(
+        cfg.safety.controller_simulation_physical_motion_threshold_deg,
+        "safety.controller_simulation_physical_motion_threshold_deg"
+    );
     validateNonNegativeFiniteArray(cfg.safety.joint_wrap_period_deg, "safety.joint_wrap_period_deg");
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
     validatePositiveFinite(cfg.servo.filter_dt_max_ratio, "servo.filter_dt_max_ratio");
@@ -1079,6 +1103,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "latch_fault_on_robot_state_error",
             "joint_wrap_for_startup_validation",
             "joint_wrap_for_motion_safety",
+            "controller_simulation_tracking_error_source",
+            "controller_simulation_physical_motion_policy",
+            "controller_simulation_physical_motion_threshold_deg",
         }, "safety");
         if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
         if (has(sec, "q_max_deg")) cfg.safety.q_max_deg = parseJointArray(sec["q_max_deg"], "safety.q_max_deg");
@@ -1092,6 +1119,26 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "latch_fault_on_robot_state_error")) cfg.safety.latch_fault_on_robot_state_error = asBool(sec["latch_fault_on_robot_state_error"], "safety.latch_fault_on_robot_state_error");
         if (has(sec, "joint_wrap_for_startup_validation")) cfg.safety.joint_wrap_for_startup_validation = asBool(sec["joint_wrap_for_startup_validation"], "safety.joint_wrap_for_startup_validation");
         if (has(sec, "joint_wrap_for_motion_safety")) cfg.safety.joint_wrap_for_motion_safety = asBool(sec["joint_wrap_for_motion_safety"], "safety.joint_wrap_for_motion_safety");
+        if (has(sec, "controller_simulation_tracking_error_source")) {
+            cfg.safety.controller_simulation_tracking_error_source =
+                parseControllerSimulationTrackingErrorSource(
+                    sec["controller_simulation_tracking_error_source"],
+                    "safety.controller_simulation_tracking_error_source"
+                );
+        }
+        if (has(sec, "controller_simulation_physical_motion_policy")) {
+            cfg.safety.controller_simulation_physical_motion_policy =
+                parseControllerSimulationPhysicalMotionPolicy(
+                    sec["controller_simulation_physical_motion_policy"],
+                    "safety.controller_simulation_physical_motion_policy"
+                );
+        }
+        if (has(sec, "controller_simulation_physical_motion_threshold_deg")) {
+            cfg.safety.controller_simulation_physical_motion_threshold_deg = asDouble(
+                sec["controller_simulation_physical_motion_threshold_deg"],
+                "safety.controller_simulation_physical_motion_threshold_deg"
+            );
+        }
     }
 
     if (has(root, "network")) {

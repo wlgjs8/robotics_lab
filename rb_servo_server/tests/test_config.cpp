@@ -181,6 +181,9 @@ bool testControllerSimulationGateConfig() {
         "  allow_controller_simulation_diagnostics_suspect: true\n"
         "safety:\n"
         "  tracking_error_policy: fault_latch\n"
+        "  controller_simulation_tracking_error_source: reference\n"
+        "  controller_simulation_physical_motion_policy: fault_latch\n"
+        "  controller_simulation_physical_motion_threshold_deg: 0.05\n"
         "cartesian_control:\n"
         "  allow_in_controller_simulation: true\n";
 
@@ -207,6 +210,15 @@ bool testControllerSimulationGateConfig() {
     RB_CHECK(cfg.servo.allow_controller_simulation_motion);
     RB_CHECK(cfg.servo.allow_controller_simulation_diagnostics_suspect);
     RB_CHECK(cfg.cartesian_control.allow_in_controller_simulation);
+    RB_CHECK(
+        cfg.safety.controller_simulation_tracking_error_source ==
+        rb_servo::ControllerSimulationTrackingErrorSource::Reference
+    );
+    RB_CHECK(
+        cfg.safety.controller_simulation_physical_motion_policy ==
+        rb_servo::ControllerSimulationPhysicalMotionPolicy::FaultLatch
+    );
+    RB_CHECK(cfg.safety.controller_simulation_physical_motion_threshold_deg == 0.05);
     RB_CHECK(cfg.left_robot.operation_mode == "simulation");
     RB_CHECK(cfg.right_robot.operation_mode == "simulation");
 

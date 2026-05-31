@@ -2,8 +2,44 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace rb_servo {
+namespace {
+
+double maxAbsJointError(const JointArray& a, const JointArray& b) {
+    double max_error = 0.0;
+    for (int i = 0; i < kDof; ++i) {
+        if (!std::isfinite(a[i]) || !std::isfinite(b[i])) {
+            return std::numeric_limits<double>::infinity();
+        }
+        max_error = std::max(max_error, std::abs(a[i] - b[i]));
+    }
+    return max_error;
+}
+
+SafetyTrackingTelemetry makeTrackingTelemetry(
+    const JointArray& previous_q_deg,
+    const RobotState& state,
+    const SafetyTrackingState& tracking_state
+) {
+    SafetyTrackingTelemetry telemetry;
+    telemetry.tracking_error_source = tracking_state.source.empty()
+        ? "actual"
+        : tracking_state.source;
+    telemetry.tracking_error_source_valid = tracking_state.source_valid;
+    telemetry.tracking_error_reason = tracking_state.reason;
+    telemetry.physical_command_actual_error_deg =
+        maxAbsJointError(previous_q_deg, state.q_actual_deg);
+    telemetry.controller_simulation_physical_motion_detected =
+        tracking_state.controller_simulation_physical_motion_detected;
+    telemetry.command_reference_tracking_error_deg = tracking_state.override_tracking_q
+        ? maxAbsJointError(previous_q_deg, tracking_state.tracking_q_deg)
+        : telemetry.physical_command_actual_error_deg;
+    return telemetry;
+}
+
+}  // namespace
 
 SafetyFilter::SafetyFilter(const SafetyConfig& config) : config_(config) {}
 
@@ -12,22 +48,51 @@ SafetyCheckResult SafetyFilter::filterJointTarget(
     const JointArray& previous_q_deg,
     const JointArray& previous_previous_q_deg,
     const RobotState& state,
-    double dt_sec
+    double dt_sec,
+    const SafetyTrackingState& tracking_state
 ) const {
     SafetyCheckResult result;
+    result.tracking = makeTrackingTelemetry(previous_q_deg, state, tracking_state);
+
+    if (!tracking_state.source_valid) {
+        result.ok = false;
+        result.verdict = SafetyVerdict::RobotStateError;
+        result.filtered_q_deg = previous_q_deg;
+        result.reason = tracking_state.reason.empty()
+            ? "controller_simulation_reference_state_unavailable"
+            : tracking_state.reason;
+        result.tracking.tracking_error_reason = result.reason;
+        return result;
+    }
+
+    if (tracking_state.controller_simulation_physical_motion_fault) {
+        result.ok = false;
+        result.verdict = SafetyVerdict::TrackingError;
+        result.filtered_q_deg = previous_q_deg;
+        result.reason = tracking_state.reason.empty()
+            ? "controller_simulation_physical_motion_detected"
+            : tracking_state.reason;
+        result.tracking.tracking_error_reason = result.reason;
+        return result;
+    }
 
     const SafetyVerdict state_verdict = checkState(state);
     if (state_verdict != SafetyVerdict::Ok) {
         result.ok = false;
         result.verdict = state_verdict;
         result.filtered_q_deg = previous_q_deg;
+        result.reason = "robot state error or disconnected";
         return result;
     }
 
-    if (hasTrackingError(previous_q_deg, state)) {
+    if (hasTrackingError(previous_q_deg, state, tracking_state)) {
         result.ok = false;
         result.verdict = SafetyVerdict::TrackingError;
         result.filtered_q_deg = previous_q_deg;
+        result.reason = tracking_state.override_tracking_q
+            ? "reference tracking error exceeded threshold"
+            : "tracking error exceeded threshold";
+        result.tracking.tracking_error_reason = result.reason;
         return result;
     }
 
@@ -57,10 +122,17 @@ SafetyVerdict SafetyFilter::checkState(const RobotState& state) const {
 
 bool SafetyFilter::hasTrackingError(
     const JointArray& previous_q_deg,
-    const RobotState& state
+    const RobotState& state,
+    const SafetyTrackingState& tracking_state
 ) const {
+    const JointArray& observed_q_deg = tracking_state.override_tracking_q
+        ? tracking_state.tracking_q_deg
+        : state.q_actual_deg;
     for (int i = 0; i < kDof; ++i) {
-        if (std::abs(previous_q_deg[i] - state.q_actual_deg[i]) > config_.max_tracking_error_deg) {
+        if (!std::isfinite(previous_q_deg[i]) || !std::isfinite(observed_q_deg[i])) {
+            return true;
+        }
+        if (std::abs(previous_q_deg[i] - observed_q_deg[i]) > config_.max_tracking_error_deg) {
             return true;
         }
     }

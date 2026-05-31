@@ -93,6 +93,16 @@ struct KinematicsConfig {
     IkSolverConfig ik;
 };
 
+enum class ControllerSimulationTrackingErrorSource {
+    Actual,
+    Reference
+};
+
+enum class ControllerSimulationPhysicalMotionPolicy {
+    WarnOnly,
+    FaultLatch
+};
+
 struct SafetyConfig {
     JointArray q_min_deg{};
     JointArray q_max_deg{};
@@ -110,6 +120,11 @@ struct SafetyConfig {
     bool latch_fault_on_robot_state_error = true;
     bool joint_wrap_for_startup_validation = false;
     bool joint_wrap_for_motion_safety = false;
+    ControllerSimulationTrackingErrorSource controller_simulation_tracking_error_source =
+        ControllerSimulationTrackingErrorSource::Actual;
+    ControllerSimulationPhysicalMotionPolicy controller_simulation_physical_motion_policy =
+        ControllerSimulationPhysicalMotionPolicy::FaultLatch;
+    double controller_simulation_physical_motion_threshold_deg = 0.05;
 };
 
 struct ServoConfig {
