@@ -84,12 +84,15 @@ public:
         rb_servo::ArmId arm_id,
         rb_servo::JointArray initial,
         bool fail_send,
-        rb_servo::BackendErrorKind send_error_kind = rb_servo::BackendErrorKind::ControllerRejected
+        rb_servo::BackendErrorKind send_error_kind = rb_servo::BackendErrorKind::ControllerRejected,
+        std::optional<rb_servo::JointArray> initial_target = std::nullopt,
+        bool accept_send_without_state_update = false
     ) : arm_id_(arm_id),
         q_actual_(initial),
-        q_target_(initial),
+        q_target_(initial_target.value_or(initial)),
         fail_send_(fail_send),
-        send_error_kind_(send_error_kind) {}
+        send_error_kind_(send_error_kind),
+        accept_send_without_state_update_(accept_send_without_state_update) {}
 
     rb_servo::BackendResult<rb_servo::RobotState> connect() override {
         connected_ = true;
@@ -148,8 +151,10 @@ public:
                 state_after_source
             );
         }
-        q_target_ = request.q_target_deg;
-        q_actual_ = request.q_target_deg;
+        if (!accept_send_without_state_update_) {
+            q_target_ = request.q_target_deg;
+            q_actual_ = request.q_target_deg;
+        }
         return rb_servo::acceptedSend(request, {}, currentState(), "cache");
     }
 
@@ -233,6 +238,7 @@ private:
     rb_servo::JointArray q_target_{};
     bool fail_send_ = false;
     rb_servo::BackendErrorKind send_error_kind_ = rb_servo::BackendErrorKind::ControllerRejected;
+    bool accept_send_without_state_update_ = false;
     bool valid_joint_state_ = true;
     bool read_ok_ = true;
     bool reset_ok_ = true;
@@ -817,6 +823,45 @@ bool runLeftTcpTwistStandCase(
         return snapshot->command.left.mode == rb_servo::ControlMode::TcpTwistStand &&
                (snapshot->safety_verdict == rb_servo::SafetyVerdict::Ok ||
                 snapshot->safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
+    }, std::chrono::milliseconds(1000)));
+    *left_twist_observed = kinematics->lastLeftTwist().has_value();
+    loop.stop();
+    return true;
+}
+
+bool runLeftTcpTwistStandWithMissingReferenceCase(
+    rb_servo::DualArmConfig cfg,
+    rb_servo::ServoSnapshot* snapshot,
+    bool* left_twist_observed
+) {
+    rb_servo::CommandBuffer buffer;
+    const rb_servo::JointArray initial = joints(0.0);
+    rb_servo::JointArray invalid_reference = initial;
+    invalid_reference[0] = std::numeric_limits<double>::quiet_NaN();
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left,
+            initial,
+            false,
+            rb_servo::BackendErrorKind::ControllerRejected,
+            invalid_reference,
+            true
+        ),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    buffer.setCommand(leftTcpTwistStandCommand());
+    RB_CHECK(waitUntil([&] {
+        *snapshot = loop.latestSnapshot();
+        return snapshot->command.left.mode == rb_servo::ControlMode::TcpTwistStand &&
+               snapshot->safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable;
     }, std::chrono::milliseconds(1000)));
     *left_twist_observed = kinematics->lastLeftTwist().has_value();
     loop.stop();
@@ -4319,12 +4364,19 @@ bool testRbpodoControllerSimulationStreamingCartesianGate() {
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
     configureCartesianLoopTest(&cfg);
     cfg.cartesian_control.allow_in_controller_simulation = true;
+    cfg.cartesian_control.controller_simulation_servo_state_source =
+        rb_servo::CartesianControllerSimulationStateSource::Reference;
+    cfg.cartesian_control.controller_simulation_divergence_source =
+        rb_servo::CartesianControllerSimulationStateSource::Reference;
 
     rb_servo::ServoSnapshot snapshot;
     bool twist_observed = false;
     RB_CHECK(runLeftTcpTwistStandCase(cfg, &snapshot, &twist_observed));
     RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok);
     RB_CHECK(twist_observed);
+    RB_CHECK(snapshot.left_cartesian_solve.cartesian_servo_state_source == "reference");
+    RB_CHECK(snapshot.left_cartesian_solve.cartesian_divergence_source == "reference");
+    RB_CHECK(snapshot.left_cartesian_solve.q_reference_for_servo_valid);
 
     rb_servo::StatePublisher publisher(cfg);
     const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
@@ -4332,8 +4384,30 @@ bool testRbpodoControllerSimulationStreamingCartesianGate() {
     RB_CHECK(json.at("left").at("controller_simulation_cartesian_enabled").get<bool>());
     RB_CHECK(!json.at("left").at("streaming_cartesian_physical_real_enabled").get<bool>());
     RB_CHECK(json.at("left").at("cartesian_gate").at("allow_in_controller_simulation").get<bool>());
+    RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_servo_state_source").get<std::string>() ==
+             "reference");
+    RB_CHECK(json.at("left").at("cartesian_solve").at("cartesian_servo_state_source").get<std::string>() ==
+             "reference");
+    RB_CHECK(json.at("left").at("cartesian_solve").at("cartesian_divergence_source").get<std::string>() ==
+             "reference");
+    RB_CHECK(json.at("left").at("cartesian_solve").at("q_reference_for_servo_valid").get<bool>());
     RB_CHECK(json.at("left").at("cartesian_gate").at("env_RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN").get<bool>());
     RB_CHECK(!json.at("left").at("cartesian_gate").at("physical_motion_expected").get<bool>());
+
+    rb_servo::ServoSnapshot missing_reference_snapshot;
+    bool missing_reference_twist_observed = false;
+    RB_CHECK(runLeftTcpTwistStandWithMissingReferenceCase(
+        cfg,
+        &missing_reference_snapshot,
+        &missing_reference_twist_observed
+    ));
+    RB_CHECK(missing_reference_snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
+    RB_CHECK(missing_reference_snapshot.left_cartesian_solve.reason ==
+             "cartesian_reference_state_unavailable");
+    RB_CHECK(missing_reference_snapshot.left_cartesian_solve.cartesian_servo_state_source == "reference");
+    RB_CHECK(missing_reference_snapshot.left_cartesian_solve.cartesian_divergence_source == "reference");
+    RB_CHECK(!missing_reference_snapshot.left_cartesian_solve.q_reference_for_servo_valid);
+    RB_CHECK(!missing_reference_twist_observed);
 
     allow_controller_sim_cartesian.unset();
     rb_servo::ServoSnapshot missing_env_snapshot;

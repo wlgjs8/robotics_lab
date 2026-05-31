@@ -341,6 +341,87 @@ RunMode cartesianComputationRunModeForArm(
     return run_mode;
 }
 
+std::string controllerSimulationStateSourceName(CartesianControllerSimulationStateSource source) {
+    switch (source) {
+        case CartesianControllerSimulationStateSource::Actual:
+            return "actual";
+        case CartesianControllerSimulationStateSource::Reference:
+            return "reference";
+    }
+    return "unknown";
+}
+
+bool controllerSimulationReferenceSourceActive(
+    const DualArmConfig& config,
+    const ArmCommand& command,
+    CartesianControllerSimulationStateSource source
+) {
+    if (source != CartesianControllerSimulationStateSource::Reference) return false;
+    const BackendConfig& backend = backendConfigForArm(config, command.arm_id);
+    return backend.run_mode == RunMode::Real &&
+        isStreamingCartesianMode(command.mode) &&
+        controllerSimulationCartesianGateOpen(config, backend);
+}
+
+struct CartesianServoStateSelection {
+    RobotState state;
+    CartesianServoStateContext context;
+    bool ok = true;
+    std::string reason;
+};
+
+CartesianServoStateSelection selectCartesianServoStateForArm(
+    const DualArmConfig& config,
+    const ArmCommand& command,
+    const RobotState& physical_state
+) {
+    CartesianServoStateSelection selection;
+    selection.state = physical_state;
+    selection.context.physical_q_actual_deg = physical_state.q_actual_deg;
+    selection.context.reference_q_deg = physical_state.q_target_deg;
+    selection.context.divergence_q_deg = physical_state.q_actual_deg;
+    selection.context.q_reference_for_servo_valid =
+        finiteJointArray(physical_state.q_target_deg) &&
+        physical_state.tcp_ref_valid &&
+        physical_state.tcp_ref_stand.has_value();
+
+    const bool servo_uses_reference = controllerSimulationReferenceSourceActive(
+        config,
+        command,
+        config.cartesian_control.controller_simulation_servo_state_source
+    );
+    const bool divergence_uses_reference = controllerSimulationReferenceSourceActive(
+        config,
+        command,
+        config.cartesian_control.controller_simulation_divergence_source
+    );
+
+    selection.context.servo_state_source = servo_uses_reference
+        ? "reference"
+        : controllerSimulationStateSourceName(CartesianControllerSimulationStateSource::Actual);
+    selection.context.divergence_source = divergence_uses_reference
+        ? "reference"
+        : controllerSimulationStateSourceName(CartesianControllerSimulationStateSource::Actual);
+
+    if ((servo_uses_reference || divergence_uses_reference) &&
+        !selection.context.q_reference_for_servo_valid) {
+        selection.ok = false;
+        selection.reason = "cartesian_reference_state_unavailable";
+        return selection;
+    }
+
+    if (servo_uses_reference) {
+        selection.state.q_actual_deg = physical_state.q_target_deg;
+        selection.state.tcp_base = physical_state.tcp_ref_base;
+        selection.state.tcp_stand = physical_state.tcp_ref_stand;
+        selection.state.has_valid_tcp_pose = physical_state.tcp_ref_valid;
+    }
+    if (divergence_uses_reference) {
+        selection.context.divergence_q_deg = physical_state.q_target_deg;
+    }
+    return selection;
+}
+
 bool controllerSimulationDiagnosticsSuspectGateOpen(const DualArmConfig& config) {
     return controllerSimulationMotionGateOpen(config) &&
         config.servo.allow_controller_simulation_diagnostics_suspect &&
@@ -1707,6 +1788,9 @@ void DualArmServoLoop::refreshCartesianVelocityIntegratorTelemetry(ArmId arm_id)
     if (!telemetry.attempted) return;
     telemetry.cartesian_velocity_integration_mode =
         velocityIntegrationModeName(config_.cartesian_control.velocity_target_integration);
+    telemetry.cartesian_servo_state_source = state.cartesian_servo_state_source;
+    telemetry.cartesian_divergence_source = state.cartesian_divergence_source;
+    telemetry.q_reference_for_servo_valid = state.q_reference_for_servo_valid;
     telemetry.q_integrator_valid = state.valid;
     telemetry.integrator_reset_reason = state.reset_reason;
     telemetry.integrator_resets_total = state.resets_total;
@@ -1714,6 +1798,10 @@ void DualArmServoLoop::refreshCartesianVelocityIntegratorTelemetry(ArmId arm_id)
     telemetry.integrator_divergence_total = state.divergence_total;
     telemetry.max_command_actual_error_deg_observed =
         state.max_command_actual_error_deg_observed;
+    telemetry.command_reference_error_deg_observed =
+        state.command_reference_error_deg_observed;
+    telemetry.physical_command_actual_error_deg_observed =
+        state.physical_command_actual_error_deg_observed;
     telemetry.velocity_target_lookahead_sec =
         config_.cartesian_control.velocity_target_lookahead_sec;
 }
@@ -1981,38 +2069,90 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         const RunMode right_cartesian_compute_run_mode =
             cartesianComputationRunModeForArm(config_, effective_command.right);
 
+        const CartesianServoStateSelection left_servo_state =
+            selectCartesianServoStateForArm(config_, effective_command.left, left_state);
+        const CartesianServoStateSelection right_servo_state =
+            selectCartesianServoStateForArm(config_, effective_command.right, right_state);
+        if (!left_servo_state.ok || !right_servo_state.ok) {
+            if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
+            if (!left_servo_state.ok) {
+                left_cartesian_velocity_integrator_.cartesian_servo_state_source =
+                    left_servo_state.context.servo_state_source;
+                left_cartesian_velocity_integrator_.cartesian_divergence_source =
+                    left_servo_state.context.divergence_source;
+                left_cartesian_velocity_integrator_.q_reference_for_servo_valid =
+                    left_servo_state.context.q_reference_for_servo_valid;
+                left_last_cartesian_solve_ = cartesianUnavailableTelemetry(
+                    left_state,
+                    config_.cartesian_control,
+                    left_servo_state.reason
+                );
+                left_last_cartesian_solve_.cartesian_servo_state_source =
+                    left_servo_state.context.servo_state_source;
+                left_last_cartesian_solve_.cartesian_divergence_source =
+                    left_servo_state.context.divergence_source;
+                left_last_cartesian_solve_.q_reference_for_servo_valid =
+                    left_servo_state.context.q_reference_for_servo_valid;
+            }
+            if (!right_servo_state.ok) {
+                right_cartesian_velocity_integrator_.cartesian_servo_state_source =
+                    right_servo_state.context.servo_state_source;
+                right_cartesian_velocity_integrator_.cartesian_divergence_source =
+                    right_servo_state.context.divergence_source;
+                right_cartesian_velocity_integrator_.q_reference_for_servo_valid =
+                    right_servo_state.context.q_reference_for_servo_valid;
+                right_last_cartesian_solve_ = cartesianUnavailableTelemetry(
+                    right_state,
+                    config_.cartesian_control,
+                    right_servo_state.reason
+                );
+                right_last_cartesian_solve_.cartesian_servo_state_source =
+                    right_servo_state.context.servo_state_source;
+                right_last_cartesian_solve_.cartesian_divergence_source =
+                    right_servo_state.context.divergence_source;
+                right_last_cartesian_solve_.q_reference_for_servo_valid =
+                    right_servo_state.context.q_reference_for_servo_valid;
+            }
+            target.left_q_target_deg = left_prev_sent_q_deg_;
+            target.right_q_target_deg = right_prev_sent_q_deg_;
+            return target;
+        }
+
         const CartesianArmTargetResult left_cartesian_result = effective_command.left.mode == ControlMode::TcpLinearMove
             ? cartesian_servo.computeLinearMoveTarget(
                 effective_command.left,
-                left_state,
+                left_servo_state.state,
                 left_prev_sent_q_deg_,
                 left_cartesian_compute_run_mode,
                 dt_sec,
                 continue_left_linear ? 0 : command.seq,
                 &left_cartesian_servo_path_,
-                &left_cartesian_velocity_integrator_
+                &left_cartesian_velocity_integrator_,
+                &left_servo_state.context
             )
             : effective_command.left.mode == ControlMode::TcpCircleMove
             ? cartesian_servo.computeCircleMoveTarget(
                 effective_command.left,
-                left_state,
+                left_servo_state.state,
                 left_prev_sent_q_deg_,
                 left_cartesian_compute_run_mode,
                 dt_sec,
                 continue_left_circle ? 0 : command.seq,
                 &left_cartesian_circle_move_,
-                &left_cartesian_velocity_integrator_
+                &left_cartesian_velocity_integrator_,
+                &left_servo_state.context
             )
             : (effective_command.left.mode == ControlMode::TcpTwistStand || effective_command.left.mode == ControlMode::TcpTwistLocal)
             ? cartesian_servo.computeTwistTarget(
                 effective_command.left,
-                left_state,
+                left_servo_state.state,
                 left_prev_sent_q_deg_,
                 left_cartesian_compute_run_mode,
                 dt_sec,
                 command.seq,
                 &left_cartesian_twist_hold_,
-                &left_cartesian_velocity_integrator_
+                &left_cartesian_velocity_integrator_,
+                &left_servo_state.context
             )
             : isCartesianMode(effective_command.left.mode)
             ? cartesian.computeArmJointTarget(
@@ -2041,35 +2181,38 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         const CartesianArmTargetResult right_cartesian_result = effective_command.right.mode == ControlMode::TcpLinearMove
             ? cartesian_servo.computeLinearMoveTarget(
                 effective_command.right,
-                right_state,
+                right_servo_state.state,
                 right_prev_sent_q_deg_,
                 right_cartesian_compute_run_mode,
                 dt_sec,
                 continue_right_linear ? 0 : command.seq,
                 &right_cartesian_servo_path_,
-                &right_cartesian_velocity_integrator_
+                &right_cartesian_velocity_integrator_,
+                &right_servo_state.context
             )
             : effective_command.right.mode == ControlMode::TcpCircleMove
             ? cartesian_servo.computeCircleMoveTarget(
                 effective_command.right,
-                right_state,
+                right_servo_state.state,
                 right_prev_sent_q_deg_,
                 right_cartesian_compute_run_mode,
                 dt_sec,
                 continue_right_circle ? 0 : command.seq,
                 &right_cartesian_circle_move_,
-                &right_cartesian_velocity_integrator_
+                &right_cartesian_velocity_integrator_,
+                &right_servo_state.context
             )
             : (effective_command.right.mode == ControlMode::TcpTwistStand || effective_command.right.mode == ControlMode::TcpTwistLocal)
             ? cartesian_servo.computeTwistTarget(
                 effective_command.right,
-                right_state,
+                right_servo_state.state,
                 right_prev_sent_q_deg_,
                 right_cartesian_compute_run_mode,
                 dt_sec,
                 command.seq,
                 &right_cartesian_twist_hold_,
-                &right_cartesian_velocity_integrator_
+                &right_cartesian_velocity_integrator_,
+                &right_servo_state.context
             )
             : isCartesianMode(effective_command.right.mode)
             ? cartesian.computeArmJointTarget(

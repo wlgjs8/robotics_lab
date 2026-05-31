@@ -236,6 +236,16 @@ CartesianCommandActualErrorPolicy parseCartesianCommandActualErrorPolicy(
     fail("Unknown cartesian_control.command_actual_error_policy: " + value, node);
 }
 
+CartesianControllerSimulationStateSource parseCartesianControllerSimulationStateSource(
+    const YAML::Node& node,
+    const std::string& path
+) {
+    const std::string value = lower(asString(node, path));
+    if (value == "actual") return CartesianControllerSimulationStateSource::Actual;
+    if (value == "reference") return CartesianControllerSimulationStateSource::Reference;
+    fail("Unknown " + path + ": " + value, node);
+}
+
 std::string getString(const YAML::Node& sec, const std::string& key, const std::string& fallback, const std::string& path) {
     return has(sec, key) ? asString(sec[key], path + "." + key) : fallback;
 }
@@ -1197,6 +1207,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "max_cartesian_step_rad",
             "exceed_limit_policy",
             "velocity_target_integration",
+            "controller_simulation_servo_state_source",
+            "controller_simulation_divergence_source",
             "velocity_target_lookahead_sec",
             "max_command_actual_error_deg",
             "reset_velocity_integrator_on_mode_change",
@@ -1296,6 +1308,20 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 parseCartesianVelocityTargetIntegrationMode(
                     sec["velocity_target_integration"],
                     "cartesian_control.velocity_target_integration"
+                );
+        }
+        if (has(sec, "controller_simulation_servo_state_source")) {
+            cfg.cartesian_control.controller_simulation_servo_state_source =
+                parseCartesianControllerSimulationStateSource(
+                    sec["controller_simulation_servo_state_source"],
+                    "cartesian_control.controller_simulation_servo_state_source"
+                );
+        }
+        if (has(sec, "controller_simulation_divergence_source")) {
+            cfg.cartesian_control.controller_simulation_divergence_source =
+                parseCartesianControllerSimulationStateSource(
+                    sec["controller_simulation_divergence_source"],
+                    "cartesian_control.controller_simulation_divergence_source"
                 );
         }
         if (has(sec, "velocity_target_lookahead_sec")) {

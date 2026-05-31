@@ -845,6 +845,74 @@ bool testVelocityIntegratorDivergenceResetsOrFaults() {
     return true;
 }
 
+bool testControllerSimulationReferenceDivergenceIgnoresStaticPhysicalActual() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.01, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    rb_servo::CartesianControlConfig config;
+    config.max_twist_linear_m_s = 1.0;
+    config.velocity_target_integration =
+        rb_servo::CartesianVelocityTargetIntegrationMode::PreviousCommand;
+    config.max_command_actual_error_deg = {1, 1, 1, 1, 1, 1};
+    rb_servo::CartesianServoController controller(
+        left_mount,
+        right_mount,
+        config,
+        kinematics
+    );
+
+    rb_servo::JointArray q_physical = zeroJoints();
+    rb_servo::JointArray q_reference = zeroJoints();
+    q_reference[0] = 20.0;
+    rb_servo::RobotState reference_state = stateFromJoints(*kinematics, q_reference, left_mount);
+    reference_state.q_target_deg = q_reference;
+
+    rb_servo::CartesianVelocityIntegratorState integrator;
+    integrator.valid = true;
+    integrator.last_mode = rb_servo::ControlMode::TcpTwistLocal;
+    integrator.q_command_deg = q_reference;
+
+    rb_servo::CartesianServoStateContext context;
+    context.servo_state_source = "reference";
+    context.divergence_source = "reference";
+    context.q_reference_for_servo_valid = true;
+    context.physical_q_actual_deg = q_physical;
+    context.reference_q_deg = q_reference;
+    context.divergence_q_deg = q_reference;
+
+    rb_servo::CartesianTwistHoldState hold;
+    rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+        command,
+        reference_state,
+        q_reference,
+        rb_servo::RunMode::Simulation,
+        0.01,
+        30,
+        &hold,
+        &integrator,
+        &context
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(integrator.divergence_total == 0);
+    RB_CHECK(integrator.reset_reason.empty());
+    RB_CHECK(std::abs(result.q_target_deg[0] - 20.01) < 1e-12);
+    RB_CHECK(result.telemetry.cartesian_servo_state_source == "reference");
+    RB_CHECK(result.telemetry.cartesian_divergence_source == "reference");
+    RB_CHECK(result.telemetry.q_reference_for_servo_valid);
+    RB_CHECK(result.telemetry.physical_command_actual_error_deg_observed > 19.0);
+    RB_CHECK(result.telemetry.command_reference_error_deg_observed < kEpsilon);
+    return true;
+}
+
 bool testTcpCircleMoveStartsWithoutJumpAndCompletes() {
     auto kinematics = std::make_shared<LinearFakeKinematics>();
     rb_servo::ArmMountConfig left_mount;
@@ -984,6 +1052,7 @@ int main() {
     if (!testVelocityIntegrationModesGenerateExpectedTargets()) return 1;
     if (!testVelocityIntegratorUsesClampedSafeTarget()) return 1;
     if (!testVelocityIntegratorDivergenceResetsOrFaults()) return 1;
+    if (!testControllerSimulationReferenceDivergenceIgnoresStaticPhysicalActual()) return 1;
     if (!testTcpCircleMoveStartsWithoutJumpAndCompletes()) return 1;
     if (!testTcpCircleMoveSafetyGates()) return 1;
     return 0;

@@ -151,18 +151,36 @@ def make_args(tmp: Path, config: Path, pgmode: Path, **overrides: object) -> arg
     return argparse.Namespace(**values)
 
 
-def state(host_time_ns: int, *, ref: dict[str, object] | None = None, actual: dict[str, object] | None = None, q_actual: list[float] | None = None) -> dict[str, object]:
+_MISSING = object()
+
+
+def state(
+    host_time_ns: int,
+    *,
+    ref: dict[str, object] | None = None,
+    actual: dict[str, object] | None = None,
+    q_actual: list[float] | None = None,
+    q_sent: list[float] | None = None,
+    q_ref: list[float] | object | None = _MISSING,
+    cartesian_solve: dict[str, object] | None = None,
+) -> dict[str, object]:
     arm_state: dict[str, object] = {
         "has_valid_joint_state": True,
         "q_actual_deg": q_actual or [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        "q_ref_deg": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "q_sent_deg": q_sent or q_actual or [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "tcp_ref_valid": ref is not None,
         "tcp_actual_valid": actual is not None,
     }
+    if q_ref is _MISSING:
+        arm_state["q_ref_deg"] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    elif q_ref is not None:
+        arm_state["q_ref_deg"] = q_ref
     if ref is not None:
         arm_state["tcp_ref_stand"] = ref
     if actual is not None:
         arm_state["tcp_actual_stand"] = actual
+    if cartesian_solve is not None:
+        arm_state["cartesian_solve"] = cartesian_solve
     return {
         "schema_version": 1,
         "host_time_ns": host_time_ns,
@@ -288,6 +306,115 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
         drift = bench.max_q_drift(bench.q_series(snapshots, "left", "q_actual_deg"))
         self.assertIsNotNone(drift)
         self.assertGreater(drift, 0.05)
+
+    def test_motion_metrics_distinguish_sent_ref_actual_sources(self) -> None:
+        snapshots = [
+            state(
+                1_000_000_000,
+                ref=pose(0.075, 0.0),
+                actual=pose(0.0, 0.0),
+                q_actual=[0.0, 0, 0, 0, 0, 0],
+                q_sent=[0.0, 0, 0, 0, 0, 0],
+                q_ref=None,
+            ),
+            state(
+                2_000_000_000,
+                ref=pose(0.0, 0.075),
+                actual=pose(0.0, 0.0),
+                q_actual=[0.0, 0, 0, 0, 0, 0],
+                q_sent=[1.0, 0, 0, 0, 0, 0],
+                q_ref=None,
+            ),
+        ]
+        q_sent = bench.q_motion_metrics(snapshots, "left", "q_sent_deg")
+        q_actual = bench.q_motion_metrics(snapshots, "left", "q_actual_deg")
+        q_ref = bench.q_motion_metrics(snapshots, "left", "q_ref_deg")
+        runtime = bench.cartesian_runtime_diagnostics(snapshots, "left", 1_000_000_000, 2_000_000_000)
+        self.assertTrue(q_sent["q_sent_moved"])
+        self.assertGreater(q_sent["q_sent_update_rate_hz"], 0.0)
+        self.assertFalse(q_actual["q_actual_moved"])
+        self.assertEqual(q_actual["q_actual_update_rate_hz"], 0.0)
+        self.assertIsNone(q_ref["q_ref_moved"])
+        self.assertIsNone(q_ref["q_ref_update_rate_hz"])
+        self.assertEqual(q_ref["q_ref_reason"], "q_ref_deg not published")
+        self.assertTrue(bench.pose_moved(runtime["tcp_ref_displacement_m"]))
+        self.assertFalse(bench.pose_moved(runtime["tcp_actual_displacement_m"]))
+
+    def test_summary_warns_when_integrator_diverges_and_actual_is_static(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            args = make_args(
+                tmp,
+                tmp / "config.yaml",
+                tmp / "pgmode.json",
+                diameter_m=0.15,
+                period_sec=4.0,
+                artifact_dir=tmp / "artifacts",
+                skip_plots=True,
+                controller="twist_stand",
+            )
+            traj = sim_bench.Trajectory(
+                start=[0.075, 0.0, 0.0],
+                axis1=[1.0, 0.0, 0.0],
+                axis2=[0.0, 1.0, 0.0],
+                radius=0.075,
+                period_sec=4.0,
+            )
+            samples: list[tuple[int, dict[str, object], list[float]]] = [
+                (1_000_000_000, pose(0.075, 0.0), [0.0, 0, 0, 0, 0, 0]),
+                (2_000_000_000, pose(0.0, 0.075), [0.5, 0, 0, 0, 0, 0]),
+                (3_000_000_000, pose(-0.075, 0.0), [1.0, 0, 0, 0, 0, 0]),
+                (4_000_000_000, pose(0.0, -0.075), [1.5, 0, 0, 0, 0, 0]),
+                (5_000_000_000, pose(0.075, 0.0), [2.0, 0, 0, 0, 0, 0]),
+            ]
+            states = [
+                state(
+                    host_time_ns,
+                    ref=ref,
+                    actual=pose(0.0, 0.0),
+                    q_actual=[0.0, 0, 0, 0, 0, 0],
+                    q_sent=q_sent,
+                    q_ref=None,
+                    cartesian_solve={
+                        "integrator_resets_total": 20,
+                        "integrator_divergence_total": 20,
+                        "integrator_clamps_total": 5,
+                        "status": "ok",
+                        "attempted": True,
+                        "success": True,
+                    },
+                )
+                for host_time_ns, ref, q_sent in samples
+            ]
+            summary = bench.summarize_run(
+                args,
+                None,  # type: ignore[arg-type]
+                {"required_tangential_speed_m_s": 0.1178},
+                states,
+                traj,
+                [0.0, 0.0, 0.0, 1.0],
+                "tcp_ref_stand",
+                None,
+                1_000_000_000,
+                5_000_000_000,
+                400,
+                [],
+                tmp / "artifacts",
+                0,
+                {},
+            )
+            self.assertTrue(summary["q_sent_moved"])
+            self.assertIsNone(summary["q_ref_moved"])
+            self.assertEqual(summary["q_ref_reason"], "q_ref_deg not published")
+            self.assertTrue(summary["tcp_ref_moved"])
+            self.assertFalse(summary["tcp_actual_moved"])
+            self.assertFalse(summary["q_actual_moved"])
+            self.assertEqual(summary["integrator_divergence_total"], 20.0)
+            self.assertEqual(summary["divergence_rate_hz"], 5.0)
+            self.assertIn(
+                "controller-simulation q_actual is stationary; Cartesian integration may need reference-state source.",
+                summary["performance_warnings"],
+            )
 
 
 if __name__ == "__main__":

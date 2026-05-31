@@ -13,6 +13,13 @@ _JOINT_MONITOR_UNITS = ("deg", "rad")
 _STAND_WORLD_MONITOR_UNITS = ("deg", "rad")
 _STAND_WORLD_POSE_FIELDS = ("x", "y", "z", "rx", "ry", "rz")
 _TCP_DISPLAY_MODES = ("auto", "actual", "reference", "both")
+_SCENE_ASSET_ERROR_KEYS = (
+    "urdf_error",
+    "stand_mesh_error",
+    "urdf_update_error",
+    "scene_error",
+)
+_ASSET_INSTALL_HINT = "Install with python3 -m pip install -e rb_gui"
 
 
 def _mode_button_color(mode: str, desired_mode: str) -> str:
@@ -141,14 +148,14 @@ def _format_arm_tcp_tracking(arm_name: str, arm: ArmSnapshot, display_mode: str)
     parts = [
         f"{arm_name}",
         f"display={display_mode}",
-        f"selected={selected}",
+        f"selected_source={selected}",
         f"actual_valid={arm.tcp_actual_valid}",
         f"ref_valid={arm.tcp_ref_valid}",
     ]
     if arm.tcp_tracking_source:
-        parts.append(f"source={arm.tcp_tracking_source}")
+        parts.append(f"tcp_tracking_source={arm.tcp_tracking_source}")
     if arm.tcp_tracking_source_recommendation:
-        parts.append(f"recommendation={arm.tcp_tracking_source_recommendation}")
+        parts.append(f"tcp_tracking_source_recommendation={arm.tcp_tracking_source_recommendation}")
     controller_sim = _format_controller_simulation_info(arm)
     if controller_sim:
         parts.append(controller_sim)
@@ -216,6 +223,24 @@ def _format_circle_overlay_status(
     if overlay.result_so_far:
         parts.append(f"result_so_far={overlay.result_so_far}")
     return ", ".join(parts)
+
+
+def _format_scene_asset_status(scene_handles: Mapping[str, Any]) -> str:
+    errors: list[str] = []
+    for key in _SCENE_ASSET_ERROR_KEYS:
+        value = scene_handles.get(key)
+        if value:
+            errors.append(f"{key}={value}")
+    for key, value in sorted(scene_handles.items()):
+        if key in _SCENE_ASSET_ERROR_KEYS:
+            continue
+        if key.endswith("_error") and value:
+            errors.append(f"{key}={value}")
+    if not errors:
+        return "stand/URDF assets loaded"
+    if not any(_ASSET_INSTALL_HINT in item for item in errors):
+        errors.append(_ASSET_INSTALL_HINT)
+    return "; ".join(errors)
 
 
 def _optional_finite(value: Any) -> float | None:

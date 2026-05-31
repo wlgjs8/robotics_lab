@@ -427,6 +427,8 @@ bool testCartesianControlTuningParsesAndValidates() {
         "  twist_orientation_hold_kp: 8.0\n"
         "  twist_angular_deadband_rad_s: 0.002\n"
         "  velocity_target_integration: measured_actual_lookahead\n"
+        "  controller_simulation_servo_state_source: reference\n"
+        "  controller_simulation_divergence_source: reference\n"
         "  velocity_target_lookahead_sec: 0.05\n"
         "  max_command_actual_error_deg: [1, 2, 3, 4, 5, 6]\n"
         "  reset_velocity_integrator_on_mode_change: false\n"
@@ -443,6 +445,10 @@ bool testCartesianControlTuningParsesAndValidates() {
     RB_CHECK(near(cfg.cartesian_control.twist_angular_deadband_rad_s, 0.002));
     RB_CHECK(cfg.cartesian_control.velocity_target_integration ==
              rb_servo::CartesianVelocityTargetIntegrationMode::MeasuredActualLookahead);
+    RB_CHECK(cfg.cartesian_control.controller_simulation_servo_state_source ==
+             rb_servo::CartesianControllerSimulationStateSource::Reference);
+    RB_CHECK(cfg.cartesian_control.controller_simulation_divergence_source ==
+             rb_servo::CartesianControllerSimulationStateSource::Reference);
     RB_CHECK(near(cfg.cartesian_control.velocity_target_lookahead_sec, 0.05));
     RB_CHECK(near(cfg.cartesian_control.max_command_actual_error_deg[0], 1.0));
     RB_CHECK(near(cfg.cartesian_control.max_command_actual_error_deg[5], 6.0));

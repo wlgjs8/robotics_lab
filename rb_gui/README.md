@@ -30,6 +30,10 @@ Run the GUI against the fanout state port and overlay port:
 tools/rbpodo_circle_gui.sh --profile stable
 ```
 
+The launcher sets `RB_GUI_DESCRIPTIONS_DIR` to
+`rb_servo_server/descriptions` so the RB3 URDF and stand meshes resolve from
+the repository checkout.
+
 The stable profile listens on state port `50161`; the GENE-style stress
 profile uses:
 
@@ -41,11 +45,24 @@ The equivalent manual command is:
 
 ```bash
 PYTHONPATH=rb_gui \
+RB_GUI_DESCRIPTIONS_DIR=rb_servo_server/descriptions \
 RB_GUI_STATE_BIND=0.0.0.0 \
 RB_GUI_STATE_PORT=50161 \
 RB_GUI_CIRCLE_OVERLAY_BIND=udp://0.0.0.0:50261 \
 python3 -m rb_servo_gui.app
 ```
+
+If TCP markers appear but the robot URDF does not, run the asset check:
+
+```bash
+PYTHONPATH=rb_gui \
+RB_GUI_DESCRIPTIONS_DIR=rb_servo_server/descriptions \
+python3 -m rb_servo_gui.app --check-assets
+```
+
+The check prints the robot URDF path, stand mesh path, whether each exists,
+and visualization dependency status. Missing dependency output includes:
+`Install with python3 -m pip install -e rb_gui`.
 
 After installing this package, the console entry point is:
 

@@ -190,6 +190,12 @@ report with `physical_motion_expected=false`, `physical_motion_detected=false`,
 and q_ref/q_actual update rates. Controller-simulation results may guide future
 low-speed parameter selection, but cannot be copied directly to real motion.
 
+RBPODO-CIRCLE-STATE-SOURCE-01 adds a controller-simulation-only Cartesian
+state-source policy so rbpodo pgmode simulation can integrate and guard against
+controller reference `q_ref` / `tcp_ref_stand` while still publishing and
+monitoring physical `q_actual` separately. Physical real and rb_simulator paths
+remain actual-state based.
+
 ## Open Review Items Before Real Robot
 
 1. Full C++ hardware-free gate must pass on the development machine.
@@ -243,6 +249,7 @@ low-speed parameter selection, but cannot be copied directly to real motion.
 49. RBPODO-CIRCLE-LIVE-RUNBOOK-01 documents the live `rb_gui` workflow for rbpodo controller-simulation circle benchmarks: server state fanout feeds benchmark and GUI ports, benchmark overlay feeds the GUI overlay port, `tcp_ref_stand` is the pgmode tracking source, `physical_motion_expected=false` remains visible, and `policy_runner` is separate from this visualization path.
 50. POLICY-DATASET-SCHEMA-01 defines additive policy/teleop dataset metadata for simulator, rbpodo controller `pgmode` simulation, and future physical real demonstrations. The policy recorder preserves optional actual/reference TCP, q_ref/q_target, ACK, diagnostics, command source, and SpaceMouse fields without changing command paths or weakening deadman, lease, or real-motion gates.
 51. RBPODO-CIRCLE-UX-01 adds convenience wrappers for rbpodo controller-simulation circle bring-up, GUI launch, and benchmark execution. The wrappers validate local configs, require explicit confirmation for controller access, refuse physical-real Cartesian settings, keep `RB_ALLOW_*` env gates opt-in, and do not send GUI commands.
+52. RBPODO-CIRCLE-METRICS-FIX-01 makes rbpodo circle summaries distinguish physical `q_actual`/`tcp_actual_stand`, commanded `q_sent`, optional published `q_ref_deg`, and controller-reference `tcp_ref_stand`. Missing `q_ref_deg` is now reported as `q_ref_moved: null` with a reason instead of a false static-reference claim; `tcp_ref_moved` is the primary controller-simulation motion evidence, and high integrator divergence with stationary `q_actual` is warned as a reference-state-source diagnostic.
 
 ## Reviewer Checklist
 

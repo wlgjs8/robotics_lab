@@ -62,6 +62,9 @@ REQUIRED_ENV = (
     "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
 )
 DEFAULT_PHYSICAL_MOTION_WARNING_DEG = 0.05
+MOTION_EPSILON_DEG = 1e-5
+MOTION_EPSILON_M = 1e-5
+INTEGRATOR_DIVERGENCE_WARNING_MIN = 10.0
 CARTESIAN_UNAVAILABLE_PREFIX = "cartesian_control_unavailable"
 CARTESIAN_REJECTION_HINTS = [
     "check cartesian_control.allow_in_controller_simulation: true",
@@ -1025,6 +1028,14 @@ def q_series(states: list[dict[str, Any]], arm: str, key: str) -> list[tuple[int
     return out
 
 
+def arm_field_observed(states: list[dict[str, Any]], arm: str, key: str) -> bool:
+    for snapshot in states:
+        arm_state = snapshot.get(arm)
+        if isinstance(arm_state, dict) and key in arm_state:
+            return True
+    return False
+
+
 def max_q_drift(series: list[tuple[int, list[float]]]) -> float | None:
     if not series:
         return None
@@ -1046,6 +1057,35 @@ def q_update_rate_hz(series: list[tuple[int, list[float]]], epsilon_deg: float =
             changes += 1
             previous = q
     return changes / ((end_ns - start_ns) / 1e9)
+
+
+def q_motion_metrics(
+    states: list[dict[str, Any]],
+    arm: str,
+    key: str,
+    *,
+    moved_epsilon_deg: float = MOTION_EPSILON_DEG,
+) -> dict[str, Any]:
+    observed = arm_field_observed(states, arm, key)
+    series = q_series(states, arm, key)
+    drift = max_q_drift(series) if observed else None
+    moved = (drift > moved_epsilon_deg) if drift is not None and len(series) >= 2 else None
+    if not observed:
+        reason = f"{key} not published"
+    elif not series:
+        reason = f"{key} not valid"
+    elif len(series) < 2:
+        reason = f"{key} has fewer than two valid samples"
+    else:
+        reason = f"{key} published"
+    prefix = key[:-4] if key.endswith("_deg") else key
+    return {
+        f"{prefix}_series": series,
+        f"{prefix}_drift_from_start_deg": drift,
+        f"{prefix}_moved": moved,
+        f"{prefix}_update_rate_hz": q_update_rate_hz(series) if observed else None,
+        f"{prefix}_reason": reason,
+    }
 
 
 def windowed_states(states: list[dict[str, Any]], start_ns: int, end_ns: int) -> list[dict[str, Any]]:
@@ -1075,6 +1115,13 @@ def max_pose_displacement(
     return max(sim_bench.norm(sim_bench.sub(position, first)) for position in positions)
 
 
+def pose_moved(displacement_m: Any, epsilon_m: float = MOTION_EPSILON_M) -> bool | None:
+    displacement = finite_number(displacement_m)
+    if displacement is None:
+        return None
+    return displacement > epsilon_m
+
+
 def cartesian_runtime_diagnostics(
     states: list[dict[str, Any]],
     arm: str,
@@ -1084,9 +1131,15 @@ def cartesian_runtime_diagnostics(
     status_counts: Counter[str] = Counter()
     reason_counts: Counter[str] = Counter()
     motion_state_counts: Counter[str] = Counter()
+    servo_state_source_counts: Counter[str] = Counter()
+    divergence_source_counts: Counter[str] = Counter()
     attempted_count = 0
     success_count = 0
     max_command_errors: list[float] = []
+    command_reference_errors: list[float] = []
+    physical_command_actual_errors: list[float] = []
+    q_reference_valid_count = 0
+    q_reference_observed_count = 0
     selected_states = windowed_states(states, start_ns, end_ns)
     for snapshot in selected_states:
         motion_state = snapshot.get("motion_state")
@@ -1108,18 +1161,43 @@ def cartesian_runtime_diagnostics(
             attempted_count += 1
         if solve.get("success") is True:
             success_count += 1
+        servo_source = solve.get("cartesian_servo_state_source")
+        if isinstance(servo_source, str) and servo_source:
+            servo_state_source_counts[servo_source] += 1
+        divergence_source = solve.get("cartesian_divergence_source")
+        if isinstance(divergence_source, str) and divergence_source:
+            divergence_source_counts[divergence_source] += 1
+        if "q_reference_for_servo_valid" in solve:
+            q_reference_observed_count += 1
+            if solve.get("q_reference_for_servo_valid") is True:
+                q_reference_valid_count += 1
         value = finite_number(solve.get("max_command_actual_error_deg_observed"))
         if value is not None:
             max_command_errors.append(value)
+        value = finite_number(solve.get("command_reference_error_deg_observed"))
+        if value is not None:
+            command_reference_errors.append(value)
+        value = finite_number(solve.get("physical_command_actual_error_deg_observed"))
+        if value is not None:
+            physical_command_actual_errors.append(value)
     return {
         "cartesian_status_counts": dict(status_counts),
         "cartesian_unavailable_count": int(status_counts.get("unavailable", 0)),
         "cartesian_unavailable_reason_counts": dict(reason_counts),
         "cartesian_attempted_count": attempted_count,
         "cartesian_success_count": success_count,
+        "cartesian_servo_state_source_counts": dict(servo_state_source_counts),
+        "cartesian_divergence_source_counts": dict(divergence_source_counts),
+        "q_reference_for_servo_valid_ratio": (
+            q_reference_valid_count / q_reference_observed_count
+            if q_reference_observed_count
+            else None
+        ),
         "motion_state_counts": dict(motion_state_counts),
         "armed_hold_count": int(motion_state_counts.get("ArmedHold", 0)),
         "max_command_actual_error_deg_observed": max(max_command_errors) if max_command_errors else None,
+        "command_reference_error_deg_observed": max(command_reference_errors) if command_reference_errors else None,
+        "physical_command_actual_error_deg_observed": max(physical_command_actual_errors) if physical_command_actual_errors else None,
         "tcp_ref_displacement_m": max_pose_displacement(states, arm, "tcp_ref_stand", start_ns, end_ns),
         "tcp_actual_displacement_m": max_pose_displacement(states, arm, "tcp_actual_stand", start_ns, end_ns),
     }
@@ -1246,8 +1324,8 @@ def classify_cartesian_runtime(summary: dict[str, Any], command_count: int) -> d
     target_static = (
         command_count > 0
         and int(summary.get("controller_acceptance_observed_count") or 0) > 0
-        and summary.get("q_ref_moved") is False
         and summary.get("tcp_ref_moved") is False
+        and summary.get("q_sent_moved") is not True
         and (max_command_error is None or max_command_error <= 1e-9)
     )
     server_rejected = (
@@ -1287,8 +1365,17 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "tcp_ref_valid_ratio",
         "tcp_actual_valid_ratio",
         "physical_motion_detected",
+        "q_actual_moved",
+        "q_sent_moved",
+        "q_ref_moved",
+        "q_ref_reason",
+        "tcp_ref_moved",
+        "tcp_actual_moved",
+        "q_sent_update_rate_hz",
         "q_ref_update_rate_hz",
         "q_actual_update_rate_hz",
+        "reset_rate_hz",
+        "divergence_rate_hz",
         "ack_observed_count",
         "controller_acceptance_observed_count",
         "command_timeout_count",
@@ -1297,8 +1384,6 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "cartesian_unavailable_count",
         "armed_hold_count",
         "command_accepted_but_target_static",
-        "q_ref_moved",
-        "tcp_ref_moved",
         "server_rejected_cartesian",
         "overlay_pub_endpoint",
         "overlay_messages_sent",
@@ -1540,23 +1625,31 @@ def summarize_run(
         metrics.update(sim_bench.feedback_metrics(feedback_rows))
     controller_rows = pose_rows(states, args.arm, "tcp_ref_stand", benchmark_start_ns)
     physical_rows = pose_rows(states, args.arm, "tcp_actual_stand", benchmark_start_ns)
-    q_actual = q_series(states, args.arm, "q_actual_deg")
-    q_ref = q_series(states, args.arm, "q_ref_deg")
-    if not q_ref:
-        q_ref = q_series(states, args.arm, "q_target_deg")
-    q_ref_drift = max_q_drift(q_ref)
-    q_actual_drift = max_q_drift(q_actual)
+    q_actual_metrics = q_motion_metrics(states, args.arm, "q_actual_deg")
+    q_sent_metrics = q_motion_metrics(states, args.arm, "q_sent_deg")
+    q_ref_metrics = q_motion_metrics(states, args.arm, "q_ref_deg")
+    q_actual_drift = q_actual_metrics["q_actual_drift_from_start_deg"]
     runtime_diagnostics = cartesian_runtime_diagnostics(
         states,
         args.arm,
         benchmark_start_ns,
         benchmark_start_ns + int(duration_sec * 1e9),
     )
-    q_ref_moved = q_ref_drift is not None and q_ref_drift > 1e-5
     tcp_ref_displacement = finite_number(runtime_diagnostics.get("tcp_ref_displacement_m"))
-    tcp_ref_moved = tcp_ref_displacement is not None and tcp_ref_displacement > 1e-5
+    tcp_ref_moved = pose_moved(tcp_ref_displacement)
+    tcp_actual_displacement = finite_number(runtime_diagnostics.get("tcp_actual_displacement_m"))
+    tcp_actual_moved = pose_moved(tcp_actual_displacement)
     physical_motion_detected = (
         q_actual_drift is not None and q_actual_drift > args.physical_motion_warning_deg
+    )
+    q_actual_moved = q_actual_metrics["q_actual_moved"]
+    integrator_resets_total = finite_number(metrics.get("integrator_resets_total"))
+    integrator_divergence_total = finite_number(metrics.get("integrator_divergence_total"))
+    reset_rate_hz = integrator_resets_total / duration_sec if integrator_resets_total is not None and duration_sec > 0 else None
+    divergence_rate_hz = (
+        integrator_divergence_total / duration_sec
+        if integrator_divergence_total is not None and duration_sec > 0
+        else None
     )
     performance_warnings = sim_bench.performance_warnings(metrics)
     if tracking_source_warning:
@@ -1565,6 +1658,14 @@ def summarize_run(
         performance_warnings.append(
             f"physical q_actual drift {q_actual_drift:.6f} deg exceeded pgmode simulation warning threshold "
             f"{args.physical_motion_warning_deg:.6f} deg"
+        )
+    if (
+        integrator_divergence_total is not None
+        and integrator_divergence_total >= INTEGRATOR_DIVERGENCE_WARNING_MIN
+        and q_actual_moved is False
+    ):
+        performance_warnings.append(
+            "controller-simulation q_actual is stationary; Cartesian integration may need reference-state source."
         )
 
     summary: dict[str, Any] = {
@@ -1597,12 +1698,24 @@ def summarize_run(
         "invalid_state_packets": 0,
         "tcp_ref_valid_ratio": tcp_valid_ratio(states, args.arm, "tcp_ref_stand"),
         "tcp_actual_valid_ratio": tcp_valid_ratio(states, args.arm, "tcp_actual_stand"),
-        "q_ref_update_rate_hz": q_update_rate_hz(q_ref),
-        "q_actual_update_rate_hz": q_update_rate_hz(q_actual),
-        "q_ref_drift_from_start_deg": q_ref_drift,
-        "q_ref_moved": q_ref_moved,
+        "q_ref_update_rate_hz": q_ref_metrics["q_ref_update_rate_hz"],
+        "q_ref_drift_from_start_deg": q_ref_metrics["q_ref_drift_from_start_deg"],
+        "q_ref_moved": q_ref_metrics["q_ref_moved"],
+        "q_ref_reason": q_ref_metrics["q_ref_reason"],
+        "q_sent_update_rate_hz": q_sent_metrics["q_sent_update_rate_hz"],
+        "q_sent_drift_from_start_deg": q_sent_metrics["q_sent_drift_from_start_deg"],
+        "q_sent_moved": q_sent_metrics["q_sent_moved"],
+        "q_sent_reason": q_sent_metrics["q_sent_reason"],
+        "q_actual_update_rate_hz": q_actual_metrics["q_actual_update_rate_hz"],
         "q_actual_drift_from_start_deg": q_actual_drift,
+        "q_actual_moved": q_actual_moved,
+        "q_actual_reason": q_actual_metrics["q_actual_reason"],
         "tcp_ref_moved": tcp_ref_moved,
+        "tcp_actual_moved": tcp_actual_moved,
+        "controller_simulation_motion_evidence_source": "tcp_ref_stand",
+        "controller_simulation_motion_detected": tcp_ref_moved,
+        "reset_rate_hz": reset_rate_hz,
+        "divergence_rate_hz": divergence_rate_hz,
         "physical_motion_detected": physical_motion_detected,
         "physical_motion_warning_threshold_deg": args.physical_motion_warning_deg,
         "safety_preflight": preflight_result,

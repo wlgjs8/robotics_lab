@@ -212,6 +212,11 @@ enum class CartesianCommandActualErrorPolicy {
     Fault
 };
 
+enum class CartesianControllerSimulationStateSource {
+    Actual,
+    Reference
+};
+
 struct CartesianControlConfig {
     bool enable = true;
     bool allow_in_simulation = true;
@@ -236,6 +241,10 @@ struct CartesianControlConfig {
     CartesianLimitPolicy exceed_limit_policy = CartesianLimitPolicy::Clamp;
     CartesianVelocityTargetIntegrationMode velocity_target_integration =
         CartesianVelocityTargetIntegrationMode::PreviousCommand;
+    CartesianControllerSimulationStateSource controller_simulation_servo_state_source =
+        CartesianControllerSimulationStateSource::Actual;
+    CartesianControllerSimulationStateSource controller_simulation_divergence_source =
+        CartesianControllerSimulationStateSource::Actual;
     double velocity_target_lookahead_sec = 0.04;
     JointArray max_command_actual_error_deg{5.0, 5.0, 5.0, 8.0, 8.0, 10.0};
     bool reset_velocity_integrator_on_mode_change = true;

@@ -20,6 +20,7 @@ Options:
   -h, --help  Show this help.
 
 This script only launches the GUI. It does not send robot commands.
+It exports RB_GUI_DESCRIPTIONS_DIR to the repository rb_servo_server/descriptions directory.
 EOF
 }
 
@@ -88,6 +89,7 @@ if [[ "${FORCE}" != "1" ]]; then
 fi
 
 export PYTHONPATH="${ROOT_DIR}/rb_gui${PYTHONPATH:+:${PYTHONPATH}}"
+export RB_GUI_DESCRIPTIONS_DIR="${ROOT_DIR}/rb_servo_server/descriptions"
 export RB_GUI_STATE_BIND="0.0.0.0"
 export RB_GUI_STATE_PORT="${STATE_PORT}"
 export RB_GUI_CIRCLE_OVERLAY_BIND="udp://0.0.0.0:${OVERLAY_PORT}"

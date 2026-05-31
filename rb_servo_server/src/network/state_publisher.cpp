@@ -133,6 +133,16 @@ std::string commandActualErrorPolicyString(CartesianCommandActualErrorPolicy pol
     return "unknown";
 }
 
+std::string controllerSimulationStateSourceString(CartesianControllerSimulationStateSource source) {
+    switch (source) {
+        case CartesianControllerSimulationStateSource::Actual:
+            return "actual";
+        case CartesianControllerSimulationStateSource::Reference:
+            return "reference";
+    }
+    return "unknown";
+}
+
 nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config) {
     return {
         {"schema", "robotics_lab.cartesian_control_snapshot.v1"},
@@ -157,6 +167,10 @@ nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config
         {"max_cartesian_step_rad", optionalDoubleJson(config.max_cartesian_step_rad)},
         {"exceed_limit_policy", cartesianLimitPolicyString(config.exceed_limit_policy)},
         {"velocity_target_integration", velocityIntegrationModeString(config.velocity_target_integration)},
+        {"controller_simulation_servo_state_source",
+            controllerSimulationStateSourceString(config.controller_simulation_servo_state_source)},
+        {"controller_simulation_divergence_source",
+            controllerSimulationStateSourceString(config.controller_simulation_divergence_source)},
         {"velocity_target_lookahead_sec", config.velocity_target_lookahead_sec},
         {"max_command_actual_error_deg", jointArrayJson(config.max_command_actual_error_deg)},
         {"reset_velocity_integrator_on_mode_change", config.reset_velocity_integrator_on_mode_change},
@@ -439,12 +453,17 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"applied_twist_linear_norm_m_s", telemetry.applied_twist_linear_norm_m_s},
         {"applied_twist_angular_norm_rad_s", telemetry.applied_twist_angular_norm_rad_s},
         {"cartesian_velocity_integration_mode", telemetry.cartesian_velocity_integration_mode},
+        {"cartesian_servo_state_source", telemetry.cartesian_servo_state_source},
+        {"cartesian_divergence_source", telemetry.cartesian_divergence_source},
+        {"q_reference_for_servo_valid", telemetry.q_reference_for_servo_valid},
         {"q_integrator_valid", telemetry.q_integrator_valid},
         {"integrator_reset_reason", telemetry.integrator_reset_reason},
         {"integrator_resets_total", telemetry.integrator_resets_total},
         {"integrator_clamps_total", telemetry.integrator_clamps_total},
         {"integrator_divergence_total", telemetry.integrator_divergence_total},
         {"max_command_actual_error_deg_observed", telemetry.max_command_actual_error_deg_observed},
+        {"command_reference_error_deg_observed", telemetry.command_reference_error_deg_observed},
+        {"physical_command_actual_error_deg_observed", telemetry.physical_command_actual_error_deg_observed},
         {"velocity_target_lookahead_sec", telemetry.velocity_target_lookahead_sec},
         {"circle_active", telemetry.circle_active},
         {"circle_phase", telemetry.circle_phase},
@@ -712,6 +731,10 @@ nlohmann::json cartesianGateJson(
         {"allow_in_simulation", cartesian_config.allow_in_simulation},
         {"allow_in_real", cartesian_config.allow_in_real},
         {"allow_in_controller_simulation", cartesian_config.allow_in_controller_simulation},
+        {"controller_simulation_servo_state_source",
+            controllerSimulationStateSourceString(cartesian_config.controller_simulation_servo_state_source)},
+        {"controller_simulation_divergence_source",
+            controllerSimulationStateSourceString(cartesian_config.controller_simulation_divergence_source)},
         {"env_RB_ALLOW_REAL_ROBOT", envFlagEnabled("RB_ALLOW_REAL_ROBOT")},
         {"env_RB_ALLOW_REAL_MOTION", envFlagEnabled("RB_ALLOW_REAL_MOTION")},
         {"env_RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION", envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION")},

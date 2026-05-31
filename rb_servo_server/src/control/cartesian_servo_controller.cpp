@@ -96,31 +96,41 @@ bool sameVelocityIntegrationCategory(ControlMode a, ControlMode b) {
 
 void resetVelocityIntegrator(
     CartesianVelocityIntegratorState* state,
-    const JointArray& q_actual_deg,
+    const JointArray& q_servo_state_deg,
     ControlMode mode,
     uint64_t seq,
     const std::string& reason
 ) {
     if (!state) return;
     state->valid = true;
-    state->q_command_deg = q_actual_deg;
+    state->q_command_deg = q_servo_state_deg;
     state->last_mode = mode;
     state->last_seq = seq;
     state->reset_reason = reason;
     ++state->resets_total;
 }
 
-bool commandActualDiverged(
+double maxJointErrorDeg(
     const JointArray& q_command_deg,
-    const JointArray& q_actual_deg,
+    const JointArray& q_state_deg
+) {
+    double observed = 0.0;
+    for (int i = 0; i < kDof; ++i) {
+        observed = std::max(observed, std::abs(q_command_deg[i] - q_state_deg[i]));
+    }
+    return observed;
+}
+
+bool commandStateDiverged(
+    const JointArray& q_command_deg,
+    const JointArray& q_state_deg,
     const JointArray& max_error_deg,
     double* max_observed
 ) {
     bool diverged = false;
-    double observed = 0.0;
+    double observed = maxJointErrorDeg(q_command_deg, q_state_deg);
     for (int i = 0; i < kDof; ++i) {
-        const double error = std::abs(q_command_deg[i] - q_actual_deg[i]);
-        observed = std::max(observed, error);
+        const double error = std::abs(q_command_deg[i] - q_state_deg[i]);
         if (error > max_error_deg[i]) {
             diverged = true;
         }
@@ -139,6 +149,9 @@ void populateIntegratorTelemetry(
         integrationModeName(config.velocity_target_integration);
     telemetry->velocity_target_lookahead_sec = config.velocity_target_lookahead_sec;
     if (!state) return;
+    telemetry->cartesian_servo_state_source = state->cartesian_servo_state_source;
+    telemetry->cartesian_divergence_source = state->cartesian_divergence_source;
+    telemetry->q_reference_for_servo_valid = state->q_reference_for_servo_valid;
     telemetry->q_integrator_valid = state->valid;
     telemetry->integrator_reset_reason = state->reset_reason;
     telemetry->integrator_resets_total = state->resets_total;
@@ -146,50 +159,80 @@ void populateIntegratorTelemetry(
     telemetry->integrator_divergence_total = state->divergence_total;
     telemetry->max_command_actual_error_deg_observed =
         state->max_command_actual_error_deg_observed;
+    telemetry->command_reference_error_deg_observed =
+        state->command_reference_error_deg_observed;
+    telemetry->physical_command_actual_error_deg_observed =
+        state->physical_command_actual_error_deg_observed;
 }
 
 CartesianArmTargetResult integrateVelocityTarget(
     const CartesianArmTargetResult& input,
     const CartesianControlConfig& config,
-    const JointArray& q_actual_deg,
+    const JointArray& q_servo_state_deg,
     const CartesianVelocityResult& velocity,
     double dt_sec,
     ControlMode mode,
     uint64_t seq,
-    CartesianVelocityIntegratorState* state
+    CartesianVelocityIntegratorState* state,
+    const CartesianServoStateContext* context
 ) {
     CartesianArmTargetResult result = input;
+
+    const JointArray& q_physical_actual_deg =
+        context ? context->physical_q_actual_deg : q_servo_state_deg;
+    const JointArray& q_reference_deg =
+        context ? context->reference_q_deg : q_servo_state_deg;
+    const JointArray& q_divergence_deg =
+        context ? context->divergence_q_deg : q_servo_state_deg;
+    if (state && context) {
+        state->cartesian_servo_state_source = context->servo_state_source;
+        state->cartesian_divergence_source = context->divergence_source;
+        state->q_reference_for_servo_valid = context->q_reference_for_servo_valid;
+    }
     populateIntegratorTelemetry(&result.telemetry, config, state);
 
     const double safe_dt_sec = std::max(0.0, dt_sec);
     double integration_dt_sec = safe_dt_sec;
-    JointArray base_q = q_actual_deg;
+    JointArray base_q = q_servo_state_deg;
 
     if (config.velocity_target_integration == CartesianVelocityTargetIntegrationMode::MeasuredActualLookahead) {
         integration_dt_sec = config.velocity_target_lookahead_sec;
     } else if (config.velocity_target_integration == CartesianVelocityTargetIntegrationMode::PreviousCommand) {
         if (!state) {
-            base_q = q_actual_deg;
+            base_q = q_servo_state_deg;
         } else if (!state->valid) {
-            resetVelocityIntegrator(state, q_actual_deg, mode, seq, "seed_from_actual");
+            resetVelocityIntegrator(state, q_servo_state_deg, mode, seq, "seed_from_servo_state");
         } else if (config.reset_velocity_integrator_on_mode_change &&
                    !sameVelocityIntegrationCategory(state->last_mode, mode)) {
-            resetVelocityIntegrator(state, q_actual_deg, mode, seq, "mode_change");
+            resetVelocityIntegrator(state, q_servo_state_deg, mode, seq, "mode_change");
         }
 
         if (state) {
-            double observed_error = 0.0;
-            if (commandActualDiverged(
+            const double physical_error =
+                maxJointErrorDeg(state->q_command_deg, q_physical_actual_deg);
+            state->physical_command_actual_error_deg_observed =
+                std::max(state->physical_command_actual_error_deg_observed, physical_error);
+            state->max_command_actual_error_deg_observed =
+                std::max(state->max_command_actual_error_deg_observed, physical_error);
+            if (context && context->q_reference_for_servo_valid) {
+                const double reference_error =
+                    maxJointErrorDeg(state->q_command_deg, q_reference_deg);
+                state->command_reference_error_deg_observed =
+                    std::max(state->command_reference_error_deg_observed, reference_error);
+            }
+
+            double observed_divergence_error = 0.0;
+            if (commandStateDiverged(
                     state->q_command_deg,
-                    q_actual_deg,
+                    q_divergence_deg,
                     config.max_command_actual_error_deg,
-                    &observed_error)) {
+                    &observed_divergence_error)) {
                 ++state->divergence_total;
-                state->max_command_actual_error_deg_observed =
-                    std::max(state->max_command_actual_error_deg_observed, observed_error);
                 if (config.command_actual_error_policy == CartesianCommandActualErrorPolicy::Fault) {
                     state->valid = false;
-                    state->reset_reason = "command_actual_divergence_fault";
+                    state->reset_reason = context && context->divergence_source == "reference"
+                        ? "command_reference_divergence_fault"
+                        : "command_actual_divergence_fault";
                     populateIntegratorTelemetry(&result.telemetry, config, state);
                     result.verdict = SafetyVerdict::TrackingError;
                     result.reason = "cartesian_velocity_integrator_divergence";
@@ -197,10 +240,15 @@ CartesianArmTargetResult integrateVelocityTarget(
                     result.telemetry.reason = result.reason;
                     return result;
                 }
-                resetVelocityIntegrator(state, q_actual_deg, mode, seq, "command_actual_divergence_reset");
-            } else {
-                state->max_command_actual_error_deg_observed =
-                    std::max(state->max_command_actual_error_deg_observed, observed_error);
+                resetVelocityIntegrator(
+                    state,
+                    q_servo_state_deg,
+                    mode,
+                    seq,
+                    context && context->divergence_source == "reference"
+                        ? "command_reference_divergence_reset"
+                        : "command_actual_divergence_reset"
+                );
             }
             state->last_mode = mode;
             state->last_seq = seq;
@@ -353,7 +401,8 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     double dt_sec,
     uint64_t command_seq,
     CartesianServoPathState* path_state,
-    CartesianVelocityIntegratorState* velocity_integrator_state
+    CartesianVelocityIntegratorState* velocity_integrator_state,
+    const CartesianServoStateContext* state_context
 ) {
     CartesianArmTargetResult result;
     result.q_target_deg = previous_safe_sent_q_deg;
@@ -592,7 +641,8 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
         dt_sec,
         ControlMode::TcpLinearMove,
         command_seq,
-        velocity_integrator_state
+        velocity_integrator_state,
+        state_context
     );
 }
 
@@ -604,7 +654,8 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
     double dt_sec,
     uint64_t command_seq,
     CartesianTwistHoldState* hold_state,
-    CartesianVelocityIntegratorState* velocity_integrator_state
+    CartesianVelocityIntegratorState* velocity_integrator_state,
+    const CartesianServoStateContext* state_context
 ) {
     CartesianArmTargetResult result;
     result.q_target_deg = previous_safe_sent_q_deg;
@@ -752,7 +803,8 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         dt_sec,
         command.mode,
         command_seq,
-        velocity_integrator_state
+        velocity_integrator_state,
+        state_context
     );
 }
 
@@ -764,7 +816,8 @@ CartesianArmTargetResult CartesianServoController::computeCircleMoveTarget(
     double dt_sec,
     uint64_t command_seq,
     CartesianCircleMoveState* circle_state,
-    CartesianVelocityIntegratorState* velocity_integrator_state
+    CartesianVelocityIntegratorState* velocity_integrator_state,
+    const CartesianServoStateContext* state_context
 ) {
     CartesianArmTargetResult result;
     result.q_target_deg = previous_safe_sent_q_deg;
@@ -996,7 +1049,8 @@ CartesianArmTargetResult CartesianServoController::computeCircleMoveTarget(
         dt_sec,
         ControlMode::TcpCircleMove,
         command_seq,
-        velocity_integrator_state
+        velocity_integrator_state,
+        state_context
     );
 }
 

@@ -311,12 +311,17 @@ struct CartesianSolveTelemetry {
     double applied_twist_linear_norm_m_s = 0.0;
     double applied_twist_angular_norm_rad_s = 0.0;
     std::string cartesian_velocity_integration_mode;
+    std::string cartesian_servo_state_source = "actual";
+    std::string cartesian_divergence_source = "actual";
+    bool q_reference_for_servo_valid = false;
     bool q_integrator_valid = false;
     std::string integrator_reset_reason;
     uint64_t integrator_resets_total = 0;
     uint64_t integrator_clamps_total = 0;
     uint64_t integrator_divergence_total = 0;
     double max_command_actual_error_deg_observed = 0.0;
+    double command_reference_error_deg_observed = 0.0;
+    double physical_command_actual_error_deg_observed = 0.0;
     double velocity_target_lookahead_sec = 0.0;
     bool circle_active = false;
     double circle_phase = 0.0;

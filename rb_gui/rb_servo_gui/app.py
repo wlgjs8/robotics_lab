@@ -57,6 +57,7 @@ from .scene import (
     _add_stand_mesh,
     _asset_path,
     _descriptions_dir,
+    format_scene_asset_startup_status,
     _install_tcp_target_callbacks,
     _joint_cfg_radians,
     _joint_marker_position,
@@ -77,6 +78,7 @@ from .status_panel import (
     _format_arm_cartesian_solve,
     _format_cartesian_solve_status,
     _format_circle_overlay_status,
+    _format_scene_asset_status,
     _format_fk_status,
     _format_joint_monitor_value,
     _format_joints,
@@ -165,6 +167,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "udp://0.0.0.0:50261. Use 'none' or an empty value to disable. "
             "Defaults to RB_GUI_CIRCLE_OVERLAY_BIND or disabled."
         ),
+    )
+    parser.add_argument(
+        "--check-assets",
+        action="store_true",
+        help="Print rb_gui URDF, mesh, and visualization dependency diagnostics, then exit.",
     )
     return parser.parse_args(argv)
 
@@ -1004,14 +1011,9 @@ def build_gui(
 
     with tabs.add_tab("Debug"):
         handles["tick"] = server.gui.add_number("tick", initial_value=0, disabled=True)
-        scene_errors = [
-            value
-            for key, value in handles.get("scene", {}).items()
-            if key.endswith("_error") or key == "scene_error"
-        ]
         handles["scene_assets"] = server.gui.add_text(
             "scene assets",
-            initial_value="; ".join(scene_errors) if scene_errors else "stand/URDF assets loaded or pending",
+            initial_value=_format_scene_asset_status(handles.get("scene", {})),
             disabled=True,
         )
         handles["left_q"] = server.gui.add_text("left q_actual", initial_value="[]", disabled=True)
@@ -1138,12 +1140,7 @@ def update_gui(
     _update_operator_monitors(handles, latest, stale=stale)
     update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
     if "scene_assets" in handles:
-        scene_errors = [
-            value
-            for key, value in handles.get("scene", {}).items()
-            if key.endswith("_error") or key == "scene_error"
-        ]
-        handles["scene_assets"].value = "; ".join(scene_errors) if scene_errors else "stand/URDF assets loaded"
+        handles["scene_assets"].value = _format_scene_asset_status(handles.get("scene", {}))
     handles["tick"].value = latest.tick
     handles["left_q"].value = _format_joints(latest.left.q_actual_deg)
     handles["right_q"].value = _format_joints(latest.right.q_actual_deg)
@@ -1165,6 +1162,9 @@ def update_gui(
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    print(format_scene_asset_startup_status(), flush=True)
+    if args.check_assets:
+        return
     try:
         import viser
     except ImportError as exc:

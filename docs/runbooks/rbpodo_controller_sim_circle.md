@@ -55,6 +55,8 @@ running:
 grep -H "allow_in_controller_simulation: true" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
 grep -H "allow_in_real: false" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
 grep -H "operation_mode: simulation" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
+grep -H "controller_simulation_servo_state_source: reference" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
+grep -H "controller_simulation_divergence_source: reference" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
 ```
 
 The required shape for rbpodo controller simulation is:
@@ -68,6 +70,8 @@ left_robot:
 cartesian_control:
   allow_in_controller_simulation: true
   allow_in_real: false
+  controller_simulation_servo_state_source: reference
+  controller_simulation_divergence_source: reference
 ```
 
 `run_mode: real` means the server is connecting to real Rainbow controller
@@ -436,6 +440,8 @@ The stable profile is `15cm/16s`. It mirrors the current simulator baseline:
 
 - `servo.rate_hz: 100`
 - `velocity_target_integration: previous_command`
+- `controller_simulation_servo_state_source: reference`
+- `controller_simulation_divergence_source: reference`
 - `path_kp_pos: 6.0`
 - `path_kp_ori: 6.0`
 - `max_twist_linear_m_s: 0.03`
@@ -452,6 +458,23 @@ settings and is not a pass/fail acceptance profile:
 For controller pgmode simulation, the correct measurement target is normally
 the controller reference path rather than physical TCP motion. The state stream
 publishes both:
+
+- `tcp_actual_stand` from physical/measured `q_actual`
+- `tcp_ref_stand` from controller reference `q_ref` / `q_target`
+
+The controller-simulation circle templates also use the controller reference
+state for Cartesian servo integration and the divergence guard:
+
+```yaml
+cartesian_control:
+  controller_simulation_servo_state_source: reference
+  controller_simulation_divergence_source: reference
+```
+
+This source selection is only meaningful for rbpodo controller pgmode
+simulation. Physical real and rb_simulator paths continue to use `q_actual`.
+If `q_ref` / `tcp_ref_stand` is unavailable, the server fails closed instead of
+falling back silently. Physical-motion monitoring still uses `q_actual`.
 
 - `tcp_actual_stand`: FK from measured `q_actual_deg`
 - `tcp_ref_stand`: FK from rbpodo controller reference joints (`jnt_ref`)
@@ -625,8 +648,11 @@ Check these fields first:
 - `cartesian_unavailable_reason_counts`
 - `armed_hold_count`
 - `command_accepted_but_target_static`
+- `q_sent_moved`
 - `q_ref_moved`
+- `q_ref_reason`
 - `tcp_ref_moved`
+- `tcp_actual_moved`
 - `max_command_actual_error_deg_observed`
 
 The usual fix is to regenerate or edit the local config and rerun with the
@@ -882,9 +908,24 @@ The runner writes both paths when available:
 - `physical_actual.csv`: `tcp_actual_stand`
 
 It also records `tcp_ref_valid_ratio`, `tcp_actual_valid_ratio`,
-`q_ref_update_rate_hz`, `q_actual_update_rate_hz`, and
-`physical_motion_detected`. Any physical `q_actual` drift above the configured
-warning threshold is a warning in pgmode simulation, not a success criterion.
+`q_sent_moved`, `q_sent_update_rate_hz`, `q_ref_moved`,
+`q_ref_update_rate_hz`, `q_ref_reason`, `q_actual_moved`,
+`q_actual_update_rate_hz`, `tcp_ref_moved`, `tcp_actual_moved`, and
+`physical_motion_detected`. `q_ref_moved` is `null` with
+`q_ref_reason: q_ref_deg not published` when the state stream does not publish
+`q_ref_deg`; do not interpret that as a static controller reference. In
+controller pgmode simulation, `tcp_ref_moved` is the primary motion evidence
+for the controller-reference path, while physical `q_actual` and
+`tcp_actual_stand` are expected to remain stationary. Any physical `q_actual`
+drift above the configured warning threshold is a warning in pgmode simulation,
+not a success criterion.
+
+Integrator diagnostics are recorded as `integrator_resets_total`,
+`integrator_divergence_total`, `integrator_clamps_total`, `reset_rate_hz`, and
+`divergence_rate_hz`. A high divergence count with stationary `q_actual`
+produces the warning that Cartesian integration may need a reference-state
+source; this warning is about controller-simulation diagnostics, not physical
+motion.
 
 ## Artifacts
 

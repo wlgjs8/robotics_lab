@@ -287,7 +287,11 @@ class ArmSnapshot:
         if mode == "actual":
             return "tcp_actual_stand" if self.tcp_actual_valid and self.tcp_actual_stand is not None else "none"
         if mode == "auto":
-            if self.tcp_tracking_source_recommendation == "tcp_ref_stand" and self.tcp_ref_valid and self.tcp_ref_stand is not None:
+            ref_requested = self.tcp_tracking_source == "tcp_ref_stand" or self.tcp_tracking_source_recommendation in {
+                "tcp_ref_stand",
+                "reference_for_controller_simulation",
+            }
+            if ref_requested and self.tcp_ref_valid and self.tcp_ref_stand is not None:
                 return "tcp_ref_stand"
             if self.tcp_actual_valid and self.tcp_actual_stand is not None:
                 return "tcp_actual_stand"

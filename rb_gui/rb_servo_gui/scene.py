@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import math
 import os
 from pathlib import Path
@@ -30,6 +31,7 @@ _DEFAULT_STAND_MESH_POSE = (0.0, 0.0, 0.01, 0.0, 0.0, -1.57078)
 _TCP_DISPLAY_MODES = ("auto", "actual", "reference", "both")
 _TCP_TRAIL_LIMIT = 200
 _CIRCLE_OVERLAY_POINT_COUNT = 96
+_ASSET_INSTALL_HINT = "Install with python3 -m pip install -e rb_gui"
 
 
 def _repo_descriptions_dir() -> Path:
@@ -63,6 +65,74 @@ def _stand_mesh_path() -> Path:
     return _asset_path("RB_GUI_STAND_MESH", "meshes/stands/dual_rb3_730e/dual_rb3_730e_stand_ver3.stl")
 
 
+def _module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _asset_error(message: str) -> str:
+    return f"{message}; {_ASSET_INSTALL_HINT}"
+
+
+def scene_asset_status() -> dict[str, Any]:
+    urdf_path = _robot_urdf_path()
+    stand_mesh_path = _stand_mesh_path()
+    viser_urdf_available = False
+    viser_urdf_error: str | None = None
+    try:
+        from viser.extras import ViserUrdf  # noqa: F401
+
+        viser_urdf_available = True
+    except Exception as exc:
+        viser_urdf_error = f"{type(exc).__name__}: {exc}"
+    return {
+        "descriptions_dir": str(_descriptions_dir()),
+        "descriptions_dir_exists": _descriptions_dir().exists(),
+        "robot_urdf_path": str(urdf_path),
+        "robot_urdf_exists": urdf_path.exists(),
+        "stand_mesh_path": str(stand_mesh_path),
+        "stand_mesh_exists": stand_mesh_path.exists(),
+        "viser_available": _module_available("viser"),
+        "viser_extras_urdf_available": viser_urdf_available,
+        "viser_extras_urdf_error": viser_urdf_error,
+        "trimesh_available": _module_available("trimesh"),
+        "yourdfpy_available": _module_available("yourdfpy"),
+        "install_hint": _ASSET_INSTALL_HINT,
+    }
+
+
+def format_scene_asset_startup_status() -> str:
+    status = scene_asset_status()
+    lines = [
+        "rb_servo_gui asset status:",
+        f"  descriptions_dir: {status['descriptions_dir']} exists={status['descriptions_dir_exists']}",
+        f"  robot_urdf_path: {status['robot_urdf_path']} exists={status['robot_urdf_exists']}",
+        f"  stand_mesh_path: {status['stand_mesh_path']} exists={status['stand_mesh_exists']}",
+        (
+            "  dependencies: "
+            f"viser={status['viser_available']} "
+            f"viser.extras.ViserUrdf={status['viser_extras_urdf_available']} "
+            f"trimesh={status['trimesh_available']} "
+            f"yourdfpy={status['yourdfpy_available']}"
+        ),
+    ]
+    if status["viser_extras_urdf_error"]:
+        lines.append(f"  viser_extras_urdf_error: {status['viser_extras_urdf_error']}")
+    missing = [
+        not status["robot_urdf_exists"],
+        not status["stand_mesh_exists"],
+        not status["viser_available"],
+        not status["viser_extras_urdf_available"],
+        not status["trimesh_available"],
+        not status["yourdfpy_available"],
+    ]
+    if any(missing):
+        lines.append(f"  hint: {status['install_hint']}")
+    return "\n".join(lines)
+
+
 def _joint_cfg_radians(q_values: tuple[float, ...] | None) -> tuple[float, ...]:
     if q_values is None:
         return tuple(0.0 for _ in _ROBOT_JOINT_NAMES)
@@ -84,7 +154,7 @@ def _joint_marker_position(base: tuple[float, float, float], q_values: tuple[flo
 def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
     stand_mesh_path = _stand_mesh_path()
     if not stand_mesh_path.exists():
-        handles["stand_mesh_error"] = f"stand mesh not found: {stand_mesh_path}"
+        handles["stand_mesh_error"] = _asset_error(f"stand mesh not found: {stand_mesh_path}")
         return
     try:
         import trimesh
@@ -98,13 +168,13 @@ def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
             wxyz=_pose_wxyz(_DEFAULT_STAND_MESH_POSE),
         )
     except Exception as exc:
-        handles["stand_mesh_error"] = f"{type(exc).__name__}: {exc}"
+        handles["stand_mesh_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
 
 
 def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
     urdf_path = _robot_urdf_path()
     if not urdf_path.exists():
-        handles["urdf_error"] = f"robot URDF not found: {urdf_path}"
+        handles["urdf_error"] = _asset_error(f"robot URDF not found: {urdf_path}")
         return
     try:
         from viser.extras import ViserUrdf
@@ -113,7 +183,7 @@ def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
         handles["right_urdf"] = ViserUrdf(server, urdf_path, root_node_name="/stand/right_base")
         handles["urdf_joint_names"] = tuple(handles["left_urdf"].get_actuated_joint_names())
     except Exception as exc:
-        handles["urdf_error"] = f"{type(exc).__name__}: {exc}"
+        handles["urdf_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
 
 
 def _update_urdf_config(urdf_handle: Any, cfg_radians: tuple[float, ...]) -> None:

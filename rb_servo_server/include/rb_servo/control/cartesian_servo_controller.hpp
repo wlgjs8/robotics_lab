@@ -57,7 +57,21 @@ struct CartesianVelocityIntegratorState {
     uint64_t clamps_total = 0;
     uint64_t divergence_total = 0;
     double max_command_actual_error_deg_observed = 0.0;
+    double command_reference_error_deg_observed = 0.0;
+    double physical_command_actual_error_deg_observed = 0.0;
+    std::string cartesian_servo_state_source = "actual";
+    std::string cartesian_divergence_source = "actual";
+    bool q_reference_for_servo_valid = false;
     std::string reset_reason;
+};
+
+struct CartesianServoStateContext {
+    std::string servo_state_source = "actual";
+    std::string divergence_source = "actual";
+    bool q_reference_for_servo_valid = false;
+    JointArray physical_q_actual_deg{};
+    JointArray reference_q_deg{};
+    JointArray divergence_q_deg{};
 };
 
 class CartesianServoController {
@@ -77,7 +91,8 @@ public:
         double dt_sec,
         uint64_t command_seq,
         CartesianServoPathState* path_state,
-        CartesianVelocityIntegratorState* velocity_integrator_state = nullptr
+        CartesianVelocityIntegratorState* velocity_integrator_state = nullptr,
+        const CartesianServoStateContext* state_context = nullptr
     );
 
     CartesianArmTargetResult computeTwistTarget(
@@ -88,7 +103,8 @@ public:
         double dt_sec,
         uint64_t command_seq,
         CartesianTwistHoldState* hold_state,
-        CartesianVelocityIntegratorState* velocity_integrator_state = nullptr
+        CartesianVelocityIntegratorState* velocity_integrator_state = nullptr,
+        const CartesianServoStateContext* state_context = nullptr
     );
 
     CartesianArmTargetResult computeCircleMoveTarget(
@@ -99,7 +115,8 @@ public:
         double dt_sec,
         uint64_t command_seq,
         CartesianCircleMoveState* circle_state,
-        CartesianVelocityIntegratorState* velocity_integrator_state = nullptr
+        CartesianVelocityIntegratorState* velocity_integrator_state = nullptr,
+        const CartesianServoStateContext* state_context = nullptr
     );
 
     void updateVelocityIntegratorAfterSafety(

@@ -5,6 +5,7 @@ import math
 import os
 import socket
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -28,6 +29,7 @@ from rb_servo_gui.app import (
     _format_cartesian_solve_status,
     _format_circle_overlay_status,
     _format_fk_status,
+    _format_scene_asset_status,
     _format_joint_monitor_value,
     _format_joints,
     _format_stand_world_pose_value,
@@ -72,7 +74,7 @@ from rb_servo_gui import geometry as gui_geometry
 from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnapshot, Pose6D
 from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from rb_servo_gui.safety import OperatorSafety, Readiness, normalize_observed_mode_backend
-from rb_servo_gui.scene import _circle_overlay_points, update_circle_overlay
+from rb_servo_gui.scene import _add_robot_urdfs, _circle_overlay_points, _robot_urdf_path, update_circle_overlay
 from rb_servo_gui.state_receiver import StateStore
 
 
@@ -437,11 +439,34 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(latest.left.selected_tcp_pose("actual").as_tuple(), (0.32, 0.13, 0.45, 0.0, 0.0, 0.0))
         self.assertEqual(latest.left.selected_tcp_source("both"), "tcp_ref_stand")
 
+    def test_auto_tcp_selection_prefers_reference_when_tracking_source_is_tcp_ref_stand(self):
+        state = self.tcp_available_state()
+        state["left"]["tcp_ref_stand"] = {"x": 0.41, "y": 0.21, "z": 0.51, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+        state["left"]["tcp_ref_valid"] = True
+        state["left"]["tcp_tracking_source"] = "tcp_ref_stand"
+        state["left"]["tcp_tracking_source_recommendation"] = None
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        self.assertEqual(latest.left.selected_tcp_source("auto"), "tcp_ref_stand")
+        self.assertEqual(latest.left.selected_tcp_pose("auto").as_tuple(), (0.41, 0.21, 0.51, 0.0, 0.0, 0.0))
+
+    def test_auto_tcp_selection_prefers_reference_for_controller_simulation_recommendation(self):
+        state = self.tcp_available_state()
+        state["left"]["tcp_ref_stand"] = {"x": 0.42, "y": 0.22, "z": 0.52, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+        state["left"]["tcp_ref_valid"] = True
+        state["left"]["tcp_tracking_source"] = None
+        state["left"]["tcp_tracking_source_recommendation"] = "reference_for_controller_simulation"
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        self.assertEqual(latest.left.selected_tcp_source("auto"), "tcp_ref_stand")
+        self.assertEqual(latest.left.selected_tcp_pose("auto").as_tuple(), (0.42, 0.22, 0.52, 0.0, 0.0, 0.0))
+
     def test_auto_tcp_selection_falls_back_to_actual_when_reference_is_invalid(self):
         state = self.tcp_available_state()
         state["left"]["tcp_ref_stand"] = {"x": 0.41, "y": 0.21, "z": 0.51, "rx": 0.0, "ry": 0.0, "rz": 0.0}
         state["left"]["tcp_ref_valid"] = False
-        state["left"]["tcp_tracking_source_recommendation"] = "tcp_ref_stand"
+        state["left"]["tcp_tracking_source"] = "tcp_ref_stand"
+        state["left"]["tcp_tracking_source_recommendation"] = "reference_for_controller_simulation"
         store, _, _ = self.make_safety(state)
         latest = store.latest()
         self.assertEqual(latest.left.selected_tcp_source("auto"), "tcp_actual_stand")
@@ -495,6 +520,7 @@ class GuiContractsTest(unittest.TestCase):
     def test_circle_overlay_bind_cli_env_and_none(self):
         self.assertEqual(parse_udp_bind("udp://127.0.0.1:50261"), ("127.0.0.1", 50261))
         self.assertIsNone(parse_udp_bind("none"))
+        self.assertTrue(parse_args(["--check-assets"]).check_assets)
         self.assertEqual(
             _circle_overlay_bind_from_args_env(parse_args(["--circle-overlay-bind", "udp://127.0.0.1:50261"])),
             ("127.0.0.1", 50261),
@@ -510,6 +536,48 @@ class GuiContractsTest(unittest.TestCase):
                 os.environ.pop("RB_GUI_CIRCLE_OVERLAY_BIND", None)
             else:
                 os.environ["RB_GUI_CIRCLE_OVERLAY_BIND"] = old_value
+
+    def test_robot_urdf_path_uses_descriptions_dir_env(self):
+        descriptions_dir = Path(__file__).resolve().parents[2] / "rb_servo_server" / "descriptions"
+        old_value = os.environ.get("RB_GUI_DESCRIPTIONS_DIR")
+        try:
+            os.environ["RB_GUI_DESCRIPTIONS_DIR"] = str(descriptions_dir)
+            self.assertEqual(_robot_urdf_path(), descriptions_dir / "urdf" / "rb3_730e.urdf")
+            self.assertTrue(_robot_urdf_path().exists())
+        finally:
+            if old_value is None:
+                os.environ.pop("RB_GUI_DESCRIPTIONS_DIR", None)
+            else:
+                os.environ["RB_GUI_DESCRIPTIONS_DIR"] = old_value
+
+    def test_missing_robot_urdf_reports_clear_error_string(self):
+        old_value = os.environ.get("RB_GUI_DESCRIPTIONS_DIR")
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                os.environ["RB_GUI_DESCRIPTIONS_DIR"] = tmpdir
+                handles: dict[str, object] = {}
+                _add_robot_urdfs(object(), handles)
+                self.assertIn("urdf_error", handles)
+                self.assertIn("robot URDF not found", str(handles["urdf_error"]))
+                self.assertIn("Install with python3 -m pip install -e rb_gui", str(handles["urdf_error"]))
+        finally:
+            if old_value is None:
+                os.environ.pop("RB_GUI_DESCRIPTIONS_DIR", None)
+            else:
+                os.environ["RB_GUI_DESCRIPTIONS_DIR"] = old_value
+
+    def test_scene_asset_status_formats_error_keys_and_hint(self):
+        status = _format_scene_asset_status(
+            {
+                "urdf_error": "robot URDF not found: /tmp/missing.urdf",
+                "stand_mesh_error": "stand mesh not found: /tmp/missing.stl",
+                "urdf_update_error": "RuntimeError: bad joint config",
+            }
+        )
+        self.assertIn("urdf_error=robot URDF not found", status)
+        self.assertIn("stand_mesh_error=stand mesh not found", status)
+        self.assertIn("urdf_update_error=RuntimeError: bad joint config", status)
+        self.assertIn("Install with python3 -m pip install -e rb_gui", status)
 
     def test_parser_accepts_legacy_tcp_pose_without_quaternion(self):
         pose = Pose6D.parse({"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": 0.0})
@@ -1738,10 +1806,11 @@ class GuiContractsTest(unittest.TestCase):
         store, _, _ = self.make_safety(state)
         status = _format_tcp_tracking_status(store.latest(), stale=False, display_mode="auto")
         self.assertIn("TCP tracking:", status)
-        self.assertIn("left display=auto selected=tcp_ref_stand", status)
+        self.assertIn("left display=auto selected_source=tcp_ref_stand", status)
         self.assertIn("actual_valid=True", status)
         self.assertIn("ref_valid=True", status)
-        self.assertIn("recommendation=tcp_ref_stand", status)
+        self.assertIn("tcp_tracking_source=tcp_ref_stand", status)
+        self.assertIn("tcp_tracking_source_recommendation=tcp_ref_stand", status)
         self.assertIn("physical_motion_expected=False", status)
         self.assertIn("diagnostics_override=True", status)
         self.assertEqual(_format_tcp_tracking_status(store.latest(), stale=True), "State stream stale")
