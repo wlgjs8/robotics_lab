@@ -84,7 +84,12 @@ safety:
 
 network:
   command_bind: "udp://127.0.0.1:50052"
-  state_pub_endpoint: "udp://127.0.0.1:50152"
+  # State fanout is robot/server telemetry. The desired-circle live overlay is
+  # benchmark-owned and should be sent with
+  # --overlay-pub-endpoint udp://127.0.0.1:50261, not added here.
+  state_pub_endpoints:
+    - "udp://127.0.0.1:50152"  # benchmark recorder
+    - "udp://127.0.0.1:50162"  # rb_gui live viewer
   state_pub_rate_hz: 50
   command_source_allowlist: ["127.0.0.1/32"]
 
@@ -129,9 +134,13 @@ kinematics:
 cartesian_control:
   enable: true
   allow_in_simulation: true
-  allow_in_real: true
-  # Real-mode parser rejects server-side benchmark primitives. Controller-box
-  # circle evidence must use the dedicated pgmode simulation gate/runner.
+  allow_in_real: false
+  # Controller pgmode simulation only; physical robot should not move.
+  # Requires RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1.
+  # Do not use for physical real Cartesian motion.
+  allow_in_controller_simulation: true
+  # Server-side circle primitives remain disabled; the controller-simulation
+  # runner streams TcpTwist* commands through the dedicated pgmode gate.
   enable_benchmark_primitives: false
   warn_ik_duration_us: 3000
   fail_ik_duration_us: 5000

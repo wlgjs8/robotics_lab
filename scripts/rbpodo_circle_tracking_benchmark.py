@@ -37,7 +37,7 @@ from rbpodo_servo_acceptance import (
     env_snapshot,
     load_config,
     parse_udp_endpoint,
-    simple_yaml_sections,
+    scalar_value,
     state_stream_timeout_message,
 )
 
@@ -206,9 +206,69 @@ def required_speed(args: argparse.Namespace) -> float:
 
 
 def endpoint_from_config(config: ParsedConfig, key: str, default: str) -> tuple[str, int, str]:
-    endpoint = str(config.network.get(key, default))
+    value = config.network.get(key)
+    if value is None and key == "state_pub_endpoint":
+        endpoints = config.network.get("state_pub_endpoints")
+        if endpoints is not None:
+            if not isinstance(endpoints, list) or not endpoints:
+                raise BenchmarkError("network.state_pub_endpoints must be a non-empty list")
+            value = endpoints[0]
+    endpoint = str(value if value is not None else default)
     host, port = parse_udp_endpoint(endpoint)
     return host, port, endpoint
+
+
+def fallback_yaml_sections(path: Path) -> dict[str, dict[str, Any]]:
+    sections: dict[str, dict[str, Any]] = {}
+    current: str | None = None
+    pending_list_key: str | None = None
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        text = line.strip()
+        if indent == 0 and text.endswith(":"):
+            current = text[:-1]
+            sections[current] = {}
+            pending_list_key = None
+            continue
+        if current is None:
+            continue
+        if indent == 2 and ":" in text:
+            key, value = text.split(":", 1)
+            key = key.strip()
+            if value.strip():
+                sections[current][key] = sim_bench.scalar_value(value)
+                pending_list_key = None
+            else:
+                sections[current][key] = []
+                pending_list_key = key
+            continue
+        if indent == 4 and pending_list_key is not None and text.startswith("- "):
+            item = text[2:].strip()
+            items = sections[current].setdefault(pending_list_key, [])
+            if isinstance(items, list):
+                items.append(scalar_value(item))
+    return sections
+
+
+def yaml_sections(path: Path) -> dict[str, dict[str, Any]]:
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return fallback_yaml_sections(path)
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise BenchmarkError(f"failed to parse YAML config {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise BenchmarkError("server config must be a YAML object")
+    sections: dict[str, dict[str, Any]] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            sections[str(key)] = value
+    return sections
 
 
 def selected_arm_config(config: ParsedConfig, arm: str) -> Any:
@@ -543,7 +603,11 @@ def preflight(args: argparse.Namespace) -> tuple[ParsedConfig, dict[str, dict[st
             file=sys.stderr,
         )
     config = load_config(args.server_config)
-    sections = simple_yaml_sections(args.server_config)
+    sections = yaml_sections(args.server_config)
+    if "servo" in sections:
+        config.servo = sections["servo"]
+    if "network" in sections:
+        config.network = sections["network"]
     preflight_result, endpoints = validate_config_and_env(args, config, sections)
     return config, sections, preflight_result, endpoints
 

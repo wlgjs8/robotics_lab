@@ -1,0 +1,2 @@
+[console_scripts]
+rb-servo-gui = rb_servo_gui.app:main

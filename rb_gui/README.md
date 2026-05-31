@@ -27,6 +27,19 @@ not carry commands.
 Run the GUI against the fanout state port and overlay port:
 
 ```bash
+tools/rbpodo_circle_gui.sh --profile stable
+```
+
+The stable profile listens on state port `50161`; the GENE-style stress
+profile uses:
+
+```bash
+tools/rbpodo_circle_gui.sh --profile gene
+```
+
+The equivalent manual command is:
+
+```bash
 PYTHONPATH=rb_gui \
 RB_GUI_STATE_BIND=0.0.0.0 \
 RB_GUI_STATE_PORT=50161 \

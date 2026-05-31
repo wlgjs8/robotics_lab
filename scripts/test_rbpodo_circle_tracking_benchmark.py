@@ -40,7 +40,14 @@ class EnvGuard:
                 os.environ[name] = value
 
 
-def write_config(path: Path, *, operation_mode: str = "simulation") -> None:
+def write_config(path: Path, *, operation_mode: str = "simulation", state_fanout: bool = False) -> None:
+    state_network = (
+        '  state_pub_endpoints:\n'
+        '    - "udp://127.0.0.1:50151"\n'
+        '    - "udp://127.0.0.1:50161"\n'
+        if state_fanout
+        else '  state_pub_endpoint: "udp://127.0.0.1:50151"\n'
+    )
     path.write_text(
         f"""schema: robotics_lab.rb_servo_server.v1
 left_robot:
@@ -70,7 +77,7 @@ servo:
   allow_controller_simulation_diagnostics_suspect: false
 network:
   command_bind: "udp://127.0.0.1:50051"
-  state_pub_endpoint: "udp://127.0.0.1:50151"
+{state_network.rstrip()}
 cartesian_control:
   enable: true
   allow_in_simulation: true
@@ -218,6 +225,23 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
             args = make_args(tmp, config, pgmode, i_confirm_controller_is_in_pgmode_simulation=False)
             with self.assertRaisesRegex(bench.BenchmarkError, "i-confirm-controller"):
                 bench.preflight(args)
+
+    def test_preflight_uses_first_state_pub_endpoint_from_fanout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text, EnvGuard():
+            tmp = Path(tmp_text)
+            config = tmp / "config.yaml"
+            pgmode = tmp / "pgmode.json"
+            write_config(config, state_fanout=True)
+            write_pgmode_summary(pgmode)
+            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
+            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
+            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
+            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
+            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
+            args = make_args(tmp, config, pgmode)
+            _config, _sections, preflight, endpoints = bench.preflight(args)
+            self.assertEqual(preflight["state_endpoint"], "udp://127.0.0.1:50151")
+            self.assertEqual(endpoints["state_port"], 50151)
 
     def test_tracking_source_auto_chooses_tcp_ref(self) -> None:
         source, warning = bench.select_tracking_source(

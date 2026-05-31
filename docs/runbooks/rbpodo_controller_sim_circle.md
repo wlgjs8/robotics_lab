@@ -219,6 +219,107 @@ Rebuilding or replacing `rb_servo_server/build/rbpodo_real_gate/rb_servo_server`
 removes these capabilities. Re-run `setcap` after every rebuild before
 starting a controller-simulation benchmark.
 
+## Convenience Wrapper Workflow
+
+The manual commands below remain the source-of-truth sequence, but these
+wrappers cover the common live GUI plus benchmark workflow with shorter
+commands. They do not weaken safety gates.
+
+Prepare local configs, optionally build the rbpodo server, apply realtime
+capabilities, check controller command/data TCP ports, and set controller
+`pgmode` simulation:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+tools/rbpodo_circle_prepare.sh \
+  --create-local-configs \
+  --build \
+  --setcap \
+  --check-ports \
+  --set-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller
+```
+
+Use `--force-local-configs` only when you intentionally want to overwrite
+operator-local configs after reviewing local edits. Rebuilding the server
+removes Linux capabilities, so rerun `tools/rbpodo_circle_prepare.sh --setcap`
+after every rebuild. If you want to verify `pgmode` without sending
+`pgmode simulation`, replace `--set-pgmode-simulation` with
+`--verify-pgmode-simulation`.
+
+Start the GUI for the stable profile:
+
+```bash
+tools/rbpodo_circle_gui.sh --profile stable
+```
+
+Start the GUI for the GENE-style stress profile:
+
+```bash
+tools/rbpodo_circle_gui.sh --profile gene
+```
+
+The GUI wrapper binds the server fanout state port and the benchmark overlay
+port. It only receives telemetry and does not send robot commands. It refuses
+to start if another local process is already listening on the selected UDP
+ports unless `--force` is passed.
+
+Run the stable 15 cm / 16 s controller-simulation benchmark:
+
+```bash
+tools/rbpodo_circle_benchmark.sh \
+  --profile stable \
+  --arm left \
+  --with-required-env \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+Run the GENE-style 15 cm / 4 s stress benchmark:
+
+```bash
+tools/rbpodo_circle_benchmark.sh \
+  --profile gene \
+  --arm left \
+  --with-required-env \
+  --feedback-kp-pos 2.0 \
+  --feedback-kp-ori 2.0 \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+`--with-required-env` is an explicit opt-in that exports:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1
+RB_ALLOW_REAL_MOTION=1
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
+```
+
+If `--with-required-env` is omitted, the benchmark wrapper prints any missing
+env vars and exits. The wrapper still requires both confirmation flags. It
+defaults to `--set-pgmode-simulation`; pass `--verify-pgmode-simulation` when
+you want a verify-only pgmode check.
+
+Before launching the benchmark, the wrapper checks the local config and refuses
+stale or dangerous settings:
+
+- `cartesian_control.allow_in_real: true`
+- missing `cartesian_control.allow_in_controller_simulation: true`
+- missing `network.state_pub_endpoints`
+- any arm without `backend_type: rbpodo`
+- any arm without `operation_mode: simulation`
+- missing realtime capabilities on the server binary, unless
+  `--allow-no-realtime` is passed explicitly
+
+Artifacts are written under:
+
+```text
+artifacts/rbpodo_circle/<timestamp>_<profile>_<arm>
+```
+
 Create operator-local circle configs from the tracked templates:
 
 ```bash

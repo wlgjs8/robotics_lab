@@ -242,6 +242,7 @@ low-speed parameter selection, but cannot be copied directly to real motion.
 48. BENCH-OVERLAY-UDP-01 adds a telemetry-only UDP overlay from the rbpodo circle benchmark for desired circle geometry and live metrics. The overlay writes `overlay_stream.jsonl`, publishes at a bounded rate, and never replaces the server state stream or carries robot commands.
 49. RBPODO-CIRCLE-LIVE-RUNBOOK-01 documents the live `rb_gui` workflow for rbpodo controller-simulation circle benchmarks: server state fanout feeds benchmark and GUI ports, benchmark overlay feeds the GUI overlay port, `tcp_ref_stand` is the pgmode tracking source, `physical_motion_expected=false` remains visible, and `policy_runner` is separate from this visualization path.
 50. POLICY-DATASET-SCHEMA-01 defines additive policy/teleop dataset metadata for simulator, rbpodo controller `pgmode` simulation, and future physical real demonstrations. The policy recorder preserves optional actual/reference TCP, q_ref/q_target, ACK, diagnostics, command source, and SpaceMouse fields without changing command paths or weakening deadman, lease, or real-motion gates.
+51. RBPODO-CIRCLE-UX-01 adds convenience wrappers for rbpodo controller-simulation circle bring-up, GUI launch, and benchmark execution. The wrappers validate local configs, require explicit confirmation for controller access, refuse physical-real Cartesian settings, keep `RB_ALLOW_*` env gates opt-in, and do not send GUI commands.
 
 ## Reviewer Checklist
 
