@@ -299,6 +299,52 @@ def apply_config_overrides_text(text: str, overrides: dict[str, Any]) -> str:
     return "\n".join(output) + ("\n" if text.endswith("\n") else "")
 
 
+def yaml_unquote_scalar(value: str) -> str:
+    value = sim_ablation.strip_comment(value).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def resolve_config_relative_path(raw_path: str, source_config: Path) -> Path:
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path
+    candidates = [
+        source_config.parent / path,
+        source_config.parent.parent / path,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[0].resolve()
+
+
+def resolve_config_relative_paths_text(text: str, source_config: Path) -> str:
+    """Make copied configs independent of the artifact directory location."""
+    lines = text.splitlines()
+    output: list[str] = []
+    current_section: str | None = None
+
+    for raw_line in lines:
+        stripped_without_comment = sim_ablation.strip_comment(raw_line).rstrip()
+        stripped = stripped_without_comment.strip()
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if indent == 0 and stripped.endswith(":") and ":" not in stripped[:-1]:
+            current_section = stripped[:-1]
+            output.append(raw_line)
+            continue
+        if current_section == "kinematics" and indent == 2 and stripped.startswith("urdf:"):
+            raw_value = stripped.split(":", 1)[1]
+            urdf_path = yaml_unquote_scalar(raw_value)
+            if urdf_path and "://" not in urdf_path:
+                resolved = resolve_config_relative_path(urdf_path, source_config)
+                output.append(f"{' ' * indent}urdf: {json.dumps(str(resolved))}")
+                continue
+        output.append(raw_line)
+    return "\n".join(output) + ("\n" if text.endswith("\n") else "")
+
+
 def scaled(summary: dict[str, Any], key: str, factor: float) -> float | None:
     value = finite_number(summary.get(key))
     return value * factor if value is not None else None
@@ -465,6 +511,7 @@ def prepare_experiment_config(root: Path, exp: dict[str, Any], exp_dir: Path) ->
     overrides = config_overrides(exp)
     text = base_config.read_text(encoding="utf-8")
     resolved_text = apply_config_overrides_text(text, overrides)
+    resolved_text = resolve_config_relative_paths_text(resolved_text, base_config)
     exp_dir.mkdir(parents=True, exist_ok=True)
     resolved_config = exp_dir / "resolved_server_config.yaml"
     resolved_config.write_text(resolved_text, encoding="utf-8")

@@ -222,6 +222,36 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             self.assertEqual(meta["speed_bar_left"], 0.2)
             self.assertTrue(meta["source_config_unchanged"])
 
+    def test_relative_urdf_path_resolves_from_source_config_not_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            root = Path(tmp_text)
+            config_dir = root / "rb_servo_server" / "config" / "local"
+            description_dir = root / "rb_servo_server" / "descriptions" / "urdf"
+            config_dir.mkdir(parents=True)
+            description_dir.mkdir(parents=True)
+            urdf = description_dir / "rb3_730e.urdf"
+            urdf.write_text("<robot name=\"test\" />\n", encoding="utf-8")
+            config = config_dir / "config.yaml"
+            write_config(config)
+            config.write_text(
+                config.read_text(encoding="utf-8")
+                + "\nkinematics:\n  urdf: \"../descriptions/urdf/rb3_730e.urdf\"\n",
+                encoding="utf-8",
+            )
+            source_text = config.read_text(encoding="utf-8")
+            exp = {
+                "name": "gene",
+                "config": "rb_servo_server/config/local/config.yaml",
+                "profile": "gene_15cm_4s",
+                "controller": "twist_stand",
+                "arm": "left",
+                "config_overrides": {"network.state_pub_rate_hz": 100},
+            }
+            meta = ablation.prepare_experiment_config(root, exp, root / "artifacts" / "01_gene")
+            resolved = Path(meta["resolved_config_path"]).read_text(encoding="utf-8")
+            self.assertIn(f'urdf: "{urdf.resolve()}"', resolved)
+            self.assertEqual(config.read_text(encoding="utf-8"), source_text)
+
     def test_matrix_yaml_config_overrides_parse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             root = Path(tmp_text)
