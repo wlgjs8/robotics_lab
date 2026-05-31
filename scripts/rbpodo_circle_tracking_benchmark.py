@@ -78,6 +78,12 @@ class BenchmarkError(RuntimeError):
     pass
 
 
+class StartupFaultError(BenchmarkError):
+    def __init__(self, message: str, details: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.details = details
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -325,6 +331,206 @@ def valid_rbpodo_state(snapshot: dict[str, Any], arm: str, source: str | None = 
     if source is None:
         return True
     return source_valid(snapshot, arm, source)
+
+
+def finite_joint_values(value: Any) -> list[float] | None:
+    if not isinstance(value, list) or len(value) != 6:
+        return None
+    numbers = [finite_number(item) for item in value]
+    if any(item is None for item in numbers):
+        return None
+    return [float(item) for item in numbers if item is not None]
+
+
+def state_excerpt(snapshot: dict[str, Any], arm: str) -> dict[str, Any]:
+    top_keys = (
+        "schema_version",
+        "host_time_ns",
+        "motion_state",
+        "safety_verdict",
+        "fault_latched",
+        "latched_fault_reason",
+        "fault_reason",
+        "fault_context",
+    )
+    arm_keys = (
+        "has_valid_joint_state",
+        "diagnostic_error_source",
+        "lifecycle_state",
+        "q_actual_deg",
+        "q_target_deg",
+        "q_ref_deg",
+        "q_sent_deg",
+        "tcp_ref_valid",
+        "tcp_actual_valid",
+        "tracking_error_source",
+        "tracking_error_source_valid",
+        "command_reference_tracking_error_deg",
+        "physical_command_actual_error_deg",
+        "controller_simulation_physical_motion_detected",
+        "controller_simulation_diagnostic_override_active",
+    )
+    excerpt = {key: snapshot.get(key) for key in top_keys if key in snapshot}
+    arm_state = snapshot.get(arm)
+    if isinstance(arm_state, dict):
+        arm_excerpt = {key: arm_state.get(key) for key in arm_keys if key in arm_state}
+        solve = arm_state.get("cartesian_solve")
+        if isinstance(solve, dict):
+            arm_excerpt["cartesian_solve"] = {
+                key: solve.get(key)
+                for key in (
+                    "status",
+                    "reason",
+                    "cartesian_servo_state_source",
+                    "cartesian_divergence_source",
+                    "q_reference_for_servo_valid",
+                    "command_reference_error_deg_observed",
+                    "physical_command_actual_error_deg_observed",
+                    "max_command_actual_error_deg_observed",
+                    "integrator_resets_total",
+                    "integrator_divergence_total",
+                )
+                if key in solve
+            }
+        worker = arm_state.get("worker")
+        if isinstance(worker, dict):
+            arm_excerpt["worker"] = {
+                key: worker.get(key)
+                for key in ("state", "last_error", "last_error_kind")
+                if key in worker
+            }
+        excerpt[arm] = arm_excerpt
+    return excerpt
+
+
+def q_actual_target_error_summary(snapshot: dict[str, Any], arm: str) -> dict[str, Any]:
+    arm_state = snapshot.get(arm)
+    if not isinstance(arm_state, dict):
+        return {"arm_state_available": False}
+    q_actual = finite_joint_values(arm_state.get("q_actual_deg"))
+    summary: dict[str, Any] = {
+        "arm_state_available": True,
+        "q_actual_available": q_actual is not None,
+    }
+    for key, label in (
+        ("q_target_deg", "q_target"),
+        ("q_ref_deg", "q_ref"),
+        ("q_sent_deg", "q_sent"),
+    ):
+        q_other = finite_joint_values(arm_state.get(key))
+        summary[f"{label}_available"] = q_other is not None
+        if q_actual is not None and q_other is not None:
+            errors = [abs(actual - target) for actual, target in zip(q_actual, q_other)]
+            summary[f"q_actual_to_{label}_max_abs_error_deg"] = max(errors)
+            summary[f"q_actual_to_{label}_error_deg"] = errors
+        else:
+            summary[f"q_actual_to_{label}_max_abs_error_deg"] = None
+    return summary
+
+
+def safety_tracking_excerpt(snapshot: dict[str, Any], arm: str) -> dict[str, Any]:
+    arm_state = snapshot.get(arm)
+    if not isinstance(arm_state, dict):
+        return {}
+    keys = (
+        "tracking_error_source",
+        "tracking_error_source_valid",
+        "command_reference_tracking_error_deg",
+        "physical_command_actual_error_deg",
+        "controller_simulation_physical_motion_detected",
+    )
+    out = {key: arm_state.get(key) for key in keys if key in arm_state}
+    solve = arm_state.get("cartesian_solve")
+    if isinstance(solve, dict):
+        for key in (
+            "cartesian_servo_state_source",
+            "cartesian_divergence_source",
+            "command_reference_error_deg_observed",
+            "physical_command_actual_error_deg_observed",
+            "q_reference_for_servo_valid",
+        ):
+            if key in solve:
+                out[key] = solve.get(key)
+    return out
+
+
+def tracking_error_source_hint(snapshot: dict[str, Any], arm: str) -> str | None:
+    safety = safety_tracking_excerpt(snapshot, arm)
+    source = safety.get("tracking_error_source")
+    if isinstance(source, str) and source:
+        return source
+    solve_source = safety.get("cartesian_divergence_source")
+    if isinstance(solve_source, str) and solve_source:
+        return solve_source
+    return None
+
+
+def startup_fault_hints(snapshot: dict[str, Any], arm: str) -> list[str]:
+    latched = str(snapshot.get("latched_fault_reason") or "")
+    source = tracking_error_source_hint(snapshot, arm)
+    hints: list[str] = []
+    if latched == "TrackingError" and source == "reference":
+        hints.extend(
+            [
+                "q_target/q_ref may differ from the startup previous target",
+                "initialize prev_sent from reference before starting controller-simulation tracking",
+                "reset pgmode simulation reference to q_actual before running",
+            ]
+        )
+    elif latched == "TrackingError":
+        hints.append("inspect q_actual/q_target startup tracking error before retrying")
+    return hints
+
+
+def server_returncode_text(proc: subprocess.Popen[str] | None) -> int | str | None:
+    if proc is None:
+        return None
+    returncode = proc.poll()
+    return returncode if returncode is not None else "still running"
+
+
+def build_startup_fault_details(
+    snapshot: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    state_packets_received: int,
+    proc: subprocess.Popen[str] | None,
+    state_endpoint: str,
+) -> dict[str, Any]:
+    latched = snapshot.get("latched_fault_reason") or "unknown"
+    fault_reason = snapshot.get("fault_reason") or "no fault reason reported"
+    details = {
+        "category": "startup_fault",
+        "result": "startup_fault",
+        "result_reason": f"startup fault latched: {latched}: {fault_reason}",
+        "state_packets_received": state_packets_received,
+        "state_endpoint": state_endpoint,
+        "server_returncode": server_returncode_text(proc),
+        "latched_fault_reason": snapshot.get("latched_fault_reason"),
+        "fault_reason": snapshot.get("fault_reason"),
+        "fault_context": snapshot.get("fault_context"),
+        "safety_tracking": safety_tracking_excerpt(snapshot, args.arm),
+        "q_actual_target_error_summary": q_actual_target_error_summary(snapshot, args.arm),
+        "latest_state_excerpt": state_excerpt(snapshot, args.arm),
+    }
+    details["startup_fault_hints"] = startup_fault_hints(snapshot, args.arm)
+    return details
+
+
+def startup_fault_message(details: dict[str, Any]) -> str:
+    parts = [
+        "rb_servo_server published a fault-latched startup state",
+        "state packets were received; this is not a state stream timeout",
+        f"state_endpoint={details.get('state_endpoint')}",
+        f"server_returncode={details.get('server_returncode')}",
+        f"latched_fault_reason={details.get('latched_fault_reason')}",
+        f"fault_reason={details.get('fault_reason')}",
+    ]
+    hints = details.get("startup_fault_hints")
+    if isinstance(hints, list) and hints:
+        parts.append("startup_fault_hints:")
+        parts.extend(f"- {hint}" for hint in hints)
+    return "\n".join(parts)
 
 
 def select_tracking_source(requested: str, snapshot: dict[str, Any], arm: str) -> tuple[str, str | None]:
@@ -659,13 +865,42 @@ def wait_for_state_source(
     state_endpoint: str,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_sec
-    while time.monotonic() < deadline:
-        for snapshot in capture.snapshots:
+    scanned_count = 0
+    latest_snapshot: dict[str, Any] | None = None
+    while True:
+        snapshots = list(capture.snapshots)
+        for snapshot in snapshots[scanned_count:]:
+            latest_snapshot = snapshot
             if valid_rbpodo_state(snapshot, args.arm):
                 return snapshot
+        scanned_count = len(snapshots)
         if proc is not None and proc.poll() is not None:
             break
+        if time.monotonic() >= deadline:
+            break
         time.sleep(0.02)
+    if latest_snapshot is not None:
+        if latest_snapshot.get("fault_latched") is True:
+            details = build_startup_fault_details(
+                latest_snapshot,
+                args,
+                state_packets_received=scanned_count,
+                proc=proc,
+                state_endpoint=state_endpoint,
+            )
+            raise StartupFaultError(startup_fault_message(details), details)
+        raise BenchmarkError(
+            "\n".join(
+                [
+                    "received rb_servo_server state packets, but none were valid for rbpodo circle startup",
+                    f"state_endpoint={state_endpoint}",
+                    f"server_returncode={server_returncode_text(proc)}",
+                    f"state_packets_received={scanned_count}",
+                    "latest_state_excerpt:",
+                    json.dumps(state_excerpt(latest_snapshot, args.arm), indent=2, sort_keys=True),
+                ]
+            )
+        )
     raise BenchmarkError(state_stream_timeout_message(proc, log_path, state_endpoint))
 
 
@@ -1955,6 +2190,32 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
 def failure_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
     artifact_dir = args.artifact_dir.resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    if isinstance(exc, StartupFaultError):
+        details = dict(exc.details)
+        failure = {
+            "schema": SCHEMA,
+            "result": "startup_fault",
+            "result_reason": details.get("result_reason") or "startup fault latched",
+            "error": str(exc),
+            "server_config": str(args.server_config.resolve()) if args.server_config else None,
+            "state_endpoint": details.get("state_endpoint"),
+            "server_returncode": details.get("server_returncode"),
+            "state_packets_received": details.get("state_packets_received"),
+            "latched_fault_reason": details.get("latched_fault_reason"),
+            "fault_reason": details.get("fault_reason"),
+            "fault_context": details.get("fault_context"),
+            "safety_tracking": details.get("safety_tracking"),
+            "q_actual_target_error_summary": details.get("q_actual_target_error_summary"),
+            "latest_state_excerpt": details.get("latest_state_excerpt"),
+            "startup_fault": details,
+            "safety_preflight": {"passed": False, "error": str(exc), "env": benchmark_env_snapshot()},
+            "threshold_failures": [details.get("result_reason") or str(exc)],
+            "performance_warnings": details.get("startup_fault_hints") or [],
+            "caveat": "rbpodo controller-simulation benchmark did not complete",
+        }
+        write_json(artifact_dir / "summary.json", failure)
+        write_summary_csv(artifact_dir / "summary.csv", failure)
+        return failure
     failure = {
         "schema": SCHEMA,
         "result": "error",

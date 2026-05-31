@@ -437,6 +437,48 @@ SafetyTrackingState trackingStateForArm(
     return tracking;
 }
 
+struct StartupTrackingTargetSelection {
+    JointArray q_deg{};
+    std::string source = "actual";
+    bool ok = true;
+    std::string reason;
+};
+
+StartupTrackingTargetSelection startupTrackingReferenceForArm(
+    const DualArmConfig& config,
+    ArmId arm_id,
+    const RobotState& state
+) {
+    StartupTrackingTargetSelection selection;
+    if (!controllerSimulationTrackingReferenceActive(config, arm_id)) {
+        selection.q_deg = state.q_actual_deg;
+        selection.source = "actual";
+        return selection;
+    }
+
+    selection.source = "reference";
+    selection.q_deg = state.q_target_deg;
+    if (!state.has_valid_joint_state || !finiteJointArray(state.q_target_deg)) {
+        selection.ok = false;
+        selection.reason = "controller_simulation_startup_reference_unavailable";
+    }
+    return selection;
+}
+
+void logStartupReferenceUnavailable(
+    ArmId arm_id,
+    const RobotState& state,
+    const StartupTrackingTargetSelection& selection
+) {
+    std::cerr << "[ERROR] controller-simulation startup reference unavailable: "
+              << (arm_id == ArmId::Left ? "left" : "right") << "\n"
+              << "  startup_previous_target_source=" << selection.source << "\n"
+              << "  reason=" << selection.reason << "\n"
+              << "  has_valid_joint_state=" << (state.has_valid_joint_state ? "true" : "false") << "\n"
+              << "  q_actual_deg=" << jointArrayDebugString(state.q_actual_deg) << "\n"
+              << "  q_target_deg=" << jointArrayDebugString(state.q_target_deg) << "\n";
+}
+
 struct CartesianServoStateSelection {
     RobotState state;
     CartesianServoStateContext context;
@@ -860,15 +902,10 @@ bool DualArmServoLoop::initializeRobots() {
     if (!states_read || !startupValidationAllowsStart(startup_validation)) {
         return false;
     }
+    if (!initializeStartupTargets(left, right)) {
+        return false;
+    }
     storeStartupValidation(startup_validation);
-    left_prev_sent_q_deg_ = left.q_actual_deg;
-    left_prevprev_sent_q_deg_ = left.q_actual_deg;
-    right_prev_sent_q_deg_ = right.q_actual_deg;
-    right_prevprev_sent_q_deg_ = right.q_actual_deg;
-    left_controller_sim_physical_baseline_q_deg_ = left.q_actual_deg;
-    right_controller_sim_physical_baseline_q_deg_ = right.q_actual_deg;
-    left_fault_hold_q_deg_ = left.q_actual_deg;
-    right_fault_hold_q_deg_ = right.q_actual_deg;
     setMotionState(ServerMotionState::ConnectedHold);
     if (readOnlyMode()) {
         std::cerr << "[INFO] servo send policy: read_only; backend sendServoJ calls are suppressed\n";
@@ -916,15 +953,12 @@ bool DualArmServoLoop::initializeWorkers() {
                 continue;
             }
             logStartupValidation(startup_validation, left, right);
+            if (!initializeStartupTargets(left, right)) {
+                left_worker_->stop();
+                right_worker_->stop();
+                return false;
+            }
             storeStartupValidation(startup_validation);
-            left_prev_sent_q_deg_ = left.q_actual_deg;
-            left_prevprev_sent_q_deg_ = left.q_actual_deg;
-            right_prev_sent_q_deg_ = right.q_actual_deg;
-            right_prevprev_sent_q_deg_ = right.q_actual_deg;
-            left_controller_sim_physical_baseline_q_deg_ = left.q_actual_deg;
-            right_controller_sim_physical_baseline_q_deg_ = right.q_actual_deg;
-            left_fault_hold_q_deg_ = left.q_actual_deg;
-            right_fault_hold_q_deg_ = right.q_actual_deg;
             setMotionState(ServerMotionState::ConnectedHold);
             if (readOnlyMode()) {
                 std::cerr << "[INFO] servo send policy: read_only; worker sendServoJ requests are suppressed\n";
@@ -1704,6 +1738,42 @@ bool DualArmServoLoop::readOnlyDiagnosticStartupEnabled() const {
         (config_.servo.allow_readonly_faulted_startup ||
          config_.servo.allow_readonly_q_range_violation_startup ||
          config_.servo.allow_readonly_wrong_mode_startup);
+}
+
+bool DualArmServoLoop::initializeStartupTargets(
+    const RobotState& left,
+    const RobotState& right
+) {
+    const StartupTrackingTargetSelection left_target =
+        startupTrackingReferenceForArm(config_, ArmId::Left, left);
+    const StartupTrackingTargetSelection right_target =
+        startupTrackingReferenceForArm(config_, ArmId::Right, right);
+
+    bool ok = true;
+    if (!left_target.ok) {
+        logStartupReferenceUnavailable(ArmId::Left, left, left_target);
+        ok = false;
+    }
+    if (!right_target.ok) {
+        logStartupReferenceUnavailable(ArmId::Right, right, right_target);
+        ok = false;
+    }
+    if (!ok) return false;
+
+    left_prev_sent_q_deg_ = left_target.q_deg;
+    left_prevprev_sent_q_deg_ = left_target.q_deg;
+    right_prev_sent_q_deg_ = right_target.q_deg;
+    right_prevprev_sent_q_deg_ = right_target.q_deg;
+    left_controller_sim_physical_baseline_q_deg_ = left.q_actual_deg;
+    right_controller_sim_physical_baseline_q_deg_ = right.q_actual_deg;
+    left_fault_hold_q_deg_ = left_target.q_deg;
+    right_fault_hold_q_deg_ = right_target.q_deg;
+
+    std::cerr << "[INFO] startup_previous_target_source"
+              << " left=" << left_target.source
+              << " right=" << right_target.source
+              << " physical_baseline_source=q_actual\n";
+    return true;
 }
 
 void DualArmServoLoop::logStartupValidation(

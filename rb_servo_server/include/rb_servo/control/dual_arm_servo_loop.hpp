@@ -64,6 +64,10 @@ private:
     ) const;
     bool startupValidationAllowsStart(const StartupValidationSnapshot& validation) const;
     bool readOnlyDiagnosticStartupEnabled() const;
+    bool initializeStartupTargets(
+        const RobotState& left,
+        const RobotState& right
+    );
     void logStartupValidation(
         const StartupValidationSnapshot& validation,
         const RobotState& left,

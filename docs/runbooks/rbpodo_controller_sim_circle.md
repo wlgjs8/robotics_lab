@@ -733,6 +733,16 @@ controller-simulation workflow, only with `operation_mode: simulation`, and
 only when the YAML explicitly allows the temporary diagnostics bridge. Do not
 use that override for physical real motion.
 
+If the benchmark reports `result: startup_fault`, the server did publish state
+packets, but the latest startup packet was already fault-latched. This is
+different from a state stream timeout. Inspect `summary.json` fields such as
+`latched_fault_reason`, `fault_context`, `safety_tracking`, and
+`q_actual_target_error_summary`. For `TrackingError` with reference tracking,
+common causes are a stale controller-simulation `q_target` / `q_ref` that
+differs from startup `q_actual`, a server build missing the startup-reference
+initialization fix, or a controller reference that should be reset to current
+joint state before retrying.
+
 `cartesian_control_unavailable` means the server rejected Cartesian command
 generation before attempting the circle. Check:
 
@@ -942,6 +952,15 @@ target against the controller reference joint state instead of physical
 is not a physical-real relaxation: `operation_mode: real` still uses
 `q_actual`, and any physical `q_actual` movement beyond the configured
 controller-simulation threshold is latched as a fault.
+
+When reference tracking is active, servo-loop startup also seeds
+`previous_sent`, `previous_previous_sent`, and the initial fault-hold target
+from the controller reference joints (`q_target` / `q_ref`) instead of
+physical `q_actual`. This prevents a stale controller-simulation reference
+from producing an immediate startup `TrackingError` when physical `q_actual`
+is stationary. The physical-motion baseline still comes from `q_actual`. If
+the startup reference is non-finite or unavailable, startup fails closed with
+`controller_simulation_startup_reference_unavailable`.
 
 ## Artifacts
 

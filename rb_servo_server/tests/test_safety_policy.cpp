@@ -850,48 +850,6 @@ bool runLeftTcpTwistStandCase(
     return true;
 }
 
-bool runLeftTcpTwistStandWithMissingReferenceCase(
-    rb_servo::DualArmConfig cfg,
-    rb_servo::ServoSnapshot* snapshot,
-    bool* left_twist_observed
-) {
-    rb_servo::CommandBuffer buffer;
-    const rb_servo::JointArray initial = joints(0.0);
-    rb_servo::JointArray invalid_reference = initial;
-    invalid_reference[0] = std::numeric_limits<double>::quiet_NaN();
-    auto kinematics = std::make_shared<FakeCartesianKinematics>();
-    rb_servo::DualArmServoLoop loop(
-        std::make_unique<TestBackend>(
-            rb_servo::ArmId::Left,
-            initial,
-            false,
-            rb_servo::BackendErrorKind::ControllerRejected,
-            invalid_reference,
-            true
-        ),
-        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
-        cfg,
-        &buffer,
-        nullptr,
-        kinematics
-    );
-    RB_CHECK(loop.start());
-    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
-    sleepTicks();
-    buffer.setCommand(leftTcpTwistStandCommand());
-    RB_CHECK(waitUntil([&] {
-        *snapshot = loop.latestSnapshot();
-        return (snapshot->fault_latched &&
-                snapshot->safety_verdict == rb_servo::SafetyVerdict::FaultLatched &&
-                snapshot->latched_fault_reason == rb_servo::SafetyVerdict::RobotStateError) ||
-               (snapshot->command.left.mode == rb_servo::ControlMode::TcpTwistStand &&
-                snapshot->safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-    }, std::chrono::milliseconds(1000)));
-    *left_twist_observed = kinematics->lastLeftTwist().has_value();
-    loop.stop();
-    return true;
-}
-
 rb_servo::BackendConfig rbsimBackendConfig(
     rb_servo::ArmId arm_id,
     const std::string& endpoint,
@@ -4379,6 +4337,120 @@ bool testStreamingCartesianSimulationStillAvailable() {
     return true;
 }
 
+bool testRbpodoControllerSimulationStartupReferenceSource() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    pgmode_confirmed.set("1");
+
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.safety.controller_simulation_tracking_error_source =
+        rb_servo::ControllerSimulationTrackingErrorSource::Reference;
+    cfg.safety.max_tracking_error_deg = 10.0;
+
+    const rb_servo::JointArray actual = joints(0.0);
+    rb_servo::JointArray reference = joints(20.0);
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left,
+            actual,
+            false,
+            rb_servo::BackendErrorKind::ControllerRejected,
+            reference,
+            true
+        ),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, actual, false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+    RB_CHECK(loop.start());
+    sleepTicks();
+    rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    rb_servo::ServoTarget previous = loop.previousSentTarget();
+    RB_CHECK(!snapshot.fault_latched);
+    RB_CHECK(sameJointArray(previous.left_q_target_deg, reference));
+    RB_CHECK(sameJointArray(previous.right_q_target_deg, actual));
+    loop.stop();
+
+    rb_servo::CommandBuffer physical_motion_buffer;
+    rb_servo::DualArmServoLoop physical_motion_loop(
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left,
+            actual,
+            false,
+            rb_servo::BackendErrorKind::ControllerRejected,
+            reference,
+            false
+        ),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, actual, false),
+        cfg,
+        &physical_motion_buffer,
+        nullptr
+    );
+    RB_CHECK(physical_motion_loop.start());
+    RB_CHECK(waitUntil([&] {
+        snapshot = physical_motion_loop.latestSnapshot();
+        return snapshot.fault_latched &&
+               snapshot.latched_fault_reason == rb_servo::SafetyVerdict::TrackingError &&
+               snapshot.fault_reason == "controller_simulation_physical_motion_detected";
+    }, std::chrono::milliseconds(1000)));
+    physical_motion_loop.stop();
+
+    rb_servo::DualArmConfig physical_real_cfg = cfg;
+    physical_real_cfg.left_robot.operation_mode = "real";
+    physical_real_cfg.right_robot.operation_mode = "real";
+    rb_servo::CommandBuffer physical_real_buffer;
+    rb_servo::DualArmServoLoop physical_real_loop(
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left,
+            actual,
+            false,
+            rb_servo::BackendErrorKind::ControllerRejected,
+            reference,
+            true
+        ),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, actual, false),
+        physical_real_cfg,
+        &physical_real_buffer,
+        nullptr
+    );
+    RB_CHECK(physical_real_loop.start());
+    sleepTicks();
+    previous = physical_real_loop.previousSentTarget();
+    snapshot = physical_real_loop.latestSnapshot();
+    RB_CHECK(!snapshot.fault_latched);
+    RB_CHECK(sameJointArray(previous.left_q_target_deg, actual));
+    physical_real_loop.stop();
+
+    rb_servo::JointArray invalid_reference = reference;
+    invalid_reference[0] = std::numeric_limits<double>::quiet_NaN();
+    rb_servo::CommandBuffer invalid_buffer;
+    rb_servo::DualArmServoLoop invalid_loop(
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left,
+            actual,
+            false,
+            rb_servo::BackendErrorKind::ControllerRejected,
+            invalid_reference,
+            true
+        ),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, actual, false),
+        cfg,
+        &invalid_buffer,
+        nullptr
+    );
+    RB_CHECK(!invalid_loop.start());
+    return true;
+}
+
 bool testRbpodoControllerSimulationStreamingCartesianGate() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
@@ -4450,24 +4522,6 @@ bool testRbpodoControllerSimulationStreamingCartesianGate() {
     RB_CHECK(physical_motion_snapshot.latched_fault_reason == rb_servo::SafetyVerdict::TrackingError);
     RB_CHECK(physical_motion_snapshot.fault_reason == "controller_simulation_physical_motion_detected");
     RB_CHECK(physical_motion_snapshot.left_safety_tracking.controller_simulation_physical_motion_detected);
-
-    rb_servo::ServoSnapshot missing_reference_snapshot;
-    bool missing_reference_twist_observed = false;
-    RB_CHECK(runLeftTcpTwistStandWithMissingReferenceCase(
-        cfg,
-        &missing_reference_snapshot,
-        &missing_reference_twist_observed
-    ));
-    RB_CHECK(missing_reference_snapshot.fault_latched);
-    RB_CHECK(missing_reference_snapshot.safety_verdict == rb_servo::SafetyVerdict::FaultLatched);
-    RB_CHECK(missing_reference_snapshot.latched_fault_reason == rb_servo::SafetyVerdict::RobotStateError);
-    RB_CHECK(missing_reference_snapshot.fault_reason ==
-             "controller_simulation_reference_state_unavailable");
-    RB_CHECK(missing_reference_snapshot.left_safety_tracking.tracking_error_source == "reference");
-    RB_CHECK(!missing_reference_snapshot.left_safety_tracking.tracking_error_source_valid);
-    RB_CHECK(missing_reference_snapshot.left_safety_tracking.tracking_error_reason ==
-             "controller_simulation_reference_state_unavailable");
-    RB_CHECK(!missing_reference_twist_observed);
 
     allow_controller_sim_cartesian.unset();
     rb_servo::ServoSnapshot missing_env_snapshot;
@@ -5288,6 +5342,7 @@ int main() {
     if (!testCartesianPoseTargetUsesIkInSimulation()) return 1;
     if (!testTcpLinearMoveUsesIkInSimulationOnly()) return 1;
     if (!testStreamingCartesianSimulationStillAvailable()) return 1;
+    if (!testRbpodoControllerSimulationStartupReferenceSource()) return 1;
     if (!testRbpodoControllerSimulationStreamingCartesianGate()) return 1;
     if (!testTcpCircleMoveSimulationOnlyAndConfigGated()) return 1;
     if (!testCartesianDeltaStandAndLocalUseIkInSimulation()) return 1;

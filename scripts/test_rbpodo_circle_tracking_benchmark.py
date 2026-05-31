@@ -160,9 +160,11 @@ def state(
     ref: dict[str, object] | None = None,
     actual: dict[str, object] | None = None,
     q_actual: list[float] | None = None,
+    q_target: list[float] | None = None,
     q_sent: list[float] | None = None,
     q_ref: list[float] | object | None = _MISSING,
     cartesian_solve: dict[str, object] | None = None,
+    tracking_error_source: str | None = None,
     fault_latched: bool = False,
     latched_fault_reason: str | None = None,
     fault_reason: str | None = None,
@@ -170,10 +172,14 @@ def state(
     arm_state: dict[str, object] = {
         "has_valid_joint_state": True,
         "q_actual_deg": q_actual or [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "q_target_deg": q_target or q_sent or q_actual or [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "q_sent_deg": q_sent or q_actual or [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "tcp_ref_valid": ref is not None,
         "tcp_actual_valid": actual is not None,
     }
+    if tracking_error_source is not None:
+        arm_state["tracking_error_source"] = tracking_error_source
+        arm_state["tracking_error_source_valid"] = True
     if q_ref is _MISSING:
         arm_state["q_ref_deg"] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     elif q_ref is not None:
@@ -204,6 +210,11 @@ def pose(x: float, y: float, z: float = 0.0) -> dict[str, object]:
         "rz": 0.0,
         "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
     }
+
+
+class FakeCapture:
+    def __init__(self, snapshots: list[dict[str, object]]) -> None:
+        self.snapshots = snapshots
 
 
 class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
@@ -278,6 +289,99 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
     def test_tracking_source_auto_fails_without_tcp_ref(self) -> None:
         with self.assertRaisesRegex(bench.BenchmarkError, "tcp_ref_stand"):
             bench.select_tracking_source("auto", state(100, actual=pose(0.0, 0.0)), "left")
+
+    def test_startup_wait_reports_fault_latched_packet_as_startup_fault(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            args = make_args(tmp, tmp / "config.yaml", tmp / "pgmode.json")
+            snapshot = state(
+                100,
+                q_actual=[0.0, 0, 0, 0, 0, 0],
+                q_target=[12.0, 0, 0, 0, 0, 0],
+                tracking_error_source="reference",
+                fault_latched=True,
+                latched_fault_reason="TrackingError",
+                fault_reason="reference tracking error exceeded threshold",
+            )
+            with self.assertRaises(bench.StartupFaultError) as raised:
+                bench.wait_for_state_source(  # type: ignore[arg-type]
+                    FakeCapture([snapshot]),
+                    args,
+                    0.0,
+                    None,
+                    tmp / "rb_servo_server.log",
+                    "udp://127.0.0.1:50151",
+                )
+            details = raised.exception.details
+            self.assertEqual(details["category"], "startup_fault")
+            self.assertEqual(details["latched_fault_reason"], "TrackingError")
+            self.assertEqual(details["state_packets_received"], 1)
+            self.assertEqual(
+                details["q_actual_target_error_summary"]["q_actual_to_q_target_max_abs_error_deg"],
+                12.0,
+            )
+            self.assertIn("initialize prev_sent from reference", "\n".join(details["startup_fault_hints"]))
+
+    def test_startup_wait_without_packets_reports_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            args = make_args(tmp, tmp / "config.yaml", tmp / "pgmode.json")
+            with self.assertRaisesRegex(bench.BenchmarkError, "timed out waiting for rb_servo_server state stream"):
+                bench.wait_for_state_source(  # type: ignore[arg-type]
+                    FakeCapture([]),
+                    args,
+                    0.0,
+                    None,
+                    tmp / "rb_servo_server.log",
+                    "udp://127.0.0.1:50151",
+                )
+
+    def test_startup_wait_returns_valid_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            args = make_args(tmp, tmp / "config.yaml", tmp / "pgmode.json")
+            snapshot = state(100, q_actual=[0.0, 0, 0, 0, 0, 0])
+            found = bench.wait_for_state_source(  # type: ignore[arg-type]
+                FakeCapture([snapshot]),
+                args,
+                0.0,
+                None,
+                tmp / "rb_servo_server.log",
+                "udp://127.0.0.1:50151",
+            )
+            self.assertIs(found, snapshot)
+
+    def test_failure_summary_writes_startup_fault_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            args = make_args(tmp, tmp / "config.yaml", tmp / "pgmode.json", artifact_dir=tmp / "artifacts")
+            snapshot = state(
+                100,
+                q_actual=[0.0, 0, 0, 0, 0, 0],
+                q_target=[12.0, 0, 0, 0, 0, 0],
+                tracking_error_source="reference",
+                fault_latched=True,
+                latched_fault_reason="TrackingError",
+                fault_reason="reference tracking error exceeded threshold",
+            )
+            details = bench.build_startup_fault_details(
+                snapshot,  # type: ignore[arg-type]
+                args,
+                state_packets_received=1,
+                proc=None,
+                state_endpoint="udp://127.0.0.1:50151",
+            )
+            exc = bench.StartupFaultError(bench.startup_fault_message(details), details)
+            summary = bench.failure_summary(args, exc)
+            written = json.loads((tmp / "artifacts" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["result"], "startup_fault")
+            self.assertEqual(written["result"], "startup_fault")
+            self.assertEqual(written["latched_fault_reason"], "TrackingError")
+            self.assertIn("latest_state_excerpt", written)
+            self.assertEqual(
+                written["q_actual_target_error_summary"]["q_actual_to_q_target_max_abs_error_deg"],
+                12.0,
+            )
 
     def test_metrics_use_tcp_ref_stand_samples(self) -> None:
         args = argparse.Namespace(arm="left")
