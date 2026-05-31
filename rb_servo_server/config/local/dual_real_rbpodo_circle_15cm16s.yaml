@@ -1,7 +1,13 @@
 schema: robotics_lab.rb_servo_server.v1
 
 # RBPODO-CIRCLE-CONFIG-01 stable controller-simulation circle template.
-# controller pgmode simulation only; physical robot must not move; requires env gates and confirmation.
+# Controller pgmode simulation only. Physical robot should not move.
+# Requires RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1.
+# Do not use for physical real Cartesian motion.
+# Copy to rb_servo_server/config/local/ with
+# tools/create_rbpodo_circle_local_configs.sh before operator runs.
+# Servo J ACKs are not circle execution evidence if Cartesian gate telemetry
+# reports unavailable.
 # Profile intent: 15 cm diameter / 16 s period, approximately 0.029 m/s TCP
 # tangential speed. Use controller q_ref / tcp_reference evidence for pgmode
 # simulation reports; this is not physical Cartesian acceptance.
@@ -59,10 +65,12 @@ servo:
   filter_dt_max_ratio: 1.5
   servo_t1_rate_match_tolerance_ratio: 0.2
   allow_servo_t1_rate_mismatch: false
-  # Controller pgmode simulation only; physical robot must not move.
+  # Controller pgmode simulation only; physical robot should not move.
   # Requires RB_ALLOW_REAL_ROBOT=1, RB_ALLOW_REAL_MOTION=1,
-  # RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1, same-run pgmode confirmation,
-  # and the benchmark confirmation flags.
+  # RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1,
+  # RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1, same-run pgmode confirmation,
+  # and the benchmark confirmation flags. Do not use for physical real
+  # Cartesian motion.
   allow_controller_simulation_motion: true
   allow_controller_simulation_diagnostics_suspect: true
 
@@ -157,6 +165,10 @@ cartesian_control:
   max_cartesian_step_rad: 0.02
   exceed_limit_policy: clamp
   velocity_target_integration: previous_command
+  # In pgmode simulation the physical q_actual can remain stationary while
+  # controller reference q_ref/q_target follows the simulated motion path.
+  controller_simulation_servo_state_source: reference
+  controller_simulation_divergence_source: reference
   velocity_target_lookahead_sec: 0.04
   max_command_actual_error_deg: [5, 5, 5, 8, 8, 10]
   reset_velocity_integrator_on_mode_change: true
