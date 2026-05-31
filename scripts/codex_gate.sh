@@ -1031,6 +1031,54 @@ run_rbpodo_circle_doc_fix_gate() {
   done
 }
 
+run_state_fanout_gate() {
+  run_servo_gate_or_skip_missing_deps
+  run_yaml_parse_checks_if_available rb_servo_server/config/*.yaml rb_servo_server/config/local/*.yaml configs/**/*.yaml
+  run_python_surface_tests
+}
+
+run_gui_tcp_ref_actual_gate() {
+  run_gui_tests
+  python3 -m compileall -q rb_gui/rb_servo_gui
+}
+
+run_bench_overlay_udp_gate() {
+  python3 -m compileall -q scripts
+  python3 scripts/rbpodo_circle_tracking_benchmark.py --help >/dev/null
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_*.py'
+  echo "codex_gate: skipping rbpodo controller-simulation benchmark; BENCH-OVERLAY-UDP-01 is validation-only by default"
+}
+
+run_gui_circle_overlay_gate() {
+  run_gui_tests
+  python3 -m compileall -q rb_gui/rb_servo_gui
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_*.py'
+  echo "codex_gate: skipping controller and benchmark runs; GUI-CIRCLE-OVERLAY-01 is visualization-only by default"
+}
+
+run_rbpodo_circle_live_runbook_gate() {
+  for token in \
+    "state_pub_endpoints" \
+    "overlay-pub-endpoint" \
+    "tcp_ref_stand" \
+    "pgmode simulation" \
+    "rb_gui"
+  do
+    grep_existing "${token}" README.md REVIEW.md docs rb_servo_server/docs
+  done
+}
+
+run_policy_dataset_schema_gate() {
+  run_policy_runner_tests
+  grep_existing "robotics_lab\\.policy_runner\\.episode\\.v1|robotics_lab\\.episode\\.v1" \
+    policy_runner README.md docs
+  grep_existing "dataset|episode" \
+    policy_runner/README.md policy_runner/policy_runner policy_runner/tests README.md docs
+  grep_existing "observations|action" \
+    policy_runner/README.md policy_runner/policy_runner/recording.py policy_runner/tests
+  echo "codex_gate: skipping real policy/data collection run by default"
+}
+
 run_backend_compare_python_tests() {
   run_python_surface_tests
   run_optional_rbscript_helper_tests
@@ -1608,6 +1656,27 @@ case "$TASK" in
     ;;
   RBPODO-CIRCLE-DOC-01)
     run_rbpodo_circle_doc_fix_gate
+    ;;
+  RBPODO-LIVE-VIZ-00)
+    run_shell_syntax_checks
+    ;;
+  STATE-FANOUT-01)
+    run_state_fanout_gate
+    ;;
+  GUI-TCP-REF-ACTUAL-01)
+    run_gui_tcp_ref_actual_gate
+    ;;
+  BENCH-OVERLAY-UDP-01)
+    run_bench_overlay_udp_gate
+    ;;
+  GUI-CIRCLE-OVERLAY-01)
+    run_gui_circle_overlay_gate
+    ;;
+  RBPODO-CIRCLE-LIVE-RUNBOOK-01)
+    run_rbpodo_circle_live_runbook_gate
+    ;;
+  POLICY-DATASET-SCHEMA-01)
+    run_policy_dataset_schema_gate
     ;;
   GATE-BACKEND-COMPARE-00)
     run_shell_syntax_checks

@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <set>
@@ -30,6 +31,29 @@ std::string lower(std::string s) {
 bool envIsOne(const char* name) {
     const char* value = std::getenv(name);
     return value && std::string(value) == "1";
+}
+
+bool isValidUdpEndpointUri(const std::string& endpoint) {
+    constexpr const char* prefix = "udp://";
+    if (endpoint.rfind(prefix, 0) != 0) return false;
+
+    const std::string rest = endpoint.substr(std::strlen(prefix));
+    if (rest.empty()) return false;
+
+    const auto colon = rest.rfind(':');
+    if (colon == std::string::npos || colon + 1 >= rest.size()) return false;
+
+    const std::string host = rest.substr(0, colon);
+    if (host.empty() || host == "0.0.0.0") return false;
+
+    try {
+        size_t consumed = 0;
+        const int port = std::stoi(rest.substr(colon + 1), &consumed);
+        if (consumed != rest.size() - colon - 1) return false;
+        return port > 0 && port <= 65535;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 std::string location(const YAML::Node& node) {
@@ -112,6 +136,20 @@ std::vector<std::string> asStringArray(const YAML::Node& node, const std::string
         values.push_back(asString(node[i], path + "[" + std::to_string(i) + "]"));
     }
     return values;
+}
+
+std::vector<std::string> dedupeStatePubEndpoints(std::vector<std::string> endpoints) {
+    std::vector<std::string> unique;
+    unique.reserve(endpoints.size());
+    std::set<std::string> seen;
+    for (const std::string& endpoint : endpoints) {
+        if (seen.insert(endpoint).second) {
+            unique.push_back(endpoint);
+        } else {
+            warn("duplicate network.state_pub_endpoints entry ignored: " + endpoint);
+        }
+    }
+    return unique;
 }
 
 JointArray parseJointArray(const YAML::Node& node, const std::string& path) {
@@ -498,6 +536,15 @@ void validateConfig(const DualArmConfig& cfg) {
     }
     if (cfg.network.state_pub_endpoints.front() != cfg.network.state_pub_endpoint) {
         throw std::runtime_error("network.state_pub_endpoint must match first network.state_pub_endpoints entry");
+    }
+    std::set<std::string> seen_state_pub_endpoints;
+    for (const std::string& endpoint : cfg.network.state_pub_endpoints) {
+        if (!isValidUdpEndpointUri(endpoint)) {
+            throw std::runtime_error("network.state_pub_endpoints entries must be udp://host:port endpoints: " + endpoint);
+        }
+        if (!seen_state_pub_endpoints.insert(endpoint).second) {
+            warn("duplicate network.state_pub_endpoints entry configured: " + endpoint);
+        }
     }
 
     const bool readonly_diagnostic_startup_allowed =
@@ -1055,7 +1102,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             fail("network cannot set both state_pub_endpoint and deprecated state_pub_bind", sec["state_pub_bind"]);
         }
         if (has(sec, "state_pub_endpoints")) {
-            cfg.network.state_pub_endpoints = asStringArray(sec["state_pub_endpoints"], "network.state_pub_endpoints");
+            cfg.network.state_pub_endpoints = dedupeStatePubEndpoints(
+                asStringArray(sec["state_pub_endpoints"], "network.state_pub_endpoints")
+            );
             if (cfg.network.state_pub_endpoints.empty()) {
                 fail("network.state_pub_endpoints must not be empty", sec["state_pub_endpoints"]);
             }

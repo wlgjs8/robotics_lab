@@ -20,3 +20,9 @@ must not block joint-only control.
 Measured and accepted calibration is a later milestone. Future calibration
 artifacts should replace or supersede this file with measured stand mounts,
 camera intrinsics, head-camera extrinsics, and wrist-camera hand-eye transforms.
+
+Policy and teleop dataset metadata should record the active calibration status.
+For the current file, use `calibration_status: configured_estimate` and keep
+`geometry_valid_for_real_policy: false` visible in dataset review. Do not label
+controller-simulation or future physical real policy data as measured until a
+measured calibration artifact is accepted.

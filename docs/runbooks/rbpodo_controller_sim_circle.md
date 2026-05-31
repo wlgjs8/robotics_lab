@@ -27,8 +27,8 @@ Use these templates only for `rbpodo` controller-simulation bring-up:
 | Servo J no-op ACK-on | `rb_servo_server/config/dual_real_rbpodo_sim_noop_100hz_ack.example.yaml` | 100 Hz | `50041` / `50141` | controller pgmode simulation only |
 | Servo J no-op ACK-on | `rb_servo_server/config/dual_real_rbpodo_sim_noop_200hz_ack.example.yaml` | 200 Hz | `50042` / `50142` | controller pgmode simulation only |
 | Servo J no-op ACK-off | `rb_servo_server/config/dual_real_rbpodo_sim_noop_200hz_no_ack.example.yaml` | 200 Hz | `50043` / `50143` | controller pgmode simulation only, experimental |
-| stable circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml` | 100 Hz | `50051` / `50151` | controller pgmode simulation only |
-| GENE-style stress circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml` | 100 Hz | `50052` / `50152` | controller pgmode simulation only, stress |
+| stable circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml` | 100 Hz | command `50051`, state `50151` recorder + `50161` GUI | controller pgmode simulation only |
+| GENE-style stress circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml` | 100 Hz | command `50052`, state `50152` recorder + `50162` GUI | controller pgmode simulation only, stress |
 
 Copy a template to `rb_servo_server/config/local/` and edit the copy for the
 site. Treat `local/*.yaml` as operator-owned working files, not production
@@ -73,6 +73,38 @@ cartesian_control:
 `run_mode: real` means the server is connecting to real Rainbow controller
 boxes. `operation_mode: simulation` means the controller command path must be
 Rainbow `pgmode` simulation, so the physical robot should not move.
+
+The circle templates use server-side state fanout:
+
+```yaml
+network:
+  command_bind: "udp://127.0.0.1:50051"
+  state_pub_endpoints:
+    - "udp://127.0.0.1:50151"  # benchmark recorder
+    - "udp://127.0.0.1:50161"  # rb_gui live viewer
+```
+
+`network.state_pub_endpoints` is the canonical multi-consumer field. The
+legacy single `network.state_pub_endpoint` remains accepted for one consumer,
+but do not combine it with `state_pub_endpoints`. The first list entry is still
+mirrored into `state_pub_endpoint` internally for older tooling.
+
+Live visualization uses two independent UDP streams:
+
+```text
+rb_servo_server state fanout
+  udp://127.0.0.1:50151 -> benchmark recorder
+  udp://127.0.0.1:50161 -> rb_gui state receiver
+
+rbpodo_circle_tracking_benchmark overlay
+  udp://127.0.0.1:50261 -> rb_gui circle overlay receiver
+```
+
+State fanout carries robot/server telemetry: `tcp_actual_stand`,
+`tcp_ref_stand`, safety verdicts, Cartesian gate reasons, and
+`physical_motion_expected=false` when the controller-simulation carve-out is
+active. The overlay carries desired circle geometry and live metrics owned by
+the benchmark. Do not put overlay traffic in `state_pub_endpoints`.
 
 ## Safety Model
 
@@ -182,6 +214,10 @@ needed Linux capabilities and verify them:
 sudo setcap cap_sys_nice,cap_ipc_lock+ep rb_servo_server/build/rbpodo_real_gate/rb_servo_server
 getcap rb_servo_server/build/rbpodo_real_gate/rb_servo_server
 ```
+
+Rebuilding or replacing `rb_servo_server/build/rbpodo_real_gate/rb_servo_server`
+removes these capabilities. Re-run `setcap` after every rebuild before
+starting a controller-simulation benchmark.
 
 Create operator-local circle configs from the tracked templates:
 
@@ -343,6 +379,63 @@ It is not the hardware-free `rb_simulator` benchmark. It connects to real
 controller boxes, requires pgmode simulation confirmation, and refuses
 `operation_mode: real`.
 
+Use server-side UDP fanout as the primary live-visualization path. The
+benchmark recorder and `rb_gui` must listen on different state ports, and
+`rb_servo_server` publishes the same serialized state JSON to both destinations
+from `network.state_pub_endpoints`. Avoid using a Python tee/rebroadcast as the
+main path; it adds another process and more latency than direct server fanout.
+The GUI command path still goes directly to `network.command_bind`; state
+fanout does not change command ownership or safety gates.
+
+Benchmark-specific desired-circle geometry and running metrics come from a
+separate telemetry-only overlay stream published by
+`scripts/rbpodo_circle_tracking_benchmark.py`. Use
+`--overlay-pub-endpoint udp://127.0.0.1:50261` for the GUI overlay listener and
+`--overlay-pub-rate-hz 20` unless a test needs a different display rate. This
+overlay carries desired pose, circle radius/center/plane, current error,
+running RMS/p95, estimated latency, and tracking source. It never carries robot
+commands and does not replace the server state stream for pass/fail evidence.
+
+Run the GUI against the fanout state port and overlay port as separate streams.
+The current repository module entry point is `rb_servo_gui.app`:
+
+```bash
+PYTHONPATH=rb_gui \
+RB_GUI_STATE_BIND=0.0.0.0 \
+RB_GUI_STATE_PORT=50161 \
+RB_GUI_CIRCLE_OVERLAY_BIND=udp://0.0.0.0:50261 \
+python3 -m rb_servo_gui.app
+```
+
+After installing `rb_gui`, the equivalent console command is `rb-servo-gui`.
+Do not use bare `python3 -m rb_servo_gui` in this checkout unless a future
+change adds `rb_servo_gui/__main__.py`; that shorthand is intended to mean the
+same GUI process:
+
+```bash
+PYTHONPATH=rb_gui \
+RB_GUI_STATE_BIND=0.0.0.0 \
+RB_GUI_STATE_PORT=50161 \
+RB_GUI_CIRCLE_OVERLAY_BIND=udp://0.0.0.0:50261 \
+python3 -m rb_servo_gui
+```
+
+The state stream is robot/server telemetry (`tcp_actual_stand`,
+`tcp_ref_stand`, faults, gates). The overlay stream is benchmark-owned desired
+geometry and live metrics, so it must be visually treated as the desired path,
+not as robot state.
+
+`policy_runner` is not in this live-visualization path. It is a separate
+command source for policy/SpaceMouse workflows. In the circle live view, the
+benchmark script is the explicit command source, while the benchmark recorder
+and `rb_gui` are state consumers. The GUI does not route commands through
+`policy_runner`.
+
+In `rb_gui`, leave `TCP display` on `Auto` for controller pgmode simulation.
+Auto shows `tcp_ref_stand` when the state stream recommends it and the
+reference pose is valid. Use `Actual` only to inspect the physical
+`q_actual`-based pose; it is not controller-simulation tracking evidence.
+
 Stable 15 cm / 16 s example:
 
 ```bash
@@ -359,6 +452,8 @@ python3 scripts/rbpodo_circle_tracking_benchmark.py \
   --repeat 3 \
   --command-rate-hz 100 \
   --tracking-source tcp_ref_stand \
+  --overlay-pub-endpoint udp://127.0.0.1:50261 \
+  --overlay-pub-rate-hz 20 \
   --set-pgmode-simulation \
   --artifact-dir artifacts/rbpodo_circle/circle_15cm16s_twist_stand_left \
   --i-understand-this-connects-to-real-controller \
@@ -385,6 +480,8 @@ python3 scripts/rbpodo_circle_tracking_benchmark.py \
   --feedback-max-linear-m-s 0.15 \
   --feedback-max-angular-rad-s 0.4 \
   --tracking-source tcp_ref_stand \
+  --overlay-pub-endpoint udp://127.0.0.1:50261 \
+  --overlay-pub-rate-hz 20 \
   --verify-pgmode-simulation \
   --artifact-dir artifacts/rbpodo_circle/gene_15cm4s_feedback_left \
   --i-understand-this-connects-to-real-controller \
@@ -450,6 +547,33 @@ confirmation. Do not set `RB_ALLOW_REAL_CARTESIAN` for this workflow.
 
 ## Troubleshooting
 
+If `rb_gui` shows no state, check that the local circle config uses
+`network.state_pub_endpoints`, that one endpoint is the GUI port, and that the
+GUI binds that same port:
+
+```bash
+grep -A4 "state_pub_endpoints" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm16s.yaml
+RB_GUI_STATE_BIND=0.0.0.0 RB_GUI_STATE_PORT=50161 env | grep '^RB_GUI_STATE'
+```
+
+For the 15 cm / 4 s stress template, use the matching GUI state endpoint
+`50162` unless you intentionally edited the local config.
+
+If the desired circle overlay is missing but state is live, check that the
+benchmark publishes to the same endpoint the GUI bound:
+
+```bash
+grep -R "\"overlay_pub_endpoint\"" artifacts/rbpodo_circle -n 2>/dev/null | tail
+env | grep '^RB_GUI_CIRCLE_OVERLAY_BIND='
+```
+
+The normal local pairing is:
+
+```text
+benchmark: --overlay-pub-endpoint udp://127.0.0.1:50261
+rb_gui:    RB_GUI_CIRCLE_OVERLAY_BIND=udp://0.0.0.0:50261
+```
+
 `realtime setup failed` or `failed to set realtime priority` means the server
 could not acquire its requested scheduler privileges. Rebuild if needed, then
 apply Linux capabilities to the exact binary you pass with `--server`:
@@ -458,6 +582,9 @@ apply Linux capabilities to the exact binary you pass with `--server`:
 sudo setcap cap_sys_nice,cap_ipc_lock+ep rb_servo_server/build/rbpodo_real_gate/rb_servo_server
 getcap rb_servo_server/build/rbpodo_real_gate/rb_servo_server
 ```
+
+If `getcap` prints nothing after a rebuild, the binary lost its capabilities;
+run `setcap` again before retrying.
 
 If startup reports `diagnostics_suspect`, inspect controller state before
 running any command benchmark:
@@ -668,6 +795,7 @@ Each run writes:
 - `raw_config.yaml`
 - `state_stream.jsonl`
 - `command_packets.jsonl`
+- `overlay_stream.jsonl` when overlay publishing is enabled
 - `desired_reference.csv`
 - `controller_reference_actual.csv`
 - `physical_actual.csv`, if available

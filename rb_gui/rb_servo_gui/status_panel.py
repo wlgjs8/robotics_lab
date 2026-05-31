@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
-from .models import ArmSnapshot, Pose6D, StateSnapshot
+from .models import ArmSnapshot, CircleOverlaySnapshot, Pose6D, StateSnapshot
 from .safety import OperatorSafety
 from .scene import _ROBOT_JOINT_NAMES
 
@@ -12,6 +12,7 @@ _INACTIVE_MODE_COLOR = "gray"
 _JOINT_MONITOR_UNITS = ("deg", "rad")
 _STAND_WORLD_MONITOR_UNITS = ("deg", "rad")
 _STAND_WORLD_POSE_FIELDS = ("x", "y", "z", "rx", "ry", "rz")
+_TCP_DISPLAY_MODES = ("auto", "actual", "reference", "both")
 
 
 def _mode_button_color(mode: str, desired_mode: str) -> str:
@@ -100,6 +101,121 @@ def _format_fk_status(latest: StateSnapshot | None, *, stale: bool) -> str:
     if left == right:
         return f"FK: {left}"
     return f"FK: left {left}, right {right}"
+
+
+def _tcp_display_mode(handles: dict[str, Any]) -> str:
+    selector = handles.get("tcp_display_mode", "auto")
+    mode = selector if isinstance(selector, str) else getattr(selector, "value", "auto")
+    return mode if mode in _TCP_DISPLAY_MODES else "auto"
+
+
+def _update_tcp_display_buttons(handles: dict[str, Any]) -> None:
+    selected = _tcp_display_mode(handles)
+    for mode, button in handles.get("tcp_display_buttons", {}).items():
+        try:
+            button.color = _mode_button_color(mode, selected)
+        except Exception:
+            pass
+
+
+def _format_controller_simulation_info(arm: ArmSnapshot) -> str:
+    parts: list[str] = []
+    mode = arm.controller_simulation_mode
+    if isinstance(mode, Mapping):
+        recommended = mode.get("recommended_tracking_pose")
+        if isinstance(recommended, str):
+            parts.append(f"controller_sim_recommended={recommended}")
+    if arm.physical_motion_expected is not None:
+        parts.append(f"physical_motion_expected={arm.physical_motion_expected}")
+    elif isinstance(mode, Mapping):
+        expected = mode.get("physical_motion_expected")
+        if isinstance(expected, bool):
+            parts.append(f"physical_motion_expected={expected}")
+    if arm.controller_simulation_diagnostic_override_active is not None:
+        parts.append(f"diagnostics_override={arm.controller_simulation_diagnostic_override_active}")
+    return ", ".join(parts)
+
+
+def _format_arm_tcp_tracking(arm_name: str, arm: ArmSnapshot, display_mode: str) -> str:
+    selected = arm.selected_tcp_source(display_mode)
+    parts = [
+        f"{arm_name}",
+        f"display={display_mode}",
+        f"selected={selected}",
+        f"actual_valid={arm.tcp_actual_valid}",
+        f"ref_valid={arm.tcp_ref_valid}",
+    ]
+    if arm.tcp_tracking_source:
+        parts.append(f"source={arm.tcp_tracking_source}")
+    if arm.tcp_tracking_source_recommendation:
+        parts.append(f"recommendation={arm.tcp_tracking_source_recommendation}")
+    controller_sim = _format_controller_simulation_info(arm)
+    if controller_sim:
+        parts.append(controller_sim)
+    return " ".join(parts)
+
+
+def _format_tcp_tracking_status(
+    latest: StateSnapshot | None,
+    *,
+    stale: bool,
+    display_mode: str = "auto",
+) -> str:
+    if latest is None:
+        return "TCP tracking: no state"
+    if stale:
+        return "State stream stale"
+    return "TCP tracking: " + "; ".join(
+        (
+            _format_arm_tcp_tracking("left", latest.left, display_mode),
+            _format_arm_tcp_tracking("right", latest.right, display_mode),
+        )
+    )
+
+
+def _format_mm(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value * 1000.0:.1f} mm"
+
+
+def _format_latency_ms(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.1f} ms"
+
+
+def _format_circle_overlay_status(
+    overlay: CircleOverlaySnapshot | None,
+    *,
+    stale: bool,
+    enabled: bool = True,
+) -> str:
+    if not enabled:
+        return "Circle overlay: disabled"
+    if overlay is None:
+        return "Circle overlay: no packets"
+    state = "stale" if stale else "live"
+    parts = [
+        f"Circle overlay: {state}",
+        f"run_id={overlay.run_id or 'n/a'}",
+        f"profile={overlay.profile or 'n/a'}",
+        f"controller={overlay.controller or 'n/a'}",
+        f"arm={overlay.arm}",
+        f"tracking_source={overlay.tracking_source or 'n/a'}",
+        f"error={_format_mm(overlay.current_error_m)}",
+        f"rms={_format_mm(overlay.running_rms_error_m)}",
+        f"p95={_format_mm(overlay.running_p95_error_m)}",
+        f"latency={_format_latency_ms(overlay.estimated_latency_ms)}",
+        f"samples={overlay.sample_count}",
+    ]
+    if overlay.command_count is not None:
+        parts.append(f"commands={overlay.command_count}")
+    if overlay.physical_motion_expected is not None:
+        parts.append(f"physical_motion_expected={overlay.physical_motion_expected}")
+    if overlay.result_so_far:
+        parts.append(f"result_so_far={overlay.result_so_far}")
+    return ", ".join(parts)
 
 
 def _optional_finite(value: Any) -> float | None:

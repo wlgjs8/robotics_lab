@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import socket
 import sys
 import time
 import unittest
@@ -15,18 +16,22 @@ from rb_servo_gui.app import (
     _DEFAULT_INIT_LEFT_JOINTS_DEG,
     _DEFAULT_INIT_RIGHT_JOINTS_DEG,
     _DEFAULT_RIGHT_POSE,
+    _TCP_DISPLAY_MODES,
     _TCP_FRAME_LOCAL,
     _TCP_FRAME_STAND,
     _apply_tcp_delta_and_send_pose_target,
     _apply_tcp_delta_to_target,
     _angular_step_radians,
     _build_operator_monitors,
+    _circle_overlay_bind_from_args_env,
     _env_joint6,
     _format_cartesian_solve_status,
+    _format_circle_overlay_status,
     _format_fk_status,
     _format_joint_monitor_value,
     _format_joints,
     _format_stand_world_pose_value,
+    _format_tcp_tracking_status,
     _joint_cfg_radians,
     _joint_marker_position,
     _linear_step_meters,
@@ -43,6 +48,7 @@ from rb_servo_gui.app import (
     _send_tcp_linear_move_from_marker,
     _send_init_motion_and_reset_targets,
     _sim_readiness_from_env,
+    _tcp_display_mode,
     _tcp_local_delta_from_target,
     _tcp_frame_mode,
     _tcp_linear_arm,
@@ -54,15 +60,19 @@ from rb_servo_gui.app import (
     _update_operator_monitors,
     _update_stand_world_monitor,
     _update_stand_world_monitor_unit_buttons,
+    _update_tcp_display_buttons,
     _update_tcp_linear_selection_buttons,
     _update_tcp_frame_buttons,
     _wxyz_to_xyzw,
+    parse_args,
     update_scene_markers,
 )
 from rb_servo_gui.command_client import CommandClient
 from rb_servo_gui import geometry as gui_geometry
-from rb_servo_gui.models import Pose6D
+from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnapshot, Pose6D
+from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from rb_servo_gui.safety import OperatorSafety, Readiness, normalize_observed_mode_backend
+from rb_servo_gui.scene import _circle_overlay_points, update_circle_overlay
 from rb_servo_gui.state_receiver import StateStore
 
 
@@ -83,7 +93,18 @@ def sample_state(**overrides):
         "error_code": 0,
         "tcp_stand": None,
         "tcp_base": None,
+        "tcp_actual_stand": None,
+        "tcp_actual_base": None,
+        "tcp_ref_stand": None,
+        "tcp_ref_base": None,
         "has_valid_tcp_pose": False,
+        "tcp_actual_valid": None,
+        "tcp_ref_valid": None,
+        "tcp_tracking_source": None,
+        "tcp_tracking_source_recommendation": None,
+        "controller_simulation_mode": None,
+        "physical_motion_expected": None,
+        "controller_simulation_diagnostic_override_active": None,
         "tcp_deferred": True,
     }
     data = {
@@ -112,6 +133,44 @@ def sample_state(**overrides):
     return data
 
 
+def sample_circle_overlay(**overrides):
+    data = {
+        "schema_version": CIRCLE_OVERLAY_SCHEMA_VERSION,
+        "host_time_ns": 123456789,
+        "run_id": "run-1",
+        "arm": "left",
+        "profile": "gene_15cm_4s",
+        "controller": "twist_stand_feedback",
+        "tracking_source": "tcp_ref_stand",
+        "plane": "xy",
+        "center_stand": [0.1, 0.2, 0.3],
+        "axis1_stand": [1.0, 0.0, 0.0],
+        "axis2_stand": [0.0, 1.0, 0.0],
+        "radius_m": 0.075,
+        "period_sec": 4.0,
+        "phase_rad": 0.5,
+        "desired_pose_stand": {
+            "x": 0.175,
+            "y": 0.2,
+            "z": 0.3,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": 0.0,
+            "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        "current_error_m": 0.001,
+        "running_rms_error_m": 0.002,
+        "running_p95_error_m": 0.003,
+        "estimated_latency_ms": 12.3,
+        "sample_count": 4,
+        "command_count": 5,
+        "physical_motion_expected": False,
+        "result_so_far": "running",
+    }
+    data.update(overrides)
+    return data
+
+
 class RecordingClient(CommandClient):
     def __init__(self):
         super().__init__("127.0.0.1", 9)
@@ -125,6 +184,7 @@ class RecordingSceneHandle:
         self.position = None
         self.wxyz = None
         self.points = None
+        self.colors = None
         self.visible = None
 
 
@@ -257,7 +317,10 @@ class GuiContractsTest(unittest.TestCase):
         for arm in ("left", "right"):
             state[arm]["tcp_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": 0.0}
             state[arm]["tcp_base"] = {"x": 0.2, "y": 0.1, "z": 0.4, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+            state[arm]["tcp_actual_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+            state[arm]["tcp_actual_base"] = {"x": 0.2, "y": 0.1, "z": 0.4, "rx": 0.0, "ry": 0.0, "rz": 0.0}
             state[arm]["has_valid_tcp_pose"] = True
+            state[arm]["tcp_actual_valid"] = True
             state[arm]["tcp_deferred"] = False
         state["tcp_fields_deferred"] = False
         return state
@@ -320,6 +383,133 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(latest.left.tcp_base.quaternion_xyzw, (0.0, 0.0, 0.0, 1.0))
         self.assertTrue(latest.left.has_valid_tcp_pose)
         self.assertFalse(latest.left.tcp_deferred)
+
+    def test_parser_preserves_actual_and_reference_tcp_pose_fields(self):
+        state = sample_state()
+        state["left"]["tcp_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+        state["left"]["tcp_actual_stand"] = {
+            "x": 0.32,
+            "y": 0.13,
+            "z": 0.45,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": 0.0,
+            "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+        }
+        state["left"]["tcp_actual_base"] = {"x": 0.22, "y": 0.11, "z": 0.41, "rx": 0.0, "ry": 0.0, "rz": 0.1}
+        state["left"]["tcp_ref_stand"] = {
+            "x": 0.41,
+            "y": 0.21,
+            "z": 0.51,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": 0.2,
+            "quaternion_xyzw": [0.0, 0.0, 1.0, 0.0],
+        }
+        state["left"]["tcp_ref_base"] = {"x": 0.29, "y": 0.19, "z": 0.49, "rx": 0.0, "ry": 0.0, "rz": 0.3}
+        state["left"]["has_valid_tcp_pose"] = True
+        state["left"]["tcp_actual_valid"] = True
+        state["left"]["tcp_ref_valid"] = True
+        state["left"]["tcp_tracking_source"] = "tcp_ref_stand"
+        state["left"]["tcp_tracking_source_recommendation"] = "tcp_ref_stand"
+        state["left"]["controller_simulation_mode"] = {
+            "recommended_tracking_pose": "tcp_ref_stand",
+            "physical_motion_expected": False,
+        }
+        state["left"]["physical_motion_expected"] = False
+        state["left"]["controller_simulation_diagnostic_override_active"] = True
+        state["left"]["tcp_deferred"] = False
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.left.tcp_actual_stand.as_tuple(), (0.32, 0.13, 0.45, 0.0, 0.0, 0.0))
+        self.assertEqual(latest.left.tcp_actual_base.as_tuple(), (0.22, 0.11, 0.41, 0.0, 0.0, 0.1))
+        self.assertEqual(latest.left.tcp_ref_stand.as_tuple(), (0.41, 0.21, 0.51, 0.0, 0.0, 0.2))
+        self.assertEqual(latest.left.tcp_ref_base.as_tuple(), (0.29, 0.19, 0.49, 0.0, 0.0, 0.3))
+        self.assertTrue(latest.left.tcp_actual_valid)
+        self.assertTrue(latest.left.tcp_ref_valid)
+        self.assertFalse(latest.left.physical_motion_expected)
+        self.assertTrue(latest.left.controller_simulation_diagnostic_override_active)
+        self.assertEqual(latest.left.tcp_tracking_source_recommendation, "tcp_ref_stand")
+        self.assertEqual(latest.left.selected_tcp_source("auto"), "tcp_ref_stand")
+        self.assertEqual(latest.left.selected_tcp_pose("auto").as_tuple(), (0.41, 0.21, 0.51, 0.0, 0.0, 0.2))
+        self.assertEqual(latest.left.selected_tcp_source("actual"), "tcp_actual_stand")
+        self.assertEqual(latest.left.selected_tcp_pose("actual").as_tuple(), (0.32, 0.13, 0.45, 0.0, 0.0, 0.0))
+        self.assertEqual(latest.left.selected_tcp_source("both"), "tcp_ref_stand")
+
+    def test_auto_tcp_selection_falls_back_to_actual_when_reference_is_invalid(self):
+        state = self.tcp_available_state()
+        state["left"]["tcp_ref_stand"] = {"x": 0.41, "y": 0.21, "z": 0.51, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+        state["left"]["tcp_ref_valid"] = False
+        state["left"]["tcp_tracking_source_recommendation"] = "tcp_ref_stand"
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        self.assertEqual(latest.left.selected_tcp_source("auto"), "tcp_actual_stand")
+        self.assertEqual(latest.left.selected_tcp_pose("auto").as_tuple(), (0.31, 0.12, 0.44, 0.0, 0.0, 0.0))
+
+    def test_circle_overlay_snapshot_parser_accepts_schema_and_rejects_wrong_schema(self):
+        overlay = CircleOverlaySnapshot.parse(sample_circle_overlay(), received_monotonic=100.0)
+        self.assertIsNotNone(overlay)
+        self.assertEqual(overlay.schema_version, CIRCLE_OVERLAY_SCHEMA_VERSION)
+        self.assertEqual(overlay.arm, "left")
+        self.assertEqual(overlay.tracking_source, "tcp_ref_stand")
+        self.assertEqual(overlay.center_stand, (0.1, 0.2, 0.3))
+        self.assertEqual(overlay.desired_pose_stand.as_tuple(), (0.175, 0.2, 0.3, 0.0, 0.0, 0.0))
+        self.assertFalse(overlay.physical_motion_expected)
+        self.assertFalse(overlay.stale(now=100.5, threshold_sec=1.0))
+        self.assertTrue(overlay.stale(now=101.5, threshold_sec=1.0))
+
+        invalid = sample_circle_overlay(schema_version="wrong.schema")
+        self.assertIsNone(CircleOverlaySnapshot.parse(invalid))
+
+    def test_circle_overlay_store_and_receiver_accept_udp_packet(self):
+        store = CircleOverlayStore(stale_after_sec=0.2)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        receiver = CircleOverlayReceiver(store, host="127.0.0.1", port=port)
+        receiver.start()
+        try:
+            deadline = time.monotonic() + 1.0
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+                payload = json.dumps(sample_circle_overlay()).encode()
+                while time.monotonic() < deadline and store.latest() is None:
+                    sender.sendto(payload, ("127.0.0.1", port))
+                    time.sleep(0.01)
+            latest = store.latest()
+            self.assertIsNotNone(latest)
+            self.assertEqual(latest.run_id, "run-1")
+            self.assertGreaterEqual(store.received_packets, 1)
+            self.assertEqual(store.invalid_packets, 0)
+        finally:
+            receiver.stop()
+
+    def test_circle_overlay_store_rejects_invalid_json_and_detects_stale_packets(self):
+        store = CircleOverlayStore(stale_after_sec=0.5)
+        self.assertFalse(store.update_from_json_bytes(b"{bad-json"))
+        self.assertEqual(store.invalid_packets, 1)
+        self.assertTrue(store.update_from_json_bytes(json.dumps(sample_circle_overlay()).encode(), received_monotonic=100.0))
+        self.assertFalse(store.is_stale(now=100.25))
+        self.assertTrue(store.is_stale(now=100.75))
+
+    def test_circle_overlay_bind_cli_env_and_none(self):
+        self.assertEqual(parse_udp_bind("udp://127.0.0.1:50261"), ("127.0.0.1", 50261))
+        self.assertIsNone(parse_udp_bind("none"))
+        self.assertEqual(
+            _circle_overlay_bind_from_args_env(parse_args(["--circle-overlay-bind", "udp://127.0.0.1:50261"])),
+            ("127.0.0.1", 50261),
+        )
+        old_value = os.environ.get("RB_GUI_CIRCLE_OVERLAY_BIND")
+        try:
+            os.environ["RB_GUI_CIRCLE_OVERLAY_BIND"] = "udp://0.0.0.0:50262"
+            self.assertEqual(_circle_overlay_bind_from_args_env(parse_args([])), ("0.0.0.0", 50262))
+            os.environ["RB_GUI_CIRCLE_OVERLAY_BIND"] = "none"
+            self.assertIsNone(_circle_overlay_bind_from_args_env(parse_args([])))
+        finally:
+            if old_value is None:
+                os.environ.pop("RB_GUI_CIRCLE_OVERLAY_BIND", None)
+            else:
+                os.environ["RB_GUI_CIRCLE_OVERLAY_BIND"] = old_value
 
     def test_parser_accepts_legacy_tcp_pose_without_quaternion(self):
         pose = Pose6D.parse({"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": 0.0})
@@ -1234,6 +1424,82 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(left_target.position, (0.5, 0.5, 0.5))
         self.assertEqual(handles["left_tcp_target_pose"][:3], (0.5, 0.5, 0.5))
 
+    def test_scene_update_distinguishes_actual_and_reference_tcp_frames(self):
+        state = sample_state()
+        state["left"]["tcp_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+        state["left"]["tcp_actual_stand"] = {"x": 0.32, "y": 0.13, "z": 0.45, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+        state["left"]["tcp_ref_stand"] = {"x": 0.41, "y": 0.21, "z": 0.51, "rx": 0.0, "ry": 0.0, "rz": math.pi}
+        state["left"]["has_valid_tcp_pose"] = True
+        state["left"]["tcp_actual_valid"] = True
+        state["left"]["tcp_ref_valid"] = True
+        state["left"]["tcp_tracking_source_recommendation"] = "tcp_ref_stand"
+        state["left"]["tcp_deferred"] = False
+        store, _, _ = self.make_safety(state)
+        left_tcp = RecordingSceneHandle()
+        left_ref = RecordingSceneHandle()
+        left_target = RecordingSceneHandle()
+        handles = {
+            "left_tcp": left_tcp,
+            "left_tcp_ref": left_ref,
+            "left_tcp_target": left_target,
+            "left_tcp_trail": RecordingSceneHandle(),
+            "left_tcp_ref_trail": RecordingSceneHandle(),
+            "left_tcp_trail_points": [],
+            "left_tcp_ref_trail_points": [],
+        }
+        update_scene_markers(handles, store.latest())
+        self.assertEqual(left_tcp.position, (0.32, 0.13, 0.45))
+        self.assertEqual(left_ref.position, (0.41, 0.21, 0.51))
+        self.assertEqual(left_target.position, (0.32, 0.13, 0.45))
+        self.assertFalse(left_tcp.visible)
+        self.assertTrue(left_ref.visible)
+        self.assertFalse(handles["left_tcp_trail"].visible)
+        self.assertTrue(handles["left_tcp_ref_trail"].visible)
+        self.assertAlmostEqual(left_ref.wxyz[3], 1.0, places=7)
+
+        update_scene_markers(handles, store.latest(), tcp_display_mode="both")
+        self.assertTrue(left_tcp.visible)
+        self.assertTrue(left_ref.visible)
+
+        update_scene_markers(handles, store.latest(), tcp_display_mode="actual")
+        self.assertTrue(left_tcp.visible)
+        self.assertFalse(left_ref.visible)
+
+    def test_circle_overlay_points_support_standard_planes(self):
+        xy = CircleOverlaySnapshot.parse(sample_circle_overlay(plane="xy", axis1_stand=None, axis2_stand=None))
+        xz = CircleOverlaySnapshot.parse(sample_circle_overlay(plane="xz", axis1_stand=None, axis2_stand=None))
+        yz = CircleOverlaySnapshot.parse(sample_circle_overlay(plane="yz", axis1_stand=None, axis2_stand=None))
+        self.assertIsNotNone(xy)
+        self.assertIsNotNone(xz)
+        self.assertIsNotNone(yz)
+        xy_points = _circle_overlay_points(xy, segments=8)
+        xz_points = _circle_overlay_points(xz, segments=8)
+        yz_points = _circle_overlay_points(yz, segments=8)
+        self.assertTrue(all(abs(point[2] - xy.center_stand[2]) < 1e-9 for point in xy_points))
+        self.assertTrue(all(abs(point[1] - xz.center_stand[1]) < 1e-9 for point in xz_points))
+        self.assertTrue(all(abs(point[0] - yz.center_stand[0]) < 1e-9 for point in yz_points))
+
+    def test_circle_overlay_scene_updates_and_hides_stale_overlay(self):
+        overlay = CircleOverlaySnapshot.parse(sample_circle_overlay())
+        self.assertIsNotNone(overlay)
+        line = RecordingSceneHandle()
+        desired = RecordingSceneHandle()
+        handles = {
+            "circle_overlay_line_mode": "point_cloud",
+            "circle_overlay_line": line,
+            "circle_overlay_desired": desired,
+        }
+        update_circle_overlay(handles, overlay, stale=False)
+        self.assertTrue(line.visible)
+        self.assertTrue(desired.visible)
+        self.assertGreater(len(line.points), 8)
+        self.assertEqual(desired.position, (0.175, 0.2, 0.3))
+        self.assertEqual(desired.wxyz, (1.0, 0.0, 0.0, 0.0))
+
+        update_circle_overlay(handles, overlay, stale=True)
+        self.assertFalse(line.visible)
+        self.assertFalse(desired.visible)
+
     def test_scene_update_uses_tcp_quaternion_over_legacy_rpy(self):
         state = sample_state()
         state["left"]["tcp_stand"] = {
@@ -1376,6 +1642,21 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_STAND].color, "green")
         self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_LOCAL].color, "gray")
 
+    def test_tcp_display_defaults_to_auto_and_updates_button_colors(self):
+        handles = {"tcp_display_buttons": {mode: RecordingButton() for mode in _TCP_DISPLAY_MODES}}
+        self.assertEqual(_tcp_display_mode(handles), "auto")
+        _update_tcp_display_buttons(handles)
+        self.assertEqual(handles["tcp_display_buttons"]["auto"].color, "green")
+        self.assertEqual(handles["tcp_display_buttons"]["actual"].color, "gray")
+
+        handles["tcp_display_mode"] = "reference"
+        _update_tcp_display_buttons(handles)
+        self.assertEqual(handles["tcp_display_buttons"]["auto"].color, "gray")
+        self.assertEqual(handles["tcp_display_buttons"]["reference"].color, "green")
+
+        handles["tcp_display_mode"] = "invalid"
+        self.assertEqual(_tcp_display_mode(handles), "auto")
+
     def test_tcp_linear_defaults_to_both_and_slerp_with_active_button_colors(self):
         handles = {
             "tcp_linear_arm_buttons": {
@@ -1440,6 +1721,54 @@ class GuiContractsTest(unittest.TestCase):
         invalid_store, _, _ = self.make_safety(invalid)
         self.assertIn("left invalid joint state", _format_fk_status(invalid_store.latest(), stale=False))
         self.assertIn("right invalid TCP pose", _format_fk_status(invalid_store.latest(), stale=False))
+
+    def test_tcp_tracking_status_reports_selection_and_controller_simulation_fields(self):
+        state = self.tcp_available_state()
+        for arm in ("left", "right"):
+            state[arm]["tcp_ref_stand"] = {"x": 0.41, "y": 0.21, "z": 0.51, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+            state[arm]["tcp_ref_valid"] = True
+            state[arm]["tcp_tracking_source"] = "tcp_ref_stand"
+            state[arm]["tcp_tracking_source_recommendation"] = "tcp_ref_stand"
+            state[arm]["controller_simulation_mode"] = {
+                "recommended_tracking_pose": "tcp_ref_stand",
+                "physical_motion_expected": False,
+            }
+            state[arm]["physical_motion_expected"] = False
+        state["left"]["controller_simulation_diagnostic_override_active"] = True
+        store, _, _ = self.make_safety(state)
+        status = _format_tcp_tracking_status(store.latest(), stale=False, display_mode="auto")
+        self.assertIn("TCP tracking:", status)
+        self.assertIn("left display=auto selected=tcp_ref_stand", status)
+        self.assertIn("actual_valid=True", status)
+        self.assertIn("ref_valid=True", status)
+        self.assertIn("recommendation=tcp_ref_stand", status)
+        self.assertIn("physical_motion_expected=False", status)
+        self.assertIn("diagnostics_override=True", status)
+        self.assertEqual(_format_tcp_tracking_status(store.latest(), stale=True), "State stream stale")
+        self.assertEqual(_format_tcp_tracking_status(None, stale=True), "TCP tracking: no state")
+
+    def test_circle_overlay_status_formats_missing_live_and_stale_fields(self):
+        self.assertEqual(
+            _format_circle_overlay_status(None, stale=True, enabled=False),
+            "Circle overlay: disabled",
+        )
+        self.assertEqual(
+            _format_circle_overlay_status(None, stale=True, enabled=True),
+            "Circle overlay: no packets",
+        )
+        overlay = CircleOverlaySnapshot.parse(sample_circle_overlay(), received_monotonic=100.0)
+        self.assertIsNotNone(overlay)
+        live = _format_circle_overlay_status(overlay, stale=False, enabled=True)
+        self.assertIn("Circle overlay: live", live)
+        self.assertIn("run_id=run-1", live)
+        self.assertIn("tracking_source=tcp_ref_stand", live)
+        self.assertIn("error=1.0 mm", live)
+        self.assertIn("rms=2.0 mm", live)
+        self.assertIn("p95=3.0 mm", live)
+        self.assertIn("latency=12.3 ms", live)
+        self.assertIn("physical_motion_expected=False", live)
+        stale = _format_circle_overlay_status(overlay, stale=True, enabled=True)
+        self.assertIn("Circle overlay: stale", stale)
 
     def test_cartesian_solve_status_displays_ik_error_and_timing(self):
         state = sample_state()

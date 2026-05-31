@@ -131,6 +131,14 @@ The V1 dataset is robot-state plus policy-command JSONL only. Camera/image
 episodes remain a later merge step using camera timestamps and robot state
 timestamps.
 
+Dataset provenance and future demonstration labels are defined in
+`docs/runbooks/policy_data_collection.md`. New policy datasets must distinguish
+hardware-free `rb_simulator`, rbpodo controller `pgmode` simulation, and future
+physical real demonstrations. Controller-simulation episodes should carry
+`backend_type: rbpodo`, `run_mode: real`, `operation_mode: simulation`, and
+`physical_motion_expected: false`; they must not be mixed with physical real
+episodes without explicit filtering.
+
 ## HDF5 Episode Recording
 
 Record teleop episodes to ACT-compatible HDF5 files, one file per episode:
@@ -157,6 +165,15 @@ behavior-cloning checkpoints and warns, or aborts with
 `--strict-config-check`, if HDF5 episodes disagree. Inference compares the
 checkpoint hashes with the live state stream once at startup and warns on
 drift unless `--ignore-config-drift` is supplied.
+
+The recorder also accepts optional dataset metadata with schema
+`robotics_lab.policy_runner.dataset_metadata.v1`. HDF5 episodes keep the same
+root schema and add optional fields when present: `q_ref_left/right`,
+`tcp_actual_stand_left/right`, `tcp_ref_stand_left/right`,
+`tcp_tracking_source_left/right`, diagnostics-suspect flags, backend send
+timing, ACK policy, controller acceptance flags, action `source_id`,
+`TcpTwistStand`, joint target/velocity commands, and raw SpaceMouse
+axes/buttons. These fields are additive and do not change command emission.
 
 Install the optional recorder dependencies first:
 

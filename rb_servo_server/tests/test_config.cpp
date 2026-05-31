@@ -241,11 +241,86 @@ bool testControllerSimulationGateConfig() {
     return true;
 }
 
+bool testStatePublisherEndpointsParseAndValidate() {
+    const std::string valid_path = writeTempConfig(
+        "state-pub-endpoints-valid",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  state_pub_endpoints:\n"
+        "    - \"udp://127.0.0.1:50151\"\n"
+        "    - \"udp://rb_gui:50161\"\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(valid_path);
+    ::unlink(valid_path.c_str());
+    RB_CHECK(cfg.network.state_pub_endpoint == "udp://127.0.0.1:50151");
+    RB_CHECK(cfg.network.state_pub_bind == cfg.network.state_pub_endpoint);
+    RB_CHECK(cfg.network.state_pub_endpoints.size() == 2);
+    RB_CHECK(cfg.network.state_pub_endpoints[0] == "udp://127.0.0.1:50151");
+    RB_CHECK(cfg.network.state_pub_endpoints[1] == "udp://rb_gui:50161");
+
+    const std::string duplicate_path = writeTempConfig(
+        "state-pub-endpoints-duplicate",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  state_pub_endpoints:\n"
+        "    - \"udp://127.0.0.1:50151\"\n"
+        "    - \"udp://127.0.0.1:50151\"\n"
+        "    - \"udp://127.0.0.1:50161\"\n"
+    );
+    const rb_servo::DualArmConfig duplicate_cfg = rb_servo::loadConfigFromYaml(duplicate_path);
+    ::unlink(duplicate_path.c_str());
+    RB_CHECK(duplicate_cfg.network.state_pub_endpoints.size() == 2);
+    RB_CHECK(duplicate_cfg.network.state_pub_endpoints[0] == "udp://127.0.0.1:50151");
+    RB_CHECK(duplicate_cfg.network.state_pub_endpoints[1] == "udp://127.0.0.1:50161");
+
+    const std::string empty_path = writeTempConfig(
+        "state-pub-endpoints-empty",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  state_pub_endpoints: []\n"
+    );
+    RB_CHECK(loadRejects(empty_path));
+    ::unlink(empty_path.c_str());
+
+    const std::string mixed_path = writeTempConfig(
+        "state-pub-endpoints-mixed",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  state_pub_endpoint: \"udp://127.0.0.1:50151\"\n"
+        "  state_pub_endpoints:\n"
+        "    - \"udp://127.0.0.1:50161\"\n"
+    );
+    RB_CHECK(loadRejects(mixed_path));
+    ::unlink(mixed_path.c_str());
+
+    const std::string invalid_scheme_path = writeTempConfig(
+        "state-pub-endpoints-invalid-scheme",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  state_pub_endpoints:\n"
+        "    - \"tcp://127.0.0.1:50151\"\n"
+    );
+    RB_CHECK(loadRejects(invalid_scheme_path));
+    ::unlink(invalid_scheme_path.c_str());
+
+    const std::string invalid_port_path = writeTempConfig(
+        "state-pub-endpoints-invalid-port",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  state_pub_endpoint: \"udp://127.0.0.1:0\"\n"
+    );
+    RB_CHECK(loadRejects(invalid_port_path));
+    ::unlink(invalid_port_path.c_str());
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
     if (!testJointWrapConfigParses()) return 1;
     if (!testInvalidJointWrapConfigRejects()) return 1;
     if (!testControllerSimulationGateConfig()) return 1;
+    if (!testStatePublisherEndpointsParseAndValidate()) return 1;
     return 0;
 }

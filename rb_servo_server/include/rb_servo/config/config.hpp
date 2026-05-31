@@ -141,8 +141,9 @@ struct ServoConfig {
 struct NetworkConfig {
     std::string command_bind = "udp://127.0.0.1:50010";
     std::string state_pub_endpoint = "udp://127.0.0.1:50110";
-    // Deprecated compatibility alias. Keep synchronized with state_pub_endpoint.
+    // Deprecated compatibility alias. Keep synchronized with the first endpoint.
     std::string state_pub_bind = "udp://127.0.0.1:50110";
+    // Canonical UDP state destinations. The first entry mirrors state_pub_endpoint.
     std::vector<std::string> state_pub_endpoints{"udp://127.0.0.1:50110"};
     int state_pub_rate_hz = 20;
     std::vector<std::string> command_source_allowlist{"127.0.0.1/32"};

@@ -7,7 +7,12 @@ import unittest
 from io import StringIO
 from pathlib import Path
 
-from policy_runner.recording import EpisodeRecorder, _hash_canonical_json
+from policy_runner.recording import (
+    DATASET_METADATA_SCHEMA,
+    EpisodeRecorder,
+    _hash_canonical_json,
+    build_dataset_metadata,
+)
 from policy_runner.robot_state_client import StateSnapshot
 from policy_runner.training import action_vector, load_dataset, state_vector, train_behavior_cloning
 
@@ -55,6 +60,28 @@ def config_snapshots(path_kp_pos: float = 6.0, damping: float = 0.001) -> tuple[
 
 
 class RecordingAndTrainingTest(unittest.TestCase):
+    def test_dataset_metadata_builder_keeps_required_provenance_keys(self) -> None:
+        metadata = build_dataset_metadata(
+            git_commit="abc123",
+            config_hash="config-sha",
+            backend_type="rbpodo",
+            run_mode="real",
+            operation_mode="simulation",
+            physical_motion_expected=False,
+            controller_pgmode="simulation",
+            calibration_status="configured_estimate",
+            camera_status="disabled",
+            command_source_id="policy_runner",
+            benchmark_linkage={"overlay_run_id": "overlay-1"},
+        )
+
+        self.assertEqual(metadata["schema"], DATASET_METADATA_SCHEMA)
+        self.assertEqual(metadata["backend_type"], "rbpodo")
+        self.assertEqual(metadata["run_mode"], "real")
+        self.assertEqual(metadata["operation_mode"], "simulation")
+        self.assertFalse(metadata["physical_motion_expected"])
+        self.assertEqual(metadata["benchmark_linkage"]["overlay_run_id"], "overlay-1")
+
     def test_episode_recorder_writes_state_and_action_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             recorder = EpisodeRecorder(tmp, episode_name="episode_test")

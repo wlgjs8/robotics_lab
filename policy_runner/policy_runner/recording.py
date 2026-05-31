@@ -12,8 +12,51 @@ from .camera_bundle_client import _MISSING_BUNDLE_AGE_US
 from .robot_state_client import StateSnapshot
 
 
+DATASET_METADATA_SCHEMA = "robotics_lab.policy_runner.dataset_metadata.v1"
+
+
 def utc_episode_name(prefix: str = "episode") -> str:
     return f"{prefix}_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+
+
+def build_dataset_metadata(
+    *,
+    git_commit: str | None = None,
+    config_hash: str | None = None,
+    backend_type: str | None = None,
+    run_mode: str | None = None,
+    operation_mode: str | None = None,
+    physical_motion_expected: bool | None = None,
+    controller_pgmode: str | None = None,
+    calibration_status: str | None = None,
+    camera_status: str | None = None,
+    command_source_id: str | None = None,
+    benchmark_linkage: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build operator-supplied dataset provenance metadata.
+
+    The helper is intentionally passive: it only formats metadata for recorders
+    and does not inspect hardware, set safety gates, or send commands.
+    """
+
+    metadata: dict[str, Any] = {
+        "schema": DATASET_METADATA_SCHEMA,
+        "git_commit": git_commit,
+        "config_hash": config_hash,
+        "backend_type": backend_type,
+        "run_mode": run_mode,
+        "operation_mode": operation_mode,
+        "physical_motion_expected": physical_motion_expected,
+        "controller_pgmode": controller_pgmode,
+        "calibration_status": calibration_status,
+        "camera_status": camera_status,
+        "command_source_id": command_source_id,
+        "benchmark_linkage": dict(benchmark_linkage or {}),
+    }
+    if extra:
+        metadata.update(extra)
+    return metadata
 
 
 @dataclass(frozen=True)
@@ -104,6 +147,7 @@ class _EpisodeBuffer:
     task_description: str
     action_source: str
     operator_id: str | None
+    dataset_metadata: dict[str, Any]
     cartesian_control_snapshot: dict[str, Any]
     kinematics_snapshot: dict[str, Any]
     cartesian_control_hash: str
@@ -121,13 +165,44 @@ class _EpisodeBuffer:
     qsent_right: list[list[float]]
     tcp_stand_left: list[list[float]]
     tcp_stand_right: list[list[float]]
+    q_ref_left: list[list[float]]
+    q_ref_right: list[list[float]]
+    tcp_actual_stand_left: list[list[float]]
+    tcp_actual_stand_right: list[list[float]]
+    tcp_ref_stand_left: list[list[float]]
+    tcp_ref_stand_right: list[list[float]]
+    tcp_actual_valid_left: list[bool]
+    tcp_actual_valid_right: list[bool]
+    tcp_ref_valid_left: list[bool]
+    tcp_ref_valid_right: list[bool]
+    tcp_tracking_source_left: list[str]
+    tcp_tracking_source_right: list[str]
+    diagnostics_suspect_left: list[bool]
+    diagnostics_suspect_right: list[bool]
+    send_duration_us_left: list[int]
+    send_duration_us_right: list[int]
+    ack_policy_left: list[str]
+    ack_policy_right: list[str]
+    controller_acceptance_observed_left: list[bool]
+    controller_acceptance_observed_right: list[bool]
     fault_latched: list[bool]
     state_age_us: list[int]
     state_host_time_ns: list[int]
     command_seq: list[int]
     action_mode: list[str]
+    action_source_id: list[str]
     action_twist_left: list[list[float]]
     action_twist_right: list[list[float]]
+    action_twist_stand_left: list[list[float]]
+    action_twist_stand_right: list[list[float]]
+    action_joint_velocity_left: list[list[float]]
+    action_joint_velocity_right: list[list[float]]
+    action_joint_target_left: list[list[float]]
+    action_joint_target_right: list[list[float]]
+    action_spacemouse_axes_left: list[list[float]]
+    action_spacemouse_axes_right: list[list[float]]
+    action_spacemouse_buttons_left: list[list[bool]]
+    action_spacemouse_buttons_right: list[list[bool]]
     action_deadman_left: list[bool]
     action_deadman_right: list[bool]
     action_host_time_ns: list[int]
@@ -195,6 +270,7 @@ class Hdf5EpisodeRecorder:
         task_description: str,
         action_source: str,
         operator_id: str | None = None,
+        dataset_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Begin an episode and anchor reset pose from the current state."""
 
@@ -213,6 +289,7 @@ class Hdf5EpisodeRecorder:
             task_description=task_description,
             action_source=action_source,
             operator_id=operator_id,
+            dataset_metadata=dict(dataset_metadata or {}),
             cartesian_control_snapshot=cartesian_control_snapshot,
             kinematics_snapshot=kinematics_snapshot,
             cartesian_control_hash=_hash_canonical_json(cartesian_control_snapshot),
@@ -230,13 +307,44 @@ class Hdf5EpisodeRecorder:
             qsent_right=[],
             tcp_stand_left=[],
             tcp_stand_right=[],
+            q_ref_left=[],
+            q_ref_right=[],
+            tcp_actual_stand_left=[],
+            tcp_actual_stand_right=[],
+            tcp_ref_stand_left=[],
+            tcp_ref_stand_right=[],
+            tcp_actual_valid_left=[],
+            tcp_actual_valid_right=[],
+            tcp_ref_valid_left=[],
+            tcp_ref_valid_right=[],
+            tcp_tracking_source_left=[],
+            tcp_tracking_source_right=[],
+            diagnostics_suspect_left=[],
+            diagnostics_suspect_right=[],
+            send_duration_us_left=[],
+            send_duration_us_right=[],
+            ack_policy_left=[],
+            ack_policy_right=[],
+            controller_acceptance_observed_left=[],
+            controller_acceptance_observed_right=[],
             fault_latched=[],
             state_age_us=[],
             state_host_time_ns=[],
             command_seq=[],
             action_mode=[],
+            action_source_id=[],
             action_twist_left=[],
             action_twist_right=[],
+            action_twist_stand_left=[],
+            action_twist_stand_right=[],
+            action_joint_velocity_left=[],
+            action_joint_velocity_right=[],
+            action_joint_target_left=[],
+            action_joint_target_right=[],
+            action_spacemouse_axes_left=[],
+            action_spacemouse_axes_right=[],
+            action_spacemouse_buttons_left=[],
+            action_spacemouse_buttons_right=[],
             action_deadman_left=[],
             action_deadman_right=[],
             action_host_time_ns=[],
@@ -282,6 +390,26 @@ class Hdf5EpisodeRecorder:
         ep.qsent_right.append(_float_list(right.get("q_sent_deg"), 6))
         ep.tcp_stand_left.append(_extract_tcp_stand_7(left))
         ep.tcp_stand_right.append(_extract_tcp_stand_7(right))
+        ep.q_ref_left.append(_float_list(_first_present(left, "q_ref_deg", "q_target_deg"), 6))
+        ep.q_ref_right.append(_float_list(_first_present(right, "q_ref_deg", "q_target_deg"), 6))
+        ep.tcp_actual_stand_left.append(_extract_tcp_pose_7(left, "tcp_actual_stand", fallback_key="tcp_stand"))
+        ep.tcp_actual_stand_right.append(_extract_tcp_pose_7(right, "tcp_actual_stand", fallback_key="tcp_stand"))
+        ep.tcp_ref_stand_left.append(_extract_tcp_pose_7(left, "tcp_ref_stand"))
+        ep.tcp_ref_stand_right.append(_extract_tcp_pose_7(right, "tcp_ref_stand"))
+        ep.tcp_actual_valid_left.append(_bool_with_fallback(left.get("tcp_actual_valid"), bool(left.get("tcp_stand"))))
+        ep.tcp_actual_valid_right.append(_bool_with_fallback(right.get("tcp_actual_valid"), bool(right.get("tcp_stand"))))
+        ep.tcp_ref_valid_left.append(bool(left.get("tcp_ref_valid", False)))
+        ep.tcp_ref_valid_right.append(bool(right.get("tcp_ref_valid", False)))
+        ep.tcp_tracking_source_left.append(_tracking_source(left))
+        ep.tcp_tracking_source_right.append(_tracking_source(right))
+        ep.diagnostics_suspect_left.append(_diagnostics_suspect(left))
+        ep.diagnostics_suspect_right.append(_diagnostics_suspect(right))
+        ep.send_duration_us_left.append(_duration_us(left))
+        ep.send_duration_us_right.append(_duration_us(right))
+        ep.ack_policy_left.append(str(_first_present(left, "ack_policy", "ack_semantics") or ""))
+        ep.ack_policy_right.append(str(_first_present(right, "ack_policy", "ack_semantics") or ""))
+        ep.controller_acceptance_observed_left.append(bool(left.get("controller_acceptance_observed", False)))
+        ep.controller_acceptance_observed_right.append(bool(right.get("controller_acceptance_observed", False)))
         ep.fault_latched.append(bool(payload.get("fault_latched", False)))
         ep.state_age_us.append(int(payload.get("state_age_us", 0) or 0))
         ep.state_host_time_ns.append(int(payload.get("host_time_ns", 0) or 0))
@@ -292,16 +420,38 @@ class Hdf5EpisodeRecorder:
             right_action = action_packet.get("right", {}) if isinstance(action_packet.get("right"), dict) else {}
             left_mode = str(left_action.get("mode", "Hold"))
             right_mode = str(right_action.get("mode", "Hold"))
-            mode = "TcpTwistLocal" if "TcpTwistLocal" in (left_mode, right_mode) else left_mode
+            mode = _dominant_action_mode(left_mode, right_mode)
             ep.action_mode.append(mode)
+            ep.action_source_id.append(str(action_packet.get("source_id", "") or ""))
             ep.action_twist_left.append(_float_list(left_action.get("tcp_twist_local"), 6))
             ep.action_twist_right.append(_float_list(right_action.get("tcp_twist_local"), 6))
+            ep.action_twist_stand_left.append(_float_list(left_action.get("tcp_twist_stand"), 6))
+            ep.action_twist_stand_right.append(_float_list(right_action.get("tcp_twist_stand"), 6))
+            ep.action_joint_velocity_left.append(_float_list(left_action.get("dq_target_deg_s"), 6))
+            ep.action_joint_velocity_right.append(_float_list(right_action.get("dq_target_deg_s"), 6))
+            ep.action_joint_target_left.append(_float_list(left_action.get("q_target_deg"), 6))
+            ep.action_joint_target_right.append(_float_list(right_action.get("q_target_deg"), 6))
+            ep.action_spacemouse_axes_left.append(_spacemouse_axes(left_action, action_packet, "left"))
+            ep.action_spacemouse_axes_right.append(_spacemouse_axes(right_action, action_packet, "right"))
+            ep.action_spacemouse_buttons_left.append(_spacemouse_buttons(left_action, action_packet, "left"))
+            ep.action_spacemouse_buttons_right.append(_spacemouse_buttons(right_action, action_packet, "right"))
             ep.action_deadman_left.append(bool(left_action.get("deadman", False)))
             ep.action_deadman_right.append(bool(right_action.get("deadman", False)))
         else:
             ep.action_mode.append("Hold")
+            ep.action_source_id.append("")
             ep.action_twist_left.append([0.0] * 6)
             ep.action_twist_right.append([0.0] * 6)
+            ep.action_twist_stand_left.append([0.0] * 6)
+            ep.action_twist_stand_right.append([0.0] * 6)
+            ep.action_joint_velocity_left.append([0.0] * 6)
+            ep.action_joint_velocity_right.append([0.0] * 6)
+            ep.action_joint_target_left.append([0.0] * 6)
+            ep.action_joint_target_right.append([0.0] * 6)
+            ep.action_spacemouse_axes_left.append([0.0] * 6)
+            ep.action_spacemouse_axes_right.append([0.0] * 6)
+            ep.action_spacemouse_buttons_left.append([False] * 8)
+            ep.action_spacemouse_buttons_right.append([False] * 8)
             ep.action_deadman_left.append(False)
             ep.action_deadman_right.append(False)
 
@@ -355,6 +505,10 @@ class Hdf5EpisodeRecorder:
             config = h5.create_group("config")
             _write_dict_as_attrs(config.create_group("cartesian_control"), ep.cartesian_control_snapshot)
             _write_dict_as_attrs(config.create_group("kinematics"), ep.kinematics_snapshot)
+            if ep.dataset_metadata:
+                metadata = h5.create_group("metadata")
+                dataset = metadata.create_group("dataset")
+                _write_dict_as_attrs(dataset, ep.dataset_metadata)
 
             obs = h5.create_group("observations")
             obs.create_dataset(
@@ -393,6 +547,79 @@ class Hdf5EpisodeRecorder:
                 compression="gzip",
                 compression_opts=1,
             )
+            obs.create_dataset(
+                "q_ref_left",
+                data=np.asarray(ep.q_ref_left, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            obs.create_dataset(
+                "q_ref_right",
+                data=np.asarray(ep.q_ref_right, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            obs.create_dataset(
+                "tcp_actual_stand_left",
+                data=np.asarray(ep.tcp_actual_stand_left, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            obs.create_dataset(
+                "tcp_actual_stand_right",
+                data=np.asarray(ep.tcp_actual_stand_right, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            obs.create_dataset(
+                "tcp_ref_stand_left",
+                data=np.asarray(ep.tcp_ref_stand_left, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            obs.create_dataset(
+                "tcp_ref_stand_right",
+                data=np.asarray(ep.tcp_ref_stand_right, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            obs.create_dataset("tcp_actual_valid_left", data=np.asarray(ep.tcp_actual_valid_left, dtype=bool))
+            obs.create_dataset("tcp_actual_valid_right", data=np.asarray(ep.tcp_actual_valid_right, dtype=bool))
+            obs.create_dataset("tcp_ref_valid_left", data=np.asarray(ep.tcp_ref_valid_left, dtype=bool))
+            obs.create_dataset("tcp_ref_valid_right", data=np.asarray(ep.tcp_ref_valid_right, dtype=bool))
+            string_dtype = h5py.string_dtype(encoding="utf-8")
+            obs.create_dataset(
+                "tcp_tracking_source_left",
+                data=np.asarray(ep.tcp_tracking_source_left, dtype=object),
+                dtype=string_dtype,
+            )
+            obs.create_dataset(
+                "tcp_tracking_source_right",
+                data=np.asarray(ep.tcp_tracking_source_right, dtype=object),
+                dtype=string_dtype,
+            )
+            obs.create_dataset("diagnostics_suspect_left", data=np.asarray(ep.diagnostics_suspect_left, dtype=bool))
+            obs.create_dataset("diagnostics_suspect_right", data=np.asarray(ep.diagnostics_suspect_right, dtype=bool))
+            obs.create_dataset("send_duration_us_left", data=np.asarray(ep.send_duration_us_left, dtype=np.int64))
+            obs.create_dataset("send_duration_us_right", data=np.asarray(ep.send_duration_us_right, dtype=np.int64))
+            obs.create_dataset(
+                "ack_policy_left",
+                data=np.asarray(ep.ack_policy_left, dtype=object),
+                dtype=string_dtype,
+            )
+            obs.create_dataset(
+                "ack_policy_right",
+                data=np.asarray(ep.ack_policy_right, dtype=object),
+                dtype=string_dtype,
+            )
+            obs.create_dataset(
+                "controller_acceptance_observed_left",
+                data=np.asarray(ep.controller_acceptance_observed_left, dtype=bool),
+            )
+            obs.create_dataset(
+                "controller_acceptance_observed_right",
+                data=np.asarray(ep.controller_acceptance_observed_right, dtype=bool),
+            )
             obs.create_dataset("fault_latched", data=np.asarray(ep.fault_latched, dtype=bool))
             obs.create_dataset("state_age_us", data=np.asarray(ep.state_age_us, dtype=np.int64))
             obs.create_dataset("state_host_time_ns", data=np.asarray(ep.state_host_time_ns, dtype=np.int64))
@@ -418,8 +645,12 @@ class Hdf5EpisodeRecorder:
                 obs.create_dataset("bundle_age_us", data=np.asarray(ep.bundle_age_us, dtype=np.int64))
 
             action = h5.create_group("action")
-            mode_dtype = h5py.string_dtype(encoding="utf-8")
-            action.create_dataset("mode", data=np.asarray(ep.action_mode, dtype=object), dtype=mode_dtype)
+            action.create_dataset("mode", data=np.asarray(ep.action_mode, dtype=object), dtype=string_dtype)
+            action.create_dataset(
+                "source_id",
+                data=np.asarray(ep.action_source_id, dtype=object),
+                dtype=string_dtype,
+            )
             action.create_dataset(
                 "tcp_twist_local_left",
                 data=np.asarray(ep.action_twist_left, dtype=np.float32),
@@ -432,6 +663,56 @@ class Hdf5EpisodeRecorder:
                 compression="gzip",
                 compression_opts=1,
             )
+            action.create_dataset(
+                "tcp_twist_stand_left",
+                data=np.asarray(ep.action_twist_stand_left, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            action.create_dataset(
+                "tcp_twist_stand_right",
+                data=np.asarray(ep.action_twist_stand_right, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            action.create_dataset(
+                "joint_velocity_left",
+                data=np.asarray(ep.action_joint_velocity_left, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            action.create_dataset(
+                "joint_velocity_right",
+                data=np.asarray(ep.action_joint_velocity_right, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            action.create_dataset(
+                "joint_target_left",
+                data=np.asarray(ep.action_joint_target_left, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            action.create_dataset(
+                "joint_target_right",
+                data=np.asarray(ep.action_joint_target_right, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            action.create_dataset(
+                "spacemouse_axes_left",
+                data=np.asarray(ep.action_spacemouse_axes_left, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            action.create_dataset(
+                "spacemouse_axes_right",
+                data=np.asarray(ep.action_spacemouse_axes_right, dtype=np.float32),
+                compression="gzip",
+                compression_opts=1,
+            )
+            action.create_dataset("spacemouse_buttons_left", data=np.asarray(ep.action_spacemouse_buttons_left, dtype=bool))
+            action.create_dataset("spacemouse_buttons_right", data=np.asarray(ep.action_spacemouse_buttons_right, dtype=bool))
             action.create_dataset("deadman_left", data=np.asarray(ep.action_deadman_left, dtype=bool))
             action.create_dataset("deadman_right", data=np.asarray(ep.action_deadman_right, dtype=bool))
             action.create_dataset(
@@ -518,6 +799,14 @@ def _dict_or_empty(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _first_present(mapping: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None:
+            return value
+    return None
+
+
 def _hash_canonical_json(value: dict[str, Any]) -> str:
     if not value:
         return ""
@@ -543,7 +832,20 @@ def _write_dict_as_attrs(group: Any, value: dict[str, Any]) -> None:
 def _extract_tcp_stand_7(arm_state: dict[str, Any]) -> list[float]:
     """Extract [x, y, z, qx, qy, qz, qw] from an arm state dict."""
 
-    tcp = arm_state.get("tcp_stand")
+    return _extract_tcp_pose_7(arm_state, "tcp_stand")
+
+
+def _extract_tcp_pose_7(
+    arm_state: dict[str, Any],
+    key: str,
+    *,
+    fallback_key: str | None = None,
+) -> list[float]:
+    """Extract [x, y, z, qx, qy, qz, qw] from an arm TCP pose field."""
+
+    tcp = arm_state.get(key)
+    if not isinstance(tcp, dict) and fallback_key is not None:
+        tcp = arm_state.get(fallback_key)
     if not isinstance(tcp, dict):
         return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     x = float(tcp.get("x", 0.0) or 0.0)
@@ -557,6 +859,85 @@ def _extract_tcp_stand_7(arm_state: dict[str, Any]) -> list[float]:
     qz = float(tcp.get("qz", 0.0) or 0.0)
     qw = float(tcp.get("qw", 1.0) or 1.0)
     return [x, y, z, qx, qy, qz, qw]
+
+
+def _bool_with_fallback(value: Any, fallback: bool) -> bool:
+    return bool(value) if isinstance(value, bool) else bool(fallback)
+
+
+def _tracking_source(arm_state: dict[str, Any]) -> str:
+    source = _first_present(
+        arm_state,
+        "tcp_tracking_source",
+        "tcp_tracking_source_recommendation",
+    )
+    return str(source or "")
+
+
+def _diagnostics_suspect(arm_state: dict[str, Any]) -> bool:
+    if isinstance(arm_state.get("diagnostics_suspect"), bool):
+        return bool(arm_state["diagnostics_suspect"])
+    return str(arm_state.get("lifecycle_state", "")) == "diagnostics_suspect"
+
+
+def _duration_us(arm_state: dict[str, Any]) -> int:
+    value = arm_state.get("send_duration_us")
+    if value is None and isinstance(arm_state.get("backend_timing"), dict):
+        value = arm_state["backend_timing"].get("send_duration_us")
+    return int(value or 0)
+
+
+def _dominant_action_mode(left_mode: str, right_mode: str) -> str:
+    modes = (left_mode, right_mode)
+    for candidate in ("TcpTwistLocal", "TcpTwistStand", "JointVelocity", "JointTarget"):
+        if candidate in modes:
+            return candidate
+    return left_mode
+
+
+def _spacemouse_axes(
+    arm_action: dict[str, Any],
+    packet: dict[str, Any],
+    side: str,
+) -> list[float]:
+    value = _spacemouse_value(arm_action, packet, side, "axes")
+    return _float_list(value, 6)
+
+
+def _spacemouse_buttons(
+    arm_action: dict[str, Any],
+    packet: dict[str, Any],
+    side: str,
+) -> list[bool]:
+    value = _spacemouse_value(arm_action, packet, side, "buttons")
+    if not isinstance(value, (list, tuple)):
+        return [False] * 8
+    out = [bool(item) for item in value[:8]]
+    if len(out) < 8:
+        out.extend([False] * (8 - len(out)))
+    return out
+
+
+def _spacemouse_value(
+    arm_action: dict[str, Any],
+    packet: dict[str, Any],
+    side: str,
+    name: str,
+) -> Any:
+    for container in (arm_action, packet.get(side), packet):
+        if not isinstance(container, dict):
+            continue
+        for key in (
+            f"spacemouse_{name}",
+            f"spacemouse_raw_{name}",
+            f"raw_{name}",
+        ):
+            if key in container:
+                return container[key]
+        raw = container.get("spacemouse_raw")
+        if isinstance(raw, dict) and name in raw:
+            return raw[name]
+    return None
 
 
 def record_state_stream(

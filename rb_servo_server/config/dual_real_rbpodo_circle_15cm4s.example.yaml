@@ -92,7 +92,12 @@ safety:
 
 network:
   command_bind: "udp://127.0.0.1:50052"
-  state_pub_endpoint: "udp://127.0.0.1:50152"
+  # State fanout is robot/server telemetry. The desired-circle live overlay is
+  # benchmark-owned and should be sent with
+  # --overlay-pub-endpoint udp://127.0.0.1:50261, not added here.
+  state_pub_endpoints:
+    - "udp://127.0.0.1:50152"  # benchmark recorder
+    - "udp://127.0.0.1:50162"  # rb_gui live viewer
   state_pub_rate_hz: 50
   command_source_allowlist: ["127.0.0.1/32"]
 

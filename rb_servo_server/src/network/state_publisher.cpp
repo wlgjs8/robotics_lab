@@ -17,6 +17,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -953,13 +954,9 @@ bool resolveUdpEndpoint(const std::string& endpoint, UdpDestination* destination
 }
 
 std::vector<UdpDestination> resolveUdpDestinations(const NetworkConfig& config) {
-    std::vector<std::string> endpoints = config.state_pub_endpoints;
-    if (endpoints.empty()) {
-        endpoints.push_back(config.state_pub_bind);
-    }
     std::vector<UdpDestination> destinations;
-    destinations.reserve(endpoints.size());
-    for (const std::string& endpoint : endpoints) {
+    destinations.reserve(config.state_pub_endpoints.size());
+    for (const std::string& endpoint : config.state_pub_endpoints) {
         UdpDestination destination;
         if (!resolveUdpEndpoint(endpoint, &destination)) {
             continue;
@@ -970,11 +967,11 @@ std::vector<UdpDestination> resolveUdpDestinations(const NetworkConfig& config) 
 }
 
 bool validateUdpEndpointSyntax(const NetworkConfig& config) {
-    std::vector<std::string> endpoints = config.state_pub_endpoints;
-    if (endpoints.empty()) {
-        endpoints.push_back(config.state_pub_bind);
+    if (config.state_pub_endpoints.empty()) {
+        std::cerr << "[ERROR] StatePublisher requires at least one state_pub_endpoints entry\n";
+        return false;
     }
-    for (const std::string& endpoint : endpoints) {
+    for (const std::string& endpoint : config.state_pub_endpoints) {
         if (!StatePublisher::parseUdpEndpointUri(endpoint, nullptr, nullptr)) {
             std::cerr << "[ERROR] StatePublisher only supports udp://host:port endpoints, got "
                       << endpoint << "\n";
@@ -984,16 +981,50 @@ bool validateUdpEndpointSyntax(const NetworkConfig& config) {
     return true;
 }
 
+std::vector<std::string> uniqueEndpoints(const std::vector<std::string>& endpoints) {
+    std::vector<std::string> unique;
+    unique.reserve(endpoints.size());
+    std::set<std::string> seen;
+    for (const std::string& endpoint : endpoints) {
+        if (seen.insert(endpoint).second) {
+            unique.push_back(endpoint);
+        } else {
+            std::cerr << "[WARN] duplicate StatePublisher endpoint ignored: "
+                      << endpoint << "\n";
+        }
+    }
+    return unique;
+}
+
 void normalizeStatePublisherNetworkConfig(NetworkConfig* config) {
     if (!config) return;
-    if (config->state_pub_bind != config->state_pub_endpoint) {
-        config->state_pub_endpoint = config->state_pub_bind;
+    const NetworkConfig defaults;
+    const bool endpoint_list_is_default =
+        config->state_pub_endpoints.size() == 1 &&
+        config->state_pub_endpoints.front() == defaults.state_pub_endpoint;
+
+    if (config->state_pub_endpoints.empty()) {
+        const std::string fallback =
+            config->state_pub_endpoint.empty() ? config->state_pub_bind : config->state_pub_endpoint;
+        config->state_pub_endpoints = {fallback};
+    } else if (endpoint_list_is_default && config->state_pub_endpoint != defaults.state_pub_endpoint) {
+        config->state_pub_endpoints = {config->state_pub_endpoint};
+    } else if (
+        endpoint_list_is_default &&
+        config->state_pub_endpoint == defaults.state_pub_endpoint &&
+        config->state_pub_bind != defaults.state_pub_bind
+    ) {
         config->state_pub_endpoints = {config->state_pub_bind};
+    } else {
+        config->state_pub_endpoints = uniqueEndpoints(config->state_pub_endpoints);
+    }
+
+    if (config->state_pub_endpoints.empty()) {
+        config->state_pub_endpoints = {defaults.state_pub_endpoint};
         return;
     }
-    if (config->state_pub_endpoints.empty() || config->state_pub_endpoints.front() != config->state_pub_endpoint) {
-        config->state_pub_endpoints = {config->state_pub_endpoint};
-    }
+    config->state_pub_endpoint = config->state_pub_endpoints.front();
+    config->state_pub_bind = config->state_pub_endpoint;
 }
 
 }  // namespace
@@ -1173,16 +1204,15 @@ void StatePublisher::threadMain() {
     }
 
     const auto publish_period = publishPeriod(config_.network.state_pub_rate_hz);
-    std::vector<UdpDestination> destinations;
-    auto next_resolve = std::chrono::steady_clock::time_point{};
-    bool send_warned = false;
+    const std::vector<UdpDestination> destinations = resolveUdpDestinations(config_.network);
+    if (destinations.empty()) {
+        std::cerr << "[ERROR] StatePublisher resolved no UDP state destinations\n";
+        ::close(fd);
+        running_ = false;
+        return;
+    }
+    std::set<std::string> send_warned_endpoints;
     while (running_) {
-        const auto now = std::chrono::steady_clock::now();
-        if (destinations.empty() || now >= next_resolve) {
-            destinations = resolveUdpDestinations(config_.network);
-            next_resolve = now + std::chrono::seconds(1);
-        }
-
         ServoSnapshot snapshot;
         if (snapshot_provider_) {
             snapshot = snapshot_provider_();
@@ -1202,10 +1232,9 @@ void StatePublisher::threadMain() {
                 destination.addr(),
                 destination.len
             );
-            if (sent < 0 && !send_warned) {
+            if (sent < 0 && send_warned_endpoints.insert(destination.endpoint).second) {
                 std::cerr << "[WARN] StatePublisher send failed to "
                           << destination.endpoint << ": " << std::strerror(errno) << "\n";
-                send_warned = true;
             }
         }
         std::this_thread::sleep_for(publish_period);
@@ -1248,7 +1277,10 @@ bool StatePublisher::parseUdpEndpointUri(const std::string& endpoint, std::strin
 }
 
 bool StatePublisher::parseEndpoint(std::string* host, int* port) const {
-    return parseUdpEndpointUri(config_.network.state_pub_bind, host, port);
+    if (!config_.network.state_pub_endpoints.empty()) {
+        return parseUdpEndpointUri(config_.network.state_pub_endpoints.front(), host, port);
+    }
+    return parseUdpEndpointUri(config_.network.state_pub_endpoint, host, port);
 }
 
 }  // namespace rb_servo

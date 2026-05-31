@@ -24,6 +24,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import benchmark_overlay
 import circle_tracking_benchmark as sim_bench
 from cartesian_acceptance import CommandRecorder, StateCapture, wait_for
 from rbpodo_servo_acceptance import (
@@ -113,6 +114,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verify-pgmode-simulation", action="store_true")
     parser.add_argument("--pgmode-timeout-sec", type=float, default=1.0)
     parser.add_argument("--pgmode-command-port", type=int, default=5000)
+    parser.add_argument("--overlay-pub-endpoint", default="udp://127.0.0.1:50261")
+    parser.add_argument("--overlay-pub-rate-hz", type=float, default=20.0)
+    parser.add_argument("--overlay-run-id")
+    parser.add_argument("--overlay-disable", action="store_true")
     parser.add_argument("--artifact-dir", type=Path, required=True)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
@@ -182,6 +187,17 @@ def apply_profile(args: argparse.Namespace) -> None:
         args.diameter_m = default_diameter
     if args.period_sec is None:
         args.period_sec = default_period
+
+
+def apply_overlay_defaults(args: argparse.Namespace) -> None:
+    if not hasattr(args, "overlay_pub_endpoint"):
+        args.overlay_pub_endpoint = "udp://127.0.0.1:50261"
+    if not hasattr(args, "overlay_pub_rate_hz"):
+        args.overlay_pub_rate_hz = 20.0
+    if not hasattr(args, "overlay_run_id"):
+        args.overlay_run_id = None
+    if not hasattr(args, "overlay_disable"):
+        args.overlay_disable = False
 
 
 def required_speed(args: argparse.Namespace) -> float:
@@ -347,6 +363,7 @@ def validate_config_and_env(
     sections: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     apply_profile(args)
+    apply_overlay_defaults(args)
     assert args.diameter_m is not None and args.period_sec is not None
     if args.repeat < 1:
         raise BenchmarkError("--repeat must be >= 1")
@@ -369,6 +386,13 @@ def validate_config_and_env(
         raise BenchmarkError("--pgmode-command-port must be in [1, 65535]")
     if not math.isfinite(args.pgmode_timeout_sec) or args.pgmode_timeout_sec <= 0.0:
         raise BenchmarkError("--pgmode-timeout-sec must be finite and positive")
+    if not args.overlay_disable:
+        if not math.isfinite(args.overlay_pub_rate_hz) or args.overlay_pub_rate_hz <= 0.0:
+            raise BenchmarkError("--overlay-pub-rate-hz must be finite and positive")
+        try:
+            benchmark_overlay.parse_udp_endpoint(args.overlay_pub_endpoint)
+        except ValueError as exc:
+            raise BenchmarkError(str(exc)) from exc
 
     for label, arm_cfg in all_arm_configs(config):
         if arm_cfg.backend_type != "rbpodo":
@@ -490,6 +514,9 @@ def validate_config_and_env(
         "disable_waiting_ack": bool(config.left.disable_waiting_ack or config.right.disable_waiting_ack),
         "docker_rb_simulator_port_check": docker_check,
         "state_pub_endpoint_unique_checked_by_bind": True,
+        "overlay_enabled": not args.overlay_disable,
+        "overlay_pub_endpoint": None if args.overlay_disable else args.overlay_pub_endpoint,
+        "overlay_pub_rate_hz": None if args.overlay_disable else args.overlay_pub_rate_hz,
         "server_env_overrides": {"RB_RBPODO_PGMODE_SIMULATION_CONFIRMED": "1"},
     }
     endpoints = {"command_host": command_host, "command_port": command_port, "state_host": state_host, "state_port": state_port}
@@ -589,17 +616,102 @@ def send_udp(host: str, port: int, packet: dict[str, Any], recorder: CommandReco
     sim_bench.send_udp(host, port, packet, recorder)
 
 
+def warn_overlay(message: str) -> None:
+    print(f"WARNING: benchmark overlay: {message}", file=sys.stderr)
+
+
+def desired_phase(traj: sim_bench.Trajectory, t_sec: float) -> float:
+    return math.fmod(traj.omega * t_sec, 2.0 * math.pi)
+
+
+def latest_overlay_snapshot(
+    capture: StateCapture,
+    arm: str,
+    source: str,
+    stale_limit_ns: int,
+    now_ns: int,
+) -> dict[str, Any] | None:
+    return latest_feedback_snapshot(capture, arm, source, stale_limit_ns, now_ns)
+
+
+def publish_overlay_status(
+    args: argparse.Namespace,
+    capture: StateCapture,
+    publisher: benchmark_overlay.BenchmarkOverlayPublisher | None,
+    metrics: benchmark_overlay.CircleOverlayMetrics | None,
+    traj: sim_bench.Trajectory,
+    q0: list[float],
+    tracking_source: str,
+    *,
+    t_sec: float,
+    command_count: int,
+    result_so_far: str = "running",
+    force: bool = False,
+) -> None:
+    if publisher is None or metrics is None or not publisher.enabled:
+        return
+    now_ns = time.monotonic_ns()
+    desired_position = traj.position(t_sec)
+    actual_position = None
+    sample_id: int | None = None
+    stale_limit_ns = int(max(1_000.0, args.max_state_age_us) * 1000.0)
+    snapshot = latest_overlay_snapshot(capture, args.arm, tracking_source, stale_limit_ns, now_ns)
+    if snapshot is not None:
+        try:
+            tracking_pose = pose_for_source(snapshot, args.arm, tracking_source)
+            actual_position = sim_bench.vec(tracking_pose)
+            sample_id = int(snapshot.get("host_time_ns", -1))
+        except Exception:
+            actual_position = None
+            sample_id = None
+    metrics.observe(
+        t_sec=t_sec,
+        desired_position=desired_position,
+        actual_position=actual_position,
+        sample_id=sample_id,
+    )
+    try:
+        message = benchmark_overlay.build_circle_overlay_message(
+            run_id=publisher.run_id,
+            arm=args.arm,
+            profile=args.profile,
+            controller=args.controller,
+            tracking_source=tracking_source,
+            plane=args.plane,
+            center_stand=traj.center,
+            axis1_stand=traj.axis1,
+            axis2_stand=traj.axis2,
+            radius_m=traj.radius,
+            period_sec=float(args.period_sec),
+            repeat=int(args.repeat),
+            phase_rad=desired_phase(traj, t_sec),
+            desired_pose_stand=benchmark_overlay.pose_payload(desired_position, q0),
+            metrics=metrics.snapshot(),
+            command_count=command_count,
+            physical_motion_expected=False,
+            result_so_far=result_so_far,
+        )
+        publisher.publish(message, force=force)
+    except Exception as exc:
+        publisher.record_warning(f"overlay publish skipped: {exc}")
+
+
 def twist_packet(args: argparse.Namespace, frame: str, twist: list[float], timeout_sec: float) -> dict[str, Any]:
     return sim_bench.twist_command(args.arm, frame, twist, timeout_sec)
 
 
 def stream_twist(
     args: argparse.Namespace,
+    capture: StateCapture,
     commands: CommandRecorder,
     endpoints: dict[str, Any],
     traj: sim_bench.Trajectory,
     frame: str,
+    q0: list[float],
+    tracking_source: str,
     duration_sec: float,
+    overlay_publisher: benchmark_overlay.BenchmarkOverlayPublisher | None = None,
+    overlay_metrics: benchmark_overlay.CircleOverlayMetrics | None = None,
 ) -> tuple[int, int, int]:
     period = 1.0 / args.command_rate_hz
     timeout = max(0.2, 3.0 * period)
@@ -627,6 +739,17 @@ def stream_twist(
         last_ns = int(packet["host_time_ns"])
         send_udp(endpoints["command_host"], endpoints["command_port"], packet, commands)
         command_count += 1
+        publish_overlay_status(
+            args,
+            capture,
+            overlay_publisher,
+            overlay_metrics,
+            traj,
+            q0,
+            tracking_source,
+            t_sec=t,
+            command_count=command_count,
+        )
         next_send += period
         time.sleep(max(0.0, next_send - time.monotonic()))
     stop = sim_bench.hold_command()
@@ -644,6 +767,8 @@ def stream_twist_feedback(
     q0: list[float],
     tracking_source: str,
     duration_sec: float,
+    overlay_publisher: benchmark_overlay.BenchmarkOverlayPublisher | None = None,
+    overlay_metrics: benchmark_overlay.CircleOverlayMetrics | None = None,
 ) -> tuple[int, int, int, list[dict[str, Any]]]:
     period = 1.0 / args.command_rate_hz
     timeout = max(0.2, 3.0 * period)
@@ -728,6 +853,17 @@ def stream_twist_feedback(
         rows.append(row)
         send_udp(endpoints["command_host"], endpoints["command_port"], packet, commands)
         command_count += 1
+        publish_overlay_status(
+            args,
+            capture,
+            overlay_publisher,
+            overlay_metrics,
+            traj,
+            q0,
+            tracking_source,
+            t_sec=t,
+            command_count=command_count,
+        )
         next_send += period
         time.sleep(max(0.0, next_send - time.monotonic()))
     stop = sim_bench.hold_command()
@@ -1100,6 +1236,8 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "q_ref_moved",
         "tcp_ref_moved",
         "server_rejected_cartesian",
+        "overlay_pub_endpoint",
+        "overlay_messages_sent",
     ]
     write_csv(path, [{field: summary.get(field) for field in fields}], fields)
 
@@ -1235,17 +1373,67 @@ def run_tracking_commands(
     q0: list[float],
     tracking_source: str,
     duration_sec: float,
+    overlay_publisher: benchmark_overlay.BenchmarkOverlayPublisher | None = None,
+    overlay_metrics: benchmark_overlay.CircleOverlayMetrics | None = None,
 ) -> tuple[int, int, int, list[dict[str, Any]]]:
     if args.controller == "twist_stand":
-        start_ns, end_ns, count = stream_twist(args, commands, endpoints, traj, "stand", duration_sec)
+        start_ns, end_ns, count = stream_twist(
+            args,
+            capture,
+            commands,
+            endpoints,
+            traj,
+            "stand",
+            q0,
+            tracking_source,
+            duration_sec,
+            overlay_publisher,
+            overlay_metrics,
+        )
         return start_ns, end_ns, count, []
     if args.controller == "twist_local":
-        start_ns, end_ns, count = stream_twist(args, commands, endpoints, traj, "local", duration_sec)
+        start_ns, end_ns, count = stream_twist(
+            args,
+            capture,
+            commands,
+            endpoints,
+            traj,
+            "local",
+            q0,
+            tracking_source,
+            duration_sec,
+            overlay_publisher,
+            overlay_metrics,
+        )
         return start_ns, end_ns, count, []
     if args.controller == "twist_stand_feedback":
-        return stream_twist_feedback(args, capture, commands, endpoints, traj, "stand", q0, tracking_source, duration_sec)
+        return stream_twist_feedback(
+            args,
+            capture,
+            commands,
+            endpoints,
+            traj,
+            "stand",
+            q0,
+            tracking_source,
+            duration_sec,
+            overlay_publisher,
+            overlay_metrics,
+        )
     if args.controller == "twist_local_feedback":
-        return stream_twist_feedback(args, capture, commands, endpoints, traj, "local", q0, tracking_source, duration_sec)
+        return stream_twist_feedback(
+            args,
+            capture,
+            commands,
+            endpoints,
+            traj,
+            "local",
+            q0,
+            tracking_source,
+            duration_sec,
+            overlay_publisher,
+            overlay_metrics,
+        )
     raise BenchmarkError(f"controller {args.controller} is not implemented for rbpodo controller-simulation benchmark")
 
 
@@ -1264,7 +1452,14 @@ def summarize_run(
     feedback_rows: list[dict[str, Any]],
     artifact_dir: Path,
     server_returncode: int | None,
+    overlay_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    overlay_stats = overlay_stats or {
+        "overlay_enabled": False,
+        "overlay_pub_endpoint": None,
+        "overlay_messages_sent": 0,
+        "overlay_messages_recorded": 0,
+    }
     duration_sec = float(args.period_sec) * int(args.repeat)
     tracking_samples = collect_samples(states, args.arm, tracking_source, benchmark_start_ns, benchmark_start_ns + int(duration_sec * 1e9))
     if not tracking_samples:
@@ -1350,6 +1545,14 @@ def summarize_run(
         "pgmode_summary": str((artifact_dir / "pgmode_summary.json").resolve()),
         "state_stream": str((artifact_dir / "state_stream.jsonl").resolve()),
         "command_packets": str((artifact_dir / "command_packets.jsonl").resolve()),
+        "overlay_stream": overlay_stats.get("overlay_stream"),
+        "overlay_pub_endpoint": overlay_stats.get("overlay_pub_endpoint"),
+        "overlay_pub_rate_hz": overlay_stats.get("overlay_pub_rate_hz"),
+        "overlay_run_id": overlay_stats.get("overlay_run_id"),
+        "overlay_messages_sent": overlay_stats.get("overlay_messages_sent", 0),
+        "overlay_messages_recorded": overlay_stats.get("overlay_messages_recorded", 0),
+        "overlay_warning_count": overlay_stats.get("overlay_warning_count", 0),
+        "overlay_last_warning": overlay_stats.get("overlay_last_warning"),
         "rb_servo_server_log": str((artifact_dir / "rb_servo_server.log").resolve()),
         "desired_reference_csv": str((artifact_dir / "desired_reference.csv").resolve()),
         "controller_reference_actual_csv": str((artifact_dir / "controller_reference_actual.csv").resolve()),
@@ -1423,6 +1626,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "artifact_dir": str(artifact_dir),
             "safety_preflight": preflight_result,
             "preflight_only": True,
+            "overlay_enabled": not args.overlay_disable,
+            "overlay_pub_endpoint": None if args.overlay_disable else args.overlay_pub_endpoint,
+            "overlay_messages_sent": 0,
         }
         write_json(artifact_dir / "summary.json", summary)
         write_summary_csv(artifact_dir / "summary.csv", summary)
@@ -1440,6 +1646,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     tracking_source_warning: str | None = None
     traj: sim_bench.Trajectory | None = None
     q0: list[float] | None = None
+    overlay_publisher: benchmark_overlay.BenchmarkOverlayPublisher | None = None
+    overlay_metrics: benchmark_overlay.CircleOverlayMetrics | None = None
     server_log_path = artifact_dir / "rb_servo_server.log"
     try:
         capture.start()
@@ -1450,6 +1658,21 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         start_pose = pose_for_source(armed, args.arm, tracking_source)
         q0 = start_pose["quaternion_xyzw"]
         traj = build_trajectory(args, start_pose)
+        overlay_publisher = benchmark_overlay.BenchmarkOverlayPublisher(
+            endpoint=args.overlay_pub_endpoint,
+            rate_hz=args.overlay_pub_rate_hz,
+            run_id=args.overlay_run_id,
+            artifact_path=artifact_dir / "overlay_stream.jsonl",
+            enabled=not args.overlay_disable,
+            warn=warn_overlay,
+        )
+        overlay_metrics = benchmark_overlay.CircleOverlayMetrics(
+            center=traj.center,
+            axis1=traj.axis1,
+            axis2=traj.axis2,
+            radius_m=traj.radius,
+            omega_rad_s=traj.omega,
+        )
         duration_sec = float(args.period_sec) * int(args.repeat)
         if args.warmup_sec > 0.0:
             time.sleep(args.warmup_sec)
@@ -1462,12 +1685,29 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             q0,
             tracking_source,
             duration_sec,
+            overlay_publisher,
+            overlay_metrics,
+        )
+        publish_overlay_status(
+            args,
+            capture,
+            overlay_publisher,
+            overlay_metrics,
+            traj,
+            q0,
+            tracking_source,
+            t_sec=duration_sec,
+            command_count=command_count,
+            result_so_far="completed",
+            force=True,
         )
         if args.settle_sec > 0.0:
             time.sleep(args.settle_sec)
         benchmark_end_ns = max(benchmark_end_ns, sim_bench.seq())
     finally:
         commands.close()
+        if overlay_publisher is not None:
+            overlay_publisher.close()
         stop_server(server_proc)
         capture.stop()
     if benchmark_start_ns == 0 or traj is None or q0 is None:
@@ -1488,6 +1728,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         feedback_rows,
         artifact_dir,
         server_returncode,
+        overlay_publisher.summary() if overlay_publisher is not None else {
+            "overlay_enabled": False,
+            "overlay_pub_endpoint": None,
+            "overlay_messages_sent": 0,
+            "overlay_messages_recorded": 0,
+        },
     )
 
 

@@ -252,6 +252,24 @@ less docs/runbooks/rbpodo_controller_sim_circle.md
 These configs target Rainbow controller boxes in `pgmode` simulation only; they
 do not approve physical Cartesian motion.
 
+Live `rb_gui` visualization for the rbpodo controller-simulation circle
+benchmark uses server-side state fanout plus a separate benchmark overlay:
+
+```text
+state_pub_endpoints:
+  50151 -> benchmark recorder
+  50161 -> rb_gui
+overlay:
+  50261 -> rb_gui desired circle / live metrics
+```
+
+Runbook: `docs/runbooks/rbpodo_controller_sim_circle.md`.
+Use `tcp_ref_stand` as the tracking source in pgmode simulation, keep
+`physical_motion_expected=false`, and include
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1` only for the controller-simulation
+Cartesian carve-out. `policy_runner` is separate from this live view; GUI and
+benchmark state consumers do not route commands through it.
+
 rbpodo vs rbscript TCP no-motion/read-only comparison:
 
 ```bash

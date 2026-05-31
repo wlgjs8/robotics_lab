@@ -1,0 +1,147 @@
+# Policy Data Collection Runbook
+
+This runbook defines the policy and teleop dataset schema for simulator data,
+rbpodo controller pgmode simulation data, and future physical real
+demonstrations. It is a recording contract only. It does not approve physical
+motion, change deadman behavior, or weaken command-source lease checks.
+
+## Evidence Categories
+
+Keep these categories separate in every episode and report:
+
+| Category | `backend_type` | `run_mode` | `operation_mode` | Physical motion |
+| --- | --- | --- | --- | --- |
+| `rb_simulator` software simulation | `simulator` | `simulation` | `simulation` when present | none |
+| `rbpodo_controller_simulation` | `rbpodo` | `real` | `simulation` | `physical_motion_expected=false` |
+| future physical real robot | `rbpodo` | `real` | `real` | future acceptance only |
+
+Simulator data is not identical to rbpodo controller-simulation data. The
+controller-simulation path uses real Rainbow controller boxes in `pgmode`
+simulation, so timing, ACK behavior, controller reference telemetry, and fault
+status can differ from the software simulator. Do not mix
+controller-simulation episodes with future physical real episodes unless the
+training loader explicitly filters by these labels.
+
+## Episode Metadata
+
+Every dataset shard should carry this metadata. Fields may be empty for legacy
+or partially collected episodes, but new collection workflows should fill them
+before training data is promoted:
+
+```json
+{
+  "schema": "robotics_lab.policy_runner.dataset_metadata.v1",
+  "git_commit": "string",
+  "config_hash": "sha256 or string",
+  "backend_type": "mock | simulator | rbpodo | rbscript_tcp-experimental",
+  "run_mode": "mock | simulation | real",
+  "operation_mode": "simulation | real | unknown",
+  "physical_motion_expected": false,
+  "controller_pgmode": "simulation | real | unknown | not_applicable",
+  "calibration_status": "configured_estimate | measured | unknown",
+  "camera_status": "disabled | simulated | real_unmeasured | real_measured",
+  "command_source_id": "policy_runner",
+  "benchmark_linkage": {
+    "circle_profile": "circle_15cm_16s",
+    "overlay_run_id": "optional overlay stream id",
+    "tracking_error_summary": "optional artifact-relative path"
+  }
+}
+```
+
+The helper `policy_runner.recording.build_dataset_metadata()` builds this
+shape for JSONL or HDF5 recorders. It is passive; it only formats metadata and
+does not inspect hardware or send commands.
+
+Use the active calibration registry for the calibration label:
+
+```text
+calibration/active_calibration.yaml
+```
+
+The current repository default is `status: configured_estimate` and
+`geometry_valid_for_real_policy: false`. That is acceptable for simulator and
+visualization work, but not for future real geometry-dependent policy.
+
+## State Fields
+
+Record raw server state whenever possible. Structured HDF5 episodes should
+preserve these fields when present:
+
+| Field | Meaning |
+| --- | --- |
+| `q_actual_deg` | measured physical/controller actual joints |
+| `q_ref_deg` or `q_target_deg` | controller reference/target joints |
+| `tcp_actual_stand` | TCP pose from `q_actual_deg` in stand frame |
+| `tcp_ref_stand` | TCP pose from controller reference joints in stand frame |
+| `tcp_tracking_source` | selected or recommended tracking source |
+| `state_age_us` | age of the state sample |
+| `diagnostics_suspect` | per-arm diagnostics-suspect state when reported |
+| `fault_latched` | server fault latch |
+| `send_duration_us` | backend send timing when reported |
+| `ack_policy` | ACK-on, ACK-off, or socket-send semantics |
+| `controller_acceptance_observed` | whether controller ACK/acceptance was observed |
+
+For rbpodo controller pgmode simulation, `tcp_ref_stand` is normally the
+measurement target for controller-reference tracking. `tcp_actual_stand` may
+remain stationary because physical motion is not expected. Do not treat
+reference TCP movement as physical motion.
+
+## Action Fields
+
+Record both the normalized command packet and raw teleop inputs when available:
+
+| Field | Meaning |
+| --- | --- |
+| `mode` | `Hold`, `JointTarget`, `JointVelocity`, `TcpTwistLocal`, `TcpTwistStand`, etc. |
+| `tcp_twist_local` | SpaceMouse local-frame twist in m/s and rad/s |
+| `tcp_twist_stand` | stand-frame twist in m/s and rad/s |
+| `q_target_deg` | joint target command |
+| `dq_target_deg_s` | joint velocity command |
+| `spacemouse_axes` | raw six-axis SpaceMouse sample before policy scaling, if captured |
+| `spacemouse_buttons` | raw SpaceMouse button state, including deadman |
+| `deadman` | per-arm deadman state used for command emission |
+| `command_seq` or `seq` | command sequence number |
+| `source_id` | command source id, normally `policy_runner` |
+
+Existing SpaceMouse action sources still require their deadman and safety
+preflight before any motion command is emitted. Recorder fields do not bypass
+those checks.
+
+## Benchmark Linkage
+
+Controller-simulation benchmark episodes may include linkage to circle
+benchmark artifacts:
+
+- `circle_profile`, such as `circle_15cm_16s` or `gene_15cm_4s`
+- overlay `run_id`
+- desired/reference tracking source, normally `tcp_ref_stand`
+- summary metrics such as RMS error, p95 error, radius gain, and estimated
+  latency
+
+Benchmark overlay UDP is a visualization/metrics stream, not robot state and
+not a command source. The state stream remains the source of truth for dataset
+state samples.
+
+## Recorder Compatibility
+
+JSONL episodes already preserve complete raw `robot_state.jsonl` payloads and
+`actions.jsonl` packets. New metadata should be placed in
+`episode_metadata.json` under the dataset metadata schema above.
+
+HDF5 episodes keep the existing root schema
+`robotics_lab.episode.v1` and add optional datasets/attrs for provenance,
+actual/reference TCP, controller reference joints, ACK semantics, diagnostics,
+and raw SpaceMouse fields when present. Old HDF5 logs remain readable because
+new fields are additive.
+
+## Safety Notes
+
+- This schema work must not enable real motion.
+- Physical real demonstrations require a separate future acceptance runbook.
+- `policy_runner` must continue to respect stale-state, fault, deadman,
+  command-source lease, and real-motion gates.
+- Controller-simulation episodes must be labeled
+  `physical_motion_expected=false`.
+- Do not train or evaluate a physical real policy on mixed simulator and
+  controller-simulation data unless the loader filters by metadata.

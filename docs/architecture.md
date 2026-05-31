@@ -82,6 +82,43 @@ rb_servo_server
 
 The simulator topology is isomorphic to the physical topology by endpoint count and ownership, not by IP address. Simulator configs must not default to the real controller IPs.
 
+## State Publication Fanout
+
+`rb_servo_server` is the owner of UDP state fanout. Multi-consumer configs use
+the canonical list field:
+
+```yaml
+network:
+  state_pub_endpoints:
+    - "udp://127.0.0.1:50151"  # benchmark recorder
+    - "udp://127.0.0.1:50161"  # rb_gui live viewer
+```
+
+The deprecated single-consumer `state_pub_endpoint` remains accepted for
+legacy configs, and the first list entry is mirrored into that field for older
+tools. Do not configure both fields together. Benchmark recorders and GUI
+viewers should bind separate UDP ports and receive identical server-published
+state JSON; benchmark tee/rebroadcast processes are not the primary state path.
+Command traffic still goes directly to `network.command_bind`.
+
+For rbpodo controller-simulation circle live visualization, state fanout and
+benchmark overlay are intentionally separate:
+
+```text
+rb_servo_server
+  state_pub_endpoints[0] udp://127.0.0.1:50151 -> benchmark recorder
+  state_pub_endpoints[1] udp://127.0.0.1:50161 -> rb_gui state receiver
+
+rbpodo_circle_tracking_benchmark
+  --overlay-pub-endpoint udp://127.0.0.1:50261 -> rb_gui circle overlay receiver
+```
+
+The state stream is robot/server telemetry, including `tcp_actual_stand`,
+`tcp_ref_stand`, Cartesian gate fields, and
+`physical_motion_expected=false` for pgmode simulation. The overlay stream is
+desired benchmark geometry and live metrics only; it is not robot state and
+must not carry commands.
+
 ### Docker Compose Simulator Topology
 
 ```text
@@ -334,6 +371,22 @@ or safety limits. `rt_script` is future work and remains out of scope.
 `rb_gui` is a viewer/operator console for mock/simulation. It may send simulator-only TCP PTP and Linear commands when the server state, mode, backend, lease, and feature flags allow it. It must keep real motion disabled.
 
 `policy_runner` owns Python action sources, including SpaceMouse. SpaceMouse Cartesian uses `TcpTwistLocal`, not repeated TCP deltas. Joint-only action sources do not require camera observations. Camera-dependent sources must declare camera readiness and fail closed when camera state is stale.
+
+For rbpodo controller-simulation circle live visualization, `rb_gui` is a
+state and overlay consumer. It should show both actual/reference TCP telemetry
+and the benchmark desired-circle overlay, but it must not route circle
+commands through `policy_runner`. `policy_runner` remains a separate command
+source for policy workflows, not a visualization broker.
+
+Policy and teleop datasets must preserve the collection environment as
+metadata. The required categories are hardware-free `rb_simulator`, rbpodo
+controller `pgmode` simulation, and future physical real demonstrations.
+Controller-simulation data uses `backend_type: rbpodo`, `run_mode: real`,
+`operation_mode: simulation`, and `physical_motion_expected=false`; it should
+record both `tcp_actual_stand` and `tcp_ref_stand` when available. It is not
+the same evidence class as simulator data and must not be mixed with future
+physical real data without explicit metadata filtering. The dataset schema is
+documented in `docs/runbooks/policy_data_collection.md`.
 
 ## Camera Role
 

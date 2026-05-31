@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import math
 import os
 import time
@@ -43,7 +44,8 @@ from .geometry import (
     _wxyz_to_xyzw,
     _xyzw_to_wxyz,
 )
-from .models import ArmSnapshot, Pose6D, StateSnapshot
+from .models import ArmSnapshot, CircleOverlaySnapshot, Pose6D, StateSnapshot
+from .overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from .safety import OperatorSafety, Readiness, normalize_observed_mode_backend
 from .scene import (
     _DEFAULT_LEFT_POSE,
@@ -62,6 +64,7 @@ from .scene import (
     _robot_urdf_path,
     _stand_mesh_path,
     _update_urdf_config,
+    update_circle_overlay,
     update_scene_markers,
 )
 from .state_receiver import StateReceiver, StateStore
@@ -69,23 +72,28 @@ from .status_panel import (
     _JOINT_MONITOR_UNITS,
     _STAND_WORLD_MONITOR_UNITS,
     _STAND_WORLD_POSE_FIELDS,
+    _TCP_DISPLAY_MODES,
     _arm_fk_status,
     _format_arm_cartesian_solve,
     _format_cartesian_solve_status,
+    _format_circle_overlay_status,
     _format_fk_status,
     _format_joint_monitor_value,
     _format_joints,
     _format_stand_world_pose_value,
     _format_tcp_command_status,
+    _format_tcp_tracking_status,
     _joint_monitor_unit,
     _mode_button_color,
     _optional_finite,
     _set_disabled,
     _stand_world_monitor_unit,
+    _tcp_display_mode,
     _update_joint_monitor,
     _update_joint_monitor_unit_buttons,
     _update_stand_world_monitor,
     _update_stand_world_monitor_unit_buttons,
+    _update_tcp_display_buttons,
 )
 
 _DESIRED_MODES = ("mock", "simulation", "real")
@@ -145,6 +153,27 @@ def _env_joint6(name: str, fallback: tuple[float, ...]) -> tuple[float, ...] | N
     if len(values) != 6 or not all(math.isfinite(value) for value in values):
         return None
     return values
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="RB servo browser GUI.")
+    parser.add_argument(
+        "--circle-overlay-bind",
+        default=None,
+        help=(
+            "UDP endpoint for circle benchmark overlay packets, for example "
+            "udp://0.0.0.0:50261. Use 'none' or an empty value to disable. "
+            "Defaults to RB_GUI_CIRCLE_OVERLAY_BIND or disabled."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def _circle_overlay_bind_from_args_env(args: argparse.Namespace) -> tuple[str, int] | None:
+    endpoint = args.circle_overlay_bind
+    if endpoint is None:
+        endpoint = os.environ.get("RB_GUI_CIRCLE_OVERLAY_BIND", "none")
+    return parse_udp_bind(endpoint)
 
 
 def _sim_readiness_from_env(observed: Any) -> Readiness:
@@ -686,8 +715,14 @@ def _update_operator_monitors(handles: dict[str, Any], latest: StateSnapshot | N
     _update_stand_world_monitor(handles, latest, stale=stale)
 
 
-def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[str, Any]:
+def build_gui(
+    server: Any,
+    safety: OperatorSafety,
+    store: StateStore,
+    overlay_store: CircleOverlayStore | None = None,
+) -> dict[str, Any]:
     handles: dict[str, Any] = {}
+    handles["circle_overlay_enabled"] = overlay_store is not None
     handles["scene"] = _add_scene_fallback(server)
 
     _build_operator_monitors(server, handles)
@@ -700,7 +735,28 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
         handles["motion"] = server.gui.add_text("Motion state", initial_value="unknown", disabled=True)
         handles["fault"] = server.gui.add_text("Fault", initial_value="none", disabled=True)
         handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
+        handles["tcp_tracking"] = server.gui.add_text("TCP tracking", initial_value="TCP tracking: no state", disabled=True)
+        handles["circle_overlay"] = server.gui.add_text(
+            "Circle overlay",
+            initial_value=_format_circle_overlay_status(None, stale=True, enabled=overlay_store is not None),
+            disabled=True,
+        )
         handles["cartesian_solve"] = server.gui.add_text("IK solve", initial_value="IK: no state", disabled=True)
+        handles["tcp_display_mode"] = "auto"
+        handles["tcp_display_buttons"] = {}
+        for display_mode in _TCP_DISPLAY_MODES:
+            display_button = server.gui.add_button(
+                f"TCP display: {display_mode}",
+                color=_mode_button_color(display_mode, _tcp_display_mode(handles)),
+            )
+            handles["tcp_display_buttons"][display_mode] = display_button
+
+            @display_button.on_click
+            def _(_: Any, display_mode: str = display_mode) -> None:
+                handles["tcp_display_mode"] = display_mode
+                _update_tcp_display_buttons(handles)
+                handles["tcp_tracking"].value = f"TCP display: {display_mode}"
+
         handles["ops"] = server.gui.add_text(
             "Container ops",
             initial_value="manual compose commands only; no Docker socket in GUI",
@@ -974,7 +1030,31 @@ def build_gui(server: Any, safety: OperatorSafety, store: StateStore) -> dict[st
     return handles
 
 
-def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStore) -> None:
+def _latest_circle_overlay(
+    overlay_store: CircleOverlayStore | None,
+) -> tuple[CircleOverlaySnapshot | None, bool]:
+    if overlay_store is None:
+        return None, True
+    return overlay_store.latest(), overlay_store.is_stale()
+
+
+def _update_circle_overlay_gui(handles: dict[str, Any], overlay_store: CircleOverlayStore | None) -> None:
+    overlay, stale = _latest_circle_overlay(overlay_store)
+    if "circle_overlay" in handles:
+        handles["circle_overlay"].value = _format_circle_overlay_status(
+            overlay,
+            stale=stale,
+            enabled=overlay_store is not None,
+        )
+    update_circle_overlay(handles.get("scene", {}), overlay, stale=stale)
+
+
+def update_gui(
+    handles: dict[str, Any],
+    safety: OperatorSafety,
+    store: StateStore,
+    overlay_store: CircleOverlayStore | None = None,
+) -> None:
     disabled_states = safety.control_disabled_states()
     for mode, button in handles.get("lifecycle_buttons", {}).items():
         _set_disabled(button, disabled_states.get(f"lifecycle:{mode}", True))
@@ -991,17 +1071,26 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
         _update_desired_mode_buttons(handles, safety.desired_mode)
     if "tcp_frame_buttons" in handles:
         _update_tcp_frame_buttons(handles)
+    if "tcp_display_buttons" in handles:
+        _update_tcp_display_buttons(handles)
     if "tcp_linear_arm_buttons" in handles or "tcp_linear_orientation_buttons" in handles:
         _update_tcp_linear_selection_buttons(handles)
     latest = store.latest()
     stale = store.is_stale()
     readiness = safety.readiness()
+    _update_circle_overlay_gui(handles, overlay_store)
     if latest is None:
         _update_operator_monitors(handles, None, stale=True)
         handles["connection"].value = "disconnected/stale"
         handles["readiness"].value = readiness.no_go_reason or "No-Go: no state stream"
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
+        if "tcp_tracking" in handles:
+            handles["tcp_tracking"].value = _format_tcp_tracking_status(
+                None,
+                stale=True,
+                display_mode=_tcp_display_mode(handles),
+            )
         if "cartesian_solve" in handles:
             handles["cartesian_solve"].value = _format_cartesian_solve_status(None, stale=True)
         if "tcp_status" in handles:
@@ -1034,6 +1123,12 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
     handles["fault"].value = latest.fault_reason if latest.fault_latched else "none"
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
+    if "tcp_tracking" in handles:
+        handles["tcp_tracking"].value = _format_tcp_tracking_status(
+            latest,
+            stale=stale,
+            display_mode=_tcp_display_mode(handles),
+        )
     if "cartesian_solve" in handles:
         handles["cartesian_solve"].value = _format_cartesian_solve_status(latest, stale=stale)
     if "tcp_status" in handles:
@@ -1041,7 +1136,7 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
     if "tcp_linear_status" in handles:
         handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     _update_operator_monitors(handles, latest, stale=stale)
-    update_scene_markers(handles.get("scene", {}), latest)
+    update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
     if "scene_assets" in handles:
         scene_errors = [
             value
@@ -1068,7 +1163,8 @@ def update_gui(handles: dict[str, Any], safety: OperatorSafety, store: StateStor
     handles["packets"].value = f"{store.received_packets} received / {store.invalid_packets} invalid"
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     try:
         import viser
     except ImportError as exc:
@@ -1092,6 +1188,14 @@ def main() -> None:
     store = StateStore()
     receiver = StateReceiver(store, host=state_host, port=state_port)
     receiver.start()
+    circle_overlay_bind = _circle_overlay_bind_from_args_env(args)
+    overlay_store: CircleOverlayStore | None = None
+    overlay_receiver: CircleOverlayReceiver | None = None
+    if circle_overlay_bind is not None:
+        overlay_host, overlay_port = circle_overlay_bind
+        overlay_store = CircleOverlayStore()
+        overlay_receiver = CircleOverlayReceiver(overlay_store, host=overlay_host, port=overlay_port)
+        overlay_receiver.start()
     safety = OperatorSafety(
         store,
         CommandClient(command_host, command_port),
@@ -1106,15 +1210,25 @@ def main() -> None:
         init_motion_timeout_sec=init_motion_timeout_sec,
     )
     server = viser.ViserServer(host=host, port=port)
-    handles = build_gui(server, safety, store)
-    print(f"rb_servo_gui listening on http://{host}:{port}, UDP state {state_host}:{state_port}", flush=True)
+    handles = build_gui(server, safety, store, overlay_store=overlay_store)
+    overlay_status = (
+        f", circle overlay UDP {circle_overlay_bind[0]}:{circle_overlay_bind[1]}"
+        if circle_overlay_bind is not None
+        else ", circle overlay disabled"
+    )
+    print(
+        f"rb_servo_gui listening on http://{host}:{port}, UDP state {state_host}:{state_port}{overlay_status}",
+        flush=True,
+    )
 
     try:
         while True:
-            update_gui(handles, safety, store)
+            update_gui(handles, safety, store, overlay_store=overlay_store)
             time.sleep(0.1)
     finally:
         receiver.stop()
+        if overlay_receiver is not None:
+            overlay_receiver.stop()
 
 
 if __name__ == "__main__":

@@ -8,7 +8,12 @@ from unittest import mock
 
 from policy_runner.camera_bundle_client import CameraBundle, CameraFrame, _MISSING_BUNDLE_AGE_US
 from policy_runner.config import CameraConfig, PolicyRunnerConfig, RecordingConfig, config_from_mapping
-from policy_runner.recording import Hdf5EpisodeRecorder, _hash_canonical_json
+from policy_runner.recording import (
+    DATASET_METADATA_SCHEMA,
+    Hdf5EpisodeRecorder,
+    _hash_canonical_json,
+    build_dataset_metadata,
+)
 from policy_runner.robot_state_client import StateSnapshot
 
 try:
@@ -30,16 +35,37 @@ def _state_snapshot(tick: int = 1, **overrides) -> StateSnapshot:
         "left": {
             "q_actual_deg": [1, 2, 3, 4, 5, 6],
             "q_sent_deg": [1.1, 2.1, 3.1, 4.1, 5.1, 6.1],
+            "q_ref_deg": [1.2, 2.2, 3.2, 4.2, 5.2, 6.2],
             "tcp_stand": {
                 "x": 0.1,
                 "y": 0.2,
                 "z": 0.3,
                 "quaternion_xyzw": [0.0, 0.1, 0.2, 0.97],
             },
+            "tcp_actual_stand": {
+                "x": 0.1,
+                "y": 0.2,
+                "z": 0.3,
+                "quaternion_xyzw": [0.0, 0.1, 0.2, 0.97],
+            },
+            "tcp_ref_stand": {
+                "x": 0.15,
+                "y": 0.25,
+                "z": 0.35,
+                "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+            "tcp_actual_valid": True,
+            "tcp_ref_valid": True,
+            "tcp_tracking_source": "tcp_ref_stand",
+            "lifecycle_state": "diagnostics_suspect",
+            "send_duration_us": 123,
+            "ack_policy": "ACK-on",
+            "controller_acceptance_observed": True,
         },
         "right": {
             "q_actual_deg": [-1, -2, -3, -4, -5, -6],
             "q_sent_deg": [-1.1, -2.1, -3.1, -4.1, -5.1, -6.1],
+            "q_target_deg": [-1.2, -2.2, -3.2, -4.2, -5.2, -6.2],
             "tcp_stand": {
                 "x": -0.1,
                 "y": -0.2,
@@ -49,6 +75,11 @@ def _state_snapshot(tick: int = 1, **overrides) -> StateSnapshot:
                 "qz": 0.1,
                 "qw": 0.9,
             },
+            "tcp_actual_valid": True,
+            "tcp_ref_valid": False,
+            "tcp_tracking_source_recommendation": "tcp_actual_stand",
+            "backend_timing": {"send_duration_us": 234},
+            "ack_semantics": "ACK-off",
         },
     }
     payload.update(overrides)
@@ -59,9 +90,11 @@ def _twist_action(seq: int = 7) -> dict:
     return {
         "seq": seq,
         "mode": "Hold",
+        "source_id": "policy_runner",
         "left": {
             "mode": "TcpTwistLocal",
             "tcp_twist_local": [0.01, 0.02, 0.03, 0.1, 0.2, 0.3],
+            "spacemouse_raw": {"axes": [1, 0, 0, 0, 0, 0], "buttons": [True, False]},
             "deadman": True,
         },
         "right": {
@@ -294,6 +327,73 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
             self.assertEqual(handle["config/cartesian_control/linear_move"].attrs["default_linear_speed_m_s"], 0.03)
             self.assertEqual(handle["config/kinematics"].attrs["provider"], "pinocchio")
             self.assertEqual(handle["config/kinematics/ik"].attrs["damping"], 0.004)
+
+    def test_dataset_metadata_and_reference_state_fields_are_recorded(self) -> None:
+        metadata = build_dataset_metadata(
+            git_commit="abc123",
+            config_hash="config-sha",
+            backend_type="rbpodo",
+            run_mode="real",
+            operation_mode="simulation",
+            physical_motion_expected=False,
+            controller_pgmode="simulation",
+            calibration_status="configured_estimate",
+            camera_status="disabled",
+            command_source_id="policy_runner",
+            benchmark_linkage={
+                "circle_profile": "circle_15cm_16s",
+                "overlay_run_id": "run-001",
+            },
+        )
+        recorder = self._recorder(rate_hz=100.0)
+        recorder.start_episode(
+            reset_snapshot=_state_snapshot(),
+            task_description="metadata",
+            action_source="dual_spacemouse_cartesian",
+            dataset_metadata=metadata,
+        )
+        recorder.record_frame(
+            state_snapshot=_state_snapshot(),
+            action_packet=_twist_action(),
+            action_host_time_ns=100,
+            action_seq=1,
+        )
+        path = recorder.end_episode(success=True, end_reason="operator_success")
+
+        with h5py.File(path, "r") as handle:
+            dataset_meta = handle["metadata/dataset"].attrs
+            self.assertEqual(dataset_meta["schema"], DATASET_METADATA_SCHEMA)
+            self.assertEqual(dataset_meta["backend_type"], "rbpodo")
+            self.assertFalse(bool(dataset_meta["physical_motion_expected"]))
+            self.assertEqual(handle["metadata/dataset/benchmark_linkage"].attrs["circle_profile"], "circle_15cm_16s")
+            np.testing.assert_allclose(handle["observations/q_ref_left"][0], [1.2, 2.2, 3.2, 4.2, 5.2, 6.2])
+            np.testing.assert_allclose(handle["observations/q_ref_right"][0], [-1.2, -2.2, -3.2, -4.2, -5.2, -6.2])
+            np.testing.assert_allclose(
+                handle["observations/tcp_actual_stand_left"][0],
+                [0.1, 0.2, 0.3, 0.0, 0.1, 0.2, 0.97],
+                rtol=1e-6,
+            )
+            np.testing.assert_allclose(
+                handle["observations/tcp_ref_stand_left"][0],
+                [0.15, 0.25, 0.35, 0.0, 0.0, 0.0, 1.0],
+                rtol=1e-6,
+            )
+            self.assertTrue(bool(handle["observations/tcp_ref_valid_left"][0]))
+            self.assertFalse(bool(handle["observations/tcp_ref_valid_right"][0]))
+            source = handle["observations/tcp_tracking_source_left"][0]
+            self.assertEqual(source.decode("utf-8") if isinstance(source, bytes) else source, "tcp_ref_stand")
+            self.assertTrue(bool(handle["observations/diagnostics_suspect_left"][0]))
+            self.assertEqual(int(handle["observations/send_duration_us_left"][0]), 123)
+            ack_policy = handle["observations/ack_policy_right"][0]
+            self.assertEqual(ack_policy.decode("utf-8") if isinstance(ack_policy, bytes) else ack_policy, "ACK-off")
+            self.assertTrue(bool(handle["observations/controller_acceptance_observed_left"][0]))
+            source_id = handle["action/source_id"][0]
+            self.assertEqual(source_id.decode("utf-8") if isinstance(source_id, bytes) else source_id, "policy_runner")
+            np.testing.assert_allclose(handle["action/spacemouse_axes_left"][0], [1, 0, 0, 0, 0, 0])
+            np.testing.assert_array_equal(
+                handle["action/spacemouse_buttons_left"][0],
+                [True, False, False, False, False, False, False, False],
+            )
 
     def test_config_snapshot_hash_changes_when_snapshot_changes(self) -> None:
         first = _hash_canonical_json(_config_snapshots(path_kp_pos=6.0)["cartesian_control_snapshot"])

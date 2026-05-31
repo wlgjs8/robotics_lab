@@ -19,6 +19,13 @@ real Rainbow controller boxes, requires explicit pgmode simulation
 confirmation, and scores controller-reference `tcp_ref_stand` telemetry rather
 than hardware-free simulator TCP state.
 
+Live visualization for the rbpodo controller-simulation runner uses two UDP
+telemetry paths: server-side state fanout for `rb_servo_server` state JSON, and
+an optional benchmark overlay stream from the benchmark script. The overlay is
+published with `--overlay-pub-endpoint` / `--overlay-pub-rate-hz` and carries
+desired circle geometry plus running metrics only. It is not a command channel
+and does not replace captured state samples for benchmark scoring.
+
 Keep the three evidence categories separate:
 
 - `rb_simulator` software simulation: hardware-free, this runbook.

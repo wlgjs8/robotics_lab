@@ -20,6 +20,7 @@ ENV_NAMES = (
     "RB_ALLOW_REAL_ROBOT",
     "RB_ALLOW_REAL_MOTION",
     "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
+    "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
     "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION",
     "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
     "RB_ALLOW_REAL_CARTESIAN",
@@ -74,6 +75,7 @@ cartesian_control:
   enable: true
   allow_in_simulation: true
   allow_in_real: false
+  allow_in_controller_simulation: true
   enable_benchmark_primitives: false
   max_twist_linear_m_s: 0.15
   max_twist_angular_rad_s: 0.4
@@ -184,6 +186,7 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
             text=True,
         )
         self.assertIn("--tracking-source", completed.stdout)
+        self.assertIn("--overlay-pub-endpoint", completed.stdout)
         self.assertIn("--i-confirm-controller-is-in-pgmode-simulation", completed.stdout)
 
     def test_preflight_rejects_operation_mode_real(self) -> None:
