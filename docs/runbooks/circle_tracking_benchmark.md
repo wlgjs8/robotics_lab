@@ -19,6 +19,22 @@ real Rainbow controller boxes, requires explicit pgmode simulation
 confirmation, and scores controller-reference `tcp_ref_stand` telemetry rather
 than hardware-free simulator TCP state.
 
+Keep the three evidence categories separate:
+
+- `rb_simulator` software simulation: hardware-free, this runbook.
+- Rainbow controller `pgmode` simulation through `rbpodo`: real controller
+  boxes with `run_mode: real`, `backend_type: rbpodo`,
+  `operation_mode: simulation`, `physical_motion_expected=false`, and
+  `tcp_ref_stand` tracking.
+- future physical real robot: not covered by either circle benchmark runbook.
+
+For the rbpodo controller-simulation category, streaming Cartesian primitives
+require `cartesian_control.allow_in_controller_simulation: true` and
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1`. Servo J ACKs alone do not imply a
+circle was executed; a blocked server can ACK repeated hold targets while
+`cartesian_solve.status` reports `unavailable`. A singular circle fit in that
+case is a gate/configuration failure, not controller tracking performance.
+
 The runner refuses configs containing `run_mode: real`, `backend_type: rbpodo`,
 `allow_in_real: true`, or the real robot IPs `172.28.60.200` /
 `172.28.60.201`.

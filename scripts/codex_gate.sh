@@ -924,6 +924,113 @@ run_rbpodo_circle_report_gate() {
   done
 }
 
+run_yaml_parse_checks_if_available() {
+  local paths=()
+  local path
+  for path in "$@"; do
+    if [[ -e "${path}" ]]; then
+      paths+=("${path}")
+    fi
+  done
+
+  if [[ "${#paths[@]}" -eq 0 ]]; then
+    echo "codex_gate: skipping YAML parse checks; no matching YAML files found"
+    return 0
+  fi
+
+  python3 - "${paths[@]}" <<'PY'
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    print("codex_gate: skipping YAML parse checks; PyYAML is unavailable")
+    raise SystemExit(0)
+
+failed = False
+for raw_path in sys.argv[1:]:
+    path = Path(raw_path)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            yaml.safe_load(handle)
+    except Exception as exc:
+        print(f"ERROR: failed to parse YAML {path}: {exc}", file=sys.stderr)
+        failed = True
+
+raise SystemExit(1 if failed else 0)
+PY
+}
+
+run_rbpodo_controller_sim_cartesian_gate() {
+  run_shell_syntax_checks
+  run_servo_gate_or_skip_missing_deps
+  run_python_surface_tests
+  echo "codex_gate: skipping rbpodo controller-simulation Cartesian controller run by default"
+}
+
+run_rbpodo_circle_config_fix_gate() {
+  run_shell_syntax_checks
+  grep_existing "dual_real_rbpodo_circle_15cm16s|dual_real_rbpodo_circle_15cm4s" \
+    README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "backend_type:[[:space:]]*rbpodo" \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+  grep_existing "operation_mode:[[:space:]]*simulation" \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+  grep_existing "controller pgmode simulation only|physical robot must not move" \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml \
+    docs/runbooks/rbpodo_controller_sim_circle.md
+  grep_existing "cartesian_control:" \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+  grep_existing "allow_in_real:[[:space:]]*false" \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+  run_yaml_parse_checks_if_available \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml \
+    rb_servo_server/config/local/dual_real_rbpodo_circle_15cm16s.yaml \
+    rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+  run_python_surface_tests
+  run_servo_gate_or_skip_missing_deps
+}
+
+run_rbpodo_circle_bench_fix_gate() {
+  python3 -m compileall -q scripts
+  python3 scripts/rbpodo_circle_tracking_benchmark.py --help >/dev/null
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_*.py'
+  if [[ "${CODEX_RUN_RBPODO_CIRCLE:-0}" == "1" ]]; then
+    if [[ ! -f scripts/rbpodo_circle_tracking_benchmark.py ]]; then
+      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE=1 but scripts/rbpodo_circle_tracking_benchmark.py is missing" >&2
+      return 1
+    fi
+    if [[ -z "${CODEX_RBPODO_CIRCLE_ARGS:-}" ]]; then
+      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE=1 requires CODEX_RBPODO_CIRCLE_ARGS with explicit controller-simulation script arguments and safety preflight flags" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2086
+    python3 scripts/rbpodo_circle_tracking_benchmark.py ${CODEX_RBPODO_CIRCLE_ARGS}
+  else
+    echo "codex_gate: skipping rbpodo controller-simulation circle benchmark; set CODEX_RUN_RBPODO_CIRCLE=1 with explicit args to enable"
+  fi
+}
+
+run_rbpodo_circle_doc_fix_gate() {
+  for token in \
+    "allow_in_controller_simulation" \
+    "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN" \
+    "pgmode simulation" \
+    "physical_motion_expected=false" \
+    "tcp_ref_stand" \
+    "cartesian_control_unavailable"
+  do
+    grep_existing "${token}" README.md REVIEW.md docs rb_servo_server/docs
+  done
+}
+
 run_backend_compare_python_tests() {
   run_python_surface_tests
   run_optional_rbscript_helper_tests
@@ -1486,6 +1593,21 @@ case "$TASK" in
     ;;
   RBPODO-CIRCLE-REPORT-01)
     run_rbpodo_circle_report_gate
+    ;;
+  RBPODO-CONTROLLER-SIM-CARTESIAN-00)
+    run_shell_syntax_checks
+    ;;
+  RBPODO-CONTROLLER-SIM-CARTESIAN-01)
+    run_rbpodo_controller_sim_cartesian_gate
+    ;;
+  RBPODO-CIRCLE-CONFIG-FIX-01)
+    run_rbpodo_circle_config_fix_gate
+    ;;
+  RBPODO-CIRCLE-BENCH-FIX-01)
+    run_rbpodo_circle_bench_fix_gate
+    ;;
+  RBPODO-CIRCLE-DOC-01)
+    run_rbpodo_circle_doc_fix_gate
     ;;
   GATE-BACKEND-COMPARE-00)
     run_shell_syntax_checks

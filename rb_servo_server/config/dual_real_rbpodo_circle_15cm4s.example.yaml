@@ -1,7 +1,13 @@
 schema: robotics_lab.rb_servo_server.v1
 
 # RBPODO-CIRCLE-CONFIG-01 GENE-style controller-simulation stress template.
-# controller pgmode simulation only; physical robot must not move; requires env gates and confirmation.
+# Controller pgmode simulation only. Physical robot should not move.
+# Requires RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1.
+# Do not use for physical real Cartesian motion.
+# Copy to rb_servo_server/config/local/ with
+# tools/create_rbpodo_circle_local_configs.sh before operator runs.
+# Servo J ACKs are not circle execution evidence if Cartesian gate telemetry
+# reports unavailable.
 # Profile intent: 15 cm diameter / 4 s period, approximately 0.118 m/s TCP
 # tangential speed. This is stress-only, feedback benchmark recommended, and
 # not physical-real-ready.
@@ -59,12 +65,14 @@ servo:
   filter_dt_max_ratio: 1.5
   servo_t1_rate_match_tolerance_ratio: 0.2
   allow_servo_t1_rate_mismatch: false
-  # Controller pgmode simulation only; physical robot must not move.
+  # Controller pgmode simulation only; physical robot should not move.
   # Requires RB_ALLOW_REAL_ROBOT=1, RB_ALLOW_REAL_MOTION=1,
-  # RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1, same-run pgmode confirmation,
-  # and the benchmark confirmation flags.
+  # RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1,
+  # RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1, same-run pgmode confirmation,
+  # and the benchmark confirmation flags. Do not use for physical real
+  # Cartesian motion.
   allow_controller_simulation_motion: true
-  allow_controller_simulation_diagnostics_suspect: false
+  allow_controller_simulation_diagnostics_suspect: true
 
 safety:
   q_min_deg: [-170, -120, -170, -190, -120, -360]
@@ -130,8 +138,12 @@ cartesian_control:
   enable: true
   allow_in_simulation: true
   allow_in_real: false
-  # Real-mode parser rejects server-side benchmark primitives. Controller-box
-  # circle evidence must use the dedicated pgmode simulation gate/runner.
+  # Controller pgmode simulation only; physical robot should not move.
+  # Requires RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1.
+  # Do not use for physical real Cartesian motion.
+  allow_in_controller_simulation: true
+  # Server-side circle primitives remain disabled; the controller-simulation
+  # runner streams TcpTwist* commands through the dedicated pgmode gate.
   enable_benchmark_primitives: false
   warn_ik_duration_us: 3000
   fail_ik_duration_us: 5000

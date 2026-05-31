@@ -126,6 +126,37 @@ RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
 RB_ALLOW_REAL_CARTESIAN=1
 ```
 
+Rainbow controller box를 `pgmode` simulation으로 둔 `rbpodo`
+controller-simulation circle benchmark는 hardware-free `rb_simulator`와
+future physical real robot benchmark 사이의 별도 evidence category입니다.
+이 경로는 실제 controller IP에 접속하므로 config는 `run_mode: real`,
+`backend_type: rbpodo`를 쓰지만, robot `operation_mode: simulation`이어야
+하고 physical robot should not move입니다. Tracking은 보통 controller
+reference인 `tcp_ref_stand`를 사용하며 summary에는
+`physical_motion_expected=false`가 기록되어야 합니다.
+
+Streaming Cartesian primitive를 controller simulation에서만 열려면 config와
+env가 모두 필요합니다.
+
+```yaml
+cartesian_control:
+  allow_in_controller_simulation: true
+  allow_in_real: false
+```
+
+```bash
+RB_ALLOW_REAL_ROBOT=1
+RB_ALLOW_REAL_MOTION=1
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
+RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
+```
+
+`RB_ALLOW_REAL_CARTESIAN`은 이 workflow에 사용하지 않습니다. Servo J ACK가
+보여도 circle이 실행되었다는 뜻은 아닙니다. `cartesian_solve.status`가
+`unavailable`이고 `circle_fit`이 singular이면 tracking failure가 아니라
+server-side Cartesian gate/configuration 문제입니다.
+
 실험용 `rbscript_tcp` real-controller 접속은 추가 gate가 필요합니다.
 
 ```bash
@@ -214,6 +245,7 @@ profiles and artifact interpretation.
 rbpodo controller-simulation circle templates:
 
 ```bash
+tools/create_rbpodo_circle_local_configs.sh
 less docs/runbooks/rbpodo_controller_sim_circle.md
 ```
 

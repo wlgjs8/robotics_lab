@@ -58,8 +58,16 @@ REQUIRED_ENV = (
     "RB_ALLOW_REAL_ROBOT",
     "RB_ALLOW_REAL_MOTION",
     "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
+    "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
 )
 DEFAULT_PHYSICAL_MOTION_WARNING_DEG = 0.05
+CARTESIAN_UNAVAILABLE_PREFIX = "cartesian_control_unavailable"
+CARTESIAN_REJECTION_HINTS = [
+    "check cartesian_control.allow_in_controller_simulation: true",
+    "check RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1",
+    "check operation_mode: simulation",
+    "check same-run pgmode simulation confirmation",
+]
 
 
 class BenchmarkError(RuntimeError):
@@ -158,6 +166,14 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | No
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def benchmark_env_snapshot() -> dict[str, str | None]:
+    snapshot = env_snapshot()
+    for key in REQUIRED_ENV:
+        snapshot[key] = os.environ.get(key)
+    snapshot["RB_ALLOW_REAL_CARTESIAN"] = os.environ.get("RB_ALLOW_REAL_CARTESIAN")
+    return snapshot
 
 
 def apply_profile(args: argparse.Namespace) -> None:
@@ -370,6 +386,8 @@ def validate_config_and_env(
     known_ips = {config.left.ip, config.right.ip} & REAL_ROBOT_IPS
     if not args.i_understand_this_connects_to_real_controller:
         raise BenchmarkError("refusing controller connection without explicit real-controller confirmation flag")
+    if not args.i_confirm_controller_is_in_pgmode_simulation:
+        raise BenchmarkError("missing --i-confirm-controller-is-in-pgmode-simulation")
     for name in REQUIRED_ENV:
         if not env_enabled(name):
             raise BenchmarkError(f"rbpodo controller-simulation circle benchmark requires {name}=1")
@@ -398,6 +416,11 @@ def validate_config_and_env(
         raise BenchmarkError("cartesian_control.allow_in_real must remain false")
     if not as_bool(cartesian.get("enable"), False):
         raise BenchmarkError("cartesian_control.enable must be true for circle benchmark")
+    if not as_bool(cartesian.get("allow_in_controller_simulation"), False):
+        raise BenchmarkError(
+            "rbpodo controller-simulation Cartesian benchmark requires "
+            "cartesian_control.allow_in_controller_simulation=true"
+        )
     if args.controller == "server_circle":
         if not as_bool(cartesian.get("enable_benchmark_primitives"), False):
             raise BenchmarkError("server_circle requires cartesian_control.enable_benchmark_primitives=true")
@@ -457,7 +480,7 @@ def validate_config_and_env(
         "pgmode_confirmation_flag": args.i_confirm_controller_is_in_pgmode_simulation,
         "pgmode_simulation_confirmed": pgmode_summary.get("overall_result") == "ok",
         "pgmode_summary": pgmode_summary,
-        "env": env_snapshot(),
+        "env": benchmark_env_snapshot(),
         "required_env": list(REQUIRED_ENV),
         "send_servo_commands": send_servo_commands,
         "allow_controller_simulation_motion": as_bool(config.servo.get("allow_controller_simulation_motion"), False),
@@ -475,7 +498,23 @@ def validate_config_and_env(
 
 def preflight(args: argparse.Namespace) -> tuple[ParsedConfig, dict[str, dict[str, Any]], dict[str, Any], dict[str, Any]]:
     if not args.server_config.is_file():
-        raise BenchmarkError(f"server config not found: {args.server_config}")
+        hint = ""
+        if "rb_servo_server/config/local" in args.server_config.as_posix() or args.server_config.name in {
+            "dual_real_rbpodo_circle_15cm16s.yaml",
+            "dual_real_rbpodo_circle_15cm4s.yaml",
+        }:
+            hint = (
+                "; create local controller-simulation circle configs with "
+                "tools/create_rbpodo_circle_local_configs.sh"
+            )
+        raise BenchmarkError(f"server config not found: {args.server_config}{hint}")
+    if args.server_config.name.endswith(".example.yaml"):
+        print(
+            "WARNING: You are using an example config. Recommended: copy to "
+            "rb_servo_server/config/local first with "
+            "tools/create_rbpodo_circle_local_configs.sh.",
+            file=sys.stderr,
+        )
     config = load_config(args.server_config)
     sections = simple_yaml_sections(args.server_config)
     preflight_result, endpoints = validate_config_and_env(args, config, sections)
@@ -809,6 +848,83 @@ def q_update_rate_hz(series: list[tuple[int, list[float]]], epsilon_deg: float =
     return changes / ((end_ns - start_ns) / 1e9)
 
 
+def windowed_states(states: list[dict[str, Any]], start_ns: int, end_ns: int) -> list[dict[str, Any]]:
+    if start_ns <= 0 or end_ns <= 0:
+        return list(states)
+    return [
+        state for state in states
+        if start_ns <= int(state.get("host_time_ns", -1)) <= end_ns
+    ]
+
+
+def max_pose_displacement(
+    states: list[dict[str, Any]],
+    arm: str,
+    source: str,
+    start_ns: int,
+    end_ns: int,
+) -> float | None:
+    positions: list[list[float]] = []
+    for snapshot in windowed_states(states, start_ns, end_ns):
+        if not source_valid(snapshot, arm, source):
+            continue
+        positions.append(sim_bench.vec(pose_for_source(snapshot, arm, source)))
+    if not positions:
+        return None
+    first = positions[0]
+    return max(sim_bench.norm(sim_bench.sub(position, first)) for position in positions)
+
+
+def cartesian_runtime_diagnostics(
+    states: list[dict[str, Any]],
+    arm: str,
+    start_ns: int,
+    end_ns: int,
+) -> dict[str, Any]:
+    status_counts: Counter[str] = Counter()
+    reason_counts: Counter[str] = Counter()
+    motion_state_counts: Counter[str] = Counter()
+    attempted_count = 0
+    success_count = 0
+    max_command_errors: list[float] = []
+    selected_states = windowed_states(states, start_ns, end_ns)
+    for snapshot in selected_states:
+        motion_state = snapshot.get("motion_state")
+        if isinstance(motion_state, str) and motion_state:
+            motion_state_counts[motion_state] += 1
+        arm_state = snapshot.get(arm)
+        if not isinstance(arm_state, dict):
+            continue
+        solve = arm_state.get("cartesian_solve")
+        if not isinstance(solve, dict):
+            continue
+        status = str(solve.get("status") or solve.get("ik_status") or "")
+        if status:
+            status_counts[status] += 1
+        reason = str(solve.get("reason") or solve.get("ik_reason") or "")
+        if status == "unavailable":
+            reason_counts[reason or "unknown"] += 1
+        if solve.get("attempted") is True:
+            attempted_count += 1
+        if solve.get("success") is True:
+            success_count += 1
+        value = finite_number(solve.get("max_command_actual_error_deg_observed"))
+        if value is not None:
+            max_command_errors.append(value)
+    return {
+        "cartesian_status_counts": dict(status_counts),
+        "cartesian_unavailable_count": int(status_counts.get("unavailable", 0)),
+        "cartesian_unavailable_reason_counts": dict(reason_counts),
+        "cartesian_attempted_count": attempted_count,
+        "cartesian_success_count": success_count,
+        "motion_state_counts": dict(motion_state_counts),
+        "armed_hold_count": int(motion_state_counts.get("ArmedHold", 0)),
+        "max_command_actual_error_deg_observed": max(max_command_errors) if max_command_errors else None,
+        "tcp_ref_displacement_m": max_pose_displacement(states, arm, "tcp_ref_stand", start_ns, end_ns),
+        "tcp_actual_displacement_m": max_pose_displacement(states, arm, "tcp_actual_stand", start_ns, end_ns),
+    }
+
+
 def telemetry_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, Any]:
     arm_states = [state.get(arm) for state in states if isinstance(state.get(arm), dict)]
     state_ages: list[float] = []
@@ -915,6 +1031,39 @@ def result_from_thresholds(args: argparse.Namespace, summary: dict[str, Any]) ->
     return result, reason, failures
 
 
+def classify_cartesian_runtime(summary: dict[str, Any], command_count: int) -> dict[str, Any]:
+    sample_count = int(summary.get("sample_count") or 0)
+    unavailable_count = int(summary.get("cartesian_unavailable_count") or 0)
+    high_unavailable = unavailable_count >= max(3, int(sample_count * 0.5))
+    fit_reason = str(summary.get("circle_fit_reason") or "").lower()
+    fit_singular = "singular" in fit_reason
+    reason_counts = summary.get("cartesian_unavailable_reason_counts")
+    has_cartesian_unavailable_reason = (
+        isinstance(reason_counts, dict)
+        and any(str(reason).startswith(CARTESIAN_UNAVAILABLE_PREFIX) for reason in reason_counts)
+    )
+    max_command_error = finite_number(summary.get("max_command_actual_error_deg_observed"))
+    target_static = (
+        command_count > 0
+        and int(summary.get("controller_acceptance_observed_count") or 0) > 0
+        and summary.get("q_ref_moved") is False
+        and summary.get("tcp_ref_moved") is False
+        and (max_command_error is None or max_command_error <= 1e-9)
+    )
+    server_rejected = (
+        command_count > 0
+        and high_unavailable
+        and fit_singular
+        and has_cartesian_unavailable_reason
+    )
+    return {
+        "cartesian_unavailable_high": high_unavailable,
+        "command_accepted_but_target_static": target_static,
+        "server_rejected_cartesian": server_rejected,
+        "cartesian_block_hint": CARTESIAN_REJECTION_HINTS if server_rejected else [],
+    }
+
+
 def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
     fields = [
         "result",
@@ -945,6 +1094,12 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "command_timeout_count",
         "controller_rejected_count",
         "diagnostics_suspect_count",
+        "cartesian_unavailable_count",
+        "armed_hold_count",
+        "command_accepted_but_target_static",
+        "q_ref_moved",
+        "tcp_ref_moved",
+        "server_rejected_cartesian",
     ]
     write_csv(path, [{field: summary.get(field) for field in fields}], fields)
 
@@ -956,6 +1111,7 @@ def plot_artifacts(
     merged: list[dict[str, Any]],
     controller_rows: list[dict[str, Any]],
     physical_rows: list[dict[str, Any]],
+    no_circle_reason: str | None = None,
 ) -> list[str]:
     if args.skip_plots:
         return ["plots skipped by --skip-plots"]
@@ -984,6 +1140,8 @@ def plot_artifacts(
         plt.figure()
         plt.plot([p[0] for p in desired_plane], [p[1] for p in desired_plane], label="desired")
         plt.plot([p[0] for p in controller_plane], [p[1] for p in controller_plane], label="controller_reference")
+        if no_circle_reason:
+            plt.title(no_circle_reason)
         plt.gca().set_aspect("equal", adjustable="box")
         plt.legend()
         plt.tight_layout()
@@ -994,6 +1152,8 @@ def plot_artifacts(
         plt.figure()
         plt.plot([p[0] for p in desired_plane], [p[1] for p in desired_plane], label="desired")
         plt.plot([p[0] for p in physical_plane], [p[1] for p in physical_plane], label="physical_actual")
+        if no_circle_reason:
+            plt.title(no_circle_reason)
         plt.gca().set_aspect("equal", adjustable="box")
         plt.legend()
         plt.tight_layout()
@@ -1005,6 +1165,8 @@ def plot_artifacts(
     def line_plot(filename: str, key: str, ylabel: str) -> None:
         plt.figure()
         plt.plot([row["t_sec"] for row in merged], [row.get(key) for row in merged])
+        if no_circle_reason:
+            plt.title(no_circle_reason)
         plt.xlabel("time (s)")
         plt.ylabel(ylabel)
         plt.tight_layout()
@@ -1022,6 +1184,8 @@ def plot_artifacts(
     for axis in ("x", "y", "z"):
         plt.plot([row["t_sec"] for row in merged], [row[f"actual_{axis}"] for row in merged], label=f"tracking {axis}")
         plt.plot([row["t_sec"] for row in merged], [row[f"reference_{axis}"] for row in merged], linestyle="--", label=f"desired {axis}")
+    if no_circle_reason:
+        plt.title(no_circle_reason)
     plt.xlabel("time (s)")
     plt.ylabel("position (m)")
     plt.legend(ncol=2)
@@ -1117,18 +1281,21 @@ def summarize_run(
         metrics.update(sim_bench.feedback_metrics(feedback_rows))
     controller_rows = pose_rows(states, args.arm, "tcp_ref_stand", benchmark_start_ns)
     physical_rows = pose_rows(states, args.arm, "tcp_actual_stand", benchmark_start_ns)
-    write_csv(artifact_dir / "desired_reference.csv", sim_bench.reference_rows(traj, q0, duration_sec, args.command_rate_hz))
-    write_csv(artifact_dir / "controller_reference_actual.csv", controller_rows)
-    if physical_rows:
-        write_csv(artifact_dir / "physical_actual.csv", physical_rows)
-    write_csv(artifact_dir / "samples.csv", merged)
-    skipped_plots = plot_artifacts(artifact_dir, args, traj, merged, controller_rows, physical_rows)
-
     q_actual = q_series(states, args.arm, "q_actual_deg")
     q_ref = q_series(states, args.arm, "q_ref_deg")
     if not q_ref:
         q_ref = q_series(states, args.arm, "q_target_deg")
+    q_ref_drift = max_q_drift(q_ref)
     q_actual_drift = max_q_drift(q_actual)
+    runtime_diagnostics = cartesian_runtime_diagnostics(
+        states,
+        args.arm,
+        benchmark_start_ns,
+        benchmark_start_ns + int(duration_sec * 1e9),
+    )
+    q_ref_moved = q_ref_drift is not None and q_ref_drift > 1e-5
+    tcp_ref_displacement = finite_number(runtime_diagnostics.get("tcp_ref_displacement_m"))
+    tcp_ref_moved = tcp_ref_displacement is not None and tcp_ref_displacement > 1e-5
     physical_motion_detected = (
         q_actual_drift is not None and q_actual_drift > args.physical_motion_warning_deg
     )
@@ -1173,7 +1340,10 @@ def summarize_run(
         "tcp_actual_valid_ratio": tcp_valid_ratio(states, args.arm, "tcp_actual_stand"),
         "q_ref_update_rate_hz": q_update_rate_hz(q_ref),
         "q_actual_update_rate_hz": q_update_rate_hz(q_actual),
+        "q_ref_drift_from_start_deg": q_ref_drift,
+        "q_ref_moved": q_ref_moved,
         "q_actual_drift_from_start_deg": q_actual_drift,
+        "tcp_ref_moved": tcp_ref_moved,
         "physical_motion_detected": physical_motion_detected,
         "physical_motion_warning_threshold_deg": args.physical_motion_warning_deg,
         "safety_preflight": preflight_result,
@@ -1193,8 +1363,35 @@ def summarize_run(
     }
     summary.update(metrics)
     summary.update(telemetry_metrics(states, args.arm))
+    summary.update(runtime_diagnostics)
     summary.update(command_interval_metrics(artifact_dir / "command_packets.jsonl"))
-    result, result_reason, failures = result_from_thresholds(args, summary)
+    summary.update(classify_cartesian_runtime(summary, command_count))
+    no_circle_reason = (
+        "No circle attempted: Cartesian unavailable"
+        if summary.get("server_rejected_cartesian") is True
+        else None
+    )
+    write_csv(artifact_dir / "desired_reference.csv", sim_bench.reference_rows(traj, q0, duration_sec, args.command_rate_hz))
+    write_csv(artifact_dir / "controller_reference_actual.csv", controller_rows)
+    if physical_rows:
+        write_csv(artifact_dir / "physical_actual.csv", physical_rows)
+    write_csv(artifact_dir / "samples.csv", merged)
+    skipped_plots = plot_artifacts(artifact_dir, args, traj, merged, controller_rows, physical_rows, no_circle_reason)
+    if summary.get("server_rejected_cartesian") is True:
+        result = "blocked"
+        result_reason = "cartesian_commands_rejected_by_server"
+        failures = [
+            "server rejected Cartesian command before attempting path; "
+            "ServoJ ACKs only show hold-target sends, not circle tracking"
+        ]
+        performance_warnings.append(
+            "server rejected Cartesian command before attempting path; check "
+            "cartesian_control.allow_in_controller_simulation, "
+            "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN, operation_mode=simulation, "
+            "and same-run pgmode confirmation"
+        )
+    else:
+        result, result_reason, failures = result_from_thresholds(args, summary)
     summary.update(
         {
             "result": result,
@@ -1303,7 +1500,7 @@ def failure_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
         "result_reason": "benchmark could not run",
         "error": str(exc),
         "server_config": str(args.server_config.resolve()) if args.server_config else None,
-        "safety_preflight": {"passed": False, "error": str(exc), "env": env_snapshot()},
+        "safety_preflight": {"passed": False, "error": str(exc), "env": benchmark_env_snapshot()},
         "threshold_failures": [str(exc)],
         "performance_warnings": [],
         "caveat": "rbpodo controller-simulation benchmark did not complete",

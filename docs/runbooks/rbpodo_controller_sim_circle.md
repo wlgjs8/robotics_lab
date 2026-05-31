@@ -1,8 +1,21 @@
 # rbpodo Controller-Simulation Circle Runbook
 
-This runbook covers configuration templates for running circle tracking against
-real Rainbow controller boxes while the controllers are in `pgmode` simulation.
-It does not approve physical robot motion or real Cartesian motion.
+This runbook covers configuration templates and commands for running circle
+tracking against real Rainbow controller boxes while the controllers are in
+`pgmode` simulation. It does not approve physical robot motion or real
+Cartesian motion.
+
+There are three separate benchmark environments:
+
+| Environment | Command path | Measurement path | Physical motion |
+| --- | --- | --- | --- |
+| `rb_simulator` software simulation | local simulator backends | simulator TCP state | none |
+| Rainbow controller `pgmode` simulation via `rbpodo` | real controller boxes, `operation_mode: simulation` | rbpodo controller reference telemetry, normally `tcp_ref_stand` | `physical_motion_expected=false` |
+| future physical real robot | real controller boxes, physical motion acceptance | physical `tcp_actual_stand` / measured state | not covered by this runbook |
+
+Do not mix the artifact categories. A good `rb_simulator` run is not evidence
+that the Rainbow controller path works, and a good controller-simulation run is
+not approval for physical Cartesian motion.
 
 ## Scope
 
@@ -18,9 +31,48 @@ Use these templates only for `rbpodo` controller-simulation bring-up:
 | GENE-style stress circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml` | 100 Hz | `50052` / `50152` | controller pgmode simulation only, stress |
 
 Copy a template to `rb_servo_server/config/local/` and edit the copy for the
-site. Do not use tracked `local/*.yaml` as production config; tracked local
-files should be sample-only, and this repository currently keeps local YAML out
-of git.
+site. Treat `local/*.yaml` as operator-owned working files, not production
+templates. A clean checkout may have no local YAMLs, and an older checkout may
+have stale local copies; regenerate them before running the benchmark.
+
+Create or refresh the circle local configs with:
+
+```bash
+tools/create_rbpodo_circle_local_configs.sh
+```
+
+The helper refuses to overwrite existing local files unless `--force` is
+passed:
+
+```bash
+tools/create_rbpodo_circle_local_configs.sh --force
+```
+
+Verify the controller-simulation Cartesian gate and physical-real block before
+running:
+
+```bash
+grep -H "allow_in_controller_simulation: true" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
+grep -H "allow_in_real: false" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
+grep -H "operation_mode: simulation" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
+```
+
+The required shape for rbpodo controller simulation is:
+
+```yaml
+left_robot:
+  backend_type: rbpodo
+  run_mode: real
+  operation_mode: simulation
+
+cartesian_control:
+  allow_in_controller_simulation: true
+  allow_in_real: false
+```
+
+`run_mode: real` means the server is connecting to real Rainbow controller
+boxes. `operation_mode: simulation` means the controller command path must be
+Rainbow `pgmode` simulation, so the physical robot should not move.
 
 ## Safety Model
 
@@ -49,17 +101,20 @@ confirmation flags. ACK-off additionally requires
 `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1` and is socket-send evidence, not
 controller-acceptance evidence.
 
-Every controller-simulation Servo J or circle command path also requires the
-explicit controller-simulation motion gate:
+Every controller-simulation circle run requires these env gates:
 
 ```bash
+RB_ALLOW_REAL_ROBOT=1
+RB_ALLOW_REAL_MOTION=1
 RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
+RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
 ```
 
-The benchmark or acceptance script must confirm controller `pgmode` simulation
-in the same run and pass `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1` only to the
-server process. Do not use this gate for `operation_mode: real` or physical
-motion.
+The benchmark runner normally sets `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1`
+only for the launched server process after the same run sets or verifies
+pgmode simulation. Set it manually only when you are starting the server
+outside the benchmark and have current controller-simulation evidence.
 
 A temporary diagnostics-suspect override exists only for known suspicious
 rbpodo status-field layouts while the controller is in `pgmode` simulation. It
@@ -85,11 +140,82 @@ cartesian_control:
   allow_in_real: false
 ```
 
-The circle templates set `cartesian_control.enable: true` so the tuning values
-are visible and versioned, but they do not enable real Cartesian execution.
-Current server code still treats `run_mode: real` Cartesian commands as
-real-Cartesian-gated. The controller-simulation circle runner must keep its own
-preflight and must not reinterpret these templates as physical-motion approval.
+The controller-simulation circle templates must opt into the narrow streaming
+Cartesian carve-out:
+
+```yaml
+cartesian_control:
+  enable: true
+  allow_in_real: false
+  allow_in_controller_simulation: true
+```
+
+This carve-out applies only when the server connects to an `rbpodo` backend with
+`run_mode: real` and robot `operation_mode: simulation`, the same run has
+confirmed Rainbow `pgmode` simulation, and all controller-simulation env gates
+are present. It does not make `TcpPoseTarget` or physical real Cartesian
+execution available. State JSON exposes the decision under per-arm
+`cartesian_gate`, including `physical_motion_expected=false` when the carve-out
+is active. If the gate is closed, the per-arm `cartesian_solve.reason` should
+report a reason such as `cartesian_control_unavailable_controller_sim_env`,
+`cartesian_control_unavailable_controller_sim_config`,
+`cartesian_control_unavailable_backend`,
+`cartesian_control_unavailable_operation_mode`, or
+`cartesian_control_unavailable_physical_real_blocked`.
+
+## One-Time Setup Commands
+
+Build the rbpodo-enabled server on a machine with the rbpodo SDK available:
+
+```bash
+cmake -S rb_servo_server -B rb_servo_server/build/rbpodo_real_gate \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DRB_SERVO_ENABLE_RBPODO=ON \
+  -DBUILD_TESTING=ON
+cmake --build rb_servo_server/build/rbpodo_real_gate -j
+```
+
+If the server fails with realtime scheduling errors, grant the binary the
+needed Linux capabilities and verify them:
+
+```bash
+sudo setcap cap_sys_nice,cap_ipc_lock+ep rb_servo_server/build/rbpodo_real_gate/rb_servo_server
+getcap rb_servo_server/build/rbpodo_real_gate/rb_servo_server
+```
+
+Create operator-local circle configs from the tracked templates:
+
+```bash
+tools/create_rbpodo_circle_local_configs.sh
+```
+
+Use `--force` only when you intentionally want to refresh stale local copies
+after reviewing local edits:
+
+```bash
+tools/create_rbpodo_circle_local_configs.sh --force
+```
+
+Put both controllers into Rainbow `pgmode` simulation before a benchmark. This
+wrapper sends only `pgmode simulation`; it does not set real mode, reset faults,
+change collision thresholds, enable servo power, or send motion:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+tools/simulation_mode.sh \
+  --summary-json artifacts/rbpodo_controller_sim_circle/pgmode_simulation.json \
+  --i-understand-this-connects-to-real-controller
+```
+
+For a read-only check that does not send `pgmode simulation`, use:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+tools/simulation_mode.sh \
+  --verify-only \
+  --summary-json artifacts/rbpodo_controller_sim_circle/pgmode_verify.json \
+  --i-understand-this-connects-to-real-controller
+```
 
 ## Diagnostic State First
 
@@ -223,19 +349,18 @@ Stable 15 cm / 16 s example:
 RB_ALLOW_REAL_ROBOT=1 \
 RB_ALLOW_REAL_MOTION=1 \
 RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
 python3 scripts/rbpodo_circle_tracking_benchmark.py \
   --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
   --server-config rb_servo_server/config/local/dual_real_rbpodo_circle_15cm16s.yaml \
   --arm left \
-  --controller twist_stand_feedback \
+  --controller twist_stand \
   --profile circle_15cm_16s \
   --repeat 3 \
   --command-rate-hz 100 \
-  --feedback-kp-pos 2.0 \
-  --feedback-kp-ori 2.0 \
-  --tracking-source auto \
+  --tracking-source tcp_ref_stand \
   --set-pgmode-simulation \
-  --artifact-dir artifacts/rbpodo_circle/circle_15cm16s_feedback_left \
+  --artifact-dir artifacts/rbpodo_circle/circle_15cm16s_twist_stand_left \
   --i-understand-this-connects-to-real-controller \
   --i-confirm-controller-is-in-pgmode-simulation
 ```
@@ -246,6 +371,7 @@ GENE-style 15 cm / 4 s stress example:
 RB_ALLOW_REAL_ROBOT=1 \
 RB_ALLOW_REAL_MOTION=1 \
 RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
 python3 scripts/rbpodo_circle_tracking_benchmark.py \
   --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
   --server-config rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml \
@@ -265,6 +391,11 @@ python3 scripts/rbpodo_circle_tracking_benchmark.py \
   --i-confirm-controller-is-in-pgmode-simulation
 ```
 
+If the state dump and local config show that the temporary controller-
+simulation diagnostics bridge is required, prepend
+`RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1` to the same command.
+Do not use that env var outside this pgmode simulation workflow.
+
 If ACK waiting is disabled in a local copy, also set:
 
 ```bash
@@ -283,6 +414,92 @@ launched server process after pgmode simulation is set or verified in the same
 run, or after a supplied `--pgmode-summary-json` confirms simulation for the
 configured controller IPs. It does not set any `RB_ALLOW_*` variable.
 
+If the run reports `server_rejected_cartesian: true` or
+`result_reason: cartesian_commands_rejected_by_server`, do not interpret the
+artifact as a tracking result. This means the server stayed in `ArmedHold` and
+rejected Cartesian command generation before attempting the path. Servo J ACKs
+can still be observed in that state because the server may keep sending the
+previous hold target; ACKs alone are not circle motion evidence.
+
+Check these fields first:
+
+- `cartesian_unavailable_count`
+- `cartesian_unavailable_reason_counts`
+- `armed_hold_count`
+- `command_accepted_but_target_static`
+- `q_ref_moved`
+- `tcp_ref_moved`
+- `max_command_actual_error_deg_observed`
+
+The usual fix is to regenerate or edit the local config and rerun with the
+controller-simulation Cartesian gate:
+
+```bash
+tools/create_rbpodo_circle_local_configs.sh --force
+grep -H "allow_in_controller_simulation: true" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
+```
+
+Then verify the run environment includes:
+
+```bash
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
+```
+
+Also confirm `operation_mode: simulation` and same-run pgmode simulation
+confirmation. Do not set `RB_ALLOW_REAL_CARTESIAN` for this workflow.
+
+## Troubleshooting
+
+`realtime setup failed` or `failed to set realtime priority` means the server
+could not acquire its requested scheduler privileges. Rebuild if needed, then
+apply Linux capabilities to the exact binary you pass with `--server`:
+
+```bash
+sudo setcap cap_sys_nice,cap_ipc_lock+ep rb_servo_server/build/rbpodo_real_gate/rb_servo_server
+getcap rb_servo_server/build/rbpodo_real_gate/rb_servo_server
+```
+
+If startup reports `diagnostics_suspect`, inspect controller state before
+running any command benchmark:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+python3 scripts/rbpodo_state_dump.py \
+  --ips 172.28.60.200 172.28.60.201 \
+  --q-min=-170,-120,-170,-190,-120,-360 \
+  --q-max=170,120,170,190,120,360 \
+  --wrap-period-deg=0,0,0,360,0,360 \
+  --output artifacts/rbpodo_controller_sim_circle/state_dump.json \
+  --pretty \
+  --i-understand-this-connects-to-real-controller
+```
+
+Use `RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1` only for this
+controller-simulation workflow, only with `operation_mode: simulation`, and
+only when the YAML explicitly allows the temporary diagnostics bridge. Do not
+use that override for physical real motion.
+
+`cartesian_control_unavailable` means the server rejected Cartesian command
+generation before attempting the circle. Check:
+
+```bash
+grep -H "allow_in_controller_simulation: true" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
+grep -H "allow_in_real: false" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
+grep -H "operation_mode: simulation" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
+env | grep '^RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN='
+```
+
+If `circle_fit_reason` is `singular`, first determine whether the reference
+trajectory moved. A singular fit with high
+`cartesian_unavailable_count`, `motion_state=ArmedHold`, `q_ref_moved=false`,
+or `tcp_ref_moved=false` is a blocked command path, not poor controller
+tracking.
+
+Servo J ACKs do not imply the circle executed. In a blocked Cartesian run the
+server can keep sending the previous hold target and still observe ACKs. Treat
+the artifact as tracking evidence only when the summary shows Cartesian
+commands were accepted and `tcp_ref_stand` moved.
+
 ## Ablation Matrix Runner
 
 `scripts/run_rbpodo_circle_ablation.py` runs a rbpodo-only matrix of
@@ -299,6 +516,7 @@ controller-simulation env gates, real-controller confirmation, and either
 RB_ALLOW_REAL_ROBOT=1 \
 RB_ALLOW_REAL_MOTION=1 \
 RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
 python3 scripts/run_rbpodo_circle_ablation.py \
   --matrix configs/rbpodo_circle_ablation/rbpodo_circle_ablation_example.yaml \
   --artifact-root artifacts/rbpodo_circle/ablation_gene15cm4s_left \
@@ -325,7 +543,7 @@ The matrix supports the intended factor split:
 ACK-off experiments require `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1`.
 Configs that opt into the temporary diagnostics-suspect bridge require
 `RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1`. The runner stops on
-safety preflight failure or child benchmark `result: error`.
+safety preflight failure or child benchmark `result: blocked` / `result: error`.
 
 Each matrix run writes:
 
@@ -345,9 +563,18 @@ controller-simulation evidence. The general
 `scripts/generate_circle_benchmark_report.py` can report mixed inputs, but the
 rbpodo wrapper makes the pgmode-simulation intent explicit:
 
+For a quick side-by-side table:
+
+```bash
+python3 scripts/compare_circle_benchmarks.py \
+  artifacts/rbpodo_circle/circle_15cm16s_twist_stand_left/summary.json \
+  artifacts/rbpodo_circle/gene_15cm4s_feedback_left/summary.json \
+  --csv artifacts/rbpodo_circle/rbpodo_circle_compare.csv
+```
+
 ```bash
 python3 scripts/generate_rbpodo_circle_report.py \
-  artifacts/rbpodo_circle/circle_15cm16s_feedback_left/summary.json \
+  artifacts/rbpodo_circle/circle_15cm16s_twist_stand_left/summary.json \
   artifacts/rbpodo_circle/gene_15cm4s_feedback_left/summary.json \
   --output-md artifacts/rbpodo_circle/rbpodo_circle_report.md \
   --csv artifacts/rbpodo_circle/rbpodo_circle_report.csv
@@ -453,6 +680,8 @@ Each run writes:
 - `phase_lag_time.png`, when reliable
 - `axis_positions_time.png`
 
-Result semantics match the simulator benchmark: `completed` means the run
-finished without thresholds, `pass`/`fail` require explicit threshold flags, and
-`error` means safety preflight or execution failed.
+Result semantics match the simulator benchmark where possible: `completed`
+means the run finished without thresholds, `pass`/`fail` require explicit
+threshold flags, `blocked` means server-side gates prevented the requested
+Cartesian path from being attempted, and `error` means safety preflight or
+execution failed.

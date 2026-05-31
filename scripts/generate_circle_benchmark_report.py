@@ -70,6 +70,9 @@ REPORT_COLUMNS = [
     "tcp_ref_valid_ratio",
     "tcp_actual_valid_ratio",
     "result",
+    "result_reason",
+    "server_rejected_cartesian",
+    "cartesian_unavailable_count",
     "classification",
     "real_candidate_policy",
     "performance_warnings",
@@ -261,6 +264,8 @@ def baseline_failures(row: dict[str, Any], min_repeats: int) -> list[str]:
 
 def rbpodo_stable_failures(row: dict[str, Any]) -> list[str]:
     failures: list[str] = []
+    if true_metric(row, "server_rejected_cartesian") or row.get("result") == "blocked":
+        failures.append("Cartesian commands were rejected by server before path execution")
     if row_category(row) != "rbpodo_controller_simulation":
         failures.append("category is not rbpodo_controller_simulation")
     if row.get("backend") != "rbpodo":
@@ -318,6 +323,8 @@ def stress_failures(row: dict[str, Any]) -> list[str]:
 
 def rbpodo_stress_failures(row: dict[str, Any]) -> list[str]:
     failures: list[str] = []
+    if true_metric(row, "server_rejected_cartesian") or row.get("result") == "blocked":
+        failures.append("Cartesian commands were rejected by server before path execution")
     if row_category(row) != "rbpodo_controller_simulation":
         failures.append("category is not rbpodo_controller_simulation")
     if row.get("backend") != "rbpodo":
@@ -361,7 +368,18 @@ def classify_row(row: dict[str, Any], min_repeats: int) -> None:
     stress = stress_failures(row)
     rbpodo_baseline = rbpodo_stable_failures(row)
     rbpodo_stress = rbpodo_stress_failures(row)
-    if category == "rbpodo_controller_simulation" and row.get("profile") == BASELINE_PROFILE and not rbpodo_baseline:
+    if category == "rbpodo_controller_simulation" and (
+        true_metric(row, "server_rejected_cartesian") or row.get("result") == "blocked"
+    ):
+        row["classification"] = "rbpodo_controller_sim_cartesian_blocked"
+        row["real_candidate_policy"] = "not_real_ready"
+        row["promotion_notes"] = (
+            "server rejected Cartesian commands before attempting path; check "
+            "cartesian_control.allow_in_controller_simulation, "
+            "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN, operation_mode=simulation, "
+            "and pgmode simulation confirmation"
+        )
+    elif category == "rbpodo_controller_simulation" and row.get("profile") == BASELINE_PROFILE and not rbpodo_baseline:
         row["classification"] = "stable_rbpodo_controller_sim_baseline_candidate"
         row["real_candidate_policy"] = "future_low_speed_seed_only_not_real_ready"
         row["promotion_notes"] = (
@@ -529,6 +547,7 @@ def report_markdown(rows: list[dict[str, Any]], title: str, min_repeats: int) ->
             "stress_rejected_or_incomplete",
             "rbpodo_controller_sim_baseline_incomplete",
             "rbpodo_controller_sim_stress_rejected_or_incomplete",
+            "rbpodo_controller_sim_cartesian_blocked",
         }
     ]
     parts = [

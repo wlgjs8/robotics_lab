@@ -85,6 +85,7 @@ bool assertSimulatorCartesianConfig(const rb_servo::DualArmConfig& cfg) {
     RB_CHECK(cfg.cartesian_control.enable);
     RB_CHECK(cfg.cartesian_control.allow_in_simulation);
     RB_CHECK(!cfg.cartesian_control.allow_in_real);
+    RB_CHECK(!cfg.cartesian_control.allow_in_controller_simulation);
     RB_CHECK(near(cfg.cartesian_control.linear_move.constant_orientation_tolerance_rad, 0.005));
     RB_CHECK(cfg.force_control.provider == "null");
     RB_CHECK(!cfg.force_control.enable);
@@ -420,6 +421,7 @@ bool testCartesianControlTuningParsesAndValidates() {
         "cartesian-tuning",
         "schema: robotics_lab.rb_servo_server.v1\n"
         "cartesian_control:\n"
+        "  allow_in_controller_simulation: true\n"
         "  path_kp_pos: 2.5\n"
         "  path_kp_ori: 7.5\n"
         "  twist_orientation_hold_kp: 8.0\n"
@@ -434,6 +436,7 @@ bool testCartesianControlTuningParsesAndValidates() {
     );
     const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
     ::unlink(path.c_str());
+    RB_CHECK(cfg.cartesian_control.allow_in_controller_simulation);
     RB_CHECK(near(cfg.cartesian_control.path_kp_pos, 2.5));
     RB_CHECK(near(cfg.cartesian_control.path_kp_ori, 7.5));
     RB_CHECK(near(cfg.cartesian_control.twist_orientation_hold_kp, 8.0));

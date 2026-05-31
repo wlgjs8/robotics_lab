@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -137,6 +138,7 @@ nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config
         {"enable", config.enable},
         {"allow_in_simulation", config.allow_in_simulation},
         {"allow_in_real", config.allow_in_real},
+        {"allow_in_controller_simulation", config.allow_in_controller_simulation},
         {"enable_benchmark_primitives", config.enable_benchmark_primitives},
         {"warn_ik_duration_us", config.warn_ik_duration_us},
         {"fail_ik_duration_us", config.fail_ik_duration_us},
@@ -613,6 +615,119 @@ bool isRbpodoControllerSimulation(const BackendConfig& backend_config) {
     return operation_mode == "simulation" || operation_mode == "sim";
 }
 
+bool envFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value && std::string(value) == "1";
+}
+
+bool isStreamingCartesianMode(ControlMode mode) {
+    return mode == ControlMode::TcpLinearMove ||
+           mode == ControlMode::TcpCircleMove ||
+           mode == ControlMode::TcpTwistStand ||
+           mode == ControlMode::TcpTwistLocal;
+}
+
+bool isCartesianMode(ControlMode mode) {
+    return mode == ControlMode::TcpPoseTarget ||
+           mode == ControlMode::TcpLinearMove ||
+           mode == ControlMode::TcpCircleMove ||
+           mode == ControlMode::TcpDeltaStand ||
+           mode == ControlMode::TcpDeltaLocal ||
+           mode == ControlMode::TcpTwistStand ||
+           mode == ControlMode::TcpTwistLocal;
+}
+
+std::string cartesianGateUnavailableReason(
+    const CartesianControlConfig& cartesian_config,
+    const BackendConfig& backend_config,
+    ControlMode command_mode
+) {
+    if (!cartesian_config.enable) {
+        return "cartesian_control_unavailable_disabled";
+    }
+    const bool streaming = isStreamingCartesianMode(command_mode);
+    if (backend_config.run_mode == RunMode::Simulation) {
+        return cartesian_config.allow_in_simulation
+            ? ""
+            : "cartesian_control_unavailable_run_mode";
+    }
+    if (backend_config.run_mode != RunMode::Real) {
+        return "cartesian_control_unavailable_run_mode";
+    }
+    if (!streaming) {
+        return cartesian_config.allow_in_real && envFlagEnabled("RB_ALLOW_REAL_CARTESIAN")
+            ? ""
+            : "cartesian_control_unavailable_physical_real_blocked";
+    }
+    if (backend_config.backend_type != BackendType::Rbpodo) {
+        return "cartesian_control_unavailable_backend";
+    }
+    const std::string operation_mode = lowerAscii(backend_config.operation_mode);
+    if (!(operation_mode == "simulation" || operation_mode == "sim")) {
+        return cartesian_config.allow_in_real && envFlagEnabled("RB_ALLOW_REAL_CARTESIAN")
+            ? "cartesian_control_unavailable_physical_real_blocked"
+            : "cartesian_control_unavailable_operation_mode";
+    }
+    if (!cartesian_config.allow_in_controller_simulation) {
+        return "cartesian_control_unavailable_controller_sim_config";
+    }
+    if (!envFlagEnabled("RB_ALLOW_REAL_ROBOT") ||
+        !envFlagEnabled("RB_ALLOW_REAL_MOTION") ||
+        !envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") ||
+        !envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN") ||
+        !envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")) {
+        return "cartesian_control_unavailable_controller_sim_env";
+    }
+    return "";
+}
+
+nlohmann::json cartesianGateJson(
+    const CartesianControlConfig& cartesian_config,
+    const BackendConfig& backend_config,
+    ControlMode command_mode,
+    const CartesianSolveTelemetry& cartesian_solve
+) {
+    std::string unavailable_reason = cartesianGateUnavailableReason(
+        cartesian_config,
+        backend_config,
+        command_mode
+    );
+    if (!cartesian_solve.reason.empty() &&
+        cartesian_solve.reason.rfind("cartesian_control_unavailable", 0) == 0) {
+        unavailable_reason = cartesian_solve.reason;
+    }
+    const bool controller_sim_cartesian_enabled =
+        unavailable_reason.empty() &&
+        isStreamingCartesianMode(command_mode) &&
+        isRbpodoControllerSimulation(backend_config) &&
+        cartesian_config.allow_in_controller_simulation;
+    const bool physical_motion_expected = isRbpodoControllerSimulation(backend_config)
+        ? false
+        : backend_config.run_mode == RunMode::Real;
+    return {
+        {"run_mode", runModeString(backend_config.run_mode)},
+        {"backend_type", backendTypeString(backend_config.backend_type)},
+        {"operation_mode", backend_config.operation_mode},
+        {"allow_in_simulation", cartesian_config.allow_in_simulation},
+        {"allow_in_real", cartesian_config.allow_in_real},
+        {"allow_in_controller_simulation", cartesian_config.allow_in_controller_simulation},
+        {"env_RB_ALLOW_REAL_ROBOT", envFlagEnabled("RB_ALLOW_REAL_ROBOT")},
+        {"env_RB_ALLOW_REAL_MOTION", envFlagEnabled("RB_ALLOW_REAL_MOTION")},
+        {"env_RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION", envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION")},
+        {"env_RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN", envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN")},
+        {"env_RB_RBPODO_PGMODE_SIMULATION_CONFIRMED", envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")},
+        {"physical_motion_expected", physical_motion_expected},
+        {"controller_simulation_cartesian_enabled", controller_sim_cartesian_enabled},
+        {"streaming_cartesian_physical_real_enabled", false},
+        {"current_command_is_cartesian", isCartesianMode(command_mode)},
+        {"current_command_is_streaming_cartesian", isStreamingCartesianMode(command_mode)},
+        {"cartesian_available", unavailable_reason.empty()},
+        {"cartesian_unavailable_reason", unavailable_reason.empty()
+            ? nlohmann::json(nullptr)
+            : nlohmann::json(unavailable_reason)},
+    };
+}
+
 bool controllerSimulationDiagnosticOverrideActive(
     const ServoConfig& servo_config,
     const BackendConfig& backend_config,
@@ -704,6 +819,7 @@ nlohmann::json armStateJson(
     bool worker_enabled,
     const ServoConfig& servo_config,
     const BackendConfig& backend_config,
+    const CartesianControlConfig& cartesian_config,
     const CartesianSolveTelemetry& cartesian_solve,
     const ArmStartupValidationSnapshot& startup_validation
 ) {
@@ -713,6 +829,8 @@ nlohmann::json armStateJson(
         backend_config,
         startup_validation
     );
+    const nlohmann::json cartesian_gate =
+        cartesianGateJson(cartesian_config, backend_config, command.mode, cartesian_solve);
     return {
         {"mode", toString(command.mode)},
         {"q_actual_deg", jointArrayJson(state.q_actual_deg)},
@@ -773,6 +891,13 @@ nlohmann::json armStateJson(
         {"tcp_tracking_source", tcpTrackingSource(tcp, backend_config)},
         {"tcp_tracking_source_recommendation", tcpTrackingSourceRecommendation(tcp, backend_config)},
         {"controller_simulation_diagnostic_override_active", diagnostic_override_active},
+        {"cartesian_available", cartesian_gate.at("cartesian_available")},
+        {"cartesian_unavailable_reason", cartesian_gate.at("cartesian_unavailable_reason")},
+        {"cartesian_gate", cartesian_gate},
+        {"controller_simulation_cartesian_enabled",
+            cartesian_gate.at("controller_simulation_cartesian_enabled")},
+        {"streaming_cartesian_physical_real_enabled",
+            cartesian_gate.at("streaming_cartesian_physical_real_enabled")},
         {"physical_motion_expected", isRbpodoControllerSimulation(backend_config)
             ? nlohmann::json(false)
             : nlohmann::json(nullptr)},
@@ -938,6 +1063,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         worker_enabled,
         config_.servo,
         config_.left_robot,
+        config_.cartesian_control,
         snapshot.left_cartesian_solve,
         snapshot.startup_validation.left
     );
@@ -966,6 +1092,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         worker_enabled,
         config_.servo,
         config_.right_robot,
+        config_.cartesian_control,
         snapshot.right_cartesian_solve,
         snapshot.startup_validation.right
     );

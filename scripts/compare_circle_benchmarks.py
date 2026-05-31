@@ -51,6 +51,9 @@ COLUMNS = [
     ("tcp_ref_valid_ratio", "tcp_ref_valid_ratio"),
     ("tcp_actual_valid_ratio", "tcp_actual_valid_ratio"),
     ("result", "result"),
+    ("result_reason", "result_reason"),
+    ("server_rejected_cartesian", "server_rejected_cartesian"),
+    ("cartesian_unavailable_count", "cartesian_unavailable_count"),
     ("performance_warnings", "performance_warnings"),
 ]
 
@@ -361,6 +364,10 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "physical_actual_csv": summary.get("physical_actual_csv"),
         "fault_latched": summary.get("fault_latched"),
         "result": summary.get("result"),
+        "result_reason": summary.get("result_reason"),
+        "server_rejected_cartesian": summary.get("server_rejected_cartesian"),
+        "cartesian_unavailable_count": summary.get("cartesian_unavailable_count"),
+        "cartesian_unavailable_reason_counts": summary.get("cartesian_unavailable_reason_counts"),
         "performance_warnings": warning_text(summary),
     }
 
@@ -402,12 +409,17 @@ def main() -> int:
     summaries = [load_summary(path) for path in args.summary_json]
     rows = [comparison_row(summary) for summary in summaries]
     if args.sort == "rms_error":
+        def rms_sort_key(row: dict[str, Any]) -> tuple[int, float]:
+            blocked = row.get("result") == "blocked" or row.get("server_rejected_cartesian") is True
+            if blocked:
+                return (2, math.inf)
+            rms = finite_number(row.get("rms_error_mm"))
+            if rms is None:
+                return (1, math.inf)
+            return (0, rms)
+
         rows.sort(
-            key=lambda row: (
-                finite_number(row.get("rms_error_mm"))
-                if finite_number(row.get("rms_error_mm")) is not None
-                else math.inf
-            )
+            key=rms_sort_key
         )
     write_markdown(rows)
     if args.csv_path:

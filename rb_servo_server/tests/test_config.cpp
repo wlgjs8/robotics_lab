@@ -144,12 +144,14 @@ bool testControllerSimulationGateConfig() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
     EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard allow_controller_sim_cartesian("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN");
     EnvVarGuard allow_diag("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
     EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
 
     allow_real.unset();
     allow_motion.unset();
     allow_controller_sim.unset();
+    allow_controller_sim_cartesian.unset();
     allow_diag.unset();
     pgmode_confirmed.unset();
 
@@ -178,7 +180,9 @@ bool testControllerSimulationGateConfig() {
         "  allow_controller_simulation_motion: true\n"
         "  allow_controller_simulation_diagnostics_suspect: true\n"
         "safety:\n"
-        "  tracking_error_policy: fault_latch\n";
+        "  tracking_error_policy: fault_latch\n"
+        "cartesian_control:\n"
+        "  allow_in_controller_simulation: true\n";
 
     const std::string missing_env_path = writeTempConfig("controller-sim-missing-env", valid_body);
     RB_CHECK(loadRejects(missing_env_path));
@@ -190,11 +194,19 @@ bool testControllerSimulationGateConfig() {
     allow_diag.set("1");
     pgmode_confirmed.set("1");
 
+    const std::string missing_cartesian_env_path =
+        writeTempConfig("controller-sim-missing-cartesian-env", valid_body);
+    RB_CHECK(loadRejects(missing_cartesian_env_path));
+    ::unlink(missing_cartesian_env_path.c_str());
+
+    allow_controller_sim_cartesian.set("1");
+
     const std::string valid_path = writeTempConfig("controller-sim-valid", valid_body);
     const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(valid_path);
     ::unlink(valid_path.c_str());
     RB_CHECK(cfg.servo.allow_controller_simulation_motion);
     RB_CHECK(cfg.servo.allow_controller_simulation_diagnostics_suspect);
+    RB_CHECK(cfg.cartesian_control.allow_in_controller_simulation);
     RB_CHECK(cfg.left_robot.operation_mode == "simulation");
     RB_CHECK(cfg.right_robot.operation_mode == "simulation");
 

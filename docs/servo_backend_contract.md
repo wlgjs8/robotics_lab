@@ -196,6 +196,32 @@ Real `sendServoJ()` requires:
 - `RB_ALLOW_REAL_ROBOT=1`
 - `RB_ALLOW_REAL_MOTION=1`
 
+Streaming Cartesian primitives remain simulator-first. In `run_mode: simulation`,
+`TcpTwistStand`, `TcpTwistLocal`, `TcpLinearMove`, and
+`TcpCircleMove` require `cartesian_control.enable: true` and
+`cartesian_control.allow_in_simulation: true`.
+
+The only real-controller carve-out is rbpodo controller `pgmode` simulation.
+For those same streaming primitives, `run_mode: real` may execute Cartesian
+target generation only when the selected backend is `rbpodo`, the robot
+`operation_mode` is `simulation`,
+`cartesian_control.allow_in_controller_simulation: true`,
+`servo.allow_controller_simulation_motion: true`, and all of these env
+gates are set:
+
+- `RB_ALLOW_REAL_ROBOT=1`
+- `RB_ALLOW_REAL_MOTION=1`
+- `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1`
+- `RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1`
+- `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1`
+
+This is not physical real Cartesian enablement. `operation_mode: real` remains
+blocked for streaming Cartesian primitives even if `RB_ALLOW_REAL_CARTESIAN=1`
+is present. State JSON must expose `cartesian_available`,
+`cartesian_unavailable_reason`, and a `cartesian_gate` object with the
+backend/run-mode/config/env decision fields so a controller-simulation
+benchmark cannot be mistaken for physical motion approval.
+
 Real stop/reset APIs remain conservative until verified. If no verified API is wired, return `DependencyUnavailable` and require operator intervention.
 
 Rbpodo is the primary vendor-library real backend. `dual_real.example.yaml` and

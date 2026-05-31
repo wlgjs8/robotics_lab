@@ -143,6 +143,37 @@ RB_ALLOW_REAL_CARTESIAN=1
 
 These environment variables are necessary but not sufficient. Config and acceptance must also explicitly allow the operation.
 
+Rainbow controller `pgmode` simulation through the `rbpodo` backend is a
+separate evidence category from both hardware-free `rb_simulator` and future
+physical real motion. It connects to real controller boxes, so configs use
+`run_mode: real` and `backend_type: rbpodo`, but each robot must use
+`operation_mode: simulation` and the controller must be confirmed in `pgmode`
+simulation. Controller-simulation circle tracking should use
+`tcp_ref_stand`/controller reference telemetry with
+`physical_motion_expected=false`.
+
+The narrow rbpodo controller-simulation streaming Cartesian carve-out requires
+all normal real-controller/motion gates plus:
+
+```bash
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
+RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
+```
+
+The config must explicitly keep physical real Cartesian blocked:
+
+```yaml
+cartesian_control:
+  allow_in_controller_simulation: true
+  allow_in_real: false
+```
+
+This carve-out is not `RB_ALLOW_REAL_CARTESIAN` and does not approve physical
+real Cartesian motion. Servo J ACKs in a controller-simulation circle artifact
+do not by themselves prove that Cartesian commands executed; check the
+Cartesian gate telemetry and `tcp_ref_stand` movement.
+
 Experimental `rbscript_tcp` real-controller connection is additionally closed
 unless:
 

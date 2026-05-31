@@ -43,6 +43,10 @@ bool isCartesianVelocityServoMode(ControlMode mode) {
            mode == ControlMode::TcpTwistLocal;
 }
 
+bool isStreamingCartesianMode(ControlMode mode) {
+    return isCartesianVelocityServoMode(mode);
+}
+
 bool isMotionMode(ControlMode mode) {
     return mode == ControlMode::JointTarget ||
            mode == ControlMode::JointVelocity ||
@@ -225,6 +229,116 @@ bool controllerSimulationMotionGateOpen(const DualArmConfig& config) {
         envFlagEnabled("RB_ALLOW_REAL_MOTION") &&
         envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
         envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+}
+
+const BackendConfig& backendConfigForArm(const DualArmConfig& config, ArmId arm_id) {
+    return arm_id == ArmId::Left ? config.left_robot : config.right_robot;
+}
+
+bool controllerSimulationCartesianGateOpen(
+    const DualArmConfig& config,
+    const BackendConfig& backend
+) {
+    return config.cartesian_control.enable &&
+        config.cartesian_control.allow_in_controller_simulation &&
+        config.servo.allow_controller_simulation_motion &&
+        isRbpodoControllerSimulationBackend(backend) &&
+        envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
+        envFlagEnabled("RB_ALLOW_REAL_MOTION") &&
+        envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
+        envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN") &&
+        envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+}
+
+struct CartesianAvailability {
+    bool available = false;
+    std::string reason = "cartesian_control_unavailable_run_mode";
+    bool controller_simulation_cartesian_enabled = false;
+    bool physical_motion_expected = true;
+};
+
+CartesianAvailability cartesianAvailabilityForArm(
+    const DualArmConfig& config,
+    const ArmCommand& command
+) {
+    CartesianAvailability availability;
+    const BackendConfig& backend = backendConfigForArm(config, command.arm_id);
+
+    if (!config.cartesian_control.enable) {
+        availability.reason = "cartesian_control_unavailable_disabled";
+        return availability;
+    }
+
+    const bool streaming_cartesian = isStreamingCartesianMode(command.mode);
+    if (backend.run_mode == RunMode::Simulation) {
+        availability.available = config.cartesian_control.allow_in_simulation;
+        availability.reason = availability.available
+            ? ""
+            : "cartesian_control_unavailable_run_mode";
+        availability.physical_motion_expected = false;
+        return availability;
+    }
+
+    if (backend.run_mode != RunMode::Real) {
+        availability.reason = "cartesian_control_unavailable_run_mode";
+        return availability;
+    }
+
+    if (!streaming_cartesian) {
+        availability.available =
+            config.cartesian_control.allow_in_real &&
+            envFlagEnabled("RB_ALLOW_REAL_CARTESIAN");
+        availability.reason = availability.available
+            ? ""
+            : "cartesian_control_unavailable_physical_real_blocked";
+        return availability;
+    }
+
+    if (backend.backend_type != BackendType::Rbpodo) {
+        availability.reason = "cartesian_control_unavailable_backend";
+        return availability;
+    }
+
+    const std::string operation_mode = lowerAscii(backend.operation_mode);
+    if (!(operation_mode == "simulation" || operation_mode == "sim")) {
+        availability.reason =
+            config.cartesian_control.allow_in_real && envFlagEnabled("RB_ALLOW_REAL_CARTESIAN")
+            ? "cartesian_control_unavailable_physical_real_blocked"
+            : "cartesian_control_unavailable_operation_mode";
+        return availability;
+    }
+
+    if (!config.cartesian_control.allow_in_controller_simulation ||
+        !config.servo.allow_controller_simulation_motion) {
+        availability.reason = "cartesian_control_unavailable_controller_sim_config";
+        availability.physical_motion_expected = false;
+        return availability;
+    }
+
+    if (!controllerSimulationCartesianGateOpen(config, backend)) {
+        availability.reason = "cartesian_control_unavailable_controller_sim_env";
+        availability.physical_motion_expected = false;
+        return availability;
+    }
+
+    availability.available = true;
+    availability.reason = "";
+    availability.controller_simulation_cartesian_enabled = true;
+    availability.physical_motion_expected = false;
+    return availability;
+}
+
+RunMode cartesianComputationRunModeForArm(
+    const DualArmConfig& config,
+    const ArmCommand& command
+) {
+    const RunMode run_mode = backendConfigForArm(config, command.arm_id).run_mode;
+    if (run_mode == RunMode::Real &&
+        isStreamingCartesianMode(command.mode) &&
+        controllerSimulationCartesianGateOpen(config, backendConfigForArm(config, command.arm_id))) {
+        return RunMode::Simulation;
+    }
+    return run_mode;
 }
 
 bool controllerSimulationDiagnosticsSuspectGateOpen(const DualArmConfig& config) {
@@ -1804,26 +1918,21 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             config_.kinematics.enable &&
             config_.kinematics.ik.enable &&
             kinematics_ != nullptr;
+        std::string left_unavailable_reason = "cartesian_control_unavailable_disabled";
+        std::string right_unavailable_reason = "cartesian_control_unavailable_disabled";
         if (cartesian_available) {
             for (const ArmCommand* arm_command : {&effective_command.left, &effective_command.right}) {
                 if (!isCartesianMode(arm_command->mode)) continue;
-                const RunMode run_mode = runModeForArm(config_, arm_command->arm_id);
-                if (arm_command->mode == ControlMode::TcpLinearMove ||
-                    arm_command->mode == ControlMode::TcpCircleMove ||
-                    arm_command->mode == ControlMode::TcpTwistStand ||
-                    arm_command->mode == ControlMode::TcpTwistLocal) {
-                    cartesian_available = run_mode == RunMode::Simulation &&
-                        config_.cartesian_control.allow_in_simulation;
-                } else if (run_mode == RunMode::Simulation) {
-                    cartesian_available = config_.cartesian_control.allow_in_simulation;
-                } else if (run_mode == RunMode::Real) {
-                    cartesian_available =
-                        config_.cartesian_control.allow_in_real &&
-                        envFlagEnabled("RB_ALLOW_REAL_CARTESIAN");
-                } else {
+                const CartesianAvailability availability =
+                    cartesianAvailabilityForArm(config_, *arm_command);
+                if (!availability.available) {
                     cartesian_available = false;
+                    if (arm_command->arm_id == ArmId::Left) {
+                        left_unavailable_reason = availability.reason;
+                    } else {
+                        right_unavailable_reason = availability.reason;
+                    }
                 }
-                if (!cartesian_available) break;
             }
         }
         if (!cartesian_available) {
@@ -1832,14 +1941,14 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 left_last_cartesian_solve_ = cartesianUnavailableTelemetry(
                     left_state,
                     config_.cartesian_control,
-                    "cartesian_control_unavailable"
+                    left_unavailable_reason
                 );
             }
             if (isCartesianMode(effective_command.right.mode)) {
                 right_last_cartesian_solve_ = cartesianUnavailableTelemetry(
                     right_state,
                     config_.cartesian_control,
-                    "cartesian_control_unavailable"
+                    right_unavailable_reason
                 );
             }
             target.left_q_target_deg = left_prev_sent_q_deg_;
@@ -1867,12 +1976,17 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             right_cartesian_twist_hold_ = CartesianTwistHoldState{};
         }
 
+        const RunMode left_cartesian_compute_run_mode =
+            cartesianComputationRunModeForArm(config_, effective_command.left);
+        const RunMode right_cartesian_compute_run_mode =
+            cartesianComputationRunModeForArm(config_, effective_command.right);
+
         const CartesianArmTargetResult left_cartesian_result = effective_command.left.mode == ControlMode::TcpLinearMove
             ? cartesian_servo.computeLinearMoveTarget(
                 effective_command.left,
                 left_state,
                 left_prev_sent_q_deg_,
-                runModeForArm(config_, ArmId::Left),
+                left_cartesian_compute_run_mode,
                 dt_sec,
                 continue_left_linear ? 0 : command.seq,
                 &left_cartesian_servo_path_,
@@ -1883,7 +1997,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 effective_command.left,
                 left_state,
                 left_prev_sent_q_deg_,
-                runModeForArm(config_, ArmId::Left),
+                left_cartesian_compute_run_mode,
                 dt_sec,
                 continue_left_circle ? 0 : command.seq,
                 &left_cartesian_circle_move_,
@@ -1894,7 +2008,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 effective_command.left,
                 left_state,
                 left_prev_sent_q_deg_,
-                runModeForArm(config_, ArmId::Left),
+                left_cartesian_compute_run_mode,
                 dt_sec,
                 command.seq,
                 &left_cartesian_twist_hold_,
@@ -1905,7 +2019,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 effective_command.left,
                 left_state,
                 left_prev_sent_q_deg_,
-                runModeForArm(config_, ArmId::Left)
+                left_cartesian_compute_run_mode
             )
             : CartesianArmTargetResult{
                 SafetyVerdict::Ok,
@@ -1929,7 +2043,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 effective_command.right,
                 right_state,
                 right_prev_sent_q_deg_,
-                runModeForArm(config_, ArmId::Right),
+                right_cartesian_compute_run_mode,
                 dt_sec,
                 continue_right_linear ? 0 : command.seq,
                 &right_cartesian_servo_path_,
@@ -1940,7 +2054,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 effective_command.right,
                 right_state,
                 right_prev_sent_q_deg_,
-                runModeForArm(config_, ArmId::Right),
+                right_cartesian_compute_run_mode,
                 dt_sec,
                 continue_right_circle ? 0 : command.seq,
                 &right_cartesian_circle_move_,
@@ -1951,7 +2065,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 effective_command.right,
                 right_state,
                 right_prev_sent_q_deg_,
-                runModeForArm(config_, ArmId::Right),
+                right_cartesian_compute_run_mode,
                 dt_sec,
                 command.seq,
                 &right_cartesian_twist_hold_,
@@ -1962,7 +2076,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 effective_command.right,
                 right_state,
                 right_prev_sent_q_deg_,
-                runModeForArm(config_, ArmId::Right)
+                right_cartesian_compute_run_mode
             )
             : CartesianArmTargetResult{
                 SafetyVerdict::Ok,

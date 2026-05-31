@@ -575,6 +575,38 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error("Refusing real Cartesian control. Set RB_ALLOW_REAL_CARTESIAN=1.");
         }
     }
+    if (anyReal(cfg) && cfg.cartesian_control.allow_in_controller_simulation) {
+        if (!cfg.cartesian_control.enable) {
+            throw std::runtime_error(
+                "cartesian_control.allow_in_controller_simulation requires cartesian_control.enable=true"
+            );
+        }
+        if (!cfg.servo.allow_controller_simulation_motion) {
+            throw std::runtime_error(
+                "cartesian_control.allow_in_controller_simulation requires "
+                "servo.allow_controller_simulation_motion=true"
+            );
+        }
+        if (!bothBackendsAreRbpodoControllerSimulation(cfg)) {
+            throw std::runtime_error(
+                "cartesian_control.allow_in_controller_simulation requires both rbpodo backends "
+                "to use run_mode=real and operation_mode=simulation"
+            );
+        }
+        if (!envIsOne("RB_ALLOW_REAL_ROBOT") ||
+            !envIsOne("RB_ALLOW_REAL_MOTION") ||
+            !envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") ||
+            !envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN") ||
+            !envIsOne("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")) {
+            throw std::runtime_error(
+                "Refusing rbpodo controller-simulation Cartesian control without "
+                "RB_ALLOW_REAL_ROBOT=1, RB_ALLOW_REAL_MOTION=1, "
+                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1, "
+                "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1, and "
+                "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1."
+            );
+        }
+    }
     validateNonNegativeFinite(cfg.cartesian_control.warn_ik_duration_us, "cartesian_control.warn_ik_duration_us");
     validateNonNegativeFinite(cfg.cartesian_control.fail_ik_duration_us, "cartesian_control.fail_ik_duration_us");
     validatePositiveFinite(cfg.cartesian_control.path_kp, "cartesian_control.path_kp");
@@ -609,8 +641,12 @@ void validateConfig(const DualArmConfig& cfg) {
     if (cfg.cartesian_control.linear_move.max_duration_sec < cfg.cartesian_control.linear_move.min_duration_sec) {
         throw std::runtime_error("cartesian_control.linear_move.max_duration_sec must be >= min_duration_sec");
     }
-    if (cfg.cartesian_control.enable_benchmark_primitives && anyReal(cfg)) {
-        throw std::runtime_error("Refusing cartesian_control.enable_benchmark_primitives in real mode");
+    if (cfg.cartesian_control.enable_benchmark_primitives && anyReal(cfg) &&
+        !cfg.cartesian_control.allow_in_controller_simulation) {
+        throw std::runtime_error(
+            "Refusing cartesian_control.enable_benchmark_primitives in real mode outside "
+            "rbpodo controller-simulation Cartesian gate"
+        );
     }
     if (cfg.cartesian_control.circle_move.allow_in_real) {
         throw std::runtime_error("cartesian_control.circle_move.allow_in_real must remain false");
@@ -1094,6 +1130,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "enable",
             "allow_in_simulation",
             "allow_in_real",
+            "allow_in_controller_simulation",
             "enable_benchmark_primitives",
             "warn_ik_duration_us",
             "fail_ik_duration_us",
@@ -1126,6 +1163,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "allow_in_real")) {
             cfg.cartesian_control.allow_in_real =
                 asBool(sec["allow_in_real"], "cartesian_control.allow_in_real");
+        }
+        if (has(sec, "allow_in_controller_simulation")) {
+            cfg.cartesian_control.allow_in_controller_simulation =
+                asBool(sec["allow_in_controller_simulation"], "cartesian_control.allow_in_controller_simulation");
         }
         if (has(sec, "enable_benchmark_primitives")) {
             cfg.cartesian_control.enable_benchmark_primitives =
