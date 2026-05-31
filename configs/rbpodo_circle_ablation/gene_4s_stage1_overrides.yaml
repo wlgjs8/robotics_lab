@@ -1,0 +1,170 @@
+# Stage-1 rbpodo controller-simulation ablation matrix for the GENE-style
+# 15 cm / 4 s stress profile.
+#
+# This matrix uses run_rbpodo_circle_ablation.py config_overrides so the source
+# local config is not edited in place. Each experiment writes its resolved
+# server config to that experiment's artifact directory as
+# resolved_server_config.yaml.
+#
+# Safety intent:
+# - rbpodo controller pgmode simulation only.
+# - Physical robot should not move.
+# - Requires the runner's real-controller confirmation flags and env gates.
+# - Do not use this matrix for physical real Cartesian motion.
+
+experiments:
+  # Stage A: open-loop diagnostic baseline at the current baseline state
+  # publish rate and speed bar.
+  - name: open_loop_pub50_speed01
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+
+  # Stage A: feedback gain sweep. The 15 cm / 4 s feedforward tangential
+  # speed is already about 0.118 m/s, leaving limited correction headroom
+  # under a 0.15 m/s feedback max.
+  - name: fb_kp05_ori05_pub50_speed01
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.5
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+
+  - name: fb_kp08_ori08_pub50_speed01
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.8
+    feedback_kp_ori: 0.8
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+
+  - name: fb_kp10_ori10_pub50_speed01
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 1.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+
+  - name: fb_kp12_ori10_pub50_speed01
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.2
+    feedback_kp_ori: 1.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+
+  # Stage B: state publish rate effect at Kp=1.0 and speed_bar=0.1.
+  - name: fb_kp10_ori10_pub100_speed01
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 1.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+
+  # Stage C: speed_bar sweep at pub_rate=100 and Kp=1.0.
+  - name: fb_kp10_ori10_pub100_speed02
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 1.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+
+  - name: fb_kp10_ori10_pub100_speed05
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 1.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+
+  - name: fb_kp10_ori10_pub100_speed10
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 1.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 1.0
+      right_robot.speed_bar: 1.0

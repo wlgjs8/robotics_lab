@@ -18,6 +18,7 @@ ENV_NAMES = (
     "RB_ALLOW_REAL_ROBOT",
     "RB_ALLOW_REAL_MOTION",
     "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
+    "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
     "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION",
     "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
     "RB_ALLOW_REAL_CARTESIAN",
@@ -46,6 +47,7 @@ left_robot:
   run_mode: real
   ip: "172.28.60.200"
   operation_mode: {operation_mode}
+  speed_bar: 0.1
   servo_t1_sec: 0.01
   servo_t2_sec: 0.05
   servo_gain: 1.0
@@ -56,6 +58,7 @@ right_robot:
   run_mode: real
   ip: "172.28.60.201"
   operation_mode: {operation_mode}
+  speed_bar: 0.1
   servo_t1_sec: 0.01
   servo_t2_sec: 0.05
   servo_gain: 1.0
@@ -69,12 +72,16 @@ servo:
 network:
   command_bind: "udp://127.0.0.1:50051"
   state_pub_endpoint: "udp://127.0.0.1:50151"
+  state_pub_rate_hz: 50
 cartesian_control:
   enable: true
   allow_in_simulation: true
   allow_in_real: false
+  allow_in_controller_simulation: true
   max_twist_linear_m_s: 0.15
   max_twist_angular_rad_s: 0.4
+  path_kp_pos: 6.0
+  path_kp_ori: 6.0
 """,
         encoding="utf-8",
     )
@@ -151,6 +158,7 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             env["RB_ALLOW_REAL_ROBOT"] = "1"
             env["RB_ALLOW_REAL_MOTION"] = "1"
             env["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
+            env["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
             env.pop("RB_ALLOW_REAL_CARTESIAN", None)
             script = Path(__file__).with_name("run_rbpodo_circle_ablation.py")
             completed = subprocess.run(
@@ -178,8 +186,120 @@ class RbpodoCircleAblationTest(unittest.TestCase):
                 text=True,
             )
             self.assertIn("rbpodo_circle_tracking_benchmark.py", completed.stdout)
+            self.assertIn("resolved_server_config.yaml", completed.stdout)
             self.assertTrue((artifact_root / "ablation_summary.csv").is_file())
-            self.assertTrue((artifact_root / "01_rbpodo_15cm16s_twist_stand" / "experiment_command.txt").is_file())
+            exp_dir = artifact_root / "01_rbpodo_15cm16s_twist_stand"
+            self.assertTrue((exp_dir / "experiment_command.txt").is_file())
+            self.assertTrue((exp_dir / "resolved_server_config.yaml").is_file())
+
+    def test_config_overrides_apply_to_temporary_config_without_mutating_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            root = Path(tmp_text)
+            config = root / "config.yaml"
+            write_config(config)
+            source_text = config.read_text(encoding="utf-8")
+            exp = {
+                "name": "gene_fb_kp10_pub100_speed02",
+                "config": "config.yaml",
+                "profile": "gene_15cm_4s",
+                "controller": "twist_stand_feedback",
+                "arm": "left",
+                "config_overrides": {
+                    "network.state_pub_rate_hz": 100,
+                    "left_robot.speed_bar": 0.2,
+                    "right_robot.speed_bar": 0.2,
+                    "cartesian_control.max_twist_linear_m_s": 0.2,
+                },
+            }
+            ablation.validate_experiment(exp, 1)
+            meta = ablation.prepare_experiment_config(root, exp, root / "artifacts" / "01_gene")
+            resolved = Path(meta["resolved_config_path"]).read_text(encoding="utf-8")
+            self.assertIn("state_pub_rate_hz: 100", resolved)
+            self.assertIn("speed_bar: 0.2", resolved)
+            self.assertIn("max_twist_linear_m_s: 0.2", resolved)
+            self.assertEqual(config.read_text(encoding="utf-8"), source_text)
+            self.assertEqual(meta["state_pub_rate_hz"], 100.0)
+            self.assertEqual(meta["speed_bar_left"], 0.2)
+            self.assertTrue(meta["source_config_unchanged"])
+
+    def test_matrix_yaml_config_overrides_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            root = Path(tmp_text)
+            config = root / "config.yaml"
+            matrix = root / "matrix.yaml"
+            write_config(config)
+            matrix.write_text(
+                """experiments:
+  - name: gene_fb_kp10_pub100_speed02
+    config: config.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+""",
+                encoding="utf-8",
+            )
+            exp = ablation.load_matrix(matrix)[0]
+            ablation.validate_experiment(exp, 1)
+            meta = ablation.prepare_experiment_config(root, exp, root / "artifacts" / "01_gene")
+            self.assertEqual(meta["config_overrides"]["network.state_pub_rate_hz"], 100)
+            self.assertEqual(meta["speed_bar_right"], 0.2)
+
+    def test_config_override_rejects_unsafe_allow_in_real(self) -> None:
+        exp = {
+            "name": "unsafe",
+            "config": "config.yaml",
+            "profile": "circle_15cm_16s",
+            "controller": "twist_stand",
+            "arm": "left",
+            "config_overrides": {"cartesian_control.allow_in_real": True},
+        }
+        with self.assertRaisesRegex(ablation.AblationError, "allow_in_real"):
+            ablation.validate_experiment(exp, 1)
+
+    def test_config_override_rejects_operation_mode_real(self) -> None:
+        exp = {
+            "name": "unsafe",
+            "config": "config.yaml",
+            "profile": "circle_15cm_16s",
+            "controller": "twist_stand",
+            "arm": "left",
+            "config_overrides": {"left_robot.operation_mode": "real"},
+        }
+        with self.assertRaisesRegex(ablation.AblationError, "operation_mode"):
+            ablation.validate_experiment(exp, 1)
+
+    def test_config_override_rejects_unknown_key(self) -> None:
+        exp = {
+            "name": "unknown",
+            "config": "config.yaml",
+            "profile": "circle_15cm_16s",
+            "controller": "twist_stand",
+            "arm": "left",
+            "config_overrides": {"network.nope": 1},
+        }
+        with self.assertRaisesRegex(ablation.AblationError, "unknown config override"):
+            ablation.validate_experiment(exp, 1)
+
+    def test_config_override_rejects_rate_t1_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            root = Path(tmp_text)
+            config = root / "config.yaml"
+            write_config(config)
+            exp = {
+                "name": "bad_rate",
+                "config": "config.yaml",
+                "profile": "circle_15cm_16s",
+                "controller": "twist_stand",
+                "arm": "left",
+                "config_overrides": {"servo.rate_hz": 200},
+            }
+            ablation.validate_experiment(exp, 1)
+            with self.assertRaisesRegex(ablation.AblationError, "servo rate/t1 mismatch"):
+                ablation.prepare_experiment_config(root, exp, root / "artifacts" / "01_bad_rate")
 
     def test_summary_aggregation_combines_fake_summaries(self) -> None:
         exp = {

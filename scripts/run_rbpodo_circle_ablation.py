@@ -32,6 +32,7 @@ REQUIRED_ENV = (
     "RB_ALLOW_REAL_ROBOT",
     "RB_ALLOW_REAL_MOTION",
     "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
+    "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
 )
 OPTIONAL_ENV_REQUIREMENTS = {
     "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION",
@@ -73,23 +74,53 @@ EXPERIMENT_KEYS = {
     "max_allowed_latency_ms",
     "skip_plots",
     "env_requirements",
+    "config_overrides",
 }
+ALLOWED_CONFIG_OVERRIDES = {
+    "network.state_pub_rate_hz",
+    "servo.rate_hz",
+    "left_robot.speed_bar",
+    "right_robot.speed_bar",
+    "left_robot.servo_t1_sec",
+    "right_robot.servo_t1_sec",
+    "left_robot.command_timeout_sec",
+    "right_robot.command_timeout_sec",
+    "cartesian_control.max_twist_linear_m_s",
+    "cartesian_control.max_twist_angular_rad_s",
+    "cartesian_control.path_kp_pos",
+    "cartesian_control.path_kp_ori",
+}
+UNSAFE_OVERRIDE_KEY_PARTS = (
+    "operation_mode",
+    "allow_in_real",
+    "allow_in_controller_simulation",
+    "backend_type",
+    "run_mode",
+)
 SUMMARY_COLUMNS = [
     "name",
     "controller",
     "profile",
     "ack_policy",
+    "state_pub_rate_hz",
+    "speed_bar_left",
+    "speed_bar_right",
     "servo_rate_hz",
+    "servo_t1_sec",
     "command_rate_hz",
     "tracking_source",
+    "feedback_kp_pos",
+    "feedback_kp_ori",
     "radius_gain",
     "rms_error_mm",
     "p95_error_mm",
     "max_error_mm",
     "p95_orientation_drift_mrad",
+    "fit_center_error_mm",
     "estimated_latency_ms",
     "q_ref_update_rate_hz",
     "send_duration_p95_us",
+    "feedback_saturation_count",
     "ack_observed_count",
     "controller_acceptance_observed_count",
     "diagnostics_suspect_count",
@@ -160,6 +191,114 @@ def finite_number(value: Any) -> float | None:
     return None
 
 
+def yaml_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+        if not math.isfinite(number):
+            raise AblationError(f"non-finite override value: {value}")
+        if isinstance(value, int):
+            return str(value)
+        return f"{number:.12g}"
+    if isinstance(value, str):
+        return value
+    raise AblationError(f"unsupported override value type: {type(value).__name__}")
+
+
+def config_overrides(exp: dict[str, Any]) -> dict[str, Any]:
+    value = exp.get("config_overrides", {})
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise AblationError(f"experiment {exp.get('name', '<unknown>')} config_overrides must be a mapping")
+    out: dict[str, Any] = {}
+    for key, override_value in value.items():
+        dotted = str(key)
+        if dotted not in ALLOWED_CONFIG_OVERRIDES:
+            if any(part in dotted for part in UNSAFE_OVERRIDE_KEY_PARTS):
+                raise AblationError(f"experiment {exp.get('name', '<unknown>')} unsafe config override is not allowed: {dotted}")
+            raise AblationError(f"experiment {exp.get('name', '<unknown>')} has unknown config override: {dotted}")
+        validate_override_value(str(exp.get("name", "<unknown>")), dotted, override_value)
+        out[dotted] = override_value
+    return out
+
+
+def validate_override_value(name: str, key: str, value: Any) -> None:
+    number = finite_number(value)
+    if number is None:
+        raise AblationError(f"experiment {name} override {key} must be a finite number")
+    if key == "network.state_pub_rate_hz" and number <= 0.0:
+        raise AblationError(f"experiment {name} override {key} must be > 0")
+    elif key == "servo.rate_hz" and number <= 0.0:
+        raise AblationError(f"experiment {name} override {key} must be > 0")
+    elif key.endswith(".speed_bar") and not (0.0 < number <= 1.0):
+        raise AblationError(f"experiment {name} override {key} must be > 0 and <= 1.0")
+    elif key.endswith(".servo_t1_sec") and number <= 0.0:
+        raise AblationError(f"experiment {name} override {key} must be > 0")
+    elif key.endswith(".command_timeout_sec") and number <= 0.0:
+        raise AblationError(f"experiment {name} override {key} must be > 0")
+    elif key in {
+        "cartesian_control.max_twist_linear_m_s",
+        "cartesian_control.max_twist_angular_rad_s",
+    } and number <= 0.0:
+        raise AblationError(f"experiment {name} override {key} must be > 0")
+    elif key in {"cartesian_control.path_kp_pos", "cartesian_control.path_kp_ori"} and number < 0.0:
+        raise AblationError(f"experiment {name} override {key} must be >= 0")
+
+
+def apply_config_overrides_text(text: str, overrides: dict[str, Any]) -> str:
+    if not overrides:
+        return text
+    grouped: dict[str, dict[str, str]] = {}
+    for dotted, value in overrides.items():
+        section, field = dotted.split(".", 1)
+        grouped.setdefault(section, {})[field] = yaml_scalar(value)
+
+    lines = text.splitlines()
+    output: list[str] = []
+    current_section: str | None = None
+    seen_sections: set[str] = set()
+    written: set[tuple[str, str]] = set()
+
+    def append_missing(section: str | None) -> None:
+        if section not in grouped:
+            return
+        assert section is not None
+        for field, rendered in grouped[section].items():
+            marker = (section, field)
+            if marker not in written:
+                output.append(f"  {field}: {rendered}")
+                written.add(marker)
+
+    for raw_line in lines:
+        stripped_without_comment = sim_ablation.strip_comment(raw_line).rstrip()
+        stripped = stripped_without_comment.strip()
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if indent == 0 and stripped.endswith(":") and ":" not in stripped[:-1]:
+            append_missing(current_section)
+            current_section = stripped[:-1]
+            seen_sections.add(current_section)
+            output.append(raw_line)
+            continue
+        if current_section in grouped and indent == 2 and ":" in stripped:
+            field = stripped.split(":", 1)[0].strip()
+            section_overrides = grouped[current_section]
+            if field in section_overrides:
+                output.append(f"  {field}: {section_overrides[field]}")
+                written.add((current_section, field))
+                continue
+        output.append(raw_line)
+    append_missing(current_section)
+
+    missing_sections = sorted(set(grouped) - seen_sections)
+    if missing_sections:
+        raise AblationError(f"config missing sections for overrides: {', '.join(missing_sections)}")
+    return "\n".join(output) + ("\n" if text.endswith("\n") else "")
+
+
 def scaled(summary: dict[str, Any], key: str, factor: float) -> float | None:
     value = finite_number(summary.get(key))
     return value * factor if value is not None else None
@@ -222,14 +361,15 @@ def validate_experiment(exp: dict[str, Any], index: int) -> None:
             raise AblationError(f"experiment {exp['name']} may not require RB_ALLOW_REAL_CARTESIAN")
         if env_name not in set(REQUIRED_ENV) | OPTIONAL_ENV_REQUIREMENTS:
             raise AblationError(f"experiment {exp['name']} has unsupported env requirement: {env_name}")
+    config_overrides(exp)
 
 
 def selected_arm(config: Any, arm: str) -> Any:
     return config.left if arm == "left" else config.right
 
 
-def validate_config(root: Path, exp: dict[str, Any]) -> dict[str, Any]:
-    config_path = root_path(root, exp["config"]).resolve()
+def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path | None = None) -> dict[str, Any]:
+    config_path = (config_path_override if config_path_override is not None else root_path(root, exp["config"])).resolve()
     if not config_path.is_file():
         raise AblationError(f"experiment {exp['name']} config not found: {config_path}")
     config = load_config(config_path)
@@ -260,6 +400,10 @@ def validate_config(root: Path, exp: dict[str, Any]) -> dict[str, Any]:
         raise AblationError(f"experiment {exp['name']} requires cartesian_control.enable=true")
     if as_bool(cartesian.get("allow_in_real"), False):
         raise AblationError(f"experiment {exp['name']} must keep cartesian_control.allow_in_real=false")
+    if not as_bool(cartesian.get("allow_in_controller_simulation"), False):
+        raise AblationError(
+            f"experiment {exp['name']} must keep cartesian_control.allow_in_controller_simulation=true"
+        )
 
     arm_cfg = selected_arm(config, str(exp["arm"]))
     servo_rate_hz = as_float(config.servo.get("rate_hz"))
@@ -273,22 +417,61 @@ def validate_config(root: Path, exp: dict[str, Any]) -> dict[str, Any]:
                 f"servo_t1_sec {servo_t1_sec:.6f} does not match 1/rate_hz "
                 f"{1.0 / servo_rate_hz:.6f}"
             )
+            if config_overrides(exp):
+                raise AblationError(f"experiment {exp['name']} resolved config has unsupported servo rate/t1 mismatch: {alignment_warning}")
+    state_pub_rate_hz = as_float(config.network.get("state_pub_rate_hz"))
+    if state_pub_rate_hz is not None and state_pub_rate_hz <= 0.0:
+        raise AblationError(f"experiment {exp['name']} network.state_pub_rate_hz must be > 0")
+    left_speed_bar = as_float(sections.get("left_robot", {}).get("speed_bar"))
+    right_speed_bar = as_float(sections.get("right_robot", {}).get("speed_bar"))
+    for label, value in (("left_robot.speed_bar", left_speed_bar), ("right_robot.speed_bar", right_speed_bar)):
+        if value is not None and not (0.0 < value <= 1.0):
+            raise AblationError(f"experiment {exp['name']} {label} must be > 0 and <= 1.0")
     return {
         "config_path": str(config_path),
+        "base_config_path": str(root_path(root, exp["config"]).resolve()),
+        "config_overrides": config_overrides(exp),
         "configured_ips": [config.left.ip, config.right.ip],
         "known_real_ips": sorted({config.left.ip, config.right.ip} & REAL_ROBOT_IPS),
         "ack_policy": "ack_off" if config.left.disable_waiting_ack else "ack_on",
         "disable_waiting_ack": bool(config.left.disable_waiting_ack),
+        "state_pub_rate_hz": state_pub_rate_hz,
+        "speed_bar_left": left_speed_bar,
+        "speed_bar_right": right_speed_bar,
         "servo_rate_hz": servo_rate_hz,
         "servo_t1_sec": servo_t1_sec,
         "servo_t1_rate_aligned": t1_aligned,
         "alignment_warning": alignment_warning,
+        "cartesian_max_twist_linear_m_s": as_float(cartesian.get("max_twist_linear_m_s")),
+        "cartesian_max_twist_angular_rad_s": as_float(cartesian.get("max_twist_angular_rad_s")),
+        "cartesian_path_kp_pos": as_float(cartesian.get("path_kp_pos")),
+        "cartesian_path_kp_ori": as_float(cartesian.get("path_kp_ori")),
         "allow_controller_simulation_diagnostics_suspect": as_bool(
             config.servo.get("allow_controller_simulation_diagnostics_suspect"), False
         ),
         "command_bind": config.network.get("command_bind"),
         "state_pub_endpoint": config.network.get("state_pub_endpoint"),
     }
+
+
+def experiment_dir(artifact_root: Path, index: int, exp: dict[str, Any]) -> Path:
+    return artifact_root / f"{index:02d}_{sim_ablation.safe_name(str(exp['name']))}"
+
+
+def prepare_experiment_config(root: Path, exp: dict[str, Any], exp_dir: Path) -> dict[str, Any]:
+    base_config = root_path(root, exp["config"]).resolve()
+    if not base_config.is_file():
+        raise AblationError(f"experiment {exp['name']} config not found: {base_config}")
+    overrides = config_overrides(exp)
+    text = base_config.read_text(encoding="utf-8")
+    resolved_text = apply_config_overrides_text(text, overrides)
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    resolved_config = exp_dir / "resolved_server_config.yaml"
+    resolved_config.write_text(resolved_text, encoding="utf-8")
+    metadata = validate_config(root, exp, resolved_config)
+    metadata["resolved_config_path"] = str(resolved_config.resolve())
+    metadata["source_config_unchanged"] = base_config.read_text(encoding="utf-8") == text
+    return metadata
 
 
 def validate_matrix_safety(args: argparse.Namespace, metadata: list[dict[str, Any]], experiments: list[dict[str, Any]]) -> None:
@@ -414,7 +597,7 @@ def run_experiment(
     index: int,
     artifact_root: Path,
 ) -> dict[str, Any]:
-    exp_dir = artifact_root / f"{index:02d}_{sim_ablation.safe_name(str(exp['name']))}"
+    exp_dir = experiment_dir(artifact_root, index, exp)
     exp_dir.mkdir(parents=True, exist_ok=True)
     command = benchmark_command(args, exp, meta, exp_dir)
     command_text = shlex.join(command)
@@ -465,17 +648,25 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "controller": summary.get("controller") or exp.get("controller"),
         "profile": summary.get("profile") or exp.get("profile"),
         "ack_policy": meta.get("ack_policy"),
+        "state_pub_rate_hz": meta.get("state_pub_rate_hz"),
+        "speed_bar_left": meta.get("speed_bar_left"),
+        "speed_bar_right": meta.get("speed_bar_right"),
         "servo_rate_hz": summary.get("servo_rate_hz") or meta.get("servo_rate_hz"),
+        "servo_t1_sec": meta.get("servo_t1_sec"),
         "command_rate_hz": summary.get("command_rate_hz") or exp.get("command_rate_hz"),
         "tracking_source": summary.get("tracking_source_used") or exp.get("tracking_source", "auto"),
+        "feedback_kp_pos": exp.get("feedback_kp_pos"),
+        "feedback_kp_ori": exp.get("feedback_kp_ori"),
         "radius_gain": summary.get("radius_gain"),
         "rms_error_mm": scaled(summary, "rms_error_m", 1000.0),
         "p95_error_mm": scaled(summary, "p95_error_m", 1000.0),
         "max_error_mm": scaled(summary, "max_error_m", 1000.0),
         "p95_orientation_drift_mrad": scaled(summary, "p95_orientation_drift_rad", 1000.0),
+        "fit_center_error_mm": scaled(summary, "fit_center_error_m", 1000.0),
         "estimated_latency_ms": summary.get("estimated_latency_ms"),
         "q_ref_update_rate_hz": summary.get("q_ref_update_rate_hz"),
         "send_duration_p95_us": nested_metric(summary, "send_duration_us", "p95"),
+        "feedback_saturation_count": summary.get("feedback_saturation_count"),
         "ack_observed_count": summary.get("ack_observed_count"),
         "controller_acceptance_observed_count": summary.get("controller_acceptance_observed_count"),
         "diagnostics_suspect_count": summary.get("diagnostics_suspect_count"),
@@ -651,11 +842,13 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
     if not enabled_pairs:
         raise AblationError("matrix has no enabled experiments")
     enabled_experiments = [exp for _index, exp in enabled_pairs]
-    metadata = [validate_config(root, exp) for exp in enabled_experiments]
-    validate_matrix_safety(args, metadata, enabled_experiments)
-
     artifact_root = root_path(root, args.artifact_root).resolve()
     artifact_root.mkdir(parents=True, exist_ok=True)
+    metadata = [
+        prepare_experiment_config(root, exp, experiment_dir(artifact_root, output_index, exp))
+        for output_index, (_matrix_index, exp) in enumerate(enabled_pairs, start=1)
+    ]
+    validate_matrix_safety(args, metadata, enabled_experiments)
     write_resolved_matrix(artifact_root / "matrix_resolved.json", args, enabled_experiments, metadata)
 
     summaries: list[dict[str, Any]] = []

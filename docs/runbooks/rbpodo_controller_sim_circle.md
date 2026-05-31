@@ -801,6 +801,14 @@ The matrix supports the intended factor split:
   `twist_stand_feedback`, or `twist_local_feedback`
 - `command_rate_hz`, `repeat`, `tracking_source`, feedback gains, feedback
   speed limits, and explicit extra env requirements
+- temporary per-experiment `config_overrides` for the allowlisted server-config
+  factors: `network.state_pub_rate_hz`, `servo.rate_hz`,
+  `left_robot.speed_bar`, `right_robot.speed_bar`,
+  `left_robot.servo_t1_sec`, `right_robot.servo_t1_sec`,
+  `left_robot.command_timeout_sec`, `right_robot.command_timeout_sec`,
+  `cartesian_control.max_twist_linear_m_s`,
+  `cartesian_control.max_twist_angular_rad_s`,
+  `cartesian_control.path_kp_pos`, and `cartesian_control.path_kp_ori`
 - ACK mode is derived from the referenced config's
   `disable_waiting_ack` fields
 
@@ -808,11 +816,76 @@ ACK-off experiments require `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1`.
 Configs that opt into the temporary diagnostics-suspect bridge require
 `RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1`. The runner stops on
 safety preflight failure or child benchmark `result: blocked` / `result: error`.
+Overrides are written to each experiment artifact directory as
+`resolved_server_config.yaml`; the source or local config is not edited in
+place. The runner rejects overrides that would change `operation_mode` to
+`real`, set `cartesian_control.allow_in_real: true`, remove
+`allow_in_controller_simulation: true`, remove `backend_type: rbpodo`, or
+create a `servo.rate_hz` / `servo_t1_sec` mismatch.
+
+Example GENE-style Kp, state publish rate, and speed-bar sweep entries:
+
+```yaml
+experiments:
+  - name: gene_fb_kp10_pub100_speed02
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 1.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+
+  - name: gene_fb_kp20_pub50_speed05
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 2.0
+    feedback_kp_ori: 2.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+
+  - name: gene_200hz_t1_005_speed10
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 2.0
+    feedback_kp_ori: 2.0
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      servo.rate_hz: 200
+      left_robot.servo_t1_sec: 0.005
+      right_robot.servo_t1_sec: 0.005
+      left_robot.speed_bar: 1.0
+      right_robot.speed_bar: 1.0
+```
 
 Each matrix run writes:
 
 - one artifact subdirectory per enabled experiment
 - `experiment_command.txt` and `ablation_command.json` per experiment
+- `resolved_server_config.yaml` per experiment
 - `matrix_resolved.json`
 - `ablation_summary.csv`
 - `ablation_summary.json`
