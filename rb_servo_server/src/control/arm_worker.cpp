@@ -719,20 +719,37 @@ void ArmWorker::updateAsyncReferenceSupervisionLocked(
     }
 
     const RobotState& state = result.value;
+    const double q_ref_epsilon_deg = 1e-6;
     const bool q_ref_valid = result.ok &&
         (state.q_ref_valid || state.has_valid_joint_state) &&
         finiteJointArray(state.q_target_deg);
     if (q_ref_valid) {
+        const bool q_ref_changed =
+            !last_async_q_ref_deg_.has_value() ||
+            maxAbsJointDelta(state.q_target_deg, *last_async_q_ref_deg_) > q_ref_epsilon_deg;
+        if (q_ref_changed) {
+            last_async_q_ref_deg_ = state.q_target_deg;
+            async_telemetry_.last_q_ref_update_host_time_ns = observed_ns;
+        }
         const double error_deg = maxAbsJointDelta(
             state.q_target_deg,
             last_async_sent_request_->q_target_deg
         );
         if (error_deg <=
             options_.rbpodo_async_reference_supervision.q_ref_target_tolerance_deg) {
-            async_telemetry_.last_q_ref_update_host_time_ns = observed_ns;
             if (async_telemetry_.supervision_state !=
                 RbpodoAsyncStreamingSupervisionState::Fault) {
                 async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Ok;
+            }
+            return;
+        }
+        if (q_ref_changed &&
+            options_.rbpodo_async_streaming_mode == RbpodoAsyncStreamingMode::SdkAckWorker) {
+            async_telemetry_.last_failure = "async_q_ref_target_lag";
+            if (async_telemetry_.supervision_state !=
+                RbpodoAsyncStreamingSupervisionState::Fault) {
+                async_telemetry_.supervision_state =
+                    RbpodoAsyncStreamingSupervisionState::Warning;
             }
             return;
         }

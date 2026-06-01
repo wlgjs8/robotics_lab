@@ -321,6 +321,11 @@ CartesianAvailability cartesianAvailabilityForArm(
     }
 
     const bool streaming_cartesian = isStreamingCartesianMode(command.mode);
+    const bool controller_simulation_circle_move =
+        command.mode == ControlMode::TcpCircleMove &&
+        config.cartesian_control.enable_benchmark_primitives &&
+        config.cartesian_control.circle_move.allow_in_simulation &&
+        !config.cartesian_control.circle_move.allow_in_real;
     if (backend.run_mode == RunMode::Simulation) {
         availability.available = config.cartesian_control.allow_in_simulation;
         availability.reason = availability.available
@@ -335,7 +340,7 @@ CartesianAvailability cartesianAvailabilityForArm(
         return availability;
     }
 
-    if (!streaming_cartesian) {
+    if (!streaming_cartesian && !controller_simulation_circle_move) {
         availability.available =
             config.cartesian_control.allow_in_real &&
             envFlagEnabled("RB_ALLOW_REAL_CARTESIAN");
@@ -385,7 +390,7 @@ RunMode cartesianComputationRunModeForArm(
 ) {
     const RunMode run_mode = backendConfigForArm(config, command.arm_id).run_mode;
     if (run_mode == RunMode::Real &&
-        isStreamingCartesianMode(command.mode) &&
+        (isStreamingCartesianMode(command.mode) || command.mode == ControlMode::TcpCircleMove) &&
         controllerSimulationCartesianGateOpen(config, backendConfigForArm(config, command.arm_id))) {
         return RunMode::Simulation;
     }
@@ -420,7 +425,7 @@ bool controllerSimulationReferenceSourceActive(
     if (source != CartesianControllerSimulationStateSource::Reference) return false;
     const BackendConfig& backend = backendConfigForArm(config, command.arm_id);
     return backend.run_mode == RunMode::Real &&
-        isStreamingCartesianMode(command.mode) &&
+        (isStreamingCartesianMode(command.mode) || command.mode == ControlMode::TcpCircleMove) &&
         controllerSimulationCartesianGateOpen(config, backend);
 }
 
@@ -503,6 +508,7 @@ struct ReferenceSupervisionRuntime {
     bool has_latest_sent_target = false;
     JointArray latest_sent_q_target_deg{};
     std::optional<Pose6D> latest_sent_tcp_ref_stand;
+    uint64_t q_ref_invalid_start_ns = 0;
     uint64_t q_ref_target_error_start_ns = 0;
     uint64_t tcp_ref_target_error_start_ns = 0;
     uint64_t last_q_ref_watchdog_miss_ns = 0;
@@ -659,8 +665,19 @@ void updateReferenceSupervision(
             runtime.last_q_ref_state_sequence_ns = q_ref_sequence_ns;
             runtime.last_q_ref_update_host_time_ns = observed_ns;
         }
-    } else {
-        mark(RbpodoAsyncStreamingSupervisionState::Fault, "async_reference_q_ref_invalid");
+        runtime.q_ref_invalid_start_ns = 0;
+    } else if (runtime.has_latest_sent_target) {
+        if (runtime.q_ref_invalid_start_ns == 0) {
+            runtime.q_ref_invalid_start_ns = observed_ns;
+        }
+        mark(RbpodoAsyncStreamingSupervisionState::Warning, "async_reference_q_ref_invalid");
+        const double invalid_age_ms = observed_ns >= runtime.q_ref_invalid_start_ns
+            ? static_cast<double>(observed_ns - runtime.q_ref_invalid_start_ns) /
+                1'000'000.0
+            : 0.0;
+        if (invalid_age_ms >= ref_cfg.q_ref_target_fault_after_ms) {
+            markPolicyViolation("async_reference_q_ref_invalid");
+        }
     }
 
     const bool tcp_ref_valid =
@@ -1475,7 +1492,18 @@ void DualArmServoLoop::loopMain() {
         const double filter_dt_sec = computeFilterDtSec(actual_period_ns, nominal_period_ns);
         last_loop_start_ns_ = loop_start;
 
-        const uint64_t worker_state_max_age_ns = std::max<uint64_t>(2 * nominal_period_ns, 1'000'000);
+        uint64_t worker_state_max_age_ns = std::max<uint64_t>(2 * nominal_period_ns, 1'000'000);
+        if (rbpodoAsyncIoMode()) {
+            const double async_state_age_ns =
+                config_.servo.rbpodo_async_streaming.ack_supervision.expected_ack_timeout_ms *
+                1'000'000.0;
+            if (std::isfinite(async_state_age_ns) && async_state_age_ns > 0.0) {
+                worker_state_max_age_ns = std::max<uint64_t>(
+                    worker_state_max_age_ns,
+                    static_cast<uint64_t>(async_state_age_ns)
+                );
+            }
+        }
         BackendResult<RobotState> left_state_result = workerBackedIoMode()
             ? (left_worker_
                 ? left_worker_->latestState(worker_state_max_age_ns)

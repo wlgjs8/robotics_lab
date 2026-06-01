@@ -48,6 +48,7 @@ CONTROLLERS = {
     "twist_local",
     "twist_stand_feedback",
     "twist_local_feedback",
+    "server_circle",
 }
 TRACKING_SOURCES = set(circle_bench.TRACKING_SOURCES)
 ARMS = {"left", "right"}
@@ -89,6 +90,7 @@ EXPERIMENT_KEYS = {
 ALLOWED_CONFIG_OVERRIDES = {
     "network.state_pub_rate_hz",
     "servo.rate_hz",
+    "servo.worker_read_period_sec",
     "left_robot.speed_bar",
     "right_robot.speed_bar",
     "left_robot.servo_t1_sec",
@@ -104,9 +106,12 @@ ALLOWED_CONFIG_OVERRIDES = {
     "cartesian_control.max_twist_linear_m_s",
     "cartesian_control.max_twist_angular_rad_s",
     "cartesian_control.max_linear_move_speed_m_s",
+    "cartesian_control.enable_benchmark_primitives",
     "cartesian_control.path_kp_pos",
     "cartesian_control.path_kp_ori",
     "cartesian_control.twist_angular_deadband_rad_s",
+    "cartesian_control.velocity_target_integration",
+    "cartesian_control.velocity_target_lookahead_sec",
     "servo.rbpodo_async_streaming.enable",
     "servo.rbpodo_async_streaming.mode",
     "servo.rbpodo_async_streaming.rate_hz",
@@ -130,6 +135,7 @@ BOOLEAN_CONFIG_OVERRIDES = {
     "left_robot.disable_waiting_ack",
     "right_robot.disable_waiting_ack",
     "servo.rbpodo_async_streaming.enable",
+    "cartesian_control.enable_benchmark_primitives",
     "servo.rbpodo_async_streaming.ack_supervision.enable",
     "servo.rbpodo_async_streaming.reference_supervision.enable",
     "servo.rbpodo_async_streaming.diagnostics.publish_per_command_jsonl",
@@ -144,6 +150,11 @@ STRING_CONFIG_OVERRIDE_VALUES = {
     "servo.rbpodo_async_streaming.reference_supervision.policy": {
         "warn_only",
         "fault_latch",
+    },
+    "cartesian_control.velocity_target_integration": {
+        "measured_actual",
+        "measured_actual_lookahead",
+        "previous_command",
     },
 }
 INTEGER_CONFIG_OVERRIDES = {
@@ -863,8 +874,13 @@ def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path 
     ):
         if value is not None and value <= 0.0:
             raise AblationError(f"experiment {exp['name']} {label} must be > 0")
+    velocity_target_lookahead = as_float(cartesian.get("velocity_target_lookahead_sec"))
     if twist_angular_deadband is not None and twist_angular_deadband < 0.0:
         raise AblationError(f"experiment {exp['name']} cartesian_control.twist_angular_deadband_rad_s must be >= 0")
+    if velocity_target_lookahead is not None and velocity_target_lookahead < 0.0:
+        raise AblationError(
+            f"experiment {exp['name']} cartesian_control.velocity_target_lookahead_sec must be >= 0"
+        )
     return {
         "config_path": str(config_path),
         "base_config_path": str(root_path(root, exp["config"]).resolve()),
@@ -898,6 +914,8 @@ def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path 
         "cartesian_path_kp_pos": as_float(cartesian.get("path_kp_pos")),
         "cartesian_path_kp_ori": as_float(cartesian.get("path_kp_ori")),
         "cartesian_twist_angular_deadband_rad_s": twist_angular_deadband,
+        "cartesian_velocity_target_integration": cartesian.get("velocity_target_integration"),
+        "cartesian_velocity_target_lookahead_sec": velocity_target_lookahead,
         "allow_controller_simulation_diagnostics_suspect": as_bool(
             config.servo.get("allow_controller_simulation_diagnostics_suspect"), False
         ),

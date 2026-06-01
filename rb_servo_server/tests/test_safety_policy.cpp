@@ -1886,7 +1886,7 @@ bool testCartesianCommandParser() {
     RB_CHECK(std::abs(out.right.tcp_twist_stand.rz - 0.1) < kEpsilon);
 
     RB_CHECK(server.parseMessage(
-        R"({"schema_version":1,"seq":11,"mode":"Hold","timeout_sec":0.2,"left":{"mode":"TcpCircleMove","plane":"xy","diameter_m":0.15,"period_sec":4.0,"repeat":2,"center_mode":"start_on_circle","orientation_mode":"constant","frame":"stand"},"right":{"mode":"Hold"}})",
+        R"({"schema_version":1,"seq":11,"mode":"Hold","timeout_sec":0.2,"left":{"mode":"TcpCircleMove","plane":"xy","diameter_m":0.15,"period_sec":4.0,"repeat":2,"phase_advance_sec":0.04,"center_mode":"start_on_circle","orientation_mode":"constant","frame":"stand"},"right":{"mode":"Hold"}})",
         now,
         &out
     ));
@@ -1896,6 +1896,7 @@ bool testCartesianCommandParser() {
     RB_CHECK(std::abs(out.left.tcp_circle_move.diameter_m - 0.15) < kEpsilon);
     RB_CHECK(std::abs(out.left.tcp_circle_move.period_sec - 4.0) < kEpsilon);
     RB_CHECK(out.left.tcp_circle_move.repeat == 2);
+    RB_CHECK(std::abs(out.left.tcp_circle_move.phase_advance_sec - 0.04) < kEpsilon);
     RB_CHECK(out.left.tcp_circle_move.center_mode == rb_servo::TcpCircleCenterMode::StartOnCircle);
     RB_CHECK(out.left.tcp_circle_move.orientation_mode == rb_servo::LinearMoveOrientationMode::Constant);
     RB_CHECK(out.left.tcp_circle_move.frame == rb_servo::TcpCircleFrame::Stand);
@@ -3470,6 +3471,7 @@ bool testRbpodoAsyncReferenceSupervisionInvalidQRefFaults() {
         const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
         if (snapshot.fault_latched &&
             snapshot.latched_fault_reason == rb_servo::SafetyVerdict::SendFailure &&
+            snapshot.left_async_streaming.commands_enqueued_total > 0 &&
             snapshot.left_async_streaming.reference_supervision_state ==
                 rb_servo::RbpodoAsyncStreamingSupervisionState::Fault &&
             snapshot.left_async_streaming.reference_supervision_reason ==

@@ -462,7 +462,9 @@ It requires `cartesian_control.enable_benchmark_primitives: true`,
 `cartesian_control.circle_move.allow_in_simulation: true`, and
 `cartesian_control.circle_move.allow_in_real: false`. Supported command
 options are currently `frame: "stand"`, `center_mode: "start_on_circle"`,
-and `orientation_mode: "constant"`.
+and `orientation_mode: "constant"`. Optional `phase_advance_sec` advances the
+server-side circle reference and must be finite, non-negative, and no greater
+than `0.25 * period_sec`.
 
 ```json
 {
@@ -476,6 +478,7 @@ and `orientation_mode: "constant"`.
     "diameter_m": 0.15,
     "period_sec": 4.0,
     "repeat": 1,
+    "phase_advance_sec": 0.005,
     "center_mode": "start_on_circle",
     "orientation_mode": "constant",
     "frame": "stand"
@@ -580,8 +583,9 @@ Motion modes require their payloads:
 - `TcpLinearMove` requires `target_tcp_stand` and either `duration_sec` or
   `linear_speed_m_s`; `orientation_mode` is `constant` or `slerp`.
 - `TcpCircleMove` requires `plane`, positive `diameter_m`, positive
-  `period_sec`, and positive integer `repeat`; only `frame: "stand"`,
-  `center_mode: "start_on_circle"`, and `orientation_mode: "constant"` are
-  currently supported at runtime.
+  `period_sec`, and positive integer `repeat`; optional `phase_advance_sec`
+  must be finite, non-negative, and no greater than `0.25 * period_sec`; only
+  `frame: "stand"`, `center_mode: "start_on_circle"`, and
+  `orientation_mode: "constant"` are currently supported at runtime.
 
 If the required payload is absent or malformed, the packet is dropped and the command buffer remains unchanged.

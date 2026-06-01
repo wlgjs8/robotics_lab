@@ -435,10 +435,11 @@ def write_resolved_config(
         if getattr(args, "disable_waiting_ack_diagnostic", False):
             raise Acceptance500HzError("--disable-waiting-ack-diagnostic cannot be combined with --async-mode")
         servo = nested_dict(data, "servo")
+        servo["worker_read_period_sec"] = 1.0 / COMMAND_RATE_HZ
         async_cfg = nested_dict(servo, "rbpodo_async_streaming")
         async_cfg["enable"] = True
         async_cfg["mode"] = async_mode
-        async_cfg["rate_hz"] = COMMAND_RATE_HZ
+        async_cfg["rate_hz"] = int(COMMAND_RATE_HZ)
         async_cfg["queue_policy"] = "latest_wins"
         async_cfg.setdefault("max_pending_age_ms", 10)
         existing_ack_supervision = (
@@ -477,7 +478,8 @@ def write_resolved_config(
         async_cfg["diagnostics"] = diagnostics
         overrides["servo.rbpodo_async_streaming.enable"] = True
         overrides["servo.rbpodo_async_streaming.mode"] = async_mode
-        overrides["servo.rbpodo_async_streaming.rate_hz"] = COMMAND_RATE_HZ
+        overrides["servo.rbpodo_async_streaming.rate_hz"] = int(COMMAND_RATE_HZ)
+        overrides["servo.worker_read_period_sec"] = 1.0 / COMMAND_RATE_HZ
         if async_mode == ASYNC_SOCKET_SEND_SUPERVISED:
             for arm in ARMS:
                 robot = nested_dict(data, f"{arm}_robot")

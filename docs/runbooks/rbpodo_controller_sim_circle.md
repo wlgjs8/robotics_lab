@@ -739,6 +739,19 @@ real-ready and must not be copied into a physical Cartesian acceptance run.
 
 ## Server-Side Circle Tracking Skeleton
 
+`TcpCircleMove` is now the implemented benchmark-only server-side circle
+primitive used by the `server_circle` benchmark controller. It starts from the
+current TCP pose, chooses the center so the current pose is on the circle, holds
+the initial orientation, and updates the desired circle reference in the servo
+tick. In rbpodo controller simulation it remains gated by
+`enable_benchmark_primitives`, `allow_in_controller_simulation: true`,
+`allow_in_real: false`, controller `operation_mode: simulation`, and the same
+pgmode confirmation env gates as the streaming Cartesian carve-out.
+
+`phase_advance_sec` on `TcpCircleMove` is allowed only as visible benchmark
+dead-time compensation. Reports must keep the configured phase advance,
+uncompensated latency estimate, and effective residual latency separate.
+
 `TcpCircleTrack` is the non-default server-side closed-loop circle tracking
 skeleton. It is intended to replace the current Python feedback loop only after
 separate implementation and acceptance work:
@@ -852,14 +865,17 @@ The state stream is robot/server telemetry (`tcp_actual_stand`,
 geometry and live metrics, so it must be visually treated as the desired path,
 not as robot state.
 
-Dead-time compensation is benchmark-side only. `--phase-advance-sec SEC`
-advances the desired circle sample used to generate benchmark commands by
-`SEC`, while `samples.csv`, error decomposition, and summary metrics still
-compare measured `tcp_ref_stand` against the desired trajectory at measurement
-time. The summary distinguishes `commanded_phase_advance_ms` from measured
-`estimated_latency_ms`. Do not use this option for physical-real commands; the
-rbpodo benchmark still requires `operation_mode: simulation`, pgmode
-confirmation, `physical_motion_expected=false`, and `allow_in_real: false`.
+Dead-time compensation must stay visible. For streaming controllers,
+`--phase-advance-sec SEC` advances the desired circle sample used to generate
+benchmark commands by `SEC`. For `server_circle`, the same field is forwarded
+as `TcpCircleMove.phase_advance_sec` and applied inside the server-side
+reference generator. In both cases, `samples.csv`, error decomposition, and
+summary metrics still compare measured `tcp_ref_stand` against the desired
+trajectory at measurement time. The summary distinguishes
+`commanded_phase_advance_ms` from measured `estimated_latency_ms`. Do not use
+this option for physical-real commands; the rbpodo benchmark still requires
+`operation_mode: simulation`, pgmode confirmation,
+`physical_motion_expected=false`, and `allow_in_real: false`.
 
 `policy_runner` is not in this live-visualization path. It is a separate
 command source for policy/SpaceMouse workflows. In the circle live view, the
@@ -1215,11 +1231,12 @@ The matrix supports the intended factor split:
 - `profile`: `safe_5cm_10s`, `circle_15cm_16s`,
   `circle_15cm_8s`, or `gene_15cm_4s`
 - `controller`: `twist_stand`, `twist_local`,
-  `twist_stand_feedback`, or `twist_local_feedback`
+  `twist_stand_feedback`, `twist_local_feedback`, or `server_circle`
 - `command_rate_hz`, `repeat`, `tracking_source`, feedback gains, feedback
   speed limits, and explicit extra env requirements
 - temporary per-experiment `config_overrides` for the allowlisted server-config
   factors: `network.state_pub_rate_hz`, `servo.rate_hz`,
+  `servo.worker_read_period_sec`,
   `left_robot.speed_bar`, `right_robot.speed_bar`,
   `left_robot.servo_t1_sec`, `right_robot.servo_t1_sec`,
   `left_robot.servo_t2_sec`, `right_robot.servo_t2_sec`,
@@ -1228,8 +1245,11 @@ The matrix supports the intended factor split:
   `cartesian_control.max_twist_linear_m_s`,
   `cartesian_control.max_twist_angular_rad_s`,
   `cartesian_control.max_linear_move_speed_m_s`,
-  `cartesian_control.path_kp_pos`, `cartesian_control.path_kp_ori`, and
-  `cartesian_control.twist_angular_deadband_rad_s`
+  `cartesian_control.enable_benchmark_primitives`,
+  `cartesian_control.path_kp_pos`, `cartesian_control.path_kp_ori`,
+  `cartesian_control.twist_angular_deadband_rad_s`,
+  `cartesian_control.velocity_target_integration`, and
+  `cartesian_control.velocity_target_lookahead_sec`
 - `phase_advance_sec` forwards to benchmark `--phase-advance-sec`; the default
   is `0.0`, values must be explicit and non-negative, and values greater than
   `0.25 * period_sec` are rejected
@@ -1259,6 +1279,15 @@ For rate/t1 sweeps, use `servo.rate_hz: 100` with `servo_t1_sec: 0.01`,
 `servo.rate_hz: 200` with `servo_t1_sec: 0.005`, or staged 500 Hz
 controller-simulation rows with `servo.rate_hz: 500` and
 `servo_t1_sec: 0.002` on both arms.
+
+`server_circle` rows send one `TcpCircleMove` packet and let the server update
+the circle reference on the servo tick. This is a controller-simulation
+benchmark primitive only. It requires
+`cartesian_control.enable_benchmark_primitives: true`,
+`cartesian_control.circle_move.allow_in_simulation: true`,
+`cartesian_control.circle_move.allow_in_real: false`, the normal pgmode
+simulation gates, and `physical_motion_expected=false`. It must not be copied
+to physical real configs.
 
 Example GENE-style Kp, state publish rate, and speed-bar sweep entries:
 

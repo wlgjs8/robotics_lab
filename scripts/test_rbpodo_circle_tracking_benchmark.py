@@ -382,6 +382,76 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
             self.assertEqual(args.feedback_kp_pos, 0.5)
             self.assertEqual(args.feedback_kp_ori, 0.0)
 
+    def test_server_circle_preflight_requires_benchmark_primitives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text, EnvGuard():
+            tmp = Path(tmp_text)
+            config = tmp / "config.yaml"
+            pgmode = tmp / "pgmode.json"
+            write_config(config)
+            write_pgmode_summary(pgmode)
+            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
+            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
+            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
+            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
+            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
+            args = make_args(tmp, config, pgmode, controller="server_circle")
+            with self.assertRaisesRegex(bench.BenchmarkError, "enable_benchmark_primitives"):
+                bench.preflight(args)
+            text = config.read_text(encoding="utf-8")
+            config.write_text(
+                text.replace(
+                    "  enable_benchmark_primitives: false",
+                    "  enable_benchmark_primitives: true",
+                ),
+                encoding="utf-8",
+            )
+            _config, _sections, preflight, _endpoints = bench.preflight(args)
+            self.assertTrue(preflight["passed"])
+
+    def test_server_circle_command_uses_tcp_circle_move_packet(self) -> None:
+        sent: list[dict[str, object]] = []
+        original_send_udp = bench.send_udp
+        original_sleep = bench.time.sleep
+        try:
+            bench.send_udp = lambda _host, _port, packet, _recorder: sent.append(packet)  # type: ignore[assignment]
+            bench.time.sleep = lambda _sec: None  # type: ignore[assignment]
+            args = argparse.Namespace(
+                arm="left",
+                plane="xy",
+                diameter_m=0.15,
+                period_sec=4.0,
+                repeat=5,
+                phase_advance_sec=0.04,
+                overlay_pub_rate_hz=20.0,
+            )
+            traj = sim_bench.Trajectory(
+                start=[0.075, 0.0, 0.0],
+                axis1=[1.0, 0.0, 0.0],
+                axis2=[0.0, 1.0, 0.0],
+                radius=0.075,
+                period_sec=4.0,
+            )
+            start_ns, stop_ns, count, rows = bench.run_server_circle(
+                args,
+                FakeCapture([]),  # type: ignore[arg-type]
+                None,  # type: ignore[arg-type]
+                {"command_host": "127.0.0.1", "command_port": 9},
+                traj,
+                [0.0, 0.0, 0.0, 1.0],
+                "tcp_ref_stand",
+                0.0,
+            )
+        finally:
+            bench.send_udp = original_send_udp  # type: ignore[assignment]
+            bench.time.sleep = original_sleep  # type: ignore[assignment]
+        self.assertEqual(count, 2)
+        self.assertEqual(rows, [])
+        self.assertGreaterEqual(stop_ns, start_ns)
+        self.assertEqual(sent[0]["left"]["mode"], "TcpCircleMove")  # type: ignore[index]
+        self.assertEqual(sent[0]["left"]["repeat"], 5)  # type: ignore[index]
+        self.assertEqual(sent[0]["left"]["phase_advance_sec"], 0.04)  # type: ignore[index]
+        self.assertEqual(sent[-1]["mode"], "Hold")
+
     def test_profile_serialization_appears_in_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)

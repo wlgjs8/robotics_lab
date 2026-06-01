@@ -365,6 +365,7 @@ struct TcpCircleMoveCommand {
     double diameter_m = 0.0;
     double period_sec = 0.0;
     int repeat = 1;
+    double phase_advance_sec = 0.0;
     TcpCircleCenterMode center_mode = TcpCircleCenterMode::StartOnCircle;
     LinearMoveOrientationMode orientation_mode = LinearMoveOrientationMode::Constant;
     TcpCircleFrame frame = TcpCircleFrame::Stand;

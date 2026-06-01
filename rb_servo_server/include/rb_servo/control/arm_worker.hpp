@@ -176,6 +176,7 @@ private:
     ArmWorkerTelemetry telemetry_;
     RbpodoAsyncStreamingTelemetry async_telemetry_;
     std::optional<SendServoJRequest> last_async_sent_request_;
+    std::optional<JointArray> last_async_q_ref_deg_;
     uint64_t last_async_reference_fault_sample_ns_ = 0;
 
     std::thread thread_;

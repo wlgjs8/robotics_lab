@@ -211,6 +211,17 @@ real Cartesian motion. Servo J ACKs in a controller-simulation circle artifact
 do not by themselves prove that Cartesian commands executed; check the
 Cartesian gate telemetry and `tcp_ref_stand` movement.
 
+`TcpCircleMove` is an optional benchmark primitive for isolating server-side
+circle generation from Python UDP streaming jitter. In `rb_simulator` it
+requires `cartesian_control.enable_benchmark_primitives: true`,
+`circle_move.allow_in_simulation: true`, and
+`circle_move.allow_in_real: false`. In rbpodo controller `pgmode` simulation,
+the same primitive is allowed only through the controller-simulation carve-out
+above, with `operation_mode: simulation`, controller-reference state, and
+`physical_motion_expected=false`. Its optional `phase_advance_sec` is visible
+telemetry and must not be interpreted as proof of physical system latency.
+Physical real `operation_mode: real` remains blocked for `TcpCircleMove`.
+
 Rbpodo async ACK-supervised 500 Hz streaming is another controller-simulation
 only carve-out. It requires `operation_mode: simulation`,
 `physical_motion_expected=false`, `RB_ALLOW_RBPODO_ASYNC_STREAMING=1`, normal

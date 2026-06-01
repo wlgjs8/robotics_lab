@@ -487,6 +487,7 @@ bool readOptionalCircleMoveFields(const json& object, ArmCommand* out) {
         object.contains("diameter_m") ||
         object.contains("period_sec") ||
         object.contains("repeat") ||
+        object.contains("phase_advance_sec") ||
         object.contains("plane") ||
         object.contains("center_mode") ||
         object.contains("frame");
@@ -503,6 +504,14 @@ bool readOptionalCircleMoveFields(const json& object, ArmCommand* out) {
     if (!readOptionalPositiveNumber(object, "period_sec", &number, &present)) return false;
     if (present) {
         out->tcp_circle_move.period_sec = number;
+        out->has_tcp_circle_move = true;
+    }
+    const auto phase_advance_it = object.find("phase_advance_sec");
+    if (phase_advance_it != object.end()) {
+        number = out->tcp_circle_move.phase_advance_sec;
+        if (!isFiniteNumber(*phase_advance_it, &number)) return false;
+        if (!std::isfinite(number) || number < 0.0) return false;
+        out->tcp_circle_move.phase_advance_sec = number;
         out->has_tcp_circle_move = true;
     }
 
@@ -542,7 +551,9 @@ bool readOptionalCircleMoveFields(const json& object, ArmCommand* out) {
     if (out->has_tcp_circle_move) {
         return out->tcp_circle_move.diameter_m > 0.0 &&
                out->tcp_circle_move.period_sec > 0.0 &&
-               out->tcp_circle_move.repeat > 0;
+               out->tcp_circle_move.repeat > 0 &&
+               out->tcp_circle_move.phase_advance_sec <=
+                   0.25 * out->tcp_circle_move.period_sec + 1e-12;
     }
     return true;
 }

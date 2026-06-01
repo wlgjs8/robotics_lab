@@ -463,6 +463,7 @@ def circle_move_command(args: argparse.Namespace, duration_sec: float) -> dict[s
         "diameter_m": float(args.diameter_m),
         "period_sec": float(args.period_sec),
         "repeat": int(args.repeat),
+        "phase_advance_sec": phase_advance_sec(args),
         "center_mode": "start_on_circle",
         "orientation_mode": "constant",
         "frame": "stand",

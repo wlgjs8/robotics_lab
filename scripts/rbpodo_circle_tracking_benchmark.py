@@ -752,7 +752,6 @@ def validate_config_and_env(
     if args.controller == "server_circle":
         if not as_bool(cartesian.get("enable_benchmark_primitives"), False):
             raise BenchmarkError("server_circle requires cartesian_control.enable_benchmark_primitives=true")
-        raise BenchmarkError("server_circle is not enabled for rbpodo controller-simulation real-controller configs")
 
     max_twist = as_float(cartesian.get("max_twist_linear_m_s"))
     max_twist_angular = as_float(cartesian.get("max_twist_angular_rad_s"))
@@ -1263,6 +1262,52 @@ def stream_twist_feedback(
     return first_ns, last_ns, command_count + 1, rows
 
 
+def run_server_circle(
+    args: argparse.Namespace,
+    capture: StateCapture,
+    commands: CommandRecorder,
+    endpoints: dict[str, Any],
+    traj: sim_bench.Trajectory,
+    q0: list[float],
+    tracking_source: str,
+    duration_sec: float,
+    overlay_publisher: benchmark_overlay.BenchmarkOverlayPublisher | None = None,
+    overlay_metrics: benchmark_overlay.CircleOverlayMetrics | None = None,
+) -> tuple[int, int, int, list[dict[str, Any]]]:
+    packet = sim_bench.circle_move_command(args, duration_sec)
+    first_ns = int(packet["host_time_ns"])
+    send_udp(endpoints["command_host"], endpoints["command_port"], packet, commands)
+    start_monotonic = time.monotonic()
+    next_overlay = start_monotonic
+    overlay_period = 1.0 / max(1.0, float(args.overlay_pub_rate_hz))
+    while True:
+        now = time.monotonic()
+        elapsed = now - start_monotonic
+        if elapsed >= duration_sec:
+            break
+        if overlay_publisher is not None and overlay_metrics is not None and now >= next_overlay:
+            publish_overlay_status(
+                args,
+                capture,
+                overlay_publisher,
+                overlay_metrics,
+                traj,
+                q0,
+                tracking_source,
+                t_sec=elapsed,
+                command_count=1,
+            )
+            next_overlay = now + overlay_period
+        if overlay_publisher is None or overlay_metrics is None:
+            time.sleep(max(0.0, min(0.05, duration_sec - elapsed)))
+            continue
+        sleep_until = min(duration_sec, max(elapsed, next_overlay - start_monotonic))
+        time.sleep(max(0.0, min(0.05, sleep_until - elapsed)))
+    stop = sim_bench.hold_command()
+    send_udp(endpoints["command_host"], endpoints["command_port"], stop, commands)
+    return first_ns, int(stop["host_time_ns"]), 2, []
+
+
 def send_arm_motion(args: argparse.Namespace, endpoints: dict[str, Any], commands: CommandRecorder, capture: StateCapture) -> dict[str, Any]:
     packet = sim_bench.lifecycle_command("ArmMotion")
     send_udp(endpoints["command_host"], endpoints["command_port"], packet, commands)
@@ -1479,6 +1524,7 @@ def cartesian_runtime_diagnostics(
     physical_command_actual_errors: list[float] = []
     q_reference_valid_count = 0
     q_reference_observed_count = 0
+    twist_clamp_count = 0
     selected_states = windowed_states(states, start_ns, end_ns)
     for snapshot in selected_states:
         motion_state = snapshot.get("motion_state")
@@ -1500,6 +1546,8 @@ def cartesian_runtime_diagnostics(
             attempted_count += 1
         if solve.get("success") is True:
             success_count += 1
+        if solve.get("twist_clamped") is True:
+            twist_clamp_count += 1
         servo_source = solve.get("cartesian_servo_state_source")
         if isinstance(servo_source, str) and servo_source:
             servo_state_source_counts[servo_source] += 1
@@ -1525,6 +1573,7 @@ def cartesian_runtime_diagnostics(
         "cartesian_unavailable_reason_counts": dict(reason_counts),
         "cartesian_attempted_count": attempted_count,
         "cartesian_success_count": success_count,
+        "cartesian_twist_clamp_count": twist_clamp_count,
         "cartesian_servo_state_source_counts": dict(servo_state_source_counts),
         "cartesian_divergence_source_counts": dict(divergence_source_counts),
         "q_reference_for_servo_valid_ratio": (
@@ -2094,6 +2143,19 @@ def run_tracking_commands(
             overlay_publisher,
             overlay_metrics,
         )
+    if args.controller == "server_circle":
+        return run_server_circle(
+            args,
+            capture,
+            commands,
+            endpoints,
+            traj,
+            q0,
+            tracking_source,
+            duration_sec,
+            overlay_publisher,
+            overlay_metrics,
+        )
     raise BenchmarkError(f"controller {args.controller} is not implemented for rbpodo controller-simulation benchmark")
 
 
@@ -2302,6 +2364,8 @@ def summarize_run(
     summary["orientation_error_vector_samples"] = orientation_error_vector_sample_rows(merged, q0)
     summary.update(telemetry_metrics(states, args.arm))
     summary.update(runtime_diagnostics)
+    if summary.get("feedback_saturation_count") is None:
+        summary["feedback_saturation_count"] = summary.get("cartesian_twist_clamp_count")
     summary.update(command_interval_metrics(artifact_dir / "command_packets.jsonl"))
     summary.update(fault_details)
     summary.update(classify_cartesian_runtime(summary, command_count))

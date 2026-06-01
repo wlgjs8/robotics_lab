@@ -883,9 +883,13 @@ CartesianArmTargetResult CartesianServoController::computeCircleMoveTarget(
         }
         if (!std::isfinite(command.tcp_circle_move.diameter_m) ||
             !std::isfinite(command.tcp_circle_move.period_sec) ||
+            !std::isfinite(command.tcp_circle_move.phase_advance_sec) ||
             command.tcp_circle_move.diameter_m <= 0.0 ||
             command.tcp_circle_move.period_sec <= 0.0 ||
-            command.tcp_circle_move.repeat <= 0) {
+            command.tcp_circle_move.repeat <= 0 ||
+            command.tcp_circle_move.phase_advance_sec < 0.0 ||
+            command.tcp_circle_move.phase_advance_sec >
+                0.25 * command.tcp_circle_move.period_sec + 1e-12) {
             result.verdict = SafetyVerdict::InvalidCommand;
             result.reason = "tcp_circle_move_invalid_parameter";
             result.telemetry.status = "failed";
@@ -955,7 +959,11 @@ CartesianArmTargetResult CartesianServoController::computeCircleMoveTarget(
     const TcpCircleMoveCommand& circle = circle_state->command;
     const double radius = circle_state->radius_m;
     const double omega = 2.0 * kPi / circle.period_sec;
-    const double theta = omega * circle_state->elapsed_sec;
+    const double reference_elapsed_sec = std::min(
+        circle_state->elapsed_sec + circle.phase_advance_sec,
+        circle_state->duration_sec
+    );
+    const double theta = omega * reference_elapsed_sec;
     Pose6D reference = circle_state->start_tcp_stand;
     reference.x = circle_state->center_x;
     reference.y = circle_state->center_y;
