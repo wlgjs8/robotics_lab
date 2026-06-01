@@ -150,6 +150,24 @@ def finite_joint_array(value: Any) -> tuple[list[float | None], list[bool], bool
     return values, finite, len(items) == 6 and all(finite)
 
 
+def joint_delta_deg(
+    reference_deg: list[float | None],
+    actual_deg: list[float | None],
+) -> tuple[list[float | None], float | None]:
+    deltas: list[float | None] = []
+    finite_abs: list[float] = []
+    for ref, actual in zip(reference_deg, actual_deg):
+        if ref is None or actual is None:
+            deltas.append(None)
+            continue
+        delta = ref - actual
+        deltas.append(delta)
+        finite_abs.append(abs(delta))
+    if len(deltas) < 6:
+        deltas.extend([None] * (6 - len(deltas)))
+    return deltas[:6], max(finite_abs) if finite_abs else None
+
+
 def joint_value_in_range(value_deg: float, min_deg: float, max_deg: float) -> bool:
     return math.isfinite(value_deg) and math.isfinite(min_deg) and math.isfinite(max_deg) and min_deg <= value_deg <= max_deg
 
@@ -327,6 +345,7 @@ def build_report_for_sdata(
     mode_warning = controller_mode_warning(raw_mode)
     q_actual, q_actual_finite, q_actual_all_finite = finite_joint_array(getattr(sdata, "jnt_ang", []))
     q_ref, q_ref_finite, q_ref_all_finite = finite_joint_array(getattr(sdata, "jnt_ref", []))
+    q_ref_actual_delta, max_abs_q_ref_actual_delta = joint_delta_deg(q_ref, q_actual)
     violations, wrapped, wrap_cleared = q_range_diagnostics(q_actual, q_min_deg, q_max_deg, wrap_period_deg)
     diagnostics_suspect, suspect_reasons, clear_errors = diagnostic_interpretation(raw)
     first_name, first_code = first_nonzero_error(raw)
@@ -356,7 +375,13 @@ def build_report_for_sdata(
         "diagnostics_suspect_reasons": suspect_reasons,
         "clear_error_flags": clear_errors,
         "q_actual_deg": q_actual,
+        "q_ref": q_ref,
+        "jnt_ref": q_ref,
         "q_ref_deg": q_ref,
+        "jnt_ref_deg": q_ref,
+        "q_ref_source": "python_rbpodo.sdata.jnt_ref",
+        "q_ref_actual_delta_deg": q_ref_actual_delta,
+        "q_actual_vs_q_ref_max_abs_error_deg": max_abs_q_ref_actual_delta,
         "q_actual_finite": q_actual_finite,
         "q_ref_finite": q_ref_finite,
         "q_actual_all_finite": q_actual_all_finite,
@@ -436,6 +461,12 @@ def human_summary(report: dict[str, Any]) -> str:
         else:
             lines.append(f"  q_actual_deg: {item.get('q_actual_deg')}")
             lines.append(f"  q_ref_deg: {item.get('q_ref_deg')}")
+            lines.append(f"  q_ref_source: {item.get('q_ref_source')}")
+            lines.append(f"  q_ref_actual_delta_deg: {item.get('q_ref_actual_delta_deg')}")
+            lines.append(
+                "  q_actual_vs_q_ref_max_abs_error_deg: "
+                f"{item.get('q_actual_vs_q_ref_max_abs_error_deg')}"
+            )
             lines.append(f"  real_vs_simulation_mode: {item.get('real_vs_simulation_mode')}")
             lines.append(f"  controller_mode: {item.get('controller_mode')}")
             if item.get("controller_mode_warning"):
@@ -495,6 +526,26 @@ def run_self_test() -> int:
         [0.0, 0.0, 360.0, 0.0, 0.0, 360.0],
     )
     assert violations and wrapped and cleared
+
+    class FakeSData:
+        time = 1.0
+        real_vs_simulation_mode = 1
+        init_state_info = 6
+        init_error = 0
+        op_stat_sos_flag = 0
+        op_stat_ems_flag = 0
+        op_stat_soft_estop_occur = 0
+        op_stat_collision_occur = 0
+        op_stat_self_collision = 0
+        jnt_ang = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+        jnt_ref = [0.5, 1.0, 1.5, 3.0, 4.5, 5.0]
+
+    fake_report = build_report_for_sdata("127.0.0.1", FakeSData(), None, None, None)
+    assert fake_report["q_ref_source"] == "python_rbpodo.sdata.jnt_ref"
+    assert fake_report["q_ref"] == fake_report["q_ref_deg"]
+    assert fake_report["jnt_ref"] == fake_report["q_ref_deg"]
+    assert fake_report["q_ref_actual_delta_deg"] == [0.5, 0.0, -0.5, 0.0, 0.5, 0.0]
+    assert fake_report["q_actual_vs_q_ref_max_abs_error_deg"] == 0.5
     print("rbpodo_state_dump self-test passed")
     return 0
 

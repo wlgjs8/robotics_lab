@@ -207,6 +207,49 @@ run_optional_python_help() {
   fi
 }
 
+run_optional_script_tests() {
+  local pattern="$1"
+  if find scripts -maxdepth 1 -name "${pattern}" -print -quit | grep -q .; then
+    PYTHONPATH=scripts python3 -m unittest discover scripts -p "${pattern}"
+  else
+    echo "codex_gate: optional script tests not present: ${pattern}"
+  fi
+}
+
+run_optional_rbpodo_measurement_readonly() {
+  local script="$1"
+  shift
+
+  if [[ "${CODEX_RUN_RBPODO_MEASUREMENT:-0}" != "1" ]]; then
+    echo "codex_gate: skipping rbpodo measurement controller read-only check; set CODEX_RUN_RBPODO_MEASUREMENT=1 with explicit args to enable"
+    return 0
+  fi
+
+  if [[ ! -f "${script}" ]]; then
+    echo "ERROR: CODEX_RUN_RBPODO_MEASUREMENT=1 but ${script} is missing" >&2
+    return 1
+  fi
+  if [[ -z "${CODEX_RBPODO_MEASUREMENT_ARGS:-}" ]]; then
+    echo "ERROR: CODEX_RUN_RBPODO_MEASUREMENT=1 requires CODEX_RBPODO_MEASUREMENT_ARGS with explicit read-only script arguments" >&2
+    return 1
+  fi
+  if [[ "${CODEX_RBPODO_MEASUREMENT_ARGS}" != *"--i-understand-this-connects-to-real-controller"* ]]; then
+    echo "ERROR: CODEX_RBPODO_MEASUREMENT_ARGS must include the tool-level real-controller confirmation flag" >&2
+    return 1
+  fi
+
+  local required_arg
+  for required_arg in "$@"; do
+    if [[ "${CODEX_RBPODO_MEASUREMENT_ARGS}" != *"${required_arg}"* ]]; then
+      echo "ERROR: CODEX_RBPODO_MEASUREMENT_ARGS must include ${required_arg} for this read-only measurement gate" >&2
+      return 1
+    fi
+  done
+
+  # shellcheck disable=SC2086
+  python3 "${script}" ${CODEX_RBPODO_MEASUREMENT_ARGS}
+}
+
 run_python_compile_checks() {
   python3 -m compileall -q \
     rb_simulator/src \
@@ -1035,6 +1078,74 @@ run_rbpodo_circle_tune_runners_gate() {
   echo "codex_gate: skipping rbpodo controller-simulation wrapper runs by default"
 }
 
+run_rbpodo_measure_state_parity_gate() {
+  run_shell_syntax_checks
+  run_servo_gate_or_skip_missing_deps
+  python3 -m compileall -q scripts
+  python3 scripts/rbpodo_state_dump.py --help >/dev/null
+  python3 scripts/rbpodo_state_dump.py --self-test
+  run_optional_script_tests 'test_rbpodo_state_dump.py'
+  run_optional_script_tests 'test_rbpodo_measure_state_parity.py'
+  run_optional_rbpodo_measurement_readonly scripts/rbpodo_state_dump.py
+}
+
+run_rbpodo_measure_raw_data_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  python3 scripts/rainbow_rate_probe.py --help >/dev/null
+  run_optional_python_help scripts/rbpodo_raw_data_capture.py
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rainbow_rate_probe.py'
+  run_optional_script_tests 'test_rbpodo_raw_data*.py'
+  run_optional_script_tests 'test_rainbow_raw_data*.py'
+  run_optional_rbpodo_measurement_readonly \
+    scripts/rainbow_rate_probe.py \
+    "--backend rbscript_tcp" \
+    "--mode read_state" \
+    "--capture-raw-data-port"
+}
+
+run_rbpodo_measure_timestamp_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  run_optional_python_help scripts/rbpodo_timestamp_audit.py
+  run_optional_python_help scripts/rbpodo_measure_timestamp_audit.py
+  run_optional_script_tests 'test_rbpodo_timestamp*.py'
+  run_optional_script_tests 'test_rbpodo_measure_timestamp*.py'
+  echo "codex_gate: skipping rbpodo measurement controller run by default"
+}
+
+run_rbpodo_circle_error_decomp_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  python3 scripts/generate_rbpodo_circle_report.py --help >/dev/null
+  run_optional_python_help scripts/rbpodo_circle_error_decomposition.py
+  run_optional_python_help scripts/decompose_rbpodo_circle_error.py
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_tracking_benchmark.py'
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_benchmark_report.py'
+  run_optional_script_tests 'test_rbpodo_circle_error*.py'
+  echo "codex_gate: skipping rbpodo controller-simulation circle benchmark by default"
+}
+
+run_rbpodo_measure_reliability_report_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  run_optional_python_help scripts/rbpodo_measure_reliability_report.py
+  run_optional_python_help scripts/generate_rbpodo_measurement_report.py
+  python3 scripts/generate_rbpodo_circle_report.py --help >/dev/null
+  run_optional_script_tests 'test_rbpodo_measure_reliability*.py'
+  for token in \
+    "diagnostics_suspect" \
+    "tcp_ref_stand" \
+    "lower bound" \
+    "timestamp alignment" \
+    "q_ref" \
+    "raw 5001"
+  do
+    grep_existing "${token}" README.md REVIEW.md docs rb_servo_server/docs scripts
+  done
+  echo "codex_gate: skipping rbpodo measurement report generation by default"
+}
+
 run_yaml_parse_checks_if_available() {
   local paths=()
   local path
@@ -1803,6 +1914,24 @@ case "$TASK" in
     ;;
   RBPODO-CIRCLE-TUNE-RUNNERS-01)
     run_rbpodo_circle_tune_runners_gate
+    ;;
+  MEASURE-P0-GATE-00)
+    run_shell_syntax_checks
+    ;;
+  RBPODO-MEASURE-STATE-PARITY-01)
+    run_rbpodo_measure_state_parity_gate
+    ;;
+  RBPODO-MEASURE-RAW-DATA-01)
+    run_rbpodo_measure_raw_data_gate
+    ;;
+  RBPODO-MEASURE-TIMESTAMP-01)
+    run_rbpodo_measure_timestamp_gate
+    ;;
+  RBPODO-CIRCLE-ERROR-DECOMP-01)
+    run_rbpodo_circle_error_decomp_gate
+    ;;
+  RBPODO-MEASURE-RELIABILITY-REPORT-01)
+    run_rbpodo_measure_reliability_report_gate
     ;;
   POLICY-DATASET-SCHEMA-01)
     run_policy_dataset_schema_gate

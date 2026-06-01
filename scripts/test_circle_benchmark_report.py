@@ -286,6 +286,122 @@ class CircleBenchmarkReportTest(unittest.TestCase):
         self.assertIsNone(rows[0]["score"])
         self.assertIn("missing candidate metrics", rows[0]["promotion_notes"])
 
+    def test_completed_tcp_ref_with_diagnostics_is_controller_reference_valid(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "diag_suspect_lower_bound",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "controller": "twist_stand_feedback",
+                    "profile": "circle_15cm_16s",
+                    "tracking_source": "tcp_ref_stand",
+                    "result": "completed",
+                    "tcp_ref_valid_ratio": 1.0,
+                    "q_ref_valid_ratio": 1.0,
+                    "q_ref_update_rate_hz": 50.0,
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                    "diagnostics_suspect_count": 10,
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertEqual(rows[0]["measurement_reliability_level"], "controller_reference_valid")
+        self.assertIn("diagnostics_suspect_override_active", rows[0]["reliability_caveats"])
+        self.assertIn("tcp_ref_lower_bound_only", rows[0]["reliability_caveats"])
+        self.assertFalse(rows[0]["physical_ready_candidate"])
+
+    def test_faulted_run_is_unreliable(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "faulted",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "profile": "circle_15cm_16s",
+                    "tracking_source": "tcp_ref_stand",
+                    "result": "faulted",
+                    "fault_latched": True,
+                    "tcp_ref_valid_ratio": 1.0,
+                    "q_ref_valid_ratio": 1.0,
+                    "physical_motion_detected": False,
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertEqual(rows[0]["measurement_reliability_level"], "unreliable")
+
+    def test_physical_motion_detected_is_unreliable(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "physical_motion",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "profile": "circle_15cm_16s",
+                    "tracking_source": "tcp_ref_stand",
+                    "result": "completed",
+                    "tcp_ref_valid_ratio": 1.0,
+                    "q_ref_valid_ratio": 1.0,
+                    "physical_motion_detected": True,
+                    "fault_latched": False,
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertEqual(rows[0]["measurement_reliability_level"], "unreliable")
+        self.assertIn("physical_motion_detected", rows[0]["reliability_reasons"])
+
+    def test_missing_q_ref_is_suspect(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "missing_q_ref",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "profile": "circle_15cm_16s",
+                    "tracking_source": "tcp_ref_stand",
+                    "result": "completed",
+                    "tcp_ref_valid_ratio": 1.0,
+                    "q_ref_reason": "q_ref_deg not published",
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertEqual(rows[0]["measurement_reliability_level"], "suspect")
+        self.assertIn("q_ref_not_directly_validated", rows[0]["reliability_caveats"])
+
+    def test_stress_profile_marks_il_data_not_recommended(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "stress",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "controller": "twist_stand_feedback",
+                    "profile": "gene_15cm_4s",
+                    "tracking_source": "tcp_ref_stand",
+                    "result": "completed",
+                    "tcp_ref_valid_ratio": 1.0,
+                    "q_ref_valid_ratio": 1.0,
+                    "q_ref_update_rate_hz": 50.0,
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertIn("stress_profile", rows[0]["benchmark_interpretation"])
+        self.assertIn("IL_data_not_recommended", rows[0]["benchmark_interpretation"])
+
     def test_rbpodo_compare_handles_missing_physical_actual_path(self) -> None:
         row = compare.comparison_row(
             {

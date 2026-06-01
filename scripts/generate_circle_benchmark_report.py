@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import compare_circle_benchmarks as compare
+import generate_rbpodo_measurement_reliability_report as reliability_report
 
 
 BASELINE_PROFILE = "circle_15cm_16s"
@@ -53,10 +54,20 @@ REPORT_COLUMNS = [
     "required_tangential_speed_m_s",
     "stress_level",
     "repeat_evidence_count",
+    "measurement_reliability_level",
+    "reliability_caveats",
+    "benchmark_interpretation",
+    "physical_real_blockers",
     "radius_gain",
     "rms_error_mm",
+    "median_error_mm",
     "p95_error_mm",
     "max_error_mm",
+    "tail_ratio",
+    "center_removed_rms_mm",
+    "phase_aligned_rms_mm",
+    "orientation_position_equiv_50mm_mm",
+    "error_classification",
     "p95_orientation_drift_mrad",
     "max_orientation_drift_mrad",
     "estimated_latency_ms",
@@ -66,9 +77,19 @@ REPORT_COLUMNS = [
     "send_command_deadline_missed_count",
     "command_interval_max_ms",
     "servo_jitter_max_ms",
+    "timing_classification",
+    "ack_spike_count_10ms",
+    "ack_spike_count_20ms",
+    "state_gap_count",
+    "command_gap_count",
+    "p95_error_near_ack_spike_mm",
+    "p95_error_away_from_ack_spike_mm",
+    "p95_error_near_command_gap_mm",
+    "p95_error_away_from_command_gap_mm",
     "physical_motion_expected",
     "physical_motion_detected",
     "q_ref_update_rate_hz",
+    "q_ref_valid_ratio",
     "q_actual_update_rate_hz",
     "ack_policy",
     "controller_acceptance_observed_count",
@@ -76,6 +97,7 @@ REPORT_COLUMNS = [
     "controller_rejected_count",
     "tcp_ref_valid_ratio",
     "tcp_actual_valid_ratio",
+    "diagnostics_suspect_count",
     "saturation_ratio",
     "orientation_p95_deg",
     "center_error_mm",
@@ -355,6 +377,9 @@ def rbpodo_tuning_rejection_reasons(row: dict[str, Any]) -> list[str]:
         reasons.append("fault_latched=true")
     if true_metric(row, "physical_motion_detected"):
         reasons.append("physical_motion_detected=true")
+    timing = str(row.get("timing_classification") or "")
+    if timing and timing != "clean_timing":
+        reasons.append(f"timing_classification={timing}")
     unavailable_count = first_number(row, "cartesian_unavailable_count")
     if unavailable_count is not None and unavailable_count > 0.0:
         reasons.append("cartesian_unavailable_count > 0")
@@ -604,6 +629,9 @@ def classify_rbpodo_tuning_row(row: dict[str, Any]) -> None:
         notes.append("rejected or heavily penalized: " + "; ".join(reasons))
     if missing:
         notes.append("missing candidate metrics: " + ", ".join(missing))
+    error_classification = row.get("error_classification")
+    if error_classification:
+        notes.append(f"error decomposition: {error_classification}")
     row["promotion_notes"] = "; ".join(notes)
 
 
@@ -658,6 +686,7 @@ def classify_rows(rows: list[dict[str, Any]], min_repeats: int = 3) -> list[dict
     annotate_repeat_evidence(normalized)
     for row in normalized:
         classify_row(row, min_repeats)
+        reliability_report.annotate_row(row)
     return normalized
 
 
@@ -725,6 +754,15 @@ open-loop radius can be good while center drift is bad.
 closed-loop is structurally needed for rbpodo controller simulation.
 Kp=2 was aggressive in previous stage.
 Kp_pos and Kp_ori should be tuned separately.
+`timing_classification` must be `clean_timing` before a feedback row is treated
+as a closed-loop tuning candidate; non-clean timing classifications are
+measurement-limited evidence, not gain quality evidence.
+
+`measurement_reliability_level` must be read before tuning notes. For rbpodo
+pgmode simulation, `controller_reference_valid` means the controller-reference
+path is usable as a lower-bound measurement only. It is not physical TCP
+tracking and it is not physical-ready evidence. `unreliable` and `suspect`
+rows should not drive gain selection or IL data selection.
 
 The rbpodo tuning report classifies rows as:
 
@@ -736,8 +774,15 @@ The rbpodo tuning report classifies rows as:
 - `state_pub_speed_mismatch`: 100 Hz state publication with `speed_bar=0.1` stress behavior.
 - `stress_only`: incomplete or heavily penalized evidence that should not be promoted.
 
+The separate `error_classification` column decomposes measurement/tracking
+error into `phase_lag_limited`, `center_drift_limited`,
+`tail_spike_limited`, `orientation_limited`, `saturation_limited`, and
+`timing_jitter_limited`. Use it to decide whether to tune gains, fix timing,
+separate orientation gain, or treat RMS/p95 as tail-spike dominated.
+
 Candidate scoring rejects or heavily penalizes `fault_latched=true`,
 `physical_motion_detected=true`, `cartesian_unavailable_count > 0`,
+non-clean `timing_classification`,
 `feedback_saturation_count > 0.2 * command_count`,
 `p95_orientation_drift_rad > 0.25`, `fit_center_error_m > 0.05` for the 4 s
 profile, and `radius_gain` outside `[0.85, 1.15]`. Among non-rejected
@@ -794,6 +839,54 @@ def best_by(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> dict[str, Any]
     return min(candidates, key=lambda row: tuple(first_number(row, key) or 0.0 for key in keys))
 
 
+def error_classification_counts(rows: list[dict[str, Any]]) -> str:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = str(row.get("error_classification") or "")
+        if not value:
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    if not counts:
+        return "_None._"
+    return ", ".join(f"{key}={counts[key]}" for key in sorted(counts))
+
+
+def row_has_orientation_limited_evidence(row: dict[str, Any]) -> bool:
+    orientation_equiv_mm = first_number(row, "orientation_position_equiv_50mm_mm")
+    orientation_p95_deg = first_number(row, "orientation_p95_deg")
+    return (
+        row.get("error_classification") == "orientation_limited"
+        or (orientation_equiv_mm is not None and orientation_equiv_mm >= 5.0)
+        or (orientation_p95_deg is not None and orientation_p95_deg >= 5.0)
+    )
+
+
+def rbpodo_error_diagnosis_notes(rows: list[dict[str, Any]]) -> list[str]:
+    rbpodo_rows = [row for row in rows if row.get("benchmark_category") == "rbpodo_controller_simulation"]
+    open_loop = [row for row in rbpodo_rows if row.get("classification") == "open_loop_baseline"]
+    closed_loop = [row for row in rbpodo_rows if row.get("classification") != "open_loop_baseline" and is_feedback_controller(row)]
+    notes: list[str] = []
+    for row in open_loop:
+        radius = first_number(row, "radius_gain")
+        center_mm = first_number(row, "center_error_mm")
+        if radius is not None and 0.95 <= radius <= 1.05 and center_mm is not None and center_mm >= 50.0:
+            notes.append("open-loop has good radius but large center drift")
+            break
+    open_centers = [first_number(row, "center_error_mm") for row in open_loop]
+    closed_centers = [first_number(row, "center_error_mm") for row in closed_loop]
+    open_values = [value for value in open_centers if value is not None]
+    closed_values = [value for value in closed_centers if value is not None]
+    if open_values and closed_values and min(closed_values) < min(open_values) * 0.5:
+        notes.append("closed-loop reduces center drift")
+    if any(row.get("error_classification") == "saturation_limited" for row in rbpodo_rows):
+        notes.append("high-gain rows can become saturation-limited")
+    if any(row_has_orientation_limited_evidence(row) for row in rbpodo_rows):
+        notes.append("orientation drift is a separate error source from position radius/center")
+    if not notes:
+        notes.append("no dominant rbpodo error decomposition pattern detected")
+    return list(dict.fromkeys(notes))
+
+
 def rbpodo_stage_summary_markdown(rows: list[dict[str, Any]]) -> str:
     rbpodo_rows = [row for row in rows if row.get("benchmark_category") == "rbpodo_controller_simulation"]
     closed_loop = [row for row in rbpodo_rows if row.get("classification") == "closed_loop_candidate"]
@@ -811,7 +904,9 @@ def rbpodo_stage_summary_markdown(rows: list[dict[str, Any]]) -> str:
         f"- best_orientation_candidate: {row_label(best_orientation)}",
         f"- best_center_candidate: {row_label(best_center)}",
         f"- best_open_loop_baseline: {row_label(best_open_loop)}",
+        f"- error_classification_counts: {error_classification_counts(rbpodo_rows)}",
     ]
+    lines.extend(f"- {note}" for note in rbpodo_error_diagnosis_notes(rows))
     return "\n".join(lines)
 
 
@@ -867,6 +962,10 @@ def report_markdown(rows: list[dict[str, Any]], title: str, min_repeats: int) ->
         "## rbpodo Controller-Simulation Benchmarks",
         "",
         markdown_table(rbpodo_rows) if rbpodo_rows else "_None supplied._",
+        "",
+        "## Measurement Reliability And Caveats",
+        "",
+        reliability_report.markdown_table(rbpodo_rows) if rbpodo_rows else "_None supplied._",
         "",
         rbpodo_stage_summary_markdown(rows),
         "",

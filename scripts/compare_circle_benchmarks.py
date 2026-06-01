@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import circle_tracking_benchmark as profile_bench
+import generate_rbpodo_measurement_reliability_report as reliability_report
 
 
 COLUMNS = [
@@ -31,11 +32,21 @@ COLUMNS = [
     ("period_sec", "period_sec"),
     ("required_tangential_speed_m_s", "required_tangential_speed_m_s"),
     ("stress_level", "stress_level"),
+    ("measurement_reliability_level", "measurement_reliability_level"),
+    ("reliability_caveats", "reliability_caveats"),
+    ("benchmark_interpretation", "benchmark_interpretation"),
+    ("physical_real_blockers", "physical_real_blockers"),
     ("radius_gain", "radius_gain"),
     ("mean_error_mm", "mean_error_mm"),
     ("rms_error_mm", "rms_error_mm"),
+    ("median_error_mm", "median_error_mm"),
     ("p95_error_mm", "p95_error_mm"),
     ("max_error_mm", "max_error_mm"),
+    ("tail_ratio", "tail_ratio"),
+    ("center_removed_rms_mm", "center_removed_rms_mm"),
+    ("phase_aligned_rms_mm", "phase_aligned_rms_mm"),
+    ("orientation_position_equiv_50mm_mm", "orientation_position_equiv_50mm_mm"),
+    ("error_classification", "error_classification"),
     ("p95_orientation_drift_mrad", "p95_orientation_drift_mrad"),
     ("max_orientation_drift_mrad", "max_orientation_drift_mrad"),
     ("estimated_latency_ms", "estimated_latency_ms"),
@@ -45,6 +56,15 @@ COLUMNS = [
     ("send_command_deadline_missed_count", "send_command_deadline_missed_count"),
     ("command_interval_max_ms", "command_interval_max_ms"),
     ("servo_jitter_max_ms", "servo_jitter_max_ms"),
+    ("timing_classification", "timing_classification"),
+    ("ack_spike_count_10ms", "ack_spike_count_10ms"),
+    ("ack_spike_count_20ms", "ack_spike_count_20ms"),
+    ("state_gap_count", "state_gap_count"),
+    ("command_gap_count", "command_gap_count"),
+    ("p95_error_near_ack_spike_mm", "p95_error_near_ack_spike_mm"),
+    ("p95_error_away_from_ack_spike_mm", "p95_error_away_from_ack_spike_mm"),
+    ("p95_error_near_command_gap_mm", "p95_error_near_command_gap_mm"),
+    ("p95_error_away_from_command_gap_mm", "p95_error_away_from_command_gap_mm"),
     ("mean_feedback_linear_norm_m_s", "mean_feedback_linear_norm_m_s"),
     ("max_feedback_linear_norm_m_s", "max_feedback_linear_norm_m_s"),
     ("feedback_saturation_count", "feedback_saturation_count"),
@@ -61,6 +81,7 @@ COLUMNS = [
     ("tcp_actual_moved", "tcp_actual_moved"),
     ("q_sent_update_rate_hz", "q_sent_update_rate_hz"),
     ("q_ref_update_rate_hz", "q_ref_update_rate_hz"),
+    ("q_ref_valid_ratio", "q_ref_valid_ratio"),
     ("q_actual_update_rate_hz", "q_actual_update_rate_hz"),
     ("q_ref_reason", "q_ref_reason"),
     ("ack_policy", "ack_policy"),
@@ -69,6 +90,8 @@ COLUMNS = [
     ("controller_rejected_count", "controller_rejected_count"),
     ("tcp_ref_valid_ratio", "tcp_ref_valid_ratio"),
     ("tcp_actual_valid_ratio", "tcp_actual_valid_ratio"),
+    ("diagnostics_suspect_count", "diagnostics_suspect_count"),
+    ("controller_simulation_diagnostic_override_active_count", "controller_simulation_diagnostic_override_active_count"),
     ("reset_rate_hz", "reset_rate_hz"),
     ("divergence_rate_hz", "divergence_rate_hz"),
     ("result", "result"),
@@ -131,6 +154,23 @@ def scaled(summary: dict[str, Any], key: str, factor: float) -> float | None:
     return value * factor if value is not None else None
 
 
+def scaled_value(value: Any, factor: float) -> float | None:
+    number = finite_number(value)
+    return number * factor if number is not None else None
+
+
+def nested_dict(summary: dict[str, Any], key: str) -> dict[str, Any]:
+    value = summary.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def nested_metric(summary: dict[str, Any], key: str, metric: str) -> float | None:
+    value = summary.get(key)
+    if not isinstance(value, dict):
+        return None
+    return finite_number(value.get(metric))
+
+
 def first_number(summary: dict[str, Any], *keys: str) -> float | None:
     for key in keys:
         value = finite_number(summary.get(key))
@@ -143,6 +183,13 @@ def first_present(summary: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in summary and summary.get(key) is not None:
             return summary.get(key)
+    return None
+
+
+def first_value(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
     return None
 
 
@@ -330,6 +377,15 @@ def command_interval_max_ms(summary: dict[str, Any]) -> float | None:
     existing = finite_number(summary.get("command_interval_max_ms"))
     if existing is not None:
         return existing
+    timestamp_alignment = nested_dict(summary, "timestamp_alignment")
+    nested = timestamp_alignment.get("command_interval_ms")
+    if isinstance(nested, dict):
+        existing = finite_number(nested.get("max"))
+        if existing is not None:
+            return existing
+    existing = nested_metric(summary, "command_interval_ms", "max")
+    if existing is not None:
+        return existing
     path_text = summary.get("command_packets")
     path = Path(path_text) if isinstance(path_text, str) and path_text else artifact_path(summary, "command_packets.jsonl")
     if not path.is_file():
@@ -397,17 +453,40 @@ def servo_jitter_max_ms(summary: dict[str, Any]) -> float | None:
 
 def warning_text(summary: dict[str, Any]) -> str:
     warnings = summary.get("performance_warnings")
+    values: list[str] = []
     if isinstance(warnings, list):
-        return "; ".join(str(item) for item in warnings)
-    if isinstance(warnings, str):
-        return warnings
-    return ""
+        values.extend(str(item) for item in warnings)
+    elif isinstance(warnings, str) and warnings:
+        values.append(warnings)
+    timing = first_present(summary, "timing_classification")
+    if timing is None:
+        timing = nested_dict(summary, "timestamp_alignment").get("timing_classification")
+    if timing not in (None, "", "clean_timing"):
+        values.append(f"timestamp_alignment timing_classification={timing}")
+    error_classification = decomposition_value(summary, "error_classification")
+    if error_classification:
+        values.append(f"error_classification={error_classification}")
+    return "; ".join(dict.fromkeys(values))
+
+
+def error_decomposition_block(summary: dict[str, Any]) -> dict[str, Any]:
+    return nested_dict(summary, "error_decomposition")
+
+
+def decomposition_value(summary: dict[str, Any], key: str) -> Any:
+    value = summary.get(key)
+    if value is not None:
+        return value
+    return error_decomposition_block(summary).get(key)
 
 
 def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
     category = infer_category(summary)
     backend = infer_backend(summary)
-    return {
+    timestamp_alignment = nested_dict(summary, "timestamp_alignment")
+    tail_error_correlation = nested_dict(summary, "tail_error_correlation")
+    error_decomposition = error_decomposition_block(summary)
+    row = {
         "run_name": run_name(summary),
         "benchmark_category": category,
         "backend": backend,
@@ -429,8 +508,20 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "radius_gain": radius_gain(summary),
         "mean_error_mm": scaled(summary, "mean_error_m", 1000.0),
         "rms_error_mm": scaled(summary, "rms_error_m", 1000.0),
+        "median_error_mm": scaled_value(decomposition_value(summary, "median_error_m"), 1000.0),
         "p95_error_mm": scaled(summary, "p95_error_m", 1000.0),
         "max_error_mm": scaled(summary, "max_error_m", 1000.0),
+        "tail_ratio": decomposition_value(summary, "tail_ratio"),
+        "center_removed_rms_mm": scaled_value(decomposition_value(summary, "center_removed_rms_error_m"), 1000.0),
+        "phase_aligned_rms_mm": scaled_value(decomposition_value(summary, "phase_aligned_rms_error_m"), 1000.0),
+        "orientation_position_equiv_50mm_mm": scaled_value(
+            decomposition_value(summary, "orientation_position_equiv_50mm_m"),
+            1000.0,
+        ),
+        "error_classification": first_value(
+            decomposition_value(summary, "error_classification"),
+            error_decomposition.get("error_classification"),
+        ),
         "p95_orientation_drift_mrad": scaled(summary, "p95_orientation_drift_rad", 1000.0),
         "max_orientation_drift_mrad": scaled(summary, "max_orientation_drift_rad", 1000.0),
         "estimated_latency_ms": summary.get("estimated_latency_ms"),
@@ -440,6 +531,48 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "send_command_deadline_missed_count": summary.get("send_command_deadline_missed_count"),
         "command_interval_max_ms": command_interval_max_ms(summary),
         "servo_jitter_max_ms": servo_jitter_max_ms(summary),
+        "timing_classification": first_value(
+            first_present(summary, "timing_classification"),
+            timestamp_alignment.get("timing_classification"),
+        ),
+        "ack_spike_count_10ms": first_value(
+            first_present(summary, "ack_spike_count_10ms"),
+            timestamp_alignment.get("ack_spike_count_10ms"),
+        ),
+        "ack_spike_count_20ms": first_value(
+            first_present(summary, "ack_spike_count_20ms"),
+            timestamp_alignment.get("ack_spike_count_20ms"),
+        ),
+        "state_gap_count": first_value(first_present(summary, "state_gap_count"), timestamp_alignment.get("state_gap_count")),
+        "command_gap_count": first_value(first_present(summary, "command_gap_count"), timestamp_alignment.get("command_gap_count")),
+        "p95_error_near_ack_spike_mm": scaled_value(
+            first_value(
+                first_present(summary, "p95_error_near_ack_spike_m"),
+                tail_error_correlation.get("p95_error_near_ack_spike_m"),
+            ),
+            1000.0,
+        ),
+        "p95_error_away_from_ack_spike_mm": scaled_value(
+            first_value(
+                first_present(summary, "p95_error_away_from_ack_spike_m"),
+                tail_error_correlation.get("p95_error_away_from_ack_spike_m"),
+            ),
+            1000.0,
+        ),
+        "p95_error_near_command_gap_mm": scaled_value(
+            first_value(
+                first_present(summary, "p95_error_near_command_gap_m"),
+                tail_error_correlation.get("p95_error_near_command_gap_m"),
+            ),
+            1000.0,
+        ),
+        "p95_error_away_from_command_gap_mm": scaled_value(
+            first_value(
+                first_present(summary, "p95_error_away_from_command_gap_m"),
+                tail_error_correlation.get("p95_error_away_from_command_gap_m"),
+            ),
+            1000.0,
+        ),
         "mean_feedback_linear_norm_m_s": summary.get("mean_feedback_linear_norm_m_s"),
         "max_feedback_linear_norm_m_s": summary.get("max_feedback_linear_norm_m_s"),
         "feedback_saturation_count": summary.get("feedback_saturation_count"),
@@ -456,6 +589,10 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "tcp_actual_moved": summary.get("tcp_actual_moved"),
         "q_sent_update_rate_hz": summary.get("q_sent_update_rate_hz"),
         "q_ref_update_rate_hz": summary.get("q_ref_update_rate_hz"),
+        "q_ref_valid_ratio": first_value(
+            first_present(summary, "q_ref_valid_ratio"),
+            summary.get("q_reference_for_servo_valid_ratio"),
+        ),
         "q_actual_update_rate_hz": summary.get("q_actual_update_rate_hz"),
         "q_ref_reason": summary.get("q_ref_reason"),
         "ack_policy": infer_ack_policy(summary),
@@ -464,6 +601,10 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "controller_rejected_count": summary.get("controller_rejected_count"),
         "tcp_ref_valid_ratio": summary.get("tcp_ref_valid_ratio"),
         "tcp_actual_valid_ratio": summary.get("tcp_actual_valid_ratio"),
+        "diagnostics_suspect_count": summary.get("diagnostics_suspect_count"),
+        "controller_simulation_diagnostic_override_active_count": summary.get(
+            "controller_simulation_diagnostic_override_active_count"
+        ),
         "reset_rate_hz": summary.get("reset_rate_hz"),
         "divergence_rate_hz": summary.get("divergence_rate_hz"),
         "physical_actual_csv": summary.get("physical_actual_csv"),
@@ -475,6 +616,8 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "cartesian_unavailable_reason_counts": summary.get("cartesian_unavailable_reason_counts"),
         "performance_warnings": warning_text(summary),
     }
+    reliability_report.annotate_row(row)
+    return row
 
 
 def format_cell(value: Any) -> str:

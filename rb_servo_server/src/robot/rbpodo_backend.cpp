@@ -306,6 +306,11 @@ RobotState mapRbpodoSystemStateSnapshot(
     out_state.q_actual_deg = snapshot.q_actual_deg;
     out_state.q_target_deg = snapshot.q_target_deg;
     out_state.dq_actual_deg_s.fill(0.0);
+    out_state.q_actual_valid = finiteJointArray(out_state.q_actual_deg);
+    out_state.q_ref_valid = finiteJointArray(out_state.q_target_deg);
+    out_state.q_ref_source = "rbpodo.sdata.jnt_ref";
+    out_state.rbpodo_sdk_state_source = "CobotData.request_data";
+    out_state.rbpodo_state_decode_policy = "strict_boolean_flags_with_suspect_large_values";
 
     RbpodoDiagnosticsSnapshot diagnostics = interpretRbpodoDiagnostics(snapshot);
     const std::optional<RbpodoInterpretedFault> clear_fault =
@@ -320,9 +325,7 @@ RobotState mapRbpodoSystemStateSnapshot(
         ? clear_fault->name
         : diagnostics.error_name;
     out_state.rbpodo_diagnostics = diagnostics;
-    out_state.has_valid_joint_state =
-        finiteJointArray(out_state.q_actual_deg) &&
-        finiteJointArray(out_state.q_target_deg);
+    out_state.has_valid_joint_state = out_state.q_actual_valid && out_state.q_ref_valid;
     if (!out_state.has_valid_joint_state) {
         out_state.lifecycle_state = "invalid_joint_state";
     } else if (diagnostics.diagnostics_suspect && !clear_fault.has_value()) {

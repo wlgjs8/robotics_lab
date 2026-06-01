@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import circle_tracking_benchmark as sim_bench
+import generate_rbpodo_measurement_reliability_report as reliability_report
 import rbpodo_circle_tracking_benchmark as circle_bench
 import run_circle_ablation as sim_ablation
 from rbpodo_servo_acceptance import (
@@ -136,19 +137,40 @@ SUMMARY_COLUMNS = [
     "cartesian_unavailable_count",
     "radius_gain",
     "rms_error_mm",
+    "median_error_mm",
     "p95_error_mm",
     "max_error_mm",
+    "tail_ratio",
+    "center_removed_rms_mm",
+    "phase_aligned_rms_mm",
+    "orientation_position_equiv_50mm_mm",
+    "error_classification",
     "p95_orientation_drift_mrad",
     "fit_center_error_mm",
     "estimated_latency_ms",
     "q_ref_update_rate_hz",
+    "q_ref_valid_ratio",
     "send_duration_p95_us",
+    "timing_classification",
+    "ack_spike_count_10ms",
+    "ack_spike_count_20ms",
+    "state_gap_count",
+    "command_gap_count",
+    "p95_error_near_ack_spike_mm",
+    "p95_error_away_from_ack_spike_mm",
+    "p95_error_near_command_gap_mm",
+    "p95_error_away_from_command_gap_mm",
     "ack_observed_count",
     "controller_acceptance_observed_count",
     "diagnostics_suspect_count",
+    "controller_simulation_diagnostic_override_active_count",
     "score",
     "classification",
     "result",
+    "measurement_reliability_level",
+    "reliability_caveats",
+    "benchmark_interpretation",
+    "physical_real_blockers",
 ]
 
 
@@ -374,6 +396,22 @@ def resolve_config_relative_paths_text(text: str, source_config: Path) -> str:
 def scaled(summary: dict[str, Any], key: str, factor: float) -> float | None:
     value = finite_number(summary.get(key))
     return value * factor if value is not None else None
+
+
+def scaled_value(value: Any, factor: float) -> float | None:
+    number = finite_number(value)
+    return number * factor if number is not None else None
+
+
+def nested_dict(summary: dict[str, Any], key: str) -> dict[str, Any]:
+    value = summary.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def summary_or_nested(summary: dict[str, Any], nested_key: str, key: str) -> Any:
+    if key in summary and summary.get(key) is not None:
+        return summary.get(key)
+    return nested_dict(summary, nested_key).get(key)
 
 
 def nested_metric(summary: dict[str, Any], key: str, metric: str) -> float | None:
@@ -788,7 +826,9 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
     )
     feedback_kp_pos = first_present(summary.get("feedback_kp_pos"), exp.get("feedback_kp_pos"))
     feedback_kp_ori = first_present(summary.get("feedback_kp_ori"), exp.get("feedback_kp_ori"))
-    return {
+    timestamp_alignment = nested_dict(summary, "timestamp_alignment")
+    tail_error_correlation = nested_dict(summary, "tail_error_correlation")
+    row = {
         "name": exp.get("name"),
         "controller": summary.get("controller") or exp.get("controller"),
         "profile": summary.get("profile") or exp.get("profile"),
@@ -822,22 +862,89 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "cartesian_unavailable_count": summary.get("cartesian_unavailable_count"),
         "radius_gain": summary.get("radius_gain"),
         "rms_error_mm": scaled(summary, "rms_error_m", 1000.0),
+        "median_error_mm": scaled_value(summary_or_nested(summary, "error_decomposition", "median_error_m"), 1000.0),
         "p95_error_mm": scaled(summary, "p95_error_m", 1000.0),
         "max_error_mm": scaled(summary, "max_error_m", 1000.0),
+        "tail_ratio": summary_or_nested(summary, "error_decomposition", "tail_ratio"),
+        "center_removed_rms_mm": scaled_value(
+            summary_or_nested(summary, "error_decomposition", "center_removed_rms_error_m"),
+            1000.0,
+        ),
+        "phase_aligned_rms_mm": scaled_value(
+            summary_or_nested(summary, "error_decomposition", "phase_aligned_rms_error_m"),
+            1000.0,
+        ),
+        "orientation_position_equiv_50mm_mm": scaled_value(
+            summary_or_nested(summary, "error_decomposition", "orientation_position_equiv_50mm_m"),
+            1000.0,
+        ),
+        "error_classification": summary_or_nested(summary, "error_decomposition", "error_classification"),
         "p95_orientation_drift_mrad": scaled(summary, "p95_orientation_drift_rad", 1000.0),
         "fit_center_error_mm": scaled(summary, "fit_center_error_m", 1000.0),
         "estimated_latency_ms": summary.get("estimated_latency_ms"),
         "q_ref_update_rate_hz": summary.get("q_ref_update_rate_hz"),
+        "q_ref_valid_ratio": summary.get("q_ref_valid_ratio"),
         "send_duration_p95_us": nested_metric(summary, "send_duration_us", "p95"),
+        "timing_classification": first_present(
+            summary.get("timing_classification"),
+            timestamp_alignment.get("timing_classification"),
+        ),
+        "ack_spike_count_10ms": first_present(
+            summary.get("ack_spike_count_10ms"),
+            timestamp_alignment.get("ack_spike_count_10ms"),
+        ),
+        "ack_spike_count_20ms": first_present(
+            summary.get("ack_spike_count_20ms"),
+            timestamp_alignment.get("ack_spike_count_20ms"),
+        ),
+        "state_gap_count": first_present(summary.get("state_gap_count"), timestamp_alignment.get("state_gap_count")),
+        "command_gap_count": first_present(summary.get("command_gap_count"), timestamp_alignment.get("command_gap_count")),
+        "p95_error_near_ack_spike_mm": scaled_value(
+            first_present(
+                summary.get("p95_error_near_ack_spike_m"),
+                tail_error_correlation.get("p95_error_near_ack_spike_m"),
+            ),
+            1000.0,
+        ),
+        "p95_error_away_from_ack_spike_mm": scaled_value(
+            first_present(
+                summary.get("p95_error_away_from_ack_spike_m"),
+                tail_error_correlation.get("p95_error_away_from_ack_spike_m"),
+            ),
+            1000.0,
+        ),
+        "p95_error_near_command_gap_mm": scaled_value(
+            first_present(
+                summary.get("p95_error_near_command_gap_m"),
+                tail_error_correlation.get("p95_error_near_command_gap_m"),
+            ),
+            1000.0,
+        ),
+        "p95_error_away_from_command_gap_mm": scaled_value(
+            first_present(
+                summary.get("p95_error_away_from_command_gap_m"),
+                tail_error_correlation.get("p95_error_away_from_command_gap_m"),
+            ),
+            1000.0,
+        ),
         "ack_observed_count": summary.get("ack_observed_count"),
         "controller_acceptance_observed_count": summary.get("controller_acceptance_observed_count"),
         "diagnostics_suspect_count": summary.get("diagnostics_suspect_count"),
+        "controller_simulation_diagnostic_override_active_count": summary.get(
+            "controller_simulation_diagnostic_override_active_count"
+        ),
         "score": summary.get("score"),
         "classification": summary.get("classification"),
         "result": summary.get("result"),
         "artifact_dir": summary.get("artifact_dir"),
         "warnings": warning_text(summary, meta),
     }
+    row.setdefault("benchmark_category", "rbpodo_controller_simulation")
+    row.setdefault("backend", "rbpodo")
+    row.setdefault("controller_mode", "pgmode_simulation")
+    row.setdefault("physical_motion_expected", False)
+    reliability_report.annotate_row(row)
+    return row
 
 
 def warning_text(summary: dict[str, Any], meta: dict[str, Any]) -> str:
@@ -856,6 +963,16 @@ def warning_text(summary: dict[str, Any], meta: dict[str, Any]) -> str:
         warnings.append(str(reason))
     if meta.get("ack_policy") == "ack_off":
         warnings.append("ACK-off controller-simulation evidence is experimental")
+    timing = summary.get("timing_classification")
+    if timing is None:
+        timestamp_alignment = summary.get("timestamp_alignment")
+        if isinstance(timestamp_alignment, dict):
+            timing = timestamp_alignment.get("timing_classification")
+    if timing not in (None, "", "clean_timing"):
+        warnings.append(f"timestamp_alignment timing_classification={timing}")
+    error_classification = summary_or_nested(summary, "error_decomposition", "error_classification")
+    if error_classification:
+        warnings.append(f"error_classification={error_classification}")
     return "; ".join(dict.fromkeys(warnings))
 
 
@@ -919,6 +1036,10 @@ def write_report(path: Path, rows: list[dict[str, Any]], skipped_plots: list[str
         "# rbpodo Controller-Simulation Circle Ablation Report",
         "",
         "This report is rbpodo controller-simulation evidence. It connects to real Rainbow controller boxes in pgmode simulation; physical robot motion is not approved.",
+        "",
+        "## Measurement reliability and caveats",
+        "",
+        reliability_report.markdown_table(rows) if rows else "_None._",
         "",
         "## All Experiments",
         "",
@@ -1035,6 +1156,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
     rows = rows_from_summaries(summaries, enabled_experiments[: len(summaries)], metadata[: len(summaries)])
     skipped_plots = ["plots skipped by --dry-run"] if args.dry_run else plot_rows(artifact_root, rows)
     write_csv_rows(artifact_root / "ablation_summary.csv", rows)
+    reliability_artifacts = reliability_report.write_artifacts(artifact_root, rows)
     summary = {
         "schema": SCHEMA,
         "matrix": str(root_path(root, args.matrix).resolve()),
@@ -1048,6 +1170,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         "required_env": list(REQUIRED_ENV),
         "env": env_snapshot(),
         "rows": rows,
+        "measurement_reliability_artifacts": reliability_artifacts,
         "skipped_plots": skipped_plots,
         "had_errors": had_errors,
         "stopped_on_error": had_errors,

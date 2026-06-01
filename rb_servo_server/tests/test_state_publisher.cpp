@@ -8,6 +8,8 @@
 #include <iostream>
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 #include "rb_servo/network/state_publisher.hpp"
 
 namespace {
@@ -137,10 +139,44 @@ bool testStatePublisherLegacySingleEndpointStillWorks() {
     return true;
 }
 
+bool testStatePublisherSerializesJointReferenceFields() {
+    rb_servo::ServoSnapshot snapshot = snapshotWithTick(99);
+    snapshot.left_state.arm_id = rb_servo::ArmId::Left;
+    snapshot.left_state.q_actual_deg = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
+    snapshot.left_state.q_target_deg = {7.0, 8.0, 9.0, 10.0, 11.0, 12.0};
+    snapshot.left_state.q_actual_valid = true;
+    snapshot.left_state.q_ref_valid = true;
+    snapshot.left_state.has_valid_joint_state = true;
+    snapshot.left_state.q_ref_source = "rbpodo.sdata.jnt_ref";
+    snapshot.left_state.rbpodo_sdk_state_source = "CobotData.request_data";
+    snapshot.left_state.rbpodo_state_decode_policy =
+        "strict_boolean_flags_with_suspect_large_values";
+
+    rb_servo::DualArmConfig cfg;
+    cfg.left_robot.backend_type = rb_servo::BackendType::Rbpodo;
+    rb_servo::StatePublisher publisher(cfg);
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    const nlohmann::json& left = json.at("left");
+
+    RB_CHECK(left.at("q_actual_deg").at(0).get<double>() == 1.0);
+    RB_CHECK(left.at("q_target_deg").at(0).get<double>() == 7.0);
+    RB_CHECK(left.at("q_ref_deg").at(0).get<double>() == 7.0);
+    RB_CHECK(left.at("q_actual_valid").get<bool>());
+    RB_CHECK(left.at("q_ref_valid").get<bool>());
+    RB_CHECK(left.at("q_ref_source").get<std::string>() == "rbpodo.sdata.jnt_ref");
+    RB_CHECK(left.at("rbpodo_sdk_state_source").get<std::string>() == "CobotData.request_data");
+    RB_CHECK(
+        left.at("rbpodo_state_decode_policy").get<std::string>() ==
+        "strict_boolean_flags_with_suspect_large_values"
+    );
+    return true;
+}
+
 }  // namespace
 
 int main() {
     if (!testStatePublisherFanoutSendsSamePayloadToTwoSockets()) return 1;
     if (!testStatePublisherLegacySingleEndpointStillWorks()) return 1;
+    if (!testStatePublisherSerializesJointReferenceFields()) return 1;
     return 0;
 }

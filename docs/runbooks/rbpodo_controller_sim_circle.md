@@ -324,6 +324,35 @@ Artifacts are written under:
 artifacts/rbpodo_circle/<timestamp>_<profile>_<arm>
 ```
 
+Each completed benchmark also writes offline timing evidence:
+
+- `alignment_summary.json`
+- `alignment_report.md`
+- nested `summary.json` blocks `timestamp_alignment` and
+  `tail_error_correlation`
+- `error_decomposition.json`
+- `cycle_error_decomposition.csv`
+
+Review `timing_classification` before interpreting tracking error tails.
+`clean_timing` means the audit did not find command, state publish, or ACK
+spikes above its thresholds. `ack_spike_limited`,
+`command_generation_limited`, `state_publish_limited`, and `jitter_limited`
+mean the artifact is measurement-limited; do not use p95/max error tails from
+that run as reliable gain-quality evidence.
+
+Review `error_classification` before tuning. The benchmark decomposes tracking
+error into phase lag, center drift, radius error, orientation drift, feedback
+saturation, timing jitter, and tail spikes. This is diagnosis only; it does not
+change control behavior or authorize physical motion.
+
+Review `measurement_reliability_level` before both tuning and dataset
+selection. In pgmode simulation, `tcp_ref_stand` is a controller-reference
+lower bound, not physical TCP tracking. A completed run can be
+`controller_reference_valid` while still carrying caveats such as
+`diagnostics_suspect_override_active`, `tcp_ref_lower_bound_only`, and
+`q_ref_not_directly_validated`. `physical_ready_candidate` is not assigned
+while diagnostics_suspect remains unresolved.
+
 Create operator-local circle configs from the tracked templates:
 
 ```bash
@@ -397,6 +426,43 @@ python3 scripts/rbpodo_state_dump.py \
   --pretty \
   --i-understand-this-connects-to-real-controller
 ```
+
+If `diagnostics_suspect` persists, capture raw Rainbow data-port payloads
+before interpreting status bits or circle tracking errors:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+python3 scripts/rainbow_data_port_capture.py \
+  --ips 172.28.60.200 172.28.60.201 \
+  --port 5001 \
+  --duration-sec 5 \
+  --rate-hz 10 \
+  --artifact-dir artifacts/rbpodo_measurement/raw_data \
+  --also-rbpodo-python \
+  --i-understand-this-connects-to-real-controller
+```
+
+This raw capture is read-only field-layout evidence. It uses only TCP data
+port 5001, does not send `pgmode`, motion, reset, or command-port traffic, and
+does not parse binary payloads. Keep real raw payloads under `artifacts/` and
+do not commit them unless sanitized.
+
+For measurement reliability, compare the Python rbpodo state decode with the
+C++ state stream before interpreting circle errors:
+
+```bash
+python3 scripts/rbpodo_state_parity_check.py \
+  --use-running-server \
+  --ips 172.28.60.200 172.28.60.201 \
+  --duration-sec 5 \
+  --state-endpoint udp://127.0.0.1:50151 \
+  --artifact-dir artifacts/rbpodo_measurement/state_parity \
+  --i-understand-this-connects-to-real-controller
+```
+
+See `docs/runbooks/rbpodo_measurement_reliability.md`. Parity passing only
+means Python and C++ decode the same fields; it does not make suspicious
+diagnostics semantically valid.
 
 Then run read-only acceptance with a local copy of
 `dual_real_rbpodo_readonly.example.yaml`. Read-only diagnostic startup may
@@ -507,7 +573,8 @@ If `q_ref` / `tcp_ref_stand` is unavailable, the server fails closed instead of
 falling back silently. Physical-motion monitoring still uses `q_actual`.
 
 - `tcp_actual_stand`: FK from measured `q_actual_deg`
-- `tcp_ref_stand`: FK from rbpodo controller reference joints (`jnt_ref`)
+- `tcp_ref_stand`: FK from rbpodo controller reference joints (`q_ref_deg`,
+  alias `q_target_deg`, source `rbpodo.sdata.jnt_ref`)
 
 Legacy `tcp_stand` remains an actual-pose alias. When the per-arm
 `controller_simulation_mode.recommended_tracking_pose` is `tcp_ref_stand`,
@@ -730,8 +797,79 @@ Then verify the run environment includes:
 RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
 ```
 
+## Timestamp Alignment Audit
+
+The benchmark runs `scripts/timestamp_alignment_audit.py` automatically after
+writing `samples.csv`, `state_stream.jsonl`, `command_packets.jsonl`, feedback
+terms, and overlay artifacts. Re-run it manually when inspecting an older
+artifact or after copying artifacts between machines:
+
+```bash
+python3 scripts/timestamp_alignment_audit.py \
+  --artifact-dir artifacts/rbpodo_circle/gene_15cm4s_feedback_left \
+  --output-md alignment_report.md \
+  --output-json alignment_summary.json
+```
+
+The audit is offline/read-only and sends no robot commands. It reports command
+generation intervals, state publish intervals, state age, servo send duration,
+ACK wait duration, stale feedback skips, overlay timing, and p95 error near
+versus away from timing spikes. Its recommendation is deliberately
+conservative: fix jitter, inspect ACK spikes, consider an explicit ACK-off
+controller-simulation experiment, move feedback server-side, increase state
+publish rate, or tune gains only after timing is clean.
+
 Also confirm `operation_mode: simulation` and same-run pgmode simulation
 confirmation. Do not set `RB_ALLOW_REAL_CARTESIAN` for this workflow.
+
+## Error Decomposition
+
+Each completed circle benchmark also writes `error_decomposition.json` and
+`cycle_error_decomposition.csv`. These files are offline/read-only analysis of
+the benchmark artifacts. They do not connect to controllers, send commands, or
+modify robot state.
+
+The run-level decomposition records:
+
+- `median_error_m`, `mad_error_m`, `iqr_error_m`, `tail_ratio`, and
+  `max_over_p95`
+- `center_error_m`, `radius_error_m`, and `radius_gain`
+- `phase_lag_rad`, `estimated_latency_ms`, and
+  `phase_aligned_rms_error_m`
+- `center_removed_rms_error_m` and
+  `center_and_phase_removed_rms_error_m`
+- orientation p50/p95/max drift, plus position-equivalent orientation error
+  for configurable tool-offset guesses
+- `error_classification` and `error_classifications`
+
+The default orientation-equivalent offsets are 0.03 m, 0.05 m, and 0.10 m.
+Override them when needed:
+
+```bash
+python3 scripts/rbpodo_circle_tracking_benchmark.py \
+  ... \
+  --tool-offset-m 0.03,0.05,0.10
+```
+
+The per-cycle CSV records `cycle_rms_error_m`, `cycle_p95_error_m`,
+`cycle_fit_center_error_m`, `cycle_radius_gain`,
+`cycle_orientation_p95_rad`, and `cycle_saturation_count`.
+
+Interpret the classifications as diagnostic hints:
+
+- `phase_lag_limited`: phase alignment strongly lowers RMS.
+- `center_drift_limited`: removing fitted center drift strongly lowers RMS.
+- `tail_spike_limited`: p95 is much larger than median error.
+- `orientation_limited`: orientation drift has a large tool-offset equivalent.
+- `saturation_limited`: feedback saturation is significant.
+- `timing_jitter_limited`: timestamp audit classified the artifact as
+  timing-limited.
+
+For stage-1 style 4 s rows, expect patterns such as open-loop having good
+radius but large center drift, closed-loop reducing center drift, high Kp rows
+showing saturation or orientation drift, and low-median rows still being
+tail-spike limited. Those observations guide the next diagnosis matrix; they
+are not physical real-motion acceptance.
 
 ## Troubleshooting
 
@@ -964,6 +1102,26 @@ Each matrix run writes:
 - summary plots for RMS error, p95 error, radius gain, latency, q_ref update
   rate, and physical-motion detection when the metrics are available
 
+The ablation summary also carries decomposition columns:
+
+- `median_error_mm`
+- `tail_ratio`
+- `center_removed_rms_mm`
+- `phase_aligned_rms_mm`
+- `orientation_position_equiv_50mm_mm`
+- `error_classification`
+
+The runner additionally writes measurement reliability artifacts at the
+ablation root:
+
+- `measurement_reliability_report.md`
+- `measurement_reliability_summary.csv`
+- `measurement_reliability_summary.json`
+
+`ablation_report.md` includes a "Measurement reliability and caveats" section
+before tuning candidate tables. Read this section first; unreliable or suspect
+rows should not drive gain changes.
+
 ## Stage-2 Rbpodo Circle Matrices
 
 The stage-2 matrices refine the latest GENE-style controller-simulation
@@ -996,6 +1154,12 @@ Interpretation:
 - Reject high orientation drift even if RMS error is lower.
 - Compare `p95_error_m` and `fit_center_error_m`; center drift matters, not
   only RMS.
+- Compare `median_error_m`, `tail_ratio`, `center_removed_rms_error_m`,
+  `phase_aligned_rms_error_m`, and `orientation_position_equiv_50mm_m` before
+  changing gains.
+- Use `measurement_reliability_level` and `benchmark_interpretation` before
+  selecting IL data. Stress-profile rows are marked `IL_data_not_recommended`;
+  use stable clean-timing profiles for any future IL candidate.
 - Treat `gene_15cm_4s` rows as stress evidence. Do not mark any 4 s matrix
   result as real-ready.
 - Treat the 8 s matrix as a bridge between 16 s and 4 s evidence, not as
@@ -1199,7 +1363,13 @@ Every rbpodo controller-simulation row must state:
 The tuning report adds structure-aware columns for `kp_pos`, `kp_ori`,
 `state_pub_rate_hz`, `speed_bar_left`, `speed_bar_right`,
 `saturation_ratio`, `orientation_p95_deg`, `center_error_mm`, `score`, and
-`classification`. Its rbpodo tuning classifications are:
+`classification`. It also reports decomposition columns:
+`median_error_mm`, `tail_ratio`, `center_removed_rms_mm`,
+`phase_aligned_rms_mm`, `orientation_position_equiv_50mm_mm`, and
+`error_classification`, plus measurement reliability fields:
+`measurement_reliability_level`, `reliability_caveats`,
+`benchmark_interpretation`, and `physical_real_blockers`. Its rbpodo tuning
+classifications are:
 
 - `open_loop_baseline`
 - `closed_loop_candidate`
@@ -1242,6 +1412,10 @@ GENE-style stress candidate criteria:
 Even a good rbpodo controller-simulation report is not real physical tracking
 evidence. It can guide future low-speed parameter selection, but speed, gains,
 and ACK-off behavior must not be copied directly into physical motion.
+Physical real motion remains blocked by unresolved diagnostics_suspect,
+unverified stop/resetFault behavior, unmeasured physical reference-to-actual
+tracking error, unresolved camera/TCP calibration, and missing tiny physical
+acceptance.
 
 ## Tracking Source
 
@@ -1265,10 +1439,11 @@ It also records `tcp_ref_valid_ratio`, `tcp_actual_valid_ratio`,
 `q_sent_moved`, `q_sent_update_rate_hz`, `q_ref_moved`,
 `q_ref_update_rate_hz`, `q_ref_reason`, `q_actual_moved`,
 `q_actual_update_rate_hz`, `tcp_ref_moved`, `tcp_actual_moved`, and
-`physical_motion_detected`. `q_ref_moved` is `null` with
-`q_ref_reason: q_ref_deg not published` when the state stream does not publish
-`q_ref_deg`; do not interpret that as a static controller reference. In
-controller pgmode simulation, `tcp_ref_moved` is the primary motion evidence
+`physical_motion_detected`. Current state JSON publishes `q_ref_deg` as an
+explicit alias for `q_target_deg`; `q_ref_reason: q_ref_deg not published`
+indicates an older or incompatible state stream and must not be interpreted as
+a static controller reference. In controller pgmode simulation,
+`tcp_ref_moved` is the primary motion evidence
 for the controller-reference path, while physical `q_actual` and
 `tcp_actual_stand` are expected to remain stationary. Any physical `q_actual`
 drift above the configured warning threshold is a warning in pgmode simulation,

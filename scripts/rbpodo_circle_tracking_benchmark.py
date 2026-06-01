@@ -26,6 +26,9 @@ from typing import Any
 
 import benchmark_overlay
 import circle_tracking_benchmark as sim_bench
+import error_decomposition
+import generate_rbpodo_measurement_reliability_report as reliability_report
+import timestamp_alignment_audit
 from cartesian_acceptance import CommandRecorder, StateCapture, wait_for
 from rbpodo_servo_acceptance import (
     ENV_KEYS,
@@ -125,6 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overlay-pub-rate-hz", type=float, default=20.0)
     parser.add_argument("--overlay-run-id")
     parser.add_argument("--overlay-disable", action="store_true")
+    parser.add_argument("--tool-offset-m", default="0.03,0.05,0.10")
     parser.add_argument("--artifact-dir", type=Path, required=True)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
@@ -205,6 +209,19 @@ def apply_overlay_defaults(args: argparse.Namespace) -> None:
         args.overlay_run_id = None
     if not hasattr(args, "overlay_disable"):
         args.overlay_disable = False
+
+
+def tool_offsets_from_args(args: argparse.Namespace) -> list[float]:
+    return error_decomposition.parse_tool_offsets(getattr(args, "tool_offset_m", "0.03,0.05,0.10"))
+
+
+def trajectory_geometry(traj: sim_bench.Trajectory) -> dict[str, Any]:
+    return {
+        "center": list(traj.center),
+        "axis1": list(traj.axis1),
+        "axis2": list(traj.axis2),
+        "radius": float(traj.radius),
+    }
 
 
 def required_speed(args: argparse.Namespace) -> float:
@@ -1099,10 +1116,13 @@ def stream_twist_feedback(
         if snapshot is None:
             applied_twist = [0.0] * 6
             row = sim_bench.zero_feedback_record(t, "missing/stale valid tracking source", frame)
+            row["feedback_state_age_us"] = None
+            row["feedback_use_current_state_time"] = args.feedback_use_current_state_time
         else:
             state_ns = int(snapshot.get("host_time_ns", -1))
             if args.feedback_use_current_state_time and first_ns:
                 t = max(0.0, (state_ns - first_ns) / 1e9)
+            feedback_state_age_us = (now_ns - state_ns) / 1000.0 if state_ns >= 0 and now_ns >= state_ns else None
             tracking_pose = pose_for_source(snapshot, args.arm, tracking_source)
             p_actual = sim_bench.vec(tracking_pose)
             q_actual = tracking_pose["quaternion_xyzw"]
@@ -1153,6 +1173,8 @@ def stream_twist_feedback(
                 "applied_twist_stand": feedback["applied_twist_stand"],
                 "saturated": bool(feedback["saturated"]),
                 "stale_or_invalid_state": False,
+                "feedback_state_age_us": feedback_state_age_us,
+                "feedback_use_current_state_time": args.feedback_use_current_state_time,
             }
         packet = twist_packet(args, frame, applied_twist, timeout)
         if first_ns == 0:
@@ -1328,6 +1350,20 @@ def q_motion_metrics(
         f"{prefix}_update_rate_hz": q_update_rate_hz(series) if observed else None,
         f"{prefix}_reason": reason,
     }
+
+
+def q_valid_ratio(states: list[dict[str, Any]], arm: str, key: str) -> float:
+    arm_states = [state.get(arm) for state in states if isinstance(state.get(arm), dict)]
+    if not arm_states:
+        return 0.0
+    valid_count = 0
+    for arm_state in arm_states:
+        value = arm_state.get(key)
+        if isinstance(value, list) and len(value) == 6:
+            parsed = [finite_number(item) for item in value]
+            if all(item is not None for item in parsed):
+                valid_count += 1
+    return valid_count / len(arm_states)
 
 
 def windowed_states(states: list[dict[str, Any]], start_ns: int, end_ns: int) -> list[dict[str, Any]]:
@@ -1535,6 +1571,11 @@ def command_interval_metrics(command_path: Path) -> dict[str, Any]:
     return {"command_interval_ms": metric_block(intervals)}
 
 
+def config_section(config: ParsedConfig | None, name: str) -> dict[str, Any]:
+    value = getattr(config, name, None)
+    return value if isinstance(value, dict) else {}
+
+
 def threshold_failures(args: argparse.Namespace, summary: dict[str, Any]) -> list[str]:
     return sim_bench.threshold_failures(args, summary)
 
@@ -1645,6 +1686,8 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "q_sent_moved",
         "q_ref_moved",
         "q_ref_reason",
+        "q_ref_valid_ratio",
+        "q_actual_valid_ratio",
         "tcp_ref_moved",
         "tcp_actual_moved",
         "q_sent_update_rate_hz",
@@ -1654,11 +1697,36 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "divergence_rate_hz",
         "feedback_saturation_count",
         "stale_state_feedback_skips",
+        "median_error_m",
+        "mad_error_m",
+        "iqr_error_m",
+        "tail_ratio",
+        "max_over_p95",
+        "phase_aligned_rms_error_m",
+        "center_removed_rms_error_m",
+        "center_and_phase_removed_rms_error_m",
+        "orientation_p50_drift_rad",
+        "orientation_position_equiv_50mm_m",
+        "error_classification",
+        "timing_classification",
+        "ack_spike_count_10ms",
+        "ack_spike_count_20ms",
+        "state_gap_count",
+        "command_gap_count",
+        "p95_error_near_ack_spike_m",
+        "p95_error_away_from_ack_spike_m",
+        "p95_error_near_command_gap_m",
+        "p95_error_away_from_command_gap_m",
         "ack_observed_count",
         "controller_acceptance_observed_count",
         "command_timeout_count",
         "controller_rejected_count",
         "diagnostics_suspect_count",
+        "controller_simulation_diagnostic_override_active_count",
+        "measurement_reliability_level",
+        "reliability_caveats",
+        "benchmark_interpretation",
+        "physical_real_blockers",
         "cartesian_unavailable_count",
         "armed_hold_count",
         "command_accepted_but_target_static",
@@ -1892,6 +1960,8 @@ def summarize_run(
     tracking_samples = collect_samples(states, args.arm, tracking_source, benchmark_start_ns, benchmark_start_ns + int(duration_sec * 1e9))
     if not tracking_samples:
         raise BenchmarkError(f"no valid {tracking_source} samples captured during benchmark")
+    network_config = config_section(config, "network")
+    servo_config = config_section(config, "servo")
     metrics, merged = sim_bench.compute_metrics(
         args=args,
         traj=traj,
@@ -1972,6 +2042,9 @@ def summarize_run(
         "recommended_controllers": profile_metadata["recommended_controllers"],
         "repeat": args.repeat,
         "command_rate_hz": args.command_rate_hz,
+        "state_pub_rate_hz": finite_number(network_config.get("state_pub_rate_hz")),
+        "servo_rate_hz": finite_number(servo_config.get("rate_hz")),
+        "tool_offset_m": tool_offsets_from_args(args),
         "required_tangential_speed_m_s": preflight_result["required_tangential_speed_m_s"],
         "duration_sec": duration_sec,
         "command_count": command_count,
@@ -1984,6 +2057,8 @@ def summarize_run(
         "invalid_state_packets": 0,
         "tcp_ref_valid_ratio": tcp_valid_ratio(states, args.arm, "tcp_ref_stand"),
         "tcp_actual_valid_ratio": tcp_valid_ratio(states, args.arm, "tcp_actual_stand"),
+        "q_ref_valid_ratio": q_valid_ratio(states, args.arm, "q_ref_deg"),
+        "q_actual_valid_ratio": q_valid_ratio(states, args.arm, "q_actual_deg"),
         "q_ref_update_rate_hz": q_ref_metrics["q_ref_update_rate_hz"],
         "q_ref_drift_from_start_deg": q_ref_metrics["q_ref_drift_from_start_deg"],
         "q_ref_moved": q_ref_metrics["q_ref_moved"],
@@ -2061,6 +2136,65 @@ def summarize_run(
     if physical_rows:
         write_csv(artifact_dir / "physical_actual.csv", physical_rows)
     write_csv(artifact_dir / "samples.csv", merged)
+    alignment_report_path = artifact_dir / "alignment_report.md"
+    alignment_summary_path = artifact_dir / "alignment_summary.json"
+    alignment_audit = timestamp_alignment_audit.audit_artifact_dir(
+        artifact_dir,
+        summary=summary,
+        expected_command_rate_hz=finite_number(args.command_rate_hz),
+        expected_state_rate_hz=finite_number(network_config.get("state_pub_rate_hz")),
+        output_md_path=alignment_report_path,
+        output_json_path=alignment_summary_path,
+    )
+    summary["timestamp_alignment"] = timestamp_alignment_audit.benchmark_timestamp_alignment_block(alignment_audit)
+    summary["tail_error_correlation"] = timestamp_alignment_audit.benchmark_tail_error_correlation_block(alignment_audit)
+    summary["timestamp_alignment_report"] = str(alignment_report_path.resolve())
+    summary["timestamp_alignment_summary"] = str(alignment_summary_path.resolve())
+    timestamp_alignment = summary["timestamp_alignment"]
+    tail_error_correlation = summary["tail_error_correlation"]
+    summary["timing_classification"] = timestamp_alignment.get("timing_classification")
+    summary["ack_spike_count_10ms"] = timestamp_alignment.get("ack_spike_count_10ms")
+    summary["ack_spike_count_20ms"] = timestamp_alignment.get("ack_spike_count_20ms")
+    summary["state_gap_count"] = timestamp_alignment.get("state_gap_count")
+    summary["command_gap_count"] = timestamp_alignment.get("command_gap_count")
+    summary["p95_error_near_ack_spike_m"] = tail_error_correlation.get("p95_error_near_ack_spike_m")
+    summary["p95_error_away_from_ack_spike_m"] = tail_error_correlation.get("p95_error_away_from_ack_spike_m")
+    summary["p95_error_near_command_gap_m"] = tail_error_correlation.get("p95_error_near_command_gap_m")
+    summary["p95_error_away_from_command_gap_m"] = tail_error_correlation.get("p95_error_away_from_command_gap_m")
+    if summary["timing_classification"] not in (None, "", "clean_timing"):
+        performance_warnings.append(
+            "timestamp_alignment timing_classification="
+            f"{summary['timing_classification']}; do not treat timing-limited tails as reliable tracking error"
+        )
+    error_decomp = error_decomposition.decompose_circle_run(
+        merged,
+        summary=summary,
+        geometry=trajectory_geometry(traj),
+        period_sec=finite_number(args.period_sec),
+        tool_offsets_m=tool_offsets_from_args(args),
+        feedback_rows=feedback_rows,
+    )
+    error_decomposition_path = artifact_dir / "error_decomposition.json"
+    write_json(error_decomposition_path, error_decomp)
+    summary["error_decomposition"] = error_decomp
+    summary["error_decomposition_json"] = str(error_decomposition_path.resolve())
+    summary["mad_error_m"] = error_decomp.get("mad_error_m")
+    summary["iqr_error_m"] = error_decomp.get("iqr_error_m")
+    summary["tail_ratio"] = error_decomp.get("tail_ratio")
+    summary["max_over_p95"] = error_decomp.get("max_over_p95")
+    summary["phase_lag_rad"] = error_decomp.get("phase_lag_rad")
+    summary["phase_aligned_rms_error_m"] = error_decomp.get("phase_aligned_rms_error_m")
+    summary["center_removed_rms_error_m"] = error_decomp.get("center_removed_rms_error_m")
+    summary["center_and_phase_removed_rms_error_m"] = error_decomp.get("center_and_phase_removed_rms_error_m")
+    orientation_block = error_decomp.get("orientation_drift_rad") if isinstance(error_decomp.get("orientation_drift_rad"), dict) else {}
+    summary["orientation_p50_drift_rad"] = orientation_block.get("p50")
+    summary["orientation_position_equiv_50mm_m"] = error_decomp.get("orientation_position_equiv_50mm_m")
+    summary["error_classification"] = error_decomp.get("error_classification")
+    summary["error_classifications"] = error_decomp.get("error_classifications")
+    summary["error_classification_reasons"] = error_decomp.get("classification_reasons")
+    cycle_rows = error_decomp.get("cycles")
+    if isinstance(cycle_rows, list):
+        write_csv(artifact_dir / "cycle_error_decomposition.csv", cycle_rows)
     skipped_plots = plot_artifacts(artifact_dir, args, traj, merged, controller_rows, physical_rows, no_circle_reason)
     if summary.get("fault_latched") is True:
         fault_name = summary.get("latched_fault_reason") or "unknown"
@@ -2093,6 +2227,7 @@ def summarize_run(
             "skipped_plots": skipped_plots,
         }
     )
+    reliability_report.annotate_row(summary)
     write_json(artifact_dir / "summary.json", summary)
     write_summary_csv(artifact_dir / "summary.csv", summary)
     return summary
@@ -2127,6 +2262,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "overlay_pub_endpoint": None if args.overlay_disable else args.overlay_pub_endpoint,
             "overlay_messages_sent": 0,
         }
+        reliability_report.annotate_row(summary)
         write_json(artifact_dir / "summary.json", summary)
         write_summary_csv(artifact_dir / "summary.csv", summary)
         return summary
@@ -2260,6 +2396,7 @@ def failure_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
             "performance_warnings": details.get("startup_fault_hints") or [],
             "caveat": "rbpodo controller-simulation benchmark did not complete",
         }
+        reliability_report.annotate_row(failure)
         write_json(artifact_dir / "summary.json", failure)
         write_summary_csv(artifact_dir / "summary.csv", failure)
         return failure
@@ -2274,6 +2411,7 @@ def failure_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
         "performance_warnings": [],
         "caveat": "rbpodo controller-simulation benchmark did not complete",
     }
+    reliability_report.annotate_row(failure)
     write_json(artifact_dir / "summary.json", failure)
     write_summary_csv(artifact_dir / "summary.csv", failure)
     return failure

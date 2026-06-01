@@ -140,6 +140,8 @@ bool testNonFiniteJointStateStillFailsAcquisition() {
     const rb_servo::RobotState state =
         rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
     RB_CHECK(!state.has_valid_joint_state);
+    RB_CHECK(!state.q_actual_valid);
+    RB_CHECK(state.q_ref_valid);
 
     const std::optional<rb_servo::BackendError> acquisition =
         rb_servo::rbpodoStateAcquisitionError(state);
@@ -172,8 +174,20 @@ bool testStatePublisherSerializesRawRbpodoDiagnostics() {
     config.right_robot.backend_type = rb_servo::BackendType::Rbpodo;
     rb_servo::StatePublisher publisher(config);
     const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(servo_snapshot));
+    const nlohmann::json& left = json.at("left");
     const nlohmann::json& diagnostics = json.at("left").at("rbpodo_diagnostics");
 
+    RB_CHECK(left.at("q_actual_deg").at(0).get<double>() == suspect_snapshot.q_actual_deg[0]);
+    RB_CHECK(left.at("q_target_deg").at(0).get<double>() == suspect_snapshot.q_target_deg[0]);
+    RB_CHECK(left.at("q_ref_deg").at(0).get<double>() == suspect_snapshot.q_target_deg[0]);
+    RB_CHECK(left.at("q_actual_valid").get<bool>());
+    RB_CHECK(left.at("q_ref_valid").get<bool>());
+    RB_CHECK(left.at("q_ref_source").get<std::string>() == "rbpodo.sdata.jnt_ref");
+    RB_CHECK(left.at("rbpodo_sdk_state_source").get<std::string>() == "CobotData.request_data");
+    RB_CHECK(
+        left.at("rbpodo_state_decode_policy").get<std::string>() ==
+        "strict_boolean_flags_with_suspect_large_values"
+    );
     RB_CHECK(!diagnostics.at("diagnostics_valid").get<bool>());
     RB_CHECK(diagnostics.at("diagnostics_suspect").get<bool>());
     RB_CHECK(diagnostics.at("error_name").get<std::string>() == "rbpodo_diagnostics_suspect");

@@ -49,6 +49,22 @@ nlohmann::json jointArrayJson(const JointArray& joints) {
     return out;
 }
 
+bool finiteJointArray(const JointArray& joints) {
+    return std::all_of(joints.begin(), joints.end(), [](double value) {
+        return std::isfinite(value);
+    });
+}
+
+bool qActualValidForPublication(const RobotState& state) {
+    return state.q_actual_valid ||
+        (state.has_valid_joint_state && finiteJointArray(state.q_actual_deg));
+}
+
+bool qRefValidForPublication(const RobotState& state) {
+    return state.q_ref_valid ||
+        (state.has_valid_joint_state && finiteJointArray(state.q_target_deg));
+}
+
 nlohmann::json optionalJointArrayJson(const std::optional<JointArray>& joints) {
     if (!joints.has_value()) return nullptr;
     return jointArrayJson(*joints);
@@ -889,6 +905,13 @@ nlohmann::json armStateJson(
     return {
         {"mode", toString(command.mode)},
         {"q_actual_deg", jointArrayJson(state.q_actual_deg)},
+        {"q_target_deg", jointArrayJson(state.q_target_deg)},
+        {"q_ref_deg", jointArrayJson(state.q_target_deg)},
+        {"q_actual_valid", qActualValidForPublication(state)},
+        {"q_ref_valid", qRefValidForPublication(state)},
+        {"q_ref_source", optionalStringJson(state.q_ref_source)},
+        {"rbpodo_sdk_state_source", optionalStringJson(state.rbpodo_sdk_state_source)},
+        {"rbpodo_state_decode_policy", optionalStringJson(state.rbpodo_state_decode_policy)},
         {"q_sent_deg", jointArrayJson(sent_q_deg)},
         {"q_previous_sent_deg", jointArrayJson(previous_sent_q_deg)},
         {"send_ok", send_ok},

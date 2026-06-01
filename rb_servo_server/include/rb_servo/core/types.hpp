@@ -251,6 +251,11 @@ struct RobotState {
     JointArray q_actual_deg{};
     JointArray q_target_deg{};
     JointArray dq_actual_deg_s{};
+    bool q_actual_valid = false;
+    bool q_ref_valid = false;
+    std::string q_ref_source;
+    std::string rbpodo_sdk_state_source;
+    std::string rbpodo_state_decode_policy;
     bool has_valid_joint_state = false;
 
     // Legacy aliases for actual TCP FK from q_actual_deg.
