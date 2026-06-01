@@ -528,8 +528,28 @@ def compare_samples(
         },
         "tolerance_deg": tolerance_deg,
         "nearest_max_delta_sec": nearest_max_delta_sec,
+        "cpp_backend_hints": cpp_backend_hints(cpp_samples),
     }
     return summary, rows
+
+
+def cpp_backend_hints(cpp_samples: list[dict[str, Any]]) -> dict[str, Any]:
+    def unique_strings(key: str) -> list[str]:
+        return sorted({
+            str(sample.get(key))
+            for sample in cpp_samples
+            if sample.get(key) is not None and str(sample.get(key))
+        })
+
+    return {
+        "schema": "robotics_lab.rbpodo_cpp_backend_hints.v1",
+        "sample_count": len(cpp_samples),
+        "rbpodo_sdk_state_sources": unique_strings("rbpodo_sdk_state_source"),
+        "rbpodo_state_decode_policies": unique_strings("rbpodo_state_decode_policy"),
+        "q_ref_sources": unique_strings("q_ref_source"),
+        "q_ref_published_count": sum(1 for sample in cpp_samples if sample.get("q_ref_published")),
+        "q_target_published_count": sum(1 for sample in cpp_samples if sample.get("q_target_published")),
+    }
 
 
 def read_cpp_state_samples(sock: socket.socket) -> list[dict[str, Any]]:

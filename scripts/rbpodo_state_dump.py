@@ -75,6 +75,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--json", action="store_true", help="Print JSON to stdout instead of a human summary.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON or the human summary.")
     parser.add_argument(
+        "--print-sdk-info",
+        action="store_true",
+        help="Print rbpodo Python module file/version metadata and exit without connecting.",
+    )
+    parser.add_argument(
         "--i-understand-this-connects-to-real-controller",
         action="store_true",
         help="Required before connecting to any controller IP.",
@@ -101,6 +106,40 @@ def parse_joint_array(text: str | None, name: str) -> list[float] | None:
     if len(values) != 6:
         raise StateDumpError(f"{name} must contain exactly 6 comma-separated values")
     return values
+
+
+def rbpodo_sdk_info() -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "schema": "robotics_lab.rbpodo_sdk_info.v1",
+        "python_executable": sys.executable,
+        "python_version": sys.version.split()[0],
+        "module_available": False,
+        "module_file": None,
+        "module_version": None,
+        "module_error_name": None,
+        "module_error_message": None,
+        "cobot_data_available": False,
+    }
+    try:
+        rbpodo = importlib.import_module("rbpodo")
+    except Exception as exc:
+        info["module_error_name"] = type(exc).__name__
+        info["module_error_message"] = str(exc)
+        return info
+
+    version = None
+    for attr in ("__version__", "VERSION", "version"):
+        value = getattr(rbpodo, attr, None)
+        if value is not None:
+            version = str(value)
+            break
+    info.update({
+        "module_available": True,
+        "module_file": getattr(rbpodo, "__file__", None),
+        "module_version": version,
+        "cobot_data_available": hasattr(rbpodo, "CobotData"),
+    })
+    return info
 
 
 def numeric(value: Any) -> float | None:
@@ -440,6 +479,7 @@ def dump_states(args: argparse.Namespace) -> dict[str, Any]:
         "read_only": True,
         "safety_note": "This tool only reads rbpodo CobotData and never sends motion, pgmode, reset, or state-changing commands.",
         "timestamp_unix_sec": time.time(),
+        "sdk_info": rbpodo_sdk_info(),
         "ips": list(args.ips),
         "known_real_controller_ips": sorted(REAL_ROBOT_IPS),
         "q_min_deg": q_min,
@@ -554,6 +594,9 @@ def main() -> int:
     args = parse_args()
     if args.self_test:
         return run_self_test()
+    if args.print_sdk_info:
+        print(json.dumps(rbpodo_sdk_info(), indent=2, sort_keys=True))
+        return 0
     try:
         report = dump_states(args)
     except StateDumpError as exc:

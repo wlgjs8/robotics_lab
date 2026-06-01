@@ -86,7 +86,12 @@ python3 scripts/rbpodo_state_dump.py \
 
 The dump includes Python-side `q_ref_deg`, `q_ref_source`,
 `q_ref_actual_delta_deg`, `q_actual_vs_q_ref_max_abs_error_deg`, and raw
-diagnostic suspect reasons.
+diagnostic suspect reasons. It also includes Python rbpodo SDK/module metadata
+when available. To print that metadata without connecting to a controller:
+
+```bash
+python3 scripts/rbpodo_state_dump.py --print-sdk-info
+```
 
 ## Raw Data-Port Capture
 
@@ -129,6 +134,69 @@ under `artifacts/` and do not commit them unless they are reviewed and
 sanitized. This capture is field-layout evidence only; it does not validate
 motion safety. Map raw payload bytes to rbpodo SDK fields only after there is
 enough fixture evidence to justify the layout.
+
+## Diagnostics Root-Cause Report
+
+Use the diagnostics report when `diagnostics_suspect` is present in rbpodo
+controller-simulation artifacts or when a controller-simulation result used:
+
+```bash
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
+```
+
+The override is controller-simulation-only. It does not make the diagnostics
+healthy and it does not authorize physical real motion.
+
+Generate the report from the read-only state dump, Python/C++ parity summary,
+and raw 5001 capture summary:
+
+```bash
+python3 scripts/generate_rbpodo_diagnostics_report.py \
+  --state-dump artifacts/rbpodo_measurement/state_dump.json \
+  --parity-summary artifacts/rbpodo_measurement/state_parity/summary.json \
+  --raw-capture artifacts/rbpodo_measurement/raw_data/summary.json \
+  --output-md artifacts/rbpodo_measurement/diagnostics_report.md \
+  --output-json artifacts/rbpodo_measurement/diagnostics_report.json
+```
+
+Report sections include:
+
+- Python rbpodo SDK/module file and version when available.
+- C++ state-stream hints such as `rbpodo_sdk_state_source`,
+  `rbpodo_state_decode_policy`, and `q_ref_source` when parity artifacts expose
+  them.
+- controller IPs and `real_vs_simulation_mode` / pgmode evidence.
+- raw diagnostic fields: `time`, `real_vs_simulation_mode`,
+  `init_state_info`, `init_error`, `op_stat_sos_flag`,
+  `op_stat_ems_flag`, `op_stat_soft_estop_occur`,
+  `op_stat_collision_occur`, and `op_stat_self_collision`.
+- suspect reasons and Python/C++ parity result.
+- raw payload length/hash stability and q_ref-change versus payload-change
+  evidence.
+- an explicit root-cause checklist and physical-real blockers.
+
+The root-cause classifier is intentionally conservative:
+
+- `controller_reports_real_fault`: a raw controller fault flag is a clear
+  fault value such as `op_stat_collision_occur=1`.
+- `python_cpp_decode_mismatch`: Python rbpodo and C++ state JSON disagree.
+- `payload_unstable`: raw 5001 payload length or q_ref/payload relation is
+  unstable enough to block layout inference.
+- `sdk_firmware_layout_mismatch`: Python and C++ agree on suspicious raw values
+  that look like a firmware/SDK layout issue, for example huge boolean-status
+  values.
+- `field_semantics_unknown`: decoders agree, but the raw field meaning is not
+  independently verified.
+- `insufficient_evidence`: state dump, parity, or raw capture evidence is
+  missing or inconclusive.
+
+Physical real remains blocked until the diagnostics root cause is resolved or
+explicitly accepted by a separate safety review. The diagnostics report keeps
+these blockers visible:
+
+- `diagnostics_suspect_unresolved`
+- `stop_resetFault_unverified`
+- `physical_reference_to_actual_error_unmeasured`
 
 ## Timestamp Alignment Audit
 
