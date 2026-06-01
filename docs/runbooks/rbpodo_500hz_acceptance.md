@@ -33,7 +33,8 @@ telemetry.
 
 1. Single-arm no-op rate probe at 100 Hz and 500 Hz: already completed for the
    left controller in `artifacts/rbpodo_servo_j_rate_probe_left`.
-2. `rb_servo_server` dual-arm no-op at 500 Hz.
+2. `rb_servo_server` full-path no-op at 500 Hz using
+   `scripts/rbpodo_500hz_acceptance.py --mode servo_j_noop_500hz`.
 3. 5 cm / 10 s circle.
 4. 15 cm / 16 s circle.
 5. 15 cm / 8 s circle.
@@ -101,14 +102,19 @@ publication to 500 Hz until a separate measurement task accepts it.
 ## Required Gates
 
 Every controller-simulation command run still requires explicit operator
-confirmation and env gates:
+confirmation. The 500 Hz Servo J no-op stage requires these env gates:
 
 ```bash
 RB_ALLOW_REAL_ROBOT=1
 RB_ALLOW_REAL_MOTION=1
 RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
 RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
+```
+
+Circle stages additionally require the Cartesian controller-simulation carve-out:
+
+```bash
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
 ```
 
 Do not set `RB_ALLOW_REAL_CARTESIAN` for this workflow. The 500 Hz templates
@@ -171,3 +177,71 @@ grep -H "operation_mode: simulation" rb_servo_server/config/local/*_500hz.yaml
 Treat Servo J ACKs as command-path evidence only. Circle evidence requires
 Cartesian commands to be accepted and controller reference telemetry such as
 `tcp_ref_stand` to move.
+
+## Stage 2: rb_servo_server No-Op
+
+Run the server-level no-op acceptance before any 500 Hz circle stage. The
+runner starts `rb_servo_server`, sends `ArmMotion`, captures the current
+selected-arm `q_ref_deg` / `q_target_deg`, and streams constant `JointTarget`
+packets at 500 Hz. This is still controller `pgmode` simulation only.
+
+Example:
+
+```bash
+python3 scripts/rbpodo_500hz_acceptance.py \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --config rb_servo_server/config/local/dual_real_rbpodo_circle_5cm10s_500hz.yaml \
+  --arm left \
+  --duration-sec 10 \
+  --artifact-dir artifacts/rbpodo_500hz_acceptance/left_noop \
+  --set-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+Default pass/fail thresholds:
+
+```text
+--max-send-duration-p99-us 1000
+--max-servo-jitter-p99-ms 2.5
+--max-deadline-miss-count 0
+--min-send-count-ratio 0.98
+--min-controller-acceptance-ratio 0.98
+--max-physical-motion-deg 0.05
+--max-reference-drift-deg 0.05
+```
+
+Required artifacts:
+
+```text
+summary.json
+summary.csv
+safety_preflight.json
+pgmode_summary.json
+noop_target.json
+state_stream.jsonl
+command_packets.jsonl
+rb_servo_server.log
+servo_log.csv
+timing_send_duration.png
+timing_servo_jitter.png
+```
+
+Acceptance means:
+
+- `result: pass`
+- `physical_motion_expected=false`
+- `physical_motion_detected=false`
+- no fault latch
+- no non-noop joint target; every streamed command uses the captured
+  `q_ref_deg` / `q_target_deg`
+- `send_count` is close to `500 * duration_sec`
+- `controller_acceptance_observed_count` is close to `send_count`
+- `send_duration_us.p99` is below threshold
+- `servo_jitter_ms.p99` is below threshold
+- `send_deadline_missed_count` is at or below threshold
+- `worker_command_drops_total` is zero if worker I/O is used
+
+If `servo_log.csv` is missing, do not treat the run as accepted. The state
+stream is still useful diagnostic evidence, but per-servo-tick 500 Hz
+acceptance depends on the servo log timing and ACK fields.
