@@ -32,6 +32,8 @@ COLUMNS = [
     ("period_sec", "period_sec"),
     ("required_tangential_speed_m_s", "required_tangential_speed_m_s"),
     ("stress_level", "stress_level"),
+    ("command_rate_hz", "command_rate_hz"),
+    ("servo_rate_hz", "servo_rate_hz"),
     ("measurement_reliability_level", "measurement_reliability_level"),
     ("reliability_caveats", "reliability_caveats"),
     ("benchmark_interpretation", "benchmark_interpretation"),
@@ -53,8 +55,14 @@ COLUMNS = [
     ("worker_command_drops_total", "worker_command_drops_total"),
     ("integrator_clamps_total", "integrator_clamps_total"),
     ("integrator_divergence_total", "integrator_divergence_total"),
+    ("send_success_rate", "send_success_rate"),
+    ("controller_acceptance_observed_rate", "controller_acceptance_observed_rate"),
+    ("send_duration_p99_us", "send_duration_p99_us"),
+    ("send_duration_max_us", "send_duration_max_us"),
     ("send_command_deadline_missed_count", "send_command_deadline_missed_count"),
+    ("deadline_miss_count", "deadline_miss_count"),
     ("command_interval_max_ms", "command_interval_max_ms"),
+    ("servo_jitter_p99_ms", "servo_jitter_p99_ms"),
     ("servo_jitter_max_ms", "servo_jitter_max_ms"),
     ("timing_classification", "timing_classification"),
     ("ack_spike_count_10ms", "ack_spike_count_10ms"),
@@ -191,6 +199,14 @@ def first_value(*values: Any) -> Any:
         if value is not None:
             return value
     return None
+
+
+def ratio_from_counts(numerator: Any, denominator: Any) -> float | None:
+    top = finite_number(numerator)
+    bottom = finite_number(denominator)
+    if top is None or bottom is None or bottom <= 0.0:
+        return None
+    return top / bottom
 
 
 def saturation_ratio(summary: dict[str, Any]) -> float | None:
@@ -421,6 +437,66 @@ def command_interval_max_ms(summary: dict[str, Any]) -> float | None:
     return max((b - a) / 1e6 for a, b in zip(host_times, host_times[1:]))
 
 
+def send_success_rate(summary: dict[str, Any]) -> float | None:
+    existing = finite_number(summary.get("send_success_rate"))
+    if existing is not None:
+        return existing
+    count = first_number(
+        summary,
+        "send_count",
+        "command_count",
+        "ack_observed_count",
+        "controller_acceptance_observed_count",
+    )
+    success = first_number(summary, "send_success_count", "send_ok_count")
+    if success is not None:
+        return ratio_from_counts(success, count)
+    failures = first_number(summary, "send_failure_count")
+    if failures is not None and count is not None and count > 0.0:
+        return max(0.0, 1.0 - failures / count)
+    return None
+
+
+def controller_acceptance_observed_rate(summary: dict[str, Any]) -> float | None:
+    existing = first_number(
+        summary,
+        "controller_acceptance_observed_rate",
+        "controller_acceptance_ratio",
+    )
+    if existing is not None:
+        return existing
+    accepted = first_number(summary, "controller_acceptance_observed_count")
+    count = first_number(summary, "send_count", "command_count", "ack_observed_count")
+    return ratio_from_counts(accepted, count)
+
+
+def nested_percentile_metric(summary: dict[str, Any], block: str, metric: str) -> float | None:
+    existing = nested_metric(summary, block, metric)
+    if existing is not None:
+        return existing
+    value = summary.get(block)
+    if isinstance(value, dict):
+        return finite_number(value.get(metric))
+    return None
+
+
+def deadline_miss_count(summary: dict[str, Any]) -> float | None:
+    return first_number(
+        summary,
+        "deadline_miss_count",
+        "send_deadline_missed_count",
+        "send_command_deadline_missed_count",
+        "command_sender_deadline_missed_count",
+    )
+
+
+def servo_jitter_p99_ms(summary: dict[str, Any]) -> float | None:
+    existing = finite_number(summary.get("servo_jitter_p99_ms"))
+    if existing is not None:
+        return existing
+    return nested_percentile_metric(summary, "servo_jitter_ms", "p99")
+
+
 def csv_max(path: Path, field: str) -> float | None:
     if not path.is_file():
         return None
@@ -505,6 +581,8 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "required_tangential_speed_m_s": required_tangential_speed(summary),
         "stress_level": stress_level(summary),
         "repeat": summary.get("repeat"),
+        "command_rate_hz": first_present(summary, "command_rate_hz", "requested_rate_hz"),
+        "servo_rate_hz": summary.get("servo_rate_hz"),
         "radius_gain": radius_gain(summary),
         "mean_error_mm": scaled(summary, "mean_error_m", 1000.0),
         "rms_error_mm": scaled(summary, "rms_error_m", 1000.0),
@@ -528,8 +606,20 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "worker_command_drops_total": summary.get("worker_command_drops_total"),
         "integrator_clamps_total": summary.get("integrator_clamps_total"),
         "integrator_divergence_total": summary.get("integrator_divergence_total"),
+        "send_success_rate": send_success_rate(summary),
+        "controller_acceptance_observed_rate": controller_acceptance_observed_rate(summary),
+        "send_duration_p99_us": first_value(
+            first_number(summary, "send_duration_p99_us"),
+            nested_percentile_metric(summary, "send_duration_us", "p99"),
+        ),
+        "send_duration_max_us": first_value(
+            first_number(summary, "send_duration_max_us"),
+            nested_percentile_metric(summary, "send_duration_us", "max"),
+        ),
         "send_command_deadline_missed_count": summary.get("send_command_deadline_missed_count"),
+        "deadline_miss_count": deadline_miss_count(summary),
         "command_interval_max_ms": command_interval_max_ms(summary),
+        "servo_jitter_p99_ms": servo_jitter_p99_ms(summary),
         "servo_jitter_max_ms": servo_jitter_max_ms(summary),
         "timing_classification": first_value(
             first_present(summary, "timing_classification"),

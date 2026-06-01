@@ -286,3 +286,56 @@ Cartesian gate rejection, missing `q_ref` / `tcp_ref_stand`, poor timing
 classification, deadline miss, or measurement reliability downgrade. The 15 cm
 / 4 s rows remain stress evidence even if they complete cleanly; do not mark
 500 Hz as real-ready from these matrices.
+
+## Comparison Report
+
+After collecting no-op and circle artifacts, generate the 100 Hz vs 500 Hz
+controller-simulation report without rerunning benchmarks:
+
+```bash
+python3 scripts/generate_rbpodo_500hz_report.py \
+  --noop-summary artifacts/rbpodo_servo_j_rate_probe_left/summary.json \
+  --ablation-summary-csv artifacts/<stage1>/ablation_summary.csv \
+  --ablation-summary-csv artifacts/<stage2>/ablation_summary.csv \
+  --ablation-summary-csv artifacts/<stage3>/ablation_summary.csv \
+  --output-md artifacts/rbpodo_500hz_report.md \
+  --csv artifacts/rbpodo_500hz_report.csv \
+  --json artifacts/rbpodo_500hz_report.json
+```
+
+The report compares these evidence pairs:
+
+- 100 Hz vs 500 Hz no-op acceptance
+- 100 Hz vs 500 Hz `safe_5cm_10s`
+- 100 Hz vs 500 Hz 15 cm / 16 s
+- 100 Hz vs 500 Hz 15 cm / 8 s
+- 100 Hz vs 500 Hz 15 cm / 4 s
+
+Classifications are deliberately conservative:
+
+- `500hz_noop_pass`: 500 Hz no-op evidence satisfies acceptance-stage report
+  checks, but remains single-arm no-op controller-simulation evidence only.
+- `500hz_circle_improved`: selected 500 Hz circle evidence has lower RMS error
+  without worse p95 error or p99 jitter evidence.
+- `500hz_circle_no_improvement`: selected 500 Hz circle evidence is stable but
+  does not improve the selected 100 Hz row.
+- `500hz_unstable`: the 500 Hz row faulted, latched safety, detected physical
+  motion, missed deadlines, had Cartesian rejection, or was otherwise
+  unreliable.
+- `insufficient_evidence`: the 100/500 pair, tracking metrics, or measurement
+  reliability evidence is incomplete.
+
+Required caveats remain attached to every report:
+
+- no-op success does not prove physical real motion
+- `tcp_ref_stand` is a controller-reference lower bound, not physical TCP
+  tracking
+- diagnostics-suspect evidence remains caveated and cannot promote defaults
+- dual-arm acceptance is required before any default-rate change
+
+Recommended interpretation:
+
+- Do not change the default rate automatically.
+- Allow 500 Hz only as a rbpodo controller-simulation experimental profile.
+- Promote only after stable 5 cm / 10 s and 15 cm / 16 s evidence passes with
+  usable measurement reliability. The 15 cm / 4 s rows remain stress evidence.

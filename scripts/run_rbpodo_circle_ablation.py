@@ -151,10 +151,14 @@ SUMMARY_COLUMNS = [
     "estimated_latency_ms",
     "q_ref_update_rate_hz",
     "q_ref_valid_ratio",
+    "send_success_rate",
+    "controller_acceptance_observed_rate",
     "send_duration_p95_us",
     "send_duration_p99_us",
+    "send_duration_max_us",
     "servo_jitter_p99_ms",
     "deadline_miss_count",
+    "command_interval_max_ms",
     "timing_classification",
     "ack_spike_count_10ms",
     "ack_spike_count_20ms",
@@ -448,6 +452,30 @@ def ratio_or_none(numerator: Any, denominator: Any) -> float | None:
     if top is None or bottom is None or bottom <= 0.0:
         return None
     return top / bottom
+
+
+def success_rate(summary: dict[str, Any], denominator: Any) -> float | None:
+    existing = finite_number(summary.get("send_success_rate"))
+    if existing is not None:
+        return existing
+    rate = ratio_or_none(summary.get("send_success_count"), denominator)
+    if rate is not None:
+        return rate
+    failures = finite_number(summary.get("send_failure_count"))
+    count = finite_number(denominator)
+    if failures is None or count is None or count <= 0.0:
+        return None
+    return max(0.0, 1.0 - failures / count)
+
+
+def command_interval_max_ms(summary: dict[str, Any], timestamp_alignment: dict[str, Any]) -> float | None:
+    value = finite_number(summary.get("command_interval_max_ms"))
+    if value is not None:
+        return value
+    nested = timestamp_alignment.get("command_interval_ms")
+    if isinstance(nested, dict):
+        return finite_number(nested.get("max"))
+    return None
 
 
 def rate_t1_overridden(overrides: dict[str, Any]) -> bool:
@@ -899,8 +927,15 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "estimated_latency_ms": summary.get("estimated_latency_ms"),
         "q_ref_update_rate_hz": summary.get("q_ref_update_rate_hz"),
         "q_ref_valid_ratio": summary.get("q_ref_valid_ratio"),
+        "send_success_rate": success_rate(summary, command_count),
+        "controller_acceptance_observed_rate": first_present(
+            summary.get("controller_acceptance_observed_rate"),
+            summary.get("controller_acceptance_ratio"),
+            ratio_or_none(summary.get("controller_acceptance_observed_count"), command_count),
+        ),
         "send_duration_p95_us": nested_metric(summary, "send_duration_us", "p95"),
         "send_duration_p99_us": nested_metric(summary, "send_duration_us", "p99"),
+        "send_duration_max_us": nested_metric(summary, "send_duration_us", "max"),
         "servo_jitter_p99_ms": nested_metric(summary, "servo_jitter_ms", "p99"),
         "deadline_miss_count": first_present(
             summary.get("deadline_miss_count"),
@@ -908,6 +943,7 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
             summary.get("send_command_deadline_missed_count"),
             summary.get("command_sender_deadline_missed_count"),
         ),
+        "command_interval_max_ms": command_interval_max_ms(summary, timestamp_alignment),
         "timing_classification": first_present(
             summary.get("timing_classification"),
             timestamp_alignment.get("timing_classification"),

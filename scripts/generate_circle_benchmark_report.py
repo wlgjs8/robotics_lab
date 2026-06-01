@@ -53,6 +53,8 @@ REPORT_COLUMNS = [
     "period_sec",
     "required_tangential_speed_m_s",
     "stress_level",
+    "command_rate_hz",
+    "servo_rate_hz",
     "repeat_evidence_count",
     "measurement_reliability_level",
     "reliability_caveats",
@@ -74,8 +76,14 @@ REPORT_COLUMNS = [
     "worker_command_drops_total",
     "integrator_clamps_total",
     "integrator_divergence_total",
+    "send_success_rate",
+    "controller_acceptance_observed_rate",
+    "send_duration_p99_us",
+    "send_duration_max_us",
     "send_command_deadline_missed_count",
+    "deadline_miss_count",
     "command_interval_max_ms",
+    "servo_jitter_p99_ms",
     "servo_jitter_max_ms",
     "timing_classification",
     "ack_spike_count_10ms",
@@ -183,6 +191,19 @@ def load_ablation_rows(path: Path) -> list[dict[str, Any]]:
                     row["required_tangential_speed_m_s"] = speed
             if not row.get("stress_level"):
                 row["stress_level"] = compare.stress_level(row)
+            if not row.get("send_success_rate"):
+                send_count = finite_number(row.get("send_count") or row.get("command_count"))
+                success_count = finite_number(row.get("send_success_count"))
+                failure_count = finite_number(row.get("send_failure_count"))
+                if success_count is not None and send_count is not None and send_count > 0:
+                    row["send_success_rate"] = success_count / send_count
+                elif failure_count is not None and send_count is not None and send_count > 0:
+                    row["send_success_rate"] = max(0.0, 1.0 - failure_count / send_count)
+            if not row.get("controller_acceptance_observed_rate"):
+                send_count = finite_number(row.get("send_count") or row.get("command_count"))
+                acceptance_count = finite_number(row.get("controller_acceptance_observed_count"))
+                if acceptance_count is not None and send_count is not None and send_count > 0:
+                    row["controller_acceptance_observed_rate"] = acceptance_count / send_count
             rows.append(row)
     return rows
 
