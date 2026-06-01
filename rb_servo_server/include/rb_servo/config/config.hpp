@@ -113,6 +113,11 @@ enum class RbpodoAsyncQueuePolicy {
     LatestWins
 };
 
+enum class RbpodoAsyncReferenceSupervisionPolicy {
+    WarnOnly,
+    FaultLatch
+};
+
 struct RbpodoAsyncAckSupervisionConfig {
     bool enable = true;
     double expected_ack_timeout_ms = 50.0;
@@ -123,8 +128,13 @@ struct RbpodoAsyncAckSupervisionConfig {
 struct RbpodoAsyncReferenceSupervisionConfig {
     bool enable = true;
     double q_ref_update_timeout_ms = 50.0;
-    double q_ref_target_tolerance_deg = 0.5;
+    double q_ref_target_tolerance_deg = 1.0;
+    double q_ref_target_fault_after_ms = 100.0;
     double tcp_ref_update_timeout_ms = 50.0;
+    double tcp_ref_target_tolerance_m = 0.02;
+    double tcp_ref_target_fault_after_ms = 100.0;
+    RbpodoAsyncReferenceSupervisionPolicy policy =
+        RbpodoAsyncReferenceSupervisionPolicy::FaultLatch;
 };
 
 struct RbpodoAsyncDiagnosticsConfig {

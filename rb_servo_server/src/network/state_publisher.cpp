@@ -251,7 +251,12 @@ nlohmann::json rbpodoAsyncStreamingJson(
         {"last_sent_seq", telemetry.last_sent_seq},
         {"last_ack_seq", telemetry.last_ack_seq},
         {"last_q_ref_update_host_time_ns", telemetry.last_q_ref_update_host_time_ns},
+        {"last_tcp_ref_update_host_time_ns", telemetry.last_tcp_ref_update_host_time_ns},
         {"last_socket_send_host_time_ns", telemetry.last_socket_send_host_time_ns},
+        {"q_ref_update_age_ms", telemetry.q_ref_update_age_ms},
+        {"tcp_ref_update_age_ms", telemetry.tcp_ref_update_age_ms},
+        {"q_ref_target_error_deg_max", telemetry.q_ref_target_error_deg_max},
+        {"tcp_ref_target_error_m", telemetry.tcp_ref_target_error_m},
         {"last_async_send_duration_us", telemetry.last_async_send_duration_us},
         {"last_async_ack_duration_us", telemetry.last_async_ack_duration_us},
         {"max_async_send_duration_us", telemetry.max_async_send_duration_us},
@@ -270,6 +275,10 @@ nlohmann::json rbpodoAsyncStreamingJson(
         {"max_pending_age_ms_observed", telemetry.max_pending_age_ms_observed},
         {"supervision_state", rbpodoAsyncSupervisionStateString(telemetry.supervision_state)},
         {"async_supervision_state", rbpodoAsyncSupervisionStateString(telemetry.supervision_state)},
+        {"reference_supervision_state",
+            rbpodoAsyncSupervisionStateString(telemetry.reference_supervision_state)},
+        {"reference_supervision_reason", telemetry.reference_supervision_reason},
+        {"reference_supervision_fault_count", telemetry.reference_supervision_fault_count},
     };
 }
 

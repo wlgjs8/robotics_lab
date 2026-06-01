@@ -168,8 +168,12 @@ servo:
     reference_supervision:
       enable: true
       q_ref_update_timeout_ms: 50
-      q_ref_target_tolerance_deg: 0.5
       tcp_ref_update_timeout_ms: 50
+      q_ref_target_tolerance_deg: 1.0
+      q_ref_target_fault_after_ms: 100
+      tcp_ref_target_tolerance_m: 0.02
+      tcp_ref_target_fault_after_ms: 100
+      policy: fault_latch
     diagnostics:
       publish_per_command_jsonl: false
 ```
@@ -182,12 +186,16 @@ Modes:
   worker results use `controller_ack_observed`, but this mode may still miss
   500 Hz if controller ACK latency is slower than the command period. Backlog,
   overwrites, drops, send duration, ACK duration, and last failure are published
-  per arm.
+  per arm. ACK remains the primary acceptance signal; q_ref/tcp_ref reference
+  supervision is warning telemetry unless `q_ref` is invalid.
 - `socket_send_supervised`: the SDK uses `disable_waiting_ack=true` or an
   equivalent socket-send-only path. Sends must be reported as
   `socket_send_only`, never `controller_ack_observed`. `q_ref` and/or
-  `tcp_ref` watchdog supervision is required to infer controller progress.
-  Socket send evidence alone is not controller ACK acceptance.
+  `tcp_ref` watchdog supervision is required to infer controller progress:
+  invalid `q_ref` faults, stale `q_ref`/`tcp_ref` beyond the configured update
+  timeout faults, and target divergence becomes a warning or fault according to
+  `reference_supervision.policy`. Socket send evidence alone is not controller
+  ACK acceptance.
 
 Async mode requires both arms to use `backend_type: rbpodo`, `run_mode: real`,
 and `operation_mode: simulation`; `operation_mode: real` is refused. Runtime
@@ -217,9 +225,13 @@ State JSON publishes per-arm `async_streaming` telemetry including
 `commands_acked_total`, `commands_socket_sent_total`,
 `commands_overwritten_total`, `commands_dropped_total`, `ack_timeout_count`,
 `last_async_send_duration_us`, `last_async_ack_duration_us`,
-`last_async_acceptance_semantics`, `async_worker_backlog`, and
-`async_supervision_state`. A supervision fault latches the servo loop fault
-state and suppresses further regular servo sends.
+`last_async_acceptance_semantics`, `async_worker_backlog`,
+`q_ref_update_age_ms`, `tcp_ref_update_age_ms`,
+`q_ref_target_error_deg_max`, `tcp_ref_target_error_m`,
+`reference_supervision_state`, `reference_supervision_reason`,
+`reference_supervision_fault_count`, and `async_supervision_state`. A
+supervision fault latches the servo loop fault state and suppresses further
+regular servo sends.
 
 ## SDK Async Capability Probe
 

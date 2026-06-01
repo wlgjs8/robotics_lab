@@ -514,7 +514,12 @@ struct RbpodoAsyncStreamingTelemetry {
     uint64_t last_sent_seq = 0;
     uint64_t last_ack_seq = 0;
     uint64_t last_q_ref_update_host_time_ns = 0;
+    uint64_t last_tcp_ref_update_host_time_ns = 0;
     uint64_t last_socket_send_host_time_ns = 0;
+    double q_ref_update_age_ms = 0.0;
+    double tcp_ref_update_age_ms = 0.0;
+    double q_ref_target_error_deg_max = 0.0;
+    double tcp_ref_target_error_m = 0.0;
     double last_async_send_duration_us = 0.0;
     double last_async_ack_duration_us = 0.0;
     double max_async_send_duration_us = 0.0;
@@ -528,6 +533,10 @@ struct RbpodoAsyncStreamingTelemetry {
     double max_pending_age_ms_observed = 0.0;
     RbpodoAsyncStreamingSupervisionState supervision_state =
         RbpodoAsyncStreamingSupervisionState::Ok;
+    RbpodoAsyncStreamingSupervisionState reference_supervision_state =
+        RbpodoAsyncStreamingSupervisionState::Ok;
+    std::string reference_supervision_reason;
+    uint64_t reference_supervision_fault_count = 0;
 };
 
 struct BackendTransportTelemetry {

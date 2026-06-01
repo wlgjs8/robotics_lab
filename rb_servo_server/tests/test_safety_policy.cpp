@@ -110,6 +110,7 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(read_sleep_ms));
         }
         ++read_count_;
+        advanceRobotTimeOnRead();
         if (!read_ok_) {
             return result(
                 rb_servo::BackendOp::ReadState,
@@ -151,7 +152,9 @@ public:
                 state_after_source
             );
         }
-        q_target_ = request.q_target_deg;
+        if (!freeze_reference_on_send_) {
+            q_target_ = request.q_target_deg;
+        }
         if (!accept_send_without_state_update_) {
             q_actual_ = request.q_target_deg;
         }
@@ -202,17 +205,31 @@ public:
     void setInvalidateJointStateOnReset(bool invalidate) { invalidate_joint_state_on_reset_ = invalidate; }
     void setReadSleepMs(int sleep_ms) { read_sleep_ms_.store(sleep_ms); }
     void setSendSleepMs(int sleep_ms) { send_sleep_ms_.store(sleep_ms); }
+    void setQRefValid(bool valid) { q_ref_valid_ = valid; }
+    void setFreezeReferenceOnSend(bool freeze) { freeze_reference_on_send_ = freeze; }
+    void setRobotTimeNs(uint64_t robot_time_ns) { robot_time_ns_.store(robot_time_ns); }
+    void setAdvanceRobotTimeOnRead(bool advance) { advance_robot_time_on_read_ = advance; }
     int readCount() const { return read_count_; }
     int resetCount() const { return reset_count_; }
     int sendCount() const { return send_count_; }
 
 private:
+    void advanceRobotTimeOnRead() {
+        if (advance_robot_time_on_read_) {
+            robot_time_ns_.fetch_add(5'000'000);
+        }
+    }
+
     rb_servo::RobotState currentState() const {
         rb_servo::RobotState state;
         state.arm_id = arm_id_;
         state.host_time_ns = rb_servo::nowSteadyNs();
+        state.robot_time_ns = robot_time_ns_.load();
         state.q_actual_deg = q_actual_;
         state.q_target_deg = q_target_;
+        state.q_actual_valid = valid_joint_state_;
+        state.q_ref_valid = q_ref_valid_ && valid_joint_state_;
+        state.q_ref_source = "test.q_ref";
         state.has_valid_joint_state = valid_joint_state_;
         state.connection_state = connected_
             ? rb_servo::RobotConnectionState::Connected
@@ -247,6 +264,9 @@ private:
     rb_servo::BackendErrorKind send_error_kind_ = rb_servo::BackendErrorKind::ControllerRejected;
     bool accept_send_without_state_update_ = false;
     bool valid_joint_state_ = true;
+    bool q_ref_valid_ = true;
+    bool freeze_reference_on_send_ = false;
+    bool advance_robot_time_on_read_ = true;
     bool read_ok_ = true;
     bool reset_ok_ = true;
     bool invalidate_joint_state_on_reset_ = false;
@@ -259,6 +279,7 @@ private:
     bool initialized_ = false;
     std::atomic<int> read_sleep_ms_{0};
     std::atomic<int> send_sleep_ms_{0};
+    mutable std::atomic<uint64_t> robot_time_ns_{0};
     int read_count_ = 0;
     int reset_count_ = 0;
     int send_count_ = 0;
@@ -771,6 +792,12 @@ void enableRbpodoAsyncStreaming(
     cfg->servo.rbpodo_async_streaming.ack_supervision.missing_ack_fault_after_ms = 20.0;
     cfg->servo.rbpodo_async_streaming.reference_supervision.q_ref_update_timeout_ms = 20.0;
     cfg->servo.rbpodo_async_streaming.reference_supervision.q_ref_target_tolerance_deg = 0.5;
+    cfg->servo.rbpodo_async_streaming.reference_supervision.q_ref_target_fault_after_ms = 20.0;
+    cfg->servo.rbpodo_async_streaming.reference_supervision.tcp_ref_update_timeout_ms = 20.0;
+    cfg->servo.rbpodo_async_streaming.reference_supervision.tcp_ref_target_tolerance_m = 0.02;
+    cfg->servo.rbpodo_async_streaming.reference_supervision.tcp_ref_target_fault_after_ms = 20.0;
+    cfg->servo.rbpodo_async_streaming.reference_supervision.policy =
+        rb_servo::RbpodoAsyncReferenceSupervisionPolicy::FaultLatch;
 }
 
 rb_servo::DualArmCommand command(rb_servo::ControlMode mode) {
@@ -3172,6 +3199,293 @@ bool testRbpodoAsyncSupervisionFaultLatchesServoLoop() {
     return true;
 }
 
+bool testRbpodoAsyncReferenceSupervisionQRefUpdatesOk() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
+    EnvVarGuard allow_socket_send("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING");
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    pgmode_confirmed.set("1");
+    allow_async.set("1");
+    allow_socket_send.set("1");
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.servo.rate_hz = 50;
+    cfg.servo.worker_read_period_sec = 0.005;
+    enableRbpodoAsyncStreaming(
+        &cfg,
+        rb_servo::RbpodoAsyncStreamingMode::SocketSendSupervised
+    );
+    cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_update_timeout_ms = 100.0;
+    const rb_servo::JointArray initial = joints(0.0);
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+    RB_CHECK(loop.start());
+
+    rb_servo::DualArmCommand arm_motion = command(rb_servo::ControlMode::ArmMotion);
+    arm_motion.left.timeout_sec = 1.0;
+    arm_motion.right.timeout_sec = 1.0;
+    buffer.setCommand(arm_motion);
+    RB_CHECK(waitUntil(
+        [&] { return loop.motionState() == rb_servo::ServerMotionState::ArmedHold; },
+        std::chrono::milliseconds(1000)
+    ));
+
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.seq = 8901;
+    target.left.q_target_deg = joints(4.0);
+    target.right.q_target_deg = joints(4.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    target.left.timeout_sec = 1.0;
+    target.right.timeout_sec = 1.0;
+    buffer.setCommand(target);
+
+    std::optional<rb_servo::ServoSnapshot> ok_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (snapshot.command.seq == 8901 &&
+            !snapshot.fault_latched &&
+            snapshot.left_async_streaming.reference_supervision_state ==
+                rb_servo::RbpodoAsyncStreamingSupervisionState::Ok &&
+            snapshot.left_async_streaming.q_ref_target_error_deg_max <= 0.5) {
+            ok_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1000)));
+
+    loop.stop();
+    RB_CHECK(ok_snapshot.has_value());
+    RB_CHECK(ok_snapshot->left_async_streaming.last_q_ref_update_host_time_ns > 0);
+    RB_CHECK(ok_snapshot->left_async_streaming.reference_supervision_fault_count == 0);
+    return true;
+}
+
+bool testRbpodoAsyncReferenceSupervisionQRefStopsFaultsSocketSend() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
+    EnvVarGuard allow_socket_send("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING");
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    pgmode_confirmed.set("1");
+    allow_async.set("1");
+    allow_socket_send.set("1");
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.servo.rate_hz = 100;
+    cfg.servo.worker_read_period_sec = 0.005;
+    enableRbpodoAsyncStreaming(
+        &cfg,
+        rb_servo::RbpodoAsyncStreamingMode::SocketSendSupervised
+    );
+    cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_update_timeout_ms = 20.0;
+    cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_target_fault_after_ms = 500.0;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    left->setAdvanceRobotTimeOnRead(false);
+    right->setAdvanceRobotTimeOnRead(false);
+    rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
+    RB_CHECK(loop.start());
+
+    std::optional<rb_servo::ServoSnapshot> fault_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (snapshot.fault_latched) {
+            fault_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1000)));
+
+    loop.stop();
+    RB_CHECK(fault_snapshot.has_value());
+    if (fault_snapshot->left_async_streaming.reference_supervision_reason !=
+        "async_q_ref_update_timeout") {
+        std::cerr << "unexpected q_ref stale supervision reason: "
+                  << fault_snapshot->left_async_streaming.reference_supervision_reason
+                  << " left_state="
+                  << static_cast<int>(fault_snapshot->left_async_streaming.reference_supervision_state)
+                  << " left_failure=" << fault_snapshot->left_async_streaming.last_failure
+                  << " fault_reason=" << fault_snapshot->fault_reason
+                  << " latched="
+                  << static_cast<int>(fault_snapshot->latched_fault_reason)
+                  << " right_reason="
+                  << fault_snapshot->right_async_streaming.reference_supervision_reason
+                  << " right_state="
+                  << static_cast<int>(fault_snapshot->right_async_streaming.reference_supervision_state)
+                  << " right_failure=" << fault_snapshot->right_async_streaming.last_failure
+                  << "\n";
+    }
+    RB_CHECK(fault_snapshot->latched_fault_reason == rb_servo::SafetyVerdict::SendFailure);
+    RB_CHECK(
+        fault_snapshot->left_async_streaming.reference_supervision_state ==
+        rb_servo::RbpodoAsyncStreamingSupervisionState::Fault
+    );
+    RB_CHECK(
+        fault_snapshot->left_async_streaming.reference_supervision_reason ==
+        "async_q_ref_update_timeout"
+    );
+    RB_CHECK(fault_snapshot->left_async_streaming.q_ref_watchdog_miss_count > 0);
+    RB_CHECK(fault_snapshot->left_async_streaming.reference_supervision_fault_count > 0);
+    return true;
+}
+
+bool testRbpodoAsyncReferenceSupervisionTargetErrorFaultsSocketSend() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
+    EnvVarGuard allow_socket_send("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING");
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    pgmode_confirmed.set("1");
+    allow_async.set("1");
+    allow_socket_send.set("1");
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.servo.rate_hz = 100;
+    cfg.servo.worker_read_period_sec = 0.005;
+    enableRbpodoAsyncStreaming(
+        &cfg,
+        rb_servo::RbpodoAsyncStreamingMode::SocketSendSupervised
+    );
+    cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_update_timeout_ms = 500.0;
+    cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_target_tolerance_deg = 0.5;
+    cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_target_fault_after_ms = 20.0;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left,
+        initial,
+        false,
+        rb_servo::BackendErrorKind::ControllerRejected,
+        std::nullopt,
+        true
+    );
+    auto right = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Right,
+        initial,
+        false,
+        rb_servo::BackendErrorKind::ControllerRejected,
+        std::nullopt,
+        true
+    );
+    left->setFreezeReferenceOnSend(true);
+    right->setFreezeReferenceOnSend(true);
+    rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
+    RB_CHECK(loop.start());
+
+    rb_servo::DualArmCommand arm_motion = command(rb_servo::ControlMode::ArmMotion);
+    arm_motion.left.timeout_sec = 1.0;
+    arm_motion.right.timeout_sec = 1.0;
+    buffer.setCommand(arm_motion);
+    RB_CHECK(waitUntil(
+        [&] { return loop.motionState() == rb_servo::ServerMotionState::ArmedHold; },
+        std::chrono::milliseconds(1000)
+    ));
+
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.seq = 8902;
+    target.left.q_target_deg = joints(5.0);
+    target.right.q_target_deg = joints(5.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    target.left.timeout_sec = 1.0;
+    target.right.timeout_sec = 1.0;
+    buffer.setCommand(target);
+
+    std::optional<rb_servo::ServoSnapshot> fault_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (snapshot.fault_latched &&
+            snapshot.latched_fault_reason == rb_servo::SafetyVerdict::SendFailure &&
+            snapshot.left_async_streaming.reference_supervision_state ==
+                rb_servo::RbpodoAsyncStreamingSupervisionState::Fault &&
+            snapshot.left_async_streaming.reference_supervision_reason ==
+                "async_q_ref_target_error") {
+            fault_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1500)));
+
+    loop.stop();
+    RB_CHECK(fault_snapshot.has_value());
+    RB_CHECK(fault_snapshot->left_async_streaming.q_ref_target_error_deg_max > 0.5);
+    RB_CHECK(!fault_snapshot->left_safety_tracking.controller_simulation_physical_motion_detected);
+    return true;
+}
+
+bool testRbpodoAsyncReferenceSupervisionInvalidQRefFaults() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
+    EnvVarGuard allow_socket_send("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING");
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    pgmode_confirmed.set("1");
+    allow_async.set("1");
+    allow_socket_send.set("1");
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.servo.rate_hz = 100;
+    cfg.servo.worker_read_period_sec = 0.005;
+    enableRbpodoAsyncStreaming(
+        &cfg,
+        rb_servo::RbpodoAsyncStreamingMode::SocketSendSupervised
+    );
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    left->setQRefValid(false);
+    right->setQRefValid(false);
+    rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
+    RB_CHECK(loop.start());
+
+    std::optional<rb_servo::ServoSnapshot> fault_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (snapshot.fault_latched &&
+            snapshot.latched_fault_reason == rb_servo::SafetyVerdict::SendFailure &&
+            snapshot.left_async_streaming.reference_supervision_state ==
+                rb_servo::RbpodoAsyncStreamingSupervisionState::Fault &&
+            snapshot.left_async_streaming.reference_supervision_reason ==
+                "async_reference_q_ref_invalid") {
+            fault_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1000)));
+
+    loop.stop();
+    RB_CHECK(fault_snapshot.has_value());
+    RB_CHECK(fault_snapshot->left_async_streaming.reference_supervision_fault_count > 0);
+    return true;
+}
+
 
 bool testStatePublisherAcceptsDockerServiceHostnameEndpoint() {
     std::string host;
@@ -3651,12 +3965,23 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     worker_snapshot.left_async_streaming.ack_timeout_count = 2;
     worker_snapshot.left_async_streaming.last_command_seq = 1300;
     worker_snapshot.left_async_streaming.last_sent_seq = 1299;
+    worker_snapshot.left_async_streaming.last_q_ref_update_host_time_ns = 1301;
+    worker_snapshot.left_async_streaming.last_tcp_ref_update_host_time_ns = 1302;
+    worker_snapshot.left_async_streaming.q_ref_update_age_ms = 4.5;
+    worker_snapshot.left_async_streaming.tcp_ref_update_age_ms = 5.5;
+    worker_snapshot.left_async_streaming.q_ref_target_error_deg_max = 0.25;
+    worker_snapshot.left_async_streaming.tcp_ref_target_error_m = 0.012;
     worker_snapshot.left_async_streaming.last_async_send_duration_us = 2500.0;
     worker_snapshot.left_async_streaming.last_async_ack_duration_us = 0.0;
     worker_snapshot.left_async_streaming.last_async_acceptance_semantics = "socket_send_only";
     worker_snapshot.left_async_streaming.worker_backlog = 1;
     worker_snapshot.left_async_streaming.supervision_state =
         rb_servo::RbpodoAsyncStreamingSupervisionState::Warning;
+    worker_snapshot.left_async_streaming.reference_supervision_state =
+        rb_servo::RbpodoAsyncStreamingSupervisionState::Warning;
+    worker_snapshot.left_async_streaming.reference_supervision_reason =
+        "async_q_ref_target_error";
+    worker_snapshot.left_async_streaming.reference_supervision_fault_count = 1;
     rb_servo::BackendTransportTelemetry transport;
     transport.connect_attempts_total = 2;
     transport.connect_failures_total = 1;
@@ -3700,11 +4025,20 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(async.at("ack_timeout_count").get<uint64_t>() == 2);
     RB_CHECK(async.at("last_command_seq").get<uint64_t>() == 1300);
     RB_CHECK(async.at("last_sent_seq").get<uint64_t>() == 1299);
+    RB_CHECK(async.at("last_q_ref_update_host_time_ns").get<uint64_t>() == 1301);
+    RB_CHECK(async.at("last_tcp_ref_update_host_time_ns").get<uint64_t>() == 1302);
+    RB_CHECK(async.at("q_ref_update_age_ms").get<double>() == 4.5);
+    RB_CHECK(async.at("tcp_ref_update_age_ms").get<double>() == 5.5);
+    RB_CHECK(async.at("q_ref_target_error_deg_max").get<double>() == 0.25);
+    RB_CHECK(async.at("tcp_ref_target_error_m").get<double>() == 0.012);
     RB_CHECK(async.at("last_async_send_duration_us").get<double>() == 2500.0);
     RB_CHECK(async.at("last_async_ack_duration_us").get<double>() == 0.0);
     RB_CHECK(async.at("last_async_acceptance_semantics").get<std::string>() == "socket_send_only");
     RB_CHECK(async.at("async_worker_backlog").get<uint64_t>() == 1);
     RB_CHECK(async.at("async_supervision_state").get<std::string>() == "warning");
+    RB_CHECK(async.at("reference_supervision_state").get<std::string>() == "warning");
+    RB_CHECK(async.at("reference_supervision_reason").get<std::string>() == "async_q_ref_target_error");
+    RB_CHECK(async.at("reference_supervision_fault_count").get<uint64_t>() == 1);
     const nlohmann::json& transport_json = worker_json.at("left").at("transport");
     RB_CHECK(transport_json.at("connect_attempts_total").get<uint64_t>() == 2);
     RB_CHECK(transport_json.at("connect_failures_total").get<uint64_t>() == 1);
@@ -5741,6 +6075,10 @@ int main() {
     if (!testRbpodoAsyncConfigRejectsPhysicalRealAndMissingEnv()) return 1;
     if (!testRbpodoAsyncServoLoopDoesNotBlockOnSlowAckWorker()) return 1;
     if (!testRbpodoAsyncSupervisionFaultLatchesServoLoop()) return 1;
+    if (!testRbpodoAsyncReferenceSupervisionQRefUpdatesOk()) return 1;
+    if (!testRbpodoAsyncReferenceSupervisionQRefStopsFaultsSocketSend()) return 1;
+    if (!testRbpodoAsyncReferenceSupervisionTargetErrorFaultsSocketSend()) return 1;
+    if (!testRbpodoAsyncReferenceSupervisionInvalidQRefFaults()) return 1;
     if (!testStatePublisherAcceptsDockerServiceHostnameEndpoint()) return 1;
     if (!testStatePublisherSerializesServoSnapshotSchema()) return 1;
     if (!testStatePublisherUsesLatestSnapshotWithoutBackendReadsAndDoesNotStallLoop()) return 1;

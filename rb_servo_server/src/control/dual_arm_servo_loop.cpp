@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 #include "rb_servo/control/cartesian_controller.hpp"
@@ -445,6 +446,343 @@ double maxAbsJointDelta(const JointArray& a, const JointArray& b) {
         max_delta = std::max(max_delta, std::abs(a[i] - b[i]));
     }
     return max_delta;
+}
+
+bool finiteTcpPosition(const Pose6D& pose) {
+    return std::isfinite(pose.x) &&
+        std::isfinite(pose.y) &&
+        std::isfinite(pose.z);
+}
+
+double tcpPositionDistanceM(const Pose6D& a, const Pose6D& b) {
+    if (!finiteTcpPosition(a) || !finiteTcpPosition(b)) {
+        return std::numeric_limits<double>::infinity();
+    }
+    const double dx = a.x - b.x;
+    const double dy = a.y - b.y;
+    const double dz = a.z - b.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+bool stateSequenceChanged(uint64_t previous, uint64_t current) {
+    return current > 0 && current != previous;
+}
+
+uint64_t referenceStateSequenceNs(const RobotState& state) {
+    return state.robot_time_ns;
+}
+
+RbpodoAsyncStreamingSupervisionState moreSevere(
+    RbpodoAsyncStreamingSupervisionState a,
+    RbpodoAsyncStreamingSupervisionState b
+) {
+    const auto rank = [](RbpodoAsyncStreamingSupervisionState value) {
+        switch (value) {
+            case RbpodoAsyncStreamingSupervisionState::Ok:
+                return 0;
+            case RbpodoAsyncStreamingSupervisionState::Warning:
+                return 1;
+            case RbpodoAsyncStreamingSupervisionState::Fault:
+                return 2;
+        }
+        return 0;
+    };
+    return rank(b) > rank(a) ? b : a;
+}
+
+struct ReferenceSupervisionRuntime {
+    bool have_q_ref_sample = false;
+    JointArray last_q_ref_deg{};
+    uint64_t last_q_ref_state_sequence_ns = 0;
+    uint64_t last_q_ref_update_host_time_ns = 0;
+
+    bool have_tcp_ref_sample = false;
+    Pose6D last_tcp_ref_stand;
+    uint64_t last_tcp_ref_update_host_time_ns = 0;
+
+    bool has_latest_sent_target = false;
+    JointArray latest_sent_q_target_deg{};
+    std::optional<Pose6D> latest_sent_tcp_ref_stand;
+    uint64_t q_ref_target_error_start_ns = 0;
+    uint64_t tcp_ref_target_error_start_ns = 0;
+    uint64_t last_q_ref_watchdog_miss_ns = 0;
+    uint64_t last_tcp_ref_watchdog_miss_ns = 0;
+    uint64_t q_ref_watchdog_miss_count = 0;
+    uint64_t tcp_ref_watchdog_miss_count = 0;
+
+    uint64_t fault_count = 0;
+    RbpodoAsyncStreamingSupervisionState last_state =
+        RbpodoAsyncStreamingSupervisionState::Ok;
+    std::string last_reason;
+};
+
+struct ReferenceSupervisionState {
+    ReferenceSupervisionRuntime left;
+    ReferenceSupervisionRuntime right;
+};
+
+std::mutex g_reference_supervision_mutex;
+std::unordered_map<const DualArmServoLoop*, ReferenceSupervisionState> g_reference_supervision_states;
+
+bool referenceSupervisionActive(
+    const DualArmConfig& config,
+    ArmId arm_id
+) {
+    const auto& async = config.servo.rbpodo_async_streaming;
+    if (!async.enable ||
+        async.mode == RbpodoAsyncStreamingMode::Disabled ||
+        !async.reference_supervision.enable) {
+        return false;
+    }
+    const BackendConfig& backend = backendConfigForArm(config, arm_id);
+    return isRbpodoControllerSimulationBackend(backend) &&
+        controllerSimulationMotionGateOpen(config);
+}
+
+ReferenceSupervisionRuntime& runtimeForArm(
+    ReferenceSupervisionState& state,
+    ArmId arm_id
+) {
+    return arm_id == ArmId::Left ? state.left : state.right;
+}
+
+void eraseReferenceSupervisionState(const DualArmServoLoop* loop) {
+    std::lock_guard<std::mutex> lock(g_reference_supervision_mutex);
+    g_reference_supervision_states.erase(loop);
+}
+
+void resetReferenceSupervisionState(const DualArmServoLoop* loop) {
+    std::lock_guard<std::mutex> lock(g_reference_supervision_mutex);
+    g_reference_supervision_states[loop] = ReferenceSupervisionState{};
+}
+
+void noteReferenceSupervisionSentTarget(
+    const DualArmServoLoop* loop,
+    const DualArmConfig& config,
+    const std::shared_ptr<IKinematics>& kinematics,
+    bool kinematics_injected,
+    ArmId arm_id,
+    const JointArray& q_target_deg
+) {
+    if (!referenceSupervisionActive(config, arm_id)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_reference_supervision_mutex);
+    ReferenceSupervisionRuntime& runtime =
+        runtimeForArm(g_reference_supervision_states[loop], arm_id);
+    runtime.has_latest_sent_target = true;
+    runtime.latest_sent_q_target_deg = q_target_deg;
+    runtime.latest_sent_tcp_ref_stand.reset();
+
+    const bool publish_tcp = config.kinematics.publish_tcp || kinematics_injected;
+    if (!kinematics || !publish_tcp || !finiteJointArray(q_target_deg)) {
+        return;
+    }
+
+    try {
+        const ArmMountConfig& mount = arm_id == ArmId::Left
+            ? config.left_mount
+            : config.right_mount;
+        runtime.latest_sent_tcp_ref_stand =
+            kinematics->computeTcpStand(arm_id, q_target_deg, mount);
+    } catch (const std::exception&) {
+        runtime.latest_sent_tcp_ref_stand.reset();
+    }
+}
+
+void updateReferenceSupervision(
+    const DualArmServoLoop* loop,
+    const DualArmConfig& config,
+    ArmId arm_id,
+    const RobotState& state,
+    uint64_t observed_ns,
+    RbpodoAsyncStreamingTelemetry* telemetry
+) {
+    if (!telemetry || !referenceSupervisionActive(config, arm_id)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_reference_supervision_mutex);
+    ReferenceSupervisionRuntime& runtime =
+        runtimeForArm(g_reference_supervision_states[loop], arm_id);
+    const auto& ref_cfg = config.servo.rbpodo_async_streaming.reference_supervision;
+    const RbpodoAsyncStreamingMode mode = config.servo.rbpodo_async_streaming.mode;
+    const bool socket_send_supervised = mode == RbpodoAsyncStreamingMode::SocketSendSupervised;
+    const bool fault_policy =
+        ref_cfg.policy == RbpodoAsyncReferenceSupervisionPolicy::FaultLatch;
+    const double q_ref_epsilon_deg = 1e-6;
+    const double tcp_ref_epsilon_m = 1e-6;
+
+    RbpodoAsyncStreamingSupervisionState reference_state =
+        RbpodoAsyncStreamingSupervisionState::Ok;
+    std::string reference_reason;
+    const auto mark = [&](RbpodoAsyncStreamingSupervisionState candidate, const std::string& reason) {
+        const RbpodoAsyncStreamingSupervisionState merged = moreSevere(reference_state, candidate);
+        if (merged != reference_state || reference_reason.empty()) {
+            reference_state = merged;
+            reference_reason = reason;
+        }
+    };
+    const auto markPolicyViolation = [&](const std::string& reason) {
+        mark(
+            socket_send_supervised && fault_policy
+                ? RbpodoAsyncStreamingSupervisionState::Fault
+                : RbpodoAsyncStreamingSupervisionState::Warning,
+            reason
+        );
+    };
+    const auto markUpdateTimeout = [&](const std::string& reason) {
+        mark(
+            socket_send_supervised
+                ? RbpodoAsyncStreamingSupervisionState::Fault
+                : RbpodoAsyncStreamingSupervisionState::Warning,
+            reason
+        );
+    };
+
+    const bool q_ref_valid =
+        state.q_ref_valid &&
+        state.has_valid_joint_state &&
+        finiteJointArray(state.q_target_deg);
+    const uint64_t q_ref_sequence_ns = referenceStateSequenceNs(state);
+    bool q_ref_updated = false;
+
+    if (q_ref_valid) {
+        q_ref_updated =
+            !runtime.have_q_ref_sample ||
+            maxAbsJointDelta(state.q_target_deg, runtime.last_q_ref_deg) > q_ref_epsilon_deg ||
+            stateSequenceChanged(runtime.last_q_ref_state_sequence_ns, q_ref_sequence_ns);
+        if (q_ref_updated) {
+            runtime.have_q_ref_sample = true;
+            runtime.last_q_ref_deg = state.q_target_deg;
+            runtime.last_q_ref_state_sequence_ns = q_ref_sequence_ns;
+            runtime.last_q_ref_update_host_time_ns = observed_ns;
+        }
+    } else {
+        mark(RbpodoAsyncStreamingSupervisionState::Fault, "async_reference_q_ref_invalid");
+    }
+
+    const bool tcp_ref_valid =
+        state.tcp_ref_valid &&
+        state.tcp_ref_stand.has_value() &&
+        finiteTcpPosition(*state.tcp_ref_stand);
+    bool tcp_ref_updated = false;
+    if (tcp_ref_valid) {
+        tcp_ref_updated =
+            !runtime.have_tcp_ref_sample ||
+            tcpPositionDistanceM(*state.tcp_ref_stand, runtime.last_tcp_ref_stand) >
+                tcp_ref_epsilon_m ||
+            q_ref_updated;
+        if (tcp_ref_updated) {
+            runtime.have_tcp_ref_sample = true;
+            runtime.last_tcp_ref_stand = *state.tcp_ref_stand;
+            runtime.last_tcp_ref_update_host_time_ns = observed_ns;
+        }
+    }
+
+    double q_ref_update_age_ms = 0.0;
+    if (runtime.last_q_ref_update_host_time_ns > 0 &&
+        observed_ns >= runtime.last_q_ref_update_host_time_ns) {
+        q_ref_update_age_ms =
+            static_cast<double>(observed_ns - runtime.last_q_ref_update_host_time_ns) /
+            1'000'000.0;
+        if (q_ref_update_age_ms >= ref_cfg.q_ref_update_timeout_ms) {
+            if (runtime.last_q_ref_watchdog_miss_ns != observed_ns) {
+                runtime.last_q_ref_watchdog_miss_ns = observed_ns;
+                ++runtime.q_ref_watchdog_miss_count;
+            }
+            markUpdateTimeout("async_q_ref_update_timeout");
+        }
+    }
+
+    double tcp_ref_update_age_ms = 0.0;
+    if (runtime.have_tcp_ref_sample &&
+        runtime.last_tcp_ref_update_host_time_ns > 0 &&
+        observed_ns >= runtime.last_tcp_ref_update_host_time_ns) {
+        tcp_ref_update_age_ms =
+            static_cast<double>(observed_ns - runtime.last_tcp_ref_update_host_time_ns) /
+            1'000'000.0;
+        if (tcp_ref_update_age_ms >= ref_cfg.tcp_ref_update_timeout_ms) {
+            if (runtime.last_tcp_ref_watchdog_miss_ns != observed_ns) {
+                runtime.last_tcp_ref_watchdog_miss_ns = observed_ns;
+                ++runtime.tcp_ref_watchdog_miss_count;
+            }
+            markUpdateTimeout("async_tcp_ref_update_timeout");
+        }
+    }
+
+    double q_ref_target_error_deg_max = 0.0;
+    if (q_ref_valid && runtime.has_latest_sent_target) {
+        q_ref_target_error_deg_max =
+            maxAbsJointDelta(state.q_target_deg, runtime.latest_sent_q_target_deg);
+        if (q_ref_target_error_deg_max > ref_cfg.q_ref_target_tolerance_deg) {
+            if (runtime.q_ref_target_error_start_ns == 0) {
+                runtime.q_ref_target_error_start_ns = observed_ns;
+            }
+            mark(RbpodoAsyncStreamingSupervisionState::Warning, "async_q_ref_target_error");
+            const double error_age_ms = observed_ns >= runtime.q_ref_target_error_start_ns
+                ? static_cast<double>(observed_ns - runtime.q_ref_target_error_start_ns) /
+                    1'000'000.0
+                : 0.0;
+            if (error_age_ms >= ref_cfg.q_ref_target_fault_after_ms) {
+                markPolicyViolation("async_q_ref_target_error");
+            }
+        } else {
+            runtime.q_ref_target_error_start_ns = 0;
+        }
+    } else {
+        runtime.q_ref_target_error_start_ns = 0;
+    }
+
+    double tcp_ref_target_error_m = 0.0;
+    if (tcp_ref_valid && runtime.latest_sent_tcp_ref_stand.has_value()) {
+        tcp_ref_target_error_m =
+            tcpPositionDistanceM(*state.tcp_ref_stand, *runtime.latest_sent_tcp_ref_stand);
+        if (tcp_ref_target_error_m > ref_cfg.tcp_ref_target_tolerance_m) {
+            if (runtime.tcp_ref_target_error_start_ns == 0) {
+                runtime.tcp_ref_target_error_start_ns = observed_ns;
+            }
+            mark(RbpodoAsyncStreamingSupervisionState::Warning, "async_tcp_ref_target_error");
+            const double error_age_ms = observed_ns >= runtime.tcp_ref_target_error_start_ns
+                ? static_cast<double>(observed_ns - runtime.tcp_ref_target_error_start_ns) /
+                    1'000'000.0
+                : 0.0;
+            if (error_age_ms >= ref_cfg.tcp_ref_target_fault_after_ms) {
+                markPolicyViolation("async_tcp_ref_target_error");
+            }
+        } else {
+            runtime.tcp_ref_target_error_start_ns = 0;
+        }
+    } else {
+        runtime.tcp_ref_target_error_start_ns = 0;
+    }
+
+    if (reference_state == RbpodoAsyncStreamingSupervisionState::Fault &&
+        runtime.last_state != RbpodoAsyncStreamingSupervisionState::Fault) {
+        ++runtime.fault_count;
+    }
+    runtime.last_state = reference_state;
+    runtime.last_reason = reference_reason;
+
+    telemetry->last_q_ref_update_host_time_ns = runtime.last_q_ref_update_host_time_ns;
+    telemetry->last_tcp_ref_update_host_time_ns = runtime.last_tcp_ref_update_host_time_ns;
+    telemetry->q_ref_update_age_ms = q_ref_update_age_ms;
+    telemetry->tcp_ref_update_age_ms = tcp_ref_update_age_ms;
+    telemetry->q_ref_target_error_deg_max = q_ref_target_error_deg_max;
+    telemetry->tcp_ref_target_error_m = tcp_ref_target_error_m;
+    telemetry->q_ref_watchdog_miss_count += runtime.q_ref_watchdog_miss_count;
+    telemetry->tcp_ref_watchdog_miss_count += runtime.tcp_ref_watchdog_miss_count;
+    telemetry->reference_supervision_state = reference_state;
+    telemetry->reference_supervision_reason = reference_reason;
+    telemetry->reference_supervision_fault_count = runtime.fault_count;
+    telemetry->supervision_state = moreSevere(telemetry->supervision_state, reference_state);
+    if (!reference_reason.empty()) {
+        if (reference_state == RbpodoAsyncStreamingSupervisionState::Fault ||
+            telemetry->last_failure.empty()) {
+            telemetry->last_failure = reference_reason;
+        }
+    }
 }
 
 SafetyTrackingState trackingStateForArm(
@@ -886,16 +1224,14 @@ std::optional<FaultContext> asyncSupervisionFaultContext(
 }
 
 LatchedDualFaultContext asyncSupervisionFaultContexts(
-    const ArmWorker* left_worker,
-    const ArmWorker* right_worker
+    const RbpodoAsyncStreamingTelemetry& left_telemetry,
+    const RbpodoAsyncStreamingTelemetry& right_telemetry
 ) {
     LatchedDualFaultContext contexts;
     const std::optional<FaultContext> left =
-        left_worker ? asyncSupervisionFaultContext(left_worker->asyncStreamingTelemetry(), ArmId::Left)
-                    : std::nullopt;
+        asyncSupervisionFaultContext(left_telemetry, ArmId::Left);
     const std::optional<FaultContext> right =
-        right_worker ? asyncSupervisionFaultContext(right_worker->asyncStreamingTelemetry(), ArmId::Right)
-                     : std::nullopt;
+        asyncSupervisionFaultContext(right_telemetry, ArmId::Right);
     contexts.left = left;
     contexts.right = right;
     if (left.has_value()) {
@@ -932,10 +1268,12 @@ DualArmServoLoop::DualArmServoLoop(
     right_traj_filter_(config.servo, config.safety),
     safety_filter_(config.safety) {
     kinematics_ = kinematics ? std::move(kinematics) : makeKinematicsProvider(config);
+    resetReferenceSupervisionState(this);
 }
 
 DualArmServoLoop::~DualArmServoLoop() {
     stop();
+    eraseReferenceSupervisionState(this);
 }
 
 bool DualArmServoLoop::start() {
@@ -1180,9 +1518,31 @@ void DualArmServoLoop::loopMain() {
         LatchedDualFaultContext read_fault_contexts =
             dualReadFaultContext(left_read_fault, right_read_fault);
         bool state_ok = read_fault.verdict == SafetyVerdict::Ok;
+        RbpodoAsyncStreamingTelemetry left_async_telemetry = workerBackedIoMode()
+            ? asyncTelemetryOrDefault(left_worker_.get())
+            : RbpodoAsyncStreamingTelemetry{};
+        RbpodoAsyncStreamingTelemetry right_async_telemetry = workerBackedIoMode()
+            ? asyncTelemetryOrDefault(right_worker_.get())
+            : RbpodoAsyncStreamingTelemetry{};
+        updateReferenceSupervision(
+            this,
+            config_,
+            ArmId::Left,
+            left_state,
+            loop_start,
+            &left_async_telemetry
+        );
+        updateReferenceSupervision(
+            this,
+            config_,
+            ArmId::Right,
+            right_state,
+            loop_start,
+            &right_async_telemetry
+        );
         if (rbpodoAsyncIoMode() && !fault_latched_.load()) {
             const LatchedDualFaultContext async_fault_contexts =
-                asyncSupervisionFaultContexts(left_worker_.get(), right_worker_.get());
+                asyncSupervisionFaultContexts(left_async_telemetry, right_async_telemetry);
             if (async_fault_contexts.top_level.has_value()) {
                 latchFault(
                     SafetyVerdict::SendFailure,
@@ -1377,6 +1737,46 @@ void DualArmServoLoop::loopMain() {
             right_state = *right_send_result.state_after;
             populateTcpPose(right_state, config_.right_mount);
         }
+        if (left_ok && !fault_latched_before_send && !send_suppressed) {
+            noteReferenceSupervisionSentTarget(
+                this,
+                config_,
+                kinematics_,
+                kinematics_injected_,
+                ArmId::Left,
+                attempted_target.left_q_target_deg
+            );
+        }
+        if (right_ok && !fault_latched_before_send && !send_suppressed) {
+            noteReferenceSupervisionSentTarget(
+                this,
+                config_,
+                kinematics_,
+                kinematics_injected_,
+                ArmId::Right,
+                attempted_target.right_q_target_deg
+            );
+        }
+        if (workerBackedIoMode()) {
+            left_async_telemetry = asyncTelemetryOrDefault(left_worker_.get());
+            right_async_telemetry = asyncTelemetryOrDefault(right_worker_.get());
+            updateReferenceSupervision(
+                this,
+                config_,
+                ArmId::Left,
+                left_state,
+                loop_start,
+                &left_async_telemetry
+            );
+            updateReferenceSupervision(
+                this,
+                config_,
+                ArmId::Right,
+                right_state,
+                loop_start,
+                &right_async_telemetry
+            );
+        }
 
         const LatchedDualFaultContext send_fault_contexts =
             classifyDualSendResultContexts(dual_send_result);
@@ -1390,6 +1790,21 @@ void DualArmServoLoop::loopMain() {
                     ? "sendServoJ failed"
                     : send_fault.reason;
                 latchFault(send_fault.verdict, reason, left_state, right_state, send_fault_contexts);
+                safe_target = currentFaultHoldTarget();
+                safety_verdict = SafetyVerdict::FaultLatched;
+            }
+        }
+        if (rbpodoAsyncIoMode() && !fault_latched_.load()) {
+            const LatchedDualFaultContext async_fault_contexts =
+                asyncSupervisionFaultContexts(left_async_telemetry, right_async_telemetry);
+            if (async_fault_contexts.top_level.has_value()) {
+                latchFault(
+                    SafetyVerdict::SendFailure,
+                    "rbpodo async streaming supervision fault",
+                    left_state,
+                    right_state,
+                    async_fault_contexts
+                );
                 safe_target = currentFaultHoldTarget();
                 safety_verdict = SafetyVerdict::FaultLatched;
             }
@@ -1504,8 +1919,8 @@ void DualArmServoLoop::loopMain() {
         if (workerBackedIoMode()) {
             sample.left_worker_telemetry = workerTelemetryOrDefault(left_worker_.get());
             sample.right_worker_telemetry = workerTelemetryOrDefault(right_worker_.get());
-            sample.left_async_streaming = asyncTelemetryOrDefault(left_worker_.get());
-            sample.right_async_streaming = asyncTelemetryOrDefault(right_worker_.get());
+            sample.left_async_streaming = left_async_telemetry;
+            sample.right_async_streaming = right_async_telemetry;
             sample.left_transport_telemetry = workerTransportTelemetry(left_worker_.get());
             sample.right_transport_telemetry = workerTransportTelemetry(right_worker_.get());
         } else {
@@ -2926,6 +3341,7 @@ bool DualArmServoLoop::clearFaultLatch(RobotState& left_state, RobotState& right
     right_controller_sim_physical_baseline_q_deg_ = right_state.q_actual_deg;
     left_fault_hold_q_deg_ = left_prev_sent_q_deg_;
     right_fault_hold_q_deg_ = right_prev_sent_q_deg_;
+    resetReferenceSupervisionState(this);
     setMotionState(ServerMotionState::ConnectedHold);
     std::cerr << "[INFO] fault latch cleared\n";
     return true;

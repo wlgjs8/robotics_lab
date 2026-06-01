@@ -215,6 +215,16 @@ RbpodoAsyncQueuePolicy parseRbpodoAsyncQueuePolicy(const YAML::Node& node, const
     fail("Unknown " + path + ": " + value, node);
 }
 
+RbpodoAsyncReferenceSupervisionPolicy parseRbpodoAsyncReferenceSupervisionPolicy(
+    const YAML::Node& node,
+    const std::string& path
+) {
+    const std::string value = lower(asString(node, path));
+    if (value == "warn_only") return RbpodoAsyncReferenceSupervisionPolicy::WarnOnly;
+    if (value == "fault_latch") return RbpodoAsyncReferenceSupervisionPolicy::FaultLatch;
+    fail("Unknown " + path + ": " + value, node);
+}
+
 LinearMoveOrientationMode parseLinearMoveOrientationMode(const YAML::Node& node, const std::string& path) {
     const std::string value = lower(asString(node, path));
     if (value == "constant") return LinearMoveOrientationMode::Constant;
@@ -381,7 +391,11 @@ void applyRbpodoAsyncStreamingSection(
             "enable",
             "q_ref_update_timeout_ms",
             "q_ref_target_tolerance_deg",
+            "q_ref_target_fault_after_ms",
             "tcp_ref_update_timeout_ms",
+            "tcp_ref_target_tolerance_m",
+            "tcp_ref_target_fault_after_ms",
+            "policy",
         }, path + ".reference_supervision");
         if (has(ref, "enable")) {
             cfg->reference_supervision.enable = asBool(ref["enable"], path + ".reference_supervision.enable");
@@ -394,9 +408,25 @@ void applyRbpodoAsyncStreamingSection(
             cfg->reference_supervision.q_ref_target_tolerance_deg =
                 asDouble(ref["q_ref_target_tolerance_deg"], path + ".reference_supervision.q_ref_target_tolerance_deg");
         }
+        if (has(ref, "q_ref_target_fault_after_ms")) {
+            cfg->reference_supervision.q_ref_target_fault_after_ms =
+                asDouble(ref["q_ref_target_fault_after_ms"], path + ".reference_supervision.q_ref_target_fault_after_ms");
+        }
         if (has(ref, "tcp_ref_update_timeout_ms")) {
             cfg->reference_supervision.tcp_ref_update_timeout_ms =
                 asDouble(ref["tcp_ref_update_timeout_ms"], path + ".reference_supervision.tcp_ref_update_timeout_ms");
+        }
+        if (has(ref, "tcp_ref_target_tolerance_m")) {
+            cfg->reference_supervision.tcp_ref_target_tolerance_m =
+                asDouble(ref["tcp_ref_target_tolerance_m"], path + ".reference_supervision.tcp_ref_target_tolerance_m");
+        }
+        if (has(ref, "tcp_ref_target_fault_after_ms")) {
+            cfg->reference_supervision.tcp_ref_target_fault_after_ms =
+                asDouble(ref["tcp_ref_target_fault_after_ms"], path + ".reference_supervision.tcp_ref_target_fault_after_ms");
+        }
+        if (has(ref, "policy")) {
+            cfg->reference_supervision.policy =
+                parseRbpodoAsyncReferenceSupervisionPolicy(ref["policy"], path + ".reference_supervision.policy");
         }
     }
 
@@ -666,8 +696,20 @@ void validateConfig(const DualArmConfig& cfg) {
         "servo.rbpodo_async_streaming.reference_supervision.q_ref_target_tolerance_deg"
     );
     validatePositiveFinite(
+        cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_target_fault_after_ms,
+        "servo.rbpodo_async_streaming.reference_supervision.q_ref_target_fault_after_ms"
+    );
+    validatePositiveFinite(
         cfg.servo.rbpodo_async_streaming.reference_supervision.tcp_ref_update_timeout_ms,
         "servo.rbpodo_async_streaming.reference_supervision.tcp_ref_update_timeout_ms"
+    );
+    validatePositiveFinite(
+        cfg.servo.rbpodo_async_streaming.reference_supervision.tcp_ref_target_tolerance_m,
+        "servo.rbpodo_async_streaming.reference_supervision.tcp_ref_target_tolerance_m"
+    );
+    validatePositiveFinite(
+        cfg.servo.rbpodo_async_streaming.reference_supervision.tcp_ref_target_fault_after_ms,
+        "servo.rbpodo_async_streaming.reference_supervision.tcp_ref_target_fault_after_ms"
     );
     validatePositiveFinite(static_cast<double>(cfg.network.state_pub_rate_hz), "network.state_pub_rate_hz");
     validatePositiveFinite(cfg.command_source.lease_timeout_sec, "command_source.lease_timeout_sec");

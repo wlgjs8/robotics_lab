@@ -187,12 +187,21 @@ bool testStatePublisherSerializesAsyncStreamingFields() {
     snapshot.left_async_streaming.last_command_seq = 99;
     snapshot.left_async_streaming.last_ack_seq = 88;
     snapshot.left_async_streaming.last_q_ref_update_host_time_ns = 777;
+    snapshot.left_async_streaming.last_tcp_ref_update_host_time_ns = 778;
     snapshot.left_async_streaming.last_socket_send_host_time_ns = 888;
+    snapshot.left_async_streaming.q_ref_update_age_ms = 12.5;
+    snapshot.left_async_streaming.tcp_ref_update_age_ms = 13.5;
+    snapshot.left_async_streaming.q_ref_target_error_deg_max = 1.25;
+    snapshot.left_async_streaming.tcp_ref_target_error_m = 0.031;
     snapshot.left_async_streaming.last_controller_acceptance_semantics = "controller_ack_observed";
     snapshot.left_async_streaming.worker_backlog = 6;
     snapshot.left_async_streaming.max_pending_age_ms_observed = 7.5;
     snapshot.left_async_streaming.supervision_state =
         rb_servo::RbpodoAsyncStreamingSupervisionState::Warning;
+    snapshot.left_async_streaming.reference_supervision_state =
+        rb_servo::RbpodoAsyncStreamingSupervisionState::Fault;
+    snapshot.left_async_streaming.reference_supervision_reason = "async_q_ref_target_error";
+    snapshot.left_async_streaming.reference_supervision_fault_count = 2;
 
     rb_servo::DualArmConfig cfg;
     cfg.servo.rbpodo_async_streaming.enable = true;
@@ -223,12 +232,20 @@ bool testStatePublisherSerializesAsyncStreamingFields() {
     RB_CHECK(async.at("last_command_seq").get<uint64_t>() == 99);
     RB_CHECK(async.at("last_ack_seq").get<uint64_t>() == 88);
     RB_CHECK(async.at("last_q_ref_update_host_time_ns").get<uint64_t>() == 777);
+    RB_CHECK(async.at("last_tcp_ref_update_host_time_ns").get<uint64_t>() == 778);
     RB_CHECK(async.at("last_socket_send_host_time_ns").get<uint64_t>() == 888);
+    RB_CHECK(async.at("q_ref_update_age_ms").get<double>() == 12.5);
+    RB_CHECK(async.at("tcp_ref_update_age_ms").get<double>() == 13.5);
+    RB_CHECK(async.at("q_ref_target_error_deg_max").get<double>() == 1.25);
+    RB_CHECK(async.at("tcp_ref_target_error_m").get<double>() == 0.031);
     RB_CHECK(async.at("last_controller_acceptance_semantics").get<std::string>() == "socket_send_only");
     RB_CHECK(async.at("last_controller_acceptance_semantics").get<std::string>() != "controller_ack_observed");
     RB_CHECK(async.at("worker_backlog").get<uint64_t>() == 6);
     RB_CHECK(async.at("max_pending_age_ms_observed").get<double>() == 7.5);
     RB_CHECK(async.at("supervision_state").get<std::string>() == "warning");
+    RB_CHECK(async.at("reference_supervision_state").get<std::string>() == "fault");
+    RB_CHECK(async.at("reference_supervision_reason").get<std::string>() == "async_q_ref_target_error");
+    RB_CHECK(async.at("reference_supervision_fault_count").get<uint64_t>() == 2);
     return true;
 }
 
