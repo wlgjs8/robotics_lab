@@ -103,6 +103,45 @@ enum class ControllerSimulationPhysicalMotionPolicy {
     FaultLatch
 };
 
+enum class RbpodoAsyncStreamingMode {
+    Disabled,
+    SdkAckWorker,
+    SocketSendSupervised
+};
+
+enum class RbpodoAsyncQueuePolicy {
+    LatestWins
+};
+
+struct RbpodoAsyncAckSupervisionConfig {
+    bool enable = true;
+    double expected_ack_timeout_ms = 50.0;
+    double missing_ack_fault_after_ms = 100.0;
+    int max_consecutive_missing_ack = 10;
+};
+
+struct RbpodoAsyncReferenceSupervisionConfig {
+    bool enable = true;
+    double q_ref_update_timeout_ms = 50.0;
+    double q_ref_target_tolerance_deg = 0.5;
+    double tcp_ref_update_timeout_ms = 50.0;
+};
+
+struct RbpodoAsyncDiagnosticsConfig {
+    bool publish_per_command_jsonl = false;
+};
+
+struct RbpodoAsyncStreamingConfig {
+    bool enable = false;
+    RbpodoAsyncStreamingMode mode = RbpodoAsyncStreamingMode::Disabled;
+    int rate_hz = 500;
+    RbpodoAsyncQueuePolicy queue_policy = RbpodoAsyncQueuePolicy::LatestWins;
+    double max_pending_age_ms = 10.0;
+    RbpodoAsyncAckSupervisionConfig ack_supervision;
+    RbpodoAsyncReferenceSupervisionConfig reference_supervision;
+    RbpodoAsyncDiagnosticsConfig diagnostics;
+};
+
 struct SafetyConfig {
     JointArray q_min_deg{};
     JointArray q_max_deg{};
@@ -151,6 +190,8 @@ struct ServoConfig {
 
     double servo_t1_rate_match_tolerance_ratio = 0.2;
     bool allow_servo_t1_rate_mismatch = false;
+
+    RbpodoAsyncStreamingConfig rbpodo_async_streaming;
 };
 
 struct NetworkConfig {

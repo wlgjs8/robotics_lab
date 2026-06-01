@@ -272,6 +272,85 @@ codes such as M561/M568/M569/M570 when they are observable.
 so command stalls are visible quickly during acceptance. Values must be finite
 and positive.
 
+### Rbpodo Async ACK-Supervised Streaming Contract
+
+Synchronous ACK terminology is fixed:
+
+- ACK-on means `controller_ack_observed`: the command call waited for and
+  observed controller ACK.
+- ACK-off means `socket_send_only`: the command was written through the client
+  path and must not be reported as controller ACK acceptance.
+
+`servo.rbpodo_async_streaming` defines the future async 500 Hz
+controller-simulation contract. It is disabled by default and does not change
+the default servo rate or current rbpodo transport behavior:
+
+```yaml
+servo:
+  rbpodo_async_streaming:
+    enable: false
+    mode: disabled
+    rate_hz: 500
+    queue_policy: latest_wins
+    max_pending_age_ms: 10
+    ack_supervision:
+      enable: true
+      expected_ack_timeout_ms: 50
+      missing_ack_fault_after_ms: 100
+      max_consecutive_missing_ack: 10
+    reference_supervision:
+      enable: true
+      q_ref_update_timeout_ms: 50
+      q_ref_target_tolerance_deg: 0.5
+      tcp_ref_update_timeout_ms: 50
+    diagnostics:
+      publish_per_command_jsonl: false
+```
+
+Allowed modes:
+
+- `disabled`: existing synchronous behavior.
+- `sdk_ack_worker`: the servo loop dispatches non-blockingly; a worker thread
+  calls the rbpodo SDK with ACK waiting enabled. Accepted commands have
+  `controller_ack_observed`, but throughput may be below 500 Hz if ACK waiting
+  is slow. Worker backlog, drops, and overwrites must be visible.
+- `socket_send_supervised`: the servo loop dispatches non-blockingly; the
+  rbpodo SDK is configured with `disable_waiting_ack=true` or equivalent.
+  Successful sends are `socket_send_only`, never `controller_ack_observed`.
+  Controller acceptance must be inferred by `q_ref` and/or `tcp_ref` watchdogs.
+
+When `enable: true`, config/startup must fail unless both arms are
+`backend_type: rbpodo`, `run_mode: real`, and `operation_mode: simulation`.
+Physical `operation_mode: real` is explicitly refused. The runtime gates are:
+
+```bash
+RB_ALLOW_RBPODO_ASYNC_STREAMING=1
+RB_ALLOW_REAL_ROBOT=1
+RB_ALLOW_REAL_MOTION=1
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
+RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
+```
+
+`socket_send_supervised` additionally requires one of:
+
+```bash
+RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
+RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1
+```
+
+This is a Rainbow controller `pgmode` simulation carve-out only. Async
+supervision is not proof of physical real safety, does not authorize
+`operation_mode: real`, does not enable physical Cartesian motion, and does not
+promote 500 Hz to a default rate.
+
+State JSON exposes top-level `async_streaming_enabled`,
+`async_streaming_mode`, and `async_streaming_policy`. Each arm exposes
+`async_streaming` with command counters, ACK/socket-send counters, drop and
+overwrite counters, q_ref/tcp_ref watchdog miss counters, sequence numbers,
+last q_ref/socket-send timestamps, `last_controller_acceptance_semantics`,
+worker backlog, max observed pending age, and `supervision_state`:
+`ok`, `warning`, or `fault`.
+
 ### Rbpodo Servo J Parameters
 
 `RbpodoBackend::sendServoJ()` maps rbpodo config fields directly to Rainbow
@@ -444,6 +523,9 @@ State JSON should expose:
   `RbsimBackend`
 - rbpodo raw diagnostics and interpretation status under
   `rbpodo_diagnostics` when using `RbpodoBackend`
+- rbpodo async streaming contract fields, including top-level
+  `async_streaming_enabled` / `async_streaming_mode` / `async_streaming_policy`
+  and per-arm `async_streaming` counters plus ACK/reference supervision state
 - startup joint wrapping diagnostics, including raw-preserving
   `q_range_wrapped` and optional `q_actual_normalized_for_safety_deg`
 - TCP pose and quaternion when FK is available

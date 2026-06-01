@@ -65,6 +65,58 @@ private:
     std::string old_value_;
 };
 
+std::string asyncControllerSimulationBody(
+    const std::string& mode,
+    const std::string& left_operation_mode = "simulation",
+    const std::string& right_operation_mode = "simulation",
+    bool disable_waiting_ack = false
+) {
+    const std::string ack_line = disable_waiting_ack ? "  disable_waiting_ack: true\n" : "";
+    return
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: 172.28.60.200\n"
+        "  operation_mode: " + left_operation_mode + "\n"
+        "  servo_t1_sec: 0.002\n"
+        "  servo_t2_sec: 0.03\n" +
+        ack_line +
+        "right_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: 172.28.60.201\n"
+        "  operation_mode: " + right_operation_mode + "\n"
+        "  servo_t1_sec: 0.002\n"
+        "  servo_t2_sec: 0.03\n" +
+        ack_line +
+        "servo:\n"
+        "  rate_hz: 500\n"
+        "  enable_realtime_priority: true\n"
+        "  send_servo_commands: true\n"
+        "  allow_controller_simulation_motion: true\n"
+        "  rbpodo_async_streaming:\n"
+        "    enable: true\n"
+        "    mode: " + mode + "\n"
+        "    rate_hz: 500\n"
+        "    queue_policy: latest_wins\n"
+        "    max_pending_age_ms: 10\n"
+        "    ack_supervision:\n"
+        "      enable: true\n"
+        "      expected_ack_timeout_ms: 50\n"
+        "      missing_ack_fault_after_ms: 100\n"
+        "      max_consecutive_missing_ack: 10\n"
+        "    reference_supervision:\n"
+        "      enable: true\n"
+        "      q_ref_update_timeout_ms: 50\n"
+        "      q_ref_target_tolerance_deg: 0.5\n"
+        "      tcp_ref_update_timeout_ms: 50\n"
+        "    diagnostics:\n"
+        "      publish_per_command_jsonl: false\n"
+        "safety:\n"
+        "  tracking_error_policy: fault_latch\n";
+}
+
 bool testJointWrapConfigParses() {
     const std::string path = writeTempConfig(
         "valid",
@@ -253,6 +305,87 @@ bool testControllerSimulationGateConfig() {
     return true;
 }
 
+bool testRbpodoAsyncStreamingConfigContract() {
+    const std::string default_path = writeTempConfig(
+        "async-default",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+    );
+    const rb_servo::DualArmConfig default_cfg = rb_servo::loadConfigFromYaml(default_path);
+    ::unlink(default_path.c_str());
+    RB_CHECK(!default_cfg.servo.rbpodo_async_streaming.enable);
+    RB_CHECK(
+        default_cfg.servo.rbpodo_async_streaming.mode ==
+        rb_servo::RbpodoAsyncStreamingMode::Disabled
+    );
+    RB_CHECK(default_cfg.servo.rbpodo_async_streaming.rate_hz == 500);
+    RB_CHECK(
+        default_cfg.servo.rbpodo_async_streaming.queue_policy ==
+        rb_servo::RbpodoAsyncQueuePolicy::LatestWins
+    );
+
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
+    EnvVarGuard allow_ack_disabled("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION");
+    EnvVarGuard allow_socket_send("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING");
+
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    pgmode_confirmed.set("1");
+    allow_async.set("1");
+    allow_ack_disabled.unset();
+    allow_socket_send.unset();
+
+    const std::string valid_sdk_path = writeTempConfig(
+        "async-sdk-valid",
+        asyncControllerSimulationBody("sdk_ack_worker")
+    );
+    const rb_servo::DualArmConfig sdk_cfg = rb_servo::loadConfigFromYaml(valid_sdk_path);
+    ::unlink(valid_sdk_path.c_str());
+    RB_CHECK(sdk_cfg.servo.rbpodo_async_streaming.enable);
+    RB_CHECK(
+        sdk_cfg.servo.rbpodo_async_streaming.mode ==
+        rb_servo::RbpodoAsyncStreamingMode::SdkAckWorker
+    );
+    RB_CHECK(sdk_cfg.servo.rbpodo_async_streaming.rate_hz == 500);
+    RB_CHECK(sdk_cfg.servo.rbpodo_async_streaming.ack_supervision.enable);
+    RB_CHECK(sdk_cfg.servo.rbpodo_async_streaming.reference_supervision.enable);
+
+    const std::string real_mode_path = writeTempConfig(
+        "async-real-operation-reject",
+        asyncControllerSimulationBody("sdk_ack_worker", "real", "simulation")
+    );
+    RB_CHECK(loadRejects(real_mode_path));
+    ::unlink(real_mode_path.c_str());
+
+    allow_socket_send.set("1");
+    const std::string valid_socket_path = writeTempConfig(
+        "async-socket-valid",
+        asyncControllerSimulationBody("socket_send_supervised", "simulation", "simulation", true)
+    );
+    const rb_servo::DualArmConfig socket_cfg = rb_servo::loadConfigFromYaml(valid_socket_path);
+    ::unlink(valid_socket_path.c_str());
+    RB_CHECK(
+        socket_cfg.servo.rbpodo_async_streaming.mode ==
+        rb_servo::RbpodoAsyncStreamingMode::SocketSendSupervised
+    );
+    RB_CHECK(socket_cfg.left_robot.disable_waiting_ack);
+    RB_CHECK(socket_cfg.right_robot.disable_waiting_ack);
+
+    allow_socket_send.unset();
+    const std::string socket_missing_env_path = writeTempConfig(
+        "async-socket-missing-env",
+        asyncControllerSimulationBody("socket_send_supervised")
+    );
+    RB_CHECK(loadRejects(socket_missing_env_path));
+    ::unlink(socket_missing_env_path.c_str());
+
+    return true;
+}
+
 bool testStatePublisherEndpointsParseAndValidate() {
     const std::string valid_path = writeTempConfig(
         "state-pub-endpoints-valid",
@@ -333,6 +466,7 @@ int main() {
     if (!testJointWrapConfigParses()) return 1;
     if (!testInvalidJointWrapConfigRejects()) return 1;
     if (!testControllerSimulationGateConfig()) return 1;
+    if (!testRbpodoAsyncStreamingConfigContract()) return 1;
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;
     return 0;
 }

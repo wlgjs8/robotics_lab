@@ -201,6 +201,20 @@ ServoIoModel parseServoIoModel(const YAML::Node& node, const std::string& path) 
     fail("Unknown servo.io_model: " + value, node);
 }
 
+RbpodoAsyncStreamingMode parseRbpodoAsyncStreamingMode(const YAML::Node& node, const std::string& path) {
+    const std::string value = lower(asString(node, path));
+    if (value == "disabled") return RbpodoAsyncStreamingMode::Disabled;
+    if (value == "sdk_ack_worker") return RbpodoAsyncStreamingMode::SdkAckWorker;
+    if (value == "socket_send_supervised") return RbpodoAsyncStreamingMode::SocketSendSupervised;
+    fail("Unknown " + path + ": " + value, node);
+}
+
+RbpodoAsyncQueuePolicy parseRbpodoAsyncQueuePolicy(const YAML::Node& node, const std::string& path) {
+    const std::string value = lower(asString(node, path));
+    if (value == "latest_wins") return RbpodoAsyncQueuePolicy::LatestWins;
+    fail("Unknown " + path + ": " + value, node);
+}
+
 LinearMoveOrientationMode parseLinearMoveOrientationMode(const YAML::Node& node, const std::string& path) {
     const std::string value = lower(asString(node, path));
     if (value == "constant") return LinearMoveOrientationMode::Constant;
@@ -307,6 +321,94 @@ void applyDeprecatedDoubleAlias(
     } else if (has_deprecated) {
         warnDeprecatedKey(path + "." + deprecated, path + "." + canonical);
         *target = asDouble(sec[deprecated], path + "." + deprecated);
+    }
+}
+
+void applyRbpodoAsyncStreamingSection(
+    const YAML::Node& sec,
+    RbpodoAsyncStreamingConfig* cfg,
+    const std::string& path
+) {
+    validateAllowedKeys(sec, {
+        "enable",
+        "mode",
+        "rate_hz",
+        "queue_policy",
+        "max_pending_age_ms",
+        "ack_supervision",
+        "reference_supervision",
+        "diagnostics",
+    }, path);
+
+    if (has(sec, "enable")) cfg->enable = asBool(sec["enable"], path + ".enable");
+    if (has(sec, "mode")) cfg->mode = parseRbpodoAsyncStreamingMode(sec["mode"], path + ".mode");
+    if (has(sec, "rate_hz")) cfg->rate_hz = asInt(sec["rate_hz"], path + ".rate_hz");
+    if (has(sec, "queue_policy")) {
+        cfg->queue_policy = parseRbpodoAsyncQueuePolicy(sec["queue_policy"], path + ".queue_policy");
+    }
+    if (has(sec, "max_pending_age_ms")) {
+        cfg->max_pending_age_ms = asDouble(sec["max_pending_age_ms"], path + ".max_pending_age_ms");
+    }
+
+    if (has(sec, "ack_supervision")) {
+        const YAML::Node ack = sec["ack_supervision"];
+        validateAllowedKeys(ack, {
+            "enable",
+            "expected_ack_timeout_ms",
+            "missing_ack_fault_after_ms",
+            "max_consecutive_missing_ack",
+        }, path + ".ack_supervision");
+        if (has(ack, "enable")) {
+            cfg->ack_supervision.enable = asBool(ack["enable"], path + ".ack_supervision.enable");
+        }
+        if (has(ack, "expected_ack_timeout_ms")) {
+            cfg->ack_supervision.expected_ack_timeout_ms =
+                asDouble(ack["expected_ack_timeout_ms"], path + ".ack_supervision.expected_ack_timeout_ms");
+        }
+        if (has(ack, "missing_ack_fault_after_ms")) {
+            cfg->ack_supervision.missing_ack_fault_after_ms =
+                asDouble(ack["missing_ack_fault_after_ms"], path + ".ack_supervision.missing_ack_fault_after_ms");
+        }
+        if (has(ack, "max_consecutive_missing_ack")) {
+            cfg->ack_supervision.max_consecutive_missing_ack =
+                asInt(ack["max_consecutive_missing_ack"], path + ".ack_supervision.max_consecutive_missing_ack");
+        }
+    }
+
+    if (has(sec, "reference_supervision")) {
+        const YAML::Node ref = sec["reference_supervision"];
+        validateAllowedKeys(ref, {
+            "enable",
+            "q_ref_update_timeout_ms",
+            "q_ref_target_tolerance_deg",
+            "tcp_ref_update_timeout_ms",
+        }, path + ".reference_supervision");
+        if (has(ref, "enable")) {
+            cfg->reference_supervision.enable = asBool(ref["enable"], path + ".reference_supervision.enable");
+        }
+        if (has(ref, "q_ref_update_timeout_ms")) {
+            cfg->reference_supervision.q_ref_update_timeout_ms =
+                asDouble(ref["q_ref_update_timeout_ms"], path + ".reference_supervision.q_ref_update_timeout_ms");
+        }
+        if (has(ref, "q_ref_target_tolerance_deg")) {
+            cfg->reference_supervision.q_ref_target_tolerance_deg =
+                asDouble(ref["q_ref_target_tolerance_deg"], path + ".reference_supervision.q_ref_target_tolerance_deg");
+        }
+        if (has(ref, "tcp_ref_update_timeout_ms")) {
+            cfg->reference_supervision.tcp_ref_update_timeout_ms =
+                asDouble(ref["tcp_ref_update_timeout_ms"], path + ".reference_supervision.tcp_ref_update_timeout_ms");
+        }
+    }
+
+    if (has(sec, "diagnostics")) {
+        const YAML::Node diagnostics = sec["diagnostics"];
+        validateAllowedKeys(diagnostics, {
+            "publish_per_command_jsonl",
+        }, path + ".diagnostics");
+        if (has(diagnostics, "publish_per_command_jsonl")) {
+            cfg->diagnostics.publish_per_command_jsonl =
+                asBool(diagnostics["publish_per_command_jsonl"], path + ".diagnostics.publish_per_command_jsonl");
+        }
     }
 }
 
@@ -534,6 +636,39 @@ void validateConfig(const DualArmConfig& cfg) {
         cfg.servo.servo_t1_rate_match_tolerance_ratio,
         "servo.servo_t1_rate_match_tolerance_ratio"
     );
+    validatePositiveFinite(
+        static_cast<double>(cfg.servo.rbpodo_async_streaming.rate_hz),
+        "servo.rbpodo_async_streaming.rate_hz"
+    );
+    validatePositiveFinite(
+        cfg.servo.rbpodo_async_streaming.max_pending_age_ms,
+        "servo.rbpodo_async_streaming.max_pending_age_ms"
+    );
+    validatePositiveFinite(
+        cfg.servo.rbpodo_async_streaming.ack_supervision.expected_ack_timeout_ms,
+        "servo.rbpodo_async_streaming.ack_supervision.expected_ack_timeout_ms"
+    );
+    validatePositiveFinite(
+        cfg.servo.rbpodo_async_streaming.ack_supervision.missing_ack_fault_after_ms,
+        "servo.rbpodo_async_streaming.ack_supervision.missing_ack_fault_after_ms"
+    );
+    if (cfg.servo.rbpodo_async_streaming.ack_supervision.max_consecutive_missing_ack <= 0) {
+        throw std::runtime_error(
+            "servo.rbpodo_async_streaming.ack_supervision.max_consecutive_missing_ack must be positive"
+        );
+    }
+    validatePositiveFinite(
+        cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_update_timeout_ms,
+        "servo.rbpodo_async_streaming.reference_supervision.q_ref_update_timeout_ms"
+    );
+    validatePositiveFinite(
+        cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_target_tolerance_deg,
+        "servo.rbpodo_async_streaming.reference_supervision.q_ref_target_tolerance_deg"
+    );
+    validatePositiveFinite(
+        cfg.servo.rbpodo_async_streaming.reference_supervision.tcp_ref_update_timeout_ms,
+        "servo.rbpodo_async_streaming.reference_supervision.tcp_ref_update_timeout_ms"
+    );
     validatePositiveFinite(static_cast<double>(cfg.network.state_pub_rate_hz), "network.state_pub_rate_hz");
     validatePositiveFinite(cfg.command_source.lease_timeout_sec, "command_source.lease_timeout_sec");
     validatePositiveFinite(cfg.left_robot.rbsim_request_timeout_sec, "left_robot.simulator_request_timeout_sec");
@@ -627,6 +762,53 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error(
                 "Refusing rbpodo diagnostics-suspect controller-simulation override without "
                 "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1."
+            );
+        }
+    }
+    const RbpodoAsyncStreamingConfig& async_streaming = cfg.servo.rbpodo_async_streaming;
+    if (!async_streaming.enable && async_streaming.mode != RbpodoAsyncStreamingMode::Disabled) {
+        throw std::runtime_error(
+            "servo.rbpodo_async_streaming.mode must be disabled when "
+            "servo.rbpodo_async_streaming.enable=false"
+        );
+    }
+    if (async_streaming.enable) {
+        if (async_streaming.mode == RbpodoAsyncStreamingMode::Disabled) {
+            throw std::runtime_error(
+                "servo.rbpodo_async_streaming.enable=true requires mode sdk_ack_worker "
+                "or socket_send_supervised"
+            );
+        }
+        if (!cfg.servo.send_servo_commands) {
+            throw std::runtime_error(
+                "servo.rbpodo_async_streaming.enable=true requires servo.send_servo_commands=true"
+            );
+        }
+        if (!bothBackendsAreRbpodoControllerSimulation(cfg)) {
+            throw std::runtime_error(
+                "servo.rbpodo_async_streaming.enable=true requires both rbpodo backends "
+                "to use run_mode=real and operation_mode=simulation"
+            );
+        }
+        if (!envIsOne("RB_ALLOW_RBPODO_ASYNC_STREAMING") ||
+            !envIsOne("RB_ALLOW_REAL_ROBOT") ||
+            !envIsOne("RB_ALLOW_REAL_MOTION") ||
+            !envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") ||
+            !envIsOne("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")) {
+            throw std::runtime_error(
+                "Refusing rbpodo async streaming without RB_ALLOW_RBPODO_ASYNC_STREAMING=1, "
+                "RB_ALLOW_REAL_ROBOT=1, RB_ALLOW_REAL_MOTION=1, "
+                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1, and "
+                "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1."
+            );
+        }
+        if (async_streaming.mode == RbpodoAsyncStreamingMode::SocketSendSupervised &&
+            !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION") &&
+            !envIsOne("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING")) {
+            throw std::runtime_error(
+                "Refusing rbpodo socket_send_supervised async streaming without "
+                "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 or "
+                "RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1."
             );
         }
     }
@@ -837,13 +1019,21 @@ void validateConfig(const DualArmConfig& cfg) {
             }
             warn(message + "; send_servo_commands=false so this is a warning");
         }
+        const bool async_socket_send_supervised =
+            cfg.servo.rbpodo_async_streaming.enable &&
+            cfg.servo.rbpodo_async_streaming.mode == RbpodoAsyncStreamingMode::SocketSendSupervised;
+        const bool ack_disabled_motion_gate =
+            envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION") ||
+            (async_socket_send_supervised && envIsOne("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING"));
         if (backend.run_mode == RunMode::Real &&
             backend.disable_waiting_ack &&
             cfg.servo.send_servo_commands &&
-            !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")) {
+            !ack_disabled_motion_gate) {
             throw std::runtime_error(
                 "Refusing rbpodo real motion with disable_waiting_ack=true. "
-                "Set RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 only after explicit ACK-off acceptance."
+                "Set RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 only after explicit ACK-off acceptance, "
+                "or RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1 for async socket-send-only "
+                "controller-simulation streaming."
             );
         }
     };
@@ -1044,6 +1234,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "filter_dt_max_ratio",
             "servo_t1_rate_match_tolerance_ratio",
             "allow_servo_t1_rate_mismatch",
+            "rbpodo_async_streaming",
         }, "servo");
         if (has(sec, "rate_hz")) cfg.servo.rate_hz = asInt(sec["rate_hz"], "servo.rate_hz");
         if (has(sec, "command_timeout_sec")) cfg.servo.command_timeout_sec = asDouble(sec["command_timeout_sec"], "servo.command_timeout_sec");
@@ -1097,6 +1288,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "allow_servo_t1_rate_mismatch")) {
             cfg.servo.allow_servo_t1_rate_mismatch =
                 asBool(sec["allow_servo_t1_rate_mismatch"], "servo.allow_servo_t1_rate_mismatch");
+        }
+        if (has(sec, "rbpodo_async_streaming")) {
+            applyRbpodoAsyncStreamingSection(
+                sec["rbpodo_async_streaming"],
+                &cfg.servo.rbpodo_async_streaming,
+                "servo.rbpodo_async_streaming"
+            );
         }
     }
 

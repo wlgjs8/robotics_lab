@@ -172,11 +172,72 @@ bool testStatePublisherSerializesJointReferenceFields() {
     return true;
 }
 
+bool testStatePublisherSerializesAsyncStreamingFields() {
+    rb_servo::ServoSnapshot snapshot = snapshotWithTick(123);
+    snapshot.left_last_send.acceptance_semantics = "controller_ack_observed";
+    snapshot.left_async_streaming.commands_enqueued_total = 10;
+    snapshot.left_async_streaming.commands_sent_total = 9;
+    snapshot.left_async_streaming.commands_socket_sent_total = 9;
+    snapshot.left_async_streaming.commands_dropped_total = 1;
+    snapshot.left_async_streaming.commands_overwritten_total = 1;
+    snapshot.left_async_streaming.ack_timeout_count = 2;
+    snapshot.left_async_streaming.missing_ack_count = 3;
+    snapshot.left_async_streaming.q_ref_watchdog_miss_count = 4;
+    snapshot.left_async_streaming.tcp_ref_watchdog_miss_count = 5;
+    snapshot.left_async_streaming.last_command_seq = 99;
+    snapshot.left_async_streaming.last_ack_seq = 88;
+    snapshot.left_async_streaming.last_q_ref_update_host_time_ns = 777;
+    snapshot.left_async_streaming.last_socket_send_host_time_ns = 888;
+    snapshot.left_async_streaming.last_controller_acceptance_semantics = "controller_ack_observed";
+    snapshot.left_async_streaming.worker_backlog = 6;
+    snapshot.left_async_streaming.max_pending_age_ms_observed = 7.5;
+    snapshot.left_async_streaming.supervision_state =
+        rb_servo::RbpodoAsyncStreamingSupervisionState::Warning;
+
+    rb_servo::DualArmConfig cfg;
+    cfg.servo.rbpodo_async_streaming.enable = true;
+    cfg.servo.rbpodo_async_streaming.mode =
+        rb_servo::RbpodoAsyncStreamingMode::SocketSendSupervised;
+    cfg.servo.rbpodo_async_streaming.queue_policy =
+        rb_servo::RbpodoAsyncQueuePolicy::LatestWins;
+
+    rb_servo::StatePublisher publisher(cfg);
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    const nlohmann::json& async = json.at("left").at("async_streaming");
+
+    RB_CHECK(json.at("async_streaming_enabled").get<bool>());
+    RB_CHECK(json.at("async_streaming_mode").get<std::string>() == "socket_send_supervised");
+    RB_CHECK(json.at("async_streaming_policy").get<std::string>() == "latest_wins");
+    RB_CHECK(async.at("enabled").get<bool>());
+    RB_CHECK(async.at("mode").get<std::string>() == "socket_send_supervised");
+    RB_CHECK(async.at("queue_policy").get<std::string>() == "latest_wins");
+    RB_CHECK(async.at("commands_enqueued_total").get<uint64_t>() == 10);
+    RB_CHECK(async.at("commands_sent_total").get<uint64_t>() == 9);
+    RB_CHECK(async.at("commands_socket_sent_total").get<uint64_t>() == 9);
+    RB_CHECK(async.at("commands_dropped_total").get<uint64_t>() == 1);
+    RB_CHECK(async.at("commands_overwritten_total").get<uint64_t>() == 1);
+    RB_CHECK(async.at("ack_timeout_count").get<uint64_t>() == 2);
+    RB_CHECK(async.at("missing_ack_count").get<uint64_t>() == 3);
+    RB_CHECK(async.at("q_ref_watchdog_miss_count").get<uint64_t>() == 4);
+    RB_CHECK(async.at("tcp_ref_watchdog_miss_count").get<uint64_t>() == 5);
+    RB_CHECK(async.at("last_command_seq").get<uint64_t>() == 99);
+    RB_CHECK(async.at("last_ack_seq").get<uint64_t>() == 88);
+    RB_CHECK(async.at("last_q_ref_update_host_time_ns").get<uint64_t>() == 777);
+    RB_CHECK(async.at("last_socket_send_host_time_ns").get<uint64_t>() == 888);
+    RB_CHECK(async.at("last_controller_acceptance_semantics").get<std::string>() == "socket_send_only");
+    RB_CHECK(async.at("last_controller_acceptance_semantics").get<std::string>() != "controller_ack_observed");
+    RB_CHECK(async.at("worker_backlog").get<uint64_t>() == 6);
+    RB_CHECK(async.at("max_pending_age_ms_observed").get<double>() == 7.5);
+    RB_CHECK(async.at("supervision_state").get<std::string>() == "warning");
+    return true;
+}
+
 }  // namespace
 
 int main() {
     if (!testStatePublisherFanoutSendsSamePayloadToTwoSockets()) return 1;
     if (!testStatePublisherLegacySingleEndpointStillWorks()) return 1;
     if (!testStatePublisherSerializesJointReferenceFields()) return 1;
+    if (!testStatePublisherSerializesAsyncStreamingFields()) return 1;
     return 0;
 }

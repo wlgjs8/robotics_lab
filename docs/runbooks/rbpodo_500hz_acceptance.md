@@ -141,6 +141,71 @@ ACK waiting remains enabled in the 500 Hz templates:
 disable_waiting_ack: false
 ```
 
+This is synchronous ACK-on evidence, meaning accepted Servo J sends are
+reported as `controller_ack_observed`. Existing ACK-off diagnostics remain
+`socket_send_only` evidence and are not controller ACK acceptance.
+
+## Async ACK-Supervised Contract
+
+The async 500 Hz contract is defined before worker behavior is implemented.
+It is controller `pgmode` simulation only and remains disabled by default:
+
+```yaml
+servo:
+  rbpodo_async_streaming:
+    enable: false
+    mode: disabled
+    rate_hz: 500
+    queue_policy: latest_wins
+    max_pending_age_ms: 10
+    ack_supervision:
+      enable: true
+      expected_ack_timeout_ms: 50
+      missing_ack_fault_after_ms: 100
+      max_consecutive_missing_ack: 10
+    reference_supervision:
+      enable: true
+      q_ref_update_timeout_ms: 50
+      q_ref_target_tolerance_deg: 0.5
+      tcp_ref_update_timeout_ms: 50
+    diagnostics:
+      publish_per_command_jsonl: false
+```
+
+Modes:
+
+- `disabled`: current behavior.
+- `sdk_ack_worker`: a worker may block inside the rbpodo SDK waiting for ACK;
+  the servo loop must not block. Accepted commands use
+  `controller_ack_observed`; backlog and drops must be visible.
+- `socket_send_supervised`: the SDK uses `disable_waiting_ack=true` or an
+  equivalent socket-send-only path. Sends must be reported as
+  `socket_send_only`, never `controller_ack_observed`. `q_ref` and/or
+  `tcp_ref` watchdog supervision is required to infer controller acceptance.
+
+Async mode requires both arms to use `backend_type: rbpodo`, `run_mode: real`,
+and `operation_mode: simulation`; `operation_mode: real` is refused. Runtime
+also requires:
+
+```bash
+RB_ALLOW_RBPODO_ASYNC_STREAMING=1
+RB_ALLOW_REAL_ROBOT=1
+RB_ALLOW_REAL_MOTION=1
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
+RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
+```
+
+For `socket_send_supervised`, add one of:
+
+```bash
+RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
+RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1
+```
+
+Async supervision is not proof of physical real safety. It does not authorize
+physical `operation_mode: real`, physical Cartesian motion, or a default 500 Hz
+rate change.
+
 ## Build And Capabilities
 
 Build the rbpodo-enabled server:

@@ -181,6 +181,84 @@ std::string controllerSimulationPhysicalMotionPolicyString(
     return "unknown";
 }
 
+std::string rbpodoAsyncStreamingModeString(RbpodoAsyncStreamingMode mode) {
+    switch (mode) {
+        case RbpodoAsyncStreamingMode::Disabled:
+            return "disabled";
+        case RbpodoAsyncStreamingMode::SdkAckWorker:
+            return "sdk_ack_worker";
+        case RbpodoAsyncStreamingMode::SocketSendSupervised:
+            return "socket_send_supervised";
+    }
+    return "unknown";
+}
+
+std::string rbpodoAsyncQueuePolicyString(RbpodoAsyncQueuePolicy policy) {
+    switch (policy) {
+        case RbpodoAsyncQueuePolicy::LatestWins:
+            return "latest_wins";
+    }
+    return "unknown";
+}
+
+std::string rbpodoAsyncSupervisionStateString(RbpodoAsyncStreamingSupervisionState state) {
+    switch (state) {
+        case RbpodoAsyncStreamingSupervisionState::Ok:
+            return "ok";
+        case RbpodoAsyncStreamingSupervisionState::Warning:
+            return "warning";
+        case RbpodoAsyncStreamingSupervisionState::Fault:
+            return "fault";
+    }
+    return "unknown";
+}
+
+std::string rbpodoAsyncAcceptanceSemantics(
+    const RbpodoAsyncStreamingConfig& config,
+    const RbpodoAsyncStreamingTelemetry& telemetry
+) {
+    if (config.mode == RbpodoAsyncStreamingMode::SocketSendSupervised) {
+        return "socket_send_only";
+    }
+    if (!telemetry.last_controller_acceptance_semantics.empty()) {
+        return telemetry.last_controller_acceptance_semantics;
+    }
+    if (config.mode == RbpodoAsyncStreamingMode::SdkAckWorker) {
+        return "controller_ack_observed";
+    }
+    return "disabled";
+}
+
+nlohmann::json rbpodoAsyncStreamingJson(
+    const RbpodoAsyncStreamingConfig& config,
+    const RbpodoAsyncStreamingTelemetry& telemetry
+) {
+    return {
+        {"enabled", config.enable},
+        {"mode", rbpodoAsyncStreamingModeString(config.mode)},
+        {"queue_policy", rbpodoAsyncQueuePolicyString(config.queue_policy)},
+        {"commands_enqueued_total", telemetry.commands_enqueued_total},
+        {"commands_sent_total", telemetry.commands_sent_total},
+        {"commands_acked_total", telemetry.commands_acked_total},
+        {"commands_socket_sent_total", telemetry.commands_socket_sent_total},
+        {"commands_dropped_total", telemetry.commands_dropped_total},
+        {"commands_overwritten_total", telemetry.commands_overwritten_total},
+        {"ack_timeout_count", telemetry.ack_timeout_count},
+        {"missing_ack_count", telemetry.missing_ack_count},
+        {"q_ref_watchdog_miss_count", telemetry.q_ref_watchdog_miss_count},
+        {"tcp_ref_watchdog_miss_count", telemetry.tcp_ref_watchdog_miss_count},
+        {"last_command_seq", telemetry.last_command_seq},
+        {"last_ack_seq", telemetry.last_ack_seq},
+        {"last_q_ref_update_host_time_ns", telemetry.last_q_ref_update_host_time_ns},
+        {"last_socket_send_host_time_ns", telemetry.last_socket_send_host_time_ns},
+        {"last_controller_acceptance_semantics",
+            rbpodoAsyncAcceptanceSemantics(config, telemetry)},
+        {"worker_backlog", telemetry.worker_backlog},
+        {"max_pending_age_ms_observed", telemetry.max_pending_age_ms_observed},
+        {"supervision_state", rbpodoAsyncSupervisionStateString(telemetry.supervision_state)},
+    };
+}
+
 nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config) {
     return {
         {"schema", "robotics_lab.cartesian_control_snapshot.v1"},
@@ -895,6 +973,7 @@ nlohmann::json armStateJson(
     bool send_period_overrun,
     double worker_loop_read_duration_us,
     const ArmWorkerTelemetry& worker_telemetry,
+    const RbpodoAsyncStreamingTelemetry& async_streaming_telemetry,
     const std::optional<BackendTransportTelemetry>& transport_telemetry,
     bool worker_enabled,
     const ServoConfig& servo_config,
@@ -942,6 +1021,10 @@ nlohmann::json armStateJson(
         {"send_deadline_hit_deprecated_alias_for", "send_within_period"},
         {"worker_loop_read_duration_us", worker_loop_read_duration_us},
         {"worker", workerTelemetryJson(worker_telemetry, worker_enabled, servo_config, state_age_us)},
+        {"async_streaming", rbpodoAsyncStreamingJson(
+            servo_config.rbpodo_async_streaming,
+            async_streaming_telemetry
+        )},
         {"transport", transportTelemetryJson(transport_telemetry)},
         {"has_valid_joint_state", state.has_valid_joint_state},
         {"startup_acquisition_ok", startup_validation.acquisition_ok},
@@ -1161,6 +1244,11 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["command_source"] = commandSourceJson(snapshot, config_);
     message["observed_mode"] = observedModeString(config_);
     message["observed_backend"] = observedBackendString(config_);
+    message["async_streaming_enabled"] = config_.servo.rbpodo_async_streaming.enable;
+    message["async_streaming_mode"] =
+        rbpodoAsyncStreamingModeString(config_.servo.rbpodo_async_streaming.mode);
+    message["async_streaming_policy"] =
+        rbpodoAsyncQueuePolicyString(config_.servo.rbpodo_async_streaming.queue_policy);
     message["cartesian_control_snapshot"] = cartesianControlSnapshotJson(config_.cartesian_control);
     message["kinematics_snapshot"] = kinematicsSnapshotJson(config_.kinematics);
     message["startup_validation"] = startupValidationJson(snapshot.startup_validation);
@@ -1187,6 +1275,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         sendPeriodOverrun(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.left_send_end_ns),
         worker_enabled ? snapshot.left_last_read.duration_us : 0.0,
         snapshot.left_worker_telemetry,
+        snapshot.left_async_streaming,
         snapshot.left_transport_telemetry,
         worker_enabled,
         config_.servo,
@@ -1218,6 +1307,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         sendPeriodOverrun(snapshot.loop_start_time_ns, snapshot.period_ms, snapshot.right_send_end_ns),
         worker_enabled ? snapshot.right_last_read.duration_us : 0.0,
         snapshot.right_worker_telemetry,
+        snapshot.right_async_streaming,
         snapshot.right_transport_telemetry,
         worker_enabled,
         config_.servo,

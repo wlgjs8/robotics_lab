@@ -132,6 +132,12 @@ enum class BackendAckPolicy {
     Disabled
 };
 
+enum class RbpodoAsyncStreamingSupervisionState {
+    Ok,
+    Warning,
+    Fault
+};
+
 enum class SafetyVerdict {
     Ok,
     JointLimitClamped,
@@ -493,6 +499,28 @@ struct ArmWorkerTelemetry {
     std::string worker_queue_policy = "latest_wins";
 };
 
+struct RbpodoAsyncStreamingTelemetry {
+    uint64_t commands_enqueued_total = 0;
+    uint64_t commands_sent_total = 0;
+    uint64_t commands_acked_total = 0;
+    uint64_t commands_socket_sent_total = 0;
+    uint64_t commands_dropped_total = 0;
+    uint64_t commands_overwritten_total = 0;
+    uint64_t ack_timeout_count = 0;
+    uint64_t missing_ack_count = 0;
+    uint64_t q_ref_watchdog_miss_count = 0;
+    uint64_t tcp_ref_watchdog_miss_count = 0;
+    uint64_t last_command_seq = 0;
+    uint64_t last_ack_seq = 0;
+    uint64_t last_q_ref_update_host_time_ns = 0;
+    uint64_t last_socket_send_host_time_ns = 0;
+    std::string last_controller_acceptance_semantics;
+    uint64_t worker_backlog = 0;
+    double max_pending_age_ms_observed = 0.0;
+    RbpodoAsyncStreamingSupervisionState supervision_state =
+        RbpodoAsyncStreamingSupervisionState::Ok;
+};
+
 struct BackendTransportTelemetry {
     uint64_t connect_attempts_total = 0;
     uint64_t connect_failures_total = 0;
@@ -602,6 +630,8 @@ struct ServoSample {
     double right_send_duration_us = 0.0;
     ArmWorkerTelemetry left_worker_telemetry;
     ArmWorkerTelemetry right_worker_telemetry;
+    RbpodoAsyncStreamingTelemetry left_async_streaming;
+    RbpodoAsyncStreamingTelemetry right_async_streaming;
     std::optional<BackendTransportTelemetry> left_transport_telemetry;
     std::optional<BackendTransportTelemetry> right_transport_telemetry;
 
@@ -675,6 +705,8 @@ struct ServoSnapshot {
     double right_send_duration_us = 0.0;
     ArmWorkerTelemetry left_worker_telemetry;
     ArmWorkerTelemetry right_worker_telemetry;
+    RbpodoAsyncStreamingTelemetry left_async_streaming;
+    RbpodoAsyncStreamingTelemetry right_async_streaming;
     std::optional<BackendTransportTelemetry> left_transport_telemetry;
     std::optional<BackendTransportTelemetry> right_transport_telemetry;
     StartupValidationSnapshot startup_validation;
