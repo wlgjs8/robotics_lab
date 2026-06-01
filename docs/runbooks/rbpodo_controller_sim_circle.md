@@ -736,6 +736,15 @@ The state stream is robot/server telemetry (`tcp_actual_stand`,
 geometry and live metrics, so it must be visually treated as the desired path,
 not as robot state.
 
+Dead-time compensation is benchmark-side only. `--phase-advance-sec SEC`
+advances the desired circle sample used to generate benchmark commands by
+`SEC`, while `samples.csv`, error decomposition, and summary metrics still
+compare measured `tcp_ref_stand` against the desired trajectory at measurement
+time. The summary distinguishes `commanded_phase_advance_ms` from measured
+`estimated_latency_ms`. Do not use this option for physical-real commands; the
+rbpodo benchmark still requires `operation_mode: simulation`, pgmode
+confirmation, `physical_motion_expected=false`, and `allow_in_real: false`.
+
 `policy_runner` is not in this live-visualization path. It is a separate
 command source for policy/SpaceMouse workflows. In the circle live view, the
 benchmark script is the explicit command source, while the benchmark recorder
@@ -1105,9 +1114,9 @@ The matrix supports the intended factor split:
   `cartesian_control.max_linear_move_speed_m_s`,
   `cartesian_control.path_kp_pos`, `cartesian_control.path_kp_ori`, and
   `cartesian_control.twist_angular_deadband_rad_s`
-- `phase_advance_sec` is a matrix field reserved for the
-  P1-DEADTIME-PHASE-ADVANCE-01 benchmark support; use dry-run only until the
-  benchmark accepts `--phase-advance-sec`
+- `phase_advance_sec` forwards to benchmark `--phase-advance-sec`; the default
+  is `0.0`, values must be explicit and non-negative, and values greater than
+  `0.25 * period_sec` are rejected
 - ACK mode is derived from the referenced config's
   `disable_waiting_ack` fields
 
@@ -1206,6 +1215,9 @@ The ablation summary also carries decomposition columns:
 - `servo_t2_sec`
 - `servo_alpha`
 - `phase_advance_sec`
+- `phase_advance_fraction_of_period`
+- `phase_advance_effect`
+- `commanded_phase_advance_ms`
 - `speed_bar`
 - `send_duration_p99_us`
 - `servo_jitter_p99_ms`
@@ -1480,8 +1492,9 @@ controller-reference lower-bound evidence:
 - `p1_servo_t2_alpha.yaml`: stable low-gain candidate `pos=0.5, ori=0.2`
   across `servo_t2_sec` 0.03/0.05/0.08 and `servo_alpha` 0.3/0.5/0.8.
 - `p1_phase_advance.yaml`: low-gain candidate across `phase_advance_sec`
-  0.00/0.02/0.04/0.06/0.08. Live execution requires
-  P1-DEADTIME-PHASE-ADVANCE-01; dry-run can validate the matrix beforehand.
+  0.00/0.02/0.04/0.06/0.08. The benchmark samples commands at
+  `t_command = t_now + phase_advance_sec`; tracking metrics still compare
+  against the measurement-time desired trajectory.
 
 Suggested run order:
 
@@ -1495,8 +1508,9 @@ Suggested run order:
    twist-cap matrix.
 4. Run `p1_servo_t2_alpha.yaml` after a low-gain candidate is stable enough to
    separate controller parameter effects from feedback effects.
-5. Run `p1_phase_advance.yaml` last and only after the benchmark supports
-   `--phase-advance-sec`.
+5. Run `p1_phase_advance.yaml` last. Treat `commanded_phase_advance_ms` as the
+   configured feed-forward offset and `estimated_latency_ms` as the measured
+   residual phase lag, not the same quantity.
 
 Dry-run any P1 matrix before a live controller-simulation run:
 

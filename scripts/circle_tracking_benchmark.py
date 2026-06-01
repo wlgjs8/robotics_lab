@@ -67,6 +67,7 @@ PROFILE_USE_CASES = {
 }
 DEFAULT_ORIENTATION_DRIFT_WARNING_RAD = 0.1
 RADIUS_GAIN_WARNING_MIN = 0.8
+MAX_PHASE_ADVANCE_FRACTION_OF_PERIOD = 0.25
 CONTROLLER_CHOICES = (
     "twist_stand",
     "twist_local",
@@ -102,6 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--period-sec", type=float)
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--command-rate-hz", type=float, default=100.0)
+    parser.add_argument("--phase-advance-sec", type=float, default=0.0)
     parser.add_argument("--warmup-sec", type=float, default=0.5)
     parser.add_argument("--settle-sec", type=float, default=1.0)
     parser.add_argument("--startup-timeout-sec", type=float, default=8.0)
@@ -183,6 +185,63 @@ def required_speed(args: argparse.Namespace) -> float:
     return math.pi * args.diameter_m / args.period_sec
 
 
+def phase_advance_sec(args: argparse.Namespace) -> float:
+    value = getattr(args, "phase_advance_sec", 0.0)
+    if value is None:
+        return 0.0
+    return float(value)
+
+
+def phase_advance_fraction_of_period(args: argparse.Namespace) -> float | None:
+    period_sec = getattr(args, "period_sec", None)
+    if period_sec is None:
+        return None
+    period = float(period_sec)
+    if not math.isfinite(period) or period <= 0.0:
+        return None
+    return phase_advance_sec(args) / period
+
+
+def validate_phase_advance(args: argparse.Namespace, error_type: type[Exception] = AcceptanceError) -> float:
+    phase = phase_advance_sec(args)
+    period_sec = getattr(args, "period_sec", None)
+    if not math.isfinite(phase) or phase < 0.0:
+        raise error_type("--phase-advance-sec must be finite and non-negative")
+    if period_sec is None:
+        return phase
+    period = float(period_sec)
+    if not math.isfinite(period) or period <= 0.0:
+        return phase
+    limit = MAX_PHASE_ADVANCE_FRACTION_OF_PERIOD * period
+    if phase > limit + 1e-12:
+        raise error_type(
+            f"--phase-advance-sec {phase:.6g} exceeds "
+            f"{MAX_PHASE_ADVANCE_FRACTION_OF_PERIOD:.2f} * period_sec "
+            f"{period:.6g} (limit {limit:.6g})"
+        )
+    return phase
+
+
+def phase_advance_summary(args: argparse.Namespace) -> dict[str, Any]:
+    phase = phase_advance_sec(args)
+    return {
+        "phase_advance_sec": phase,
+        "phase_advance_fraction_of_period": phase_advance_fraction_of_period(args),
+        "phase_advance_enabled": phase > 0.0,
+        "commanded_phase_advance_sec": phase,
+        "commanded_phase_advance_ms": phase * 1000.0,
+        "phase_advance_limit_fraction_of_period": MAX_PHASE_ADVANCE_FRACTION_OF_PERIOD,
+        "phase_advance_scope": "benchmark_generated_commands_only",
+        "estimated_latency_note": (
+            "estimated_latency_ms is measured from tracking samples; it is not the configured commanded phase advance"
+        ),
+    }
+
+
+def command_sample_time(args: argparse.Namespace, t_sec: float) -> float:
+    return max(0.0, float(t_sec)) + phase_advance_sec(args)
+
+
 def benchmark_context(args: argparse.Namespace, safety: dict[str, Any]) -> dict[str, Any]:
     server_text = read_text(args.server_config, "server config")
     simulator_config = args.left_config if args.arm == "left" else args.right_config
@@ -221,6 +280,7 @@ def benchmark_context(args: argparse.Namespace, safety: dict[str, Any]) -> dict[
 def preflight(args: argparse.Namespace) -> dict[str, Any]:
     apply_profile(args)
     assert args.diameter_m is not None and args.period_sec is not None
+    configured_phase_advance = validate_phase_advance(args, AcceptanceError)
     if args.repeat < 1:
         raise AcceptanceError("--repeat must be >= 1")
     for name, value in (
@@ -305,6 +365,8 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
             )
     if args.controller == "server_circle" and benchmark_primitives_enabled is not True:
         raise AcceptanceError("server_circle requires cartesian_control.enable_benchmark_primitives: true")
+    if args.controller == "server_circle" and configured_phase_advance > 0.0:
+        raise AcceptanceError("--phase-advance-sec is benchmark-side only and is not supported with server_circle")
 
     return {
         "passed": True,
@@ -316,6 +378,7 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         "max_linear_move_speed_m_s": max_linear,
         "enable_benchmark_primitives": benchmark_primitives_enabled,
         "required_tangential_speed_m_s": speed,
+        **phase_advance_summary(args),
     }
 
 
@@ -382,6 +445,14 @@ def linear_move_command(arm: str, target: dict[str, Any], duration_sec: float, o
         "duration_sec": duration_sec,
         "orientation_mode": orientation_mode,
     }
+    return {
+        "seq": s,
+        "mode": "Hold",
+        "host_time_ns": s,
+        "timeout_sec": max(0.2, duration_sec + 0.2),
+        "left": payload if arm == "left" else {"mode": "Hold"},
+        "right": payload if arm == "right" else {"mode": "Hold"},
+    }
 
 
 def circle_move_command(args: argparse.Namespace, duration_sec: float) -> dict[str, Any]:
@@ -403,14 +474,6 @@ def circle_move_command(args: argparse.Namespace, duration_sec: float) -> dict[s
         "timeout_sec": max(0.2, duration_sec + 0.2),
         "left": payload if args.arm == "left" else {"mode": "Hold"},
         "right": payload if args.arm == "right" else {"mode": "Hold"},
-    }
-    return {
-        "seq": s,
-        "mode": "Hold",
-        "host_time_ns": s,
-        "timeout_sec": max(0.2, duration_sec + 0.2),
-        "left": payload if arm == "left" else {"mode": "Hold"},
-        "right": payload if arm == "right" else {"mode": "Hold"},
     }
 
 
@@ -677,7 +740,8 @@ def stream_twist(args: argparse.Namespace, commands: CommandRecorder, traj: Traj
         t = now - start_monotonic
         if t >= duration_sec:
             break
-        v1, v2 = traj.velocity_components(t)
+        command_t = command_sample_time(args, t)
+        v1, v2 = traj.velocity_components(command_t)
         twist = [0.0] * 6
         if args.plane == "xy":
             twist[0], twist[1] = v1, v2
@@ -735,15 +799,32 @@ def stream_twist_feedback(
         if snapshot is None or stale_or_invalid:
             applied_twist = [0.0] * 6
             row = zero_feedback_record(t, skip_reason, frame)
+            command_t = command_sample_time(args, t)
+            command_ref = traj.position(command_t)
+            measurement_ref = traj.position(t)
+            row.update(
+                {
+                    "command_t_sec": command_t,
+                    "phase_advance_sec": phase_advance_sec(args),
+                    "command_reference_x": command_ref[0],
+                    "command_reference_y": command_ref[1],
+                    "command_reference_z": command_ref[2],
+                    "measurement_reference_x": measurement_ref[0],
+                    "measurement_reference_y": measurement_ref[1],
+                    "measurement_reference_z": measurement_ref[2],
+                }
+            )
         else:
             actual_pose = arm_pose(snapshot, args.arm, "feedback.actual")
             p_actual = vec(actual_pose)
             q_actual = actual_pose["quaternion_xyzw"]
-            p_ref = traj.position(t)
+            command_t = command_sample_time(args, t)
+            p_ref = traj.position(command_t)
+            measurement_ref = traj.position(t)
             position_error_stand = sub(p_ref, p_actual)
             orientation_error_stand = quat_error_vector(q0, q_actual)
             feedback = compute_feedback_twist_stand(
-                feedforward_linear_stand=trajectory_velocity_stand(traj, t),
+                feedforward_linear_stand=trajectory_velocity_stand(traj, command_t),
                 position_error_stand=position_error_stand,
                 orientation_error_stand=orientation_error_stand,
                 kp_pos=args.feedback_kp_pos,
@@ -767,6 +848,8 @@ def stream_twist_feedback(
                 applied_twist = feedback["applied_twist_stand"]
             row = {
                 "t_sec": t,
+                "command_t_sec": command_t,
+                "phase_advance_sec": phase_advance_sec(args),
                 "frame": frame,
                 "feedback_skip_reason": "",
                 "actual_x": p_actual[0],
@@ -775,6 +858,12 @@ def stream_twist_feedback(
                 "reference_x": p_ref[0],
                 "reference_y": p_ref[1],
                 "reference_z": p_ref[2],
+                "command_reference_x": p_ref[0],
+                "command_reference_y": p_ref[1],
+                "command_reference_z": p_ref[2],
+                "measurement_reference_x": measurement_ref[0],
+                "measurement_reference_y": measurement_ref[1],
+                "measurement_reference_z": measurement_ref[2],
                 "position_error_x": position_error_stand[0],
                 "position_error_y": position_error_stand[1],
                 "position_error_z": position_error_stand[2],
@@ -818,7 +907,7 @@ def stream_linear_segments(args: argparse.Namespace, commands: CommandRecorder, 
     start_monotonic = time.monotonic()
     for index in range(1, segment_count + 1):
         t = min(duration_sec, index * segment_sec)
-        target = pose_payload(traj.position(t), q0)
+        target = pose_payload(traj.position(command_sample_time(args, t)), q0)
         packet = linear_move_command(args.arm, target, segment_sec, args.orientation_mode)
         if first_ns == 0:
             first_ns = int(packet["host_time_ns"])
@@ -1202,6 +1291,10 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "angular_frequency_rad_s",
         "repeat",
         "command_rate_hz",
+        "phase_advance_sec",
+        "phase_advance_fraction_of_period",
+        "phase_advance_enabled",
+        "commanded_phase_advance_ms",
         "required_tangential_speed_m_s",
         "configured_max_twist_linear_m_s",
         "configured_max_linear_move_speed_m_s",
@@ -1406,6 +1499,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "period_sec": args.period_sec,
         "repeat": args.repeat,
         "command_rate_hz": args.command_rate_hz,
+        **phase_advance_summary(args),
         "required_tangential_speed_m_s": safety["required_tangential_speed_m_s"],
         "safety_preflight": safety,
         "artifact_dir": str(artifact_dir),
@@ -1609,6 +1703,7 @@ def main() -> int:
             "left_config": str(args.left_config.resolve()) if hasattr(args, "left_config") else None,
             "right_config": str(args.right_config.resolve()) if hasattr(args, "right_config") else None,
             "safety_preflight": {"passed": False, "error": str(exc)},
+            **phase_advance_summary(args),
             "performance_warnings": [],
             "threshold_failures": [str(exc)],
             "caveat": "simulator-only benchmark evidence; not real robot readiness",

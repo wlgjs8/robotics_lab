@@ -104,6 +104,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--period-sec", type=float)
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--command-rate-hz", type=float, default=100.0)
+    parser.add_argument("--phase-advance-sec", type=float, default=0.0)
     parser.add_argument("--warmup-sec", type=float, default=0.5)
     parser.add_argument("--settle-sec", type=float, default=1.0)
     parser.add_argument("--startup-timeout-sec", type=float, default=12.0)
@@ -665,6 +666,7 @@ def validate_config_and_env(
     apply_profile(args)
     apply_overlay_defaults(args)
     assert args.diameter_m is not None and args.period_sec is not None
+    sim_bench.validate_phase_advance(args, BenchmarkError)
     if sim_bench.profile_requires_fast_stress(args.profile) and not getattr(args, "allow_fast_stress", False):
         raise BenchmarkError("GENE-style 15 cm / 4 s stress requires --allow-fast-stress")
     if args.repeat < 1:
@@ -801,6 +803,7 @@ def validate_config_and_env(
         "period_sec": args.period_sec,
         "repeat": args.repeat,
         "command_rate_hz": args.command_rate_hz,
+        **sim_bench.phase_advance_summary(args),
         "required_tangential_speed_m_s": speed,
         "max_twist_linear_m_s": max_twist,
         "max_twist_angular_rad_s": max_twist_angular,
@@ -1067,7 +1070,8 @@ def stream_twist(
         t = now - start_monotonic
         if t >= duration_sec:
             break
-        v1, v2 = traj.velocity_components(t)
+        command_t = sim_bench.command_sample_time(args, t)
+        v1, v2 = traj.velocity_components(command_t)
         twist = [0.0] * 6
         if args.plane == "xy":
             twist[0], twist[1] = v1, v2
@@ -1132,6 +1136,21 @@ def stream_twist_feedback(
         if snapshot is None:
             applied_twist = [0.0] * 6
             row = sim_bench.zero_feedback_record(t, "missing/stale valid tracking source", frame)
+            command_t = sim_bench.command_sample_time(args, t)
+            command_ref = traj.position(command_t)
+            measurement_ref = traj.position(t)
+            row.update(
+                {
+                    "command_t_sec": command_t,
+                    "phase_advance_sec": sim_bench.phase_advance_sec(args),
+                    "command_reference_x": command_ref[0],
+                    "command_reference_y": command_ref[1],
+                    "command_reference_z": command_ref[2],
+                    "measurement_reference_x": measurement_ref[0],
+                    "measurement_reference_y": measurement_ref[1],
+                    "measurement_reference_z": measurement_ref[2],
+                }
+            )
             row["orientation_error_norm_rad"] = None
             row["angular_feedback_norm_rad_s"] = None
             row["angular_applied_norm_rad_s"] = None
@@ -1146,11 +1165,13 @@ def stream_twist_feedback(
             tracking_pose = pose_for_source(snapshot, args.arm, tracking_source)
             p_actual = sim_bench.vec(tracking_pose)
             q_actual = tracking_pose["quaternion_xyzw"]
-            p_ref = traj.position(t)
+            command_t = sim_bench.command_sample_time(args, t)
+            p_ref = traj.position(command_t)
+            measurement_ref = traj.position(t)
             position_error_stand = sim_bench.sub(p_ref, p_actual)
             orientation_error_stand = sim_bench.quat_error_vector(q0, q_actual)
             feedback = sim_bench.compute_feedback_twist_stand(
-                feedforward_linear_stand=sim_bench.trajectory_velocity_stand(traj, t),
+                feedforward_linear_stand=sim_bench.trajectory_velocity_stand(traj, command_t),
                 position_error_stand=position_error_stand,
                 orientation_error_stand=orientation_error_stand,
                 kp_pos=args.feedback_kp_pos,
@@ -1182,6 +1203,8 @@ def stream_twist_feedback(
             )
             row = {
                 "t_sec": t,
+                "command_t_sec": command_t,
+                "phase_advance_sec": sim_bench.phase_advance_sec(args),
                 "frame": frame,
                 "tracking_source": tracking_source,
                 "feedback_skip_reason": "",
@@ -1191,6 +1214,12 @@ def stream_twist_feedback(
                 "reference_x": p_ref[0],
                 "reference_y": p_ref[1],
                 "reference_z": p_ref[2],
+                "command_reference_x": p_ref[0],
+                "command_reference_y": p_ref[1],
+                "command_reference_z": p_ref[2],
+                "measurement_reference_x": measurement_ref[0],
+                "measurement_reference_y": measurement_ref[1],
+                "measurement_reference_z": measurement_ref[2],
                 "position_error_vector": position_error_stand,
                 "orientation_error_vector": orientation_error_stand,
                 "orientation_error_norm_rad": orientation_error_norm,
@@ -1784,6 +1813,10 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "angular_frequency_rad_s",
         "repeat",
         "command_rate_hz",
+        "phase_advance_sec",
+        "phase_advance_fraction_of_period",
+        "phase_advance_enabled",
+        "commanded_phase_advance_ms",
         "feedback_kp_pos",
         "feedback_kp_ori",
         "feedback_max_linear_m_s",
@@ -2174,6 +2207,7 @@ def summarize_run(
         "recommended_controllers": profile_metadata["recommended_controllers"],
         "repeat": args.repeat,
         "command_rate_hz": args.command_rate_hz,
+        **sim_bench.phase_advance_summary(args),
         "state_pub_rate_hz": finite_number(network_config.get("state_pub_rate_hz")),
         "servo_rate_hz": finite_number(servo_config.get("rate_hz")),
         "tool_offset_m": tool_offsets_from_args(args),
@@ -2409,6 +2443,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "period_sec": args.period_sec,
             "required_tangential_speed_m_s": preflight_result.get("required_tangential_speed_m_s"),
             "angular_frequency_rad_s": preflight_result.get("angular_frequency_rad_s"),
+            **sim_bench.phase_advance_summary(args),
             "recommended_controller": preflight_result.get("recommended_controller"),
             "recommended_controllers": preflight_result.get("recommended_controllers"),
             "safety_preflight": preflight_result,
@@ -2547,6 +2582,7 @@ def failure_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
             "latest_state_excerpt": details.get("latest_state_excerpt"),
             "startup_fault": details,
             "safety_preflight": {"passed": False, "error": str(exc), "env": benchmark_env_snapshot()},
+            **sim_bench.phase_advance_summary(args),
             "threshold_failures": [details.get("result_reason") or str(exc)],
             "performance_warnings": details.get("startup_fault_hints") or [],
             "caveat": "rbpodo controller-simulation benchmark did not complete",
@@ -2562,6 +2598,7 @@ def failure_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
         "error": str(exc),
         "server_config": str(args.server_config.resolve()) if args.server_config else None,
         "safety_preflight": {"passed": False, "error": str(exc), "env": benchmark_env_snapshot()},
+        **sim_bench.phase_advance_summary(args),
         "threshold_failures": [str(exc)],
         "performance_warnings": [],
         "caveat": "rbpodo controller-simulation benchmark did not complete",

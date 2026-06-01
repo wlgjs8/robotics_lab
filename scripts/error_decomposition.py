@@ -537,6 +537,12 @@ def decompose_circle_run(
     phase_aligned_rms = rms(phase_errors)
     center_removed_rms = rms(center_errors)
     center_phase_removed_rms = rms(center_phase_errors)
+    commanded_phase_advance_sec = finite_number(summary.get("commanded_phase_advance_sec"))
+    if commanded_phase_advance_sec is None:
+        commanded_phase_advance_sec = finite_number(summary.get("phase_advance_sec"))
+    phase_advance_fraction = finite_number(summary.get("phase_advance_fraction_of_period"))
+    if phase_advance_fraction is None and commanded_phase_advance_sec is not None and period_sec is not None and period_sec > 0.0:
+        phase_advance_fraction = commanded_phase_advance_sec / period_sec
     error_classification, classifications, reasons = classify_error_source(
         summary=summary,
         rms_error_m=base_rms,
@@ -559,6 +565,19 @@ def decompose_circle_run(
         "radius_gain": finite_number(summary.get("radius_gain")),
         "phase_lag_rad": phase_lag,
         "estimated_latency_ms": finite_number(summary.get("estimated_latency_ms")),
+        "commanded_phase_advance_sec": commanded_phase_advance_sec,
+        "commanded_phase_advance_ms": (
+            commanded_phase_advance_sec * 1000.0
+            if commanded_phase_advance_sec is not None
+            else None
+        ),
+        "phase_advance_sec": commanded_phase_advance_sec,
+        "phase_advance_fraction_of_period": phase_advance_fraction,
+        "phase_advance_enabled": bool(commanded_phase_advance_sec and commanded_phase_advance_sec > 0.0),
+        "latency_interpretation": (
+            "estimated_latency_ms is measured residual phase lag in the sampled tracking data; "
+            "commanded_phase_advance_ms is the configured benchmark command offset"
+        ),
         "phase_aligned_rms_error_m": phase_aligned_rms,
         "center_removed_rms_error_m": center_removed_rms,
         "center_and_phase_removed_rms_error_m": center_phase_removed_rms,

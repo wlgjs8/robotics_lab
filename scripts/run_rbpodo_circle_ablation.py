@@ -116,6 +116,7 @@ SUMMARY_COLUMNS = [
     "name",
     "controller",
     "profile",
+    "arm",
     "ack_policy",
     "state_pub_rate_hz",
     "speed_bar_left",
@@ -127,6 +128,12 @@ SUMMARY_COLUMNS = [
     "servo_alpha",
     "command_rate_hz",
     "phase_advance_sec",
+    "phase_advance_fraction_of_period",
+    "phase_advance_enabled",
+    "commanded_phase_advance_ms",
+    "phase_advance_effect",
+    "phase_aligned_rms_delta_mm",
+    "saturation_ratio_delta",
     "command_count",
     "tracking_source",
     "kp_pos",
@@ -574,6 +581,13 @@ def validate_experiment(exp: dict[str, Any], index: int) -> None:
         value = finite_number(exp["phase_advance_sec"])
         if value is None or value < 0.0:
             raise AblationError(f"experiment {exp['name']} has invalid phase_advance_sec: {exp['phase_advance_sec']}")
+        period_sec = circle_bench.PROFILE_DEFAULTS[str(exp["profile"])][1]
+        limit = sim_bench.MAX_PHASE_ADVANCE_FRACTION_OF_PERIOD * period_sec
+        if value > limit + 1e-12:
+            raise AblationError(
+                f"experiment {exp['name']} phase_advance_sec exceeds "
+                f"{sim_bench.MAX_PHASE_ADVANCE_FRACTION_OF_PERIOD:.2f} * period ({limit:.6g} sec)"
+            )
     if "repeat" in exp:
         repeat = finite_number(exp["repeat"])
         if repeat is None or int(repeat) < 1:
@@ -849,6 +863,13 @@ def run_experiment(
             "arm": exp.get("arm"),
             "profile": exp.get("profile"),
             "command_rate_hz": exp.get("command_rate_hz", 100),
+            "phase_advance_sec": exp.get("phase_advance_sec", 0.0),
+            "phase_advance_fraction_of_period": (
+                finite_number(exp.get("phase_advance_sec", 0.0)) / circle_bench.PROFILE_DEFAULTS[str(exp["profile"])][1]
+                if finite_number(exp.get("phase_advance_sec", 0.0)) is not None
+                else None
+            ),
+            "phase_advance_enabled": bool(finite_number(exp.get("phase_advance_sec", 0.0)) or 0.0),
             "tracking_source_used": exp.get("tracking_source", "auto"),
             "server_config": meta["config_path"],
             "physical_motion_expected": False,
@@ -893,6 +914,7 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "name": exp.get("name"),
         "controller": summary.get("controller") or exp.get("controller"),
         "profile": summary.get("profile") or exp.get("profile"),
+        "arm": summary.get("arm") or exp.get("arm"),
         "ack_policy": meta.get("ack_policy"),
         "state_pub_rate_hz": meta.get("state_pub_rate_hz"),
         "speed_bar_left": meta.get("speed_bar_left"),
@@ -904,6 +926,22 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "servo_alpha": first_present(summary.get("servo_alpha"), meta.get("servo_alpha")),
         "command_rate_hz": first_present(summary.get("command_rate_hz"), exp.get("command_rate_hz")),
         "phase_advance_sec": first_present(summary.get("phase_advance_sec"), exp.get("phase_advance_sec")),
+        "phase_advance_fraction_of_period": first_present(
+            summary.get("phase_advance_fraction_of_period"),
+            (
+                finite_number(exp.get("phase_advance_sec")) / circle_bench.PROFILE_DEFAULTS[str(exp["profile"])][1]
+                if finite_number(exp.get("phase_advance_sec")) is not None
+                else None
+            ),
+        ),
+        "phase_advance_enabled": first_present(
+            summary.get("phase_advance_enabled"),
+            bool(finite_number(exp.get("phase_advance_sec")) or 0.0),
+        ),
+        "commanded_phase_advance_ms": first_present(
+            summary.get("commanded_phase_advance_ms"),
+            scaled_value(exp.get("phase_advance_sec"), 1000.0),
+        ),
         "command_count": command_count,
         "tracking_source": first_present(summary.get("tracking_source_used"), exp.get("tracking_source", "auto")),
         "kp_pos": feedback_kp_pos,
@@ -1066,6 +1104,95 @@ def rows_from_summaries(
         row_from_summary(summary, exp, meta)
         for summary, exp, meta in zip(summaries, experiments, metadata)
     ]
+
+
+def phase_compare_value(value: Any) -> Any:
+    number = finite_number(value)
+    if number is not None:
+        return round(number, 9)
+    return value
+
+
+def phase_advance_compare_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    keys = (
+        "controller",
+        "profile",
+        "arm",
+        "ack_policy",
+        "state_pub_rate_hz",
+        "speed_bar_left",
+        "speed_bar_right",
+        "servo_rate_hz",
+        "servo_t1_sec",
+        "servo_t2_sec",
+        "servo_alpha",
+        "command_rate_hz",
+        "tracking_source",
+        "feedback_kp_pos",
+        "feedback_kp_ori",
+        "feedback_max_linear_m_s",
+        "feedback_max_angular_rad_s",
+    )
+    return tuple(phase_compare_value(row.get(key)) for key in keys)
+
+
+def phase_saturation_metric(row: dict[str, Any]) -> float | None:
+    value = finite_number(row.get("saturation_ratio"))
+    if value is not None:
+        return value
+    return finite_number(row.get("feedback_saturation_count"))
+
+
+def annotate_phase_advance_effects(rows: list[dict[str, Any]]) -> None:
+    baselines: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        phase = finite_number(row.get("phase_advance_sec")) or 0.0
+        if abs(phase) > 1e-12:
+            continue
+        key = phase_advance_compare_key(row)
+        current = baselines.get(key)
+        current_rms = finite_number(current.get("phase_aligned_rms_mm")) if current else None
+        row_rms = finite_number(row.get("phase_aligned_rms_mm"))
+        if current is None or (row_rms is not None and (current_rms is None or row_rms < current_rms)):
+            baselines[key] = row
+        row["phase_advance_effect"] = "phase_advance_baseline"
+        row["phase_aligned_rms_delta_mm"] = None
+        row["saturation_ratio_delta"] = None
+
+    for row in rows:
+        phase = finite_number(row.get("phase_advance_sec")) or 0.0
+        if abs(phase) <= 1e-12:
+            continue
+        baseline = baselines.get(phase_advance_compare_key(row))
+        if baseline is None:
+            row["phase_advance_effect"] = "phase_advance_no_zero_baseline"
+            row["phase_aligned_rms_delta_mm"] = None
+            row["saturation_ratio_delta"] = None
+            continue
+
+        baseline_rms = finite_number(baseline.get("phase_aligned_rms_mm"))
+        row_rms = finite_number(row.get("phase_aligned_rms_mm"))
+        baseline_saturation = phase_saturation_metric(baseline)
+        row_saturation = phase_saturation_metric(row)
+        rms_delta = row_rms - baseline_rms if row_rms is not None and baseline_rms is not None else None
+        saturation_delta = (
+            row_saturation - baseline_saturation
+            if row_saturation is not None and baseline_saturation is not None
+            else None
+        )
+        row["phase_aligned_rms_delta_mm"] = rms_delta
+        row["saturation_ratio_delta"] = saturation_delta
+        rms_reduced = rms_delta is not None and rms_delta < -1e-9
+        saturation_reduced = saturation_delta is not None and saturation_delta < -1e-12
+        if rms_reduced and saturation_reduced:
+            effect = "phase_advance_reduces_phase_aligned_rms_and_saturation"
+        elif rms_reduced:
+            effect = "phase_advance_reduces_phase_aligned_rms"
+        elif saturation_reduced:
+            effect = "phase_advance_reduces_saturation"
+        else:
+            effect = "phase_advance_no_measured_reduction"
+        row["phase_advance_effect"] = effect
 
 
 def write_csv_rows(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -1263,6 +1390,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
             break
 
     rows = rows_from_summaries(summaries, enabled_experiments[: len(summaries)], metadata[: len(summaries)])
+    annotate_phase_advance_effects(rows)
     skipped_plots = ["plots skipped by --dry-run"] if args.dry_run else plot_rows(artifact_root, rows)
     write_csv_rows(artifact_root / "ablation_summary.csv", rows)
     reliability_artifacts = reliability_report.write_artifacts(artifact_root, rows)

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import circle_tracking_benchmark as sim_bench
 import rbpodo_circle_tracking_benchmark as bench
+import run_rbpodo_circle_ablation as rbpodo_ablation
 
 
 ENV_NAMES = (
@@ -123,6 +124,7 @@ def make_args(tmp: Path, config: Path, pgmode: Path, **overrides: object) -> arg
         "period_sec": None,
         "repeat": 1,
         "command_rate_hz": 100.0,
+        "phase_advance_sec": 0.0,
         "warmup_sec": 0.0,
         "settle_sec": 0.0,
         "startup_timeout_sec": 1.0,
@@ -232,7 +234,94 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
         self.assertIn("circle_15cm_8s", completed.stdout)
         self.assertIn("--allow-fast-stress", completed.stdout)
         self.assertIn("--overlay-pub-endpoint", completed.stdout)
+        self.assertIn("--phase-advance-sec", completed.stdout)
         self.assertIn("--i-confirm-controller-is-in-pgmode-simulation", completed.stdout)
+
+    def test_phase_advance_changes_command_reference_pose(self) -> None:
+        args = argparse.Namespace(period_sec=4.0, phase_advance_sec=1.0)
+        sim_bench.validate_phase_advance(args)
+        traj = sim_bench.Trajectory(
+            start=[0.075, 0.0, 0.0],
+            axis1=[1.0, 0.0, 0.0],
+            axis2=[0.0, 1.0, 0.0],
+            radius=0.075,
+            period_sec=4.0,
+        )
+        measurement_pose = traj.position(0.0)
+        command_pose = traj.position(sim_bench.command_sample_time(args, 0.0))
+        self.assertAlmostEqual(measurement_pose[0], 0.075, places=9)
+        self.assertAlmostEqual(measurement_pose[1], 0.0, places=9)
+        self.assertAlmostEqual(command_pose[0], 0.0, places=9)
+        self.assertAlmostEqual(command_pose[1], 0.075, places=9)
+
+    def test_preflight_rejects_phase_advance_above_period_quarter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text, EnvGuard():
+            tmp = Path(tmp_text)
+            config = tmp / "config.yaml"
+            pgmode = tmp / "pgmode.json"
+            write_config(config)
+            write_pgmode_summary(pgmode)
+            args = make_args(tmp, config, pgmode, phase_advance_sec=4.01)
+            with self.assertRaisesRegex(bench.BenchmarkError, "phase-advance-sec"):
+                bench.preflight(args)
+
+    def test_rbpodo_matrix_forwards_phase_advance_sec(self) -> None:
+        exp = {
+            "name": "phase_advance_40ms",
+            "config": "config.yaml",
+            "profile": "gene_15cm_4s",
+            "controller": "twist_stand_feedback",
+            "arm": "left",
+            "phase_advance_sec": 0.04,
+        }
+        rbpodo_ablation.validate_experiment(exp, 1)
+        args = argparse.Namespace(
+            root=Path("."),
+            server=Path("server"),
+            skip_plots=False,
+            set_pgmode_simulation=False,
+            verify_pgmode_simulation=True,
+            pgmode_summary_json=None,
+            pgmode_timeout_sec=1.0,
+            pgmode_command_port=5000,
+        )
+        command = rbpodo_ablation.benchmark_command(
+            args,
+            exp,
+            {"config_path": "resolved.yaml"},
+            Path("artifacts/phase_advance_40ms"),
+        )
+        self.assertIn("--phase-advance-sec", command)
+        self.assertEqual(command[command.index("--phase-advance-sec") + 1], "0.04")
+
+    def test_phase_advance_effect_classifies_rms_and_saturation_reduction(self) -> None:
+        base = {
+            "name": "baseline",
+            "controller": "twist_stand_feedback",
+            "profile": "gene_15cm_4s",
+            "arm": "left",
+            "phase_advance_sec": 0.0,
+            "phase_aligned_rms_mm": 12.0,
+            "saturation_ratio": 0.25,
+        }
+        advanced = {
+            "name": "phase_advance_40ms",
+            "controller": "twist_stand_feedback",
+            "profile": "gene_15cm_4s",
+            "arm": "left",
+            "phase_advance_sec": 0.04,
+            "phase_aligned_rms_mm": 9.0,
+            "saturation_ratio": 0.10,
+        }
+        rows = [base, advanced]
+        rbpodo_ablation.annotate_phase_advance_effects(rows)
+        self.assertEqual(base["phase_advance_effect"], "phase_advance_baseline")
+        self.assertEqual(
+            advanced["phase_advance_effect"],
+            "phase_advance_reduces_phase_aligned_rms_and_saturation",
+        )
+        self.assertAlmostEqual(advanced["phase_aligned_rms_delta_mm"], -3.0)
+        self.assertAlmostEqual(advanced["saturation_ratio_delta"], -0.15)
 
     def test_middle_speed_profile_preflight_serializes_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text, EnvGuard():
