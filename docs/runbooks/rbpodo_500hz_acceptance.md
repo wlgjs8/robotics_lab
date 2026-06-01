@@ -206,6 +206,88 @@ Async supervision is not proof of physical real safety. It does not authorize
 physical `operation_mode: real`, physical Cartesian motion, or a default 500 Hz
 rate change.
 
+## SDK Async Capability Probe
+
+Before implementing `sdk_ack_worker` or `socket_send_supervised`, characterize
+what the Python rbpodo SDK exposes. `RBPODO-ASYNC-SDK-PROBE-01` adds a
+controller `pgmode` simulation-only probe:
+
+```bash
+python3 scripts/rbpodo_async_sdk_probe.py \
+  --ip 172.28.60.200 \
+  --duration-sec 5 \
+  --rate-hz 500 \
+  --mode ack_on \
+  --artifact-dir artifacts/rbpodo_async_sdk_probe/left \
+  --set-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --allow-simulation-servo-j
+```
+
+Modes:
+
+- `ack_on`: calls `move_servo_j` with ACK waiting enabled and records per-call
+  duration. Successful sends are treated as `controller_ack_observed` evidence.
+- `ack_off`: requires `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1`, configures
+  `disable_waiting_ack` when the SDK exposes it, records socket/API send
+  duration, and samples `q_ref` for supervision evidence. Successful sends
+  remain `socket_send_only`, not controller ACK evidence.
+- `concurrent_read_send`: uses separate `Cobot` and `CobotData` objects so one
+  thread can send no-op Servo J while another reads state. It does not prove a
+  shared `Cobot` object is thread-safe; `sdk_thread_safety_observed` remains
+  `unknown` unless a future SDK-documented safe sharing path is tested.
+
+Required gates for every mode:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1
+RB_ALLOW_REAL_MOTION=1
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
+```
+
+Do not set `RB_ALLOW_REAL_CARTESIAN`. The probe refuses `operation_mode: real`,
+requires `--set-pgmode-simulation` or `--verify-pgmode-simulation`, requires
+`--i-understand-this-connects-to-real-controller`, and requires
+`--allow-simulation-servo-j`. Before every Servo J send, the target must still
+match current `q_ref` and `q_actual` within tolerance; otherwise the probe stops
+without sending.
+
+Artifacts:
+
+```text
+summary.json
+send_samples.csv
+state_samples.csv
+responses.jsonl
+sdk_capabilities.json
+report.md
+```
+
+The summary classification is one of:
+
+- `ack_on_fast_enough`
+- `ack_on_outlier_limited`
+- `ack_off_state_supervision_viable`
+- `concurrent_read_send_viable`
+- `sdk_async_ack_not_supported`
+- `insufficient_evidence`
+
+Use the result only to choose the next implementation shape:
+
+- `ack_on_fast_enough` or `ack_on_outlier_limited` supports investigating
+  `sdk_ack_worker`, where a worker may block inside the SDK while the servo loop
+  remains non-blocking.
+- `ack_off_state_supervision_viable` supports investigating
+  `socket_send_supervised`, where sends are socket/API evidence only and
+  `q_ref` / `tcp_ref` watchdogs supervise controller progress.
+- `concurrent_read_send_viable` supports using a separate data-channel reader
+  while command sends are in flight.
+- `sdk_async_ack_not_supported` or `insufficient_evidence` means do not
+  implement async streaming from assumptions.
+
+This probe does not prove dual-arm `rb_servo_server` 500 Hz behavior, does not
+prove circle tracking, and does not authorize physical robot motion.
+
 ## Build And Capabilities
 
 Build the rbpodo-enabled server:
