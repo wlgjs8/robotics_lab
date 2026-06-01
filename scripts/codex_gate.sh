@@ -1146,6 +1146,237 @@ run_rbpodo_measure_reliability_report_gate() {
   echo "codex_gate: skipping rbpodo measurement report generation by default"
 }
 
+run_rbpodo_p0_measurement_common_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+}
+
+run_p0_parity_repair_gate() {
+  run_rbpodo_p0_measurement_common_gate
+  python3 scripts/rbpodo_state_parity_check.py --help >/dev/null
+  python3 scripts/rbpodo_state_dump.py --help >/dev/null
+  run_optional_script_tests 'test_rbpodo_state_parity_check.py'
+  run_optional_script_tests 'test_rbpodo_state_dump.py'
+  run_optional_rbpodo_measurement_readonly \
+    scripts/rbpodo_state_parity_check.py \
+    "--ips" \
+    "--state-endpoint" \
+    "--artifact-dir"
+}
+
+run_p0_diagnostics_rootcause_gate() {
+  run_rbpodo_p0_measurement_common_gate
+  python3 scripts/rbpodo_state_dump.py --help >/dev/null
+  python3 scripts/rbpodo_state_parity_check.py --help >/dev/null
+  python3 scripts/rainbow_data_port_capture.py --help >/dev/null
+  run_optional_script_tests 'test_rbpodo_state_dump.py'
+  run_optional_script_tests 'test_rbpodo_state_parity_check.py'
+  run_optional_script_tests 'test_rainbow_data_port_capture.py'
+  run_optional_rbpodo_measurement_readonly \
+    scripts/rainbow_data_port_capture.py \
+    "--ips" \
+    "--artifact-dir" \
+    "--also-rbpodo-python"
+}
+
+run_p0_raw_payload_fixture_gate() {
+  run_rbpodo_p0_measurement_common_gate
+  python3 scripts/rainbow_data_port_capture.py --help >/dev/null
+  python3 scripts/rainbow_rate_probe.py --help >/dev/null
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rainbow_data_port_capture.py'
+  run_optional_script_tests 'test_rainbow_rate_probe.py'
+  run_optional_rbpodo_measurement_readonly \
+    scripts/rainbow_data_port_capture.py \
+    "--ips" \
+    "--artifact-dir"
+}
+
+run_p0_measurement_gating_gate() {
+  run_rbpodo_p0_measurement_common_gate
+  python3 scripts/timestamp_alignment_audit.py --help >/dev/null
+  python3 scripts/generate_circle_benchmark_report.py --help >/dev/null
+  python3 scripts/generate_rbpodo_measurement_reliability_report.py --help >/dev/null
+  run_optional_python_help scripts/error_decomposition.py
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_timestamp_alignment_audit.py'
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_error_decomposition.py'
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_benchmark_report.py'
+  for token in \
+    "diagnostics_suspect" \
+    "tcp_ref_stand" \
+    "lower bound" \
+    "timestamp alignment" \
+    "q_ref" \
+    "raw 5001"
+  do
+    grep_existing "${token}" README.md REVIEW.md docs rb_servo_server/docs scripts
+  done
+  echo "codex_gate: skipping rbpodo measurement controller run by default"
+}
+
+run_optional_rbpodo_500hz_controller_sim() {
+  if [[ "${CODEX_RUN_RBPODO_500HZ:-0}" != "1" ]]; then
+    echo "codex_gate: skipping rbpodo 500Hz controller-simulation probe; set CODEX_RUN_RBPODO_500HZ=1 with explicit CODEX_RBPODO_500HZ_ARGS to enable"
+    return 0
+  fi
+  if [[ -z "${CODEX_RBPODO_500HZ_ARGS:-}" ]]; then
+    echo "ERROR: CODEX_RUN_RBPODO_500HZ=1 requires CODEX_RBPODO_500HZ_ARGS with explicit controller-simulation arguments" >&2
+    return 1
+  fi
+  for required_arg in \
+    "--backend rbpodo" \
+    "--mode servo_j_simulation_only" \
+    "--rates 100,500" \
+    "--allow-simulation-servo-j" \
+    "--artifact-dir" \
+    "--i-understand-this-connects-to-real-controller"
+  do
+    if [[ "${CODEX_RBPODO_500HZ_ARGS}" != *"${required_arg}"* ]]; then
+      echo "ERROR: CODEX_RBPODO_500HZ_ARGS must include ${required_arg}" >&2
+      return 1
+    fi
+  done
+  if [[ "${CODEX_RBPODO_500HZ_ARGS}" != *"--verify-pgmode-simulation"* && "${CODEX_RBPODO_500HZ_ARGS}" != *"--set-pgmode-simulation"* ]]; then
+    echo "ERROR: CODEX_RBPODO_500HZ_ARGS must include --verify-pgmode-simulation or --set-pgmode-simulation" >&2
+    return 1
+  fi
+  if [[ "${CODEX_RBPODO_500HZ_ARGS}" == *"rbscript_tcp"* || "${CODEX_RBPODO_500HZ_ARGS}" == *"tiny_joint_motion"* || "${CODEX_RBPODO_500HZ_ARGS}" == *"--allow-ack-disabled"* ]]; then
+    echo "ERROR: rbpodo 500Hz gates only allow ACK-on rbpodo pgmode-simulation probes; rbscript_tcp, tiny physical motion, and ACK-off are out of scope" >&2
+    return 1
+  fi
+  if [[ "${RB_ALLOW_REAL_CARTESIAN:-0}" == "1" ]]; then
+    echo "ERROR: RB_ALLOW_REAL_CARTESIAN must not be set for rbpodo 500Hz controller-simulation gates" >&2
+    return 1
+  fi
+  # shellcheck disable=SC2086
+  python3 scripts/rainbow_rate_probe.py ${CODEX_RBPODO_500HZ_ARGS}
+}
+
+run_rbpodo_500hz_common_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  python3 scripts/rainbow_rate_probe.py --help >/dev/null
+  python3 scripts/rbpodo_servo_acceptance.py --help >/dev/null
+  python3 scripts/rbpodo_circle_tracking_benchmark.py --help >/dev/null
+  run_yaml_parse_checks_if_available \
+    rb_servo_server/config/dual_real_rbpodo_readonly.example.yaml \
+    rb_servo_server/config/dual_real_rbpodo_sim_noop_*.example.yaml \
+    rb_servo_server/config/dual_real_rbpodo_circle_15cm*.example.yaml \
+    configs/rbpodo_circle_ablation/*.yaml
+  grep_existing "100,500|500 Hz|500Hz" scripts/rainbow_rate_probe.py docs/runbooks/rbpodo_controller_sim_circle.md REVIEW.md
+  grep_existing "pgmode simulation|controller pgmode simulation only|operation_mode:[[:space:]]*simulation" \
+    docs/runbooks/rbpodo_controller_sim_circle.md rb_servo_server/config/dual_real_rbpodo_*.example.yaml
+}
+
+run_rbpodo_500hz_config_gate() {
+  run_rbpodo_500hz_common_gate
+  echo "codex_gate: skipping rbpodo 500Hz controller run by default"
+}
+
+run_rbpodo_500hz_accept_gate() {
+  run_rbpodo_500hz_common_gate
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rainbow_rate_probe.py'
+  run_optional_rbpodo_500hz_controller_sim
+}
+
+run_rbpodo_500hz_circle_matrix_gate() {
+  run_rbpodo_500hz_common_gate
+  python3 scripts/run_rbpodo_circle_ablation.py --help >/dev/null
+  run_rbpodo_circle_matrix_schema_checks
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_ablation.py'
+  echo "codex_gate: skipping rbpodo 500Hz circle matrix run by default; set CODEX_RUN_RBPODO_500HZ=1 for the explicit rate probe only"
+}
+
+run_rbpodo_500hz_report_gate() {
+  run_rbpodo_500hz_common_gate
+  python3 scripts/generate_circle_benchmark_report.py --help >/dev/null
+  run_optional_python_help scripts/generate_rbpodo_measurement_reliability_report.py
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_benchmark_report.py'
+  echo "codex_gate: skipping rbpodo 500Hz report generation by default"
+}
+
+run_optional_rbpodo_p1_circle_ablation() {
+  if [[ "${CODEX_RUN_RBPODO_CIRCLE_ABLATION:-0}" != "1" ]]; then
+    echo "codex_gate: skipping rbpodo P1 controller-simulation ablation; set CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 with explicit CODEX_RBPODO_CIRCLE_ABLATION_ARGS to enable"
+    return 0
+  fi
+  if [[ -z "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS:-}" ]]; then
+    echo "ERROR: CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 requires CODEX_RBPODO_CIRCLE_ABLATION_ARGS with explicit matrix/script arguments and safety preflight flags" >&2
+    return 1
+  fi
+  for required_arg in \
+    "--matrix" \
+    "--artifact-root" \
+    "--i-understand-this-connects-to-real-controller" \
+    "--i-confirm-controller-is-in-pgmode-simulation"
+  do
+    if [[ "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}" != *"${required_arg}"* ]]; then
+      echo "ERROR: CODEX_RBPODO_CIRCLE_ABLATION_ARGS must include ${required_arg}" >&2
+      return 1
+    fi
+  done
+  if [[ "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}" != *"--verify-pgmode-simulation"* && "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}" != *"--set-pgmode-simulation"* && "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}" != *"--pgmode-summary-json"* ]]; then
+    echo "ERROR: CODEX_RBPODO_CIRCLE_ABLATION_ARGS must include pgmode simulation evidence" >&2
+    return 1
+  fi
+  if [[ "${RB_ALLOW_REAL_CARTESIAN:-0}" == "1" ]]; then
+    echo "ERROR: RB_ALLOW_REAL_CARTESIAN must not be set for rbpodo P1 controller-simulation ablation" >&2
+    return 1
+  fi
+  # shellcheck disable=SC2086
+  python3 scripts/run_rbpodo_circle_ablation.py ${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}
+}
+
+run_rbpodo_p1_common_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  python3 scripts/rbpodo_circle_tracking_benchmark.py --help >/dev/null
+  python3 scripts/run_rbpodo_circle_ablation.py --help >/dev/null
+  python3 scripts/generate_circle_benchmark_report.py --help >/dev/null
+  run_yaml_parse_checks_if_available configs/rbpodo_circle_ablation/*.yaml
+  run_rbpodo_circle_matrix_schema_checks
+}
+
+run_p1_circle_factor_matrix_gate() {
+  run_rbpodo_p1_common_gate
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_ablation.py'
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_benchmark_report.py'
+  run_optional_rbpodo_p1_circle_ablation
+}
+
+run_p1_orientation_diag_gate() {
+  run_rbpodo_p1_common_gate
+  run_optional_python_help scripts/error_decomposition.py
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_error_decomposition.py'
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_benchmark_report.py'
+  grep_existing "orientation|orientation_limited|orientation_position_equiv" scripts docs REVIEW.md
+  echo "codex_gate: skipping rbpodo orientation diagnostic controller run by default"
+}
+
+run_p1_deadtime_phase_advance_gate() {
+  run_rbpodo_p1_common_gate
+  python3 scripts/timestamp_alignment_audit.py --help >/dev/null
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_timestamp_alignment_audit.py'
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_error_decomposition.py'
+  grep_existing "phase_lag|estimated_latency|timestamp_alignment|ack_spike" scripts docs REVIEW.md
+  echo "codex_gate: skipping rbpodo deadtime/phase controller run by default"
+}
+
+run_p1_servo_param_sweep_gate() {
+  run_rbpodo_p1_common_gate
+  python3 scripts/rainbow_rate_probe.py --help >/dev/null
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rainbow_rate_probe.py'
+  grep_existing "servo_t1_sec|servo_t2_sec|servo_gain|servo_alpha|speed_bar" \
+    scripts docs REVIEW.md rb_servo_server/config
+  run_optional_rbpodo_p1_circle_ablation
+}
+
+run_p1_server_side_circle_track_skeleton_gate() {
+  run_rbpodo_p1_common_gate
+  grep_existing "server_circle" scripts/rbpodo_circle_tracking_benchmark.py scripts/test_rbpodo_circle_tracking_benchmark.py
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_tracking_benchmark.py'
+  echo "codex_gate: skipping server-side circle tracking runtime by default"
+}
+
 run_yaml_parse_checks_if_available() {
   local paths=()
   local path
@@ -1932,6 +2163,48 @@ case "$TASK" in
     ;;
   RBPODO-MEASURE-RELIABILITY-REPORT-01)
     run_rbpodo_measure_reliability_report_gate
+    ;;
+  GATE-RBPODO-500-P0-P1-00)
+    run_shell_syntax_checks
+    ;;
+  P0-PARITY-REPAIR-01)
+    run_p0_parity_repair_gate
+    ;;
+  P0-DIAGNOSTICS-ROOTCAUSE-01)
+    run_p0_diagnostics_rootcause_gate
+    ;;
+  P0-RAW-PAYLOAD-FIXTURE-02)
+    run_p0_raw_payload_fixture_gate
+    ;;
+  P0-MEASUREMENT-GATING-01)
+    run_p0_measurement_gating_gate
+    ;;
+  RBPODO-500HZ-CONFIG-01)
+    run_rbpodo_500hz_config_gate
+    ;;
+  RBPODO-500HZ-ACCEPT-01)
+    run_rbpodo_500hz_accept_gate
+    ;;
+  RBPODO-500HZ-CIRCLE-MATRIX-01)
+    run_rbpodo_500hz_circle_matrix_gate
+    ;;
+  RBPODO-500HZ-REPORT-01)
+    run_rbpodo_500hz_report_gate
+    ;;
+  P1-CIRCLE-FACTOR-MATRIX-01)
+    run_p1_circle_factor_matrix_gate
+    ;;
+  P1-ORIENTATION-DIAG-01)
+    run_p1_orientation_diag_gate
+    ;;
+  P1-DEADTIME-PHASE-ADVANCE-01)
+    run_p1_deadtime_phase_advance_gate
+    ;;
+  P1-SERVO-PARAM-SWEEP-01)
+    run_p1_servo_param_sweep_gate
+    ;;
+  P1-SERVER-SIDE-CIRCLE-TRACK-SKELETON-01)
+    run_p1_server_side_circle_track_skeleton_gate
     ;;
   POLICY-DATASET-SCHEMA-01)
     run_policy_dataset_schema_gate
