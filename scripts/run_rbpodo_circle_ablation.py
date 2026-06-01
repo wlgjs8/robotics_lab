@@ -53,6 +53,7 @@ SERVO_T2_MIN_SEC = 0.02
 SERVO_T2_MAX_SEC = 0.2
 SERVO_ALPHA_MIN = 0.0
 SERVO_ALPHA_MAX = 1.0
+MAX_STATE_PUB_RATE_HZ = 500.0
 EXPERIMENT_KEYS = {
     "name",
     "enabled",
@@ -306,8 +307,10 @@ def validate_override_value(name: str, key: str, value: Any) -> None:
     number = finite_number(value)
     if number is None:
         raise AblationError(f"experiment {name} override {key} must be a finite number")
-    if key == "network.state_pub_rate_hz" and not (0.0 < number <= 200.0):
-        raise AblationError(f"experiment {name} override {key} must be > 0 and <= 200")
+    if key == "network.state_pub_rate_hz" and not (0.0 < number <= MAX_STATE_PUB_RATE_HZ):
+        raise AblationError(
+            f"experiment {name} override {key} must be > 0 and <= {MAX_STATE_PUB_RATE_HZ:g}"
+        )
     elif key == "servo.rate_hz" and number <= 0.0:
         raise AblationError(f"experiment {name} override {key} must be > 0")
     elif key.endswith(".speed_bar") and not (0.0 < number <= 1.0):
@@ -673,8 +676,10 @@ def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path 
     servo_t1_sec = arm_cfg.servo_t1_sec
     t1_aligned, alignment_warning = validate_servo_rate_t1_alignment(str(exp["name"]), config, overrides)
     state_pub_rate_hz = as_float(config.network.get("state_pub_rate_hz"))
-    if state_pub_rate_hz is not None and not (0.0 < state_pub_rate_hz <= 200.0):
-        raise AblationError(f"experiment {exp['name']} network.state_pub_rate_hz must be > 0 and <= 200")
+    if state_pub_rate_hz is not None and not (0.0 < state_pub_rate_hz <= MAX_STATE_PUB_RATE_HZ):
+        raise AblationError(
+            f"experiment {exp['name']} network.state_pub_rate_hz must be > 0 and <= {MAX_STATE_PUB_RATE_HZ:g}"
+        )
     left_speed_bar = as_float(sections.get("left_robot", {}).get("speed_bar"))
     right_speed_bar = as_float(sections.get("right_robot", {}).get("speed_bar"))
     for label, value in (("left_robot.speed_bar", left_speed_bar), ("right_robot.speed_bar", right_speed_bar)):

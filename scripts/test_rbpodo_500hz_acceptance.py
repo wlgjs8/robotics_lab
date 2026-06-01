@@ -22,7 +22,7 @@ left_robot:
   servo_t2_sec: 0.03
   servo_gain: 1.0
   servo_alpha: 0.5
-  disable_waiting_ack: false
+  disable_waiting_ack: {disable_waiting_ack}
 right_robot:
   backend_type: rbpodo
   run_mode: real
@@ -33,7 +33,7 @@ right_robot:
   servo_t2_sec: 0.03
   servo_gain: 1.0
   servo_alpha: 0.5
-  disable_waiting_ack: false
+  disable_waiting_ack: {disable_waiting_ack}
 servo:
   rate_hz: 500
   send_servo_commands: true
@@ -70,6 +70,7 @@ def make_args(config: Path, artifact_dir: Path, duration_sec: float = 0.01) -> S
         warmup_rate_hz=100.0,
         warmup_command_timeout_sec=None,
         ack_timeout_sweep=None,
+        disable_waiting_ack_diagnostic=False,
         preserve_cartesian_control=False,
         startup_timeout_sec=1.0,
         settle_sec=0.0,
@@ -93,12 +94,19 @@ def make_args(config: Path, artifact_dir: Path, duration_sec: float = 0.01) -> S
     )
 
 
-def write_config(tmp: Path, operation_mode: str = "simulation", *, cartesian_enable: bool = True) -> Path:
+def write_config(
+    tmp: Path,
+    operation_mode: str = "simulation",
+    *,
+    cartesian_enable: bool = True,
+    disable_waiting_ack: bool = False,
+) -> Path:
     path = tmp / "config.yaml"
     path.write_text(
         CONFIG_TEMPLATE.format(
             operation_mode=operation_mode,
             cartesian_enable=str(cartesian_enable).lower(),
+            disable_waiting_ack=str(disable_waiting_ack).lower(),
         ),
         encoding="utf-8",
     )
@@ -119,6 +127,7 @@ def fake_arm_state(
     q_actual_5: float = 0.0,
     deadline_missed: bool = False,
     ack_timeout: bool = False,
+    ack_disabled: bool = False,
 ) -> dict:
     q_ref = [1.0, -2.0, 3.0, -4.0, 5.0, -6.0]
     if ack_timeout:
@@ -135,6 +144,17 @@ def fake_arm_state(
             "send_acceptance_semantics": "controller_ack_observed",
         }
         send_ok = False
+    elif ack_disabled:
+        last_send = {
+            "accepted": True,
+            "duration_us": 150.0,
+            "ack_wait_duration_us": 0.0,
+            "ack_policy": "disabled",
+            "ack_observed": False,
+            "controller_acceptance_observed": False,
+            "send_acceptance_semantics": "socket_send_only",
+        }
+        send_ok = True
     else:
         last_send = {
             "accepted": True,
@@ -170,6 +190,7 @@ def fake_state(
     deadline_missed: bool = False,
     right_ack_timeout: bool = False,
     left_ack_timeout: bool = False,
+    ack_disabled: bool = False,
 ) -> dict:
     host_time_ns = 1_000_000_000 + index * 2_000_000
     return {
@@ -184,8 +205,9 @@ def fake_state(
             q_actual_5=q_actual_5,
             deadline_missed=deadline_missed,
             ack_timeout=left_ack_timeout,
+            ack_disabled=ack_disabled,
         ),
-        "right": fake_arm_state(ack_timeout=right_ack_timeout),
+        "right": fake_arm_state(ack_timeout=right_ack_timeout, ack_disabled=ack_disabled),
     }
 
 
@@ -259,6 +281,37 @@ class Rbpodo500HzAcceptanceTests(unittest.TestCase):
             resolved_text = Path(preflight["resolved_config"]).read_text(encoding="utf-8")
             self.assertIn("command_timeout_sec: 0.02", resolved_text)
 
+    def test_ack_off_diagnostic_requires_ack_disabled_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            config_path = write_config(tmp, cartesian_enable=False)
+            args = make_args(config_path, tmp / "artifacts")
+            args.disable_waiting_ack_diagnostic = True
+            env = required_env()
+            env.pop("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION", None)
+            with mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(accept.Acceptance500HzError) as ctx:
+                    accept.preflight(args, run_pgmode=False)
+            self.assertEqual(ctx.exception.failure_phase, "preflight")
+            self.assertEqual(ctx.exception.failure_classification, "preflight_env_missing")
+            self.assertIn("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION", str(ctx.exception))
+
+    def test_ack_off_diagnostic_writes_resolved_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            config_path = write_config(tmp, cartesian_enable=False)
+            args = make_args(config_path, tmp / "artifacts")
+            args.disable_waiting_ack_diagnostic = True
+            env = {**required_env(), "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION": "1"}
+            with mock.patch.dict(os.environ, env, clear=True):
+                _config, preflight = accept.preflight(args, run_pgmode=False)
+            self.assertTrue(preflight["disable_waiting_ack"])
+            self.assertTrue(preflight["disable_waiting_ack_diagnostic"])
+            self.assertEqual(preflight["ack_semantics"], "socket_send_only")
+            self.assertFalse(preflight["controller_acceptance_measured"])
+            resolved_text = Path(preflight["resolved_config"]).read_text(encoding="utf-8")
+            self.assertEqual(resolved_text.count("disable_waiting_ack: true"), 2)
+
     def test_fake_state_stream_noop_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)
@@ -292,6 +345,47 @@ class Rbpodo500HzAcceptanceTests(unittest.TestCase):
             self.assertFalse(summary["physical_motion_detected"])
             self.assertIsNone(summary["failure_phase"])
             self.assertEqual(summary["failure_classification"], None)
+
+    def test_fake_ack_off_diagnostic_pass_without_controller_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            config_path = write_config(tmp)
+            config = accept.load_config(config_path)
+            args = make_args(config_path, tmp / "artifacts")
+            args.disable_waiting_ack_diagnostic = True
+            states = [fake_state(index, ack_disabled=True) for index in range(5)]
+            command_run = accept.CommandRunMetrics(
+                command_count=5,
+                expected_command_count=5,
+                start_host_time_ns=states[0]["host_time_ns"],
+                end_host_time_ns=states[-1]["host_time_ns"],
+                elapsed_sec=0.01,
+                sender_deadline_missed_count=0,
+                max_sender_lateness_us=0.0,
+                hold_sent=True,
+            )
+            summary = accept.summarize_acceptance(
+                args,
+                config,
+                {
+                    "passed": True,
+                    "mode": accept.MODE,
+                    "disable_waiting_ack": True,
+                    "disable_waiting_ack_diagnostic": True,
+                    "ack_semantics": "socket_send_only",
+                    "controller_acceptance_measured": False,
+                },
+                states,
+                command_run,
+                tmp,
+                None,
+                None,
+            )
+            self.assertEqual(summary["result"], "pass", json.dumps(summary["threshold_failures"]))
+            self.assertEqual(summary["controller_acceptance_observed_count"], 0)
+            self.assertFalse(summary["controller_acceptance_measured"])
+            self.assertEqual(summary["ack_semantics"], "socket_send_only")
+            self.assertIn("controller ACK acceptance not measured", summary["result_reason"])
 
     def test_fake_deadline_misses_fail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:

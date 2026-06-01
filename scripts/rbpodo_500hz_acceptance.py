@@ -48,6 +48,7 @@ REQUIRED_ENV = (
     "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED",
 )
 CONTROLLER_SIM_CARTESIAN_ENV = "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"
+ACK_DISABLED_ENV = "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION"
 
 
 class Acceptance500HzError(RuntimeError):
@@ -125,6 +126,14 @@ def parse_args() -> argparse.Namespace:
             f"if controller-simulation Cartesian is enabled, {CONTROLLER_SIM_CARTESIAN_ENV}=1 is required."
         ),
     )
+    parser.add_argument(
+        "--disable-waiting-ack-diagnostic",
+        action="store_true",
+        help=(
+            "Write an artifact-local resolved config with rbpodo disable_waiting_ack=true for both arms. "
+            "This is diagnostic-only socket-send evidence and is not controller ACK acceptance."
+        ),
+    )
     parser.add_argument("--startup-timeout-sec", type=float, default=12.0)
     parser.add_argument("--settle-sec", type=float, default=0.25)
     parser.add_argument("--max-state-age-us", type=float, default=250_000.0)
@@ -183,6 +192,7 @@ def bool_value(value: Any) -> bool:
 def env_snapshot_500hz() -> dict[str, str | None]:
     snapshot = env_snapshot()
     snapshot[CONTROLLER_SIM_CARTESIAN_ENV] = os.environ.get(CONTROLLER_SIM_CARTESIAN_ENV)
+    snapshot[ACK_DISABLED_ENV] = os.environ.get(ACK_DISABLED_ENV)
     return snapshot
 
 
@@ -367,6 +377,13 @@ def write_resolved_config(
             robot["command_timeout_sec"] = float(command_timeout_sec)
         overrides["left_robot.command_timeout_sec"] = float(command_timeout_sec)
         overrides["right_robot.command_timeout_sec"] = float(command_timeout_sec)
+
+    if getattr(args, "disable_waiting_ack_diagnostic", False):
+        for arm in ARMS:
+            robot = nested_dict(data, f"{arm}_robot")
+            robot["disable_waiting_ack"] = True
+        overrides["left_robot.disable_waiting_ack"] = True
+        overrides["right_robot.disable_waiting_ack"] = True
 
     cartesian_control = data.get("cartesian_control")
     cartesian_disabled_for_noop = False
@@ -563,6 +580,8 @@ def validate_config_and_env(
     validate_numeric_args(args)
     if args.mode != MODE:
         raise Acceptance500HzError(f"unsupported mode {args.mode}")
+    ack_disabled_diagnostic = bool(getattr(args, "disable_waiting_ack_diagnostic", False))
+    ack_disabled_arms: list[str] = []
     for label, cfg in all_arms(config):
         if cfg.backend_type != "rbpodo":
             raise Acceptance500HzError(f"{label}_robot.backend_type must be rbpodo")
@@ -576,7 +595,22 @@ def validate_config_and_env(
         if not cfg.ip:
             raise Acceptance500HzError(f"{label}_robot.ip is required")
         if cfg.disable_waiting_ack:
-            raise Acceptance500HzError("500 Hz no-op acceptance requires ACK-on rbpodo settings")
+            ack_disabled_arms.append(label)
+            if not ack_disabled_diagnostic:
+                raise Acceptance500HzError("500 Hz no-op acceptance requires ACK-on rbpodo settings")
+
+    ack_disabled = bool(ack_disabled_arms)
+    if ack_disabled_diagnostic:
+        if set(ack_disabled_arms) != set(ARMS):
+            raise Acceptance500HzError(
+                "--disable-waiting-ack-diagnostic must resolve both arms to disable_waiting_ack=true"
+            )
+        if not env_enabled(ACK_DISABLED_ENV):
+            raise Acceptance500HzError(
+                f"ACK-off 500 Hz diagnostic requires {ACK_DISABLED_ENV}=1",
+                failure_phase="preflight",
+                failure_classification="preflight_env_missing",
+            )
 
     known_ips = {config.left.ip, config.right.ip} & REAL_ROBOT_IPS
     if known_ips and not args.i_understand_this_connects_to_real_controller:
@@ -671,8 +705,10 @@ def validate_config_and_env(
         "servo_rate_hz": servo_rate_hz,
         "command_rate_hz": COMMAND_RATE_HZ,
         "servo_t1_sec": selected.servo_t1_sec,
-        "disable_waiting_ack": False,
-        "ack_semantics": "controller_ack_observed",
+        "disable_waiting_ack": ack_disabled,
+        "disable_waiting_ack_diagnostic": ack_disabled_diagnostic,
+        "ack_semantics": "socket_send_only" if ack_disabled else "controller_ack_observed",
+        "controller_acceptance_measured": not ack_disabled,
         "send_servo_commands": send_servo_commands,
         "allow_controller_simulation_motion": True,
         "allow_controller_simulation_diagnostics_suspect": as_bool(
@@ -685,7 +721,7 @@ def validate_config_and_env(
         "command_port": command_port,
         "state_host": state_host,
         "state_port": state_port,
-        "required_env": list(REQUIRED_ENV),
+        "required_env": list(REQUIRED_ENV) + ([ACK_DISABLED_ENV] if ack_disabled_diagnostic else []),
         "env": env_snapshot_500hz(),
         "confirmation_flag": args.i_understand_this_connects_to_real_controller,
         "pgmode_confirmation_flag": args.i_confirm_controller_is_in_pgmode_simulation,
@@ -1567,7 +1603,13 @@ def summarize_acceptance(
             f"exceeds {args.max_deadline_miss_count}"
         )
     result = "fail" if failures else "pass"
-    result_reason = "thresholds applied and failed" if failures else "500 Hz no-op thresholds satisfied"
+    diagnostic_only = bool(preflight_result.get("disable_waiting_ack_diagnostic"))
+    if failures:
+        result_reason = "thresholds applied and failed"
+    elif diagnostic_only:
+        result_reason = "500 Hz ACK-off diagnostic thresholds satisfied; controller ACK acceptance not measured"
+    else:
+        result_reason = "500 Hz no-op thresholds satisfied"
     failure_classification = None if result == "pass" else classify_acceptance_summary(
         {
             "result": result,
@@ -1576,6 +1618,16 @@ def summarize_acceptance(
             "send_deadline_missed_count": send_deadline_missed_count,
         },
         phase=phase,
+    )
+    ack_disabled = bool(preflight_result.get("disable_waiting_ack"))
+    caveat = (
+        "ACK-off diagnostic only: socket send success is not controller ACK acceptance; "
+        "controller boxes are real, physical robot motion is not expected or approved"
+        if diagnostic_only
+        else (
+            "rbpodo controller-simulation no-op evidence; controller boxes are real, "
+            "physical robot motion is not expected or approved"
+        )
     )
     summary = {
         "schema": SCHEMA,
@@ -1593,6 +1645,10 @@ def summarize_acceptance(
         "duration_sec": args.duration_sec,
         "command_rate_hz": command_run.command_rate_hz,
         "servo_rate_hz": COMMAND_RATE_HZ,
+        "disable_waiting_ack": ack_disabled,
+        "disable_waiting_ack_diagnostic": diagnostic_only,
+        "ack_semantics": preflight_result.get("ack_semantics"),
+        "controller_acceptance_measured": bool(preflight_result.get("controller_acceptance_measured", True)),
         "command_timeout_sec_left": preflight_result.get("command_timeout_sec_left"),
         "command_timeout_sec_right": preflight_result.get("command_timeout_sec_right"),
         "warmup_enabled": phase == "warmup",
@@ -1649,10 +1705,7 @@ def summarize_acceptance(
             "max_reference_drift_deg": args.max_reference_drift_deg,
         },
         "threshold_failures": failures,
-        "caveat": (
-            "rbpodo controller-simulation no-op evidence; controller boxes are real, "
-            "physical robot motion is not expected or approved"
-        ),
+        "caveat": caveat,
     }
     summary.update(send_failure_details)
     return summary
@@ -1676,12 +1729,13 @@ def threshold_failures(
     min_send_count = math.floor(expected_send_count * args.min_send_count_ratio)
     if send_count < min_send_count:
         failures.append(f"send_count {send_count} below minimum {min_send_count} for expected {expected_send_count}")
-    min_acceptance = math.floor(max(send_count, 1) * args.min_controller_acceptance_ratio)
-    if acceptance_count < min_acceptance:
-        failures.append(
-            f"controller_acceptance_observed_count {acceptance_count} below minimum {min_acceptance} "
-            f"for send_count {send_count}"
-        )
+    if not getattr(args, "disable_waiting_ack_diagnostic", False):
+        min_acceptance = math.floor(max(send_count, 1) * args.min_controller_acceptance_ratio)
+        if acceptance_count < min_acceptance:
+            failures.append(
+                f"controller_acceptance_observed_count {acceptance_count} below minimum {min_acceptance} "
+                f"for send_count {send_count}"
+            )
     p99_send = finite_number(send_duration.get("p99"))
     if p99_send is None:
         failures.append(f"send_duration_us.p99 unavailable from {timing_source_name}")
@@ -1731,6 +1785,10 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "mode",
         "arm",
         "send_arms",
+        "disable_waiting_ack",
+        "disable_waiting_ack_diagnostic",
+        "ack_semantics",
+        "controller_acceptance_measured",
         "duration_sec",
         "command_timeout_sec_left",
         "command_timeout_sec_right",
@@ -1841,6 +1899,10 @@ def run_acceptance_once(
             "failure_classification": None,
             "source_config": preflight_result.get("source_config"),
             "resolved_config": preflight_result.get("resolved_config"),
+            "disable_waiting_ack": bool(preflight_result.get("disable_waiting_ack")),
+            "disable_waiting_ack_diagnostic": bool(preflight_result.get("disable_waiting_ack_diagnostic")),
+            "ack_semantics": preflight_result.get("ack_semantics"),
+            "controller_acceptance_measured": bool(preflight_result.get("controller_acceptance_measured", True)),
             "command_timeout_sec_left": preflight_result.get("command_timeout_sec_left"),
             "command_timeout_sec_right": preflight_result.get("command_timeout_sec_right"),
             "warmup_enabled": False,

@@ -446,16 +446,27 @@ class RbpodoCircleAblationTest(unittest.TestCase):
         with self.assertRaisesRegex(ablation.AblationError, "allow_controller_simulation_motion"):
             ablation.validate_experiment(exp, 1)
 
-    def test_config_override_rejects_state_pub_rate_over_200(self) -> None:
+    def test_config_override_allows_state_pub_rate_500(self) -> None:
+        exp = {
+            "name": "pub_rate_500",
+            "config": "config.yaml",
+            "profile": "circle_15cm_16s",
+            "controller": "twist_stand",
+            "arm": "left",
+            "config_overrides": {"network.state_pub_rate_hz": 500},
+        }
+        ablation.validate_experiment(exp, 1)
+
+    def test_config_override_rejects_state_pub_rate_over_500(self) -> None:
         exp = {
             "name": "bad_pub_rate",
             "config": "config.yaml",
             "profile": "circle_15cm_16s",
             "controller": "twist_stand",
             "arm": "left",
-            "config_overrides": {"network.state_pub_rate_hz": 250},
+            "config_overrides": {"network.state_pub_rate_hz": 501},
         }
-        with self.assertRaisesRegex(ablation.AblationError, "<= 200"):
+        with self.assertRaisesRegex(ablation.AblationError, "<= 500"):
             ablation.validate_experiment(exp, 1)
 
     def test_config_override_rejects_rate_t1_mismatch(self) -> None:

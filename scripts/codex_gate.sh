@@ -1294,6 +1294,277 @@ run_rbpodo_500hz_report_gate() {
   echo "codex_gate: skipping rbpodo 500Hz report generation by default"
 }
 
+run_optional_rbpodo_async_500hz_controller_sim() {
+  local script="$1"
+  local require_cartesian="${2:-0}"
+
+  if [[ "${CODEX_RUN_RBPODO_ASYNC_500HZ:-0}" != "1" ]]; then
+    echo "codex_gate: skipping rbpodo async ACK-supervised 500Hz controller-simulation run; set CODEX_RUN_RBPODO_ASYNC_500HZ=1 with explicit CODEX_RBPODO_ASYNC_500HZ_ARGS to enable"
+    return 0
+  fi
+  if [[ ! -f "${script}" ]]; then
+    echo "ERROR: CODEX_RUN_RBPODO_ASYNC_500HZ=1 but ${script} is missing" >&2
+    return 1
+  fi
+  if [[ -z "${CODEX_RBPODO_ASYNC_500HZ_ARGS:-}" ]]; then
+    echo "ERROR: CODEX_RUN_RBPODO_ASYNC_500HZ=1 requires CODEX_RBPODO_ASYNC_500HZ_ARGS with explicit controller-simulation arguments" >&2
+    return 1
+  fi
+  for required_arg in \
+    "--artifact" \
+    "--i-understand-this-connects-to-real-controller" \
+    "--i-confirm-controller-is-in-pgmode-simulation"
+  do
+    if [[ "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"${required_arg}"* ]]; then
+      echo "ERROR: CODEX_RBPODO_ASYNC_500HZ_ARGS must include ${required_arg}" >&2
+      return 1
+    fi
+  done
+  if [[ "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"--verify-pgmode-simulation"* && \
+        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"--set-pgmode-simulation"* && \
+        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"--pgmode-summary-json"* ]]; then
+    echo "ERROR: CODEX_RBPODO_ASYNC_500HZ_ARGS must include pgmode simulation evidence" >&2
+    return 1
+  fi
+  if [[ "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"--async-ack-supervised"* && \
+        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"--ack-mode async-supervised"* && \
+        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"--ack-mode=async-supervised"* ]]; then
+    echo "ERROR: CODEX_RBPODO_ASYNC_500HZ_ARGS must request an explicit async ACK-supervised mode" >&2
+    return 1
+  fi
+  if [[ "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"--disable-waiting-ack-diagnostic"* || \
+        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"--allow-ack-disabled"* || \
+        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"disable_waiting_ack"* || \
+        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"socket_send_only"* || \
+        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"ackoff"* || \
+        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"ack-off"* || \
+        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"operation_mode: real"* ]]; then
+    echo "ERROR: rbpodo async ACK-supervised gates do not allow ACK-off/socket-send-only or operation_mode=real evidence" >&2
+    return 1
+  fi
+  run_rbpodo_async_controller_config_preflight
+  for required_env in \
+    RB_ALLOW_REAL_ROBOT \
+    RB_ALLOW_REAL_MOTION \
+    RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION \
+    RB_RBPODO_PGMODE_SIMULATION_CONFIRMED \
+    RB_ALLOW_RBPODO_ASYNC_ACK_SUPERVISED
+  do
+    if [[ "${!required_env:-0}" != "1" ]]; then
+      echo "ERROR: ${required_env}=1 is required for opt-in rbpodo async ACK-supervised controller-simulation gates" >&2
+      return 1
+    fi
+  done
+  if [[ "${require_cartesian}" == "1" && "${RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN:-0}" != "1" ]]; then
+    echo "ERROR: RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 is required for opt-in rbpodo async circle matrix gates" >&2
+    return 1
+  fi
+  if [[ "${RB_ALLOW_REAL_CARTESIAN:-0}" == "1" ]]; then
+    echo "ERROR: RB_ALLOW_REAL_CARTESIAN must not be set for rbpodo async ACK-supervised controller-simulation gates" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2086
+  python3 "${script}" ${CODEX_RBPODO_ASYNC_500HZ_ARGS}
+}
+
+run_rbpodo_async_controller_config_preflight() {
+  python3 - "$REPO_ROOT" <<'PY'
+import os
+import shlex
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    print(
+        "ERROR: PyYAML is required to verify async rbpodo controller-simulation configs",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+repo = Path(sys.argv[1])
+try:
+    args = shlex.split(os.environ.get("CODEX_RBPODO_ASYNC_500HZ_ARGS", ""))
+except ValueError as exc:
+    print(f"ERROR: failed to parse CODEX_RBPODO_ASYNC_500HZ_ARGS: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+def arg_values(names):
+    values = []
+    i = 0
+    while i < len(args):
+        item = args[i]
+        for name in names:
+            if item == name and i + 1 < len(args):
+                values.append(args[i + 1])
+                i += 1
+                break
+            prefix = name + "="
+            if item.startswith(prefix):
+                values.append(item[len(prefix):])
+                break
+        i += 1
+    return values
+
+def as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+def resolve(path_text):
+    path = Path(path_text)
+    if not path.is_absolute():
+        path = repo / path
+    return path
+
+def load_yaml(path):
+    if not path.exists():
+        print(f"ERROR: async rbpodo gate config path does not exist: {path}", file=sys.stderr)
+        raise SystemExit(1)
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle)
+    return data if isinstance(data, dict) else {}
+
+def check_config(path):
+    data = load_yaml(path)
+    for arm_key in ("left_robot", "right_robot"):
+        arm = data.get(arm_key)
+        if not isinstance(arm, dict):
+            continue
+        operation_mode = str(arm.get("operation_mode", "")).strip().lower()
+        if operation_mode == "real":
+            print(
+                f"ERROR: async rbpodo gates refuse operation_mode=real in {path}:{arm_key}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        if as_bool(arm.get("disable_waiting_ack")):
+            print(
+                f"ERROR: async rbpodo gates refuse disable_waiting_ack=true in {path}:{arm_key}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+    cartesian = data.get("cartesian_control")
+    if isinstance(cartesian, dict) and as_bool(cartesian.get("allow_in_real")):
+        print(
+            f"ERROR: async rbpodo gates refuse cartesian_control.allow_in_real=true in {path}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+def check_matrix(path):
+    data = load_yaml(path)
+    experiments = data.get("experiments")
+    if not isinstance(experiments, list):
+        print(f"ERROR: async rbpodo matrix must contain an experiments list: {path}", file=sys.stderr)
+        raise SystemExit(1)
+    for item in experiments:
+        if not isinstance(item, dict):
+            continue
+        config = item.get("config")
+        if config:
+            check_config(resolve(str(config)))
+        overrides = item.get("config_overrides")
+        if isinstance(overrides, dict):
+            for key, value in overrides.items():
+                key_text = str(key)
+                if key_text.endswith(".operation_mode") and str(value).strip().lower() == "real":
+                    print(
+                        f"ERROR: async rbpodo gates refuse operation_mode=real override in {path}",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1)
+                if key_text.endswith(".disable_waiting_ack") and as_bool(value):
+                    print(
+                        f"ERROR: async rbpodo gates refuse disable_waiting_ack=true override in {path}",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1)
+                if key_text == "cartesian_control.allow_in_real" and as_bool(value):
+                    print(
+                        f"ERROR: async rbpodo gates refuse cartesian_control.allow_in_real=true override in {path}",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1)
+
+config_paths = [resolve(value) for value in arg_values(("--config", "--server-config"))]
+matrix_paths = [resolve(value) for value in arg_values(("--matrix",))]
+if not config_paths and not matrix_paths:
+    print(
+        "ERROR: async rbpodo controller runs must provide --config, --server-config, or --matrix",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+for config_path in config_paths:
+    check_config(config_path)
+for matrix_path in matrix_paths:
+    check_matrix(matrix_path)
+PY
+}
+
+run_rbpodo_async_common_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  run_optional_python_help scripts/rainbow_rate_probe.py
+  run_optional_python_help scripts/rbpodo_500hz_acceptance.py
+  run_optional_python_help scripts/rbpodo_circle_tracking_benchmark.py
+  run_optional_python_help scripts/run_rbpodo_circle_ablation.py
+  grep_existing "500 Hz|ACK|pgmode simulation" \
+    docs/runbooks/rbpodo_500hz_acceptance.md REVIEW.md scripts/rbpodo_500hz_acceptance.py
+}
+
+run_rbpodo_async_contract_probe_gate() {
+  run_rbpodo_async_common_gate
+  run_optional_script_tests 'test_rainbow_rate_probe.py'
+  run_optional_script_tests 'test_rbpodo_500hz_acceptance.py'
+  echo "codex_gate: skipping rbpodo async ACK-supervised controller probe by default"
+}
+
+run_rbpodo_async_cpp_gate() {
+  run_rbpodo_async_common_gate
+  run_servo_gate_or_skip_missing_deps
+  run_optional_script_tests 'test_rbpodo_500hz_acceptance.py'
+  echo "codex_gate: skipping rbpodo async ACK-supervised controller run by default"
+}
+
+run_rbpodo_async_acceptance_gate() {
+  run_rbpodo_async_common_gate
+  python3 scripts/rbpodo_500hz_acceptance.py --help >/dev/null
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_500hz_acceptance.py'
+  run_optional_rbpodo_async_500hz_controller_sim scripts/rbpodo_500hz_acceptance.py 0
+}
+
+run_rbpodo_async_circle_matrix_gate() {
+  run_rbpodo_async_common_gate
+  python3 scripts/run_rbpodo_circle_ablation.py --help >/dev/null
+  run_rbpodo_circle_matrix_schema_checks
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_ablation.py'
+  run_optional_rbpodo_async_500hz_controller_sim scripts/run_rbpodo_circle_ablation.py 1
+}
+
+run_rbpodo_async_report_gate() {
+  run_rbpodo_async_common_gate
+  run_optional_python_help scripts/generate_rbpodo_500hz_report.py
+  run_optional_python_help scripts/generate_circle_benchmark_report.py
+  run_optional_python_help scripts/generate_rbpodo_measurement_reliability_report.py
+  run_optional_script_tests 'test_500hz_report.py'
+  run_optional_script_tests 'test_circle_benchmark_report.py'
+  echo "codex_gate: skipping rbpodo async ACK-supervised report generation by default"
+}
+
+run_rbpodo_async_runbook_gate() {
+  run_rbpodo_async_common_gate
+  grep_existing "async|ACK-supervised|500 Hz|pgmode simulation" \
+    docs/runbooks/rbpodo_500hz_acceptance.md REVIEW.md
+  echo "codex_gate: skipping rbpodo async ACK-supervised controller run by default"
+}
+
 run_optional_rbpodo_p1_circle_ablation() {
   if [[ "${CODEX_RUN_RBPODO_CIRCLE_ABLATION:-0}" != "1" ]]; then
     echo "codex_gate: skipping rbpodo P1 controller-simulation ablation; set CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 with explicit CODEX_RBPODO_CIRCLE_ABLATION_ARGS to enable"
@@ -2190,6 +2461,33 @@ case "$TASK" in
     ;;
   RBPODO-500HZ-REPORT-01)
     run_rbpodo_500hz_report_gate
+    ;;
+  RBPODO-ASYNC-GATE-00)
+    run_shell_syntax_checks
+    ;;
+  RBPODO-ASYNC-CONTRACT-01)
+    run_rbpodo_async_contract_probe_gate
+    ;;
+  RBPODO-ASYNC-SDK-PROBE-01)
+    run_rbpodo_async_contract_probe_gate
+    ;;
+  RBPODO-ASYNC-WORKER-01)
+    run_rbpodo_async_cpp_gate
+    ;;
+  RBPODO-ASYNC-REFERENCE-SUPERVISOR-01)
+    run_rbpodo_async_cpp_gate
+    ;;
+  RBPODO-ASYNC-500HZ-ACCEPT-01)
+    run_rbpodo_async_acceptance_gate
+    ;;
+  RBPODO-ASYNC-CIRCLE-MATRIX-01)
+    run_rbpodo_async_circle_matrix_gate
+    ;;
+  RBPODO-ASYNC-REPORT-01)
+    run_rbpodo_async_report_gate
+    ;;
+  RBPODO-ASYNC-RUNBOOK-01)
+    run_rbpodo_async_runbook_gate
     ;;
   P1-CIRCLE-FACTOR-MATRIX-01)
     run_p1_circle_factor_matrix_gate
