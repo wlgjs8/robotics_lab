@@ -13,6 +13,9 @@ schema: robotics_lab.rb_servo_server.v1
 # Profile intent: 5 cm diameter / 10 s period, approximately 0.016 m/s TCP
 # tangential speed. This is the first staged 500 Hz circle profile after
 # dual-arm no-op acceptance.
+# The no-op acceptance runner writes an artifact-local resolved config with
+# cartesian_control.enable=false unless --preserve-cartesian-control is used.
+# This source template stays Cartesian-capable for circle stages.
 
 left_robot:
   backend_type: rbpodo

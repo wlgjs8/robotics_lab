@@ -117,6 +117,14 @@ Circle stages additionally require the Cartesian controller-simulation carve-out
 RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
 ```
 
+The no-op acceptance runner does not need Cartesian primitives. By default it
+writes an artifact-local `resolved_config.yaml` with
+`cartesian_control.enable: false` before launching `rb_servo_server`. This does
+not edit the source or local YAML. Use `--preserve-cartesian-control` only when
+you intentionally want to validate a config that keeps Cartesian enabled; in
+that case the runner requires `RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1` and
+classifies a missing gate as `preflight_env_missing_or_config_mismatch`.
+
 Do not set `RB_ALLOW_REAL_CARTESIAN` for this workflow. The 500 Hz templates
 are still controller-simulation Cartesian only, not physical real Cartesian.
 
@@ -192,8 +200,31 @@ python3 scripts/rbpodo_500hz_acceptance.py \
   --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
   --config rb_servo_server/config/local/dual_real_rbpodo_circle_5cm10s_500hz.yaml \
   --arm left \
+  --send-arms left \
+  --command-timeout-sec 0.005 \
   --duration-sec 10 \
   --artifact-dir artifacts/rbpodo_500hz_acceptance/left_noop \
+  --set-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+ACK timeout tightness can be separated from 500 Hz timing with a sequential
+sweep. Each timeout gets its own subdirectory, for example
+`timeout_005ms`, `timeout_010ms`, and so on:
+
+```bash
+python3 scripts/rbpodo_500hz_acceptance.py \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --config rb_servo_server/config/local/dual_real_rbpodo_circle_5cm10s_500hz.yaml \
+  --arm left \
+  --send-arms both \
+  --duration-sec 10 \
+  --warmup-duration-sec 2 \
+  --warmup-rate-hz 100 \
+  --warmup-command-timeout-sec 0.05 \
+  --ack-timeout-sweep 0.005,0.01,0.02,0.05 \
+  --artifact-dir artifacts/rbpodo_500hz_acceptance/ack_timeout_sweep \
   --set-pgmode-simulation \
   --i-understand-this-connects-to-real-controller \
   --i-confirm-controller-is-in-pgmode-simulation
@@ -218,6 +249,7 @@ summary.json
 summary.csv
 safety_preflight.json
 pgmode_summary.json
+resolved_config.yaml
 noop_target.json
 state_stream.jsonl
 command_packets.jsonl
@@ -241,6 +273,19 @@ Acceptance means:
 - `servo_jitter_ms.p99` is below threshold
 - `send_deadline_missed_count` is at or below threshold
 - `worker_command_drops_total` is zero if worker I/O is used
+
+Failure classification fields are part of the acceptance evidence:
+
+- `failure_phase`: `preflight`, `startup`, `warmup`, or `measurement`
+- `failure_classification`: `preflight_env_missing`,
+  `preflight_env_missing_or_config_mismatch`, `startup_ack_timeout`,
+  `warmup_ack_timeout`, `measurement_ack_timeout`, `deadline_limited`, or a
+  generic threshold/fault class
+- `ack_timeout_count_by_arm`, `warmup_timeout_count`, and
+  `measurement_timeout_count`
+- `first_send_failure_arm`, `first_send_failure_index`, and
+  `first_send_failure_elapsed_sec`
+- `send_duration_p99_us_by_arm` and `deadline_miss_count_by_arm`
 
 If `servo_log.csv` is missing, do not treat the run as accepted. The state
 stream is still useful diagnostic evidence, but per-servo-tick 500 Hz

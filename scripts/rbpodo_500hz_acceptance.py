@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import socket
@@ -38,16 +40,29 @@ SCHEMA = "robotics_lab.rbpodo_500hz_acceptance.v1"
 MODE = "servo_j_noop_500hz"
 COMMAND_RATE_HZ = 500.0
 COMMAND_PERIOD_SEC = 1.0 / COMMAND_RATE_HZ
+ARMS = ("left", "right")
 REQUIRED_ENV = (
     "RB_ALLOW_REAL_ROBOT",
     "RB_ALLOW_REAL_MOTION",
     "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
     "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED",
 )
+CONTROLLER_SIM_CARTESIAN_ENV = "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"
 
 
 class Acceptance500HzError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_phase: str | None = None,
+        failure_classification: str | None = None,
+        snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_phase = failure_phase
+        self.failure_classification = failure_classification
+        self.snapshot = snapshot
 
 
 @dataclass
@@ -60,6 +75,7 @@ class CommandRunMetrics:
     sender_deadline_missed_count: int
     max_sender_lateness_us: float
     hold_sent: bool
+    command_rate_hz: float = COMMAND_RATE_HZ
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,9 +90,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--arm", choices=("left", "right"), required=True)
+    parser.add_argument(
+        "--send-arms",
+        choices=("left", "right", "both"),
+        help="Arm(s) that receive no-op JointTarget packets. Defaults to --arm.",
+    )
     parser.add_argument("--mode", choices=(MODE,), default=MODE)
     parser.add_argument("--duration-sec", type=float, default=10.0)
     parser.add_argument("--artifact-dir", type=Path, required=True)
+    parser.add_argument(
+        "--command-timeout-sec",
+        type=float,
+        help=(
+            "Override left/right rbpodo command_timeout_sec in artifact-dir/resolved_config.yaml "
+            "for the measured 500 Hz phase."
+        ),
+    )
+    parser.add_argument("--warmup-duration-sec", type=float, default=0.0)
+    parser.add_argument("--warmup-rate-hz", type=float, default=100.0)
+    parser.add_argument(
+        "--warmup-command-timeout-sec",
+        type=float,
+        help="Override rbpodo command_timeout_sec for the separate warmup server run.",
+    )
+    parser.add_argument(
+        "--ack-timeout-sweep",
+        help="Comma-separated measured-phase command_timeout_sec values, e.g. 0.005,0.01,0.02,0.05.",
+    )
+    parser.add_argument(
+        "--preserve-cartesian-control",
+        action="store_true",
+        help=(
+            "Do not disable cartesian_control.enable in the no-op resolved config; "
+            f"if controller-simulation Cartesian is enabled, {CONTROLLER_SIM_CARTESIAN_ENV}=1 is required."
+        ),
+    )
     parser.add_argument("--startup-timeout-sec", type=float, default=12.0)
     parser.add_argument("--settle-sec", type=float, default=0.25)
     parser.add_argument("--max-state-age-us", type=float, default=250_000.0)
@@ -130,6 +178,49 @@ def bool_value(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return False
+
+
+def env_snapshot_500hz() -> dict[str, str | None]:
+    snapshot = env_snapshot()
+    snapshot[CONTROLLER_SIM_CARTESIAN_ENV] = os.environ.get(CONTROLLER_SIM_CARTESIAN_ENV)
+    return snapshot
+
+
+def active_send_arms(args: argparse.Namespace) -> tuple[str, ...]:
+    requested = getattr(args, "send_arms", None) or args.arm
+    if requested == "both":
+        return ARMS
+    if requested not in ARMS:
+        raise Acceptance500HzError(f"--send-arms must be left, right, or both; got {requested!r}")
+    return (str(requested),)
+
+
+def parse_ack_timeout_sweep(value: str | None) -> list[float]:
+    if value is None:
+        return []
+    out: list[float] = []
+    for raw_item in value.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        try:
+            timeout = float(item)
+        except ValueError as exc:
+            raise Acceptance500HzError(f"invalid --ack-timeout-sweep value {item!r}") from exc
+        if not math.isfinite(timeout) or timeout <= 0.0:
+            raise Acceptance500HzError("--ack-timeout-sweep values must be finite and positive")
+        out.append(timeout)
+    if not out:
+        raise Acceptance500HzError("--ack-timeout-sweep must contain at least one timeout")
+    return out
+
+
+def timeout_sweep_label(timeout_sec: float) -> str:
+    timeout_ms = timeout_sec * 1000.0
+    if abs(timeout_ms - round(timeout_ms)) < 1e-9:
+        return f"timeout_{int(round(timeout_ms)):03d}ms"
+    safe = f"{timeout_ms:.3f}".rstrip("0").rstrip(".").replace(".", "p")
+    return f"timeout_{safe}ms"
 
 
 def percentile(values: list[float], pct: float) -> float | None:
@@ -203,6 +294,118 @@ def yaml_sections(path: Path) -> dict[str, dict[str, Any]]:
     return {str(key): value for key, value in data.items() if isinstance(value, dict)}
 
 
+def yaml_document(path: Path) -> dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:
+        raise Acceptance500HzError(
+            "PyYAML is required to write the artifact-local resolved 500 Hz config"
+        ) from exc
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise Acceptance500HzError(f"failed to parse YAML config {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise Acceptance500HzError("server config must be a YAML object")
+    return data
+
+
+def write_yaml_document(path: Path, data: dict[str, Any]) -> None:
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:
+        raise Acceptance500HzError(
+            "PyYAML is required to write the artifact-local resolved 500 Hz config"
+        ) from exc
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def resolve_existing_relative_path(source_config_path: Path, value: str) -> str:
+    path = Path(value)
+    if path.is_absolute():
+        return value
+    candidates = [
+        source_config_path.parent / path,
+        source_config_path.parent.parent / path,
+        source_config_path.parent.parent.parent / path,
+    ]
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.exists():
+            return str(resolved)
+    return value
+
+
+def nested_dict(data: dict[str, Any], key: str) -> dict[str, Any]:
+    value = data.get(key)
+    if isinstance(value, dict):
+        return value
+    value = {}
+    data[key] = value
+    return value
+
+
+def command_timeout_from_sections(sections: dict[str, dict[str, Any]], arm: str) -> float | None:
+    return finite_number(sections.get(f"{arm}_robot", {}).get("command_timeout_sec"))
+
+
+def write_resolved_config(
+    args: argparse.Namespace,
+    source_config_path: Path,
+    artifact_dir: Path,
+    *,
+    command_timeout_sec: float | None,
+) -> tuple[Path, dict[str, Any]]:
+    data = yaml_document(source_config_path)
+    overrides: dict[str, Any] = {}
+    if command_timeout_sec is not None:
+        if not math.isfinite(command_timeout_sec) or command_timeout_sec <= 0.0:
+            raise Acceptance500HzError("--command-timeout-sec must be finite and positive")
+        for arm in ARMS:
+            robot = nested_dict(data, f"{arm}_robot")
+            robot["command_timeout_sec"] = float(command_timeout_sec)
+        overrides["left_robot.command_timeout_sec"] = float(command_timeout_sec)
+        overrides["right_robot.command_timeout_sec"] = float(command_timeout_sec)
+
+    cartesian_control = data.get("cartesian_control")
+    cartesian_disabled_for_noop = False
+    if (
+        isinstance(cartesian_control, dict)
+        and not getattr(args, "preserve_cartesian_control", False)
+        and bool_value(cartesian_control.get("enable"))
+    ):
+        cartesian_control["enable"] = False
+        cartesian_control["allow_in_controller_simulation"] = False
+        cartesian_disabled_for_noop = True
+        overrides["cartesian_control.enable"] = False
+        overrides["cartesian_control.allow_in_controller_simulation"] = False
+
+    kinematics = data.get("kinematics")
+    if isinstance(kinematics, dict) and isinstance(kinematics.get("urdf"), str):
+        resolved_urdf = resolve_existing_relative_path(source_config_path, str(kinematics["urdf"]))
+        if resolved_urdf != kinematics["urdf"]:
+            kinematics["urdf"] = resolved_urdf
+            overrides["kinematics.urdf"] = resolved_urdf
+
+    resolved_config_path = artifact_dir / "resolved_config.yaml"
+    write_yaml_document(resolved_config_path, data)
+    sections = yaml_sections(resolved_config_path)
+    timeout_by_arm = {
+        arm: command_timeout_from_sections(sections, arm)
+        for arm in ARMS
+    }
+    return resolved_config_path, {
+        "source_config": str(source_config_path),
+        "resolved_config": str(resolved_config_path.resolve()),
+        "resolved_config_overrides": overrides,
+        "cartesian_control_disabled_for_noop": cartesian_disabled_for_noop,
+        "preserve_cartesian_control": bool(getattr(args, "preserve_cartesian_control", False)),
+        "command_timeout_sec_left": timeout_by_arm["left"],
+        "command_timeout_sec_right": timeout_by_arm["right"],
+    }
+
+
 def selected_arm(config: ParsedConfig, arm: str) -> Any:
     return config.left if arm == "left" else config.right
 
@@ -253,6 +456,14 @@ def noop_target_from_state(snapshot: dict[str, Any], arm: str) -> tuple[list[flo
     raise Acceptance500HzError(f"{arm} state did not publish finite q_ref_deg or q_target_deg")
 
 
+def noop_targets_from_state(snapshot: dict[str, Any], arms: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+    targets: dict[str, dict[str, Any]] = {}
+    for arm in arms:
+        q_target, target_source = noop_target_from_state(snapshot, arm)
+        targets[arm] = {"q_target_deg": q_target, "target_source": target_source}
+    return targets
+
+
 def q_actual_from_state(snapshot: dict[str, Any], arm: str) -> list[float]:
     state = arm_state(snapshot, arm)
     joints = finite_joint_values(state.get("q_actual_deg") if state else None)
@@ -261,10 +472,15 @@ def q_actual_from_state(snapshot: dict[str, Any], arm: str) -> list[float]:
     return joints
 
 
+def q_actual_for_arms(snapshot: dict[str, Any], arms: tuple[str, ...]) -> dict[str, list[float]]:
+    return {arm: q_actual_from_state(snapshot, arm) for arm in arms}
+
+
 def validate_numeric_args(args: argparse.Namespace) -> None:
     positive = (
         ("--duration-sec", args.duration_sec),
         ("--startup-timeout-sec", args.startup_timeout_sec),
+        ("--warmup-rate-hz", getattr(args, "warmup_rate_hz", 100.0)),
         ("--pgmode-timeout-sec", args.pgmode_timeout_sec),
         ("--max-state-age-us", args.max_state_age_us),
         ("--max-physical-motion-deg", args.max_physical_motion_deg),
@@ -289,6 +505,16 @@ def validate_numeric_args(args: argparse.Namespace) -> None:
         raise Acceptance500HzError("--pgmode-command-port must be in [1, 65535]")
     if args.settle_sec < 0.0 or not math.isfinite(args.settle_sec):
         raise Acceptance500HzError("--settle-sec must be finite and non-negative")
+    warmup_duration = getattr(args, "warmup_duration_sec", 0.0)
+    if warmup_duration < 0.0 or not math.isfinite(warmup_duration):
+        raise Acceptance500HzError("--warmup-duration-sec must be finite and non-negative")
+    for name, value in (
+        ("--command-timeout-sec", getattr(args, "command_timeout_sec", None)),
+        ("--warmup-command-timeout-sec", getattr(args, "warmup_command_timeout_sec", None)),
+    ):
+        if value is not None and (not math.isfinite(value) or value <= 0.0):
+            raise Acceptance500HzError(f"{name} must be finite and positive")
+    parse_ack_timeout_sweep(getattr(args, "ack_timeout_sweep", None))
 
 
 def ensure_pgmode(args: argparse.Namespace, config: ParsedConfig) -> dict[str, Any]:
@@ -297,10 +523,16 @@ def ensure_pgmode(args: argparse.Namespace, config: ParsedConfig) -> dict[str, A
     if not args.set_pgmode_simulation and not args.verify_pgmode_simulation:
         raise Acceptance500HzError(
             "500 Hz controller-simulation acceptance requires --set-pgmode-simulation "
-            "or --verify-pgmode-simulation"
+            "or --verify-pgmode-simulation",
+            failure_phase="preflight",
+            failure_classification="preflight_env_missing",
         )
     if not args.i_confirm_controller_is_in_pgmode_simulation:
-        raise Acceptance500HzError("missing --i-confirm-controller-is-in-pgmode-simulation")
+        raise Acceptance500HzError(
+            "missing --i-confirm-controller-is-in-pgmode-simulation",
+            failure_phase="preflight",
+            failure_classification="preflight_env_missing",
+        )
     try:
         from rainbow_pgmode import RainbowPgmodeError, ensure_controller_simulation_mode
     except Exception as exc:
@@ -326,6 +558,7 @@ def validate_config_and_env(
     sections: dict[str, dict[str, Any]],
     *,
     run_pgmode: bool = True,
+    resolve_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     validate_numeric_args(args)
     if args.mode != MODE:
@@ -347,14 +580,42 @@ def validate_config_and_env(
 
     known_ips = {config.left.ip, config.right.ip} & REAL_ROBOT_IPS
     if known_ips and not args.i_understand_this_connects_to_real_controller:
-        raise Acceptance500HzError("refusing known real controller IP without explicit confirmation flag")
+        raise Acceptance500HzError(
+            "refusing known real controller IP without explicit confirmation flag",
+            failure_phase="preflight",
+            failure_classification="preflight_env_missing",
+        )
     if not args.i_understand_this_connects_to_real_controller:
-        raise Acceptance500HzError("missing --i-understand-this-connects-to-real-controller")
+        raise Acceptance500HzError(
+            "missing --i-understand-this-connects-to-real-controller",
+            failure_phase="preflight",
+            failure_classification="preflight_env_missing",
+        )
     for name in REQUIRED_ENV:
         if not env_enabled(name):
-            raise Acceptance500HzError(f"500 Hz controller-simulation no-op requires {name}=1")
+            raise Acceptance500HzError(
+                f"500 Hz controller-simulation no-op requires {name}=1",
+                failure_phase="preflight",
+                failure_classification="preflight_env_missing",
+            )
     if env_enabled("RB_ALLOW_REAL_CARTESIAN"):
-        raise Acceptance500HzError("RB_ALLOW_REAL_CARTESIAN must not be set for 500 Hz Servo J no-op acceptance")
+        raise Acceptance500HzError(
+            "RB_ALLOW_REAL_CARTESIAN must not be set for 500 Hz Servo J no-op acceptance",
+            failure_phase="preflight",
+            failure_classification="preflight_env_missing",
+        )
+
+    cartesian_control = sections.get("cartesian_control", {})
+    cartesian_enabled = as_bool(cartesian_control.get("enable"), False)
+    cartesian_controller_sim_allowed = as_bool(cartesian_control.get("allow_in_controller_simulation"), False)
+    cartesian_env_required = cartesian_enabled and cartesian_controller_sim_allowed
+    if cartesian_env_required and not env_enabled(CONTROLLER_SIM_CARTESIAN_ENV):
+        raise Acceptance500HzError(
+            "config enables cartesian_control.allow_in_controller_simulation with cartesian_control.enable=true; "
+            f"set {CONTROLLER_SIM_CARTESIAN_ENV}=1 or use the no-op resolved config with Cartesian disabled",
+            failure_phase="preflight",
+            failure_classification="preflight_env_missing_or_config_mismatch",
+        )
 
     send_servo_commands = as_bool(config.servo.get("send_servo_commands"), False)
     if not send_servo_commands:
@@ -368,7 +629,9 @@ def validate_config_and_env(
     ):
         raise Acceptance500HzError(
             "diagnostics-suspect controller-simulation override requires "
-            "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1"
+            "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1",
+            failure_phase="preflight",
+            failure_classification="preflight_env_missing",
         )
 
     servo_rate_hz = as_float(config.servo.get("rate_hz"))
@@ -391,7 +654,7 @@ def validate_config_and_env(
         raise Acceptance500HzError("pgmode simulation preflight did not return overall_result=ok")
 
     selected = selected_arm(config, args.arm)
-    return {
+    result = {
         "passed": True,
         "schema": SCHEMA,
         "mode": MODE,
@@ -400,6 +663,7 @@ def validate_config_and_env(
         "physical_motion_expected": False,
         "physical_real_motion_refused": True,
         "arm": args.arm,
+        "send_arms": list(active_send_arms(args)),
         "selected_ip": selected.ip,
         "configured_ips": [config.left.ip, config.right.ip],
         "known_real_ips": sorted(known_ips),
@@ -422,32 +686,51 @@ def validate_config_and_env(
         "state_host": state_host,
         "state_port": state_port,
         "required_env": list(REQUIRED_ENV),
-        "env": env_snapshot(),
+        "env": env_snapshot_500hz(),
         "confirmation_flag": args.i_understand_this_connects_to_real_controller,
         "pgmode_confirmation_flag": args.i_confirm_controller_is_in_pgmode_simulation,
         "pgmode_simulation_confirmed": pgmode_summary.get("overall_result") == "ok",
         "pgmode_summary": pgmode_summary,
         "server_env_overrides": {"RB_RBPODO_PGMODE_SIMULATION_CONFIRMED": "1"},
-        "cartesian_env_required": False,
+        "cartesian_control_enable": cartesian_enabled,
+        "cartesian_control_allow_in_controller_simulation": cartesian_controller_sim_allowed,
+        "cartesian_env_required": cartesian_env_required,
         "cartesian_env_forbidden": "RB_ALLOW_REAL_CARTESIAN",
         "network_state_pub_rate_hz": as_float(config.network.get("state_pub_rate_hz")),
         "logging_directory": sections.get("logging", {}).get("directory"),
     }
+    if resolve_info:
+        result.update(resolve_info)
+    return result
 
 
 def preflight(args: argparse.Namespace, *, run_pgmode: bool = True) -> tuple[ParsedConfig, dict[str, Any]]:
     config_path = (args.root / args.config).resolve() if not args.config.is_absolute() else args.config.resolve()
     if not config_path.is_file():
         raise Acceptance500HzError(f"config not found: {config_path}")
-    config = load_config(config_path)
-    sections = yaml_sections(config_path)
+    artifact_dir = args.artifact_dir.resolve()
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    resolved_config_path, resolve_info = write_resolved_config(
+        args,
+        config_path,
+        artifact_dir,
+        command_timeout_sec=getattr(args, "command_timeout_sec", None),
+    )
+    config = load_config(resolved_config_path)
+    sections = yaml_sections(resolved_config_path)
     if "servo" in sections:
         config.servo = sections["servo"]
     if "network" in sections:
         config.network = sections["network"]
     if "logging" in sections:
         config.logging = sections["logging"]
-    return config, validate_config_and_env(args, config, sections, run_pgmode=run_pgmode)
+    return config, validate_config_and_env(
+        args,
+        config,
+        sections,
+        run_pgmode=run_pgmode,
+        resolve_info=resolve_info,
+    )
 
 
 def now_ns() -> int:
@@ -508,8 +791,7 @@ def hold_packet(seq: int, session_id: str) -> dict[str, Any]:
     }
 
 
-def joint_target_packet(seq: int, session_id: str, arm: str, q_target_deg: list[float]) -> dict[str, Any]:
-    payload = {"q_target_deg": q_target_deg}
+def joint_target_packet(seq: int, session_id: str, q_targets_by_arm: dict[str, list[float]]) -> dict[str, Any]:
     stamp = now_ns()
     return {
         "schema_version": 1,
@@ -520,8 +802,8 @@ def joint_target_packet(seq: int, session_id: str, arm: str, q_target_deg: list[
         "coupled_timeout": True,
         "source_id": "rbpodo_500hz_acceptance",
         "session_id": session_id,
-        "left": payload if arm == "left" else {"mode": "Hold"},
-        "right": payload if arm == "right" else {"mode": "Hold"},
+        "left": {"q_target_deg": q_targets_by_arm["left"]} if "left" in q_targets_by_arm else {"mode": "Hold"},
+        "right": {"q_target_deg": q_targets_by_arm["right"]} if "right" in q_targets_by_arm else {"mode": "Hold"},
     }
 
 
@@ -529,7 +811,10 @@ def start_server(args: argparse.Namespace, log_path: Path, preflight_result: dic
     server = (args.root / args.server).resolve() if not args.server.is_absolute() else args.server.resolve()
     if not server.is_file():
         raise Acceptance500HzError(f"server binary not found: {server}")
-    config_path = (args.root / args.config).resolve() if not args.config.is_absolute() else args.config.resolve()
+    resolved_config = preflight_result.get("resolved_config")
+    config_path = Path(str(resolved_config)) if resolved_config else (
+        (args.root / args.config).resolve() if not args.config.is_absolute() else args.config.resolve()
+    )
     command = [str(server), "--config", str(config_path)]
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("w", encoding="utf-8")
@@ -594,6 +879,16 @@ def state_excerpt(snapshot: dict[str, Any], arm: str) -> dict[str, Any]:
     return out
 
 
+def state_excerpt_for_arms(snapshot: dict[str, Any], arms: tuple[str, ...]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for arm in arms:
+        arm_excerpt = state_excerpt(snapshot, arm)
+        for key, value in arm_excerpt.items():
+            if key not in out:
+                out[key] = value
+    return out
+
+
 def start_state_ready(snapshot: dict[str, Any], arm: str) -> bool:
     if snapshot.get("fault_latched") is True:
         return False
@@ -603,6 +898,10 @@ def start_state_ready(snapshot: dict[str, Any], arm: str) -> bool:
     return finite_joint_values(state.get("q_actual_deg")) is not None and any(
         finite_joint_values(state.get(key)) is not None for key in ("q_ref_deg", "q_target_deg")
     )
+
+
+def start_state_ready_for_arms(snapshot: dict[str, Any], arms: tuple[str, ...]) -> bool:
+    return all(start_state_ready(snapshot, arm) for arm in arms)
 
 
 def wait_for_start_state(
@@ -615,16 +914,20 @@ def wait_for_start_state(
     deadline = time.monotonic() + args.startup_timeout_sec
     scanned = 0
     latest: dict[str, Any] | None = None
+    arms = active_send_arms(args)
     while time.monotonic() < deadline:
         snapshots = list(capture.snapshots)
         for snapshot in snapshots[scanned:]:
             latest = snapshot
-            if start_state_ready(snapshot, args.arm):
+            if start_state_ready_for_arms(snapshot, arms):
                 return snapshot
             if snapshot.get("fault_latched") is True:
                 raise Acceptance500HzError(
                     "rb_servo_server published a fault-latched startup state:\n"
-                    + json.dumps(state_excerpt(snapshot, args.arm), indent=2, sort_keys=True)
+                    + json.dumps(state_excerpt_for_arms(snapshot, arms), indent=2, sort_keys=True),
+                    failure_phase="startup",
+                    failure_classification=classify_snapshot_failure(snapshot, "startup"),
+                    snapshot=snapshot,
                 )
         scanned = len(snapshots)
         if proc is not None and proc.poll() is not None:
@@ -633,9 +936,15 @@ def wait_for_start_state(
     if latest is not None:
         raise Acceptance500HzError(
             "received rb_servo_server state packets, but no valid rbpodo no-op start state was observed:\n"
-            + json.dumps(state_excerpt(latest, args.arm), indent=2, sort_keys=True)
+            + json.dumps(state_excerpt_for_arms(latest, arms), indent=2, sort_keys=True),
+            failure_phase="startup",
+            snapshot=latest,
         )
-    raise Acceptance500HzError(state_stream_timeout_message(proc, log_path, state_endpoint))
+    raise Acceptance500HzError(
+        state_stream_timeout_message(proc, log_path, state_endpoint),
+        failure_phase="startup",
+        failure_classification=classify_error_text(state_stream_timeout_message(proc, log_path, state_endpoint), "startup"),
+    )
 
 
 def wait_for_armed(
@@ -646,6 +955,7 @@ def wait_for_armed(
     deadline = time.monotonic() + args.startup_timeout_sec
     scanned = 0
     latest: dict[str, Any] | None = None
+    arms = active_send_arms(args)
     while time.monotonic() < deadline:
         snapshots = list(capture.snapshots)
         for snapshot in snapshots[scanned:]:
@@ -655,26 +965,38 @@ def wait_for_armed(
             if snapshot.get("fault_latched") is True:
                 raise Acceptance500HzError(
                     "fault latched while arming rb_servo_server:\n"
-                    + json.dumps(state_excerpt(snapshot, args.arm), indent=2, sort_keys=True)
+                    + json.dumps(state_excerpt_for_arms(snapshot, arms), indent=2, sort_keys=True),
+                    failure_phase="startup",
+                    failure_classification=classify_snapshot_failure(snapshot, "startup"),
+                    snapshot=snapshot,
                 )
-            if snapshot.get("motion_state") in {"ArmedHold", "Running"} and start_state_ready(snapshot, args.arm):
+            if snapshot.get("motion_state") in {"ArmedHold", "Running"} and start_state_ready_for_arms(snapshot, arms):
                 return snapshot
         scanned = len(snapshots)
         time.sleep(0.02)
-    detail = json.dumps(state_excerpt(latest or {}, args.arm), indent=2, sort_keys=True)
-    raise Acceptance500HzError(f"timed out waiting for rb_servo_server ArmedHold state:\n{detail}")
+    detail = json.dumps(state_excerpt_for_arms(latest or {}, arms), indent=2, sort_keys=True)
+    raise Acceptance500HzError(
+        f"timed out waiting for rb_servo_server ArmedHold state:\n{detail}",
+        failure_phase="startup",
+        snapshot=latest,
+    )
 
 
 def send_noop_stream(
     args: argparse.Namespace,
     preflight_result: dict[str, Any],
-    q_noop: list[float],
+    q_noop_by_arm: dict[str, list[float]],
     artifact_path: Path,
     session_id: str,
+    *,
+    command_rate_hz: float = COMMAND_RATE_HZ,
 ) -> CommandRunMetrics:
     host = str(preflight_result["command_host"])
     port = int(preflight_result["command_port"])
-    expected_count = max(1, int(round(float(args.duration_sec) * COMMAND_RATE_HZ)))
+    if not math.isfinite(command_rate_hz) or command_rate_hz <= 0.0:
+        raise Acceptance500HzError("command_rate_hz must be finite and positive")
+    command_period_sec = 1.0 / command_rate_hz
+    expected_count = max(1, int(round(float(args.duration_sec) * command_rate_hz)))
     seq = 2
     start_host_ns = 0
     end_host_ns = 0
@@ -689,16 +1011,16 @@ def send_noop_stream(
         for _index in range(expected_count):
             now = time.monotonic()
             lateness = now - next_send
-            if lateness > COMMAND_PERIOD_SEC:
+            if lateness > command_period_sec:
                 deadline_misses += 1
                 max_lateness_us = max(max_lateness_us, lateness * 1e6)
-            packet = joint_target_packet(seq, session_id, args.arm, q_noop)
+            packet = joint_target_packet(seq, session_id, q_noop_by_arm)
             if start_host_ns == 0:
                 start_host_ns = int(packet["host_time_ns"])
             end_host_ns = int(packet["host_time_ns"])
             send_udp_with_socket(sock, host, port, packet, handle)
             seq += 1
-            next_send += COMMAND_PERIOD_SEC
+            next_send += command_period_sec
             sleep_sec = next_send - time.monotonic()
             if sleep_sec > 0.0:
                 time.sleep(sleep_sec)
@@ -714,6 +1036,7 @@ def send_noop_stream(
         sender_deadline_missed_count=deadline_misses,
         max_sender_lateness_us=max_lateness_us,
         hold_sent=True,
+        command_rate_hz=command_rate_hz,
     )
 
 
@@ -928,6 +1251,227 @@ def state_stream_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, An
     }
 
 
+def error_text_from_mapping(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    keys = (
+        "backend_error_kind",
+        "backend_error_name",
+        "backend_error_code",
+        "backend_op",
+        "error_kind",
+        "error_name",
+        "error_code",
+        "send_error_kind",
+        "send_error_name",
+        "send_error_message",
+        "reason",
+        "message",
+        "verdict",
+    )
+    parts = [str(value.get(key)) for key in keys if value.get(key) not in (None, "")]
+    return " ".join(parts)
+
+
+def is_ack_timeout_text(text: str) -> bool:
+    lower = text.lower()
+    has_timeout = "timeout" in lower or "timed out" in lower
+    has_ack_context = (
+        re.search(r"\back\b|ack_|_ack|ack-|acknowledg", lower) is not None
+        or "acknowledg" in lower
+        or "move_servo_j" in lower
+        or "servolj" in lower
+        or "sendservoj" in lower
+        or "transporttimeout" in lower
+    )
+    return has_timeout and has_ack_context
+
+
+def arm_from_error_text(text: str) -> str | None:
+    lower = text.lower()
+    if " on left" in lower or "left_" in lower:
+        return "left"
+    if " on right" in lower or "right_" in lower:
+        return "right"
+    return None
+
+
+def observation_from_error(
+    snapshot: dict[str, Any],
+    index: int,
+    arm: str | None,
+    source: str,
+    fields: dict[str, Any],
+) -> dict[str, Any] | None:
+    text = error_text_from_mapping(fields)
+    if not text:
+        return None
+    backend_kind = str(fields.get("backend_error_kind") or fields.get("send_error_kind") or "")
+    error_name = str(fields.get("backend_error_name") or fields.get("error_name") or fields.get("send_error_name") or "")
+    if backend_kind == "SuppressedByPolicy" or error_name == "fault_latched":
+        return None
+    accepted = fields.get("accepted")
+    send_ok = fields.get("send_ok")
+    verdict = str(fields.get("verdict") or "")
+    backend_op = str(fields.get("backend_op") or "")
+    is_failure = (
+        accepted is False
+        or send_ok is False
+        or verdict == "SendFailure"
+        or bool(fields.get("transport_fault"))
+        or backend_kind not in {"", "None"}
+        or (backend_op == "SendServoJ" and backend_kind)
+    )
+    if not is_failure:
+        return None
+    resolved_arm = arm or arm_from_error_text(text)
+    if resolved_arm not in ARMS:
+        resolved_arm = "unknown"
+    host_time_ns = int(finite_number(snapshot.get("loop_start_time_ns")) or finite_number(snapshot.get("host_time_ns")) or 0)
+    return {
+        "index": index,
+        "host_time_ns": host_time_ns,
+        "arm": resolved_arm,
+        "source": source,
+        "ack_timeout": is_ack_timeout_text(text),
+        "text": text,
+    }
+
+
+def send_failure_observations(states: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    observations: list[dict[str, Any]] = []
+    seen: set[tuple[int, str, str]] = set()
+    for index, snapshot in enumerate(states):
+        fault_context = snapshot.get("fault_context")
+        if isinstance(fault_context, dict):
+            for key in ("top_level", "left", "right"):
+                context = fault_context.get(key)
+                if not isinstance(context, dict):
+                    continue
+                arm = str(context.get("arm") or key)
+                obs = observation_from_error(snapshot, index, arm, f"fault_context.{key}", context)
+                if obs is not None:
+                    token = (index, str(obs["arm"]), str(obs["source"]))
+                    if token not in seen:
+                        seen.add(token)
+                        observations.append(obs)
+        for arm in ARMS:
+            state = arm_state(snapshot, arm)
+            if state is None:
+                continue
+            last_send = state.get("last_send")
+            if isinstance(last_send, dict):
+                obs = observation_from_error(snapshot, index, arm, f"{arm}.last_send", last_send)
+                if obs is not None:
+                    token = (index, str(obs["arm"]), str(obs["source"]))
+                    if token not in seen:
+                        seen.add(token)
+                        observations.append(obs)
+            send_fields = {
+                "send_ok": state.get("send_ok"),
+                "send_error_kind": state.get("send_error_kind"),
+                "send_error_name": state.get("send_error_name"),
+                "send_error_message": state.get("send_error_message"),
+            }
+            obs = observation_from_error(snapshot, index, arm, f"{arm}.send_result", send_fields)
+            if obs is not None:
+                token = (index, str(obs["arm"]), str(obs["source"]))
+                if token not in seen:
+                    seen.add(token)
+                    observations.append(obs)
+    observations.sort(key=lambda item: (int(item.get("host_time_ns") or 0), int(item.get("index") or 0)))
+    return observations
+
+
+def send_failure_summary(
+    states: list[dict[str, Any]],
+    *,
+    phase: str,
+    start_host_time_ns: int = 0,
+) -> dict[str, Any]:
+    observations = send_failure_observations(states)
+    ack_timeout_count_by_arm = {arm: 0 for arm in ARMS}
+    ack_timeout_count_by_arm["unknown"] = 0
+    for observation in observations:
+        if not observation.get("ack_timeout"):
+            continue
+        arm = str(observation.get("arm") or "unknown")
+        ack_timeout_count_by_arm[arm] = ack_timeout_count_by_arm.get(arm, 0) + 1
+    first = observations[0] if observations else None
+    first_elapsed_sec: float | None = None
+    if first is not None:
+        host_ns = int(first.get("host_time_ns") or 0)
+        base_ns = start_host_time_ns if start_host_time_ns > 0 else host_ns
+        first_elapsed_sec = max(0.0, (host_ns - base_ns) / 1e9) if host_ns > 0 else None
+    timeout_count = sum(ack_timeout_count_by_arm.values())
+    return {
+        "ack_timeout_count_by_arm": {arm: ack_timeout_count_by_arm.get(arm, 0) for arm in ARMS},
+        "ack_timeout_count_unknown_arm": ack_timeout_count_by_arm.get("unknown", 0),
+        "warmup_timeout_count": timeout_count if phase == "warmup" else 0,
+        "measurement_timeout_count": timeout_count if phase == "measurement" else 0,
+        "first_send_failure_arm": first.get("arm") if first else None,
+        "first_send_failure_index": first.get("index") if first else None,
+        "first_send_failure_elapsed_sec": first_elapsed_sec,
+        "first_send_failure_source": first.get("source") if first else None,
+        "first_send_failure_ack_timeout": bool(first.get("ack_timeout")) if first else False,
+        "first_send_failure_text": first.get("text") if first else None,
+    }
+
+
+def classify_error_text(text: str, phase: str | None) -> str | None:
+    if not text:
+        return None
+    lower = text.lower()
+    if (
+        CONTROLLER_SIM_CARTESIAN_ENV in text
+        or "controller-simulation cartesian" in lower
+        or "cartesian_control.allow_in_controller_simulation" in lower
+    ):
+        return "preflight_env_missing_or_config_mismatch"
+    if "requires rb_allow" in lower or "missing --" in lower or "must not be set" in lower:
+        return "preflight_env_missing"
+    if is_ack_timeout_text(text):
+        if phase == "warmup":
+            return "warmup_ack_timeout"
+        if phase == "measurement":
+            return "measurement_ack_timeout"
+        if phase == "startup":
+            return "startup_ack_timeout"
+        return "ack_timeout"
+    if "deadline" in lower:
+        return "deadline_limited"
+    return None
+
+
+def classify_snapshot_failure(snapshot: dict[str, Any] | None, phase: str) -> str | None:
+    if not snapshot:
+        return None
+    failures = send_failure_summary([snapshot], phase=phase)
+    if sum(failures.get("ack_timeout_count_by_arm", {}).values()) > 0:
+        return classify_error_text(str(failures.get("first_send_failure_text") or ""), phase)
+    if snapshot.get("send_command_deadline_missed") is True:
+        return "deadline_limited"
+    return f"{phase}_fault_latched" if snapshot.get("fault_latched") is True else None
+
+
+def classify_acceptance_summary(summary: dict[str, Any], *, phase: str) -> str:
+    if summary.get("result") == "pass":
+        return "pass"
+    timeout_count = int(summary.get("warmup_timeout_count") or 0) + int(summary.get("measurement_timeout_count") or 0)
+    if timeout_count > 0:
+        if phase == "warmup":
+            return "warmup_ack_timeout"
+        if phase == "measurement":
+            return "measurement_ack_timeout"
+        return "ack_timeout"
+    deadline_counts = summary.get("deadline_miss_count_by_arm")
+    if isinstance(deadline_counts, dict) and sum(int(value or 0) for value in deadline_counts.values()) > 0:
+        return "deadline_limited"
+    if int(summary.get("send_deadline_missed_count") or 0) > 0:
+        return "deadline_limited"
+    return "threshold_failure"
+
+
 def summarize_acceptance(
     args: argparse.Namespace,
     config: ParsedConfig,
@@ -937,18 +1481,33 @@ def summarize_acceptance(
     artifact_dir: Path,
     server_returncode: int | None,
     servo_log: dict[str, Any] | None,
+    *,
+    phase: str = "measurement",
 ) -> dict[str, Any]:
     state_metrics = state_stream_metrics(states, args.arm)
+    state_metrics_by_arm = {arm: state_stream_metrics(states, arm) for arm in ARMS}
     servo_metrics: dict[str, Any] | None = None
+    servo_metrics_by_arm: dict[str, dict[str, Any]] = {}
     if servo_log and isinstance(servo_log.get("path"), str):
-        servo_metrics = parse_servo_log_metrics(
-            Path(servo_log["path"]),
-            args.arm,
-            command_run.start_host_time_ns,
-            command_run.end_host_time_ns,
-        )
+        servo_log_path = Path(servo_log["path"])
+        for arm in ARMS:
+            servo_metrics_by_arm[arm] = parse_servo_log_metrics(
+                servo_log_path,
+                arm,
+                command_run.start_host_time_ns,
+                command_run.end_host_time_ns,
+            )
+        servo_metrics = servo_metrics_by_arm.get(args.arm)
 
     timing_source = servo_metrics if servo_metrics and servo_metrics.get("send_count") else state_metrics
+    timing_source_by_arm: dict[str, dict[str, Any]] = {}
+    for arm in ARMS:
+        servo_arm_metrics = servo_metrics_by_arm.get(arm)
+        timing_source_by_arm[arm] = (
+            servo_arm_metrics
+            if servo_arm_metrics and servo_arm_metrics.get("send_count")
+            else state_metrics_by_arm[arm]
+        )
     q_actual_drift = state_metrics.get("q_actual_drift_from_start_deg")
     q_ref_drift = state_metrics.get("q_ref_drift_from_start_deg")
     physical_motion_detected = (
@@ -967,6 +1526,23 @@ def summarize_acceptance(
     if not isinstance(servo_jitter, dict):
         servo_jitter = {}
     send_deadline_missed_count = int(timing_source.get("send_deadline_missed_count") or 0)
+    send_duration_p99_us_by_arm = {
+        arm: (
+            timing_source_by_arm[arm].get("send_duration_us") or {}
+        ).get("p99")
+        if isinstance(timing_source_by_arm[arm].get("send_duration_us"), dict)
+        else None
+        for arm in ARMS
+    }
+    deadline_miss_count_by_arm = {
+        arm: int(timing_source_by_arm[arm].get("send_deadline_missed_count") or 0)
+        for arm in ARMS
+    }
+    send_failure_details = send_failure_summary(
+        states,
+        phase=phase,
+        start_host_time_ns=command_run.start_host_time_ns,
+    )
     failures = threshold_failures(
         args,
         expected_send_count=expected_send_count,
@@ -980,18 +1556,47 @@ def summarize_acceptance(
         timing_source_name=str(timing_source.get("source")),
         physical_motion_detected=physical_motion_detected,
     )
+    ack_timeout_total = int(send_failure_details.get("warmup_timeout_count") or 0) + int(
+        send_failure_details.get("measurement_timeout_count") or 0
+    )
+    if ack_timeout_total > 0:
+        failures.append(f"{phase} observed rbpodo Servo J ACK timeout count {ack_timeout_total}")
+    if sum(deadline_miss_count_by_arm.values()) > args.max_deadline_miss_count and ack_timeout_total == 0:
+        failures.append(
+            f"deadline_miss_count_by_arm total {sum(deadline_miss_count_by_arm.values())} "
+            f"exceeds {args.max_deadline_miss_count}"
+        )
     result = "fail" if failures else "pass"
     result_reason = "thresholds applied and failed" if failures else "500 Hz no-op thresholds satisfied"
+    failure_classification = None if result == "pass" else classify_acceptance_summary(
+        {
+            "result": result,
+            **send_failure_details,
+            "deadline_miss_count_by_arm": deadline_miss_count_by_arm,
+            "send_deadline_missed_count": send_deadline_missed_count,
+        },
+        phase=phase,
+    )
     summary = {
         "schema": SCHEMA,
         "result": result,
         "result_reason": result_reason,
+        "failure_phase": phase if result != "pass" else None,
+        "failure_classification": failure_classification,
         "artifact_dir": str(artifact_dir.resolve()),
         "config": str(config.path),
+        "source_config": preflight_result.get("source_config"),
+        "resolved_config": preflight_result.get("resolved_config"),
         "mode": MODE,
         "arm": args.arm,
+        "send_arms": list(active_send_arms(args)),
         "duration_sec": args.duration_sec,
-        "command_rate_hz": COMMAND_RATE_HZ,
+        "command_rate_hz": command_run.command_rate_hz,
+        "servo_rate_hz": COMMAND_RATE_HZ,
+        "command_timeout_sec_left": preflight_result.get("command_timeout_sec_left"),
+        "command_timeout_sec_right": preflight_result.get("command_timeout_sec_right"),
+        "warmup_enabled": phase == "warmup",
+        "warmup_result": result if phase == "warmup" else "not_run",
         "expected_send_count": expected_send_count,
         "udp_command_count": command_run.command_count,
         "send_count": send_count,
@@ -1003,8 +1608,10 @@ def summarize_acceptance(
         "send_failure_count": send_failure_count,
         "ack_observed_count": int(timing_source.get("ack_observed_count") or 0),
         "send_duration_us": send_duration,
+        "send_duration_p99_us_by_arm": send_duration_p99_us_by_arm,
         "servo_jitter_ms": servo_jitter,
         "send_deadline_missed_count": send_deadline_missed_count,
+        "deadline_miss_count_by_arm": deadline_miss_count_by_arm,
         "send_period_overrun_count": int(timing_source.get("send_period_overrun_count") or 0),
         "command_sender_deadline_missed_count": command_run.sender_deadline_missed_count,
         "command_sender_max_lateness_us": command_run.max_sender_lateness_us,
@@ -1027,7 +1634,9 @@ def summarize_acceptance(
         "rb_servo_server_log": str((artifact_dir / "rb_servo_server.log").resolve()),
         "servo_log": servo_log,
         "servo_log_metrics": servo_metrics,
+        "servo_log_metrics_by_arm": servo_metrics_by_arm,
         "state_stream_metrics": state_metrics,
+        "state_stream_metrics_by_arm": state_metrics_by_arm,
         "safety_preflight": preflight_result,
         "thresholds": {
             "min_send_count_ratio": args.min_send_count_ratio,
@@ -1045,6 +1654,7 @@ def summarize_acceptance(
             "physical robot motion is not expected or approved"
         ),
     }
+    summary.update(send_failure_details)
     return summary
 
 
@@ -1116,16 +1726,31 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
     fields = [
         "result",
         "result_reason",
+        "failure_phase",
+        "failure_classification",
         "mode",
         "arm",
+        "send_arms",
         "duration_sec",
+        "command_timeout_sec_left",
+        "command_timeout_sec_right",
+        "warmup_enabled",
+        "warmup_result",
+        "warmup_timeout_count",
+        "measurement_timeout_count",
+        "first_send_failure_arm",
+        "first_send_failure_index",
+        "first_send_failure_elapsed_sec",
         "expected_send_count",
         "send_count",
         "controller_acceptance_observed_count",
         "controller_acceptance_ratio",
         "send_duration_p99_us",
+        "send_duration_p99_us_by_arm",
         "servo_jitter_p99_ms",
         "send_deadline_missed_count",
+        "deadline_miss_count_by_arm",
+        "ack_timeout_count_by_arm",
         "worker_command_drops_total",
         "physical_motion_detected",
         "q_actual_drift_from_start_deg",
@@ -1190,14 +1815,21 @@ def write_plots(artifact_dir: Path, summary: dict[str, Any]) -> tuple[list[str],
     return generated, []
 
 
-def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
+def run_acceptance_once(
+    args: argparse.Namespace,
+    *,
+    phase: str = "measurement",
+    command_rate_hz: float = COMMAND_RATE_HZ,
+) -> dict[str, Any]:
     args.root = args.root.resolve()
     config, preflight_result = preflight(args)
     artifact_dir = args.artifact_dir.resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
     write_json(artifact_dir / "safety_preflight.json", preflight_result)
     write_json(artifact_dir / "pgmode_summary.json", preflight_result["pgmode_summary"])
-    shutil.copy2(config.path, artifact_dir / "raw_config.yaml")
+    source_config = preflight_result.get("source_config")
+    if isinstance(source_config, str) and Path(source_config).is_file():
+        shutil.copy2(source_config, artifact_dir / "raw_config.yaml")
     if args.preflight_only:
         summary = {
             "schema": SCHEMA,
@@ -1205,6 +1837,22 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
             "result_reason": "preflight only",
             "artifact_dir": str(artifact_dir),
             "mode": MODE,
+            "failure_phase": None,
+            "failure_classification": None,
+            "source_config": preflight_result.get("source_config"),
+            "resolved_config": preflight_result.get("resolved_config"),
+            "command_timeout_sec_left": preflight_result.get("command_timeout_sec_left"),
+            "command_timeout_sec_right": preflight_result.get("command_timeout_sec_right"),
+            "warmup_enabled": False,
+            "warmup_result": "not_run",
+            "warmup_timeout_count": 0,
+            "measurement_timeout_count": 0,
+            "first_send_failure_arm": None,
+            "first_send_failure_index": None,
+            "first_send_failure_elapsed_sec": None,
+            "ack_timeout_count_by_arm": {arm: 0 for arm in ARMS},
+            "send_duration_p99_us_by_arm": {arm: None for arm in ARMS},
+            "deadline_miss_count_by_arm": {arm: 0 for arm in ARMS},
             "safety_preflight": preflight_result,
             "preflight_only": True,
         }
@@ -1231,15 +1879,17 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
             server_log_path,
             str(preflight_result["state_endpoint"]),
         )
-        q_noop, target_source = noop_target_from_state(first_state, args.arm)
-        q_actual_from_state(first_state, args.arm)
+        arms = active_send_arms(args)
+        noop_targets = noop_targets_from_state(first_state, arms)
+        q_actual_for_arms(first_state, arms)
+        q_noop_by_arm = {arm: list(noop_targets[arm]["q_target_deg"]) for arm in arms}
         with (artifact_dir / "noop_target.json").open("w", encoding="utf-8") as handle:
             json.dump(
                 {
                     "arm": args.arm,
-                    "target_source": target_source,
-                    "q_target_deg": q_noop,
-                    "startup_state_excerpt": state_excerpt(first_state, args.arm),
+                    "send_arms": list(arms),
+                    "targets_by_arm": noop_targets,
+                    "startup_state_excerpt": state_excerpt_for_arms(first_state, arms),
                 },
                 handle,
                 indent=2,
@@ -1258,9 +1908,10 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         command_run = send_noop_stream(
             args,
             preflight_result,
-            q_noop,
+            q_noop_by_arm,
             artifact_dir / "command_packets.jsonl",
             session_id,
+            command_rate_hz=command_rate_hz,
         )
         if args.settle_sec > 0.0:
             time.sleep(args.settle_sec)
@@ -1278,6 +1929,7 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         artifact_dir,
         server_returncode,
         servo_log,
+        phase=phase,
     )
     if args.skip_plots:
         summary["generated_plots"] = []
@@ -1291,9 +1943,180 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
     return summary
 
 
-def failure_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
+def run_acceptance_with_warmup(args: argparse.Namespace) -> dict[str, Any]:
+    root_artifact_dir = args.artifact_dir.resolve()
+    root_artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    warmup_args = copy.copy(args)
+    warmup_args.artifact_dir = root_artifact_dir / "warmup"
+    warmup_args.duration_sec = args.warmup_duration_sec
+    warmup_args.command_timeout_sec = (
+        args.warmup_command_timeout_sec
+        if args.warmup_command_timeout_sec is not None
+        else args.command_timeout_sec
+    )
+    warmup_args.warmup_duration_sec = 0.0
+    warmup_args.ack_timeout_sweep = None
+    try:
+        warmup_summary = run_acceptance_once(
+            warmup_args,
+            phase="warmup",
+            command_rate_hz=args.warmup_rate_hz,
+        )
+    except Exception as exc:
+        warmup_summary = failure_summary(warmup_args, exc, default_phase="warmup")
+
+    if warmup_summary.get("result") != "pass":
+        summary = dict(warmup_summary)
+        summary.update(
+            {
+                "artifact_dir": str(root_artifact_dir),
+                "warmup_enabled": True,
+                "warmup_result": warmup_summary.get("result"),
+                "warmup_summary": str((warmup_args.artifact_dir / "summary.json").resolve()),
+                "measurement_summary": None,
+                "failure_phase": "warmup",
+                "failure_classification": warmup_summary.get("failure_classification") or "warmup_failed",
+            }
+        )
+        write_json(root_artifact_dir / "summary.json", summary)
+        write_summary_csv(root_artifact_dir / "summary.csv", summary)
+        return summary
+
+    measurement_args = copy.copy(args)
+    measurement_args.artifact_dir = root_artifact_dir / "measurement"
+    measurement_args.warmup_duration_sec = 0.0
+    measurement_args.ack_timeout_sweep = None
+    try:
+        measurement_summary = run_acceptance_once(measurement_args, phase="measurement")
+    except Exception as exc:
+        measurement_summary = failure_summary(measurement_args, exc, default_phase="measurement")
+
+    summary = dict(measurement_summary)
+    summary.update(
+        {
+            "artifact_dir": str(root_artifact_dir),
+            "warmup_enabled": True,
+            "warmup_result": warmup_summary.get("result"),
+            "warmup_timeout_count": warmup_summary.get("warmup_timeout_count", 0),
+            "warmup_summary": str((warmup_args.artifact_dir / "summary.json").resolve()),
+            "measurement_summary": str((measurement_args.artifact_dir / "summary.json").resolve()),
+        }
+    )
+    write_json(root_artifact_dir / "summary.json", summary)
+    write_summary_csv(root_artifact_dir / "summary.csv", summary)
+    return summary
+
+
+def run_ack_timeout_sweep(args: argparse.Namespace) -> dict[str, Any]:
+    timeouts = parse_ack_timeout_sweep(args.ack_timeout_sweep)
+    root_artifact_dir = args.artifact_dir.resolve()
+    root_artifact_dir.mkdir(parents=True, exist_ok=True)
+    sub_experiments: list[dict[str, Any]] = []
+    for timeout_sec in timeouts:
+        sub_args = copy.copy(args)
+        sub_args.artifact_dir = root_artifact_dir / timeout_sweep_label(timeout_sec)
+        sub_args.command_timeout_sec = timeout_sec
+        sub_args.ack_timeout_sweep = None
+        try:
+            summary = run_acceptance(sub_args)
+        except Exception as exc:
+            summary = failure_summary(sub_args, exc)
+        sub_experiments.append(
+            {
+                "command_timeout_sec": timeout_sec,
+                "artifact_dir": str(sub_args.artifact_dir.resolve()),
+                "summary": str((sub_args.artifact_dir / "summary.json").resolve()),
+                "result": summary.get("result"),
+                "failure_phase": summary.get("failure_phase"),
+                "failure_classification": summary.get("failure_classification"),
+                "warmup_result": summary.get("warmup_result"),
+                "warmup_timeout_count": summary.get("warmup_timeout_count"),
+                "measurement_timeout_count": summary.get("measurement_timeout_count"),
+                "ack_timeout_count_by_arm": summary.get("ack_timeout_count_by_arm"),
+            }
+        )
+    result = "pass" if all(item.get("result") == "pass" for item in sub_experiments) else "fail"
+    first_failed = next((item for item in sub_experiments if item.get("result") != "pass"), None)
+    ack_timeout_count_by_arm = {
+        arm: sum(
+            int(((item.get("ack_timeout_count_by_arm") or {}).get(arm) or 0))
+            for item in sub_experiments
+        )
+        for arm in ARMS
+    }
+    warmup_timeout_count = sum(int(item.get("warmup_timeout_count") or 0) for item in sub_experiments)
+    measurement_timeout_count = sum(int(item.get("measurement_timeout_count") or 0) for item in sub_experiments)
+    summary = {
+        "schema": SCHEMA,
+        "result": result,
+        "result_reason": "ACK timeout sweep completed",
+        "mode": MODE,
+        "artifact_dir": str(root_artifact_dir),
+        "ack_timeout_sweep": timeouts,
+        "command_timeout_sec_left": None,
+        "command_timeout_sec_right": None,
+        "warmup_enabled": getattr(args, "warmup_duration_sec", 0.0) > 0.0,
+        "warmup_result": "pass"
+        if sub_experiments and all(item.get("warmup_result") in {"pass", "not_run"} for item in sub_experiments)
+        else "mixed",
+        "warmup_timeout_count": warmup_timeout_count,
+        "measurement_timeout_count": measurement_timeout_count,
+        "first_send_failure_arm": None,
+        "first_send_failure_index": None,
+        "first_send_failure_elapsed_sec": None,
+        "ack_timeout_count_by_arm": ack_timeout_count_by_arm,
+        "send_duration_p99_us_by_arm": {arm: None for arm in ARMS},
+        "deadline_miss_count_by_arm": {arm: 0 for arm in ARMS},
+        "sub_experiments": sub_experiments,
+        "failure_phase": None if result == "pass" else (first_failed or {}).get("failure_phase"),
+        "failure_classification": None
+        if result == "pass"
+        else (first_failed or {}).get("failure_classification") or "ack_timeout_sweep_failed",
+        "caveat": (
+            "Sweep results separate ACK timeout tightness from the 500 Hz no-op control path; "
+            "ACK failures remain failures."
+        ),
+    }
+    write_json(root_artifact_dir / "summary.json", summary)
+    write_json(root_artifact_dir / "ack_timeout_sweep_summary.json", summary)
+    write_summary_csv(root_artifact_dir / "summary.csv", summary)
+    return summary
+
+
+def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "ack_timeout_sweep", None):
+        return run_ack_timeout_sweep(args)
+    if getattr(args, "warmup_duration_sec", 0.0) > 0.0:
+        return run_acceptance_with_warmup(args)
+    return run_acceptance_once(args, phase="measurement")
+
+
+def failure_summary(
+    args: argparse.Namespace,
+    exc: Exception,
+    *,
+    default_phase: str = "preflight",
+) -> dict[str, Any]:
     artifact_dir = args.artifact_dir.resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    phase = getattr(exc, "failure_phase", None) or default_phase
+    classification = getattr(exc, "failure_classification", None) or classify_error_text(str(exc), phase)
+    snapshot = getattr(exc, "snapshot", None)
+    failure_details = send_failure_summary([snapshot], phase=phase) if isinstance(snapshot, dict) else {
+        "ack_timeout_count_by_arm": {arm: 0 for arm in ARMS},
+        "ack_timeout_count_unknown_arm": 0,
+        "warmup_timeout_count": 0,
+        "measurement_timeout_count": 0,
+        "first_send_failure_arm": None,
+        "first_send_failure_index": None,
+        "first_send_failure_elapsed_sec": None,
+        "first_send_failure_source": None,
+        "first_send_failure_ack_timeout": False,
+        "first_send_failure_text": None,
+    }
+    if classification is None:
+        classification = "preflight_error" if phase == "preflight" else f"{phase}_error"
     summary = {
         "schema": SCHEMA,
         "result": "error",
@@ -1301,10 +2124,19 @@ def failure_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
         "error": str(exc),
         "mode": MODE,
         "artifact_dir": str(artifact_dir),
-        "safety_preflight": {"passed": False, "error": str(exc), "env": env_snapshot()},
+        "failure_phase": phase,
+        "failure_classification": classification,
+        "command_timeout_sec_left": getattr(args, "command_timeout_sec", None),
+        "command_timeout_sec_right": getattr(args, "command_timeout_sec", None),
+        "warmup_enabled": getattr(args, "warmup_duration_sec", 0.0) > 0.0 or phase == "warmup",
+        "warmup_result": "error" if phase == "warmup" else "not_run",
+        "send_duration_p99_us_by_arm": {arm: None for arm in ARMS},
+        "deadline_miss_count_by_arm": {arm: 0 for arm in ARMS},
+        "safety_preflight": {"passed": False, "error": str(exc), "env": env_snapshot_500hz()},
         "threshold_failures": [str(exc)],
         "caveat": "No acceptance evidence was produced.",
     }
+    summary.update(failure_details)
     write_json(artifact_dir / "summary.json", summary)
     try:
         write_summary_csv(artifact_dir / "summary.csv", summary)

@@ -4,6 +4,9 @@
 # - After the separate 500 Hz no-op gate, compare the safe 5 cm / 10 s circle
 #   at 100 Hz and 500 Hz before any 15 cm profile.
 # - Keep state publication at 100 Hz and use low feedback gains.
+# - Circle rows intentionally keep controller-simulation Cartesian enabled;
+#   the no-op runner disables Cartesian only in its artifact-local resolved
+#   config.
 #
 # Safety intent:
 # - rbpodo controller pgmode simulation only.
