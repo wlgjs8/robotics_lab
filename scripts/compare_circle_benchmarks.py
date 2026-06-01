@@ -10,6 +10,8 @@ import math
 from pathlib import Path
 from typing import Any
 
+import circle_tracking_benchmark as profile_bench
+
 
 COLUMNS = [
     ("run name", "run_name"),
@@ -22,6 +24,8 @@ COLUMNS = [
     ("tracking_source", "tracking_source"),
     ("diameter_m", "diameter_m"),
     ("period_sec", "period_sec"),
+    ("required_tangential_speed_m_s", "required_tangential_speed_m_s"),
+    ("stress_level", "stress_level"),
     ("radius_gain", "radius_gain"),
     ("mean_error_mm", "mean_error_mm"),
     ("rms_error_mm", "rms_error_mm"),
@@ -67,10 +71,8 @@ COLUMNS = [
 ]
 
 PROFILE_BY_DIMENSION = {
-    (0.05, 10.0): "safe_5cm_10s",
-    (0.15, 16.0): "circle_15cm_16s",
-    (0.15, 8.0): "circle_15cm_8s",
-    (0.15, 4.0): "gene_15cm_4s",
+    defaults: profile
+    for profile, defaults in profile_bench.PROFILE_DEFAULTS.items()
 }
 
 
@@ -141,6 +143,43 @@ def inferred_profile(summary: dict[str, Any]) -> Any:
         if abs(diameter - known_diameter) < 1e-9 and abs(period - known_period) < 1e-9:
             return known_profile
     return None
+
+
+def summary_profile_catalog_entry(summary: dict[str, Any]) -> dict[str, Any]:
+    embedded = summary.get("profile_catalog_entry")
+    if isinstance(embedded, dict):
+        return embedded
+    preflight = safety_preflight(summary)
+    embedded = preflight.get("profile_catalog_entry")
+    if isinstance(embedded, dict):
+        return embedded
+    profile = inferred_profile(summary)
+    if isinstance(profile, str) and profile in profile_bench.PROFILE_CATALOG:
+        return profile_bench.benchmark_profile_metadata(profile)
+    return {}
+
+
+def required_tangential_speed(summary: dict[str, Any]) -> float | None:
+    for source in (summary, safety_preflight(summary)):
+        value = finite_number(source.get("required_tangential_speed_m_s"))
+        if value is not None:
+            return value
+    diameter = finite_number(summary.get("diameter_m"))
+    period = finite_number(summary.get("period_sec"))
+    if diameter is not None and period is not None and period > 0.0:
+        return math.pi * diameter / period
+    value = finite_number(summary_profile_catalog_entry(summary).get("required_tangential_speed_m_s"))
+    if value is not None:
+        return value
+    return None
+
+
+def stress_level(summary: dict[str, Any]) -> str:
+    for source in (summary, safety_preflight(summary), summary_profile_catalog_entry(summary)):
+        value = source.get("stress_level")
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def radius_gain(summary: dict[str, Any]) -> float | None:
@@ -341,6 +380,8 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "tracking_source": infer_tracking_source(summary),
         "diameter_m": summary.get("diameter_m"),
         "period_sec": summary.get("period_sec"),
+        "required_tangential_speed_m_s": required_tangential_speed(summary),
+        "stress_level": stress_level(summary),
         "repeat": summary.get("repeat"),
         "radius_gain": radius_gain(summary),
         "mean_error_mm": scaled(summary, "mean_error_m", 1000.0),

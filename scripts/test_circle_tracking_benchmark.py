@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -119,6 +120,7 @@ def rbpodo_args(tmp: Path, config: Path, pgmode: Path, **overrides: object) -> a
         "controller": "twist_stand",
         "plane": "xy",
         "profile": "circle_15cm_16s",
+        "allow_fast_stress": False,
         "diameter_m": None,
         "period_sec": None,
         "repeat": 1,
@@ -201,6 +203,47 @@ def unavailable_state(host_time_ns: int) -> dict[str, object]:
 
 
 class CircleTrackingBenchmarkHelpersTest(unittest.TestCase):
+    def test_profile_catalog_includes_middle_speed_metadata(self) -> None:
+        self.assertIn("circle_15cm_8s", bench.PROFILE_DEFAULTS)
+        middle = bench.benchmark_profile_metadata("circle_15cm_8s")
+        self.assertEqual(middle["diameter_m"], 0.15)
+        self.assertEqual(middle["period_sec"], 8.0)
+        self.assertEqual(middle["purpose"], "middle speed ablation")
+        self.assertEqual(middle["stress_level"], "middle")
+        self.assertEqual(middle["recommended_controller"], ["twist_stand", "twist_stand_feedback"])
+        self.assertEqual(middle["recommended_controllers"], ["twist_stand", "twist_stand_feedback"])
+        self.assertAlmostEqual(middle["required_tangential_speed_m_s"], math.pi * 0.15 / 8.0)
+        self.assertAlmostEqual(middle["angular_frequency_rad_s"], 2.0 * math.pi / 8.0)
+
+    def test_profile_required_tangential_speeds(self) -> None:
+        expected = {
+            "safe_5cm_10s": math.pi * 0.05 / 10.0,
+            "circle_15cm_16s": math.pi * 0.15 / 16.0,
+            "circle_15cm_8s": math.pi * 0.15 / 8.0,
+            "gene_15cm_4s": math.pi * 0.15 / 4.0,
+        }
+        for profile, speed in expected.items():
+            with self.subTest(profile=profile):
+                self.assertAlmostEqual(
+                    bench.benchmark_profile_metadata(profile)["required_tangential_speed_m_s"],
+                    speed,
+                )
+
+    def test_compare_summary_serializes_profile_speed_and_stress(self) -> None:
+        row = compare_bench.comparison_row(
+            {
+                "artifact_dir": "/tmp/middle",
+                "controller": "twist_stand",
+                "profile": "circle_15cm_8s",
+                "diameter_m": 0.15,
+                "period_sec": 8.0,
+            }
+        )
+        self.assertAlmostEqual(row["required_tangential_speed_m_s"], math.pi * 0.15 / 8.0)
+        self.assertEqual(row["stress_level"], "middle")
+        self.assertIn("required_tangential_speed_m_s", report_bench.REPORT_COLUMNS)
+        self.assertIn("stress_level", report_bench.REPORT_COLUMNS)
+
     def test_feedback_controller_appears_in_help(self) -> None:
         script = Path(__file__).with_name("circle_tracking_benchmark.py")
         completed = subprocess.run(

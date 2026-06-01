@@ -35,17 +35,35 @@ from cartesian_acceptance import (
 
 REAL_ROBOT_IPS = ("172.28.60.200", "172.28.60.201")
 REAL_GATE_ENV = ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN")
+RECOMMENDED_PROFILE_CONTROLLERS = ("twist_stand", "twist_stand_feedback")
+
+
+def make_profile_entry(diameter_m: float, period_sec: float, purpose: str, stress_level: str) -> dict[str, Any]:
+    return {
+        "diameter_m": diameter_m,
+        "period_sec": period_sec,
+        "purpose": purpose,
+        "required_tangential_speed_m_s": math.pi * diameter_m / period_sec,
+        "angular_frequency_rad_s": 2.0 * math.pi / period_sec,
+        "recommended_controller": list(RECOMMENDED_PROFILE_CONTROLLERS),
+        "recommended_controllers": list(RECOMMENDED_PROFILE_CONTROLLERS),
+        "stress_level": stress_level,
+    }
+
+
+PROFILE_CATALOG: dict[str, dict[str, Any]] = {
+    "safe_5cm_10s": make_profile_entry(0.05, 10.0, "bring-up", "bringup"),
+    "circle_15cm_16s": make_profile_entry(0.15, 16.0, "stable baseline", "baseline"),
+    "circle_15cm_8s": make_profile_entry(0.15, 8.0, "middle speed ablation", "middle"),
+    "gene_15cm_4s": make_profile_entry(0.15, 4.0, "GENE-style stress", "stress"),
+}
 PROFILE_DEFAULTS: dict[str, tuple[float, float]] = {
-    "safe_5cm_10s": (0.05, 10.0),
-    "circle_15cm_16s": (0.15, 16.0),
-    "circle_15cm_8s": (0.15, 8.0),
-    "gene_15cm_4s": (0.15, 4.0),
+    name: (float(entry["diameter_m"]), float(entry["period_sec"]))
+    for name, entry in PROFILE_CATALOG.items()
 }
 PROFILE_USE_CASES = {
-    "safe_5cm_10s": "conservative simulator smoke/regression baseline",
-    "circle_15cm_16s": "15 cm circle within the default 0.03 m/s twist speed limit",
-    "circle_15cm_8s": "15 cm simulator stress below GENE-style speed",
-    "gene_15cm_4s": "explicit GENE-style 15 cm / 4 s simulator-only stress",
+    name: str(entry["purpose"])
+    for name, entry in PROFILE_CATALOG.items()
 }
 DEFAULT_ORIENTATION_DRIFT_WARNING_RAD = 0.1
 RADIUS_GAIN_WARNING_MIN = 0.8
@@ -133,19 +151,23 @@ def benchmark_profile_label(profile: str) -> str:
     if profile == "gene_15cm_4s":
         return "GENE-style 15 cm / 4 s stress"
     if profile == "safe_5cm_10s":
-        return "safe baseline"
+        return "bring-up"
     return profile
 
 
 def benchmark_profile_metadata(profile: str) -> dict[str, Any]:
-    diameter_m, period_sec = PROFILE_DEFAULTS[profile]
-    return {
-        "name": profile,
-        "diameter_m": diameter_m,
-        "period_sec": period_sec,
-        "required_tangential_speed_m_s": math.pi * diameter_m / period_sec,
-        "expected_use_case": PROFILE_USE_CASES[profile],
-    }
+    entry = dict(PROFILE_CATALOG[profile])
+    entry["name"] = profile
+    entry["expected_use_case"] = entry["purpose"]
+    return entry
+
+
+def profile_requires_fast_stress(profile: str) -> bool:
+    return profile == "gene_15cm_4s"
+
+
+def profile_stress_level(profile: str) -> str:
+    return str(PROFILE_CATALOG[profile]["stress_level"])
 
 
 def apply_profile(args: argparse.Namespace) -> None:
@@ -165,6 +187,9 @@ def benchmark_context(args: argparse.Namespace, safety: dict[str, Any]) -> dict[
     server_text = read_text(args.server_config, "server config")
     simulator_config = args.left_config if args.arm == "left" else args.right_config
     simulator_text = read_text(simulator_config, f"{args.arm} simulator config")
+    profile_period_sec = getattr(args, "period_sec", None)
+    if profile_period_sec is None:
+        profile_period_sec = PROFILE_DEFAULTS[args.profile][1]
     servo_rate_hz = parse_scalar_float(server_text, "rate_hz")
     motion_time_constant_sec = parse_scalar_float(simulator_text, "motion_time_constant_sec")
     servo_dt_sec = 1.0 / servo_rate_hz if servo_rate_hz and servo_rate_hz > 0.0 else None
@@ -177,8 +202,13 @@ def benchmark_context(args: argparse.Namespace, safety: dict[str, Any]) -> dict[
         "profile": args.profile,
         "profile_label": benchmark_profile_label(args.profile),
         "profile_expected_use_case": PROFILE_USE_CASES[args.profile],
+        "profile_purpose": PROFILE_USE_CASES[args.profile],
         "profile_catalog_entry": benchmark_profile_metadata(args.profile),
-        "stress_profile": args.profile == "gene_15cm_4s",
+        "stress_level": profile_stress_level(args.profile),
+        "angular_frequency_rad_s": 2.0 * math.pi / float(profile_period_sec),
+        "recommended_controller": list(RECOMMENDED_PROFILE_CONTROLLERS),
+        "recommended_controllers": list(RECOMMENDED_PROFILE_CONTROLLERS),
+        "stress_profile": profile_requires_fast_stress(args.profile),
         "configured_max_twist_linear_m_s": safety.get("max_twist_linear_m_s"),
         "configured_max_linear_move_speed_m_s": safety.get("max_linear_move_speed_m_s"),
         "simulator_motion_time_constant_sec": motion_time_constant_sec,
@@ -243,7 +273,7 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
     max_twist_angular = parse_scalar_float(server_text, "max_twist_angular_rad_s")
     max_linear = parse_scalar_float(server_text, "max_linear_move_speed_m_s")
     benchmark_primitives_enabled = parse_scalar_bool(server_text, "enable_benchmark_primitives")
-    profile_is_gene = args.profile == "gene_15cm_4s" or (args.diameter_m >= 0.149 and args.period_sec <= 4.01)
+    profile_is_gene = profile_requires_fast_stress(args.profile) or (args.diameter_m >= 0.149 and args.period_sec <= 4.01)
     if profile_is_gene and not args.allow_fast_stress:
         raise AcceptanceError("GENE-style 15 cm / 4 s stress requires --allow-fast-stress")
     if args.controller in {"twist_stand", "twist_local", "twist_stand_feedback", "twist_local_feedback", "server_circle"}:
@@ -1164,9 +1194,12 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "plane",
         "profile",
         "profile_label",
+        "profile_purpose",
+        "stress_level",
         "diameter_m",
         "reference_radius_m",
         "period_sec",
+        "angular_frequency_rad_s",
         "repeat",
         "command_rate_hz",
         "required_tangential_speed_m_s",

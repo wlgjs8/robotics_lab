@@ -924,6 +924,117 @@ run_rbpodo_circle_report_gate() {
   done
 }
 
+run_rbpodo_circle_profile_tuning_gate() {
+  python3 -m compileall -q scripts
+  python3 scripts/rbpodo_circle_tracking_benchmark.py --help >/dev/null
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_tracking_benchmark.py'
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_tracking_benchmark.py'
+  echo "codex_gate: skipping rbpodo controller-simulation benchmark run by default"
+}
+
+run_rbpodo_circle_ablation_overrides_gate() {
+  python3 -m compileall -q scripts
+  python3 scripts/run_rbpodo_circle_ablation.py --help >/dev/null
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_ablation.py'
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_run_circle_ablation.py'
+  if [[ "${CODEX_RUN_RBPODO_CIRCLE_ABLATION:-0}" == "1" ]]; then
+    if [[ ! -f scripts/run_rbpodo_circle_ablation.py ]]; then
+      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 but scripts/run_rbpodo_circle_ablation.py is missing" >&2
+      return 1
+    fi
+    if [[ -z "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS:-}" ]]; then
+      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 requires CODEX_RBPODO_CIRCLE_ABLATION_ARGS with explicit matrix/script arguments and safety preflight flags" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2086
+    python3 scripts/run_rbpodo_circle_ablation.py ${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}
+  else
+    echo "codex_gate: skipping rbpodo controller-simulation circle ablation; set CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 with explicit args to enable"
+  fi
+}
+
+run_rbpodo_circle_stage2_matrices_gate() {
+  python3 -m compileall -q scripts
+  python3 scripts/run_rbpodo_circle_ablation.py --help >/dev/null
+  run_yaml_parse_checks_if_available configs/rbpodo_circle_ablation/*.yaml
+  run_rbpodo_circle_matrix_schema_checks
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_ablation.py'
+  echo "codex_gate: skipping rbpodo controller-simulation matrix run by default"
+}
+
+run_rbpodo_circle_matrix_schema_checks() {
+  local matrices=()
+  local path
+  for path in configs/rbpodo_circle_ablation/*.yaml; do
+    if [[ -e "${path}" ]]; then
+      matrices+=("${path}")
+    fi
+  done
+
+  if [[ "${#matrices[@]}" -eq 0 ]]; then
+    echo "codex_gate: skipping rbpodo circle matrix schema checks; no matrix YAML files found"
+    return 0
+  fi
+
+  PYTHONPATH=scripts python3 - "${matrices[@]}" <<'PY'
+import sys
+from pathlib import Path
+
+import run_rbpodo_circle_ablation as ablation
+
+for raw_path in sys.argv[1:]:
+    path = Path(raw_path)
+    experiments = ablation.load_matrix(path)
+    for index, experiment in enumerate(experiments, start=1):
+        ablation.validate_experiment(experiment, index)
+PY
+}
+
+run_rbpodo_circle_tuning_report_gate() {
+  python3 -m compileall -q scripts
+  python3 scripts/generate_rbpodo_circle_report.py --help >/dev/null
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_benchmark_report.py'
+  echo "codex_gate: skipping rbpodo controller-simulation report generation by default"
+}
+
+run_tools_shell_syntax_checks() {
+  local tool
+  local found=0
+  for tool in tools/*.sh; do
+    if [[ ! -e "${tool}" ]]; then
+      continue
+    fi
+    bash -n "${tool}"
+    found=1
+  done
+  if [[ "${found}" != "1" ]]; then
+    echo "codex_gate: skipping tools shell syntax checks; no tools/*.sh files found"
+  fi
+}
+
+run_rbpodo_circle_wrapper_help_checks() {
+  local wrapper
+  for wrapper in \
+    tools/create_rbpodo_circle_local_configs.sh \
+    tools/rbpodo_circle_prepare.sh \
+    tools/rbpodo_circle_benchmark.sh \
+    tools/rbpodo_circle_gui.sh \
+    tools/simulation_mode.sh
+  do
+    if [[ -f "${wrapper}" ]]; then
+      bash "${wrapper}" --help >/dev/null
+    else
+      echo "codex_gate: optional wrapper not present: ${wrapper}"
+    fi
+  done
+}
+
+run_rbpodo_circle_tune_runners_gate() {
+  run_tools_shell_syntax_checks
+  run_rbpodo_circle_wrapper_help_checks
+  echo "codex_gate: skipping rbpodo controller-simulation wrapper runs by default"
+}
+
 run_yaml_parse_checks_if_available() {
   local paths=()
   local path
@@ -1674,6 +1785,24 @@ case "$TASK" in
     ;;
   RBPODO-CIRCLE-LIVE-RUNBOOK-01)
     run_rbpodo_circle_live_runbook_gate
+    ;;
+  RBPODO-TUNE-GATE-00)
+    run_shell_syntax_checks
+    ;;
+  RBPODO-CIRCLE-PROFILES-02)
+    run_rbpodo_circle_profile_tuning_gate
+    ;;
+  RBPODO-CIRCLE-ABLATION-OVERRIDES-01)
+    run_rbpodo_circle_ablation_overrides_gate
+    ;;
+  RBPODO-CIRCLE-STAGE2-MATRICES-01)
+    run_rbpodo_circle_stage2_matrices_gate
+    ;;
+  RBPODO-CIRCLE-TUNING-REPORT-01)
+    run_rbpodo_circle_tuning_report_gate
+    ;;
+  RBPODO-CIRCLE-TUNE-RUNNERS-01)
+    run_rbpodo_circle_tune_runners_gate
     ;;
   POLICY-DATASET-SCHEMA-01)
     run_policy_dataset_schema_gate

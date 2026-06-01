@@ -436,7 +436,29 @@ controller mode from these scripts.
 
 ## Circle Profiles
 
-The stable profile is `15cm/16s`. It mirrors the current simulator baseline:
+Run profiles from slowest/safest to fastest/stress:
+
+| Profile | Diameter | Period | Required speed | Stress level | Purpose |
+| --- | ---: | ---: | ---: | --- | --- |
+| `safe_5cm_10s` | 0.05 m | 10 s | 0.016 m/s | `bringup` | bring-up |
+| `circle_15cm_16s` | 0.15 m | 16 s | 0.029 m/s | `baseline` | stable baseline |
+| `circle_15cm_8s` | 0.15 m | 8 s | 0.059 m/s | `middle` | middle speed ablation |
+| `gene_15cm_4s` | 0.15 m | 4 s | 0.118 m/s | `stress` | GENE-style stress |
+
+Recommended progression:
+
+1. `safe_5cm_10s`
+2. `circle_15cm_16s`
+3. `circle_15cm_8s`
+4. `gene_15cm_4s`
+
+Use `circle_15cm_8s` before the 4 s stress case to isolate whether 4 s
+failures are bandwidth, latency, saturation, or speed-limit constrained rather
+than basic 15 cm tracking errors. The 4 s profile is not real-ready and remains
+explicit stress evidence only.
+
+The stable baseline profile is `15cm/16s`. It mirrors the current simulator
+baseline:
 
 - `servo.rate_hz: 100`
 - `velocity_target_integration: previous_command`
@@ -447,13 +469,21 @@ The stable profile is `15cm/16s`. It mirrors the current simulator baseline:
 - `max_twist_linear_m_s: 0.03`
 - `max_twist_angular_rad_s: 0.2`
 
+The middle profile is `15cm/8s`. It requires about `0.059 m/s`, so the stable
+15cm/16s template speed limit is not sufficient unless a local copy raises the
+controller-simulation twist limits. Keep it as a middle-speed ablation, not a
+real-candidate label.
+
 The stress profile is `15cm/4s`. It mirrors the GENE-style simulator stress
-settings and is not a pass/fail acceptance profile:
+settings and is not a pass/fail acceptance profile or real-ready profile:
 
 - `servo.rate_hz: 100`
 - `max_twist_linear_m_s: 0.15`
 - `max_twist_angular_rad_s: 0.4`
 - feedback benchmark mode is recommended before interpreting drift
+
+The benchmark profile metadata recommends comparing `twist_stand` and
+`twist_stand_feedback` for all four profiles.
 
 For controller pgmode simulation, the correct measurement target is normally
 the controller reference path rather than physical TCP motion. The state stream
@@ -584,6 +614,36 @@ python3 scripts/rbpodo_circle_tracking_benchmark.py \
   --i-confirm-controller-is-in-pgmode-simulation
 ```
 
+Middle 15 cm / 8 s ablation example:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
+python3 scripts/rbpodo_circle_tracking_benchmark.py \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --server-config rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml \
+  --arm left \
+  --controller twist_stand_feedback \
+  --profile circle_15cm_8s \
+  --repeat 3 \
+  --command-rate-hz 100 \
+  --feedback-kp-pos 1.0 \
+  --feedback-kp-ori 1.0 \
+  --tracking-source tcp_ref_stand \
+  --overlay-pub-endpoint udp://127.0.0.1:50261 \
+  --overlay-pub-rate-hz 20 \
+  --verify-pgmode-simulation \
+  --artifact-dir artifacts/rbpodo_circle/circle_15cm8s_feedback_left \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+This middle-speed example uses the local 15cm/4s-capable config only for its
+speed envelope; it is still controller-simulation ablation evidence and is not
+real-ready.
+
 GENE-style 15 cm / 4 s stress example:
 
 ```bash
@@ -597,6 +657,7 @@ python3 scripts/rbpodo_circle_tracking_benchmark.py \
   --arm left \
   --controller twist_stand_feedback \
   --profile gene_15cm_4s \
+  --allow-fast-stress \
   --repeat 5 \
   --command-rate-hz 100 \
   --feedback-kp-pos 2.0 \
@@ -796,7 +857,8 @@ same explicit safety flags and env gates required for a real matrix run.
 
 The matrix supports the intended factor split:
 
-- `profile`: `circle_15cm_16s` or `gene_15cm_4s`
+- `profile`: `safe_5cm_10s`, `circle_15cm_16s`,
+  `circle_15cm_8s`, or `gene_15cm_4s`
 - `controller`: `twist_stand`, `twist_local`,
   `twist_stand_feedback`, or `twist_local_feedback`
 - `command_rate_hz`, `repeat`, `tracking_source`, feedback gains, feedback
@@ -939,6 +1001,8 @@ Every rbpodo controller-simulation row must state:
 
 - `backend: rbpodo`
 - `controller_mode: pgmode_simulation`
+- `diameter_m`, `period_sec`, `required_tangential_speed_m_s`, and
+  `stress_level`
 - `tracking_source`, normally `tcp_ref_stand`
 - `physical_motion_expected: false`
 - `physical_motion_detected`

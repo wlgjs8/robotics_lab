@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -117,6 +118,7 @@ def make_args(tmp: Path, config: Path, pgmode: Path, **overrides: object) -> arg
         "controller": "twist_stand_feedback",
         "plane": "xy",
         "profile": "circle_15cm_16s",
+        "allow_fast_stress": False,
         "diameter_m": None,
         "period_sec": None,
         "repeat": 1,
@@ -227,8 +229,101 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
             text=True,
         )
         self.assertIn("--tracking-source", completed.stdout)
+        self.assertIn("circle_15cm_8s", completed.stdout)
+        self.assertIn("--allow-fast-stress", completed.stdout)
         self.assertIn("--overlay-pub-endpoint", completed.stdout)
         self.assertIn("--i-confirm-controller-is-in-pgmode-simulation", completed.stdout)
+
+    def test_middle_speed_profile_preflight_serializes_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text, EnvGuard():
+            tmp = Path(tmp_text)
+            config = tmp / "config.yaml"
+            pgmode = tmp / "pgmode.json"
+            write_config(config)
+            write_pgmode_summary(pgmode)
+            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
+            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
+            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
+            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
+            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
+            args = make_args(tmp, config, pgmode, profile="circle_15cm_8s")
+            _config, _sections, preflight, _endpoints = bench.preflight(args)
+            self.assertEqual(preflight["profile"], "circle_15cm_8s")
+            self.assertEqual(preflight["stress_level"], "middle")
+            self.assertEqual(preflight["profile_catalog_entry"]["purpose"], "middle speed ablation")
+            self.assertEqual(preflight["recommended_controller"], ["twist_stand", "twist_stand_feedback"])
+            self.assertAlmostEqual(preflight["required_tangential_speed_m_s"], math.pi * 0.15 / 8.0)
+            self.assertAlmostEqual(preflight["angular_frequency_rad_s"], 2.0 * math.pi / 8.0)
+
+    def test_gene_profile_requires_fast_stress_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text, EnvGuard():
+            tmp = Path(tmp_text)
+            config = tmp / "config.yaml"
+            pgmode = tmp / "pgmode.json"
+            write_config(config)
+            write_pgmode_summary(pgmode)
+            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
+            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
+            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
+            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
+            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
+            args = make_args(tmp, config, pgmode, profile="gene_15cm_4s")
+            with self.assertRaisesRegex(bench.BenchmarkError, "allow-fast-stress"):
+                bench.preflight(args)
+            args.allow_fast_stress = True
+            _config, _sections, preflight, _endpoints = bench.preflight(args)
+            self.assertEqual(preflight["profile"], "gene_15cm_4s")
+            self.assertEqual(preflight["stress_level"], "stress")
+
+    def test_profile_serialization_appears_in_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            args = make_args(
+                tmp,
+                tmp / "config.yaml",
+                tmp / "pgmode.json",
+                profile="circle_15cm_8s",
+                diameter_m=0.15,
+                period_sec=8.0,
+                artifact_dir=tmp / "artifacts",
+                skip_plots=True,
+                controller="twist_stand",
+            )
+            traj = sim_bench.Trajectory(
+                start=[0.075, 0.0, 0.0],
+                axis1=[1.0, 0.0, 0.0],
+                axis2=[0.0, 1.0, 0.0],
+                radius=0.075,
+                period_sec=8.0,
+            )
+            states = [
+                state(1_000_000_000, ref=pose(0.075, 0.0), actual=pose(0.0, 0.0)),
+                state(3_000_000_000, ref=pose(0.0, 0.075), actual=pose(0.0, 0.0)),
+                state(5_000_000_000, ref=pose(-0.075, 0.0), actual=pose(0.0, 0.0)),
+                state(7_000_000_000, ref=pose(0.0, -0.075), actual=pose(0.0, 0.0)),
+            ]
+            summary = bench.summarize_run(
+                args,
+                None,  # type: ignore[arg-type]
+                {"required_tangential_speed_m_s": math.pi * 0.15 / 8.0},
+                states,
+                traj,
+                [0.0, 0.0, 0.0, 1.0],
+                "tcp_ref_stand",
+                None,
+                1_000_000_000,
+                7_000_000_000,
+                4,
+                [],
+                tmp / "artifacts",
+                0,
+                {},
+            )
+            self.assertEqual(summary["profile"], "circle_15cm_8s")
+            self.assertEqual(summary["stress_level"], "middle")
+            self.assertEqual(summary["profile_catalog_entry"]["purpose"], "middle speed ablation")
+            self.assertEqual(summary["recommended_controller"], ["twist_stand", "twist_stand_feedback"])
+            self.assertAlmostEqual(summary["required_tangential_speed_m_s"], math.pi * 0.15 / 8.0)
 
     def test_preflight_rejects_operation_mode_real(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text, EnvGuard():

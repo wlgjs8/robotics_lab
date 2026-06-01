@@ -52,10 +52,10 @@ Run profiles from slowest/safest to fastest/stress:
 
 | Profile | Diameter | Period | Required speed | Expected use case |
 | --- | ---: | ---: | ---: | --- |
-| `safe_5cm_10s` | 0.05 m | 10 s | 0.016 m/s | conservative simulator smoke/regression baseline |
-| `circle_15cm_16s` | 0.15 m | 16 s | 0.029 m/s | 15 cm circle within the default 0.03 m/s twist limit |
-| `circle_15cm_8s` | 0.15 m | 8 s | 0.059 m/s | 15 cm simulator stress below GENE-style speed |
-| `gene_15cm_4s` | 0.15 m | 4 s | 0.118 m/s | explicit GENE-style simulator-only stress |
+| `safe_5cm_10s` | 0.05 m | 10 s | 0.016 m/s | bring-up |
+| `circle_15cm_16s` | 0.15 m | 16 s | 0.029 m/s | stable baseline |
+| `circle_15cm_8s` | 0.15 m | 8 s | 0.059 m/s | middle speed ablation |
+| `gene_15cm_4s` | 0.15 m | 4 s | 0.118 m/s | GENE-style stress |
 
 Recommended regression sequence:
 
@@ -66,6 +66,11 @@ Recommended regression sequence:
 4. Run `gene_15cm_4s` only with
    `rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml` and
    `--allow-fast-stress`.
+
+The `circle_15cm_8s` profile is the middle-speed split between the stable
+16 s baseline and the GENE-style 4 s stress case. Use it to isolate whether a
+4 s failure is caused by bandwidth, latency, saturation, or limits rather than
+by basic 15 cm tracking geometry.
 
 ## Named Server Config Profiles
 
@@ -378,6 +383,10 @@ circle radius/center, sample and command counts, worker drop/overwrite telemetry
 when present, state age, send result age, IK timing, fault state, and threshold
 pass/fail if threshold flags were supplied.
 
+Profile metadata is serialized with each summary: `diameter_m`, `period_sec`,
+`required_tangential_speed_m_s`, `angular_frequency_rad_s`,
+`recommended_controller` / `recommended_controllers`, and `stress_level`.
+
 Feedback runs also record:
 
 - `mean_feedback_linear_norm_m_s`
@@ -505,7 +514,8 @@ python3 scripts/generate_circle_benchmark_report.py \
   --csv artifacts/circle_tracking/circle_benchmark_report.csv
 ```
 
-The report includes controller/profile metadata, radius gain, position error,
+The report includes controller/profile metadata, `diameter_m`, `period_sec`,
+`required_tangential_speed_m_s`, `stress_level`, radius gain, position error,
 orientation drift, estimated latency, worker drops, integrator clamp/divergence
 counts, timing jitter when available, benchmark result, performance warnings,
 and a classification:

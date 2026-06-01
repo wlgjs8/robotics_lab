@@ -51,10 +51,7 @@ CONTROLLERS = (
     "server_circle",
 )
 TRACKING_SOURCES = ("auto", "tcp_ref_stand", "tcp_actual_stand")
-PROFILE_DEFAULTS = {
-    "circle_15cm_16s": (0.15, 16.0),
-    "gene_15cm_4s": (0.15, 4.0),
-}
+PROFILE_DEFAULTS = sim_bench.PROFILE_DEFAULTS
 REQUIRED_ENV = (
     "RB_ALLOW_REAL_ROBOT",
     "RB_ALLOW_REAL_MOTION",
@@ -99,6 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controller", choices=CONTROLLERS, default="twist_stand")
     parser.add_argument("--plane", choices=("xy", "xz", "yz"), default="xy")
     parser.add_argument("--profile", choices=tuple(PROFILE_DEFAULTS), default="circle_15cm_16s")
+    parser.add_argument("--allow-fast-stress", action="store_true")
     parser.add_argument("--diameter-m", type=float)
     parser.add_argument("--period-sec", type=float)
     parser.add_argument("--repeat", type=int, default=1)
@@ -634,6 +632,8 @@ def validate_config_and_env(
     apply_profile(args)
     apply_overlay_defaults(args)
     assert args.diameter_m is not None and args.period_sec is not None
+    if sim_bench.profile_requires_fast_stress(args.profile) and not getattr(args, "allow_fast_stress", False):
+        raise BenchmarkError("GENE-style 15 cm / 4 s stress requires --allow-fast-stress")
     if args.repeat < 1:
         raise BenchmarkError("--repeat must be >= 1")
     for name, value in (
@@ -726,6 +726,7 @@ def validate_config_and_env(
     if max_twist_angular is None:
         raise BenchmarkError("config must expose cartesian_control.max_twist_angular_rad_s")
     speed = required_speed(args)
+    profile_metadata = sim_bench.benchmark_profile_metadata(args.profile)
     if speed > max_twist + 1e-9:
         raise BenchmarkError(f"required tangential speed {speed:.6f} m/s exceeds max_twist_linear_m_s {max_twist:.6f}")
     if args.controller.endswith("_feedback"):
@@ -756,6 +757,12 @@ def validate_config_and_env(
         "arm": args.arm,
         "server_config": str(args.server_config.resolve()),
         "profile": args.profile,
+        "profile_purpose": profile_metadata["purpose"],
+        "profile_catalog_entry": profile_metadata,
+        "stress_level": profile_metadata["stress_level"],
+        "angular_frequency_rad_s": 2.0 * math.pi / float(args.period_sec),
+        "recommended_controller": profile_metadata["recommended_controller"],
+        "recommended_controllers": profile_metadata["recommended_controllers"],
         "controller": args.controller,
         "diameter_m": args.diameter_m,
         "period_sec": args.period_sec,
@@ -1610,11 +1617,15 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "controller",
         "arm",
         "profile",
+        "profile_purpose",
+        "stress_level",
         "tracking_source_used",
         "diameter_m",
         "period_sec",
+        "angular_frequency_rad_s",
         "repeat",
         "command_rate_hz",
+        "required_tangential_speed_m_s",
         "mean_error_m",
         "rms_error_m",
         "p95_error_m",
@@ -1871,6 +1882,7 @@ def summarize_run(
         "overlay_messages_recorded": 0,
     }
     duration_sec = float(args.period_sec) * int(args.repeat)
+    profile_metadata = sim_bench.benchmark_profile_metadata(args.profile)
     tracking_samples = collect_samples(states, args.arm, tracking_source, benchmark_start_ns, benchmark_start_ns + int(duration_sec * 1e9))
     if not tracking_samples:
         raise BenchmarkError(f"no valid {tracking_source} samples captured during benchmark")
@@ -1942,10 +1954,16 @@ def summarize_run(
         "arm": args.arm,
         "plane": args.plane,
         "profile": args.profile,
+        "profile_purpose": profile_metadata["purpose"],
+        "profile_catalog_entry": profile_metadata,
+        "stress_level": profile_metadata["stress_level"],
         "diameter_m": args.diameter_m,
         "radius_m": float(args.diameter_m) * 0.5,
         "reference_radius_m": float(args.diameter_m) * 0.5,
         "period_sec": args.period_sec,
+        "angular_frequency_rad_s": 2.0 * math.pi / float(args.period_sec),
+        "recommended_controller": profile_metadata["recommended_controller"],
+        "recommended_controllers": profile_metadata["recommended_controllers"],
         "repeat": args.repeat,
         "command_rate_hz": args.command_rate_hz,
         "required_tangential_speed_m_s": preflight_result["required_tangential_speed_m_s"],
@@ -2074,6 +2092,16 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "result": "completed",
             "result_reason": "preflight only; no tracking run or performance thresholds were evaluated",
             "artifact_dir": str(artifact_dir),
+            "profile": args.profile,
+            "profile_purpose": preflight_result.get("profile_purpose"),
+            "profile_catalog_entry": preflight_result.get("profile_catalog_entry"),
+            "stress_level": preflight_result.get("stress_level"),
+            "diameter_m": args.diameter_m,
+            "period_sec": args.period_sec,
+            "required_tangential_speed_m_s": preflight_result.get("required_tangential_speed_m_s"),
+            "angular_frequency_rad_s": preflight_result.get("angular_frequency_rad_s"),
+            "recommended_controller": preflight_result.get("recommended_controller"),
+            "recommended_controllers": preflight_result.get("recommended_controllers"),
             "safety_preflight": preflight_result,
             "preflight_only": True,
             "overlay_enabled": not args.overlay_disable,

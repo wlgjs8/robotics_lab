@@ -45,6 +45,8 @@ REPORT_COLUMNS = [
     "tracking_source",
     "diameter_m",
     "period_sec",
+    "required_tangential_speed_m_s",
+    "stress_level",
     "repeat_evidence_count",
     "radius_gain",
     "rms_error_mm",
@@ -130,6 +132,12 @@ def load_ablation_rows(path: Path) -> list[dict[str, Any]]:
                 row.setdefault("backend", "simulator")
                 row.setdefault("benchmark_category", "rb_simulator")
                 row.setdefault("controller_mode", "rb_simulator")
+            if not row.get("required_tangential_speed_m_s"):
+                speed = compare.required_tangential_speed(row)
+                if speed is not None:
+                    row["required_tangential_speed_m_s"] = speed
+            if not row.get("stress_level"):
+                row["stress_level"] = compare.stress_level(row)
             rows.append(row)
     return rows
 
@@ -358,6 +366,12 @@ def rbpodo_stress_failures(row: dict[str, Any]) -> list[str]:
 def classify_row(row: dict[str, Any], min_repeats: int) -> None:
     category = row_category(row)
     row["benchmark_category"] = category
+    if not row.get("required_tangential_speed_m_s"):
+        speed = compare.required_tangential_speed(row)
+        if speed is not None:
+            row["required_tangential_speed_m_s"] = speed
+    if not row.get("stress_level"):
+        row["stress_level"] = compare.stress_level(row)
     if category == "rbpodo_controller_simulation" and row.get("backend") in (None, ""):
         row["backend"] = "rbpodo"
     if category == "rbpodo_controller_simulation" and row.get("controller_mode") in (None, ""):
@@ -473,6 +487,10 @@ A stable simulator baseline candidate must satisfy all of:
 - repeated at least `{min_repeats}` times, either through one summary with `repeat >= {min_repeats}` or matching repeated summaries
 
 ## Stress Interpretation
+
+A `circle_15cm_8s` run is middle-speed ablation evidence. It is intended to
+separate bandwidth, latency, and limit constraints from basic 15 cm tracking
+errors before attempting the GENE-style 4 s stress profile.
 
 A `{STRESS_PROFILE}` run can be a stress benchmark candidate when `radius_gain >= 0.90`,
 `fault_latched == false`, worker drops are zero, and integrator divergence is zero.
