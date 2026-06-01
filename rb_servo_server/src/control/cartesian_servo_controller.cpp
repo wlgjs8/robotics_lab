@@ -579,6 +579,8 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
         result.telemetry.reason = result.reason;
         return result;
     }
+    result.telemetry.requested_twist_linear_norm_m_s = linearNorm(v_cmd);
+    result.telemetry.requested_twist_angular_norm_rad_s = angularNorm(v_cmd);
     double max_linear_velocity = config_.max_linear_move_speed_m_s;
     double max_angular_velocity = config_.max_angular_move_speed_rad_s;
     if (dt_sec > 0.0 && config_.max_cartesian_step_m.has_value()) {
@@ -592,13 +594,17 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
             max_linear_velocity,
             max_angular_velocity,
             config_.exceed_limit_policy,
-            nullptr)) {
+            &result.telemetry.twist_clamped)) {
         result.verdict = SafetyVerdict::InvalidCommand;
         result.reason = "cartesian_linear_move_limit_exceeded";
         result.telemetry.status = "failed";
         result.telemetry.reason = result.reason;
+        result.telemetry.applied_twist_linear_norm_m_s = 0.0;
+        result.telemetry.applied_twist_angular_norm_rad_s = 0.0;
         return result;
     }
+    result.telemetry.applied_twist_linear_norm_m_s = linearNorm(v_cmd);
+    result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(v_cmd);
 
     const CartesianVelocityResult velocity = kinematics_->solveCartesianVelocity(
         command.arm_id,
@@ -978,6 +984,8 @@ CartesianArmTargetResult CartesianServoController::computeCircleMoveTarget(
         result.telemetry.reason = result.reason;
         return result;
     }
+    result.telemetry.requested_twist_linear_norm_m_s = linearNorm(v_cmd);
+    result.telemetry.requested_twist_angular_norm_rad_s = angularNorm(v_cmd);
     bool twist_clamped = false;
     if (!limitTwist(
             &v_cmd,
@@ -989,6 +997,8 @@ CartesianArmTargetResult CartesianServoController::computeCircleMoveTarget(
         result.reason = "cartesian_circle_move_limit_exceeded";
         result.telemetry.status = "failed";
         result.telemetry.reason = result.reason;
+        result.telemetry.applied_twist_linear_norm_m_s = 0.0;
+        result.telemetry.applied_twist_angular_norm_rad_s = 0.0;
         return result;
     }
 

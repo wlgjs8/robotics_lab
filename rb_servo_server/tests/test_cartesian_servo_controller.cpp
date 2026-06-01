@@ -5,6 +5,7 @@
 #include <memory>
 
 #include "rb_servo/control/cartesian_servo_controller.hpp"
+#include "rb_servo/math/se3.hpp"
 
 namespace {
 
@@ -410,6 +411,113 @@ bool testTcpTwistAngularDeadbandMaintainsHoldForNoise() {
     RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
     RB_CHECK(!hold.orientation_hold_active);
     RB_CHECK(std::abs(kinematics->last_twist_local.rz - 0.002) < kEpsilon);
+    return true;
+}
+
+bool testPositiveOrientationHoldErrorReducesAfterSyntheticIntegration() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.twist_angular_deadband_rad_s = 0.001;
+    config.twist_orientation_hold_kp = 2.0;
+    config.max_twist_linear_m_s = 1.0;
+    config.max_twist_angular_rad_s = 1.0;
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    rb_servo::CartesianTwistHoldState hold;
+    hold.orientation_hold_active = true;
+    hold.hold_tcp_stand.rz = 0.02;
+    hold.hold_tcp_stand.quaternion_xyzw = yawQuaternion(0.02);
+
+    const rb_servo::JointArray q = zeroJoints();
+    const rb_servo::RobotState state = stateFromJoints(*kinematics, q, left_mount);
+    const double error_before = rb_servo::math::orientationDistanceRad(*state.tcp_stand, hold.hold_tcp_stand);
+    const rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+        command,
+        state,
+        q,
+        rb_servo::RunMode::Simulation,
+        0.05,
+        1,
+        &hold
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(kinematics->last_twist_local.rz > 0.0);
+    RB_CHECK(result.q_target_deg[5] > q[5]);
+
+    const rb_servo::RobotState next_state = stateFromJoints(*kinematics, result.q_target_deg, left_mount);
+    const double error_after = rb_servo::math::orientationDistanceRad(*next_state.tcp_stand, hold.hold_tcp_stand);
+    RB_CHECK(error_before > 0.0);
+    RB_CHECK(error_after < error_before);
+    RB_CHECK(std::abs(result.telemetry.applied_twist_angular_norm_rad_s - std::abs(kinematics->last_twist_local.rz)) < kEpsilon);
+    return true;
+}
+
+bool testTcpTwistStandPositiveWorldXConvertsToLocalNegativeYAtPositiveYaw() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.max_twist_linear_m_s = 1.0;
+    config.max_twist_angular_rad_s = 1.0;
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistStand;
+    command.has_tcp_twist_stand = true;
+    command.tcp_twist_stand = {0.02, 0.0, 0.0, 0.0, 0.0, 0.03};
+
+    rb_servo::JointArray q = zeroJoints();
+    q[5] = 0.5 * kPi * 100.0;
+    rb_servo::CartesianTwistHoldState hold;
+    const rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q, left_mount),
+        q,
+        rb_servo::RunMode::Simulation,
+        0.01,
+        1,
+        &hold
+    );
+
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(std::abs(kinematics->last_twist_local.x) < 1e-12);
+    RB_CHECK(std::abs(kinematics->last_twist_local.y + 0.02) < 1e-12);
+    RB_CHECK(std::abs(kinematics->last_twist_local.rz - 0.03) < 1e-12);
+    RB_CHECK(result.q_target_deg[1] < q[1]);
+    RB_CHECK(result.q_target_deg[5] > q[5]);
+    return true;
+}
+
+bool testQuaternionAndRpyYawFrameConversionMatch() {
+    rb_servo::Pose6D rpy_pose;
+    rpy_pose.rz = 0.7;
+    rb_servo::Pose6D quaternion_pose;
+    quaternion_pose.quaternion_xyzw = yawQuaternion(0.7);
+
+    rb_servo::Vec6 stand_twist{0.03, -0.01, 0.02, 0.0, 0.0, 0.04};
+    const rb_servo::Vec6 local_from_rpy = rb_servo::math::twistStandToLocal(stand_twist, rpy_pose);
+    const rb_servo::Vec6 local_from_quaternion = rb_servo::math::twistStandToLocal(stand_twist, quaternion_pose);
+
+    RB_CHECK(std::abs(local_from_rpy.x - local_from_quaternion.x) < 1e-12);
+    RB_CHECK(std::abs(local_from_rpy.y - local_from_quaternion.y) < 1e-12);
+    RB_CHECK(std::abs(local_from_rpy.z - local_from_quaternion.z) < 1e-12);
+    RB_CHECK(std::abs(local_from_rpy.rx - local_from_quaternion.rx) < 1e-12);
+    RB_CHECK(std::abs(local_from_rpy.ry - local_from_quaternion.ry) < 1e-12);
+    RB_CHECK(std::abs(local_from_rpy.rz - local_from_quaternion.rz) < 1e-12);
+    RB_CHECK(rb_servo::math::orientationDistanceRad(rpy_pose, quaternion_pose) < 1e-12);
     return true;
 }
 
@@ -1043,6 +1151,9 @@ int main() {
     if (!testLinearMoveConstantOrientationToleranceIsConfigurable()) return 1;
     if (!testTcpTwistLocalMovesLocalXAndHoldsOrientation()) return 1;
     if (!testTcpTwistAngularDeadbandMaintainsHoldForNoise()) return 1;
+    if (!testPositiveOrientationHoldErrorReducesAfterSyntheticIntegration()) return 1;
+    if (!testTcpTwistStandPositiveWorldXConvertsToLocalNegativeYAtPositiveYaw()) return 1;
+    if (!testQuaternionAndRpyYawFrameConversionMatch()) return 1;
     if (!testLinearMoveConstantOrientationNearPiStaysFinite()) return 1;
     if (!testTcpTwistOrientationHoldNearPiStaysBounded()) return 1;
     if (!testTcpTwistRealModeBlocked()) return 1;

@@ -368,6 +368,24 @@ error into phase lag, center drift, radius error, orientation drift, feedback
 saturation, timing jitter, and tail spikes. This is diagnosis only; it does not
 change control behavior or authorize physical motion.
 
+For orientation-specific diagnosis, inspect these summary fields before raising
+orientation gain:
+
+- `desired_orientation_stand` and `measured_orientation_source`
+- `orientation_error_vector_samples`
+- `angular_feedback_norm` and `angular_applied_norm`
+- `angular_saturation_count` and `angular_saturation_ratio`
+- `orientation_p50_deg`, `orientation_p95_deg`, and `orientation_max_deg`
+- `orientation_position_equiv_mm`
+
+Run a `Kp_ori=0` row under the same `Kp_pos`, profile, tracking source, command
+rate, and feedback limits before tuning `Kp_ori` upward. If a positive
+`Kp_ori` row increases orientation drift relative to the matched `Kp_ori=0`
+row, classify the result as `orientation_feedback_suspect` and inspect sign,
+stand/local frame convention, angular saturation, desired-orientation hold, and
+position/orientation coupling before trying a larger orientation gain. Do not
+couple `Kp_pos=Kp_ori` by default.
+
 Review `measurement_reliability_level` before both tuning and dataset
 selection. In pgmode simulation, `tcp_ref_stand` is a controller-reference
 lower bound, not physical TCP tracking. A completed run can be
@@ -1274,7 +1292,13 @@ limits are sufficient for 15 cm / 8 s.
 
 Interpretation:
 
+- Test `Kp_ori=0` before increasing orientation gain, and compare it only
+  against rows with the same `Kp_pos` and timing/speed limits.
+- Do not set `Kp_pos=Kp_ori` automatically; position and orientation feedback
+  are separate channels with separate saturation and drift failure modes.
 - Choose candidates with low or zero `feedback_saturation_count` first.
+- Check `angular_saturation_count`, `angular_feedback_norm`, and
+  `angular_applied_norm` before interpreting orientation drift as a gain issue.
 - Reject high orientation drift even if RMS error is lower.
 - Compare `p95_error_m` and `fit_center_error_m`; center drift matters, not
   only RMS.

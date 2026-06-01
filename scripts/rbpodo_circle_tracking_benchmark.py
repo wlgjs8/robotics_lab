@@ -163,6 +163,22 @@ def metric_block(values: list[float]) -> dict[str, float | None]:
     }
 
 
+def finite_float_list(value: Any, length: int) -> list[float] | None:
+    if not isinstance(value, list) or len(value) < length:
+        return None
+    numbers = [finite_number(item) for item in value[:length]]
+    if any(item is None for item in numbers):
+        return None
+    return [float(item) for item in numbers if item is not None]
+
+
+def angular_norm_from_twist(value: Any) -> float | None:
+    twist = finite_float_list(value, 6)
+    if twist is None:
+        return None
+    return sim_bench.norm(twist[3:6])
+
+
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1116,6 +1132,10 @@ def stream_twist_feedback(
         if snapshot is None:
             applied_twist = [0.0] * 6
             row = sim_bench.zero_feedback_record(t, "missing/stale valid tracking source", frame)
+            row["orientation_error_norm_rad"] = None
+            row["angular_feedback_norm_rad_s"] = None
+            row["angular_applied_norm_rad_s"] = None
+            row["angular_saturated"] = False
             row["feedback_state_age_us"] = None
             row["feedback_use_current_state_time"] = args.feedback_use_current_state_time
         else:
@@ -1152,6 +1172,14 @@ def stream_twist_feedback(
                 feedforward_twist = feedback["feedforward_twist_stand"]
                 feedback_twist = feedback["feedback_twist_stand"]
                 applied_twist = feedback["applied_twist_stand"]
+            orientation_error_norm = sim_bench.norm(orientation_error_stand)
+            angular_feedback_norm = angular_norm_from_twist(feedback["feedback_twist_stand"])
+            angular_applied_norm = angular_norm_from_twist(feedback["applied_twist_stand"])
+            angular_saturated = (
+                angular_feedback_norm is not None
+                and args.feedback_max_angular_rad_s is not None
+                and angular_feedback_norm > float(args.feedback_max_angular_rad_s) + 1e-12
+            )
             row = {
                 "t_sec": t,
                 "frame": frame,
@@ -1165,12 +1193,16 @@ def stream_twist_feedback(
                 "reference_z": p_ref[2],
                 "position_error_vector": position_error_stand,
                 "orientation_error_vector": orientation_error_stand,
+                "orientation_error_norm_rad": orientation_error_norm,
                 "feedforward_twist": feedforward_twist,
                 "feedback_twist": feedback_twist,
                 "applied_twist": applied_twist,
                 "feedforward_twist_stand": feedback["feedforward_twist_stand"],
                 "feedback_twist_stand": feedback["feedback_twist_stand"],
                 "applied_twist_stand": feedback["applied_twist_stand"],
+                "angular_feedback_norm_rad_s": angular_feedback_norm,
+                "angular_applied_norm_rad_s": angular_applied_norm,
+                "angular_saturated": angular_saturated,
                 "saturated": bool(feedback["saturated"]),
                 "stale_or_invalid_state": False,
                 "feedback_state_age_us": feedback_state_age_us,
@@ -1571,6 +1603,91 @@ def command_interval_metrics(command_path: Path) -> dict[str, Any]:
     return {"command_interval_ms": metric_block(intervals)}
 
 
+def orientation_error_vector_sample_rows(
+    merged: list[dict[str, Any]],
+    q0: list[float],
+    *,
+    max_samples: int = 12,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for row in merged:
+        q_actual = [
+            finite_number(row.get("actual_qx")),
+            finite_number(row.get("actual_qy")),
+            finite_number(row.get("actual_qz")),
+            finite_number(row.get("actual_qw")),
+        ]
+        if any(value is None for value in q_actual):
+            continue
+        q_values = [float(value) for value in q_actual if value is not None]
+        vector = sim_bench.quat_error_vector(q0, q_values)
+        candidates.append(
+            {
+                "host_time_ns": row.get("host_time_ns"),
+                "t_sec": row.get("t_sec"),
+                "orientation_error_vector_stand": vector,
+                "orientation_error_norm_rad": sim_bench.norm(vector),
+            }
+        )
+    if len(candidates) <= max_samples:
+        return candidates
+    if max_samples <= 1:
+        return candidates[:1]
+    indices = [
+        round(index * (len(candidates) - 1) / (max_samples - 1))
+        for index in range(max_samples)
+    ]
+    return [candidates[index] for index in indices]
+
+
+def feedback_orientation_command_metrics(
+    rows: list[dict[str, Any]],
+    *,
+    max_angular_rad_s: float | None,
+) -> dict[str, Any]:
+    feedback_norms: list[float] = []
+    applied_norms: list[float] = []
+    angular_saturation_count = 0
+    for row in rows:
+        if row.get("stale_or_invalid_state") is True:
+            continue
+        feedback_norm = finite_number(row.get("angular_feedback_norm_rad_s"))
+        if feedback_norm is None:
+            feedback_norm = angular_norm_from_twist(row.get("feedback_twist_stand"))
+        applied_norm = finite_number(row.get("angular_applied_norm_rad_s"))
+        if applied_norm is None:
+            applied_norm = angular_norm_from_twist(row.get("applied_twist_stand"))
+        if feedback_norm is not None:
+            feedback_norms.append(feedback_norm)
+        if applied_norm is not None:
+            applied_norms.append(applied_norm)
+        saturated = row.get("angular_saturated") is True
+        if not saturated and feedback_norm is not None and max_angular_rad_s is not None:
+            saturated = feedback_norm > max_angular_rad_s + 1e-12
+        if saturated:
+            angular_saturation_count += 1
+
+    feedback_block = metric_block(feedback_norms)
+    applied_block = metric_block(applied_norms)
+    denominator = len(feedback_norms)
+    return {
+        "angular_feedback_norm": feedback_block,
+        "angular_applied_norm": applied_block,
+        "angular_feedback_norm_p50": feedback_block["p50"],
+        "angular_feedback_norm_p95": feedback_block["p95"],
+        "angular_feedback_norm_max": feedback_block["max"],
+        "angular_applied_norm_p50": applied_block["p50"],
+        "angular_applied_norm_p95": applied_block["p95"],
+        "angular_applied_norm_max": applied_block["max"],
+        "angular_saturation_count": angular_saturation_count,
+        "angular_saturation_ratio": (
+            angular_saturation_count / denominator
+            if denominator
+            else None
+        ),
+    }
+
+
 def config_section(config: ParsedConfig | None, name: str) -> dict[str, Any]:
     value = getattr(config, name, None)
     return value if isinstance(value, dict) else {}
@@ -1661,6 +1778,7 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "profile_purpose",
         "stress_level",
         "tracking_source_used",
+        "measured_orientation_source",
         "diameter_m",
         "period_sec",
         "angular_frequency_rad_s",
@@ -1706,7 +1824,21 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "center_removed_rms_error_m",
         "center_and_phase_removed_rms_error_m",
         "orientation_p50_drift_rad",
+        "orientation_p95_drift_rad",
+        "orientation_max_drift_rad",
+        "orientation_p50_deg",
+        "orientation_p95_deg",
+        "orientation_max_deg",
         "orientation_position_equiv_50mm_m",
+        "orientation_position_equiv_50mm_mm",
+        "angular_feedback_norm_p50",
+        "angular_feedback_norm_p95",
+        "angular_feedback_norm_max",
+        "angular_applied_norm_p50",
+        "angular_applied_norm_p95",
+        "angular_applied_norm_max",
+        "angular_saturation_count",
+        "angular_saturation_ratio",
         "error_classification",
         "timing_classification",
         "ack_spike_count_10ms",
@@ -2053,6 +2185,12 @@ def summarize_run(
         "tracking_source_requested": args.tracking_source,
         "tracking_source_used": tracking_source,
         "tracking_source_warning": tracking_source_warning,
+        "desired_orientation_stand": {
+            "quaternion_xyzw": list(q0),
+            "frame": "stand",
+            "source": f"{tracking_source} at ArmMotion",
+        },
+        "measured_orientation_source": f"{tracking_source}.quaternion_xyzw",
         "state_packet_count": len(states),
         "invalid_state_packets": 0,
         "tcp_ref_valid_ratio": tcp_valid_ratio(states, args.arm, "tcp_ref_stand"),
@@ -2121,6 +2259,13 @@ def summarize_run(
             }
         )
     summary.update(metrics)
+    summary.update(
+        feedback_orientation_command_metrics(
+            feedback_rows,
+            max_angular_rad_s=finite_number(args.feedback_max_angular_rad_s),
+        )
+    )
+    summary["orientation_error_vector_samples"] = orientation_error_vector_sample_rows(merged, q0)
     summary.update(telemetry_metrics(states, args.arm))
     summary.update(runtime_diagnostics)
     summary.update(command_interval_metrics(artifact_dir / "command_packets.jsonl"))
@@ -2188,7 +2333,17 @@ def summarize_run(
     summary["center_and_phase_removed_rms_error_m"] = error_decomp.get("center_and_phase_removed_rms_error_m")
     orientation_block = error_decomp.get("orientation_drift_rad") if isinstance(error_decomp.get("orientation_drift_rad"), dict) else {}
     summary["orientation_p50_drift_rad"] = orientation_block.get("p50")
+    summary["orientation_p95_drift_rad"] = orientation_block.get("p95")
+    summary["orientation_max_drift_rad"] = orientation_block.get("max")
+    summary["orientation_p50_rad"] = error_decomp.get("orientation_p50_rad")
+    summary["orientation_p95_rad"] = error_decomp.get("orientation_p95_rad")
+    summary["orientation_max_rad"] = error_decomp.get("orientation_max_rad")
+    summary["orientation_p50_deg"] = error_decomp.get("orientation_p50_deg")
+    summary["orientation_p95_deg"] = error_decomp.get("orientation_p95_deg")
+    summary["orientation_max_deg"] = error_decomp.get("orientation_max_deg")
     summary["orientation_position_equiv_50mm_m"] = error_decomp.get("orientation_position_equiv_50mm_m")
+    summary["orientation_position_equiv_50mm_mm"] = error_decomp.get("orientation_position_equiv_50mm_mm")
+    summary["orientation_position_equiv_mm"] = error_decomp.get("orientation_position_equiv_mm")
     summary["error_classification"] = error_decomp.get("error_classification")
     summary["error_classifications"] = error_decomp.get("error_classifications")
     summary["error_classification_reasons"] = error_decomp.get("classification_reasons")

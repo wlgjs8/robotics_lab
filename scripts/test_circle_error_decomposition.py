@@ -113,8 +113,36 @@ class CircleErrorDecompositionTests(unittest.TestCase):
         )
 
         self.assertEqual(result["error_classification"], "orientation_limited")
+        self.assertAlmostEqual(result["orientation_p50_rad"], 0.2)
+        self.assertAlmostEqual(result["orientation_p95_deg"], math.degrees(0.2))
         self.assertAlmostEqual(result["orientation_position_equiv_50mm_m"], 0.01)
+        self.assertAlmostEqual(result["orientation_position_equiv_50mm_mm"], 10.0)
+        self.assertAlmostEqual(result["orientation_position_equiv_mm"]["50"]["p95"], 10.0)
+        self.assertAlmostEqual(result["orientation_position_equiv_mm"]["100"]["max"], 20.0)
         self.assertAlmostEqual(result["orientation_error_position_equivalent_m"]["0.1"]["p95"], 0.02)
+
+    def test_orientation_feedback_sign_diagnostic_flags_positive_kp_increase(self):
+        baseline = {
+            "controller": "twist_stand_feedback",
+            "arm": "left",
+            "profile": "gene_15cm_4s",
+            "tracking_source_used": "tcp_ref_stand",
+            "diameter_m": 0.15,
+            "period_sec": 4.0,
+            "command_rate_hz": 100.0,
+            "feedback_kp_pos": 0.5,
+            "feedback_kp_ori": 0.0,
+            "p95_orientation_drift_rad": 0.08,
+        }
+        suspect = dict(baseline)
+        suspect["feedback_kp_ori"] = 0.2
+        suspect["p95_orientation_drift_rad"] = 0.12
+
+        result = decomp.classify_orientation_feedback_sign([baseline, suspect])
+
+        self.assertEqual(result["classification"], "orientation_feedback_suspect")
+        self.assertEqual(result["comparisons"][0]["classification"], "orientation_feedback_suspect")
+        self.assertAlmostEqual(result["comparisons"][0]["absolute_increase_rad"], 0.04)
 
 
 if __name__ == "__main__":

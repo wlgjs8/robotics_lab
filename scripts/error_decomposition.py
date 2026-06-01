@@ -210,6 +210,146 @@ def orientation_equivalent(orientation_values: list[float], offsets: list[float]
     return out
 
 
+def orientation_equivalent_mm(orientation_values: list[float], offsets: list[float]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for offset in offsets:
+        equivalents = [value * offset * 1000.0 for value in orientation_values]
+        offset_mm = offset * 1000.0
+        key = f"{offset_mm:.3f}".rstrip("0").rstrip(".")
+        out[key] = {
+            "offset_m": offset,
+            "offset_mm": offset_mm,
+            "p50": percentile(equivalents, 50.0),
+            "p95": percentile(equivalents, 95.0),
+            "max": max(equivalents) if equivalents else None,
+        }
+    return out
+
+
+def rad_to_deg_block(block: dict[str, float | None]) -> dict[str, float | None]:
+    return {
+        key: (value * 180.0 / math.pi if value is not None else None)
+        for key, value in block.items()
+    }
+
+
+def orientation_drift_from_summary(summary: dict[str, Any]) -> float | None:
+    for key in (
+        "p95_orientation_drift_rad",
+        "orientation_p95_drift_rad",
+        "orientation_p95_rad",
+        "max_orientation_drift_rad",
+    ):
+        value = finite_number(summary.get(key))
+        if value is not None:
+            return value
+    decomp = summary.get("error_decomposition")
+    if isinstance(decomp, dict):
+        for block_key in ("orientation_error_rad", "orientation_drift_rad"):
+            block = decomp.get(block_key)
+            if isinstance(block, dict):
+                value = finite_number(block.get("p95"))
+                if value is not None:
+                    return value
+    return None
+
+
+def orientation_sign_compare_key(summary: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        summary.get("controller"),
+        summary.get("arm"),
+        summary.get("profile"),
+        summary.get("tracking_source_used"),
+        finite_number(summary.get("diameter_m")),
+        finite_number(summary.get("period_sec")),
+        finite_number(summary.get("command_rate_hz")),
+        finite_number(summary.get("feedback_kp_pos")),
+    )
+
+
+def classify_orientation_feedback_sign(
+    summaries: list[dict[str, Any]],
+    *,
+    min_abs_increase_rad: float = 1e-6,
+    min_relative_increase: float = 0.0,
+) -> dict[str, Any]:
+    """Offline Kp_ori sign diagnostic across comparable benchmark summaries."""
+    baselines: dict[tuple[Any, ...], dict[str, Any]] = {}
+    candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    for summary in summaries:
+        kp_ori = finite_number(summary.get("feedback_kp_ori"))
+        kp_pos = finite_number(summary.get("feedback_kp_pos"))
+        drift = orientation_drift_from_summary(summary)
+        if kp_ori is None or kp_pos is None or drift is None:
+            continue
+        key = orientation_sign_compare_key(summary)
+        if abs(kp_ori) <= EPSILON:
+            current = baselines.get(key)
+            if current is None or drift < float(current["orientation_drift_rad"]):
+                baselines[key] = {"summary": summary, "orientation_drift_rad": drift}
+        elif kp_ori > 0.0:
+            candidates.append((key, summary))
+
+    comparisons: list[dict[str, Any]] = []
+    suspect = False
+    reasons: list[str] = []
+    for key, summary in candidates:
+        baseline = baselines.get(key)
+        if baseline is None:
+            continue
+        baseline_drift = float(baseline["orientation_drift_rad"])
+        candidate_drift = orientation_drift_from_summary(summary)
+        if candidate_drift is None:
+            continue
+        abs_increase = candidate_drift - baseline_drift
+        relative_increase = (
+            abs_increase / baseline_drift
+            if baseline_drift > EPSILON
+            else (math.inf if abs_increase > 0.0 else 0.0)
+        )
+        increased = (
+            abs_increase > min_abs_increase_rad
+            and relative_increase >= min_relative_increase
+        )
+        comparison = {
+            "classification": "orientation_feedback_suspect" if increased else "orientation_feedback_not_suspect",
+            "controller": summary.get("controller"),
+            "arm": summary.get("arm"),
+            "profile": summary.get("profile"),
+            "tracking_source_used": summary.get("tracking_source_used"),
+            "feedback_kp_pos": finite_number(summary.get("feedback_kp_pos")),
+            "baseline_feedback_kp_ori": 0.0,
+            "candidate_feedback_kp_ori": finite_number(summary.get("feedback_kp_ori")),
+            "baseline_orientation_drift_rad": baseline_drift,
+            "candidate_orientation_drift_rad": candidate_drift,
+            "absolute_increase_rad": abs_increase,
+            "relative_increase": relative_increase,
+        }
+        comparisons.append(comparison)
+        if increased:
+            suspect = True
+            reasons.append(
+                "Kp_ori>0 increased orientation drift relative to Kp_ori=0 "
+                f"for controller={summary.get('controller')} arm={summary.get('arm')} "
+                f"profile={summary.get('profile')} Kp_pos={summary.get('feedback_kp_pos')}"
+            )
+
+    if suspect:
+        classification = "orientation_feedback_suspect"
+    elif comparisons:
+        classification = "orientation_feedback_not_suspect"
+    else:
+        classification = "orientation_feedback_insufficient_comparison"
+        reasons.append("no comparable Kp_ori=0 and Kp_ori>0 summaries with finite orientation drift")
+    return {
+        "schema": "robotics_lab.orientation_feedback_sign_diagnostic.v1",
+        "classification": classification,
+        "comparisons": comparisons,
+        "reasons": reasons,
+        "input_summary_count": len(summaries),
+    }
+
+
 def classify_error_source(
     *,
     summary: dict[str, Any],
@@ -389,7 +529,9 @@ def decompose_circle_run(
         "p95": percentile(orientations, 95.0),
         "max": max(orientations) if orientations else None,
     }
+    orientation_block_deg = rad_to_deg_block(orientation_block)
     orientation_equiv = orientation_equivalent(orientations, offsets)
+    orientation_equiv_mm = orientation_equivalent_mm(orientations, offsets)
     equiv_50mm = orientation_equiv.get("0.05") or orientation_equiv.get("0.050")
     orientation_50mm_p95 = finite_number(equiv_50mm.get("p95")) if isinstance(equiv_50mm, dict) else None
     phase_aligned_rms = rms(phase_errors)
@@ -424,8 +566,22 @@ def decompose_circle_run(
         "center_removal_improvement_ratio": improvement_ratio(base_rms, center_removed_rms),
         "center_and_phase_removal_improvement_ratio": improvement_ratio(base_rms, center_phase_removed_rms),
         "orientation_drift_rad": orientation_block,
+        "orientation_error_rad": orientation_block,
+        "orientation_error_deg": orientation_block_deg,
+        "orientation_p50_rad": orientation_block["p50"],
+        "orientation_p95_rad": orientation_block["p95"],
+        "orientation_max_rad": orientation_block["max"],
+        "orientation_p50_deg": orientation_block_deg["p50"],
+        "orientation_p95_deg": orientation_block_deg["p95"],
+        "orientation_max_deg": orientation_block_deg["max"],
         "orientation_error_position_equivalent_m": orientation_equiv,
+        "orientation_position_equiv_mm": orientation_equiv_mm,
         "orientation_position_equiv_50mm_m": orientation_50mm_p95,
+        "orientation_position_equiv_50mm_mm": (
+            orientation_50mm_p95 * 1000.0
+            if orientation_50mm_p95 is not None
+            else None
+        ),
         "error_classification": error_classification,
         "error_classifications": classifications,
         "classification_reasons": reasons,
