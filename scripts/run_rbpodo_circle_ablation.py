@@ -1028,6 +1028,28 @@ def child_result_failed(value: dict[str, Any]) -> bool:
     return value.get("result") in {"error", "blocked", "faulted", "startup_fault"}
 
 
+def decision_split_markdown(rows: list[dict[str, Any]]) -> str:
+    columns = [
+        "name",
+        "classification",
+        "score",
+        "error_classification",
+        "timing_classification",
+        "measurement_reliability_level",
+        "reliability_caveats",
+        "physical_real_blockers",
+    ]
+    if not rows:
+        return "_None._"
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(format_cell(row.get(key)) for key in columns) + " |")
+    return "\n".join(lines)
+
+
 def write_report(path: Path, rows: list[dict[str, Any]], skipped_plots: list[str]) -> None:
     stable = [row for row in rows if row.get("profile") == "circle_15cm_16s" and not rejected(row)]
     stress = [row for row in rows if row.get("profile") == "gene_15cm_4s" and not rejected(row)]
@@ -1040,6 +1062,12 @@ def write_report(path: Path, rows: list[dict[str, Any]], skipped_plots: list[str
         "## Measurement reliability and caveats",
         "",
         reliability_report.markdown_table(rows) if rows else "_None._",
+        "",
+        "## Tuning result vs measurement reliability",
+        "",
+        "This table separates tuning classification, error/timing classification, measurement reliability, and physical-readiness blockers.",
+        "",
+        decision_split_markdown(rows),
         "",
         "## All Experiments",
         "",

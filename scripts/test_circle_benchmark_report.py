@@ -286,7 +286,7 @@ class CircleBenchmarkReportTest(unittest.TestCase):
         self.assertIsNone(rows[0]["score"])
         self.assertIn("missing candidate metrics", rows[0]["promotion_notes"])
 
-    def test_completed_tcp_ref_with_diagnostics_is_controller_reference_valid(self) -> None:
+    def test_completed_tcp_ref_with_diagnostics_is_suspect_not_physical_ready(self) -> None:
         rows = report.classify_rows(
             [
                 {
@@ -308,9 +308,39 @@ class CircleBenchmarkReportTest(unittest.TestCase):
             ],
             min_repeats=1,
         )
-        self.assertEqual(rows[0]["measurement_reliability_level"], "controller_reference_valid")
+        self.assertEqual(rows[0]["measurement_reliability_level"], "suspect")
+        self.assertIn("diagnostics_suspect_unresolved", rows[0]["reliability_reasons"])
         self.assertIn("diagnostics_suspect_override_active", rows[0]["reliability_caveats"])
         self.assertIn("tcp_ref_lower_bound_only", rows[0]["reliability_caveats"])
+        self.assertFalse(rows[0]["physical_ready_candidate"])
+
+    def test_clean_controller_reference_run_is_controller_reference_valid(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "clean_controller_reference",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "controller": "twist_stand_feedback",
+                    "profile": "circle_15cm_16s",
+                    "tracking_source": "tcp_ref_stand",
+                    "result": "completed",
+                    "tcp_ref_valid_ratio": 1.0,
+                    "q_ref_valid_ratio": 1.0,
+                    "q_ref_update_rate_hz": 100.0,
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                    "diagnostics_suspect_count": 0,
+                    "cartesian_unavailable_count": 0,
+                    "timing_classification": "clean_timing",
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertEqual(rows[0]["measurement_reliability_level"], "controller_reference_valid")
+        self.assertIn("controller_reference_lower_bound", rows[0]["benchmark_interpretation"])
+        self.assertIn("physical_reference_to_actual_error_unmeasured", rows[0]["physical_real_blockers"])
         self.assertFalse(rows[0]["physical_ready_candidate"])
 
     def test_faulted_run_is_unreliable(self) -> None:
@@ -377,6 +407,31 @@ class CircleBenchmarkReportTest(unittest.TestCase):
         )
         self.assertEqual(rows[0]["measurement_reliability_level"], "suspect")
         self.assertIn("q_ref_not_directly_validated", rows[0]["reliability_caveats"])
+
+    def test_state_parity_failed_caps_reliability_at_suspect(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "parity_failed",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "profile": "circle_15cm_16s",
+                    "tracking_source": "tcp_ref_stand",
+                    "result": "completed",
+                    "tcp_ref_valid_ratio": 1.0,
+                    "q_ref_valid_ratio": 1.0,
+                    "q_ref_update_rate_hz": 100.0,
+                    "state_parity_result": "failed_parity_mismatch",
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertEqual(rows[0]["measurement_reliability_level"], "suspect")
+        self.assertIn("state_parity_failed", rows[0]["reliability_reasons"])
+        self.assertIn("state_parity_failed", rows[0]["physical_real_blockers"])
 
     def test_stress_profile_marks_il_data_not_recommended(self) -> None:
         rows = report.classify_rows(

@@ -359,13 +359,15 @@ Reliability levels:
 
 - `unreliable`: no valid state, startup fault, blocked Cartesian path,
   fault-latched run, or physical motion detected during pgmode simulation.
-- `suspect`: q_ref is missing or low-validity, timestamp/state/command timing
-  is not clean, or evidence is otherwise incomplete.
+- `suspect`: diagnostics are suspect, q_ref is missing or low-validity,
+  Python/C++ state parity failed, timestamp/state/command timing is not clean,
+  or evidence is otherwise incomplete.
 - `controller_reference_valid`: the run completed with valid `tcp_ref_stand`
   and visible `q_ref`/`q_target`, no fault, and no physical motion detected.
   This is still controller-reference lower-bound evidence only.
 - `physical_ready_candidate`: reserved for future physical real acceptance and
-  not assigned while `diagnostics_suspect` remains unresolved.
+  not assigned while `diagnostics_suspect` remains unresolved. Current rbpodo
+  pgmode simulation reports should not produce this level.
 
 Important caveats:
 
@@ -375,7 +377,11 @@ Important caveats:
   validation of the raw `jnt_ref` field unless state parity and raw-data
   investigations have passed.
 - A run with `diagnostics_suspect_count > 0` or an active diagnostics-suspect
-  override cannot be physical-ready.
+  override is graded `suspect` and cannot be physical-ready.
+- A run with failed Python/C++ state parity is graded no higher than `suspect`.
+- A run with `tracking_source=tcp_ref_stand` must be interpreted as
+  `controller_reference_lower_bound`.
+- A missing or low `q_ref_valid_ratio` records `q_ref_not_directly_validated`.
 - `gene_15cm_4s` stress rows are labeled `IL_data_not_recommended` by default.
   Use stable, clean-timing profiles for imitation-learning data candidates.
 

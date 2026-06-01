@@ -19,6 +19,7 @@ SCHEMA = "robotics_lab.rbpodo_measurement_reliability_report.v1"
 OUTPUT_MD = "measurement_reliability_report.md"
 OUTPUT_CSV = "measurement_reliability_summary.csv"
 OUTPUT_JSON = "measurement_reliability_summary.json"
+Q_REF_VALID_RATIO_MIN = 0.95
 
 RELIABILITY_COLUMNS = [
     "run_name",
@@ -139,6 +140,46 @@ def diagnostics_suspect_active(row: dict[str, Any]) -> bool:
     return "diagnostics_suspect" in warnings or "diagnostic_override" in warnings
 
 
+def diagnostics_override_active(row: dict[str, Any]) -> bool:
+    if (finite_number(row.get("controller_simulation_diagnostic_override_active_count")) or 0.0) > 0.0:
+        return True
+    if as_bool(row.get("controller_simulation_diagnostic_override_active")) is True:
+        return True
+    warnings = str(row.get("warnings") or row.get("performance_warnings") or "")
+    return "diagnostic_override" in warnings
+
+
+def state_parity_result(row: dict[str, Any]) -> str:
+    for key in (
+        "state_parity_result",
+        "rbpodo_state_parity_result",
+        "python_cpp_state_parity_result",
+        "parity_result",
+    ):
+        value = row.get(key)
+        if isinstance(value, str) and value:
+            return value
+    for key in ("state_parity", "rbpodo_state_parity", "python_cpp_state_parity", "parity_summary"):
+        nested = nested_dict(row, key)
+        value = nested.get("result")
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def state_parity_failed(row: dict[str, Any]) -> bool:
+    result = state_parity_result(row)
+    if not result:
+        return False
+    if result in {"passed", "ok", "suspect_but_consistent", "parity_suspect"}:
+        return False
+    return result.startswith("failed") or result in {"mismatch", "error", "transport_error"}
+
+
+def state_parity_passed(row: dict[str, Any]) -> bool:
+    return state_parity_result(row) in {"passed", "ok"}
+
+
 def state_available(row: dict[str, Any]) -> bool:
     state_packets = finite_number(row.get("state_packet_count"))
     if state_packets is not None:
@@ -162,7 +203,7 @@ def blocked_or_cartesian_unavailable(row: dict[str, Any]) -> bool:
 def q_ref_visible(row: dict[str, Any]) -> bool:
     q_ref_valid_ratio = finite_number(first_present(row, "q_ref_valid_ratio", "q_reference_for_servo_valid_ratio"))
     if q_ref_valid_ratio is not None:
-        return q_ref_valid_ratio >= 0.95
+        return q_ref_valid_ratio >= Q_REF_VALID_RATIO_MIN
     update_rate = finite_number(row.get("q_ref_update_rate_hz"))
     if update_rate is not None and update_rate > 0.0:
         return True
@@ -172,12 +213,17 @@ def q_ref_visible(row: dict[str, Any]) -> bool:
 
 def q_ref_low_or_missing(row: dict[str, Any]) -> bool:
     ratio = finite_number(first_present(row, "q_ref_valid_ratio", "q_reference_for_servo_valid_ratio"))
-    if ratio is not None and ratio < 0.95:
+    if ratio is not None and ratio < Q_REF_VALID_RATIO_MIN:
         return True
     reason = str(row.get("q_ref_reason") or "")
     if "not published" in reason or "not valid" in reason:
         return True
     return not q_ref_visible(row)
+
+
+def q_ref_ratio_missing_or_low(row: dict[str, Any]) -> bool:
+    ratio = finite_number(first_present(row, "q_ref_valid_ratio", "q_reference_for_servo_valid_ratio"))
+    return ratio is None or ratio < Q_REF_VALID_RATIO_MIN
 
 
 def tcp_ref_high(row: dict[str, Any]) -> bool:
@@ -245,6 +291,8 @@ def base_physical_blockers(row: dict[str, Any]) -> list[str]:
     ]
     if diagnostics_suspect_active(row):
         blockers.insert(0, "diagnostics_suspect_unresolved")
+    if state_parity_failed(row):
+        blockers.insert(0, "state_parity_failed")
     return blockers
 
 
@@ -269,9 +317,16 @@ def grade_row(row: dict[str, Any]) -> dict[str, Any]:
         interpretation.append("controller_reference_lower_bound")
     if pgmode:
         interpretation.append("not_physical_tracking")
+    if pgmode and (q_ref_ratio_missing_or_low(row) or not state_parity_passed(row)):
         caveats.append("q_ref_not_directly_validated")
     if diagnostics_suspect_active(row):
+        caveats.append("diagnostics_suspect_unresolved")
+    if diagnostics_override_active(row):
         caveats.append("diagnostics_suspect_override_active")
+    elif diagnostics_suspect_active(row):
+        caveats.append("diagnostics_suspect_override_active")
+    if state_parity_failed(row):
+        caveats.append("state_parity_failed")
     if timing_jitter_present(row):
         caveats.append("timing_jitter_spikes")
     if feedback_saturation_present(row):
@@ -303,6 +358,10 @@ def grade_row(row: dict[str, Any]) -> dict[str, Any]:
     suspect_reasons: list[str] = []
     if q_ref_low_or_missing(row):
         suspect_reasons.append("q_ref_not_directly_validated")
+    if diagnostics_suspect_active(row):
+        suspect_reasons.append("diagnostics_suspect_unresolved")
+    if state_parity_failed(row):
+        suspect_reasons.append("state_parity_failed")
     if timing_jitter_present(row):
         suspect_reasons.append("timing_jitter_spikes")
     state_gap = finite_number(row.get("state_gap_count"))
@@ -317,6 +376,8 @@ def grade_row(row: dict[str, Any]) -> dict[str, Any]:
         pgmode
         and completed
         and as_bool(row.get("physical_motion_detected")) is not True
+        and not diagnostics_suspect_active(row)
+        and not state_parity_failed(row)
         and tcp_ref_high(row)
         and q_ref_visible(row)
         and as_bool(row.get("fault_latched")) is not True
@@ -342,6 +403,8 @@ def grade_row(row: dict[str, Any]) -> dict[str, Any]:
 
     if diagnostics_suspect_active(row) and "diagnostics_suspect_unresolved" not in blockers and pgmode:
         blockers.insert(0, "diagnostics_suspect_unresolved")
+    if state_parity_failed(row) and "state_parity_failed" not in blockers and pgmode:
+        blockers.insert(0, "state_parity_failed")
 
     return {
         "measurement_reliability_level": level,

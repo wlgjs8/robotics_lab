@@ -910,6 +910,27 @@ def rbpodo_stage_summary_markdown(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def rbpodo_decision_split_markdown(rows: list[dict[str, Any]]) -> str:
+    rbpodo_rows = [row for row in rows if row.get("benchmark_category") == "rbpodo_controller_simulation"]
+    if not rbpodo_rows:
+        return "_None supplied._"
+    columns = [
+        "run_name",
+        "classification",
+        "score",
+        "measurement_reliability_level",
+        "reliability_caveats",
+        "physical_real_blockers",
+    ]
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for row in rbpodo_rows:
+        lines.append("| " + " | ".join(format_cell(row.get(key)) for key in columns) + " |")
+    return "\n".join(lines)
+
+
 def report_markdown(rows: list[dict[str, Any]], title: str, min_repeats: int) -> str:
     baseline = [row for row in rows if row.get("classification") == "stable_simulator_baseline_candidate"]
     stress = [row for row in rows if row.get("classification") == "stress_benchmark_candidate"]
@@ -967,6 +988,12 @@ def report_markdown(rows: list[dict[str, Any]], title: str, min_repeats: int) ->
         "",
         reliability_report.markdown_table(rbpodo_rows) if rbpodo_rows else "_None supplied._",
         "",
+        "## rbpodo Tuning Result vs Measurement Reliability",
+        "",
+        "This table separates the tuning classification from measurement reliability and physical-readiness blockers.",
+        "",
+        rbpodo_decision_split_markdown(rows),
+        "",
         rbpodo_stage_summary_markdown(rows),
         "",
         "## rbpodo Closed-Loop Candidates",
@@ -1008,7 +1035,9 @@ def report_markdown(rows: list[dict[str, Any]], title: str, min_repeats: int) ->
         "",
         "Current rbpodo controller-simulation circle baseline: <artifact path>, profile circle_15cm_16s, "
         "tracking_source tcp_ref_stand, radius_gain <value>, rms_error_m <value>, "
-        "p95_error_m <value>, physical_motion_detected false. pgmode simulation only; not real-ready.",
+        "p95_error_m <value>, physical_motion_detected false, measurement_reliability_level "
+        "<level>, benchmark_interpretation <values>, physical_real_blockers <values>. "
+        "pgmode simulation only; not real-ready.",
         "```",
     ]
     return "\n".join(parts) + "\n"

@@ -348,10 +348,15 @@ change control behavior or authorize physical motion.
 Review `measurement_reliability_level` before both tuning and dataset
 selection. In pgmode simulation, `tcp_ref_stand` is a controller-reference
 lower bound, not physical TCP tracking. A completed run can be
-`controller_reference_valid` while still carrying caveats such as
-`diagnostics_suspect_override_active`, `tcp_ref_lower_bound_only`, and
-`q_ref_not_directly_validated`. `physical_ready_candidate` is not assigned
-while diagnostics_suspect remains unresolved.
+`controller_reference_valid` only when reference telemetry is valid, no fault
+or physical motion was detected, Cartesian commands were available, and
+diagnostics are not suspect. Runs with `diagnostics_suspect_count > 0` or a
+diagnostics-suspect override are `suspect`, not physical-ready. Runs with
+failed Python/C++ state parity are no higher than `suspect`. Caveats such as
+`tcp_ref_lower_bound_only`, `controller_reference_lower_bound`, and
+`q_ref_not_directly_validated` must stay visible before tuning or dataset
+selection. `physical_ready_candidate` is not assigned while
+diagnostics_suspect remains unresolved.
 
 Create operator-local circle configs from the tracked templates:
 
@@ -1359,6 +1364,10 @@ Every rbpodo controller-simulation row must state:
 - `q_ref_update_rate_hz` and `q_actual_update_rate_hz`
 - `ack_policy`
 - `controller_acceptance_observed_count`
+- `measurement_reliability_level`
+- `reliability_caveats`
+- `benchmark_interpretation`
+- `physical_real_blockers`
 
 The tuning report adds structure-aware columns for `kp_pos`, `kp_ori`,
 `state_pub_rate_hz`, `speed_bar_left`, `speed_bar_right`,
@@ -1378,6 +1387,11 @@ classifications are:
 - `center_drift_limited`
 - `state_pub_speed_mismatch`
 - `stress_only`
+
+Read report sections in this order: tuning result, measurement reliability,
+then physical-readiness blockers. A tuning candidate with `suspect` or
+`unreliable` measurement reliability is not a physical-ready candidate and
+should not be promoted as IL data without a clean follow-up artifact.
 
 Interpret the stage-1 rows structurally: open-loop radius can be good while
 center drift is bad, closed-loop is structurally needed for rbpodo controller
