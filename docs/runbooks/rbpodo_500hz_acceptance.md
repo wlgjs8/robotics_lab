@@ -590,6 +590,29 @@ compare 100 Hz against 500 Hz with `network.state_pub_rate_hz: 100`.
 | 2 | `configs/rbpodo_circle_ablation/500hz_stage2_15cm16s.yaml` | 15 cm / 16 s open-loop and closed-loop candidates |
 | 3 | `configs/rbpodo_circle_ablation/500hz_stage3_8s_4s.yaml` | 15 cm / 8 s bridge before 15 cm / 4 s stress |
 | async | `configs/rbpodo_circle_ablation/500hz_async_acceptance.yaml` | safe 5 cm / 10 s async socket-send supervised row; ACK-worker row is disabled until no-op ACK-worker evidence is feasible |
+| async stage 1 | `configs/rbpodo_circle_ablation/async_500hz_stage1_safe.yaml` | safe 5 cm / 10 s, tuned 100 Hz ACK-on baseline, 500 Hz synchronous ACK-on, 500 Hz socket-send supervised, and disabled ACK-worker candidate |
+| async stage 2 | `configs/rbpodo_circle_ablation/async_500hz_stage2_15cm16s.yaml` | 15 cm / 16 s, `Kp_pos/Kp_ori` candidates `0.5/0.2` and `1.0/0.5` across ACK-on and socket-send supervised modes |
+| async stage 3 | `configs/rbpodo_circle_ablation/async_500hz_stage3_8s_4s.yaml` | 15 cm / 8 s and 15 cm / 4 s stress, 100 Hz ACK-on best row, socket-send supervised repeat 5, phase advance `0.00/0.02/0.04`, and `t2` `0.08/0.03` with `alpha=0.8` |
+
+For `RBPODO-ASYNC-CIRCLE-MATRIX-01`, use this run order:
+
+1. Complete async no-op evidence for `socket_send_supervised`; enable the
+   disabled `sdk_ack_worker` rows only after no-op ACK-worker evidence is
+   feasible.
+2. Run `async_500hz_stage1_safe.yaml`.
+3. Run `async_500hz_stage2_15cm16s.yaml`.
+4. Run `async_500hz_stage3_8s_4s.yaml`, stopping before the 4 s rows if the
+   8 s bridge shows timing, fault, physical-motion, or reference-supervision
+   problems.
+
+Every async circle matrix row writes an artifact-local resolved config with
+explicit `servo.rate_hz`, per-arm `servo_t1_sec`, per-arm
+`disable_waiting_ack`, `servo.rbpodo_async_streaming.*`, `network.state_pub_rate_hz`,
+and per-arm `speed_bar` overrides. Source configs are not edited.
+
+`socket_send_supervised` rows intentionally set `disable_waiting_ack: true`.
+Their successful sends are `socket_send_only` evidence, require reference
+supervision, and must not be counted as `controller_ack_observed`.
 
 Dry-run each matrix before connecting to controllers:
 
@@ -613,6 +636,28 @@ Use the same command shape for stages 2 and 3, changing `--matrix` and
 `--artifact-root`. For live runs, remove `--dry-run` only after reviewing the
 resolved configs and confirming the controllers are in `pgmode` simulation for
 that session.
+
+For async matrices, include the async env gate and ACK-disabled socket-send
+gate for dry-runs and live runs that include enabled `socket_send_supervised`
+rows:
+
+```bash
+RB_ALLOW_RBPODO_ASYNC_STREAMING=1 \
+RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 \
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1 \
+python3 scripts/run_rbpodo_circle_ablation.py \
+  --matrix configs/rbpodo_circle_ablation/async_500hz_stage1_safe.yaml \
+  --artifact-root artifacts/rbpodo_circle_ablation/async_500hz_stage1_dry_run \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --dry-run \
+  --verify-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
 
 Stop the staged sequence at the first fault latch, physical-motion warning,
 Cartesian gate rejection, missing `q_ref` / `tcp_ref_stand`, poor timing

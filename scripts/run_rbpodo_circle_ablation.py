@@ -38,7 +38,9 @@ REQUIRED_ENV = (
 )
 OPTIONAL_ENV_REQUIREMENTS = {
     "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION",
+    "RB_ALLOW_RBPODO_ASYNC_STREAMING",
     "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
+    "RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING",
 }
 PROFILES = set(circle_bench.PROFILE_DEFAULTS)
 CONTROLLERS = {
@@ -91,6 +93,8 @@ ALLOWED_CONFIG_OVERRIDES = {
     "right_robot.speed_bar",
     "left_robot.servo_t1_sec",
     "right_robot.servo_t1_sec",
+    "left_robot.disable_waiting_ack",
+    "right_robot.disable_waiting_ack",
     "left_robot.servo_t2_sec",
     "right_robot.servo_t2_sec",
     "left_robot.servo_alpha",
@@ -103,7 +107,50 @@ ALLOWED_CONFIG_OVERRIDES = {
     "cartesian_control.path_kp_pos",
     "cartesian_control.path_kp_ori",
     "cartesian_control.twist_angular_deadband_rad_s",
+    "servo.rbpodo_async_streaming.enable",
+    "servo.rbpodo_async_streaming.mode",
+    "servo.rbpodo_async_streaming.rate_hz",
+    "servo.rbpodo_async_streaming.queue_policy",
+    "servo.rbpodo_async_streaming.max_pending_age_ms",
+    "servo.rbpodo_async_streaming.ack_supervision.enable",
+    "servo.rbpodo_async_streaming.ack_supervision.expected_ack_timeout_ms",
+    "servo.rbpodo_async_streaming.ack_supervision.missing_ack_fault_after_ms",
+    "servo.rbpodo_async_streaming.ack_supervision.max_consecutive_missing_ack",
+    "servo.rbpodo_async_streaming.reference_supervision.enable",
+    "servo.rbpodo_async_streaming.reference_supervision.q_ref_update_timeout_ms",
+    "servo.rbpodo_async_streaming.reference_supervision.q_ref_target_tolerance_deg",
+    "servo.rbpodo_async_streaming.reference_supervision.q_ref_target_fault_after_ms",
+    "servo.rbpodo_async_streaming.reference_supervision.tcp_ref_update_timeout_ms",
+    "servo.rbpodo_async_streaming.reference_supervision.tcp_ref_target_tolerance_m",
+    "servo.rbpodo_async_streaming.reference_supervision.tcp_ref_target_fault_after_ms",
+    "servo.rbpodo_async_streaming.reference_supervision.policy",
+    "servo.rbpodo_async_streaming.diagnostics.publish_per_command_jsonl",
 }
+BOOLEAN_CONFIG_OVERRIDES = {
+    "left_robot.disable_waiting_ack",
+    "right_robot.disable_waiting_ack",
+    "servo.rbpodo_async_streaming.enable",
+    "servo.rbpodo_async_streaming.ack_supervision.enable",
+    "servo.rbpodo_async_streaming.reference_supervision.enable",
+    "servo.rbpodo_async_streaming.diagnostics.publish_per_command_jsonl",
+}
+STRING_CONFIG_OVERRIDE_VALUES = {
+    "servo.rbpodo_async_streaming.mode": {
+        "disabled",
+        "sdk_ack_worker",
+        "socket_send_supervised",
+    },
+    "servo.rbpodo_async_streaming.queue_policy": {"latest_wins"},
+    "servo.rbpodo_async_streaming.reference_supervision.policy": {
+        "warn_only",
+        "fault_latch",
+    },
+}
+INTEGER_CONFIG_OVERRIDES = {
+    "servo.rbpodo_async_streaming.rate_hz",
+    "servo.rbpodo_async_streaming.ack_supervision.max_consecutive_missing_ack",
+}
+ASYNC_CONFIG_OVERRIDE_PREFIX = "servo.rbpodo_async_streaming."
 UNSAFE_OVERRIDE_KEY_PARTS = (
     "operation_mode",
     "allow_in_real",
@@ -123,6 +170,8 @@ SUMMARY_COLUMNS = [
     "profile",
     "arm",
     "ack_policy",
+    "async_mode",
+    "acceptance_semantics",
     "state_pub_rate_hz",
     "speed_bar_left",
     "speed_bar_right",
@@ -193,7 +242,10 @@ SUMMARY_COLUMNS = [
     "p95_error_near_command_gap_mm",
     "p95_error_away_from_command_gap_mm",
     "ack_observed_count",
+    "controller_ack_observed_count",
     "controller_acceptance_observed_count",
+    "socket_send_only_count",
+    "reference_supervision_state",
     "diagnostics_suspect_count",
     "controller_simulation_diagnostic_override_active_count",
     "score",
@@ -304,14 +356,28 @@ def config_overrides(exp: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_override_value(name: str, key: str, value: Any) -> None:
+    if key in BOOLEAN_CONFIG_OVERRIDES:
+        if not isinstance(value, bool):
+            raise AblationError(f"experiment {name} override {key} must be true or false")
+        return
+    if key in STRING_CONFIG_OVERRIDE_VALUES:
+        if not isinstance(value, str) or value not in STRING_CONFIG_OVERRIDE_VALUES[key]:
+            allowed = ", ".join(sorted(STRING_CONFIG_OVERRIDE_VALUES[key]))
+            raise AblationError(f"experiment {name} override {key} must be one of: {allowed}")
+        return
     number = finite_number(value)
     if number is None:
         raise AblationError(f"experiment {name} override {key} must be a finite number")
+    if key in INTEGER_CONFIG_OVERRIDES:
+        if abs(number - int(number)) > 1e-12 or int(number) <= 0:
+            raise AblationError(f"experiment {name} override {key} must be a positive integer")
     if key == "network.state_pub_rate_hz" and not (0.0 < number <= MAX_STATE_PUB_RATE_HZ):
         raise AblationError(
             f"experiment {name} override {key} must be > 0 and <= {MAX_STATE_PUB_RATE_HZ:g}"
         )
     elif key == "servo.rate_hz" and number <= 0.0:
+        raise AblationError(f"experiment {name} override {key} must be > 0")
+    elif key.startswith(ASYNC_CONFIG_OVERRIDE_PREFIX) and number <= 0.0:
         raise AblationError(f"experiment {name} override {key} must be > 0")
     elif key.endswith(".speed_bar") and not (0.0 < number <= 1.0):
         raise AblationError(f"experiment {name} override {key} must be > 0 and <= 1.0")
@@ -335,9 +401,45 @@ def validate_override_value(name: str, key: str, value: Any) -> None:
         raise AblationError(f"experiment {name} override {key} must be >= 0")
 
 
+def has_nested_config_overrides(overrides: dict[str, Any]) -> bool:
+    return any("." in dotted.split(".", 1)[1] for dotted in overrides)
+
+
+def set_nested_override(data: dict[str, Any], dotted: str, value: Any) -> None:
+    parts = dotted.split(".")
+    current: dict[str, Any] = data
+    for part in parts[:-1]:
+        existing = current.get(part)
+        if existing is None:
+            existing = {}
+            current[part] = existing
+        if not isinstance(existing, dict):
+            raise AblationError(f"cannot apply nested override through non-mapping key: {dotted}")
+        current = existing
+    current[parts[-1]] = value
+
+
+def apply_nested_config_overrides_text(text: str, overrides: dict[str, Any]) -> str:
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:
+        raise AblationError("nested async config overrides require PyYAML") from exc
+    try:
+        data = yaml.safe_load(text)
+    except Exception as exc:
+        raise AblationError(f"failed to parse config YAML for nested overrides: {exc}") from exc
+    if not isinstance(data, dict):
+        raise AblationError("config YAML must be a mapping for nested overrides")
+    for dotted, value in overrides.items():
+        set_nested_override(data, dotted, value)
+    return yaml.safe_dump(data, sort_keys=False)
+
+
 def apply_config_overrides_text(text: str, overrides: dict[str, Any]) -> str:
     if not overrides:
         return text
+    if has_nested_config_overrides(overrides):
+        return apply_nested_config_overrides_text(text, overrides)
     grouped: dict[str, dict[str, str]] = {}
     for dotted, value in overrides.items():
         section, field = dotted.split(".", 1)
@@ -498,6 +600,25 @@ def success_rate(summary: dict[str, Any], denominator: Any) -> float | None:
     return max(0.0, 1.0 - failures / count)
 
 
+def semantics_distribution_count(summary: dict[str, Any], semantics: str) -> Any:
+    distribution = summary.get("send_acceptance_semantics_distribution")
+    if isinstance(distribution, dict):
+        return distribution.get(semantics)
+    return None
+
+
+def append_cell_value(row: dict[str, Any], key: str, value: str) -> None:
+    existing = row.get(key)
+    parts: list[str] = []
+    if isinstance(existing, str):
+        parts = [part.strip() for part in existing.split(";") if part.strip()]
+    elif isinstance(existing, list):
+        parts = [str(part).strip() for part in existing if str(part).strip()]
+    if value not in parts:
+        parts.append(value)
+    row[key] = "; ".join(parts)
+
+
 def command_interval_max_ms(summary: dict[str, Any], timestamp_alignment: dict[str, Any]) -> float | None:
     value = finite_number(summary.get("command_interval_max_ms"))
     if value is not None:
@@ -518,6 +639,27 @@ def expected_servo_t1_sec(rate_hz: float) -> float:
     if abs(rate_hz - 200.0) <= 1e-9:
         return 0.005
     return 1.0 / rate_hz
+
+
+def ablation_env_snapshot() -> dict[str, str | None]:
+    snapshot = env_snapshot()
+    for name in sorted(OPTIONAL_ENV_REQUIREMENTS):
+        snapshot.setdefault(name, os.environ.get(name))
+    return snapshot
+
+
+def override_bool(overrides: dict[str, Any], key: str, default: bool = False) -> bool:
+    value = overrides.get(key)
+    return value if isinstance(value, bool) else default
+
+
+def async_mode_from_overrides(overrides: dict[str, Any]) -> str:
+    mode = overrides.get("servo.rbpodo_async_streaming.mode")
+    return str(mode) if mode is not None else "disabled"
+
+
+def async_enabled_from_overrides(overrides: dict[str, Any]) -> bool:
+    return override_bool(overrides, "servo.rbpodo_async_streaming.enable", False)
 
 
 def validate_servo_rate_t1_alignment(
@@ -671,6 +813,31 @@ def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path 
         )
 
     overrides = config_overrides(exp)
+    async_enabled = async_enabled_from_overrides(overrides)
+    async_mode = async_mode_from_overrides(overrides)
+    async_reference_supervision_enabled = override_bool(
+        overrides,
+        "servo.rbpodo_async_streaming.reference_supervision.enable",
+        False,
+    )
+    if not async_enabled and async_mode != "disabled":
+        raise AblationError(
+            f"experiment {exp['name']} has async mode {async_mode} while async streaming is disabled"
+        )
+    if async_enabled and async_mode == "disabled":
+        raise AblationError(
+            f"experiment {exp['name']} enables async streaming but leaves mode disabled"
+        )
+    if async_mode == "socket_send_supervised" and not (
+        config.left.disable_waiting_ack and config.right.disable_waiting_ack
+    ):
+        raise AblationError(
+            f"experiment {exp['name']} socket_send_supervised requires both disable_waiting_ack fields true"
+        )
+    if async_mode == "sdk_ack_worker" and (config.left.disable_waiting_ack or config.right.disable_waiting_ack):
+        raise AblationError(
+            f"experiment {exp['name']} sdk_ack_worker must keep both disable_waiting_ack fields false"
+        )
     arm_cfg = selected_arm(config, str(exp["arm"]))
     servo_rate_hz = as_float(config.servo.get("rate_hz"))
     servo_t1_sec = arm_cfg.servo_t1_sec
@@ -706,6 +873,12 @@ def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path 
         "known_real_ips": sorted({config.left.ip, config.right.ip} & REAL_ROBOT_IPS),
         "ack_policy": "ack_off" if config.left.disable_waiting_ack else "ack_on",
         "disable_waiting_ack": bool(config.left.disable_waiting_ack),
+        "async_streaming_enabled": async_enabled,
+        "async_mode": async_mode,
+        "async_reference_supervision_enabled": async_reference_supervision_enabled,
+        "acceptance_semantics": "socket_send_only"
+        if async_mode == "socket_send_supervised" or config.left.disable_waiting_ack
+        else "controller_ack_observed",
         "state_pub_rate_hz": state_pub_rate_hz,
         "speed_bar_left": left_speed_bar,
         "speed_bar_right": right_speed_bar,
@@ -785,6 +958,18 @@ def validate_matrix_safety(args: argparse.Namespace, metadata: list[dict[str, An
             raise AblationError(
                 f"experiment {exp['name']} is ACK-off and requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1"
             )
+        if meta.get("async_streaming_enabled") and not env_enabled("RB_ALLOW_RBPODO_ASYNC_STREAMING"):
+            raise AblationError(
+                f"experiment {exp['name']} enables rbpodo async streaming and requires "
+                "RB_ALLOW_RBPODO_ASYNC_STREAMING=1"
+            )
+        if meta.get("async_mode") == "socket_send_supervised":
+            if meta.get("acceptance_semantics") == "controller_ack_observed":
+                raise AblationError(f"experiment {exp['name']} mislabels socket_send_supervised as controller ACK")
+            if not meta.get("async_reference_supervision_enabled"):
+                raise AblationError(
+                    f"experiment {exp['name']} socket_send_supervised requires reference supervision"
+                )
         if meta["allow_controller_simulation_diagnostics_suspect"] and not env_enabled(
             "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM"
         ):
@@ -945,12 +1130,33 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
     feedback_kp_ori = first_present(summary.get("feedback_kp_ori"), exp.get("feedback_kp_ori"))
     timestamp_alignment = nested_dict(summary, "timestamp_alignment")
     tail_error_correlation = nested_dict(summary, "tail_error_correlation")
+    async_mode = first_present(summary.get("async_mode"), summary.get("async_streaming_mode"), meta.get("async_mode"))
+    acceptance_semantics = first_present(
+        summary.get("acceptance_semantics"),
+        summary.get("ack_semantics"),
+        meta.get("acceptance_semantics"),
+    )
+    socket_send_only_count = first_present(
+        summary.get("socket_send_only_count"),
+        semantics_distribution_count(summary, "socket_send_only"),
+        0 if acceptance_semantics == "controller_ack_observed" else None,
+    )
+    if acceptance_semantics == "socket_send_only":
+        controller_ack_observed_count = 0
+    else:
+        controller_ack_observed_count = first_present(
+            summary.get("controller_ack_observed_count"),
+            summary.get("controller_acceptance_observed_count"),
+            semantics_distribution_count(summary, "controller_ack_observed"),
+        )
     row = {
         "name": exp.get("name"),
         "controller": summary.get("controller") or exp.get("controller"),
         "profile": summary.get("profile") or exp.get("profile"),
         "arm": summary.get("arm") or exp.get("arm"),
         "ack_policy": meta.get("ack_policy"),
+        "async_mode": async_mode,
+        "acceptance_semantics": acceptance_semantics,
         "state_pub_rate_hz": meta.get("state_pub_rate_hz"),
         "speed_bar_left": meta.get("speed_bar_left"),
         "speed_bar_right": meta.get("speed_bar_right"),
@@ -1086,7 +1292,16 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
             1000.0,
         ),
         "ack_observed_count": summary.get("ack_observed_count"),
+        "controller_ack_observed_count": controller_ack_observed_count,
         "controller_acceptance_observed_count": summary.get("controller_acceptance_observed_count"),
+        "socket_send_only_count": socket_send_only_count,
+        "reference_supervision_state": first_present(
+            summary.get("reference_supervision_state"),
+            summary.get("async_reference_supervision_state"),
+            "configured"
+            if meta.get("async_reference_supervision_enabled")
+            else "not_applicable",
+        ),
         "diagnostics_suspect_count": summary.get("diagnostics_suspect_count"),
         "controller_simulation_diagnostic_override_active_count": summary.get(
             "controller_simulation_diagnostic_override_active_count"
@@ -1102,6 +1317,9 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
     row.setdefault("controller_mode", "pgmode_simulation")
     row.setdefault("physical_motion_expected", False)
     reliability_report.annotate_row(row)
+    if acceptance_semantics == "socket_send_only" or async_mode == "socket_send_supervised":
+        append_cell_value(row, "reliability_caveats", "socket_send_only_not_controller_ack")
+        append_cell_value(row, "benchmark_interpretation", "reference_supervision_required")
     return row
 
 
@@ -1121,6 +1339,8 @@ def warning_text(summary: dict[str, Any], meta: dict[str, Any]) -> str:
         warnings.append(str(reason))
     if meta.get("ack_policy") == "ack_off":
         warnings.append("ACK-off controller-simulation evidence is experimental")
+    if meta.get("acceptance_semantics") == "socket_send_only":
+        warnings.append("socket_send_only evidence is not controller ACK acceptance")
     timing = summary.get("timing_classification")
     if timing is None:
         timestamp_alignment = summary.get("timestamp_alignment")
@@ -1444,7 +1664,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         "max_workers_requested": args.max_workers,
         "max_workers_effective": 1,
         "required_env": list(REQUIRED_ENV),
-        "env": env_snapshot(),
+        "env": ablation_env_snapshot(),
         "rows": rows,
         "measurement_reliability_artifacts": reliability_artifacts,
         "skipped_plots": skipped_plots,
