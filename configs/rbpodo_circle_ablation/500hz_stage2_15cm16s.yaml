@@ -1,0 +1,349 @@
+# RBPODO-500HZ-CIRCLE-MATRIX-01 stage 2 matrix.
+#
+# Purpose:
+# - Compare the stable 15 cm / 16 s baseline at 100 Hz and 500 Hz.
+# - Split open-loop from low closed-loop gain candidates.
+# - Sweep speed_bar 0.2 and 0.5 only after stage 1 passes cleanly.
+#
+# Safety intent:
+# - rbpodo controller pgmode simulation only.
+# - Physical robot should not move.
+# - Requires run_rbpodo_circle_ablation.py confirmation flags and env gates.
+# - Not physical real Cartesian readiness.
+
+experiments:
+  - name: 15cm16s_open_loop_100hz_speed02
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+      servo.rate_hz: 100
+      left_robot.servo_t1_sec: 0.01
+      right_robot.servo_t1_sec: 0.01
+      left_robot.command_timeout_sec: 0.05
+      right_robot.command_timeout_sec: 0.05
+
+  - name: 15cm16s_fb_pos05_ori02_100hz_speed02
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+      servo.rate_hz: 100
+      left_robot.servo_t1_sec: 0.01
+      right_robot.servo_t1_sec: 0.01
+      left_robot.command_timeout_sec: 0.05
+      right_robot.command_timeout_sec: 0.05
+
+  - name: 15cm16s_fb_pos10_ori05_100hz_speed02
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 0.5
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+      servo.rate_hz: 100
+      left_robot.servo_t1_sec: 0.01
+      right_robot.servo_t1_sec: 0.01
+      left_robot.command_timeout_sec: 0.05
+      right_robot.command_timeout_sec: 0.05
+
+  - name: 15cm16s_fb_pos10_ori10_100hz_speed02
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 1.0
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+      servo.rate_hz: 100
+      left_robot.servo_t1_sec: 0.01
+      right_robot.servo_t1_sec: 0.01
+      left_robot.command_timeout_sec: 0.05
+      right_robot.command_timeout_sec: 0.05
+
+  - name: 15cm16s_open_loop_500hz_speed02
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s_500hz.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 500
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
+      left_robot.command_timeout_sec: 0.005
+      right_robot.command_timeout_sec: 0.005
+
+  - name: 15cm16s_fb_pos05_ori02_500hz_speed02
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s_500hz.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 500
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
+      left_robot.command_timeout_sec: 0.005
+      right_robot.command_timeout_sec: 0.005
+
+  - name: 15cm16s_fb_pos10_ori05_500hz_speed02
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s_500hz.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 500
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 0.5
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
+      left_robot.command_timeout_sec: 0.005
+      right_robot.command_timeout_sec: 0.005
+
+  - name: 15cm16s_fb_pos10_ori10_500hz_speed02
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s_500hz.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 500
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 1.0
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
+      left_robot.command_timeout_sec: 0.005
+      right_robot.command_timeout_sec: 0.005
+
+  - name: 15cm16s_open_loop_100hz_speed05
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+      servo.rate_hz: 100
+      left_robot.servo_t1_sec: 0.01
+      right_robot.servo_t1_sec: 0.01
+      left_robot.command_timeout_sec: 0.05
+      right_robot.command_timeout_sec: 0.05
+
+  - name: 15cm16s_fb_pos05_ori02_100hz_speed05
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+      servo.rate_hz: 100
+      left_robot.servo_t1_sec: 0.01
+      right_robot.servo_t1_sec: 0.01
+      left_robot.command_timeout_sec: 0.05
+      right_robot.command_timeout_sec: 0.05
+
+  - name: 15cm16s_fb_pos10_ori05_100hz_speed05
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 0.5
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+      servo.rate_hz: 100
+      left_robot.servo_t1_sec: 0.01
+      right_robot.servo_t1_sec: 0.01
+      left_robot.command_timeout_sec: 0.05
+      right_robot.command_timeout_sec: 0.05
+
+  - name: 15cm16s_fb_pos10_ori10_100hz_speed05
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 1.0
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+      servo.rate_hz: 100
+      left_robot.servo_t1_sec: 0.01
+      right_robot.servo_t1_sec: 0.01
+      left_robot.command_timeout_sec: 0.05
+      right_robot.command_timeout_sec: 0.05
+
+  - name: 15cm16s_open_loop_500hz_speed05
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s_500hz.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 500
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
+      left_robot.command_timeout_sec: 0.005
+      right_robot.command_timeout_sec: 0.005
+
+  - name: 15cm16s_fb_pos05_ori02_500hz_speed05
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s_500hz.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 500
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
+      left_robot.command_timeout_sec: 0.005
+      right_robot.command_timeout_sec: 0.005
+
+  - name: 15cm16s_fb_pos10_ori05_500hz_speed05
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s_500hz.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 500
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 0.5
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
+      left_robot.command_timeout_sec: 0.005
+      right_robot.command_timeout_sec: 0.005
+
+  - name: 15cm16s_fb_pos10_ori10_500hz_speed05
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s_500hz.example.yaml
+    profile: circle_15cm_16s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 500
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 1.0
+    feedback_kp_ori: 1.0
+    feedback_max_linear_m_s: 0.03
+    feedback_max_angular_rad_s: 0.2
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
+      left_robot.command_timeout_sec: 0.005
+      right_robot.command_timeout_sec: 0.005

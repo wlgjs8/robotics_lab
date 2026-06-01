@@ -245,3 +245,44 @@ Acceptance means:
 If `servo_log.csv` is missing, do not treat the run as accepted. The state
 stream is still useful diagnostic evidence, but per-servo-tick 500 Hz
 acceptance depends on the servo log timing and ACK fields.
+
+## Circle Matrix Stages
+
+After the no-op stage passes, run the circle matrices in order. These matrices
+are controller `pgmode` simulation only, keep physical Cartesian blocked, and
+compare 100 Hz against 500 Hz with `network.state_pub_rate_hz: 100`.
+
+| Stage | Matrix | Purpose |
+| --- | --- | --- |
+| 1 | `configs/rbpodo_circle_ablation/500hz_stage1_noop_and_safe.yaml` | safe 5 cm / 10 s, low gains, 100 Hz vs 500 Hz |
+| 2 | `configs/rbpodo_circle_ablation/500hz_stage2_15cm16s.yaml` | 15 cm / 16 s open-loop and closed-loop candidates |
+| 3 | `configs/rbpodo_circle_ablation/500hz_stage3_8s_4s.yaml` | 15 cm / 8 s bridge before 15 cm / 4 s stress |
+
+Dry-run each matrix before connecting to controllers:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1 \
+python3 scripts/run_rbpodo_circle_ablation.py \
+  --matrix configs/rbpodo_circle_ablation/500hz_stage1_noop_and_safe.yaml \
+  --artifact-root artifacts/rbpodo_circle_ablation/500hz_stage1_dry_run \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --dry-run \
+  --verify-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+Use the same command shape for stages 2 and 3, changing `--matrix` and
+`--artifact-root`. For live runs, remove `--dry-run` only after reviewing the
+resolved configs and confirming the controllers are in `pgmode` simulation for
+that session.
+
+Stop the staged sequence at the first fault latch, physical-motion warning,
+Cartesian gate rejection, missing `q_ref` / `tcp_ref_stand`, poor timing
+classification, deadline miss, or measurement reliability downgrade. The 15 cm
+/ 4 s rows remain stress evidence even if they complete cleanly; do not mark
+500 Hz as real-ready from these matrices.

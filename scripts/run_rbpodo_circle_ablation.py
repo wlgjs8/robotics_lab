@@ -115,6 +115,7 @@ SUMMARY_COLUMNS = [
     "state_pub_rate_hz",
     "speed_bar_left",
     "speed_bar_right",
+    "speed_bar",
     "servo_rate_hz",
     "servo_t1_sec",
     "command_rate_hz",
@@ -151,6 +152,9 @@ SUMMARY_COLUMNS = [
     "q_ref_update_rate_hz",
     "q_ref_valid_ratio",
     "send_duration_p95_us",
+    "send_duration_p99_us",
+    "servo_jitter_p99_ms",
+    "deadline_miss_count",
     "timing_classification",
     "ack_spike_count_10ms",
     "ack_spike_count_20ms",
@@ -426,6 +430,16 @@ def first_present(*values: Any) -> Any:
         if value is not None:
             return value
     return None
+
+
+def common_value_or_pair(left: Any, right: Any) -> Any:
+    if left == right:
+        return left
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return f"{left}/{right}"
 
 
 def ratio_or_none(numerator: Any, denominator: Any) -> float | None:
@@ -836,6 +850,7 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "state_pub_rate_hz": meta.get("state_pub_rate_hz"),
         "speed_bar_left": meta.get("speed_bar_left"),
         "speed_bar_right": meta.get("speed_bar_right"),
+        "speed_bar": common_value_or_pair(meta.get("speed_bar_left"), meta.get("speed_bar_right")),
         "servo_rate_hz": first_present(summary.get("servo_rate_hz"), meta.get("servo_rate_hz")),
         "servo_t1_sec": meta.get("servo_t1_sec"),
         "command_rate_hz": first_present(summary.get("command_rate_hz"), exp.get("command_rate_hz")),
@@ -885,6 +900,14 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "q_ref_update_rate_hz": summary.get("q_ref_update_rate_hz"),
         "q_ref_valid_ratio": summary.get("q_ref_valid_ratio"),
         "send_duration_p95_us": nested_metric(summary, "send_duration_us", "p95"),
+        "send_duration_p99_us": nested_metric(summary, "send_duration_us", "p99"),
+        "servo_jitter_p99_ms": nested_metric(summary, "servo_jitter_ms", "p99"),
+        "deadline_miss_count": first_present(
+            summary.get("deadline_miss_count"),
+            summary.get("send_deadline_missed_count"),
+            summary.get("send_command_deadline_missed_count"),
+            summary.get("command_sender_deadline_missed_count"),
+        ),
         "timing_classification": first_present(
             summary.get("timing_classification"),
             timestamp_alignment.get("timing_classification"),

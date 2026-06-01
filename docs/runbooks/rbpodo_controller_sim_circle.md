@@ -580,6 +580,21 @@ default.
 
 See `docs/runbooks/rbpodo_500hz_acceptance.md` for the full staged workflow.
 
+RBPODO-500HZ-CIRCLE-MATRIX-01 adds three staged matrix files for the circle
+part of that workflow:
+
+1. `configs/rbpodo_circle_ablation/500hz_stage1_noop_and_safe.yaml`
+2. `configs/rbpodo_circle_ablation/500hz_stage2_15cm16s.yaml`
+3. `configs/rbpodo_circle_ablation/500hz_stage3_8s_4s.yaml`
+
+Run them in that order after the 500 Hz no-op stage. Stage 1 uses the safe
+5 cm / 10 s profile with low gains. Stage 2 compares 15 cm / 16 s open-loop
+and low-gain closed-loop rows at speed_bar 0.2 and 0.5. Stage 3 runs the
+15 cm / 8 s bridge before any 15 cm / 4 s stress rows; its speed_bar 0.5 rows
+are disabled optional follow-ups. All 500 Hz rows explicitly keep
+`servo.rate_hz: 500`, `servo_t1_sec: 0.002`, controller
+`operation_mode: simulation`, and `cartesian_control.allow_in_real: false`.
+
 The stable baseline profile is `15cm/16s`. It mirrors the current simulator
 baseline:
 
@@ -1086,8 +1101,10 @@ place. The runner rejects overrides that would change `operation_mode` to
 create a `servo.rate_hz` / `servo_t1_sec` mismatch unless the source config
 already explicitly allows that mismatch. `network.state_pub_rate_hz` overrides
 must be `> 0` and `<= 200`; `speed_bar` overrides must be `> 0` and `<= 1.0`.
-For rate/t1 sweeps, use `servo.rate_hz: 100` with `servo_t1_sec: 0.01` or
-`servo.rate_hz: 200` with `servo_t1_sec: 0.005` on both arms.
+For rate/t1 sweeps, use `servo.rate_hz: 100` with `servo_t1_sec: 0.01`,
+`servo.rate_hz: 200` with `servo_t1_sec: 0.005`, or staged 500 Hz
+controller-simulation rows with `servo.rate_hz: 500` and
+`servo_t1_sec: 0.002` on both arms.
 
 Example GENE-style Kp, state publish rate, and speed-bar sweep entries:
 
@@ -1161,6 +1178,14 @@ Each matrix run writes:
 
 The ablation summary also carries decomposition columns:
 
+- `servo_rate_hz`
+- `servo_t1_sec`
+- `speed_bar`
+- `send_duration_p99_us`
+- `servo_jitter_p99_ms`
+- `deadline_miss_count`
+- `feedback_saturation_count`
+- `orientation_p95_deg`
 - `median_error_mm`
 - `tail_ratio`
 - `center_removed_rms_mm`
@@ -1178,6 +1203,40 @@ ablation root:
 `ablation_report.md` includes a "Measurement reliability and caveats" section
 before tuning candidate tables. Read this section first; unreliable or suspect
 rows should not drive gain changes.
+
+## 500 Hz Rbpodo Circle Matrices
+
+The 500 Hz matrices are a staged comparison, not a promotion to physical real
+motion. Keep the run order:
+
+1. `500hz_stage1_noop_and_safe.yaml`
+2. `500hz_stage2_15cm16s.yaml`
+3. `500hz_stage3_8s_4s.yaml`
+
+Dry-run stage 1:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1 \
+python3 scripts/run_rbpodo_circle_ablation.py \
+  --matrix configs/rbpodo_circle_ablation/500hz_stage1_noop_and_safe.yaml \
+  --artifact-root artifacts/rbpodo_circle_ablation/500hz_stage1_dry_run \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --dry-run \
+  --verify-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+Use the same command shape for stage 2 and stage 3. For actual runs, remove
+`--dry-run` only after reviewing `matrix_resolved.json` and each
+`resolved_server_config.yaml`. Stop before the next stage if any row reports a
+fault latch, physical-motion detection, Cartesian unavailable rejection,
+deadline miss, timing issue, missing `tcp_ref_stand`, or suspect measurement
+reliability. The 15 cm / 4 s rows remain stress evidence.
 
 ## Stage-2 Rbpodo Circle Matrices
 
