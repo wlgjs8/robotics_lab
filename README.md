@@ -250,6 +250,8 @@ tools/rbpodo_circle_tune.sh --matrix stage2_gain_split --arm left --help
 less docs/runbooks/rbpodo_controller_sim_circle.md
 ```
 
+Async ACK-supervised 500Hz runbook: `docs/runbooks/rbpodo_500hz_acceptance.md`.
+
 These configs target Rainbow controller boxes in `pgmode` simulation only; they
 do not approve physical Cartesian motion.
 

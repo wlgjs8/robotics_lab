@@ -598,6 +598,67 @@ default.
 
 See `docs/runbooks/rbpodo_500hz_acceptance.md` for the full staged workflow.
 
+### Async ACK-Supervised 500 Hz Workflow
+
+`RBPODO-ASYNC-RUNBOOK-01` extends the 500 Hz track with async ACK-supervised
+controller-simulation modes. The three 500 Hz modes are:
+
+- synchronous ACK-on: `disable_waiting_ack: false` and no async worker; the
+  servo loop waits for the rbpodo SDK call/ACK path. At 500 Hz, the 2 ms tick
+  makes this fragile because ACK wait outliers can consume the tick, and
+  dual-arm sequential sends can make the second arm inherit the first arm's
+  ACK delay.
+- `sdk_ack_worker`: the servo loop enqueues a latest-wins target and does not
+  wait for ACK. A per-arm worker waits for SDK ACK and reports worker ACK
+  telemetry, while supervision faults on missing ACK or invalid reference
+  state.
+- `socket_send_supervised`: the servo loop enqueues without waiting for ACK and
+  the send lane is socket/API send only. Reports must label successful sends as
+  `socket_send_only`; a q_ref watchdog and tcp_ref watchdog must show fresh
+  controller-reference telemetry before the row can be accepted.
+
+Async ACK-supervised means the servo loop is not ACK-blocked, but ACK or
+controller-reference supervision is still mandatory. `sdk_ack_worker` preserves
+controller ACK evidence in the worker lane. `socket_send_supervised` is not
+controller ACK evidence; it is supervised socket-send evidence that depends on
+healthy `q_ref` / `tcp_ref_stand` updates.
+
+No physical real: async 500 Hz evidence is controller `pgmode` simulation only.
+Every row must keep `operation_mode: simulation` (`operation_mode=simulation`
+in reports), `allow_in_real: false`, `physical_motion_expected=false`, and
+`physical_motion_detected=false`.
+
+Required async gates are the normal real-controller/controller-simulation
+gates plus:
+
+```bash
+RB_ALLOW_RBPODO_ASYNC_STREAMING=1
+RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
+```
+
+`socket_send_supervised` additionally requires one of:
+
+```bash
+RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
+RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1
+```
+
+Run async acceptance in this order:
+
+1. SDK probe.
+2. No-op acceptance.
+3. `safe_5cm_10s`.
+4. `circle_15cm_16s`.
+5. `circle_15cm_8s`.
+6. `gene_15cm_4s` stress.
+
+Read async reports by separating `controller_ack_observed` from
+`socket_send_only`, then checking `q_ref_supervised`,
+`reference_supervision_state`, q_ref/tcp_ref update ages, and the
+`tcp_ref_stand` / tcp_ref lower bound caveat. `diagnostics_suspect` rows remain
+suspect measurement evidence and cannot promote 500 Hz defaults or physical
+real readiness.
+
 RBPODO-500HZ-CIRCLE-MATRIX-01 adds three staged matrix files for the circle
 part of that workflow:
 

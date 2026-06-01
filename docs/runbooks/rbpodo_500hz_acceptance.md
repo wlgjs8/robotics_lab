@@ -7,6 +7,48 @@ must keep each robot `operation_mode: simulation` and
 
 It is not a default-rate change and it is not physical real-motion readiness.
 
+## 500 Hz Mode Taxonomy
+
+There are three distinct 500 Hz controller-simulation modes. Do not merge
+their report semantics:
+
+| Mode | Loop behavior | ACK/reference evidence | Use |
+| --- | --- | --- | --- |
+| synchronous ACK-on | `servo.rbpodo_async_streaming.enable: false`, `disable_waiting_ack: false`; the servo loop calls rbpodo and waits for the SDK call/ACK path before the tick can complete | Successful sends are `controller_ack_observed` when the controller ACK is observed. `q_ref` / `tcp_ref_stand` are still measurement telemetry, but ACK is the command-acceptance signal. | Baseline 500 Hz evidence and failure comparison. |
+| `sdk_ack_worker` | The servo loop enqueues the latest Servo J target and does not wait for ACK; a per-arm worker calls the synchronous rbpodo SDK and records ACK timing/results | Worker ACKs are `sdk_worker_ack_observed` / `controller_ack_observed`-style evidence in the worker lane. Missing ACK supervision can fault; q_ref/tcp_ref supervision contributes health telemetry and invalid `q_ref` faults. | Tests whether moving ACK waits out of the tick removes servo-loop blocking. |
+| `socket_send_supervised` | The servo loop enqueues the latest target and does not wait for ACK; the worker uses ACK-disabled socket/API send semantics | Successful sends are `socket_send_only`, never per-command controller ACK. A q_ref watchdog and tcp_ref watchdog must show fresh controller-reference movement and target convergence; stale/missing reference telemetry faults. | Tests high-rate socket-send feasibility with controller-reference supervision. |
+
+No physical real: all three modes in this runbook are rbpodo controller
+`pgmode` simulation only. They require `operation_mode: simulation`
+(`operation_mode=simulation` in reports), `physical_motion_expected=false`,
+and no physical robot motion.
+`operation_mode: real` is out of scope and must be refused for async 500 Hz
+evidence.
+
+## Why Synchronous ACK-On Is Fragile At 500 Hz
+
+A 500 Hz servo tick is only 2 ms. In synchronous ACK-on mode, any rbpodo
+`move_servo_j` call that waits close to or beyond that 2 ms budget consumes the
+whole tick before the loop can finish timing, safety, state publication, and
+the second arm.
+
+This fragility shows up in three places:
+
+- ACK wait outliers: occasional controller ACK latency spikes can create
+  deadline misses even when median send time looks acceptable.
+- Dual-arm sequential effects: if the loop services left and right arms in one
+  thread, the second arm inherits the first arm's ACK delay before its own send
+  begins.
+- Worker effects: worker I/O avoids blocking the main loop only if backlog,
+  overwrites, drops, and ACK supervision stay bounded; otherwise the worker may
+  hide a controller-acceptance problem until the watchdog faults.
+
+Async ACK-supervised mode exists to separate the servo tick from controller ACK
+waiting. The target generation loop must keep ticking without waiting for ACK,
+while a worker or supervisor records ACK and/or q_ref/tcp_ref state. Missing
+ACK, missing q_ref, stale tcp_ref, target divergence, or excessive worker
+overwrite/drop counts are faults or acceptance failures, not acceptable jitter.
+
 ## Stage 0 Evidence
 
 The initial evidence is a single-arm `rainbow_rate_probe.py`
@@ -31,6 +73,8 @@ Run stages in order and stop at the first fault, physical-motion warning,
 Cartesian gate rejection, timing classification problem, or missing reference
 telemetry.
 
+Synchronous 500 Hz acceptance starts from the existing rate probe:
+
 1. Single-arm no-op rate probe at 100 Hz and 500 Hz: already completed for the
    left controller in `artifacts/rbpodo_servo_j_rate_probe_left`.
 2. `rb_servo_server` full-path no-op at 500 Hz using
@@ -39,6 +83,15 @@ telemetry.
 4. 15 cm / 16 s circle.
 5. 15 cm / 8 s circle.
 6. 15 cm / 4 s circle.
+
+Async ACK-supervised acceptance must use this order:
+
+1. SDK async capability probe.
+2. No-op acceptance for the candidate async mode.
+3. `safe_5cm_10s`.
+4. `circle_15cm_16s`.
+5. `circle_15cm_8s`.
+6. `gene_15cm_4s` stress.
 
 The 15 cm / 4 s profile remains stress evidence. Do not label it physical-real
 ready.
@@ -109,6 +162,12 @@ RB_ALLOW_REAL_ROBOT=1
 RB_ALLOW_REAL_MOTION=1
 RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
 RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
+```
+
+Async 500 Hz modes additionally require:
+
+```bash
+RB_ALLOW_RBPODO_ASYNC_STREAMING=1
 ```
 
 Circle stages additionally require the Cartesian controller-simulation carve-out:
@@ -315,6 +374,26 @@ Use the result only to choose the next implementation shape:
 This probe does not prove dual-arm `rb_servo_server` 500 Hz behavior, does not
 prove circle tracking, and does not authorize physical robot motion.
 
+Use the probe before the no-op stage for any async acceptance run. A typical
+socket-send supervision probe uses the common controller-simulation gates plus
+an ACK-disabled/socket-send approval:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 \
+python3 scripts/rbpodo_async_sdk_probe.py \
+  --ip 172.28.60.200 \
+  --duration-sec 5 \
+  --rate-hz 500 \
+  --mode ack_off \
+  --artifact-dir artifacts/rbpodo_async_sdk_probe/left_ack_off \
+  --set-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --allow-simulation-servo-j
+```
+
 ## Build And Capabilities
 
 Build the rbpodo-enabled server:
@@ -505,6 +584,11 @@ RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1
 Run the ACK-worker no-op stage:
 
 ```bash
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_ASYNC_STREAMING=1 \
+RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1 \
 python3 scripts/rbpodo_500hz_acceptance.py \
   --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
   --config rb_servo_server/config/local/dual_real_rbpodo_circle_5cm10s_500hz.yaml \
@@ -523,6 +607,12 @@ python3 scripts/rbpodo_500hz_acceptance.py \
 Run the socket-send supervised no-op stage:
 
 ```bash
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_ASYNC_STREAMING=1 \
+RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 \
+RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1 \
 python3 scripts/rbpodo_500hz_acceptance.py \
   --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
   --config rb_servo_server/config/local/dual_real_rbpodo_circle_5cm10s_500hz.yaml \
@@ -712,6 +802,23 @@ Async telemetry columns include `async_mode`, `commands_enqueued_total`,
 `commands_dropped_total`, `reference_supervision_state`,
 `q_ref_update_rate_hz`, and `q_ref_target_error_deg_max`.
 
+Read these fields before interpreting tracking error:
+
+- `controller_ack_observed` / `controller_acceptance_observed_count`: ACK-on
+  controller acceptance evidence. This can come from synchronous ACK-on or from
+  the ACK worker, depending on the row.
+- `socket_send_only`: socket/API write evidence only. It must not be counted
+  as per-command controller ACK.
+- `q_ref_supervised` and `reference_supervision_state`: whether the q_ref
+  watchdog and tcp_ref watchdog saw fresh controller-reference telemetry and no
+  target-divergence fault.
+- `tcp_ref_stand`: controller-reference lower bound for pgmode simulation
+  tracking, not physical TCP tracking. Treat this as the tcp_ref lower bound;
+  it is useful only when reference validity and update-rate fields are healthy.
+- `diagnostics_suspect`: measurement caveat. Suspect diagnostics can make an
+  otherwise completed row useful for debugging, but not for promoting 500 Hz
+  defaults or physical-real readiness.
+
 Classifications are deliberately conservative:
 
 - `500hz_async_supervised_pass`: the selected 500 Hz row has supervised ACK or
@@ -746,3 +853,47 @@ Recommended interpretation:
 - Allow 500 Hz only as a rbpodo controller-simulation experimental profile.
 - Promote only after stable 5 cm / 10 s and 15 cm / 16 s evidence passes with
   usable measurement reliability. The 15 cm / 4 s rows remain stress evidence.
+
+## Troubleshooting
+
+ACK timeout:
+
+- In synchronous ACK-on, classify the row as ACK blocking limited. Widening
+  `command_timeout_sec` can diagnose timeout tightness, but it does not fix the
+  2 ms servo-tick budget.
+- In `sdk_ack_worker`, inspect `ack_timeout_count`, last worker failure,
+  `commands_acked_total`, and worker backlog before trying circle stages.
+
+q_ref watchdog miss:
+
+- Treat `reference_supervision_failed`, stale `q_ref_update_age_ms`, stale
+  `tcp_ref_update_age_ms`, invalid `q_ref`, or high q_ref target error as a
+  failed async row.
+- Do not fall back to `tcp_actual_stand` for scoring; pgmode simulation uses
+  `tcp_ref_stand` as controller-reference lower-bound evidence.
+
+Worker overwrite/drop high:
+
+- High `commands_overwritten_total`, `commands_dropped_total`, overwrite ratio,
+  drop ratio, or `async_worker_backlog_max` means the async path is not keeping
+  up with 500 Hz.
+- Stop before circle stages if no-op exceeds the configured overwrite/drop
+  thresholds.
+
+Physical motion detected:
+
+- Stop immediately. These runs require `operation_mode: simulation`,
+  `physical_motion_expected=false`, and `physical_motion_detected=false`.
+- Do not retry as a physical-real run. Capture state/preflight artifacts and
+  inspect pgmode confirmation, local config, and controller state.
+
+setcap missing:
+
+- `realtime setup failed` or `failed to set realtime priority` usually means
+  the exact server binary lacks Linux capabilities.
+- Re-run after every rebuild and verify with `getcap`:
+
+  ```bash
+  sudo setcap cap_sys_nice,cap_ipc_lock+ep rb_servo_server/build/rbpodo_real_gate/rb_servo_server
+  getcap rb_servo_server/build/rbpodo_real_gate/rb_servo_server
+  ```

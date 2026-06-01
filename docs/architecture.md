@@ -211,6 +211,15 @@ real Cartesian motion. Servo J ACKs in a controller-simulation circle artifact
 do not by themselves prove that Cartesian commands executed; check the
 Cartesian gate telemetry and `tcp_ref_stand` movement.
 
+Rbpodo async ACK-supervised 500 Hz streaming is another controller-simulation
+only carve-out. It requires `operation_mode: simulation`,
+`physical_motion_expected=false`, `RB_ALLOW_RBPODO_ASYNC_STREAMING=1`, normal
+real-controller/motion gates, controller-simulation motion gates, and same-run
+pgmode confirmation. `sdk_ack_worker` moves ACK waiting into a worker lane;
+`socket_send_supervised` is `socket_send_only` evidence and must be guarded by
+q_ref/tcp_ref watchdogs. This is no physical real approval and does not change
+the default servo rate.
+
 ### Server-Side Circle Tracking Skeleton
 
 `TcpCircleTrack` is the reserved command schema for moving closed-loop circle
