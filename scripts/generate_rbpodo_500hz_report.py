@@ -69,6 +69,10 @@ RATE_COLUMNS = [
     "profile",
     "controller",
     "result",
+    "run_result_status",
+    "benchmark_threshold_status",
+    "ackon500_goal_status",
+    "diagnostic_warning_count",
     *KEY_FIELDS,
     "tracking_source",
     "reliability_caveats",
@@ -111,6 +115,10 @@ COMPARATIVE_COLUMNS = [
     "socket_send_only",
     "q_ref_supervised",
     "result",
+    "run_result_status",
+    "benchmark_threshold_status",
+    "ackon500_goal_status",
+    "diagnostic_warning_count",
     "rms_error_mm",
     "p95_error_mm",
     "servo_jitter_p99_ms",
@@ -312,6 +320,11 @@ def p99_loop_jitter_ms(row: dict[str, Any]) -> float | None:
 def flatten_metrics(row: dict[str, Any]) -> None:
     async_fields = compare.async_report_fields(row)
     row.update(async_fields)
+    row["run_result_status"] = row.get("run_result_status") or compare.infer_run_result_status(row)
+    row["benchmark_threshold_status"] = row.get("benchmark_threshold_status") or compare.infer_benchmark_threshold_status(row)
+    row["ackon500_goal_status"] = row.get("ackon500_goal_status") or compare.infer_ackon500_goal_status(row)
+    if not row.get("diagnostic_warning_count"):
+        row["diagnostic_warning_count"] = compare.diagnostic_warning_count(row)
     row["send_success_rate"] = success_rate(row)
     row["controller_acceptance_observed_rate"] = 0.0 if row.get("socket_send_only") else controller_acceptance_rate(row)
     row["send_duration_p99_us"] = first_number(row, "send_duration_p99_us") or nested_number(row, "send_duration_us", "p99")
@@ -509,8 +522,13 @@ def unstable_reasons(row: dict[str, Any] | None) -> list[str]:
     if row is None:
         return ["missing_row"]
     reasons: list[str] = []
+    run_status = str(row.get("run_result_status") or "").lower()
     result = str(row.get("result") or "").lower()
-    if result in {"fail", "failed", "error", "blocked", "faulted", "startup_fault", "state_stream_timeout"}:
+    if run_status in {"error", "blocked", "faulted", "startup_fault", "state_stream_timeout"}:
+        reasons.append(f"run_result_status={run_status}")
+    elif not run_status and result in {"fail", "failed"} and "threshold" not in str(row.get("result_reason") or "").lower():
+        reasons.append(f"result={result}")
+    elif not run_status and result in {"error", "blocked", "faulted", "startup_fault", "state_stream_timeout"}:
         reasons.append(f"result={result}")
     if as_bool(row.get("fault_latched")) is True:
         reasons.append("fault_latched=true")

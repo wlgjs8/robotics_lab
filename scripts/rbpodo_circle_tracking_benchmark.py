@@ -72,6 +72,24 @@ CARTESIAN_REJECTION_HINTS = [
     "check operation_mode: simulation",
     "check same-run pgmode simulation confirmation",
 ]
+ACKON500_GOAL_THRESHOLDS = {
+    "min_repeat": 5,
+    "servo_rate_hz": 500.0,
+    "servo_t1_sec": 0.002,
+    "min_ack_ratio": 0.98,
+    "min_effective_command_rate_hz": 490.0,
+    "max_saturation_ratio": 0.01,
+    "max_rms_error_m": 0.003,
+    "max_p95_error_m": 0.006,
+    "max_fit_center_error_m": 0.003,
+    "min_radius_gain": 0.98,
+    "max_radius_gain": 1.02,
+    "max_p95_orientation_drift_rad": 0.02,
+    "max_effective_phase_latency_abs_ms": 5.0,
+    "max_state_age_p95_us": 5000.0,
+}
+ACKON500_ACK_SEMANTICS = {"controller_ack_observed", "sdk_worker_ack_observed"}
+RUN_FAILURE_STATUSES = {"error", "blocked", "faulted", "startup_fault"}
 
 
 class BenchmarkError(RuntimeError):
@@ -1598,6 +1616,7 @@ def telemetry_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, Any]:
     ack_waits: list[float] = []
     ack_policies: Counter[str] = Counter()
     semantics: Counter[str] = Counter()
+    async_modes: Counter[str] = Counter()
     error_names: Counter[str] = Counter()
     command_timeout_count = 0
     controller_rejected_count = 0
@@ -1605,6 +1624,19 @@ def telemetry_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, Any]:
     controller_acceptance_count = 0
     diagnostics_suspect_count = 0
     override_active_count = 0
+    async_sample_count = 0
+    async_enabled_observed = False
+    async_counters = {
+        "commands_enqueued_total": 0,
+        "commands_sent_total": 0,
+        "commands_acked_total": 0,
+        "commands_socket_sent_total": 0,
+        "commands_dropped_total": 0,
+        "commands_overwritten_total": 0,
+        "ack_timeout_count": 0,
+        "missing_ack_count": 0,
+        "reference_supervision_fault_count": 0,
+    }
     for arm_state in arm_states:
         age = finite_number(arm_state.get("state_age_us"))
         if age is not None:
@@ -1613,6 +1645,18 @@ def telemetry_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, Any]:
             diagnostics_suspect_count += 1
         if arm_state.get("controller_simulation_diagnostic_override_active") is True:
             override_active_count += 1
+        async_streaming = arm_state.get("async_streaming")
+        if isinstance(async_streaming, dict):
+            async_sample_count += 1
+            if async_streaming.get("enabled") is True:
+                async_enabled_observed = True
+            mode = async_streaming.get("mode")
+            if isinstance(mode, str) and mode:
+                async_modes[mode] += 1
+            for key in async_counters:
+                value = finite_number(async_streaming.get(key))
+                if value is not None and value >= 0.0:
+                    async_counters[key] = max(async_counters[key], int(value))
         last_send = arm_state.get("last_send")
         if not isinstance(last_send, dict):
             continue
@@ -1653,6 +1697,14 @@ def telemetry_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, Any]:
         "response_error_names": dict(error_names),
         "diagnostics_suspect_count": diagnostics_suspect_count,
         "controller_simulation_diagnostic_override_active_count": override_active_count,
+        "async_streaming_metrics": {
+            "sample_count": async_sample_count,
+            "enabled_observed": async_enabled_observed,
+            "mode": async_modes.most_common(1)[0][0] if async_modes else None,
+            **async_counters,
+        },
+        "async_streaming_mode": async_modes.most_common(1)[0][0] if async_modes else None,
+        **async_counters,
     }
 
 
@@ -1787,6 +1839,291 @@ def result_from_thresholds(args: argparse.Namespace, summary: dict[str, Any]) ->
     return result, reason, failures
 
 
+def near(actual: Any, expected: float, tolerance: float = 1e-9) -> bool:
+    number = finite_number(actual)
+    return number is not None and abs(number - expected) <= tolerance
+
+
+def text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, tuple):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        return [value] if value else []
+    return [str(value)]
+
+
+def count_from_distribution(summary: dict[str, Any], name: str) -> int:
+    distribution = summary.get("send_acceptance_semantics_distribution")
+    if not isinstance(distribution, dict):
+        return 0
+    value = finite_number(distribution.get(name))
+    return int(value) if value is not None and value >= 0.0 else 0
+
+
+def most_likely_acceptance_semantics(summary: dict[str, Any]) -> str | None:
+    explicit = summary.get("acceptance_semantics") or summary.get("ack_semantics")
+    if isinstance(explicit, str) and explicit:
+        if summary.get("async_mode") == "sdk_ack_worker" and explicit == "controller_ack_observed":
+            return "sdk_worker_ack_observed"
+        return explicit
+    async_mode = summary.get("async_mode") or summary.get("async_streaming_mode")
+    if async_mode == "sdk_ack_worker" and int(finite_number(summary.get("commands_acked_total")) or 0) > 0:
+        return "sdk_worker_ack_observed"
+    if int(finite_number(summary.get("socket_send_only_count")) or 0) > 0:
+        return "socket_send_only"
+    if count_from_distribution(summary, "controller_ack_observed") > 0:
+        return "controller_ack_observed"
+    if count_from_distribution(summary, "socket_send_only") > 0:
+        return "socket_send_only"
+    return None
+
+
+def annotate_goal_derived_fields(summary: dict[str, Any]) -> None:
+    async_metrics = summary.get("async_streaming_metrics")
+    if not isinstance(async_metrics, dict):
+        async_metrics = {}
+    if summary.get("async_mode") in (None, ""):
+        summary["async_mode"] = summary.get("async_streaming_mode") or async_metrics.get("mode") or "disabled"
+    for key in (
+        "commands_sent_total",
+        "commands_acked_total",
+        "commands_socket_sent_total",
+        "commands_enqueued_total",
+        "commands_dropped_total",
+        "commands_overwritten_total",
+    ):
+        if summary.get(key) is None and async_metrics.get(key) is not None:
+            summary[key] = async_metrics.get(key)
+    socket_count = finite_number(summary.get("socket_send_only_count"))
+    if socket_count is None:
+        socket_count = finite_number(summary.get("commands_socket_sent_total"))
+    if socket_count is None:
+        socket_count = float(count_from_distribution(summary, "socket_send_only"))
+    summary["socket_send_only_count"] = int(socket_count or 0)
+    semantics = most_likely_acceptance_semantics(summary)
+    if semantics:
+        summary["acceptance_semantics"] = semantics
+
+    commands_sent = finite_number(summary.get("commands_sent_total"))
+    if commands_sent is None or commands_sent <= 0.0:
+        commands_sent = finite_number(summary.get("command_count"))
+    commands_acked = finite_number(summary.get("commands_acked_total"))
+    if commands_acked is None or commands_acked <= 0.0:
+        commands_acked = finite_number(summary.get("ack_observed_count"))
+    if commands_acked is None or commands_acked <= 0.0:
+        commands_acked = finite_number(summary.get("controller_acceptance_observed_count"))
+    if commands_sent is not None:
+        summary["commands_sent_total"] = int(commands_sent)
+    if commands_acked is not None:
+        summary["commands_acked_total"] = int(commands_acked)
+    summary["ack_observed_ratio"] = (
+        commands_acked / commands_sent
+        if commands_sent is not None and commands_sent > 0.0 and commands_acked is not None
+        else None
+    )
+    duration_sec = finite_number(summary.get("duration_sec"))
+    summary["effective_command_rate_hz"] = (
+        commands_sent / duration_sec
+        if commands_sent is not None and commands_sent > 0.0 and duration_sec is not None and duration_sec > 0.0
+        else finite_number(summary.get("effective_command_rate_hz"))
+    )
+    saturation_count = finite_number(summary.get("feedback_saturation_count"))
+    command_count = finite_number(summary.get("command_count"))
+    saturation_denominator = max(command_count or 0.0, commands_sent or 0.0)
+    summary["feedback_saturation_ratio"] = (
+        saturation_count / saturation_denominator
+        if saturation_count is not None and saturation_denominator > 0.0
+        else finite_number(summary.get("feedback_saturation_ratio"))
+    )
+    estimated_latency_ms = finite_number(summary.get("estimated_latency_ms"))
+    summary["effective_phase_latency_abs_ms"] = (
+        abs(estimated_latency_ms)
+        if estimated_latency_ms is not None
+        else finite_number(summary.get("effective_phase_latency_abs_ms"))
+    )
+    state_age = summary.get("state_age_us")
+    if isinstance(state_age, dict):
+        state_age_p95 = finite_number(state_age.get("p95"))
+        if state_age_p95 is not None:
+            summary["state_age_p95_us"] = state_age_p95
+
+
+def safety_result(summary: dict[str, Any], run_status: str) -> dict[str, Any]:
+    fault_latched = summary.get("fault_latched") is True or run_status in {"faulted", "startup_fault"}
+    physical_motion = summary.get("physical_motion_detected") is True
+    cartesian_unavailable = int(finite_number(summary.get("cartesian_unavailable_count")) or 0)
+    status = "fail" if fault_latched or physical_motion or cartesian_unavailable > 0 or run_status in {"error", "blocked"} else "pass"
+    return {
+        "fault_latched": fault_latched,
+        "physical_motion_detected": physical_motion,
+        "cartesian_unavailable_count": cartesian_unavailable,
+        "status": status,
+    }
+
+
+def benchmark_threshold_result(
+    threshold_failures_value: list[str],
+    threshold_warnings: list[str],
+    thresholds_were_requested: bool,
+) -> dict[str, Any]:
+    if threshold_failures_value:
+        status = "fail"
+    elif thresholds_were_requested:
+        status = "pass"
+    else:
+        status = "not_evaluated"
+    return {
+        "status": status,
+        "threshold_failures": list(threshold_failures_value),
+        "threshold_warnings": list(threshold_warnings),
+    }
+
+
+def diagnostic_warnings(summary: dict[str, Any], threshold_failures_value: list[str], threshold_warnings: list[str]) -> list[str]:
+    warnings: list[str] = []
+    joined = " ".join([*threshold_failures_value, *threshold_warnings])
+    if "max_orientation_drift_rad" in joined or "orientation_drift_high" in joined:
+        warnings.append("max_orientation_drift_spike")
+    if (finite_number(summary.get("controller_simulation_diagnostic_override_active_count")) or 0.0) > 0.0:
+        warnings.append("diagnostics_suspect_override_active")
+    elif (finite_number(summary.get("diagnostics_suspect_count")) or 0.0) > 0.0:
+        warnings.append("diagnostics_suspect_override_active")
+    if summary.get("tracking_source_used") == "tcp_ref_stand" or summary.get("tracking_source") == "tcp_ref_stand":
+        warnings.append("controller_reference_lower_bound")
+    if (finite_number(summary.get("max_over_p95")) or 0.0) >= 3.0 or (finite_number(summary.get("tail_ratio")) or 0.0) >= 3.0:
+        warnings.append("max_error_spike")
+    timing = summary.get("timing_classification")
+    if timing not in (None, "", "clean_timing"):
+        warnings.append("timing_spike")
+    for key in ("ack_spike_count_10ms", "ack_spike_count_20ms", "state_gap_count", "command_gap_count"):
+        if (finite_number(summary.get(key)) or 0.0) > 0.0:
+            warnings.append("timing_spike")
+            break
+    if (finite_number(summary.get("feedback_saturation_count")) or 0.0) > 0.0:
+        warnings.append("feedback_saturation")
+    return list(dict.fromkeys(warnings))
+
+
+def check_min(summary: dict[str, Any], key: str, minimum: float, failures: list[str]) -> None:
+    value = finite_number(summary.get(key))
+    if value is None:
+        failures.append(f"{key} unavailable")
+    elif value < minimum:
+        failures.append(f"{key} {value:.9g} < {minimum:.9g}")
+
+
+def check_max(summary: dict[str, Any], key: str, maximum: float, failures: list[str]) -> None:
+    value = finite_number(summary.get(key))
+    if value is None:
+        failures.append(f"{key} unavailable")
+    elif value > maximum:
+        failures.append(f"{key} {value:.9g} > {maximum:.9g}")
+
+
+def ackon500_goal_result(summary: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+    if summary.get("profile") != "gene_15cm_4s" or summary.get("preflight_only") is True:
+        return {
+            "evaluated": False,
+            "status": "not_applicable",
+            "failures": [],
+            "warnings": list(warnings),
+        }
+
+    failures: list[str] = []
+    check_min(summary, "repeat", ACKON500_GOAL_THRESHOLDS["min_repeat"], failures)
+    tracking_source = summary.get("tracking_source_used") or summary.get("tracking_source")
+    if tracking_source != "tcp_ref_stand":
+        failures.append(f"tracking_source {tracking_source} != tcp_ref_stand")
+    if not near(summary.get("servo_rate_hz"), ACKON500_GOAL_THRESHOLDS["servo_rate_hz"]):
+        failures.append(f"servo_rate_hz {summary.get('servo_rate_hz')} != 500")
+    if not near(summary.get("servo_t1_sec"), ACKON500_GOAL_THRESHOLDS["servo_t1_sec"]):
+        failures.append(f"servo_t1_sec {summary.get('servo_t1_sec')} != 0.002")
+    semantics = summary.get("acceptance_semantics")
+    if semantics not in ACKON500_ACK_SEMANTICS:
+        failures.append(f"acceptance_semantics {semantics} is not ACK-observed")
+    check_min(summary, "ack_observed_ratio", ACKON500_GOAL_THRESHOLDS["min_ack_ratio"], failures)
+    if int(finite_number(summary.get("socket_send_only_count")) or 0) != 0:
+        failures.append(f"socket_send_only_count {summary.get('socket_send_only_count')} != 0")
+    check_min(summary, "effective_command_rate_hz", ACKON500_GOAL_THRESHOLDS["min_effective_command_rate_hz"], failures)
+    if summary.get("fault_latched") is not False:
+        failures.append(f"fault_latched {summary.get('fault_latched')} is not false")
+    if summary.get("physical_motion_detected") is not False:
+        failures.append(f"physical_motion_detected {summary.get('physical_motion_detected')} is not false")
+    if summary.get("physical_motion_expected") is not False:
+        failures.append(f"physical_motion_expected {summary.get('physical_motion_expected')} is not false")
+    if int(finite_number(summary.get("cartesian_unavailable_count")) or 0) != 0:
+        failures.append(f"cartesian_unavailable_count {summary.get('cartesian_unavailable_count')} != 0")
+    check_max(summary, "feedback_saturation_ratio", ACKON500_GOAL_THRESHOLDS["max_saturation_ratio"], failures)
+    check_max(summary, "rms_error_m", ACKON500_GOAL_THRESHOLDS["max_rms_error_m"], failures)
+    check_max(summary, "p95_error_m", ACKON500_GOAL_THRESHOLDS["max_p95_error_m"], failures)
+    check_max(summary, "fit_center_error_m", ACKON500_GOAL_THRESHOLDS["max_fit_center_error_m"], failures)
+    check_min(summary, "radius_gain", ACKON500_GOAL_THRESHOLDS["min_radius_gain"], failures)
+    check_max(summary, "radius_gain", ACKON500_GOAL_THRESHOLDS["max_radius_gain"], failures)
+    check_max(summary, "p95_orientation_drift_rad", ACKON500_GOAL_THRESHOLDS["max_p95_orientation_drift_rad"], failures)
+    check_max(summary, "effective_phase_latency_abs_ms", ACKON500_GOAL_THRESHOLDS["max_effective_phase_latency_abs_ms"], failures)
+    check_max(summary, "state_age_p95_us", ACKON500_GOAL_THRESHOLDS["max_state_age_p95_us"], failures)
+    if summary.get("measurement_reliability_level") == "unreliable":
+        failures.append("measurement_reliability_level is unreliable")
+    return {
+        "evaluated": True,
+        "status": "fail" if failures else "pass",
+        "failures": failures,
+        "warnings": list(warnings),
+    }
+
+
+def apply_result_contract(
+    summary: dict[str, Any],
+    *,
+    run_status: str,
+    run_reason: str,
+    threshold_failures_value: list[str] | None = None,
+    threshold_warnings: list[str] | None = None,
+    thresholds_were_requested: bool = False,
+    legacy_threshold_failures_value: list[str] | None = None,
+) -> None:
+    threshold_failures_list = list(threshold_failures_value or [])
+    legacy_threshold_failures = (
+        list(legacy_threshold_failures_value)
+        if legacy_threshold_failures_value is not None
+        else threshold_failures_list
+    )
+    threshold_warnings_list = list(threshold_warnings or [])
+    annotate_goal_derived_fields(summary)
+    diagnostics = diagnostic_warnings(summary, threshold_failures_list, threshold_warnings_list)
+    benchmark_result_block = benchmark_threshold_result(
+        threshold_failures_list,
+        threshold_warnings_list,
+        thresholds_were_requested,
+    )
+    safety = safety_result(summary, run_status)
+    goal = ackon500_goal_result(summary, diagnostics)
+    summary.update(
+        {
+            "run_result": {"status": run_status, "reason": run_reason},
+            "safety_result": safety,
+            "benchmark_threshold_result": benchmark_result_block,
+            "ackon500_goal_result": goal,
+            "diagnostic_warnings": diagnostics,
+            "run_result_status": run_status,
+            "run_result_reason": run_reason,
+            "safety_result_status": safety["status"],
+            "benchmark_threshold_status": benchmark_result_block["status"],
+            "ackon500_goal_status": goal["status"],
+            "diagnostic_warning_count": len(diagnostics),
+            "goal_pass": goal["status"] == "pass" if goal.get("evaluated") else None,
+            "result": run_status,
+            "result_reason": run_reason,
+            "threshold_failures": legacy_threshold_failures,
+            "threshold_warnings": threshold_warnings_list,
+        }
+    )
+
+
 def first_fault_details(states: list[dict[str, Any]], benchmark_start_ns: int) -> dict[str, Any]:
     for snapshot in states:
         if snapshot.get("fault_latched") is not True:
@@ -1850,6 +2187,13 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
     fields = [
         "result",
         "result_reason",
+        "run_result_status",
+        "run_result_reason",
+        "safety_result_status",
+        "benchmark_threshold_status",
+        "ackon500_goal_status",
+        "goal_pass",
+        "diagnostic_warning_count",
         "controller",
         "arm",
         "profile",
@@ -1862,6 +2206,15 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "angular_frequency_rad_s",
         "repeat",
         "command_rate_hz",
+        "servo_rate_hz",
+        "servo_t1_sec",
+        "acceptance_semantics",
+        "async_mode",
+        "commands_sent_total",
+        "commands_acked_total",
+        "socket_send_only_count",
+        "ack_observed_ratio",
+        "effective_command_rate_hz",
         "phase_advance_sec",
         "phase_advance_fraction_of_period",
         "phase_advance_enabled",
@@ -1942,6 +2295,9 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "benchmark_interpretation",
         "physical_real_blockers",
         "cartesian_unavailable_count",
+        "threshold_failures",
+        "threshold_warnings",
+        "diagnostic_warnings",
         "armed_hold_count",
         "command_accepted_but_target_static",
         "server_rejected_cartesian",
@@ -2189,6 +2545,11 @@ def summarize_run(
         raise BenchmarkError(f"no valid {tracking_source} samples captured during benchmark")
     network_config = config_section(config, "network")
     servo_config = config_section(config, "servo")
+    arm_config = (
+        selected_arm_config(config, args.arm)
+        if hasattr(config, "left") and hasattr(config, "right")
+        else None
+    )
     metrics, merged = sim_bench.compute_metrics(
         args=args,
         traj=traj,
@@ -2272,6 +2633,9 @@ def summarize_run(
         **sim_bench.phase_advance_summary(args),
         "state_pub_rate_hz": finite_number(network_config.get("state_pub_rate_hz")),
         "servo_rate_hz": finite_number(servo_config.get("rate_hz")),
+        "servo_t1_sec": finite_number(getattr(arm_config, "servo_t1_sec", None)),
+        "servo_t2_sec": finite_number(getattr(arm_config, "servo_t2_sec", None)),
+        "servo_alpha": finite_number(getattr(arm_config, "servo_alpha", None)),
         "tool_offset_m": tool_offsets_from_args(args),
         "required_tangential_speed_m_s": preflight_result["required_tangential_speed_m_s"],
         "duration_sec": duration_sec,
@@ -2312,6 +2676,7 @@ def summarize_run(
         "reset_rate_hz": reset_rate_hz,
         "divergence_rate_hz": divergence_rate_hz,
         "physical_motion_detected": physical_motion_detected,
+        "physical_motion_expected": False,
         "physical_motion_warning_threshold_deg": args.physical_motion_warning_deg,
         "safety_preflight": preflight_result,
         "pgmode_summary": str((artifact_dir / "pgmode_summary.json").resolve()),
@@ -2452,13 +2817,15 @@ def summarize_run(
     if summary.get("fault_latched") is True:
         fault_name = summary.get("latched_fault_reason") or "unknown"
         fault_text = summary.get("fault_reason") or "no fault reason reported"
-        result = "faulted"
-        result_reason = f"server fault latched: {fault_name}: {fault_text}"
-        failures = [result_reason]
+        run_status = "faulted"
+        run_reason = f"server fault latched: {fault_name}: {fault_text}"
+        failures: list[str] = []
+        legacy_failures = [run_reason]
     elif summary.get("server_rejected_cartesian") is True:
-        result = "blocked"
-        result_reason = "cartesian_commands_rejected_by_server"
-        failures = [
+        run_status = "blocked"
+        run_reason = "cartesian_commands_rejected_by_server"
+        failures = []
+        legacy_failures = [
             "server rejected Cartesian command before attempting path; "
             "ServoJ ACKs only show hold-target sends, not circle tracking"
         ]
@@ -2469,18 +2836,29 @@ def summarize_run(
             "and same-run pgmode confirmation"
         )
     else:
-        result, result_reason, failures = result_from_thresholds(args, summary)
+        _threshold_result, threshold_reason, failures = result_from_thresholds(args, summary)
+        run_status = "completed"
+        run_reason = "run completed; " + threshold_reason
+        legacy_failures = failures
     summary.update(
         {
-            "result": result,
-            "result_reason": result_reason,
-            "threshold_failures": failures,
+            "result": run_status,
+            "result_reason": run_reason,
             "performance_warnings": performance_warnings,
             "generated_plots": generated_plot_paths(artifact_dir),
             "skipped_plots": skipped_plots,
         }
     )
     reliability_report.annotate_row(summary)
+    apply_result_contract(
+        summary,
+        run_status=run_status,
+        run_reason=run_reason,
+        threshold_failures_value=failures,
+        threshold_warnings=performance_warnings,
+        thresholds_were_requested=thresholds_requested(args),
+        legacy_threshold_failures_value=legacy_failures,
+    )
     write_json(artifact_dir / "summary.json", summary)
     write_summary_csv(artifact_dir / "summary.csv", summary)
     return summary
@@ -2512,11 +2890,23 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "recommended_controllers": preflight_result.get("recommended_controllers"),
             "safety_preflight": preflight_result,
             "preflight_only": True,
+            "fault_latched": False,
+            "physical_motion_detected": False,
+            "physical_motion_expected": False,
+            "cartesian_unavailable_count": 0,
             "overlay_enabled": not args.overlay_disable,
             "overlay_pub_endpoint": None if args.overlay_disable else args.overlay_pub_endpoint,
             "overlay_messages_sent": 0,
         }
         reliability_report.annotate_row(summary)
+        apply_result_contract(
+            summary,
+            run_status="completed",
+            run_reason="preflight only; no tracking run or performance thresholds were evaluated",
+            threshold_failures_value=[],
+            threshold_warnings=[],
+            thresholds_were_requested=False,
+        )
         write_json(artifact_dir / "summary.json", summary)
         write_summary_csv(artifact_dir / "summary.csv", summary)
         return summary
@@ -2641,17 +3031,28 @@ def failure_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
             "latched_fault_reason": details.get("latched_fault_reason"),
             "fault_reason": details.get("fault_reason"),
             "fault_context": details.get("fault_context"),
+            "fault_latched": True,
+            "physical_motion_detected": False,
+            "physical_motion_expected": False,
+            "cartesian_unavailable_count": 0,
             "safety_tracking": details.get("safety_tracking"),
             "q_actual_target_error_summary": details.get("q_actual_target_error_summary"),
             "latest_state_excerpt": details.get("latest_state_excerpt"),
             "startup_fault": details,
             "safety_preflight": {"passed": False, "error": str(exc), "env": benchmark_env_snapshot()},
             **sim_bench.phase_advance_summary(args),
-            "threshold_failures": [details.get("result_reason") or str(exc)],
             "performance_warnings": details.get("startup_fault_hints") or [],
             "caveat": "rbpodo controller-simulation benchmark did not complete",
         }
         reliability_report.annotate_row(failure)
+        apply_result_contract(
+            failure,
+            run_status="startup_fault",
+            run_reason=details.get("result_reason") or "startup fault latched",
+            threshold_failures_value=[],
+            threshold_warnings=text_list(details.get("startup_fault_hints")),
+            thresholds_were_requested=False,
+        )
         write_json(artifact_dir / "summary.json", failure)
         write_summary_csv(artifact_dir / "summary.csv", failure)
         return failure
@@ -2663,11 +3064,22 @@ def failure_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
         "server_config": str(args.server_config.resolve()) if args.server_config else None,
         "safety_preflight": {"passed": False, "error": str(exc), "env": benchmark_env_snapshot()},
         **sim_bench.phase_advance_summary(args),
-        "threshold_failures": [str(exc)],
         "performance_warnings": [],
+        "fault_latched": False,
+        "physical_motion_detected": False,
+        "physical_motion_expected": False,
+        "cartesian_unavailable_count": 0,
         "caveat": "rbpodo controller-simulation benchmark did not complete",
     }
     reliability_report.annotate_row(failure)
+    apply_result_contract(
+        failure,
+        run_status="error",
+        run_reason="benchmark could not run",
+        threshold_failures_value=[],
+        threshold_warnings=[],
+        thresholds_were_requested=False,
+    )
     write_json(artifact_dir / "summary.json", failure)
     write_summary_csv(artifact_dir / "summary.csv", failure)
     return failure

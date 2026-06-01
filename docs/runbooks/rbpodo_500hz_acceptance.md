@@ -25,6 +25,30 @@ and no physical robot motion.
 `operation_mode: real` is out of scope and must be refused for async 500 Hz
 evidence.
 
+## Result Contract
+
+Circle summaries and 500 Hz reports separate execution, safety, generic
+benchmark thresholds, the official ACKON500 goal, and diagnostics:
+
+- `run_result.status` says whether the run completed, faulted, was blocked, or
+  errored. New artifacts mirror this in the legacy top-level `result`.
+- `safety_result.status` covers fault latch, physical-motion detection, and
+  Cartesian availability.
+- `benchmark_threshold_result.status` covers generic report thresholds such as
+  `max_orientation_drift_rad`.
+- `ackon500_goal_result.status` is the official goal result for
+  `gene_15cm_4s`. It uses `p95_orientation_drift_rad <= 0.02 rad`, not max
+  orientation drift, unless `GOAL.md` is updated.
+- `diagnostic_warnings` keeps non-fatal diagnostics visible, including
+  `max_orientation_drift_spike`, timing spikes, diagnostics-suspect override
+  evidence, and controller-reference lower-bound caveats.
+
+A 500 Hz `sdk_ack_worker` candidate can therefore be official goal `pass` while
+`benchmark_threshold_result.status` is `fail` because a generic
+`max_orientation_drift_rad` diagnostic threshold fired. That is not a hidden
+failure of the official ACKON500 goal; it is a diagnostic warning that must
+remain visible. `socket_send_only_count > 0` is still an official goal failure.
+
 ## Why Synchronous ACK-On Is Fragile At 500 Hz
 
 A 500 Hz servo tick is only 2 ms. In synchronous ACK-on mode, any rbpodo

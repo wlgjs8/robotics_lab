@@ -262,6 +262,10 @@ SUMMARY_COLUMNS = [
     "score",
     "classification",
     "result",
+    "run_result_status",
+    "benchmark_threshold_status",
+    "ackon500_goal_status",
+    "diagnostic_warning_count",
     "measurement_reliability_level",
     "reliability_caveats",
     "benchmark_interpretation",
@@ -563,6 +567,72 @@ def summary_or_nested(summary: dict[str, Any], nested_key: str, key: str) -> Any
     if key in summary and summary.get(key) is not None:
         return summary.get(key)
     return nested_dict(summary, nested_key).get(key)
+
+
+def infer_run_result_status(summary: dict[str, Any]) -> str:
+    if summary.get("run_result_status") not in (None, ""):
+        return str(summary.get("run_result_status"))
+    status = summary_or_nested(summary, "run_result", "status")
+    if status not in (None, ""):
+        return str(status)
+    result = str(summary.get("result") or "")
+    reason = str(summary.get("result_reason") or "")
+    if result in {"completed", "pass"}:
+        return "completed"
+    if result == "fail" and "threshold" in reason:
+        return "completed"
+    if result in {"error", "blocked", "faulted", "startup_fault"}:
+        return result
+    return result
+
+
+def infer_benchmark_threshold_status(summary: dict[str, Any]) -> str:
+    if summary.get("benchmark_threshold_status") not in (None, ""):
+        return str(summary.get("benchmark_threshold_status"))
+    status = summary_or_nested(summary, "benchmark_threshold_result", "status")
+    if status not in (None, ""):
+        return str(status)
+    failures = text_list(summary.get("threshold_failures"))
+    result = str(summary.get("result") or "")
+    reason = str(summary.get("result_reason") or "")
+    if failures:
+        return "fail"
+    if "threshold" in reason and result in {"pass", "fail"}:
+        return result
+    return "not_evaluated"
+
+
+def infer_ackon500_goal_status(summary: dict[str, Any]) -> str:
+    if summary.get("ackon500_goal_status") not in (None, ""):
+        return str(summary.get("ackon500_goal_status"))
+    status = summary_or_nested(summary, "ackon500_goal_result", "status")
+    if status not in (None, ""):
+        return str(status)
+    goal_pass = summary.get("goal_pass")
+    if isinstance(goal_pass, bool):
+        return "pass" if goal_pass else "fail"
+    return "not_applicable"
+
+
+def text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if isinstance(value, str):
+        if not value:
+            return []
+        if ";" in value:
+            return [item.strip() for item in value.split(";") if item.strip()]
+        return [value]
+    return [str(value)]
+
+
+def diagnostic_warning_count(summary: dict[str, Any]) -> int:
+    explicit = finite_number(summary.get("diagnostic_warning_count"))
+    if explicit is not None:
+        return int(explicit)
+    return len(text_list(summary.get("diagnostic_warnings")))
 
 
 def nested_metric(summary: dict[str, Any], key: str, metric: str) -> float | None:
@@ -1327,6 +1397,10 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "score": summary.get("score"),
         "classification": summary.get("classification"),
         "result": summary.get("result"),
+        "run_result_status": infer_run_result_status(summary),
+        "benchmark_threshold_status": infer_benchmark_threshold_status(summary),
+        "ackon500_goal_status": infer_ackon500_goal_status(summary),
+        "diagnostic_warning_count": diagnostic_warning_count(summary),
         "artifact_dir": summary.get("artifact_dir"),
         "warnings": warning_text(summary, meta),
     }
@@ -1350,9 +1424,11 @@ def warning_text(summary: dict[str, Any], meta: dict[str, Any]) -> str:
         warnings.extend(str(item) for item in value)
     elif isinstance(value, str) and value:
         warnings.append(value)
+    for item in text_list(summary.get("diagnostic_warnings")):
+        warnings.append(f"diagnostic_warning={item}")
     if summary.get("physical_motion_detected") is True:
         warnings.append("physical_motion_detected true in pgmode simulation")
-    if summary.get("result") == "error":
+    if infer_run_result_status(summary) == "error":
         reason = summary.get("result_reason") or summary.get("error") or "error"
         warnings.append(str(reason))
     if meta.get("ack_policy") == "ack_off":
@@ -1510,7 +1586,14 @@ def rejected(row: dict[str, Any]) -> bool:
 
 
 def child_result_failed(value: dict[str, Any]) -> bool:
-    return value.get("result") in {"error", "blocked", "faulted", "startup_fault"}
+    status = value.get("run_result_status")
+    if status not in (None, ""):
+        return str(status) in {"error", "blocked", "faulted", "startup_fault"}
+    result = str(value.get("result") or "")
+    reason = str(value.get("result_reason") or "")
+    if result == "fail" and "threshold" in reason:
+        return False
+    return result in {"error", "blocked", "faulted", "startup_fault"}
 
 
 def decision_split_markdown(rows: list[dict[str, Any]]) -> str:

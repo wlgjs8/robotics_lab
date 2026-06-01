@@ -17,6 +17,30 @@ Do not mix the artifact categories. A good `rb_simulator` run is not evidence
 that the Rainbow controller path works, and a good controller-simulation run is
 not approval for physical Cartesian motion.
 
+## Result Contract
+
+Every new circle summary separates these result surfaces:
+
+- `run_result`: execution status (`completed`, `faulted`, `startup_fault`,
+  `blocked`, or `error`).
+- `safety_result`: fault latch, physical-motion detection, Cartesian
+  availability, and pass/fail safety status.
+- `benchmark_threshold_result`: generic benchmark threshold pass/fail, such as
+  max error, max orientation drift, or latency thresholds.
+- `ackon500_goal_result`: official ACKON500 `gene_15cm_4s` pass/fail when the
+  row is applicable.
+- `diagnostic_warnings`: non-fatal labels such as
+  `max_orientation_drift_spike`, `diagnostics_suspect_override_active`,
+  `controller_reference_lower_bound`, `max_error_spike`, and `timing_spike`.
+
+Reports should prefer those structured fields over the legacy top-level
+`result`. For new circle artifacts, the top-level `result` mirrors
+`run_result.status`; a completed run with a generic threshold failure remains a
+completed run. The official ACKON500 orientation criterion remains
+`p95_orientation_drift_rad <= 0.02 rad`; `max_orientation_drift_rad` stays
+visible as a diagnostic unless `GOAL.md` explicitly promotes it to a goal
+criterion. Socket-send-only rows are never official ACK-ON passes.
+
 ## Scope
 
 Use these templates only for `rbpodo` controller-simulation bring-up:

@@ -116,10 +116,18 @@ COLUMNS = [
     ("controller_simulation_diagnostic_override_active_count", "controller_simulation_diagnostic_override_active_count"),
     ("reset_rate_hz", "reset_rate_hz"),
     ("divergence_rate_hz", "divergence_rate_hz"),
+    ("run_result_status", "run_result_status"),
+    ("safety_result_status", "safety_result_status"),
+    ("benchmark_threshold_status", "benchmark_threshold_status"),
+    ("ackon500_goal_status", "ackon500_goal_status"),
+    ("goal_pass", "goal_pass"),
+    ("diagnostic_warning_count", "diagnostic_warning_count"),
     ("result", "result"),
     ("result_reason", "result_reason"),
     ("server_rejected_cartesian", "server_rejected_cartesian"),
     ("cartesian_unavailable_count", "cartesian_unavailable_count"),
+    ("threshold_failures", "threshold_failures"),
+    ("diagnostic_warnings", "diagnostic_warnings"),
     ("performance_warnings", "performance_warnings"),
 ]
 
@@ -213,6 +221,79 @@ def first_value(*values: Any) -> Any:
         if value is not None:
             return value
     return None
+
+
+def summary_or_nested(summary: dict[str, Any], nested_key: str, key: str) -> Any:
+    if key in summary and summary.get(key) is not None:
+        return summary.get(key)
+    nested = nested_dict(summary, nested_key)
+    return nested.get(key)
+
+
+def text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if isinstance(value, str):
+        if not value:
+            return []
+        if ";" in value:
+            return [item.strip() for item in value.split(";") if item.strip()]
+        return [value]
+    return [str(value)]
+
+
+def infer_run_result_status(summary: dict[str, Any]) -> str:
+    if summary.get("run_result_status") not in (None, ""):
+        return str(summary.get("run_result_status"))
+    status = summary_or_nested(summary, "run_result", "status")
+    if status not in (None, ""):
+        return str(status)
+    result = str(summary.get("result") or "")
+    reason = str(summary.get("result_reason") or "")
+    if result in {"completed", "pass"}:
+        return "completed"
+    if result == "fail" and "threshold" in reason:
+        return "completed"
+    if result in {"error", "blocked", "faulted", "startup_fault"}:
+        return result
+    return result
+
+
+def infer_benchmark_threshold_status(summary: dict[str, Any]) -> str:
+    if summary.get("benchmark_threshold_status") not in (None, ""):
+        return str(summary.get("benchmark_threshold_status"))
+    status = summary_or_nested(summary, "benchmark_threshold_result", "status")
+    if status not in (None, ""):
+        return str(status)
+    failures = text_list(summary.get("threshold_failures"))
+    result = str(summary.get("result") or "")
+    reason = str(summary.get("result_reason") or "")
+    if failures:
+        return "fail"
+    if "threshold" in reason and result in {"pass", "fail"}:
+        return result
+    return "not_evaluated"
+
+
+def infer_ackon500_goal_status(summary: dict[str, Any]) -> str:
+    if summary.get("ackon500_goal_status") not in (None, ""):
+        return str(summary.get("ackon500_goal_status"))
+    status = summary_or_nested(summary, "ackon500_goal_result", "status")
+    if status not in (None, ""):
+        return str(status)
+    goal_pass = summary.get("goal_pass")
+    if isinstance(goal_pass, bool):
+        return "pass" if goal_pass else "fail"
+    return "not_applicable"
+
+
+def diagnostic_warning_count(summary: dict[str, Any]) -> int:
+    explicit = finite_number(summary.get("diagnostic_warning_count"))
+    if explicit is not None:
+        return int(explicit)
+    return len(text_list(summary.get("diagnostic_warnings")))
 
 
 def ratio_from_counts(numerator: Any, denominator: Any) -> float | None:
@@ -709,6 +790,8 @@ def warning_text(summary: dict[str, Any]) -> str:
         values.extend(str(item) for item in warnings)
     elif isinstance(warnings, str) and warnings:
         values.append(warnings)
+    for item in text_list(summary.get("diagnostic_warnings")):
+        values.append(f"diagnostic_warning={item}")
     timing = first_present(summary, "timing_classification")
     if timing is None:
         timing = nested_dict(summary, "timestamp_alignment").get("timing_classification")
@@ -878,11 +961,20 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "divergence_rate_hz": summary.get("divergence_rate_hz"),
         "physical_actual_csv": summary.get("physical_actual_csv"),
         "fault_latched": summary.get("fault_latched"),
+        "run_result_status": infer_run_result_status(summary),
+        "run_result_reason": summary_or_nested(summary, "run_result", "reason") or summary.get("result_reason"),
+        "safety_result_status": summary_or_nested(summary, "safety_result", "status"),
+        "benchmark_threshold_status": infer_benchmark_threshold_status(summary),
+        "ackon500_goal_status": infer_ackon500_goal_status(summary),
+        "goal_pass": summary.get("goal_pass"),
+        "diagnostic_warning_count": diagnostic_warning_count(summary),
         "result": summary.get("result"),
         "result_reason": summary.get("result_reason"),
         "server_rejected_cartesian": summary.get("server_rejected_cartesian"),
         "cartesian_unavailable_count": summary.get("cartesian_unavailable_count"),
         "cartesian_unavailable_reason_counts": summary.get("cartesian_unavailable_reason_counts"),
+        "threshold_failures": "; ".join(text_list(summary.get("threshold_failures"))),
+        "diagnostic_warnings": "; ".join(text_list(summary.get("diagnostic_warnings"))),
         "performance_warnings": warning_text(summary),
     }
     reliability_report.annotate_row(row)
@@ -927,7 +1019,11 @@ def main() -> int:
     rows = [comparison_row(summary) for summary in summaries]
     if args.sort == "rms_error":
         def rms_sort_key(row: dict[str, Any]) -> tuple[int, float]:
-            blocked = row.get("result") == "blocked" or row.get("server_rejected_cartesian") is True
+            blocked = (
+                row.get("run_result_status") == "blocked"
+                or row.get("result") == "blocked"
+                or row.get("server_rejected_cartesian") is True
+            )
             if blocked:
                 return (2, math.inf)
             rms = finite_number(row.get("rms_error_mm"))

@@ -31,6 +31,34 @@ class CircleBenchmarkReportTest(unittest.TestCase):
         self.assertIsNone(row["integrator_clamps_total"])
         self.assertEqual(row["benchmark_category"], "unknown")
 
+    def test_legacy_threshold_fail_is_not_execution_failure(self) -> None:
+        row = compare.comparison_row(
+            {
+                "artifact_dir": "/tmp/ackon500_candidate",
+                "schema": "robotics_lab.rbpodo_circle_tracking_benchmark.v1",
+                "controller": "twist_stand_feedback",
+                "profile": "gene_15cm_4s",
+                "tracking_source_used": "tcp_ref_stand",
+                "result": "fail",
+                "result_reason": "thresholds applied and failed",
+                "threshold_failures": ["max_orientation_drift_rad 0.032 exceeds threshold 0.02"],
+                "max_orientation_drift_rad": 0.032,
+                "p95_orientation_drift_rad": 0.01,
+                "safety_preflight": {
+                    "backend": "rbpodo",
+                    "controller_simulation_only": True,
+                    "physical_motion_expected": False,
+                    "pgmode_simulation_confirmed": True,
+                },
+                "physical_motion_detected": False,
+                "fault_latched": False,
+                "cartesian_unavailable_count": 0,
+            }
+        )
+        self.assertEqual(row["run_result_status"], "completed")
+        self.assertEqual(row["benchmark_threshold_status"], "fail")
+        self.assertIn("max_orientation_drift_rad", row["threshold_failures"])
+
     def test_good_15cm16s_classifies_as_baseline_candidate(self) -> None:
         rows = report.classify_rows(
             [

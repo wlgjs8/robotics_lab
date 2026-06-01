@@ -128,6 +128,141 @@ def scaled_number(value: Any, factor: float) -> float | None:
     return number * factor if number is not None else None
 
 
+def nested_dict(summary: dict[str, Any], key: str) -> dict[str, Any]:
+    value = summary.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def summary_or_nested(summary: dict[str, Any], nested_key: str, key: str) -> Any:
+    if key in summary and summary.get(key) is not None:
+        return summary.get(key)
+    return nested_dict(summary, nested_key).get(key)
+
+
+def text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if isinstance(value, str):
+        if not value:
+            return []
+        if ";" in value:
+            return [item.strip() for item in value.split(";") if item.strip()]
+        return [value]
+    return [str(value)]
+
+
+def infer_run_result(summary: dict[str, Any]) -> dict[str, str]:
+    if summary.get("run_result_status") not in (None, ""):
+        return {
+            "status": str(summary.get("run_result_status")),
+            "reason": str(summary.get("run_result_reason") or summary.get("result_reason") or ""),
+        }
+    status = summary_or_nested(summary, "run_result", "status")
+    reason = summary_or_nested(summary, "run_result", "reason") or summary.get("result_reason")
+    if status not in (None, ""):
+        return {"status": str(status), "reason": str(reason or "")}
+    result = str(summary.get("result") or "")
+    result_reason = str(reason or "")
+    if result in {"completed", "pass"}:
+        return {"status": "completed", "reason": result_reason or "run completed"}
+    if result == "fail" and "threshold" in result_reason:
+        return {"status": "completed", "reason": result_reason}
+    if result in {"error", "blocked", "faulted", "startup_fault"}:
+        return {"status": result, "reason": result_reason}
+    return {"status": result or "completed", "reason": result_reason}
+
+
+def infer_benchmark_threshold_result(summary: dict[str, Any]) -> dict[str, Any]:
+    if summary.get("benchmark_threshold_status") not in (None, ""):
+        return {
+            "status": str(summary.get("benchmark_threshold_status")),
+            "threshold_failures": text_list(summary.get("threshold_failures")),
+            "threshold_warnings": text_list(summary.get("threshold_warnings") or summary.get("performance_warnings")),
+        }
+    block = nested_dict(summary, "benchmark_threshold_result")
+    if block.get("status") not in (None, ""):
+        return {
+            "status": block.get("status"),
+            "threshold_failures": text_list(block.get("threshold_failures")),
+            "threshold_warnings": text_list(block.get("threshold_warnings")),
+        }
+    failures = text_list(summary.get("threshold_failures"))
+    warnings = text_list(summary.get("threshold_warnings"))
+    if not warnings:
+        warnings = text_list(summary.get("performance_warnings"))
+    result = str(summary.get("result") or "")
+    reason = str(summary.get("result_reason") or "")
+    if failures:
+        status = "fail"
+    elif "threshold" in reason and result in {"pass", "fail"}:
+        status = result
+    else:
+        status = "not_evaluated"
+    return {
+        "status": status,
+        "threshold_failures": failures,
+        "threshold_warnings": warnings,
+    }
+
+
+def infer_safety_result(summary: dict[str, Any], run_result: dict[str, str]) -> dict[str, Any]:
+    if summary.get("safety_result_status") not in (None, ""):
+        return {
+            "fault_latched": as_bool(summary.get("fault_latched")) is True,
+            "physical_motion_detected": as_bool(summary.get("physical_motion_detected")) is True,
+            "cartesian_unavailable_count": int(finite_number(summary.get("cartesian_unavailable_count")) or 0),
+            "status": str(summary.get("safety_result_status")),
+        }
+    block = nested_dict(summary, "safety_result")
+    if block.get("status") not in (None, ""):
+        return {
+            "fault_latched": as_bool(block.get("fault_latched")) is True,
+            "physical_motion_detected": as_bool(block.get("physical_motion_detected")) is True,
+            "cartesian_unavailable_count": int(finite_number(block.get("cartesian_unavailable_count")) or 0),
+            "status": str(block.get("status")),
+        }
+    fault_latched = as_bool(summary.get("fault_latched")) is True or run_result.get("status") in {"faulted", "startup_fault"}
+    physical_motion = as_bool(summary.get("physical_motion_detected")) is True
+    cartesian_unavailable = int(finite_number(summary.get("cartesian_unavailable_count")) or 0)
+    status = (
+        "fail"
+        if fault_latched or physical_motion or cartesian_unavailable > 0 or run_result.get("status") in {"error", "blocked"}
+        else "pass"
+    )
+    return {
+        "fault_latched": fault_latched,
+        "physical_motion_detected": physical_motion,
+        "cartesian_unavailable_count": cartesian_unavailable,
+        "status": status,
+    }
+
+
+def diagnostic_warnings_from_summary(summary: dict[str, Any], threshold_result: dict[str, Any]) -> list[str]:
+    warnings = text_list(summary.get("diagnostic_warnings"))
+    joined = " ".join(
+        [
+            *text_list(threshold_result.get("threshold_failures")),
+            *text_list(threshold_result.get("threshold_warnings")),
+        ]
+    )
+    if "max_orientation_drift_rad" in joined and "max_orientation_drift_spike" not in warnings:
+        warnings.append("max_orientation_drift_spike")
+    if (finite_number(summary.get("controller_simulation_diagnostic_override_active_count")) or 0.0) > 0.0:
+        warnings.append("diagnostics_suspect_override_active")
+    elif (finite_number(summary.get("diagnostics_suspect_count")) or 0.0) > 0.0:
+        warnings.append("diagnostics_suspect_override_active")
+    if (summary.get("tracking_source_used") or summary.get("tracking_source")) == "tcp_ref_stand":
+        warnings.append("controller_reference_lower_bound")
+    if (finite_number(summary.get("max_over_p95")) or 0.0) >= 3.0:
+        warnings.append("max_error_spike")
+    timing = summary.get("timing_classification")
+    if timing not in (None, "", "clean_timing"):
+        warnings.append("timing_spike")
+    return list(dict.fromkeys(warnings))
+
+
 def read_ablation_rows(artifact_root: Path) -> dict[str, dict[str, str]]:
     path = artifact_root / "ablation_summary.csv"
     if not path.is_file():
@@ -342,6 +477,10 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
     )
     estimated_latency_ms = finite_number(summary.get("estimated_latency_ms"))
     phase_advance_ms = first_number(summary.get("commanded_phase_advance_ms"), row.get("commanded_phase_advance_ms"), 0.0)
+    run_result = infer_run_result(summary)
+    safety_result = infer_safety_result(summary, run_result)
+    threshold_result = infer_benchmark_threshold_result(summary)
+    diagnostics = diagnostic_warnings_from_summary(summary, threshold_result)
     candidate = {
         "name": first_value(row.get("name"), summary.get("name"), artifact_dir.name),
         "artifact_dir": str(artifact_dir),
@@ -367,6 +506,7 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
         "fit_center_error_m": first_number(summary.get("fit_center_error_m"), scaled_number(row.get("fit_center_error_mm"), 0.001)),
         "radius_gain": first_number(summary.get("radius_gain"), row.get("radius_gain")),
         "p95_orientation_drift_rad": first_number(summary.get("p95_orientation_drift_rad"), scaled_number(row.get("p95_orientation_drift_mrad"), 0.001)),
+        "max_orientation_drift_rad": first_number(summary.get("max_orientation_drift_rad"), summary.get("orientation_max_drift_rad")),
         "estimated_latency_ms": estimated_latency_ms,
         "commanded_phase_advance_ms": phase_advance_ms,
         "uncompensated_latency_estimate_ms": estimated_latency_ms + phase_advance_ms if estimated_latency_ms is not None and phase_advance_ms is not None else None,
@@ -380,9 +520,19 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
         "cartesian_unavailable_count": first_number(summary.get("cartesian_unavailable_count"), row.get("cartesian_unavailable_count")),
         "measurement_reliability_level": first_value(summary.get("measurement_reliability_level"), row.get("measurement_reliability_level")),
         "timing_classification": first_value(summary.get("timing_classification"), row.get("timing_classification")),
-        "result": summary.get("result"),
+        "run_result": run_result,
+        "run_result_status": run_result.get("status"),
+        "safety_result": safety_result,
+        "safety_result_status": safety_result.get("status"),
+        "benchmark_threshold_result": threshold_result,
+        "benchmark_threshold_status": threshold_result.get("status"),
+        "diagnostic_warnings": diagnostics,
+        "diagnostic_warning_count": len(diagnostics),
+        "legacy_result": summary.get("result"),
+        "result": run_result.get("status"),
         "result_reason": summary.get("result_reason"),
-        "threshold_failures": summary.get("threshold_failures"),
+        "threshold_failures": threshold_result.get("threshold_failures"),
+        "threshold_warnings": threshold_result.get("threshold_warnings"),
         "state_stream": str((artifact_dir / "state_stream.jsonl").resolve()),
         "command_packets": str((artifact_dir / "command_packets.jsonl").resolve()),
         "async_ack_telemetry": str(async_telemetry_path.resolve()) if async_telemetry_rows else None,
@@ -406,7 +556,15 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
     )
     candidate["required_artifacts_present"] = required_artifacts_present(candidate)
     candidate["failures"] = goal_failures(candidate)
-    candidate["pass"] = not candidate["failures"]
+    candidate["ackon500_goal_result"] = {
+        "evaluated": True,
+        "status": "fail" if candidate["failures"] else "pass",
+        "failures": list(candidate["failures"]),
+        "warnings": list(candidate.get("diagnostic_warnings") or []),
+    }
+    candidate["ackon500_goal_status"] = candidate["ackon500_goal_result"]["status"]
+    candidate["goal_pass"] = candidate["ackon500_goal_status"] == "pass"
+    candidate["pass"] = candidate["goal_pass"]
     return candidate
 
 
@@ -447,6 +605,10 @@ def goal_failures(candidate: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     if candidate.get("profile") != "gene_15cm_4s":
         failures.append(f"profile {candidate.get('profile')} != gene_15cm_4s")
+    if candidate.get("run_result_status") != "completed":
+        failures.append(f"run_result_status {candidate.get('run_result_status')} != completed")
+    if candidate.get("safety_result_status") != "pass":
+        failures.append(f"safety_result_status {candidate.get('safety_result_status')} != pass")
     check_min(candidate, "repeat", PASS_THRESHOLDS["min_repeat"], failures)
     if candidate.get("tracking_source") != "tcp_ref_stand":
         failures.append(f"tracking_source {candidate.get('tracking_source')} != tcp_ref_stand")
@@ -525,9 +687,12 @@ def report_markdown(summary: dict[str, Any]) -> str:
     parts = [
         "# ACKON500-GENE-GOAL-01 Report",
         "",
-        f"Result: **{summary['result'].upper()}**",
+        f"Official goal result: **{summary['official_goal_result'].upper()}**",
         "",
         "This is rbpodo controller pgmode-simulation evidence only. Physical robot motion is not approved.",
+        "",
+        "The official orientation criterion is `p95_orientation_drift_rad <= 0.02`. "
+        "`max_orientation_drift_rad` remains visible as a non-fatal diagnostic spike unless it is promoted in GOAL.md.",
         "",
         "## Best candidate",
         "",
@@ -535,7 +700,12 @@ def report_markdown(summary: dict[str, Any]) -> str:
             [best] if best else [],
             [
                 "name",
-                "pass",
+                "goal_pass",
+                "ackon500_goal_status",
+                "run_result_status",
+                "safety_result_status",
+                "benchmark_threshold_status",
+                "diagnostic_warning_count",
                 "acceptance_semantics",
                 "commands_sent_total",
                 "commands_acked_total",
@@ -550,6 +720,29 @@ def report_markdown(summary: dict[str, Any]) -> str:
             ],
         ),
         "",
+        "## Run execution result",
+        "",
+        table(
+            candidates,
+            ["name", "run_result_status", "safety_result_status", "result_reason"],
+        ),
+        "",
+        "## Generic diagnostic threshold result",
+        "",
+        "Generic benchmark thresholds are reported separately from the official ACKON500 goal. "
+        "A candidate can be goal PASS while carrying a diagnostic warning, for example a "
+        "`max_orientation_drift_rad` spike when p95 orientation still satisfies the official goal.",
+        "",
+        table(
+            candidates,
+            [
+                "name",
+                "benchmark_threshold_status",
+                "threshold_failures",
+                "diagnostic_warnings",
+            ],
+        ),
+        "",
         "## Limiting factors",
         "",
         "\n".join(f"- {item}" for item in summary.get("limiting_factors", [])) or "_None._",
@@ -560,7 +753,10 @@ def report_markdown(summary: dict[str, Any]) -> str:
             candidates,
             [
                 "name",
-                "pass",
+                "goal_pass",
+                "ackon500_goal_status",
+                "run_result_status",
+                "benchmark_threshold_status",
                 "async_mode",
                 "acceptance_semantics",
                 "repeat",
@@ -576,7 +772,7 @@ def report_markdown(summary: dict[str, Any]) -> str:
                 "effective_phase_latency_abs_ms",
                 "state_age_p95_us",
                 "feedback_saturation_ratio",
-                "result",
+                "diagnostic_warning_count",
             ],
         ),
         "",
@@ -598,6 +794,9 @@ def timing_markdown(summary: dict[str, Any]) -> str:
                 summary.get("candidates", []),
                 [
                     "name",
+                    "goal_pass",
+                    "run_result_status",
+                    "benchmark_threshold_status",
                     "async_mode",
                     "commands_sent_total",
                     "commands_acked_total",
@@ -626,11 +825,15 @@ def error_markdown(summary: dict[str, Any]) -> str:
                 summary.get("candidates", []),
                 [
                     "name",
+                    "goal_pass",
+                    "benchmark_threshold_status",
                     "rms_error_m",
                     "p95_error_m",
                     "fit_center_error_m",
                     "radius_gain",
                     "p95_orientation_drift_rad",
+                    "max_orientation_drift_rad",
+                    "diagnostic_warnings",
                     "feedback_saturation_ratio",
                     "measurement_reliability_level",
                     "failures",
@@ -665,6 +868,8 @@ def build_summary(artifact_root: Path) -> dict[str, Any]:
         "artifact_root": str(artifact_root.resolve()),
         "result": result,
         "pass": result == "pass",
+        "goal_pass": result == "pass",
+        "official_goal_result": result,
         "thresholds": PASS_THRESHOLDS,
         "candidate_count": len(candidates),
         "best_candidate": best,
@@ -693,7 +898,7 @@ def main() -> int:
         print(f"generate_ackon500_gene_goal_report: FAIL: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(summary, indent=2, sort_keys=True))
-    if args.require_pass and summary.get("result") != "pass":
+    if args.require_pass and summary.get("goal_pass") is not True:
         return 2
     return 0
 

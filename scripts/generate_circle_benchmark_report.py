@@ -125,6 +125,10 @@ REPORT_COLUMNS = [
     "center_error_mm",
     "score",
     "result",
+    "run_result_status",
+    "benchmark_threshold_status",
+    "ackon500_goal_status",
+    "diagnostic_warning_count",
     "result_reason",
     "server_rejected_cartesian",
     "cartesian_unavailable_count",
@@ -176,6 +180,11 @@ def load_ablation_rows(path: Path) -> list[dict[str, Any]]:
             row["_source"] = str(path)
             row["run_name"] = row.get("name") or row.get("run_name")
             row["performance_warnings"] = row.get("warnings") or row.get("performance_warnings")
+            row["run_result_status"] = row.get("run_result_status") or compare.infer_run_result_status(row)
+            row["benchmark_threshold_status"] = row.get("benchmark_threshold_status") or compare.infer_benchmark_threshold_status(row)
+            row["ackon500_goal_status"] = row.get("ackon500_goal_status") or compare.infer_ackon500_goal_status(row)
+            if not row.get("diagnostic_warning_count"):
+                row["diagnostic_warning_count"] = compare.diagnostic_warning_count(row)
             row.update(compare.async_report_fields(row))
             if not row.get("kp_pos"):
                 row["kp_pos"] = row.get("feedback_kp_pos")
@@ -512,7 +521,7 @@ def baseline_failures(row: dict[str, Any], min_repeats: int) -> list[str]:
 
 def rbpodo_stable_failures(row: dict[str, Any]) -> list[str]:
     failures: list[str] = []
-    if true_metric(row, "server_rejected_cartesian") or row.get("result") == "blocked":
+    if true_metric(row, "server_rejected_cartesian") or row.get("run_result_status") == "blocked" or row.get("result") == "blocked":
         failures.append("Cartesian commands were rejected by server before path execution")
     if row_category(row) != "rbpodo_controller_simulation":
         failures.append("category is not rbpodo_controller_simulation")
@@ -571,7 +580,7 @@ def stress_failures(row: dict[str, Any]) -> list[str]:
 
 def rbpodo_stress_failures(row: dict[str, Any]) -> list[str]:
     failures: list[str] = []
-    if true_metric(row, "server_rejected_cartesian") or row.get("result") == "blocked":
+    if true_metric(row, "server_rejected_cartesian") or row.get("run_result_status") == "blocked" or row.get("result") == "blocked":
         failures.append("Cartesian commands were rejected by server before path execution")
     if row_category(row) != "rbpodo_controller_simulation":
         failures.append("category is not rbpodo_controller_simulation")
@@ -609,7 +618,7 @@ def classify_rbpodo_tuning_row(row: dict[str, Any]) -> None:
     reasons = rbpodo_tuning_rejection_reasons(row)
     missing = missing_rbpodo_candidate_metrics(row)
 
-    if true_metric(row, "server_rejected_cartesian") or row.get("result") == "blocked":
+    if true_metric(row, "server_rejected_cartesian") or row.get("run_result_status") == "blocked" or row.get("result") == "blocked":
         row["classification"] = "rbpodo_controller_sim_cartesian_blocked"
         row["real_candidate_policy"] = "not_real_ready"
         row["promotion_notes"] = (

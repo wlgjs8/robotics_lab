@@ -54,7 +54,18 @@ def write_ablation_csv(root: Path, artifact_dir: Path, *, acceptance_semantics: 
         )
 
 
-def write_candidate(root: Path, *, socket_send_only: bool = False, rms_error_m: float = 0.0025) -> Path:
+def write_candidate(
+    root: Path,
+    *,
+    socket_send_only: bool = False,
+    rms_error_m: float = 0.0025,
+    result: str = "pass",
+    result_reason: str = "thresholds applied and satisfied",
+    threshold_failures: list[str] | None = None,
+    max_orientation_drift_rad: float = 0.01,
+    p95_orientation_drift_rad: float = 0.01,
+    fault_latched: bool = False,
+) -> Path:
     artifact_dir = root / "01_ackon500_gene_sdk_pass"
     write_ablation_csv(root, artifact_dir, acceptance_semantics="socket_send_only" if socket_send_only else "controller_ack_observed")
     summary = {
@@ -71,18 +82,21 @@ def write_candidate(root: Path, *, socket_send_only: bool = False, rms_error_m: 
         "p95_error_m": 0.0055,
         "fit_center_error_m": 0.002,
         "radius_gain": 1.0,
-        "p95_orientation_drift_rad": 0.01,
+        "p95_orientation_drift_rad": p95_orientation_drift_rad,
+        "max_orientation_drift_rad": max_orientation_drift_rad,
         "estimated_latency_ms": 2.5,
         "commanded_phase_advance_ms": 40.0,
         "state_age_us": {"p95": 900.0},
         "feedback_saturation_count": 10,
         "command_count": 10001,
-        "fault_latched": False,
+        "fault_latched": fault_latched,
         "physical_motion_detected": False,
         "physical_motion_expected": False,
         "cartesian_unavailable_count": 0,
         "measurement_reliability_level": "controller_reference_valid",
-        "result": "pass",
+        "result": result,
+        "result_reason": result_reason,
+        "threshold_failures": threshold_failures or [],
     }
     write_json(artifact_dir / "summary.json", summary)
     sent = 10000
@@ -149,6 +163,48 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
             self.assertEqual(summary["result"], "fail")
             failures = "\n".join(summary["best_candidate"]["failures"])
             self.assertIn("socket_send_only_count", failures)
+            self.assertEqual(summary["best_candidate"]["ackon500_goal_status"], "fail")
+
+    def test_goal_pass_can_carry_generic_max_orientation_threshold_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_candidate(
+                root,
+                result="fail",
+                result_reason="thresholds applied and failed",
+                threshold_failures=["max_orientation_drift_rad 0.032 exceeds threshold 0.02"],
+                max_orientation_drift_rad=0.032,
+                p95_orientation_drift_rad=0.01,
+            )
+            summary = report.build_summary(root)
+            best = summary["best_candidate"]
+            self.assertEqual(summary["result"], "pass")
+            self.assertTrue(summary["goal_pass"])
+            self.assertEqual(best["run_result_status"], "completed")
+            self.assertEqual(best["ackon500_goal_status"], "pass")
+            self.assertEqual(best["benchmark_threshold_status"], "fail")
+            self.assertIn("max_orientation_drift_spike", best["diagnostic_warnings"])
+            markdown = report.report_markdown(summary)
+            self.assertIn("Official goal result", markdown)
+            self.assertIn("A candidate can be goal PASS", markdown)
+            self.assertIn("max_orientation_drift_rad", markdown)
+
+    def test_faulted_candidate_fails_goal_and_run_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_candidate(
+                root,
+                result="faulted",
+                result_reason="server fault latched",
+                fault_latched=True,
+            )
+            summary = report.build_summary(root)
+            best = summary["best_candidate"]
+            self.assertEqual(summary["result"], "fail")
+            self.assertEqual(best["run_result_status"], "faulted")
+            self.assertEqual(best["safety_result_status"], "fail")
+            self.assertEqual(best["ackon500_goal_status"], "fail")
+            self.assertIn("fault_latched", "\n".join(best["failures"]))
 
     def test_cli_help_works(self) -> None:
         script = Path(__file__).with_name("generate_ackon500_gene_goal_report.py")
