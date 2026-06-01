@@ -29,6 +29,10 @@ Use these templates only for `rbpodo` controller-simulation bring-up:
 | Servo J no-op ACK-off | `rb_servo_server/config/dual_real_rbpodo_sim_noop_200hz_no_ack.example.yaml` | 200 Hz | `50043` / `50143` | controller pgmode simulation only, experimental |
 | stable circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml` | 100 Hz | command `50051`, state `50151` recorder + `50161` GUI | controller pgmode simulation only |
 | GENE-style stress circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml` | 100 Hz | command `50052`, state `50152` recorder + `50162` GUI | controller pgmode simulation only, stress |
+| safe 500 Hz circle | `rb_servo_server/config/dual_real_rbpodo_circle_5cm10s_500hz.example.yaml` | 500 Hz | command `50251`, state `50351` recorder + `50361` GUI | controller pgmode simulation only, staged |
+| stable 500 Hz circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm16s_500hz.example.yaml` | 500 Hz | command `50252`, state `50352` recorder + `50362` GUI | controller pgmode simulation only, staged |
+| middle 500 Hz circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm8s_500hz.example.yaml` | 500 Hz | command `50253`, state `50353` recorder + `50363` GUI | controller pgmode simulation only, staged |
+| stress 500 Hz circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz.example.yaml` | 500 Hz | command `50254`, state `50354` recorder + `50364` GUI | controller pgmode simulation only, stress |
 
 Copy a template to `rb_servo_server/config/local/` and edit the copy for the
 site. Treat `local/*.yaml` as operator-owned working files, not production
@@ -48,6 +52,16 @@ passed:
 tools/create_rbpodo_circle_local_configs.sh --force
 ```
 
+Create staged 500 Hz local configs only when you intend to run the 500 Hz
+acceptance track:
+
+```bash
+tools/create_rbpodo_circle_local_configs.sh --include-500hz
+```
+
+The 500 Hz configs are not created by default and do not change the existing
+100 Hz circle defaults.
+
 Verify the controller-simulation Cartesian gate and physical-real block before
 running:
 
@@ -57,6 +71,15 @@ grep -H "allow_in_real: false" rb_servo_server/config/local/dual_real_rbpodo_cir
 grep -H "operation_mode: simulation" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
 grep -H "controller_simulation_servo_state_source: reference" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
 grep -H "controller_simulation_divergence_source: reference" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm*.yaml
+```
+
+For 500 Hz local configs, use the `_500hz` glob and also verify `servo_t1_sec`
+matches the 2 ms command period:
+
+```bash
+grep -H "servo_t1_sec: 0.002" rb_servo_server/config/local/*_500hz.yaml
+grep -H "allow_in_real: false" rb_servo_server/config/local/*_500hz.yaml
+grep -H "operation_mode: simulation" rb_servo_server/config/local/*_500hz.yaml
 ```
 
 The required shape for rbpodo controller simulation is:
@@ -527,6 +550,35 @@ Use `circle_15cm_8s` before the 4 s stress case to isolate whether 4 s
 failures are bandwidth, latency, saturation, or speed-limit constrained rather
 than basic 15 cm tracking errors. The 4 s profile is not real-ready and remains
 explicit stress evidence only.
+
+## 500 Hz Controller-Simulation Track
+
+The 500 Hz track is staged from a single-arm no-op rate-probe artifact, not from
+a physical-motion run. Stage 0 evidence in
+`artifacts/rbpodo_servo_j_rate_probe_left` shows 5000/5000 500 Hz Servo J
+no-op sends succeeded over 10 seconds in controller `pgmode` simulation, with
+loop interval p99 about 2.006 ms and max send duration about 501 us. This is
+only enough to begin staged 500 Hz controller-simulation acceptance.
+
+500 Hz is not the default. Existing 100 Hz templates and local-config creation
+remain unchanged unless `--include-500hz` is passed.
+
+Run order:
+
+1. single-arm no-op 500 Hz rate probe: already done for the left controller
+2. `rb_servo_server` dual-arm no-op 500 Hz
+3. 5 cm / 10 s circle
+4. 15 cm / 16 s circle
+5. 15 cm / 8 s circle
+6. 15 cm / 4 s circle
+
+All 500 Hz templates keep `operation_mode: simulation`,
+`disable_waiting_ack: false`, `cartesian_control.allow_in_real: false`,
+`cartesian_control.allow_in_controller_simulation: true`, and
+`network.state_pub_rate_hz: 100`. Do not raise state publication to 500 Hz by
+default.
+
+See `docs/runbooks/rbpodo_500hz_acceptance.md` for the full staged workflow.
 
 The stable baseline profile is `15cm/16s`. It mirrors the current simulator
 baseline:
