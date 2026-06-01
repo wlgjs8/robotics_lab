@@ -1,4 +1,8 @@
+import socket
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 import rbpodo_state_parity_check as parity
 
@@ -26,6 +30,8 @@ def python_sample(raw=None, q_ref=None, suspect=False):
         "q_actual_deg": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
         "q_ref_deg": q_ref,
         "q_target_deg": q_ref,
+        "jnt_ref": q_ref,
+        "jnt_ref_deg": q_ref,
         "q_ref_source": "python_rbpodo.sdata.jnt_ref",
         "raw": raw,
         "diagnostics_suspect": suspect,
@@ -42,6 +48,9 @@ def cpp_sample(raw=None, q_ref=None, suspect=False):
         "q_actual_deg": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
         "q_ref_deg": q_ref,
         "q_target_deg": q_ref,
+        "jnt_ref_deg": q_ref,
+        "q_ref_published": True,
+        "q_target_published": True,
         "q_ref_source": "rbpodo.sdata.jnt_ref",
         "rbpodo_sdk_state_source": "CobotData.request_data",
         "rbpodo_state_decode_policy": "strict_boolean_flags_with_suspect_large_values",
@@ -68,7 +77,7 @@ class RbpodoStateParityCheckTest(unittest.TestCase):
             [cpp_sample(q_ref=[10.0, 11.0, 12.5, 13.0, 14.0, 15.0])],
         )
 
-        self.assertEqual(summary["result"], "failed")
+        self.assertEqual(summary["result"], "failed_parity_mismatch")
         self.assertIn("q_ref_deg", summary["reason"])
 
     def test_suspect_but_consistent_for_shared_huge_diagnostic(self):
@@ -81,8 +90,107 @@ class RbpodoStateParityCheckTest(unittest.TestCase):
         )
 
         self.assertEqual(summary["result"], "suspect_but_consistent")
+        self.assertIn("diagnostics_suspect_unresolved", summary["caveats"])
         self.assertEqual(summary["metrics"]["raw_field_match_rate"], 1.0)
         self.assertEqual(summary["metrics"]["diagnostics_suspect_agreement_rate"], 1.0)
+
+    def test_send_servo_commands_true_config_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = Path(tmpdir) / "unsafe.yaml"
+            config.write_text("servo:\n  send_servo_commands: true\n", encoding="utf-8")
+            args = SimpleNamespace(
+                duration_sec=1.0,
+                sample_rate_hz=1.0,
+                request_timeout_sec=0.1,
+                startup_timeout_sec=0.1,
+                tolerance_deg=0.0,
+                nearest_max_delta_sec=0.1,
+                ips=["172.28.60.200"],
+                i_understand_this_connects_to_real_controller=True,
+                use_running_server=True,
+                server=None,
+                server_config=config,
+            )
+
+            with self.assertRaises(parity.StateParityError) as ctx:
+                parity.ensure_safe_args(args)
+
+            self.assertIn("send_servo_commands: false", str(ctx.exception))
+
+    def test_server_exit_before_state_is_classified_with_log_tail(self):
+        class TimeoutSocket:
+            def settimeout(self, _timeout):
+                pass
+
+            def recvfrom(self, _size):
+                raise socket.timeout()
+
+        class ExitedProcess:
+            def poll(self):
+                return 23
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = Path(tmpdir) / "rb_servo_server.log"
+            log.write_text("line one\nfatal startup\n", encoding="utf-8")
+
+            with self.assertRaises(parity.ParityRunFailure) as ctx:
+                parity.wait_for_initial_cpp_state(
+                    TimeoutSocket(),
+                    0.1,
+                    ExitedProcess(),
+                    log,
+                    "udp://127.0.0.1:50171",
+                )
+
+            self.assertEqual(ctx.exception.result, "failed_server_exit")
+            self.assertIn("fatal startup", "\n".join(ctx.exception.details["server_log_tail"]))
+
+    def test_no_state_packets_is_transport_failure(self):
+        class TimeoutSocket:
+            def settimeout(self, _timeout):
+                pass
+
+            def recvfrom(self, _size):
+                raise socket.timeout()
+
+        class RunningProcess:
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = Path(tmpdir) / "rb_servo_server.log"
+            log.write_text("", encoding="utf-8")
+
+            with self.assertRaises(parity.ParityRunFailure) as ctx:
+                parity.wait_for_initial_cpp_state(
+                    TimeoutSocket(),
+                    0.0,
+                    RunningProcess(),
+                    log,
+                    "udp://127.0.0.1:50171",
+                )
+
+            self.assertEqual(ctx.exception.result, "failed_transport")
+
+    def test_missing_cpp_q_ref_fails_with_caveat(self):
+        sample = cpp_sample()
+        sample.pop("q_ref_deg")
+        sample["q_ref_published"] = False
+
+        summary, _ = parity.compare_samples([python_sample()], [sample])
+
+        self.assertEqual(summary["result"], "failed_parity_mismatch")
+        self.assertIn("q_ref_not_published", summary["reason"])
+        self.assertIn("q_ref_not_published", summary["caveats"])
+
+    def test_fault_latched_state_is_parity_suspect_not_transport_failure(self):
+        sample = cpp_sample()
+        sample["fault_latched"] = True
+
+        summary, _ = parity.compare_samples([python_sample()], [sample])
+
+        self.assertEqual(summary["result"], "passed")
+        self.assertIn("parity_suspect", summary["caveats"])
 
 
 if __name__ == "__main__":

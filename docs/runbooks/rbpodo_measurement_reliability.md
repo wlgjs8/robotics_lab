@@ -287,13 +287,21 @@ Read-only server-start mode:
 ```bash
 python3 scripts/rbpodo_state_parity_check.py \
   --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
-  --server-config rb_servo_server/config/local/dual_real_rbpodo_readonly.yaml \
+  --server-config rb_servo_server/config/local/dual_real_rbpodo_readonly_measurement.yaml \
   --ips 172.28.60.200 172.28.60.201 \
   --duration-sec 5 \
-  --state-endpoint udp://127.0.0.1:50151 \
+  --state-endpoint udp://127.0.0.1:50171 \
   --artifact-dir artifacts/rbpodo_measurement/state_parity \
   --i-understand-this-connects-to-real-controller
 ```
+
+Create the local config from
+`rb_servo_server/config/dual_real_rbpodo_readonly_measurement.example.yaml`.
+The template uses `operation_mode: simulation`,
+`servo.send_servo_commands: false`, read-only unsafe-startup allowances, and
+measurement-only state fanout on `udp://127.0.0.1:50171`. The parity checker
+refuses any supplied server config that does not explicitly set
+`servo.send_servo_commands: false`.
 
 Already-running server mode:
 
@@ -302,7 +310,7 @@ python3 scripts/rbpodo_state_parity_check.py \
   --use-running-server \
   --ips 172.28.60.200 172.28.60.201 \
   --duration-sec 5 \
-  --state-endpoint udp://127.0.0.1:50151 \
+  --state-endpoint udp://127.0.0.1:50171 \
   --artifact-dir artifacts/rbpodo_measurement/state_parity \
   --i-understand-this-connects-to-real-controller
 ```
@@ -310,8 +318,8 @@ python3 scripts/rbpodo_state_parity_check.py \
 Artifacts:
 
 - `summary.json`
-- `samples_python.jsonl`
-- `samples_cpp_state.jsonl`
+- `python_samples.jsonl`
+- `cpp_state_samples.jsonl`
 - `parity.csv`
 - `parity_report.md`
 
@@ -319,6 +327,7 @@ Key metrics:
 
 - `max_q_actual_diff_deg`
 - `max_q_ref_diff_deg`
+- `max_q_target_diff_deg`
 - `raw_field_match_rate`
 - `diagnostics_suspect_agreement_rate`
 - `python_time_plausible`
@@ -328,6 +337,16 @@ Key metrics:
 Interpretation:
 
 - `passed`: Python and C++ samples agree and diagnostics are not suspect.
-- `failed`: field mismatch, missing samples, or missing source metadata.
 - `suspect_but_consistent`: Python and C++ agree, but the decoded values remain
-  suspect and block motion interpretation.
+  suspect and block motion interpretation. The summary caveats include
+  `diagnostics_suspect_unresolved`.
+- `failed_transport`: no state packets or Python rbpodo samples could be read.
+- `failed_server_exit`: `rb_servo_server` exited before publishing state; the
+  summary includes `server_log_tail`.
+- `failed_parity_mismatch`: field mismatch, missing samples, missing source
+  metadata, or missing C++ `q_ref_deg`. Missing C++ q-ref publication is
+  reported with caveat `q_ref_not_published`.
+
+The checker waits for any state packet before sampling. A fault-latched state
+packet is still parity evidence and is reported as `parity_suspect`, not as a
+state-stream transport failure.
