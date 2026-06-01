@@ -1,0 +1,56 @@
+# RBPODO-ASYNC-500HZ-ACCEPT-01 async controller-simulation acceptance matrix.
+#
+# This matrix covers the circle stages after these no-op stages pass with
+# scripts/rbpodo_500hz_acceptance.py:
+# 1. noop_500hz_sdk_ack_worker
+# 2. noop_500hz_socket_send_supervised
+#
+# Local server configs are intentionally referenced under rb_servo_server/config/local.
+# Create them from the 5 cm / 10 s 500 Hz template and add:
+#
+# servo.rbpodo_async_streaming.enable: true
+# servo.rbpodo_async_streaming.mode: socket_send_supervised or sdk_ack_worker
+#
+# socket_send_supervised configs must also set both disable_waiting_ack fields
+# to true. Keep operation_mode: simulation and cartesian_control.allow_in_real:
+# false. Physical robot motion is not expected or approved.
+
+experiments:
+  - name: safe_5cm_10s_socket_send_supervised
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_5cm10s_500hz_socket_send_supervised.yaml
+    profile: safe_5cm_10s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 500
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.2
+    max_allowed_rms_error_m: 0.01
+    max_allowed_p95_error_m: 0.02
+    max_allowed_orientation_drift_rad: 0.05
+    max_allowed_latency_ms: 20
+    skip_plots: false
+    env_requirements: RB_ALLOW_RBPODO_ACK_DISABLED_MOTION,RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM
+
+  - name: safe_5cm_10s_sdk_ack_worker
+    enabled: false
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_5cm10s_500hz_sdk_ack_worker.yaml
+    profile: safe_5cm_10s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 500
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.2
+    max_allowed_rms_error_m: 0.01
+    max_allowed_p95_error_m: 0.02
+    max_allowed_orientation_drift_rad: 0.05
+    max_allowed_latency_ms: 20
+    skip_plots: false
+    env_requirements: RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM

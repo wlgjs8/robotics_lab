@@ -49,6 +49,12 @@ REQUIRED_ENV = (
 )
 CONTROLLER_SIM_CARTESIAN_ENV = "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"
 ACK_DISABLED_ENV = "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION"
+ASYNC_STREAMING_ENV = "RB_ALLOW_RBPODO_ASYNC_STREAMING"
+SOCKET_SEND_ONLY_ENV = "RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING"
+ASYNC_DISABLED = "disabled"
+ASYNC_SDK_ACK_WORKER = "sdk_ack_worker"
+ASYNC_SOCKET_SEND_SUPERVISED = "socket_send_supervised"
+ASYNC_MODES = (ASYNC_DISABLED, ASYNC_SDK_ACK_WORKER, ASYNC_SOCKET_SEND_SUPERVISED)
 
 
 class Acceptance500HzError(RuntimeError):
@@ -145,6 +151,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-servo-jitter-p99-ms", type=float, default=2.5)
     parser.add_argument("--max-deadline-miss-count", type=int, default=0)
     parser.add_argument("--max-worker-drop-count", type=int, default=0)
+    parser.add_argument(
+        "--async-mode",
+        choices=ASYNC_MODES,
+        default=ASYNC_DISABLED,
+        help=(
+            "Configure artifact-local rbpodo async streaming for the measured run. "
+            "disabled preserves synchronous behavior; sdk_ack_worker expects worker "
+            "controller ACK telemetry; socket_send_supervised expects socket-send-only "
+            "plus q_ref/tcp_ref reference supervision."
+        ),
+    )
+    parser.add_argument(
+        "--require-reference-supervision",
+        action="store_true",
+        help="Require async q_ref/tcp_ref supervision telemetry to be present and healthy.",
+    )
+    parser.add_argument("--max-q-ref-update-age-ms", type=float, default=50.0)
+    parser.add_argument("--max-tcp-ref-update-age-ms", type=float, default=50.0)
+    parser.add_argument("--max-overwrite-ratio", type=float, default=0.05)
+    parser.add_argument("--max-drop-ratio", type=float, default=0.0)
+    parser.add_argument("--min-q-ref-update-rate-hz", type=float, default=20.0)
+    parser.add_argument(
+        "--allow-socket-send-only",
+        action="store_true",
+        help=(
+            "Required with --async-mode socket_send_supervised to acknowledge that "
+            "successful sends are socket-send-only evidence, not controller ACKs."
+        ),
+    )
     parser.add_argument("--set-pgmode-simulation", action="store_true")
     parser.add_argument("--verify-pgmode-simulation", action="store_true")
     parser.add_argument("--pgmode-timeout-sec", type=float, default=1.0)
@@ -193,7 +228,17 @@ def env_snapshot_500hz() -> dict[str, str | None]:
     snapshot = env_snapshot()
     snapshot[CONTROLLER_SIM_CARTESIAN_ENV] = os.environ.get(CONTROLLER_SIM_CARTESIAN_ENV)
     snapshot[ACK_DISABLED_ENV] = os.environ.get(ACK_DISABLED_ENV)
+    snapshot[ASYNC_STREAMING_ENV] = os.environ.get(ASYNC_STREAMING_ENV)
+    snapshot[SOCKET_SEND_ONLY_ENV] = os.environ.get(SOCKET_SEND_ONLY_ENV)
     return snapshot
+
+
+def async_mode_value(args: argparse.Namespace | Any) -> str:
+    return str(getattr(args, "async_mode", ASYNC_DISABLED) or ASYNC_DISABLED)
+
+
+def reference_supervision_required(args: argparse.Namespace | Any) -> bool:
+    return bool(getattr(args, "require_reference_supervision", False)) or async_mode_value(args) == ASYNC_SOCKET_SEND_SUPERVISED
 
 
 def active_send_arms(args: argparse.Namespace) -> tuple[str, ...]:
@@ -369,6 +414,7 @@ def write_resolved_config(
 ) -> tuple[Path, dict[str, Any]]:
     data = yaml_document(source_config_path)
     overrides: dict[str, Any] = {}
+    async_mode = async_mode_value(args)
     if command_timeout_sec is not None:
         if not math.isfinite(command_timeout_sec) or command_timeout_sec <= 0.0:
             raise Acceptance500HzError("--command-timeout-sec must be finite and positive")
@@ -384,6 +430,66 @@ def write_resolved_config(
             robot["disable_waiting_ack"] = True
         overrides["left_robot.disable_waiting_ack"] = True
         overrides["right_robot.disable_waiting_ack"] = True
+
+    if async_mode != ASYNC_DISABLED:
+        if getattr(args, "disable_waiting_ack_diagnostic", False):
+            raise Acceptance500HzError("--disable-waiting-ack-diagnostic cannot be combined with --async-mode")
+        servo = nested_dict(data, "servo")
+        async_cfg = nested_dict(servo, "rbpodo_async_streaming")
+        async_cfg["enable"] = True
+        async_cfg["mode"] = async_mode
+        async_cfg["rate_hz"] = COMMAND_RATE_HZ
+        async_cfg["queue_policy"] = "latest_wins"
+        async_cfg.setdefault("max_pending_age_ms", 10)
+        existing_ack_supervision = (
+            async_cfg.get("ack_supervision")
+            if isinstance(async_cfg.get("ack_supervision"), dict)
+            else {}
+        )
+        async_cfg["ack_supervision"] = {
+            "enable": True,
+            "expected_ack_timeout_ms": 50,
+            "missing_ack_fault_after_ms": 100,
+            "max_consecutive_missing_ack": 10,
+            **existing_ack_supervision,
+        }
+        async_cfg["ack_supervision"]["enable"] = True
+        existing_reference_supervision = (
+            async_cfg.get("reference_supervision")
+            if isinstance(async_cfg.get("reference_supervision"), dict)
+            else {}
+        )
+        async_cfg["reference_supervision"] = {
+            **existing_reference_supervision,
+            "enable": True,
+            "q_ref_update_timeout_ms": float(getattr(args, "max_q_ref_update_age_ms", 50.0)),
+            "q_ref_target_tolerance_deg": float(getattr(args, "max_reference_drift_deg", 0.05)),
+            "q_ref_target_fault_after_ms": 100,
+            "tcp_ref_update_timeout_ms": float(getattr(args, "max_tcp_ref_update_age_ms", 50.0)),
+            "tcp_ref_target_tolerance_m": 0.02,
+            "tcp_ref_target_fault_after_ms": 100,
+            "policy": "fault_latch",
+        }
+        diagnostics = async_cfg.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        diagnostics.setdefault("publish_per_command_jsonl", False)
+        async_cfg["diagnostics"] = diagnostics
+        overrides["servo.rbpodo_async_streaming.enable"] = True
+        overrides["servo.rbpodo_async_streaming.mode"] = async_mode
+        overrides["servo.rbpodo_async_streaming.rate_hz"] = COMMAND_RATE_HZ
+        if async_mode == ASYNC_SOCKET_SEND_SUPERVISED:
+            for arm in ARMS:
+                robot = nested_dict(data, f"{arm}_robot")
+                robot["disable_waiting_ack"] = True
+            overrides["left_robot.disable_waiting_ack"] = True
+            overrides["right_robot.disable_waiting_ack"] = True
+        elif async_mode == ASYNC_SDK_ACK_WORKER:
+            for arm in ARMS:
+                robot = nested_dict(data, f"{arm}_robot")
+                robot["disable_waiting_ack"] = False
+            overrides["left_robot.disable_waiting_ack"] = False
+            overrides["right_robot.disable_waiting_ack"] = False
 
     cartesian_control = data.get("cartesian_control")
     cartesian_disabled_for_noop = False
@@ -511,9 +617,13 @@ def validate_numeric_args(args: argparse.Namespace) -> None:
     for name, value in (
         ("--min-send-count-ratio", args.min_send_count_ratio),
         ("--min-controller-acceptance-ratio", args.min_controller_acceptance_ratio),
+        ("--max-overwrite-ratio", getattr(args, "max_overwrite_ratio", 0.05)),
+        ("--max-drop-ratio", getattr(args, "max_drop_ratio", 0.0)),
     ):
-        if not math.isfinite(value) or value <= 0.0 or value > 1.0:
-            raise Acceptance500HzError(f"{name} must be finite and in (0, 1]")
+        lower_ok = value >= 0.0 if name in {"--max-overwrite-ratio", "--max-drop-ratio"} else value > 0.0
+        if not math.isfinite(value) or not lower_ok or value > 1.0:
+            interval = "[0, 1]" if name in {"--max-overwrite-ratio", "--max-drop-ratio"} else "(0, 1]"
+            raise Acceptance500HzError(f"{name} must be finite and in {interval}")
     if args.max_deadline_miss_count < 0:
         raise Acceptance500HzError("--max-deadline-miss-count must be >= 0")
     if args.max_worker_drop_count < 0:
@@ -531,6 +641,19 @@ def validate_numeric_args(args: argparse.Namespace) -> None:
     ):
         if value is not None and (not math.isfinite(value) or value <= 0.0):
             raise Acceptance500HzError(f"{name} must be finite and positive")
+    for name, value in (
+        ("--max-q-ref-update-age-ms", getattr(args, "max_q_ref_update_age_ms", 50.0)),
+        ("--max-tcp-ref-update-age-ms", getattr(args, "max_tcp_ref_update_age_ms", 50.0)),
+        ("--min-q-ref-update-rate-hz", getattr(args, "min_q_ref_update_rate_hz", 20.0)),
+    ):
+        if not math.isfinite(value) or value <= 0.0:
+            raise Acceptance500HzError(f"{name} must be finite and positive")
+    if async_mode_value(args) not in ASYNC_MODES:
+        raise Acceptance500HzError(f"--async-mode must be one of {', '.join(ASYNC_MODES)}")
+    if async_mode_value(args) == ASYNC_DISABLED and getattr(args, "require_reference_supervision", False):
+        raise Acceptance500HzError("--require-reference-supervision requires --async-mode sdk_ack_worker or socket_send_supervised")
+    if async_mode_value(args) != ASYNC_SOCKET_SEND_SUPERVISED and getattr(args, "allow_socket_send_only", False):
+        raise Acceptance500HzError("--allow-socket-send-only is only valid with --async-mode socket_send_supervised")
     parse_ack_timeout_sweep(getattr(args, "ack_timeout_sweep", None))
 
 
@@ -580,6 +703,7 @@ def validate_config_and_env(
     validate_numeric_args(args)
     if args.mode != MODE:
         raise Acceptance500HzError(f"unsupported mode {args.mode}")
+    async_mode = async_mode_value(args)
     ack_disabled_diagnostic = bool(getattr(args, "disable_waiting_ack_diagnostic", False))
     ack_disabled_arms: list[str] = []
     for label, cfg in all_arms(config):
@@ -596,7 +720,9 @@ def validate_config_and_env(
             raise Acceptance500HzError(f"{label}_robot.ip is required")
         if cfg.disable_waiting_ack:
             ack_disabled_arms.append(label)
-            if not ack_disabled_diagnostic:
+            if async_mode == ASYNC_SOCKET_SEND_SUPERVISED:
+                pass
+            elif not ack_disabled_diagnostic:
                 raise Acceptance500HzError("500 Hz no-op acceptance requires ACK-on rbpodo settings")
 
     ack_disabled = bool(ack_disabled_arms)
@@ -611,6 +737,26 @@ def validate_config_and_env(
                 failure_phase="preflight",
                 failure_classification="preflight_env_missing",
             )
+    if async_mode == ASYNC_SOCKET_SEND_SUPERVISED:
+        if set(ack_disabled_arms) != set(ARMS):
+            raise Acceptance500HzError(
+                "--async-mode socket_send_supervised must resolve both arms to disable_waiting_ack=true"
+            )
+        if not getattr(args, "allow_socket_send_only", False):
+            raise Acceptance500HzError(
+                "--async-mode socket_send_supervised requires --allow-socket-send-only",
+                failure_phase="preflight",
+                failure_classification="preflight_env_missing",
+            )
+        if not (env_enabled(ACK_DISABLED_ENV) or env_enabled(SOCKET_SEND_ONLY_ENV)):
+            raise Acceptance500HzError(
+                f"--async-mode socket_send_supervised requires {ACK_DISABLED_ENV}=1 "
+                f"or {SOCKET_SEND_ONLY_ENV}=1",
+                failure_phase="preflight",
+                failure_classification="preflight_env_missing",
+            )
+    elif async_mode == ASYNC_SDK_ACK_WORKER and ack_disabled:
+        raise Acceptance500HzError("--async-mode sdk_ack_worker requires ACK waiting enabled for both arms")
 
     known_ips = {config.left.ip, config.right.ip} & REAL_ROBOT_IPS
     if known_ips and not args.i_understand_this_connects_to_real_controller:
@@ -632,6 +778,12 @@ def validate_config_and_env(
                 failure_phase="preflight",
                 failure_classification="preflight_env_missing",
             )
+    if async_mode != ASYNC_DISABLED and not env_enabled(ASYNC_STREAMING_ENV):
+        raise Acceptance500HzError(
+            f"--async-mode {async_mode} requires {ASYNC_STREAMING_ENV}=1",
+            failure_phase="preflight",
+            failure_classification="preflight_env_missing",
+        )
     if env_enabled("RB_ALLOW_REAL_CARTESIAN"):
         raise Acceptance500HzError(
             "RB_ALLOW_REAL_CARTESIAN must not be set for 500 Hz Servo J no-op acceptance",
@@ -671,6 +823,24 @@ def validate_config_and_env(
     servo_rate_hz = as_float(config.servo.get("rate_hz"))
     if servo_rate_hz is None or abs(servo_rate_hz - COMMAND_RATE_HZ) > 1e-9:
         raise Acceptance500HzError(f"servo.rate_hz must be 500 for {MODE}")
+    async_cfg = sections.get("servo", {}).get("rbpodo_async_streaming")
+    async_enabled = isinstance(async_cfg, dict) and as_bool(async_cfg.get("enable"), False)
+    resolved_async_mode = str(async_cfg.get("mode", ASYNC_DISABLED)) if isinstance(async_cfg, dict) else ASYNC_DISABLED
+    if async_mode == ASYNC_DISABLED:
+        if async_enabled or resolved_async_mode != ASYNC_DISABLED:
+            raise Acceptance500HzError("resolved config has rbpodo async streaming enabled but --async-mode is disabled")
+    else:
+        if not async_enabled or resolved_async_mode != async_mode:
+            raise Acceptance500HzError(
+                f"resolved config must enable servo.rbpodo_async_streaming.mode={async_mode}"
+            )
+        reference_cfg = async_cfg.get("reference_supervision") if isinstance(async_cfg, dict) else None
+        if reference_supervision_required(args) and not (
+            isinstance(reference_cfg, dict) and as_bool(reference_cfg.get("enable"), False)
+        ):
+            raise Acceptance500HzError(
+                f"--async-mode {async_mode} requires servo.rbpodo_async_streaming.reference_supervision.enable=true"
+            )
     tolerance_ratio = as_float(config.servo.get("servo_t1_rate_match_tolerance_ratio"), 0.2) or 0.2
     expected_t1 = COMMAND_PERIOD_SEC
     for label, cfg in all_arms(config):
@@ -705,10 +875,14 @@ def validate_config_and_env(
         "servo_rate_hz": servo_rate_hz,
         "command_rate_hz": COMMAND_RATE_HZ,
         "servo_t1_sec": selected.servo_t1_sec,
+        "async_mode": async_mode,
+        "rbpodo_async_streaming_enabled": async_mode != ASYNC_DISABLED,
+        "reference_supervision_required": reference_supervision_required(args),
+        "allow_socket_send_only": bool(getattr(args, "allow_socket_send_only", False)),
         "disable_waiting_ack": ack_disabled,
         "disable_waiting_ack_diagnostic": ack_disabled_diagnostic,
         "ack_semantics": "socket_send_only" if ack_disabled else "controller_ack_observed",
-        "controller_acceptance_measured": not ack_disabled,
+        "controller_acceptance_measured": async_mode != ASYNC_SOCKET_SEND_SUPERVISED and not ack_disabled,
         "send_servo_commands": send_servo_commands,
         "allow_controller_simulation_motion": True,
         "allow_controller_simulation_diagnostics_suspect": as_bool(
@@ -721,7 +895,15 @@ def validate_config_and_env(
         "command_port": command_port,
         "state_host": state_host,
         "state_port": state_port,
-        "required_env": list(REQUIRED_ENV) + ([ACK_DISABLED_ENV] if ack_disabled_diagnostic else []),
+        "required_env": (
+            list(REQUIRED_ENV)
+            + ([ASYNC_STREAMING_ENV] if async_mode != ASYNC_DISABLED else [])
+            + (
+                [f"{ACK_DISABLED_ENV} or {SOCKET_SEND_ONLY_ENV}"]
+                if async_mode == ASYNC_SOCKET_SEND_SUPERVISED
+                else ([ACK_DISABLED_ENV] if ack_disabled_diagnostic else [])
+            )
+        ),
         "env": env_snapshot_500hz(),
         "confirmation_flag": args.i_understand_this_connects_to_real_controller,
         "pgmode_confirmation_flag": args.i_confirm_controller_is_in_pgmode_simulation,
@@ -893,6 +1075,9 @@ def state_excerpt(snapshot: dict[str, Any], arm: str) -> dict[str, Any]:
         "fault_reason",
         "send_policy",
         "send_suppressed",
+        "async_streaming_enabled",
+        "async_streaming_mode",
+        "async_streaming_policy",
     )
     arm_keys = (
         "has_valid_joint_state",
@@ -907,6 +1092,7 @@ def state_excerpt(snapshot: dict[str, Any], arm: str) -> dict[str, Any]:
         "send_command_deadline_missed",
         "last_send",
         "worker",
+        "async_streaming",
     )
     out = {key: snapshot.get(key) for key in top_keys if key in snapshot}
     state = arm_state(snapshot, arm)
@@ -1206,6 +1392,7 @@ def state_stream_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, An
     send_failure_count = 0
     acceptance_count = 0
     ack_count = 0
+    socket_send_only_count = 0
     deadline_missed_count = 0
     period_overrun_count = 0
     stale_state_count = 0
@@ -1245,6 +1432,13 @@ def state_stream_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, An
             acceptance_count += 1
         if last_send.get("ack_observed") is True:
             ack_count += 1
+        semantics = str(
+            last_send.get("send_acceptance_semantics")
+            or last_send.get("last_controller_acceptance_semantics")
+            or ""
+        )
+        if semantics == "socket_send_only":
+            socket_send_only_count += 1
         if state.get("send_command_deadline_missed") is True or snapshot.get("send_command_deadline_missed") is True:
             deadline_missed_count += 1
         if state.get("send_period_overrun") is True or snapshot.get("send_period_overrun") is True:
@@ -1258,6 +1452,15 @@ def state_stream_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, An
             overwrites = finite_number(worker.get("pending_overwrites_total"))
             if overwrites is not None:
                 worker_pending_overwrites = max(worker_pending_overwrites, int(overwrites))
+        async_streaming = state.get("async_streaming")
+        if isinstance(async_streaming, dict):
+            async_duration = finite_number(async_streaming.get("last_async_send_duration_us"))
+            if async_duration is not None:
+                send_durations.append(async_duration)
+            if async_streaming.get("last_controller_acceptance_semantics") == "controller_ack_observed":
+                acceptance_count += 1
+            if async_streaming.get("last_async_acceptance_semantics") == "socket_send_only":
+                socket_send_only_count += 1
     intervals = [(b - a) / 1e6 for a, b in zip(host_times, host_times[1:]) if b >= a]
     jitter = [abs(interval - (1000.0 / COMMAND_RATE_HZ)) for interval in intervals]
     return {
@@ -1272,6 +1475,7 @@ def state_stream_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, An
         "send_failure_count": send_failure_count,
         "controller_acceptance_observed_count": acceptance_count,
         "ack_observed_count": ack_count,
+        "socket_send_only_count": socket_send_only_count,
         "send_deadline_missed_count": deadline_missed_count,
         "send_period_overrun_count": period_overrun_count,
         "send_duration_us": metric_block(send_durations),
@@ -1284,6 +1488,153 @@ def state_stream_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, An
         "worker_pending_overwrites_total": worker_pending_overwrites,
         "fault_latched": any(snapshot.get("fault_latched") is True for snapshot in states),
         "stale_state_count": stale_state_count,
+    }
+
+
+def async_arm_state(snapshot: dict[str, Any], arm: str) -> dict[str, Any] | None:
+    state = arm_state(snapshot, arm)
+    if state is None:
+        return None
+    value = state.get("async_streaming")
+    return value if isinstance(value, dict) else None
+
+
+def nonnegative_int(value: Any) -> int | None:
+    number = finite_number(value)
+    if number is None or number < 0:
+        return None
+    return int(number)
+
+
+def max_counter(samples: list[dict[str, Any]], key: str) -> int:
+    values = [nonnegative_int(sample.get(key)) for sample in samples]
+    return max((value for value in values if value is not None), default=0)
+
+
+def supervision_state_from_samples(samples: list[dict[str, Any]], key: str) -> str:
+    if not samples:
+        return "unknown"
+    rank = {"ok": 0, "warning": 1, "fault": 2}
+    worst = "unknown"
+    worst_rank = -1
+    for sample in samples:
+        value = str(sample.get(key) or "").strip().lower()
+        if value not in rank:
+            continue
+        if rank[value] > worst_rank:
+            worst = value
+            worst_rank = rank[value]
+    return worst
+
+
+def update_rate_from_timestamps(samples: list[dict[str, Any]], key: str) -> float | None:
+    timestamps: list[int] = []
+    previous: int | None = None
+    for sample in samples:
+        value = nonnegative_int(sample.get(key))
+        if value is None or value <= 0:
+            continue
+        if previous is None or value != previous:
+            timestamps.append(value)
+            previous = value
+    if len(timestamps) < 2:
+        return None
+    elapsed_sec = (timestamps[-1] - timestamps[0]) / 1e9
+    if elapsed_sec <= 0.0:
+        return None
+    return (len(timestamps) - 1) / elapsed_sec
+
+
+def async_streaming_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, Any]:
+    samples = [
+        sample
+        for snapshot in states
+        for sample in [async_arm_state(snapshot, arm)]
+        if sample is not None
+    ]
+    q_ref_update_ages = [
+        value
+        for value in (finite_number(sample.get("q_ref_update_age_ms")) for sample in samples)
+        if value is not None
+    ]
+    tcp_ref_update_ages = [
+        value
+        for value in (finite_number(sample.get("tcp_ref_update_age_ms")) for sample in samples)
+        if value is not None
+    ]
+    q_ref_target_errors = [
+        value
+        for value in (finite_number(sample.get("q_ref_target_error_deg_max")) for sample in samples)
+        if value is not None
+    ]
+    tcp_ref_target_errors = [
+        value
+        for value in (finite_number(sample.get("tcp_ref_target_error_m")) for sample in samples)
+        if value is not None
+    ]
+    backlogs = [
+        value
+        for value in (
+            nonnegative_int(sample.get("async_worker_backlog") if "async_worker_backlog" in sample else sample.get("worker_backlog"))
+            for sample in samples
+        )
+        if value is not None
+    ]
+    enabled_observed = any(sample.get("enabled") is True for sample in samples)
+    modes = [str(sample.get("mode")) for sample in samples if sample.get("mode") not in (None, "")]
+    mode_counts = Counter(modes)
+    mode = mode_counts.most_common(1)[0][0] if mode_counts else None
+    commands_enqueued = max_counter(samples, "commands_enqueued_total")
+    commands_sent = max_counter(samples, "commands_sent_total")
+    commands_acked = max_counter(samples, "commands_acked_total")
+    commands_socket_sent = max_counter(samples, "commands_socket_sent_total")
+    commands_overwritten = max_counter(samples, "commands_overwritten_total")
+    commands_dropped = max_counter(samples, "commands_dropped_total")
+    ack_timeout_count = max_counter(samples, "ack_timeout_count")
+    q_ref_watchdog_miss_count = max_counter(samples, "q_ref_watchdog_miss_count")
+    tcp_ref_watchdog_miss_count = max_counter(samples, "tcp_ref_watchdog_miss_count")
+    reference_supervision_fault_count = max_counter(samples, "reference_supervision_fault_count")
+    denominator = max(commands_enqueued, commands_sent, 1)
+    return {
+        "source": "async_streaming",
+        "sample_count": len(samples),
+        "enabled_observed": enabled_observed,
+        "mode": mode,
+        "commands_enqueued_total": commands_enqueued,
+        "commands_sent_total": commands_sent,
+        "commands_acked_total": commands_acked,
+        "commands_socket_sent_total": commands_socket_sent,
+        "socket_send_only_count": commands_socket_sent,
+        "controller_ack_observed_count": commands_acked,
+        "commands_overwritten_total": commands_overwritten,
+        "commands_dropped_total": commands_dropped,
+        "commands_overwritten_ratio": commands_overwritten / denominator,
+        "commands_dropped_ratio": commands_dropped / denominator,
+        "ack_timeout_count": ack_timeout_count,
+        "q_ref_watchdog_miss_count": q_ref_watchdog_miss_count,
+        "tcp_ref_watchdog_miss_count": tcp_ref_watchdog_miss_count,
+        "q_ref_update_rate_hz": update_rate_from_timestamps(samples, "last_q_ref_update_host_time_ns"),
+        "tcp_ref_update_rate_hz": update_rate_from_timestamps(samples, "last_tcp_ref_update_host_time_ns"),
+        "q_ref_update_age_ms": metric_block(q_ref_update_ages),
+        "tcp_ref_update_age_ms": metric_block(tcp_ref_update_ages),
+        "q_ref_update_age_p95_ms": percentile(q_ref_update_ages, 0.95),
+        "tcp_ref_update_age_p95_ms": percentile(tcp_ref_update_ages, 0.95),
+        "q_ref_target_error_deg_max": max(q_ref_target_errors) if q_ref_target_errors else None,
+        "tcp_ref_target_error_m_max": max(tcp_ref_target_errors) if tcp_ref_target_errors else None,
+        "async_worker_backlog_max": max(backlogs) if backlogs else 0,
+        "supervision_state": supervision_state_from_samples(samples, "supervision_state"),
+        "async_supervision_state": supervision_state_from_samples(samples, "async_supervision_state"),
+        "reference_supervision_state": supervision_state_from_samples(samples, "reference_supervision_state"),
+        "reference_supervision_reason": next(
+            (
+                str(sample.get("reference_supervision_reason"))
+                for sample in reversed(samples)
+                if sample.get("reference_supervision_reason") not in (None, "")
+            ),
+            None,
+        ),
+        "reference_supervision_fault_count": reference_supervision_fault_count,
+        "supervision_fault_count": max(reference_supervision_fault_count, ack_timeout_count),
     }
 
 
@@ -1505,7 +1856,40 @@ def classify_acceptance_summary(summary: dict[str, Any], *, phase: str) -> str:
         return "deadline_limited"
     if int(summary.get("send_deadline_missed_count") or 0) > 0:
         return "deadline_limited"
+    failures = summary.get("threshold_failures")
+    if isinstance(failures, list):
+        joined = "\n".join(str(item) for item in failures)
+        if "controller_ack_observed_count" in joined and "sdk_ack_worker" in joined:
+            return "async_ack_missing"
+        if "commands_overwritten_ratio" in joined:
+            return "async_overwrite_limited"
+        if "commands_dropped_ratio" in joined:
+            return "async_drop_limited"
+        if "reference_supervision_state" in joined or "q_ref_update" in joined or "tcp_ref_update" in joined:
+            return "reference_supervision_failed"
+        if "servo_loop_blocked_by_ack" in joined:
+            return "async_servo_loop_blocked"
     return "threshold_failure"
+
+
+def classify_servo_loop_blocked_by_ack(
+    args: argparse.Namespace,
+    async_mode: str,
+    async_metrics: dict[str, Any],
+    *,
+    send_deadline_missed_count: int,
+    servo_jitter: dict[str, Any],
+) -> bool | str:
+    if async_mode == ASYNC_DISABLED:
+        return "unknown"
+    if not async_metrics.get("enabled_observed"):
+        return "unknown"
+    if send_deadline_missed_count > args.max_deadline_miss_count:
+        return True
+    p99_jitter = finite_number(servo_jitter.get("p99")) if isinstance(servo_jitter, dict) else None
+    if p99_jitter is not None and p99_jitter > args.max_servo_jitter_p99_ms:
+        return True
+    return False
 
 
 def summarize_acceptance(
@@ -1520,8 +1904,11 @@ def summarize_acceptance(
     *,
     phase: str = "measurement",
 ) -> dict[str, Any]:
+    async_mode = str(preflight_result.get("async_mode") or async_mode_value(args))
     state_metrics = state_stream_metrics(states, args.arm)
     state_metrics_by_arm = {arm: state_stream_metrics(states, arm) for arm in ARMS}
+    async_metrics = async_streaming_metrics(states, args.arm)
+    async_metrics_by_arm = {arm: async_streaming_metrics(states, arm) for arm in ARMS}
     servo_metrics: dict[str, Any] | None = None
     servo_metrics_by_arm: dict[str, dict[str, Any]] = {}
     if servo_log and isinstance(servo_log.get("path"), str):
@@ -1545,13 +1932,30 @@ def summarize_acceptance(
             else state_metrics_by_arm[arm]
         )
     q_actual_drift = state_metrics.get("q_actual_drift_from_start_deg")
+    q_actual_drift_by_arm = {
+        arm: state_metrics_by_arm[arm].get("q_actual_drift_from_start_deg")
+        for arm in ARMS
+    }
     q_ref_drift = state_metrics.get("q_ref_drift_from_start_deg")
-    physical_motion_detected = (
-        q_actual_drift is not None and float(q_actual_drift) > args.max_physical_motion_deg
+    physical_motion_detected = any(
+        finite_number(q_actual_drift_by_arm.get(arm)) is not None
+        and float(q_actual_drift_by_arm[arm]) > args.max_physical_motion_deg
+        for arm in active_send_arms(args)
     )
     expected_send_count = command_run.expected_command_count
     send_count = int(timing_source.get("send_count") or command_run.command_count)
-    acceptance_count = int(timing_source.get("controller_acceptance_observed_count") or 0)
+    timing_acceptance_count = int(timing_source.get("controller_acceptance_observed_count") or 0)
+    async_ack_count = int(async_metrics.get("controller_ack_observed_count") or 0)
+    if async_mode == ASYNC_SDK_ACK_WORKER:
+        acceptance_count = async_ack_count
+    elif async_mode == ASYNC_SOCKET_SEND_SUPERVISED:
+        acceptance_count = 0
+    else:
+        acceptance_count = max(timing_acceptance_count, async_ack_count)
+    socket_send_only_count = max(
+        int(timing_source.get("socket_send_only_count") or 0),
+        int(async_metrics.get("socket_send_only_count") or 0),
+    )
     send_failure_count = int(timing_source.get("send_failure_count") or 0)
     send_duration = timing_source.get("send_duration_us") if isinstance(timing_source.get("send_duration_us"), dict) else {}
     servo_jitter = (
@@ -1562,6 +1966,13 @@ def summarize_acceptance(
     if not isinstance(servo_jitter, dict):
         servo_jitter = {}
     send_deadline_missed_count = int(timing_source.get("send_deadline_missed_count") or 0)
+    servo_loop_blocked_by_ack = classify_servo_loop_blocked_by_ack(
+        args,
+        async_mode,
+        async_metrics,
+        send_deadline_missed_count=send_deadline_missed_count,
+        servo_jitter=servo_jitter,
+    )
     send_duration_p99_us_by_arm = {
         arm: (
             timing_source_by_arm[arm].get("send_duration_us") or {}
@@ -1589,6 +2000,11 @@ def summarize_acceptance(
         servo_jitter=servo_jitter,
         send_deadline_missed_count=send_deadline_missed_count,
         state_metrics=state_metrics,
+        async_mode=async_mode,
+        async_metrics=async_metrics,
+        controller_ack_observed_count=acceptance_count,
+        socket_send_only_count=socket_send_only_count,
+        servo_loop_blocked_by_ack=servo_loop_blocked_by_ack,
         timing_source_name=str(timing_source.get("source")),
         physical_motion_detected=physical_motion_detected,
     )
@@ -1606,6 +2022,10 @@ def summarize_acceptance(
     diagnostic_only = bool(preflight_result.get("disable_waiting_ack_diagnostic"))
     if failures:
         result_reason = "thresholds applied and failed"
+    elif async_mode == ASYNC_SOCKET_SEND_SUPERVISED:
+        result_reason = "500 Hz socket-send supervised async thresholds satisfied"
+    elif async_mode == ASYNC_SDK_ACK_WORKER:
+        result_reason = "500 Hz SDK ACK-worker async thresholds satisfied"
     elif diagnostic_only:
         result_reason = "500 Hz ACK-off diagnostic thresholds satisfied; controller ACK acceptance not measured"
     else:
@@ -1616,6 +2036,7 @@ def summarize_acceptance(
             **send_failure_details,
             "deadline_miss_count_by_arm": deadline_miss_count_by_arm,
             "send_deadline_missed_count": send_deadline_missed_count,
+            "threshold_failures": failures,
         },
         phase=phase,
     )
@@ -1625,8 +2046,21 @@ def summarize_acceptance(
         "controller boxes are real, physical robot motion is not expected or approved"
         if diagnostic_only
         else (
-            "rbpodo controller-simulation no-op evidence; controller boxes are real, "
-            "physical robot motion is not expected or approved"
+            (
+                "Async socket-send supervised controller-simulation evidence; q_ref/tcp_ref "
+                "supervision is required because socket sends are not controller ACK acceptance; "
+                "physical robot motion is not expected or approved"
+            )
+            if async_mode == ASYNC_SOCKET_SEND_SUPERVISED
+            else (
+                "Async SDK ACK-worker controller-simulation evidence; ACK waiting runs outside "
+                "the servo loop; physical robot motion is not expected or approved"
+            )
+            if async_mode == ASYNC_SDK_ACK_WORKER
+            else (
+                "rbpodo controller-simulation no-op evidence; controller boxes are real, "
+                "physical robot motion is not expected or approved"
+            )
         )
     )
     summary = {
@@ -1640,11 +2074,19 @@ def summarize_acceptance(
         "source_config": preflight_result.get("source_config"),
         "resolved_config": preflight_result.get("resolved_config"),
         "mode": MODE,
+        "acceptance_stage": (
+            f"noop_500hz_{async_mode}"
+            if async_mode != ASYNC_DISABLED
+            else MODE
+        ),
         "arm": args.arm,
         "send_arms": list(active_send_arms(args)),
         "duration_sec": args.duration_sec,
         "command_rate_hz": command_run.command_rate_hz,
         "servo_rate_hz": COMMAND_RATE_HZ,
+        "async_mode": async_mode,
+        "rbpodo_async_streaming_enabled": async_mode != ASYNC_DISABLED,
+        "reference_supervision_required": reference_supervision_required(args),
         "disable_waiting_ack": ack_disabled,
         "disable_waiting_ack_diagnostic": diagnostic_only,
         "ack_semantics": preflight_result.get("ack_semantics"),
@@ -1659,7 +2101,9 @@ def summarize_acceptance(
         "send_count_source": timing_source.get("source"),
         "achieved_udp_command_rate_hz": command_run.command_count / command_run.elapsed_sec,
         "controller_acceptance_observed_count": acceptance_count,
+        "controller_ack_observed_count": acceptance_count,
         "controller_acceptance_ratio": acceptance_count / send_count if send_count > 0 else None,
+        "socket_send_only_count": socket_send_only_count,
         "send_success_count": int(timing_source.get("send_success_count") or 0),
         "send_failure_count": send_failure_count,
         "ack_observed_count": int(timing_source.get("ack_observed_count") or 0),
@@ -1675,6 +2119,7 @@ def summarize_acceptance(
         "state_valid_ratio": state_metrics.get("state_valid_ratio"),
         "state_age_us": state_metrics.get("state_age_us"),
         "q_actual_drift_from_start_deg": q_actual_drift,
+        "q_actual_drift_from_start_deg_by_arm": q_actual_drift_by_arm,
         "q_ref_drift_from_start_deg": q_ref_drift,
         "q_target_drift_from_start_deg": state_metrics.get("q_target_drift_from_start_deg"),
         "physical_motion_expected": False,
@@ -1684,6 +2129,23 @@ def summarize_acceptance(
         "worker_path_used": state_metrics.get("worker_path_used"),
         "worker_command_drops_total": state_metrics.get("worker_command_drops_total"),
         "worker_pending_overwrites_total": state_metrics.get("worker_pending_overwrites_total"),
+        "commands_overwritten_total": async_metrics.get("commands_overwritten_total"),
+        "commands_dropped_total": async_metrics.get("commands_dropped_total"),
+        "commands_overwritten_ratio": async_metrics.get("commands_overwritten_ratio"),
+        "commands_dropped_ratio": async_metrics.get("commands_dropped_ratio"),
+        "async_worker_backlog_max": async_metrics.get("async_worker_backlog_max"),
+        "reference_supervision_state": async_metrics.get("reference_supervision_state"),
+        "reference_supervision_reason": async_metrics.get("reference_supervision_reason"),
+        "q_ref_update_rate_hz": async_metrics.get("q_ref_update_rate_hz"),
+        "tcp_ref_update_rate_hz": async_metrics.get("tcp_ref_update_rate_hz"),
+        "q_ref_update_age_ms": async_metrics.get("q_ref_update_age_ms"),
+        "q_ref_update_age_p95_ms": async_metrics.get("q_ref_update_age_p95_ms"),
+        "tcp_ref_update_age_ms": async_metrics.get("tcp_ref_update_age_ms"),
+        "tcp_ref_update_age_p95_ms": async_metrics.get("tcp_ref_update_age_p95_ms"),
+        "q_ref_target_error_deg_max": async_metrics.get("q_ref_target_error_deg_max"),
+        "tcp_ref_target_error_m_max": async_metrics.get("tcp_ref_target_error_m_max"),
+        "supervision_fault_count": async_metrics.get("supervision_fault_count"),
+        "servo_loop_blocked_by_ack": servo_loop_blocked_by_ack,
         "server_returncode": server_returncode,
         "state_stream": str((artifact_dir / "state_stream.jsonl").resolve()),
         "command_packets": str((artifact_dir / "command_packets.jsonl").resolve()),
@@ -1693,6 +2155,8 @@ def summarize_acceptance(
         "servo_log_metrics_by_arm": servo_metrics_by_arm,
         "state_stream_metrics": state_metrics,
         "state_stream_metrics_by_arm": state_metrics_by_arm,
+        "async_streaming_metrics": async_metrics,
+        "async_streaming_metrics_by_arm": async_metrics_by_arm,
         "safety_preflight": preflight_result,
         "thresholds": {
             "min_send_count_ratio": args.min_send_count_ratio,
@@ -1701,6 +2165,11 @@ def summarize_acceptance(
             "max_servo_jitter_p99_ms": args.max_servo_jitter_p99_ms,
             "max_deadline_miss_count": args.max_deadline_miss_count,
             "max_worker_drop_count": args.max_worker_drop_count,
+            "max_overwrite_ratio": getattr(args, "max_overwrite_ratio", 0.05),
+            "max_drop_ratio": getattr(args, "max_drop_ratio", 0.0),
+            "max_q_ref_update_age_ms": getattr(args, "max_q_ref_update_age_ms", 50.0),
+            "max_tcp_ref_update_age_ms": getattr(args, "max_tcp_ref_update_age_ms", 50.0),
+            "min_q_ref_update_rate_hz": getattr(args, "min_q_ref_update_rate_hz", 20.0),
             "max_physical_motion_deg": args.max_physical_motion_deg,
             "max_reference_drift_deg": args.max_reference_drift_deg,
         },
@@ -1722,6 +2191,11 @@ def threshold_failures(
     servo_jitter: dict[str, Any],
     send_deadline_missed_count: int,
     state_metrics: dict[str, Any],
+    async_mode: str,
+    async_metrics: dict[str, Any],
+    controller_ack_observed_count: int,
+    socket_send_only_count: int,
+    servo_loop_blocked_by_ack: bool | str,
     timing_source_name: str,
     physical_motion_detected: bool,
 ) -> list[str]:
@@ -1729,7 +2203,13 @@ def threshold_failures(
     min_send_count = math.floor(expected_send_count * args.min_send_count_ratio)
     if send_count < min_send_count:
         failures.append(f"send_count {send_count} below minimum {min_send_count} for expected {expected_send_count}")
-    if not getattr(args, "disable_waiting_ack_diagnostic", False):
+    if async_mode == ASYNC_SDK_ACK_WORKER:
+        if controller_ack_observed_count <= 0:
+            failures.append("sdk_ack_worker controller_ack_observed_count must be > 0")
+    elif async_mode == ASYNC_SOCKET_SEND_SUPERVISED:
+        if socket_send_only_count <= 0:
+            failures.append("socket_send_supervised socket_send_only_count must be > 0")
+    elif not getattr(args, "disable_waiting_ack_diagnostic", False):
         min_acceptance = math.floor(max(send_count, 1) * args.min_controller_acceptance_ratio)
         if acceptance_count < min_acceptance:
             failures.append(
@@ -1763,9 +2243,64 @@ def threshold_failures(
     state_valid_ratio = finite_number(state_metrics.get("state_valid_ratio"))
     if state_valid_ratio is None or state_valid_ratio <= 0.0:
         failures.append("state stream did not contain valid selected-arm joint state")
+    elif async_mode != ASYNC_DISABLED and state_valid_ratio < 1.0:
+        failures.append(f"state_valid_ratio {state_valid_ratio:.6f} below 1.0 for async acceptance")
     worker_drops = int(state_metrics.get("worker_command_drops_total") or 0)
     if state_metrics.get("worker_path_used") is True and worker_drops > args.max_worker_drop_count:
         failures.append(f"worker_command_drops_total {worker_drops} exceeds {args.max_worker_drop_count}")
+    if async_mode != ASYNC_DISABLED:
+        if async_metrics.get("enabled_observed") is not True:
+            failures.append(f"{async_mode} async_streaming telemetry was not observed")
+        if async_metrics.get("mode") not in {None, async_mode}:
+            failures.append(f"async_streaming mode {async_metrics.get('mode')} did not match {async_mode}")
+        if servo_loop_blocked_by_ack is not False:
+            failures.append(f"servo_loop_blocked_by_ack was {servo_loop_blocked_by_ack}")
+        overwrite_ratio = finite_number(async_metrics.get("commands_overwritten_ratio"))
+        if overwrite_ratio is None:
+            failures.append("commands_overwritten_ratio unavailable from async telemetry")
+        elif overwrite_ratio > getattr(args, "max_overwrite_ratio", 0.05):
+            failures.append(
+                f"commands_overwritten_ratio {overwrite_ratio:.6f} exceeds {getattr(args, 'max_overwrite_ratio', 0.05):.6f}"
+            )
+        drop_ratio = finite_number(async_metrics.get("commands_dropped_ratio"))
+        if drop_ratio is None:
+            failures.append("commands_dropped_ratio unavailable from async telemetry")
+        elif drop_ratio > getattr(args, "max_drop_ratio", 0.0):
+            failures.append(f"commands_dropped_ratio {drop_ratio:.6f} exceeds {getattr(args, 'max_drop_ratio', 0.0):.6f}")
+    if reference_supervision_required(args):
+        reference_state = str(async_metrics.get("reference_supervision_state") or "unknown")
+        if reference_state != "ok":
+            failures.append(f"reference_supervision_state {reference_state} is not ok")
+        q_ref_age_p95 = finite_number(async_metrics.get("q_ref_update_age_p95_ms"))
+        if q_ref_age_p95 is None:
+            failures.append("q_ref_update_age_p95_ms unavailable from async telemetry")
+        elif q_ref_age_p95 > getattr(args, "max_q_ref_update_age_ms", 50.0):
+            failures.append(
+                f"q_ref_update_age_p95_ms {q_ref_age_p95:.3f} exceeds {getattr(args, 'max_q_ref_update_age_ms', 50.0):.3f}"
+            )
+        tcp_ref_age_p95 = finite_number(async_metrics.get("tcp_ref_update_age_p95_ms"))
+        if tcp_ref_age_p95 is None:
+            failures.append("tcp_ref_update_age_p95_ms unavailable from async telemetry")
+        elif tcp_ref_age_p95 > getattr(args, "max_tcp_ref_update_age_ms", 50.0):
+            failures.append(
+                f"tcp_ref_update_age_p95_ms {tcp_ref_age_p95:.3f} exceeds {getattr(args, 'max_tcp_ref_update_age_ms', 50.0):.3f}"
+            )
+        q_ref_rate = finite_number(async_metrics.get("q_ref_update_rate_hz"))
+        if q_ref_rate is None:
+            failures.append("q_ref_update_rate_hz unavailable from async telemetry")
+        elif q_ref_rate < getattr(args, "min_q_ref_update_rate_hz", 20.0):
+            failures.append(
+                f"q_ref_update_rate_hz {q_ref_rate:.3f} below {getattr(args, 'min_q_ref_update_rate_hz', 20.0):.3f}"
+            )
+        q_ref_target_error = finite_number(async_metrics.get("q_ref_target_error_deg_max"))
+        if q_ref_target_error is None:
+            failures.append("q_ref_target_error_deg_max unavailable from async telemetry")
+        elif q_ref_target_error > args.max_reference_drift_deg:
+            failures.append(
+                f"q_ref_target_error_deg_max {q_ref_target_error:.6f} exceeds {args.max_reference_drift_deg:.6f}"
+            )
+        if int(async_metrics.get("supervision_fault_count") or 0) > 0:
+            failures.append(f"supervision_fault_count {async_metrics.get('supervision_fault_count')} must be 0")
     if send_failure_count > 0:
         failures.append(f"{timing_source_name} reported send failures: {send_failure_count}")
     return failures
@@ -1783,8 +2318,12 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "failure_phase",
         "failure_classification",
         "mode",
+        "acceptance_stage",
         "arm",
         "send_arms",
+        "async_mode",
+        "rbpodo_async_streaming_enabled",
+        "reference_supervision_required",
         "disable_waiting_ack",
         "disable_waiting_ack_diagnostic",
         "ack_semantics",
@@ -1802,7 +2341,9 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "expected_send_count",
         "send_count",
         "controller_acceptance_observed_count",
+        "controller_ack_observed_count",
         "controller_acceptance_ratio",
+        "socket_send_only_count",
         "send_duration_p99_us",
         "send_duration_p99_us_by_arm",
         "servo_jitter_p99_ms",
@@ -1810,6 +2351,15 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "deadline_miss_count_by_arm",
         "ack_timeout_count_by_arm",
         "worker_command_drops_total",
+        "commands_overwritten_total",
+        "commands_dropped_total",
+        "async_worker_backlog_max",
+        "reference_supervision_state",
+        "q_ref_update_rate_hz",
+        "q_ref_update_age_p95_ms",
+        "tcp_ref_update_age_p95_ms",
+        "supervision_fault_count",
+        "servo_loop_blocked_by_ack",
         "physical_motion_detected",
         "q_actual_drift_from_start_deg",
         "q_ref_drift_from_start_deg",
@@ -1895,10 +2445,18 @@ def run_acceptance_once(
             "result_reason": "preflight only",
             "artifact_dir": str(artifact_dir),
             "mode": MODE,
+            "acceptance_stage": (
+                f"noop_500hz_{preflight_result.get('async_mode')}"
+                if preflight_result.get("async_mode") not in (None, ASYNC_DISABLED)
+                else MODE
+            ),
             "failure_phase": None,
             "failure_classification": None,
             "source_config": preflight_result.get("source_config"),
             "resolved_config": preflight_result.get("resolved_config"),
+            "async_mode": preflight_result.get("async_mode", ASYNC_DISABLED),
+            "rbpodo_async_streaming_enabled": bool(preflight_result.get("rbpodo_async_streaming_enabled")),
+            "reference_supervision_required": bool(preflight_result.get("reference_supervision_required")),
             "disable_waiting_ack": bool(preflight_result.get("disable_waiting_ack")),
             "disable_waiting_ack_diagnostic": bool(preflight_result.get("disable_waiting_ack_diagnostic")),
             "ack_semantics": preflight_result.get("ack_semantics"),
@@ -1915,6 +2473,17 @@ def run_acceptance_once(
             "ack_timeout_count_by_arm": {arm: 0 for arm in ARMS},
             "send_duration_p99_us_by_arm": {arm: None for arm in ARMS},
             "deadline_miss_count_by_arm": {arm: 0 for arm in ARMS},
+            "controller_ack_observed_count": 0,
+            "socket_send_only_count": 0,
+            "reference_supervision_state": "unknown",
+            "q_ref_update_rate_hz": None,
+            "q_ref_update_age_p95_ms": None,
+            "tcp_ref_update_age_p95_ms": None,
+            "commands_overwritten_total": 0,
+            "commands_dropped_total": 0,
+            "async_worker_backlog_max": 0,
+            "supervision_fault_count": 0,
+            "servo_loop_blocked_by_ack": "unknown",
             "safety_preflight": preflight_result,
             "preflight_only": True,
         }
@@ -2114,6 +2683,12 @@ def run_ack_timeout_sweep(args: argparse.Namespace) -> dict[str, Any]:
         "result": result,
         "result_reason": "ACK timeout sweep completed",
         "mode": MODE,
+        "acceptance_stage": (
+            f"noop_500hz_{async_mode_value(args)}"
+            if async_mode_value(args) != ASYNC_DISABLED
+            else MODE
+        ),
+        "async_mode": async_mode_value(args),
         "artifact_dir": str(root_artifact_dir),
         "ack_timeout_sweep": timeouts,
         "command_timeout_sec_left": None,
@@ -2130,6 +2705,17 @@ def run_ack_timeout_sweep(args: argparse.Namespace) -> dict[str, Any]:
         "ack_timeout_count_by_arm": ack_timeout_count_by_arm,
         "send_duration_p99_us_by_arm": {arm: None for arm in ARMS},
         "deadline_miss_count_by_arm": {arm: 0 for arm in ARMS},
+        "controller_ack_observed_count": None,
+        "socket_send_only_count": None,
+        "reference_supervision_state": None,
+        "q_ref_update_rate_hz": None,
+        "q_ref_update_age_p95_ms": None,
+        "tcp_ref_update_age_p95_ms": None,
+        "commands_overwritten_total": None,
+        "commands_dropped_total": None,
+        "async_worker_backlog_max": None,
+        "supervision_fault_count": None,
+        "servo_loop_blocked_by_ack": "unknown",
         "sub_experiments": sub_experiments,
         "failure_phase": None if result == "pass" else (first_failed or {}).get("failure_phase"),
         "failure_classification": None
@@ -2185,6 +2771,12 @@ def failure_summary(
         "result_reason": "500 Hz no-op acceptance could not run",
         "error": str(exc),
         "mode": MODE,
+        "acceptance_stage": (
+            f"noop_500hz_{async_mode_value(args)}"
+            if async_mode_value(args) != ASYNC_DISABLED
+            else MODE
+        ),
+        "async_mode": async_mode_value(args),
         "artifact_dir": str(artifact_dir),
         "failure_phase": phase,
         "failure_classification": classification,
@@ -2194,6 +2786,17 @@ def failure_summary(
         "warmup_result": "error" if phase == "warmup" else "not_run",
         "send_duration_p99_us_by_arm": {arm: None for arm in ARMS},
         "deadline_miss_count_by_arm": {arm: 0 for arm in ARMS},
+        "controller_ack_observed_count": 0,
+        "socket_send_only_count": 0,
+        "reference_supervision_state": "unknown",
+        "q_ref_update_rate_hz": None,
+        "q_ref_update_age_p95_ms": None,
+        "tcp_ref_update_age_p95_ms": None,
+        "commands_overwritten_total": 0,
+        "commands_dropped_total": 0,
+        "async_worker_backlog_max": 0,
+        "supervision_fault_count": 0,
+        "servo_loop_blocked_by_ack": "unknown",
         "safety_preflight": {"passed": False, "error": str(exc), "env": env_snapshot_500hz()},
         "threshold_failures": [str(exc)],
         "caveat": "No acceptance evidence was produced.",

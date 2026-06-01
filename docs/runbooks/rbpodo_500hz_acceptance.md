@@ -465,6 +465,119 @@ If `servo_log.csv` is missing, do not treat the run as accepted. The state
 stream is still useful diagnostic evidence, but per-servo-tick 500 Hz
 acceptance depends on the servo log timing and ACK fields.
 
+### Async ACK-Supervised No-Op Acceptance
+
+`RBPODO-ASYNC-500HZ-ACCEPT-01` extends the same no-op runner with explicit
+async modes:
+
+```text
+--async-mode disabled|sdk_ack_worker|socket_send_supervised
+--require-reference-supervision
+--max-q-ref-update-age-ms
+--max-tcp-ref-update-age-ms
+--max-overwrite-ratio
+--max-drop-ratio
+--min-q-ref-update-rate-hz
+--allow-socket-send-only
+```
+
+The runner writes an artifact-local `resolved_config.yaml`; it does not edit
+the source or local YAML. With `--async-mode sdk_ack_worker`, it enables
+`servo.rbpodo_async_streaming.mode: sdk_ack_worker` and keeps ACK waiting
+enabled. With `--async-mode socket_send_supervised`, it enables
+`servo.rbpodo_async_streaming.mode: socket_send_supervised`, sets both
+`disable_waiting_ack` fields in the artifact-local config, and requires
+`--allow-socket-send-only`.
+
+Additional env gates for both async no-op modes:
+
+```bash
+RB_ALLOW_RBPODO_ASYNC_STREAMING=1
+```
+
+`socket_send_supervised` additionally requires one of:
+
+```bash
+RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
+RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1
+```
+
+Run the ACK-worker no-op stage:
+
+```bash
+python3 scripts/rbpodo_500hz_acceptance.py \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --config rb_servo_server/config/local/dual_real_rbpodo_circle_5cm10s_500hz.yaml \
+  --arm left \
+  --send-arms both \
+  --duration-sec 10 \
+  --async-mode sdk_ack_worker \
+  --max-overwrite-ratio 0.05 \
+  --max-drop-ratio 0.0 \
+  --artifact-dir artifacts/rbpodo_async_500hz/noop_sdk_ack_worker \
+  --set-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+Run the socket-send supervised no-op stage:
+
+```bash
+python3 scripts/rbpodo_500hz_acceptance.py \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --config rb_servo_server/config/local/dual_real_rbpodo_circle_5cm10s_500hz.yaml \
+  --arm left \
+  --send-arms both \
+  --duration-sec 10 \
+  --async-mode socket_send_supervised \
+  --allow-socket-send-only \
+  --require-reference-supervision \
+  --min-q-ref-update-rate-hz 20 \
+  --max-q-ref-update-age-ms 50 \
+  --max-tcp-ref-update-age-ms 50 \
+  --max-overwrite-ratio 0.05 \
+  --max-drop-ratio 0.0 \
+  --artifact-dir artifacts/rbpodo_async_500hz/noop_socket_send_supervised \
+  --set-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+Async summaries add these required fields:
+
+```text
+async_mode
+socket_send_only_count
+controller_ack_observed_count
+reference_supervision_state
+q_ref_update_rate_hz
+q_ref_update_age_p95_ms
+tcp_ref_update_age_p95_ms
+commands_overwritten_total
+commands_dropped_total
+async_worker_backlog_max
+supervision_fault_count
+servo_loop_blocked_by_ack
+```
+
+Async no-op pass criteria:
+
+- `fault_latched=false`
+- `physical_motion_detected=false`
+- `send_deadline_missed_count` is at or below `--max-deadline-miss-count`
+- `servo_loop_blocked_by_ack=false`
+- no invalid selected-arm state packets
+- `sdk_ack_worker`: `controller_ack_observed_count > 0` and overwrite/drop
+  ratios are below their thresholds
+- `socket_send_supervised`: `socket_send_only_count > 0`,
+  `reference_supervision_state=ok`, `q_ref_update_rate_hz` is above threshold,
+  q_ref/tcp_ref update ages are below thresholds, and q_ref target error stays
+  within `--max-reference-drift-deg`
+
+Failure classifications distinguish ACK timeout, deadline-limited,
+`async_ack_missing`, `async_overwrite_limited`, `async_drop_limited`,
+`reference_supervision_failed`, and `async_servo_loop_blocked`.
+
 ## Circle Matrix Stages
 
 After the no-op stage passes, run the circle matrices in order. These matrices
@@ -476,6 +589,7 @@ compare 100 Hz against 500 Hz with `network.state_pub_rate_hz: 100`.
 | 1 | `configs/rbpodo_circle_ablation/500hz_stage1_noop_and_safe.yaml` | safe 5 cm / 10 s, low gains, 100 Hz vs 500 Hz |
 | 2 | `configs/rbpodo_circle_ablation/500hz_stage2_15cm16s.yaml` | 15 cm / 16 s open-loop and closed-loop candidates |
 | 3 | `configs/rbpodo_circle_ablation/500hz_stage3_8s_4s.yaml` | 15 cm / 8 s bridge before 15 cm / 4 s stress |
+| async | `configs/rbpodo_circle_ablation/500hz_async_acceptance.yaml` | safe 5 cm / 10 s async socket-send supervised row; ACK-worker row is disabled until no-op ACK-worker evidence is feasible |
 
 Dry-run each matrix before connecting to controllers:
 

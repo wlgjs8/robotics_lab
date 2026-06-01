@@ -83,6 +83,14 @@ def make_args(config: Path, artifact_dir: Path, duration_sec: float = 0.01) -> S
         max_servo_jitter_p99_ms=2.5,
         max_deadline_miss_count=0,
         max_worker_drop_count=0,
+        async_mode=accept.ASYNC_DISABLED,
+        require_reference_supervision=False,
+        max_q_ref_update_age_ms=50.0,
+        max_tcp_ref_update_age_ms=50.0,
+        max_overwrite_ratio=0.05,
+        max_drop_ratio=0.0,
+        min_q_ref_update_rate_hz=20.0,
+        allow_socket_send_only=False,
         set_pgmode_simulation=True,
         verify_pgmode_simulation=False,
         pgmode_timeout_sec=1.0,
@@ -128,6 +136,7 @@ def fake_arm_state(
     deadline_missed: bool = False,
     ack_timeout: bool = False,
     ack_disabled: bool = False,
+    async_streaming: dict | None = None,
 ) -> dict:
     q_ref = [1.0, -2.0, 3.0, -4.0, 5.0, -6.0]
     if ack_timeout:
@@ -180,6 +189,63 @@ def fake_arm_state(
             "command_drops_total": 0,
             "pending_overwrites_total": 0,
         },
+        **({"async_streaming": async_streaming} if async_streaming is not None else {}),
+    }
+
+
+def fake_async_streaming(
+    index: int,
+    *,
+    mode: str,
+    commands_enqueued: int = 10,
+    commands_sent: int = 10,
+    commands_acked: int = 0,
+    commands_socket_sent: int = 0,
+    commands_overwritten: int = 0,
+    commands_dropped: int = 0,
+    reference_state: str = "ok",
+    q_ref_age_ms: float = 4.0,
+    tcp_ref_age_ms: float = 5.0,
+    q_ref_target_error_deg_max: float = 0.01,
+    supervision_fault_count: int = 0,
+) -> dict:
+    update_time_ns = 1_000_000_000 + index * 2_000_000
+    return {
+        "enabled": True,
+        "mode": mode,
+        "queue_policy": "latest_wins",
+        "commands_enqueued_total": commands_enqueued,
+        "commands_sent_total": commands_sent,
+        "commands_acked_total": commands_acked,
+        "commands_socket_sent_total": commands_socket_sent,
+        "commands_overwritten_total": commands_overwritten,
+        "commands_dropped_total": commands_dropped,
+        "ack_timeout_count": 0,
+        "missing_ack_count": 0,
+        "q_ref_watchdog_miss_count": 1 if reference_state == "fault" else 0,
+        "tcp_ref_watchdog_miss_count": 0,
+        "last_q_ref_update_host_time_ns": update_time_ns,
+        "last_tcp_ref_update_host_time_ns": update_time_ns,
+        "last_socket_send_host_time_ns": update_time_ns if commands_socket_sent else 0,
+        "q_ref_update_age_ms": q_ref_age_ms,
+        "tcp_ref_update_age_ms": tcp_ref_age_ms,
+        "q_ref_target_error_deg_max": q_ref_target_error_deg_max,
+        "tcp_ref_target_error_m": 0.001,
+        "last_async_send_duration_us": 120.0,
+        "last_async_ack_duration_us": 0.0 if commands_socket_sent else 500.0,
+        "last_controller_acceptance_semantics": (
+            "socket_send_only" if commands_socket_sent else "controller_ack_observed"
+        ),
+        "last_async_acceptance_semantics": (
+            "socket_send_only" if commands_socket_sent else "controller_ack_observed"
+        ),
+        "async_worker_backlog": 0,
+        "worker_backlog": 0,
+        "supervision_state": reference_state,
+        "async_supervision_state": reference_state,
+        "reference_supervision_state": reference_state,
+        "reference_supervision_reason": "" if reference_state == "ok" else "async_q_ref_watchdog_miss",
+        "reference_supervision_fault_count": supervision_fault_count,
     }
 
 
@@ -191,8 +257,14 @@ def fake_state(
     right_ack_timeout: bool = False,
     left_ack_timeout: bool = False,
     ack_disabled: bool = False,
+    async_mode: str = accept.ASYNC_DISABLED,
+    left_async: dict | None = None,
+    right_async: dict | None = None,
 ) -> dict:
     host_time_ns = 1_000_000_000 + index * 2_000_000
+    if async_mode != accept.ASYNC_DISABLED:
+        left_async = left_async or fake_async_streaming(index, mode=async_mode)
+        right_async = right_async or fake_async_streaming(index, mode=async_mode)
     return {
         "schema_version": 1,
         "host_time_ns": host_time_ns,
@@ -201,13 +273,21 @@ def fake_state(
         "safety_verdict": "Ok",
         "fault_latched": right_ack_timeout or left_ack_timeout,
         "observed_backend": "rbpodo",
+        "async_streaming_enabled": async_mode != accept.ASYNC_DISABLED,
+        "async_streaming_mode": async_mode,
+        "async_streaming_policy": "latest_wins",
         "left": fake_arm_state(
             q_actual_5=q_actual_5,
             deadline_missed=deadline_missed,
             ack_timeout=left_ack_timeout,
             ack_disabled=ack_disabled,
+            async_streaming=left_async,
         ),
-        "right": fake_arm_state(ack_timeout=right_ack_timeout, ack_disabled=ack_disabled),
+        "right": fake_arm_state(
+            ack_timeout=right_ack_timeout,
+            ack_disabled=ack_disabled,
+            async_streaming=right_async,
+        ),
     }
 
 
@@ -223,6 +303,8 @@ class Rbpodo500HzAcceptanceTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("servo_j_noop_500hz", completed.stdout)
+        self.assertIn("--async-mode", completed.stdout)
+        self.assertIn("socket_send_supervised", completed.stdout)
 
     def test_preflight_rejects_operation_mode_real(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
@@ -312,6 +394,27 @@ class Rbpodo500HzAcceptanceTests(unittest.TestCase):
             resolved_text = Path(preflight["resolved_config"]).read_text(encoding="utf-8")
             self.assertEqual(resolved_text.count("disable_waiting_ack: true"), 2)
 
+    def test_socket_send_supervised_preflight_writes_async_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            config_path = write_config(tmp, cartesian_enable=False)
+            args = make_args(config_path, tmp / "artifacts")
+            args.async_mode = accept.ASYNC_SOCKET_SEND_SUPERVISED
+            args.allow_socket_send_only = True
+            env = {
+                **required_env(),
+                "RB_ALLOW_RBPODO_ASYNC_STREAMING": "1",
+                "RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING": "1",
+            }
+            with mock.patch.dict(os.environ, env, clear=True):
+                _config, preflight = accept.preflight(args, run_pgmode=False)
+            self.assertEqual(preflight["async_mode"], accept.ASYNC_SOCKET_SEND_SUPERVISED)
+            self.assertEqual(preflight["ack_semantics"], "socket_send_only")
+            self.assertFalse(preflight["controller_acceptance_measured"])
+            resolved_text = Path(preflight["resolved_config"]).read_text(encoding="utf-8")
+            self.assertIn("mode: socket_send_supervised", resolved_text)
+            self.assertEqual(resolved_text.count("disable_waiting_ack: true"), 2)
+
     def test_fake_state_stream_noop_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)
@@ -386,6 +489,144 @@ class Rbpodo500HzAcceptanceTests(unittest.TestCase):
             self.assertFalse(summary["controller_acceptance_measured"])
             self.assertEqual(summary["ack_semantics"], "socket_send_only")
             self.assertIn("controller ACK acceptance not measured", summary["result_reason"])
+
+    def test_fake_socket_send_supervised_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            config_path = write_config(tmp)
+            config = accept.load_config(config_path)
+            args = make_args(config_path, tmp / "artifacts")
+            args.async_mode = accept.ASYNC_SOCKET_SEND_SUPERVISED
+            args.require_reference_supervision = True
+            args.allow_socket_send_only = True
+            states = [
+                fake_state(
+                    index,
+                    ack_disabled=True,
+                    async_mode=accept.ASYNC_SOCKET_SEND_SUPERVISED,
+                    left_async=fake_async_streaming(
+                        index,
+                        mode=accept.ASYNC_SOCKET_SEND_SUPERVISED,
+                        commands_enqueued=index + 1,
+                        commands_sent=index + 1,
+                        commands_socket_sent=index + 1,
+                    ),
+                )
+                for index in range(5)
+            ]
+            command_run = accept.CommandRunMetrics(5, 5, states[0]["host_time_ns"], states[-1]["host_time_ns"], 0.01, 0, 0.0, True)
+            summary = accept.summarize_acceptance(
+                args,
+                config,
+                {
+                    "passed": True,
+                    "mode": accept.MODE,
+                    "async_mode": accept.ASYNC_SOCKET_SEND_SUPERVISED,
+                    "disable_waiting_ack": True,
+                    "ack_semantics": "socket_send_only",
+                    "controller_acceptance_measured": False,
+                    "reference_supervision_required": True,
+                },
+                states,
+                command_run,
+                tmp,
+                None,
+                None,
+            )
+            self.assertEqual(summary["result"], "pass", json.dumps(summary["threshold_failures"]))
+            self.assertEqual(summary["async_mode"], accept.ASYNC_SOCKET_SEND_SUPERVISED)
+            self.assertGreater(summary["socket_send_only_count"], 0)
+            self.assertEqual(summary["reference_supervision_state"], "ok")
+            self.assertFalse(summary["servo_loop_blocked_by_ack"])
+
+    def test_fake_q_ref_watchdog_miss_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            config_path = write_config(tmp)
+            config = accept.load_config(config_path)
+            args = make_args(config_path, tmp / "artifacts")
+            args.async_mode = accept.ASYNC_SOCKET_SEND_SUPERVISED
+            args.require_reference_supervision = True
+            args.allow_socket_send_only = True
+            states = [
+                fake_state(
+                    index,
+                    ack_disabled=True,
+                    async_mode=accept.ASYNC_SOCKET_SEND_SUPERVISED,
+                    left_async=fake_async_streaming(
+                        index,
+                        mode=accept.ASYNC_SOCKET_SEND_SUPERVISED,
+                        commands_enqueued=index + 1,
+                        commands_sent=index + 1,
+                        commands_socket_sent=index + 1,
+                        reference_state="fault",
+                        q_ref_age_ms=75.0,
+                        supervision_fault_count=1,
+                    ),
+                )
+                for index in range(5)
+            ]
+            command_run = accept.CommandRunMetrics(5, 5, states[0]["host_time_ns"], states[-1]["host_time_ns"], 0.01, 0, 0.0, True)
+            summary = accept.summarize_acceptance(args, config, {"passed": True, "async_mode": accept.ASYNC_SOCKET_SEND_SUPERVISED}, states, command_run, tmp, None, None)
+            self.assertEqual(summary["result"], "fail")
+            self.assertEqual(summary["failure_classification"], "reference_supervision_failed")
+            self.assertTrue(any("reference_supervision_state" in item for item in summary["threshold_failures"]))
+
+    def test_fake_worker_overwrite_too_high_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            config_path = write_config(tmp)
+            config = accept.load_config(config_path)
+            args = make_args(config_path, tmp / "artifacts")
+            args.async_mode = accept.ASYNC_SDK_ACK_WORKER
+            args.max_overwrite_ratio = 0.1
+            states = [
+                fake_state(
+                    index,
+                    async_mode=accept.ASYNC_SDK_ACK_WORKER,
+                    left_async=fake_async_streaming(
+                        index,
+                        mode=accept.ASYNC_SDK_ACK_WORKER,
+                        commands_enqueued=10,
+                        commands_sent=5,
+                        commands_acked=5,
+                        commands_overwritten=5,
+                    ),
+                )
+                for index in range(5)
+            ]
+            command_run = accept.CommandRunMetrics(5, 5, states[0]["host_time_ns"], states[-1]["host_time_ns"], 0.01, 0, 0.0, True)
+            summary = accept.summarize_acceptance(args, config, {"passed": True, "async_mode": accept.ASYNC_SDK_ACK_WORKER}, states, command_run, tmp, None, None)
+            self.assertEqual(summary["result"], "fail")
+            self.assertEqual(summary["failure_classification"], "async_overwrite_limited")
+            self.assertTrue(any("commands_overwritten_ratio" in item for item in summary["threshold_failures"]))
+
+    def test_fake_ack_worker_no_ack_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            config_path = write_config(tmp)
+            config = accept.load_config(config_path)
+            args = make_args(config_path, tmp / "artifacts")
+            args.async_mode = accept.ASYNC_SDK_ACK_WORKER
+            states = [
+                fake_state(
+                    index,
+                    async_mode=accept.ASYNC_SDK_ACK_WORKER,
+                    left_async=fake_async_streaming(
+                        index,
+                        mode=accept.ASYNC_SDK_ACK_WORKER,
+                        commands_enqueued=index + 1,
+                        commands_sent=index + 1,
+                        commands_acked=0,
+                    ),
+                )
+                for index in range(5)
+            ]
+            command_run = accept.CommandRunMetrics(5, 5, states[0]["host_time_ns"], states[-1]["host_time_ns"], 0.01, 0, 0.0, True)
+            summary = accept.summarize_acceptance(args, config, {"passed": True, "async_mode": accept.ASYNC_SDK_ACK_WORKER}, states, command_run, tmp, None, None)
+            self.assertEqual(summary["result"], "fail")
+            self.assertEqual(summary["failure_classification"], "async_ack_missing")
+            self.assertTrue(any("controller_ack_observed_count" in item for item in summary["threshold_failures"]))
 
     def test_fake_deadline_misses_fail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
