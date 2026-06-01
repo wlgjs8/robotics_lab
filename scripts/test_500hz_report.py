@@ -21,6 +21,11 @@ def circle_row(
     p95_error_mm: float = 6.0,
     servo_jitter_p99_ms: float = 0.2,
     result: str = "completed",
+    async_mode: str = "disabled",
+    acceptance_semantics: str = "controller_ack_observed",
+    reference_supervision_state: str = "",
+    physical_motion_detected: bool = False,
+    deadline_miss_count: int = 0,
 ) -> dict[str, object]:
     return report.normalize_row(
         {
@@ -30,24 +35,29 @@ def circle_row(
             "controller": "twist_stand_feedback",
             "tracking_source": "tcp_ref_stand",
             "result": result,
+            "async_mode": async_mode,
+            "acceptance_semantics": acceptance_semantics,
             "send_success_rate": 1.0,
             "controller_acceptance_observed_rate": 1.0,
+            "controller_ack_observed_count": 100,
             "send_duration_p99_us": 250.0,
             "send_duration_max_us": 500.0,
             "servo_jitter_p99_ms": servo_jitter_p99_ms,
-            "deadline_miss_count": 0,
+            "deadline_miss_count": deadline_miss_count,
             "command_interval_max_ms": 10.0 if rate_hz == 100 else 2.0,
             "state_pub_rate_hz": 100.0,
             "q_ref_update_rate_hz": 100.0,
+            "q_ref_target_error_deg_max": 0.05,
             "rms_error_mm": rms_error_mm,
             "p95_error_mm": p95_error_mm,
             "tail_ratio": 1.5,
             "orientation_p95_deg": 1.0,
             "feedback_saturation_count": 0,
             "measurement_reliability_level": "controller_reference_valid",
-            "physical_motion_detected": False,
+            "physical_motion_detected": physical_motion_detected,
             "fault_latched": False,
             "cartesian_unavailable_count": 0,
+            "reference_supervision_state": reference_supervision_state,
         },
         source_kind="circle",
     )
@@ -100,37 +110,40 @@ class Rbpodo500HzReportTest(unittest.TestCase):
                 ],
             }
         )
-        selected, comparisons = report.build_report(rows)
+        selected, comparisons, comparative = report.build_report(rows)
         noop = next(row for row in comparisons if row["profile"] == "noop_acceptance")
         selected_500 = next(row for row in selected if row["profile"] == "noop_acceptance" and row["rate_hz"] == 500.0)
-        self.assertEqual(noop["classification"], "500hz_noop_pass")
+        self.assertEqual(noop["classification"], "500hz_async_supervised_pass")
         self.assertEqual(selected_500["measurement_reliability_level"], "acceptance_stage_noop")
-        markdown = report.report_markdown(selected, comparisons, "test")
-        self.assertIn("no-op success does not prove physical real motion", markdown)
+        self.assertTrue(any(row["lane"] == "500hz_ack_on" for row in comparative))
+        markdown = report.report_markdown(selected, comparisons, comparative, "test")
+        self.assertIn("controller_ack_observed", markdown)
         self.assertIn("Do not change the default rate automatically", markdown)
 
-    def test_lower_jitter_lower_rms_classifies_improved(self) -> None:
-        _selected, comparisons = report.build_report(
+    def test_lower_jitter_lower_rms_classifies_supervised_pass(self) -> None:
+        _selected, comparisons, _comparative = report.build_report(
             [
                 circle_row(rate_hz=100.0, rms_error_mm=5.0, p95_error_mm=8.0, servo_jitter_p99_ms=0.5),
                 circle_row(rate_hz=500.0, rms_error_mm=3.0, p95_error_mm=6.0, servo_jitter_p99_ms=0.2),
             ]
         )
         safe = next(row for row in comparisons if row["profile"] == "safe_5cm_10s")
-        self.assertEqual(safe["classification"], "500hz_circle_improved")
+        self.assertEqual(safe["classification"], "500hz_async_supervised_pass")
+        self.assertEqual(safe["tracking_delta_interpretation"], "tracking_improved")
 
-    def test_higher_500hz_error_classifies_no_improvement(self) -> None:
-        _selected, comparisons = report.build_report(
+    def test_higher_500hz_error_still_shows_no_tracking_improvement(self) -> None:
+        _selected, comparisons, _comparative = report.build_report(
             [
                 circle_row(rate_hz=100.0, rms_error_mm=3.0, p95_error_mm=5.0, servo_jitter_p99_ms=0.2),
                 circle_row(rate_hz=500.0, rms_error_mm=6.0, p95_error_mm=9.0, servo_jitter_p99_ms=0.1),
             ]
         )
         safe = next(row for row in comparisons if row["profile"] == "safe_5cm_10s")
-        self.assertEqual(safe["classification"], "500hz_circle_no_improvement")
+        self.assertEqual(safe["classification"], "500hz_async_supervised_pass")
+        self.assertEqual(safe["tracking_delta_interpretation"], "timing_only_or_no_tracking_improvement")
 
     def test_faulted_500hz_run_classifies_unstable(self) -> None:
-        _selected, comparisons = report.build_report(
+        _selected, comparisons, _comparative = report.build_report(
             [
                 circle_row(rate_hz=100.0, profile="circle_15cm_16s", rms_error_mm=3.0),
                 circle_row(rate_hz=500.0, profile="circle_15cm_16s", rms_error_mm=2.0, result="faulted"),
@@ -138,6 +151,96 @@ class Rbpodo500HzReportTest(unittest.TestCase):
         )
         stable = next(row for row in comparisons if row["profile"] == "circle_15cm_16s")
         self.assertEqual(stable["classification"], "500hz_unstable")
+
+    def test_socket_send_only_good_tracking_is_promising_not_ack_observed(self) -> None:
+        socket_row = circle_row(
+            rate_hz=500.0,
+            rms_error_mm=2.5,
+            p95_error_mm=5.0,
+            async_mode="socket_send_supervised",
+            acceptance_semantics="socket_send_only",
+            reference_supervision_state="ok",
+        )
+        _selected, comparisons, comparative = report.build_report(
+            [
+                circle_row(rate_hz=100.0, rms_error_mm=4.0, p95_error_mm=6.0),
+                socket_row,
+            ]
+        )
+        safe = next(row for row in comparisons if row["profile"] == "safe_5cm_10s")
+        self.assertEqual(safe["classification"], "500hz_socket_send_only_promising")
+        self.assertFalse(socket_row["controller_ack_observed"])
+        self.assertEqual(socket_row["controller_ack_observed_count"], 0.0)
+        self.assertTrue(socket_row["socket_send_only"])
+        self.assertTrue(socket_row["q_ref_supervised"])
+        lane = next(
+            row for row in comparative
+            if row["profile"] == "safe_5cm_10s" and row["lane"] == "500hz_socket_send_supervised"
+        )
+        self.assertTrue(lane["evidence_present"])
+        self.assertEqual(lane["acceptance_semantics"], "socket_send_only")
+
+    def test_sdk_ack_worker_reports_worker_ack_semantics(self) -> None:
+        sdk_row = circle_row(
+            rate_hz=500.0,
+            rms_error_mm=2.5,
+            p95_error_mm=5.0,
+            async_mode="sdk_ack_worker",
+            acceptance_semantics="controller_ack_observed",
+        )
+        _selected, comparisons, comparative = report.build_report(
+            [
+                circle_row(rate_hz=100.0, rms_error_mm=4.0, p95_error_mm=6.0),
+                sdk_row,
+            ]
+        )
+        safe = next(row for row in comparisons if row["profile"] == "safe_5cm_10s")
+        self.assertEqual(safe["classification"], "500hz_async_supervised_pass")
+        self.assertEqual(sdk_row["acceptance_semantics"], "sdk_worker_ack_observed")
+        self.assertTrue(sdk_row["sdk_worker_ack_observed"])
+        self.assertFalse(sdk_row["controller_ack_observed"])
+        lane = next(
+            row for row in comparative
+            if row["profile"] == "safe_5cm_10s" and row["lane"] == "500hz_async_sdk_ack_worker"
+        )
+        self.assertTrue(lane["evidence_present"])
+        self.assertEqual(lane["acceptance_semantics"], "sdk_worker_ack_observed")
+
+    def test_q_ref_watchdog_failure_classifies_failed(self) -> None:
+        _selected, comparisons, _comparative = report.build_report(
+            [
+                circle_row(rate_hz=100.0),
+                circle_row(
+                    rate_hz=500.0,
+                    async_mode="socket_send_supervised",
+                    acceptance_semantics="socket_send_only",
+                    reference_supervision_state="fault",
+                ),
+            ]
+        )
+        safe = next(row for row in comparisons if row["profile"] == "safe_5cm_10s")
+        self.assertEqual(safe["classification"], "500hz_reference_watchdog_failed")
+
+    def test_ack_on_blocking_classifies_limited(self) -> None:
+        _selected, comparisons, _comparative = report.build_report(
+            [
+                circle_row(rate_hz=100.0),
+                circle_row(rate_hz=500.0, deadline_miss_count=3),
+            ]
+        )
+        safe = next(row for row in comparisons if row["profile"] == "safe_5cm_10s")
+        self.assertEqual(safe["classification"], "500hz_ack_on_blocking_limited")
+
+    def test_physical_motion_detected_classifies_unstable(self) -> None:
+        _selected, comparisons, _comparative = report.build_report(
+            [
+                circle_row(rate_hz=100.0),
+                circle_row(rate_hz=500.0, physical_motion_detected=True),
+            ]
+        )
+        safe = next(row for row in comparisons if row["profile"] == "safe_5cm_10s")
+        self.assertEqual(safe["classification"], "500hz_unstable")
+        self.assertIn("physical_motion_detected=true", safe["classification_reason"])
 
     def test_cli_help_and_artifact_writes(self) -> None:
         script = Path(__file__).with_name("generate_rbpodo_500hz_report.py")
@@ -197,9 +300,11 @@ class Rbpodo500HzReportTest(unittest.TestCase):
                 ],
                 check=True,
             )
-            self.assertIn("500hz_noop_pass", md.read_text(encoding="utf-8"))
+            self.assertIn("500hz_async_supervised_pass", md.read_text(encoding="utf-8"))
             self.assertIn("classification", csv_path.read_text(encoding="utf-8"))
-            self.assertEqual(json.loads(json_path.read_text(encoding="utf-8"))["schema"], report.SCHEMA)
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema"], report.SCHEMA)
+            self.assertIn("comparative_rows", payload)
 
 
 if __name__ == "__main__":

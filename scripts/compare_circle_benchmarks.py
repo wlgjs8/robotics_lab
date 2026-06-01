@@ -34,6 +34,20 @@ COLUMNS = [
     ("stress_level", "stress_level"),
     ("command_rate_hz", "command_rate_hz"),
     ("servo_rate_hz", "servo_rate_hz"),
+    ("async_mode", "async_mode"),
+    ("acceptance_semantics", "acceptance_semantics"),
+    ("controller_ack_observed", "controller_ack_observed"),
+    ("sdk_worker_ack_observed", "sdk_worker_ack_observed"),
+    ("socket_send_only", "socket_send_only"),
+    ("q_ref_supervised", "q_ref_supervised"),
+    ("commands_enqueued_total", "commands_enqueued_total"),
+    ("commands_sent_total", "commands_sent_total"),
+    ("commands_acked_total", "commands_acked_total"),
+    ("commands_socket_sent_total", "commands_socket_sent_total"),
+    ("commands_overwritten_total", "commands_overwritten_total"),
+    ("commands_dropped_total", "commands_dropped_total"),
+    ("reference_supervision_state", "reference_supervision_state"),
+    ("q_ref_target_error_deg_max", "q_ref_target_error_deg_max"),
     ("measurement_reliability_level", "measurement_reliability_level"),
     ("reliability_caveats", "reliability_caveats"),
     ("benchmark_interpretation", "benchmark_interpretation"),
@@ -381,6 +395,167 @@ def infer_ack_policy(summary: dict[str, Any]) -> str:
     return ""
 
 
+def semantics_distribution_count(summary: dict[str, Any], semantics: str) -> float | None:
+    distribution = summary.get("send_acceptance_semantics_distribution")
+    if isinstance(distribution, dict):
+        return finite_number(distribution.get(semantics))
+    return None
+
+
+def async_metrics_block(summary: dict[str, Any]) -> dict[str, Any]:
+    value = summary.get("async_streaming_metrics")
+    return value if isinstance(value, dict) else {}
+
+
+def async_metric(summary: dict[str, Any], *keys: str) -> Any:
+    metrics = async_metrics_block(summary)
+    for key in keys:
+        if key in summary and summary.get(key) is not None:
+            return summary.get(key)
+        if key in metrics and metrics.get(key) is not None:
+            return metrics.get(key)
+    return None
+
+
+def async_number(summary: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = finite_number(async_metric(summary, key))
+        if value is not None:
+            return value
+    return None
+
+
+def infer_async_mode(summary: dict[str, Any]) -> str:
+    preflight = safety_preflight(summary)
+    value = first_value(
+        first_present(summary, "async_mode"),
+        first_present(summary, "async_streaming_mode"),
+        async_metrics_block(summary).get("mode"),
+        preflight.get("async_mode"),
+        preflight.get("async_streaming_mode"),
+    )
+    text = str(value).strip() if value not in (None, "") else ""
+    return text or "disabled"
+
+
+def infer_acceptance_semantics(summary: dict[str, Any], async_mode: str) -> str:
+    metrics = async_metrics_block(summary)
+    value = first_value(
+        first_present(
+            summary,
+            "acceptance_semantics",
+            "ack_semantics",
+            "send_acceptance_semantics",
+            "last_controller_acceptance_semantics",
+            "last_async_acceptance_semantics",
+        ),
+        metrics.get("acceptance_semantics"),
+        metrics.get("last_controller_acceptance_semantics"),
+        metrics.get("last_async_acceptance_semantics"),
+    )
+    semantics = str(value).strip() if value not in (None, "") else ""
+    ack_policy = infer_ack_policy(summary)
+    preflight = safety_preflight(summary)
+    disable_waiting_ack = first_value(
+        summary.get("disable_waiting_ack"),
+        preflight.get("disable_waiting_ack"),
+    )
+    ack_disabled = reliability_report.as_bool(disable_waiting_ack) is True
+    if (
+        async_mode == "socket_send_supervised"
+        or ack_disabled
+        or ack_policy in {"ack_off", "disabled", "no_ack", "socket_send_only"}
+        or semantics == "socket_send_only"
+        or semantics_distribution_count(summary, "socket_send_only")
+    ):
+        return "socket_send_only"
+    if async_mode == "sdk_ack_worker" and semantics in {"", "controller_ack_observed"}:
+        return "sdk_worker_ack_observed"
+    if semantics:
+        return semantics
+    if ack_policy in {"ack_on", "wait"}:
+        return "controller_ack_observed"
+    if async_number(summary, "controller_ack_observed_count", "controller_acceptance_observed_count") is not None:
+        return "controller_ack_observed"
+    return ""
+
+
+def async_report_fields(summary: dict[str, Any]) -> dict[str, Any]:
+    async_mode = infer_async_mode(summary)
+    acceptance_semantics = infer_acceptance_semantics(summary, async_mode)
+    socket_send_only = acceptance_semantics == "socket_send_only" or async_mode == "socket_send_supervised"
+
+    controller_ack_count = async_number(
+        summary,
+        "controller_ack_observed_count",
+        "commands_acked_total",
+        "controller_acceptance_observed_count",
+    )
+    socket_send_count = async_number(
+        summary,
+        "commands_socket_sent_total",
+        "socket_send_only_count",
+    )
+    commands_enqueued = async_number(summary, "commands_enqueued_total")
+    commands_sent = async_number(summary, "commands_sent_total")
+    if commands_sent is None:
+        commands_sent = first_number(summary, "send_count", "command_count")
+    commands_acked = async_number(summary, "commands_acked_total", "controller_ack_observed_count")
+    commands_socket_sent = async_number(summary, "commands_socket_sent_total", "socket_send_only_count")
+    if socket_send_only:
+        controller_ack_count = 0.0
+        commands_acked = 0.0
+        if socket_send_count is None:
+            socket_send_count = commands_sent
+        if commands_socket_sent is None:
+            commands_socket_sent = socket_send_count
+    else:
+        socket_send_count = 0.0 if socket_send_count is None else socket_send_count
+        commands_socket_sent = 0.0 if commands_socket_sent is None else commands_socket_sent
+
+    reference_state = str(async_metric(summary, "reference_supervision_state") or "")
+    q_ref_update_rate = async_number(summary, "q_ref_update_rate_hz")
+    q_ref_target_error = async_number(summary, "q_ref_target_error_deg_max")
+    q_ref_supervised = (
+        reference_state == "ok"
+        and q_ref_update_rate is not None
+        and q_ref_update_rate > 0.0
+    )
+    sdk_worker_ack_observed = (
+        acceptance_semantics == "sdk_worker_ack_observed"
+        and not socket_send_only
+        and (controller_ack_count or 0.0) > 0.0
+    )
+    controller_ack_observed = (
+        not socket_send_only
+        and async_mode != "sdk_ack_worker"
+        and acceptance_semantics == "controller_ack_observed"
+        and (controller_ack_count is None or controller_ack_count > 0.0)
+    )
+    return {
+        "async_mode": async_mode,
+        "acceptance_semantics": acceptance_semantics,
+        "controller_ack_observed": controller_ack_observed,
+        "sdk_worker_ack_observed": sdk_worker_ack_observed,
+        "socket_send_only": socket_send_only,
+        "q_ref_supervised": q_ref_supervised,
+        "controller_ack_observed_count": controller_ack_count,
+        "socket_send_only_count": socket_send_count,
+        "commands_enqueued_total": commands_enqueued,
+        "commands_sent_total": commands_sent,
+        "commands_acked_total": commands_acked,
+        "commands_socket_sent_total": commands_socket_sent,
+        "commands_overwritten_total": async_number(summary, "commands_overwritten_total"),
+        "commands_dropped_total": async_number(summary, "commands_dropped_total"),
+        "reference_supervision_state": reference_state,
+        "q_ref_update_rate_hz": q_ref_update_rate,
+        "q_ref_target_error_deg_max": q_ref_target_error,
+        "q_ref_watchdog_miss_count": async_number(summary, "q_ref_watchdog_miss_count"),
+        "supervision_fault_count": async_number(summary, "supervision_fault_count", "reference_supervision_fault_count"),
+        "servo_loop_blocked_by_ack": async_metric(summary, "servo_loop_blocked_by_ack"),
+    }
+
+
 def artifact_path(summary: dict[str, Any], filename: str) -> Path:
     artifact_dir = summary.get("artifact_dir")
     if isinstance(artifact_dir, str) and artifact_dir:
@@ -562,6 +737,7 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
     timestamp_alignment = nested_dict(summary, "timestamp_alignment")
     tail_error_correlation = nested_dict(summary, "tail_error_correlation")
     error_decomposition = error_decomposition_block(summary)
+    async_fields = async_report_fields(summary)
     row = {
         "run_name": run_name(summary),
         "benchmark_category": category,
@@ -583,6 +759,7 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "repeat": summary.get("repeat"),
         "command_rate_hz": first_present(summary, "command_rate_hz", "requested_rate_hz"),
         "servo_rate_hz": summary.get("servo_rate_hz"),
+        **async_fields,
         "radius_gain": radius_gain(summary),
         "mean_error_mm": scaled(summary, "mean_error_m", 1000.0),
         "rms_error_mm": scaled(summary, "rms_error_m", 1000.0),
@@ -607,7 +784,9 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "integrator_clamps_total": summary.get("integrator_clamps_total"),
         "integrator_divergence_total": summary.get("integrator_divergence_total"),
         "send_success_rate": send_success_rate(summary),
-        "controller_acceptance_observed_rate": controller_acceptance_observed_rate(summary),
+        "controller_acceptance_observed_rate": (
+            0.0 if async_fields.get("socket_send_only") else controller_acceptance_observed_rate(summary)
+        ),
         "send_duration_p99_us": first_value(
             first_number(summary, "send_duration_p99_us"),
             nested_percentile_metric(summary, "send_duration_us", "p99"),
@@ -678,7 +857,7 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "tcp_ref_moved": summary.get("tcp_ref_moved"),
         "tcp_actual_moved": summary.get("tcp_actual_moved"),
         "q_sent_update_rate_hz": summary.get("q_sent_update_rate_hz"),
-        "q_ref_update_rate_hz": summary.get("q_ref_update_rate_hz"),
+        "q_ref_update_rate_hz": async_fields.get("q_ref_update_rate_hz"),
         "q_ref_valid_ratio": first_value(
             first_present(summary, "q_ref_valid_ratio"),
             summary.get("q_reference_for_servo_valid_ratio"),
@@ -686,7 +865,7 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "q_actual_update_rate_hz": summary.get("q_actual_update_rate_hz"),
         "q_ref_reason": summary.get("q_ref_reason"),
         "ack_policy": infer_ack_policy(summary),
-        "controller_acceptance_observed_count": summary.get("controller_acceptance_observed_count"),
+        "controller_acceptance_observed_count": async_fields.get("controller_ack_observed_count"),
         "command_timeout_count": summary.get("command_timeout_count"),
         "controller_rejected_count": summary.get("controller_rejected_count"),
         "tcp_ref_valid_ratio": summary.get("tcp_ref_valid_ratio"),

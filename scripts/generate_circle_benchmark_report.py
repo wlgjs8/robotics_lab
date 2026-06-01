@@ -55,6 +55,20 @@ REPORT_COLUMNS = [
     "stress_level",
     "command_rate_hz",
     "servo_rate_hz",
+    "async_mode",
+    "acceptance_semantics",
+    "controller_ack_observed",
+    "sdk_worker_ack_observed",
+    "socket_send_only",
+    "q_ref_supervised",
+    "commands_enqueued_total",
+    "commands_sent_total",
+    "commands_acked_total",
+    "commands_socket_sent_total",
+    "commands_overwritten_total",
+    "commands_dropped_total",
+    "reference_supervision_state",
+    "q_ref_target_error_deg_max",
     "repeat_evidence_count",
     "measurement_reliability_level",
     "reliability_caveats",
@@ -162,6 +176,7 @@ def load_ablation_rows(path: Path) -> list[dict[str, Any]]:
             row["_source"] = str(path)
             row["run_name"] = row.get("name") or row.get("run_name")
             row["performance_warnings"] = row.get("warnings") or row.get("performance_warnings")
+            row.update(compare.async_report_fields(row))
             if not row.get("kp_pos"):
                 row["kp_pos"] = row.get("feedback_kp_pos")
             if not row.get("kp_ori"):
@@ -398,6 +413,9 @@ def rbpodo_tuning_rejection_reasons(row: dict[str, Any]) -> list[str]:
         reasons.append("fault_latched=true")
     if true_metric(row, "physical_motion_detected"):
         reasons.append("physical_motion_detected=true")
+    reference_state = str(row.get("reference_supervision_state") or "")
+    if reference_state in {"fault", "failed", "watchdog_failed"}:
+        reasons.append(f"reference_supervision_state={reference_state}")
     timing = str(row.get("timing_classification") or "")
     if timing and timing != "clean_timing":
         reasons.append(f"timing_classification={timing}")

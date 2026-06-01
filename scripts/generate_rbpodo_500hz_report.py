@@ -30,6 +30,12 @@ COMPARISONS = [
 ]
 
 KEY_FIELDS = [
+    "async_mode",
+    "acceptance_semantics",
+    "controller_ack_observed",
+    "sdk_worker_ack_observed",
+    "socket_send_only",
+    "q_ref_supervised",
     "send_success_rate",
     "controller_acceptance_observed_rate",
     "send_duration_p99_us",
@@ -38,7 +44,15 @@ KEY_FIELDS = [
     "deadline_miss_count",
     "command_interval_max_ms",
     "state_pub_rate_hz",
+    "commands_enqueued_total",
+    "commands_sent_total",
+    "commands_acked_total",
+    "commands_socket_sent_total",
+    "commands_overwritten_total",
+    "commands_dropped_total",
+    "reference_supervision_state",
     "q_ref_update_rate_hz",
+    "q_ref_target_error_deg_max",
     "rms_error_mm",
     "p95_error_mm",
     "tail_ratio",
@@ -67,12 +81,52 @@ COMPARISON_COLUMNS = [
     "classification",
     "rate_100_run",
     "rate_500_run",
+    "rate_100_lane",
+    "rate_500_lane",
+    "tracking_delta_interpretation",
     "recommendation",
     "classification_reason",
     "caveats",
 ]
 for _field in KEY_FIELDS:
     COMPARISON_COLUMNS.extend([f"rate_100_{_field}", f"rate_500_{_field}"])
+
+COMPARATIVE_LANES = [
+    ("100hz_ack_on_best", 100.0),
+    ("500hz_ack_on", 500.0),
+    ("500hz_socket_send_supervised", 500.0),
+    ("500hz_async_sdk_ack_worker", 500.0),
+]
+
+COMPARATIVE_COLUMNS = [
+    "comparison",
+    "lane",
+    "evidence_present",
+    "run_name",
+    "rate_hz",
+    "async_mode",
+    "acceptance_semantics",
+    "controller_ack_observed",
+    "sdk_worker_ack_observed",
+    "socket_send_only",
+    "q_ref_supervised",
+    "result",
+    "rms_error_mm",
+    "p95_error_mm",
+    "servo_jitter_p99_ms",
+    "q_ref_update_rate_hz",
+    "q_ref_target_error_deg_max",
+    "reference_supervision_state",
+    "commands_enqueued_total",
+    "commands_sent_total",
+    "commands_acked_total",
+    "commands_socket_sent_total",
+    "commands_overwritten_total",
+    "commands_dropped_total",
+    "tracking_source",
+    "reliability_caveats",
+    "artifact_dir",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -148,6 +202,18 @@ def ratio(numerator: Any, denominator: Any) -> float | None:
     if top is None or bottom is None or bottom <= 0.0:
         return None
     return top / bottom
+
+
+def append_cell_value(row: dict[str, Any], key: str, value: str) -> None:
+    existing = row.get(key)
+    parts: list[str] = []
+    if isinstance(existing, str):
+        parts = [part.strip() for part in existing.split(";") if part.strip()]
+    elif isinstance(existing, list):
+        parts = [str(part).strip() for part in existing if str(part).strip()]
+    if value not in parts:
+        parts.append(value)
+    row[key] = "; ".join(parts)
 
 
 def load_json_object(path: Path) -> dict[str, Any]:
@@ -244,8 +310,10 @@ def p99_loop_jitter_ms(row: dict[str, Any]) -> float | None:
 
 
 def flatten_metrics(row: dict[str, Any]) -> None:
+    async_fields = compare.async_report_fields(row)
+    row.update(async_fields)
     row["send_success_rate"] = success_rate(row)
-    row["controller_acceptance_observed_rate"] = controller_acceptance_rate(row)
+    row["controller_acceptance_observed_rate"] = 0.0 if row.get("socket_send_only") else controller_acceptance_rate(row)
     row["send_duration_p99_us"] = first_number(row, "send_duration_p99_us") or nested_number(row, "send_duration_us", "p99")
     row["send_duration_max_us"] = first_number(row, "send_duration_max_us") or nested_number(row, "send_duration_us", "max")
     row["servo_jitter_p99_ms"] = p99_loop_jitter_ms(row)
@@ -277,6 +345,9 @@ def flatten_metrics(row: dict[str, Any]) -> None:
         tail = nested_dict(row, "error_decomposition").get("tail_ratio")
         if tail is not None:
             row["tail_ratio"] = tail
+    if row.get("socket_send_only"):
+        append_cell_value(row, "reliability_caveats", "socket_send_only_not_controller_ack")
+        append_cell_value(row, "benchmark_interpretation", "reference_supervision_required")
 
 
 def normalize_row(row: dict[str, Any], *, source_kind: str) -> dict[str, Any]:
@@ -309,7 +380,7 @@ def normalize_row(row: dict[str, Any], *, source_kind: str) -> dict[str, Any]:
 def noop_rows_from_rate_probe(summary: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     preflight = nested_dict(summary, "safety_preflight")
-    disable_waiting_ack = as_bool(preflight.get("disable_waiting_ack"))
+    disable_waiting_ack = as_bool(first_present(summary, "disable_waiting_ack") if "disable_waiting_ack" in summary else preflight.get("disable_waiting_ack"))
     ack_policy = "ack_off" if disable_waiting_ack is True else "ack_on" if disable_waiting_ack is False else ""
     for result in summary.get("rate_results", []):
         if not isinstance(result, dict):
@@ -326,6 +397,8 @@ def noop_rows_from_rate_probe(summary: dict[str, Any]) -> list[dict[str, Any]]:
         row["physical_motion_detected"] = False
         row["fault_latched"] = False
         row["ack_policy"] = ack_policy
+        if ack_policy == "ack_off":
+            row["acceptance_semantics"] = "socket_send_only"
         if ack_policy == "ack_on" and row.get("controller_acceptance_observed_rate") is None:
             row["controller_acceptance_observed_rate"] = row.get("send_success_rate")
         rows.append(normalize_row(row, source_kind="noop_acceptance"))
@@ -383,6 +456,55 @@ def rate_matches(row: dict[str, Any], expected: float) -> bool:
     return rate is not None and abs(rate - expected) <= 1e-6
 
 
+def row_lane(row: dict[str, Any] | None) -> str:
+    if row is None:
+        return ""
+    rate = first_number(row, "rate_hz")
+    if rate is not None and abs(rate - 100.0) <= 1e-6:
+        return "100hz_ack_on_best"
+    async_mode = str(row.get("async_mode") or "disabled")
+    if async_mode == "sdk_ack_worker":
+        return "500hz_async_sdk_ack_worker"
+    if async_mode == "socket_send_supervised" or row.get("socket_send_only"):
+        return "500hz_socket_send_supervised"
+    return "500hz_ack_on"
+
+
+def reference_watchdog_failed(row: dict[str, Any] | None) -> bool:
+    if row is None:
+        return False
+    reference_state = str(row.get("reference_supervision_state") or "")
+    if reference_state in {"fault", "failed", "watchdog_failed", "stale", "timeout"}:
+        return True
+    if (first_number(row, "q_ref_watchdog_miss_count") or 0.0) > 0.0:
+        return True
+    if (first_number(row, "supervision_fault_count") or 0.0) > 0.0:
+        return True
+    if row.get("socket_send_only") and reference_state not in {"", "ok", "configured"}:
+        return True
+    return False
+
+
+def ack_on_blocking_limited(row: dict[str, Any] | None) -> bool:
+    if row is None or row.get("socket_send_only"):
+        return False
+    async_mode = str(row.get("async_mode") or "disabled")
+    if async_mode == "sdk_ack_worker":
+        return False
+    if as_bool(row.get("servo_loop_blocked_by_ack")) is True:
+        return True
+    joined = " ".join(
+        str(row.get(key) or "")
+        for key in ("failure_classification", "result_reason", "timing_classification")
+    ).lower()
+    if "ack_timeout" in joined or "blocked_by_ack" in joined:
+        return True
+    if (first_number(row, "deadline_miss_count") or 0.0) > 0.0:
+        return True
+    send_p99 = first_number(row, "send_duration_p99_us")
+    return send_p99 is not None and send_p99 > 2000.0
+
+
 def unstable_reasons(row: dict[str, Any] | None) -> list[str]:
     if row is None:
         return ["missing_row"]
@@ -400,6 +522,8 @@ def unstable_reasons(row: dict[str, Any] | None) -> list[str]:
         reasons.append("cartesian_unavailable_count>0")
     if (first_number(row, "deadline_miss_count") or 0.0) > 0.0:
         reasons.append("deadline_miss_count>0")
+    if reference_watchdog_failed(row):
+        reasons.append("reference_supervision_failed")
     if row.get("measurement_reliability_level") == "unreliable":
         reasons.append("measurement_reliability_level=unreliable")
     if row.get("source_kind") == "noop_acceptance":
@@ -451,6 +575,22 @@ def noop_pass(row: dict[str, Any] | None) -> bool:
     return all(value == 0.0 for value in error_counts)
 
 
+def supervised_pass(row: dict[str, Any] | None) -> bool:
+    if row is None:
+        return False
+    if row.get("source_kind") == "noop_acceptance":
+        if row.get("socket_send_only"):
+            return bool(row.get("q_ref_supervised")) and not row_unstable(row)
+        return noop_pass(row)
+    if row_unstable(row):
+        return False
+    if not reliability_usable(row):
+        return False
+    if row.get("socket_send_only") and not row.get("q_ref_supervised"):
+        return False
+    return first_number(row, "rms_error_mm") is not None and first_number(row, "p95_error_mm") is not None
+
+
 def row_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
     if row.get("source_kind") == "noop_acceptance":
         return (not noop_pass(row), row_unstable(row), row_name(row))
@@ -476,6 +616,58 @@ def selected_row(rows: list[dict[str, Any]], profile: str, rate_hz: float) -> di
     return sorted(candidates, key=row_sort_key)[0]
 
 
+def row_matches_lane(row: dict[str, Any], lane: str, rate_hz: float) -> bool:
+    if not rate_matches(row, rate_hz):
+        return False
+    if lane == "100hz_ack_on_best":
+        return not row.get("socket_send_only") and str(row.get("async_mode") or "disabled") in {"", "disabled"}
+    if lane == "500hz_ack_on":
+        return (
+            not row.get("socket_send_only")
+            and str(row.get("async_mode") or "disabled") in {"", "disabled"}
+            and rate_matches(row, 500.0)
+        )
+    if lane == "500hz_socket_send_supervised":
+        return row.get("socket_send_only") is True or str(row.get("async_mode") or "") == "socket_send_supervised"
+    if lane == "500hz_async_sdk_ack_worker":
+        return str(row.get("async_mode") or "") == "sdk_ack_worker"
+    return False
+
+
+def selected_lane_row(rows: list[dict[str, Any]], profile: str, lane: str, rate_hz: float) -> dict[str, Any] | None:
+    candidates = [
+        row for row in rows
+        if row.get("profile") == profile and row_matches_lane(row, lane, rate_hz)
+    ]
+    if not candidates:
+        return None
+    return sorted(candidates, key=row_sort_key)[0]
+
+
+def comparative_row(profile: str, lane: str, row: dict[str, Any] | None) -> dict[str, Any]:
+    base = {
+        "comparison": comparison_label(profile),
+        "profile": profile,
+        "lane": lane,
+        "evidence_present": row is not None,
+    }
+    if row is None:
+        return base
+    for key in COMPARATIVE_COLUMNS:
+        if key not in base:
+            base[key] = row.get(key)
+    base["run_name"] = row_name(row)
+    return base
+
+
+def build_comparative_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    comparative: list[dict[str, Any]] = []
+    for profile, _label in COMPARISONS:
+        for lane, rate_hz in COMPARATIVE_LANES:
+            comparative.append(comparative_row(profile, lane, selected_lane_row(rows, profile, lane, rate_hz)))
+    return comparative
+
+
 def metric_improved(row100: dict[str, Any], row500: dict[str, Any]) -> bool | None:
     rms100 = first_number(row100, "rms_error_mm")
     rms500 = first_number(row500, "rms_error_mm")
@@ -492,11 +684,31 @@ def metric_improved(row100: dict[str, Any], row500: dict[str, Any]) -> bool | No
     return rms_better and p95_not_worse and jitter_not_worse
 
 
+def tracking_delta_interpretation(row100: dict[str, Any] | None, row500: dict[str, Any] | None) -> str:
+    if row100 is None or row500 is None:
+        return "missing_reference_or_candidate"
+    improved = metric_improved(row100, row500)
+    if improved is True:
+        return "tracking_improved"
+    if improved is False:
+        jitter100 = first_number(row100, "servo_jitter_p99_ms")
+        jitter500 = first_number(row500, "servo_jitter_p99_ms")
+        send100 = first_number(row100, "send_duration_p99_us")
+        send500 = first_number(row500, "send_duration_p99_us")
+        timing_improved = (
+            (jitter100 is not None and jitter500 is not None and jitter500 < jitter100)
+            or (send100 is not None and send500 is not None and send500 < send100)
+        )
+        return "timing_only_or_no_tracking_improvement" if timing_improved else "no_tracking_improvement"
+    return "missing_tracking_metrics"
+
+
 def caveats_for_pair(row100: dict[str, Any] | None, row500: dict[str, Any] | None) -> list[str]:
     caveats = [
-        "no-op success does not prove physical real motion",
+        "socket_send_only is not per-command controller ACK",
         "tcp_ref_stand is controller-reference lower bound",
-        "diagnostics_suspect caveat remains",
+        "diagnostics_suspect unresolved",
+        "physical real not proven",
         "dual-arm acceptance required before default change",
     ]
     for row in (row100, row500):
@@ -512,19 +724,38 @@ def caveats_for_pair(row100: dict[str, Any] | None, row500: dict[str, Any] | Non
 def classify_pair(profile: str, row100: dict[str, Any] | None, row500: dict[str, Any] | None) -> dict[str, Any]:
     label = comparison_label(profile)
     reasons: list[str] = []
+    tracking_interpretation = tracking_delta_interpretation(row100, row500)
     if row500 is None:
         classification = "insufficient_evidence"
         reasons.append("missing 500 Hz row")
+    elif as_bool(row500.get("physical_motion_detected")) is True:
+        classification = "500hz_unstable"
+        reasons.append("physical_motion_detected=true")
+    elif reference_watchdog_failed(row500):
+        classification = "500hz_reference_watchdog_failed"
+        reasons.append("q_ref/tcp_ref reference supervision watchdog failed")
+    elif ack_on_blocking_limited(row500):
+        classification = "500hz_ack_on_blocking_limited"
+        reasons.append("500 Hz synchronous ACK-on appears limited by blocking ACK/timing")
     elif row_unstable(row500):
         classification = "500hz_unstable"
         reasons.extend(unstable_reasons(row500))
-    elif profile == "noop_acceptance":
-        if noop_pass(row500):
-            classification = "500hz_noop_pass"
-            reasons.append("500 Hz no-op satisfied acceptance-stage report checks")
+    elif row500.get("socket_send_only"):
+        if supervised_pass(row500):
+            classification = "500hz_socket_send_only_promising"
+            reasons.append("socket_send_only tracking is promising but is not controller ACK evidence")
+            if tracking_interpretation:
+                reasons.append(tracking_interpretation)
         else:
             classification = "insufficient_evidence"
-            reasons.append("500 Hz no-op missing required pass metrics")
+            reasons.append("socket_send_only row lacks q_ref-supervised acceptance evidence")
+    elif profile == "noop_acceptance":
+        if supervised_pass(row500):
+            classification = "500hz_async_supervised_pass"
+            reasons.append("500 Hz no-op satisfied ACK/q_ref-supervised report checks")
+        else:
+            classification = "insufficient_evidence"
+            reasons.append("500 Hz no-op missing required supervised pass metrics")
     elif row100 is None:
         classification = "insufficient_evidence"
         reasons.append("missing 100 Hz row")
@@ -543,12 +774,16 @@ def classify_pair(profile: str, row100: dict[str, Any] | None, row500: dict[str,
         if improved is None:
             classification = "insufficient_evidence"
             reasons.append("missing RMS comparison metric")
-        elif improved:
-            classification = "500hz_circle_improved"
-            reasons.append("500 Hz has lower RMS without worse p95 or p99 jitter evidence")
+        elif supervised_pass(row500):
+            classification = "500hz_async_supervised_pass"
+            if improved:
+                reasons.append("500 Hz has lower RMS without worse p95 or p99 jitter evidence")
+            else:
+                reasons.append("500 Hz supervised row is stable but tracking improvement is not shown")
+            reasons.append(tracking_interpretation)
         else:
-            classification = "500hz_circle_no_improvement"
-            reasons.append("500 Hz does not improve the selected 100 Hz circle evidence")
+            classification = "insufficient_evidence"
+            reasons.append("500 Hz row lacks supervised pass evidence")
 
     return {
         "comparison": label,
@@ -556,6 +791,9 @@ def classify_pair(profile: str, row100: dict[str, Any] | None, row500: dict[str,
         "classification": classification,
         "rate_100_run": row_name(row100) if row100 else "",
         "rate_500_run": row_name(row500) if row500 else "",
+        "rate_100_lane": row_lane(row100),
+        "rate_500_lane": row_lane(row500),
+        "tracking_delta_interpretation": tracking_interpretation,
         "recommendation": recommendation_for_classification(classification),
         "classification_reason": "; ".join(dict.fromkeys(reasons)),
         "caveats": "; ".join(caveats_for_pair(row100, row500)),
@@ -569,18 +807,20 @@ def prefixed_metrics(prefix: str, row: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def recommendation_for_classification(classification: str) -> str:
-    if classification == "500hz_noop_pass":
-        return "acceptance_stage_only_continue_to_circle_stages"
-    if classification == "500hz_circle_improved":
+    if classification == "500hz_async_supervised_pass":
         return "controller_simulation_experimental_candidate_only"
-    if classification == "500hz_circle_no_improvement":
-        return "do_not_promote_500hz_from_this_profile"
+    if classification == "500hz_socket_send_only_promising":
+        return "keep_as_promising_socket_send_q_ref_supervised_evidence_only"
+    if classification == "500hz_ack_on_blocking_limited":
+        return "do_not_promote_500hz_ack_on_without_async_or_timeout_fix"
+    if classification == "500hz_reference_watchdog_failed":
+        return "stop_and_fix_reference_supervision_before_interpreting_tracking"
     if classification == "500hz_unstable":
         return "stop_stage_sequence_and_fix_faults_timing_or_safety"
     return "collect_missing_100hz_500hz_evidence"
 
 
-def build_report(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def build_report(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     selected: list[dict[str, Any]] = []
     comparisons: list[dict[str, Any]] = []
     for profile, _label in COMPARISONS:
@@ -591,7 +831,7 @@ def build_report(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list
         if row500 is not None:
             selected.append(row500)
         comparisons.append(classify_pair(profile, row100, row500))
-    return selected, comparisons
+    return selected, comparisons, build_comparative_rows(rows)
 
 
 def format_cell(value: Any) -> str:
@@ -617,16 +857,32 @@ def markdown_table(rows: list[dict[str, Any]], columns: list[str]) -> str:
     return "\n".join(lines)
 
 
-def report_markdown(rate_rows: list[dict[str, Any]], comparisons: list[dict[str, Any]], title: str) -> str:
+def report_markdown(
+    rate_rows: list[dict[str, Any]],
+    comparisons: list[dict[str, Any]],
+    comparative_rows: list[dict[str, Any]],
+    title: str,
+) -> str:
     return "\n".join(
         [
             f"# {title}",
             "",
             "This is rbpodo controller-simulation report evidence only. It does not authorize physical robot motion or a default-rate change.",
             "",
+            "## Acceptance Semantics",
+            "",
+            "- `controller_ack_observed`: synchronous ACK-on command calls observed per-command controller ACK.",
+            "- `sdk_worker_ack_observed`: async `sdk_ack_worker` observed controller ACK in the worker thread.",
+            "- `socket_send_only`: command write/socket/API send evidence only; not per-command controller ACK.",
+            "- `q_ref_supervised`: controller-reference watchdog evidence was present and OK.",
+            "",
             "## Comparison Classifications",
             "",
             markdown_table(comparisons, COMPARISON_COLUMNS),
+            "",
+            "## Comparative Evidence Table",
+            "",
+            markdown_table(comparative_rows, COMPARATIVE_COLUMNS) if comparative_rows else "_No comparative rows._",
             "",
             "## Selected Rate Evidence",
             "",
@@ -634,9 +890,10 @@ def report_markdown(rate_rows: list[dict[str, Any]], comparisons: list[dict[str,
             "",
             "## Caveats",
             "",
-            "- no-op success does not prove physical real motion.",
+            "- socket_send_only is not per-command controller ACK.",
             "- `tcp_ref_stand` is controller-reference lower bound.",
-            "- diagnostics_suspect caveat remains.",
+            "- diagnostics_suspect unresolved.",
+            "- physical real not proven.",
             "- dual-arm acceptance required before default change.",
             "",
             "## Recommendation",
@@ -657,11 +914,17 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writerow({field: row.get(field) for field in COMPARISON_COLUMNS})
 
 
-def write_json(path: Path, rate_rows: list[dict[str, Any]], comparisons: list[dict[str, Any]]) -> None:
+def write_json(
+    path: Path,
+    rate_rows: list[dict[str, Any]],
+    comparisons: list[dict[str, Any]],
+    comparative_rows: list[dict[str, Any]],
+) -> None:
     payload = {
         "schema": SCHEMA,
         "rate_rows": rate_rows,
         "comparisons": comparisons,
+        "comparative_rows": comparative_rows,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -681,8 +944,8 @@ def load_all(args: argparse.Namespace) -> list[dict[str, Any]]:
 def main() -> int:
     args = parse_args()
     rows = load_all(args)
-    rate_rows, comparisons = build_report(rows)
-    markdown = report_markdown(rate_rows, comparisons, args.title)
+    rate_rows, comparisons, comparative_rows = build_report(rows)
+    markdown = report_markdown(rate_rows, comparisons, comparative_rows, args.title)
     if args.output_md:
         args.output_md.parent.mkdir(parents=True, exist_ok=True)
         args.output_md.write_text(markdown, encoding="utf-8")
@@ -691,7 +954,7 @@ def main() -> int:
     if args.csv_path:
         write_csv(args.csv_path, comparisons)
     if args.json_path:
-        write_json(args.json_path, rate_rows, comparisons)
+        write_json(args.json_path, rate_rows, comparisons, comparative_rows)
     return 0
 
 

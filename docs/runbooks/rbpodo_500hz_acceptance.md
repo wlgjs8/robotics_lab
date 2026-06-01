@@ -689,14 +689,42 @@ The report compares these evidence pairs:
 - 100 Hz vs 500 Hz 15 cm / 8 s
 - 100 Hz vs 500 Hz 15 cm / 4 s
 
+It also writes a comparative evidence table for:
+
+- 100 Hz ACK-on best row
+- 500 Hz synchronous ACK-on row
+- 500 Hz `socket_send_supervised` row
+- 500 Hz async `sdk_ack_worker` row
+
+Acceptance semantics are reported separately:
+
+- `controller_ack_observed`: synchronous ACK-on command calls observed
+  per-command controller ACK.
+- `sdk_worker_ack_observed`: async `sdk_ack_worker` observed controller ACK in
+  the worker thread.
+- `socket_send_only`: command write/socket/API send evidence only; it is not
+  per-command controller ACK.
+- `q_ref_supervised`: controller-reference watchdog evidence was present and OK.
+
+Async telemetry columns include `async_mode`, `commands_enqueued_total`,
+`commands_sent_total`, `commands_acked_total`,
+`commands_socket_sent_total`, `commands_overwritten_total`,
+`commands_dropped_total`, `reference_supervision_state`,
+`q_ref_update_rate_hz`, and `q_ref_target_error_deg_max`.
+
 Classifications are deliberately conservative:
 
-- `500hz_noop_pass`: 500 Hz no-op evidence satisfies acceptance-stage report
-  checks, but remains single-arm no-op controller-simulation evidence only.
-- `500hz_circle_improved`: selected 500 Hz circle evidence has lower RMS error
-  without worse p95 error or p99 jitter evidence.
-- `500hz_circle_no_improvement`: selected 500 Hz circle evidence is stable but
-  does not improve the selected 100 Hz row.
+- `500hz_async_supervised_pass`: the selected 500 Hz row has supervised ACK or
+  q_ref evidence and passes report-stage stability checks. Read the
+  `tracking_delta_interpretation` column to distinguish real tracking
+  improvement from timing-only improvement.
+- `500hz_socket_send_only_promising`: socket-send-only tracking is promising
+  with q_ref supervision, but it is not controller ACK evidence and cannot
+  promote defaults by itself.
+- `500hz_ack_on_blocking_limited`: synchronous ACK-on at 500 Hz appears limited
+  by ACK blocking, ACK timeout, or deadline timing.
+- `500hz_reference_watchdog_failed`: q_ref/tcp_ref reference supervision failed
+  or faulted, so tracking metrics are not accepted.
 - `500hz_unstable`: the 500 Hz row faulted, latched safety, detected physical
   motion, missed deadlines, had Cartesian rejection, or was otherwise
   unreliable.
@@ -705,10 +733,11 @@ Classifications are deliberately conservative:
 
 Required caveats remain attached to every report:
 
-- no-op success does not prove physical real motion
+- `socket_send_only` is not per-command controller ACK
 - `tcp_ref_stand` is a controller-reference lower bound, not physical TCP
   tracking
-- diagnostics-suspect evidence remains caveated and cannot promote defaults
+- diagnostics-suspect evidence remains unresolved and cannot promote defaults
+- physical real motion is not proven
 - dual-arm acceptance is required before any default-rate change
 
 Recommended interpretation:
