@@ -29,6 +29,12 @@ public:
         const ServoDispatchRequest& request
     );
 
+    static DualSendResult dispatchRbpodoAsync(
+        ArmWorker& left,
+        ArmWorker& right,
+        const ServoDispatchRequest& request
+    );
+
     static bool armDeadlineMissed(const ArmSendResult& result);
     static bool deadlineMissed(const DualSendResult& result);
 };

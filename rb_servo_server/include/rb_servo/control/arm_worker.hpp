@@ -10,6 +10,7 @@
 #include <string>
 #include <thread>
 
+#include "rb_servo/config/config.hpp"
 #include "rb_servo/robot/i_robot_backend.hpp"
 
 namespace rb_servo {
@@ -17,6 +18,12 @@ namespace rb_servo {
 struct ArmWorkerOptions {
     uint64_t read_period_ns = 10'000'000;
     std::size_t lifecycle_queue_capacity = 4;
+    bool rbpodo_async_streaming_enabled = false;
+    RbpodoAsyncStreamingMode rbpodo_async_streaming_mode =
+        RbpodoAsyncStreamingMode::Disabled;
+    double rbpodo_async_max_pending_age_ms = 10.0;
+    RbpodoAsyncAckSupervisionConfig rbpodo_async_ack_supervision;
+    RbpodoAsyncReferenceSupervisionConfig rbpodo_async_reference_supervision;
 };
 
 enum class ArmWorkerCommandKind {
@@ -55,6 +62,7 @@ public:
 
     BackendResult<RobotState> latestState(uint64_t max_age_ns) const;
     void enqueueServoJ(SendServoJRequest request);
+    ArmSendResult enqueueAsyncServoJ(SendServoJRequest request);
     BackendResult<RobotState> enqueueLifecycleCommand(ArmWorkerCommand command);
     BackendResult<RobotState> resetFault(uint64_t command_seq = 0, uint64_t deadline_ns = 0);
     std::optional<ArmWorkerLifecycleResult> lastLifecycleResult() const;
@@ -70,6 +78,7 @@ public:
         uint64_t wait_until_ns
     );
     ArmWorkerTelemetry telemetry() const;
+    RbpodoAsyncStreamingTelemetry asyncStreamingTelemetry() const;
     std::optional<BackendTransportTelemetry> transportTelemetry() const;
 
     ArmId armId() const;
@@ -88,6 +97,27 @@ private:
         const SendServoJResult& result,
         const BackendTiming& dispatch_timing
     );
+    void storeImmediateAsyncResultLocked(
+        const SendServoJRequest& request,
+        const SendServoJResult& result,
+        const BackendTiming& dispatch_timing
+    );
+    void updateAsyncSendTelemetryLocked(
+        const SendServoJRequest& request,
+        const SendServoJResult& result,
+        const BackendTiming& dispatch_timing
+    );
+    void updateAsyncReferenceSupervisionLocked(
+        const BackendResult<RobotState>& result,
+        uint64_t observed_ns
+    );
+    void noteAsyncDropLocked(
+        uint64_t seq,
+        const std::string& reason,
+        RbpodoAsyncStreamingSupervisionState state =
+            RbpodoAsyncStreamingSupervisionState::Warning
+    );
+    bool asyncStreamingEnabled() const;
     bool isExpired(const SendServoJRequest& request, uint64_t now_ns) const;
     SendServoJResult expiredResult(const SendServoJRequest& request, uint64_t now_ns) const;
     SendServoJResult deadlineMissedResult(
@@ -144,6 +174,9 @@ private:
     std::optional<ArmSendResult> last_send_result_;
     std::optional<ArmWorkerLifecycleResult> last_lifecycle_result_;
     ArmWorkerTelemetry telemetry_;
+    RbpodoAsyncStreamingTelemetry async_telemetry_;
+    std::optional<SendServoJRequest> last_async_sent_request_;
+    uint64_t last_async_reference_fault_sample_ns_ = 0;
 
     std::thread thread_;
 };

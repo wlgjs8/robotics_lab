@@ -248,14 +248,28 @@ nlohmann::json rbpodoAsyncStreamingJson(
         {"q_ref_watchdog_miss_count", telemetry.q_ref_watchdog_miss_count},
         {"tcp_ref_watchdog_miss_count", telemetry.tcp_ref_watchdog_miss_count},
         {"last_command_seq", telemetry.last_command_seq},
+        {"last_sent_seq", telemetry.last_sent_seq},
         {"last_ack_seq", telemetry.last_ack_seq},
         {"last_q_ref_update_host_time_ns", telemetry.last_q_ref_update_host_time_ns},
         {"last_socket_send_host_time_ns", telemetry.last_socket_send_host_time_ns},
+        {"last_async_send_duration_us", telemetry.last_async_send_duration_us},
+        {"last_async_ack_duration_us", telemetry.last_async_ack_duration_us},
+        {"max_async_send_duration_us", telemetry.max_async_send_duration_us},
+        {"max_async_ack_duration_us", telemetry.max_async_ack_duration_us},
         {"last_controller_acceptance_semantics",
             rbpodoAsyncAcceptanceSemantics(config, telemetry)},
+        {"last_async_acceptance_semantics",
+            telemetry.last_async_acceptance_semantics.empty()
+                ? rbpodoAsyncAcceptanceSemantics(config, telemetry)
+                : telemetry.last_async_acceptance_semantics},
+        {"last_send_result", telemetry.last_send_result},
+        {"last_ack_result", telemetry.last_ack_result},
+        {"last_failure", telemetry.last_failure},
         {"worker_backlog", telemetry.worker_backlog},
+        {"async_worker_backlog", telemetry.worker_backlog},
         {"max_pending_age_ms_observed", telemetry.max_pending_age_ms_observed},
         {"supervision_state", rbpodoAsyncSupervisionStateString(telemetry.supervision_state)},
+        {"async_supervision_state", rbpodoAsyncSupervisionStateString(telemetry.supervision_state)},
     };
 }
 
@@ -1252,7 +1266,9 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["cartesian_control_snapshot"] = cartesianControlSnapshotJson(config_.cartesian_control);
     message["kinematics_snapshot"] = kinematicsSnapshotJson(config_.kinematics);
     message["startup_validation"] = startupValidationJson(snapshot.startup_validation);
-    const bool worker_enabled = config_.servo.io_model == ServoIoModel::Worker;
+    const bool worker_enabled =
+        config_.servo.io_model == ServoIoModel::Worker ||
+        config_.servo.rbpodo_async_streaming.enable;
 
     message["left"] = armStateJson(
         snapshot.left_state,

@@ -190,4 +190,38 @@ DualSendResult ServoDispatcher::dispatchWorker(
     return result;
 }
 
+DualSendResult ServoDispatcher::dispatchRbpodoAsync(
+    ArmWorker& left_worker,
+    ArmWorker& right_worker,
+    const ServoDispatchRequest& request
+) {
+    DualSendResult result;
+    result.dispatch_start_ns = request.dispatch_start_ns > 0
+        ? request.dispatch_start_ns
+        : nowSteadyNs();
+
+    SendServoJRequest left_request = request.left;
+    left_request.command_seq = request.seq;
+    left_request.deadline_ns = request.deadline_ns;
+    left_request.host_time_ns = requestHostTime(left_request.host_time_ns, result.dispatch_start_ns);
+
+    SendServoJRequest right_request = request.right;
+    right_request.command_seq = request.seq;
+    right_request.deadline_ns = request.deadline_ns;
+    right_request.host_time_ns = requestHostTime(right_request.host_time_ns, result.dispatch_start_ns);
+
+    const uint64_t left_enqueue_ns = nowSteadyNs();
+    result.left = left_worker.enqueueAsyncServoJ(left_request);
+
+    const uint64_t right_enqueue_ns = nowSteadyNs();
+    result.right = right_worker.enqueueAsyncServoJ(right_request);
+
+    result.dispatch_end_ns = nowSteadyNs();
+    result.timing = makeBackendTiming(result.dispatch_start_ns, result.dispatch_end_ns);
+    result.left_right_start_skew_us = absDurationUs(left_enqueue_ns, right_enqueue_ns);
+    result.left_right_end_skew_us =
+        absDurationUs(result.left.dispatch_timing.end_ns, result.right.dispatch_timing.end_ns);
+    return result;
+}
+
 }  // namespace rb_servo

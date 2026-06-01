@@ -253,6 +253,14 @@ rb_servo::ServoDispatchRequest workerRequest(uint64_t seq, uint64_t host_time_ns
     return request;
 }
 
+rb_servo::ArmWorkerOptions asyncWorkerOptions() {
+    rb_servo::ArmWorkerOptions options;
+    options.read_period_ns = 1'000'000;
+    options.rbpodo_async_streaming_enabled = true;
+    options.rbpodo_async_streaming_mode = rb_servo::RbpodoAsyncStreamingMode::SdkAckWorker;
+    return options;
+}
+
 bool testDirectSequentialPopulatesTimingAndPreservesResults() {
     DispatchBackend left(rb_servo::ArmId::Left, rb_servo::BackendErrorKind::None, std::chrono::microseconds(200));
     DispatchBackend right(rb_servo::ArmId::Right, rb_servo::BackendErrorKind::TransportWriteFailed);
@@ -451,6 +459,51 @@ bool testRobotFaultHelper() {
     return true;
 }
 
+bool testRbpodoAsyncDispatchDoesNotWaitForSlowAckWorker() {
+    auto left_backend = std::make_unique<WorkerDispatchBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None,
+        std::chrono::milliseconds(120)
+    );
+    auto right_backend = std::make_unique<WorkerDispatchBackend>(
+        rb_servo::ArmId::Right,
+        rb_servo::BackendErrorKind::None,
+        std::chrono::milliseconds(120)
+    );
+    WorkerDispatchBackend* left_raw = left_backend.get();
+    WorkerDispatchBackend* right_raw = right_backend.get();
+    rb_servo::ArmWorker left(std::move(left_backend), asyncWorkerOptions());
+    rb_servo::ArmWorker right(std::move(right_backend), asyncWorkerOptions());
+    RB_CHECK(left.start());
+    RB_CHECK(right.start());
+    RB_CHECK(waitForWorkerState(left));
+    RB_CHECK(waitForWorkerState(right));
+
+    const uint64_t host_time_ns = rb_servo::nowSteadyNs();
+    const auto started = std::chrono::steady_clock::now();
+    const rb_servo::DualSendResult result = rb_servo::ServoDispatcher::dispatchRbpodoAsync(
+        left,
+        right,
+        workerRequest(104, host_time_ns, host_time_ns + 500'000'000)
+    );
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started
+    );
+
+    RB_CHECK(elapsed.count() < 50);
+    RB_CHECK(result.left.result.accepted);
+    RB_CHECK(result.right.result.accepted);
+    RB_CHECK(result.left.result.acceptance_semantics == "async_enqueued");
+    RB_CHECK(result.right.result.acceptance_semantics == "async_enqueued");
+    RB_CHECK(result.left.dispatch_timing.duration_us < 50'000.0);
+    RB_CHECK(result.right.dispatch_timing.duration_us < 50'000.0);
+    RB_CHECK(left_raw->waitForSends(1, std::chrono::milliseconds(500)));
+    RB_CHECK(right_raw->waitForSends(1, std::chrono::milliseconds(500)));
+    left.stop();
+    right.stop();
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -460,5 +513,6 @@ int main() {
     if (!testWorkerDispatchTransportFailureDoesNotHideAcceptedArm()) return 1;
     if (!testDirectSequentialDeadlineMissFlag()) return 1;
     if (!testRobotFaultHelper()) return 1;
+    if (!testRbpodoAsyncDispatchDoesNotWaitForSlowAckWorker()) return 1;
     return 0;
 }

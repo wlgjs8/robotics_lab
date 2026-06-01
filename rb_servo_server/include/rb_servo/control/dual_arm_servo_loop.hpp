@@ -131,6 +131,8 @@ private:
     bool commandBlockedByReadOnly(const DualArmCommand& command) const;
     bool readOnlyMode() const;
     bool workerIoMode() const;
+    bool rbpodoAsyncIoMode() const;
+    bool workerBackedIoMode() const;
     bool motionAllowed() const;
     bool isRealMode() const;
     std::string currentSendPolicy() const;

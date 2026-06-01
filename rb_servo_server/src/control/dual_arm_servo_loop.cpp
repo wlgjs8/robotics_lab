@@ -777,6 +777,10 @@ ArmWorkerTelemetry workerTelemetryOrDefault(const ArmWorker* worker) {
     return worker ? worker->telemetry() : ArmWorkerTelemetry{};
 }
 
+RbpodoAsyncStreamingTelemetry asyncTelemetryOrDefault(const ArmWorker* worker) {
+    return worker ? worker->asyncStreamingTelemetry() : RbpodoAsyncStreamingTelemetry{};
+}
+
 std::optional<BackendTransportTelemetry> workerTransportTelemetry(const ArmWorker* worker) {
     return worker ? worker->transportTelemetry() : std::nullopt;
 }
@@ -802,6 +806,13 @@ uint64_t workerReadPeriodNs(const ServoConfig& config) {
 ArmWorkerOptions workerOptions(const DualArmConfig& config) {
     ArmWorkerOptions options;
     options.read_period_ns = workerReadPeriodNs(config.servo);
+    options.rbpodo_async_streaming_enabled = config.servo.rbpodo_async_streaming.enable;
+    options.rbpodo_async_streaming_mode = config.servo.rbpodo_async_streaming.mode;
+    options.rbpodo_async_max_pending_age_ms = config.servo.rbpodo_async_streaming.max_pending_age_ms;
+    options.rbpodo_async_ack_supervision =
+        config.servo.rbpodo_async_streaming.ack_supervision;
+    options.rbpodo_async_reference_supervision =
+        config.servo.rbpodo_async_streaming.reference_supervision;
     return options;
 }
 
@@ -838,6 +849,59 @@ LatchedDualFaultContext dualReadFaultContext(
         contexts.top_level = contexts.left;
     } else if (contexts.right.has_value()) {
         contexts.top_level = contexts.right;
+    }
+    return contexts;
+}
+
+std::optional<FaultContext> asyncSupervisionFaultContext(
+    const RbpodoAsyncStreamingTelemetry& telemetry,
+    ArmId arm
+) {
+    if (telemetry.supervision_state != RbpodoAsyncStreamingSupervisionState::Fault) {
+        return std::nullopt;
+    }
+
+    FaultContext context;
+    context.verdict = SafetyVerdict::SendFailure;
+    context.domain = FaultDomain::Backend;
+    context.arm = arm;
+    context.backend_op = BackendOp::SendServoJ;
+    context.backend_error = backendError(
+        BackendErrorKind::CommandTimeout,
+        telemetry.last_failure.empty()
+            ? "rbpodo async streaming supervision fault"
+            : telemetry.last_failure,
+        "",
+        telemetry.last_failure.empty()
+            ? "rbpodo_async_supervision_fault"
+            : telemetry.last_failure,
+        true,
+        true
+    );
+    context.reason = "rbpodo async streaming supervision fault";
+    context.retryable = true;
+    context.recoverable = true;
+    context.suppress_regular_servo = true;
+    return context;
+}
+
+LatchedDualFaultContext asyncSupervisionFaultContexts(
+    const ArmWorker* left_worker,
+    const ArmWorker* right_worker
+) {
+    LatchedDualFaultContext contexts;
+    const std::optional<FaultContext> left =
+        left_worker ? asyncSupervisionFaultContext(left_worker->asyncStreamingTelemetry(), ArmId::Left)
+                    : std::nullopt;
+    const std::optional<FaultContext> right =
+        right_worker ? asyncSupervisionFaultContext(right_worker->asyncStreamingTelemetry(), ArmId::Right)
+                     : std::nullopt;
+    contexts.left = left;
+    contexts.right = right;
+    if (left.has_value()) {
+        contexts.top_level = left;
+    } else if (right.has_value()) {
+        contexts.top_level = right;
     }
     return contexts;
 }
@@ -901,7 +965,7 @@ void DualArmServoLoop::stop() {
     }
     if (left_worker_) left_worker_->stop();
     if (right_worker_) right_worker_->stop();
-    if (!workerIoMode()) {
+    if (!workerBackedIoMode()) {
         if (left_robot_) left_robot_->stop();
         if (right_robot_) right_robot_->stop();
     }
@@ -937,7 +1001,7 @@ ServoSnapshot DualArmServoLoop::latestSnapshot() const {
 }
 
 bool DualArmServoLoop::initializeRobots() {
-    if (workerIoMode()) {
+    if (workerBackedIoMode()) {
         return initializeWorkers();
     }
 
@@ -1026,7 +1090,13 @@ bool DualArmServoLoop::initializeWorkers() {
             if (readOnlyMode()) {
                 std::cerr << "[INFO] servo send policy: read_only; worker sendServoJ requests are suppressed\n";
             }
-            std::cerr << "[INFO] servo io_model: worker; ServoLoop reads cached ArmWorker state and enqueues sends\n";
+            if (rbpodoAsyncIoMode()) {
+                std::cerr << "[INFO] servo io_model: rbpodo_async; ServoLoop reads cached "
+                          << "ArmWorker state and enqueues non-blocking rbpodo sends\n";
+            } else {
+                std::cerr << "[INFO] servo io_model: worker; ServoLoop reads cached "
+                          << "ArmWorker state and enqueues sends\n";
+            }
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1068,14 +1138,14 @@ void DualArmServoLoop::loopMain() {
         last_loop_start_ns_ = loop_start;
 
         const uint64_t worker_state_max_age_ns = std::max<uint64_t>(2 * nominal_period_ns, 1'000'000);
-        BackendResult<RobotState> left_state_result = workerIoMode()
+        BackendResult<RobotState> left_state_result = workerBackedIoMode()
             ? (left_worker_
                 ? left_worker_->latestState(worker_state_max_age_ns)
                 : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "left worker unavailable")))
             : (left_robot_
                 ? left_robot_->readState()
                 : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "left backend unavailable")));
-        BackendResult<RobotState> right_state_result = workerIoMode()
+        BackendResult<RobotState> right_state_result = workerBackedIoMode()
             ? (right_worker_
                 ? right_worker_->latestState(worker_state_max_age_ns)
                 : failedReadState(backendError(BackendErrorKind::RobotDisconnected, "right worker unavailable")))
@@ -1110,6 +1180,19 @@ void DualArmServoLoop::loopMain() {
         LatchedDualFaultContext read_fault_contexts =
             dualReadFaultContext(left_read_fault, right_read_fault);
         bool state_ok = read_fault.verdict == SafetyVerdict::Ok;
+        if (rbpodoAsyncIoMode() && !fault_latched_.load()) {
+            const LatchedDualFaultContext async_fault_contexts =
+                asyncSupervisionFaultContexts(left_worker_.get(), right_worker_.get());
+            if (async_fault_contexts.top_level.has_value()) {
+                latchFault(
+                    SafetyVerdict::SendFailure,
+                    "rbpodo async streaming supervision fault",
+                    left_state,
+                    right_state,
+                    async_fault_contexts
+                );
+            }
+        }
 
         DualArmCommand command = command_buffer_
             ? command_buffer_->latestOrHold(loop_start)
@@ -1418,9 +1501,11 @@ void DualArmServoLoop::loopMain() {
         if (right_send_end_ns >= right_send_start_ns && right_send_start_ns > 0) {
             sample.right_send_duration_us = static_cast<double>(right_send_end_ns - right_send_start_ns) / 1000.0;
         }
-        if (workerIoMode()) {
+        if (workerBackedIoMode()) {
             sample.left_worker_telemetry = workerTelemetryOrDefault(left_worker_.get());
             sample.right_worker_telemetry = workerTelemetryOrDefault(right_worker_.get());
+            sample.left_async_streaming = asyncTelemetryOrDefault(left_worker_.get());
+            sample.right_async_streaming = asyncTelemetryOrDefault(right_worker_.get());
             sample.left_transport_telemetry = workerTransportTelemetry(left_worker_.get());
             sample.right_transport_telemetry = workerTransportTelemetry(right_worker_.get());
         } else {
@@ -1506,6 +1591,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.right_send_duration_us = sample.right_send_duration_us;
             latest_snapshot_.left_worker_telemetry = sample.left_worker_telemetry;
             latest_snapshot_.right_worker_telemetry = sample.right_worker_telemetry;
+            latest_snapshot_.left_async_streaming = sample.left_async_streaming;
+            latest_snapshot_.right_async_streaming = sample.right_async_streaming;
             latest_snapshot_.left_transport_telemetry = sample.left_transport_telemetry;
             latest_snapshot_.right_transport_telemetry = sample.right_transport_telemetry;
             latest_snapshot_.startup_validation = startup_validation_;
@@ -1540,10 +1627,10 @@ bool DualArmServoLoop::configureRealtimeForLoop() {
 bool DualArmServoLoop::readRobotStates(RobotState& left, RobotState& right) {
     const uint64_t max_age_ns =
         static_cast<uint64_t>(std::max(0.1, config_.servo.command_timeout_sec) * 1'000'000'000.0);
-    const BackendResult<RobotState> left_result = workerIoMode()
+    const BackendResult<RobotState> left_result = workerBackedIoMode()
         ? (left_worker_ ? left_worker_->latestState(max_age_ns) : BackendResult<RobotState>{})
         : (left_robot_ ? left_robot_->readState() : BackendResult<RobotState>{});
-    const BackendResult<RobotState> right_result = workerIoMode()
+    const BackendResult<RobotState> right_result = workerBackedIoMode()
         ? (right_worker_ ? right_worker_->latestState(max_age_ns) : BackendResult<RobotState>{})
         : (right_robot_ ? right_robot_->readState() : BackendResult<RobotState>{});
     if (left_result.ok) {
@@ -2648,6 +2735,16 @@ DualSendResult DualArmServoLoop::sendTargets(
         return result;
     }
 
+    if (rbpodoAsyncIoMode()) {
+        dispatch_request.left.host_time_ns = command_host_time_ns;
+        dispatch_request.right.host_time_ns = command_host_time_ns;
+        return ServoDispatcher::dispatchRbpodoAsync(
+            *left_worker_,
+            *right_worker_,
+            dispatch_request
+        );
+    }
+
     if (workerIoMode()) {
         dispatch_request.left.host_time_ns = command_host_time_ns;
         dispatch_request.right.host_time_ns = command_host_time_ns;
@@ -2707,6 +2804,14 @@ bool DualArmServoLoop::workerIoMode() const {
     return config_.servo.io_model == ServoIoModel::Worker;
 }
 
+bool DualArmServoLoop::rbpodoAsyncIoMode() const {
+    return config_.servo.rbpodo_async_streaming.enable;
+}
+
+bool DualArmServoLoop::workerBackedIoMode() const {
+    return workerIoMode() || rbpodoAsyncIoMode();
+}
+
 bool DualArmServoLoop::motionAllowed() const {
     const ServerMotionState state = motion_state_.load();
     return state == ServerMotionState::ArmedHold || state == ServerMotionState::Running;
@@ -2739,7 +2844,7 @@ bool DualArmServoLoop::clearFaultLatch(RobotState& left_state, RobotState& right
     const uint64_t reset_start_ns = nowSteadyNs();
     const uint64_t reset_timeout_ns = timeoutNs(config_.servo.command_timeout_sec, 1'000'000'000);
     const uint64_t reset_deadline_ns = addDeadlineNs(reset_start_ns, reset_timeout_ns);
-    if (workerIoMode()) {
+    if (workerBackedIoMode()) {
         const BackendResult<RobotState> left_reset = left_worker_
             ? left_worker_->resetFault(tick_, reset_deadline_ns)
             : BackendResult<RobotState>{

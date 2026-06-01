@@ -155,7 +155,14 @@ public:
         if (!accept_send_without_state_update_) {
             q_actual_ = request.q_target_deg;
         }
-        return rb_servo::acceptedSend(request, {}, currentState(), "cache");
+        rb_servo::SendServoJResult result =
+            rb_servo::acceptedSend(request, {}, currentState(), "cache");
+        result.ack_policy = rb_servo::BackendAckPolicy::Wait;
+        result.ack_observed = true;
+        result.controller_acceptance_observed = true;
+        result.rbpodo_waiting_ack = true;
+        result.acceptance_semantics = "controller_ack_observed";
+        return result;
     }
 
     rb_servo::BackendResult<rb_servo::RobotState> stop() override {
@@ -752,6 +759,20 @@ rb_servo::DualArmConfig rbpodoControllerSimulationConfig() {
     return cfg;
 }
 
+void enableRbpodoAsyncStreaming(
+    rb_servo::DualArmConfig* cfg,
+    rb_servo::RbpodoAsyncStreamingMode mode =
+        rb_servo::RbpodoAsyncStreamingMode::SdkAckWorker
+) {
+    cfg->servo.rbpodo_async_streaming.enable = true;
+    cfg->servo.rbpodo_async_streaming.mode = mode;
+    cfg->servo.rbpodo_async_streaming.rate_hz = cfg->servo.rate_hz;
+    cfg->servo.rbpodo_async_streaming.ack_supervision.max_consecutive_missing_ack = 2;
+    cfg->servo.rbpodo_async_streaming.ack_supervision.missing_ack_fault_after_ms = 20.0;
+    cfg->servo.rbpodo_async_streaming.reference_supervision.q_ref_update_timeout_ms = 20.0;
+    cfg->servo.rbpodo_async_streaming.reference_supervision.q_ref_target_tolerance_deg = 0.5;
+}
+
 rb_servo::DualArmCommand command(rb_servo::ControlMode mode) {
     rb_servo::DualArmCommand cmd;
     cmd.seq = 1;
@@ -1004,6 +1025,52 @@ private:
     bool had_value_ = false;
     std::string old_value_;
 };
+
+std::string writeRbpodoAsyncConfig(
+    const std::string& suffix,
+    const std::string& left_operation_mode = "simulation",
+    const std::string& right_operation_mode = "simulation",
+    const std::string& async_mode = "sdk_ack_worker",
+    bool disable_waiting_ack = false
+) {
+    const std::string path =
+        "/tmp/rb-servo-rbpodo-async-" + suffix + "-" + std::to_string(getpid()) + ".yaml";
+    std::ofstream file(path);
+    file << "left_robot:\n"
+         << "  backend_type: rbpodo\n"
+         << "  run_mode: real\n"
+         << "  operation_mode: " << left_operation_mode << "\n"
+         << "  ip: 127.0.0.1\n"
+         << "  servo_t1_sec: 0.002\n"
+         << "  servo_t2_sec: 0.05\n"
+         << "  servo_gain: 1.0\n"
+         << "  servo_alpha: 0.5\n"
+         << "  disable_waiting_ack: " << (disable_waiting_ack ? "true" : "false") << "\n"
+         << "right_robot:\n"
+         << "  backend_type: rbpodo\n"
+         << "  run_mode: real\n"
+         << "  operation_mode: " << right_operation_mode << "\n"
+         << "  ip: 127.0.0.2\n"
+         << "  servo_t1_sec: 0.002\n"
+         << "  servo_t2_sec: 0.05\n"
+         << "  servo_gain: 1.0\n"
+         << "  servo_alpha: 0.5\n"
+         << "  disable_waiting_ack: " << (disable_waiting_ack ? "true" : "false") << "\n"
+         << "servo:\n"
+         << "  rate_hz: 500\n"
+         << "  send_servo_commands: true\n"
+         << "  allow_controller_simulation_motion: true\n"
+         << "  enable_realtime_priority: true\n"
+         << "  rbpodo_async_streaming:\n"
+         << "    enable: true\n"
+         << "    mode: " << async_mode << "\n"
+         << "    rate_hz: 500\n"
+         << "safety:\n"
+         << "  tracking_error_policy: fault_latch\n"
+         << "  stop_both_arms_on_single_arm_error: true\n"
+         << "  latch_fault_on_robot_state_error: true\n";
+    return path;
+}
 
 bool testSimulatorConfigParsesCanonicalAndAliases() {
     const std::filesystem::path config_path =
@@ -2935,6 +3002,176 @@ bool testWorkerIoModeClassifiesStaleStateExplicitly() {
     return true;
 }
 
+bool testRbpodoAsyncConfigRejectsPhysicalRealAndMissingEnv() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
+    EnvVarGuard allow_ack_disabled("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION");
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    pgmode_confirmed.set("1");
+    allow_async.unset();
+    allow_ack_disabled.unset();
+
+    const std::string missing_env_path = writeRbpodoAsyncConfig("missing-env");
+    bool missing_env_rejected = false;
+    try {
+        (void)rb_servo::loadConfigFromYaml(missing_env_path);
+    } catch (const std::exception& exc) {
+        missing_env_rejected = contains(exc.what(), "RB_ALLOW_RBPODO_ASYNC_STREAMING");
+    }
+    ::unlink(missing_env_path.c_str());
+    RB_CHECK(missing_env_rejected);
+
+    allow_async.set("1");
+    const std::string operation_real_path =
+        writeRbpodoAsyncConfig("operation-real", "real", "simulation");
+    bool physical_real_rejected = false;
+    try {
+        (void)rb_servo::loadConfigFromYaml(operation_real_path);
+    } catch (const std::exception& exc) {
+        physical_real_rejected = contains(exc.what(), "operation_mode=simulation");
+    }
+    ::unlink(operation_real_path.c_str());
+    RB_CHECK(physical_real_rejected);
+    return true;
+}
+
+bool testRbpodoAsyncServoLoopDoesNotBlockOnSlowAckWorker() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    pgmode_confirmed.set("1");
+    allow_async.set("1");
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.servo.rate_hz = 20;
+    cfg.servo.worker_read_period_sec = 0.005;
+    enableRbpodoAsyncStreaming(&cfg);
+    cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_update_timeout_ms = 200.0;
+    cfg.servo.rbpodo_async_streaming.ack_supervision.missing_ack_fault_after_ms = 200.0;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    TestBackend* left_backend = left.get();
+    TestBackend* right_backend = right.get();
+    rb_servo::DualArmServoLoop loop(
+        std::move(left),
+        std::move(right),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    left_backend->setSendSleepMs(80);
+    right_backend->setSendSleepMs(80);
+    rb_servo::DualArmCommand arm_motion = command(rb_servo::ControlMode::ArmMotion);
+    arm_motion.left.timeout_sec = 1.0;
+    arm_motion.right.timeout_sec = 1.0;
+    buffer.setCommand(arm_motion);
+    RB_CHECK(waitUntil(
+        [&] { return loop.motionState() == rb_servo::ServerMotionState::ArmedHold; },
+        std::chrono::milliseconds(1000)
+    ));
+
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.seq = 8801;
+    target.left.q_target_deg = joints(8.0);
+    target.right.q_target_deg = joints(8.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    target.left.timeout_sec = 1.0;
+    target.right.timeout_sec = 1.0;
+    buffer.setCommand(target);
+
+    std::optional<rb_servo::ServoSnapshot> async_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (snapshot.command.seq == 8801 &&
+            snapshot.left_last_send.acceptance_semantics == "async_enqueued" &&
+            snapshot.right_last_send.acceptance_semantics == "async_enqueued") {
+            async_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1000)));
+
+    RB_CHECK(async_snapshot.has_value());
+    RB_CHECK(async_snapshot->left_send_ok);
+    RB_CHECK(async_snapshot->right_send_ok);
+    RB_CHECK(async_snapshot->left_send_duration_us < 50'000.0);
+    RB_CHECK(async_snapshot->right_send_duration_us < 50'000.0);
+    loop.stop();
+    RB_CHECK(async_snapshot->left_async_streaming.commands_enqueued_total > 0);
+    RB_CHECK(left_backend->sendCount() > 0);
+    RB_CHECK(right_backend->sendCount() > 0);
+    return true;
+}
+
+bool testRbpodoAsyncSupervisionFaultLatchesServoLoop() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    pgmode_confirmed.set("1");
+    allow_async.set("1");
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.servo.rate_hz = 50;
+    cfg.servo.worker_read_period_sec = 0.005;
+    enableRbpodoAsyncStreaming(&cfg);
+    const rb_servo::JointArray initial = joints(0.0);
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left,
+            initial,
+            true,
+            rb_servo::BackendErrorKind::TransportTimeout
+        ),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+
+    std::optional<rb_servo::ServoSnapshot> fault_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (snapshot.fault_latched &&
+            snapshot.latched_fault_reason == rb_servo::SafetyVerdict::SendFailure &&
+            snapshot.left_async_streaming.supervision_state ==
+                rb_servo::RbpodoAsyncStreamingSupervisionState::Fault) {
+            fault_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1500)));
+
+    loop.stop();
+    RB_CHECK(fault_snapshot.has_value());
+    RB_CHECK(fault_snapshot->left_async_streaming.commands_dropped_total > 0);
+    RB_CHECK(fault_snapshot->left_async_streaming.ack_timeout_count > 0);
+    RB_CHECK(fault_snapshot->fault_reason == "rbpodo async streaming supervision fault");
+    return true;
+}
+
 
 bool testStatePublisherAcceptsDockerServiceHostnameEndpoint() {
     std::string host;
@@ -3394,6 +3631,9 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     rb_servo::DualArmConfig worker_cfg = cfg;
     worker_cfg.servo.io_model = rb_servo::ServoIoModel::Worker;
     worker_cfg.servo.worker_read_period_sec = 0.025;
+    worker_cfg.servo.rbpodo_async_streaming.enable = true;
+    worker_cfg.servo.rbpodo_async_streaming.mode =
+        rb_servo::RbpodoAsyncStreamingMode::SocketSendSupervised;
     rb_servo::ServoSnapshot worker_snapshot = snapshot;
     worker_snapshot.loop_end_time_ns = 20'000;
     worker_snapshot.left_worker_telemetry.worker_command_drops_total = 3;
@@ -3402,6 +3642,21 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     worker_snapshot.left_worker_telemetry.worker_last_enqueued_seq = 1204;
     worker_snapshot.left_worker_telemetry.worker_last_dispatched_seq = 1204;
     worker_snapshot.left_worker_telemetry.worker_last_completed_seq = 1204;
+    worker_snapshot.left_async_streaming.commands_enqueued_total = 10;
+    worker_snapshot.left_async_streaming.commands_sent_total = 9;
+    worker_snapshot.left_async_streaming.commands_acked_total = 0;
+    worker_snapshot.left_async_streaming.commands_socket_sent_total = 9;
+    worker_snapshot.left_async_streaming.commands_overwritten_total = 1;
+    worker_snapshot.left_async_streaming.commands_dropped_total = 1;
+    worker_snapshot.left_async_streaming.ack_timeout_count = 2;
+    worker_snapshot.left_async_streaming.last_command_seq = 1300;
+    worker_snapshot.left_async_streaming.last_sent_seq = 1299;
+    worker_snapshot.left_async_streaming.last_async_send_duration_us = 2500.0;
+    worker_snapshot.left_async_streaming.last_async_ack_duration_us = 0.0;
+    worker_snapshot.left_async_streaming.last_async_acceptance_semantics = "socket_send_only";
+    worker_snapshot.left_async_streaming.worker_backlog = 1;
+    worker_snapshot.left_async_streaming.supervision_state =
+        rb_servo::RbpodoAsyncStreamingSupervisionState::Warning;
     rb_servo::BackendTransportTelemetry transport;
     transport.connect_attempts_total = 2;
     transport.connect_failures_total = 1;
@@ -3433,6 +3688,23 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(worker.at("last_enqueued_seq").get<uint64_t>() == 1204);
     RB_CHECK(worker.at("last_dispatched_seq").get<uint64_t>() == 1204);
     RB_CHECK(worker.at("last_completed_seq").get<uint64_t>() == 1204);
+    const nlohmann::json& async = worker_json.at("left").at("async_streaming");
+    RB_CHECK(async.at("enabled").get<bool>());
+    RB_CHECK(async.at("mode").get<std::string>() == "socket_send_supervised");
+    RB_CHECK(async.at("commands_enqueued_total").get<uint64_t>() == 10);
+    RB_CHECK(async.at("commands_sent_total").get<uint64_t>() == 9);
+    RB_CHECK(async.at("commands_acked_total").get<uint64_t>() == 0);
+    RB_CHECK(async.at("commands_socket_sent_total").get<uint64_t>() == 9);
+    RB_CHECK(async.at("commands_overwritten_total").get<uint64_t>() == 1);
+    RB_CHECK(async.at("commands_dropped_total").get<uint64_t>() == 1);
+    RB_CHECK(async.at("ack_timeout_count").get<uint64_t>() == 2);
+    RB_CHECK(async.at("last_command_seq").get<uint64_t>() == 1300);
+    RB_CHECK(async.at("last_sent_seq").get<uint64_t>() == 1299);
+    RB_CHECK(async.at("last_async_send_duration_us").get<double>() == 2500.0);
+    RB_CHECK(async.at("last_async_ack_duration_us").get<double>() == 0.0);
+    RB_CHECK(async.at("last_async_acceptance_semantics").get<std::string>() == "socket_send_only");
+    RB_CHECK(async.at("async_worker_backlog").get<uint64_t>() == 1);
+    RB_CHECK(async.at("async_supervision_state").get<std::string>() == "warning");
     const nlohmann::json& transport_json = worker_json.at("left").at("transport");
     RB_CHECK(transport_json.at("connect_attempts_total").get<uint64_t>() == 2);
     RB_CHECK(transport_json.at("connect_failures_total").get<uint64_t>() == 1);
@@ -5466,6 +5738,9 @@ int main() {
     if (!testWorkerIoModeTimesOutMissingSendResultByDeadline()) return 1;
     if (!testWorkerIoModeReportsMixedTimeoutAndAcceptedArm()) return 1;
     if (!testWorkerIoModeClassifiesStaleStateExplicitly()) return 1;
+    if (!testRbpodoAsyncConfigRejectsPhysicalRealAndMissingEnv()) return 1;
+    if (!testRbpodoAsyncServoLoopDoesNotBlockOnSlowAckWorker()) return 1;
+    if (!testRbpodoAsyncSupervisionFaultLatchesServoLoop()) return 1;
     if (!testStatePublisherAcceptsDockerServiceHostnameEndpoint()) return 1;
     if (!testStatePublisherSerializesServoSnapshotSchema()) return 1;
     if (!testStatePublisherUsesLatestSnapshotWithoutBackendReadsAndDoesNotStallLoop()) return 1;

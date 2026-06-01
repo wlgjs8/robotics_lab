@@ -811,6 +811,13 @@ void validateConfig(const DualArmConfig& cfg) {
                 "RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1."
             );
         }
+        if (async_streaming.mode == RbpodoAsyncStreamingMode::SocketSendSupervised &&
+            (!cfg.left_robot.disable_waiting_ack || !cfg.right_robot.disable_waiting_ack)) {
+            throw std::runtime_error(
+                "servo.rbpodo_async_streaming.mode=socket_send_supervised requires "
+                "left_robot.disable_waiting_ack=true and right_robot.disable_waiting_ack=true"
+            );
+        }
     }
     if (cfg.safety.joint_wrap_for_motion_safety) {
         throw std::runtime_error(

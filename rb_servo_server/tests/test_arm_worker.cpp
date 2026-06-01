@@ -63,10 +63,12 @@ public:
     explicit WorkerTestBackend(
         rb_servo::ArmId arm_id,
         rb_servo::BackendErrorKind send_error_kind = rb_servo::BackendErrorKind::None,
-        bool block_first_read = false
+        bool block_first_read = false,
+        bool socket_send_only = false
     ) : arm_id_(arm_id),
         send_error_kind_(send_error_kind),
         block_first_read_(block_first_read),
+        socket_send_only_(socket_send_only),
         state_(validState(arm_id, joints(0.0))) {}
 
     rb_servo::BackendResult<rb_servo::RobotState> connect() override {
@@ -116,7 +118,24 @@ public:
 
         std::lock_guard<std::mutex> lock(mutex_);
         if (send_error_kind_ == rb_servo::BackendErrorKind::None) {
-            return rb_servo::acceptedSend(request, {}, state_, "cache");
+            rb_servo::SendServoJResult result =
+                rb_servo::acceptedSend(request, {}, state_, "cache");
+            if (socket_send_only_) {
+                result.ack_policy = rb_servo::BackendAckPolicy::Disabled;
+                result.ack_observed = false;
+                result.controller_acceptance_observed = false;
+                result.ack_wait_duration_us = 0.0;
+                result.rbpodo_waiting_ack = false;
+                result.acceptance_semantics = "socket_send_only";
+            } else {
+                result.ack_policy = rb_servo::BackendAckPolicy::Wait;
+                result.ack_observed = true;
+                result.controller_acceptance_observed = true;
+                result.ack_wait_duration_us = result.timing.duration_us;
+                result.rbpodo_waiting_ack = true;
+                result.acceptance_semantics = "controller_ack_observed";
+            }
+            return result;
         }
         return rb_servo::rejectedSend(
             request,
@@ -221,6 +240,7 @@ private:
     rb_servo::ArmId arm_id_;
     rb_servo::BackendErrorKind send_error_kind_;
     bool block_first_read_ = false;
+    bool socket_send_only_ = false;
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     bool connected_ = false;
@@ -244,6 +264,16 @@ rb_servo::SendServoJRequest request(uint64_t seq, const rb_servo::JointArray& q,
     out.deadline_ns = deadline_ns;
     out.q_target_deg = q;
     return out;
+}
+
+rb_servo::ArmWorkerOptions asyncWorkerOptions(rb_servo::RbpodoAsyncStreamingMode mode) {
+    rb_servo::ArmWorkerOptions options;
+    options.read_period_ns = 1'000'000;
+    options.rbpodo_async_streaming_enabled = true;
+    options.rbpodo_async_streaming_mode = mode;
+    options.rbpodo_async_max_pending_age_ms = 10.0;
+    options.rbpodo_async_ack_supervision.max_consecutive_missing_ack = 2;
+    return options;
 }
 
 bool testSuccessfulReadLoop() {
@@ -586,6 +616,118 @@ bool testStopWithPendingCommandBehindReadDoesNotDeadlock() {
     return true;
 }
 
+bool testAsyncLatestWinsOverwriteTelemetry() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None,
+        true
+    );
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorker worker(
+        std::move(backend),
+        asyncWorkerOptions(rb_servo::RbpodoAsyncStreamingMode::SdkAckWorker)
+    );
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForFirstReadEntered(std::chrono::milliseconds(200)));
+
+    const uint64_t deadline = rb_servo::nowSteadyNs() + 1'000'000'000;
+    const rb_servo::ArmSendResult first =
+        worker.enqueueAsyncServoJ(request(1011, joints(11.0), deadline));
+    RB_CHECK(first.result.accepted);
+    RB_CHECK(first.result.acceptance_semantics == "async_enqueued");
+
+    const rb_servo::ArmSendResult second =
+        worker.enqueueAsyncServoJ(request(1012, joints(12.0), deadline));
+    RB_CHECK(second.result.accepted);
+
+    rb_servo::RbpodoAsyncStreamingTelemetry async = worker.asyncStreamingTelemetry();
+    RB_CHECK(async.commands_enqueued_total == 2);
+    RB_CHECK(async.commands_overwritten_total == 1);
+    RB_CHECK(async.commands_dropped_total == 1);
+    RB_CHECK(async.last_command_seq == 1012);
+    RB_CHECK(async.worker_backlog == 1);
+
+    raw_backend->releaseFirstRead();
+    RB_CHECK(raw_backend->waitForSends(1, std::chrono::milliseconds(200)));
+    worker.stop();
+
+    const std::optional<rb_servo::SendServoJRequest> last_request = raw_backend->lastRequest();
+    RB_CHECK(last_request.has_value());
+    RB_CHECK(last_request->command_seq == 1012);
+    RB_CHECK(raw_backend->sendCount() == 1);
+    async = worker.asyncStreamingTelemetry();
+    RB_CHECK(async.commands_sent_total == 1);
+    RB_CHECK(async.commands_acked_total == 1);
+    RB_CHECK(async.last_sent_seq == 1012);
+    RB_CHECK(async.last_ack_seq == 1012);
+    RB_CHECK(async.last_async_acceptance_semantics == "controller_ack_observed");
+    return true;
+}
+
+bool testAsyncSdkAckWorkerRecordsAckObservedResults() {
+    auto backend = std::make_unique<WorkerTestBackend>(rb_servo::ArmId::Right);
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorker worker(
+        std::move(backend),
+        asyncWorkerOptions(rb_servo::RbpodoAsyncStreamingMode::SdkAckWorker)
+    );
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(200)));
+
+    const uint64_t deadline = rb_servo::nowSteadyNs() + 1'000'000'000;
+    const rb_servo::ArmSendResult enqueue =
+        worker.enqueueAsyncServoJ(request(1020, joints(20.0), deadline));
+    RB_CHECK(enqueue.result.accepted);
+    RB_CHECK(enqueue.result.controller_acceptance_observed == false);
+    RB_CHECK(raw_backend->waitForSends(1, std::chrono::milliseconds(200)));
+
+    rb_servo::RbpodoAsyncStreamingTelemetry async = worker.asyncStreamingTelemetry();
+    worker.stop();
+    RB_CHECK(async.commands_enqueued_total == 1);
+    RB_CHECK(async.commands_sent_total == 1);
+    RB_CHECK(async.commands_acked_total == 1);
+    RB_CHECK(async.commands_socket_sent_total == 0);
+    RB_CHECK(async.last_ack_seq == 1020);
+    RB_CHECK(async.last_ack_result == "controller_ack_observed");
+    RB_CHECK(async.last_async_ack_duration_us >= 0.0);
+    RB_CHECK(async.supervision_state == rb_servo::RbpodoAsyncStreamingSupervisionState::Ok);
+    return true;
+}
+
+bool testAsyncSocketSendSupervisedRecordsSocketSendOnly() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None,
+        false,
+        true
+    );
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorker worker(
+        std::move(backend),
+        asyncWorkerOptions(rb_servo::RbpodoAsyncStreamingMode::SocketSendSupervised)
+    );
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(200)));
+
+    const uint64_t deadline = rb_servo::nowSteadyNs() + 1'000'000'000;
+    const rb_servo::ArmSendResult enqueue =
+        worker.enqueueAsyncServoJ(request(1030, joints(30.0), deadline));
+    RB_CHECK(enqueue.result.accepted);
+    RB_CHECK(enqueue.result.ack_policy == rb_servo::BackendAckPolicy::Disabled);
+    RB_CHECK(raw_backend->waitForSends(1, std::chrono::milliseconds(200)));
+
+    const rb_servo::RbpodoAsyncStreamingTelemetry async = worker.asyncStreamingTelemetry();
+    worker.stop();
+    RB_CHECK(async.commands_enqueued_total == 1);
+    RB_CHECK(async.commands_sent_total == 1);
+    RB_CHECK(async.commands_socket_sent_total == 1);
+    RB_CHECK(async.commands_acked_total == 0);
+    RB_CHECK(async.last_ack_seq == 0);
+    RB_CHECK(async.last_async_acceptance_semantics == "socket_send_only");
+    RB_CHECK(async.last_controller_acceptance_semantics == "socket_send_only");
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -602,5 +744,8 @@ int main() {
     if (!testStopJoinsThreadAndRejectsNewCommand()) return 1;
     if (!testNoDeadlockOnDestruction()) return 1;
     if (!testStopWithPendingCommandBehindReadDoesNotDeadlock()) return 1;
+    if (!testAsyncLatestWinsOverwriteTelemetry()) return 1;
+    if (!testAsyncSdkAckWorkerRecordsAckObservedResults()) return 1;
+    if (!testAsyncSocketSendSupervisedRecordsSocketSendOnly()) return 1;
     return 0;
 }

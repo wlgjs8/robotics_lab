@@ -145,10 +145,12 @@ This is synchronous ACK-on evidence, meaning accepted Servo J sends are
 reported as `controller_ack_observed`. Existing ACK-off diagnostics remain
 `socket_send_only` evidence and are not controller ACK acceptance.
 
-## Async ACK-Supervised Contract
+## Async ACK-Supervised Worker Contract
 
-The async 500 Hz contract is defined before worker behavior is implemented.
-It is controller `pgmode` simulation only and remains disabled by default:
+The async 500 Hz worker is controller `pgmode` simulation only and remains
+disabled by default. When enabled, the servo loop computes a target every tick
+and enqueues a latest-wins Servo J request into one per-arm worker slot instead
+of waiting for rbpodo SDK ACK in the loop thread:
 
 ```yaml
 servo:
@@ -175,13 +177,17 @@ servo:
 Modes:
 
 - `disabled`: current behavior.
-- `sdk_ack_worker`: a worker may block inside the rbpodo SDK waiting for ACK;
-  the servo loop must not block. Accepted commands use
-  `controller_ack_observed`; backlog and drops must be visible.
+- `sdk_ack_worker`: the worker calls the synchronous rbpodo SDK and may block
+  waiting for ACK in its own thread; the servo loop does not block. Accepted
+  worker results use `controller_ack_observed`, but this mode may still miss
+  500 Hz if controller ACK latency is slower than the command period. Backlog,
+  overwrites, drops, send duration, ACK duration, and last failure are published
+  per arm.
 - `socket_send_supervised`: the SDK uses `disable_waiting_ack=true` or an
   equivalent socket-send-only path. Sends must be reported as
   `socket_send_only`, never `controller_ack_observed`. `q_ref` and/or
-  `tcp_ref` watchdog supervision is required to infer controller acceptance.
+  `tcp_ref` watchdog supervision is required to infer controller progress.
+  Socket send evidence alone is not controller ACK acceptance.
 
 Async mode requires both arms to use `backend_type: rbpodo`, `run_mode: real`,
 and `operation_mode: simulation`; `operation_mode: real` is refused. Runtime
@@ -206,11 +212,20 @@ Async supervision is not proof of physical real safety. It does not authorize
 physical `operation_mode: real`, physical Cartesian motion, or a default 500 Hz
 rate change.
 
+State JSON publishes per-arm `async_streaming` telemetry including
+`enabled`, `mode`, `commands_enqueued_total`, `commands_sent_total`,
+`commands_acked_total`, `commands_socket_sent_total`,
+`commands_overwritten_total`, `commands_dropped_total`, `ack_timeout_count`,
+`last_async_send_duration_us`, `last_async_ack_duration_us`,
+`last_async_acceptance_semantics`, `async_worker_backlog`, and
+`async_supervision_state`. A supervision fault latches the servo loop fault
+state and suppresses further regular servo sends.
+
 ## SDK Async Capability Probe
 
-Before implementing `sdk_ack_worker` or `socket_send_supervised`, characterize
-what the Python rbpodo SDK exposes. `RBPODO-ASYNC-SDK-PROBE-01` adds a
-controller `pgmode` simulation-only probe:
+Before changing `sdk_ack_worker` or `socket_send_supervised` assumptions,
+characterize what the Python rbpodo SDK exposes. `RBPODO-ASYNC-SDK-PROBE-01`
+adds a controller `pgmode` simulation-only probe:
 
 ```bash
 python3 scripts/rbpodo_async_sdk_probe.py \

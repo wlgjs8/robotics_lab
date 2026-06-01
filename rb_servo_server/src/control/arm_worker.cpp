@@ -1,6 +1,9 @@
 #include "rb_servo/control/arm_worker.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -88,6 +91,42 @@ bool lifecycleResultMatches(
 
 std::size_t lifecycleQueueCapacity(const ArmWorkerOptions& options) {
     return options.lifecycle_queue_capacity == 0 ? 1 : options.lifecycle_queue_capacity;
+}
+
+bool finiteJointArray(const JointArray& joints) {
+    return std::all_of(joints.begin(), joints.end(), [](double value) {
+        return std::isfinite(value);
+    });
+}
+
+double maxAbsJointDelta(const JointArray& a, const JointArray& b) {
+    double max_delta = 0.0;
+    for (int i = 0; i < kDof; ++i) {
+        if (!std::isfinite(a[i]) || !std::isfinite(b[i])) {
+            return std::numeric_limits<double>::infinity();
+        }
+        max_delta = std::max(max_delta, std::abs(a[i] - b[i]));
+    }
+    return max_delta;
+}
+
+bool timeoutLikeError(BackendErrorKind kind) {
+    return kind == BackendErrorKind::TransportTimeout ||
+        kind == BackendErrorKind::CommandTimeout;
+}
+
+std::string sendResultSummary(const SendServoJResult& result) {
+    if (result.accepted) {
+        return result.acceptance_semantics.empty()
+            ? "accepted"
+            : result.acceptance_semantics;
+    }
+    return result.error.name.empty() ? toString(result.error.kind) : result.error.name;
+}
+
+void updateMax(double value, double* target) {
+    if (!target || !std::isfinite(value)) return;
+    *target = std::max(*target, value);
 }
 
 }  // namespace
@@ -188,6 +227,79 @@ void ArmWorker::enqueueServoJ(SendServoJRequest request) {
     telemetry_.worker_last_enqueued_seq = request.command_seq;
     pending_servo_j_ = std::move(request);
     cv_.notify_one();
+}
+
+ArmSendResult ArmWorker::enqueueAsyncServoJ(SendServoJRequest request) {
+    const uint64_t now = nowSteadyNs();
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!running_) {
+        const BackendTiming timing = makeBackendTiming(now, now);
+        const SendServoJResult result = notRunningResult(request, now);
+        if (asyncStreamingEnabled()) {
+            noteAsyncDropLocked(
+                request.command_seq,
+                result.error.name,
+                RbpodoAsyncStreamingSupervisionState::Fault
+            );
+        }
+        storeImmediateAsyncResultLocked(request, result, timing);
+        return *last_send_result_;
+    }
+
+    if (isExpired(request, now)) {
+        const BackendTiming timing = makeBackendTiming(now, now);
+        const SendServoJResult result = expiredResult(request, now);
+        if (asyncStreamingEnabled()) {
+            noteAsyncDropLocked(
+                request.command_seq,
+                result.error.name,
+                RbpodoAsyncStreamingSupervisionState::Warning
+            );
+        }
+        storeImmediateAsyncResultLocked(request, result, timing);
+        return *last_send_result_;
+    }
+
+    const bool overwrite = pending_servo_j_.has_value() &&
+        pending_servo_j_->command_seq != request.command_seq;
+    if (overwrite) {
+        ++telemetry_.worker_command_drops_total;
+        ++telemetry_.worker_pending_overwrites_total;
+        telemetry_.worker_last_dropped_seq = pending_servo_j_->command_seq;
+    }
+
+    if (asyncStreamingEnabled()) {
+        ++async_telemetry_.commands_enqueued_total;
+        async_telemetry_.last_command_seq = request.command_seq;
+        async_telemetry_.worker_backlog = 1;
+        if (overwrite) {
+            ++async_telemetry_.commands_overwritten_total;
+            ++async_telemetry_.commands_dropped_total;
+            async_telemetry_.last_failure = "async_latest_wins_overwrite";
+        }
+        if (async_telemetry_.supervision_state !=
+            RbpodoAsyncStreamingSupervisionState::Fault) {
+            async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Ok;
+        }
+    }
+
+    telemetry_.worker_last_enqueued_seq = request.command_seq;
+    pending_servo_j_ = request;
+
+    BackendTiming timing = makeBackendTiming(now, nowSteadyNs());
+    SendServoJResult result = acceptedSend(request, timing);
+    result.ack_policy = options_.rbpodo_async_streaming_mode ==
+            RbpodoAsyncStreamingMode::SocketSendSupervised
+        ? BackendAckPolicy::Disabled
+        : BackendAckPolicy::Wait;
+    result.ack_observed = false;
+    result.controller_acceptance_observed = false;
+    result.rbpodo_waiting_ack = false;
+    result.acceptance_semantics = "async_enqueued";
+    storeImmediateAsyncResultLocked(request, result, timing);
+    cv_.notify_one();
+    return *last_send_result_;
 }
 
 BackendResult<RobotState> ArmWorker::enqueueLifecycleCommand(ArmWorkerCommand command) {
@@ -311,6 +423,11 @@ ArmWorkerTelemetry ArmWorker::telemetry() const {
     return telemetry_;
 }
 
+RbpodoAsyncStreamingTelemetry ArmWorker::asyncStreamingTelemetry() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return async_telemetry_;
+}
+
 std::optional<BackendTransportTelemetry> ArmWorker::transportTelemetry() const {
     return backend_ ? backend_->transportTelemetry() : std::nullopt;
 }
@@ -358,6 +475,10 @@ void ArmWorker::run() {
                 command = pending_servo_j_;
                 telemetry_.worker_last_dispatched_seq = command->command_seq;
                 pending_servo_j_.reset();
+                if (asyncStreamingEnabled()) {
+                    async_telemetry_.worker_backlog = 0;
+                    async_telemetry_.last_sent_seq = command->command_seq;
+                }
             }
         }
 
@@ -435,6 +556,7 @@ void ArmWorker::storeReadResult(const BackendResult<RobotState>& result, uint64_
     std::lock_guard<std::mutex> lock(mutex_);
     latest_state_ = result;
     latest_state_observed_ns_ = observed_ns;
+    updateAsyncReferenceSupervisionLocked(result, observed_ns);
 }
 
 void ArmWorker::storeSendResult(
@@ -461,7 +583,209 @@ void ArmWorker::storeSendResultLocked(
     arm_result.dispatch_timing = dispatch_timing;
     last_send_result_ = std::move(arm_result);
     telemetry_.worker_last_completed_seq = request.command_seq;
+    updateAsyncSendTelemetryLocked(request, result, dispatch_timing);
     cv_.notify_all();
+}
+
+void ArmWorker::storeImmediateAsyncResultLocked(
+    const SendServoJRequest& request,
+    const SendServoJResult& result,
+    const BackendTiming& dispatch_timing
+) {
+    ArmSendResult arm_result;
+    arm_result.arm_id = arm_id_;
+    arm_result.request = request;
+    arm_result.result = result;
+    if (arm_result.result.timing.start_ns == 0 && arm_result.result.timing.end_ns == 0) {
+        arm_result.result.timing = dispatch_timing;
+    }
+    arm_result.dispatch_timing = dispatch_timing;
+    last_send_result_ = std::move(arm_result);
+    cv_.notify_all();
+}
+
+void ArmWorker::updateAsyncSendTelemetryLocked(
+    const SendServoJRequest& request,
+    const SendServoJResult& result,
+    const BackendTiming& dispatch_timing
+) {
+    if (!asyncStreamingEnabled()) {
+        return;
+    }
+
+    const bool backend_attempted =
+        result.error.name != "arm_worker_command_expired" &&
+        result.error.name != "arm_worker_backend_not_ready" &&
+        result.error.name != "arm_worker_not_running";
+    if (!backend_attempted) {
+        ++async_telemetry_.commands_dropped_total;
+        async_telemetry_.last_failure = result.error.name.empty()
+            ? toString(result.error.kind)
+            : result.error.name;
+        if (timeoutLikeError(result.error.kind)) {
+            ++async_telemetry_.ack_timeout_count;
+        }
+        async_telemetry_.supervision_state =
+            result.error.name == "arm_worker_backend_not_ready"
+                ? RbpodoAsyncStreamingSupervisionState::Fault
+                : RbpodoAsyncStreamingSupervisionState::Warning;
+        return;
+    }
+
+    ++async_telemetry_.commands_sent_total;
+    async_telemetry_.last_sent_seq = request.command_seq;
+    async_telemetry_.last_send_result = sendResultSummary(result);
+    async_telemetry_.last_async_send_duration_us = dispatch_timing.duration_us;
+    updateMax(dispatch_timing.duration_us, &async_telemetry_.max_async_send_duration_us);
+    last_async_sent_request_ = request;
+
+    const double pending_age_ms = request.host_time_ns > 0 &&
+            dispatch_timing.start_ns >= request.host_time_ns
+        ? static_cast<double>(dispatch_timing.start_ns - request.host_time_ns) / 1'000'000.0
+        : 0.0;
+    if (std::isfinite(pending_age_ms)) {
+        async_telemetry_.max_pending_age_ms_observed =
+            std::max(async_telemetry_.max_pending_age_ms_observed, pending_age_ms);
+    }
+
+    const bool socket_send_only = result.acceptance_semantics == "socket_send_only" ||
+        result.ack_policy == BackendAckPolicy::Disabled;
+    const bool ack_observed = result.accepted &&
+        (result.controller_acceptance_observed ||
+         result.ack_observed ||
+         result.acceptance_semantics == "controller_ack_observed");
+
+    if (socket_send_only && result.accepted) {
+        ++async_telemetry_.commands_socket_sent_total;
+        async_telemetry_.last_socket_send_host_time_ns = dispatch_timing.end_ns;
+        async_telemetry_.last_async_acceptance_semantics = "socket_send_only";
+        async_telemetry_.last_controller_acceptance_semantics = "socket_send_only";
+    } else if (ack_observed) {
+        ++async_telemetry_.commands_acked_total;
+        async_telemetry_.last_ack_seq = request.command_seq;
+        async_telemetry_.last_async_ack_duration_us =
+            result.ack_wait_duration_us > 0.0
+                ? result.ack_wait_duration_us
+                : dispatch_timing.duration_us;
+        updateMax(
+            async_telemetry_.last_async_ack_duration_us,
+            &async_telemetry_.max_async_ack_duration_us
+        );
+        async_telemetry_.last_ack_result = sendResultSummary(result);
+        async_telemetry_.last_async_acceptance_semantics =
+            result.acceptance_semantics.empty()
+                ? "controller_ack_observed"
+                : result.acceptance_semantics;
+        async_telemetry_.last_controller_acceptance_semantics =
+            async_telemetry_.last_async_acceptance_semantics;
+    } else if (options_.rbpodo_async_streaming_mode ==
+        RbpodoAsyncStreamingMode::SdkAckWorker) {
+        ++async_telemetry_.missing_ack_count;
+        if (async_telemetry_.missing_ack_count >= static_cast<uint64_t>(
+                options_.rbpodo_async_ack_supervision.max_consecutive_missing_ack)) {
+            async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Fault;
+            async_telemetry_.last_failure = "async_sdk_ack_missing";
+        } else if (async_telemetry_.supervision_state !=
+            RbpodoAsyncStreamingSupervisionState::Fault) {
+            async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Warning;
+        }
+    }
+
+    if (!result.accepted) {
+        ++async_telemetry_.commands_dropped_total;
+        async_telemetry_.last_failure = result.error.name.empty()
+            ? toString(result.error.kind)
+            : result.error.name;
+        if (timeoutLikeError(result.error.kind)) {
+            ++async_telemetry_.ack_timeout_count;
+        }
+        async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Fault;
+        return;
+    }
+
+    if (async_telemetry_.supervision_state != RbpodoAsyncStreamingSupervisionState::Fault) {
+        async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Ok;
+    }
+}
+
+void ArmWorker::updateAsyncReferenceSupervisionLocked(
+    const BackendResult<RobotState>& result,
+    uint64_t observed_ns
+) {
+    if (!asyncStreamingEnabled() ||
+        !options_.rbpodo_async_reference_supervision.enable ||
+        !last_async_sent_request_.has_value()) {
+        return;
+    }
+
+    const RobotState& state = result.value;
+    const bool q_ref_valid = result.ok &&
+        (state.q_ref_valid || state.has_valid_joint_state) &&
+        finiteJointArray(state.q_target_deg);
+    if (q_ref_valid) {
+        const double error_deg = maxAbsJointDelta(
+            state.q_target_deg,
+            last_async_sent_request_->q_target_deg
+        );
+        if (error_deg <=
+            options_.rbpodo_async_reference_supervision.q_ref_target_tolerance_deg) {
+            async_telemetry_.last_q_ref_update_host_time_ns = observed_ns;
+            if (async_telemetry_.supervision_state !=
+                RbpodoAsyncStreamingSupervisionState::Fault) {
+                async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Ok;
+            }
+            return;
+        }
+    }
+
+    const uint64_t reference_base_ns =
+        async_telemetry_.last_q_ref_update_host_time_ns > 0
+            ? async_telemetry_.last_q_ref_update_host_time_ns
+            : last_async_sent_request_->host_time_ns;
+    if (reference_base_ns == 0 || observed_ns < reference_base_ns) {
+        return;
+    }
+
+    const double age_ms = static_cast<double>(observed_ns - reference_base_ns) / 1'000'000.0;
+    if (age_ms < options_.rbpodo_async_reference_supervision.q_ref_update_timeout_ms) {
+        return;
+    }
+    if (last_async_reference_fault_sample_ns_ == observed_ns) {
+        return;
+    }
+    last_async_reference_fault_sample_ns_ = observed_ns;
+    ++async_telemetry_.q_ref_watchdog_miss_count;
+    async_telemetry_.last_failure = "async_q_ref_watchdog_miss";
+    if (age_ms >= options_.rbpodo_async_ack_supervision.missing_ack_fault_after_ms ||
+        options_.rbpodo_async_streaming_mode ==
+            RbpodoAsyncStreamingMode::SocketSendSupervised) {
+        async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Fault;
+    } else if (async_telemetry_.supervision_state !=
+        RbpodoAsyncStreamingSupervisionState::Fault) {
+        async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Warning;
+    }
+}
+
+void ArmWorker::noteAsyncDropLocked(
+    uint64_t seq,
+    const std::string& reason,
+    RbpodoAsyncStreamingSupervisionState state
+) {
+    if (!asyncStreamingEnabled()) {
+        return;
+    }
+    ++async_telemetry_.commands_dropped_total;
+    async_telemetry_.last_command_seq = seq;
+    async_telemetry_.last_failure = reason;
+    if (state == RbpodoAsyncStreamingSupervisionState::Fault ||
+        async_telemetry_.supervision_state != RbpodoAsyncStreamingSupervisionState::Fault) {
+        async_telemetry_.supervision_state = state;
+    }
+}
+
+bool ArmWorker::asyncStreamingEnabled() const {
+    return options_.rbpodo_async_streaming_enabled &&
+        options_.rbpodo_async_streaming_mode != RbpodoAsyncStreamingMode::Disabled;
 }
 
 BackendResult<RobotState> ArmWorker::executeLifecycleCommand(
