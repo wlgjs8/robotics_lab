@@ -1,0 +1,242 @@
+# P1-CIRCLE-FACTOR-MATRIX-01 publish-rate and speed-bar matrix.
+#
+# Purpose:
+# - Re-test state_pub_rate and speed_bar after separating low-gain candidates.
+# - Avoid the stage-1 aggressive Kp=1.0/1.0 setting so publish/speed effects
+#   are not confused with feedback saturation.
+# - Hold twist caps fixed at 0.15 m/s linear and 0.4 rad/s angular.
+#
+# Safety intent:
+# - rbpodo controller pgmode simulation only.
+# - Physical robot should not move.
+# - Results are controller-reference lower-bound evidence only.
+# - GENE 15 cm / 4 s remains stress evidence and is not IL-ready or real-ready.
+
+experiments:
+  - name: fb_pos05_ori02_pub50_speed01
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+      cartesian_control.max_twist_linear_m_s: 0.15
+      cartesian_control.max_twist_angular_rad_s: 0.4
+
+  - name: fb_pos05_ori02_pub100_speed02
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+      cartesian_control.max_twist_linear_m_s: 0.15
+      cartesian_control.max_twist_angular_rad_s: 0.4
+
+  - name: fb_pos05_ori02_pub100_speed05
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+      cartesian_control.max_twist_linear_m_s: 0.15
+      cartesian_control.max_twist_angular_rad_s: 0.4
+
+  - name: fb_pos05_ori02_pub100_speed10
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 1.0
+      right_robot.speed_bar: 1.0
+      cartesian_control.max_twist_linear_m_s: 0.15
+      cartesian_control.max_twist_angular_rad_s: 0.4
+
+  - name: fb_pos05_ori05_pub50_speed01
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.5
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+      cartesian_control.max_twist_linear_m_s: 0.15
+      cartesian_control.max_twist_angular_rad_s: 0.4
+
+  - name: fb_pos05_ori05_pub100_speed02
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.5
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+      cartesian_control.max_twist_linear_m_s: 0.15
+      cartesian_control.max_twist_angular_rad_s: 0.4
+
+  - name: fb_pos05_ori05_pub100_speed05
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.5
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+      cartesian_control.max_twist_linear_m_s: 0.15
+      cartesian_control.max_twist_angular_rad_s: 0.4
+
+  - name: fb_pos05_ori05_pub100_speed10
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.5
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 1.0
+      right_robot.speed_bar: 1.0
+      cartesian_control.max_twist_linear_m_s: 0.15
+      cartesian_control.max_twist_angular_rad_s: 0.4
+
+  - name: fb_pos08_ori02_pub50_speed01
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.8
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+      cartesian_control.max_twist_linear_m_s: 0.15
+      cartesian_control.max_twist_angular_rad_s: 0.4
+
+  - name: fb_pos08_ori02_pub100_speed02
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.8
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+      cartesian_control.max_twist_linear_m_s: 0.15
+      cartesian_control.max_twist_angular_rad_s: 0.4
+
+  - name: fb_pos08_ori02_pub100_speed05
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.8
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.5
+      right_robot.speed_bar: 0.5
+      cartesian_control.max_twist_linear_m_s: 0.15
+      cartesian_control.max_twist_angular_rad_s: 0.4
+
+  - name: fb_pos08_ori02_pub100_speed10
+    config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
+    profile: gene_15cm_4s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 5
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.8
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 1.0
+      right_robot.speed_bar: 1.0
+      cartesian_control.max_twist_linear_m_s: 0.15
+      cartesian_control.max_twist_angular_rad_s: 0.4

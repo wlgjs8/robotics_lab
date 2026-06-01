@@ -1079,12 +1079,17 @@ The matrix supports the intended factor split:
   factors: `network.state_pub_rate_hz`, `servo.rate_hz`,
   `left_robot.speed_bar`, `right_robot.speed_bar`,
   `left_robot.servo_t1_sec`, `right_robot.servo_t1_sec`,
+  `left_robot.servo_t2_sec`, `right_robot.servo_t2_sec`,
+  `left_robot.servo_alpha`, `right_robot.servo_alpha`,
   `left_robot.command_timeout_sec`, `right_robot.command_timeout_sec`,
   `cartesian_control.max_twist_linear_m_s`,
   `cartesian_control.max_twist_angular_rad_s`,
   `cartesian_control.max_linear_move_speed_m_s`,
   `cartesian_control.path_kp_pos`, `cartesian_control.path_kp_ori`, and
   `cartesian_control.twist_angular_deadband_rad_s`
+- `phase_advance_sec` is a matrix field reserved for the
+  P1-DEADTIME-PHASE-ADVANCE-01 benchmark support; use dry-run only until the
+  benchmark accepts `--phase-advance-sec`
 - ACK mode is derived from the referenced config's
   `disable_waiting_ack` fields
 
@@ -1180,6 +1185,9 @@ The ablation summary also carries decomposition columns:
 
 - `servo_rate_hz`
 - `servo_t1_sec`
+- `servo_t2_sec`
+- `servo_alpha`
+- `phase_advance_sec`
 - `speed_bar`
 - `send_duration_p99_us`
 - `servo_jitter_p99_ms`
@@ -1420,6 +1428,76 @@ python3 scripts/run_rbpodo_circle_ablation.py \
   --i-understand-this-connects-to-real-controller \
   --i-confirm-controller-is-in-pgmode-simulation
 ```
+
+## P1 Rbpodo Circle Factor Matrices
+
+P1-CIRCLE-FACTOR-MATRIX-01 adds factor-separated matrices under
+`configs/rbpodo_circle_ablation/`:
+
+1. `p1_gain_split.yaml`
+2. `p1_pub_speed.yaml`
+3. `p1_twist_cap.yaml`
+4. `p1_servo_t2_alpha.yaml`
+5. `p1_phase_advance.yaml`
+
+The P1 matrices are not random gain searches. They isolate one factor family at
+a time while keeping the GENE-style 15 cm / 4 s result category as stress-only
+controller-reference lower-bound evidence:
+
+- `p1_gain_split.yaml`: open-loop baseline plus `Kp_pos` 0.3/0.5/0.8 crossed
+  with `Kp_ori` 0.0/0.2/0.5 at `state_pub_rate_hz=50`, `speed_bar=0.1`, and
+  `max_twist_linear_m_s=0.15`.
+- `p1_pub_speed.yaml`: low-gain candidates `0.5/0.2`, `0.5/0.5`, and
+  `0.8/0.2` across `pub50 speed0.1`, `pub100 speed0.2`,
+  `pub100 speed0.5`, and `pub100 speed1.0`.
+- `p1_twist_cap.yaml`: placeholder best-two gain candidates across
+  `max_twist_linear_m_s` 0.15/0.18/0.20/0.25, with separate 0.2 rad/s angular
+  cap probes.
+- `p1_servo_t2_alpha.yaml`: stable low-gain candidate `pos=0.5, ori=0.2`
+  across `servo_t2_sec` 0.03/0.05/0.08 and `servo_alpha` 0.3/0.5/0.8.
+- `p1_phase_advance.yaml`: low-gain candidate across `phase_advance_sec`
+  0.00/0.02/0.04/0.06/0.08. Live execution requires
+  P1-DEADTIME-PHASE-ADVANCE-01; dry-run can validate the matrix beforehand.
+
+Suggested run order:
+
+1. Run `p1_gain_split.yaml`; reject rows with high orientation drift, center
+   drift, saturation, fault latch, physical-motion detection, or suspect
+   measurement reliability.
+2. Run `p1_pub_speed.yaml` only on the low-gain candidates; do not retry
+   stage-1 aggressive `Kp=1.0/1.0` as a default.
+3. Update the placeholder candidate comments in `p1_twist_cap.yaml` if the
+   first two matrices identify different best-two candidates, then run the
+   twist-cap matrix.
+4. Run `p1_servo_t2_alpha.yaml` after a low-gain candidate is stable enough to
+   separate controller parameter effects from feedback effects.
+5. Run `p1_phase_advance.yaml` last and only after the benchmark supports
+   `--phase-advance-sec`.
+
+Dry-run any P1 matrix before a live controller-simulation run:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1 \
+python3 scripts/run_rbpodo_circle_ablation.py \
+  --matrix configs/rbpodo_circle_ablation/p1_gain_split.yaml \
+  --artifact-root artifacts/rbpodo_circle_ablation/p1_gain_split_dry_run \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --dry-run \
+  --verify-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+Use the same command shape for `p1_pub_speed.yaml`, `p1_twist_cap.yaml`,
+`p1_servo_t2_alpha.yaml`, and `p1_phase_advance.yaml`, changing both
+`--matrix` and `--artifact-root`. Remove `--dry-run` only after checking
+`matrix_resolved.json`, `resolved_server_config.yaml`, measurement reliability,
+and current pgmode confirmation. No P1 row may be promoted to physical real
+Cartesian readiness or IL readiness.
 
 ## Reporting And Decision Policy
 

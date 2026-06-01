@@ -65,6 +65,7 @@ EXPERIMENT_KEYS = {
     "feedback_max_linear_m_s",
     "feedback_max_angular_rad_s",
     "feedback_use_current_state_time",
+    "phase_advance_sec",
     "warmup_sec",
     "settle_sec",
     "startup_timeout_sec",
@@ -85,6 +86,10 @@ ALLOWED_CONFIG_OVERRIDES = {
     "right_robot.speed_bar",
     "left_robot.servo_t1_sec",
     "right_robot.servo_t1_sec",
+    "left_robot.servo_t2_sec",
+    "right_robot.servo_t2_sec",
+    "left_robot.servo_alpha",
+    "right_robot.servo_alpha",
     "left_robot.command_timeout_sec",
     "right_robot.command_timeout_sec",
     "cartesian_control.max_twist_linear_m_s",
@@ -118,7 +123,10 @@ SUMMARY_COLUMNS = [
     "speed_bar",
     "servo_rate_hz",
     "servo_t1_sec",
+    "servo_t2_sec",
+    "servo_alpha",
     "command_rate_hz",
+    "phase_advance_sec",
     "command_count",
     "tracking_source",
     "kp_pos",
@@ -291,6 +299,10 @@ def validate_override_value(name: str, key: str, value: Any) -> None:
         raise AblationError(f"experiment {name} override {key} must be > 0 and <= 1.0")
     elif key.endswith(".servo_t1_sec") and number <= 0.0:
         raise AblationError(f"experiment {name} override {key} must be > 0")
+    elif key.endswith(".servo_t2_sec") and not (0.02 < number < 0.2):
+        raise AblationError(f"experiment {name} override {key} must be > 0.02 and < 0.2")
+    elif key.endswith(".servo_alpha") and not (0.0 < number < 1.0):
+        raise AblationError(f"experiment {name} override {key} must be > 0 and < 1.0")
     elif key.endswith(".command_timeout_sec") and number <= 0.0:
         raise AblationError(f"experiment {name} override {key} must be > 0")
     elif key in {
@@ -558,6 +570,10 @@ def validate_experiment(exp: dict[str, Any], index: int) -> None:
             nonnegative = key in {"feedback_kp_pos", "feedback_kp_ori", "warmup_sec", "settle_sec"}
             if value is None or (nonnegative and value < 0.0) or (not nonnegative and value <= 0.0):
                 raise AblationError(f"experiment {exp['name']} has invalid {key}: {exp[key]}")
+    if "phase_advance_sec" in exp:
+        value = finite_number(exp["phase_advance_sec"])
+        if value is None or value < 0.0:
+            raise AblationError(f"experiment {exp['name']} has invalid phase_advance_sec: {exp['phase_advance_sec']}")
     if "repeat" in exp:
         repeat = finite_number(exp["repeat"])
         if repeat is None or int(repeat) < 1:
@@ -650,6 +666,8 @@ def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path 
         "speed_bar_right": right_speed_bar,
         "servo_rate_hz": servo_rate_hz,
         "servo_t1_sec": servo_t1_sec,
+        "servo_t2_sec": common_value_or_pair(config.left.servo_t2_sec, config.right.servo_t2_sec),
+        "servo_alpha": common_value_or_pair(config.left.servo_alpha, config.right.servo_alpha),
         "servo_t1_rate_aligned": t1_aligned,
         "alignment_warning": alignment_warning,
         "cartesian_max_twist_linear_m_s": max_twist_linear,
@@ -763,6 +781,7 @@ def benchmark_command(args: argparse.Namespace, exp: dict[str, Any], meta: dict[
         ("feedback_kp_ori", "--feedback-kp-ori"),
         ("feedback_max_linear_m_s", "--feedback-max-linear-m-s"),
         ("feedback_max_angular_rad_s", "--feedback-max-angular-rad-s"),
+        ("phase_advance_sec", "--phase-advance-sec"),
         ("warmup_sec", "--warmup-sec"),
         ("settle_sec", "--settle-sec"),
         ("startup_timeout_sec", "--startup-timeout-sec"),
@@ -881,7 +900,10 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "speed_bar": common_value_or_pair(meta.get("speed_bar_left"), meta.get("speed_bar_right")),
         "servo_rate_hz": first_present(summary.get("servo_rate_hz"), meta.get("servo_rate_hz")),
         "servo_t1_sec": meta.get("servo_t1_sec"),
+        "servo_t2_sec": first_present(summary.get("servo_t2_sec"), meta.get("servo_t2_sec")),
+        "servo_alpha": first_present(summary.get("servo_alpha"), meta.get("servo_alpha")),
         "command_rate_hz": first_present(summary.get("command_rate_hz"), exp.get("command_rate_hz")),
+        "phase_advance_sec": first_present(summary.get("phase_advance_sec"), exp.get("phase_advance_sec")),
         "command_count": command_count,
         "tracking_source": first_present(summary.get("tracking_source_used"), exp.get("tracking_source", "auto")),
         "kp_pos": feedback_kp_pos,
