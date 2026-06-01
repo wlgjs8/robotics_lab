@@ -231,6 +231,81 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             self.assertEqual(meta["speed_bar_left"], 0.2)
             self.assertTrue(meta["source_config_unchanged"])
 
+    def test_servo_t2_alpha_overrides_apply_to_generated_config_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            root = Path(tmp_text)
+            config = root / "config.yaml"
+            write_config(config)
+            source_text = config.read_text(encoding="utf-8")
+            exp = {
+                "name": "gene_fb_t2_alpha",
+                "config": "config.yaml",
+                "profile": "gene_15cm_4s",
+                "controller": "twist_stand_feedback",
+                "arm": "left",
+                "config_overrides": {
+                    "left_robot.servo_t2_sec": 0.03,
+                    "right_robot.servo_t2_sec": 0.08,
+                    "left_robot.servo_alpha": 0.3,
+                    "right_robot.servo_alpha": 0.8,
+                },
+            }
+            ablation.validate_experiment(exp, 1)
+            meta = ablation.prepare_experiment_config(root, exp, root / "artifacts" / "01_gene")
+            resolved_path = Path(meta["resolved_config_path"])
+            resolved = resolved_path.read_text(encoding="utf-8")
+            self.assertTrue(resolved_path.is_file())
+            self.assertIn("servo_t2_sec: 0.03", resolved)
+            self.assertIn("servo_t2_sec: 0.08", resolved)
+            self.assertIn("servo_alpha: 0.3", resolved)
+            self.assertIn("servo_alpha: 0.8", resolved)
+            self.assertEqual(config.read_text(encoding="utf-8"), source_text)
+            self.assertTrue(meta["source_config_unchanged"])
+            self.assertEqual(meta["servo_t2_sec"], "0.03/0.08")
+            self.assertEqual(meta["servo_t2_sec_left"], 0.03)
+            self.assertEqual(meta["servo_t2_sec_right"], 0.08)
+            self.assertEqual(meta["servo_alpha"], "0.3/0.8")
+            self.assertEqual(meta["servo_alpha_left"], 0.3)
+            self.assertEqual(meta["servo_alpha_right"], 0.8)
+
+    def test_servo_t2_alpha_overrides_reject_out_of_range_values(self) -> None:
+        base = {
+            "name": "bad_servo_param",
+            "config": "config.yaml",
+            "profile": "gene_15cm_4s",
+            "controller": "twist_stand_feedback",
+            "arm": "left",
+        }
+        invalid_cases = (
+            ("left_robot.servo_t2_sec", 0.02, r"> 0\.02"),
+            ("left_robot.servo_t2_sec", 0.2, r"< 0\.2"),
+            ("right_robot.servo_alpha", 0.0, r"> 0"),
+            ("right_robot.servo_alpha", 1.0, r"< 1\.0"),
+        )
+        for key, value, pattern in invalid_cases:
+            with self.subTest(key=key, value=value):
+                exp = dict(base)
+                exp["config_overrides"] = {key: value}
+                with self.assertRaisesRegex(ablation.AblationError, pattern):
+                    ablation.validate_experiment(exp, 1)
+
+    def test_resolved_config_rejects_out_of_range_servo_t2_alpha(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            root = Path(tmp_text)
+            config = root / "config.yaml"
+            write_config(config)
+            exp = {
+                "name": "bad_source_servo_param",
+                "config": "config.yaml",
+                "profile": "gene_15cm_4s",
+                "controller": "twist_stand_feedback",
+                "arm": "left",
+            }
+            text = config.read_text(encoding="utf-8")
+            config.write_text(text.replace("servo_t2_sec: 0.05", "servo_t2_sec: 0.2", 1), encoding="utf-8")
+            with self.assertRaisesRegex(ablation.AblationError, r"left_robot\.servo_t2_sec"):
+                ablation.prepare_experiment_config(root, exp, root / "artifacts" / "01_bad_t2")
+
     def test_relative_urdf_path_resolves_from_source_config_not_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             root = Path(tmp_text)
@@ -434,7 +509,17 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             "feedback_max_linear_m_s": 0.15,
             "feedback_max_angular_rad_s": 0.4,
         }
-        meta = {"ack_policy": "ack_on", "servo_rate_hz": 100, "alignment_warning": ""}
+        meta = {
+            "ack_policy": "ack_on",
+            "servo_rate_hz": 100,
+            "servo_t2_sec": "0.03/0.08",
+            "servo_t2_sec_left": 0.03,
+            "servo_t2_sec_right": 0.08,
+            "servo_alpha": "0.3/0.8",
+            "servo_alpha_left": 0.3,
+            "servo_alpha_right": 0.8,
+            "alignment_warning": "",
+        }
         summary = {
             "controller": "twist_stand_feedback",
             "profile": "gene_15cm_4s",
@@ -470,6 +555,12 @@ class RbpodoCircleAblationTest(unittest.TestCase):
         self.assertEqual(rows[0]["p95_orientation_drift_rad"], 0.001)
         self.assertEqual(rows[0]["fit_center_error_m"], 0.002)
         self.assertFalse(rows[0]["fault_latched"])
+        self.assertEqual(rows[0]["servo_t2_sec"], "0.03/0.08")
+        self.assertEqual(rows[0]["servo_t2_sec_left"], 0.03)
+        self.assertEqual(rows[0]["servo_t2_sec_right"], 0.08)
+        self.assertEqual(rows[0]["servo_alpha"], "0.3/0.8")
+        self.assertEqual(rows[0]["servo_alpha_left"], 0.3)
+        self.assertEqual(rows[0]["servo_alpha_right"], 0.8)
 
 
 if __name__ == "__main__":

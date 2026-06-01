@@ -49,6 +49,10 @@ CONTROLLERS = {
 }
 TRACKING_SOURCES = set(circle_bench.TRACKING_SOURCES)
 ARMS = {"left", "right"}
+SERVO_T2_MIN_SEC = 0.02
+SERVO_T2_MAX_SEC = 0.2
+SERVO_ALPHA_MIN = 0.0
+SERVO_ALPHA_MAX = 1.0
 EXPERIMENT_KEYS = {
     "name",
     "enabled",
@@ -125,7 +129,11 @@ SUMMARY_COLUMNS = [
     "servo_rate_hz",
     "servo_t1_sec",
     "servo_t2_sec",
+    "servo_t2_sec_left",
+    "servo_t2_sec_right",
     "servo_alpha",
+    "servo_alpha_left",
+    "servo_alpha_right",
     "command_rate_hz",
     "phase_advance_sec",
     "phase_advance_fraction_of_period",
@@ -306,9 +314,9 @@ def validate_override_value(name: str, key: str, value: Any) -> None:
         raise AblationError(f"experiment {name} override {key} must be > 0 and <= 1.0")
     elif key.endswith(".servo_t1_sec") and number <= 0.0:
         raise AblationError(f"experiment {name} override {key} must be > 0")
-    elif key.endswith(".servo_t2_sec") and not (0.02 < number < 0.2):
+    elif key.endswith(".servo_t2_sec") and not (SERVO_T2_MIN_SEC < number < SERVO_T2_MAX_SEC):
         raise AblationError(f"experiment {name} override {key} must be > 0.02 and < 0.2")
-    elif key.endswith(".servo_alpha") and not (0.0 < number < 1.0):
+    elif key.endswith(".servo_alpha") and not (SERVO_ALPHA_MIN < number < SERVO_ALPHA_MAX):
         raise AblationError(f"experiment {name} override {key} must be > 0 and < 1.0")
     elif key.endswith(".command_timeout_sec") and number <= 0.0:
         raise AblationError(f"experiment {name} override {key} must be > 0")
@@ -537,6 +545,23 @@ def validate_servo_rate_t1_alignment(
     return False, warning
 
 
+def validate_servo_sweep_ranges(name: str, label: str, arm_cfg: Any) -> None:
+    servo_t2_sec = arm_cfg.servo_t2_sec
+    if servo_t2_sec is None or not (
+        SERVO_T2_MIN_SEC < float(servo_t2_sec) < SERVO_T2_MAX_SEC
+    ):
+        raise AblationError(
+            f"experiment {name} {label}.servo_t2_sec must be finite and in (0.02, 0.2)"
+        )
+    servo_alpha = arm_cfg.servo_alpha
+    if servo_alpha is None or not (
+        SERVO_ALPHA_MIN < float(servo_alpha) < SERVO_ALPHA_MAX
+    ):
+        raise AblationError(
+            f"experiment {name} {label}.servo_alpha must be finite and in (0, 1)"
+        )
+
+
 def root_path(root: Path, path_value: Any) -> Path:
     path = Path(str(path_value))
     return path if path.is_absolute() else root / path
@@ -622,6 +647,7 @@ def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path 
             )
         if not arm_cfg.ip:
             raise AblationError(f"experiment {exp['name']} {label}_robot.ip is required")
+        validate_servo_sweep_ranges(str(exp["name"]), f"{label}_robot", arm_cfg)
     if config.left.disable_waiting_ack != config.right.disable_waiting_ack:
         raise AblationError(f"experiment {exp['name']} has mismatched left/right ACK policy")
     send_servo_commands = as_bool(config.servo.get("send_servo_commands"), False)
@@ -681,7 +707,11 @@ def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path 
         "servo_rate_hz": servo_rate_hz,
         "servo_t1_sec": servo_t1_sec,
         "servo_t2_sec": common_value_or_pair(config.left.servo_t2_sec, config.right.servo_t2_sec),
+        "servo_t2_sec_left": config.left.servo_t2_sec,
+        "servo_t2_sec_right": config.right.servo_t2_sec,
         "servo_alpha": common_value_or_pair(config.left.servo_alpha, config.right.servo_alpha),
+        "servo_alpha_left": config.left.servo_alpha,
+        "servo_alpha_right": config.right.servo_alpha,
         "servo_t1_rate_aligned": t1_aligned,
         "alignment_warning": alignment_warning,
         "cartesian_max_twist_linear_m_s": max_twist_linear,
@@ -923,7 +953,11 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "servo_rate_hz": first_present(summary.get("servo_rate_hz"), meta.get("servo_rate_hz")),
         "servo_t1_sec": meta.get("servo_t1_sec"),
         "servo_t2_sec": first_present(summary.get("servo_t2_sec"), meta.get("servo_t2_sec")),
+        "servo_t2_sec_left": first_present(summary.get("servo_t2_sec_left"), meta.get("servo_t2_sec_left")),
+        "servo_t2_sec_right": first_present(summary.get("servo_t2_sec_right"), meta.get("servo_t2_sec_right")),
         "servo_alpha": first_present(summary.get("servo_alpha"), meta.get("servo_alpha")),
+        "servo_alpha_left": first_present(summary.get("servo_alpha_left"), meta.get("servo_alpha_left")),
+        "servo_alpha_right": first_present(summary.get("servo_alpha_right"), meta.get("servo_alpha_right")),
         "command_rate_hz": first_present(summary.get("command_rate_hz"), exp.get("command_rate_hz")),
         "phase_advance_sec": first_present(summary.get("phase_advance_sec"), exp.get("phase_advance_sec")),
         "phase_advance_fraction_of_period": first_present(

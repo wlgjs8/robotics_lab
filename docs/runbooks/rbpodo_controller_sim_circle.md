@@ -1133,6 +1133,12 @@ place. The runner rejects overrides that would change `operation_mode` to
 create a `servo.rate_hz` / `servo_t1_sec` mismatch unless the source config
 already explicitly allows that mismatch. `network.state_pub_rate_hz` overrides
 must be `> 0` and `<= 200`; `speed_bar` overrides must be `> 0` and `<= 1.0`.
+Servo J parameter sweeps are limited to temporary resolved configs and are
+validated on the resolved file before a benchmark command is launched:
+`servo_t2_sec` must be finite and in `(0.02, 0.2)`, and `servo_alpha` must be
+finite and in `(0, 1)` on both arms. These ranges are an ablation safety
+envelope, not an interpretation of what Rainbow's `alpha` means; alpha
+semantics must be determined from measured controller-simulation artifacts.
 For rate/t1 sweeps, use `servo.rate_hz: 100` with `servo_t1_sec: 0.01`,
 `servo.rate_hz: 200` with `servo_t1_sec: 0.005`, or staged 500 Hz
 controller-simulation rows with `servo.rate_hz: 500` and
@@ -1213,7 +1219,11 @@ The ablation summary also carries decomposition columns:
 - `servo_rate_hz`
 - `servo_t1_sec`
 - `servo_t2_sec`
+- `servo_t2_sec_left`
+- `servo_t2_sec_right`
 - `servo_alpha`
+- `servo_alpha_left`
+- `servo_alpha_right`
 - `phase_advance_sec`
 - `phase_advance_fraction_of_period`
 - `phase_advance_effect`
@@ -1490,7 +1500,8 @@ controller-reference lower-bound evidence:
   `max_twist_linear_m_s` 0.15/0.18/0.20/0.25, with separate 0.2 rad/s angular
   cap probes.
 - `p1_servo_t2_alpha.yaml`: stable low-gain candidate `pos=0.5, ori=0.2`
-  across `servo_t2_sec` 0.03/0.05/0.08 and `servo_alpha` 0.3/0.5/0.8.
+  across `servo_t2_sec` 0.03/0.05/0.08 and `servo_alpha` 0.3/0.5/0.8,
+  crossed with `pub50/speed0.1` and `pub100/speed0.2`.
 - `p1_phase_advance.yaml`: low-gain candidate across `phase_advance_sec`
   0.00/0.02/0.04/0.06/0.08. The benchmark samples commands at
   `t_command = t_now + phase_advance_sec`; tracking metrics still compare
@@ -1507,7 +1518,10 @@ Suggested run order:
    first two matrices identify different best-two candidates, then run the
    twist-cap matrix.
 4. Run `p1_servo_t2_alpha.yaml` after a low-gain candidate is stable enough to
-   separate controller parameter effects from feedback effects.
+   separate controller parameter effects from feedback effects. Compare
+   `servo_t2_sec_left/right`, `servo_alpha_left/right`, send-duration p95/p99,
+   radius gain, orientation drift, saturation, and timing classification before
+   drawing conclusions; do not assume the sign or meaning of `alpha`.
 5. Run `p1_phase_advance.yaml` last. Treat `commanded_phase_advance_ms` as the
    configured feed-forward offset and `estimated_latency_ms` as the measured
    residual phase lag, not the same quantity.
@@ -1598,8 +1612,10 @@ Every rbpodo controller-simulation row must state:
 
 The tuning report adds structure-aware columns for `kp_pos`, `kp_ori`,
 `state_pub_rate_hz`, `speed_bar_left`, `speed_bar_right`,
-`saturation_ratio`, `orientation_p95_deg`, `center_error_mm`, `score`, and
-`classification`. It also reports decomposition columns:
+`servo_t2_sec_left`, `servo_t2_sec_right`, `servo_alpha_left`,
+`servo_alpha_right`, `saturation_ratio`, `orientation_p95_deg`,
+`center_error_mm`, `score`, and `classification`. It also reports
+decomposition columns:
 `median_error_mm`, `tail_ratio`, `center_removed_rms_mm`,
 `phase_aligned_rms_mm`, `orientation_position_equiv_50mm_mm`, and
 `error_classification`, plus measurement reliability fields:
