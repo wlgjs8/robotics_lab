@@ -115,19 +115,59 @@ The tool only connects to TCP data port 5001 and sends the read-only
 `reqdata` request by default. It does not connect to command port 5000, send
 motion, set `pgmode`, reset faults, or parse binary payloads.
 
+By default the capture is compact: every sample gets metadata in
+`samples.jsonl`, while raw payload bytes are stored only as `first_payload.bin`
+and `last_payload.bin`. Use `--save-each-sample` only when a supervised
+investigation needs one binary fixture per sample:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+python3 scripts/rainbow_data_port_capture.py \
+  --ip 172.28.60.200 \
+  --port 5001 \
+  --duration-sec 5 \
+  --rate-hz 10 \
+  --artifact-dir artifacts/rbpodo_measurement/raw_data_left \
+  --also-rbpodo-python \
+  --save-each-sample \
+  --i-understand-this-connects-to-real-controller
+```
+
 Artifacts include:
 
 - `samples.jsonl`
-- `raw_response.bin`
-- per-sample `samples_<ip>_<index>.bin`
+- `first_payload.bin` and `last_payload.bin` by default
+- per-sample `samples_<ip>_<index>.bin` only with `--save-each-sample`
 - optional `python_decoded_samples.jsonl`
 - `summary.json`
 
 The summary records `success_count`, `timeout_count`,
-`unique_payload_lengths`, `unique_hash_count`, `stable_prefix_hex`, and the
-optional `rbpodo_python_diagnostics_suspect_rate`. The fixture comparison is
-limited to length/hash/prefix patterns and whether payload hashes changed while
-Python `q_ref_deg` changed. It is not a binary parser.
+`unique_payload_lengths`, `unique_hash_count`, `stable_prefix_hex`,
+`stable_suffix_hex`, per-sample payload SHA256/length/prefix/suffix,
+inter-sample `changed_byte_count`, `first_changed_offset`,
+`changed_offsets_histogram`, and the optional
+`rbpodo_python_diagnostics_suspect_rate`. With `--also-rbpodo-python`, the
+capture also records `q_actual_deg`, `q_ref_deg`, per-controller
+`q_ref_delta_norm_deg`, and q_ref/payload transition counts:
+
+- `q_ref_changed_payload_changed_count`
+- `q_ref_changed_payload_static_count`
+- `q_ref_static_payload_changed_count`
+
+Generate an offline fixture report from a capture directory:
+
+```bash
+python3 scripts/rainbow_data_fixture_report.py \
+  --capture-dir artifacts/rbpodo_measurement/raw_data_left \
+  --output-md fixture_report.md \
+  --output-json fixture_report.json
+```
+
+Relative report paths are written inside `--capture-dir`. The report repeats
+the unique payload lengths, unique hash count, stable prefix/suffix, offsets
+that change most often, q_ref/payload transition counts, and the required next
+step: collect motion/no-op fixture, compare firmware SDK docs, and do not infer
+layout yet.
 
 Raw payloads may contain hardware-specific information. Keep real captures
 under `artifacts/` and do not commit them unless they are reviewed and
