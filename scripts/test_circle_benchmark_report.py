@@ -138,14 +138,17 @@ class CircleBenchmarkReportTest(unittest.TestCase):
                     "fault_latched": False,
                     "ack_policy": "ack_on",
                     "controller_acceptance_observed_count": 100,
+                    "command_count": 100,
+                    "feedback_saturation_count": 0,
                     "command_timeout_count": 0,
                     "controller_rejected_count": 0,
                 }
             ],
             min_repeats=1,
         )
-        self.assertEqual(rows[0]["classification"], "stable_rbpodo_controller_sim_baseline_candidate")
+        self.assertEqual(rows[0]["classification"], "closed_loop_candidate")
         self.assertEqual(rows[0]["real_candidate_policy"], "future_low_speed_seed_only_not_real_ready")
+        self.assertEqual(rows[0]["saturation_ratio"], 0.0)
 
     def test_rbpodo_stress_is_not_real_ready(self) -> None:
         rows = report.classify_rows(
@@ -163,6 +166,7 @@ class CircleBenchmarkReportTest(unittest.TestCase):
                     "rms_error_mm": 8.0,
                     "p95_error_mm": 14.0,
                     "feedback_saturation_count": 3,
+                    "command_count": 100,
                     "physical_motion_expected": False,
                     "physical_motion_detected": False,
                     "fault_latched": False,
@@ -170,9 +174,117 @@ class CircleBenchmarkReportTest(unittest.TestCase):
             ],
             min_repeats=1,
         )
-        self.assertEqual(rows[0]["classification"], "rbpodo_controller_sim_stress_candidate")
+        self.assertEqual(rows[0]["classification"], "closed_loop_candidate")
         self.assertEqual(rows[0]["real_candidate_policy"], "controller_sim_stress_not_real_ready")
-        self.assertIn("not real-ready", rows[0]["promotion_notes"].lower())
+        self.assertIn("not physical real evidence", rows[0]["promotion_notes"].lower())
+
+    def test_rbpodo_open_loop_center_drift_is_baseline_only(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "open_loop_radius_good_center_bad",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "controller": "twist_stand",
+                    "profile": "gene_15cm_4s",
+                    "tracking_source": "tcp_ref_stand",
+                    "radius_gain": 1.01,
+                    "rms_error_mm": 126.0,
+                    "p95_error_mm": 143.0,
+                    "center_error_mm": 121.0,
+                    "orientation_p95_deg": 2.5,
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertEqual(rows[0]["classification"], "open_loop_baseline")
+        self.assertIn("open-loop radius can be good while center drift is bad", rows[0]["promotion_notes"])
+
+    def test_rbpodo_saturation_limited_case(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "sat_limited",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "controller": "twist_stand_feedback",
+                    "profile": "gene_15cm_4s",
+                    "tracking_source": "tcp_ref_stand",
+                    "kp_pos": 1.2,
+                    "kp_ori": 1.0,
+                    "radius_gain": 1.05,
+                    "rms_error_mm": 40.0,
+                    "p95_error_mm": 60.0,
+                    "feedback_saturation_count": 30,
+                    "command_count": 100,
+                    "center_error_mm": 10.0,
+                    "orientation_p95_deg": 6.0,
+                    "state_pub_rate_hz": 50,
+                    "speed_bar_left": 0.1,
+                    "speed_bar_right": 0.1,
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertEqual(rows[0]["classification"], "saturation_limited")
+        self.assertGreater(rows[0]["score"], 50000.0)
+
+    def test_rbpodo_good_low_saturation_candidate_scores(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "good_low_sat",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "controller": "twist_stand_feedback",
+                    "profile": "gene_15cm_4s",
+                    "tracking_source": "tcp_ref_stand",
+                    "kp_pos": 0.5,
+                    "kp_ori": 0.2,
+                    "radius_gain": 0.99,
+                    "rms_error_mm": 20.0,
+                    "p95_error_mm": 45.0,
+                    "feedback_saturation_count": 0,
+                    "command_count": 100,
+                    "center_error_mm": 4.0,
+                    "orientation_p95_deg": 8.0,
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertEqual(rows[0]["classification"], "closed_loop_candidate")
+        self.assertEqual(rows[0]["saturation_ratio"], 0.0)
+        self.assertLess(rows[0]["score"], 1000.0)
+
+    def test_rbpodo_report_handles_missing_tuning_fields(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "missing_fields",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "controller": "twist_stand_feedback",
+                    "profile": "gene_15cm_4s",
+                    "tracking_source": "tcp_ref_stand",
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertEqual(rows[0]["classification"], "stress_only")
+        self.assertIsNone(rows[0]["score"])
+        self.assertIn("missing candidate metrics", rows[0]["promotion_notes"])
 
     def test_rbpodo_compare_handles_missing_physical_actual_path(self) -> None:
         row = compare.comparison_row(
@@ -236,6 +348,7 @@ class CircleBenchmarkReportTest(unittest.TestCase):
             )
             self.assertIn("stable_simulator_baseline_candidate", md.read_text(encoding="utf-8"))
             self.assertIn("stress evidence is not real-ready", md.read_text(encoding="utf-8").lower())
+            self.assertIn("closed-loop is structurally needed for rbpodo controller simulation", md.read_text(encoding="utf-8"))
             self.assertIn("classification", csv_path.read_text(encoding="utf-8"))
 
     def test_rbpodo_report_cli_help_works(self) -> None:

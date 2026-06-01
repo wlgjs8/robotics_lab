@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -67,6 +68,7 @@ right_robot:
 servo:
   rate_hz: 100
   send_servo_commands: true
+  allow_servo_t1_rate_mismatch: false
   allow_controller_simulation_motion: true
   allow_controller_simulation_diagnostics_suspect: false
 network:
@@ -80,8 +82,10 @@ cartesian_control:
   allow_in_controller_simulation: true
   max_twist_linear_m_s: 0.15
   max_twist_angular_rad_s: 0.4
+  max_linear_move_speed_m_s: 0.15
   path_kp_pos: 6.0
   path_kp_ori: 6.0
+  twist_angular_deadband_rad_s: 0.0001
 """,
         encoding="utf-8",
     )
@@ -186,6 +190,7 @@ class RbpodoCircleAblationTest(unittest.TestCase):
                 text=True,
             )
             self.assertIn("rbpodo_circle_tracking_benchmark.py", completed.stdout)
+            self.assertIn("resolved_config:", completed.stdout)
             self.assertIn("resolved_server_config.yaml", completed.stdout)
             self.assertTrue((artifact_root / "ablation_summary.csv").is_file())
             exp_dir = artifact_root / "01_rbpodo_15cm16s_twist_stand"
@@ -209,6 +214,8 @@ class RbpodoCircleAblationTest(unittest.TestCase):
                     "left_robot.speed_bar": 0.2,
                     "right_robot.speed_bar": 0.2,
                     "cartesian_control.max_twist_linear_m_s": 0.2,
+                    "cartesian_control.max_linear_move_speed_m_s": 0.12,
+                    "cartesian_control.twist_angular_deadband_rad_s": 0.0002,
                 },
             }
             ablation.validate_experiment(exp, 1)
@@ -217,6 +224,8 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             self.assertIn("state_pub_rate_hz: 100", resolved)
             self.assertIn("speed_bar: 0.2", resolved)
             self.assertIn("max_twist_linear_m_s: 0.2", resolved)
+            self.assertIn("max_linear_move_speed_m_s: 0.12", resolved)
+            self.assertIn("twist_angular_deadband_rad_s: 0.0002", resolved)
             self.assertEqual(config.read_text(encoding="utf-8"), source_text)
             self.assertEqual(meta["state_pub_rate_hz"], 100.0)
             self.assertEqual(meta["speed_bar_left"], 0.2)
@@ -278,6 +287,42 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             self.assertEqual(meta["config_overrides"]["network.state_pub_rate_hz"], 100)
             self.assertEqual(meta["speed_bar_right"], 0.2)
 
+    def test_gene_profile_command_includes_fast_stress_opt_in(self) -> None:
+        args = argparse.Namespace(
+            root=Path("/repo"),
+            server=Path("missing_server"),
+            skip_plots=False,
+            set_pgmode_simulation=False,
+            verify_pgmode_simulation=False,
+            pgmode_summary_json=None,
+            pgmode_timeout_sec=1.0,
+            pgmode_command_port=5000,
+        )
+        exp = {
+            "name": "fb_pos05_ori02_pub50_speed01",
+            "profile": "gene_15cm_4s",
+            "controller": "twist_stand_feedback",
+            "arm": "left",
+        }
+        meta = {"config_path": "/tmp/resolved_server_config.yaml"}
+        command = ablation.benchmark_command(args, exp, meta, Path("/tmp/artifacts"))
+        self.assertIn("--allow-fast-stress", command)
+
+    def test_feedback_orientation_gain_zero_is_valid_for_gain_split(self) -> None:
+        exp = {
+            "name": "fb_pos05_ori00_pub50_speed01",
+            "config": "config.yaml",
+            "profile": "gene_15cm_4s",
+            "controller": "twist_stand_feedback",
+            "arm": "left",
+            "feedback_kp_pos": 0.5,
+            "feedback_kp_ori": 0.0,
+        }
+        ablation.validate_experiment(exp, 1)
+        exp["feedback_kp_ori"] = -0.1
+        with self.assertRaisesRegex(ablation.AblationError, "feedback_kp_ori"):
+            ablation.validate_experiment(exp, 1)
+
     def test_config_override_rejects_unsafe_allow_in_real(self) -> None:
         exp = {
             "name": "unsafe",
@@ -314,6 +359,30 @@ class RbpodoCircleAblationTest(unittest.TestCase):
         with self.assertRaisesRegex(ablation.AblationError, "unknown config override"):
             ablation.validate_experiment(exp, 1)
 
+    def test_config_override_rejects_controller_sim_motion_disable(self) -> None:
+        exp = {
+            "name": "unsafe",
+            "config": "config.yaml",
+            "profile": "circle_15cm_16s",
+            "controller": "twist_stand",
+            "arm": "left",
+            "config_overrides": {"servo.allow_controller_simulation_motion": False},
+        }
+        with self.assertRaisesRegex(ablation.AblationError, "allow_controller_simulation_motion"):
+            ablation.validate_experiment(exp, 1)
+
+    def test_config_override_rejects_state_pub_rate_over_200(self) -> None:
+        exp = {
+            "name": "bad_pub_rate",
+            "config": "config.yaml",
+            "profile": "circle_15cm_16s",
+            "controller": "twist_stand",
+            "arm": "left",
+            "config_overrides": {"network.state_pub_rate_hz": 250},
+        }
+        with self.assertRaisesRegex(ablation.AblationError, "<= 200"):
+            ablation.validate_experiment(exp, 1)
+
     def test_config_override_rejects_rate_t1_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             root = Path(tmp_text)
@@ -331,6 +400,30 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             with self.assertRaisesRegex(ablation.AblationError, "servo rate/t1 mismatch"):
                 ablation.prepare_experiment_config(root, exp, root / "artifacts" / "01_bad_rate")
 
+    def test_config_override_accepts_200hz_when_both_t1_values_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            root = Path(tmp_text)
+            config = root / "config.yaml"
+            write_config(config)
+            exp = {
+                "name": "good_rate",
+                "config": "config.yaml",
+                "profile": "circle_15cm_16s",
+                "controller": "twist_stand",
+                "arm": "left",
+                "config_overrides": {
+                    "servo.rate_hz": 200,
+                    "left_robot.servo_t1_sec": 0.005,
+                    "right_robot.servo_t1_sec": 0.005,
+                },
+            }
+            ablation.validate_experiment(exp, 1)
+            meta = ablation.prepare_experiment_config(root, exp, root / "artifacts" / "01_good_rate")
+            resolved = Path(meta["resolved_config_path"]).read_text(encoding="utf-8")
+            self.assertIn("rate_hz: 200", resolved)
+            self.assertEqual(meta["servo_rate_hz"], 200.0)
+            self.assertTrue(meta["servo_t1_rate_aligned"])
+
     def test_summary_aggregation_combines_fake_summaries(self) -> None:
         exp = {
             "name": "rbpodo_gene4s_feedback_kp2",
@@ -338,6 +431,8 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             "controller": "twist_stand_feedback",
             "command_rate_hz": 100,
             "tracking_source": "tcp_ref_stand",
+            "feedback_max_linear_m_s": 0.15,
+            "feedback_max_angular_rad_s": 0.4,
         }
         meta = {"ack_policy": "ack_on", "servo_rate_hz": 100, "alignment_warning": ""}
         summary = {
@@ -345,18 +440,23 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             "profile": "gene_15cm_4s",
             "command_rate_hz": 100,
             "tracking_source_used": "tcp_ref_stand",
+            "feedback_kp_pos": 2.0,
+            "feedback_kp_ori": 2.0,
             "radius_gain": 0.98,
             "rms_error_m": 0.004,
             "p95_error_m": 0.006,
             "max_error_m": 0.008,
             "p95_orientation_drift_rad": 0.001,
+            "fit_center_error_m": 0.002,
             "estimated_latency_ms": 12.0,
             "q_ref_update_rate_hz": 99.5,
             "send_duration_us": {"p95": 900.0},
+            "feedback_saturation_count": 3,
             "ack_observed_count": 100,
             "controller_acceptance_observed_count": 100,
             "diagnostics_suspect_count": 0,
             "physical_motion_detected": False,
+            "fault_latched": False,
             "result": "completed",
         }
         rows = ablation.rows_from_summaries([summary], [exp], [meta])
@@ -364,6 +464,12 @@ class RbpodoCircleAblationTest(unittest.TestCase):
         self.assertEqual(rows[0]["rms_error_mm"], 4.0)
         self.assertEqual(rows[0]["send_duration_p95_us"], 900.0)
         self.assertEqual(rows[0]["ack_policy"], "ack_on")
+        self.assertEqual(rows[0]["feedback_kp_pos"], 2.0)
+        self.assertEqual(rows[0]["feedback_max_linear_m_s"], 0.15)
+        self.assertEqual(rows[0]["feedback_saturation_count"], 3)
+        self.assertEqual(rows[0]["p95_orientation_drift_rad"], 0.001)
+        self.assertEqual(rows[0]["fit_center_error_m"], 0.002)
+        self.assertFalse(rows[0]["fault_latched"])
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import circle_tracking_benchmark as sim_bench
 import rbpodo_circle_tracking_benchmark as circle_bench
 import run_circle_ablation as sim_ablation
 from rbpodo_servo_acceptance import (
@@ -87,16 +88,24 @@ ALLOWED_CONFIG_OVERRIDES = {
     "right_robot.command_timeout_sec",
     "cartesian_control.max_twist_linear_m_s",
     "cartesian_control.max_twist_angular_rad_s",
+    "cartesian_control.max_linear_move_speed_m_s",
     "cartesian_control.path_kp_pos",
     "cartesian_control.path_kp_ori",
+    "cartesian_control.twist_angular_deadband_rad_s",
 }
 UNSAFE_OVERRIDE_KEY_PARTS = (
     "operation_mode",
     "allow_in_real",
     "allow_in_controller_simulation",
+    "allow_controller_simulation_motion",
     "backend_type",
     "run_mode",
 )
+RATE_T1_OVERRIDE_KEYS = {
+    "servo.rate_hz",
+    "left_robot.servo_t1_sec",
+    "right_robot.servo_t1_sec",
+}
 SUMMARY_COLUMNS = [
     "name",
     "controller",
@@ -108,9 +117,23 @@ SUMMARY_COLUMNS = [
     "servo_rate_hz",
     "servo_t1_sec",
     "command_rate_hz",
+    "command_count",
     "tracking_source",
+    "kp_pos",
+    "kp_ori",
     "feedback_kp_pos",
     "feedback_kp_ori",
+    "feedback_max_linear_m_s",
+    "feedback_max_angular_rad_s",
+    "feedback_saturation_count",
+    "saturation_ratio",
+    "p95_orientation_drift_rad",
+    "orientation_p95_deg",
+    "fit_center_error_m",
+    "center_error_mm",
+    "physical_motion_detected",
+    "fault_latched",
+    "cartesian_unavailable_count",
     "radius_gain",
     "rms_error_mm",
     "p95_error_mm",
@@ -120,11 +143,11 @@ SUMMARY_COLUMNS = [
     "estimated_latency_ms",
     "q_ref_update_rate_hz",
     "send_duration_p95_us",
-    "feedback_saturation_count",
     "ack_observed_count",
     "controller_acceptance_observed_count",
     "diagnostics_suspect_count",
-    "physical_motion_detected",
+    "score",
+    "classification",
     "result",
 ]
 
@@ -230,8 +253,8 @@ def validate_override_value(name: str, key: str, value: Any) -> None:
     number = finite_number(value)
     if number is None:
         raise AblationError(f"experiment {name} override {key} must be a finite number")
-    if key == "network.state_pub_rate_hz" and number <= 0.0:
-        raise AblationError(f"experiment {name} override {key} must be > 0")
+    if key == "network.state_pub_rate_hz" and not (0.0 < number <= 200.0):
+        raise AblationError(f"experiment {name} override {key} must be > 0 and <= 200")
     elif key == "servo.rate_hz" and number <= 0.0:
         raise AblationError(f"experiment {name} override {key} must be > 0")
     elif key.endswith(".speed_bar") and not (0.0 < number <= 1.0):
@@ -243,8 +266,11 @@ def validate_override_value(name: str, key: str, value: Any) -> None:
     elif key in {
         "cartesian_control.max_twist_linear_m_s",
         "cartesian_control.max_twist_angular_rad_s",
+        "cartesian_control.max_linear_move_speed_m_s",
     } and number <= 0.0:
         raise AblationError(f"experiment {name} override {key} must be > 0")
+    elif key == "cartesian_control.twist_angular_deadband_rad_s" and number < 0.0:
+        raise AblationError(f"experiment {name} override {key} must be >= 0")
     elif key in {"cartesian_control.path_kp_pos", "cartesian_control.path_kp_ori"} and number < 0.0:
         raise AblationError(f"experiment {name} override {key} must be >= 0")
 
@@ -357,6 +383,61 @@ def nested_metric(summary: dict[str, Any], key: str, metric: str) -> float | Non
     return finite_number(value.get(metric))
 
 
+def first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def ratio_or_none(numerator: Any, denominator: Any) -> float | None:
+    top = finite_number(numerator)
+    bottom = finite_number(denominator)
+    if top is None or bottom is None or bottom <= 0.0:
+        return None
+    return top / bottom
+
+
+def rate_t1_overridden(overrides: dict[str, Any]) -> bool:
+    return any(key in overrides for key in RATE_T1_OVERRIDE_KEYS)
+
+
+def expected_servo_t1_sec(rate_hz: float) -> float:
+    if abs(rate_hz - 100.0) <= 1e-9:
+        return 0.01
+    if abs(rate_hz - 200.0) <= 1e-9:
+        return 0.005
+    return 1.0 / rate_hz
+
+
+def validate_servo_rate_t1_alignment(
+    name: str,
+    config: Any,
+    overrides: dict[str, Any],
+) -> tuple[bool | None, str]:
+    servo_rate_hz = as_float(config.servo.get("rate_hz"))
+    if servo_rate_hz is None or servo_rate_hz <= 0.0:
+        return None, ""
+    expected_t1 = expected_servo_t1_sec(servo_rate_hz)
+    mismatches: list[str] = []
+    observed = False
+    for label, arm_cfg in (("left_robot", config.left), ("right_robot", config.right)):
+        servo_t1_sec = arm_cfg.servo_t1_sec
+        if servo_t1_sec is None:
+            continue
+        observed = True
+        if abs(float(servo_t1_sec) - expected_t1) > 1e-6:
+            mismatches.append(f"{label}.servo_t1_sec {float(servo_t1_sec):.6f} != expected {expected_t1:.6f}")
+    if not observed:
+        return None, ""
+    if not mismatches:
+        return True, ""
+    warning = f"servo.rate_hz {servo_rate_hz:.6f}: " + "; ".join(mismatches)
+    if rate_t1_overridden(overrides) and not as_bool(config.servo.get("allow_servo_t1_rate_mismatch"), False):
+        raise AblationError(f"experiment {name} resolved config has unsupported servo rate/t1 mismatch: {warning}")
+    return False, warning
+
+
 def root_path(root: Path, path_value: Any) -> Path:
     path = Path(str(path_value))
     return path if path.is_absolute() else root / path
@@ -394,9 +475,8 @@ def validate_experiment(exp: dict[str, Any], index: int) -> None:
     for key in ("command_rate_hz", "feedback_kp_pos", "feedback_kp_ori", "warmup_sec", "settle_sec"):
         if key in exp:
             value = finite_number(exp[key])
-            if value is None or (key in {"warmup_sec", "settle_sec"} and value < 0.0) or (
-                key not in {"warmup_sec", "settle_sec"} and value <= 0.0
-            ):
+            nonnegative = key in {"feedback_kp_pos", "feedback_kp_ori", "warmup_sec", "settle_sec"}
+            if value is None or (nonnegative and value < 0.0) or (not nonnegative and value <= 0.0):
                 raise AblationError(f"experiment {exp['name']} has invalid {key}: {exp[key]}")
     if "repeat" in exp:
         repeat = finite_number(exp["repeat"])
@@ -451,32 +531,36 @@ def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path 
             f"experiment {exp['name']} must keep cartesian_control.allow_in_controller_simulation=true"
         )
 
+    overrides = config_overrides(exp)
     arm_cfg = selected_arm(config, str(exp["arm"]))
     servo_rate_hz = as_float(config.servo.get("rate_hz"))
     servo_t1_sec = arm_cfg.servo_t1_sec
-    t1_aligned = None
-    alignment_warning = ""
-    if servo_rate_hz and servo_t1_sec:
-        t1_aligned = abs(servo_t1_sec - (1.0 / servo_rate_hz)) <= 1e-6
-        if not t1_aligned:
-            alignment_warning = (
-                f"servo_t1_sec {servo_t1_sec:.6f} does not match 1/rate_hz "
-                f"{1.0 / servo_rate_hz:.6f}"
-            )
-            if config_overrides(exp):
-                raise AblationError(f"experiment {exp['name']} resolved config has unsupported servo rate/t1 mismatch: {alignment_warning}")
+    t1_aligned, alignment_warning = validate_servo_rate_t1_alignment(str(exp["name"]), config, overrides)
     state_pub_rate_hz = as_float(config.network.get("state_pub_rate_hz"))
-    if state_pub_rate_hz is not None and state_pub_rate_hz <= 0.0:
-        raise AblationError(f"experiment {exp['name']} network.state_pub_rate_hz must be > 0")
+    if state_pub_rate_hz is not None and not (0.0 < state_pub_rate_hz <= 200.0):
+        raise AblationError(f"experiment {exp['name']} network.state_pub_rate_hz must be > 0 and <= 200")
     left_speed_bar = as_float(sections.get("left_robot", {}).get("speed_bar"))
     right_speed_bar = as_float(sections.get("right_robot", {}).get("speed_bar"))
     for label, value in (("left_robot.speed_bar", left_speed_bar), ("right_robot.speed_bar", right_speed_bar)):
         if value is not None and not (0.0 < value <= 1.0):
             raise AblationError(f"experiment {exp['name']} {label} must be > 0 and <= 1.0")
+    max_twist_linear = as_float(cartesian.get("max_twist_linear_m_s"))
+    max_twist_angular = as_float(cartesian.get("max_twist_angular_rad_s"))
+    max_linear_move_speed = as_float(cartesian.get("max_linear_move_speed_m_s"))
+    twist_angular_deadband = as_float(cartesian.get("twist_angular_deadband_rad_s"))
+    for label, value in (
+        ("cartesian_control.max_twist_linear_m_s", max_twist_linear),
+        ("cartesian_control.max_twist_angular_rad_s", max_twist_angular),
+        ("cartesian_control.max_linear_move_speed_m_s", max_linear_move_speed),
+    ):
+        if value is not None and value <= 0.0:
+            raise AblationError(f"experiment {exp['name']} {label} must be > 0")
+    if twist_angular_deadband is not None and twist_angular_deadband < 0.0:
+        raise AblationError(f"experiment {exp['name']} cartesian_control.twist_angular_deadband_rad_s must be >= 0")
     return {
         "config_path": str(config_path),
         "base_config_path": str(root_path(root, exp["config"]).resolve()),
-        "config_overrides": config_overrides(exp),
+        "config_overrides": overrides,
         "configured_ips": [config.left.ip, config.right.ip],
         "known_real_ips": sorted({config.left.ip, config.right.ip} & REAL_ROBOT_IPS),
         "ack_policy": "ack_off" if config.left.disable_waiting_ack else "ack_on",
@@ -488,10 +572,12 @@ def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path 
         "servo_t1_sec": servo_t1_sec,
         "servo_t1_rate_aligned": t1_aligned,
         "alignment_warning": alignment_warning,
-        "cartesian_max_twist_linear_m_s": as_float(cartesian.get("max_twist_linear_m_s")),
-        "cartesian_max_twist_angular_rad_s": as_float(cartesian.get("max_twist_angular_rad_s")),
+        "cartesian_max_twist_linear_m_s": max_twist_linear,
+        "cartesian_max_twist_angular_rad_s": max_twist_angular,
+        "cartesian_max_linear_move_speed_m_s": max_linear_move_speed,
         "cartesian_path_kp_pos": as_float(cartesian.get("path_kp_pos")),
         "cartesian_path_kp_ori": as_float(cartesian.get("path_kp_ori")),
+        "cartesian_twist_angular_deadband_rad_s": twist_angular_deadband,
         "allow_controller_simulation_diagnostics_suspect": as_bool(
             config.servo.get("allow_controller_simulation_diagnostics_suspect"), False
         ),
@@ -590,6 +676,8 @@ def benchmark_command(args: argparse.Namespace, exp: dict[str, Any], meta: dict[
         "--i-understand-this-connects-to-real-controller",
         "--i-confirm-controller-is-in-pgmode-simulation",
     ]
+    if sim_bench.profile_requires_fast_stress(str(exp["profile"])):
+        command.append("--allow-fast-stress")
     for matrix_key, cli_key in (
         ("feedback_kp_pos", "--feedback-kp-pos"),
         ("feedback_kp_ori", "--feedback-kp-ori"),
@@ -651,6 +739,7 @@ def run_experiment(
     (exp_dir / "experiment_command.txt").write_text(command_text + "\n", encoding="utf-8")
     write_json(exp_dir / "ablation_command.json", command)
     if args.dry_run:
+        print(f"resolved_config: {meta['resolved_config_path']}")
         print(command_text)
         return {
             "schema": circle_bench.SCHEMA,
@@ -662,6 +751,8 @@ def run_experiment(
             "profile": exp.get("profile"),
             "command_rate_hz": exp.get("command_rate_hz", 100),
             "tracking_source_used": exp.get("tracking_source", "auto"),
+            "server_config": meta["config_path"],
+            "physical_motion_expected": False,
         }
     completed = subprocess.run(
         command,
@@ -690,6 +781,13 @@ def run_experiment(
 
 
 def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    command_count = first_present(
+        summary.get("command_count"),
+        summary.get("ack_observed_count"),
+        summary.get("controller_acceptance_observed_count"),
+    )
+    feedback_kp_pos = first_present(summary.get("feedback_kp_pos"), exp.get("feedback_kp_pos"))
+    feedback_kp_ori = first_present(summary.get("feedback_kp_ori"), exp.get("feedback_kp_ori"))
     return {
         "name": exp.get("name"),
         "controller": summary.get("controller") or exp.get("controller"),
@@ -698,12 +796,30 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "state_pub_rate_hz": meta.get("state_pub_rate_hz"),
         "speed_bar_left": meta.get("speed_bar_left"),
         "speed_bar_right": meta.get("speed_bar_right"),
-        "servo_rate_hz": summary.get("servo_rate_hz") or meta.get("servo_rate_hz"),
+        "servo_rate_hz": first_present(summary.get("servo_rate_hz"), meta.get("servo_rate_hz")),
         "servo_t1_sec": meta.get("servo_t1_sec"),
-        "command_rate_hz": summary.get("command_rate_hz") or exp.get("command_rate_hz"),
-        "tracking_source": summary.get("tracking_source_used") or exp.get("tracking_source", "auto"),
-        "feedback_kp_pos": exp.get("feedback_kp_pos"),
-        "feedback_kp_ori": exp.get("feedback_kp_ori"),
+        "command_rate_hz": first_present(summary.get("command_rate_hz"), exp.get("command_rate_hz")),
+        "command_count": command_count,
+        "tracking_source": first_present(summary.get("tracking_source_used"), exp.get("tracking_source", "auto")),
+        "kp_pos": feedback_kp_pos,
+        "kp_ori": feedback_kp_ori,
+        "feedback_kp_pos": feedback_kp_pos,
+        "feedback_kp_ori": feedback_kp_ori,
+        "feedback_max_linear_m_s": first_present(
+            summary.get("feedback_max_linear_m_s"), exp.get("feedback_max_linear_m_s")
+        ),
+        "feedback_max_angular_rad_s": first_present(
+            summary.get("feedback_max_angular_rad_s"), exp.get("feedback_max_angular_rad_s")
+        ),
+        "feedback_saturation_count": summary.get("feedback_saturation_count"),
+        "saturation_ratio": ratio_or_none(summary.get("feedback_saturation_count"), command_count),
+        "p95_orientation_drift_rad": summary.get("p95_orientation_drift_rad"),
+        "orientation_p95_deg": scaled(summary, "p95_orientation_drift_rad", 180.0 / math.pi),
+        "fit_center_error_m": summary.get("fit_center_error_m"),
+        "center_error_mm": scaled(summary, "fit_center_error_m", 1000.0),
+        "physical_motion_detected": summary.get("physical_motion_detected"),
+        "fault_latched": summary.get("fault_latched"),
+        "cartesian_unavailable_count": summary.get("cartesian_unavailable_count"),
         "radius_gain": summary.get("radius_gain"),
         "rms_error_mm": scaled(summary, "rms_error_m", 1000.0),
         "p95_error_mm": scaled(summary, "p95_error_m", 1000.0),
@@ -713,11 +829,11 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "estimated_latency_ms": summary.get("estimated_latency_ms"),
         "q_ref_update_rate_hz": summary.get("q_ref_update_rate_hz"),
         "send_duration_p95_us": nested_metric(summary, "send_duration_us", "p95"),
-        "feedback_saturation_count": summary.get("feedback_saturation_count"),
         "ack_observed_count": summary.get("ack_observed_count"),
         "controller_acceptance_observed_count": summary.get("controller_acceptance_observed_count"),
         "diagnostics_suspect_count": summary.get("diagnostics_suspect_count"),
-        "physical_motion_detected": summary.get("physical_motion_detected"),
+        "score": summary.get("score"),
+        "classification": summary.get("classification"),
         "result": summary.get("result"),
         "artifact_dir": summary.get("artifact_dir"),
         "warnings": warning_text(summary, meta),
@@ -780,13 +896,19 @@ def markdown_table(rows: list[dict[str, Any]], columns: list[str] | None = None)
 
 
 def rejected(row: dict[str, Any]) -> bool:
-    if row.get("result") == "error":
+    if child_result_failed(row):
         return True
     if row.get("physical_motion_detected") is True:
+        return True
+    if row.get("fault_latched") is True:
         return True
     if finite_number(row.get("diagnostics_suspect_count")) not in (None, 0.0):
         return True
     return False
+
+
+def child_result_failed(value: dict[str, Any]) -> bool:
+    return value.get("result") in {"error", "blocked", "faulted", "startup_fault"}
 
 
 def write_report(path: Path, rows: list[dict[str, Any]], skipped_plots: list[str]) -> None:
@@ -906,7 +1028,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         summary["_experiment"] = dict(exp)
         summary["_config_metadata"] = dict(meta)
         summaries.append(summary)
-        if summary.get("result") == "error":
+        if child_result_failed(summary):
             had_errors = True
             break
 

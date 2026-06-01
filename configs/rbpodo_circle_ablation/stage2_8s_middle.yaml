@@ -1,0 +1,134 @@
+# Stage-2 rbpodo controller-simulation middle-speed matrix for the
+# 15 cm / 8 s profile.
+#
+# Purpose:
+# - Bridge the stable 15 cm / 16 s baseline and the GENE-style 15 cm / 4 s
+#   stress profile.
+# - Compare open-loop and low-gain closed-loop behavior at moderate speed.
+#
+# Safety intent:
+# - rbpodo controller pgmode simulation only.
+# - Physical robot should not move.
+# - Requires run_rbpodo_circle_ablation.py confirmation flags and env gates.
+# - The 15 cm / 8 s profile is middle-speed ablation evidence, not real-ready
+#   physical Cartesian evidence.
+#
+# This matrix uses the 15 cm / 4 s local config because its speed envelope is
+# sufficient for 15 cm / 8 s; the stable 15 cm / 16 s template speed limit is
+# intentionally conservative and may be too low for this profile.
+
+experiments:
+  - name: 8s_open_loop_pub50_speed01
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: circle_15cm_8s
+    controller: twist_stand
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+
+  - name: 8s_fb_pos05_ori02_pub50_speed01
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: circle_15cm_8s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+
+  - name: 8s_fb_pos05_ori05_pub50_speed01
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: circle_15cm_8s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.5
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+
+  - name: 8s_fb_pos08_ori02_pub50_speed01
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: circle_15cm_8s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.8
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+
+  - name: 8s_fb_pos08_ori05_pub50_speed01
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: circle_15cm_8s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.8
+    feedback_kp_ori: 0.5
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 50
+      left_robot.speed_bar: 0.1
+      right_robot.speed_bar: 0.1
+
+  - name: 8s_fb_pos05_ori02_pub100_speed02
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: circle_15cm_8s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2
+
+  - name: 8s_fb_pos08_ori02_pub100_speed02
+    config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
+    profile: circle_15cm_8s
+    controller: twist_stand_feedback
+    arm: left
+    command_rate_hz: 100
+    repeat: 3
+    tracking_source: tcp_ref_stand
+    feedback_kp_pos: 0.8
+    feedback_kp_ori: 0.2
+    feedback_max_linear_m_s: 0.15
+    feedback_max_angular_rad_s: 0.4
+    config_overrides:
+      network.state_pub_rate_hz: 100
+      left_robot.speed_bar: 0.2
+      right_robot.speed_bar: 0.2

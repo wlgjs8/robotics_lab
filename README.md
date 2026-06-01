@@ -246,6 +246,7 @@ rbpodo controller-simulation circle templates:
 
 ```bash
 tools/create_rbpodo_circle_local_configs.sh
+tools/rbpodo_circle_tune.sh --matrix stage2_gain_split --arm left --help
 less docs/runbooks/rbpodo_controller_sim_circle.md
 ```
 

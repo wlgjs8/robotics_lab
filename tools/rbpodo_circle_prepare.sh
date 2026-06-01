@@ -134,6 +134,10 @@ validate_config() {
     || fail "${config} must contain allow_in_real: false"
   grep -Eq '^[[:space:]]*allow_in_controller_simulation:[[:space:]]*true([[:space:]]*(#.*)?)?$' "${config}" \
     || fail "${config} must contain allow_in_controller_simulation: true"
+  grep -Eq '^[[:space:]]*controller_simulation_tracking_error_source:[[:space:]]*reference([[:space:]]*(#.*)?)?$' "${config}" \
+    || fail "${config} must contain controller_simulation_tracking_error_source: reference"
+  grep -Eq '^[[:space:]]*controller_simulation_servo_state_source:[[:space:]]*reference([[:space:]]*(#.*)?)?$' "${config}" \
+    || fail "${config} must contain controller_simulation_servo_state_source: reference"
   grep -Eq '^[[:space:]]*state_pub_endpoints:[[:space:]]*$' "${config}" \
     || fail "${config} must contain network.state_pub_endpoints"
   local backend_count
@@ -232,6 +236,13 @@ cat <<'EOF'
 
 Next commands:
   tools/rbpodo_circle_gui.sh --profile stable
+
+  tools/rbpodo_circle_tune.sh \
+    --matrix stage2_gain_split \
+    --arm left \
+    --with-required-env \
+    --i-understand-this-connects-to-real-controller \
+    --i-confirm-controller-is-in-pgmode-simulation
 
   tools/rbpodo_circle_benchmark.sh \
     --profile stable \

@@ -43,6 +43,11 @@ REPORT_COLUMNS = [
     "arm",
     "profile",
     "tracking_source",
+    "kp_pos",
+    "kp_ori",
+    "state_pub_rate_hz",
+    "speed_bar_left",
+    "speed_bar_right",
     "diameter_m",
     "period_sec",
     "required_tangential_speed_m_s",
@@ -71,6 +76,10 @@ REPORT_COLUMNS = [
     "controller_rejected_count",
     "tcp_ref_valid_ratio",
     "tcp_actual_valid_ratio",
+    "saturation_ratio",
+    "orientation_p95_deg",
+    "center_error_mm",
+    "score",
     "result",
     "result_reason",
     "server_rejected_cartesian",
@@ -85,7 +94,7 @@ REPORT_COLUMNS = [
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate a markdown and CSV report for simulator-only circle benchmark "
+            "Generate a markdown and CSV report for circle benchmark "
             "summary.json artifacts, including baseline/stress classification and "
             "real-candidate parameter policy."
         )
@@ -123,6 +132,20 @@ def load_ablation_rows(path: Path) -> list[dict[str, Any]]:
             row["_source"] = str(path)
             row["run_name"] = row.get("name") or row.get("run_name")
             row["performance_warnings"] = row.get("warnings") or row.get("performance_warnings")
+            if not row.get("kp_pos"):
+                row["kp_pos"] = row.get("feedback_kp_pos")
+            if not row.get("kp_ori"):
+                row["kp_ori"] = row.get("feedback_kp_ori")
+            if not row.get("orientation_p95_deg") and row.get("p95_orientation_drift_mrad"):
+                orientation_mrad = finite_number(row.get("p95_orientation_drift_mrad"))
+                if orientation_mrad is not None:
+                    row["orientation_p95_deg"] = orientation_mrad / 1000.0 * 180.0 / math.pi
+                    row["p95_orientation_drift_rad"] = orientation_mrad / 1000.0
+            if not row.get("center_error_mm") and row.get("fit_center_error_mm"):
+                row["center_error_mm"] = row.get("fit_center_error_mm")
+                center_mm = finite_number(row.get("fit_center_error_mm"))
+                if center_mm is not None:
+                    row["fit_center_error_m"] = center_mm / 1000.0
             if row.get("ack_policy") or row.get("q_ref_update_rate_hz") or row.get("tracking_source"):
                 row.setdefault("backend", "rbpodo")
                 row.setdefault("benchmark_category", "rbpodo_controller_simulation")
@@ -241,6 +264,159 @@ def row_category(row: dict[str, Any]) -> str:
     if true_metric(row, "physical_motion_expected"):
         return "real_physical_benchmark"
     return "unknown"
+
+
+def first_present(row: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in row and row.get(key) is not None:
+            return row.get(key)
+    return None
+
+
+def first_number(row: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = finite_number(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def normalize_rbpodo_tuning_fields(row: dict[str, Any]) -> None:
+    kp_pos = first_present(row, "kp_pos", "feedback_kp_pos")
+    kp_ori = first_present(row, "kp_ori", "feedback_kp_ori")
+    if kp_pos is not None:
+        row["kp_pos"] = kp_pos
+        row.setdefault("feedback_kp_pos", kp_pos)
+    if kp_ori is not None:
+        row["kp_ori"] = kp_ori
+        row.setdefault("feedback_kp_ori", kp_ori)
+
+    orientation_rad = first_number(row, "p95_orientation_drift_rad")
+    if orientation_rad is None:
+        orientation_mrad = first_number(row, "p95_orientation_drift_mrad")
+        if orientation_mrad is not None:
+            orientation_rad = orientation_mrad / 1000.0
+            row["p95_orientation_drift_rad"] = orientation_rad
+    if orientation_rad is None:
+        orientation_deg = first_number(row, "orientation_p95_deg")
+        if orientation_deg is not None:
+            orientation_rad = orientation_deg * math.pi / 180.0
+            row["p95_orientation_drift_rad"] = orientation_rad
+    if orientation_rad is not None:
+        row["orientation_p95_deg"] = orientation_rad * 180.0 / math.pi
+
+    center_m = first_number(row, "fit_center_error_m")
+    if center_m is None:
+        center_mm = first_number(row, "center_error_mm", "fit_center_error_mm")
+        if center_mm is not None:
+            center_m = center_mm / 1000.0
+            row["fit_center_error_m"] = center_m
+    if center_m is not None:
+        row["center_error_mm"] = center_m * 1000.0
+
+    saturation_count = first_number(row, "feedback_saturation_count")
+    command_count = first_number(
+        row,
+        "command_count",
+        "ack_observed_count",
+        "controller_acceptance_observed_count",
+    )
+    if saturation_count is not None and command_count is not None and command_count > 0.0:
+        row["saturation_ratio"] = saturation_count / command_count
+    elif "saturation_ratio" not in row:
+        row["saturation_ratio"] = None
+
+
+def is_feedback_controller(row: dict[str, Any]) -> bool:
+    return str(row.get("controller") or "").endswith("_feedback")
+
+
+def is_rbpodo_stress_row(row: dict[str, Any]) -> bool:
+    return row.get("profile") == STRESS_PROFILE
+
+
+def state_pub_speed_mismatch(row: dict[str, Any]) -> bool:
+    state_pub_rate = first_number(row, "state_pub_rate_hz")
+    speed_left = first_number(row, "speed_bar_left")
+    speed_right = first_number(row, "speed_bar_right")
+    speed_values = [value for value in (speed_left, speed_right) if value is not None]
+    return (
+        is_rbpodo_stress_row(row)
+        and state_pub_rate is not None
+        and state_pub_rate >= 100.0
+        and bool(speed_values)
+        and max(speed_values) <= 0.1
+    )
+
+
+def rbpodo_tuning_rejection_reasons(row: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if true_metric(row, "fault_latched"):
+        reasons.append("fault_latched=true")
+    if true_metric(row, "physical_motion_detected"):
+        reasons.append("physical_motion_detected=true")
+    unavailable_count = first_number(row, "cartesian_unavailable_count")
+    if unavailable_count is not None and unavailable_count > 0.0:
+        reasons.append("cartesian_unavailable_count > 0")
+    saturation = first_number(row, "saturation_ratio")
+    if saturation is not None and saturation > 0.2:
+        reasons.append("feedback_saturation_count > 0.2 * command_count")
+    orientation_rad = first_number(row, "p95_orientation_drift_rad")
+    if orientation_rad is not None and orientation_rad > 0.25:
+        reasons.append("p95_orientation_drift_rad > 0.25")
+    center_m = first_number(row, "fit_center_error_m")
+    if is_rbpodo_stress_row(row) and center_m is not None and center_m > 0.05:
+        reasons.append("fit_center_error_m > 0.05 for 4s")
+    radius = first_number(row, "radius_gain")
+    if radius is not None and not (0.85 <= radius <= 1.15):
+        reasons.append("radius_gain outside [0.85, 1.15]")
+    return reasons
+
+
+def rbpodo_tuning_score(row: dict[str, Any]) -> float | None:
+    metric_keys = ("radius_gain", "rms_error_mm", "p95_error_mm")
+    if not any(first_number(row, key) is not None for key in metric_keys):
+        return None
+
+    score = 0.0
+    saturation = first_number(row, "saturation_ratio") or 0.0
+    center_mm = first_number(row, "center_error_mm")
+    orientation_deg = first_number(row, "orientation_p95_deg")
+    radius = first_number(row, "radius_gain")
+    rms_mm = first_number(row, "rms_error_mm")
+    p95_mm = first_number(row, "p95_error_mm")
+
+    score += saturation * 10000.0
+    score += (center_mm if center_mm is not None else 100.0) * 5.0
+    score += (orientation_deg if orientation_deg is not None else 30.0) * 3.0
+    score += (abs(radius - 1.0) if radius is not None else 0.5) * 200.0
+    score += (rms_mm if rms_mm is not None else 250.0) * 0.30
+    score += (p95_mm if p95_mm is not None else 250.0) * 0.15
+
+    for reason in rbpodo_tuning_rejection_reasons(row):
+        if reason in {"fault_latched=true", "physical_motion_detected=true", "cartesian_unavailable_count > 0"}:
+            score += 100000.0
+        elif reason == "feedback_saturation_count > 0.2 * command_count":
+            score += 50000.0
+        elif reason == "p95_orientation_drift_rad > 0.25":
+            score += 40000.0
+        elif reason == "fit_center_error_m > 0.05 for 4s":
+            score += 30000.0
+        elif reason == "radius_gain outside [0.85, 1.15]":
+            score += 20000.0
+    if not is_feedback_controller(row):
+        score += 50000.0
+    return score
+
+
+def missing_rbpodo_candidate_metrics(row: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for key in ("radius_gain", "rms_error_mm", "p95_error_mm"):
+        if first_number(row, key) is None:
+            missing.append(key)
+    if is_feedback_controller(row) and first_number(row, "saturation_ratio") is None:
+        missing.append("saturation_ratio")
+    return missing
 
 
 def baseline_failures(row: dict[str, Any], min_repeats: int) -> list[str]:
@@ -363,6 +539,74 @@ def rbpodo_stress_failures(row: dict[str, Any]) -> list[str]:
     return failures
 
 
+def classify_rbpodo_tuning_row(row: dict[str, Any]) -> None:
+    normalize_rbpodo_tuning_fields(row)
+    row["score"] = rbpodo_tuning_score(row)
+    reasons = rbpodo_tuning_rejection_reasons(row)
+    missing = missing_rbpodo_candidate_metrics(row)
+
+    if true_metric(row, "server_rejected_cartesian") or row.get("result") == "blocked":
+        row["classification"] = "rbpodo_controller_sim_cartesian_blocked"
+        row["real_candidate_policy"] = "not_real_ready"
+        row["promotion_notes"] = (
+            "server rejected Cartesian commands before attempting path; check "
+            "cartesian_control.allow_in_controller_simulation, "
+            "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN, operation_mode=simulation, "
+            "and pgmode simulation confirmation"
+        )
+        return
+
+    if not is_feedback_controller(row):
+        row["classification"] = "open_loop_baseline"
+        row["real_candidate_policy"] = "not_real_ready"
+        notes = [
+            "open-loop radius can be good while center drift is bad",
+            "closed-loop is structurally needed for rbpodo controller simulation",
+        ]
+        if reasons:
+            notes.append("rejected for candidate ranking: " + "; ".join(reasons))
+        row["promotion_notes"] = "; ".join(notes)
+        return
+
+    if state_pub_speed_mismatch(row):
+        row["classification"] = "state_pub_speed_mismatch"
+    elif first_number(row, "saturation_ratio") is not None and first_number(row, "saturation_ratio") > 0.2:
+        row["classification"] = "saturation_limited"
+    elif first_number(row, "p95_orientation_drift_rad") is not None and first_number(row, "p95_orientation_drift_rad") > 0.25:
+        row["classification"] = "orientation_unstable"
+    elif (
+        is_rbpodo_stress_row(row)
+        and first_number(row, "fit_center_error_m") is not None
+        and first_number(row, "fit_center_error_m") > 0.05
+    ):
+        row["classification"] = "center_drift_limited"
+    elif reasons or missing:
+        row["classification"] = "stress_only"
+    else:
+        row["classification"] = "closed_loop_candidate"
+
+    policy = "controller_sim_stress_not_real_ready" if is_rbpodo_stress_row(row) else "future_low_speed_seed_only_not_real_ready"
+    row["real_candidate_policy"] = policy
+    notes: list[str] = []
+    if row["classification"] == "closed_loop_candidate":
+        notes.append("closed-loop candidate for rbpodo controller-simulation tuning; not physical real evidence")
+    elif row["classification"] == "state_pub_speed_mismatch":
+        notes.append("pub_rate=100 with speed_bar=0.1 can destabilize; speed_bar>=0.2 can restore stability")
+    elif row["classification"] == "saturation_limited":
+        notes.append("feedback saturation dominates this row")
+    elif row["classification"] == "orientation_unstable":
+        notes.append("orientation drift exceeds the tuning cutoff")
+    elif row["classification"] == "center_drift_limited":
+        notes.append("center drift makes the radius metric misleading")
+    elif row["classification"] == "stress_only":
+        notes.append("stress-only or incomplete tuning evidence; do not promote as a candidate")
+    if reasons:
+        notes.append("rejected or heavily penalized: " + "; ".join(reasons))
+    if missing:
+        notes.append("missing candidate metrics: " + ", ".join(missing))
+    row["promotion_notes"] = "; ".join(notes)
+
+
 def classify_row(row: dict[str, Any], min_repeats: int) -> None:
     category = row_category(row)
     row["benchmark_category"] = category
@@ -380,42 +624,10 @@ def classify_row(row: dict[str, Any], min_repeats: int) -> None:
         row["backend"] = "simulator"
     baseline = baseline_failures(row, min_repeats)
     stress = stress_failures(row)
-    rbpodo_baseline = rbpodo_stable_failures(row)
-    rbpodo_stress = rbpodo_stress_failures(row)
-    if category == "rbpodo_controller_simulation" and (
-        true_metric(row, "server_rejected_cartesian") or row.get("result") == "blocked"
-    ):
-        row["classification"] = "rbpodo_controller_sim_cartesian_blocked"
-        row["real_candidate_policy"] = "not_real_ready"
-        row["promotion_notes"] = (
-            "server rejected Cartesian commands before attempting path; check "
-            "cartesian_control.allow_in_controller_simulation, "
-            "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN, operation_mode=simulation, "
-            "and pgmode simulation confirmation"
-        )
-    elif category == "rbpodo_controller_simulation" and row.get("profile") == BASELINE_PROFILE and not rbpodo_baseline:
-        row["classification"] = "stable_rbpodo_controller_sim_baseline_candidate"
-        row["real_candidate_policy"] = "future_low_speed_seed_only_not_real_ready"
-        row["promotion_notes"] = (
-            "meets rbpodo pgmode-simulation baseline criteria using tcp_ref_stand; "
-            "may guide future low-speed planning but is not physical-motion evidence"
-        )
-    elif category == "rbpodo_controller_simulation" and row.get("profile") == STRESS_PROFILE and not rbpodo_stress:
-        row["classification"] = "rbpodo_controller_sim_stress_candidate"
-        row["real_candidate_policy"] = "controller_sim_stress_not_real_ready"
-        row["promotion_notes"] = (
-            "GENE-style rbpodo pgmode-simulation stress evidence; not real-ready; "
-            "do not copy speed/gains directly to real"
-        )
-    elif category == "rbpodo_controller_simulation" and row.get("profile") == BASELINE_PROFILE:
-        row["classification"] = "rbpodo_controller_sim_baseline_incomplete"
-        row["real_candidate_policy"] = "not_real_ready"
-        row["promotion_notes"] = "; ".join(rbpodo_baseline)
-    elif category == "rbpodo_controller_simulation" and row.get("profile") == STRESS_PROFILE:
-        row["classification"] = "rbpodo_controller_sim_stress_rejected_or_incomplete"
-        row["real_candidate_policy"] = "controller_sim_stress_not_real_ready"
-        row["promotion_notes"] = "; ".join(rbpodo_stress)
-    elif category == "real_physical_benchmark":
+    if category == "rbpodo_controller_simulation":
+        classify_rbpodo_tuning_row(row)
+        return
+    if category == "real_physical_benchmark":
         row["classification"] = "real_physical_benchmark_future_or_unreviewed"
         row["real_candidate_policy"] = "requires_separate_real_physical_acceptance"
         row["promotion_notes"] = "real physical circle reporting is future scope; do not infer approval from this report"
@@ -507,28 +719,35 @@ aggressive stress gains, GENE-style 4 s speed, or Python sender timing
 assumptions. Copy cautiously: frame conventions, conservative path gains,
 lease/deadman requirements, telemetry thresholds, and safety gates.
 
-## rbpodo Controller-Simulation Decision Rules
+## rbpodo Controller-Simulation Tuning Rules
 
-A stable rbpodo controller-simulation baseline candidate must satisfy all of:
+open-loop radius can be good while center drift is bad.
+closed-loop is structurally needed for rbpodo controller simulation.
+Kp=2 was aggressive in previous stage.
+Kp_pos and Kp_ori should be tuned separately.
 
-- category `rbpodo_controller_simulation`
-- `backend == rbpodo`
-- `controller_mode == pgmode_simulation`
-- profile `{BASELINE_PROFILE}`
-- `tracking_source == tcp_ref_stand`
-- `physical_motion_expected == false`
-- `physical_motion_detected == false`
-- `radius_gain` in `[0.98, 1.02]`
-- `rms_error_m <= 0.005`
-- `p95_error_m <= 0.007`
-- `fault_latched == false`
-- command/source drops, timeouts, and controller rejections are zero when reported
-- ACK-on runs have `controller_acceptance_observed_count > 0`
+The rbpodo tuning report classifies rows as:
 
-A `{STRESS_PROFILE}` rbpodo controller-simulation run is only a stress candidate
-when `radius_gain` is in `[0.90, 1.10]`, RMS and p95 errors are recorded,
-feedback saturation is recorded for feedback controllers,
-`physical_motion_detected == false`, and `fault_latched == false`.
+- `open_loop_baseline`: useful reference evidence, not a candidate.
+- `closed_loop_candidate`: feedback row that avoids the structural rejection cutoffs.
+- `saturation_limited`: feedback saturation ratio is above the candidate cutoff.
+- `orientation_unstable`: p95 orientation drift is above the candidate cutoff.
+- `center_drift_limited`: 4 s fit-center drift makes radius gain misleading.
+- `state_pub_speed_mismatch`: 100 Hz state publication with `speed_bar=0.1` stress behavior.
+- `stress_only`: incomplete or heavily penalized evidence that should not be promoted.
+
+Candidate scoring rejects or heavily penalizes `fault_latched=true`,
+`physical_motion_detected=true`, `cartesian_unavailable_count > 0`,
+`feedback_saturation_count > 0.2 * command_count`,
+`p95_orientation_drift_rad > 0.25`, `fit_center_error_m > 0.05` for the 4 s
+profile, and `radius_gain` outside `[0.85, 1.15]`. Among non-rejected
+closed-loop candidates, lower scores prioritize low saturation, low center
+error, low orientation drift, radius gain near 1, then RMS and p95 error.
+
+Orientation feedback may worsen orientation drift, so position and orientation
+gains should be compared independently. `pub_rate=100` with `speed_bar=0.1`
+can destabilize the 4 s stress row; `speed_bar>=0.2` can restore stability but
+still needs radius, orientation, and center-drift review.
 
 rbpodo controller-simulation results can guide future low-speed parameter
 selection, but cannot be copied directly to real physical motion.
@@ -544,17 +763,74 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writerow({key: row.get(key) for key in REPORT_COLUMNS})
 
 
+def row_label(row: dict[str, Any] | None) -> str:
+    if row is None:
+        return "_None._"
+    name = row.get("run_name") or row.get("name") or Path(str(row.get("artifact_dir", ""))).name
+    score = first_number(row, "score")
+    details = []
+    if score is not None:
+        details.append(f"score {score:.3f}")
+    kp_pos = first_number(row, "kp_pos")
+    kp_ori = first_number(row, "kp_ori")
+    if kp_pos is not None:
+        details.append(f"Kp_pos {kp_pos:g}")
+    if kp_ori is not None:
+        details.append(f"Kp_ori {kp_ori:g}")
+    classification = row.get("classification")
+    if classification:
+        details.append(str(classification))
+    suffix = f" ({', '.join(details)})" if details else ""
+    return f"{name}{suffix}"
+
+
+def best_by(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if all(first_number(row, key) is not None for key in keys):
+            candidates.append(row)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda row: tuple(first_number(row, key) or 0.0 for key in keys))
+
+
+def rbpodo_stage_summary_markdown(rows: list[dict[str, Any]]) -> str:
+    rbpodo_rows = [row for row in rows if row.get("benchmark_category") == "rbpodo_controller_simulation"]
+    closed_loop = [row for row in rbpodo_rows if row.get("classification") == "closed_loop_candidate"]
+    open_loop = [row for row in rbpodo_rows if row.get("classification") == "open_loop_baseline"]
+    best_overall = best_by(closed_loop, ("score",))
+    best_low_saturation = best_by(closed_loop, ("saturation_ratio", "score"))
+    best_orientation = best_by(closed_loop, ("orientation_p95_deg", "score"))
+    best_center = best_by(closed_loop, ("center_error_mm", "score"))
+    best_open_loop = best_by(open_loop, ("score",))
+    lines = [
+        "## rbpodo Tuning Stage Summary",
+        "",
+        f"- best_overall_candidate: {row_label(best_overall)}",
+        f"- best_low_saturation_candidate: {row_label(best_low_saturation)}",
+        f"- best_orientation_candidate: {row_label(best_orientation)}",
+        f"- best_center_candidate: {row_label(best_center)}",
+        f"- best_open_loop_baseline: {row_label(best_open_loop)}",
+    ]
+    return "\n".join(lines)
+
+
 def report_markdown(rows: list[dict[str, Any]], title: str, min_repeats: int) -> str:
     baseline = [row for row in rows if row.get("classification") == "stable_simulator_baseline_candidate"]
     stress = [row for row in rows if row.get("classification") == "stress_benchmark_candidate"]
     rbpodo_rows = [row for row in rows if row.get("benchmark_category") == "rbpodo_controller_simulation"]
-    rbpodo_baseline = [
-        row for row in rows
-        if row.get("classification") == "stable_rbpodo_controller_sim_baseline_candidate"
-    ]
-    rbpodo_stress = [
-        row for row in rows
-        if row.get("classification") == "rbpodo_controller_sim_stress_candidate"
+    rbpodo_closed_loop = [row for row in rbpodo_rows if row.get("classification") == "closed_loop_candidate"]
+    rbpodo_open_loop = [row for row in rbpodo_rows if row.get("classification") == "open_loop_baseline"]
+    rbpodo_structural = [
+        row for row in rbpodo_rows
+        if row.get("classification") in {
+            "saturation_limited",
+            "orientation_unstable",
+            "center_drift_limited",
+            "state_pub_speed_mismatch",
+            "stress_only",
+            "rbpodo_controller_sim_cartesian_blocked",
+        }
     ]
     simulator_rows = [row for row in rows if row.get("benchmark_category") == "rb_simulator"]
     real_physical_rows = [row for row in rows if row.get("benchmark_category") == "real_physical_benchmark"]
@@ -566,6 +842,11 @@ def report_markdown(rows: list[dict[str, Any]], title: str, min_repeats: int) ->
             "rbpodo_controller_sim_baseline_incomplete",
             "rbpodo_controller_sim_stress_rejected_or_incomplete",
             "rbpodo_controller_sim_cartesian_blocked",
+            "saturation_limited",
+            "orientation_unstable",
+            "center_drift_limited",
+            "state_pub_speed_mismatch",
+            "stress_only",
         }
     ]
     parts = [
@@ -587,6 +868,20 @@ def report_markdown(rows: list[dict[str, Any]], title: str, min_repeats: int) ->
         "",
         markdown_table(rbpodo_rows) if rbpodo_rows else "_None supplied._",
         "",
+        rbpodo_stage_summary_markdown(rows),
+        "",
+        "## rbpodo Closed-Loop Candidates",
+        "",
+        markdown_table(rbpodo_closed_loop) if rbpodo_closed_loop else "_None._",
+        "",
+        "## rbpodo Open-Loop Baselines",
+        "",
+        markdown_table(rbpodo_open_loop) if rbpodo_open_loop else "_None._",
+        "",
+        "## rbpodo Structural Rejections",
+        "",
+        markdown_table(rbpodo_structural) if rbpodo_structural else "_None._",
+        "",
         "## Real Physical Benchmarks",
         "",
         markdown_table(real_physical_rows) if real_physical_rows else "_Future/not run. No real physical circle tracking evidence is claimed._",
@@ -598,14 +893,6 @@ def report_markdown(rows: list[dict[str, Any]], title: str, min_repeats: int) ->
         "## Stress Benchmark Candidates",
         "",
         markdown_table(stress) if stress else "_None._",
-        "",
-        "## Stable rbpodo Controller-Simulation Baseline Candidates",
-        "",
-        markdown_table(rbpodo_baseline) if rbpodo_baseline else "_None._",
-        "",
-        "## GENE-Style rbpodo Controller-Simulation Stress Candidates",
-        "",
-        markdown_table(rbpodo_stress) if rbpodo_stress else "_None._",
         "",
         "## Rejected Or Incomplete Baseline/Stress Runs",
         "",

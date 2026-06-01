@@ -842,6 +842,7 @@ RB_ALLOW_REAL_ROBOT=1 \
 RB_ALLOW_REAL_MOTION=1 \
 RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
 RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1 \
 python3 scripts/run_rbpodo_circle_ablation.py \
   --matrix configs/rbpodo_circle_ablation/rbpodo_circle_ablation_example.yaml \
   --artifact-root artifacts/rbpodo_circle/ablation_gene15cm4s_left \
@@ -852,8 +853,9 @@ python3 scripts/run_rbpodo_circle_ablation.py \
 ```
 
 Use `--dry-run` first to validate matrix/config shape and print the exact
-benchmark commands. Dry-run still checks that the runner has been given the
-same explicit safety flags and env gates required for a real matrix run.
+benchmark commands plus each experiment's `resolved_server_config.yaml` path.
+Dry-run still checks that the runner has been given the same explicit safety
+flags and env gates required for a real matrix run.
 
 The matrix supports the intended factor split:
 
@@ -870,26 +872,33 @@ The matrix supports the intended factor split:
   `left_robot.command_timeout_sec`, `right_robot.command_timeout_sec`,
   `cartesian_control.max_twist_linear_m_s`,
   `cartesian_control.max_twist_angular_rad_s`,
-  `cartesian_control.path_kp_pos`, and `cartesian_control.path_kp_ori`
+  `cartesian_control.max_linear_move_speed_m_s`,
+  `cartesian_control.path_kp_pos`, `cartesian_control.path_kp_ori`, and
+  `cartesian_control.twist_angular_deadband_rad_s`
 - ACK mode is derived from the referenced config's
   `disable_waiting_ack` fields
 
 ACK-off experiments require `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1`.
 Configs that opt into the temporary diagnostics-suspect bridge require
 `RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1`. The runner stops on
-safety preflight failure or child benchmark `result: blocked` / `result: error`.
+safety preflight failure or child benchmark `result: blocked`, `faulted`,
+`startup_fault`, or `error`.
 Overrides are written to each experiment artifact directory as
 `resolved_server_config.yaml`; the source or local config is not edited in
 place. The runner rejects overrides that would change `operation_mode` to
 `real`, set `cartesian_control.allow_in_real: true`, remove
 `allow_in_controller_simulation: true`, remove `backend_type: rbpodo`, or
-create a `servo.rate_hz` / `servo_t1_sec` mismatch.
+create a `servo.rate_hz` / `servo_t1_sec` mismatch unless the source config
+already explicitly allows that mismatch. `network.state_pub_rate_hz` overrides
+must be `> 0` and `<= 200`; `speed_bar` overrides must be `> 0` and `<= 1.0`.
+For rate/t1 sweeps, use `servo.rate_hz: 100` with `servo_t1_sec: 0.01` or
+`servo.rate_hz: 200` with `servo_t1_sec: 0.005` on both arms.
 
 Example GENE-style Kp, state publish rate, and speed-bar sweep entries:
 
 ```yaml
 experiments:
-  - name: gene_fb_kp10_pub100_speed02
+  - name: gene_fb_kp05_ori02_pub100_speed02
     config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
     profile: gene_15cm_4s
     controller: twist_stand_feedback
@@ -897,8 +906,8 @@ experiments:
     command_rate_hz: 100
     repeat: 5
     tracking_source: tcp_ref_stand
-    feedback_kp_pos: 1.0
-    feedback_kp_ori: 1.0
+    feedback_kp_pos: 0.5
+    feedback_kp_ori: 0.2
     feedback_max_linear_m_s: 0.15
     feedback_max_angular_rad_s: 0.4
     config_overrides:
@@ -955,6 +964,183 @@ Each matrix run writes:
 - summary plots for RMS error, p95 error, radius gain, latency, q_ref update
   rate, and physical-motion detection when the metrics are available
 
+## Stage-2 Rbpodo Circle Matrices
+
+The stage-2 matrices refine the latest GENE-style controller-simulation
+evidence from
+`artifacts/rbpodo_circle_ablation/gene4s_stage1_20260531_232739`. Stage-1
+showed that open-loop 15 cm / 4 s has large center drift, closed-loop feedback
+is structurally better, `Kp=2` is too aggressive, `Kp_pos=0.5` /
+`Kp_ori=0.5` is the best current 4 s stress candidate, orientation feedback
+can increase orientation drift, and `pub_rate=100` with `speed_bar=0.1`
+saturates heavily. These observations guide the next matrices only; no
+controller-simulation result is real-ready.
+
+Run order:
+
+1. `stage2_gain_split.yaml`
+2. `stage2_pub_speed.yaml`
+3. `stage2_8s_middle.yaml`
+
+`stage2_gain_split.yaml` separates position and orientation feedback at
+`network.state_pub_rate_hz: 50` and `speed_bar: 0.1`, centered around
+`Kp_pos=0.5`. `stage2_pub_speed.yaml` then checks publish-rate and speed-bar
+effects for the low-gain candidates. `stage2_8s_middle.yaml` bridges the stable
+15 cm / 16 s baseline and the GENE-style 15 cm / 4 s stress profile; it uses
+the 15 cm / 4 s local config only because its controller-simulation speed
+limits are sufficient for 15 cm / 8 s.
+
+Interpretation:
+
+- Choose candidates with low or zero `feedback_saturation_count` first.
+- Reject high orientation drift even if RMS error is lower.
+- Compare `p95_error_m` and `fit_center_error_m`; center drift matters, not
+  only RMS.
+- Treat `gene_15cm_4s` rows as stress evidence. Do not mark any 4 s matrix
+  result as real-ready.
+- Treat the 8 s matrix as a bridge between 16 s and 4 s evidence, not as
+  physical Cartesian acceptance.
+
+Use the convenience runner for stage-2 tuning matrices:
+
+```bash
+tools/rbpodo_circle_tune.sh \
+  --matrix stage2_gain_split \
+  --arm left \
+  --with-required-env \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+The wrapper resolves the stage-2 matrix file, creates an artifact directory
+under `artifacts/rbpodo_circle_ablation/<timestamp>_<matrix>_<arm>`, checks the
+local controller-simulation configs, checks server realtime capabilities, runs
+`scripts/run_rbpodo_circle_ablation.py`, and prints the final
+`ablation_report.md` path. Use `--matrix stage2_pub_speed` and
+`--matrix stage2_8s_middle` for the next two matrices, or `--matrix-file PATH`
+for a custom matrix whose enabled rows already match `--arm`.
+
+Safety behavior:
+
+- `--i-understand-this-connects-to-real-controller` and
+  `--i-confirm-controller-is-in-pgmode-simulation` are always required.
+- `RB_ALLOW_*` gates are exported only when `--with-required-env` is passed;
+  otherwise they must already be set by the operator.
+- `RB_ALLOW_REAL_CARTESIAN=1` is refused.
+- Local configs must keep `operation_mode: simulation`,
+  `allow_in_real: false`, `allow_in_controller_simulation: true`,
+  `controller_simulation_tracking_error_source: reference`, and
+  `controller_simulation_servo_state_source: reference`.
+- `getcap` and the server's `cap_sys_nice,cap_ipc_lock` capabilities are
+  required unless `--allow-no-realtime` is passed.
+- Existing local configs are never overwritten unless `--force-local-configs`
+  is passed.
+- `--check-controller` verifies controller ports 5000 and 5001 before the
+  matrix run. `--set-pgmode-simulation` calls `tools/simulation_mode.sh` first
+  and then passes the resulting pgmode summary to the ablation runner.
+
+Dry-run the convenience command before running a live matrix:
+
+```bash
+tools/rbpodo_circle_tune.sh \
+  --matrix stage2_gain_split \
+  --arm left \
+  --with-required-env \
+  --dry-run \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+Dry-run the matrices first:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1 \
+python3 scripts/run_rbpodo_circle_ablation.py \
+  --matrix configs/rbpodo_circle_ablation/stage2_gain_split.yaml \
+  --artifact-root artifacts/rbpodo_circle_ablation/stage2_gain_split_dry_run \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --dry-run \
+  --verify-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1 \
+python3 scripts/run_rbpodo_circle_ablation.py \
+  --matrix configs/rbpodo_circle_ablation/stage2_pub_speed.yaml \
+  --artifact-root artifacts/rbpodo_circle_ablation/stage2_pub_speed_dry_run \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --dry-run \
+  --verify-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1 \
+python3 scripts/run_rbpodo_circle_ablation.py \
+  --matrix configs/rbpodo_circle_ablation/stage2_8s_middle.yaml \
+  --artifact-root artifacts/rbpodo_circle_ablation/stage2_8s_middle_dry_run \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --dry-run \
+  --verify-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+Run the actual matrices in the same order after confirming pgmode simulation
+for the same session:
+
+```bash
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1 \
+python3 scripts/run_rbpodo_circle_ablation.py \
+  --matrix configs/rbpodo_circle_ablation/stage2_gain_split.yaml \
+  --artifact-root artifacts/rbpodo_circle_ablation/stage2_gain_split \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --verify-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1 \
+python3 scripts/run_rbpodo_circle_ablation.py \
+  --matrix configs/rbpodo_circle_ablation/stage2_pub_speed.yaml \
+  --artifact-root artifacts/rbpodo_circle_ablation/stage2_pub_speed \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --verify-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+
+RB_ALLOW_REAL_ROBOT=1 \
+RB_ALLOW_REAL_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
+RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 \
+RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1 \
+python3 scripts/run_rbpodo_circle_ablation.py \
+  --matrix configs/rbpodo_circle_ablation/stage2_8s_middle.yaml \
+  --artifact-root artifacts/rbpodo_circle_ablation/stage2_8s_middle \
+  --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --verify-pgmode-simulation \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
 ## Reporting And Decision Policy
 
 Use `scripts/generate_rbpodo_circle_report.py` for rbpodo
@@ -1009,6 +1195,27 @@ Every rbpodo controller-simulation row must state:
 - `q_ref_update_rate_hz` and `q_actual_update_rate_hz`
 - `ack_policy`
 - `controller_acceptance_observed_count`
+
+The tuning report adds structure-aware columns for `kp_pos`, `kp_ori`,
+`state_pub_rate_hz`, `speed_bar_left`, `speed_bar_right`,
+`saturation_ratio`, `orientation_p95_deg`, `center_error_mm`, `score`, and
+`classification`. Its rbpodo tuning classifications are:
+
+- `open_loop_baseline`
+- `closed_loop_candidate`
+- `saturation_limited`
+- `orientation_unstable`
+- `center_drift_limited`
+- `state_pub_speed_mismatch`
+- `stress_only`
+
+Interpret the stage-1 rows structurally: open-loop radius can be good while
+center drift is bad, closed-loop is structurally needed for rbpodo controller
+simulation, Kp=2 was aggressive in previous stage, and Kp_pos and Kp_ori
+should be tuned separately. Orientation feedback may worsen orientation drift.
+`pub_rate=100` with `speed_bar=0.1` can destabilize; `speed_bar>=0.2` can
+restore stability but still needs radius, center, orientation, and saturation
+review.
 
 Stable controller-simulation baseline criteria:
 

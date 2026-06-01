@@ -646,7 +646,7 @@ def validate_config_and_env(
         ("--feedback-kp-ori", args.feedback_kp_ori),
         ("--physical-motion-warning-deg", args.physical_motion_warning_deg),
     ):
-        if name in {"--warmup-sec", "--settle-sec"}:
+        if name in {"--warmup-sec", "--settle-sec", "--feedback-kp-pos", "--feedback-kp-ori"}:
             if not math.isfinite(value) or value < 0.0:
                 raise BenchmarkError(f"{name} must be finite and non-negative")
         elif not math.isfinite(value) or value <= 0.0:
@@ -1625,6 +1625,10 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "angular_frequency_rad_s",
         "repeat",
         "command_rate_hz",
+        "feedback_kp_pos",
+        "feedback_kp_ori",
+        "feedback_max_linear_m_s",
+        "feedback_max_angular_rad_s",
         "required_tangential_speed_m_s",
         "mean_error_m",
         "rms_error_m",
@@ -1648,6 +1652,8 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "q_actual_update_rate_hz",
         "reset_rate_hz",
         "divergence_rate_hz",
+        "feedback_saturation_count",
+        "stale_state_feedback_skips",
         "ack_observed_count",
         "controller_acceptance_observed_count",
         "command_timeout_count",
@@ -2026,6 +2032,19 @@ def summarize_run(
             "physical robot motion is not expected or approved"
         ),
     }
+    if args.controller.endswith("_feedback"):
+        summary.update(
+            {
+                "feedback_kp_pos": args.feedback_kp_pos,
+                "feedback_kp_ori": args.feedback_kp_ori,
+                "feedback_max_linear_m_s": args.feedback_max_linear_m_s,
+                "feedback_max_angular_rad_s": args.feedback_max_angular_rad_s,
+                "feedback_use_current_state_time": args.feedback_use_current_state_time,
+                "feedback_mode_caveat": (
+                    "closed-loop command-source benchmark compensation; not production policy or real robot readiness"
+                ),
+            }
+        )
     summary.update(metrics)
     summary.update(telemetry_metrics(states, args.arm))
     summary.update(runtime_diagnostics)

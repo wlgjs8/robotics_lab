@@ -275,6 +275,24 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
             self.assertEqual(preflight["profile"], "gene_15cm_4s")
             self.assertEqual(preflight["stress_level"], "stress")
 
+    def test_preflight_allows_zero_orientation_feedback_gain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text, EnvGuard():
+            tmp = Path(tmp_text)
+            config = tmp / "config.yaml"
+            pgmode = tmp / "pgmode.json"
+            write_config(config)
+            write_pgmode_summary(pgmode)
+            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
+            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
+            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
+            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
+            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
+            args = make_args(tmp, config, pgmode, feedback_kp_pos=0.5, feedback_kp_ori=0.0)
+            _config, _sections, preflight, _endpoints = bench.preflight(args)
+            self.assertTrue(preflight["passed"])
+            self.assertEqual(args.feedback_kp_pos, 0.5)
+            self.assertEqual(args.feedback_kp_ori, 0.0)
+
     def test_profile_serialization_appears_in_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)

@@ -22,6 +22,11 @@ COLUMNS = [
     ("arm", "arm"),
     ("profile", "profile"),
     ("tracking_source", "tracking_source"),
+    ("kp_pos", "kp_pos"),
+    ("kp_ori", "kp_ori"),
+    ("state_pub_rate_hz", "state_pub_rate_hz"),
+    ("speed_bar_left", "speed_bar_left"),
+    ("speed_bar_right", "speed_bar_right"),
     ("diameter_m", "diameter_m"),
     ("period_sec", "period_sec"),
     ("required_tangential_speed_m_s", "required_tangential_speed_m_s"),
@@ -43,6 +48,9 @@ COLUMNS = [
     ("mean_feedback_linear_norm_m_s", "mean_feedback_linear_norm_m_s"),
     ("max_feedback_linear_norm_m_s", "max_feedback_linear_norm_m_s"),
     ("feedback_saturation_count", "feedback_saturation_count"),
+    ("saturation_ratio", "saturation_ratio"),
+    ("orientation_p95_deg", "orientation_p95_deg"),
+    ("center_error_mm", "center_error_mm"),
     ("stale_state_feedback_skips", "stale_state_feedback_skips"),
     ("physical_motion_expected", "physical_motion_expected"),
     ("physical_motion_detected", "physical_motion_detected"),
@@ -121,6 +129,36 @@ def finite_number(value: Any) -> float | None:
 def scaled(summary: dict[str, Any], key: str, factor: float) -> float | None:
     value = finite_number(summary.get(key))
     return value * factor if value is not None else None
+
+
+def first_number(summary: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = finite_number(summary.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def first_present(summary: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in summary and summary.get(key) is not None:
+            return summary.get(key)
+    return None
+
+
+def saturation_ratio(summary: dict[str, Any]) -> float | None:
+    saturation_count = finite_number(summary.get("feedback_saturation_count"))
+    if saturation_count is None:
+        return None
+    command_count = first_number(
+        summary,
+        "command_count",
+        "ack_observed_count",
+        "controller_acceptance_observed_count",
+    )
+    if command_count is None or command_count <= 0.0:
+        return None
+    return saturation_count / command_count
 
 
 def run_name(summary: dict[str, Any]) -> str:
@@ -378,6 +416,11 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "arm": summary.get("arm"),
         "profile": inferred_profile(summary),
         "tracking_source": infer_tracking_source(summary),
+        "kp_pos": first_present(summary, "feedback_kp_pos", "kp_pos"),
+        "kp_ori": first_present(summary, "feedback_kp_ori", "kp_ori"),
+        "state_pub_rate_hz": summary.get("state_pub_rate_hz"),
+        "speed_bar_left": summary.get("speed_bar_left"),
+        "speed_bar_right": summary.get("speed_bar_right"),
         "diameter_m": summary.get("diameter_m"),
         "period_sec": summary.get("period_sec"),
         "required_tangential_speed_m_s": required_tangential_speed(summary),
@@ -400,6 +443,9 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "mean_feedback_linear_norm_m_s": summary.get("mean_feedback_linear_norm_m_s"),
         "max_feedback_linear_norm_m_s": summary.get("max_feedback_linear_norm_m_s"),
         "feedback_saturation_count": summary.get("feedback_saturation_count"),
+        "saturation_ratio": saturation_ratio(summary),
+        "orientation_p95_deg": scaled(summary, "p95_orientation_drift_rad", 180.0 / math.pi),
+        "center_error_mm": scaled(summary, "fit_center_error_m", 1000.0),
         "stale_state_feedback_skips": summary.get("stale_state_feedback_skips"),
         "physical_motion_expected": infer_physical_motion_expected(summary),
         "physical_motion_detected": summary.get("physical_motion_detected"),
