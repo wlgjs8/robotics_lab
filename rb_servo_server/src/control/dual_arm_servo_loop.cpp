@@ -25,6 +25,7 @@ bool isCartesianMode(ControlMode mode) {
     return mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
            mode == ControlMode::TcpCircleMove ||
+           mode == ControlMode::TcpCircleTrack ||
            mode == ControlMode::TcpDeltaStand ||
            mode == ControlMode::TcpDeltaLocal ||
            mode == ControlMode::TcpTwistStand ||
@@ -39,6 +40,7 @@ bool isCartesianDeltaMode(ControlMode mode) {
 bool isCartesianVelocityServoMode(ControlMode mode) {
     return mode == ControlMode::TcpLinearMove ||
            mode == ControlMode::TcpCircleMove ||
+           mode == ControlMode::TcpCircleTrack ||
            mode == ControlMode::TcpTwistStand ||
            mode == ControlMode::TcpTwistLocal;
 }
@@ -53,6 +55,7 @@ bool isMotionMode(ControlMode mode) {
            mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
            mode == ControlMode::TcpCircleMove ||
+           mode == ControlMode::TcpCircleTrack ||
            mode == ControlMode::TcpDeltaStand ||
            mode == ControlMode::TcpDeltaLocal ||
            mode == ControlMode::TcpTwistStand ||
@@ -131,6 +134,8 @@ bool isCommandModeMissingPayload(const ArmCommand& command) {
                    (!command.has_linear_move_duration && !command.has_linear_move_linear_speed);
         case ControlMode::TcpCircleMove:
             return !command.has_tcp_circle_move;
+        case ControlMode::TcpCircleTrack:
+            return !command.has_tcp_circle_track;
         case ControlMode::TcpDeltaStand:
             return !command.has_tcp_delta_stand;
         case ControlMode::TcpDeltaLocal:
@@ -266,6 +271,51 @@ CartesianAvailability cartesianAvailabilityForArm(
 
     if (!config.cartesian_control.enable) {
         availability.reason = "cartesian_control_unavailable_disabled";
+        return availability;
+    }
+
+    if (command.mode == ControlMode::TcpCircleTrack) {
+        if (!config.cartesian_control.enable_server_side_circle_track) {
+            availability.reason = "tcp_circle_track_disabled";
+            availability.physical_motion_expected = false;
+            return availability;
+        }
+        if (backend.run_mode == RunMode::Simulation) {
+            availability.available = config.cartesian_control.allow_in_simulation;
+            availability.reason = availability.available
+                ? ""
+                : "cartesian_control_unavailable_run_mode";
+            availability.physical_motion_expected = false;
+            return availability;
+        }
+        if (backend.run_mode != RunMode::Real) {
+            availability.reason = "cartesian_control_unavailable_run_mode";
+            return availability;
+        }
+        if (backend.backend_type != BackendType::Rbpodo) {
+            availability.reason = "cartesian_control_unavailable_backend";
+            return availability;
+        }
+        const std::string operation_mode = lowerAscii(backend.operation_mode);
+        if (!(operation_mode == "simulation" || operation_mode == "sim")) {
+            availability.reason = "tcp_circle_track_physical_real_blocked";
+            return availability;
+        }
+        if (!config.cartesian_control.allow_in_controller_simulation ||
+            !config.servo.allow_controller_simulation_motion) {
+            availability.reason = "cartesian_control_unavailable_controller_sim_config";
+            availability.physical_motion_expected = false;
+            return availability;
+        }
+        if (!controllerSimulationCartesianGateOpen(config, backend)) {
+            availability.reason = "cartesian_control_unavailable_controller_sim_env";
+            availability.physical_motion_expected = false;
+            return availability;
+        }
+        availability.available = true;
+        availability.reason = "";
+        availability.controller_simulation_cartesian_enabled = true;
+        availability.physical_motion_expected = false;
         return availability;
     }
 
@@ -611,6 +661,19 @@ CartesianSolveTelemetry cartesianUnavailableTelemetry(
     telemetry.warn_ik_duration_us = config.warn_ik_duration_us;
     telemetry.fail_ik_duration_us = config.fail_ik_duration_us;
     return telemetry;
+}
+
+CartesianArmTargetResult rejectedCircleTrackTarget(
+    const RobotState& state,
+    const CartesianControlConfig& config,
+    const JointArray& previous_safe_sent_q_deg
+) {
+    CartesianArmTargetResult result;
+    result.q_target_deg = previous_safe_sent_q_deg;
+    result.verdict = SafetyVerdict::CartesianUnavailable;
+    result.reason = "tcp_circle_track_not_implemented";
+    result.telemetry = cartesianUnavailableTelemetry(state, config, result.reason);
+    return result;
 }
 
 ArmCommand linearMoveContinuationCommand(
@@ -2286,6 +2349,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 &left_cartesian_velocity_integrator_,
                 &left_servo_state.context
             )
+            : effective_command.left.mode == ControlMode::TcpCircleTrack
+            ? rejectedCircleTrackTarget(
+                left_servo_state.state,
+                config_.cartesian_control,
+                left_prev_sent_q_deg_
+            )
             : effective_command.left.mode == ControlMode::TcpCircleMove
             ? cartesian_servo.computeCircleMoveTarget(
                 effective_command.left,
@@ -2345,6 +2414,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 &right_cartesian_servo_path_,
                 &right_cartesian_velocity_integrator_,
                 &right_servo_state.context
+            )
+            : effective_command.right.mode == ControlMode::TcpCircleTrack
+            ? rejectedCircleTrackTarget(
+                right_servo_state.state,
+                config_.cartesian_control,
+                right_prev_sent_q_deg_
             )
             : effective_command.right.mode == ControlMode::TcpCircleMove
             ? cartesian_servo.computeCircleMoveTarget(

@@ -28,6 +28,7 @@ JointArray TrajectoryFilter::computeJointTarget(
         case ControlMode::TcpPoseTarget:
         case ControlMode::TcpLinearMove:
         case ControlMode::TcpCircleMove:
+        case ControlMode::TcpCircleTrack:
         case ControlMode::TcpDeltaStand:
         case ControlMode::TcpDeltaLocal:
         case ControlMode::TcpTwistStand:

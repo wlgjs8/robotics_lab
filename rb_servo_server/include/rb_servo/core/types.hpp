@@ -95,6 +95,7 @@ enum class ControlMode {
     TcpPoseTarget,
     TcpLinearMove,
     TcpCircleMove,
+    TcpCircleTrack,
     TcpDeltaStand,
     TcpDeltaLocal,
     TcpTwistStand,
@@ -177,6 +178,12 @@ enum class TcpCircleCenterMode {
 
 enum class TcpCircleFrame {
     Stand
+};
+
+enum class TcpCircleTrackTrackingSource {
+    Auto,
+    TcpActualStand,
+    TcpRefStand
 };
 
 struct Pose6D {
@@ -357,6 +364,21 @@ struct TcpCircleMoveCommand {
     TcpCircleFrame frame = TcpCircleFrame::Stand;
 };
 
+struct TcpCircleTrackCommand {
+    std::array<double, 3> center_stand{0.0, 0.0, 0.0};
+    double radius_m = 0.0;
+    TcpCirclePlane plane = TcpCirclePlane::XY;
+    double period_sec = 0.0;
+    int repeat = 1;
+    double start_phase_rad = 0.0;
+    bool orientation_hold = true;
+    double feedback_kp_pos = 0.0;
+    double feedback_kp_ori = 0.0;
+    double max_linear_m_s = 0.0;
+    double max_angular_rad_s = 0.0;
+    TcpCircleTrackTrackingSource tracking_source = TcpCircleTrackTrackingSource::Auto;
+};
+
 struct ArmCommand {
     ArmId arm_id = ArmId::Left;
 
@@ -374,6 +396,7 @@ struct ArmCommand {
     Vec6 tcp_twist_stand;
     Vec6 tcp_twist_local;
     TcpCircleMoveCommand tcp_circle_move;
+    TcpCircleTrackCommand tcp_circle_track;
     double linear_move_duration_sec = 0.0;
     double linear_move_linear_speed_m_s = 0.0;
     double linear_move_angular_speed_rad_s = 0.0;
@@ -394,6 +417,7 @@ struct ArmCommand {
     bool has_tcp_twist_stand = false;
     bool has_tcp_twist_local = false;
     bool has_tcp_circle_move = false;
+    bool has_tcp_circle_track = false;
     bool has_linear_move_duration = false;
     bool has_linear_move_linear_speed = false;
     bool has_linear_move_angular_speed = false;
@@ -666,6 +690,7 @@ std::string toString(BackendAckPolicy policy);
 std::string toString(SafetyVerdict verdict);
 std::string toString(FaultDomain domain);
 std::string toString(TrackingErrorPolicy policy);
+std::string toString(TcpCircleTrackTrackingSource source);
 ControlMode controlModeFromString(const std::string& mode);
 ForceControlMode forceControlModeFromString(const std::string& mode);
 TrackingErrorPolicy trackingErrorPolicyFromString(const std::string& value);

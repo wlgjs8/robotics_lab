@@ -211,6 +211,35 @@ real Cartesian motion. Servo J ACKs in a controller-simulation circle artifact
 do not by themselves prove that Cartesian commands executed; check the
 Cartesian gate telemetry and `tcp_ref_stand` movement.
 
+### Server-Side Circle Tracking Skeleton
+
+`TcpCircleTrack` is the reserved command schema for moving closed-loop circle
+generation from Python into `rb_servo_server`. The long-term path is:
+
+1. Parser/schema: accept a trajectory-parameter command and publish structured
+   accepted/rejected telemetry without sending motion.
+2. Simulator implementation: compute desired pose/twist and feedback inside the
+   servo tick using fresh simulator state.
+3. Rbpodo controller-simulation implementation: run the same tick-local control
+   against controller-reference state in Rainbow `pgmode` simulation only.
+4. Acceptance matrix: compare simulator, rbpodo controller-simulation, and
+   future physical-real evidence as separate categories.
+
+The skeleton is disabled by default:
+
+```yaml
+cartesian_control:
+  enable_server_side_circle_track: false
+```
+
+When disabled, `TcpCircleTrack` is rejected with
+`tcp_circle_track_disabled`. If explicitly enabled, the current skeleton still
+rejects with `tcp_circle_track_not_implemented`; it does not produce Cartesian
+twist targets. Physical real `operation_mode: real` is rejected with
+`tcp_circle_track_physical_real_blocked`. Future controller-simulation work
+must keep `operation_mode: simulation`, `allow_in_real: false`, and the existing
+controller-simulation env gates.
+
 Experimental `rbscript_tcp` real-controller connection is additionally closed
 unless:
 

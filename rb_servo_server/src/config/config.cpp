@@ -729,6 +729,18 @@ void validateConfig(const DualArmConfig& cfg) {
             "rbpodo controller-simulation Cartesian gate"
         );
     }
+    if (cfg.cartesian_control.enable_server_side_circle_track && !cfg.cartesian_control.enable) {
+        throw std::runtime_error(
+            "cartesian_control.enable_server_side_circle_track requires cartesian_control.enable=true"
+        );
+    }
+    if (cfg.cartesian_control.enable_server_side_circle_track && anyReal(cfg) &&
+        !cfg.cartesian_control.allow_in_controller_simulation) {
+        throw std::runtime_error(
+            "Refusing cartesian_control.enable_server_side_circle_track in real mode outside "
+            "rbpodo controller-simulation Cartesian gate"
+        );
+    }
     if (cfg.cartesian_control.circle_move.allow_in_real) {
         throw std::runtime_error("cartesian_control.circle_move.allow_in_real must remain false");
     }
@@ -1237,6 +1249,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "allow_in_simulation",
             "allow_in_real",
             "allow_in_controller_simulation",
+            "enable_server_side_circle_track",
             "enable_benchmark_primitives",
             "warn_ik_duration_us",
             "fail_ik_duration_us",
@@ -1275,6 +1288,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "allow_in_controller_simulation")) {
             cfg.cartesian_control.allow_in_controller_simulation =
                 asBool(sec["allow_in_controller_simulation"], "cartesian_control.allow_in_controller_simulation");
+        }
+        if (has(sec, "enable_server_side_circle_track")) {
+            cfg.cartesian_control.enable_server_side_circle_track =
+                asBool(sec["enable_server_side_circle_track"], "cartesian_control.enable_server_side_circle_track");
         }
         if (has(sec, "enable_benchmark_primitives")) {
             cfg.cartesian_control.enable_benchmark_primitives =

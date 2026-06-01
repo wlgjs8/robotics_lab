@@ -676,6 +676,61 @@ reference telemetry instead of silently treating stationary physical
 Physical real circle testing is a separate future task. These templates are not
 real-ready and must not be copied into a physical Cartesian acceptance run.
 
+## Server-Side Circle Tracking Skeleton
+
+`TcpCircleTrack` is the non-default server-side closed-loop circle tracking
+skeleton. It is intended to replace the current Python feedback loop only after
+separate implementation and acceptance work:
+
+```text
+current: benchmark state UDP -> Python feedback -> UDP command -> server -> rbpodo
+target: benchmark parameters -> server servo tick desired pose/twist + feedback
+```
+
+The command carries trajectory and feedback parameters:
+
+```json
+{
+  "schema_version": 1,
+  "seq": 1,
+  "mode": "TcpCircleTrack",
+  "arm": "left",
+  "center_stand": [0.4, -0.1, 0.2],
+  "radius_m": 0.075,
+  "plane": "xy",
+  "period_sec": 6.0,
+  "repeat": 3,
+  "start_phase_rad": 0.0,
+  "orientation_hold": true,
+  "feedback_kp_pos": 1.5,
+  "feedback_kp_ori": 0.0,
+  "max_linear_m_s": 0.2,
+  "max_angular_rad_s": 0.4,
+  "tracking_source": "tcp_ref_stand"
+}
+```
+
+Safety status for this skeleton:
+
+- Default config leaves `cartesian_control.enable_server_side_circle_track:
+  false`, so the command rejects as `tcp_circle_track_disabled`.
+- If the config flag is enabled, the current implementation still rejects as
+  `tcp_circle_track_not_implemented`; it does not send a generated twist.
+- Physical real `operation_mode: real` rejects as
+  `tcp_circle_track_physical_real_blocked`.
+- Future rbpodo support is limited to controller pgmode simulation with
+  `operation_mode: simulation`, `allow_in_real: false`, and the existing
+  `RB_ALLOW_RBPODO_CONTROLLER_SIM_*` gates.
+
+Implementation phases:
+
+1. Parser/schema and structured accepted/rejected telemetry.
+2. Simulator-side tick-local trajectory and feedback implementation.
+3. Rbpodo controller-simulation implementation using controller-reference
+   state (`tcp_ref_stand`) in pgmode simulation only.
+4. Acceptance matrix that keeps `rb_simulator`, rbpodo controller-simulation,
+   and any future physical-real evidence separate.
+
 ## Circle Benchmark Runner
 
 `scripts/rbpodo_circle_tracking_benchmark.py` runs the controller-simulation

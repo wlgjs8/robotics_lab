@@ -798,6 +798,31 @@ rb_servo::DualArmCommand leftTcpTwistStandCommand() {
     return twist;
 }
 
+rb_servo::DualArmCommand leftTcpCircleTrackCommand() {
+    rb_servo::DualArmCommand circle = command(rb_servo::ControlMode::Hold);
+    circle.seq = 2;
+    circle.host_time_ns = rb_servo::nowSteadyNs();
+    circle.left.seq = circle.seq;
+    circle.left.host_time_ns = circle.host_time_ns;
+    circle.left.mode = rb_servo::ControlMode::TcpCircleTrack;
+    circle.left.has_tcp_circle_track = true;
+    circle.left.tcp_circle_track.center_stand = {0.4, -0.1, 0.2};
+    circle.left.tcp_circle_track.radius_m = 0.075;
+    circle.left.tcp_circle_track.plane = rb_servo::TcpCirclePlane::XY;
+    circle.left.tcp_circle_track.period_sec = 6.0;
+    circle.left.tcp_circle_track.repeat = 2;
+    circle.left.tcp_circle_track.start_phase_rad = 0.0;
+    circle.left.tcp_circle_track.orientation_hold = true;
+    circle.left.tcp_circle_track.feedback_kp_pos = 1.5;
+    circle.left.tcp_circle_track.feedback_kp_ori = 0.0;
+    circle.left.tcp_circle_track.max_linear_m_s = 0.2;
+    circle.left.tcp_circle_track.max_angular_rad_s = 0.4;
+    circle.left.tcp_circle_track.tracking_source =
+        rb_servo::TcpCircleTrackTrackingSource::TcpRefStand;
+    circle.right.mode = rb_servo::ControlMode::Hold;
+    return circle;
+}
+
 bool runLeftTcpTwistStandCase(
     rb_servo::DualArmConfig cfg,
     rb_servo::ServoSnapshot* snapshot,
@@ -1623,6 +1648,7 @@ bool testCommandValidation() {
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpPoseTarget"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpLinearMove"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpCircleMove"})", now, &out));
+    RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpCircleTrack"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpDeltaStand"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpDeltaLocal"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpTwistStand"})", now, &out));
@@ -1781,23 +1807,58 @@ bool testCartesianCommandParser() {
     RB_CHECK(out.left.tcp_circle_move.frame == rb_servo::TcpCircleFrame::Stand);
     RB_CHECK(out.right.mode == rb_servo::ControlMode::Hold);
 
+    RB_CHECK(server.parseMessage(
+        R"({"schema_version":1,"seq":12,"mode":"TcpCircleTrack","arm":"left","timeout_sec":0.2,"center_stand":[0.4,-0.1,0.2],"radius_m":0.075,"plane":"xy","period_sec":6.0,"repeat":3,"start_phase_rad":0.25,"orientation_hold":true,"feedback_kp_pos":1.5,"feedback_kp_ori":0.0,"max_linear_m_s":0.2,"max_angular_rad_s":0.4,"tracking_source":"tcp_ref_stand"})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpCircleTrack);
+    RB_CHECK(out.left.has_tcp_circle_track);
+    RB_CHECK(out.right.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(std::abs(out.left.tcp_circle_track.center_stand[0] - 0.4) < kEpsilon);
+    RB_CHECK(std::abs(out.left.tcp_circle_track.center_stand[1] + 0.1) < kEpsilon);
+    RB_CHECK(std::abs(out.left.tcp_circle_track.center_stand[2] - 0.2) < kEpsilon);
+    RB_CHECK(std::abs(out.left.tcp_circle_track.radius_m - 0.075) < kEpsilon);
+    RB_CHECK(out.left.tcp_circle_track.plane == rb_servo::TcpCirclePlane::XY);
+    RB_CHECK(std::abs(out.left.tcp_circle_track.period_sec - 6.0) < kEpsilon);
+    RB_CHECK(out.left.tcp_circle_track.repeat == 3);
+    RB_CHECK(std::abs(out.left.tcp_circle_track.start_phase_rad - 0.25) < kEpsilon);
+    RB_CHECK(out.left.tcp_circle_track.orientation_hold);
+    RB_CHECK(std::abs(out.left.tcp_circle_track.feedback_kp_pos - 1.5) < kEpsilon);
+    RB_CHECK(std::abs(out.left.tcp_circle_track.feedback_kp_ori - 0.0) < kEpsilon);
+    RB_CHECK(std::abs(out.left.tcp_circle_track.max_linear_m_s - 0.2) < kEpsilon);
+    RB_CHECK(std::abs(out.left.tcp_circle_track.max_angular_rad_s - 0.4) < kEpsilon);
+    RB_CHECK(out.left.tcp_circle_track.tracking_source ==
+             rb_servo::TcpCircleTrackTrackingSource::TcpRefStand);
+
     RB_CHECK(!server.parseMessage(
-        R"({"schema_version":1,"seq":12,"mode":"TcpCircleMove","timeout_sec":0.2,"left":{"plane":"bad","diameter_m":0.15,"period_sec":4.0,"repeat":1},"right":{"mode":"Hold"}})",
+        R"({"schema_version":1,"seq":13,"mode":"TcpCircleTrack","arm":"left","timeout_sec":0.2,"center_stand":[0,0,0],"radius_m":0.0,"plane":"xy","period_sec":6.0,"repeat":1,"start_phase_rad":0.0,"orientation_hold":true,"feedback_kp_pos":1.0,"feedback_kp_ori":1.0,"max_linear_m_s":0.2,"max_angular_rad_s":0.4,"tracking_source":"tcp_ref_stand"})",
         now,
         &out
     ));
     RB_CHECK(!server.parseMessage(
-        R"({"schema_version":1,"seq":13,"mode":"TcpCircleMove","timeout_sec":0.2,"left":{"plane":"xy","diameter_m":0.0,"period_sec":4.0,"repeat":1},"right":{"mode":"Hold"}})",
+        R"({"schema_version":1,"seq":14,"mode":"TcpCircleTrack","arm":"left","timeout_sec":0.2,"center_stand":[0,0,0],"radius_m":0.05,"plane":"xy","period_sec":0.0,"repeat":1,"start_phase_rad":0.0,"orientation_hold":true,"feedback_kp_pos":1.0,"feedback_kp_ori":1.0,"max_linear_m_s":0.2,"max_angular_rad_s":0.4,"tracking_source":"tcp_ref_stand"})",
+        now,
+        &out
+    ));
+
+    RB_CHECK(!server.parseMessage(
+        R"({"schema_version":1,"seq":15,"mode":"TcpCircleMove","timeout_sec":0.2,"left":{"plane":"bad","diameter_m":0.15,"period_sec":4.0,"repeat":1},"right":{"mode":"Hold"}})",
         now,
         &out
     ));
     RB_CHECK(!server.parseMessage(
-        R"({"schema_version":1,"seq":14,"mode":"TcpCircleMove","timeout_sec":0.2,"left":{"plane":"xy","diameter_m":0.15,"period_sec":0.0,"repeat":1},"right":{"mode":"Hold"}})",
+        R"({"schema_version":1,"seq":16,"mode":"TcpCircleMove","timeout_sec":0.2,"left":{"plane":"xy","diameter_m":0.0,"period_sec":4.0,"repeat":1},"right":{"mode":"Hold"}})",
         now,
         &out
     ));
     RB_CHECK(!server.parseMessage(
-        R"({"schema_version":1,"seq":15,"mode":"TcpCircleMove","timeout_sec":0.2,"left":{"plane":"xy","diameter_m":0.15,"period_sec":4.0,"repeat":0},"right":{"mode":"Hold"}})",
+        R"({"schema_version":1,"seq":17,"mode":"TcpCircleMove","timeout_sec":0.2,"left":{"plane":"xy","diameter_m":0.15,"period_sec":0.0,"repeat":1},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+    RB_CHECK(!server.parseMessage(
+        R"({"schema_version":1,"seq":18,"mode":"TcpCircleMove","timeout_sec":0.2,"left":{"plane":"xy","diameter_m":0.15,"period_sec":4.0,"repeat":0},"right":{"mode":"Hold"}})",
         now,
         &out
     ));
@@ -4682,6 +4743,92 @@ bool testTcpCircleMoveSimulationOnlyAndConfigGated() {
     return true;
 }
 
+bool testTcpCircleTrackSkeletonRejectsDisabledIncompleteAndPhysicalReal() {
+    rb_servo::CommandBuffer disabled_buffer;
+    rb_servo::DualArmConfig disabled_cfg = testConfig();
+    disabled_cfg.left_robot.run_mode = rb_servo::RunMode::Simulation;
+    disabled_cfg.right_robot.run_mode = rb_servo::RunMode::Simulation;
+    configureCartesianLoopTest(&disabled_cfg);
+    const rb_servo::JointArray initial = joints(0.0);
+    auto disabled_kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop disabled_loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        disabled_cfg,
+        &disabled_buffer,
+        nullptr,
+        disabled_kinematics
+    );
+    RB_CHECK(disabled_loop.start());
+    disabled_buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    disabled_buffer.setCommand(leftTcpCircleTrackCommand());
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = disabled_loop.latestSnapshot();
+        return snapshot.command.left.mode == rb_servo::ControlMode::TcpCircleTrack &&
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable &&
+               snapshot.left_cartesian_solve.reason == "tcp_circle_track_disabled";
+    }));
+    RB_CHECK(!disabled_kinematics->lastLeftTwist().has_value());
+    disabled_loop.stop();
+
+    rb_servo::CommandBuffer enabled_buffer;
+    rb_servo::DualArmConfig enabled_cfg = disabled_cfg;
+    enabled_cfg.cartesian_control.enable_server_side_circle_track = true;
+    auto enabled_kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop enabled_loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        enabled_cfg,
+        &enabled_buffer,
+        nullptr,
+        enabled_kinematics
+    );
+    RB_CHECK(enabled_loop.start());
+    enabled_buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    enabled_buffer.setCommand(leftTcpCircleTrackCommand());
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = enabled_loop.latestSnapshot();
+        return snapshot.command.left.mode == rb_servo::ControlMode::TcpCircleTrack &&
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable &&
+               snapshot.left_cartesian_solve.reason == "tcp_circle_track_not_implemented";
+    }));
+    RB_CHECK(!enabled_kinematics->lastLeftTwist().has_value());
+    enabled_loop.stop();
+
+    rb_servo::CommandBuffer real_buffer;
+    rb_servo::DualArmConfig real_cfg = enabled_cfg;
+    real_cfg.left_robot.backend_type = rb_servo::BackendType::Rbpodo;
+    real_cfg.right_robot.backend_type = rb_servo::BackendType::Rbpodo;
+    real_cfg.left_robot.run_mode = rb_servo::RunMode::Real;
+    real_cfg.right_robot.run_mode = rb_servo::RunMode::Real;
+    real_cfg.left_robot.operation_mode = "real";
+    real_cfg.right_robot.operation_mode = "real";
+    auto real_kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop real_loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        real_cfg,
+        &real_buffer,
+        nullptr,
+        real_kinematics
+    );
+    RB_CHECK(real_loop.start());
+    real_buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    real_buffer.setCommand(leftTcpCircleTrackCommand());
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = real_loop.latestSnapshot();
+        return snapshot.command.left.mode == rb_servo::ControlMode::TcpCircleTrack &&
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable &&
+               snapshot.left_cartesian_solve.reason == "tcp_circle_track_physical_real_blocked";
+    }));
+    RB_CHECK(!real_kinematics->lastLeftTwist().has_value());
+    real_loop.stop();
+    return true;
+}
+
 bool testCartesianDeltaStandAndLocalUseIkInSimulation() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
@@ -5345,6 +5492,7 @@ int main() {
     if (!testRbpodoControllerSimulationStartupReferenceSource()) return 1;
     if (!testRbpodoControllerSimulationStreamingCartesianGate()) return 1;
     if (!testTcpCircleMoveSimulationOnlyAndConfigGated()) return 1;
+    if (!testTcpCircleTrackSkeletonRejectsDisabledIncompleteAndPhysicalReal()) return 1;
     if (!testCartesianDeltaStandAndLocalUseIkInSimulation()) return 1;
     if (!testCartesianDeltaCommandsAreOneShotPerSeq()) return 1;
     if (!testCartesianIkFailureHoldsPreviousSafeTarget()) return 1;

@@ -681,6 +681,7 @@ bool envFlagEnabled(const char* name) {
 bool isStreamingCartesianMode(ControlMode mode) {
     return mode == ControlMode::TcpLinearMove ||
            mode == ControlMode::TcpCircleMove ||
+           mode == ControlMode::TcpCircleTrack ||
            mode == ControlMode::TcpTwistStand ||
            mode == ControlMode::TcpTwistLocal;
 }
@@ -689,6 +690,7 @@ bool isCartesianMode(ControlMode mode) {
     return mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
            mode == ControlMode::TcpCircleMove ||
+           mode == ControlMode::TcpCircleTrack ||
            mode == ControlMode::TcpDeltaStand ||
            mode == ControlMode::TcpDeltaLocal ||
            mode == ControlMode::TcpTwistStand ||
@@ -702,6 +704,10 @@ std::string cartesianGateUnavailableReason(
 ) {
     if (!cartesian_config.enable) {
         return "cartesian_control_unavailable_disabled";
+    }
+    if (command_mode == ControlMode::TcpCircleTrack &&
+        !cartesian_config.enable_server_side_circle_track) {
+        return "tcp_circle_track_disabled";
     }
     const bool streaming = isStreamingCartesianMode(command_mode);
     if (backend_config.run_mode == RunMode::Simulation) {
@@ -722,6 +728,9 @@ std::string cartesianGateUnavailableReason(
     }
     const std::string operation_mode = lowerAscii(backend_config.operation_mode);
     if (!(operation_mode == "simulation" || operation_mode == "sim")) {
+        if (command_mode == ControlMode::TcpCircleTrack) {
+            return "tcp_circle_track_physical_real_blocked";
+        }
         return cartesian_config.allow_in_real && envFlagEnabled("RB_ALLOW_REAL_CARTESIAN")
             ? "cartesian_control_unavailable_physical_real_blocked"
             : "cartesian_control_unavailable_operation_mode";
@@ -752,7 +761,8 @@ nlohmann::json cartesianGateJson(
         command_mode
     );
     if (!cartesian_solve.reason.empty() &&
-        cartesian_solve.reason.rfind("cartesian_control_unavailable", 0) == 0) {
+        (cartesian_solve.reason.rfind("cartesian_control_unavailable", 0) == 0 ||
+         cartesian_solve.reason.rfind("tcp_circle_track_", 0) == 0)) {
         unavailable_reason = cartesian_solve.reason;
     }
     const bool controller_sim_cartesian_enabled =
@@ -770,6 +780,7 @@ nlohmann::json cartesianGateJson(
         {"allow_in_simulation", cartesian_config.allow_in_simulation},
         {"allow_in_real", cartesian_config.allow_in_real},
         {"allow_in_controller_simulation", cartesian_config.allow_in_controller_simulation},
+        {"enable_server_side_circle_track", cartesian_config.enable_server_side_circle_track},
         {"controller_simulation_servo_state_source",
             controllerSimulationStateSourceString(cartesian_config.controller_simulation_servo_state_source)},
         {"controller_simulation_divergence_source",

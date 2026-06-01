@@ -298,6 +298,42 @@ bool parseCircleFrame(const std::string& value, TcpCircleFrame* out) {
     return false;
 }
 
+bool parseArmId(const std::string& value, ArmId* out) {
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (normalized == "left" || normalized == "left_robot") {
+        if (out) *out = ArmId::Left;
+        return true;
+    }
+    if (normalized == "right" || normalized == "right_robot") {
+        if (out) *out = ArmId::Right;
+        return true;
+    }
+    return false;
+}
+
+bool parseCircleTrackTrackingSource(const std::string& value, TcpCircleTrackTrackingSource* out) {
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (normalized == "auto") {
+        if (out) *out = TcpCircleTrackTrackingSource::Auto;
+        return true;
+    }
+    if (normalized == "tcp_actual_stand" || normalized == "actual") {
+        if (out) *out = TcpCircleTrackTrackingSource::TcpActualStand;
+        return true;
+    }
+    if (normalized == "tcp_ref_stand" || normalized == "reference" || normalized == "ref") {
+        if (out) *out = TcpCircleTrackTrackingSource::TcpRefStand;
+        return true;
+    }
+    return false;
+}
+
 bool readOptionalPositiveNumber(
     const json& object,
     const char* key,
@@ -311,6 +347,51 @@ bool readOptionalPositiveNumber(
     if (!isFiniteNumber(*it, &value) || value <= 0.0) return false;
     if (out) *out = value;
     if (present) *present = true;
+    return true;
+}
+
+bool readRequiredPositiveNumber(
+    const json& object,
+    const char* key,
+    double* out
+) {
+    bool present = false;
+    if (!readOptionalPositiveNumber(object, key, out, &present)) return false;
+    return present;
+}
+
+bool readRequiredNonNegativeNumber(
+    const json& object,
+    const char* key,
+    double* out
+) {
+    const auto it = object.find(key);
+    if (it == object.end()) return false;
+    double value = 0.0;
+    if (!isFiniteNumber(*it, &value) || value < 0.0) return false;
+    if (out) *out = value;
+    return true;
+}
+
+bool readRequiredPoint3(const json& object, const char* key, std::array<double, 3>* out) {
+    const auto it = object.find(key);
+    if (it == object.end()) return false;
+
+    std::array<double, 3> values{};
+    if (it->is_array()) {
+        if (it->size() != values.size()) return false;
+        for (size_t i = 0; i < values.size(); ++i) {
+            if (!isFiniteNumber((*it)[i], &values[i])) return false;
+        }
+    } else if (it->is_object()) {
+        const json& point = *it;
+        if (!readRequiredNumber(point, "x", &values[0])) return false;
+        if (!readRequiredNumber(point, "y", &values[1])) return false;
+        if (!readRequiredNumber(point, "z", &values[2])) return false;
+    } else {
+        return false;
+    }
+    if (out) *out = values;
     return true;
 }
 
@@ -352,6 +433,52 @@ bool readOptionalLinearMoveFields(const json& object, ArmCommand* out) {
         if (!parseLinearMoveOrientationMode(orientation_mode, &out->linear_move_orientation_mode)) return false;
         out->has_linear_move_orientation_mode = true;
     }
+    return true;
+}
+
+bool readOptionalCircleTrackFields(const json& object, ArmCommand* out) {
+    const bool circle_track_fields_present =
+        object.contains("center_stand") ||
+        object.contains("radius_m") ||
+        object.contains("period_sec") ||
+        object.contains("repeat") ||
+        object.contains("plane") ||
+        object.contains("start_phase_rad") ||
+        object.contains("orientation_hold") ||
+        object.contains("feedback_kp_pos") ||
+        object.contains("feedback_kp_ori") ||
+        object.contains("max_linear_m_s") ||
+        object.contains("max_angular_rad_s") ||
+        object.contains("tracking_source");
+    if (!circle_track_fields_present) return true;
+
+    TcpCircleTrackCommand parsed = out->tcp_circle_track;
+    if (!readRequiredPoint3(object, "center_stand", &parsed.center_stand)) return false;
+    if (!readRequiredPositiveNumber(object, "radius_m", &parsed.radius_m)) return false;
+    if (!readRequiredPositiveNumber(object, "period_sec", &parsed.period_sec)) return false;
+
+    const auto repeat_it = object.find("repeat");
+    if (repeat_it == object.end() || !repeat_it->is_number_integer()) return false;
+    parsed.repeat = repeat_it->get<int>();
+    if (parsed.repeat <= 0) return false;
+
+    if (!readRequiredNumber(object, "start_phase_rad", &parsed.start_phase_rad)) return false;
+    if (!readOptionalBool(object, "orientation_hold", &parsed.orientation_hold)) return false;
+    if (!object.contains("orientation_hold")) return false;
+    if (!readRequiredNonNegativeNumber(object, "feedback_kp_pos", &parsed.feedback_kp_pos)) return false;
+    if (!readRequiredNonNegativeNumber(object, "feedback_kp_ori", &parsed.feedback_kp_ori)) return false;
+    if (!readRequiredPositiveNumber(object, "max_linear_m_s", &parsed.max_linear_m_s)) return false;
+    if (!readRequiredPositiveNumber(object, "max_angular_rad_s", &parsed.max_angular_rad_s)) return false;
+
+    std::string value;
+    if (!readOptionalString(object, "plane", &value) || value.empty()) return false;
+    if (!parseCirclePlane(value, &parsed.plane)) return false;
+    value.clear();
+    if (!readOptionalString(object, "tracking_source", &value) || value.empty()) return false;
+    if (!parseCircleTrackTrackingSource(value, &parsed.tracking_source)) return false;
+
+    out->tcp_circle_track = parsed;
+    out->has_tcp_circle_track = true;
     return true;
 }
 
@@ -426,6 +553,7 @@ bool requiresPayload(ControlMode mode) {
            mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
            mode == ControlMode::TcpCircleMove ||
+           mode == ControlMode::TcpCircleTrack ||
            mode == ControlMode::TcpDeltaStand ||
            mode == ControlMode::TcpDeltaLocal ||
            mode == ControlMode::TcpTwistStand ||
@@ -445,6 +573,8 @@ bool hasRequiredPayload(const ArmCommand& command) {
                    (command.has_linear_move_duration || command.has_linear_move_linear_speed);
         case ControlMode::TcpCircleMove:
             return command.has_tcp_circle_move;
+        case ControlMode::TcpCircleTrack:
+            return command.has_tcp_circle_track;
         case ControlMode::TcpDeltaStand:
             return command.has_tcp_delta_stand;
         case ControlMode::TcpDeltaLocal:
@@ -470,6 +600,7 @@ bool commandRequiresLease(ControlMode mode) {
            mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
            mode == ControlMode::TcpCircleMove ||
+           mode == ControlMode::TcpCircleTrack ||
            mode == ControlMode::TcpDeltaStand ||
            mode == ControlMode::TcpDeltaLocal ||
            mode == ControlMode::TcpTwistStand ||
@@ -527,6 +658,12 @@ bool parseArmObject(
         std::string mode;
         if (!readOptionalString(object, "mode", &mode)) return false;
         if (!mode.empty()) out->mode = controlModeFromString(mode);
+        std::string arm_name;
+        if (!readOptionalString(object, "arm", &arm_name)) return false;
+        if (!arm_name.empty()) {
+            ArmId parsed_arm = arm_id;
+            if (!parseArmId(arm_name, &parsed_arm) || parsed_arm != arm_id) return false;
+        }
 
         double timeout = out->timeout_sec;
         if (!readOptionalNumber(object, "timeout_sec", &timeout)) return false;
@@ -565,7 +702,14 @@ bool parseArmObject(
         if (!readOptionalVec6(object, "tcp_twist_local", &out->tcp_twist_local, &present)) return false;
         out->has_tcp_twist_local = present;
         if (!readOptionalLinearMoveFields(object, out)) return false;
-        if (!readOptionalCircleMoveFields(object, out)) return false;
+        if (out->mode == ControlMode::TcpCircleMove &&
+            !readOptionalCircleMoveFields(object, out)) {
+            return false;
+        }
+        if (out->mode == ControlMode::TcpCircleTrack &&
+            !readOptionalCircleTrackFields(object, out)) {
+            return false;
+        }
         if (!parseForceControlObject(object, &out->force_control)) return false;
     }
     if (out->timeout_sec <= 0.0 || !std::isfinite(out->timeout_sec)) return false;
@@ -757,6 +901,8 @@ bool CommandServer::parseMessage(
 
     const json left_object = root.contains("left") ? root.at("left") : json();
     const json right_object = root.contains("right") ? root.at("right") : json();
+    std::string root_arm;
+    if (!readOptionalString(root, "arm", &root_arm)) return false;
 
     try {
         if (!parseArmObject(left_object, ArmId::Left, cmd.seq, receive_time_ns, default_mode, timeout_sec, &cmd.left)) return false;
@@ -765,7 +911,30 @@ bool CommandServer::parseMessage(
         return false;
     }
 
-    if (!root.contains("left") && !root.contains("right")) {
+    if (!root.contains("left") && !root.contains("right") &&
+        default_mode == ControlMode::TcpCircleTrack) {
+        if (root_arm.empty()) return false;
+        ArmId selected_arm = ArmId::Left;
+        if (!parseArmId(root_arm, &selected_arm)) return false;
+
+        ArmCommand selected;
+        if (!parseArmObject(root, selected_arm, cmd.seq, receive_time_ns, default_mode, timeout_sec, &selected)) {
+            return false;
+        }
+        ArmCommand hold;
+        hold.arm_id = selected_arm == ArmId::Left ? ArmId::Right : ArmId::Left;
+        hold.seq = cmd.seq;
+        hold.host_time_ns = receive_time_ns;
+        hold.mode = ControlMode::Hold;
+        hold.timeout_sec = timeout_sec;
+        if (selected_arm == ArmId::Left) {
+            cmd.left = selected;
+            cmd.right = hold;
+        } else {
+            cmd.right = selected;
+            cmd.left = hold;
+        }
+    } else if (!root.contains("left") && !root.contains("right")) {
         bool present = false;
         if (!readOptionalJointArray(root, "q_target_deg", &cmd.left.q_target_deg, &present)) return false;
         cmd.left.has_joint_target = cmd.left.has_joint_target || present;
@@ -821,9 +990,17 @@ bool CommandServer::parseMessage(
         cmd.right.has_linear_move_orientation_mode =
             cmd.right.has_linear_move_orientation_mode || cmd.left.has_linear_move_orientation_mode;
 
-        if (!readOptionalCircleMoveFields(root, &cmd.left)) return false;
-        cmd.right.tcp_circle_move = cmd.left.tcp_circle_move;
-        cmd.right.has_tcp_circle_move = cmd.right.has_tcp_circle_move || cmd.left.has_tcp_circle_move;
+        if (cmd.left.mode == ControlMode::TcpCircleMove) {
+            if (!readOptionalCircleMoveFields(root, &cmd.left)) return false;
+            cmd.right.tcp_circle_move = cmd.left.tcp_circle_move;
+            cmd.right.has_tcp_circle_move = cmd.right.has_tcp_circle_move || cmd.left.has_tcp_circle_move;
+        }
+
+        if (cmd.left.mode == ControlMode::TcpCircleTrack) {
+            if (!readOptionalCircleTrackFields(root, &cmd.left)) return false;
+            cmd.right.tcp_circle_track = cmd.left.tcp_circle_track;
+            cmd.right.has_tcp_circle_track = cmd.right.has_tcp_circle_track || cmd.left.has_tcp_circle_track;
+        }
     }
 
     if (requiresPayload(cmd.left.mode) && !hasRequiredPayload(cmd.left)) return false;

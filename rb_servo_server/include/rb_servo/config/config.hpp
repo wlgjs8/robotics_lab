@@ -237,6 +237,7 @@ struct CartesianControlConfig {
     bool allow_in_simulation = true;
     bool allow_in_real = false;
     bool allow_in_controller_simulation = false;
+    bool enable_server_side_circle_track = false;
     bool enable_benchmark_primitives = false;
     double warn_ik_duration_us = 3000.0;
     double fail_ik_duration_us = 0.0;
