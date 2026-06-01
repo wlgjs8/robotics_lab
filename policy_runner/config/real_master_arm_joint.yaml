@@ -1,0 +1,63 @@
+schema: robotics_lab.policy_runner.v1
+mode: real
+action_source: master_arm_joint
+
+robot_state:
+  # Must match rb_servo_server network.state_pub_endpoint destination.
+  bind: "udp://127.0.0.1:50110"
+  stale_timeout_sec: 0.5
+
+servo_command:
+  endpoint: "udp://127.0.0.1:50010"
+  timeout_sec: 0.2
+  # Enable this if rb_servo_server config enforces command-source leases.
+  acquire_lease: false
+  lease_readback_timeout_sec: 1.0
+
+safety:
+  # Keep false until read-only state and simulator tests pass. Set true only for
+  # a supervised real-robot joint-only run.
+  allow_real_motion: false
+  require_valid_joint_state: true
+
+master_arm_joint:
+  # mo_master_arm config and built Python binding location.
+  config_path: "/home/plaif/workspace/mo_master_arm/config/config.yaml"
+  python_module_dir: "/home/plaif/workspace/mo_master_arm/build/python"
+
+  selected_arm: both
+
+  # Startup: move the master arm to its init_joint from mo_master_arm/config.yaml.
+  # For the robot side, "current" means do not jump the real robot to an
+  # absolute pose at startup; teleop begins from the current robot pose.
+  # Use "configured" only after measuring safe init poses below.
+  robot_init_strategy: current
+  # left_robot_init_deg: [0, -30, 80, 0, 60, 0]
+  # right_robot_init_deg: [0, -30, 80, 0, 60, 0]
+
+  # Delta mode latches master and robot anchors on deadman press:
+  # q_robot_cmd = q_robot_anchor + scale * sign * (q_master - q_master_anchor)
+  mapping_mode: delta
+  left_scale: [1, 1, 1, 1, 1, 1]
+  right_scale: [1, 1, 1, 1, 1, 1]
+  left_sign: [1, 1, 1, 1, 1, 1]
+  right_sign: [1, 1, 1, 1, 1, 1]
+  left_joint_map: [0, 1, 2, 3, 4, 5]
+  right_joint_map: [0, 1, 2, 3, 4, 5]
+
+  # Existing mo_master_arm config uses switch 1 as front and 2 as back.
+  # Use either side's back button as the deadman by default.
+  require_deadman: true
+  deadman_side: either
+  deadman_switch: 2
+
+  # Use mo_master_arm's adaptive gravity compensation to hold/release the master.
+  use_gravity_compensation: true
+  hold_master_on_release: true
+
+  # Command-side extra shaping. rb_servo_server still applies its own safety limits.
+  max_joint_velocity_deg_s: [30, 30, 30, 45, 45, 60]
+  smoothing_alpha: 0.35
+  wrap_delta: true
+
+command_rate_hz: 100

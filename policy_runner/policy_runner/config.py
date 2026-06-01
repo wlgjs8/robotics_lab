@@ -188,6 +188,49 @@ class DualSpaceMouseCartesianConfig:
 
 
 @dataclass(frozen=True)
+class MasterArmJointConfig:
+    config_path: str = ""
+    python_module_dir: str = ""
+    module_name: str = "_mo_master_arm_py"
+    selected_arm: str = "both"
+    mapping_mode: str = "delta"
+    robot_init_strategy: str = "current"
+    deadman_side: str = "either"
+    deadman_switch: int = 2
+    require_deadman: bool = True
+    use_gravity_compensation: bool = True
+    hold_master_on_release: bool = True
+    enable_gripper_readers: bool = False
+    left_scale: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    right_scale: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    left_sign: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    right_sign: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    left_offset_deg: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    right_offset_deg: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    left_robot_init_deg: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    right_robot_init_deg: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    left_joint_map: tuple[int, ...] = (0, 1, 2, 3, 4, 5)
+    right_joint_map: tuple[int, ...] = (0, 1, 2, 3, 4, 5)
+    max_joint_velocity_deg_s: tuple[float, ...] = (30.0, 30.0, 30.0, 45.0, 45.0, 60.0)
+    smoothing_alpha: float = 1.0
+    wrap_delta: bool = True
+
+    def __post_init__(self) -> None:
+        if self.selected_arm not in {"left", "right", "both"}:
+            raise ValueError("master_arm_joint.selected_arm must be left, right, or both")
+        if self.mapping_mode not in {"delta", "absolute"}:
+            raise ValueError("master_arm_joint.mapping_mode must be delta or absolute")
+        if self.robot_init_strategy not in {"current", "configured", "master_absolute"}:
+            raise ValueError("master_arm_joint.robot_init_strategy must be current, configured, or master_absolute")
+        if self.deadman_side not in {"left", "right", "either", "both", "none"}:
+            raise ValueError("master_arm_joint.deadman_side must be left, right, either, both, or none")
+        if self.deadman_switch < 0:
+            raise ValueError("master_arm_joint.deadman_switch must be non-negative")
+        if not 0.0 <= self.smoothing_alpha <= 1.0:
+            raise ValueError("master_arm_joint.smoothing_alpha must be in [0, 1]")
+
+
+@dataclass(frozen=True)
 class PolicyRunnerConfig:
     schema: str = "robotics_lab.policy_runner.v1"
     mode: str = "simulation"
@@ -207,6 +250,7 @@ class PolicyRunnerConfig:
     spacemouse_cartesian_dual: DualSpaceMouseCartesianConfig = field(
         default_factory=DualSpaceMouseCartesianConfig
     )
+    master_arm_joint: MasterArmJointConfig = field(default_factory=MasterArmJointConfig)
     command_rate_hz: float = 100.0
 
     def __post_init__(self) -> None:
@@ -244,6 +288,7 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         spacemouse_cartesian_dual=_spacemouse_cartesian_dual_config(
             _section(raw, "spacemouse_cartesian_dual")
         ),
+        master_arm_joint=_master_arm_joint_config(_section(raw, "master_arm_joint")),
         command_rate_hz=float(raw.get("command_rate_hz", 100.0)),
     )
 
@@ -360,6 +405,35 @@ def _spacemouse_device_config(raw: dict[str, Any]) -> SpaceMouseDeviceConfig:
     return SpaceMouseDeviceConfig(**raw)
 
 
+def _master_arm_joint_config(raw: dict[str, Any]) -> MasterArmJointConfig:
+    tuple6_keys = {
+        "left_scale",
+        "right_scale",
+        "left_sign",
+        "right_sign",
+        "left_offset_deg",
+        "right_offset_deg",
+        "left_robot_init_deg",
+        "right_robot_init_deg",
+        "max_joint_velocity_deg_s",
+    }
+    for key in tuple6_keys:
+        if key in raw:
+            raw[key] = _tuple6(raw[key], f"master_arm_joint.{key}")
+    for key in ("left_joint_map", "right_joint_map"):
+        if key in raw:
+            raw[key] = _tuple6_int(raw[key], f"master_arm_joint.{key}")
+            if sorted(raw[key]) != [0, 1, 2, 3, 4, 5]:
+                raise ValueError(f"master_arm_joint.{key} must be a permutation of 0..5")
+    for key in ("deadman_switch",):
+        if key in raw:
+            raw[key] = int(raw[key])
+    for key in ("smoothing_alpha",):
+        if key in raw:
+            raw[key] = float(raw[key])
+    return MasterArmJointConfig(**raw)
+
+
 def _apply_spacemouse_cartesian_velocity_aliases(raw: dict[str, Any], section: str) -> None:
     aliases = (
         ("max_linear_step_m", "max_linear_velocity_m_s"),
@@ -382,6 +456,12 @@ def _tuple6(value: Any, label: str) -> tuple[float, ...]:
     if not isinstance(value, (list, tuple)) or len(value) != 6:
         raise ValueError(f"{label} must contain 6 numbers")
     return tuple(float(v) for v in value)
+
+
+def _tuple6_int(value: Any, label: str) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) != 6:
+        raise ValueError(f"{label} must contain 6 integers")
+    return tuple(int(v) for v in value)
 
 
 def _validate_command_rate_hz(command_rate_hz: float) -> None:

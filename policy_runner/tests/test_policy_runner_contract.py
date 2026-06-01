@@ -261,6 +261,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
             "hold",
             "joint_sine",
             "joint_velocity",
+            "master_arm_joint",
             "spacemouse_joint_velocity",
             "tcp_delta",
             "spacemouse_cartesian",

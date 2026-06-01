@@ -10,6 +10,7 @@ from .action_sources import (
     HoldActionSource,
     JointSineActionSource,
     JointVelocityActionSource,
+    MasterArmJointActionSource,
     SpaceMouseCartesianActionSource,
     SpaceMouseJointVelocityActionSource,
     TcpDeltaActionSource,
@@ -130,6 +131,36 @@ def make_action_source(config: PolicyRunnerConfig):
             selected_arm=config.joint_velocity.selected_arm,
             timeout_sec=config.servo_command.timeout_sec,
             simulation_only=config.joint_velocity.simulation_only,
+        )
+    if config.action_source == "master_arm_joint":
+        ma = config.master_arm_joint
+        return MasterArmJointActionSource(
+            config_path=ma.config_path,
+            python_module_dir=ma.python_module_dir,
+            module_name=ma.module_name,
+            selected_arm=ma.selected_arm,
+            mapping_mode=ma.mapping_mode,
+            robot_init_strategy=ma.robot_init_strategy,
+            deadman_side=ma.deadman_side,
+            deadman_switch=ma.deadman_switch,
+            require_deadman=ma.require_deadman,
+            use_gravity_compensation=ma.use_gravity_compensation,
+            hold_master_on_release=ma.hold_master_on_release,
+            enable_gripper_readers=ma.enable_gripper_readers,
+            left_scale=ma.left_scale,
+            right_scale=ma.right_scale,
+            left_sign=ma.left_sign,
+            right_sign=ma.right_sign,
+            left_offset_deg=ma.left_offset_deg,
+            right_offset_deg=ma.right_offset_deg,
+            left_robot_init_deg=ma.left_robot_init_deg,
+            right_robot_init_deg=ma.right_robot_init_deg,
+            left_joint_map=ma.left_joint_map,
+            right_joint_map=ma.right_joint_map,
+            max_joint_velocity_deg_s=ma.max_joint_velocity_deg_s,
+            smoothing_alpha=ma.smoothing_alpha,
+            wrap_delta=ma.wrap_delta,
+            timeout_sec=config.servo_command.timeout_sec,
         )
     if config.action_source == "spacemouse_joint_velocity":
         return SpaceMouseJointVelocityActionSource(

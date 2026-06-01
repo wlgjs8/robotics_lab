@@ -1,0 +1,180 @@
+schema: robotics_lab.rb_servo_server.v1
+
+# RBPODO-500HZ-CONFIG-01 stress 500 Hz controller-simulation circle template.
+# Controller pgmode simulation only. Physical robot should not move.
+# Requires RB_ALLOW_REAL_ROBOT=1, RB_ALLOW_REAL_MOTION=1,
+# RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1,
+# RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1, same-run pgmode confirmation,
+# and the benchmark confirmation flags.
+# Do not use for physical real Cartesian motion.
+# Copy to rb_servo_server/config/local/ with
+# tools/create_rbpodo_circle_local_configs.sh --include-500hz before operator
+# runs.
+# Profile intent: 15 cm diameter / 4 s period, approximately 0.118 m/s TCP
+# tangential speed. This is the final staged 500 Hz stress profile and is not
+# physical-real-ready.
+
+left_robot:
+  backend_type: rbpodo
+  run_mode: real
+  name: left_rbpodo_circle_15cm4s_500hz
+  ip: "172.28.60.200"
+  operation_mode: simulation
+  command_port: 5000
+  data_port: 5001
+  command_timeout_sec: 0.005
+  initial_q_deg: [0, -30, 80, 0, 60, 0]
+  speed_bar: 0.1
+  servo_t1_sec: 0.002
+  servo_t2_sec: 0.03
+  servo_gain: 1.0
+  servo_alpha: 0.5
+  disable_waiting_ack: false
+
+right_robot:
+  backend_type: rbpodo
+  run_mode: real
+  name: right_rbpodo_circle_15cm4s_500hz
+  ip: "172.28.60.201"
+  operation_mode: simulation
+  command_port: 5000
+  data_port: 5001
+  command_timeout_sec: 0.005
+  initial_q_deg: [0, -30, 80, 0, 60, 0]
+  speed_bar: 0.1
+  servo_t1_sec: 0.002
+  servo_t2_sec: 0.03
+  servo_gain: 1.0
+  servo_alpha: 0.5
+  disable_waiting_ack: false
+
+left_mount:
+  base_pose_in_stand: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
+
+right_mount:
+  base_pose_in_stand: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
+
+servo:
+  rate_hz: 500
+  command_timeout_sec: 0.2
+  io_model: direct
+  startup_mode: Hold
+  # Controller pgmode simulation only. This sends Servo J commands only when
+  # the normal real-controller/motion env gates, controller-simulation env
+  # gates, and same-run pgmode confirmation are present. It is not physical
+  # real motion approval.
+  send_servo_commands: true
+  enable_realtime_priority: true
+  realtime_priority: 80
+  cpu_core: 2
+  filter_dt_min_ratio: 0.5
+  filter_dt_max_ratio: 1.5
+  servo_t1_rate_match_tolerance_ratio: 0.2
+  allow_servo_t1_rate_mismatch: false
+  allow_controller_simulation_motion: true
+  allow_controller_simulation_diagnostics_suspect: true
+
+safety:
+  q_min_deg: [-170, -120, -170, -190, -120, -360]
+  q_max_deg: [170, 120, 170, 190, 120, 360]
+  dq_max_deg_s: [60, 60, 60, 90, 90, 120]
+  ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]
+  joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
+  joint_wrap_for_startup_validation: false
+  joint_wrap_for_motion_safety: false
+  command_timeout_sec: 0.2
+  max_tracking_error_deg: 10.0
+  tracking_error_policy: fault_latch
+  controller_simulation_tracking_error_source: reference
+  controller_simulation_physical_motion_policy: fault_latch
+  controller_simulation_physical_motion_threshold_deg: 0.05
+  latch_fault_on_robot_state_error: true
+  stop_both_arms_on_single_arm_error: true
+
+network:
+  command_bind: "udp://127.0.0.1:50254"
+  state_pub_endpoints:
+    - "udp://127.0.0.1:50354"  # benchmark recorder
+    - "udp://127.0.0.1:50364"  # rb_gui live viewer
+  # Keep state publication at 100 Hz initially; 500 Hz applies to Servo J
+  # command generation only for this staged acceptance config.
+  state_pub_rate_hz: 100
+  command_source_allowlist: ["127.0.0.1/32"]
+
+command_source:
+  enforce_lease: true
+  lease_timeout_sec: 60.0
+
+logging:
+  enable: true
+  directory: "./logs"
+  flush_period_ms: 100
+  queue_capacity: 4096
+
+force_control:
+  provider: null
+  enable: false
+
+kinematics:
+  enable: true
+  provider: pinocchio
+  urdf: "../descriptions/urdf/rb3_730e.urdf"
+  base_link: "world"
+  tip_link: "tcp"
+  joint_names:
+    - base_joint
+    - shoulder_joint
+    - elbow_joint
+    - wrist1_joint
+    - wrist2_joint
+    - wrist3_joint
+  q_units: deg
+  publish_tcp: true
+  ik:
+    enable: true
+    max_iterations: 50
+    timeout_ms: 20.0
+    damping: 0.001
+    position_tolerance_m: 0.002
+    orientation_tolerance_rad: 0.005
+    max_step_deg: [2, 2, 2, 3, 3, 4]
+
+cartesian_control:
+  enable: true
+  allow_in_simulation: true
+  allow_in_real: false
+  allow_in_controller_simulation: true
+  enable_benchmark_primitives: false
+  warn_ik_duration_us: 3000
+  fail_ik_duration_us: 5000
+  path_kp_pos: 6.0
+  path_kp_ori: 6.0
+  twist_orientation_hold_kp: 6.0
+  twist_angular_deadband_rad_s: 0.0001
+  velocity_damping: 0.01
+  max_twist_linear_m_s: 0.15
+  max_twist_angular_rad_s: 0.4
+  max_linear_move_speed_m_s: 0.15
+  max_angular_move_speed_rad_s: 0.4
+  max_cartesian_step_m: 0.002
+  max_cartesian_step_rad: 0.02
+  exceed_limit_policy: clamp
+  velocity_target_integration: previous_command
+  controller_simulation_servo_state_source: reference
+  controller_simulation_divergence_source: reference
+  velocity_target_lookahead_sec: 0.04
+  max_command_actual_error_deg: [5, 5, 5, 8, 8, 10]
+  reset_velocity_integrator_on_mode_change: true
+  command_actual_error_policy: reset
+  circle_move:
+    allow_in_simulation: true
+    allow_in_real: false
+    max_diameter_m: 0.20
+    min_period_sec: 3.0
+  linear_move:
+    min_duration_sec: 0.05
+    max_duration_sec: 10.0
+    default_linear_speed_m_s: 0.03
+    default_angular_speed_rad_s: 0.2
+    constant_orientation_tolerance_rad: 0.005
+    default_orientation_mode: constant

@@ -8,6 +8,8 @@ Supported action sources:
 - `hold`: receive state and keep policy output as no-op by default.
 - `joint_sine`: small simulation-only joint target motion.
 - `joint_velocity`: fixed simulation-only joint velocity command.
+- `master_arm_joint`: joint-space teleop from `mo_master_arm` to
+  `JointTarget`.
 - `spacemouse_joint_velocity`: SpaceMouse six-axis input mapped directly to
   joint velocity commands.
 - `tcp_delta`: small simulation-only `TcpDeltaStand` command.
@@ -46,6 +48,14 @@ they do not send motion unless the config explicitly sets
 `spacemouse_joint_velocity` also remains behind the same stale-state,
 fault-state, and real-motion gates. Button 0 is the default deadman switch:
 when it is released, the action source emits no motion command.
+
+`master_arm_joint` is joint-only and intended for supervised master-arm
+teleoperation. The tracked example config keeps `safety.allow_real_motion:
+false`; real robot commands are still blocked until an operator explicitly
+changes that local run configuration and the server-side real-motion gates are
+also satisfied. The default mapping is delta mode: the runner latches master
+and robot joint anchors on deadman press, then sends `JointTarget` commands
+from the relative master-arm motion.
 
 Joint-only sources do not require the geometry registry. Future Cartesian or
 camera policy sources must declare geometry requirements before emitting
@@ -99,8 +109,15 @@ Simulation-only example configs:
 - `policy_runner/config/simulator_dual_spacemouse_cartesian.yaml`: two
   SpaceMouse devices mapped to left/right simulator TCP twists.
 
-These examples use loopback simulator endpoints and do not enable real motion
-or real Cartesian motion.
+Real joint-only example configs:
+
+- `policy_runner/config/real_master_arm_joint.yaml`: `mo_master_arm`
+  joint-space teleop wiring. It is motion-blocked by default with
+  `allow_real_motion: false` and uses loopback UDP endpoints.
+
+The simulator examples use loopback simulator endpoints and do not enable real
+motion or real Cartesian motion. The real master-arm example also keeps motion
+blocked by default; it only defines policy-runner command/state wiring.
 
 ## Imitation Data Collection
 
