@@ -180,8 +180,15 @@ Current recorded rbpodo controller-simulation baseline:
 
 - Best stable baseline: pending; no reviewed `circle_15cm_16s`
   `tcp_ref_stand` artifact is recorded here.
-- Best GENE-style stress result: pending; no reviewed `gene_15cm_4s`
-  rbpodo controller-simulation artifact is recorded here.
+- Best GENE-style ACKON500 stress result:
+  `ackon500_best_server_circle_phase005_t2_080_alpha08_path06_ori06`,
+  tracked as
+  `rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz_goal.example.yaml`
+  and `configs/rbpodo_circle_ablation/ackon500_gene_goal_best.yaml`.
+  Evidence category is controller-reference lower-bound only:
+  500 Hz, `sdk_ack_worker`, ACK-observed semantics, 15 cm / 4 s,
+  `repeat>=5`, `tracking_source=tcp_ref_stand`, about 1.5 mm RMS, and about
+  3.3 ms effective phase latency.
 - Real physical circle benchmark: not run and not approved.
 
 Before any physical circle discussion, record a rbpodo controller-simulation
@@ -189,6 +196,12 @@ report with `physical_motion_expected=false`, `physical_motion_detected=false`,
 `tracking_source=tcp_ref_stand`, pgmode simulation confirmation, ACK semantics,
 and q_ref/q_actual update rates. Controller-simulation results may guide future
 low-speed parameter selection, but cannot be copied directly to real motion.
+
+ACKON500-BEST-PROFILE-PROMOTION-01 promotes the current best 500 Hz
+controller-simulation profile for reproducibility. It keeps
+`operation_mode: simulation`, `cartesian_control.allow_in_real: false`,
+`physical_motion_expected=false`, and `disable_waiting_ack: false`. It does not
+claim physical real readiness.
 
 RBPODO-CIRCLE-STATE-SOURCE-01 adds a controller-simulation-only Cartesian
 state-source policy so rbpodo pgmode simulation can integrate and guard against
@@ -289,6 +302,7 @@ remain actual-state based.
 88. ACKON500-RESULT-CONTRACT-01 separates circle execution, safety, generic benchmark thresholds, official ACKON500 goal status, and diagnostic warnings in summaries and reports. New circle artifacts mirror `run_result.status` in legacy `result`, keep max-orientation spikes visible under generic thresholds/diagnostics, preserve the official p95-orientation ACKON500 criterion from `GOAL.md`, and continue rejecting socket-send-only rows for official ACK-ON goal passes. This is reporting-only and does not change servo control, rbpodo backend behavior, safety gates, or physical real gates.
 89. ACKON500-RATE-ACCOUNTING-01 separates high-level UDP command counts from low-level async ServoJ worker totals and official tracking-window rate evidence. ACKON500 reports now expose `udp_command_count`, `server_servo_tick_count`, `async_commands_*_total`, `official_tracking_window_sec`, `measured_worker_window_sec`, `official_servo_rate_hz`, `goal_window_commands_sent`, `goal_window_commands_acked`, `ack_coverage_ratio`, `effective_goal_command_rate_hz`, and worker lifetime diagnostics; official pass/fail no longer uses the ambiguous total-counter `effective_command_rate_hz`. C++ changes are telemetry-only worker timestamps/phase publication and do not change control behavior, ACK semantics, physical real gates, or real-motion readiness.
 90. BENCHMARK-LANE-CANONICALIZE-01 adds canonical benchmark lane metadata to circle summaries, ablation rows, comparison reports, 500 Hz reports, and ACKON500 goal reports. Reports now group by `benchmark_lane` and expose `control_loop_location`, `trajectory_generation_location`, `feedback_loop_location`, `low_level_send_mode`, `acceptance_semantics`, `tracking_source`, and `physical_motion_expected`. The official ACKON500 pass lane is `rbpodo_server_side_circle_ackon500_sdk_worker`; `socket_send_supervised` maps to `rbpodo_server_side_circle_500hz_socket_send_supervised` and cannot pass the official goal. `TcpCircleMove` remains the implemented server-side circle benchmark command, `TcpCircleTrack` remains the reserved skeleton, and both are grouped as `command_family: server_side_circle`. This is metadata/reporting/state-overlay only and does not change control behavior, physical real gates, or real-motion readiness.
+91. ACKON500-BEST-PROFILE-PROMOTION-01 promotes the achieved 500 Hz ACKON500 controller-simulation result to a named best profile and runner default. The profile keeps `operation_mode: simulation`, `sdk_ack_worker`, ACK-observed semantics, `disable_waiting_ack: false`, `physical_motion_expected=false`, and `cartesian_control.allow_in_real: false`; it preserves 100 Hz fallback docs and does not change control code, physical real gates, diagnostics-suspect policy, or physical-readiness status.
 
 ## Reviewer Checklist
 

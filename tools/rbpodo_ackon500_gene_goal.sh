@@ -3,8 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER="${ROOT_DIR}/rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
-MATRIX="${ROOT_DIR}/configs/rbpodo_circle_ablation/ackon500_gene_goal.yaml"
+MATRIX=""
 ARTIFACT_ROOT=""
+PROFILE="best"
 WITH_REQUIRED_ENV=0
 DRY_RUN=0
 SKIP_PLOTS=0
@@ -13,7 +14,10 @@ VERIFY_PGMODE=0
 CONFIRM=0
 CONFIRM_PGMODE=0
 ALLOW_NO_REALTIME=0
+ALLOW_LOCAL_DIFF=0
 PGMODE_TIMEOUT_SEC="1.0"
+NOOP_CONFIG=""
+NOOP_COMMAND_TIMEOUT_SEC="0.05"
 
 usage() {
   cat <<'EOF'
@@ -22,6 +26,11 @@ Usage: tools/rbpodo_ackon500_gene_goal.sh [options]
 Run ACKON500-GENE-GOAL-01 against Rainbow controllers in pgmode simulation.
 The wrapper refuses physical Cartesian real mode and never sets RB_ALLOW_*
 variables unless --with-required-env is passed.
+
+Default profile:
+  --profile best  Run the named ACKON500 best controller-simulation profile.
+                  This is controller-reference lower-bound evidence, not
+                  physical real tracking.
 
 Required safety flags:
   --i-understand-this-connects-to-real-controller
@@ -38,9 +47,11 @@ Environment behavior:
     RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
 
 Options:
-  --artifact-root DIR        Default artifacts/rbpodo_circle_ablation/<timestamp>_ackon500_gene_goal
+  --profile NAME            best (default) or matrix.
+  --allow-local-diff        Allow local best profile to differ from tracked best profile.
+  --artifact-root DIR        Default artifacts/rbpodo_circle_ablation/<timestamp>_<profile suffix>
   --server PATH              rb_servo_server binary path.
-  --matrix PATH              Matrix path, default configs/rbpodo_circle_ablation/ackon500_gene_goal.yaml.
+  --matrix PATH              Matrix path, default depends on --profile.
   --verify-pgmode-simulation Verify instead of setting pgmode simulation for each run.
   --pgmode-timeout-sec SEC   pgmode command timeout, default 1.0.
   --skip-noop                Skip the 500 Hz sdk_ack_worker no-op preflight.
@@ -131,8 +142,42 @@ check_realtime_caps() {
   fi
 }
 
+check_local_best_profile() {
+  local tracked="${ROOT_DIR}/rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz_goal.example.yaml"
+  local local_copy="${ROOT_DIR}/rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s_500hz_goal.yaml"
+
+  [[ -f "${tracked}" ]] || fail "tracked best profile not found: ${tracked}"
+
+  if [[ ! -f "${local_copy}" ]]; then
+    note "local best profile not found; using tracked profile: ${tracked#${ROOT_DIR}/}"
+    note "create a local copy with tools/create_rbpodo_circle_local_configs.sh --include-goal"
+    return 0
+  fi
+
+  if cmp -s "${tracked}" "${local_copy}"; then
+    note "local best profile matches tracked profile: ${local_copy#${ROOT_DIR}/}"
+    return 0
+  fi
+
+  if [[ "${ALLOW_LOCAL_DIFF}" == "1" ]]; then
+    note "warning: local best profile differs from tracked profile and --allow-local-diff was supplied"
+    return 0
+  fi
+
+  fail "local best profile differs from tracked profile: ${local_copy#${ROOT_DIR}/}; pass --allow-local-diff only after reviewing operator-local edits"
+}
+
 while (($# > 0)); do
   case "$1" in
+    --profile)
+      [[ $# -ge 2 ]] || fail "--profile requires a value"
+      PROFILE="$2"
+      shift 2
+      ;;
+    --allow-local-diff)
+      ALLOW_LOCAL_DIFF=1
+      shift
+      ;;
     --artifact-root)
       [[ $# -ge 2 ]] || fail "--artifact-root requires a directory"
       ARTIFACT_ROOT="$2"
@@ -203,13 +248,38 @@ if [[ "${RB_ALLOW_REAL_CARTESIAN:-}" == "1" ]]; then
   fail "RB_ALLOW_REAL_CARTESIAN must not be set for controller-simulation goal runs"
 fi
 
+case "${PROFILE}" in
+  best)
+    [[ -n "${MATRIX}" ]] || MATRIX="configs/rbpodo_circle_ablation/ackon500_gene_goal_best.yaml"
+    NOOP_CONFIG="rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz_goal.example.yaml"
+    NOOP_COMMAND_TIMEOUT_SEC="0.05"
+    ARTIFACT_SUFFIX="ackon500_gene_goal_best"
+    ;;
+  matrix|full)
+    [[ -n "${MATRIX}" ]] || MATRIX="configs/rbpodo_circle_ablation/ackon500_gene_goal.yaml"
+    NOOP_CONFIG="rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz.example.yaml"
+    NOOP_COMMAND_TIMEOUT_SEC="0.2"
+    ARTIFACT_SUFFIX="ackon500_gene_goal"
+    ;;
+  *)
+    fail "unknown profile: ${PROFILE}; expected best or matrix"
+    ;;
+esac
+
 SERVER="$(abs_from_root "${SERVER}")"
 MATRIX="$(abs_from_root "${MATRIX}")"
 [[ -f "${MATRIX}" ]] || fail "matrix file not found: ${MATRIX}"
+[[ -f "${ROOT_DIR}/${NOOP_CONFIG}" ]] || fail "no-op config not found: ${NOOP_CONFIG}"
+
+if [[ "${PROFILE}" == "best" ]]; then
+  check_local_best_profile
+fi
+
+note "This is controller-reference lower-bound evidence, not physical real tracking."
 
 if [[ -z "${ARTIFACT_ROOT}" ]]; then
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  ARTIFACT_ROOT="${ROOT_DIR}/artifacts/rbpodo_circle_ablation/${timestamp}_ackon500_gene_goal"
+  ARTIFACT_ROOT="${ROOT_DIR}/artifacts/rbpodo_circle_ablation/${timestamp}_${ARTIFACT_SUFFIX}"
 else
   ARTIFACT_ROOT="$(abs_from_root "${ARTIFACT_ROOT}")"
 fi
@@ -233,11 +303,11 @@ NOOP_ARTIFACT="${ARTIFACT_ROOT}/00_noop_500hz_sdk_ack_worker"
 noop_cmd=(
   python3 scripts/rbpodo_500hz_acceptance.py
   --server "${SERVER}"
-  --config rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz.example.yaml
+  --config "${NOOP_CONFIG}"
   --arm left
   --send-arms both
   --duration-sec 10
-  --command-timeout-sec 0.2
+  --command-timeout-sec "${NOOP_COMMAND_TIMEOUT_SEC}"
   --async-mode sdk_ack_worker
   --min-controller-acceptance-ratio 0.98
   --min-send-count-ratio 0.98

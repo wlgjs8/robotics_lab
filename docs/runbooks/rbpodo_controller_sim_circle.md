@@ -87,6 +87,7 @@ Use these templates only for `rbpodo` controller-simulation bring-up:
 | stable 500 Hz circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm16s_500hz.example.yaml` | 500 Hz | command `50252`, state `50352` recorder + `50362` GUI | controller pgmode simulation only, staged |
 | middle 500 Hz circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm8s_500hz.example.yaml` | 500 Hz | command `50253`, state `50353` recorder + `50363` GUI | controller pgmode simulation only, staged |
 | stress 500 Hz circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz.example.yaml` | 500 Hz | command `50254`, state `50354` recorder + `50364` GUI | controller pgmode simulation only, stress |
+| current best 500 Hz ACKON500 profile | `rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz_goal.example.yaml` | 500 Hz | command `50255`, state `50355` recorder + `50365` GUI | controller pgmode simulation only, ACK-observed lower-bound |
 
 Copy a template to `rb_servo_server/config/local/` and edit the copy for the
 site. Treat `local/*.yaml` as operator-owned working files, not production
@@ -113,8 +114,15 @@ acceptance track:
 tools/create_rbpodo_circle_local_configs.sh --include-500hz
 ```
 
-The 500 Hz configs are not created by default and do not change the existing
-100 Hz circle defaults.
+Create only the named ACKON500 best goal profile with:
+
+```bash
+tools/create_rbpodo_circle_local_configs.sh --include-goal
+```
+
+The 500 Hz configs and named goal profile are not created by default and do not
+change the existing 100 Hz circle defaults. The goal profile is created only
+with `--include-500hz` or `--include-goal`.
 
 Verify the controller-simulation Cartesian gate and physical-real block before
 running:
@@ -134,7 +142,85 @@ matches the 2 ms command period:
 grep -H "servo_t1_sec: 0.002" rb_servo_server/config/local/*_500hz.yaml
 grep -H "allow_in_real: false" rb_servo_server/config/local/*_500hz.yaml
 grep -H "operation_mode: simulation" rb_servo_server/config/local/*_500hz.yaml
+grep -H "mode: sdk_ack_worker" rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s_500hz_goal.yaml
 ```
+
+## Current Best Controller-Simulation Profile
+
+The current named best profile is the ACKON500 controller-reference lower-bound
+profile:
+
+```bash
+tools/rbpodo_ackon500_gene_goal.sh --profile best
+```
+
+`--profile best` is the runner default. It uses
+`configs/rbpodo_circle_ablation/ackon500_gene_goal_best.yaml` and
+`rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz_goal.example.yaml`.
+If `rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s_500hz_goal.yaml`
+exists and differs from the tracked profile, the runner refuses unless
+`--allow-local-diff` is supplied after reviewing the local operator edits.
+
+Exact promoted parameters:
+
+```text
+rate: 500 Hz
+async mode: sdk_ack_worker
+ACK semantics: worker/controller ACK observed
+circle: 15 cm diameter, 4 s period, repeat >= 5
+tracking source: tcp_ref_stand
+server-side phase advance: 0.005 s
+servo_t1_sec: 0.002
+servo_t2_sec: 0.08
+servo_alpha: 0.8
+speed_bar: 0.2
+disable_waiting_ack: false
+command_timeout_sec: 0.05
+path_kp_pos/path_kp_ori: 6.0 / 6.0
+max twist: 0.2 m/s linear, 0.4 rad/s angular
+state_pub_rate_hz: 100
+allow_in_real: false
+physical_motion_expected: false
+```
+
+Exact pass criteria:
+
+- `operation_mode=simulation`, `physical_motion_expected=false`, and no
+  physical-motion detection.
+- `benchmark_lane=rbpodo_server_side_circle_ackon500_sdk_worker`,
+  `acceptance_semantics=sdk_worker_ack_observed`, and no socket-send-only
+  commands.
+- Official 500 Hz goal-window send rate inside the configured 490 to 510 Hz
+  band, with ACK coverage for the official window.
+- 15 cm / 4 s / repeat >= 5 GENE row using `tcp_ref_stand`.
+- `rms_error_m <= 0.003`, `p95_error_m <= 0.006`,
+  `p95_orientation_drift_rad <= 0.02`, and absolute effective phase latency
+  <= 5 ms.
+- No fault latch, no Cartesian-unavailable samples, and no feedback saturation.
+
+The best candidate evidence reached the official ACKON500 controller-simulation
+goal at roughly 1.5 mm RMS and roughly 3.3 ms effective phase latency. This is
+controller-reference lower-bound evidence, not physical real tracking.
+
+Caveats:
+
+- This runbook still connects to real controller IPs, but every best-profile
+  robot remains `operation_mode: simulation`.
+- `cartesian_control.allow_in_real: false` must not be changed for this
+  profile.
+- `disable_waiting_ack: false` must remain set; do not use
+  `disable_waiting_ack=true`.
+- `sdk_ack_worker` is required for the official profile.
+- `diagnostics_suspect` remains an unresolved controller-simulation caveat and
+  is not changed by this promotion.
+
+Next validation:
+
+1. Repeatability x3.
+2. Right arm.
+3. Dual-arm.
+4. `diagnostics_suspect` root cause.
+5. Tiny physical acceptance later under a separate real-hardware task.
 
 The required shape for rbpodo controller simulation is:
 

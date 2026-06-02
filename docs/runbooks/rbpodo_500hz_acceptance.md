@@ -77,6 +77,105 @@ The report may also keep older comparison labels such as `500hz_ack_on` or
 Official ACKON500 goal reports must group by `benchmark_lane` and reject any
 candidate whose lane is not `rbpodo_server_side_circle_ackon500_sdk_worker`.
 
+## Current Best Controller-Simulation Profile
+
+The named high-performance controller-simulation profile is:
+
+```text
+rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz_goal.example.yaml
+configs/rbpodo_circle_ablation/ackon500_gene_goal_best.yaml
+tools/rbpodo_ackon500_gene_goal.sh --profile best
+```
+
+It encodes the current ACKON500 best candidate for the controller-reference
+lower-bound lane. It is not physical real tracking and is not physical real
+readiness. The runner prints this caveat for every run:
+
+```text
+This is controller-reference lower-bound evidence, not physical real tracking.
+```
+
+Exact promoted parameters:
+
+```yaml
+servo:
+  rate_hz: 500
+  rbpodo_async_streaming:
+    enable: true
+    mode: sdk_ack_worker
+    rate_hz: 500
+    queue_policy: latest_wins
+    ack_supervision.enable: true
+    reference_supervision.enable: true
+
+left_robot/right_robot:
+  operation_mode: simulation
+  command_timeout_sec: 0.05
+  speed_bar: 0.2
+  servo_t1_sec: 0.002
+  servo_t2_sec: 0.08
+  servo_alpha: 0.8
+  disable_waiting_ack: false
+
+cartesian_control:
+  enable: true
+  enable_benchmark_primitives: true
+  allow_in_controller_simulation: true
+  allow_in_real: false
+  max_twist_linear_m_s: 0.2
+  max_twist_angular_rad_s: 0.4
+  path_kp_pos: 6.0
+  path_kp_ori: 6.0
+
+network:
+  state_pub_rate_hz: 100
+```
+
+The server-side circle row sets `phase_advance_sec: 0.005` in the matrix. The
+current evidence category is `profile=gene_15cm_4s`, `diameter_m=0.15`,
+`period_sec=4.0`, `repeat>=5`, `tracking_source=tcp_ref_stand`,
+`async_mode=sdk_ack_worker`, and ACK-observed semantics. The latest reviewed
+best candidate was about 1.5 mm RMS with about 3.3 ms effective phase latency.
+
+Exact pass criteria for this profile:
+
+- `operation_mode=simulation`, `physical_motion_expected=false`, and
+  `physical_motion_detected=false`.
+- `benchmark_lane=rbpodo_server_side_circle_ackon500_sdk_worker`,
+  `low_level_send_mode=sdk_ack_worker`, and
+  `acceptance_semantics=sdk_worker_ack_observed`.
+- 500 Hz official goal-window send rate within the configured tolerance band
+  of 490 to 510 Hz.
+- ACK-observed evidence for the official window; `socket_send_only_count=0`.
+- `profile=gene_15cm_4s`, left arm unless the row explicitly says otherwise,
+  15 cm diameter, 4 s period, and `repeat>=5`.
+- `rms_error_m <= 0.003`, `p95_error_m <= 0.006`,
+  `p95_orientation_drift_rad <= 0.02`, and effective phase latency absolute
+  value <= 5 ms.
+- `fault_latched=false`, `cartesian_unavailable_count=0`, and
+  `feedback_saturation_count=0`.
+
+Caveats:
+
+- This is controller-reference lower-bound evidence from Rainbow `pgmode`
+  simulation, not physical `tcp_actual_stand` tracking.
+- `allow_in_real: false` must remain set, and `RB_ALLOW_REAL_CARTESIAN` must
+  not be used by this workflow.
+- `disable_waiting_ack: false` must remain set; ACK-off/socket-send-only rows
+  cannot pass the official profile.
+- `diagnostics_suspect` remains a documented controller-simulation carve-out
+  until its root cause is resolved.
+- The profile is left-arm single-arm evidence until the follow-on validations
+  below are completed.
+
+Next validation sequence:
+
+1. Repeatability x3 for the named best profile.
+2. Right-arm single-arm best profile run.
+3. Dual-arm best profile run.
+4. Root-cause and retire the `diagnostics_suspect` carve-out.
+5. Tiny physical acceptance later, under a separate explicitly approved task.
+
 ## Servo Rate Accounting
 
 ACKON500 reports separate high-level UDP command packets from low-level ServoJ
@@ -208,6 +307,7 @@ rb_servo_server/config/dual_real_rbpodo_circle_5cm10s_500hz.example.yaml
 rb_servo_server/config/dual_real_rbpodo_circle_15cm16s_500hz.example.yaml
 rb_servo_server/config/dual_real_rbpodo_circle_15cm8s_500hz.example.yaml
 rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz.example.yaml
+rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz_goal.example.yaml
 ```
 
 Required safety shape:

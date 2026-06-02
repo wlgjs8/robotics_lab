@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: tools/create_rbpodo_circle_local_configs.sh [--force] [--include-500hz] [--root DIR]
+Usage: tools/create_rbpodo_circle_local_configs.sh [--force] [--include-500hz] [--include-goal] [--root DIR]
 
 Create operator-local rbpodo controller-simulation circle configs from the
 repository templates.
@@ -11,6 +11,7 @@ repository templates.
 Options:
   --force         overwrite existing local files
   --include-500hz also create staged 500 Hz controller-simulation templates
+  --include-goal  also create the named ACKON500 best goal profile
   --root DIR      repository root to write into, for tests or alternate checkouts
   -h, --help      show this help
 EOF
@@ -20,6 +21,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root_dir="$(cd "${script_dir}/.." && pwd)"
 force=0
 include_500hz=0
+include_goal=0
 
 while (($# > 0)); do
   case "$1" in
@@ -29,6 +31,10 @@ while (($# > 0)); do
       ;;
     --include-500hz)
       include_500hz=1
+      shift
+      ;;
+    --include-goal)
+      include_goal=1
       shift
       ;;
     --root)
@@ -79,6 +85,15 @@ if [[ "${include_500hz}" -eq 1 ]]; then
   )
 fi
 
+if [[ "${include_500hz}" -eq 1 || "${include_goal}" -eq 1 ]]; then
+  sources+=(
+    "dual_real_rbpodo_circle_15cm4s_500hz_goal.example.yaml"
+  )
+  destinations+=(
+    "dual_real_rbpodo_circle_15cm4s_500hz_goal.yaml"
+  )
+fi
+
 for src in "${sources[@]}"; do
   if [[ ! -f "${config_dir}/${src}" ]]; then
     echo "error: template not found: ${config_dir}/${src}" >&2
@@ -124,8 +139,14 @@ Staged 500 Hz configs are created only when --include-500hz is passed:
   --server-config rb_servo_server/config/local/dual_real_rbpodo_circle_15cm16s_500hz.yaml
   --server-config rb_servo_server/config/local/dual_real_rbpodo_circle_15cm8s_500hz.yaml
   --server-config rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s_500hz.yaml
+  --server-config rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s_500hz_goal.yaml
   grep -H "servo_t1_sec: 0.002" "${local_dir}"/*_500hz.yaml
   grep -H "operation_mode: simulation" "${local_dir}"/*_500hz.yaml
+
+The named ACKON500 best goal profile is created with --include-goal or
+--include-500hz:
+  tools/create_rbpodo_circle_local_configs.sh --include-goal
+  --server-config rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s_500hz_goal.yaml
 
 Required env gates include:
   RB_ALLOW_REAL_ROBOT=1

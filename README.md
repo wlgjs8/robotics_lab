@@ -251,6 +251,9 @@ less docs/runbooks/rbpodo_controller_sim_circle.md
 ```
 
 Async ACK-supervised 500Hz runbook: `docs/runbooks/rbpodo_500hz_acceptance.md`.
+The named ACKON500 best controller-simulation profile is
+`tools/rbpodo_ackon500_gene_goal.sh --profile best`; it is controller-reference
+lower-bound evidence only, not physical real tracking.
 
 These configs target Rainbow controller boxes in `pgmode` simulation only; they
 do not approve physical Cartesian motion.
