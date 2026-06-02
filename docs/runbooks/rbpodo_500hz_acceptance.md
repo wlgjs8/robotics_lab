@@ -170,11 +170,111 @@ Caveats:
 
 Next validation sequence:
 
-1. Repeatability x3 for the named best profile.
-2. Right-arm single-arm best profile run.
-3. Dual-arm best profile run.
+1. Run ACKON500-REPEATABILITY-VALIDATION-01 for the named best profile.
+2. Review any `pass_with_outlier`, `not_repeatable`, or
+   `insufficient_evidence` rows before changing any profile default.
+3. Optional dual-arm sequential evidence remains future work until explicitly
+   enabled and safe.
 4. Root-cause and retire the `diagnostics_suspect` carve-out.
 5. Tiny physical acceptance later, under a separate explicitly approved task.
+
+## ACKON500 Repeatability Validation
+
+ACKON500-REPEATABILITY-VALIDATION-01 is the official repeatability matrix for
+the achieved best profile. It is reporting/configuration only and does not
+change control behavior or physical real gates.
+
+Matrix:
+
+```text
+configs/rbpodo_circle_ablation/ackon500_gene_repeatability.yaml
+```
+
+Required runs:
+
+```text
+best_left_run01
+best_left_run02
+best_left_run03
+best_right_run01
+best_right_run02
+best_right_run03
+```
+
+Every required row uses the tracked best-profile config and pins the same
+best-profile runtime shape:
+
+- `profile=gene_15cm_4s`, `controller=server_circle`, `repeat=5`
+- `servo.rate_hz=500`, `servo_t1_sec=0.002`
+- `sdk_ack_worker`, `disable_waiting_ack=false`, ACK-observed semantics
+- `servo_t2_sec=0.08`, `servo_alpha=0.8`, `speed_bar=0.2`
+- `cartesian_control.path_kp_pos=6.0`, `path_kp_ori=6.0`
+- `phase_advance_sec=0.005`
+- `tracking_source=tcp_ref_stand`
+
+The tracked goal config must still validate with
+`cartesian_control.allow_in_controller_simulation=true` and
+`cartesian_control.allow_in_real=false`; these safety fields are not matrix
+overrides.
+
+Runner:
+
+```bash
+tools/rbpodo_ackon500_gene_goal.sh --profile repeatability \
+  --i-understand-this-connects-to-real-controller \
+  --i-confirm-controller-is-in-pgmode-simulation
+```
+
+As with the best-profile runner, pass `--with-required-env` only when the
+operator explicitly wants the wrapper to export the required controller
+simulation gates. Do not set `RB_ALLOW_REAL_CARTESIAN` for this workflow.
+
+Repeatability report outputs:
+
+```text
+repeatability_report.md
+repeatability_summary.csv
+repeatability_summary.json
+```
+
+Aggregate pass criteria:
+
+- all required rows pass the official ACKON500 goal, or failures are listed
+  per row
+- median RMS <= 3 mm and worst RMS <= 3.5 mm
+- median p95 <= 6 mm and worst p95 <= 8 mm
+- `fault_latched=false` for every required row
+- `physical_motion_detected=false` for every required row
+- ACK observed ratio >= 0.98 for every required row
+- `socket_send_only_count=0` for every required row
+- `diagnostics_suspect` remains an explicit caveat
+
+Aggregate fields:
+
+```text
+rms_mean/std/min/max
+p95_mean/std/min/max
+latency_mean/std/min/max
+ack_observed_ratio_min
+state_age_p95_max
+```
+
+Classifications:
+
+- `repeatable_pass`: complete left/right evidence, all required runs pass, and
+  aggregate thresholds pass.
+- `pass_with_outlier`: complete evidence with a bounded performance outlier;
+  review the listed row before promotion.
+- `not_repeatable`: complete evidence with hard safety/ACK/socket failures,
+  multiple official failures, or failed aggregate medians.
+- `insufficient_evidence`: missing required left/right repeats or missing
+  aggregate metrics.
+
+The optional dual-arm sequential rows named `dual_arm_safe_5cm10s_both` and
+`dual_arm_15cm4s_both` are intentionally not part of the official matrix until
+a future task adds an explicitly safe both-arm runner shape. Do not add inert
+disabled `arm: both` rows; the matrix validator only accepts `left` and
+`right`.
 
 ## Servo Rate Accounting
 

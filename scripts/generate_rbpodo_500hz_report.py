@@ -174,6 +174,26 @@ COMPARATIVE_COLUMNS = [
     "reliability_caveats",
     "artifact_dir",
 ]
+REPEATABILITY_COLUMNS = [
+    "source",
+    "classification",
+    "required_run_count",
+    "required_pass_count",
+    "rms_mean",
+    "rms_std",
+    "rms_min",
+    "rms_max",
+    "p95_mean",
+    "p95_std",
+    "p95_min",
+    "p95_max",
+    "latency_mean",
+    "latency_std",
+    "latency_min",
+    "latency_max",
+    "ack_observed_ratio_min",
+    "state_age_p95_max",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -207,6 +227,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-md", type=Path, help="Write markdown report to this path instead of stdout.")
     parser.add_argument("--csv", dest="csv_path", type=Path, help="Write comparison CSV to this path.")
     parser.add_argument("--json", dest="json_path", type=Path, help="Write structured comparison JSON to this path.")
+    parser.add_argument(
+        "--repeatability-summary-json",
+        action="append",
+        type=Path,
+        default=[],
+        help="ACKON500 repeatability_summary.json to include in the 500 Hz report.",
+    )
     parser.add_argument("--title", default=DEFAULT_TITLE)
     return parser.parse_args()
 
@@ -977,12 +1004,33 @@ def lane_group_markdown(rows: list[dict[str, Any]]) -> str:
     return markdown_table(table_rows, columns)
 
 
+def repeatability_report_rows(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for summary in summaries:
+        aggregate = summary.get("aggregate")
+        if not isinstance(aggregate, dict):
+            aggregate = {}
+        row = {
+            "source": summary.get("_source"),
+            "classification": summary.get("classification"),
+            "required_run_count": summary.get("required_run_count"),
+            "required_pass_count": summary.get("required_pass_count"),
+        }
+        for key in REPEATABILITY_COLUMNS:
+            if key not in row:
+                row[key] = aggregate.get(key)
+        rows.append(row)
+    return rows
+
+
 def report_markdown(
     rate_rows: list[dict[str, Any]],
     comparisons: list[dict[str, Any]],
     comparative_rows: list[dict[str, Any]],
     title: str,
+    repeatability_summaries: list[dict[str, Any]] | None = None,
 ) -> str:
+    repeatability_rows = repeatability_report_rows(repeatability_summaries or [])
     return "\n".join(
         [
             f"# {title}",
@@ -1007,6 +1055,10 @@ def report_markdown(
             "## Comparative Evidence Table",
             "",
             markdown_table(comparative_rows, COMPARATIVE_COLUMNS) if comparative_rows else "_No comparative rows._",
+            "",
+            "## ACKON500 Repeatability",
+            "",
+            markdown_table(repeatability_rows, REPEATABILITY_COLUMNS) if repeatability_rows else "_No repeatability summary supplied._",
             "",
             "## Selected Rate Evidence",
             "",
@@ -1043,12 +1095,14 @@ def write_json(
     rate_rows: list[dict[str, Any]],
     comparisons: list[dict[str, Any]],
     comparative_rows: list[dict[str, Any]],
+    repeatability_summaries: list[dict[str, Any]] | None = None,
 ) -> None:
     payload = {
         "schema": SCHEMA,
         "rate_rows": rate_rows,
         "comparisons": comparisons,
         "comparative_rows": comparative_rows,
+        "repeatability_summaries": repeatability_summaries or [],
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1065,11 +1119,16 @@ def load_all(args: argparse.Namespace) -> list[dict[str, Any]]:
     return rows
 
 
+def load_repeatability_summaries(args: argparse.Namespace) -> list[dict[str, Any]]:
+    return [load_json_object(path) for path in args.repeatability_summary_json]
+
+
 def main() -> int:
     args = parse_args()
     rows = load_all(args)
+    repeatability_summaries = load_repeatability_summaries(args)
     rate_rows, comparisons, comparative_rows = build_report(rows)
-    markdown = report_markdown(rate_rows, comparisons, comparative_rows, args.title)
+    markdown = report_markdown(rate_rows, comparisons, comparative_rows, args.title, repeatability_summaries)
     if args.output_md:
         args.output_md.parent.mkdir(parents=True, exist_ok=True)
         args.output_md.write_text(markdown, encoding="utf-8")
@@ -1078,7 +1137,7 @@ def main() -> int:
     if args.csv_path:
         write_csv(args.csv_path, comparisons)
     if args.json_path:
-        write_json(args.json_path, rate_rows, comparisons, comparative_rows)
+        write_json(args.json_path, rate_rows, comparisons, comparative_rows, repeatability_summaries)
     return 0
 
 

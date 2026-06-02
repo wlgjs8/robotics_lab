@@ -31,6 +31,9 @@ Default profile:
   --profile best  Run the named ACKON500 best controller-simulation profile.
                   This is controller-reference lower-bound evidence, not
                   physical real tracking.
+  --profile repeatability
+                  Run ACKON500-REPEATABILITY-VALIDATION-01: three left-arm
+                  and three right-arm repetitions of the named best profile.
 
 Required safety flags:
   --i-understand-this-connects-to-real-controller
@@ -47,7 +50,7 @@ Environment behavior:
     RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
 
 Options:
-  --profile NAME            best (default) or matrix.
+  --profile NAME            best (default), matrix, or repeatability.
   --allow-local-diff        Allow local best profile to differ from tracked best profile.
   --artifact-root DIR        Default artifacts/rbpodo_circle_ablation/<timestamp>_<profile suffix>
   --server PATH              rb_servo_server binary path.
@@ -62,7 +65,8 @@ Options:
 
 Pass criteria are evaluated by scripts/generate_ackon500_gene_goal_report.py.
 The final summary is written to ARTIFACT_ROOT/summary.json and the markdown
-report to ARTIFACT_ROOT/gene_goal_report.md.
+report to ARTIFACT_ROOT/gene_goal_report.md. Repeatability runs also write
+repeatability_summary.csv/json and repeatability_report.md.
 EOF
 }
 
@@ -261,8 +265,14 @@ case "${PROFILE}" in
     NOOP_COMMAND_TIMEOUT_SEC="0.2"
     ARTIFACT_SUFFIX="ackon500_gene_goal"
     ;;
+  repeatability)
+    [[ -n "${MATRIX}" ]] || MATRIX="configs/rbpodo_circle_ablation/ackon500_gene_repeatability.yaml"
+    NOOP_CONFIG="rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz_goal.example.yaml"
+    NOOP_COMMAND_TIMEOUT_SEC="0.05"
+    ARTIFACT_SUFFIX="ackon500_gene_repeatability"
+    ;;
   *)
-    fail "unknown profile: ${PROFILE}; expected best or matrix"
+    fail "unknown profile: ${PROFILE}; expected best, matrix, or repeatability"
     ;;
 esac
 
@@ -336,8 +346,12 @@ ablation_cmd=(
 report_cmd=(
   python3 scripts/generate_ackon500_gene_goal_report.py
   --artifact-root "${ARTIFACT_ROOT}"
-  --require-pass
 )
+if [[ "${PROFILE}" == "repeatability" ]]; then
+  report_cmd+=(--require-repeatable)
+else
+  report_cmd+=(--require-pass)
+fi
 
 [[ "${SKIP_PLOTS}" == "1" ]] && noop_cmd+=(--skip-plots) && ablation_cmd+=(--skip-plots)
 
@@ -349,6 +363,10 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   print_command "${report_cmd[@]}"
   note "dry-run only; commands were not executed"
   note "expected summary: ${ARTIFACT_ROOT}/summary.json"
+  if [[ "${PROFILE}" == "repeatability" ]]; then
+    note "expected repeatability summary: ${ARTIFACT_ROOT}/repeatability_summary.json"
+    note "expected repeatability report: ${ARTIFACT_ROOT}/repeatability_report.md"
+  fi
   exit 0
 fi
 
@@ -367,3 +385,7 @@ print_command "${report_cmd[@]}"
 
 note "goal summary: ${ARTIFACT_ROOT}/summary.json"
 note "goal report: ${ARTIFACT_ROOT}/gene_goal_report.md"
+if [[ "${PROFILE}" == "repeatability" ]]; then
+  note "repeatability summary: ${ARTIFACT_ROOT}/repeatability_summary.json"
+  note "repeatability report: ${ARTIFACT_ROOT}/repeatability_report.md"
+fi
