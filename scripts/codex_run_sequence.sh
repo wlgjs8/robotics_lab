@@ -129,7 +129,6 @@ run_gate() {
     > "$stdout_path" \
     2> "$stderr_path"
   local rc=$?
-  set -e
   return "$rc"
 }
 

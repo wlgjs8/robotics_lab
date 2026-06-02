@@ -514,6 +514,12 @@ struct RbpodoAsyncStreamingTelemetry {
     uint64_t last_command_seq = 0;
     uint64_t last_sent_seq = 0;
     uint64_t last_ack_seq = 0;
+    uint64_t first_goal_command_send_ns = 0;
+    uint64_t last_goal_command_send_ns = 0;
+    uint64_t first_worker_send_ns = 0;
+    uint64_t last_worker_send_ns = 0;
+    uint64_t goal_window_commands_sent = 0;
+    uint64_t goal_window_commands_acked = 0;
     uint64_t last_q_ref_update_host_time_ns = 0;
     uint64_t last_tcp_ref_update_host_time_ns = 0;
     uint64_t last_socket_send_host_time_ns = 0;
@@ -527,6 +533,7 @@ struct RbpodoAsyncStreamingTelemetry {
     double max_async_ack_duration_us = 0.0;
     std::string last_controller_acceptance_semantics;
     std::string last_async_acceptance_semantics;
+    std::string command_phase;
     std::string last_send_result;
     std::string last_ack_result;
     std::string last_failure;

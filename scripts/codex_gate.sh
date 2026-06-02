@@ -1565,6 +1565,61 @@ run_rbpodo_async_runbook_gate() {
   echo "codex_gate: skipping rbpodo async ACK-supervised controller run by default"
 }
 
+run_ackon500_followup_common_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  run_optional_python_help scripts/rbpodo_circle_tracking_benchmark.py
+  run_optional_python_help scripts/run_rbpodo_circle_ablation.py
+  run_optional_python_help scripts/generate_ackon500_gene_goal_report.py
+  run_optional_python_help scripts/generate_circle_benchmark_report.py
+  run_optional_python_help scripts/generate_rbpodo_500hz_report.py
+  run_optional_python_help scripts/generate_rbpodo_measurement_reliability_report.py
+  run_yaml_parse_checks_if_available configs/rbpodo_circle_ablation/*.yaml
+  run_optional_script_tests 'test_*.py'
+  run_gui_tests
+  run_policy_runner_tests
+  run_simulator_tests
+}
+
+run_ackon500_rate_accounting_gate() {
+  run_ackon500_followup_common_gate
+  run_servo_gate_or_skip_missing_deps
+}
+
+run_benchmark_lane_canonicalize_gate() {
+  run_ackon500_followup_common_gate
+  run_servo_gate_or_skip_missing_deps
+}
+
+run_ackon500_best_profile_promotion_gate() {
+  run_ackon500_followup_common_gate
+  bash -n tools/rbpodo_ackon500_gene_goal.sh
+  bash -n tools/create_rbpodo_circle_local_configs.sh
+  grep_existing "sdk_ack_worker" \
+    tools/rbpodo_ackon500_gene_goal.sh \
+    tools/create_rbpodo_circle_local_configs.sh \
+    configs/rbpodo_circle_ablation \
+    rb_servo_server/config
+  grep_existing "not physical real|controller-reference lower-bound|physical_motion_expected" \
+    docs/runbooks/rbpodo_500hz_acceptance.md \
+    docs/runbooks/rbpodo_controller_sim_circle.md \
+    REVIEW.md \
+    README.md
+}
+
+run_ackon500_repeatability_validation_gate() {
+  run_ackon500_followup_common_gate
+  run_yaml_parse_checks_if_available configs/rbpodo_circle_ablation/ackon500_gene_repeatability.yaml
+  grep_existing "repeatability|repeatable_pass|not_repeatable|insufficient_evidence" \
+    scripts docs/runbooks REVIEW.md configs/rbpodo_circle_ablation
+}
+
+run_physical_readiness_blockers_clarity_gate() {
+  run_ackon500_followup_common_gate
+  grep_existing "physical_readiness|physical_tracking_result|controller-reference lower-bound|not physical" \
+    scripts docs/runbooks REVIEW.md README.md
+}
+
 run_optional_rbpodo_p1_circle_ablation() {
   if [[ "${CODEX_RUN_RBPODO_CIRCLE_ABLATION:-0}" != "1" ]]; then
     echo "codex_gate: skipping rbpodo P1 controller-simulation ablation; set CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 with explicit CODEX_RBPODO_CIRCLE_ABLATION_ARGS to enable"
@@ -2488,6 +2543,21 @@ case "$TASK" in
     ;;
   RBPODO-ASYNC-RUNBOOK-01)
     run_rbpodo_async_runbook_gate
+    ;;
+  ACKON500-RATE-ACCOUNTING-01)
+    run_ackon500_rate_accounting_gate
+    ;;
+  BENCHMARK-LANE-CANONICALIZE-01)
+    run_benchmark_lane_canonicalize_gate
+    ;;
+  ACKON500-BEST-PROFILE-PROMOTION-01)
+    run_ackon500_best_profile_promotion_gate
+    ;;
+  ACKON500-REPEATABILITY-VALIDATION-01)
+    run_ackon500_repeatability_validation_gate
+    ;;
+  PHYSICAL-READINESS-BLOCKERS-CLARITY-01)
+    run_physical_readiness_blockers_clarity_gate
     ;;
   P1-CIRCLE-FACTOR-MATRIX-01)
     run_p1_circle_factor_matrix_gate

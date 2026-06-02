@@ -637,6 +637,25 @@ void ArmWorker::updateAsyncSendTelemetryLocked(
     async_telemetry_.last_send_result = sendResultSummary(result);
     async_telemetry_.last_async_send_duration_us = dispatch_timing.duration_us;
     updateMax(dispatch_timing.duration_us, &async_telemetry_.max_async_send_duration_us);
+    const uint64_t worker_send_start_ns = dispatch_timing.start_ns > 0
+        ? dispatch_timing.start_ns
+        : result.timing.start_ns;
+    const uint64_t worker_send_end_ns = dispatch_timing.end_ns > 0
+        ? dispatch_timing.end_ns
+        : result.timing.end_ns;
+    if (worker_send_start_ns > 0 && async_telemetry_.first_worker_send_ns == 0) {
+        async_telemetry_.first_worker_send_ns = worker_send_start_ns;
+    }
+    if (worker_send_end_ns > 0) {
+        async_telemetry_.last_worker_send_ns = worker_send_end_ns;
+    }
+    if (!last_async_sent_request_.has_value()) {
+        async_telemetry_.command_phase = "warmup";
+    } else if (maxAbsJointDelta(request.q_target_deg, last_async_sent_request_->q_target_deg) > 1e-7) {
+        async_telemetry_.command_phase = "tracking";
+    } else {
+        async_telemetry_.command_phase = "hold";
+    }
     last_async_sent_request_ = request;
 
     const double pending_age_ms = request.host_time_ns > 0 &&

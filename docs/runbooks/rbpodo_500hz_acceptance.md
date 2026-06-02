@@ -49,6 +49,44 @@ A 500 Hz `sdk_ack_worker` candidate can therefore be official goal `pass` while
 failure of the official ACKON500 goal; it is a diagnostic warning that must
 remain visible. `socket_send_only_count > 0` is still an official goal failure.
 
+## Servo Rate Accounting
+
+ACKON500 reports separate high-level UDP command packets from low-level ServoJ
+worker sends. Do not use `command_count` or `udp_command_count` as a low-level
+ServoJ command count.
+
+Official rate fields:
+
+- `udp_command_count`: high-level UDP commands sent by the benchmark, such as
+  one circle command plus hold.
+- `server_servo_tick_count`: servo-loop ticks observed inside the official
+  tracking window.
+- `async_commands_enqueued_total`, `async_commands_sent_total`, and
+  `async_commands_acked_total`: async worker lifetime totals, including any
+  warmup, hold, or cleanup traffic.
+- `official_tracking_window_sec`: start of official circle tracking to the end
+  of the repeat window. For 15 cm / 4 s repeat 5 this is about 20 seconds.
+- `expected_servo_ticks`: `round(servo_rate_hz * official_tracking_window_sec)`.
+- `goal_window_commands_sent` and `goal_window_commands_acked`: low-level
+  ServoJ sends and ACKs counted for the official tracking window only.
+- `official_servo_rate_hz`: configured official target rate for the run.
+- `effective_goal_command_rate_hz`:
+  `goal_window_commands_sent / official_tracking_window_sec`.
+- `ack_coverage_ratio`:
+  `goal_window_commands_acked / goal_window_commands_sent`.
+- `measured_worker_window_sec`, `worker_send_rate_hz`, and
+  `worker_lifetime_send_rate_hz`: worker lifetime diagnostics. They can differ
+  from the official goal rate when warmup, hold, cleanup, or measurement-window
+  boundaries differ.
+- `worker_sends_outside_official_window`: lifetime sends minus official-window
+  sends. This must remain visible instead of being folded into the goal rate.
+
+The official ACKON500 rate check uses `effective_goal_command_rate_hz` in the
+configured tolerance band, currently 490 to 510 Hz. A candidate must not pass
+the official goal from `worker_send_rate_hz` alone when official tracking-window
+evidence is missing. The older ambiguous `effective_command_rate_hz` should not
+be used for pass/fail.
+
 ## Why Synchronous ACK-On Is Fragile At 500 Hz
 
 A 500 Hz servo tick is only 2 ms. In synchronous ACK-on mode, any rbpodo
@@ -307,6 +345,10 @@ State JSON publishes per-arm `async_streaming` telemetry including
 `enabled`, `mode`, `commands_enqueued_total`, `commands_sent_total`,
 `commands_acked_total`, `commands_socket_sent_total`,
 `commands_overwritten_total`, `commands_dropped_total`, `ack_timeout_count`,
+`first_worker_send_ns`, `last_worker_send_ns`,
+`first_goal_command_send_ns`, `last_goal_command_send_ns`,
+`goal_window_commands_sent`, `goal_window_commands_acked`,
+`command_phase`,
 `last_async_send_duration_us`, `last_async_ack_duration_us`,
 `last_async_acceptance_semantics`, `async_worker_backlog`,
 `q_ref_update_age_ms`, `tcp_ref_update_age_ms`,
@@ -823,8 +865,14 @@ Acceptance semantics are reported separately:
 Async telemetry columns include `async_mode`, `commands_enqueued_total`,
 `commands_sent_total`, `commands_acked_total`,
 `commands_socket_sent_total`, `commands_overwritten_total`,
-`commands_dropped_total`, `reference_supervision_state`,
-`q_ref_update_rate_hz`, and `q_ref_target_error_deg_max`.
+`commands_dropped_total`, `async_commands_enqueued_total`,
+`async_commands_sent_total`, `async_commands_acked_total`,
+`official_tracking_window_sec`, `server_servo_tick_count`,
+`goal_window_commands_sent`, `goal_window_commands_acked`,
+`effective_goal_command_rate_hz`, `ack_coverage_ratio`,
+`worker_send_rate_hz`, `worker_sends_outside_official_window`,
+`reference_supervision_state`, `q_ref_update_rate_hz`, and
+`q_ref_target_error_deg_max`.
 
 Read these fields before interpreting tracking error:
 

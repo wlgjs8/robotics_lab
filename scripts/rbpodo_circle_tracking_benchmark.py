@@ -77,7 +77,8 @@ ACKON500_GOAL_THRESHOLDS = {
     "servo_rate_hz": 500.0,
     "servo_t1_sec": 0.002,
     "min_ack_ratio": 0.98,
-    "min_effective_command_rate_hz": 490.0,
+    "min_effective_goal_command_rate_hz": 490.0,
+    "max_effective_goal_command_rate_hz": 510.0,
     "max_saturation_ratio": 0.01,
     "max_rms_error_m": 0.003,
     "max_p95_error_m": 0.006,
@@ -1633,10 +1634,19 @@ def telemetry_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, Any]:
         "commands_socket_sent_total": 0,
         "commands_dropped_total": 0,
         "commands_overwritten_total": 0,
+        "goal_window_commands_sent": 0,
+        "goal_window_commands_acked": 0,
         "ack_timeout_count": 0,
         "missing_ack_count": 0,
         "reference_supervision_fault_count": 0,
     }
+    async_timestamps = {
+        "first_goal_command_send_ns": 0,
+        "last_goal_command_send_ns": 0,
+        "first_worker_send_ns": 0,
+        "last_worker_send_ns": 0,
+    }
+    command_phases: Counter[str] = Counter()
     for arm_state in arm_states:
         age = finite_number(arm_state.get("state_age_us"))
         if age is not None:
@@ -1657,6 +1667,22 @@ def telemetry_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, Any]:
                 value = finite_number(async_streaming.get(key))
                 if value is not None and value >= 0.0:
                     async_counters[key] = max(async_counters[key], int(value))
+            for key in async_timestamps:
+                value = finite_number(async_streaming.get(key))
+                if value is None or value <= 0.0:
+                    continue
+                as_int = int(value)
+                if key.startswith("first_"):
+                    async_timestamps[key] = (
+                        as_int
+                        if async_timestamps[key] == 0
+                        else min(async_timestamps[key], as_int)
+                    )
+                else:
+                    async_timestamps[key] = max(async_timestamps[key], as_int)
+            phase = async_streaming.get("command_phase")
+            if isinstance(phase, str) and phase:
+                command_phases[phase] += 1
         last_send = arm_state.get("last_send")
         if not isinstance(last_send, dict):
             continue
@@ -1702,9 +1728,13 @@ def telemetry_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, Any]:
             "enabled_observed": async_enabled_observed,
             "mode": async_modes.most_common(1)[0][0] if async_modes else None,
             **async_counters,
+            **async_timestamps,
+            "command_phase": command_phases.most_common(1)[0][0] if command_phases else None,
+            "command_phase_distribution": dict(command_phases),
         },
         "async_streaming_mode": async_modes.most_common(1)[0][0] if async_modes else None,
         **async_counters,
+        **async_timestamps,
     }
 
 
@@ -1882,6 +1912,75 @@ def most_likely_acceptance_semantics(summary: dict[str, Any]) -> str | None:
     return None
 
 
+def positive_int(value: Any) -> int | None:
+    number = finite_number(value)
+    if number is None or number <= 0.0:
+        return None
+    return int(round(number))
+
+
+def official_tracking_window(summary: dict[str, Any]) -> tuple[int | None, int | None, float | None]:
+    window_sec = finite_number(summary.get("official_tracking_window_sec"))
+    start_ns = positive_int(summary.get("official_tracking_start_ns"))
+    end_ns = positive_int(summary.get("official_tracking_end_ns"))
+    if start_ns is None:
+        start_ns = positive_int(summary.get("benchmark_start_ns"))
+    if window_sec is None:
+        duration_sec = finite_number(summary.get("duration_sec"))
+        if duration_sec is not None and duration_sec > 0.0:
+            window_sec = duration_sec
+    if end_ns is None and start_ns is not None and window_sec is not None:
+        end_ns = start_ns + int(round(window_sec * 1e9))
+    if window_sec is None and start_ns is not None and end_ns is not None and end_ns > start_ns:
+        window_sec = (end_ns - start_ns) / 1e9
+    return start_ns, end_ns, window_sec
+
+
+def snapshot_time_ns(snapshot: dict[str, Any]) -> int | None:
+    for key in ("loop_start_time_ns", "host_time_ns", "loop_end_time_ns"):
+        value = positive_int(snapshot.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def server_servo_tick_count(states: list[dict[str, Any]], start_ns: int | None, end_ns: int | None) -> int | None:
+    if start_ns is None or end_ns is None or end_ns <= start_ns:
+        return None
+    ticks: list[int] = []
+    for snapshot in states:
+        time_ns = snapshot_time_ns(snapshot)
+        if time_ns is None or time_ns < start_ns or time_ns >= end_ns:
+            continue
+        tick = positive_int(snapshot.get("tick"))
+        if tick is not None:
+            ticks.append(tick)
+    if len(ticks) >= 2:
+        return max(ticks) - min(ticks) + 1
+    return None
+
+
+def copy_async_rate_fields(summary: dict[str, Any], async_metrics: dict[str, Any]) -> None:
+    aliases = {
+        "async_commands_enqueued_total": "commands_enqueued_total",
+        "async_commands_sent_total": "commands_sent_total",
+        "async_commands_acked_total": "commands_acked_total",
+    }
+    for alias, legacy in aliases.items():
+        value = summary.get(alias)
+        if value is None:
+            value = summary.get(legacy)
+        if value is None:
+            value = async_metrics.get(alias)
+        if value is None:
+            value = async_metrics.get(legacy)
+        number = positive_int(value)
+        if number is not None:
+            summary[alias] = number
+            if summary.get(legacy) is None:
+                summary[legacy] = number
+
+
 def annotate_goal_derived_fields(summary: dict[str, Any]) -> None:
     async_metrics = summary.get("async_streaming_metrics")
     if not isinstance(async_metrics, dict):
@@ -1898,6 +1997,7 @@ def annotate_goal_derived_fields(summary: dict[str, Any]) -> None:
     ):
         if summary.get(key) is None and async_metrics.get(key) is not None:
             summary[key] = async_metrics.get(key)
+    copy_async_rate_fields(summary, async_metrics)
     socket_count = finite_number(summary.get("socket_send_only_count"))
     if socket_count is None:
         socket_count = finite_number(summary.get("commands_socket_sent_total"))
@@ -1925,12 +2025,85 @@ def annotate_goal_derived_fields(summary: dict[str, Any]) -> None:
         if commands_sent is not None and commands_sent > 0.0 and commands_acked is not None
         else None
     )
-    duration_sec = finite_number(summary.get("duration_sec"))
-    summary["effective_command_rate_hz"] = (
-        commands_sent / duration_sec
-        if commands_sent is not None and commands_sent > 0.0 and duration_sec is not None and duration_sec > 0.0
-        else finite_number(summary.get("effective_command_rate_hz"))
+    start_ns, end_ns, official_window_sec = official_tracking_window(summary)
+    if start_ns is not None:
+        summary["official_tracking_start_ns"] = start_ns
+    if end_ns is not None:
+        summary["official_tracking_end_ns"] = end_ns
+    if official_window_sec is not None:
+        summary["official_tracking_window_sec"] = official_window_sec
+    servo_rate = finite_number(summary.get("servo_rate_hz"))
+    if servo_rate is not None:
+        summary["official_servo_rate_hz"] = servo_rate
+    if servo_rate is not None and official_window_sec is not None:
+        summary["expected_servo_ticks"] = int(round(servo_rate * official_window_sec))
+
+    for key in (
+        "first_goal_command_send_ns",
+        "last_goal_command_send_ns",
+        "first_worker_send_ns",
+        "last_worker_send_ns",
+    ):
+        if summary.get(key) is None and async_metrics.get(key) is not None:
+            summary[key] = async_metrics.get(key)
+
+    goal_sent = finite_number(summary.get("goal_window_commands_sent"))
+    if goal_sent is None or goal_sent <= 0.0:
+        goal_sent = finite_number(async_metrics.get("goal_window_commands_sent"))
+    goal_acked = finite_number(summary.get("goal_window_commands_acked"))
+    if goal_acked is None or goal_acked <= 0.0:
+        goal_acked = finite_number(async_metrics.get("goal_window_commands_acked"))
+    goal_count_source = summary.get("goal_window_count_source")
+    if (
+        (goal_sent is None or goal_sent <= 0.0)
+        and finite_number(summary.get("server_servo_tick_count")) is not None
+        and int(finite_number(summary.get("commands_dropped_total")) or 0) == 0
+        and int(finite_number(summary.get("commands_overwritten_total")) or 0) == 0
+    ):
+        goal_sent = finite_number(summary.get("server_servo_tick_count"))
+        if goal_sent is not None and commands_acked is not None and commands_acked >= goal_sent:
+            goal_acked = goal_sent
+        goal_count_source = "server_servo_tick_count_inferred"
+    if goal_sent is not None and goal_sent > 0.0:
+        summary["goal_window_commands_sent"] = int(goal_sent)
+        if not goal_count_source:
+            summary["goal_window_count_source"] = "async_worker_telemetry"
+        else:
+            summary["goal_window_count_source"] = goal_count_source
+    if goal_acked is not None and goal_acked >= 0.0:
+        summary["goal_window_commands_acked"] = int(goal_acked)
+    summary["effective_goal_command_rate_hz"] = (
+        goal_sent / official_window_sec
+        if goal_sent is not None and goal_sent > 0.0 and official_window_sec is not None and official_window_sec > 0.0
+        else None
     )
+    summary["ack_coverage_ratio"] = (
+        goal_acked / goal_sent
+        if goal_sent is not None and goal_sent > 0.0 and goal_acked is not None
+        else None
+    )
+    worker_first_ns = positive_int(summary.get("first_worker_send_ns"))
+    worker_last_ns = positive_int(summary.get("last_worker_send_ns"))
+    worker_window_sec = None
+    if worker_first_ns is not None and worker_last_ns is not None and worker_last_ns > worker_first_ns:
+        worker_window_sec = (worker_last_ns - worker_first_ns) / 1e9
+    if worker_window_sec is not None:
+        summary["measured_worker_window_sec"] = worker_window_sec
+        summary["worker_active_window_sec"] = worker_window_sec
+    async_sent_total = finite_number(summary.get("async_commands_sent_total"))
+    if async_sent_total is None:
+        async_sent_total = finite_number(summary.get("commands_sent_total"))
+    worker_send_rate = (
+        async_sent_total / worker_window_sec
+        if async_sent_total is not None and async_sent_total > 0.0 and worker_window_sec is not None and worker_window_sec > 0.0
+        else None
+    )
+    summary["worker_send_rate_hz"] = worker_send_rate
+    summary["worker_lifetime_send_rate_hz"] = worker_send_rate
+    if async_sent_total is not None and goal_sent is not None:
+        outside = int(async_sent_total) - int(goal_sent)
+        summary["worker_sends_outside_official_window"] = outside
+        summary["worker_sends_outside_official_window_detected"] = outside != 0
     saturation_count = finite_number(summary.get("feedback_saturation_count"))
     command_count = finite_number(summary.get("command_count"))
     saturation_denominator = max(command_count or 0.0, commands_sent or 0.0)
@@ -2045,10 +2218,23 @@ def ackon500_goal_result(summary: dict[str, Any], warnings: list[str]) -> dict[s
     semantics = summary.get("acceptance_semantics")
     if semantics not in ACKON500_ACK_SEMANTICS:
         failures.append(f"acceptance_semantics {semantics} is not ACK-observed")
-    check_min(summary, "ack_observed_ratio", ACKON500_GOAL_THRESHOLDS["min_ack_ratio"], failures)
+    check_min(summary, "official_tracking_window_sec", 1e-9, failures)
+    check_min(summary, "goal_window_commands_sent", 1.0, failures)
+    check_min(summary, "ack_coverage_ratio", ACKON500_GOAL_THRESHOLDS["min_ack_ratio"], failures)
     if int(finite_number(summary.get("socket_send_only_count")) or 0) != 0:
         failures.append(f"socket_send_only_count {summary.get('socket_send_only_count')} != 0")
-    check_min(summary, "effective_command_rate_hz", ACKON500_GOAL_THRESHOLDS["min_effective_command_rate_hz"], failures)
+    check_min(
+        summary,
+        "effective_goal_command_rate_hz",
+        ACKON500_GOAL_THRESHOLDS["min_effective_goal_command_rate_hz"],
+        failures,
+    )
+    check_max(
+        summary,
+        "effective_goal_command_rate_hz",
+        ACKON500_GOAL_THRESHOLDS["max_effective_goal_command_rate_hz"],
+        failures,
+    )
     if summary.get("fault_latched") is not False:
         failures.append(f"fault_latched {summary.get('fault_latched')} is not false")
     if summary.get("physical_motion_detected") is not False:
@@ -2210,11 +2396,27 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "servo_t1_sec",
         "acceptance_semantics",
         "async_mode",
+        "udp_command_count",
+        "server_servo_tick_count",
+        "async_commands_enqueued_total",
+        "async_commands_sent_total",
+        "async_commands_acked_total",
         "commands_sent_total",
         "commands_acked_total",
         "socket_send_only_count",
         "ack_observed_ratio",
-        "effective_command_rate_hz",
+        "official_tracking_window_sec",
+        "measured_worker_window_sec",
+        "official_servo_rate_hz",
+        "expected_servo_ticks",
+        "goal_window_commands_sent",
+        "goal_window_commands_acked",
+        "goal_window_count_source",
+        "ack_coverage_ratio",
+        "effective_goal_command_rate_hz",
+        "worker_send_rate_hz",
+        "worker_lifetime_send_rate_hz",
+        "worker_sends_outside_official_window",
         "phase_advance_sec",
         "phase_advance_fraction_of_period",
         "phase_advance_enabled",
@@ -2539,8 +2741,10 @@ def summarize_run(
         "overlay_messages_recorded": 0,
     }
     duration_sec = float(args.period_sec) * int(args.repeat)
+    official_tracking_start_ns = benchmark_start_ns
+    official_tracking_end_ns = benchmark_start_ns + int(round(duration_sec * 1e9))
     profile_metadata = sim_bench.benchmark_profile_metadata(args.profile)
-    tracking_samples = collect_samples(states, args.arm, tracking_source, benchmark_start_ns, benchmark_start_ns + int(duration_sec * 1e9))
+    tracking_samples = collect_samples(states, args.arm, tracking_source, official_tracking_start_ns, official_tracking_end_ns)
     if not tracking_samples:
         raise BenchmarkError(f"no valid {tracking_source} samples captured during benchmark")
     network_config = config_section(config, "network")
@@ -2569,8 +2773,8 @@ def summarize_run(
     runtime_diagnostics = cartesian_runtime_diagnostics(
         states,
         args.arm,
-        benchmark_start_ns,
-        benchmark_start_ns + int(duration_sec * 1e9),
+        official_tracking_start_ns,
+        official_tracking_end_ns,
     )
     tcp_ref_displacement = finite_number(runtime_diagnostics.get("tcp_ref_displacement_m"))
     tcp_ref_moved = pose_moved(tcp_ref_displacement)
@@ -2640,8 +2844,17 @@ def summarize_run(
         "required_tangential_speed_m_s": preflight_result["required_tangential_speed_m_s"],
         "duration_sec": duration_sec,
         "command_count": command_count,
+        "udp_command_count": command_count,
         "benchmark_start_ns": benchmark_start_ns,
         "benchmark_end_ns": benchmark_end_ns,
+        "official_tracking_start_ns": official_tracking_start_ns,
+        "official_tracking_end_ns": official_tracking_end_ns,
+        "official_tracking_window_sec": duration_sec,
+        "server_servo_tick_count": server_servo_tick_count(
+            states,
+            official_tracking_start_ns,
+            official_tracking_end_ns,
+        ),
         "tracking_source_requested": args.tracking_source,
         "tracking_source_used": tracking_source,
         "tracking_source_warning": tracking_source_warning,

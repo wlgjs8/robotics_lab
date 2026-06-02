@@ -250,6 +250,12 @@ nlohmann::json rbpodoAsyncStreamingJson(
         {"last_command_seq", telemetry.last_command_seq},
         {"last_sent_seq", telemetry.last_sent_seq},
         {"last_ack_seq", telemetry.last_ack_seq},
+        {"first_goal_command_send_ns", telemetry.first_goal_command_send_ns},
+        {"last_goal_command_send_ns", telemetry.last_goal_command_send_ns},
+        {"first_worker_send_ns", telemetry.first_worker_send_ns},
+        {"last_worker_send_ns", telemetry.last_worker_send_ns},
+        {"goal_window_commands_sent", telemetry.goal_window_commands_sent},
+        {"goal_window_commands_acked", telemetry.goal_window_commands_acked},
         {"last_q_ref_update_host_time_ns", telemetry.last_q_ref_update_host_time_ns},
         {"last_tcp_ref_update_host_time_ns", telemetry.last_tcp_ref_update_host_time_ns},
         {"last_socket_send_host_time_ns", telemetry.last_socket_send_host_time_ns},
@@ -267,6 +273,7 @@ nlohmann::json rbpodoAsyncStreamingJson(
             telemetry.last_async_acceptance_semantics.empty()
                 ? rbpodoAsyncAcceptanceSemantics(config, telemetry)
                 : telemetry.last_async_acceptance_semantics},
+        {"command_phase", telemetry.command_phase},
         {"last_send_result", telemetry.last_send_result},
         {"last_ack_result", telemetry.last_ack_result},
         {"last_failure", telemetry.last_failure},

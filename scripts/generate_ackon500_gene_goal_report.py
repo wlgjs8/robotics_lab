@@ -24,7 +24,8 @@ PASS_THRESHOLDS = {
     "servo_rate_hz": 500.0,
     "servo_t1_sec": 0.002,
     "min_ack_ratio": 0.98,
-    "min_effective_command_rate_hz": 490.0,
+    "min_effective_goal_command_rate_hz": 490.0,
+    "max_effective_goal_command_rate_hz": 510.0,
     "max_saturation_ratio": 0.01,
     "max_rms_error_m": 0.003,
     "max_p95_error_m": 0.006,
@@ -327,6 +328,17 @@ def max_counter(samples: list[dict[str, Any]], key: str) -> int:
     return max(values, default=0)
 
 
+def timestamp_extent(samples: list[dict[str, Any]], key: str, *, first: bool) -> int:
+    values: list[int] = []
+    for sample in samples:
+        number = finite_number(sample.get(key))
+        if number is not None and number > 0:
+            values.append(int(number))
+    if not values:
+        return 0
+    return min(values) if first else max(values)
+
+
 def async_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, Any]:
     samples = [
         sample
@@ -336,6 +348,8 @@ def async_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, Any]:
     ]
     modes = [str(sample.get("mode")) for sample in samples if sample.get("mode") not in (None, "")]
     mode = max(set(modes), key=modes.count) if modes else None
+    phases = [str(sample.get("command_phase")) for sample in samples if sample.get("command_phase") not in (None, "")]
+    phase = max(set(phases), key=phases.count) if phases else None
     return {
         "sample_count": len(samples),
         "enabled_observed": any(sample.get("enabled") is True for sample in samples),
@@ -346,6 +360,13 @@ def async_metrics(states: list[dict[str, Any]], arm: str) -> dict[str, Any]:
         "commands_socket_sent_total": max_counter(samples, "commands_socket_sent_total"),
         "commands_dropped_total": max_counter(samples, "commands_dropped_total"),
         "commands_overwritten_total": max_counter(samples, "commands_overwritten_total"),
+        "goal_window_commands_sent": max_counter(samples, "goal_window_commands_sent"),
+        "goal_window_commands_acked": max_counter(samples, "goal_window_commands_acked"),
+        "first_goal_command_send_ns": timestamp_extent(samples, "first_goal_command_send_ns", first=True),
+        "last_goal_command_send_ns": timestamp_extent(samples, "last_goal_command_send_ns", first=False),
+        "first_worker_send_ns": timestamp_extent(samples, "first_worker_send_ns", first=True),
+        "last_worker_send_ns": timestamp_extent(samples, "last_worker_send_ns", first=False),
+        "command_phase": phase,
         "ack_timeout_count": max_counter(samples, "ack_timeout_count"),
         "missing_ack_count": max_counter(samples, "missing_ack_count"),
         "reference_supervision_fault_count": max_counter(samples, "reference_supervision_fault_count"),
@@ -389,17 +410,168 @@ def command_packet_rate(command_packets: list[dict[str, Any]], arm: str) -> dict
         int(packet["host_time_ns"])
         for packet in command_packets
         if isinstance(packet.get("host_time_ns"), int)
+    ]
+    tracking_times = [
+        int(packet["host_time_ns"])
+        for packet in command_packets
+        if isinstance(packet.get("host_time_ns"), int)
         and command_mode(packet, arm).startswith("Tcp")
     ]
     if len(times) < 2:
-        return {"udp_command_count": len(times), "udp_effective_command_rate_hz": None}
+        return {
+            "udp_command_count": len(times),
+            "udp_tracking_command_count": len(tracking_times),
+            "udp_effective_command_rate_hz": None,
+        }
     elapsed_sec = (times[-1] - times[0]) / 1e9
     rate = (len(times) - 1) / elapsed_sec if elapsed_sec > 0 else None
     return {
         "udp_command_count": len(times),
+        "udp_tracking_command_count": len(tracking_times),
         "udp_command_start_ns": times[0],
         "udp_command_end_ns": times[-1],
         "udp_effective_command_rate_hz": rate,
+    }
+
+
+def positive_int(value: Any) -> int | None:
+    number = finite_number(value)
+    if number is None or number <= 0.0:
+        return None
+    return int(round(number))
+
+
+def official_tracking_window(summary: dict[str, Any], duration_sec: float | None) -> tuple[int | None, int | None, float | None]:
+    window_sec = first_number(summary.get("official_tracking_window_sec"), duration_sec)
+    start_ns = positive_int(first_value(summary.get("official_tracking_start_ns"), summary.get("benchmark_start_ns")))
+    end_ns = positive_int(summary.get("official_tracking_end_ns"))
+    if end_ns is None and start_ns is not None and window_sec is not None:
+        end_ns = start_ns + int(round(window_sec * 1e9))
+    if window_sec is None and start_ns is not None and end_ns is not None and end_ns > start_ns:
+        window_sec = (end_ns - start_ns) / 1e9
+    return start_ns, end_ns, window_sec
+
+
+def snapshot_time_ns(snapshot: dict[str, Any]) -> int | None:
+    for key in ("loop_start_time_ns", "host_time_ns", "loop_end_time_ns"):
+        value = positive_int(snapshot.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def server_servo_tick_count(states: list[dict[str, Any]], start_ns: int | None, end_ns: int | None) -> int | None:
+    if start_ns is None or end_ns is None or end_ns <= start_ns:
+        return None
+    ticks: list[int] = []
+    for snapshot in states:
+        time_ns = snapshot_time_ns(snapshot)
+        if time_ns is None or time_ns < start_ns or time_ns >= end_ns:
+            continue
+        tick = positive_int(snapshot.get("tick"))
+        if tick is not None:
+            ticks.append(tick)
+    if len(ticks) >= 2:
+        return max(ticks) - min(ticks) + 1
+    return None
+
+
+def first_counter(summary: dict[str, Any], row: dict[str, str], async_info: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = first_number(summary.get(key), row.get(key), async_info.get(key))
+        if value is not None and value >= 0.0:
+            return int(value)
+    return None
+
+
+def rate_accounting_fields(
+    summary: dict[str, Any],
+    row: dict[str, str],
+    async_info: dict[str, Any],
+    states: list[dict[str, Any]],
+    *,
+    duration_sec: float | None,
+    servo_rate_hz: float | None,
+    commands_sent: int,
+    commands_acked: int,
+) -> dict[str, Any]:
+    start_ns, end_ns, window_sec = official_tracking_window(summary, duration_sec)
+    tick_count = first_counter(summary, row, async_info, "server_servo_tick_count")
+    if tick_count is None:
+        tick_count = server_servo_tick_count(states, start_ns, end_ns)
+    expected_ticks = (
+        int(round(servo_rate_hz * window_sec))
+        if servo_rate_hz is not None and window_sec is not None and window_sec > 0.0
+        else first_counter(summary, row, async_info, "expected_servo_ticks")
+    )
+    async_enqueued = first_counter(summary, row, async_info, "async_commands_enqueued_total", "commands_enqueued_total")
+    async_sent = first_counter(summary, row, async_info, "async_commands_sent_total", "commands_sent_total")
+    async_acked = first_counter(summary, row, async_info, "async_commands_acked_total", "commands_acked_total")
+    if async_sent is None:
+        async_sent = commands_sent if commands_sent > 0 else None
+    if async_acked is None:
+        async_acked = commands_acked if commands_acked > 0 else None
+    goal_sent = first_counter(summary, row, async_info, "goal_window_commands_sent")
+    goal_acked = first_counter(summary, row, async_info, "goal_window_commands_acked")
+    if goal_sent is not None and goal_sent <= 0:
+        goal_sent = None
+    if goal_acked is not None and goal_acked < 0:
+        goal_acked = None
+    goal_count_source = first_value(summary.get("goal_window_count_source"), row.get("goal_window_count_source"))
+    if goal_sent is None and tick_count is not None:
+        dropped = first_counter(summary, row, async_info, "commands_dropped_total") or 0
+        overwritten = first_counter(summary, row, async_info, "commands_overwritten_total") or 0
+        if dropped == 0 and overwritten == 0:
+            goal_sent = tick_count
+            if async_acked is not None and async_acked >= goal_sent:
+                goal_acked = goal_sent
+            goal_count_source = goal_count_source or "server_servo_tick_count_inferred"
+    effective_goal_rate = (
+        goal_sent / window_sec
+        if goal_sent is not None and goal_sent > 0 and window_sec is not None and window_sec > 0.0
+        else None
+    )
+    ack_coverage = (
+        goal_acked / goal_sent
+        if goal_sent is not None and goal_sent > 0 and goal_acked is not None
+        else None
+    )
+    first_worker_ns = first_counter(summary, row, async_info, "first_worker_send_ns")
+    last_worker_ns = first_counter(summary, row, async_info, "last_worker_send_ns")
+    worker_window_sec = (
+        (last_worker_ns - first_worker_ns) / 1e9
+        if first_worker_ns is not None and last_worker_ns is not None and last_worker_ns > first_worker_ns
+        else finite_number(summary.get("measured_worker_window_sec"))
+    )
+    worker_send_rate = (
+        async_sent / worker_window_sec
+        if async_sent is not None and async_sent > 0 and worker_window_sec is not None and worker_window_sec > 0.0
+        else None
+    )
+    outside = async_sent - goal_sent if async_sent is not None and goal_sent is not None else None
+    return {
+        "official_tracking_start_ns": start_ns,
+        "official_tracking_end_ns": end_ns,
+        "official_tracking_window_sec": window_sec,
+        "official_servo_rate_hz": servo_rate_hz,
+        "expected_servo_ticks": expected_ticks,
+        "server_servo_tick_count": tick_count,
+        "async_commands_enqueued_total": async_enqueued,
+        "async_commands_sent_total": async_sent,
+        "async_commands_acked_total": async_acked,
+        "goal_window_commands_sent": goal_sent,
+        "goal_window_commands_acked": goal_acked,
+        "goal_window_count_source": goal_count_source,
+        "ack_coverage_ratio": ack_coverage,
+        "effective_goal_command_rate_hz": effective_goal_rate,
+        "first_worker_send_ns": first_worker_ns,
+        "last_worker_send_ns": last_worker_ns,
+        "measured_worker_window_sec": worker_window_sec,
+        "worker_active_window_sec": worker_window_sec,
+        "worker_send_rate_hz": worker_send_rate,
+        "worker_lifetime_send_rate_hz": worker_send_rate,
+        "worker_sends_outside_official_window": outside,
+        "worker_sends_outside_official_window_detected": outside not in (None, 0),
     }
 
 
@@ -469,8 +641,17 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
         commands_sent = int(first_number(summary.get("command_count"), row.get("command_count")) or 0)
         commands_acked = int(first_number(summary.get("controller_ack_observed_count"), summary.get("controller_acceptance_observed_count"), row.get("controller_ack_observed_count")) or 0)
     ack_ratio = commands_acked / commands_sent if commands_sent > 0 else None
-    controller_send_rate = commands_sent / duration_sec if commands_sent > 0 and duration_sec and duration_sec > 0 else None
-    effective_command_rate = first_number(controller_send_rate, packet_rate.get("udp_effective_command_rate_hz"))
+    servo_rate_hz = first_number(summary.get("servo_rate_hz"), row.get("servo_rate_hz"))
+    rate_accounting = rate_accounting_fields(
+        summary,
+        row,
+        async_info,
+        states,
+        duration_sec=duration_sec,
+        servo_rate_hz=servo_rate_hz,
+        commands_sent=commands_sent,
+        commands_acked=commands_acked,
+    )
     state_age_p95 = first_number(
         nested_metric(summary, "state_age_us", "p95"),
         nested_metric(summary.get("timestamp_alignment", {}) if isinstance(summary.get("timestamp_alignment"), dict) else {}, "state_age_us", "p95"),
@@ -488,7 +669,7 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
         "profile": first_value(summary.get("profile"), row.get("profile")),
         "repeat": first_number(summary.get("repeat"), row.get("repeat")),
         "tracking_source": first_value(summary.get("tracking_source_used"), summary.get("tracking_source"), row.get("tracking_source")),
-        "servo_rate_hz": first_number(summary.get("servo_rate_hz"), row.get("servo_rate_hz")),
+        "servo_rate_hz": servo_rate_hz,
         "servo_t1_sec": first_number(summary.get("servo_t1_sec"), row.get("servo_t1_sec")),
         "command_rate_hz": first_number(summary.get("command_rate_hz"), row.get("command_rate_hz")),
         "async_mode": first_value(summary.get("async_mode"), summary.get("async_streaming_mode"), row.get("async_mode"), async_info.get("mode")),
@@ -497,8 +678,7 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
         "commands_acked_total": commands_acked,
         "socket_send_only_count": socket_sent,
         "ack_observed_ratio": ack_ratio,
-        "effective_command_rate_hz": effective_command_rate,
-        "controller_send_rate_hz": controller_send_rate,
+        **rate_accounting,
         **packet_rate,
         "async_streaming_metrics": async_info,
         "rms_error_m": first_number(summary.get("rms_error_m"), scaled_number(row.get("rms_error_mm"), 0.001)),
@@ -618,10 +798,23 @@ def goal_failures(candidate: dict[str, Any]) -> list[str]:
         failures.append(f"servo_t1_sec {candidate.get('servo_t1_sec')} != 0.002")
     if candidate.get("acceptance_semantics") not in {"controller_ack_observed", "sdk_worker_ack_observed"}:
         failures.append(f"acceptance_semantics {candidate.get('acceptance_semantics')} is not ACK-observed")
-    check_min(candidate, "ack_observed_ratio", PASS_THRESHOLDS["min_ack_ratio"], failures)
+    check_min(candidate, "official_tracking_window_sec", 1e-9, failures)
+    check_min(candidate, "goal_window_commands_sent", 1.0, failures)
+    check_min(candidate, "ack_coverage_ratio", PASS_THRESHOLDS["min_ack_ratio"], failures)
     if int(candidate.get("socket_send_only_count") or 0) != 0:
         failures.append(f"socket_send_only_count {candidate.get('socket_send_only_count')} != 0")
-    check_min(candidate, "effective_command_rate_hz", PASS_THRESHOLDS["min_effective_command_rate_hz"], failures)
+    check_min(
+        candidate,
+        "effective_goal_command_rate_hz",
+        PASS_THRESHOLDS["min_effective_goal_command_rate_hz"],
+        failures,
+    )
+    check_max(
+        candidate,
+        "effective_goal_command_rate_hz",
+        PASS_THRESHOLDS["max_effective_goal_command_rate_hz"],
+        failures,
+    )
     if candidate.get("fault_latched") is not False:
         failures.append(f"fault_latched {candidate.get('fault_latched')} is not false")
     if candidate.get("physical_motion_detected") is not False:
@@ -707,10 +900,19 @@ def report_markdown(summary: dict[str, Any]) -> str:
                 "benchmark_threshold_status",
                 "diagnostic_warning_count",
                 "acceptance_semantics",
+                "udp_command_count",
+                "server_servo_tick_count",
+                "async_commands_sent_total",
+                "async_commands_acked_total",
+                "official_tracking_window_sec",
+                "goal_window_commands_sent",
+                "goal_window_commands_acked",
+                "ack_coverage_ratio",
+                "effective_goal_command_rate_hz",
+                "worker_send_rate_hz",
+                "worker_sends_outside_official_window",
                 "commands_sent_total",
                 "commands_acked_total",
-                "ack_observed_ratio",
-                "effective_command_rate_hz",
                 "rms_error_m",
                 "p95_error_m",
                 "radius_gain",
@@ -762,8 +964,14 @@ def report_markdown(summary: dict[str, Any]) -> str:
                 "repeat",
                 "servo_rate_hz",
                 "servo_t1_sec",
-                "ack_observed_ratio",
-                "effective_command_rate_hz",
+                "udp_command_count",
+                "server_servo_tick_count",
+                "official_tracking_window_sec",
+                "goal_window_commands_sent",
+                "goal_window_commands_acked",
+                "ack_coverage_ratio",
+                "effective_goal_command_rate_hz",
+                "worker_send_rate_hz",
                 "rms_error_m",
                 "p95_error_m",
                 "fit_center_error_m",
@@ -798,12 +1006,25 @@ def timing_markdown(summary: dict[str, Any]) -> str:
                     "run_result_status",
                     "benchmark_threshold_status",
                     "async_mode",
+                    "udp_command_count",
+                    "server_servo_tick_count",
+                    "async_commands_enqueued_total",
+                    "async_commands_sent_total",
+                    "async_commands_acked_total",
                     "commands_sent_total",
                     "commands_acked_total",
                     "ack_observed_ratio",
-                    "controller_send_rate_hz",
+                    "ack_coverage_ratio",
+                    "official_tracking_window_sec",
+                    "measured_worker_window_sec",
+                    "official_servo_rate_hz",
+                    "goal_window_commands_sent",
+                    "goal_window_commands_acked",
+                    "effective_goal_command_rate_hz",
+                    "worker_send_rate_hz",
+                    "worker_lifetime_send_rate_hz",
+                    "worker_sends_outside_official_window",
                     "udp_effective_command_rate_hz",
-                    "effective_command_rate_hz",
                     "state_age_p95_us",
                     "estimated_latency_ms",
                     "commanded_phase_advance_ms",

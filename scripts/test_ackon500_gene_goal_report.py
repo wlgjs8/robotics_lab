@@ -58,6 +58,11 @@ def write_candidate(
     root: Path,
     *,
     socket_send_only: bool = False,
+    sent: int = 10000,
+    acked: int | None = None,
+    goal_sent: int | None = 10000,
+    goal_acked: int | None = None,
+    include_tick_window: bool = True,
     rms_error_m: float = 0.0025,
     result: str = "pass",
     result_reason: str = "thresholds applied and satisfied",
@@ -68,12 +73,19 @@ def write_candidate(
 ) -> Path:
     artifact_dir = root / "01_ackon500_gene_sdk_pass"
     write_ablation_csv(root, artifact_dir, acceptance_semantics="socket_send_only" if socket_send_only else "controller_ack_observed")
+    benchmark_start_ns = 1_000_000_000
+    official_window_sec = 20.0
+    benchmark_end_ns = benchmark_start_ns + int(official_window_sec * 1e9)
+    acked = sent if acked is None else acked
+    goal_acked = goal_sent if goal_acked is None and goal_sent is not None else goal_acked
     summary = {
         "artifact_dir": str(artifact_dir.resolve()),
         "profile": "gene_15cm_4s",
         "repeat": 5,
         "period_sec": 4.0,
-        "duration_sec": 20.0,
+        "duration_sec": official_window_sec,
+        "benchmark_start_ns": benchmark_start_ns,
+        "benchmark_end_ns": benchmark_end_ns,
         "tracking_source_used": "tcp_ref_stand",
         "servo_rate_hz": 500.0,
         "command_rate_hz": 500.0,
@@ -88,7 +100,7 @@ def write_candidate(
         "commanded_phase_advance_ms": 40.0,
         "state_age_us": {"p95": 900.0},
         "feedback_saturation_count": 10,
-        "command_count": 10001,
+        "command_count": 2,
         "fault_latched": fault_latched,
         "physical_motion_detected": False,
         "physical_motion_expected": False,
@@ -99,43 +111,51 @@ def write_candidate(
         "threshold_failures": threshold_failures or [],
     }
     write_json(artifact_dir / "summary.json", summary)
-    sent = 10000
-    acked = 9900
     socket_sent = sent if socket_send_only else 0
+    first_async = {
+        "enabled": True,
+        "mode": "sdk_ack_worker",
+        "commands_sent_total": 1,
+        "commands_acked_total": 1,
+        "commands_socket_sent_total": 0,
+        "first_worker_send_ns": benchmark_start_ns,
+        "last_worker_send_ns": benchmark_start_ns,
+    }
+    last_async = {
+        "enabled": True,
+        "mode": "sdk_ack_worker",
+        "commands_enqueued_total": sent,
+        "commands_sent_total": sent,
+        "commands_acked_total": acked,
+        "commands_socket_sent_total": socket_sent,
+        "commands_dropped_total": 0,
+        "commands_overwritten_total": 0,
+        "first_worker_send_ns": benchmark_start_ns,
+        "last_worker_send_ns": benchmark_end_ns,
+    }
+    if goal_sent is not None:
+        last_async.update(
+            {
+                "goal_window_commands_sent": goal_sent,
+                "goal_window_commands_acked": goal_acked,
+                "first_goal_command_send_ns": benchmark_start_ns,
+                "last_goal_command_send_ns": benchmark_end_ns,
+            }
+        )
+    first_state = {"host_time_ns": benchmark_start_ns, "loop_start_time_ns": benchmark_start_ns, "left": {"async_streaming": first_async}}
+    last_state = {"host_time_ns": benchmark_end_ns, "loop_start_time_ns": benchmark_end_ns - 2_000_000, "left": {"async_streaming": last_async}}
+    if include_tick_window:
+        first_state["tick"] = 1
+        last_state["tick"] = 10000
     write_jsonl(
         artifact_dir / "state_stream.jsonl",
-        [
-            {
-                "host_time_ns": 1,
-                "left": {
-                    "async_streaming": {
-                        "enabled": True,
-                        "mode": "sdk_ack_worker",
-                        "commands_sent_total": 1,
-                        "commands_acked_total": 1,
-                        "commands_socket_sent_total": 0,
-                    }
-                },
-            },
-            {
-                "host_time_ns": 20_000_000_000,
-                "left": {
-                    "async_streaming": {
-                        "enabled": True,
-                        "mode": "sdk_ack_worker",
-                        "commands_sent_total": sent,
-                        "commands_acked_total": acked,
-                        "commands_socket_sent_total": socket_sent,
-                    }
-                },
-            },
-        ],
+        [first_state, last_state],
     )
     write_jsonl(
         artifact_dir / "command_packets.jsonl",
         [
-            {"host_time_ns": 1, "left": {"mode": "TcpTwistStand"}},
-            {"host_time_ns": 20_000_000_000, "left": {"mode": "TcpTwistStand"}},
+            {"host_time_ns": benchmark_start_ns, "left": {"mode": "TcpCircleMove"}},
+            {"host_time_ns": benchmark_end_ns, "left": {"mode": "Hold"}},
         ],
     )
     write_json(artifact_dir / "error_decomposition.json", {"error_classification": "goal_test"})
@@ -151,9 +171,41 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
             self.assertEqual(summary["result"], "pass")
             best = summary["best_candidate"]
             self.assertEqual(best["acceptance_semantics"], "sdk_worker_ack_observed")
-            self.assertGreaterEqual(best["ack_observed_ratio"], 0.98)
-            self.assertGreaterEqual(best["effective_command_rate_hz"], 490.0)
+            self.assertGreaterEqual(best["ack_coverage_ratio"], 0.98)
+            self.assertEqual(best["udp_command_count"], 2)
+            self.assertEqual(best["async_commands_sent_total"], 10000)
+            self.assertNotEqual(best["udp_command_count"], best["async_commands_sent_total"])
+            self.assertAlmostEqual(best["official_tracking_window_sec"], 20.0)
+            self.assertAlmostEqual(best["effective_goal_command_rate_hz"], 500.0)
             self.assertTrue((artifact_dir / "async_ack_telemetry.jsonl").is_file())
+
+    def test_extra_hold_commands_do_not_change_goal_rate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_candidate(root, sent=10800, acked=10800, goal_sent=10000, goal_acked=10000)
+            summary = report.build_summary(root)
+            best = summary["best_candidate"]
+            self.assertEqual(summary["result"], "pass")
+            self.assertEqual(best["commands_sent_total"], 10800)
+            self.assertEqual(best["goal_window_commands_sent"], 10000)
+            self.assertEqual(best["worker_sends_outside_official_window"], 800)
+            self.assertAlmostEqual(best["effective_goal_command_rate_hz"], 500.0)
+
+    def test_total_rate_539_without_goal_window_evidence_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_candidate(
+                root,
+                sent=10788,
+                acked=10788,
+                goal_sent=None,
+                include_tick_window=False,
+            )
+            summary = report.build_summary(root)
+            best = summary["best_candidate"]
+            self.assertEqual(summary["result"], "fail")
+            self.assertIsNone(best["effective_goal_command_rate_hz"])
+            self.assertIn("goal_window_commands_sent unavailable", "\n".join(best["failures"]))
 
     def test_socket_send_only_candidate_fails_even_with_good_tracking(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
