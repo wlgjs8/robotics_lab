@@ -70,6 +70,7 @@ def write_candidate(
     max_orientation_drift_rad: float = 0.01,
     p95_orientation_drift_rad: float = 0.01,
     fault_latched: bool = False,
+    diagnostics_suspect_count: int = 0,
 ) -> Path:
     artifact_dir = root / "01_ackon500_gene_sdk_pass"
     write_ablation_csv(root, artifact_dir, acceptance_semantics="socket_send_only" if socket_send_only else "controller_ack_observed")
@@ -106,6 +107,7 @@ def write_candidate(
         "physical_motion_expected": False,
         "cartesian_unavailable_count": 0,
         "measurement_reliability_level": "controller_reference_valid",
+        "diagnostics_suspect_count": diagnostics_suspect_count,
         "result": result,
         "result_reason": result_reason,
         "threshold_failures": threshold_failures or [],
@@ -297,7 +299,32 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
             self.assertNotEqual(best["udp_command_count"], best["async_commands_sent_total"])
             self.assertAlmostEqual(best["official_tracking_window_sec"], 20.0)
             self.assertAlmostEqual(best["effective_goal_command_rate_hz"], 500.0)
+            self.assertEqual(summary["controller_reference_result"]["status"], "pass")
+            self.assertEqual(summary["physical_readiness"]["status"], "blocked")
+            self.assertIn("diagnostics_suspect_unresolved", summary["physical_readiness"]["blockers"])
+            self.assertEqual(summary["physical_tracking_result"]["status"], "not_measured")
+            self.assertNotEqual(summary["physical_tracking_result"]["status"], "pass")
             self.assertTrue((artifact_dir / "async_ack_telemetry.jsonl").is_file())
+
+    def test_goal_pass_with_diagnostics_suspect_still_blocks_physical_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_candidate(root, diagnostics_suspect_count=2)
+            summary = report.build_summary(root)
+            self.assertEqual(summary["result"], "pass")
+            self.assertEqual(summary["controller_reference_result"]["status"], "pass")
+            self.assertEqual(summary["physical_readiness"]["status"], "blocked")
+            self.assertEqual(
+                summary["physical_readiness"]["blockers"],
+                [
+                    "diagnostics_suspect_unresolved",
+                    "physical_reference_to_actual_error_unmeasured",
+                    "stop_resetFault_unverified",
+                    "camera_tcp_calibration_unresolved",
+                    "no_tiny_physical_acceptance",
+                ],
+            )
+            self.assertEqual(summary["physical_tracking_result"]["status"], "not_measured")
 
     def test_extra_hold_commands_do_not_change_goal_rate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

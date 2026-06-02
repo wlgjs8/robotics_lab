@@ -371,6 +371,8 @@ Reliability levels:
 
 Important caveats:
 
+**ACKON500 PASS is controller-reference lower-bound evidence, not physical TCP tracking.**
+
 - `tcp_ref_stand` is FK from controller reference joints and is a lower bound
   on controller-reference tracking. It is not physical TCP tracking.
 - `q_ref_deg` / `q_target_deg` visibility does not prove independent semantic
@@ -393,6 +395,42 @@ work:
 - `physical_reference_to_actual_error_unmeasured`
 - `camera_tcp_calibration_unresolved`
 - `no_tiny_physical_acceptance`
+
+Required report boundary fields:
+
+```yaml
+physical_readiness:
+  status: blocked
+  blockers:
+    - diagnostics_suspect_unresolved
+    - physical_reference_to_actual_error_unmeasured
+    - stop_resetFault_unverified
+    - camera_tcp_calibration_unresolved
+    - no_tiny_physical_acceptance
+  next_required_acceptance:
+    - read-only diagnostics parity
+    - tiny joint no-op physical or approved safe mode
+    - tiny physical joint move
+    - tiny physical Cartesian move
+    - low-speed circle
+    - then speed ladder
+controller_reference_result:
+  status: pass|fail
+  explanation: "tcp_ref_stand lower-bound evidence"
+physical_tracking_result:
+  status: not_measured
+```
+
+Transition ladder:
+
+1. Controller pgmode simulation repeatability
+2. Right arm
+3. Dual arm
+4. P0 diagnostics root cause
+5. Real controller read-only
+6. Tiny physical acceptance
+7. Slow physical circle
+8. Fast physical circle only after approval
 
 ## Parity Check
 

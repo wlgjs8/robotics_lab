@@ -21,6 +21,25 @@ import circle_tracking_benchmark as sim_bench
 
 
 SCHEMA = "robotics_lab.ackon500_gene_goal_report.v1"
+ACKON500_PHYSICAL_WARNING = (
+    "ACKON500 PASS is controller-reference lower-bound evidence, not physical TCP tracking."
+)
+CONTROLLER_REFERENCE_EXPLANATION = "tcp_ref_stand lower-bound evidence"
+PHYSICAL_READINESS_BLOCKERS = [
+    "diagnostics_suspect_unresolved",
+    "physical_reference_to_actual_error_unmeasured",
+    "stop_resetFault_unverified",
+    "camera_tcp_calibration_unresolved",
+    "no_tiny_physical_acceptance",
+]
+NEXT_REQUIRED_ACCEPTANCE = [
+    "read-only diagnostics parity",
+    "tiny joint no-op physical or approved safe mode",
+    "tiny physical joint move",
+    "tiny physical Cartesian move",
+    "low-speed circle",
+    "then speed ladder",
+]
 PASS_THRESHOLDS = {
     "min_repeat": 5,
     "servo_rate_hz": 500.0,
@@ -167,6 +186,25 @@ def write_json(path: Path, value: Any) -> None:
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text.rstrip() + "\n", encoding="utf-8")
+
+
+def physical_readiness() -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "blockers": list(PHYSICAL_READINESS_BLOCKERS),
+        "next_required_acceptance": list(NEXT_REQUIRED_ACCEPTANCE),
+    }
+
+
+def controller_reference_result(passed: bool) -> dict[str, str]:
+    return {
+        "status": "pass" if passed else "fail",
+        "explanation": CONTROLLER_REFERENCE_EXPLANATION,
+    }
+
+
+def physical_tracking_result() -> dict[str, str]:
+    return {"status": "not_measured"}
 
 
 def nested_metric(summary: dict[str, Any], key: str, metric: str) -> float | None:
@@ -843,6 +881,14 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
     candidate["ackon500_goal_status"] = candidate["ackon500_goal_result"]["status"]
     candidate["goal_pass"] = candidate["ackon500_goal_status"] == "pass"
     candidate["pass"] = candidate["goal_pass"]
+    candidate["physical_readiness"] = physical_readiness()
+    candidate["controller_reference_result"] = controller_reference_result(
+        candidate["goal_pass"] and candidate.get("tracking_source") == "tcp_ref_stand"
+    )
+    candidate["physical_tracking_result"] = physical_tracking_result()
+    candidate["physical_readiness_status"] = candidate["physical_readiness"]["status"]
+    candidate["controller_reference_status"] = candidate["controller_reference_result"]["status"]
+    candidate["physical_tracking_status"] = candidate["physical_tracking_result"]["status"]
     return candidate
 
 
@@ -1293,6 +1339,8 @@ def report_markdown(summary: dict[str, Any]) -> str:
         "",
         f"Official goal result: **{summary['official_goal_result'].upper()}**",
         "",
+        f"**{ACKON500_PHYSICAL_WARNING}**",
+        "",
         "This is rbpodo controller pgmode-simulation evidence only. Physical robot motion is not approved.",
         "",
         "Official pass lane: `rbpodo_server_side_circle_ackon500_sdk_worker`.",
@@ -1354,6 +1402,17 @@ def report_markdown(summary: dict[str, Any]) -> str:
                 "measurement_reliability_level",
             ],
         ),
+        "",
+        "## Physical readiness",
+        "",
+        f"- physical_readiness.status: `{summary['physical_readiness']['status']}`",
+        "- physical_readiness.blockers: "
+        + ", ".join(f"`{item}`" for item in summary["physical_readiness"]["blockers"]),
+        "- physical_readiness.next_required_acceptance: "
+        + ", ".join(f"`{item}`" for item in summary["physical_readiness"]["next_required_acceptance"]),
+        f"- controller_reference_result.status: `{summary['controller_reference_result']['status']}`",
+        f"- controller_reference_result.explanation: {summary['controller_reference_result']['explanation']}",
+        f"- physical_tracking_result.status: `{summary['physical_tracking_result']['status']}`",
         "",
         "## Run execution result",
         "",
@@ -1531,6 +1590,13 @@ def build_summary(artifact_root: Path) -> dict[str, Any]:
         "pass": result == "pass",
         "goal_pass": result == "pass",
         "official_goal_result": result,
+        "physical_readiness": physical_readiness(),
+        "controller_reference_result": controller_reference_result(
+            result == "pass"
+            and best is not None
+            and best.get("tracking_source") == "tcp_ref_stand"
+        ),
+        "physical_tracking_result": physical_tracking_result(),
         "thresholds": PASS_THRESHOLDS,
         "candidate_count": len(candidates),
         "best_candidate": best,

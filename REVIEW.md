@@ -198,6 +198,44 @@ Current recorded rbpodo controller-simulation baseline:
   caveat or approve physical real motion.
 - Real physical circle benchmark: not run and not approved.
 
+**ACKON500 PASS is controller-reference lower-bound evidence, not physical TCP tracking.**
+
+Required report fields keep this boundary machine-readable:
+
+```yaml
+physical_readiness:
+  status: blocked
+  blockers:
+    - diagnostics_suspect_unresolved
+    - physical_reference_to_actual_error_unmeasured
+    - stop_resetFault_unverified
+    - camera_tcp_calibration_unresolved
+    - no_tiny_physical_acceptance
+  next_required_acceptance:
+    - read-only diagnostics parity
+    - tiny joint no-op physical or approved safe mode
+    - tiny physical joint move
+    - tiny physical Cartesian move
+    - low-speed circle
+    - then speed ladder
+controller_reference_result:
+  status: pass|fail
+  explanation: "tcp_ref_stand lower-bound evidence"
+physical_tracking_result:
+  status: not_measured
+```
+
+Transition ladder before fast physical circles:
+
+1. Controller pgmode simulation repeatability
+2. Right arm
+3. Dual arm
+4. P0 diagnostics root cause
+5. Real controller read-only
+6. Tiny physical acceptance
+7. Slow physical circle
+8. Fast physical circle only after approval
+
 Before any physical circle discussion, record a rbpodo controller-simulation
 report with `physical_motion_expected=false`, `physical_motion_detected=false`,
 `tracking_source=tcp_ref_stand`, pgmode simulation confirmation, ACK semantics,
@@ -228,6 +266,7 @@ remain actual-state based.
 8. Real motion remains blocked.
 9. Real camera acceptance remains separate.
 10. Measured calibration is still absent.
+11. ACKON500 controller-reference PASS remains physical-readiness blocked until diagnostics parity, tiny physical acceptance, and slow physical circle acceptance are complete.
 11. Run BENCH-CIRCLE-01 simulator benchmark and record artifacts before real robot Cartesian testing. Latest CART-SERVO-01 conservative gate evidence: `artifacts/circle_tracking/bench_circle_01` safe 5 cm / 10 s threshold pass; `artifacts/circle_tracking/left_twist_stand_15cm_16s_after/summary.json` is the current 15 cm / 16 s simulator baseline candidate but is `completed`, not threshold `pass`. CART-SERVO-02 changes benchmark runs without thresholds from `pass` to `completed` so poor tracking cannot be mislabeled as a performance pass. CART-SERVO-03 adds the four-profile regression sequence and `scripts/compare_circle_benchmarks.py` for before/after summaries. GATE-BENCH-00 registers follow-on gate names for circle ablation, tuning, feedback comparison, server-side circle experiments, and reporting. BENCH-ABLATION-01 adds the matrix runner for factor-separated simulator-only circle tracking experiments; run and archive ablation artifacts before promoting any stress settings. CART-TUNE-02 adds named simulator circle profiles for baseline, stress, and conservative real-candidate separation; none is real-ready. BENCH-CIRCLE-FEEDBACK-01 adds simulator-only closed-loop benchmark modes to compare open-loop twist drift against command-source feedback compensation. BENCH-REPORT-01 defines baseline promotion rules, stress interpretation, and the real-candidate parameter policy.
 12. GATE-RBSCRIPT-00 registers the experimental `RBSCRIPT-*` task names for future rbscript_tcp backend comparison work. This is gate registration only; it does not enable rbscript_tcp real motion or weaken the existing real robot gates.
 13. RBSCRIPT-TCP-01 adds an experimental raw Rainbow script TCP backend skeleton for comparison only. It requires `RB_ALLOW_RBSCRIPT_TCP=1` for real connection and `RB_ALLOW_RBSCRIPT_TCP_MOTION=1` for servo sends, keeps `send_servo_commands: false` in the tracked example, and is not accepted for production motion.

@@ -95,6 +95,8 @@ readiness. The runner prints this caveat for every run:
 This is controller-reference lower-bound evidence, not physical real tracking.
 ```
 
+**ACKON500 PASS is controller-reference lower-bound evidence, not physical TCP tracking.**
+
 Exact promoted parameters:
 
 ```yaml
@@ -168,15 +170,41 @@ Caveats:
 - The profile is left-arm single-arm evidence until the follow-on validations
   below are completed.
 
-Next validation sequence:
+Required ACKON500 report boundary fields:
 
-1. Run ACKON500-REPEATABILITY-VALIDATION-01 for the named best profile.
-2. Review any `pass_with_outlier`, `not_repeatable`, or
-   `insufficient_evidence` rows before changing any profile default.
-3. Optional dual-arm sequential evidence remains future work until explicitly
-   enabled and safe.
-4. Root-cause and retire the `diagnostics_suspect` carve-out.
-5. Tiny physical acceptance later, under a separate explicitly approved task.
+```yaml
+physical_readiness:
+  status: blocked
+  blockers:
+    - diagnostics_suspect_unresolved
+    - physical_reference_to_actual_error_unmeasured
+    - stop_resetFault_unverified
+    - camera_tcp_calibration_unresolved
+    - no_tiny_physical_acceptance
+  next_required_acceptance:
+    - read-only diagnostics parity
+    - tiny joint no-op physical or approved safe mode
+    - tiny physical joint move
+    - tiny physical Cartesian move
+    - low-speed circle
+    - then speed ladder
+controller_reference_result:
+  status: pass|fail
+  explanation: "tcp_ref_stand lower-bound evidence"
+physical_tracking_result:
+  status: not_measured
+```
+
+Transition ladder:
+
+1. Controller pgmode simulation repeatability
+2. Right arm
+3. Dual arm
+4. P0 diagnostics root cause
+5. Real controller read-only
+6. Tiny physical acceptance
+7. Slow physical circle
+8. Fast physical circle only after approval
 
 ## ACKON500 Repeatability Validation
 

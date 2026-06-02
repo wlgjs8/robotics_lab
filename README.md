@@ -255,6 +255,11 @@ The named ACKON500 best controller-simulation profile is
 `tools/rbpodo_ackon500_gene_goal.sh --profile best`; it is controller-reference
 lower-bound evidence only, not physical real tracking.
 
+**ACKON500 PASS is controller-reference lower-bound evidence, not physical TCP tracking.**
+ACKON500 reports must keep `physical_readiness.status=blocked` and
+`physical_tracking_result.status=not_measured` until diagnostics parity, tiny
+physical acceptance, and slow physical-circle acceptance are complete.
+
 These configs target Rainbow controller boxes in `pgmode` simulation only; they
 do not approve physical Cartesian motion.
 

@@ -20,6 +20,25 @@ OUTPUT_MD = "measurement_reliability_report.md"
 OUTPUT_CSV = "measurement_reliability_summary.csv"
 OUTPUT_JSON = "measurement_reliability_summary.json"
 Q_REF_VALID_RATIO_MIN = 0.95
+ACKON500_PHYSICAL_WARNING = (
+    "ACKON500 PASS is controller-reference lower-bound evidence, not physical TCP tracking."
+)
+CONTROLLER_REFERENCE_EXPLANATION = "tcp_ref_stand lower-bound evidence"
+PHYSICAL_READINESS_BLOCKERS = [
+    "diagnostics_suspect_unresolved",
+    "physical_reference_to_actual_error_unmeasured",
+    "stop_resetFault_unverified",
+    "camera_tcp_calibration_unresolved",
+    "no_tiny_physical_acceptance",
+]
+NEXT_REQUIRED_ACCEPTANCE = [
+    "read-only diagnostics parity",
+    "tiny joint no-op physical or approved safe mode",
+    "tiny physical joint move",
+    "tiny physical Cartesian move",
+    "low-speed circle",
+    "then speed ladder",
+]
 
 RELIABILITY_COLUMNS = [
     "run_name",
@@ -296,6 +315,27 @@ def base_physical_blockers(row: dict[str, Any]) -> list[str]:
     return blockers
 
 
+def physical_readiness() -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "blockers": list(PHYSICAL_READINESS_BLOCKERS),
+        "next_required_acceptance": list(NEXT_REQUIRED_ACCEPTANCE),
+    }
+
+
+def physical_tracking_result() -> dict[str, str]:
+    return {"status": "not_measured"}
+
+
+def controller_reference_result(row: dict[str, Any], level: str) -> dict[str, str]:
+    source = tracking_source(row)
+    status = "pass" if source == "tcp_ref_stand" and level == "controller_reference_valid" else "fail"
+    return {
+        "status": status,
+        "explanation": CONTROLLER_REFERENCE_EXPLANATION,
+    }
+
+
 def grade_row(row: dict[str, Any]) -> dict[str, Any]:
     caveats: list[str] = []
     interpretation: list[str] = []
@@ -311,6 +351,12 @@ def grade_row(row: dict[str, Any]) -> dict[str, Any]:
             "physical_real_blockers": [],
             "reliability_reasons": ["not_rbpodo_pgmode_simulation"],
             "physical_ready_candidate": False,
+            "physical_readiness": physical_readiness(),
+            "controller_reference_result": {
+                "status": "fail",
+                "explanation": CONTROLLER_REFERENCE_EXPLANATION,
+            },
+            "physical_tracking_result": physical_tracking_result(),
         }
     if source == "tcp_ref_stand":
         caveats.append("tcp_ref_lower_bound_only")
@@ -413,6 +459,9 @@ def grade_row(row: dict[str, Any]) -> dict[str, Any]:
         "physical_real_blockers": unique(blockers),
         "reliability_reasons": unique(reasons),
         "physical_ready_candidate": False,
+        "physical_readiness": physical_readiness(),
+        "controller_reference_result": controller_reference_result(row, level),
+        "physical_tracking_result": physical_tracking_result(),
     }
 
 
@@ -424,6 +473,12 @@ def annotate_row(row: dict[str, Any]) -> dict[str, Any]:
     row["physical_real_blockers"] = list_cell(grade["physical_real_blockers"])
     row["reliability_reasons"] = list_cell(grade["reliability_reasons"])
     row["physical_ready_candidate"] = False
+    row["physical_readiness"] = grade["physical_readiness"]
+    row["controller_reference_result"] = grade["controller_reference_result"]
+    row["physical_tracking_result"] = grade["physical_tracking_result"]
+    row["physical_readiness_status"] = grade["physical_readiness"]["status"]
+    row["controller_reference_status"] = grade["controller_reference_result"]["status"]
+    row["physical_tracking_status"] = grade["physical_tracking_result"]["status"]
     return row
 
 
@@ -483,10 +538,20 @@ def report_markdown(rows: list[dict[str, Any]]) -> str:
         [
             "# rbpodo Measurement Reliability Report",
             "",
+            f"**{ACKON500_PHYSICAL_WARNING}**",
+            "",
             "This report grades measurement reliability before tuning interpretation. "
             "Controller `pgmode` `tcp_ref_stand` evidence is a controller-reference lower bound, not physical TCP tracking.",
             "",
             markdown_table(rows) if rows else "_No rows supplied._",
+            "",
+            "## Physical Readiness",
+            "",
+            f"- status: `{physical_readiness()['status']}`",
+            "- blockers: " + ", ".join(f"`{item}`" for item in PHYSICAL_READINESS_BLOCKERS),
+            "- next_required_acceptance: " + ", ".join(f"`{item}`" for item in NEXT_REQUIRED_ACCEPTANCE),
+            f"- controller_reference_result.explanation: {CONTROLLER_REFERENCE_EXPLANATION}",
+            "- physical_tracking_result.status: `not_measured`",
             "",
             "Physical-ready candidate status is reserved for future physical real acceptance and is not assigned while diagnostics_suspect remains unresolved.",
         ]
@@ -504,9 +569,21 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def write_json(path: Path, rows: list[dict[str, Any]]) -> None:
+    json_rows = [reliability_json_row(row) for row in rows]
+    controller_reference_status = (
+        "pass"
+        if any(row.get("controller_reference_result", {}).get("status") == "pass" for row in json_rows)
+        else "fail"
+    )
     payload = {
         "schema": SCHEMA,
-        "rows": [reliability_json_row(row) for row in rows],
+        "physical_readiness": physical_readiness(),
+        "controller_reference_result": {
+            "status": controller_reference_status,
+            "explanation": CONTROLLER_REFERENCE_EXPLANATION,
+        },
+        "physical_tracking_result": physical_tracking_result(),
+        "rows": json_rows,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")

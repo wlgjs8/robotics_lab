@@ -346,6 +346,9 @@ class CircleBenchmarkReportTest(unittest.TestCase):
         self.assertIn("diagnostics_suspect_override_active", rows[0]["reliability_caveats"])
         self.assertIn("tcp_ref_lower_bound_only", rows[0]["reliability_caveats"])
         self.assertFalse(rows[0]["physical_ready_candidate"])
+        self.assertEqual(rows[0]["physical_readiness"]["status"], "blocked")
+        self.assertEqual(rows[0]["physical_tracking_result"]["status"], "not_measured")
+        self.assertNotEqual(rows[0]["physical_tracking_result"]["status"], "pass")
 
     def test_clean_controller_reference_run_is_controller_reference_valid(self) -> None:
         rows = report.classify_rows(
@@ -375,6 +378,9 @@ class CircleBenchmarkReportTest(unittest.TestCase):
         self.assertIn("controller_reference_lower_bound", rows[0]["benchmark_interpretation"])
         self.assertIn("physical_reference_to_actual_error_unmeasured", rows[0]["physical_real_blockers"])
         self.assertFalse(rows[0]["physical_ready_candidate"])
+        self.assertEqual(rows[0]["controller_reference_result"]["status"], "pass")
+        self.assertEqual(rows[0]["controller_reference_result"]["explanation"], "tcp_ref_stand lower-bound evidence")
+        self.assertEqual(rows[0]["physical_tracking_result"]["status"], "not_measured")
 
     def test_faulted_run_is_unreliable(self) -> None:
         rows = report.classify_rows(

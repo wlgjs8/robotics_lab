@@ -80,6 +80,9 @@ REPORT_COLUMNS = [
     "reliability_caveats",
     "benchmark_interpretation",
     "physical_real_blockers",
+    "physical_readiness_status",
+    "controller_reference_status",
+    "physical_tracking_status",
     "radius_gain",
     "rms_error_mm",
     "median_error_mm",
@@ -769,6 +772,44 @@ Reports keep these categories separate:
 - `rbpodo_controller_simulation`: rbpodo path through real Rainbow controller boxes in `pgmode` simulation.
 - `real_physical_benchmark`: future physical-motion evidence; this report does not create or approve it.
 
+**{reliability_report.ACKON500_PHYSICAL_WARNING}**
+
+Transition ladder before fast physical circles:
+
+1. Controller pgmode simulation repeatability
+2. Right arm
+3. Dual arm
+4. P0 diagnostics root cause
+5. Real controller read-only
+6. Tiny physical acceptance
+7. Slow physical circle
+8. Fast physical circle only after approval
+
+Required controller-reference report boundary fields:
+
+```yaml
+physical_readiness:
+  status: blocked
+  blockers:
+    - diagnostics_suspect_unresolved
+    - physical_reference_to_actual_error_unmeasured
+    - stop_resetFault_unverified
+    - camera_tcp_calibration_unresolved
+    - no_tiny_physical_acceptance
+  next_required_acceptance:
+    - read-only diagnostics parity
+    - tiny joint no-op physical or approved safe mode
+    - tiny physical joint move
+    - tiny physical Cartesian move
+    - low-speed circle
+    - then speed ladder
+controller_reference_result:
+  status: pass|fail
+  explanation: "tcp_ref_stand lower-bound evidence"
+physical_tracking_result:
+  status: not_measured
+```
+
 ## Simulator Baseline Promotion Criteria
 
 A stable simulator baseline candidate must satisfy all of:
@@ -977,6 +1018,9 @@ def rbpodo_decision_split_markdown(rows: list[dict[str, Any]]) -> str:
         "measurement_reliability_level",
         "reliability_caveats",
         "physical_real_blockers",
+        "physical_readiness_status",
+        "controller_reference_status",
+        "physical_tracking_status",
     ]
     lines = [
         "| " + " | ".join(columns) + " |",
@@ -1086,6 +1130,8 @@ def report_markdown(rows: list[dict[str, Any]], title: str, min_repeats: int) ->
         f"# {title}",
         "",
         "This report separates simulator, rbpodo controller-simulation, and future real physical evidence. It does not authorize real robot motion.",
+        "",
+        f"**{reliability_report.ACKON500_PHYSICAL_WARNING}**",
         "",
         criteria_markdown(min_repeats).rstrip(),
         "",
