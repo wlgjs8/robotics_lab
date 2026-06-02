@@ -314,6 +314,12 @@ def runtime_proprio_from_state(
     return np.concatenate([left_features, right_features, arm_mask.astype(np.float32)]).astype(np.float32)
 
 
+def pose_from_state_payload(payload: dict[str, Any], side: str) -> np.ndarray:
+    if side not in {"left", "right"}:
+        raise ValueError("side must be left or right")
+    return _pose_from_state_arm(payload.get(side, {}))
+
+
 def normalize_runtime_proprio(proprio: np.ndarray, stats: dict[str, Any]) -> np.ndarray:
     return _normalize_array(
         proprio.astype(np.float32),
@@ -323,8 +329,15 @@ def normalize_runtime_proprio(proprio: np.ndarray, stats: dict[str, Any]) -> np.
 
 
 def decode_hdf5_image_value(value: Any, *, image_size: int = DEFAULT_IMAGE_SIZE) -> np.ndarray:
-    if isinstance(value, np.ndarray) and value.dtype == np.uint8 and value.ndim == 3:
-        image = Image.fromarray(value, mode="RGB")
+    if isinstance(value, np.ndarray) and value.ndim == 2:
+        image = Image.fromarray(value)
+    elif isinstance(value, np.ndarray) and value.dtype == np.uint8 and value.ndim == 3:
+        if value.shape[2] == 1:
+            image = Image.fromarray(value[:, :, 0], mode="L")
+        elif value.shape[2] == 4:
+            image = Image.fromarray(value, mode="RGBA")
+        else:
+            image = Image.fromarray(value[:, :, :3], mode="RGB")
     elif isinstance(value, np.ndarray) and value.dtype == np.uint8 and value.ndim == 1:
         image = Image.open(io.BytesIO(value.tobytes()))
     elif isinstance(value, (bytes, bytearray)):
@@ -422,8 +435,24 @@ def _load_robotics_lab_episode(path: Path, handle: h5py.File) -> FlowEpisodeInde
     left_target_grip = right_target_grip = None
     action_kind = "target_pose"
     if action_group is not None:
-        left_delta = _first_dataset(action_group, length, "tcp_delta_stand_left", "tcp_twist_local_left", "tcp_twist_stand_left")
-        right_delta = _first_dataset(action_group, length, "tcp_delta_stand_right", "tcp_twist_local_right", "tcp_twist_stand_right")
+        left_delta = _first_dataset(
+            action_group,
+            length,
+            "tcp_delta_stand_left",
+            "tcp_delta_left",
+            "tcp_twist_stand_left",
+            "tcp_twist_local_left",
+            "tcp_twist_left",
+        )
+        right_delta = _first_dataset(
+            action_group,
+            length,
+            "tcp_delta_stand_right",
+            "tcp_delta_right",
+            "tcp_twist_stand_right",
+            "tcp_twist_local_right",
+            "tcp_twist_right",
+        )
         if left_delta is not None or right_delta is not None:
             action_kind = "delta"
             left_delta = _ensure_delta(left_delta, length)

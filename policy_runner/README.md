@@ -216,6 +216,66 @@ chunks and gzip compression. Configure `camera.expected_cameras` to record a
 fixed subset; missing frames after a shape has been observed are zero-filled and
 `bundle_age_us` marks missing bundles.
 
+## Image-Conditioned Flow Baseline
+
+`flow-train` is the default image-conditioned imitation baseline for HDF5
+episodes. It is custom flow matching rather than OpenPI so the first baseline
+keeps the action representation, masking, normalization, and SafetyGate runtime
+path local to `policy_runner`. OpenPI 0.5 remains a later comparison path after
+the robotics_lab dataset schema and simulator execution loop are stable.
+
+Train from pika UMI or robotics_lab HDF5 episodes:
+
+```bash
+python3 -m policy_runner flow-train \
+  --episodes-dir data/episodes \
+  --checkpoint outputs/flow_policy.pt \
+  --vision-backbone resnet50 \
+  --action-horizon 16 \
+  --batch-size 32 \
+  --epochs 100
+```
+
+The checkpoint schema is `robotics_lab.policy_runner.flow_matching.v1`.
+Training also writes `dataset_stats.json` and `training_curves.jsonl` beside the
+checkpoint. The validation metrics are rollout-free: `action_mse`,
+`gripper_mse`, `chunk_endpoint_error`, `image_decode_count`, and
+`missing_camera_count`.
+
+The policy output is a high-level action chunk, not a 500 Hz low-level servo
+target. Each step is a 14D vector:
+
+```text
+left dx,dy,dz,drx,dry,drz,grip,
+right dx,dy,dz,drx,dry,drz,grip
+```
+
+Current pika UMI single-arm episodes are mapped to the left arm by default and
+carry a zero right-arm `arm_mask`. Future robotics_lab dual-arm episodes can
+provide left/right cameras, TCP proprioception, and gripper values. Proprio
+features are reset-relative; action chunks are current-relative. Dataset
+statistics normalize proprio, action chunks, and camera images before training.
+
+The model uses a frozen vision encoder by default (`resnet18` or `resnet50` via
+`torchvision`) with a placeholder `dinov3` plugin hook for later optional
+integration. Multi-view camera embeddings are fused with a proprio MLP through
+an MLP or Transformer condition encoder, then a rectified-flow decoder learns
+`v_theta(x_t, t, cond)` over action chunks.
+
+Run a trained checkpoint as a simulator Cartesian action source:
+
+```bash
+python3 -m policy_runner flow-infer \
+  --checkpoint outputs/flow_policy.pt \
+  --config policy_runner/config/simulator_dual_spacemouse_cartesian.yaml
+```
+
+`flow-infer` emits bounded `TcpDeltaStand` steps from the current chunk. Gripper
+values stay in the action vector for training but are not sent to hardware in
+this baseline. Required camera frames must be available when sampling a new
+chunk; otherwise the source emits no motion intent. All inference intents remain
+behind the existing `SafetyGate`, and real Cartesian motion remains blocked.
+
 ## SpaceMouse Joint Velocity
 
 SpaceMouse support belongs in `policy_runner`, not `rb_gui`. The joint-velocity

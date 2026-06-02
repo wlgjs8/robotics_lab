@@ -300,6 +300,30 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="Abort training if HDF5 episodes carry different config hashes.",
     )
 
+    flow_train = sub.add_parser(
+        "flow-train",
+        help="Train an offline image-conditioned flow-matching action-chunk baseline from HDF5 episodes.",
+    )
+    flow_train.add_argument("--episodes-dir", default="data/episodes")
+    flow_train.add_argument("--checkpoint", default="outputs/flow_policy.pt")
+    flow_train.add_argument("--vision-backbone", default="resnet50")
+    flow_train.add_argument("--action-horizon", type=int, default=16)
+    flow_train.add_argument("--batch-size", type=int, default=32)
+    flow_train.add_argument("--epochs", type=int, default=100)
+    flow_train.add_argument("--lr", type=float, default=1e-4)
+    flow_train.add_argument("--image-size", type=int, default=224)
+    flow_train.add_argument("--hidden-dim", type=int, default=128)
+    flow_train.add_argument("--condition-encoder", choices=("transformer", "mlp"), default="transformer")
+    flow_train.add_argument(
+        "--train-vision",
+        action="store_true",
+        help="Unfreeze the vision encoder; the default keeps it frozen.",
+    )
+    flow_train.add_argument("--val-split", type=float, default=0.1)
+    flow_train.add_argument("--sample-steps", type=int, default=16)
+    flow_train.add_argument("--device", default="auto")
+    flow_train.add_argument("--max-stats-samples", type=int, default=None)
+
     infer = sub.add_parser("infer", help="Run a trained behavior-cloning checkpoint in simulation.")
     infer.add_argument("--config", required=True, help="policy_runner YAML config")
     infer.add_argument("--checkpoint", default="/data/checkpoints/bc_state_to_twist.pt")
@@ -308,6 +332,17 @@ def _main_with_subcommands(argv: list[str]) -> int:
         action="store_true",
         help="Suppress one-shot checkpoint/runtime config hash drift warnings.",
     )
+
+    flow_infer = sub.add_parser(
+        "flow-infer",
+        help="Run a trained flow-matching action-chunk checkpoint in simulation.",
+    )
+    flow_infer.add_argument("--checkpoint", default="outputs/flow_policy.pt")
+    flow_infer.add_argument("--config", required=True, help="policy_runner YAML config")
+    flow_infer.add_argument("--sample-steps", type=int, default=16)
+    flow_infer.add_argument("--device", default="auto")
+    flow_infer.add_argument("--max-linear-step-m", type=float, default=0.002)
+    flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.01)
 
     args = parser.parse_args(argv)
     if args.command == "record":
@@ -455,6 +490,27 @@ def _main_with_subcommands(argv: list[str]) -> int:
             strict_config_check=args.strict_config_check,
         )
         return 0
+    if args.command == "flow-train":
+        from .flow_training import train_flow_matching
+
+        train_flow_matching(
+            episodes_dir=args.episodes_dir,
+            checkpoint_path=args.checkpoint,
+            vision_backbone=args.vision_backbone,
+            action_horizon=args.action_horizon,
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            lr=args.lr,
+            image_size=args.image_size,
+            hidden_dim=args.hidden_dim,
+            condition_encoder=args.condition_encoder,
+            frozen_vision=not args.train_vision,
+            val_split=args.val_split,
+            sample_steps=args.sample_steps,
+            device=args.device,
+            max_stats_samples=args.max_stats_samples,
+        )
+        return 0
     if args.command == "infer":
         from .training import BehaviorCloningActionSource
 
@@ -467,4 +523,32 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 ignore_config_drift=args.ignore_config_drift,
             ),
         )
+    if args.command == "flow-infer":
+        from .flow_inference import FlowMatchingActionSource
+
+        config = load_config(args.config)
+        camera_client = None
+        if config.camera.enable:
+            from .camera_bundle_client import CameraBundleClient
+
+            camera_client = CameraBundleClient(
+                zmq_endpoint=config.camera.zmq_endpoint,
+                topic=config.camera.bundle_topic,
+                max_age_ms=config.camera.max_age_ms,
+            )
+        try:
+            source = FlowMatchingActionSource(
+                args.checkpoint,
+                timeout_sec=config.servo_command.timeout_sec,
+                camera_client=camera_client,
+                sample_steps=args.sample_steps,
+                max_linear_step_m=args.max_linear_step_m,
+                max_angular_step_rad=args.max_angular_step_rad,
+                device=args.device,
+            )
+        except Exception:
+            if camera_client is not None:
+                camera_client.close()
+            raise
+        return run(config, source=source)
     raise ValueError(f"unknown policy_runner command: {args.command}")
