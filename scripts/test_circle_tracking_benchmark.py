@@ -229,6 +229,23 @@ class CircleTrackingBenchmarkHelpersTest(unittest.TestCase):
                     speed,
                 )
 
+    def test_python_feedback_lane_metadata_stays_separate_from_server_circle(self) -> None:
+        row = {
+            "schema": rbpodo_bench.SCHEMA,
+            "benchmark_category": "rbpodo_controller_simulation",
+            "backend": "rbpodo",
+            "controller_mode": "pgmode_simulation",
+            "controller": "twist_stand_feedback",
+            "tracking_source_used": "tcp_ref_stand",
+            "physical_motion_expected": False,
+        }
+        bench.apply_canonical_lane_metadata(row)
+        self.assertEqual(row["benchmark_lane"], "rbpodo_python_streaming_feedback")
+        self.assertEqual(row["control_loop_location"], "python_benchmark")
+        self.assertEqual(row["trajectory_generation_location"], "python_benchmark")
+        self.assertEqual(row["feedback_loop_location"], "python_benchmark")
+        self.assertEqual(row["tracking_source"], "tcp_ref_stand")
+
     def test_compare_summary_serializes_profile_speed_and_stress(self) -> None:
         row = compare_bench.comparison_row(
             {

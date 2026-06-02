@@ -330,6 +330,7 @@ nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config
             {"default_orientation_mode", orientationModeString(config.linear_move.default_orientation_mode)},
         }},
         {"circle_move", {
+            {"command_family", "server_side_circle"},
             {"allow_in_simulation", config.circle_move.allow_in_simulation},
             {"allow_in_real", config.circle_move.allow_in_real},
             {"max_diameter_m", config.circle_move.max_diameter_m},
@@ -805,6 +806,16 @@ bool isCartesianMode(ControlMode mode) {
            mode == ControlMode::TcpTwistLocal;
 }
 
+std::string commandFamilyString(ControlMode mode) {
+    switch (mode) {
+        case ControlMode::TcpCircleMove:
+        case ControlMode::TcpCircleTrack:
+            return "server_side_circle";
+        default:
+            return "";
+    }
+}
+
 std::string cartesianGateUnavailableReason(
     const CartesianControlConfig& cartesian_config,
     const BackendConfig& backend_config,
@@ -1024,6 +1035,7 @@ nlohmann::json armStateJson(
         cartesianGateJson(cartesian_config, safety_config, backend_config, command.mode, cartesian_solve);
     return {
         {"mode", toString(command.mode)},
+        {"command_family", optionalStringJson(commandFamilyString(command.mode))},
         {"q_actual_deg", jointArrayJson(state.q_actual_deg)},
         {"q_target_deg", jointArrayJson(state.q_target_deg)},
         {"q_ref_deg", jointArrayJson(state.q_target_deg)},

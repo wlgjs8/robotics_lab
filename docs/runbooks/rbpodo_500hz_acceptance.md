@@ -49,6 +49,34 @@ A 500 Hz `sdk_ack_worker` candidate can therefore be official goal `pass` while
 failure of the official ACKON500 goal; it is a diagnostic warning that must
 remain visible. `socket_send_only_count > 0` is still an official goal failure.
 
+## Canonical Benchmark Lanes
+
+Every 500 Hz circle summary and report row must expose these canonical fields:
+
+```text
+benchmark_lane
+control_loop_location
+trajectory_generation_location
+feedback_loop_location
+low_level_send_mode
+acceptance_semantics
+tracking_source
+physical_motion_expected
+```
+
+The report may also keep older comparison labels such as `500hz_ack_on` or
+`500hz_async_sdk_ack_worker`, but `benchmark_lane` is the source of truth:
+
+| Canonical lane | Required interpretation |
+| --- | --- |
+| `rbpodo_server_side_circle_ackon500_sync` | Server-side circle with synchronous ACK-on sends at 500 Hz. Useful comparison evidence, not the official async ACKON500 pass lane. |
+| `rbpodo_server_side_circle_ackon500_sdk_worker` | Official ACKON500 pass lane when `async_mode=sdk_ack_worker`, `low_level_send_mode=sdk_ack_worker`, and `acceptance_semantics=sdk_worker_ack_observed`. |
+| `rbpodo_server_side_circle_500hz_socket_send_supervised` | Socket/API send with reference supervision. It is `socket_send_only` and cannot pass the official ACKON500 goal. |
+| `rbpodo_python_streaming_feedback` | Python benchmark feedback streaming. Keep separate from server-side circle even when tracking metrics are good. |
+
+Official ACKON500 goal reports must group by `benchmark_lane` and reject any
+candidate whose lane is not `rbpodo_server_side_circle_ackon500_sdk_worker`.
+
 ## Servo Rate Accounting
 
 ACKON500 reports separate high-level UDP command packets from low-level ServoJ

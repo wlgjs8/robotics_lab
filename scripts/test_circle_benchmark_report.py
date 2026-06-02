@@ -142,9 +142,14 @@ class CircleBenchmarkReportTest(unittest.TestCase):
         )
         rows = report.classify_rows([simulator, rbpodo])
         self.assertEqual(rows[0]["benchmark_category"], "rb_simulator")
+        self.assertEqual(rows[0]["benchmark_lane"], "simulator_python_streaming_open_loop")
         self.assertEqual(rows[1]["benchmark_category"], "rbpodo_controller_simulation")
+        self.assertEqual(rows[1]["benchmark_lane"], "rbpodo_python_streaming_feedback")
         self.assertEqual(rows[1]["controller_mode"], "pgmode_simulation")
         self.assertEqual(rows[1]["backend"], "rbpodo")
+        markdown = report.report_markdown(rows, "test", 1)
+        self.assertIn("## Canonical Benchmark Lanes", markdown)
+        self.assertIn("benchmark_lane", markdown)
 
     def test_rbpodo_stable_baseline_uses_tcp_ref_tracking_source(self) -> None:
         rows = report.classify_rows(

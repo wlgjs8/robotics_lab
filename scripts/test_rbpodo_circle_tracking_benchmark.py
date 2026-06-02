@@ -448,9 +448,50 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertGreaterEqual(stop_ns, start_ns)
         self.assertEqual(sent[0]["left"]["mode"], "TcpCircleMove")  # type: ignore[index]
+        self.assertEqual(sent[0]["left"]["command_family"], "server_side_circle")  # type: ignore[index]
         self.assertEqual(sent[0]["left"]["repeat"], 5)  # type: ignore[index]
         self.assertEqual(sent[0]["left"]["phase_advance_sec"], 0.04)  # type: ignore[index]
         self.assertEqual(sent[-1]["mode"], "Hold")
+
+    def test_server_circle_sdk_ack_worker_maps_to_official_ackon500_lane(self) -> None:
+        row = {
+            "schema": bench.SCHEMA,
+            "benchmark_category": "rbpodo_controller_simulation",
+            "backend": "rbpodo",
+            "controller_mode": "pgmode_simulation",
+            "controller": "server_circle",
+            "command_family": "server_side_circle",
+            "servo_rate_hz": 500.0,
+            "async_mode": "sdk_ack_worker",
+            "acceptance_semantics": "controller_ack_observed",
+            "tracking_source_used": "tcp_ref_stand",
+            "physical_motion_expected": False,
+        }
+        sim_bench.apply_canonical_lane_metadata(row)
+        self.assertEqual(row["benchmark_lane"], "rbpodo_server_side_circle_ackon500_sdk_worker")
+        self.assertEqual(row["low_level_send_mode"], "sdk_ack_worker")
+        self.assertEqual(row["acceptance_semantics"], "sdk_worker_ack_observed")
+        self.assertEqual(row["control_loop_location"], "rb_servo_server")
+
+    def test_socket_send_supervised_uses_send_only_lane(self) -> None:
+        row = {
+            "schema": bench.SCHEMA,
+            "benchmark_category": "rbpodo_controller_simulation",
+            "backend": "rbpodo",
+            "controller_mode": "pgmode_simulation",
+            "controller": "server_circle",
+            "command_family": "server_side_circle",
+            "servo_rate_hz": 500.0,
+            "async_mode": "socket_send_supervised",
+            "acceptance_semantics": "socket_send_only",
+            "tracking_source_used": "tcp_ref_stand",
+            "physical_motion_expected": False,
+        }
+        sim_bench.apply_canonical_lane_metadata(row)
+        self.assertEqual(row["benchmark_lane"], "rbpodo_server_side_circle_500hz_socket_send_supervised")
+        self.assertEqual(row["low_level_send_mode"], "socket_send_supervised")
+        self.assertEqual(row["acceptance_semantics"], "socket_send_only")
+        self.assertNotEqual(row["benchmark_lane"], "rbpodo_server_side_circle_ackon500_sdk_worker")
 
     def test_profile_serialization_appears_in_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:

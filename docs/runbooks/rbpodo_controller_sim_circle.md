@@ -41,6 +41,36 @@ completed run. The official ACKON500 orientation criterion remains
 visible as a diagnostic unless `GOAL.md` explicitly promotes it to a goal
 criterion. Socket-send-only rows are never official ACK-ON passes.
 
+Every benchmark summary, ablation row, and report row also carries canonical
+lane metadata:
+
+```text
+benchmark_lane
+control_loop_location
+trajectory_generation_location
+feedback_loop_location
+low_level_send_mode
+acceptance_semantics
+tracking_source
+physical_motion_expected
+```
+
+For rbpodo controller simulation, the current lanes are:
+
+| Lane | Meaning |
+| --- | --- |
+| `rbpodo_python_streaming_open_loop` | Python benchmark streams open-loop twist/segment commands. |
+| `rbpodo_python_streaming_feedback` | Python benchmark closes the feedback loop from state telemetry. |
+| `rbpodo_server_side_circle_ackon100` | Server-side circle tracking at the 100 Hz ACK-on baseline. |
+| `rbpodo_server_side_circle_ackon500_sync` | Server-side circle tracking at 500 Hz with synchronous ACK-on sends. |
+| `rbpodo_server_side_circle_ackon500_sdk_worker` | Official ACKON500 pass lane: server-side circle, 500 Hz, async `sdk_ack_worker`, worker ACK observed. |
+| `rbpodo_server_side_circle_500hz_socket_send_supervised` | Server-side circle with `socket_send_supervised`; send-only evidence, never an official ACKON500 pass. |
+| `future_physical_real_unavailable` | Placeholder for future physical-real evidence; this runbook does not create it. |
+
+`socket_send_supervised` must not be grouped with ACKON500 pass evidence.
+Python streaming feedback remains a distinct lane even when its metrics are
+good enough to guide future policy-runner or IL work.
+
 ## Scope
 
 Use these templates only for `rbpodo` controller-simulation bring-up:
@@ -784,6 +814,11 @@ separate implementation and acceptance work:
 current: benchmark state UDP -> Python feedback -> UDP command -> server -> rbpodo
 target: benchmark parameters -> server servo tick desired pose/twist + feedback
 ```
+
+Use server-side circle tracking as the official report term. Keep accepting
+legacy names for now, but report both `TcpCircleMove` and `TcpCircleTrack` as
+`command_family: server_side_circle` so historical artifacts, GUI overlays, and
+future reports can group them without implying they are the same command.
 
 The command carries trajectory and feedback parameters:
 

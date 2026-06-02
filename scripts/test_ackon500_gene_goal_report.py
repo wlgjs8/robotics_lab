@@ -170,6 +170,8 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
             summary = report.build_summary(root)
             self.assertEqual(summary["result"], "pass")
             best = summary["best_candidate"]
+            self.assertEqual(best["benchmark_lane"], "rbpodo_server_side_circle_ackon500_sdk_worker")
+            self.assertEqual(best["low_level_send_mode"], "sdk_ack_worker")
             self.assertEqual(best["acceptance_semantics"], "sdk_worker_ack_observed")
             self.assertGreaterEqual(best["ack_coverage_ratio"], 0.98)
             self.assertEqual(best["udp_command_count"], 2)
@@ -214,6 +216,11 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
             summary = report.build_summary(root)
             self.assertEqual(summary["result"], "fail")
             failures = "\n".join(summary["best_candidate"]["failures"])
+            self.assertEqual(
+                summary["best_candidate"]["benchmark_lane"],
+                "rbpodo_server_side_circle_500hz_socket_send_supervised",
+            )
+            self.assertIn("benchmark_lane", failures)
             self.assertIn("socket_send_only_count", failures)
             self.assertEqual(summary["best_candidate"]["ackon500_goal_status"], "fail")
 

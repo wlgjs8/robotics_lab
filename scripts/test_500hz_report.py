@@ -173,6 +173,19 @@ class Rbpodo500HzReportTest(unittest.TestCase):
         self.assertEqual(socket_row["controller_ack_observed_count"], 0.0)
         self.assertTrue(socket_row["socket_send_only"])
         self.assertTrue(socket_row["q_ref_supervised"])
+        self.assertEqual(socket_row["benchmark_lane"], "rbpodo_python_streaming_feedback")
+        socket_server_row = report.normalize_row(
+            {
+                **dict(socket_row),
+                "controller": "server_circle",
+                "command_family": "server_side_circle",
+            },
+            source_kind="circle",
+        )
+        self.assertEqual(
+            socket_server_row["benchmark_lane"],
+            "rbpodo_server_side_circle_500hz_socket_send_supervised",
+        )
         lane = next(
             row for row in comparative
             if row["profile"] == "safe_5cm_10s" and row["lane"] == "500hz_socket_send_supervised"
@@ -199,12 +212,28 @@ class Rbpodo500HzReportTest(unittest.TestCase):
         self.assertEqual(sdk_row["acceptance_semantics"], "sdk_worker_ack_observed")
         self.assertTrue(sdk_row["sdk_worker_ack_observed"])
         self.assertFalse(sdk_row["controller_ack_observed"])
+        self.assertEqual(sdk_row["benchmark_lane"], "rbpodo_python_streaming_feedback")
+        sdk_server_row = report.normalize_row(
+            {
+                **dict(sdk_row),
+                "controller": "server_circle",
+                "command_family": "server_side_circle",
+            },
+            source_kind="circle",
+        )
+        self.assertEqual(
+            sdk_server_row["benchmark_lane"],
+            "rbpodo_server_side_circle_ackon500_sdk_worker",
+        )
         lane = next(
             row for row in comparative
             if row["profile"] == "safe_5cm_10s" and row["lane"] == "500hz_async_sdk_ack_worker"
         )
         self.assertTrue(lane["evidence_present"])
         self.assertEqual(lane["acceptance_semantics"], "sdk_worker_ack_observed")
+        markdown = report.report_markdown(_selected, comparisons, comparative, "test")
+        self.assertIn("## Canonical Benchmark Lanes", markdown)
+        self.assertIn("benchmark_lane", markdown)
 
     def test_q_ref_watchdog_failure_classifies_failed(self) -> None:
         _selected, comparisons, _comparative = report.build_report(

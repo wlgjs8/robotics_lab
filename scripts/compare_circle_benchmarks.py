@@ -17,6 +17,11 @@ import generate_rbpodo_measurement_reliability_report as reliability_report
 COLUMNS = [
     ("run name", "run_name"),
     ("category", "benchmark_category"),
+    ("benchmark_lane", "benchmark_lane"),
+    ("control_loop_location", "control_loop_location"),
+    ("trajectory_generation_location", "trajectory_generation_location"),
+    ("feedback_loop_location", "feedback_loop_location"),
+    ("low_level_send_mode", "low_level_send_mode"),
     ("backend", "backend"),
     ("controller_mode", "controller_mode"),
     ("controller", "controller"),
@@ -1021,6 +1026,7 @@ def comparison_row(summary: dict[str, Any]) -> dict[str, Any]:
         "diagnostic_warnings": "; ".join(text_list(summary.get("diagnostic_warnings"))),
         "performance_warnings": warning_text(summary),
     }
+    profile_bench.apply_canonical_lane_metadata(row)
     reliability_report.annotate_row(row)
     return row
 
@@ -1040,11 +1046,78 @@ def format_cell(value: Any) -> str:
 
 
 def write_markdown(rows: list[dict[str, Any]]) -> None:
+    print("## Canonical Benchmark Lanes")
+    print()
+    print(lane_group_markdown(rows))
+    print()
+    print("## All Runs")
+    print()
     headers = [title for title, _key in COLUMNS]
     print("| " + " | ".join(headers) + " |")
     print("| " + " | ".join("---" for _ in headers) + " |")
     for row in rows:
         print("| " + " | ".join(format_cell(row.get(key)) for _title, key in COLUMNS) + " |")
+
+
+def lane_group_markdown(rows: list[dict[str, Any]]) -> str:
+    columns = [
+        "benchmark_lane",
+        "count",
+        "categories",
+        "controllers",
+        "async_modes",
+        "low_level_send_modes",
+        "acceptance_semantics",
+        "tracking_sources",
+    ]
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        lane = str(row.get("benchmark_lane") or "")
+        if not lane:
+            continue
+        group = groups.setdefault(
+            lane,
+            {
+                "benchmark_lane": lane,
+                "count": 0,
+                "categories": set(),
+                "controllers": set(),
+                "async_modes": set(),
+                "low_level_send_modes": set(),
+                "acceptance_semantics": set(),
+                "tracking_sources": set(),
+            },
+        )
+        group["count"] += 1
+        for field, target in (
+            ("benchmark_category", "categories"),
+            ("controller", "controllers"),
+            ("async_mode", "async_modes"),
+            ("low_level_send_mode", "low_level_send_modes"),
+            ("acceptance_semantics", "acceptance_semantics"),
+            ("tracking_source", "tracking_sources"),
+        ):
+            value = row.get(field)
+            if value not in (None, ""):
+                group[target].add(str(value))
+    if not groups:
+        return "_No canonical lane rows._"
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for lane in sorted(groups):
+        group = groups[lane]
+        table_row = {
+            key: (
+                ", ".join(sorted(value))
+                if isinstance(value, set)
+                else value
+            )
+            for key, value in group.items()
+        }
+        lines.append("| " + " | ".join(format_cell(table_row.get(key)) for key in columns) + " |")
+    return "\n".join(lines)
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:

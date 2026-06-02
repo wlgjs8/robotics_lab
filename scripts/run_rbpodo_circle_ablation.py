@@ -177,6 +177,8 @@ RATE_T1_OVERRIDE_KEYS = {
 }
 SUMMARY_COLUMNS = [
     "name",
+    *sim_bench.CANONICAL_LANE_FIELDS,
+    "command_family",
     "controller",
     "profile",
     "arm",
@@ -1256,6 +1258,12 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
     row = {
         "name": exp.get("name"),
         "controller": summary.get("controller") or exp.get("controller"),
+        "command_family": first_present(
+            summary.get("command_family"),
+            sim_bench.SERVER_SIDE_CIRCLE_COMMAND_FAMILY
+            if (summary.get("controller") or exp.get("controller")) == "server_circle"
+            else "python_streaming",
+        ),
         "profile": summary.get("profile") or exp.get("profile"),
         "arm": summary.get("arm") or exp.get("arm"),
         "ack_policy": meta.get("ack_policy"),
@@ -1452,6 +1460,7 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
     row.setdefault("backend", "rbpodo")
     row.setdefault("controller_mode", "pgmode_simulation")
     row.setdefault("physical_motion_expected", False)
+    sim_bench.apply_canonical_lane_metadata(row)
     reliability_report.annotate_row(row)
     if acceptance_semantics == "socket_send_only" or async_mode == "socket_send_supervised":
         append_cell_value(row, "reliability_caveats", "socket_send_only_not_controller_ack")
@@ -1662,6 +1671,62 @@ def decision_split_markdown(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def lane_group_markdown(rows: list[dict[str, Any]]) -> str:
+    columns = [
+        "benchmark_lane",
+        "count",
+        "controllers",
+        "async_modes",
+        "low_level_send_modes",
+        "acceptance_semantics",
+        "tracking_sources",
+    ]
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        lane = str(row.get("benchmark_lane") or "")
+        if not lane:
+            continue
+        group = groups.setdefault(
+            lane,
+            {
+                "benchmark_lane": lane,
+                "count": 0,
+                "controllers": set(),
+                "async_modes": set(),
+                "low_level_send_modes": set(),
+                "acceptance_semantics": set(),
+                "tracking_sources": set(),
+            },
+        )
+        group["count"] += 1
+        for field, target in (
+            ("controller", "controllers"),
+            ("async_mode", "async_modes"),
+            ("low_level_send_mode", "low_level_send_modes"),
+            ("acceptance_semantics", "acceptance_semantics"),
+            ("tracking_source", "tracking_sources"),
+        ):
+            value = row.get(field)
+            if value not in (None, ""):
+                group[target].add(str(value))
+    if not groups:
+        return "_None._"
+    table_rows: list[dict[str, Any]] = []
+    for lane in sorted(groups):
+        group = groups[lane]
+        table_rows.append(
+            {
+                key: (
+                    ", ".join(sorted(value))
+                    if isinstance(value, set)
+                    else value
+                )
+                for key, value in group.items()
+            }
+        )
+    return markdown_table(table_rows, columns)
+
+
 def write_report(path: Path, rows: list[dict[str, Any]], skipped_plots: list[str]) -> None:
     stable = [row for row in rows if row.get("profile") == "circle_15cm_16s" and not rejected(row)]
     stress = [row for row in rows if row.get("profile") == "gene_15cm_4s" and not rejected(row)]
@@ -1680,6 +1745,10 @@ def write_report(path: Path, rows: list[dict[str, Any]], skipped_plots: list[str
         "This table separates tuning classification, error/timing classification, measurement reliability, and physical-readiness blockers.",
         "",
         decision_split_markdown(rows),
+        "",
+        "## Canonical Benchmark Lanes",
+        "",
+        lane_group_markdown(rows),
         "",
         "## All Experiments",
         "",

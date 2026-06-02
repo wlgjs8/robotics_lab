@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import compare_circle_benchmarks as compare
+import circle_tracking_benchmark as profile_bench
 import generate_rbpodo_measurement_reliability_report as reliability_report
 
 
@@ -30,6 +31,11 @@ COMPARISONS = [
 ]
 
 KEY_FIELDS = [
+    "benchmark_lane",
+    "control_loop_location",
+    "trajectory_generation_location",
+    "feedback_loop_location",
+    "low_level_send_mode",
     "async_mode",
     "acceptance_semantics",
     "controller_ack_observed",
@@ -121,6 +127,7 @@ COMPARATIVE_LANES = [
 COMPARATIVE_COLUMNS = [
     "comparison",
     "lane",
+    "benchmark_lane",
     "evidence_present",
     "run_name",
     "rate_hz",
@@ -393,6 +400,7 @@ def flatten_metrics(row: dict[str, Any]) -> None:
     if row.get("socket_send_only"):
         append_cell_value(row, "reliability_caveats", "socket_send_only_not_controller_ack")
         append_cell_value(row, "benchmark_interpretation", "reference_supervision_required")
+    profile_bench.apply_canonical_lane_metadata(row)
 
 
 def normalize_row(row: dict[str, Any], *, source_kind: str) -> dict[str, Any]:
@@ -707,6 +715,7 @@ def comparative_row(profile: str, lane: str, row: dict[str, Any] | None) -> dict
         if key not in base:
             base[key] = row.get(key)
     base["run_name"] = row_name(row)
+    base["benchmark_lane"] = row.get("benchmark_lane")
     return base
 
 
@@ -907,6 +916,67 @@ def markdown_table(rows: list[dict[str, Any]], columns: list[str]) -> str:
     return "\n".join(lines)
 
 
+def lane_group_markdown(rows: list[dict[str, Any]]) -> str:
+    columns = [
+        "benchmark_lane",
+        "count",
+        "legacy_lanes",
+        "profiles",
+        "async_modes",
+        "low_level_send_modes",
+        "acceptance_semantics",
+        "tracking_sources",
+    ]
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        lane = str(row.get("benchmark_lane") or "")
+        if not lane:
+            continue
+        group = groups.setdefault(
+            lane,
+            {
+                "benchmark_lane": lane,
+                "count": 0,
+                "legacy_lanes": set(),
+                "profiles": set(),
+                "async_modes": set(),
+                "low_level_send_modes": set(),
+                "acceptance_semantics": set(),
+                "tracking_sources": set(),
+            },
+        )
+        group["count"] += 1
+        legacy = row_lane(row)
+        if legacy:
+            group["legacy_lanes"].add(legacy)
+        for field, target in (
+            ("profile", "profiles"),
+            ("async_mode", "async_modes"),
+            ("low_level_send_mode", "low_level_send_modes"),
+            ("acceptance_semantics", "acceptance_semantics"),
+            ("tracking_source", "tracking_sources"),
+        ):
+            value = row.get(field)
+            if value not in (None, ""):
+                group[target].add(str(value))
+    if not groups:
+        return "_No canonical lane rows._"
+    table_rows: list[dict[str, Any]] = []
+    for lane in sorted(groups):
+        group = groups[lane]
+        table_rows.append(
+            {
+                key: (
+                    ", ".join(sorted(value))
+                    if isinstance(value, set)
+                    else value
+                )
+                for key, value in group.items()
+            }
+        )
+    return markdown_table(table_rows, columns)
+
+
 def report_markdown(
     rate_rows: list[dict[str, Any]],
     comparisons: list[dict[str, Any]],
@@ -925,6 +995,10 @@ def report_markdown(
             "- `sdk_worker_ack_observed`: async `sdk_ack_worker` observed controller ACK in the worker thread.",
             "- `socket_send_only`: command write/socket/API send evidence only; not per-command controller ACK.",
             "- `q_ref_supervised`: controller-reference watchdog evidence was present and OK.",
+            "",
+            "## Canonical Benchmark Lanes",
+            "",
+            lane_group_markdown(rate_rows),
             "",
             "## Comparison Classifications",
             "",

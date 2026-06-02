@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import circle_tracking_benchmark as sim_bench
+
 
 SCHEMA = "robotics_lab.ackon500_gene_goal_report.v1"
 PASS_THRESHOLDS = {
@@ -601,6 +603,16 @@ def derive_acceptance_semantics(summary: dict[str, Any], row: dict[str, str], as
     return None
 
 
+def server_side_circle_packet_observed(commands: list[dict[str, Any]], arm: str) -> bool:
+    for packet in commands:
+        arm_payload = packet.get(arm)
+        if not isinstance(arm_payload, dict):
+            continue
+        if arm_payload.get("mode") in sim_bench.SERVER_SIDE_CIRCLE_MODES:
+            return True
+    return False
+
+
 def artifact_exists(path_text: Any, fallback: Path) -> bool:
     path = Path(str(path_text)) if isinstance(path_text, str) and path_text else fallback
     return path.is_file()
@@ -619,6 +631,7 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
     commands = load_jsonl(artifact_dir / "command_packets.jsonl")
     async_info = async_metrics(states, arm)
     packet_rate = command_packet_rate(commands, arm)
+    server_side_circle_observed = server_side_circle_packet_observed(commands, arm)
     async_telemetry_path = artifact_dir / "async_ack_telemetry.jsonl"
     async_telemetry_rows = 0
     if async_info.get("enabled_observed") or async_info.get("mode") == "sdk_ack_worker":
@@ -667,6 +680,19 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
         "artifact_dir": str(artifact_dir),
         "summary_json": str(path.resolve()),
         "profile": first_value(summary.get("profile"), row.get("profile")),
+        "benchmark_category": "rbpodo_controller_simulation",
+        "backend": "rbpodo",
+        "controller_mode": "pgmode_simulation",
+        "controller": first_value(
+            summary.get("controller"),
+            row.get("controller"),
+            "server_circle" if server_side_circle_observed else None,
+        ),
+        "command_family": first_value(
+            summary.get("command_family"),
+            row.get("command_family"),
+            sim_bench.SERVER_SIDE_CIRCLE_COMMAND_FAMILY if server_side_circle_observed else None,
+        ),
         "repeat": first_number(summary.get("repeat"), row.get("repeat")),
         "tracking_source": first_value(summary.get("tracking_source_used"), summary.get("tracking_source"), row.get("tracking_source")),
         "servo_rate_hz": servo_rate_hz,
@@ -734,6 +760,7 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
         if saturation_count is not None and saturation_denominator > 0
         else None
     )
+    sim_bench.apply_canonical_lane_metadata(candidate)
     candidate["required_artifacts_present"] = required_artifacts_present(candidate)
     candidate["failures"] = goal_failures(candidate)
     candidate["ackon500_goal_result"] = {
@@ -798,6 +825,11 @@ def goal_failures(candidate: dict[str, Any]) -> list[str]:
         failures.append(f"servo_t1_sec {candidate.get('servo_t1_sec')} != 0.002")
     if candidate.get("acceptance_semantics") not in {"controller_ack_observed", "sdk_worker_ack_observed"}:
         failures.append(f"acceptance_semantics {candidate.get('acceptance_semantics')} is not ACK-observed")
+    if candidate.get("benchmark_lane") != "rbpodo_server_side_circle_ackon500_sdk_worker":
+        failures.append(
+            "benchmark_lane "
+            f"{candidate.get('benchmark_lane')} != rbpodo_server_side_circle_ackon500_sdk_worker"
+        )
     check_min(candidate, "official_tracking_window_sec", 1e-9, failures)
     check_min(candidate, "goal_window_commands_sent", 1.0, failures)
     check_min(candidate, "ack_coverage_ratio", PASS_THRESHOLDS["min_ack_ratio"], failures)
@@ -884,8 +916,27 @@ def report_markdown(summary: dict[str, Any]) -> str:
         "",
         "This is rbpodo controller pgmode-simulation evidence only. Physical robot motion is not approved.",
         "",
+        "Official pass lane: `rbpodo_server_side_circle_ackon500_sdk_worker`.",
+        "",
         "The official orientation criterion is `p95_orientation_drift_rad <= 0.02`. "
         "`max_orientation_drift_rad` remains visible as a non-fatal diagnostic spike unless it is promoted in GOAL.md.",
+        "",
+        "## Canonical lane evidence",
+        "",
+        table(
+            candidates,
+            [
+                "name",
+                "benchmark_lane",
+                "control_loop_location",
+                "trajectory_generation_location",
+                "feedback_loop_location",
+                "low_level_send_mode",
+                "acceptance_semantics",
+                "tracking_source",
+                "physical_motion_expected",
+            ],
+        ),
         "",
         "## Best candidate",
         "",
@@ -899,7 +950,10 @@ def report_markdown(summary: dict[str, Any]) -> str:
                 "safety_result_status",
                 "benchmark_threshold_status",
                 "diagnostic_warning_count",
+                "benchmark_lane",
+                "low_level_send_mode",
                 "acceptance_semantics",
+                "tracking_source",
                 "udp_command_count",
                 "server_servo_tick_count",
                 "async_commands_sent_total",
@@ -959,8 +1013,11 @@ def report_markdown(summary: dict[str, Any]) -> str:
                 "ackon500_goal_status",
                 "run_result_status",
                 "benchmark_threshold_status",
+                "benchmark_lane",
+                "low_level_send_mode",
                 "async_mode",
                 "acceptance_semantics",
+                "tracking_source",
                 "repeat",
                 "servo_rate_hz",
                 "servo_t1_sec",
@@ -1005,7 +1062,10 @@ def timing_markdown(summary: dict[str, Any]) -> str:
                     "goal_pass",
                     "run_result_status",
                     "benchmark_threshold_status",
+                    "benchmark_lane",
+                    "low_level_send_mode",
                     "async_mode",
+                    "acceptance_semantics",
                     "udp_command_count",
                     "server_servo_tick_count",
                     "async_commands_enqueued_total",

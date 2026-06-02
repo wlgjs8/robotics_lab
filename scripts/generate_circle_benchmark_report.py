@@ -10,6 +10,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+import circle_tracking_benchmark as profile_bench
 import compare_circle_benchmarks as compare
 import generate_rbpodo_measurement_reliability_report as reliability_report
 
@@ -38,6 +39,11 @@ RBPODO_STRESS_RULES = {
 REPORT_COLUMNS = [
     "run_name",
     "benchmark_category",
+    "benchmark_lane",
+    "control_loop_location",
+    "trajectory_generation_location",
+    "feedback_loop_location",
+    "low_level_send_mode",
     "backend",
     "controller_mode",
     "controller",
@@ -228,6 +234,7 @@ def load_ablation_rows(path: Path) -> list[dict[str, Any]]:
                 acceptance_count = finite_number(row.get("controller_acceptance_observed_count"))
                 if acceptance_count is not None and send_count is not None and send_count > 0:
                     row["controller_acceptance_observed_rate"] = acceptance_count / send_count
+            profile_bench.apply_canonical_lane_metadata(row)
             rows.append(row)
     return rows
 
@@ -698,6 +705,7 @@ def classify_row(row: dict[str, Any], min_repeats: int) -> None:
         row["controller_mode"] = "pgmode_simulation"
     if category == "rb_simulator" and row.get("backend") in (None, ""):
         row["backend"] = "simulator"
+    profile_bench.apply_canonical_lane_metadata(row)
     baseline = baseline_failures(row, min_repeats)
     stress = stress_failures(row)
     if category == "rbpodo_controller_simulation":
@@ -979,6 +987,67 @@ def rbpodo_decision_split_markdown(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def lane_group_markdown(rows: list[dict[str, Any]]) -> str:
+    columns = [
+        "benchmark_lane",
+        "count",
+        "benchmark_categories",
+        "controllers",
+        "async_modes",
+        "low_level_send_modes",
+        "acceptance_semantics",
+        "tracking_sources",
+    ]
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        lane = str(row.get("benchmark_lane") or "")
+        if not lane:
+            continue
+        group = groups.setdefault(
+            lane,
+            {
+                "benchmark_lane": lane,
+                "count": 0,
+                "benchmark_categories": set(),
+                "controllers": set(),
+                "async_modes": set(),
+                "low_level_send_modes": set(),
+                "acceptance_semantics": set(),
+                "tracking_sources": set(),
+            },
+        )
+        group["count"] += 1
+        for field, target in (
+            ("benchmark_category", "benchmark_categories"),
+            ("controller", "controllers"),
+            ("async_mode", "async_modes"),
+            ("low_level_send_mode", "low_level_send_modes"),
+            ("acceptance_semantics", "acceptance_semantics"),
+            ("tracking_source", "tracking_sources"),
+        ):
+            value = row.get(field)
+            if value not in (None, ""):
+                group[target].add(str(value))
+    if not groups:
+        return "_None supplied._"
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for lane in sorted(groups):
+        group = groups[lane]
+        row = {
+            key: (
+                ", ".join(sorted(value))
+                if isinstance(value, set)
+                else value
+            )
+            for key, value in group.items()
+        }
+        lines.append("| " + " | ".join(format_cell(row.get(key)) for key in columns) + " |")
+    return "\n".join(lines)
+
+
 def report_markdown(rows: list[dict[str, Any]], title: str, min_repeats: int) -> str:
     baseline = [row for row in rows if row.get("classification") == "stable_simulator_baseline_candidate"]
     stress = [row for row in rows if row.get("classification") == "stress_benchmark_candidate"]
@@ -1019,6 +1088,10 @@ def report_markdown(rows: list[dict[str, Any]], title: str, min_repeats: int) ->
         "This report separates simulator, rbpodo controller-simulation, and future real physical evidence. It does not authorize real robot motion.",
         "",
         criteria_markdown(min_repeats).rstrip(),
+        "",
+        "## Canonical Benchmark Lanes",
+        "",
+        lane_group_markdown(rows),
         "",
         "## All Runs",
         "",

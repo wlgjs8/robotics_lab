@@ -222,6 +222,13 @@ above, with `operation_mode: simulation`, controller-reference state, and
 telemetry and must not be interpreted as proof of physical system latency.
 Physical real `operation_mode: real` remains blocked for `TcpCircleMove`.
 
+The official report term for `TcpCircleMove` / reserved `TcpCircleTrack`
+evidence is server-side circle tracking. Both command names carry or imply
+`command_family: server_side_circle` in benchmark/state metadata so reports can
+group them without breaking backward compatibility. `TcpCircleMove` is the
+implemented benchmark command today; `TcpCircleTrack` remains a disabled
+closed-loop skeleton until a future acceptance task implements it.
+
 Rbpodo async ACK-supervised 500 Hz streaming is another controller-simulation
 only carve-out. It requires `operation_mode: simulation`,
 `physical_motion_expected=false`, `RB_ALLOW_RBPODO_ASYNC_STREAMING=1`, normal
@@ -230,6 +237,15 @@ pgmode confirmation. `sdk_ack_worker` moves ACK waiting into a worker lane;
 `socket_send_supervised` is `socket_send_only` evidence and must be guarded by
 q_ref/tcp_ref watchdogs. This is no physical real approval and does not change
 the default servo rate.
+
+Benchmark summaries and reports must include canonical lane metadata:
+`benchmark_lane`, `control_loop_location`,
+`trajectory_generation_location`, `feedback_loop_location`,
+`low_level_send_mode`, `acceptance_semantics`, `tracking_source`, and
+`physical_motion_expected`. The ACKON500 official pass lane is
+`rbpodo_server_side_circle_ackon500_sdk_worker`. The
+`rbpodo_server_side_circle_500hz_socket_send_supervised` lane is send-only
+evidence and must not be grouped as an ACKON500 pass.
 
 ### Server-Side Circle Tracking Skeleton
 

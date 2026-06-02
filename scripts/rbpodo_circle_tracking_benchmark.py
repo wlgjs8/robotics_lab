@@ -2308,6 +2308,7 @@ def apply_result_contract(
             "threshold_warnings": threshold_warnings_list,
         }
     )
+    sim_bench.apply_canonical_lane_metadata(summary)
 
 
 def first_fault_details(states: list[dict[str, Any]], benchmark_start_ns: int) -> dict[str, Any]:
@@ -2380,6 +2381,8 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
         "ackon500_goal_status",
         "goal_pass",
         "diagnostic_warning_count",
+        *sim_bench.CANONICAL_LANE_FIELDS,
+        "command_family",
         "controller",
         "arm",
         "profile",
@@ -2819,6 +2822,11 @@ def summarize_run(
         "server_config": str(args.server_config.resolve()),
         "raw_config": str((artifact_dir / "raw_config.yaml").resolve()),
         "controller": args.controller,
+        "command_family": (
+            sim_bench.SERVER_SIDE_CIRCLE_COMMAND_FAMILY
+            if args.controller == "server_circle"
+            else "python_streaming"
+        ),
         "arm": args.arm,
         "plane": args.plane,
         "profile": args.profile,
@@ -3091,6 +3099,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "result_reason": "preflight only; no tracking run or performance thresholds were evaluated",
             "artifact_dir": str(artifact_dir),
             "profile": args.profile,
+            "controller": args.controller,
+            "command_family": (
+                sim_bench.SERVER_SIDE_CIRCLE_COMMAND_FAMILY
+                if args.controller == "server_circle"
+                else "python_streaming"
+            ),
             "profile_purpose": preflight_result.get("profile_purpose"),
             "profile_catalog_entry": preflight_result.get("profile_catalog_entry"),
             "stress_level": preflight_result.get("stress_level"),
@@ -3106,6 +3120,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "fault_latched": False,
             "physical_motion_detected": False,
             "physical_motion_expected": False,
+            "tracking_source": "unknown",
             "cartesian_unavailable_count": 0,
             "overlay_enabled": not args.overlay_disable,
             "overlay_pub_endpoint": None if args.overlay_disable else args.overlay_pub_endpoint,
@@ -3247,6 +3262,13 @@ def failure_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
             "fault_latched": True,
             "physical_motion_detected": False,
             "physical_motion_expected": False,
+            "controller": getattr(args, "controller", None),
+            "command_family": (
+                sim_bench.SERVER_SIDE_CIRCLE_COMMAND_FAMILY
+                if getattr(args, "controller", None) == "server_circle"
+                else "python_streaming"
+            ),
+            "tracking_source": "unknown",
             "cartesian_unavailable_count": 0,
             "safety_tracking": details.get("safety_tracking"),
             "q_actual_target_error_summary": details.get("q_actual_target_error_summary"),
@@ -3281,6 +3303,13 @@ def failure_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
         "fault_latched": False,
         "physical_motion_detected": False,
         "physical_motion_expected": False,
+        "controller": getattr(args, "controller", None),
+        "command_family": (
+            sim_bench.SERVER_SIDE_CIRCLE_COMMAND_FAMILY
+            if getattr(args, "controller", None) == "server_circle"
+            else "python_streaming"
+        ),
+        "tracking_source": "unknown",
         "cartesian_unavailable_count": 0,
         "caveat": "rbpodo controller-simulation benchmark did not complete",
     }

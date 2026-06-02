@@ -76,6 +76,311 @@ CONTROLLER_CHOICES = (
     "server_circle",
     "linear_segments",
 )
+CANONICAL_LANE_FIELDS = [
+    "benchmark_lane",
+    "control_loop_location",
+    "trajectory_generation_location",
+    "feedback_loop_location",
+    "low_level_send_mode",
+    "acceptance_semantics",
+    "tracking_source",
+    "physical_motion_expected",
+]
+SERVER_SIDE_CIRCLE_COMMAND_FAMILY = "server_side_circle"
+SERVER_SIDE_CIRCLE_MODES = {"TcpCircleMove", "TcpCircleTrack"}
+CANONICAL_TRACKING_SOURCES = {
+    "tcp_ref_stand",
+    "tcp_actual_stand",
+    "simulator_tcp_actual",
+    "unknown",
+}
+CANONICAL_ACCEPTANCE_SEMANTICS = {
+    "controller_ack_observed",
+    "sdk_worker_ack_observed",
+    "socket_send_only",
+    "simulator_accepted",
+    "none",
+}
+CANONICAL_LOW_LEVEL_SEND_MODES = {
+    "synchronous_ack_on",
+    "sdk_ack_worker",
+    "socket_send_supervised",
+    "simulator_backend",
+    "mock",
+}
+
+
+def _canonical_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _first_present_value(row: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _finite_number_value(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, str):
+        try:
+            number = float(value)
+        except ValueError:
+            return None
+        return number if math.isfinite(number) else None
+    return None
+
+
+def _bool_value(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _safety_preflight(row: dict[str, Any]) -> dict[str, Any]:
+    safety = row.get("safety_preflight")
+    return safety if isinstance(safety, dict) else {}
+
+
+def _canonical_category(row: dict[str, Any]) -> str:
+    explicit = _canonical_text(row.get("benchmark_category"))
+    if explicit:
+        return explicit
+    if _bool_value(row.get("physical_motion_expected")) is True:
+        return "real_physical_benchmark"
+    safety = _safety_preflight(row)
+    schema = _canonical_text(row.get("schema"))
+    backend = _canonical_text(_first_present_value(row, "backend", "backend_type", "backend_name"))
+    controller_mode = _canonical_text(row.get("controller_mode"))
+    if (
+        "rbpodo_circle_tracking_benchmark" in schema
+        or backend == "rbpodo"
+        or safety.get("backend") == "rbpodo"
+        or safety.get("controller_simulation_only") is True
+        or controller_mode == "pgmode_simulation"
+    ):
+        return "rbpodo_controller_simulation"
+    if (
+        "circle_tracking_benchmark" in schema
+        or backend == "simulator"
+        or row.get("left_simulator_log")
+        or row.get("right_simulator_log")
+        or row.get("simulator_motion_time_constant_sec") is not None
+    ):
+        return "rb_simulator"
+    if backend == "mock":
+        return "mock"
+    return "unknown"
+
+
+def _canonical_controller(row: dict[str, Any]) -> str:
+    return _canonical_text(
+        _first_present_value(row, "controller", "controller_mode", "mode")
+    )
+
+
+def _canonical_async_mode(row: dict[str, Any]) -> str:
+    async_mode = _canonical_text(_first_present_value(row, "async_mode", "async_streaming_mode"))
+    if async_mode:
+        return async_mode
+    metrics = row.get("async_streaming_metrics")
+    if isinstance(metrics, dict):
+        async_mode = _canonical_text(metrics.get("mode"))
+        if async_mode:
+            return async_mode
+    return "disabled"
+
+
+def _command_family(row: dict[str, Any]) -> str:
+    return _canonical_text(row.get("command_family"))
+
+
+def _is_server_side_circle(row: dict[str, Any]) -> bool:
+    if _command_family(row) == SERVER_SIDE_CIRCLE_COMMAND_FAMILY:
+        return True
+    controller = _canonical_controller(row)
+    if controller == "server_circle":
+        return True
+    return controller in SERVER_SIDE_CIRCLE_MODES
+
+
+def _is_python_feedback_controller(row: dict[str, Any]) -> bool:
+    controller = _canonical_controller(row)
+    return controller.endswith("_feedback")
+
+
+def _canonical_rate(row: dict[str, Any]) -> float | None:
+    for key in (
+        "official_servo_rate_hz",
+        "servo_rate_hz",
+        "rate_hz",
+        "command_rate_hz",
+        "requested_rate_hz",
+    ):
+        value = _finite_number_value(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _canonical_low_level_send_mode(row: dict[str, Any], category: str) -> str:
+    explicit = _canonical_text(row.get("low_level_send_mode"))
+    if explicit in CANONICAL_LOW_LEVEL_SEND_MODES:
+        return explicit
+    async_mode = _canonical_async_mode(row)
+    acceptance = _canonical_text(row.get("acceptance_semantics"))
+    if async_mode == "socket_send_supervised" or acceptance == "socket_send_only" or _bool_value(row.get("socket_send_only")) is True:
+        return "socket_send_supervised"
+    socket_count = _finite_number_value(
+        _first_present_value(row, "socket_send_only_count", "commands_socket_sent_total")
+    )
+    if socket_count is not None and socket_count > 0.0:
+        return "socket_send_supervised"
+    if async_mode == "sdk_ack_worker":
+        return "sdk_ack_worker"
+    backend = _canonical_text(_first_present_value(row, "backend", "backend_type"))
+    if category == "rb_simulator" or backend == "simulator":
+        return "simulator_backend"
+    if backend == "mock" or category == "mock":
+        return "mock"
+    if category == "rbpodo_controller_simulation" or backend == "rbpodo":
+        return "synchronous_ack_on"
+    return "mock"
+
+
+def _canonical_acceptance_semantics(row: dict[str, Any], low_level_send_mode: str) -> str:
+    explicit = _canonical_text(row.get("acceptance_semantics"))
+    if explicit in CANONICAL_ACCEPTANCE_SEMANTICS:
+        if low_level_send_mode == "sdk_ack_worker" and explicit == "controller_ack_observed":
+            return "sdk_worker_ack_observed"
+        if low_level_send_mode == "socket_send_supervised":
+            return "socket_send_only"
+        return explicit
+    if low_level_send_mode == "sdk_ack_worker":
+        return "sdk_worker_ack_observed"
+    if low_level_send_mode == "socket_send_supervised":
+        return "socket_send_only"
+    if low_level_send_mode == "simulator_backend":
+        return "simulator_accepted"
+    if low_level_send_mode == "synchronous_ack_on":
+        return "controller_ack_observed"
+    return "none"
+
+
+def _canonical_tracking_source(row: dict[str, Any], category: str) -> str:
+    value = _canonical_text(
+        _first_present_value(row, "tracking_source_used", "tracking_source", "tracking_source_requested")
+    )
+    if value in CANONICAL_TRACKING_SOURCES:
+        return value
+    if category == "rb_simulator":
+        return "simulator_tcp_actual"
+    return "unknown"
+
+
+def _canonical_benchmark_lane(
+    row: dict[str, Any],
+    category: str,
+    low_level_send_mode: str,
+    physical_motion_expected: bool,
+) -> str:
+    if physical_motion_expected:
+        return "future_physical_real_unavailable"
+    profile = _canonical_text(row.get("profile"))
+    if profile == "noop_acceptance" and not _canonical_text(row.get("controller")):
+        return "future_physical_real_unavailable"
+    server_side = _is_server_side_circle(row)
+    feedback = _is_python_feedback_controller(row)
+    if category == "rb_simulator":
+        if server_side:
+            return "simulator_server_side_circle"
+        return "simulator_python_streaming_feedback" if feedback else "simulator_python_streaming_open_loop"
+    if category == "rbpodo_controller_simulation":
+        if not server_side:
+            return "rbpodo_python_streaming_feedback" if feedback else "rbpodo_python_streaming_open_loop"
+        if low_level_send_mode == "socket_send_supervised":
+            return "rbpodo_server_side_circle_500hz_socket_send_supervised"
+        if low_level_send_mode == "sdk_ack_worker":
+            return "rbpodo_server_side_circle_ackon500_sdk_worker"
+        rate = _canonical_rate(row)
+        if rate is not None and abs(rate - 500.0) <= 1e-6:
+            return "rbpodo_server_side_circle_ackon500_sync"
+        return "rbpodo_server_side_circle_ackon100"
+    return "future_physical_real_unavailable"
+
+
+def canonical_lane_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    category = _canonical_category(row)
+    physical_motion_expected = _bool_value(row.get("physical_motion_expected")) is True
+    low_level_send_mode = _canonical_low_level_send_mode(row, category)
+    acceptance_semantics = _canonical_acceptance_semantics(row, low_level_send_mode)
+    tracking_source = _canonical_tracking_source(row, category)
+    benchmark_lane = _canonical_benchmark_lane(
+        row,
+        category,
+        low_level_send_mode,
+        physical_motion_expected,
+    )
+    server_side_lane = benchmark_lane in {
+        "simulator_server_side_circle",
+        "rbpodo_server_side_circle_ackon100",
+        "rbpodo_server_side_circle_ackon500_sync",
+        "rbpodo_server_side_circle_ackon500_sdk_worker",
+        "rbpodo_server_side_circle_500hz_socket_send_supervised",
+    }
+    python_lane = benchmark_lane in {
+        "simulator_python_streaming_open_loop",
+        "simulator_python_streaming_feedback",
+        "rbpodo_python_streaming_open_loop",
+        "rbpodo_python_streaming_feedback",
+    }
+    if server_side_lane:
+        control_loop_location = "rb_servo_server"
+        trajectory_generation_location = "rb_servo_server"
+        feedback_loop_location = "rb_servo_server"
+    elif python_lane:
+        control_loop_location = "python_benchmark"
+        trajectory_generation_location = "python_benchmark"
+        feedback_loop_location = (
+            "python_benchmark"
+            if benchmark_lane.endswith("_feedback")
+            else "none"
+        )
+    else:
+        control_loop_location = "unknown"
+        trajectory_generation_location = "controller_box_future"
+        feedback_loop_location = "controller_box_future"
+    return {
+        "benchmark_lane": benchmark_lane,
+        "control_loop_location": control_loop_location,
+        "trajectory_generation_location": trajectory_generation_location,
+        "feedback_loop_location": feedback_loop_location,
+        "low_level_send_mode": low_level_send_mode,
+        "acceptance_semantics": acceptance_semantics,
+        "tracking_source": tracking_source,
+        "physical_motion_expected": physical_motion_expected,
+    }
+
+
+def apply_canonical_lane_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    row.update(canonical_lane_metadata(row))
+    if _is_server_side_circle(row):
+        row.setdefault("command_family", SERVER_SIDE_CIRCLE_COMMAND_FAMILY)
+    return row
 
 
 def parse_args() -> argparse.Namespace:
@@ -459,6 +764,7 @@ def circle_move_command(args: argparse.Namespace, duration_sec: float) -> dict[s
     s = seq()
     payload = {
         "mode": "TcpCircleMove",
+        "command_family": SERVER_SIDE_CIRCLE_COMMAND_FAMILY,
         "plane": args.plane,
         "diameter_m": float(args.diameter_m),
         "period_sec": float(args.period_sec),
@@ -1279,6 +1585,8 @@ def write_summary_csv(path: Path, summary: dict[str, Any]) -> None:
     fields = [
         "result",
         "result_reason",
+        *CANONICAL_LANE_FIELDS,
+        "command_family",
         "controller",
         "arm",
         "plane",
@@ -1492,6 +1800,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "left_config": str(args.left_config.resolve()),
         "right_config": str(args.right_config.resolve()),
         "controller": args.controller,
+        "command_family": SERVER_SIDE_CIRCLE_COMMAND_FAMILY if args.controller == "server_circle" else "python_streaming",
         "arm": args.arm,
         "plane": args.plane,
         "diameter_m": args.diameter_m,
@@ -1503,6 +1812,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         **phase_advance_summary(args),
         "required_tangential_speed_m_s": safety["required_tangential_speed_m_s"],
         "safety_preflight": safety,
+        "tracking_source": "simulator_tcp_actual",
+        "physical_motion_expected": False,
         "artifact_dir": str(artifact_dir),
         "state_stream": str(artifact_dir / "state_stream.jsonl"),
         "command_packets": str(artifact_dir / "command_packets.jsonl"),
@@ -1523,6 +1834,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
     base_summary.update(context)
+    apply_canonical_lane_metadata(base_summary)
     if args.preflight_only:
         base_summary.update({
             "result": "completed",
@@ -1532,6 +1844,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "threshold_failures": [],
             "skipped_plots": ["preflight only"],
         })
+        apply_canonical_lane_metadata(base_summary)
         write_json(artifact_dir / "summary.json", base_summary)
         write_summary_csv(artifact_dir / "summary.csv", base_summary)
         return base_summary
@@ -1668,6 +1981,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "orientation_drift_warning_threshold_rad": DEFAULT_ORIENTATION_DRIFT_WARNING_RAD,
         }
     )
+    apply_canonical_lane_metadata(summary)
     write_json(artifact_dir / "summary.json", summary)
     write_summary_csv(artifact_dir / "summary.csv", summary)
     return summary
@@ -1707,8 +2021,15 @@ def main() -> int:
             **phase_advance_summary(args),
             "performance_warnings": [],
             "threshold_failures": [str(exc)],
+            "controller": getattr(args, "controller", None),
+            "command_family": SERVER_SIDE_CIRCLE_COMMAND_FAMILY
+            if getattr(args, "controller", None) == "server_circle"
+            else "python_streaming",
+            "tracking_source": "simulator_tcp_actual",
+            "physical_motion_expected": False,
             "caveat": "simulator-only benchmark evidence; not real robot readiness",
         }
+        apply_canonical_lane_metadata(failure)
         write_json(artifact_dir / "summary.json", failure)
         write_summary_csv(artifact_dir / "summary.csv", failure)
         print(f"circle_tracking_benchmark: FAIL: {exc}", file=sys.stderr)

@@ -35,6 +35,23 @@ Keep the three evidence categories separate:
   `tcp_ref_stand` tracking.
 - future physical real robot: not covered by either circle benchmark runbook.
 
+Every new summary and report row must carry canonical lane metadata:
+
+```text
+benchmark_lane
+control_loop_location
+trajectory_generation_location
+feedback_loop_location
+low_level_send_mode
+acceptance_semantics
+tracking_source
+physical_motion_expected
+```
+
+The lane separates where the trajectory and feedback loop run from how the
+low-level send is accepted. Python streaming feedback remains a separate lane
+from server-side circle tracking even if its tracking metrics are good.
+
 For the rbpodo controller-simulation category, streaming Cartesian primitives
 require `cartesian_control.allow_in_controller_simulation: true` and
 `RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1`. Servo J ACKs alone do not imply a
@@ -282,6 +299,13 @@ python3 scripts/circle_tracking_benchmark.py \
   loop and Cartesian controller from Python UDP streaming jitter.
 - `linear_segments`: approximates the circle with `TcpLinearMove` waypoints and
   evaluates MoveL-like polyline tracking.
+
+Official terminology for `server_circle` is server-side circle tracking. The
+implemented benchmark command is `TcpCircleMove`. `TcpCircleTrack` is a
+reserved closed-loop server-side circle schema in the servo server, not the
+current benchmark command. Both names are reported as
+`command_family: server_side_circle` when they appear in command/state metadata.
+This preserves backward compatibility while making report grouping unambiguous.
 
 Open-loop twist modes benchmark server-side velocity tracking and plant
 integration. Feedback twist modes benchmark closed-loop command-source
