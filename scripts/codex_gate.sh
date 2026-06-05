@@ -216,6 +216,48 @@ run_optional_script_tests() {
   fi
 }
 
+require_file() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    echo "ERROR: required file is missing: ${path}" >&2
+    return 1
+  fi
+}
+
+run_required_python_help() {
+  local script="$1"
+  require_file "${script}"
+  python3 "${script}" --help >/dev/null
+}
+
+run_required_script_tests() {
+  local pattern="$1"
+  if ! find scripts -maxdepth 1 -name "${pattern}" -print -quit | grep -q .; then
+    echo "ERROR: required script tests not present: ${pattern}" >&2
+    return 1
+  fi
+  PYTHONPATH=scripts python3 -m unittest discover -s scripts -p "${pattern}"
+}
+
+run_required_policy_runner_tests() {
+  local pattern="$1"
+  if ! find policy_runner/tests -maxdepth 1 -name "${pattern}" -print -quit | grep -q .; then
+    echo "ERROR: required policy_runner tests not present: ${pattern}" >&2
+    return 1
+  fi
+  PYTHONPATH=policy_runner python3 -m unittest discover -s policy_runner/tests -p "${pattern}"
+}
+
+run_policy_runner_help() {
+  local subcommand="$1"
+  PYTHONPATH=policy_runner python3 -m policy_runner "${subcommand}" --help >/dev/null
+}
+
+run_required_make_dry_run() {
+  local target="$1"
+  make -n "${target}" >/dev/null
+}
+
 run_optional_rbpodo_measurement_readonly() {
   local script="$1"
   shift
@@ -1620,6 +1662,129 @@ run_physical_readiness_blockers_clarity_gate() {
     scripts docs/runbooks REVIEW.md README.md
 }
 
+run_gene_umi_control_defaults_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  run_required_python_help scripts/validate_control_defaults.py
+  run_required_script_tests 'test_validate_control_defaults.py'
+  run_yaml_parse_checks_if_available configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml
+  python3 scripts/validate_control_defaults.py \
+    --defaults configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml
+  grep_existing "controller_sim_high_performance_gene_26_5|physical_real_conservative_seed" \
+    configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml
+  grep_existing "The GENE 26.5 / ACKON500 default is a controller-simulation high-performance default only" \
+    docs/runbooks/rbpodo_controller_sim_circle.md \
+    docs/runbooks/policy_data_collection.md \
+    REVIEW.md
+}
+
+run_gene_umi_controller_sim_repeatability_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  bash -n tools/rbpodo_ackon500_gene_goal.sh
+  run_required_python_help scripts/generate_ackon500_gene_goal_report.py
+  run_yaml_parse_checks_if_available configs/rbpodo_circle_ablation/ackon500_gene_repeatability.yaml
+  run_required_script_tests 'test_*ackon500*.py'
+  tools/rbpodo_ackon500_gene_goal.sh \
+    --profile repeatability \
+    --dry-run \
+    --with-required-env \
+    --i-understand-this-connects-to-real-controller \
+    --i-confirm-controller-is-in-pgmode-simulation
+  grep_existing "best_left_run01|best_right_run01|repeatability|physical_readiness" \
+    configs/rbpodo_circle_ablation scripts docs/runbooks REVIEW.md
+}
+
+run_gene_umi_physical_transition_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  run_required_python_help scripts/rbpodo_physical_transition_acceptance.py
+  run_required_python_help scripts/generate_rbpodo_physical_transition_report.py
+  run_required_script_tests 'test_*physical*transition*.py'
+  run_yaml_parse_checks_if_available rb_servo_server/config/dual_real_rbpodo_physical_*.example.yaml
+  grep_existing "pgmode_real_transition|tiny_cartesian|slow_physical_circle|physical_readiness" \
+    scripts docs/runbooks rb_servo_server/config
+  grep_existing "send_servo_commands:[[:space:]]*false" rb_servo_server/config/dual_real_rbpodo_physical_*.example.yaml
+  grep_existing "allow_in_real:[[:space:]]*false" rb_servo_server/config/dual_real_rbpodo_physical_*.example.yaml
+  grep_existing "tracking_source:[[:space:]]*tcp_actual_stand|tcp_actual_stand" scripts docs/runbooks
+}
+
+run_gene_umi_hdf5_audit_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q policy_runner/policy_runner scripts
+  run_policy_runner_help hdf5-audit
+  run_required_policy_runner_tests 'test_flow_dataset.py'
+  run_required_policy_runner_tests 'test_hdf5_audit*.py'
+  grep_existing "robotics_lab\\.policy_runner\\.hdf5_audit\\.v1|DatasetManifest|dataset_manifest" \
+    policy_runner/policy_runner policy_runner/tests docs README.md
+  if [[ -f episode_002.hdf5 ]]; then
+    PYTHONPATH=policy_runner python3 -m policy_runner hdf5-audit \
+      --episodes-dir episode_002.hdf5 \
+      --output-json /tmp/robotics_lab_hdf5_audit_gate.json \
+      --output-md /tmp/robotics_lab_hdf5_audit_gate.md
+  else
+    echo "codex_gate: skipping uploaded episode audit smoke; episode_002.hdf5 is absent"
+  fi
+}
+
+run_gene_umi_bimanual_collection_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q policy_runner/policy_runner scripts
+  run_policy_runner_help umi-import
+  run_policy_runner_help umi-convert
+  require_file calibration/umi_retarget.example.yaml
+  run_yaml_parse_checks_if_available calibration/umi_retarget.example.yaml
+  run_required_policy_runner_tests 'test_umi_*.py'
+  grep_existing "robotics_lab\\.umi_retarget\\.v1|retarget_status|configured_estimate|measured" \
+    calibration policy_runner docs README.md
+}
+
+run_gene_umi_flow_training_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q policy_runner/policy_runner scripts
+  run_policy_runner_help flow-train
+  run_policy_runner_help ml-preflight
+  run_required_policy_runner_tests 'test_flow_matching.py'
+  run_required_policy_runner_tests 'test_flow_training*.py'
+  PYTHONPATH=policy_runner python3 -m policy_runner ml-preflight --vision-backbone tiny_cnn
+  grep_existing "tiny_cnn|dataset-manifest|write-eval-report|flow_eval_summary" \
+    policy_runner/policy_runner policy_runner/tests docs README.md
+}
+
+run_gene_umi_policy_rollout_modes_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q policy_runner/policy_runner scripts
+  run_policy_runner_help flow-infer
+  run_required_policy_runner_tests 'test_flow_inference*.py'
+  run_required_policy_runner_tests 'test_policy_rollout_modes*.py'
+  grep_existing "rollout-mode|controller_simulation|real_supervised|rollout_summary" \
+    policy_runner/policy_runner policy_runner/tests docs README.md
+}
+
+run_gene_umi_dual_arm_gripper_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q policy_runner/policy_runner scripts
+  run_policy_runner_help flow-infer
+  run_required_policy_runner_tests 'test_gripper*.py'
+  run_required_policy_runner_tests 'test_dual_arm_policy*.py'
+  grep_existing "RB_ALLOW_REAL_GRIPPER|allow_real_gripper_motion|collision_model_status|selected[-_]arm" \
+    policy_runner/policy_runner policy_runner/tests docs README.md
+}
+
+run_gene_umi_docs_ci_artifact_manifest_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q policy_runner/policy_runner scripts
+  run_policy_runner_tests
+  run_required_script_tests 'test_*.py'
+  run_required_python_help scripts/collect_gene_umi_artifact_manifest.py
+  require_file docs/runbooks/gene_umi_policy_transition.md
+  grep_existing "GENE 26.5|ACKON500|hdf5-audit|flow-infer|real[-_]supervised|[Aa]rtifact manifest|artifact_manifest" \
+    docs/runbooks/gene_umi_policy_transition.md README.md REVIEW.md policy_runner/README.md docs/runbooks/policy_data_collection.md
+  run_required_make_dry_run policy-hdf5-audit-smoke
+  run_required_make_dry_run policy-flow-smoke
+  run_required_make_dry_run pgmode-transition-dry-run
+}
+
 run_optional_rbpodo_p1_circle_ablation() {
   if [[ "${CODEX_RUN_RBPODO_CIRCLE_ABLATION:-0}" != "1" ]]; then
     echo "codex_gate: skipping rbpodo P1 controller-simulation ablation; set CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 with explicit CODEX_RBPODO_CIRCLE_ABLATION_ARGS to enable"
@@ -2549,6 +2714,33 @@ case "$TASK" in
     ;;
   BENCHMARK-LANE-CANONICALIZE-01)
     run_benchmark_lane_canonicalize_gate
+    ;;
+  01_promote_ackon500_defaults)
+    run_gene_umi_control_defaults_gate
+    ;;
+  02_controller_sim_repeatability)
+    run_gene_umi_controller_sim_repeatability_gate
+    ;;
+  03_pgmode_real_transition_acceptance)
+    run_gene_umi_physical_transition_gate
+    ;;
+  04_umi_hdf5_audit_adapter)
+    run_gene_umi_hdf5_audit_gate
+    ;;
+  05_umi_bimanual_collection)
+    run_gene_umi_bimanual_collection_gate
+    ;;
+  06_flow_training_preflight_eval)
+    run_gene_umi_flow_training_gate
+    ;;
+  07_policy_runner_rollout_modes)
+    run_gene_umi_policy_rollout_modes_gate
+    ;;
+  08_dual_arm_real_policy_and_gripper)
+    run_gene_umi_dual_arm_gripper_gate
+    ;;
+  09_docs_ci_artifact_manifest)
+    run_gene_umi_docs_ci_artifact_manifest_gate
     ;;
   ACKON500-BEST-PROFILE-PROMOTION-01)
     run_ackon500_best_profile_promotion_gate

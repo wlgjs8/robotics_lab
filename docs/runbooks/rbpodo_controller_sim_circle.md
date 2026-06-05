@@ -161,6 +161,22 @@ If `rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s_500hz_goal.yaml`
 exists and differs from the tracked profile, the runner refuses unless
 `--allow-local-diff` is supplied after reviewing the local operator edits.
 
+The reproducible default-profile registry is:
+
+```text
+configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml
+```
+
+The GENE 26.5 / ACKON500 default is a controller-simulation high-performance default only. It is not the physical-real default until the physical promotion ladder produces actual TCP tracking evidence.
+
+Validate the registry and write the default report with:
+
+```bash
+python3 scripts/validate_control_defaults.py \
+  --defaults configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml \
+  --write-report artifacts/control_defaults/gene_26_5_defaults_report.md
+```
+
 Exact promoted parameters:
 
 ```text

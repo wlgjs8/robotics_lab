@@ -200,6 +200,15 @@ Current recorded rbpodo controller-simulation baseline:
 
 **ACKON500 PASS is controller-reference lower-bound evidence, not physical TCP tracking.**
 
+The GENE 26.5 / ACKON500 default is a controller-simulation high-performance default only. It is not the physical-real default until the physical promotion ladder produces actual TCP tracking evidence.
+
+The explicit default-profile registry is
+`configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml`. Validate it
+with `python3 scripts/validate_control_defaults.py --defaults
+configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml`; the optional
+report path is
+`artifacts/control_defaults/gene_26_5_defaults_report.md`.
+
 Required report fields keep this boundary machine-readable:
 
 ```yaml
