@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
+from .dataset_manifest import DatasetManifest
 from .flow_dataset import (
     FLOW_ACTION_DIM,
     FLOW_CHECKPOINT_SCHEMA,
@@ -35,7 +36,7 @@ class FlowTrainingResult:
 
 def train_flow_matching(
     *,
-    episodes_dir: str | Path,
+    episodes_dir: str | Path | None,
     checkpoint_path: str | Path,
     vision_backbone: str = "resnet50",
     action_horizon: int = 16,
@@ -50,6 +51,9 @@ def train_flow_matching(
     sample_steps: int = 16,
     device: str = "auto",
     max_stats_samples: int | None = None,
+    dataset_manifest: str | Path | DatasetManifest | None = None,
+    camera_names: list[str] | None = None,
+    single_arm_side: str | None = None,
 ) -> FlowTrainingResult:
     if epochs <= 0:
         raise ValueError("epochs must be positive")
@@ -62,21 +66,39 @@ def train_flow_matching(
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     stats_path = checkpoint.parent / "dataset_stats.json"
     curves_path = checkpoint.parent / "training_curves.jsonl"
+    manifest = _coerce_dataset_manifest(dataset_manifest)
+    if manifest is None:
+        resolved_episodes_dir = str(episodes_dir or "data/episodes")
+        dataset_kwargs = {
+            "camera_names": camera_names,
+            "single_arm_side": single_arm_side or "left",
+        }
+    else:
+        resolved_episodes_dir = manifest.resolved_episodes_dir(episodes_dir)
+        dataset_kwargs = manifest.training_dataset_kwargs(
+            camera_names_override=camera_names,
+            single_arm_side_override=single_arm_side,
+        )
 
     stats_source = FlowHdf5Dataset(
-        episodes_dir,
+        resolved_episodes_dir,
         action_horizon=action_horizon,
         image_size=image_size,
         normalize=False,
+        **dataset_kwargs,
     )
     stats = compute_dataset_statistics(stats_source, max_samples=max_stats_samples)
     write_dataset_statistics(stats_path, stats)
 
     dataset = FlowHdf5Dataset(
-        episodes_dir,
+        resolved_episodes_dir,
         action_horizon=action_horizon,
         image_size=image_size,
         camera_names=list(stats["camera_names"]),
+        single_arm_side=dataset_kwargs["single_arm_side"],
+        include_formats=dataset_kwargs.get("include_formats"),
+        exclude_camera_names=dataset_kwargs.get("exclude_camera_names"),
+        required_attrs=dataset_kwargs.get("required_attrs"),
         stats=stats,
         normalize=True,
     )
@@ -157,7 +179,8 @@ def train_flow_matching(
         "validation_metrics": last_metrics,
         "model_state": model.cpu().state_dict(),
         "training_args": {
-            "episodes_dir": str(episodes_dir),
+            "episodes_dir": str(resolved_episodes_dir),
+            "dataset_manifest": str(dataset_manifest) if dataset_manifest is not None else None,
             "vision_backbone": vision_backbone,
             "batch_size": int(batch_size),
             "epochs": int(epochs),
@@ -179,6 +202,14 @@ def train_flow_matching(
         curves_path=curves_path,
         validation_metrics=last_metrics,
     )
+
+
+def _coerce_dataset_manifest(value: str | Path | DatasetManifest | None) -> DatasetManifest | None:
+    if value is None:
+        return None
+    if isinstance(value, DatasetManifest):
+        return value
+    return DatasetManifest.load(value)
 
 
 @torch.no_grad()

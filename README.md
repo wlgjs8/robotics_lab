@@ -335,6 +335,24 @@ make policy-train
 make sim-infer-up
 ```
 
+HDF5 policy episodes should be audited before `flow-train`:
+
+```bash
+python3 -m policy_runner hdf5-audit \
+  --episodes-dir data/umi_episodes \
+  --output-json data/umi_episodes/audit.json \
+  --output-md data/umi_episodes/audit.md
+```
+
+The audit schema is `robotics_lab.policy_runner.hdf5_audit.v1`. Supported HDF5
+layouts are `pika_umi_single_arm`, `pika_umi_bimanual`, and
+`robotics_lab_dual_arm`. Use a `DatasetManifest` with schema
+`robotics_lab.policy_runner.dataset_manifest.v1` to pin allowed formats,
+camera filters, `single_arm_side`, required root attrs such as `pose_format`,
+and retarget metadata. `pose_frame=steamvr_world` is not treated as `stand`;
+real policy rollout remains blocked unless the manifest retarget transform to
+`stand` is measured or accepted.
+
 접속:
 
 ```text

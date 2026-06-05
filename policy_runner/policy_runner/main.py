@@ -16,6 +16,7 @@ from .action_sources import (
     TcpDeltaActionSource,
 )
 from .config import PolicyRunnerConfig, load_config
+from .dataset_manifest import parse_camera_names
 from .geometry import GeometryStatus, load_geometry_status
 from .robot_state_client import RobotStateClient, StateSnapshot, StateStreamLeaseReadback
 from .safety import SafetyGate
@@ -304,7 +305,10 @@ def _main_with_subcommands(argv: list[str]) -> int:
         "flow-train",
         help="Train an offline image-conditioned flow-matching action-chunk baseline from HDF5 episodes.",
     )
-    flow_train.add_argument("--episodes-dir", default="data/episodes")
+    flow_train.add_argument("--episodes-dir", default=None)
+    flow_train.add_argument("--dataset-manifest", default=None)
+    flow_train.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
+    flow_train.add_argument("--single-arm-side", choices=("left", "right"), default=None)
     flow_train.add_argument("--checkpoint", default="outputs/flow_policy.pt")
     flow_train.add_argument("--vision-backbone", default="resnet50")
     flow_train.add_argument("--action-horizon", type=int, default=16)
@@ -343,6 +347,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument("--device", default="auto")
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.002)
     flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.01)
+
+    hdf5_audit = sub.add_parser(
+        "hdf5-audit",
+        help="Inspect UMI/Pika and robotics_lab HDF5 episodes before training.",
+    )
+    hdf5_audit.add_argument("--episodes-dir", required=True)
+    hdf5_audit.add_argument("--dataset-manifest", default=None)
+    hdf5_audit.add_argument("--single-arm-side", choices=("left", "right"), default=None)
+    hdf5_audit.add_argument("--output-json", required=True)
+    hdf5_audit.add_argument("--output-md", required=True)
 
     args = parser.parse_args(argv)
     if args.command == "record":
@@ -509,6 +523,9 @@ def _main_with_subcommands(argv: list[str]) -> int:
             sample_steps=args.sample_steps,
             device=args.device,
             max_stats_samples=args.max_stats_samples,
+            dataset_manifest=args.dataset_manifest,
+            camera_names=parse_camera_names(args.camera_names),
+            single_arm_side=args.single_arm_side,
         )
         return 0
     if args.command == "infer":
@@ -523,6 +540,26 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 ignore_config_drift=args.ignore_config_drift,
             ),
         )
+    if args.command == "hdf5-audit":
+        from .hdf5_audit import audit_hdf5_episodes, write_hdf5_audit_outputs
+
+        try:
+            report = audit_hdf5_episodes(
+                args.episodes_dir,
+                dataset_manifest=args.dataset_manifest,
+                single_arm_side=args.single_arm_side,
+            )
+            write_hdf5_audit_outputs(
+                report,
+                output_json=args.output_json,
+                output_md=args.output_md,
+            )
+        except Exception as exc:
+            print(f"policy_runner hdf5-audit failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"wrote HDF5 audit JSON: {args.output_json}", flush=True)
+        print(f"wrote HDF5 audit report: {args.output_md}", flush=True)
+        return 0
     if args.command == "flow-infer":
         from .flow_inference import FlowMatchingActionSource
 

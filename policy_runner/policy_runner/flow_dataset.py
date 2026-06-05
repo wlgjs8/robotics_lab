@@ -59,6 +59,9 @@ class FlowHdf5Dataset:
         image_size: int = DEFAULT_IMAGE_SIZE,
         camera_names: list[str] | None = None,
         single_arm_side: str = "left",
+        include_formats: list[str] | tuple[str, ...] | None = None,
+        exclude_camera_names: list[str] | tuple[str, ...] | None = None,
+        required_attrs: dict[str, Any] | None = None,
         stats: dict[str, Any] | None = None,
         normalize: bool = True,
     ):
@@ -74,17 +77,30 @@ class FlowHdf5Dataset:
         self.single_arm_side = single_arm_side
         self.normalize = bool(normalize)
         self.stats = stats
+        self.required_attrs = dict(required_attrs or {})
         self.episodes = [
             load_flow_episode_index(path, single_arm_side=single_arm_side)
             for path in discover_hdf5_episodes(self.root)
         ]
+        if include_formats:
+            allowed_formats = set(include_formats)
+            self.episodes = [
+                episode for episode in self.episodes if episode.format_name in allowed_formats
+            ]
+        if self.required_attrs:
+            for episode in self.episodes:
+                _validate_required_attrs(episode.path, self.required_attrs)
         if not self.episodes:
             raise ValueError(f"no HDF5 episodes found under {self.root}")
 
         discovered_cameras = sorted(
             {name for episode in self.episodes for name in episode.camera_paths}
         )
-        self.camera_names = list(camera_names) if camera_names is not None else discovered_cameras
+        selected_cameras = list(camera_names) if camera_names is not None else discovered_cameras
+        excluded_cameras = set(exclude_camera_names or [])
+        self.camera_names = [
+            name for name in selected_cameras if name not in excluded_cameras
+        ]
         self.sample_refs: list[FlowSampleRef] = []
         for episode_index, episode in enumerate(self.episodes):
             sample_count = max(0, episode.length - self.action_horizon + 1)
@@ -158,6 +174,18 @@ def load_flow_episode_index(
         if _is_robotics_lab(handle):
             return _load_robotics_lab_episode(episode_path, handle)
     raise ValueError(f"unsupported HDF5 episode format: {episode_path}")
+
+
+def _validate_required_attrs(path: Path, required_attrs: dict[str, Any]) -> None:
+    with h5py.File(path, "r") as handle:
+        for key, expected in required_attrs.items():
+            if key not in handle.attrs:
+                raise ValueError(f"{path}: missing required HDF5 attr {key!r}")
+            actual = _decode_hdf5_attr(handle.attrs.get(key))
+            if actual != str(expected):
+                raise ValueError(
+                    f"{path}: required HDF5 attr {key!r}={expected!r}, got {actual!r}"
+                )
 
 
 def compute_dataset_statistics(

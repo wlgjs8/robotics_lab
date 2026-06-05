@@ -229,6 +229,9 @@ Train from pika UMI or robotics_lab HDF5 episodes:
 ```bash
 python3 -m policy_runner flow-train \
   --episodes-dir data/episodes \
+  --dataset-manifest data/episodes/manifest.yaml \
+  --camera-names fisheye,realsense_color \
+  --single-arm-side left \
   --checkpoint outputs/flow_policy.pt \
   --vision-backbone resnet50 \
   --action-horizon 16 \
@@ -258,6 +261,59 @@ dual-arm episodes can provide left/right cameras, TCP proprioception, and
 gripper values. Proprio features are reset-relative; action chunks are
 current-relative. Dataset statistics normalize proprio, action chunks, and
 camera images before training.
+
+Audit HDF5 episodes before training:
+
+```bash
+python3 -m policy_runner hdf5-audit \
+  --episodes-dir data/umi_episodes \
+  --output-json data/umi_episodes/audit.json \
+  --output-md data/umi_episodes/audit.md
+```
+
+The audit JSON schema is `robotics_lab.policy_runner.hdf5_audit.v1`. It reports
+the detected format, frame count, timing, pose frame/format, camera names and
+encodings, arm mask, action kind, warnings, and deployment blockers for each
+episode. Supported layouts are `pika_umi_single_arm`, `pika_umi_bimanual`, and
+`robotics_lab_dual_arm`. A single-arm Pika/UMI file such as
+`episode_002.hdf5` is interpreted as `pika_umi_single_arm` and maps to the left
+arm unless `--single-arm-side right` or a dataset manifest says otherwise.
+
+Audit warnings include timestamp dt outliers, missing/corrupt images,
+unsupported image encodings, mixed camera names across episodes, missing
+gripper fields, unsupported pose formats, non-normalized quaternions, unknown
+pose frames, single-arm default mapping, and action pose columns that exactly
+match current pose columns. Warnings are training-readiness evidence. Deployment
+blockers are stricter: any non-`stand` `pose_frame`, including
+`steamvr_world`, remains blocked for real policy rollout unless a retarget
+manifest supplies a measured or accepted transform to `stand`.
+
+Dataset manifests use schema `robotics_lab.policy_runner.dataset_manifest.v1`:
+
+```yaml
+schema: robotics_lab.policy_runner.dataset_manifest.v1
+episodes_dir: data/umi_episodes
+include_formats:
+  - pika_umi_single_arm
+  - pika_umi_bimanual
+  - robotics_lab_dual_arm
+single_arm_side: left
+camera_names:
+  - fisheye
+  - realsense_color
+exclude_camera_names:
+  - realsense_depth
+required_attrs:
+  pose_format: x,y,z,qx,qy,qz,qw
+retarget:
+  pose_frame: steamvr_world
+  target_frame: stand
+  transform_status: missing
+```
+
+For training-only offline smoke, the flow loader may still use reset-relative
+deltas. For real policy rollout, `retarget.transform_status` must be `measured`
+or `accepted`; `configured_estimate` and `missing` remain deployment blockers.
 
 The model uses a frozen vision encoder by default (`resnet18` or `resnet50` via
 `torchvision`) with a placeholder `dinov3` plugin hook for later optional
