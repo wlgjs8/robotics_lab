@@ -26,3 +26,9 @@ For the current file, use `calibration_status: configured_estimate` and keep
 `geometry_valid_for_real_policy: false` visible in dataset review. Do not label
 controller-simulation or future physical real policy data as measured until a
 measured calibration artifact is accepted.
+
+`umi_retarget.example.yaml` is the template for offline UMI-to-stand retarget
+metadata. Its default `status: configured_estimate` is suitable for synthetic
+fixtures and training pipeline smoke tests only. Real policy rollout must remain
+blocked until a site-specific retarget config is measured and accepted by a
+future real-hardware task.

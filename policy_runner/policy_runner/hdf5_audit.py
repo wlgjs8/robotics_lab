@@ -249,7 +249,7 @@ def _looks_like_pika_bimanual(handle: h5py.File) -> bool:
     if "timestamp" not in handle or "observations" not in handle:
         return False
     return any(
-        "pose" in handle[group_path] and "action" in handle[group_path]
+        "pose" in handle[group_path] and "gripper" in handle[group_path]
         for group_path in _bimanual_arm_groups(handle).values()
         if group_path in handle
     )

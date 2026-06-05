@@ -414,7 +414,6 @@ def _is_pika_umi_bimanual(handle: h5py.File) -> bool:
         group_path in handle
         and "pose" in handle[group_path]
         and "gripper" in handle[group_path]
-        and "action" in handle[group_path]
         for group_path in arm_groups.values()
     )
 

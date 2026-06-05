@@ -288,6 +288,77 @@ blockers are stricter: any non-`stand` `pose_frame`, including
 `steamvr_world`, remains blocked for real policy rollout unless a retarget
 manifest supplies a measured or accepted transform to `stand`.
 
+## UMI Import And Retarget Metadata
+
+`umi-import` and `umi-convert` are repository-side file pipelines. They do not
+import or require a live UMI hardware SDK. Install the optional HDF5/image
+dependencies first:
+
+```bash
+python3 -m pip install -e "policy_runner[umi]"
+```
+
+Canonical bimanual UMI input is:
+
+```text
+/timestamp
+/observations/left/pose
+/observations/left/gripper
+/observations/left/action                 # optional
+/observations/left/images/<camera_name>
+/observations/right/pose
+/observations/right/gripper
+/observations/right/action                # optional
+/observations/right/images/<camera_name>
+attrs: schema=robotics_lab.umi_episode.v1 or absent Pika-compatible layout,
+       arm_names=left,right,
+       pose_format=x,y,z,qx,qy,qz,qw,
+       pose_frame=steamvr_world|slam_world|robot_stand|stand|...,
+       umi_device_serials=<JSON>,
+       capture_hz=<Hz>,
+       retarget_status=missing|configured_estimate|measured
+```
+
+Import links raw HDF5 episodes into the output directory instead of duplicating
+image payloads, then writes `manifest.json` and `conversion_report.md`:
+
+```bash
+python3 -m policy_runner umi-import \
+  --input raw_umi_session_dir \
+  --output-dir data/umi_episodes \
+  --task "task name" \
+  --left-device SERIAL_OR_NAME \
+  --right-device SERIAL_OR_NAME \
+  --retarget-config calibration/umi_retarget.yaml
+```
+
+Conversion writes a FlowHdf5Dataset-compatible HDF5 file. The
+`robotics_lab_dual_arm` target stores `/observations/tcp_stand_left/right` and
+`/action/tcp_delta_stand_left/right`; camera names are flattened with arm
+prefixes such as `left_wrist_rgb`.
+
+```bash
+python3 -m policy_runner umi-convert \
+  --input episode_raw.hdf5 \
+  --output episode_robotics_lab.hdf5 \
+  --format robotics_lab_dual_arm \
+  --retarget-config calibration/umi_retarget.yaml
+```
+
+Retarget config template: `calibration/umi_retarget.example.yaml`. Required
+fields are `schema`, `status`, `source_pose_frame`, `target_pose_frame`, per-arm
+`T_stand_source`, per-arm `T_tcp_umi_gripper`,
+`gripper_open_close_units`, and `quality`. The config hash is stored in the
+manifest and converted HDF5 attrs. `status: measured` is required only when
+`--require-measured-retarget` is passed; `missing`, `configured_estimate`, and
+unknown status values remain real-rollout blockers while still allowing offline
+training/import review.
+
+The conversion report includes episode/frame/duration counts, per-arm frame
+availability, camera decode samples, timestamp jitter, action step/velocity
+distribution, gripper min/max and event counts, IK feasibility status,
+workspace-envelope status, and retarget status.
+
 Dataset manifests use schema `robotics_lab.policy_runner.dataset_manifest.v1`:
 
 ```yaml

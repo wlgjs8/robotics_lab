@@ -358,6 +358,46 @@ def _main_with_subcommands(argv: list[str]) -> int:
     hdf5_audit.add_argument("--output-json", required=True)
     hdf5_audit.add_argument("--output-md", required=True)
 
+    umi_import = sub.add_parser(
+        "umi-import",
+        help="Import canonical UMI HDF5 episodes by linking raw files and writing manifest/report metadata.",
+    )
+    umi_import.add_argument("--input", required=True, help="Raw UMI session directory or HDF5 file")
+    umi_import.add_argument("--output-dir", required=True, help="Output dataset directory")
+    umi_import.add_argument("--task", required=True, help="Task name or description")
+    umi_import.add_argument("--left-device", default=None, help="Expected left UMI device serial or name")
+    umi_import.add_argument("--right-device", default=None, help="Expected right UMI device serial or name")
+    umi_import.add_argument("--retarget-config", default=None, help="UMI retarget YAML/JSON config")
+    umi_import.add_argument(
+        "--require-measured-retarget",
+        action="store_true",
+        help="Fail unless the retarget config has status=measured",
+    )
+    umi_import.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace existing imported links/files under the output directory",
+    )
+
+    umi_convert = sub.add_parser(
+        "umi-convert",
+        help="Convert one UMI HDF5 episode to a FlowHdf5Dataset-compatible layout.",
+    )
+    umi_convert.add_argument("--input", required=True, help="Input UMI HDF5 episode")
+    umi_convert.add_argument("--output", required=True, help="Output HDF5 episode")
+    umi_convert.add_argument(
+        "--format",
+        choices=("robotics_lab_dual_arm", "pika_bimanual"),
+        required=True,
+        help="Conversion target layout",
+    )
+    umi_convert.add_argument("--retarget-config", default=None, help="UMI retarget YAML/JSON config")
+    umi_convert.add_argument(
+        "--require-measured-retarget",
+        action="store_true",
+        help="Fail unless the retarget config has status=measured",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "record":
         from .recording import record_state_stream
@@ -560,6 +600,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
         print(f"wrote HDF5 audit JSON: {args.output_json}", flush=True)
         print(f"wrote HDF5 audit report: {args.output_md}", flush=True)
         return 0
+    if args.command == "umi-import":
+        from .umi_pipeline import run_umi_import_cli
+
+        return run_umi_import_cli(args)
+    if args.command == "umi-convert":
+        from .umi_pipeline import run_umi_convert_cli
+
+        return run_umi_convert_cli(args)
     if args.command == "flow-infer":
         from .flow_inference import FlowMatchingActionSource
 
