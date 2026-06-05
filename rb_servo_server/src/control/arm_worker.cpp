@@ -138,6 +138,8 @@ ArmWorker::ArmWorker(std::unique_ptr<IRobotBackend> backend, ArmWorkerOptions op
     }
     arm_id_ = backend_->armId();
     name_ = backend_->name();
+    startup_telemetry_.arm_id = arm_id_;
+    startup_telemetry_.backend_name = name_;
 }
 
 ArmWorker::~ArmWorker() {
@@ -151,6 +153,15 @@ bool ArmWorker::start() {
     }
     stop_requested_ = false;
     running_ = true;
+    const uint64_t now = nowSteadyNs();
+    startup_telemetry_.phase = "not_started";
+    startup_telemetry_.start_time_ns = now;
+    startup_telemetry_.phase_time_ns = now;
+    startup_telemetry_.last_op.clear();
+    startup_telemetry_.last_result_ok = false;
+    startup_telemetry_.last_error_name = "None";
+    startup_telemetry_.last_error_kind = "None";
+    startup_telemetry_.last_error_message.clear();
     thread_ = std::thread(&ArmWorker::run, this);
     return true;
 }
@@ -423,6 +434,13 @@ ArmWorkerTelemetry ArmWorker::telemetry() const {
     return telemetry_;
 }
 
+ArmWorkerStartupTelemetry ArmWorker::startupTelemetry() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ArmWorkerStartupTelemetry telemetry = startup_telemetry_;
+    telemetry.latest_state_present = latest_state_.has_value();
+    return telemetry;
+}
+
 RbpodoAsyncStreamingTelemetry ArmWorker::asyncStreamingTelemetry() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return async_telemetry_;
@@ -443,18 +461,29 @@ std::string ArmWorker::name() const {
 void ArmWorker::run() {
     bool backend_ready = false;
 
+    updateStartupPhase("connect_entered");
     const BackendResult<RobotState> connect_result = backend_->connect();
+    updateStartupResultPhase("connect_returned", connect_result);
     if (!connect_result.ok) {
         storeReadResult(lifecycleFailureAsReadResult(connect_result), nowSteadyNs());
+        updateStartupPhase("connect_failure_stored");
     } else {
+        storeReadResult(connect_result, nowSteadyNs());
+        updateStartupPhase("connect_state_stored");
+        updateStartupPhase("initialize_entered");
         const BackendResult<RobotState> initialize_result = backend_->initialize();
+        updateStartupResultPhase("initialize_returned", initialize_result);
         if (!initialize_result.ok) {
             storeReadResult(lifecycleFailureAsReadResult(initialize_result), nowSteadyNs());
+            updateStartupPhase("initialize_failure_stored");
         } else {
+            storeReadResult(initialize_result, nowSteadyNs());
+            updateStartupPhase("initialize_state_stored");
             backend_ready = true;
         }
     }
 
+    updateStartupPhase("read_loop_entered");
     while (true) {
         std::optional<SendServoJRequest> command;
         std::optional<ArmWorkerCommand> lifecycle_command;
@@ -535,7 +564,9 @@ void ArmWorker::run() {
         }
 
         const BackendResult<RobotState> read_result = backend_->readState();
+        updateStartupResultPhase("read_state_returned", read_result);
         storeReadResult(read_result, nowSteadyNs());
+        updateStartupPhase("read_state_stored");
 
         std::unique_lock<std::mutex> lock(mutex_);
         if (stop_requested_) {
@@ -557,6 +588,26 @@ void ArmWorker::storeReadResult(const BackendResult<RobotState>& result, uint64_
     latest_state_ = result;
     latest_state_observed_ns_ = observed_ns;
     updateAsyncReferenceSupervisionLocked(result, observed_ns);
+}
+
+void ArmWorker::updateStartupPhase(const std::string& phase) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    startup_telemetry_.phase = phase;
+    startup_telemetry_.phase_time_ns = nowSteadyNs();
+}
+
+void ArmWorker::updateStartupResultPhase(
+    const std::string& phase,
+    const BackendResult<RobotState>& result
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    startup_telemetry_.phase = phase;
+    startup_telemetry_.phase_time_ns = nowSteadyNs();
+    startup_telemetry_.last_op = toString(result.op);
+    startup_telemetry_.last_result_ok = result.ok;
+    startup_telemetry_.last_error_name = result.error.name;
+    startup_telemetry_.last_error_kind = toString(result.error.kind);
+    startup_telemetry_.last_error_message = result.error.message;
 }
 
 void ArmWorker::storeSendResult(

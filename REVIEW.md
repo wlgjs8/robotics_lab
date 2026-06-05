@@ -76,7 +76,9 @@ Review requirements:
 
 ### `TcpLinearMove`
 
-Status: simulator acceptance candidate.
+Status: simulator acceptance candidate, plus a narrow rbpodo controller
+`pgmode` simulation carve-out when `operation_mode=simulation` and
+`physical_motion_expected=false` are reported by server telemetry.
 
 Meaning: MoveL-like Cartesian path primitive. The TCP position reference should follow a straight line. Orientation mode must be explicit:
 
@@ -103,6 +105,8 @@ Review requirements:
 - SpaceMouse must require deadman
 - local-frame twist must preserve orientation when angular input is zero, within tolerance
 - real mode must remain blocked
+- physical real Cartesian mode must remain blocked; controller pgmode
+  simulation is not physical real motion evidence
 
 ### `TcpDeltaLocal` / `TcpDeltaStand`
 

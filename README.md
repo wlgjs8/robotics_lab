@@ -197,7 +197,10 @@ force_control:
 
 - `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target입니다. Cartesian path는 보장하지 않습니다.
 - `TcpLinearMove`: simulator-only MoveL-like Cartesian path primitive입니다.
-- `TcpTwistLocal` / `TcpTwistStand`: simulator-only streaming Cartesian velocity primitive입니다.
+- `TcpTwistLocal` / `TcpTwistStand`: 기본은 simulator-only streaming
+  Cartesian velocity primitive입니다. 예외적으로 rbpodo controller
+  `pgmode` simulation carve-out은 `operation_mode: simulation`과
+  `physical_motion_expected=false` telemetry가 확인될 때만 허용됩니다.
 - `TcpDeltaLocal` / `TcpDeltaStand`: low-level one-shot/debug jog primitive입니다.
 
 ## 자주 쓰는 명령

@@ -47,6 +47,20 @@ struct ArmWorkerLifecycleResult {
     BackendTiming dispatch_timing;
 };
 
+struct ArmWorkerStartupTelemetry {
+    ArmId arm_id = ArmId::Left;
+    std::string backend_name;
+    std::string phase = "not_started";
+    uint64_t start_time_ns = 0;
+    uint64_t phase_time_ns = 0;
+    std::string last_op;
+    bool last_result_ok = false;
+    std::string last_error_name = "None";
+    std::string last_error_kind = "None";
+    std::string last_error_message;
+    bool latest_state_present = false;
+};
+
 class ArmWorker {
 public:
     explicit ArmWorker(std::unique_ptr<IRobotBackend> backend, ArmWorkerOptions options = {});
@@ -78,6 +92,7 @@ public:
         uint64_t wait_until_ns
     );
     ArmWorkerTelemetry telemetry() const;
+    ArmWorkerStartupTelemetry startupTelemetry() const;
     RbpodoAsyncStreamingTelemetry asyncStreamingTelemetry() const;
     std::optional<BackendTransportTelemetry> transportTelemetry() const;
 
@@ -116,6 +131,11 @@ private:
         const std::string& reason,
         RbpodoAsyncStreamingSupervisionState state =
             RbpodoAsyncStreamingSupervisionState::Warning
+    );
+    void updateStartupPhase(const std::string& phase);
+    void updateStartupResultPhase(
+        const std::string& phase,
+        const BackendResult<RobotState>& result
     );
     bool asyncStreamingEnabled() const;
     bool isExpired(const SendServoJRequest& request, uint64_t now_ns) const;
@@ -174,6 +194,7 @@ private:
     std::optional<ArmSendResult> last_send_result_;
     std::optional<ArmWorkerLifecycleResult> last_lifecycle_result_;
     ArmWorkerTelemetry telemetry_;
+    ArmWorkerStartupTelemetry startup_telemetry_;
     RbpodoAsyncStreamingTelemetry async_telemetry_;
     std::optional<SendServoJRequest> last_async_sent_request_;
     std::optional<JointArray> last_async_q_ref_deg_;

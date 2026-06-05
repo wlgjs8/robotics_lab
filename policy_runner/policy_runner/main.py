@@ -193,9 +193,13 @@ def make_action_source(config: PolicyRunnerConfig):
             max_angular_velocity_rad_s=config.spacemouse_cartesian.max_angular_velocity_rad_s,
             deadband=config.spacemouse_cartesian.deadband,
             response_curve_gamma=config.spacemouse_cartesian.response_curve_gamma,
+            sample_hold_timeout_sec=config.spacemouse_cartesian.sample_hold_timeout_sec,
             require_deadman=config.spacemouse_cartesian.require_deadman,
             deadman_button=config.spacemouse_cartesian.deadman_button,
             timeout_sec=config.servo_command.timeout_sec,
+            allow_rbpodo_controller_simulation=(
+                config.safety.allow_rbpodo_controller_simulation_cartesian
+            ),
         )
     if config.action_source == "dual_spacemouse_cartesian":
         left = config.spacemouse_cartesian_dual.left
@@ -216,9 +220,13 @@ def make_action_source(config: PolicyRunnerConfig):
             max_angular_velocity_rad_s=config.spacemouse_cartesian_dual.max_angular_velocity_rad_s,
             deadband=config.spacemouse_cartesian_dual.deadband,
             response_curve_gamma=config.spacemouse_cartesian_dual.response_curve_gamma,
+            sample_hold_timeout_sec=config.spacemouse_cartesian_dual.sample_hold_timeout_sec,
             left_deadman_button=left.deadman_button,
             right_deadman_button=right.deadman_button,
             timeout_sec=config.servo_command.timeout_sec,
+            allow_rbpodo_controller_simulation=(
+                config.safety.allow_rbpodo_controller_simulation_cartesian
+            ),
         )
     raise ValueError(f"unknown action_source: {config.action_source}")
 
@@ -445,6 +453,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 "recording_mode": "teleop_record",
                 "policy_config": args.config,
                 "action_source": config.action_source,
+                "dataset_metadata": config.recording.dataset_metadata,
             },
         )
         state_client = RobotStateClient(config.robot_state.bind, config.robot_state.stale_timeout_sec)
@@ -505,6 +514,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             task_description=args.task,
             action_source=config.action_source,
             operator_id=args.operator,
+            dataset_metadata=config.recording.dataset_metadata,
         )
         print("Started episode; reset anchored. Press Ctrl-C to end.", flush=True)
 

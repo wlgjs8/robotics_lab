@@ -78,6 +78,7 @@ class GeometrySafetyTest(unittest.TestCase):
                 "safety": {
                     "allow_configured_estimate_geometry_in_simulation": False,
                     "allow_configured_estimate_geometry_in_real": True,
+                    "allow_configured_estimate_geometry_in_controller_simulation": False,
                     "camera_stale_timeout_sec": 0.75,
                 },
             }
@@ -86,6 +87,7 @@ class GeometrySafetyTest(unittest.TestCase):
         self.assertEqual(cfg.geometry.path, "calibration/test.yaml")
         self.assertFalse(cfg.safety.allow_configured_estimate_geometry_in_simulation)
         self.assertTrue(cfg.safety.allow_configured_estimate_geometry_in_real)
+        self.assertFalse(cfg.safety.allow_configured_estimate_geometry_in_controller_simulation)
         self.assertEqual(cfg.safety.camera_stale_timeout_sec, 0.75)
 
     def test_joint_only_action_can_run_without_geometry_file(self):

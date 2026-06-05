@@ -28,6 +28,8 @@ class ServoCommandConfig:
 @dataclass(frozen=True)
 class SafetyConfig:
     allow_real_motion: bool = False
+    allow_rbpodo_controller_simulation_cartesian: bool = False
+    allow_configured_estimate_geometry_in_controller_simulation: bool = True
     require_valid_joint_state: bool = True
     kinematics_available: bool = False
     camera_available: bool = False
@@ -51,6 +53,7 @@ class RecordingConfig:
     output_dir: str = "/data/episodes"
     rate_hz: float = 30.0
     format: str = "hdf5"
+    dataset_metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.rate_hz < 1.0 or self.rate_hz > 100.0:
@@ -119,6 +122,7 @@ class SpaceMouseCartesianConfig:
     max_angular_velocity_rad_s: float = 0.2
     deadband: float = 0.08
     response_curve_gamma: float = 3.0
+    sample_hold_timeout_sec: float = 0.05
     require_deadman: bool = True
     deadman_button: int = 0
 
@@ -131,6 +135,8 @@ class SpaceMouseCartesianConfig:
             raise ValueError("spacemouse_cartesian.deadband must be non-negative")
         if self.response_curve_gamma < 1.0:
             raise ValueError("spacemouse_cartesian.response_curve_gamma must be >= 1.0")
+        if self.sample_hold_timeout_sec <= 0.0:
+            raise ValueError("spacemouse_cartesian.sample_hold_timeout_sec must be positive")
         _validate_command_rate_hz(float(self.command_rate_hz))
 
     @property
@@ -167,6 +173,7 @@ class DualSpaceMouseCartesianConfig:
     max_angular_velocity_rad_s: float = 0.2
     deadband: float = 0.08
     response_curve_gamma: float = 3.0
+    sample_hold_timeout_sec: float = 0.05
 
     def __post_init__(self) -> None:
         if self.max_linear_velocity_m_s < 0.0:
@@ -177,6 +184,8 @@ class DualSpaceMouseCartesianConfig:
             raise ValueError("spacemouse_cartesian_dual.deadband must be non-negative")
         if self.response_curve_gamma < 1.0:
             raise ValueError("spacemouse_cartesian_dual.response_curve_gamma must be >= 1.0")
+        if self.sample_hold_timeout_sec <= 0.0:
+            raise ValueError("spacemouse_cartesian_dual.sample_hold_timeout_sec must be positive")
 
     @property
     def max_linear_step_m(self) -> float:
@@ -315,6 +324,11 @@ def _recording_config(raw: dict[str, Any]) -> RecordingConfig:
         raw["format"] = str(raw["format"])
     if "output_dir" in raw:
         raw["output_dir"] = str(raw["output_dir"])
+    if "dataset_metadata" in raw:
+        value = raw["dataset_metadata"]
+        if not isinstance(value, dict):
+            raise ValueError("recording.dataset_metadata must be a mapping")
+        raw["dataset_metadata"] = dict(value)
     return RecordingConfig(**raw)
 
 
@@ -381,6 +395,8 @@ def _spacemouse_cartesian_config(raw: dict[str, Any]) -> SpaceMouseCartesianConf
         raw["command_rate_hz"] = float(raw["command_rate_hz"])
     if "response_curve_gamma" in raw:
         raw["response_curve_gamma"] = float(raw["response_curve_gamma"])
+    if "sample_hold_timeout_sec" in raw:
+        raw["sample_hold_timeout_sec"] = float(raw["sample_hold_timeout_sec"])
     return SpaceMouseCartesianConfig(**raw)
 
 
@@ -394,6 +410,8 @@ def _spacemouse_cartesian_dual_config(raw: dict[str, Any]) -> DualSpaceMouseCart
     _apply_spacemouse_cartesian_velocity_aliases(top_level, "spacemouse_cartesian_dual")
     if "response_curve_gamma" in top_level:
         top_level["response_curve_gamma"] = float(top_level["response_curve_gamma"])
+    if "sample_hold_timeout_sec" in top_level:
+        top_level["sample_hold_timeout_sec"] = float(top_level["sample_hold_timeout_sec"])
     return DualSpaceMouseCartesianConfig(left=left, right=right, **top_level)
 
 

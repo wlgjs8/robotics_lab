@@ -64,22 +64,40 @@ public:
         rb_servo::ArmId arm_id,
         rb_servo::BackendErrorKind send_error_kind = rb_servo::BackendErrorKind::None,
         bool block_first_read = false,
-        bool socket_send_only = false
+        bool socket_send_only = false,
+        bool block_initialize = false,
+        bool block_connect = false
     ) : arm_id_(arm_id),
         send_error_kind_(send_error_kind),
         block_first_read_(block_first_read),
         socket_send_only_(socket_send_only),
+        block_initialize_(block_initialize),
+        block_connect_(block_connect),
         state_(validState(arm_id, joints(0.0))) {}
 
     rb_servo::BackendResult<rb_servo::RobotState> connect() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (block_connect_) {
+            connect_waiting_ = true;
+            cv_.notify_all();
+            cv_.wait(lock, [this] {
+                return connect_released_;
+            });
+        }
         connected_ = true;
         ++connect_count_;
         return backendStateResult(rb_servo::BackendOp::Connect, state_);
     }
 
     rb_servo::BackendResult<rb_servo::RobotState> initialize() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (block_initialize_) {
+            initialize_waiting_ = true;
+            cv_.notify_all();
+            cv_.wait(lock, [this] {
+                return initialize_released_;
+            });
+        }
         initialized_ = true;
         ++initialize_count_;
         return backendStateResult(rb_servo::BackendOp::Initialize, state_);
@@ -198,10 +216,40 @@ public:
         });
     }
 
+    bool waitForInitializeEntered(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this] {
+            return initialize_waiting_;
+        });
+    }
+
+    bool waitForConnectEntered(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this] {
+            return connect_waiting_;
+        });
+    }
+
+    void releaseConnect() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            connect_released_ = true;
+        }
+        cv_.notify_all();
+    }
+
     void releaseFirstRead() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             first_read_released_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    void releaseInitialize() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            initialize_released_ = true;
         }
         cv_.notify_all();
     }
@@ -241,10 +289,16 @@ private:
     rb_servo::BackendErrorKind send_error_kind_;
     bool block_first_read_ = false;
     bool socket_send_only_ = false;
+    bool block_initialize_ = false;
+    bool block_connect_ = false;
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     bool connected_ = false;
     bool initialized_ = false;
+    bool connect_waiting_ = false;
+    bool connect_released_ = false;
+    bool initialize_waiting_ = false;
+    bool initialize_released_ = false;
     bool first_read_waiting_ = false;
     bool first_read_released_ = false;
     int connect_count_ = 0;
@@ -295,6 +349,92 @@ bool testSuccessfulReadLoop() {
     RB_CHECK(state.value.has_valid_joint_state);
     RB_CHECK(raw_backend->connectCount() == 1);
     RB_CHECK(raw_backend->initializeCount() == 1);
+    worker.stop();
+    return true;
+}
+
+bool testInitializeStateIsPublishedBeforeFirstReadCompletes() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None,
+        true
+    );
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorker worker(std::move(backend));
+
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForFirstReadEntered(std::chrono::milliseconds(200)));
+
+    const rb_servo::BackendResult<rb_servo::RobotState> state =
+        worker.latestState(1'000'000'000);
+    RB_CHECK(state.ok);
+    RB_CHECK(state.op == rb_servo::BackendOp::Initialize);
+    RB_CHECK(state.value.arm_id == rb_servo::ArmId::Left);
+    RB_CHECK(state.value.has_valid_joint_state);
+    RB_CHECK(raw_backend->connectCount() == 1);
+    RB_CHECK(raw_backend->initializeCount() == 1);
+
+    raw_backend->releaseFirstRead();
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(200)));
+    worker.stop();
+    return true;
+}
+
+bool testConnectStateIsPublishedBeforeInitializeCompletes() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None,
+        false,
+        false,
+        true
+    );
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorker worker(std::move(backend));
+
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForInitializeEntered(std::chrono::milliseconds(200)));
+
+    rb_servo::ArmWorkerStartupTelemetry startup = worker.startupTelemetry();
+    RB_CHECK(startup.phase == "initialize_entered");
+    RB_CHECK(!startup.latest_state_present || startup.last_op == "Connect");
+
+    const rb_servo::BackendResult<rb_servo::RobotState> state =
+        worker.latestState(1'000'000'000);
+    RB_CHECK(state.ok);
+    RB_CHECK(state.op == rb_servo::BackendOp::Connect);
+    RB_CHECK(state.value.arm_id == rb_servo::ArmId::Left);
+    RB_CHECK(state.value.has_valid_joint_state);
+    RB_CHECK(raw_backend->connectCount() == 1);
+    RB_CHECK(raw_backend->initializeCount() == 0);
+
+    raw_backend->releaseInitialize();
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(200)));
+    worker.stop();
+    return true;
+}
+
+bool testStartupTelemetryReportsBlockedConnect() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None,
+        false,
+        false,
+        false,
+        true
+    );
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorker worker(std::move(backend));
+
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForConnectEntered(std::chrono::milliseconds(200)));
+
+    rb_servo::ArmWorkerStartupTelemetry startup = worker.startupTelemetry();
+    RB_CHECK(startup.phase == "connect_entered");
+    RB_CHECK(!startup.latest_state_present);
+    RB_CHECK(startup.backend_name == "worker_test_backend");
+
+    raw_backend->releaseConnect();
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(200)));
     worker.stop();
     return true;
 }
@@ -732,6 +872,9 @@ bool testAsyncSocketSendSupervisedRecordsSocketSendOnly() {
 
 int main() {
     if (!testSuccessfulReadLoop()) return 1;
+    if (!testInitializeStateIsPublishedBeforeFirstReadCompletes()) return 1;
+    if (!testConnectStateIsPublishedBeforeInitializeCompletes()) return 1;
+    if (!testStartupTelemetryReportsBlockedConnect()) return 1;
     if (!testDefaultReadPeriodIsConservative()) return 1;
     if (!testLatestStateReportsStaleSample()) return 1;
     if (!testSendRequestAccepted()) return 1;

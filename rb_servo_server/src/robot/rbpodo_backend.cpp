@@ -641,8 +641,6 @@ BackendResult<RobotState> RbpodoBackend::connect() {
             );
         }
         impl_->connected = true;
-        std::cerr << "[INFO] RbpodoBackend connected to " << impl_->config.ip
-                  << " for " << impl_->config.name << "\n";
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
@@ -656,6 +654,17 @@ BackendResult<RobotState> RbpodoBackend::connect() {
                 makeBackendTiming(start, nowSteadyNs())
             );
         }
+        std::cerr << "[INFO] RbpodoBackend connected to " << impl_->config.ip
+                  << " for " << impl_->config.name
+                  << " initial_state_valid=" << (mapped.has_valid_joint_state ? "true" : "false")
+                  << " controller_mode="
+                  << (rbpodoModeFieldIsKnown(snapshot.real_vs_simulation_mode)
+                      ? rbpodoModeName(snapshot.real_vs_simulation_mode == 1)
+                      : "unknown");
+        if (impl_->last_state_error.has_value()) {
+            std::cerr << " readiness_error=" << impl_->last_state_error->name;
+        }
+        std::cerr << "\n";
         return okResult(BackendOp::Connect, mapped, makeBackendTiming(start, nowSteadyNs()));
     } catch (const std::exception& exc) {
         std::cerr << "[ERROR] RbpodoBackend connect failed for " << impl_->config.ip

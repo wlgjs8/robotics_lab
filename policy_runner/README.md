@@ -13,13 +13,18 @@ Supported action sources:
 - `spacemouse_joint_velocity`: SpaceMouse six-axis input mapped directly to
   joint velocity commands.
 - `tcp_delta`: small simulation-only `TcpDeltaStand` command.
-- `spacemouse_cartesian`: simulation-only SpaceMouse input mapped to
-  `TcpTwistLocal`.
-- `dual_spacemouse_cartesian`: simulation-only two-SpaceMouse input mapped to
-  per-arm `TcpTwistLocal` commands.
+- `spacemouse_cartesian`: SpaceMouse input mapped to `TcpTwistLocal`;
+  simulation by default, with an explicit rbpodo controller pgmode simulation
+  profile.
+- `dual_spacemouse_cartesian`: two-SpaceMouse input mapped to per-arm
+  `TcpTwistLocal` commands; simulation by default, with an explicit rbpodo
+  controller pgmode simulation profile.
 
 Joint actions remain joint-only. Geometry-aware safety gates protect Cartesian
-and camera-related action sources. Cartesian action sources are simulation-only.
+and camera-related action sources. Cartesian action sources remain
+simulation-only unless a config explicitly opts into the rbpodo controller
+pgmode simulation carve-out and the server state proves
+`physical_motion_expected=false`.
 
 ## Safety
 
@@ -36,8 +41,11 @@ Motion commands are blocked when:
   intrinsics/extrinsics are unavailable
 - an action source declares `requires_valid_tcp_pose` and the state stream does
   not report valid TCP pose for both arms
-- a Cartesian source does not observe `observed_mode: simulation`
-- a Cartesian source sees a non-simulator `observed_backend`/`backend_type`
+- a Cartesian source does not observe `observed_mode: simulation`, unless the
+  explicit rbpodo pgmode simulation SpaceMouse profile is active
+- a Cartesian source sees a non-simulator `observed_backend`/`backend_type`,
+  unless per-arm `cartesian_gate` telemetry proves rbpodo controller pgmode
+  simulation with physical motion not expected
 - configured mode is `real` and `allow_real_motion` is false
 - an action source requires camera or kinematics inputs that are unavailable
 
@@ -75,11 +83,14 @@ but it is blocked for real geometry-dependent policy by default because
 `geometry_valid_for_real_policy` is false.
 
 Cartesian sources are stricter than joint sources. They require fresh state, no
-fault latch, valid joint state, valid TCP pose for both arms, simulation as the
-observed mode, and simulator backend when the backend is reported. Real
-Cartesian commands remain blocked even when `allow_real_motion: true`; a future
-separate `allow_real_cartesian` implementation must be added before real
-Cartesian motion can be opened.
+fault latch, valid joint state, and valid TCP pose for both arms. The default
+path still requires simulation as the observed mode and simulator backend when
+the backend is reported. The only non-simulator SpaceMouse carve-out is rbpodo
+controller `pgmode` simulation: `mode: real`, `backend_type: rbpodo`,
+`operation_mode: simulation`, `physical_motion_expected=false`, explicit
+policy-runner opt-in, command-source lease, and server-published
+`cartesian_gate` evidence. Physical real Cartesian commands remain blocked;
+do not set `RB_ALLOW_REAL_CARTESIAN` for this workflow.
 
 Only one command source should be active at a time. Do not run GUI teleop and
 `policy_runner` teleop against the same `rb_servo_server` command port
@@ -118,6 +129,18 @@ Real joint-only example configs:
 The simulator examples use loopback simulator endpoints and do not enable real
 motion or real Cartesian motion. The real master-arm example also keeps motion
 blocked by default; it only defines policy-runner command/state wiring.
+
+Rbpodo controller pgmode simulation example:
+
+- `policy_runner/config/rbpodo_pgmode_spacemouse_500hz_ack.yaml`: dual
+  SpaceMouse `TcpTwistLocal` teleop for the ACKON500 500 Hz controller
+  simulation profile. It sends commands to `udp://127.0.0.1:50256`, listens to
+  server state on `50376`, acquires the command-source lease, and requires
+  server telemetry to report controller-simulation Cartesian enabled with
+  `physical_motion_expected=false`.
+
+Use `tools/rbpodo_pgmode_spacemouse.sh` for the prepared server config, GUI,
+and recorder commands.
 
 ## Imitation Data Collection
 

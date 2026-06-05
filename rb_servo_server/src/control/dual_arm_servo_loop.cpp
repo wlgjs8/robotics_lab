@@ -1144,6 +1144,35 @@ std::optional<BackendTransportTelemetry> backendTransportTelemetry(const IRobotB
     return backend ? backend->transportTelemetry() : std::nullopt;
 }
 
+std::string workerStartupSummary(const ArmWorker* worker) {
+    if (!worker) {
+        return "{worker=null}";
+    }
+    const ArmWorkerStartupTelemetry telemetry = worker->startupTelemetry();
+    const uint64_t now = nowSteadyNs();
+    const double phase_age_ms =
+        telemetry.phase_time_ns > 0 && now >= telemetry.phase_time_ns
+            ? static_cast<double>(now - telemetry.phase_time_ns) / 1'000'000.0
+            : 0.0;
+
+    std::ostringstream out;
+    out << "{backend=" << telemetry.backend_name
+        << ",phase=" << telemetry.phase
+        << ",phase_age_ms=" << phase_age_ms
+        << ",latest_state_present=" << (telemetry.latest_state_present ? "true" : "false");
+    if (!telemetry.last_op.empty()) {
+        out << ",last_op=" << telemetry.last_op
+            << ",last_ok=" << (telemetry.last_result_ok ? "true" : "false")
+            << ",last_error_kind=" << telemetry.last_error_kind
+            << ",last_error_name=" << telemetry.last_error_name;
+        if (!telemetry.last_error_message.empty()) {
+            out << ",last_error_message=" << telemetry.last_error_message;
+        }
+    }
+    out << "}";
+    return out.str();
+}
+
 uint64_t workerReadPeriodNs(const ServoConfig& config) {
     constexpr double kNsPerSecond = 1'000'000'000.0;
     const double period_ns = config.worker_read_period_sec * kNsPerSecond;
@@ -1169,6 +1198,15 @@ ArmWorkerOptions workerOptions(const DualArmConfig& config) {
     options.rbpodo_async_reference_supervision =
         config.servo.rbpodo_async_streaming.reference_supervision;
     return options;
+}
+
+uint64_t workerStartupTimeoutNs(const DualArmConfig& config) {
+    double timeout_sec = std::max(0.1, config.servo.command_timeout_sec);
+    if (config.servo.io_model == ServoIoModel::Worker ||
+        config.servo.rbpodo_async_streaming.enable) {
+        timeout_sec = std::max(timeout_sec, 1.0);
+    }
+    return static_cast<uint64_t>(timeout_sec * 1'000'000'000.0);
 }
 
 LatchedFaultContextSnapshot faultContextSnapshot(const FaultContext& context) {
@@ -1422,8 +1460,7 @@ bool DualArmServoLoop::initializeWorkers() {
         return false;
     }
 
-    const uint64_t startup_timeout_ns =
-        static_cast<uint64_t>(std::max(0.1, config_.servo.command_timeout_sec) * 1'000'000'000.0);
+    const uint64_t startup_timeout_ns = workerStartupTimeoutNs(config_);
     const uint64_t deadline_ns = nowSteadyNs() + startup_timeout_ns;
     RobotState left;
     RobotState right;
@@ -1461,7 +1498,10 @@ bool DualArmServoLoop::initializeWorkers() {
     const BackendResult<RobotState> right_state = right_worker_->latestState(startup_timeout_ns);
     std::cerr << "[ERROR] invalid worker startup state"
               << " left=" << left_state.error.name << ":" << left_state.error.message
-              << " right=" << right_state.error.name << ":" << right_state.error.message << "\n";
+              << " right=" << right_state.error.name << ":" << right_state.error.message
+              << " timeout_sec=" << static_cast<double>(startup_timeout_ns) / 1'000'000'000.0
+              << " left_worker=" << workerStartupSummary(left_worker_.get())
+              << " right_worker=" << workerStartupSummary(right_worker_.get()) << "\n";
     left_worker_->stop();
     right_worker_->stop();
     return false;

@@ -14,6 +14,25 @@ CARTESIAN_ACTION_REQUIREMENTS = ActionRequirements(
     cartesian_motion=True,
 )
 
+RBPODO_CONTROLLER_SIMULATION_CARTESIAN_ACTION_REQUIREMENTS = ActionRequirements(
+    requires_geometry=True,
+    requires_valid_tcp_pose=True,
+    simulation_only=True,
+    requires_observed_simulation=True,
+    requires_simulator_backend_if_available=True,
+    allow_rbpodo_controller_simulation_cartesian=True,
+    cartesian_motion=True,
+)
+
+
+def cartesian_action_requirements(
+    *,
+    allow_rbpodo_controller_simulation: bool = False,
+) -> ActionRequirements:
+    if allow_rbpodo_controller_simulation:
+        return RBPODO_CONTROLLER_SIMULATION_CARTESIAN_ACTION_REQUIREMENTS
+    return CARTESIAN_ACTION_REQUIREMENTS
+
 
 class CartesianCommandIntent(CommandIntent):
     @property

@@ -28,6 +28,7 @@ class ActionRequirements:
     simulation_only: bool = False
     requires_observed_simulation: bool = False
     requires_simulator_backend_if_available: bool = False
+    allow_rbpodo_controller_simulation_cartesian: bool = False
     cartesian_motion: bool = False
 
     def __post_init__(self) -> None:
@@ -91,15 +92,34 @@ class SafetyGate:
             return SafetyDecision(False, "kinematics_unavailable")
         observed_mode = _observed_mode(payload)
         effective_mode = observed_mode or self.mode
+        controller_simulation_cartesian = False
         if requirements.cartesian_motion and (observed_mode == "real" or self.mode == "real"):
-            return SafetyDecision(False, "real_cartesian_not_allowed")
+            if (
+                requirements.allow_rbpodo_controller_simulation_cartesian
+                and self.config.allow_rbpodo_controller_simulation_cartesian
+            ):
+                controller_decision = _evaluate_rbpodo_controller_simulation_cartesian(payload, intent)
+                if not controller_decision.allowed:
+                    return controller_decision
+                controller_simulation_cartesian = True
+                effective_mode = "controller_simulation"
+            else:
+                return SafetyDecision(False, "real_cartesian_not_allowed")
         if requirements.cartesian_motion and str(payload.get("safety_verdict", "")) == "CartesianUnavailable":
             return SafetyDecision(False, "cartesian_unavailable")
-        if requirements.requires_observed_simulation and observed_mode != "simulation":
+        if (
+            requirements.requires_observed_simulation
+            and observed_mode != "simulation"
+            and not controller_simulation_cartesian
+        ):
             return SafetyDecision(False, "observed_mode_not_simulation")
-        if requirements.requires_observed_simulation and self.mode != "simulation":
+        if (
+            requirements.requires_observed_simulation
+            and self.mode != "simulation"
+            and not controller_simulation_cartesian
+        ):
             return SafetyDecision(False, "configured_mode_not_simulation")
-        if requirements.requires_simulator_backend_if_available:
+        if requirements.requires_simulator_backend_if_available and not controller_simulation_cartesian:
             observed_backend = _observed_backend(payload)
             if observed_backend is not None and observed_backend != "simulator":
                 return SafetyDecision(False, "observed_backend_not_simulator")
@@ -165,6 +185,14 @@ class SafetyGate:
                 return SafetyDecision(False, "configured_estimate_geometry_not_allowed_in_real")
             if effective_mode == "simulation" and not self.config.allow_configured_estimate_geometry_in_simulation:
                 return SafetyDecision(False, "configured_estimate_geometry_not_allowed_in_simulation")
+            if (
+                effective_mode == "controller_simulation"
+                and not self.config.allow_configured_estimate_geometry_in_controller_simulation
+            ):
+                return SafetyDecision(
+                    False,
+                    "configured_estimate_geometry_not_allowed_in_controller_simulation",
+                )
         elif not _is_real_policy_geometry_status(status.status):
             return SafetyDecision(False, "geometry_status_not_policy_ready")
         if effective_mode == "real" and not status.geometry_valid_for_real_policy:
@@ -208,6 +236,116 @@ def _observed_backend(payload: dict[str, Any]) -> str | None:
         if isinstance(value, str) and value.lower() in {"mock", "simulator", "rbpodo"}:
             return value.lower()
     return None
+
+
+_CARTESIAN_ARM_MOTION_MODES = {
+    "TcpPoseTarget",
+    "TcpDeltaStand",
+    "TcpDeltaLocal",
+    "TcpLinearMove",
+    "TcpTwistStand",
+    "TcpTwistLocal",
+    "TcpCircleMove",
+    "TcpCircleTrack",
+}
+
+_CONTROLLER_SIMULATION_ENV_KEYS = (
+    "env_RB_ALLOW_REAL_ROBOT",
+    "env_RB_ALLOW_REAL_MOTION",
+    "env_RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
+    "env_RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
+    "env_RB_RBPODO_PGMODE_SIMULATION_CONFIRMED",
+)
+
+
+def _evaluate_rbpodo_controller_simulation_cartesian(
+    payload: dict[str, Any],
+    intent: CommandIntent,
+) -> SafetyDecision:
+    observed_backend = _observed_backend(payload)
+    if observed_backend is not None and observed_backend != "rbpodo":
+        return SafetyDecision(False, "controller_simulation_backend_not_rbpodo")
+    observed_mode = _observed_mode(payload)
+    if observed_mode is not None and observed_mode != "real":
+        return SafetyDecision(False, "controller_simulation_mode_not_real")
+
+    arms = _active_cartesian_arms(intent)
+    if not arms:
+        arms = ("left", "right")
+    for arm in arms:
+        decision = _evaluate_arm_controller_simulation_cartesian(payload, arm)
+        if not decision.allowed:
+            return decision
+    return SafetyDecision(True)
+
+
+def _active_cartesian_arms(intent: CommandIntent) -> tuple[str, ...]:
+    if intent.mode == "ArmMotion":
+        return ("left", "right")
+    arms: list[str] = []
+    for arm_name, arm_payload in (("left", intent.left), ("right", intent.right)):
+        if _arm_mode(arm_payload) in _CARTESIAN_ARM_MOTION_MODES:
+            arms.append(arm_name)
+    if not arms and intent.mode in _CARTESIAN_ARM_MOTION_MODES:
+        return ("left", "right")
+    return tuple(arms)
+
+
+def _evaluate_arm_controller_simulation_cartesian(
+    payload: dict[str, Any],
+    arm: str,
+) -> SafetyDecision:
+    arm_payload = payload.get(arm, {})
+    if not isinstance(arm_payload, dict):
+        return SafetyDecision(False, "controller_simulation_arm_state_missing")
+    gate = arm_payload.get("cartesian_gate")
+    if not isinstance(gate, dict):
+        gate = payload.get("cartesian_gate")
+    if not isinstance(gate, dict):
+        return SafetyDecision(False, "controller_simulation_cartesian_gate_missing")
+
+    if _lower_str(gate.get("backend_type")) != "rbpodo":
+        return SafetyDecision(False, "controller_simulation_backend_not_rbpodo")
+    if _lower_str(gate.get("run_mode")) != "real":
+        return SafetyDecision(False, "controller_simulation_mode_not_real")
+    if _lower_str(gate.get("operation_mode")) not in {"simulation", "sim"}:
+        return SafetyDecision(False, "controller_simulation_operation_mode_not_simulation")
+    if not bool(gate.get("allow_in_controller_simulation", False)):
+        return SafetyDecision(False, "controller_simulation_cartesian_config_not_allowed")
+    if bool(gate.get("streaming_cartesian_physical_real_enabled", False)):
+        return SafetyDecision(False, "controller_simulation_physical_real_cartesian_enabled")
+    if bool(arm_payload.get("controller_simulation_physical_motion_detected", False)):
+        return SafetyDecision(False, "controller_simulation_physical_motion_detected")
+    physical_motion_expected = gate.get(
+        "physical_motion_expected",
+        arm_payload.get("physical_motion_expected"),
+    )
+    if physical_motion_expected is not False:
+        return SafetyDecision(False, "controller_simulation_physical_motion_expected")
+    for key in _CONTROLLER_SIMULATION_ENV_KEYS:
+        if gate.get(key) is not True:
+            return SafetyDecision(False, "controller_simulation_env_missing")
+    if not bool(gate.get("cartesian_available", False)):
+        reason = gate.get("cartesian_unavailable_reason")
+        if isinstance(reason, str) and reason:
+            return SafetyDecision(False, reason)
+        return SafetyDecision(False, "controller_simulation_cartesian_unavailable")
+    if not bool(gate.get("controller_simulation_cartesian_enabled", False)):
+        return SafetyDecision(False, "controller_simulation_cartesian_not_enabled")
+    return SafetyDecision(True)
+
+
+def _arm_mode(value: dict[str, Any] | None) -> str | None:
+    if not value:
+        return None
+    mode = value.get("mode")
+    return str(mode) if mode is not None else None
+
+
+def _lower_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value.lower()
 
 
 def _camera_readiness_missing(raw: dict[str, Any]) -> bool:

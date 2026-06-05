@@ -5,6 +5,7 @@ import warnings
 
 from policy_runner.action_sources.tcp_delta import (
     CARTESIAN_ACTION_REQUIREMENTS,
+    cartesian_action_requirements,
     clamp_tcp_twist,
     tcp_twist_local_intent,
 )
@@ -25,9 +26,11 @@ class SpaceMouseCartesianActionSource:
         max_angular_velocity_rad_s: float = 0.2,
         deadband: float = 0.08,
         response_curve_gamma: float = 3.0,
+        sample_hold_timeout_sec: float = 0.05,
         require_deadman: bool = True,
         deadman_button: int = 0,
         timeout_sec: float = 0.2,
+        allow_rbpodo_controller_simulation: bool = False,
         max_linear_step_m: float | None = None,
         max_angular_step_rad: float | None = None,
     ):
@@ -49,6 +52,8 @@ class SpaceMouseCartesianActionSource:
             raise ValueError("deadband must be non-negative")
         if response_curve_gamma < 1.0:
             raise ValueError("response_curve_gamma must be >= 1.0")
+        if sample_hold_timeout_sec <= 0.0:
+            raise ValueError("sample_hold_timeout_sec must be positive")
         if deadman_button < 0:
             raise ValueError("deadman_button must be non-negative")
         if not require_deadman:
@@ -60,27 +65,41 @@ class SpaceMouseCartesianActionSource:
         self.max_angular_velocity_rad_s = float(max_angular_velocity_rad_s)
         self.deadband = float(deadband)
         self.response_curve_gamma = float(response_curve_gamma)
+        self.sample_hold_timeout_sec = float(sample_hold_timeout_sec)
         self.require_deadman = bool(require_deadman)
         self.deadman_button = int(deadman_button)
         self.timeout_sec = timeout_sec
+        self.requirements = cartesian_action_requirements(
+            allow_rbpodo_controller_simulation=allow_rbpodo_controller_simulation
+        )
         self._was_armed = False
+        self._last_armed_twist: tuple[float, ...] | None = None
+        self._last_sample_monotonic: float | None = None
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
-        _ = snapshot, now_monotonic
+        _ = snapshot
         sample = self.reader.read(timeout_sec=0.0)
         if sample is None:
-            return None
+            if self._last_armed_twist is None or self._last_sample_monotonic is None:
+                return None
+            if now_monotonic - self._last_sample_monotonic <= self.sample_hold_timeout_sec:
+                return self._twist_intent(self._last_armed_twist)
+            self._was_armed = False
+            self._last_armed_twist = None
+            self._last_sample_monotonic = None
+            return self._zero_twist_intent()
+        self._last_sample_monotonic = sample.timestamp_monotonic
         armed = self._deadman_active(sample)
         if not armed:
+            self._last_armed_twist = None
             if self._was_armed:
                 self._was_armed = False
                 return self._zero_twist_intent()
             return None
         self._was_armed = True
         twist = self._twist_from_sample(sample)
-        left = twist if self.selected_arm in {"left", "both"} else None
-        right = twist if self.selected_arm in {"right", "both"} else None
-        return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
+        self._last_armed_twist = twist
+        return self._twist_intent(twist)
 
     def close(self) -> None:
         self.reader.close()
@@ -93,9 +112,11 @@ class SpaceMouseCartesianActionSource:
         return sample.buttons[self.deadman_button]
 
     def _zero_twist_intent(self) -> CommandIntent:
-        zero = (0.0,) * 6
-        left = zero if self.selected_arm in {"left", "both"} else None
-        right = zero if self.selected_arm in {"right", "both"} else None
+        return self._twist_intent((0.0,) * 6)
+
+    def _twist_intent(self, twist: tuple[float, ...]) -> CommandIntent:
+        left = twist if self.selected_arm in {"left", "both"} else None
+        right = twist if self.selected_arm in {"right", "both"} else None
         return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
 
     def _twist_from_sample(self, sample: SpaceMouseSample) -> tuple[float, ...]:

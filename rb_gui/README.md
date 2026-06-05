@@ -84,3 +84,23 @@ should be scored against `tcp_ref_stand`.
 `policy_runner` is a separate command source. The GUI does not route benchmark
 commands through `policy_runner`; it only receives server state and benchmark
 overlay telemetry for this workflow.
+
+## rbpodo SpaceMouse pgmode Live View
+
+The ACKON500 SpaceMouse pgmode profile uses separate state fanout ports so
+`policy_runner` and the GUI do not bind the same UDP socket:
+
+```text
+rb_servo_server state fanout
+  udp://127.0.0.1:50366 -> rb_gui / viser live viewer
+  udp://127.0.0.1:50376 -> policy_runner safety readback
+```
+
+Launch the viewer with:
+
+```bash
+tools/rbpodo_pgmode_spacemouse.sh gui
+```
+
+This disables the circle overlay and only listens to server state. The command
+does not send robot commands.

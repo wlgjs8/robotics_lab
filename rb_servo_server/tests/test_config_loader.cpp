@@ -175,6 +175,72 @@ bool testRepositoryConfigsParse() {
 
     {
         EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
+        EnvGuard controller_sim_gate("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION", "1");
+        EnvGuard controller_sim_cartesian_gate("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN", "1");
+        EnvGuard async_gate("RB_ALLOW_RBPODO_ASYNC_STREAMING", "1");
+        EnvGuard diagnostics_gate("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM", "1");
+        EnvGuard pgmode_gate("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED", "1");
+        EnvGuard physical_cartesian_gate("RB_ALLOW_REAL_CARTESIAN", nullptr);
+
+        const rb_servo::DualArmConfig pgmode =
+            rb_servo::loadConfigFromYaml(
+                (config_dir / "dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml").string()
+            );
+        RB_CHECK(pgmode.left_robot.backend_type == rb_servo::BackendType::Rbpodo);
+        RB_CHECK(pgmode.right_robot.backend_type == rb_servo::BackendType::Rbpodo);
+        RB_CHECK(pgmode.left_robot.run_mode == rb_servo::RunMode::Real);
+        RB_CHECK(pgmode.right_robot.run_mode == rb_servo::RunMode::Real);
+        RB_CHECK(pgmode.left_robot.operation_mode == "simulation");
+        RB_CHECK(pgmode.right_robot.operation_mode == "simulation");
+        RB_CHECK(pgmode.servo.rate_hz == 500);
+        RB_CHECK(pgmode.servo.send_servo_commands);
+        RB_CHECK(pgmode.servo.allow_controller_simulation_motion);
+        RB_CHECK(pgmode.servo.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(near(pgmode.left_robot.servo_t1_sec, 0.002));
+        RB_CHECK(near(pgmode.right_robot.servo_t1_sec, 0.002));
+        RB_CHECK(near(pgmode.left_robot.servo_t2_sec, 0.08));
+        RB_CHECK(near(pgmode.left_robot.servo_alpha, 0.8));
+        RB_CHECK(!pgmode.left_robot.disable_waiting_ack);
+        RB_CHECK(!pgmode.right_robot.disable_waiting_ack);
+        RB_CHECK(pgmode.servo.rbpodo_async_streaming.enable);
+        RB_CHECK(pgmode.servo.rbpodo_async_streaming.mode ==
+                 rb_servo::RbpodoAsyncStreamingMode::SdkAckWorker);
+        RB_CHECK(pgmode.servo.rbpodo_async_streaming.rate_hz == 500);
+        RB_CHECK(pgmode.servo.rbpodo_async_streaming.reference_supervision.policy ==
+                 rb_servo::RbpodoAsyncReferenceSupervisionPolicy::FaultLatch);
+        RB_CHECK(pgmode.servo.rbpodo_async_streaming.diagnostics.publish_per_command_jsonl);
+        RB_CHECK(pgmode.safety.controller_simulation_tracking_error_source ==
+                 rb_servo::ControllerSimulationTrackingErrorSource::Reference);
+        RB_CHECK(pgmode.safety.controller_simulation_physical_motion_policy ==
+                 rb_servo::ControllerSimulationPhysicalMotionPolicy::FaultLatch);
+        RB_CHECK(pgmode.network.command_bind == "udp://127.0.0.1:50256");
+        RB_CHECK(pgmode.network.state_pub_endpoint == "udp://127.0.0.1:50356");
+        RB_CHECK(pgmode.network.state_pub_endpoints.size() == 3);
+        RB_CHECK(pgmode.network.state_pub_endpoints[1] == "udp://127.0.0.1:50366");
+        RB_CHECK(pgmode.network.state_pub_endpoints[2] == "udp://127.0.0.1:50376");
+        RB_CHECK(pgmode.command_source.enforce_lease);
+        RB_CHECK(pgmode.network.command_source_enforce_lease);
+        RB_CHECK(near(pgmode.command_source.lease_timeout_sec, 60.0));
+        RB_CHECK(pgmode.cartesian_control.enable);
+        RB_CHECK(pgmode.cartesian_control.allow_in_controller_simulation);
+        RB_CHECK(!pgmode.cartesian_control.allow_in_real);
+        RB_CHECK(!pgmode.cartesian_control.enable_benchmark_primitives);
+        RB_CHECK(!pgmode.cartesian_control.circle_move.allow_in_simulation);
+        RB_CHECK(near(pgmode.cartesian_control.max_twist_linear_m_s, 0.2));
+        RB_CHECK(near(pgmode.cartesian_control.max_twist_angular_rad_s, 0.4));
+        RB_CHECK(pgmode.cartesian_control.controller_simulation_servo_state_source ==
+                 rb_servo::CartesianControllerSimulationStateSource::Reference);
+        RB_CHECK(pgmode.cartesian_control.controller_simulation_divergence_source ==
+                 rb_servo::CartesianControllerSimulationStateSource::Reference);
+        RB_CHECK(pgmode.force_control.provider == "null");
+        RB_CHECK(!pgmode.force_control.enable);
+        RB_CHECK(pgmode.kinematics.enable);
+        RB_CHECK(pgmode.kinematics.provider == "pinocchio");
+    }
+
+    {
+        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
         EnvGuard rbscript_gate("RB_ALLOW_RBSCRIPT_TCP", "1");
         EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", nullptr);
         EnvGuard rbscript_motion_gate("RB_ALLOW_RBSCRIPT_TCP_MOTION", nullptr);

@@ -42,6 +42,48 @@ def sample_state(**overrides):
     return StateSnapshot(payload=payload, received_monotonic=time.monotonic())
 
 
+def controller_sim_cartesian_gate(**overrides):
+    gate = {
+        "run_mode": "real",
+        "backend_type": "rbpodo",
+        "operation_mode": "simulation",
+        "allow_in_controller_simulation": True,
+        "env_RB_ALLOW_REAL_ROBOT": True,
+        "env_RB_ALLOW_REAL_MOTION": True,
+        "env_RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION": True,
+        "env_RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN": True,
+        "env_RB_RBPODO_PGMODE_SIMULATION_CONFIRMED": True,
+        "physical_motion_expected": False,
+        "controller_simulation_cartesian_enabled": True,
+        "streaming_cartesian_physical_real_enabled": False,
+        "cartesian_available": True,
+        "cartesian_unavailable_reason": None,
+    }
+    gate.update(overrides)
+    return gate
+
+
+def controller_sim_state(**overrides):
+    left = {
+        "has_valid_joint_state": True,
+        "has_valid_tcp_pose": True,
+        "q_actual_deg": [0, -30, 80, 0, 60, 0],
+        "cartesian_gate": controller_sim_cartesian_gate(),
+        "physical_motion_expected": False,
+        "controller_simulation_physical_motion_detected": False,
+    }
+    right = dict(left)
+    right["cartesian_gate"] = controller_sim_cartesian_gate()
+    payload = {
+        "observed_mode": "real",
+        "observed_backend": "rbpodo",
+        "left": left,
+        "right": right,
+    }
+    payload.update(overrides)
+    return sample_state(**payload)
+
+
 def spacemouse_sample(
     tx=0.0,
     ty=0.0,
@@ -178,6 +220,29 @@ class CartesianActionSourceTest(unittest.TestCase):
         assert released is not None
         self.assertEqual(released.left["tcp_twist_local"], [0.0] * 6)
         self.assertEqual(released.right["tcp_twist_local"], [0.0] * 6)
+        self.assertIsNone(idle)
+
+    def test_spacemouse_cartesian_holds_latest_sample_until_timeout_then_zeroes(self):
+        reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0, buttons=(True,))])
+        source = SpaceMouseCartesianActionSource(
+            reader=reader,
+            selected_arm="left",
+            sample_hold_timeout_sec=0.05,
+        )
+        snapshot = sample_state()
+        start = time.monotonic()
+
+        first = source.next_intent(snapshot, start)
+        held = source.next_intent(snapshot, start + 0.02)
+        zero = source.next_intent(snapshot, start + 0.08)
+        idle = source.next_intent(snapshot, start + 0.10)
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(held)
+        self.assertIsNotNone(zero)
+        assert first is not None and held is not None and zero is not None
+        self.assertEqual(held.left["tcp_twist_local"], first.left["tcp_twist_local"])
+        self.assertEqual(zero.left["tcp_twist_local"], [0.0] * 6)
         self.assertIsNone(idle)
 
     def test_no_zero_twist_if_never_armed(self):
@@ -317,6 +382,28 @@ class CartesianActionSourceTest(unittest.TestCase):
             [0.0, -0.0276, 0.0, 0.0, 0.0, 0.0],
         )
 
+    def test_dual_spacemouse_holds_each_arm_sample_until_timeout(self):
+        source = DualSpaceMouseCartesianActionSource(
+            left_reader=FakeSpaceMouseReader([spacemouse_sample(tx=1.0)]),
+            right_reader=FakeSpaceMouseReader([spacemouse_sample(ty=-1.0)]),
+            sample_hold_timeout_sec=0.05,
+        )
+        snapshot = sample_state()
+        start = time.monotonic()
+
+        first = source.next_intent(snapshot, start)
+        held = source.next_intent(snapshot, start + 0.02)
+        zero = source.next_intent(snapshot, start + 0.08)
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(held)
+        self.assertIsNotNone(zero)
+        assert first is not None and held is not None and zero is not None
+        self.assertEqual(held.left["tcp_twist_local"], first.left["tcp_twist_local"])
+        self.assertEqual(held.right["tcp_twist_local"], first.right["tcp_twist_local"])
+        self.assertEqual(zero.left["tcp_twist_local"], [0.0] * 6)
+        self.assertEqual(zero.right["tcp_twist_local"], [0.0] * 6)
+
     def test_dual_source_simultaneous_release(self):
         source = DualSpaceMouseCartesianActionSource(
             left_reader=FakeSpaceMouseReader(
@@ -451,6 +538,112 @@ class CartesianActionSourceTest(unittest.TestCase):
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "real_cartesian_not_allowed")
+
+    def test_rbpodo_controller_simulation_allows_spacemouse_cartesian_with_gate_evidence(self):
+        reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
+        source = SpaceMouseCartesianActionSource(
+            reader=reader,
+            allow_rbpodo_controller_simulation=True,
+        )
+        snapshot = controller_sim_state()
+        intent = source.next_intent(snapshot, time.monotonic())
+        gate = SafetyGate(
+            "real",
+            SafetyConfig(
+                allow_real_motion=True,
+                allow_rbpodo_controller_simulation_cartesian=True,
+            ),
+            stale_timeout_sec=0.5,
+            geometry_status=configured_estimate_geometry(),
+        )
+
+        decision = gate.evaluate(snapshot, intent, source.requirements, time.monotonic())
+
+        self.assertTrue(decision.allowed)
+
+    def test_rbpodo_controller_simulation_requires_policy_opt_in(self):
+        reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
+        source = SpaceMouseCartesianActionSource(
+            reader=reader,
+            allow_rbpodo_controller_simulation=True,
+        )
+        snapshot = controller_sim_state()
+        intent = source.next_intent(snapshot, time.monotonic())
+        gate = SafetyGate(
+            "real",
+            SafetyConfig(allow_real_motion=True),
+            stale_timeout_sec=0.5,
+            geometry_status=configured_estimate_geometry(),
+        )
+
+        decision = gate.evaluate(snapshot, intent, source.requirements, time.monotonic())
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "real_cartesian_not_allowed")
+
+    def test_rbpodo_controller_simulation_blocks_physical_motion_expected(self):
+        reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
+        source = SpaceMouseCartesianActionSource(
+            reader=reader,
+            allow_rbpodo_controller_simulation=True,
+        )
+        left_gate = controller_sim_cartesian_gate(physical_motion_expected=True)
+        snapshot = controller_sim_state(
+            left={
+                "has_valid_joint_state": True,
+                "has_valid_tcp_pose": True,
+                "q_actual_deg": [0, -30, 80, 0, 60, 0],
+                "cartesian_gate": left_gate,
+                "physical_motion_expected": True,
+            }
+        )
+        intent = source.next_intent(snapshot, time.monotonic())
+        gate = SafetyGate(
+            "real",
+            SafetyConfig(
+                allow_real_motion=True,
+                allow_rbpodo_controller_simulation_cartesian=True,
+            ),
+            stale_timeout_sec=0.5,
+            geometry_status=configured_estimate_geometry(),
+        )
+
+        decision = gate.evaluate(snapshot, intent, source.requirements, time.monotonic())
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "controller_simulation_physical_motion_expected")
+
+    def test_rbpodo_controller_simulation_blocks_missing_env_gate(self):
+        reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
+        source = SpaceMouseCartesianActionSource(
+            reader=reader,
+            allow_rbpodo_controller_simulation=True,
+        )
+        left_gate = controller_sim_cartesian_gate(env_RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=False)
+        snapshot = controller_sim_state(
+            left={
+                "has_valid_joint_state": True,
+                "has_valid_tcp_pose": True,
+                "q_actual_deg": [0, -30, 80, 0, 60, 0],
+                "cartesian_gate": left_gate,
+                "physical_motion_expected": False,
+            }
+        )
+        intent = source.next_intent(snapshot, time.monotonic())
+        gate = SafetyGate(
+            "real",
+            SafetyConfig(
+                allow_real_motion=True,
+                allow_rbpodo_controller_simulation_cartesian=True,
+            ),
+            stale_timeout_sec=0.5,
+            geometry_status=configured_estimate_geometry(),
+        )
+
+        decision = gate.evaluate(snapshot, intent, source.requirements, time.monotonic())
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "controller_simulation_env_missing")
 
     def test_stale_and_fault_state_block_cartesian_command(self):
         source = TcpDeltaActionSource()

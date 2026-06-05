@@ -240,6 +240,59 @@ class PolicyRunnerContractTest(unittest.TestCase):
                     close()
         self.assertTrue(load_config(config_dir / "simulator_tcp_delta.yaml").tcp_delta.simulation_only)
 
+    def test_rbpodo_pgmode_spacemouse_config_loads_with_explicit_safety_opt_in(self):
+        config_dir = Path(__file__).resolve().parents[1] / "config"
+        cfg = load_config(config_dir / "rbpodo_pgmode_spacemouse_500hz_ack.yaml")
+
+        self.assertEqual(cfg.mode, "real")
+        self.assertEqual(cfg.action_source, "dual_spacemouse_cartesian")
+        self.assertTrue(cfg.safety.allow_real_motion)
+        self.assertTrue(cfg.safety.allow_rbpodo_controller_simulation_cartesian)
+        self.assertFalse(cfg.safety.allow_configured_estimate_geometry_in_real)
+        self.assertEqual(cfg.command_rate_hz, 500.0)
+        self.assertEqual(cfg.servo_command.endpoint, "udp://127.0.0.1:50256")
+        self.assertEqual(cfg.robot_state.bind, "udp://0.0.0.0:50376")
+        self.assertTrue(cfg.servo_command.acquire_lease)
+        self.assertEqual(cfg.spacemouse_cartesian_dual.max_linear_velocity_m_s, 0.2)
+        self.assertEqual(cfg.spacemouse_cartesian_dual.max_angular_velocity_rad_s, 0.4)
+        self.assertEqual(cfg.spacemouse_cartesian_dual.sample_hold_timeout_sec, 0.05)
+        self.assertEqual(cfg.recording.dataset_metadata["backend_type"], "rbpodo")
+        self.assertEqual(cfg.recording.dataset_metadata["operation_mode"], "simulation")
+        self.assertFalse(cfg.recording.dataset_metadata["physical_motion_expected"])
+
+        source = make_action_source(cfg)
+        try:
+            self.assertTrue(source.requirements.allow_rbpodo_controller_simulation_cartesian)
+        finally:
+            close = getattr(source, "close", None)
+            if callable(close):
+                close()
+
+    def test_rbpodo_pgmode_spacemouse_server_template_is_controller_sim_only(self):
+        root = Path(__file__).resolve().parents[2]
+        template = root / "rb_servo_server" / "config" / "dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml"
+        text = template.read_text()
+
+        self.assertIn("rate_hz: 500", text)
+        self.assertIn("mode: sdk_ack_worker", text)
+        self.assertIn('command_bind: "udp://127.0.0.1:50256"', text)
+        self.assertIn('"udp://127.0.0.1:50366"', text)
+        self.assertIn('"udp://127.0.0.1:50376"', text)
+        self.assertIn("operation_mode: simulation", text)
+        self.assertIn("allow_in_controller_simulation: true", text)
+        self.assertIn("allow_in_real: false", text)
+        self.assertIn("enable_benchmark_primitives: false", text)
+        self.assertIn("enforce_lease: true", text)
+        self.assertIn("provider: null", text)
+        self.assertIn("enable: false", text)
+
+    def test_rbpodo_pgmode_spacemouse_tool_exists(self):
+        root = Path(__file__).resolve().parents[2]
+        tool = root / "tools" / "rbpodo_pgmode_spacemouse.sh"
+
+        self.assertTrue(tool.exists())
+        self.assertIn("RB_ALLOW_RBPODO_ASYNC_STREAMING", tool.read_text())
+
     def test_runtime_config_defaults_and_parses_startup_timeout(self):
         default_cfg = config_from_mapping({"schema": "robotics_lab.policy_runner.v1"})
         self.assertEqual(default_cfg.runtime.startup_timeout_sec, 5.0)
@@ -255,6 +308,28 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertEqual(cfg.runtime.startup_timeout_sec, 0.25)
         self.assertTrue(cfg.servo_command.acquire_lease)
         self.assertEqual(cfg.servo_command.lease_readback_timeout_sec, 0.75)
+
+    def test_recording_metadata_must_be_mapping(self):
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "recording": {
+                    "dataset_metadata": {
+                        "backend_type": "rbpodo",
+                        "operation_mode": "simulation",
+                    }
+                },
+            }
+        )
+        self.assertEqual(cfg.recording.dataset_metadata["backend_type"], "rbpodo")
+
+        with self.assertRaisesRegex(ValueError, "recording.dataset_metadata must be a mapping"):
+            config_from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.v1",
+                    "recording": {"dataset_metadata": "not-a-map"},
+                }
+            )
 
     def test_make_action_source_accepts_all_configured_action_sources_without_hardware(self):
         for action_source in (
