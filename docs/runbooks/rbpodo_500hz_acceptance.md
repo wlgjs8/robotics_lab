@@ -260,6 +260,7 @@ simulation gates. Do not set `RB_ALLOW_REAL_CARTESIAN` for this workflow.
 Repeatability report outputs:
 
 ```text
+matrix_resolved.yaml
 repeatability_report.md
 repeatability_summary.csv
 repeatability_summary.json
@@ -267,8 +268,10 @@ repeatability_summary.json
 
 Aggregate pass criteria:
 
-- all required rows pass the official ACKON500 goal, or failures are listed
-  per row
+- every required row passes the official ACKON500 goal
+- the left-arm aggregate passes only if all three required left rows pass
+- the right-arm aggregate passes only if all three required right rows pass
+- global repeatability passes only if both left and right aggregates pass
 - median RMS <= 3 mm and worst RMS <= 3.5 mm
 - median p95 <= 6 mm and worst p95 <= 8 mm
 - `fault_latched=false` for every required row
@@ -276,6 +279,8 @@ Aggregate pass criteria:
 - ACK observed ratio >= 0.98 for every required row
 - `socket_send_only_count=0` for every required row
 - `diagnostics_suspect` remains an explicit caveat
+- `physical_readiness.status=blocked` remains machine-readable in JSON and
+  visible in markdown
 
 Aggregate fields:
 
@@ -291,18 +296,17 @@ Classifications:
 
 - `repeatable_pass`: complete left/right evidence, all required runs pass, and
   aggregate thresholds pass.
-- `pass_with_outlier`: complete evidence with a bounded performance outlier;
-  review the listed row before promotion.
-- `not_repeatable`: complete evidence with hard safety/ACK/socket failures,
-  multiple official failures, or failed aggregate medians.
+- `not_repeatable`: complete evidence where any required official row fails,
+  either per-arm aggregate fails, hard safety/ACK/socket failures are present,
+  or aggregate medians fail.
 - `insufficient_evidence`: missing required left/right repeats or missing
   aggregate metrics.
 
-The optional dual-arm sequential rows named `dual_arm_safe_5cm10s_both` and
-`dual_arm_15cm4s_both` are intentionally not part of the official matrix until
-a future task adds an explicitly safe both-arm runner shape. Do not add inert
-disabled `arm: both` rows; the matrix validator only accepts `left` and
-`right`.
+Optional dual-arm sequential rows, if a future task adds a reviewed
+controller-simulation-only runner shape, must use
+`best_dual_sequential_run01..03` and remain separate from the required
+left/right aggregate pass. Do not add inert disabled `arm: both` rows; the
+matrix validator currently accepts only `left` and `right`.
 
 ## Servo Rate Accounting
 

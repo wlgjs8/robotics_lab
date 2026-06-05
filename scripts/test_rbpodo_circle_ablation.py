@@ -193,6 +193,7 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             self.assertIn("resolved_config:", completed.stdout)
             self.assertIn("resolved_server_config.yaml", completed.stdout)
             self.assertTrue((artifact_root / "ablation_summary.csv").is_file())
+            self.assertTrue((artifact_root / "matrix_resolved.yaml").is_file())
             exp_dir = artifact_root / "01_rbpodo_15cm16s_twist_stand"
             self.assertTrue((exp_dir / "experiment_command.txt").is_file())
             self.assertTrue((exp_dir / "resolved_server_config.yaml").is_file())
@@ -408,6 +409,23 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             "config_overrides": {"cartesian_control.allow_in_real": True},
         }
         with self.assertRaisesRegex(ablation.AblationError, "allow_in_real"):
+            ablation.validate_experiment(exp, 1)
+
+    def test_config_override_allows_only_safe_cartesian_gate_values(self) -> None:
+        exp = {
+            "name": "safe_cartesian_gates",
+            "config": "config.yaml",
+            "profile": "circle_15cm_16s",
+            "controller": "twist_stand",
+            "arm": "left",
+            "config_overrides": {
+                "cartesian_control.allow_in_controller_simulation": True,
+                "cartesian_control.allow_in_real": False,
+            },
+        }
+        ablation.validate_experiment(exp, 1)
+        exp["config_overrides"] = {"cartesian_control.allow_in_controller_simulation": False}
+        with self.assertRaisesRegex(ablation.AblationError, "allow_in_controller_simulation"):
             ablation.validate_experiment(exp, 1)
 
     def test_config_override_rejects_operation_mode_real(self) -> None:

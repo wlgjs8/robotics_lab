@@ -281,7 +281,7 @@ MATRIX="$(abs_from_root "${MATRIX}")"
 [[ -f "${MATRIX}" ]] || fail "matrix file not found: ${MATRIX}"
 [[ -f "${ROOT_DIR}/${NOOP_CONFIG}" ]] || fail "no-op config not found: ${NOOP_CONFIG}"
 
-if [[ "${PROFILE}" == "best" ]]; then
+if [[ "${PROFILE}" == "best" || "${PROFILE}" == "repeatability" ]]; then
   check_local_best_profile
 fi
 
@@ -302,6 +302,8 @@ if [[ "${WITH_REQUIRED_ENV}" == "1" ]]; then
   export RB_ALLOW_RBPODO_ASYNC_STREAMING=1
   export RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
   export RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
+elif [[ "${DRY_RUN}" == "1" ]]; then
+  note "dry-run: required controller-simulation env gates were not checked or exported"
 else
   require_env
 fi
@@ -364,6 +366,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   note "dry-run only; commands were not executed"
   note "expected summary: ${ARTIFACT_ROOT}/summary.json"
   if [[ "${PROFILE}" == "repeatability" ]]; then
+    note "expected resolved matrix: ${ARTIFACT_ROOT}/matrix_resolved.yaml"
     note "expected repeatability summary: ${ARTIFACT_ROOT}/repeatability_summary.json"
     note "expected repeatability report: ${ARTIFACT_ROOT}/repeatability_report.md"
   fi
@@ -386,6 +389,7 @@ print_command "${report_cmd[@]}"
 note "goal summary: ${ARTIFACT_ROOT}/summary.json"
 note "goal report: ${ARTIFACT_ROOT}/gene_goal_report.md"
 if [[ "${PROFILE}" == "repeatability" ]]; then
+  note "resolved matrix: ${ARTIFACT_ROOT}/matrix_resolved.yaml"
   note "repeatability summary: ${ARTIFACT_ROOT}/repeatability_summary.json"
   note "repeatability report: ${ARTIFACT_ROOT}/repeatability_report.md"
 fi

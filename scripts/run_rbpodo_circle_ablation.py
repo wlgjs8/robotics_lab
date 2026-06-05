@@ -107,6 +107,8 @@ ALLOWED_CONFIG_OVERRIDES = {
     "cartesian_control.max_twist_angular_rad_s",
     "cartesian_control.max_linear_move_speed_m_s",
     "cartesian_control.enable_benchmark_primitives",
+    "cartesian_control.allow_in_controller_simulation",
+    "cartesian_control.allow_in_real",
     "cartesian_control.path_kp_pos",
     "cartesian_control.path_kp_ori",
     "cartesian_control.twist_angular_deadband_rad_s",
@@ -136,6 +138,8 @@ BOOLEAN_CONFIG_OVERRIDES = {
     "right_robot.disable_waiting_ack",
     "servo.rbpodo_async_streaming.enable",
     "cartesian_control.enable_benchmark_primitives",
+    "cartesian_control.allow_in_controller_simulation",
+    "cartesian_control.allow_in_real",
     "servo.rbpodo_async_streaming.ack_supervision.enable",
     "servo.rbpodo_async_streaming.reference_supervision.enable",
     "servo.rbpodo_async_streaming.diagnostics.publish_per_command_jsonl",
@@ -164,8 +168,6 @@ INTEGER_CONFIG_OVERRIDES = {
 ASYNC_CONFIG_OVERRIDE_PREFIX = "servo.rbpodo_async_streaming."
 UNSAFE_OVERRIDE_KEY_PARTS = (
     "operation_mode",
-    "allow_in_real",
-    "allow_in_controller_simulation",
     "allow_controller_simulation_motion",
     "backend_type",
     "run_mode",
@@ -183,6 +185,13 @@ SUMMARY_COLUMNS = [
     "profile",
     "arm",
     "ack_policy",
+    "disable_waiting_ack",
+    "left_disable_waiting_ack",
+    "right_disable_waiting_ack",
+    "left_operation_mode",
+    "right_operation_mode",
+    "cartesian_allow_in_controller_simulation",
+    "cartesian_allow_in_real",
     "async_mode",
     "acceptance_semantics",
     "state_pub_rate_hz",
@@ -236,6 +245,7 @@ SUMMARY_COLUMNS = [
     "fit_center_error_m",
     "center_error_mm",
     "physical_motion_detected",
+    "physical_motion_expected",
     "fault_latched",
     "cartesian_unavailable_count",
     "radius_gain",
@@ -389,6 +399,14 @@ def config_overrides(exp: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_override_value(name: str, key: str, value: Any) -> None:
+    if key == "cartesian_control.allow_in_real":
+        if value is not False:
+            raise AblationError(f"experiment {name} override {key} must be false")
+        return
+    if key == "cartesian_control.allow_in_controller_simulation":
+        if value is not True:
+            raise AblationError(f"experiment {name} override {key} must be true")
+        return
     if key in BOOLEAN_CONFIG_OVERRIDES:
         if not isinstance(value, bool):
             raise AblationError(f"experiment {name} override {key} must be true or false")
@@ -977,6 +995,14 @@ def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path 
         "known_real_ips": sorted({config.left.ip, config.right.ip} & REAL_ROBOT_IPS),
         "ack_policy": "ack_off" if config.left.disable_waiting_ack else "ack_on",
         "disable_waiting_ack": bool(config.left.disable_waiting_ack),
+        "left_disable_waiting_ack": bool(config.left.disable_waiting_ack),
+        "right_disable_waiting_ack": bool(config.right.disable_waiting_ack),
+        "left_operation_mode": config.left.operation_mode,
+        "right_operation_mode": config.right.operation_mode,
+        "cartesian_allow_in_controller_simulation": as_bool(
+            cartesian.get("allow_in_controller_simulation"), False
+        ),
+        "cartesian_allow_in_real": as_bool(cartesian.get("allow_in_real"), False),
         "async_streaming_enabled": async_enabled,
         "async_mode": async_mode,
         "async_reference_supervision_enabled": async_reference_supervision_enabled,
@@ -1154,6 +1180,16 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def write_yaml(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+
 def load_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -1267,6 +1303,13 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "profile": summary.get("profile") or exp.get("profile"),
         "arm": summary.get("arm") or exp.get("arm"),
         "ack_policy": meta.get("ack_policy"),
+        "disable_waiting_ack": meta.get("disable_waiting_ack"),
+        "left_disable_waiting_ack": meta.get("left_disable_waiting_ack"),
+        "right_disable_waiting_ack": meta.get("right_disable_waiting_ack"),
+        "left_operation_mode": meta.get("left_operation_mode"),
+        "right_operation_mode": meta.get("right_operation_mode"),
+        "cartesian_allow_in_controller_simulation": meta.get("cartesian_allow_in_controller_simulation"),
+        "cartesian_allow_in_real": meta.get("cartesian_allow_in_real"),
         "async_mode": async_mode,
         "acceptance_semantics": acceptance_semantics,
         "state_pub_rate_hz": meta.get("state_pub_rate_hz"),
@@ -1346,6 +1389,7 @@ def row_from_summary(summary: dict[str, Any], exp: dict[str, Any], meta: dict[st
         "fit_center_error_m": summary.get("fit_center_error_m"),
         "center_error_mm": scaled(summary, "fit_center_error_m", 1000.0),
         "physical_motion_detected": summary.get("physical_motion_detected"),
+        "physical_motion_expected": first_present(summary.get("physical_motion_expected"), False),
         "fault_latched": summary.get("fault_latched"),
         "cartesian_unavailable_count": summary.get("cartesian_unavailable_count"),
         "radius_gain": summary.get("radius_gain"),
@@ -1811,8 +1855,12 @@ def plot_rows(artifact_root: Path, rows: list[dict[str, Any]]) -> list[str]:
     return skipped
 
 
-def write_resolved_matrix(path: Path, args: argparse.Namespace, experiments: list[dict[str, Any]], metadata: list[dict[str, Any]]) -> None:
-    value = {
+def resolved_matrix_document(
+    args: argparse.Namespace,
+    experiments: list[dict[str, Any]],
+    metadata: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
         "schema": SCHEMA,
         "source_matrix": str(root_path(args.root, args.matrix).resolve()),
         "server": str(args.server),
@@ -1824,7 +1872,14 @@ def write_resolved_matrix(path: Path, args: argparse.Namespace, experiments: lis
             for exp, meta in zip(experiments, metadata)
         ],
     }
-    write_json(path, value)
+
+
+def write_resolved_matrix(path: Path, args: argparse.Namespace, experiments: list[dict[str, Any]], metadata: list[dict[str, Any]]) -> None:
+    value = resolved_matrix_document(args, experiments, metadata)
+    if path.suffix in {".yaml", ".yml"}:
+        write_yaml(path, value)
+    else:
+        write_json(path, value)
 
 
 def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
@@ -1849,6 +1904,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
     ]
     validate_matrix_safety(args, metadata, enabled_experiments)
     write_resolved_matrix(artifact_root / "matrix_resolved.json", args, enabled_experiments, metadata)
+    write_resolved_matrix(artifact_root / "matrix_resolved.yaml", args, enabled_experiments, metadata)
 
     summaries: list[dict[str, Any]] = []
     had_errors = False

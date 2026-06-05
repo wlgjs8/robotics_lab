@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -58,6 +59,13 @@ def write_candidate(
     root: Path,
     *,
     socket_send_only: bool = False,
+    tracking_source: str = "tcp_ref_stand",
+    cartesian_allow_in_real: bool = False,
+    cartesian_allow_in_controller_simulation: bool = True,
+    operation_mode: str = "simulation",
+    async_mode: str = "sdk_ack_worker",
+    command_rate_hz: float = 500.0,
+    phase_advance_sec: float = 0.005,
     sent: int = 10000,
     acked: int | None = None,
     goal_sent: int | None = 10000,
@@ -87,10 +95,11 @@ def write_candidate(
         "duration_sec": official_window_sec,
         "benchmark_start_ns": benchmark_start_ns,
         "benchmark_end_ns": benchmark_end_ns,
-        "tracking_source_used": "tcp_ref_stand",
+        "tracking_source_used": tracking_source,
         "servo_rate_hz": 500.0,
-        "command_rate_hz": 500.0,
-        "async_mode": "sdk_ack_worker",
+        "command_rate_hz": command_rate_hz,
+        "phase_advance_sec": phase_advance_sec,
+        "async_mode": async_mode,
         "rms_error_m": rms_error_m,
         "p95_error_m": 0.0055,
         "fit_center_error_m": 0.002,
@@ -98,13 +107,20 @@ def write_candidate(
         "p95_orientation_drift_rad": p95_orientation_drift_rad,
         "max_orientation_drift_rad": max_orientation_drift_rad,
         "estimated_latency_ms": 2.5,
-        "commanded_phase_advance_ms": 40.0,
+        "commanded_phase_advance_ms": phase_advance_sec * 1000.0,
         "state_age_us": {"p95": 900.0},
         "feedback_saturation_count": 10,
         "command_count": 2,
         "fault_latched": fault_latched,
         "physical_motion_detected": False,
         "physical_motion_expected": False,
+        "disable_waiting_ack": socket_send_only,
+        "left_disable_waiting_ack": socket_send_only,
+        "right_disable_waiting_ack": socket_send_only,
+        "left_operation_mode": operation_mode,
+        "right_operation_mode": operation_mode,
+        "cartesian_allow_in_controller_simulation": cartesian_allow_in_controller_simulation,
+        "cartesian_allow_in_real": cartesian_allow_in_real,
         "cartesian_unavailable_count": 0,
         "measurement_reliability_level": "controller_reference_valid",
         "diagnostics_suspect_count": diagnostics_suspect_count,
@@ -116,7 +132,7 @@ def write_candidate(
     socket_sent = sent if socket_send_only else 0
     first_async = {
         "enabled": True,
-        "mode": "sdk_ack_worker",
+        "mode": async_mode,
         "commands_sent_total": 1,
         "commands_acked_total": 1,
         "commands_socket_sent_total": 0,
@@ -125,7 +141,7 @@ def write_candidate(
     }
     last_async = {
         "enabled": True,
-        "mode": "sdk_ack_worker",
+        "mode": async_mode,
         "commands_enqueued_total": sent,
         "commands_sent_total": sent,
         "commands_acked_total": acked,
@@ -169,6 +185,16 @@ def write_repeatability_candidate(
     *,
     name: str,
     arm: str,
+    profile: str = "gene_15cm_4s",
+    controller: str = "server_circle",
+    tracking_source: str = "tcp_ref_stand",
+    command_rate_hz: float = 500.0,
+    phase_advance_sec: float = 0.005,
+    async_mode: str = "sdk_ack_worker",
+    socket_send_only: bool = False,
+    cartesian_allow_in_real: bool = False,
+    cartesian_allow_in_controller_simulation: bool = True,
+    operation_mode: str = "simulation",
     rms_error_m: float = 0.0024,
     p95_error_m: float = 0.0048,
     estimated_latency_ms: float = 2.0,
@@ -187,33 +213,42 @@ def write_repeatability_candidate(
     summary = {
         "name": name,
         "artifact_dir": str(artifact_dir.resolve()),
-        "profile": "gene_15cm_4s",
-        "controller": "server_circle",
-        "command_family": "server_side_circle",
+        "profile": profile,
+        "controller": controller,
+        "command_family": "server_side_circle" if controller == "server_circle" else "python_streaming",
         "arm": arm,
         "repeat": 5,
         "period_sec": 4.0,
         "duration_sec": official_window_sec,
         "benchmark_start_ns": benchmark_start_ns,
         "benchmark_end_ns": benchmark_end_ns,
-        "tracking_source_used": "tcp_ref_stand",
+        "tracking_source_used": tracking_source,
         "servo_rate_hz": 500.0,
         "servo_t1_sec": 0.002,
-        "command_rate_hz": 500.0,
-        "async_mode": "sdk_ack_worker",
+        "command_rate_hz": command_rate_hz,
+        "phase_advance_sec": phase_advance_sec,
+        "async_mode": async_mode,
+        "acceptance_semantics": "socket_send_only" if socket_send_only else "controller_ack_observed",
         "rms_error_m": rms_error_m,
         "p95_error_m": p95_error_m,
         "fit_center_error_m": 0.001,
         "radius_gain": 1.0,
         "p95_orientation_drift_rad": 0.01,
         "estimated_latency_ms": estimated_latency_ms,
-        "commanded_phase_advance_ms": 5.0,
+        "commanded_phase_advance_ms": phase_advance_sec * 1000.0,
         "state_age_us": {"p95": 900.0},
         "feedback_saturation_count": 0,
         "command_count": 2,
         "fault_latched": fault_latched,
         "physical_motion_detected": False,
         "physical_motion_expected": False,
+        "disable_waiting_ack": socket_send_only,
+        "left_disable_waiting_ack": socket_send_only,
+        "right_disable_waiting_ack": socket_send_only,
+        "left_operation_mode": operation_mode,
+        "right_operation_mode": operation_mode,
+        "cartesian_allow_in_controller_simulation": cartesian_allow_in_controller_simulation,
+        "cartesian_allow_in_real": cartesian_allow_in_real,
         "cartesian_unavailable_count": 0,
         "measurement_reliability_level": "suspect",
         "diagnostics_suspect_count": 3,
@@ -232,10 +267,10 @@ def write_repeatability_candidate(
                 arm: {
                     "async_streaming": {
                         "enabled": True,
-                        "mode": "sdk_ack_worker",
+                        "mode": async_mode,
                         "commands_sent_total": 1,
                         "commands_acked_total": 1,
-                        "commands_socket_sent_total": 0,
+                        "commands_socket_sent_total": 1 if socket_send_only else 0,
                         "first_worker_send_ns": benchmark_start_ns,
                         "last_worker_send_ns": benchmark_start_ns,
                     }
@@ -248,11 +283,11 @@ def write_repeatability_candidate(
                 arm: {
                     "async_streaming": {
                         "enabled": True,
-                        "mode": "sdk_ack_worker",
+                        "mode": async_mode,
                         "commands_enqueued_total": goal_sent,
                         "commands_sent_total": goal_sent,
                         "commands_acked_total": goal_acked,
-                        "commands_socket_sent_total": 0,
+                        "commands_socket_sent_total": goal_sent if socket_send_only else 0,
                         "commands_dropped_total": 0,
                         "commands_overwritten_total": 0,
                         "goal_window_commands_sent": goal_sent,
@@ -269,7 +304,7 @@ def write_repeatability_candidate(
     write_jsonl(
         artifact_dir / "command_packets.jsonl",
         [
-            {"host_time_ns": benchmark_start_ns, arm: {"mode": "TcpCircleMove"}},
+            {"host_time_ns": benchmark_start_ns, arm: {"mode": "TcpCircleMove" if controller == "server_circle" else "TcpTwistStand"}},
             {"host_time_ns": benchmark_end_ns, arm: {"mode": "Hold"}},
         ],
     )
@@ -417,6 +452,9 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
             summary = report.build_summary(root)
             repeatability = summary["repeatability"]
             self.assertEqual(repeatability["classification"], "repeatable_pass")
+            self.assertTrue(repeatability["global_repeatability_pass"])
+            self.assertEqual(repeatability["left_arm_aggregate"]["status"], "pass")
+            self.assertEqual(repeatability["right_arm_aggregate"]["status"], "pass")
             self.assertEqual(repeatability["required_run_count"], 6)
             self.assertEqual(repeatability["required_pass_count"], 6)
             self.assertLessEqual(
@@ -425,7 +463,7 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
             )
             self.assertIn("diagnostics_suspect_caveat_remains", repeatability["caveats"])
 
-    def test_one_performance_failure_classifies_outlier(self) -> None:
+    def test_one_performance_failure_blocks_global_repeatability(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_repeatability_set(root)
@@ -440,7 +478,10 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
                 threshold_failures=["rms_error_m 0.0042 exceeds threshold 0.003"],
             )
             repeatability = report.build_summary(root)["repeatability"]
-            self.assertEqual(repeatability["classification"], "pass_with_outlier")
+            self.assertEqual(repeatability["classification"], "not_repeatable")
+            self.assertFalse(repeatability["global_repeatability_pass"])
+            self.assertEqual(repeatability["left_arm_aggregate"]["status"], "pass")
+            self.assertEqual(repeatability["right_arm_aggregate"]["status"], "fail")
             self.assertEqual(repeatability["required_pass_count"], 5)
             self.assertEqual(repeatability["failed_runs"][0]["name"], "best_right_run03")
 
@@ -452,6 +493,125 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
             repeatability = report.build_summary(root)["repeatability"]
             self.assertEqual(repeatability["classification"], "insufficient_evidence")
             self.assertIn("best_right_run01", repeatability["missing_required_runs"])
+
+    def test_repeatability_rejects_socket_send_only_required_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repeatability_set(root)
+            write_repeatability_candidate(root, name="best_left_run01", arm="left", socket_send_only=True)
+            repeatability = report.build_summary(root)["repeatability"]
+            self.assertEqual(repeatability["classification"], "not_repeatable")
+            failures = "\n".join(repeatability["left_arm_aggregate"]["reasons"])
+            self.assertIn("socket_send_only_count", failures)
+            self.assertEqual(repeatability["left_arm_aggregate"]["status"], "fail")
+
+    def test_repeatability_rejects_wrong_benchmark_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repeatability_set(root)
+            write_repeatability_candidate(root, name="best_left_run02", arm="left", controller="twist_stand")
+            repeatability = report.build_summary(root)["repeatability"]
+            self.assertEqual(repeatability["classification"], "not_repeatable")
+            failures = "\n".join(repeatability["left_arm_aggregate"]["reasons"])
+            self.assertIn("benchmark_lane", failures)
+            self.assertIn("controller twist_stand != server_circle", failures)
+
+    def test_repeatability_rejects_wrong_tracking_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repeatability_set(root)
+            write_repeatability_candidate(
+                root,
+                name="best_right_run01",
+                arm="right",
+                tracking_source="tcp_actual_stand",
+            )
+            repeatability = report.build_summary(root)["repeatability"]
+            self.assertEqual(repeatability["classification"], "not_repeatable")
+            failures = "\n".join(repeatability["right_arm_aggregate"]["reasons"])
+            self.assertIn("tracking_source tcp_actual_stand != tcp_ref_stand", failures)
+
+    def test_repeatability_rejects_allow_in_real_true(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repeatability_set(root)
+            write_repeatability_candidate(
+                root,
+                name="best_right_run02",
+                arm="right",
+                cartesian_allow_in_real=True,
+            )
+            repeatability = report.build_summary(root)["repeatability"]
+            self.assertEqual(repeatability["classification"], "not_repeatable")
+            failures = "\n".join(repeatability["right_arm_aggregate"]["reasons"])
+            self.assertIn("cartesian_allow_in_real True is not false", failures)
+
+    def test_repeatability_rejects_operation_mode_real(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repeatability_set(root)
+            write_repeatability_candidate(
+                root,
+                name="best_left_run03",
+                arm="left",
+                operation_mode="real",
+            )
+            repeatability = report.build_summary(root)["repeatability"]
+            self.assertEqual(repeatability["classification"], "not_repeatable")
+            failures = "\n".join(repeatability["left_arm_aggregate"]["reasons"])
+            self.assertIn("left_operation_mode real is not simulation", failures)
+
+    def test_repeatability_report_prints_caveat_and_groupings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_repeatability_set(root)
+            repeatability = report.build_summary(root)["repeatability"]
+            markdown = report.repeatability_markdown(repeatability)
+            self.assertIn("The diagnostics_suspect caveat remains", markdown)
+            self.assertIn("physical_readiness.status: `blocked`", markdown)
+            self.assertIn("Rows By Arm", markdown)
+            self.assertIn("Rows By Benchmark Lane", markdown)
+            self.assertIn("Rows By Acceptance Semantics", markdown)
+            self.assertIn("Rows By Tracking Source", markdown)
+
+    def test_wrapper_repeatability_dry_run_without_env_prints_commands(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            for key in (
+                "RB_ALLOW_REAL_ROBOT",
+                "RB_ALLOW_REAL_MOTION",
+                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
+                "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
+                "RB_ALLOW_RBPODO_ASYNC_STREAMING",
+                "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
+                "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED",
+                "RB_ALLOW_REAL_CARTESIAN",
+            ):
+                env.pop(key, None)
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "tools/rbpodo_ackon500_gene_goal.sh",
+                    "--profile",
+                    "repeatability",
+                    "--dry-run",
+                    "--artifact-root",
+                    str(Path(tmp) / "repeatability"),
+                    "--i-understand-this-connects-to-real-controller",
+                    "--i-confirm-controller-is-in-pgmode-simulation",
+                ],
+                cwd=repo,
+                env=env,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertIn("dry-run: required controller-simulation env gates were not checked", completed.stdout)
+            self.assertIn("run_rbpodo_circle_ablation.py", completed.stdout)
+            self.assertIn("--require-repeatable", completed.stdout)
+            self.assertIn("repeatability_report.md", completed.stdout)
 
     def test_cli_help_works(self) -> None:
         script = Path(__file__).with_name("generate_ackon500_gene_goal_report.py")

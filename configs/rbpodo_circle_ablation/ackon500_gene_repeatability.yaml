@@ -45,6 +45,8 @@ experiments:
       left_robot.servo_alpha: 0.8
       right_robot.servo_alpha: 0.8
       cartesian_control.enable_benchmark_primitives: true
+      cartesian_control.allow_in_controller_simulation: true
+      cartesian_control.allow_in_real: false
       cartesian_control.max_twist_linear_m_s: 0.2
       cartesian_control.max_twist_angular_rad_s: 0.4
       cartesian_control.max_linear_move_speed_m_s: 0.2
@@ -106,6 +108,8 @@ experiments:
       left_robot.servo_alpha: 0.8
       right_robot.servo_alpha: 0.8
       cartesian_control.enable_benchmark_primitives: true
+      cartesian_control.allow_in_controller_simulation: true
+      cartesian_control.allow_in_real: false
       cartesian_control.max_twist_linear_m_s: 0.2
       cartesian_control.max_twist_angular_rad_s: 0.4
       cartesian_control.max_linear_move_speed_m_s: 0.2
@@ -167,6 +171,8 @@ experiments:
       left_robot.servo_alpha: 0.8
       right_robot.servo_alpha: 0.8
       cartesian_control.enable_benchmark_primitives: true
+      cartesian_control.allow_in_controller_simulation: true
+      cartesian_control.allow_in_real: false
       cartesian_control.max_twist_linear_m_s: 0.2
       cartesian_control.max_twist_angular_rad_s: 0.4
       cartesian_control.max_linear_move_speed_m_s: 0.2
@@ -228,6 +234,8 @@ experiments:
       left_robot.servo_alpha: 0.8
       right_robot.servo_alpha: 0.8
       cartesian_control.enable_benchmark_primitives: true
+      cartesian_control.allow_in_controller_simulation: true
+      cartesian_control.allow_in_real: false
       cartesian_control.max_twist_linear_m_s: 0.2
       cartesian_control.max_twist_angular_rad_s: 0.4
       cartesian_control.max_linear_move_speed_m_s: 0.2
@@ -289,6 +297,8 @@ experiments:
       left_robot.servo_alpha: 0.8
       right_robot.servo_alpha: 0.8
       cartesian_control.enable_benchmark_primitives: true
+      cartesian_control.allow_in_controller_simulation: true
+      cartesian_control.allow_in_real: false
       cartesian_control.max_twist_linear_m_s: 0.2
       cartesian_control.max_twist_angular_rad_s: 0.4
       cartesian_control.max_linear_move_speed_m_s: 0.2
@@ -350,6 +360,8 @@ experiments:
       left_robot.servo_alpha: 0.8
       right_robot.servo_alpha: 0.8
       cartesian_control.enable_benchmark_primitives: true
+      cartesian_control.allow_in_controller_simulation: true
+      cartesian_control.allow_in_real: false
       cartesian_control.max_twist_linear_m_s: 0.2
       cartesian_control.max_twist_angular_rad_s: 0.4
       cartesian_control.max_linear_move_speed_m_s: 0.2

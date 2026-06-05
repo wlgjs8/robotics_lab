@@ -842,6 +842,18 @@ def validate_config_and_env(
             config.servo.get("allow_controller_simulation_diagnostics_suspect"), False
         ),
         "disable_waiting_ack": bool(config.left.disable_waiting_ack or config.right.disable_waiting_ack),
+        "left_disable_waiting_ack": bool(config.left.disable_waiting_ack),
+        "right_disable_waiting_ack": bool(config.right.disable_waiting_ack),
+        "operation_modes": {
+            "left": config.left.operation_mode,
+            "right": config.right.operation_mode,
+        },
+        "left_operation_mode": config.left.operation_mode,
+        "right_operation_mode": config.right.operation_mode,
+        "cartesian_allow_in_controller_simulation": as_bool(
+            cartesian.get("allow_in_controller_simulation"), False
+        ),
+        "cartesian_allow_in_real": as_bool(cartesian.get("allow_in_real"), False),
         "docker_rb_simulator_port_check": docker_check,
         "state_pub_endpoint_unique_checked_by_bind": True,
         "overlay_enabled": not args.overlay_disable,

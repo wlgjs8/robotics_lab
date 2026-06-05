@@ -44,6 +44,8 @@ PASS_THRESHOLDS = {
     "min_repeat": 5,
     "servo_rate_hz": 500.0,
     "servo_t1_sec": 0.002,
+    "command_rate_hz": 500.0,
+    "phase_advance_sec": 0.005,
     "min_ack_ratio": 0.98,
     "min_effective_goal_command_rate_hz": 490.0,
     "max_effective_goal_command_rate_hz": 510.0,
@@ -77,23 +79,33 @@ REPEATABILITY_REQUIRED_RUN_NAMES = [
 REPEATABILITY_ROW_COLUMNS = [
     "name",
     "arm",
+    "profile",
+    "controller",
     "goal_pass",
     "ackon500_goal_status",
     "run_result_status",
     "safety_result_status",
     "benchmark_lane",
     "low_level_send_mode",
+    "async_mode",
     "acceptance_semantics",
     "tracking_source",
     "repeat",
+    "command_rate_hz",
+    "phase_advance_sec",
     "rms_error_mm",
     "p95_error_mm",
     "latency_ms",
     "ack_observed_ratio",
     "state_age_p95_us",
     "socket_send_only_count",
+    "left_disable_waiting_ack",
+    "right_disable_waiting_ack",
+    "cartesian_allow_in_controller_simulation",
+    "cartesian_allow_in_real",
     "fault_latched",
     "physical_motion_detected",
+    "physical_motion_expected",
     "measurement_reliability_level",
     "diagnostic_warnings",
     "failures",
@@ -115,6 +127,25 @@ REPEATABILITY_AGGREGATE_COLUMNS = [
     "latency_std",
     "latency_min",
     "latency_max",
+    "ack_observed_ratio_min",
+    "state_age_p95_max",
+]
+REPEATABILITY_GROUP_COLUMNS = [
+    "group",
+    "count",
+    "pass_count",
+    "fail_count",
+    "rows",
+]
+REPEATABILITY_ARM_AGGREGATE_COLUMNS = [
+    "arm",
+    "status",
+    "required_run_count",
+    "required_pass_count",
+    "rms_median",
+    "rms_max",
+    "p95_median",
+    "p95_max",
     "ack_observed_ratio_min",
     "state_age_p95_max",
 ]
@@ -724,6 +755,8 @@ def artifact_exists(path_text: Any, fallback: Path) -> bool:
 def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]]) -> dict[str, Any]:
     summary = load_json(path)
     artifact_dir = path.parent.resolve()
+    preflight = nested_dict(summary, "safety_preflight")
+    operation_modes = nested_dict(preflight, "operation_modes")
     row = ablation_rows.get(str(artifact_dir), {})
     if not row and summary.get("artifact_dir"):
         row = ablation_rows.get(str(Path(str(summary["artifact_dir"])).resolve()), {})
@@ -807,6 +840,12 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
         "path_kp_pos": first_number(summary.get("path_kp_pos"), row.get("path_kp_pos"), row.get("feedback_kp_pos")),
         "path_kp_ori": first_number(summary.get("path_kp_ori"), row.get("path_kp_ori"), row.get("feedback_kp_ori")),
         "command_rate_hz": first_number(summary.get("command_rate_hz"), row.get("command_rate_hz")),
+        "phase_advance_sec": first_number(
+            summary.get("phase_advance_sec"),
+            row.get("phase_advance_sec"),
+            scaled_number(summary.get("commanded_phase_advance_ms"), 0.001),
+            scaled_number(row.get("commanded_phase_advance_ms"), 0.001),
+        ),
         "async_mode": first_value(summary.get("async_mode"), summary.get("async_streaming_mode"), row.get("async_mode"), async_info.get("mode")),
         "acceptance_semantics": derive_acceptance_semantics(summary, row, async_info),
         "commands_sent_total": commands_sent,
@@ -832,6 +871,55 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
         "fault_latched": as_bool(first_value(summary.get("fault_latched"), row.get("fault_latched"))),
         "physical_motion_detected": as_bool(first_value(summary.get("physical_motion_detected"), row.get("physical_motion_detected"))),
         "physical_motion_expected": as_bool(first_value(summary.get("physical_motion_expected"), row.get("physical_motion_expected"), False)),
+        "disable_waiting_ack": as_bool(
+            first_value(summary.get("disable_waiting_ack"), row.get("disable_waiting_ack"), preflight.get("disable_waiting_ack"))
+        ),
+        "left_disable_waiting_ack": as_bool(
+            first_value(
+                summary.get("left_disable_waiting_ack"),
+                row.get("left_disable_waiting_ack"),
+                preflight.get("left_disable_waiting_ack"),
+                summary.get("disable_waiting_ack"),
+                row.get("disable_waiting_ack"),
+                preflight.get("disable_waiting_ack"),
+            )
+        ),
+        "right_disable_waiting_ack": as_bool(
+            first_value(
+                summary.get("right_disable_waiting_ack"),
+                row.get("right_disable_waiting_ack"),
+                preflight.get("right_disable_waiting_ack"),
+                summary.get("disable_waiting_ack"),
+                row.get("disable_waiting_ack"),
+                preflight.get("disable_waiting_ack"),
+            )
+        ),
+        "left_operation_mode": first_value(
+            summary.get("left_operation_mode"),
+            row.get("left_operation_mode"),
+            preflight.get("left_operation_mode"),
+            operation_modes.get("left"),
+        ),
+        "right_operation_mode": first_value(
+            summary.get("right_operation_mode"),
+            row.get("right_operation_mode"),
+            preflight.get("right_operation_mode"),
+            operation_modes.get("right"),
+        ),
+        "cartesian_allow_in_controller_simulation": as_bool(
+            first_value(
+                summary.get("cartesian_allow_in_controller_simulation"),
+                row.get("cartesian_allow_in_controller_simulation"),
+                preflight.get("cartesian_allow_in_controller_simulation"),
+            )
+        ),
+        "cartesian_allow_in_real": as_bool(
+            first_value(
+                summary.get("cartesian_allow_in_real"),
+                row.get("cartesian_allow_in_real"),
+                preflight.get("cartesian_allow_in_real"),
+            )
+        ),
         "cartesian_unavailable_count": first_number(summary.get("cartesian_unavailable_count"), row.get("cartesian_unavailable_count")),
         "measurement_reliability_level": first_value(summary.get("measurement_reliability_level"), row.get("measurement_reliability_level")),
         "timing_classification": first_value(summary.get("timing_classification"), row.get("timing_classification")),
@@ -929,6 +1017,8 @@ def goal_failures(candidate: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     if candidate.get("profile") != "gene_15cm_4s":
         failures.append(f"profile {candidate.get('profile')} != gene_15cm_4s")
+    if candidate.get("controller") != "server_circle":
+        failures.append(f"controller {candidate.get('controller')} != server_circle")
     if candidate.get("run_result_status") != "completed":
         failures.append(f"run_result_status {candidate.get('run_result_status')} != completed")
     if candidate.get("safety_result_status") != "pass":
@@ -940,6 +1030,12 @@ def goal_failures(candidate: dict[str, Any]) -> list[str]:
         failures.append(f"servo_rate_hz {candidate.get('servo_rate_hz')} != 500")
     if not near(candidate.get("servo_t1_sec"), PASS_THRESHOLDS["servo_t1_sec"]):
         failures.append(f"servo_t1_sec {candidate.get('servo_t1_sec')} != 0.002")
+    if not near(candidate.get("command_rate_hz"), PASS_THRESHOLDS["command_rate_hz"]):
+        failures.append(f"command_rate_hz {candidate.get('command_rate_hz')} != 500")
+    if not near(candidate.get("phase_advance_sec"), PASS_THRESHOLDS["phase_advance_sec"]):
+        failures.append(f"phase_advance_sec {candidate.get('phase_advance_sec')} != 0.005")
+    if candidate.get("async_mode") != "sdk_ack_worker":
+        failures.append(f"async_mode {candidate.get('async_mode')} != sdk_ack_worker")
     if candidate.get("acceptance_semantics") not in {"controller_ack_observed", "sdk_worker_ack_observed"}:
         failures.append(f"acceptance_semantics {candidate.get('acceptance_semantics')} is not ACK-observed")
     if candidate.get("benchmark_lane") != "rbpodo_server_side_circle_ackon500_sdk_worker":
@@ -952,6 +1048,19 @@ def goal_failures(candidate: dict[str, Any]) -> list[str]:
     check_min(candidate, "ack_coverage_ratio", PASS_THRESHOLDS["min_ack_ratio"], failures)
     if int(candidate.get("socket_send_only_count") or 0) != 0:
         failures.append(f"socket_send_only_count {candidate.get('socket_send_only_count')} != 0")
+    for key in ("left_disable_waiting_ack", "right_disable_waiting_ack"):
+        if candidate.get(key) is not False:
+            failures.append(f"{key} {candidate.get(key)} is not false")
+    for key in ("left_operation_mode", "right_operation_mode"):
+        if candidate.get(key) not in {"simulation", "sim"}:
+            failures.append(f"{key} {candidate.get(key)} is not simulation")
+    if candidate.get("cartesian_allow_in_controller_simulation") is not True:
+        failures.append(
+            "cartesian_allow_in_controller_simulation "
+            f"{candidate.get('cartesian_allow_in_controller_simulation')} is not true"
+        )
+    if candidate.get("cartesian_allow_in_real") is not False:
+        failures.append(f"cartesian_allow_in_real {candidate.get('cartesian_allow_in_real')} is not false")
     check_min(
         candidate,
         "effective_goal_command_rate_hz",
@@ -1051,34 +1160,19 @@ def mm_value(value: Any) -> float | None:
     return number * 1000.0 if number is not None else None
 
 
-def repeatability_profile_candidate(candidate: dict[str, Any]) -> bool:
-    if candidate.get("profile") != "gene_15cm_4s":
-        return False
-    if candidate.get("controller") != "server_circle":
-        return False
-    if candidate.get("tracking_source") != "tcp_ref_stand":
-        return False
-    return str(candidate.get("arm") or "") in {"left", "right"}
+def required_names_for_arm(arm: str) -> list[str]:
+    prefix = f"best_{arm}_"
+    return [name for name in REPEATABILITY_REQUIRED_RUN_NAMES if name.startswith(prefix)]
 
 
 def select_repeatability_required_candidates(candidates: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
-    eligible = [candidate for candidate in candidates if repeatability_profile_candidate(candidate)]
-    by_name = {str(candidate.get("name")): candidate for candidate in eligible if candidate.get("name") not in (None, "")}
-    expected_present = [name for name in REPEATABILITY_REQUIRED_RUN_NAMES if name in by_name]
-    if expected_present:
-        missing = [name for name in REPEATABILITY_REQUIRED_RUN_NAMES if name not in by_name]
-        return [by_name[name] for name in REPEATABILITY_REQUIRED_RUN_NAMES if name in by_name], missing
-
-    selected: list[dict[str, Any]] = []
-    missing: list[str] = []
-    required_count = int(REPEATABILITY_THRESHOLDS["required_repeats_per_arm"])
-    for arm in REPEATABILITY_THRESHOLDS["required_arms"]:
-        arm_rows = [candidate for candidate in eligible if candidate.get("arm") == arm]
-        arm_rows.sort(key=lambda row: str(row.get("name") or row.get("artifact_dir") or ""))
-        selected.extend(arm_rows[:required_count])
-        if len(arm_rows) < required_count:
-            missing.append(f"{arm}_arm_repeat_count {len(arm_rows)} < {required_count}")
-    return selected, missing
+    by_name = {
+        str(candidate.get("name")): candidate
+        for candidate in candidates
+        if candidate.get("name") not in (None, "")
+    }
+    missing = [name for name in REPEATABILITY_REQUIRED_RUN_NAMES if name not in by_name]
+    return [by_name[name] for name in REPEATABILITY_REQUIRED_RUN_NAMES if name in by_name], missing
 
 
 def repeatability_row(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -1094,6 +1188,10 @@ def repeatability_row(candidate: dict[str, Any]) -> dict[str, Any]:
         hard_failures.append(
             f"physical_motion_detected {candidate.get('physical_motion_detected')} is not false"
         )
+    if candidate.get("physical_motion_expected") is not False:
+        hard_failures.append(
+            f"physical_motion_expected {candidate.get('physical_motion_expected')} is not false"
+        )
     if int(candidate.get("socket_send_only_count") or 0) != 0:
         hard_failures.append(f"socket_send_only_count {candidate.get('socket_send_only_count')} != 0")
     if ack_ratio is None:
@@ -1108,23 +1206,35 @@ def repeatability_row(candidate: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": candidate.get("name"),
         "arm": candidate.get("arm"),
+        "profile": candidate.get("profile"),
+        "controller": candidate.get("controller"),
         "goal_pass": candidate.get("goal_pass") is True,
         "ackon500_goal_status": candidate.get("ackon500_goal_status"),
         "run_result_status": candidate.get("run_result_status"),
         "safety_result_status": candidate.get("safety_result_status"),
         "benchmark_lane": candidate.get("benchmark_lane"),
         "low_level_send_mode": candidate.get("low_level_send_mode"),
+        "async_mode": candidate.get("async_mode"),
         "acceptance_semantics": candidate.get("acceptance_semantics"),
         "tracking_source": candidate.get("tracking_source"),
         "repeat": candidate.get("repeat"),
+        "command_rate_hz": candidate.get("command_rate_hz"),
+        "phase_advance_sec": candidate.get("phase_advance_sec"),
         "rms_error_mm": rms_mm,
         "p95_error_mm": p95_mm,
         "latency_ms": latency_ms,
         "ack_observed_ratio": ack_ratio,
         "state_age_p95_us": candidate.get("state_age_p95_us"),
         "socket_send_only_count": candidate.get("socket_send_only_count"),
+        "left_disable_waiting_ack": candidate.get("left_disable_waiting_ack"),
+        "right_disable_waiting_ack": candidate.get("right_disable_waiting_ack"),
+        "left_operation_mode": candidate.get("left_operation_mode"),
+        "right_operation_mode": candidate.get("right_operation_mode"),
+        "cartesian_allow_in_controller_simulation": candidate.get("cartesian_allow_in_controller_simulation"),
+        "cartesian_allow_in_real": candidate.get("cartesian_allow_in_real"),
         "fault_latched": candidate.get("fault_latched"),
         "physical_motion_detected": candidate.get("physical_motion_detected"),
+        "physical_motion_expected": candidate.get("physical_motion_expected"),
         "measurement_reliability_level": candidate.get("measurement_reliability_level"),
         "diagnostic_warnings": candidate.get("diagnostic_warnings"),
         "failures": failures,
@@ -1190,19 +1300,9 @@ def aggregate_threshold_failures(aggregate: dict[str, Any]) -> list[str]:
     return failures
 
 
-def classify_repeatability(rows: list[dict[str, Any]], missing_required: list[str], aggregate: dict[str, Any]) -> tuple[str, list[str]]:
-    reasons: list[str] = []
-    required_total = int(REPEATABILITY_THRESHOLDS["required_repeats_per_arm"]) * len(
-        REPEATABILITY_THRESHOLDS["required_arms"]
-    )
-    if missing_required or len(rows) < required_total:
-        reasons.extend(missing_required)
-        if len(rows) < required_total:
-            reasons.append(f"required_run_count {len(rows)} < {required_total}")
-        return "insufficient_evidence", list(dict.fromkeys(reasons))
-
-    metric_missing = [
-        row.get("name")
+def metric_missing_rows(rows: list[dict[str, Any]]) -> list[str]:
+    return [
+        str(row.get("name"))
         for row in rows
         if finite_number(row.get("rms_error_mm")) is None
         or finite_number(row.get("p95_error_mm")) is None
@@ -1210,36 +1310,122 @@ def classify_repeatability(rows: list[dict[str, Any]], missing_required: list[st
         or finite_number(row.get("ack_observed_ratio")) is None
         or finite_number(row.get("state_age_p95_us")) is None
     ]
+
+
+def build_arm_repeatability_aggregate(
+    arm: str,
+    rows: list[dict[str, Any]],
+    missing_required: list[str],
+) -> dict[str, Any]:
+    required_names = required_names_for_arm(arm)
+    arm_rows = [row for row in rows if row.get("name") in required_names]
+    missing = [name for name in required_names if name in missing_required]
+    present_names = {str(row.get("name")) for row in arm_rows}
+    missing.extend(name for name in required_names if name not in present_names and name not in missing)
+    aggregate = aggregate_repeatability(arm_rows)
+    reasons: list[str] = []
+    if missing:
+        reasons.extend(f"missing {name}" for name in missing)
+
+    wrong_arm = [row for row in arm_rows if row.get("arm") != arm]
+    reasons.extend(f"{row.get('name')}: arm {row.get('arm')} != {arm}" for row in wrong_arm)
+
+    metric_missing = metric_missing_rows(arm_rows)
+    if metric_missing:
+        reasons.append("missing per-run aggregate metrics: " + ", ".join(metric_missing))
+
+    hard_failed = [row for row in arm_rows if row.get("hard_failures")]
+    reasons.extend(
+        f"{row.get('name')}: " + "; ".join(str(item) for item in row.get("hard_failures") or [])
+        for row in hard_failed
+    )
+
+    failed_rows = [row for row in arm_rows if row.get("goal_pass") is not True]
+    reasons.extend(
+        f"{row.get('name')}: " + "; ".join(str(item) for item in row.get("failures") or [])
+        for row in failed_rows
+    )
+
+    aggregate_failures = []
+    if not missing and not metric_missing:
+        aggregate_failures = aggregate_threshold_failures(aggregate)
+        reasons.extend(aggregate_failures)
+
+    required_count = len(required_names)
+    if missing or len(arm_rows) < required_count or metric_missing:
+        status = "insufficient_evidence"
+    elif wrong_arm or hard_failed or failed_rows or aggregate_failures:
+        status = "fail"
+    else:
+        status = "pass"
+
+    return {
+        "arm": arm,
+        "status": status,
+        "pass": status == "pass",
+        "required_run_names": required_names,
+        "missing_required_runs": list(dict.fromkeys(missing)),
+        "required_run_count": len(arm_rows),
+        "required_expected_run_count": required_count,
+        "required_pass_count": sum(1 for row in arm_rows if row.get("goal_pass") is True),
+        "failed_runs": failed_rows,
+        "aggregate": aggregate,
+        "aggregate_failures": aggregate_failures,
+        "reasons": list(dict.fromkeys(reason for reason in reasons if reason)),
+        **aggregate,
+    }
+
+
+def group_repeatability_rows(rows: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = str(row.get(field) if row.get(field) not in (None, "") else "<missing>")
+        group = groups.setdefault(
+            key,
+            {
+                "group": key,
+                "count": 0,
+                "pass_count": 0,
+                "fail_count": 0,
+                "rows": [],
+            },
+        )
+        group["count"] += 1
+        if row.get("goal_pass") is True:
+            group["pass_count"] += 1
+        else:
+            group["fail_count"] += 1
+        group["rows"].append(row.get("name"))
+    return [groups[key] for key in sorted(groups)]
+
+
+def classify_repeatability(
+    rows: list[dict[str, Any]],
+    missing_required: list[str],
+    per_arm: dict[str, dict[str, Any]],
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    required_total = len(REPEATABILITY_REQUIRED_RUN_NAMES)
+    if missing_required or len(rows) < required_total:
+        reasons.extend(f"missing {name}" for name in missing_required)
+        if len(rows) < required_total:
+            reasons.append(f"required_run_count {len(rows)} < {required_total}")
+        return "insufficient_evidence", list(dict.fromkeys(reasons))
+
+    metric_missing = metric_missing_rows(rows)
     if metric_missing:
         reasons.append("missing per-run aggregate metrics: " + ", ".join(str(name) for name in metric_missing))
         return "insufficient_evidence", reasons
 
-    hard_failed = [row for row in rows if row.get("hard_failures")]
-    if hard_failed:
-        reasons.extend(
-            f"{row.get('name')}: " + "; ".join(str(item) for item in row.get("hard_failures") or [])
-            for row in hard_failed
-        )
-        return "not_repeatable", reasons
-
-    aggregate_failures = aggregate_threshold_failures(aggregate)
-    failed_rows = [row for row in rows if row.get("goal_pass") is not True]
-    if not failed_rows and not aggregate_failures:
+    if all(per_arm.get(arm, {}).get("pass") is True for arm in REPEATABILITY_THRESHOLDS["required_arms"]):
         return "repeatable_pass", []
 
-    reasons.extend(f"{row.get('name')}: " + "; ".join(str(item) for item in row.get("failures") or []) for row in failed_rows)
-    reasons.extend(aggregate_failures)
-
-    median_rms = finite_number(aggregate.get("rms_median"))
-    median_p95 = finite_number(aggregate.get("p95_median"))
-    median_ok = (
-        median_rms is not None
-        and median_rms <= REPEATABILITY_THRESHOLDS["max_median_rms_error_mm"]
-        and median_p95 is not None
-        and median_p95 <= REPEATABILITY_THRESHOLDS["max_median_p95_error_mm"]
-    )
-    if median_ok and len(failed_rows) <= 1:
-        return "pass_with_outlier", list(dict.fromkeys(reasons))
+    for arm in REPEATABILITY_THRESHOLDS["required_arms"]:
+        arm_status = per_arm.get(arm, {})
+        if arm_status.get("status") == "insufficient_evidence":
+            reasons.extend(f"{arm}: {reason}" for reason in arm_status.get("reasons") or [])
+            return "insufficient_evidence", list(dict.fromkeys(reasons))
+        reasons.extend(f"{arm}: {reason}" for reason in arm_status.get("reasons") or [])
     return "not_repeatable", list(dict.fromkeys(reasons))
 
 
@@ -1247,8 +1433,17 @@ def build_repeatability_summary(candidates: list[dict[str, Any]], artifact_root:
     required_candidates, missing_required = select_repeatability_required_candidates(candidates)
     rows = [repeatability_row(candidate) for candidate in required_candidates]
     aggregate = aggregate_repeatability(rows)
-    classification, classification_reasons = classify_repeatability(rows, missing_required, aggregate)
+    per_arm = {
+        arm: build_arm_repeatability_aggregate(arm, rows, missing_required)
+        for arm in REPEATABILITY_THRESHOLDS["required_arms"]
+    }
+    classification, classification_reasons = classify_repeatability(rows, missing_required, per_arm)
     failed_runs = [row for row in rows if row.get("goal_pass") is not True]
+    optional_dual_rows = [
+        repeatability_row(candidate)
+        for candidate in candidates
+        if str(candidate.get("name") or "").startswith("best_dual_sequential_")
+    ]
     caveats = [
         "controller_reference_lower_bound_not_physical_real_tracking",
         "diagnostics_suspect_caveat_remains",
@@ -1265,9 +1460,22 @@ def build_repeatability_summary(candidates: list[dict[str, Any]], artifact_root:
         "required_run_names": REPEATABILITY_REQUIRED_RUN_NAMES,
         "missing_required_runs": missing_required,
         "required_run_count": len(rows),
+        "required_expected_run_count": len(REPEATABILITY_REQUIRED_RUN_NAMES),
         "required_pass_count": sum(1 for row in rows if row.get("goal_pass") is True),
+        "global_repeatability_pass": classification == "repeatable_pass",
+        "left_arm_aggregate": per_arm.get("left"),
+        "right_arm_aggregate": per_arm.get("right"),
+        "per_arm_aggregates": per_arm,
         "failed_runs": failed_runs,
         "aggregate": aggregate,
+        "groups": {
+            "arm": group_repeatability_rows(rows, "arm"),
+            "benchmark_lane": group_repeatability_rows(rows, "benchmark_lane"),
+            "acceptance_semantics": group_repeatability_rows(rows, "acceptance_semantics"),
+            "tracking_source": group_repeatability_rows(rows, "tracking_source"),
+        },
+        "optional_dual_sequential_rows": optional_dual_rows,
+        "physical_readiness": physical_readiness(),
         "caveats": caveats,
         "rows": rows,
     }
@@ -1281,6 +1489,12 @@ def repeatability_markdown(summary: dict[str, Any]) -> str:
         "required_pass_count": summary.get("required_pass_count"),
         **aggregate,
     }
+    arm_rows = [
+        summary.get("left_arm_aggregate") or {},
+        summary.get("right_arm_aggregate") or {},
+    ]
+    physical = summary.get("physical_readiness") or physical_readiness()
+    groups = summary.get("groups") or {}
     reasons = summary.get("classification_reasons") or []
     missing = summary.get("missing_required_runs") or []
     failed = summary.get("failed_runs") or []
@@ -1294,13 +1508,43 @@ def repeatability_markdown(summary: dict[str, Any]) -> str:
             "The metrics are controller-reference lower-bound tracking (`tcp_ref_stand`), not physical real TCP tracking.",
             "The diagnostics_suspect caveat remains and is not retired by repeatability validation.",
             "",
+            "## Physical Readiness",
+            "",
+            f"- physical_readiness.status: `{physical.get('status')}`",
+            "- physical_readiness.blockers: "
+            + ", ".join(f"`{item}`" for item in physical.get("blockers", [])),
+            "",
+            "## Per-Arm Aggregate Pass",
+            "",
+            table(arm_rows, REPEATABILITY_ARM_AGGREGATE_COLUMNS),
+            "",
             "## Aggregate",
             "",
             table([aggregate_row], REPEATABILITY_AGGREGATE_COLUMNS),
             "",
+            "## Rows By Arm",
+            "",
+            table(groups.get("arm", []), REPEATABILITY_GROUP_COLUMNS),
+            "",
+            "## Rows By Benchmark Lane",
+            "",
+            table(groups.get("benchmark_lane", []), REPEATABILITY_GROUP_COLUMNS),
+            "",
+            "## Rows By Acceptance Semantics",
+            "",
+            table(groups.get("acceptance_semantics", []), REPEATABILITY_GROUP_COLUMNS),
+            "",
+            "## Rows By Tracking Source",
+            "",
+            table(groups.get("tracking_source", []), REPEATABILITY_GROUP_COLUMNS),
+            "",
             "## Per-Run Metrics",
             "",
             table(summary.get("rows", []), REPEATABILITY_ROW_COLUMNS),
+            "",
+            "## Optional Dual Sequential Rows",
+            "",
+            table(summary.get("optional_dual_sequential_rows", []), REPEATABILITY_ROW_COLUMNS),
             "",
             "## Failed Or Missing Evidence",
             "",
