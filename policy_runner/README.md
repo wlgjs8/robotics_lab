@@ -250,11 +250,14 @@ left dx,dy,dz,drx,dry,drz,grip,
 right dx,dy,dz,drx,dry,drz,grip
 ```
 
-Current pika UMI single-arm episodes are mapped to the left arm by default and
-carry a zero right-arm `arm_mask`. Future robotics_lab dual-arm episodes can
-provide left/right cameras, TCP proprioception, and gripper values. Proprio
-features are reset-relative; action chunks are current-relative. Dataset
-statistics normalize proprio, action chunks, and camera images before training.
+Pika UMI single-arm episodes are mapped to the left arm by default and carry a
+zero right-arm `arm_mask`. Pika UMI bimanual episodes written as
+`observations/<left|right>/...` are loaded with both arms active and camera
+names prefixed by side, such as `left_realsense_color`. Future robotics_lab
+dual-arm episodes can provide left/right cameras, TCP proprioception, and
+gripper values. Proprio features are reset-relative; action chunks are
+current-relative. Dataset statistics normalize proprio, action chunks, and
+camera images before training.
 
 The model uses a frozen vision encoder by default (`resnet18` or `resnet50` via
 `torchvision`) with a placeholder `dinov3` plugin hook for later optional

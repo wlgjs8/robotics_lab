@@ -78,6 +78,27 @@ class FlowHdf5DatasetTest(unittest.TestCase):
             self.assertTrue(np.all(sample["action_mask"][:, 7:] == 0.0))
             self.assertTrue(np.allclose(sample["action_chunk"][:, 7:], 0.0))
 
+    def test_bimanual_pika_episode_maps_both_arms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "episode_001.hdf5"
+            self._write_bimanual_pika_episode(path)
+
+            index = load_flow_episode_index(path)
+            self.assertEqual(index.format_name, "pika_umi_bimanual")
+            self.assertEqual(index.arm_mask.tolist(), [1.0, 1.0])
+            self.assertIn("left_realsense_color", index.camera_paths)
+            self.assertIn("right_realsense_color", index.camera_paths)
+
+            dataset = FlowHdf5Dataset(path, action_horizon=3, image_size=8, normalize=False)
+            sample = dataset.raw_sample(0)
+
+            self.assertEqual(sample["action_chunk"].shape, (3, 14))
+            self.assertTrue(np.all(sample["action_mask"] == 1.0))
+            self.assertEqual(sample["images"].shape, (2, 3, 8, 8))
+            self.assertEqual(int(sample["image_decode_count"]), 2)
+            self.assertGreater(float(np.abs(sample["action_chunk"][:, :7]).sum()), 0.0)
+            self.assertGreater(float(np.abs(sample["action_chunk"][:, 7:]).sum()), 0.0)
+
     def test_dataset_statistics_normalize_action_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "episode_001.hdf5"
@@ -124,6 +145,35 @@ class FlowHdf5DatasetTest(unittest.TestCase):
                 self._write_vlen_image_dataset(images, "jpeg_cam", length, suffix="jpeg")
             if image_count >= 2:
                 self._write_vlen_image_dataset(images, "png_cam", length, suffix="png")
+
+    def _write_bimanual_pika_episode(self, path: Path) -> None:
+        assert h5py is not None and np is not None
+        length = 4
+        timestamps = np.arange(length, dtype=np.float64) / 30.0
+        with h5py.File(path, "w") as handle:
+            handle.attrs["n_arms"] = 2
+            handle.attrs["arm_names"] = "left,right"
+            handle.create_dataset("timestamp", data=timestamps)
+            obs = handle.create_group("observations")
+            for side, sign in (("left", 1.0), ("right", -1.0)):
+                group = obs.create_group(side)
+                pose = np.zeros((length, 7), dtype=np.float32)
+                pose[:, 0] = sign * np.linspace(0.0, 0.03, length)
+                pose[:, 1] = sign * 0.01
+                pose[:, 6] = 1.0
+                gripper = np.zeros((length, 2), dtype=np.float32)
+                gripper[:, 0] = np.linspace(0.1, 0.4, length)
+                gripper[:, 1] = np.linspace(0.2, 0.5, length)
+                action = np.zeros((length, 8), dtype=np.float32)
+                action[:, :7] = pose
+                action[:, 0] += sign * 0.01
+                action[:, 7] = gripper[:, 1] + 0.1
+                group.create_dataset("pose", data=pose)
+                group.create_dataset("gripper", data=gripper)
+                group.create_dataset("command", data=np.zeros(length, dtype=np.int8))
+                group.create_dataset("action", data=action)
+                images = group.create_group("images")
+                self._write_vlen_image_dataset(images, "realsense_color", length, suffix="jpeg")
 
     def _write_vlen_image_dataset(self, group: h5py.Group, name: str, length: int, *, suffix: str) -> None:
         assert h5py is not None and np is not None

@@ -151,6 +151,8 @@ def load_flow_episode_index(
 ) -> FlowEpisodeIndex:
     episode_path = Path(path)
     with h5py.File(episode_path, "r") as handle:
+        if _is_pika_umi_bimanual(handle):
+            return _load_pika_bimanual_episode(episode_path, handle)
         if _is_pika_umi(handle):
             return _load_pika_episode(episode_path, handle, single_arm_side)
         if _is_robotics_lab(handle):
@@ -373,6 +375,22 @@ def _is_pika_umi(handle: h5py.File) -> bool:
     )
 
 
+def _is_pika_umi_bimanual(handle: h5py.File) -> bool:
+    if "timestamp" not in handle or "observations" not in handle:
+        return False
+    observations = handle["observations"]
+    if not isinstance(observations, h5py.Group):
+        return False
+    arm_groups = _pika_bimanual_arm_groups(handle)
+    return any(
+        group_path in handle
+        and "pose" in handle[group_path]
+        and "gripper" in handle[group_path]
+        and "action" in handle[group_path]
+        for group_path in arm_groups.values()
+    )
+
+
 def _is_robotics_lab(handle: h5py.File) -> bool:
     schema = str(handle.attrs.get("schema", "") or "")
     return schema == "robotics_lab.episode.v1" and "observations" in handle
@@ -416,6 +434,62 @@ def _load_pika_episode(
         action_right_pose=right_action_pose,
         action_left_gripper=target_gripper if single_arm_side == "left" else zero_gripper,
         action_right_gripper=target_gripper if single_arm_side == "right" else zero_gripper,
+    )
+
+
+def _load_pika_bimanual_episode(path: Path, handle: h5py.File) -> FlowEpisodeIndex:
+    arm_groups = _pika_bimanual_arm_groups(handle)
+    timestamps = np.asarray(handle["timestamp"], dtype=np.float64)
+    length_candidates = [len(timestamps)]
+    camera_paths: dict[str, str] = {}
+    for side, group_path in arm_groups.items():
+        group = handle[group_path]
+        for name in ("pose", "gripper", "action"):
+            if name in group:
+                length_candidates.append(int(group[name].shape[0]))
+        side_camera_paths = _camera_paths(handle, f"{group_path}/images") if "images" in group else {}
+        for camera_name, camera_path in side_camera_paths.items():
+            camera_paths[f"{side}_{camera_name}"] = camera_path
+    length_candidates.extend(_camera_lengths(handle, camera_paths))
+    length = min(length_candidates) if length_candidates else 0
+
+    left_pose, left_gripper, left_action_pose, left_action_gripper = _pika_bimanual_arm_arrays(
+        handle,
+        arm_groups.get("left"),
+        length,
+    )
+    right_pose, right_gripper, right_action_pose, right_action_gripper = _pika_bimanual_arm_arrays(
+        handle,
+        arm_groups.get("right"),
+        length,
+    )
+    arm_mask = np.asarray(
+        [
+            1.0 if arm_groups.get("left") is not None else 0.0,
+            1.0 if arm_groups.get("right") is not None else 0.0,
+        ],
+        dtype=np.float32,
+    )
+    if not arm_mask.any():
+        arm_mask[:] = 1.0
+    return FlowEpisodeIndex(
+        path=path,
+        format_name="pika_umi_bimanual",
+        length=length,
+        timestamps=timestamps[:length],
+        camera_paths=camera_paths,
+        left_pose=left_pose,
+        right_pose=right_pose,
+        left_gripper=left_gripper,
+        right_gripper=right_gripper,
+        arm_mask=arm_mask,
+        reset_left_pose=left_pose[0] if length else _identity_poses(1)[0],
+        reset_right_pose=right_pose[0] if length else _identity_poses(1)[0],
+        action_kind="target_pose",
+        action_left_pose=left_action_pose,
+        action_right_pose=right_action_pose,
+        action_left_gripper=left_action_gripper,
+        action_right_gripper=right_action_gripper,
     )
 
 
@@ -493,6 +567,67 @@ def _load_robotics_lab_episode(path: Path, handle: h5py.File) -> FlowEpisodeInde
         action_left_gripper=left_target_grip[:length] if left_target_grip is not None else left_gripper[:length],
         action_right_gripper=right_target_grip[:length] if right_target_grip is not None else right_gripper[:length],
     )
+
+
+def _pika_bimanual_arm_groups(handle: h5py.File) -> dict[str, str]:
+    if "observations" not in handle:
+        return {}
+    observations = handle["observations"]
+    if not isinstance(observations, h5py.Group):
+        return {}
+    group_names = [
+        str(name)
+        for name, value in observations.items()
+        if isinstance(value, h5py.Group) and "pose" in value and "gripper" in value
+    ]
+    if not group_names:
+        return {}
+
+    out: dict[str, str] = {}
+    for name in group_names:
+        canonical = name.strip().lower()
+        if canonical in {"left", "right"}:
+            out[canonical] = f"observations/{name}"
+
+    if {"left", "right"}.issubset(out):
+        return out
+
+    arm_names = _decode_hdf5_attr(handle.attrs.get("arm_names", ""))
+    ordered_names = [name.strip() for name in arm_names.split(",") if name.strip()]
+    for name in ordered_names:
+        canonical = name.lower()
+        if canonical in {"left", "right"} and name in observations:
+            group = observations[name]
+            if isinstance(group, h5py.Group) and "pose" in group and "gripper" in group:
+                out[canonical] = f"observations/{name}"
+
+    remaining = [name for name in group_names if f"observations/{name}" not in out.values()]
+    for side, name in zip(("left", "right"), remaining):
+        out.setdefault(side, f"observations/{name}")
+    return out
+
+
+def _pika_bimanual_arm_arrays(
+    handle: h5py.File,
+    group_path: str | None,
+    length: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
+    identity_pose = _identity_poses(length)
+    zero_gripper = np.zeros(length, dtype=np.float32)
+    if group_path is None or group_path not in handle:
+        return identity_pose, zero_gripper, None, zero_gripper
+
+    group = handle[group_path]
+    pose = np.asarray(group["pose"], dtype=np.float32)[:length, :7] if "pose" in group else identity_pose
+    gripper_raw = np.asarray(group["gripper"], dtype=np.float32)[:length] if "gripper" in group else None
+    if gripper_raw is not None and gripper_raw.ndim == 2 and gripper_raw.shape[1] > 0:
+        gripper = gripper_raw[:, 0]
+    else:
+        gripper = zero_gripper
+    action = np.asarray(group["action"], dtype=np.float32)[:length] if "action" in group else None
+    action_pose = action[:, :7] if action is not None and action.ndim == 2 and action.shape[1] >= 7 else pose
+    action_gripper = action[:, 7] if action is not None and action.ndim == 2 and action.shape[1] > 7 else gripper
+    return pose, gripper.reshape(-1), action_pose, action_gripper.reshape(-1)
 
 
 def _camera_paths(handle: h5py.File, group_path: str) -> dict[str, str]:
@@ -740,6 +875,12 @@ def _pose_from_state_arm(value: Any) -> np.ndarray:
         ],
         dtype=np.float32,
     )
+
+
+def _decode_hdf5_attr(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value or "")
 
 
 def _nested_first(value: Any, *names: str) -> Any:
