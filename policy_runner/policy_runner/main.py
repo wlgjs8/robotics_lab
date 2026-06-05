@@ -301,6 +301,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="Abort training if HDF5 episodes carry different config hashes.",
     )
 
+    ml_preflight = sub.add_parser(
+        "ml-preflight",
+        help="Report ML dependency status and verify the requested vision backbone.",
+    )
+    ml_preflight.add_argument(
+        "--vision-backbone",
+        choices=("tiny_cnn", "resnet18", "resnet50", "dinov3"),
+        default="tiny_cnn",
+    )
+
     flow_train = sub.add_parser(
         "flow-train",
         help="Train an offline image-conditioned flow-matching action-chunk baseline from HDF5 episodes.",
@@ -308,7 +318,9 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_train.add_argument("--episodes-dir", default=None)
     flow_train.add_argument("--dataset-manifest", default=None)
     flow_train.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
+    flow_train.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
     flow_train.add_argument("--single-arm-side", choices=("left", "right"), default=None)
+    flow_train.add_argument("--max-episodes", type=int, default=None)
     flow_train.add_argument("--checkpoint", default="outputs/flow_policy.pt")
     flow_train.add_argument("--vision-backbone", default="resnet50")
     flow_train.add_argument("--action-horizon", type=int, default=16)
@@ -327,6 +339,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_train.add_argument("--sample-steps", type=int, default=16)
     flow_train.add_argument("--device", default="auto")
     flow_train.add_argument("--max-stats-samples", type=int, default=None)
+    flow_train.add_argument("--write-eval-report", default=None)
 
     infer = sub.add_parser("infer", help="Run a trained behavior-cloning checkpoint in simulation.")
     infer.add_argument("--config", required=True, help="policy_runner YAML config")
@@ -357,6 +370,18 @@ def _main_with_subcommands(argv: list[str]) -> int:
     hdf5_audit.add_argument("--single-arm-side", choices=("left", "right"), default=None)
     hdf5_audit.add_argument("--output-json", required=True)
     hdf5_audit.add_argument("--output-md", required=True)
+
+    hdf5_view = sub.add_parser(
+        "hdf5-view",
+        help="View HDF5 episode images, poses, deltas, and actions in an OpenCV window.",
+    )
+    hdf5_view.add_argument("episode", help="HDF5 episode file")
+    hdf5_view.add_argument("--single-arm-side", choices=("left", "right"), default="left")
+    hdf5_view.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
+    hdf5_view.add_argument("--start-frame", type=int, default=0)
+    hdf5_view.add_argument("--fps", type=float, default=None)
+    hdf5_view.add_argument("--image-size", type=int, default=320)
+    hdf5_view.add_argument("--trail-length", type=int, default=120)
 
     umi_import = sub.add_parser(
         "umi-import",
@@ -544,7 +569,19 @@ def _main_with_subcommands(argv: list[str]) -> int:
             strict_config_check=args.strict_config_check,
         )
         return 0
+    if args.command == "ml-preflight":
+        from .ml_preflight import run_ml_preflight
+
+        return run_ml_preflight(vision_backbone=args.vision_backbone)
     if args.command == "flow-train":
+        from .ml_preflight import check_ml_preflight, render_ml_preflight
+
+        preflight = check_ml_preflight(vision_backbone=args.vision_backbone)
+        if not bool(preflight["requested_backbone"]["ok"]):
+            sys.stderr.write(render_ml_preflight(preflight))
+            sys.stderr.flush()
+            return 1
+
         from .flow_training import train_flow_matching
 
         train_flow_matching(
@@ -565,7 +602,10 @@ def _main_with_subcommands(argv: list[str]) -> int:
             max_stats_samples=args.max_stats_samples,
             dataset_manifest=args.dataset_manifest,
             camera_names=parse_camera_names(args.camera_names),
+            exclude_camera_names=parse_camera_names(args.exclude_camera_names),
             single_arm_side=args.single_arm_side,
+            max_episodes=args.max_episodes,
+            write_eval_report=args.write_eval_report,
         )
         return 0
     if args.command == "infer":
@@ -600,6 +640,10 @@ def _main_with_subcommands(argv: list[str]) -> int:
         print(f"wrote HDF5 audit JSON: {args.output_json}", flush=True)
         print(f"wrote HDF5 audit report: {args.output_md}", flush=True)
         return 0
+    if args.command == "hdf5-view":
+        from .hdf5_viewer import run_hdf5_viewer_cli
+
+        return run_hdf5_viewer_cli(args)
     if args.command == "umi-import":
         from .umi_pipeline import run_umi_import_cli
 

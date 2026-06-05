@@ -17,6 +17,22 @@ FLOW_ACTION_DIM = 14
 FLOW_ARM_DIM = 7
 FLOW_PROPRIO_DIM = 16
 DEFAULT_IMAGE_SIZE = 224
+FLOW_ACTION_DIM_NAMES = (
+    "left_dx",
+    "left_dy",
+    "left_dz",
+    "left_drx",
+    "left_dry",
+    "left_drz",
+    "left_grip",
+    "right_dx",
+    "right_dy",
+    "right_dz",
+    "right_drx",
+    "right_dry",
+    "right_drz",
+    "right_grip",
+)
 
 
 @dataclass(frozen=True)
@@ -62,6 +78,7 @@ class FlowHdf5Dataset:
         include_formats: list[str] | tuple[str, ...] | None = None,
         exclude_camera_names: list[str] | tuple[str, ...] | None = None,
         required_attrs: dict[str, Any] | None = None,
+        max_episodes: int | None = None,
         stats: dict[str, Any] | None = None,
         normalize: bool = True,
     ):
@@ -71,6 +88,8 @@ class FlowHdf5Dataset:
             raise ValueError("image_size must be positive")
         if single_arm_side not in {"left", "right"}:
             raise ValueError("single_arm_side must be left or right")
+        if max_episodes is not None and max_episodes <= 0:
+            raise ValueError("max_episodes must be positive")
         self.root = Path(episodes_dir)
         self.action_horizon = int(action_horizon)
         self.image_size = int(image_size)
@@ -87,6 +106,8 @@ class FlowHdf5Dataset:
             self.episodes = [
                 episode for episode in self.episodes if episode.format_name in allowed_formats
             ]
+        if max_episodes is not None:
+            self.episodes = self.episodes[: int(max_episodes)]
         if self.required_attrs:
             for episode in self.episodes:
                 _validate_required_attrs(episode.path, self.required_attrs)
@@ -207,6 +228,7 @@ def compute_dataset_statistics(
     image_decode_count = 0
     missing_camera_count = 0
     arm_counts = np.zeros(2, dtype=np.int64)
+    action_values_by_dim: list[list[np.ndarray]] = [[] for _ in range(FLOW_ACTION_DIM)]
 
     for index in range(sample_count):
         sample = dataset.raw_sample(index)
@@ -216,6 +238,10 @@ def compute_dataset_statistics(
         action_sum += (actions * mask).sum(axis=0)
         action_sq_sum += ((actions * actions) * mask).sum(axis=0)
         action_count += mask.sum(axis=0)
+        for dim in range(FLOW_ACTION_DIM):
+            active_values = actions[:, dim][mask[:, dim] > 0.0]
+            if active_values.size:
+                action_values_by_dim[dim].append(active_values)
         images = sample["images"].astype(np.float64)
         if images.size:
             # Images are V,C,H,W in [0,1].
@@ -261,9 +287,25 @@ def compute_dataset_statistics(
     image_std[image_count == 0] = 1.0
 
     formats = sorted({episode.format_name for episode in dataset.episodes})
+    action_percentiles: dict[str, dict[str, float]] = {}
+    for dim, name in enumerate(FLOW_ACTION_DIM_NAMES):
+        if action_values_by_dim[dim]:
+            values = np.concatenate(action_values_by_dim[dim]).astype(np.float64)
+            percentiles = np.percentile(values, [1, 5, 50, 95, 99])
+        else:
+            percentiles = np.zeros(5, dtype=np.float64)
+        action_percentiles[name] = {
+            "p01": float(percentiles[0]),
+            "p05": float(percentiles[1]),
+            "p50": float(percentiles[2]),
+            "p95": float(percentiles[3]),
+            "p99": float(percentiles[4]),
+        }
     return {
         "schema": FLOW_CHECKPOINT_SCHEMA + ".dataset_stats",
         "episode_count": len(dataset.episodes),
+        "frame_count": int(sum(episode.length for episode in dataset.episodes)),
+        "total_sample_count": len(dataset),
         "sample_count": sample_count,
         "action_horizon": dataset.action_horizon,
         "camera_names": dataset.camera_names,
@@ -279,6 +321,7 @@ def compute_dataset_statistics(
         "image_decode_count": int(image_decode_count),
         "missing_camera_count": int(missing_camera_count),
         "arm_mask_counts": {"left": int(arm_counts[0]), "right": int(arm_counts[1])},
+        "action_distribution_percentiles": action_percentiles,
     }
 
 

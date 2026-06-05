@@ -50,3 +50,7 @@ rb_servo_server/submodules/
 *.swo
 .vscode/
 .idea/
+
+# Local HDF5 datasets
+*.hdf5
+*.h5

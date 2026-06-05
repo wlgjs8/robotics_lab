@@ -231,19 +231,37 @@ python3 -m policy_runner flow-train \
   --episodes-dir data/episodes \
   --dataset-manifest data/episodes/manifest.yaml \
   --camera-names fisheye,realsense_color \
+  --exclude-camera-names realsense_depth \
   --single-arm-side left \
+  --max-episodes 100 \
   --checkpoint outputs/flow_policy.pt \
   --vision-backbone resnet50 \
   --action-horizon 16 \
   --batch-size 32 \
-  --epochs 100
+  --epochs 100 \
+  --write-eval-report outputs/flow_eval_report.md
 ```
 
 The checkpoint schema is `robotics_lab.policy_runner.flow_matching.v1`.
 Training also writes `dataset_stats.json` and `training_curves.jsonl` beside the
-checkpoint. The validation metrics are rollout-free: `action_mse`,
+checkpoint, plus `flow_eval_report.md` and `flow_eval_summary.json` evaluation
+artifacts. The validation metrics are rollout-free: `action_mse`,
 `gripper_mse`, `chunk_endpoint_error`, `image_decode_count`, and
-`missing_camera_count`.
+`missing_camera_count`. The evaluation summary also records dataset formats,
+episode/frame/sample counts, camera decode and missing counts, action
+percentiles per dimension, arm mask counts, checkpoint schema/SHA-256, and
+manifest/audit warnings.
+
+Check local ML dependency readiness before training:
+
+```bash
+python3 -m policy_runner ml-preflight --vision-backbone tiny_cnn
+python3 -m policy_runner ml-preflight --vision-backbone resnet18
+```
+
+`tiny_cnn` is a small PyTorch-only CNN intended for CPU smoke tests and CI when
+`torchvision` is absent or broken. Use `resnet18` or `resnet50` for production
+visual training only after the preflight reports a healthy `torchvision` import.
 
 The policy output is a high-level action chunk, not a 500 Hz low-level servo
 target. Each step is a 14D vector:

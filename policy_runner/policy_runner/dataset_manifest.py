@@ -88,16 +88,18 @@ class DatasetManifest:
         self,
         *,
         camera_names_override: list[str] | None = None,
+        exclude_camera_names_override: list[str] | None = None,
         single_arm_side_override: str | None = None,
     ) -> dict[str, Any]:
         side = single_arm_side_override or self.single_arm_side
         if side not in {"left", "right"}:
             raise ValueError("single_arm_side must be left or right")
+        excluded = list(dict.fromkeys([*self.exclude_camera_names, *(exclude_camera_names_override or [])]))
         return {
-            "camera_names": self.selected_camera_names(camera_names_override),
+            "camera_names": _exclude_names(self.selected_camera_names(camera_names_override), excluded),
             "single_arm_side": side,
             "include_formats": list(self.include_formats) or None,
-            "exclude_camera_names": list(self.exclude_camera_names),
+            "exclude_camera_names": excluded,
             "required_attrs": dict(self.required_attrs),
         }
 
@@ -114,6 +116,13 @@ def parse_camera_names(value: str | None) -> list[str] | None:
         return None
     names = [part.strip() for part in value.split(",") if part.strip()]
     return names or []
+
+
+def _exclude_names(names: list[str] | None, excluded: list[str]) -> list[str] | None:
+    if names is None:
+        return None
+    excluded_set = set(excluded)
+    return [name for name in names if name not in excluded_set]
 
 
 def _load_mapping(path: Path) -> dict[str, Any]:

@@ -12,7 +12,7 @@ from torch import nn
 from .flow_dataset import FLOW_ACTION_DIM, FLOW_PROPRIO_DIM
 
 
-SUPPORTED_VISION_BACKBONES = ("resnet18", "resnet50", "dinov3")
+SUPPORTED_VISION_BACKBONES = ("tiny_cnn", "resnet18", "resnet50", "dinov3")
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,9 @@ class VisionBackbone(nn.Module):
         self.name = str(name)
         self.output_dim = int(output_dim)
         self.frozen = bool(frozen)
-        if self.name in {"resnet18", "resnet50"}:
+        if self.name == "tiny_cnn":
+            self.encoder, feature_dim = _build_tiny_cnn()
+        elif self.name in {"resnet18", "resnet50"}:
             self.encoder, feature_dim = _build_resnet(self.name)
         elif self.name == "dinov3":
             self.encoder, feature_dim = _build_dinov3_plugin()
@@ -289,6 +291,20 @@ def _build_resnet(name: str) -> tuple[nn.Module, int]:
     feature_dim = int(model.fc.in_features)
     model.fc = nn.Identity()
     return model, feature_dim
+
+
+def _build_tiny_cnn() -> tuple[nn.Module, int]:
+    return (
+        nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=5, stride=2),
+            nn.GELU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2),
+            nn.GELU(),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+        ),
+        32,
+    )
 
 
 def _build_dinov3_plugin() -> tuple[nn.Module, int]:
