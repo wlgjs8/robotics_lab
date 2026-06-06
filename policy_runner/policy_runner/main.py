@@ -436,6 +436,35 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     flow_infer.add_argument("--sample-steps", type=int, default=16)
     flow_infer.add_argument("--device", default="auto")
+    flow_infer.add_argument(
+        "--command-family",
+        choices=("tcp_twist_local", "tcp_delta_stand"),
+        default=None,
+        help=(
+            "Flow action command family. Defaults to tcp_twist_local for simulator, "
+            "controller-simulation, and offline reporting."
+        ),
+    )
+    flow_infer.add_argument(
+        "--allow-experimental-tcp-delta-stand",
+        action="store_true",
+        help=(
+            "Allow the debug TcpDeltaStand flow command family outside offline_eval/sim_dryrun. "
+            "TcpTwistLocal remains the default controller-simulation path."
+        ),
+    )
+    flow_infer.add_argument(
+        "--policy-dt-sec",
+        type=float,
+        default=None,
+        help=(
+            "Seconds represented by one flow action step. Required for controller_sim "
+            "and real_policy TcpTwistLocal rollout; other non-offline modes default "
+            "to 1/command_rate_hz when omitted."
+        ),
+    )
+    flow_infer.add_argument("--max-linear-velocity-m-s", type=float, default=0.03)
+    flow_infer.add_argument("--max-angular-velocity-rad-s", type=float, default=0.2)
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.002)
     flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.01)
 
@@ -733,13 +762,33 @@ def _main_with_subcommands(argv: list[str]) -> int:
 
         return run_umi_convert_cli(args)
     if args.command == "flow-infer":
-        from .flow_inference import FlowMatchingActionSource, run_flow_offline_eval
+        from .flow_inference import (
+            FlowMatchingActionSource,
+            canonical_flow_command_family,
+            resolve_flow_command_family,
+            resolve_flow_policy_dt_sec,
+            run_flow_offline_eval,
+            validate_flow_command_family,
+        )
 
         config = load_config(args.config)
         rollout_policy = RolloutModePolicy.from_value(
             args.rollout_mode,
             send_dryrun_commands=args.send_dryrun_commands,
         )
+        try:
+            command_family = resolve_flow_command_family(
+                rollout_policy.mode,
+                args.command_family,
+            )
+            validate_flow_command_family(
+                rollout_policy.mode,
+                command_family,
+                allow_experimental_tcp_delta_stand=args.allow_experimental_tcp_delta_stand,
+            )
+        except RolloutModeValidationError as exc:
+            print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
+            return 2
         if rollout_policy.mode == RolloutMode.OFFLINE_EVAL:
             if args.episodes_dir is None:
                 print(
@@ -755,6 +804,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     sample_steps=args.sample_steps,
                     device=args.device,
                     max_samples=args.max_offline_samples,
+                    command_family=canonical_flow_command_family(command_family),
                 )
             except (RolloutModeValidationError, ValueError) as exc:
                 print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
@@ -783,11 +833,21 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 max_age_ms=config.camera.max_age_ms,
             )
         try:
+            policy_dt_sec = resolve_flow_policy_dt_sec(
+                rollout_policy.mode,
+                command_family,
+                policy_dt_sec=args.policy_dt_sec,
+                command_rate_hz=config.command_rate_hz,
+            )
             source = FlowMatchingActionSource(
                 args.checkpoint,
                 timeout_sec=config.servo_command.timeout_sec,
                 camera_client=camera_client,
                 sample_steps=args.sample_steps,
+                command_family=command_family,
+                policy_dt_sec=policy_dt_sec,
+                max_linear_velocity_m_s=args.max_linear_velocity_m_s,
+                max_angular_velocity_rad_s=args.max_angular_velocity_rad_s,
                 max_linear_step_m=args.max_linear_step_m,
                 max_angular_step_rad=args.max_angular_step_rad,
                 allow_rbpodo_controller_simulation_cartesian=(
@@ -821,7 +881,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             write_rollout_summary(recorder, args.rollout_summary, source=run_source)
             print(f"wrote rollout_summary: {args.rollout_summary}", flush=True)
             return rc
-        except RolloutModeValidationError as exc:
+        except (RolloutModeValidationError, ValueError) as exc:
             print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
             if camera_client is not None:
                 camera_client.close()

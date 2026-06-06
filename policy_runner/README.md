@@ -336,6 +336,15 @@ the policy rollout selector. The modes are:
 The `real_policy` validator checks `safety.measured_retarget_available`,
 `safety.measured_collision_model_available`, and
 `safety.measured_gripper_available` in addition to measured runtime geometry.
+`flow-infer` defaults to `--command-family tcp_twist_local` for
+`controller_sim`, `sim_dryrun`, and offline reporting. For live
+`TcpTwistLocal` conversion, each 6D flow action delta is divided by
+`--policy-dt-sec` and clamped by `--max-linear-velocity-m-s` and
+`--max-angular-velocity-rad-s`. In `controller_sim`, `--policy-dt-sec` is
+required. In non-offline simulator or read-only modes, omitting it uses
+`1 / command_rate_hz` as a documented dry-run fallback. The legacy
+`--command-family tcp_delta_stand` path is debug/experimental; it is accepted
+without an extra flag only for `offline_eval` and `sim_dryrun`.
 
 Example offline and read-only invocations:
 
@@ -489,14 +498,21 @@ Run a trained checkpoint as a simulator Cartesian action source:
 ```bash
 python3 -m policy_runner flow-infer \
   --checkpoint outputs/flow_policy.pt \
-  --config policy_runner/config/simulator_dual_spacemouse_cartesian.yaml
+  --config policy_runner/config/simulator_dual_spacemouse_cartesian.yaml \
+  --rollout-mode sim_dryrun \
+  --policy-dt-sec 0.01
 ```
 
-`flow-infer` emits bounded `TcpDeltaStand` steps from the current chunk. Gripper
-values stay in the action vector for training but are not sent to hardware in
-this baseline. Required camera frames must be available when sampling a new
-chunk; otherwise the source emits no motion intent. All inference intents remain
-behind the existing `SafetyGate`, and real Cartesian motion remains blocked.
+`flow-infer` emits bounded `TcpTwistLocal` velocity commands by default, using
+the same streaming Cartesian family as the SpaceMouse pgmode simulation path.
+Gripper values stay in the action vector for training but are not sent to
+hardware in this baseline. Required camera frames must be available when
+sampling or continuing a chunk; otherwise the source emits no new nonzero
+motion intent and sends a one-shot zero twist if needed to stop a previous
+stream. All inference intents remain behind the existing `SafetyGate`, and
+real Cartesian motion remains blocked. Use `--command-family tcp_delta_stand`
+only for offline/simulator debug; outside those lanes it also requires
+`--allow-experimental-tcp-delta-stand`.
 
 ## SpaceMouse Joint Velocity
 

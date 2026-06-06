@@ -53,6 +53,15 @@ run writes `rollout_summary`, including decode/missing-camera counts, safety
 decision counts, command send/drop counts, and backend/run_mode/operation_mode
 observed in state.
 
+For flow-policy actions, `--command-family tcp_twist_local` is the default and
+the controller-simulation path. It divides the learned 6D delta by
+`--policy-dt-sec` and clamps the final `TcpTwistLocal` velocity with
+`--max-linear-velocity-m-s` and `--max-angular-velocity-rad-s`. `controller_sim`
+requires explicit `--policy-dt-sec`; dry-run/read-only modes may use the
+documented `1 / command_rate_hz` fallback. `--command-family tcp_delta_stand`
+is an offline/simulator debug path and requires
+`--allow-experimental-tcp-delta-stand` outside those debug lanes.
+
 ## Episode Metadata
 
 Every dataset shard should carry this metadata. Fields may be empty for legacy
