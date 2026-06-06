@@ -63,6 +63,44 @@ class Hdf5AuditTest(unittest.TestCase):
             self.assertFalse(_contains(audited["warnings"], "corrupt_images"))
             self.assertFalse(_contains(audited["warnings"], "unsupported_image_encoding"))
 
+    def test_png16_varlen_encoding_is_inferred_without_attr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "episode_001.hdf5"
+            _write_pika_episode(
+                path,
+                image_specs={"realsense_depth": "png16"},
+                image_encoding_attrs=False,
+            )
+
+            report = audit_hdf5_episodes(path)
+            audited = report["episodes"][0]
+
+            self.assertEqual(audited["camera_encodings"]["realsense_depth"], "png16")
+            self.assertFalse(_contains(audited["warnings"], "unsupported_image_encoding"))
+
+    def test_missing_gripper_field_is_audited_not_misclassified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "episode_001.hdf5"
+            _write_pika_episode(path, with_gripper=False)
+
+            report = audit_hdf5_episodes(path)
+            audited = report["episodes"][0]
+
+            self.assertEqual(audited["format_name"], "pika_umi_single_arm")
+            self.assertTrue(_contains(audited["warnings"], "missing_gripper_field"))
+
+    def test_bimanual_missing_gripper_field_is_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "episode_001.hdf5"
+            _write_bimanual_pika_episode(path, with_gripper=False)
+
+            report = audit_hdf5_episodes(path)
+            audited = report["episodes"][0]
+
+            self.assertEqual(audited["format_name"], "pika_umi_bimanual")
+            self.assertEqual(audited["arm_mask"], [1.0, 1.0])
+            self.assertTrue(_contains(audited["warnings"], "missing_gripper_field"))
+
     def test_bimanual_pika_layout_maps_both_arms(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "episode_001.hdf5"
@@ -179,6 +217,8 @@ def _write_pika_episode(
     pose_frame: str = "steamvr_world",
     quaternion_scale: float = 1.0,
     image_specs: dict[str, str] | None = None,
+    with_gripper: bool = True,
+    image_encoding_attrs: bool = True,
 ) -> None:
     assert h5py is not None and np is not None
     image_specs = image_specs or {"fisheye": "jpeg"}
@@ -198,13 +238,20 @@ def _write_pika_episode(
         handle.create_dataset("timestamp", data=np.arange(length, dtype=np.float64) / 30.0)
         obs = handle.create_group("observations")
         obs.create_dataset("pose", data=pose)
-        obs.create_dataset("gripper", data=gripper)
+        if with_gripper:
+            obs.create_dataset("gripper", data=gripper)
         images = obs.create_group("images")
         for name, encoding in image_specs.items():
-            _write_vlen_image_dataset(images, name, length, encoding=encoding)
+            _write_vlen_image_dataset(
+                images,
+                name,
+                length,
+                encoding=encoding,
+                with_encoding_attr=image_encoding_attrs,
+            )
 
 
-def _write_bimanual_pika_episode(path: Path, *, length: int = 4) -> None:
+def _write_bimanual_pika_episode(path: Path, *, length: int = 4, with_gripper: bool = True) -> None:
     assert h5py is not None and np is not None
     with h5py.File(path, "w") as handle:
         handle.attrs["arm_names"] = "left,right"
@@ -222,7 +269,8 @@ def _write_bimanual_pika_episode(path: Path, *, length: int = 4) -> None:
             action[:, :7] = pose
             action[:, 0] += sign * 0.01
             group.create_dataset("pose", data=pose)
-            group.create_dataset("gripper", data=gripper)
+            if with_gripper:
+                group.create_dataset("gripper", data=gripper)
             group.create_dataset("action", data=action)
             images = group.create_group("images")
             _write_vlen_image_dataset(images, "realsense_color", length, encoding="jpeg")
@@ -234,11 +282,13 @@ def _write_vlen_image_dataset(
     length: int,
     *,
     encoding: str,
+    with_encoding_attr: bool = True,
 ) -> None:
     assert h5py is not None and np is not None
     dtype = h5py.vlen_dtype(np.dtype("uint8"))
     dataset = group.create_dataset(name, shape=(length,), dtype=dtype)
-    dataset.attrs["encoding"] = encoding
+    if with_encoding_attr:
+        dataset.attrs["encoding"] = encoding
     for index in range(length):
         dataset[index] = np.frombuffer(_image_bytes(encoding, index=index), dtype=np.uint8)
 

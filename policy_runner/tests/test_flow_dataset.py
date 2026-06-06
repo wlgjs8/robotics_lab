@@ -78,6 +78,21 @@ class FlowHdf5DatasetTest(unittest.TestCase):
             self.assertTrue(np.all(sample["action_mask"][:, 7:] == 0.0))
             self.assertTrue(np.allclose(sample["action_chunk"][:, 7:], 0.0))
 
+    def test_single_arm_missing_gripper_loads_with_zero_gripper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "episode_001.hdf5"
+            self._write_pika_episode(path, image_count=1, with_gripper=False)
+
+            index = load_flow_episode_index(path)
+            self.assertEqual(index.format_name, "pika_umi_single_arm")
+            self.assertTrue(np.allclose(index.left_gripper, 0.0))
+            self.assertEqual(index.action_left_gripper.shape, (index.length,))
+
+            dataset = FlowHdf5Dataset(path, action_horizon=2, image_size=8, normalize=False)
+            sample = dataset.raw_sample(0)
+            self.assertEqual(sample["action_chunk"].shape, (2, 14))
+            self.assertTrue(np.allclose(sample["proprio"][6], 0.0))
+
     def test_bimanual_pika_episode_maps_both_arms(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "episode_001.hdf5"
@@ -121,7 +136,7 @@ class FlowHdf5DatasetTest(unittest.TestCase):
             self.assertTrue(np.isfinite(sample["proprio"]).all())
             self.assertTrue(np.isfinite(sample["action_chunk"]).all())
 
-    def _write_pika_episode(self, path: Path, *, image_count: int) -> None:
+    def _write_pika_episode(self, path: Path, *, image_count: int, with_gripper: bool = True) -> None:
         assert h5py is not None and np is not None and Image is not None
         length = 4
         pose = np.zeros((length, 7), dtype=np.float32)
@@ -139,7 +154,8 @@ class FlowHdf5DatasetTest(unittest.TestCase):
             handle.create_dataset("timestamp", data=np.arange(length, dtype=np.float64) / 30.0)
             obs = handle.create_group("observations")
             obs.create_dataset("pose", data=pose)
-            obs.create_dataset("gripper", data=gripper)
+            if with_gripper:
+                obs.create_dataset("gripper", data=gripper)
             images = obs.create_group("images")
             if image_count >= 1:
                 self._write_vlen_image_dataset(images, "jpeg_cam", length, suffix="jpeg")

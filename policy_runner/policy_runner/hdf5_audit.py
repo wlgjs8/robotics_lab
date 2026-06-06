@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import math
 from collections import Counter
@@ -8,6 +9,7 @@ from typing import Any
 
 import h5py
 import numpy as np
+from PIL import Image
 
 from .dataset_manifest import DatasetManifest
 from .flow_dataset import decode_hdf5_image_value, discover_hdf5_episodes
@@ -249,7 +251,7 @@ def _looks_like_pika_bimanual(handle: h5py.File) -> bool:
     if "timestamp" not in handle or "observations" not in handle:
         return False
     return any(
-        "pose" in handle[group_path] and "gripper" in handle[group_path]
+        "pose" in handle[group_path]
         for group_path in _bimanual_arm_groups(handle).values()
         if group_path in handle
     )
@@ -627,10 +629,21 @@ def _infer_image_encoding(dataset: h5py.Dataset) -> str | None:
         if data.startswith(b"\xff\xd8\xff"):
             return "jpeg"
         if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            if _png_value_is_16_bit(data):
+                return "png16"
             return "png"
     if dataset.dtype == np.uint8 and len(dataset.shape) >= 3:
         return "rgb8"
     return None
+
+
+def _png_value_is_16_bit(data: bytes) -> bool:
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            arr = np.asarray(image)
+            return arr.dtype == np.uint16 or image.mode in {"I;16", "I;16B", "I;16L"}
+    except Exception:
+        return False
 
 
 def _bytes_from_hdf5_value(value: Any) -> bytes:

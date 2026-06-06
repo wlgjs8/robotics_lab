@@ -441,7 +441,6 @@ def _is_pika_umi(handle: h5py.File) -> bool:
         and "timestamp" in handle
         and "observations" in handle
         and "pose" in handle["observations"]
-        and "gripper" in handle["observations"]
         and "images" in handle["observations"]
     )
 
@@ -456,7 +455,6 @@ def _is_pika_umi_bimanual(handle: h5py.File) -> bool:
     return any(
         group_path in handle
         and "pose" in handle[group_path]
-        and "gripper" in handle[group_path]
         for group_path in arm_groups.values()
     )
 
@@ -473,7 +471,11 @@ def _load_pika_episode(
 ) -> FlowEpisodeIndex:
     action = np.asarray(handle["action"], dtype=np.float32)
     pose = np.asarray(handle["observations/pose"], dtype=np.float32)
-    gripper = np.asarray(handle["observations/gripper"], dtype=np.float32)
+    gripper = (
+        np.asarray(handle["observations/gripper"], dtype=np.float32)
+        if "observations/gripper" in handle
+        else np.zeros((pose.shape[0], 1), dtype=np.float32)
+    )
     timestamps = np.asarray(handle["timestamp"], dtype=np.float64)
     camera_paths = _camera_paths(handle, "observations/images")
     length = min([len(action), len(pose), len(gripper), len(timestamps)] + _camera_lengths(handle, camera_paths))
@@ -648,7 +650,7 @@ def _pika_bimanual_arm_groups(handle: h5py.File) -> dict[str, str]:
     group_names = [
         str(name)
         for name, value in observations.items()
-        if isinstance(value, h5py.Group) and "pose" in value and "gripper" in value
+        if isinstance(value, h5py.Group) and "pose" in value
     ]
     if not group_names:
         return {}
@@ -668,7 +670,7 @@ def _pika_bimanual_arm_groups(handle: h5py.File) -> dict[str, str]:
         canonical = name.lower()
         if canonical in {"left", "right"} and name in observations:
             group = observations[name]
-            if isinstance(group, h5py.Group) and "pose" in group and "gripper" in group:
+            if isinstance(group, h5py.Group) and "pose" in group:
                 out[canonical] = f"observations/{name}"
 
     remaining = [name for name in group_names if f"observations/{name}" not in out.values()]
