@@ -207,8 +207,20 @@ commit_if_needed() {
   fi
 
   git diff --cached --stat | tee "$artifact_dir/diff.stat.txt"
-  git commit -m "codex: implement ${task} [codex:${codex_status}] [gate:${gate_status}]"
-  echo "Committed: codex: implement ${task} [codex:${codex_status}] [gate:${gate_status}]"
+  local commit_subject
+  commit_subject="Advance ${task} after deterministic sequence validation"
+  git commit \
+    -m "$commit_subject" \
+    -m "Codex status: ${codex_status}. Gate status: ${gate_status}." \
+    -m "Constraint: codex_run_sequence commits each task independently after Codex execution and deterministic gate evaluation." \
+    -m "Rejected: codex: implement ${task} [codex:${codex_status}] [gate:${gate_status}] | it lacks Lore trailers required by the workspace commit policy" \
+    -m "Confidence: medium" \
+    -m "Scope-risk: narrow" \
+    -m "Directive: Preserve per-task commits and keep artifact logs out of git history." \
+    -m "Tested: Codex task ${task} status=${codex_status}; deterministic gate status=${gate_status}" \
+    -m "Not-tested: Manual review beyond the task prompt and deterministic gate output" \
+    -m "Co-authored-by: OmX <omx@oh-my-codex.dev>"
+  echo "Committed: ${commit_subject}"
 }
 
 run_one_task() {
