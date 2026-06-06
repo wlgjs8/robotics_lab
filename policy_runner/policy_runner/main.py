@@ -358,6 +358,17 @@ def _main_with_subcommands(argv: list[str]) -> int:
         choices=("tiny_cnn", "resnet18", "resnet50", "dinov3"),
         default="tiny_cnn",
     )
+    ml_preflight.add_argument(
+        "--require-cuda",
+        action="store_true",
+        help="Fail if PyTorch cannot see CUDA.",
+    )
+    ml_preflight.add_argument(
+        "--expect-cuda-device-count",
+        type=int,
+        default=None,
+        help="Fail unless PyTorch sees exactly this many CUDA devices.",
+    )
 
     flow_train = sub.add_parser(
         "flow-train",
@@ -697,7 +708,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
     if args.command == "ml-preflight":
         from .ml_preflight import run_ml_preflight
 
-        return run_ml_preflight(vision_backbone=args.vision_backbone)
+        return run_ml_preflight(
+            vision_backbone=args.vision_backbone,
+            require_cuda=args.require_cuda,
+            expect_cuda_device_count=args.expect_cuda_device_count,
+        )
     if args.command == "flow-train":
         from .ml_preflight import check_ml_preflight, render_ml_preflight
 

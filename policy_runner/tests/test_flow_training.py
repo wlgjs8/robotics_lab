@@ -91,6 +91,60 @@ class MlPreflightTest(unittest.TestCase):
         self.assertIn("torchvision: ERROR RuntimeError: operator torchvision::nms does not exist", output)
         self.assertIn("requested_backbone_error: torchvision import failed", output)
 
+    def test_ml_preflight_reports_expected_cuda_device_count(self) -> None:
+        if run_ml_preflight is None:
+            self.skipTest("ml preflight is not importable")
+
+        def fake_import(module_name: str):
+            if module_name == "torch":
+                return _FakeTorchModule(cuda_available=True, cuda_device_count=8)
+            if module_name in {"h5py", "PIL"}:
+                return types.SimpleNamespace(__version__="fake")
+            return importlib.import_module(module_name)
+
+        stdout = io.StringIO()
+
+        with mock.patch.dict(sys.modules, {"policy_runner.flow_model": self._fake_flow_model_module()}):
+            rc = run_ml_preflight(
+                vision_backbone="tiny_cnn",
+                require_cuda=True,
+                expect_cuda_device_count=8,
+                stdout=stdout,
+                import_module=fake_import,
+            )
+
+        output = stdout.getvalue()
+        self.assertEqual(rc, 0, output)
+        self.assertIn("cuda_available: true", output)
+        self.assertIn("cuda_device_count: 8", output)
+        self.assertIn("cuda_check: OK", output)
+
+    def test_ml_preflight_fails_on_cuda_count_mismatch(self) -> None:
+        if run_ml_preflight is None:
+            self.skipTest("ml preflight is not importable")
+
+        def fake_import(module_name: str):
+            if module_name == "torch":
+                return _FakeTorchModule(cuda_available=True, cuda_device_count=1)
+            if module_name in {"h5py", "PIL"}:
+                return types.SimpleNamespace(__version__="fake")
+            return importlib.import_module(module_name)
+
+        stdout = io.StringIO()
+
+        with mock.patch.dict(sys.modules, {"policy_runner.flow_model": self._fake_flow_model_module()}):
+            rc = run_ml_preflight(
+                vision_backbone="tiny_cnn",
+                require_cuda=True,
+                expect_cuda_device_count=8,
+                stdout=stdout,
+                import_module=fake_import,
+            )
+
+        output = stdout.getvalue()
+        self.assertEqual(rc, 1, output)
+        self.assertIn("cuda_check: ERROR expected 8 CUDA devices, found 1", output)
+
     def _fake_ml_module(self, module_name: str):
         if module_name == "torch":
             return _FakeTorchModule()
@@ -232,7 +286,13 @@ class _FakeNoGrad:
 
 class _FakeTorchModule:
     __version__ = "fake"
-    cuda = types.SimpleNamespace(is_available=lambda: False)
+
+    def __init__(self, *, cuda_available: bool = False, cuda_device_count: int = 0):
+        self.cuda = types.SimpleNamespace(
+            is_available=lambda: cuda_available,
+            device_count=lambda: cuda_device_count,
+            get_device_name=lambda index: f"Fake CUDA GPU {index}",
+        )
 
     @staticmethod
     def zeros(*_shape):

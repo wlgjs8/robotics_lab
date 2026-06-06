@@ -36,23 +36,31 @@ class ImportStatus:
 def run_ml_preflight(
     *,
     vision_backbone: str,
+    require_cuda: bool = False,
+    expect_cuda_device_count: int | None = None,
     stdout: TextIO = sys.stdout,
     import_module: Callable[[str], Any] = importlib.import_module,
 ) -> int:
     report = check_ml_preflight(
         vision_backbone=vision_backbone,
+        require_cuda=require_cuda,
+        expect_cuda_device_count=expect_cuda_device_count,
         import_module=import_module,
     )
     stdout.write(render_ml_preflight(report))
     stdout.flush()
-    return 0 if bool(report["requested_backbone"]["ok"]) else 1
+    return 0 if bool(report["ok"]) else 1
 
 
 def check_ml_preflight(
     *,
     vision_backbone: str,
+    require_cuda: bool = False,
+    expect_cuda_device_count: int | None = None,
     import_module: Callable[[str], Any] = importlib.import_module,
 ) -> dict[str, Any]:
+    if expect_cuda_device_count is not None and expect_cuda_device_count < 0:
+        raise ValueError("expect_cuda_device_count must be non-negative")
     backbone = str(vision_backbone)
     torch_status, torch_module = _import_status("torch", import_module=import_module)
     if backbone in TORCHVISION_BACKBONES:
@@ -66,8 +74,16 @@ def check_ml_preflight(
     pillow_status, _ = _import_status("PIL", import_module=import_module)
 
     cuda_available = False
+    cuda_device_count = 0
+    cuda_device_names: list[str] = []
     if torch_status.ok:
         cuda_available = bool(torch_module.cuda.is_available())
+        if cuda_available:
+            cuda_device_count = int(torch_module.cuda.device_count())
+            cuda_device_names = [
+                str(torch_module.cuda.get_device_name(index))
+                for index in range(cuda_device_count)
+            ]
 
     forward = _check_backbone_forward(
         backbone,
@@ -76,8 +92,16 @@ def check_ml_preflight(
         torch_module=torch_module,
     )
     requested_ok = bool(forward["ok"])
+    cuda_ok = _cuda_status_ok(
+        available=cuda_available,
+        device_count=cuda_device_count,
+        require_cuda=require_cuda,
+        expect_device_count=expect_cuda_device_count,
+    )
+    ok = bool(requested_ok and cuda_ok["ok"])
 
     return {
+        "ok": ok,
         "requested_backbone": {
             "name": backbone,
             "ok": requested_ok,
@@ -86,6 +110,9 @@ def check_ml_preflight(
         "torch": torch_status.to_dict(),
         "torchvision": torchvision_status.to_dict(),
         "cuda_available": cuda_available,
+        "cuda_device_count": cuda_device_count,
+        "cuda_device_names": cuda_device_names,
+        "cuda_check": cuda_ok,
         "hdf5": h5py_status.to_dict(),
         "pillow": pillow_status.to_dict(),
         "backbone_forward": forward,
@@ -99,6 +126,9 @@ def render_ml_preflight(report: dict[str, Any]) -> str:
         _format_import("torch", report["torch"]),
         _format_import("torchvision", report["torchvision"]),
         f"cuda_available: {str(bool(report['cuda_available'])).lower()}",
+        f"cuda_device_count: {int(report.get('cuda_device_count', 0))}",
+        _format_cuda_device_names(report.get("cuda_device_names", [])),
+        _format_cuda_check(report.get("cuda_check", {})),
         _format_import("hdf5", report["hdf5"]),
         _format_import("pillow", report["pillow"]),
         _format_forward(report["backbone_forward"]),
@@ -110,6 +140,28 @@ def render_ml_preflight(report: dict[str, Any]) -> str:
     if not report["requested_backbone"]["ok"]:
         lines.append(f"requested_backbone_error: {report['requested_backbone']['error']}")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _cuda_status_ok(
+    *,
+    available: bool,
+    device_count: int,
+    require_cuda: bool,
+    expect_device_count: int | None,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    if require_cuda and not available:
+        errors.append("cuda unavailable")
+    if expect_device_count is not None and int(device_count) != int(expect_device_count):
+        errors.append(
+            f"expected {int(expect_device_count)} CUDA devices, found {int(device_count)}"
+        )
+    return {
+        "ok": not errors,
+        "require_cuda": bool(require_cuda),
+        "expect_device_count": expect_device_count,
+        "errors": errors,
+    }
 
 
 def _import_status(
@@ -217,6 +269,18 @@ def _format_import(label: str, status: dict[str, Any]) -> str:
     return f"{label}: ERROR {status.get('error', '')}"
 
 
+def _format_cuda_device_names(names: list[str]) -> str:
+    if not names:
+        return "cuda_device_names: []"
+    return "cuda_device_names: " + json_dumps_compact(names)
+
+
+def _format_cuda_check(status: dict[str, Any]) -> str:
+    if status.get("ok", True):
+        return "cuda_check: OK"
+    return "cuda_check: ERROR " + "; ".join(str(item) for item in status.get("errors", []))
+
+
 def _format_forward(forward: dict[str, Any]) -> str:
     if forward.get("ok"):
         return (
@@ -229,3 +293,9 @@ def _format_forward(forward: dict[str, Any]) -> str:
         f"backbone={forward.get('backbone', '')} "
         f"{forward.get('error', '')}"
     )
+
+
+def json_dumps_compact(value: Any) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))

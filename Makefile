@@ -5,12 +5,16 @@ SIM_BACKEND_COMPOSE_FILE ?= docker-compose.sim-backend.yml
 SIM_CONTROL_COMPOSE_FILE ?= docker-compose.sim-control.yml
 FLOW_COMPOSE_FILE ?= docker-compose.flow-train.yml
 FLOW_TRAIN_SERVICES ?= policy_flow_train_gpu0 policy_flow_train_gpu1 policy_flow_train_gpu2 policy_flow_train_gpu3 policy_flow_train_gpu4 policy_flow_train_gpu5 policy_flow_train_gpu6 policy_flow_train_gpu7
+FLOW_EXPECTED_GPU_COUNT ?= 8
+FLOW_RUN_UID ?= $(shell id -u)
+FLOW_RUN_GID ?= $(shell id -g)
 POLICY_FLOW_AUDIT_HOST_OUT ?= outputs/flow_runs/audit
 POLICY_FLOW_AUDIT_CONTAINER_OUT ?= /outputs/flow_runs/audit
 POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
+export FLOW_EXPECTED_GPU_COUNT FLOW_RUN_UID FLOW_RUN_GID
 
-.PHONY: build deploy stop sim-local-up sim-up sim-backend-up sim-control-up sim-down sim-smoke sim-teleop-up sim-infer-up policy-train policy-flow-train-config policy-flow-train-build policy-flow-train-preflight policy-flow-hdf5-audit policy-flow-train-up policy-flow-train-down policy-hdf5-audit-smoke policy-flow-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up
+.PHONY: build deploy stop sim-local-up sim-up sim-backend-up sim-control-up sim-down sim-smoke sim-teleop-up sim-infer-up policy-train policy-flow-train-config policy-flow-train-build policy-flow-gpu-smoke policy-flow-train-preflight policy-flow-hdf5-audit policy-flow-train-up policy-flow-train-down policy-hdf5-audit-smoke policy-flow-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up
 
 build:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) build
@@ -49,6 +53,9 @@ policy-flow-train-config:
 
 policy-flow-train-build:
 	$(COMPOSE) -p $(PROJECT) -f $(FLOW_COMPOSE_FILE) --profile flow-train build
+
+policy-flow-gpu-smoke:
+	FLOW_EXPECTED_GPU_COUNT=$(FLOW_EXPECTED_GPU_COUNT) $(COMPOSE) -p $(PROJECT) -f $(FLOW_COMPOSE_FILE) --profile flow-train run --rm --no-deps policy_flow_gpu_smoke
 
 policy-flow-train-preflight:
 	$(COMPOSE) -p $(PROJECT) -f $(FLOW_COMPOSE_FILE) --profile flow-train run --rm --no-deps --entrypoint policy-runner policy_flow_train_gpu0 ml-preflight --vision-backbone resnet18

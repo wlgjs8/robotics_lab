@@ -7,8 +7,12 @@ x-policy-flow-train-base: &policy-flow-train-base
   image: robotics_lab/policy_runner:cuda-ml
   init: true
   shm_size: "8gb"
+  user: "${FLOW_RUN_UID:-1001}:${FLOW_RUN_GID:-1001}"
   environment:
+    HOME: "/tmp"
     PYTHONUNBUFFERED: "1"
+    TORCHINDUCTOR_CACHE_DIR: "/tmp/torchinductor"
+    XDG_CACHE_HOME: "/tmp/.cache"
   entrypoint:
     - "policy-runner"
     - "flow-train"
@@ -104,7 +108,28 @@ x-gpu7: &gpu7
             device_ids: ["7"]
             capabilities: ["gpu"]
 
+x-all-gpus: &all-gpus
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: ["gpu"]
+
 services:
+  policy_flow_gpu_smoke:
+    <<: [*policy-flow-train-base, *all-gpus]
+    entrypoint:
+      - "policy-runner"
+    command:
+      - "ml-preflight"
+      - "--vision-backbone"
+      - "tiny_cnn"
+      - "--require-cuda"
+      - "--expect-cuda-device-count"
+      - "${FLOW_EXPECTED_GPU_COUNT:-8}"
+
   policy_flow_train_gpu0:
     <<: [*policy-flow-train-base, *gpu0]
     command:

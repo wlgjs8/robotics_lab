@@ -282,6 +282,7 @@ Run the prepared 8-GPU independent experiment sweep with Docker Compose:
 ```bash
 make policy-flow-train-config
 make policy-flow-train-build
+make policy-flow-gpu-smoke
 make policy-flow-train-preflight
 make policy-flow-hdf5-audit
 make policy-flow-train-up
@@ -293,6 +294,11 @@ read-only HDF5 input, writes outputs under `outputs/flow_runs`, uses
 `policy_flow_train_gpu7` to host GPU IDs `0` through `7`. These are independent
 single-GPU experiments, not distributed training. The first sweep uses
 `left_realsense_color,right_realsense_color` and excludes depth cameras.
+`make policy-flow-gpu-smoke` runs the same CUDA ML image with all GPUs exposed
+and fails unless PyTorch can see `FLOW_EXPECTED_GPU_COUNT`, which defaults to
+`8`. Flow training containers run as `FLOW_RUN_UID:FLOW_RUN_GID`, defaulting to
+the current host user from the Makefile, so generated reports and checkpoints
+remain writable from the host.
 
 The target host must have NVIDIA Container Toolkit and Docker Compose GPU
 reservation support. On smaller hosts, run a subset:
@@ -346,6 +352,8 @@ Check local ML dependency readiness before training:
 ```bash
 python3 -m policy_runner ml-preflight --vision-backbone tiny_cnn
 python3 -m policy_runner ml-preflight --vision-backbone resnet18
+python3 -m policy_runner ml-preflight --vision-backbone tiny_cnn \
+  --require-cuda --expect-cuda-device-count 8
 ```
 
 `tiny_cnn` is a small PyTorch-only CNN intended for CPU smoke tests and CI when
