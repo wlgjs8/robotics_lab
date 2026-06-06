@@ -13,6 +13,15 @@ from typing import Any
 import benchmark_overlay as overlay
 
 
+def loopback_udp_available() -> bool:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return False
+    sock.close()
+    return True
+
+
 def sample_message(**overrides: Any) -> dict[str, Any]:
     metrics = overlay.CircleOverlayMetrics(
         center=[0.0, 0.0, 0.0],
@@ -75,6 +84,7 @@ class BenchmarkOverlayTest(unittest.TestCase):
         self.assertAlmostEqual(message["current_error_m"], 0.001)
         self.assertFalse(message["physical_motion_expected"])
 
+    @unittest.skipUnless(loopback_udp_available(), "loopback UDP sockets unavailable")
     def test_udp_receiver_gets_overlay_and_artifact_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)
@@ -122,6 +132,7 @@ class BenchmarkOverlayTest(unittest.TestCase):
             self.assertEqual(summary["overlay_messages_sent"], 0)
             self.assertIsNone(summary["overlay_pub_endpoint"])
 
+    @unittest.skipUnless(loopback_udp_available(), "loopback UDP sockets unavailable")
     def test_rate_limiter_bounds_publish_rate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)

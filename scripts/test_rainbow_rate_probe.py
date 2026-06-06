@@ -14,6 +14,15 @@ import rainbow_rate_probe as probe
 import rb_backend_ablation as ablation
 
 
+def loopback_tcp_available():
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return False
+    sock.close()
+    return True
+
+
 def args(**overrides):
     base = {
         "ip": "127.0.0.1",
@@ -318,6 +327,7 @@ class RainbowRateProbeTests(unittest.TestCase):
         self.assertTrue(written.is_file())
         self.assertEqual(json.loads(written.read_text(encoding="utf-8"))["overall_result"], "error")
 
+    @unittest.skipUnless(loopback_tcp_available(), "loopback TCP sockets unavailable")
     def test_capture_raw_data_port_writes_bytes_without_valid_state(self):
         artifact_dir = Path(tempfile.mkdtemp())
         server = RawDataServer(b"\x01\x02rainbow5001\n")

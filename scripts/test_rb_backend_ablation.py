@@ -14,6 +14,15 @@ import rb_backend_ablation as ablation
 import compare_backend_ablation as compare
 
 
+def loopback_tcp_available():
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return False
+    sock.close()
+    return True
+
+
 class FakeLineServer:
     def __init__(self, response: str, hold: float = 0.0):
         self.response = response
@@ -195,6 +204,7 @@ class BackendAblationTests(unittest.TestCase):
                 )
             )
 
+    @unittest.skipUnless(loopback_tcp_available(), "loopback TCP sockets unavailable")
     def test_rbscript_read_state_fake_server(self):
         fixture = json.dumps(
             {
@@ -217,6 +227,7 @@ class BackendAblationTests(unittest.TestCase):
         self.assertFalse(sample.comparable)
         self.assertEqual(server.received, "reqdata\n")
 
+    @unittest.skipUnless(loopback_tcp_available(), "loopback TCP sockets unavailable")
     def test_rbscript_read_state_unknown_payload_is_unsupported(self):
         server = FakeLineServer("\x01\x02rainbow")
         try:
@@ -239,6 +250,7 @@ class BackendAblationTests(unittest.TestCase):
         self.assertEqual(summary["rbscript_tcp_data_port_mode"], "real_controller_unsupported")
         self.assertFalse(summary["comparable"])
 
+    @unittest.skipUnless(loopback_tcp_available(), "loopback TCP sockets unavailable")
     def test_persistent_command_socket_reuses_one_connection(self):
         server = MultiCommandLineServer(["ok", "ok", "ok"])
         try:
@@ -260,6 +272,7 @@ class BackendAblationTests(unittest.TestCase):
         self.assertEqual(server.received_commands, ["noop()\n", "noop()\n", "noop()\n"])
         self.assertTrue(all(sample.persistent_socket for sample in samples))
 
+    @unittest.skipUnless(loopback_tcp_available(), "loopback TCP sockets unavailable")
     def test_extra_lines_are_counted_and_classified(self):
         server = MultiCommandLineServer(["ok"], extra_lines={0: ["extra detail", "another detail"]})
         try:
@@ -318,6 +331,7 @@ class BackendAblationTests(unittest.TestCase):
         self.assertEqual(records[0]["stale_response_lines"], ["late previous ack"])
         self.assertIn("unrecognized_response", records[0]["response_error_names"])
 
+    @unittest.skipUnless(loopback_tcp_available(), "loopback TCP sockets unavailable")
     def test_persistent_reconnect_count_after_transport_drop(self):
         server = MultiCommandLineServer(
             ["ok", "ok"],

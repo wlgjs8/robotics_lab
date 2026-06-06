@@ -3,8 +3,10 @@ COMPOSE_FILE ?= docker-compose.yml
 PROJECT ?= robotics_lab
 SIM_BACKEND_COMPOSE_FILE ?= docker-compose.sim-backend.yml
 SIM_CONTROL_COMPOSE_FILE ?= docker-compose.sim-control.yml
+POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
+POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 
-.PHONY: build deploy stop sim-local-up sim-up sim-backend-up sim-control-up sim-down sim-smoke sim-teleop-up sim-infer-up policy-train mig-rebaseline deps-hardware-free camera-mock-up camera-real-up
+.PHONY: build deploy stop sim-local-up sim-up sim-backend-up sim-control-up sim-down sim-smoke sim-teleop-up sim-infer-up policy-train policy-hdf5-audit-smoke policy-flow-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up
 
 build:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) build
@@ -37,6 +39,25 @@ sim-infer-up:
 
 policy-train:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile ml run --rm policy_train
+
+policy-hdf5-audit-smoke:
+	mkdir -p "$(POLICY_HDF5_AUDIT_OUT)"
+	if [ -n "$(POLICY_HDF5_AUDIT_SMOKE)" ] || [ -e episode_002.hdf5 ]; then \
+		episodes="$(POLICY_HDF5_AUDIT_SMOKE)"; \
+		if [ -z "$$episodes" ]; then episodes="episode_002.hdf5"; fi; \
+		PYTHONPATH=policy_runner python3 -m policy_runner hdf5-audit \
+			--episodes-dir "$$episodes" \
+			--output-json "$(POLICY_HDF5_AUDIT_OUT)/hdf5_audit_smoke.json" \
+			--output-md "$(POLICY_HDF5_AUDIT_OUT)/hdf5_audit_smoke.md"; \
+	else \
+		echo "policy-hdf5-audit-smoke: no CODEX_UPLOADED_HDF5_SMOKE or episode_002.hdf5; skipped"; \
+	fi
+
+policy-flow-smoke:
+	PYTHONPATH=policy_runner python3 -m policy_runner ml-preflight --vision-backbone tiny_cnn
+
+pgmode-transition-dry-run:
+	tools/rbpodo_pgmode_spacemouse.sh check
 
 sim-smoke:
 	./scripts/hardware_free_validation.sh

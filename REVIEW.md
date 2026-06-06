@@ -261,6 +261,13 @@ controller-simulation profile for reproducibility. It keeps
 `physical_motion_expected=false`, and `disable_waiting_ack: false`. It does not
 claim physical real readiness.
 
+The GENE/UMI policy-transition documentation path keeps HDF5 `hdf5-audit`
+outputs, `flow-infer` `rollout_summary` files, controller-simulation
+repeatability reports, pgmode transition reports, and the GENE 26.5 /
+ACKON500 control-default report in an Artifact manifest / `artifact_manifest`.
+This is evidence inventory only; `real_supervised` remains read-only and
+`real_policy` remains blocked until the physical promotion ladder passes.
+
 RBPODO-CIRCLE-STATE-SOURCE-01 adds a controller-simulation-only Cartesian
 state-source policy so rbpodo pgmode simulation can integrate and guard against
 controller reference `q_ref` / `tcp_ref_stand` while still publishing and

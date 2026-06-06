@@ -368,6 +368,12 @@ current `real_supervised` observation lane and never sends motion commands.
 `real_policy` remains blocked unless real motion, measured or accepted retarget,
 collision, gripper, and geometry gates are present.
 
+For the GENE 26.5 / ACKON500 policy-transition lane, keep `hdf5-audit`,
+`flow-infer`, `real_supervised`/`real_readonly`, and pgmode transition outputs
+in an Artifact manifest / `artifact_manifest`. Generate it with
+`scripts/collect_gene_umi_artifact_manifest.py`; the manifest is documentation
+and evidence inventory only, not physical real robot approval.
+
 접속:
 
 ```text

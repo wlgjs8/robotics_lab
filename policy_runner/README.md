@@ -388,6 +388,14 @@ blockers are stricter: any non-`stand` `pose_frame`, including
 `steamvr_world`, remains blocked for real policy rollout unless a retarget
 manifest supplies a measured transform to `stand`.
 
+For the GENE 26.5 / ACKON500 transition workflow, preserve `hdf5-audit`
+outputs, `flow-train` reports/checkpoints, `flow-infer` `rollout_summary`
+files, controller-simulation repeatability reports, and pgmode transition
+reports in an Artifact manifest / `artifact_manifest`. Use
+`scripts/collect_gene_umi_artifact_manifest.py`; this inventory does not
+promote `real_supervised` read-only observation or future `real_policy` to
+physical motion.
+
 ## UMI Import And Retarget Metadata
 
 `umi-import` and `umi-convert` are repository-side file pipelines. They do not
