@@ -220,7 +220,14 @@ blocked for streaming Cartesian primitives even if `RB_ALLOW_REAL_CARTESIAN=1`
 is present. State JSON must expose `cartesian_available`,
 `cartesian_unavailable_reason`, and a `cartesian_gate` object with the
 backend/run-mode/config/env decision fields so a controller-simulation
-benchmark cannot be mistaken for physical motion approval.
+benchmark cannot be mistaken for physical motion approval. The gate separates
+prospective streaming availability from the current command:
+`controller_simulation_streaming_cartesian_available` says a subsequent
+streaming Cartesian command may be admitted under pgmode simulation, while
+`controller_simulation_cartesian_enabled_for_current_command` is true only when
+the current command is a controller-simulation Cartesian command. This split
+prevents a startup `Hold` state from deadlocking the first policy-runner
+`TcpTwistLocal` command.
 
 Real stop/reset APIs remain conservative until verified. If no verified API is wired, return `DependencyUnavailable` and require operator intervention.
 

@@ -3694,6 +3694,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "tcp_stand", "tcp_base", "tcp_deferred", "fk_duration_us", "cartesian_solve", "worker",
         "transport", "cartesian_available", "cartesian_unavailable_reason", "cartesian_gate",
         "controller_simulation_cartesian_enabled", "streaming_cartesian_physical_real_enabled",
+        "controller_simulation_cartesian_enabled_for_current_command",
+        "controller_simulation_streaming_cartesian_available",
         "tracking_error_source", "tracking_error_source_valid", "tracking_error_reason",
         "command_reference_tracking_error_deg", "physical_command_actual_error_deg",
         "controller_simulation_physical_motion_detected"
@@ -3747,6 +3749,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("right").at("mode").get<std::string>() == "Hold");
     RB_CHECK(json.at("left").at("cartesian_gate").at("backend_type").get<std::string>() == "mock");
     RB_CHECK(!json.at("left").at("cartesian_gate").at("allow_in_controller_simulation").get<bool>());
+    RB_CHECK(!json.at("left").at("cartesian_gate").at("allow_controller_simulation_motion").get<bool>());
+    RB_CHECK(!json.at("left").at("cartesian_gate").at("controller_simulation_streaming_cartesian_available").get<bool>());
     RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_tracking_error_source").get<std::string>() ==
              "actual");
     RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_physical_motion_policy").get<std::string>() ==
@@ -5161,8 +5165,14 @@ bool testRbpodoControllerSimulationStreamingCartesianGate() {
     const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
     RB_CHECK(json.at("left").at("cartesian_available").get<bool>());
     RB_CHECK(json.at("left").at("controller_simulation_cartesian_enabled").get<bool>());
+    RB_CHECK(json.at("left").at("controller_simulation_cartesian_enabled_for_current_command").get<bool>());
+    RB_CHECK(json.at("left").at("controller_simulation_streaming_cartesian_available").get<bool>());
     RB_CHECK(!json.at("left").at("streaming_cartesian_physical_real_enabled").get<bool>());
     RB_CHECK(json.at("left").at("cartesian_gate").at("allow_in_controller_simulation").get<bool>());
+    RB_CHECK(json.at("left").at("cartesian_gate").at("allow_controller_simulation_motion").get<bool>());
+    RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_cartesian_enabled_for_current_command").get<bool>());
+    RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_streaming_cartesian_available").get<bool>());
+    RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_streaming_cartesian_unavailable_reason").is_null());
     RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_servo_state_source").get<std::string>() ==
              "reference");
     RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_tracking_error_source").get<std::string>() ==
@@ -5177,6 +5187,23 @@ bool testRbpodoControllerSimulationStreamingCartesianGate() {
     RB_CHECK(json.at("left").at("cartesian_solve").at("q_reference_for_servo_valid").get<bool>());
     RB_CHECK(json.at("left").at("cartesian_gate").at("env_RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN").get<bool>());
     RB_CHECK(!json.at("left").at("cartesian_gate").at("physical_motion_expected").get<bool>());
+
+    rb_servo::ServoSnapshot hold_snapshot = snapshot;
+    hold_snapshot.command.left.mode = rb_servo::ControlMode::Hold;
+    hold_snapshot.command.right.mode = rb_servo::ControlMode::Hold;
+    hold_snapshot.left_cartesian_solve = rb_servo::CartesianSolveTelemetry{};
+    hold_snapshot.right_cartesian_solve = rb_servo::CartesianSolveTelemetry{};
+    const nlohmann::json hold_json = nlohmann::json::parse(publisher.serializeSnapshot(hold_snapshot));
+    RB_CHECK(!hold_json.at("left").at("cartesian_available").get<bool>());
+    RB_CHECK(!hold_json.at("left").at("controller_simulation_cartesian_enabled").get<bool>());
+    RB_CHECK(!hold_json.at("left").at("controller_simulation_cartesian_enabled_for_current_command").get<bool>());
+    RB_CHECK(hold_json.at("left").at("controller_simulation_streaming_cartesian_available").get<bool>());
+    RB_CHECK(hold_json.at("left").at("cartesian_gate")
+                 .at("controller_simulation_streaming_cartesian_available")
+                 .get<bool>());
+    RB_CHECK(hold_json.at("left").at("cartesian_gate")
+                 .at("controller_simulation_streaming_cartesian_unavailable_reason")
+                 .is_null());
 
     rb_servo::ServoSnapshot physical_motion_snapshot;
     bool physical_motion_twist_observed = false;

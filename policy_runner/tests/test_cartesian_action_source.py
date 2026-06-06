@@ -48,6 +48,7 @@ def controller_sim_cartesian_gate(**overrides):
         "backend_type": "rbpodo",
         "operation_mode": "simulation",
         "allow_in_controller_simulation": True,
+        "allow_controller_simulation_motion": True,
         "env_RB_ALLOW_REAL_ROBOT": True,
         "env_RB_ALLOW_REAL_MOTION": True,
         "env_RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION": True,
@@ -55,7 +56,11 @@ def controller_sim_cartesian_gate(**overrides):
         "env_RB_RBPODO_PGMODE_SIMULATION_CONFIRMED": True,
         "physical_motion_expected": False,
         "controller_simulation_cartesian_enabled": True,
+        "controller_simulation_cartesian_enabled_for_current_command": True,
+        "controller_simulation_streaming_cartesian_available": True,
+        "controller_simulation_streaming_cartesian_unavailable_reason": None,
         "streaming_cartesian_physical_real_enabled": False,
+        "current_command_is_streaming_cartesian": True,
         "cartesian_available": True,
         "cartesian_unavailable_reason": None,
     }
@@ -537,7 +542,7 @@ class CartesianActionSourceTest(unittest.TestCase):
         decision = gate.evaluate(snapshot, intent, source.requirements, time.monotonic())
 
         self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "real_cartesian_not_allowed")
+        self.assertEqual(decision.reason, "real_motion_not_allowed")
 
     def test_rbpodo_controller_simulation_allows_spacemouse_cartesian_with_gate_evidence(self):
         reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
@@ -550,7 +555,7 @@ class CartesianActionSourceTest(unittest.TestCase):
         gate = SafetyGate(
             "real",
             SafetyConfig(
-                allow_real_motion=True,
+                allow_real_motion=False,
                 allow_rbpodo_controller_simulation_cartesian=True,
             ),
             stale_timeout_sec=0.5,
@@ -571,7 +576,7 @@ class CartesianActionSourceTest(unittest.TestCase):
         intent = source.next_intent(snapshot, time.monotonic())
         gate = SafetyGate(
             "real",
-            SafetyConfig(allow_real_motion=True),
+            SafetyConfig(allow_real_motion=False),
             stale_timeout_sec=0.5,
             geometry_status=configured_estimate_geometry(),
         )
@@ -579,7 +584,7 @@ class CartesianActionSourceTest(unittest.TestCase):
         decision = gate.evaluate(snapshot, intent, source.requirements, time.monotonic())
 
         self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "real_cartesian_not_allowed")
+        self.assertEqual(decision.reason, "real_motion_not_allowed")
 
     def test_rbpodo_controller_simulation_blocks_physical_motion_expected(self):
         reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
@@ -601,7 +606,7 @@ class CartesianActionSourceTest(unittest.TestCase):
         gate = SafetyGate(
             "real",
             SafetyConfig(
-                allow_real_motion=True,
+                allow_real_motion=False,
                 allow_rbpodo_controller_simulation_cartesian=True,
             ),
             stale_timeout_sec=0.5,
@@ -633,7 +638,7 @@ class CartesianActionSourceTest(unittest.TestCase):
         gate = SafetyGate(
             "real",
             SafetyConfig(
-                allow_real_motion=True,
+                allow_real_motion=False,
                 allow_rbpodo_controller_simulation_cartesian=True,
             ),
             stale_timeout_sec=0.5,

@@ -246,7 +246,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
 
         self.assertEqual(cfg.mode, "real")
         self.assertEqual(cfg.action_source, "dual_spacemouse_cartesian")
-        self.assertTrue(cfg.safety.allow_real_motion)
+        self.assertFalse(cfg.safety.allow_real_motion)
         self.assertTrue(cfg.safety.allow_rbpodo_controller_simulation_cartesian)
         self.assertFalse(cfg.safety.allow_configured_estimate_geometry_in_real)
         self.assertEqual(cfg.command_rate_hz, 500.0)

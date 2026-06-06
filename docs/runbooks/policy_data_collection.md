@@ -29,6 +29,18 @@ through `configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml` and
 keep the episode category `rbpodo_controller_simulation` unless a future
 physical promotion artifact explicitly changes this contract.
 
+For rbpodo controller pgmode collection,
+`policy_runner.safety.allow_real_motion=false` is the expected policy setting.
+The runner may send Cartesian SpaceMouse commands only when
+`allow_rbpodo_controller_simulation_cartesian=true` and the server state proves
+`backend_type=rbpodo`, `run_mode=real`, `operation_mode=simulation`, required
+controller-simulation env gates, and `physical_motion_expected=false`.
+Server-side env flags such as `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`,
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION`,
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN`, and
+`RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` are not policy-runner physical-motion
+approval.
+
 ## Episode Metadata
 
 Every dataset shard should carry this metadata. Fields may be empty for legacy
@@ -150,5 +162,8 @@ new fields are additive.
   command-source lease, and real-motion gates.
 - Controller-simulation episodes must be labeled
   `physical_motion_expected=false`.
+- Controller-simulation collection should keep
+  `policy_runner.safety.allow_real_motion=false`; do not use physical-motion
+  approval to make pgmode simulation pass.
 - Do not train or evaluate a physical real policy on mixed simulator and
   controller-simulation data unless the loader filters by metadata.

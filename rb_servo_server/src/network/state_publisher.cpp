@@ -818,6 +818,7 @@ std::string commandFamilyString(ControlMode mode) {
 
 std::string cartesianGateUnavailableReason(
     const CartesianControlConfig& cartesian_config,
+    const ServoConfig& servo_config,
     const BackendConfig& backend_config,
     ControlMode command_mode
 ) {
@@ -854,7 +855,8 @@ std::string cartesianGateUnavailableReason(
             ? "cartesian_control_unavailable_physical_real_blocked"
             : "cartesian_control_unavailable_operation_mode";
     }
-    if (!cartesian_config.allow_in_controller_simulation) {
+    if (!cartesian_config.allow_in_controller_simulation ||
+        !servo_config.allow_controller_simulation_motion) {
         return "cartesian_control_unavailable_controller_sim_config";
     }
     if (!envFlagEnabled("RB_ALLOW_REAL_ROBOT") ||
@@ -869,6 +871,7 @@ std::string cartesianGateUnavailableReason(
 
 nlohmann::json cartesianGateJson(
     const CartesianControlConfig& cartesian_config,
+    const ServoConfig& servo_config,
     const SafetyConfig& safety_config,
     const BackendConfig& backend_config,
     ControlMode command_mode,
@@ -876,6 +879,7 @@ nlohmann::json cartesianGateJson(
 ) {
     std::string unavailable_reason = cartesianGateUnavailableReason(
         cartesian_config,
+        servo_config,
         backend_config,
         command_mode
     );
@@ -889,6 +893,17 @@ nlohmann::json cartesianGateJson(
         isStreamingCartesianMode(command_mode) &&
         isRbpodoControllerSimulation(backend_config) &&
         cartesian_config.allow_in_controller_simulation;
+    const std::string streaming_unavailable_reason = cartesianGateUnavailableReason(
+        cartesian_config,
+        servo_config,
+        backend_config,
+        ControlMode::TcpTwistLocal
+    );
+    const bool controller_sim_streaming_cartesian_available =
+        streaming_unavailable_reason.empty() &&
+        isRbpodoControllerSimulation(backend_config) &&
+        cartesian_config.allow_in_controller_simulation &&
+        servo_config.allow_controller_simulation_motion;
     const bool physical_motion_expected = isRbpodoControllerSimulation(backend_config)
         ? false
         : backend_config.run_mode == RunMode::Real;
@@ -899,6 +914,7 @@ nlohmann::json cartesianGateJson(
         {"allow_in_simulation", cartesian_config.allow_in_simulation},
         {"allow_in_real", cartesian_config.allow_in_real},
         {"allow_in_controller_simulation", cartesian_config.allow_in_controller_simulation},
+        {"allow_controller_simulation_motion", servo_config.allow_controller_simulation_motion},
         {"enable_server_side_circle_track", cartesian_config.enable_server_side_circle_track},
         {"controller_simulation_servo_state_source",
             controllerSimulationStateSourceString(cartesian_config.controller_simulation_servo_state_source)},
@@ -917,6 +933,13 @@ nlohmann::json cartesianGateJson(
         {"env_RB_RBPODO_PGMODE_SIMULATION_CONFIRMED", envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")},
         {"physical_motion_expected", physical_motion_expected},
         {"controller_simulation_cartesian_enabled", controller_sim_cartesian_enabled},
+        {"controller_simulation_cartesian_enabled_for_current_command", controller_sim_cartesian_enabled},
+        {"controller_simulation_streaming_cartesian_available",
+            controller_sim_streaming_cartesian_available},
+        {"controller_simulation_streaming_cartesian_unavailable_reason",
+            streaming_unavailable_reason.empty()
+                ? nlohmann::json(nullptr)
+                : nlohmann::json(streaming_unavailable_reason)},
         {"streaming_cartesian_physical_real_enabled", false},
         {"current_command_is_cartesian", isCartesianMode(command_mode)},
         {"current_command_is_streaming_cartesian", isStreamingCartesianMode(command_mode)},
@@ -1032,7 +1055,14 @@ nlohmann::json armStateJson(
         startup_validation
     );
     const nlohmann::json cartesian_gate =
-        cartesianGateJson(cartesian_config, safety_config, backend_config, command.mode, cartesian_solve);
+        cartesianGateJson(
+            cartesian_config,
+            servo_config,
+            safety_config,
+            backend_config,
+            command.mode,
+            cartesian_solve
+        );
     return {
         {"mode", toString(command.mode)},
         {"command_family", optionalStringJson(commandFamilyString(command.mode))},
@@ -1119,6 +1149,10 @@ nlohmann::json armStateJson(
         {"cartesian_gate", cartesian_gate},
         {"controller_simulation_cartesian_enabled",
             cartesian_gate.at("controller_simulation_cartesian_enabled")},
+        {"controller_simulation_cartesian_enabled_for_current_command",
+            cartesian_gate.at("controller_simulation_cartesian_enabled_for_current_command")},
+        {"controller_simulation_streaming_cartesian_available",
+            cartesian_gate.at("controller_simulation_streaming_cartesian_available")},
         {"streaming_cartesian_physical_real_enabled",
             cartesian_gate.at("streaming_cartesian_physical_real_enabled")},
         {"physical_motion_expected", isRbpodoControllerSimulation(backend_config)

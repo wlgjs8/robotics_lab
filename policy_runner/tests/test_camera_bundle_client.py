@@ -32,6 +32,14 @@ def _free_tcp_endpoint() -> str:
         return f"tcp://127.0.0.1:{sock.getsockname()[1]}"
 
 
+def _local_tcp_socket_available() -> bool:
+    try:
+        _free_tcp_endpoint()
+    except OSError:
+        return False
+    return True
+
+
 def _write_shm_image(
     *,
     name: str,
@@ -87,6 +95,7 @@ def _write_shm_image(
 
 
 @unittest.skipIf(zmq is None or np is None, "camera extras not installed")
+@unittest.skipIf(not _local_tcp_socket_available(), "local TCP sockets unavailable")
 class CameraBundleClientTest(unittest.TestCase):
     def setUp(self) -> None:
         self.ctx = zmq.Context.instance()

@@ -46,7 +46,8 @@ Motion commands are blocked when:
 - a Cartesian source sees a non-simulator `observed_backend`/`backend_type`,
   unless per-arm `cartesian_gate` telemetry proves rbpodo controller pgmode
   simulation with physical motion not expected
-- configured mode is `real` and `allow_real_motion` is false
+- configured mode is `real` and `allow_real_motion` is false, except after
+  the rbpodo controller-simulation Cartesian carve-out has passed
 - an action source requires camera or kinematics inputs that are unavailable
 
 `joint_sine` and `joint_velocity` are simulation-only by default. In real mode
@@ -137,7 +138,10 @@ Rbpodo controller pgmode simulation example:
   simulation profile. It sends commands to `udp://127.0.0.1:50256`, listens to
   server state on `50376`, acquires the command-source lease, and requires
   server telemetry to report controller-simulation Cartesian enabled with
-  `physical_motion_expected=false`.
+  `physical_motion_expected=false`. It intentionally keeps
+  `safety.allow_real_motion: false`; controller-simulation motion is admitted
+  only through `safety.allow_rbpodo_controller_simulation_cartesian: true` and
+  server gate evidence.
 
 Use `tools/rbpodo_pgmode_spacemouse.sh` for the prepared server config, GUI,
 and recorder commands.

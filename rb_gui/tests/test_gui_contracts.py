@@ -78,6 +78,15 @@ from rb_servo_gui.scene import _add_robot_urdfs, _circle_overlay_points, _robot_
 from rb_servo_gui.state_receiver import StateStore
 
 
+def _local_udp_socket_available() -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+    except OSError:
+        return False
+    return True
+
+
 def sample_state(**overrides):
     arm = {
         "mode": "Hold",
@@ -487,6 +496,7 @@ class GuiContractsTest(unittest.TestCase):
         invalid = sample_circle_overlay(schema_version="wrong.schema")
         self.assertIsNone(CircleOverlaySnapshot.parse(invalid))
 
+    @unittest.skipIf(not _local_udp_socket_available(), "local UDP sockets unavailable")
     def test_circle_overlay_store_and_receiver_accept_udp_packet(self):
         store = CircleOverlayStore(stale_after_sec=0.2)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:

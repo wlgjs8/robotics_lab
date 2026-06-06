@@ -28,7 +28,8 @@ servo_command:
   acquire_lease: true
   lease_readback_timeout_sec: 2.0
 safety:
-  allow_real_motion: true
+  # allow_real_motion=false is intentional; rbpodo pgmode simulation uses controller-simulation carve-out only.
+  allow_real_motion: false
   allow_rbpodo_controller_simulation_cartesian: true
   allow_configured_estimate_geometry_in_controller_simulation: true
   allow_configured_estimate_geometry_in_real: false

@@ -104,6 +104,8 @@ class SafetyGate:
                 controller_simulation_cartesian = True
                 effective_mode = "controller_simulation"
             else:
+                if intent.is_motion and not self.config.allow_real_motion:
+                    return SafetyDecision(False, "real_motion_not_allowed")
                 return SafetyDecision(False, "real_cartesian_not_allowed")
         if requirements.cartesian_motion and str(payload.get("safety_verdict", "")) == "CartesianUnavailable":
             return SafetyDecision(False, "cartesian_unavailable")
@@ -126,13 +128,14 @@ class SafetyGate:
         geometry_decision = self._evaluate_geometry_requirements(requirements, payload, effective_mode)
         if not geometry_decision.allowed:
             return geometry_decision
-        if observed_mode == "real" and intent.is_motion and not self.config.allow_real_motion:
-            return SafetyDecision(False, "real_motion_not_allowed")
-        if requirements.simulation_only and self.mode == "real" and intent.is_motion:
-            if not self.config.allow_real_motion:
+        if not controller_simulation_cartesian:
+            if observed_mode == "real" and intent.is_motion and not self.config.allow_real_motion:
                 return SafetyDecision(False, "real_motion_not_allowed")
-        if self.mode == "real" and intent.is_motion and not self.config.allow_real_motion:
-            return SafetyDecision(False, "real_motion_not_allowed")
+            if requirements.simulation_only and self.mode == "real" and intent.is_motion:
+                if not self.config.allow_real_motion:
+                    return SafetyDecision(False, "real_motion_not_allowed")
+            if self.mode == "real" and intent.is_motion and not self.config.allow_real_motion:
+                return SafetyDecision(False, "real_motion_not_allowed")
         return SafetyDecision(True)
 
     def _evaluate_camera_requirements(
@@ -312,6 +315,8 @@ def _evaluate_arm_controller_simulation_cartesian(
         return SafetyDecision(False, "controller_simulation_operation_mode_not_simulation")
     if not bool(gate.get("allow_in_controller_simulation", False)):
         return SafetyDecision(False, "controller_simulation_cartesian_config_not_allowed")
+    if gate.get("allow_controller_simulation_motion") is False:
+        return SafetyDecision(False, "controller_simulation_cartesian_config_not_allowed")
     if bool(gate.get("streaming_cartesian_physical_real_enabled", False)):
         return SafetyDecision(False, "controller_simulation_physical_real_cartesian_enabled")
     if bool(arm_payload.get("controller_simulation_physical_motion_detected", False)):
@@ -325,14 +330,46 @@ def _evaluate_arm_controller_simulation_cartesian(
     for key in _CONTROLLER_SIMULATION_ENV_KEYS:
         if gate.get(key) is not True:
             return SafetyDecision(False, "controller_simulation_env_missing")
+
+    prospective_available = gate.get("controller_simulation_streaming_cartesian_available")
+    if isinstance(prospective_available, bool):
+        if not prospective_available:
+            return _controller_simulation_cartesian_unavailable_decision(
+                gate,
+                "controller_simulation_streaming_cartesian_unavailable_reason",
+            )
+        if bool(gate.get("current_command_is_streaming_cartesian", False)):
+            current_decision = _evaluate_current_controller_simulation_cartesian_gate(gate)
+            if not current_decision.allowed:
+                return current_decision
+        return SafetyDecision(True)
+
+    return _evaluate_current_controller_simulation_cartesian_gate(gate)
+
+
+def _evaluate_current_controller_simulation_cartesian_gate(gate: dict[str, Any]) -> SafetyDecision:
     if not bool(gate.get("cartesian_available", False)):
         reason = gate.get("cartesian_unavailable_reason")
         if isinstance(reason, str) and reason:
             return SafetyDecision(False, reason)
         return SafetyDecision(False, "controller_simulation_cartesian_unavailable")
-    if not bool(gate.get("controller_simulation_cartesian_enabled", False)):
+    current_enabled = gate.get(
+        "controller_simulation_cartesian_enabled_for_current_command",
+        gate.get("controller_simulation_cartesian_enabled", False),
+    )
+    if not bool(current_enabled):
         return SafetyDecision(False, "controller_simulation_cartesian_not_enabled")
     return SafetyDecision(True)
+
+
+def _controller_simulation_cartesian_unavailable_decision(
+    gate: dict[str, Any],
+    reason_key: str,
+) -> SafetyDecision:
+    reason = gate.get(reason_key)
+    if isinstance(reason, str) and reason:
+        return SafetyDecision(False, reason)
+    return SafetyDecision(False, "controller_simulation_cartesian_unavailable")
 
 
 def _arm_mode(value: dict[str, Any] | None) -> str | None:
