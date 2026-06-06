@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 import generate_ackon500_gene_goal_report as report
+import run_rbpodo_circle_ablation as ablation
 
 
 def write_json(path: Path, value: object) -> None:
@@ -317,6 +318,34 @@ def write_repeatability_set(root: Path) -> None:
             write_repeatability_candidate(root, name=f"best_{arm}_run{index:02d}", arm=arm)
 
 
+def wrapper_env(*, include_required: bool = False) -> dict[str, str]:
+    env = os.environ.copy()
+    for key in (
+        "RB_ALLOW_REAL_ROBOT",
+        "RB_ALLOW_REAL_MOTION",
+        "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
+        "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
+        "RB_ALLOW_RBPODO_ASYNC_STREAMING",
+        "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
+        "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED",
+        "RB_ALLOW_REAL_CARTESIAN",
+    ):
+        env.pop(key, None)
+    if include_required:
+        env.update(
+            {
+                "RB_ALLOW_REAL_ROBOT": "1",
+                "RB_ALLOW_REAL_MOTION": "1",
+                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION": "1",
+                "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN": "1",
+                "RB_ALLOW_RBPODO_ASYNC_STREAMING": "1",
+                "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM": "1",
+                "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED": "1",
+            }
+        )
+    return env
+
+
 class Ackon500GeneGoalReportTest(unittest.TestCase):
     def test_sdk_ack_worker_candidate_passes_goal_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -574,21 +603,18 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
             self.assertIn("Rows By Acceptance Semantics", markdown)
             self.assertIn("Rows By Tracking Source", markdown)
 
+    def test_repeatability_run_name_layout_uses_required_artifact_prefix(self) -> None:
+        path = ablation.experiment_dir(
+            Path("/tmp/artifacts"),
+            1,
+            {"name": "best_left_run01"},
+            "run-name",
+        )
+        self.assertEqual(path.name, "run_best_left_run01")
+
     def test_wrapper_repeatability_dry_run_without_env_prints_commands(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:
-            env = os.environ.copy()
-            for key in (
-                "RB_ALLOW_REAL_ROBOT",
-                "RB_ALLOW_REAL_MOTION",
-                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
-                "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
-                "RB_ALLOW_RBPODO_ASYNC_STREAMING",
-                "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
-                "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED",
-                "RB_ALLOW_REAL_CARTESIAN",
-            ):
-                env.pop(key, None)
             completed = subprocess.run(
                 [
                     "bash",
@@ -602,16 +628,124 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
                     "--i-confirm-controller-is-in-pgmode-simulation",
                 ],
                 cwd=repo,
-                env=env,
+                env=wrapper_env(),
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
             self.assertIn("dry-run: required controller-simulation env gates were not checked", completed.stdout)
+            self.assertIn("dry-run: server realtime capabilities were not checked", completed.stdout)
             self.assertIn("run_rbpodo_circle_ablation.py", completed.stdout)
+            self.assertIn("--run-dir-layout", completed.stdout)
+            self.assertIn("run-name", completed.stdout)
             self.assertIn("--require-repeatable", completed.stdout)
             self.assertIn("repeatability_report.md", completed.stdout)
+
+    def test_wrapper_rejects_missing_pgmode_confirmation(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        completed = subprocess.run(
+            [
+                "bash",
+                "tools/rbpodo_ackon500_gene_goal.sh",
+                "--profile",
+                "repeatability",
+                "--dry-run",
+                "--i-understand-this-connects-to-real-controller",
+            ],
+            cwd=repo,
+            env=wrapper_env(),
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("missing --i-confirm-controller-is-in-pgmode-simulation", completed.stderr)
+
+    def test_wrapper_rejects_real_cartesian_env_even_in_dry_run(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        env = wrapper_env()
+        env["RB_ALLOW_REAL_CARTESIAN"] = "1"
+        completed = subprocess.run(
+            [
+                "bash",
+                "tools/rbpodo_ackon500_gene_goal.sh",
+                "--profile",
+                "repeatability",
+                "--dry-run",
+                "--i-understand-this-connects-to-real-controller",
+                "--i-confirm-controller-is-in-pgmode-simulation",
+            ],
+            cwd=repo,
+            env=env,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("RB_ALLOW_REAL_CARTESIAN must not be set", completed.stderr)
+
+    def test_wrapper_rejects_missing_realtime_caps_before_running(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            server = Path(tmp) / "rb_servo_server"
+            server.write_text("#!/bin/sh\n", encoding="utf-8")
+            server.chmod(0o755)
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "tools/rbpodo_ackon500_gene_goal.sh",
+                    "--profile",
+                    "repeatability",
+                    "--server",
+                    str(server),
+                    "--artifact-root",
+                    str(Path(tmp) / "repeatability"),
+                    "--skip-noop",
+                    "--i-understand-this-connects-to-real-controller",
+                    "--i-confirm-controller-is-in-pgmode-simulation",
+                ],
+                cwd=repo,
+                env=wrapper_env(include_required=True),
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("--allow-no-realtime", completed.stderr)
+
+    def test_wrapper_dry_run_rejects_explicit_server_without_realtime_caps(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            server = Path(tmp) / "rb_servo_server"
+            server.write_text("#!/bin/sh\n", encoding="utf-8")
+            server.chmod(0o755)
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "tools/rbpodo_ackon500_gene_goal.sh",
+                    "--profile",
+                    "repeatability",
+                    "--server",
+                    str(server),
+                    "--artifact-root",
+                    str(Path(tmp) / "repeatability"),
+                    "--dry-run",
+                    "--i-understand-this-connects-to-real-controller",
+                    "--i-confirm-controller-is-in-pgmode-simulation",
+                ],
+                cwd=repo,
+                env=wrapper_env(),
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("--allow-no-realtime", completed.stderr)
 
     def test_cli_help_works(self) -> None:
         script = Path(__file__).with_name("generate_ackon500_gene_goal_report.py")

@@ -324,6 +324,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true", help="Validate and print benchmark commands without running them.")
     parser.add_argument("--skip-plots", action="store_true", help="Forward --skip-plots to every benchmark run.")
+    parser.add_argument(
+        "--run-dir-layout",
+        choices=("indexed", "run-name"),
+        default="indexed",
+        help="Artifact directory layout for each experiment. Default: 01_<name>; run-name: run_<name>.",
+    )
     parser.add_argument("--set-pgmode-simulation", action="store_true")
     parser.add_argument("--verify-pgmode-simulation", action="store_true")
     parser.add_argument("--pgmode-summary-json", type=Path)
@@ -1038,8 +1044,11 @@ def validate_config(root: Path, exp: dict[str, Any], config_path_override: Path 
     }
 
 
-def experiment_dir(artifact_root: Path, index: int, exp: dict[str, Any]) -> Path:
-    return artifact_root / f"{index:02d}_{sim_ablation.safe_name(str(exp['name']))}"
+def experiment_dir(artifact_root: Path, index: int, exp: dict[str, Any], layout: str = "indexed") -> Path:
+    name = sim_ablation.safe_name(str(exp["name"]))
+    if layout == "run-name":
+        return artifact_root / f"run_{name}"
+    return artifact_root / f"{index:02d}_{name}"
 
 
 def prepare_experiment_config(root: Path, exp: dict[str, Any], exp_dir: Path) -> dict[str, Any]:
@@ -1207,7 +1216,7 @@ def run_experiment(
     index: int,
     artifact_root: Path,
 ) -> dict[str, Any]:
-    exp_dir = experiment_dir(artifact_root, index, exp)
+    exp_dir = experiment_dir(artifact_root, index, exp, args.run_dir_layout)
     exp_dir.mkdir(parents=True, exist_ok=True)
     command = benchmark_command(args, exp, meta, exp_dir)
     command_text = shlex.join(command)
@@ -1896,10 +1905,15 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
     if not enabled_pairs:
         raise AblationError("matrix has no enabled experiments")
     enabled_experiments = [exp for _index, exp in enabled_pairs]
+    if args.run_dir_layout == "run-name":
+        run_dir_names = [f"run_{sim_ablation.safe_name(str(exp['name']))}" for exp in enabled_experiments]
+        duplicates = sorted({name for name in run_dir_names if run_dir_names.count(name) > 1})
+        if duplicates:
+            raise AblationError("run-name artifact layout requires unique safe experiment names: " + ", ".join(duplicates))
     artifact_root = root_path(root, args.artifact_root).resolve()
     artifact_root.mkdir(parents=True, exist_ok=True)
     metadata = [
-        prepare_experiment_config(root, exp, experiment_dir(artifact_root, output_index, exp))
+        prepare_experiment_config(root, exp, experiment_dir(artifact_root, output_index, exp, args.run_dir_layout))
         for output_index, (_matrix_index, exp) in enumerate(enabled_pairs, start=1)
     ]
     validate_matrix_safety(args, metadata, enabled_experiments)

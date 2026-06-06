@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER="${ROOT_DIR}/rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
+SERVER_EXPLICIT=0
 MATRIX=""
 ARTIFACT_ROOT=""
 PROFILE="best"
@@ -190,6 +191,7 @@ while (($# > 0)); do
     --server)
       [[ $# -ge 2 ]] || fail "--server requires a path"
       SERVER="$2"
+      SERVER_EXPLICIT=1
       shift 2
       ;;
     --matrix)
@@ -308,6 +310,10 @@ else
   require_env
 fi
 
+if [[ "${DRY_RUN}" == "1" && "${SERVER_EXPLICIT}" == "1" ]]; then
+  check_realtime_caps
+fi
+
 PGMODE_FLAG="--set-pgmode-simulation"
 [[ "${VERIFY_PGMODE}" == "1" ]] && PGMODE_FLAG="--verify-pgmode-simulation"
 
@@ -344,6 +350,9 @@ ablation_cmd=(
   --i-understand-this-connects-to-real-controller
   --i-confirm-controller-is-in-pgmode-simulation
 )
+if [[ "${PROFILE}" == "repeatability" ]]; then
+  ablation_cmd+=(--run-dir-layout run-name)
+fi
 
 report_cmd=(
   python3 scripts/generate_ackon500_gene_goal_report.py
@@ -360,6 +369,11 @@ fi
 cd "${ROOT_DIR}"
 
 if [[ "${DRY_RUN}" == "1" ]]; then
+  if [[ "${SERVER_EXPLICIT}" == "1" ]]; then
+    note "dry-run: explicit server realtime capability gate was checked"
+  else
+    note "dry-run: server realtime capabilities were not checked; actual runs require caps or --allow-no-realtime"
+  fi
   [[ "${SKIP_NOOP}" == "1" ]] || print_command "${noop_cmd[@]}"
   print_command "${ablation_cmd[@]}"
   print_command "${report_cmd[@]}"
