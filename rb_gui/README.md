@@ -102,5 +102,24 @@ Launch the viewer with:
 tools/rbpodo_pgmode_spacemouse.sh gui
 ```
 
-This disables the circle overlay and only listens to server state. The command
-does not send robot commands.
+The launcher prints the browser URL and binds the viewer state receiver to
+`udp://0.0.0.0:50366`. This disables the circle overlay and only listens to
+server state. The command does not send robot commands, does not read
+SpaceMouse HID devices, and does not route SpaceMouse packets; those commands
+route only through `policy_runner`.
+
+The Status tab includes a compact pgmode line for this workflow, for example:
+
+```text
+pgmode_sim: backend=rbpodo run_mode=real operation_mode=simulation physical_motion_expected=false cartesian_available=true policy_runner_lease=active source=policy_runner command=TcpTwistLocal selected_tcp=tcp_ref_stand
+```
+
+If telemetry needed to prove the controller-simulation boundary is missing,
+the line includes `degraded missing=...`. If `physical_motion_expected` is not
+explicitly `false`, the line includes
+`warning=physical_motion_expected_not_false`.
+
+Leave TCP display on `Auto`; it selects `tcp_ref_stand` when the server
+recommends `reference_for_controller_simulation`. Use `both` when inspecting
+physical-state `tcp_actual_stand` alongside the controller-simulation
+reference `tcp_ref_stand`.

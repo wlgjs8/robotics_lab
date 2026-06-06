@@ -151,6 +151,10 @@ def _joint_marker_position(base: tuple[float, float, float], q_values: tuple[flo
     return (base[0] + 0.08 * shoulder, base[1] + 0.08 * elbow, base[2] + 0.04 + 0.06 * wrist)
 
 
+def _tcp_label_position(position: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (position[0], position[1], position[2] + 0.045)
+
+
 def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
     stand_mesh_path = _stand_mesh_path()
     if not stand_mesh_path.exists():
@@ -208,6 +212,23 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         handles["right_tcp"] = server.scene.add_frame("/stand/right_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(-0.1601, -0.1725, 0.78))
         handles["left_tcp_ref"] = server.scene.add_frame("/stand/left_tcp_ref", show_axes=True, axes_length=0.055, axes_radius=0.002, position=(0.1601, -0.1725, 0.78))
         handles["right_tcp_ref"] = server.scene.add_frame("/stand/right_tcp_ref", show_axes=True, axes_length=0.055, axes_radius=0.002, position=(-0.1601, -0.1725, 0.78))
+        if hasattr(server.scene, "add_label"):
+            for arm, position in (
+                ("left", (0.1601, -0.1725, 0.78)),
+                ("right", (-0.1601, -0.1725, 0.78)),
+            ):
+                handles[f"{arm}_tcp_label"] = server.scene.add_label(
+                    f"/stand/{arm}_tcp_label",
+                    f"{arm} tcp_actual_stand physical-state inspection",
+                    position=_tcp_label_position(position),
+                    visible=False,
+                )
+                handles[f"{arm}_tcp_ref_label"] = server.scene.add_label(
+                    f"/stand/{arm}_tcp_ref_label",
+                    f"{arm} tcp_ref_stand controller-sim reference",
+                    position=_tcp_label_position(position),
+                    visible=False,
+                )
         if has_transform_controls:
             handles["left_tcp_target"] = server.scene.add_transform_controls(
                 "/stand/left_tcp_target", scale=0.16, line_width=3.0, position=(0.1601, -0.1725, 0.78)
@@ -299,7 +320,14 @@ def _set_visible(handle: Any, visible: bool) -> None:
 
 
 def _hide_tcp_handles(scene_handles: dict[str, Any], arm: str, *, include_target: bool = False) -> None:
-    keys = [f"{arm}_tcp", f"{arm}_tcp_ref", f"{arm}_tcp_trail", f"{arm}_tcp_ref_trail"]
+    keys = [
+        f"{arm}_tcp",
+        f"{arm}_tcp_ref",
+        f"{arm}_tcp_trail",
+        f"{arm}_tcp_ref_trail",
+        f"{arm}_tcp_label",
+        f"{arm}_tcp_ref_label",
+    ]
     if include_target:
         keys.append(f"{arm}_tcp_target")
     for key in keys:
@@ -443,6 +471,7 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
 
     for arm, (position, wxyz) in actual_updates.items():
         updates[f"{arm}_tcp"] = position
+        updates[f"{arm}_tcp_label"] = _tcp_label_position(position)
         target_key = f"{arm}_tcp_target"
         if target_key not in scene_handles or f"{arm}_tcp_target_user_moved" not in scene_handles:
             updates[target_key] = position
@@ -466,6 +495,7 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
 
     for arm, (position, wxyz) in ref_updates.items():
         updates[f"{arm}_tcp_ref"] = position
+        updates[f"{arm}_tcp_ref_label"] = _tcp_label_position(position)
         _set_visible(
             scene_handles.get(f"{arm}_tcp_ref"),
             display_mode in {"reference", "both"} or (
@@ -491,12 +521,16 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
         )
         _set_visible(scene_handles.get(f"{arm}_tcp"), actual_visible)
         _set_visible(scene_handles.get(f"{arm}_tcp_ref"), ref_visible)
+        _set_visible(scene_handles.get(f"{arm}_tcp_label"), actual_visible)
+        _set_visible(scene_handles.get(f"{arm}_tcp_ref_label"), ref_visible)
         if arm not in ref_updates:
             _set_visible(scene_handles.get(f"{arm}_tcp_ref"), False)
             _set_visible(scene_handles.get(f"{arm}_tcp_ref_trail"), False)
+            _set_visible(scene_handles.get(f"{arm}_tcp_ref_label"), False)
         if arm not in actual_updates:
             _set_visible(scene_handles.get(f"{arm}_tcp"), False)
             _set_visible(scene_handles.get(f"{arm}_tcp_trail"), False)
+            _set_visible(scene_handles.get(f"{arm}_tcp_label"), False)
             _set_visible(scene_handles.get(f"{arm}_tcp_target"), False)
 
     for key, position in updates.items():

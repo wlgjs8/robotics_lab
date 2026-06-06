@@ -32,6 +32,7 @@ from rb_servo_gui.app import (
     _format_scene_asset_status,
     _format_joint_monitor_value,
     _format_joints,
+    _format_pgmode_status,
     _format_stand_world_pose_value,
     _format_tcp_tracking_status,
     _joint_cfg_radians,
@@ -74,7 +75,7 @@ from rb_servo_gui import geometry as gui_geometry
 from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnapshot, Pose6D
 from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from rb_servo_gui.safety import OperatorSafety, Readiness, normalize_observed_mode_backend
-from rb_servo_gui.scene import _add_robot_urdfs, _circle_overlay_points, _robot_urdf_path, update_circle_overlay
+from rb_servo_gui.scene import _add_robot_urdfs, _add_scene_fallback, _circle_overlay_points, _robot_urdf_path, update_circle_overlay
 from rb_servo_gui.state_receiver import StateStore
 
 
@@ -197,6 +198,7 @@ class RecordingSceneHandle:
         self.points = None
         self.colors = None
         self.visible = None
+        self.text = None
 
 
 class RecordingButton:
@@ -261,10 +263,28 @@ class RecordingGui:
 class RecordingScene:
     def __init__(self):
         self.containers = []
+        self.frames = []
+        self.labels = []
 
     def add_3d_gui_container(self, name, **kwargs):
         self.containers.append((name, kwargs))
         return RecordingContext(name)
+
+    def add_frame(self, name, **kwargs):
+        handle = RecordingSceneHandle()
+        handle.position = kwargs.get("position")
+        handle.wxyz = kwargs.get("wxyz")
+        handle.visible = kwargs.get("visible", True)
+        self.frames.append((name, kwargs, handle))
+        return handle
+
+    def add_label(self, name, text, **kwargs):
+        handle = RecordingSceneHandle()
+        handle.text = text
+        handle.position = kwargs.get("position")
+        handle.visible = kwargs.get("visible", True)
+        self.labels.append((name, text, kwargs, handle))
+        return handle
 
 
 class RecordingServer:
@@ -334,6 +354,49 @@ class GuiContractsTest(unittest.TestCase):
             state[arm]["tcp_actual_valid"] = True
             state[arm]["tcp_deferred"] = False
         state["tcp_fields_deferred"] = False
+        return state
+
+    def pgmode_spacemouse_state(self):
+        state = self.tcp_available_state(
+            observed_mode="real",
+            observed_backend="rbpodo",
+            command_source={
+                "source_id": "policy_runner",
+                "session_id": "policy-session",
+                "active": True,
+                "active_source_id": "policy_runner",
+                "active_session_id": "policy-session",
+                "lease_timeout_sec": 60.0,
+                "expires_time_ns": 123456789,
+                "command_requires_lease": True,
+                "command_has_lease": True,
+            },
+        )
+        for arm in ("left", "right"):
+            state[arm]["mode"] = "TcpTwistLocal"
+            state[arm]["tcp_ref_stand"] = {"x": 0.41, "y": 0.21, "z": 0.51, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+            state[arm]["tcp_ref_valid"] = True
+            state[arm]["tcp_tracking_source"] = "tcp_ref_stand"
+            state[arm]["tcp_tracking_source_recommendation"] = "reference_for_controller_simulation"
+            state[arm]["physical_motion_expected"] = False
+            state[arm]["controller_simulation_physical_motion_detected"] = False
+            state[arm]["cartesian_available"] = True
+            state[arm]["controller_simulation_cartesian_enabled"] = True
+            state[arm]["controller_simulation_cartesian_enabled_for_current_command"] = True
+            state[arm]["controller_simulation_streaming_cartesian_available"] = True
+            state[arm]["cartesian_gate"] = {
+                "run_mode": "real",
+                "backend_type": "rbpodo",
+                "operation_mode": "simulation",
+                "allow_in_controller_simulation": True,
+                "allow_in_real": False,
+                "physical_motion_expected": False,
+                "cartesian_available": True,
+                "controller_simulation_cartesian_enabled": True,
+                "controller_simulation_cartesian_enabled_for_current_command": True,
+                "controller_simulation_streaming_cartesian_available": True,
+                "controller_simulation_physical_motion_detected": False,
+            }
         return state
 
     def test_valid_state_updates_latest_and_invalid_json_is_counted(self):
@@ -488,6 +551,54 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(latest.left.selected_tcp_source("auto"), "tcp_ref_stand")
         self.assertEqual(latest.left.selected_tcp_pose("auto").as_tuple(), (0.42, 0.22, 0.52, 0.0, 0.0, 0.0))
         self.assertFalse(latest.left.physical_motion_expected)
+
+    def test_pgmode_status_reports_reference_selection_and_policy_lease(self):
+        store, _, _ = self.make_safety(self.pgmode_spacemouse_state())
+        latest = store.latest()
+        self.assertEqual(latest.left.selected_tcp_source("auto"), "tcp_ref_stand")
+        self.assertEqual(latest.right.selected_tcp_source("auto"), "tcp_ref_stand")
+        self.assertEqual(latest.left.cartesian_gate["operation_mode"], "simulation")
+        self.assertTrue(latest.left.controller_simulation_cartesian_available)
+        self.assertFalse(latest.left.controller_simulation_physical_motion_detected)
+        self.assertTrue(latest.command_source.active)
+        self.assertEqual(latest.command_source.display_source_id, "policy_runner")
+
+        status = _format_pgmode_status(latest, stale=False, display_mode="auto")
+        self.assertIn("pgmode_sim:", status)
+        self.assertIn("backend=rbpodo", status)
+        self.assertIn("run_mode=real", status)
+        self.assertIn("operation_mode=simulation", status)
+        self.assertIn("physical_motion_expected=false", status)
+        self.assertIn("cartesian_available=true", status)
+        self.assertIn("policy_runner_lease=active", status)
+        self.assertIn("source=policy_runner", status)
+        self.assertIn("command=TcpTwistLocal", status)
+        self.assertIn("selected_tcp=tcp_ref_stand", status)
+        self.assertNotIn("degraded", status)
+        self.assertNotIn("warning=", status)
+
+    def test_pgmode_status_warns_on_true_physical_motion_expected(self):
+        state = self.pgmode_spacemouse_state()
+        for arm in ("left", "right"):
+            state[arm]["physical_motion_expected"] = True
+            state[arm]["cartesian_gate"]["physical_motion_expected"] = True
+        store, _, _ = self.make_safety(state)
+
+        status = _format_pgmode_status(store.latest(), stale=False, display_mode="auto")
+        self.assertIn("physical_motion_expected=true", status)
+        self.assertIn("warning=physical_motion_expected_not_false", status)
+
+    def test_pgmode_status_degrades_and_warns_when_physical_motion_expected_missing(self):
+        state = self.pgmode_spacemouse_state()
+        for arm in ("left", "right"):
+            state[arm].pop("physical_motion_expected")
+            state[arm]["cartesian_gate"].pop("physical_motion_expected")
+        store, _, _ = self.make_safety(state)
+
+        status = _format_pgmode_status(store.latest(), stale=False, display_mode="auto")
+        self.assertIn("physical_motion_expected=missing", status)
+        self.assertIn("warning=physical_motion_expected_not_false", status)
+        self.assertIn("degraded missing=physical_motion_expected", status)
 
     def test_auto_tcp_selection_falls_back_to_actual_when_reference_is_invalid(self):
         state = self.tcp_available_state()
@@ -1535,10 +1646,14 @@ class GuiContractsTest(unittest.TestCase):
         left_tcp = RecordingSceneHandle()
         left_ref = RecordingSceneHandle()
         left_target = RecordingSceneHandle()
+        left_tcp_label = RecordingSceneHandle()
+        left_ref_label = RecordingSceneHandle()
         handles = {
             "left_tcp": left_tcp,
             "left_tcp_ref": left_ref,
             "left_tcp_target": left_target,
+            "left_tcp_label": left_tcp_label,
+            "left_tcp_ref_label": left_ref_label,
             "left_tcp_trail": RecordingSceneHandle(),
             "left_tcp_ref_trail": RecordingSceneHandle(),
             "left_tcp_trail_points": [],
@@ -1550,6 +1665,10 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(left_target.position, (0.32, 0.13, 0.45))
         self.assertFalse(left_tcp.visible)
         self.assertTrue(left_ref.visible)
+        self.assertFalse(left_tcp_label.visible)
+        self.assertTrue(left_ref_label.visible)
+        self.assertEqual(left_tcp_label.position, (0.32, 0.13, 0.495))
+        self.assertEqual(left_ref_label.position, (0.41, 0.21, 0.555))
         self.assertFalse(handles["left_tcp_trail"].visible)
         self.assertTrue(handles["left_tcp_ref_trail"].visible)
         self.assertAlmostEqual(left_ref.wxyz[3], 1.0, places=7)
@@ -1557,10 +1676,23 @@ class GuiContractsTest(unittest.TestCase):
         update_scene_markers(handles, store.latest(), tcp_display_mode="both")
         self.assertTrue(left_tcp.visible)
         self.assertTrue(left_ref.visible)
+        self.assertTrue(left_tcp_label.visible)
+        self.assertTrue(left_ref_label.visible)
 
         update_scene_markers(handles, store.latest(), tcp_display_mode="actual")
         self.assertTrue(left_tcp.visible)
         self.assertFalse(left_ref.visible)
+        self.assertTrue(left_tcp_label.visible)
+        self.assertFalse(left_ref_label.visible)
+
+    def test_scene_fallback_labels_actual_and_reference_tcp_markers(self):
+        server = RecordingServer(scene=RecordingScene())
+        _add_scene_fallback(server)
+        label_texts = [text for _name, text, _kwargs, _handle in server.scene.labels]
+        self.assertIn("left tcp_actual_stand physical-state inspection", label_texts)
+        self.assertIn("left tcp_ref_stand controller-sim reference", label_texts)
+        self.assertIn("right tcp_actual_stand physical-state inspection", label_texts)
+        self.assertIn("right tcp_ref_stand controller-sim reference", label_texts)
 
     def test_circle_overlay_points_support_standard_planes(self):
         xy = CircleOverlaySnapshot.parse(sample_circle_overlay(plane="xy", axis1_stand=None, axis2_stand=None))

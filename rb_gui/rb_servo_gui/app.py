@@ -82,6 +82,7 @@ from .status_panel import (
     _format_fk_status,
     _format_joint_monitor_value,
     _format_joints,
+    _format_pgmode_status,
     _format_stand_world_pose_value,
     _format_tcp_command_status,
     _format_tcp_tracking_status,
@@ -743,6 +744,7 @@ def build_gui(
         handles["fault"] = server.gui.add_text("Fault", initial_value="none", disabled=True)
         handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
         handles["tcp_tracking"] = server.gui.add_text("TCP tracking", initial_value="TCP tracking: no state", disabled=True)
+        handles["pgmode_status"] = server.gui.add_text("pgmode simulation", initial_value="pgmode_sim: no state", disabled=True)
         handles["circle_overlay"] = server.gui.add_text(
             "Circle overlay",
             initial_value=_format_circle_overlay_status(None, stale=True, enabled=overlay_store is not None),
@@ -1093,6 +1095,12 @@ def update_gui(
                 stale=True,
                 display_mode=_tcp_display_mode(handles),
             )
+        if "pgmode_status" in handles:
+            handles["pgmode_status"].value = _format_pgmode_status(
+                None,
+                stale=True,
+                display_mode=_tcp_display_mode(handles),
+            )
         if "cartesian_solve" in handles:
             handles["cartesian_solve"].value = _format_cartesian_solve_status(None, stale=True)
         if "tcp_status" in handles:
@@ -1127,6 +1135,12 @@ def update_gui(
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
     if "tcp_tracking" in handles:
         handles["tcp_tracking"].value = _format_tcp_tracking_status(
+            latest,
+            stale=stale,
+            display_mode=_tcp_display_mode(handles),
+        )
+    if "pgmode_status" in handles:
+        handles["pgmode_status"].value = _format_pgmode_status(
             latest,
             stale=stale,
             display_mode=_tcp_display_mode(handles),

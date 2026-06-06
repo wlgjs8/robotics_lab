@@ -86,9 +86,30 @@ separate from `policy_runner.safety.allow_real_motion`, which stays `false`.
 tools/rbpodo_pgmode_spacemouse.sh gui
 ```
 
+The launcher prints the viewer URL, defaulting to
+`http://127.0.0.1:8080`, and listens to server state on
+`udp://0.0.0.0:50366`. It is a state-only viewer for this workflow: it does
+not send robot commands, does not read SpaceMouse HID devices, and does not
+route SpaceMouse packets. SpaceMouse commands route through `policy_runner`
+only.
+
 Leave TCP display on `Auto`; for controller simulation it should select
 `tcp_ref_stand` when the state stream recommends
 `reference_for_controller_simulation`.
+
+In the Status tab, confirm the compact pgmode line contains the expected
+controller-simulation boundary:
+
+```text
+pgmode_sim: backend=rbpodo run_mode=real operation_mode=simulation physical_motion_expected=false cartesian_available=true policy_runner_lease=active source=policy_runner command=TcpTwistLocal selected_tcp=tcp_ref_stand
+```
+
+If any required field is missing, the line reports
+`degraded missing=...`. If `physical_motion_expected` is absent or not
+`false`, it reports `warning=physical_motion_expected_not_false`.
+Use TCP display `both` when you need to inspect physical-state
+`tcp_actual_stand` next to controller-simulation reference `tcp_ref_stand`;
+tracking should still use the reference when the server recommends it.
 
 3. Start `policy_runner` with the manual SpaceMouse path:
 
@@ -134,6 +155,9 @@ Before trusting a run, inspect live state or recorder output for:
   `Hold`
 - per-arm `physical_motion_expected=false`
 - command-source lease active for `policy_runner`
+- GUI pgmode line showing `operation_mode=simulation`,
+  `physical_motion_expected=false`, `policy_runner_lease=active`, and
+  `selected_tcp=tcp_ref_stand`
 - `async_streaming_enabled=true`
 - `async_streaming_mode=sdk_ack_worker`
 

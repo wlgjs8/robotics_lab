@@ -224,12 +224,17 @@ run_gui() {
   if [[ "${FORCE}" != "1" ]]; then
     port_in_use 50366 && fail "UDP state port 50366 is already in use; pass --force to skip this check"
   fi
+  local gui_host="${RB_GUI_HOST:-0.0.0.0}"
+  local gui_port="${RB_GUI_PORT:-8080}"
   export PYTHONPATH="${ROOT_DIR}/rb_gui${PYTHONPATH:+:${PYTHONPATH}}"
   export RB_GUI_DESCRIPTIONS_DIR="${ROOT_DIR}/rb_servo_server/descriptions"
   export RB_GUI_STATE_BIND="0.0.0.0"
   export RB_GUI_STATE_PORT="50366"
   export RB_GUI_CIRCLE_OVERLAY_BIND="none"
   local cmd=(python3 -m rb_servo_gui.app)
+  note "viewer URL: http://127.0.0.1:${gui_port} (bind ${gui_host}:${gui_port})"
+  note "viewer state UDP: ${RB_GUI_STATE_BIND}:${RB_GUI_STATE_PORT}; circle overlay disabled"
+  note "viewer is state-only for this workflow; SpaceMouse commands route through policy_runner"
   print_command "${cmd[@]}"
   [[ "${DRY_RUN}" == "1" ]] && return 0
   cd "${ROOT_DIR}"

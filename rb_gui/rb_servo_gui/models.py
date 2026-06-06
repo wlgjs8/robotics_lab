@@ -180,6 +180,47 @@ class CircleOverlaySnapshot:
 
 
 @dataclass(frozen=True)
+class CommandSourceSnapshot:
+    active: bool | None = None
+    source_id: str | None = None
+    session_id: str | None = None
+    active_source_id: str | None = None
+    active_session_id: str | None = None
+    lease_timeout_sec: float | None = None
+    expires_time_ns: int | None = None
+    expired: bool | None = None
+    command_requires_lease: bool | None = None
+    command_has_lease: bool | None = None
+    raw: Mapping[str, Any] | None = None
+
+    @classmethod
+    def parse(cls, value: Any) -> "CommandSourceSnapshot":
+        if not isinstance(value, Mapping):
+            return cls()
+        return cls(
+            active=_optional_bool(value.get("active")),
+            source_id=_optional_str(value.get("source_id")),
+            session_id=_optional_str(value.get("session_id")),
+            active_source_id=_optional_str(value.get("active_source_id")),
+            active_session_id=_optional_str(value.get("active_session_id")),
+            lease_timeout_sec=_optional_finite(value.get("lease_timeout_sec")),
+            expires_time_ns=_optional_int(value.get("expires_time_ns")),
+            expired=_optional_bool(value.get("expired")),
+            command_requires_lease=_optional_bool(value.get("command_requires_lease")),
+            command_has_lease=_optional_bool(value.get("command_has_lease")),
+            raw=value,
+        )
+
+    @property
+    def display_source_id(self) -> str | None:
+        return self.active_source_id or self.source_id
+
+    @property
+    def display_session_id(self) -> str | None:
+        return self.active_session_id or self.session_id
+
+
+@dataclass(frozen=True)
 class ArmSnapshot:
     mode: str
     q_actual_deg: tuple[float, ...] | None
@@ -201,14 +242,27 @@ class ArmSnapshot:
     tcp_tracking_source: str | None = None
     tcp_tracking_source_recommendation: str | None = None
     controller_simulation_mode: Mapping[str, Any] | None = None
+    cartesian_gate: Mapping[str, Any] | None = None
+    cartesian_available: bool | None = None
+    cartesian_unavailable_reason: str | None = None
+    controller_simulation_cartesian_enabled: bool | None = None
+    controller_simulation_cartesian_enabled_for_current_command: bool | None = None
+    controller_simulation_streaming_cartesian_available: bool | None = None
     physical_motion_expected: bool | None = None
+    controller_simulation_physical_motion_detected: bool | None = None
     controller_simulation_diagnostic_override_active: bool | None = None
     tcp_deferred: bool = True
     send_duration_us: float | None = None
     cartesian_solve: "CartesianSolveSnapshot | None" = None
 
     @classmethod
-    def parse(cls, data: Mapping[str, Any]) -> "ArmSnapshot | None":
+    def parse(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        fallback_cartesian_gate: Mapping[str, Any] | None = None,
+        fallback_state: Mapping[str, Any] | None = None,
+    ) -> "ArmSnapshot | None":
         q_actual = finite_joint_array(data.get("q_actual_deg"))
         q_sent = finite_joint_array(data.get("q_sent_deg"))
         q_prev = finite_joint_array(data.get("q_previous_sent_deg"))
@@ -237,6 +291,9 @@ class ArmSnapshot:
             )
         )
         controller_simulation_mode = data.get("controller_simulation_mode")
+        cartesian_gate = data.get("cartesian_gate")
+        if not isinstance(cartesian_gate, Mapping):
+            cartesian_gate = fallback_cartesian_gate if isinstance(fallback_cartesian_gate, Mapping) else None
         return cls(
             mode=str(data.get("mode", "Unknown")),
             q_actual_deg=q_actual,
@@ -262,7 +319,26 @@ class ArmSnapshot:
                 else None
             ),
             controller_simulation_mode=controller_simulation_mode if isinstance(controller_simulation_mode, Mapping) else None,
-            physical_motion_expected=_optional_bool(data.get("physical_motion_expected")),
+            cartesian_gate=cartesian_gate,
+            cartesian_available=_optional_bool(_field_value(data, "cartesian_available", cartesian_gate, fallback_state)),
+            cartesian_unavailable_reason=_optional_str(
+                _field_value(data, "cartesian_unavailable_reason", cartesian_gate, fallback_state)
+            ),
+            controller_simulation_cartesian_enabled=_optional_bool(
+                _field_value(data, "controller_simulation_cartesian_enabled", cartesian_gate, fallback_state)
+            ),
+            controller_simulation_cartesian_enabled_for_current_command=_optional_bool(
+                _field_value(data, "controller_simulation_cartesian_enabled_for_current_command", cartesian_gate, fallback_state)
+            ),
+            controller_simulation_streaming_cartesian_available=_optional_bool(
+                _field_value(data, "controller_simulation_streaming_cartesian_available", cartesian_gate, fallback_state)
+            ),
+            physical_motion_expected=_optional_bool(
+                _field_value(data, "physical_motion_expected", cartesian_gate, fallback_state)
+            ),
+            controller_simulation_physical_motion_detected=_optional_bool(
+                _field_value(data, "controller_simulation_physical_motion_detected", cartesian_gate, fallback_state)
+            ),
             controller_simulation_diagnostic_override_active=_optional_bool(
                 data.get("controller_simulation_diagnostic_override_active")
             ),
@@ -298,6 +374,14 @@ class ArmSnapshot:
             if self.has_valid_tcp_pose and self.tcp_stand is not None:
                 return "tcp_stand"
         return "none"
+
+    @property
+    def controller_simulation_cartesian_available(self) -> bool | None:
+        if self.controller_simulation_streaming_cartesian_available is not None:
+            return self.controller_simulation_streaming_cartesian_available
+        if self.controller_simulation_cartesian_enabled_for_current_command is not None:
+            return self.controller_simulation_cartesian_enabled_for_current_command
+        return self.controller_simulation_cartesian_enabled
 
 
 @dataclass(frozen=True)
@@ -343,11 +427,32 @@ def _optional_bool(value: Any) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+def _optional_str(value: Any) -> str | None:
+    return str(value) if isinstance(value, str) and value else None
+
+
+def _optional_int(value: Any) -> int | None:
+    return int(value) if isinstance(value, int) else None
+
+
 def _optional_finite(value: Any) -> float | None:
     if not isinstance(value, int | float):
         return None
     parsed = float(value)
     return parsed if math.isfinite(parsed) else None
+
+
+def _field_value(
+    data: Mapping[str, Any],
+    key: str,
+    *fallbacks: Mapping[str, Any] | None,
+) -> Any:
+    if key in data:
+        return data.get(key)
+    for fallback in fallbacks:
+        if isinstance(fallback, Mapping) and key in fallback:
+            return fallback.get(key)
+    return None
 
 
 @dataclass(frozen=True)
@@ -362,6 +467,10 @@ class StateSnapshot:
     fault_reason: str
     logger_health: Mapping[str, Any]
     mounts: Mapping[str, Any]
+    observed_mode: str | None
+    observed_backend: str | None
+    command_source: CommandSourceSnapshot
+    cartesian_gate: Mapping[str, Any] | None
     raw: Mapping[str, Any]
 
     @classmethod
@@ -372,8 +481,18 @@ class StateSnapshot:
         right_raw = data.get("right")
         if not isinstance(left_raw, Mapping) or not isinstance(right_raw, Mapping):
             return None
-        left = ArmSnapshot.parse(left_raw)
-        right = ArmSnapshot.parse(right_raw)
+        top_cartesian_gate = data.get("cartesian_gate")
+        left_cartesian_gate = None
+        right_cartesian_gate = None
+        if isinstance(top_cartesian_gate, Mapping):
+            left_gate = top_cartesian_gate.get("left")
+            right_gate = top_cartesian_gate.get("right")
+            left_cartesian_gate = left_gate if isinstance(left_gate, Mapping) else top_cartesian_gate
+            right_cartesian_gate = right_gate if isinstance(right_gate, Mapping) else top_cartesian_gate
+        else:
+            top_cartesian_gate = None
+        left = ArmSnapshot.parse(left_raw, fallback_cartesian_gate=left_cartesian_gate, fallback_state=data)
+        right = ArmSnapshot.parse(right_raw, fallback_cartesian_gate=right_cartesian_gate, fallback_state=data)
         if left is None or right is None:
             return None
         tick = data.get("tick")
@@ -390,9 +509,19 @@ class StateSnapshot:
             fault_reason=str(data.get("fault_reason", "")),
             logger_health=data.get("logger_health", {}) if isinstance(data.get("logger_health", {}), Mapping) else {},
             mounts=data.get("mounts", {}) if isinstance(data.get("mounts", {}), Mapping) else {},
+            observed_mode=_optional_str(data.get("observed_mode")),
+            observed_backend=_optional_str(data.get("observed_backend")),
+            command_source=CommandSourceSnapshot.parse(data.get("command_source")),
+            cartesian_gate=top_cartesian_gate if isinstance(top_cartesian_gate, Mapping) else None,
             raw=data,
         )
 
     def stale(self, *, now: float | None = None, threshold_sec: float = 0.5) -> bool:
         now_value = time.monotonic() if now is None else now
         return now_value - self.received_monotonic > threshold_sec
+
+    @property
+    def active_command_mode(self) -> str:
+        if self.left.mode == self.right.mode:
+            return self.left.mode
+        return f"left={self.left.mode},right={self.right.mode}"

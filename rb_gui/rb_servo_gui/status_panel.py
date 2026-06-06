@@ -156,6 +156,20 @@ def _format_arm_tcp_tracking(arm_name: str, arm: ArmSnapshot, display_mode: str)
         parts.append(f"tcp_tracking_source={arm.tcp_tracking_source}")
     if arm.tcp_tracking_source_recommendation:
         parts.append(f"tcp_tracking_source_recommendation={arm.tcp_tracking_source_recommendation}")
+    if arm.cartesian_available is not None:
+        parts.append(f"cartesian_available={arm.cartesian_available}")
+    if arm.controller_simulation_cartesian_enabled is not None:
+        parts.append(f"controller_simulation_cartesian_enabled={arm.controller_simulation_cartesian_enabled}")
+    if arm.controller_simulation_streaming_cartesian_available is not None:
+        parts.append(
+            "controller_simulation_streaming_cartesian_available="
+            f"{arm.controller_simulation_streaming_cartesian_available}"
+        )
+    if arm.controller_simulation_physical_motion_detected is not None:
+        parts.append(
+            "controller_simulation_physical_motion_detected="
+            f"{arm.controller_simulation_physical_motion_detected}"
+        )
     controller_sim = _format_controller_simulation_info(arm)
     if controller_sim:
         parts.append(controller_sim)
@@ -178,6 +192,153 @@ def _format_tcp_tracking_status(
             _format_arm_tcp_tracking("right", latest.right, display_mode),
         )
     )
+
+
+def _format_bool_token(value: bool | None) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return "missing"
+
+
+def _format_pgmode_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return _format_bool_token(value)
+    if value is None:
+        return "missing"
+    return str(value)
+
+
+def _arm_gate_value(arm: ArmSnapshot, key: str) -> Any:
+    if isinstance(arm.cartesian_gate, Mapping) and key in arm.cartesian_gate:
+        return arm.cartesian_gate.get(key)
+    return getattr(arm, key, None)
+
+
+def _same_or_per_arm(left: Any, right: Any) -> Any:
+    if left == right:
+        return left
+    return f"left={_format_pgmode_value(left)},right={_format_pgmode_value(right)}"
+
+
+def _pgmode_field(latest: StateSnapshot, key: str, *, top_fallback: Any = None) -> Any:
+    left = _arm_gate_value(latest.left, key)
+    right = _arm_gate_value(latest.right, key)
+    if left is None and right is None:
+        return top_fallback
+    return _same_or_per_arm(left, right)
+
+
+def _pgmode_bool_field(latest: StateSnapshot, key: str) -> bool | str | None:
+    left = _arm_gate_value(latest.left, key)
+    right = _arm_gate_value(latest.right, key)
+    if not isinstance(left, bool):
+        left = None
+    if not isinstance(right, bool):
+        right = None
+    return _same_or_per_arm(left, right)
+
+
+def _pgmode_cartesian_available(latest: StateSnapshot) -> bool | str | None:
+    left = latest.left.controller_simulation_cartesian_available
+    right = latest.right.controller_simulation_cartesian_available
+    if left is None and right is None:
+        left = latest.left.cartesian_available
+        right = latest.right.cartesian_available
+    return _same_or_per_arm(left, right)
+
+
+def _pgmode_selected_tcp(latest: StateSnapshot, display_mode: str) -> str:
+    return str(
+        _same_or_per_arm(
+            latest.left.selected_tcp_source(display_mode),
+            latest.right.selected_tcp_source(display_mode),
+        )
+    )
+
+
+def _policy_runner_lease_status(latest: StateSnapshot) -> str:
+    command_source = latest.command_source
+    source = command_source.display_source_id
+    if command_source.expired is True:
+        return "expired"
+    if command_source.active is True and source == "policy_runner":
+        return "active"
+    if command_source.active is True and source:
+        return "held_by_other"
+    if command_source.active is False:
+        return "inactive"
+    return "missing"
+
+
+def _format_pgmode_status(
+    latest: StateSnapshot | None,
+    *,
+    stale: bool,
+    display_mode: str = "auto",
+) -> str:
+    if latest is None:
+        return "pgmode_sim: no state"
+    if stale:
+        return "State stream stale"
+
+    backend = _pgmode_field(latest, "backend_type", top_fallback=latest.observed_backend)
+    run_mode = _pgmode_field(latest, "run_mode", top_fallback=latest.observed_mode)
+    operation_mode = _pgmode_field(latest, "operation_mode")
+    physical_motion_expected = _pgmode_bool_field(latest, "physical_motion_expected")
+    cartesian_available = _pgmode_cartesian_available(latest)
+    physical_motion_detected = _pgmode_bool_field(latest, "controller_simulation_physical_motion_detected")
+    selected_tcp = _pgmode_selected_tcp(latest, display_mode)
+    lease_status = _policy_runner_lease_status(latest)
+    source = latest.command_source.display_source_id
+    session = latest.command_source.display_session_id
+    command = latest.active_command_mode
+
+    required: dict[str, Any] = {
+        "backend": backend,
+        "run_mode": run_mode,
+        "operation_mode": operation_mode,
+        "physical_motion_expected": physical_motion_expected,
+        "cartesian_available": cartesian_available,
+        "policy_runner_lease": lease_status,
+        "source": source,
+        "command": command,
+        "selected_tcp": selected_tcp,
+    }
+    missing = [
+        key
+        for key, value in required.items()
+        if value is None or value == "missing" or (key == "selected_tcp" and value == "none")
+    ]
+    parts = [
+        "pgmode_sim:",
+        f"backend={_format_pgmode_value(backend)}",
+        f"run_mode={_format_pgmode_value(run_mode)}",
+        f"operation_mode={_format_pgmode_value(operation_mode)}",
+        f"physical_motion_expected={_format_pgmode_value(physical_motion_expected)}",
+        f"cartesian_available={_format_pgmode_value(cartesian_available)}",
+        f"policy_runner_lease={lease_status}",
+        f"source={_format_pgmode_value(source)}",
+        f"command={_format_pgmode_value(command)}",
+        f"selected_tcp={selected_tcp}",
+    ]
+    if session:
+        parts.append(f"session={session}")
+    if latest.command_source.lease_timeout_sec is not None:
+        parts.append(f"lease_timeout_sec={latest.command_source.lease_timeout_sec:g}")
+    if latest.command_source.expires_time_ns is not None:
+        parts.append(f"expires_time_ns={latest.command_source.expires_time_ns}")
+    warnings: list[str] = []
+    if physical_motion_expected is not False:
+        warnings.append("physical_motion_expected_not_false")
+    if physical_motion_detected is not False and physical_motion_detected is not None:
+        warnings.append("controller_simulation_physical_motion_detected")
+    if warnings:
+        parts.append("warning=" + "|".join(warnings))
+    if missing:
+        parts.append("degraded missing=" + "|".join(missing))
+    return " ".join(parts)
 
 
 def _format_mm(value: float | None) -> str:
