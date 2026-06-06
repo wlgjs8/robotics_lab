@@ -354,7 +354,7 @@ layouts are `pika_umi_single_arm`, `pika_umi_bimanual`, and
 camera filters, `single_arm_side`, required root attrs such as `pose_format`,
 and retarget metadata. `pose_frame=steamvr_world` is not treated as `stand`;
 real policy rollout remains blocked unless the manifest retarget transform to
-`stand` is measured or accepted.
+`stand` is measured.
 
 접속:
 

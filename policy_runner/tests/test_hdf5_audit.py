@@ -194,6 +194,26 @@ class Hdf5AuditTest(unittest.TestCase):
 
             self.assertFalse(_contains(audited["deployment_blockers"], "retarget_required"))
 
+    def test_accepted_retarget_manifest_still_blocks_real_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "episode_001.hdf5"
+            _write_pika_episode(path, pose_frame="steamvr_world")
+            manifest = DatasetManifest.from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.dataset_manifest.v1",
+                    "retarget": {
+                        "pose_frame": "steamvr_world",
+                        "target_frame": "stand",
+                        "transform_status": "accepted",
+                    },
+                }
+            )
+
+            report = audit_hdf5_episodes(path, dataset_manifest=manifest)
+            audited = report["episodes"][0]
+
+            self.assertTrue(_contains(audited["deployment_blockers"], "retarget_required"))
+
     def test_audit_fails_closed_on_empty_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "no HDF5 episodes"):

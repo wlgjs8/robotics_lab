@@ -327,7 +327,7 @@ pose frames, single-arm default mapping, and action pose columns that exactly
 match current pose columns. Warnings are training-readiness evidence. Deployment
 blockers are stricter: any non-`stand` `pose_frame`, including
 `steamvr_world`, remains blocked for real policy rollout unless a retarget
-manifest supplies a measured or accepted transform to `stand`.
+manifest supplies a measured transform to `stand`.
 
 ## UMI Import And Retarget Metadata
 
@@ -424,8 +424,9 @@ retarget:
 ```
 
 For training-only offline smoke, the flow loader may still use reset-relative
-deltas. For real policy rollout, `retarget.transform_status` must be `measured`
-or `accepted`; `configured_estimate` and `missing` remain deployment blockers.
+deltas. For real policy rollout, `retarget.transform_status` must be
+`measured`; `configured_estimate`, `accepted`, and `missing` remain deployment
+blockers.
 
 The model uses a frozen vision encoder by default (`resnet18` or `resnet50` via
 `torchvision`) with a placeholder `dinov3` plugin hook for later optional

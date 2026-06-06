@@ -107,7 +107,7 @@ class DatasetManifest:
         return (
             str(self.retarget.get("pose_frame", "") or "") == pose_frame
             and str(self.retarget.get("target_frame", "") or "") == target_frame
-            and str(self.retarget.get("transform_status", "") or "") in {"measured", "accepted"}
+            and str(self.retarget.get("transform_status", "") or "") == "measured"
         )
 
 
