@@ -289,9 +289,17 @@ class PolicyRunnerContractTest(unittest.TestCase):
     def test_rbpodo_pgmode_spacemouse_tool_exists(self):
         root = Path(__file__).resolve().parents[2]
         tool = root / "tools" / "rbpodo_pgmode_spacemouse.sh"
+        text = tool.read_text()
 
         self.assertTrue(tool.exists())
-        self.assertIn("RB_ALLOW_RBPODO_ASYNC_STREAMING", tool.read_text())
+        self.assertIn("RB_ALLOW_RBPODO_ASYNC_STREAMING", text)
+        self.assertIn("server-dry-run", text)
+        self.assertIn("policy-dry-run", text)
+        self.assertIn("check", text)
+        self.assertIn("127.0.0.1:50256", text)
+        self.assertIn("0.0.0.0:50376", text)
+        self.assertIn("127.0.0.1:50366", text)
+        self.assertIn("mock_script: pgmode_spacemouse_smoke", text)
 
     def test_runtime_config_defaults_and_parses_startup_timeout(self):
         default_cfg = config_from_mapping({"schema": "robotics_lab.policy_runner.v1"})

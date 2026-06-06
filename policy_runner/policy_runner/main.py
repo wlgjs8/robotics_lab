@@ -21,7 +21,7 @@ from .geometry import GeometryStatus, load_geometry_status
 from .robot_state_client import RobotStateClient, StateSnapshot, StateStreamLeaseReadback
 from .safety import SafetyGate
 from .servo_command_client import CommandIntent, ServoCommandClient
-from .spacemouse import HidSpaceMouseReader, SpaceMouseReader, SpaceMouseSample
+from .spacemouse import HidSpaceMouseReader, ScriptedSpaceMouseReader, SpaceMouseReader, SpaceMouseSample
 
 
 STARTUP_TIMEOUT_EXIT_CODE = 2
@@ -205,16 +205,8 @@ def make_action_source(config: PolicyRunnerConfig):
         left = config.spacemouse_cartesian_dual.left
         right = config.spacemouse_cartesian_dual.right
         return DualSpaceMouseCartesianActionSource(
-            left_reader=_LazyHidSpaceMouseReader(
-                device=left.device,
-                path=left.path,
-                device_number=left.device_number,
-            ),
-            right_reader=_LazyHidSpaceMouseReader(
-                device=right.device,
-                path=right.path,
-                device_number=right.device_number,
-            ),
+            left_reader=_spacemouse_reader_from_device_config(left),
+            right_reader=_spacemouse_reader_from_device_config(right),
             frame=config.spacemouse_cartesian_dual.frame,
             max_linear_velocity_m_s=config.spacemouse_cartesian_dual.max_linear_velocity_m_s,
             max_angular_velocity_rad_s=config.spacemouse_cartesian_dual.max_angular_velocity_rad_s,
@@ -229,6 +221,16 @@ def make_action_source(config: PolicyRunnerConfig):
             ),
         )
     raise ValueError(f"unknown action_source: {config.action_source}")
+
+
+def _spacemouse_reader_from_device_config(device_config) -> SpaceMouseReader:
+    if device_config.mock_script is not None:
+        return ScriptedSpaceMouseReader(device_config.mock_script)
+    return _LazyHidSpaceMouseReader(
+        device=device_config.device,
+        path=device_config.path,
+        device_number=device_config.device_number,
+    )
 
 
 def _load_runtime_geometry_status(config: PolicyRunnerConfig) -> GeometryStatus:

@@ -154,12 +154,15 @@ class SpaceMouseDeviceConfig:
     path: str | None = None
     device_number: int = 0
     deadman_button: int = 0
+    mock_script: str | tuple[dict[str, Any] | None, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.device_number < 0:
             raise ValueError("spacemouse device_number must be non-negative")
         if self.deadman_button < 0:
             raise ValueError("spacemouse deadman_button must be non-negative")
+        if self.mock_script is not None and not isinstance(self.mock_script, (str, tuple)):
+            raise ValueError("spacemouse mock_script must be a script name or a list of samples")
 
 
 @dataclass(frozen=True)
@@ -420,6 +423,20 @@ def _spacemouse_device_config(raw: dict[str, Any]) -> SpaceMouseDeviceConfig:
         raw["device_number"] = int(raw["device_number"])
     if "deadman_button" in raw:
         raw["deadman_button"] = int(raw["deadman_button"])
+    if "mock_script" in raw:
+        value = raw["mock_script"]
+        if isinstance(value, list):
+            samples: list[dict[str, Any] | None] = []
+            for item in value:
+                if item is None:
+                    samples.append(None)
+                elif isinstance(item, dict):
+                    samples.append(dict(item))
+                else:
+                    raise ValueError("spacemouse mock_script entries must be mappings or null")
+            raw["mock_script"] = tuple(samples)
+        elif value is not None and not isinstance(value, str):
+            raise ValueError("spacemouse mock_script must be a script name or a list of samples")
     return SpaceMouseDeviceConfig(**raw)
 
 

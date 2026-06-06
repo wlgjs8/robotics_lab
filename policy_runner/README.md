@@ -146,6 +146,14 @@ Rbpodo controller pgmode simulation example:
 Use `tools/rbpodo_pgmode_spacemouse.sh` for the prepared server config, GUI,
 and recorder commands.
 
+For hardware-free command previews or integration tests, the dual SpaceMouse
+config accepts `spacemouse_cartesian_dual.left.mock_script` and
+`right.mock_script`. The built-in `pgmode_spacemouse_smoke` script covers
+unarmed input, armed twist, centered armed Hold, deadman release zero twist,
+and stale-sample zero twist without opening HID devices. The wrapper action
+`tools/rbpodo_pgmode_spacemouse.sh policy-dry-run` prints a mock-script
+policy command and does not execute it.
+
 ## Imitation Data Collection
 
 The Docker simulator stack can run a passive policy recorder with `make sim-up`.

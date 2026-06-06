@@ -6,6 +6,7 @@ SERVER="${ROOT_DIR}/rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
 SERVER_TEMPLATE_REL="rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml"
 SERVER_LOCAL_REL="rb_servo_server/config/local/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.yaml"
 POLICY_CONFIG_REL="policy_runner/config/rbpodo_pgmode_spacemouse_500hz_ack.yaml"
+POLICY_DRY_RUN_CONFIG="${TMPDIR:-/tmp}/rbpodo_pgmode_spacemouse_policy_dry_run.yaml"
 OUTPUT_DIR="policy_runner/episodes"
 TASK=""
 OPERATOR=""
@@ -22,7 +23,10 @@ Usage: tools/rbpodo_pgmode_spacemouse.sh ACTION [options]
 Actions:
   prepare        Copy the tracked server template to rb_servo_server/config/local/.
   server         Launch rb_servo_server with the local ACKON500 pgmode SpaceMouse config.
+  server-dry-run Print the server launch command and required env gates; do not execute.
+  policy-dry-run Print a mock-SpaceMouse policy_runner command; do not require HID devices.
   gui            Launch rb_gui/viser on the SpaceMouse pgmode state port.
+  check          Print expected endpoints and required env gates; do not set them.
   teleop-record  Run policy_runner dual SpaceMouse teleop and JSONL recording.
   hdf5-record    Run policy_runner dual SpaceMouse teleop and HDF5 recording.
 
@@ -53,6 +57,30 @@ fail() {
 
 note() {
   echo "rbpodo_pgmode_spacemouse: $*"
+}
+
+print_required_env() {
+  cat <<'EOF'
+rbpodo_pgmode_spacemouse: required rbpodo pgmode simulation env flags:
+  RB_ALLOW_REAL_ROBOT=1
+  RB_ALLOW_REAL_MOTION=1
+  RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
+  RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
+  RB_ALLOW_RBPODO_ASYNC_STREAMING=1
+  RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
+  RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
+rbpodo_pgmode_spacemouse: RB_ALLOW_REAL_CARTESIAN must remain unset for this workflow.
+EOF
+}
+
+print_endpoint_check() {
+  cat <<'EOF'
+rbpodo_pgmode_spacemouse: expected endpoints:
+  servo command UDP endpoint: 127.0.0.1:50256
+  policy safety readback: 0.0.0.0:50376
+  viewer state fanout: 127.0.0.1:50366
+EOF
+  print_required_env
 }
 
 print_command() {
@@ -176,6 +204,22 @@ run_server() {
   exec "${cmd[@]}"
 }
 
+run_server_dry_run() {
+  if [[ -f "${ROOT_DIR}/${SERVER_LOCAL_REL}" ]]; then
+    note "server config: ${SERVER_LOCAL_REL}"
+  else
+    note "dry-run: local config missing; run prepare before a real server launch"
+  fi
+  if [[ -f "${SERVER}" ]]; then
+    print_binary_fingerprint "${SERVER}"
+  else
+    note "dry-run: server binary not found: ${SERVER}"
+  fi
+  local cmd=("${SERVER}" --config "${ROOT_DIR}/${SERVER_LOCAL_REL}")
+  print_command "${cmd[@]}"
+  print_required_env
+}
+
 run_gui() {
   if [[ "${FORCE}" != "1" ]]; then
     port_in_use 50366 && fail "UDP state port 50366 is already in use; pass --force to skip this check"
@@ -190,6 +234,59 @@ run_gui() {
   [[ "${DRY_RUN}" == "1" ]] && return 0
   cd "${ROOT_DIR}"
   exec "${cmd[@]}"
+}
+
+write_policy_dry_run_config() {
+  cat >"${POLICY_DRY_RUN_CONFIG}" <<'EOF'
+schema: robotics_lab.policy_runner.v1
+mode: real
+action_source: dual_spacemouse_cartesian
+runtime:
+  startup_timeout_sec: 5.0
+geometry:
+  path: "calibration/active_calibration.yaml"
+robot_state:
+  bind: "udp://0.0.0.0:50376"
+  stale_timeout_sec: 0.5
+servo_command:
+  endpoint: "udp://127.0.0.1:50256"
+  timeout_sec: 0.05
+  acquire_lease: true
+  lease_readback_timeout_sec: 2.0
+safety:
+  allow_real_motion: false
+  allow_rbpodo_controller_simulation_cartesian: true
+  allow_configured_estimate_geometry_in_controller_simulation: true
+  allow_configured_estimate_geometry_in_real: false
+  require_valid_joint_state: true
+command_rate_hz: 500
+spacemouse_cartesian_dual:
+  frame: local
+  max_linear_velocity_m_s: 0.2
+  max_angular_velocity_rad_s: 0.4
+  deadband: 0.08
+  response_curve_gamma: 3.0
+  sample_hold_timeout_sec: 0.05
+  left:
+    mock_script: pgmode_spacemouse_smoke
+    deadman_button: 0
+  right:
+    mock_script: pgmode_spacemouse_smoke
+    deadman_button: 0
+EOF
+}
+
+run_policy_dry_run() {
+  write_policy_dry_run_config
+  note "wrote mock SpaceMouse config: ${POLICY_DRY_RUN_CONFIG}"
+  local cmd=(
+    env "PYTHONPATH=${ROOT_DIR}/policy_runner${PYTHONPATH:+:${PYTHONPATH}}"
+    python3 -m policy_runner
+    --config "${POLICY_DRY_RUN_CONFIG}"
+  )
+  print_command "${cmd[@]}"
+  note "dry-run only: command is not executed and no HID device is opened"
+  print_endpoint_check
 }
 
 run_teleop_record() {
@@ -295,8 +392,17 @@ case "${ACTION}" in
   server)
     run_server
     ;;
+  server-dry-run)
+    run_server_dry_run
+    ;;
+  policy-dry-run)
+    run_policy_dry_run
+    ;;
   gui)
     run_gui
+    ;;
+  check)
+    print_endpoint_check
     ;;
   teleop-record)
     run_teleop_record

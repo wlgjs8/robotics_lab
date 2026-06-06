@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,23 @@ class FakeSpaceMouseReader:
 
     def push(self, sample: SpaceMouseSample) -> None:
         self._samples.append(sample)
+
+    def read(self, timeout_sec: float | None = None) -> SpaceMouseSample | None:
+        _ = timeout_sec
+        if not self._samples:
+            return None
+        return self._samples.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class ScriptedSpaceMouseReader:
+    """Deterministic SpaceMouse reader for hardware-free policy_runner tests."""
+
+    def __init__(self, script: str | Iterable[Mapping[str, Any] | None]):
+        self._samples = _script_to_samples(script)
+        self.closed = False
 
     def read(self, timeout_sec: float | None = None) -> SpaceMouseSample | None:
         _ = timeout_sec
@@ -158,3 +175,51 @@ def _buttons_attr(state: Any) -> tuple[bool, ...]:
     if buttons is None:
         return ()
     return tuple(bool(button) for button in buttons)
+
+
+_NAMED_SCRIPTS: dict[str, tuple[Mapping[str, Any] | None, ...]] = {
+    "pgmode_spacemouse_smoke": (
+        {"tx": 0.20, "buttons": [False], "timestamp_monotonic": 0.00},
+        {"tx": 0.40, "ty": -0.20, "buttons": [True], "timestamp_monotonic": 0.01},
+        {"buttons": [True], "timestamp_monotonic": 0.02},
+        {"buttons": [False], "timestamp_monotonic": 0.03},
+        {"tz": 0.30, "rz": -0.20, "buttons": [True], "timestamp_monotonic": 0.04},
+        None,
+    ),
+}
+
+
+def _script_to_samples(script: str | Iterable[Mapping[str, Any] | None]) -> list[SpaceMouseSample | None]:
+    if isinstance(script, str):
+        try:
+            entries = _NAMED_SCRIPTS[script]
+        except KeyError as exc:
+            known = ", ".join(sorted(_NAMED_SCRIPTS))
+            raise ValueError(f"unknown SpaceMouse mock_script {script!r}; known scripts: {known}") from exc
+    else:
+        entries = tuple(script)
+    return [_sample_from_script_entry(entry, index) for index, entry in enumerate(entries)]
+
+
+def _sample_from_script_entry(entry: Mapping[str, Any] | None, index: int) -> SpaceMouseSample | None:
+    if entry is None:
+        return None
+    if not isinstance(entry, Mapping):
+        raise ValueError("SpaceMouse mock_script entries must be mappings or null")
+    buttons_raw = entry.get("buttons", (False,))
+    if buttons_raw is None:
+        buttons: tuple[bool, ...] = ()
+    elif isinstance(buttons_raw, (list, tuple)):
+        buttons = tuple(bool(value) for value in buttons_raw)
+    else:
+        raise ValueError("SpaceMouse mock_script buttons must be a list")
+    return SpaceMouseSample(
+        tx=float(entry.get("tx", 0.0)),
+        ty=float(entry.get("ty", 0.0)),
+        tz=float(entry.get("tz", 0.0)),
+        rx=float(entry.get("rx", 0.0)),
+        ry=float(entry.get("ry", 0.0)),
+        rz=float(entry.get("rz", 0.0)),
+        buttons=buttons,
+        timestamp_monotonic=float(entry.get("timestamp_monotonic", index * 0.01)),
+    )

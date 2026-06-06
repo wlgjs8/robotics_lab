@@ -32,6 +32,7 @@ policy_runner:       udp://127.0.0.1:50376
 
 ```bash
 tools/rbpodo_pgmode_spacemouse.sh prepare
+tools/rbpodo_pgmode_spacemouse.sh check
 ```
 
 Review the local copy before running. Keep physical real Cartesian disabled:
@@ -48,9 +49,21 @@ uses only `allow_rbpodo_controller_simulation_cartesian=true` plus server
 telemetry to admit pgmode simulation commands; it must not look like physical
 real-motion approval.
 
-## Launch
+For a hardware-free command preview without SpaceMouse HID devices:
 
-Start the server:
+```bash
+tools/rbpodo_pgmode_spacemouse.sh server-dry-run
+tools/rbpodo_pgmode_spacemouse.sh policy-dry-run
+```
+
+`policy-dry-run` writes a temporary `/tmp` policy config that uses
+`mock_script: pgmode_spacemouse_smoke` for both SpaceMouse readers, then prints
+the command it would run. It does not execute `policy_runner`, open HID
+devices, or set rbpodo env gates.
+
+## Operator Sequence
+
+1. Start the server in rbpodo `pgmode` simulation:
 
 ```bash
 tools/rbpodo_pgmode_spacemouse.sh server \
@@ -67,13 +80,17 @@ as `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`,
 the server connects to real controller boxes in `pgmode` simulation. They are
 separate from `policy_runner.safety.allow_real_motion`, which stays `false`.
 
-Start the GUI:
+2. Start the viewer:
 
 ```bash
 tools/rbpodo_pgmode_spacemouse.sh gui
 ```
 
-Run JSONL teleop recording:
+Leave TCP display on `Auto`; for controller simulation it should select
+`tcp_ref_stand` when the state stream recommends
+`reference_for_controller_simulation`.
+
+3. Start `policy_runner` with the manual SpaceMouse path:
 
 ```bash
 tools/rbpodo_pgmode_spacemouse.sh teleop-record \
@@ -81,7 +98,7 @@ tools/rbpodo_pgmode_spacemouse.sh teleop-record \
   --i-confirm-controller-is-in-pgmode-simulation
 ```
 
-Run HDF5 teleop recording:
+For HDF5 recording use the same ordering:
 
 ```bash
 tools/rbpodo_pgmode_spacemouse.sh hdf5-record \
@@ -89,6 +106,19 @@ tools/rbpodo_pgmode_spacemouse.sh hdf5-record \
   --i-confirm-controller-is-in-pgmode-simulation \
   --task "dual arm SpaceMouse pgmode simulation"
 ```
+
+4. Verify no physical motion is expected. In the GUI or recorded state, confirm
+   every arm reports `physical_motion_expected=false`,
+   `cartesian_gate.operation_mode=simulation`, and
+   `tcp_tracking_source_recommendation=reference_for_controller_simulation` or
+   an equivalent `tcp_ref_stand` recommendation.
+
+5. Verify deadman release zeros the command. While both SpaceMouse deadmen are
+   pressed, the policy path may send per-arm `TcpTwistLocal`. Release either
+   deadman and confirm the next command for that arm is zero twist. If a
+   SpaceMouse sample goes stale past `sample_hold_timeout_sec`, the source also
+   emits zero twist. When both devices are armed but centered, the dual source
+   may emit per-arm `Hold`; this is the documented no-motion centered behavior.
 
 ## Required Evidence
 
@@ -109,3 +139,17 @@ Before trusting a run, inspect live state or recorder output for:
 
 Do not set `RB_ALLOW_REAL_CARTESIAN` or
 `policy_runner.safety.allow_real_motion=true` for this workflow.
+
+## Abort And Stop
+
+- To stop manual commands, release both SpaceMouse deadmen. The policy runner
+  should send zero twist on release or stale samples.
+- To stop `policy_runner`, press `Ctrl-C` in its terminal.
+- To stop the viewer, press `Ctrl-C` in the GUI terminal.
+- To stop the server, press `Ctrl-C` in the server terminal. If a server fault
+  or unexpected telemetry appears, stop `policy_runner` first, then the server,
+  and do not restart until the local config and controller `pgmode` state have
+  been rechecked.
+
+This path is not physical real robot performance validation. It is controller
+simulation readiness evidence for the manual SpaceMouse path only.

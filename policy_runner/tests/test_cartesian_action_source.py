@@ -16,7 +16,7 @@ from policy_runner.geometry import geometry_status_from_mapping
 from policy_runner.robot_state_client import StateSnapshot
 from policy_runner.safety import SafetyGate
 from policy_runner.servo_command_client import ServoCommandClient
-from policy_runner.spacemouse import FakeSpaceMouseReader, SpaceMouseSample
+from policy_runner.spacemouse import FakeSpaceMouseReader, ScriptedSpaceMouseReader, SpaceMouseSample
 
 
 def sample_state(**overrides):
@@ -474,6 +474,40 @@ class CartesianActionSourceTest(unittest.TestCase):
 
         self.assertIsNone(source.next_intent(sample_state(), time.monotonic()))
 
+    def test_scripted_spacemouse_reader_supports_pgmode_smoke_sequence(self):
+        source = DualSpaceMouseCartesianActionSource(
+            left_reader=ScriptedSpaceMouseReader("pgmode_spacemouse_smoke"),
+            right_reader=ScriptedSpaceMouseReader("pgmode_spacemouse_smoke"),
+            sample_hold_timeout_sec=0.05,
+        )
+        snapshot = sample_state()
+
+        unarmed = source.next_intent(snapshot, 0.00)
+        moving = source.next_intent(snapshot, 0.01)
+        centered = source.next_intent(snapshot, 0.02)
+        released = source.next_intent(snapshot, 0.03)
+        moving_again = source.next_intent(snapshot, 0.04)
+        held_none = source.next_intent(snapshot, 0.05)
+        stale_zero = source.next_intent(snapshot, 0.10)
+
+        self.assertIsNone(unarmed)
+        self.assertIsNotNone(moving)
+        self.assertIsNotNone(centered)
+        self.assertIsNotNone(released)
+        self.assertIsNotNone(moving_again)
+        self.assertIsNotNone(held_none)
+        self.assertIsNotNone(stale_zero)
+        assert moving is not None and centered is not None and released is not None
+        assert moving_again is not None and held_none is not None and stale_zero is not None
+        self.assertEqual(moving.left["mode"], "TcpTwistLocal")
+        self.assertEqual(centered.left["mode"], "Hold")
+        self.assertEqual(centered.right["mode"], "Hold")
+        self.assertEqual(released.left["tcp_twist_local"], [0.0] * 6)
+        self.assertEqual(released.right["tcp_twist_local"], [0.0] * 6)
+        self.assertEqual(held_none.left["tcp_twist_local"], moving_again.left["tcp_twist_local"])
+        self.assertEqual(stale_zero.left["tcp_twist_local"], [0.0] * 6)
+        self.assertEqual(stale_zero.right["tcp_twist_local"], [0.0] * 6)
+
     def test_dual_spacemouse_cartesian_clamps_per_arm(self):
         source = DualSpaceMouseCartesianActionSource(
             left_reader=FakeSpaceMouseReader([spacemouse_sample(tx=10.0, rx=-10.0)]),
@@ -800,11 +834,17 @@ class CartesianActionSourceTest(unittest.TestCase):
                         "path": "/dev/hidraw-left",
                         "device_number": 0,
                         "deadman_button": 0,
+                        "mock_script": [
+                            {"tx": 0.2, "buttons": [False], "timestamp_monotonic": 0.0},
+                            {"tx": 0.4, "buttons": [True], "timestamp_monotonic": 0.01},
+                            None,
+                        ],
                     },
                     "right": {
                         "path": "/dev/hidraw-right",
                         "device_number": 2,
                         "deadman_button": 1,
+                        "mock_script": "pgmode_spacemouse_smoke",
                     },
                 },
             }
@@ -818,6 +858,8 @@ class CartesianActionSourceTest(unittest.TestCase):
         self.assertEqual(cfg.spacemouse_cartesian_dual.left.path, "/dev/hidraw-left")
         self.assertEqual(cfg.spacemouse_cartesian_dual.right.device_number, 2)
         self.assertEqual(cfg.spacemouse_cartesian_dual.right.deadman_button, 1)
+        self.assertEqual(len(cfg.spacemouse_cartesian_dual.left.mock_script), 3)
+        self.assertEqual(cfg.spacemouse_cartesian_dual.right.mock_script, "pgmode_spacemouse_smoke")
 
     def test_dual_spacemouse_cartesian_invalid_device_config_fails(self):
         with self.assertRaisesRegex(ValueError, "device_number"):

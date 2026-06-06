@@ -461,14 +461,33 @@ class GuiContractsTest(unittest.TestCase):
 
     def test_auto_tcp_selection_prefers_reference_for_controller_simulation_recommendation(self):
         state = self.tcp_available_state()
+        state["left"]["tcp_actual_stand"] = {
+            "x": 0.31,
+            "y": 0.12,
+            "z": 0.44,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": 0.0,
+        }
         state["left"]["tcp_ref_stand"] = {"x": 0.42, "y": 0.22, "z": 0.52, "rx": 0.0, "ry": 0.0, "rz": 0.0}
         state["left"]["tcp_ref_valid"] = True
         state["left"]["tcp_tracking_source"] = None
         state["left"]["tcp_tracking_source_recommendation"] = "reference_for_controller_simulation"
+        state["left"]["physical_motion_expected"] = False
+        state["left"]["cartesian_gate"] = {
+            "run_mode": "real",
+            "backend_type": "rbpodo",
+            "operation_mode": "simulation",
+            "allow_in_controller_simulation": True,
+            "allow_in_real": False,
+            "physical_motion_expected": False,
+            "controller_simulation_streaming_cartesian_available": True,
+        }
         store, _, _ = self.make_safety(state)
         latest = store.latest()
         self.assertEqual(latest.left.selected_tcp_source("auto"), "tcp_ref_stand")
         self.assertEqual(latest.left.selected_tcp_pose("auto").as_tuple(), (0.42, 0.22, 0.52, 0.0, 0.0, 0.0))
+        self.assertFalse(latest.left.physical_motion_expected)
 
     def test_auto_tcp_selection_falls_back_to_actual_when_reference_is_invalid(self):
         state = self.tcp_available_state()
