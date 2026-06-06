@@ -400,6 +400,72 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_train.add_argument("--max-stats-samples", type=int, default=None)
     flow_train.add_argument("--write-eval-report", default=None)
 
+    imitation_snapshot = sub.add_parser(
+        "imitation-snapshot",
+        help="Materialize an immutable HDF5 dataset snapshot for official imitation experiments.",
+    )
+    imitation_snapshot.add_argument("--data-dir", required=True)
+    imitation_snapshot.add_argument("--output-dir", required=True)
+    imitation_snapshot.add_argument("--action-horizon", type=int, default=16)
+
+    imitation_split = sub.add_parser(
+        "imitation-split",
+        help="Create a deterministic episode-level train/validation split from an imitation snapshot.",
+    )
+    imitation_split.add_argument("--snapshot", required=True)
+    imitation_split.add_argument("--output-dir", required=True)
+    imitation_split.add_argument("--val-ratio", type=float, default=0.2)
+    imitation_split.add_argument("--seed", type=int, default=0)
+
+    imitation_experiment = sub.add_parser(
+        "imitation-experiment",
+        help="Run leakage-safe imitation-learning baselines and action-chunk models from HDF5 episodes.",
+    )
+    imitation_experiment.add_argument("--data-dir", required=True)
+    imitation_experiment.add_argument("--output-dir", required=True)
+    imitation_experiment.add_argument("--snapshot", default=None)
+    imitation_experiment.add_argument("--split", default=None)
+    imitation_experiment.add_argument(
+        "--models",
+        default="zero,train_mean,state_mlp,direct_bc_tiny,direct_bc_resnet18,flow_tiny,flow_resnet18,act_tiny",
+        help="Comma-separated model list.",
+    )
+    imitation_experiment.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
+    imitation_experiment.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
+    imitation_experiment.add_argument("--action-horizon", type=int, default=16)
+    imitation_experiment.add_argument("--image-size", type=int, default=128)
+    imitation_experiment.add_argument("--batch-size", type=int, default=64)
+    imitation_experiment.add_argument("--epochs", type=int, default=20)
+    imitation_experiment.add_argument("--lr", type=float, default=1e-4)
+    imitation_experiment.add_argument("--hidden-dim", type=int, default=256)
+    imitation_experiment.add_argument("--device", default="auto")
+    imitation_experiment.add_argument("--seed", type=int, default=0)
+    imitation_experiment.add_argument("--max-train-samples", type=int, default=None)
+    imitation_experiment.add_argument("--max-val-samples", type=int, default=None)
+    imitation_experiment.add_argument("--flow-sample-steps", type=int, default=8)
+    imitation_experiment.add_argument(
+        "--split-mode",
+        choices=("primary", "session_holdout"),
+        default="primary",
+        help=(
+            "primary uses the fixed episode train/validation split; session_holdout "
+            "trains on non-held sessions and validates on session_holdout_val."
+        ),
+    )
+
+    imitation_aggregate = sub.add_parser(
+        "imitation-aggregate",
+        help="Aggregate one or more imitation leaderboard summaries into a combined report.",
+    )
+    imitation_aggregate.add_argument(
+        "--input",
+        action="append",
+        required=True,
+        help="Input directory or leaderboard_summary.json. May be supplied multiple times.",
+    )
+    imitation_aggregate.add_argument("--output-dir", required=True)
+    imitation_aggregate.add_argument("--label", default="combined")
+
     infer = sub.add_parser("infer", help="Run a trained behavior-cloning checkpoint in simulation.")
     infer.add_argument("--config", required=True, help="policy_runner YAML config")
     infer.add_argument("--checkpoint", default="/data/checkpoints/bc_state_to_twist.pt")
@@ -746,6 +812,78 @@ def _main_with_subcommands(argv: list[str]) -> int:
             single_arm_side=args.single_arm_side,
             max_episodes=args.max_episodes,
             write_eval_report=args.write_eval_report,
+        )
+        return 0
+    if args.command == "imitation-snapshot":
+        from .imitation_experiments import create_dataset_snapshot
+
+        result = create_dataset_snapshot(
+            data_dir=args.data_dir,
+            output_dir=args.output_dir,
+            action_horizon=args.action_horizon,
+        )
+        print(
+            "imitation snapshot written: "
+            f"{result.snapshot_path} hash={result.snapshot_hash} "
+            f"valid={result.valid_episode_count} rejected={result.rejected_episode_count}",
+            flush=True,
+        )
+        return 0
+    if args.command == "imitation-split":
+        from .imitation_experiments import create_split_manifest
+
+        result = create_split_manifest(
+            snapshot_path=args.snapshot,
+            output_dir=args.output_dir,
+            val_ratio=args.val_ratio,
+            seed=args.seed,
+        )
+        print(
+            "imitation split written: "
+            f"{result.split_path} hash={result.split_hash} "
+            f"train={result.train_count} val={result.val_count} "
+            f"session_holdout_val={result.session_holdout_val_count}",
+            flush=True,
+        )
+        return 0
+    if args.command == "imitation-experiment":
+        from .imitation_experiments import run_imitation_experiment
+
+        report = run_imitation_experiment(
+            data_dir=args.data_dir,
+            output_dir=args.output_dir,
+            snapshot_path=args.snapshot,
+            split_path=args.split,
+            models=[name.strip() for name in args.models.split(",") if name.strip()],
+            action_horizon=args.action_horizon,
+            image_size=args.image_size,
+            camera_names=parse_camera_names(args.camera_names),
+            exclude_camera_names=parse_camera_names(args.exclude_camera_names),
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            lr=args.lr,
+            hidden_dim=args.hidden_dim,
+            device=args.device,
+            seed=args.seed,
+            max_train_samples=args.max_train_samples,
+            max_val_samples=args.max_val_samples,
+            flow_sample_steps=args.flow_sample_steps,
+            split_mode=args.split_mode,
+        )
+        print(f"imitation leaderboard written: {report['output_dir']}/leaderboard_report.md", flush=True)
+        return 0
+    if args.command == "imitation-aggregate":
+        from .imitation_experiments import aggregate_imitation_reports
+
+        result = aggregate_imitation_reports(
+            input_dirs=args.input,
+            output_dir=args.output_dir,
+            label=args.label,
+        )
+        print(
+            "imitation aggregate written: "
+            f"{result.report_path} rows={result.row_count} failed={result.failed_count}",
+            flush=True,
         )
         return 0
     if args.command == "infer":
