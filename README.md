@@ -56,6 +56,7 @@ mock/simulation에서 지원되는 항목:
 - `REVIEW.md`: 현재 review baseline 및 open item
 - `docs/current_review.md`: `REVIEW.md`로 가는 짧은 redirect입니다. 내용을 중복하지 않습니다.
 - `docs/architecture.md`: 시스템 토폴로지, 용어, motion primitive contract, safety boundary
+- `docs/code_architecture_map.md`: 코드에서 검증한 컴포넌트 맵, 포트/와이어 포맷, 문서-코드 드리프트 목록
 - `docs/servo_backend_contract.md`: backend result, fault, worker I/O, state telemetry contract
 - `docs/frame_contract.md`: 공통 frame 및 calibration 상태
 - `docs/joint_range_policy.md`: rbpodo raw joint angle/range policy

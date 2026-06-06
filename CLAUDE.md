@@ -14,9 +14,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docs/frame_contract.md` and `calibration/active_calibration.yaml` — frame/geometry source of truth
 - `docs/joint_range_policy.md` — rbpodo raw joint angle/range policy
 - `docs/hardware_free_validation.md` — hardware-free validation boundary
+- `docs/code_architecture_map.md` — code-verified component map, ports/wire-formats, and a doc-vs-code drift list
 - the component README/docs for whatever module you change
 
-Historical files (`TODO.md`, `CODEX_*PROMPTS*`, `MIG-*`, `HARDEN-*`, `CART-HARDEN-*`, `docs/archive/**`) are audit context only.
+Historical files (`TODO.md`, `CODEX_*PROMPTS*`, `MIG-*`, `HARDEN-*`, `CART-HARDEN-*`, `docs/archive/**`) are audit context only. `GOAL.md` and `REVIEW.md` are point-in-time snapshots, not direction — see the drift notes below.
 
 ## Current Phase
 
@@ -42,6 +43,8 @@ camera_server (C++) ──────┘ (RealSense/mock, shared-memory image t
 - **`camera_server`** (C++) owns capture, shared-memory ring-buffer transport, metadata, and health. Camera acceptance is separate from robot motion acceptance.
 
 State fanout: `rb_servo_server` is the sole owner of UDP state publication via `network.state_pub_endpoints` (list). Commands go directly to `network.command_bind`. Benchmark overlay streams (desired geometry/metrics) are separate from robot state and must never carry commands.
+
+Ports/protocols (verified against compose + config; full table in `docs/code_architecture_map.md`): command in `UDP 50010`; state out fanout to `UDP 50110` (gui) + `UDP 50120` (policy); server↔simulator `TCP 50200` (control) / `50201` (admin) per arm with JSON-lines schema `rbsim.v1`; camera metadata `ZMQ 5600` (`camera.bundle`/`camera.health`) with images in a POSIX shared-memory ring (`/camera_server_frames`); GUI web `HTTP 8080`; optional circle overlay `UDP 50261`. Command JSON `{seq, mode, left{…}, right{…}}` (`mode` parsed by `controlModeFromString` in `src/core/types.cpp`); state JSON schema `robotics_lab.servo_state.v1`.
 
 ## Canonical Terminology (use everywhere — config, docs, GUI, logs, tests)
 
@@ -108,6 +111,15 @@ make camera-mock-up / make camera-real-up
 GUI: `http://127.0.0.1:8080`. Flow-matching multi-GPU training uses `docker-compose.flow-train.yml` (`make policy-flow-train-*`).
 
 ML data flow: audit HDF5 episodes (`python3 -m policy_runner hdf5-audit ...`, schema `robotics_lab.policy_runner.hdf5_audit.v1`) before flow-train. `flow-infer` requires explicit `--rollout-mode` (`offline_eval` / `sim_dryrun` / `controller_sim` / `real_readonly` / `real_policy`); `real_policy` stays blocked without measured/accepted retarget, collision, gripper, and geometry gates.
+
+## Doc Map & Drift (read before trusting a doc)
+
+Scattered docs don't all track the latest direction. Key gotchas (full list in `docs/code_architecture_map.md`):
+
+- **`GOAL.md` is not the project goal** — it's the verbatim text of one task prompt (`ACKON500-GENE-GOAL-01`, a 500 Hz rbpodo controller-sim circle-tracking tuning task). Treat it as a snapshot.
+- **Milestone vs. activity**: the advertised milestone is simulator-first Cartesian hardening, but recent commits, `GOAL.md`, `scripts/rbpodo_*`, `configs/rbpodo_circle_ablation/*`, and many runbooks concentrate on the rbpodo controller-`pgmode` circle-tracking benchmark (ACKON500/500 Hz), which `docs/architecture.md` frames only as a narrow carve-out.
+- **`TcpCircleTrack` is a stub** (`tcp_circle_track_not_implemented`); `TcpCircleMove` is implemented.
+- **Precedence on conflict** (`AGENTS.md`): `AGENTS.md` → root `README.md` → `docs/architecture.md` → contract docs → component READMEs. `docs/current_review.md` redirects to `REVIEW.md`; `docs/archive/**` is audit-only.
 
 ## Development Rules
 
