@@ -70,8 +70,8 @@ servo:
   allow_controller_simulation_diagnostics_suspect: true
 
 safety:
-  q_min_deg: [-170, -120, -170, -190, -120, -360]
-  q_max_deg: [170, 120, 170, 190, 120, 360]
+  q_min_deg: [-360, -360, -360, -360, -360, -360]
+  q_max_deg: [360, 360, 360, 360, 360, 360]
   dq_max_deg_s: [60, 60, 60, 90, 90, 120]
   ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]
   joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]

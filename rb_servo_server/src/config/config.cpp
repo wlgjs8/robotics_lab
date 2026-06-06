@@ -584,6 +584,11 @@ bool anyReal(const DualArmConfig& cfg) {
     return cfg.left_robot.run_mode == RunMode::Real || cfg.right_robot.run_mode == RunMode::Real;
 }
 
+bool anyRbpodo(const DualArmConfig& cfg) {
+    return cfg.left_robot.backend_type == BackendType::Rbpodo ||
+           cfg.right_robot.backend_type == BackendType::Rbpodo;
+}
+
 bool isRbpodoControllerSimulationBackend(const BackendConfig& backend) {
     if (backend.backend_type != BackendType::Rbpodo) return false;
     if (backend.run_mode != RunMode::Real) return false;
@@ -594,6 +599,31 @@ bool isRbpodoControllerSimulationBackend(const BackendConfig& backend) {
 bool bothBackendsAreRbpodoControllerSimulation(const DualArmConfig& cfg) {
     return isRbpodoControllerSimulationBackend(cfg.left_robot) &&
         isRbpodoControllerSimulationBackend(cfg.right_robot);
+}
+
+void warnIfRbpodoSafetyRangeDiffersFromKnownUrdf(const DualArmConfig& cfg) {
+    if (!cfg.kinematics.enable || !anyRbpodo(cfg)) return;
+    if (std::filesystem::path(cfg.kinematics.urdf).filename().string() != "rb3_730e.urdf") return;
+
+    const JointArray urdf_min_deg{-360.0, -360.0, -150.0, -360.0, -360.0, -360.0};
+    const JointArray urdf_max_deg{360.0, 360.0, 150.0, 360.0, 360.0, 360.0};
+    constexpr double kToleranceDeg = 0.5;
+    for (int i = 0; i < kDof; ++i) {
+        if (std::abs(cfg.safety.q_min_deg[i] - urdf_min_deg[i]) <= kToleranceDeg &&
+            std::abs(cfg.safety.q_max_deg[i] - urdf_max_deg[i]) <= kToleranceDeg) {
+            continue;
+        }
+        const std::string joint_name = i < static_cast<int>(cfg.kinematics.joint_names.size())
+            ? cfg.kinematics.joint_names[static_cast<std::size_t>(i)]
+            : ("joint_" + std::to_string(i + 1));
+        warn(
+            "rbpodo safety q_min/q_max differs from rb3_730e URDF IK limit for " +
+            joint_name + ": safety=[" + std::to_string(cfg.safety.q_min_deg[i]) +
+            ", " + std::to_string(cfg.safety.q_max_deg[i]) + "], urdf=[" +
+            std::to_string(urdf_min_deg[i]) + ", " + std::to_string(urdf_max_deg[i]) +
+            "]. Raw rbpodo state/commands stay in configured safety range; IK may still be model-limited."
+        );
+    }
 }
 
 std::string resolvePathForConfig(const std::string& value, const std::string& config_path) {
@@ -1042,6 +1072,7 @@ void validateConfig(const DualArmConfig& cfg) {
         if (cfg.kinematics.urdf.empty() || !std::filesystem::is_regular_file(cfg.kinematics.urdf)) {
             throw std::runtime_error("kinematics.urdf must point to an existing URDF file: " + cfg.kinematics.urdf);
         }
+        warnIfRbpodoSafetyRangeDiffersFromKnownUrdf(cfg);
     }
     if (cfg.kinematics.ik.max_iterations <= 0) {
         throw std::runtime_error("kinematics.ik.max_iterations must be positive");
@@ -1228,8 +1259,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
     cfg.servo.enable_realtime_priority = false;
     cfg.servo.filter_dt_min_ratio = 0.5;
     cfg.servo.filter_dt_max_ratio = 1.5;
-    cfg.safety.q_min_deg = {-170, -120, -170, -190, -120, -360};
-    cfg.safety.q_max_deg = {170, 120, 170, 190, 120, 360};
+    cfg.safety.q_min_deg = rbpodoDefaultSafetyJointMinDeg();
+    cfg.safety.q_max_deg = rbpodoDefaultSafetyJointMaxDeg();
     cfg.safety.dq_max_deg_s = {60, 60, 60, 90, 90, 120};
     cfg.safety.ddq_max_deg_s2 = {300, 300, 300, 500, 500, 700};
     cfg.safety.tracking_error_policy = TrackingErrorPolicy::SnapToActual;

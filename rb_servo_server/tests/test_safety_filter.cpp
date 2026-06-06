@@ -29,6 +29,16 @@ rb_servo::JointArray joints(double value) {
     return out;
 }
 
+rb_servo::SafetyConfig rbpodoRawControllerTestSafetyConfig() {
+    rb_servo::SafetyConfig config;
+    config.q_min_deg = rb_servo::rbpodoDefaultSafetyJointMinDeg();
+    config.q_max_deg = rb_servo::rbpodoDefaultSafetyJointMaxDeg();
+    config.dq_max_deg_s.fill(1000.0);
+    config.ddq_max_deg_s2.fill(1000.0);
+    config.max_tracking_error_deg = 1000.0;
+    return config;
+}
+
 bool testNormalizeWrappedJointIntoRange() {
     const rb_servo::JointRangeNormalization normalized =
         rb_servo::normalizeJointForRange(-317.0, -190.0, 190.0, 360.0);
@@ -58,6 +68,7 @@ bool testAmbiguousFullPeriodRangeDoesNotNormalize() {
 
 bool testMotionSafetyDoesNotWrapTargetsByDefault() {
     rb_servo::SafetyConfig config;
+    // Intentionally narrow diagnostic range to prove motion targets clamp instead of wrapping.
     config.q_min_deg.fill(-190.0);
     config.q_max_deg.fill(190.0);
     config.dq_max_deg_s.fill(1000.0);
@@ -87,11 +98,7 @@ bool testMotionSafetyDoesNotWrapTargetsByDefault() {
 }
 
 rb_servo::SafetyConfig trackingTestConfig() {
-    rb_servo::SafetyConfig config;
-    config.q_min_deg.fill(-190.0);
-    config.q_max_deg.fill(190.0);
-    config.dq_max_deg_s.fill(1000.0);
-    config.ddq_max_deg_s2.fill(1000.0);
+    rb_servo::SafetyConfig config = rbpodoRawControllerTestSafetyConfig();
     config.max_tracking_error_deg = 2.0;
     return config;
 }
@@ -176,6 +183,48 @@ bool testControllerSimulationPhysicalMotionFaultsClosed() {
     return true;
 }
 
+bool testTrackingPreservesRawControllerValuesInsideConfiguredRange() {
+    rb_servo::SafetyConfig config = rbpodoRawControllerTestSafetyConfig();
+    rb_servo::SafetyFilter filter(config);
+
+    rb_servo::JointArray raw = joints(0.0);
+    raw[0] = 270.0;
+    raw[2] = -317.0;
+    rb_servo::RobotState state = connectedState(raw);
+
+    rb_servo::JointArray desired = raw;
+    desired[0] = 271.0;
+    const rb_servo::SafetyCheckResult result =
+        filter.filterJointTarget(desired, raw, raw, state, 10.0);
+
+    RB_CHECK(result.ok);
+    RB_CHECK(!result.joint_limit_clamped);
+    RB_CHECK(near(result.filtered_q_deg[0], 271.0));
+    RB_CHECK(near(result.filtered_q_deg[2], -317.0));
+    RB_CHECK(result.tracking.physical_command_actual_error_deg < kEpsilon);
+    return true;
+}
+
+bool testCommandTargetClampingUsesConfiguredRawRangeWithoutWrap() {
+    rb_servo::SafetyConfig config = rbpodoRawControllerTestSafetyConfig();
+    rb_servo::SafetyFilter filter(config);
+    rb_servo::RobotState state = connectedState(joints(0.0));
+
+    rb_servo::JointArray desired = joints(0.0);
+    desired[0] = 400.0;
+    desired[1] = -400.0;
+    desired[2] = 270.0;
+    const rb_servo::SafetyCheckResult result =
+        filter.filterJointTarget(desired, joints(0.0), joints(0.0), state, 10.0);
+
+    RB_CHECK(result.ok);
+    RB_CHECK(result.joint_limit_clamped);
+    RB_CHECK(near(result.filtered_q_deg[0], 360.0));
+    RB_CHECK(near(result.filtered_q_deg[1], -360.0));
+    RB_CHECK(near(result.filtered_q_deg[2], 270.0));
+    return true;
+}
+
 bool testStatePublisherSerializesWrapDiagnostics() {
     rb_servo::ServoSnapshot snapshot;
     snapshot.left_state.q_actual_deg = joints(0.0);
@@ -219,6 +268,8 @@ int main() {
     if (!testReferenceTrackingOverrideCanPassWithStaticActual()) return 1;
     if (!testReferenceTrackingInvalidFailsClosed()) return 1;
     if (!testControllerSimulationPhysicalMotionFaultsClosed()) return 1;
+    if (!testTrackingPreservesRawControllerValuesInsideConfiguredRange()) return 1;
+    if (!testCommandTargetClampingUsesConfiguredRawRangeWithoutWrap()) return 1;
     if (!testStatePublisherSerializesWrapDiagnostics()) return 1;
     return 0;
 }

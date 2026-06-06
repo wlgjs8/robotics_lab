@@ -58,6 +58,7 @@ mock/simulation에서 지원되는 항목:
 - `docs/architecture.md`: 시스템 토폴로지, 용어, motion primitive contract, safety boundary
 - `docs/servo_backend_contract.md`: backend result, fault, worker I/O, state telemetry contract
 - `docs/frame_contract.md`: 공통 frame 및 calibration 상태
+- `docs/joint_range_policy.md`: rbpodo raw joint angle/range policy
 - `docs/hardware_free_validation.md`: hardware-free validation boundary
 - `docs/runbooks/tcp_pose_simulator_acceptance.md`: Cartesian simulator acceptance
 - `docs/runbooks/camera_acceptance.md`: 실제 3-camera acceptance
@@ -169,6 +170,13 @@ deprecated입니다. 지원되는 robot-control profile은 500 Hz이며
 `servo_t1_sec: 0.002`가 command period와 맞아야 합니다. 자세한 절차는
 `docs/runbooks/rbpodo_servo_acceptance.md`와
 `docs/runbooks/real_robot_readonly.md`를 봅니다.
+
+`rbpodo` joint state와 command는 raw controller degree 값을 보존합니다.
+tracked real rbpodo template의 supported safety range는 명시적 per-joint
+`q_min_deg: [-360, -360, -360, -360, -360, -360]` /
+`q_max_deg: [360, 360, 360, 360, 360, 360]`입니다. `[-180, 180]`
+정규화는 control/safety/tracking/log source-of-truth에 쓰지 않습니다.
+자세한 내용은 `docs/joint_range_policy.md`를 봅니다.
 
 Force control은 비활성 상태를 유지합니다.
 

@@ -59,8 +59,8 @@ servo:
   allow_servo_t1_rate_mismatch: false
 
 safety:
-  q_min_deg: [-170, -120, -170, -190, -120, -360]
-  q_max_deg: [170, 120, 170, 190, 120, 360]
+  q_min_deg: [-360, -360, -360, -360, -360, -360]
+  q_max_deg: [360, 360, 360, 360, 360, 360]
   dq_max_deg_s: [20, 20, 20, 30, 30, 40]
   ddq_max_deg_s2: [100, 100, 100, 150, 150, 200]
   joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]

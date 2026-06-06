@@ -140,6 +140,11 @@ human-gated task. Start from the tracked
 procedure. The real template defaults to `tracking_error_policy: fault_latch`
 and `servo.send_servo_commands: false`.
 
+Rbpodo joint states and commands preserve raw controller degrees. The tracked
+real templates use explicit `q_min_deg: [-360, -360, -360, -360, -360, -360]`
+and `q_max_deg: [360, 360, 360, 360, 360, 360]`; see
+`../docs/joint_range_policy.md`.
+
 ## Command channel
 
 Default command endpoint:

@@ -52,6 +52,10 @@ SUPPORTED_SCOPE_RBPODO_500HZ_TASKS=(
   04_supported_scope_docs_ci_hygiene
 )
 
+JOINT_RANGE_POLICY_TASKS=(
+  00_joint_range_policy_rbpodo_raw_controller_limits
+)
+
 print_recommended_sequences() {
   echo "Recommended current sequences:"
   echo "  GENE/UMI:"
@@ -60,6 +64,8 @@ print_recommended_sequences() {
   echo "    ${SPACEMOUSE_PGMODE_TASKS[*]}"
   echo "  Supported scope rbpodo 500Hz:"
   echo "    ${SUPPORTED_SCOPE_RBPODO_500HZ_TASKS[*]}"
+  echo "  Joint range policy:"
+  echo "    ${JOINT_RANGE_POLICY_TASKS[*]}"
 }
 
 print_known_tasks() {
@@ -71,6 +77,9 @@ print_known_tasks() {
   echo
   echo "Supported scope rbpodo 500Hz task IDs:"
   printf '  %s\n' "${SUPPORTED_SCOPE_RBPODO_500HZ_TASKS[@]}"
+  echo
+  echo "Joint range policy task IDs:"
+  printf '  %s\n' "${JOINT_RANGE_POLICY_TASKS[@]}"
 }
 
 print_usage() {

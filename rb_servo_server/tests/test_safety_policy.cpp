@@ -54,6 +54,18 @@ rb_servo::JointArray joints(double value) {
     return out;
 }
 
+void applyIntentionalNarrowJointRangeForViolationTest(rb_servo::SafetyConfig* safety) {
+    safety->q_min_deg = joints(-180.0);
+    safety->q_max_deg = joints(180.0);
+}
+
+rb_servo::SafetyConfig rbpodoRawControllerSafetyConfigForTests() {
+    rb_servo::SafetyConfig cfg;
+    cfg.q_min_deg = rb_servo::rbpodoDefaultSafetyJointMinDeg();
+    cfg.q_max_deg = rb_servo::rbpodoDefaultSafetyJointMaxDeg();
+    return cfg;
+}
+
 bool sameJointArray(const rb_servo::JointArray& a, const rb_servo::JointArray& b) {
     for (int i = 0; i < rb_servo::kDof; ++i) {
         if (std::abs(a[i] - b[i]) > kEpsilon) return false;
@@ -753,8 +765,8 @@ rb_servo::DualArmConfig testConfig() {
     cfg.servo.enable_realtime_priority = false;
     cfg.servo.filter_dt_min_ratio = 0.5;
     cfg.servo.filter_dt_max_ratio = 1.5;
-    cfg.safety.q_min_deg = joints(-180.0);
-    cfg.safety.q_max_deg = joints(180.0);
+    cfg.safety.q_min_deg = rb_servo::rbpodoDefaultSafetyJointMinDeg();
+    cfg.safety.q_max_deg = rb_servo::rbpodoDefaultSafetyJointMaxDeg();
     cfg.safety.dq_max_deg_s = joints(10000.0);
     cfg.safety.ddq_max_deg_s2 = joints(100000.0);
     cfg.safety.max_tracking_error_deg = 1000.0;
@@ -2608,9 +2620,7 @@ bool testRealModeReadOnlyAndMotionEnvGates() {
 }
 
 bool testSafetyFilterVelocityClampMaxStep() {
-    rb_servo::SafetyConfig cfg;
-    cfg.q_min_deg = joints(-180.0);
-    cfg.q_max_deg = joints(180.0);
+    rb_servo::SafetyConfig cfg = rbpodoRawControllerSafetyConfigForTests();
     cfg.dq_max_deg_s = joints(10.0);
     cfg.ddq_max_deg_s2 = joints(100000.0);
     cfg.max_tracking_error_deg = 1000.0;
@@ -2638,9 +2648,7 @@ bool testSafetyFilterVelocityClampMaxStep() {
 }
 
 bool testSafetyFilterAccelerationClampDoesNotOvershoot() {
-    rb_servo::SafetyConfig cfg;
-    cfg.q_min_deg = joints(-180.0);
-    cfg.q_max_deg = joints(180.0);
+    rb_servo::SafetyConfig cfg = rbpodoRawControllerSafetyConfigForTests();
     cfg.dq_max_deg_s = joints(1000.0);
     cfg.ddq_max_deg_s2 = joints(100.0);
     cfg.max_tracking_error_deg = 1000.0;
@@ -4401,7 +4409,7 @@ bool testRbpodoControllerSimulationDiagnosticOverrideRejectsHardFaults() {
 
     {
         rb_servo::JointArray out_of_range = joints(0.0);
-        out_of_range[2] = 250.0;
+        out_of_range[2] = 370.0;
         auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, out_of_range, false);
         left->setHasError(true);
         left->setMotionReadinessError(
@@ -4463,9 +4471,10 @@ bool testRbpodoControllerSimulationDiagnosticOverrideRejectsHardFaults() {
 bool testReadOnlyDiagnosticStartupAllowsRangeViolationOnlyWhenConfigured() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
+    applyIntentionalNarrowJointRangeForViolationTest(&cfg.safety);
     cfg.servo.send_servo_commands = false;
     rb_servo::JointArray out_of_range = joints(0.0);
-    out_of_range[2] = 250.0;
+    out_of_range[2] = 270.0;
     {
         rb_servo::DualArmServoLoop loop(
             std::make_unique<TestBackend>(rb_servo::ArmId::Left, out_of_range, false),
@@ -4495,19 +4504,48 @@ bool testReadOnlyDiagnosticStartupAllowsRangeViolationOnlyWhenConfigured() {
     RB_CHECK(containsValue(snapshot.startup_validation.left.invalid_reasons, "q_range_violation"));
     RB_CHECK(snapshot.startup_validation.left.q_range_violations.size() == 1);
     RB_CHECK(snapshot.startup_validation.left.q_range_violations.front().joint == 3);
-    RB_CHECK(snapshot.startup_validation.left.q_range_violations.front().value_deg == 250.0);
+    RB_CHECK(snapshot.startup_validation.left.q_range_violations.front().value_deg == 270.0);
     RB_CHECK(snapshot.send_suppressed);
     RB_CHECK(snapshot.send_policy == "read_only");
     loop.stop();
     return true;
 }
 
-bool testMotionStartupRejectsRangeViolation() {
+bool testStartupPreservesRawControllerJointValuesInsideConfiguredRange() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
     cfg.servo.send_servo_commands = true;
+    rb_servo::JointArray raw = joints(0.0);
+    raw[0] = 270.0;
+    raw[2] = -317.0;
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, raw, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, joints(0.0), false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    RB_CHECK(waitUntil([&] { return loop.latestSnapshot().loop_end_time_ns > 0; }));
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+    RB_CHECK(snapshot.startup_validation.acquisition_ok);
+    RB_CHECK(snapshot.startup_validation.motion_ready);
+    RB_CHECK(snapshot.startup_validation.left.q_range_violations.empty());
+    RB_CHECK(snapshot.startup_validation.left.q_range_wrapped.empty());
+    RB_CHECK(!snapshot.startup_validation.left.q_actual_normalized_for_safety_deg.has_value());
+    RB_CHECK(sameJointArray(snapshot.left_state.q_actual_deg, raw));
+    return true;
+}
+
+bool testMotionStartupRejectsRangeViolation() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    applyIntentionalNarrowJointRangeForViolationTest(&cfg.safety);
+    cfg.servo.send_servo_commands = true;
     rb_servo::JointArray out_of_range = joints(0.0);
-    out_of_range[2] = 250.0;
+    out_of_range[2] = 270.0;
     rb_servo::DualArmServoLoop loop(
         std::make_unique<TestBackend>(rb_servo::ArmId::Left, out_of_range, false),
         std::make_unique<TestBackend>(rb_servo::ArmId::Right, joints(0.0), false),
@@ -6123,6 +6161,7 @@ int main() {
     if (!testRbpodoControllerSimulationDiagnosticOverrideIsNarrow()) return 1;
     if (!testRbpodoControllerSimulationDiagnosticOverrideRejectsHardFaults()) return 1;
     if (!testReadOnlyDiagnosticStartupAllowsRangeViolationOnlyWhenConfigured()) return 1;
+    if (!testStartupPreservesRawControllerJointValuesInsideConfiguredRange()) return 1;
     if (!testMotionStartupRejectsRangeViolation()) return 1;
     if (!testReadOnlyDiagnosticStartupAllowsWrongModeOnlyWhenConfigured()) return 1;
     if (!testMotionStartupRejectsWrongMode()) return 1;

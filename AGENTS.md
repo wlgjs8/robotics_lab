@@ -27,6 +27,7 @@ Always read the current source-of-truth docs before editing code:
 - `docs/current_review.md`, if present
 - `docs/servo_backend_contract.md`
 - `docs/frame_contract.md`
+- `docs/joint_range_policy.md`
 - `docs/hardware_free_validation.md`
 - `docs/runbooks/tcp_pose_simulator_acceptance.md`
 - the component README/docs for the module being changed

@@ -168,6 +168,14 @@ struct SafetyConfig {
     double controller_simulation_physical_motion_threshold_deg = 0.05;
 };
 
+inline constexpr JointArray rbpodoDefaultSafetyJointMinDeg() {
+    return JointArray{-360.0, -360.0, -360.0, -360.0, -360.0, -360.0};
+}
+
+inline constexpr JointArray rbpodoDefaultSafetyJointMaxDeg() {
+    return JointArray{360.0, 360.0, 360.0, 360.0, 360.0, 360.0};
+}
+
 struct ServoConfig {
     int rate_hz = 500;
     double command_timeout_sec = 0.2;

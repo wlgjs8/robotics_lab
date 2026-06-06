@@ -174,6 +174,17 @@ wrapping for that joint and `360` treats values separated by a full revolution
 as equivalent for range diagnostics. For example, raw `-317 deg` with range
 `[-190, 190]` and period `360` normalizes to `43 deg`.
 
+For the supported rbpodo-only real-control scope, raw joint values are the
+source of truth. Preserve controller degrees in `q_actual_deg`, `q_target_deg`,
+`q_ref_deg`, `q_sent_deg`, state JSON, and servo logs. Control, safety,
+tracking, and q-ref comparisons must not normalize raw values to `[-180, 180]`.
+The tracked rbpodo real templates use explicit per-joint raw safety arrays
+matching the current controller soft-limit configuration:
+`q_min_deg: [-360, -360, -360, -360, -360, -360]` and
+`q_max_deg: [360, 360, 360, 360, 360, 360]`. Narrow ranges such as
+`[-180, 180]` are allowed only for intentional tests or site-owned conservative
+overrides, not as production defaults.
+
 This wrapping policy is for startup diagnostics only by default. State JSON must
 keep raw `q_actual_deg`, publish any `q_range_wrapped` entries, and may publish
 `q_actual_normalized_for_safety_deg` for the validation view. If the raw value
@@ -183,6 +194,11 @@ deterministic diagnostic representative, not motion-ready evidence.
 `safety.joint_wrap_for_motion_safety` is refused until a future task implements
 continuous motion-safe unwrapping, because silently wrapping command targets can
 create joint discontinuities.
+
+When kinematics is enabled, the server warns if the configured rbpodo safety
+range differs from the known `rb3_730e.urdf` model limits. This is diagnostic:
+raw controller state and commands remain governed by configured safety limits,
+while IK may still be limited by the URDF/Pinocchio model.
 
 If `servo.send_servo_commands: true`, startup remains strict. Robot faults,
 wrong mode/not-ready state, and joint-range violations must fail startup rather

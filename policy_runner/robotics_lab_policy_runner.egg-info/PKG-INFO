@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: robotics-lab-policy-runner
+Version: 0.1.0
+Summary: Python action-source runner for robotics_lab servo commands
+Requires-Python: >=3.10
+Provides-Extra: spacemouse
+Requires-Dist: hidapi; extra == "spacemouse"
+Requires-Dist: pyspacemouse; extra == "spacemouse"
+Provides-Extra: recording
+Requires-Dist: h5py>=3.10.0; extra == "recording"
+Requires-Dist: numpy>=1.24.0; extra == "recording"
+Provides-Extra: camera
+Requires-Dist: pyzmq>=25.0.0; extra == "camera"
+Requires-Dist: numpy>=1.24.0; extra == "camera"
+Provides-Extra: ml
+Requires-Dist: torch>=2.0; extra == "ml"
+Requires-Dist: torchvision>=0.15; extra == "ml"
+Requires-Dist: h5py>=3.10.0; extra == "ml"
+Requires-Dist: numpy>=1.24.0; extra == "ml"
+Requires-Dist: Pillow>=10.0.0; extra == "ml"
+Provides-Extra: umi
+Requires-Dist: h5py>=3.10.0; extra == "umi"
+Requires-Dist: numpy>=1.24.0; extra == "umi"
+Requires-Dist: Pillow>=10.0.0; extra == "umi"

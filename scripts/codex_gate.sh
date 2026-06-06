@@ -962,6 +962,15 @@ run_rbpodo_status_fields_gate() {
 }
 
 run_rbpodo_joint_wrap_gate() {
+  python3 scripts/check_joint_range_policy.py
+  run_servo_gate_or_skip_missing_deps
+}
+
+run_rbpodo_joint_range_policy_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  python3 scripts/check_joint_range_policy.py --self-test
+  python3 scripts/check_joint_range_policy.py
   run_servo_gate_or_skip_missing_deps
 }
 
@@ -2762,6 +2771,9 @@ case "$TASK" in
     ;;
   RBPODO-JOINT-WRAP-01)
     run_rbpodo_joint_wrap_gate
+    ;;
+  RBPODO-JOINT-RANGE-POLICY-01|00_joint_range_policy_rbpodo_raw_controller_limits)
+    run_rbpodo_joint_range_policy_gate
     ;;
   RBPODO-BRINGUP-TOOLS-01)
     run_rbpodo_bringup_tools_gate

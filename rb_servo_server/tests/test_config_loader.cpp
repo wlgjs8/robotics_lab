@@ -39,6 +39,14 @@ bool near(double a, double b) {
     return std::abs(a - b) < 1e-12;
 }
 
+std::filesystem::path servoRoot() {
+    return std::filesystem::path(__FILE__).parent_path().parent_path();
+}
+
+std::string rb3UrdfPath() {
+    return (servoRoot() / "descriptions" / "urdf" / "rb3_730e.urdf").string();
+}
+
 class EnvGuard {
 public:
     EnvGuard(const char* name, const char* value) : name_(name) {
@@ -150,6 +158,10 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(real_default.left_robot.servo_alpha, 0.5));
         RB_CHECK(near(real_default.left_robot.command_timeout_sec, 0.02));
         RB_CHECK(!real_default.servo.send_servo_commands);
+        RB_CHECK(near(real_default.safety.q_min_deg[0], -360.0));
+        RB_CHECK(near(real_default.safety.q_min_deg[2], -360.0));
+        RB_CHECK(near(real_default.safety.q_max_deg[0], 360.0));
+        RB_CHECK(near(real_default.safety.q_max_deg[2], 360.0));
     }
 
     {
@@ -189,6 +201,8 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(pgmode.servo.rbpodo_async_streaming.reference_supervision.policy ==
                  rb_servo::RbpodoAsyncReferenceSupervisionPolicy::FaultLatch);
         RB_CHECK(pgmode.servo.rbpodo_async_streaming.diagnostics.publish_per_command_jsonl);
+        RB_CHECK(near(pgmode.safety.q_min_deg[0], -360.0));
+        RB_CHECK(near(pgmode.safety.q_max_deg[2], 360.0));
         RB_CHECK(pgmode.safety.controller_simulation_tracking_error_source ==
                  rb_servo::ControllerSimulationTrackingErrorSource::Reference);
         RB_CHECK(pgmode.safety.controller_simulation_physical_motion_policy ==
@@ -908,6 +922,58 @@ bool testRbpodoServoJParametersParseAndValidate() {
     return true;
 }
 
+bool testKinematicsSafetyLimitMismatchWarnsForRbpodo() {
+    EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+    const std::string path = writeTempConfig(
+        "rbpodo-kinematics-safety-mismatch",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.200\"\n"
+        "  operation_mode: simulation\n"
+        "  servo_t1_sec: 0.002\n"
+        "  servo_t2_sec: 0.05\n"
+        "  servo_gain: 1.0\n"
+        "  servo_alpha: 0.5\n"
+        "right_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.201\"\n"
+        "  operation_mode: simulation\n"
+        "  servo_t1_sec: 0.002\n"
+        "  servo_t2_sec: 0.05\n"
+        "  servo_gain: 1.0\n"
+        "  servo_alpha: 0.5\n"
+        "servo:\n"
+        "  rate_hz: 500\n"
+        "  send_servo_commands: false\n"
+        "  enable_realtime_priority: true\n"
+        "safety:\n"
+        "  q_min_deg: [-360, -360, -360, -360, -360, -360]\n"
+        "  q_max_deg: [360, 360, 360, 360, 360, 360]\n"
+        "  tracking_error_policy: fault_latch\n"
+        "  stop_both_arms_on_single_arm_error: true\n"
+        "  latch_fault_on_robot_state_error: true\n"
+        "kinematics:\n"
+        "  enable: true\n"
+        "  provider: pinocchio\n"
+        "  urdf: \"" + rb3UrdfPath() + "\"\n"
+        "  publish_tcp: true\n"
+    );
+
+    std::ostringstream warnings;
+    auto* const old_cerr = std::cerr.rdbuf(warnings.rdbuf());
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    std::cerr.rdbuf(old_cerr);
+    ::unlink(path.c_str());
+    RB_CHECK(cfg.kinematics.enable);
+    RB_CHECK(near(cfg.safety.q_min_deg[2], -360.0));
+    RB_CHECK(warnings.str().find("differs from rb3_730e URDF IK limit") != std::string::npos);
+    RB_CHECK(warnings.str().find("elbow_joint") != std::string::npos);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -922,5 +988,6 @@ int main() {
     if (!testRemovedRawScriptBackendRejected()) return 1;
     if (!testRobotIpEnvExpansion()) return 1;
     if (!testRbpodoServoJParametersParseAndValidate()) return 1;
+    if (!testKinematicsSafetyLimitMismatchWarnsForRbpodo()) return 1;
     return 0;
 }

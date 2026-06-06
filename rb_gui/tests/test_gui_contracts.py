@@ -1306,6 +1306,12 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(_format_joint_monitor_value(q_actual_deg, 2, valid=True, unit="rad"), "1.5708 rad")
         self.assertEqual(_format_joint_monitor_value(q_actual_deg, 3, valid=True, unit="rad"), "3.1416 rad")
 
+        raw_controller_q_actual_deg = (0.0, -30.0, 270.0, -317.0, 180.0, -180.0)
+        self.assertEqual(_format_joint_monitor_value(raw_controller_q_actual_deg, 2, valid=True, unit="deg"), "270.00 deg")
+        self.assertEqual(_format_joint_monitor_value(raw_controller_q_actual_deg, 3, valid=True, unit="deg"), "-317.00 deg")
+        self.assertEqual(_format_joint_monitor_value(raw_controller_q_actual_deg, 2, valid=True, unit="rad"), "4.7124 rad")
+        self.assertEqual(_format_joint_monitor_value(raw_controller_q_actual_deg, 3, valid=True, unit="rad"), "-5.5327 rad")
+
     def test_joint_monitor_invalid_state_does_not_fallback_to_zero(self):
         self.assertEqual(_format_joint_monitor_value(None, 0, valid=True, unit="deg"), "invalid")
         self.assertEqual(_format_joint_monitor_value((0.0, 1.0, 2.0), 0, valid=True, unit="deg"), "invalid")

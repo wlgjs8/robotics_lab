@@ -136,8 +136,8 @@ rb_servo::DualArmConfig testConfig() {
     cfg.servo.rate_hz = 200;
     cfg.servo.enable_realtime_priority = false;
     cfg.servo.send_servo_commands = false;
-    cfg.safety.q_min_deg = joints(-180.0);
-    cfg.safety.q_max_deg = joints(180.0);
+    cfg.safety.q_min_deg = rb_servo::rbpodoDefaultSafetyJointMinDeg();
+    cfg.safety.q_max_deg = rb_servo::rbpodoDefaultSafetyJointMaxDeg();
     cfg.safety.dq_max_deg_s = joints(10000.0);
     cfg.safety.ddq_max_deg_s2 = joints(100000.0);
     cfg.safety.max_tracking_error_deg = 1000.0;
