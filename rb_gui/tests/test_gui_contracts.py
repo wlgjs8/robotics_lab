@@ -10,6 +10,8 @@ import time
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from rb_servo_gui.app import (
@@ -285,6 +287,71 @@ class RecordingScene:
         handle.visible = kwargs.get("visible", True)
         self.labels.append((name, text, kwargs, handle))
         return handle
+
+
+class ShapeCheckingScene(RecordingScene):
+    def __init__(self):
+        super().__init__()
+        self.point_clouds = []
+        self.line_segments = []
+        self.meshes = []
+        self.icospheres = []
+        self.transform_controls = []
+
+    def add_point_cloud(self, name, points, colors, **kwargs):
+        points_array = np.asarray(points)
+        colors_array = np.asarray(colors)
+        self.assert_point_cloud_arrays(points_array, colors_array)
+        handle = RecordingSceneHandle()
+        handle.points = points_array
+        handle.colors = colors_array
+        handle.visible = kwargs.get("visible", True)
+        self.point_clouds.append((name, points_array, colors_array, kwargs, handle))
+        return handle
+
+    def add_line_segments(self, name, points, colors, **kwargs):
+        points_array = np.asarray(points)
+        colors_array = np.asarray(colors)
+        self.assert_line_segment_arrays(points_array, colors_array)
+        handle = RecordingSceneHandle()
+        handle.points = points_array
+        handle.colors = colors_array
+        handle.visible = kwargs.get("visible", True)
+        self.line_segments.append((name, points_array, colors_array, kwargs, handle))
+        return handle
+
+    def add_transform_controls(self, name, **kwargs):
+        handle = RecordingSceneHandle()
+        handle.position = kwargs.get("position")
+        handle.wxyz = kwargs.get("wxyz")
+        handle.visible = kwargs.get("visible", True)
+        self.transform_controls.append((name, kwargs, handle))
+        return handle
+
+    def add_mesh_trimesh(self, name, **kwargs):
+        handle = RecordingSceneHandle()
+        handle.position = kwargs.get("position")
+        handle.wxyz = kwargs.get("wxyz")
+        handle.visible = kwargs.get("visible", True)
+        self.meshes.append((name, kwargs, handle))
+        return handle
+
+    def add_icosphere(self, name, **kwargs):
+        handle = RecordingSceneHandle()
+        handle.position = kwargs.get("position")
+        handle.visible = kwargs.get("visible", True)
+        self.icospheres.append((name, kwargs, handle))
+        return handle
+
+    @staticmethod
+    def assert_point_cloud_arrays(points, colors):
+        assert points.ndim == 2 and points.shape[-1] == 3
+        assert colors.shape in {points.shape, (3,)}
+
+    @staticmethod
+    def assert_line_segment_arrays(points, colors):
+        assert points.ndim == 3 and points.shape[1:] == (2, 3)
+        assert colors.shape in {points.shape, (3,)}
 
 
 class RecordingServer:
@@ -1699,6 +1766,15 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("left tcp_ref_stand controller-sim reference", label_texts)
         self.assertIn("right tcp_actual_stand physical-state inspection", label_texts)
         self.assertIn("right tcp_ref_stand controller-sim reference", label_texts)
+
+    def test_scene_fallback_uses_viser_compatible_empty_geometry_arrays(self):
+        scene = ShapeCheckingScene()
+        server = RecordingServer(scene=scene)
+        handles = _add_scene_fallback(server)
+        self.assertNotIn("scene_error", handles)
+        self.assertIn("stand_mesh", handles)
+        self.assertGreaterEqual(len(scene.point_clouds), 4)
+        self.assertGreaterEqual(len(scene.line_segments), 1)
 
     def test_circle_overlay_points_support_standard_planes(self):
         xy = CircleOverlaySnapshot.parse(sample_circle_overlay(plane="xy", axis1_stand=None, axis2_stand=None))

@@ -34,6 +34,30 @@ _CIRCLE_OVERLAY_POINT_COUNT = 96
 _ASSET_INSTALL_HINT = "Install with python3 -m pip install -e rb_gui"
 
 
+def _points_array(points: Any = ()) -> Any:
+    import numpy as np
+
+    return np.asarray(points, dtype=np.float32).reshape((-1, 3))
+
+
+def _line_segments_array(points: Any = ()) -> Any:
+    import numpy as np
+
+    return np.asarray(points, dtype=np.float32).reshape((-1, 2, 3))
+
+
+def _colors_array(colors: Any = ()) -> Any:
+    import numpy as np
+
+    return np.asarray(colors, dtype=np.uint8).reshape((-1, 3))
+
+
+def _line_segment_colors_array(colors: Any = ()) -> Any:
+    import numpy as np
+
+    return np.asarray(colors, dtype=np.uint8).reshape((-1, 2, 3))
+
+
 def _repo_descriptions_dir() -> Path:
     workspace_root = Path(__file__).resolve().parents[2]
     candidates = (
@@ -245,14 +269,14 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
                 handles[f"{arm}_tcp_ref_trail_points"] = []
                 handles[f"{arm}_tcp_trail"] = server.scene.add_point_cloud(
                     f"/stand/{arm}_tcp_trail",
-                    points=(),
-                    colors=(),
+                    points=_points_array(),
+                    colors=_colors_array(),
                     point_size=0.012,
                 )
                 handles[f"{arm}_tcp_ref_trail"] = server.scene.add_point_cloud(
                     f"/stand/{arm}_tcp_ref_trail",
-                    points=(),
-                    colors=(),
+                    points=_points_array(),
+                    colors=_colors_array(),
                     point_size=0.012,
                 )
                 handles[f"{arm}_tcp_trail_color"] = actual_color
@@ -261,16 +285,16 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
             handles["circle_overlay_line_mode"] = "line_segments"
             handles["circle_overlay_line"] = server.scene.add_line_segments(
                 "/stand/circle_overlay",
-                points=(),
-                colors=(),
+                points=_line_segments_array(),
+                colors=_line_segment_colors_array(),
                 line_width=2.0,
             )
         elif hasattr(server.scene, "add_point_cloud"):
             handles["circle_overlay_line_mode"] = "point_cloud"
             handles["circle_overlay_line"] = server.scene.add_point_cloud(
                 "/stand/circle_overlay",
-                points=(),
-                colors=(),
+                points=_points_array(),
+                colors=_colors_array(),
                 point_size=0.008,
             )
         if hasattr(server.scene, "add_icosphere"):
@@ -283,8 +307,8 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         elif hasattr(server.scene, "add_point_cloud"):
             handles["circle_overlay_desired"] = server.scene.add_point_cloud(
                 "/stand/circle_overlay_desired",
-                points=(),
-                colors=(),
+                points=_points_array(),
+                colors=_colors_array(),
                 point_size=0.02,
             )
         _set_visible(handles.get("circle_overlay_line"), False)
@@ -295,11 +319,31 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         if urdf_loaded:
             return handles
         if hasattr(server.scene, "add_icosphere"):
-            handles["left_marker"] = server.scene.add_icosphere("/stand/left_state_marker", radius=0.025, color=(80, 160, 255), position=(0.1601, -0.1725, 0.68))
-            handles["right_marker"] = server.scene.add_icosphere("/stand/right_state_marker", radius=0.025, color=(255, 160, 80), position=(-0.1601, -0.1725, 0.68))
+            handles["left_marker"] = server.scene.add_icosphere(
+                "/stand/left_state_marker",
+                radius=0.025,
+                color=(80, 160, 255),
+                position=(0.1601, -0.1725, 0.68),
+            )
+            handles["right_marker"] = server.scene.add_icosphere(
+                "/stand/right_state_marker",
+                radius=0.025,
+                color=(255, 160, 80),
+                position=(-0.1601, -0.1725, 0.68),
+            )
         elif hasattr(server.scene, "add_point_cloud"):
-            handles["left_marker"] = server.scene.add_point_cloud("/stand/left_state_marker", points=((0.1601, -0.1725, 0.68),), colors=((80, 160, 255),), point_size=0.04)
-            handles["right_marker"] = server.scene.add_point_cloud("/stand/right_state_marker", points=((-0.1601, -0.1725, 0.68),), colors=((255, 160, 80),), point_size=0.04)
+            handles["left_marker"] = server.scene.add_point_cloud(
+                "/stand/left_state_marker",
+                points=_points_array(((0.1601, -0.1725, 0.68),)),
+                colors=_colors_array(((80, 160, 255),)),
+                point_size=0.04,
+            )
+            handles["right_marker"] = server.scene.add_point_cloud(
+                "/stand/right_state_marker",
+                points=_points_array(((-0.1601, -0.1725, 0.68),)),
+                colors=_colors_array(((255, 160, 80),)),
+                point_size=0.04,
+            )
     except Exception as exc:
         handles["scene_error"] = str(exc)
     return handles
@@ -350,8 +394,8 @@ def _update_tcp_trail(
         del points[:-_TCP_TRAIL_LIMIT]
     color = scene_handles.get(f"{key_prefix}_trail_color", (160, 160, 160))
     try:
-        handle.points = tuple(points)
-        handle.colors = tuple(color for _ in points)
+        handle.points = _points_array(tuple(points))
+        handle.colors = _colors_array(tuple(color for _ in points))
         handle.visible = visible
     except Exception:
         pass
@@ -409,11 +453,13 @@ def update_circle_overlay(scene_handles: dict[str, Any], overlay: CircleOverlayS
     try:
         if scene_handles.get("circle_overlay_line_mode") == "line_segments":
             segments = _circle_overlay_line_segments(points)
-            line.points = segments
-            line.colors = tuple((line_color, line_color) for _ in segments)
+            line.points = _line_segments_array(segments)
+            line.colors = _line_segment_colors_array(
+                tuple((line_color, line_color) for _ in segments)
+            )
         elif line is not None:
-            line.points = points
-            line.colors = tuple(line_color for _ in points)
+            line.points = _points_array(points)
+            line.colors = _colors_array(tuple(line_color for _ in points))
         _set_visible(line, True)
     except Exception:
         pass
@@ -423,8 +469,8 @@ def update_circle_overlay(scene_handles: dict[str, Any], overlay: CircleOverlayS
         desired.position = position
     except Exception:
         try:
-            desired.points = (position,)
-            desired.colors = ((230, 40, 40),)
+            desired.points = _points_array((position,))
+            desired.colors = _colors_array(((230, 40, 40),))
         except Exception:
             pass
     try:
