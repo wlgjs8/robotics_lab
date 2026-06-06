@@ -18,7 +18,7 @@ left_robot:
   ip: "172.28.60.200"
   operation_mode: real
   speed_bar: 0.05
-  servo_t1_sec: 0.01
+  servo_t1_sec: 0.002
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
@@ -29,13 +29,13 @@ right_robot:
   ip: "172.28.60.201"
   operation_mode: real
   speed_bar: 0.05
-  servo_t1_sec: 0.01
+  servo_t1_sec: 0.002
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
   disable_waiting_ack: {disable_waiting_ack}
 servo:
-  rate_hz: 100
+  rate_hz: 500
   send_servo_commands: {send_servo_commands}
 force_control:
   provider: null

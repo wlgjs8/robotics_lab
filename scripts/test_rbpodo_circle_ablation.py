@@ -49,7 +49,7 @@ left_robot:
   ip: "172.28.60.200"
   operation_mode: {operation_mode}
   speed_bar: 0.1
-  servo_t1_sec: 0.01
+  servo_t1_sec: 0.002
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
@@ -60,13 +60,13 @@ right_robot:
   ip: "172.28.60.201"
   operation_mode: {operation_mode}
   speed_bar: 0.1
-  servo_t1_sec: 0.01
+  servo_t1_sec: 0.002
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
   disable_waiting_ack: {ack}
 servo:
-  rate_hz: 100
+  rate_hz: 500
   send_servo_commands: true
   allow_servo_t1_rate_mismatch: false
   allow_controller_simulation_motion: true
@@ -99,7 +99,7 @@ def write_matrix(path: Path, config_name: str = "config.yaml") -> None:
     profile: circle_15cm_16s
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 1
     tracking_source: tcp_ref_stand
 """,
@@ -498,13 +498,13 @@ class RbpodoCircleAblationTest(unittest.TestCase):
                 "profile": "circle_15cm_16s",
                 "controller": "twist_stand",
                 "arm": "left",
-                "config_overrides": {"servo.rate_hz": 200},
+                "config_overrides": {"servo.rate_hz": 250},
             }
             ablation.validate_experiment(exp, 1)
             with self.assertRaisesRegex(ablation.AblationError, "servo rate/t1 mismatch"):
                 ablation.prepare_experiment_config(root, exp, root / "artifacts" / "01_bad_rate")
 
-    def test_config_override_accepts_200hz_when_both_t1_values_match(self) -> None:
+    def test_config_override_accepts_rate_when_both_t1_values_match(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             root = Path(tmp_text)
             config = root / "config.yaml"
@@ -516,16 +516,16 @@ class RbpodoCircleAblationTest(unittest.TestCase):
                 "controller": "twist_stand",
                 "arm": "left",
                 "config_overrides": {
-                    "servo.rate_hz": 200,
-                    "left_robot.servo_t1_sec": 0.005,
-                    "right_robot.servo_t1_sec": 0.005,
+                    "servo.rate_hz": 500,
+                    "left_robot.servo_t1_sec": 0.002,
+                    "right_robot.servo_t1_sec": 0.002,
                 },
             }
             ablation.validate_experiment(exp, 1)
             meta = ablation.prepare_experiment_config(root, exp, root / "artifacts" / "01_good_rate")
             resolved = Path(meta["resolved_config_path"]).read_text(encoding="utf-8")
-            self.assertIn("rate_hz: 200", resolved)
-            self.assertEqual(meta["servo_rate_hz"], 200.0)
+            self.assertIn("rate_hz: 500", resolved)
+            self.assertEqual(meta["servo_rate_hz"], 500.0)
             self.assertTrue(meta["servo_t1_rate_aligned"])
 
     def test_summary_aggregation_combines_fake_summaries(self) -> None:
@@ -533,14 +533,14 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             "name": "rbpodo_gene4s_feedback_kp2",
             "profile": "gene_15cm_4s",
             "controller": "twist_stand_feedback",
-            "command_rate_hz": 100,
+            "command_rate_hz": 500,
             "tracking_source": "tcp_ref_stand",
             "feedback_max_linear_m_s": 0.15,
             "feedback_max_angular_rad_s": 0.4,
         }
         meta = {
             "ack_policy": "ack_on",
-            "servo_rate_hz": 100,
+            "servo_rate_hz": 500,
             "servo_t2_sec": "0.03/0.08",
             "servo_t2_sec_left": 0.03,
             "servo_t2_sec_right": 0.08,
@@ -552,7 +552,7 @@ class RbpodoCircleAblationTest(unittest.TestCase):
         summary = {
             "controller": "twist_stand_feedback",
             "profile": "gene_15cm_4s",
-            "command_rate_hz": 100,
+            "command_rate_hz": 500,
             "tracking_source_used": "tcp_ref_stand",
             "feedback_kp_pos": 2.0,
             "feedback_kp_ori": 2.0,
@@ -563,7 +563,7 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             "p95_orientation_drift_rad": 0.001,
             "fit_center_error_m": 0.002,
             "estimated_latency_ms": 12.0,
-            "q_ref_update_rate_hz": 99.5,
+            "q_ref_update_rate_hz": 499.5,
             "send_duration_us": {"p95": 900.0},
             "feedback_saturation_count": 3,
             "ack_observed_count": 100,

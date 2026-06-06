@@ -13,7 +13,7 @@ Primary near-term goal:
 
 - mock mode runs without robots
 - Python sends UDP JSON commands
-- C++ server runs same-tick dual-arm `servo_j` style loop at 100–200 Hz
+- C++ server runs same-tick dual-arm `servo_j` style loop at 500 Hz
 - logs period/jitter and joint targets
 
 Later goals:
@@ -33,7 +33,7 @@ Do not implement these in Milestone 1:
 - force control in the active servo path
 - RealSense capture in this process
 - ROS2 integration
-- 500 Hz optimization
+- unsupported non-500 Hz robot-control profiles
 
 ## Architecture
 
@@ -45,7 +45,7 @@ CommandServer
         ↓
 CommandBuffer, lifecycle queue + latest-motion-wins
         ↓
-DualArmServoLoop, 100–200 Hz
+DualArmServoLoop, 500 Hz
         ↓
 TrajectoryFilter
         ↓
@@ -157,7 +157,7 @@ Expected:
 - `command_seq` changes from incoming commands
 - `left_mode/right_mode` show `JointTarget`
 - `left_q_sent_0` and `right_q_sent_0` move in opposite directions
-- `period_ms` is around 5 ms for 200 Hz
+- `period_ms` is around 2 ms for 500 Hz
 - `jitter_ms` is nonzero and meaningful
 - send timing columns are present for later skew analysis
 - after command timeout, mode falls back to `Hold`
@@ -189,7 +189,7 @@ Implement or refine:
    - ignore non-reset commands until reset is supported
 
 3. `CommandBuffer`
-   - current mutex version is acceptable for mock/100–200 Hz
+   - current mutex version is acceptable for hardware-free 500 Hz smoke tests
    - replace with priority-inheritance mutex or seqlock before high-RT testing
 
 4. `MockBackend`
@@ -279,7 +279,7 @@ If integrating `mo_forcecontroller`:
 
 - wrap it behind `ForceController`
 - make sampling time configurable
-- do not leave `Ts=0.002` hard-coded if the servo loop is 100–200 Hz
+- use the configured loop `dt_sec`; the supported robot-control target is `Ts=0.002`
 
 ## Coding rules
 

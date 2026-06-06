@@ -17,10 +17,10 @@ experiments:
     profile: circle_15cm_16s
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     server_config: rb_servo_server/config/dual_simulator_tcp_acceptance.yaml
     server_config_overrides:
-      servo.rate_hz: 100
+      servo.rate_hz: 500
       network.state_pub_rate_hz: 20
       cartesian_control.velocity_target_integration: previous_command
 """
@@ -32,7 +32,7 @@ class CircleAblationHelpersTest(unittest.TestCase):
         self.assertEqual(len(experiments), 1)
         self.assertEqual(experiments[0]["name"], "baseline_15cm_16s_twist_stand")
         self.assertEqual(experiments[0]["profile"], "circle_15cm_16s")
-        self.assertEqual(experiments[0]["server_config_overrides"]["servo.rate_hz"], 100)
+        self.assertEqual(experiments[0]["server_config_overrides"]["servo.rate_hz"], 500)
         ablation.validate_experiment(experiments[0], 1)
 
     def test_unknown_factor_is_rejected(self) -> None:
@@ -83,7 +83,7 @@ cartesian_control:
   velocity_target_integration: measured_actual
   path_kp_pos: 6.0
 servo:
-  rate_hz: 100
+  rate_hz: 500
 network:
   state_pub_rate_hz: 20
 """
@@ -92,18 +92,18 @@ network:
                 source=source,
                 target=target,
                 overrides={
-                    "servo.rate_hz": 200,
+                    "servo.rate_hz": 500,
                     "cartesian_control.velocity_target_integration": "previous_command",
-                    "servo.worker_read_rate_hz": 200,
+                    "servo.worker_read_rate_hz": 500,
                 },
                 allowed_overrides=ablation.SERVER_OVERRIDE_KEYS,
                 label="server config",
             )
             self.assertEqual(source.read_text(encoding="utf-8"), original)
             generated = target.read_text(encoding="utf-8")
-            self.assertIn("rate_hz: 200", generated)
+            self.assertIn("rate_hz: 500", generated)
             self.assertIn("velocity_target_integration: previous_command", generated)
-            self.assertIn("worker_read_rate_hz: 200", generated)
+            self.assertIn("worker_read_rate_hz: 500", generated)
 
     def test_summary_aggregation_combines_fake_summaries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -112,7 +112,7 @@ network:
             config.write_text(
                 """
 servo:
-  rate_hz: 100
+  rate_hz: 500
 cartesian_control:
   velocity_target_integration: previous_command
   path_kp_pos: 6.0
@@ -142,7 +142,7 @@ cartesian_control:
                     "_generated_server_config": str(config),
                     "diameter_m": 0.15,
                     "period_sec": 16.0,
-                    "command_rate_hz": 100,
+                    "command_rate_hz": 500,
                     "radius_gain": 0.98,
                     "rms_error_m": 0.002,
                     "p95_error_m": 0.003,
@@ -155,7 +155,7 @@ cartesian_control:
                     "_generated_server_config": str(config),
                     "diameter_m": 0.15,
                     "period_sec": 4.0,
-                    "command_rate_hz": 100,
+                    "command_rate_hz": 500,
                     "radius_gain": 0.9,
                     "rms_error_m": 0.011,
                     "p95_error_m": 0.021,

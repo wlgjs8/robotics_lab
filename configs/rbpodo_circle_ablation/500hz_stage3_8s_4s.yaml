@@ -2,7 +2,7 @@
 #
 # Purpose:
 # - Run the 15 cm / 8 s middle profile before the 15 cm / 4 s stress profile.
-# - Compare 100 Hz and 500 Hz with low feedback gains.
+# - Compare 500 Hz and 500 Hz with low feedback gains.
 # - Keep speed_bar 0.2 enabled first; speed_bar 0.5 rows are optional and
 #   disabled until the 0.2 rows are reviewed.
 #
@@ -13,12 +13,12 @@
 # - The 15 cm / 4 s rows remain stress evidence, not real-ready evidence.
 
 experiments:
-  - name: 15cm8s_fb_pos05_ori02_100hz_speed02
+  - name: 15cm8s_fb_pos05_ori02_500hz_speed02
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
     profile: circle_15cm_8s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -29,21 +29,21 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.2
       right_robot.speed_bar: 0.2
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.command_timeout_sec: 0.05
       right_robot.command_timeout_sec: 0.05
       cartesian_control.max_twist_linear_m_s: 0.08
       cartesian_control.max_twist_angular_rad_s: 0.3
       cartesian_control.max_linear_move_speed_m_s: 0.08
 
-  - name: 15cm8s_fb_pos08_ori02_100hz_speed02
+  - name: 15cm8s_fb_pos08_ori02_500hz_speed02
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
     profile: circle_15cm_8s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.8
@@ -54,9 +54,9 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.2
       right_robot.speed_bar: 0.2
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.command_timeout_sec: 0.05
       right_robot.command_timeout_sec: 0.05
       cartesian_control.max_twist_linear_m_s: 0.08
@@ -113,12 +113,12 @@ experiments:
       cartesian_control.max_twist_angular_rad_s: 0.3
       cartesian_control.max_linear_move_speed_m_s: 0.08
 
-  - name: 15cm4s_fb_pos05_ori00_100hz_speed02
+  - name: 15cm4s_fb_pos05_ori00_500hz_speed02
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -129,20 +129,20 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.2
       right_robot.speed_bar: 0.2
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.command_timeout_sec: 0.05
       right_robot.command_timeout_sec: 0.05
       cartesian_control.max_twist_linear_m_s: 0.15
       cartesian_control.max_twist_angular_rad_s: 0.4
 
-  - name: 15cm4s_fb_pos05_ori02_100hz_speed02
+  - name: 15cm4s_fb_pos05_ori02_500hz_speed02
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -153,20 +153,20 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.2
       right_robot.speed_bar: 0.2
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.command_timeout_sec: 0.05
       right_robot.command_timeout_sec: 0.05
       cartesian_control.max_twist_linear_m_s: 0.15
       cartesian_control.max_twist_angular_rad_s: 0.4
 
-  - name: 15cm4s_fb_pos08_ori02_100hz_speed02
+  - name: 15cm4s_fb_pos08_ori02_500hz_speed02
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.8
@@ -177,9 +177,9 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.2
       right_robot.speed_bar: 0.2
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.command_timeout_sec: 0.05
       right_robot.command_timeout_sec: 0.05
       cartesian_control.max_twist_linear_m_s: 0.15
@@ -260,13 +260,13 @@ experiments:
   # Optional speed_bar=0.5 follow-up rows. Leave disabled until every
   # speed_bar=0.2 row has clean timing, no physical-motion warning, and no
   # fault latch.
-  - name: 15cm8s_fb_pos05_ori02_100hz_speed05
+  - name: 15cm8s_fb_pos05_ori02_500hz_speed05
     enabled: false
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
     profile: circle_15cm_8s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -277,22 +277,22 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.5
       right_robot.speed_bar: 0.5
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.command_timeout_sec: 0.05
       right_robot.command_timeout_sec: 0.05
       cartesian_control.max_twist_linear_m_s: 0.08
       cartesian_control.max_twist_angular_rad_s: 0.3
       cartesian_control.max_linear_move_speed_m_s: 0.08
 
-  - name: 15cm8s_fb_pos08_ori02_100hz_speed05
+  - name: 15cm8s_fb_pos08_ori02_500hz_speed05
     enabled: false
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
     profile: circle_15cm_8s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.8
@@ -303,9 +303,9 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.5
       right_robot.speed_bar: 0.5
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.command_timeout_sec: 0.05
       right_robot.command_timeout_sec: 0.05
       cartesian_control.max_twist_linear_m_s: 0.08
@@ -364,13 +364,13 @@ experiments:
       cartesian_control.max_twist_angular_rad_s: 0.3
       cartesian_control.max_linear_move_speed_m_s: 0.08
 
-  - name: 15cm4s_fb_pos05_ori00_100hz_speed05
+  - name: 15cm4s_fb_pos05_ori00_500hz_speed05
     enabled: false
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -381,21 +381,21 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.5
       right_robot.speed_bar: 0.5
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.command_timeout_sec: 0.05
       right_robot.command_timeout_sec: 0.05
       cartesian_control.max_twist_linear_m_s: 0.15
       cartesian_control.max_twist_angular_rad_s: 0.4
 
-  - name: 15cm4s_fb_pos05_ori02_100hz_speed05
+  - name: 15cm4s_fb_pos05_ori02_500hz_speed05
     enabled: false
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -406,21 +406,21 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.5
       right_robot.speed_bar: 0.5
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.command_timeout_sec: 0.05
       right_robot.command_timeout_sec: 0.05
       cartesian_control.max_twist_linear_m_s: 0.15
       cartesian_control.max_twist_angular_rad_s: 0.4
 
-  - name: 15cm4s_fb_pos08_ori02_100hz_speed05
+  - name: 15cm4s_fb_pos08_ori02_500hz_speed05
     enabled: false
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.8
@@ -431,9 +431,9 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.5
       right_robot.speed_bar: 0.5
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.command_timeout_sec: 0.05
       right_robot.command_timeout_sec: 0.05
       cartesian_control.max_twist_linear_m_s: 0.15

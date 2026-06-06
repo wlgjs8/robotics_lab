@@ -2498,14 +2498,14 @@ bool testRealModeReadOnlyAndMotionEnvGates() {
              << "  backend_type: rbpodo\n"
              << "  run_mode: real\n"
              << "  ip: 172.28.60.200\n"
-             << "  servo_t1_sec: 0.005\n"
+             << "  servo_t1_sec: 0.002\n"
              << "  servo_t2_sec: 0.05\n"
              << "  servo_alpha: 0.5\n"
              << "right_robot:\n"
              << "  backend_type: rbpodo\n"
              << "  run_mode: real\n"
              << "  ip: 172.28.60.201\n"
-             << "  servo_t1_sec: 0.005\n"
+             << "  servo_t1_sec: 0.002\n"
              << "  servo_t2_sec: 0.05\n"
              << "  servo_alpha: 0.5\n"
              << "servo:\n"
@@ -2541,14 +2541,14 @@ bool testRealModeReadOnlyAndMotionEnvGates() {
              << "  backend_type: rbpodo\n"
              << "  run_mode: real\n"
              << "  ip: 172.28.60.200\n"
-             << "  servo_t1_sec: 0.005\n"
+             << "  servo_t1_sec: 0.002\n"
              << "  servo_t2_sec: 0.05\n"
              << "  servo_alpha: 0.5\n"
              << "right_robot:\n"
              << "  backend_type: rbpodo\n"
              << "  run_mode: real\n"
              << "  ip: 172.28.60.201\n"
-             << "  servo_t1_sec: 0.005\n"
+             << "  servo_t1_sec: 0.002\n"
              << "  servo_t2_sec: 0.05\n"
              << "  servo_alpha: 0.5\n"
              << "servo:\n"
@@ -2579,14 +2579,14 @@ bool testRealModeReadOnlyAndMotionEnvGates() {
              << "  backend_type: rbpodo\n"
              << "  run_mode: real\n"
              << "  ip: 172.28.60.200\n"
-             << "  servo_t1_sec: 0.005\n"
+             << "  servo_t1_sec: 0.002\n"
              << "  servo_t2_sec: 0.05\n"
              << "  servo_alpha: 0.5\n"
              << "right_robot:\n"
              << "  backend_type: rbpodo\n"
              << "  run_mode: real\n"
              << "  ip: 172.28.60.201\n"
-             << "  servo_t1_sec: 0.005\n"
+             << "  servo_t1_sec: 0.002\n"
              << "  servo_t2_sec: 0.05\n"
              << "  servo_alpha: 0.5\n"
              << "servo:\n"
@@ -5240,16 +5240,20 @@ bool testRbpodoControllerSimulationStreamingCartesianGate() {
              "cartesian_control_unavailable_operation_mode");
     RB_CHECK(!physical_mode_twist_observed);
 
-    rb_servo::DualArmConfig rbscript_cfg = cfg;
-    rbscript_cfg.left_robot.backend_type = rb_servo::BackendType::RbscriptTcp;
-    rbscript_cfg.right_robot.backend_type = rb_servo::BackendType::RbscriptTcp;
-    rb_servo::ServoSnapshot rbscript_snapshot;
-    bool rbscript_twist_observed = false;
-    RB_CHECK(runLeftTcpTwistStandCase(rbscript_cfg, &rbscript_snapshot, &rbscript_twist_observed));
-    RB_CHECK(rbscript_snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-    RB_CHECK(rbscript_snapshot.left_cartesian_solve.reason ==
+    rb_servo::DualArmConfig unsupported_backend_cfg = cfg;
+    unsupported_backend_cfg.left_robot.backend_type = rb_servo::BackendType::Simulator;
+    unsupported_backend_cfg.right_robot.backend_type = rb_servo::BackendType::Simulator;
+    rb_servo::ServoSnapshot unsupported_backend_snapshot;
+    bool unsupported_backend_twist_observed = false;
+    RB_CHECK(runLeftTcpTwistStandCase(
+        unsupported_backend_cfg,
+        &unsupported_backend_snapshot,
+        &unsupported_backend_twist_observed
+    ));
+    RB_CHECK(unsupported_backend_snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
+    RB_CHECK(unsupported_backend_snapshot.left_cartesian_solve.reason ==
              "cartesian_control_unavailable_backend");
-    RB_CHECK(!rbscript_twist_observed);
+    RB_CHECK(!unsupported_backend_twist_observed);
 
     rb_servo::DualArmConfig config_closed_cfg = cfg;
     config_closed_cfg.cartesian_control.allow_in_controller_simulation = false;

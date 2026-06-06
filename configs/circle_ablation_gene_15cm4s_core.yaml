@@ -1,45 +1,45 @@
 experiments:
-  - name: gene_4s_base_100cmd_100servo
+  - name: gene_4s_base_500cmd_500servo
     profile: gene_15cm_4s
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
 
-  - name: gene_4s_200cmd_100servo
+  - name: gene_4s_500cmd_500servo
     profile: gene_15cm_4s
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 200
+    command_rate_hz: 500
     repeat: 5
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
 
-  - name: gene_4s_200cmd_200servo
+  - name: gene_4s_500cmd_500servo
     profile: gene_15cm_4s
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 200
+    command_rate_hz: 500
     repeat: 5
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
     server_config_overrides:
-      servo.rate_hz: 200
+      servo.rate_hz: 500
       network.state_pub_rate_hz: 50
       servo.worker_read_rate_hz: 500
 
-  - name: gene_4s_100cmd_200servo
+  - name: gene_4s_500cmd_500servo
     profile: gene_15cm_4s
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
     server_config_overrides:
-      servo.rate_hz: 200
+      servo.rate_hz: 500
       network.state_pub_rate_hz: 50
       servo.worker_read_rate_hz: 500
 
@@ -48,7 +48,7 @@ experiments:
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
     server_config_overrides:
@@ -60,7 +60,7 @@ experiments:
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
     server_config_overrides:
@@ -72,7 +72,7 @@ experiments:
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
     server_config_overrides:
@@ -83,7 +83,7 @@ experiments:
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
     server_config_overrides:

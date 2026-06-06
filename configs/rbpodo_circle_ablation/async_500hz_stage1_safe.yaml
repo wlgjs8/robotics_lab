@@ -6,12 +6,12 @@
 # reported as controller_ack_observed.
 
 experiments:
-  - name: safe_5cm10s_100hz_ack_on_tuned_baseline
+  - name: safe_5cm10s_500hz_ack_on_tuned_baseline
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml
     profile: safe_5cm_10s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -22,9 +22,9 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.2
       right_robot.speed_bar: 0.2
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.disable_waiting_ack: false
       right_robot.disable_waiting_ack: false
       left_robot.command_timeout_sec: 0.05
@@ -36,7 +36,7 @@ experiments:
       cartesian_control.max_twist_linear_m_s: 0.15
       servo.rbpodo_async_streaming.enable: false
       servo.rbpodo_async_streaming.mode: disabled
-      servo.rbpodo_async_streaming.rate_hz: 100
+      servo.rbpodo_async_streaming.rate_hz: 500
       servo.rbpodo_async_streaming.queue_policy: latest_wins
       servo.rbpodo_async_streaming.max_pending_age_ms: 10
       servo.rbpodo_async_streaming.ack_supervision.enable: true

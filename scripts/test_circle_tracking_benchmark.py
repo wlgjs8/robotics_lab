@@ -62,7 +62,7 @@ left_robot:
   run_mode: real
   ip: "172.28.60.200"
   operation_mode: simulation
-  servo_t1_sec: 0.01
+  servo_t1_sec: 0.002
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
@@ -72,13 +72,13 @@ right_robot:
   run_mode: real
   ip: "172.28.60.201"
   operation_mode: simulation
-  servo_t1_sec: 0.01
+  servo_t1_sec: 0.002
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
   disable_waiting_ack: false
 servo:
-  rate_hz: 100
+  rate_hz: 500
   send_servo_commands: true
   allow_controller_simulation_motion: true
   allow_controller_simulation_diagnostics_suspect: false
@@ -124,7 +124,7 @@ def rbpodo_args(tmp: Path, config: Path, pgmode: Path, **overrides: object) -> a
         "diameter_m": None,
         "period_sec": None,
         "repeat": 1,
-        "command_rate_hz": 100.0,
+        "command_rate_hz": 500.0,
         "warmup_sec": 0.0,
         "settle_sec": 0.0,
         "startup_timeout_sec": 1.0,
@@ -428,7 +428,7 @@ cartesian_control:
                 diameter_m=None,
                 period_sec=None,
                 repeat=1,
-                command_rate_hz=100.0,
+                command_rate_hz=500.0,
                 warmup_sec=0.0,
                 settle_sec=0.0,
                 allow_fast_stress=False,

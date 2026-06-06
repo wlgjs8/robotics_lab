@@ -8,14 +8,14 @@ It is not the VLA model, not the RealSense recorder, and not the high-level bima
 
 ```text
 Python policy / teleop
-  10–30 Hz UDP JSON command
+  500 Hz UDP JSON command stream
         ↓
 CommandServer
         ↓
 CommandBuffer
         ↓
 DualArmServoLoop
-  100–200 Hz initially
+  500 Hz supported robot-control loop
         ↓
 IRobotBackend
   MockBackend / RbpodoBackend

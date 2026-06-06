@@ -553,7 +553,7 @@ Example config fields:
 
 ```yaml
 action_source: spacemouse_joint_velocity
-command_rate_hz: 100
+command_rate_hz: 500
 spacemouse:
   selected_arm: left
   max_joint_velocity_deg_s: [5, 5, 5, 8, 8, 10]
@@ -563,8 +563,9 @@ spacemouse:
   deadman_button: 0
 ```
 
-The default `command_rate_hz` is 100 Hz. Valid values are 1-500 Hz; the policy
-runner should not attempt to publish above the servo-loop frequency.
+The default `command_rate_hz` is 500 Hz. Valid values are 1-500 Hz; lower values
+may be loaded for compatibility, but the supported robot-control default is 500
+Hz and should match the servo-loop frequency.
 
 Hardware-free tests use `FakeSpaceMouseReader`. Real HID support is optional:
 
@@ -604,7 +605,7 @@ Example config fields:
 action_source: spacemouse_cartesian
 runtime:
   startup_timeout_sec: 5.0
-command_rate_hz: 100
+command_rate_hz: 500
 spacemouse_cartesian:
   selected_arm: left
   frame: local
@@ -633,7 +634,7 @@ command packet so the two arms are updated together:
 
 ```yaml
 action_source: dual_spacemouse_cartesian
-command_rate_hz: 100
+command_rate_hz: 500
 spacemouse_cartesian_dual:
   frame: local
   max_linear_velocity_m_s: 0.03

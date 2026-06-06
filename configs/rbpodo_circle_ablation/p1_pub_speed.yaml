@@ -18,7 +18,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -37,7 +37,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -56,7 +56,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -75,7 +75,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -94,7 +94,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -113,7 +113,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -132,7 +132,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -151,7 +151,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -170,7 +170,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.8
@@ -189,7 +189,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.8
@@ -208,7 +208,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.8
@@ -227,7 +227,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.8

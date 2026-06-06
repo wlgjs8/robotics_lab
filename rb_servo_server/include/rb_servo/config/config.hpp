@@ -29,28 +29,20 @@ struct BackendConfig {
     double rbsim_stop_timeout_sec = 0.2;
     double rbsim_reset_timeout_sec = 0.2;
 
-    int command_port = 5000;
-    int data_port = 5001;
     double command_timeout_sec = 0.2;
-    double read_timeout_sec = 0.2;
-    double connect_timeout_sec = 1.0;
-    double script_t1_sec = 0.008;
-    double script_t2_sec = 0.05;
-    double script_gain = 1.0;
-    double script_alpha = 0.5;
 
     JointArray initial_q_deg{};
 
     double speed_bar = 0.1;
 
-    double servo_t1_sec = 0.01;
+    double servo_t1_sec = 0.002;
     double servo_t2_sec = 0.05;
     double servo_gain = 1.0;
     double servo_alpha = 0.5;
 
     // Deprecated rbpodo aliases. Kept synchronized with canonical fields while
     // old configs migrate.
-    double servo_time_sec = 0.01;
+    double servo_time_sec = 0.002;
     double servo_lookahead_sec = 0.05;
     double servo_acc = 0.5;
 
@@ -177,7 +169,7 @@ struct SafetyConfig {
 };
 
 struct ServoConfig {
-    int rate_hz = 200;
+    int rate_hz = 500;
     double command_timeout_sec = 0.2;
     ServoIoModel io_model = ServoIoModel::Direct;
     ControlMode startup_mode = ControlMode::Hold;
@@ -191,7 +183,7 @@ struct ServoConfig {
     bool enable_realtime_priority = true;
     int realtime_priority = 80;
     int cpu_core = -1;
-    double worker_read_period_sec = 0.01;
+    double worker_read_period_sec = 0.002;
 
     // Use actual period for logging, but cap filter dt so one late tick does not
     // create an unexpectedly large joint step.

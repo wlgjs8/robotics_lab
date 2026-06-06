@@ -2,8 +2,8 @@
 #
 # Purpose:
 # - After the separate 500 Hz no-op gate, compare the safe 5 cm / 10 s circle
-#   at 100 Hz and 500 Hz before any 15 cm profile.
-# - Keep state publication at 100 Hz and use low feedback gains.
+#   at 500 Hz and 500 Hz before any 15 cm profile.
+# - Keep state publication at 500 Hz and use low feedback gains.
 # - Circle rows intentionally keep controller-simulation Cartesian enabled;
 #   the no-op runner disables Cartesian only in its artifact-local resolved
 #   config.
@@ -15,12 +15,12 @@
 # - Not physical real Cartesian readiness.
 
 experiments:
-  - name: safe_5cm10s_fb_pos05_ori02_100hz_speed02
+  - name: safe_5cm10s_fb_pos05_ori02_500hz_speed02
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml
     profile: safe_5cm_10s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -31,9 +31,9 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.2
       right_robot.speed_bar: 0.2
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.command_timeout_sec: 0.05
       right_robot.command_timeout_sec: 0.05
       cartesian_control.max_twist_linear_m_s: 0.15

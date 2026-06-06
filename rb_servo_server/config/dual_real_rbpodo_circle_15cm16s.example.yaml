@@ -18,12 +18,10 @@ left_robot:
   name: left_rbpodo_circle_15cm16s
   ip: "172.28.60.200"
   operation_mode: simulation
-  command_port: 5000
-  data_port: 5001
   command_timeout_sec: 0.05
   initial_q_deg: [0, -30, 80, 0, 60, 0]
   speed_bar: 0.1
-  servo_t1_sec: 0.01
+  servo_t1_sec: 0.002
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
@@ -35,12 +33,10 @@ right_robot:
   name: right_rbpodo_circle_15cm16s
   ip: "172.28.60.201"
   operation_mode: simulation
-  command_port: 5000
-  data_port: 5001
   command_timeout_sec: 0.05
   initial_q_deg: [0, -30, 80, 0, 60, 0]
   speed_bar: 0.1
-  servo_t1_sec: 0.01
+  servo_t1_sec: 0.002
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
@@ -53,7 +49,7 @@ right_mount:
   base_pose_in_stand: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
 
 servo:
-  rate_hz: 100
+  rate_hz: 500
   command_timeout_sec: 0.2
   io_model: direct
   startup_mode: Hold

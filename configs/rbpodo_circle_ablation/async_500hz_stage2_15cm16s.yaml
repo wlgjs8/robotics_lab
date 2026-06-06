@@ -6,12 +6,12 @@
 # controller_ack_observed.
 
 experiments:
-  - name: 15cm16s_100hz_ack_on_pos05_ori02_t2_008
+  - name: 15cm16s_500hz_ack_on_pos05_ori02_t2_008
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml
     profile: circle_15cm_16s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -22,9 +22,9 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.2
       right_robot.speed_bar: 0.2
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.disable_waiting_ack: false
       right_robot.disable_waiting_ack: false
       left_robot.command_timeout_sec: 0.05
@@ -35,7 +35,7 @@ experiments:
       right_robot.servo_alpha: 0.8
       servo.rbpodo_async_streaming.enable: false
       servo.rbpodo_async_streaming.mode: disabled
-      servo.rbpodo_async_streaming.rate_hz: 100
+      servo.rbpodo_async_streaming.rate_hz: 500
       servo.rbpodo_async_streaming.queue_policy: latest_wins
       servo.rbpodo_async_streaming.max_pending_age_ms: 10
       servo.rbpodo_async_streaming.ack_supervision.enable: true
@@ -52,12 +52,12 @@ experiments:
       servo.rbpodo_async_streaming.reference_supervision.policy: fault_latch
       servo.rbpodo_async_streaming.diagnostics.publish_per_command_jsonl: false
 
-  - name: 15cm16s_100hz_ack_on_pos10_ori05_t2_008
+  - name: 15cm16s_500hz_ack_on_pos10_ori05_t2_008
     config: rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml
     profile: circle_15cm_16s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 1.0
@@ -68,9 +68,9 @@ experiments:
       network.state_pub_rate_hz: 100
       left_robot.speed_bar: 0.2
       right_robot.speed_bar: 0.2
-      servo.rate_hz: 100
-      left_robot.servo_t1_sec: 0.01
-      right_robot.servo_t1_sec: 0.01
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.disable_waiting_ack: false
       right_robot.disable_waiting_ack: false
       left_robot.command_timeout_sec: 0.05
@@ -81,7 +81,7 @@ experiments:
       right_robot.servo_alpha: 0.8
       servo.rbpodo_async_streaming.enable: false
       servo.rbpodo_async_streaming.mode: disabled
-      servo.rbpodo_async_streaming.rate_hz: 100
+      servo.rbpodo_async_streaming.rate_hz: 500
       servo.rbpodo_async_streaming.queue_policy: latest_wins
       servo.rbpodo_async_streaming.max_pending_age_ms: 10
       servo.rbpodo_async_streaming.ack_supervision.enable: true

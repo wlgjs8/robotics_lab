@@ -868,7 +868,7 @@ The rbpodo tuning report classifies rows as:
 - `saturation_limited`: feedback saturation ratio is above the candidate cutoff.
 - `orientation_unstable`: p95 orientation drift is above the candidate cutoff.
 - `center_drift_limited`: 4 s fit-center drift makes radius gain misleading.
-- `state_pub_speed_mismatch`: 100 Hz state publication with `speed_bar=0.1` stress behavior.
+- `state_pub_speed_mismatch`: state publication and `speed_bar=0.1` stress behavior.
 - `stress_only`: incomplete or heavily penalized evidence that should not be promoted.
 
 The separate `error_classification` column decomposes measurement/tracking

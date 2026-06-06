@@ -95,7 +95,7 @@ filter_dt_min_ratio: 0.5
 filter_dt_max_ratio: 1.5
 ```
 
-At 200 Hz this means filter dt is constrained to 2.5–7.5 ms by default. One late OS tick no longer permits a proportionally large joint step.
+At 500 Hz this means filter dt is constrained to 1.0-3.0 ms by default. One late OS tick no longer permits a proportionally large joint step.
 
 ### 7. Acceleration clamp no longer overshoots the velocity-limited target
 

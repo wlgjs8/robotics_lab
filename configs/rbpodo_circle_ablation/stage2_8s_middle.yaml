@@ -23,7 +23,7 @@ experiments:
     profile: circle_15cm_8s
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     config_overrides:
@@ -36,7 +36,7 @@ experiments:
     profile: circle_15cm_8s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -53,7 +53,7 @@ experiments:
     profile: circle_15cm_8s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -70,7 +70,7 @@ experiments:
     profile: circle_15cm_8s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.8
@@ -87,7 +87,7 @@ experiments:
     profile: circle_15cm_8s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.8
@@ -104,7 +104,7 @@ experiments:
     profile: circle_15cm_8s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -121,7 +121,7 @@ experiments:
     profile: circle_15cm_8s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.8

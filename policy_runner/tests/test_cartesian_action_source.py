@@ -763,11 +763,11 @@ class CartesianActionSourceTest(unittest.TestCase):
         self.assertEqual(cfg.spacemouse_cartesian.max_angular_velocity_rad_s, 0.2)
         self.assertTrue(cfg.spacemouse_cartesian.require_deadman)
 
-    def test_default_command_rate_hz_is_100(self):
+    def test_default_command_rate_hz_is_500(self):
         cfg = config_from_mapping({"schema": "robotics_lab.policy_runner.v1"})
 
-        self.assertEqual(cfg.command_rate_hz, 100.0)
-        self.assertEqual(cfg.spacemouse_cartesian.command_rate_hz, 100.0)
+        self.assertEqual(cfg.command_rate_hz, 500.0)
+        self.assertEqual(cfg.spacemouse_cartesian.command_rate_hz, 500.0)
 
     def test_command_rate_hz_below_one_rejected(self):
         with self.assertRaisesRegex(ValueError, "command_rate_hz must be in"):

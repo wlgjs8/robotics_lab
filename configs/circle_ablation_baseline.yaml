@@ -3,7 +3,7 @@ experiments:
     profile: safe_5cm_10s
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     server_config: rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml
 
@@ -11,7 +11,7 @@ experiments:
     profile: circle_15cm_16s
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     server_config: rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml
 
@@ -19,7 +19,7 @@ experiments:
     profile: circle_15cm_16s
     controller: twist_local
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     server_config: rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml
 

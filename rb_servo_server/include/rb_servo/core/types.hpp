@@ -81,7 +81,6 @@ enum class BackendType {
     Rbpodo,
     Mock,
     Simulator,
-    RbscriptTcp,
     Rbsim = Simulator  // Deprecated compatibility name.
 };
 

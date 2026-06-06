@@ -11,28 +11,20 @@ evidence for the primary vendor-library real backend. It does not authorize
 real Cartesian motion, `rt_script`, collision-threshold changes, or unattended
 robot motion.
 
-The current rbpodo comparison profiles are:
+The supported rbpodo profile is:
 
 | Profile | Template | Rate | `servo_t1_sec` | ACK policy | Command/state endpoints | Default motion |
 | --- | --- | ---: | ---: | --- | --- | --- |
-| `100hz_ack` | `rb_servo_server/config/dual_real_100hz_ack.example.yaml` | 100 Hz | 0.01 s | ACK-on | `50031` / `50131` | disabled |
-| `200hz_ack` | `rb_servo_server/config/dual_real_200hz_ack.example.yaml` | 200 Hz | 0.005 s | ACK-on | `50032` / `50132` | disabled |
-| `200hz_no_ack` | `rb_servo_server/config/dual_real_200hz_no_ack.example.yaml` | 200 Hz | 0.005 s | ACK-off | `50033` / `50133` | disabled |
+| `500hz_ack` | `rb_servo_server/config/dual_real.example.yaml` | 500 Hz | 0.002 s | ACK-on | site-local | disabled |
 
-The controller-simulation no-op templates for supervised `pgmode` simulation
-are separate:
-
-| Profile | Template | Rate | ACK policy | Command/state endpoints |
-| --- | --- | ---: | --- | --- |
-| `100hz_ack` | `rb_servo_server/config/dual_real_rbpodo_sim_noop_100hz_ack.example.yaml` | 100 Hz | ACK-on | `50041` / `50141` |
-| `200hz_ack` | `rb_servo_server/config/dual_real_rbpodo_sim_noop_200hz_ack.example.yaml` | 200 Hz | ACK-on | `50042` / `50142` |
-| `200hz_no_ack` | `rb_servo_server/config/dual_real_rbpodo_sim_noop_200hz_no_ack.example.yaml` | 200 Hz | ACK-off | `50043` / `50143` |
+Controller-simulation no-op acceptance is handled by
+`scripts/rbpodo_500hz_acceptance.py` and 500 Hz rbpodo controller-simulation
+configs.
 
 Circle controller-simulation templates are documented in
 `docs/runbooks/rbpodo_controller_sim_circle.md`.
 
-`servo_t1_sec` must match the command period. For 100 Hz the period is
-0.01 s; for 200 Hz it is 0.005 s.
+`servo_t1_sec` must match the supported command period: 0.002 s at 500 Hz.
 
 ## Servo J Parameters
 
@@ -57,11 +49,10 @@ Do not use `servo_acc`; use `servo_alpha`. Do not use
 `servo_lookahead_sec`; use `servo_t2_sec`. Old aliases are deprecated and
 exist only for migration.
 
-For real motion configs, a rate mismatch should fail unless an explicit
-acceptance task allows it:
+For real/controller-simulation configs, a rate mismatch should fail unless an
+explicit acceptance task allows it:
 
-- 100 Hz -> `servo_t1_sec: 0.01`
-- 200 Hz -> `servo_t1_sec: 0.005`
+- 500 Hz -> `servo_t1_sec: 0.002`
 
 ## ACK Semantics
 
@@ -148,30 +139,26 @@ RB_ALLOW_REAL_CARTESIAN=1
    It sends a target equal to current `q_actual_deg`. The same tool run must
    use `--set-pgmode-simulation` or `--verify-pgmode-simulation`, and the config
    must set `operation_mode: simulation`.
-4. 100 Hz ACK-on no-op / tiny simulation-mode evidence.
-5. 200 Hz ACK-on evidence.
-6. 200 Hz ACK-off evidence, with `--allow-ack-disabled`.
-7. `tiny_joint_motion`: reserved for a future motion runbook. Do not run it
+4. 500 Hz ACK-on no-op / tiny simulation-mode evidence.
+5. ACK-off diagnostics, if explicitly requested, are not supported motion
+   profiles and must not be treated as controller-ACK acceptance.
+6. `tiny_joint_motion`: reserved for a future motion runbook. Do not run it
    from this runbook and do not treat this runbook as approval.
 
 ## Config Handling
 
-`rb_servo_server/config/dual_real.example.yaml` and the named
-`dual_real_*_ack.example.yaml` files are templates, not ready-to-run real motion
-configs. Copy one tracked example to `rb_servo_server/config/local/`, review the
-local values, and keep `send_servo_commands: false` for read-only acceptance.
+`rb_servo_server/config/dual_real.example.yaml` is a template, not a
+ready-to-run real motion config. Copy it to `rb_servo_server/config/local/`,
+review the local values, and keep `send_servo_commands: false` for read-only
+acceptance.
 The `config/local` directory is user-owned; tracked local YAML samples are not
 production configuration.
 
 Example copy commands:
 
 ```bash
-cp rb_servo_server/config/dual_real_100hz_ack.example.yaml \
-  rb_servo_server/config/local/dual_real_100hz_ack.yaml
-cp rb_servo_server/config/dual_real_200hz_ack.example.yaml \
-  rb_servo_server/config/local/dual_real_200hz_ack.yaml
-cp rb_servo_server/config/dual_real_200hz_no_ack.example.yaml \
-  rb_servo_server/config/local/dual_real_200hz_no_ack.yaml
+cp rb_servo_server/config/dual_real.example.yaml \
+  rb_servo_server/config/local/dual_real_500hz_ack.yaml
 ```
 
 For controller bring-up diagnostics, the ACK-on read-only examples enable:
@@ -201,9 +188,8 @@ near `-317 deg` with range `[-190, 190]` and period `360` is equivalent to about
 `43 deg` for startup range diagnostics. Motion target wrapping remains disabled
 to avoid discontinuities.
 
-Controller-simulation no-op comparison is separate from the read-only templates.
-Use a local copy of
-`rb_servo_server/config/dual_real_rbpodo_sim_noop_200hz_ack.example.yaml` only
+Controller-simulation no-op acceptance is separate from the read-only template.
+Use an artifact-local or site-local 500 Hz controller-simulation config only
 after controller `pgmode` simulation has been verified by the acceptance tool
 and the normal real-controller/motion env gates are set. The local copy must
 explicitly set:
@@ -268,46 +254,16 @@ Use a local copy under `rb_servo_server/config/local/`, not a tracked template.
 ```bash
 RB_ALLOW_REAL_ROBOT=1 \
 python3 scripts/rbpodo_servo_acceptance.py \
-  --config rb_servo_server/config/local/dual_real_100hz_ack.yaml \
+  --config rb_servo_server/config/local/dual_real_500hz_ack.yaml \
   --arm left \
   --mode read_only \
-  --profile 100hz_ack \
+  --profile 500hz_ack \
   --duration-sec 10 \
-  --artifact-dir artifacts/rbpodo_acceptance/100hz_ack_read_only_left \
+  --artifact-dir artifacts/rbpodo_acceptance/500hz_ack_read_only_left \
   --i-understand-this-connects-to-real-controller
 ```
 
-## 200 Hz ACK-On Read-Only
-
-```bash
-RB_ALLOW_REAL_ROBOT=1 \
-python3 scripts/rbpodo_servo_acceptance.py \
-  --config rb_servo_server/config/local/dual_real_200hz_ack.yaml \
-  --arm left \
-  --mode read_only \
-  --profile 200hz_ack \
-  --duration-sec 10 \
-  --artifact-dir artifacts/rbpodo_acceptance/200hz_ack_read_only_left \
-  --i-understand-this-connects-to-real-controller
-```
-
-## 200 Hz ACK-Off Read-Only
-
-ACK-off still requires explicit acknowledgement even in read-only acceptance,
-because the run is evaluating a profile where immediate command ACK is disabled.
-
-```bash
-RB_ALLOW_REAL_ROBOT=1 \
-python3 scripts/rbpodo_servo_acceptance.py \
-  --config rb_servo_server/config/local/dual_real_200hz_no_ack.yaml \
-  --arm left \
-  --mode read_only \
-  --profile 200hz_no_ack \
-  --allow-ack-disabled \
-  --duration-sec 10 \
-  --artifact-dir artifacts/rbpodo_acceptance/200hz_no_ack_read_only_left \
-  --i-understand-this-connects-to-real-controller
-```
+The local config must remain 500 Hz with `servo_t1_sec: 0.002` on both arms.
 
 ## Artifacts
 

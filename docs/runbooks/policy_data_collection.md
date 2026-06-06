@@ -101,7 +101,7 @@ before training data is promoted:
   "schema": "robotics_lab.policy_runner.dataset_metadata.v1",
   "git_commit": "string",
   "config_hash": "sha256 or string",
-  "backend_type": "mock | simulator | rbpodo | rbscript_tcp-experimental",
+  "backend_type": "mock | simulator | rbpodo",
   "run_mode": "mock | simulation | real",
   "operation_mode": "simulation | real | unknown",
   "physical_motion_expected": false,

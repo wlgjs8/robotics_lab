@@ -4,7 +4,6 @@
 
 #include "rb_servo/robot/mock_backend.hpp"
 #include "rb_servo/robot/rbpodo_backend.hpp"
-#include "rb_servo/robot/rbscript_tcp_backend.hpp"
 #include "rb_servo/robot/rbsim_backend.hpp"
 
 namespace rb_servo {
@@ -18,8 +17,6 @@ std::unique_ptr<IRobotBackend> BackendFactory::create(
             return std::make_unique<MockBackend>(arm_id, config);
         case BackendType::Rbpodo:
             return std::make_unique<RbpodoBackend>(arm_id, config);
-        case BackendType::RbscriptTcp:
-            return std::make_unique<RbscriptTcpBackend>(arm_id, config);
         case BackendType::Simulator:
             return std::make_unique<RbsimBackend>(arm_id, config);
     }

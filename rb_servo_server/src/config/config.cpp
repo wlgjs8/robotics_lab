@@ -174,7 +174,6 @@ BackendType parseBackendType(const YAML::Node& node, const std::string& path) {
     if (value == "mock") return BackendType::Mock;
     if (value == "rbpodo") return BackendType::Rbpodo;
     if (value == "simulator") return BackendType::Simulator;
-    if (value == "rbscript_tcp") return BackendType::RbscriptTcp;
     if (value == "rbsim" || value == "rbsim_local") {
         warnDeprecatedValue(path, value, "simulator");
         return BackendType::Simulator;
@@ -292,6 +291,56 @@ ControllerSimulationPhysicalMotionPolicy parseControllerSimulationPhysicalMotion
 
 std::string getString(const YAML::Node& sec, const std::string& key, const std::string& fallback, const std::string& path) {
     return has(sec, key) ? asString(sec[key], path + "." + key) : fallback;
+}
+
+bool isEnvNameStart(char c) {
+    const unsigned char value = static_cast<unsigned char>(c);
+    return std::isalpha(value) || c == '_';
+}
+
+bool isEnvNameChar(char c) {
+    const unsigned char value = static_cast<unsigned char>(c);
+    return std::isalnum(value) || c == '_';
+}
+
+std::string expandEnvReferences(
+    const std::string& value,
+    const std::string& field_path,
+    const YAML::Node& node
+) {
+    std::string expanded;
+    std::size_t cursor = 0;
+    while (cursor < value.size()) {
+        const std::size_t start = value.find("${", cursor);
+        if (start == std::string::npos) {
+            expanded.append(value.substr(cursor));
+            break;
+        }
+        expanded.append(value.substr(cursor, start - cursor));
+        const std::size_t end = value.find('}', start + 2);
+        if (end == std::string::npos) {
+            fail(field_path + " contains an unterminated environment reference", node);
+        }
+        const std::string name = value.substr(start + 2, end - start - 2);
+        if (name.empty() || !isEnvNameStart(name.front())) {
+            fail(field_path + " contains an invalid environment variable reference: ${" + name + "}", node);
+        }
+        for (char c : name) {
+            if (!isEnvNameChar(c)) {
+                fail(field_path + " contains an invalid environment variable reference: ${" + name + "}", node);
+            }
+        }
+        const char* env_value = std::getenv(name.c_str());
+        if (!env_value) {
+            fail(field_path + " references unset environment variable ${" + name + "}", node);
+        }
+        if (std::string(env_value).empty()) {
+            fail(field_path + " references empty environment variable ${" + name + "}", node);
+        }
+        expanded.append(env_value);
+        cursor = end + 1;
+    }
+    return expanded;
 }
 
 void applySimulatorTimeoutAlias(
@@ -463,15 +512,7 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
         "rbsim_send_timeout_sec",
         "rbsim_stop_timeout_sec",
         "rbsim_reset_timeout_sec",
-        "command_port",
-        "data_port",
         "command_timeout_sec",
-        "read_timeout_sec",
-        "connect_timeout_sec",
-        "script_t1_sec",
-        "script_t2_sec",
-        "script_gain",
-        "script_alpha",
         "initial_q_deg",
         "speed_bar",
         "servo_t1_sec",
@@ -487,7 +528,9 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
     if (has(sec, "backend_type")) cfg->backend_type = parseBackendType(sec["backend_type"], path + ".backend_type");
     if (has(sec, "run_mode")) cfg->run_mode = parseRunMode(sec["run_mode"], path + ".run_mode");
     cfg->name = getString(sec, "name", cfg->name, path);
-    cfg->ip = getString(sec, "ip", cfg->ip, path);
+    cfg->ip = has(sec, "ip")
+        ? expandEnvReferences(asString(sec["ip"], path + ".ip"), path + ".ip", sec["ip"])
+        : cfg->ip;
     cfg->operation_mode = getString(sec, "operation_mode", cfg->operation_mode, path);
 
     if (has(sec, "simulator_control_endpoint") && has(sec, "rbsim_control_endpoint")) {
@@ -523,15 +566,7 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
     applySimulatorTimeoutAlias(sec, "simulator_stop_timeout_sec", "rbsim_stop_timeout_sec", path, &cfg->rbsim_stop_timeout_sec);
     applySimulatorTimeoutAlias(sec, "simulator_reset_timeout_sec", "rbsim_reset_timeout_sec", path, &cfg->rbsim_reset_timeout_sec);
 
-    if (has(sec, "command_port")) cfg->command_port = asInt(sec["command_port"], path + ".command_port");
-    if (has(sec, "data_port")) cfg->data_port = asInt(sec["data_port"], path + ".data_port");
     if (has(sec, "command_timeout_sec")) cfg->command_timeout_sec = asDouble(sec["command_timeout_sec"], path + ".command_timeout_sec");
-    if (has(sec, "read_timeout_sec")) cfg->read_timeout_sec = asDouble(sec["read_timeout_sec"], path + ".read_timeout_sec");
-    if (has(sec, "connect_timeout_sec")) cfg->connect_timeout_sec = asDouble(sec["connect_timeout_sec"], path + ".connect_timeout_sec");
-    if (has(sec, "script_t1_sec")) cfg->script_t1_sec = asDouble(sec["script_t1_sec"], path + ".script_t1_sec");
-    if (has(sec, "script_t2_sec")) cfg->script_t2_sec = asDouble(sec["script_t2_sec"], path + ".script_t2_sec");
-    if (has(sec, "script_gain")) cfg->script_gain = asDouble(sec["script_gain"], path + ".script_gain");
-    if (has(sec, "script_alpha")) cfg->script_alpha = asDouble(sec["script_alpha"], path + ".script_alpha");
 
     if (has(sec, "initial_q_deg")) cfg->initial_q_deg = parseJointArray(sec["initial_q_deg"], path + ".initial_q_deg");
     if (has(sec, "speed_bar")) cfg->speed_bar = asDouble(sec["speed_bar"], path + ".speed_bar");
@@ -1088,46 +1123,6 @@ void validateConfig(const DualArmConfig& cfg) {
     };
     validate_rbpodo_backend(cfg.left_robot, "left_robot");
     validate_rbpodo_backend(cfg.right_robot, "right_robot");
-
-    const auto validate_rbscript_tcp_backend = [&cfg](const BackendConfig& backend, const std::string& label) {
-        if (backend.backend_type != BackendType::RbscriptTcp) return;
-        if (backend.run_mode != RunMode::Real) {
-            throw std::runtime_error(label + " backend_type=rbscript_tcp is experimental real-read-only only; mock/simulation configs are refused");
-        }
-        if (backend.ip.empty()) {
-            throw std::runtime_error(label + ".ip must be set for backend_type=rbscript_tcp");
-        }
-        if (backend.command_port <= 0 || backend.command_port > 65535) {
-            throw std::runtime_error(label + ".command_port must be in [1, 65535] for backend_type=rbscript_tcp");
-        }
-        if (backend.data_port <= 0 || backend.data_port > 65535) {
-            throw std::runtime_error(label + ".data_port must be in [1, 65535] for backend_type=rbscript_tcp");
-        }
-        validatePositiveFinite(backend.command_timeout_sec, label + ".command_timeout_sec");
-        validatePositiveFinite(backend.read_timeout_sec, label + ".read_timeout_sec");
-        validatePositiveFinite(backend.connect_timeout_sec, label + ".connect_timeout_sec");
-        if (!(backend.script_t1_sec >= 0.002) || !std::isfinite(backend.script_t1_sec)) {
-            throw std::runtime_error(label + ".script_t1_sec must be finite and >= 0.002 for backend_type=rbscript_tcp");
-        }
-        if (!(backend.script_t2_sec > 0.02 && backend.script_t2_sec < 0.2) || !std::isfinite(backend.script_t2_sec)) {
-            throw std::runtime_error(label + ".script_t2_sec must be finite and in (0.02, 0.2) for backend_type=rbscript_tcp");
-        }
-        validatePositiveFinite(backend.script_gain, label + ".script_gain");
-        if (!(backend.script_alpha > 0.0 && backend.script_alpha < 1.0) || !std::isfinite(backend.script_alpha)) {
-            throw std::runtime_error(label + ".script_alpha must be finite and in (0, 1) for backend_type=rbscript_tcp");
-        }
-        if (!envIsOne("RB_ALLOW_RBSCRIPT_TCP")) {
-            throw std::runtime_error("Refusing rbscript_tcp real connection. Set RB_ALLOW_RBSCRIPT_TCP=1.");
-        }
-        if (backend.disable_waiting_ack && !envIsOne("RB_ALLOW_RBSCRIPT_TCP_MOTION")) {
-            throw std::runtime_error("Refusing rbscript_tcp disable_waiting_ack without RB_ALLOW_RBSCRIPT_TCP_MOTION=1.");
-        }
-        if (cfg.servo.send_servo_commands && !envIsOne("RB_ALLOW_RBSCRIPT_TCP_MOTION")) {
-            throw std::runtime_error("Refusing rbscript_tcp servo motion. Set RB_ALLOW_RBSCRIPT_TCP_MOTION=1 and RB_ALLOW_REAL_MOTION=1 or servo.send_servo_commands=false.");
-        }
-    };
-    validate_rbscript_tcp_backend(cfg.left_robot, "left_robot");
-    validate_rbscript_tcp_backend(cfg.right_robot, "right_robot");
 
     if (anyReal(cfg)) {
         if (cfg.servo.io_model == ServoIoModel::Worker) {

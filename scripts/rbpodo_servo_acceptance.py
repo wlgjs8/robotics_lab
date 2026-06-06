@@ -36,9 +36,7 @@ ENV_KEYS = (
     "RB_ALLOW_REAL_CARTESIAN",
 )
 PROFILES = {
-    "100hz_ack": {"rate_hz": 100, "servo_t1_sec": 0.01, "disable_waiting_ack": False},
-    "200hz_ack": {"rate_hz": 200, "servo_t1_sec": 0.005, "disable_waiting_ack": False},
-    "200hz_no_ack": {"rate_hz": 200, "servo_t1_sec": 0.005, "disable_waiting_ack": True},
+    "500hz_ack": {"rate_hz": 500, "servo_t1_sec": 0.002, "disable_waiting_ack": False},
 }
 M_CODES = ("M561", "M568", "M569", "M570")
 MOTION_MODES = {"servo_j_noop", "tiny_joint_motion"}
@@ -75,8 +73,8 @@ class ParsedConfig:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run staged rbpodo Servo J acceptance for 100Hz/200Hz ACK-on/off "
-            "profiles. Default mode is read-only and does not command motion."
+            "Run staged rbpodo Servo J acceptance for the supported 500Hz ACK-on "
+            "profile. Default mode is read-only and does not command motion."
         )
     )
     parser.add_argument("--config", type=Path)
@@ -1069,7 +1067,7 @@ left_robot:
   ip: "172.28.60.200"
   operation_mode: real
   command_timeout_sec: 0.02
-  servo_t1_sec: 0.005
+  servo_t1_sec: 0.002
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
@@ -1080,13 +1078,13 @@ right_robot:
   ip: "172.28.60.201"
   operation_mode: real
   command_timeout_sec: 0.02
-  servo_t1_sec: 0.005
+  servo_t1_sec: 0.002
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
   disable_waiting_ack: false
 servo:
-  rate_hz: 200
+  rate_hz: 500
   send_servo_commands: false
   servo_t1_rate_match_tolerance_ratio: 0.2
 network:
@@ -1103,7 +1101,7 @@ logging:
             config=path,
             arm="left",
             mode="read_only",
-            profile="200hz_ack",
+            profile="500hz_ack",
             duration_sec=1.0,
             command_rate_hz=None,
             artifact_dir=Path(tmp) / "artifacts",
@@ -1136,7 +1134,7 @@ logging:
             os.environ.pop("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED", None)
             os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
             result = preflight(base, config)
-            assert result["profile"] == "200hz_ack"
+            assert result["profile"] == "500hz_ack"
 
             motion = argparse.Namespace(**vars(base))
             motion.mode = "servo_j_noop"

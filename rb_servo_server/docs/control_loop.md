@@ -2,10 +2,10 @@
 
 `DualArmServoLoop` is the only high-rate control thread.
 
-Default mock target:
+Supported servo target:
 
 ```text
-200 Hz → 5 ms period
+500 Hz -> 2 ms period
 ```
 
 ## Per-tick flow
@@ -48,8 +48,8 @@ The logger records:
 - `left_send_start_ns`, `left_send_end_ns`, `right_send_start_ns`, `right_send_end_ns`
 - `send_skew_us`, `left_send_duration_us`, `right_send_duration_us`
 
-These are used to decide whether 100-200 Hz is stable enough before trying
-external simulator or real hardware.
+These are used to decide whether the 500 Hz loop is stable enough before
+external simulator or real hardware work.
 
 ## Snapshot ownership
 

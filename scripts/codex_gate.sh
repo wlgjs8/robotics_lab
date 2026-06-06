@@ -774,88 +774,153 @@ run_bench_report_gate() {
   echo "codex_gate: skipping full benchmark reporting run by default"
 }
 
-run_optional_rbscript_helper_tests() {
-  local ran_any=0
+run_supported_scope_name_scan() {
+  local removed_backend
+  removed_backend="rb""script"
+  local removed_env
+  removed_env="RB_ALLOW_RB""SCRIPT"
+  local removed_ablation
+  removed_ablation="rb_backend_""ablation"
+  local removed_rate_probe
+  removed_rate_probe="rainbow_rate_""probe"
+  local removed_compare_dir
+  removed_compare_dir="backend_""compare"
+  local disallowed=(
+    "${removed_backend}"
+    "Rb""script"
+    "${removed_env}"
+    "${removed_ablation}"
+    "${removed_rate_probe}"
+    "${removed_compare_dir}"
+  )
   local pattern
-  for pattern in 'test_rbscript*.py' 'test_rainbow*.py' 'test_rb_backend*.py'; do
-    if find scripts -maxdepth 1 -name "${pattern}" -print -quit | grep -q .; then
-      PYTHONPATH=scripts python3 -m unittest discover scripts -p "${pattern}"
-      ran_any=1
-    fi
-  done
-  if [[ "${ran_any}" != "1" ]]; then
-    echo "codex_gate: optional rbscript/rainbow Python helper tests not present"
+  pattern="$(IFS='|'; echo "${disallowed[*]}")"
+
+  local matches
+  set +e
+  matches="$(
+    find \
+      AGENTS.md README.md README.en.md REVIEW.md docs rb_servo_server policy_runner scripts configs \
+      -path './.git' -prune -o \
+      -path './.codex' -prune -o \
+      -path './artifacts' -prune -o \
+      -path './rb_servo_server/build' -prune -o \
+      -path 'rb_servo_server/build' -prune -o \
+      -path 'rb_servo_server/build/*' -prune -o \
+      -path './scripts/codex_gate.sh' -prune -o \
+      -path './scripts/codex_run_sequence.sh' -prune -o \
+      -path '*/__pycache__' -prune -o \
+      -type f -print 2>/dev/null | \
+      xargs -r grep -IEn "${pattern}"
+  )"
+  local rc=$?
+  set -e
+  if [[ "${rc}" == "0" ]]; then
+    echo "ERROR: removed backend or comparison-surface references remain:" >&2
+    echo "${matches}" >&2
+    return 1
   fi
 }
 
-run_rbscript_tcp_01_gate() {
+run_supported_scope_file_scan() {
+  local removed_backend_glob="*rb""script*"
+  local removed_ablation_glob="*rb_backend_""ablation*"
+  local removed_compare_glob="*backend_""compare*"
+  local removed_rate_probe_glob="*rainbow_rate_""probe*"
+  local matches
+  set +e
+  matches="$(
+    find . \
+      -path './.git' -prune -o \
+      -path './.codex' -prune -o \
+      -path './artifacts' -prune -o \
+      -path './rb_servo_server/build' -prune -o \
+      -path 'rb_servo_server/build' -prune -o \
+      -path 'rb_servo_server/build/*' -prune -o \
+      -path '*/__pycache__' -prune -o \
+      \( -iname "${removed_backend_glob}" -o -iname "${removed_ablation_glob}" -o -iname "${removed_compare_glob}" -o -iname "${removed_rate_probe_glob}" \) \
+      -print
+  )"
+  local rc=$?
+  set -e
+  if [[ "${rc}" == "0" && -n "${matches}" ]]; then
+    echo "ERROR: removed backend/comparison files remain:" >&2
+    echo "${matches}" >&2
+    return 1
+  fi
+}
+
+run_supported_scope_500hz_scan() {
+  python3 - <<'PY'
+from pathlib import Path
+import re
+import sys
+
+roots = [
+    Path("rb_servo_server/config"),
+    Path("policy_runner/config"),
+    Path("configs"),
+]
+paths: list[Path] = []
+for root in roots:
+    if root.exists():
+        paths.extend(p for p in root.rglob("*.yaml") if "local" not in p.parts)
+
+bad: list[str] = []
+checks = [
+    re.compile(r"^\s*command_rate_hz:\s*(?:100|200)\b"),
+    re.compile(r"^\s*(?:servo|servo\.rbpodo_async_streaming)\.rate_hz:\s*(?:100|200)\b"),
+    re.compile(r"^\s*servo\.worker_read_rate_hz:\s*(?:100|200)\b"),
+    re.compile(r"^\s*servo\.worker_read_period_sec:\s*(?:0\.01|0\.005)\b"),
+    re.compile(r"^\s*(?:left_robot|right_robot)\.servo_t1_sec:\s*(?:0\.01|0\.005)\b"),
+]
+real_template_checks = [
+    re.compile(r"^(?:rate_hz:\s*(?:100|200)|servo_t1_sec:\s*(?:0\.01|0\.005)|servo_time_sec:\s*(?:0\.01|0\.005))\b"),
+    re.compile(r"^worker_read_rate_hz:\s*(?:100|200)\b"),
+    re.compile(r"^worker_read_period_sec:\s*(?:0\.01|0\.005)\b"),
+]
+
+for path in sorted(paths):
+    text = path.read_text(errors="ignore").splitlines()
+    is_real_template = path.match("rb_servo_server/config/dual_real*.yaml")
+    for lineno, line in enumerate(text, start=1):
+        stripped = line.strip()
+        if is_real_template and any(check.search(stripped) for check in real_template_checks):
+            bad.append(f"{path}:{lineno}:{line}")
+        if any(check.search(line) for check in checks):
+            bad.append(f"{path}:{lineno}:{line}")
+
+if bad:
+    print("ERROR: unsupported non-500 robot-control defaults remain:", file=sys.stderr)
+    print("\n".join(bad), file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+run_supported_scope_common_gate() {
   run_shell_syntax_checks
+  python3 -m compileall -q scripts policy_runner/policy_runner
+  run_supported_scope_name_scan
+  run_supported_scope_file_scan
+}
+
+run_supported_scope_backend_gate() {
+  run_supported_scope_common_gate
   run_servo_gate_or_skip_missing_deps
-  run_python_surface_tests
 }
 
-run_rbscript_tcp_02_gate() {
-  run_shell_syntax_checks
-  run_servo_gate_or_skip_missing_deps
-  run_optional_rbscript_helper_tests
+run_supported_scope_500hz_gate() {
+  run_supported_scope_common_gate
+  run_supported_scope_500hz_scan
+  run_required_policy_runner_tests 'test_cartesian_action_source.py'
 }
 
-run_rbscript_ablation_gate() {
-  run_shell_syntax_checks
-  python3 -m compileall -q scripts
-  python3 scripts/rb_backend_ablation.py --help >/dev/null
-  run_optional_python_help scripts/compare_backend_ablation.py
-  run_optional_rbscript_helper_tests
-  grep_existing "rb_backend_ablation.py|rbscript_tcp|command port.*5000|data port.*5001|no-motion" \
-    docs/runbooks/rbscript_tcp_ablation.md REVIEW.md
-  run_python_surface_tests
-  if [[ "${CODEX_RUN_RBSCRIPT_ABLATION:-0}" == "1" ]]; then
-    if [[ ! -f scripts/rb_backend_ablation.py ]]; then
-      echo "ERROR: CODEX_RUN_RBSCRIPT_ABLATION=1 but scripts/rb_backend_ablation.py is missing" >&2
-      return 1
-    fi
-    if [[ -z "${CODEX_RBSCRIPT_ABLATION_ARGS:-}" ]]; then
-      echo "ERROR: CODEX_RUN_RBSCRIPT_ABLATION=1 requires CODEX_RBSCRIPT_ABLATION_ARGS with explicit simulator/read-only config" >&2
-      return 1
-    fi
-    # shellcheck disable=SC2086
-    python3 scripts/rb_backend_ablation.py ${CODEX_RBSCRIPT_ABLATION_ARGS}
-  else
-    echo "codex_gate: skipping rbscript backend ablation; set CODEX_RUN_RBSCRIPT_ABLATION=1 with explicit args to enable"
-  fi
-}
-
-run_rbscript_rate_probe_gate() {
-  run_shell_syntax_checks
-  python3 -m compileall -q scripts
-  python3 scripts/rainbow_rate_probe.py --help >/dev/null
-  run_optional_rbscript_helper_tests
-  grep_existing "rainbow_rate_probe.py|M561|M568|M569|M570|disable_waiting_ack|200 Hz|200Hz" \
-    docs/runbooks/rbscript_tcp_ablation.md REVIEW.md
-  run_python_surface_tests
-  if [[ "${CODEX_RUN_REAL_RATE_PROBE:-0}" == "1" ]]; then
-    if [[ ! -f scripts/rainbow_rate_probe.py ]]; then
-      echo "ERROR: CODEX_RUN_REAL_RATE_PROBE=1 but scripts/rainbow_rate_probe.py is missing" >&2
-      return 1
-    fi
-    if [[ -z "${CODEX_RAINBOW_RATE_PROBE_ARGS:-}" ]]; then
-      echo "ERROR: CODEX_RUN_REAL_RATE_PROBE=1 requires CODEX_RAINBOW_RATE_PROBE_ARGS with explicit config and safety preflight flags" >&2
-      return 1
-    fi
-    # shellcheck disable=SC2086
-    python3 scripts/rainbow_rate_probe.py ${CODEX_RAINBOW_RATE_PROBE_ARGS}
-  else
-    echo "codex_gate: skipping real Rainbow rate probe; set CODEX_RUN_REAL_RATE_PROBE=1 with explicit args to enable"
-  fi
-}
-
-run_rbscript_doc_gate() {
-  run_shell_syntax_checks
-  grep_existing "rbscript_tcp" README.md REVIEW.md docs rb_servo_server/docs
-  grep_existing "command[[:space:]_-]*port[^0-9]*5000" README.md REVIEW.md docs rb_servo_server/docs
-  grep_existing "data[[:space:]_-]*port[^0-9]*5001" README.md REVIEW.md docs rb_servo_server/docs
-  grep_existing "simulator/read-only first|simulator.*read-only.*first|read-only.*simulator" README.md REVIEW.md docs rb_servo_server/docs
-  grep_existing "no UDP direct-to-controller|no UDP.*controller|UDP direct-to-controller" README.md REVIEW.md docs rb_servo_server/docs
+run_supported_scope_docs_gate() {
+  run_supported_scope_common_gate
+  run_supported_scope_500hz_scan
+  grep_existing "supported scope|500 Hz|rbpodo" README.md README.en.md docs AGENTS.md REVIEW.md
+  grep_existing "unsupported raw script TCP|raw script TCP.*removed|removed.*raw script TCP" \
+    README.md README.en.md docs AGENTS.md REVIEW.md
 }
 
 run_rbpodo_accept_gate() {
@@ -914,8 +979,8 @@ run_rbpodo_doc_gate() {
   grep_existing "servo_alpha" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
   grep_existing "disable_waiting_ack" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
   grep_existing "ACK disabled" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
-  grep_existing "100[[:space:]]*Hz|100Hz" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
-  grep_existing "200[[:space:]]*Hz|200Hz" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "500[[:space:]]*Hz|500Hz" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "supported scope|rbpodo-only|rbpodo only" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
   grep_existing "RB_ALLOW_REAL_MOTION" README.md REVIEW.md AGENTS.md docs rb_servo_server/docs rb_servo_server/config
 }
 
@@ -1168,16 +1233,12 @@ run_rbpodo_measure_state_parity_gate() {
 run_rbpodo_measure_raw_data_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts
-  python3 scripts/rainbow_rate_probe.py --help >/dev/null
   run_optional_python_help scripts/rbpodo_raw_data_capture.py
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rainbow_rate_probe.py'
   run_optional_script_tests 'test_rbpodo_raw_data*.py'
   run_optional_script_tests 'test_rainbow_raw_data*.py'
   run_optional_rbpodo_measurement_readonly \
-    scripts/rainbow_rate_probe.py \
-    "--backend rbscript_tcp" \
-    "--mode read_state" \
-    "--capture-raw-data-port"
+    scripts/rbpodo_state_dump.py \
+    "--artifact-dir"
 }
 
 run_rbpodo_measure_timestamp_gate() {
@@ -1258,9 +1319,7 @@ run_p0_diagnostics_rootcause_gate() {
 run_p0_raw_payload_fixture_gate() {
   run_rbpodo_p0_measurement_common_gate
   python3 scripts/rainbow_data_port_capture.py --help >/dev/null
-  python3 scripts/rainbow_rate_probe.py --help >/dev/null
   PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rainbow_data_port_capture.py'
-  run_optional_script_tests 'test_rainbow_rate_probe.py'
   run_optional_rbpodo_measurement_readonly \
     scripts/rainbow_data_port_capture.py \
     "--ips" \
@@ -1299,12 +1358,12 @@ run_optional_rbpodo_500hz_controller_sim() {
     return 1
   fi
   for required_arg in \
-    "--backend rbpodo" \
-    "--mode servo_j_simulation_only" \
-    "--rates 100,500" \
-    "--allow-simulation-servo-j" \
+    "--server" \
+    "--config" \
+    "--mode servo_j_noop_500hz" \
     "--artifact-dir" \
-    "--i-understand-this-connects-to-real-controller"
+    "--i-understand-this-connects-to-real-controller" \
+    "--i-confirm-controller-is-in-pgmode-simulation"
   do
     if [[ "${CODEX_RBPODO_500HZ_ARGS}" != *"${required_arg}"* ]]; then
       echo "ERROR: CODEX_RBPODO_500HZ_ARGS must include ${required_arg}" >&2
@@ -1315,8 +1374,8 @@ run_optional_rbpodo_500hz_controller_sim() {
     echo "ERROR: CODEX_RBPODO_500HZ_ARGS must include --verify-pgmode-simulation or --set-pgmode-simulation" >&2
     return 1
   fi
-  if [[ "${CODEX_RBPODO_500HZ_ARGS}" == *"rbscript_tcp"* || "${CODEX_RBPODO_500HZ_ARGS}" == *"tiny_joint_motion"* || "${CODEX_RBPODO_500HZ_ARGS}" == *"--allow-ack-disabled"* ]]; then
-    echo "ERROR: rbpodo 500Hz gates only allow ACK-on rbpodo pgmode-simulation probes; rbscript_tcp, tiny physical motion, and ACK-off are out of scope" >&2
+  if [[ "${CODEX_RBPODO_500HZ_ARGS}" == *"tiny_joint_motion"* || "${CODEX_RBPODO_500HZ_ARGS}" == *"--allow-ack-disabled"* ]]; then
+    echo "ERROR: rbpodo 500Hz gates only allow ACK-on rbpodo pgmode-simulation probes; tiny physical motion and ACK-off are out of scope" >&2
     return 1
   fi
   if [[ "${RB_ALLOW_REAL_CARTESIAN:-0}" == "1" ]]; then
@@ -1324,21 +1383,20 @@ run_optional_rbpodo_500hz_controller_sim() {
     return 1
   fi
   # shellcheck disable=SC2086
-  python3 scripts/rainbow_rate_probe.py ${CODEX_RBPODO_500HZ_ARGS}
+  python3 scripts/rbpodo_500hz_acceptance.py ${CODEX_RBPODO_500HZ_ARGS}
 }
 
 run_rbpodo_500hz_common_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts
-  python3 scripts/rainbow_rate_probe.py --help >/dev/null
+  python3 scripts/rbpodo_500hz_acceptance.py --help >/dev/null
   python3 scripts/rbpodo_servo_acceptance.py --help >/dev/null
   python3 scripts/rbpodo_circle_tracking_benchmark.py --help >/dev/null
   run_yaml_parse_checks_if_available \
     rb_servo_server/config/dual_real_rbpodo_readonly.example.yaml \
-    rb_servo_server/config/dual_real_rbpodo_sim_noop_*.example.yaml \
     rb_servo_server/config/dual_real_rbpodo_circle_15cm*.example.yaml \
     configs/rbpodo_circle_ablation/*.yaml
-  grep_existing "100,500|500 Hz|500Hz" scripts/rainbow_rate_probe.py docs/runbooks/rbpodo_controller_sim_circle.md REVIEW.md
+  grep_existing "500 Hz|500Hz" scripts/rbpodo_500hz_acceptance.py docs/runbooks/rbpodo_controller_sim_circle.md REVIEW.md
   grep_existing "pgmode simulation|controller pgmode simulation only|operation_mode:[[:space:]]*simulation" \
     docs/runbooks/rbpodo_controller_sim_circle.md rb_servo_server/config/dual_real_rbpodo_*.example.yaml
 }
@@ -1350,7 +1408,7 @@ run_rbpodo_500hz_config_gate() {
 
 run_rbpodo_500hz_accept_gate() {
   run_rbpodo_500hz_common_gate
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rainbow_rate_probe.py'
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_500hz_acceptance.py'
   run_optional_rbpodo_500hz_controller_sim
 }
 
@@ -1587,7 +1645,6 @@ PY
 run_rbpodo_async_common_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts
-  run_optional_python_help scripts/rainbow_rate_probe.py
   run_optional_python_help scripts/rbpodo_500hz_acceptance.py
   run_optional_python_help scripts/rbpodo_circle_tracking_benchmark.py
   run_optional_python_help scripts/run_rbpodo_circle_ablation.py
@@ -1597,7 +1654,6 @@ run_rbpodo_async_common_gate() {
 
 run_rbpodo_async_contract_probe_gate() {
   run_rbpodo_async_common_gate
-  run_optional_script_tests 'test_rainbow_rate_probe.py'
   run_optional_script_tests 'test_rbpodo_500hz_acceptance.py'
   echo "codex_gate: skipping rbpodo async ACK-supervised controller probe by default"
 }
@@ -1626,10 +1682,8 @@ run_rbpodo_async_circle_matrix_gate() {
 
 run_rbpodo_async_report_gate() {
   run_rbpodo_async_common_gate
-  run_optional_python_help scripts/generate_rbpodo_500hz_report.py
   run_optional_python_help scripts/generate_circle_benchmark_report.py
   run_optional_python_help scripts/generate_rbpodo_measurement_reliability_report.py
-  run_optional_script_tests 'test_500hz_report.py'
   run_optional_script_tests 'test_circle_benchmark_report.py'
   echo "codex_gate: skipping rbpodo async ACK-supervised report generation by default"
 }
@@ -1648,7 +1702,6 @@ run_ackon500_followup_common_gate() {
   run_optional_python_help scripts/run_rbpodo_circle_ablation.py
   run_optional_python_help scripts/generate_ackon500_gene_goal_report.py
   run_optional_python_help scripts/generate_circle_benchmark_report.py
-  run_optional_python_help scripts/generate_rbpodo_500hz_report.py
   run_optional_python_help scripts/generate_rbpodo_measurement_reliability_report.py
   run_yaml_parse_checks_if_available configs/rbpodo_circle_ablation/*.yaml
   run_optional_script_tests 'test_*.py'
@@ -2057,6 +2110,27 @@ run_source_hygiene_local_configs_gate() {
     README.md docs rb_servo_server/config/dual_real.example.yaml rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml
 }
 
+run_vm_parity_guardrails_gate() {
+  run_shell_syntax_checks
+  python3 -m compileall -q scripts
+  local tool
+  for tool in tools/vm/*.sh; do
+    if [[ -e "${tool}" ]]; then
+      bash -n "${tool}"
+      bash "${tool}" --help >/dev/null
+    fi
+  done
+  python3 scripts/check_vm_artifact_tagging.py --help >/dev/null
+  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_check_vm_artifact_tagging.py'
+  python3 scripts/check_vm_artifact_tagging.py \
+    --root . \
+    --physical-root artifacts/circle_tracking \
+    --physical-root artifacts/rbpodo_physical_transition \
+    --physical-root artifacts/physical_acceptance
+  grep_existing "controller_simulation_vm|physical_motion=false|5000/5001|ROBOT_LEFT_IP" \
+    docs/runbooks/vm_network_bringup.md docs/runbooks/vm_real_parity.md scripts/check_vm_artifact_tagging.py tools/vm
+}
+
 run_optional_rbpodo_p1_circle_ablation() {
   if [[ "${CODEX_RUN_RBPODO_CIRCLE_ABLATION:-0}" != "1" ]]; then
     echo "codex_gate: skipping rbpodo P1 controller-simulation ablation; set CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 with explicit CODEX_RBPODO_CIRCLE_ABLATION_ARGS to enable"
@@ -2126,8 +2200,6 @@ run_p1_deadtime_phase_advance_gate() {
 
 run_p1_servo_param_sweep_gate() {
   run_rbpodo_p1_common_gate
-  python3 scripts/rainbow_rate_probe.py --help >/dev/null
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rainbow_rate_probe.py'
   grep_existing "servo_t1_sec|servo_t2_sec|servo_gain|servo_alpha|speed_bar" \
     scripts docs REVIEW.md rb_servo_server/config
   run_optional_rbpodo_p1_circle_ablation
@@ -2293,125 +2365,6 @@ run_policy_dataset_schema_gate() {
   grep_existing "observations|action" \
     policy_runner/README.md policy_runner/policy_runner/recording.py policy_runner/tests
   echo "codex_gate: skipping real policy/data collection run by default"
-}
-
-run_backend_compare_python_tests() {
-  run_python_surface_tests
-  run_optional_rbscript_helper_tests
-}
-
-run_backend_compare_doc_config_checks() {
-  grep_existing "rbpodo" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
-  grep_existing "rbscript_tcp" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
-  grep_existing "RB_ALLOW_REAL_ROBOT" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
-  grep_existing "RB_ALLOW_RBSCRIPT_TCP" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
-  grep_existing "RB_ALLOW_RBSCRIPT_TCP_MOTION" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
-  grep_existing "send_servo_commands:[[:space:]]*false" rb_servo_server/config docs/runbooks
-  grep_existing "read-only|no-motion" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
-}
-
-run_backend_compare_config_gate() {
-  run_shell_syntax_checks
-  run_backend_compare_doc_config_checks
-  run_backend_compare_python_tests
-}
-
-run_backend_compare_probe_if_requested() {
-  if [[ "${CODEX_RUN_BACKEND_COMPARE:-0}" == "1" ]]; then
-    if [[ ! -f scripts/rb_backend_ablation.py ]]; then
-      echo "ERROR: CODEX_RUN_BACKEND_COMPARE=1 but scripts/rb_backend_ablation.py is missing" >&2
-      return 1
-    fi
-    local args="${CODEX_BACKEND_COMPARE_ABLATION_ARGS:-${CODEX_BACKEND_COMPARE_ARGS:-}}"
-    if [[ -z "${args}" ]]; then
-      echo "ERROR: CODEX_RUN_BACKEND_COMPARE=1 requires CODEX_BACKEND_COMPARE_ABLATION_ARGS or CODEX_BACKEND_COMPARE_ARGS with explicit tool arguments and safety preflight flags" >&2
-      return 1
-    fi
-    # shellcheck disable=SC2086
-    python3 scripts/rb_backend_ablation.py ${args}
-  else
-    echo "codex_gate: skipping full backend comparison probe; set CODEX_RUN_BACKEND_COMPARE=1 with explicit args to enable"
-  fi
-}
-
-run_rbscript_persistent_probe_gate() {
-  run_shell_syntax_checks
-  python3 -m compileall -q scripts
-  python3 scripts/rb_backend_ablation.py --help >/dev/null
-  python3 scripts/rainbow_rate_probe.py --help >/dev/null
-  python3 scripts/compare_backend_ablation.py --help >/dev/null
-  run_backend_compare_python_tests
-  run_backend_compare_probe_if_requested
-}
-
-run_rbscript_servo_noop_gate() {
-  run_shell_syntax_checks
-  run_servo_gate_or_skip_missing_deps
-  run_optional_python_help scripts/rbscript_servo_acceptance.py
-  if [[ -f scripts/rbscript_servo_acceptance.py ]]; then
-    python3 scripts/rbscript_servo_acceptance.py --self-test
-  fi
-  run_backend_compare_python_tests
-  if [[ "${CODEX_RUN_RBSCRIPT_SERVO_ACCEPTANCE:-0}" == "1" ]]; then
-    if [[ ! -f scripts/rbscript_servo_acceptance.py ]]; then
-      echo "ERROR: CODEX_RUN_RBSCRIPT_SERVO_ACCEPTANCE=1 but scripts/rbscript_servo_acceptance.py is missing" >&2
-      return 1
-    fi
-    if [[ -z "${CODEX_RBSCRIPT_SERVO_ACCEPTANCE_ARGS:-}" ]]; then
-      echo "ERROR: CODEX_RUN_RBSCRIPT_SERVO_ACCEPTANCE=1 requires CODEX_RBSCRIPT_SERVO_ACCEPTANCE_ARGS with explicit script arguments and safety preflight flags" >&2
-      return 1
-    fi
-    # shellcheck disable=SC2086
-    python3 scripts/rbscript_servo_acceptance.py ${CODEX_RBSCRIPT_SERVO_ACCEPTANCE_ARGS}
-  else
-    echo "codex_gate: skipping rbscript ServoJ no-op acceptance; set CODEX_RUN_RBSCRIPT_SERVO_ACCEPTANCE=1 with explicit args to enable"
-  fi
-}
-
-run_rbscript_data_port_gate() {
-  run_shell_syntax_checks
-  run_servo_gate_or_skip_missing_deps
-  run_optional_rbscript_helper_tests
-  grep_existing "data[[:space:]_-]*port[^0-9]*5001|reqdata|rbscript_tcp_state_v1" \
-    docs/runbooks/rbscript_tcp_ablation.md docs/servo_backend_contract.md scripts/rb_backend_ablation.py
-  echo "codex_gate: skipping real rbscript data-port probe by default"
-}
-
-run_backend_compare_matrix_gate() {
-  python3 -m compileall -q scripts
-  run_optional_python_help scripts/run_backend_comparison_matrix.py
-  if [[ "${CODEX_RUN_BACKEND_COMPARE:-0}" == "1" ]]; then
-    if [[ ! -f scripts/run_backend_comparison_matrix.py ]]; then
-      echo "ERROR: CODEX_RUN_BACKEND_COMPARE=1 but scripts/run_backend_comparison_matrix.py is missing" >&2
-      return 1
-    fi
-    if [[ -z "${CODEX_BACKEND_COMPARE_MATRIX_ARGS:-}" ]]; then
-      echo "ERROR: CODEX_RUN_BACKEND_COMPARE=1 requires CODEX_BACKEND_COMPARE_MATRIX_ARGS with explicit script arguments and safety preflight flags" >&2
-      return 1
-    fi
-    # shellcheck disable=SC2086
-    python3 scripts/run_backend_comparison_matrix.py ${CODEX_BACKEND_COMPARE_MATRIX_ARGS}
-  else
-    echo "codex_gate: skipping full backend comparison matrix; set CODEX_RUN_BACKEND_COMPARE=1 with explicit matrix args to enable"
-  fi
-}
-
-run_backend_compare_report_gate() {
-  python3 -m compileall -q scripts
-  python3 scripts/compare_backend_ablation.py --help >/dev/null
-  run_optional_python_help scripts/report_backend_comparison.py
-  run_optional_python_help scripts/backend_comparison_report.py
-  for token in \
-    "rbpodo" \
-    "rbscript_tcp" \
-    "apples-to-apples" \
-    "read_state" \
-    "servo_j_noop" \
-    "ACK-on" \
-    "ACK-off"
-  do
-    grep_existing "${token}" README.md REVIEW.md docs rb_servo_server/docs
-  done
 }
 
 run_doc_hygiene_gate() {
@@ -2785,24 +2738,6 @@ case "$TASK" in
   BENCH-REPORT-01)
     run_bench_report_gate
     ;;
-  GATE-RBSCRIPT-00)
-    run_shell_syntax_checks
-    ;;
-  RBSCRIPT-TCP-01)
-    run_rbscript_tcp_01_gate
-    ;;
-  RBSCRIPT-TCP-02)
-    run_rbscript_tcp_02_gate
-    ;;
-  RBSCRIPT-ABLATION-01)
-    run_rbscript_ablation_gate
-    ;;
-  RBSCRIPT-RATE-PROBE-01)
-    run_rbscript_rate_probe_gate
-    ;;
-  RBSCRIPT-DOC-01)
-    run_rbscript_doc_gate
-    ;;
   GATE-RBPODO-00)
     run_shell_syntax_checks
     ;;
@@ -3071,29 +3006,26 @@ case "$TASK" in
   POLICY-DATASET-SCHEMA-01)
     run_policy_dataset_schema_gate
     ;;
-  GATE-BACKEND-COMPARE-00)
-    run_shell_syntax_checks
+  00_update_codex_gate_supported_scope)
+    run_supported_scope_common_gate
     ;;
-  BACKEND-COMPARE-CONFIG-01)
-    run_backend_compare_config_gate
+  "01_remove_rb""script_tcp_backend_and_experiments")
+    run_supported_scope_backend_gate
     ;;
-  RBSCRIPT-PERSISTENT-PROBE-01)
-    run_rbscript_persistent_probe_gate
+  02_rbpodo_only_supported_real_backend_contract)
+    run_supported_scope_backend_gate
     ;;
-  RBSCRIPT-SERVO-NOOP-01)
-    run_rbscript_servo_noop_gate
+  03_standardize_500hz_control_defaults)
+    run_supported_scope_500hz_gate
     ;;
-  RBSCRIPT-DATA-PORT-01)
-    run_rbscript_data_port_gate
-    ;;
-  BACKEND-COMPARE-MATRIX-01)
-    run_backend_compare_matrix_gate
-    ;;
-  BACKEND-COMPARE-REPORT-01)
-    run_backend_compare_report_gate
+  04_supported_scope_docs_ci_hygiene)
+    run_supported_scope_docs_gate
     ;;
   DOC-HYGIENE-01)
     run_doc_hygiene_gate
+    ;;
+  VM-PARITY-GUARDRAILS-01)
+    run_vm_parity_guardrails_gate
     ;;
   GUI-SPLIT-01)
     run_gui_split_gate

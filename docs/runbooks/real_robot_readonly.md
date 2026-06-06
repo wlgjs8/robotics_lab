@@ -70,24 +70,24 @@ Official Servo J ranges remain part of config validation:
 - `servo_gain > 0`
 - `0 < servo_alpha < 1`
 
-For later motion configs, `servo_t1_sec` must match the command period:
+For later motion configs, `servo_t1_sec` must match the supported command
+period:
 
-- 100 Hz -> `servo_t1_sec: 0.01`
-- 200 Hz -> `servo_t1_sec: 0.005`
+- 500 Hz -> `servo_t1_sec: 0.002`
 
 ## Read-Only Command
 
-Example for the left arm 100 Hz ACK-on profile:
+Example for the left arm 500 Hz ACK-on profile:
 
 ```bash
 RB_ALLOW_REAL_ROBOT=1 \
 python3 scripts/rbpodo_servo_acceptance.py \
-  --config rb_servo_server/config/local/dual_real_100hz_ack.yaml \
+  --config rb_servo_server/config/local/dual_real_500hz_ack.yaml \
   --arm left \
   --mode read_only \
-  --profile 100hz_ack \
+  --profile 500hz_ack \
   --duration-sec 10 \
-  --artifact-dir artifacts/rbpodo_acceptance/100hz_ack_read_only_left \
+  --artifact-dir artifacts/rbpodo_acceptance/500hz_ack_read_only_left \
   --i-understand-this-connects-to-real-controller
 ```
 

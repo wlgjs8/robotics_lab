@@ -23,7 +23,6 @@ add_library(rb_servo_core
     src/kinematics/pinocchio_kinematics.cpp
     src/robot/mock_backend.cpp
     src/robot/rbpodo_backend.cpp
-    src/robot/rbscript_tcp_backend.cpp
     src/robot/rbsim_backend.cpp
     src/robot/backend_factory.cpp
     src/control/command_buffer.cpp
@@ -115,10 +114,6 @@ if(BUILD_TESTING)
     add_executable(test_config_loader tests/test_config_loader.cpp)
     target_link_libraries(test_config_loader PRIVATE rb_servo_core)
     add_test(NAME config_loader COMMAND test_config_loader)
-
-    add_executable(test_rbscript_tcp_backend tests/test_rbscript_tcp_backend.cpp)
-    target_link_libraries(test_rbscript_tcp_backend PRIVATE rb_servo_core)
-    add_test(NAME rbscript_tcp_backend COMMAND test_rbscript_tcp_backend)
 
     add_executable(test_kinematics_fk tests/test_kinematics_fk.cpp)
     target_link_libraries(test_kinematics_fk PRIVATE rb_servo_core)

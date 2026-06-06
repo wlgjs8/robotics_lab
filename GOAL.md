@@ -1,4 +1,4 @@
-Read AGENTS.md, REVIEW.md, docs/runbooks/rbpodo_500hz_acceptance.md, docs/runbooks/rbpodo_controller_sim_circle.md, docs/runbooks/rbpodo_measurement_reliability.md, rb_servo_server/src/control/dual_arm_servo_loop.cpp, rb_servo_server/src/control/arm_worker.cpp, rb_servo_server/src/control/servo_dispatcher.cpp, rb_servo_server/src/control/cartesian_servo_controller.cpp, rb_servo_server/src/control/cartesian_trajectory_planner.cpp, rb_servo_server/src/robot/rbpodo_backend.cpp, rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz.example.yaml, scripts/rbpodo_500hz_acceptance.py, scripts/rbpodo_circle_tracking_benchmark.py, scripts/run_rbpodo_circle_ablation.py, scripts/generate_rbpodo_500hz_report.py, scripts/generate_circle_benchmark_report.py, and the latest rbpodo artifacts first.
+Read AGENTS.md, REVIEW.md, docs/supported_scope.md, docs/runbooks/rbpodo_500hz_acceptance.md, docs/runbooks/rbpodo_controller_sim_circle.md, docs/runbooks/rbpodo_measurement_reliability.md, rb_servo_server/src/control/dual_arm_servo_loop.cpp, rb_servo_server/src/control/arm_worker.cpp, rb_servo_server/src/control/servo_dispatcher.cpp, rb_servo_server/src/control/cartesian_servo_controller.cpp, rb_servo_server/src/control/cartesian_trajectory_planner.cpp, rb_servo_server/src/robot/rbpodo_backend.cpp, rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz.example.yaml, scripts/rbpodo_500hz_acceptance.py, scripts/rbpodo_circle_tracking_benchmark.py, scripts/run_rbpodo_circle_ablation.py, scripts/generate_circle_benchmark_report.py, and the latest rbpodo artifacts first.
 
 Implement ONLY ACKON500-GENE-GOAL-01:
 Aggressively optimize rbpodo controller-simulation 500Hz ACK-ON circle tracking for the GENE-style 15cm/4s benchmark, with strict non-cheating measurement semantics.
@@ -14,7 +14,7 @@ Context:
   - Send duration max within 2ms tick.
 - However, this does not prove full dual-arm rb_servo_server 500Hz circle tracking.
 - Previous ACK-off 500Hz circle results are promising but socket_send_only and must not be treated as ACK-ON.
-- Previous 100Hz ACK-on tuned result achieved about 4mm-class RMS in controller-reference tracking under some parameter combinations.
+- Previous supported-scope ACK-on tuning achieved about 4mm-class RMS in controller-reference tracking under some parameter combinations.
 - The goal is now stricter:
   ACK-ON semantics + 500Hz target generation + 15cm/4s circle + RMS <= 3mm + effective latency <= 5ms.
 
@@ -189,7 +189,7 @@ Required tests:
 - bash -n tools/rbpodo_ackon500_gene_goal.sh
 - python3 scripts/rbpodo_circle_tracking_benchmark.py --help
 - python3 scripts/run_rbpodo_circle_ablation.py --help
-- python3 scripts/generate_rbpodo_500hz_report.py --help
+- python3 scripts/generate_circle_benchmark_report.py --help
 - PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_*.py'
 - python3 -m unittest discover rb_gui/tests
 - PYTHONPATH=policy_runner python3 -m unittest discover policy_runner/tests

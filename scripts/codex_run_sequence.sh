@@ -44,12 +44,22 @@ SPACEMOUSE_PGMODE_TASKS=(
   10_source_hygiene_local_configs
 )
 
+SUPPORTED_SCOPE_RBPODO_500HZ_TASKS=(
+  00_update_codex_gate_supported_scope
+  "01_remove_rb""script_tcp_backend_and_experiments"
+  02_rbpodo_only_supported_real_backend_contract
+  03_standardize_500hz_control_defaults
+  04_supported_scope_docs_ci_hygiene
+)
+
 print_recommended_sequences() {
   echo "Recommended current sequences:"
   echo "  GENE/UMI:"
   echo "    ${GENE_UMI_TASKS[*]}"
   echo "  SpaceMouse/pgmode:"
   echo "    ${SPACEMOUSE_PGMODE_TASKS[*]}"
+  echo "  Supported scope rbpodo 500Hz:"
+  echo "    ${SUPPORTED_SCOPE_RBPODO_500HZ_TASKS[*]}"
 }
 
 print_known_tasks() {
@@ -58,6 +68,9 @@ print_known_tasks() {
   echo
   echo "SpaceMouse/pgmode task IDs:"
   printf '  %s\n' "${SPACEMOUSE_PGMODE_TASKS[@]}"
+  echo
+  echo "Supported scope rbpodo 500Hz task IDs:"
+  printf '  %s\n' "${SUPPORTED_SCOPE_RBPODO_500HZ_TASKS[@]}"
 }
 
 print_usage() {

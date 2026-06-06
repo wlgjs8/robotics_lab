@@ -44,10 +44,9 @@ backend_type: mock | simulator | rbpodo
 
 Do not introduce new public terms such as `rbsim_local`, public `rbsim`, or mixed simulator aliases. Legacy filenames may exist for compatibility, but new work should use `simulator`.
 
-`backend_type: rbscript_tcp` is an experimental, explicitly gated comparison
-backend for Rainbow script TCP overhead studies only. It is not a promoted
-production backend and must not be treated as a replacement for `rbpodo` unless
-a future acceptance task updates this contract.
+Supported real-controller scope is rbpodo only. Mock and simulator backends
+remain for hardware-free validation; raw script TCP comparison backends are no
+longer part of the active code, config, gate, or runbook surface.
 
 ## Target Topology
 
@@ -97,27 +96,16 @@ Real Cartesian/TCP motion requires:
 RB_ALLOW_REAL_CARTESIAN=1
 ```
 
-Experimental `rbscript_tcp` real-controller connection additionally requires:
-
-```bash
-RB_ALLOW_RBSCRIPT_TCP=1
-```
-
-Experimental `rbscript_tcp` servo motion additionally requires:
-
-```bash
-RB_ALLOW_RBSCRIPT_TCP_MOTION=1
-```
-
 Even with these environment variables, real motion must also be explicitly allowed by config and by the relevant real-hardware acceptance task. Simulator acceptance is not real-hardware acceptance.
 
 For new rbpodo configs, use canonical Rainbow Servo J fields only:
 `servo_t1_sec`, `servo_t2_sec`, `servo_gain`, and `servo_alpha`.
 Do not add new uses of deprecated aliases `servo_time_sec`,
 `servo_lookahead_sec`, or `servo_acc`. `servo_t1_sec` must match the streaming
-command period for real motion configs, for example `0.01` at 100 Hz and
-`0.005` at 200 Hz. ACK-off rbpodo settings are acceptance evidence only until a
-future real-motion task promotes them.
+command period for supported real/controller-simulation configs: `0.002` at
+500 Hz. Manual non-500 YAML overrides may remain parseable for compatibility,
+but they are not supported profiles. ACK-off rbpodo settings are diagnostic
+evidence only until a future real-motion task promotes them.
 
 Tracked real robot config must remain a template only:
 
@@ -187,10 +175,9 @@ Backend APIs must preserve structured results:
 
 Do not parse backend error strings to infer safety behavior if structured fields are available. Simulator, mock, and rbpodo backends should all map failures to the shared backend taxonomy.
 
-`rbscript_tcp` uses Rainbow script TCP command port 5000 and data port 5001 for
-experimental comparison. It is not UDP, must not add a UDP direct-to-controller
-path, and remains no-motion/read-only first until separate real-motion
-acceptance exists.
+Unsupported raw script TCP comparison paths must not be reintroduced. Rbpodo is
+the only supported real backend; mock and simulator paths remain hardware-free
+test surfaces.
 
 ## Servo Loop And I/O Architecture
 

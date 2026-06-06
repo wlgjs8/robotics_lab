@@ -114,7 +114,7 @@ public:
 };
 ```
 
-Before integration, make its sampling time configurable. The observed `Ts = 0.002` implies 500 Hz. This server starts at 100–200 Hz, so `Ts` must come from `ForceControlConfig` or the actual loop `dt_sec`.
+Before integration, make its sampling time configurable. The supported robot-control period is `Ts = 0.002` at 500 Hz, so `Ts` must come from `ForceControlConfig` or the actual loop `dt_sec`.
 
 Recommended path:
 

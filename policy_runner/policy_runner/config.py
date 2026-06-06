@@ -147,7 +147,7 @@ class SpaceMouseConfig:
 class SpaceMouseCartesianConfig:
     selected_arm: str = "left"
     frame: str = "local"
-    command_rate_hz: float = 100.0
+    command_rate_hz: float = 500.0
     max_linear_velocity_m_s: float = 0.03
     max_angular_velocity_rad_s: float = 0.2
     deadband: float = 0.08
@@ -293,7 +293,7 @@ class PolicyRunnerConfig:
         default_factory=DualSpaceMouseCartesianConfig
     )
     master_arm_joint: MasterArmJointConfig = field(default_factory=MasterArmJointConfig)
-    command_rate_hz: float = 100.0
+    command_rate_hz: float = 500.0
 
     def __post_init__(self) -> None:
         _validate_command_rate_hz(float(self.command_rate_hz))
@@ -331,7 +331,7 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
             _section(raw, "spacemouse_cartesian_dual")
         ),
         master_arm_joint=_master_arm_joint_config(_section(raw, "master_arm_joint")),
-        command_rate_hz=float(raw.get("command_rate_hz", 100.0)),
+        command_rate_hz=float(raw.get("command_rate_hz", 500.0)),
     )
 
 

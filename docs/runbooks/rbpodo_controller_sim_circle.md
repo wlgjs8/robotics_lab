@@ -61,7 +61,6 @@ For rbpodo controller simulation, the current lanes are:
 | --- | --- |
 | `rbpodo_python_streaming_open_loop` | Python benchmark streams open-loop twist/segment commands. |
 | `rbpodo_python_streaming_feedback` | Python benchmark closes the feedback loop from state telemetry. |
-| `rbpodo_server_side_circle_ackon100` | Server-side circle tracking at the 100 Hz ACK-on baseline. |
 | `rbpodo_server_side_circle_ackon500_sync` | Server-side circle tracking at 500 Hz with synchronous ACK-on sends. |
 | `rbpodo_server_side_circle_ackon500_sdk_worker` | Official ACKON500 pass lane: server-side circle, 500 Hz, async `sdk_ack_worker`, worker ACK observed. |
 | `rbpodo_server_side_circle_500hz_socket_send_supervised` | Server-side circle with `socket_send_supervised`; send-only evidence, never an official ACKON500 pass. |
@@ -77,12 +76,9 @@ Use these templates only for `rbpodo` controller-simulation bring-up:
 
 | Purpose | Template | Rate | Command/state endpoints | Motion default |
 | --- | --- | ---: | --- | --- |
-| read-only diagnostic | `rb_servo_server/config/dual_real_rbpodo_readonly.example.yaml` | 100 Hz | `50031` / `50131` | disabled |
-| Servo J no-op ACK-on | `rb_servo_server/config/dual_real_rbpodo_sim_noop_100hz_ack.example.yaml` | 100 Hz | `50041` / `50141` | controller pgmode simulation only |
-| Servo J no-op ACK-on | `rb_servo_server/config/dual_real_rbpodo_sim_noop_200hz_ack.example.yaml` | 200 Hz | `50042` / `50142` | controller pgmode simulation only |
-| Servo J no-op ACK-off | `rb_servo_server/config/dual_real_rbpodo_sim_noop_200hz_no_ack.example.yaml` | 200 Hz | `50043` / `50143` | controller pgmode simulation only, experimental |
-| stable circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml` | 100 Hz | command `50051`, state `50151` recorder + `50161` GUI | controller pgmode simulation only |
-| GENE-style stress circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml` | 100 Hz | command `50052`, state `50152` recorder + `50162` GUI | controller pgmode simulation only, stress |
+| read-only diagnostic | `rb_servo_server/config/dual_real_rbpodo_readonly.example.yaml` | 500 Hz | `50031` / `50131` | disabled |
+| stable circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml` | 500 Hz | command `50051`, state `50151` recorder + `50161` GUI | controller pgmode simulation only |
+| GENE-style stress circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml` | 500 Hz | command `50052`, state `50152` recorder + `50162` GUI | controller pgmode simulation only, stress |
 | safe 500 Hz circle | `rb_servo_server/config/dual_real_rbpodo_circle_5cm10s_500hz.example.yaml` | 500 Hz | command `50251`, state `50351` recorder + `50361` GUI | controller pgmode simulation only, staged |
 | stable 500 Hz circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm16s_500hz.example.yaml` | 500 Hz | command `50252`, state `50352` recorder + `50362` GUI | controller pgmode simulation only, staged |
 | middle 500 Hz circle | `rb_servo_server/config/dual_real_rbpodo_circle_15cm8s_500hz.example.yaml` | 500 Hz | command `50253`, state `50353` recorder + `50363` GUI | controller pgmode simulation only, staged |
@@ -120,9 +116,8 @@ Create only the named ACKON500 best goal profile with:
 tools/create_rbpodo_circle_local_configs.sh --include-goal
 ```
 
-The 500 Hz configs and named goal profile are not created by default and do not
-change the existing 100 Hz circle defaults. The goal profile is created only
-with `--include-500hz` or `--include-goal`.
+The active controller-simulation configs are 500 Hz. The named goal profile is
+created only with `--include-500hz` or `--include-goal`.
 
 Verify the controller-simulation Cartesian gate and physical-real block before
 running:
@@ -717,14 +712,14 @@ RB_ALLOW_REAL_MOTION=1 \
 RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1 \
 python3 scripts/rbpodo_servo_acceptance.py \
   --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
-  --config rb_servo_server/config/local/dual_real_rbpodo_sim_noop_200hz_ack.yaml \
+  --config rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s_500hz_goal.yaml \
   --arm left \
   --mode servo_j_noop \
-  --profile 200hz_ack \
+  --profile 500hz_ack \
   --allow-motion \
   --set-pgmode-simulation \
   --duration-sec 10 \
-  --artifact-dir artifacts/rbpodo_controller_sim_circle/servo_j_noop_200hz_ack_left \
+  --artifact-dir artifacts/rbpodo_controller_sim_circle/servo_j_noop_500hz_ack_left \
   --i-understand-this-connects-to-real-controller
 ```
 
@@ -757,15 +752,16 @@ explicit stress evidence only.
 
 ## 500 Hz Controller-Simulation Track
 
-The 500 Hz track is staged from a single-arm no-op rate-probe artifact, not from
+The 500 Hz track is staged from a single-arm no-op acceptance artifact, not from
 a physical-motion run. Stage 0 evidence in
 `artifacts/rbpodo_servo_j_rate_probe_left` shows 5000/5000 500 Hz Servo J
 no-op sends succeeded over 10 seconds in controller `pgmode` simulation, with
 loop interval p99 about 2.006 ms and max send duration about 501 us. This is
 only enough to begin staged 500 Hz controller-simulation acceptance.
 
-500 Hz is not the default. Existing 100 Hz templates and local-config creation
-remain unchanged unless `--include-500hz` is passed.
+500 Hz is the supported robot-control default. State publication may remain at
+the configured telemetry rate for load management; do not confuse it with servo
+command rate.
 
 Run order:
 
@@ -863,7 +859,7 @@ are disabled optional follow-ups. All 500 Hz rows explicitly keep
 The stable baseline profile is `15cm/16s`. It mirrors the current simulator
 baseline:
 
-- `servo.rate_hz: 100`
+- `servo.rate_hz: 500`
 - `velocity_target_integration: previous_command`
 - `controller_simulation_servo_state_source: reference`
 - `controller_simulation_divergence_source: reference`
@@ -880,7 +876,7 @@ real-candidate label.
 The stress profile is `15cm/4s`. It mirrors the GENE-style simulator stress
 settings and is not a pass/fail acceptance profile or real-ready profile:
 
-- `servo.rate_hz: 100`
+- `servo.rate_hz: 500`
 - `max_twist_linear_m_s: 0.15`
 - `max_twist_angular_rad_s: 0.4`
 - feedback benchmark mode is recommended before interpreting drift
@@ -1466,10 +1462,10 @@ validated on the resolved file before a benchmark command is launched:
 finite and in `(0, 1)` on both arms. These ranges are an ablation safety
 envelope, not an interpretation of what Rainbow's `alpha` means; alpha
 semantics must be determined from measured controller-simulation artifacts.
-For rate/t1 sweeps, use `servo.rate_hz: 100` with `servo_t1_sec: 0.01`,
-`servo.rate_hz: 200` with `servo_t1_sec: 0.005`, or staged 500 Hz
-controller-simulation rows with `servo.rate_hz: 500` and
-`servo_t1_sec: 0.002` on both arms.
+For rate/t1 sweeps, keep supported controller-simulation rows at
+`servo.rate_hz: 500` and `servo_t1_sec: 0.002` on both arms. Manual non-500
+YAML overrides may parse for compatibility, but they are not supported
+profiles.
 
 `server_circle` rows send one `TcpCircleMove` packet and let the server update
 the circle reference on the servo tick. This is a controller-simulation
@@ -1489,7 +1485,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 0.5
@@ -1506,7 +1502,7 @@ experiments:
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 2.0
@@ -1518,12 +1514,12 @@ experiments:
       left_robot.speed_bar: 0.5
       right_robot.speed_bar: 0.5
 
-  - name: gene_200hz_t1_005_speed10
+  - name: gene_500hz_t1_002_speed10
     config: rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
     profile: gene_15cm_4s
     controller: twist_stand_feedback
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     tracking_source: tcp_ref_stand
     feedback_kp_pos: 2.0
@@ -1531,9 +1527,9 @@ experiments:
     feedback_max_linear_m_s: 0.15
     feedback_max_angular_rad_s: 0.4
     config_overrides:
-      servo.rate_hz: 200
-      left_robot.servo_t1_sec: 0.005
-      right_robot.servo_t1_sec: 0.005
+      servo.rate_hz: 500
+      left_robot.servo_t1_sec: 0.002
+      right_robot.servo_t1_sec: 0.002
       left_robot.speed_bar: 1.0
       right_robot.speed_bar: 1.0
 ```

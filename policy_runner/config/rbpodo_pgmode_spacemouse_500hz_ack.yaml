@@ -44,11 +44,11 @@ spacemouse_cartesian_dual:
   sample_hold_timeout_sec: 0.05
   left:
     device: null
-    path: null
+    path: /dev/hidraw5
     device_number: 0
     deadman_button: 0
   right:
     device: null
-    path: null
-    device_number: 1
+    path: /dev/hidraw10
+    device_number: 0
     deadman_button: 0

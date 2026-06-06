@@ -72,11 +72,9 @@ run_mode: mock | simulation | real
 backend_type: mock | simulator | rbpodo
 ```
 
-`rbscript_tcp`는 표준 production backend가 아니라 실험용 비교 backend입니다.
-Rainbow script TCP command port 5000과 data port 5001을 사용해 `rbpodo`
-경로와 raw script TCP 경로의 overhead를 비교하기 위한 것이며, UDP
-direct-to-controller 경로가 아닙니다. 자세한 no-motion/read-only 비교 절차는
-`docs/runbooks/rbscript_tcp_ablation.md`를 봅니다.
+지원되는 real-controller backend는 `rbpodo` 하나뿐입니다. `mock`과
+`simulator`는 hardware-free 검증용으로 유지하며, unsupported raw script TCP
+비교 경로는 active code/config/gate/runbook surface에서 제거되었습니다.
 
 ## 실제 및 시뮬레이터 토폴로지
 
@@ -157,19 +155,6 @@ RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
 `unavailable`이고 `circle_fit`이 singular이면 tracking failure가 아니라
 server-side Cartesian gate/configuration 문제입니다.
 
-실험용 `rbscript_tcp` real-controller 접속은 추가 gate가 필요합니다.
-
-```bash
-RB_ALLOW_RBSCRIPT_TCP=1
-```
-
-`rbscript_tcp` servo motion은 별도 승인 전까지 금지이며, 미래 motion
-acceptance가 생기더라도 추가로 다음 gate가 필요합니다.
-
-```bash
-RB_ALLOW_RBSCRIPT_TCP_MOTION=1
-```
-
 이 gate들은 필요 조건일 뿐 충분 조건은 아닙니다. Config와 real-hardware acceptance도 해당 동작을 명시적으로 허용해야 합니다.
 
 `rbpodo` real config의 Rainbow Servo J parameter는 새 이름만 사용합니다.
@@ -180,8 +165,8 @@ RB_ALLOW_RBSCRIPT_TCP_MOTION=1
 - `servo_alpha` -> `alpha`
 
 새 config에서 `servo_acc`나 `servo_lookahead_sec`를 쓰지 마세요. 기존 alias는
-deprecated입니다. 100Hz profile은 `servo_t1_sec: 0.01`, 200Hz profile은
-`servo_t1_sec: 0.005`가 command period와 맞아야 합니다. 자세한 절차는
+deprecated입니다. 지원되는 robot-control profile은 500 Hz이며
+`servo_t1_sec: 0.002`가 command period와 맞아야 합니다. 자세한 절차는
 `docs/runbooks/rbpodo_servo_acceptance.md`와
 `docs/runbooks/real_robot_readonly.md`를 봅니다.
 
@@ -284,16 +269,14 @@ Use `tcp_ref_stand` as the tracking source in pgmode simulation, keep
 Cartesian carve-out. `policy_runner` is separate from this live view; GUI and
 benchmark state consumers do not route commands through it.
 
-rbpodo vs rbscript TCP no-motion/read-only comparison:
+Supported scope hygiene:
 
 ```bash
-python3 scripts/rb_backend_ablation.py --help
-python3 scripts/rainbow_rate_probe.py --help
+CODEX_SKIP_MISSING_CPP_DEPS=1 ./scripts/codex_gate.sh 04_supported_scope_docs_ci_hygiene
 ```
 
-See `docs/runbooks/rbscript_tcp_ablation.md`. These probes measure ACK/read
-latency, success/error counts, state age, achieved rate, and reconnect behavior.
-They do not approve real motion.
+This keeps the active surface rbpodo-only for real controllers and 500 Hz for
+robot command/control defaults. It does not approve real motion.
 
 rbpodo Servo J supervised acceptance:
 

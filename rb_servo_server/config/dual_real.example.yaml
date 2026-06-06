@@ -24,9 +24,9 @@ left_robot:
   command_timeout_sec: 0.02
   initial_q_deg: [0, -30, 80, 0, 60, 0]
   speed_bar: 0.1
-  # Rainbow move_servo_j(jnt, t1, t2, gain, alpha). At 200 Hz, t1 matches
-  # the 0.005 s server command period. t2 is hold time, not UR lookahead.
-  servo_t1_sec: 0.005
+  # Rainbow move_servo_j(jnt, t1, t2, gain, alpha). At 500 Hz, t1 matches
+  # the 0.002 s server command period. t2 is hold time, not UR lookahead.
+  servo_t1_sec: 0.002
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
@@ -43,9 +43,9 @@ right_robot:
   command_timeout_sec: 0.02
   initial_q_deg: [0, -30, 80, 0, 60, 0]
   speed_bar: 0.1
-  # Rainbow move_servo_j(jnt, t1, t2, gain, alpha). At 200 Hz, t1 matches
-  # the 0.005 s server command period. t2 is hold time, not UR lookahead.
-  servo_t1_sec: 0.005
+  # Rainbow move_servo_j(jnt, t1, t2, gain, alpha). At 500 Hz, t1 matches
+  # the 0.002 s server command period. t2 is hold time, not UR lookahead.
+  servo_t1_sec: 0.002
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
@@ -62,7 +62,7 @@ right_mount:
   base_pose_in_stand: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
 
 servo:
-  rate_hz: 200
+  rate_hz: 500
   command_timeout_sec: 0.2
   io_model: direct
   startup_mode: Hold

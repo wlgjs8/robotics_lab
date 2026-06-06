@@ -60,4 +60,4 @@ master_arm_joint:
   smoothing_alpha: 0.35
   wrap_delta: true
 
-command_rate_hz: 100
+command_rate_hz: 500

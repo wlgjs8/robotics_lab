@@ -372,8 +372,8 @@ overwrite/drop counts are faults or acceptance failures, not acceptable jitter.
 
 ## Stage 0 Evidence
 
-The initial evidence is a single-arm `rainbow_rate_probe.py`
-`servo_j_simulation_only` artifact:
+The initial evidence is a single-arm `rbpodo_500hz_acceptance.py`
+`servo_j_noop_500hz` artifact:
 
 ```text
 artifacts/rbpodo_servo_j_rate_probe_left
@@ -394,9 +394,9 @@ Run stages in order and stop at the first fault, physical-motion warning,
 Cartesian gate rejection, timing classification problem, or missing reference
 telemetry.
 
-Synchronous 500 Hz acceptance starts from the existing rate probe:
+Synchronous 500 Hz acceptance starts from the existing no-op acceptance:
 
-1. Single-arm no-op rate probe at 100 Hz and 500 Hz: already completed for the
+1. Single-arm 500 Hz no-op acceptance: already completed for the
    left controller in `artifacts/rbpodo_servo_j_rate_probe_left`.
 2. `rb_servo_server` full-path no-op at 500 Hz using
    `scripts/rbpodo_500hz_acceptance.py --mode servo_j_noop_500hz`.
@@ -471,8 +471,9 @@ safety:
   controller_simulation_physical_motion_threshold_deg: 0.05
 ```
 
-`network.state_pub_rate_hz` stays at 100 Hz initially. Do not set state
-publication to 500 Hz until a separate measurement task accepts it.
+`network.state_pub_rate_hz` remains a telemetry publication setting. Do not
+tie it to the 500 Hz servo command rate until a separate measurement task
+accepts that change.
 
 ## Required Gates
 
@@ -998,17 +999,18 @@ Failure classifications distinguish ACK timeout, deadline-limited,
 
 After the no-op stage passes, run the circle matrices in order. These matrices
 are controller `pgmode` simulation only, keep physical Cartesian blocked, and
-compare 100 Hz against 500 Hz with `network.state_pub_rate_hz: 100`.
+exercise the supported 500 Hz command/control path while leaving state
+publication as a separate telemetry rate.
 
 | Stage | Matrix | Purpose |
 | --- | --- | --- |
-| 1 | `configs/rbpodo_circle_ablation/500hz_stage1_noop_and_safe.yaml` | safe 5 cm / 10 s, low gains, 100 Hz vs 500 Hz |
+| 1 | `configs/rbpodo_circle_ablation/500hz_stage1_noop_and_safe.yaml` | safe 5 cm / 10 s, low gains, 500 Hz supported path |
 | 2 | `configs/rbpodo_circle_ablation/500hz_stage2_15cm16s.yaml` | 15 cm / 16 s open-loop and closed-loop candidates |
 | 3 | `configs/rbpodo_circle_ablation/500hz_stage3_8s_4s.yaml` | 15 cm / 8 s bridge before 15 cm / 4 s stress |
 | async | `configs/rbpodo_circle_ablation/500hz_async_acceptance.yaml` | safe 5 cm / 10 s async socket-send supervised row; ACK-worker row is disabled until no-op ACK-worker evidence is feasible |
-| async stage 1 | `configs/rbpodo_circle_ablation/async_500hz_stage1_safe.yaml` | safe 5 cm / 10 s, tuned 100 Hz ACK-on baseline, 500 Hz synchronous ACK-on, 500 Hz socket-send supervised, and disabled ACK-worker candidate |
+| async stage 1 | `configs/rbpodo_circle_ablation/async_500hz_stage1_safe.yaml` | safe 5 cm / 10 s, 500 Hz synchronous ACK-on, 500 Hz socket-send supervised, and disabled ACK-worker candidate |
 | async stage 2 | `configs/rbpodo_circle_ablation/async_500hz_stage2_15cm16s.yaml` | 15 cm / 16 s, `Kp_pos/Kp_ori` candidates `0.5/0.2` and `1.0/0.5` across ACK-on and socket-send supervised modes |
-| async stage 3 | `configs/rbpodo_circle_ablation/async_500hz_stage3_8s_4s.yaml` | 15 cm / 8 s and 15 cm / 4 s stress, 100 Hz ACK-on best row, socket-send supervised repeat 5, phase advance `0.00/0.02/0.04`, and `t2` `0.08/0.03` with `alpha=0.8` |
+| async stage 3 | `configs/rbpodo_circle_ablation/async_500hz_stage3_8s_4s.yaml` | 15 cm / 8 s and 15 cm / 4 s stress, 500 Hz ACK-on best row, socket-send supervised repeat 5, phase advance `0.00/0.02/0.04`, and `t2` `0.08/0.03` with `alpha=0.8` |
 
 For `RBPODO-ASYNC-CIRCLE-MATRIX-01`, use this run order:
 
@@ -1081,36 +1083,13 @@ classification, deadline miss, or measurement reliability downgrade. The 15 cm
 / 4 s rows remain stress evidence even if they complete cleanly; do not mark
 500 Hz as real-ready from these matrices.
 
-## Comparison Report
+## Evidence Report
 
-After collecting no-op and circle artifacts, generate the 100 Hz vs 500 Hz
-controller-simulation report without rerunning benchmarks:
-
-```bash
-python3 scripts/generate_rbpodo_500hz_report.py \
-  --noop-summary artifacts/rbpodo_servo_j_rate_probe_left/summary.json \
-  --ablation-summary-csv artifacts/<stage1>/ablation_summary.csv \
-  --ablation-summary-csv artifacts/<stage2>/ablation_summary.csv \
-  --ablation-summary-csv artifacts/<stage3>/ablation_summary.csv \
-  --output-md artifacts/rbpodo_500hz_report.md \
-  --csv artifacts/rbpodo_500hz_report.csv \
-  --json artifacts/rbpodo_500hz_report.json
-```
-
-The report compares these evidence pairs:
-
-- 100 Hz vs 500 Hz no-op acceptance
-- 100 Hz vs 500 Hz `safe_5cm_10s`
-- 100 Hz vs 500 Hz 15 cm / 16 s
-- 100 Hz vs 500 Hz 15 cm / 8 s
-- 100 Hz vs 500 Hz 15 cm / 4 s
-
-It also writes a comparative evidence table for:
-
-- 100 Hz ACK-on best row
-- 500 Hz synchronous ACK-on row
-- 500 Hz `socket_send_supervised` row
-- 500 Hz async `sdk_ack_worker` row
+After collecting no-op and circle artifacts, summarize the 500 Hz evidence from
+the generated `summary.json`, `ablation_summary.csv`, and ACKON500 report
+artifacts. Keep synchronous ACK-on, `socket_send_supervised`, and async
+`sdk_ack_worker` rows separated so socket-send-only evidence cannot be reported
+as per-command controller ACK.
 
 Acceptance semantics are reported separately:
 

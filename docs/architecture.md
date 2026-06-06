@@ -57,10 +57,9 @@ backend_type: mock | simulator | rbpodo
 
 `run_mode` describes the environment. `backend_type` describes the backend implementation. Deprecated terms such as `rbsim_local`, public `rbsim`, or mixed simulator aliases must not be introduced in new public docs/configs.
 
-`backend_type: rbscript_tcp` is an experimental comparison backend name, not a
-production backend. It exists to compare the primary vendor-library `rbpodo`
-path with raw Rainbow script TCP overhead under explicit gates. Do not present
-it as a replacement for `rbpodo` until a future acceptance task promotes it.
+Supported real-controller scope is rbpodo only. Mock and simulator backends are
+hardware-free validation surfaces; unsupported raw script TCP comparison paths
+must not be presented as runnable backends.
 
 ## Controller Topology
 
@@ -276,22 +275,6 @@ twist targets. Physical real `operation_mode: real` is rejected with
 must keep `operation_mode: simulation`, `allow_in_real: false`, and the existing
 controller-simulation env gates.
 
-Experimental `rbscript_tcp` real-controller connection is additionally closed
-unless:
-
-```bash
-RB_ALLOW_RBSCRIPT_TCP=1
-```
-
-Experimental `rbscript_tcp` servo motion is additionally closed unless:
-
-```bash
-RB_ALLOW_RBSCRIPT_TCP_MOTION=1
-```
-
-These gates do not make `rbscript_tcp` real-motion-ready; they only permit the
-next explicitly accepted stage to run.
-
 Tracked real config is a template only:
 
 ```text
@@ -316,9 +299,11 @@ must use canonical names in new configs:
 
 Do not introduce new uses of deprecated aliases `servo_time_sec`,
 `servo_lookahead_sec`, or `servo_acc`. `servo_t1_sec` must match the streaming
-period for real motion configs: `0.01` at 100 Hz and `0.005` at 200 Hz. ACK-off
-rbpodo settings are not a real baseline until the supervised acceptance sequence
-passes with state-age, ACK, error-code, and q_ref/q_actual evidence.
+period for supported real/controller-simulation configs: `0.002` at 500 Hz.
+Manual non-500 YAML overrides may remain parseable for compatibility, but they
+are not supported profiles. ACK-off rbpodo settings are not a real baseline
+until the supervised acceptance sequence passes with state-age, ACK, error-code,
+and q_ref/q_actual evidence.
 
 Deprecated simulator config names are archived under `docs/archive/configs/`
 for historical reference only. They are not runnable source-of-truth profiles
@@ -417,16 +402,9 @@ Bool-only backend results must not be reintroduced.
 
 `RbpodoBackend` separates state acquisition from motion readiness. Valid joint feedback with `servo_enabled=false` is a valid read state, not motion readiness. Real `servo_j` sends remain blocked unless real gates and controller readiness are satisfied. Real stop/reset API wiring remains conservative until verified.
 
-`RbscriptTcpBackend` is experimental. It sends Rainbow UI Script text over the
-controller TCP command port 5000 and reads bounded data from TCP data port 5001
-when supported. It is not UDP and must not introduce a UDP direct-to-controller
-path. The intended use is staged overhead comparison:
-
-- no-motion connect
-- read-only `readState()`
-- no-motion command ACK timing
-- simulation-mode `servo_j` probing only when explicitly accepted
-- tiny real joint motion only in a future motion runbook
+Unsupported raw script TCP comparison backends are outside the current
+architecture. Do not add direct-to-controller raw script command paths; real
+controller integration goes through `RbpodoBackend`.
 
 Lower raw TCP client overhead does not bypass controller parser, ACK, motion,
 or safety limits. `rt_script` is future work and remains out of scope.

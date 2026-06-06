@@ -637,7 +637,7 @@ experiments:
     profile: circle_15cm_16s
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     server_config: rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml
 
@@ -646,19 +646,19 @@ experiments:
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 3
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
 
-  - name: stress_15cm_4s_twist_stand_200hz
+  - name: stress_15cm_4s_twist_stand_500hz
     profile: gene_15cm_4s
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 200
+    command_rate_hz: 500
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
     server_config_overrides:
-      servo.rate_hz: 200
+      servo.rate_hz: 500
       network.state_pub_rate_hz: 50
       cartesian_control.velocity_target_integration: previous_command
 ```

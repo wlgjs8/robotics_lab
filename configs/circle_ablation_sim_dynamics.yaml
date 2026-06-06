@@ -4,7 +4,7 @@ experiments:
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
     left_config_overrides:
@@ -17,7 +17,7 @@ experiments:
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
     left_config_overrides:
@@ -30,7 +30,7 @@ experiments:
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
     left_config_overrides:
@@ -43,7 +43,7 @@ experiments:
     allow_fast_stress: true
     controller: twist_stand
     arm: left
-    command_rate_hz: 100
+    command_rate_hz: 500
     repeat: 5
     server_config: rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
     left_config_overrides:
