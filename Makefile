@@ -3,10 +3,14 @@ COMPOSE_FILE ?= docker-compose.yml
 PROJECT ?= robotics_lab
 SIM_BACKEND_COMPOSE_FILE ?= docker-compose.sim-backend.yml
 SIM_CONTROL_COMPOSE_FILE ?= docker-compose.sim-control.yml
+FLOW_COMPOSE_FILE ?= docker-compose.flow-train.yml
+FLOW_TRAIN_SERVICES ?= policy_flow_train_gpu0 policy_flow_train_gpu1 policy_flow_train_gpu2 policy_flow_train_gpu3 policy_flow_train_gpu4 policy_flow_train_gpu5 policy_flow_train_gpu6 policy_flow_train_gpu7
+POLICY_FLOW_AUDIT_HOST_OUT ?= outputs/flow_runs/audit
+POLICY_FLOW_AUDIT_CONTAINER_OUT ?= /outputs/flow_runs/audit
 POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 
-.PHONY: build deploy stop sim-local-up sim-up sim-backend-up sim-control-up sim-down sim-smoke sim-teleop-up sim-infer-up policy-train policy-hdf5-audit-smoke policy-flow-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up
+.PHONY: build deploy stop sim-local-up sim-up sim-backend-up sim-control-up sim-down sim-smoke sim-teleop-up sim-infer-up policy-train policy-flow-train-config policy-flow-train-build policy-flow-train-preflight policy-flow-hdf5-audit policy-flow-train-up policy-flow-train-down policy-hdf5-audit-smoke policy-flow-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up
 
 build:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) build
@@ -39,6 +43,29 @@ sim-infer-up:
 
 policy-train:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile ml run --rm policy_train
+
+policy-flow-train-config:
+	$(COMPOSE) -p $(PROJECT) -f $(FLOW_COMPOSE_FILE) --profile flow-train config
+
+policy-flow-train-build:
+	$(COMPOSE) -p $(PROJECT) -f $(FLOW_COMPOSE_FILE) --profile flow-train build
+
+policy-flow-train-preflight:
+	$(COMPOSE) -p $(PROJECT) -f $(FLOW_COMPOSE_FILE) --profile flow-train run --rm --no-deps --entrypoint policy-runner policy_flow_train_gpu0 ml-preflight --vision-backbone resnet18
+	$(COMPOSE) -p $(PROJECT) -f $(FLOW_COMPOSE_FILE) --profile flow-train run --rm --no-deps --entrypoint policy-runner policy_flow_train_gpu0 ml-preflight --vision-backbone resnet50
+
+policy-flow-hdf5-audit:
+	mkdir -p "$(POLICY_FLOW_AUDIT_HOST_OUT)"
+	$(COMPOSE) -p $(PROJECT) -f $(FLOW_COMPOSE_FILE) --profile flow-train run --rm --no-deps --entrypoint policy-runner policy_flow_train_gpu0 hdf5-audit \
+		--episodes-dir /data/policy_episodes \
+		--output-json "$(POLICY_FLOW_AUDIT_CONTAINER_OUT)/hdf5_audit.json" \
+		--output-md "$(POLICY_FLOW_AUDIT_CONTAINER_OUT)/hdf5_audit.md"
+
+policy-flow-train-up:
+	$(COMPOSE) -p $(PROJECT) -f $(FLOW_COMPOSE_FILE) --profile flow-train up --build $(FLOW_TRAIN_SERVICES)
+
+policy-flow-train-down:
+	$(COMPOSE) -p $(PROJECT) -f $(FLOW_COMPOSE_FILE) down --remove-orphans
 
 policy-hdf5-audit-smoke:
 	mkdir -p "$(POLICY_HDF5_AUDIT_OUT)"

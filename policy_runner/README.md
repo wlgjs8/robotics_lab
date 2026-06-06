@@ -277,6 +277,60 @@ python3 -m policy_runner flow-train \
   --write-eval-report outputs/flow_eval_report.md
 ```
 
+Run the prepared 8-GPU independent experiment sweep with Docker Compose:
+
+```bash
+make policy-flow-train-config
+make policy-flow-train-build
+make policy-flow-train-preflight
+make policy-flow-hdf5-audit
+make policy-flow-train-up
+```
+
+The sweep is defined in `docker-compose.flow-train.yml`. It mounts `./data` as
+read-only HDF5 input, writes outputs under `outputs/flow_runs`, uses
+`--val-split 0.2`, and pins `policy_flow_train_gpu0` through
+`policy_flow_train_gpu7` to host GPU IDs `0` through `7`. These are independent
+single-GPU experiments, not distributed training. The first sweep uses
+`left_realsense_color,right_realsense_color` and excludes depth cameras.
+
+The target host must have NVIDIA Container Toolkit and Docker Compose GPU
+reservation support. On smaller hosts, run a subset:
+
+```bash
+FLOW_TRAIN_SERVICES=policy_flow_train_gpu0 make policy-flow-train-up
+```
+
+If Compose GPU reservation is unavailable, run one experiment directly:
+
+```bash
+docker build \
+  -f policy_runner/docker/policy_runner.Dockerfile \
+  --target cuda-ml \
+  -t robotics_lab/policy_runner:cuda-ml .
+
+docker run --rm --gpus '"device=0"' \
+  -v "$PWD/data:/data/policy_episodes:ro" \
+  -v "$PWD/outputs/flow_runs:/outputs/flow_runs" \
+  robotics_lab/policy_runner:cuda-ml \
+  flow-train \
+  --episodes-dir /data/policy_episodes \
+  --camera-names left_realsense_color,right_realsense_color \
+  --exclude-camera-names left_realsense_depth,right_realsense_depth \
+  --val-split 0.2 \
+  --sample-steps 16 \
+  --device auto \
+  --checkpoint /outputs/flow_runs/gpu0_resnet18_transformer_h16/flow_policy.pt \
+  --write-eval-report /outputs/flow_runs/gpu0_resnet18_transformer_h16/flow_eval_report.md \
+  --vision-backbone resnet18 \
+  --condition-encoder transformer \
+  --action-horizon 16 \
+  --hidden-dim 128 \
+  --lr 1e-4 \
+  --batch-size 32 \
+  --epochs 100
+```
+
 The checkpoint schema is `robotics_lab.policy_runner.flow_matching.v1`.
 Training also writes `dataset_stats.json` and `training_curves.jsonl` beside the
 checkpoint, plus `flow_eval_report.md` and `flow_eval_summary.json` evaluation
