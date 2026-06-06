@@ -451,8 +451,20 @@ def env_snapshot() -> dict[str, str | None]:
     return {key: os.environ.get(key) for key in ENV_KEYS}
 
 
-def missing_env(stage: Stage) -> list[str]:
-    return [name for name in stage.required_env if not env_enabled(name)]
+def stage_required_env(stage: Stage, config: ParsedConfig | None) -> tuple[str, ...]:
+    required = list(stage.required_env)
+    ack_disabled = bool(
+        stage.is_motion
+        and config is not None
+        and (config.left.disable_waiting_ack or config.right.disable_waiting_ack)
+    )
+    if ack_disabled and "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION" not in required:
+        required.append("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")
+    return tuple(required)
+
+
+def missing_env(required_env: tuple[str, ...]) -> list[str]:
+    return [name for name in required_env if not env_enabled(name)]
 
 
 def missing_confirmations(args: argparse.Namespace, stage: Stage) -> list[str]:
@@ -531,10 +543,13 @@ def validate_config_policy(args: argparse.Namespace, stage: Stage, config: Parse
             blockers.append(f"{stage.stage_id} {stage.cli_name} requires servo.send_servo_commands=true in the local config")
         if not stage.is_motion and send_servo_commands:
             blockers.append(f"{stage.stage_id} {stage.cli_name} requires servo.send_servo_commands=false")
-        if stage.is_cartesian and not cartesian_allow_in_real:
-            blockers.append(
-                f"{stage.stage_id} {stage.cli_name} requires a site-local config with cartesian_control.allow_in_real=true"
-            )
+        if stage.is_cartesian:
+            if not as_bool(config.cartesian_control.get("enable"), False):
+                blockers.append(f"{stage.stage_id} {stage.cli_name} requires cartesian_control.enable=true")
+            if not cartesian_allow_in_real:
+                blockers.append(
+                    f"{stage.stage_id} {stage.cli_name} requires a site-local config with cartesian_control.allow_in_real=true"
+                )
     return blockers
 
 
@@ -641,6 +656,7 @@ def build_summary(
     config: ParsedConfig | None,
     blockers: list[str],
     prereq_artifacts: dict[str, str],
+    required_env: tuple[str, ...],
 ) -> dict[str, Any]:
     dry_run = bool(args.dry_run)
     result_status = "dry_run" if dry_run and not blockers else "blocked" if blockers else "preflight_pass"
@@ -664,8 +680,8 @@ def build_summary(
             "blockers": blockers,
         },
         "gates": {
-            "required_env": [f"{name}=1" for name in stage.required_env],
-            "missing_env": [f"{name}=1" for name in missing_env(stage)],
+            "required_env": [f"{name}=1" for name in required_env],
+            "missing_env": [f"{name}=1" for name in missing_env(required_env)],
             "required_confirmation_flags": [CONFIRMATION_TO_FLAG[name] for name in stage.required_confirmations],
             "missing_confirmation_flags": missing_confirmations(args, stage),
             "env_snapshot": env_snapshot(),
@@ -766,12 +782,13 @@ def main(argv: list[str] | None = None) -> int:
         stage = STAGES[args.stage]
         config = load_config(args.config, args.root) if args.config else None
         prereq_artifacts = parse_prereq_artifacts(args.prereq_artifact)
+        required_env = stage_required_env(stage, config)
         blockers = validate_numeric_args(args, stage)
         blockers.extend(validate_config_policy(args, stage, config))
         if not args.dry_run:
-            blockers.extend(f"missing env gate {gate}" for gate in missing_env(stage))
+            blockers.extend(f"missing env gate {gate}=1" for gate in missing_env(required_env))
             blockers.extend(f"missing confirmation flag {flag}" for flag in missing_confirmations(args, stage))
-        summary = build_summary(args, stage, config, blockers, prereq_artifacts)
+        summary = build_summary(args, stage, config, blockers, prereq_artifacts, required_env)
         if blockers:
             print_gate_summary(stage, summary)
             if args.artifact_dir:

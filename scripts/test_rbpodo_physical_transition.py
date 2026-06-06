@@ -22,7 +22,7 @@ left_robot:
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
-  disable_waiting_ack: false
+  disable_waiting_ack: {disable_waiting_ack}
 right_robot:
   backend_type: rbpodo
   run_mode: real
@@ -33,7 +33,7 @@ right_robot:
   servo_t2_sec: 0.05
   servo_gain: 1.0
   servo_alpha: 0.5
-  disable_waiting_ack: false
+  disable_waiting_ack: {disable_waiting_ack}
 servo:
   rate_hz: 100
   send_servo_commands: {send_servo_commands}
@@ -65,6 +65,7 @@ def write_config(
     send_servo_commands: bool,
     cartesian_enable: bool = False,
     allow_in_real: bool = False,
+    disable_waiting_ack: bool = False,
 ) -> Path:
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,6 +74,7 @@ def write_config(
             send_servo_commands=str(send_servo_commands).lower(),
             cartesian_enable=str(cartesian_enable).lower(),
             allow_in_real=str(allow_in_real).lower(),
+            disable_waiting_ack=str(disable_waiting_ack).lower(),
         ),
         encoding="utf-8",
     )
@@ -160,6 +162,61 @@ class PhysicalTransitionAcceptanceTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("RB_ALLOW_REAL_CARTESIAN=1", stdout + stderr)
 
+    def test_tiny_cartesian_refuses_when_cartesian_control_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = write_config(
+                root,
+                "rb_servo_server/config/local/tiny_cartesian.yaml",
+                send_servo_commands=True,
+                cartesian_enable=False,
+                allow_in_real=True,
+            )
+            code, stdout, stderr = run_accept(
+                [
+                    "--root",
+                    str(root),
+                    "--stage",
+                    "tiny_cartesian",
+                    "--execute",
+                    "--config",
+                    str(config),
+                    *ALL_FLAGS,
+                ],
+                env={
+                    "RB_ALLOW_REAL_ROBOT": "1",
+                    "RB_ALLOW_REAL_MOTION": "1",
+                    "RB_ALLOW_REAL_CARTESIAN": "1",
+                },
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("requires cartesian_control.enable=true", stdout + stderr)
+
+    def test_ack_disabled_motion_requires_ack_disabled_env_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = write_config(
+                root,
+                "rb_servo_server/config/local/tiny_joint_ack_disabled.yaml",
+                send_servo_commands=True,
+                disable_waiting_ack=True,
+            )
+            code, stdout, stderr = run_accept(
+                [
+                    "--root",
+                    str(root),
+                    "--stage",
+                    "tiny_joint",
+                    "--execute",
+                    "--config",
+                    str(config),
+                    *ALL_FLAGS,
+                ],
+                env={"RB_ALLOW_REAL_ROBOT": "1", "RB_ALLOW_REAL_MOTION": "1"},
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1", stdout + stderr)
+
     def test_tracked_example_refuses_send_servo_commands_true(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -190,6 +247,8 @@ def write_stage_summary(
     status: str = "pass",
     physical_status: str = "not_run",
     physical_source: str = "tcp_actual_stand",
+    calibration_status: str | None = None,
+    calibration_measured: bool | None = None,
 ) -> Path:
     path = root / stage_id / "summary.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,6 +279,12 @@ def write_stage_summary(
             "physical_motion_detected": physical_status == "pass",
         },
     }
+    if calibration_status is not None:
+        data["calibration"] = {
+            "status": calibration_status,
+            "measured": calibration_measured,
+            "geometry_valid_for_real_policy": bool(calibration_measured),
+        }
     path.write_text(json.dumps(data), encoding="utf-8")
     return path
 
@@ -248,6 +313,26 @@ class PhysicalTransitionReportTest(unittest.TestCase):
             data = json.loads(out_json.read_text(encoding="utf-8"))
         self.assertEqual(data["physical_readiness"]["status"], "blocked")
         self.assertIn("missing_P1_artifact", data["physical_readiness"]["blockers"])
+
+    def test_report_stage_rows_include_calibration_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_stage_summary(
+                root,
+                "P1",
+                calibration_status="configured_estimate",
+                calibration_measured=False,
+            )
+            out_json = root / "report.json"
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = report.main(["--artifact-dir", str(root), "--json", str(out_json)])
+            self.assertEqual(code, 0)
+            data = json.loads(out_json.read_text(encoding="utf-8"))
+        row = next(row for row in data["stage_rows"] if row["stage_id"] == "P1")
+        self.assertEqual(row["calibration_status"], "configured_estimate")
+        self.assertFalse(row["calibration_measured"])
+        self.assertIn("camera_robot_calibration_not_measured", data["physical_readiness"]["blockers"])
 
 
 if __name__ == "__main__":

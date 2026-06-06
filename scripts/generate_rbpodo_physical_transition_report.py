@@ -226,10 +226,15 @@ def stage_row(stage_id: str, name: str, summary: dict[str, Any] | None) -> dict[
             "stop_reset_behavior_result": "missing",
             "physical_motion_expected": None,
             "physical_motion_detected": None,
+            "calibration_status": "",
+            "calibration_measured": None,
+            "geometry_valid_for_real_policy": None,
         }
     physical = physical_tracking(summary)
     controller = controller_reference(summary)
     tel = telemetry(summary)
+    calibration = summary.get("calibration")
+    calibration = calibration if isinstance(calibration, dict) else {}
     return {
         "stage_id": stage_id,
         "stage_name": name,
@@ -249,6 +254,9 @@ def stage_row(stage_id: str, name: str, summary: dict[str, Any] | None) -> dict[
         "stop_reset_behavior_result": tel.get("stop_reset_behavior_result"),
         "physical_motion_expected": tel.get("physical_motion_expected"),
         "physical_motion_detected": tel.get("physical_motion_detected"),
+        "calibration_status": calibration.get("status"),
+        "calibration_measured": calibration.get("measured"),
+        "geometry_valid_for_real_policy": calibration.get("geometry_valid_for_real_policy"),
     }
 
 
@@ -286,6 +294,8 @@ def build_report(artifact_dir: Path) -> dict[str, Any]:
                 "physical_motion_expected",
                 "physical_motion_detected",
                 "calibration.status",
+                "calibration.measured",
+                "calibration.geometry_valid_for_real_policy",
             ],
         },
     }
@@ -330,6 +340,29 @@ def markdown(report: dict[str, Any]) -> str:
                     "rms_error_m",
                     "p95_error_m",
                     "max_error_m",
+                )
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Calibration",
+            "",
+            "| Stage | Status | Measured | Geometry valid for real policy |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    for row in report["stage_rows"]:
+        lines.append(
+            "| "
+            + " | ".join(
+                format_cell(row.get(key))
+                for key in (
+                    "stage_id",
+                    "calibration_status",
+                    "calibration_measured",
+                    "geometry_valid_for_real_policy",
                 )
             )
             + " |"
