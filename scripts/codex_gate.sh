@@ -1730,6 +1730,7 @@ run_gene_umi_controller_sim_repeatability_gate() {
 }
 
 run_gene_umi_physical_transition_gate() {
+  run_source_hygiene_local_configs_gate
   run_shell_syntax_checks
   python3 -m compileall -q scripts
   run_required_python_help scripts/rbpodo_physical_transition_acceptance.py
@@ -1857,7 +1858,11 @@ fail_if_tracked_matches() {
   local description="$1"
   local pattern="$2"
   local matches
-  matches="$(git ls-files | grep -E "${pattern}" || true)"
+  matches="$(
+    git ls-files | grep -E "${pattern}" | while IFS= read -r path; do
+      [[ -e "${path}" ]] && printf '%s\n' "${path}"
+    done || true
+  )"
   if [[ -n "${matches}" ]]; then
     echo "ERROR: tracked files include forbidden ${description}:" >&2
     printf '%s\n' "${matches}" >&2
@@ -2033,16 +2038,21 @@ run_artifact_manifest_docs_makefile_gate() {
 run_source_hygiene_local_configs_gate() {
   run_shell_syntax_checks
   run_python_compile_checks
+  bash -n tools/create_rbpodo_pgmode_spacemouse_local_config.sh
   require_active_gitignore_entry "HDF5 datasets (*.hdf5)" '\*\.hdf5([[:space:]]|$)'
   require_active_gitignore_entry "HDF5 datasets (*.h5)" '\*\.h5([[:space:]]|$)'
   require_active_gitignore_entry "artifact directories" '(\*\*/)?artifacts/'
   require_active_gitignore_entry "rb_servo_server local YAML configs" 'rb_servo_server/config/local/\*\.ya?ml'
+  require_active_gitignore_entry "rb_servo_server local YML configs" 'rb_servo_server/config/local/\*\.yml'
   require_active_gitignore_entry "runtime output directories" '(\*\*/)?(logs|episodes|checkpoints)/'
   fail_if_tracked_matches "large local dataset files" '\.(hdf5|h5)$'
   fail_if_tracked_matches "Python cache files" '(^|/)__pycache__(/|$)|\.pyc$'
   fail_if_tracked_matches "Codex run artifacts" '^artifacts/codex_runs/'
   fail_if_tracked_matches "local rb_servo_server YAML configs" '^rb_servo_server/config/local/.+\.(yaml|yml)$'
   fail_if_tracked_real_config_without_example_suffix
+  grep_existing "create_rbpodo_pgmode_spacemouse_local_config|RB_PGMODE_SPACEMOUSE_LEFT_IP|ignored by git" \
+    tools/create_rbpodo_pgmode_spacemouse_local_config.sh docs/runbooks/rbpodo_pgmode_spacemouse.md tools/rbpodo_pgmode_spacemouse.sh
+  grep_absent "172\\.28\\.60\\.(200|201)" docs/runbooks/rbpodo_pgmode_spacemouse.md
   grep_existing "\\.example\\.yaml|site-specific|placeholder|config/local|Copy to config/local" \
     README.md docs rb_servo_server/config/dual_real.example.yaml rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml
 }

@@ -21,7 +21,7 @@ usage() {
 Usage: tools/rbpodo_pgmode_spacemouse.sh ACTION [options]
 
 Actions:
-  prepare        Copy the tracked server template to rb_servo_server/config/local/.
+  prepare        Create the ignored local server config from the tracked template.
   server         Launch rb_servo_server with the local ACKON500 pgmode SpaceMouse config.
   server-dry-run Print the server launch command and required env gates; do not execute.
   policy-dry-run Print a mock-SpaceMouse policy_runner command; do not require HID devices.
@@ -166,16 +166,13 @@ require_server_env() {
 }
 
 prepare_local_config() {
-  local template="${ROOT_DIR}/${SERVER_TEMPLATE_REL}"
-  local local_copy="${ROOT_DIR}/${SERVER_LOCAL_REL}"
-  [[ -f "${template}" ]] || fail "template not found: ${SERVER_TEMPLATE_REL}"
-  mkdir -p "$(dirname "${local_copy}")"
-  if [[ -f "${local_copy}" && "${FORCE}" != "1" ]]; then
-    note "local config already exists: ${SERVER_LOCAL_REL}"
-    return 0
+  local generator="${ROOT_DIR}/tools/create_rbpodo_pgmode_spacemouse_local_config.sh"
+  [[ -f "${generator}" ]] || fail "generator not found: tools/create_rbpodo_pgmode_spacemouse_local_config.sh"
+  local args=(--root "${ROOT_DIR}" --output "${SERVER_LOCAL_REL}")
+  if [[ "${FORCE}" == "1" ]]; then
+    args+=(--force)
   fi
-  cp "${template}" "${local_copy}"
-  note "wrote ${SERVER_LOCAL_REL}"
+  bash "${generator}" "${args[@]}"
 }
 
 run_server() {

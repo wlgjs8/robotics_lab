@@ -4,12 +4,14 @@ schema: robotics_lab.rb_servo_server.v1
 # This connects to real controller boxes with operation_mode=simulation.
 # Physical robot motion must remain unexpected. Copy to config/local/ before
 # site edits; do not treat this template as physical real acceptance evidence.
+# Controller IPs use documentation placeholders. Inject site-local IPs with
+# tools/create_rbpodo_pgmode_spacemouse_local_config.sh.
 
 left_robot:
   backend_type: rbpodo
   run_mode: real
   name: left_rbpodo_pgmode_spacemouse_500hz_ack
-  ip: "172.28.60.200"
+  ip: "192.0.2.10"
   operation_mode: simulation
   command_port: 5000
   data_port: 5001
@@ -26,7 +28,7 @@ right_robot:
   backend_type: rbpodo
   run_mode: real
   name: right_rbpodo_pgmode_spacemouse_500hz_ack
-  ip: "172.28.60.201"
+  ip: "192.0.2.11"
   operation_mode: simulation
   command_port: 5000
   data_port: 5001

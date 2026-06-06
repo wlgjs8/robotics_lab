@@ -290,8 +290,11 @@ class PolicyRunnerContractTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         tool = root / "tools" / "rbpodo_pgmode_spacemouse.sh"
         text = tool.read_text()
+        generator = root / "tools" / "create_rbpodo_pgmode_spacemouse_local_config.sh"
+        generator_text = generator.read_text()
 
         self.assertTrue(tool.exists())
+        self.assertTrue(generator.exists())
         self.assertIn("RB_ALLOW_RBPODO_ASYNC_STREAMING", text)
         self.assertIn("server-dry-run", text)
         self.assertIn("policy-dry-run", text)
@@ -300,6 +303,9 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertIn("0.0.0.0:50376", text)
         self.assertIn("127.0.0.1:50366", text)
         self.assertIn("mock_script: pgmode_spacemouse_smoke", text)
+        self.assertIn("--left-ip", generator_text)
+        self.assertIn("RB_PGMODE_SPACEMOUSE_LEFT_IP", generator_text)
+        self.assertIn("ignored by git", generator_text)
 
     def test_runtime_config_defaults_and_parses_startup_timeout(self):
         default_cfg = config_from_mapping({"schema": "robotics_lab.policy_runner.v1"})

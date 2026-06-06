@@ -30,10 +30,30 @@ policy_runner:       udp://127.0.0.1:50376
 
 ## Prepare Local Config
 
+Create the ignored local server config from the tracked example:
+
 ```bash
-tools/rbpodo_pgmode_spacemouse.sh prepare
+tools/create_rbpodo_pgmode_spacemouse_local_config.sh \
+  --left-ip 192.0.2.10 \
+  --right-ip 192.0.2.11
 tools/rbpodo_pgmode_spacemouse.sh check
 ```
+
+The addresses above are documentation placeholders. Use site-local controller
+addresses for an operator run, either through the flags above or with
+`RB_PGMODE_SPACEMOUSE_LEFT_IP` and
+`RB_PGMODE_SPACEMOUSE_RIGHT_IP`. To set non-default controller ports, pass
+`--command-port`, `--data-port`, or the per-arm port flags.
+
+The existing wrapper action delegates to the same generator:
+
+```bash
+tools/rbpodo_pgmode_spacemouse.sh prepare
+```
+
+You may also copy
+`rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml`
+to the local path manually and edit it there. The local copy is ignored by git.
 
 Review the local copy before running. Keep physical real Cartesian disabled:
 
