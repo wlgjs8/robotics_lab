@@ -82,13 +82,15 @@ def tcp_delta_stand_intent(
     *,
     left: tuple[float, ...] | list[float] | None = None,
     right: tuple[float, ...] | list[float] | None = None,
+    left_gripper: float | None = None,
+    right_gripper: float | None = None,
     timeout_sec: float = 0.2,
 ) -> CommandIntent:
     return CartesianCommandIntent(
         "TcpDeltaStand",
         timeout_sec=timeout_sec,
-        left=_arm_payload("TcpDeltaStand", "tcp_delta_stand", left),
-        right=_arm_payload("TcpDeltaStand", "tcp_delta_stand", right),
+        left=_arm_payload("TcpDeltaStand", "tcp_delta_stand", left, gripper_target=left_gripper),
+        right=_arm_payload("TcpDeltaStand", "tcp_delta_stand", right, gripper_target=right_gripper),
     )
 
 
@@ -96,13 +98,15 @@ def tcp_twist_local_intent(
     *,
     left: tuple[float, ...] | list[float] | None = None,
     right: tuple[float, ...] | list[float] | None = None,
+    left_gripper: float | None = None,
+    right_gripper: float | None = None,
     timeout_sec: float = 0.2,
 ) -> CommandIntent:
     return CartesianCommandIntent(
         "TcpTwistLocal",
         timeout_sec=timeout_sec,
-        left=_arm_payload("TcpTwistLocal", "tcp_twist_local", left),
-        right=_arm_payload("TcpTwistLocal", "tcp_twist_local", right),
+        left=_arm_payload("TcpTwistLocal", "tcp_twist_local", left, gripper_target=left_gripper),
+        right=_arm_payload("TcpTwistLocal", "tcp_twist_local", right, gripper_target=right_gripper),
     )
 
 
@@ -110,13 +114,15 @@ def tcp_twist_stand_intent(
     *,
     left: tuple[float, ...] | list[float] | None = None,
     right: tuple[float, ...] | list[float] | None = None,
+    left_gripper: float | None = None,
+    right_gripper: float | None = None,
     timeout_sec: float = 0.2,
 ) -> CommandIntent:
     return CartesianCommandIntent(
         "TcpTwistStand",
         timeout_sec=timeout_sec,
-        left=_arm_payload("TcpTwistStand", "tcp_twist_stand", left),
-        right=_arm_payload("TcpTwistStand", "tcp_twist_stand", right),
+        left=_arm_payload("TcpTwistStand", "tcp_twist_stand", left, gripper_target=left_gripper),
+        right=_arm_payload("TcpTwistStand", "tcp_twist_stand", right, gripper_target=right_gripper),
     )
 
 
@@ -156,12 +162,24 @@ def clamp_tcp_twist(
     return tuple(_clamp(float(value), limit) for value, limit in zip(twist, limits))
 
 
-def _arm_payload(mode: str, key: str, delta: tuple[float, ...] | list[float] | None) -> dict:
+def _arm_payload(
+    mode: str,
+    key: str,
+    delta: tuple[float, ...] | list[float] | None,
+    *,
+    gripper_target: float | None = None,
+) -> dict:
     if delta is None:
-        return {"mode": "Hold"}
+        payload = {"mode": "Hold"}
+        if gripper_target is not None:
+            payload["gripper_target"] = float(gripper_target)
+        return payload
     if len(delta) != 6:
         raise ValueError(f"{key} must contain 6 values")
-    return {"mode": mode, key: [float(value) for value in delta]}
+    payload = {"mode": mode, key: [float(value) for value in delta]}
+    if gripper_target is not None:
+        payload["gripper_target"] = float(gripper_target)
+    return payload
 
 
 def _clamp(value: float, limit: float) -> float:

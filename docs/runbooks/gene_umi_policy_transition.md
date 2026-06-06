@@ -88,9 +88,11 @@ PYTHONPATH=policy_runner python3 -m policy_runner flow-train \
 ```
 
 Run `flow-infer` only with an explicit `--rollout-mode`. The default live
-command family is `tcp_twist_local`, which converts each 6D flow action delta
-into a bounded local-frame Cartesian velocity using `--policy-dt-sec`,
-`--max-linear-velocity-m-s`, and `--max-angular-velocity-rad-s`.
+command family is `tcp_twist_stand`, which converts each per-step stand-frame
+6D flow action delta into a bounded stand-frame Cartesian velocity using
+`--policy-dt-sec` or checkpoint `dataset_stats.dt_mean_sec`. Velocity clamps
+come from checkpoint action statistics unless explicit linear/angular limits
+are supplied.
 
 ## Rollout Modes
 
@@ -115,10 +117,11 @@ PYTHONPATH=policy_runner python3 -m policy_runner flow-infer \
   --rollout-summary outputs/rollout_summary.json
 ```
 
-For `controller_sim`, `--policy-dt-sec` is required. For non-offline simulator
-or read-only modes, omitting it means `1 / command_rate_hz`; this fallback is
-for dry-run and summary convenience only. Physical `real_policy` remains
-blocked by rollout-mode validation and measured-geometry safety gates.
+For `controller_sim`, policy dt must come from `--policy-dt-sec` or checkpoint
+`dataset_stats.dt_mean_sec`. For non-offline simulator or read-only modes,
+omitting both means `1 / command_rate_hz`; this fallback is for dry-run and
+summary convenience only. Physical `real_policy` remains blocked by
+rollout-mode validation and measured-geometry safety gates.
 
 ## SpaceMouse -> policy_runner -> rbpodo pgmode simulation -> viser path
 
@@ -134,8 +137,8 @@ tools/rbpodo_pgmode_spacemouse.sh policy-dry-run
 tools/rbpodo_pgmode_spacemouse.sh gui --dry-run
 ```
 
-The path sends `TcpTwistLocal` only after command-source lease, deadman, stale
-state, fault, controller-simulation Cartesian, and
+The SpaceMouse path sends `TcpTwistLocal` only after command-source lease,
+deadman, stale state, fault, controller-simulation Cartesian, and
 `physical_motion_expected=false` gates are satisfied. It must not be run
 concurrently with GUI teleop against the same command port.
 

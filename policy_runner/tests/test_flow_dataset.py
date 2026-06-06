@@ -16,6 +16,8 @@ try:
         compute_dataset_statistics,
         decode_hdf5_image_value,
         load_flow_episode_index,
+        pose_delta,
+        tcp_delta_stand_from_poses,
     )
 except ModuleNotFoundError:
     h5py = None
@@ -162,8 +164,38 @@ class FlowHdf5DatasetTest(unittest.TestCase):
 
             self.assertEqual(stats["schema"], "robotics_lab.policy_runner.flow_matching.v1.dataset_stats")
             self.assertEqual(stats["action_dim"], 14)
+            self.assertAlmostEqual(float(stats["dt_mean_sec"]), 1.0 / 30.0)
+            self.assertAlmostEqual(float(stats["dt_p50_sec"]), 1.0 / 30.0)
             self.assertTrue(np.isfinite(sample["proprio"]).all())
             self.assertTrue(np.isfinite(sample["action_chunk"]).all())
+
+    def test_action_chunk_is_per_step_stand_delta_not_start_anchored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "episode_001.hdf5"
+            self._write_pika_episode(path, image_count=1)
+
+            dataset = FlowHdf5Dataset(path, action_horizon=2, image_size=8, normalize=False)
+            sample = dataset.raw_sample(0)
+
+            self.assertEqual(len(dataset), 2)
+            np.testing.assert_allclose(sample["action_chunk"][0, 0:3], [0.01, 0.0, 0.0])
+            np.testing.assert_allclose(sample["action_chunk"][1, 0:3], [0.01, 0.0, 0.0])
+            self.assertAlmostEqual(float(sample["action_chunk"][0, 6]), 1.0 / 3.0, places=6)
+            self.assertAlmostEqual(float(sample["action_chunk"][1, 6]), 1.0 / 3.0, places=6)
+
+    def test_tcp_delta_stand_from_poses_uses_spatial_rotation_order(self) -> None:
+        q_current = _quat_from_axis_angle([0.0, 0.0, 1.0], 0.4)
+        q_spatial_delta = _quat_from_axis_angle([1.0, 0.0, 0.0], 0.3)
+        q_target = _quat_multiply(q_spatial_delta, q_current)
+        current = np.asarray([0.1, 0.2, 0.3, *q_current], dtype=np.float32)
+        target = np.asarray([0.12, 0.18, 0.35, *q_target], dtype=np.float32)
+
+        state_delta = pose_delta(current, target)
+        action_delta = tcp_delta_stand_from_poses(current, target)
+
+        np.testing.assert_allclose(action_delta[:3], target[:3] - current[:3])
+        np.testing.assert_allclose(action_delta[3:6], [0.3, 0.0, 0.0], atol=1e-6)
+        self.assertGreater(float(np.linalg.norm(state_delta[4:6])), 0.05)
 
     def _write_pika_episode(
         self,
@@ -245,6 +277,27 @@ def _image_bytes(suffix: str, *, index: int) -> bytes:
     buffer = io.BytesIO()
     image.save(buffer, format="JPEG" if suffix == "jpeg" else "PNG")
     return buffer.getvalue()
+
+
+def _quat_from_axis_angle(axis: list[float], angle: float) -> np.ndarray:
+    axis_array = np.asarray(axis, dtype=np.float64)
+    axis_array = axis_array / np.linalg.norm(axis_array)
+    half = angle * 0.5
+    return np.asarray([*(axis_array * np.sin(half)), np.cos(half)], dtype=np.float64)
+
+
+def _quat_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return np.asarray(
+        [
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ],
+        dtype=np.float64,
+    )
 
 
 if __name__ == "__main__":

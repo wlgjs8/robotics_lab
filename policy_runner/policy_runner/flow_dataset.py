@@ -172,7 +172,7 @@ class FlowHdf5Dataset:
         ]
         self.sample_refs: list[FlowSampleRef] = []
         for episode_index, episode in enumerate(self.episodes):
-            sample_count = max(0, episode.length - self.action_horizon + 1)
+            sample_count = max(0, episode.length - self.action_horizon)
             self.sample_refs.extend(
                 FlowSampleRef(episode_index, start) for start in range(sample_count)
             )
@@ -391,6 +391,7 @@ def compute_dataset_statistics(
     image_std[image_count == 0] = 1.0
 
     formats = sorted({episode.format_name for episode in dataset.episodes})
+    dt_values = _dataset_dt_values_sec(dataset.episodes)
     action_percentiles: dict[str, dict[str, float]] = {}
     for dim, name in enumerate(FLOW_ACTION_DIM_NAMES):
         if action_values_by_dim[dim]:
@@ -426,6 +427,8 @@ def compute_dataset_statistics(
         "missing_camera_count": int(missing_camera_count),
         "arm_mask_counts": {"left": int(arm_counts[0]), "right": int(arm_counts[1])},
         "action_distribution_percentiles": action_percentiles,
+        "dt_mean_sec": float(np.mean(dt_values)) if dt_values.size else None,
+        "dt_p50_sec": float(np.percentile(dt_values, 50)) if dt_values.size else None,
     }
 
 
@@ -860,35 +863,47 @@ def _proprio_vector(episode: FlowEpisodeIndex, index: int) -> np.ndarray:
 
 def _action_chunk(episode: FlowEpisodeIndex, start: int, horizon: int) -> np.ndarray:
     chunk = np.zeros((horizon, FLOW_ACTION_DIM), dtype=np.float32)
-    current_left_pose = episode.left_pose[start]
-    current_right_pose = episode.right_pose[start]
-    current_left_gripper = float(episode.left_gripper[start])
-    current_right_gripper = float(episode.right_gripper[start])
     for offset in range(horizon):
         index = start + offset
+        next_index = index + 1
         if episode.arm_mask[0] > 0.0:
-            if episode.action_kind == "delta" and episode.action_left_delta is not None:
-                left_delta = episode.action_left_delta[index]
-            else:
-                target = episode.action_left_pose[index] if episode.action_left_pose is not None else episode.left_pose[index]
-                left_delta = pose_delta(current_left_pose, target)
-            left_grip = _target_gripper_delta(episode.action_left_gripper, index, current_left_gripper)
+            left_current = _action_pose_at(episode.action_left_pose, episode.left_pose, index)
+            left_next = _action_pose_at(episode.action_left_pose, episode.left_pose, next_index)
+            left_delta = tcp_delta_stand_from_poses(left_current, left_next)
+            left_grip = _per_step_gripper_delta(
+                episode.action_left_gripper,
+                episode.left_gripper,
+                index,
+                next_index,
+            )
             chunk[offset, 0:FLOW_ARM_DIM] = np.concatenate([left_delta, [left_grip]])
         if episode.arm_mask[1] > 0.0:
-            if episode.action_kind == "delta" and episode.action_right_delta is not None:
-                right_delta = episode.action_right_delta[index]
-            else:
-                target = episode.action_right_pose[index] if episode.action_right_pose is not None else episode.right_pose[index]
-                right_delta = pose_delta(current_right_pose, target)
-            right_grip = _target_gripper_delta(episode.action_right_gripper, index, current_right_gripper)
+            right_current = _action_pose_at(episode.action_right_pose, episode.right_pose, index)
+            right_next = _action_pose_at(episode.action_right_pose, episode.right_pose, next_index)
+            right_delta = tcp_delta_stand_from_poses(right_current, right_next)
+            right_grip = _per_step_gripper_delta(
+                episode.action_right_gripper,
+                episode.right_gripper,
+                index,
+                next_index,
+            )
             chunk[offset, FLOW_ARM_DIM : 2 * FLOW_ARM_DIM] = np.concatenate([right_delta, [right_grip]])
     return chunk
 
 
-def _target_gripper_delta(values: np.ndarray | None, index: int, current_value: float) -> float:
+def _action_pose_at(values: np.ndarray | None, fallback: np.ndarray, index: int) -> np.ndarray:
+    return values[index] if values is not None else fallback[index]
+
+
+def _per_step_gripper_delta(
+    values: np.ndarray | None,
+    fallback: np.ndarray,
+    index: int,
+    next_index: int,
+) -> float:
     if values is None:
-        return 0.0
-    return float(values[index]) - float(current_value)
+        values = fallback
+    return float(values[next_index]) - float(values[index])
 
 
 def pose_delta(reference_pose: np.ndarray, target_pose: np.ndarray) -> np.ndarray:
@@ -900,6 +915,36 @@ def pose_delta(reference_pose: np.ndarray, target_pose: np.ndarray) -> np.ndarra
     q_delta = _quat_multiply(_quat_inverse(q_ref), q_target)
     rotvec = _quat_to_rotvec(q_delta)
     return np.concatenate([translation, rotvec]).astype(np.float32)
+
+
+def tcp_delta_stand_from_poses(current_pose: np.ndarray, next_pose: np.ndarray) -> np.ndarray:
+    current = _valid_pose(current_pose)
+    target = _valid_pose(next_pose)
+    translation = target[:3] - current[:3]
+    q_current = _normalize_quat(current[3:7])
+    q_target = _normalize_quat(target[3:7])
+    q_delta = _quat_multiply(q_target, _quat_inverse(q_current))
+    rotvec = _quat_to_rotvec(q_delta)
+    return np.concatenate([translation, rotvec]).astype(np.float32)
+
+
+def _dataset_dt_values_sec(episodes: list[FlowEpisodeIndex]) -> np.ndarray:
+    values: list[np.ndarray] = []
+    for episode in episodes:
+        timestamps = np.asarray(episode.timestamps, dtype=np.float64).reshape(-1)
+        if timestamps.shape[0] < 2:
+            continue
+        deltas = np.diff(timestamps)
+        deltas = deltas[np.isfinite(deltas) & (deltas > 0.0)]
+        if not deltas.size:
+            continue
+        # Some robotics logs carry raw nanoseconds despite a generic timestamp key.
+        if float(np.median(deltas)) > 1000.0:
+            deltas = deltas / 1e9
+        values.append(deltas.astype(np.float64, copy=False))
+    if not values:
+        return np.zeros(0, dtype=np.float64)
+    return np.concatenate(values).astype(np.float64, copy=False)
 
 
 def _valid_pose(value: np.ndarray) -> np.ndarray:

@@ -285,6 +285,8 @@ def build_flow_eval_summary(
             "missing_camera_count": int(stats.get("missing_camera_count", 0)),
             "action_horizon": int(stats.get("action_horizon", 0)),
             "arm_mask_counts": dict(stats.get("arm_mask_counts", {})),
+            "dt_mean_sec": stats.get("dt_mean_sec"),
+            "dt_p50_sec": stats.get("dt_p50_sec"),
         },
         "validation": {
             "action_mse": float(validation_metrics.get("action_mse", 0.0)),
@@ -349,6 +351,8 @@ def render_flow_eval_report(summary: dict[str, Any]) -> str:
         f"- Image decode count: {dataset.get('image_decode_count', 0)}",
         f"- Missing camera count: {dataset.get('missing_camera_count', 0)}",
         f"- Action horizon: {dataset.get('action_horizon', 0)}",
+        f"- dt_mean_sec: {dataset.get('dt_mean_sec', None)}",
+        f"- dt_p50_sec: {dataset.get('dt_p50_sec', None)}",
         f"- Arm mask counts: `{json.dumps(dataset.get('arm_mask_counts', {}), sort_keys=True)}`",
         "",
         "## Validation",

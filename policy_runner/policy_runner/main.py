@@ -438,10 +438,10 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument("--device", default="auto")
     flow_infer.add_argument(
         "--command-family",
-        choices=("tcp_twist_local", "tcp_delta_stand"),
+        choices=("tcp_twist_stand", "tcp_twist_local", "tcp_delta_stand"),
         default=None,
         help=(
-            "Flow action command family. Defaults to tcp_twist_local for simulator, "
+            "Flow action command family. Defaults to tcp_twist_stand for simulator, "
             "controller-simulation, and offline reporting."
         ),
     )
@@ -450,7 +450,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
         action="store_true",
         help=(
             "Allow the debug TcpDeltaStand flow command family outside offline_eval/sim_dryrun. "
-            "TcpTwistLocal remains the default controller-simulation path."
+            "TcpTwistStand remains the default controller-simulation path."
         ),
     )
     flow_infer.add_argument(
@@ -458,13 +458,29 @@ def _main_with_subcommands(argv: list[str]) -> int:
         type=float,
         default=None,
         help=(
-            "Seconds represented by one flow action step. Required for controller_sim "
-            "and real_policy TcpTwistLocal rollout; other non-offline modes default "
-            "to 1/command_rate_hz when omitted."
+            "Seconds represented by one flow action step. Controller/real twist rollout "
+            "requires this value or checkpoint dataset_stats.dt_mean_sec; sim_dryrun "
+            "can fall back to 1/command_rate_hz."
         ),
     )
-    flow_infer.add_argument("--max-linear-velocity-m-s", type=float, default=0.03)
-    flow_infer.add_argument("--max-angular-velocity-rad-s", type=float, default=0.2)
+    flow_infer.add_argument(
+        "--max-linear-velocity-m-s",
+        type=float,
+        default=None,
+        help="Override flow twist linear clamp; omitted uses checkpoint action statistics.",
+    )
+    flow_infer.add_argument(
+        "--max-angular-velocity-rad-s",
+        type=float,
+        default=None,
+        help="Override flow twist angular clamp; omitted uses checkpoint action statistics.",
+    )
+    flow_infer.add_argument(
+        "--chunk-execute-steps",
+        type=int,
+        default=None,
+        help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
+    )
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.002)
     flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.01)
 
@@ -765,6 +781,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
         from .flow_inference import (
             FlowMatchingActionSource,
             canonical_flow_command_family,
+            load_flow_checkpoint_dataset_stats,
             resolve_flow_command_family,
             resolve_flow_policy_dt_sec,
             run_flow_offline_eval,
@@ -834,11 +851,15 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 max_age_ms=config.camera.max_age_ms,
             )
         try:
+            dataset_stats = None
+            if command_family in {"tcp_twist_stand", "tcp_twist_local"} and args.policy_dt_sec is None:
+                dataset_stats = load_flow_checkpoint_dataset_stats(args.checkpoint, device="cpu")
             policy_dt_sec = resolve_flow_policy_dt_sec(
                 rollout_policy.mode,
                 command_family,
                 policy_dt_sec=args.policy_dt_sec,
                 command_rate_hz=config.command_rate_hz,
+                dataset_stats=dataset_stats,
             )
             source = FlowMatchingActionSource(
                 args.checkpoint,
@@ -851,6 +872,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 max_angular_velocity_rad_s=args.max_angular_velocity_rad_s,
                 max_linear_step_m=args.max_linear_step_m,
                 max_angular_step_rad=args.max_angular_step_rad,
+                chunk_execute_steps=args.chunk_execute_steps,
                 allow_rbpodo_controller_simulation_cartesian=(
                     rollout_policy.allows_controller_simulation_cartesian
                 ),

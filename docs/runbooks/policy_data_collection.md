@@ -71,19 +71,24 @@ list is:
   and `RB_ALLOW_REAL_GRIPPER=1`
 
 Flow actions are 14D, with per-arm Cartesian channels and separate gripper
-target/delta channels. Runtime gripper commands are not packed into Cartesian
-arm commands. In `controller_sim`, gripper proposals are logged and dropped by
-the noop gripper backend unless an explicit simulator gripper backend is
-configured; physical gripper motion remains blocked by default.
+delta channels. The Cartesian action contract is per-step stand-frame delta:
+`p[k+1] - p[k]` plus `rotvec(q[k+1] * inverse(q[k]))`. Runtime converts that
+delta to `TcpTwistStand` by dividing by policy dt. In `controller_sim`, gripper
+proposals are logged and dropped by the noop gripper backend unless an explicit
+simulator gripper backend is configured; physical gripper motion remains
+blocked by default.
 
-For flow-policy actions, `--command-family tcp_twist_local` is the default and
-the controller-simulation path. It divides the learned 6D delta by
-`--policy-dt-sec` and clamps the final `TcpTwistLocal` velocity with
-`--max-linear-velocity-m-s` and `--max-angular-velocity-rad-s`. `controller_sim`
-requires explicit `--policy-dt-sec`; dry-run/read-only modes may use the
-documented `1 / command_rate_hz` fallback. `--command-family tcp_delta_stand`
-is an offline/simulator debug path and requires
-`--allow-experimental-tcp-delta-stand` outside those debug lanes.
+For flow-policy actions, `--command-family tcp_twist_stand` is the default and
+the controller-simulation path. It divides the learned 6D per-step delta by
+`--policy-dt-sec` or checkpoint `dataset_stats.dt_mean_sec`, then clamps the
+final `TcpTwistStand` velocity with checkpoint action statistics unless
+`--max-linear-velocity-m-s` and `--max-angular-velocity-rad-s` are supplied.
+`controller_sim` and `real_policy` require policy dt from the CLI or checkpoint
+stats; dry-run/read-only modes may use the documented `1 / command_rate_hz`
+fallback. `--command-family tcp_twist_local` and
+`--command-family tcp_delta_stand` are offline/simulator debug paths;
+`tcp_delta_stand` requires `--allow-experimental-tcp-delta-stand` outside
+those debug lanes.
 
 ## Episode Metadata
 
@@ -160,13 +165,13 @@ Record both the normalized command packet and raw teleop inputs when available:
 | --- | --- |
 | `mode` | `Hold`, `JointTarget`, `JointVelocity`, `TcpTwistLocal`, `TcpTwistStand`, etc. |
 | `tcp_twist_local` | SpaceMouse local-frame twist in m/s and rad/s |
-| `tcp_twist_stand` | stand-frame twist in m/s and rad/s |
+| `tcp_twist_stand` | flow-policy stand-frame twist in m/s and rad/s |
 | `q_target_deg` | joint target command |
 | `dq_target_deg_s` | joint velocity command |
 | `spacemouse_axes` | raw six-axis SpaceMouse sample before policy scaling, if captured |
 | `spacemouse_buttons` | raw SpaceMouse button state, including deadman |
 | `deadman` | per-arm deadman state used for command emission |
-| `gripper_left/right` | current or target gripper state; real physical output additionally requires `allow_real_gripper_motion` and `RB_ALLOW_REAL_GRIPPER` |
+| `gripper_left/right` or `gripper_target` | current or target gripper state; real physical output additionally requires `allow_real_gripper_motion` and `RB_ALLOW_REAL_GRIPPER` |
 | `command_seq` or `seq` | command sequence number |
 | `source_id` | command source id, normally `policy_runner` |
 

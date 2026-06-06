@@ -18,6 +18,7 @@ from .flow_dataset import (
     decode_hdf5_image_value,
     load_flow_episode_index,
     pose_delta,
+    tcp_delta_stand_from_poses,
 )
 
 
@@ -256,15 +257,16 @@ def _arm_summary(episode: FlowEpisodeIndex, side: str, index: int) -> dict[str, 
 
     if not active:
         action = np.zeros(FLOW_ARM_DIM, dtype=np.float32)
-        target_gripper_delta = 0.0
     elif episode.action_kind == "delta" and action_delta is not None:
         action = _pad_action_delta(action_delta[index])
-        target_gripper_delta = _gripper_delta(action_gripper, index, gripper)
+        action[6] = _per_step_gripper_delta(action_gripper, index)
+    elif index >= episode.length - 1:
+        action = np.zeros(FLOW_ARM_DIM, dtype=np.float32)
     else:
         target = action_pose[index] if action_pose is not None else pose
-        target_delta = pose_delta(pose, target)
-        target_gripper_delta = _gripper_delta(action_gripper, index, gripper)
-        action = np.concatenate([target_delta, [target_gripper_delta]]).astype(np.float32)
+        next_target = action_pose[index + 1] if action_pose is not None else _next_pose(episode, side, index)
+        target_delta = tcp_delta_stand_from_poses(target, next_target)
+        action = np.concatenate([target_delta, [_per_step_gripper_delta(action_gripper, index)]]).astype(np.float32)
 
     return {
         "active": active,
@@ -284,10 +286,16 @@ def _pad_action_delta(value: np.ndarray) -> np.ndarray:
     return out
 
 
-def _gripper_delta(values: np.ndarray | None, index: int, current: float) -> float:
-    if values is None:
+def _next_pose(episode: FlowEpisodeIndex, side: str, index: int) -> np.ndarray:
+    if side == "left":
+        return episode.left_pose[index + 1]
+    return episode.right_pose[index + 1]
+
+
+def _per_step_gripper_delta(values: np.ndarray | None, index: int) -> float:
+    if values is None or index >= len(values) - 1:
         return 0.0
-    return float(values[index]) - float(current)
+    return float(values[index + 1]) - float(values[index])
 
 
 def _draw_side_panel(

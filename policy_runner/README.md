@@ -311,9 +311,11 @@ zero right-arm `arm_mask`. Pika UMI bimanual episodes written as
 `observations/<left|right>/...` are loaded with both arms active and camera
 names prefixed by side, such as `left_realsense_color`. Future robotics_lab
 dual-arm episodes can provide left/right cameras, TCP proprioception, and
-gripper values. Proprio features are reset-relative; action chunks are
-current-relative. Dataset statistics normalize proprio, action chunks, and
-camera images before training.
+gripper values. Proprio features are reset-relative. Action chunks are per-step
+stand-frame deltas: `p[k+1] - p[k]` plus
+`rotvec(q[k+1] * inverse(q[k]))`, followed by the per-step gripper delta.
+Dataset statistics normalize proprio, action chunks, camera images, and record
+timing fields such as `dt_mean_sec` before training.
 
 Run `flow-infer` with an explicit `--rollout-mode`; do not use `mode: real` as
 the policy rollout selector. The modes are:
@@ -336,15 +338,18 @@ the policy rollout selector. The modes are:
 The `real_policy` validator checks `safety.measured_retarget_available`,
 `safety.measured_collision_model_available`, and
 `safety.measured_gripper_available` in addition to measured runtime geometry.
-`flow-infer` defaults to `--command-family tcp_twist_local` for
-`controller_sim`, `sim_dryrun`, and offline reporting. For live
-`TcpTwistLocal` conversion, each 6D flow action delta is divided by
-`--policy-dt-sec` and clamped by `--max-linear-velocity-m-s` and
-`--max-angular-velocity-rad-s`. In `controller_sim`, `--policy-dt-sec` is
-required. In non-offline simulator or read-only modes, omitting it uses
-`1 / command_rate_hz` as a documented dry-run fallback. The legacy
-`--command-family tcp_delta_stand` path is debug/experimental; it is accepted
-without an extra flag only for `offline_eval` and `sim_dryrun`.
+`flow-infer` defaults to `--command-family tcp_twist_stand` for
+`controller_sim`, `sim_dryrun`, and offline reporting. For live `TcpTwistStand`
+conversion, each 6D per-step action delta is divided by `--policy-dt-sec` or
+checkpoint `dataset_stats.dt_mean_sec`, then clamped by checkpoint action
+distribution statistics unless `--max-linear-velocity-m-s` or
+`--max-angular-velocity-rad-s` is supplied. In `controller_sim` and
+`real_policy`, policy dt must come from the CLI or checkpoint stats. In
+non-offline simulator or read-only modes, omitting both uses
+`1 / command_rate_hz` as a dry-run fallback. `--command-family tcp_twist_local`
+and `--command-family tcp_delta_stand` are debug paths; `tcp_delta_stand`
+requires `--allow-experimental-tcp-delta-stand` outside `offline_eval` and
+`sim_dryrun`.
 
 Example offline and read-only invocations:
 
@@ -442,8 +447,10 @@ python3 -m policy_runner umi-import \
 
 Conversion writes a FlowHdf5Dataset-compatible HDF5 file. The
 `robotics_lab_dual_arm` target stores `/observations/tcp_stand_left/right` and
-`/action/tcp_delta_stand_left/right`; camera names are flattened with arm
-prefixes such as `left_wrist_rgb`.
+per-step `/action/tcp_delta_stand_left/right`; camera names are flattened with
+arm prefixes such as `left_wrist_rgb`. Existing checkpoints trained on older
+current-to-target or zero-delta converted files must be retrained after
+recomputing these per-step action statistics.
 
 ```bash
 python3 -m policy_runner umi-convert \
@@ -513,16 +520,18 @@ python3 -m policy_runner flow-infer \
   --policy-dt-sec 0.01
 ```
 
-`flow-infer` emits bounded `TcpTwistLocal` velocity commands by default, using
-the same streaming Cartesian family as the SpaceMouse pgmode simulation path.
-Gripper values stay in the action vector for training but are not sent to
-hardware in this baseline. Required camera frames must be available when
-sampling or continuing a chunk; otherwise the source emits no new nonzero
-motion intent and sends a one-shot zero twist if needed to stop a previous
-stream. All inference intents remain behind the existing `SafetyGate`, and
-real Cartesian motion remains blocked. Use `--command-family tcp_delta_stand`
-only for offline/simulator debug; outside those lanes it also requires
-`--allow-experimental-tcp-delta-stand`.
+`flow-infer` emits bounded `TcpTwistStand` velocity commands by default. It
+executes only the first `--chunk-execute-steps` sampled actions before
+resampling; the default is half the checkpoint action horizon. Flow gripper
+channels remain separately gated by `GripperRuntime`; simulator/controller-sim
+packets may carry an integrated `gripper_target`, while physical gripper output
+still requires `allow_real_gripper_motion=true` and `RB_ALLOW_REAL_GRIPPER=1`.
+Required camera frames must be available when sampling or continuing a chunk;
+otherwise the source emits no new nonzero motion intent and sends a one-shot
+zero twist if needed to stop a previous stream. All inference intents remain
+behind the existing `SafetyGate`, and real Cartesian motion remains blocked.
+Use `--command-family tcp_delta_stand` only for offline/simulator debug;
+outside those lanes it also requires `--allow-experimental-tcp-delta-stand`.
 
 ## SpaceMouse Joint Velocity
 
@@ -691,6 +700,9 @@ Joint actions use per-arm modes so either arm can hold independently:
 Supported command modes are `Hold`, `ArmMotion`, `DisarmMotion`,
 `EmergencyStop`, `ResetFault`, `JointTarget`, and `JointVelocity`.
 Cartesian packets additionally use `TcpDeltaStand` with per-arm
-`tcp_delta_stand` one-shot jog payloads and `TcpTwistLocal` with per-arm
-`tcp_twist_local` velocity payloads in simulation only. `TcpTwistLocal` units
-are `vx,vy,vz` in m/s and `wx,wy,wz` in rad/s.
+`tcp_delta_stand` one-shot jog payloads, `TcpTwistLocal` with per-arm
+`tcp_twist_local` velocity payloads for SpaceMouse local-frame teleop, and
+`TcpTwistStand` with per-arm `tcp_twist_stand` velocity payloads for flow
+policy rollout. Twist units are `vx,vy,vz` in m/s and `wx,wy,wz` in rad/s.
+Per-arm payloads may include `gripper_target`; real physical gripper output
+remains separately gated.

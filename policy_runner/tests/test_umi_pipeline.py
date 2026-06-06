@@ -142,6 +142,8 @@ class UmiPipelineTest(unittest.TestCase):
                 )
                 self.assertIn("tcp_delta_stand_left", dst["action"])
                 self.assertEqual(dst["action/tcp_delta_stand_left"].shape, (5, 6))
+                np.testing.assert_allclose(dst["action/tcp_delta_stand_left"][0, :3], [0.01, 0.0, 0.0], atol=1e-7)
+                np.testing.assert_allclose(dst["action/tcp_delta_stand_left"][-1], np.zeros(6), atol=1e-7)
 
             index = load_flow_episode_index(output)
             self.assertEqual(index.format_name, "robotics_lab_dual_arm")
@@ -153,6 +155,30 @@ class UmiPipelineTest(unittest.TestCase):
                     for item in manifest["aggregate"]["deployment_blockers"]
                 )
             )
+
+    def test_convert_robotics_lab_without_action_writes_pose_per_step_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "episode_no_action.hdf5"
+            output = root / "episode_robotics_lab.hdf5"
+            retarget_path = root / "umi_retarget.yaml"
+            _write_bimanual_umi_episode(source, include_action=False)
+            _write_retarget_config(retarget_path)
+
+            convert_umi_episode(
+                source,
+                output,
+                output_format="robotics_lab_dual_arm",
+                retarget_config=retarget_path,
+            )
+
+            with h5py.File(output, "r") as dst:
+                left_delta = dst["action/tcp_delta_stand_left"][:]
+                right_delta = dst["action/tcp_delta_stand_right"][:]
+                np.testing.assert_allclose(left_delta[0, :3], [0.01, 0.0, 0.0], atol=1e-7)
+                np.testing.assert_allclose(right_delta[0, :3], [-0.01, 0.0, 0.0], atol=1e-7)
+                np.testing.assert_allclose(left_delta[-1], np.zeros(6), atol=1e-7)
+                self.assertGreater(float(np.linalg.norm(left_delta[:-1, :3])), 0.0)
 
     def test_configured_estimate_retarget_status_blocks_require_measured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

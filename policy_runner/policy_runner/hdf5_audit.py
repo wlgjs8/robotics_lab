@@ -187,6 +187,13 @@ def _audit_episode(
         pose_format = _pose_format(handle, format_name)
         arm_mask = _arm_mask_for_format(handle, format_name, single_arm_side)
         action_kind = _action_kind_for_format(handle, format_name)
+        action_step_distribution = _action_step_distribution_for_format(
+            handle,
+            format_name,
+            length,
+            timestamps,
+            single_arm_side,
+        )
 
         if format_name == "unsupported":
             _append(warnings, "unsupported_format: HDF5 layout is not supported by flow_dataset")
@@ -224,6 +231,7 @@ def _audit_episode(
         "camera_encodings": camera_encodings,
         "arm_mask": arm_mask,
         "action_kind": action_kind,
+        "action_step_distribution": action_step_distribution,
         "warnings": warnings,
         "deployment_blockers": blockers,
     }
@@ -550,6 +558,8 @@ def _check_action_matches_pose(
             action_name = f"target_pose_{side}"
             pose_name = f"tcp_stand_{side}"
             if action_name in action and pose_name in obs:
+                if _has_nonzero_action_delta(action, side, length):
+                    continue
                 _check_action_pose_pair(
                     np.asarray(action[action_name], dtype=np.float32)[:length, :7],
                     np.asarray(obs[pose_name], dtype=np.float32)[:length, :7],
@@ -574,6 +584,122 @@ def _check_action_pose_pair(
             warnings,
             f"action_matches_observation_pose: {label} action pose columns are identical to current pose",
         )
+
+
+def _has_nonzero_action_delta(action: h5py.Group, side: str, length: int) -> bool:
+    for name in (f"tcp_delta_stand_{side}", f"tcp_delta_{side}"):
+        if name not in action:
+            continue
+        values = np.asarray(action[name], dtype=np.float32)[:length]
+        if values.ndim == 2 and values.shape[1] >= 3 and bool(np.any(np.abs(values[:, :3]) > 1e-9)):
+            return True
+    return False
+
+
+def _action_step_distribution_for_format(
+    handle: h5py.File,
+    format_name: str,
+    length: int,
+    timestamps: np.ndarray,
+    single_arm_side: str,
+) -> dict[str, Any]:
+    sides = ("left", "right") if format_name in {"pika_umi_bimanual", "robotics_lab_dual_arm"} else (single_arm_side,)
+    out: dict[str, Any] = {}
+    for side in sides:
+        delta = _action_delta_for_format(handle, format_name, side, length)
+        if delta is not None:
+            out[side] = {
+                "encoding": "per_step_delta_stand",
+                **_action_step_stats(delta, timestamps, per_step_delta=True),
+            }
+            continue
+        pose = _action_pose_for_format(handle, format_name, side, length, single_arm_side)
+        out[side] = {
+            "encoding": "target_pose",
+            **_action_step_stats(pose, timestamps, per_step_delta=False),
+        }
+    return out
+
+
+def _action_delta_for_format(
+    handle: h5py.File,
+    format_name: str,
+    side: str,
+    length: int,
+) -> np.ndarray | None:
+    if format_name != "robotics_lab_dual_arm" or "action" not in handle:
+        return None
+    action = handle["action"]
+    for name in (f"tcp_delta_stand_{side}", f"tcp_delta_{side}"):
+        if name in action:
+            return np.asarray(action[name], dtype=np.float32)[:length]
+    return None
+
+
+def _action_pose_for_format(
+    handle: h5py.File,
+    format_name: str,
+    side: str,
+    length: int,
+    single_arm_side: str,
+) -> np.ndarray | None:
+    if format_name == "pika_umi_single_arm" and side == single_arm_side and "action" in handle:
+        action = np.asarray(handle["action"], dtype=np.float32)[:length]
+        return action[:, :7] if action.ndim == 2 and action.shape[1] >= 7 else None
+    if format_name == "pika_umi_bimanual":
+        group_path = _bimanual_arm_groups(handle).get(side)
+        if group_path and f"{group_path}/action" in handle:
+            action = np.asarray(handle[f"{group_path}/action"], dtype=np.float32)[:length]
+            return action[:, :7] if action.ndim == 2 and action.shape[1] >= 7 else None
+    if format_name == "robotics_lab_dual_arm" and "action" in handle:
+        action = handle["action"]
+        for name in (f"target_pose_{side}", f"tcp_pose_target_{side}"):
+            if name in action:
+                values = np.asarray(action[name], dtype=np.float32)[:length]
+                return values[:, :7] if values.ndim == 2 and values.shape[1] >= 7 else None
+    return None
+
+
+def _action_step_stats(
+    values: np.ndarray | None,
+    timestamps: np.ndarray,
+    *,
+    per_step_delta: bool,
+) -> dict[str, Any]:
+    if values is None:
+        return {"present": False, "translation_step_m": _empty_numeric_stats(), "translation_velocity_m_s": _empty_numeric_stats()}
+    array = np.asarray(values, dtype=np.float32)
+    if array.ndim != 2 or array.shape[0] < 2 or array.shape[1] < 3:
+        return {"present": True, "translation_step_m": _empty_numeric_stats(), "translation_velocity_m_s": _empty_numeric_stats()}
+    if per_step_delta:
+        step = np.linalg.norm(array[:-1, :3].astype(np.float64), axis=1)
+    else:
+        step = np.linalg.norm(np.diff(array[:, :3].astype(np.float64), axis=0), axis=1)
+    dt = np.diff(timestamps[: array.shape[0]].astype(np.float64))
+    velocity = np.divide(step, dt, out=np.zeros_like(step), where=dt > 0.0)
+    velocity = velocity[np.isfinite(velocity)]
+    return {
+        "present": True,
+        "translation_step_m": _numeric_stats(step),
+        "translation_velocity_m_s": _numeric_stats(velocity),
+    }
+
+
+def _numeric_stats(values: np.ndarray) -> dict[str, float]:
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return _empty_numeric_stats()
+    return {
+        "min": _rounded(float(finite.min()), 9),
+        "p50": _rounded(float(np.percentile(finite, 50)), 9),
+        "p95": _rounded(float(np.percentile(finite, 95)), 9),
+        "max": _rounded(float(finite.max()), 9),
+    }
+
+
+def _empty_numeric_stats() -> dict[str, float]:
+    return {"min": 0.0, "p50": 0.0, "p95": 0.0, "max": 0.0}
 
 
 def _check_images(

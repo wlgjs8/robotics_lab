@@ -767,6 +767,7 @@ def _arm_availability_summary(
     pose = _arm_pose(handle, format_name, side, arm_groups, length)
     gripper = _arm_gripper(handle, format_name, side, arm_groups, length)
     action = _arm_action(handle, format_name, side, arm_groups, length)
+    action_delta = _arm_action_delta(handle, format_name, side, length)
     present = pose is not None
     pose_count = int(pose.shape[0]) if pose is not None else 0
     gripper_count = int(gripper.shape[0]) if gripper is not None else 0
@@ -779,7 +780,12 @@ def _arm_availability_summary(
         "missing_frame_count": max(0, int(length) - min([count for count in (pose_count, gripper_count) if count > 0], default=0)),
         "pose_finite": bool(pose is not None and np.isfinite(pose).all()),
         "gripper_distribution": _gripper_distribution(gripper),
-        "action_step_distribution": _action_step_distribution(action if action is not None else pose, timestamps),
+        "action_encoding": "per_step_delta_stand" if action_delta is not None else "target_pose",
+        "action_step_distribution": _action_step_distribution(
+            action_delta if action_delta is not None else action if action is not None else pose,
+            timestamps,
+            per_step_delta=action_delta is not None,
+        ),
     }
 
 
@@ -852,6 +858,21 @@ def _arm_action(
     return None
 
 
+def _arm_action_delta(
+    handle: Any,
+    format_name: str,
+    side: str,
+    length: int,
+):
+    _, np = _require_hdf5()
+    if format_name == "robotics_lab_dual_arm" and "action" in handle:
+        action = handle["action"]
+        for name in (f"tcp_delta_stand_{side}", f"tcp_delta_{side}"):
+            if name in action:
+                return np.asarray(action[name], dtype=np.float32)[:length]
+    return None
+
+
 def _gripper_distribution(values: Any | None) -> dict[str, Any]:
     _, np = _require_hdf5()
     if values is None:
@@ -889,14 +910,22 @@ def _gripper_distribution(values: Any | None) -> dict[str, Any]:
     }
 
 
-def _action_step_distribution(values: Any | None, timestamps: Any) -> dict[str, Any]:
+def _action_step_distribution(
+    values: Any | None,
+    timestamps: Any,
+    *,
+    per_step_delta: bool = False,
+) -> dict[str, Any]:
     _, np = _require_hdf5()
     if values is None:
         return {"present": False, "translation_step_m": _empty_stats(), "translation_velocity_m_s": _empty_stats()}
     array = np.asarray(values, dtype=np.float32)
     if array.ndim != 2 or array.shape[0] < 2 or array.shape[1] < 3:
         return {"present": True, "translation_step_m": _empty_stats(), "translation_velocity_m_s": _empty_stats()}
-    step = np.linalg.norm(np.diff(array[:, :3].astype(np.float64), axis=0), axis=1)
+    if per_step_delta:
+        step = np.linalg.norm(array[:-1, :3].astype(np.float64), axis=1)
+    else:
+        step = np.linalg.norm(np.diff(array[:, :3].astype(np.float64), axis=0), axis=1)
     seconds = _timestamps_to_seconds(timestamps)
     velocity = np.asarray([], dtype=np.float64)
     if len(seconds) >= len(array):
@@ -984,7 +1013,7 @@ def _write_robotics_lab_dual_arm_episode(
     task: str | None,
 ) -> None:
     h5py, np = _require_hdf5()
-    from .flow_dataset import pose_delta
+    from .flow_dataset import tcp_delta_stand_from_poses
 
     with h5py.File(source, "r") as src, h5py.File(destination, "w") as dst:
         format_name = _detect_episode_format(src)
@@ -1017,8 +1046,8 @@ def _write_robotics_lab_dual_arm_episode(
         right_action_pose = _retarget_poses(right_action_source, retarget.right if retarget is not None else None)
         left_gripper = _gripper_or_zero(src, format_name, "left", arm_groups, length)
         right_gripper = _gripper_or_zero(src, format_name, "right", arm_groups, length)
-        left_delta = np.stack([pose_delta(left_pose[index], left_action_pose[index]) for index in range(length)], axis=0)
-        right_delta = np.stack([pose_delta(right_pose[index], right_action_pose[index]) for index in range(length)], axis=0)
+        left_delta = _per_step_tcp_delta_stand(left_action_pose, tcp_delta_stand_from_poses)
+        right_delta = _per_step_tcp_delta_stand(right_action_pose, tcp_delta_stand_from_poses)
 
         dst.attrs["schema"] = ROBOTICS_LAB_EPISODE_SCHEMA
         dst.attrs["source_schema"] = _decode_attr(src.attrs.get("schema")) or UMI_EPISODE_SCHEMA
@@ -1052,6 +1081,15 @@ def _write_robotics_lab_dual_arm_episode(
         action.create_dataset("target_pose_right", data=right_action_pose.astype(np.float32), compression="gzip", compression_opts=1)
         action.create_dataset("gripper_left", data=_action_gripper_or_current(src, format_name, "left", arm_groups, length, left_gripper))
         action.create_dataset("gripper_right", data=_action_gripper_or_current(src, format_name, "right", arm_groups, length, right_gripper))
+
+
+def _per_step_tcp_delta_stand(poses: Any, delta_fn: Any):
+    _, np = _require_hdf5()
+    array = np.asarray(poses, dtype=np.float32)
+    out = np.zeros((int(array.shape[0]), 6), dtype=np.float32)
+    for index in range(max(0, int(array.shape[0]) - 1)):
+        out[index, :] = delta_fn(array[index], array[index + 1])
+    return out
 
 
 def _write_pika_bimanual_episode(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from policy_runner.config import config_from_mapping
+from policy_runner.action_sources.tcp_delta import tcp_twist_stand_intent
 from policy_runner.gripper import (
     GripperCommand,
     GripperRuntime,
@@ -88,6 +89,19 @@ class GripperRuntimeTest(unittest.TestCase):
         self.assertEqual([command.arm for command in commands], ["left", "right"])
         self.assertEqual([command.value for command in commands], [0.2, -0.3])
         self.assertTrue(all(command.command_type == "delta" for command in commands))
+
+    def test_cartesian_intent_can_carry_gripper_targets(self) -> None:
+        intent = tcp_twist_stand_intent(
+            left=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0],
+            right=None,
+            left_gripper=0.42,
+            right_gripper=0.15,
+        )
+
+        self.assertEqual(intent.left["mode"], "TcpTwistStand")
+        self.assertEqual(intent.left["gripper_target"], 0.42)
+        self.assertEqual(intent.right["mode"], "Hold")
+        self.assertEqual(intent.right["gripper_target"], 0.15)
 
 
 if __name__ == "__main__":
