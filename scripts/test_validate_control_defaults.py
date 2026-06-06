@@ -87,6 +87,20 @@ class ControlDefaultsValidationTest(unittest.TestCase):
             with self.assertRaisesRegex(validator.ValidationError, "operation_mode"):
                 validator.validate_defaults(fixture.defaults_path, root=fixture.root)
 
+    def test_validate_control_defaults_rejects_matrix_operation_mode_real_for_controller_sim_profile(self) -> None:
+        with DefaultsFixture() as fixture:
+            matrix = load_yaml(fixture.matrix_path)
+            experiments = matrix["experiments"]
+            self.assertIsInstance(experiments, list)
+            first = experiments[0]
+            self.assertIsInstance(first, dict)
+            overrides = first["config_overrides"]
+            self.assertIsInstance(overrides, dict)
+            overrides["left_robot.operation_mode"] = "real"
+            write_yaml(fixture.matrix_path, matrix)
+            with self.assertRaisesRegex(validator.ValidationError, "operation_mode"):
+                validator.validate_defaults(fixture.defaults_path, root=fixture.root)
+
     def test_validate_control_defaults_rejects_ack_off_for_ackon500_default(self) -> None:
         with DefaultsFixture() as fixture:
             config = load_yaml(fixture.server_config_path)

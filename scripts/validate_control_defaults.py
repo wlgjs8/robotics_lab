@@ -138,6 +138,13 @@ def matrix_override(experiment: dict[str, Any], key: str) -> Any:
     return overrides[key]
 
 
+def optional_matrix_override(experiment: dict[str, Any], key: str) -> Any:
+    overrides = experiment.get("config_overrides")
+    if not isinstance(overrides, dict):
+        raise ValidationError("source matrix experiment must contain config_overrides")
+    return overrides.get(key)
+
+
 def assert_both_arms(
     server_config: dict[str, Any],
     experiment: dict[str, Any],
@@ -165,8 +172,10 @@ def validate_controller_sim_profile(
     server_config_path = resolve_source(root, source.get("server_config"), "source.server_config")
     assert_equal(source.get("evidence_lane"), "rbpodo_server_side_circle_ackon500_sdk_worker", "source.evidence_lane")
     assert_equal(source.get("tracking_source"), "tcp_ref_stand", "source.tracking_source")
-    if "rbpodo_controller_pgmode_simulation" not in profile.get("allowed_use", []):
-        raise ValidationError(f"{CONTROLLER_SIM_PROFILE}.allowed_use must include rbpodo_controller_pgmode_simulation")
+    if profile.get("allowed_use") != ["rbpodo_controller_pgmode_simulation"]:
+        raise ValidationError(
+            f"{CONTROLLER_SIM_PROFILE}.allowed_use must be exactly rbpodo_controller_pgmode_simulation"
+        )
     forbidden = profile.get("forbidden_use", [])
     for forbidden_use in ("physical_real_default", "real_cartesian_default_without_acceptance"):
         if forbidden_use not in forbidden:
@@ -189,6 +198,9 @@ def validate_controller_sim_profile(
         assert_equal(nested(server_config, f"{arm}.backend_type"), "rbpodo", f"server_config {arm}.backend_type")
         assert_equal(nested(server_config, f"{arm}.run_mode"), "real", f"server_config {arm}.run_mode")
         assert_equal(nested(server_config, f"{arm}.operation_mode"), "simulation", f"server_config {arm}.operation_mode")
+        matrix_operation_mode = optional_matrix_override(experiment, f"{arm}.operation_mode")
+        if matrix_operation_mode is not None:
+            assert_equal(matrix_operation_mode, "simulation", f"matrix override {arm}.operation_mode")
 
     assert_equal(nested(server_config, "cartesian_control.allow_in_real"), False, "server_config cartesian_control.allow_in_real")
     assert_equal(
@@ -209,6 +221,16 @@ def validate_controller_sim_profile(
 
     assert_equal(nested(server_config, "servo.rate_hz"), params.get("servo_rate_hz"), "server_config servo.rate_hz")
     assert_equal(matrix_override(experiment, "servo.rate_hz"), params.get("servo_rate_hz"), "matrix override servo.rate_hz")
+    assert_equal(
+        nested(server_config, "servo.rbpodo_async_streaming.enable"),
+        True,
+        "server_config servo.rbpodo_async_streaming.enable",
+    )
+    assert_equal(
+        matrix_override(experiment, "servo.rbpodo_async_streaming.enable"),
+        True,
+        "matrix override servo.rbpodo_async_streaming.enable",
+    )
     assert_equal(
         nested(server_config, "servo.rbpodo_async_streaming.mode"),
         params.get("async_mode"),
@@ -258,6 +280,10 @@ def validate_controller_sim_profile(
 
     if params.get("disable_waiting_ack") is not False:
         raise ValidationError(f"{CONTROLLER_SIM_PROFILE}.parameters.disable_waiting_ack must be false")
+    servo_rate_hz = finite_number(params.get("servo_rate_hz"), f"{CONTROLLER_SIM_PROFILE}.parameters.servo_rate_hz")
+    servo_t1_sec = finite_number(params.get("servo_t1_sec"), f"{CONTROLLER_SIM_PROFILE}.parameters.servo_t1_sec")
+    if not math.isclose(servo_t1_sec, 1.0 / servo_rate_hz, rel_tol=1e-9, abs_tol=1e-12):
+        raise ValidationError(f"{CONTROLLER_SIM_PROFILE}.parameters.servo_t1_sec must match servo_rate_hz period")
 
     return ValidationReport(
         defaults_path=defaults_path,
