@@ -20,6 +20,31 @@ The GENE 26.5 / ACKON500 default remains a controller-simulation profile. It is
 not the physical-real default and must be reported with
 `physical_motion_expected=false`.
 
+## Physical Real-Policy Gate List
+
+`real_policy` is blocked by default. A future physical rollout must satisfy all
+of these gates before policy-runner may send motion:
+
+- `mode: real` and `safety.allow_real_motion: true`
+- measured geometry with `geometry_valid_for_real_policy: true`
+- `retarget_status: measured` and `measured_retarget_available: true`
+- `collision_model_status: measured|validated` and
+  `measured_collision_model_available: true`
+- `workspace_envelope_status: measured|validated`
+- `minimum_inter_arm_distance_m` configured
+- `selected_arm: left|right|both` or `selected_arms: [left, right]` matching
+  the checkpoint `arm_mask`
+- measured gripper integration with `measured_gripper_available: true`
+- physical gripper block remains active unless
+  `allow_real_gripper_motion: true` and `RB_ALLOW_REAL_GRIPPER=1`
+- normal real robot and real motion gates required by the servo server
+
+Flow checkpoints are 14D: each arm has six Cartesian channels plus one gripper
+channel. The gripper channel is handled separately from Cartesian arm motion.
+In `controller_sim`, proposed gripper commands are logged and dropped by the
+noop gripper backend unless a simulator gripper backend is explicitly provided.
+Controller simulation does not approve physical gripper motion.
+
 ## Flow-Infer Command Family
 
 `flow-infer` must declare `--rollout-mode`. It may also declare:
@@ -87,6 +112,9 @@ is intentionally leaving the default streaming `TcpTwistLocal` path.
   `cartesian_action_requirements(allow_rbpodo_controller_simulation=True)`,
   server `cartesian_gate` evidence, and `physical_motion_expected=false`.
 - `RB_ALLOW_REAL_CARTESIAN` is not part of this controller-simulation workflow.
+- `RB_ALLOW_REAL_GRIPPER` is not part of controller simulation; it is only a
+  future physical `real_policy` gripper gate paired with
+  `allow_real_gripper_motion: true`.
 
 ## Validation
 

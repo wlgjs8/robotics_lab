@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
@@ -95,6 +96,8 @@ class RolloutModePolicy:
         *,
         checkpoint_camera_names: list[str] | tuple[str, ...] = (),
         geometry_status: Any | None = None,
+        checkpoint_arm_mask: list[float] | tuple[float, ...] | None = None,
+        checkpoint_has_nonzero_gripper_commands: bool = False,
     ) -> None:
         mode = str(getattr(config, "mode", "") or "").lower()
         safety = getattr(config, "safety", None)
@@ -136,11 +139,23 @@ class RolloutModePolicy:
                 raise RolloutModeValidationError("real_readonly requires config mode=real")
             return
         if self.mode == RolloutMode.REAL_POLICY:
-            self._validate_real_policy(config, geometry_status=geometry_status)
+            self._validate_real_policy(
+                config,
+                geometry_status=geometry_status,
+                checkpoint_arm_mask=checkpoint_arm_mask,
+                checkpoint_has_nonzero_gripper_commands=checkpoint_has_nonzero_gripper_commands,
+            )
             return
         raise RolloutModeValidationError(f"unhandled rollout-mode {self.mode.value}")
 
-    def _validate_real_policy(self, config: Any, *, geometry_status: Any | None) -> None:
+    def _validate_real_policy(
+        self,
+        config: Any,
+        *,
+        geometry_status: Any | None,
+        checkpoint_arm_mask: list[float] | tuple[float, ...] | None,
+        checkpoint_has_nonzero_gripper_commands: bool,
+    ) -> None:
         mode = str(getattr(config, "mode", "") or "").lower()
         safety = getattr(config, "safety", None)
         if mode != "real":
@@ -164,18 +179,66 @@ class RolloutModePolicy:
             raise RolloutModeValidationError(
                 "real_policy requires geometry_valid_for_real_policy=true"
             )
+        retarget_status = str(getattr(safety, "retarget_status", "") or "missing")
+        if retarget_status != "measured":
+            raise RolloutModeValidationError(
+                f"real_policy requires retarget_status=measured; got {retarget_status}"
+            )
         if not bool(getattr(safety, "measured_retarget_available", False)):
             raise RolloutModeValidationError(
                 "real_policy requires measured_retarget_available=true"
+            )
+        collision_model_status = str(getattr(safety, "collision_model_status", "") or "missing")
+        if collision_model_status in {"missing", "configured_estimate"}:
+            raise RolloutModeValidationError(
+                f"real_policy requires collision_model_status measured or validated; "
+                f"got {collision_model_status}"
+            )
+        if collision_model_status not in {"measured", "validated"}:
+            raise RolloutModeValidationError(
+                f"real_policy requires collision_model_status measured or validated; "
+                f"got {collision_model_status}"
             )
         if not bool(getattr(safety, "measured_collision_model_available", False)):
             raise RolloutModeValidationError(
                 "real_policy requires measured_collision_model_available=true"
             )
+        workspace_envelope_status = str(
+            getattr(safety, "workspace_envelope_status", "") or "missing"
+        )
+        if workspace_envelope_status not in {"measured", "validated"}:
+            raise RolloutModeValidationError(
+                f"real_policy requires workspace_envelope_status measured or validated; "
+                f"got {workspace_envelope_status}"
+            )
+        minimum_inter_arm_distance_m = getattr(safety, "minimum_inter_arm_distance_m", None)
+        if minimum_inter_arm_distance_m is None:
+            raise RolloutModeValidationError(
+                "real_policy requires minimum_inter_arm_distance_m"
+            )
+        if checkpoint_arm_mask is not None:
+            selected_arms = _selected_arms_from_safety(safety)
+            checkpoint_arms = _arms_from_checkpoint_mask(checkpoint_arm_mask)
+            if selected_arms != checkpoint_arms:
+                raise RolloutModeValidationError(
+                    "real_policy selected_arm/selected_arms must match checkpoint arm_mask; "
+                    f"selected_arms={list(selected_arms)} checkpoint_arm_mask={list(checkpoint_arm_mask)}"
+                )
         if not bool(getattr(safety, "measured_gripper_available", False)):
             raise RolloutModeValidationError(
                 "real_policy requires measured_gripper_available=true for flow-policy gripper channels"
             )
+        if checkpoint_has_nonzero_gripper_commands:
+            if not bool(getattr(safety, "allow_real_gripper_motion", False)):
+                raise RolloutModeValidationError(
+                    "real_policy checkpoint has nonzero gripper commands; "
+                    "requires allow_real_gripper_motion=true"
+                )
+            if os.environ.get("RB_ALLOW_REAL_GRIPPER") != "1":
+                raise RolloutModeValidationError(
+                    "real_policy checkpoint has nonzero gripper commands; "
+                    "requires RB_ALLOW_REAL_GRIPPER=1"
+                )
 
 
 @dataclass
@@ -197,6 +260,14 @@ class RolloutSummaryRecorder:
     run_mode_seen: str | None = None
     operation_mode_seen: str | None = None
     physical_motion_expected: bool | None = None
+    selected_arm: str | None = None
+    selected_arms: list[str] = field(default_factory=list)
+    left_arm_mask: float | None = None
+    right_arm_mask: float | None = None
+    gripper_command_count: int = 0
+    gripper_dropped_count: int = 0
+    allow_real_gripper_motion: bool = False
+    collision_model_status: str = "missing"
 
     def record_state(self, snapshot: Any) -> None:
         payload = getattr(snapshot, "payload", snapshot)
@@ -234,6 +305,23 @@ class RolloutSummaryRecorder:
         if source_cameras is not None:
             self.camera_names = [str(name) for name in source_cameras]
         self.command_family = str(getattr(source, "command_family", self.command_family) or self.command_family)
+        source_selected_arms = getattr(source, "checkpoint_selected_arms", None)
+        if source_selected_arms is not None:
+            self.selected_arms = [str(arm) for arm in source_selected_arms]
+            self.selected_arm = _selected_arm_label(self.selected_arms)
+        source_arm_mask = getattr(source, "checkpoint_arm_mask", None)
+        if source_arm_mask is not None:
+            mask = list(source_arm_mask)
+            if len(mask) >= 1:
+                self.left_arm_mask = float(mask[0])
+            if len(mask) >= 2:
+                self.right_arm_mask = float(mask[1])
+        self.gripper_command_count = int(
+            getattr(source, "gripper_command_count", self.gripper_command_count) or 0
+        )
+        self.gripper_dropped_count = int(
+            getattr(source, "gripper_dropped_count", self.gripper_dropped_count) or 0
+        )
 
     def record_decision(self, decision: Any) -> None:
         reason = str(getattr(decision, "reason", "") or "ok")
@@ -263,6 +351,7 @@ class RolloutSummaryRecorder:
     def to_dict(self, source: Any | None = None) -> dict[str, Any]:
         if source is not None:
             self.record_source(source)
+        selected_arm = self.selected_arm or _selected_arm_label(self.selected_arms)
         data = {
             **self.policy.report_fields,
             "checkpoint_path": self.checkpoint_path,
@@ -281,6 +370,18 @@ class RolloutSummaryRecorder:
             "backend_seen": self.backend_seen,
             "run_mode_seen": self.run_mode_seen,
             "operation_mode_seen": self.operation_mode_seen,
+            "selected_arm": selected_arm,
+            "selected_arms": list(self.selected_arms),
+            "left_arm_mask": self.left_arm_mask,
+            "right_arm_mask": self.right_arm_mask,
+            "arm_mask": {
+                "left": self.left_arm_mask,
+                "right": self.right_arm_mask,
+            },
+            "gripper_command_count": int(self.gripper_command_count),
+            "gripper_dropped_count": int(self.gripper_dropped_count),
+            "allow_real_gripper_motion": bool(self.allow_real_gripper_motion),
+            "collision_model_status": self.collision_model_status,
         }
         return data
 
@@ -317,6 +418,22 @@ class ReadOnlyActionSource:
     @property
     def missing_camera_count(self) -> int:
         return int(getattr(self._source, "missing_camera_count", 0) or 0)
+
+    @property
+    def checkpoint_selected_arms(self) -> Any:
+        return getattr(self._source, "checkpoint_selected_arms", [])
+
+    @property
+    def checkpoint_arm_mask(self) -> Any:
+        return getattr(self._source, "checkpoint_arm_mask", None)
+
+    @property
+    def gripper_command_count(self) -> int:
+        return int(getattr(self._source, "gripper_command_count", 0) or 0)
+
+    @property
+    def gripper_dropped_count(self) -> int:
+        return int(getattr(self._source, "gripper_dropped_count", 0) or 0)
 
     def next_intent(self, snapshot: Any, now_monotonic: float) -> Any | None:
         intent = self._source.next_intent(snapshot, now_monotonic)
@@ -423,3 +540,36 @@ def _first_nested_bool(
             if isinstance(value, bool):
                 return value
     return current
+
+
+def _selected_arms_from_safety(safety: Any) -> tuple[str, ...]:
+    selected_arms = getattr(safety, "selected_arms", ())
+    if selected_arms:
+        return tuple(arm for arm in ("left", "right") if arm in set(selected_arms))
+    selected_arm = str(getattr(safety, "selected_arm", "") or "both")
+    if selected_arm == "left":
+        return ("left",)
+    if selected_arm == "right":
+        return ("right",)
+    return ("left", "right")
+
+
+def _arms_from_checkpoint_mask(mask: list[float] | tuple[float, ...]) -> tuple[str, ...]:
+    arms: list[str] = []
+    values = list(mask)
+    if len(values) >= 1 and float(values[0]) > 0.0:
+        arms.append("left")
+    if len(values) >= 2 and float(values[1]) > 0.0:
+        arms.append("right")
+    return tuple(arms) or ("left", "right")
+
+
+def _selected_arm_label(selected_arms: list[str]) -> str | None:
+    arms = [arm for arm in ("left", "right") if arm in set(selected_arms)]
+    if arms == ["left"]:
+        return "left"
+    if arms == ["right"]:
+        return "right"
+    if arms == ["left", "right"]:
+        return "both"
+    return None

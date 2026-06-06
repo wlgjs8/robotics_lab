@@ -146,7 +146,7 @@ class PolicyRolloutModesTest(unittest.TestCase):
                 "safety": {"allow_real_motion": True},
             }
         )
-        with self.assertRaisesRegex(RolloutModeValidationError, "measured_retarget_available"):
+        with self.assertRaisesRegex(RolloutModeValidationError, "retarget_status=measured"):
             policy.validate_config(missing_gates, geometry_status=measured_geometry())
 
         allowed = config_from_mapping(
@@ -155,6 +155,11 @@ class PolicyRolloutModesTest(unittest.TestCase):
                 "mode": "real",
                 "safety": {
                     "allow_real_motion": True,
+                    "selected_arm": "both",
+                    "retarget_status": "measured",
+                    "collision_model_status": "measured",
+                    "minimum_inter_arm_distance_m": 0.05,
+                    "workspace_envelope_status": "measured",
                     "measured_retarget_available": True,
                     "measured_collision_model_available": True,
                     "measured_gripper_available": True,
@@ -171,6 +176,13 @@ class PolicyRolloutModesTest(unittest.TestCase):
             config_path="policy_runner/config/simulator_hold.yaml",
             command_family="TcpDeltaStand",
             camera_names=["head"],
+            selected_arms=["left", "right"],
+            left_arm_mask=1.0,
+            right_arm_mask=1.0,
+            gripper_command_count=2,
+            gripper_dropped_count=2,
+            allow_real_gripper_motion=False,
+            collision_model_status="configured_estimate",
         )
         recorder.record_state(
             sample_state(
@@ -204,6 +216,13 @@ class PolicyRolloutModesTest(unittest.TestCase):
         self.assertEqual(summary["backend_seen"], "simulator")
         self.assertEqual(summary["run_mode_seen"], "simulation")
         self.assertEqual(summary["operation_mode_seen"], "simulation")
+        self.assertEqual(summary["selected_arm"], "both")
+        self.assertEqual(summary["selected_arms"], ["left", "right"])
+        self.assertEqual(summary["arm_mask"], {"left": 1.0, "right": 1.0})
+        self.assertEqual(summary["gripper_command_count"], 2)
+        self.assertEqual(summary["gripper_dropped_count"], 2)
+        self.assertFalse(summary["allow_real_gripper_motion"])
+        self.assertEqual(summary["collision_model_status"], "configured_estimate")
 
 
 def measured_geometry():

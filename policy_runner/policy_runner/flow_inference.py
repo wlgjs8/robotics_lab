@@ -17,6 +17,7 @@ from .action_sources.tcp_delta import (
 )
 from .flow_dataset import (
     FLOW_CHECKPOINT_SCHEMA,
+    FLOW_ACTION_DIM_NAMES,
     FlowHdf5Dataset,
     decode_hdf5_image_value,
     normalize_runtime_proprio,
@@ -24,6 +25,7 @@ from .flow_dataset import (
     runtime_proprio_from_state,
 )
 from .flow_model import FlowMatchingPolicy, sample_action_chunks
+from .gripper import GripperRuntime, gripper_commands_from_flow_step
 from .robot_state_client import StateSnapshot
 from .rollout_modes import RolloutMode, RolloutModeValidationError, parse_rollout_mode
 from .servo_command_client import CommandIntent
@@ -148,6 +150,7 @@ class FlowMatchingActionSource:
         max_linear_step_m: float = 0.002,
         max_angular_step_rad: float = 0.01,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
+        gripper_runtime: GripperRuntime | None = None,
         device: str = "auto",
         stderr: TextIO = sys.stderr,
     ):
@@ -195,6 +198,13 @@ class FlowMatchingActionSource:
         self.model.eval()
 
         self.arm_mask = _arm_mask_from_stats(self.stats)
+        self.checkpoint_arm_mask = tuple(float(value) for value in self.arm_mask.tolist())
+        self.checkpoint_selected_arms = _arms_from_mask(self.arm_mask)
+        self.checkpoint_has_nonzero_gripper_commands = _checkpoint_has_nonzero_gripper_commands(
+            self.stats,
+            int(model_config.get("action_dim", checkpoint.get("action_dim", 0)) or 0),
+        )
+        self.gripper_runtime = gripper_runtime or GripperRuntime(rollout_mode="sim_dryrun")
         self.requirements = replace(
             cartesian_action_requirements(
                 allow_rbpodo_controller_simulation=allow_rbpodo_controller_simulation_cartesian,
@@ -236,10 +246,28 @@ class FlowMatchingActionSource:
             self._chunk_index = 0
         step = self._chunk[self._chunk_index]
         self._chunk_index += 1
+        self._dispatch_gripper_step(step)
 
         if self.command_family_option == "tcp_twist_local":
             return self._tcp_twist_local_step_intent(step)
         return self._tcp_delta_stand_step_intent(step)
+
+    @property
+    def gripper_command_count(self) -> int:
+        return int(self.gripper_runtime.command_count)
+
+    @property
+    def gripper_dropped_count(self) -> int:
+        return int(self.gripper_runtime.dropped_count)
+
+    def _dispatch_gripper_step(self, step: np.ndarray) -> None:
+        commands = gripper_commands_from_flow_step(
+            step.tolist(),
+            arm_mask=self.arm_mask.tolist(),
+            command_type="delta",
+            source="flow_policy",
+        )
+        self.gripper_runtime.dispatch(commands)
 
     def _tcp_delta_stand_step_intent(self, step: np.ndarray) -> CommandIntent | None:
         left = None
@@ -504,6 +532,37 @@ def _arm_mask_from_stats(stats: dict[str, Any]) -> np.ndarray:
     if not mask.any():
         mask[:] = 1.0
     return mask
+
+
+def _arms_from_mask(mask: np.ndarray) -> list[str]:
+    arms: list[str] = []
+    if len(mask) >= 1 and float(mask[0]) > 0.0:
+        arms.append("left")
+    if len(mask) >= 2 and float(mask[1]) > 0.0:
+        arms.append("right")
+    return arms or ["left", "right"]
+
+
+def _checkpoint_has_nonzero_gripper_commands(stats: dict[str, Any], action_dim: int) -> bool:
+    percentiles = stats.get("action_distribution_percentiles", {})
+    if isinstance(percentiles, dict):
+        found_gripper_percentiles = False
+        for name in ("left_grip", "right_grip"):
+            values = percentiles.get(name)
+            if not isinstance(values, dict):
+                continue
+            found_gripper_percentiles = True
+            for value in values.values():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    if abs(float(value)) > 1e-12:
+                        return True
+        if found_gripper_percentiles:
+            return False
+
+    names = list(FLOW_ACTION_DIM_NAMES)
+    if action_dim >= len(names):
+        return True
+    return action_dim > max(names.index("left_grip"), names.index("right_grip"))
 
 
 def _normalize_images(images: np.ndarray, stats: dict[str, Any]) -> np.ndarray:

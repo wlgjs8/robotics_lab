@@ -770,6 +770,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             run_flow_offline_eval,
             validate_flow_command_family,
         )
+        from .gripper import GripperRuntime
 
         config = load_config(args.config)
         rollout_policy = RolloutModePolicy.from_value(
@@ -853,6 +854,10 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 allow_rbpodo_controller_simulation_cartesian=(
                     rollout_policy.allows_controller_simulation_cartesian
                 ),
+                gripper_runtime=GripperRuntime(
+                    rollout_mode=rollout_policy.mode.value,
+                    allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+                ),
                 device=args.device,
             )
             geometry_status = _load_runtime_geometry_status(config)
@@ -860,6 +865,10 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 config,
                 checkpoint_camera_names=source.camera_names,
                 geometry_status=geometry_status,
+                checkpoint_arm_mask=source.checkpoint_arm_mask,
+                checkpoint_has_nonzero_gripper_commands=(
+                    source.checkpoint_has_nonzero_gripper_commands
+                ),
             )
             recorder = RolloutSummaryRecorder(
                 rollout_policy,
@@ -867,6 +876,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 config_path=str(args.config),
                 command_family=source.command_family,
                 camera_names=list(source.camera_names),
+                allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+                selected_arms=list(source.checkpoint_selected_arms),
+                left_arm_mask=source.checkpoint_arm_mask[0],
+                right_arm_mask=source.checkpoint_arm_mask[1],
+                collision_model_status=config.safety.collision_model_status,
             )
             run_source = source
             if not rollout_policy.may_send_commands:

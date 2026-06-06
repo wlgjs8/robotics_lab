@@ -53,6 +53,29 @@ run writes `rollout_summary`, including decode/missing-camera counts, safety
 decision counts, command send/drop counts, and backend/run_mode/operation_mode
 observed in state.
 
+Physical `real_policy` must remain blocked by default. The exact required gate
+list is:
+
+- `mode: real`
+- `safety.allow_real_motion: true`
+- measured geometry with `geometry_valid_for_real_policy: true`
+- `retarget_status: measured` and `measured_retarget_available: true`
+- `collision_model_status: measured|validated` and
+  `measured_collision_model_available: true`
+- `workspace_envelope_status: measured|validated`
+- `minimum_inter_arm_distance_m` configured
+- `selected_arm: left|right|both` or `selected_arms: [left, right]` matching
+  the checkpoint `arm_mask`
+- `measured_gripper_available: true`
+- for nonzero checkpoint gripper channels, `allow_real_gripper_motion: true`
+  and `RB_ALLOW_REAL_GRIPPER=1`
+
+Flow actions are 14D, with per-arm Cartesian channels and separate gripper
+target/delta channels. Runtime gripper commands are not packed into Cartesian
+arm commands. In `controller_sim`, gripper proposals are logged and dropped by
+the noop gripper backend unless an explicit simulator gripper backend is
+configured; physical gripper motion remains blocked by default.
+
 For flow-policy actions, `--command-family tcp_twist_local` is the default and
 the controller-simulation path. It divides the learned 6D delta by
 `--policy-dt-sec` and clamps the final `TcpTwistLocal` velocity with
@@ -80,6 +103,8 @@ before training data is promoted:
   "controller_pgmode": "simulation | real | unknown | not_applicable",
   "calibration_status": "configured_estimate | measured | unknown",
   "camera_status": "disabled | simulated | real_unmeasured | real_measured",
+  "selected_arm": "left | right | both",
+  "collision_model_status": "missing | configured_estimate | measured | validated",
   "command_source_id": "policy_runner",
   "benchmark_linkage": {
     "circle_profile": "circle_15cm_16s",
@@ -141,6 +166,7 @@ Record both the normalized command packet and raw teleop inputs when available:
 | `spacemouse_axes` | raw six-axis SpaceMouse sample before policy scaling, if captured |
 | `spacemouse_buttons` | raw SpaceMouse button state, including deadman |
 | `deadman` | per-arm deadman state used for command emission |
+| `gripper_left/right` | current or target gripper state; real physical output additionally requires `allow_real_gripper_motion` and `RB_ALLOW_REAL_GRIPPER` |
 | `command_seq` or `seq` | command sequence number |
 | `source_id` | command source id, normally `policy_runner` |
 

@@ -28,11 +28,19 @@ class ServoCommandConfig:
 @dataclass(frozen=True)
 class SafetyConfig:
     allow_real_motion: bool = False
+    allow_real_gripper_motion: bool = False
     allow_rbpodo_controller_simulation_cartesian: bool = False
     allow_configured_estimate_geometry_in_controller_simulation: bool = True
+    selected_arm: str = "both"
+    selected_arms: tuple[str, ...] = ()
+    retarget_status: str = "missing"
+    collision_model_status: str = "missing"
+    minimum_inter_arm_distance_m: float | None = None
+    workspace_envelope_status: str = "missing"
     measured_retarget_available: bool = False
     measured_collision_model_available: bool = False
     measured_gripper_available: bool = False
+    allow_selected_arm_checkpoint_mismatch_readonly: bool = False
     require_valid_joint_state: bool = True
     kinematics_available: bool = False
     camera_available: bool = False
@@ -42,6 +50,25 @@ class SafetyConfig:
     allow_configured_estimate_geometry_in_real: bool = False
 
     def __post_init__(self) -> None:
+        if self.selected_arm not in {"left", "right", "both"}:
+            raise ValueError("safety.selected_arm must be left, right, or both")
+        invalid_arms = [arm for arm in self.selected_arms if arm not in {"left", "right"}]
+        if invalid_arms:
+            raise ValueError("safety.selected_arms entries must be left or right")
+        if self.retarget_status not in {"missing", "configured_estimate", "measured", "validated"}:
+            raise ValueError(
+                "safety.retarget_status must be missing, configured_estimate, measured, or validated"
+            )
+        if self.collision_model_status not in {"missing", "configured_estimate", "measured", "validated"}:
+            raise ValueError(
+                "safety.collision_model_status must be missing, configured_estimate, measured, or validated"
+            )
+        if self.workspace_envelope_status not in {"missing", "configured_estimate", "measured", "validated"}:
+            raise ValueError(
+                "safety.workspace_envelope_status must be missing, configured_estimate, measured, or validated"
+            )
+        if self.minimum_inter_arm_distance_m is not None and self.minimum_inter_arm_distance_m < 0.0:
+            raise ValueError("safety.minimum_inter_arm_distance_m must be non-negative")
         if self.camera_stale_timeout_sec <= 0.0:
             raise ValueError("safety.camera_stale_timeout_sec must be positive")
 
@@ -365,6 +392,21 @@ def _servo_command_config(raw: dict[str, Any]) -> ServoCommandConfig:
 def _safety_config(raw: dict[str, Any]) -> SafetyConfig:
     if "camera_stale_timeout_sec" in raw:
         raw["camera_stale_timeout_sec"] = float(raw["camera_stale_timeout_sec"])
+    if "selected_arms" in raw:
+        value = raw["selected_arms"]
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("safety.selected_arms must be a list")
+        raw["selected_arms"] = tuple(str(item) for item in value)
+    if "selected_arm" in raw:
+        raw["selected_arm"] = str(raw["selected_arm"])
+    if "retarget_status" in raw:
+        raw["retarget_status"] = str(raw["retarget_status"])
+    if "collision_model_status" in raw:
+        raw["collision_model_status"] = str(raw["collision_model_status"])
+    if "workspace_envelope_status" in raw:
+        raw["workspace_envelope_status"] = str(raw["workspace_envelope_status"])
+    if "minimum_inter_arm_distance_m" in raw and raw["minimum_inter_arm_distance_m"] is not None:
+        raw["minimum_inter_arm_distance_m"] = float(raw["minimum_inter_arm_distance_m"])
     return SafetyConfig(**raw)
 
 
