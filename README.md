@@ -356,6 +356,18 @@ and retarget metadata. `pose_frame=steamvr_world` is not treated as `stand`;
 real policy rollout remains blocked unless the manifest retarget transform to
 `stand` is measured.
 
+`flow-infer` requires an explicit `--rollout-mode` so inferred actions are not
+implicitly routed by the old `mode: real` flag. Supported values are
+`offline_eval`, `sim_dryrun`, `controller_sim`, `real_readonly`, and
+`real_policy`; each run writes a machine-readable `rollout_summary` to
+`outputs/rollout_summary.json` unless `--rollout-summary` is supplied.
+`controller_sim` is the rbpodo `controller_simulation` carve-out only:
+`run_mode=real`, `operation_mode=simulation`, controller-simulation Cartesian
+gate evidence, and `physical_motion_expected=false`. `real_readonly` is the
+current `real_supervised` observation lane and never sends motion commands.
+`real_policy` remains blocked unless real motion, measured retarget,
+collision, gripper, and geometry gates are present.
+
 접속:
 
 ```text

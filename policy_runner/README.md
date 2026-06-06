@@ -315,6 +315,44 @@ gripper values. Proprio features are reset-relative; action chunks are
 current-relative. Dataset statistics normalize proprio, action chunks, and
 camera images before training.
 
+Run `flow-infer` with an explicit `--rollout-mode`; do not use `mode: real` as
+the policy rollout selector. The modes are:
+
+- `offline_eval`: load a checkpoint and HDF5 samples from `--episodes-dir`,
+  produce action chunks, and avoid robot state and UDP command clients.
+- `sim_dryrun`: use mock/simulator state, run inference, and drop intents
+  unless the test-only `--send-dryrun-commands` flag is supplied.
+- `controller_sim`: the rbpodo `controller_simulation` pgmode path. It requires
+  config `mode: real`, `allow_rbpodo_controller_simulation_cartesian=true`,
+  server `operation_mode=simulation`, Cartesian gate evidence, and
+  `physical_motion_expected=false`.
+- `real_readonly`: connect to state/camera, run inference, write
+  `rollout_summary`, and never send commands. This is the `real_supervised`
+  read-only lane.
+- `real_policy`: future physical policy rollout only. It stays blocked unless
+  `allow_real_motion=true` and measured retarget, collision, gripper, and
+  geometry gates are all present.
+
+The `real_policy` validator checks `safety.measured_retarget_available`,
+`safety.measured_collision_model_available`, and
+`safety.measured_gripper_available` in addition to measured runtime geometry.
+
+Example offline and read-only invocations:
+
+```bash
+python3 -m policy_runner flow-infer \
+  --config policy_runner/config/simulator_hold.yaml \
+  --checkpoint outputs/flow_policy.pt \
+  --rollout-mode offline_eval \
+  --episodes-dir data/episodes \
+  --rollout-summary outputs/rollout_summary.json
+
+python3 -m policy_runner flow-infer \
+  --config policy_runner/config/real_master_arm_joint.yaml \
+  --checkpoint outputs/flow_policy.pt \
+  --rollout-mode real_readonly
+```
+
 Audit HDF5 episodes before training:
 
 ```bash

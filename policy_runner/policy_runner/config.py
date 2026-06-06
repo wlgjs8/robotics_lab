@@ -30,6 +30,9 @@ class SafetyConfig:
     allow_real_motion: bool = False
     allow_rbpodo_controller_simulation_cartesian: bool = False
     allow_configured_estimate_geometry_in_controller_simulation: bool = True
+    measured_retarget_available: bool = False
+    measured_collision_model_available: bool = False
+    measured_gripper_available: bool = False
     require_valid_joint_state: bool = True
     kinematics_available: bool = False
     camera_available: bool = False

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -9,12 +9,13 @@ import numpy as np
 import torch
 
 from .action_sources.tcp_delta import (
-    CARTESIAN_ACTION_REQUIREMENTS,
     clamp_tcp_delta,
+    cartesian_action_requirements,
     tcp_delta_stand_intent,
 )
 from .flow_dataset import (
     FLOW_CHECKPOINT_SCHEMA,
+    FlowHdf5Dataset,
     decode_hdf5_image_value,
     normalize_runtime_proprio,
     pose_from_state_payload,
@@ -23,6 +24,16 @@ from .flow_dataset import (
 from .flow_model import FlowMatchingPolicy, sample_action_chunks
 from .robot_state_client import StateSnapshot
 from .servo_command_client import CommandIntent
+
+
+@dataclass(frozen=True)
+class FlowOfflineEvalResult:
+    sample_count: int
+    action_chunk_count: int
+    camera_names: list[str]
+    image_decode_count: int
+    missing_camera_count: int
+    command_family: str = "offline_action_chunk"
 
 
 class FlowMatchingActionSource:
@@ -41,6 +52,7 @@ class FlowMatchingActionSource:
         sample_steps: int = 16,
         max_linear_step_m: float = 0.002,
         max_angular_step_rad: float = 0.01,
+        allow_rbpodo_controller_simulation_cartesian: bool = False,
         device: str = "auto",
         stderr: TextIO = sys.stderr,
     ):
@@ -53,6 +65,7 @@ class FlowMatchingActionSource:
         self.max_angular_step_rad = float(max_angular_step_rad)
         self.stderr = stderr
         self.device = _resolve_device(device)
+        self.command_family = "TcpDeltaStand"
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         schema = str(checkpoint.get("schema", "") or "")
@@ -75,7 +88,9 @@ class FlowMatchingActionSource:
 
         self.arm_mask = _arm_mask_from_stats(self.stats)
         self.requirements = replace(
-            CARTESIAN_ACTION_REQUIREMENTS,
+            cartesian_action_requirements(
+                allow_rbpodo_controller_simulation=allow_rbpodo_controller_simulation_cartesian,
+            ),
             requires_camera=bool(self.camera_names),
         )
         self._reset_left_pose: np.ndarray | None = None
@@ -85,6 +100,8 @@ class FlowMatchingActionSource:
         self._warned_missing_camera_client = False
         self.last_image_decode_count = 0
         self.last_missing_camera_count = 0
+        self.image_decode_count = 0
+        self.missing_camera_count = 0
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         _ = now_monotonic
@@ -141,6 +158,8 @@ class FlowMatchingActionSource:
         images, decode_count, missing_count = self._runtime_images()
         self.last_image_decode_count = decode_count
         self.last_missing_camera_count = missing_count
+        self.image_decode_count += decode_count
+        self.missing_camera_count += missing_count
         if self.camera_names and missing_count > 0:
             return None
         images = _normalize_images(images, self.stats)
@@ -203,6 +222,81 @@ class FlowMatchingActionSource:
                 frames.append(np.zeros((3, self.image_size, self.image_size), dtype=np.float32))
                 missing_count += 1
         return np.stack(frames, axis=0), decode_count, missing_count
+
+
+def run_flow_offline_eval(
+    *,
+    checkpoint_path: str | Path,
+    episodes_dir: str | Path,
+    sample_steps: int = 16,
+    device: str = "auto",
+    max_samples: int = 1,
+) -> FlowOfflineEvalResult:
+    if sample_steps <= 0:
+        raise ValueError("sample_steps must be positive")
+    if max_samples <= 0:
+        raise ValueError("max_offline_samples must be positive")
+    torch_device = _resolve_device(device)
+    checkpoint = torch.load(checkpoint_path, map_location=torch_device, weights_only=False)
+    schema = str(checkpoint.get("schema", "") or "")
+    if schema != FLOW_CHECKPOINT_SCHEMA:
+        raise ValueError(f"unsupported flow checkpoint schema: {schema}")
+
+    stats = dict(checkpoint["dataset_stats"])
+    camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
+    image_size = int(checkpoint.get("image_size", 224))
+    model_config = dict(checkpoint.get("model_config", {}))
+    if not model_config:
+        model_config = {
+            "action_horizon": int(checkpoint["action_horizon"]),
+            "action_dim": int(checkpoint["action_dim"]),
+            "proprio_dim": int(checkpoint["proprio_dim"]),
+            "camera_names": camera_names,
+        }
+    model = FlowMatchingPolicy.from_checkpoint_config(model_config).to(torch_device)
+    model.load_state_dict(checkpoint["model_state"])
+    model.eval()
+
+    dataset = FlowHdf5Dataset(
+        episodes_dir,
+        action_horizon=int(model_config["action_horizon"]),
+        image_size=image_size,
+        camera_names=camera_names,
+        stats=stats,
+        normalize=True,
+    )
+    sample_count = min(int(max_samples), len(dataset))
+    image_decode_count = 0
+    missing_camera_count = 0
+    action_chunk_count = 0
+    for index in range(sample_count):
+        sample = dataset[index]
+        image_decode_count += int(sample["image_decode_count"])
+        missing_camera_count += int(sample["missing_camera_count"])
+        with torch.no_grad():
+            chunk = sample_action_chunks(
+                model,
+                torch.as_tensor(
+                    sample["images"][None, ...],
+                    dtype=torch.float32,
+                    device=torch_device,
+                ),
+                torch.as_tensor(
+                    sample["proprio"][None, ...],
+                    dtype=torch.float32,
+                    device=torch_device,
+                ),
+                steps=sample_steps,
+            )
+        action_chunk_count += int(chunk.shape[1])
+
+    return FlowOfflineEvalResult(
+        sample_count=sample_count,
+        action_chunk_count=action_chunk_count,
+        camera_names=camera_names,
+        image_decode_count=image_decode_count,
+        missing_camera_count=missing_camera_count,
+    )
 
 
 def _arm_mask_from_stats(stats: dict[str, Any]) -> np.ndarray:

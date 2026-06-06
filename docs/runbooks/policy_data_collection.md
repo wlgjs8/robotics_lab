@@ -41,6 +41,18 @@ Server-side env flags such as `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`,
 `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` are not policy-runner physical-motion
 approval.
 
+Flow-policy rollout must also declare `--rollout-mode`; the policy runner must
+not infer rollout authority from `mode: real` alone. Use `offline_eval` for
+checkpoint plus HDF5 sample review without state or UDP clients, `sim_dryrun`
+for mock/simulator state with dropped intents by default, `controller_sim` for
+the rbpodo `controller_simulation` carve-out, `real_readonly` for
+`real_supervised` observation/inference with no command sends, and
+`real_policy` only for future physical rollout after measured retarget,
+collision, gripper, camera, and geometry gates are present. Every `flow-infer`
+run writes `rollout_summary`, including decode/missing-camera counts, safety
+decision counts, command send/drop counts, and backend/run_mode/operation_mode
+observed in state.
+
 ## Episode Metadata
 
 Every dataset shard should carry this metadata. Fields may be empty for legacy

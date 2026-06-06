@@ -19,6 +19,14 @@ from .config import PolicyRunnerConfig, load_config
 from .dataset_manifest import parse_camera_names
 from .geometry import GeometryStatus, load_geometry_status
 from .robot_state_client import RobotStateClient, StateSnapshot, StateStreamLeaseReadback
+from .rollout_modes import (
+    ReadOnlyActionSource,
+    RolloutMode,
+    RolloutModePolicy,
+    RolloutModeValidationError,
+    RolloutSummaryRecorder,
+    write_rollout_summary,
+)
 from .safety import SafetyGate
 from .servo_command_client import CommandIntent, ServoCommandClient
 from .spacemouse import HidSpaceMouseReader, ScriptedSpaceMouseReader, SpaceMouseReader, SpaceMouseSample
@@ -49,18 +57,22 @@ def run(
     monotonic_fn=time.monotonic,
     stderr: TextIO = sys.stderr,
     state_sink: Callable[[StateSnapshot], None] | None = None,
+    send_commands: bool = True,
+    rollout_recorder: RolloutSummaryRecorder | None = None,
+    geometry_status: GeometryStatus | None = None,
 ) -> int:
     state_client = state_client or RobotStateClient(config.robot_state.bind, config.robot_state.stale_timeout_sec)
-    command_client = command_client or ServoCommandClient(
-        config.servo_command.endpoint,
-        config.servo_command.timeout_sec,
-    )
+    if send_commands:
+        command_client = command_client or ServoCommandClient(
+            config.servo_command.endpoint,
+            config.servo_command.timeout_sec,
+        )
     source = source or make_action_source(config)
     safety_gate = SafetyGate(
         config.mode,
         config.safety,
         config.robot_state.stale_timeout_sec,
-        geometry_status=_load_runtime_geometry_status(config),
+        geometry_status=geometry_status or _load_runtime_geometry_status(config),
     )
     state_client.start()
     armed_for_motion = False
@@ -84,7 +96,10 @@ def run(
                 continue
             if state_sink is not None:
                 state_sink(snapshot)
-            if config.servo_command.acquire_lease and not lease_acquired:
+            if rollout_recorder is not None:
+                rollout_recorder.record_state(snapshot)
+            if send_commands and config.servo_command.acquire_lease and not lease_acquired:
+                assert command_client is not None
                 try:
                     command_client.acquire_lease(
                         StateStreamLeaseReadback(state_client),
@@ -98,21 +113,44 @@ def run(
                 lease_acquired = True
             intent = source.next_intent(snapshot, now)
             decision = safety_gate.evaluate(snapshot, intent, getattr(source, "requirements", None), now)
+            if rollout_recorder is not None:
+                rollout_recorder.record_decision(decision)
+                rollout_recorder.record_source(source)
             if decision.allowed and intent is not None:
+                if not send_commands:
+                    if rollout_recorder is not None:
+                        rollout_recorder.record_dropped("rollout_mode_command_send_disabled", intent)
+                    sleep_fn(period)
+                    continue
+                assert command_client is not None
                 if intent.is_motion and not armed_for_motion:
                     arm = CommandIntent.arm_motion(timeout_sec=config.servo_command.timeout_sec)
                     arm_decision = safety_gate.evaluate(snapshot, arm, getattr(source, "requirements", None), now)
+                    if rollout_recorder is not None:
+                        rollout_recorder.record_decision(arm_decision)
                     if arm_decision.allowed:
                         command_client.send(arm)
+                        if rollout_recorder is not None:
+                            rollout_recorder.record_sent(arm)
                         armed_for_motion = True
+                    else:
+                        if rollout_recorder is not None:
+                            rollout_recorder.record_dropped(arm_decision.reason, arm)
+                        sleep_fn(period)
+                        continue
                 command_client.send(intent)
+                if rollout_recorder is not None:
+                    rollout_recorder.record_sent(intent)
+            elif intent is not None and rollout_recorder is not None:
+                rollout_recorder.record_dropped(decision.reason, intent)
             sleep_fn(period)
     except KeyboardInterrupt:
         return 0
     finally:
         _close_if_supported(source)
         state_client.close()
-        command_client.close()
+        if command_client is not None:
+            command_client.close()
 
 
 def make_action_source(config: PolicyRunnerConfig):
@@ -366,6 +404,36 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     flow_infer.add_argument("--checkpoint", default="outputs/flow_policy.pt")
     flow_infer.add_argument("--config", required=True, help="policy_runner YAML config")
+    flow_infer.add_argument(
+        "--rollout-mode",
+        required=True,
+        choices=RolloutMode.choices(),
+        help=(
+            "Where inferred flow-policy actions may go: offline_eval, sim_dryrun, "
+            "controller_sim, real_readonly, or real_policy."
+        ),
+    )
+    flow_infer.add_argument(
+        "--send-dryrun-commands",
+        action="store_true",
+        help="Test-only override allowing sim_dryrun to send UDP commands.",
+    )
+    flow_infer.add_argument(
+        "--rollout-summary",
+        default="outputs/rollout_summary.json",
+        help="Path for rollout_summary JSON output.",
+    )
+    flow_infer.add_argument(
+        "--episodes-dir",
+        default=None,
+        help="HDF5 episode file or directory for rollout-mode offline_eval.",
+    )
+    flow_infer.add_argument(
+        "--max-offline-samples",
+        type=int,
+        default=1,
+        help="Maximum HDF5 samples to evaluate in rollout-mode offline_eval.",
+    )
     flow_infer.add_argument("--sample-steps", type=int, default=16)
     flow_infer.add_argument("--device", default="auto")
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.002)
@@ -665,9 +733,46 @@ def _main_with_subcommands(argv: list[str]) -> int:
 
         return run_umi_convert_cli(args)
     if args.command == "flow-infer":
-        from .flow_inference import FlowMatchingActionSource
+        from .flow_inference import FlowMatchingActionSource, run_flow_offline_eval
 
         config = load_config(args.config)
+        rollout_policy = RolloutModePolicy.from_value(
+            args.rollout_mode,
+            send_dryrun_commands=args.send_dryrun_commands,
+        )
+        if rollout_policy.mode == RolloutMode.OFFLINE_EVAL:
+            if args.episodes_dir is None:
+                print(
+                    "policy_runner flow-infer offline_eval requires --episodes-dir with one or more HDF5 samples",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                rollout_policy.validate_config(config)
+                offline_result = run_flow_offline_eval(
+                    checkpoint_path=args.checkpoint,
+                    episodes_dir=args.episodes_dir,
+                    sample_steps=args.sample_steps,
+                    device=args.device,
+                    max_samples=args.max_offline_samples,
+                )
+            except (RolloutModeValidationError, ValueError) as exc:
+                print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
+                return 2
+            recorder = RolloutSummaryRecorder(
+                rollout_policy,
+                checkpoint_path=str(args.checkpoint),
+                config_path=str(args.config),
+                command_family=offline_result.command_family,
+                camera_names=offline_result.camera_names,
+            )
+            recorder.image_decode_count = offline_result.image_decode_count
+            recorder.missing_camera_count = offline_result.missing_camera_count
+            recorder.proposed_intent_count = offline_result.action_chunk_count
+            write_rollout_summary(recorder, args.rollout_summary)
+            print(f"wrote rollout_summary: {args.rollout_summary}", flush=True)
+            return 0
+
         camera_client = None
         if config.camera.enable:
             from .camera_bundle_client import CameraBundleClient
@@ -685,11 +790,44 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 sample_steps=args.sample_steps,
                 max_linear_step_m=args.max_linear_step_m,
                 max_angular_step_rad=args.max_angular_step_rad,
+                allow_rbpodo_controller_simulation_cartesian=(
+                    rollout_policy.allows_controller_simulation_cartesian
+                ),
                 device=args.device,
             )
+            geometry_status = _load_runtime_geometry_status(config)
+            rollout_policy.validate_config(
+                config,
+                checkpoint_camera_names=source.camera_names,
+                geometry_status=geometry_status,
+            )
+            recorder = RolloutSummaryRecorder(
+                rollout_policy,
+                checkpoint_path=str(args.checkpoint),
+                config_path=str(args.config),
+                command_family=source.command_family,
+                camera_names=list(source.camera_names),
+            )
+            run_source = source
+            if not rollout_policy.may_send_commands:
+                run_source = ReadOnlyActionSource(source, recorder)
+            rc = run(
+                config,
+                source=run_source,
+                send_commands=rollout_policy.may_send_commands,
+                rollout_recorder=recorder,
+                geometry_status=geometry_status,
+            )
+            write_rollout_summary(recorder, args.rollout_summary, source=run_source)
+            print(f"wrote rollout_summary: {args.rollout_summary}", flush=True)
+            return rc
+        except RolloutModeValidationError as exc:
+            print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
+            if camera_client is not None:
+                camera_client.close()
+            return 2
         except Exception:
             if camera_client is not None:
                 camera_client.close()
             raise
-        return run(config, source=source)
     raise ValueError(f"unknown policy_runner command: {args.command}")
