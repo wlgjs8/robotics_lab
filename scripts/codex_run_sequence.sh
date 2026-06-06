@@ -19,17 +19,77 @@ CODEX_BIN="${CODEX_BIN:-codex}"
 CODEX_SANDBOX="${CODEX_SANDBOX:-workspace-write}"
 CODEX_APPROVAL_POLICY="${CODEX_APPROVAL_POLICY:-never}"
 
+GENE_UMI_TASKS=(
+  01_promote_ackon500_defaults
+  02_controller_sim_repeatability
+  03_pgmode_real_transition_acceptance
+  04_umi_hdf5_audit_adapter
+  05_umi_bimanual_collection
+  06_flow_training_preflight_eval
+  07_policy_runner_rollout_modes
+  08_dual_arm_real_policy_and_gripper
+  09_docs_ci_artifact_manifest
+)
+
+SPACEMOUSE_PGMODE_TASKS=(
+  01_fix_controller_sim_safety_semantics
+  02_pgmode_spacemouse_end_to_end_dryrun
+  03_flow_infer_rollout_modes
+  04_flow_policy_tcp_twistlocal_controller_sim
+  05_viser_pgmode_operator_view
+  06_gripper_and_dual_arm_policy_gate
+  07_ml_preflight_gate_stability
+  08_umi_hdf5_manifest_robustness
+  09_artifact_manifest_docs_makefile
+  10_source_hygiene_local_configs
+)
+
+print_recommended_sequences() {
+  echo "Recommended current sequences:"
+  echo "  GENE/UMI:"
+  echo "    ${GENE_UMI_TASKS[*]}"
+  echo "  SpaceMouse/pgmode:"
+  echo "    ${SPACEMOUSE_PGMODE_TASKS[*]}"
+}
+
+print_known_tasks() {
+  echo "GENE/UMI task IDs:"
+  printf '  %s\n' "${GENE_UMI_TASKS[@]}"
+  echo
+  echo "SpaceMouse/pgmode task IDs:"
+  printf '  %s\n' "${SPACEMOUSE_PGMODE_TASKS[@]}"
+}
+
+print_usage() {
+  echo "Usage: $0 TASK_A TASK_B ..."
+  echo "       $0 --list"
+  echo
+  print_recommended_sequences
+  echo
+  echo "Environment knobs:"
+  echo "  CODEX_SKIP_GATE=1"
+  echo "  CODEX_CONTINUE_ON_GATE_FAIL=1"
+  echo "  CODEX_CONTINUE_ON_CODEX_FAIL=1"
+  echo "  CODEX_ALLOW_DIRTY=1"
+  echo "  CODEX_TEE_LOGS=1"
+  echo "  CODEX_SANDBOX=workspace-write|danger-full-access"
+}
+
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 HARDEN-01 HARDEN-02 ..." >&2
-  echo "Environment knobs:" >&2
-  echo "  CODEX_SKIP_GATE=1" >&2
-  echo "  CODEX_CONTINUE_ON_GATE_FAIL=1" >&2
-  echo "  CODEX_CONTINUE_ON_CODEX_FAIL=1" >&2
-  echo "  CODEX_ALLOW_DIRTY=1" >&2
-  echo "  CODEX_TEE_LOGS=1" >&2
-  echo "  CODEX_SANDBOX=workspace-write|danger-full-access" >&2
+  print_usage >&2
   exit 2
 fi
+
+case "${1:-}" in
+  -h|--help)
+    print_usage
+    exit 0
+    ;;
+  --list)
+    print_known_tasks
+    exit 0
+    ;;
+esac
 
 require_clean_tree() {
   if [[ "${CODEX_ALLOW_DIRTY:-0}" == "1" ]]; then

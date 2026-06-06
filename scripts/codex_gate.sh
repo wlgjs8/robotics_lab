@@ -1785,6 +1785,226 @@ run_gene_umi_docs_ci_artifact_manifest_gate() {
   run_required_make_dry_run pgmode-transition-dry-run
 }
 
+run_required_policy_runner_tests_any() {
+  local description="$1"
+  shift
+
+  local ran_any=0
+  local pattern
+  for pattern in "$@"; do
+    if find policy_runner/tests -maxdepth 1 -name "${pattern}" -print -quit | grep -q .; then
+      PYTHONPATH=policy_runner python3 -m unittest discover -s policy_runner/tests -p "${pattern}"
+      ran_any=1
+    fi
+  done
+
+  if [[ "${ran_any}" != "1" ]]; then
+    echo "ERROR: required policy_runner tests not present for ${description}: $*" >&2
+    return 1
+  fi
+}
+
+require_active_gitignore_entry() {
+  local description="$1"
+  local pattern="$2"
+  if ! grep -Eq "^[[:space:]]*${pattern}" .gitignore; then
+    echo "ERROR: .gitignore missing active coverage for ${description}" >&2
+    return 1
+  fi
+}
+
+fail_if_tracked_matches() {
+  local description="$1"
+  local pattern="$2"
+  local matches
+  matches="$(git ls-files | grep -E "${pattern}" || true)"
+  if [[ -n "${matches}" ]]; then
+    echo "ERROR: tracked files include forbidden ${description}:" >&2
+    printf '%s\n' "${matches}" >&2
+    return 1
+  fi
+}
+
+fail_if_tracked_real_config_without_example_suffix() {
+  local matches
+  matches="$(git ls-files 'rb_servo_server/config/dual_real*.yaml' | grep -Ev '\.example\.yaml$' || true)"
+  if [[ -n "${matches}" ]]; then
+    echo "ERROR: tracked real robot configs must be .example.yaml templates:" >&2
+    printf '%s\n' "${matches}" >&2
+    return 1
+  fi
+}
+
+check_spacemouse_pgmode_config_safety() {
+  local policy_config="policy_runner/config/rbpodo_pgmode_spacemouse_500hz_ack.yaml"
+  local server_template="rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml"
+
+  require_file "${policy_config}"
+  require_file "${server_template}"
+
+  grep_absent "allow_real_motion:[[:space:]]*true" "${policy_config}"
+  grep_existing "allow_rbpodo_controller_simulation_cartesian:[[:space:]]*true|controller_simulation_cartesian" \
+    "${policy_config}" policy_runner/policy_runner policy_runner/tests policy_runner/README.md
+  grep_existing "allow_in_controller_simulation:[[:space:]]*true|controller_simulation_cartesian" \
+    "${server_template}" docs/runbooks/rbpodo_pgmode_spacemouse.md docs/servo_backend_contract.md docs/architecture.md
+  grep_existing "allow_in_real:[[:space:]]*false" "${server_template}" docs/runbooks/rbpodo_pgmode_spacemouse.md
+  grep_existing "physical_motion_expected:[[:space:]]*false|physical_motion_expected=false" \
+    "${policy_config}" "${server_template}" docs/runbooks/rbpodo_pgmode_spacemouse.md policy_runner/README.md
+  grep_existing "RB_ALLOW_REAL_MOTION|RB_ALLOW_REAL_ROBOT|RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION" \
+    README.md docs/architecture.md docs/servo_backend_contract.md tools/rbpodo_pgmode_spacemouse.sh
+  grep_existing "RB_ALLOW_REAL_CARTESIAN.*must not|Do not set.*RB_ALLOW_REAL_CARTESIAN|do not set.*RB_ALLOW_REAL_CARTESIAN" \
+    tools/rbpodo_pgmode_spacemouse.sh docs/runbooks/rbpodo_pgmode_spacemouse.md policy_runner/README.md README.md
+}
+
+run_pgmode_spacemouse_python_checks() {
+  run_shell_syntax_checks
+  run_python_compile_checks
+  run_policy_runner_tests
+}
+
+run_spacemouse_fix_controller_sim_safety_gate() {
+  run_pgmode_spacemouse_python_checks
+  check_spacemouse_pgmode_config_safety
+}
+
+run_pgmode_spacemouse_end_to_end_dryrun_gate() {
+  run_shell_syntax_checks
+  run_python_compile_checks
+  run_policy_runner_tests
+  run_gui_tests
+  run_servo_gate_or_skip_missing_deps
+  bash -n tools/rbpodo_pgmode_spacemouse.sh
+  grep_existing "dual_spacemouse_cartesian" \
+    policy_runner/policy_runner policy_runner/tests policy_runner/config policy_runner/README.md
+  grep_existing "deadman|deadman_button" \
+    policy_runner/policy_runner/action_sources policy_runner/tests policy_runner/config policy_runner/README.md
+  grep_existing "release[-_ ]?zero|zero.*release|deadman.*released|released.*no motion|emits no motion" \
+    policy_runner/policy_runner/action_sources policy_runner/tests policy_runner/README.md docs/runbooks/policy_data_collection.md
+  grep_existing "sample_hold_timeout_sec|sample[-_ ]?hold|state_stream_stale|stale.*timeout|timeout.*stale" \
+    policy_runner/policy_runner policy_runner/tests policy_runner/config
+  grep_existing "TcpTwistLocal|tcp_twist_local" \
+    policy_runner/policy_runner policy_runner/tests policy_runner/README.md
+  grep_existing "controller_simulation_cartesian_enabled|cartesian_gate|controller_simulation.*readback|lease_readback|50376" \
+    policy_runner/policy_runner policy_runner/tests policy_runner/config docs/runbooks/rbpodo_pgmode_spacemouse.md
+  grep_existing "device:[[:space:]]*null|path:[[:space:]]*null|Fake.*SpaceMouse|fake.*spacemouse|FakeSpaceMouse" \
+    policy_runner/config policy_runner/tests
+}
+
+run_spacemouse_flow_infer_rollout_modes_gate() {
+  run_gene_umi_policy_rollout_modes_gate
+  run_policy_runner_help flow-infer
+  run_required_policy_runner_tests 'test_flow_inference*.py'
+  run_required_policy_runner_tests 'test_policy_rollout_modes*.py'
+  grep_existing "rollout-mode|controller_simulation|rollout_summary" \
+    policy_runner/policy_runner policy_runner/tests docs README.md
+  grep_existing "real_readonly|real_supervised" \
+    policy_runner/policy_runner policy_runner/tests docs README.md
+}
+
+run_flow_policy_tcp_twistlocal_controller_sim_gate() {
+  run_shell_syntax_checks
+  run_python_compile_checks
+  run_policy_runner_tests
+  run_policy_runner_help flow-infer
+  run_required_policy_runner_tests_any \
+    "flow policy TcpTwistLocal controller-simulation rollout" \
+    'test_flow_policy_tcp_twistlocal*.py' \
+    'test_flow_policy_tcp_twist_local*.py' \
+    'test_*flow*twistlocal*.py' \
+    'test_*flow*tcp_twistlocal*.py'
+  grep_existing "TcpTwistLocal|tcp_twist_local" \
+    policy_runner/policy_runner policy_runner/tests docs/runbooks/policy_data_collection.md
+  grep_existing "bounded.*TcpTwistLocal|TcpTwistLocal.*bounded|clamp|clip|max_linear_velocity_m_s|max_angular_velocity_rad_s" \
+    policy_runner/policy_runner policy_runner/tests docs README.md
+  grep_existing "policy_dt_sec|policy[-_ ]dt|command_rate_hz|dt_sec" \
+    policy_runner/policy_runner policy_runner/tests policy_runner/config docs README.md
+  grep_existing "controller_simulation|allow_rbpodo_controller_simulation_cartesian|controller_simulation_cartesian" \
+    policy_runner/policy_runner policy_runner/tests policy_runner/config docs README.md
+  grep_existing "real_readonly|real_supervised|physical real|physical_real|allow_real_motion:[[:space:]]*false" \
+    policy_runner/policy_runner policy_runner/tests policy_runner/config docs README.md
+}
+
+run_viser_pgmode_operator_view_gate() {
+  run_shell_syntax_checks
+  run_python_compile_checks
+  run_gui_tests
+  grep_existing "50366" \
+    rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md tools/rbpodo_pgmode_spacemouse.sh \
+    rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml
+  grep_existing "50376" \
+    rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md tools/rbpodo_pgmode_spacemouse.sh \
+    rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml policy_runner/config
+  grep_existing "physical_motion_expected" rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md
+  grep_existing "tcp_ref_stand|selected_tcp_source|selected_source|selected TCP|selected tcp" \
+    rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md
+  grep_existing "lease|source_id|command_source|policy_runner safety readback" \
+    rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md tools/rbpodo_pgmode_spacemouse.sh
+  grep_existing "controller_simulation_mode|controller simulation|controller_simulation" \
+    rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md
+  echo "codex_gate: not launching live viewer; 05_viser_pgmode_operator_view is documentation/test evidence only"
+}
+
+run_spacemouse_gripper_dual_arm_policy_gate() {
+  run_gene_umi_dual_arm_gripper_gate
+  grep_existing "RB_ALLOW_REAL_GRIPPER|allow_real_gripper_motion" \
+    policy_runner/policy_runner policy_runner/tests docs README.md
+  grep_existing "selected[-_]arm|collision_model_status" \
+    policy_runner/policy_runner policy_runner/tests docs README.md
+  grep_existing "physical.*gripper.*block|gripper.*physical.*block|allow_real_gripper_motion:[[:space:]]*false|blocked by default" \
+    policy_runner/policy_runner policy_runner/tests docs README.md
+}
+
+run_ml_preflight_gate_stability_gate() {
+  run_gene_umi_flow_training_gate
+  run_policy_runner_help ml-preflight
+  run_policy_runner_help flow-train
+  PYTHONPATH=policy_runner python3 -m policy_runner ml-preflight --vision-backbone tiny_cnn
+  grep_existing "tiny_cnn" policy_runner/policy_runner policy_runner/tests docs README.md
+  grep_existing "seed|deterministic" \
+    policy_runner/policy_runner policy_runner/tests docs README.md
+  grep_existing "no network|network downloads|no internet|offline|download" \
+    policy_runner/policy_runner policy_runner/tests docs README.md
+}
+
+run_umi_hdf5_manifest_robustness_gate() {
+  run_gene_umi_hdf5_audit_gate
+  run_gene_umi_bimanual_collection_gate
+  run_policy_runner_help hdf5-audit
+  run_policy_runner_help umi-import
+  run_policy_runner_help umi-convert
+  run_required_policy_runner_tests 'test_hdf5_audit*.py'
+  run_required_policy_runner_tests 'test_flow_dataset.py'
+  run_required_policy_runner_tests 'test_umi_*.py'
+  grep_existing "dataset_manifest|DatasetManifest" policy_runner/policy_runner policy_runner/tests docs README.md
+  grep_existing "schema|schema_version|version" policy_runner/policy_runner policy_runner/tests docs README.md
+  if [[ -f episode_002.hdf5 ]]; then
+    echo "codex_gate: episode_002.hdf5 is present; hdf5 audit smoke remains optional and local"
+  else
+    echo "codex_gate: episode_002.hdf5 absent as expected; gate does not require committed dataset files"
+  fi
+}
+
+run_artifact_manifest_docs_makefile_gate() {
+  run_gene_umi_docs_ci_artifact_manifest_gate
+}
+
+run_source_hygiene_local_configs_gate() {
+  run_shell_syntax_checks
+  run_python_compile_checks
+  require_active_gitignore_entry "HDF5 datasets (*.hdf5)" '\*\.hdf5([[:space:]]|$)'
+  require_active_gitignore_entry "HDF5 datasets (*.h5)" '\*\.h5([[:space:]]|$)'
+  require_active_gitignore_entry "artifact directories" '(\*\*/)?artifacts/'
+  require_active_gitignore_entry "rb_servo_server local YAML configs" 'rb_servo_server/config/local/\*\.ya?ml'
+  require_active_gitignore_entry "runtime output directories" '(\*\*/)?(logs|episodes|checkpoints)/'
+  fail_if_tracked_matches "large local dataset files" '\.(hdf5|h5)$'
+  fail_if_tracked_matches "Python cache files" '(^|/)__pycache__(/|$)|\.pyc$'
+  fail_if_tracked_matches "Codex run artifacts" '^artifacts/codex_runs/'
+  fail_if_tracked_matches "local rb_servo_server YAML configs" '^rb_servo_server/config/local/.+\.(yaml|yml)$'
+  fail_if_tracked_real_config_without_example_suffix
+  grep_existing "\\.example\\.yaml|site-specific|placeholder|config/local|Copy to config/local" \
+    README.md docs rb_servo_server/config/dual_real.example.yaml rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml
+}
+
 run_optional_rbpodo_p1_circle_ablation() {
   if [[ "${CODEX_RUN_RBPODO_CIRCLE_ABLATION:-0}" != "1" ]]; then
     echo "codex_gate: skipping rbpodo P1 controller-simulation ablation; set CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 with explicit CODEX_RBPODO_CIRCLE_ABLATION_ARGS to enable"
@@ -2741,6 +2961,36 @@ case "$TASK" in
     ;;
   09_docs_ci_artifact_manifest)
     run_gene_umi_docs_ci_artifact_manifest_gate
+    ;;
+  01_fix_controller_sim_safety_semantics)
+    run_spacemouse_fix_controller_sim_safety_gate
+    ;;
+  02_pgmode_spacemouse_end_to_end_dryrun)
+    run_pgmode_spacemouse_end_to_end_dryrun_gate
+    ;;
+  03_flow_infer_rollout_modes)
+    run_spacemouse_flow_infer_rollout_modes_gate
+    ;;
+  04_flow_policy_tcp_twistlocal_controller_sim)
+    run_flow_policy_tcp_twistlocal_controller_sim_gate
+    ;;
+  05_viser_pgmode_operator_view)
+    run_viser_pgmode_operator_view_gate
+    ;;
+  06_gripper_and_dual_arm_policy_gate)
+    run_spacemouse_gripper_dual_arm_policy_gate
+    ;;
+  07_ml_preflight_gate_stability)
+    run_ml_preflight_gate_stability_gate
+    ;;
+  08_umi_hdf5_manifest_robustness)
+    run_umi_hdf5_manifest_robustness_gate
+    ;;
+  09_artifact_manifest_docs_makefile)
+    run_artifact_manifest_docs_makefile_gate
+    ;;
+  10_source_hygiene_local_configs)
+    run_source_hygiene_local_configs_gate
     ;;
   ACKON500-BEST-PROFILE-PROMOTION-01)
     run_ackon500_best_profile_promotion_gate
