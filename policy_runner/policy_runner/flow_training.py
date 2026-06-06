@@ -112,6 +112,8 @@ def train_flow_matching(
         include_formats=dataset_kwargs.get("include_formats"),
         exclude_camera_names=dataset_kwargs.get("exclude_camera_names"),
         required_attrs=dataset_kwargs.get("required_attrs"),
+        episode_paths=dataset_kwargs.get("episode_paths"),
+        include_patterns=dataset_kwargs.get("include_patterns"),
         max_episodes=max_episodes,
         stats=stats,
         normalize=True,

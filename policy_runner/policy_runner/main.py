@@ -503,7 +503,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     umi_import.add_argument(
         "--require-measured-retarget",
         action="store_true",
-        help="Fail unless the retarget config has status=measured",
+        help="Fail unless the retarget config has status=measured or status=accepted",
     )
     umi_import.add_argument(
         "--overwrite",
@@ -527,7 +527,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     umi_convert.add_argument(
         "--require-measured-retarget",
         action="store_true",
-        help="Fail unless the retarget config has status=measured",
+        help="Fail unless the retarget config has status=measured or status=accepted",
     )
 
     args = parser.parse_args(argv)

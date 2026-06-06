@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import io
 import json
 import math
@@ -17,6 +18,47 @@ FLOW_ACTION_DIM = 14
 FLOW_ARM_DIM = 7
 FLOW_PROPRIO_DIM = 16
 DEFAULT_IMAGE_SIZE = 224
+HDF5_EPISODE_SUFFIXES = {".hdf5", ".h5"}
+HDF5_SKIP_PARENT_NAMES = {
+    ".tmp",
+    "audit",
+    "audits",
+    "checkpoint",
+    "checkpoints",
+    "report",
+    "reports",
+    "temp",
+    "temporary",
+    "tmp",
+}
+HDF5_SKIP_EXACT_NAMES = {
+    "audit.h5",
+    "audit.hdf5",
+    "conversion_report.h5",
+    "conversion_report.hdf5",
+    "hdf5_audit.h5",
+    "hdf5_audit.hdf5",
+    "manifest.h5",
+    "manifest.hdf5",
+}
+HDF5_SKIP_STEM_PREFIXES = (
+    "audit",
+    "checkpoint",
+    "ckpt",
+    "conversion_report",
+    "hdf5_audit",
+    "model_checkpoint",
+    "tmp",
+    "temp",
+)
+HDF5_SKIP_STEM_SUFFIXES = (
+    ".partial",
+    ".tmp",
+    "-partial",
+    "-tmp",
+    "_partial",
+    "_tmp",
+)
 FLOW_ACTION_DIM_NAMES = (
     "left_dx",
     "left_dy",
@@ -78,6 +120,8 @@ class FlowHdf5Dataset:
         include_formats: list[str] | tuple[str, ...] | None = None,
         exclude_camera_names: list[str] | tuple[str, ...] | None = None,
         required_attrs: dict[str, Any] | None = None,
+        episode_paths: list[str] | tuple[str, ...] | None = None,
+        include_patterns: list[str] | tuple[str, ...] | None = None,
         max_episodes: int | None = None,
         stats: dict[str, Any] | None = None,
         normalize: bool = True,
@@ -99,7 +143,11 @@ class FlowHdf5Dataset:
         self.required_attrs = dict(required_attrs or {})
         self.episodes = [
             load_flow_episode_index(path, single_arm_side=single_arm_side)
-            for path in discover_hdf5_episodes(self.root)
+            for path in discover_hdf5_episodes(
+                self.root,
+                episode_paths=episode_paths,
+                include_patterns=include_patterns,
+            )
         ]
         if include_formats:
             allowed_formats = set(include_formats)
@@ -170,15 +218,71 @@ class FlowHdf5Dataset:
         }
 
 
-def discover_hdf5_episodes(root: str | Path) -> list[Path]:
+def discover_hdf5_episodes(
+    root: str | Path,
+    *,
+    episode_paths: list[str] | tuple[str, ...] | None = None,
+    include_patterns: list[str] | tuple[str, ...] | None = None,
+    skip_non_episode_files: bool = True,
+) -> list[Path]:
     path = Path(root)
     if path.is_file():
-        return [path] if path.suffix.lower() in {".hdf5", ".h5"} else []
+        return [path] if path.suffix.lower() in HDF5_EPISODE_SUFFIXES else []
+
+    if episode_paths:
+        return _manifest_listed_hdf5_episodes(path, episode_paths)
+
+    if include_patterns:
+        candidates = _manifest_pattern_hdf5_candidates(path, include_patterns)
+    else:
+        candidates = path.rglob("*")
+
     return sorted(
-        candidate
-        for candidate in path.rglob("*")
-        if candidate.is_file() and candidate.suffix.lower() in {".hdf5", ".h5"}
+        dict.fromkeys(
+            candidate
+            for candidate in candidates
+            if candidate.is_file()
+            and candidate.suffix.lower() in HDF5_EPISODE_SUFFIXES
+            and (not skip_non_episode_files or not _is_obvious_non_episode_hdf5(candidate))
+        )
     )
+
+
+def _manifest_listed_hdf5_episodes(root: Path, episode_paths: list[str] | tuple[str, ...]) -> list[Path]:
+    paths: list[Path] = []
+    missing: list[str] = []
+    for entry in episode_paths:
+        candidate = Path(entry)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        if not candidate.is_file() or candidate.suffix.lower() not in HDF5_EPISODE_SUFFIXES:
+            missing.append(str(candidate))
+            continue
+        paths.append(candidate)
+    if missing:
+        raise ValueError("manifest-listed HDF5 episode is missing or not an HDF5 file: " + ", ".join(missing))
+    return sorted(dict.fromkeys(paths))
+
+
+def _manifest_pattern_hdf5_candidates(root: Path, include_patterns: list[str] | tuple[str, ...]):
+    candidates: list[Path] = []
+    for pattern in include_patterns:
+        pattern_path = Path(pattern)
+        if pattern_path.is_absolute():
+            candidates.extend(Path(item) for item in glob.glob(str(pattern_path), recursive=True))
+        else:
+            candidates.extend(root.glob(str(pattern)))
+    return candidates
+
+
+def _is_obvious_non_episode_hdf5(path: Path) -> bool:
+    name = path.name.lower()
+    stem = path.stem.lower()
+    if name in HDF5_SKIP_EXACT_NAMES:
+        return True
+    if path.parent.name.lower() in HDF5_SKIP_PARENT_NAMES:
+        return True
+    return stem.startswith(HDF5_SKIP_STEM_PREFIXES) or stem.endswith(HDF5_SKIP_STEM_SUFFIXES)
 
 
 def load_flow_episode_index(
@@ -471,14 +575,13 @@ def _load_pika_episode(
 ) -> FlowEpisodeIndex:
     action = np.asarray(handle["action"], dtype=np.float32)
     pose = np.asarray(handle["observations/pose"], dtype=np.float32)
-    gripper = (
-        np.asarray(handle["observations/gripper"], dtype=np.float32)
-        if "observations/gripper" in handle
-        else np.zeros((pose.shape[0], 1), dtype=np.float32)
-    )
+    gripper = np.asarray(handle["observations/gripper"], dtype=np.float32) if "observations/gripper" in handle else None
     timestamps = np.asarray(handle["timestamp"], dtype=np.float64)
     camera_paths = _camera_paths(handle, "observations/images")
-    length = min([len(action), len(pose), len(gripper), len(timestamps)] + _camera_lengths(handle, camera_paths))
+    length_candidates = [len(action), len(pose), len(timestamps)] + _camera_lengths(handle, camera_paths)
+    if gripper is not None and gripper.size:
+        length_candidates.append(int(gripper.shape[0]))
+    length = min(length_candidates)
     identity_pose = _identity_poses(length)
     zero_gripper = np.zeros(length, dtype=np.float32)
     arm_mask = np.asarray([1.0, 0.0] if single_arm_side == "left" else [0.0, 1.0], dtype=np.float32)
@@ -486,7 +589,7 @@ def _load_pika_episode(
     right_pose = pose[:length] if single_arm_side == "right" else identity_pose.copy()
     left_action_pose = action[:length, :7] if single_arm_side == "left" else None
     right_action_pose = action[:length, :7] if single_arm_side == "right" else None
-    current_gripper = gripper[:length, 0] if gripper.shape[1] else zero_gripper
+    current_gripper = _gripper_vector_or_zero(gripper, length)
     target_gripper = action[:length, 7] if action.shape[1] > 7 else current_gripper
     return FlowEpisodeIndex(
         path=path,
@@ -691,11 +794,8 @@ def _pika_bimanual_arm_arrays(
 
     group = handle[group_path]
     pose = np.asarray(group["pose"], dtype=np.float32)[:length, :7] if "pose" in group else identity_pose
-    gripper_raw = np.asarray(group["gripper"], dtype=np.float32)[:length] if "gripper" in group else None
-    if gripper_raw is not None and gripper_raw.ndim == 2 and gripper_raw.shape[1] > 0:
-        gripper = gripper_raw[:, 0]
-    else:
-        gripper = zero_gripper
+    gripper_raw = np.asarray(group["gripper"], dtype=np.float32) if "gripper" in group else None
+    gripper = _gripper_vector_or_zero(gripper_raw, length)
     action = np.asarray(group["action"], dtype=np.float32)[:length] if "action" in group else None
     action_pose = action[:, :7] if action is not None and action.ndim == 2 and action.shape[1] >= 7 else pose
     action_gripper = action[:, 7] if action is not None and action.ndim == 2 and action.shape[1] > 7 else gripper
@@ -891,10 +991,27 @@ def _optional_vector(group: h5py.Group, length: int, *names: str) -> np.ndarray:
     for name in names:
         if name in group:
             values = np.asarray(group[name], dtype=np.float32)
-            if values.ndim == 2 and values.shape[1] > 0:
-                values = values[:, 0]
-            return values[:length].reshape(-1)
+            return _gripper_vector_or_zero(values, length)
     return np.zeros(length, dtype=np.float32)
+
+
+def _gripper_vector_or_zero(values: np.ndarray | None, length: int) -> np.ndarray:
+    if values is None:
+        return np.zeros(length, dtype=np.float32)
+    array = np.asarray(values, dtype=np.float32)
+    if array.size == 0:
+        return np.zeros(length, dtype=np.float32)
+    if array.ndim == 1:
+        vector = array
+    elif array.ndim == 2 and array.shape[1] > 0:
+        vector = array[:, 0]
+    else:
+        return np.zeros(length, dtype=np.float32)
+    out = np.zeros(length, dtype=np.float32)
+    count = min(length, int(vector.shape[0]))
+    if count > 0:
+        out[:count] = vector[:count]
+    return out
 
 
 def _first_dataset(group: h5py.Group, length: int, *names: str) -> np.ndarray | None:

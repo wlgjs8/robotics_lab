@@ -47,7 +47,7 @@ checkpoint plus HDF5 sample review without state or UDP clients, `sim_dryrun`
 for mock/simulator state with dropped intents by default, `controller_sim` for
 the rbpodo `controller_simulation` carve-out, `real_readonly` for
 `real_supervised` observation/inference with no command sends, and
-`real_policy` only for future physical rollout after measured retarget,
+`real_policy` only for future physical rollout after measured or accepted retarget,
 collision, gripper, camera, and geometry gates are present. Every `flow-infer`
 run writes `rollout_summary`, including decode/missing-camera counts, safety
 decision counts, command send/drop counts, and backend/run_mode/operation_mode
@@ -59,7 +59,7 @@ list is:
 - `mode: real`
 - `safety.allow_real_motion: true`
 - measured geometry with `geometry_valid_for_real_policy: true`
-- `retarget_status: measured` and `measured_retarget_available: true`
+- `retarget_status: measured|accepted` and `measured_retarget_available: true`
 - `collision_model_status: measured|validated` and
   `measured_collision_model_available: true`
 - `workspace_envelope_status: measured|validated`

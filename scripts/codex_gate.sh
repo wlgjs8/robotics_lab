@@ -1751,7 +1751,13 @@ run_gene_umi_hdf5_audit_gate() {
   run_required_policy_runner_tests 'test_hdf5_audit*.py'
   grep_existing "robotics_lab\\.policy_runner\\.hdf5_audit\\.v1|DatasetManifest|dataset_manifest" \
     policy_runner/policy_runner policy_runner/tests docs README.md
-  if [[ -f episode_002.hdf5 ]]; then
+  local smoke_hdf5="${CODEX_UPLOADED_HDF5_SMOKE:-}"
+  if [[ -n "${smoke_hdf5}" ]]; then
+    PYTHONPATH=policy_runner python3 -m policy_runner hdf5-audit \
+      --episodes-dir "${smoke_hdf5}" \
+      --output-json /tmp/robotics_lab_hdf5_audit_gate.json \
+      --output-md /tmp/robotics_lab_hdf5_audit_gate.md
+  elif [[ -f episode_002.hdf5 ]]; then
     PYTHONPATH=policy_runner python3 -m policy_runner hdf5-audit \
       --episodes-dir episode_002.hdf5 \
       --output-json /tmp/robotics_lab_hdf5_audit_gate.json \
@@ -2011,7 +2017,9 @@ run_umi_hdf5_manifest_robustness_gate() {
   run_required_policy_runner_tests 'test_umi_*.py'
   grep_existing "dataset_manifest|DatasetManifest" policy_runner/policy_runner policy_runner/tests docs README.md
   grep_existing "schema|schema_version|version" policy_runner/policy_runner policy_runner/tests docs README.md
-  if [[ -f episode_002.hdf5 ]]; then
+  if [[ -n "${CODEX_UPLOADED_HDF5_SMOKE:-}" ]]; then
+    echo "codex_gate: CODEX_UPLOADED_HDF5_SMOKE is set; hdf5 audit smoke runs through 04_umi_hdf5_audit_adapter"
+  elif [[ -f episode_002.hdf5 ]]; then
     echo "codex_gate: episode_002.hdf5 is present; hdf5 audit smoke remains optional and local"
   else
     echo "codex_gate: episode_002.hdf5 absent as expected; gate does not require committed dataset files"

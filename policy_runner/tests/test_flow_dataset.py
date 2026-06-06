@@ -93,6 +93,35 @@ class FlowHdf5DatasetTest(unittest.TestCase):
             self.assertEqual(sample["action_chunk"].shape, (2, 14))
             self.assertTrue(np.allclose(sample["proprio"][6], 0.0))
 
+    def test_single_arm_gripper_shapes_use_first_vector_without_zeroing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            expected = np.asarray([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
+            cases = {
+                "gripper_1d.hdf5": expected,
+                "gripper_n1.hdf5": expected.reshape(-1, 1),
+                "gripper_n2.hdf5": np.stack([expected, expected + 1.0], axis=1),
+            }
+
+            for filename, gripper_data in cases.items():
+                path = root / filename
+                self._write_pika_episode(path, image_count=1, gripper_data=gripper_data)
+
+                index = load_flow_episode_index(path)
+
+                self.assertEqual(index.length, len(expected))
+                np.testing.assert_allclose(index.left_gripper, expected)
+
+    def test_single_arm_empty_gripper_uses_zero_vector_without_shortening_episode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "episode_001.hdf5"
+            self._write_pika_episode(path, image_count=1, gripper_data=np.asarray([], dtype=np.float32))
+
+            index = load_flow_episode_index(path)
+
+            self.assertEqual(index.length, 4)
+            self.assertTrue(np.allclose(index.left_gripper, 0.0))
+
     def test_bimanual_pika_episode_maps_both_arms(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "episode_001.hdf5"
@@ -136,7 +165,14 @@ class FlowHdf5DatasetTest(unittest.TestCase):
             self.assertTrue(np.isfinite(sample["proprio"]).all())
             self.assertTrue(np.isfinite(sample["action_chunk"]).all())
 
-    def _write_pika_episode(self, path: Path, *, image_count: int, with_gripper: bool = True) -> None:
+    def _write_pika_episode(
+        self,
+        path: Path,
+        *,
+        image_count: int,
+        with_gripper: bool = True,
+        gripper_data: np.ndarray | None = None,
+    ) -> None:
         assert h5py is not None and np is not None and Image is not None
         length = 4
         pose = np.zeros((length, 7), dtype=np.float32)
@@ -155,7 +191,7 @@ class FlowHdf5DatasetTest(unittest.TestCase):
             obs = handle.create_group("observations")
             obs.create_dataset("pose", data=pose)
             if with_gripper:
-                obs.create_dataset("gripper", data=gripper)
+                obs.create_dataset("gripper", data=gripper if gripper_data is None else gripper_data)
             images = obs.create_group("images")
             if image_count >= 1:
                 self._write_vlen_image_dataset(images, "jpeg_cam", length, suffix="jpeg")

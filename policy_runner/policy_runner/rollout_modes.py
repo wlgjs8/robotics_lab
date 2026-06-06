@@ -180,9 +180,9 @@ class RolloutModePolicy:
                 "real_policy requires geometry_valid_for_real_policy=true"
             )
         retarget_status = str(getattr(safety, "retarget_status", "") or "missing")
-        if retarget_status != "measured":
+        if retarget_status not in {"measured", "accepted"}:
             raise RolloutModeValidationError(
-                f"real_policy requires retarget_status=measured; got {retarget_status}"
+                f"real_policy requires retarget_status=measured or accepted; got {retarget_status}"
             )
         if not bool(getattr(safety, "measured_retarget_available", False)):
             raise RolloutModeValidationError(

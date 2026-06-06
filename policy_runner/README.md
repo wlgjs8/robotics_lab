@@ -330,7 +330,7 @@ the policy rollout selector. The modes are:
   `rollout_summary`, and never send commands. This is the `real_supervised`
   read-only lane.
 - `real_policy`: future physical policy rollout only. It stays blocked unless
-  `allow_real_motion=true` and measured retarget, collision, gripper, and
+  `allow_real_motion=true` and measured or accepted retarget, collision, gripper, and
   geometry gates are all present.
 
 The `real_policy` validator checks `safety.measured_retarget_available`,
@@ -416,7 +416,7 @@ attrs: schema=robotics_lab.umi_episode.v1 or absent Pika-compatible layout,
        pose_frame=steamvr_world|slam_world|robot_stand|stand|...,
        umi_device_serials=<JSON>,
        capture_hz=<Hz>,
-       retarget_status=missing|configured_estimate|measured
+       retarget_status=missing|configured_estimate|measured|accepted
 ```
 
 Import links raw HDF5 episodes into the output directory instead of duplicating
@@ -449,10 +449,11 @@ Retarget config template: `calibration/umi_retarget.example.yaml`. Required
 fields are `schema`, `status`, `source_pose_frame`, `target_pose_frame`, per-arm
 `T_stand_source`, per-arm `T_tcp_umi_gripper`,
 `gripper_open_close_units`, and `quality`. The config hash is stored in the
-manifest and converted HDF5 attrs. `status: measured` is required only when
-`--require-measured-retarget` is passed; `missing`, `configured_estimate`, and
-unknown status values remain real-rollout blockers while still allowing offline
-training/import review.
+manifest and converted HDF5 attrs. `status: measured` or `status: accepted` is
+required only when `--require-measured-retarget` is passed; `accepted` means a
+measured transform was accepted by a documented acceptance artifact. `missing`
+and `configured_estimate` remain physical real rollout blockers while still
+allowing offline training/import review.
 
 The conversion report includes episode/frame/duration counts, per-arm frame
 availability, camera decode samples, timestamp jitter, action step/velocity
@@ -468,6 +469,8 @@ include_formats:
   - pika_umi_single_arm
   - pika_umi_bimanual
   - robotics_lab_dual_arm
+include_patterns:
+  - episode_*.hdf5
 single_arm_side: left
 camera_names:
   - fisheye
@@ -477,15 +480,14 @@ exclude_camera_names:
 required_attrs:
   pose_format: x,y,z,qx,qy,qz,qw
 retarget:
-  pose_frame: steamvr_world
-  target_frame: stand
-  transform_status: missing
+  source_pose_frame: steamvr_world
+  target_pose_frame: stand
+  status: missing
 ```
 
 For training-only offline smoke, the flow loader may still use reset-relative
-deltas. For real policy rollout, `retarget.transform_status` must be
-`measured`; `configured_estimate`, `accepted`, and `missing` remain deployment
-blockers.
+deltas. For physical real policy rollout, `retarget.status` must be `measured`
+or `accepted`; `configured_estimate` and `missing` remain deployment blockers.
 
 The model uses a frozen vision encoder by default (`resnet18` or `resnet50` via
 `torchvision`) with a placeholder `dinov3` plugin hook for later optional

@@ -354,7 +354,7 @@ layouts are `pika_umi_single_arm`, `pika_umi_bimanual`, and
 camera filters, `single_arm_side`, required root attrs such as `pose_format`,
 and retarget metadata. `pose_frame=steamvr_world` is not treated as `stand`;
 real policy rollout remains blocked unless the manifest retarget transform to
-`stand` is measured.
+`stand` is measured or accepted.
 
 `flow-infer` requires an explicit `--rollout-mode` so inferred actions are not
 implicitly routed by the old `mode: real` flag. Supported values are
@@ -365,7 +365,7 @@ implicitly routed by the old `mode: real` flag. Supported values are
 `run_mode=real`, `operation_mode=simulation`, controller-simulation Cartesian
 gate evidence, and `physical_motion_expected=false`. `real_readonly` is the
 current `real_supervised` observation lane and never sends motion commands.
-`real_policy` remains blocked unless real motion, measured retarget,
+`real_policy` remains blocked unless real motion, measured or accepted retarget,
 collision, gripper, and geometry gates are present.
 
 접속:

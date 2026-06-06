@@ -12,6 +12,8 @@ KNOWN_DATASET_FORMATS = {
     "pika_umi_bimanual",
     "robotics_lab_dual_arm",
 }
+RETARGET_STATUSES = {"missing", "configured_estimate", "measured", "accepted"}
+PHYSICAL_ROLLOUT_RETARGET_STATUSES = {"measured", "accepted"}
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,8 @@ class DatasetManifest:
     """Lightweight dataset adapter manifest for HDF5 flow training."""
 
     episodes_dir: str | None = None
+    episode_paths: tuple[str, ...] = field(default_factory=tuple)
+    include_patterns: tuple[str, ...] = field(default_factory=tuple)
     include_formats: tuple[str, ...] = field(default_factory=tuple)
     single_arm_side: str = "left"
     camera_names: tuple[str, ...] = field(default_factory=tuple)
@@ -54,10 +58,12 @@ class DatasetManifest:
             raise ValueError(f"{source}: unknown include_formats: {', '.join(unknown_formats)}")
 
         required_attrs = _string_mapping(data.get("required_attrs", {}), field_name="required_attrs")
-        retarget = _string_mapping(data.get("retarget", {}), field_name="retarget")
+        retarget = _canonical_retarget_mapping(data.get("retarget", {}), source=source)
 
         return cls(
             episodes_dir=_optional_string(data.get("episodes_dir")),
+            episode_paths=tuple(_episode_path_list(data.get("episodes", data.get("episode_paths", [])))),
+            include_patterns=tuple(_string_list(data.get("include_patterns", []))),
             include_formats=include_formats,
             single_arm_side=single_arm_side,
             camera_names=tuple(_string_list(data.get("camera_names", []))),
@@ -98,16 +104,25 @@ class DatasetManifest:
         return {
             "camera_names": _exclude_names(self.selected_camera_names(camera_names_override), excluded),
             "single_arm_side": side,
+            "episode_paths": list(self.episode_paths) or None,
+            "include_patterns": list(self.include_patterns) or None,
             "include_formats": list(self.include_formats) or None,
             "exclude_camera_names": excluded,
             "required_attrs": dict(self.required_attrs),
         }
 
-    def retarget_is_measured_for(self, pose_frame: str, target_frame: str = "stand") -> bool:
+    def retarget_allows_physical_rollout_for(self, source_pose_frame: str, target_pose_frame: str = "stand") -> bool:
         return (
-            str(self.retarget.get("pose_frame", "") or "") == pose_frame
-            and str(self.retarget.get("target_frame", "") or "") == target_frame
-            and str(self.retarget.get("transform_status", "") or "") == "measured"
+            str(self.retarget.get("source_pose_frame", "") or "") == source_pose_frame
+            and str(self.retarget.get("target_pose_frame", "") or "") == target_pose_frame
+            and str(self.retarget.get("status", "") or "") in PHYSICAL_ROLLOUT_RETARGET_STATUSES
+        )
+
+    def retarget_is_measured_for(self, source_pose_frame: str, target_pose_frame: str = "stand") -> bool:
+        return (
+            str(self.retarget.get("source_pose_frame", "") or "") == source_pose_frame
+            and str(self.retarget.get("target_pose_frame", "") or "") == target_pose_frame
+            and str(self.retarget.get("status", "") or "") == "measured"
         )
 
 
@@ -232,12 +247,57 @@ def _string_list(value: Any) -> list[str]:
     raise ValueError(f"expected a list of strings, got {type(value).__name__}")
 
 
+def _episode_path_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"episodes must be a list of paths, got {type(value).__name__}")
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            candidate = item.get("path") or item.get("imported_path") or item.get("source_path")
+            if candidate:
+                out.append(str(candidate))
+            continue
+        text = str(item).strip()
+        if text:
+            out.append(text)
+    return out
+
+
 def _string_mapping(value: Any, *, field_name: str) -> dict[str, str]:
     if value is None:
         return {}
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be a mapping")
     return {str(key): str(item) for key, item in value.items()}
+
+
+def _canonical_retarget_mapping(value: Any, *, source: str | Path) -> dict[str, str]:
+    retarget = _string_mapping(value, field_name="retarget")
+    if not retarget:
+        return {}
+
+    canonical = dict(retarget)
+    if "source_pose_frame" not in canonical and "pose_frame" in canonical:
+        canonical["source_pose_frame"] = canonical["pose_frame"]
+    if "target_pose_frame" not in canonical and "target_frame" in canonical:
+        canonical["target_pose_frame"] = canonical["target_frame"]
+    if "status" not in canonical and "transform_status" in canonical:
+        canonical["status"] = canonical["transform_status"]
+    canonical.pop("pose_frame", None)
+    canonical.pop("target_frame", None)
+    canonical.pop("transform_status", None)
+
+    status = str(canonical.get("status", "missing") or "missing")
+    if status not in RETARGET_STATUSES:
+        raise ValueError(
+            f"{source}: retarget.status must be one of {sorted(RETARGET_STATUSES)}, got {status!r}"
+        )
+    canonical["status"] = status
+    return canonical
 
 
 def _optional_string(value: Any) -> str | None:

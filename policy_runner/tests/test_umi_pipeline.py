@@ -52,6 +52,8 @@ class UmiPipelineTest(unittest.TestCase):
             self.assertTrue((output_dir / "episode_001.hdf5").exists())
             self.assertEqual(manifest["aggregate"]["episode_count"], 1)
             self.assertEqual(manifest["retarget"]["status"], "configured_estimate")
+            self.assertEqual(manifest["retarget"]["source_pose_frame"], "steamvr_world")
+            self.assertEqual(manifest["retarget"]["target_pose_frame"], "stand")
             self.assertEqual(manifest["episodes"][0]["arm_mask"], [1.0, 1.0])
             self.assertIn("left_wrist_rgb", manifest["episodes"][0]["camera_names"])
             self.assertEqual(
@@ -146,19 +148,22 @@ class UmiPipelineTest(unittest.TestCase):
             self.assertIn("left_wrist_rgb", index.camera_paths)
             self.assertIn("right_wrist_rgb", index.camera_paths)
             self.assertTrue(
-                any("retarget_status_not_measured" in item for item in manifest["aggregate"]["deployment_blockers"])
+                any(
+                    "retarget_status_not_physical_rollout_ready" in item
+                    for item in manifest["aggregate"]["deployment_blockers"]
+                )
             )
 
-    def test_unknown_retarget_status_blocks_require_measured(self) -> None:
+    def test_configured_estimate_retarget_status_blocks_require_measured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "episode_001.hdf5"
             output = root / "episode_robotics_lab.hdf5"
             retarget_path = root / "umi_retarget.yaml"
             _write_bimanual_umi_episode(source)
-            _write_retarget_config(retarget_path, status="unknown")
+            _write_retarget_config(retarget_path, status="configured_estimate")
 
-            with self.assertRaisesRegex(ValueError, "requires retarget config status=measured"):
+            with self.assertRaisesRegex(ValueError, "requires retarget config status=measured or accepted"):
                 convert_umi_episode(
                     source,
                     output,
@@ -166,6 +171,41 @@ class UmiPipelineTest(unittest.TestCase):
                     retarget_config=retarget_path,
                     require_measured_retarget=True,
                 )
+
+    def test_accepted_retarget_status_passes_require_measured_and_clears_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "episode_001.hdf5"
+            output = root / "episode_robotics_lab.hdf5"
+            retarget_path = root / "umi_retarget.yaml"
+            _write_bimanual_umi_episode(source)
+            _write_retarget_config(retarget_path, status="accepted")
+
+            manifest = convert_umi_episode(
+                source,
+                output,
+                output_format="robotics_lab_dual_arm",
+                retarget_config=retarget_path,
+                require_measured_retarget=True,
+            )
+
+            self.assertEqual(manifest["retarget"]["status"], "accepted")
+            self.assertEqual(manifest["retarget"]["source_pose_frame"], "steamvr_world")
+            self.assertEqual(manifest["retarget"]["target_pose_frame"], "stand")
+            self.assertFalse(
+                any(
+                    "retarget_status_not_physical_rollout_ready" in item
+                    for item in manifest["aggregate"]["deployment_blockers"]
+                )
+            )
+
+    def test_unknown_retarget_status_is_rejected_by_config_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            retarget_path = Path(tmp) / "umi_retarget.yaml"
+            _write_retarget_config(retarget_path, status="unknown")
+
+            with self.assertRaisesRegex(ValueError, "status must be one of"):
+                load_umi_retarget_config(retarget_path)
 
     def test_import_does_not_import_live_hardware_sdk_modules(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

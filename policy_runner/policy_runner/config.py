@@ -55,9 +55,9 @@ class SafetyConfig:
         invalid_arms = [arm for arm in self.selected_arms if arm not in {"left", "right"}]
         if invalid_arms:
             raise ValueError("safety.selected_arms entries must be left or right")
-        if self.retarget_status not in {"missing", "configured_estimate", "measured", "validated"}:
+        if self.retarget_status not in {"missing", "configured_estimate", "measured", "accepted"}:
             raise ValueError(
-                "safety.retarget_status must be missing, configured_estimate, measured, or validated"
+                "safety.retarget_status must be missing, configured_estimate, measured, or accepted"
             )
         if self.collision_model_status not in {"missing", "configured_estimate", "measured", "validated"}:
             raise ValueError(

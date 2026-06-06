@@ -30,5 +30,6 @@ measured calibration artifact is accepted.
 `umi_retarget.example.yaml` is the template for offline UMI-to-stand retarget
 metadata. Its default `status: configured_estimate` is suitable for synthetic
 fixtures and training pipeline smoke tests only. Real policy rollout must remain
-blocked until a site-specific retarget config is measured and accepted by a
-future real-hardware task.
+blocked until a site-specific retarget config has `status: measured` or
+`status: accepted`. `accepted` means a measured transform was accepted by a
+documented acceptance artifact.

@@ -146,7 +146,7 @@ class PolicyRolloutModesTest(unittest.TestCase):
                 "safety": {"allow_real_motion": True},
             }
         )
-        with self.assertRaisesRegex(RolloutModeValidationError, "retarget_status=measured"):
+        with self.assertRaisesRegex(RolloutModeValidationError, "retarget_status=measured or accepted"):
             policy.validate_config(missing_gates, geometry_status=measured_geometry())
 
         allowed = config_from_mapping(
@@ -168,6 +168,26 @@ class PolicyRolloutModesTest(unittest.TestCase):
         )
 
         policy.validate_config(allowed, geometry_status=measured_geometry())
+
+        accepted = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "mode": "real",
+                "safety": {
+                    "allow_real_motion": True,
+                    "selected_arm": "both",
+                    "retarget_status": "accepted",
+                    "collision_model_status": "measured",
+                    "minimum_inter_arm_distance_m": 0.05,
+                    "workspace_envelope_status": "measured",
+                    "measured_retarget_available": True,
+                    "measured_collision_model_available": True,
+                    "measured_gripper_available": True,
+                },
+            }
+        )
+
+        policy.validate_config(accepted, geometry_status=measured_geometry())
 
     def test_rollout_summary_json_has_rollout_summary_and_counts(self) -> None:
         recorder = RolloutSummaryRecorder(

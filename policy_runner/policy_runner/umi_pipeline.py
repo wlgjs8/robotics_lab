@@ -18,7 +18,8 @@ UMI_CONVERSION_REPORT_SCHEMA = "robotics_lab.policy_runner.umi_conversion_report
 UMI_RETARGET_SCHEMA = "robotics_lab.umi_retarget.v1"
 ROBOTICS_LAB_EPISODE_SCHEMA = "robotics_lab.episode.v1"
 POSE_FORMAT_XYZW = "x,y,z,qx,qy,qz,qw"
-RETARGET_STATUSES = {"missing", "configured_estimate", "measured"}
+RETARGET_STATUSES = {"missing", "configured_estimate", "measured", "accepted"}
+PHYSICAL_ROLLOUT_RETARGET_STATUSES = {"measured", "accepted"}
 GRIPPER_UNITS = {"percent", "mm", "raw"}
 
 
@@ -44,6 +45,10 @@ class UmiRetargetConfig:
     @property
     def is_measured(self) -> bool:
         return self.status == "measured"
+
+    @property
+    def allows_physical_rollout(self) -> bool:
+        return self.status in PHYSICAL_ROLLOUT_RETARGET_STATUSES
 
 
 def import_umi_session(
@@ -180,6 +185,8 @@ def load_umi_retarget_config(path: str | Path) -> UmiRetargetConfig:
     if schema != UMI_RETARGET_SCHEMA:
         raise ValueError(f"{config_path}: unsupported UMI retarget schema: {schema}")
     status = str(data.get("status", "missing") or "missing")
+    if status not in RETARGET_STATUSES:
+        raise ValueError(f"{config_path}: status must be one of {sorted(RETARGET_STATUSES)}, got {status!r}")
     source_pose_frame = str(data.get("source_pose_frame", "") or "")
     target_pose_frame = str(data.get("target_pose_frame", "") or "")
     if not source_pose_frame:
@@ -433,9 +440,9 @@ def _check_retarget_requirement(
     if not require_measured_retarget:
         return
     status = retarget.status if retarget is not None else "missing"
-    if status != "measured":
+    if status not in PHYSICAL_ROLLOUT_RETARGET_STATUSES:
         raise ValueError(
-            "--require-measured-retarget requires retarget config status=measured; "
+            "--require-measured-retarget requires retarget config status=measured or accepted; "
             f"got {status}"
         )
 
@@ -938,16 +945,16 @@ def _summary_warnings(
         warnings.append(f"unsupported_pose_format: {pose_format}")
     if retarget_status not in RETARGET_STATUSES:
         warnings.append(f"unknown_retarget_status: {retarget_status}")
-    if retarget_status != "measured":
+    if retarget_status not in PHYSICAL_ROLLOUT_RETARGET_STATUSES:
         blockers.append(
-            "retarget_status_not_measured: real policy rollout requires "
-            f"measured UMI retarget metadata; retarget_status={retarget_status}"
+            "retarget_status_not_physical_rollout_ready: physical real policy rollout requires "
+            f"measured or accepted UMI retarget metadata; retarget_status={retarget_status}"
         )
     target_frame = retarget_config.target_pose_frame if retarget_config is not None else "stand"
-    if pose_frame != target_frame and retarget_status != "measured":
+    if pose_frame != target_frame and retarget_status not in PHYSICAL_ROLLOUT_RETARGET_STATUSES:
         blockers.append(
             "retarget_required: pose_frame "
-            f"{pose_frame} requires measured retarget to {target_frame} before real policy rollout; "
+            f"{pose_frame} requires measured or accepted retarget to {target_frame} before physical real policy rollout; "
             f"retarget_status={retarget_status}"
         )
     return warnings, blockers

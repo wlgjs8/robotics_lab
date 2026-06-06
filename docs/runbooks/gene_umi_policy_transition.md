@@ -14,7 +14,7 @@ Keep these lanes separate:
 | `sim_dryrun` | dropped by default | mock/simulator state and SafetyGate decisions |
 | `controller_sim` | rbpodo controller `pgmode` simulation only | controller reference with `physical_motion_expected=false` |
 | `real_readonly` / `real_supervised` | none | real state/camera observation and rollout summary |
-| `real_policy` | future only | blocked until measured retarget, collision, gripper, camera, and geometry gates pass |
+| `real_policy` | future only | blocked until measured or accepted retarget, collision, gripper, camera, and geometry gates pass |
 
 The GENE 26.5 / ACKON500 default remains a controller-simulation profile. It is
 not the physical-real default and must be reported with
@@ -27,7 +27,7 @@ of these gates before policy-runner may send motion:
 
 - `mode: real` and `safety.allow_real_motion: true`
 - measured geometry with `geometry_valid_for_real_policy: true`
-- `retarget_status: measured` and `measured_retarget_available: true`
+- `retarget_status: measured|accepted` and `measured_retarget_available: true`
 - `collision_model_status: measured|validated` and
   `measured_collision_model_available: true`
 - `workspace_envelope_status: measured|validated`

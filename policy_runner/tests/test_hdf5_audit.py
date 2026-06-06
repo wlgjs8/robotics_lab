@@ -182,9 +182,9 @@ class Hdf5AuditTest(unittest.TestCase):
                 {
                     "schema": "robotics_lab.policy_runner.dataset_manifest.v1",
                     "retarget": {
-                        "pose_frame": "steamvr_world",
-                        "target_frame": "stand",
-                        "transform_status": "measured",
+                        "source_pose_frame": "steamvr_world",
+                        "target_pose_frame": "stand",
+                        "status": "measured",
                     },
                 }
             )
@@ -194,7 +194,7 @@ class Hdf5AuditTest(unittest.TestCase):
 
             self.assertFalse(_contains(audited["deployment_blockers"], "retarget_required"))
 
-    def test_accepted_retarget_manifest_still_blocks_real_rollout(self) -> None:
+    def test_accepted_retarget_manifest_clears_frame_deployment_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "episode_001.hdf5"
             _write_pika_episode(path, pose_frame="steamvr_world")
@@ -202,9 +202,9 @@ class Hdf5AuditTest(unittest.TestCase):
                 {
                     "schema": "robotics_lab.policy_runner.dataset_manifest.v1",
                     "retarget": {
-                        "pose_frame": "steamvr_world",
-                        "target_frame": "stand",
-                        "transform_status": "accepted",
+                        "source_pose_frame": "steamvr_world",
+                        "target_pose_frame": "stand",
+                        "status": "accepted",
                     },
                 }
             )
@@ -212,7 +212,66 @@ class Hdf5AuditTest(unittest.TestCase):
             report = audit_hdf5_episodes(path, dataset_manifest=manifest)
             audited = report["episodes"][0]
 
-            self.assertTrue(_contains(audited["deployment_blockers"], "retarget_required"))
+            self.assertFalse(_contains(audited["deployment_blockers"], "retarget_required"))
+
+    def test_manifest_episode_list_limits_audit_to_listed_hdf5_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            keep = root / "episode_keep.hdf5"
+            extra = root / "episode_extra.hdf5"
+            _write_pika_episode(keep)
+            _write_pika_episode(extra)
+            (root / "checkpoints").mkdir()
+            with h5py.File(root / "checkpoints" / "checkpoint_001.hdf5", "w") as handle:
+                handle.attrs["not_episode"] = "checkpoint"
+            manifest = DatasetManifest.from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.dataset_manifest.v1",
+                    "episodes": ["episode_keep.hdf5"],
+                    "include_patterns": ["episode_*.hdf5"],
+                }
+            )
+
+            report = audit_hdf5_episodes(root, dataset_manifest=manifest)
+
+            self.assertEqual(report["aggregate"]["episode_count"], 1)
+            self.assertEqual(report["episodes"][0]["path"], "episode_keep.hdf5")
+
+    def test_manifest_include_patterns_limit_audit_to_matching_hdf5_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_pika_episode(root / "episode_keep.hdf5")
+            _write_pika_episode(root / "other_episode.hdf5")
+            with h5py.File(root / "audit.hdf5", "w") as handle:
+                handle.attrs["not_episode"] = "audit_output"
+            manifest = DatasetManifest.from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.dataset_manifest.v1",
+                    "include_patterns": ["episode_*.hdf5"],
+                }
+            )
+
+            report = audit_hdf5_episodes(root, dataset_manifest=manifest)
+
+            self.assertEqual(report["aggregate"]["episode_count"], 1)
+            self.assertEqual(report["episodes"][0]["path"], "episode_keep.hdf5")
+
+    def test_obvious_non_episode_hdf5_files_are_skipped_in_directory_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_pika_episode(root / "episode_keep.hdf5")
+            (root / "checkpoints").mkdir()
+            with h5py.File(root / "checkpoints" / "checkpoint_001.hdf5", "w") as handle:
+                handle.attrs["not_episode"] = "checkpoint"
+            with h5py.File(root / "audit.hdf5", "w") as handle:
+                handle.attrs["not_episode"] = "audit_output"
+            with h5py.File(root / "episode_tmp.tmp.hdf5", "w") as handle:
+                handle.attrs["not_episode"] = "temporary_conversion"
+
+            report = audit_hdf5_episodes(root)
+
+            self.assertEqual(report["aggregate"]["episode_count"], 1)
+            self.assertEqual(report["episodes"][0]["path"], "episode_keep.hdf5")
 
     def test_audit_fails_closed_on_empty_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

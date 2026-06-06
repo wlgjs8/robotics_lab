@@ -43,8 +43,12 @@ def audit_hdf5_episodes(
     if side not in {"left", "right"}:
         raise ValueError("single_arm_side must be left or right")
 
-    root = Path(episodes_dir)
-    paths = discover_hdf5_episodes(root)
+    root = Path(manifest.resolved_episodes_dir(episodes_dir) if manifest is not None else episodes_dir)
+    paths = discover_hdf5_episodes(
+        root,
+        episode_paths=list(manifest.episode_paths) if manifest is not None else None,
+        include_patterns=list(manifest.include_patterns) if manifest is not None else None,
+    )
     if not paths:
         raise ValueError(f"no HDF5 episodes found under {root}")
 
@@ -438,15 +442,15 @@ def _check_pose_metadata(
         _append(warnings, f"unknown_pose_frame: {pose_frame}")
 
     if pose_frame != "stand":
-        if manifest is not None and manifest.retarget_is_measured_for(pose_frame, "stand"):
+        if manifest is not None and manifest.retarget_allows_physical_rollout_for(pose_frame, "stand"):
             return
-        transform_status = "missing"
+        status = "missing"
         if manifest is not None and manifest.retarget:
-            transform_status = str(manifest.retarget.get("transform_status", "missing") or "missing")
+            status = str(manifest.retarget.get("status", "missing") or "missing")
         message = (
             "retarget_required: pose_frame "
-            f"{pose_frame} must have a measured retarget transform to stand "
-            f"before real policy rollout; transform_status={transform_status}"
+            f"{pose_frame} must have measured or accepted retarget metadata to stand "
+            f"before physical real policy rollout; status={status}"
         )
         _append(warnings, f"deployment_blocker: {message}")
         _append(blockers, message)

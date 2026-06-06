@@ -1,5 +1,5 @@
 schema: robotics_lab.umi_retarget.v1
-status: configured_estimate   # measured required for real policy rollout
+status: configured_estimate   # measured or accepted required for physical real policy rollout
 source_pose_frame: steamvr_world
 target_pose_frame: stand
 left:
