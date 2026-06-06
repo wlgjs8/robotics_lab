@@ -15,6 +15,26 @@ else
 fi
 cd "$REPO_ROOT"
 
+run_with_timeout() {
+  local seconds="$1"
+  shift
+
+  local timeout_cmd=""
+  if command -v timeout >/dev/null 2>&1 && timeout --version 2>/dev/null | grep -qi "GNU coreutils"; then
+    timeout_cmd="timeout"
+  elif command -v gtimeout >/dev/null 2>&1 && gtimeout --version 2>/dev/null | grep -qi "GNU coreutils"; then
+    timeout_cmd="gtimeout"
+  fi
+
+  if [[ -z "${timeout_cmd}" ]]; then
+    echo "codex_gate: warning: GNU timeout unavailable; running without ${seconds}s limit: $*" >&2
+    "$@"
+    return
+  fi
+
+  "${timeout_cmd}" "${seconds}s" "$@"
+}
+
 cmake_prefix_args() {
   if [[ -n "${CMAKE_PREFIX_PATH:-}" ]]; then
     printf '%s\n' "-DCMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}"
@@ -248,9 +268,23 @@ run_required_policy_runner_tests() {
   PYTHONPATH=policy_runner python3 -m unittest discover -s policy_runner/tests -p "${pattern}"
 }
 
+run_required_policy_runner_tests_with_timeout() {
+  local seconds="$1"
+  local pattern="$2"
+  if ! find policy_runner/tests -maxdepth 1 -name "${pattern}" -print -quit | grep -q .; then
+    echo "ERROR: required policy_runner tests not present: ${pattern}" >&2
+    return 1
+  fi
+  run_with_timeout "${seconds}" env PYTHONPATH=policy_runner python3 -m unittest discover -s policy_runner/tests -p "${pattern}"
+}
+
 run_policy_runner_help() {
   local subcommand="$1"
   PYTHONPATH=policy_runner python3 -m policy_runner "${subcommand}" --help >/dev/null
+}
+
+run_tiny_cnn_ml_preflight_with_timeout() {
+  run_with_timeout 120 env PYTHONPATH=policy_runner python3 -m policy_runner ml-preflight --vision-backbone tiny_cnn
 }
 
 run_required_make_dry_run() {
@@ -1745,8 +1779,8 @@ run_gene_umi_flow_training_gate() {
   run_policy_runner_help flow-train
   run_policy_runner_help ml-preflight
   run_required_policy_runner_tests 'test_flow_matching.py'
-  run_required_policy_runner_tests 'test_flow_training*.py'
-  PYTHONPATH=policy_runner python3 -m policy_runner ml-preflight --vision-backbone tiny_cnn
+  run_required_policy_runner_tests_with_timeout 120 'test_flow_training*.py'
+  run_tiny_cnn_ml_preflight_with_timeout
   grep_existing "tiny_cnn|dataset-manifest|write-eval-report|flow_eval_summary" \
     policy_runner/policy_runner policy_runner/tests docs README.md
 }
@@ -1958,7 +1992,7 @@ run_ml_preflight_gate_stability_gate() {
   run_gene_umi_flow_training_gate
   run_policy_runner_help ml-preflight
   run_policy_runner_help flow-train
-  PYTHONPATH=policy_runner python3 -m policy_runner ml-preflight --vision-backbone tiny_cnn
+  run_tiny_cnn_ml_preflight_with_timeout
   grep_existing "tiny_cnn" policy_runner/policy_runner policy_runner/tests docs README.md
   grep_existing "seed|deterministic" \
     policy_runner/policy_runner policy_runner/tests docs README.md

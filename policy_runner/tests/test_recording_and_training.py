@@ -4,6 +4,7 @@ import contextlib
 import json
 import tempfile
 import unittest
+import warnings
 from io import StringIO
 from pathlib import Path
 
@@ -132,17 +133,27 @@ class RecordingAndTrainingTest(unittest.TestCase):
             self._write_hdf5_hashes(Path(tmp) / "ep_001.hdf5", cartesian, kinematics)
 
             checkpoint = Path(tmp) / "bc.pt"
-            train_behavior_cloning(
-                episodes_dir=tmp,
-                checkpoint_path=checkpoint,
-                epochs=1,
-                batch_size=1,
-            )
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                train_behavior_cloning(
+                    episodes_dir=tmp,
+                    checkpoint_path=checkpoint,
+                    epochs=1,
+                    batch_size=1,
+                )
 
             saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
+            warning_messages = [str(warning.message) for warning in caught]
+            self.assertFalse(
+                any("std()" in message or "degrees of freedom" in message for message in warning_messages),
+                warning_messages,
+            )
             self.assertEqual(saved["schema"], "robotics_lab.policy_runner.bc_checkpoint.v2")
             self.assertEqual(saved["cartesian_control_hash"], _hash_canonical_json(cartesian))
             self.assertEqual(saved["kinematics_hash"], _hash_canonical_json(kinematics))
+            obs_std = torch.tensor(saved["obs_std"])
+            self.assertTrue(bool(torch.isfinite(obs_std).all()))
+            self.assertTrue(bool(torch.allclose(obs_std, torch.full_like(obs_std, 1e-6))))
 
     @unittest.skipIf(h5py is None or torch is None, "training extras not installed")
     def test_training_warns_on_hdf5_config_hash_mismatch(self) -> None:

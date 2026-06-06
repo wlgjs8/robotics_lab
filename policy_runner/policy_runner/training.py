@@ -119,7 +119,7 @@ def train_behavior_cloning(
     x = torch.tensor(obs, dtype=torch.float32)
     y = torch.tensor(act, dtype=torch.float32)
     obs_mean = x.mean(dim=0)
-    obs_std = x.std(dim=0).clamp_min(1e-6)
+    obs_std = x.std(dim=0, unbiased=False).clamp_min(1e-6)
     x = (x - obs_mean) / obs_std
 
     dataset = TensorDataset(x, y)

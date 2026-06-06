@@ -3,9 +3,12 @@ from __future__ import annotations
 import importlib
 import io
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     from policy_runner.ml_preflight import run_ml_preflight
@@ -39,12 +42,41 @@ class MlPreflightTest(unittest.TestCase):
         self.assertIn("torch: OK", stdout.getvalue())
         self.assertIn("backbone_forward: OK backbone=tiny_cnn", stdout.getvalue())
 
-    @unittest.skipIf(run_ml_preflight is None or torch is None, "torch is not installed")
+    def test_ml_preflight_tiny_cnn_skips_broken_torchvision_import(self) -> None:
+        if run_ml_preflight is None:
+            self.skipTest("ml preflight is not importable")
+        calls: list[str] = []
+
+        def broken_torchvision_import(module_name: str):
+            calls.append(module_name)
+            if module_name == "torchvision":
+                raise RuntimeError("operator torchvision::nms does not exist")
+            return self._fake_ml_module(module_name)
+
+        stdout = io.StringIO()
+
+        with mock.patch.dict(sys.modules, {"policy_runner.flow_model": self._fake_flow_model_module()}):
+            rc = run_ml_preflight(
+                vision_backbone="tiny_cnn",
+                stdout=stdout,
+                import_module=broken_torchvision_import,
+            )
+
+        output = stdout.getvalue()
+        self.assertEqual(rc, 0, output)
+        self.assertNotIn("torchvision", calls)
+        self.assertIn("torchvision: SKIPPED not required for tiny_cnn", output)
+        self.assertIn("backbone_forward: OK backbone=tiny_cnn", output)
+        self.assertNotIn("operator torchvision::nms does not exist", output)
+
     def test_ml_preflight_resnet_reports_torchvision_failure_when_broken(self) -> None:
+        if run_ml_preflight is None:
+            self.skipTest("ml preflight is not importable")
+
         def broken_torchvision_import(module_name: str):
             if module_name == "torchvision":
                 raise RuntimeError("operator torchvision::nms does not exist")
-            return importlib.import_module(module_name)
+            return self._fake_ml_module(module_name)
 
         stdout = io.StringIO()
 
@@ -58,6 +90,18 @@ class MlPreflightTest(unittest.TestCase):
         self.assertEqual(rc, 1, output)
         self.assertIn("torchvision: ERROR RuntimeError: operator torchvision::nms does not exist", output)
         self.assertIn("requested_backbone_error: torchvision import failed", output)
+
+    def _fake_ml_module(self, module_name: str):
+        if module_name == "torch":
+            return _FakeTorchModule()
+        if module_name in {"h5py", "PIL"}:
+            return types.SimpleNamespace(__version__="fake")
+        return importlib.import_module(module_name)
+
+    def _fake_flow_model_module(self):
+        module = types.ModuleType("policy_runner.flow_model")
+        module.VisionBackbone = _FakeVisionBackbone
+        return module
 
 
 @unittest.skipIf(
@@ -176,6 +220,40 @@ class FlowTrainingTest(unittest.TestCase):
             self.assertEqual(len(summary["checkpoint"]["sha256"]), 64)
             self.assertIn("# Flow Evaluation Report", report)
             self.assertIn("chunk_endpoint_error", report)
+
+
+class _FakeNoGrad:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeTorchModule:
+    __version__ = "fake"
+    cuda = types.SimpleNamespace(is_available=lambda: False)
+
+    @staticmethod
+    def zeros(*_shape):
+        return object()
+
+    @staticmethod
+    def no_grad():
+        return _FakeNoGrad()
+
+
+class _FakeVisionBackbone:
+    def __init__(self, name: str, output_dim: int, *, frozen: bool = True):
+        self.name = name
+        self.output_dim = output_dim
+        self.frozen = frozen
+
+    def eval(self):
+        return None
+
+    def __call__(self, _images):
+        return types.SimpleNamespace(shape=(2, self.output_dim))
 
 
 def _write_pika_episode(

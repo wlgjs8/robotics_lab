@@ -8,6 +8,7 @@ from typing import Any, Callable, TextIO
 
 
 REQUESTED_BACKBONES = ("tiny_cnn", "resnet18", "resnet50", "dinov3")
+TORCHVISION_BACKBONES = {"resnet18", "resnet50"}
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,8 @@ class ImportStatus:
     version: str
     error: str
     traceback: str
+    skipped: bool = False
+    skip_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -25,6 +28,8 @@ class ImportStatus:
             "version": self.version,
             "error": self.error,
             "traceback": self.traceback,
+            "skipped": self.skipped,
+            "skip_reason": self.skip_reason,
         }
 
 
@@ -50,7 +55,13 @@ def check_ml_preflight(
 ) -> dict[str, Any]:
     backbone = str(vision_backbone)
     torch_status, torch_module = _import_status("torch", import_module=import_module)
-    torchvision_status, _ = _import_status("torchvision", import_module=import_module)
+    if backbone in TORCHVISION_BACKBONES:
+        torchvision_status, _ = _import_status("torchvision", import_module=import_module)
+    else:
+        torchvision_status = _skipped_import_status(
+            "torchvision",
+            reason=f"not required for {backbone}",
+        )
     h5py_status, _ = _import_status("h5py", import_module=import_module)
     pillow_status, _ = _import_status("PIL", import_module=import_module)
 
@@ -152,7 +163,7 @@ def _check_backbone_forward(
             "error": "torch import failed",
             "output_shape": [],
         }
-    if backbone in {"resnet18", "resnet50"} and not torchvision_status.ok:
+    if backbone in TORCHVISION_BACKBONES and not torchvision_status.ok:
         return {
             "ok": False,
             "backbone": backbone,
@@ -185,7 +196,21 @@ def _check_backbone_forward(
     }
 
 
+def _skipped_import_status(module_name: str, *, reason: str) -> ImportStatus:
+    return ImportStatus(
+        name=module_name,
+        ok=True,
+        version="",
+        error="",
+        traceback="",
+        skipped=True,
+        skip_reason=reason,
+    )
+
+
 def _format_import(label: str, status: dict[str, Any]) -> str:
+    if status.get("skipped"):
+        return f"{label}: SKIPPED {status.get('skip_reason', '')}".rstrip()
     if status.get("ok"):
         version = str(status.get("version") or "unknown")
         return f"{label}: OK version={version}"
