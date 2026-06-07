@@ -46,7 +46,27 @@ Already relaxed (exist): `allow_controller_simulation_motion`, `..._diagnostics_
 - Missing controls: `TcpTwistLocal/Stand`, `JointVelocity`, gripper (gripper deferred to C). Command builders in `rb_gui/rb_servo_gui/command_client.py`.
 - Real mode block to PRESERVE: `safety.py:174-175`.
 
-## 3. Stage A — server: unblock simulation-only Cartesian for controller-sim
+## 2b. CRITICAL refinement — measure before editing
+
+Static analysis is contradictory and must be grounded empirically. `isCartesianVelocityServoMode`
+(`dual_arm_servo_loop.cpp:41-47`) ALREADY includes `TcpLinearMove`, `TcpCircleMove`, `TcpCircleTrack`,
+`TcpTwistStand`, `TcpTwistLocal`. And `cartesianComputationRunModeForArm` (`:387-398`, called at
+`:2954-2956`) maps the **effective** run_mode Real→Simulation for those modes when
+`controllerSimulationCartesianGateOpen` is true. So the per-primitive `run_mode != Simulation` gates in
+`cartesian_servo_controller.cpp:414/673/835` likely RECEIVE the mapped (Simulation) run_mode in
+controller-sim and may already PASS. The static inventory (which read raw `run_mode`) probably overstated
+the blockers.
+
+**Stage A.0 (do first): empirical capability probe.** With `vm_dual_cartesian.yaml` + full controller-sim
+Cartesian env, send EACH Cartesian primitive (TcpPoseTarget, TcpDelta{Local,Stand}, TcpLinearMove,
+TcpTwistLocal/Stand, TcpCircleMove) and record accept/reject + exact reason + whether q_ref/TCP tracks.
+Only then fix the genuinely-blocked ones. Candidate genuine gaps to confirm: (i) `cartesian_controller.cpp:78`
+TcpLinearMove gate IF that controller path is used with RAW run_mode (vs the servo controller that gets the
+mapped run_mode); (ii) `circle_move.allow_in_simulation` config requirement for TcpCircleMove; (iii) rb_gui
+backend block (Stage B). Sending Cartesian via policy_runner needs geometry config (requires_geometry) —
+set that up, or send raw command JSON.
+
+## 3. Stage A — server: unblock simulation-only Cartesian for controller-sim (only what A.0 proves blocked)
 
 Introduce ONE shared predicate used at the three+ gate sites:
 
