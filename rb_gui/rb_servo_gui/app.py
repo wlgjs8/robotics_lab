@@ -1195,6 +1195,7 @@ def main(argv: list[str] | None = None) -> None:
     observed = normalize_observed_mode_backend(observed_mode_raw, observed_backend_raw)
     ops_available = os.environ.get("RB_GUI_OPS_AVAILABLE", "0") == "1"
     enable_tcp_pose_commands = os.environ.get("RB_GUI_ENABLE_TCP_POSE_COMMANDS", "0") == "1"
+    enable_controller_sim_cartesian = os.environ.get("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", "0") == "1"
     init_left_joints = _env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG)
     init_right_joints = _env_joint6("RB_GUI_INIT_RIGHT_JOINTS", _DEFAULT_INIT_RIGHT_JOINTS_DEG)
     init_motion_timeout_sec = _env_float("RB_GUI_INIT_MOTION_TIMEOUT_SEC", 10.0)
@@ -1219,6 +1220,7 @@ def main(argv: list[str] | None = None) -> None:
         sim_readiness=_sim_readiness_from_env(observed),
         ops_available=ops_available,
         enable_tcp_pose_commands=enable_tcp_pose_commands,
+        enable_controller_sim_cartesian=enable_controller_sim_cartesian,
         init_left_joint_deg=init_left_joints,
         init_right_joint_deg=init_right_joints,
         init_motion_timeout_sec=init_motion_timeout_sec,

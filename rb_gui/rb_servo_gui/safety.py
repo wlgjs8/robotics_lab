@@ -82,6 +82,7 @@ class OperatorSafety:
         sim_readiness: Readiness | None = None,
         ops_available: bool = False,
         enable_tcp_pose_commands: bool = False,
+        enable_controller_sim_cartesian: bool = False,
         max_jog_step_deg: float = 2.0,
         max_tcp_linear_step_m: float = 0.005,
         max_tcp_angular_step_rad: float = 0.02,
@@ -101,6 +102,10 @@ class OperatorSafety:
         self.sim_readiness = sim_readiness or Readiness(no_go_reason="simulator/rbpodo readiness not proven")
         self.ops_available = ops_available
         self.enable_tcp_pose_commands = bool(enable_tcp_pose_commands)
+        # pgmode simulation opt-in: allow TCP/Cartesian commands against an rbpodo
+        # controller-simulation backend (operation_mode=simulation). Real mode stays
+        # status-only regardless of this flag.
+        self.enable_controller_sim_cartesian = bool(enable_controller_sim_cartesian)
         self.max_jog_step_deg = float(max_jog_step_deg)
         self.max_tcp_linear_step_m = float(max_tcp_linear_step_m)
         self.max_tcp_angular_step_rad = float(max_tcp_angular_step_rad)
@@ -200,7 +205,15 @@ class OperatorSafety:
         if self.observed_server_mode != "simulation":
             return "TCP pose command requires observed simulation mode"
         if self.observed_backend != "simulator":
-            return "TCP pose command requires simulator backend"
+            # pgmode simulation: an rbpodo controller-simulation backend
+            # (operation_mode=simulation) may run TCP/Cartesian commands when the
+            # operator opts in. Real motion is impossible by construction here.
+            if not (self.observed_backend == "rbpodo" and self.enable_controller_sim_cartesian):
+                return (
+                    "TCP pose command requires simulator backend, or an rbpodo "
+                    "controller-simulation backend with "
+                    "RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1"
+                )
         reason = self.blocked_reason("TcpDeltaStand")
         if reason:
             return reason
