@@ -50,16 +50,12 @@ if pgrep -f 'rb_servo[_]server --config' >/dev/null 2>&1; then
     echo "pgmode_sim_up: rb_servo_server already running"
 else
     echo "pgmode_sim_up: starting rb_servo_server (sudo) with $CFG"
+    # C-phase-1: the controller-simulation carve-out is config-derived now
+    # (operation_mode=simulation + servo.allow_controller_simulation_* flags).
+    # Only the real-connection tripwire env remains (retired in C-phase-2).
     nohup sudo env \
         RB_ALLOW_REAL_ROBOT="${RB_ALLOW_REAL_ROBOT:-1}" \
         RB_ALLOW_REAL_MOTION="${RB_ALLOW_REAL_MOTION:-1}" \
-        RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION="${RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION:-1}" \
-        RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN="${RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN:-1}" \
-        RB_RBPODO_PGMODE_SIMULATION_CONFIRMED="${RB_RBPODO_PGMODE_SIMULATION_CONFIRMED:-1}" \
-        RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM="${RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM:-1}" \
-        RB_ALLOW_RBPODO_NOT_ACTIVATED_CONTROLLER_SIM="${RB_ALLOW_RBPODO_NOT_ACTIVATED_CONTROLLER_SIM:-1}" \
-        RB_ALLOW_RBPODO_ACK_DISABLED_MOTION="${RB_ALLOW_RBPODO_ACK_DISABLED_MOTION:-1}" \
-        RB_ALLOW_RBPODO_ASYNC_STREAMING="${RB_ALLOW_RBPODO_ASYNC_STREAMING:-1}" \
         "$BIN" --config "$CFG" > "$SERVER_LOG" 2>&1 &
     wait_for "$SERVER_LOG" "CommandServer listening" "rb_servo_server"
 fi

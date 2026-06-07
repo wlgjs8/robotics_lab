@@ -49,6 +49,8 @@ struct BackendConfig {
     // rbpodo-only. When true, Cobot::disable_waiting_ack() makes command calls
     // return after socket send instead of waiting for controller ACK.
     bool disable_waiting_ack = false;
+    bool allow_controller_simulation_diagnostics_suspect = false;
+    bool allow_controller_simulation_init_error = false;
 };
 
 struct ArmMountConfig {

@@ -868,39 +868,6 @@ void validateConfig(const DualArmConfig& cfg) {
                 "to use run_mode=real and operation_mode=simulation"
             );
         }
-        if (!envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION")) {
-            throw std::runtime_error(
-                "Refusing rbpodo controller-simulation motion without "
-                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1."
-            );
-        }
-        if (!envIsOne("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")) {
-            throw std::runtime_error(
-                "Refusing rbpodo controller-simulation motion before pgmode simulation "
-                "is confirmed by the acceptance tool."
-            );
-        }
-        if (cfg.servo.allow_controller_simulation_diagnostics_suspect &&
-            !envIsOne("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM")) {
-            throw std::runtime_error(
-                "Refusing rbpodo diagnostics-suspect controller-simulation override without "
-                "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1."
-            );
-        }
-        if (cfg.servo.allow_controller_simulation_init_error &&
-            !envIsOne("RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM")) {
-            throw std::runtime_error(
-                "Refusing rbpodo init-error controller-simulation override without "
-                "RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM=1."
-            );
-        }
-        if (cfg.servo.allow_controller_simulation_not_activated &&
-            !envIsOne("RB_ALLOW_RBPODO_NOT_ACTIVATED_CONTROLLER_SIM")) {
-            throw std::runtime_error(
-                "Refusing rbpodo not-activated controller-simulation override without "
-                "RB_ALLOW_RBPODO_NOT_ACTIVATED_CONTROLLER_SIM=1."
-            );
-        }
     }
     const RbpodoAsyncStreamingConfig& async_streaming = cfg.servo.rbpodo_async_streaming;
     if (!async_streaming.enable && async_streaming.mode != RbpodoAsyncStreamingMode::Disabled) {
@@ -927,25 +894,11 @@ void validateConfig(const DualArmConfig& cfg) {
                 "to use run_mode=real and operation_mode=simulation"
             );
         }
-        if (!envIsOne("RB_ALLOW_RBPODO_ASYNC_STREAMING") ||
-            !envIsOne("RB_ALLOW_REAL_ROBOT") ||
-            !envIsOne("RB_ALLOW_REAL_MOTION") ||
-            !envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") ||
-            !envIsOne("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")) {
+        if (!envIsOne("RB_ALLOW_REAL_ROBOT") ||
+            !envIsOne("RB_ALLOW_REAL_MOTION")) {
             throw std::runtime_error(
-                "Refusing rbpodo async streaming without RB_ALLOW_RBPODO_ASYNC_STREAMING=1, "
-                "RB_ALLOW_REAL_ROBOT=1, RB_ALLOW_REAL_MOTION=1, "
-                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1, and "
-                "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1."
-            );
-        }
-        if (async_streaming.mode == RbpodoAsyncStreamingMode::SocketSendSupervised &&
-            !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION") &&
-            !envIsOne("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING")) {
-            throw std::runtime_error(
-                "Refusing rbpodo socket_send_supervised async streaming without "
-                "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 or "
-                "RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1."
+                "Refusing rbpodo async streaming without "
+                "RB_ALLOW_REAL_ROBOT=1 and RB_ALLOW_REAL_MOTION=1."
             );
         }
         if (async_streaming.mode == RbpodoAsyncStreamingMode::SocketSendSupervised &&
@@ -1001,16 +954,10 @@ void validateConfig(const DualArmConfig& cfg) {
             );
         }
         if (!envIsOne("RB_ALLOW_REAL_ROBOT") ||
-            !envIsOne("RB_ALLOW_REAL_MOTION") ||
-            !envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") ||
-            !envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN") ||
-            !envIsOne("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")) {
+            !envIsOne("RB_ALLOW_REAL_MOTION")) {
             throw std::runtime_error(
                 "Refusing rbpodo controller-simulation Cartesian control without "
-                "RB_ALLOW_REAL_ROBOT=1, RB_ALLOW_REAL_MOTION=1, "
-                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1, "
-                "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1, and "
-                "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1."
+                "RB_ALLOW_REAL_ROBOT=1 and RB_ALLOW_REAL_MOTION=1."
             );
         }
     }
@@ -1164,21 +1111,14 @@ void validateConfig(const DualArmConfig& cfg) {
             }
             warn(message + "; send_servo_commands=false so this is a warning");
         }
-        const bool async_socket_send_supervised =
-            cfg.servo.rbpodo_async_streaming.enable &&
-            cfg.servo.rbpodo_async_streaming.mode == RbpodoAsyncStreamingMode::SocketSendSupervised;
-        const bool ack_disabled_motion_gate =
-            envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION") ||
-            (async_socket_send_supervised && envIsOne("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING"));
         if (backend.run_mode == RunMode::Real &&
+            !isRbpodoControllerSimulationBackend(backend) &&
             backend.disable_waiting_ack &&
             cfg.servo.send_servo_commands &&
-            !ack_disabled_motion_gate) {
+            !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")) {
             throw std::runtime_error(
                 "Refusing rbpodo real motion with disable_waiting_ack=true. "
-                "Set RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 only after explicit ACK-off acceptance, "
-                "or RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1 for async socket-send-only "
-                "controller-simulation streaming."
+                "Set RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 only after explicit ACK-off acceptance."
             );
         }
     };
@@ -1418,6 +1358,14 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             );
         }
     }
+    cfg.left_robot.allow_controller_simulation_diagnostics_suspect =
+        cfg.servo.allow_controller_simulation_diagnostics_suspect;
+    cfg.right_robot.allow_controller_simulation_diagnostics_suspect =
+        cfg.servo.allow_controller_simulation_diagnostics_suspect;
+    cfg.left_robot.allow_controller_simulation_init_error =
+        cfg.servo.allow_controller_simulation_init_error;
+    cfg.right_robot.allow_controller_simulation_init_error =
+        cfg.servo.allow_controller_simulation_init_error;
 
     if (has(root, "safety")) {
         const YAML::Node sec = root["safety"];

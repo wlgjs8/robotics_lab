@@ -3159,31 +3159,23 @@ bool testWorkerIoModeClassifiesStaleStateExplicitly() {
     return true;
 }
 
-bool testRbpodoAsyncConfigRejectsPhysicalRealAndMissingEnv() {
+bool testRbpodoAsyncConfigRejectsPhysicalRealAndMissingRealEnv() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
-    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
-    EnvVarGuard allow_ack_disabled("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION");
     allow_real.set("1");
-    allow_motion.set("1");
-    allow_controller_sim.set("1");
-    pgmode_confirmed.set("1");
-    allow_async.unset();
-    allow_ack_disabled.unset();
+    allow_motion.unset();
 
-    const std::string missing_env_path = writeRbpodoAsyncConfig("missing-env");
+    const std::string missing_env_path = writeRbpodoAsyncConfig("missing-real-env");
     bool missing_env_rejected = false;
     try {
         (void)rb_servo::loadConfigFromYaml(missing_env_path);
     } catch (const std::exception& exc) {
-        missing_env_rejected = contains(exc.what(), "RB_ALLOW_RBPODO_ASYNC_STREAMING");
+        missing_env_rejected = contains(exc.what(), "RB_ALLOW_REAL_MOTION");
     }
     ::unlink(missing_env_path.c_str());
     RB_CHECK(missing_env_rejected);
 
-    allow_async.set("1");
+    allow_motion.set("1");
     const std::string operation_real_path =
         writeRbpodoAsyncConfig("operation-real", "real", "simulation");
     bool physical_real_rejected = false;
@@ -3200,14 +3192,8 @@ bool testRbpodoAsyncConfigRejectsPhysicalRealAndMissingEnv() {
 bool testRbpodoAsyncServoLoopDoesNotBlockOnSlowAckWorker() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
-    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    pgmode_confirmed.set("1");
-    allow_async.set("1");
 
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
@@ -3278,14 +3264,8 @@ bool testRbpodoAsyncServoLoopDoesNotBlockOnSlowAckWorker() {
 bool testRbpodoAsyncSupervisionFaultLatchesServoLoop() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
-    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    pgmode_confirmed.set("1");
-    allow_async.set("1");
 
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
@@ -3332,16 +3312,8 @@ bool testRbpodoAsyncSupervisionFaultLatchesServoLoop() {
 bool testRbpodoAsyncReferenceSupervisionQRefUpdatesOk() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
-    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
-    EnvVarGuard allow_socket_send("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING");
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    pgmode_confirmed.set("1");
-    allow_async.set("1");
-    allow_socket_send.set("1");
 
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
@@ -3405,16 +3377,8 @@ bool testRbpodoAsyncReferenceSupervisionQRefUpdatesOk() {
 bool testRbpodoAsyncReferenceSupervisionQRefStopsFaultsSocketSend() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
-    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
-    EnvVarGuard allow_socket_send("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING");
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    pgmode_confirmed.set("1");
-    allow_async.set("1");
-    allow_socket_send.set("1");
 
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
@@ -3480,16 +3444,8 @@ bool testRbpodoAsyncReferenceSupervisionQRefStopsFaultsSocketSend() {
 bool testRbpodoAsyncReferenceSupervisionTargetErrorFaultsSocketSend() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
-    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
-    EnvVarGuard allow_socket_send("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING");
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    pgmode_confirmed.set("1");
-    allow_async.set("1");
-    allow_socket_send.set("1");
 
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
@@ -3568,16 +3524,8 @@ bool testRbpodoAsyncReferenceSupervisionTargetErrorFaultsSocketSend() {
 bool testRbpodoAsyncReferenceSupervisionInvalidQRefFaults() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
-    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
-    EnvVarGuard allow_socket_send("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING");
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    pgmode_confirmed.set("1");
-    allow_async.set("1");
-    allow_socket_send.set("1");
 
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
@@ -4356,15 +4304,11 @@ bool testMotionStartupRejectsFaultedState() {
     return true;
 }
 
-bool testRbpodoControllerSimulationMotionRequiresExplicitGate() {
+bool testRbpodoControllerSimulationMotionRequiresConfigAndRealEnvGates() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
     allow_real.unset();
     allow_motion.unset();
-    allow_controller_sim.unset();
-    pgmode_confirmed.unset();
 
     rb_servo::CommandBuffer buffer;
     const rb_servo::JointArray initial = joints(0.0);
@@ -4382,8 +4326,6 @@ bool testRbpodoControllerSimulationMotionRequiresExplicitGate() {
     }
 
     allow_real.set("1");
-    allow_motion.set("1");
-    allow_controller_sim.set("1");
     {
         rb_servo::DualArmServoLoop loop(
             std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
@@ -4395,7 +4337,20 @@ bool testRbpodoControllerSimulationMotionRequiresExplicitGate() {
         RB_CHECK(!loop.start());
     }
 
-    pgmode_confirmed.set("1");
+    allow_motion.set("1");
+    rb_servo::DualArmConfig config_closed_cfg = cfg;
+    config_closed_cfg.servo.allow_controller_simulation_motion = false;
+    {
+        rb_servo::DualArmServoLoop loop(
+            std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+            std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+            config_closed_cfg,
+            &buffer,
+            nullptr
+        );
+        RB_CHECK(!loop.start());
+    }
+
     rb_servo::DualArmServoLoop loop(
         std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
         std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
@@ -4413,14 +4368,8 @@ bool testRbpodoControllerSimulationMotionRequiresExplicitGate() {
 bool testRbpodoControllerSimulationDiagnosticOverrideIsNarrow() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard allow_diag("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    allow_diag.unset();
-    pgmode_confirmed.set("1");
 
     const rb_servo::JointArray initial = joints(0.0);
     const auto diagnostic_backend = [&]() {
@@ -4449,18 +4398,6 @@ bool testRbpodoControllerSimulationDiagnosticOverrideIsNarrow() {
     }
 
     cfg.servo.allow_controller_simulation_diagnostics_suspect = true;
-    {
-        rb_servo::DualArmServoLoop loop(
-            diagnostic_backend(),
-            std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
-            cfg,
-            &buffer,
-            nullptr
-        );
-        RB_CHECK(!loop.start());
-    }
-
-    allow_diag.set("1");
     auto left = diagnostic_backend();
     TestBackend* left_raw = left.get();
     rb_servo::DualArmServoLoop loop(
@@ -4495,16 +4432,8 @@ bool testRbpodoControllerSimulationDiagnosticOverrideIsNarrow() {
 bool testRbpodoControllerSimulationNotActivatedDiagnosticOverrideRequiresGate() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard allow_diag("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
-    EnvVarGuard allow_not_activated("RB_ALLOW_RBPODO_NOT_ACTIVATED_CONTROLLER_SIM");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    allow_diag.set("1");
-    allow_not_activated.unset();
-    pgmode_confirmed.set("1");
 
     const rb_servo::JointArray initial = joints(0.0);
     const auto not_activated_diagnostic_backend = [&](rb_servo::ArmId arm) {
@@ -4536,18 +4465,6 @@ bool testRbpodoControllerSimulationNotActivatedDiagnosticOverrideRequiresGate() 
     }
 
     cfg.servo.allow_controller_simulation_not_activated = true;
-    {
-        rb_servo::DualArmServoLoop loop(
-            not_activated_diagnostic_backend(rb_servo::ArmId::Left),
-            not_activated_diagnostic_backend(rb_servo::ArmId::Right),
-            cfg,
-            &buffer,
-            nullptr
-        );
-        RB_CHECK(!loop.start());
-    }
-
-    allow_not_activated.set("1");
     auto left = not_activated_diagnostic_backend(rb_servo::ArmId::Left);
     auto right = not_activated_diagnostic_backend(rb_servo::ArmId::Right);
     TestBackend* left_raw = left.get();
@@ -4628,14 +4545,8 @@ bool testRbpodoControllerSimulationNotActivatedDiagnosticOverrideRequiresGate() 
 bool testRbpodoControllerSimulationDiagnosticOverrideRejectsHardFaults() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard allow_diag("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    allow_diag.set("1");
-    pgmode_confirmed.set("1");
 
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
@@ -4725,14 +4636,8 @@ bool testRbpodoControllerSimulationDiagnosticOverrideRejectsHardFaults() {
 bool testRbpodoControllerSimulationInitErrorOverrideIsNarrow() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard allow_init_error("RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    allow_init_error.unset();
-    pgmode_confirmed.set("1");
 
     const rb_servo::JointArray initial = joints(0.0);
     const auto init_error_backend = [&](rb_servo::ArmId arm) {
@@ -4762,18 +4667,6 @@ bool testRbpodoControllerSimulationInitErrorOverrideIsNarrow() {
     }
 
     cfg.servo.allow_controller_simulation_init_error = true;
-    {
-        rb_servo::DualArmServoLoop loop(
-            init_error_backend(rb_servo::ArmId::Left),
-            std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
-            cfg,
-            &buffer,
-            nullptr
-        );
-        RB_CHECK(!loop.start());
-    }
-
-    allow_init_error.set("1");
     auto left = init_error_backend(rb_servo::ArmId::Left);
     TestBackend* left_raw = left.get();
     rb_servo::DualArmServoLoop loop(
@@ -4842,14 +4735,8 @@ bool testRbpodoControllerSimulationInitErrorOverrideIsNarrow() {
 bool testRbpodoControllerSimulationInitErrorOverrideRejectsOtherInvalidReasons() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard allow_init_error("RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    allow_init_error.set("1");
-    pgmode_confirmed.set("1");
 
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
@@ -5483,13 +5370,9 @@ bool testStreamingCartesianSimulationStillAvailable() {
 bool testRbpodoControllerSimulationStartupReferenceSource() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
 
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    pgmode_confirmed.set("1");
 
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
     cfg.safety.controller_simulation_tracking_error_source =
@@ -5597,17 +5480,11 @@ bool testRbpodoControllerSimulationStartupReferenceSource() {
 bool testRbpodoControllerSimulationStreamingCartesianGate() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard allow_controller_sim_cartesian("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN");
     EnvVarGuard allow_real_cartesian("RB_ALLOW_REAL_CARTESIAN");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
 
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    allow_controller_sim_cartesian.set("1");
     allow_real_cartesian.unset();
-    pgmode_confirmed.set("1");
 
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
     configureCartesianLoopTest(&cfg);
@@ -5655,7 +5532,11 @@ bool testRbpodoControllerSimulationStreamingCartesianGate() {
     RB_CHECK(json.at("left").at("cartesian_solve").at("cartesian_divergence_source").get<std::string>() ==
              "reference");
     RB_CHECK(json.at("left").at("cartesian_solve").at("q_reference_for_servo_valid").get<bool>());
-    RB_CHECK(json.at("left").at("cartesian_gate").at("env_RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN").get<bool>());
+    int cartesian_gate_env_key_count = 0;
+    for (const auto& item : json.at("left").at("cartesian_gate").items()) {
+        if (item.key().rfind("env_", 0) == 0) ++cartesian_gate_env_key_count;
+    }
+    RB_CHECK(cartesian_gate_env_key_count == 2);
     RB_CHECK(!json.at("left").at("cartesian_gate").at("physical_motion_expected").get<bool>());
 
     rb_servo::ServoSnapshot hold_snapshot = snapshot;
@@ -5689,15 +5570,16 @@ bool testRbpodoControllerSimulationStreamingCartesianGate() {
     RB_CHECK(physical_motion_snapshot.fault_reason == "controller_simulation_physical_motion_detected");
     RB_CHECK(physical_motion_snapshot.left_safety_tracking.controller_simulation_physical_motion_detected);
 
-    allow_controller_sim_cartesian.unset();
-    rb_servo::ServoSnapshot missing_env_snapshot;
-    bool missing_env_twist_observed = false;
-    RB_CHECK(runLeftTcpTwistStandCase(cfg, &missing_env_snapshot, &missing_env_twist_observed));
-    RB_CHECK(missing_env_snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-    RB_CHECK(missing_env_snapshot.left_cartesian_solve.reason ==
+    allow_motion.unset();
+    const nlohmann::json missing_env_json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    RB_CHECK(!missing_env_json.at("left").at("cartesian_available").get<bool>());
+    RB_CHECK(missing_env_json.at("left").at("cartesian_unavailable_reason").get<std::string>() ==
              "cartesian_control_unavailable_controller_sim_env");
-    RB_CHECK(!missing_env_twist_observed);
-    allow_controller_sim_cartesian.set("1");
+    RB_CHECK(missing_env_json.at("left")
+                 .at("cartesian_gate")
+                 .at("controller_simulation_streaming_cartesian_unavailable_reason")
+                 .get<std::string>() == "cartesian_control_unavailable_controller_sim_env");
+    allow_motion.set("1");
 
     rb_servo::DualArmConfig physical_mode_cfg = cfg;
     physical_mode_cfg.left_robot.operation_mode = "real";
@@ -5754,17 +5636,11 @@ bool testRbpodoControllerSimulationStreamingCartesianGate() {
 bool testRbpodoControllerSimulationNonStreamingCartesianGate() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard allow_controller_sim_cartesian("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN");
     EnvVarGuard allow_real_cartesian("RB_ALLOW_REAL_CARTESIAN");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
 
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    allow_controller_sim_cartesian.set("1");
     allow_real_cartesian.unset();
-    pgmode_confirmed.set("1");
 
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
     configureCartesianLoopTest(&cfg);
@@ -5780,25 +5656,6 @@ bool testRbpodoControllerSimulationNonStreamingCartesianGate() {
         RB_CHECK(ik_observed);
         RB_CHECK(checkPublishedLeftCartesianGate(cfg, snapshot, true, true, ""));
     }
-
-    allow_controller_sim_cartesian.unset();
-    for (const rb_servo::ControlMode mode : nonStreamingCartesianModes()) {
-        rb_servo::ServoSnapshot snapshot;
-        bool ik_observed = false;
-        RB_CHECK(runLeftNonStreamingCartesianCase(cfg, mode, &snapshot, &ik_observed, true));
-        RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-        RB_CHECK(snapshot.left_cartesian_solve.reason ==
-                 "cartesian_control_unavailable_physical_real_blocked");
-        RB_CHECK(!ik_observed);
-        RB_CHECK(checkPublishedLeftCartesianGate(
-            cfg,
-            snapshot,
-            false,
-            false,
-            "cartesian_control_unavailable_physical_real_blocked"
-        ));
-    }
-    allow_controller_sim_cartesian.set("1");
 
     rb_servo::DualArmConfig physical_real_cfg = cfg;
     physical_real_cfg.left_robot.operation_mode = "real";
@@ -6687,7 +6544,7 @@ int main() {
     if (!testWorkerIoModeTimesOutMissingSendResultByDeadline()) return 1;
     if (!testWorkerIoModeReportsMixedTimeoutAndAcceptedArm()) return 1;
     if (!testWorkerIoModeClassifiesStaleStateExplicitly()) return 1;
-    if (!testRbpodoAsyncConfigRejectsPhysicalRealAndMissingEnv()) return 1;
+    if (!testRbpodoAsyncConfigRejectsPhysicalRealAndMissingRealEnv()) return 1;
     if (!testRbpodoAsyncServoLoopDoesNotBlockOnSlowAckWorker()) return 1;
     if (!testRbpodoAsyncSupervisionFaultLatchesServoLoop()) return 1;
     if (!testRbpodoAsyncReferenceSupervisionQRefUpdatesOk()) return 1;
@@ -6701,7 +6558,7 @@ int main() {
     if (!testLoggerZeroCapacityDropsWithoutBlocking()) return 1;
     if (!testReadOnlyDiagnosticStartupAllowsFaultedStateAndPublishesUnsafeSnapshot()) return 1;
     if (!testMotionStartupRejectsFaultedState()) return 1;
-    if (!testRbpodoControllerSimulationMotionRequiresExplicitGate()) return 1;
+    if (!testRbpodoControllerSimulationMotionRequiresConfigAndRealEnvGates()) return 1;
     if (!testRbpodoControllerSimulationDiagnosticOverrideIsNarrow()) return 1;
     if (!testRbpodoControllerSimulationNotActivatedDiagnosticOverrideRequiresGate()) return 1;
     if (!testRbpodoControllerSimulationDiagnosticOverrideRejectsHardFaults()) return 1;

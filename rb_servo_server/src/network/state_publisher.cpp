@@ -817,10 +817,7 @@ bool controllerSimulationCartesianGateOpen(
         backend_config.run_mode == RunMode::Real &&
         isRbpodoControllerSimulation(backend_config) &&
         envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
-        envFlagEnabled("RB_ALLOW_REAL_MOTION") &&
-        envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
-        envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN") &&
-        envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+        envFlagEnabled("RB_ALLOW_REAL_MOTION");
 }
 
 std::string commandFamilyString(ControlMode mode) {
@@ -888,10 +885,7 @@ std::string cartesianGateUnavailableReason(
         return "cartesian_control_unavailable_controller_sim_config";
     }
     if (!envFlagEnabled("RB_ALLOW_REAL_ROBOT") ||
-        !envFlagEnabled("RB_ALLOW_REAL_MOTION") ||
-        !envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") ||
-        !envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN") ||
-        !envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")) {
+        !envFlagEnabled("RB_ALLOW_REAL_MOTION")) {
         return "cartesian_control_unavailable_controller_sim_env";
     }
     return "";
@@ -953,9 +947,6 @@ nlohmann::json cartesianGateJson(
             safety_config.controller_simulation_physical_motion_threshold_deg},
         {"env_RB_ALLOW_REAL_ROBOT", envFlagEnabled("RB_ALLOW_REAL_ROBOT")},
         {"env_RB_ALLOW_REAL_MOTION", envFlagEnabled("RB_ALLOW_REAL_MOTION")},
-        {"env_RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION", envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION")},
-        {"env_RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN", envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN")},
-        {"env_RB_RBPODO_PGMODE_SIMULATION_CONFIRMED", envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")},
         {"physical_motion_expected", physical_motion_expected},
         {"controller_simulation_cartesian_enabled", controller_sim_cartesian_enabled},
         {"controller_simulation_cartesian_enabled_for_current_command", controller_sim_cartesian_enabled},

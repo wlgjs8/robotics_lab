@@ -109,9 +109,7 @@ bool rbpodoControllerSimulationMotionGateOpen(const BackendConfig& config) {
     return config.run_mode == RunMode::Real &&
         expectedSimulationMode(config) &&
         envIsOne("RB_ALLOW_REAL_ROBOT") &&
-        envIsOne("RB_ALLOW_REAL_MOTION") &&
-        envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
-        envIsOne("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+        envIsOne("RB_ALLOW_REAL_MOTION");
 }
 
 bool diagnosticsSuspectControllerSimulationOverrideAllowed(
@@ -120,7 +118,7 @@ bool diagnosticsSuspectControllerSimulationOverrideAllowed(
 ) {
     return error.name == "rbpodo_diagnostics_suspect" &&
         rbpodoControllerSimulationMotionGateOpen(config) &&
-        envIsOne("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
+        config.allow_controller_simulation_diagnostics_suspect;
 }
 
 bool initErrorControllerSimulationOverrideAllowed(
@@ -129,7 +127,7 @@ bool initErrorControllerSimulationOverrideAllowed(
 ) {
     return error.name == "rbpodo_init_error" &&
         rbpodoControllerSimulationMotionGateOpen(config) &&
-        envIsOne("RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM");
+        config.allow_controller_simulation_init_error;
 }
 
 bool controllerSimulationReadinessOverrideAllowed(
@@ -875,11 +873,15 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
             0.0
         );
     }
+    // Controller-simulation (operation_mode=simulation) is exempt — ACK-off is a
+    // normal pgmode-sim streaming mode. Genuine real (operation_mode=real) keeps
+    // the byte-identical env acceptance gate.
     if (impl_->config.run_mode == RunMode::Real &&
         impl_->config.disable_waiting_ack &&
+        !expectedSimulationMode(impl_->config) &&
         !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")) {
         std::cerr << "[ERROR] RbpodoBackend refused ACK-disabled servo_j without "
-                     "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1\n";
+                     "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 (genuine real)\n";
         return with_ack_metadata(
             rejectedSend(
                 request,
@@ -1078,11 +1080,10 @@ BackendResult<RobotState> RbpodoBackend::resetFault() {
     // (operation_mode=simulation, physical_motion_expected=false) has no physical
     // robot to endanger, so a fault reset is safe and is required to recover from
     // a server-side EmergencyStop/soft-estop latch without restarting the server.
-    // Gated by operation_mode=simulation AND the controller-simulation motion env.
+    // Gated by operation_mode=simulation and live controller data.
     // Physical real mode keeps the conservative refusal below: no verified rbpodo
     // fault-reset API exists, so motion must remain disabled after any reset.
     if (expectedSimulationMode(impl_->config) &&
-        envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
         impl_->connected && impl_->data_channel) {
         try {
             const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);

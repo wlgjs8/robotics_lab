@@ -232,9 +232,7 @@ bool controllerSimulationMotionGateOpen(const DualArmConfig& config) {
     return config.servo.allow_controller_simulation_motion &&
         bothRbpodoControllerSimulationBackends(config) &&
         envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
-        envFlagEnabled("RB_ALLOW_REAL_MOTION") &&
-        envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
-        envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+        envFlagEnabled("RB_ALLOW_REAL_MOTION");
 }
 
 const BackendConfig& backendConfigForArm(const DualArmConfig& config, ArmId arm_id) {
@@ -250,10 +248,7 @@ bool controllerSimulationCartesianGateOpen(
         config.servo.allow_controller_simulation_motion &&
         isRbpodoControllerSimulationBackend(backend) &&
         envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
-        envFlagEnabled("RB_ALLOW_REAL_MOTION") &&
-        envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
-        envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN") &&
-        envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+        envFlagEnabled("RB_ALLOW_REAL_MOTION");
 }
 
 struct CartesianAvailability {
@@ -957,22 +952,19 @@ CartesianServoStateSelection selectCartesianServoStateForArm(
 
 bool controllerSimulationDiagnosticsSuspectGateOpen(const DualArmConfig& config) {
     return controllerSimulationMotionGateOpen(config) &&
-        config.servo.allow_controller_simulation_diagnostics_suspect &&
-        envFlagEnabled("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
+        config.servo.allow_controller_simulation_diagnostics_suspect;
 }
 
 bool controllerSimulationInitErrorGateOpen(const DualArmConfig& config) {
     return controllerSimulationMotionRequired(config) &&
         controllerSimulationMotionGateOpen(config) &&
-        config.servo.allow_controller_simulation_init_error &&
-        envFlagEnabled("RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM");
+        config.servo.allow_controller_simulation_init_error;
 }
 
 bool controllerSimulationNotActivatedGateOpen(const DualArmConfig& config) {
     return controllerSimulationMotionRequired(config) &&
         controllerSimulationMotionGateOpen(config) &&
-        config.servo.allow_controller_simulation_not_activated &&
-        envFlagEnabled("RB_ALLOW_RBPODO_NOT_ACTIVATED_CONTROLLER_SIM");
+        config.servo.allow_controller_simulation_not_activated;
 }
 
 bool isAllowedControllerSimulationDiagnosticReason(
@@ -2601,9 +2593,7 @@ void DualArmServoLoop::logStartupValidation(
         std::cerr << "[ERROR] controller-simulation motion gate closed; refusing rbpodo "
                      "controller-simulation benchmark. Required: operation_mode=simulation, "
                      "servo.allow_controller_simulation_motion=true, "
-                     "RB_ALLOW_REAL_ROBOT=1, RB_ALLOW_REAL_MOTION=1, "
-                     "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1, and "
-                     "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1.\n";
+                     "RB_ALLOW_REAL_ROBOT=1, and RB_ALLOW_REAL_MOTION=1.\n";
     }
 }
 

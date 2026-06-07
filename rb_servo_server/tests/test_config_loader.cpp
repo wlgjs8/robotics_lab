@@ -167,11 +167,6 @@ bool testRepositoryConfigsParse() {
     {
         EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
         EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
-        EnvGuard controller_sim_gate("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION", "1");
-        EnvGuard controller_sim_cartesian_gate("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN", "1");
-        EnvGuard async_gate("RB_ALLOW_RBPODO_ASYNC_STREAMING", "1");
-        EnvGuard diagnostics_gate("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM", "1");
-        EnvGuard pgmode_gate("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED", "1");
         EnvGuard physical_cartesian_gate("RB_ALLOW_REAL_CARTESIAN", nullptr);
 
         const rb_servo::DualArmConfig pgmode =
@@ -190,6 +185,10 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(pgmode.servo.allow_controller_simulation_diagnostics_suspect);
         RB_CHECK(!pgmode.servo.allow_controller_simulation_init_error);
         RB_CHECK(!pgmode.servo.allow_controller_simulation_not_activated);
+        RB_CHECK(pgmode.left_robot.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(pgmode.right_robot.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(!pgmode.left_robot.allow_controller_simulation_init_error);
+        RB_CHECK(!pgmode.right_robot.allow_controller_simulation_init_error);
         RB_CHECK(near(pgmode.left_robot.servo_t1_sec, 0.002));
         RB_CHECK(near(pgmode.right_robot.servo_t1_sec, 0.002));
         RB_CHECK(near(pgmode.left_robot.servo_t2_sec, 0.08));
