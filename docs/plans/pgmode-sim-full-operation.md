@@ -66,6 +66,38 @@ mapped run_mode); (ii) `circle_move.allow_in_simulation` config requirement for 
 backend block (Stage B). Sending Cartesian via policy_runner needs geometry config (requires_geometry) —
 set that up, or send raw command JSON.
 
+## 2c. Stage A.0 RESULT (probed + code-confirmed) — the real gap is NON-streaming Cartesian
+
+Authoritative gate: `dual_arm_servo_loop.cpp:343-385` (`cartesianAvailabilityForArm`). For `run_mode==Real`
+(controller-sim), the branch:
+```
+if (!streaming_cartesian && !controller_simulation_circle_move) {
+    available = allow_in_real && RB_ALLOW_REAL_CARTESIAN;   // → physical_real_blocked in controller-sim
+    return;
+}
+// only streaming_cartesian / circle_move fall through to the controller-sim path (available=true)
+```
+`isStreamingCartesianMode` = {TcpLinearMove, TcpCircleMove, TcpCircleTrack, TcpTwistStand, TcpTwistLocal}.
+
+- **Already available in controller-sim**: TcpLinearMove, TcpTwistLocal/Stand, TcpCircleMove (and TcpCircleTrack is a stub). No server change needed for these.
+- **BLOCKED in controller-sim (the real Stage A gap)**: **TcpPoseTarget, TcpDeltaStand, TcpDeltaLocal**
+  (non-streaming) — they hit the `!streaming && !circle_move` branch which requires real Cartesian.
+  Confirmed live: TcpDeltaStand → `cart_avail=False, reason=cartesian_control_unavailable_physical_real_blocked, ik=unavailable`.
+- **Caveat**: the runtime probe's q_ref motion was a Virtual ControlBox jnt_ref drift ARTIFACT, not command
+  execution (probe #1 over-claimed; probe #2 + gate code corrected it). Also `has_valid_tcp_pose` appears
+  false (no `tcp_ref_stand`/`tcp_stand` published) → TcpPoseTarget/TcpLinearMove can't even build a target;
+  investigate why TCP FK pose isn't published in controller-sim (kinematics valid-state dependency).
+
+### Stage A (targeted fix)
+Add a controller-sim carve-out to the `!streaming_cartesian && !controller_simulation_circle_move` branch
+(dual_arm_servo_loop.cpp:343-352): when `backend_type==Rbpodo`, `operation_mode==simulation`,
+`cartesian_control.allow_in_controller_simulation`, `allow_controller_simulation_motion`, and
+`controllerSimulationCartesianGateOpen`, set `available=true, physical_motion_expected=false` — mirroring
+the streaming path below it (lines 353-385). This unblocks TcpPoseTarget/TcpDeltaStand/TcpDeltaLocal in
+controller-sim. Real (operation_mode!=simulation) keeps requiring RB_ALLOW_REAL_CARTESIAN. Mirror the
+state_publisher reason at :843/:854. Separately fix TCP-pose publication so FK pose is valid in
+controller-sim (needed for PoseTarget/Linear). Tests + HARDEN-10 + live re-probe.
+
 ## 3. Stage A — server: unblock simulation-only Cartesian for controller-sim (only what A.0 proves blocked)
 
 Introduce ONE shared predicate used at the three+ gate sites:
