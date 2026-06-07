@@ -99,7 +99,9 @@ from .status_panel import (
     _update_tcp_display_buttons,
 )
 
-_DESIRED_MODES = ("mock", "simulation", "real")
+# mock is intentionally not operator-selectable: the GUI targets simulation
+# (incl. rbpodo pgmode controller-simulation) and real (status-only).
+_DESIRED_MODES = ("simulation", "real")
 _TCP_FRAME_STAND = "Stand/world"
 _TCP_FRAME_LOCAL = "TCP local"
 _TCP_FRAME_OPTIONS = (_TCP_FRAME_STAND, _TCP_FRAME_LOCAL)
@@ -191,7 +193,16 @@ def _sim_readiness_from_env(observed: Any) -> Readiness:
     no_go_reason = os.environ.get("RB_GUI_SIM_READINESS_NO_GO", "simulator/rbpodo readiness tests have not passed")
     if ready:
         no_go_reason = ""
-    if observed.mode != "simulation" or observed.backend != "simulator":
+    # The local simulator backend is always a valid sim stack. An rbpodo
+    # controller in pgmode simulation also counts as a sim stack, but only when
+    # the operator opts in (RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1); real mode
+    # never qualifies.
+    controller_sim_optin = _env_bool("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", False)
+    valid_sim_stack = observed.mode == "simulation" and (
+        observed.backend == "simulator"
+        or (observed.backend == "rbpodo" and controller_sim_optin)
+    )
+    if not valid_sim_stack:
         ready = False
         running = False
         connected = False
