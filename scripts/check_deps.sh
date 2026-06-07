@@ -153,7 +153,7 @@ check_hardware_free() {
   check_cmake_package yaml-cpp "Ubuntu: sudo apt-get install libyaml-cpp-dev"
   check_cmake_package nlohmann_json "Ubuntu: sudo apt-get install nlohmann-json3-dev, or set CMAKE_PREFIX_PATH."
   check_cmake_package Eigen3 "Ubuntu: sudo apt-get install libeigen3-dev"
-  check_cmake_package pinocchio "Ubuntu: run scripts/install_deps_ubuntu.sh --profile hardware-free to install robotpkg-pinocchio under /opt/openrobots, or install via conda/mamba/source and set CMAKE_PREFIX_PATH."
+  check_cmake_package pinocchio "Ubuntu: run scripts/install_deps_ubuntu.sh --profile hardware-free to install Pinocchio under /opt/openrobots via robotpkg on jammy or a pinned source build on non-jammy hosts, or install via conda/mamba/source and set CMAKE_PREFIX_PATH."
 }
 
 check_real_camera() {

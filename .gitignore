@@ -68,3 +68,7 @@ data*/
 # PyTorch model files
 *.pth
 *.pt
+
+# Local Python virtualenvs
+.venv/
+venv/
