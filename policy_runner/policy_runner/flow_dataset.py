@@ -18,6 +18,7 @@ FLOW_ACTION_DIM = 14
 FLOW_ARM_DIM = 7
 FLOW_PROPRIO_DIM = 16
 DEFAULT_IMAGE_SIZE = 224
+IMAGE_CROP_MODES = ("none", "center_square")
 HDF5_EPISODE_SUFFIXES = {".hdf5", ".h5"}
 HDF5_SKIP_PARENT_NAMES = {
     ".tmp",
@@ -115,6 +116,7 @@ class FlowHdf5Dataset:
         *,
         action_horizon: int = 16,
         image_size: int = DEFAULT_IMAGE_SIZE,
+        image_crop: str = "none",
         camera_names: list[str] | None = None,
         single_arm_side: str = "left",
         include_formats: list[str] | tuple[str, ...] | None = None,
@@ -137,6 +139,9 @@ class FlowHdf5Dataset:
         self.root = Path(episodes_dir)
         self.action_horizon = int(action_horizon)
         self.image_size = int(image_size)
+        if image_crop not in IMAGE_CROP_MODES:
+            raise ValueError(f"image_crop must be one of: {', '.join(IMAGE_CROP_MODES)}")
+        self.image_crop = image_crop
         self.single_arm_side = single_arm_side
         self.normalize = bool(normalize)
         self.stats = stats
@@ -203,6 +208,7 @@ class FlowHdf5Dataset:
             self.camera_names,
             ref.start,
             self.image_size,
+            self.image_crop,
         )
         proprio = _proprio_vector(episode, ref.start)
         action_chunk = _action_chunk(episode, ref.start, self.action_horizon)
@@ -413,6 +419,8 @@ def compute_dataset_statistics(
         "total_sample_count": len(dataset),
         "sample_count": sample_count,
         "action_horizon": dataset.action_horizon,
+        "image_size": dataset.image_size,
+        "image_crop": dataset.image_crop,
         "camera_names": dataset.camera_names,
         "formats": formats,
         "proprio_dim": FLOW_PROPRIO_DIM,
@@ -508,7 +516,12 @@ def normalize_runtime_proprio(proprio: np.ndarray, stats: dict[str, Any]) -> np.
     )
 
 
-def decode_hdf5_image_value(value: Any, *, image_size: int = DEFAULT_IMAGE_SIZE) -> np.ndarray:
+def decode_hdf5_image_value(
+    value: Any,
+    *,
+    image_size: int = DEFAULT_IMAGE_SIZE,
+    image_crop: str = "none",
+) -> np.ndarray:
     if isinstance(value, np.ndarray) and value.ndim == 2:
         image = Image.fromarray(value)
     elif isinstance(value, np.ndarray) and value.dtype == np.uint8 and value.ndim == 3:
@@ -537,6 +550,14 @@ def decode_hdf5_image_value(value: Any, *, image_size: int = DEFAULT_IMAGE_SIZE)
         image = Image.fromarray(arr8, mode="L").convert("RGB")
     else:
         image = image.convert("RGB")
+    if image_crop == "center_square":
+        width, height = image.size
+        side = min(width, height)
+        left = max(0, (width - side) // 2)
+        top = max(0, (height - side) // 2)
+        image = image.crop((left, top, left + side, top + side))
+    elif image_crop != "none":
+        raise ValueError(f"image_crop must be one of: {', '.join(IMAGE_CROP_MODES)}")
     image = image.resize((image_size, image_size), Image.BILINEAR)
     arr = np.asarray(image, dtype=np.float32) / 255.0
     return np.transpose(arr, (2, 0, 1))
@@ -826,6 +847,7 @@ def _load_images(
     camera_names: list[str],
     index: int,
     image_size: int,
+    image_crop: str,
 ) -> tuple[np.ndarray, int, int]:
     if not camera_names:
         return np.zeros((0, 3, image_size, image_size), dtype=np.float32), 0, 0
@@ -844,7 +866,13 @@ def _load_images(
                 frames.append(np.zeros((3, image_size, image_size), dtype=np.float32))
                 missing_count += 1
                 continue
-            frames.append(decode_hdf5_image_value(dataset[index], image_size=image_size))
+            frames.append(
+                decode_hdf5_image_value(
+                    dataset[index],
+                    image_size=image_size,
+                    image_crop=image_crop,
+                )
+            )
             decode_count += 1
     return np.stack(frames, axis=0), decode_count, missing_count
 

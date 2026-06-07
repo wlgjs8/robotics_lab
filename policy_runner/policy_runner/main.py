@@ -355,7 +355,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     ml_preflight.add_argument(
         "--vision-backbone",
-        choices=("tiny_cnn", "resnet18", "resnet50", "dinov3"),
+        choices=(
+            "tiny_cnn",
+            "resnet18",
+            "resnet50",
+            "dinov3",
+            "dinov3_convnext_tiny",
+            "dinov3_convnext_small",
+            "dinov3_convnext_base",
+            "dinov3_convnext_large",
+        ),
         default="tiny_cnn",
     )
     ml_preflight.add_argument(
@@ -434,6 +443,12 @@ def _main_with_subcommands(argv: list[str]) -> int:
     imitation_experiment.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
     imitation_experiment.add_argument("--action-horizon", type=int, default=16)
     imitation_experiment.add_argument("--image-size", type=int, default=128)
+    imitation_experiment.add_argument(
+        "--image-crop",
+        choices=("none", "center_square"),
+        default="none",
+        help="Deterministic image crop before resize; center_square is fixed and not validation-tuned.",
+    )
     imitation_experiment.add_argument("--batch-size", type=int, default=64)
     imitation_experiment.add_argument("--epochs", type=int, default=20)
     imitation_experiment.add_argument("--lr", type=float, default=1e-4)
@@ -443,6 +458,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     imitation_experiment.add_argument("--max-train-samples", type=int, default=None)
     imitation_experiment.add_argument("--max-val-samples", type=int, default=None)
     imitation_experiment.add_argument("--flow-sample-steps", type=int, default=8)
+    imitation_experiment.add_argument("--diffusion-sample-steps", type=int, default=16)
     imitation_experiment.add_argument(
         "--split-mode",
         choices=("primary", "session_holdout"),
@@ -857,6 +873,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             models=[name.strip() for name in args.models.split(",") if name.strip()],
             action_horizon=args.action_horizon,
             image_size=args.image_size,
+            image_crop=args.image_crop,
             camera_names=parse_camera_names(args.camera_names),
             exclude_camera_names=parse_camera_names(args.exclude_camera_names),
             batch_size=args.batch_size,
@@ -868,6 +885,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             max_train_samples=args.max_train_samples,
             max_val_samples=args.max_val_samples,
             flow_sample_steps=args.flow_sample_steps,
+            diffusion_sample_steps=args.diffusion_sample_steps,
             split_mode=args.split_mode,
         )
         print(f"imitation leaderboard written: {report['output_dir']}/leaderboard_report.md", flush=True)
