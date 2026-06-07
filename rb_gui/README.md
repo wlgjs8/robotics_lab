@@ -6,7 +6,8 @@ GUI.
 
 For an rbpodo controller in `pgmode` simulation (controller-simulation), the GUI
 can drive its full existing control set (joint jog, lifecycle, TCP PTP/Linear/
-Delta) when the operator opts in with `RB_GUI_ENABLE_TCP_POSE_COMMANDS=1` and
+Delta, plus the Velocity jog tab for streaming JointVelocity / TcpTwist) when
+the operator opts in with `RB_GUI_ENABLE_TCP_POSE_COMMANDS=1` and
 `RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1` (plus `RB_GUI_OBSERVED_MODE=simulation`,
 `RB_GUI_OBSERVED_BACKEND=rbpodo`). Real mode stays connect/status-only and the
 GUI never sets `RB_ALLOW_REAL_CARTESIAN`. See

@@ -86,6 +86,9 @@ class OperatorSafety:
         max_jog_step_deg: float = 2.0,
         max_tcp_linear_step_m: float = 0.005,
         max_tcp_angular_step_rad: float = 0.02,
+        max_tcp_linear_velocity_m_s: float = 0.05,
+        max_tcp_angular_velocity_rad_s: float = 0.2,
+        max_joint_velocity_deg_s: float = 10.0,
         command_timeout_sec: float = 0.2,
         init_left_joint_deg: tuple[float, ...] | None = None,
         init_right_joint_deg: tuple[float, ...] | None = None,
@@ -109,6 +112,9 @@ class OperatorSafety:
         self.max_jog_step_deg = float(max_jog_step_deg)
         self.max_tcp_linear_step_m = float(max_tcp_linear_step_m)
         self.max_tcp_angular_step_rad = float(max_tcp_angular_step_rad)
+        self.max_tcp_linear_velocity_m_s = float(max_tcp_linear_velocity_m_s)
+        self.max_tcp_angular_velocity_rad_s = float(max_tcp_angular_velocity_rad_s)
+        self.max_joint_velocity_deg_s = float(max_joint_velocity_deg_s)
         self.command_timeout_sec = float(command_timeout_sec)
         self.init_left_joint_deg = self._validated_joint6(init_left_joint_deg)
         self.init_right_joint_deg = self._validated_joint6(init_right_joint_deg)
@@ -380,6 +386,86 @@ class OperatorSafety:
         latest = self.latest_valid()
         verdict = latest.safety_verdict if latest is not None else "unavailable"
         return True, f"sent {self.last_tcp_command}; server verdict: {verdict}"
+
+    def _validated_tcp_twist(self, twist: tuple[float, ...]) -> tuple[bool, object]:
+        try:
+            twist_values = tuple(float(value) for value in twist)
+        except (TypeError, ValueError):
+            return False, "non-finite TCP twist rejected"
+        if len(twist_values) != 6 or any(not math.isfinite(v) for v in twist_values):
+            return False, "non-finite TCP twist rejected"
+        if any(abs(v) > self.max_tcp_linear_velocity_m_s for v in twist_values[:3]):
+            return False, f"TCP linear velocity exceeds {self.max_tcp_linear_velocity_m_s:.3f} m/s limit"
+        if any(abs(v) > self.max_tcp_angular_velocity_rad_s for v in twist_values[3:]):
+            return False, f"TCP angular velocity exceeds {self.max_tcp_angular_velocity_rad_s:.3f} rad/s limit"
+        return True, twist_values
+
+    def _send_tcp_twist(
+        self,
+        arm: Literal["left", "right"],
+        twist: tuple[float, ...],
+        *,
+        frame: Literal["local", "stand"],
+    ) -> tuple[bool, str]:
+        reason = self.tcp_command_disabled_reason(arm)
+        if reason:
+            return False, reason
+        ok, validated = self._validated_tcp_twist(twist)
+        if not ok:
+            return False, str(validated)
+        twist_values = validated  # type: ignore[assignment]
+        if frame == "local":
+            packet = self.command_client.build_tcp_twist_local(
+                left_twist=twist_values if arm == "left" else None,
+                right_twist=twist_values if arm == "right" else None,
+                timeout_sec=self.command_timeout_sec,
+            )
+            mode_name = "TcpTwistLocal"
+        else:
+            packet = self.command_client.build_tcp_twist_stand(
+                left_twist=twist_values if arm == "left" else None,
+                right_twist=twist_values if arm == "right" else None,
+                timeout_sec=self.command_timeout_sec,
+            )
+            mode_name = "TcpTwistStand"
+        self.command_client.send(packet)
+        self.last_tcp_command = f"{mode_name} {arm}"
+        latest = self.latest_valid()
+        verdict = latest.safety_verdict if latest is not None else "unavailable"
+        return True, f"sent {self.last_tcp_command}; server verdict: {verdict}"
+
+    def send_tcp_twist_local(self, arm: Literal["left", "right"], twist: tuple[float, ...]) -> tuple[bool, str]:
+        return self._send_tcp_twist(arm, twist, frame="local")
+
+    def send_tcp_twist_stand(self, arm: Literal["left", "right"], twist: tuple[float, ...]) -> tuple[bool, str]:
+        return self._send_tcp_twist(arm, twist, frame="stand")
+
+    def send_joint_velocity(
+        self,
+        arm: Literal["left", "right"],
+        velocity: tuple[float, ...],
+    ) -> tuple[bool, str]:
+        reason = self.blocked_reason("JointVelocity")
+        if reason:
+            return False, reason
+        try:
+            vel = tuple(float(value) for value in velocity)
+        except (TypeError, ValueError):
+            return False, "non-finite joint velocity rejected"
+        if len(vel) != 6 or any(not math.isfinite(v) for v in vel):
+            return False, "non-finite joint velocity rejected"
+        if any(abs(v) > self.max_joint_velocity_deg_s for v in vel):
+            return False, f"joint velocity exceeds {self.max_joint_velocity_deg_s:.3f} deg/s limit"
+        packet = self.command_client.build_joint_velocity(
+            left_velocity=vel if arm == "left" else None,
+            right_velocity=vel if arm == "right" else None,
+            timeout_sec=self.command_timeout_sec,
+        )
+        self.command_client.send(packet)
+        self.last_tcp_command = f"JointVelocity {arm}"
+        latest = self.latest_valid()
+        verdict = latest.safety_verdict if latest is not None else "unavailable"
+        return True, f"sent JointVelocity {arm}; server verdict: {verdict}"
 
     def send_tcp_pose_target(
         self,

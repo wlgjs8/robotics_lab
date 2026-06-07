@@ -827,6 +827,36 @@ def build_gui(
             ok, message = safety.jog_joint(arm_group.value, int(joint_slider.value) - 1, float(delta_slider.value))
             handles["jog_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
+    with tabs.add_tab("Velocity jog"):
+        vel_arm = server.gui.add_button_group("Arm", ("left", "right"))
+        vj_index = server.gui.add_slider("Joint index", min=1, max=6, step=1, initial_value=1)
+        vj_vel = server.gui.add_slider("Joint vel deg/s", min=-10.0, max=10.0, step=0.5, initial_value=3.0)
+        vj_button = server.gui.add_button("Send joint velocity")
+        v_frame = server.gui.add_button_group("Twist frame", ("stand", "local"))
+        v_axis = server.gui.add_button_group("Twist axis", ("X", "Y", "Z", "Rx", "Ry", "Rz"))
+        v_lin = server.gui.add_slider("Linear vel m/s", min=-0.05, max=0.05, step=0.005, initial_value=0.02)
+        v_ang = server.gui.add_slider("Angular vel rad/s", min=-0.2, max=0.2, step=0.02, initial_value=0.1)
+        vt_button = server.gui.add_button("Send TCP twist")
+        handles["velocity_status"] = server.gui.add_text("Velocity status", initial_value="idle", disabled=True)
+
+        @vj_button.on_click
+        def _(_: Any) -> None:
+            vel = [0.0] * 6
+            vel[int(vj_index.value) - 1] = float(vj_vel.value)
+            ok, message = safety.send_joint_velocity(vel_arm.value, tuple(vel))
+            handles["velocity_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+        @vt_button.on_click
+        def _(_: Any) -> None:
+            axis_index = {"X": 0, "Y": 1, "Z": 2, "Rx": 3, "Ry": 4, "Rz": 5}[v_axis.value]
+            twist = [0.0] * 6
+            twist[axis_index] = float(v_lin.value) if axis_index < 3 else float(v_ang.value)
+            if v_frame.value == "local":
+                ok, message = safety.send_tcp_twist_local(vel_arm.value, tuple(twist))
+            else:
+                ok, message = safety.send_tcp_twist_stand(vel_arm.value, tuple(twist))
+            handles["velocity_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
     with tabs.add_tab("TCP PTP"):
         handles["tcp_ptp_note"] = server.gui.add_text(
             "TCP PTP",

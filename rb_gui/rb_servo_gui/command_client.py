@@ -259,6 +259,81 @@ class CommandClient:
         packet["session_id"] = self.session_id
         return packet
 
+    def build_tcp_twist_local(
+        self,
+        *,
+        left_twist: tuple[float, ...] | None = None,
+        right_twist: tuple[float, ...] | None = None,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        if left_twist is None and right_twist is None:
+            raise ValueError("at least one TCP local twist is required")
+        packet: dict[str, Any] = {
+            "schema_version": 1,
+            "seq": self.next_seq(),
+            "mode": "TcpTwistLocal" if left_twist is not None and right_twist is not None else "Hold",
+            "host_time_ns": time.monotonic_ns(),
+            "timeout_sec": timeout_sec,
+            "coupled_timeout": True,
+            "left": {},
+            "right": {},
+        }
+        if left_twist is not None:
+            packet["left"] = {"mode": "TcpTwistLocal", "tcp_twist_local": self._finite_six(left_twist, "left TCP local twist")}
+        if right_twist is not None:
+            packet["right"] = {"mode": "TcpTwistLocal", "tcp_twist_local": self._finite_six(right_twist, "right TCP local twist")}
+        return self._with_source(packet)
+
+    def build_tcp_twist_stand(
+        self,
+        *,
+        left_twist: tuple[float, ...] | None = None,
+        right_twist: tuple[float, ...] | None = None,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        if left_twist is None and right_twist is None:
+            raise ValueError("at least one TCP stand twist is required")
+        packet: dict[str, Any] = {
+            "schema_version": 1,
+            "seq": self.next_seq(),
+            "mode": "TcpTwistStand" if left_twist is not None and right_twist is not None else "Hold",
+            "host_time_ns": time.monotonic_ns(),
+            "timeout_sec": timeout_sec,
+            "coupled_timeout": True,
+            "left": {},
+            "right": {},
+        }
+        if left_twist is not None:
+            packet["left"] = {"mode": "TcpTwistStand", "tcp_twist_stand": self._finite_six(left_twist, "left TCP stand twist")}
+        if right_twist is not None:
+            packet["right"] = {"mode": "TcpTwistStand", "tcp_twist_stand": self._finite_six(right_twist, "right TCP stand twist")}
+        return self._with_source(packet)
+
+    def build_joint_velocity(
+        self,
+        *,
+        left_velocity: tuple[float, ...] | None = None,
+        right_velocity: tuple[float, ...] | None = None,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        if left_velocity is None and right_velocity is None:
+            raise ValueError("at least one joint velocity is required")
+        packet: dict[str, Any] = {
+            "schema_version": 1,
+            "seq": self.next_seq(),
+            "mode": "JointVelocity" if left_velocity is not None and right_velocity is not None else "Hold",
+            "host_time_ns": time.monotonic_ns(),
+            "timeout_sec": timeout_sec,
+            "coupled_timeout": True,
+            "left": {},
+            "right": {},
+        }
+        if left_velocity is not None:
+            packet["left"] = {"mode": "JointVelocity", "dq_target_deg_s": self._finite_six(left_velocity, "left joint velocity")}
+        if right_velocity is not None:
+            packet["right"] = {"mode": "JointVelocity", "dq_target_deg_s": self._finite_six(right_velocity, "right joint velocity")}
+        return self._with_source(packet)
+
     def send(self, packet: Mapping[str, Any]) -> None:
         payload = json.dumps(packet, separators=(",", ":")).encode("utf-8")
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:

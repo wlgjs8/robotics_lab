@@ -1334,6 +1334,60 @@ class GuiContractsTest(unittest.TestCase):
         )
         self.assertIsNone(sim_safety.tcp_command_disabled_reason("left"))
 
+    def test_tcp_twist_and_joint_velocity_in_controller_sim(self):
+        state = self.tcp_available_state()
+        _, client, safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="rbpodo",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+            enable_controller_sim_cartesian=True,
+        )
+        # TcpTwistStand within velocity limit -> sent.
+        ok, msg = safety.send_tcp_twist_stand("left", (0.02, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertTrue(ok, msg)
+        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "TcpTwistStand")
+        self.assertIn("tcp_twist_stand", client.sent_packets[-1]["left"])
+        # TcpTwistLocal too -> sent.
+        ok, msg = safety.send_tcp_twist_local("left", (0.0, 0.0, 0.01, 0.0, 0.0, 0.0))
+        self.assertTrue(ok, msg)
+        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "TcpTwistLocal")
+        # Over the linear velocity limit -> rejected, nothing sent.
+        before = len(client.sent_packets)
+        ok, msg = safety.send_tcp_twist_stand("left", (99.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        self.assertIn("velocity exceeds", msg)
+        self.assertEqual(len(client.sent_packets), before)
+        # JointVelocity within limit -> sent.
+        ok, msg = safety.send_joint_velocity("left", (5.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertTrue(ok, msg)
+        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "JointVelocity")
+        self.assertIn("dq_target_deg_s", client.sent_packets[-1]["left"])
+        # JointVelocity over limit -> rejected.
+        ok, msg = safety.send_joint_velocity("left", (999.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        self.assertIn("velocity exceeds", msg)
+
+    def test_tcp_twist_blocked_in_real_mode(self):
+        state = self.tcp_available_state()
+        _, client, safety = self.make_safety(
+            state,
+            desired="real",
+            observed="real",
+            observed_backend="rbpodo",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+            enable_controller_sim_cartesian=True,
+        )
+        ok, msg = safety.send_tcp_twist_stand("left", (0.02, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        ok, msg = safety.send_joint_velocity("left", (5.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+
     def test_tcp_delta_stand_blocks_stale_and_faulted_state(self):
         state = self.tcp_available_state()
         _, client, stale_safety = self.make_safety(
