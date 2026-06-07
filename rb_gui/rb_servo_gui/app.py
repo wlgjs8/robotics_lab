@@ -868,11 +868,21 @@ def build_gui(
         circle_stop_event = threading.Event()
         circle_state: dict[str, Any] = {"thread": None}
 
-        def _circle_loop(packet: dict[str, Any]) -> None:
-            # The server traces the whole circle from ONE command; re-send the
-            # SAME packet (same seq) as a keep-alive so it stays fresh. A new seq
-            # would reset the circle to the current TCP each tick.
+        def _circle_loop(diameter: float, period: float, plane: str) -> None:
+            # ArmMotion FIRST, then build the circle packet so its seq is higher
+            # than ArmMotion's — the server drops any command whose seq <= the
+            # last accepted seq for this source. The circle packet keeps a FIXED
+            # seq + long timeout so the server traces the whole circle from one
+            # accepted command; re-sends (same seq) are harmless keep-alives.
             safety.send_lifecycle("ArmMotion")
+            time.sleep(0.1)
+            ok, message, packet = safety.build_circle_packet(
+                diameter, period, arm="both", plane=plane, repeat=200
+            )
+            if not ok or packet is None:
+                handles["circle_status"].value = "BLOCKED: " + message
+                return
+            handles["circle_status"].value = "running: " + message
             while not circle_stop_event.is_set():
                 safety.command_client.send(packet)
                 circle_stop_event.wait(0.3)
@@ -884,21 +894,19 @@ def build_gui(
             if existing is not None and existing.is_alive():
                 handles["circle_status"].value = "already running; press Stop first"
                 return
-            ok, message, packet = safety.build_circle_packet(
-                float(c_diameter.value),
-                float(c_period.value),
-                arm="both",
-                plane=str(c_plane.value),
-                repeat=200,
-            )
-            if not ok or packet is None:
-                handles["circle_status"].value = "BLOCKED: " + message
+            reason = safety.tcp_command_disabled_reason()
+            if reason:
+                handles["circle_status"].value = "BLOCKED: " + reason
                 return
             circle_stop_event.clear()
-            thread = threading.Thread(target=_circle_loop, args=(packet,), daemon=True)
+            thread = threading.Thread(
+                target=_circle_loop,
+                args=(float(c_diameter.value), float(c_period.value), str(c_plane.value)),
+                daemon=True,
+            )
             circle_state["thread"] = thread
             thread.start()
-            handles["circle_status"].value = "running: " + message
+            handles["circle_status"].value = "starting..."
 
         @c_stop.on_click
         def _(_: Any) -> None:
