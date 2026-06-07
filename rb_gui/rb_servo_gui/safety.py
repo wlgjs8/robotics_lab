@@ -467,40 +467,69 @@ class OperatorSafety:
         verdict = latest.safety_verdict if latest is not None else "unavailable"
         return True, f"sent JointVelocity {arm}; server verdict: {verdict}"
 
+    def build_circle_packet(
+        self,
+        diameter_m: float = 0.15,
+        period_sec: float = 4.0,
+        *,
+        arm: Literal["left", "right", "both"] = "both",
+        plane: str = "xy",
+        repeat: int = 50,
+    ) -> tuple[bool, str, dict[str, object] | None]:
+        """Validate + build ONE TcpCircleMove packet (fixed seq, full payload).
+
+        The caller re-sends the SAME returned packet to keep the circle fresh;
+        sending a new seq would reset the circle to the current TCP.
+        """
+        arms = ("left", "right") if arm == "both" else (arm,)
+        for one in arms:
+            reason = self.tcp_command_disabled_reason(one)  # type: ignore[arg-type]
+            if reason:
+                return False, reason, None
+        try:
+            diameter = float(diameter_m)
+            period = float(period_sec)
+        except (TypeError, ValueError):
+            return False, "non-finite circle parameters rejected", None
+        if not (math.isfinite(diameter) and math.isfinite(period)):
+            return False, "non-finite circle parameters rejected", None
+        if diameter <= 0.0 or diameter > 0.20:
+            return False, "circle diameter must be in (0, 0.20] m", None
+        if period < 3.0:
+            return False, "circle period must be >= 3.0 s", None
+        if plane not in {"xy", "xz", "yz"}:
+            return False, "circle plane must be xy, xz, or yz", None
+        if int(repeat) < 1:
+            return False, "circle repeat must be >= 1", None
+        packet = self.command_client.build_tcp_circle_move(
+            left=arm in {"left", "both"},
+            right=arm in {"right", "both"},
+            diameter_m=diameter,
+            period_sec=period,
+            plane=plane,
+            repeat=int(repeat),
+        )
+        return True, f"TcpCircleMove {arm} d={diameter:.3f}m p={period:.2f}s plane={plane}", packet
+
     def send_tcp_circle_move(
         self,
         diameter_m: float = 0.15,
         period_sec: float = 4.0,
         *,
         arm: Literal["left", "right", "both"] = "both",
+        plane: str = "xy",
+        repeat: int = 50,
     ) -> tuple[bool, str]:
-        arms = ("left", "right") if arm == "both" else (arm,)
-        for one in arms:
-            reason = self.tcp_command_disabled_reason(one)  # type: ignore[arg-type]
-            if reason:
-                return False, reason
-        try:
-            diameter = float(diameter_m)
-            period = float(period_sec)
-        except (TypeError, ValueError):
-            return False, "non-finite circle parameters rejected"
-        if not (math.isfinite(diameter) and math.isfinite(period)):
-            return False, "non-finite circle parameters rejected"
-        if diameter <= 0.0 or diameter > 0.20:
-            return False, "circle diameter must be in (0, 0.20] m"
-        if period < 3.0:
-            return False, "circle period must be >= 3.0 s"
-        packet = self.command_client.build_tcp_circle_move(
-            left=arm in {"left", "both"},
-            right=arm in {"right", "both"},
-            diameter_m=diameter,
-            period_sec=period,
+        ok, message, packet = self.build_circle_packet(
+            diameter_m, period_sec, arm=arm, plane=plane, repeat=repeat
         )
+        if not ok or packet is None:
+            return False, message
         self.command_client.send(packet)
-        self.last_tcp_command = f"TcpCircleMove {arm} d={diameter:.3f}m p={period:.2f}s"
+        self.last_tcp_command = message
         latest = self.latest_valid()
         verdict = latest.safety_verdict if latest is not None else "unavailable"
-        return True, f"sent {self.last_tcp_command}; server verdict: {verdict}"
+        return True, f"sent {message}; server verdict: {verdict}"
 
     def send_tcp_pose_target(
         self,

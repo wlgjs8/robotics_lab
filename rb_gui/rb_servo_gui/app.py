@@ -861,20 +861,21 @@ def build_gui(
     with tabs.add_tab("Circle"):
         c_diameter = server.gui.add_slider("Diameter m", min=0.02, max=0.20, step=0.01, initial_value=0.15)
         c_period = server.gui.add_slider("Period s", min=3.0, max=16.0, step=0.5, initial_value=4.0)
+        c_plane = server.gui.add_button_group("Plane", ("xy", "xz", "yz"))
         c_start = server.gui.add_button("Start circle (both arms)")
         c_stop = server.gui.add_button("Stop circle")
         handles["circle_status"] = server.gui.add_text("Circle status", initial_value="idle", disabled=True)
         circle_stop_event = threading.Event()
         circle_state: dict[str, Any] = {"thread": None}
 
-        def _circle_loop(diameter: float, period: float) -> None:
+        def _circle_loop(packet: dict[str, Any]) -> None:
+            # The server traces the whole circle from ONE command; re-send the
+            # SAME packet (same seq) as a keep-alive so it stays fresh. A new seq
+            # would reset the circle to the current TCP each tick.
             safety.send_lifecycle("ArmMotion")
             while not circle_stop_event.is_set():
-                ok, message = safety.send_tcp_circle_move(diameter, period, arm="both")
-                if not ok:
-                    handles["circle_status"].value = "BLOCKED: " + message
-                    break
-                circle_stop_event.wait(0.02)
+                safety.command_client.send(packet)
+                circle_stop_event.wait(0.3)
             safety.command_client.send_lifecycle("Hold")
 
         @c_start.on_click
@@ -883,17 +884,21 @@ def build_gui(
             if existing is not None and existing.is_alive():
                 handles["circle_status"].value = "already running; press Stop first"
                 return
-            reason = safety.tcp_command_disabled_reason()
-            if reason:
-                handles["circle_status"].value = "BLOCKED: " + reason
+            ok, message, packet = safety.build_circle_packet(
+                float(c_diameter.value),
+                float(c_period.value),
+                arm="both",
+                plane=str(c_plane.value),
+                repeat=200,
+            )
+            if not ok or packet is None:
+                handles["circle_status"].value = "BLOCKED: " + message
                 return
             circle_stop_event.clear()
-            diameter = float(c_diameter.value)
-            period = float(c_period.value)
-            thread = threading.Thread(target=_circle_loop, args=(diameter, period), daemon=True)
+            thread = threading.Thread(target=_circle_loop, args=(packet,), daemon=True)
             circle_state["thread"] = thread
             thread.start()
-            handles["circle_status"].value = f"running: d={diameter:.2f}m p={period:.1f}s (both arms)"
+            handles["circle_status"].value = "running: " + message
 
         @c_stop.on_click
         def _(_: Any) -> None:

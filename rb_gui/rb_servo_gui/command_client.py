@@ -341,19 +341,38 @@ class CommandClient:
         right: bool = True,
         diameter_m: float = 0.15,
         period_sec: float = 4.0,
+        plane: str = "xy",
+        repeat: int = 50,
     ) -> dict[str, Any]:
+        # Full server-side circle payload. The server traces the whole circle
+        # autonomously over period*repeat once it receives a command; the caller
+        # must re-send THIS SAME packet (same seq) to keep it fresh — sending a
+        # new seq resets the circle to the current TCP. timeout_sec covers the
+        # full duration so the circle stays fresh between keep-alive sends.
         if not left and not right:
             raise ValueError("at least one arm is required for TcpCircleMove")
-        arm = {"mode": "TcpCircleMove", "diameter_m": float(diameter_m), "period_sec": float(period_sec)}
+        duration_sec = float(period_sec) * int(repeat)
+        arm = {
+            "mode": "TcpCircleMove",
+            "command_family": "server_circle",
+            "plane": str(plane),
+            "diameter_m": float(diameter_m),
+            "period_sec": float(period_sec),
+            "repeat": int(repeat),
+            "phase_advance_sec": 0.0,
+            "center_mode": "start_on_circle",
+            "orientation_mode": "constant",
+            "frame": "stand",
+        }
         packet: dict[str, Any] = {
             "schema_version": 1,
             "seq": self.next_seq(),
             "mode": "TcpCircleMove" if left and right else "Hold",
             "host_time_ns": time.monotonic_ns(),
-            "timeout_sec": 0.3,
+            "timeout_sec": max(0.2, duration_sec + 0.2),
             "coupled_timeout": True,
-            "left": dict(arm) if left else {},
-            "right": dict(arm) if right else {},
+            "left": dict(arm) if left else {"mode": "Hold"},
+            "right": dict(arm) if right else {"mode": "Hold"},
         }
         return self._with_source(packet)
 
