@@ -54,11 +54,20 @@ server refuses real:
 
 ## Phased implementation (ORDER MATTERS — safety first)
 
-- **C-phase-1 (safe now, no dependency):** derive the controller-sim carve-out
-  env gates from `operation_mode==simulation` and DELETE those env checks.
-  pgmode-sim then runs from config alone (no RB_ALLOW_RBPODO_*_CONTROLLER_SIM /
-  PGMODE_CONFIRMED / ACK_DISABLED env). Simplifies the launcher env. Real env
-  gates (REAL_ROBOT/MOTION/CARTESIAN) stay UNCHANGED in this phase.
+- **C-phase-1 (DONE — commit bd12a62):** controller-sim carve-out now derived
+  from `operation_mode==simulation` + the `servo.allow_controller_simulation_*` /
+  `cartesian_control.allow_in_controller_simulation` config flags; the 9
+  controller-sim env checks deleted from source, tests, and the pgmode-sim
+  launcher (CONTROLLER_SIM_MOTION/CARTESIAN, PGMODE_CONFIRMED, DIAGNOSTICS_SUSPECT,
+  INIT_ERROR, NOT_ACTIVATED, ASYNC_STREAMING, SOCKET_SEND_ONLY, and ACK_DISABLED
+  for the controller-sim path only). Plumbed two new BackendConfig flags
+  (allow_controller_simulation_diagnostics_suspect / _init_error) from servo.* so
+  the per-arm backend keeps granular consent. Real stays byte-identical:
+  REAL_ROBOT/MOTION/CARTESIAN unchanged; genuine-real ACK-off still needs
+  RB_ALLOW_RBPODO_ACK_DISABLED_MOTION at config-load AND runtime. Validated:
+  ctest 15/15 + live dual-VM smoke with no controller-sim env (config validation
+  passed, both arms connected, overrides activated from config flags). The
+  launcher still exports REAL_ROBOT/MOTION (retired only in C-phase-2).
 - **B (safety subsystems):** build + validate the 4 safety subsystems in sim.
 - **C-phase-2 (after B):** replace the real env gates with config `run_mode:real`
   + the mandatory safety self-test + the GUI arm action. Update all real configs,
