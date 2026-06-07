@@ -1,0 +1,8 @@
+{
+  "created_at": "2026-06-06T11:27:31.774708+00:00",
+  "failed_runs": [],
+  "label": "imitation_official",
+  "rows": [],
+  "schema": "robotics_lab.policy_runner.imitation_combined_leaderboard.v1",
+  "source_reports": []
+}

@@ -1,0 +1,109 @@
+{
+  "backbone": "dinov3_convnext_tiny",
+  "checkpoint_path": "/outputs/flow_runs/imitation_dinov3_20epoch_primary_structured/structured_dinov3_convnext_tiny/checkpoint.pt",
+  "checkpoint_sha256": "612571840487e00f83e7c38b9df2e58c412b6d763fa238317d2cd34ba35ed710",
+  "family": "arm_structured_direct",
+  "gpu_info": {
+    "cuda_available": true,
+    "cuda_device_count": 1,
+    "cuda_visible_devices": "1",
+    "devices": [
+      {
+        "index": 0,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      }
+    ],
+    "nvidia_smi": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 1025, 14\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 1029, 12\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, 0, 0\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, 0, 0\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, 0, 0\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, 0, 0"
+  },
+  "latency": {
+    "median_ms": 1.9729530031327158,
+    "p95_ms": 2.0039875496877357
+  },
+  "loss_name": "mse",
+  "metrics": {
+    "action_mse": 1.1712351143285789,
+    "by_phase": {
+      "left_pick": {
+        "action_mse": 1.3168724405655856,
+        "normalized_action_mse": 0.9698529875475095
+      },
+      "left_place": {
+        "action_mse": 1.958297821991137,
+        "normalized_action_mse": 1.442251302905366
+      },
+      "right_pick": {
+        "action_mse": 0.06253578660326234,
+        "normalized_action_mse": 0.04605648777930124
+      },
+      "right_place": {
+        "action_mse": 1.3588039822451112,
+        "normalized_action_mse": 1.000734817645567
+      }
+    },
+    "gripper_mse": 8.198563062951433,
+    "inactive_arm_leakage": 0.0022402974534589722,
+    "normalized_action_mse": 0.8625937028982477,
+    "rotation_endpoint_error": 0.006799593865929935,
+    "smoothness": 0.483187289577977,
+    "translation_endpoint_error": 0.0016758663942390154
+  },
+  "model": "structured_dinov3_convnext_tiny",
+  "shortcut_ablations": {
+    "image_shuffle": {
+      "action_mse": 1.2643573362912675,
+      "by_phase": {
+        "left_pick": {
+          "action_mse": 1.3675067499546214,
+          "normalized_action_mse": 1.0071442503309191
+        },
+        "left_place": {
+          "action_mse": 2.0154585936552145,
+          "normalized_action_mse": 1.4843491883657958
+        },
+        "right_pick": {
+          "action_mse": 0.10409185023146356,
+          "normalized_action_mse": 0.07666178501159462
+        },
+        "right_place": {
+          "action_mse": 1.5824473909530898,
+          "normalized_action_mse": 1.165444186145666
+        }
+      },
+      "gripper_mse": 8.850410031173418,
+      "inactive_arm_leakage": 0.0024438256872526946,
+      "normalized_action_mse": 0.931176552987195,
+      "rotation_endpoint_error": 0.0070307827014075945,
+      "smoothness": 0.45037243447833725,
+      "translation_endpoint_error": 0.0019401520207713106
+    },
+    "zero_image": {
+      "action_mse": 1.525626410904096,
+      "by_phase": {
+        "left_pick": {
+          "action_mse": 1.472367697762644,
+          "normalized_action_mse": 1.0843724619449424
+        },
+        "left_place": {
+          "action_mse": 2.7299817244686273,
+          "normalized_action_mse": 2.010582688091523
+        },
+        "right_pick": {
+          "action_mse": 0.16143043160743425,
+          "normalized_action_mse": 0.11889062414299686
+        },
+        "right_place": {
+          "action_mse": 1.7548408235434105,
+          "normalized_action_mse": 1.292408864333846
+        }
+      },
+      "gripper_mse": 10.679274564898273,
+      "inactive_arm_leakage": 0.003999721287184524,
+      "normalized_action_mse": 1.1235965511293042,
+      "rotation_endpoint_error": 0.007857507627119089,
+      "smoothness": 0.7441905432335298,
+      "translation_endpoint_error": 0.002402889325514109
+    }
+  },
+  "training_curves": "/outputs/flow_runs/imitation_dinov3_20epoch_primary_structured/structured_dinov3_convnext_tiny/training_curves.jsonl",
+  "wall_time_sec": 1845.1956539870007
+}

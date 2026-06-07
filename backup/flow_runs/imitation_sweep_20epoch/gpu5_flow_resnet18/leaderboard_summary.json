@@ -1,0 +1,230 @@
+{
+  "args": {
+    "action_horizon": 16,
+    "batch_size": 32,
+    "camera_names": [
+      "left_realsense_color",
+      "right_realsense_color"
+    ],
+    "data_dir": "/data/policy_episodes",
+    "device": "cuda",
+    "epochs": 20,
+    "exclude_camera_names": [
+      "left_realsense_depth",
+      "right_realsense_depth"
+    ],
+    "flow_sample_steps": 8,
+    "hidden_dim": 128,
+    "image_size": 128,
+    "lr": 0.0001,
+    "max_train_samples": null,
+    "max_val_samples": null,
+    "models": [
+      "flow_resnet18"
+    ],
+    "seed": 0
+  },
+  "baseline_comparison": {
+    "best_minus_state_only_normalized_mse": null,
+    "best_minus_train_mean_normalized_mse": null,
+    "best_minus_zero_normalized_mse": null
+  },
+  "created_at": "2026-06-06T11:25:24.147543+00:00",
+  "dataset": {
+    "detected_cameras": [
+      "left_realsense_color",
+      "left_realsense_depth",
+      "right_realsense_color",
+      "right_realsense_depth"
+    ],
+    "detected_formats": [
+      "pika_umi_bimanual"
+    ],
+    "frame_count": 42435,
+    "sessions": [
+      "data_20260606_134608",
+      "data_20260606_140442",
+      "data_20260606_140813",
+      "data_20260606_175002",
+      "data_20260606_175635",
+      "data_20260606_183038",
+      "data_20260606_185446",
+      "data_20260606_190156"
+    ],
+    "snapshot_hash": "532de3a1c38a4b3f12dcc875d928f723d798a1ee0edf02b99e857d2483e9f9ce",
+    "snapshot_path": "/outputs/flow_runs/imitation_official/dataset_snapshot.json",
+    "valid_episode_count": 146
+  },
+  "failed_runs": [],
+  "leaderboard": [
+    {
+      "action_mse": 1.1598106133045247,
+      "backbone": "resnet18",
+      "checkpoint_sha256": "df626f738c698b5fd47b19b854c1bb7d18f3365e9d1c9a624a72d0acf4c4487d",
+      "family": "flow_matching",
+      "gripper_mse": 8.118584766336438,
+      "inactive_arm_leakage": 0.002336570878924306,
+      "latency": {
+        "median_ms": 11.737593507859856,
+        "p95_ms": 11.794465201091953
+      },
+      "loss_name": null,
+      "model": "flow_resnet18",
+      "normalized_action_mse": 0.8541797623311114,
+      "rank": 1,
+      "rotation_endpoint_error": 0.006993046149250579,
+      "translation_endpoint_error": 0.0018513631406520158,
+      "wall_time_sec": 1830.928767386009
+    }
+  ],
+  "normalization": {
+    "action_dim_names": [
+      "left_dx",
+      "left_dy",
+      "left_dz",
+      "left_drx",
+      "left_dry",
+      "left_drz",
+      "left_grip",
+      "right_dx",
+      "right_dy",
+      "right_dz",
+      "right_drx",
+      "right_dry",
+      "right_drz",
+      "right_grip"
+    ],
+    "path": "/outputs/flow_runs/imitation_sweep_20epoch/gpu5_flow_resnet18/train_dataset_stats.json",
+    "sample_count": 32112,
+    "source": "train_only",
+    "train_episode_count": 117
+  },
+  "output_dir": "/outputs/flow_runs/imitation_sweep_20epoch/gpu5_flow_resnet18",
+  "recommendation": "Next rollout candidate for simulator dry-run is `flow_resnet18` from family `flow_matching`.",
+  "results": [
+    {
+      "backbone": "resnet18",
+      "checkpoint_path": "/outputs/flow_runs/imitation_sweep_20epoch/gpu5_flow_resnet18/flow_resnet18/checkpoint.pt",
+      "checkpoint_sha256": "df626f738c698b5fd47b19b854c1bb7d18f3365e9d1c9a624a72d0acf4c4487d",
+      "family": "flow_matching",
+      "gpu_info": {
+        "cuda_available": true,
+        "cuda_device_count": 1,
+        "cuda_visible_devices": "",
+        "devices": [
+          {
+            "index": 0,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          }
+        ],
+        "nvidia_smi": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0"
+      },
+      "latency": {
+        "median_ms": 11.737593507859856,
+        "p95_ms": 11.794465201091953
+      },
+      "metrics": {
+        "action_mse": 1.1598106133045247,
+        "by_phase": {
+          "left_pick": {
+            "action_mse": 1.2357900228058998,
+            "normalized_action_mse": 0.9101372378063788
+          },
+          "left_place": {
+            "action_mse": 1.9912991981578492,
+            "normalized_action_mse": 1.4665562259051355
+          },
+          "right_pick": {
+            "action_mse": 0.09808291260612671,
+            "normalized_action_mse": 0.07223630997817636
+          },
+          "right_place": {
+            "action_mse": 1.3257098659937698,
+            "normalized_action_mse": 0.9763615932330165
+          }
+        },
+        "gripper_mse": 8.118584766336438,
+        "inactive_arm_leakage": 0.002336570878924306,
+        "normalized_action_mse": 0.8541797623311114,
+        "rotation_endpoint_error": 0.006993046149250579,
+        "smoothness": 0.11219610094198236,
+        "translation_endpoint_error": 0.0018513631406520158
+      },
+      "model": "flow_resnet18",
+      "shortcut_ablations": {
+        "image_shuffle": {
+          "action_mse": 1.189192114314052,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 1.2469674762385647,
+              "normalized_action_mse": 0.918369232243279
+            },
+            "left_place": {
+              "action_mse": 2.042797542071478,
+              "normalized_action_mse": 1.5044838346543403
+            },
+            "right_pick": {
+              "action_mse": 0.11431017808188243,
+              "normalized_action_mse": 0.08418740062035646
+            },
+            "right_place": {
+              "action_mse": 1.364605034284442,
+              "normalized_action_mse": 1.005007188664925
+            }
+          },
+          "gripper_mse": 8.324252750215194,
+          "inactive_arm_leakage": 0.002456394510267703,
+          "normalized_action_mse": 0.8758187120538966,
+          "rotation_endpoint_error": 0.007077730755323323,
+          "smoothness": 0.10941338602929684,
+          "translation_endpoint_error": 0.0019509744910172133
+        },
+        "zero_image": {
+          "action_mse": 1.2888225914956897,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 1.3381120085395406,
+              "normalized_action_mse": 0.9854955492863757
+            },
+            "left_place": {
+              "action_mse": 2.187132383639711,
+              "normalized_action_mse": 1.6107838626525157
+            },
+            "right_pick": {
+              "action_mse": 0.09301494506562648,
+              "normalized_action_mse": 0.06850384257394021
+            },
+            "right_place": {
+              "action_mse": 1.5501702324431637,
+              "normalized_action_mse": 1.1416726364905212
+            }
+          },
+          "gripper_mse": 9.021642560884963,
+          "inactive_arm_leakage": 0.005795500751395169,
+          "normalized_action_mse": 0.9491947756488601,
+          "rotation_endpoint_error": 0.00791757582163629,
+          "smoothness": 0.05479030558036189,
+          "translation_endpoint_error": 0.0033337013802771085
+        }
+      },
+      "training_curves": "/outputs/flow_runs/imitation_sweep_20epoch/gpu5_flow_resnet18/flow_resnet18/training_curves.jsonl",
+      "wall_time_sec": 1830.928767386009
+    }
+  ],
+  "safety": {
+    "real_mode_behavior_touched": false,
+    "robot_motion_commands_sent": false,
+    "scope": "offline HDF5 imitation-learning experiment only"
+  },
+  "schema": "robotics_lab.policy_runner.imitation_report.v1",
+  "split": {
+    "session_holdout_val_episode_count": 50,
+    "split_algorithm": "session_stratified_episode",
+    "split_hash": "93ac654ea69705f967546f011fecc2efdb4047fc92590928b54c7708a061e7dc",
+    "split_path": "/outputs/flow_runs/imitation_official/split_manifest.json",
+    "train_episode_count": 117,
+    "val_ratio": 0.2,
+    "validation_episode_count": 29
+  },
+  "warnings": []
+}

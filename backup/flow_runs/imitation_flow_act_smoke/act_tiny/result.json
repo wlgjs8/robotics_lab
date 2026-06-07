@@ -1,0 +1,136 @@
+{
+  "backbone": "tiny_cnn",
+  "checkpoint_path": "/outputs/flow_runs/imitation_flow_act_smoke/act_tiny/checkpoint.pt",
+  "checkpoint_sha256": "a05151ba5c00e31325a923f538b7f0a55b5d9a46d125d0713d0238404801f31c",
+  "family": "act_style_transformer_chunk",
+  "gpu_info": {
+    "cuda_available": true,
+    "cuda_device_count": 8,
+    "cuda_visible_devices": "",
+    "devices": [
+      {
+        "index": 0,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 1,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 2,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 3,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 4,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 5,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 6,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 7,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      }
+    ],
+    "nvidia_smi": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0"
+  },
+  "latency": {
+    "median_ms": 0.8414419862674549,
+    "p95_ms": 1.3038868972216733
+  },
+  "metrics": {
+    "action_mse": 0.023889967243173865,
+    "by_phase": {
+      "left_pick": {
+        "action_mse": 0.0,
+        "normalized_action_mse": 0.0
+      },
+      "left_place": {
+        "action_mse": 0.0,
+        "normalized_action_mse": 0.0
+      },
+      "right_pick": {
+        "action_mse": 0.023889967243173865,
+        "normalized_action_mse": 1.1496824077365575
+      },
+      "right_place": {
+        "action_mse": 0.0,
+        "normalized_action_mse": 0.0
+      }
+    },
+    "gripper_mse": 0.16698291605860774,
+    "inactive_arm_leakage": 0.005698292821762152,
+    "normalized_action_mse": 1.1496824077365575,
+    "rotation_endpoint_error": 0.012298865987915747,
+    "smoothness": 0.4385817838566644,
+    "translation_endpoint_error": 0.0027109417831671146
+  },
+  "model": "act_tiny",
+  "shortcut_ablations": {
+    "image_shuffle": {
+      "action_mse": 0.023882195419139517,
+      "by_phase": {
+        "left_pick": {
+          "action_mse": 0.0,
+          "normalized_action_mse": 0.0
+        },
+        "left_place": {
+          "action_mse": 0.0,
+          "normalized_action_mse": 0.0
+        },
+        "right_pick": {
+          "action_mse": 0.023882195419139517,
+          "normalized_action_mse": 1.1493083959483719
+        },
+        "right_place": {
+          "action_mse": 0.0,
+          "normalized_action_mse": 0.0
+        }
+      },
+      "gripper_mse": 0.16692851498676373,
+      "inactive_arm_leakage": 0.005698293098248541,
+      "normalized_action_mse": 1.1493083959483719,
+      "rotation_endpoint_error": 0.012298694231536175,
+      "smoothness": 0.43858316221407484,
+      "translation_endpoint_error": 0.002710928303173599
+    },
+    "zero_image": {
+      "action_mse": 0.023838036087480977,
+      "by_phase": {
+        "left_pick": {
+          "action_mse": 0.0,
+          "normalized_action_mse": 0.0
+        },
+        "left_place": {
+          "action_mse": 0.0,
+          "normalized_action_mse": 0.0
+        },
+        "right_pick": {
+          "action_mse": 0.023838036087480977,
+          "normalized_action_mse": 1.1471832692695259
+        },
+        "right_place": {
+          "action_mse": 0.0,
+          "normalized_action_mse": 0.0
+        }
+      },
+      "gripper_mse": 0.16661894400870492,
+      "inactive_arm_leakage": 0.005695215702871792,
+      "normalized_action_mse": 1.1471832692695259,
+      "rotation_endpoint_error": 0.012315849321520531,
+      "smoothness": 0.4386775163667543,
+      "translation_endpoint_error": 0.0027109680666721845
+    }
+  },
+  "training_curves": "/outputs/flow_runs/imitation_flow_act_smoke/act_tiny/training_curves.jsonl",
+  "wall_time_sec": 1.0082715180178639
+}

@@ -1,0 +1,176 @@
+{
+  "action_distribution_percentiles": {
+    "left_drx": {
+      "p01": -0.009552760981023312,
+      "p05": -0.009143554582260549,
+      "p50": 0.00520645035430789,
+      "p95": 0.014236046420410268,
+      "p99": 0.014428558759391308
+    },
+    "left_dry": {
+      "p01": -0.009941350668668747,
+      "p05": -0.009540248732082545,
+      "p50": 0.001963168557267636,
+      "p95": 0.004812134429812431,
+      "p99": 0.0065154447220265865
+    },
+    "left_drz": {
+      "p01": -0.01335538923740387,
+      "p05": -0.013033973705023526,
+      "p50": -0.003210362745448947,
+      "p95": 0.006809246051125227,
+      "p99": 0.006845520343631506
+    },
+    "left_dx": {
+      "p01": 3.08823585510254e-05,
+      "p05": 0.00045827329158782965,
+      "p50": 0.0012220144271850586,
+      "p95": 0.00281201750040054,
+      "p99": 0.002894669771194458
+    },
+    "left_dy": {
+      "p01": -0.0008392333984375,
+      "p05": -0.0007863044738769531,
+      "p50": 0.0004210472106933594,
+      "p95": 0.0018496811389923083,
+      "p99": 0.0018869638442993164
+    },
+    "left_dz": {
+      "p01": -0.0016069698333740234,
+      "p05": -0.001489877700805664,
+      "p50": -0.00047659873962402344,
+      "p95": 0.0013063549995422363,
+      "p99": 0.0013079643249511719
+    },
+    "left_grip": {
+      "p01": -0.445404052734375,
+      "p05": -0.445404052734375,
+      "p50": 0.0,
+      "p95": 0.445404052734375,
+      "p99": 0.445404052734375
+    },
+    "right_drx": {
+      "p01": -0.006483329460024834,
+      "p05": -0.005863060348201542,
+      "p50": 0.004588109441101551,
+      "p95": 0.019677977357059707,
+      "p99": 0.01994561403989792
+    },
+    "right_dry": {
+      "p01": -0.006273647304624319,
+      "p05": -0.006041956203989684,
+      "p50": 0.004533001687377691,
+      "p95": 0.01276433002203703,
+      "p99": 0.014242344535887241
+    },
+    "right_drz": {
+      "p01": -0.01671108789741993,
+      "p05": -0.016670354083180426,
+      "p50": -0.005017234943807125,
+      "p95": 0.0017994734348576336,
+      "p99": 0.005679648811928912
+    },
+    "right_dx": {
+      "p01": 0.002351425588130951,
+      "p05": 0.002402670681476593,
+      "p50": 0.0037379134446382523,
+      "p95": 0.004943987727165221,
+      "p99": 0.004974439740180969
+    },
+    "right_dy": {
+      "p01": -0.0014719021320343017,
+      "p05": -0.0012766122817993164,
+      "p50": 0.00020599365234375,
+      "p95": 0.0021234631538391106,
+      "p99": 0.0021430253982543945
+    },
+    "right_dz": {
+      "p01": -0.0026453351974487305,
+      "p05": -0.0016875267028808594,
+      "p50": 0.0030176639556884766,
+      "p95": 0.005005478858947754,
+      "p99": 0.0050122737884521484
+    },
+    "right_grip": {
+      "p01": -0.16740219116210936,
+      "p05": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0
+    }
+  },
+  "artifacts": {
+    "dataset_stats": "dataset_stats.json",
+    "training_curves": "/outputs/flow_runs/smoke_tiny_gpu0/training_curves.jsonl"
+  },
+  "checkpoint": {
+    "path": "/outputs/flow_runs/smoke_tiny_gpu0/flow_policy.pt",
+    "schema": "robotics_lab.policy_runner.flow_matching.v1",
+    "sha256": "3c53cf59b41e99ff8eaded69baf979086fbad8c28282f2877b8651f718106abc"
+  },
+  "dataset": {
+    "action_horizon": 4,
+    "arm_mask_counts": {
+      "left": 16,
+      "right": 16
+    },
+    "camera_names": [
+      "left_realsense_color",
+      "right_realsense_color"
+    ],
+    "dt_mean_sec": 0.03340245672019131,
+    "dt_p50_sec": 0.03339123725891113,
+    "episode_count": 1,
+    "formats": [
+      "pika_umi_bimanual"
+    ],
+    "frame_count": 416,
+    "image_decode_count": 32,
+    "missing_camera_count": 0,
+    "sample_count": 412,
+    "stats_sample_count": 16
+  },
+  "schema": "robotics_lab.policy_runner.flow_eval_summary.v1",
+  "training_args": {
+    "batch_size": 2,
+    "camera_names": [
+      "left_realsense_color",
+      "right_realsense_color"
+    ],
+    "condition_encoder": "mlp",
+    "dataset_manifest": null,
+    "episodes_dir": "/data/policy_episodes",
+    "epochs": 1,
+    "exclude_camera_names": [
+      "left_realsense_depth",
+      "right_realsense_depth"
+    ],
+    "frozen_vision": true,
+    "hidden_dim": 32,
+    "lr": 0.0001,
+    "max_episodes": 1,
+    "sample_steps": 1,
+    "single_arm_side": "left",
+    "val_split": 0.2,
+    "vision_backbone": "tiny_cnn"
+  },
+  "validation": {
+    "action_mse": 0.9668615220945316,
+    "chunk_endpoint_error": 0.011512256823707281,
+    "gripper_mse": 6.767853089846762,
+    "image_decode_count": 164.0,
+    "missing_camera_count": 0.0
+  },
+  "warnings": {
+    "audit": [
+      "deployment_blocker: retarget_required: pose_frame steamvr_world must have measured or accepted retarget metadata to stand before physical real policy rollout; status=missing",
+      "action_matches_observation_pose: left action pose columns are identical to current pose",
+      "action_matches_observation_pose: right action pose columns are identical to current pose"
+    ],
+    "audit_deployment_blocker_count": 43,
+    "audit_warning_count": 129,
+    "deployment_blockers": [
+      "retarget_required: pose_frame steamvr_world must have measured or accepted retarget metadata to stand before physical real policy rollout; status=missing"
+    ]
+  }
+}
