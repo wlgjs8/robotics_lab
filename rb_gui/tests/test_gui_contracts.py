@@ -1388,6 +1388,45 @@ class GuiContractsTest(unittest.TestCase):
         ok, msg = safety.send_joint_velocity("left", (5.0, 0.0, 0.0, 0.0, 0.0, 0.0))
         self.assertFalse(ok)
 
+    def test_tcp_circle_move_in_controller_sim(self):
+        state = self.tcp_available_state()
+        _, client, safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="rbpodo",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+            enable_controller_sim_cartesian=True,
+        )
+        ok, msg = safety.send_tcp_circle_move(0.15, 4.0, arm="both")
+        self.assertTrue(ok, msg)
+        pkt = client.sent_packets[-1]
+        self.assertEqual(pkt["mode"], "TcpCircleMove")
+        self.assertEqual(pkt["left"]["mode"], "TcpCircleMove")
+        self.assertEqual(pkt["left"]["diameter_m"], 0.15)
+        self.assertEqual(pkt["left"]["period_sec"], 4.0)
+        self.assertEqual(pkt["right"]["diameter_m"], 0.15)
+        ok, msg = safety.send_tcp_circle_move(0.5, 4.0)
+        self.assertFalse(ok)
+        self.assertIn("diameter", msg)
+        ok, msg = safety.send_tcp_circle_move(0.15, 1.0)
+        self.assertFalse(ok)
+        self.assertIn("period", msg)
+        _, _, real_safety = self.make_safety(
+            state,
+            desired="real",
+            observed="real",
+            observed_backend="rbpodo",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+            enable_controller_sim_cartesian=True,
+        )
+        ok, msg = real_safety.send_tcp_circle_move(0.15, 4.0)
+        self.assertFalse(ok)
+
     def test_tcp_delta_stand_blocks_stale_and_faulted_state(self):
         state = self.tcp_available_state()
         _, client, stale_safety = self.make_safety(

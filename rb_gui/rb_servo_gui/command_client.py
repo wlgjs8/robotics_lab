@@ -334,6 +334,29 @@ class CommandClient:
             packet["right"] = {"mode": "JointVelocity", "dq_target_deg_s": self._finite_six(right_velocity, "right joint velocity")}
         return self._with_source(packet)
 
+    def build_tcp_circle_move(
+        self,
+        *,
+        left: bool = True,
+        right: bool = True,
+        diameter_m: float = 0.15,
+        period_sec: float = 4.0,
+    ) -> dict[str, Any]:
+        if not left and not right:
+            raise ValueError("at least one arm is required for TcpCircleMove")
+        arm = {"mode": "TcpCircleMove", "diameter_m": float(diameter_m), "period_sec": float(period_sec)}
+        packet: dict[str, Any] = {
+            "schema_version": 1,
+            "seq": self.next_seq(),
+            "mode": "TcpCircleMove" if left and right else "Hold",
+            "host_time_ns": time.monotonic_ns(),
+            "timeout_sec": 0.3,
+            "coupled_timeout": True,
+            "left": dict(arm) if left else {},
+            "right": dict(arm) if right else {},
+        }
+        return self._with_source(packet)
+
     def send(self, packet: Mapping[str, Any]) -> None:
         payload = json.dumps(packet, separators=(",", ":")).encode("utf-8")
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:

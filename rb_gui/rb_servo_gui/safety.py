@@ -467,6 +467,41 @@ class OperatorSafety:
         verdict = latest.safety_verdict if latest is not None else "unavailable"
         return True, f"sent JointVelocity {arm}; server verdict: {verdict}"
 
+    def send_tcp_circle_move(
+        self,
+        diameter_m: float = 0.15,
+        period_sec: float = 4.0,
+        *,
+        arm: Literal["left", "right", "both"] = "both",
+    ) -> tuple[bool, str]:
+        arms = ("left", "right") if arm == "both" else (arm,)
+        for one in arms:
+            reason = self.tcp_command_disabled_reason(one)  # type: ignore[arg-type]
+            if reason:
+                return False, reason
+        try:
+            diameter = float(diameter_m)
+            period = float(period_sec)
+        except (TypeError, ValueError):
+            return False, "non-finite circle parameters rejected"
+        if not (math.isfinite(diameter) and math.isfinite(period)):
+            return False, "non-finite circle parameters rejected"
+        if diameter <= 0.0 or diameter > 0.20:
+            return False, "circle diameter must be in (0, 0.20] m"
+        if period < 3.0:
+            return False, "circle period must be >= 3.0 s"
+        packet = self.command_client.build_tcp_circle_move(
+            left=arm in {"left", "both"},
+            right=arm in {"right", "both"},
+            diameter_m=diameter,
+            period_sec=period,
+        )
+        self.command_client.send(packet)
+        self.last_tcp_command = f"TcpCircleMove {arm} d={diameter:.3f}m p={period:.2f}s"
+        latest = self.latest_valid()
+        verdict = latest.safety_verdict if latest is not None else "unavailable"
+        return True, f"sent {self.last_tcp_command}; server verdict: {verdict}"
+
     def send_tcp_pose_target(
         self,
         *,
