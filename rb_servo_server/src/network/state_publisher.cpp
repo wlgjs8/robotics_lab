@@ -805,6 +805,24 @@ bool isCartesianMode(ControlMode mode) {
            mode == ControlMode::TcpTwistLocal;
 }
 
+bool controllerSimulationCartesianGateOpen(
+    const CartesianControlConfig& cartesian_config,
+    const ServoConfig& servo_config,
+    const BackendConfig& backend_config
+) {
+    return cartesian_config.enable &&
+        cartesian_config.allow_in_controller_simulation &&
+        servo_config.allow_controller_simulation_motion &&
+        backend_config.backend_type == BackendType::Rbpodo &&
+        backend_config.run_mode == RunMode::Real &&
+        isRbpodoControllerSimulation(backend_config) &&
+        envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
+        envFlagEnabled("RB_ALLOW_REAL_MOTION") &&
+        envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
+        envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN") &&
+        envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+}
+
 std::string commandFamilyString(ControlMode mode) {
     switch (mode) {
         case ControlMode::TcpCircleMove:
@@ -829,6 +847,7 @@ std::string cartesianGateUnavailableReason(
         return "tcp_circle_track_disabled";
     }
     const bool streaming = isStreamingCartesianMode(command_mode);
+    const bool cartesian = isCartesianMode(command_mode);
     if (backend_config.run_mode == RunMode::Simulation) {
         return cartesian_config.allow_in_simulation
             ? ""
@@ -837,7 +856,17 @@ std::string cartesianGateUnavailableReason(
     if (backend_config.run_mode != RunMode::Real) {
         return "cartesian_control_unavailable_run_mode";
     }
-    if (!streaming) {
+    const bool rbpodo_controller_simulation_operation =
+        backend_config.backend_type == BackendType::Rbpodo &&
+        isRbpodoControllerSimulation(backend_config);
+    const bool controller_simulation_cartesian_context =
+        cartesian &&
+        rbpodo_controller_simulation_operation &&
+        controllerSimulationCartesianGateOpen(cartesian_config, servo_config, backend_config);
+    if (!streaming && !controller_simulation_cartesian_context) {
+        if (cartesian && rbpodo_controller_simulation_operation) {
+            return "cartesian_control_unavailable_physical_real_blocked";
+        }
         return cartesian_config.allow_in_real && envFlagEnabled("RB_ALLOW_REAL_CARTESIAN")
             ? ""
             : "cartesian_control_unavailable_physical_real_blocked";
@@ -889,9 +918,8 @@ nlohmann::json cartesianGateJson(
     }
     const bool controller_sim_cartesian_enabled =
         unavailable_reason.empty() &&
-        isStreamingCartesianMode(command_mode) &&
-        isRbpodoControllerSimulation(backend_config) &&
-        cartesian_config.allow_in_controller_simulation;
+        isCartesianMode(command_mode) &&
+        controllerSimulationCartesianGateOpen(cartesian_config, servo_config, backend_config);
     const std::string streaming_unavailable_reason = cartesianGateUnavailableReason(
         cartesian_config,
         servo_config,
@@ -900,9 +928,7 @@ nlohmann::json cartesianGateJson(
     );
     const bool controller_sim_streaming_cartesian_available =
         streaming_unavailable_reason.empty() &&
-        isRbpodoControllerSimulation(backend_config) &&
-        cartesian_config.allow_in_controller_simulation &&
-        servo_config.allow_controller_simulation_motion;
+        controllerSimulationCartesianGateOpen(cartesian_config, servo_config, backend_config);
     const bool physical_motion_expected = isRbpodoControllerSimulation(backend_config)
         ? false
         : backend_config.run_mode == RunMode::Real;

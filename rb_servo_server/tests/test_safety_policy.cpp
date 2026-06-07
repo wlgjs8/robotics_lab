@@ -860,6 +860,125 @@ rb_servo::DualArmCommand leftTcpTwistStandCommand() {
     return twist;
 }
 
+std::vector<rb_servo::ControlMode> nonStreamingCartesianModes() {
+    return {
+        rb_servo::ControlMode::TcpPoseTarget,
+        rb_servo::ControlMode::TcpDeltaStand,
+        rb_servo::ControlMode::TcpDeltaLocal,
+    };
+}
+
+rb_servo::DualArmCommand leftNonStreamingCartesianCommand(rb_servo::ControlMode mode) {
+    rb_servo::DualArmCommand cartesian = command(rb_servo::ControlMode::Hold);
+    cartesian.seq = 20 + static_cast<uint64_t>(mode);
+    cartesian.host_time_ns = rb_servo::nowSteadyNs();
+    cartesian.left.mode = mode;
+    cartesian.right.mode = rb_servo::ControlMode::Hold;
+    switch (mode) {
+        case rb_servo::ControlMode::TcpPoseTarget:
+            cartesian.left.has_tcp_target = true;
+            cartesian.left.tcp_target_stand = {0.04, 0.02, 0.01, 0.0, 0.0, 0.0};
+            break;
+        case rb_servo::ControlMode::TcpDeltaStand:
+            cartesian.left.has_tcp_delta_stand = true;
+            cartesian.left.tcp_delta_stand = {0.02, 0.0, 0.0, 0.0, 0.0, 0.0};
+            break;
+        case rb_servo::ControlMode::TcpDeltaLocal:
+            cartesian.left.has_tcp_delta_local = true;
+            cartesian.left.tcp_delta_local = {0.0, 0.02, 0.0, 0.0, 0.0, 0.0};
+            break;
+        default:
+            break;
+    }
+    return cartesian;
+}
+
+bool runLeftNonStreamingCartesianCase(
+    rb_servo::DualArmConfig cfg,
+    rb_servo::ControlMode mode,
+    rb_servo::ServoSnapshot* snapshot,
+    bool* left_ik_observed,
+    bool accept_send_without_state_update = false
+) {
+    rb_servo::CommandBuffer buffer;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left,
+            initial,
+            false,
+            rb_servo::BackendErrorKind::ControllerRejected,
+            std::nullopt,
+            accept_send_without_state_update
+        ),
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Right,
+            initial,
+            false,
+            rb_servo::BackendErrorKind::ControllerRejected,
+            std::nullopt,
+            accept_send_without_state_update
+        ),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    const rb_servo::DualArmCommand cartesian = leftNonStreamingCartesianCommand(mode);
+    buffer.setCommand(cartesian);
+    RB_CHECK(waitUntil([&] {
+        *snapshot = loop.latestSnapshot();
+        return snapshot->command.seq == cartesian.seq &&
+               snapshot->left_cartesian_solve.attempted &&
+               (snapshot->safety_verdict == rb_servo::SafetyVerdict::Ok ||
+                snapshot->safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable ||
+                snapshot->safety_verdict == rb_servo::SafetyVerdict::IkFailed);
+    }, std::chrono::milliseconds(1000)));
+    *left_ik_observed = kinematics->lastLeftTarget().has_value();
+    loop.stop();
+    return true;
+}
+
+bool checkPublishedLeftCartesianGate(
+    const rb_servo::DualArmConfig& cfg,
+    const rb_servo::ServoSnapshot& snapshot,
+    bool expected_available,
+    bool expected_controller_sim_enabled,
+    const std::string& expected_reason
+) {
+    rb_servo::StatePublisher publisher(cfg);
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    RB_CHECK(json.at("left").at("cartesian_available").get<bool>() == expected_available);
+    RB_CHECK(json.at("left").at("controller_simulation_cartesian_enabled").get<bool>() ==
+             expected_controller_sim_enabled);
+    RB_CHECK(json.at("left").at("controller_simulation_cartesian_enabled_for_current_command").get<bool>() ==
+             expected_controller_sim_enabled);
+    RB_CHECK(json.at("left").at("cartesian_gate").at("cartesian_available").get<bool>() ==
+             expected_available);
+    RB_CHECK(json.at("left").at("cartesian_gate")
+                 .at("controller_simulation_cartesian_enabled_for_current_command")
+                 .get<bool>() == expected_controller_sim_enabled);
+    if (expected_controller_sim_enabled) {
+        RB_CHECK(!json.at("left").at("physical_motion_expected").get<bool>());
+        RB_CHECK(!json.at("left").at("cartesian_gate").at("physical_motion_expected").get<bool>());
+    }
+    if (expected_reason.empty()) {
+        RB_CHECK(json.at("left").at("cartesian_unavailable_reason").is_null());
+        RB_CHECK(json.at("left").at("cartesian_gate").at("cartesian_unavailable_reason").is_null());
+    } else {
+        RB_CHECK(json.at("left").at("cartesian_unavailable_reason").get<std::string>() ==
+                 expected_reason);
+        RB_CHECK(json.at("left").at("cartesian_gate")
+                     .at("cartesian_unavailable_reason")
+                     .get<std::string>() == expected_reason);
+    }
+    return true;
+}
+
 rb_servo::DualArmCommand leftTcpCircleTrackCommand() {
     rb_servo::DualArmCommand circle = command(rb_servo::ControlMode::Hold);
     circle.seq = 2;
@@ -5632,6 +5751,118 @@ bool testRbpodoControllerSimulationStreamingCartesianGate() {
     return true;
 }
 
+bool testRbpodoControllerSimulationNonStreamingCartesianGate() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard allow_controller_sim_cartesian("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN");
+    EnvVarGuard allow_real_cartesian("RB_ALLOW_REAL_CARTESIAN");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    allow_controller_sim_cartesian.set("1");
+    allow_real_cartesian.unset();
+    pgmode_confirmed.set("1");
+
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    configureCartesianLoopTest(&cfg);
+    cfg.cartesian_control.allow_in_controller_simulation = true;
+    cfg.cartesian_control.allow_in_real = false;
+
+    for (const rb_servo::ControlMode mode : nonStreamingCartesianModes()) {
+        rb_servo::ServoSnapshot snapshot;
+        bool ik_observed = false;
+        RB_CHECK(runLeftNonStreamingCartesianCase(cfg, mode, &snapshot, &ik_observed, true));
+        RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok);
+        RB_CHECK(snapshot.left_cartesian_solve.status == "ok");
+        RB_CHECK(ik_observed);
+        RB_CHECK(checkPublishedLeftCartesianGate(cfg, snapshot, true, true, ""));
+    }
+
+    allow_controller_sim_cartesian.unset();
+    for (const rb_servo::ControlMode mode : nonStreamingCartesianModes()) {
+        rb_servo::ServoSnapshot snapshot;
+        bool ik_observed = false;
+        RB_CHECK(runLeftNonStreamingCartesianCase(cfg, mode, &snapshot, &ik_observed, true));
+        RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
+        RB_CHECK(snapshot.left_cartesian_solve.reason ==
+                 "cartesian_control_unavailable_physical_real_blocked");
+        RB_CHECK(!ik_observed);
+        RB_CHECK(checkPublishedLeftCartesianGate(
+            cfg,
+            snapshot,
+            false,
+            false,
+            "cartesian_control_unavailable_physical_real_blocked"
+        ));
+    }
+    allow_controller_sim_cartesian.set("1");
+
+    rb_servo::DualArmConfig physical_real_cfg = cfg;
+    physical_real_cfg.left_robot.operation_mode = "real";
+    physical_real_cfg.right_robot.operation_mode = "real";
+    physical_real_cfg.cartesian_control.allow_in_real = true;
+    allow_real_cartesian.unset();
+    for (const rb_servo::ControlMode mode : nonStreamingCartesianModes()) {
+        rb_servo::ServoSnapshot snapshot;
+        bool ik_observed = false;
+        RB_CHECK(runLeftNonStreamingCartesianCase(
+            physical_real_cfg,
+            mode,
+            &snapshot,
+            &ik_observed,
+            true
+        ));
+        RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
+        RB_CHECK(snapshot.left_cartesian_solve.reason ==
+                 "cartesian_control_unavailable_physical_real_blocked");
+        RB_CHECK(!ik_observed);
+        RB_CHECK(checkPublishedLeftCartesianGate(
+            physical_real_cfg,
+            snapshot,
+            false,
+            false,
+            "cartesian_control_unavailable_physical_real_blocked"
+        ));
+    }
+
+    allow_real_cartesian.set("1");
+    for (const rb_servo::ControlMode mode : nonStreamingCartesianModes()) {
+        rb_servo::ServoSnapshot snapshot;
+        bool ik_observed = false;
+        RB_CHECK(runLeftNonStreamingCartesianCase(
+            physical_real_cfg,
+            mode,
+            &snapshot,
+            &ik_observed,
+            true
+        ));
+        RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok);
+        RB_CHECK(snapshot.left_cartesian_solve.status == "ok");
+        RB_CHECK(ik_observed);
+        RB_CHECK(checkPublishedLeftCartesianGate(physical_real_cfg, snapshot, true, false, ""));
+    }
+    allow_real_cartesian.unset();
+
+    rb_servo::DualArmConfig simulation_cfg = testConfig();
+    simulation_cfg.left_robot.run_mode = rb_servo::RunMode::Simulation;
+    simulation_cfg.right_robot.run_mode = rb_servo::RunMode::Simulation;
+    configureCartesianLoopTest(&simulation_cfg);
+    for (const rb_servo::ControlMode mode : nonStreamingCartesianModes()) {
+        rb_servo::ServoSnapshot snapshot;
+        bool ik_observed = false;
+        RB_CHECK(runLeftNonStreamingCartesianCase(simulation_cfg, mode, &snapshot, &ik_observed));
+        RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok);
+        RB_CHECK(snapshot.left_cartesian_solve.status == "ok");
+        RB_CHECK(ik_observed);
+        RB_CHECK(checkPublishedLeftCartesianGate(simulation_cfg, snapshot, true, false, ""));
+    }
+
+    return true;
+}
+
 bool testTcpCircleMoveSimulationOnlyAndConfigGated() {
     rb_servo::CommandBuffer disabled_buffer;
     rb_servo::DualArmConfig cfg = testConfig();
@@ -6492,6 +6723,7 @@ int main() {
     if (!testStreamingCartesianSimulationStillAvailable()) return 1;
     if (!testRbpodoControllerSimulationStartupReferenceSource()) return 1;
     if (!testRbpodoControllerSimulationStreamingCartesianGate()) return 1;
+    if (!testRbpodoControllerSimulationNonStreamingCartesianGate()) return 1;
     if (!testTcpCircleMoveSimulationOnlyAndConfigGated()) return 1;
     if (!testTcpCircleTrackSkeletonRejectsDisabledIncompleteAndPhysicalReal()) return 1;
     if (!testCartesianDeltaStandAndLocalUseIkInSimulation()) return 1;

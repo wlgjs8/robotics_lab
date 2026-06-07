@@ -340,7 +340,19 @@ CartesianAvailability cartesianAvailabilityForArm(
         return availability;
     }
 
-    if (!streaming_cartesian && !controller_simulation_circle_move) {
+    const bool rbpodo_controller_simulation_operation =
+        isRbpodoControllerSimulationBackend(backend);
+    const bool controller_simulation_cartesian_context =
+        rbpodo_controller_simulation_operation &&
+        controllerSimulationCartesianGateOpen(config, backend);
+
+    if (!streaming_cartesian &&
+        !controller_simulation_circle_move &&
+        !controller_simulation_cartesian_context) {
+        if (rbpodo_controller_simulation_operation) {
+            availability.reason = "cartesian_control_unavailable_physical_real_blocked";
+            return availability;
+        }
         availability.available =
             config.cartesian_control.allow_in_real &&
             envFlagEnabled("RB_ALLOW_REAL_CARTESIAN");
