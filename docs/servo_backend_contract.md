@@ -167,6 +167,21 @@ otherwise valid, but they do make the state motion-unsafe and block
 Garbage-looking raw flag values must be kept in `rbpodo_diagnostics.raw` rather
 than used as the sole controller `error_code`.
 
+Rainbow Virtual ControlBox controller-simulation targets may permanently
+report `init_error != 0` and `init_state_info != 6` even while accepting
+simulation `move_servo_j` commands and updating controller reference joints.
+The server may tolerate only that controller-simulation shape when all gates
+are open: `operation_mode: simulation`,
+`servo.allow_controller_simulation_motion: true`,
+`servo.allow_controller_simulation_init_error: true`,
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1`,
+`RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1`, and
+`RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM=1`, plus the normal real-controller
+connection/motion env gates required for rbpodo controller simulation. The
+tolerance is limited to `diagnostic_error_source == "rbpodo_init_error"` with
+startup invalid reasons confined to `robot_fault` and `servo_disabled`; it is
+not physical real-motion acceptance.
+
 Raw controller joint angles may use continuous or wrapped representations. When
 `safety.joint_wrap_for_startup_validation: true`, startup range diagnostics may
 normalize configured joints using `safety.joint_wrap_period_deg`; `0` disables

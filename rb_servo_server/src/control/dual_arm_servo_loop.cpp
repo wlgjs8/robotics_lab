@@ -949,6 +949,13 @@ bool controllerSimulationDiagnosticsSuspectGateOpen(const DualArmConfig& config)
         envFlagEnabled("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
 }
 
+bool controllerSimulationInitErrorGateOpen(const DualArmConfig& config) {
+    return controllerSimulationMotionRequired(config) &&
+        controllerSimulationMotionGateOpen(config) &&
+        config.servo.allow_controller_simulation_init_error &&
+        envFlagEnabled("RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM");
+}
+
 bool isRbpodoDiagnosticsSuspectOnly(const ArmStartupValidationSnapshot& arm) {
     if (arm.motion_ready) return true;
     if (!arm.acquisition_ok) return false;
@@ -956,6 +963,18 @@ bool isRbpodoDiagnosticsSuspectOnly(const ArmStartupValidationSnapshot& arm) {
     if (!containsReason(arm, "robot_fault")) return false;
     for (const std::string& reason : arm.invalid_reasons) {
         if (reason != "robot_fault") return false;
+    }
+    return true;
+}
+
+bool isRbpodoInitErrorOnly(const ArmStartupValidationSnapshot& arm) {
+    if (arm.motion_ready) return true;
+    if (!arm.acquisition_ok) return false;
+    if (arm.diagnostic_error_source != "rbpodo_init_error") return false;
+    if (!containsReason(arm, "robot_fault")) return false;
+    if (!containsReason(arm, "servo_disabled")) return false;
+    for (const std::string& reason : arm.invalid_reasons) {
+        if (reason != "robot_fault" && reason != "servo_disabled") return false;
     }
     return true;
 }
@@ -971,6 +990,17 @@ bool controllerSimulationDiagnosticsSuspectStartupAllowed(
         isRbpodoDiagnosticsSuspectOnly(validation.right);
 }
 
+bool controllerSimulationInitErrorStartupAllowed(
+    const DualArmConfig& config,
+    const StartupValidationSnapshot& validation
+) {
+    if (!controllerSimulationInitErrorGateOpen(config)) return false;
+    if (!validation.acquisition_ok) return false;
+    if (validation.motion_ready) return true;
+    return isRbpodoInitErrorOnly(validation.left) &&
+        isRbpodoInitErrorOnly(validation.right);
+}
+
 bool controllerSimulationDiagnosticsSuspectStateAllowed(
     const DualArmConfig& config,
     const RobotState& state
@@ -980,14 +1010,32 @@ bool controllerSimulationDiagnosticsSuspectStateAllowed(
         state.diagnostic_error_source == "rbpodo_diagnostics_suspect";
 }
 
-FaultContext clearControllerSimulationDiagnosticsReadFault(
+bool controllerSimulationInitErrorStateAllowed(
+    const DualArmConfig& config,
+    const RobotState& state
+) {
+    return controllerSimulationInitErrorGateOpen(config) &&
+        state.has_error &&
+        !state.servo_enabled &&
+        state.diagnostic_error_source == "rbpodo_init_error";
+}
+
+bool controllerSimulationDiagnosticStateAllowed(
+    const DualArmConfig& config,
+    const RobotState& state
+) {
+    return controllerSimulationDiagnosticsSuspectStateAllowed(config, state) ||
+        controllerSimulationInitErrorStateAllowed(config, state);
+}
+
+FaultContext clearControllerSimulationDiagnosticReadFault(
     const DualArmConfig& config,
     const RobotState& state,
     const FaultContext& fault,
     ArmId arm
 ) {
     if (fault.verdict == SafetyVerdict::Ok ||
-        !controllerSimulationDiagnosticsSuspectStateAllowed(config, state)) {
+        !controllerSimulationDiagnosticStateAllowed(config, state)) {
         return fault;
     }
     FaultContext cleared;
@@ -1568,13 +1616,13 @@ void DualArmServoLoop::loopMain() {
 
         FaultContext left_read_fault = classifyReadStateResult(left_state_result, ArmId::Left);
         FaultContext right_read_fault = classifyReadStateResult(right_state_result, ArmId::Right);
-        left_read_fault = clearControllerSimulationDiagnosticsReadFault(
+        left_read_fault = clearControllerSimulationDiagnosticReadFault(
             config_,
             left_state,
             left_read_fault,
             ArmId::Left
         );
-        right_read_fault = clearControllerSimulationDiagnosticsReadFault(
+        right_read_fault = clearControllerSimulationDiagnosticReadFault(
             config_,
             right_state,
             right_read_fault,
@@ -1661,13 +1709,13 @@ void DualArmServoLoop::loopMain() {
                     right_state_result = okReadState(right_state, reset_read_timing);
                     left_read_fault = classifyReadStateResult(left_state_result, ArmId::Left);
                     right_read_fault = classifyReadStateResult(right_state_result, ArmId::Right);
-                    left_read_fault = clearControllerSimulationDiagnosticsReadFault(
+                    left_read_fault = clearControllerSimulationDiagnosticReadFault(
                         config_,
                         left_state,
                         left_read_fault,
                         ArmId::Left
                     );
-                    right_read_fault = clearControllerSimulationDiagnosticsReadFault(
+                    right_read_fault = clearControllerSimulationDiagnosticReadFault(
                         config_,
                         right_state,
                         right_read_fault,
@@ -2333,6 +2381,9 @@ bool DualArmServoLoop::startupValidationAllowsStart(
     if (controllerSimulationDiagnosticsSuspectStartupAllowed(config_, validation)) {
         return true;
     }
+    if (controllerSimulationInitErrorStartupAllowed(config_, validation)) {
+        return true;
+    }
     if (!readOnlyDiagnosticStartupEnabled()) return false;
     if (config_.servo.send_servo_commands) return false;
 
@@ -2419,6 +2470,16 @@ void DualArmServoLoop::logStartupValidation(
                              const RobotState& state,
                              const ArmStartupValidationSnapshot& arm) {
         if (arm.motion_ready) return;
+        const bool controller_sim_diagnostics_suspect_override_active =
+            start_allowed &&
+            arm.allowed_unsafe_startup &&
+            arm.diagnostic_error_source == "rbpodo_diagnostics_suspect" &&
+            config_.servo.send_servo_commands;
+        const bool controller_sim_init_error_override_active =
+            start_allowed &&
+            arm.allowed_unsafe_startup &&
+            arm.diagnostic_error_source == "rbpodo_init_error" &&
+            config_.servo.send_servo_commands;
         std::cerr << "[ERROR] invalid robot startup state: " << name << "\n"
                   << "  has_valid_joint_state=" << (state.has_valid_joint_state ? "true" : "false") << "\n"
                   << "  has_error=" << (state.has_error ? "true" : "false") << "\n"
@@ -2463,19 +2524,23 @@ void DualArmServoLoop::logStartupValidation(
                   << "  controller_simulation_motion_gate_open="
                   << (controllerSimulationMotionGateOpen(config_) ? "true" : "false") << "\n"
                   << "  controller_simulation_diagnostic_override_allowed="
+                  << ((controllerSimulationDiagnosticsSuspectGateOpen(config_) ||
+                       controllerSimulationInitErrorGateOpen(config_)) ? "true" : "false") << "\n"
+                  << "  controller_simulation_diagnostics_suspect_override_allowed="
                   << (controllerSimulationDiagnosticsSuspectGateOpen(config_) ? "true" : "false") << "\n"
+                  << "  controller_simulation_init_error_override_allowed="
+                  << (controllerSimulationInitErrorGateOpen(config_) ? "true" : "false") << "\n"
                   << "  controller_simulation_diagnostic_override_active="
-                  << (start_allowed &&
-                      arm.allowed_unsafe_startup &&
-                      arm.diagnostic_error_source == "rbpodo_diagnostics_suspect" &&
-                      config_.servo.send_servo_commands ? "true" : "false") << "\n"
+                  << ((controller_sim_diagnostics_suspect_override_active ||
+                       controller_sim_init_error_override_active) ? "true" : "false") << "\n"
                   << "  send_servo_commands="
                   << (config_.servo.send_servo_commands ? "true" : "false") << "\n";
-        if (start_allowed &&
-            arm.allowed_unsafe_startup &&
-            arm.diagnostic_error_source == "rbpodo_diagnostics_suspect" &&
-            config_.servo.send_servo_commands) {
+        if (controller_sim_diagnostics_suspect_override_active) {
             std::cerr << "[WARN] rbpodo controller-simulation diagnostics-suspect startup "
+                      << "override active for " << name
+                      << "; physical_motion_expected=false.\n";
+        } else if (controller_sim_init_error_override_active) {
+            std::cerr << "[WARN] rbpodo controller-simulation init-error startup "
                       << "override active for " << name
                       << "; physical_motion_expected=false.\n";
         } else if (start_allowed && arm.allowed_unsafe_startup) {
@@ -2507,7 +2572,7 @@ void DualArmServoLoop::storeStartupValidation(const StartupValidationSnapshot& v
 bool DualArmServoLoop::isValidJointState(const RobotState& state) const {
     if (state.connection_state != RobotConnectionState::Connected) return false;
     if (!state.has_valid_joint_state) return false;
-    if (state.has_error && !controllerSimulationDiagnosticsSuspectStateAllowed(config_, state)) {
+    if (state.has_error && !controllerSimulationDiagnosticStateAllowed(config_, state)) {
         return false;
     }
     for (int i = 0; i < kDof; ++i) {
@@ -3088,11 +3153,11 @@ ServoTarget DualArmServoLoop::applySafety(
     ServoTarget out;
     RobotState left_filter_state = left_state;
     RobotState right_filter_state = right_state;
-    if (controllerSimulationDiagnosticsSuspectStateAllowed(config_, left_filter_state)) {
+    if (controllerSimulationDiagnosticStateAllowed(config_, left_filter_state)) {
         left_filter_state.has_error = false;
         left_filter_state.error_code = 0;
     }
-    if (controllerSimulationDiagnosticsSuspectStateAllowed(config_, right_filter_state)) {
+    if (controllerSimulationDiagnosticStateAllowed(config_, right_filter_state)) {
         right_filter_state.has_error = false;
         right_filter_state.error_code = 0;
     }

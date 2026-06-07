@@ -954,12 +954,17 @@ bool controllerSimulationDiagnosticOverrideActive(
     const BackendConfig& backend_config,
     const ArmStartupValidationSnapshot& startup_validation
 ) {
+    const bool diagnostics_suspect_active =
+        servo_config.allow_controller_simulation_diagnostics_suspect &&
+        startup_validation.diagnostic_error_source == "rbpodo_diagnostics_suspect";
+    const bool init_error_active =
+        servo_config.allow_controller_simulation_init_error &&
+        startup_validation.diagnostic_error_source == "rbpodo_init_error";
     return servo_config.send_servo_commands &&
         servo_config.allow_controller_simulation_motion &&
-        servo_config.allow_controller_simulation_diagnostics_suspect &&
         isRbpodoControllerSimulation(backend_config) &&
         startup_validation.allowed_unsafe_startup &&
-        startup_validation.diagnostic_error_source == "rbpodo_diagnostics_suspect";
+        (diagnostics_suspect_active || init_error_active);
 }
 
 std::string tcpTrackingSource(

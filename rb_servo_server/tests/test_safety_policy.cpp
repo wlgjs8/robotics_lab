@@ -213,6 +213,7 @@ public:
         motion_readiness_error_name_ = name;
         diagnostic_error_source_ = source;
     }
+    void setServoEnabled(bool enabled) { servo_enabled_override_ = enabled; }
     void setResetOk(bool ok) { reset_ok_ = ok; }
     void setInvalidateJointStateOnReset(bool invalidate) { invalidate_joint_state_on_reset_ = invalidate; }
     void setReadSleepMs(int sleep_ms) { read_sleep_ms_.store(sleep_ms); }
@@ -246,7 +247,7 @@ private:
         state.connection_state = connected_
             ? rb_servo::RobotConnectionState::Connected
             : rb_servo::RobotConnectionState::Disconnected;
-        state.servo_enabled = initialized_;
+        state.servo_enabled = servo_enabled_override_.value_or(initialized_);
         state.has_error = has_error_;
         state.error_code = error_code_;
         state.motion_readiness_error_kind = motion_readiness_error_kind_;
@@ -287,6 +288,7 @@ private:
     std::string motion_readiness_error_kind_;
     std::string motion_readiness_error_name_;
     std::string diagnostic_error_source_;
+    std::optional<bool> servo_enabled_override_;
     bool connected_ = false;
     bool initialized_ = false;
     std::atomic<int> read_sleep_ms_{0};
@@ -4468,6 +4470,184 @@ bool testRbpodoControllerSimulationDiagnosticOverrideRejectsHardFaults() {
     return true;
 }
 
+bool testRbpodoControllerSimulationInitErrorOverrideIsNarrow() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard allow_init_error("RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    allow_init_error.unset();
+    pgmode_confirmed.set("1");
+
+    const rb_servo::JointArray initial = joints(0.0);
+    const auto init_error_backend = [&](rb_servo::ArmId arm) {
+        auto backend = std::make_unique<TestBackend>(arm, initial, false);
+        backend->setHasError(true);
+        backend->setErrorCode(187);
+        backend->setServoEnabled(false);
+        backend->setMotionReadinessError(
+            "RobotFault",
+            "rbpodo_init_error",
+            "rbpodo_init_error"
+        );
+        return backend;
+    };
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+
+    {
+        rb_servo::DualArmServoLoop loop(
+            init_error_backend(rb_servo::ArmId::Left),
+            std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+            cfg,
+            &buffer,
+            nullptr
+        );
+        RB_CHECK(!loop.start());
+    }
+
+    cfg.servo.allow_controller_simulation_init_error = true;
+    {
+        rb_servo::DualArmServoLoop loop(
+            init_error_backend(rb_servo::ArmId::Left),
+            std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+            cfg,
+            &buffer,
+            nullptr
+        );
+        RB_CHECK(!loop.start());
+    }
+
+    allow_init_error.set("1");
+    auto left = init_error_backend(rb_servo::ArmId::Left);
+    TestBackend* left_raw = left.get();
+    rb_servo::DualArmServoLoop loop(
+        std::move(left),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+    RB_CHECK(loop.start());
+    RB_CHECK(waitUntil([&] { return loop.latestSnapshot().loop_end_time_ns > 0; }));
+    RB_CHECK(left_raw->sendCount() > 0);
+
+    rb_servo::DualArmCommand arm_motion = command(rb_servo::ControlMode::ArmMotion);
+    arm_motion.seq = 2;
+    buffer.setCommand(arm_motion);
+    RB_CHECK(waitUntil([&] {
+        return loop.motionState() == rb_servo::ServerMotionState::ArmedHold;
+    }));
+
+    const int sends_before_target = left_raw->sendCount();
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.seq = 3;
+    target.left.q_target_deg = joints(4.0);
+    target.right.q_target_deg = joints(4.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    buffer.setCommand(target);
+    RB_CHECK(waitUntil([&] { return left_raw->sendCount() > sends_before_target; }));
+
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    RB_CHECK(!snapshot.fault_latched);
+    RB_CHECK(snapshot.left_send_ok);
+    RB_CHECK(snapshot.left_state.has_error);
+    RB_CHECK(!snapshot.left_state.servo_enabled);
+    RB_CHECK(snapshot.left_state.diagnostic_error_source == "rbpodo_init_error");
+    RB_CHECK(snapshot.startup_validation.allowed_unsafe_startup);
+    RB_CHECK(snapshot.startup_validation.left.allowed_unsafe_startup);
+    RB_CHECK(containsValue(snapshot.startup_validation.left.invalid_reasons, "robot_fault"));
+    RB_CHECK(containsValue(snapshot.startup_validation.left.invalid_reasons, "servo_disabled"));
+
+    rb_servo::StatePublisher publisher(cfg);
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    RB_CHECK(json.at("left").at("controller_simulation_diagnostic_override_active").get<bool>());
+    RB_CHECK(!json.at("left").at("physical_motion_expected").get<bool>());
+    RB_CHECK(json.at("left")
+        .at("controller_simulation_mode")
+        .at("controller_simulation_diagnostic_override_active")
+        .get<bool>());
+    loop.stop();
+
+    rb_servo::DualArmConfig physical_real_cfg = cfg;
+    physical_real_cfg.left_robot.operation_mode = "real";
+    physical_real_cfg.right_robot.operation_mode = "real";
+    rb_servo::DualArmServoLoop physical_real_loop(
+        init_error_backend(rb_servo::ArmId::Left),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        physical_real_cfg,
+        &buffer,
+        nullptr
+    );
+    RB_CHECK(!physical_real_loop.start());
+    return true;
+}
+
+bool testRbpodoControllerSimulationInitErrorOverrideRejectsOtherInvalidReasons() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
+    EnvVarGuard allow_init_error("RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM");
+    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_controller_sim.set("1");
+    allow_init_error.set("1");
+    pgmode_confirmed.set("1");
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.servo.allow_controller_simulation_init_error = true;
+
+    {
+        rb_servo::JointArray out_of_range = joints(0.0);
+        out_of_range[2] = 370.0;
+        auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, out_of_range, false);
+        left->setHasError(true);
+        left->setErrorCode(187);
+        left->setServoEnabled(false);
+        left->setMotionReadinessError(
+            "RobotFault",
+            "rbpodo_init_error",
+            "rbpodo_init_error"
+        );
+        rb_servo::DualArmServoLoop loop(
+            std::move(left),
+            std::make_unique<TestBackend>(rb_servo::ArmId::Right, joints(0.0), false),
+            cfg,
+            &buffer,
+            nullptr
+        );
+        RB_CHECK(!loop.start());
+    }
+
+    {
+        auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, joints(0.0), false);
+        left->setHasError(true);
+        left->setErrorCode(187);
+        left->setServoEnabled(true);
+        left->setMotionReadinessError(
+            "RobotFault",
+            "rbpodo_init_error",
+            "rbpodo_init_error"
+        );
+        rb_servo::DualArmServoLoop loop(
+            std::move(left),
+            std::make_unique<TestBackend>(rb_servo::ArmId::Right, joints(0.0), false),
+            cfg,
+            &buffer,
+            nullptr
+        );
+        RB_CHECK(!loop.start());
+    }
+
+    return true;
+}
+
 bool testReadOnlyDiagnosticStartupAllowsRangeViolationOnlyWhenConfigured() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
@@ -6160,6 +6340,8 @@ int main() {
     if (!testRbpodoControllerSimulationMotionRequiresExplicitGate()) return 1;
     if (!testRbpodoControllerSimulationDiagnosticOverrideIsNarrow()) return 1;
     if (!testRbpodoControllerSimulationDiagnosticOverrideRejectsHardFaults()) return 1;
+    if (!testRbpodoControllerSimulationInitErrorOverrideIsNarrow()) return 1;
+    if (!testRbpodoControllerSimulationInitErrorOverrideRejectsOtherInvalidReasons()) return 1;
     if (!testReadOnlyDiagnosticStartupAllowsRangeViolationOnlyWhenConfigured()) return 1;
     if (!testStartupPreservesRawControllerJointValuesInsideConfiguredRange()) return 1;
     if (!testMotionStartupRejectsRangeViolation()) return 1;

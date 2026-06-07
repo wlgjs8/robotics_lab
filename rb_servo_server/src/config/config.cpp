@@ -839,8 +839,16 @@ void validateConfig(const DualArmConfig& cfg) {
             "servo.allow_controller_simulation_motion=true"
         );
     }
+    if (cfg.servo.allow_controller_simulation_init_error &&
+        !cfg.servo.allow_controller_simulation_motion) {
+        throw std::runtime_error(
+            "servo.allow_controller_simulation_init_error requires "
+            "servo.allow_controller_simulation_motion=true"
+        );
+    }
     if (cfg.servo.allow_controller_simulation_motion ||
-        cfg.servo.allow_controller_simulation_diagnostics_suspect) {
+        cfg.servo.allow_controller_simulation_diagnostics_suspect ||
+        cfg.servo.allow_controller_simulation_init_error) {
         if (!cfg.servo.send_servo_commands) {
             throw std::runtime_error(
                 "servo.allow_controller_simulation_* options require servo.send_servo_commands=true"
@@ -869,6 +877,13 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error(
                 "Refusing rbpodo diagnostics-suspect controller-simulation override without "
                 "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1."
+            );
+        }
+        if (cfg.servo.allow_controller_simulation_init_error &&
+            !envIsOne("RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM")) {
+            throw std::runtime_error(
+                "Refusing rbpodo init-error controller-simulation override without "
+                "RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM=1."
             );
         }
     }
@@ -1300,6 +1315,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "allow_readonly_wrong_mode_startup",
             "allow_controller_simulation_motion",
             "allow_controller_simulation_diagnostics_suspect",
+            "allow_controller_simulation_init_error",
             "enable_realtime_priority",
             "realtime_priority",
             "cpu_core",
@@ -1340,6 +1356,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 asBool(
                     sec["allow_controller_simulation_diagnostics_suspect"],
                     "servo.allow_controller_simulation_diagnostics_suspect"
+                );
+        }
+        if (has(sec, "allow_controller_simulation_init_error")) {
+            cfg.servo.allow_controller_simulation_init_error =
+                asBool(
+                    sec["allow_controller_simulation_init_error"],
+                    "servo.allow_controller_simulation_init_error"
                 );
         }
         if (has(sec, "enable_realtime_priority")) cfg.servo.enable_realtime_priority = asBool(sec["enable_realtime_priority"], "servo.enable_realtime_priority");

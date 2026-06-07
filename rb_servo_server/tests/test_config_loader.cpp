@@ -188,6 +188,7 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(pgmode.servo.send_servo_commands);
         RB_CHECK(pgmode.servo.allow_controller_simulation_motion);
         RB_CHECK(pgmode.servo.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(!pgmode.servo.allow_controller_simulation_init_error);
         RB_CHECK(near(pgmode.left_robot.servo_t1_sec, 0.002));
         RB_CHECK(near(pgmode.right_robot.servo_t1_sec, 0.002));
         RB_CHECK(near(pgmode.left_robot.servo_t2_sec, 0.08));

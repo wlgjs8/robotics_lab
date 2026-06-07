@@ -115,6 +115,14 @@ if(BUILD_TESTING)
     target_link_libraries(test_config_loader PRIVATE rb_servo_core)
     add_test(NAME config_loader COMMAND test_config_loader)
 
+    add_executable(test_config tests/test_config.cpp)
+    target_link_libraries(test_config PRIVATE rb_servo_core)
+    add_test(NAME config COMMAND test_config)
+
+    add_executable(test_rbpodo_backend tests/test_rbpodo_backend.cpp)
+    target_link_libraries(test_rbpodo_backend PRIVATE rb_servo_core)
+    add_test(NAME rbpodo_backend COMMAND test_rbpodo_backend)
+
     add_executable(test_kinematics_fk tests/test_kinematics_fk.cpp)
     target_link_libraries(test_kinematics_fk PRIVATE rb_servo_core)
     add_test(NAME kinematics_fk COMMAND test_kinematics_fk)

@@ -198,6 +198,7 @@ bool testControllerSimulationGateConfig() {
     EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
     EnvVarGuard allow_controller_sim_cartesian("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN");
     EnvVarGuard allow_diag("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
+    EnvVarGuard allow_init_error("RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM");
     EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
 
     allow_real.unset();
@@ -205,6 +206,7 @@ bool testControllerSimulationGateConfig() {
     allow_controller_sim.unset();
     allow_controller_sim_cartesian.unset();
     allow_diag.unset();
+    allow_init_error.unset();
     pgmode_confirmed.unset();
 
     const std::string valid_body =
@@ -231,6 +233,7 @@ bool testControllerSimulationGateConfig() {
         "  send_servo_commands: true\n"
         "  allow_controller_simulation_motion: true\n"
         "  allow_controller_simulation_diagnostics_suspect: true\n"
+        "  allow_controller_simulation_init_error: true\n"
         "safety:\n"
         "  tracking_error_policy: fault_latch\n"
         "  controller_simulation_tracking_error_source: reference\n"
@@ -247,6 +250,7 @@ bool testControllerSimulationGateConfig() {
     allow_motion.set("1");
     allow_controller_sim.set("1");
     allow_diag.set("1");
+    allow_init_error.set("1");
     pgmode_confirmed.set("1");
 
     const std::string missing_cartesian_env_path =
@@ -261,6 +265,7 @@ bool testControllerSimulationGateConfig() {
     ::unlink(valid_path.c_str());
     RB_CHECK(cfg.servo.allow_controller_simulation_motion);
     RB_CHECK(cfg.servo.allow_controller_simulation_diagnostics_suspect);
+    RB_CHECK(cfg.servo.allow_controller_simulation_init_error);
     RB_CHECK(cfg.cartesian_control.allow_in_controller_simulation);
     RB_CHECK(
         cfg.safety.controller_simulation_tracking_error_source ==
@@ -291,6 +296,19 @@ bool testControllerSimulationGateConfig() {
         writeTempConfig("controller-sim-diag-without-motion", diag_without_motion_body);
     RB_CHECK(loadRejects(diag_without_motion_path));
     ::unlink(diag_without_motion_path.c_str());
+
+    std::string init_without_motion_body = valid_body;
+    const std::size_t init_motion_pos = init_without_motion_body.find(motion_key);
+    RB_CHECK(init_motion_pos != std::string::npos);
+    init_without_motion_body.erase(init_motion_pos, motion_key.size());
+    const std::string diag_key = "  allow_controller_simulation_diagnostics_suspect: true\n";
+    const std::size_t diag_pos = init_without_motion_body.find(diag_key);
+    RB_CHECK(diag_pos != std::string::npos);
+    init_without_motion_body.erase(diag_pos, diag_key.size());
+    const std::string init_without_motion_path =
+        writeTempConfig("controller-sim-init-without-motion", init_without_motion_body);
+    RB_CHECK(loadRejects(init_without_motion_path));
+    ::unlink(init_without_motion_path.c_str());
 
     std::string read_only_body = valid_body;
     const std::string send_true = "  send_servo_commands: true\n";

@@ -123,6 +123,23 @@ bool diagnosticsSuspectControllerSimulationOverrideAllowed(
         envIsOne("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
 }
 
+bool initErrorControllerSimulationOverrideAllowed(
+    const BackendConfig& config,
+    const BackendError& error
+) {
+    return error.name == "rbpodo_init_error" &&
+        rbpodoControllerSimulationMotionGateOpen(config) &&
+        envIsOne("RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM");
+}
+
+bool controllerSimulationReadinessOverrideAllowed(
+    const BackendConfig& config,
+    const BackendError& error
+) {
+    return diagnosticsSuspectControllerSimulationOverrideAllowed(config, error) ||
+        initErrorControllerSimulationOverrideAllowed(config, error);
+}
+
 void annotateRbpodoAckResult(
     SendServoJResult* result,
     const BackendConfig& config,
@@ -914,7 +931,7 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
     }
     if (cached_state.has_value() &&
         impl_->last_state_error.has_value() &&
-        !diagnosticsSuspectControllerSimulationOverrideAllowed(
+        !controllerSimulationReadinessOverrideAllowed(
             impl_->config,
             *impl_->last_state_error
         )) {
@@ -932,7 +949,7 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
     }
     if (!cached_state.has_value() &&
         impl_->last_state_error.has_value() &&
-        !diagnosticsSuspectControllerSimulationOverrideAllowed(
+        !controllerSimulationReadinessOverrideAllowed(
             impl_->config,
             *impl_->last_state_error
         )) {
