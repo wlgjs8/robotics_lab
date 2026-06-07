@@ -170,17 +170,43 @@ than used as the sole controller `error_code`.
 Rainbow Virtual ControlBox controller-simulation targets may permanently
 report `init_error != 0` and `init_state_info != 6` even while accepting
 simulation `move_servo_j` commands and updating controller reference joints.
-The server may tolerate only that controller-simulation shape when all gates
-are open: `operation_mode: simulation`,
+The server may tolerate only tightly-scoped controller-simulation shapes when
+all matching gates are open: `operation_mode: simulation`,
 `servo.allow_controller_simulation_motion: true`,
-`servo.allow_controller_simulation_init_error: true`,
 `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1`,
-`RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1`, and
-`RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM=1`, plus the normal real-controller
-connection/motion env gates required for rbpodo controller simulation. The
-tolerance is limited to `diagnostic_error_source == "rbpodo_init_error"` with
-startup invalid reasons confined to `robot_fault` and `servo_disabled`; it is
-not physical real-motion acceptance.
+`RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1`, plus the normal real-controller
+connection/motion env gates required for rbpodo controller simulation.
+
+`diagnostic_error_source == "rbpodo_init_error"` additionally requires:
+
+```yaml
+servo.allow_controller_simulation_init_error: true
+```
+
+```bash
+RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM=1
+```
+
+The init-error tolerance is limited to startup invalid reasons confined to
+`robot_fault` and `servo_disabled`.
+
+The fully-virtual "not activated" condition (`servo_enabled=false`,
+`init_state_info != 6`, startup reason `servo_disabled`) is a separate
+controller-simulation override. It additionally requires:
+
+```yaml
+servo.allow_controller_simulation_not_activated: true
+```
+
+```bash
+RB_ALLOW_RBPODO_NOT_ACTIVATED_CONTROLLER_SIM=1
+```
+
+When that not-activated gate is open, an otherwise-accepted
+`rbpodo_diagnostics_suspect` controller-simulation startup/state may also
+carry `servo_disabled`; when it is closed, the diagnostics-suspect startup
+tolerance remains confined to `robot_fault` only. These overrides are not
+physical real-motion acceptance.
 
 Raw controller joint angles may use continuous or wrapped representations. When
 `safety.joint_wrap_for_startup_validation: true`, startup range diagnostics may

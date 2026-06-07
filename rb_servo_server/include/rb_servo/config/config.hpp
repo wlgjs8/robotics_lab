@@ -188,6 +188,7 @@ struct ServoConfig {
     bool allow_controller_simulation_motion = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
     bool allow_controller_simulation_init_error = false;
+    bool allow_controller_simulation_not_activated = false;
 
     bool enable_realtime_priority = true;
     int realtime_priority = 80;

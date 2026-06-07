@@ -956,13 +956,33 @@ bool controllerSimulationInitErrorGateOpen(const DualArmConfig& config) {
         envFlagEnabled("RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM");
 }
 
-bool isRbpodoDiagnosticsSuspectOnly(const ArmStartupValidationSnapshot& arm) {
+bool controllerSimulationNotActivatedGateOpen(const DualArmConfig& config) {
+    return controllerSimulationMotionRequired(config) &&
+        controllerSimulationMotionGateOpen(config) &&
+        config.servo.allow_controller_simulation_not_activated &&
+        envFlagEnabled("RB_ALLOW_RBPODO_NOT_ACTIVATED_CONTROLLER_SIM");
+}
+
+bool isAllowedControllerSimulationDiagnosticReason(
+    const std::string& reason,
+    bool tolerate_servo_disabled
+) {
+    return reason == "robot_fault" ||
+        (tolerate_servo_disabled && reason == "servo_disabled");
+}
+
+bool isRbpodoDiagnosticsSuspectOnly(
+    const ArmStartupValidationSnapshot& arm,
+    bool tolerate_servo_disabled
+) {
     if (arm.motion_ready) return true;
     if (!arm.acquisition_ok) return false;
     if (arm.diagnostic_error_source != "rbpodo_diagnostics_suspect") return false;
     if (!containsReason(arm, "robot_fault")) return false;
     for (const std::string& reason : arm.invalid_reasons) {
-        if (reason != "robot_fault") return false;
+        if (!isAllowedControllerSimulationDiagnosticReason(reason, tolerate_servo_disabled)) {
+            return false;
+        }
     }
     return true;
 }
@@ -986,8 +1006,9 @@ bool controllerSimulationDiagnosticsSuspectStartupAllowed(
     if (!controllerSimulationDiagnosticsSuspectGateOpen(config)) return false;
     if (!validation.acquisition_ok) return false;
     if (validation.motion_ready) return true;
-    return isRbpodoDiagnosticsSuspectOnly(validation.left) &&
-        isRbpodoDiagnosticsSuspectOnly(validation.right);
+    const bool tolerate_servo_disabled = controllerSimulationNotActivatedGateOpen(config);
+    return isRbpodoDiagnosticsSuspectOnly(validation.left, tolerate_servo_disabled) &&
+        isRbpodoDiagnosticsSuspectOnly(validation.right, tolerate_servo_disabled);
 }
 
 bool controllerSimulationInitErrorStartupAllowed(
@@ -1007,7 +1028,8 @@ bool controllerSimulationDiagnosticsSuspectStateAllowed(
 ) {
     return controllerSimulationDiagnosticsSuspectGateOpen(config) &&
         state.has_error &&
-        state.diagnostic_error_source == "rbpodo_diagnostics_suspect";
+        state.diagnostic_error_source == "rbpodo_diagnostics_suspect" &&
+        (state.servo_enabled || controllerSimulationNotActivatedGateOpen(config));
 }
 
 bool controllerSimulationInitErrorStateAllowed(
@@ -2480,6 +2502,12 @@ void DualArmServoLoop::logStartupValidation(
             arm.allowed_unsafe_startup &&
             arm.diagnostic_error_source == "rbpodo_init_error" &&
             config_.servo.send_servo_commands;
+        const bool controller_sim_not_activated_override_active =
+            start_allowed &&
+            arm.allowed_unsafe_startup &&
+            containsReason(arm, "servo_disabled") &&
+            controllerSimulationNotActivatedGateOpen(config_) &&
+            config_.servo.send_servo_commands;
         std::cerr << "[ERROR] invalid robot startup state: " << name << "\n"
                   << "  has_valid_joint_state=" << (state.has_valid_joint_state ? "true" : "false") << "\n"
                   << "  has_error=" << (state.has_error ? "true" : "false") << "\n"
@@ -2530,9 +2558,13 @@ void DualArmServoLoop::logStartupValidation(
                   << (controllerSimulationDiagnosticsSuspectGateOpen(config_) ? "true" : "false") << "\n"
                   << "  controller_simulation_init_error_override_allowed="
                   << (controllerSimulationInitErrorGateOpen(config_) ? "true" : "false") << "\n"
+                  << "  controller_simulation_not_activated_override_allowed="
+                  << (controllerSimulationNotActivatedGateOpen(config_) ? "true" : "false") << "\n"
                   << "  controller_simulation_diagnostic_override_active="
                   << ((controller_sim_diagnostics_suspect_override_active ||
                        controller_sim_init_error_override_active) ? "true" : "false") << "\n"
+                  << "  controller_simulation_not_activated_override_active="
+                  << (controller_sim_not_activated_override_active ? "true" : "false") << "\n"
                   << "  send_servo_commands="
                   << (config_.servo.send_servo_commands ? "true" : "false") << "\n";
         if (controller_sim_diagnostics_suspect_override_active) {
