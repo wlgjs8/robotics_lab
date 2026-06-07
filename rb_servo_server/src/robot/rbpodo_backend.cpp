@@ -1074,6 +1074,27 @@ BackendResult<RobotState> RbpodoBackend::resetFault() {
         makeBackendTiming(start, nowSteadyNs())
     );
 #else
+    // Controller-simulation carve-out: an rbpodo controller in pgmode simulation
+    // (operation_mode=simulation, physical_motion_expected=false) has no physical
+    // robot to endanger, so a fault reset is safe and is required to recover from
+    // a server-side EmergencyStop/soft-estop latch without restarting the server.
+    // Gated by operation_mode=simulation AND the controller-simulation motion env.
+    // Physical real mode keeps the conservative refusal below: no verified rbpodo
+    // fault-reset API exists, so motion must remain disabled after any reset.
+    if (expectedSimulationMode(impl_->config) &&
+        envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
+        impl_->connected && impl_->data_channel) {
+        try {
+            const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+            if (state) {
+                const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
+                RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
+                return okResult(BackendOp::ResetFault, mapped, makeBackendTiming(start, nowSteadyNs()));
+            }
+        } catch (const std::exception&) {
+            // fall through to the conservative refusal below
+        }
+    }
     // No verified fault-reset API is exposed by the inspected rbpodo headers.
     return failedResult<RobotState>(
         BackendOp::ResetFault,
