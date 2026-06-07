@@ -149,3 +149,27 @@ reviewable codex change + commit. Update `AGENTS.md`/`docs/architecture.md` only
 "rb_gui keeps real motion disabled / simulator-only commands" wording needs to reflect the new pgmode-sim
 operability (real stays disabled; this is an additive sim capability). Historical conservative wording is
 amended, not the real-safety invariant.
+
+## 6. Native one-command bring-up (Makefile)
+
+The pgmode-simulation stack runs **natively on WSL** (not Docker): default WSL2
+NAT reaches the VirtualBox host-only VMs, the server needs realtime priority via
+sudo, and the rbpodo SDK / Pinocchio are installed natively. Docker would add a
+network/RT/SDK-build layer for no benefit on a single box.
+
+One-time prerequisites:
+```bash
+make pgmode-sim-build   # rbpodo SDK (py+C++) + rb_servo_server (RB_SERVO_ENABLE_RBPODO=ON)
+cp rb_servo_server/config/local/pgmode_sim.env.example rb_servo_server/config/local/pgmode_sim.env
+# create rb_servo_server/config/local/vm_dual_cartesian.yaml (dual rbpodo sim + circle_move + ACK-off)
+```
+
+Daily use:
+```bash
+make pgmode-sim-up      # rb_servo_server (sudo) + rb_gui (viser) -> http://localhost:8080
+make pgmode-sim-down    # stop both (bracket-glob kill; no pkill self-match)
+```
+
+`pgmode_sim.env` (gitignored) holds the controller-simulation env gates +
+rb_gui flags + ports; the `.example` is tracked. `RB_ALLOW_REAL_CARTESIAN` is
+never set. Launch logs: `logs/pgmode_sim_{server,gui}.log`.
