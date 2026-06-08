@@ -523,6 +523,7 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
         "servo_alpha",
         "servo_acc",
         "disable_waiting_ack",
+        "max_consecutive_read_misses",
     }, path);
 
     if (has(sec, "backend_type")) cfg->backend_type = parseBackendType(sec["backend_type"], path + ".backend_type");
@@ -578,6 +579,7 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
     cfg->servo_lookahead_sec = cfg->servo_t2_sec;
     cfg->servo_acc = cfg->servo_alpha;
     if (has(sec, "disable_waiting_ack")) cfg->disable_waiting_ack = asBool(sec["disable_waiting_ack"], path + ".disable_waiting_ack");
+    if (has(sec, "max_consecutive_read_misses")) cfg->max_consecutive_read_misses = asInt(sec["max_consecutive_read_misses"], path + ".max_consecutive_read_misses");
 }
 
 bool anyReal(const DualArmConfig& cfg) {
@@ -790,6 +792,26 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.right_robot.rbsim_stop_timeout_sec, "right_robot.simulator_stop_timeout_sec");
     validatePositiveFinite(cfg.left_robot.rbsim_reset_timeout_sec, "left_robot.simulator_reset_timeout_sec");
     validatePositiveFinite(cfg.right_robot.rbsim_reset_timeout_sec, "right_robot.simulator_reset_timeout_sec");
+    {
+        const auto validate_read_miss_tolerance = [](const BackendConfig& robot, const std::string& name) {
+            if (robot.max_consecutive_read_misses < 0) {
+                throw std::runtime_error(name + ".max_consecutive_read_misses must be >= 0");
+            }
+            if (robot.max_consecutive_read_misses > 100) {
+                throw std::runtime_error(name + ".max_consecutive_read_misses must be <= 100");
+            }
+            // Read-miss tolerance holds the last state instead of failing closed on a
+            // missing frame; only the rbpodo controller-simulation (pgmode) carve-out
+            // may use it. Physical real must fail closed on any read miss.
+            if (robot.max_consecutive_read_misses > 0 && !isRbpodoControllerSimulationBackend(robot)) {
+                throw std::runtime_error(
+                    name + ".max_consecutive_read_misses > 0 requires rbpodo controller simulation "
+                    "(run_mode: real, backend_type: rbpodo, operation_mode: simulation)");
+            }
+        };
+        validate_read_miss_tolerance(cfg.left_robot, "left_robot");
+        validate_read_miss_tolerance(cfg.right_robot, "right_robot");
+    }
     if (cfg.servo.filter_dt_max_ratio < cfg.servo.filter_dt_min_ratio) {
         throw std::runtime_error("servo.filter_dt_max_ratio must be >= filter_dt_min_ratio");
     }

@@ -573,6 +573,9 @@ struct RbpodoBackend::Impl {
     std::unique_ptr<rb::podo::CobotData> data_channel;
     std::optional<RobotState> last_state_cache;
     std::optional<BackendError> last_state_error;
+    // Consecutive transient readState misses currently being tolerated (held)
+    // under the controller-simulation read-miss carve-out. Reset on any valid read.
+    int consecutive_read_misses = 0;
 #endif
 };
 
@@ -792,6 +795,27 @@ BackendResult<RobotState> RbpodoBackend::readState() {
     try {
         const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
         if (!state) {
+            // Controller-simulation read-miss carve-out: a single missing CobotData
+            // frame is treated as a transient gap (hold the last valid state and stay
+            // connected) for up to max_consecutive_read_misses consecutive misses. A
+            // sustained outage still trips after that many. Physical real operation
+            // always fails closed here (carve-out gated on simulation operation_mode).
+            if (expectedSimulationMode(impl_->config) &&
+                impl_->config.max_consecutive_read_misses > 0 &&
+                impl_->consecutive_read_misses < impl_->config.max_consecutive_read_misses &&
+                impl_->last_state_cache.has_value()) {
+                ++impl_->consecutive_read_misses;
+                RobotState held = *impl_->last_state_cache;
+                held.arm_id = impl_->arm_id;
+                held.host_time_ns = nowSteadyNs();
+                held.connection_state = RobotConnectionState::Connected;
+                held.rbpodo_sdk_state_source = "last_state_cache (read-miss hold)";
+                std::cerr << "[WARN] RbpodoBackend readState transient miss for "
+                          << impl_->config.name << "; holding last state ("
+                          << impl_->consecutive_read_misses << "/"
+                          << impl_->config.max_consecutive_read_misses << ")\n";
+                return okResult(BackendOp::ReadState, held, makeBackendTiming(start, nowSteadyNs()));
+            }
             out_state.connection_state = RobotConnectionState::Disconnected;
             impl_->connected = false;
             return failedResult<RobotState>(
@@ -805,6 +829,7 @@ BackendResult<RobotState> RbpodoBackend::readState() {
                 makeBackendTiming(start, nowSteadyNs())
             );
         }
+        impl_->consecutive_read_misses = 0;
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, out_state);
