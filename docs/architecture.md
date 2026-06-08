@@ -61,6 +61,31 @@ Supported real-controller scope is rbpodo only. Mock and simulator backends are
 hardware-free validation surfaces; unsupported raw script TCP comparison paths
 must not be presented as runnable backends.
 
+### Simulation flavors (name them precisely)
+
+Three distinct things are loosely called "simulation". Name them by their
+canonical config keys, never by the bare word "simulation":
+
+| Flavor | Canonical name | `run_mode` | `backend_type` | `operation_mode` | Connects to |
+|---|---|---|---|---|---|
+| Software simulation | `rb_simulator` / simulator backend | `simulation` | `simulator` | — | hardware-free Python `ArmSimulator` over local TCP |
+| Controller simulation | rbpodo `pgmode` controller-sim | `real` | `rbpodo` | `simulation` | a real rbpodo controller running in `pgmode` |
+
+`run_mode` is `simulation` only for the software simulator. Controller simulation
+is `run_mode: real` (it really connects to a controller) with the controller's
+`operation_mode: simulation`.
+
+Within controller simulation the **target** may be a Virtual ControlBox **VM** or
+a **physical** controller box in `pgmode`. These are behaviourally identical to
+the server — same `rbpodo` backend, same `operation_mode: simulation`, same env
+gates — so they must NOT get new `run_mode`/`backend_type` values. Distinguish
+them only by deployment target, via config filename suffix and docs:
+
+- `…controller_sim_vm.yaml` — target is a Virtual ControlBox VM (no physical hardware on the wire)
+- `…controller_sim_onbox.yaml` — target is a physical controller box held in `pgmode`
+
+Site/VM configs live in gitignored `rb_servo_server/config/local/`.
+
 ## Controller Topology
 
 The physical system has one controller endpoint per arm:

@@ -109,9 +109,7 @@ bool rbpodoControllerSimulationMotionGateOpen(const BackendConfig& config) {
     return config.run_mode == RunMode::Real &&
         expectedSimulationMode(config) &&
         envIsOne("RB_ALLOW_REAL_ROBOT") &&
-        envIsOne("RB_ALLOW_REAL_MOTION") &&
-        envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
-        envIsOne("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+        envIsOne("RB_ALLOW_REAL_MOTION");
 }
 
 bool diagnosticsSuspectControllerSimulationOverrideAllowed(
@@ -120,7 +118,24 @@ bool diagnosticsSuspectControllerSimulationOverrideAllowed(
 ) {
     return error.name == "rbpodo_diagnostics_suspect" &&
         rbpodoControllerSimulationMotionGateOpen(config) &&
-        envIsOne("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
+        config.allow_controller_simulation_diagnostics_suspect;
+}
+
+bool initErrorControllerSimulationOverrideAllowed(
+    const BackendConfig& config,
+    const BackendError& error
+) {
+    return error.name == "rbpodo_init_error" &&
+        rbpodoControllerSimulationMotionGateOpen(config) &&
+        config.allow_controller_simulation_init_error;
+}
+
+bool controllerSimulationReadinessOverrideAllowed(
+    const BackendConfig& config,
+    const BackendError& error
+) {
+    return diagnosticsSuspectControllerSimulationOverrideAllowed(config, error) ||
+        initErrorControllerSimulationOverrideAllowed(config, error);
 }
 
 void annotateRbpodoAckResult(
@@ -558,6 +573,9 @@ struct RbpodoBackend::Impl {
     std::unique_ptr<rb::podo::CobotData> data_channel;
     std::optional<RobotState> last_state_cache;
     std::optional<BackendError> last_state_error;
+    // Consecutive transient readState misses currently being tolerated (held)
+    // under the controller-simulation read-miss carve-out. Reset on any valid read.
+    int consecutive_read_misses = 0;
 #endif
 };
 
@@ -777,6 +795,27 @@ BackendResult<RobotState> RbpodoBackend::readState() {
     try {
         const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
         if (!state) {
+            // Controller-simulation read-miss carve-out: a single missing CobotData
+            // frame is treated as a transient gap (hold the last valid state and stay
+            // connected) for up to max_consecutive_read_misses consecutive misses. A
+            // sustained outage still trips after that many. Physical real operation
+            // always fails closed here (carve-out gated on simulation operation_mode).
+            if (expectedSimulationMode(impl_->config) &&
+                impl_->config.max_consecutive_read_misses > 0 &&
+                impl_->consecutive_read_misses < impl_->config.max_consecutive_read_misses &&
+                impl_->last_state_cache.has_value()) {
+                ++impl_->consecutive_read_misses;
+                RobotState held = *impl_->last_state_cache;
+                held.arm_id = impl_->arm_id;
+                held.host_time_ns = nowSteadyNs();
+                held.connection_state = RobotConnectionState::Connected;
+                held.rbpodo_sdk_state_source = "last_state_cache (read-miss hold)";
+                std::cerr << "[WARN] RbpodoBackend readState transient miss for "
+                          << impl_->config.name << "; holding last state ("
+                          << impl_->consecutive_read_misses << "/"
+                          << impl_->config.max_consecutive_read_misses << ")\n";
+                return okResult(BackendOp::ReadState, held, makeBackendTiming(start, nowSteadyNs()));
+            }
             out_state.connection_state = RobotConnectionState::Disconnected;
             impl_->connected = false;
             return failedResult<RobotState>(
@@ -790,6 +829,7 @@ BackendResult<RobotState> RbpodoBackend::readState() {
                 makeBackendTiming(start, nowSteadyNs())
             );
         }
+        impl_->consecutive_read_misses = 0;
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, out_state);
@@ -858,11 +898,15 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
             0.0
         );
     }
+    // Controller-simulation (operation_mode=simulation) is exempt — ACK-off is a
+    // normal pgmode-sim streaming mode. Genuine real (operation_mode=real) keeps
+    // the byte-identical env acceptance gate.
     if (impl_->config.run_mode == RunMode::Real &&
         impl_->config.disable_waiting_ack &&
+        !expectedSimulationMode(impl_->config) &&
         !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")) {
         std::cerr << "[ERROR] RbpodoBackend refused ACK-disabled servo_j without "
-                     "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1\n";
+                     "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 (genuine real)\n";
         return with_ack_metadata(
             rejectedSend(
                 request,
@@ -914,7 +958,7 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
     }
     if (cached_state.has_value() &&
         impl_->last_state_error.has_value() &&
-        !diagnosticsSuspectControllerSimulationOverrideAllowed(
+        !controllerSimulationReadinessOverrideAllowed(
             impl_->config,
             *impl_->last_state_error
         )) {
@@ -932,7 +976,7 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
     }
     if (!cached_state.has_value() &&
         impl_->last_state_error.has_value() &&
-        !diagnosticsSuspectControllerSimulationOverrideAllowed(
+        !controllerSimulationReadinessOverrideAllowed(
             impl_->config,
             *impl_->last_state_error
         )) {
@@ -1057,6 +1101,26 @@ BackendResult<RobotState> RbpodoBackend::resetFault() {
         makeBackendTiming(start, nowSteadyNs())
     );
 #else
+    // Controller-simulation carve-out: an rbpodo controller in pgmode simulation
+    // (operation_mode=simulation, physical_motion_expected=false) has no physical
+    // robot to endanger, so a fault reset is safe and is required to recover from
+    // a server-side EmergencyStop/soft-estop latch without restarting the server.
+    // Gated by operation_mode=simulation and live controller data.
+    // Physical real mode keeps the conservative refusal below: no verified rbpodo
+    // fault-reset API exists, so motion must remain disabled after any reset.
+    if (expectedSimulationMode(impl_->config) &&
+        impl_->connected && impl_->data_channel) {
+        try {
+            const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+            if (state) {
+                const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
+                RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
+                return okResult(BackendOp::ResetFault, mapped, makeBackendTiming(start, nowSteadyNs()));
+            }
+        } catch (const std::exception&) {
+            // fall through to the conservative refusal below
+        }
+    }
     // No verified fault-reset API is exposed by the inspected rbpodo headers.
     return failedResult<RobotState>(
         BackendOp::ResetFault,

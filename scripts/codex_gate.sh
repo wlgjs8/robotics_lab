@@ -641,7 +641,7 @@ run_bench_ablation_gate() {
   run_python_surface_tests
   if [[ "${CODEX_RUN_CIRCLE_ABLATION:-0}" == "1" ]]; then
     local matrix
-    matrix="${CODEX_CIRCLE_ABLATION_MATRIX:-configs/circle_ablation_15cm.yaml}"
+    matrix="${CODEX_CIRCLE_ABLATION_MATRIX:-configs/circle_ablation_baseline.yaml}"
     if [[ -f "${matrix}" ]]; then
       PYTHONPATH=rb_simulator/src python3 scripts/run_circle_ablation.py \
         --root . \

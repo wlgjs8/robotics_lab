@@ -82,9 +82,13 @@ class OperatorSafety:
         sim_readiness: Readiness | None = None,
         ops_available: bool = False,
         enable_tcp_pose_commands: bool = False,
+        enable_controller_sim_cartesian: bool = False,
         max_jog_step_deg: float = 2.0,
         max_tcp_linear_step_m: float = 0.005,
         max_tcp_angular_step_rad: float = 0.02,
+        max_tcp_linear_velocity_m_s: float = 0.05,
+        max_tcp_angular_velocity_rad_s: float = 0.2,
+        max_joint_velocity_deg_s: float = 10.0,
         command_timeout_sec: float = 0.2,
         init_left_joint_deg: tuple[float, ...] | None = None,
         init_right_joint_deg: tuple[float, ...] | None = None,
@@ -101,9 +105,16 @@ class OperatorSafety:
         self.sim_readiness = sim_readiness or Readiness(no_go_reason="simulator/rbpodo readiness not proven")
         self.ops_available = ops_available
         self.enable_tcp_pose_commands = bool(enable_tcp_pose_commands)
+        # pgmode simulation opt-in: allow TCP/Cartesian commands against an rbpodo
+        # controller-simulation backend (operation_mode=simulation). Real mode stays
+        # status-only regardless of this flag.
+        self.enable_controller_sim_cartesian = bool(enable_controller_sim_cartesian)
         self.max_jog_step_deg = float(max_jog_step_deg)
         self.max_tcp_linear_step_m = float(max_tcp_linear_step_m)
         self.max_tcp_angular_step_rad = float(max_tcp_angular_step_rad)
+        self.max_tcp_linear_velocity_m_s = float(max_tcp_linear_velocity_m_s)
+        self.max_tcp_angular_velocity_rad_s = float(max_tcp_angular_velocity_rad_s)
+        self.max_joint_velocity_deg_s = float(max_joint_velocity_deg_s)
         self.command_timeout_sec = float(command_timeout_sec)
         self.init_left_joint_deg = self._validated_joint6(init_left_joint_deg)
         self.init_right_joint_deg = self._validated_joint6(init_right_joint_deg)
@@ -200,7 +211,15 @@ class OperatorSafety:
         if self.observed_server_mode != "simulation":
             return "TCP pose command requires observed simulation mode"
         if self.observed_backend != "simulator":
-            return "TCP pose command requires simulator backend"
+            # pgmode simulation: an rbpodo controller-simulation backend
+            # (operation_mode=simulation) may run TCP/Cartesian commands when the
+            # operator opts in. Real motion is impossible by construction here.
+            if not (self.observed_backend == "rbpodo" and self.enable_controller_sim_cartesian):
+                return (
+                    "TCP pose command requires simulator backend, or an rbpodo "
+                    "controller-simulation backend with "
+                    "RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1"
+                )
         reason = self.blocked_reason("TcpDeltaStand")
         if reason:
             return reason
@@ -367,6 +386,150 @@ class OperatorSafety:
         latest = self.latest_valid()
         verdict = latest.safety_verdict if latest is not None else "unavailable"
         return True, f"sent {self.last_tcp_command}; server verdict: {verdict}"
+
+    def _validated_tcp_twist(self, twist: tuple[float, ...]) -> tuple[bool, object]:
+        try:
+            twist_values = tuple(float(value) for value in twist)
+        except (TypeError, ValueError):
+            return False, "non-finite TCP twist rejected"
+        if len(twist_values) != 6 or any(not math.isfinite(v) for v in twist_values):
+            return False, "non-finite TCP twist rejected"
+        if any(abs(v) > self.max_tcp_linear_velocity_m_s for v in twist_values[:3]):
+            return False, f"TCP linear velocity exceeds {self.max_tcp_linear_velocity_m_s:.3f} m/s limit"
+        if any(abs(v) > self.max_tcp_angular_velocity_rad_s for v in twist_values[3:]):
+            return False, f"TCP angular velocity exceeds {self.max_tcp_angular_velocity_rad_s:.3f} rad/s limit"
+        return True, twist_values
+
+    def _send_tcp_twist(
+        self,
+        arm: Literal["left", "right"],
+        twist: tuple[float, ...],
+        *,
+        frame: Literal["local", "stand"],
+    ) -> tuple[bool, str]:
+        reason = self.tcp_command_disabled_reason(arm)
+        if reason:
+            return False, reason
+        ok, validated = self._validated_tcp_twist(twist)
+        if not ok:
+            return False, str(validated)
+        twist_values = validated  # type: ignore[assignment]
+        if frame == "local":
+            packet = self.command_client.build_tcp_twist_local(
+                left_twist=twist_values if arm == "left" else None,
+                right_twist=twist_values if arm == "right" else None,
+                timeout_sec=self.command_timeout_sec,
+            )
+            mode_name = "TcpTwistLocal"
+        else:
+            packet = self.command_client.build_tcp_twist_stand(
+                left_twist=twist_values if arm == "left" else None,
+                right_twist=twist_values if arm == "right" else None,
+                timeout_sec=self.command_timeout_sec,
+            )
+            mode_name = "TcpTwistStand"
+        self.command_client.send(packet)
+        self.last_tcp_command = f"{mode_name} {arm}"
+        latest = self.latest_valid()
+        verdict = latest.safety_verdict if latest is not None else "unavailable"
+        return True, f"sent {self.last_tcp_command}; server verdict: {verdict}"
+
+    def send_tcp_twist_local(self, arm: Literal["left", "right"], twist: tuple[float, ...]) -> tuple[bool, str]:
+        return self._send_tcp_twist(arm, twist, frame="local")
+
+    def send_tcp_twist_stand(self, arm: Literal["left", "right"], twist: tuple[float, ...]) -> tuple[bool, str]:
+        return self._send_tcp_twist(arm, twist, frame="stand")
+
+    def send_joint_velocity(
+        self,
+        arm: Literal["left", "right"],
+        velocity: tuple[float, ...],
+    ) -> tuple[bool, str]:
+        reason = self.blocked_reason("JointVelocity")
+        if reason:
+            return False, reason
+        try:
+            vel = tuple(float(value) for value in velocity)
+        except (TypeError, ValueError):
+            return False, "non-finite joint velocity rejected"
+        if len(vel) != 6 or any(not math.isfinite(v) for v in vel):
+            return False, "non-finite joint velocity rejected"
+        if any(abs(v) > self.max_joint_velocity_deg_s for v in vel):
+            return False, f"joint velocity exceeds {self.max_joint_velocity_deg_s:.3f} deg/s limit"
+        packet = self.command_client.build_joint_velocity(
+            left_velocity=vel if arm == "left" else None,
+            right_velocity=vel if arm == "right" else None,
+            timeout_sec=self.command_timeout_sec,
+        )
+        self.command_client.send(packet)
+        self.last_tcp_command = f"JointVelocity {arm}"
+        latest = self.latest_valid()
+        verdict = latest.safety_verdict if latest is not None else "unavailable"
+        return True, f"sent JointVelocity {arm}; server verdict: {verdict}"
+
+    def build_circle_packet(
+        self,
+        diameter_m: float = 0.15,
+        period_sec: float = 4.0,
+        *,
+        arm: Literal["left", "right", "both"] = "both",
+        plane: str = "xy",
+        repeat: int = 50,
+    ) -> tuple[bool, str, dict[str, object] | None]:
+        """Validate + build ONE TcpCircleMove packet (fixed seq, full payload).
+
+        The caller re-sends the SAME returned packet to keep the circle fresh;
+        sending a new seq would reset the circle to the current TCP.
+        """
+        arms = ("left", "right") if arm == "both" else (arm,)
+        for one in arms:
+            reason = self.tcp_command_disabled_reason(one)  # type: ignore[arg-type]
+            if reason:
+                return False, reason, None
+        try:
+            diameter = float(diameter_m)
+            period = float(period_sec)
+        except (TypeError, ValueError):
+            return False, "non-finite circle parameters rejected", None
+        if not (math.isfinite(diameter) and math.isfinite(period)):
+            return False, "non-finite circle parameters rejected", None
+        if diameter <= 0.0 or diameter > 0.20:
+            return False, "circle diameter must be in (0, 0.20] m", None
+        if period < 3.0:
+            return False, "circle period must be >= 3.0 s", None
+        if plane not in {"xy", "xz", "yz"}:
+            return False, "circle plane must be xy, xz, or yz", None
+        if int(repeat) < 1:
+            return False, "circle repeat must be >= 1", None
+        packet = self.command_client.build_tcp_circle_move(
+            left=arm in {"left", "both"},
+            right=arm in {"right", "both"},
+            diameter_m=diameter,
+            period_sec=period,
+            plane=plane,
+            repeat=int(repeat),
+        )
+        return True, f"TcpCircleMove {arm} d={diameter:.3f}m p={period:.2f}s plane={plane}", packet
+
+    def send_tcp_circle_move(
+        self,
+        diameter_m: float = 0.15,
+        period_sec: float = 4.0,
+        *,
+        arm: Literal["left", "right", "both"] = "both",
+        plane: str = "xy",
+        repeat: int = 50,
+    ) -> tuple[bool, str]:
+        ok, message, packet = self.build_circle_packet(
+            diameter_m, period_sec, arm=arm, plane=plane, repeat=repeat
+        )
+        if not ok or packet is None:
+            return False, message
+        self.command_client.send(packet)
+        self.last_tcp_command = message
+        latest = self.latest_valid()
+        verdict = latest.safety_verdict if latest is not None else "unavailable"
+        return True, f"sent {message}; server verdict: {verdict}"
 
     def send_tcp_pose_target(
         self,

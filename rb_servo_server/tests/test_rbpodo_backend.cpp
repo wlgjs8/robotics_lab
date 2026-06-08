@@ -112,6 +112,34 @@ bool testHugeSelfCollisionIsSuspectButReadable() {
     return true;
 }
 
+bool testInitErrorSimulationStateIsFaultedButReadable() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+    snapshot.real_vs_simulation_mode = 1;
+    snapshot.init_state_info = 5;
+    snapshot.init_error = 187;
+
+    const rb_servo::RobotState state =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
+    RB_CHECK(state.has_valid_joint_state);
+    RB_CHECK(state.has_error);
+    RB_CHECK(!state.servo_enabled);
+    RB_CHECK(state.error_code == 187);
+    RB_CHECK(state.lifecycle_state == "faulted");
+    RB_CHECK(state.diagnostic_error_source == "rbpodo_init_error");
+    RB_CHECK(state.rbpodo_diagnostics.has_value());
+    RB_CHECK(state.rbpodo_diagnostics->diagnostics_valid);
+    RB_CHECK(!state.rbpodo_diagnostics->diagnostics_suspect);
+    RB_CHECK(state.rbpodo_diagnostics->raw.init_error == 187);
+    RB_CHECK(!rb_servo::rbpodoStateAcquisitionError(state).has_value());
+
+    const std::optional<rb_servo::BackendError> readiness =
+        rb_servo::rbpodoMotionReadinessError(rbpodoConfig("simulation"), snapshot, state);
+    RB_CHECK(readiness.has_value());
+    RB_CHECK(readiness->kind == rb_servo::BackendErrorKind::RobotFault);
+    RB_CHECK(readiness->name == "rbpodo_init_error");
+    return true;
+}
+
 bool testTinyTimeMarksDiagnosticsSuspectWithoutLosingJoints() {
     rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
     snapshot.robot_time_sec = 3.0e-41;
@@ -203,6 +231,7 @@ bool testStatePublisherSerializesRawRbpodoDiagnostics() {
 int main() {
     if (!testClearSelfCollisionIsRobotFault()) return 1;
     if (!testHugeSelfCollisionIsSuspectButReadable()) return 1;
+    if (!testInitErrorSimulationStateIsFaultedButReadable()) return 1;
     if (!testTinyTimeMarksDiagnosticsSuspectWithoutLosingJoints()) return 1;
     if (!testNonFiniteJointStateStillFailsAcquisition()) return 1;
     if (!testStatePublisherSerializesRawRbpodoDiagnostics()) return 1;

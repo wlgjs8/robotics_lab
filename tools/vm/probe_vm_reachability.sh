@@ -9,10 +9,12 @@ TRY_RBPODO_STATE=0
 
 usage() {
   cat <<'EOF'
-Usage: tools/vm/probe_vm_reachability.sh --left IP --right IP [options]
+Usage: tools/vm/probe_vm_reachability.sh (--left IP | --right IP) [options]
+       tools/vm/probe_vm_reachability.sh --left IP --right IP [options]
 
-Probe the two Rainbow controller-simulation VMs from the host. rbpodo uses
-fixed command/data ports 5000/5001, so left and right must be different IPs.
+Probe one or two Rainbow controller-simulation VMs from the host. rbpodo uses
+fixed command/data ports 5000/5001. When both arms are provided, left and right
+must be different IPs.
 
 Options:
   --left IP             Left VM/controller IP.
@@ -65,9 +67,12 @@ while (($# > 0)); do
   esac
 done
 
-[[ -n "${LEFT_IP}" ]] || fail "missing --left"
-[[ -n "${RIGHT_IP}" ]] || fail "missing --right"
-[[ "${LEFT_IP}" != "${RIGHT_IP}" ]] || fail "left and right VM IPs must differ"
+if [[ -z "${LEFT_IP}" && -z "${RIGHT_IP}" ]]; then
+  fail "missing --left or --right"
+fi
+if [[ -n "${LEFT_IP}" && -n "${RIGHT_IP}" ]]; then
+  [[ "${LEFT_IP}" != "${RIGHT_IP}" ]] || fail "left and right VM IPs must differ"
+fi
 
 python3 - "${LEFT_IP}" "${RIGHT_IP}" "${TIMEOUT_SEC}" "${OUTPUT}" "${TRY_RBPODO_STATE}" <<'PY'
 import json
@@ -117,14 +122,18 @@ def state_probe(ip: str, artifact: Path) -> dict[str, object]:
     }
 
 
-arms = {"left": left_ip, "right": right_ip}
+arms = {}
+if left_ip:
+    arms["left"] = left_ip
+if right_ip:
+    arms["right"] = right_ip
 result: dict[str, object] = {
     "schema": "robotics_lab.vm_parity.reachability.v1",
     "source": "controller_simulation_vm",
     "physical_motion": False,
     "timeout_sec": timeout,
     "rbpodo_fixed_ports": [5000, 5001],
-    "same_ip_forbidden": left_ip == right_ip,
+    "same_ip_forbidden": bool(left_ip and right_ip and left_ip == right_ip),
     "arms": {},
     "status": "FAIL",
 }

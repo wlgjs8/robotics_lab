@@ -49,6 +49,16 @@ struct BackendConfig {
     // rbpodo-only. When true, Cobot::disable_waiting_ack() makes command calls
     // return after socket send instead of waiting for controller ACK.
     bool disable_waiting_ack = false;
+    bool allow_controller_simulation_diagnostics_suspect = false;
+    bool allow_controller_simulation_init_error = false;
+
+    // rbpodo controller-simulation only: tolerate up to N consecutive transient
+    // readState misses (no CobotData frame within the read window) by holding the
+    // last valid state and staying connected, instead of declaring the controller
+    // disconnected on the first miss. A sustained outage still trips after N
+    // consecutive misses. 0 = no tolerance (fail-closed, default). Ignored for
+    // physical real operation (operation_mode != simulation).
+    int max_consecutive_read_misses = 0;
 };
 
 struct ArmMountConfig {
@@ -187,6 +197,8 @@ struct ServoConfig {
     bool allow_readonly_wrong_mode_startup = false;
     bool allow_controller_simulation_motion = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
+    bool allow_controller_simulation_init_error = false;
+    bool allow_controller_simulation_not_activated = false;
 
     bool enable_realtime_priority = true;
     int realtime_priority = 80;
