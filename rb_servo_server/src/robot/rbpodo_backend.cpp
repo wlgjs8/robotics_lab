@@ -1007,6 +1007,24 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
             true
         );
         const uint64_t ack_end = nowSteadyNs();
+        // ACK-disabled streaming leak fix: the SDK's disable_waiting_ack only
+        // flips a client-side flag (waiting_ack=false) — it does NOT tell the
+        // controller to stop sending a response per command. move_servo_j then
+        // returns without reading the command socket, and state is read on a
+        // separate CobotData channel, so the command socket is NEVER drained.
+        // Over a long run the controller's per-command responses pile up unread
+        // in the command-socket receive buffer until it backs up and the command
+        // channel corrupts (~10-20 min: controller "parsing error", teaching
+        // pendant link drops, GUI ArmMotion/InitMotion ignored). Drain it every
+        // cycle: flush() is a non-blocking read-until-empty. We discard the
+        // drained responses (this mode already ignores ACKs), so accept/reject
+        // below is unchanged and the streamed command bytes are identical — safe
+        // for the real path too. No-op when ACK waiting is enabled (move_servo_j
+        // already drains via wait_until_ack_message).
+        if (impl_->config.disable_waiting_ack) {
+            rb::podo::ResponseCollector drained;
+            impl_->robot->flush(drained);
+        }
         const double ack_wait_duration_us =
             impl_->config.disable_waiting_ack ? 0.0 : makeBackendTiming(ack_start, ack_end).duration_us;
         if (!ret.is_success()) {
