@@ -139,6 +139,7 @@ class FlowHdf5Dataset:
         self.root = Path(episodes_dir)
         self.action_horizon = int(action_horizon)
         self.image_size = int(image_size)
+        self._phase_boundary_cache: dict[str, Any] = {}
         if image_crop not in IMAGE_CROP_MODES:
             raise ValueError(f"image_crop must be one of: {', '.join(IMAGE_CROP_MODES)}")
         self.image_crop = image_crop
@@ -222,6 +223,21 @@ class FlowHdf5Dataset:
             "image_decode_count": np.asarray(decode_count, dtype=np.int64),
             "missing_camera_count": np.asarray(missing_count, dtype=np.int64),
         }
+
+    def phase_boundaries_for_episode(self, episode_index: int):
+        from .phase_segmentation import extract_phase_boundaries
+
+        episode = self.episodes[int(episode_index)]
+        key = str(episode.path)
+        boundaries = self._phase_boundary_cache.get(key)
+        if boundaries is None:
+            boundaries = extract_phase_boundaries(
+                episode.left_gripper,
+                episode.right_gripper,
+                episode.length,
+            )
+            self._phase_boundary_cache[key] = boundaries
+        return boundaries
 
 
 def discover_hdf5_episodes(
