@@ -164,6 +164,27 @@ def _joint_cfg_radians(q_values: tuple[float, ...] | None) -> tuple[float, ...]:
     return tuple(math.radians(value) for value in padded)
 
 
+# Translucent blue for the reference "ghost" robot (R, G, B, alpha in 0..1).
+_REFERENCE_GHOST_RGBA = (0.25, 0.6, 1.0, 0.35)
+
+
+def _reference_ghost_enabled() -> bool:
+    return os.environ.get("RB_GUI_REFERENCE_GHOST", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _reference_ghost_active(arm_state: Any) -> bool:
+    """Show the q_ref ghost in simulation contexts where q_actual need not track the
+    command (controller/pgmode simulation). Hidden for physical real motion, where
+    the solid q_actual robot already follows the command."""
+    if not _reference_ghost_enabled():
+        return False
+    if getattr(arm_state, "q_ref_deg", None) is None:
+        return False
+    if getattr(arm_state, "physical_motion_expected", None) is True:
+        return False
+    return True
+
+
 def _joint_marker_position(base: tuple[float, float, float], q_values: tuple[float, ...] | None) -> tuple[float, float, float]:
     # Marker-only fallback: not FK. It gives operators visible left/right state
     # changes without pretending Cartesian kinematics are available.
@@ -210,6 +231,20 @@ def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
         handles["left_urdf"] = ViserUrdf(server, urdf_path, root_node_name="/stand/left_base")
         handles["right_urdf"] = ViserUrdf(server, urdf_path, root_node_name="/stand/right_base")
         handles["urdf_joint_names"] = tuple(handles["left_urdf"].get_actuated_joint_names())
+        # Translucent reference "ghost" robot following q_ref. In controller (pgmode)
+        # simulation the controller does not move q_actual to track streamed servo_j,
+        # so this overlay shows the commanded motion while the solid robot truthfully
+        # stays at q_actual. RGBA mesh_color_override -> add_mesh_simple(opacity=a).
+        if _reference_ghost_enabled():
+            try:
+                handles["left_urdf_ref"] = ViserUrdf(
+                    server, urdf_path, root_node_name="/stand/left_base_ref",
+                    mesh_color_override=_REFERENCE_GHOST_RGBA)
+                handles["right_urdf_ref"] = ViserUrdf(
+                    server, urdf_path, root_node_name="/stand/right_base_ref",
+                    mesh_color_override=_REFERENCE_GHOST_RGBA)
+            except Exception as exc:
+                handles["urdf_ref_error"] = f"{type(exc).__name__}: {exc}"
     except Exception as exc:
         handles["urdf_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
 
@@ -231,6 +266,9 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         handles["stand"] = server.scene.add_frame("/stand", show_axes=False)
         handles["left_base"] = server.scene.add_frame("/stand/left_base", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False)
         handles["right_base"] = server.scene.add_frame("/stand/right_base", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False)
+        # Mount frames for the translucent reference "ghost" robot (follows q_ref).
+        handles["left_base_ref"] = server.scene.add_frame("/stand/left_base_ref", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
+        handles["right_base_ref"] = server.scene.add_frame("/stand/right_base_ref", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
         has_transform_controls = hasattr(server.scene, "add_transform_controls")
         handles["left_tcp"] = server.scene.add_frame("/stand/left_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(0.1601, -0.1725, 0.78))
         handles["right_tcp"] = server.scene.add_frame("/stand/right_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(-0.1601, -0.1725, 0.78))
@@ -497,9 +535,27 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
         except Exception as exc:
             scene_handles["urdf_update_error"] = f"{type(exc).__name__}: {exc}"
 
+    # Reference ghost robot: drive q_ref and toggle visibility per arm.
+    for key, base_key, arm_state in (
+        ("left_urdf_ref", "left_base_ref", latest.left),
+        ("right_urdf_ref", "right_base_ref", latest.right),
+    ):
+        ghost = scene_handles.get(key)
+        if ghost is None:
+            continue
+        show_ghost = _reference_ghost_active(arm_state)
+        if show_ghost:
+            try:
+                _update_urdf_config(ghost, _joint_cfg_radians(arm_state.q_ref_deg))
+            except Exception as exc:
+                scene_handles["urdf_ref_update_error"] = f"{type(exc).__name__}: {exc}"
+        _set_visible(scene_handles.get(base_key), show_ghost)
+
     updates = {
         "left_base": left_base,
         "right_base": right_base,
+        "left_base_ref": left_base,
+        "right_base_ref": right_base,
         "left_marker": _joint_marker_position(left_base, latest.left.q_actual_deg),
         "right_marker": _joint_marker_position(right_base, latest.right.q_actual_deg),
     }
@@ -593,6 +649,8 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
     rotations = {
         "left_base": _pose_wxyz(left_pose),
         "right_base": _pose_wxyz(right_pose),
+        "left_base_ref": _pose_wxyz(left_pose),
+        "right_base_ref": _pose_wxyz(right_pose),
     }
     for arm, (_, wxyz) in actual_updates.items():
         rotations[f"{arm}_tcp"] = wxyz

@@ -230,6 +230,7 @@ class ArmSnapshot:
     connection_state: str
     send_ok: bool
     error_code: int | None = None
+    q_ref_deg: tuple[float, ...] | None = None
     tcp_stand: Pose6D | None = None
     tcp_base: Pose6D | None = None
     tcp_actual_stand: Pose6D | None = None
@@ -266,6 +267,7 @@ class ArmSnapshot:
         q_actual = finite_joint_array(data.get("q_actual_deg"))
         q_sent = finite_joint_array(data.get("q_sent_deg"))
         q_prev = finite_joint_array(data.get("q_previous_sent_deg"))
+        q_ref = finite_joint_array(data.get("q_ref_deg"))
         has_valid_joint_state = bool(data.get("has_valid_joint_state", False)) and q_actual is not None and q_sent is not None and q_prev is not None
         error_code = data.get("error_code")
         tcp_stand = Pose6D.parse(data.get("tcp_stand"))
@@ -299,6 +301,7 @@ class ArmSnapshot:
             q_actual_deg=q_actual,
             q_sent_deg=q_sent,
             q_previous_sent_deg=q_prev,
+            q_ref_deg=q_ref,
             has_valid_joint_state=has_valid_joint_state,
             connection_state=str(data.get("connection_state", "Disconnected")),
             send_ok=bool(data.get("send_ok", False)),
