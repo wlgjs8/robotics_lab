@@ -73,6 +73,27 @@ ova = Path(sys.argv[1])
 output = Path(sys.argv[2])
 expected_sha256 = sys.argv[3] or None
 
+# Distro-specific VirtualBox OSType ids such as Debian_64 may not contain "linux".
+LINUX_OSTYPE_TOKENS = (
+    "linux",
+    "debian",
+    "ubuntu",
+    "redhat",
+    "rhel",
+    "fedora",
+    "centos",
+    "oraclelinux",
+    "oracle",
+    "gentoo",
+    "opensuse",
+    "suse",
+    "sles",
+    "mandriva",
+    "turbolinux",
+    "xandros",
+    "arch",
+)
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -153,7 +174,10 @@ try:
             if ovf_handle is None:
                 raise OSError("failed to read OVF member")
             ovf_text = ovf_handle.read().decode("utf-8", errors="ignore")
-            result["guest_os_linux_like"] = "linux" in ovf_text.lower()
+            ovf_text_lower = ovf_text.lower()
+            result["guest_os_linux_like"] = any(
+                token in ovf_text_lower for token in LINUX_OSTYPE_TOKENS
+            )
             result["nic_count"] = len(
                 re.findall(r"<[^>]*ResourceType[^>]*>\s*10\s*</", ovf_text, flags=re.IGNORECASE)
             )

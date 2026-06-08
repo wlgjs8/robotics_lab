@@ -49,6 +49,16 @@ struct BackendConfig {
     // rbpodo-only. When true, Cobot::disable_waiting_ack() makes command calls
     // return after socket send instead of waiting for controller ACK.
     bool disable_waiting_ack = false;
+    bool allow_controller_simulation_diagnostics_suspect = false;
+    bool allow_controller_simulation_init_error = false;
+
+    // rbpodo controller-simulation only: tolerate up to N consecutive transient
+    // readState misses (no CobotData frame within the read window) by holding the
+    // last valid state and staying connected, instead of declaring the controller
+    // disconnected on the first miss. A sustained outage still trips after N
+    // consecutive misses. 0 = no tolerance (fail-closed, default). Ignored for
+    // physical real operation (operation_mode != simulation).
+    int max_consecutive_read_misses = 0;
 };
 
 struct ArmMountConfig {
@@ -144,6 +154,31 @@ struct RbpodoAsyncStreamingConfig {
     RbpodoAsyncDiagnosticsConfig diagnostics;
 };
 
+enum class SelfCollisionFailPolicy {
+    ClampToHold,
+    FaultLatch,
+};
+
+// Server-side dual-arm self-collision guard (the rbpodo controller firmware does
+// not populate op_stat_self_collision). Each arm link is approximated as a capsule
+// (segment between consecutive kinematic-chain points + radius); a candidate target
+// is refused if any left/right capsule pair comes within margin_m of each other.
+struct SelfCollisionConfig {
+    bool enable = false;
+    double margin_m = 0.05;
+    // Capsule radius per bone (meters). Chain points are [base, j1..j6, tcp] (8
+    // points -> 7 bones); index i is the bone from point i to point i+1. The last
+    // radius is reused if more bones exist (e.g. a future gripper). Conservative
+    // (slightly large) defaults; tune in simulation.
+    std::array<double, 7> link_radius_m{0.10, 0.09, 0.08, 0.07, 0.06, 0.06, 0.06};
+    SelfCollisionFailPolicy fail_policy = SelfCollisionFailPolicy::ClampToHold;
+    // Observe-only: still evaluate and publish clearance/violation telemetry, but
+    // do NOT clamp or latch. For tuning radii/margin in simulation against a known
+    // collision-free trajectory. Never use monitor_only as a real-motion safety
+    // posture.
+    bool monitor_only = false;
+};
+
 struct SafetyConfig {
     JointArray q_min_deg{};
     JointArray q_max_deg{};
@@ -166,6 +201,7 @@ struct SafetyConfig {
     ControllerSimulationPhysicalMotionPolicy controller_simulation_physical_motion_policy =
         ControllerSimulationPhysicalMotionPolicy::FaultLatch;
     double controller_simulation_physical_motion_threshold_deg = 0.05;
+    SelfCollisionConfig self_collision;
 };
 
 inline constexpr JointArray rbpodoDefaultSafetyJointMinDeg() {
@@ -187,6 +223,8 @@ struct ServoConfig {
     bool allow_readonly_wrong_mode_startup = false;
     bool allow_controller_simulation_motion = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
+    bool allow_controller_simulation_init_error = false;
+    bool allow_controller_simulation_not_activated = false;
 
     bool enable_realtime_priority = true;
     int realtime_priority = 80;

@@ -115,6 +115,14 @@ if(BUILD_TESTING)
     target_link_libraries(test_config_loader PRIVATE rb_servo_core)
     add_test(NAME config_loader COMMAND test_config_loader)
 
+    add_executable(test_config tests/test_config.cpp)
+    target_link_libraries(test_config PRIVATE rb_servo_core)
+    add_test(NAME config COMMAND test_config)
+
+    add_executable(test_rbpodo_backend tests/test_rbpodo_backend.cpp)
+    target_link_libraries(test_rbpodo_backend PRIVATE rb_servo_core)
+    add_test(NAME rbpodo_backend COMMAND test_rbpodo_backend)
+
     add_executable(test_kinematics_fk tests/test_kinematics_fk.cpp)
     target_link_libraries(test_kinematics_fk PRIVATE rb_servo_core)
     add_test(NAME kinematics_fk COMMAND test_kinematics_fk)
@@ -126,6 +134,14 @@ if(BUILD_TESTING)
     add_executable(test_se3_math tests/test_se3_math.cpp)
     target_link_libraries(test_se3_math PRIVATE rb_servo_core)
     add_test(NAME se3_math COMMAND test_se3_math)
+
+    add_executable(test_capsule_distance tests/test_capsule_distance.cpp)
+    target_link_libraries(test_capsule_distance PRIVATE rb_servo_core)
+    add_test(NAME capsule_distance COMMAND test_capsule_distance)
+
+    add_executable(test_self_collision tests/test_self_collision.cpp)
+    target_link_libraries(test_self_collision PRIVATE rb_servo_core)
+    add_test(NAME self_collision COMMAND test_self_collision)
 
     add_executable(test_cartesian_planner tests/test_cartesian_planner.cpp)
     target_link_libraries(test_cartesian_planner PRIVATE rb_servo_core)

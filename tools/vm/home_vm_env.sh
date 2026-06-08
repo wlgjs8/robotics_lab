@@ -5,6 +5,7 @@ LEFT_IP="${ROBOT_LEFT_IP:-192.168.56.101}"
 RIGHT_IP="${ROBOT_RIGHT_IP:-192.168.56.102}"
 MODE="closed"
 EXEC_MODE=0
+SINGLE=0
 COMMAND=()
 
 usage() {
@@ -12,12 +13,13 @@ usage() {
 Usage: tools/vm/home_vm_env.sh [options] [--exec -- command ...]
 
 Print or run with the environment for Rainbow VM controller-simulation parity.
-Default mode is fail-closed: it sets only ROBOT_LEFT_IP/ROBOT_RIGHT_IP and
-opens no real/controller-simulation gates.
+Default mode is fail-closed: it sets only ROBOT_LEFT_IP/ROBOT_RIGHT_IP in
+two-arm mode and opens no real/controller-simulation gates.
 
 Options:
   --left-ip IP       Left VM IP, default $ROBOT_LEFT_IP or 192.168.56.101.
   --right-ip IP      Right VM IP, default $ROBOT_RIGHT_IP or 192.168.56.102.
+  --single           Single-arm left-only mode; use/export only ROBOT_LEFT_IP.
   --readonly         Open read-only rbpodo connection gate only.
   --motion           Open controller-simulation Servo J motion gates.
   --cartesian        Open controller-simulation Cartesian gates.
@@ -44,6 +46,10 @@ while (($# > 0)); do
       [[ $# -ge 2 ]] || fail "--right-ip requires a value"
       RIGHT_IP="$2"
       shift 2
+      ;;
+    --single)
+      SINGLE=1
+      shift
       ;;
     --readonly)
       MODE="readonly"
@@ -75,15 +81,21 @@ while (($# > 0)); do
 done
 
 [[ -n "${LEFT_IP}" ]] || fail "left IP is empty"
-[[ -n "${RIGHT_IP}" ]] || fail "right IP is empty"
-[[ "${LEFT_IP}" != "${RIGHT_IP}" ]] || fail "left and right VM IPs must differ"
+if [[ "${SINGLE}" == "0" ]]; then
+  [[ -n "${RIGHT_IP}" ]] || fail "right IP is empty"
+  [[ "${LEFT_IP}" != "${RIGHT_IP}" ]] || fail "left and right VM IPs must differ"
+fi
 if [[ "${EXEC_MODE}" == "1" && "${#COMMAND[@]}" -eq 0 ]]; then
   fail "--exec requires a command"
 fi
 
 apply_env() {
   export ROBOT_LEFT_IP="${LEFT_IP}"
-  export ROBOT_RIGHT_IP="${RIGHT_IP}"
+  if [[ "${SINGLE}" == "1" ]]; then
+    unset ROBOT_RIGHT_IP
+  else
+    export ROBOT_RIGHT_IP="${RIGHT_IP}"
+  fi
   unset RB_ALLOW_REAL_CARTESIAN
 
   case "${MODE}" in
@@ -123,7 +135,9 @@ apply_env() {
 
 print_exports() {
   printf 'export ROBOT_LEFT_IP=%q\n' "${LEFT_IP}"
-  printf 'export ROBOT_RIGHT_IP=%q\n' "${RIGHT_IP}"
+  if [[ "${SINGLE}" == "0" ]]; then
+    printf 'export ROBOT_RIGHT_IP=%q\n' "${RIGHT_IP}"
+  fi
   echo 'unset RB_ALLOW_REAL_CARTESIAN'
   case "${MODE}" in
     closed)

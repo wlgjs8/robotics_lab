@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import math
 import os
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,7 +13,16 @@ from torch import nn
 from .flow_dataset import FLOW_ACTION_DIM, FLOW_PROPRIO_DIM
 
 
-SUPPORTED_VISION_BACKBONES = ("tiny_cnn", "resnet18", "resnet50", "dinov3")
+SUPPORTED_VISION_BACKBONES = (
+    "tiny_cnn",
+    "resnet18",
+    "resnet50",
+    "dinov3",
+    "dinov3_convnext_tiny",
+    "dinov3_convnext_small",
+    "dinov3_convnext_base",
+    "dinov3_convnext_large",
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +82,8 @@ class VisionBackbone(nn.Module):
             self.encoder, feature_dim = _build_resnet(self.name)
         elif self.name == "dinov3":
             self.encoder, feature_dim = _build_dinov3_plugin()
+        elif self.name.startswith("dinov3_convnext_"):
+            self.encoder, feature_dim = _build_dinov3_convnext(self.name)
         else:
             supported = ", ".join(SUPPORTED_VISION_BACKBONES)
             raise ValueError(f"unsupported vision_backbone '{self.name}', expected one of: {supported}")
@@ -327,3 +339,101 @@ def _build_dinov3_plugin() -> tuple[nn.Module, int]:
     if not isinstance(model, nn.Module) or feature_dim is None:
         raise RuntimeError("dinov3 plugin must return (nn.Module, feature_dim) or expose feature_dim")
     return model, int(feature_dim)
+
+
+def _build_dinov3_convnext(name: str) -> tuple[nn.Module, int]:
+    try:
+        from torchvision import models
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "DINOv3 ConvNeXt backbones require torchvision; install policy_runner with the ml extra"
+        ) from exc
+    size = name.removeprefix("dinov3_convnext_")
+    builders = {
+        "tiny": models.convnext_tiny,
+        "small": models.convnext_small,
+        "base": models.convnext_base,
+        "large": models.convnext_large,
+    }
+    if size not in builders:
+        supported = ", ".join(f"dinov3_convnext_{key}" for key in sorted(builders))
+        raise ValueError(f"unsupported DINOv3 ConvNeXt backbone '{name}', expected one of: {supported}")
+    model = builders[size](weights=None)
+    state_path = _dinov3_checkpoint_path(f"dinov3_convnext_{size}")
+    raw_state = torch.load(state_path, map_location="cpu")
+    converted = _convert_dinov3_convnext_state_dict(raw_state)
+    missing, unexpected = model.load_state_dict(converted, strict=False)
+    allowed_missing_prefixes = ("classifier.",)
+    allowed_unexpected_prefixes = ("norms.",)
+    bad_missing = [key for key in missing if not key.startswith(allowed_missing_prefixes)]
+    bad_unexpected = [key for key in unexpected if not key.startswith(allowed_unexpected_prefixes)]
+    if bad_missing or bad_unexpected:
+        raise RuntimeError(
+            "failed to load DINOv3 ConvNeXt checkpoint "
+            f"{state_path}: missing={bad_missing[:8]} unexpected={bad_unexpected[:8]}"
+        )
+    feature_dim = int(model.classifier[-1].in_features)
+    model.classifier = nn.Sequential(nn.Flatten(1))
+    return model, feature_dim
+
+
+def _dinov3_checkpoint_path(stem: str) -> Path:
+    search_dirs = []
+    env_dir = os.environ.get("POLICY_RUNNER_DINOV3_DIR")
+    if env_dir:
+        search_dirs.append(Path(env_dir))
+    search_dirs.extend(
+        [
+            Path("/app/policy_runner/dinov3"),
+            Path(__file__).resolve().parents[1] / "dinov3",
+            Path.cwd() / "policy_runner" / "dinov3",
+        ]
+    )
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        matches = sorted(directory.glob(f"{stem}_pretrain_*.pth"))
+        if matches:
+            return matches[0]
+    searched = ", ".join(str(path) for path in search_dirs)
+    raise RuntimeError(f"missing DINOv3 checkpoint for {stem}; searched: {searched}")
+
+
+def _convert_dinov3_convnext_state_dict(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    converted: dict[str, torch.Tensor] = {}
+    stage_feature_indices = {0: 1, 1: 3, 2: 5, 3: 7}
+    for key, value in state.items():
+        new_key = key
+        if key.startswith("downsample_layers."):
+            parts = key.split(".")
+            layer_index = int(parts[1])
+            if layer_index == 0:
+                feature_index = 0
+                op_index = parts[2]
+                suffix = ".".join(parts[3:])
+            else:
+                feature_index = layer_index * 2
+                op_index = "0" if parts[2] == "0" else "1"
+                suffix = ".".join(parts[3:])
+            new_key = f"features.{feature_index}.{op_index}.{suffix}"
+        elif key.startswith("stages."):
+            parts = key.split(".")
+            stage_index = int(parts[1])
+            block_index = int(parts[2])
+            rest = ".".join(parts[3:])
+            prefix = f"features.{stage_feature_indices[stage_index]}.{block_index}"
+            if rest == "gamma":
+                new_key = f"{prefix}.layer_scale"
+                value = value.reshape(-1, 1, 1)
+            elif rest.startswith("dwconv."):
+                new_key = f"{prefix}.block.0.{rest.removeprefix('dwconv.')}"
+            elif rest.startswith("norm."):
+                new_key = f"{prefix}.block.2.{rest.removeprefix('norm.')}"
+            elif rest.startswith("pwconv1."):
+                new_key = f"{prefix}.block.3.{rest.removeprefix('pwconv1.')}"
+            elif rest.startswith("pwconv2."):
+                new_key = f"{prefix}.block.5.{rest.removeprefix('pwconv2.')}"
+        elif key.startswith("norm."):
+            new_key = f"classifier.0.{key.removeprefix('norm.')}"
+        converted[new_key] = value
+    return converted

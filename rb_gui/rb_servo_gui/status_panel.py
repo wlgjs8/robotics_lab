@@ -272,6 +272,35 @@ def _policy_runner_lease_status(latest: StateSnapshot) -> str:
     return "missing"
 
 
+def _format_self_collision_status(
+    latest: StateSnapshot | None,
+    *,
+    stale: bool,
+) -> str:
+    if latest is None:
+        return "self-collision: no state"
+    if stale:
+        return "State stream stale"
+    sc = latest.self_collision
+    if not isinstance(sc, Mapping):
+        return "self-collision: disabled"
+    if not bool(sc.get("enabled", False)):
+        return "self-collision: disabled"
+
+    margin = sc.get("margin_m")
+    margin_txt = f"{float(margin) * 1000:.0f}mm" if isinstance(margin, (int, float)) else "?"
+    if not bool(sc.get("checked", False)):
+        return f"self-collision: ON margin={margin_txt} (geometry unavailable)"
+
+    clearance = sc.get("min_clearance_m")
+    clearance_txt = (
+        f"{float(clearance) * 1000:.0f}mm" if isinstance(clearance, (int, float)) else "?"
+    )
+    violated = bool(sc.get("violated", False))
+    status = "VIOLATED" if violated else "ok"
+    return f"self-collision: {status} clearance={clearance_txt} margin={margin_txt}"
+
+
 def _format_pgmode_status(
     latest: StateSnapshot | None,
     *,

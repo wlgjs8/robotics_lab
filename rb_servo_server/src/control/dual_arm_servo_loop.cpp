@@ -232,9 +232,7 @@ bool controllerSimulationMotionGateOpen(const DualArmConfig& config) {
     return config.servo.allow_controller_simulation_motion &&
         bothRbpodoControllerSimulationBackends(config) &&
         envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
-        envFlagEnabled("RB_ALLOW_REAL_MOTION") &&
-        envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
-        envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+        envFlagEnabled("RB_ALLOW_REAL_MOTION");
 }
 
 const BackendConfig& backendConfigForArm(const DualArmConfig& config, ArmId arm_id) {
@@ -250,10 +248,7 @@ bool controllerSimulationCartesianGateOpen(
         config.servo.allow_controller_simulation_motion &&
         isRbpodoControllerSimulationBackend(backend) &&
         envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
-        envFlagEnabled("RB_ALLOW_REAL_MOTION") &&
-        envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") &&
-        envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN") &&
-        envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
+        envFlagEnabled("RB_ALLOW_REAL_MOTION");
 }
 
 struct CartesianAvailability {
@@ -340,7 +335,19 @@ CartesianAvailability cartesianAvailabilityForArm(
         return availability;
     }
 
-    if (!streaming_cartesian && !controller_simulation_circle_move) {
+    const bool rbpodo_controller_simulation_operation =
+        isRbpodoControllerSimulationBackend(backend);
+    const bool controller_simulation_cartesian_context =
+        rbpodo_controller_simulation_operation &&
+        controllerSimulationCartesianGateOpen(config, backend);
+
+    if (!streaming_cartesian &&
+        !controller_simulation_circle_move &&
+        !controller_simulation_cartesian_context) {
+        if (rbpodo_controller_simulation_operation) {
+            availability.reason = "cartesian_control_unavailable_physical_real_blocked";
+            return availability;
+        }
         availability.available =
             config.cartesian_control.allow_in_real &&
             envFlagEnabled("RB_ALLOW_REAL_CARTESIAN");
@@ -945,17 +952,53 @@ CartesianServoStateSelection selectCartesianServoStateForArm(
 
 bool controllerSimulationDiagnosticsSuspectGateOpen(const DualArmConfig& config) {
     return controllerSimulationMotionGateOpen(config) &&
-        config.servo.allow_controller_simulation_diagnostics_suspect &&
-        envFlagEnabled("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
+        config.servo.allow_controller_simulation_diagnostics_suspect;
 }
 
-bool isRbpodoDiagnosticsSuspectOnly(const ArmStartupValidationSnapshot& arm) {
+bool controllerSimulationInitErrorGateOpen(const DualArmConfig& config) {
+    return controllerSimulationMotionRequired(config) &&
+        controllerSimulationMotionGateOpen(config) &&
+        config.servo.allow_controller_simulation_init_error;
+}
+
+bool controllerSimulationNotActivatedGateOpen(const DualArmConfig& config) {
+    return controllerSimulationMotionRequired(config) &&
+        controllerSimulationMotionGateOpen(config) &&
+        config.servo.allow_controller_simulation_not_activated;
+}
+
+bool isAllowedControllerSimulationDiagnosticReason(
+    const std::string& reason,
+    bool tolerate_servo_disabled
+) {
+    return reason == "robot_fault" ||
+        (tolerate_servo_disabled && reason == "servo_disabled");
+}
+
+bool isRbpodoDiagnosticsSuspectOnly(
+    const ArmStartupValidationSnapshot& arm,
+    bool tolerate_servo_disabled
+) {
     if (arm.motion_ready) return true;
     if (!arm.acquisition_ok) return false;
     if (arm.diagnostic_error_source != "rbpodo_diagnostics_suspect") return false;
     if (!containsReason(arm, "robot_fault")) return false;
     for (const std::string& reason : arm.invalid_reasons) {
-        if (reason != "robot_fault") return false;
+        if (!isAllowedControllerSimulationDiagnosticReason(reason, tolerate_servo_disabled)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool isRbpodoInitErrorOnly(const ArmStartupValidationSnapshot& arm) {
+    if (arm.motion_ready) return true;
+    if (!arm.acquisition_ok) return false;
+    if (arm.diagnostic_error_source != "rbpodo_init_error") return false;
+    if (!containsReason(arm, "robot_fault")) return false;
+    if (!containsReason(arm, "servo_disabled")) return false;
+    for (const std::string& reason : arm.invalid_reasons) {
+        if (reason != "robot_fault" && reason != "servo_disabled") return false;
     }
     return true;
 }
@@ -967,8 +1010,20 @@ bool controllerSimulationDiagnosticsSuspectStartupAllowed(
     if (!controllerSimulationDiagnosticsSuspectGateOpen(config)) return false;
     if (!validation.acquisition_ok) return false;
     if (validation.motion_ready) return true;
-    return isRbpodoDiagnosticsSuspectOnly(validation.left) &&
-        isRbpodoDiagnosticsSuspectOnly(validation.right);
+    const bool tolerate_servo_disabled = controllerSimulationNotActivatedGateOpen(config);
+    return isRbpodoDiagnosticsSuspectOnly(validation.left, tolerate_servo_disabled) &&
+        isRbpodoDiagnosticsSuspectOnly(validation.right, tolerate_servo_disabled);
+}
+
+bool controllerSimulationInitErrorStartupAllowed(
+    const DualArmConfig& config,
+    const StartupValidationSnapshot& validation
+) {
+    if (!controllerSimulationInitErrorGateOpen(config)) return false;
+    if (!validation.acquisition_ok) return false;
+    if (validation.motion_ready) return true;
+    return isRbpodoInitErrorOnly(validation.left) &&
+        isRbpodoInitErrorOnly(validation.right);
 }
 
 bool controllerSimulationDiagnosticsSuspectStateAllowed(
@@ -977,17 +1032,36 @@ bool controllerSimulationDiagnosticsSuspectStateAllowed(
 ) {
     return controllerSimulationDiagnosticsSuspectGateOpen(config) &&
         state.has_error &&
-        state.diagnostic_error_source == "rbpodo_diagnostics_suspect";
+        state.diagnostic_error_source == "rbpodo_diagnostics_suspect" &&
+        (state.servo_enabled || controllerSimulationNotActivatedGateOpen(config));
 }
 
-FaultContext clearControllerSimulationDiagnosticsReadFault(
+bool controllerSimulationInitErrorStateAllowed(
+    const DualArmConfig& config,
+    const RobotState& state
+) {
+    return controllerSimulationInitErrorGateOpen(config) &&
+        state.has_error &&
+        !state.servo_enabled &&
+        state.diagnostic_error_source == "rbpodo_init_error";
+}
+
+bool controllerSimulationDiagnosticStateAllowed(
+    const DualArmConfig& config,
+    const RobotState& state
+) {
+    return controllerSimulationDiagnosticsSuspectStateAllowed(config, state) ||
+        controllerSimulationInitErrorStateAllowed(config, state);
+}
+
+FaultContext clearControllerSimulationDiagnosticReadFault(
     const DualArmConfig& config,
     const RobotState& state,
     const FaultContext& fault,
     ArmId arm
 ) {
     if (fault.verdict == SafetyVerdict::Ok ||
-        !controllerSimulationDiagnosticsSuspectStateAllowed(config, state)) {
+        !controllerSimulationDiagnosticStateAllowed(config, state)) {
         return fault;
     }
     FaultContext cleared;
@@ -1568,13 +1642,13 @@ void DualArmServoLoop::loopMain() {
 
         FaultContext left_read_fault = classifyReadStateResult(left_state_result, ArmId::Left);
         FaultContext right_read_fault = classifyReadStateResult(right_state_result, ArmId::Right);
-        left_read_fault = clearControllerSimulationDiagnosticsReadFault(
+        left_read_fault = clearControllerSimulationDiagnosticReadFault(
             config_,
             left_state,
             left_read_fault,
             ArmId::Left
         );
-        right_read_fault = clearControllerSimulationDiagnosticsReadFault(
+        right_read_fault = clearControllerSimulationDiagnosticReadFault(
             config_,
             right_state,
             right_read_fault,
@@ -1661,13 +1735,13 @@ void DualArmServoLoop::loopMain() {
                     right_state_result = okReadState(right_state, reset_read_timing);
                     left_read_fault = classifyReadStateResult(left_state_result, ArmId::Left);
                     right_read_fault = classifyReadStateResult(right_state_result, ArmId::Right);
-                    left_read_fault = clearControllerSimulationDiagnosticsReadFault(
+                    left_read_fault = clearControllerSimulationDiagnosticReadFault(
                         config_,
                         left_state,
                         left_read_fault,
                         ArmId::Left
                     );
-                    right_read_fault = clearControllerSimulationDiagnosticsReadFault(
+                    right_read_fault = clearControllerSimulationDiagnosticReadFault(
                         config_,
                         right_state,
                         right_read_fault,
@@ -2024,6 +2098,25 @@ void DualArmServoLoop::loopMain() {
                 sample.right_latched_fault_context.reset();
             }
 
+            // Commanded TCP FK from the joints actually sent this cycle. Stable at
+            // rest (unlike the controller's noisy jnt_ref-derived tcp_ref), used for
+            // clean display in controller simulation.
+            if (kinematics_ && (config_.kinematics.publish_tcp || kinematics_injected_)) {
+                const auto fk_command_tcp = [&](RobotState& st, const JointArray& q, const ArmMountConfig& mount) {
+                    st.tcp_command_stand.reset();
+                    if (!finiteJointArray(q)) {
+                        return;
+                    }
+                    try {
+                        st.tcp_command_stand = kinematics_->computeTcpStand(st.arm_id, q, mount);
+                    } catch (const std::exception&) {
+                        st.tcp_command_stand.reset();
+                    }
+                };
+                fk_command_tcp(left_state, attempted_target.left_q_target_deg, config_.left_mount);
+                fk_command_tcp(right_state, attempted_target.right_q_target_deg, config_.right_mount);
+            }
+
             latest_snapshot_.tick = sample.tick;
             latest_snapshot_.loop_start_time_ns = loop_start;
             latest_snapshot_.loop_end_time_ns = loop_end;
@@ -2038,6 +2131,13 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.jitter_ms = sample.jitter_ms;
             latest_snapshot_.filter_dt_ms = sample.filter_dt_ms;
             latest_snapshot_.safety_verdict = safety_verdict;
+            latest_snapshot_.self_collision_enabled = config_.safety.self_collision.enable;
+            latest_snapshot_.self_collision_checked = last_self_collision_.checked;
+            latest_snapshot_.self_collision_violated = last_self_collision_.violated;
+            latest_snapshot_.self_collision_min_clearance_m = last_self_collision_.min_clearance_m;
+            latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.margin_m;
+            latest_snapshot_.self_collision_left_bone = last_self_collision_.left_bone;
+            latest_snapshot_.self_collision_right_bone = last_self_collision_.right_bone;
             latest_snapshot_.motion_state = sample.motion_state;
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.latched_fault_reason = latched_fault_reason_.load();
@@ -2333,6 +2433,9 @@ bool DualArmServoLoop::startupValidationAllowsStart(
     if (controllerSimulationDiagnosticsSuspectStartupAllowed(config_, validation)) {
         return true;
     }
+    if (controllerSimulationInitErrorStartupAllowed(config_, validation)) {
+        return true;
+    }
     if (!readOnlyDiagnosticStartupEnabled()) return false;
     if (config_.servo.send_servo_commands) return false;
 
@@ -2419,6 +2522,22 @@ void DualArmServoLoop::logStartupValidation(
                              const RobotState& state,
                              const ArmStartupValidationSnapshot& arm) {
         if (arm.motion_ready) return;
+        const bool controller_sim_diagnostics_suspect_override_active =
+            start_allowed &&
+            arm.allowed_unsafe_startup &&
+            arm.diagnostic_error_source == "rbpodo_diagnostics_suspect" &&
+            config_.servo.send_servo_commands;
+        const bool controller_sim_init_error_override_active =
+            start_allowed &&
+            arm.allowed_unsafe_startup &&
+            arm.diagnostic_error_source == "rbpodo_init_error" &&
+            config_.servo.send_servo_commands;
+        const bool controller_sim_not_activated_override_active =
+            start_allowed &&
+            arm.allowed_unsafe_startup &&
+            containsReason(arm, "servo_disabled") &&
+            controllerSimulationNotActivatedGateOpen(config_) &&
+            config_.servo.send_servo_commands;
         std::cerr << "[ERROR] invalid robot startup state: " << name << "\n"
                   << "  has_valid_joint_state=" << (state.has_valid_joint_state ? "true" : "false") << "\n"
                   << "  has_error=" << (state.has_error ? "true" : "false") << "\n"
@@ -2463,19 +2582,27 @@ void DualArmServoLoop::logStartupValidation(
                   << "  controller_simulation_motion_gate_open="
                   << (controllerSimulationMotionGateOpen(config_) ? "true" : "false") << "\n"
                   << "  controller_simulation_diagnostic_override_allowed="
+                  << ((controllerSimulationDiagnosticsSuspectGateOpen(config_) ||
+                       controllerSimulationInitErrorGateOpen(config_)) ? "true" : "false") << "\n"
+                  << "  controller_simulation_diagnostics_suspect_override_allowed="
                   << (controllerSimulationDiagnosticsSuspectGateOpen(config_) ? "true" : "false") << "\n"
+                  << "  controller_simulation_init_error_override_allowed="
+                  << (controllerSimulationInitErrorGateOpen(config_) ? "true" : "false") << "\n"
+                  << "  controller_simulation_not_activated_override_allowed="
+                  << (controllerSimulationNotActivatedGateOpen(config_) ? "true" : "false") << "\n"
                   << "  controller_simulation_diagnostic_override_active="
-                  << (start_allowed &&
-                      arm.allowed_unsafe_startup &&
-                      arm.diagnostic_error_source == "rbpodo_diagnostics_suspect" &&
-                      config_.servo.send_servo_commands ? "true" : "false") << "\n"
+                  << ((controller_sim_diagnostics_suspect_override_active ||
+                       controller_sim_init_error_override_active) ? "true" : "false") << "\n"
+                  << "  controller_simulation_not_activated_override_active="
+                  << (controller_sim_not_activated_override_active ? "true" : "false") << "\n"
                   << "  send_servo_commands="
                   << (config_.servo.send_servo_commands ? "true" : "false") << "\n";
-        if (start_allowed &&
-            arm.allowed_unsafe_startup &&
-            arm.diagnostic_error_source == "rbpodo_diagnostics_suspect" &&
-            config_.servo.send_servo_commands) {
+        if (controller_sim_diagnostics_suspect_override_active) {
             std::cerr << "[WARN] rbpodo controller-simulation diagnostics-suspect startup "
+                      << "override active for " << name
+                      << "; physical_motion_expected=false.\n";
+        } else if (controller_sim_init_error_override_active) {
+            std::cerr << "[WARN] rbpodo controller-simulation init-error startup "
                       << "override active for " << name
                       << "; physical_motion_expected=false.\n";
         } else if (start_allowed && arm.allowed_unsafe_startup) {
@@ -2492,9 +2619,7 @@ void DualArmServoLoop::logStartupValidation(
         std::cerr << "[ERROR] controller-simulation motion gate closed; refusing rbpodo "
                      "controller-simulation benchmark. Required: operation_mode=simulation, "
                      "servo.allow_controller_simulation_motion=true, "
-                     "RB_ALLOW_REAL_ROBOT=1, RB_ALLOW_REAL_MOTION=1, "
-                     "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1, and "
-                     "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1.\n";
+                     "RB_ALLOW_REAL_ROBOT=1, and RB_ALLOW_REAL_MOTION=1.\n";
     }
 }
 
@@ -2507,7 +2632,7 @@ void DualArmServoLoop::storeStartupValidation(const StartupValidationSnapshot& v
 bool DualArmServoLoop::isValidJointState(const RobotState& state) const {
     if (state.connection_state != RobotConnectionState::Connected) return false;
     if (!state.has_valid_joint_state) return false;
-    if (state.has_error && !controllerSimulationDiagnosticsSuspectStateAllowed(config_, state)) {
+    if (state.has_error && !controllerSimulationDiagnosticStateAllowed(config_, state)) {
         return false;
     }
     for (int i = 0; i < kDof; ++i) {
@@ -3088,11 +3213,11 @@ ServoTarget DualArmServoLoop::applySafety(
     ServoTarget out;
     RobotState left_filter_state = left_state;
     RobotState right_filter_state = right_state;
-    if (controllerSimulationDiagnosticsSuspectStateAllowed(config_, left_filter_state)) {
+    if (controllerSimulationDiagnosticStateAllowed(config_, left_filter_state)) {
         left_filter_state.has_error = false;
         left_filter_state.error_code = 0;
     }
-    if (controllerSimulationDiagnosticsSuspectStateAllowed(config_, right_filter_state)) {
+    if (controllerSimulationDiagnosticStateAllowed(config_, right_filter_state)) {
         right_filter_state.has_error = false;
         right_filter_state.error_code = 0;
     }
@@ -3171,8 +3296,79 @@ ServoTarget DualArmServoLoop::applySafety(
         }
     }
 
+    // Dual-arm self-collision guard: never command a configuration that brings the
+    // two arms' link capsules within the configured margin. Evaluated on the final
+    // candidate targets (post per-arm filtering).
+    if (config_.safety.self_collision.enable) {
+        const SelfCollisionResult sc =
+            evaluateSelfCollision(out.left_q_target_deg, out.right_q_target_deg);
+        last_self_collision_ = sc;  // telemetry, even when already faulted
+        // Fail closed on a violation, or if geometry is unavailable; skip once
+        // latched. monitor_only keeps the telemetry but never clamps/latches
+        // (tuning aid only — not a real-motion safety posture).
+        if (!config_.safety.self_collision.monitor_only &&
+            (sc.violated || !sc.checked) &&
+            combined != SafetyVerdict::FaultLatched &&
+            !fault_latched_.load()) {
+            const std::string reason = sc.checked
+                ? ("self-collision: capsule clearance " + std::to_string(sc.min_clearance_m) +
+                   " m below margin " + std::to_string(config_.safety.self_collision.margin_m) + " m")
+                : "self-collision guard: link geometry unavailable";
+            if (config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch) {
+                latchFault(SafetyVerdict::SelfCollision, reason, left_state, right_state);
+                out = currentFaultHoldTarget();
+                combined = SafetyVerdict::FaultLatched;
+            } else {
+                // ClampToHold with an escape direction: refuse to advance *toward*
+                // collision, but allow a commanded target that strictly increases
+                // clearance versus the last sent configuration (retreating out of
+                // the keep-out zone). Without the escape exception the arm is
+                // permanently frozen once it touches the margin and can never back
+                // out. Geometry-unavailable (!checked) always holds (fail closed).
+                constexpr double kEscapeEpsM = 1e-4;
+                bool allow_escape = false;
+                if (sc.checked) {
+                    const SelfCollisionResult prev =
+                        evaluateSelfCollision(left_prev_sent_q_deg_, right_prev_sent_q_deg_);
+                    allow_escape = prev.checked &&
+                        sc.min_clearance_m > prev.min_clearance_m + kEscapeEpsM;
+                }
+                if (!allow_escape) {
+                    out.left_q_target_deg = left_prev_sent_q_deg_;
+                    out.right_q_target_deg = right_prev_sent_q_deg_;
+                    if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
+                        combined = SafetyVerdict::SelfCollision;
+                    }
+                }
+            }
+        }
+    }
+
     if (verdict) *verdict = combined;
     return out;
+}
+
+SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
+    const JointArray& left_q_deg,
+    const JointArray& right_q_deg
+) const {
+    if (!kinematics_) {
+        return SelfCollisionResult{};  // checked=false -> caller fails closed
+    }
+    std::vector<std::array<double, 3>> left_points;
+    std::vector<std::array<double, 3>> right_points;
+    try {
+        left_points = kinematics_->linkCollisionPointsInStand(ArmId::Left, left_q_deg, config_.left_mount);
+        right_points = kinematics_->linkCollisionPointsInStand(ArmId::Right, right_q_deg, config_.right_mount);
+    } catch (const std::exception&) {
+        return SelfCollisionResult{};  // checked=false -> caller fails closed
+    }
+    return dualArmSelfCollisionClearance(
+        left_points,
+        right_points,
+        config_.safety.self_collision.link_radius_m,
+        config_.safety.self_collision.margin_m
+    );
 }
 
 DualSendResult DualArmServoLoop::sendTargets(

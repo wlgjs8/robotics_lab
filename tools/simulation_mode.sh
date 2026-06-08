@@ -6,7 +6,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="5000"
 TIMEOUT_SEC="1.0"
 SUMMARY_JSON="artifacts/rbpodo_pgmode/simulation_mode_summary.json"
+# Connect acknowledgment: pass --i-understand-this-connects-to-real-controller, or
+# set RB_I_UNDERSTAND_REAL_CONTROLLER=1 once (convenience for routine pgmode-sim use).
+# This only acknowledges connecting to a real controller IP; no physical motion.
 CONFIRM=0
+case "${RB_I_UNDERSTAND_REAL_CONTROLLER:-}" in
+  1 | true | TRUE | yes | YES | on | ON) CONFIRM=1 ;;
+esac
 
 ROBOTS=(
   "172.28.60.200"
@@ -16,6 +22,7 @@ ROBOTS=(
 usage() {
   cat <<'EOF'
 Usage: tools/simulation_mode.sh --i-understand-this-connects-to-real-controller [options]
+       (or set RB_I_UNDERSTAND_REAL_CONTROLLER=1 instead of passing the flag)
 
 Options:
   --ips IP [IP ...]       Override controller IPs.

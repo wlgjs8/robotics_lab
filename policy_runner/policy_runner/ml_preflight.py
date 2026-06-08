@@ -7,8 +7,24 @@ from dataclasses import dataclass
 from typing import Any, Callable, TextIO
 
 
-REQUESTED_BACKBONES = ("tiny_cnn", "resnet18", "resnet50", "dinov3")
-TORCHVISION_BACKBONES = {"resnet18", "resnet50"}
+REQUESTED_BACKBONES = (
+    "tiny_cnn",
+    "resnet18",
+    "resnet50",
+    "dinov3",
+    "dinov3_convnext_tiny",
+    "dinov3_convnext_small",
+    "dinov3_convnext_base",
+    "dinov3_convnext_large",
+)
+TORCHVISION_BACKBONES = {
+    "resnet18",
+    "resnet50",
+    "dinov3_convnext_tiny",
+    "dinov3_convnext_small",
+    "dinov3_convnext_base",
+    "dinov3_convnext_large",
+}
 
 
 @dataclass(frozen=True)

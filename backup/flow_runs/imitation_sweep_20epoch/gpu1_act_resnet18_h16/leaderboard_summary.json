@@ -1,0 +1,231 @@
+{
+  "args": {
+    "action_horizon": 16,
+    "batch_size": 32,
+    "camera_names": [
+      "left_realsense_color",
+      "right_realsense_color"
+    ],
+    "data_dir": "/data/policy_episodes",
+    "device": "cuda",
+    "epochs": 20,
+    "exclude_camera_names": [
+      "left_realsense_depth",
+      "right_realsense_depth"
+    ],
+    "flow_sample_steps": 8,
+    "hidden_dim": 256,
+    "image_size": 128,
+    "lr": 0.0001,
+    "max_train_samples": null,
+    "max_val_samples": null,
+    "models": [
+      "act_resnet18"
+    ],
+    "seed": 0
+  },
+  "baseline_comparison": {
+    "best_minus_state_only_normalized_mse": null,
+    "best_minus_train_mean_normalized_mse": null,
+    "best_minus_zero_normalized_mse": null
+  },
+  "created_at": "2026-06-06T11:25:31.096821+00:00",
+  "dataset": {
+    "detected_cameras": [
+      "left_realsense_color",
+      "left_realsense_depth",
+      "right_realsense_color",
+      "right_realsense_depth"
+    ],
+    "detected_formats": [
+      "pika_umi_bimanual"
+    ],
+    "frame_count": 42435,
+    "sessions": [
+      "data_20260606_134608",
+      "data_20260606_140442",
+      "data_20260606_140813",
+      "data_20260606_175002",
+      "data_20260606_175635",
+      "data_20260606_183038",
+      "data_20260606_185446",
+      "data_20260606_190156"
+    ],
+    "snapshot_hash": "532de3a1c38a4b3f12dcc875d928f723d798a1ee0edf02b99e857d2483e9f9ce",
+    "snapshot_path": "/outputs/flow_runs/imitation_official/dataset_snapshot.json",
+    "valid_episode_count": 146
+  },
+  "failed_runs": [],
+  "leaderboard": [
+    {
+      "action_mse": 1.4319133851673447,
+      "backbone": "resnet18",
+      "checkpoint_sha256": "0a243fda6d029f80bd9870e8ea05f2fd25fecf5ec38685be3809365d25fbad79",
+      "family": "act_style_transformer_chunk",
+      "gripper_mse": 10.023295200411809,
+      "inactive_arm_leakage": 0.00255619196348594,
+      "latency": {
+        "median_ms": 1.3649730099132285,
+        "p95_ms": 1.391983799112495
+      },
+      "loss_name": "mse",
+      "model": "act_resnet18",
+      "normalized_action_mse": 1.0545785846329674,
+      "rank": 1,
+      "rotation_endpoint_error": 0.007360793798844382,
+      "translation_endpoint_error": 0.0019389586122390068,
+      "wall_time_sec": 1837.3733199469862
+    }
+  ],
+  "normalization": {
+    "action_dim_names": [
+      "left_dx",
+      "left_dy",
+      "left_dz",
+      "left_drx",
+      "left_dry",
+      "left_drz",
+      "left_grip",
+      "right_dx",
+      "right_dy",
+      "right_dz",
+      "right_drx",
+      "right_dry",
+      "right_drz",
+      "right_grip"
+    ],
+    "path": "/outputs/flow_runs/imitation_sweep_20epoch/gpu1_act_resnet18_h16/train_dataset_stats.json",
+    "sample_count": 32112,
+    "source": "train_only",
+    "train_episode_count": 117
+  },
+  "output_dir": "/outputs/flow_runs/imitation_sweep_20epoch/gpu1_act_resnet18_h16",
+  "recommendation": "Next rollout candidate for simulator dry-run is `act_resnet18` from family `act_style_transformer_chunk`.",
+  "results": [
+    {
+      "backbone": "resnet18",
+      "checkpoint_path": "/outputs/flow_runs/imitation_sweep_20epoch/gpu1_act_resnet18_h16/act_resnet18/checkpoint.pt",
+      "checkpoint_sha256": "0a243fda6d029f80bd9870e8ea05f2fd25fecf5ec38685be3809365d25fbad79",
+      "family": "act_style_transformer_chunk",
+      "gpu_info": {
+        "cuda_available": true,
+        "cuda_device_count": 1,
+        "cuda_visible_devices": "",
+        "devices": [
+          {
+            "index": 0,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          }
+        ],
+        "nvidia_smi": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0"
+      },
+      "latency": {
+        "median_ms": 1.3649730099132285,
+        "p95_ms": 1.391983799112495
+      },
+      "loss_name": "mse",
+      "metrics": {
+        "action_mse": 1.4319133851673447,
+        "by_phase": {
+          "left_pick": {
+            "action_mse": 1.4107780787858852,
+            "normalized_action_mse": 1.0390128096912528
+          },
+          "left_place": {
+            "action_mse": 2.482337061843269,
+            "normalized_action_mse": 1.8281968255745402
+          },
+          "right_pick": {
+            "action_mse": 0.13664990024812523,
+            "normalized_action_mse": 0.10064020623500387
+          },
+          "right_place": {
+            "action_mse": 1.7127291939375848,
+            "normalized_action_mse": 1.261394402700673
+          }
+        },
+        "gripper_mse": 10.023295200411809,
+        "inactive_arm_leakage": 0.00255619196348594,
+        "normalized_action_mse": 1.0545785846329674,
+        "rotation_endpoint_error": 0.007360793798844382,
+        "smoothness": 0.4884711660570048,
+        "translation_endpoint_error": 0.0019389586122390068
+      },
+      "model": "act_resnet18",
+      "shortcut_ablations": {
+        "image_shuffle": {
+          "action_mse": 1.425131395132007,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 1.4110883720180372,
+              "normalized_action_mse": 1.0392413351041538
+            },
+            "left_place": {
+              "action_mse": 2.4363982874989385,
+              "normalized_action_mse": 1.794363740326751
+            },
+            "right_pick": {
+              "action_mse": 0.1327929654215886,
+              "normalized_action_mse": 0.09779964275363433
+            },
+            "right_place": {
+              "action_mse": 1.7348920443242208,
+              "normalized_action_mse": 1.2777169454146928
+            }
+          },
+          "gripper_mse": 9.975820118931924,
+          "inactive_arm_leakage": 0.0026302705283578276,
+          "normalized_action_mse": 1.049583770333061,
+          "rotation_endpoint_error": 0.0074079717250515025,
+          "smoothness": 0.4812735451307098,
+          "translation_endpoint_error": 0.001963829040809071
+        },
+        "zero_image": {
+          "action_mse": 1.2179939703237839,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 1.2943048007295952,
+              "normalized_action_mse": 0.9532323246475926
+            },
+            "left_place": {
+              "action_mse": 2.0426227774011485,
+              "normalized_action_mse": 1.5043551236019896
+            },
+            "right_pick": {
+              "action_mse": 0.11714879719114407,
+              "normalized_action_mse": 0.08627799279832356
+            },
+            "right_place": {
+              "action_mse": 1.4298472831415112,
+              "normalized_action_mse": 1.0530569374630472
+            }
+          },
+          "gripper_mse": 8.52586063897446,
+          "inactive_arm_leakage": 0.0030728046411161686,
+          "normalized_action_mse": 0.8970307636068583,
+          "rotation_endpoint_error": 0.007213552375284307,
+          "smoothness": 0.3238911877888022,
+          "translation_endpoint_error": 0.0022464660561920496
+        }
+      },
+      "training_curves": "/outputs/flow_runs/imitation_sweep_20epoch/gpu1_act_resnet18_h16/act_resnet18/training_curves.jsonl",
+      "wall_time_sec": 1837.3733199469862
+    }
+  ],
+  "safety": {
+    "real_mode_behavior_touched": false,
+    "robot_motion_commands_sent": false,
+    "scope": "offline HDF5 imitation-learning experiment only"
+  },
+  "schema": "robotics_lab.policy_runner.imitation_report.v1",
+  "split": {
+    "session_holdout_val_episode_count": 50,
+    "split_algorithm": "session_stratified_episode",
+    "split_hash": "93ac654ea69705f967546f011fecc2efdb4047fc92590928b54c7708a061e7dc",
+    "split_path": "/outputs/flow_runs/imitation_official/split_manifest.json",
+    "train_episode_count": 117,
+    "val_ratio": 0.2,
+    "validation_episode_count": 29
+  },
+  "warnings": []
+}

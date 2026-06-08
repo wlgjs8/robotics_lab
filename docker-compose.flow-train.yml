@@ -11,6 +11,7 @@ x-policy-flow-train-base: &policy-flow-train-base
   environment:
     HOME: "/tmp"
     PYTHONUNBUFFERED: "1"
+    POLICY_RUNNER_DINOV3_DIR: "/app/policy_runner/dinov3"
     TORCHINDUCTOR_CACHE_DIR: "/tmp/torchinductor"
     XDG_CACHE_HOME: "/tmp/.cache"
   entrypoint:
@@ -34,6 +35,7 @@ x-policy-flow-train-base: &policy-flow-train-base
     - "auto"
   volumes:
     - ./data:/data/policy_episodes:ro
+    - ./policy_runner/dinov3:/app/policy_runner/dinov3:ro
     - ./outputs/flow_runs:/outputs/flow_runs
   labels:
     rb-servo.role: "hardware-free-policy-flow-train"
@@ -230,9 +232,9 @@ services:
     <<: [*policy-flow-train-base, *gpu4]
     command:
       - "--output-dir"
-      - "/outputs/flow_runs/imitation_official/gpu4_direct_resnet18_l1"
+      - "/outputs/flow_runs/imitation_official/gpu4_diffusion_resnet18"
       - "--models"
-      - "direct_bc_resnet18_l1"
+      - "diffusion_resnet18"
       - "--hidden-dim"
       - "256"
       - "--lr"
@@ -241,6 +243,8 @@ services:
       - "32"
       - "--epochs"
       - "${FLOW_EPOCHS:-20}"
+      - "--diffusion-sample-steps"
+      - "16"
 
   policy_flow_train_gpu5:
     <<: [*policy-flow-train-base, *gpu5]

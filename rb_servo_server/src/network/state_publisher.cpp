@@ -754,6 +754,7 @@ struct TcpPublication {
     std::optional<Pose6D> actual_stand;
     std::optional<Pose6D> ref_base;
     std::optional<Pose6D> ref_stand;
+    std::optional<Pose6D> command_stand;
     bool actual_valid = false;
     bool ref_valid = false;
 };
@@ -764,6 +765,7 @@ TcpPublication tcpPublicationForState(const RobotState& state) {
     out.actual_stand = state.tcp_actual_stand.has_value() ? state.tcp_actual_stand : state.tcp_stand;
     out.ref_base = state.tcp_ref_base;
     out.ref_stand = state.tcp_ref_stand;
+    out.command_stand = state.tcp_command_stand;
     out.actual_valid =
         (state.tcp_actual_valid || state.has_valid_tcp_pose) &&
         out.actual_base.has_value() &&
@@ -805,6 +807,21 @@ bool isCartesianMode(ControlMode mode) {
            mode == ControlMode::TcpTwistLocal;
 }
 
+bool controllerSimulationCartesianGateOpen(
+    const CartesianControlConfig& cartesian_config,
+    const ServoConfig& servo_config,
+    const BackendConfig& backend_config
+) {
+    return cartesian_config.enable &&
+        cartesian_config.allow_in_controller_simulation &&
+        servo_config.allow_controller_simulation_motion &&
+        backend_config.backend_type == BackendType::Rbpodo &&
+        backend_config.run_mode == RunMode::Real &&
+        isRbpodoControllerSimulation(backend_config) &&
+        envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
+        envFlagEnabled("RB_ALLOW_REAL_MOTION");
+}
+
 std::string commandFamilyString(ControlMode mode) {
     switch (mode) {
         case ControlMode::TcpCircleMove:
@@ -829,6 +846,7 @@ std::string cartesianGateUnavailableReason(
         return "tcp_circle_track_disabled";
     }
     const bool streaming = isStreamingCartesianMode(command_mode);
+    const bool cartesian = isCartesianMode(command_mode);
     if (backend_config.run_mode == RunMode::Simulation) {
         return cartesian_config.allow_in_simulation
             ? ""
@@ -837,7 +855,17 @@ std::string cartesianGateUnavailableReason(
     if (backend_config.run_mode != RunMode::Real) {
         return "cartesian_control_unavailable_run_mode";
     }
-    if (!streaming) {
+    const bool rbpodo_controller_simulation_operation =
+        backend_config.backend_type == BackendType::Rbpodo &&
+        isRbpodoControllerSimulation(backend_config);
+    const bool controller_simulation_cartesian_context =
+        cartesian &&
+        rbpodo_controller_simulation_operation &&
+        controllerSimulationCartesianGateOpen(cartesian_config, servo_config, backend_config);
+    if (!streaming && !controller_simulation_cartesian_context) {
+        if (cartesian && rbpodo_controller_simulation_operation) {
+            return "cartesian_control_unavailable_physical_real_blocked";
+        }
         return cartesian_config.allow_in_real && envFlagEnabled("RB_ALLOW_REAL_CARTESIAN")
             ? ""
             : "cartesian_control_unavailable_physical_real_blocked";
@@ -859,10 +887,7 @@ std::string cartesianGateUnavailableReason(
         return "cartesian_control_unavailable_controller_sim_config";
     }
     if (!envFlagEnabled("RB_ALLOW_REAL_ROBOT") ||
-        !envFlagEnabled("RB_ALLOW_REAL_MOTION") ||
-        !envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") ||
-        !envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN") ||
-        !envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")) {
+        !envFlagEnabled("RB_ALLOW_REAL_MOTION")) {
         return "cartesian_control_unavailable_controller_sim_env";
     }
     return "";
@@ -889,9 +914,8 @@ nlohmann::json cartesianGateJson(
     }
     const bool controller_sim_cartesian_enabled =
         unavailable_reason.empty() &&
-        isStreamingCartesianMode(command_mode) &&
-        isRbpodoControllerSimulation(backend_config) &&
-        cartesian_config.allow_in_controller_simulation;
+        isCartesianMode(command_mode) &&
+        controllerSimulationCartesianGateOpen(cartesian_config, servo_config, backend_config);
     const std::string streaming_unavailable_reason = cartesianGateUnavailableReason(
         cartesian_config,
         servo_config,
@@ -900,9 +924,7 @@ nlohmann::json cartesianGateJson(
     );
     const bool controller_sim_streaming_cartesian_available =
         streaming_unavailable_reason.empty() &&
-        isRbpodoControllerSimulation(backend_config) &&
-        cartesian_config.allow_in_controller_simulation &&
-        servo_config.allow_controller_simulation_motion;
+        controllerSimulationCartesianGateOpen(cartesian_config, servo_config, backend_config);
     const bool physical_motion_expected = isRbpodoControllerSimulation(backend_config)
         ? false
         : backend_config.run_mode == RunMode::Real;
@@ -927,9 +949,6 @@ nlohmann::json cartesianGateJson(
             safety_config.controller_simulation_physical_motion_threshold_deg},
         {"env_RB_ALLOW_REAL_ROBOT", envFlagEnabled("RB_ALLOW_REAL_ROBOT")},
         {"env_RB_ALLOW_REAL_MOTION", envFlagEnabled("RB_ALLOW_REAL_MOTION")},
-        {"env_RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION", envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION")},
-        {"env_RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN", envFlagEnabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN")},
-        {"env_RB_RBPODO_PGMODE_SIMULATION_CONFIRMED", envFlagEnabled("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")},
         {"physical_motion_expected", physical_motion_expected},
         {"controller_simulation_cartesian_enabled", controller_sim_cartesian_enabled},
         {"controller_simulation_cartesian_enabled_for_current_command", controller_sim_cartesian_enabled},
@@ -954,12 +973,17 @@ bool controllerSimulationDiagnosticOverrideActive(
     const BackendConfig& backend_config,
     const ArmStartupValidationSnapshot& startup_validation
 ) {
+    const bool diagnostics_suspect_active =
+        servo_config.allow_controller_simulation_diagnostics_suspect &&
+        startup_validation.diagnostic_error_source == "rbpodo_diagnostics_suspect";
+    const bool init_error_active =
+        servo_config.allow_controller_simulation_init_error &&
+        startup_validation.diagnostic_error_source == "rbpodo_init_error";
     return servo_config.send_servo_commands &&
         servo_config.allow_controller_simulation_motion &&
-        servo_config.allow_controller_simulation_diagnostics_suspect &&
         isRbpodoControllerSimulation(backend_config) &&
         startup_validation.allowed_unsafe_startup &&
-        startup_validation.diagnostic_error_source == "rbpodo_diagnostics_suspect";
+        (diagnostics_suspect_active || init_error_active);
 }
 
 std::string tcpTrackingSource(
@@ -1128,6 +1152,7 @@ nlohmann::json armStateJson(
         {"tcp_actual_base", optionalPoseJson(tcp.actual_base)},
         {"tcp_ref_stand", optionalPoseJson(tcp.ref_stand)},
         {"tcp_ref_base", optionalPoseJson(tcp.ref_base)},
+        {"tcp_command_stand", optionalPoseJson(tcp.command_stand)},
         {"has_valid_tcp_pose", tcp.actual_valid},
         {"tcp_actual_valid", tcp.actual_valid},
         {"tcp_ref_valid", tcp.ref_valid},
@@ -1418,6 +1443,22 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["send_suppressed"] = snapshot.send_suppressed;
     message["send_policy"] = snapshot.send_policy;
     message["safety_verdict"] = toString(snapshot.safety_verdict);
+    {
+        nlohmann::json self_collision;
+        self_collision["enabled"] = snapshot.self_collision_enabled;
+        self_collision["checked"] = snapshot.self_collision_checked;
+        self_collision["violated"] = snapshot.self_collision_violated;
+        self_collision["margin_m"] = snapshot.self_collision_margin_m;
+        if (snapshot.self_collision_checked &&
+            std::isfinite(snapshot.self_collision_min_clearance_m)) {
+            self_collision["min_clearance_m"] = snapshot.self_collision_min_clearance_m;
+        } else {
+            self_collision["min_clearance_m"] = nullptr;
+        }
+        self_collision["left_bone"] = snapshot.self_collision_left_bone;
+        self_collision["right_bone"] = snapshot.self_collision_right_bone;
+        message["self_collision"] = self_collision;
+    }
     message["motion_state"] = toString(snapshot.motion_state);
     message["fault_latched"] = snapshot.fault_latched;
     message["latched_fault_reason"] = toString(snapshot.latched_fault_reason);

@@ -148,6 +148,7 @@ enum class SafetyVerdict {
     InvalidCommand,
     CartesianUnavailable,
     IkFailed,
+    SelfCollision,
     UnknownError
 };
 
@@ -278,6 +279,10 @@ struct RobotState {
     // Controller/internal reference TCP FK from q_target_deg / rbpodo jnt_ref.
     std::optional<Pose6D> tcp_ref_base;
     std::optional<Pose6D> tcp_ref_stand;
+    // Commanded TCP FK from the joints actually sent this cycle (q_sent). Clean of
+    // the controller's noisy jnt_ref readback; used for at-rest-stable display in
+    // controller simulation.
+    std::optional<Pose6D> tcp_command_stand;
     bool has_valid_tcp_pose = false;
     bool tcp_actual_valid = false;
     bool tcp_ref_valid = false;
@@ -697,6 +702,15 @@ struct ServoSnapshot {
     bool fault_latched = false;
     SafetyVerdict latched_fault_reason = SafetyVerdict::Ok;
     std::string fault_reason;
+
+    // Dual-arm self-collision guard telemetry (safety.self_collision).
+    bool self_collision_enabled = false;
+    bool self_collision_checked = false;
+    bool self_collision_violated = false;
+    double self_collision_min_clearance_m = 0.0;
+    double self_collision_margin_m = 0.0;
+    int self_collision_left_bone = -1;
+    int self_collision_right_bone = -1;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;

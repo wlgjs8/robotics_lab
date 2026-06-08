@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <string>
+#include <vector>
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/core/types.hpp"
@@ -54,6 +56,22 @@ public:
         const Vec6& tcp_twist_local,
         double damping
     ) const = 0;
+
+    // Ordered kinematic chain points (xyz, meters) in the STAND frame used to
+    // build per-link self-collision capsules: [base, joint1..joint6 origins, tcp].
+    // Consecutive points are capsule bone endpoints. Default returns empty,
+    // meaning the implementation does not provide link geometry (the dual-arm
+    // self-collision guard then treats geometry as unavailable / fails closed).
+    virtual std::vector<std::array<double, 3>> linkCollisionPointsInStand(
+        ArmId arm,
+        const JointArray& q_deg,
+        const ArmMountConfig& mount
+    ) const {
+        (void)arm;
+        (void)q_deg;
+        (void)mount;
+        return {};
+    }
 };
 
 }  // namespace rb_servo

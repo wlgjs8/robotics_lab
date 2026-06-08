@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import time
 import unittest
@@ -15,12 +17,19 @@ try:
 
     from policy_runner.flow_dataset import FLOW_ACTION_DIM, FLOW_CHECKPOINT_SCHEMA, FLOW_PROPRIO_DIM
     from policy_runner.flow_inference import (
+        DirectBcCheckpointEnsembleActionSource,
+        DirectBcImageActionSource,
+        IMITATION_ENSEMBLE_REPORT_SCHEMA,
         FlowMatchingActionSource,
+        IMITATION_CHECKPOINT_SCHEMA,
+        action_chunk_checkpoint_kind,
         canonical_flow_command_family,
+        load_action_chunk_checkpoint_dataset_stats,
         resolve_flow_command_family,
         validate_flow_command_family,
     )
     from policy_runner.flow_model import FlowMatchingPolicy, FlowModelConfig
+    from policy_runner.imitation_experiments import _build_direct_bc_policy
 except Exception:
     np = None
     torch = None
@@ -122,7 +131,11 @@ class FlowInferenceTcpTwistStandTest(unittest.TestCase):
         assert intent is not None
         self.assertEqual(intent.left["mode"], "Hold")
         self.assertEqual(intent.right["mode"], "TcpTwistStand")
-        self.assertEqual(intent.right["tcp_twist_stand"], [0.0, 0.3, 0.0, 0.0, 0.0, 0.0])
+        _assert_sequence_almost_equal(
+            self,
+            intent.right["tcp_twist_stand"],
+            [0.0, 0.3, 0.0, 0.0, 0.0, 0.0],
+        )
 
     def test_zero_action_sends_only_stop_zero_after_nonzero(self) -> None:
         assert torch is not None
@@ -193,10 +206,35 @@ class FlowInferenceTcpTwistStandTest(unittest.TestCase):
             resolve_flow_command_family(RolloutMode.CONTROLLER_SIM, None),
             "tcp_twist_stand",
         )
+        self.assertEqual(
+            resolve_flow_command_family(
+                RolloutMode.SIM_DRYRUN,
+                None,
+                dataset_stats={"proprio_action_frame": "ee_local"},
+            ),
+            "tcp_twist_local",
+        )
         self.assertEqual(canonical_flow_command_family("tcp_twist_stand"), "TcpTwistStand")
         self.assertEqual(canonical_flow_command_family("tcp_twist_local"), "TcpTwistLocal")
         with self.assertRaisesRegex(RolloutModeValidationError, "tcp_twist_local"):
             validate_flow_command_family(RolloutMode.CONTROLLER_SIM, "tcp_twist_local")
+        with self.assertRaisesRegex(RolloutModeValidationError, "ee_local"):
+            validate_flow_command_family(
+                RolloutMode.SIM_DRYRUN,
+                "tcp_twist_stand",
+                dataset_stats={"proprio_action_frame": "ee_local"},
+            )
+        with self.assertRaisesRegex(RolloutModeValidationError, "tcp_twist_local"):
+            validate_flow_command_family(
+                RolloutMode.CONTROLLER_SIM,
+                "tcp_twist_local",
+                dataset_stats={"proprio_action_frame": "ee_local"},
+            )
+        validate_flow_command_family(
+            RolloutMode.SIM_DRYRUN,
+            "tcp_twist_local",
+            dataset_stats={"proprio_action_frame": "ee_local"},
+        )
         validate_flow_command_family(RolloutMode.SIM_DRYRUN, "tcp_twist_local")
         validate_flow_command_family(RolloutMode.SIM_DRYRUN, "tcp_delta_stand")
         validate_flow_command_family(RolloutMode.OFFLINE_EVAL, "tcp_delta_stand")
@@ -207,6 +245,31 @@ class FlowInferenceTcpTwistStandTest(unittest.TestCase):
             "tcp_delta_stand",
             allow_experimental_tcp_delta_stand=True,
         )
+
+    def test_ee_local_checkpoint_defaults_to_tcp_twist_local(self) -> None:
+        assert torch is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "flow_policy.pt"
+            _write_flow_checkpoint(checkpoint, proprio_action_frame="ee_local")
+            source = FlowMatchingActionSource(
+                checkpoint,
+                device="cpu",
+                policy_dt_sec=0.01,
+                max_linear_velocity_m_s=0.2,
+                max_angular_velocity_rad_s=0.5,
+            )
+            action = _action_chunk([0.002, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            try:
+                with mock.patch("policy_runner.flow_inference.sample_action_chunks", return_value=action):
+                    intent = source.next_intent(_sample_state(), 0.0)
+            finally:
+                source.close()
+
+        self.assertEqual(source.command_family, "TcpTwistLocal")
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.mode, "TcpTwistLocal")
+        self.assertEqual(intent.left["tcp_twist_local"], [0.2, 0.0, 0.0, 0.0, 0.0, 0.0])
 
     def test_default_receding_horizon_resamples_after_half_chunk(self) -> None:
         assert torch is not None
@@ -247,9 +310,128 @@ class FlowInferenceTcpTwistStandTest(unittest.TestCase):
         assert first_intent is not None
         assert second_intent is not None
         assert resampled_intent is not None
-        self.assertEqual(first_intent.left["tcp_twist_stand"], [0.1, 0.0, 0.0, 0.0, 0.0, 0.0])
-        self.assertEqual(second_intent.left["tcp_twist_stand"], [0.2, 0.0, 0.0, 0.0, 0.0, 0.0])
-        self.assertEqual(resampled_intent.left["tcp_twist_stand"], [0.9, 0.0, 0.0, 0.0, 0.0, 0.0])
+        _assert_sequence_almost_equal(
+            self,
+            first_intent.left["tcp_twist_stand"],
+            [0.1, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        _assert_sequence_almost_equal(
+            self,
+            second_intent.left["tcp_twist_stand"],
+            [0.2, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        _assert_sequence_almost_equal(
+            self,
+            resampled_intent.left["tcp_twist_stand"],
+            [0.9, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+
+    def test_direct_bc_checkpoint_converts_chunk_to_bounded_tcp_twist_stand(self) -> None:
+        assert torch is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "direct_bc.pt"
+            _write_direct_bc_checkpoint(checkpoint)
+            source = DirectBcImageActionSource(
+                checkpoint,
+                device="cpu",
+                policy_dt_sec=0.01,
+                max_linear_velocity_m_s=0.2,
+                max_angular_velocity_rad_s=0.5,
+            )
+            try:
+                intent = source.next_intent(_sample_state(), 0.0)
+            finally:
+                source.close()
+            checkpoint_kind = action_chunk_checkpoint_kind(checkpoint)
+
+        self.assertEqual(checkpoint_kind, "direct_bc")
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.mode, "TcpTwistStand")
+        self.assertEqual(intent.left["mode"], "TcpTwistStand")
+        _assert_sequence_almost_equal(
+            self,
+            intent.left["tcp_twist_stand"],
+            [0.1, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        self.assertEqual(intent.right["mode"], "Hold")
+
+    def test_direct_bc_checkpoint_without_image_size_fails_closed(self) -> None:
+        assert torch is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "direct_bc.pt"
+            _write_direct_bc_checkpoint(checkpoint, include_image_size=False)
+
+            with self.assertRaisesRegex(ValueError, "missing image_size"):
+                DirectBcImageActionSource(checkpoint, device="cpu", policy_dt_sec=0.01)
+
+    def test_direct_bc_ensemble_report_averages_member_predictions(self) -> None:
+        assert torch is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first.pt"
+            second = root / "second.pt"
+            _write_direct_bc_checkpoint(first, bias=0.001)
+            _write_direct_bc_checkpoint(second, bias=0.003)
+            report = root / "ensemble_report.json"
+            _write_ensemble_report(report, [first, second])
+            source = DirectBcCheckpointEnsembleActionSource(
+                report,
+                ensemble_name="top2",
+                device="cpu",
+                policy_dt_sec=0.01,
+                max_linear_velocity_m_s=1.0,
+                max_angular_velocity_rad_s=1.0,
+            )
+            try:
+                intent = source.next_intent(_sample_state(), 0.0)
+            finally:
+                source.close()
+            checkpoint_kind = action_chunk_checkpoint_kind(report)
+
+        self.assertEqual(checkpoint_kind, "direct_bc_ensemble")
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        _assert_sequence_almost_equal(
+            self,
+            intent.left["tcp_twist_stand"],
+            [0.2, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+
+    def test_direct_bc_ensemble_stats_use_selected_ensemble_member(self) -> None:
+        assert torch is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            default = root / "default.pt"
+            alternate = root / "alternate.pt"
+            _write_direct_bc_checkpoint(default, dt_mean_sec=0.01)
+            _write_direct_bc_checkpoint(alternate, dt_mean_sec=0.02)
+            report = root / "ensemble_report.json"
+            payload = {
+                "schema": IMITATION_ENSEMBLE_REPORT_SCHEMA,
+                "args": {"image_size": 32},
+                "ensembles": [
+                    {
+                        "name": "top5",
+                        "members": [str(default)],
+                        "member_checkpoint_sha256": [_sha256_file(default)],
+                    },
+                    {
+                        "name": "alternate",
+                        "members": [str(alternate)],
+                        "member_checkpoint_sha256": [_sha256_file(alternate)],
+                    },
+                ],
+            }
+            report.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+            stats = load_action_chunk_checkpoint_dataset_stats(
+                report,
+                device="cpu",
+                ensemble_name="alternate",
+            )
+
+        self.assertEqual(stats["dt_mean_sec"], 0.02)
 
 
 def _write_flow_checkpoint(
@@ -258,6 +440,7 @@ def _write_flow_checkpoint(
     arm_mask_counts: dict[str, int] | None = None,
     camera_names: tuple[str, ...] = (),
     action_horizon: int = 2,
+    proprio_action_frame: str | None = None,
 ) -> None:
     assert torch is not None
     config = FlowModelConfig(
@@ -284,6 +467,7 @@ def _write_flow_checkpoint(
                 "arm_mask_counts": arm_mask_counts or {"left": 1, "right": 0},
                 "dt_mean_sec": 0.01,
                 "dt_p50_sec": 0.01,
+                **({"proprio_action_frame": proprio_action_frame} if proprio_action_frame is not None else {}),
             },
             "camera_names": list(camera_names),
             "image_size": 32,
@@ -292,6 +476,82 @@ def _write_flow_checkpoint(
         },
         path,
     )
+
+
+def _assert_sequence_almost_equal(
+    test_case: unittest.TestCase,
+    observed: list[float],
+    expected: list[float],
+) -> None:
+    test_case.assertEqual(len(observed), len(expected))
+    for actual, desired in zip(observed, expected):
+        test_case.assertAlmostEqual(actual, desired, places=7)
+
+
+def _write_direct_bc_checkpoint(
+    path: Path,
+    *,
+    include_image_size: bool = True,
+    bias: float = 0.001,
+    dt_mean_sec: float = 0.01,
+) -> None:
+    assert torch is not None
+    model = _build_direct_bc_policy(
+        backbone="tiny_cnn",
+        action_horizon=2,
+        camera_count=0,
+        hidden_dim=32,
+    )
+    with torch.no_grad():
+        for param in model.parameters():
+            param.zero_()
+        model.head[2].bias[0] = float(bias)
+    payload = {
+        "schema": IMITATION_CHECKPOINT_SCHEMA,
+        "model_family": "direct_bc_chunk",
+        "backbone": "tiny_cnn",
+        "action_horizon": 2,
+        "action_dim": FLOW_ACTION_DIM,
+        "proprio_dim": FLOW_PROPRIO_DIM,
+        "camera_names": [],
+        "dataset_stats": {
+            "action_mean": [0.0] * FLOW_ACTION_DIM,
+            "action_std": [1.0] * FLOW_ACTION_DIM,
+            "proprio_mean": [0.0] * FLOW_PROPRIO_DIM,
+            "proprio_std": [1.0] * FLOW_PROPRIO_DIM,
+            "image_mean": [0.0, 0.0, 0.0],
+            "image_std": [1.0, 1.0, 1.0],
+            "arm_mask_counts": {"left": 1, "right": 0},
+            "dt_mean_sec": float(dt_mean_sec),
+        },
+        "model_state": model.state_dict(),
+    }
+    if include_image_size:
+        payload["image_size"] = 32
+    torch.save(payload, path)
+
+
+def _write_ensemble_report(path: Path, members: list[Path]) -> None:
+    payload = {
+        "schema": IMITATION_ENSEMBLE_REPORT_SCHEMA,
+        "args": {"image_size": 32},
+        "ensembles": [
+            {
+                "name": "top2",
+                "members": [str(member) for member in members],
+                "member_checkpoint_sha256": [_sha256_file(member) for member in members],
+            }
+        ],
+    }
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _sample_state() -> object:

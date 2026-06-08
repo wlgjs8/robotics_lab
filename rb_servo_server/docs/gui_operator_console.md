@@ -40,6 +40,21 @@ config publishes FK TCP poses and enables simulator-only Cartesian IK, so the GU
 TCP target gizmos can send `TcpPoseTarget` commands after `ArmMotion` is active.
 `cartesian_control.allow_in_real` stays false.
 
+### rbpodo pgmode simulation (controller-simulation) operation
+
+By default the GUI only allows TCP/Cartesian commands against the `simulator`
+backend. For an rbpodo controller in `pgmode` simulation (`backend_type=rbpodo`,
+`run_mode=real`, `operation_mode=simulation`, `physical_motion_expected=false`),
+the operator can opt in to the full set of existing GUI controls (joint jog,
+lifecycle, TCP PTP/Linear/Delta) by setting BOTH
+`RB_GUI_ENABLE_TCP_POSE_COMMANDS=1` and `RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1`
+(with `RB_GUI_OBSERVED_MODE=simulation`, `RB_GUI_OBSERVED_BACKEND=rbpodo`). The
+server side still requires its controller-simulation Cartesian gate
+(`cartesian_control.allow_in_controller_simulation` + the
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_*` / `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED`
+env). Real mode (`operation_mode=real`) stays connect/status-only regardless of
+these flags, and `RB_ALLOW_REAL_CARTESIAN` is never set by the GUI.
+
 ## Operator monitors
 
 The GUI exposes live monitors as responsive fixed HTML overlays on the left side

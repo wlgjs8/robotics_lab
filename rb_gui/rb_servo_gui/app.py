@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import threading
 import time
 from html import escape
 from pathlib import Path
@@ -83,6 +84,7 @@ from .status_panel import (
     _format_joint_monitor_value,
     _format_joints,
     _format_pgmode_status,
+    _format_self_collision_status,
     _format_stand_world_pose_value,
     _format_tcp_command_status,
     _format_tcp_tracking_status,
@@ -99,7 +101,9 @@ from .status_panel import (
     _update_tcp_display_buttons,
 )
 
-_DESIRED_MODES = ("mock", "simulation", "real")
+# mock is intentionally not operator-selectable: the GUI targets simulation
+# (incl. rbpodo pgmode controller-simulation) and real (status-only).
+_DESIRED_MODES = ("simulation", "real")
 _TCP_FRAME_STAND = "Stand/world"
 _TCP_FRAME_LOCAL = "TCP local"
 _TCP_FRAME_OPTIONS = (_TCP_FRAME_STAND, _TCP_FRAME_LOCAL)
@@ -191,7 +195,16 @@ def _sim_readiness_from_env(observed: Any) -> Readiness:
     no_go_reason = os.environ.get("RB_GUI_SIM_READINESS_NO_GO", "simulator/rbpodo readiness tests have not passed")
     if ready:
         no_go_reason = ""
-    if observed.mode != "simulation" or observed.backend != "simulator":
+    # The local simulator backend is always a valid sim stack. An rbpodo
+    # controller in pgmode simulation also counts as a sim stack, but only when
+    # the operator opts in (RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1); real mode
+    # never qualifies.
+    controller_sim_optin = _env_bool("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", False)
+    valid_sim_stack = observed.mode == "simulation" and (
+        observed.backend == "simulator"
+        or (observed.backend == "rbpodo" and controller_sim_optin)
+    )
+    if not valid_sim_stack:
         ready = False
         running = False
         connected = False
@@ -619,6 +632,22 @@ def _operator_monitor_row(label: str, value_html: str) -> str:
     return f'<div class="rb-monitor-row"><span>{escape(label)}</span><span>{value_html}</span></div>'
 
 
+def _arm_is_controller_sim(arm_state: Any) -> bool:
+    """True for rbpodo controller (pgmode) simulation, where q_actual does not track
+    the streamed servo_j so the reference is the meaningful signal. False for
+    software simulation, physical real, and unknown."""
+    if arm_state is None:
+        return False
+    csm = getattr(arm_state, "controller_simulation_mode", None)
+    if not csm:
+        return False
+    try:
+        operation_mode = str(csm.get("operation_mode", "")).lower()
+    except AttributeError:
+        return False
+    return operation_mode in ("simulation", "sim")
+
+
 def _render_joint_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str:
     if latest is None:
         status = "No state stream"
@@ -628,24 +657,24 @@ def _render_joint_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> 
         arms = (("left", latest.left), ("right", latest.right))
     parts = [f'<div class="rb-monitor-status">{escape(status)}</div>']
     for arm, arm_state in arms:
-        parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(arm)}</div>')
+        # In controller (pgmode) simulation q_actual does not track the command, so
+        # show the commanded joints (q_sent). q_sent is the clean signal we stream;
+        # the controller's jnt_ref readback (q_ref) is noisy at rest, so it is not used.
+        use_ref = arm_state is not None and _arm_is_controller_sim(arm_state) and arm_state.q_sent_deg is not None
+        title = f"{arm} · q_sent (controller-sim)" if use_ref else arm
+        q_values = None
+        valid = False
+        if arm_state is not None:
+            q_values = arm_state.q_sent_deg if use_ref else arm_state.q_actual_deg
+            valid = (arm_state.q_sent_deg is not None) if use_ref else arm_state.has_valid_joint_state
+        parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(title)}</div>')
         for index, joint_name in enumerate(_ROBOT_JOINT_NAMES):
             if arm_state is None:
                 value_html = _operator_monitor_invalid_pair()
             else:
                 value_html = _operator_monitor_value_pair(
-                    _format_joint_monitor_value(
-                        arm_state.q_actual_deg,
-                        index,
-                        valid=arm_state.has_valid_joint_state,
-                        unit="deg",
-                    ),
-                    _format_joint_monitor_value(
-                        arm_state.q_actual_deg,
-                        index,
-                        valid=arm_state.has_valid_joint_state,
-                        unit="rad",
-                    ),
+                    _format_joint_monitor_value(q_values, index, valid=valid, unit="deg"),
+                    _format_joint_monitor_value(q_values, index, valid=valid, unit="rad"),
                 )
             parts.append(_operator_monitor_row(f"J{index + 1} {joint_name}", value_html))
         parts.append("</div>")
@@ -661,15 +690,28 @@ def _render_stand_world_monitor_rows(latest: StateSnapshot | None, *, stale: boo
         arms = (("left", latest.left), ("right", latest.right))
     parts = [f'<div class="rb-monitor-status">{escape(status)}</div>']
     for arm, arm_state in arms:
-        parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(arm)}</div>')
-        valid = bool(
+        # In controller (pgmode) simulation show the commanded TCP (stand frame) from
+        # FK(q_sent), since the actual TCP (from q_actual) does not track the command
+        # and the jnt_ref-derived tcp_ref is noisy at rest.
+        use_ref = (
             arm_state is not None
-            and not stale
-            and arm_state.has_valid_tcp_pose
-            and arm_state.tcp_stand is not None
-            and not arm_state.tcp_deferred
+            and _arm_is_controller_sim(arm_state)
+            and arm_state.tcp_command_stand is not None
         )
-        pose = arm_state.tcp_stand if arm_state is not None else None
+        title = f"{arm} · tcp_command_stand (controller-sim)" if use_ref else arm
+        parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(title)}</div>')
+        if use_ref:
+            valid = bool(arm_state is not None and not stale and arm_state.tcp_command_stand is not None)
+            pose = arm_state.tcp_command_stand if arm_state is not None else None
+        else:
+            valid = bool(
+                arm_state is not None
+                and not stale
+                and arm_state.has_valid_tcp_pose
+                and arm_state.tcp_stand is not None
+                and not arm_state.tcp_deferred
+            )
+            pose = arm_state.tcp_stand if arm_state is not None else None
         for field in _STAND_WORLD_POSE_FIELDS:
             if field in ("x", "y", "z"):
                 value_html = escape(_format_stand_world_pose_value(pose, field, valid=valid, unit="deg"))
@@ -742,6 +784,9 @@ def build_gui(
         handles["readiness"] = server.gui.add_text("Readiness", initial_value="No-Go: no state", disabled=True)
         handles["motion"] = server.gui.add_text("Motion state", initial_value="unknown", disabled=True)
         handles["fault"] = server.gui.add_text("Fault", initial_value="none", disabled=True)
+        handles["self_collision"] = server.gui.add_text(
+            "Self-collision", initial_value="self-collision: no state", disabled=True
+        )
         handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
         handles["tcp_tracking"] = server.gui.add_text("TCP tracking", initial_value="TCP tracking: no state", disabled=True)
         handles["pgmode_status"] = server.gui.add_text("pgmode simulation", initial_value="pgmode_sim: no state", disabled=True)
@@ -815,6 +860,91 @@ def build_gui(
         def _(_: Any) -> None:
             ok, message = safety.jog_joint(arm_group.value, int(joint_slider.value) - 1, float(delta_slider.value))
             handles["jog_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+    with tabs.add_tab("Velocity jog"):
+        vel_arm = server.gui.add_button_group("Arm", ("left", "right"))
+        vj_index = server.gui.add_slider("Joint index", min=1, max=6, step=1, initial_value=1)
+        vj_vel = server.gui.add_slider("Joint vel deg/s", min=-10.0, max=10.0, step=0.5, initial_value=3.0)
+        vj_button = server.gui.add_button("Send joint velocity")
+        v_frame = server.gui.add_button_group("Twist frame", ("stand", "local"))
+        v_axis = server.gui.add_button_group("Twist axis", ("X", "Y", "Z", "Rx", "Ry", "Rz"))
+        v_lin = server.gui.add_slider("Linear vel m/s", min=-0.05, max=0.05, step=0.005, initial_value=0.02)
+        v_ang = server.gui.add_slider("Angular vel rad/s", min=-0.2, max=0.2, step=0.02, initial_value=0.1)
+        vt_button = server.gui.add_button("Send TCP twist")
+        handles["velocity_status"] = server.gui.add_text("Velocity status", initial_value="idle", disabled=True)
+
+        @vj_button.on_click
+        def _(_: Any) -> None:
+            vel = [0.0] * 6
+            vel[int(vj_index.value) - 1] = float(vj_vel.value)
+            ok, message = safety.send_joint_velocity(vel_arm.value, tuple(vel))
+            handles["velocity_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+        @vt_button.on_click
+        def _(_: Any) -> None:
+            axis_index = {"X": 0, "Y": 1, "Z": 2, "Rx": 3, "Ry": 4, "Rz": 5}[v_axis.value]
+            twist = [0.0] * 6
+            twist[axis_index] = float(v_lin.value) if axis_index < 3 else float(v_ang.value)
+            if v_frame.value == "local":
+                ok, message = safety.send_tcp_twist_local(vel_arm.value, tuple(twist))
+            else:
+                ok, message = safety.send_tcp_twist_stand(vel_arm.value, tuple(twist))
+            handles["velocity_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+    with tabs.add_tab("Circle"):
+        c_diameter = server.gui.add_slider("Diameter m", min=0.02, max=0.20, step=0.01, initial_value=0.15)
+        c_period = server.gui.add_slider("Period s", min=3.0, max=16.0, step=0.5, initial_value=4.0)
+        c_plane = server.gui.add_button_group("Plane", ("xy", "xz", "yz"))
+        c_start = server.gui.add_button("Start circle (both arms)")
+        c_stop = server.gui.add_button("Stop circle")
+        handles["circle_status"] = server.gui.add_text("Circle status", initial_value="idle", disabled=True)
+        circle_stop_event = threading.Event()
+        circle_state: dict[str, Any] = {"thread": None}
+
+        def _circle_loop(diameter: float, period: float, plane: str) -> None:
+            # ArmMotion FIRST, then build the circle packet so its seq is higher
+            # than ArmMotion's — the server drops any command whose seq <= the
+            # last accepted seq for this source. The circle packet keeps a FIXED
+            # seq + long timeout so the server traces the whole circle from one
+            # accepted command; re-sends (same seq) are harmless keep-alives.
+            safety.send_lifecycle("ArmMotion")
+            time.sleep(0.1)
+            ok, message, packet = safety.build_circle_packet(
+                diameter, period, arm="both", plane=plane, repeat=200
+            )
+            if not ok or packet is None:
+                handles["circle_status"].value = "BLOCKED: " + message
+                return
+            handles["circle_status"].value = "running: " + message
+            while not circle_stop_event.is_set():
+                safety.command_client.send(packet)
+                circle_stop_event.wait(0.3)
+            safety.command_client.send_lifecycle("Hold")
+
+        @c_start.on_click
+        def _(_: Any) -> None:
+            existing = circle_state["thread"]
+            if existing is not None and existing.is_alive():
+                handles["circle_status"].value = "already running; press Stop first"
+                return
+            reason = safety.tcp_command_disabled_reason()
+            if reason:
+                handles["circle_status"].value = "BLOCKED: " + reason
+                return
+            circle_stop_event.clear()
+            thread = threading.Thread(
+                target=_circle_loop,
+                args=(float(c_diameter.value), float(c_period.value), str(c_plane.value)),
+                daemon=True,
+            )
+            circle_state["thread"] = thread
+            thread.start()
+            handles["circle_status"].value = "starting..."
+
+        @c_stop.on_click
+        def _(_: Any) -> None:
+            circle_stop_event.set()
+            handles["circle_status"].value = "stopped"
 
     with tabs.add_tab("TCP PTP"):
         handles["tcp_ptp_note"] = server.gui.add_text(
@@ -1087,6 +1217,8 @@ def update_gui(
         _update_operator_monitors(handles, None, stale=True)
         handles["connection"].value = "disconnected/stale"
         handles["readiness"].value = readiness.no_go_reason or "No-Go: no state stream"
+        if "self_collision" in handles:
+            handles["self_collision"].value = _format_self_collision_status(None, stale=True)
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
         if "tcp_tracking" in handles:
@@ -1131,6 +1263,8 @@ def update_gui(
     handles["readiness"].value = ", ".join(readiness_parts)
     handles["motion"].value = latest.motion_state
     handles["fault"].value = latest.fault_reason if latest.fault_latched else "none"
+    if "self_collision" in handles:
+        handles["self_collision"].value = _format_self_collision_status(latest, stale=stale)
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
     if "tcp_tracking" in handles:
@@ -1195,6 +1329,7 @@ def main(argv: list[str] | None = None) -> None:
     observed = normalize_observed_mode_backend(observed_mode_raw, observed_backend_raw)
     ops_available = os.environ.get("RB_GUI_OPS_AVAILABLE", "0") == "1"
     enable_tcp_pose_commands = os.environ.get("RB_GUI_ENABLE_TCP_POSE_COMMANDS", "0") == "1"
+    enable_controller_sim_cartesian = os.environ.get("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", "0") == "1"
     init_left_joints = _env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG)
     init_right_joints = _env_joint6("RB_GUI_INIT_RIGHT_JOINTS", _DEFAULT_INIT_RIGHT_JOINTS_DEG)
     init_motion_timeout_sec = _env_float("RB_GUI_INIT_MOTION_TIMEOUT_SEC", 10.0)
@@ -1219,6 +1354,7 @@ def main(argv: list[str] | None = None) -> None:
         sim_readiness=_sim_readiness_from_env(observed),
         ops_available=ops_available,
         enable_tcp_pose_commands=enable_tcp_pose_commands,
+        enable_controller_sim_cartesian=enable_controller_sim_cartesian,
         init_left_joint_deg=init_left_joints,
         init_right_joint_deg=init_right_joints,
         init_motion_timeout_sec=init_motion_timeout_sec,

@@ -1,0 +1,10 @@
+{"epoch": 1, "hard_loss": 0.7010829005051024, "teacher_loss": 0.29402886912487214}
+{"epoch": 2, "hard_loss": 0.5930084000539567, "teacher_loss": 0.1863803549100025}
+{"epoch": 3, "hard_loss": 0.5529252290599131, "teacher_loss": 0.14772585454919226}
+{"epoch": 4, "hard_loss": 0.521141396921017, "teacher_loss": 0.11860310425991769}
+{"epoch": 5, "hard_loss": 0.494278849021403, "teacher_loss": 0.09498187051161068}
+{"epoch": 6, "hard_loss": 0.4723504038384287, "teacher_loss": 0.07695406672279825}
+{"epoch": 7, "hard_loss": 0.45589071160762895, "teacher_loss": 0.06401301221529786}
+{"epoch": 8, "hard_loss": 0.4430957469808884, "teacher_loss": 0.054552699996887215}
+{"epoch": 9, "hard_loss": 0.43236329820983566, "teacher_loss": 0.047220252831767444}
+{"epoch": 10, "hard_loss": 0.42343733488665336, "teacher_loss": 0.04177091818864814}

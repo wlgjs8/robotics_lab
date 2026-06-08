@@ -379,6 +379,7 @@ class GuiContractsTest(unittest.TestCase):
         sim_ready=False,
         cartesian_available=None,
         enable_tcp_pose=False,
+        enable_controller_sim_cartesian=False,
         stale=False,
         init_left_joint_deg=None,
         init_right_joint_deg=None,
@@ -404,6 +405,7 @@ class GuiContractsTest(unittest.TestCase):
                 cartesian_no_go_reason="cartesian readiness not proven",
             ),
             enable_tcp_pose_commands=enable_tcp_pose,
+            enable_controller_sim_cartesian=enable_controller_sim_cartesian,
             init_left_joint_deg=init_left_joint_deg,
             init_right_joint_deg=init_right_joint_deg,
             init_motion_timeout_sec=init_motion_timeout_sec,
@@ -1273,6 +1275,157 @@ class GuiContractsTest(unittest.TestCase):
             enable_tcp_pose=True,
         )
         self.assertIn("cartesian readiness", cart_safety.tcp_command_disabled_reason("left"))
+
+    def test_tcp_command_allows_rbpodo_controller_simulation_with_optin(self):
+        state = self.tcp_available_state()
+        # rbpodo + operation_mode=simulation, both opt-ins on -> TCP allowed.
+        _, _, allowed = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="rbpodo",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+            enable_controller_sim_cartesian=True,
+        )
+        self.assertIsNone(allowed.tcp_command_disabled_reason("left"))
+        ok, _ = allowed.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertTrue(ok)
+
+        # rbpodo + simulation but controller-sim opt-in OFF -> still blocked.
+        _, _, no_optin = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="rbpodo",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+            enable_controller_sim_cartesian=False,
+        )
+        self.assertIn(
+            "RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN",
+            no_optin.tcp_command_disabled_reason("left"),
+        )
+
+        # Real mode stays status-only even with the controller-sim opt-in set.
+        _, _, real_safety = self.make_safety(
+            state,
+            desired="real",
+            observed="real",
+            observed_backend="rbpodo",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+            enable_controller_sim_cartesian=True,
+        )
+        self.assertIsNotNone(real_safety.tcp_command_disabled_reason("left"))
+
+        # Simulator backend behaviour is unchanged (no controller-sim opt-in needed).
+        _, _, sim_safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="simulator",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+        )
+        self.assertIsNone(sim_safety.tcp_command_disabled_reason("left"))
+
+    def test_tcp_twist_and_joint_velocity_in_controller_sim(self):
+        state = self.tcp_available_state()
+        _, client, safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="rbpodo",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+            enable_controller_sim_cartesian=True,
+        )
+        # TcpTwistStand within velocity limit -> sent.
+        ok, msg = safety.send_tcp_twist_stand("left", (0.02, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertTrue(ok, msg)
+        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "TcpTwistStand")
+        self.assertIn("tcp_twist_stand", client.sent_packets[-1]["left"])
+        # TcpTwistLocal too -> sent.
+        ok, msg = safety.send_tcp_twist_local("left", (0.0, 0.0, 0.01, 0.0, 0.0, 0.0))
+        self.assertTrue(ok, msg)
+        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "TcpTwistLocal")
+        # Over the linear velocity limit -> rejected, nothing sent.
+        before = len(client.sent_packets)
+        ok, msg = safety.send_tcp_twist_stand("left", (99.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        self.assertIn("velocity exceeds", msg)
+        self.assertEqual(len(client.sent_packets), before)
+        # JointVelocity within limit -> sent.
+        ok, msg = safety.send_joint_velocity("left", (5.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertTrue(ok, msg)
+        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "JointVelocity")
+        self.assertIn("dq_target_deg_s", client.sent_packets[-1]["left"])
+        # JointVelocity over limit -> rejected.
+        ok, msg = safety.send_joint_velocity("left", (999.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        self.assertIn("velocity exceeds", msg)
+
+    def test_tcp_twist_blocked_in_real_mode(self):
+        state = self.tcp_available_state()
+        _, client, safety = self.make_safety(
+            state,
+            desired="real",
+            observed="real",
+            observed_backend="rbpodo",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+            enable_controller_sim_cartesian=True,
+        )
+        ok, msg = safety.send_tcp_twist_stand("left", (0.02, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+        ok, msg = safety.send_joint_velocity("left", (5.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertFalse(ok)
+
+    def test_tcp_circle_move_in_controller_sim(self):
+        state = self.tcp_available_state()
+        _, client, safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="rbpodo",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+            enable_controller_sim_cartesian=True,
+        )
+        ok, msg = safety.send_tcp_circle_move(0.15, 4.0, arm="both")
+        self.assertTrue(ok, msg)
+        pkt = client.sent_packets[-1]
+        self.assertEqual(pkt["mode"], "TcpCircleMove")
+        self.assertEqual(pkt["left"]["mode"], "TcpCircleMove")
+        self.assertEqual(pkt["left"]["diameter_m"], 0.15)
+        self.assertEqual(pkt["left"]["period_sec"], 4.0)
+        self.assertEqual(pkt["right"]["diameter_m"], 0.15)
+        ok, msg = safety.send_tcp_circle_move(0.5, 4.0)
+        self.assertFalse(ok)
+        self.assertIn("diameter", msg)
+        ok, msg = safety.send_tcp_circle_move(0.15, 1.0)
+        self.assertFalse(ok)
+        self.assertIn("period", msg)
+        _, _, real_safety = self.make_safety(
+            state,
+            desired="real",
+            observed="real",
+            observed_backend="rbpodo",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+            enable_controller_sim_cartesian=True,
+        )
+        ok, msg = real_safety.send_tcp_circle_move(0.15, 4.0)
+        self.assertFalse(ok)
 
     def test_tcp_delta_stand_blocks_stale_and_faulted_state(self):
         state = self.tcp_available_state()

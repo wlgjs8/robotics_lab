@@ -1,0 +1,3833 @@
+{
+  "action_horizon": 16,
+  "aggregate": {
+    "audit_warning_count": 0,
+    "detected_cameras": [
+      "left_realsense_color",
+      "left_realsense_depth",
+      "right_realsense_color",
+      "right_realsense_depth"
+    ],
+    "detected_formats": [
+      "pika_umi_bimanual"
+    ],
+    "frame_count": 42435,
+    "rejected_episode_count": 0,
+    "sample_count_horizon": 40099,
+    "sessions": [
+      "data_20260606_134608",
+      "data_20260606_140442",
+      "data_20260606_140813",
+      "data_20260606_175002",
+      "data_20260606_175635",
+      "data_20260606_183038",
+      "data_20260606_185446",
+      "data_20260606_190156"
+    ],
+    "valid_episode_count": 146
+  },
+  "created_at": "2026-06-06T10:16:31.450653+00:00",
+  "data_dir": "/data/policy_episodes",
+  "episodes": [
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 416,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_000.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_000.hdf5",
+      "sample_count_horizon": 400,
+      "session": "data_20260606_134608",
+      "sha256": "c6aa82c7f1e209437c4346424e0dcb608bc59feaeb70b76f9bdd3a8b9cd44807",
+      "timestamp_range": {
+        "end": 1780721196.5911934,
+        "start": 1780721182.729174
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 339,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_001.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_001.hdf5",
+      "sample_count_horizon": 323,
+      "session": "data_20260606_134608",
+      "sha256": "68d76818c0a0d484828b5b139c44c8c0efaad45d3898fb604b5f3c74eae11ffb",
+      "timestamp_range": {
+        "end": 1780721216.4181426,
+        "start": 1780721205.1275241
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 355,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_002.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_002.hdf5",
+      "sample_count_horizon": 339,
+      "session": "data_20260606_134608",
+      "sha256": "0897ceb968b301fb2d7dc6b6d55711434f00a53bca50fcb587c36710bfb0867b",
+      "timestamp_range": {
+        "end": 1780721238.9271111,
+        "start": 1780721227.1021633
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 314,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_003.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_003.hdf5",
+      "sample_count_horizon": 298,
+      "session": "data_20260606_134608",
+      "sha256": "ae85a005520bdf8cb85463fb7b5aba9e29cd87d1ce80b623cbe07ad952bd744c",
+      "timestamp_range": {
+        "end": 1780721261.3413882,
+        "start": 1780721250.8878202
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 353,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_004.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_004.hdf5",
+      "sample_count_horizon": 337,
+      "session": "data_20260606_134608",
+      "sha256": "bb2f863700eddb23e8a5e332580e62b68c532eb5d5772344332d715fd1ad9350",
+      "timestamp_range": {
+        "end": 1780721282.1042972,
+        "start": 1780721270.3463116
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 300,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_005.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_005.hdf5",
+      "sample_count_horizon": 284,
+      "session": "data_20260606_134608",
+      "sha256": "5f68d70f0109ddcabad10cc35753a82536847ecdbc2879297979f2311ec6ec1c",
+      "timestamp_range": {
+        "end": 1780721298.6308732,
+        "start": 1780721288.6421223
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 280,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_006.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_006.hdf5",
+      "sample_count_horizon": 264,
+      "session": "data_20260606_134608",
+      "sha256": "6a5bbff1836061ad1a80658892931070fa5d7ab7e97d338baa402a1efba39a25",
+      "timestamp_range": {
+        "end": 1780721316.44744,
+        "start": 1780721307.1263213
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 325,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_007.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_007.hdf5",
+      "sample_count_horizon": 309,
+      "session": "data_20260606_134608",
+      "sha256": "71543eae7279d5e7342c24e0b50a7e49dcf3907819010863eb617a181fcd7fb3",
+      "timestamp_range": {
+        "end": 1780721334.3825388,
+        "start": 1780721323.5595953
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 286,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_008.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_008.hdf5",
+      "sample_count_horizon": 270,
+      "session": "data_20260606_134608",
+      "sha256": "d1af582cdd98a22530fcff5ea5430ad02071d57201fe513c1be4da2bd2a45b1d",
+      "timestamp_range": {
+        "end": 1780721349.808984,
+        "start": 1780721340.2880244
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 327,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_009.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_009.hdf5",
+      "sample_count_horizon": 311,
+      "session": "data_20260606_134608",
+      "sha256": "c9adeae1927fba84e57057333d582c5bb6cdbaf54c5f226b91b916e59ea7f0df",
+      "timestamp_range": {
+        "end": 1780721367.8156302,
+        "start": 1780721356.9235094
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 285,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_010.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_010.hdf5",
+      "sample_count_horizon": 269,
+      "session": "data_20260606_134608",
+      "sha256": "db4a6114532729613ea7ea96f50c795297ccfe7ecaca9dffaf94cbfaf693a9f4",
+      "timestamp_range": {
+        "end": 1780721383.029246,
+        "start": 1780721373.5437162
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 321,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_011.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_011.hdf5",
+      "sample_count_horizon": 305,
+      "session": "data_20260606_134608",
+      "sha256": "9c60bc03369a642100f5d83e729c4cee058a8ce73f557ccafe320703e3ca0119",
+      "timestamp_range": {
+        "end": 1780721401.8624718,
+        "start": 1780721391.1730552
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 248,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_012.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_012.hdf5",
+      "sample_count_horizon": 232,
+      "session": "data_20260606_134608",
+      "sha256": "a30f277aa7df7607fbab715cef23e1aeb7624e219bfe71e9e3a33bcdc80c5728",
+      "timestamp_range": {
+        "end": 1780721417.6900845,
+        "start": 1780721409.4423602
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 308,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_013.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_013.hdf5",
+      "sample_count_horizon": 292,
+      "session": "data_20260606_134608",
+      "sha256": "a1cf09a4d302f9dbfec2a6f88d772e416e1a03ec6e98c8b9fa6126a214fa3033",
+      "timestamp_range": {
+        "end": 1780721437.7464633,
+        "start": 1780721427.492393
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 283,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_014.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_014.hdf5",
+      "sample_count_horizon": 267,
+      "session": "data_20260606_134608",
+      "sha256": "80c5435169badc6160a9cd6bb28c96b78bf6967c8f0deb986ba085c5af15f3e4",
+      "timestamp_range": {
+        "end": 1780721457.6915572,
+        "start": 1780721448.2751174
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 288,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_015.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_015.hdf5",
+      "sample_count_horizon": 272,
+      "session": "data_20260606_134608",
+      "sha256": "98c3f0db42318158ce958fde2869d47fd62ad2df1662a6e6dff945b9da2e002b",
+      "timestamp_range": {
+        "end": 1780721479.0260165,
+        "start": 1780721469.4404602
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 292,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_016.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_016.hdf5",
+      "sample_count_horizon": 276,
+      "session": "data_20260606_134608",
+      "sha256": "1b49470d11b9114fbc1a50875c2c39568f3d3c60f352bedb1324086232aaa816",
+      "timestamp_range": {
+        "end": 1780721494.4616938,
+        "start": 1780721484.7402487
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 306,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_017.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_017.hdf5",
+      "sample_count_horizon": 290,
+      "session": "data_20260606_134608",
+      "sha256": "963a35b6548e725b7c074be89aee58d6d5e4d0645c127e80910385603d10bd94",
+      "timestamp_range": {
+        "end": 1780721510.4239554,
+        "start": 1780721500.235422
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 312,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_018.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_018.hdf5",
+      "sample_count_horizon": 296,
+      "session": "data_20260606_134608",
+      "sha256": "ccd3d64927ce31eda7b3eab38f21312306f19f0f11f0dd9c99998003b97d1603",
+      "timestamp_range": {
+        "end": 1780721526.7279904,
+        "start": 1780721516.3381007
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 330,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_019.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_019.hdf5",
+      "sample_count_horizon": 314,
+      "session": "data_20260606_134608",
+      "sha256": "4a67d8efd702c869dbe1c56bbd36428eb187a8d6567678ef344843b7a78dcd29",
+      "timestamp_range": {
+        "end": 1780721546.1141398,
+        "start": 1780721535.119899
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 309,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_020.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_020.hdf5",
+      "sample_count_horizon": 293,
+      "session": "data_20260606_134608",
+      "sha256": "87b2a73d690409799d3d27750965d16d0f4d738744e07db8b926d74164d41622",
+      "timestamp_range": {
+        "end": 1780721562.102003,
+        "start": 1780721551.8133595
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 317,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_021.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_021.hdf5",
+      "sample_count_horizon": 301,
+      "session": "data_20260606_134608",
+      "sha256": "51b9a2dcba1748dbbae775b54c097527e96a4a0b17d1aa6b23cf9093e9c39499",
+      "timestamp_range": {
+        "end": 1780721582.352634,
+        "start": 1780721571.7988205
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 290,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_022.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_022.hdf5",
+      "sample_count_horizon": 274,
+      "session": "data_20260606_134608",
+      "sha256": "afbf299ed6758700a1f97da9a44d00ecc292287b8afb7e08f21c8fe1e7dc5558",
+      "timestamp_range": {
+        "end": 1780721597.711142,
+        "start": 1780721588.056261
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 305,
+      "path": "/data/policy_episodes/data_20260606_134608/episode_023.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_134608/episode_023.hdf5",
+      "sample_count_horizon": 289,
+      "session": "data_20260606_134608",
+      "sha256": "defdf55badca3ec705f762e1e120464055eefc641131492421e8deb6f17600fb",
+      "timestamp_range": {
+        "end": 1780721614.2067807,
+        "start": 1780721604.0532024
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 318,
+      "path": "/data/policy_episodes/data_20260606_140442/episode_000.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_140442/episode_000.hdf5",
+      "sample_count_horizon": 302,
+      "session": "data_20260606_140442",
+      "sha256": "6925b703f8afe6ff573a36fb3bae26062e14036ce950197015f99a2bab5a5ffa",
+      "timestamp_range": {
+        "end": 1780722311.053167,
+        "start": 1780722300.4660857
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 286,
+      "path": "/data/policy_episodes/data_20260606_140442/episode_001.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_140442/episode_001.hdf5",
+      "sample_count_horizon": 270,
+      "session": "data_20260606_140442",
+      "sha256": "c0199c3a5f9bbaca6b54ebfd324e287d95742ec177f2dc507fe6739df80a9b47",
+      "timestamp_range": {
+        "end": 1780722330.037649,
+        "start": 1780722320.5165267
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 266,
+      "path": "/data/policy_episodes/data_20260606_140442/episode_002.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_140442/episode_002.hdf5",
+      "sample_count_horizon": 250,
+      "session": "data_20260606_140442",
+      "sha256": "e752239fc3343b5b0d7ddb40b305864d26535ba44c0c89ff9e64a122d667beaa",
+      "timestamp_range": {
+        "end": 1780722344.6634784,
+        "start": 1780722335.812474
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 325,
+      "path": "/data/policy_episodes/data_20260606_140813/episode_000.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_140813/episode_000.hdf5",
+      "sample_count_horizon": 309,
+      "session": "data_20260606_140813",
+      "sha256": "62cdf8ea80c83312e1c172f21e67f6093c315c9df87d2c2b35ad341b7a365d24",
+      "timestamp_range": {
+        "end": 1780722517.9440386,
+        "start": 1780722507.1230032
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 240,
+      "path": "/data/policy_episodes/data_20260606_140813/episode_001.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_140813/episode_001.hdf5",
+      "sample_count_horizon": 224,
+      "session": "data_20260606_140813",
+      "sha256": "8dc57f3c24854d375aa6e4eabcc7008cbd57f76f03995de34a7d43884792c9d0",
+      "timestamp_range": {
+        "end": 1780722531.9456244,
+        "start": 1780722523.965058
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 234,
+      "path": "/data/policy_episodes/data_20260606_140813/episode_002.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_140813/episode_002.hdf5",
+      "sample_count_horizon": 218,
+      "session": "data_20260606_140813",
+      "sha256": "30959ba70759a2bc933c842e2661ba1e9617a4b3f04150a7fa43305adca244df",
+      "timestamp_range": {
+        "end": 1780722546.1139681,
+        "start": 1780722538.33198
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 257,
+      "path": "/data/policy_episodes/data_20260606_140813/episode_003.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_140813/episode_003.hdf5",
+      "sample_count_horizon": 241,
+      "session": "data_20260606_140813",
+      "sha256": "f9bc59eb6c1c9394fbcbb57320e1c5cfb6d6f82cdf73421a0dcdea6aa5e1729b",
+      "timestamp_range": {
+        "end": 1780722560.9882429,
+        "start": 1780722552.439949
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 279,
+      "path": "/data/policy_episodes/data_20260606_140813/episode_004.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_140813/episode_004.hdf5",
+      "sample_count_horizon": 263,
+      "session": "data_20260606_140813",
+      "sha256": "253ffa0324910c7782a5069c411f71784487bb34b62da6c4fab1eb7848072342",
+      "timestamp_range": {
+        "end": 1780722576.7735143,
+        "start": 1780722567.488275
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 326,
+      "path": "/data/policy_episodes/data_20260606_140813/episode_005.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_140813/episode_005.hdf5",
+      "sample_count_horizon": 310,
+      "session": "data_20260606_140813",
+      "sha256": "437c1a3023455c932a01ffb94ee0545f8de41e4c4bb216de5715d9f6dcd2c440",
+      "timestamp_range": {
+        "end": 1780722595.6441283,
+        "start": 1780722584.7862885
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 303,
+      "path": "/data/policy_episodes/data_20260606_175002/episode_000.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175002/episode_000.hdf5",
+      "sample_count_horizon": 287,
+      "session": "data_20260606_175002",
+      "sha256": "8600458969fbe2068525a27b44061d38edc4b860f51a4535bc9f59421244d736",
+      "timestamp_range": {
+        "end": 1780735835.2479608,
+        "start": 1780735825.1616774
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 278,
+      "path": "/data/policy_episodes/data_20260606_175002/episode_001.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175002/episode_001.hdf5",
+      "sample_count_horizon": 262,
+      "session": "data_20260606_175002",
+      "sha256": "2e5b2e0e03dc7da373f75a524881980939322211911c6b331a461bcc63f31530",
+      "timestamp_range": {
+        "end": 1780735849.6392004,
+        "start": 1780735840.3895826
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 255,
+      "path": "/data/policy_episodes/data_20260606_175002/episode_002.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175002/episode_002.hdf5",
+      "sample_count_horizon": 239,
+      "session": "data_20260606_175002",
+      "sha256": "d25a6da2c76bbbcf868e07b770c43f3dfa4dcc2cddec29312808f99e61e206fb",
+      "timestamp_range": {
+        "end": 1780735865.0303602,
+        "start": 1780735856.5446548
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 293,
+      "path": "/data/policy_episodes/data_20260606_175002/episode_003.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175002/episode_003.hdf5",
+      "sample_count_horizon": 277,
+      "session": "data_20260606_175002",
+      "sha256": "b9dcdaad8f3cccca4fa0e16b94c2bf78441abed0c33f0d246bcf37ca06e6144b",
+      "timestamp_range": {
+        "end": 1780735880.8843293,
+        "start": 1780735871.1319442
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 262,
+      "path": "/data/policy_episodes/data_20260606_175002/episode_004.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175002/episode_004.hdf5",
+      "sample_count_horizon": 246,
+      "session": "data_20260606_175002",
+      "sha256": "f25b3aa643358cd91f07949e85474cd5be00e6a51827eb09894f1272232d6f2b",
+      "timestamp_range": {
+        "end": 1780735894.8562372,
+        "start": 1780735886.1408703
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 266,
+      "path": "/data/policy_episodes/data_20260606_175002/episode_005.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175002/episode_005.hdf5",
+      "sample_count_horizon": 250,
+      "session": "data_20260606_175002",
+      "sha256": "b1f114306aa27807f13242d9b5de0b3e19558113f17ad6504722456b7b898c63",
+      "timestamp_range": {
+        "end": 1780735909.810563,
+        "start": 1780735900.9597843
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 318,
+      "path": "/data/policy_episodes/data_20260606_175002/episode_006.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175002/episode_006.hdf5",
+      "sample_count_horizon": 302,
+      "session": "data_20260606_175002",
+      "sha256": "06e3aa85155bcded8a3a9b975fea9eac081de98a285364894f803028074da15d",
+      "timestamp_range": {
+        "end": 1780735927.1949785,
+        "start": 1780735916.6076155
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 287,
+      "path": "/data/policy_episodes/data_20260606_175002/episode_007.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175002/episode_007.hdf5",
+      "sample_count_horizon": 271,
+      "session": "data_20260606_175002",
+      "sha256": "398b86f0f02410cab6ad0d66fa35682b534a188f6651b97bf6e480bca5c285e0",
+      "timestamp_range": {
+        "end": 1780735945.8849282,
+        "start": 1780735936.3305678
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 270,
+      "path": "/data/policy_episodes/data_20260606_175002/episode_008.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175002/episode_008.hdf5",
+      "sample_count_horizon": 254,
+      "session": "data_20260606_175002",
+      "sha256": "17712af05c8bc78041283eefccdbf67d0a834c87d50ad46e4def22ca5708de7a",
+      "timestamp_range": {
+        "end": 1780735962.8131723,
+        "start": 1780735953.8286214
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 303,
+      "path": "/data/policy_episodes/data_20260606_175002/episode_009.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175002/episode_009.hdf5",
+      "sample_count_horizon": 287,
+      "session": "data_20260606_175002",
+      "sha256": "676b68095f590c09e79b827a243ea2c688b1f2e7efcd32ea7014ed12cb78a4a2",
+      "timestamp_range": {
+        "end": 1780735982.2411215,
+        "start": 1780735972.1546898
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 337,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_000.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_000.hdf5",
+      "sample_count_horizon": 321,
+      "session": "data_20260606_175635",
+      "sha256": "82b0a61ce6e5d482361d0abc1c4194a21efd1c8f2eb9614033395c309be25764",
+      "timestamp_range": {
+        "end": 1780736219.8054554,
+        "start": 1780736208.5815773
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 242,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_001.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_001.hdf5",
+      "sample_count_horizon": 226,
+      "session": "data_20260606_175635",
+      "sha256": "7fdfc0dbf59f9ba009ac574f10832f6682d3ffff46365cdcf3e65d44f1378646",
+      "timestamp_range": {
+        "end": 1780736235.763201,
+        "start": 1780736227.7139482
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 246,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_002.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_002.hdf5",
+      "sample_count_horizon": 230,
+      "session": "data_20260606_175635",
+      "sha256": "e473f5af6b299ef4a7c1ab9733afbb4b5f5ea72ed862abbd8e3d3dbde6252271",
+      "timestamp_range": {
+        "end": 1780736252.5443578,
+        "start": 1780736244.3577662
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 291,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_003.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_003.hdf5",
+      "sample_count_horizon": 275,
+      "session": "data_20260606_175635",
+      "sha256": "802032ce5fcfc01fa3f3de529b1e9801fc1ed356fd4b07b8020ee82548538be9",
+      "timestamp_range": {
+        "end": 1780736270.9515312,
+        "start": 1780736261.2636309
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 288,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_004.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_004.hdf5",
+      "sample_count_horizon": 272,
+      "session": "data_20260606_175635",
+      "sha256": "b5dee5c621fef23f1bc0fbbb8854f7d307fc0365feb13a5b5862f2736f062a49",
+      "timestamp_range": {
+        "end": 1780736288.421679,
+        "start": 1780736278.8340795
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 255,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_005.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_005.hdf5",
+      "sample_count_horizon": 239,
+      "session": "data_20260606_175635",
+      "sha256": "69d60f720dfbd19d5dbe3ac5df4ba830560afd0b0eb933e0b6130575564d7c16",
+      "timestamp_range": {
+        "end": 1780736303.3188193,
+        "start": 1780736294.8314652
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 252,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_006.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_006.hdf5",
+      "sample_count_horizon": 236,
+      "session": "data_20260606_175635",
+      "sha256": "5237f7f2f040efeb4a636abf6b8e67cb74718896d26745b48a10f31d0e671cc6",
+      "timestamp_range": {
+        "end": 1780736318.0279777,
+        "start": 1780736309.6407049
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 289,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_007.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_007.hdf5",
+      "sample_count_horizon": 273,
+      "session": "data_20260606_175635",
+      "sha256": "ac12802e7624852e339d37a61f8683b2903dca50139c75fc41820dc87f9dc748",
+      "timestamp_range": {
+        "end": 1780736334.681949,
+        "start": 1780736325.0617664
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 261,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_008.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_008.hdf5",
+      "sample_count_horizon": 245,
+      "session": "data_20260606_175635",
+      "sha256": "3d71a67d758581438949a6ded405aba07c43574b15ed9bea716655db7356f1b5",
+      "timestamp_range": {
+        "end": 1780736352.9831092,
+        "start": 1780736344.29946
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 320,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_009.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_009.hdf5",
+      "sample_count_horizon": 304,
+      "session": "data_20260606_175635",
+      "sha256": "dbbbe42cd8176fd707ce3d423fe203e41581a691346b52f11fee62995ed69f89",
+      "timestamp_range": {
+        "end": 1780736370.9732392,
+        "start": 1780736360.3166008
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 292,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_010.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_010.hdf5",
+      "sample_count_horizon": 276,
+      "session": "data_20260606_175635",
+      "sha256": "2c7ccb5eac65fd98ce6c846c9f5ffa6a9a882ed2ea6d900a379645acedb855b1",
+      "timestamp_range": {
+        "end": 1780736388.592442,
+        "start": 1780736378.8734128
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 283,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_011.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_011.hdf5",
+      "sample_count_horizon": 267,
+      "session": "data_20260606_175635",
+      "sha256": "637ad213666574aa0e1862c4b06aa8477959c9bf7201688b55f645076cbc28a6",
+      "timestamp_range": {
+        "end": 1780736406.030792,
+        "start": 1780736396.612278
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 282,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_012.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_012.hdf5",
+      "sample_count_horizon": 266,
+      "session": "data_20260606_175635",
+      "sha256": "9e39f59e65d1d61f50308e09d93574380dffd367ec02daa2fb0a9e79a67a23dc",
+      "timestamp_range": {
+        "end": 1780736422.2023659,
+        "start": 1780736412.8171837
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 285,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_013.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_013.hdf5",
+      "sample_count_horizon": 269,
+      "session": "data_20260606_175635",
+      "sha256": "637b16a6073d023f27f5067d5b6691db5f5fd560d1282be5254b89d1ebda1d34",
+      "timestamp_range": {
+        "end": 1780736439.5989332,
+        "start": 1780736430.1115842
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 303,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_014.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_014.hdf5",
+      "sample_count_horizon": 287,
+      "session": "data_20260606_175635",
+      "sha256": "912986e88d464c90776772c430ee93179f86161f6bbffda9e9204745208b257c",
+      "timestamp_range": {
+        "end": 1780736457.2614622,
+        "start": 1780736447.1731086
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 328,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_015.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_015.hdf5",
+      "sample_count_horizon": 312,
+      "session": "data_20260606_175635",
+      "sha256": "6ab8e65b3fd46e44f9e220d14ba1131f1d0de5132632923cf4934370ee7fb3a4",
+      "timestamp_range": {
+        "end": 1780736475.938459,
+        "start": 1780736465.0148776
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 307,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_016.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_016.hdf5",
+      "sample_count_horizon": 291,
+      "session": "data_20260606_175635",
+      "sha256": "f5dcb07060b9ca271678fa75f56c7809daea5569967b9a1fda30a4fd9aedf59c",
+      "timestamp_range": {
+        "end": 1780736493.5924606,
+        "start": 1780736483.3723276
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 274,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_017.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_017.hdf5",
+      "sample_count_horizon": 258,
+      "session": "data_20260606_175635",
+      "sha256": "7014919dec8a4ab0af0736278e37fee2f33ac436a3b06d6c5e802c324a76337a",
+      "timestamp_range": {
+        "end": 1780736511.968049,
+        "start": 1780736502.8479042
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 259,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_018.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_018.hdf5",
+      "sample_count_horizon": 243,
+      "session": "data_20260606_175635",
+      "sha256": "633d74d1b6a2205593a2dd8837e0b4e8223221b5d6a1a951ea485a04521a8aa8",
+      "timestamp_range": {
+        "end": 1780736531.1601648,
+        "start": 1780736522.5429156
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 263,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_019.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_019.hdf5",
+      "sample_count_horizon": 247,
+      "session": "data_20260606_175635",
+      "sha256": "a1f3ff712a17232fc85f01a6f791fc606523599c45e01c5a05a37dbdad7a6dae",
+      "timestamp_range": {
+        "end": 1780736548.5125482,
+        "start": 1780736539.7597053
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 265,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_020.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_020.hdf5",
+      "sample_count_horizon": 249,
+      "session": "data_20260606_175635",
+      "sha256": "b1b915ec522bbd3d513e63debdcd71a349ee60f88d58313f9ccc84ed0319e2c0",
+      "timestamp_range": {
+        "end": 1780736563.3588607,
+        "start": 1780736554.5391538
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 293,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_021.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_021.hdf5",
+      "sample_count_horizon": 277,
+      "session": "data_20260606_175635",
+      "sha256": "28058b086c976e2b4dd261e080b4a937a0ad05ded134bfc08b8b33fe9f88afce",
+      "timestamp_range": {
+        "end": 1780736580.3092122,
+        "start": 1780736570.5567281
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 285,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_022.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_022.hdf5",
+      "sample_count_horizon": 269,
+      "session": "data_20260606_175635",
+      "sha256": "3c1af6e62d702fa06bc500dead0cbd1e1c305722d28a8e677cf904b28b96f932",
+      "timestamp_range": {
+        "end": 1780736596.408947,
+        "start": 1780736586.9258795
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 302,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_023.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_023.hdf5",
+      "sample_count_horizon": 286,
+      "session": "data_20260606_175635",
+      "sha256": "3effede8ce7444a76b4fb1b12134fbebd950ebbf3c9fd9ba8025a71cf83fed6c",
+      "timestamp_range": {
+        "end": 1780736612.0701485,
+        "start": 1780736602.015186
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 275,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_024.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_024.hdf5",
+      "sample_count_horizon": 259,
+      "session": "data_20260606_175635",
+      "sha256": "dd4d98a475c4f45353062cbec345c2c6a8957c0f68a8a7ef55e81ee3b1f6117e",
+      "timestamp_range": {
+        "end": 1780736626.4693427,
+        "start": 1780736617.3157277
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 274,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_025.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_025.hdf5",
+      "sample_count_horizon": 258,
+      "session": "data_20260606_175635",
+      "sha256": "65699f4e9efd8b1202f1bd460946e8724d834054bc5f931e4c16eefafe3e023b",
+      "timestamp_range": {
+        "end": 1780736641.1943882,
+        "start": 1780736632.076616
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 267,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_026.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_026.hdf5",
+      "sample_count_horizon": 251,
+      "session": "data_20260606_175635",
+      "sha256": "e5d0d8ae5d6b32c410368c7afe32d04f8ecc3b0f47579978fb43a066d139e2da",
+      "timestamp_range": {
+        "end": 1780736656.3774943,
+        "start": 1780736647.4904623
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 271,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_027.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_027.hdf5",
+      "sample_count_horizon": 255,
+      "session": "data_20260606_175635",
+      "sha256": "a7177a63953ee5f790b3d669752923c589035514ab25620193d1100c5d9d66fe",
+      "timestamp_range": {
+        "end": 1780736672.5657303,
+        "start": 1780736663.5501366
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 274,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_028.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_028.hdf5",
+      "sample_count_horizon": 258,
+      "session": "data_20260606_175635",
+      "sha256": "1f1c5cfffd37db37acd91b7c8ffcc1768046de471b2e1ab623af2e32d31fcbeb",
+      "timestamp_range": {
+        "end": 1780736693.9629314,
+        "start": 1780736684.845077
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 306,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_029.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_029.hdf5",
+      "sample_count_horizon": 290,
+      "session": "data_20260606_175635",
+      "sha256": "09468d4c29ec7fe4210a1c96f6cfb8c94e9e7ab6da20aac54ba4a429e9444655",
+      "timestamp_range": {
+        "end": 1780736710.05329,
+        "start": 1780736699.8641896
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 318,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_030.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_030.hdf5",
+      "sample_count_horizon": 302,
+      "session": "data_20260606_175635",
+      "sha256": "cdb2dd554f03a205b0305ec5f6e24ee860160a04270d92d084f3e893c52683e5",
+      "timestamp_range": {
+        "end": 1780736727.832364,
+        "start": 1780736717.2429838
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 284,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_031.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_031.hdf5",
+      "sample_count_horizon": 268,
+      "session": "data_20260606_175635",
+      "sha256": "1f2c9069b26b34ad85bc6f28becfe14db3124cde79bc755dc0e855d7099b15b7",
+      "timestamp_range": {
+        "end": 1780736750.521336,
+        "start": 1780736741.0693974
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 295,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_032.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_032.hdf5",
+      "sample_count_horizon": 279,
+      "session": "data_20260606_175635",
+      "sha256": "e7de46a17d3d5b8413afd36a045efa1e6b7ee11df563c15a18b862a1c4331a90",
+      "timestamp_range": {
+        "end": 1780736768.657989,
+        "start": 1780736758.8387773
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 310,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_033.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_033.hdf5",
+      "sample_count_horizon": 294,
+      "session": "data_20260606_175635",
+      "sha256": "ff299a23924150f04959013cd3f24ea602905cd971b3275530b232e1ff0c763b",
+      "timestamp_range": {
+        "end": 1780736787.560106,
+        "start": 1780736777.2422566
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 296,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_034.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_034.hdf5",
+      "sample_count_horizon": 280,
+      "session": "data_20260606_175635",
+      "sha256": "2f09bde25c11c006d6fe5b3ed912ff52ba3c6d2c86034d25d4e084c3e0515434",
+      "timestamp_range": {
+        "end": 1780736803.3372543,
+        "start": 1780736793.4846025
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 282,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_035.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_035.hdf5",
+      "sample_count_horizon": 266,
+      "session": "data_20260606_175635",
+      "sha256": "fecaf76e9699e3702182b7a73e9cae5959cbc47cce427399b657d64305ef595e",
+      "timestamp_range": {
+        "end": 1780736818.262031,
+        "start": 1780736808.8788865
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 274,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_036.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_036.hdf5",
+      "sample_count_horizon": 258,
+      "session": "data_20260606_175635",
+      "sha256": "e192f2569b40cc53200d9ca9d65137dca66c0a43831d65233abbdf99e652464e",
+      "timestamp_range": {
+        "end": 1780736833.824831,
+        "start": 1780736824.7049239
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 264,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_037.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_037.hdf5",
+      "sample_count_horizon": 248,
+      "session": "data_20260606_175635",
+      "sha256": "697a7318c511f0480052795e5bfd43b19ec72c389d35c544333082474c01aa93",
+      "timestamp_range": {
+        "end": 1780736849.9466546,
+        "start": 1780736841.162948
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 264,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_038.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_038.hdf5",
+      "sample_count_horizon": 248,
+      "session": "data_20260606_175635",
+      "sha256": "f939c8917e844a5b302b02d8c022c62fb69d355ce52dd34a53deacc381aca08b",
+      "timestamp_range": {
+        "end": 1780736868.8685884,
+        "start": 1780736860.0820289
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 266,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_039.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_039.hdf5",
+      "sample_count_horizon": 250,
+      "session": "data_20260606_175635",
+      "sha256": "b47407aff798b2794948a389503750e30420cabc258a32e5e65663d6a0e166ee",
+      "timestamp_range": {
+        "end": 1780736884.4625077,
+        "start": 1780736875.6093743
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 278,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_040.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_040.hdf5",
+      "sample_count_horizon": 262,
+      "session": "data_20260606_175635",
+      "sha256": "1bab0cc410c0c336b0e1f2c18fe367c3677741e1e6d552847f5f69c190addc35",
+      "timestamp_range": {
+        "end": 1780736900.5442069,
+        "start": 1780736891.290377
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 273,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_041.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_041.hdf5",
+      "sample_count_horizon": 257,
+      "session": "data_20260606_175635",
+      "sha256": "c082e08130611947c395261ca854509103dcb112dbca3bbd829e65998fda0b05",
+      "timestamp_range": {
+        "end": 1780736917.1092155,
+        "start": 1780736908.0212195
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 277,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_042.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_042.hdf5",
+      "sample_count_horizon": 261,
+      "session": "data_20260606_175635",
+      "sha256": "c98d8dd84c234db8dafdcb48dbed4763c9717298802708092da0ca4e02787e56",
+      "timestamp_range": {
+        "end": 1780736931.428969,
+        "start": 1780736922.2109673
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 274,
+      "path": "/data/policy_episodes/data_20260606_175635/episode_043.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_175635/episode_043.hdf5",
+      "sample_count_horizon": 258,
+      "session": "data_20260606_175635",
+      "sha256": "45c27bd8193a6d2d9a04087fea01a4349053a2ad417c27c33b06554b72fe96a2",
+      "timestamp_range": {
+        "end": 1780736946.6260953,
+        "start": 1780736937.507298
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 269,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_000.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_000.hdf5",
+      "sample_count_horizon": 253,
+      "session": "data_20260606_183038",
+      "sha256": "8ed754d745d7cade7a2d5507727326f93273ece97d8265121d42c125a305f68a",
+      "timestamp_range": {
+        "end": 1780738267.1304421,
+        "start": 1780738258.1772695
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 272,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_001.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_001.hdf5",
+      "sample_count_horizon": 256,
+      "session": "data_20260606_183038",
+      "sha256": "9162e06d65dcb56a581a69ccd1b308209ad7a52bb17c38922717e8658b1742d1",
+      "timestamp_range": {
+        "end": 1780738281.6290102,
+        "start": 1780738272.575261
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 309,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_002.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_002.hdf5",
+      "sample_count_horizon": 293,
+      "session": "data_20260606_183038",
+      "sha256": "2630fcaa6ba35f1bd7bc1f9b860451aa3f11881ba07f43f42b6347f69a109c08",
+      "timestamp_range": {
+        "end": 1780738297.5869024,
+        "start": 1780738287.3002307
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 304,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_003.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_003.hdf5",
+      "sample_count_horizon": 288,
+      "session": "data_20260606_183038",
+      "sha256": "5012c93b12ef251c9747d1b925810d39f61ca2f1aa808418c10c8b617e6d5a57",
+      "timestamp_range": {
+        "end": 1780738314.1607084,
+        "start": 1780738304.0410583
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 294,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_004.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_004.hdf5",
+      "sample_count_horizon": 278,
+      "session": "data_20260606_183038",
+      "sha256": "7e862245e4a1f9fe9393bd38578c08ee451234daca15d90356f1d9ce6a26bf3f",
+      "timestamp_range": {
+        "end": 1780738329.4907217,
+        "start": 1780738319.7049387
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 297,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_005.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_005.hdf5",
+      "sample_count_horizon": 281,
+      "session": "data_20260606_183038",
+      "sha256": "43867da8abe1e0faba5a440f4040419658c6c40f03eee2e63f20abd5951a75ae",
+      "timestamp_range": {
+        "end": 1780738344.8260686,
+        "start": 1780738334.9402256
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 273,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_006.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_006.hdf5",
+      "sample_count_horizon": 257,
+      "session": "data_20260606_183038",
+      "sha256": "eec871b2218ed9a6d3a58b3183b0677db5c58c4bda3946c0cac2eedc72c6826c",
+      "timestamp_range": {
+        "end": 1780738360.2992942,
+        "start": 1780738351.2167468
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 309,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_007.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_007.hdf5",
+      "sample_count_horizon": 293,
+      "session": "data_20260606_183038",
+      "sha256": "c491e7c6a785f0a48d91a9ee841fe5d507b4a6ad35d184101f7fcf7362840c1b",
+      "timestamp_range": {
+        "end": 1780738376.4583592,
+        "start": 1780738366.1695936
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 287,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_008.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_008.hdf5",
+      "sample_count_horizon": 271,
+      "session": "data_20260606_183038",
+      "sha256": "7931b4978e2fe71bab63f121461d46497ea8c165d62db7f56cfcd85577589ac3",
+      "timestamp_range": {
+        "end": 1780738391.4001348,
+        "start": 1780738381.8440475
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 327,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_009.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_009.hdf5",
+      "sample_count_horizon": 311,
+      "session": "data_20260606_183038",
+      "sha256": "6220a339c849089ce147bb0f850ea88dfaedc837ba85b38c39ec8446f8f0733c",
+      "timestamp_range": {
+        "end": 1780738410.1991405,
+        "start": 1780738399.309125
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 312,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_010.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_010.hdf5",
+      "sample_count_horizon": 296,
+      "session": "data_20260606_183038",
+      "sha256": "3b033a1d87e693936d1dae01bd3e01b63ce19f52934614eaf6cd9b3d3adf70d7",
+      "timestamp_range": {
+        "end": 1780738430.1867628,
+        "start": 1780738419.7998838
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 290,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_011.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_011.hdf5",
+      "sample_count_horizon": 274,
+      "session": "data_20260606_183038",
+      "sha256": "8178f2fc7c98eedd27c714e427c92d53a3c144c8962959fb6a05e7c7addb96f7",
+      "timestamp_range": {
+        "end": 1780738445.9304564,
+        "start": 1780738436.2761261
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 295,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_012.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_012.hdf5",
+      "sample_count_horizon": 279,
+      "session": "data_20260606_183038",
+      "sha256": "e1634da38d2be97fd90178429fabfea0e691ef5c1d9543f297e75959e741bdad",
+      "timestamp_range": {
+        "end": 1780738463.0917,
+        "start": 1780738453.2724457
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 300,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_013.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_013.hdf5",
+      "sample_count_horizon": 284,
+      "session": "data_20260606_183038",
+      "sha256": "97e09a324da0f3d90b087f3882ef6536c45b4c4cbaeba57cd7e09fcbc14ef4ec",
+      "timestamp_range": {
+        "end": 1780738479.418306,
+        "start": 1780738469.4311771
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 294,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_014.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_014.hdf5",
+      "sample_count_horizon": 278,
+      "session": "data_20260606_183038",
+      "sha256": "621927177e6cd961b58fe8ba2b4656d0a9d976eed34087cd173a7ef7260b792c",
+      "timestamp_range": {
+        "end": 1780738495.1575944,
+        "start": 1780738485.3695824
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 310,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_015.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_015.hdf5",
+      "sample_count_horizon": 294,
+      "session": "data_20260606_183038",
+      "sha256": "4366ba18e1c283594428c2fb0c1a4b5447ecbdb441b65de8a03cd5a1682501e0",
+      "timestamp_range": {
+        "end": 1780738510.9224763,
+        "start": 1780738500.602195
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 306,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_016.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_016.hdf5",
+      "sample_count_horizon": 290,
+      "session": "data_20260606_183038",
+      "sha256": "a72a757beff2804bdde1ae4775ffc27125a9b704bf234547478ff5490627abeb",
+      "timestamp_range": {
+        "end": 1780738526.7604084,
+        "start": 1780738516.5704522
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 282,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_017.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_017.hdf5",
+      "sample_count_horizon": 266,
+      "session": "data_20260606_183038",
+      "sha256": "f62eea85206a9711f306190265221ae9dc980b44a09b40226ba988686b7b7fad",
+      "timestamp_range": {
+        "end": 1780738541.366724,
+        "start": 1780738531.9794574
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 390,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_018.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_018.hdf5",
+      "sample_count_horizon": 374,
+      "session": "data_20260606_183038",
+      "sha256": "734c84678d79b816fc412e102a20952280e72d9e56c2f8ca8f80bf19df3ae5b7",
+      "timestamp_range": {
+        "end": 1780738565.5393462,
+        "start": 1780738552.5425324
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 272,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_019.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_019.hdf5",
+      "sample_count_horizon": 256,
+      "session": "data_20260606_183038",
+      "sha256": "f6dbdfd256405ecf0ce056927172e15018ae815e204771521031a87204d9750f",
+      "timestamp_range": {
+        "end": 1780738579.7234325,
+        "start": 1780738570.6743193
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 289,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_020.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_020.hdf5",
+      "sample_count_horizon": 273,
+      "session": "data_20260606_183038",
+      "sha256": "8d9a15d08d005cdaab04c0fafaa657e2d6b5242d29117581883d008e3a983c57",
+      "timestamp_range": {
+        "end": 1780738595.6072457,
+        "start": 1780738585.9877377
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 263,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_021.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_021.hdf5",
+      "sample_count_horizon": 247,
+      "session": "data_20260606_183038",
+      "sha256": "c2a463f4985d85651a70b4116269f7002f51d8fe8256e126ceec31f90304412b",
+      "timestamp_range": {
+        "end": 1780738610.041894,
+        "start": 1780738601.2892134
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 298,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_022.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_022.hdf5",
+      "sample_count_horizon": 282,
+      "session": "data_20260606_183038",
+      "sha256": "2099195a1cbbd950ff2a22acdf482d9fb551370f67530149f501b6fe1cc51d02",
+      "timestamp_range": {
+        "end": 1780738627.255445,
+        "start": 1780738617.3338664
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 297,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_023.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_023.hdf5",
+      "sample_count_horizon": 281,
+      "session": "data_20260606_183038",
+      "sha256": "14d2442df7b8087e50f11b10d93910458d5dc0f3736af0e87126071f6b318c6c",
+      "timestamp_range": {
+        "end": 1780738646.2327895,
+        "start": 1780738636.3468232
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 291,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_024.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_024.hdf5",
+      "sample_count_horizon": 275,
+      "session": "data_20260606_183038",
+      "sha256": "16137fa9648fac18849d7cdf5929238ea04b32871f524edbf8402ca045bf82a5",
+      "timestamp_range": {
+        "end": 1780738665.1035438,
+        "start": 1780738655.4200106
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 299,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_025.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_025.hdf5",
+      "sample_count_horizon": 283,
+      "session": "data_20260606_183038",
+      "sha256": "d448ac109402f7bf8f018d98d9d1bd3c3104a62ec62424df1366e75dfcca22b3",
+      "timestamp_range": {
+        "end": 1780738680.5647054,
+        "start": 1780738670.6100607
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 296,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_026.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_026.hdf5",
+      "sample_count_horizon": 280,
+      "session": "data_20260606_183038",
+      "sha256": "b75d4ee592c31b69f8f9eebd7b1a8b7b85f965298c998c3fb7e62e38a0788f23",
+      "timestamp_range": {
+        "end": 1780738696.389006,
+        "start": 1780738686.536408
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 373,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_027.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_027.hdf5",
+      "sample_count_horizon": 357,
+      "session": "data_20260606_183038",
+      "sha256": "7a0e71c9513f27f26bf08ea8dea6305719a946a8992656e44cf3e7c1a79dfc4c",
+      "timestamp_range": {
+        "end": 1780738714.7994313,
+        "start": 1780738702.3714142
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 282,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_028.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_028.hdf5",
+      "sample_count_horizon": 266,
+      "session": "data_20260606_183038",
+      "sha256": "1977c8f05592c19ed5d0c02e47001195e586bfbf558b2a5aef74ffd3f6a119b7",
+      "timestamp_range": {
+        "end": 1780738731.6107292,
+        "start": 1780738722.2253258
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 230,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_029.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_029.hdf5",
+      "sample_count_horizon": 214,
+      "session": "data_20260606_183038",
+      "sha256": "b30708b6e96b2571eef55c6a0808a479214b2bb0504b229040e403eed00d216d",
+      "timestamp_range": {
+        "end": 1780738744.9711056,
+        "start": 1780738737.3202581
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 260,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_030.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_030.hdf5",
+      "sample_count_horizon": 244,
+      "session": "data_20260606_183038",
+      "sha256": "488a0dca7205a6ab2e0da88517b69a623c437d20df5bd284615c5d712d918710",
+      "timestamp_range": {
+        "end": 1780738758.5694876,
+        "start": 1780738749.918612
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 284,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_031.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_031.hdf5",
+      "sample_count_horizon": 268,
+      "session": "data_20260606_183038",
+      "sha256": "7cce0179b7ce479962e34d860ca4e5d35c64cf8d2b7ad0faa0be4141383c029e",
+      "timestamp_range": {
+        "end": 1780738773.393195,
+        "start": 1780738763.9384205
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 282,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_032.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_032.hdf5",
+      "sample_count_horizon": 266,
+      "session": "data_20260606_183038",
+      "sha256": "09ebc77cae7d0fc8be9dd53957166a3128c26bedbf24fb2ce4d07f77aa3aaf79",
+      "timestamp_range": {
+        "end": 1780738788.1503623,
+        "start": 1780738778.762833
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 267,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_033.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_033.hdf5",
+      "sample_count_horizon": 251,
+      "session": "data_20260606_183038",
+      "sha256": "89088c5b83452f46878e15be12d74b4f99e8d42a9ff68c09737d9621720d8310",
+      "timestamp_range": {
+        "end": 1780738802.5013282,
+        "start": 1780738793.6142123
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 312,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_034.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_034.hdf5",
+      "sample_count_horizon": 296,
+      "session": "data_20260606_183038",
+      "sha256": "d7dc3ecfc3aef4966ea0c466d08e58732975adedc3bf0f6749a7d1597ee3a8aa",
+      "timestamp_range": {
+        "end": 1780738818.7862897,
+        "start": 1780738808.3994923
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 290,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_035.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_035.hdf5",
+      "sample_count_horizon": 274,
+      "session": "data_20260606_183038",
+      "sha256": "934505859d1225ad6ed7c3ad94d2a47661f896b3a2f0e3f84be4b75b27a003bf",
+      "timestamp_range": {
+        "end": 1780738834.1275623,
+        "start": 1780738824.4731693
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 302,
+      "path": "/data/policy_episodes/data_20260606_183038/episode_036.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_183038/episode_036.hdf5",
+      "sample_count_horizon": 286,
+      "session": "data_20260606_183038",
+      "sha256": "d031d49c17b2c834bc4beba041d36ea3f6945003b3c6841566238044e462be73",
+      "timestamp_range": {
+        "end": 1780738849.6500022,
+        "start": 1780738839.5970156
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 277,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_000.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_000.hdf5",
+      "sample_count_horizon": 261,
+      "session": "data_20260606_185446",
+      "sha256": "20b9125db919e54fa6d8f4e2544338aecce6197a64333411bd499da7806b423b",
+      "timestamp_range": {
+        "end": 1780739708.7147768,
+        "start": 1780739699.4963894
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 271,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_001.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_001.hdf5",
+      "sample_count_horizon": 255,
+      "session": "data_20260606_185446",
+      "sha256": "51c74b91205f6417684ef2203de652672c00c85dc938d784c1b0388b6f01128a",
+      "timestamp_range": {
+        "end": 1780739724.1327143,
+        "start": 1780739715.1169498
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 271,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_002.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_002.hdf5",
+      "sample_count_horizon": 255,
+      "session": "data_20260606_185446",
+      "sha256": "866748bf30d551625c68a0c972abdea9cc3c87e6018d35851dcf9bc92244cc0b",
+      "timestamp_range": {
+        "end": 1780739739.3904073,
+        "start": 1780739730.3703718
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 302,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_003.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_003.hdf5",
+      "sample_count_horizon": 286,
+      "session": "data_20260606_185446",
+      "sha256": "38b2af853bf4b85c4ad09594a7f46141e36debade458ba41507042f476caad0b",
+      "timestamp_range": {
+        "end": 1780739755.91019,
+        "start": 1780739745.8574517
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 271,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_004.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_004.hdf5",
+      "sample_count_horizon": 255,
+      "session": "data_20260606_185446",
+      "sha256": "cea4999a469c8ff60ffa227561d33f5c1f6bdac288c60a6ae1ece907e4d18223",
+      "timestamp_range": {
+        "end": 1780739770.913858,
+        "start": 1780739761.8961704
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 280,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_005.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_005.hdf5",
+      "sample_count_horizon": 264,
+      "session": "data_20260606_185446",
+      "sha256": "57d735bf1d741d42c9e59b35538fab712863413a5fb8c4b9579cc5f4b79e5be4",
+      "timestamp_range": {
+        "end": 1780739788.1284287,
+        "start": 1780739778.8077066
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 261,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_006.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_006.hdf5",
+      "sample_count_horizon": 245,
+      "session": "data_20260606_185446",
+      "sha256": "511c4bd8e3ff6fa8d6b041db80d18dece5b36d2b954d22cefc560497c889b872",
+      "timestamp_range": {
+        "end": 1780739804.3004184,
+        "start": 1780739795.614426
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 272,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_007.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_007.hdf5",
+      "sample_count_horizon": 256,
+      "session": "data_20260606_185446",
+      "sha256": "5b669f83d5a6e31eeaf0bd49f3acfbb78ecbec89d01e8956c053dd87a3565894",
+      "timestamp_range": {
+        "end": 1780739820.313585,
+        "start": 1780739811.26247
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 289,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_008.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_008.hdf5",
+      "sample_count_horizon": 273,
+      "session": "data_20260606_185446",
+      "sha256": "3c16fba42bfb8c6dd64f034b07635d85ebfc9b16bdbad71da3818f598e5b77c7",
+      "timestamp_range": {
+        "end": 1780739837.2728531,
+        "start": 1780739827.6515303
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 344,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_009.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_009.hdf5",
+      "sample_count_horizon": 328,
+      "session": "data_20260606_185446",
+      "sha256": "70f06fb62cefaf0f445b09c6f5f9a20a5ee1cd22b9fcbaec0c33a2c0d2799790",
+      "timestamp_range": {
+        "end": 1780739856.9119318,
+        "start": 1780739845.453906
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 307,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_010.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_010.hdf5",
+      "sample_count_horizon": 291,
+      "session": "data_20260606_185446",
+      "sha256": "40487d5dd2a4fb64dc806ab6152470c89406247e0904fe0278e6d4e402ba7f54",
+      "timestamp_range": {
+        "end": 1780739875.2724454,
+        "start": 1780739865.0525887
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 290,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_011.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_011.hdf5",
+      "sample_count_horizon": 274,
+      "session": "data_20260606_185446",
+      "sha256": "b8d0b691532887f42d9ff1d7524a139f1eb34e210fd000629146190dff4a7e89",
+      "timestamp_range": {
+        "end": 1780739892.751213,
+        "start": 1780739883.0955548
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 314,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_012.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_012.hdf5",
+      "sample_count_horizon": 298,
+      "session": "data_20260606_185446",
+      "sha256": "a58c01326e50a2c0ab5cb0702fbd63e236433ebe9a018b035ae5554925193800",
+      "timestamp_range": {
+        "end": 1780739909.162233,
+        "start": 1780739898.7061126
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 276,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_013.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_013.hdf5",
+      "sample_count_horizon": 260,
+      "session": "data_20260606_185446",
+      "sha256": "5625fbe016f84afe58cf975fae262b87853afe5fd05339054490ca392830c251",
+      "timestamp_range": {
+        "end": 1780739924.1443207,
+        "start": 1780739914.9594958
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 329,
+      "path": "/data/policy_episodes/data_20260606_185446/episode_014.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_185446/episode_014.hdf5",
+      "sample_count_horizon": 313,
+      "session": "data_20260606_185446",
+      "sha256": "3332c7b02a8fdcf1e74c03113c51b453c4a92753d73314d8a8a924d73be83965",
+      "timestamp_range": {
+        "end": 1780739942.9309351,
+        "start": 1780739931.9745104
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 278,
+      "path": "/data/policy_episodes/data_20260606_190156/episode_000.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_190156/episode_000.hdf5",
+      "sample_count_horizon": 262,
+      "session": "data_20260606_190156",
+      "sha256": "558607adfcb74cb86d2b31084ee91eef50b4c9ef137d85231d6e20c4855d0fc8",
+      "timestamp_range": {
+        "end": 1780740142.2705936,
+        "start": 1780740133.0191083
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 304,
+      "path": "/data/policy_episodes/data_20260606_190156/episode_001.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_190156/episode_001.hdf5",
+      "sample_count_horizon": 288,
+      "session": "data_20260606_190156",
+      "sha256": "cf81ee0709b4396fc1fa26b7de9fbddf7c6c2dbdd698500fc765d402e497f346",
+      "timestamp_range": {
+        "end": 1780740158.398358,
+        "start": 1780740148.2752116
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 278,
+      "path": "/data/policy_episodes/data_20260606_190156/episode_002.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_190156/episode_002.hdf5",
+      "sample_count_horizon": 262,
+      "session": "data_20260606_190156",
+      "sha256": "54ffb9d4d95151d70c4a870e8e2c218ed586ad47fb2d2a6ca5226a868a47cfcb",
+      "timestamp_range": {
+        "end": 1780740175.703204,
+        "start": 1780740166.449592
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 252,
+      "path": "/data/policy_episodes/data_20260606_190156/episode_003.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_190156/episode_003.hdf5",
+      "sample_count_horizon": 236,
+      "session": "data_20260606_190156",
+      "sha256": "c6b17ad89d982d54300dbfd947159b23318aa6c93719ce40b601538a2c2165bb",
+      "timestamp_range": {
+        "end": 1780740192.018046,
+        "start": 1780740183.634972
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 249,
+      "path": "/data/policy_episodes/data_20260606_190156/episode_004.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_190156/episode_004.hdf5",
+      "sample_count_horizon": 233,
+      "session": "data_20260606_190156",
+      "sha256": "e98e6ddb863f348d08ff3789b29c5cd7f058b6180f21bd27d89c4d3d60c2e10c",
+      "timestamp_range": {
+        "end": 1780740207.4235866,
+        "start": 1780740199.142564
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 254,
+      "path": "/data/policy_episodes/data_20260606_190156/episode_005.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_190156/episode_005.hdf5",
+      "sample_count_horizon": 238,
+      "session": "data_20260606_190156",
+      "sha256": "e9579f2d2a4211bd70e548ec79a3530447a8f0089f5f75a5001109ef47217aa2",
+      "timestamp_range": {
+        "end": 1780740220.8293173,
+        "start": 1780740212.3792
+      }
+    },
+    {
+      "action_dim": 14,
+      "arm_mask": [
+        1.0,
+        1.0
+      ],
+      "audit_warnings": [],
+      "detected_cameras": [
+        "left_realsense_color",
+        "left_realsense_depth",
+        "right_realsense_color",
+        "right_realsense_depth"
+      ],
+      "detected_format": "pika_umi_bimanual",
+      "frame_count": 280,
+      "path": "/data/policy_episodes/data_20260606_190156/episode_006.hdf5",
+      "proprio_dim": 16,
+      "relative_path": "data_20260606_190156/episode_006.hdf5",
+      "sample_count_horizon": 264,
+      "session": "data_20260606_190156",
+      "sha256": "b2b964c93398e470be376b17ac8f22509c55b12053296c3fd26e1db4398484bf",
+      "timestamp_range": {
+        "end": 1780740237.9829857,
+        "start": 1780740228.6625936
+      }
+    }
+  ],
+  "rejected": [],
+  "schema": "robotics_lab.policy_runner.imitation_snapshot.v1",
+  "single_arm_side": "left",
+  "snapshot_hash": "487c1c5500e9b2c090548d9fcfce5af359a0aa5b551ec42e2615fb1717dedde6"
+}

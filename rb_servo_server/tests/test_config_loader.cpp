@@ -167,11 +167,6 @@ bool testRepositoryConfigsParse() {
     {
         EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
         EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
-        EnvGuard controller_sim_gate("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION", "1");
-        EnvGuard controller_sim_cartesian_gate("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN", "1");
-        EnvGuard async_gate("RB_ALLOW_RBPODO_ASYNC_STREAMING", "1");
-        EnvGuard diagnostics_gate("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM", "1");
-        EnvGuard pgmode_gate("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED", "1");
         EnvGuard physical_cartesian_gate("RB_ALLOW_REAL_CARTESIAN", nullptr);
 
         const rb_servo::DualArmConfig pgmode =
@@ -188,6 +183,12 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(pgmode.servo.send_servo_commands);
         RB_CHECK(pgmode.servo.allow_controller_simulation_motion);
         RB_CHECK(pgmode.servo.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(!pgmode.servo.allow_controller_simulation_init_error);
+        RB_CHECK(!pgmode.servo.allow_controller_simulation_not_activated);
+        RB_CHECK(pgmode.left_robot.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(pgmode.right_robot.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(!pgmode.left_robot.allow_controller_simulation_init_error);
+        RB_CHECK(!pgmode.right_robot.allow_controller_simulation_init_error);
         RB_CHECK(near(pgmode.left_robot.servo_t1_sec, 0.002));
         RB_CHECK(near(pgmode.right_robot.servo_t1_sec, 0.002));
         RB_CHECK(near(pgmode.left_robot.servo_t2_sec, 0.08));
@@ -974,6 +975,177 @@ bool testKinematicsSafetyLimitMismatchWarnsForRbpodo() {
     return true;
 }
 
+std::string controllerSimReadMissBody(int left_misses, int right_misses) {
+    return
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.200\"\n"
+        "  operation_mode: simulation\n"
+        "  max_consecutive_read_misses: " + std::to_string(left_misses) + "\n"
+        "right_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.201\"\n"
+        "  operation_mode: simulation\n"
+        "  max_consecutive_read_misses: " + std::to_string(right_misses) + "\n"
+        "servo:\n"
+        "  rate_hz: 500\n"
+        "  send_servo_commands: false\n"
+        "  enable_realtime_priority: true\n"
+        "safety:\n"
+        "  tracking_error_policy: fault_latch\n"
+        "  stop_both_arms_on_single_arm_error: true\n"
+        "  latch_fault_on_robot_state_error: true\n";
+}
+
+bool testReadMissToleranceParsesAndIsControllerSimOnly() {
+    EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+
+    // Controller simulation accepts and parses the tolerance.
+    {
+        const std::string path = writeTempConfig(
+            "read-miss-controller-sim", controllerSimReadMissBody(3, 2));
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        RB_CHECK(cfg.left_robot.max_consecutive_read_misses == 3);
+        RB_CHECK(cfg.right_robot.max_consecutive_read_misses == 2);
+    }
+
+    // Default is 0 (fail-closed) when the key is absent.
+    {
+        const std::string path = writeTempConfig(
+            "read-miss-default", controllerSimReadMissBody(0, 0));
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        RB_CHECK(cfg.left_robot.max_consecutive_read_misses == 0);
+    }
+
+    // Negative tolerance is rejected.
+    {
+        const std::string path = writeTempConfig(
+            "read-miss-negative", controllerSimReadMissBody(-1, 0));
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    // Physical real (operation_mode: real) must fail closed: tolerance > 0 rejected.
+    {
+        const std::string path = writeTempConfig(
+            "read-miss-real-rejected",
+            rbpodoConfigBody("  max_consecutive_read_misses: 3\n", 500, false));
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    return true;
+}
+
+std::string selfCollisionConfigBody(bool with_kinematics, const std::string& self_collision_yaml) {
+    std::string body =
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.200\"\n"
+        "  operation_mode: simulation\n"
+        "right_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.201\"\n"
+        "  operation_mode: simulation\n"
+        "servo:\n"
+        "  rate_hz: 500\n"
+        "  send_servo_commands: false\n"
+        "  enable_realtime_priority: true\n"
+        "safety:\n"
+        "  tracking_error_policy: fault_latch\n"
+        "  stop_both_arms_on_single_arm_error: true\n"
+        "  latch_fault_on_robot_state_error: true\n" +
+        self_collision_yaml;
+    if (with_kinematics) {
+        body +=
+            "kinematics:\n"
+            "  enable: true\n"
+            "  provider: pinocchio\n"
+            "  urdf: \"" + rb3UrdfPath() + "\"\n"
+            "  base_link: \"world\"\n"
+            "  tip_link: \"tcp\"\n"
+            "  joint_names:\n"
+            "    - base_joint\n"
+            "    - shoulder_joint\n"
+            "    - elbow_joint\n"
+            "    - wrist1_joint\n"
+            "    - wrist2_joint\n"
+            "    - wrist3_joint\n"
+            "  publish_tcp: true\n";
+    }
+    return body;
+}
+
+bool testSelfCollisionConfig() {
+    EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+
+    // Enabled + kinematics: accepted and parsed.
+    {
+        const std::string path = writeTempConfig(
+            "self-collision-ok",
+            selfCollisionConfigBody(
+                true,
+                "  self_collision:\n"
+                "    enable: true\n"
+                "    monitor_only: true\n"
+                "    margin_m: 0.04\n"
+                "    fail_policy: clamp_hold\n"
+                "    link_radius_m: [0.10, 0.09, 0.08, 0.07, 0.06, 0.06, 0.06]\n"));
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        RB_CHECK(cfg.safety.self_collision.enable);
+        RB_CHECK(cfg.safety.self_collision.monitor_only);
+        RB_CHECK(near(cfg.safety.self_collision.margin_m, 0.04));
+        RB_CHECK(cfg.safety.self_collision.fail_policy == rb_servo::SelfCollisionFailPolicy::ClampToHold);
+        RB_CHECK(near(cfg.safety.self_collision.link_radius_m[0], 0.10));
+        RB_CHECK(near(cfg.safety.self_collision.link_radius_m[6], 0.06));
+    }
+
+    // Disabled by default when the block is absent.
+    {
+        const std::string path = writeTempConfig(
+            "self-collision-default", selfCollisionConfigBody(true, ""));
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        RB_CHECK(!cfg.safety.self_collision.enable);
+        RB_CHECK(!cfg.safety.self_collision.monitor_only);
+    }
+
+    // Enabled without kinematics: rejected (no link-geometry source).
+    {
+        const std::string path = writeTempConfig(
+            "self-collision-no-kinematics",
+            selfCollisionConfigBody(false, "  self_collision:\n    enable: true\n"));
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    // Wrong link_radius_m count: rejected.
+    {
+        const std::string path = writeTempConfig(
+            "self-collision-bad-radii",
+            selfCollisionConfigBody(
+                true,
+                "  self_collision:\n    enable: true\n    link_radius_m: [0.1, 0.1, 0.1]\n"));
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -989,5 +1161,7 @@ int main() {
     if (!testRobotIpEnvExpansion()) return 1;
     if (!testRbpodoServoJParametersParseAndValidate()) return 1;
     if (!testKinematicsSafetyLimitMismatchWarnsForRbpodo()) return 1;
+    if (!testReadMissToleranceParsesAndIsControllerSimOnly()) return 1;
+    if (!testSelfCollisionConfig()) return 1;
     return 0;
 }

@@ -4,6 +4,15 @@
 operator-facing simulator controls. Real robot motion gates remain outside the
 GUI.
 
+For an rbpodo controller in `pgmode` simulation (controller-simulation), the GUI
+can drive its full existing control set (joint jog, lifecycle, TCP PTP/Linear/
+Delta, plus the Velocity jog tab for streaming JointVelocity / TcpTwist, and the Circle tab for the TcpCircleMove benchmark on both arms) when
+the operator opts in with `RB_GUI_ENABLE_TCP_POSE_COMMANDS=1` and
+`RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1` (plus `RB_GUI_OBSERVED_MODE=simulation`,
+`RB_GUI_OBSERVED_BACKEND=rbpodo`). Real mode stays connect/status-only and the
+GUI never sets `RB_ALLOW_REAL_CARTESIAN`. See
+`rb_servo_server/docs/gui_operator_console.md`.
+
 ## rbpodo Circle Live View
 
 For rbpodo controller-simulation circle benchmarks, the GUI consumes two UDP

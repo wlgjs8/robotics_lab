@@ -355,7 +355,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     ml_preflight.add_argument(
         "--vision-backbone",
-        choices=("tiny_cnn", "resnet18", "resnet50", "dinov3"),
+        choices=(
+            "tiny_cnn",
+            "resnet18",
+            "resnet50",
+            "dinov3",
+            "dinov3_convnext_tiny",
+            "dinov3_convnext_small",
+            "dinov3_convnext_base",
+            "dinov3_convnext_large",
+        ),
         default="tiny_cnn",
     )
     ml_preflight.add_argument(
@@ -379,6 +388,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_train.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
     flow_train.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
     flow_train.add_argument("--single-arm-side", choices=("left", "right"), default=None)
+    flow_train.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
     flow_train.add_argument("--max-episodes", type=int, default=None)
     flow_train.add_argument("--checkpoint", default="outputs/flow_policy.pt")
     flow_train.add_argument("--vision-backbone", default="resnet50")
@@ -432,8 +442,15 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     imitation_experiment.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
     imitation_experiment.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
+    imitation_experiment.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
     imitation_experiment.add_argument("--action-horizon", type=int, default=16)
     imitation_experiment.add_argument("--image-size", type=int, default=128)
+    imitation_experiment.add_argument(
+        "--image-crop",
+        choices=("none", "center_square"),
+        default="none",
+        help="Deterministic image crop before resize; center_square is fixed and not validation-tuned.",
+    )
     imitation_experiment.add_argument("--batch-size", type=int, default=64)
     imitation_experiment.add_argument("--epochs", type=int, default=20)
     imitation_experiment.add_argument("--lr", type=float, default=1e-4)
@@ -443,6 +460,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     imitation_experiment.add_argument("--max-train-samples", type=int, default=None)
     imitation_experiment.add_argument("--max-val-samples", type=int, default=None)
     imitation_experiment.add_argument("--flow-sample-steps", type=int, default=8)
+    imitation_experiment.add_argument("--diffusion-sample-steps", type=int, default=16)
     imitation_experiment.add_argument(
         "--split-mode",
         choices=("primary", "session_holdout"),
@@ -514,12 +532,26 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument("--sample-steps", type=int, default=16)
     flow_infer.add_argument("--device", default="auto")
     flow_infer.add_argument(
+        "--image-size",
+        type=int,
+        default=None,
+        help=(
+            "Image size for direct-BC imitation checkpoints or ensembles that do not store image_size; "
+            "must match training."
+        ),
+    )
+    flow_infer.add_argument(
+        "--ensemble-name",
+        default="top5",
+        help="Named ensemble from an imitation ensemble report JSON; default is top5.",
+    )
+    flow_infer.add_argument(
         "--command-family",
         choices=("tcp_twist_stand", "tcp_twist_local", "tcp_delta_stand"),
         default=None,
         help=(
-            "Flow action command family. Defaults to tcp_twist_stand for simulator, "
-            "controller-simulation, and offline reporting."
+            "Flow action command family. Defaults to tcp_twist_local for ee_local "
+            "checkpoints and tcp_twist_stand otherwise."
         ),
     )
     flow_infer.add_argument(
@@ -578,6 +610,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     hdf5_view.add_argument("episode", help="HDF5 episode file")
     hdf5_view.add_argument("--single-arm-side", choices=("left", "right"), default="left")
     hdf5_view.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
+    hdf5_view.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
     hdf5_view.add_argument("--start-frame", type=int, default=0)
     hdf5_view.add_argument("--fps", type=float, default=None)
     hdf5_view.add_argument("--image-size", type=int, default=320)
@@ -812,6 +845,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             single_arm_side=args.single_arm_side,
             max_episodes=args.max_episodes,
             write_eval_report=args.write_eval_report,
+            action_frame=args.action_frame,
         )
         return 0
     if args.command == "imitation-snapshot":
@@ -857,8 +891,10 @@ def _main_with_subcommands(argv: list[str]) -> int:
             models=[name.strip() for name in args.models.split(",") if name.strip()],
             action_horizon=args.action_horizon,
             image_size=args.image_size,
+            image_crop=args.image_crop,
             camera_names=parse_camera_names(args.camera_names),
             exclude_camera_names=parse_camera_names(args.exclude_camera_names),
+            action_frame=args.action_frame,
             batch_size=args.batch_size,
             epochs=args.epochs,
             lr=args.lr,
@@ -868,6 +904,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             max_train_samples=args.max_train_samples,
             max_val_samples=args.max_val_samples,
             flow_sample_steps=args.flow_sample_steps,
+            diffusion_sample_steps=args.diffusion_sample_steps,
             split_mode=args.split_mode,
         )
         print(f"imitation leaderboard written: {report['output_dir']}/leaderboard_report.md", flush=True)
@@ -932,11 +969,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
         return run_umi_convert_cli(args)
     if args.command == "flow-infer":
         from .flow_inference import (
+            DirectBcCheckpointEnsembleActionSource,
+            DirectBcImageActionSource,
             FlowMatchingActionSource,
+            action_chunk_checkpoint_kind,
             canonical_flow_command_family,
-            load_flow_checkpoint_dataset_stats,
+            load_action_chunk_checkpoint_dataset_stats,
             resolve_flow_command_family,
             resolve_flow_policy_dt_sec,
+            run_direct_bc_ensemble_offline_eval,
+            run_direct_bc_offline_eval,
             run_flow_offline_eval,
             validate_flow_command_family,
         )
@@ -948,16 +990,24 @@ def _main_with_subcommands(argv: list[str]) -> int:
             send_dryrun_commands=args.send_dryrun_commands,
         )
         try:
+            checkpoint_kind = action_chunk_checkpoint_kind(args.checkpoint, device="cpu")
+            dataset_stats = load_action_chunk_checkpoint_dataset_stats(
+                args.checkpoint,
+                device="cpu",
+                ensemble_name=args.ensemble_name,
+            )
             command_family = resolve_flow_command_family(
                 rollout_policy.mode,
                 args.command_family,
+                dataset_stats=dataset_stats,
             )
             validate_flow_command_family(
                 rollout_policy.mode,
                 command_family,
                 allow_experimental_tcp_delta_stand=args.allow_experimental_tcp_delta_stand,
+                dataset_stats=dataset_stats,
             )
-        except RolloutModeValidationError as exc:
+        except (RolloutModeValidationError, ValueError) as exc:
             print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
             return 2
         if rollout_policy.mode == RolloutMode.OFFLINE_EVAL:
@@ -969,14 +1019,34 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 return 2
             try:
                 rollout_policy.validate_config(config)
-                offline_result = run_flow_offline_eval(
-                    checkpoint_path=args.checkpoint,
-                    episodes_dir=args.episodes_dir,
-                    sample_steps=args.sample_steps,
-                    device=args.device,
-                    max_samples=args.max_offline_samples,
-                    command_family=canonical_flow_command_family(command_family),
-                )
+                if checkpoint_kind == "direct_bc":
+                    offline_result = run_direct_bc_offline_eval(
+                        checkpoint_path=args.checkpoint,
+                        episodes_dir=args.episodes_dir,
+                        device=args.device,
+                        max_samples=args.max_offline_samples,
+                        command_family=canonical_flow_command_family(command_family),
+                        image_size=args.image_size,
+                    )
+                elif checkpoint_kind == "direct_bc_ensemble":
+                    offline_result = run_direct_bc_ensemble_offline_eval(
+                        report_path=args.checkpoint,
+                        episodes_dir=args.episodes_dir,
+                        device=args.device,
+                        max_samples=args.max_offline_samples,
+                        command_family=canonical_flow_command_family(command_family),
+                        image_size=args.image_size,
+                        ensemble_name=args.ensemble_name,
+                    )
+                else:
+                    offline_result = run_flow_offline_eval(
+                        checkpoint_path=args.checkpoint,
+                        episodes_dir=args.episodes_dir,
+                        sample_steps=args.sample_steps,
+                        device=args.device,
+                        max_samples=args.max_offline_samples,
+                        command_family=canonical_flow_command_family(command_family),
+                    )
             except (RolloutModeValidationError, ValueError) as exc:
                 print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
                 return 2
@@ -986,6 +1056,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 config_path=str(args.config),
                 command_family=offline_result.command_family,
                 camera_names=offline_result.camera_names,
+                selected_arms=list(offline_result.selected_arms),
+                left_arm_mask=offline_result.checkpoint_arm_mask[0]
+                if offline_result.checkpoint_arm_mask is not None
+                else None,
+                right_arm_mask=offline_result.checkpoint_arm_mask[1]
+                if offline_result.checkpoint_arm_mask is not None
+                and len(offline_result.checkpoint_arm_mask) > 1
+                else None,
+                allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+                collision_model_status=config.safety.collision_model_status,
             )
             recorder.image_decode_count = offline_result.image_decode_count
             recorder.missing_camera_count = offline_result.missing_camera_count
@@ -1004,9 +1084,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 max_age_ms=config.camera.max_age_ms,
             )
         try:
-            dataset_stats = None
-            if command_family in {"tcp_twist_stand", "tcp_twist_local"} and args.policy_dt_sec is None:
-                dataset_stats = load_flow_checkpoint_dataset_stats(args.checkpoint, device="cpu")
             policy_dt_sec = resolve_flow_policy_dt_sec(
                 rollout_policy.mode,
                 command_family,
@@ -1014,27 +1091,44 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 command_rate_hz=config.command_rate_hz,
                 dataset_stats=dataset_stats,
             )
-            source = FlowMatchingActionSource(
-                args.checkpoint,
-                timeout_sec=config.servo_command.timeout_sec,
-                camera_client=camera_client,
-                sample_steps=args.sample_steps,
-                command_family=command_family,
-                policy_dt_sec=policy_dt_sec,
-                max_linear_velocity_m_s=args.max_linear_velocity_m_s,
-                max_angular_velocity_rad_s=args.max_angular_velocity_rad_s,
-                max_linear_step_m=args.max_linear_step_m,
-                max_angular_step_rad=args.max_angular_step_rad,
-                chunk_execute_steps=args.chunk_execute_steps,
-                allow_rbpodo_controller_simulation_cartesian=(
+            source_kwargs = {
+                "timeout_sec": config.servo_command.timeout_sec,
+                "camera_client": camera_client,
+                "command_family": command_family,
+                "policy_dt_sec": policy_dt_sec,
+                "max_linear_velocity_m_s": args.max_linear_velocity_m_s,
+                "max_angular_velocity_rad_s": args.max_angular_velocity_rad_s,
+                "max_linear_step_m": args.max_linear_step_m,
+                "max_angular_step_rad": args.max_angular_step_rad,
+                "chunk_execute_steps": args.chunk_execute_steps,
+                "allow_rbpodo_controller_simulation_cartesian": (
                     rollout_policy.allows_controller_simulation_cartesian
                 ),
-                gripper_runtime=GripperRuntime(
+                "gripper_runtime": GripperRuntime(
                     rollout_mode=rollout_policy.mode.value,
                     allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
                 ),
-                device=args.device,
-            )
+                "device": args.device,
+            }
+            if checkpoint_kind == "direct_bc":
+                source = DirectBcImageActionSource(
+                    args.checkpoint,
+                    image_size=args.image_size,
+                    **source_kwargs,
+                )
+            elif checkpoint_kind == "direct_bc_ensemble":
+                source = DirectBcCheckpointEnsembleActionSource(
+                    args.checkpoint,
+                    ensemble_name=args.ensemble_name,
+                    image_size=args.image_size,
+                    **source_kwargs,
+                )
+            else:
+                source = FlowMatchingActionSource(
+                    args.checkpoint,
+                    sample_steps=args.sample_steps,
+                    **source_kwargs,
+                )
             geometry_status = _load_runtime_geometry_status(config)
             rollout_policy.validate_config(
                 config,

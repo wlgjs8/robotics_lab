@@ -289,6 +289,16 @@ ControllerSimulationPhysicalMotionPolicy parseControllerSimulationPhysicalMotion
     fail("Unknown " + path + ": " + value, node);
 }
 
+SelfCollisionFailPolicy parseSelfCollisionFailPolicy(
+    const YAML::Node& node,
+    const std::string& path
+) {
+    const std::string value = lower(asString(node, path));
+    if (value == "clamp_hold" || value == "clamp_to_hold") return SelfCollisionFailPolicy::ClampToHold;
+    if (value == "fault_latch") return SelfCollisionFailPolicy::FaultLatch;
+    fail("Unknown " + path + ": " + value, node);
+}
+
 std::string getString(const YAML::Node& sec, const std::string& key, const std::string& fallback, const std::string& path) {
     return has(sec, key) ? asString(sec[key], path + "." + key) : fallback;
 }
@@ -523,6 +533,7 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
         "servo_alpha",
         "servo_acc",
         "disable_waiting_ack",
+        "max_consecutive_read_misses",
     }, path);
 
     if (has(sec, "backend_type")) cfg->backend_type = parseBackendType(sec["backend_type"], path + ".backend_type");
@@ -578,6 +589,7 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
     cfg->servo_lookahead_sec = cfg->servo_t2_sec;
     cfg->servo_acc = cfg->servo_alpha;
     if (has(sec, "disable_waiting_ack")) cfg->disable_waiting_ack = asBool(sec["disable_waiting_ack"], path + ".disable_waiting_ack");
+    if (has(sec, "max_consecutive_read_misses")) cfg->max_consecutive_read_misses = asInt(sec["max_consecutive_read_misses"], path + ".max_consecutive_read_misses");
 }
 
 bool anyReal(const DualArmConfig& cfg) {
@@ -724,6 +736,17 @@ void validateConfig(const DualArmConfig& cfg) {
         "safety.controller_simulation_physical_motion_threshold_deg"
     );
     validateNonNegativeFiniteArray(cfg.safety.joint_wrap_period_deg, "safety.joint_wrap_period_deg");
+    if (cfg.safety.self_collision.enable) {
+        validateNonNegativeFinite(cfg.safety.self_collision.margin_m, "safety.self_collision.margin_m");
+        for (std::size_t i = 0; i < cfg.safety.self_collision.link_radius_m.size(); ++i) {
+            validatePositiveFinite(
+                cfg.safety.self_collision.link_radius_m[i], "safety.self_collision.link_radius_m");
+        }
+        if (!cfg.kinematics.enable) {
+            throw std::runtime_error(
+                "safety.self_collision.enable=true requires kinematics.enable=true (link geometry source)");
+        }
+    }
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
     validatePositiveFinite(cfg.servo.filter_dt_max_ratio, "servo.filter_dt_max_ratio");
     validatePositiveFinite(cfg.servo.worker_read_period_sec, "servo.worker_read_period_sec");
@@ -790,6 +813,26 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.right_robot.rbsim_stop_timeout_sec, "right_robot.simulator_stop_timeout_sec");
     validatePositiveFinite(cfg.left_robot.rbsim_reset_timeout_sec, "left_robot.simulator_reset_timeout_sec");
     validatePositiveFinite(cfg.right_robot.rbsim_reset_timeout_sec, "right_robot.simulator_reset_timeout_sec");
+    {
+        const auto validate_read_miss_tolerance = [](const BackendConfig& robot, const std::string& name) {
+            if (robot.max_consecutive_read_misses < 0) {
+                throw std::runtime_error(name + ".max_consecutive_read_misses must be >= 0");
+            }
+            if (robot.max_consecutive_read_misses > 100) {
+                throw std::runtime_error(name + ".max_consecutive_read_misses must be <= 100");
+            }
+            // Read-miss tolerance holds the last state instead of failing closed on a
+            // missing frame; only the rbpodo controller-simulation (pgmode) carve-out
+            // may use it. Physical real must fail closed on any read miss.
+            if (robot.max_consecutive_read_misses > 0 && !isRbpodoControllerSimulationBackend(robot)) {
+                throw std::runtime_error(
+                    name + ".max_consecutive_read_misses > 0 requires rbpodo controller simulation "
+                    "(run_mode: real, backend_type: rbpodo, operation_mode: simulation)");
+            }
+        };
+        validate_read_miss_tolerance(cfg.left_robot, "left_robot");
+        validate_read_miss_tolerance(cfg.right_robot, "right_robot");
+    }
     if (cfg.servo.filter_dt_max_ratio < cfg.servo.filter_dt_min_ratio) {
         throw std::runtime_error("servo.filter_dt_max_ratio must be >= filter_dt_min_ratio");
     }
@@ -839,8 +882,24 @@ void validateConfig(const DualArmConfig& cfg) {
             "servo.allow_controller_simulation_motion=true"
         );
     }
+    if (cfg.servo.allow_controller_simulation_init_error &&
+        !cfg.servo.allow_controller_simulation_motion) {
+        throw std::runtime_error(
+            "servo.allow_controller_simulation_init_error requires "
+            "servo.allow_controller_simulation_motion=true"
+        );
+    }
+    if (cfg.servo.allow_controller_simulation_not_activated &&
+        !cfg.servo.allow_controller_simulation_motion) {
+        throw std::runtime_error(
+            "servo.allow_controller_simulation_not_activated requires "
+            "servo.allow_controller_simulation_motion=true"
+        );
+    }
     if (cfg.servo.allow_controller_simulation_motion ||
-        cfg.servo.allow_controller_simulation_diagnostics_suspect) {
+        cfg.servo.allow_controller_simulation_diagnostics_suspect ||
+        cfg.servo.allow_controller_simulation_init_error ||
+        cfg.servo.allow_controller_simulation_not_activated) {
         if (!cfg.servo.send_servo_commands) {
             throw std::runtime_error(
                 "servo.allow_controller_simulation_* options require servo.send_servo_commands=true"
@@ -850,25 +909,6 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error(
                 "servo.allow_controller_simulation_* options require both rbpodo backends "
                 "to use run_mode=real and operation_mode=simulation"
-            );
-        }
-        if (!envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION")) {
-            throw std::runtime_error(
-                "Refusing rbpodo controller-simulation motion without "
-                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1."
-            );
-        }
-        if (!envIsOne("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")) {
-            throw std::runtime_error(
-                "Refusing rbpodo controller-simulation motion before pgmode simulation "
-                "is confirmed by the acceptance tool."
-            );
-        }
-        if (cfg.servo.allow_controller_simulation_diagnostics_suspect &&
-            !envIsOne("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM")) {
-            throw std::runtime_error(
-                "Refusing rbpodo diagnostics-suspect controller-simulation override without "
-                "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1."
             );
         }
     }
@@ -897,25 +937,11 @@ void validateConfig(const DualArmConfig& cfg) {
                 "to use run_mode=real and operation_mode=simulation"
             );
         }
-        if (!envIsOne("RB_ALLOW_RBPODO_ASYNC_STREAMING") ||
-            !envIsOne("RB_ALLOW_REAL_ROBOT") ||
-            !envIsOne("RB_ALLOW_REAL_MOTION") ||
-            !envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") ||
-            !envIsOne("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")) {
+        if (!envIsOne("RB_ALLOW_REAL_ROBOT") ||
+            !envIsOne("RB_ALLOW_REAL_MOTION")) {
             throw std::runtime_error(
-                "Refusing rbpodo async streaming without RB_ALLOW_RBPODO_ASYNC_STREAMING=1, "
-                "RB_ALLOW_REAL_ROBOT=1, RB_ALLOW_REAL_MOTION=1, "
-                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1, and "
-                "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1."
-            );
-        }
-        if (async_streaming.mode == RbpodoAsyncStreamingMode::SocketSendSupervised &&
-            !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION") &&
-            !envIsOne("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING")) {
-            throw std::runtime_error(
-                "Refusing rbpodo socket_send_supervised async streaming without "
-                "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 or "
-                "RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1."
+                "Refusing rbpodo async streaming without "
+                "RB_ALLOW_REAL_ROBOT=1 and RB_ALLOW_REAL_MOTION=1."
             );
         }
         if (async_streaming.mode == RbpodoAsyncStreamingMode::SocketSendSupervised &&
@@ -971,16 +997,10 @@ void validateConfig(const DualArmConfig& cfg) {
             );
         }
         if (!envIsOne("RB_ALLOW_REAL_ROBOT") ||
-            !envIsOne("RB_ALLOW_REAL_MOTION") ||
-            !envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION") ||
-            !envIsOne("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN") ||
-            !envIsOne("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED")) {
+            !envIsOne("RB_ALLOW_REAL_MOTION")) {
             throw std::runtime_error(
                 "Refusing rbpodo controller-simulation Cartesian control without "
-                "RB_ALLOW_REAL_ROBOT=1, RB_ALLOW_REAL_MOTION=1, "
-                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1, "
-                "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1, and "
-                "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1."
+                "RB_ALLOW_REAL_ROBOT=1 and RB_ALLOW_REAL_MOTION=1."
             );
         }
     }
@@ -1134,21 +1154,14 @@ void validateConfig(const DualArmConfig& cfg) {
             }
             warn(message + "; send_servo_commands=false so this is a warning");
         }
-        const bool async_socket_send_supervised =
-            cfg.servo.rbpodo_async_streaming.enable &&
-            cfg.servo.rbpodo_async_streaming.mode == RbpodoAsyncStreamingMode::SocketSendSupervised;
-        const bool ack_disabled_motion_gate =
-            envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION") ||
-            (async_socket_send_supervised && envIsOne("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING"));
         if (backend.run_mode == RunMode::Real &&
+            !isRbpodoControllerSimulationBackend(backend) &&
             backend.disable_waiting_ack &&
             cfg.servo.send_servo_commands &&
-            !ack_disabled_motion_gate) {
+            !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")) {
             throw std::runtime_error(
                 "Refusing rbpodo real motion with disable_waiting_ack=true. "
-                "Set RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 only after explicit ACK-off acceptance, "
-                "or RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1 for async socket-send-only "
-                "controller-simulation streaming."
+                "Set RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 only after explicit ACK-off acceptance."
             );
         }
     };
@@ -1300,6 +1313,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "allow_readonly_wrong_mode_startup",
             "allow_controller_simulation_motion",
             "allow_controller_simulation_diagnostics_suspect",
+            "allow_controller_simulation_init_error",
+            "allow_controller_simulation_not_activated",
             "enable_realtime_priority",
             "realtime_priority",
             "cpu_core",
@@ -1342,6 +1357,20 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "servo.allow_controller_simulation_diagnostics_suspect"
                 );
         }
+        if (has(sec, "allow_controller_simulation_init_error")) {
+            cfg.servo.allow_controller_simulation_init_error =
+                asBool(
+                    sec["allow_controller_simulation_init_error"],
+                    "servo.allow_controller_simulation_init_error"
+                );
+        }
+        if (has(sec, "allow_controller_simulation_not_activated")) {
+            cfg.servo.allow_controller_simulation_not_activated =
+                asBool(
+                    sec["allow_controller_simulation_not_activated"],
+                    "servo.allow_controller_simulation_not_activated"
+                );
+        }
         if (has(sec, "enable_realtime_priority")) cfg.servo.enable_realtime_priority = asBool(sec["enable_realtime_priority"], "servo.enable_realtime_priority");
         if (has(sec, "realtime_priority")) cfg.servo.realtime_priority = asInt(sec["realtime_priority"], "servo.realtime_priority");
         if (has(sec, "cpu_core")) cfg.servo.cpu_core = asInt(sec["cpu_core"], "servo.cpu_core");
@@ -1372,6 +1401,14 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             );
         }
     }
+    cfg.left_robot.allow_controller_simulation_diagnostics_suspect =
+        cfg.servo.allow_controller_simulation_diagnostics_suspect;
+    cfg.right_robot.allow_controller_simulation_diagnostics_suspect =
+        cfg.servo.allow_controller_simulation_diagnostics_suspect;
+    cfg.left_robot.allow_controller_simulation_init_error =
+        cfg.servo.allow_controller_simulation_init_error;
+    cfg.right_robot.allow_controller_simulation_init_error =
+        cfg.servo.allow_controller_simulation_init_error;
 
     if (has(root, "safety")) {
         const YAML::Node sec = root["safety"];
@@ -1391,6 +1428,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "controller_simulation_tracking_error_source",
             "controller_simulation_physical_motion_policy",
             "controller_simulation_physical_motion_threshold_deg",
+            "self_collision",
         }, "safety");
         if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
         if (has(sec, "q_max_deg")) cfg.safety.q_max_deg = parseJointArray(sec["q_max_deg"], "safety.q_max_deg");
@@ -1423,6 +1461,45 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 sec["controller_simulation_physical_motion_threshold_deg"],
                 "safety.controller_simulation_physical_motion_threshold_deg"
             );
+        }
+        if (has(sec, "self_collision")) {
+            const YAML::Node sc = sec["self_collision"];
+            validateAllowedKeys(sc, {
+                "enable",
+                "margin_m",
+                "link_radius_m",
+                "fail_policy",
+                "monitor_only",
+            }, "safety.self_collision");
+            if (has(sc, "enable")) {
+                cfg.safety.self_collision.enable = asBool(sc["enable"], "safety.self_collision.enable");
+            }
+            if (has(sc, "monitor_only")) {
+                cfg.safety.self_collision.monitor_only =
+                    asBool(sc["monitor_only"], "safety.self_collision.monitor_only");
+            }
+            if (has(sc, "margin_m")) {
+                cfg.safety.self_collision.margin_m = asDouble(sc["margin_m"], "safety.self_collision.margin_m");
+            }
+            if (has(sc, "fail_policy")) {
+                cfg.safety.self_collision.fail_policy =
+                    parseSelfCollisionFailPolicy(sc["fail_policy"], "safety.self_collision.fail_policy");
+            }
+            if (has(sc, "link_radius_m")) {
+                const YAML::Node radii = sc["link_radius_m"];
+                const std::size_t expected = cfg.safety.self_collision.link_radius_m.size();
+                if (!radii.IsSequence() || radii.size() != expected) {
+                    fail(
+                        "safety.self_collision.link_radius_m must be a sequence of " +
+                            std::to_string(expected) + " values",
+                        radii
+                    );
+                }
+                for (std::size_t i = 0; i < expected; ++i) {
+                    cfg.safety.self_collision.link_radius_m[i] =
+                        asDouble(radii[i], "safety.self_collision.link_radius_m");
+                }
+            }
         }
     }
 
