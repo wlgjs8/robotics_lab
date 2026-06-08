@@ -1,0 +1,281 @@
+{
+  "args": {
+    "action_horizon": 1,
+    "batch_size": 8,
+    "camera_names": [
+      "left_realsense_color",
+      "right_realsense_color"
+    ],
+    "data_dir": "/data/policy_episodes",
+    "device": "cuda",
+    "diffusion_sample_steps": 16,
+    "epochs": 30,
+    "exclude_camera_names": [
+      "left_realsense_depth",
+      "right_realsense_depth"
+    ],
+    "flow_sample_steps": 8,
+    "hard_weight": 0.2,
+    "hidden_dim": 512,
+    "image_crop": "none",
+    "image_size": 384,
+    "lr": 0.0001,
+    "max_train_samples": null,
+    "max_val_samples": null,
+    "models": [
+      "distill_cached_direct_bc_dinov3_convnext_tiny_h512_hard020_e30"
+    ],
+    "seed": 5,
+    "split_mode": "session_holdout",
+    "teacher_cache_path": "/outputs/flow_runs/imitation_distill_cached_direct_tiny_holdout_color384_h1_latest/train_teacher_cache.pt"
+  },
+  "created_at": "2026-06-07T23:01:23.266294+00:00",
+  "dataset": {
+    "detected_cameras": [
+      "left_realsense_color",
+      "left_realsense_depth",
+      "right_realsense_color",
+      "right_realsense_depth"
+    ],
+    "detected_formats": [
+      "pika_umi_bimanual"
+    ],
+    "frame_count": 42435,
+    "sessions": [
+      "data_20260606_134608",
+      "data_20260606_140442",
+      "data_20260606_140813",
+      "data_20260606_175002",
+      "data_20260606_175635",
+      "data_20260606_183038",
+      "data_20260606_185446",
+      "data_20260606_190156"
+    ],
+    "snapshot_hash": "532de3a1c38a4b3f12dcc875d928f723d798a1ee0edf02b99e857d2483e9f9ce",
+    "snapshot_path": "/outputs/flow_runs/imitation_official/dataset_snapshot.json",
+    "valid_episode_count": 146
+  },
+  "failed_runs": [],
+  "leaderboard": [
+    {
+      "action_mse": 0.48505222293964423,
+      "backbone": "dinov3_convnext_tiny",
+      "checkpoint_sha256": "8efc535d4caadf113c4a64d1154b944379eb1dc42b92d513f6fa9da54c7000fd",
+      "family": "direct_bc_distilled_cached_ensemble",
+      "gripper_mse": 3.39528490328336,
+      "inactive_arm_leakage": 0.0020578975775542045,
+      "latency": {
+        "median_ms": 3.4230700111947954,
+        "p95_ms": 3.5273861925816163
+      },
+      "loss_name": "cached_distill_mse",
+      "model": "distill_cached_direct_bc_dinov3_convnext_tiny_h512_hard020_e30",
+      "normalized_action_mse": 0.3761230167095047,
+      "rank": 1,
+      "rotation_endpoint_error": 0.00660620167536377,
+      "split_mode": "session_holdout",
+      "train_normalized_action_mse": 0.18018377132531477,
+      "translation_endpoint_error": 0.0016042156065568238,
+      "wall_time_sec": 5897.263271890988
+    }
+  ],
+  "normalization": {
+    "action_dim_names": [
+      "left_dx",
+      "left_dy",
+      "left_dz",
+      "left_drx",
+      "left_dry",
+      "left_drz",
+      "left_grip",
+      "right_dx",
+      "right_dy",
+      "right_dz",
+      "right_drx",
+      "right_dry",
+      "right_drz",
+      "right_grip"
+    ],
+    "path": "/outputs/flow_runs/imitation_dinov3_tiny_holdout_color384_h1_seed5_lr3e4/train_dataset_stats.json",
+    "sample_count": 28254,
+    "source": "train_only",
+    "train_episode_count": 96
+  },
+  "output_dir": "/outputs/flow_runs/imitation_distill_cached_direct_tiny_holdout_color384_h1_latest/h512_hard020_e30",
+  "recommendation": "Use only if it beats the best single checkpoint and runtime checkpoint loading is accepted.",
+  "results": [
+    {
+      "backbone": "dinov3_convnext_tiny",
+      "checkpoint_path": "/outputs/flow_runs/imitation_distill_cached_direct_tiny_holdout_color384_h1_latest/h512_hard020_e30/direct_bc_dinov3_convnext_tiny_distill/checkpoint.pt",
+      "checkpoint_sha256": "8efc535d4caadf113c4a64d1154b944379eb1dc42b92d513f6fa9da54c7000fd",
+      "family": "direct_bc_distilled_cached_ensemble",
+      "latency": {
+        "median_ms": 3.4230700111947954,
+        "p95_ms": 3.5273861925816163
+      },
+      "loss_name": "cached_distill_mse",
+      "metrics": {
+        "action_mse": 0.48505222293964423,
+        "by_phase": {
+          "left_pick": {
+            "action_mse": 0.5371931074734458,
+            "normalized_action_mse": 0.4165545122418851
+          },
+          "left_place": {
+            "action_mse": 0.692196327163548,
+            "normalized_action_mse": 0.5367483302110106
+          },
+          "right_pick": {
+            "action_mse": 0.039796578495686054,
+            "normalized_action_mse": 0.030859376476616174
+          },
+          "right_place": {
+            "action_mse": 0.6751240394704235,
+            "normalized_action_mse": 0.5235100023659087
+          }
+        },
+        "gripper_mse": 3.39528490328336,
+        "inactive_arm_leakage": 0.0020578975775542045,
+        "normalized_action_mse": 0.3761230167095047,
+        "rotation_endpoint_error": 0.00660620167536377,
+        "smoothness": 0.0,
+        "translation_endpoint_error": 0.0016042156065568238
+      },
+      "model": "distill_cached_direct_bc_dinov3_convnext_tiny_h512_hard020_e30",
+      "model_config": {
+        "action_dim": 14,
+        "action_horizon": 1,
+        "backbone": "dinov3_convnext_tiny",
+        "camera_names": [
+          "left_realsense_color",
+          "right_realsense_color"
+        ],
+        "epochs": 30,
+        "hard_weight": 0.2,
+        "hidden_dim": 512,
+        "loss_name": "cached_distill_mse",
+        "lr": 0.0001,
+        "proprio_dim": 16,
+        "teacher": "top5_prediction_ensemble_train_cache"
+      },
+      "safety": {
+        "real_mode_behavior_touched": false,
+        "robot_motion_commands_sent": false,
+        "scope": "offline HDF5 cached distillation only"
+      },
+      "shortcut_ablations": {
+        "image_shuffle": {
+          "action_mse": 1.0890364299220407,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 1.2445668856359446,
+              "normalized_action_mse": 0.965071861098124
+            },
+            "left_place": {
+              "action_mse": 1.3055807830696602,
+              "normalized_action_mse": 1.012383738208785
+            },
+            "right_pick": {
+              "action_mse": 0.3709918250362117,
+              "normalized_action_mse": 0.2876774042215815
+            },
+            "right_place": {
+              "action_mse": 1.441039465479218,
+              "normalized_action_mse": 1.1174221770774948
+            }
+          },
+          "gripper_mse": 7.623157909496248,
+          "inactive_arm_leakage": 0.002663836639891997,
+          "normalized_action_mse": 0.8444692096170348,
+          "rotation_endpoint_error": 0.007189513356029322,
+          "smoothness": 0.0,
+          "translation_endpoint_error": 0.0021526225165970463
+        },
+        "zero_image": {
+          "action_mse": 6.81411572530268,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 5.237144298136757,
+              "normalized_action_mse": 4.0610276980490925
+            },
+            "left_place": {
+              "action_mse": 6.656772964330689,
+              "normalized_action_mse": 5.161847344437134
+            },
+            "right_pick": {
+              "action_mse": 4.061020800620199,
+              "normalized_action_mse": 3.149028748270223
+            },
+            "right_place": {
+              "action_mse": 11.329285472893597,
+              "normalized_action_mse": 8.785043811165329
+            }
+          },
+          "gripper_mse": 47.69859710132495,
+          "inactive_arm_leakage": 0.010372100286422969,
+          "normalized_action_mse": 5.283855307941615,
+          "rotation_endpoint_error": 0.012453063644327874,
+          "smoothness": 0.0,
+          "translation_endpoint_error": 0.0035447421839136985
+        }
+      },
+      "train_metrics": {
+        "action_mse": 0.23236689842486813,
+        "by_phase": {
+          "left_pick": {
+            "action_mse": 0.20812587706768343,
+            "normalized_action_mse": 0.16138660753596676
+          },
+          "left_place": {
+            "action_mse": 0.43254801632977913,
+            "normalized_action_mse": 0.33540979111008534
+          },
+          "right_pick": {
+            "action_mse": 0.026599413219885022,
+            "normalized_action_mse": 0.020625926590611108
+          },
+          "right_place": {
+            "action_mse": 0.26442898191777386,
+            "normalized_action_mse": 0.20504560474246472
+          }
+        },
+        "gripper_mse": 1.6265148134318934,
+        "inactive_arm_leakage": 0.0021509106468439033,
+        "normalized_action_mse": 0.18018377132531477,
+        "rotation_endpoint_error": 0.005583492473970744,
+        "smoothness": 0.0,
+        "translation_endpoint_error": 0.0011615031984777203
+      },
+      "training_curves": "/outputs/flow_runs/imitation_distill_cached_direct_tiny_holdout_color384_h1_latest/h512_hard020_e30/direct_bc_dinov3_convnext_tiny_distill/training_curves.jsonl",
+      "wall_time_sec": 5897.263271890988
+    }
+  ],
+  "safety": {
+    "real_mode_behavior_touched": false,
+    "robot_motion_commands_sent": false,
+    "scope": "offline HDF5 cached distillation only"
+  },
+  "schema": "robotics_lab.policy_runner.imitation_report.v1",
+  "split": {
+    "effective_split_algorithm": "session_holdout_by_folder",
+    "primary_train_episode_count": 117,
+    "primary_validation_episode_count": 29,
+    "session_holdout_sessions": [
+      "data_20260606_140813",
+      "data_20260606_175635"
+    ],
+    "session_holdout_train_episode_count": 96,
+    "session_holdout_val_episode_count": 50,
+    "split_algorithm": "session_stratified_episode",
+    "split_hash": "93ac654ea69705f967546f011fecc2efdb4047fc92590928b54c7708a061e7dc",
+    "split_mode": "session_holdout",
+    "split_path": "/outputs/flow_runs/imitation_official/split_manifest.json",
+    "train_episode_count": 96,
+    "val_ratio": 0.2,
+    "validation_episode_count": 50
+  },
+  "warnings": [
+    "Teacher top5 ensemble was selected from validation leaderboard; treat as post-hoc compression evidence, not leakage-free model-family selection.",
+    "Teacher cache contains train-split predictions only."
+  ]
+}

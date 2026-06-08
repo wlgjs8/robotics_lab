@@ -1,0 +1,27 @@
+{
+  "action_mse": 0.203255911346875,
+  "by_phase": {
+    "left_pick": {
+      "action_mse": 0.0,
+      "normalized_action_mse": 0.0
+    },
+    "left_place": {
+      "action_mse": 0.0,
+      "normalized_action_mse": 0.0
+    },
+    "right_pick": {
+      "action_mse": 0.17268434856606202,
+      "normalized_action_mse": 0.4563661099105658
+    },
+    "right_place": {
+      "action_mse": 0.263688070332203,
+      "normalized_action_mse": 0.6968685922412627
+    }
+  },
+  "gripper_mse": 1.4227013618845061,
+  "inactive_arm_leakage": 0.0037503393832594156,
+  "normalized_action_mse": 0.5371599125685343,
+  "rotation_endpoint_error": 0.007376383259872548,
+  "smoothness": 0.0,
+  "translation_endpoint_error": 0.0021198286018614906
+}

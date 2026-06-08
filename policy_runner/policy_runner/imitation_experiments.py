@@ -25,12 +25,18 @@ from .flow_dataset import (
     load_flow_episode_index,
     write_dataset_statistics,
 )
+from .phase_segmentation import (
+    EVENT_NAMES,
+    PHASE_NAMES as SEGMENTATION_PHASE_NAMES,
+    gripper_thresholds,
+    ordered_event_frames_from_signals,
+)
 
 
 IMITATION_SNAPSHOT_SCHEMA = "robotics_lab.policy_runner.imitation_snapshot.v1"
 IMITATION_SPLIT_SCHEMA = "robotics_lab.policy_runner.imitation_split.v1"
 IMITATION_REPORT_SCHEMA = "robotics_lab.policy_runner.imitation_report.v1"
-PHASE_NAMES = ("right_pick", "right_place", "left_pick", "left_place")
+PHASE_NAMES = SEGMENTATION_PHASE_NAMES
 DEFAULT_MODEL_FAMILY = (
     "zero",
     "train_mean",
@@ -39,6 +45,7 @@ DEFAULT_MODEL_FAMILY = (
     "direct_bc_resnet18",
     "flow_tiny",
     "flow_resnet18",
+    "diffusion_resnet18",
     "act_tiny",
     "structured_resnet18",
 )
@@ -225,6 +232,7 @@ def run_imitation_experiment(
     models: Iterable[str] = DEFAULT_MODEL_FAMILY,
     action_horizon: int = 16,
     image_size: int = 128,
+    image_crop: str = "none",
     camera_names: list[str] | None = None,
     exclude_camera_names: list[str] | None = None,
     batch_size: int = 64,
@@ -236,6 +244,7 @@ def run_imitation_experiment(
     max_train_samples: int | None = None,
     max_val_samples: int | None = None,
     flow_sample_steps: int = 8,
+    diffusion_sample_steps: int = 16,
     split_mode: str = "primary",
 ) -> dict[str, Any]:
     torch = _require_torch()
@@ -275,6 +284,7 @@ def run_imitation_experiment(
         data_dir,
         action_horizon=action_horizon,
         image_size=image_size,
+        image_crop=image_crop,
         episode_paths=train_paths,
         camera_names=selected_cameras,
         exclude_camera_names=excluded,
@@ -292,6 +302,7 @@ def run_imitation_experiment(
         data_dir,
         action_horizon=action_horizon,
         image_size=image_size,
+        image_crop=image_crop,
         episode_paths=train_paths,
         camera_names=list(stats["camera_names"]),
         exclude_camera_names=excluded,
@@ -302,6 +313,7 @@ def run_imitation_experiment(
         data_dir,
         action_horizon=action_horizon,
         image_size=image_size,
+        image_crop=image_crop,
         episode_paths=val_paths,
         camera_names=list(stats["camera_names"]),
         exclude_camera_names=excluded,
@@ -324,8 +336,10 @@ def run_imitation_experiment(
                 result = _evaluate_constant_baseline(
                     name=model_name,
                     prediction=np.zeros(FLOW_ACTION_DIM, dtype=np.float32),
-                    dataset=val_dataset,
-                    indices=val_indices,
+                    train_dataset=train_dataset,
+                    val_dataset=val_dataset,
+                    train_indices=train_indices,
+                    val_indices=val_indices,
                     stats=stats,
                     output_dir=model_dir,
                 )
@@ -333,8 +347,10 @@ def run_imitation_experiment(
                 result = _evaluate_constant_baseline(
                     name=model_name,
                     prediction=np.asarray(stats["action_mean"], dtype=np.float32),
-                    dataset=val_dataset,
-                    indices=val_indices,
+                    train_dataset=train_dataset,
+                    val_dataset=val_dataset,
+                    train_indices=train_indices,
+                    val_indices=val_indices,
                     stats=stats,
                     output_dir=model_dir,
                 )
@@ -410,6 +426,25 @@ def run_imitation_experiment(
                     device=torch_device,
                     torch=torch,
                 )
+            elif model_name.startswith("diffusion_"):
+                backbone = model_name.removeprefix("diffusion_")
+                result = _train_diffusion(
+                    name=model_name,
+                    backbone=_backbone_name(backbone),
+                    train_dataset=train_dataset,
+                    val_dataset=val_dataset,
+                    train_indices=train_indices,
+                    val_indices=val_indices,
+                    stats=stats,
+                    output_dir=model_dir,
+                    batch_size=batch_size,
+                    epochs=epochs,
+                    lr=lr,
+                    hidden_dim=hidden_dim,
+                    sample_steps=diffusion_sample_steps,
+                    device=torch_device,
+                    torch=torch,
+                )
             elif model_name.startswith("act_"):
                 backbone = model_name.removeprefix("act_")
                 result = _train_act(
@@ -462,6 +497,7 @@ def run_imitation_experiment(
             "data_dir": str(Path(data_dir).resolve()),
             "action_horizon": action_horizon,
             "image_size": image_size,
+            "image_crop": image_crop,
             "camera_names": list(stats["camera_names"]),
             "exclude_camera_names": excluded,
             "batch_size": batch_size,
@@ -473,6 +509,7 @@ def run_imitation_experiment(
             "max_train_samples": max_train_samples,
             "max_val_samples": max_val_samples,
             "flow_sample_steps": flow_sample_steps,
+            "diffusion_sample_steps": diffusion_sample_steps,
             "split_mode": split_mode,
             "models": model_names,
         },
@@ -605,6 +642,15 @@ def _train_flow(*, name: str, backbone: str, **kwargs: Any) -> dict[str, Any]:
         sample_steps=kwargs["sample_steps"],
         torch=torch,
     )
+    train_metrics = _evaluate_flow_model(
+        model=model,
+        dataset=kwargs["train_dataset"],
+        indices=kwargs["train_indices"],
+        stats=kwargs["stats"],
+        device=kwargs["device"],
+        sample_steps=kwargs["sample_steps"],
+        torch=torch,
+    )
     latency = _measure_flow_latency(
         model=model,
         dataset=kwargs["val_dataset"],
@@ -619,6 +665,7 @@ def _train_flow(*, name: str, backbone: str, **kwargs: Any) -> dict[str, Any]:
         "model_family": "flow_matching",
         "model_config": config.to_dict(),
         "dataset_stats": kwargs["stats"],
+        "train_metrics": train_metrics,
         "validation_metrics": metrics,
         "model_state": model.cpu().state_dict(),
     }
@@ -630,9 +677,125 @@ def _train_flow(*, name: str, backbone: str, **kwargs: Any) -> dict[str, Any]:
         "checkpoint_path": str(checkpoint),
         "checkpoint_sha256": _sha256_file(checkpoint),
         "training_curves": str(curves_path),
+        "train_metrics": train_metrics,
         "metrics": metrics,
         "latency": latency,
+        "model_config": config.to_dict(),
         "shortcut_ablations": _flow_shortcut_ablations(
+            model=model.to(kwargs["device"]),
+            dataset=kwargs["val_dataset"],
+            indices=kwargs["val_indices"],
+            stats=kwargs["stats"],
+            device=kwargs["device"],
+            sample_steps=kwargs["sample_steps"],
+            torch=torch,
+        ),
+    }
+
+
+def _train_diffusion(*, name: str, backbone: str, **kwargs: Any) -> dict[str, Any]:
+    torch = kwargs["torch"]
+    model = _build_diffusion_policy(
+        backbone=backbone,
+        action_horizon=kwargs["train_dataset"].action_horizon,
+        camera_count=len(kwargs["train_dataset"].camera_names),
+        hidden_dim=kwargs["hidden_dim"],
+        torch=torch,
+    ).to(kwargs["device"])
+    optimizer = torch.optim.AdamW(
+        (parameter for parameter in model.parameters() if parameter.requires_grad),
+        lr=float(kwargs["lr"]),
+    )
+    train_loader = _loader(
+        kwargs["train_dataset"],
+        kwargs["train_indices"],
+        batch_size=kwargs["batch_size"],
+        shuffle=True,
+        torch=torch,
+    )
+    curves_path = kwargs["output_dir"] / "training_curves.jsonl"
+    with curves_path.open("w", encoding="utf-8") as curves:
+        for epoch in range(1, kwargs["epochs"] + 1):
+            model.train()
+            total = 0.0
+            denom = 0.0
+            for batch in train_loader:
+                batch = _to_device(batch, kwargs["device"], torch=torch)
+                loss = _diffusion_x0_loss(model=model, batch=batch, torch=torch)
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+                optimizer.step()
+                n = float(batch["action_mask"].float().sum().item())
+                total += float(loss.item()) * n
+                denom += n
+            curves.write(json.dumps({"epoch": epoch, "train_loss": total / max(denom, 1.0)}, sort_keys=True) + "\n")
+            curves.flush()
+    metrics = _evaluate_diffusion_model(
+        model=model,
+        dataset=kwargs["val_dataset"],
+        indices=kwargs["val_indices"],
+        stats=kwargs["stats"],
+        device=kwargs["device"],
+        sample_steps=kwargs["sample_steps"],
+        torch=torch,
+    )
+    train_metrics = _evaluate_diffusion_model(
+        model=model,
+        dataset=kwargs["train_dataset"],
+        indices=kwargs["train_indices"],
+        stats=kwargs["stats"],
+        device=kwargs["device"],
+        sample_steps=kwargs["sample_steps"],
+        torch=torch,
+    )
+    latency = _measure_diffusion_latency(
+        model=model,
+        dataset=kwargs["val_dataset"],
+        device=kwargs["device"],
+        sample_steps=kwargs["sample_steps"],
+        torch=torch,
+    )
+    checkpoint = kwargs["output_dir"] / "checkpoint.pt"
+    torch.save(
+        {
+            "schema": "robotics_lab.policy_runner.imitation_checkpoint.v1",
+            "model_family": "diffusion_policy_x0",
+            "backbone": backbone,
+            "loss_name": "x0",
+            "action_horizon": kwargs["train_dataset"].action_horizon,
+            "action_dim": FLOW_ACTION_DIM,
+            "proprio_dim": FLOW_PROPRIO_DIM,
+            "camera_names": kwargs["train_dataset"].camera_names,
+            "dataset_stats": kwargs["stats"],
+            "train_metrics": train_metrics,
+            "validation_metrics": metrics,
+            "sample_steps": kwargs["sample_steps"],
+            "model_state": model.cpu().state_dict(),
+        },
+        checkpoint,
+    )
+    return {
+        "model": name,
+        "family": "diffusion_policy_x0",
+        "backbone": backbone,
+        "loss_name": "x0",
+        "checkpoint_path": str(checkpoint),
+        "checkpoint_sha256": _sha256_file(checkpoint),
+        "training_curves": str(curves_path),
+        "train_metrics": train_metrics,
+        "metrics": metrics,
+        "latency": latency,
+        "model_config": {
+            "action_horizon": kwargs["train_dataset"].action_horizon,
+            "action_dim": FLOW_ACTION_DIM,
+            "proprio_dim": FLOW_PROPRIO_DIM,
+            "camera_names": list(kwargs["train_dataset"].camera_names),
+            "backbone": backbone,
+            "hidden_dim": kwargs["hidden_dim"],
+            "sample_steps": kwargs["sample_steps"],
+        },
+        "shortcut_ablations": _diffusion_shortcut_ablations(
             model=model.to(kwargs["device"]),
             dataset=kwargs["val_dataset"],
             indices=kwargs["val_indices"],
@@ -700,6 +863,14 @@ def _train_supervised_model(
         device=device,
         torch=torch,
     )
+    train_metrics = _evaluate_supervised_model(
+        model=model,
+        dataset=train_dataset,
+        indices=train_indices,
+        stats=stats,
+        device=device,
+        torch=torch,
+    )
     latency = _measure_supervised_latency(
         model=model,
         dataset=val_dataset,
@@ -718,6 +889,7 @@ def _train_supervised_model(
             "proprio_dim": FLOW_PROPRIO_DIM,
             "camera_names": train_dataset.camera_names,
             "dataset_stats": stats,
+            "train_metrics": train_metrics,
             "validation_metrics": metrics,
             "model_state": model.cpu().state_dict(),
         },
@@ -731,8 +903,19 @@ def _train_supervised_model(
         "checkpoint_path": str(checkpoint),
         "checkpoint_sha256": _sha256_file(checkpoint),
         "training_curves": str(curves_path),
+        "train_metrics": train_metrics,
         "metrics": metrics,
         "latency": latency,
+        "model_config": {
+            "action_horizon": train_dataset.action_horizon,
+            "action_dim": FLOW_ACTION_DIM,
+            "proprio_dim": FLOW_PROPRIO_DIM,
+            "camera_names": list(train_dataset.camera_names),
+            "backbone": backbone,
+            "hidden_dim": hidden_dim,
+            "loss_name": loss_name,
+            "uses_images": bool(uses_images),
+        },
     }
     if uses_images:
         result["shortcut_ablations"] = _supervised_shortcut_ablations(
@@ -764,13 +947,54 @@ def _evaluate_constant_baseline(
     *,
     name: str,
     prediction: np.ndarray,
-    dataset: FlowHdf5Dataset,
-    indices: list[int],
+    train_dataset: FlowHdf5Dataset,
+    val_dataset: FlowHdf5Dataset,
+    train_indices: list[int],
+    val_indices: list[int],
     stats: dict[str, Any],
     output_dir: Path,
 ) -> dict[str, Any]:
-    pred_chunk = np.tile(prediction.reshape(1, -1), (dataset.action_horizon, 1)).astype(np.float32)
+    pred_chunk = np.tile(prediction.reshape(1, -1), (val_dataset.action_horizon, 1)).astype(np.float32)
+    train_summary = _evaluate_constant_prediction(
+        pred_chunk=pred_chunk,
+        dataset=train_dataset,
+        indices=train_indices,
+        stats=stats,
+    )
+    summary = _evaluate_constant_prediction(
+        pred_chunk=pred_chunk,
+        dataset=val_dataset,
+        indices=val_indices,
+        stats=stats,
+    )
+    output_path = output_dir / "constant_baseline.json"
+    output_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {
+        "model": name,
+        "family": "constant_baseline",
+        "checkpoint_path": None,
+        "checkpoint_sha256": None,
+        "train_metrics": train_summary,
+        "metrics": summary,
+        "latency": {"median_ms": 0.0, "p95_ms": 0.0},
+        "artifact": str(output_path),
+        "model_config": {
+            "action_horizon": val_dataset.action_horizon,
+            "action_dim": FLOW_ACTION_DIM,
+            "prediction": "zero" if name == "zero" else "train_mean",
+        },
+    }
+
+
+def _evaluate_constant_prediction(
+    *,
+    pred_chunk: np.ndarray,
+    dataset: FlowHdf5Dataset,
+    indices: list[int],
+    stats: dict[str, Any],
+) -> dict[str, Any]:
     metrics = _empty_metric_accumulator()
+    ordered = _empty_ordered_eval_accumulator(dataset)
     for index in indices:
         sample = dataset.raw_sample(index)
         _accumulate_raw_metrics(
@@ -780,23 +1004,14 @@ def _evaluate_constant_baseline(
             sample["action_mask"],
             phase=_sample_phase(dataset, index),
         )
-    summary = _finalize_metrics(metrics, stats=stats)
-    output_path = output_dir / "constant_baseline.json"
-    output_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return {
-        "model": name,
-        "family": "constant_baseline",
-        "checkpoint_path": None,
-        "checkpoint_sha256": None,
-        "metrics": summary,
-        "latency": {"median_ms": 0.0, "p95_ms": 0.0},
-        "artifact": str(output_path),
-    }
+        _accumulate_ordered_prediction(ordered, dataset, index, pred_chunk, sample["action_chunk"])
+    return _finalize_with_ordered_metrics(metrics, ordered, dataset, stats=stats)
 
 
 def _evaluate_supervised_model(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, torch: Any) -> dict[str, Any]:
     model.eval()
     metrics = _empty_metric_accumulator()
+    ordered = _empty_ordered_eval_accumulator(dataset)
     loader = _loader(dataset, indices, batch_size=64, shuffle=False, torch=torch, include_index=True)
     with torch.no_grad():
         for batch in loader:
@@ -814,7 +1029,8 @@ def _evaluate_supervised_model(*, model: Any, dataset: FlowHdf5Dataset, indices:
                     mask[row],
                     phase=_sample_phase(dataset, sample_index),
                 )
-    return _finalize_metrics(metrics, stats=stats)
+                _accumulate_ordered_prediction(ordered, dataset, sample_index, pred_raw[row], target_raw[row])
+    return _finalize_with_ordered_metrics(metrics, ordered, dataset, stats=stats)
 
 
 def _evaluate_flow_model(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, sample_steps: int, torch: Any) -> dict[str, Any]:
@@ -822,6 +1038,7 @@ def _evaluate_flow_model(*, model: Any, dataset: FlowHdf5Dataset, indices: list[
 
     model.eval()
     metrics = _empty_metric_accumulator()
+    ordered = _empty_ordered_eval_accumulator(dataset)
     loader = _loader(dataset, indices, batch_size=32, shuffle=False, torch=torch, include_index=True)
     with torch.no_grad():
         for batch in loader:
@@ -844,7 +1061,39 @@ def _evaluate_flow_model(*, model: Any, dataset: FlowHdf5Dataset, indices: list[
                     mask[row],
                     phase=_sample_phase(dataset, sample_index),
                 )
-    return _finalize_metrics(metrics, stats=stats)
+                _accumulate_ordered_prediction(ordered, dataset, sample_index, pred_raw[row], target_raw[row])
+    return _finalize_with_ordered_metrics(metrics, ordered, dataset, stats=stats)
+
+
+def _evaluate_diffusion_model(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, sample_steps: int, torch: Any) -> dict[str, Any]:
+    model.eval()
+    metrics = _empty_metric_accumulator()
+    ordered = _empty_ordered_eval_accumulator(dataset)
+    loader = _loader(dataset, indices, batch_size=32, shuffle=False, torch=torch, include_index=True)
+    with torch.no_grad():
+        for batch in loader:
+            sample_indices = batch.pop("_sample_index").cpu().numpy().astype(int).tolist()
+            batch = _to_device(batch, device, torch=torch)
+            pred = _sample_diffusion_x0(
+                model=model,
+                images=batch["images"].float(),
+                proprio=batch["proprio"].float(),
+                sample_steps=sample_steps,
+                torch=torch,
+            )
+            pred_raw = denormalize_actions(pred, stats).cpu().numpy()
+            target_raw = denormalize_actions(batch["action_chunk"].float(), stats).cpu().numpy()
+            mask = batch["action_mask"].float().cpu().numpy()
+            for row, sample_index in enumerate(sample_indices):
+                _accumulate_raw_metrics(
+                    metrics,
+                    pred_raw[row],
+                    target_raw[row],
+                    mask[row],
+                    phase=_sample_phase(dataset, sample_index),
+                )
+                _accumulate_ordered_prediction(ordered, dataset, sample_index, pred_raw[row], target_raw[row])
+    return _finalize_with_ordered_metrics(metrics, ordered, dataset, stats=stats)
 
 
 def _supervised_shortcut_ablations(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, torch: Any) -> dict[str, Any]:
@@ -895,9 +1144,35 @@ def _flow_shortcut_ablations(*, model: Any, dataset: FlowHdf5Dataset, indices: l
     }
 
 
+def _diffusion_shortcut_ablations(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, sample_steps: int, torch: Any) -> dict[str, Any]:
+    return {
+        "zero_image": _evaluate_diffusion_model_with_image_mode(
+            model=model,
+            dataset=dataset,
+            indices=indices,
+            stats=stats,
+            device=device,
+            sample_steps=sample_steps,
+            torch=torch,
+            image_mode="zero",
+        ),
+        "image_shuffle": _evaluate_diffusion_model_with_image_mode(
+            model=model,
+            dataset=dataset,
+            indices=indices,
+            stats=stats,
+            device=device,
+            sample_steps=sample_steps,
+            torch=torch,
+            image_mode="shuffle",
+        ),
+    }
+
+
 def _evaluate_supervised_model_with_image_mode(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, torch: Any, image_mode: str) -> dict[str, Any]:
     model.eval()
     metrics = _empty_metric_accumulator()
+    ordered = _empty_ordered_eval_accumulator(dataset)
     loader = _loader(dataset, indices, batch_size=64, shuffle=False, torch=torch, include_index=True)
     with torch.no_grad():
         for batch in loader:
@@ -910,7 +1185,8 @@ def _evaluate_supervised_model_with_image_mode(*, model: Any, dataset: FlowHdf5D
             mask = batch["action_mask"].float().cpu().numpy()
             for row, sample_index in enumerate(sample_indices):
                 _accumulate_raw_metrics(metrics, pred_raw[row], target_raw[row], mask[row], phase=_sample_phase(dataset, sample_index))
-    return _finalize_metrics(metrics, stats=stats)
+                _accumulate_ordered_prediction(ordered, dataset, sample_index, pred_raw[row], target_raw[row])
+    return _finalize_with_ordered_metrics(metrics, ordered, dataset, stats=stats)
 
 
 def _evaluate_flow_model_with_image_mode(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, sample_steps: int, torch: Any, image_mode: str) -> dict[str, Any]:
@@ -918,6 +1194,7 @@ def _evaluate_flow_model_with_image_mode(*, model: Any, dataset: FlowHdf5Dataset
 
     model.eval()
     metrics = _empty_metric_accumulator()
+    ordered = _empty_ordered_eval_accumulator(dataset)
     loader = _loader(dataset, indices, batch_size=32, shuffle=False, torch=torch, include_index=True)
     with torch.no_grad():
         for batch in loader:
@@ -930,7 +1207,34 @@ def _evaluate_flow_model_with_image_mode(*, model: Any, dataset: FlowHdf5Dataset
             mask = batch["action_mask"].float().cpu().numpy()
             for row, sample_index in enumerate(sample_indices):
                 _accumulate_raw_metrics(metrics, pred_raw[row], target_raw[row], mask[row], phase=_sample_phase(dataset, sample_index))
-    return _finalize_metrics(metrics, stats=stats)
+                _accumulate_ordered_prediction(ordered, dataset, sample_index, pred_raw[row], target_raw[row])
+    return _finalize_with_ordered_metrics(metrics, ordered, dataset, stats=stats)
+
+
+def _evaluate_diffusion_model_with_image_mode(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, sample_steps: int, torch: Any, image_mode: str) -> dict[str, Any]:
+    model.eval()
+    metrics = _empty_metric_accumulator()
+    ordered = _empty_ordered_eval_accumulator(dataset)
+    loader = _loader(dataset, indices, batch_size=32, shuffle=False, torch=torch, include_index=True)
+    with torch.no_grad():
+        for batch in loader:
+            sample_indices = batch.pop("_sample_index").cpu().numpy().astype(int).tolist()
+            batch = _to_device(batch, device, torch=torch)
+            batch["images"] = _alter_images(batch["images"], mode=image_mode, torch=torch)
+            pred = _sample_diffusion_x0(
+                model=model,
+                images=batch["images"].float(),
+                proprio=batch["proprio"].float(),
+                sample_steps=sample_steps,
+                torch=torch,
+            )
+            pred_raw = denormalize_actions(pred, stats).cpu().numpy()
+            target_raw = denormalize_actions(batch["action_chunk"].float(), stats).cpu().numpy()
+            mask = batch["action_mask"].float().cpu().numpy()
+            for row, sample_index in enumerate(sample_indices):
+                _accumulate_raw_metrics(metrics, pred_raw[row], target_raw[row], mask[row], phase=_sample_phase(dataset, sample_index))
+                _accumulate_ordered_prediction(ordered, dataset, sample_index, pred_raw[row], target_raw[row])
+    return _finalize_with_ordered_metrics(metrics, ordered, dataset, stats=stats)
 
 
 def _alter_images(images: Any, *, mode: str, torch: Any) -> Any:
@@ -955,10 +1259,8 @@ def _empty_metric_accumulator() -> dict[str, Any]:
         "inactive_leakage_count": 0.0,
         "smoothness_sum": 0.0,
         "smoothness_count": 0.0,
-        "phase": {
-            phase: {"sq_sum": 0.0, "count": 0.0}
-            for phase in PHASE_NAMES
-        },
+        "overall_split": _empty_metric_split_bucket(),
+        "phase": {phase: _empty_metric_split_bucket() for phase in PHASE_NAMES},
     }
 
 
@@ -967,9 +1269,8 @@ def _accumulate_raw_metrics(metrics: dict[str, Any], pred: np.ndarray, target: n
     active = mask.astype(np.float64)
     metrics["sq_sum"] += float(((error * error) * active).sum())
     metrics["count"] += float(active.sum())
-    normalized_phase = metrics["phase"][phase]
-    normalized_phase["sq_sum"] += float(((error * error) * active).sum())
-    normalized_phase["count"] += float(active.sum())
+    _accumulate_metric_split_bucket(metrics["overall_split"], pred, target, active, phase=phase)
+    _accumulate_metric_split_bucket(metrics["phase"][phase], pred, target, active, phase=phase)
     for arm_start in (0, 7):
         if active[-1, arm_start : arm_start + 6].sum() <= 0.0:
             continue
@@ -1002,12 +1303,8 @@ def _finalize_metrics(metrics: dict[str, Any], *, stats: dict[str, Any]) -> dict
     scale = float(np.mean(np.square(np.maximum(action_std, 1e-12))))
     by_phase = {}
     for phase, values in metrics["phase"].items():
-        mse = values["sq_sum"] / max(values["count"], 1.0)
-        by_phase[phase] = {
-            "action_mse": mse,
-            "normalized_action_mse": mse / max(scale, 1e-12),
-        }
-    return {
+        by_phase[phase] = _finalize_metric_split_bucket(values, scale=scale)
+    finalized = {
         "action_mse": raw_action_mse,
         "normalized_action_mse": raw_action_mse / max(scale, 1e-12),
         "translation_endpoint_error": metrics["translation_endpoint_sum"] / max(metrics["translation_endpoint_count"], 1.0),
@@ -1017,6 +1314,321 @@ def _finalize_metrics(metrics: dict[str, Any], *, stats: dict[str, Any]) -> dict
         "smoothness": metrics["smoothness_sum"] / max(metrics["smoothness_count"], 1.0),
         "by_phase": by_phase,
     }
+    finalized.update(_finalize_metric_split_bucket(metrics["overall_split"], scale=scale))
+    return finalized
+
+
+def _empty_metric_split_bucket() -> dict[str, Any]:
+    return {
+        "sq_sum": 0.0,
+        "count": 0.0,
+        "translation_sq": {"left": 0.0, "right": 0.0},
+        "translation_count": {"left": 0.0, "right": 0.0},
+        "rotation_sq": {"left": 0.0, "right": 0.0},
+        "rotation_count": {"left": 0.0, "right": 0.0},
+        "gripper_sq": {"left": 0.0, "right": 0.0},
+        "gripper_count": {"left": 0.0, "right": 0.0},
+        "active_arm_action_sq": 0.0,
+        "active_arm_action_count": 0.0,
+        "inactive_arm_action_sq": 0.0,
+        "inactive_arm_action_count": 0.0,
+        "inactive_arm_pred_motion_sum": 0.0,
+        "inactive_arm_pred_motion_count": 0.0,
+        "sample_count": 0,
+    }
+
+
+def _accumulate_metric_split_bucket(
+    bucket: dict[str, Any],
+    pred: np.ndarray,
+    target: np.ndarray,
+    active: np.ndarray,
+    *,
+    phase: str,
+) -> None:
+    error = (pred - target).astype(np.float64)
+    bucket["sq_sum"] += float(((error * error) * active).sum())
+    bucket["count"] += float(active.sum())
+    bucket["sample_count"] += 1
+    for side, start in (("left", 0), ("right", 7)):
+        trans = slice(start, start + 3)
+        rot = slice(start + 3, start + 6)
+        grip = start + 6
+        trans_mask = active[:, trans]
+        rot_mask = active[:, rot]
+        grip_mask = active[:, grip]
+        bucket["translation_sq"][side] += float(((error[:, trans] ** 2) * trans_mask).sum())
+        bucket["translation_count"][side] += float(trans_mask.sum())
+        bucket["rotation_sq"][side] += float(((error[:, rot] ** 2) * rot_mask).sum())
+        bucket["rotation_count"][side] += float(rot_mask.sum())
+        bucket["gripper_sq"][side] += float(((error[:, grip] ** 2) * grip_mask).sum())
+        bucket["gripper_count"][side] += float(grip_mask.sum())
+
+    active_side, inactive_side = _phase_arm_routing(phase)
+    active_start = 0 if active_side == "left" else 7
+    inactive_start = 0 if inactive_side == "left" else 7
+    active_slice = slice(active_start, active_start + 7)
+    inactive_slice = slice(inactive_start, inactive_start + 7)
+    active_mask = active[:, active_slice]
+    inactive_mask = active[:, inactive_slice]
+    bucket["active_arm_action_sq"] += float(((error[:, active_slice] ** 2) * active_mask).sum())
+    bucket["active_arm_action_count"] += float(active_mask.sum())
+    bucket["inactive_arm_action_sq"] += float(((error[:, inactive_slice] ** 2) * inactive_mask).sum())
+    bucket["inactive_arm_action_count"] += float(inactive_mask.sum())
+    inactive_trans_mask = active[:, inactive_start : inactive_start + 3]
+    valid_rows = inactive_trans_mask.sum(axis=1) > 0.0
+    if np.any(valid_rows):
+        motion = np.linalg.norm(pred[valid_rows, inactive_start : inactive_start + 3], axis=-1)
+        bucket["inactive_arm_pred_motion_sum"] += float(motion.sum())
+        bucket["inactive_arm_pred_motion_count"] += float(motion.size)
+
+
+def _finalize_metric_split_bucket(bucket: dict[str, Any], *, scale: float) -> dict[str, Any]:
+    action_mse = bucket["sq_sum"] / max(bucket["count"], 1.0)
+    left_trans_count = bucket["translation_count"]["left"]
+    right_trans_count = bucket["translation_count"]["right"]
+    left_rot_count = bucket["rotation_count"]["left"]
+    right_rot_count = bucket["rotation_count"]["right"]
+    return {
+        "action_mse": action_mse,
+        "normalized_action_mse": action_mse / max(scale, 1e-12),
+        "sample_count": int(bucket["sample_count"]),
+        "action_element_count": int(bucket["count"]),
+        "translation_mse": {
+            "left": _metric_value_count(bucket["translation_sq"]["left"], left_trans_count),
+            "right": _metric_value_count(bucket["translation_sq"]["right"], right_trans_count),
+            "combined": _metric_value_count(
+                bucket["translation_sq"]["left"] + bucket["translation_sq"]["right"],
+                left_trans_count + right_trans_count,
+            ),
+        },
+        "rotation_mse": {
+            "left": _metric_value_count(bucket["rotation_sq"]["left"], left_rot_count),
+            "right": _metric_value_count(bucket["rotation_sq"]["right"], right_rot_count),
+            "combined": _metric_value_count(
+                bucket["rotation_sq"]["left"] + bucket["rotation_sq"]["right"],
+                left_rot_count + right_rot_count,
+            ),
+        },
+        "gripper_mse_by_arm": {
+            "left": _metric_value_count(bucket["gripper_sq"]["left"], bucket["gripper_count"]["left"]),
+            "right": _metric_value_count(bucket["gripper_sq"]["right"], bucket["gripper_count"]["right"]),
+        },
+        "active_arm_action_mse": _metric_value_count(
+            bucket["active_arm_action_sq"],
+            bucket["active_arm_action_count"],
+        ),
+        "inactive_arm_action_mse": _metric_value_count(
+            bucket["inactive_arm_action_sq"],
+            bucket["inactive_arm_action_count"],
+        ),
+        "inactive_arm_pred_motion": _metric_value_count(
+            bucket["inactive_arm_pred_motion_sum"],
+            bucket["inactive_arm_pred_motion_count"],
+        ),
+    }
+
+
+def _metric_value_count(total: float, count: float) -> dict[str, float | int]:
+    return {
+        "value": float(total / max(float(count), 1.0)),
+        "count": int(count),
+    }
+
+
+def _phase_arm_routing(phase: str) -> tuple[str, str]:
+    if phase in {"right_pick", "right_place"}:
+        return "right", "left"
+    if phase in {"left_pick", "left_place"}:
+        return "left", "right"
+    raise ValueError(f"unknown phase: {phase}")
+
+
+def _empty_ordered_eval_accumulator(dataset: FlowHdf5Dataset) -> dict[str, Any]:
+    episodes: dict[str, Any] = {}
+    for episode_index, episode in enumerate(dataset.episodes):
+        length = int(episode.length)
+        episodes[str(episode.path)] = {
+            "episode_index": episode_index,
+            "pred": np.full((length, FLOW_ACTION_DIM), np.nan, dtype=np.float64),
+            "target": np.full((length, FLOW_ACTION_DIM), np.nan, dtype=np.float64),
+            "observed": np.zeros(length, dtype=bool),
+        }
+    return {"episodes": episodes}
+
+
+def _accumulate_ordered_prediction(
+    ordered: dict[str, Any],
+    dataset: FlowHdf5Dataset,
+    sample_index: int,
+    pred: np.ndarray,
+    target: np.ndarray,
+) -> None:
+    ref = dataset.sample_refs[int(sample_index)]
+    episode = dataset.episodes[ref.episode_index]
+    row = ordered["episodes"].get(str(episode.path))
+    if row is None:
+        return
+    frame = int(ref.start)
+    if frame < 0 or frame >= row["pred"].shape[0] or pred.shape[0] <= 0:
+        return
+    row["pred"][frame] = np.asarray(pred[0], dtype=np.float64)
+    row["target"][frame] = np.asarray(target[0], dtype=np.float64)
+    row["observed"][frame] = True
+
+
+def _finalize_with_ordered_metrics(
+    metrics: dict[str, Any],
+    ordered: dict[str, Any],
+    dataset: FlowHdf5Dataset,
+    *,
+    stats: dict[str, Any],
+) -> dict[str, Any]:
+    out = _finalize_metrics(metrics, stats=stats)
+    event_metrics = _finalize_ordered_event_metrics(ordered, dataset)
+    out.update(event_metrics)
+    return out
+
+
+def _finalize_ordered_event_metrics(
+    ordered: dict[str, Any],
+    dataset: FlowHdf5Dataset,
+) -> dict[str, Any]:
+    timing_errors: dict[str, list[float]] = {name: [] for name in EVENT_NAMES}
+    timing_missed: dict[str, int] = {name: 0 for name in EVENT_NAMES}
+    critical_translation: dict[str, list[float]] = {name: [] for name in EVENT_NAMES}
+    critical_rotation: dict[str, list[float]] = {name: [] for name in EVENT_NAMES}
+    critical_missing: dict[str, int] = {name: 0 for name in EVENT_NAMES}
+    clean_episode_count = 0
+    total_episode_count = 0
+
+    for episode_index, episode in enumerate(dataset.episodes):
+        total_episode_count += 1
+        boundaries = dataset.phase_boundaries_for_episode(episode_index)
+        if not boundaries.clean:
+            continue
+        clean_episode_count += 1
+        row = ordered["episodes"].get(str(episode.path))
+        if row is None:
+            continue
+        observed = row["observed"]
+        pred = row["pred"]
+        target = row["target"]
+        pred_left = _fill_missing_signal(pred[:, 6], observed, episode.left_gripper)
+        pred_right = _fill_missing_signal(pred[:, 13], observed, episode.right_gripper)
+        predicted_events = ordered_event_frames_from_signals(
+            left_signal=pred_left,
+            right_signal=pred_right,
+            left_thresholds=gripper_thresholds(episode.left_gripper[: episode.length]),
+            right_thresholds=gripper_thresholds(episode.right_gripper[: episode.length]),
+        )
+        gt_events = boundaries.event_frames()
+        for event_name in EVENT_NAMES:
+            predicted_frame = predicted_events[event_name]
+            gt_frame = gt_events[event_name]
+            if predicted_frame is None:
+                timing_missed[event_name] += 1
+            else:
+                timing_errors[event_name].append(
+                    _frame_error_ms(episode.timestamps, int(predicted_frame), int(gt_frame))
+                )
+
+            if 0 <= gt_frame < pred.shape[0] and bool(observed[gt_frame]):
+                side = "right" if event_name.startswith("right_") else "left"
+                start = 7 if side == "right" else 0
+                critical_translation[event_name].append(
+                    float(np.linalg.norm(pred[gt_frame, start : start + 3] - target[gt_frame, start : start + 3]))
+                )
+                critical_rotation[event_name].append(
+                    float(np.linalg.norm(pred[gt_frame, start + 3 : start + 6] - target[gt_frame, start + 3 : start + 6]))
+                )
+            else:
+                critical_missing[event_name] += 1
+
+    timing_summary = {
+        name: {
+            "mean_ms": _mean_or_none(timing_errors[name]),
+            "median_ms": _median_or_none(timing_errors[name]),
+            "missed_event_rate": float(timing_missed[name] / max(clean_episode_count, 1)),
+            "count": int(len(timing_errors[name])),
+            "episode_count": int(clean_episode_count),
+            "lower_is_better": True,
+        }
+        for name in EVENT_NAMES
+    }
+    critical_summary = {
+        name: {
+            "translation_error_mean": _mean_or_none(critical_translation[name]),
+            "translation_error_median": _median_or_none(critical_translation[name]),
+            "rotation_error_mean": _mean_or_none(critical_rotation[name]),
+            "rotation_error_median": _median_or_none(critical_rotation[name]),
+            "missing_prediction_rate": float(critical_missing[name] / max(clean_episode_count, 1)),
+            "count": int(len(critical_translation[name])),
+            "episode_count": int(clean_episode_count),
+            "lower_is_better": True,
+        }
+        for name in EVENT_NAMES
+    }
+    return {
+        "gripper_event_timing": {
+            "unit": "ms",
+            "description": "absolute predicted-vs-ground-truth gripper crossing timing error; lower is better",
+            "event_order": list(EVENT_NAMES),
+            "clean_episode_count": int(clean_episode_count),
+            "total_episode_count": int(total_episode_count),
+            "events": timing_summary,
+        },
+        "critical_instant_endpoint_error": {
+            "description": "first-step active-arm predicted-vs-target action error at ground-truth gripper event frames; lower is better",
+            "event_order": list(EVENT_NAMES),
+            "clean_episode_count": int(clean_episode_count),
+            "total_episode_count": int(total_episode_count),
+            "events": critical_summary,
+        },
+    }
+
+
+def _fill_missing_signal(predicted: np.ndarray, observed: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+    out = np.asarray(predicted, dtype=np.float64).copy()
+    valid = np.asarray(observed, dtype=bool) & np.isfinite(out)
+    if not np.any(valid):
+        fallback_values = np.asarray(fallback, dtype=np.float64).reshape(-1)
+        initial = float(fallback_values[0]) if fallback_values.size and np.isfinite(fallback_values[0]) else 0.0
+        return np.full_like(out, initial, dtype=np.float64)
+    valid_indices = np.flatnonzero(valid)
+    first = int(valid_indices[0])
+    out[:first] = out[first]
+    last_value = float(out[first])
+    for index in range(first + 1, out.size):
+        if valid[index]:
+            last_value = float(out[index])
+        else:
+            out[index] = last_value
+    return out
+
+
+def _frame_error_ms(timestamps: np.ndarray, predicted_frame: int, gt_frame: int) -> float:
+    ts = np.asarray(timestamps, dtype=np.float64).reshape(-1)
+    if (
+        0 <= predicted_frame < ts.size
+        and 0 <= gt_frame < ts.size
+        and np.isfinite(ts[predicted_frame])
+        and np.isfinite(ts[gt_frame])
+    ):
+        return float(abs(ts[predicted_frame] - ts[gt_frame]) * 1000.0)
+    return float(abs(int(predicted_frame) - int(gt_frame)) * (1000.0 / 30.0))
+
+
+def _mean_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(np.mean(np.asarray(values, dtype=np.float64)))
+
+
+def _median_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(np.median(np.asarray(values, dtype=np.float64)))
 
 
 class _IndexedDataset:
@@ -1218,6 +1830,147 @@ def _build_act_chunk_policy(*, backbone: str, action_horizon: int, camera_count:
     return ActChunkPolicy()
 
 
+def _build_diffusion_policy(*, backbone: str, action_horizon: int, camera_count: int, hidden_dim: int, torch: Any) -> Any:
+    from torch import nn
+    from .flow_model import SinusoidalTimeEmbedding, VisionBackbone
+
+    class DiffusionChunkPolicy(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.action_horizon = int(action_horizon)
+            self.action_dim = FLOW_ACTION_DIM
+            self.diffusion_train_steps = 100
+            self.vision = VisionBackbone(backbone, hidden_dim, frozen=True)
+            self.camera_embedding = nn.Embedding(max(camera_count, 1), hidden_dim)
+            self.proprio = nn.Sequential(
+                nn.Linear(FLOW_PROPRIO_DIM, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            self.condition = nn.Sequential(
+                nn.Linear(hidden_dim * 2, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            self.time_embedding = nn.Sequential(
+                SinusoidalTimeEmbedding(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            self.step_embedding = nn.Embedding(self.action_horizon, hidden_dim)
+            self.denoiser = nn.Sequential(
+                nn.Linear(FLOW_ACTION_DIM + hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, FLOW_ACTION_DIM),
+            )
+
+        def encode_condition(self, images: Any, proprio: Any) -> Any:
+            batch = proprio.shape[0]
+            prop = self.proprio(proprio)
+            if images.shape[1] > 0:
+                flat = images.reshape(batch * images.shape[1], *images.shape[2:])
+                vision = self.vision(flat).reshape(batch, images.shape[1], -1)
+                cam_ids = torch.arange(images.shape[1], device=images.device).clamp_max(
+                    self.camera_embedding.num_embeddings - 1
+                )
+                pooled = (vision + self.camera_embedding(cam_ids)[None, :, :]).mean(dim=1)
+            else:
+                pooled = prop.new_zeros((batch, prop.shape[-1]))
+            return self.condition(torch.cat([prop, pooled], dim=-1))
+
+        def forward(self, images: Any, proprio: Any, x_t: Any, t: Any) -> Any:
+            if x_t.ndim != 3:
+                raise ValueError("x_t must be B,H,A")
+            if x_t.shape[1] != self.action_horizon:
+                raise ValueError("x_t horizon does not match model config")
+            cond = self.encode_condition(images, proprio) + self.time_embedding(t)
+            step_ids = torch.arange(self.action_horizon, device=x_t.device)
+            step_tokens = self.step_embedding(step_ids)[None, :, :] + cond[:, None, :]
+            return self.denoiser(torch.cat([x_t, step_tokens], dim=-1))
+
+    return DiffusionChunkPolicy()
+
+
+def _diffusion_alpha_bar(train_steps: int, *, device: Any, dtype: Any, torch: Any) -> Any:
+    betas = torch.linspace(1e-4, 0.02, int(train_steps), device=device, dtype=dtype)
+    return torch.cumprod(1.0 - betas, dim=0)
+
+
+def _diffusion_x0_loss(*, model: Any, batch: dict[str, Any], torch: Any) -> Any:
+    actions = batch["action_chunk"].float()
+    mask = batch.get("action_mask")
+    if mask is None:
+        mask = torch.ones_like(actions)
+    else:
+        mask = mask.float()
+    batch_size = int(actions.shape[0])
+    t_idx = torch.randint(
+        0,
+        int(model.diffusion_train_steps),
+        (batch_size,),
+        device=actions.device,
+    )
+    alpha_bar = _diffusion_alpha_bar(
+        int(model.diffusion_train_steps),
+        device=actions.device,
+        dtype=actions.dtype,
+        torch=torch,
+    )[t_idx]
+    noise = torch.randn_like(actions)
+    x_t = alpha_bar.sqrt()[:, None, None] * actions + (1.0 - alpha_bar).sqrt()[:, None, None] * noise
+    t = t_idx.to(dtype=actions.dtype) / float(max(1, int(model.diffusion_train_steps) - 1))
+    pred_x0 = model(batch["images"].float(), batch["proprio"].float(), x_t, t)
+    loss = ((pred_x0 - actions) ** 2) * mask
+    return loss.sum() / mask.sum().clamp_min(1.0)
+
+
+def _sample_diffusion_x0(*, model: Any, images: Any, proprio: Any, sample_steps: int, torch: Any) -> Any:
+    if sample_steps <= 0:
+        raise ValueError("sample_steps must be positive")
+    model.eval()
+    batch_size = int(proprio.shape[0])
+    train_steps = int(model.diffusion_train_steps)
+    alpha_bars = _diffusion_alpha_bar(
+        train_steps,
+        device=proprio.device,
+        dtype=proprio.dtype,
+        torch=torch,
+    )
+    x = torch.randn(
+        (batch_size, int(model.action_horizon), FLOW_ACTION_DIM),
+        dtype=proprio.dtype,
+        device=proprio.device,
+    )
+    indices = torch.linspace(
+        train_steps - 1,
+        0,
+        steps=min(int(sample_steps), train_steps),
+        device=proprio.device,
+    ).round().long()
+    indices = torch.unique_consecutive(indices)
+    for i, t_idx in enumerate(indices):
+        t_int = int(t_idx.item())
+        alpha_t = alpha_bars[t_int]
+        t = torch.full(
+            (batch_size,),
+            float(t_int) / float(max(1, train_steps - 1)),
+            dtype=proprio.dtype,
+            device=proprio.device,
+        )
+        pred_x0 = model(images, proprio, x, t)
+        if i == len(indices) - 1:
+            x = pred_x0
+            continue
+        next_t = int(indices[i + 1].item())
+        alpha_next = alpha_bars[next_t]
+        eps = (x - alpha_t.sqrt() * pred_x0) / (1.0 - alpha_t).sqrt().clamp_min(1e-6)
+        x = alpha_next.sqrt() * pred_x0 + (1.0 - alpha_next).sqrt() * eps
+    return x
+
+
 def _measure_supervised_latency(*, model: Any, dataset: FlowHdf5Dataset, device: Any, torch: Any) -> dict[str, float]:
     model.eval()
     if len(dataset) == 0:
@@ -1240,6 +1993,26 @@ def _measure_flow_latency(*, model: Any, dataset: FlowHdf5Dataset, stats: dict[s
     proprio = torch.as_tensor(sample["proprio"])[None].to(device)
     return _latency_loop(
         lambda: sample_action_chunks(model, images.float(), proprio.float(), steps=sample_steps),
+        torch=torch,
+        device=device,
+    )
+
+
+def _measure_diffusion_latency(*, model: Any, dataset: FlowHdf5Dataset, device: Any, sample_steps: int, torch: Any) -> dict[str, float]:
+    model.eval()
+    if len(dataset) == 0:
+        return {"median_ms": 0.0, "p95_ms": 0.0}
+    sample = dataset[0]
+    images = torch.as_tensor(sample["images"])[None].to(device)
+    proprio = torch.as_tensor(sample["proprio"])[None].to(device)
+    return _latency_loop(
+        lambda: _sample_diffusion_x0(
+            model=model,
+            images=images.float(),
+            proprio=proprio.float(),
+            sample_steps=sample_steps,
+            torch=torch,
+        ),
         torch=torch,
         device=device,
     )
@@ -1273,6 +2046,12 @@ def _to_device(batch: dict[str, Any], device: Any, *, torch: Any) -> dict[str, A
 
 
 def _sample_phase(dataset: FlowHdf5Dataset, sample_index: int) -> str:
+    ref = dataset.sample_refs[sample_index]
+    boundaries = dataset.phase_boundaries_for_episode(ref.episode_index)
+    return boundaries.phase_for_frame(int(ref.start))
+
+
+def _quarter_sample_phase(dataset: FlowHdf5Dataset, sample_index: int) -> str:
     ref = dataset.sample_refs[sample_index]
     episode = dataset.episodes[ref.episode_index]
     denom = max(1, episode.length - dataset.action_horizon)
@@ -1423,12 +2202,16 @@ def _build_report(
                 "model": item["model"],
                 "family": item["family"],
                 "backbone": item.get("backbone"),
+                "train_normalized_action_mse": item.get("train_metrics", {}).get("normalized_action_mse"),
                 "normalized_action_mse": item["metrics"]["normalized_action_mse"],
                 "action_mse": item["metrics"]["action_mse"],
                 "translation_endpoint_error": item["metrics"]["translation_endpoint_error"],
                 "rotation_endpoint_error": item["metrics"]["rotation_endpoint_error"],
                 "gripper_mse": item["metrics"]["gripper_mse"],
                 "inactive_arm_leakage": item["metrics"]["inactive_arm_leakage"],
+                "gripper_event_timing": item["metrics"].get("gripper_event_timing", {}),
+                "critical_instant_endpoint_error": item["metrics"].get("critical_instant_endpoint_error", {}),
+                "by_phase": item["metrics"].get("by_phase", {}),
                 "latency": item.get("latency", {}),
                 "checkpoint_sha256": item.get("checkpoint_sha256"),
                 "wall_time_sec": item.get("wall_time_sec"),
@@ -1478,19 +2261,65 @@ def _render_report_markdown(report: dict[str, Any]) -> str:
         "",
         "## Leaderboard",
         "",
-        "| Rank | Model | Split | Family | Backbone | Norm MSE | Action MSE | Trans End | Rot End | Grip MSE | P50 Lat ms | Checkpoint |",
-        "| ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Rank | Model | Split | Family | Backbone | Train Norm MSE | Norm MSE | Action MSE | Trans End | Rot End | Grip MSE | P50 Lat ms | Checkpoint |",
+        "| ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in report["leaderboard"]:
         latency = row.get("latency", {})
         lines.append(
             f"| {row['rank']} | {row['model']} | {row.get('split_mode', '')} | "
             f"{row['family']} | {row.get('backbone') or ''} | "
+            f"{_format_optional_float(row.get('train_normalized_action_mse'))} | "
             f"{row['normalized_action_mse']:.6g} | {row['action_mse']:.6g} | "
             f"{row['translation_endpoint_error']:.6g} | {row['rotation_endpoint_error']:.6g} | "
             f"{row['gripper_mse']:.6g} | {float(latency.get('median_ms', 0.0)):.4g} | "
             f"`{row.get('checkpoint_sha256') or ''}` |"
         )
+    lines.extend(
+        [
+            "",
+            "## Task Proxy Metrics",
+            "",
+            "Lower is better. These are offline normalized/raw MSE and timing proxies, not rollout success.",
+            "",
+            "### Gripper Event Timing",
+            "",
+            "| Rank | Model | right_close mean/median ms | right_open mean/median ms | left_close mean/median ms | left_open mean/median ms | Missed rates |",
+            "| ---: | --- | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for row in report["leaderboard"]:
+        timing = row.get("gripper_event_timing", {}).get("events", {})
+        misses = ", ".join(
+            f"{name}={_format_optional_float(timing.get(name, {}).get('missed_event_rate'))}"
+            for name in EVENT_NAMES
+        )
+        lines.append(
+            f"| {row['rank']} | {row['model']} | "
+            f"{_format_timing_cell(timing.get('right_close', {}))} | "
+            f"{_format_timing_cell(timing.get('right_open', {}))} | "
+            f"{_format_timing_cell(timing.get('left_close', {}))} | "
+            f"{_format_timing_cell(timing.get('left_open', {}))} | {misses} |"
+        )
+    lines.extend(
+        [
+            "",
+            "### Per-phase Active/Inactive Arm Split",
+            "",
+            "| Rank | Model | Phase | Active arm action MSE | Inactive arm pred motion | Inactive arm action MSE | Samples |",
+            "| ---: | --- | --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in report["leaderboard"]:
+        for phase in PHASE_NAMES:
+            phase_metrics = row.get("by_phase", {}).get(phase, {})
+            lines.append(
+                f"| {row['rank']} | {row['model']} | {phase} | "
+                f"{_format_metric_value_count(phase_metrics.get('active_arm_action_mse'))} | "
+                f"{_format_metric_value_count(phase_metrics.get('inactive_arm_pred_motion'))} | "
+                f"{_format_metric_value_count(phase_metrics.get('inactive_arm_action_mse'))} | "
+                f"{int(phase_metrics.get('sample_count', 0))} |"
+            )
     lines.extend(["", "## Recommendation", "", report["recommendation"], ""])
     if report["warnings"]:
         lines.extend(["## Warnings", ""])
@@ -1663,8 +2492,8 @@ def _render_combined_report(payload: dict[str, Any]) -> str:
         f"- Split hash: `{payload.get('split_hash', '')}`",
         f"- Source reports: {len(payload.get('source_reports', []))}",
         "",
-        "| Rank | Model | Split | Family | Backbone | Loss | Norm MSE | Action MSE | Trans End | Rot End | Grip MSE | P50 Lat ms | Source |",
-        "| ---: | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Rank | Model | Split | Family | Backbone | Loss | Train Norm MSE | Norm MSE | Action MSE | Trans End | Rot End | Grip MSE | P50 Lat ms | Source |",
+        "| ---: | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in payload.get("rows", []):
         latency = row.get("latency", {})
@@ -1672,6 +2501,7 @@ def _render_combined_report(payload: dict[str, Any]) -> str:
             f"| {row.get('rank', '')} | {row.get('model', '')} | "
             f"{row.get('split_mode', '')} | {row.get('family', '')} | "
             f"{row.get('backbone') or ''} | {row.get('loss_name') or ''} | "
+            f"{_format_optional_float(row.get('train_normalized_action_mse'))} | "
             f"{float(row.get('normalized_action_mse', 0.0)):.6g} | "
             f"{float(row.get('action_mse', 0.0)):.6g} | "
             f"{float(row.get('translation_endpoint_error', 0.0)):.6g} | "
@@ -1696,6 +2526,29 @@ def _render_combined_report(payload: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _format_timing_cell(event_metrics: dict[str, Any]) -> str:
+    mean = _format_optional_float(event_metrics.get("mean_ms"))
+    median = _format_optional_float(event_metrics.get("median_ms"))
+    if not mean and not median:
+        return ""
+    return f"{mean}/{median}"
+
+
+def _format_metric_value_count(metric: Any) -> str:
+    if not isinstance(metric, dict):
+        return ""
+    return _format_optional_float(metric.get("value"))
+
+
+def _format_optional_float(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        return f"{float(value):.6g}"
+    except (TypeError, ValueError):
+        return ""
 
 
 def _recommendation(best: dict[str, Any] | None, state: dict[str, Any] | None) -> str:

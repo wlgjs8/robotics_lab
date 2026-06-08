@@ -1,0 +1,522 @@
+{
+  "args": {
+    "action_horizon": 8,
+    "batch_size": 16,
+    "camera_names": [
+      "left_realsense_color",
+      "right_realsense_color"
+    ],
+    "data_dir": "/data/policy_episodes",
+    "device": "cuda",
+    "epochs": 1,
+    "exclude_camera_names": [
+      "left_realsense_depth",
+      "right_realsense_depth"
+    ],
+    "flow_sample_steps": 8,
+    "hidden_dim": 64,
+    "image_size": 64,
+    "lr": 0.0001,
+    "max_train_samples": 64,
+    "max_val_samples": 32,
+    "models": [
+      "direct_bc_resnet18_huber",
+      "structured_tiny",
+      "does_not_exist"
+    ],
+    "seed": 0
+  },
+  "baseline_comparison": {
+    "best_minus_state_only_normalized_mse": null,
+    "best_minus_train_mean_normalized_mse": null,
+    "best_minus_zero_normalized_mse": null
+  },
+  "created_at": "2026-06-06T10:50:11.568545+00:00",
+  "dataset": {
+    "detected_cameras": [
+      "left_realsense_color",
+      "left_realsense_depth",
+      "right_realsense_color",
+      "right_realsense_depth"
+    ],
+    "detected_formats": [
+      "pika_umi_bimanual"
+    ],
+    "frame_count": 42435,
+    "sessions": [
+      "data_20260606_134608",
+      "data_20260606_140442",
+      "data_20260606_140813",
+      "data_20260606_175002",
+      "data_20260606_175635",
+      "data_20260606_183038",
+      "data_20260606_185446",
+      "data_20260606_190156"
+    ],
+    "snapshot_hash": "532de3a1c38a4b3f12dcc875d928f723d798a1ee0edf02b99e857d2483e9f9ce",
+    "snapshot_path": "/outputs/flow_runs/imitation_official/dataset_snapshot.json",
+    "valid_episode_count": 146
+  },
+  "failed_runs": [
+    {
+      "checkpoint_path": null,
+      "checkpoint_sha256": null,
+      "error": "unknown imitation model family: does_not_exist",
+      "error_type": "ValueError",
+      "family": "failed",
+      "gpu_info": {
+        "cuda_available": true,
+        "cuda_device_count": 8,
+        "cuda_visible_devices": "",
+        "devices": [
+          {
+            "index": 0,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 1,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 2,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 3,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 4,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 5,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 6,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 7,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          }
+        ],
+        "nvidia_smi": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0"
+      },
+      "latency": {},
+      "metrics": {},
+      "model": "does_not_exist",
+      "status": "failed",
+      "wall_time_sec": 6.930000381544232e-06
+    }
+  ],
+  "leaderboard": [
+    {
+      "action_mse": 0.013243690464797208,
+      "backbone": "tiny_cnn",
+      "checkpoint_sha256": "ba72801a351f70e746f44e6be3f66f2586ca74a1d72d1b31644a6cad6d21a59e",
+      "family": "arm_structured_direct",
+      "gripper_mse": 0.09248702009011844,
+      "inactive_arm_leakage": 0.004274045903002843,
+      "latency": {
+        "median_ms": 0.6404199957614765,
+        "p95_ms": 0.7919659183244221
+      },
+      "loss_name": "mse",
+      "model": "structured_tiny",
+      "normalized_action_mse": 0.6373402602817011,
+      "rank": 1,
+      "rotation_endpoint_error": 0.011355965022700277,
+      "translation_endpoint_error": 0.002509072689768146,
+      "wall_time_sec": 1.0625363369763363
+    },
+    {
+      "action_mse": 0.013490950140766265,
+      "backbone": "resnet18",
+      "checkpoint_sha256": "113c87be485032c186d65b3f514157f2e2eac4aeac085804ebfcebe2dedbef70",
+      "family": "direct_bc_chunk",
+      "gripper_mse": 0.09421740523125677,
+      "inactive_arm_leakage": 0.0018072212042170577,
+      "latency": {
+        "median_ms": 1.069858015398495,
+        "p95_ms": 1.0875561623834074
+      },
+      "loss_name": "huber",
+      "model": "direct_bc_resnet18_huber",
+      "normalized_action_mse": 0.6492394017376397,
+      "rank": 2,
+      "rotation_endpoint_error": 0.012331879444317248,
+      "translation_endpoint_error": 0.0025572685904350417,
+      "wall_time_sec": 2.685299735981971
+    }
+  ],
+  "normalization": {
+    "action_dim_names": [
+      "left_dx",
+      "left_dy",
+      "left_dz",
+      "left_drx",
+      "left_dry",
+      "left_drz",
+      "left_grip",
+      "right_dx",
+      "right_dy",
+      "right_dz",
+      "right_drx",
+      "right_dry",
+      "right_drz",
+      "right_grip"
+    ],
+    "path": "/outputs/flow_runs/imitation_new_models_smoke/train_dataset_stats.json",
+    "sample_count": 64,
+    "source": "train_only",
+    "train_episode_count": 117
+  },
+  "output_dir": "/outputs/flow_runs/imitation_new_models_smoke",
+  "recommendation": "Next rollout candidate for simulator dry-run is `structured_tiny` from family `arm_structured_direct`.",
+  "results": [
+    {
+      "backbone": "resnet18",
+      "checkpoint_path": "/outputs/flow_runs/imitation_new_models_smoke/direct_bc_resnet18_huber/checkpoint.pt",
+      "checkpoint_sha256": "113c87be485032c186d65b3f514157f2e2eac4aeac085804ebfcebe2dedbef70",
+      "family": "direct_bc_chunk",
+      "gpu_info": {
+        "cuda_available": true,
+        "cuda_device_count": 8,
+        "cuda_visible_devices": "",
+        "devices": [
+          {
+            "index": 0,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 1,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 2,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 3,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 4,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 5,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 6,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 7,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          }
+        ],
+        "nvidia_smi": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0"
+      },
+      "latency": {
+        "median_ms": 1.069858015398495,
+        "p95_ms": 1.0875561623834074
+      },
+      "loss_name": "huber",
+      "metrics": {
+        "action_mse": 0.013490950140766265,
+        "by_phase": {
+          "left_pick": {
+            "action_mse": 0.0,
+            "normalized_action_mse": 0.0
+          },
+          "left_place": {
+            "action_mse": 0.0,
+            "normalized_action_mse": 0.0
+          },
+          "right_pick": {
+            "action_mse": 0.013490950140766265,
+            "normalized_action_mse": 0.6492394017376397
+          },
+          "right_place": {
+            "action_mse": 0.0,
+            "normalized_action_mse": 0.0
+          }
+        },
+        "gripper_mse": 0.09421740523125677,
+        "inactive_arm_leakage": 0.0018072212042170577,
+        "normalized_action_mse": 0.6492394017376397,
+        "rotation_endpoint_error": 0.012331879444317248,
+        "smoothness": 0.143726382670658,
+        "translation_endpoint_error": 0.0025572685904350417
+      },
+      "model": "direct_bc_resnet18_huber",
+      "shortcut_ablations": {
+        "image_shuffle": {
+          "action_mse": 0.013484428503553848,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 0.0,
+              "normalized_action_mse": 0.0
+            },
+            "left_place": {
+              "action_mse": 0.0,
+              "normalized_action_mse": 0.0
+            },
+            "right_pick": {
+              "action_mse": 0.013484428503553848,
+              "normalized_action_mse": 0.6489255540250649
+            },
+            "right_place": {
+              "action_mse": 0.0,
+              "normalized_action_mse": 0.0
+            }
+          },
+          "gripper_mse": 0.09417177155099773,
+          "inactive_arm_leakage": 0.0018071461054205429,
+          "normalized_action_mse": 0.6489255540250649,
+          "rotation_endpoint_error": 0.012327975054927255,
+          "smoothness": 0.1435692762689931,
+          "translation_endpoint_error": 0.002557126363717707
+        },
+        "zero_image": {
+          "action_mse": 0.013412672757595969,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 0.0,
+              "normalized_action_mse": 0.0
+            },
+            "left_place": {
+              "action_mse": 0.0,
+              "normalized_action_mse": 0.0
+            },
+            "right_pick": {
+              "action_mse": 0.013412672757595969,
+              "normalized_action_mse": 0.6454723756283738
+            },
+            "right_place": {
+              "action_mse": 0.0,
+              "normalized_action_mse": 0.0
+            }
+          },
+          "gripper_mse": 0.09366800876406911,
+          "inactive_arm_leakage": 0.001906130630231928,
+          "normalized_action_mse": 0.6454723756283738,
+          "rotation_endpoint_error": 0.012518951379590726,
+          "smoothness": 0.1588549597987107,
+          "translation_endpoint_error": 0.002527523646360518
+        }
+      },
+      "training_curves": "/outputs/flow_runs/imitation_new_models_smoke/direct_bc_resnet18_huber/training_curves.jsonl",
+      "wall_time_sec": 2.685299735981971
+    },
+    {
+      "backbone": "tiny_cnn",
+      "checkpoint_path": "/outputs/flow_runs/imitation_new_models_smoke/structured_tiny/checkpoint.pt",
+      "checkpoint_sha256": "ba72801a351f70e746f44e6be3f66f2586ca74a1d72d1b31644a6cad6d21a59e",
+      "family": "arm_structured_direct",
+      "gpu_info": {
+        "cuda_available": true,
+        "cuda_device_count": 8,
+        "cuda_visible_devices": "",
+        "devices": [
+          {
+            "index": 0,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 1,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 2,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 3,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 4,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 5,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 6,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 7,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          }
+        ],
+        "nvidia_smi": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0"
+      },
+      "latency": {
+        "median_ms": 0.6404199957614765,
+        "p95_ms": 0.7919659183244221
+      },
+      "loss_name": "mse",
+      "metrics": {
+        "action_mse": 0.013243690464797208,
+        "by_phase": {
+          "left_pick": {
+            "action_mse": 0.0,
+            "normalized_action_mse": 0.0
+          },
+          "left_place": {
+            "action_mse": 0.0,
+            "normalized_action_mse": 0.0
+          },
+          "right_pick": {
+            "action_mse": 0.013243690464797208,
+            "normalized_action_mse": 0.6373402602817011
+          },
+          "right_place": {
+            "action_mse": 0.0,
+            "normalized_action_mse": 0.0
+          }
+        },
+        "gripper_mse": 0.09248702009011844,
+        "inactive_arm_leakage": 0.004274045903002843,
+        "normalized_action_mse": 0.6373402602817011,
+        "rotation_endpoint_error": 0.011355965022700277,
+        "smoothness": 0.11186320999903339,
+        "translation_endpoint_error": 0.002509072689768146
+      },
+      "model": "structured_tiny",
+      "shortcut_ablations": {
+        "image_shuffle": {
+          "action_mse": 0.01324367803396508,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 0.0,
+              "normalized_action_mse": 0.0
+            },
+            "left_place": {
+              "action_mse": 0.0,
+              "normalized_action_mse": 0.0
+            },
+            "right_pick": {
+              "action_mse": 0.01324367803396508,
+              "normalized_action_mse": 0.6373396620594907
+            },
+            "right_place": {
+              "action_mse": 0.0,
+              "normalized_action_mse": 0.0
+            }
+          },
+          "gripper_mse": 0.0924869329280296,
+          "inactive_arm_leakage": 0.004274046514183283,
+          "normalized_action_mse": 0.6373396620594907,
+          "rotation_endpoint_error": 0.01135597696827114,
+          "smoothness": 0.11186290479132108,
+          "translation_endpoint_error": 0.002509044689499406
+        },
+        "zero_image": {
+          "action_mse": 0.013244713350896841,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 0.0,
+              "normalized_action_mse": 0.0
+            },
+            "left_place": {
+              "action_mse": 0.0,
+              "normalized_action_mse": 0.0
+            },
+            "right_pick": {
+              "action_mse": 0.013244713350896841,
+              "normalized_action_mse": 0.6373894857218992
+            },
+            "right_place": {
+              "action_mse": 0.0,
+              "normalized_action_mse": 0.0
+            }
+          },
+          "gripper_mse": 0.0924941912871726,
+          "inactive_arm_leakage": 0.004273895901860669,
+          "normalized_action_mse": 0.6373894857218992,
+          "rotation_endpoint_error": 0.0113619226664582,
+          "smoothness": 0.1119160351476499,
+          "translation_endpoint_error": 0.002508803497584891
+        }
+      },
+      "training_curves": "/outputs/flow_runs/imitation_new_models_smoke/structured_tiny/training_curves.jsonl",
+      "wall_time_sec": 1.0625363369763363
+    },
+    {
+      "checkpoint_path": null,
+      "checkpoint_sha256": null,
+      "error": "unknown imitation model family: does_not_exist",
+      "error_type": "ValueError",
+      "family": "failed",
+      "gpu_info": {
+        "cuda_available": true,
+        "cuda_device_count": 8,
+        "cuda_visible_devices": "",
+        "devices": [
+          {
+            "index": 0,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 1,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 2,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 3,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 4,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 5,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 6,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          },
+          {
+            "index": 7,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          }
+        ],
+        "nvidia_smi": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0"
+      },
+      "latency": {},
+      "metrics": {},
+      "model": "does_not_exist",
+      "status": "failed",
+      "wall_time_sec": 6.930000381544232e-06
+    }
+  ],
+  "safety": {
+    "real_mode_behavior_touched": false,
+    "robot_motion_commands_sent": false,
+    "scope": "offline HDF5 imitation-learning experiment only"
+  },
+  "schema": "robotics_lab.policy_runner.imitation_report.v1",
+  "split": {
+    "session_holdout_val_episode_count": 50,
+    "split_algorithm": "session_stratified_episode",
+    "split_hash": "93ac654ea69705f967546f011fecc2efdb4047fc92590928b54c7708a061e7dc",
+    "split_path": "/outputs/flow_runs/imitation_official/split_manifest.json",
+    "train_episode_count": 117,
+    "val_ratio": 0.2,
+    "validation_episode_count": 29
+  },
+  "warnings": []
+}

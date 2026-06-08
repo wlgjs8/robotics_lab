@@ -1,0 +1,145 @@
+{
+  "backbone": "dinov3_convnext_tiny",
+  "checkpoint_path": "/outputs/flow_runs/imitation_weightavg_direct_tiny_holdout_color384_h1_latest/top2_h256/direct_bc_dinov3_convnext_tiny_weightavg/checkpoint.pt",
+  "checkpoint_sha256": "905e0716682a27191385a411d397d31f0ce6dfda521aed8859d3e7b404499d22",
+  "family": "direct_bc_weight_average",
+  "latency": {
+    "median_ms": 3.412919002585113,
+    "p95_ms": 3.5150458716088906
+  },
+  "loss_name": "weight_average",
+  "metrics": {
+    "action_mse": 1.1756333244267998,
+    "by_phase": {
+      "left_pick": {
+        "action_mse": 1.3127264146864408,
+        "normalized_action_mse": 1.0179246601814955
+      },
+      "left_place": {
+        "action_mse": 1.8926211875882324,
+        "normalized_action_mse": 1.4675912343001238
+      },
+      "right_pick": {
+        "action_mse": 0.06988720846512599,
+        "normalized_action_mse": 0.05419248986841577
+      },
+      "right_place": {
+        "action_mse": 1.4380358188472666,
+        "normalized_action_mse": 1.115093065738736
+      }
+    },
+    "gripper_mse": 8.22933320193902,
+    "inactive_arm_leakage": 0.0019279873234038694,
+    "normalized_action_mse": 0.9116188558992611,
+    "rotation_endpoint_error": 0.007062059315120306,
+    "smoothness": 0.0,
+    "translation_endpoint_error": 0.0027431792497540695
+  },
+  "model": "weightavg_direct_bc_dinov3_convnext_tiny_top2_h256",
+  "model_config": {
+    "action_dim": 14,
+    "action_horizon": 1,
+    "backbone": "dinov3_convnext_tiny",
+    "camera_names": [
+      "left_realsense_color",
+      "right_realsense_color"
+    ],
+    "hidden_dim": 256,
+    "loss_name": "mse",
+    "member_checkpoint_sha256": [
+      "8140a6b015c2a6f50dc8813b108aec9f55d2b6d988523c4a1a84d5a94b437cb5",
+      "3ad5d816d32bbc8c05fd19607c1272f134cf4183483768b09623346235a94fa8"
+    ],
+    "member_count": 2,
+    "proprio_dim": 16,
+    "uses_images": true
+  },
+  "safety": {
+    "real_mode_behavior_touched": false,
+    "robot_motion_commands_sent": false,
+    "scope": "offline HDF5 validation only"
+  },
+  "shortcut_ablations": {
+    "image_shuffle": {
+      "action_mse": 1.3182867062665746,
+      "by_phase": {
+        "left_pick": {
+          "action_mse": 1.5324121797756924,
+          "normalized_action_mse": 1.1882751271739673
+        },
+        "left_place": {
+          "action_mse": 2.022621935398622,
+          "normalized_action_mse": 1.5683974385158286
+        },
+        "right_pick": {
+          "action_mse": 0.09345260691357345,
+          "normalized_action_mse": 0.07246575681826013
+        },
+        "right_place": {
+          "action_mse": 1.63608370637469,
+          "normalized_action_mse": 1.2686649192152804
+        }
+      },
+      "gripper_mse": 9.227904208902181,
+      "inactive_arm_leakage": 0.00195854151406049,
+      "normalized_action_mse": 1.022236265291209,
+      "rotation_endpoint_error": 0.007149881847349026,
+      "smoothness": 0.0,
+      "translation_endpoint_error": 0.002796221549930835
+    },
+    "zero_image": {
+      "action_mse": 2.182745500647306,
+      "by_phase": {
+        "left_pick": {
+          "action_mse": 2.2329992457698418,
+          "normalized_action_mse": 1.7315298702043251
+        },
+        "left_place": {
+          "action_mse": 2.6712143943608315,
+          "normalized_action_mse": 2.071334113666902
+        },
+        "right_pick": {
+          "action_mse": 0.8091740014591157,
+          "normalized_action_mse": 0.627456080145775
+        },
+        "right_place": {
+          "action_mse": 3.030195108635019,
+          "normalized_action_mse": 2.349697767739138
+        }
+      },
+      "gripper_mse": 15.279103798840262,
+      "inactive_arm_leakage": 0.003892561033985896,
+      "normalized_action_mse": 1.692561715184055,
+      "rotation_endpoint_error": 0.008133797445260636,
+      "smoothness": 0.0,
+      "translation_endpoint_error": 0.0029846220089143663
+    }
+  },
+  "train_metrics": {
+    "action_mse": 1.108309654714322,
+    "by_phase": {
+      "left_pick": {
+        "action_mse": 0.9873046690693248,
+        "normalized_action_mse": 0.7655835660152022
+      },
+      "left_place": {
+        "action_mse": 1.8922400754415336,
+        "normalized_action_mse": 1.467295709316335
+      },
+      "right_pick": {
+        "action_mse": 0.08156882478863317,
+        "normalized_action_mse": 0.06325074084397564
+      },
+      "right_place": {
+        "action_mse": 1.482544392602438,
+        "normalized_action_mse": 1.1496062547079073
+      }
+    },
+    "gripper_mse": 7.7580683147939435,
+    "inactive_arm_leakage": 0.001937096908185966,
+    "normalized_action_mse": 0.8594142054499788,
+    "rotation_endpoint_error": 0.007281054475642697,
+    "smoothness": 0.0,
+    "translation_endpoint_error": 0.002692885496854138
+  }
+}

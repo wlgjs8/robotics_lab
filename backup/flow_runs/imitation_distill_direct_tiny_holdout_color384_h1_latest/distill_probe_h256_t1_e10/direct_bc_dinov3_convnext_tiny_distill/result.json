@@ -1,0 +1,144 @@
+{
+  "backbone": "dinov3_convnext_tiny",
+  "checkpoint_path": "/outputs/flow_runs/imitation_distill_direct_tiny_holdout_color384_h1_latest/distill_probe_h256_t1_e10/direct_bc_dinov3_convnext_tiny_distill/checkpoint.pt",
+  "checkpoint_sha256": "be70a831e4f214640055f3a3877c1e8fd594fbe511e0e9007295540c14a46496",
+  "family": "direct_bc_distilled_ensemble",
+  "latency": {
+    "median_ms": 3.500253485981375,
+    "p95_ms": 3.513788411510177
+  },
+  "loss_name": "distill_teacher_mse",
+  "metrics": {
+    "action_mse": 0.5146436094419408,
+    "by_phase": {
+      "left_pick": {
+        "action_mse": 0.538055438685484,
+        "normalized_action_mse": 0.4172231879051135
+      },
+      "left_place": {
+        "action_mse": 0.7760426278197629,
+        "normalized_action_mse": 0.6017650893377322
+      },
+      "right_pick": {
+        "action_mse": 0.042746417223400036,
+        "normalized_action_mse": 0.03314676366628867
+      },
+      "right_place": {
+        "action_mse": 0.7063052373316608,
+        "normalized_action_mse": 0.5476887725055599
+      }
+    },
+    "gripper_mse": 3.602425836553762,
+    "inactive_arm_leakage": 0.0019238498500350227,
+    "normalized_action_mse": 0.3990690027981936,
+    "rotation_endpoint_error": 0.006532157963076149,
+    "smoothness": 0.0,
+    "translation_endpoint_error": 0.0015906573314592677
+  },
+  "model": "distill_direct_bc_dinov3_convnext_tiny_distill_probe_h256_t1_e10",
+  "model_config": {
+    "action_dim": 14,
+    "action_horizon": 1,
+    "backbone": "dinov3_convnext_tiny",
+    "camera_names": [
+      "left_realsense_color",
+      "right_realsense_color"
+    ],
+    "epochs": 10,
+    "hard_weight": 0.0,
+    "hidden_dim": 256,
+    "loss_name": "distill_teacher_mse",
+    "proprio_dim": 16,
+    "teacher": "top5_prediction_ensemble"
+  },
+  "safety": {
+    "real_mode_behavior_touched": false,
+    "robot_motion_commands_sent": false,
+    "scope": "offline HDF5 distillation only"
+  },
+  "shortcut_ablations": {
+    "image_shuffle": {
+      "action_mse": 1.220719732763658,
+      "by_phase": {
+        "left_pick": {
+          "action_mse": 1.2722389232798852,
+          "normalized_action_mse": 0.9865295305714438
+        },
+        "left_place": {
+          "action_mse": 1.6389199429733874,
+          "normalized_action_mse": 1.2708642161469361
+        },
+        "right_pick": {
+          "action_mse": 0.4154201209258774,
+          "normalized_action_mse": 0.32212834349572816
+        },
+        "right_place": {
+          "action_mse": 1.5639884501763295,
+          "normalized_action_mse": 1.2127602475751174
+        }
+      },
+      "gripper_mse": 8.544943173278885,
+      "inactive_arm_leakage": 0.0024174633417179824,
+      "normalized_action_mse": 0.9465801139128457,
+      "rotation_endpoint_error": 0.007071505833833165,
+      "smoothness": 0.0,
+      "translation_endpoint_error": 0.002142377239658791
+    },
+    "zero_image": {
+      "action_mse": 1.6472874878742083,
+      "by_phase": {
+        "left_pick": {
+          "action_mse": 1.560285328839956,
+          "normalized_action_mse": 1.2098887440495032
+        },
+        "left_place": {
+          "action_mse": 1.4632604749814127,
+          "normalized_action_mse": 1.1346529673574437
+        },
+        "right_pick": {
+          "action_mse": 0.6475837055117786,
+          "normalized_action_mse": 0.5021544596020078
+        },
+        "right_place": {
+          "action_mse": 2.9260739027372358,
+          "normalized_action_mse": 2.268959281832686
+        }
+      },
+      "gripper_mse": 11.53086911406593,
+      "inactive_arm_leakage": 0.006362025967942127,
+      "normalized_action_mse": 1.277352643746495,
+      "rotation_endpoint_error": 0.009654169299278722,
+      "smoothness": 0.0,
+      "translation_endpoint_error": 0.0027579531444468504
+    }
+  },
+  "train_metrics": {
+    "action_mse": 0.3902471095820681,
+    "by_phase": {
+      "left_pick": {
+        "action_mse": 0.3234190902976457,
+        "normalized_action_mse": 0.25078817939842885
+      },
+      "left_place": {
+        "action_mse": 0.7310547341727914,
+        "normalized_action_mse": 0.5668802223612319
+      },
+      "right_pick": {
+        "action_mse": 0.03746044176825702,
+        "normalized_action_mse": 0.029047870927705798
+      },
+      "right_place": {
+        "action_mse": 0.47294544200095956,
+        "normalized_action_mse": 0.3667350812379342
+      }
+    },
+    "gripper_mse": 2.73166476101387,
+    "inactive_arm_leakage": 0.0020709429271930104,
+    "normalized_action_mse": 0.3026084886872816,
+    "rotation_endpoint_error": 0.006101269358243018,
+    "smoothness": 0.0,
+    "translation_endpoint_error": 0.0013600517896461977
+  },
+  "training_curves": "/outputs/flow_runs/imitation_distill_direct_tiny_holdout_color384_h1_latest/distill_probe_h256_t1_e10/direct_bc_dinov3_convnext_tiny_distill/training_curves.jsonl",
+  "wall_time_sec": 3522.254317051964
+}

@@ -1,0 +1,51 @@
+{
+  "artifact": "/outputs/flow_runs/imitation_sweep_20epoch/gpu0_baselines_state/zero/constant_baseline.json",
+  "checkpoint_path": null,
+  "checkpoint_sha256": null,
+  "family": "constant_baseline",
+  "gpu_info": {
+    "cuda_available": true,
+    "cuda_device_count": 1,
+    "cuda_visible_devices": "",
+    "devices": [
+      {
+        "index": 0,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      }
+    ],
+    "nvidia_smi": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0"
+  },
+  "latency": {
+    "median_ms": 0.0,
+    "p95_ms": 0.0
+  },
+  "metrics": {
+    "action_mse": 1.3273991581200226,
+    "by_phase": {
+      "left_pick": {
+        "action_mse": 1.435685504147794,
+        "normalized_action_mse": 1.057356682761441
+      },
+      "left_place": {
+        "action_mse": 2.2158843344828583,
+        "normalized_action_mse": 1.6319591599433216
+      },
+      "right_pick": {
+        "action_mse": 0.08703444492205877,
+        "normalized_action_mse": 0.06409931123696705
+      },
+      "right_place": {
+        "action_mse": 1.5842107320823122,
+        "normalized_action_mse": 1.1667428553330228
+      }
+    },
+    "gripper_mse": 9.291691298429868,
+    "inactive_arm_leakage": 0.0,
+    "normalized_action_mse": 0.9776057266547648,
+    "rotation_endpoint_error": 0.007068827789147709,
+    "smoothness": 0.0,
+    "translation_endpoint_error": 0.002818798355933776
+  },
+  "model": "zero",
+  "wall_time_sec": 38.617868144996464
+}

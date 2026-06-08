@@ -66,6 +66,16 @@ class FlowHdf5DatasetTest(unittest.TestCase):
             self.assertEqual(jpeg.shape, (3, 8, 8))
             self.assertEqual(png.shape, (3, 8, 8))
 
+    def test_center_square_crop_changes_nonsquare_image_before_resize(self) -> None:
+        raw = _image_bytes("png", index=0)
+
+        full = decode_hdf5_image_value(raw, image_size=8, image_crop="none")
+        cropped = decode_hdf5_image_value(raw, image_size=8, image_crop="center_square")
+
+        self.assertEqual(full.shape, (3, 8, 8))
+        self.assertEqual(cropped.shape, (3, 8, 8))
+        self.assertGreater(float(np.abs(full - cropped).sum()), 0.0)
+
     def test_single_arm_maps_to_left_and_zero_masks_right_arm(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "episode_001.hdf5"
@@ -164,6 +174,7 @@ class FlowHdf5DatasetTest(unittest.TestCase):
 
             self.assertEqual(stats["schema"], "robotics_lab.policy_runner.flow_matching.v1.dataset_stats")
             self.assertEqual(stats["action_dim"], 14)
+            self.assertEqual(stats["image_crop"], "none")
             self.assertAlmostEqual(float(stats["dt_mean_sec"]), 1.0 / 30.0)
             self.assertAlmostEqual(float(stats["dt_p50_sec"]), 1.0 / 30.0)
             self.assertTrue(np.isfinite(sample["proprio"]).all())
@@ -270,8 +281,8 @@ class FlowHdf5DatasetTest(unittest.TestCase):
 def _image_bytes(suffix: str, *, index: int) -> bytes:
     assert Image is not None and np is not None
     arr = np.zeros((12, 10, 3), dtype=np.uint8)
-    arr[:, :, 0] = 20 + index
-    arr[:, :, 1] = 40
+    arr[:, :, 0] = 20 + index + np.arange(10, dtype=np.uint8)[None, :]
+    arr[:, :, 1] = 40 + np.arange(12, dtype=np.uint8)[:, None]
     arr[:, :, 2] = 80
     image = Image.fromarray(arr, mode="RGB")
     buffer = io.BytesIO()

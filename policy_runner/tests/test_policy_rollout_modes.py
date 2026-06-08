@@ -244,6 +244,43 @@ class PolicyRolloutModesTest(unittest.TestCase):
         self.assertFalse(summary["allow_real_gripper_motion"])
         self.assertEqual(summary["collision_model_status"], "configured_estimate")
 
+    def test_offline_rollout_summary_preserves_checkpoint_arm_metadata(self) -> None:
+        recorder = RolloutSummaryRecorder(
+            RolloutModePolicy(RolloutMode.OFFLINE_EVAL),
+            checkpoint_path="outputs/direct_bc_distill.pt",
+            config_path="policy_runner/config/simulator_hold.yaml",
+            command_family="TcpTwistStand",
+            camera_names=["left_realsense_color", "right_realsense_color"],
+            selected_arms=["left", "right"],
+            left_arm_mask=1.0,
+            right_arm_mask=1.0,
+            allow_real_gripper_motion=False,
+            collision_model_status="missing",
+        )
+        recorder.image_decode_count = 64
+        recorder.missing_camera_count = 0
+        recorder.proposed_intent_count = 32
+
+        document = recorder.to_document()
+        summary = document["rollout_summary"]
+
+        self.assertEqual(summary["rollout_mode"], "offline_eval")
+        self.assertFalse(summary["may_send_commands"])
+        self.assertFalse(summary["allows_physical_real_motion"])
+        self.assertEqual(summary["command_family"], "TcpTwistStand")
+        self.assertEqual(
+            summary["camera_names"],
+            ["left_realsense_color", "right_realsense_color"],
+        )
+        self.assertEqual(summary["image_decode_count"], 64)
+        self.assertEqual(summary["missing_camera_count"], 0)
+        self.assertEqual(summary["proposed_intent_count"], 32)
+        self.assertEqual(summary["selected_arm"], "both")
+        self.assertEqual(summary["selected_arms"], ["left", "right"])
+        self.assertEqual(summary["arm_mask"], {"left": 1.0, "right": 1.0})
+        self.assertEqual(summary["sent_command_count"], 0)
+        self.assertEqual(summary["dropped_command_count"], 0)
+
 
 def measured_geometry():
     return geometry_status_from_mapping(

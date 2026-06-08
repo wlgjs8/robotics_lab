@@ -1,0 +1,79 @@
+{
+  "artifact": "/outputs/flow_runs/imitation_code_smoke/zero/constant_baseline.json",
+  "checkpoint_path": null,
+  "checkpoint_sha256": null,
+  "family": "constant_baseline",
+  "gpu_info": {
+    "cuda_available": true,
+    "cuda_device_count": 8,
+    "cuda_visible_devices": "",
+    "devices": [
+      {
+        "index": 0,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 1,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 2,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 3,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 4,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 5,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 6,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      },
+      {
+        "index": 7,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      }
+    ],
+    "nvidia_smi": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0"
+  },
+  "latency": {
+    "median_ms": 0.0,
+    "p95_ms": 0.0
+  },
+  "metrics": {
+    "action_mse": 0.01755329416838739,
+    "by_phase": {
+      "left_pick": {
+        "action_mse": 0.0,
+        "normalized_action_mse": 0.0
+      },
+      "left_place": {
+        "action_mse": 0.0,
+        "normalized_action_mse": 0.0
+      },
+      "right_pick": {
+        "action_mse": 0.01755329416838739,
+        "normalized_action_mse": 0.24894017691870468
+      },
+      "right_place": {
+        "action_mse": 0.0,
+        "normalized_action_mse": 0.0
+      }
+    },
+    "gripper_mse": 0.12275734027394947,
+    "inactive_arm_leakage": 0.0,
+    "normalized_action_mse": 0.24894017691870468,
+    "rotation_endpoint_error": 0.008307110216705191,
+    "smoothness": 0.0,
+    "translation_endpoint_error": 0.0024250776294858856
+  },
+  "model": "zero",
+  "wall_time_sec": 0.36047595500713214
+}

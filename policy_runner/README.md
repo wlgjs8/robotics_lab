@@ -380,7 +380,15 @@ Dataset statistics normalize proprio, action chunks, camera images, and record
 timing fields such as `dt_mean_sec` before training.
 
 Run `flow-infer` with an explicit `--rollout-mode`; do not use `mode: real` as
-the policy rollout selector. The modes are:
+the policy rollout selector. Despite the command name, the runtime supports
+both `robotics_lab.policy_runner.flow_matching.v1` checkpoints and the guarded
+image action-chunk imitation families in
+`robotics_lab.policy_runner.imitation_checkpoint.v1`: `direct_bc_chunk`,
+`direct_bc_distilled_cached_ensemble`, and `arm_structured_direct`. It also
+supports prediction-averaged direct-BC ensembles from
+`robotics_lab.policy_runner.imitation_ensemble_report.v1` JSON reports, selected
+with `--ensemble-name`. Other imitation checkpoint families fail closed until a
+runtime action source is implemented for them. The modes are:
 
 - `offline_eval`: load a checkpoint and HDF5 samples from `--episodes-dir`,
   produce action chunks, and avoid robot state and UDP command clients.
@@ -411,7 +419,12 @@ non-offline simulator or read-only modes, omitting both uses
 `1 / command_rate_hz` as a dry-run fallback. `--command-family tcp_twist_local`
 and `--command-family tcp_delta_stand` are debug paths; `tcp_delta_stand`
 requires `--allow-experimental-tcp-delta-stand` outside `offline_eval` and
-`sim_dryrun`.
+`sim_dryrun`. Direct-BC imitation checkpoints and ensemble reports must carry
+the training `image_size` or receive an explicit `--image-size`; this must match
+training resolution, for example `--image-size 384` for the current color-384
+DINOv3 direct/distill experiments. Ensemble reports verify member checkpoint
+SHA-256 values when `member_checkpoint_sha256` is present and fail closed if
+member action/camera/stat metadata differs.
 
 Example offline and read-only invocations:
 
