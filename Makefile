@@ -14,7 +14,7 @@ POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 export FLOW_EXPECTED_GPU_COUNT FLOW_RUN_UID FLOW_RUN_GID
 
-.PHONY: build deploy stop sim-local-up sim-up sim-backend-up sim-control-up sim-down sim-smoke sim-teleop-up sim-infer-up policy-train policy-flow-train-config policy-flow-train-build policy-flow-gpu-smoke policy-flow-train-preflight policy-flow-hdf5-audit policy-flow-train-up policy-flow-train-down policy-hdf5-audit-smoke policy-flow-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up
+.PHONY: build deploy stop sim-local-up sim-up sim-backend-up sim-control-up sim-down sim-smoke sim-teleop-up sim-infer-up policy-train policy-flow-train-config policy-flow-train-build policy-flow-gpu-smoke policy-flow-train-preflight policy-flow-hdf5-audit policy-flow-train-up policy-flow-train-down policy-hdf5-audit-smoke policy-flow-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up pgmode-sim-build pgmode-sim-up pgmode-sim-down
 
 build:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) build
@@ -107,3 +107,15 @@ camera-mock-up:
 
 camera-real-up:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up --build camera_server
+
+# --- rbpodo pgmode-simulation (native; dual Virtual ControlBox VMs) ---
+# One-command bring-up of rb_servo_server + rb_gui (viser) on this WSL box.
+# Controller-simulation only; never sets RB_ALLOW_REAL_CARTESIAN.
+pgmode-sim-build:
+	bash tools/vm/pgmode_sim_build.sh
+
+pgmode-sim-up:
+	bash tools/vm/pgmode_sim_up.sh
+
+pgmode-sim-down:
+	bash tools/vm/pgmode_sim_down.sh

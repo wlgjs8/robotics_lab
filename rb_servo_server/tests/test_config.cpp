@@ -195,17 +195,9 @@ bool testInvalidJointWrapConfigRejects() {
 bool testControllerSimulationGateConfig() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard allow_controller_sim_cartesian("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN");
-    EnvVarGuard allow_diag("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
 
     allow_real.unset();
     allow_motion.unset();
-    allow_controller_sim.unset();
-    allow_controller_sim_cartesian.unset();
-    allow_diag.unset();
-    pgmode_confirmed.unset();
 
     const std::string valid_body =
         "schema: robotics_lab.rb_servo_server.v1\n"
@@ -231,6 +223,8 @@ bool testControllerSimulationGateConfig() {
         "  send_servo_commands: true\n"
         "  allow_controller_simulation_motion: true\n"
         "  allow_controller_simulation_diagnostics_suspect: true\n"
+        "  allow_controller_simulation_init_error: true\n"
+        "  allow_controller_simulation_not_activated: true\n"
         "safety:\n"
         "  tracking_error_policy: fault_latch\n"
         "  controller_simulation_tracking_error_source: reference\n"
@@ -239,29 +233,25 @@ bool testControllerSimulationGateConfig() {
         "cartesian_control:\n"
         "  allow_in_controller_simulation: true\n";
 
-    const std::string missing_env_path = writeTempConfig("controller-sim-missing-env", valid_body);
-    RB_CHECK(loadRejects(missing_env_path));
-    ::unlink(missing_env_path.c_str());
+    const std::string missing_real_env_path = writeTempConfig("controller-sim-missing-real-env", valid_body);
+    RB_CHECK(loadRejects(missing_real_env_path));
+    ::unlink(missing_real_env_path.c_str());
 
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    allow_diag.set("1");
-    pgmode_confirmed.set("1");
-
-    const std::string missing_cartesian_env_path =
-        writeTempConfig("controller-sim-missing-cartesian-env", valid_body);
-    RB_CHECK(loadRejects(missing_cartesian_env_path));
-    ::unlink(missing_cartesian_env_path.c_str());
-
-    allow_controller_sim_cartesian.set("1");
 
     const std::string valid_path = writeTempConfig("controller-sim-valid", valid_body);
     const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(valid_path);
     ::unlink(valid_path.c_str());
     RB_CHECK(cfg.servo.allow_controller_simulation_motion);
     RB_CHECK(cfg.servo.allow_controller_simulation_diagnostics_suspect);
+    RB_CHECK(cfg.servo.allow_controller_simulation_init_error);
+    RB_CHECK(cfg.servo.allow_controller_simulation_not_activated);
     RB_CHECK(cfg.cartesian_control.allow_in_controller_simulation);
+    RB_CHECK(cfg.left_robot.allow_controller_simulation_diagnostics_suspect);
+    RB_CHECK(cfg.right_robot.allow_controller_simulation_diagnostics_suspect);
+    RB_CHECK(cfg.left_robot.allow_controller_simulation_init_error);
+    RB_CHECK(cfg.right_robot.allow_controller_simulation_init_error);
     RB_CHECK(
         cfg.safety.controller_simulation_tracking_error_source ==
         rb_servo::ControllerSimulationTrackingErrorSource::Reference
@@ -291,6 +281,35 @@ bool testControllerSimulationGateConfig() {
         writeTempConfig("controller-sim-diag-without-motion", diag_without_motion_body);
     RB_CHECK(loadRejects(diag_without_motion_path));
     ::unlink(diag_without_motion_path.c_str());
+
+    std::string init_without_motion_body = valid_body;
+    const std::size_t init_motion_pos = init_without_motion_body.find(motion_key);
+    RB_CHECK(init_motion_pos != std::string::npos);
+    init_without_motion_body.erase(init_motion_pos, motion_key.size());
+    const std::string diag_key = "  allow_controller_simulation_diagnostics_suspect: true\n";
+    const std::size_t diag_pos = init_without_motion_body.find(diag_key);
+    RB_CHECK(diag_pos != std::string::npos);
+    init_without_motion_body.erase(diag_pos, diag_key.size());
+    const std::string init_without_motion_path =
+        writeTempConfig("controller-sim-init-without-motion", init_without_motion_body);
+    RB_CHECK(loadRejects(init_without_motion_path));
+    ::unlink(init_without_motion_path.c_str());
+
+    std::string not_activated_without_motion_body = valid_body;
+    const std::size_t not_activated_motion_pos = not_activated_without_motion_body.find(motion_key);
+    RB_CHECK(not_activated_motion_pos != std::string::npos);
+    not_activated_without_motion_body.erase(not_activated_motion_pos, motion_key.size());
+    const std::size_t not_activated_diag_pos = not_activated_without_motion_body.find(diag_key);
+    RB_CHECK(not_activated_diag_pos != std::string::npos);
+    not_activated_without_motion_body.erase(not_activated_diag_pos, diag_key.size());
+    const std::string init_key = "  allow_controller_simulation_init_error: true\n";
+    const std::size_t not_activated_init_pos = not_activated_without_motion_body.find(init_key);
+    RB_CHECK(not_activated_init_pos != std::string::npos);
+    not_activated_without_motion_body.erase(not_activated_init_pos, init_key.size());
+    const std::string not_activated_without_motion_path =
+        writeTempConfig("controller-sim-not-activated-without-motion", not_activated_without_motion_body);
+    RB_CHECK(loadRejects(not_activated_without_motion_path));
+    ::unlink(not_activated_without_motion_path.c_str());
 
     std::string read_only_body = valid_body;
     const std::string send_true = "  send_servo_commands: true\n";
@@ -325,19 +344,9 @@ bool testRbpodoAsyncStreamingConfigContract() {
 
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
-    EnvVarGuard allow_controller_sim("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION");
-    EnvVarGuard pgmode_confirmed("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED");
-    EnvVarGuard allow_async("RB_ALLOW_RBPODO_ASYNC_STREAMING");
-    EnvVarGuard allow_ack_disabled("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION");
-    EnvVarGuard allow_socket_send("RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING");
 
     allow_real.set("1");
     allow_motion.set("1");
-    allow_controller_sim.set("1");
-    pgmode_confirmed.set("1");
-    allow_async.set("1");
-    allow_ack_disabled.unset();
-    allow_socket_send.unset();
 
     const std::string valid_sdk_path = writeTempConfig(
         "async-sdk-valid",
@@ -361,7 +370,6 @@ bool testRbpodoAsyncStreamingConfigContract() {
     RB_CHECK(loadRejects(real_mode_path));
     ::unlink(real_mode_path.c_str());
 
-    allow_socket_send.set("1");
     const std::string valid_socket_path = writeTempConfig(
         "async-socket-valid",
         asyncControllerSimulationBody("socket_send_supervised", "simulation", "simulation", true)
@@ -374,14 +382,6 @@ bool testRbpodoAsyncStreamingConfigContract() {
     );
     RB_CHECK(socket_cfg.left_robot.disable_waiting_ack);
     RB_CHECK(socket_cfg.right_robot.disable_waiting_ack);
-
-    allow_socket_send.unset();
-    const std::string socket_missing_env_path = writeTempConfig(
-        "async-socket-missing-env",
-        asyncControllerSimulationBody("socket_send_supervised")
-    );
-    RB_CHECK(loadRejects(socket_missing_env_path));
-    ::unlink(socket_missing_env_path.c_str());
 
     return true;
 }

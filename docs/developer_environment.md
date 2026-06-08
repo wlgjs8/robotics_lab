@@ -4,9 +4,12 @@ This page documents reproducible local setup for simulator-first development. It
 
 ## Ubuntu Hardware-Free Dependencies
 
-Install the base C++ and Python dependencies. This helper follows the
-hardware-free Dockerfile and installs Pinocchio from robotpkg as
-`robotpkg-pinocchio` under `/opt/openrobots`:
+Install the base C++ and Python dependencies. On Ubuntu jammy, or when
+`ROBOTPKG_DIST` is set explicitly, this helper follows the hardware-free
+Dockerfile and installs Pinocchio from robotpkg as `robotpkg-pinocchio` under
+`/opt/openrobots`. On non-jammy hosts such as Ubuntu 24.04 noble with
+`ROBOTPKG_DIST` unset, it builds pinned Pinocchio source release `v3.9.0` with
+URDF support and installs it under the same prefix:
 
 ```bash
 ./scripts/install_deps_ubuntu.sh --profile hardware-free
@@ -18,7 +21,7 @@ Then run:
 ./scripts/check_deps.sh --profile hardware-free
 ```
 
-The robotpkg install prefix is `/opt/openrobots`. If CMake does not find it
+The Pinocchio install prefix is `/opt/openrobots`. If CMake does not find it
 automatically, set:
 
 ```bash
@@ -30,7 +33,9 @@ export CMAKE_PREFIX_PATH=/opt/openrobots${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH
 Eigen3 and Pinocchio are mandatory for `rb_servo_server` C++ builds.
 Cartesian FK/IK, orientation interpolation, frame conversion, and SE(3) delta
 math delegate to Eigen/Pinocchio. There is no supported custom-math fallback
-when Pinocchio is missing.
+when Pinocchio is missing. Pinocchio must be 3.0.0 or newer because the
+Cartesian code uses the one-argument `pinocchio::Jlog6(M)` overload added in
+Pinocchio 3.0.0, matching the robotpkg jammy 3.x path used in the office.
 
 Check availability:
 
@@ -38,10 +43,14 @@ Check availability:
 ./scripts/check_deps.sh --profile hardware-free
 ```
 
-The supported Ubuntu helper path is robotpkg, matching
-`scripts/docker/rb_servo_server.hardware_free.Dockerfile`. Conda/mamba or
-source installs are also acceptable when they expose the `pinocchio` CMake
-package through `CMAKE_PREFIX_PATH`.
+The supported Ubuntu helper path keeps robotpkg as the jammy default, matching
+`scripts/docker/rb_servo_server.hardware_free.Dockerfile`, and uses a pinned
+source build for non-jammy hosts when robotpkg is not selected. Set
+`RB_PINOCCHIO_SOURCE=1` to force source or `PINOCCHIO_VERSION=<tag>` to override
+the source tag. Source builds use an automatic memory-capped job limit to avoid
+OOM on low-RAM WSL2 hosts; set `PINOCCHIO_BUILD_JOBS=<N>` to override it.
+Conda/mamba or other source installs are also acceptable when they expose the
+`pinocchio` CMake package through `CMAKE_PREFIX_PATH`.
 
 ## Python Checks
 

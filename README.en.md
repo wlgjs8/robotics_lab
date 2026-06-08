@@ -54,6 +54,7 @@ Start here:
 - `REVIEW.md`: current review baseline and open items
 - `docs/current_review.md`: short redirect to `REVIEW.md`; do not duplicate review content there
 - `docs/architecture.md`: system topology, terminology, motion primitive contract, safety boundaries
+- `docs/code_architecture_map.md`: code-verified component map, ports/wire-formats, and a doc-vs-code drift list
 - `docs/servo_backend_contract.md`: backend result, fault, worker I/O, and state telemetry contract
 - `docs/frame_contract.md`: shared frames and calibration status
 - `docs/hardware_free_validation.md`: hardware-free validation boundary

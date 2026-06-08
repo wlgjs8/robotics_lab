@@ -278,6 +278,10 @@ struct RobotState {
     // Controller/internal reference TCP FK from q_target_deg / rbpodo jnt_ref.
     std::optional<Pose6D> tcp_ref_base;
     std::optional<Pose6D> tcp_ref_stand;
+    // Commanded TCP FK from the joints actually sent this cycle (q_sent). Clean of
+    // the controller's noisy jnt_ref readback; used for at-rest-stable display in
+    // controller simulation.
+    std::optional<Pose6D> tcp_command_stand;
     bool has_valid_tcp_pose = false;
     bool tcp_actual_valid = false;
     bool tcp_ref_valid = false;
