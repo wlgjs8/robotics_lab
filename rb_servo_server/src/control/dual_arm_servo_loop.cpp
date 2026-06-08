@@ -2131,6 +2131,10 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.jitter_ms = sample.jitter_ms;
             latest_snapshot_.filter_dt_ms = sample.filter_dt_ms;
             latest_snapshot_.safety_verdict = safety_verdict;
+            latest_snapshot_.self_collision_enabled = config_.safety.self_collision.enable;
+            latest_snapshot_.self_collision_checked = last_self_collision_.checked;
+            latest_snapshot_.self_collision_violated = last_self_collision_.violated;
+            latest_snapshot_.self_collision_min_clearance_m = last_self_collision_.min_clearance_m;
             latest_snapshot_.motion_state = sample.motion_state;
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.latched_fault_reason = latched_fault_reason_.load();
@@ -3289,8 +3293,61 @@ ServoTarget DualArmServoLoop::applySafety(
         }
     }
 
+    // Dual-arm self-collision guard: never command a configuration that brings the
+    // two arms' link capsules within the configured margin. Evaluated on the final
+    // candidate targets (post per-arm filtering).
+    if (config_.safety.self_collision.enable) {
+        const SelfCollisionResult sc =
+            evaluateSelfCollision(out.left_q_target_deg, out.right_q_target_deg);
+        last_self_collision_ = sc;  // telemetry, even when already faulted
+        // Fail closed on a violation, or if geometry is unavailable; skip once latched.
+        if ((sc.violated || !sc.checked) &&
+            combined != SafetyVerdict::FaultLatched &&
+            !fault_latched_.load()) {
+            const std::string reason = sc.checked
+                ? ("self-collision: capsule clearance " + std::to_string(sc.min_clearance_m) +
+                   " m below margin " + std::to_string(config_.safety.self_collision.margin_m) + " m")
+                : "self-collision guard: link geometry unavailable";
+            if (config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch) {
+                latchFault(SafetyVerdict::SelfCollision, reason, left_state, right_state);
+                out = currentFaultHoldTarget();
+                combined = SafetyVerdict::FaultLatched;
+            } else {
+                // ClampToHold: refuse to advance toward collision; hold last sent targets.
+                out.left_q_target_deg = left_prev_sent_q_deg_;
+                out.right_q_target_deg = right_prev_sent_q_deg_;
+                if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
+                    combined = SafetyVerdict::SelfCollision;
+                }
+            }
+        }
+    }
+
     if (verdict) *verdict = combined;
     return out;
+}
+
+SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
+    const JointArray& left_q_deg,
+    const JointArray& right_q_deg
+) const {
+    if (!kinematics_) {
+        return SelfCollisionResult{};  // checked=false -> caller fails closed
+    }
+    std::vector<std::array<double, 3>> left_points;
+    std::vector<std::array<double, 3>> right_points;
+    try {
+        left_points = kinematics_->linkCollisionPointsInStand(ArmId::Left, left_q_deg, config_.left_mount);
+        right_points = kinematics_->linkCollisionPointsInStand(ArmId::Right, right_q_deg, config_.right_mount);
+    } catch (const std::exception&) {
+        return SelfCollisionResult{};  // checked=false -> caller fails closed
+    }
+    return dualArmSelfCollisionClearance(
+        left_points,
+        right_points,
+        config_.safety.self_collision.link_radius_m,
+        config_.safety.self_collision.margin_m
+    );
 }
 
 DualSendResult DualArmServoLoop::sendTargets(

@@ -69,6 +69,21 @@ server refuses real:
   passed, both arms connected, overrides activated from config flags). The
   launcher still exports REAL_ROBOT/MOTION (retired only in C-phase-2).
 - **B (safety subsystems):** build + validate the 4 safety subsystems in sim.
+  - **B.2 dual-arm self-collision — DONE (sim-validated).** Per-link capsule model
+    (segment between consecutive FK chain points + per-bone radius), pairwise
+    capsule clearance vs a configurable `safety.self_collision.margin_m`, hooked
+    into the servo loop's `applySafety` on the final candidate targets. Fail policy
+    `clamp_hold` (default, holds last sent targets) or `fault_latch`; fail-closed if
+    link geometry is unavailable; requires `kinematics.enable`. Motivated by the
+    RB3-730 firmware not populating `op_stat_self_collision`. New: `math/capsule_distance.hpp`,
+    `control/self_collision.hpp`, `safety.self_collision` config, `SafetyVerdict::SelfCollision`,
+    state telemetry `self_collision{enabled,checked,violated,min_clearance_m}`,
+    `IKinematics::linkCollisionPointsInStand`. Tests: capsule_distance, self_collision,
+    kinematics_fk (link points), config_loader (self_collision). Live mock-sim
+    validation: clearance tracks geometry; guard clamps when clearance < margin.
+    TODO: subsystems 1/3/4 (safety planes+zone, stand collision, all-zeros/IK-fail
+    guard); clamp_hold currently blocks all motion while violating (no escape
+    direction yet); tune real link radii.
 - **C-phase-2 (after B):** replace the real env gates with config `run_mode:real`
   + the mandatory safety self-test + the GUI arm action. Update all real configs,
   the GUI mode switch, docs (AGENTS.md / architecture / gui_operator_console),

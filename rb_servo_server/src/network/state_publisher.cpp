@@ -1443,6 +1443,19 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["send_suppressed"] = snapshot.send_suppressed;
     message["send_policy"] = snapshot.send_policy;
     message["safety_verdict"] = toString(snapshot.safety_verdict);
+    {
+        nlohmann::json self_collision;
+        self_collision["enabled"] = snapshot.self_collision_enabled;
+        self_collision["checked"] = snapshot.self_collision_checked;
+        self_collision["violated"] = snapshot.self_collision_violated;
+        if (snapshot.self_collision_checked &&
+            std::isfinite(snapshot.self_collision_min_clearance_m)) {
+            self_collision["min_clearance_m"] = snapshot.self_collision_min_clearance_m;
+        } else {
+            self_collision["min_clearance_m"] = nullptr;
+        }
+        message["self_collision"] = self_collision;
+    }
     message["motion_state"] = toString(snapshot.motion_state);
     message["fault_latched"] = snapshot.fault_latched;
     message["latched_fault_reason"] = toString(snapshot.latched_fault_reason);

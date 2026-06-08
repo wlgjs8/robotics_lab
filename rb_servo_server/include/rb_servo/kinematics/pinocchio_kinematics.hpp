@@ -36,6 +36,12 @@ public:
         double damping
     ) const override;
 
+    std::vector<std::array<double, 3>> linkCollisionPointsInStand(
+        ArmId arm,
+        const JointArray& q_deg,
+        const ArmMountConfig& mount
+    ) const override;
+
 private:
     struct Impl;
 

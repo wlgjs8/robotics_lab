@@ -1044,6 +1044,105 @@ bool testReadMissToleranceParsesAndIsControllerSimOnly() {
     return true;
 }
 
+std::string selfCollisionConfigBody(bool with_kinematics, const std::string& self_collision_yaml) {
+    std::string body =
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.200\"\n"
+        "  operation_mode: simulation\n"
+        "right_robot:\n"
+        "  backend_type: rbpodo\n"
+        "  run_mode: real\n"
+        "  ip: \"172.28.60.201\"\n"
+        "  operation_mode: simulation\n"
+        "servo:\n"
+        "  rate_hz: 500\n"
+        "  send_servo_commands: false\n"
+        "  enable_realtime_priority: true\n"
+        "safety:\n"
+        "  tracking_error_policy: fault_latch\n"
+        "  stop_both_arms_on_single_arm_error: true\n"
+        "  latch_fault_on_robot_state_error: true\n" +
+        self_collision_yaml;
+    if (with_kinematics) {
+        body +=
+            "kinematics:\n"
+            "  enable: true\n"
+            "  provider: pinocchio\n"
+            "  urdf: \"" + rb3UrdfPath() + "\"\n"
+            "  base_link: \"world\"\n"
+            "  tip_link: \"tcp\"\n"
+            "  joint_names:\n"
+            "    - base_joint\n"
+            "    - shoulder_joint\n"
+            "    - elbow_joint\n"
+            "    - wrist1_joint\n"
+            "    - wrist2_joint\n"
+            "    - wrist3_joint\n"
+            "  publish_tcp: true\n";
+    }
+    return body;
+}
+
+bool testSelfCollisionConfig() {
+    EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
+
+    // Enabled + kinematics: accepted and parsed.
+    {
+        const std::string path = writeTempConfig(
+            "self-collision-ok",
+            selfCollisionConfigBody(
+                true,
+                "  self_collision:\n"
+                "    enable: true\n"
+                "    margin_m: 0.04\n"
+                "    fail_policy: clamp_hold\n"
+                "    link_radius_m: [0.10, 0.09, 0.08, 0.07, 0.06, 0.06, 0.06]\n"));
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        RB_CHECK(cfg.safety.self_collision.enable);
+        RB_CHECK(near(cfg.safety.self_collision.margin_m, 0.04));
+        RB_CHECK(cfg.safety.self_collision.fail_policy == rb_servo::SelfCollisionFailPolicy::ClampToHold);
+        RB_CHECK(near(cfg.safety.self_collision.link_radius_m[0], 0.10));
+        RB_CHECK(near(cfg.safety.self_collision.link_radius_m[6], 0.06));
+    }
+
+    // Disabled by default when the block is absent.
+    {
+        const std::string path = writeTempConfig(
+            "self-collision-default", selfCollisionConfigBody(true, ""));
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        RB_CHECK(!cfg.safety.self_collision.enable);
+    }
+
+    // Enabled without kinematics: rejected (no link-geometry source).
+    {
+        const std::string path = writeTempConfig(
+            "self-collision-no-kinematics",
+            selfCollisionConfigBody(false, "  self_collision:\n    enable: true\n"));
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    // Wrong link_radius_m count: rejected.
+    {
+        const std::string path = writeTempConfig(
+            "self-collision-bad-radii",
+            selfCollisionConfigBody(
+                true,
+                "  self_collision:\n    enable: true\n    link_radius_m: [0.1, 0.1, 0.1]\n"));
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -1060,5 +1159,6 @@ int main() {
     if (!testRbpodoServoJParametersParseAndValidate()) return 1;
     if (!testKinematicsSafetyLimitMismatchWarnsForRbpodo()) return 1;
     if (!testReadMissToleranceParsesAndIsControllerSimOnly()) return 1;
+    if (!testSelfCollisionConfig()) return 1;
     return 0;
 }

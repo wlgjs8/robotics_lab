@@ -4,11 +4,13 @@
 #include "rb_servo/math/se3.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Cholesky>
@@ -210,6 +212,44 @@ Pose6D PinocchioKinematics::computeTcpStand(
     (void)arm;
     const Pose6D tcp_base = computeTcpBase(q_deg);
     return math::poseFromSe3(math::se3FromPose(mount.base_pose_in_stand) * math::se3FromPose(tcp_base));
+}
+
+std::vector<std::array<double, 3>> PinocchioKinematics::linkCollisionPointsInStand(
+    ArmId arm,
+    const JointArray& q_deg,
+    const ArmMountConfig& mount
+) const {
+    (void)arm;
+    if (!impl_) {
+        throw std::runtime_error("Pinocchio kinematics is not initialized");
+    }
+    Eigen::VectorXd q = toPinocchioQ(q_deg, impl_->model, impl_->joints);
+    pinocchio::forwardKinematics(impl_->model, impl_->data, q);
+    pinocchio::updateFramePlacements(impl_->model, impl_->data);
+
+    const pinocchio::SE3& world_base = impl_->data.oMf[impl_->base_frame];
+    const pinocchio::SE3 stand_T_world =
+        math::se3FromPose(mount.base_pose_in_stand) * world_base.inverse();
+
+    // World-frame chain points: base origin, each joint origin, then the tip.
+    std::vector<Eigen::Vector3d> world_points;
+    world_points.reserve(impl_->joints.size() + 2);
+    world_points.push_back(world_base.translation());
+    for (std::size_t i = 0; i < impl_->joints.size(); ++i) {
+        world_points.push_back(impl_->data.oMi[impl_->joints[i]].translation());
+    }
+    world_points.push_back(impl_->data.oMf[impl_->tip_frame].translation());
+
+    std::vector<std::array<double, 3>> stand_points;
+    stand_points.reserve(world_points.size());
+    for (const Eigen::Vector3d& wp : world_points) {
+        const Eigen::Vector3d sp = stand_T_world.act(wp);
+        if (!sp.allFinite()) {
+            throw std::runtime_error("Pinocchio self-collision FK produced a non-finite point");
+        }
+        stand_points.push_back({sp.x(), sp.y(), sp.z()});
+    }
+    return stand_points;
 }
 
 IkResult PinocchioKinematics::solveIk(
