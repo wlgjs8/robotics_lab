@@ -431,6 +431,56 @@ bool testPinocchioFk() {
     return true;
 }
 
+bool testLinkCollisionPointsInStand() {
+    rb_servo::KinematicsConfig cfg;
+    cfg.enable = true;
+    cfg.provider = "pinocchio";
+    cfg.urdf = rb3Urdf().string();
+    cfg.base_link = "world";
+    cfg.tip_link = "tcp";
+    cfg.joint_names = {
+        "base_joint",
+        "shoulder_joint",
+        "elbow_joint",
+        "wrist1_joint",
+        "wrist2_joint",
+        "wrist3_joint",
+    };
+    cfg.q_units = "deg";
+    cfg.publish_tcp = true;
+    rb_servo::PinocchioKinematics kin(cfg);
+
+    rb_servo::ArmMountConfig mount;
+    mount.arm_id = rb_servo::ArmId::Left;
+    mount.base_pose_in_stand = {0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296};
+
+    rb_servo::JointArray q{};
+    q[0] = 10.0;
+    q[1] = -30.0;
+    q[2] = 80.0;
+    q[3] = 0.0;
+    q[4] = 60.0;
+    q[5] = 0.0;
+
+    const std::vector<std::array<double, 3>> pts =
+        kin.linkCollisionPointsInStand(rb_servo::ArmId::Left, q, mount);
+    // base origin + 6 joint origins + tcp = 8 chain points.
+    RB_CHECK(pts.size() == 8);
+    for (const std::array<double, 3>& p : pts) {
+        RB_CHECK(std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]));
+    }
+    // Base origin in stand equals the mount translation (base_link == world).
+    RB_CHECK(std::fabs(pts.front()[0] - mount.base_pose_in_stand.x) < 1e-9);
+    RB_CHECK(std::fabs(pts.front()[1] - mount.base_pose_in_stand.y) < 1e-9);
+    RB_CHECK(std::fabs(pts.front()[2] - mount.base_pose_in_stand.z) < 1e-9);
+    // Last chain point equals the TCP-in-stand translation (FK consistency).
+    const rb_servo::Pose6D tcp = kin.computeTcpStand(rb_servo::ArmId::Left, q, mount);
+    RB_CHECK(std::fabs(pts.back()[0] - tcp.x) < 1e-9);
+    RB_CHECK(std::fabs(pts.back()[1] - tcp.y) < 1e-9);
+    RB_CHECK(std::fabs(pts.back()[2] - tcp.z) < 1e-9);
+    return true;
+}
+
 bool testConfiguredMountNormals() {
     const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml((servoRoot() / "config" / "dual_simulator.yaml").string());
     const std::array<double, 3> left_normal = shoulderMountNormal(cfg.left_mount.base_pose_in_stand, rb_servo::ArmId::Left);
@@ -709,6 +759,7 @@ int main() {
     if (!testIkRemainsUnavailable()) return 1;
     if (!testConfiguredMountNormals()) return 1;
     if (!testPinocchioFk()) return 1;
+    if (!testLinkCollisionPointsInStand()) return 1;
     if (!testStatePublisherSerializesTcpPoseValidity()) return 1;
     if (!testStatePublisherKeepsTcpDeferredWhenFkDisabled()) return 1;
     if (!testServoLoopPublishesInjectedFkForValidJointState()) return 1;

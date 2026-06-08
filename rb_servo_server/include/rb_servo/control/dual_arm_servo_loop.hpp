@@ -11,6 +11,7 @@
 #include "rb_servo/control/arm_worker.hpp"
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 #include "rb_servo/control/command_buffer.hpp"
+#include "rb_servo/control/self_collision.hpp"
 #include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/safety_filter.hpp"
 #include "rb_servo/control/trajectory_filter.hpp"
@@ -108,6 +109,14 @@ private:
         SafetyVerdict* verdict
     );
 
+    // Dual-arm self-collision clearance for candidate joint targets (uses the
+    // configured kinematics + mounts + safety.self_collision). checked=false if
+    // link geometry is unavailable.
+    SelfCollisionResult evaluateSelfCollision(
+        const JointArray& left_q_deg,
+        const JointArray& right_q_deg
+    ) const;
+
     DualSendResult sendTargets(
         const ServoTarget& target,
         uint64_t command_seq,
@@ -204,6 +213,7 @@ private:
     CartesianSolveTelemetry right_last_cartesian_solve_;
     SafetyTrackingTelemetry left_safety_tracking_;
     SafetyTrackingTelemetry right_safety_tracking_;
+    SelfCollisionResult last_self_collision_{};
     LatchedCartesianTarget left_latched_cartesian_target_;
     LatchedCartesianTarget right_latched_cartesian_target_;
     CartesianServoPathState left_cartesian_servo_path_;

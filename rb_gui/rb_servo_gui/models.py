@@ -477,6 +477,7 @@ class StateSnapshot:
     observed_backend: str | None
     command_source: CommandSourceSnapshot
     cartesian_gate: Mapping[str, Any] | None
+    self_collision: Mapping[str, Any] | None
     raw: Mapping[str, Any]
 
     @classmethod
@@ -519,6 +520,7 @@ class StateSnapshot:
             observed_backend=_optional_str(data.get("observed_backend")),
             command_source=CommandSourceSnapshot.parse(data.get("command_source")),
             cartesian_gate=top_cartesian_gate if isinstance(top_cartesian_gate, Mapping) else None,
+            self_collision=data.get("self_collision") if isinstance(data.get("self_collision"), Mapping) else None,
             raw=data,
         )
 

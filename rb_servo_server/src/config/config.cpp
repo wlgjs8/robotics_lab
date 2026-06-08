@@ -289,6 +289,16 @@ ControllerSimulationPhysicalMotionPolicy parseControllerSimulationPhysicalMotion
     fail("Unknown " + path + ": " + value, node);
 }
 
+SelfCollisionFailPolicy parseSelfCollisionFailPolicy(
+    const YAML::Node& node,
+    const std::string& path
+) {
+    const std::string value = lower(asString(node, path));
+    if (value == "clamp_hold" || value == "clamp_to_hold") return SelfCollisionFailPolicy::ClampToHold;
+    if (value == "fault_latch") return SelfCollisionFailPolicy::FaultLatch;
+    fail("Unknown " + path + ": " + value, node);
+}
+
 std::string getString(const YAML::Node& sec, const std::string& key, const std::string& fallback, const std::string& path) {
     return has(sec, key) ? asString(sec[key], path + "." + key) : fallback;
 }
@@ -726,6 +736,17 @@ void validateConfig(const DualArmConfig& cfg) {
         "safety.controller_simulation_physical_motion_threshold_deg"
     );
     validateNonNegativeFiniteArray(cfg.safety.joint_wrap_period_deg, "safety.joint_wrap_period_deg");
+    if (cfg.safety.self_collision.enable) {
+        validateNonNegativeFinite(cfg.safety.self_collision.margin_m, "safety.self_collision.margin_m");
+        for (std::size_t i = 0; i < cfg.safety.self_collision.link_radius_m.size(); ++i) {
+            validatePositiveFinite(
+                cfg.safety.self_collision.link_radius_m[i], "safety.self_collision.link_radius_m");
+        }
+        if (!cfg.kinematics.enable) {
+            throw std::runtime_error(
+                "safety.self_collision.enable=true requires kinematics.enable=true (link geometry source)");
+        }
+    }
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
     validatePositiveFinite(cfg.servo.filter_dt_max_ratio, "servo.filter_dt_max_ratio");
     validatePositiveFinite(cfg.servo.worker_read_period_sec, "servo.worker_read_period_sec");
@@ -1407,6 +1428,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "controller_simulation_tracking_error_source",
             "controller_simulation_physical_motion_policy",
             "controller_simulation_physical_motion_threshold_deg",
+            "self_collision",
         }, "safety");
         if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
         if (has(sec, "q_max_deg")) cfg.safety.q_max_deg = parseJointArray(sec["q_max_deg"], "safety.q_max_deg");
@@ -1439,6 +1461,45 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 sec["controller_simulation_physical_motion_threshold_deg"],
                 "safety.controller_simulation_physical_motion_threshold_deg"
             );
+        }
+        if (has(sec, "self_collision")) {
+            const YAML::Node sc = sec["self_collision"];
+            validateAllowedKeys(sc, {
+                "enable",
+                "margin_m",
+                "link_radius_m",
+                "fail_policy",
+                "monitor_only",
+            }, "safety.self_collision");
+            if (has(sc, "enable")) {
+                cfg.safety.self_collision.enable = asBool(sc["enable"], "safety.self_collision.enable");
+            }
+            if (has(sc, "monitor_only")) {
+                cfg.safety.self_collision.monitor_only =
+                    asBool(sc["monitor_only"], "safety.self_collision.monitor_only");
+            }
+            if (has(sc, "margin_m")) {
+                cfg.safety.self_collision.margin_m = asDouble(sc["margin_m"], "safety.self_collision.margin_m");
+            }
+            if (has(sc, "fail_policy")) {
+                cfg.safety.self_collision.fail_policy =
+                    parseSelfCollisionFailPolicy(sc["fail_policy"], "safety.self_collision.fail_policy");
+            }
+            if (has(sc, "link_radius_m")) {
+                const YAML::Node radii = sc["link_radius_m"];
+                const std::size_t expected = cfg.safety.self_collision.link_radius_m.size();
+                if (!radii.IsSequence() || radii.size() != expected) {
+                    fail(
+                        "safety.self_collision.link_radius_m must be a sequence of " +
+                            std::to_string(expected) + " values",
+                        radii
+                    );
+                }
+                for (std::size_t i = 0; i < expected; ++i) {
+                    cfg.safety.self_collision.link_radius_m[i] =
+                        asDouble(radii[i], "safety.self_collision.link_radius_m");
+                }
+            }
         }
     }
 

@@ -83,6 +83,7 @@ std::string toString(SafetyVerdict verdict) {
         case SafetyVerdict::InvalidCommand: return "InvalidCommand";
         case SafetyVerdict::CartesianUnavailable: return "CartesianUnavailable";
         case SafetyVerdict::IkFailed: return "IkFailed";
+        case SafetyVerdict::SelfCollision: return "SelfCollision";
         case SafetyVerdict::UnknownError: return "UnknownError";
     }
     return "Unknown";

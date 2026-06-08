@@ -135,6 +135,14 @@ if(BUILD_TESTING)
     target_link_libraries(test_se3_math PRIVATE rb_servo_core)
     add_test(NAME se3_math COMMAND test_se3_math)
 
+    add_executable(test_capsule_distance tests/test_capsule_distance.cpp)
+    target_link_libraries(test_capsule_distance PRIVATE rb_servo_core)
+    add_test(NAME capsule_distance COMMAND test_capsule_distance)
+
+    add_executable(test_self_collision tests/test_self_collision.cpp)
+    target_link_libraries(test_self_collision PRIVATE rb_servo_core)
+    add_test(NAME self_collision COMMAND test_self_collision)
+
     add_executable(test_cartesian_planner tests/test_cartesian_planner.cpp)
     target_link_libraries(test_cartesian_planner PRIVATE rb_servo_core)
     add_test(NAME cartesian_planner COMMAND test_cartesian_planner)

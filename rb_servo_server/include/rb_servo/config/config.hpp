@@ -154,6 +154,31 @@ struct RbpodoAsyncStreamingConfig {
     RbpodoAsyncDiagnosticsConfig diagnostics;
 };
 
+enum class SelfCollisionFailPolicy {
+    ClampToHold,
+    FaultLatch,
+};
+
+// Server-side dual-arm self-collision guard (the rbpodo controller firmware does
+// not populate op_stat_self_collision). Each arm link is approximated as a capsule
+// (segment between consecutive kinematic-chain points + radius); a candidate target
+// is refused if any left/right capsule pair comes within margin_m of each other.
+struct SelfCollisionConfig {
+    bool enable = false;
+    double margin_m = 0.05;
+    // Capsule radius per bone (meters). Chain points are [base, j1..j6, tcp] (8
+    // points -> 7 bones); index i is the bone from point i to point i+1. The last
+    // radius is reused if more bones exist (e.g. a future gripper). Conservative
+    // (slightly large) defaults; tune in simulation.
+    std::array<double, 7> link_radius_m{0.10, 0.09, 0.08, 0.07, 0.06, 0.06, 0.06};
+    SelfCollisionFailPolicy fail_policy = SelfCollisionFailPolicy::ClampToHold;
+    // Observe-only: still evaluate and publish clearance/violation telemetry, but
+    // do NOT clamp or latch. For tuning radii/margin in simulation against a known
+    // collision-free trajectory. Never use monitor_only as a real-motion safety
+    // posture.
+    bool monitor_only = false;
+};
+
 struct SafetyConfig {
     JointArray q_min_deg{};
     JointArray q_max_deg{};
@@ -176,6 +201,7 @@ struct SafetyConfig {
     ControllerSimulationPhysicalMotionPolicy controller_simulation_physical_motion_policy =
         ControllerSimulationPhysicalMotionPolicy::FaultLatch;
     double controller_simulation_physical_motion_threshold_deg = 0.05;
+    SelfCollisionConfig self_collision;
 };
 
 inline constexpr JointArray rbpodoDefaultSafetyJointMinDeg() {
