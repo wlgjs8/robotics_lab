@@ -93,16 +93,20 @@ class PhaseMetricTests(unittest.TestCase):
         episode = _Episode(Path("episode.hdf5"), length, left, right, np.arange(length) / 30.0)
         dataset = _Dataset(episode, list(range(length)))
         ordered = ie._empty_ordered_eval_accumulator(dataset)
-        pred_grip_left = np.full(length, 90.0, dtype=np.float64)
-        pred_grip_right = np.full(length, 90.0, dtype=np.float64)
-        pred_grip_right[13:33] = 10.0
-        pred_grip_left[64:82] = 10.0
+        # The action-chunk gripper dim is a DELTA (target minus the current
+        # observation gripper). The metric reconstructs the absolute predicted
+        # gripper as obs + delta, so build the deltas from a desired absolute
+        # predicted gripper trajectory that closes/opens a few frames late.
+        pred_abs_left = np.full(length, 90.0, dtype=np.float64)
+        pred_abs_right = np.full(length, 90.0, dtype=np.float64)
+        pred_abs_right[13:33] = 10.0
+        pred_abs_left[64:82] = 10.0
 
         for frame in range(length):
             pred = np.zeros((1, 14), dtype=np.float64)
             target = np.zeros((1, 14), dtype=np.float64)
-            pred[0, 6] = pred_grip_left[frame]
-            pred[0, 13] = pred_grip_right[frame]
+            pred[0, 6] = pred_abs_left[frame] - left[frame]
+            pred[0, 13] = pred_abs_right[frame] - right[frame]
             if frame == 10:
                 pred[0, 7:10] = [1.0, 2.0, 2.0]
             ie._accumulate_ordered_prediction(ordered, dataset, frame, pred, target)
