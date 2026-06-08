@@ -754,6 +754,7 @@ struct TcpPublication {
     std::optional<Pose6D> actual_stand;
     std::optional<Pose6D> ref_base;
     std::optional<Pose6D> ref_stand;
+    std::optional<Pose6D> command_stand;
     bool actual_valid = false;
     bool ref_valid = false;
 };
@@ -764,6 +765,7 @@ TcpPublication tcpPublicationForState(const RobotState& state) {
     out.actual_stand = state.tcp_actual_stand.has_value() ? state.tcp_actual_stand : state.tcp_stand;
     out.ref_base = state.tcp_ref_base;
     out.ref_stand = state.tcp_ref_stand;
+    out.command_stand = state.tcp_command_stand;
     out.actual_valid =
         (state.tcp_actual_valid || state.has_valid_tcp_pose) &&
         out.actual_base.has_value() &&
@@ -1150,6 +1152,7 @@ nlohmann::json armStateJson(
         {"tcp_actual_base", optionalPoseJson(tcp.actual_base)},
         {"tcp_ref_stand", optionalPoseJson(tcp.ref_stand)},
         {"tcp_ref_base", optionalPoseJson(tcp.ref_base)},
+        {"tcp_command_stand", optionalPoseJson(tcp.command_stand)},
         {"has_valid_tcp_pose", tcp.actual_valid},
         {"tcp_actual_valid", tcp.actual_valid},
         {"tcp_ref_valid", tcp.ref_valid},

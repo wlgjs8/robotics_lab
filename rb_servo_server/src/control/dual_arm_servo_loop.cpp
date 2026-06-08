@@ -2098,6 +2098,25 @@ void DualArmServoLoop::loopMain() {
                 sample.right_latched_fault_context.reset();
             }
 
+            // Commanded TCP FK from the joints actually sent this cycle. Stable at
+            // rest (unlike the controller's noisy jnt_ref-derived tcp_ref), used for
+            // clean display in controller simulation.
+            if (kinematics_ && (config_.kinematics.publish_tcp || kinematics_injected_)) {
+                const auto fk_command_tcp = [&](RobotState& st, const JointArray& q, const ArmMountConfig& mount) {
+                    st.tcp_command_stand.reset();
+                    if (!finiteJointArray(q)) {
+                        return;
+                    }
+                    try {
+                        st.tcp_command_stand = kinematics_->computeTcpStand(st.arm_id, q, mount);
+                    } catch (const std::exception&) {
+                        st.tcp_command_stand.reset();
+                    }
+                };
+                fk_command_tcp(left_state, attempted_target.left_q_target_deg, config_.left_mount);
+                fk_command_tcp(right_state, attempted_target.right_q_target_deg, config_.right_mount);
+            }
+
             latest_snapshot_.tick = sample.tick;
             latest_snapshot_.loop_start_time_ns = loop_start;
             latest_snapshot_.loop_end_time_ns = loop_end;
