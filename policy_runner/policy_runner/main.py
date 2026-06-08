@@ -388,6 +388,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_train.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
     flow_train.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
     flow_train.add_argument("--single-arm-side", choices=("left", "right"), default=None)
+    flow_train.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
     flow_train.add_argument("--max-episodes", type=int, default=None)
     flow_train.add_argument("--checkpoint", default="outputs/flow_policy.pt")
     flow_train.add_argument("--vision-backbone", default="resnet50")
@@ -441,6 +442,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     imitation_experiment.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
     imitation_experiment.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
+    imitation_experiment.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
     imitation_experiment.add_argument("--action-horizon", type=int, default=16)
     imitation_experiment.add_argument("--image-size", type=int, default=128)
     imitation_experiment.add_argument(
@@ -548,8 +550,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
         choices=("tcp_twist_stand", "tcp_twist_local", "tcp_delta_stand"),
         default=None,
         help=(
-            "Flow action command family. Defaults to tcp_twist_stand for simulator, "
-            "controller-simulation, and offline reporting."
+            "Flow action command family. Defaults to tcp_twist_local for ee_local "
+            "checkpoints and tcp_twist_stand otherwise."
         ),
     )
     flow_infer.add_argument(
@@ -608,6 +610,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     hdf5_view.add_argument("episode", help="HDF5 episode file")
     hdf5_view.add_argument("--single-arm-side", choices=("left", "right"), default="left")
     hdf5_view.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
+    hdf5_view.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
     hdf5_view.add_argument("--start-frame", type=int, default=0)
     hdf5_view.add_argument("--fps", type=float, default=None)
     hdf5_view.add_argument("--image-size", type=int, default=320)
@@ -842,6 +845,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             single_arm_side=args.single_arm_side,
             max_episodes=args.max_episodes,
             write_eval_report=args.write_eval_report,
+            action_frame=args.action_frame,
         )
         return 0
     if args.command == "imitation-snapshot":
@@ -890,6 +894,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             image_crop=args.image_crop,
             camera_names=parse_camera_names(args.camera_names),
             exclude_camera_names=parse_camera_names(args.exclude_camera_names),
+            action_frame=args.action_frame,
             batch_size=args.batch_size,
             epochs=args.epochs,
             lr=args.lr,
@@ -985,16 +990,24 @@ def _main_with_subcommands(argv: list[str]) -> int:
             send_dryrun_commands=args.send_dryrun_commands,
         )
         try:
+            checkpoint_kind = action_chunk_checkpoint_kind(args.checkpoint, device="cpu")
+            dataset_stats = load_action_chunk_checkpoint_dataset_stats(
+                args.checkpoint,
+                device="cpu",
+                ensemble_name=args.ensemble_name,
+            )
             command_family = resolve_flow_command_family(
                 rollout_policy.mode,
                 args.command_family,
+                dataset_stats=dataset_stats,
             )
             validate_flow_command_family(
                 rollout_policy.mode,
                 command_family,
                 allow_experimental_tcp_delta_stand=args.allow_experimental_tcp_delta_stand,
+                dataset_stats=dataset_stats,
             )
-        except RolloutModeValidationError as exc:
+        except (RolloutModeValidationError, ValueError) as exc:
             print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
             return 2
         if rollout_policy.mode == RolloutMode.OFFLINE_EVAL:
@@ -1006,7 +1019,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 return 2
             try:
                 rollout_policy.validate_config(config)
-                checkpoint_kind = action_chunk_checkpoint_kind(args.checkpoint, device="cpu")
                 if checkpoint_kind == "direct_bc":
                     offline_result = run_direct_bc_offline_eval(
                         checkpoint_path=args.checkpoint,
@@ -1072,13 +1084,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 max_age_ms=config.camera.max_age_ms,
             )
         try:
-            dataset_stats = None
-            if command_family in {"tcp_twist_stand", "tcp_twist_local"} and args.policy_dt_sec is None:
-                dataset_stats = load_action_chunk_checkpoint_dataset_stats(
-                    args.checkpoint,
-                    device="cpu",
-                    ensemble_name=args.ensemble_name,
-                )
             policy_dt_sec = resolve_flow_policy_dt_sec(
                 rollout_policy.mode,
                 command_family,
@@ -1086,7 +1091,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 command_rate_hz=config.command_rate_hz,
                 dataset_stats=dataset_stats,
             )
-            checkpoint_kind = action_chunk_checkpoint_kind(args.checkpoint, device="cpu")
             source_kwargs = {
                 "timeout_sec": config.servo_command.timeout_sec,
                 "camera_client": camera_client,

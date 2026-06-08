@@ -14,6 +14,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from .flow_dataset import (
+    DEFAULT_ACTION_FRAME,
     FLOW_ACTION_DIM,
     FLOW_PROPRIO_DIM,
     FLOW_CHECKPOINT_SCHEMA,
@@ -246,6 +247,7 @@ def run_imitation_experiment(
     flow_sample_steps: int = 8,
     diffusion_sample_steps: int = 16,
     split_mode: str = "primary",
+    action_frame: str = DEFAULT_ACTION_FRAME,
 ) -> dict[str, Any]:
     torch = _require_torch()
     _seed_everything(seed, torch=torch)
@@ -289,6 +291,7 @@ def run_imitation_experiment(
         camera_names=selected_cameras,
         exclude_camera_names=excluded,
         normalize=False,
+        action_frame=action_frame,
     )
     stats = compute_dataset_statistics(stats_source, max_samples=max_train_samples)
     stats["snapshot_hash"] = snapshot_payload["snapshot_hash"]
@@ -308,6 +311,7 @@ def run_imitation_experiment(
         exclude_camera_names=excluded,
         stats=stats,
         normalize=True,
+        action_frame=action_frame,
     )
     val_dataset = FlowHdf5Dataset(
         data_dir,
@@ -319,6 +323,7 @@ def run_imitation_experiment(
         exclude_camera_names=excluded,
         stats=stats,
         normalize=True,
+        action_frame=action_frame,
     )
     train_indices = _limited_indices(len(train_dataset), max_train_samples)
     val_indices = _limited_indices(len(val_dataset), max_val_samples)

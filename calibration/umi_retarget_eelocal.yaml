@@ -1,0 +1,19 @@
+schema: robotics_lab.umi_retarget.v1
+status: configured_estimate   # identity R: NOT a measured steamvr->stand alignment.
+                              # Used ONLY to apply the tracker->gripper-TCP tool offset for
+                              # EE-relative (body-frame) training. R is irrelevant to ee_local
+                              # (cancels). Must stay non-"measured" so real rollout stays blocked.
+source_pose_frame: steamvr_world
+target_pose_frame: stand
+left:
+  T_stand_source: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]        # identity (R cancels for ee_local)
+  T_tcp_umi_gripper: [-0.172, 0.0, 0.076, 0.0, 0.0, 0.0, 1.0]  # inverse of Pika tracker->gripper offset
+  gripper_open_close_units: percent
+right:
+  T_stand_source: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+  T_tcp_umi_gripper: [-0.172, 0.0, 0.076, 0.0, 0.0, 0.0, 1.0]
+  gripper_open_close_units: percent
+quality:
+  measured_date: null
+  max_translation_error_m: null
+  max_rotation_error_rad: null
