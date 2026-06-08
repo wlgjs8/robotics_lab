@@ -61,10 +61,26 @@ class UmiPipelineTest(unittest.TestCase):
                 0,
             )
 
-            dataset = FlowHdf5Dataset(output_dir, action_horizon=2, image_size=8, normalize=False)
+            dataset = FlowHdf5Dataset(
+                output_dir,
+                action_horizon=2,
+                image_size=8,
+                normalize=False,
+                action_frame="stand",
+            )
             sample = dataset.raw_sample(0)
+            ee_local_dataset = FlowHdf5Dataset(
+                output_dir,
+                action_horizon=2,
+                image_size=8,
+                normalize=False,
+                action_frame="ee_local",
+            )
+            ee_local_sample = ee_local_dataset.raw_sample(0)
             self.assertEqual(sample["images"].shape[0], 4)
             self.assertEqual(int(sample["missing_camera_count"]), 0)
+            self.assertEqual(ee_local_sample["action_chunk"].shape, sample["action_chunk"].shape)
+            self.assertEqual(ee_local_dataset.action_frame, "ee_local")
 
     def test_missing_right_arm_maps_arm_mask(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

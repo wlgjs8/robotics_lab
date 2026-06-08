@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, Subset
 
 from .dataset_manifest import DatasetManifest
 from .flow_dataset import (
+    DEFAULT_ACTION_FRAME,
     FLOW_ACTION_DIM,
     FLOW_CHECKPOINT_SCHEMA,
     FlowHdf5Dataset,
@@ -60,6 +61,7 @@ def train_flow_matching(
     single_arm_side: str | None = None,
     max_episodes: int | None = None,
     write_eval_report: str | Path | None = None,
+    action_frame: str = DEFAULT_ACTION_FRAME,
 ) -> FlowTrainingResult:
     if epochs <= 0:
         raise ValueError("epochs must be positive")
@@ -98,6 +100,7 @@ def train_flow_matching(
         image_size=image_size,
         normalize=False,
         max_episodes=max_episodes,
+        action_frame=action_frame,
         **dataset_kwargs,
     )
     stats = compute_dataset_statistics(stats_source, max_samples=max_stats_samples)
@@ -117,6 +120,7 @@ def train_flow_matching(
         max_episodes=max_episodes,
         stats=stats,
         normalize=True,
+        action_frame=action_frame,
     )
     train_indices, val_indices = _split_indices(len(dataset), val_split)
     train_loader = DataLoader(

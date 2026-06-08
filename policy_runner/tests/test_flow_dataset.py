@@ -11,12 +11,14 @@ try:
     from PIL import Image
 
     from policy_runner.flow_dataset import (
+        DEFAULT_ACTION_FRAME,
         FLOW_ACTION_DIM,
         FlowHdf5Dataset,
         compute_dataset_statistics,
         decode_hdf5_image_value,
         load_flow_episode_index,
         pose_delta,
+        pose_delta_local,
         tcp_delta_stand_from_poses,
     )
 except ModuleNotFoundError:
@@ -174,6 +176,7 @@ class FlowHdf5DatasetTest(unittest.TestCase):
 
             self.assertEqual(stats["schema"], "robotics_lab.policy_runner.flow_matching.v1.dataset_stats")
             self.assertEqual(stats["action_dim"], 14)
+            self.assertEqual(stats["proprio_action_frame"], DEFAULT_ACTION_FRAME)
             self.assertEqual(stats["image_crop"], "none")
             self.assertAlmostEqual(float(stats["dt_mean_sec"]), 1.0 / 30.0)
             self.assertAlmostEqual(float(stats["dt_p50_sec"]), 1.0 / 30.0)
@@ -185,7 +188,13 @@ class FlowHdf5DatasetTest(unittest.TestCase):
             path = Path(tmp) / "episode_001.hdf5"
             self._write_pika_episode(path, image_count=1)
 
-            dataset = FlowHdf5Dataset(path, action_horizon=2, image_size=8, normalize=False)
+            dataset = FlowHdf5Dataset(
+                path,
+                action_horizon=2,
+                image_size=8,
+                normalize=False,
+                action_frame="stand",
+            )
             sample = dataset.raw_sample(0)
 
             self.assertEqual(len(dataset), 2)
@@ -193,6 +202,27 @@ class FlowHdf5DatasetTest(unittest.TestCase):
             np.testing.assert_allclose(sample["action_chunk"][1, 0:3], [0.01, 0.0, 0.0])
             self.assertAlmostEqual(float(sample["action_chunk"][0, 6]), 1.0 / 3.0, places=6)
             self.assertAlmostEqual(float(sample["action_chunk"][1, 6]), 1.0 / 3.0, places=6)
+
+    def test_action_chunk_ee_local_uses_body_frame_translation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "episode_001.hdf5"
+            self._write_pika_episode(path, image_count=1)
+            q_yaw_90 = _quat_from_axis_angle([0.0, 0.0, 1.0], np.pi / 2.0)
+            with h5py.File(path, "r+") as handle:
+                handle["observations/pose"][:, 3:7] = q_yaw_90
+                handle["action"][:, 3:7] = q_yaw_90
+
+            dataset = FlowHdf5Dataset(
+                path,
+                action_horizon=2,
+                image_size=8,
+                normalize=False,
+                action_frame="ee_local",
+            )
+            sample = dataset.raw_sample(0)
+
+            np.testing.assert_allclose(sample["action_chunk"][0, 0:3], [0.0, -0.01, 0.0], atol=1e-6)
+            np.testing.assert_allclose(sample["action_chunk"][1, 0:3], [0.0, -0.01, 0.0], atol=1e-6)
 
     def test_tcp_delta_stand_from_poses_uses_spatial_rotation_order(self) -> None:
         q_current = _quat_from_axis_angle([0.0, 0.0, 1.0], 0.4)
@@ -207,6 +237,62 @@ class FlowHdf5DatasetTest(unittest.TestCase):
         np.testing.assert_allclose(action_delta[:3], target[:3] - current[:3])
         np.testing.assert_allclose(action_delta[3:6], [0.3, 0.0, 0.0], atol=1e-6)
         self.assertGreater(float(np.linalg.norm(state_delta[4:6])), 0.05)
+
+    def test_pose_delta_local_rotates_translation_into_reference_body(self) -> None:
+        q_ref = _quat_from_axis_angle([0.0, 0.0, 1.0], np.pi / 2.0)
+        reference = np.asarray([0.0, 0.0, 0.0, *q_ref], dtype=np.float32)
+        target = np.asarray([1.0, 0.0, 0.0, *q_ref], dtype=np.float32)
+
+        stand_delta = pose_delta(reference, target)
+        local_delta = pose_delta_local(reference, target)
+
+        np.testing.assert_allclose(stand_delta[:3], [1.0, 0.0, 0.0], atol=1e-6)
+        np.testing.assert_allclose(local_delta[:3], [0.0, -1.0, 0.0], atol=1e-6)
+        np.testing.assert_allclose(local_delta[3:6], [0.0, 0.0, 0.0], atol=1e-6)
+
+    def test_flow_dataset_ee_local_frame_invariance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original = root / "episode_original.hdf5"
+            transformed = root / "episode_transformed.hdf5"
+            left_pose, right_pose = _synthetic_bimanual_pose_tracks()
+            _write_bimanual_pose_episode(original, left_pose=left_pose, right_pose=right_pose)
+
+            q_transform = _quat_from_axis_angle([0.3, -0.4, 0.8], 1.1)
+            t_transform = np.asarray([0.7, -0.2, 0.4], dtype=np.float64)
+            _write_bimanual_pose_episode(
+                transformed,
+                left_pose=_transform_pose_track(left_pose, q_transform, t_transform),
+                right_pose=_transform_pose_track(right_pose, q_transform, t_transform),
+            )
+
+            original_dataset = FlowHdf5Dataset(
+                original,
+                action_horizon=3,
+                image_size=8,
+                normalize=False,
+                action_frame="ee_local",
+            )
+            transformed_dataset = FlowHdf5Dataset(
+                transformed,
+                action_horizon=3,
+                image_size=8,
+                normalize=False,
+                action_frame="ee_local",
+            )
+            original_sample = original_dataset.raw_sample(0)
+            transformed_sample = transformed_dataset.raw_sample(0)
+
+            np.testing.assert_allclose(
+                transformed_sample["proprio"],
+                original_sample["proprio"],
+                atol=1e-5,
+            )
+            np.testing.assert_allclose(
+                transformed_sample["action_chunk"],
+                original_sample["action_chunk"],
+                atol=1e-5,
+            )
 
     def _write_pika_episode(
         self,
@@ -295,6 +381,71 @@ def _quat_from_axis_angle(axis: list[float], angle: float) -> np.ndarray:
     axis_array = axis_array / np.linalg.norm(axis_array)
     half = angle * 0.5
     return np.asarray([*(axis_array * np.sin(half)), np.cos(half)], dtype=np.float64)
+
+
+def _synthetic_bimanual_pose_tracks() -> tuple[np.ndarray, np.ndarray]:
+    length = 5
+    left = np.zeros((length, 7), dtype=np.float32)
+    right = np.zeros((length, 7), dtype=np.float32)
+    for index in range(length):
+        left[index, :3] = [0.10 + 0.015 * index, -0.04 + 0.005 * index, 0.30 + 0.002 * index]
+        right[index, :3] = [-0.08 - 0.010 * index, 0.05 + 0.004 * index, 0.28 - 0.003 * index]
+        left[index, 3:7] = _quat_from_axis_angle([0.2, 0.0, 1.0], 0.15 + 0.05 * index)
+        right[index, 3:7] = _quat_from_axis_angle([0.0, 0.3, 1.0], -0.10 + 0.04 * index)
+    return left, right
+
+
+def _write_bimanual_pose_episode(path: Path, *, left_pose: np.ndarray, right_pose: np.ndarray) -> None:
+    assert h5py is not None and np is not None
+    length = int(min(len(left_pose), len(right_pose)))
+    timestamps = np.arange(length, dtype=np.float64) / 30.0
+    with h5py.File(path, "w") as handle:
+        handle.attrs["n_arms"] = 2
+        handle.attrs["arm_names"] = "left,right"
+        handle.create_dataset("timestamp", data=timestamps)
+        obs = handle.create_group("observations")
+        for side, pose, offset in (
+            ("left", left_pose[:length], 0.0),
+            ("right", right_pose[:length], 0.1),
+        ):
+            group = obs.create_group(side)
+            gripper = np.linspace(0.1 + offset, 0.4 + offset, length, dtype=np.float32)
+            action = np.zeros((length, 8), dtype=np.float32)
+            action[:, :7] = pose
+            action[:, 7] = gripper + 0.05
+            group.create_dataset("pose", data=pose.astype(np.float32))
+            group.create_dataset("gripper", data=np.stack([gripper, gripper + 0.02], axis=1))
+            group.create_dataset("action", data=action)
+
+
+def _transform_pose_track(
+    poses: np.ndarray,
+    q_transform: np.ndarray,
+    t_transform: np.ndarray,
+) -> np.ndarray:
+    transformed = np.zeros_like(poses, dtype=np.float32)
+    q_transform = _normalize_quat(q_transform)
+    for index, pose in enumerate(np.asarray(poses, dtype=np.float64)):
+        transformed[index, :3] = _quat_rotate_vector(q_transform, pose[:3]) + t_transform
+        transformed[index, 3:7] = _normalize_quat(_quat_multiply(q_transform, pose[3:7]))
+    return transformed
+
+
+def _normalize_quat(q: np.ndarray) -> np.ndarray:
+    quat = np.asarray(q, dtype=np.float64)
+    return quat / np.linalg.norm(quat)
+
+
+def _quat_inverse(q: np.ndarray) -> np.ndarray:
+    return np.asarray([-q[0], -q[1], -q[2], q[3]], dtype=np.float64)
+
+
+def _quat_rotate_vector(q: np.ndarray, vector: np.ndarray) -> np.ndarray:
+    quat = _normalize_quat(q)
+    value = np.asarray(vector, dtype=np.float64).reshape(3)
+    pure = np.asarray([value[0], value[1], value[2], 0.0], dtype=np.float64)
+    rotated = _quat_multiply(_quat_multiply(quat, pure), _quat_inverse(quat))
+    return rotated[:3]
 
 
 def _quat_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
