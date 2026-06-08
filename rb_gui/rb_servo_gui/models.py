@@ -237,6 +237,7 @@ class ArmSnapshot:
     tcp_actual_base: Pose6D | None = None
     tcp_ref_stand: Pose6D | None = None
     tcp_ref_base: Pose6D | None = None
+    tcp_command_stand: Pose6D | None = None
     has_valid_tcp_pose: bool = False
     tcp_actual_valid: bool = False
     tcp_ref_valid: bool = False
@@ -276,6 +277,7 @@ class ArmSnapshot:
         tcp_actual_base = Pose6D.parse(data.get("tcp_actual_base")) or tcp_base
         tcp_ref_stand = Pose6D.parse(data.get("tcp_ref_stand"))
         tcp_ref_base = Pose6D.parse(data.get("tcp_ref_base"))
+        tcp_command_stand = Pose6D.parse(data.get("tcp_command_stand"))
         has_valid_tcp_pose_raw = data.get("has_valid_tcp_pose")
         has_valid_tcp_pose = bool(has_valid_tcp_pose_raw) if isinstance(has_valid_tcp_pose_raw, bool) else tcp_stand is not None
         tcp_actual_valid = _optional_bool(data.get("tcp_actual_valid"))
@@ -312,6 +314,7 @@ class ArmSnapshot:
             tcp_actual_base=tcp_actual_base,
             tcp_ref_stand=tcp_ref_stand,
             tcp_ref_base=tcp_ref_base,
+            tcp_command_stand=tcp_command_stand,
             has_valid_tcp_pose=has_valid_tcp_pose and tcp_stand is not None,
             tcp_actual_valid=bool(tcp_actual_valid),
             tcp_ref_valid=tcp_ref_valid,

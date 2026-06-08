@@ -173,12 +173,12 @@ def _reference_ghost_enabled() -> bool:
 
 
 def _reference_ghost_active(arm_state: Any) -> bool:
-    """Show the q_ref ghost in simulation contexts where q_actual need not track the
-    command (controller/pgmode simulation). Hidden for physical real motion, where
-    the solid q_actual robot already follows the command."""
+    """Show the commanded ghost in simulation contexts where q_actual need not track
+    the command (controller/pgmode simulation). Driven by q_sent (the clean commanded
+    joints), not the controller's noisy jnt_ref. Hidden for physical real motion."""
     if not _reference_ghost_enabled():
         return False
-    if getattr(arm_state, "q_ref_deg", None) is None:
+    if getattr(arm_state, "q_sent_deg", None) is None:
         return False
     if getattr(arm_state, "physical_motion_expected", None) is True:
         return False
@@ -518,6 +518,17 @@ def update_circle_overlay(scene_handles: dict[str, Any], overlay: CircleOverlayS
     _set_visible(desired, True)
 
 
+def _arm_is_controller_sim(arm_state: Any) -> bool:
+    """True for rbpodo controller (pgmode) simulation (operation_mode: simulation)."""
+    csm = getattr(arm_state, "controller_simulation_mode", None)
+    if not csm:
+        return False
+    try:
+        return str(csm.get("operation_mode", "")).lower() in ("simulation", "sim")
+    except AttributeError:
+        return False
+
+
 def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_display_mode: str | None = None) -> None:
     mounts = latest.mounts if isinstance(latest.mounts, dict) else {}
     left_pose = _mount_pose_from_mounts(mounts, "left", _DEFAULT_LEFT_POSE)
@@ -546,7 +557,7 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
         show_ghost = _reference_ghost_active(arm_state)
         if show_ghost:
             try:
-                _update_urdf_config(ghost, _joint_cfg_radians(arm_state.q_ref_deg))
+                _update_urdf_config(ghost, _joint_cfg_radians(arm_state.q_sent_deg))
             except Exception as exc:
                 scene_handles["urdf_ref_update_error"] = f"{type(exc).__name__}: {exc}"
         _set_visible(scene_handles.get(base_key), show_ghost)
@@ -565,8 +576,15 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
         actual_pose = arm_state.tcp_actual_stand or arm_state.tcp_stand
         if arm_state.tcp_actual_valid and actual_pose is not None and not arm_state.tcp_deferred:
             actual_updates[arm] = (_pose_position(actual_pose), _pose_orientation_wxyz(actual_pose))
-        ref_pose = arm_state.tcp_ref_stand
-        if arm_state.tcp_ref_valid and ref_pose is not None:
+        # Controller-sim reference gizmo: prefer the commanded TCP (FK of q_sent),
+        # which is stable at rest, over the noisy jnt_ref-derived tcp_ref_stand.
+        if _arm_is_controller_sim(arm_state) and arm_state.tcp_command_stand is not None:
+            ref_pose = arm_state.tcp_command_stand
+            ref_valid = True
+        else:
+            ref_pose = arm_state.tcp_ref_stand
+            ref_valid = bool(arm_state.tcp_ref_valid and ref_pose is not None)
+        if ref_valid:
             ref_updates[arm] = (_pose_position(ref_pose), _pose_orientation_wxyz(ref_pose))
         if arm not in actual_updates and arm not in ref_updates:
             _hide_tcp_handles(scene_handles, arm, include_target=True)

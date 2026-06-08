@@ -631,6 +631,22 @@ def _operator_monitor_row(label: str, value_html: str) -> str:
     return f'<div class="rb-monitor-row"><span>{escape(label)}</span><span>{value_html}</span></div>'
 
 
+def _arm_is_controller_sim(arm_state: Any) -> bool:
+    """True for rbpodo controller (pgmode) simulation, where q_actual does not track
+    the streamed servo_j so the reference is the meaningful signal. False for
+    software simulation, physical real, and unknown."""
+    if arm_state is None:
+        return False
+    csm = getattr(arm_state, "controller_simulation_mode", None)
+    if not csm:
+        return False
+    try:
+        operation_mode = str(csm.get("operation_mode", "")).lower()
+    except AttributeError:
+        return False
+    return operation_mode in ("simulation", "sim")
+
+
 def _render_joint_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str:
     if latest is None:
         status = "No state stream"
@@ -640,24 +656,24 @@ def _render_joint_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> 
         arms = (("left", latest.left), ("right", latest.right))
     parts = [f'<div class="rb-monitor-status">{escape(status)}</div>']
     for arm, arm_state in arms:
-        parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(arm)}</div>')
+        # In controller (pgmode) simulation q_actual does not track the command, so
+        # show the commanded joints (q_sent). q_sent is the clean signal we stream;
+        # the controller's jnt_ref readback (q_ref) is noisy at rest, so it is not used.
+        use_ref = arm_state is not None and _arm_is_controller_sim(arm_state) and arm_state.q_sent_deg is not None
+        title = f"{arm} · q_sent (controller-sim)" if use_ref else arm
+        q_values = None
+        valid = False
+        if arm_state is not None:
+            q_values = arm_state.q_sent_deg if use_ref else arm_state.q_actual_deg
+            valid = (arm_state.q_sent_deg is not None) if use_ref else arm_state.has_valid_joint_state
+        parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(title)}</div>')
         for index, joint_name in enumerate(_ROBOT_JOINT_NAMES):
             if arm_state is None:
                 value_html = _operator_monitor_invalid_pair()
             else:
                 value_html = _operator_monitor_value_pair(
-                    _format_joint_monitor_value(
-                        arm_state.q_actual_deg,
-                        index,
-                        valid=arm_state.has_valid_joint_state,
-                        unit="deg",
-                    ),
-                    _format_joint_monitor_value(
-                        arm_state.q_actual_deg,
-                        index,
-                        valid=arm_state.has_valid_joint_state,
-                        unit="rad",
-                    ),
+                    _format_joint_monitor_value(q_values, index, valid=valid, unit="deg"),
+                    _format_joint_monitor_value(q_values, index, valid=valid, unit="rad"),
                 )
             parts.append(_operator_monitor_row(f"J{index + 1} {joint_name}", value_html))
         parts.append("</div>")
@@ -673,15 +689,28 @@ def _render_stand_world_monitor_rows(latest: StateSnapshot | None, *, stale: boo
         arms = (("left", latest.left), ("right", latest.right))
     parts = [f'<div class="rb-monitor-status">{escape(status)}</div>']
     for arm, arm_state in arms:
-        parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(arm)}</div>')
-        valid = bool(
+        # In controller (pgmode) simulation show the commanded TCP (stand frame) from
+        # FK(q_sent), since the actual TCP (from q_actual) does not track the command
+        # and the jnt_ref-derived tcp_ref is noisy at rest.
+        use_ref = (
             arm_state is not None
-            and not stale
-            and arm_state.has_valid_tcp_pose
-            and arm_state.tcp_stand is not None
-            and not arm_state.tcp_deferred
+            and _arm_is_controller_sim(arm_state)
+            and arm_state.tcp_command_stand is not None
         )
-        pose = arm_state.tcp_stand if arm_state is not None else None
+        title = f"{arm} · tcp_command_stand (controller-sim)" if use_ref else arm
+        parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(title)}</div>')
+        if use_ref:
+            valid = bool(arm_state is not None and not stale and arm_state.tcp_command_stand is not None)
+            pose = arm_state.tcp_command_stand if arm_state is not None else None
+        else:
+            valid = bool(
+                arm_state is not None
+                and not stale
+                and arm_state.has_valid_tcp_pose
+                and arm_state.tcp_stand is not None
+                and not arm_state.tcp_deferred
+            )
+            pose = arm_state.tcp_stand if arm_state is not None else None
         for field in _STAND_WORLD_POSE_FIELDS:
             if field in ("x", "y", "z"):
                 value_html = escape(_format_stand_world_pose_value(pose, field, valid=valid, unit="deg"))
