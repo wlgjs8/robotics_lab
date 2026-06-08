@@ -172,6 +172,11 @@ struct SelfCollisionConfig {
     // (slightly large) defaults; tune in simulation.
     std::array<double, 7> link_radius_m{0.10, 0.09, 0.08, 0.07, 0.06, 0.06, 0.06};
     SelfCollisionFailPolicy fail_policy = SelfCollisionFailPolicy::ClampToHold;
+    // Observe-only: still evaluate and publish clearance/violation telemetry, but
+    // do NOT clamp or latch. For tuning radii/margin in simulation against a known
+    // collision-free trajectory. Never use monitor_only as a real-motion safety
+    // posture.
+    bool monitor_only = false;
 };
 
 struct SafetyConfig {

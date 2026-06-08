@@ -1469,9 +1469,14 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "margin_m",
                 "link_radius_m",
                 "fail_policy",
+                "monitor_only",
             }, "safety.self_collision");
             if (has(sc, "enable")) {
                 cfg.safety.self_collision.enable = asBool(sc["enable"], "safety.self_collision.enable");
+            }
+            if (has(sc, "monitor_only")) {
+                cfg.safety.self_collision.monitor_only =
+                    asBool(sc["monitor_only"], "safety.self_collision.monitor_only");
             }
             if (has(sc, "margin_m")) {
                 cfg.safety.self_collision.margin_m = asDouble(sc["margin_m"], "safety.self_collision.margin_m");

@@ -1097,12 +1097,14 @@ bool testSelfCollisionConfig() {
                 true,
                 "  self_collision:\n"
                 "    enable: true\n"
+                "    monitor_only: true\n"
                 "    margin_m: 0.04\n"
                 "    fail_policy: clamp_hold\n"
                 "    link_radius_m: [0.10, 0.09, 0.08, 0.07, 0.06, 0.06, 0.06]\n"));
         const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
         ::unlink(path.c_str());
         RB_CHECK(cfg.safety.self_collision.enable);
+        RB_CHECK(cfg.safety.self_collision.monitor_only);
         RB_CHECK(near(cfg.safety.self_collision.margin_m, 0.04));
         RB_CHECK(cfg.safety.self_collision.fail_policy == rb_servo::SelfCollisionFailPolicy::ClampToHold);
         RB_CHECK(near(cfg.safety.self_collision.link_radius_m[0], 0.10));
@@ -1116,6 +1118,7 @@ bool testSelfCollisionConfig() {
         const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
         ::unlink(path.c_str());
         RB_CHECK(!cfg.safety.self_collision.enable);
+        RB_CHECK(!cfg.safety.self_collision.monitor_only);
     }
 
     // Enabled without kinematics: rejected (no link-geometry source).

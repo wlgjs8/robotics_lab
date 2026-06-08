@@ -709,6 +709,8 @@ struct ServoSnapshot {
     bool self_collision_violated = false;
     double self_collision_min_clearance_m = 0.0;
     double self_collision_margin_m = 0.0;
+    int self_collision_left_bone = -1;
+    int self_collision_right_bone = -1;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;

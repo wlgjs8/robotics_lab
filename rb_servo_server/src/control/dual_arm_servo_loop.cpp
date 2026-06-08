@@ -2136,6 +2136,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_violated = last_self_collision_.violated;
             latest_snapshot_.self_collision_min_clearance_m = last_self_collision_.min_clearance_m;
             latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.margin_m;
+            latest_snapshot_.self_collision_left_bone = last_self_collision_.left_bone;
+            latest_snapshot_.self_collision_right_bone = last_self_collision_.right_bone;
             latest_snapshot_.motion_state = sample.motion_state;
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.latched_fault_reason = latched_fault_reason_.load();
@@ -3301,8 +3303,11 @@ ServoTarget DualArmServoLoop::applySafety(
         const SelfCollisionResult sc =
             evaluateSelfCollision(out.left_q_target_deg, out.right_q_target_deg);
         last_self_collision_ = sc;  // telemetry, even when already faulted
-        // Fail closed on a violation, or if geometry is unavailable; skip once latched.
-        if ((sc.violated || !sc.checked) &&
+        // Fail closed on a violation, or if geometry is unavailable; skip once
+        // latched. monitor_only keeps the telemetry but never clamps/latches
+        // (tuning aid only — not a real-motion safety posture).
+        if (!config_.safety.self_collision.monitor_only &&
+            (sc.violated || !sc.checked) &&
             combined != SafetyVerdict::FaultLatched &&
             !fault_latched_.load()) {
             const std::string reason = sc.checked
@@ -3314,11 +3319,26 @@ ServoTarget DualArmServoLoop::applySafety(
                 out = currentFaultHoldTarget();
                 combined = SafetyVerdict::FaultLatched;
             } else {
-                // ClampToHold: refuse to advance toward collision; hold last sent targets.
-                out.left_q_target_deg = left_prev_sent_q_deg_;
-                out.right_q_target_deg = right_prev_sent_q_deg_;
-                if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
-                    combined = SafetyVerdict::SelfCollision;
+                // ClampToHold with an escape direction: refuse to advance *toward*
+                // collision, but allow a commanded target that strictly increases
+                // clearance versus the last sent configuration (retreating out of
+                // the keep-out zone). Without the escape exception the arm is
+                // permanently frozen once it touches the margin and can never back
+                // out. Geometry-unavailable (!checked) always holds (fail closed).
+                constexpr double kEscapeEpsM = 1e-4;
+                bool allow_escape = false;
+                if (sc.checked) {
+                    const SelfCollisionResult prev =
+                        evaluateSelfCollision(left_prev_sent_q_deg_, right_prev_sent_q_deg_);
+                    allow_escape = prev.checked &&
+                        sc.min_clearance_m > prev.min_clearance_m + kEscapeEpsM;
+                }
+                if (!allow_escape) {
+                    out.left_q_target_deg = left_prev_sent_q_deg_;
+                    out.right_q_target_deg = right_prev_sent_q_deg_;
+                    if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
+                        combined = SafetyVerdict::SelfCollision;
+                    }
                 }
             }
         }

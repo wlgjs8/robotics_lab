@@ -1455,6 +1455,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         } else {
             self_collision["min_clearance_m"] = nullptr;
         }
+        self_collision["left_bone"] = snapshot.self_collision_left_bone;
+        self_collision["right_bone"] = snapshot.self_collision_right_bone;
         message["self_collision"] = self_collision;
     }
     message["motion_state"] = toString(snapshot.motion_state);
