@@ -206,10 +206,35 @@ class FlowInferenceTcpTwistStandTest(unittest.TestCase):
             resolve_flow_command_family(RolloutMode.CONTROLLER_SIM, None),
             "tcp_twist_stand",
         )
+        self.assertEqual(
+            resolve_flow_command_family(
+                RolloutMode.SIM_DRYRUN,
+                None,
+                dataset_stats={"proprio_action_frame": "ee_local"},
+            ),
+            "tcp_twist_local",
+        )
         self.assertEqual(canonical_flow_command_family("tcp_twist_stand"), "TcpTwistStand")
         self.assertEqual(canonical_flow_command_family("tcp_twist_local"), "TcpTwistLocal")
         with self.assertRaisesRegex(RolloutModeValidationError, "tcp_twist_local"):
             validate_flow_command_family(RolloutMode.CONTROLLER_SIM, "tcp_twist_local")
+        with self.assertRaisesRegex(RolloutModeValidationError, "ee_local"):
+            validate_flow_command_family(
+                RolloutMode.SIM_DRYRUN,
+                "tcp_twist_stand",
+                dataset_stats={"proprio_action_frame": "ee_local"},
+            )
+        with self.assertRaisesRegex(RolloutModeValidationError, "tcp_twist_local"):
+            validate_flow_command_family(
+                RolloutMode.CONTROLLER_SIM,
+                "tcp_twist_local",
+                dataset_stats={"proprio_action_frame": "ee_local"},
+            )
+        validate_flow_command_family(
+            RolloutMode.SIM_DRYRUN,
+            "tcp_twist_local",
+            dataset_stats={"proprio_action_frame": "ee_local"},
+        )
         validate_flow_command_family(RolloutMode.SIM_DRYRUN, "tcp_twist_local")
         validate_flow_command_family(RolloutMode.SIM_DRYRUN, "tcp_delta_stand")
         validate_flow_command_family(RolloutMode.OFFLINE_EVAL, "tcp_delta_stand")
@@ -220,6 +245,31 @@ class FlowInferenceTcpTwistStandTest(unittest.TestCase):
             "tcp_delta_stand",
             allow_experimental_tcp_delta_stand=True,
         )
+
+    def test_ee_local_checkpoint_defaults_to_tcp_twist_local(self) -> None:
+        assert torch is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "flow_policy.pt"
+            _write_flow_checkpoint(checkpoint, proprio_action_frame="ee_local")
+            source = FlowMatchingActionSource(
+                checkpoint,
+                device="cpu",
+                policy_dt_sec=0.01,
+                max_linear_velocity_m_s=0.2,
+                max_angular_velocity_rad_s=0.5,
+            )
+            action = _action_chunk([0.002, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            try:
+                with mock.patch("policy_runner.flow_inference.sample_action_chunks", return_value=action):
+                    intent = source.next_intent(_sample_state(), 0.0)
+            finally:
+                source.close()
+
+        self.assertEqual(source.command_family, "TcpTwistLocal")
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.mode, "TcpTwistLocal")
+        self.assertEqual(intent.left["tcp_twist_local"], [0.2, 0.0, 0.0, 0.0, 0.0, 0.0])
 
     def test_default_receding_horizon_resamples_after_half_chunk(self) -> None:
         assert torch is not None
@@ -390,6 +440,7 @@ def _write_flow_checkpoint(
     arm_mask_counts: dict[str, int] | None = None,
     camera_names: tuple[str, ...] = (),
     action_horizon: int = 2,
+    proprio_action_frame: str | None = None,
 ) -> None:
     assert torch is not None
     config = FlowModelConfig(
@@ -416,6 +467,7 @@ def _write_flow_checkpoint(
                 "arm_mask_counts": arm_mask_counts or {"left": 1, "right": 0},
                 "dt_mean_sec": 0.01,
                 "dt_p50_sec": 0.01,
+                **({"proprio_action_frame": proprio_action_frame} if proprio_action_frame is not None else {}),
             },
             "camera_names": list(camera_names),
             "image_size": 32,

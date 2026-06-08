@@ -18,6 +18,8 @@ FLOW_ACTION_DIM = 14
 FLOW_ARM_DIM = 7
 FLOW_PROPRIO_DIM = 16
 DEFAULT_IMAGE_SIZE = 224
+DEFAULT_ACTION_FRAME = "stand"
+ACTION_FRAMES = ("stand", "ee_local")
 IMAGE_CROP_MODES = ("none", "center_square")
 HDF5_EPISODE_SUFFIXES = {".hdf5", ".h5"}
 HDF5_SKIP_PARENT_NAMES = {
@@ -127,6 +129,7 @@ class FlowHdf5Dataset:
         max_episodes: int | None = None,
         stats: dict[str, Any] | None = None,
         normalize: bool = True,
+        action_frame: str = DEFAULT_ACTION_FRAME,
     ):
         if action_horizon <= 0:
             raise ValueError("action_horizon must be positive")
@@ -139,6 +142,7 @@ class FlowHdf5Dataset:
         self.root = Path(episodes_dir)
         self.action_horizon = int(action_horizon)
         self.image_size = int(image_size)
+        self.action_frame = normalize_action_frame(action_frame)
         self._phase_boundary_cache: dict[str, Any] = {}
         if image_crop not in IMAGE_CROP_MODES:
             raise ValueError(f"image_crop must be one of: {', '.join(IMAGE_CROP_MODES)}")
@@ -211,8 +215,13 @@ class FlowHdf5Dataset:
             self.image_size,
             self.image_crop,
         )
-        proprio = _proprio_vector(episode, ref.start)
-        action_chunk = _action_chunk(episode, ref.start, self.action_horizon)
+        proprio = _proprio_vector(episode, ref.start, action_frame=self.action_frame)
+        action_chunk = _action_chunk(
+            episode,
+            ref.start,
+            self.action_horizon,
+            action_frame=self.action_frame,
+        )
         action_mask = action_mask_from_arm_mask(episode.arm_mask, self.action_horizon)
         return {
             "images": images.astype(np.float32, copy=False),
@@ -268,6 +277,13 @@ def discover_hdf5_episodes(
             and (not skip_non_episode_files or not _is_obvious_non_episode_hdf5(candidate))
         )
     )
+
+
+def normalize_action_frame(action_frame: str) -> str:
+    frame = str(action_frame or "").strip().lower()
+    if frame not in ACTION_FRAMES:
+        raise ValueError(f"action_frame must be one of: {', '.join(ACTION_FRAMES)}")
+    return frame
 
 
 def _manifest_listed_hdf5_episodes(root: Path, episode_paths: list[str] | tuple[str, ...]) -> list[Path]:
@@ -439,6 +455,7 @@ def compute_dataset_statistics(
         "image_crop": dataset.image_crop,
         "camera_names": dataset.camera_names,
         "formats": formats,
+        "proprio_action_frame": dataset.action_frame,
         "proprio_dim": FLOW_PROPRIO_DIM,
         "action_dim": FLOW_ACTION_DIM,
         "proprio_mean": proprio_mean.astype(float).tolist(),
@@ -508,13 +525,16 @@ def runtime_proprio_from_state(
     reset_left_pose: np.ndarray,
     reset_right_pose: np.ndarray,
     arm_mask: np.ndarray,
+    action_frame: str = DEFAULT_ACTION_FRAME,
 ) -> np.ndarray:
+    frame = normalize_action_frame(action_frame)
+    delta_fn = pose_delta_local if frame == "ee_local" else pose_delta
     left_pose = _pose_from_state_arm(payload.get("left", {}))
     right_pose = _pose_from_state_arm(payload.get("right", {}))
     left_gripper = _float_or_zero(_nested_first(payload.get("left", {}), "gripper", "gripper_position"))
     right_gripper = _float_or_zero(_nested_first(payload.get("right", {}), "gripper", "gripper_position"))
-    left_features = np.concatenate([pose_delta(reset_left_pose, left_pose), [left_gripper]])
-    right_features = np.concatenate([pose_delta(reset_right_pose, right_pose), [right_gripper]])
+    left_features = np.concatenate([delta_fn(reset_left_pose, left_pose), [left_gripper]])
+    right_features = np.concatenate([delta_fn(reset_right_pose, right_pose), [right_gripper]])
     return np.concatenate([left_features, right_features, arm_mask.astype(np.float32)]).astype(np.float32)
 
 
@@ -893,19 +913,34 @@ def _load_images(
     return np.stack(frames, axis=0), decode_count, missing_count
 
 
-def _proprio_vector(episode: FlowEpisodeIndex, index: int) -> np.ndarray:
+def _proprio_vector(
+    episode: FlowEpisodeIndex,
+    index: int,
+    *,
+    action_frame: str = DEFAULT_ACTION_FRAME,
+) -> np.ndarray:
+    frame = normalize_action_frame(action_frame)
+    delta_fn = pose_delta_local if frame == "ee_local" else pose_delta
     left_features = np.concatenate([
-        pose_delta(episode.reset_left_pose, episode.left_pose[index]),
+        delta_fn(episode.reset_left_pose, episode.left_pose[index]),
         [episode.left_gripper[index]],
     ])
     right_features = np.concatenate([
-        pose_delta(episode.reset_right_pose, episode.right_pose[index]),
+        delta_fn(episode.reset_right_pose, episode.right_pose[index]),
         [episode.right_gripper[index]],
     ])
     return np.concatenate([left_features, right_features, episode.arm_mask])
 
 
-def _action_chunk(episode: FlowEpisodeIndex, start: int, horizon: int) -> np.ndarray:
+def _action_chunk(
+    episode: FlowEpisodeIndex,
+    start: int,
+    horizon: int,
+    *,
+    action_frame: str = DEFAULT_ACTION_FRAME,
+) -> np.ndarray:
+    frame = normalize_action_frame(action_frame)
+    delta_fn = pose_delta_local if frame == "ee_local" else tcp_delta_stand_from_poses
     chunk = np.zeros((horizon, FLOW_ACTION_DIM), dtype=np.float32)
     for offset in range(horizon):
         index = start + offset
@@ -913,7 +948,7 @@ def _action_chunk(episode: FlowEpisodeIndex, start: int, horizon: int) -> np.nda
         if episode.arm_mask[0] > 0.0:
             left_current = _action_pose_at(episode.action_left_pose, episode.left_pose, index)
             left_next = _action_pose_at(episode.action_left_pose, episode.left_pose, next_index)
-            left_delta = tcp_delta_stand_from_poses(left_current, left_next)
+            left_delta = delta_fn(left_current, left_next)
             left_grip = _per_step_gripper_delta(
                 episode.action_left_gripper,
                 episode.left_gripper,
@@ -924,7 +959,7 @@ def _action_chunk(episode: FlowEpisodeIndex, start: int, horizon: int) -> np.nda
         if episode.arm_mask[1] > 0.0:
             right_current = _action_pose_at(episode.action_right_pose, episode.right_pose, index)
             right_next = _action_pose_at(episode.action_right_pose, episode.right_pose, next_index)
-            right_delta = tcp_delta_stand_from_poses(right_current, right_next)
+            right_delta = delta_fn(right_current, right_next)
             right_grip = _per_step_gripper_delta(
                 episode.action_right_gripper,
                 episode.right_gripper,
@@ -957,6 +992,18 @@ def pose_delta(reference_pose: np.ndarray, target_pose: np.ndarray) -> np.ndarra
     q_ref = _normalize_quat(reference[3:7])
     q_target = _normalize_quat(target[3:7])
     q_delta = _quat_multiply(_quat_inverse(q_ref), q_target)
+    rotvec = _quat_to_rotvec(q_delta)
+    return np.concatenate([translation, rotvec]).astype(np.float32)
+
+
+def pose_delta_local(reference_pose: np.ndarray, target_pose: np.ndarray) -> np.ndarray:
+    reference = _valid_pose(reference_pose)
+    target = _valid_pose(target_pose)
+    q_ref = _normalize_quat(reference[3:7])
+    q_target = _normalize_quat(target[3:7])
+    q_ref_inverse = _quat_inverse(q_ref)
+    translation = _quat_rotate_vector(q_ref_inverse, target[:3] - reference[:3])
+    q_delta = _quat_multiply(q_ref_inverse, q_target)
     rotvec = _quat_to_rotvec(q_delta)
     return np.concatenate([translation, rotvec]).astype(np.float32)
 
@@ -1025,6 +1072,14 @@ def _quat_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+
+
+def _quat_rotate_vector(q: np.ndarray, vector: np.ndarray) -> np.ndarray:
+    quat = _normalize_quat(q)
+    value = np.asarray(vector, dtype=np.float64).reshape(3)
+    pure = np.asarray([value[0], value[1], value[2], 0.0], dtype=np.float64)
+    rotated = _quat_multiply(_quat_multiply(quat, pure), _quat_inverse(quat))
+    return rotated[:3]
 
 
 def _quat_to_rotvec(q: np.ndarray) -> np.ndarray:

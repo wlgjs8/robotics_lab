@@ -12,12 +12,15 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .dataset_manifest import parse_camera_names
 from .flow_dataset import (
+    DEFAULT_ACTION_FRAME,
     FLOW_ACTION_DIM,
     FLOW_ARM_DIM,
     FlowEpisodeIndex,
     decode_hdf5_image_value,
     load_flow_episode_index,
+    normalize_action_frame,
     pose_delta,
+    pose_delta_local,
     tcp_delta_stand_from_poses,
 )
 
@@ -32,6 +35,7 @@ class ViewerEpisode:
     episode: FlowEpisodeIndex
     camera_names: tuple[str, ...]
     single_arm_side: str
+    action_frame: str = DEFAULT_ACTION_FRAME
 
 
 def load_viewer_episode(
@@ -39,6 +43,7 @@ def load_viewer_episode(
     *,
     single_arm_side: str = "left",
     camera_names: list[str] | tuple[str, ...] | None = None,
+    action_frame: str = DEFAULT_ACTION_FRAME,
 ) -> ViewerEpisode:
     episode = load_flow_episode_index(episode_path, single_arm_side=single_arm_side)
     selected_cameras = (
@@ -48,6 +53,7 @@ def load_viewer_episode(
         episode=episode,
         camera_names=selected_cameras,
         single_arm_side=single_arm_side,
+        action_frame=normalize_action_frame(action_frame),
     )
 
 
@@ -73,8 +79,8 @@ def frame_summary(viewer: ViewerEpisode, frame_index: int) -> dict[str, Any]:
         "timestamp": timestamp,
         "camera_names": list(viewer.camera_names),
         "arms": {
-            "left": _arm_summary(episode, "left", index),
-            "right": _arm_summary(episode, "right", index),
+            "left": _arm_summary(episode, "left", index, action_frame=viewer.action_frame),
+            "right": _arm_summary(episode, "right", index, action_frame=viewer.action_frame),
         },
     }
 
@@ -175,6 +181,7 @@ def run_hdf5_viewer_cli(args: Any, *, stderr: TextIO = sys.stderr) -> int:
             args.episode,
             single_arm_side=args.single_arm_side,
             camera_names=parse_camera_names(args.camera_names),
+            action_frame=getattr(args, "action_frame", DEFAULT_ACTION_FRAME),
         )
     except Exception as exc:
         print(f"policy_runner hdf5-view failed: {exc}", file=stderr)
@@ -235,7 +242,16 @@ def run_hdf5_viewer_cli(args: Any, *, stderr: TextIO = sys.stderr) -> int:
     return 0
 
 
-def _arm_summary(episode: FlowEpisodeIndex, side: str, index: int) -> dict[str, Any]:
+def _arm_summary(
+    episode: FlowEpisodeIndex,
+    side: str,
+    index: int,
+    *,
+    action_frame: str = DEFAULT_ACTION_FRAME,
+) -> dict[str, Any]:
+    frame = normalize_action_frame(action_frame)
+    reset_delta_fn = pose_delta_local if frame == "ee_local" else pose_delta
+    action_delta_fn = pose_delta_local if frame == "ee_local" else tcp_delta_stand_from_poses
     if side == "left":
         pose = episode.left_pose[index]
         reset_pose = episode.reset_left_pose
@@ -265,14 +281,14 @@ def _arm_summary(episode: FlowEpisodeIndex, side: str, index: int) -> dict[str, 
     else:
         target = action_pose[index] if action_pose is not None else pose
         next_target = action_pose[index + 1] if action_pose is not None else _next_pose(episode, side, index)
-        target_delta = tcp_delta_stand_from_poses(target, next_target)
+        target_delta = action_delta_fn(target, next_target)
         action = np.concatenate([target_delta, [_per_step_gripper_delta(action_gripper, index)]]).astype(np.float32)
 
     return {
         "active": active,
         "pose": np.asarray(pose, dtype=np.float32),
-        "reset_delta": pose_delta(reset_pose, pose),
-        "frame_delta": pose_delta(previous_pose, pose) if index > 0 else np.zeros(6, dtype=np.float32),
+        "reset_delta": reset_delta_fn(reset_pose, pose),
+        "frame_delta": reset_delta_fn(previous_pose, pose) if index > 0 else np.zeros(6, dtype=np.float32),
         "gripper": gripper,
         "action": action,
         "action_kind": episode.action_kind,

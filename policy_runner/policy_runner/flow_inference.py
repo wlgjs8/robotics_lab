@@ -19,12 +19,14 @@ from .action_sources.tcp_delta import (
     tcp_twist_stand_intent,
 )
 from .flow_dataset import (
+    DEFAULT_ACTION_FRAME,
     FLOW_CHECKPOINT_SCHEMA,
     FLOW_ACTION_DIM,
     FLOW_ACTION_DIM_NAMES,
     FLOW_PROPRIO_DIM,
     FlowHdf5Dataset,
     decode_hdf5_image_value,
+    normalize_action_frame,
     normalize_runtime_proprio,
     pose_from_state_payload,
     runtime_proprio_from_state,
@@ -83,11 +85,15 @@ class _DirectBcEnsembleBundle:
 def resolve_flow_command_family(
     rollout_mode: str | RolloutMode,
     command_family: str | None,
+    *,
+    dataset_stats: dict[str, Any] | None = None,
 ) -> str:
     """Return the normalized flow command family for a rollout mode."""
 
     _ = parse_rollout_mode(rollout_mode)
     if command_family is None:
+        if _proprio_action_frame_from_stats(dataset_stats) == "ee_local":
+            return "tcp_twist_local"
         return "tcp_twist_stand"
     return normalize_flow_command_family(command_family)
 
@@ -111,14 +117,39 @@ def canonical_flow_command_family(command_family: str) -> str:
     return _FLOW_COMMAND_FAMILY_LABELS[normalize_flow_command_family(command_family)]
 
 
+def _proprio_action_frame_from_stats(stats: dict[str, Any] | None) -> str:
+    if not isinstance(stats, dict):
+        return DEFAULT_ACTION_FRAME
+    return normalize_action_frame(stats.get("proprio_action_frame", DEFAULT_ACTION_FRAME))
+
+
+def _resolve_runtime_command_family(
+    command_family: str | None,
+    stats: dict[str, Any],
+) -> str:
+    family = resolve_flow_command_family(
+        RolloutMode.SIM_DRYRUN,
+        command_family,
+        dataset_stats=stats,
+    )
+    if _proprio_action_frame_from_stats(stats) == "ee_local" and family != "tcp_twist_local":
+        raise ValueError("ee_local checkpoints require command-family tcp_twist_local")
+    return family
+
+
 def validate_flow_command_family(
     rollout_mode: str | RolloutMode,
     command_family: str,
     *,
     allow_experimental_tcp_delta_stand: bool = False,
+    dataset_stats: dict[str, Any] | None = None,
 ) -> None:
     mode = parse_rollout_mode(rollout_mode)
     family = normalize_flow_command_family(command_family)
+    if _proprio_action_frame_from_stats(dataset_stats) == "ee_local" and family != "tcp_twist_local":
+        raise RolloutModeValidationError(
+            "ee_local checkpoints require command-family tcp_twist_local"
+        )
     if family == "tcp_twist_stand":
         return
     if family == "tcp_twist_local":
@@ -185,7 +216,7 @@ class FlowMatchingActionSource:
         timeout_sec: float = 0.2,
         camera_client: Any | None = None,
         sample_steps: int = 16,
-        command_family: str = "tcp_twist_stand",
+        command_family: str | None = None,
         policy_dt_sec: float | None = None,
         max_linear_velocity_m_s: float | None = None,
         max_angular_velocity_rad_s: float | None = None,
@@ -202,8 +233,6 @@ class FlowMatchingActionSource:
         self.timeout_sec = float(timeout_sec)
         self.camera_client = camera_client
         self.sample_steps = int(sample_steps)
-        self.command_family_option = normalize_flow_command_family(command_family)
-        self.command_family = canonical_flow_command_family(self.command_family_option)
         if policy_dt_sec is not None and policy_dt_sec <= 0.0:
             raise ValueError("policy_dt_sec must be positive")
         if max_linear_velocity_m_s is not None and max_linear_velocity_m_s < 0.0:
@@ -222,6 +251,9 @@ class FlowMatchingActionSource:
         if schema != FLOW_CHECKPOINT_SCHEMA:
             raise ValueError(f"unsupported flow checkpoint schema: {schema}")
         self.stats = dict(checkpoint["dataset_stats"])
+        self.action_frame = _proprio_action_frame_from_stats(self.stats)
+        self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
+        self.command_family = canonical_flow_command_family(self.command_family_option)
         self.camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
         self.image_size = int(checkpoint.get("image_size", 224))
         model_config = dict(checkpoint.get("model_config", {}))
@@ -480,6 +512,7 @@ class FlowMatchingActionSource:
             reset_left_pose=self._reset_left_pose,
             reset_right_pose=self._reset_right_pose,
             arm_mask=self.arm_mask,
+            action_frame=self.action_frame,
         )
         proprio = normalize_runtime_proprio(proprio, self.stats)
         images, decode_count, missing_count = self._runtime_images()
@@ -589,7 +622,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
         *,
         timeout_sec: float = 0.2,
         camera_client: Any | None = None,
-        command_family: str = "tcp_twist_stand",
+        command_family: str | None = None,
         policy_dt_sec: float | None = None,
         image_size: int | None = None,
         max_linear_velocity_m_s: float | None = None,
@@ -605,8 +638,6 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
         self.timeout_sec = float(timeout_sec)
         self.camera_client = camera_client
         self.sample_steps = 1
-        self.command_family_option = normalize_flow_command_family(command_family)
-        self.command_family = canonical_flow_command_family(self.command_family_option)
         if policy_dt_sec is not None and policy_dt_sec <= 0.0:
             raise ValueError("policy_dt_sec must be positive")
         if image_size is not None and int(image_size) <= 0:
@@ -638,6 +669,9 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
             raise ValueError(f"unsupported imitation proprio_dim {proprio_dim}; expected {FLOW_PROPRIO_DIM}")
 
         self.stats = dict(checkpoint["dataset_stats"])
+        self.action_frame = _proprio_action_frame_from_stats(self.stats)
+        self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
+        self.command_family = canonical_flow_command_family(self.command_family_option)
         self.camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
         checkpoint_image_size = _positive_int(checkpoint.get("image_size"))
         stats_image_size = _positive_int(self.stats.get("image_size"))
@@ -730,6 +764,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
             reset_left_pose=self._reset_left_pose,
             reset_right_pose=self._reset_right_pose,
             arm_mask=self.arm_mask,
+            action_frame=self.action_frame,
         )
         proprio = normalize_runtime_proprio(proprio, self.stats)
         images, decode_count, missing_count = self._runtime_images()
@@ -759,7 +794,7 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         ensemble_name: str | None = "top5",
         timeout_sec: float = 0.2,
         camera_client: Any | None = None,
-        command_family: str = "tcp_twist_stand",
+        command_family: str | None = None,
         policy_dt_sec: float | None = None,
         image_size: int | None = None,
         max_linear_velocity_m_s: float | None = None,
@@ -775,8 +810,6 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         self.timeout_sec = float(timeout_sec)
         self.camera_client = camera_client
         self.sample_steps = 1
-        self.command_family_option = normalize_flow_command_family(command_family)
-        self.command_family = canonical_flow_command_family(self.command_family_option)
         if policy_dt_sec is not None and policy_dt_sec <= 0.0:
             raise ValueError("policy_dt_sec must be positive")
         if image_size is not None and int(image_size) <= 0:
@@ -802,6 +835,9 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         self.member_checkpoint_paths = list(bundle.member_paths)
         self.models = list(bundle.models)
         self.stats = dict(bundle.stats)
+        self.action_frame = _proprio_action_frame_from_stats(self.stats)
+        self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
+        self.command_family = canonical_flow_command_family(self.command_family_option)
         self.camera_names = list(bundle.camera_names)
         self.image_size = int(bundle.image_size)
         self.action_horizon = int(bundle.action_horizon)
@@ -860,6 +896,7 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
             reset_left_pose=self._reset_left_pose,
             reset_right_pose=self._reset_right_pose,
             arm_mask=self.arm_mask,
+            action_frame=self.action_frame,
         )
         proprio = normalize_runtime_proprio(proprio, self.stats)
         images, decode_count, missing_count = self._runtime_images()
@@ -899,6 +936,7 @@ def run_flow_offline_eval(
         raise ValueError(f"unsupported flow checkpoint schema: {schema}")
 
     stats = dict(checkpoint["dataset_stats"])
+    action_frame = _proprio_action_frame_from_stats(stats)
     camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
     image_size = int(checkpoint.get("image_size", 224))
     model_config = dict(checkpoint.get("model_config", {}))
@@ -921,6 +959,7 @@ def run_flow_offline_eval(
         camera_names=camera_names,
         stats=stats,
         normalize=True,
+        action_frame=action_frame,
     )
     sample_count = min(int(max_samples), len(dataset))
     image_decode_count = 0
@@ -984,6 +1023,7 @@ def run_direct_bc_offline_eval(
         raise ValueError(f"unsupported imitation checkpoint family: {family}")
 
     stats = dict(checkpoint["dataset_stats"])
+    action_frame = _proprio_action_frame_from_stats(stats)
     camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
     arm_mask = _arm_mask_from_stats(stats)
     resolved_image_size = int(image_size or _positive_int(checkpoint.get("image_size")) or _positive_int(stats.get("image_size")) or 0)
@@ -1019,6 +1059,7 @@ def run_direct_bc_offline_eval(
         camera_names=camera_names,
         stats=stats,
         normalize=True,
+        action_frame=action_frame,
     )
     sample_count = min(int(max_samples), len(dataset))
     image_decode_count = 0
@@ -1077,6 +1118,7 @@ def run_direct_bc_ensemble_offline_eval(
         camera_names=list(bundle.camera_names),
         stats=bundle.stats,
         normalize=True,
+        action_frame=_proprio_action_frame_from_stats(bundle.stats),
     )
     sample_count = min(int(max_samples), len(dataset))
     image_decode_count = 0

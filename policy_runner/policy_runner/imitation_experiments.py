@@ -14,6 +14,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from .flow_dataset import (
+    DEFAULT_ACTION_FRAME,
     FLOW_ACTION_DIM,
     FLOW_PROPRIO_DIM,
     FLOW_CHECKPOINT_SCHEMA,
@@ -246,6 +247,7 @@ def run_imitation_experiment(
     flow_sample_steps: int = 8,
     diffusion_sample_steps: int = 16,
     split_mode: str = "primary",
+    action_frame: str = DEFAULT_ACTION_FRAME,
 ) -> dict[str, Any]:
     torch = _require_torch()
     _seed_everything(seed, torch=torch)
@@ -289,6 +291,7 @@ def run_imitation_experiment(
         camera_names=selected_cameras,
         exclude_camera_names=excluded,
         normalize=False,
+        action_frame=action_frame,
     )
     stats = compute_dataset_statistics(stats_source, max_samples=max_train_samples)
     stats["snapshot_hash"] = snapshot_payload["snapshot_hash"]
@@ -308,6 +311,7 @@ def run_imitation_experiment(
         exclude_camera_names=excluded,
         stats=stats,
         normalize=True,
+        action_frame=action_frame,
     )
     val_dataset = FlowHdf5Dataset(
         data_dir,
@@ -319,6 +323,7 @@ def run_imitation_experiment(
         exclude_camera_names=excluded,
         stats=stats,
         normalize=True,
+        action_frame=action_frame,
     )
     train_indices = _limited_indices(len(train_dataset), max_train_samples)
     val_indices = _limited_indices(len(val_dataset), max_val_samples)
@@ -1496,7 +1501,6 @@ def _finalize_ordered_event_metrics(
 ) -> dict[str, Any]:
     timing_errors: dict[str, list[float]] = {name: [] for name in EVENT_NAMES}
     timing_missed: dict[str, int] = {name: 0 for name in EVENT_NAMES}
-    timing_eligible: dict[str, int] = {name: 0 for name in EVENT_NAMES}
     critical_translation: dict[str, list[float]] = {name: [] for name in EVENT_NAMES}
     critical_rotation: dict[str, list[float]] = {name: [] for name in EVENT_NAMES}
     critical_missing: dict[str, int] = {name: 0 for name in EVENT_NAMES}
@@ -1515,29 +1519,18 @@ def _finalize_ordered_event_metrics(
         observed = row["observed"]
         pred = row["pred"]
         target = row["target"]
-        # The action-chunk gripper dim is a DELTA (target minus the current
-        # observation gripper), not an absolute level, so hysteresis level
-        # crossings are only meaningful on the reconstructed ABSOLUTE predicted
-        # gripper = current observation gripper + predicted delta. Thresholds are
-        # taken from the absolute observation gripper (the clean segmentation
-        # signal); ground-truth timing stays the observation grasp/release frame.
-        obs_left = np.asarray(episode.left_gripper[: episode.length], dtype=np.float64)
-        obs_right = np.asarray(episode.right_gripper[: episode.length], dtype=np.float64)
-        pred_delta_left = _fill_missing_signal(pred[:, 6], observed, np.zeros_like(obs_left))
-        pred_delta_right = _fill_missing_signal(pred[:, 13], observed, np.zeros_like(obs_right))
-        pred_left = obs_left + pred_delta_left[: obs_left.size]
-        pred_right = obs_right + pred_delta_right[: obs_right.size]
+        pred_left = _fill_missing_signal(pred[:, 6], observed, episode.left_gripper)
+        pred_right = _fill_missing_signal(pred[:, 13], observed, episode.right_gripper)
         predicted_events = ordered_event_frames_from_signals(
             left_signal=pred_left,
             right_signal=pred_right,
-            left_thresholds=gripper_thresholds(obs_left),
-            right_thresholds=gripper_thresholds(obs_right),
+            left_thresholds=gripper_thresholds(episode.left_gripper[: episode.length]),
+            right_thresholds=gripper_thresholds(episode.right_gripper[: episode.length]),
         )
         gt_events = boundaries.event_frames()
         for event_name in EVENT_NAMES:
             predicted_frame = predicted_events[event_name]
             gt_frame = gt_events[event_name]
-            timing_eligible[event_name] += 1
             if predicted_frame is None:
                 timing_missed[event_name] += 1
             else:
@@ -1561,9 +1554,8 @@ def _finalize_ordered_event_metrics(
         name: {
             "mean_ms": _mean_or_none(timing_errors[name]),
             "median_ms": _median_or_none(timing_errors[name]),
-            "missed_event_rate": float(timing_missed[name] / max(timing_eligible[name], 1)),
+            "missed_event_rate": float(timing_missed[name] / max(clean_episode_count, 1)),
             "count": int(len(timing_errors[name])),
-            "eligible_episode_count": int(timing_eligible[name]),
             "episode_count": int(clean_episode_count),
             "lower_is_better": True,
         }
