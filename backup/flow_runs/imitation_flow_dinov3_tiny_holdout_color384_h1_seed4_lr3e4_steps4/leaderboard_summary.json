@@ -1,0 +1,284 @@
+{
+  "args": {
+    "action_horizon": 1,
+    "batch_size": 8,
+    "camera_names": [
+      "left_realsense_color",
+      "right_realsense_color"
+    ],
+    "data_dir": "/data/policy_episodes",
+    "device": "cuda",
+    "diffusion_sample_steps": 16,
+    "epochs": 20,
+    "exclude_camera_names": [
+      "left_realsense_depth",
+      "right_realsense_depth"
+    ],
+    "flow_sample_steps": 4,
+    "hidden_dim": 256,
+    "image_crop": "none",
+    "image_size": 384,
+    "lr": 0.0003,
+    "max_train_samples": null,
+    "max_val_samples": null,
+    "models": [
+      "flow_dinov3_convnext_tiny"
+    ],
+    "seed": 4,
+    "split_mode": "session_holdout"
+  },
+  "baseline_comparison": {
+    "best_minus_state_only_normalized_mse": null,
+    "best_minus_train_mean_normalized_mse": null,
+    "best_minus_zero_normalized_mse": null
+  },
+  "created_at": "2026-06-07T14:13:14.686732+00:00",
+  "dataset": {
+    "detected_cameras": [
+      "left_realsense_color",
+      "left_realsense_depth",
+      "right_realsense_color",
+      "right_realsense_depth"
+    ],
+    "detected_formats": [
+      "pika_umi_bimanual"
+    ],
+    "frame_count": 42435,
+    "sessions": [
+      "data_20260606_134608",
+      "data_20260606_140442",
+      "data_20260606_140813",
+      "data_20260606_175002",
+      "data_20260606_175635",
+      "data_20260606_183038",
+      "data_20260606_185446",
+      "data_20260606_190156"
+    ],
+    "snapshot_hash": "532de3a1c38a4b3f12dcc875d928f723d798a1ee0edf02b99e857d2483e9f9ce",
+    "snapshot_path": "/outputs/flow_runs/imitation_official/dataset_snapshot.json",
+    "valid_episode_count": 146
+  },
+  "failed_runs": [],
+  "leaderboard": [
+    {
+      "action_mse": 0.5432614583935256,
+      "backbone": "dinov3_convnext_tiny",
+      "checkpoint_sha256": "e6fed75b90393635f016e9b8a2ba3b0ee6e6b2b32b36ab8823a5d6d5aed98015",
+      "family": "flow_matching",
+      "gripper_mse": 3.8027507949495547,
+      "inactive_arm_leakage": 0.0020446145567586125,
+      "latency": {
+        "median_ms": 12.867248995462433,
+        "p95_ms": 12.881776096764952
+      },
+      "loss_name": null,
+      "model": "flow_dinov3_convnext_tiny",
+      "normalized_action_mse": 0.42126008072826293,
+      "rank": 1,
+      "rotation_endpoint_error": 0.006493245396649114,
+      "split_mode": "session_holdout",
+      "train_normalized_action_mse": 0.3129661691692809,
+      "translation_endpoint_error": 0.0016343444080528062,
+      "wall_time_sec": 4289.860083525011
+    }
+  ],
+  "normalization": {
+    "action_dim_names": [
+      "left_dx",
+      "left_dy",
+      "left_dz",
+      "left_drx",
+      "left_dry",
+      "left_drz",
+      "left_grip",
+      "right_dx",
+      "right_dy",
+      "right_dz",
+      "right_drx",
+      "right_dry",
+      "right_drz",
+      "right_grip"
+    ],
+    "path": "/outputs/flow_runs/imitation_flow_dinov3_tiny_holdout_color384_h1_seed4_lr3e4_steps4/train_dataset_stats.json",
+    "sample_count": 28254,
+    "source": "train_only",
+    "train_episode_count": 96
+  },
+  "output_dir": "/outputs/flow_runs/imitation_flow_dinov3_tiny_holdout_color384_h1_seed4_lr3e4_steps4",
+  "recommendation": "Next rollout candidate for simulator dry-run is `flow_dinov3_convnext_tiny` from family `flow_matching`.",
+  "results": [
+    {
+      "backbone": "dinov3_convnext_tiny",
+      "checkpoint_path": "/outputs/flow_runs/imitation_flow_dinov3_tiny_holdout_color384_h1_seed4_lr3e4_steps4/flow_dinov3_convnext_tiny/checkpoint.pt",
+      "checkpoint_sha256": "e6fed75b90393635f016e9b8a2ba3b0ee6e6b2b32b36ab8823a5d6d5aed98015",
+      "family": "flow_matching",
+      "gpu_info": {
+        "cuda_available": true,
+        "cuda_device_count": 1,
+        "cuda_visible_devices": "4",
+        "devices": [
+          {
+            "index": 0,
+            "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+          }
+        ],
+        "nvidia_smi": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 917, 2\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 695, 3\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 1715, 32\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, 695, 3\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, 1675, 6\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, 1025, 1"
+      },
+      "latency": {
+        "median_ms": 12.867248995462433,
+        "p95_ms": 12.881776096764952
+      },
+      "metrics": {
+        "action_mse": 0.5432614583935256,
+        "by_phase": {
+          "left_pick": {
+            "action_mse": 0.6317345613664423,
+            "normalized_action_mse": 0.48986459136456356
+          },
+          "left_place": {
+            "action_mse": 0.8001105488570327,
+            "normalized_action_mse": 0.6204280263130576
+          },
+          "right_pick": {
+            "action_mse": 0.025464385926091897,
+            "normalized_action_mse": 0.019745794782943426
+          },
+          "right_place": {
+            "action_mse": 0.7204558257908603,
+            "normalized_action_mse": 0.5586615333089902
+          }
+        },
+        "gripper_mse": 3.8027507949495547,
+        "inactive_arm_leakage": 0.0020446145567586125,
+        "normalized_action_mse": 0.42126008072826293,
+        "rotation_endpoint_error": 0.006493245396649114,
+        "smoothness": 0.0,
+        "translation_endpoint_error": 0.0016343444080528062
+      },
+      "model": "flow_dinov3_convnext_tiny",
+      "model_config": {
+        "action_dim": 14,
+        "action_horizon": 1,
+        "camera_names": [
+          "left_realsense_color",
+          "right_realsense_color"
+        ],
+        "condition_encoder": "transformer",
+        "frozen_vision": true,
+        "hidden_dim": 256,
+        "proprio_dim": 16,
+        "vision_backbone": "dinov3_convnext_tiny"
+      },
+      "shortcut_ablations": {
+        "image_shuffle": {
+          "action_mse": 1.1626526456709092,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 1.2448263083805367,
+              "normalized_action_mse": 0.9652730247268724
+            },
+            "left_place": {
+              "action_mse": 1.4638987689134728,
+              "normalized_action_mse": 1.1351479182677164
+            },
+            "right_pick": {
+              "action_mse": 0.29388722349577534,
+              "normalized_action_mse": 0.22788834654483345
+            },
+            "right_place": {
+              "action_mse": 1.6557733674474235,
+              "normalized_action_mse": 1.283932831350147
+            }
+          },
+          "gripper_mse": 8.138477358715932,
+          "inactive_arm_leakage": 0.0020882396423328392,
+          "normalized_action_mse": 0.9015532756963432,
+          "rotation_endpoint_error": 0.006858653218561557,
+          "smoothness": 0.0,
+          "translation_endpoint_error": 0.0020074457030961543
+        },
+        "zero_image": {
+          "action_mse": 1.2054935069740278,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 1.1950838792400518,
+              "normalized_action_mse": 0.9267013583743486
+            },
+            "left_place": {
+              "action_mse": 1.8074733660597135,
+              "normalized_action_mse": 1.40156523960319
+            },
+            "right_pick": {
+              "action_mse": 0.11828027246766788,
+              "normalized_action_mse": 0.0917178208732735
+            },
+            "right_place": {
+              "action_mse": 1.7118974064224077,
+              "normalized_action_mse": 1.32745297588481
+            }
+          },
+          "gripper_mse": 8.43834740088959,
+          "inactive_arm_leakage": 0.003388047941897687,
+          "normalized_action_mse": 0.934773273935105,
+          "rotation_endpoint_error": 0.007698649887599085,
+          "smoothness": 0.0,
+          "translation_endpoint_error": 0.0023171596408792777
+        }
+      },
+      "train_metrics": {
+        "action_mse": 0.40360448394922255,
+        "by_phase": {
+          "left_pick": {
+            "action_mse": 0.33881857843726687,
+            "normalized_action_mse": 0.26272937183283046
+          },
+          "left_place": {
+            "action_mse": 0.7659638169551468,
+            "normalized_action_mse": 0.593949698400506
+          },
+          "right_pick": {
+            "action_mse": 0.021900411487011117,
+            "normalized_action_mse": 0.016982189640844268
+          },
+          "right_place": {
+            "action_mse": 0.491903373939088,
+            "normalized_action_mse": 0.38143559020154244
+          }
+        },
+        "gripper_mse": 2.8251728058569943,
+        "inactive_arm_leakage": 0.0024407351631820264,
+        "normalized_action_mse": 0.3129661691692809,
+        "rotation_endpoint_error": 0.005753266712332786,
+        "smoothness": 0.0,
+        "translation_endpoint_error": 0.0011780882412775347
+      },
+      "training_curves": "/outputs/flow_runs/imitation_flow_dinov3_tiny_holdout_color384_h1_seed4_lr3e4_steps4/flow_dinov3_convnext_tiny/training_curves.jsonl",
+      "wall_time_sec": 4289.860083525011
+    }
+  ],
+  "safety": {
+    "real_mode_behavior_touched": false,
+    "robot_motion_commands_sent": false,
+    "scope": "offline HDF5 imitation-learning experiment only"
+  },
+  "schema": "robotics_lab.policy_runner.imitation_report.v1",
+  "split": {
+    "effective_split_algorithm": "session_holdout_by_folder",
+    "primary_train_episode_count": 117,
+    "primary_validation_episode_count": 29,
+    "session_holdout_sessions": [
+      "data_20260606_140813",
+      "data_20260606_175635"
+    ],
+    "session_holdout_train_episode_count": 96,
+    "session_holdout_val_episode_count": 50,
+    "split_algorithm": "session_stratified_episode",
+    "split_hash": "93ac654ea69705f967546f011fecc2efdb4047fc92590928b54c7708a061e7dc",
+    "split_mode": "session_holdout",
+    "split_path": "/outputs/flow_runs/imitation_official/split_manifest.json",
+    "train_episode_count": 96,
+    "val_ratio": 0.2,
+    "validation_episode_count": 50
+  },
+  "warnings": []
+}

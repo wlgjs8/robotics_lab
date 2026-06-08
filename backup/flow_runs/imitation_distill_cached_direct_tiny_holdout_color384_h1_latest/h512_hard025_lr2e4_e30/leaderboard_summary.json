@@ -1,0 +1,281 @@
+{
+  "args": {
+    "action_horizon": 1,
+    "batch_size": 8,
+    "camera_names": [
+      "left_realsense_color",
+      "right_realsense_color"
+    ],
+    "data_dir": "/data/policy_episodes",
+    "device": "cuda",
+    "diffusion_sample_steps": 16,
+    "epochs": 30,
+    "exclude_camera_names": [
+      "left_realsense_depth",
+      "right_realsense_depth"
+    ],
+    "flow_sample_steps": 8,
+    "hard_weight": 0.25,
+    "hidden_dim": 512,
+    "image_crop": "none",
+    "image_size": 384,
+    "lr": 0.0002,
+    "max_train_samples": null,
+    "max_val_samples": null,
+    "models": [
+      "distill_cached_direct_bc_dinov3_convnext_tiny_h512_hard025_lr2e4_e30"
+    ],
+    "seed": 5,
+    "split_mode": "session_holdout",
+    "teacher_cache_path": "/outputs/flow_runs/imitation_distill_cached_direct_tiny_holdout_color384_h1_latest/train_teacher_cache.pt"
+  },
+  "created_at": "2026-06-07T23:02:55.802752+00:00",
+  "dataset": {
+    "detected_cameras": [
+      "left_realsense_color",
+      "left_realsense_depth",
+      "right_realsense_color",
+      "right_realsense_depth"
+    ],
+    "detected_formats": [
+      "pika_umi_bimanual"
+    ],
+    "frame_count": 42435,
+    "sessions": [
+      "data_20260606_134608",
+      "data_20260606_140442",
+      "data_20260606_140813",
+      "data_20260606_175002",
+      "data_20260606_175635",
+      "data_20260606_183038",
+      "data_20260606_185446",
+      "data_20260606_190156"
+    ],
+    "snapshot_hash": "532de3a1c38a4b3f12dcc875d928f723d798a1ee0edf02b99e857d2483e9f9ce",
+    "snapshot_path": "/outputs/flow_runs/imitation_official/dataset_snapshot.json",
+    "valid_episode_count": 146
+  },
+  "failed_runs": [],
+  "leaderboard": [
+    {
+      "action_mse": 0.5014295498625349,
+      "backbone": "dinov3_convnext_tiny",
+      "checkpoint_sha256": "310754f79befd7c0f30dd463956fcca529015e40a6bb94f14179c1ce36097aea",
+      "family": "direct_bc_distilled_cached_ensemble",
+      "gripper_mse": 3.50992630949913,
+      "inactive_arm_leakage": 0.00213774519961181,
+      "latency": {
+        "median_ms": 3.5494314797688276,
+        "p95_ms": 3.5695836937520653
+      },
+      "loss_name": "cached_distill_mse",
+      "model": "distill_cached_direct_bc_dinov3_convnext_tiny_h512_hard025_lr2e4_e30",
+      "normalized_action_mse": 0.38882245259816756,
+      "rank": 1,
+      "rotation_endpoint_error": 0.006608518535447797,
+      "split_mode": "session_holdout",
+      "train_normalized_action_mse": 0.17036351956073925,
+      "translation_endpoint_error": 0.0015911422707827587,
+      "wall_time_sec": 5989.7985096569755
+    }
+  ],
+  "normalization": {
+    "action_dim_names": [
+      "left_dx",
+      "left_dy",
+      "left_dz",
+      "left_drx",
+      "left_dry",
+      "left_drz",
+      "left_grip",
+      "right_dx",
+      "right_dy",
+      "right_dz",
+      "right_drx",
+      "right_dry",
+      "right_drz",
+      "right_grip"
+    ],
+    "path": "/outputs/flow_runs/imitation_dinov3_tiny_holdout_color384_h1_seed5_lr3e4/train_dataset_stats.json",
+    "sample_count": 28254,
+    "source": "train_only",
+    "train_episode_count": 96
+  },
+  "output_dir": "/outputs/flow_runs/imitation_distill_cached_direct_tiny_holdout_color384_h1_latest/h512_hard025_lr2e4_e30",
+  "recommendation": "Use only if it beats the best single checkpoint and runtime checkpoint loading is accepted.",
+  "results": [
+    {
+      "backbone": "dinov3_convnext_tiny",
+      "checkpoint_path": "/outputs/flow_runs/imitation_distill_cached_direct_tiny_holdout_color384_h1_latest/h512_hard025_lr2e4_e30/direct_bc_dinov3_convnext_tiny_distill/checkpoint.pt",
+      "checkpoint_sha256": "310754f79befd7c0f30dd463956fcca529015e40a6bb94f14179c1ce36097aea",
+      "family": "direct_bc_distilled_cached_ensemble",
+      "latency": {
+        "median_ms": 3.5494314797688276,
+        "p95_ms": 3.5695836937520653
+      },
+      "loss_name": "cached_distill_mse",
+      "metrics": {
+        "action_mse": 0.5014295498625349,
+        "by_phase": {
+          "left_pick": {
+            "action_mse": 0.572740508742661,
+            "normalized_action_mse": 0.4441189582319083
+          },
+          "left_place": {
+            "action_mse": 0.656152290811269,
+            "normalized_action_mse": 0.5087987795316128
+          },
+          "right_pick": {
+            "action_mse": 0.03717217541959939,
+            "normalized_action_mse": 0.028824341164217976
+          },
+          "right_place": {
+            "action_mse": 0.7436963435173971,
+            "normalized_action_mse": 0.5766828786895337
+          }
+        },
+        "gripper_mse": 3.50992630949913,
+        "inactive_arm_leakage": 0.00213774519961181,
+        "normalized_action_mse": 0.38882245259816756,
+        "rotation_endpoint_error": 0.006608518535447797,
+        "smoothness": 0.0,
+        "translation_endpoint_error": 0.0015911422707827587
+      },
+      "model": "distill_cached_direct_bc_dinov3_convnext_tiny_h512_hard025_lr2e4_e30",
+      "model_config": {
+        "action_dim": 14,
+        "action_horizon": 1,
+        "backbone": "dinov3_convnext_tiny",
+        "camera_names": [
+          "left_realsense_color",
+          "right_realsense_color"
+        ],
+        "epochs": 30,
+        "hard_weight": 0.25,
+        "hidden_dim": 512,
+        "loss_name": "cached_distill_mse",
+        "lr": 0.0002,
+        "proprio_dim": 16,
+        "teacher": "top5_prediction_ensemble_train_cache"
+      },
+      "safety": {
+        "real_mode_behavior_touched": false,
+        "robot_motion_commands_sent": false,
+        "scope": "offline HDF5 cached distillation only"
+      },
+      "shortcut_ablations": {
+        "image_shuffle": {
+          "action_mse": 1.1003780147275202,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 1.3261592327709242,
+              "normalized_action_mse": 1.0283408418252493
+            },
+            "left_place": {
+              "action_mse": 1.312259930691356,
+              "normalized_action_mse": 1.0175629354863387
+            },
+            "right_pick": {
+              "action_mse": 0.3917814838337698,
+              "normalized_action_mse": 0.3037982852597287
+            },
+            "right_place": {
+              "action_mse": 1.3770122810624674,
+              "normalized_action_mse": 1.067773713231076
+            }
+          },
+          "gripper_mse": 7.702548214710745,
+          "inactive_arm_leakage": 0.0026319514590586422,
+          "normalized_action_mse": 0.853263790673587,
+          "rotation_endpoint_error": 0.007238716584220477,
+          "smoothness": 0.0,
+          "translation_endpoint_error": 0.002127808623431581
+        },
+        "zero_image": {
+          "action_mse": 6.7944694509311825,
+          "by_phase": {
+            "left_pick": {
+              "action_mse": 4.400676750682078,
+              "normalized_action_mse": 3.41240744140633
+            },
+            "left_place": {
+              "action_mse": 8.282906659469376,
+              "normalized_action_mse": 6.42279674753809
+            },
+            "right_pick": {
+              "action_mse": 2.231216967827843,
+              "normalized_action_mse": 1.7301478421989762
+            },
+            "right_place": {
+              "action_mse": 12.313332840340559,
+              "normalized_action_mse": 9.548101574690419
+            }
+          },
+          "gripper_mse": 47.561072128399886,
+          "inactive_arm_leakage": 0.009924374567485794,
+          "normalized_action_mse": 5.268621039064489,
+          "rotation_endpoint_error": 0.012626904082691303,
+          "smoothness": 0.0,
+          "translation_endpoint_error": 0.003099051500681211
+        }
+      },
+      "train_metrics": {
+        "action_mse": 0.21970259781942753,
+        "by_phase": {
+          "left_pick": {
+            "action_mse": 0.18286634096233123,
+            "normalized_action_mse": 0.14179965901514757
+          },
+          "left_place": {
+            "action_mse": 0.4317662799411233,
+            "normalized_action_mse": 0.33480361091985583
+          },
+          "right_pick": {
+            "action_mse": 0.0237476427443174,
+            "normalized_action_mse": 0.018414584257752525
+          },
+          "right_place": {
+            "action_mse": 0.24266823312626326,
+            "normalized_action_mse": 0.18817171344944594
+          }
+        },
+        "gripper_mse": 1.5378706834184006,
+        "inactive_arm_leakage": 0.0023037189424791565,
+        "normalized_action_mse": 0.17036351956073925,
+        "rotation_endpoint_error": 0.005307435259319712,
+        "smoothness": 0.0,
+        "translation_endpoint_error": 0.0010832304842435872
+      },
+      "training_curves": "/outputs/flow_runs/imitation_distill_cached_direct_tiny_holdout_color384_h1_latest/h512_hard025_lr2e4_e30/direct_bc_dinov3_convnext_tiny_distill/training_curves.jsonl",
+      "wall_time_sec": 5989.7985096569755
+    }
+  ],
+  "safety": {
+    "real_mode_behavior_touched": false,
+    "robot_motion_commands_sent": false,
+    "scope": "offline HDF5 cached distillation only"
+  },
+  "schema": "robotics_lab.policy_runner.imitation_report.v1",
+  "split": {
+    "effective_split_algorithm": "session_holdout_by_folder",
+    "primary_train_episode_count": 117,
+    "primary_validation_episode_count": 29,
+    "session_holdout_sessions": [
+      "data_20260606_140813",
+      "data_20260606_175635"
+    ],
+    "session_holdout_train_episode_count": 96,
+    "session_holdout_val_episode_count": 50,
+    "split_algorithm": "session_stratified_episode",
+    "split_hash": "93ac654ea69705f967546f011fecc2efdb4047fc92590928b54c7708a061e7dc",
+    "split_mode": "session_holdout",
+    "split_path": "/outputs/flow_runs/imitation_official/split_manifest.json",
+    "train_episode_count": 96,
+    "val_ratio": 0.2,
+    "validation_episode_count": 50
+  },
+  "warnings": [
+    "Teacher top5 ensemble was selected from validation leaderboard; treat as post-hoc compression evidence, not leakage-free model-family selection.",
+    "Teacher cache contains train-split predictions only."
+  ]
+}

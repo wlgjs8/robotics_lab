@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -18,7 +20,9 @@ from .action_sources.tcp_delta import (
 )
 from .flow_dataset import (
     FLOW_CHECKPOINT_SCHEMA,
+    FLOW_ACTION_DIM,
     FLOW_ACTION_DIM_NAMES,
+    FLOW_PROPRIO_DIM,
     FlowHdf5Dataset,
     decode_hdf5_image_value,
     normalize_runtime_proprio,
@@ -42,6 +46,13 @@ _ZERO_TWIST = (0.0,) * 6
 DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S = 0.30
 DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S = 2.0
 _FLOW_STATS_VELOCITY_LIMIT_SCALE = 1.25
+IMITATION_CHECKPOINT_SCHEMA = "robotics_lab.policy_runner.imitation_checkpoint.v1"
+IMITATION_ENSEMBLE_REPORT_SCHEMA = "robotics_lab.policy_runner.imitation_ensemble_report.v1"
+DIRECT_BC_RUNTIME_FAMILIES = {
+    "direct_bc_chunk",
+    "direct_bc_distilled_cached_ensemble",
+    "arm_structured_direct",
+}
 
 
 @dataclass(frozen=True)
@@ -52,6 +63,21 @@ class FlowOfflineEvalResult:
     image_decode_count: int
     missing_camera_count: int
     command_family: str = "TcpTwistStand"
+    selected_arms: list[str] = field(default_factory=list)
+    checkpoint_arm_mask: tuple[float, float] | None = None
+    checkpoint_has_nonzero_gripper_commands: bool = False
+
+
+@dataclass(frozen=True)
+class _DirectBcEnsembleBundle:
+    name: str
+    member_paths: list[str]
+    models: list[Any]
+    stats: dict[str, Any]
+    camera_names: list[str]
+    image_size: int
+    action_horizon: int
+    arm_mask: np.ndarray
 
 
 def resolve_flow_command_family(
@@ -186,6 +212,8 @@ class FlowMatchingActionSource:
             raise ValueError("max_angular_velocity_rad_s must be non-negative")
         self.max_linear_step_m = float(max_linear_step_m)
         self.max_angular_step_rad = float(max_angular_step_rad)
+        self.policy_label = "flow policy"
+        self.gripper_command_source = "flow_policy"
         self.stderr = stderr
         self.device = _resolve_device(device)
 
@@ -301,7 +329,7 @@ class FlowMatchingActionSource:
             step.tolist(),
             arm_mask=self.arm_mask.tolist(),
             command_type="delta",
-            source="flow_policy",
+            source=self.gripper_command_source,
         )
         self.gripper_runtime.dispatch(commands)
 
@@ -535,8 +563,8 @@ class FlowMatchingActionSource:
         elif not self._warned_missing_camera_client:
             self._warned_missing_camera_client = True
             print(
-                "WARNING: flow policy checkpoint expects cameras, but camera.enable is false; "
-                "the flow action source will emit no motion intents until required frames are available.",
+                f"WARNING: {self.policy_label} checkpoint expects cameras, but camera.enable is false; "
+                "the action source will emit no motion intents until required frames are available.",
                 file=self.stderr,
             )
         return bundle
@@ -550,6 +578,305 @@ class FlowMatchingActionSource:
             if pixels is None:
                 missing_count += 1
         return missing_count
+
+
+class DirectBcImageActionSource(FlowMatchingActionSource):
+    """Runtime source for supervised image action-chunk imitation checkpoints."""
+
+    def __init__(
+        self,
+        checkpoint_path: str | Path,
+        *,
+        timeout_sec: float = 0.2,
+        camera_client: Any | None = None,
+        command_family: str = "tcp_twist_stand",
+        policy_dt_sec: float | None = None,
+        image_size: int | None = None,
+        max_linear_velocity_m_s: float | None = None,
+        max_angular_velocity_rad_s: float | None = None,
+        max_linear_step_m: float = 0.002,
+        max_angular_step_rad: float = 0.01,
+        chunk_execute_steps: int | None = None,
+        allow_rbpodo_controller_simulation_cartesian: bool = False,
+        gripper_runtime: GripperRuntime | None = None,
+        device: str = "auto",
+        stderr: TextIO = sys.stderr,
+    ):
+        self.timeout_sec = float(timeout_sec)
+        self.camera_client = camera_client
+        self.sample_steps = 1
+        self.command_family_option = normalize_flow_command_family(command_family)
+        self.command_family = canonical_flow_command_family(self.command_family_option)
+        if policy_dt_sec is not None and policy_dt_sec <= 0.0:
+            raise ValueError("policy_dt_sec must be positive")
+        if image_size is not None and int(image_size) <= 0:
+            raise ValueError("image_size must be positive")
+        if max_linear_velocity_m_s is not None and max_linear_velocity_m_s < 0.0:
+            raise ValueError("max_linear_velocity_m_s must be non-negative")
+        if max_angular_velocity_rad_s is not None and max_angular_velocity_rad_s < 0.0:
+            raise ValueError("max_angular_velocity_rad_s must be non-negative")
+        self.max_linear_step_m = float(max_linear_step_m)
+        self.max_angular_step_rad = float(max_angular_step_rad)
+        self.policy_label = "direct BC image policy"
+        self.gripper_command_source = "direct_bc_policy"
+        self.stderr = stderr
+        self.device = _resolve_device(device)
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        schema = str(checkpoint.get("schema", "") or "")
+        if schema != IMITATION_CHECKPOINT_SCHEMA:
+            raise ValueError(f"unsupported imitation checkpoint schema: {schema}")
+        family = str(checkpoint.get("model_family", "") or "")
+        if family not in DIRECT_BC_RUNTIME_FAMILIES:
+            choices = ", ".join(sorted(DIRECT_BC_RUNTIME_FAMILIES))
+            raise ValueError(f"unsupported imitation checkpoint family {family!r}; expected one of: {choices}")
+        action_dim = int(checkpoint.get("action_dim", 0) or 0)
+        proprio_dim = int(checkpoint.get("proprio_dim", 0) or 0)
+        if action_dim != FLOW_ACTION_DIM:
+            raise ValueError(f"unsupported imitation action_dim {action_dim}; expected {FLOW_ACTION_DIM}")
+        if proprio_dim != FLOW_PROPRIO_DIM:
+            raise ValueError(f"unsupported imitation proprio_dim {proprio_dim}; expected {FLOW_PROPRIO_DIM}")
+
+        self.stats = dict(checkpoint["dataset_stats"])
+        self.camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
+        checkpoint_image_size = _positive_int(checkpoint.get("image_size"))
+        stats_image_size = _positive_int(self.stats.get("image_size"))
+        resolved_image_size = int(image_size or checkpoint_image_size or stats_image_size or 0)
+        if resolved_image_size <= 0:
+            raise ValueError(
+                "direct BC image checkpoint is missing image_size; pass --image-size matching training"
+            )
+        self.image_size = resolved_image_size
+        self.action_horizon = int(checkpoint.get("action_horizon", 0) or 0)
+        if self.action_horizon <= 0:
+            raise ValueError("imitation checkpoint action_horizon must be positive")
+        self.chunk_execute_steps = _resolve_chunk_execute_steps(chunk_execute_steps, self.action_horizon)
+        self.policy_dt_sec = _resolve_runtime_policy_dt_sec(
+            self.command_family_option,
+            policy_dt_sec,
+            self.stats,
+        )
+        self.max_linear_velocity_m_s = _resolve_velocity_limit_from_stats(
+            configured=max_linear_velocity_m_s,
+            stats=self.stats,
+            policy_dt_sec=self.policy_dt_sec,
+            names=("left_dx", "left_dy", "left_dz", "right_dx", "right_dy", "right_dz"),
+            fallback=DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
+        )
+        self.max_angular_velocity_rad_s = _resolve_velocity_limit_from_stats(
+            configured=max_angular_velocity_rad_s,
+            stats=self.stats,
+            policy_dt_sec=self.policy_dt_sec,
+            names=("left_drx", "left_dry", "left_drz", "right_drx", "right_dry", "right_drz"),
+            fallback=DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S,
+        )
+
+        hidden_dim = _infer_direct_bc_hidden_dim(checkpoint["model_state"], family)
+        backbone = str(checkpoint.get("backbone", "") or "")
+        if not backbone:
+            raise ValueError("imitation checkpoint is missing backbone")
+        if family == "arm_structured_direct":
+            from .imitation_experiments import _build_structured_direct_policy
+
+            self.model = _build_structured_direct_policy(
+                backbone=backbone,
+                action_horizon=self.action_horizon,
+                camera_count=len(self.camera_names),
+                hidden_dim=hidden_dim,
+            ).to(self.device)
+        else:
+            from .imitation_experiments import _build_direct_bc_policy
+
+            self.model = _build_direct_bc_policy(
+                backbone=backbone,
+                action_horizon=self.action_horizon,
+                camera_count=len(self.camera_names),
+                hidden_dim=hidden_dim,
+            ).to(self.device)
+        self.model.load_state_dict(checkpoint["model_state"])
+        self.model.eval()
+
+        self.arm_mask = _arm_mask_from_stats(self.stats)
+        self.checkpoint_arm_mask = tuple(float(value) for value in self.arm_mask.tolist())
+        self.checkpoint_selected_arms = _arms_from_mask(self.arm_mask)
+        self.checkpoint_has_nonzero_gripper_commands = _checkpoint_has_nonzero_gripper_commands(
+            self.stats,
+            action_dim,
+        )
+        self.gripper_runtime = gripper_runtime or GripperRuntime(rollout_mode="sim_dryrun")
+        self.requirements = replace(
+            cartesian_action_requirements(
+                allow_rbpodo_controller_simulation=allow_rbpodo_controller_simulation_cartesian,
+            ),
+            requires_camera=bool(self.camera_names),
+        )
+        self._reset_left_pose: np.ndarray | None = None
+        self._reset_right_pose: np.ndarray | None = None
+        self._chunk: np.ndarray | None = None
+        self._chunk_index = 0
+        self._warned_missing_camera_client = False
+        self.last_image_decode_count = 0
+        self.last_missing_camera_count = 0
+        self.image_decode_count = 0
+        self.missing_camera_count = 0
+        self._last_nonzero_twist_by_arm = {"left": False, "right": False}
+        self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+
+    def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
+        assert self._reset_left_pose is not None
+        assert self._reset_right_pose is not None
+        proprio = runtime_proprio_from_state(
+            payload,
+            reset_left_pose=self._reset_left_pose,
+            reset_right_pose=self._reset_right_pose,
+            arm_mask=self.arm_mask,
+        )
+        proprio = normalize_runtime_proprio(proprio, self.stats)
+        images, decode_count, missing_count = self._runtime_images()
+        self.last_image_decode_count = decode_count
+        self.last_missing_camera_count = missing_count
+        self.image_decode_count += decode_count
+        self.missing_camera_count += missing_count
+        if self.camera_names and missing_count > 0:
+            return None
+        images = _normalize_images(images, self.stats)
+        with torch.no_grad():
+            chunk = self.model(
+                torch.as_tensor(images[None, ...], dtype=torch.float32, device=self.device),
+                torch.as_tensor(proprio[None, ...], dtype=torch.float32, device=self.device),
+            )
+            chunk = _denormalize_action_numpy(chunk, self.stats)
+        return chunk[0]
+
+
+class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
+    """Runtime source for prediction-averaged direct-BC checkpoint ensembles."""
+
+    def __init__(
+        self,
+        report_path: str | Path,
+        *,
+        ensemble_name: str | None = "top5",
+        timeout_sec: float = 0.2,
+        camera_client: Any | None = None,
+        command_family: str = "tcp_twist_stand",
+        policy_dt_sec: float | None = None,
+        image_size: int | None = None,
+        max_linear_velocity_m_s: float | None = None,
+        max_angular_velocity_rad_s: float | None = None,
+        max_linear_step_m: float = 0.002,
+        max_angular_step_rad: float = 0.01,
+        chunk_execute_steps: int | None = None,
+        allow_rbpodo_controller_simulation_cartesian: bool = False,
+        gripper_runtime: GripperRuntime | None = None,
+        device: str = "auto",
+        stderr: TextIO = sys.stderr,
+    ):
+        self.timeout_sec = float(timeout_sec)
+        self.camera_client = camera_client
+        self.sample_steps = 1
+        self.command_family_option = normalize_flow_command_family(command_family)
+        self.command_family = canonical_flow_command_family(self.command_family_option)
+        if policy_dt_sec is not None and policy_dt_sec <= 0.0:
+            raise ValueError("policy_dt_sec must be positive")
+        if image_size is not None and int(image_size) <= 0:
+            raise ValueError("image_size must be positive")
+        if max_linear_velocity_m_s is not None and max_linear_velocity_m_s < 0.0:
+            raise ValueError("max_linear_velocity_m_s must be non-negative")
+        if max_angular_velocity_rad_s is not None and max_angular_velocity_rad_s < 0.0:
+            raise ValueError("max_angular_velocity_rad_s must be non-negative")
+        self.max_linear_step_m = float(max_linear_step_m)
+        self.max_angular_step_rad = float(max_angular_step_rad)
+        self.policy_label = "direct BC checkpoint ensemble"
+        self.gripper_command_source = "direct_bc_ensemble_policy"
+        self.stderr = stderr
+        self.device = _resolve_device(device)
+
+        bundle = _load_direct_bc_ensemble_bundle(
+            report_path,
+            device=self.device,
+            image_size=image_size,
+            ensemble_name=ensemble_name,
+        )
+        self.ensemble_name = bundle.name
+        self.member_checkpoint_paths = list(bundle.member_paths)
+        self.models = list(bundle.models)
+        self.stats = dict(bundle.stats)
+        self.camera_names = list(bundle.camera_names)
+        self.image_size = int(bundle.image_size)
+        self.action_horizon = int(bundle.action_horizon)
+        self.chunk_execute_steps = _resolve_chunk_execute_steps(chunk_execute_steps, self.action_horizon)
+        self.policy_dt_sec = _resolve_runtime_policy_dt_sec(
+            self.command_family_option,
+            policy_dt_sec,
+            self.stats,
+        )
+        self.max_linear_velocity_m_s = _resolve_velocity_limit_from_stats(
+            configured=max_linear_velocity_m_s,
+            stats=self.stats,
+            policy_dt_sec=self.policy_dt_sec,
+            names=("left_dx", "left_dy", "left_dz", "right_dx", "right_dy", "right_dz"),
+            fallback=DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
+        )
+        self.max_angular_velocity_rad_s = _resolve_velocity_limit_from_stats(
+            configured=max_angular_velocity_rad_s,
+            stats=self.stats,
+            policy_dt_sec=self.policy_dt_sec,
+            names=("left_drx", "left_dry", "left_drz", "right_drx", "right_dry", "right_drz"),
+            fallback=DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S,
+        )
+
+        self.arm_mask = bundle.arm_mask
+        self.checkpoint_arm_mask = tuple(float(value) for value in self.arm_mask.tolist())
+        self.checkpoint_selected_arms = _arms_from_mask(self.arm_mask)
+        self.checkpoint_has_nonzero_gripper_commands = _checkpoint_has_nonzero_gripper_commands(
+            self.stats,
+            FLOW_ACTION_DIM,
+        )
+        self.gripper_runtime = gripper_runtime or GripperRuntime(rollout_mode="sim_dryrun")
+        self.requirements = replace(
+            cartesian_action_requirements(
+                allow_rbpodo_controller_simulation=allow_rbpodo_controller_simulation_cartesian,
+            ),
+            requires_camera=bool(self.camera_names),
+        )
+        self._reset_left_pose: np.ndarray | None = None
+        self._reset_right_pose: np.ndarray | None = None
+        self._chunk: np.ndarray | None = None
+        self._chunk_index = 0
+        self._warned_missing_camera_client = False
+        self.last_image_decode_count = 0
+        self.last_missing_camera_count = 0
+        self.image_decode_count = 0
+        self.missing_camera_count = 0
+        self._last_nonzero_twist_by_arm = {"left": False, "right": False}
+        self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+
+    def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
+        assert self._reset_left_pose is not None
+        assert self._reset_right_pose is not None
+        proprio = runtime_proprio_from_state(
+            payload,
+            reset_left_pose=self._reset_left_pose,
+            reset_right_pose=self._reset_right_pose,
+            arm_mask=self.arm_mask,
+        )
+        proprio = normalize_runtime_proprio(proprio, self.stats)
+        images, decode_count, missing_count = self._runtime_images()
+        self.last_image_decode_count = decode_count
+        self.last_missing_camera_count = missing_count
+        self.image_decode_count += decode_count
+        self.missing_camera_count += missing_count
+        if self.camera_names and missing_count > 0:
+            return None
+        images = _normalize_images(images, self.stats)
+        image_tensor = torch.as_tensor(images[None, ...], dtype=torch.float32, device=self.device)
+        proprio_tensor = torch.as_tensor(proprio[None, ...], dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            predictions = [model(image_tensor, proprio_tensor) for model in self.models]
+            chunk = torch.stack(predictions, dim=0).mean(dim=0)
+            chunk = _denormalize_action_numpy(chunk, self.stats)
+        return chunk[0]
 
 
 def run_flow_offline_eval(
@@ -582,6 +909,7 @@ def run_flow_offline_eval(
             "proprio_dim": int(checkpoint["proprio_dim"]),
             "camera_names": camera_names,
         }
+    arm_mask = _arm_mask_from_stats(stats)
     model = FlowMatchingPolicy.from_checkpoint_config(model_config).to(torch_device)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
@@ -626,6 +954,158 @@ def run_flow_offline_eval(
         image_decode_count=image_decode_count,
         missing_camera_count=missing_camera_count,
         command_family=command_family,
+        selected_arms=_arms_from_mask(arm_mask),
+        checkpoint_arm_mask=tuple(float(value) for value in arm_mask.tolist()),
+        checkpoint_has_nonzero_gripper_commands=_checkpoint_has_nonzero_gripper_commands(
+            stats,
+            int(model_config.get("action_dim", checkpoint.get("action_dim", 0)) or 0),
+        ),
+    )
+
+
+def run_direct_bc_offline_eval(
+    *,
+    checkpoint_path: str | Path,
+    episodes_dir: str | Path,
+    device: str = "auto",
+    max_samples: int = 1,
+    command_family: str = "TcpTwistStand",
+    image_size: int | None = None,
+) -> FlowOfflineEvalResult:
+    if max_samples <= 0:
+        raise ValueError("max_offline_samples must be positive")
+    torch_device = _resolve_device(device)
+    checkpoint = torch.load(checkpoint_path, map_location=torch_device, weights_only=False)
+    schema = str(checkpoint.get("schema", "") or "")
+    if schema != IMITATION_CHECKPOINT_SCHEMA:
+        raise ValueError(f"unsupported imitation checkpoint schema: {schema}")
+    family = str(checkpoint.get("model_family", "") or "")
+    if family not in DIRECT_BC_RUNTIME_FAMILIES:
+        raise ValueError(f"unsupported imitation checkpoint family: {family}")
+
+    stats = dict(checkpoint["dataset_stats"])
+    camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
+    arm_mask = _arm_mask_from_stats(stats)
+    resolved_image_size = int(image_size or _positive_int(checkpoint.get("image_size")) or _positive_int(stats.get("image_size")) or 0)
+    if resolved_image_size <= 0:
+        raise ValueError("direct BC image checkpoint is missing image_size; pass --image-size matching training")
+    hidden_dim = _infer_direct_bc_hidden_dim(checkpoint["model_state"], family)
+    backbone = str(checkpoint.get("backbone", "") or "")
+    if family == "arm_structured_direct":
+        from .imitation_experiments import _build_structured_direct_policy
+
+        model = _build_structured_direct_policy(
+            backbone=backbone,
+            action_horizon=int(checkpoint["action_horizon"]),
+            camera_count=len(camera_names),
+            hidden_dim=hidden_dim,
+        ).to(torch_device)
+    else:
+        from .imitation_experiments import _build_direct_bc_policy
+
+        model = _build_direct_bc_policy(
+            backbone=backbone,
+            action_horizon=int(checkpoint["action_horizon"]),
+            camera_count=len(camera_names),
+            hidden_dim=hidden_dim,
+        ).to(torch_device)
+    model.load_state_dict(checkpoint["model_state"])
+    model.eval()
+
+    dataset = FlowHdf5Dataset(
+        episodes_dir,
+        action_horizon=int(checkpoint["action_horizon"]),
+        image_size=resolved_image_size,
+        camera_names=camera_names,
+        stats=stats,
+        normalize=True,
+    )
+    sample_count = min(int(max_samples), len(dataset))
+    image_decode_count = 0
+    missing_camera_count = 0
+    action_chunk_count = 0
+    for index in range(sample_count):
+        sample = dataset[index]
+        image_decode_count += int(sample["image_decode_count"])
+        missing_camera_count += int(sample["missing_camera_count"])
+        with torch.no_grad():
+            chunk = model(
+                torch.as_tensor(sample["images"][None, ...], dtype=torch.float32, device=torch_device),
+                torch.as_tensor(sample["proprio"][None, ...], dtype=torch.float32, device=torch_device),
+            )
+        action_chunk_count += int(chunk.shape[1])
+
+    return FlowOfflineEvalResult(
+        sample_count=sample_count,
+        action_chunk_count=action_chunk_count,
+        camera_names=camera_names,
+        image_decode_count=image_decode_count,
+        missing_camera_count=missing_camera_count,
+        command_family=command_family,
+        selected_arms=_arms_from_mask(arm_mask),
+        checkpoint_arm_mask=tuple(float(value) for value in arm_mask.tolist()),
+        checkpoint_has_nonzero_gripper_commands=_checkpoint_has_nonzero_gripper_commands(
+            stats,
+            int(checkpoint.get("action_dim", 0) or 0),
+        ),
+    )
+
+
+def run_direct_bc_ensemble_offline_eval(
+    *,
+    report_path: str | Path,
+    episodes_dir: str | Path,
+    device: str = "auto",
+    max_samples: int = 1,
+    command_family: str = "TcpTwistStand",
+    image_size: int | None = None,
+    ensemble_name: str | None = "top5",
+) -> FlowOfflineEvalResult:
+    if max_samples <= 0:
+        raise ValueError("max_offline_samples must be positive")
+    torch_device = _resolve_device(device)
+    bundle = _load_direct_bc_ensemble_bundle(
+        report_path,
+        device=torch_device,
+        image_size=image_size,
+        ensemble_name=ensemble_name,
+    )
+    dataset = FlowHdf5Dataset(
+        episodes_dir,
+        action_horizon=int(bundle.action_horizon),
+        image_size=int(bundle.image_size),
+        camera_names=list(bundle.camera_names),
+        stats=bundle.stats,
+        normalize=True,
+    )
+    sample_count = min(int(max_samples), len(dataset))
+    image_decode_count = 0
+    missing_camera_count = 0
+    action_chunk_count = 0
+    for index in range(sample_count):
+        sample = dataset[index]
+        image_decode_count += int(sample["image_decode_count"])
+        missing_camera_count += int(sample["missing_camera_count"])
+        images = torch.as_tensor(sample["images"][None, ...], dtype=torch.float32, device=torch_device)
+        proprio = torch.as_tensor(sample["proprio"][None, ...], dtype=torch.float32, device=torch_device)
+        with torch.no_grad():
+            predictions = [model(images, proprio) for model in bundle.models]
+            chunk = torch.stack(predictions, dim=0).mean(dim=0)
+        action_chunk_count += int(chunk.shape[1])
+
+    return FlowOfflineEvalResult(
+        sample_count=sample_count,
+        action_chunk_count=action_chunk_count,
+        camera_names=list(bundle.camera_names),
+        image_decode_count=image_decode_count,
+        missing_camera_count=missing_camera_count,
+        command_family=command_family,
+        selected_arms=_arms_from_mask(bundle.arm_mask),
+        checkpoint_arm_mask=tuple(float(value) for value in bundle.arm_mask.tolist()),
+        checkpoint_has_nonzero_gripper_commands=_checkpoint_has_nonzero_gripper_commands(
+            bundle.stats,
+            FLOW_ACTION_DIM,
+        ),
     )
 
 
@@ -640,6 +1120,255 @@ def load_flow_checkpoint_dataset_stats(
         raise ValueError(f"unsupported flow checkpoint schema: {schema}")
     stats = checkpoint.get("dataset_stats", {})
     return dict(stats) if isinstance(stats, dict) else {}
+
+
+def action_chunk_checkpoint_kind(
+    checkpoint_path: str | Path,
+    *,
+    device: str = "cpu",
+) -> str:
+    path = Path(checkpoint_path)
+    if path.suffix.lower() == ".json":
+        payload = _load_json(path)
+        schema = str(payload.get("schema", "") or "")
+        if schema == IMITATION_ENSEMBLE_REPORT_SCHEMA:
+            return "direct_bc_ensemble"
+        raise ValueError(f"unsupported action-chunk JSON schema: {schema}")
+    checkpoint = torch.load(checkpoint_path, map_location=_resolve_device(device), weights_only=False)
+    schema = str(checkpoint.get("schema", "") or "")
+    if schema == FLOW_CHECKPOINT_SCHEMA:
+        return "flow"
+    if schema == IMITATION_CHECKPOINT_SCHEMA:
+        family = str(checkpoint.get("model_family", "") or "")
+        if family in DIRECT_BC_RUNTIME_FAMILIES:
+            return "direct_bc"
+        raise ValueError(f"unsupported imitation checkpoint family: {family}")
+    raise ValueError(f"unsupported action-chunk checkpoint schema: {schema}")
+
+
+def load_action_chunk_checkpoint_dataset_stats(
+    checkpoint_path: str | Path,
+    *,
+    device: str = "cpu",
+    ensemble_name: str | None = "top5",
+) -> dict[str, Any]:
+    path = Path(checkpoint_path)
+    if path.suffix.lower() == ".json":
+        payload = _load_json(path)
+        schema = str(payload.get("schema", "") or "")
+        if schema != IMITATION_ENSEMBLE_REPORT_SCHEMA:
+            raise ValueError(f"unsupported action-chunk JSON schema: {schema}")
+        member_path = _first_ensemble_member_path(path, payload, ensemble_name=ensemble_name)
+        checkpoint = torch.load(member_path, map_location=_resolve_device(device), weights_only=False)
+        stats = checkpoint.get("dataset_stats", {})
+        return dict(stats) if isinstance(stats, dict) else {}
+    checkpoint = torch.load(checkpoint_path, map_location=_resolve_device(device), weights_only=False)
+    schema = str(checkpoint.get("schema", "") or "")
+    if schema not in {FLOW_CHECKPOINT_SCHEMA, IMITATION_CHECKPOINT_SCHEMA}:
+        raise ValueError(f"unsupported action-chunk checkpoint schema: {schema}")
+    if schema == IMITATION_CHECKPOINT_SCHEMA:
+        family = str(checkpoint.get("model_family", "") or "")
+        if family not in DIRECT_BC_RUNTIME_FAMILIES:
+            raise ValueError(f"unsupported imitation checkpoint family: {family}")
+    stats = checkpoint.get("dataset_stats", {})
+    return dict(stats) if isinstance(stats, dict) else {}
+
+
+def _load_json(path: str | Path) -> dict[str, Any]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"expected JSON object in {path}")
+    return payload
+
+
+def _sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _first_ensemble_member_path(
+    report_path: Path,
+    payload: dict[str, Any],
+    *,
+    ensemble_name: str | None,
+) -> Path:
+    ensemble = _select_ensemble(payload, ensemble_name=ensemble_name)
+    members = ensemble.get("members", [])
+    if not isinstance(members, list) or not members:
+        raise ValueError("ensemble report selected entry has no members")
+    return _resolve_report_member_path(report_path, members[0])
+
+
+def _load_direct_bc_ensemble_bundle(
+    report_path: str | Path,
+    *,
+    device: torch.device,
+    image_size: int | None,
+    ensemble_name: str | None,
+) -> _DirectBcEnsembleBundle:
+    report = Path(report_path)
+    payload = _load_json(report)
+    schema = str(payload.get("schema", "") or "")
+    if schema != IMITATION_ENSEMBLE_REPORT_SCHEMA:
+        raise ValueError(f"unsupported imitation ensemble report schema: {schema}")
+    ensemble = _select_ensemble(payload, ensemble_name=ensemble_name)
+    name = str(ensemble.get("name", "") or "")
+    members = ensemble.get("members", [])
+    if not isinstance(members, list) or not members:
+        raise ValueError("ensemble report selected entry has no members")
+    expected_sha = ensemble.get("member_checkpoint_sha256", [])
+    if expected_sha and (not isinstance(expected_sha, list) or len(expected_sha) != len(members)):
+        raise ValueError("ensemble report member_checkpoint_sha256 length must match members")
+    report_image_size = _positive_int((payload.get("args") or {}).get("image_size")) if isinstance(payload.get("args"), dict) else None
+    resolved_image_size = int(image_size or report_image_size or 0)
+    if resolved_image_size <= 0:
+        raise ValueError("direct BC ensemble report is missing image_size; pass --image-size matching training")
+
+    models: list[Any] = []
+    member_paths: list[str] = []
+    reference_stats: dict[str, Any] | None = None
+    reference_cameras: list[str] | None = None
+    reference_horizon: int | None = None
+    reference_arm_mask: np.ndarray | None = None
+    for index, member in enumerate(members):
+        member_path = _resolve_report_member_path(report, member)
+        if not member_path.exists():
+            raise ValueError(f"ensemble member checkpoint does not exist: {member_path}")
+        if expected_sha:
+            actual_sha = _sha256_file(member_path)
+            wanted_sha = str(expected_sha[index])
+            if actual_sha != wanted_sha:
+                raise ValueError(f"ensemble member SHA mismatch for {member_path}: {actual_sha} != {wanted_sha}")
+        checkpoint = torch.load(member_path, map_location=device, weights_only=False)
+        model = _build_direct_bc_model_from_checkpoint(checkpoint, device=device)
+        stats = dict(checkpoint["dataset_stats"])
+        cameras = [str(camera) for camera in checkpoint.get("camera_names", [])]
+        horizon = int(checkpoint.get("action_horizon", 0) or 0)
+        arm_mask = _arm_mask_from_stats(stats)
+        if reference_stats is None:
+            reference_stats = stats
+            reference_cameras = cameras
+            reference_horizon = horizon
+            reference_arm_mask = arm_mask
+        else:
+            _validate_ensemble_member_compatible(
+                member_path=member_path,
+                stats=stats,
+                camera_names=cameras,
+                action_horizon=horizon,
+                arm_mask=arm_mask,
+                reference_stats=reference_stats,
+                reference_camera_names=reference_cameras or [],
+                reference_action_horizon=int(reference_horizon or 0),
+                reference_arm_mask=reference_arm_mask if reference_arm_mask is not None else np.ones(2, dtype=np.float32),
+            )
+        models.append(model)
+        member_paths.append(str(member_path))
+    assert reference_stats is not None
+    assert reference_cameras is not None
+    assert reference_horizon is not None
+    assert reference_arm_mask is not None
+    return _DirectBcEnsembleBundle(
+        name=name,
+        member_paths=member_paths,
+        models=models,
+        stats=reference_stats,
+        camera_names=reference_cameras,
+        image_size=resolved_image_size,
+        action_horizon=reference_horizon,
+        arm_mask=reference_arm_mask,
+    )
+
+
+def _select_ensemble(payload: dict[str, Any], *, ensemble_name: str | None) -> dict[str, Any]:
+    ensembles = payload.get("ensembles", payload.get("results", []))
+    if not isinstance(ensembles, list) or not ensembles:
+        raise ValueError("ensemble report has no ensembles")
+    desired = str(ensemble_name or "").strip()
+    if desired:
+        for ensemble in ensembles:
+            if isinstance(ensemble, dict) and str(ensemble.get("name", "") or "") == desired:
+                return ensemble
+        raise ValueError(f"ensemble {desired!r} not found in report")
+    first = ensembles[0]
+    if not isinstance(first, dict):
+        raise ValueError("ensemble report first entry is not an object")
+    return first
+
+
+def _resolve_report_member_path(report_path: Path, member: Any) -> Path:
+    path = Path(str(member))
+    if path.is_absolute():
+        return path
+    return report_path.parent / path
+
+
+def _build_direct_bc_model_from_checkpoint(checkpoint: dict[str, Any], *, device: torch.device) -> Any:
+    schema = str(checkpoint.get("schema", "") or "")
+    if schema != IMITATION_CHECKPOINT_SCHEMA:
+        raise ValueError(f"unsupported imitation checkpoint schema: {schema}")
+    family = str(checkpoint.get("model_family", "") or "")
+    if family not in DIRECT_BC_RUNTIME_FAMILIES:
+        raise ValueError(f"unsupported imitation checkpoint family: {family}")
+    action_dim = int(checkpoint.get("action_dim", 0) or 0)
+    proprio_dim = int(checkpoint.get("proprio_dim", 0) or 0)
+    if action_dim != FLOW_ACTION_DIM:
+        raise ValueError(f"unsupported imitation action_dim {action_dim}; expected {FLOW_ACTION_DIM}")
+    if proprio_dim != FLOW_PROPRIO_DIM:
+        raise ValueError(f"unsupported imitation proprio_dim {proprio_dim}; expected {FLOW_PROPRIO_DIM}")
+    hidden_dim = _infer_direct_bc_hidden_dim(checkpoint["model_state"], family)
+    backbone = str(checkpoint.get("backbone", "") or "")
+    if not backbone:
+        raise ValueError("imitation checkpoint is missing backbone")
+    if family == "arm_structured_direct":
+        from .imitation_experiments import _build_structured_direct_policy
+
+        model = _build_structured_direct_policy(
+            backbone=backbone,
+            action_horizon=int(checkpoint["action_horizon"]),
+            camera_count=len(checkpoint.get("camera_names", [])),
+            hidden_dim=hidden_dim,
+        ).to(device)
+    else:
+        from .imitation_experiments import _build_direct_bc_policy
+
+        model = _build_direct_bc_policy(
+            backbone=backbone,
+            action_horizon=int(checkpoint["action_horizon"]),
+            camera_count=len(checkpoint.get("camera_names", [])),
+            hidden_dim=hidden_dim,
+        ).to(device)
+    model.load_state_dict(checkpoint["model_state"])
+    model.eval()
+    return model
+
+
+def _validate_ensemble_member_compatible(
+    *,
+    member_path: Path,
+    stats: dict[str, Any],
+    camera_names: list[str],
+    action_horizon: int,
+    arm_mask: np.ndarray,
+    reference_stats: dict[str, Any],
+    reference_camera_names: list[str],
+    reference_action_horizon: int,
+    reference_arm_mask: np.ndarray,
+) -> None:
+    if camera_names != reference_camera_names:
+        raise ValueError(f"ensemble member camera_names mismatch: {member_path}")
+    if int(action_horizon) != int(reference_action_horizon):
+        raise ValueError(f"ensemble member action_horizon mismatch: {member_path}")
+    if not np.allclose(arm_mask, reference_arm_mask):
+        raise ValueError(f"ensemble member arm_mask mismatch: {member_path}")
+    for key in ("action_mean", "action_std", "proprio_mean", "proprio_std", "image_mean", "image_std"):
+        if key not in stats or key not in reference_stats:
+            raise ValueError(f"ensemble member missing dataset_stats.{key}: {member_path}")
+        if not np.allclose(np.asarray(stats[key], dtype=np.float64), np.asarray(reference_stats[key], dtype=np.float64)):
+            raise ValueError(f"ensemble member dataset_stats.{key} mismatch: {member_path}")
 
 
 def _arm_mask_from_stats(stats: dict[str, Any]) -> np.ndarray:
@@ -699,6 +1428,27 @@ def _normalize_images(images: np.ndarray, stats: dict[str, Any]) -> np.ndarray:
         np.float32,
         copy=False,
     )
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _infer_direct_bc_hidden_dim(model_state: dict[str, Any], family: str) -> int:
+    if family == "arm_structured_direct":
+        weight = model_state.get("left_head.weight")
+        if weight is not None and len(getattr(weight, "shape", ())) == 2:
+            return int(weight.shape[1])
+    weight = model_state.get("head.0.weight")
+    if weight is not None and len(getattr(weight, "shape", ())) == 2:
+        return int(weight.shape[0])
+    raise ValueError("could not infer direct BC hidden_dim from checkpoint model_state")
 
 
 def _denormalize_action_numpy(actions: torch.Tensor, stats: dict[str, Any]) -> np.ndarray:

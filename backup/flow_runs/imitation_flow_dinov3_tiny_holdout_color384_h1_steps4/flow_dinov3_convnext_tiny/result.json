@@ -1,0 +1,148 @@
+{
+  "backbone": "dinov3_convnext_tiny",
+  "checkpoint_path": "/outputs/flow_runs/imitation_flow_dinov3_tiny_holdout_color384_h1_steps4/flow_dinov3_convnext_tiny/checkpoint.pt",
+  "checkpoint_sha256": "51f0f19ee5cf33f634d7fa287cd7dc0df7a34c30add8bd5d1d61427c466ed8d9",
+  "family": "flow_matching",
+  "gpu_info": {
+    "cuda_available": true,
+    "cuda_device_count": 1,
+    "cuda_visible_devices": "6",
+    "devices": [
+      {
+        "index": 0,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+      }
+    ],
+    "nvidia_smi": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 1101, 1\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, 1685, 4\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, 695, 1\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, 1021, 0\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, 3, 0"
+  },
+  "latency": {
+    "median_ms": 12.844268494518474,
+    "p95_ms": 12.860205641482025
+  },
+  "metrics": {
+    "action_mse": 0.5524620496509351,
+    "by_phase": {
+      "left_pick": {
+        "action_mse": 0.6673032378419911,
+        "normalized_action_mse": 0.5174455347427211
+      },
+      "left_place": {
+        "action_mse": 0.7371332416825344,
+        "normalized_action_mse": 0.5715936665503958
+      },
+      "right_pick": {
+        "action_mse": 0.02924524176748738,
+        "normalized_action_mse": 0.022677575810955274
+      },
+      "right_place": {
+        "action_mse": 0.7806343165264182,
+        "normalized_action_mse": 0.6053256127751293
+      }
+    },
+    "gripper_mse": 3.867148490702043,
+    "inactive_arm_leakage": 0.0022093870029999156,
+    "normalized_action_mse": 0.4283944756976858,
+    "rotation_endpoint_error": 0.0068222000745645954,
+    "smoothness": 0.0,
+    "translation_endpoint_error": 0.0016480080160536743
+  },
+  "model": "flow_dinov3_convnext_tiny",
+  "model_config": {
+    "action_dim": 14,
+    "action_horizon": 1,
+    "camera_names": [
+      "left_realsense_color",
+      "right_realsense_color"
+    ],
+    "condition_encoder": "transformer",
+    "frozen_vision": true,
+    "hidden_dim": 256,
+    "proprio_dim": 16,
+    "vision_backbone": "dinov3_convnext_tiny"
+  },
+  "shortcut_ablations": {
+    "image_shuffle": {
+      "action_mse": 1.1030064778772104,
+      "by_phase": {
+        "left_pick": {
+          "action_mse": 1.2932650698838641,
+          "normalized_action_mse": 1.0028337908478655
+        },
+        "left_place": {
+          "action_mse": 1.4881100161544396,
+          "normalized_action_mse": 1.15392199437726
+        },
+        "right_pick": {
+          "action_mse": 0.06777160495402133,
+          "normalized_action_mse": 0.05255199192381216
+        },
+        "right_place": {
+          "action_mse": 1.5719022835251963,
+          "normalized_action_mse": 1.218896854588013
+        }
+      },
+      "gripper_mse": 7.72094806258225,
+      "inactive_arm_leakage": 0.0023697204081005526,
+      "normalized_action_mse": 0.8553019742802506,
+      "rotation_endpoint_error": 0.0071924101320683395,
+      "smoothness": 0.0,
+      "translation_endpoint_error": 0.0019895697516269673
+    },
+    "zero_image": {
+      "action_mse": 1.3376815788857106,
+      "by_phase": {
+        "left_pick": {
+          "action_mse": 1.1049757336817625,
+          "normalized_action_mse": 0.8568289901330838
+        },
+        "left_place": {
+          "action_mse": 2.3673664858775303,
+          "normalized_action_mse": 1.8357219742832354
+        },
+        "right_pick": {
+          "action_mse": 0.035499317061429225,
+          "normalized_action_mse": 0.027527160154739407
+        },
+        "right_place": {
+          "action_mse": 1.8574099445334806,
+          "normalized_action_mse": 1.4402874547615385
+        }
+      },
+      "gripper_mse": 9.363660240620435,
+      "inactive_arm_leakage": 0.003839049431703398,
+      "normalized_action_mse": 1.037275590240584,
+      "rotation_endpoint_error": 0.008005043609275245,
+      "smoothness": 0.0,
+      "translation_endpoint_error": 0.0023115459545617334
+    }
+  },
+  "train_metrics": {
+    "action_mse": 0.4141486619521528,
+    "by_phase": {
+      "left_pick": {
+        "action_mse": 0.34227597371449436,
+        "normalized_action_mse": 0.2654103325214485
+      },
+      "left_place": {
+        "action_mse": 0.776169134149076,
+        "normalized_action_mse": 0.6018631858724223
+      },
+      "right_pick": {
+        "action_mse": 0.02087469408019957,
+        "normalized_action_mse": 0.016186819767053554
+      },
+      "right_place": {
+        "action_mse": 0.5215447047376021,
+        "normalized_action_mse": 0.4044203044899433
+      }
+    },
+    "gripper_mse": 2.898989813718774,
+    "inactive_arm_leakage": 0.0026127696161519914,
+    "normalized_action_mse": 0.32114241875978655,
+    "rotation_endpoint_error": 0.005401040184732231,
+    "smoothness": 0.0,
+    "translation_endpoint_error": 0.0010047412634160376
+  },
+  "training_curves": "/outputs/flow_runs/imitation_flow_dinov3_tiny_holdout_color384_h1_steps4/flow_dinov3_convnext_tiny/training_curves.jsonl",
+  "wall_time_sec": 4306.856557863008
+}
