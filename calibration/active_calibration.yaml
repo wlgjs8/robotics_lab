@@ -1,5 +1,9 @@
 schema: robotics_lab.calibration.v1
 calibration_id: "CONFIG_ESTIMATE_001"
+# Robot mounts (T_stand_*_base) are mechanically measured (see per-transform status
+# below). Overall status stays "configured_estimate" and geometry_valid_for_real_policy
+# stays false because camera hand-eye is still unmeasured. Camera-inclusive real policy
+# remains blocked; robot-only / TCP-frame Cartesian does not depend on camera geometry.
 status: configured_estimate
 geometry_valid_for_real_policy: false
 
@@ -12,8 +16,9 @@ robot:
     units:
       translation: m
       rotation: rad
-    status: configured_estimate
-    source: rb_servo_server mount config
+    status: measured
+    source: mechanical measurement
+    # TODO(operator): record measurement_date / method / tool / robot_serial for the audit.
   T_stand_right_base:
     parent: stand
     child: right_base
@@ -22,8 +27,9 @@ robot:
     units:
       translation: m
       rotation: rad
-    status: configured_estimate
-    source: rb_servo_server mount config
+    status: measured
+    source: mechanical measurement
+    # TODO(operator): record measurement_date / method / tool / robot_serial for the audit.
 
 cameras:
   head:
