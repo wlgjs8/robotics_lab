@@ -84,6 +84,7 @@ from .status_panel import (
     _format_joint_monitor_value,
     _format_joints,
     _format_pgmode_status,
+    _format_self_collision_status,
     _format_stand_world_pose_value,
     _format_tcp_command_status,
     _format_tcp_tracking_status,
@@ -783,6 +784,9 @@ def build_gui(
         handles["readiness"] = server.gui.add_text("Readiness", initial_value="No-Go: no state", disabled=True)
         handles["motion"] = server.gui.add_text("Motion state", initial_value="unknown", disabled=True)
         handles["fault"] = server.gui.add_text("Fault", initial_value="none", disabled=True)
+        handles["self_collision"] = server.gui.add_text(
+            "Self-collision", initial_value="self-collision: no state", disabled=True
+        )
         handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
         handles["tcp_tracking"] = server.gui.add_text("TCP tracking", initial_value="TCP tracking: no state", disabled=True)
         handles["pgmode_status"] = server.gui.add_text("pgmode simulation", initial_value="pgmode_sim: no state", disabled=True)
@@ -1213,6 +1217,8 @@ def update_gui(
         _update_operator_monitors(handles, None, stale=True)
         handles["connection"].value = "disconnected/stale"
         handles["readiness"].value = readiness.no_go_reason or "No-Go: no state stream"
+        if "self_collision" in handles:
+            handles["self_collision"].value = _format_self_collision_status(None, stale=True)
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
         if "tcp_tracking" in handles:
@@ -1257,6 +1263,8 @@ def update_gui(
     handles["readiness"].value = ", ".join(readiness_parts)
     handles["motion"].value = latest.motion_state
     handles["fault"].value = latest.fault_reason if latest.fault_latched else "none"
+    if "self_collision" in handles:
+        handles["self_collision"].value = _format_self_collision_status(latest, stale=stale)
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
     if "tcp_tracking" in handles:

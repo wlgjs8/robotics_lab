@@ -2135,6 +2135,7 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_checked = last_self_collision_.checked;
             latest_snapshot_.self_collision_violated = last_self_collision_.violated;
             latest_snapshot_.self_collision_min_clearance_m = last_self_collision_.min_clearance_m;
+            latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.margin_m;
             latest_snapshot_.motion_state = sample.motion_state;
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.latched_fault_reason = latched_fault_reason_.load();

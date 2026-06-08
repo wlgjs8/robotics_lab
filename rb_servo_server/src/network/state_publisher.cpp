@@ -1448,6 +1448,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         self_collision["enabled"] = snapshot.self_collision_enabled;
         self_collision["checked"] = snapshot.self_collision_checked;
         self_collision["violated"] = snapshot.self_collision_violated;
+        self_collision["margin_m"] = snapshot.self_collision_margin_m;
         if (snapshot.self_collision_checked &&
             std::isfinite(snapshot.self_collision_min_clearance_m)) {
             self_collision["min_clearance_m"] = snapshot.self_collision_min_clearance_m;
