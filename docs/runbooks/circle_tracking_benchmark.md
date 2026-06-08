@@ -668,7 +668,7 @@ Run the matrix:
 ```bash
 python3 scripts/run_circle_ablation.py \
   --root . \
-  --matrix configs/circle_ablation_15cm.yaml \
+  --matrix configs/circle_ablation_baseline.yaml \
   --artifact-root artifacts/circle_tracking/ablation_001 \
   --max-workers 1
 ```

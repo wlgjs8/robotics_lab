@@ -46,6 +46,8 @@ Verified by reading source under `rb_servo_server/`, `rb_simulator/`, `rb_gui/`,
 
 In the **real** topology the simulator endpoints are replaced by the `rbpodo` backend talking to real controllers at `172.28.60.200` (left) / `172.28.60.201` (right). Simulator and real topologies are isomorphic by endpoint count and ownership, **not** by IP — simulator configs must not default to the real controller IPs.
 
+The `rbpodo` backend also serves **controller (`pgmode`) simulation** (`run_mode: real`, `operation_mode: simulation`), pointed either at a Virtual ControlBox VM or a physical box held in `pgmode` — the same code path, distinguished only by deployment target. This is a separate flavor from the hardware-free `rb_simulator`; see the "Simulation flavors" table in `docs/architecture.md`.
+
 ### Port reference
 
 | Path | Protocol | Port(s) | Notes |
