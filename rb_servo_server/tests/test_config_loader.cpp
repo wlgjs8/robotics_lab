@@ -116,6 +116,7 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(!mock.force_control.enable);
     RB_CHECK(mock.servo.io_model == rb_servo::ServoIoModel::Direct);
     RB_CHECK(near(mock.servo.worker_read_period_sec, 0.002));
+    RB_CHECK(!mock.servo.controller_simulation_async_supervision_nonlatching);
 
     const rb_servo::DualArmConfig simulator =
         rb_servo::loadConfigFromYaml((config_dir / "dual_simulator.yaml").string());
@@ -184,6 +185,7 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(pgmode.servo.allow_controller_simulation_motion);
         RB_CHECK(pgmode.servo.allow_controller_simulation_diagnostics_suspect);
         RB_CHECK(pgmode.servo.controller_simulation_treat_unreliable_status_fields_as_unavailable);
+        RB_CHECK(pgmode.servo.controller_simulation_async_supervision_nonlatching);
         RB_CHECK(!pgmode.servo.allow_controller_simulation_init_error);
         RB_CHECK(!pgmode.servo.allow_controller_simulation_not_activated);
         RB_CHECK(pgmode.left_robot.allow_controller_simulation_diagnostics_suspect);

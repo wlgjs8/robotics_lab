@@ -794,6 +794,14 @@ rb_servo::DualArmConfig rbpodoControllerSimulationConfig() {
     return cfg;
 }
 
+rb_servo::DualArmConfig rbpodoPhysicalRealConfig() {
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.left_robot.operation_mode = "real";
+    cfg.right_robot.operation_mode = "real";
+    cfg.servo.allow_controller_simulation_motion = false;
+    return cfg;
+}
+
 void enableRbpodoAsyncStreaming(
     rb_servo::DualArmConfig* cfg,
     rb_servo::RbpodoAsyncStreamingMode mode =
@@ -3309,6 +3317,104 @@ bool testRbpodoAsyncSupervisionFaultLatchesServoLoop() {
     return true;
 }
 
+bool testRbpodoAsyncSupervisionFaultIsAdvisoryInControllerSimulationWhenFlagEnabled() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    allow_real.set("1");
+    allow_motion.set("1");
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.servo.rate_hz = 50;
+    cfg.servo.worker_read_period_sec = 0.005;
+    cfg.servo.controller_simulation_async_supervision_nonlatching = true;
+    enableRbpodoAsyncStreaming(&cfg);
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left,
+        initial,
+        true,
+        rb_servo::BackendErrorKind::TransportTimeout
+    );
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    TestBackend* left_backend = left.get();
+    TestBackend* right_backend = right.get();
+    rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
+
+    RB_CHECK(loop.start());
+
+    std::optional<rb_servo::ServoSnapshot> degraded_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (!snapshot.fault_latched &&
+            snapshot.async_supervision_degraded &&
+            snapshot.send_policy == "send_servo_j" &&
+            snapshot.left_async_streaming.supervision_state ==
+                rb_servo::RbpodoAsyncStreamingSupervisionState::Fault) {
+            degraded_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1500)));
+
+    const int left_send_count = left_backend->sendCount();
+    const int right_send_count = right_backend->sendCount();
+    RB_CHECK(waitUntil([&] {
+        return !loop.faultLatched() &&
+               left_backend->sendCount() > left_send_count &&
+               right_backend->sendCount() > right_send_count;
+    }, std::chrono::milliseconds(500)));
+    loop.stop();
+    RB_CHECK(degraded_snapshot.has_value());
+    RB_CHECK(degraded_snapshot->left_async_streaming.commands_dropped_total > 0);
+    RB_CHECK(degraded_snapshot->left_async_streaming.ack_timeout_count > 0);
+    RB_CHECK(loop.latchedFaultReason() == rb_servo::SafetyVerdict::Ok);
+    return true;
+}
+
+bool testRbpodoAsyncSupervisionFlagDoesNotBypassPhysicalRealLatch() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    cfg.servo.rate_hz = 50;
+    cfg.servo.worker_read_period_sec = 0.005;
+    cfg.servo.controller_simulation_async_supervision_nonlatching = true;
+    enableRbpodoAsyncStreaming(&cfg);
+    const rb_servo::JointArray initial = joints(0.0);
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left,
+            initial,
+            true,
+            rb_servo::BackendErrorKind::TransportTimeout
+        ),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+
+    std::optional<rb_servo::ServoSnapshot> fault_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (snapshot.fault_latched &&
+            !snapshot.async_supervision_degraded &&
+            snapshot.latched_fault_reason == rb_servo::SafetyVerdict::SendFailure &&
+            snapshot.left_async_streaming.supervision_state ==
+                rb_servo::RbpodoAsyncStreamingSupervisionState::Fault) {
+            fault_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1500)));
+
+    loop.stop();
+    RB_CHECK(fault_snapshot.has_value());
+    RB_CHECK(fault_snapshot->fault_reason == "rbpodo async streaming supervision fault");
+    return true;
+}
+
 bool testRbpodoAsyncReferenceSupervisionQRefUpdatesOk() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
@@ -3518,6 +3624,99 @@ bool testRbpodoAsyncReferenceSupervisionTargetErrorFaultsSocketSend() {
     RB_CHECK(fault_snapshot.has_value());
     RB_CHECK(fault_snapshot->left_async_streaming.q_ref_target_error_deg_max > 0.5);
     RB_CHECK(!fault_snapshot->left_safety_tracking.controller_simulation_physical_motion_detected);
+    return true;
+}
+
+bool testRbpodoAsyncReferenceSupervisionTargetErrorIsAdvisoryWhenFlagEnabled() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    allow_real.set("1");
+    allow_motion.set("1");
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.servo.rate_hz = 100;
+    cfg.servo.worker_read_period_sec = 0.005;
+    cfg.servo.controller_simulation_async_supervision_nonlatching = true;
+    enableRbpodoAsyncStreaming(
+        &cfg,
+        rb_servo::RbpodoAsyncStreamingMode::SocketSendSupervised
+    );
+    cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_update_timeout_ms = 500.0;
+    cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_target_tolerance_deg = 0.5;
+    cfg.servo.rbpodo_async_streaming.reference_supervision.q_ref_target_fault_after_ms = 20.0;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left,
+        initial,
+        false,
+        rb_servo::BackendErrorKind::ControllerRejected,
+        std::nullopt,
+        true
+    );
+    auto right = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Right,
+        initial,
+        false,
+        rb_servo::BackendErrorKind::ControllerRejected,
+        std::nullopt,
+        true
+    );
+    TestBackend* left_backend = left.get();
+    TestBackend* right_backend = right.get();
+    left_backend->setFreezeReferenceOnSend(true);
+    right_backend->setFreezeReferenceOnSend(true);
+    rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
+    RB_CHECK(loop.start());
+
+    rb_servo::DualArmCommand arm_motion = command(rb_servo::ControlMode::ArmMotion);
+    arm_motion.left.timeout_sec = 1.0;
+    arm_motion.right.timeout_sec = 1.0;
+    buffer.setCommand(arm_motion);
+    RB_CHECK(waitUntil(
+        [&] { return loop.motionState() == rb_servo::ServerMotionState::ArmedHold; },
+        std::chrono::milliseconds(1000)
+    ));
+
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.seq = 8903;
+    target.left.q_target_deg = joints(5.0);
+    target.right.q_target_deg = joints(5.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    target.left.timeout_sec = 1.0;
+    target.right.timeout_sec = 1.0;
+    buffer.setCommand(target);
+
+    std::optional<rb_servo::ServoSnapshot> degraded_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (snapshot.command.seq == 8903 &&
+            !snapshot.fault_latched &&
+            snapshot.async_supervision_degraded &&
+            snapshot.send_policy == "send_servo_j" &&
+            snapshot.left_async_streaming.reference_supervision_state ==
+                rb_servo::RbpodoAsyncStreamingSupervisionState::Fault &&
+            snapshot.left_async_streaming.reference_supervision_reason ==
+                "async_q_ref_target_error") {
+            degraded_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1500)));
+
+    const int left_send_count = left_backend->sendCount();
+    const int right_send_count = right_backend->sendCount();
+    RB_CHECK(waitUntil([&] {
+        return !loop.faultLatched() &&
+               left_backend->sendCount() > left_send_count &&
+               right_backend->sendCount() > right_send_count;
+    }, std::chrono::milliseconds(500)));
+    loop.stop();
+    RB_CHECK(degraded_snapshot.has_value());
+    RB_CHECK(degraded_snapshot->left_async_streaming.q_ref_target_error_deg_max > 0.5);
+    RB_CHECK(degraded_snapshot->left_async_streaming.reference_supervision_fault_count > 0);
+    RB_CHECK(loop.latchedFaultReason() == rb_servo::SafetyVerdict::Ok);
     return true;
 }
 
@@ -3750,7 +3949,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "send_skew_us", "send_within_period", "send_period_overrun", "send_command_deadline_missed",
         "send_deadline_hit", "send_deadline_hit_deprecated_alias_for",
         "send_suppressed", "send_policy", "safety_verdict", "motion_state", "fault_latched",
-        "latched_fault_reason", "fault_reason", "logger_dropped_samples", "logger_health",
+        "async_supervision_degraded", "latched_fault_reason", "fault_reason",
+        "logger_dropped_samples", "logger_health",
         "fault_context", "mount_transform_deferred", "mounts", "tcp_fields_deferred",
         "last_cartesian_solve"
     };
@@ -6547,9 +6747,12 @@ int main() {
     if (!testRbpodoAsyncConfigRejectsPhysicalRealAndMissingRealEnv()) return 1;
     if (!testRbpodoAsyncServoLoopDoesNotBlockOnSlowAckWorker()) return 1;
     if (!testRbpodoAsyncSupervisionFaultLatchesServoLoop()) return 1;
+    if (!testRbpodoAsyncSupervisionFaultIsAdvisoryInControllerSimulationWhenFlagEnabled()) return 1;
+    if (!testRbpodoAsyncSupervisionFlagDoesNotBypassPhysicalRealLatch()) return 1;
     if (!testRbpodoAsyncReferenceSupervisionQRefUpdatesOk()) return 1;
     if (!testRbpodoAsyncReferenceSupervisionQRefStopsFaultsSocketSend()) return 1;
     if (!testRbpodoAsyncReferenceSupervisionTargetErrorFaultsSocketSend()) return 1;
+    if (!testRbpodoAsyncReferenceSupervisionTargetErrorIsAdvisoryWhenFlagEnabled()) return 1;
     if (!testRbpodoAsyncReferenceSupervisionInvalidQRefFaults()) return 1;
     if (!testStatePublisherAcceptsDockerServiceHostnameEndpoint()) return 1;
     if (!testStatePublisherSerializesServoSnapshotSchema()) return 1;

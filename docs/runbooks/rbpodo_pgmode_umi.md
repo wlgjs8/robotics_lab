@@ -55,6 +55,7 @@ status-field decode policy:
 ```yaml
 servo:
   controller_simulation_treat_unreliable_status_fields_as_unavailable: true
+  controller_simulation_async_supervision_nonlatching: true
 ```
 
 This policy is inert unless the controller-simulation motion gate is open
@@ -67,6 +68,12 @@ telemetry must still publish `rbpodo_diagnostics.raw`,
 `rbpodo_state_decode_policy=controller_sim_unreliable_fields_unavailable`.
 EMS, soft-estop, collision, SOS, and `op_stat_self_collision == 1` fault paths
 remain enforced.
+
+The async supervision non-latching option is also controller-simulation only.
+When pgmode async ACK/q_ref supervision degrades, the server continues command
+handling, sets top-level state `async_supervision_degraded=true`, keeps per-arm
+async telemetry visible, and emits throttled WARN logs. Physical real mode and
+non-async fault paths still latch.
 
 ## Mock Preview
 
@@ -233,6 +240,8 @@ Before trusting a run, inspect live state or recorder output for:
 - per-arm `rbpodo_state_decode_policy=controller_sim_unreliable_fields_unavailable`
 - per-arm `rbpodo_diagnostics.unavailable_fields` lists the suppressed
   controller-simulation fields when the decode policy is active
+- `async_supervision_degraded=false` during healthy streaming; if it becomes
+  true, inspect per-arm `async_streaming` telemetry and WARN logs
 - `fault_latched=false`
 - command-source lease active for `policy_runner`
 - `TcpPoseTarget` commands while UMI deadmen are held

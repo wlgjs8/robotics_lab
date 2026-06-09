@@ -258,6 +258,16 @@ If `servo.send_servo_commands: true`, startup remains strict. Robot faults,
 wrong mode/not-ready state, and joint-range violations must fail startup rather
 than being converted into a healthy condition.
 
+For rbpodo controller `pgmode` simulation only, configs may opt into
+`servo.controller_simulation_async_supervision_nonlatching: true`. The option
+defaults to `false` and is active only when the controller-simulation motion
+shape and gates are open. When active, async streaming supervision faults are
+published as a recoverable advisory instead of latching top-level
+`SendFailure`: state JSON sets `async_supervision_degraded: true` while the
+suppressed async fault context is present, per-arm async telemetry remains
+visible, and the server emits a throttled warning. Physical real mode and all
+non-async-supervision fault paths continue to latch exactly as before.
+
 Real `sendServoJ()` requires:
 
 - valid state acquisition
