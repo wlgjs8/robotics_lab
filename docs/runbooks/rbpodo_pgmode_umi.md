@@ -56,6 +56,9 @@ status-field decode policy:
 servo:
   controller_simulation_treat_unreliable_status_fields_as_unavailable: true
   controller_simulation_async_supervision_nonlatching: true
+safety:
+  tracking_error_policy: fault_latch              # stays enforced for real mode
+  controller_simulation_tracking_error_nonlatching: true
 ```
 
 This policy is inert unless the controller-simulation motion gate is open
@@ -74,6 +77,16 @@ When pgmode async ACK/q_ref supervision degrades, the server continues command
 handling, sets top-level state `async_supervision_degraded=true`, keeps per-arm
 async telemetry visible, and emits throttled WARN logs. Physical real mode and
 non-async fault paths still latch.
+
+The tracking-error non-latching option closes the same 1hr-stability gap on the
+synchronous safety filter. The diagnostics_suspect controller's reference readback
+lags the commanded joints, so the command-tracking divergence would otherwise
+latch `TrackingError` mid-teleop. With
+`safety.controller_simulation_tracking_error_nonlatching: true` (gated identically,
+inert in real mode), that divergence is advisory: the server keeps following the
+rate-limited desired target, sets top-level state `tracking_error_degraded=true`,
+and emits throttled WARN logs. `tracking_error_policy` stays `fault_latch`. The
+`controller_simulation_physical_motion` guard is excluded and still latches.
 
 ## Mock Preview
 
@@ -242,6 +255,9 @@ Before trusting a run, inspect live state or recorder output for:
   controller-simulation fields when the decode policy is active
 - `async_supervision_degraded=false` during healthy streaming; if it becomes
   true, inspect per-arm `async_streaming` telemetry and WARN logs
+- `tracking_error_degraded=false` during healthy tracking; if it becomes true,
+  the controller reference is lagging the command (advisory, not latched) — watch
+  per-arm `command_reference_tracking_error_deg` and WARN logs
 - `fault_latched=false`
 - command-source lease active for `policy_runner`
 - `TcpPoseTarget` commands while UMI deadmen are held

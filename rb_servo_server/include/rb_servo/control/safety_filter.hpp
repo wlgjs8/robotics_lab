@@ -53,6 +53,18 @@ public:
         const RobotState& right_state
     ) const;
 
+    // Joint-limit + velocity + acceleration clamp chain applied to a desired target.
+    // Exposed so callers that bypass the tracking-error hold (e.g. the controller-sim
+    // tracking-error advisory) still rate-limit the followed target. `clamped` (if
+    // non-null) reports whether a joint-limit clamp occurred.
+    JointArray clampMotion(
+        const JointArray& desired_q_deg,
+        const JointArray& previous_q_deg,
+        const JointArray& previous_previous_q_deg,
+        double dt_sec,
+        bool* clamped = nullptr
+    ) const;
+
 private:
     JointArray clampJointLimits(const JointArray& q, bool* clamped) const;
 

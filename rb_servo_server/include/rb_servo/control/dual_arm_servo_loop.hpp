@@ -214,6 +214,14 @@ private:
     SafetyTrackingTelemetry left_safety_tracking_;
     SafetyTrackingTelemetry right_safety_tracking_;
     SelfCollisionResult last_self_collision_{};
+    // Controller-sim tracking-error advisory (safety.controller_simulation_tracking_error_nonlatching).
+    // Reset each tick in loopMain; set in applySafety when a reference/actual tracking
+    // divergence is suppressed (not latched). Surfaced as published telemetry
+    // (tracking_error_degraded) + a throttled WARN.
+    bool tracking_error_degraded_this_tick_ = false;
+    bool tracking_error_degraded_prev_tick_ = false;
+    uint64_t last_tracking_error_degraded_warn_ns_ = 0;
+    std::string last_tracking_error_degraded_reason_;
     LatchedCartesianTarget left_latched_cartesian_target_;
     LatchedCartesianTarget right_latched_cartesian_target_;
     CartesianServoPathState left_cartesian_servo_path_;

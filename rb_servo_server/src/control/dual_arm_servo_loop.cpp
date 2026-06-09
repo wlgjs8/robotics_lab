@@ -1625,6 +1625,7 @@ void DualArmServoLoop::loopMain() {
         const uint64_t loop_start = nowSteadyNs();
         bool async_supervision_degraded_this_tick = false;
         bool async_supervision_degraded_warned_this_tick = false;
+        tracking_error_degraded_this_tick_ = false;
         const auto handleAsyncSupervisionFault =
             [&](const LatchedDualFaultContext& async_fault_contexts,
                 const RobotState& current_left_state,
@@ -2129,6 +2130,7 @@ void DualArmServoLoop::loopMain() {
             sample.fault_latched = fault_latched_.load();
             sample.motion_state = motion_state_.load();
             sample.async_supervision_degraded = async_supervision_degraded_this_tick;
+            sample.tracking_error_degraded = tracking_error_degraded_this_tick_;
             sample.fault_reason = fault_reason_;
             if (latched_fault_context_) {
                 sample.latched_fault_context = faultContextSnapshot(*latched_fault_context_);
@@ -2191,6 +2193,7 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.motion_state = sample.motion_state;
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.async_supervision_degraded = sample.async_supervision_degraded;
+            latest_snapshot_.tracking_error_degraded = sample.tracking_error_degraded;
             latest_snapshot_.latched_fault_reason = latched_fault_reason_.load();
             latest_snapshot_.fault_reason = fault_reason_;
             latest_snapshot_.latched_fault_context = sample.latched_fault_context;
@@ -2238,6 +2241,7 @@ void DualArmServoLoop::loopMain() {
         }
 
         async_supervision_degraded_last_tick = async_supervision_degraded_this_tick;
+        tracking_error_degraded_prev_tick_ = tracking_error_degraded_this_tick_;
         std::this_thread::sleep_until(next_tick);
     }
 }
@@ -3285,6 +3289,17 @@ ServoTarget DualArmServoLoop::applySafety(
         right_filter_state,
         right_controller_sim_physical_baseline_q_deg_
     );
+    // pgmode controller-sim tracking-error advisory gate. Fail-closed in real mode
+    // (controllerSimulationMotionGateOpen is false there). The physical-motion guard
+    // (controller_simulation_physical_motion_fault) is a genuine safety signal — an
+    // unexpected actual move in a no-motion mode — so it is excluded and still latches.
+    const bool tracking_error_nonlatching =
+        controllerSimulationMotionRequired(config_) &&
+        controllerSimulationMotionGateOpen(config_) &&
+        config_.safety.controller_simulation_tracking_error_nonlatching;
+    const bool tracking_error_physical_motion_fault =
+        left_tracking_state.controller_simulation_physical_motion_fault ||
+        right_tracking_state.controller_simulation_physical_motion_fault;
     const SafetyCheckResult left_result = safety_filter_.filterJointTarget(
         desired.left_q_target_deg,
         left_prev_sent_q_deg_,
@@ -3322,6 +3337,45 @@ ServoTarget DualArmServoLoop::applySafety(
             // 개발/mock/rbsim용 복구 정책: 현재 실제 자세를 새 안전 기준점으로 삼고 그 자리에서 멈춘다.
             out.left_q_target_deg = left_state.q_actual_deg;
             out.right_q_target_deg = right_state.q_actual_deg;
+        } else if (tracking_error_nonlatching && !tracking_error_physical_motion_fault) {
+            // pgmode controller-sim advisory: keep following the rate-limited desired
+            // target instead of holding/latching, so teleop stays live. The lag is the
+            // diagnostics_suspect controller's reference readback, with no physical
+            // motion. Surfaced as degraded telemetry + throttled WARN; real mode keeps
+            // the latch (gate closed above).
+            out.left_q_target_deg = safety_filter_.clampMotion(
+                desired.left_q_target_deg,
+                left_prev_sent_q_deg_,
+                left_prevprev_sent_q_deg_,
+                dt_sec
+            );
+            out.right_q_target_deg = safety_filter_.clampMotion(
+                desired.right_q_target_deg,
+                right_prev_sent_q_deg_,
+                right_prevprev_sent_q_deg_,
+                dt_sec
+            );
+            tracking_error_degraded_this_tick_ = true;
+            const std::string reason = combined_reason.empty()
+                ? "tracking error exceeded threshold"
+                : combined_reason;
+            constexpr uint64_t kTrackingErrorDegradedWarnPeriodNs = 5'000'000'000ULL;
+            const uint64_t now_ns = nowSteadyNs();
+            const bool state_changed =
+                !tracking_error_degraded_prev_tick_ ||
+                reason != last_tracking_error_degraded_reason_;
+            const bool warn_period_elapsed =
+                last_tracking_error_degraded_warn_ns_ == 0 ||
+                now_ns - last_tracking_error_degraded_warn_ns_ >=
+                    kTrackingErrorDegradedWarnPeriodNs;
+            if (state_changed || warn_period_elapsed) {
+                std::cerr
+                    << "[WARN] controller-sim tracking error degraded "
+                    << "(suppressed, not latched): " << reason << "\n";
+                last_tracking_error_degraded_warn_ns_ = now_ns;
+                last_tracking_error_degraded_reason_ = reason;
+            }
+            combined = SafetyVerdict::Ok;
         } else {
             latchFault(
                 SafetyVerdict::TrackingError,

@@ -3415,6 +3415,116 @@ bool testRbpodoAsyncSupervisionFlagDoesNotBypassPhysicalRealLatch() {
     return true;
 }
 
+// In pgmode controller-sim with the flag enabled, a sustained command-vs-actual
+// tracking divergence (the diagnostics_suspect controller never reports following
+// the command) must NOT latch: it stays advisory (tracking_error_degraded=true),
+// keeps following/sending, and never trips fault_latched.
+bool testRbpodoTrackingErrorIsAdvisoryInControllerSimulationWhenFlagEnabled() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    allow_real.set("1");
+    allow_motion.set("1");
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.servo.rate_hz = 50;
+    cfg.servo.worker_read_period_sec = 0.005;
+    cfg.safety.max_tracking_error_deg = 2.0;
+    cfg.safety.controller_simulation_tracking_error_nonlatching = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    // accept_send_without_state_update=true freezes q_actual at initial while the
+    // commanded target advances, opening a > max_tracking_error_deg gap (the
+    // controller-not-following case) without any genuine physical motion.
+    auto left = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left, initial, false,
+        rb_servo::BackendErrorKind::ControllerRejected, std::nullopt, true);
+    auto right = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Right, initial, false,
+        rb_servo::BackendErrorKind::ControllerRejected, std::nullopt, true);
+    TestBackend* left_backend = left.get();
+    TestBackend* right_backend = right.get();
+    rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.left.q_target_deg = joints(30.0);
+    target.right.q_target_deg = joints(30.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    buffer.setCommand(target);
+
+    std::optional<rb_servo::ServoSnapshot> degraded_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (!snapshot.fault_latched && snapshot.tracking_error_degraded) {
+            degraded_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1500)));
+
+    // Stays live: keeps issuing servo sends and never latches while degraded.
+    const int left_send_count = left_backend->sendCount();
+    const int right_send_count = right_backend->sendCount();
+    RB_CHECK(waitUntil([&] {
+        return !loop.faultLatched() &&
+               left_backend->sendCount() > left_send_count &&
+               right_backend->sendCount() > right_send_count;
+    }, std::chrono::milliseconds(500)));
+    loop.stop();
+    RB_CHECK(degraded_snapshot.has_value());
+    RB_CHECK(!loop.faultLatched());
+    RB_CHECK(loop.latchedFaultReason() == rb_servo::SafetyVerdict::Ok);
+    return true;
+}
+
+// Fail-closed: the same flag set in a physical-real config (gate closed) must NOT
+// suppress the tracking-error latch. Real mode keeps latching TrackingError.
+bool testRbpodoTrackingErrorFlagDoesNotBypassPhysicalRealLatch() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    cfg.servo.rate_hz = 50;
+    cfg.servo.worker_read_period_sec = 0.005;
+    cfg.safety.max_tracking_error_deg = 2.0;
+    cfg.safety.controller_simulation_tracking_error_nonlatching = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left, initial, false,
+        rb_servo::BackendErrorKind::ControllerRejected, std::nullopt, true);
+    auto right = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Right, initial, false,
+        rb_servo::BackendErrorKind::ControllerRejected, std::nullopt, true);
+    rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.left.q_target_deg = joints(30.0);
+    target.right.q_target_deg = joints(30.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    buffer.setCommand(target);
+
+    std::optional<rb_servo::ServoSnapshot> fault_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (snapshot.fault_latched &&
+            !snapshot.tracking_error_degraded &&
+            snapshot.latched_fault_reason == rb_servo::SafetyVerdict::TrackingError) {
+            fault_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1500)));
+
+    loop.stop();
+    RB_CHECK(fault_snapshot.has_value());
+    return true;
+}
+
 bool testRbpodoAsyncReferenceSupervisionQRefUpdatesOk() {
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
@@ -3949,7 +4059,7 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "send_skew_us", "send_within_period", "send_period_overrun", "send_command_deadline_missed",
         "send_deadline_hit", "send_deadline_hit_deprecated_alias_for",
         "send_suppressed", "send_policy", "safety_verdict", "motion_state", "fault_latched",
-        "async_supervision_degraded", "latched_fault_reason", "fault_reason",
+        "async_supervision_degraded", "tracking_error_degraded", "latched_fault_reason", "fault_reason",
         "logger_dropped_samples", "logger_health",
         "fault_context", "mount_transform_deferred", "mounts", "tcp_fields_deferred",
         "last_cartesian_solve"
@@ -6749,6 +6859,8 @@ int main() {
     if (!testRbpodoAsyncSupervisionFaultLatchesServoLoop()) return 1;
     if (!testRbpodoAsyncSupervisionFaultIsAdvisoryInControllerSimulationWhenFlagEnabled()) return 1;
     if (!testRbpodoAsyncSupervisionFlagDoesNotBypassPhysicalRealLatch()) return 1;
+    if (!testRbpodoTrackingErrorIsAdvisoryInControllerSimulationWhenFlagEnabled()) return 1;
+    if (!testRbpodoTrackingErrorFlagDoesNotBypassPhysicalRealLatch()) return 1;
     if (!testRbpodoAsyncReferenceSupervisionQRefUpdatesOk()) return 1;
     if (!testRbpodoAsyncReferenceSupervisionQRefStopsFaultsSocketSend()) return 1;
     if (!testRbpodoAsyncReferenceSupervisionTargetErrorFaultsSocketSend()) return 1;

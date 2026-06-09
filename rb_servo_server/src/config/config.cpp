@@ -896,6 +896,13 @@ void validateConfig(const DualArmConfig& cfg) {
             "servo.allow_controller_simulation_motion=true"
         );
     }
+    if (cfg.safety.controller_simulation_tracking_error_nonlatching &&
+        !cfg.servo.allow_controller_simulation_motion) {
+        throw std::runtime_error(
+            "safety.controller_simulation_tracking_error_nonlatching requires "
+            "servo.allow_controller_simulation_motion=true"
+        );
+    }
     if (cfg.servo.allow_controller_simulation_init_error &&
         !cfg.servo.allow_controller_simulation_motion) {
         throw std::runtime_error(
@@ -1464,6 +1471,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "controller_simulation_tracking_error_source",
             "controller_simulation_physical_motion_policy",
             "controller_simulation_physical_motion_threshold_deg",
+            "controller_simulation_tracking_error_nonlatching",
             "self_collision",
         }, "safety");
         if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
@@ -1496,6 +1504,12 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             cfg.safety.controller_simulation_physical_motion_threshold_deg = asDouble(
                 sec["controller_simulation_physical_motion_threshold_deg"],
                 "safety.controller_simulation_physical_motion_threshold_deg"
+            );
+        }
+        if (has(sec, "controller_simulation_tracking_error_nonlatching")) {
+            cfg.safety.controller_simulation_tracking_error_nonlatching = asBool(
+                sec["controller_simulation_tracking_error_nonlatching"],
+                "safety.controller_simulation_tracking_error_nonlatching"
             );
         }
         if (has(sec, "self_collision")) {

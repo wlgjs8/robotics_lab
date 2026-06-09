@@ -102,6 +102,15 @@ safety:
   max_tracking_error_deg: 10.0
   tracking_error_policy: fault_latch
   controller_simulation_tracking_error_source: reference
+  # Comprehensive 1hr-stability fix (pairs with the servo async-supervision flag):
+  # in pgmode controller-sim the reference/actual tracking-error divergence is
+  # ADVISORY (degraded warning + telemetry), never a latching TrackingError. The
+  # diagnostics_suspect controller's reference readback lags the commanded joints
+  # with no physical motion, so the latch is spurious there. tracking_error_policy
+  # stays fault_latch (required + enforced in real mode); this only suppresses the
+  # latch at runtime when the controller-sim motion gate is open. The
+  # controller_simulation_physical_motion guard below is unaffected and still latches.
+  controller_simulation_tracking_error_nonlatching: true
   controller_simulation_physical_motion_policy: fault_latch
   controller_simulation_physical_motion_threshold_deg: 0.05
   latch_fault_on_robot_state_error: true

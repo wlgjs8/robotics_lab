@@ -674,6 +674,7 @@ struct ServoSample {
     ServerMotionState motion_state = ServerMotionState::Disconnected;
     bool fault_latched = false;
     bool async_supervision_degraded = false;
+    bool tracking_error_degraded = false;
     std::string fault_reason;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
@@ -703,6 +704,7 @@ struct ServoSnapshot {
     ServerMotionState motion_state = ServerMotionState::Disconnected;
     bool fault_latched = false;
     bool async_supervision_degraded = false;
+    bool tracking_error_degraded = false;
     SafetyVerdict latched_fault_reason = SafetyVerdict::Ok;
     std::string fault_reason;
 

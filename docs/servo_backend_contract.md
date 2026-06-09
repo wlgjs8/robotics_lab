@@ -268,6 +268,20 @@ suppressed async fault context is present, per-arm async telemetry remains
 visible, and the server emits a throttled warning. Physical real mode and all
 non-async-supervision fault paths continue to latch exactly as before.
 
+For the same rbpodo controller `pgmode` simulation only, configs may also opt
+into `safety.controller_simulation_tracking_error_nonlatching: true` (default
+`false`, active only when the controller-simulation motion gate is open). When
+active, the reference/actual command-tracking divergence
+(`SafetyVerdict::TrackingError` from the joint-tracking check) is treated as a
+recoverable advisory instead of latching: the server keeps following the
+rate-limited (`clampMotion`) desired target, sets state JSON
+`tracking_error_degraded: true`, and emits a throttled warning. `tracking_error_policy`
+itself stays `fault_latch` (still required and enforced in real mode); this flag
+only suppresses the latch at runtime inside the pgmode gate. The separate
+`controller_simulation_physical_motion` guard — an unexpected actual move in a
+no-motion mode — is explicitly excluded and continues to latch, as do physical
+real mode and every other fault path.
+
 Real `sendServoJ()` requires:
 
 - valid state acquisition

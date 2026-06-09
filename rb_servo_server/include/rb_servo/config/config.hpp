@@ -202,6 +202,14 @@ struct SafetyConfig {
     ControllerSimulationPhysicalMotionPolicy controller_simulation_physical_motion_policy =
         ControllerSimulationPhysicalMotionPolicy::FaultLatch;
     double controller_simulation_physical_motion_threshold_deg = 0.05;
+    // pgmode controller-sim only (opt-in, default false). When the controller-sim
+    // motion gate is open, the reference/actual tracking-error divergence is treated
+    // as ADVISORY (degraded telemetry + throttled WARN) instead of latching
+    // SafetyVerdict::TrackingError. The diagnostics_suspect controller's reference
+    // readback lags the commanded joints with no physical motion, so the latch is
+    // spurious there. Inert in real mode (gate closed → keeps latching). Does NOT
+    // affect the controller_simulation_physical_motion guard, which still latches.
+    bool controller_simulation_tracking_error_nonlatching = false;
     SelfCollisionConfig self_collision;
 };
 

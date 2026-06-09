@@ -117,6 +117,7 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(mock.servo.io_model == rb_servo::ServoIoModel::Direct);
     RB_CHECK(near(mock.servo.worker_read_period_sec, 0.002));
     RB_CHECK(!mock.servo.controller_simulation_async_supervision_nonlatching);
+    RB_CHECK(!mock.safety.controller_simulation_tracking_error_nonlatching);
 
     const rb_servo::DualArmConfig simulator =
         rb_servo::loadConfigFromYaml((config_dir / "dual_simulator.yaml").string());
@@ -211,6 +212,7 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(pgmode.safety.q_max_deg[2], 360.0));
         RB_CHECK(pgmode.safety.controller_simulation_tracking_error_source ==
                  rb_servo::ControllerSimulationTrackingErrorSource::Reference);
+        RB_CHECK(pgmode.safety.controller_simulation_tracking_error_nonlatching);
         RB_CHECK(pgmode.safety.controller_simulation_physical_motion_policy ==
                  rb_servo::ControllerSimulationPhysicalMotionPolicy::FaultLatch);
         RB_CHECK(pgmode.network.command_bind == "udp://127.0.0.1:50256");
