@@ -658,7 +658,9 @@ class CartesianActionSourceTest(unittest.TestCase):
             reader=reader,
             allow_rbpodo_controller_simulation=True,
         )
-        left_gate = controller_sim_cartesian_gate(env_RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=False)
+        # Retired controller-sim env toggles are config-derived now; a missing
+        # REAL_MOTION tripwire still rejects as controller_simulation_env_missing.
+        left_gate = controller_sim_cartesian_gate(env_RB_ALLOW_REAL_MOTION=False)
         snapshot = controller_sim_state(
             left={
                 "has_valid_joint_state": True,

@@ -199,7 +199,10 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
         self.assertEqual(decision.reason, "controller_simulation_physical_motion_detected")
 
     def test_controller_simulation_rejects_missing_env_gate(self):
-        gate = controller_sim_cartesian_gate(env_RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=False)
+        # Only the real-connection tripwires remain required (the controller-sim
+        # env toggles moved to config-derived gate fields); a missing REAL_MOTION
+        # tripwire must still reject as controller_simulation_env_missing.
+        gate = controller_sim_cartesian_gate(env_RB_ALLOW_REAL_MOTION=False)
         snapshot = controller_sim_state(left_overrides={"cartesian_gate": gate})
 
         decision = self.gate.evaluate(
