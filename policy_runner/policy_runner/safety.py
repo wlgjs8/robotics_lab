@@ -252,12 +252,17 @@ _CARTESIAN_ARM_MOTION_MODES = {
     "TcpCircleTrack",
 }
 
+# Only the real-connection tripwires remain server-reported in cartesian_gate.
+# rb_servo_server moved the controller-simulation toggles
+# (RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION/CARTESIAN, RB_RBPODO_PGMODE_SIMULATION_CONFIRMED)
+# to config-derived gate fields, which are already enforced above via
+# allow_in_controller_simulation + allow_controller_simulation_motion. Requiring
+# the retired env keys here made the gate report controller_simulation_env_missing
+# and drop every pgmode cartesian command. Keep the REAL_ROBOT/REAL_MOTION
+# tripwires that the server still publishes.
 _CONTROLLER_SIMULATION_ENV_KEYS = (
     "env_RB_ALLOW_REAL_ROBOT",
     "env_RB_ALLOW_REAL_MOTION",
-    "env_RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
-    "env_RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
-    "env_RB_RBPODO_PGMODE_SIMULATION_CONFIRMED",
 )
 
 
