@@ -232,6 +232,7 @@ struct RbpodoDiagnosticsSnapshot {
     std::string error_name;
     int stable_error_code = 0;
     RbpodoRawDiagnostics raw;
+    std::vector<std::string> unavailable_fields;
 };
 
 struct ForceControlAxis {

@@ -726,11 +726,15 @@ void ArmWorker::updateAsyncSendTelemetryLocked(
          result.acceptance_semantics == "controller_ack_observed");
 
     if (socket_send_only && result.accepted) {
+        consecutive_async_timing_rejects_ = 0;
+        async_telemetry_.missing_ack_count = 0;
         ++async_telemetry_.commands_socket_sent_total;
         async_telemetry_.last_socket_send_host_time_ns = dispatch_timing.end_ns;
         async_telemetry_.last_async_acceptance_semantics = "socket_send_only";
         async_telemetry_.last_controller_acceptance_semantics = "socket_send_only";
     } else if (ack_observed) {
+        consecutive_async_timing_rejects_ = 0;
+        async_telemetry_.missing_ack_count = 0;
         ++async_telemetry_.commands_acked_total;
         async_telemetry_.last_ack_seq = request.command_seq;
         async_telemetry_.last_async_ack_duration_us =
@@ -769,11 +773,29 @@ void ArmWorker::updateAsyncSendTelemetryLocked(
         if (timeoutLikeError(result.error.kind)) {
             ++async_telemetry_.ack_timeout_count;
         }
+        if (options_.controller_simulation_timing_reject_tolerance_enabled &&
+            result.error.kind == BackendErrorKind::CommandTimeout) {
+            ++consecutive_async_timing_rejects_;
+            async_telemetry_.missing_ack_count = std::max(
+                async_telemetry_.missing_ack_count,
+                consecutive_async_timing_rejects_
+            );
+            if (consecutive_async_timing_rejects_ >= static_cast<uint64_t>(
+                    options_.rbpodo_async_ack_supervision.max_consecutive_missing_ack)) {
+                async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Fault;
+            } else if (async_telemetry_.supervision_state !=
+                RbpodoAsyncStreamingSupervisionState::Fault) {
+                async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Warning;
+            }
+            return;
+        }
+        consecutive_async_timing_rejects_ = 0;
         async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Fault;
         return;
     }
 
     if (async_telemetry_.supervision_state != RbpodoAsyncStreamingSupervisionState::Fault) {
+        consecutive_async_timing_rejects_ = 0;
         async_telemetry_.supervision_state = RbpodoAsyncStreamingSupervisionState::Ok;
     }
 }

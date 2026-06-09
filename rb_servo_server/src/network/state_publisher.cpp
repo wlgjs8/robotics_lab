@@ -438,6 +438,7 @@ nlohmann::json optionalRbpodoDiagnosticsJson(
         {"reason", optionalStringJson(diagnostics->reason)},
         {"error_name", optionalStringJson(diagnostics->error_name)},
         {"stable_error_code", diagnostics->stable_error_code},
+        {"unavailable_fields", stringArrayJson(diagnostics->unavailable_fields)},
         {"raw", rbpodoRawDiagnosticsJson(diagnostics->raw)},
     };
 }

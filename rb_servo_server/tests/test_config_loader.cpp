@@ -183,10 +183,13 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(pgmode.servo.send_servo_commands);
         RB_CHECK(pgmode.servo.allow_controller_simulation_motion);
         RB_CHECK(pgmode.servo.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(pgmode.servo.controller_simulation_treat_unreliable_status_fields_as_unavailable);
         RB_CHECK(!pgmode.servo.allow_controller_simulation_init_error);
         RB_CHECK(!pgmode.servo.allow_controller_simulation_not_activated);
         RB_CHECK(pgmode.left_robot.allow_controller_simulation_diagnostics_suspect);
         RB_CHECK(pgmode.right_robot.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(pgmode.left_robot.controller_simulation_treat_unreliable_status_fields_as_unavailable);
+        RB_CHECK(pgmode.right_robot.controller_simulation_treat_unreliable_status_fields_as_unavailable);
         RB_CHECK(!pgmode.left_robot.allow_controller_simulation_init_error);
         RB_CHECK(!pgmode.right_robot.allow_controller_simulation_init_error);
         RB_CHECK(near(pgmode.left_robot.servo_t1_sec, 0.002));

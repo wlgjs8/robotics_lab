@@ -106,10 +106,19 @@ bool operationModeMatchesConfig(const BackendConfig& config, const RbpodoSystemS
 }
 
 bool rbpodoControllerSimulationMotionGateOpen(const BackendConfig& config) {
-    return config.run_mode == RunMode::Real &&
+    return config.backend_type == BackendType::Rbpodo &&
+        config.run_mode == RunMode::Real &&
         expectedSimulationMode(config) &&
         envIsOne("RB_ALLOW_REAL_ROBOT") &&
         envIsOne("RB_ALLOW_REAL_MOTION");
+}
+
+RbpodoStateDecodeOptions decodeOptionsForConfig(const BackendConfig& config) {
+    RbpodoStateDecodeOptions options;
+    options.controller_simulation_unreliable_status_fields_unavailable =
+        config.controller_simulation_treat_unreliable_status_fields_as_unavailable &&
+        rbpodoControllerSimulationMotionGateOpen(config);
+    return options;
 }
 
 bool diagnosticsSuspectControllerSimulationOverrideAllowed(
@@ -215,6 +224,20 @@ void markSuspiciousFlag(
     );
 }
 
+void markUnavailableField(
+    RbpodoDiagnosticsSnapshot* diagnostics,
+    const std::string& field_name
+) {
+    if (!diagnostics) return;
+    if (std::find(
+            diagnostics->unavailable_fields.begin(),
+            diagnostics->unavailable_fields.end(),
+            field_name
+        ) == diagnostics->unavailable_fields.end()) {
+        diagnostics->unavailable_fields.push_back(field_name);
+    }
+}
+
 void markSuspiciousBoundedCode(
     RbpodoDiagnosticsSnapshot* diagnostics,
     const std::string& field_name,
@@ -232,17 +255,32 @@ void markSuspiciousBoundedCode(
     );
 }
 
-RbpodoDiagnosticsSnapshot interpretRbpodoDiagnostics(const RbpodoSystemStateSnapshot& snapshot) {
+RbpodoDiagnosticsSnapshot interpretRbpodoDiagnostics(
+    const RbpodoSystemStateSnapshot& snapshot,
+    const RbpodoStateDecodeOptions& decode_options
+) {
     RbpodoDiagnosticsSnapshot diagnostics;
     diagnostics.raw = rawDiagnosticsFromSnapshot(snapshot);
+    const bool unreliable_fields_unavailable =
+        decode_options.controller_simulation_unreliable_status_fields_unavailable;
 
     markSuspiciousBoundedCode(&diagnostics, "op_stat_sos_flag", snapshot.op_stat_sos_flag, 0, 12);
     markSuspiciousBoundedCode(&diagnostics, "op_stat_ems_flag", snapshot.op_stat_ems_flag, 0, 4);
     markSuspiciousFlag(&diagnostics, "op_stat_soft_estop_occur", snapshot.op_stat_soft_estop_occur);
     markSuspiciousFlag(&diagnostics, "op_stat_collision_occur", snapshot.op_stat_collision_occur);
-    markSuspiciousFlag(&diagnostics, "op_stat_self_collision", snapshot.op_stat_self_collision);
+    if (unreliable_fields_unavailable) {
+        markUnavailableField(&diagnostics, "op_stat_self_collision");
+    } else {
+        markSuspiciousFlag(&diagnostics, "op_stat_self_collision", snapshot.op_stat_self_collision);
+    }
 
-    if (!std::isfinite(snapshot.robot_time_sec)) {
+    if (unreliable_fields_unavailable &&
+        (!std::isfinite(snapshot.robot_time_sec) ||
+         snapshot.robot_time_sec <= 0.0 ||
+         (snapshot.robot_time_sec > 0.0 &&
+          snapshot.robot_time_sec < kRbpodoMinPlausibleNonZeroTimeSec))) {
+        markUnavailableField(&diagnostics, "robot_time_sec");
+    } else if (!std::isfinite(snapshot.robot_time_sec)) {
         diagnostics.diagnostics_valid = false;
         diagnostics.diagnostics_suspect = true;
         appendDiagnosticReason(&diagnostics.reason, "time was non-finite");
@@ -269,6 +307,17 @@ RbpodoDiagnosticsSnapshot interpretRbpodoDiagnostics(const RbpodoSystemStateSnap
     if (diagnostics.diagnostics_suspect) {
         diagnostics.error_name = "rbpodo_diagnostics_suspect";
         diagnostics.stable_error_code = kRbpodoDiagnosticsSuspectCode;
+    }
+    if (!diagnostics.unavailable_fields.empty()) {
+        std::ostringstream fields;
+        for (std::size_t i = 0; i < diagnostics.unavailable_fields.size(); ++i) {
+            if (i > 0) fields << ",";
+            fields << diagnostics.unavailable_fields[i];
+        }
+        appendDiagnosticReason(
+            &diagnostics.reason,
+            "unavailable fields under controller-simulation decode policy: " + fields.str()
+        );
     }
     return diagnostics;
 }
@@ -318,7 +367,8 @@ std::optional<RbpodoInterpretedFault> firstClearRbpodoFault(
 
 RobotState mapRbpodoSystemStateSnapshot(
     ArmId arm_id,
-    const RbpodoSystemStateSnapshot& snapshot
+    const RbpodoSystemStateSnapshot& snapshot,
+    const RbpodoStateDecodeOptions& decode_options
 ) {
     RobotState out_state;
     out_state.arm_id = arm_id;
@@ -334,9 +384,12 @@ RobotState mapRbpodoSystemStateSnapshot(
     out_state.q_ref_valid = finiteJointArray(out_state.q_target_deg);
     out_state.q_ref_source = "rbpodo.sdata.jnt_ref";
     out_state.rbpodo_sdk_state_source = "CobotData.request_data";
-    out_state.rbpodo_state_decode_policy = "bounded_status_codes_with_boolean_safety_flags";
+    out_state.rbpodo_state_decode_policy =
+        decode_options.controller_simulation_unreliable_status_fields_unavailable
+            ? "controller_sim_unreliable_fields_unavailable"
+            : "bounded_status_codes_with_boolean_safety_flags";
 
-    RbpodoDiagnosticsSnapshot diagnostics = interpretRbpodoDiagnostics(snapshot);
+    RbpodoDiagnosticsSnapshot diagnostics = interpretRbpodoDiagnostics(snapshot, decode_options);
     const std::optional<RbpodoInterpretedFault> clear_fault =
         firstClearRbpodoFault(snapshot, diagnostics);
     out_state.connection_state = RobotConnectionState::Connected;
@@ -364,6 +417,21 @@ RobotState mapRbpodoSystemStateSnapshot(
         out_state.lifecycle_state = "connected_not_motion_ready";
     }
     return out_state;
+}
+
+RobotState mapRbpodoSystemStateSnapshot(
+    ArmId arm_id,
+    const RbpodoSystemStateSnapshot& snapshot
+) {
+    return mapRbpodoSystemStateSnapshot(arm_id, snapshot, RbpodoStateDecodeOptions{});
+}
+
+RobotState mapRbpodoSystemStateSnapshot(
+    ArmId arm_id,
+    const RbpodoSystemStateSnapshot& snapshot,
+    const BackendConfig& config
+) {
+    return mapRbpodoSystemStateSnapshot(arm_id, snapshot, decodeOptionsForConfig(config));
 }
 
 std::optional<BackendError> rbpodoStateAcquisitionError(const RobotState& mapped) {
@@ -669,7 +737,7 @@ BackendResult<RobotState> RbpodoBackend::connect() {
         }
         impl_->connected = true;
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
-        RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
+        RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
         attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);
         impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
@@ -747,7 +815,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
         }
 
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
-        RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
+        RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
         attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);
         impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
@@ -840,7 +908,7 @@ BackendResult<RobotState> RbpodoBackend::readState() {
         }
         impl_->consecutive_read_misses = 0;
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
-        out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
+        out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, out_state);
         attachMotionReadinessDiagnostic(&out_state, impl_->last_state_error);
         impl_->last_state_cache = out_state.has_valid_joint_state ? std::make_optional(out_state) : std::nullopt;
@@ -1141,7 +1209,7 @@ BackendResult<RobotState> RbpodoBackend::resetFault() {
             const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
             if (state) {
                 const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
-                RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
+                RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
                 return okResult(BackendOp::ResetFault, mapped, makeBackendTiming(start, nowSteadyNs()));
             }
         } catch (const std::exception&) {

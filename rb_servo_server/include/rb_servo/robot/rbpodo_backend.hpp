@@ -23,9 +23,25 @@ struct RbpodoSystemStateSnapshot {
     int op_stat_self_collision = 0;
 };
 
+struct RbpodoStateDecodeOptions {
+    bool controller_simulation_unreliable_status_fields_unavailable = false;
+};
+
 RobotState mapRbpodoSystemStateSnapshot(
     ArmId arm_id,
     const RbpodoSystemStateSnapshot& snapshot
+);
+
+RobotState mapRbpodoSystemStateSnapshot(
+    ArmId arm_id,
+    const RbpodoSystemStateSnapshot& snapshot,
+    const BackendConfig& config
+);
+
+RobotState mapRbpodoSystemStateSnapshot(
+    ArmId arm_id,
+    const RbpodoSystemStateSnapshot& snapshot,
+    const RbpodoStateDecodeOptions& decode_options
 );
 
 std::optional<BackendError> rbpodoStateAcquisitionError(const RobotState& mapped);

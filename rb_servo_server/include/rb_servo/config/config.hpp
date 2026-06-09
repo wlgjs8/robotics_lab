@@ -50,6 +50,7 @@ struct BackendConfig {
     // return after socket send instead of waiting for controller ACK.
     bool disable_waiting_ack = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
+    bool controller_simulation_treat_unreliable_status_fields_as_unavailable = false;
     bool allow_controller_simulation_init_error = false;
 
     // rbpodo controller-simulation only: tolerate up to N consecutive transient
@@ -223,6 +224,7 @@ struct ServoConfig {
     bool allow_readonly_wrong_mode_startup = false;
     bool allow_controller_simulation_motion = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
+    bool controller_simulation_treat_unreliable_status_fields_as_unavailable = false;
     bool allow_controller_simulation_init_error = false;
     bool allow_controller_simulation_not_activated = false;
 

@@ -58,6 +58,11 @@ servo:
   allow_servo_t1_rate_mismatch: false
   allow_controller_simulation_motion: true
   allow_controller_simulation_diagnostics_suspect: true
+  # Controller-simulation only: the current rbpodo SDK/controller layout can
+  # mis-decode op_stat_self_collision and controller time in pgmode. This keeps
+  # those fields visible as unavailable in telemetry while other fault fields
+  # remain enforced. Default is false; do not enable for physical real mode.
+  controller_simulation_treat_unreliable_status_fields_as_unavailable: true
   rbpodo_async_streaming:
     enable: true
     mode: sdk_ack_worker

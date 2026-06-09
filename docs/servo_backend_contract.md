@@ -167,6 +167,19 @@ otherwise valid, but they do make the state motion-unsafe and block
 Garbage-looking raw flag values must be kept in `rbpodo_diagnostics.raw` rather
 than used as the sole controller `error_code`.
 
+For rbpodo controller `pgmode` simulation only, configs may opt into
+`servo.controller_simulation_treat_unreliable_status_fields_as_unavailable: true`.
+The option defaults to `false` and is active only when the
+controller-simulation motion gate is open. When active, the decoder treats only
+`op_stat_self_collision` shape validation and controller time plausibility as
+unavailable, publishes the suppressed field names in
+`rbpodo_diagnostics.unavailable_fields`, and sets
+`rbpodo_state_decode_policy` to
+`controller_sim_unreliable_fields_unavailable`. Raw values remain visible.
+SOS, EMS, soft-estop, collision, unknown `real_vs_simulation_mode`, and the
+explicit `op_stat_self_collision == 1` self-collision fault path remain
+enforced.
+
 Rainbow Virtual ControlBox controller-simulation targets may permanently
 report `init_error != 0` and `init_state_info != 6` even while accepting
 simulation `move_servo_j` commands and updating controller reference joints.
