@@ -328,6 +328,7 @@ class UmiDualCartesianTest(unittest.TestCase):
             "udp://127.0.0.1:49000",
             "right",
             socket_factory=lambda *_args: fake_socket,
+            monotonic_fn=lambda: 777.0,
         )
 
         sample = reader.read()
@@ -338,7 +339,9 @@ class UmiDualCartesianTest(unittest.TestCase):
         self.assertEqual(sample.pose_xyzw[:3], (4.0, 5.0, 6.0))
         self.assertEqual(sample.gripper, 90.0)
         self.assertFalse(sample.deadman)
-        self.assertEqual(sample.monotonic, 12.5)
+        # Staleness uses the LOCAL arrival clock, not the remote packet "t" (12.5):
+        # cross-machine monotonic clocks are not comparable.
+        self.assertEqual(sample.monotonic, 777.0)
         self.assertEqual(fake_socket.bound, ("127.0.0.1", 49000))
         self.assertTrue(fake_socket.closed)
 

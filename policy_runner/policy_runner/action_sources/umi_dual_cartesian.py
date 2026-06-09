@@ -330,7 +330,11 @@ def _sample_from_udp_packet(data: bytes, side: str, monotonic_fn: Any) -> UmiSam
     if not isinstance(side_raw, Mapping):
         raise ValueError(f"UMI UDP packet {side} field must be an object")
     entry = dict(side_raw)
-    entry.setdefault("monotonic", raw.get("t", monotonic_fn()))
+    # Staleness MUST be measured against the local arrival clock. A remote
+    # publisher's "t" (and any per-side "monotonic") is from an unrelated
+    # monotonic domain on another machine and is not comparable cross-host, so
+    # we always stamp the sample with the consumer's own monotonic at parse time.
+    entry["monotonic"] = monotonic_fn()
     return _sample_from_mapping(entry, 0)
 
 
