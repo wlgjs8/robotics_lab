@@ -80,6 +80,7 @@ def write_candidate(
     p95_orientation_drift_rad: float = 0.01,
     fault_latched: bool = False,
     diagnostics_suspect_count: int = 0,
+    physical_tracking_result: dict[str, object] | None = None,
 ) -> Path:
     artifact_dir = root / "01_ackon500_gene_sdk_pass"
     write_ablation_csv(root, artifact_dir, acceptance_semantics="socket_send_only" if socket_send_only else "controller_ack_observed")
@@ -129,6 +130,8 @@ def write_candidate(
         "result_reason": result_reason,
         "threshold_failures": threshold_failures or [],
     }
+    if physical_tracking_result is not None:
+        summary["physical_tracking_result"] = physical_tracking_result
     write_json(artifact_dir / "summary.json", summary)
     socket_sent = sent if socket_send_only else 0
     first_async = {
@@ -387,6 +390,50 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
                     "camera_tcp_calibration_unresolved",
                     "no_tiny_physical_acceptance",
                 ],
+            )
+            self.assertEqual(summary["physical_tracking_result"]["status"], "not_measured")
+
+    def test_measured_tcp_actual_artifact_clears_unmeasured_blocker_without_quality_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_candidate(
+                root,
+                physical_tracking_result={
+                    "status": "fail",
+                    "tracking_source": "tcp_actual_stand",
+                    "rms_error_m": 0.25,
+                    "p95_error_m": 0.3,
+                    "max_error_m": 0.4,
+                },
+            )
+            summary = report.build_summary(root)
+
+            self.assertEqual(summary["result"], "pass")
+            self.assertNotIn(
+                "physical_reference_to_actual_error_unmeasured",
+                summary["physical_readiness"]["blockers"],
+            )
+            self.assertEqual(summary["physical_tracking_result"]["status"], "fail")
+            self.assertEqual(summary["best_candidate"]["physical_tracking_status"], "fail")
+            self.assertIn("diagnostics_suspect_unresolved", summary["physical_readiness"]["blockers"])
+            self.assertIn("stop_resetFault_unverified", summary["physical_readiness"]["blockers"])
+
+    def test_tcp_ref_tracking_result_does_not_clear_unmeasured_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_candidate(
+                root,
+                physical_tracking_result={
+                    "status": "pass",
+                    "tracking_source": "tcp_ref_stand",
+                    "rms_error_m": 0.001,
+                },
+            )
+            summary = report.build_summary(root)
+
+            self.assertIn(
+                "physical_reference_to_actual_error_unmeasured",
+                summary["physical_readiness"]["blockers"],
             )
             self.assertEqual(summary["physical_tracking_result"]["status"], "not_measured")
 

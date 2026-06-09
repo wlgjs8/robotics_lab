@@ -382,6 +382,77 @@ class CircleBenchmarkReportTest(unittest.TestCase):
         self.assertEqual(rows[0]["controller_reference_result"]["explanation"], "tcp_ref_stand lower-bound evidence")
         self.assertEqual(rows[0]["physical_tracking_result"]["status"], "not_measured")
 
+    def test_measured_tcp_actual_artifact_clears_only_unmeasured_blocker(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "measured_physical_tracking",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "controller": "twist_stand_feedback",
+                    "profile": "circle_15cm_16s",
+                    "tracking_source": "tcp_ref_stand",
+                    "result": "completed",
+                    "tcp_ref_valid_ratio": 1.0,
+                    "q_ref_valid_ratio": 1.0,
+                    "q_ref_update_rate_hz": 100.0,
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                    "diagnostics_suspect_count": 7,
+                    "cartesian_unavailable_count": 0,
+                    "timing_classification": "clean_timing",
+                    "physical_tracking_result": {
+                        "status": "fail",
+                        "tracking_source": "tcp_actual_stand",
+                        "rms_error_m": 0.08,
+                        "p95_error_m": 0.09,
+                        "max_error_m": 0.1,
+                    },
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertNotIn("physical_reference_to_actual_error_unmeasured", rows[0]["physical_real_blockers"])
+        self.assertNotIn(
+            "physical_reference_to_actual_error_unmeasured",
+            rows[0]["physical_readiness"]["blockers"],
+        )
+        self.assertIn("diagnostics_suspect_unresolved", rows[0]["physical_real_blockers"])
+        self.assertEqual(rows[0]["physical_tracking_result"]["status"], "fail")
+        self.assertEqual(rows[0]["physical_tracking_status"], "fail")
+
+    def test_tcp_ref_physical_tracking_result_does_not_clear_unmeasured_blocker(self) -> None:
+        rows = report.classify_rows(
+            [
+                {
+                    "run_name": "ref_tracking_only",
+                    "benchmark_category": "rbpodo_controller_simulation",
+                    "backend": "rbpodo",
+                    "controller_mode": "pgmode_simulation",
+                    "controller": "twist_stand_feedback",
+                    "profile": "circle_15cm_16s",
+                    "tracking_source": "tcp_ref_stand",
+                    "result": "completed",
+                    "tcp_ref_valid_ratio": 1.0,
+                    "q_ref_valid_ratio": 1.0,
+                    "q_ref_update_rate_hz": 100.0,
+                    "physical_motion_detected": False,
+                    "fault_latched": False,
+                    "cartesian_unavailable_count": 0,
+                    "timing_classification": "clean_timing",
+                    "physical_tracking_result": {
+                        "status": "pass",
+                        "tracking_source": "tcp_ref_stand",
+                        "rms_error_m": 0.001,
+                    },
+                }
+            ],
+            min_repeats=1,
+        )
+        self.assertIn("physical_reference_to_actual_error_unmeasured", rows[0]["physical_real_blockers"])
+        self.assertEqual(rows[0]["physical_tracking_result"]["status"], "not_measured")
+
     def test_faulted_run_is_unreliable(self) -> None:
         rows = report.classify_rows(
             [

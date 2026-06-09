@@ -161,8 +161,6 @@ void annotateRbpodoAckResult(
 }
 
 constexpr int kRbpodoDiagnosticsSuspectCode = -2001;
-constexpr int kRbpodoSosFlagCode = 1001;
-constexpr int kRbpodoEmsFlagCode = 1002;
 constexpr int kRbpodoSoftEstopCode = 1003;
 constexpr int kRbpodoCollisionCode = 1004;
 constexpr int kRbpodoSelfCollisionCode = 1005;
@@ -217,12 +215,29 @@ void markSuspiciousFlag(
     );
 }
 
+void markSuspiciousBoundedCode(
+    RbpodoDiagnosticsSnapshot* diagnostics,
+    const std::string& field_name,
+    int value,
+    int min_value,
+    int max_value
+) {
+    if (!diagnostics || (value >= min_value && value <= max_value)) return;
+    diagnostics->diagnostics_valid = false;
+    diagnostics->diagnostics_suspect = true;
+    appendDiagnosticReason(
+        &diagnostics->reason,
+        field_name + " expected " + std::to_string(min_value) + ".." +
+            std::to_string(max_value) + " but was " + std::to_string(value)
+    );
+}
+
 RbpodoDiagnosticsSnapshot interpretRbpodoDiagnostics(const RbpodoSystemStateSnapshot& snapshot) {
     RbpodoDiagnosticsSnapshot diagnostics;
     diagnostics.raw = rawDiagnosticsFromSnapshot(snapshot);
 
-    markSuspiciousFlag(&diagnostics, "op_stat_sos_flag", snapshot.op_stat_sos_flag);
-    markSuspiciousFlag(&diagnostics, "op_stat_ems_flag", snapshot.op_stat_ems_flag);
+    markSuspiciousBoundedCode(&diagnostics, "op_stat_sos_flag", snapshot.op_stat_sos_flag, 0, 12);
+    markSuspiciousBoundedCode(&diagnostics, "op_stat_ems_flag", snapshot.op_stat_ems_flag, 0, 4);
     markSuspiciousFlag(&diagnostics, "op_stat_soft_estop_occur", snapshot.op_stat_soft_estop_occur);
     markSuspiciousFlag(&diagnostics, "op_stat_collision_occur", snapshot.op_stat_collision_occur);
     markSuspiciousFlag(&diagnostics, "op_stat_self_collision", snapshot.op_stat_self_collision);
@@ -262,14 +277,14 @@ std::optional<RbpodoInterpretedFault> firstClearRbpodoFault(
     const RbpodoSystemStateSnapshot& snapshot,
     const RbpodoDiagnosticsSnapshot& diagnostics
 ) {
-    if (snapshot.op_stat_sos_flag == 1) {
-        return RbpodoInterpretedFault{kRbpodoSosFlagCode, "rbpodo_sos_flag"};
+    if (snapshot.op_stat_sos_flag >= 1 && snapshot.op_stat_sos_flag <= 12) {
+        return RbpodoInterpretedFault{snapshot.op_stat_sos_flag, "rbpodo_sos_flag"};
     }
     if (snapshot.init_error != 0) {
         return RbpodoInterpretedFault{snapshot.init_error, "rbpodo_init_error"};
     }
-    if (snapshot.op_stat_ems_flag == 1) {
-        return RbpodoInterpretedFault{kRbpodoEmsFlagCode, "rbpodo_ems_flag"};
+    if (snapshot.op_stat_ems_flag >= 1 && snapshot.op_stat_ems_flag <= 4) {
+        return RbpodoInterpretedFault{snapshot.op_stat_ems_flag, "rbpodo_ems_flag"};
     }
     if (snapshot.op_stat_soft_estop_occur == 1) {
         return RbpodoInterpretedFault{kRbpodoSoftEstopCode, "rbpodo_soft_estop"};
@@ -282,12 +297,6 @@ std::optional<RbpodoInterpretedFault> firstClearRbpodoFault(
     }
 
     if (diagnostics.diagnostics_suspect) {
-        if (snapshot.op_stat_sos_flag != 0 && !rbpodoSuspiciousRawCode(snapshot.op_stat_sos_flag)) {
-            return RbpodoInterpretedFault{snapshot.op_stat_sos_flag, "rbpodo_sos_flag_suspect"};
-        }
-        if (snapshot.op_stat_ems_flag != 0 && !rbpodoSuspiciousRawCode(snapshot.op_stat_ems_flag)) {
-            return RbpodoInterpretedFault{snapshot.op_stat_ems_flag, "rbpodo_ems_flag_suspect"};
-        }
         if (snapshot.op_stat_soft_estop_occur != 0 &&
             !rbpodoSuspiciousRawCode(snapshot.op_stat_soft_estop_occur)) {
             return RbpodoInterpretedFault{snapshot.op_stat_soft_estop_occur, "rbpodo_soft_estop_suspect"};
@@ -325,7 +334,7 @@ RobotState mapRbpodoSystemStateSnapshot(
     out_state.q_ref_valid = finiteJointArray(out_state.q_target_deg);
     out_state.q_ref_source = "rbpodo.sdata.jnt_ref";
     out_state.rbpodo_sdk_state_source = "CobotData.request_data";
-    out_state.rbpodo_state_decode_policy = "strict_boolean_flags_with_suspect_large_values";
+    out_state.rbpodo_state_decode_policy = "bounded_status_codes_with_boolean_safety_flags";
 
     RbpodoDiagnosticsSnapshot diagnostics = interpretRbpodoDiagnostics(snapshot);
     const std::optional<RbpodoInterpretedFault> clear_fault =

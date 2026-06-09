@@ -21,7 +21,11 @@ import rbpodo_state_dump as state_dump
 
 RAW_FIELDS = state_dump.DIAGNOSTIC_FIELDS
 ARM_NAMES = ("left", "right")
-DEFAULT_TOLERANCE_DEG = 1e-6
+# rbpodo SDK joint arrays are float32 while rb_servo_server state JSON carries
+# Python-decoded values as JSON numbers. Treat sub-millidegree float32-sized
+# differences as the same decode so diagnostics can reach the firmware/semantics
+# branch instead of a false Python/C++ mismatch.
+DEFAULT_TOLERANCE_DEG = 5e-4
 DEFAULT_STARTUP_TIMEOUT_SEC = 12.0
 READONLY_MEASUREMENT_CONFIG = "rb_servo_server/config/dual_real_rbpodo_readonly_measurement.example.yaml"
 READONLY_MEASUREMENT_ENDPOINT = "udp://127.0.0.1:50171"

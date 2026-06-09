@@ -224,6 +224,7 @@ def stage_row(stage_id: str, name: str, summary: dict[str, Any] | None) -> dict[
             "fault_latch_status": "missing",
             "cartesian_availability": "missing",
             "stop_reset_behavior_result": "missing",
+            "stop_reset_behavior_note": "",
             "physical_motion_expected": None,
             "physical_motion_detected": None,
             "calibration_status": "",
@@ -252,6 +253,7 @@ def stage_row(stage_id: str, name: str, summary: dict[str, Any] | None) -> dict[
         "fault_latch_status": tel.get("fault_latch_status"),
         "cartesian_availability": tel.get("cartesian_availability"),
         "stop_reset_behavior_result": tel.get("stop_reset_behavior_result"),
+        "stop_reset_behavior_note": tel.get("stop_reset_behavior_note"),
         "physical_motion_expected": tel.get("physical_motion_expected"),
         "physical_motion_detected": tel.get("physical_motion_detected"),
         "calibration_status": calibration.get("status"),
@@ -291,6 +293,7 @@ def build_report(artifact_dir: Path) -> dict[str, Any]:
                 "fault_latch_status",
                 "cartesian_availability",
                 "stop_reset_behavior_result",
+                "stop_reset_behavior_note",
                 "physical_motion_expected",
                 "physical_motion_detected",
                 "calibration.status",
@@ -323,8 +326,8 @@ def markdown(report: dict[str, Any]) -> str:
         "",
         "## Ladder",
         "",
-        "| Stage | Status | Artifact | Physical source | Controller source | RMS m | P95 m | Max m |",
-        "| --- | --- | --- | --- | --- | ---: | ---: | ---: |",
+        "| Stage | Status | Artifact | Physical source | Controller source | Stop/reset result | Stop/reset note | RMS m | P95 m | Max m |",
+        "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |",
     ]
     for row in report["stage_rows"]:
         lines.append(
@@ -337,6 +340,8 @@ def markdown(report: dict[str, Any]) -> str:
                     "artifact_ref",
                     "physical_tracking_source",
                     "controller_reference_source",
+                    "stop_reset_behavior_result",
+                    "stop_reset_behavior_note",
                     "rms_error_m",
                     "p95_error_m",
                     "max_error_m",

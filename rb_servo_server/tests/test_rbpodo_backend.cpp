@@ -112,6 +112,112 @@ bool testHugeSelfCollisionIsSuspectButReadable() {
     return true;
 }
 
+bool testValidSosCodeIsDeviceFaultNotBooleanViolation() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+    snapshot.op_stat_sos_flag = 2;
+
+    const rb_servo::RobotState state =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
+    RB_CHECK(state.has_valid_joint_state);
+    RB_CHECK(state.has_error);
+    RB_CHECK(state.error_code == 2);
+    RB_CHECK(state.lifecycle_state == "faulted");
+    RB_CHECK(state.diagnostic_error_source == "rbpodo_sos_flag");
+    RB_CHECK(state.rbpodo_diagnostics.has_value());
+    RB_CHECK(state.rbpodo_diagnostics->diagnostics_valid);
+    RB_CHECK(!state.rbpodo_diagnostics->diagnostics_suspect);
+    RB_CHECK(!contains(state.rbpodo_diagnostics->reason, "expected 0/1"));
+    RB_CHECK(state.rbpodo_diagnostics->raw.op_stat_sos_flag == 2);
+
+    const std::optional<rb_servo::BackendError> readiness =
+        rb_servo::rbpodoMotionReadinessError(rbpodoConfig(), snapshot, state);
+    RB_CHECK(readiness.has_value());
+    RB_CHECK(readiness->kind == rb_servo::BackendErrorKind::RobotFault);
+    RB_CHECK(readiness->name == "rbpodo_sos_flag");
+    return true;
+}
+
+bool testValidEmsCodeIsDeviceFaultNotBooleanViolation() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+    snapshot.op_stat_ems_flag = 1;
+
+    const rb_servo::RobotState state =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Right, snapshot);
+    RB_CHECK(state.has_valid_joint_state);
+    RB_CHECK(state.has_error);
+    RB_CHECK(state.error_code == 1);
+    RB_CHECK(state.lifecycle_state == "faulted");
+    RB_CHECK(state.diagnostic_error_source == "rbpodo_ems_flag");
+    RB_CHECK(state.rbpodo_diagnostics.has_value());
+    RB_CHECK(state.rbpodo_diagnostics->diagnostics_valid);
+    RB_CHECK(!state.rbpodo_diagnostics->diagnostics_suspect);
+    RB_CHECK(!contains(state.rbpodo_diagnostics->reason, "expected 0/1"));
+    RB_CHECK(state.rbpodo_diagnostics->raw.op_stat_ems_flag == 1);
+
+    const std::optional<rb_servo::BackendError> readiness =
+        rb_servo::rbpodoMotionReadinessError(rbpodoConfig(), snapshot, state);
+    RB_CHECK(readiness.has_value());
+    RB_CHECK(readiness->kind == rb_servo::BackendErrorKind::RobotFault);
+    RB_CHECK(readiness->name == "rbpodo_ems_flag");
+    return true;
+}
+
+bool testOutOfRangeSosAndEmsCodesAreSuspect() {
+    {
+        rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+        snapshot.op_stat_sos_flag = 13;
+
+        const rb_servo::RobotState state =
+            rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
+        RB_CHECK(state.has_valid_joint_state);
+        RB_CHECK(state.has_error);
+        RB_CHECK(state.error_code != snapshot.op_stat_sos_flag);
+        RB_CHECK(state.lifecycle_state == "diagnostics_suspect");
+        RB_CHECK(state.diagnostic_error_source == "rbpodo_diagnostics_suspect");
+        RB_CHECK(state.rbpodo_diagnostics.has_value());
+        RB_CHECK(!state.rbpodo_diagnostics->diagnostics_valid);
+        RB_CHECK(state.rbpodo_diagnostics->diagnostics_suspect);
+        RB_CHECK(contains(state.rbpodo_diagnostics->reason, "op_stat_sos_flag expected 0..12"));
+        RB_CHECK(!contains(state.rbpodo_diagnostics->reason, "op_stat_sos_flag expected 0/1"));
+    }
+
+    {
+        rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+        snapshot.op_stat_ems_flag = 5;
+
+        const rb_servo::RobotState state =
+            rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Right, snapshot);
+        RB_CHECK(state.has_valid_joint_state);
+        RB_CHECK(state.has_error);
+        RB_CHECK(state.error_code != snapshot.op_stat_ems_flag);
+        RB_CHECK(state.lifecycle_state == "diagnostics_suspect");
+        RB_CHECK(state.diagnostic_error_source == "rbpodo_diagnostics_suspect");
+        RB_CHECK(state.rbpodo_diagnostics.has_value());
+        RB_CHECK(!state.rbpodo_diagnostics->diagnostics_valid);
+        RB_CHECK(state.rbpodo_diagnostics->diagnostics_suspect);
+        RB_CHECK(contains(state.rbpodo_diagnostics->reason, "op_stat_ems_flag expected 0..4"));
+        RB_CHECK(!contains(state.rbpodo_diagnostics->reason, "op_stat_ems_flag expected 0/1"));
+    }
+
+    return true;
+}
+
+bool testBooleanStatusFieldsStillRejectNonBooleanValues() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+    snapshot.op_stat_collision_occur = 2;
+
+    const rb_servo::RobotState state =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
+    RB_CHECK(state.has_valid_joint_state);
+    RB_CHECK(state.has_error);
+    RB_CHECK(state.diagnostic_error_source == "rbpodo_collision_suspect");
+    RB_CHECK(state.rbpodo_diagnostics.has_value());
+    RB_CHECK(!state.rbpodo_diagnostics->diagnostics_valid);
+    RB_CHECK(state.rbpodo_diagnostics->diagnostics_suspect);
+    RB_CHECK(contains(state.rbpodo_diagnostics->reason, "op_stat_collision_occur expected 0/1"));
+    return true;
+}
+
 bool testInitErrorSimulationStateIsFaultedButReadable() {
     rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
     snapshot.real_vs_simulation_mode = 1;
@@ -214,7 +320,7 @@ bool testStatePublisherSerializesRawRbpodoDiagnostics() {
     RB_CHECK(left.at("rbpodo_sdk_state_source").get<std::string>() == "CobotData.request_data");
     RB_CHECK(
         left.at("rbpodo_state_decode_policy").get<std::string>() ==
-        "strict_boolean_flags_with_suspect_large_values"
+        "bounded_status_codes_with_boolean_safety_flags"
     );
     RB_CHECK(!diagnostics.at("diagnostics_valid").get<bool>());
     RB_CHECK(diagnostics.at("diagnostics_suspect").get<bool>());
@@ -231,6 +337,10 @@ bool testStatePublisherSerializesRawRbpodoDiagnostics() {
 int main() {
     if (!testClearSelfCollisionIsRobotFault()) return 1;
     if (!testHugeSelfCollisionIsSuspectButReadable()) return 1;
+    if (!testValidSosCodeIsDeviceFaultNotBooleanViolation()) return 1;
+    if (!testValidEmsCodeIsDeviceFaultNotBooleanViolation()) return 1;
+    if (!testOutOfRangeSosAndEmsCodesAreSuspect()) return 1;
+    if (!testBooleanStatusFieldsStillRejectNonBooleanValues()) return 1;
     if (!testInitErrorSimulationStateIsFaultedButReadable()) return 1;
     if (!testTinyTimeMarksDiagnosticsSuspectWithoutLosingJoints()) return 1;
     if (!testNonFiniteJointStateStillFailsAcquisition()) return 1;
