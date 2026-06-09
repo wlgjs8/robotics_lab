@@ -14,6 +14,7 @@ from .action_sources import (
     SpaceMouseCartesianActionSource,
     SpaceMouseJointVelocityActionSource,
     TcpDeltaActionSource,
+    UmiDualCartesianActionSource,
 )
 from .config import PolicyRunnerConfig, load_config
 from .dataset_manifest import parse_camera_names
@@ -30,6 +31,7 @@ from .rollout_modes import (
 from .safety import SafetyGate
 from .servo_command_client import CommandIntent, ServoCommandClient
 from .spacemouse import HidSpaceMouseReader, ScriptedSpaceMouseReader, SpaceMouseReader, SpaceMouseSample
+from .action_sources.umi_dual_cartesian import MockUmiPoseReader, UdpUmiPoseReader, UmiPoseReader
 
 
 STARTUP_TIMEOUT_EXIT_CODE = 2
@@ -258,6 +260,19 @@ def make_action_source(config: PolicyRunnerConfig):
                 config.safety.allow_rbpodo_controller_simulation_cartesian
             ),
         )
+    if config.action_source == "umi_dual_cartesian":
+        umi = config.umi_dual_cartesian
+        return UmiDualCartesianActionSource(
+            left_reader=_umi_reader_from_config(umi.left, "left"),
+            right_reader=_umi_reader_from_config(umi.right, "right"),
+            max_linear_step_m=umi.max_linear_step_m,
+            max_angular_step_rad=umi.max_angular_step_rad,
+            gripper_offset=umi.gripper_offset,
+            r_align=umi.r_align,
+            workspace_bounds=umi.workspace_bounds,
+            sample_hold_timeout_sec=umi.sample_hold_timeout_sec,
+            timeout_sec=config.servo_command.timeout_sec,
+        )
     raise ValueError(f"unknown action_source: {config.action_source}")
 
 
@@ -269,6 +284,14 @@ def _spacemouse_reader_from_device_config(device_config) -> SpaceMouseReader:
         path=device_config.path,
         device_number=device_config.device_number,
     )
+
+
+def _umi_reader_from_config(reader_config, side: str) -> UmiPoseReader:
+    if reader_config.mock_script is not None:
+        return MockUmiPoseReader(reader_config.mock_script)
+    if reader_config.endpoint:
+        return UdpUmiPoseReader(reader_config.endpoint, side)
+    return MockUmiPoseReader("pgmode_umi_smoke")
 
 
 def _load_runtime_geometry_status(config: PolicyRunnerConfig) -> GeometryStatus:

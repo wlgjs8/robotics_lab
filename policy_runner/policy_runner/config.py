@@ -230,6 +230,51 @@ class DualSpaceMouseCartesianConfig:
 
 
 @dataclass(frozen=True)
+class UmiPoseReaderConfig:
+    udp_endpoint: str | None = None
+    bind: str | None = None
+    mock_script: str | tuple[dict[str, Any] | None, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.mock_script is not None and not isinstance(self.mock_script, (str, tuple)):
+            raise ValueError("umi mock_script must be a script name or a list of samples")
+        if self.udp_endpoint is not None and self.bind is not None:
+            raise ValueError("umi reader must not set both udp_endpoint and bind")
+
+    @property
+    def endpoint(self) -> str | None:
+        return self.udp_endpoint or self.bind
+
+
+@dataclass(frozen=True)
+class UmiDualCartesianConfig:
+    left: UmiPoseReaderConfig = field(
+        default_factory=lambda: UmiPoseReaderConfig(mock_script="pgmode_umi_smoke")
+    )
+    right: UmiPoseReaderConfig = field(
+        default_factory=lambda: UmiPoseReaderConfig(mock_script="pgmode_umi_smoke")
+    )
+    max_linear_step_m: float = 0.005
+    max_angular_step_rad: float = 0.04
+    gripper_offset: tuple[float, ...] = (0.172, 0.0, -0.076)
+    r_align: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    workspace_bounds: dict[str, tuple[float, float]] | tuple[float, ...] | None = None
+    sample_hold_timeout_sec: float = 0.05
+
+    def __post_init__(self) -> None:
+        if self.max_linear_step_m < 0.0:
+            raise ValueError("umi_dual_cartesian.max_linear_step_m must be non-negative")
+        if self.max_angular_step_rad < 0.0:
+            raise ValueError("umi_dual_cartesian.max_angular_step_rad must be non-negative")
+        if len(self.gripper_offset) != 3:
+            raise ValueError("umi_dual_cartesian.gripper_offset must contain 3 values")
+        if len(self.r_align) not in {3, 9}:
+            raise ValueError("umi_dual_cartesian.r_align must contain 3 RPY values or 9 matrix values")
+        if self.sample_hold_timeout_sec <= 0.0:
+            raise ValueError("umi_dual_cartesian.sample_hold_timeout_sec must be positive")
+
+
+@dataclass(frozen=True)
 class MasterArmJointConfig:
     config_path: str = ""
     python_module_dir: str = ""
@@ -292,6 +337,7 @@ class PolicyRunnerConfig:
     spacemouse_cartesian_dual: DualSpaceMouseCartesianConfig = field(
         default_factory=DualSpaceMouseCartesianConfig
     )
+    umi_dual_cartesian: UmiDualCartesianConfig = field(default_factory=UmiDualCartesianConfig)
     master_arm_joint: MasterArmJointConfig = field(default_factory=MasterArmJointConfig)
     command_rate_hz: float = 500.0
 
@@ -330,6 +376,7 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         spacemouse_cartesian_dual=_spacemouse_cartesian_dual_config(
             _section(raw, "spacemouse_cartesian_dual")
         ),
+        umi_dual_cartesian=_umi_dual_cartesian_config(_section(raw, "umi_dual_cartesian")),
         master_arm_joint=_master_arm_joint_config(_section(raw, "master_arm_joint")),
         command_rate_hz=float(raw.get("command_rate_hz", 500.0)),
     )
@@ -485,6 +532,50 @@ def _spacemouse_device_config(raw: dict[str, Any]) -> SpaceMouseDeviceConfig:
     return SpaceMouseDeviceConfig(**raw)
 
 
+def _umi_dual_cartesian_config(raw: dict[str, Any]) -> UmiDualCartesianConfig:
+    left = _umi_reader_config(_section(raw, "left"))
+    right = _umi_reader_config(_section(raw, "right"))
+    top_level = {key: value for key, value in raw.items() if key not in {"left", "right"}}
+    if "max_linear_step_m" in top_level:
+        top_level["max_linear_step_m"] = float(top_level["max_linear_step_m"])
+    if "max_angular_step_rad" in top_level:
+        top_level["max_angular_step_rad"] = float(top_level["max_angular_step_rad"])
+    if "sample_hold_timeout_sec" in top_level:
+        top_level["sample_hold_timeout_sec"] = float(top_level["sample_hold_timeout_sec"])
+    if "gripper_offset" in top_level:
+        top_level["gripper_offset"] = _tuple3(top_level["gripper_offset"], "umi_dual_cartesian.gripper_offset")
+    if "r_align" in top_level:
+        value = top_level["r_align"]
+        if not isinstance(value, (list, tuple)) or len(value) not in {3, 9}:
+            raise ValueError("umi_dual_cartesian.r_align must contain 3 or 9 numbers")
+        top_level["r_align"] = tuple(float(item) for item in value)
+    if "workspace_bounds" in top_level:
+        top_level["workspace_bounds"] = _umi_workspace_bounds(top_level["workspace_bounds"])
+    return UmiDualCartesianConfig(left=left, right=right, **top_level)
+
+
+def _umi_reader_config(raw: dict[str, Any]) -> UmiPoseReaderConfig:
+    if "mock_script" in raw:
+        value = raw["mock_script"]
+        if isinstance(value, list):
+            samples: list[dict[str, Any] | None] = []
+            for item in value:
+                if item is None:
+                    samples.append(None)
+                elif isinstance(item, dict):
+                    samples.append(dict(item))
+                else:
+                    raise ValueError("umi mock_script entries must be mappings or null")
+            raw["mock_script"] = tuple(samples)
+        elif value is not None and not isinstance(value, str):
+            raise ValueError("umi mock_script must be a script name or a list of samples")
+    if "bind" in raw and raw.get("udp_endpoint") is None:
+        raw["bind"] = str(raw["bind"]) if raw["bind"] is not None else None
+    if "udp_endpoint" in raw and raw["udp_endpoint"] is not None:
+        raw["udp_endpoint"] = str(raw["udp_endpoint"])
+    return UmiPoseReaderConfig(**raw)
+
+
 def _master_arm_joint_config(raw: dict[str, Any]) -> MasterArmJointConfig:
     tuple6_keys = {
         "left_scale",
@@ -542,6 +633,30 @@ def _tuple6_int(value: Any, label: str) -> tuple[int, ...]:
     if not isinstance(value, (list, tuple)) or len(value) != 6:
         raise ValueError(f"{label} must contain 6 integers")
     return tuple(int(v) for v in value)
+
+
+def _tuple3(value: Any, label: str) -> tuple[float, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError(f"{label} must contain 3 numbers")
+    return tuple(float(v) for v in value)
+
+
+def _umi_workspace_bounds(value: Any) -> dict[str, tuple[float, float]] | tuple[float, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        out: dict[str, tuple[float, float]] = {}
+        for axis in ("x", "y", "z"):
+            if axis not in value:
+                continue
+            raw_pair = value[axis]
+            if not isinstance(raw_pair, (list, tuple)) or len(raw_pair) != 2:
+                raise ValueError(f"umi_dual_cartesian.workspace_bounds.{axis} must contain [min,max]")
+            out[axis] = (float(raw_pair[0]), float(raw_pair[1]))
+        return out
+    if not isinstance(value, (list, tuple)) or len(value) != 6:
+        raise ValueError("umi_dual_cartesian.workspace_bounds must be a mapping or 6-number list")
+    return tuple(float(item) for item in value)
 
 
 def _validate_command_rate_hz(command_rate_hz: float) -> None:

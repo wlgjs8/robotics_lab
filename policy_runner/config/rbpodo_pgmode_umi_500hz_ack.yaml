@@ -1,0 +1,48 @@
+schema: robotics_lab.policy_runner.v1
+mode: real
+action_source: umi_dual_cartesian
+runtime:
+  startup_timeout_sec: 5.0
+geometry:
+  path: "calibration/active_calibration.yaml"
+recording:
+  output_dir: "policy_runner/episodes"
+  rate_hz: 100.0
+  format: hdf5
+  dataset_metadata:
+    schema: robotics_lab.policy_runner.dataset_metadata.v1
+    backend_type: rbpodo
+    run_mode: real
+    operation_mode: simulation
+    physical_motion_expected: false
+    controller_pgmode: simulation
+    calibration_status: configured_estimate
+    camera_status: disabled
+    command_source_id: policy_runner
+    action_source: umi_dual_cartesian
+robot_state:
+  bind: "udp://0.0.0.0:50376"
+  stale_timeout_sec: 0.5
+servo_command:
+  endpoint: "udp://127.0.0.1:50256"
+  timeout_sec: 0.05
+  acquire_lease: true
+  lease_readback_timeout_sec: 2.0
+safety:
+  # allow_real_motion=false is intentional; rbpodo pgmode simulation uses controller-simulation carve-out only.
+  allow_real_motion: false
+  allow_rbpodo_controller_simulation_cartesian: true
+  allow_configured_estimate_geometry_in_controller_simulation: true
+  allow_configured_estimate_geometry_in_real: false
+  require_valid_joint_state: true
+command_rate_hz: 500
+umi_dual_cartesian:
+  max_linear_step_m: 0.005
+  max_angular_step_rad: 0.04
+  gripper_offset: [0.172, 0.0, -0.076]
+  r_align: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  sample_hold_timeout_sec: 0.05
+  left:
+    mock_script: pgmode_umi_smoke
+  right:
+    mock_script: pgmode_umi_smoke

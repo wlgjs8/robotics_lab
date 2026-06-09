@@ -19,6 +19,9 @@ Supported action sources:
 - `dual_spacemouse_cartesian`: two-SpaceMouse input mapped to per-arm
   `TcpTwistLocal` commands; simulation by default, with an explicit rbpodo
   controller pgmode simulation profile.
+- `umi_dual_cartesian`: two UMI / Vive-tracker inputs mapped through
+  relative-from-init clutching to per-arm `TcpPoseTarget` commands; the tracked
+  pgmode config defaults to mock replay readers.
 
 Joint actions remain joint-only. Geometry-aware safety gates protect Cartesian
 and camera-related action sources. Cartesian action sources remain
@@ -145,6 +148,12 @@ Rbpodo controller pgmode simulation example:
 
 Use `tools/rbpodo_pgmode_spacemouse.sh` for the prepared server config, GUI,
 and recorder commands.
+
+- `policy_runner/config/rbpodo_pgmode_umi_500hz_ack.yaml`: dual UMI
+  relative Cartesian `TcpPoseTarget` teleop for the same pgmode server profile.
+  It defaults to `mock_script: pgmode_umi_smoke` for both readers, keeps
+  `safety.allow_real_motion: false`, and is documented in
+  `docs/runbooks/rbpodo_pgmode_umi.md`.
 
 For hardware-free command previews or integration tests, the dual SpaceMouse
 config accepts `spacemouse_cartesian_dual.left.mock_script` and
