@@ -113,11 +113,34 @@ bool rbpodoControllerSimulationMotionGateOpen(const BackendConfig& config) {
         envIsOne("RB_ALLOW_REAL_MOTION");
 }
 
+// REAL physical-motion opt-in (operation_mode: real, NOT controller-sim): accept the
+// same vendor-unreliable status fields (op_stat_self_collision shape, robot_time) as
+// UNAVAILABLE instead of latching diagnostics_suspect. Fail-closed: requires the per-arm
+// config opt-in AND a real (non-sim) operation mode AND all three env gates, including
+// the dedicated RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION. Every other field
+// (EMS/SOS/soft-estop/collision_occur, unknown real_vs_sim mode, init error) keeps
+// faulting exactly as before — this only suppresses the two measured field-layout-garbage
+// fields so a physical run is not blocked by the vendor -2001 mismatch.
+bool rbpodoSuspectDiagnosticsRealMotionGateOpen(const BackendConfig& config) {
+    return config.backend_type == BackendType::Rbpodo &&
+        config.run_mode == RunMode::Real &&
+        !expectedSimulationMode(config) &&
+        config.allow_real_motion_with_suspect_diagnostics &&
+        envIsOne("RB_ALLOW_REAL_ROBOT") &&
+        envIsOne("RB_ALLOW_REAL_MOTION") &&
+        envIsOne("RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION");
+}
+
 RbpodoStateDecodeOptions decodeOptionsForConfig(const BackendConfig& config) {
     RbpodoStateDecodeOptions options;
-    options.controller_simulation_unreliable_status_fields_unavailable =
+    const bool controller_sim_unreliable_gate =
         config.controller_simulation_treat_unreliable_status_fields_as_unavailable &&
         rbpodoControllerSimulationMotionGateOpen(config);
+    const bool real_motion_suspect_gate =
+        rbpodoSuspectDiagnosticsRealMotionGateOpen(config);
+    options.controller_simulation_unreliable_status_fields_unavailable =
+        controller_sim_unreliable_gate || real_motion_suspect_gate;
+    options.real_motion_suspect_diagnostics_accepted = real_motion_suspect_gate;
     return options;
 }
 
@@ -385,9 +408,11 @@ RobotState mapRbpodoSystemStateSnapshot(
     out_state.q_ref_source = "rbpodo.sdata.jnt_ref";
     out_state.rbpodo_sdk_state_source = "CobotData.request_data";
     out_state.rbpodo_state_decode_policy =
-        decode_options.controller_simulation_unreliable_status_fields_unavailable
-            ? "controller_sim_unreliable_fields_unavailable"
-            : "bounded_status_codes_with_boolean_safety_flags";
+        decode_options.real_motion_suspect_diagnostics_accepted
+            ? "real_motion_suspect_diagnostics_accepted"
+            : (decode_options.controller_simulation_unreliable_status_fields_unavailable
+                ? "controller_sim_unreliable_fields_unavailable"
+                : "bounded_status_codes_with_boolean_safety_flags");
 
     RbpodoDiagnosticsSnapshot diagnostics = interpretRbpodoDiagnostics(snapshot, decode_options);
     const std::optional<RbpodoInterpretedFault> clear_fault =

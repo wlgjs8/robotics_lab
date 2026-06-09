@@ -51,6 +51,13 @@ struct BackendConfig {
     bool disable_waiting_ack = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
     bool controller_simulation_treat_unreliable_status_fields_as_unavailable = false;
+    // Real (operation_mode: real) physical-motion opt-in mirror of the field above:
+    // accept the same vendor-unreliable status fields (op_stat_self_collision shape,
+    // robot_time) as UNAVAILABLE instead of latching diagnostics_suspect. Fail-closed,
+    // gated by rbpodoSuspectDiagnosticsRealMotionGateOpen (needs operation_mode==real +
+    // RB_ALLOW_REAL_ROBOT/MOTION + RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION). Does
+    // NOT suppress EMS/SOS/soft-estop/collision_occur/unknown-mode faults.
+    bool allow_real_motion_with_suspect_diagnostics = false;
     bool allow_controller_simulation_init_error = false;
 
     // rbpodo controller-simulation only: tolerate up to N consecutive transient
@@ -233,6 +240,8 @@ struct ServoConfig {
     bool allow_controller_simulation_motion = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
     bool controller_simulation_treat_unreliable_status_fields_as_unavailable = false;
+    // Real physical-motion (operation_mode: real) opt-in; propagated to both backends.
+    bool allow_real_motion_with_suspect_diagnostics = false;
     bool controller_simulation_async_supervision_nonlatching = false;
     bool allow_controller_simulation_init_error = false;
     bool allow_controller_simulation_not_activated = false;

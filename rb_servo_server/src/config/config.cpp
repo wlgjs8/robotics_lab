@@ -1337,6 +1337,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "allow_controller_simulation_motion",
             "allow_controller_simulation_diagnostics_suspect",
             "controller_simulation_treat_unreliable_status_fields_as_unavailable",
+            "allow_real_motion_with_suspect_diagnostics",
             "controller_simulation_async_supervision_nonlatching",
             "allow_controller_simulation_init_error",
             "allow_controller_simulation_not_activated",
@@ -1387,6 +1388,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 asBool(
                     sec["controller_simulation_treat_unreliable_status_fields_as_unavailable"],
                     "servo.controller_simulation_treat_unreliable_status_fields_as_unavailable"
+                );
+        }
+        if (has(sec, "allow_real_motion_with_suspect_diagnostics")) {
+            cfg.servo.allow_real_motion_with_suspect_diagnostics =
+                asBool(
+                    sec["allow_real_motion_with_suspect_diagnostics"],
+                    "servo.allow_real_motion_with_suspect_diagnostics"
                 );
         }
         if (has(sec, "controller_simulation_async_supervision_nonlatching")) {
@@ -1448,6 +1456,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         cfg.servo.controller_simulation_treat_unreliable_status_fields_as_unavailable;
     cfg.right_robot.controller_simulation_treat_unreliable_status_fields_as_unavailable =
         cfg.servo.controller_simulation_treat_unreliable_status_fields_as_unavailable;
+    cfg.left_robot.allow_real_motion_with_suspect_diagnostics =
+        cfg.servo.allow_real_motion_with_suspect_diagnostics;
+    cfg.right_robot.allow_real_motion_with_suspect_diagnostics =
+        cfg.servo.allow_real_motion_with_suspect_diagnostics;
     cfg.left_robot.allow_controller_simulation_init_error =
         cfg.servo.allow_controller_simulation_init_error;
     cfg.right_robot.allow_controller_simulation_init_error =
