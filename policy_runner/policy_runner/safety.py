@@ -93,42 +93,63 @@ class SafetyGate:
         observed_mode = _observed_mode(payload)
         effective_mode = observed_mode or self.mode
         controller_simulation_cartesian = False
+        real_cartesian_motion = False
         if requirements.cartesian_motion and (observed_mode == "real" or self.mode == "real"):
+            physical_real_cartesian = _is_physical_real_cartesian(payload, intent)
             if (
                 requirements.allow_rbpodo_controller_simulation_cartesian
                 and self.config.allow_rbpodo_controller_simulation_cartesian
             ):
                 controller_decision = _evaluate_rbpodo_controller_simulation_cartesian(payload, intent)
-                if not controller_decision.allowed:
+                if controller_decision.allowed:
+                    controller_simulation_cartesian = True
+                    effective_mode = "controller_simulation"
+                elif physical_real_cartesian:
+                    # The controller is in physical real (cartesian_gate.operation_mode
+                    # == "real"), so controller-sim evidence is legitimately absent.
+                    # Real-test relaxation: allow real Cartesian motion. Real-motion
+                    # safety is enforced solely by the server (allow_in_real +
+                    # RB_ALLOW_REAL_CARTESIAN, speed/step clamps, tracking-error latch,
+                    # URDF-capsule self-collision guard).
+                    real_cartesian_motion = True
+                    effective_mode = "real"
+                else:
+                    # Genuine controller-sim failure (env missing, or physical motion
+                    # detected/expected while in operation_mode simulation): keep blocking.
                     return controller_decision
-                controller_simulation_cartesian = True
-                effective_mode = "controller_simulation"
+            elif physical_real_cartesian:
+                # Real Cartesian motion allowed (policy gate relaxed; server-enforced).
+                real_cartesian_motion = True
+                effective_mode = "real"
             else:
                 if intent.is_motion and not self.config.allow_real_motion:
                     return SafetyDecision(False, "real_motion_not_allowed")
                 return SafetyDecision(False, "real_cartesian_not_allowed")
+        cartesian_bypass = controller_simulation_cartesian or real_cartesian_motion
         if requirements.cartesian_motion and str(payload.get("safety_verdict", "")) == "CartesianUnavailable":
             return SafetyDecision(False, "cartesian_unavailable")
         if (
             requirements.requires_observed_simulation
             and observed_mode != "simulation"
-            and not controller_simulation_cartesian
+            and not cartesian_bypass
         ):
             return SafetyDecision(False, "observed_mode_not_simulation")
         if (
             requirements.requires_observed_simulation
             and self.mode != "simulation"
-            and not controller_simulation_cartesian
+            and not cartesian_bypass
         ):
             return SafetyDecision(False, "configured_mode_not_simulation")
-        if requirements.requires_simulator_backend_if_available and not controller_simulation_cartesian:
+        if requirements.requires_simulator_backend_if_available and not cartesian_bypass:
             observed_backend = _observed_backend(payload)
             if observed_backend is not None and observed_backend != "simulator":
                 return SafetyDecision(False, "observed_backend_not_simulator")
-        geometry_decision = self._evaluate_geometry_requirements(requirements, payload, effective_mode)
+        geometry_decision = self._evaluate_geometry_requirements(
+            requirements, payload, effective_mode, real_cartesian_motion
+        )
         if not geometry_decision.allowed:
             return geometry_decision
-        if not controller_simulation_cartesian:
+        if not cartesian_bypass:
             if observed_mode == "real" and intent.is_motion and not self.config.allow_real_motion:
                 return SafetyDecision(False, "real_motion_not_allowed")
             if requirements.simulation_only and self.mode == "real" and intent.is_motion:
@@ -169,9 +190,16 @@ class SafetyGate:
         requirements: ActionRequirements,
         payload: dict[str, Any],
         effective_mode: str,
+        real_cartesian_bypass: bool = False,
     ) -> SafetyDecision:
         if requirements.requires_valid_tcp_pose and not _has_valid_tcp_pose(payload):
             return SafetyDecision(False, "invalid_tcp_pose")
+        if real_cartesian_bypass:
+            # Real-test relaxation: the policy's measured-geometry-for-real gates
+            # (configured_estimate_geometry_in_real, geometry_valid_for_real_policy) are
+            # intentionally bypassed. The server's URDF-capsule self-collision guard is
+            # the active collision protection.
+            return SafetyDecision(True)
         if not (requirements.requires_geometry or requirements.requires_camera_geometry):
             return SafetyDecision(True)
         if self.geometry_status is None:
@@ -297,6 +325,23 @@ def _active_cartesian_arms(intent: CommandIntent) -> tuple[str, ...]:
     if not arms and intent.mode in _CARTESIAN_ARM_MOTION_MODES:
         return ("left", "right")
     return tuple(arms)
+
+
+def _is_physical_real_cartesian(payload: dict[str, Any], intent: CommandIntent) -> bool:
+    """True when the server reports an active arm in PHYSICAL real Cartesian operation
+    (cartesian_gate.operation_mode == "real") — i.e. genuine physical motion, distinct
+    from controller-simulation (operation_mode "simulation"). Used to scope the
+    real-Cartesian gate relaxation to real runs only, leaving controller-sim safety
+    (env gate, physical-motion-detected/expected) intact."""
+    arms = _active_cartesian_arms(intent) or ("left", "right")
+    for arm in arms:
+        arm_payload = payload.get(arm, {})
+        gate = arm_payload.get("cartesian_gate") if isinstance(arm_payload, dict) else None
+        if not isinstance(gate, dict):
+            gate = payload.get("cartesian_gate")
+        if isinstance(gate, dict) and _lower_str(gate.get("operation_mode")) == "real":
+            return True
+    return False
 
 
 def _evaluate_arm_controller_simulation_cartesian(

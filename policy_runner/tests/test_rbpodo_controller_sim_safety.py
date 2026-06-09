@@ -150,7 +150,11 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
 
                 self.assertTrue(decision.allowed, decision.reason)
 
-    def test_controller_simulation_rejects_operation_mode_real(self):
+    def test_operation_mode_real_allows_physical_real_cartesian(self):
+        # Real-test relaxation: when the controller is in physical real
+        # (cartesian_gate.operation_mode == "real"), the controller-sim Cartesian gate
+        # no longer blocks — real Cartesian motion is allowed and the server is the sole
+        # safety layer. (Was: rejected with controller_simulation_operation_mode_not_simulation.)
         gate = controller_sim_cartesian_gate(operation_mode="real")
         snapshot = controller_sim_state(
             left_overrides={"cartesian_gate": gate},
@@ -164,8 +168,7 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
             time.monotonic(),
         )
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "controller_simulation_operation_mode_not_simulation")
+        self.assertTrue(decision.allowed)
 
     def test_controller_simulation_rejects_physical_motion_expected(self):
         gate = controller_sim_cartesian_gate(physical_motion_expected=True)
