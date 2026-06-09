@@ -1267,6 +1267,8 @@ ArmWorkerOptions workerOptions(const DualArmConfig& config) {
     options.rbpodo_async_streaming_enabled = config.servo.rbpodo_async_streaming.enable;
     options.rbpodo_async_streaming_mode = config.servo.rbpodo_async_streaming.mode;
     options.rbpodo_async_max_pending_age_ms = config.servo.rbpodo_async_streaming.max_pending_age_ms;
+    options.controller_simulation_timing_reject_tolerance_enabled =
+        controllerSimulationMotionGateOpen(config);
     options.rbpodo_async_ack_supervision =
         config.servo.rbpodo_async_streaming.ack_supervision;
     options.rbpodo_async_reference_supervision =

@@ -21,7 +21,9 @@ also publishes:
 - `q_ref_valid`
 - `q_actual_valid`
 - `rbpodo_sdk_state_source: CobotData.request_data`
-- `rbpodo_state_decode_policy: strict_boolean_flags_with_suspect_large_values`
+- `rbpodo_state_decode_policy: bounded_status_codes_with_boolean_safety_flags`
+  or `controller_sim_unreliable_fields_unavailable` for the narrow
+  controller-simulation opt-in described below
 
 `tcp_ref_stand` is FK from `q_ref_deg`, not an independent controller field.
 `tcp_actual_stand` remains FK from measured `q_actual_deg`.
@@ -45,6 +47,30 @@ valid. If both sides decode a huge invalid status value the result is
 
 Physical real motion must not proceed while `diagnostics_suspect` remains
 unresolved.
+
+## Controller-Simulation Unavailable-Field Policy
+
+For rbpodo controller `pgmode` simulation only, the server can opt into:
+
+```yaml
+servo:
+  controller_simulation_treat_unreliable_status_fields_as_unavailable: true
+```
+
+The option defaults to `false` and is active only when the rbpodo
+controller-simulation motion gate is open: `run_mode: real`,
+`backend_type: rbpodo`, `operation_mode: simulation`,
+`servo.allow_controller_simulation_motion: true`, `RB_ALLOW_REAL_ROBOT=1`, and
+`RB_ALLOW_REAL_MOTION=1`. It is not a physical-real decode policy.
+
+When active, the decoder treats only `op_stat_self_collision` shape validation
+and controller time plausibility as unavailable. The state stream must expose
+the raw values under `rbpodo_diagnostics.raw`, list the suppressed fields in
+`rbpodo_diagnostics.unavailable_fields`, and publish
+`rbpodo_state_decode_policy=controller_sim_unreliable_fields_unavailable`.
+The policy does not suppress SOS, EMS, soft-estop, collision, unknown
+`real_vs_simulation_mode`, or the explicit `op_stat_self_collision == 1` fault
+path.
 
 ## Safety Contract
 

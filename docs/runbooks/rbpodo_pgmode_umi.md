@@ -49,6 +49,25 @@ workflow. Do not modify measured calibration or `calibration/umi_retarget*.yaml`
 UMI live teleop uses relative-from-init clutching, not measured hand-eye
 retarget.
 
+The shared server profile opts into the rbpodo controller-simulation unreliable
+status-field decode policy:
+
+```yaml
+servo:
+  controller_simulation_treat_unreliable_status_fields_as_unavailable: true
+```
+
+This policy is inert unless the controller-simulation motion gate is open
+(`run_mode: real`, `backend_type: rbpodo`, `operation_mode: simulation`,
+`servo.allow_controller_simulation_motion: true`, `RB_ALLOW_REAL_ROBOT=1`, and
+`RB_ALLOW_REAL_MOTION=1`). When active, only `op_stat_self_collision` shape
+validation and controller time plausibility are treated as unavailable. State
+telemetry must still publish `rbpodo_diagnostics.raw`,
+`rbpodo_diagnostics.unavailable_fields`, and
+`rbpodo_state_decode_policy=controller_sim_unreliable_fields_unavailable`.
+EMS, soft-estop, collision, SOS, and `op_stat_self_collision == 1` fault paths
+remain enforced.
+
 ## Mock Preview
 
 The tracked policy config defaults both readers to:
@@ -211,6 +230,9 @@ Before trusting a run, inspect live state or recorder output for:
 - per-arm `cartesian_gate.operation_mode=simulation`
 - per-arm `controller_simulation_cartesian_enabled=true`
 - per-arm `physical_motion_expected=false`
+- per-arm `rbpodo_state_decode_policy=controller_sim_unreliable_fields_unavailable`
+- per-arm `rbpodo_diagnostics.unavailable_fields` lists the suppressed
+  controller-simulation fields when the decode policy is active
 - `fault_latched=false`
 - command-source lease active for `policy_runner`
 - `TcpPoseTarget` commands while UMI deadmen are held

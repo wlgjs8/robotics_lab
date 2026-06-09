@@ -223,6 +223,7 @@ bool testControllerSimulationGateConfig() {
         "  send_servo_commands: true\n"
         "  allow_controller_simulation_motion: true\n"
         "  allow_controller_simulation_diagnostics_suspect: true\n"
+        "  controller_simulation_treat_unreliable_status_fields_as_unavailable: true\n"
         "  allow_controller_simulation_init_error: true\n"
         "  allow_controller_simulation_not_activated: true\n"
         "safety:\n"
@@ -245,11 +246,14 @@ bool testControllerSimulationGateConfig() {
     ::unlink(valid_path.c_str());
     RB_CHECK(cfg.servo.allow_controller_simulation_motion);
     RB_CHECK(cfg.servo.allow_controller_simulation_diagnostics_suspect);
+    RB_CHECK(cfg.servo.controller_simulation_treat_unreliable_status_fields_as_unavailable);
     RB_CHECK(cfg.servo.allow_controller_simulation_init_error);
     RB_CHECK(cfg.servo.allow_controller_simulation_not_activated);
     RB_CHECK(cfg.cartesian_control.allow_in_controller_simulation);
     RB_CHECK(cfg.left_robot.allow_controller_simulation_diagnostics_suspect);
     RB_CHECK(cfg.right_robot.allow_controller_simulation_diagnostics_suspect);
+    RB_CHECK(cfg.left_robot.controller_simulation_treat_unreliable_status_fields_as_unavailable);
+    RB_CHECK(cfg.right_robot.controller_simulation_treat_unreliable_status_fields_as_unavailable);
     RB_CHECK(cfg.left_robot.allow_controller_simulation_init_error);
     RB_CHECK(cfg.right_robot.allow_controller_simulation_init_error);
     RB_CHECK(
@@ -290,6 +294,11 @@ bool testControllerSimulationGateConfig() {
     const std::size_t diag_pos = init_without_motion_body.find(diag_key);
     RB_CHECK(diag_pos != std::string::npos);
     init_without_motion_body.erase(diag_pos, diag_key.size());
+    const std::string unavailable_key =
+        "  controller_simulation_treat_unreliable_status_fields_as_unavailable: true\n";
+    const std::size_t unavailable_pos = init_without_motion_body.find(unavailable_key);
+    RB_CHECK(unavailable_pos != std::string::npos);
+    init_without_motion_body.erase(unavailable_pos, unavailable_key.size());
     const std::string init_without_motion_path =
         writeTempConfig("controller-sim-init-without-motion", init_without_motion_body);
     RB_CHECK(loadRejects(init_without_motion_path));
@@ -302,6 +311,10 @@ bool testControllerSimulationGateConfig() {
     const std::size_t not_activated_diag_pos = not_activated_without_motion_body.find(diag_key);
     RB_CHECK(not_activated_diag_pos != std::string::npos);
     not_activated_without_motion_body.erase(not_activated_diag_pos, diag_key.size());
+    const std::size_t not_activated_unavailable_pos =
+        not_activated_without_motion_body.find(unavailable_key);
+    RB_CHECK(not_activated_unavailable_pos != std::string::npos);
+    not_activated_without_motion_body.erase(not_activated_unavailable_pos, unavailable_key.size());
     const std::string init_key = "  allow_controller_simulation_init_error: true\n";
     const std::size_t not_activated_init_pos = not_activated_without_motion_body.find(init_key);
     RB_CHECK(not_activated_init_pos != std::string::npos);
@@ -320,6 +333,18 @@ bool testControllerSimulationGateConfig() {
         writeTempConfig("controller-sim-read-only", read_only_body);
     RB_CHECK(loadRejects(read_only_path));
     ::unlink(read_only_path.c_str());
+
+    std::string unavailable_without_motion_body = valid_body;
+    const std::size_t unavailable_motion_pos = unavailable_without_motion_body.find(motion_key);
+    RB_CHECK(unavailable_motion_pos != std::string::npos);
+    unavailable_without_motion_body.erase(unavailable_motion_pos, motion_key.size());
+    const std::size_t unavailable_diag_pos = unavailable_without_motion_body.find(diag_key);
+    RB_CHECK(unavailable_diag_pos != std::string::npos);
+    unavailable_without_motion_body.erase(unavailable_diag_pos, diag_key.size());
+    const std::string unavailable_without_motion_path =
+        writeTempConfig("controller-sim-unavailable-without-motion", unavailable_without_motion_body);
+    RB_CHECK(loadRejects(unavailable_without_motion_path));
+    ::unlink(unavailable_without_motion_path.c_str());
 
     return true;
 }
