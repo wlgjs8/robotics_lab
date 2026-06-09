@@ -118,6 +118,7 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(near(mock.servo.worker_read_period_sec, 0.002));
     RB_CHECK(!mock.servo.controller_simulation_async_supervision_nonlatching);
     RB_CHECK(!mock.safety.controller_simulation_tracking_error_nonlatching);
+    RB_CHECK(!mock.servo.allow_real_motion_with_suspect_diagnostics);
 
     const rb_servo::DualArmConfig simulator =
         rb_servo::loadConfigFromYaml((config_dir / "dual_simulator.yaml").string());

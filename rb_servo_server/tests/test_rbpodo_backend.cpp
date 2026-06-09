@@ -447,6 +447,129 @@ bool testControllerSimUnavailableFieldPolicyStillFaultsRealSafetyFields() {
     return true;
 }
 
+rb_servo::BackendConfig realSuspectDiagnosticsConfig() {
+    rb_servo::BackendConfig config = rbpodoConfig("real");
+    config.allow_real_motion_with_suspect_diagnostics = true;
+    return config;
+}
+
+rb_servo::RbpodoSystemStateSnapshot realModeGarbageSelfCollisionSnapshot() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = controllerSimGarbageSelfCollisionSnapshot();
+    snapshot.real_vs_simulation_mode = 0;  // a real controller reports real mode
+    return snapshot;
+}
+
+// operation_mode: real physical opt-in accepts the same vendor-garbage op_stat/time
+// fields as unavailable (so the -2001 mismatch does not block a physical run), with a
+// distinct operator-visible decode policy.
+bool testRealMotionSuspectDiagnosticsAcceptedWhenGateOpen() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_suspect("RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION");
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_suspect.set("1");
+
+    const rb_servo::RbpodoSystemStateSnapshot snapshot = realModeGarbageSelfCollisionSnapshot();
+    const rb_servo::BackendConfig config = realSuspectDiagnosticsConfig();
+    const rb_servo::RobotState state =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot, config);
+
+    RB_CHECK(state.has_valid_joint_state);
+    RB_CHECK(!state.has_error);
+    RB_CHECK(state.rbpodo_state_decode_policy == "real_motion_suspect_diagnostics_accepted");
+    RB_CHECK(state.rbpodo_diagnostics.has_value());
+    RB_CHECK(state.rbpodo_diagnostics->diagnostics_valid);
+    RB_CHECK(!state.rbpodo_diagnostics->diagnostics_suspect);
+    RB_CHECK(state.rbpodo_diagnostics->raw.op_stat_self_collision == 1984732816);
+    RB_CHECK(containsField(state.rbpodo_diagnostics->unavailable_fields, "op_stat_self_collision"));
+    RB_CHECK(containsField(state.rbpodo_diagnostics->unavailable_fields, "robot_time_sec"));
+    RB_CHECK(!rb_servo::rbpodoStateAcquisitionError(state).has_value());
+    return true;
+}
+
+// Fail-closed: missing the dedicated env, the config opt-in, or a real operation mode
+// all keep the suspect latch (and the controller-sim carve-out never leaks into real).
+bool testRealMotionSuspectDiagnosticsFailClosed() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_suspect("RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION");
+    allow_real.set("1");
+    allow_motion.set("1");
+
+    const rb_servo::RbpodoSystemStateSnapshot snapshot = realModeGarbageSelfCollisionSnapshot();
+
+    // (a) dedicated env gate missing -> still suspect.
+    allow_suspect.unset();
+    {
+        const rb_servo::BackendConfig config = realSuspectDiagnosticsConfig();
+        const rb_servo::RobotState state =
+            rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot, config);
+        RB_CHECK(state.has_error);
+        RB_CHECK(state.rbpodo_diagnostics->diagnostics_suspect);
+        RB_CHECK(state.rbpodo_diagnostics->unavailable_fields.empty());
+        RB_CHECK(state.rbpodo_state_decode_policy != "real_motion_suspect_diagnostics_accepted");
+    }
+
+    // (b) env present but config opt-in false -> still suspect.
+    allow_suspect.set("1");
+    {
+        const rb_servo::BackendConfig config = rbpodoConfig("real");
+        const rb_servo::RobotState state =
+            rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot, config);
+        RB_CHECK(state.has_error);
+        RB_CHECK(state.rbpodo_diagnostics->diagnostics_suspect);
+    }
+
+    // (c) operation_mode simulation with the REAL flag -> real gate needs non-sim, and
+    //     the controller-sim carve-out flag is not set -> still suspect.
+    {
+        rb_servo::BackendConfig config = realSuspectDiagnosticsConfig();
+        config.operation_mode = "simulation";
+        const rb_servo::RobotState state = rb_servo::mapRbpodoSystemStateSnapshot(
+            rb_servo::ArmId::Left, controllerSimGarbageSelfCollisionSnapshot(), config);
+        RB_CHECK(state.has_error);
+        RB_CHECK(state.rbpodo_diagnostics->diagnostics_suspect);
+    }
+    return true;
+}
+
+// The real suspect gate suppresses ONLY the two field-layout-garbage fields; genuine
+// EMS/collision/self-collision faults still latch under physical motion.
+bool testRealMotionSuspectGateStillFaultsRealSafetyFields() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    EnvVarGuard allow_suspect("RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION");
+    allow_real.set("1");
+    allow_motion.set("1");
+    allow_suspect.set("1");
+
+    const rb_servo::BackendConfig config = realSuspectDiagnosticsConfig();
+
+    {
+        rb_servo::RbpodoSystemStateSnapshot snapshot = realModeGarbageSelfCollisionSnapshot();
+        snapshot.op_stat_collision_occur = 1;
+        const rb_servo::RobotState state =
+            rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot, config);
+        RB_CHECK(state.has_error);
+        RB_CHECK(state.diagnostic_error_source == "rbpodo_collision");
+        const std::optional<rb_servo::BackendError> readiness =
+            rb_servo::rbpodoMotionReadinessError(config, snapshot, state);
+        RB_CHECK(readiness.has_value());
+        RB_CHECK(readiness->name == "rbpodo_collision");
+    }
+
+    {
+        rb_servo::RbpodoSystemStateSnapshot snapshot = realModeGarbageSelfCollisionSnapshot();
+        snapshot.op_stat_self_collision = 1;  // a genuine self-collision (clean 1, not garbage)
+        const rb_servo::RobotState state =
+            rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Right, snapshot, config);
+        RB_CHECK(state.has_error);
+        RB_CHECK(state.diagnostic_error_source == "rbpodo_self_collision");
+    }
+    return true;
+}
+
 bool testNonFiniteJointStateStillFailsAcquisition() {
     rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
     snapshot.q_actual_deg[2] = std::numeric_limits<double>::quiet_NaN();
@@ -569,6 +692,9 @@ int main() {
     if (!testControllerSimUnavailableFieldPolicyRequiresConfigAndGate()) return 1;
     if (!testControllerSimUnavailableFieldPolicySuppressesOnlyCapturedBadFields()) return 1;
     if (!testControllerSimUnavailableFieldPolicyStillFaultsRealSafetyFields()) return 1;
+    if (!testRealMotionSuspectDiagnosticsAcceptedWhenGateOpen()) return 1;
+    if (!testRealMotionSuspectDiagnosticsFailClosed()) return 1;
+    if (!testRealMotionSuspectGateStillFaultsRealSafetyFields()) return 1;
     if (!testNonFiniteJointStateStillFailsAcquisition()) return 1;
     if (!testStatePublisherSerializesRawRbpodoDiagnostics()) return 1;
     if (!testStatePublisherSerializesControllerSimUnavailableFields()) return 1;
