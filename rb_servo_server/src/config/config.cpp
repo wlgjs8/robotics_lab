@@ -889,6 +889,13 @@ void validateConfig(const DualArmConfig& cfg) {
             "servo.allow_controller_simulation_motion=true"
         );
     }
+    if (cfg.servo.controller_simulation_async_supervision_nonlatching &&
+        !cfg.servo.allow_controller_simulation_motion) {
+        throw std::runtime_error(
+            "servo.controller_simulation_async_supervision_nonlatching requires "
+            "servo.allow_controller_simulation_motion=true"
+        );
+    }
     if (cfg.servo.allow_controller_simulation_init_error &&
         !cfg.servo.allow_controller_simulation_motion) {
         throw std::runtime_error(
@@ -906,6 +913,7 @@ void validateConfig(const DualArmConfig& cfg) {
     if (cfg.servo.allow_controller_simulation_motion ||
         cfg.servo.allow_controller_simulation_diagnostics_suspect ||
         cfg.servo.controller_simulation_treat_unreliable_status_fields_as_unavailable ||
+        cfg.servo.controller_simulation_async_supervision_nonlatching ||
         cfg.servo.allow_controller_simulation_init_error ||
         cfg.servo.allow_controller_simulation_not_activated) {
         if (!cfg.servo.send_servo_commands) {
@@ -1322,6 +1330,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "allow_controller_simulation_motion",
             "allow_controller_simulation_diagnostics_suspect",
             "controller_simulation_treat_unreliable_status_fields_as_unavailable",
+            "controller_simulation_async_supervision_nonlatching",
             "allow_controller_simulation_init_error",
             "allow_controller_simulation_not_activated",
             "enable_realtime_priority",
@@ -1371,6 +1380,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 asBool(
                     sec["controller_simulation_treat_unreliable_status_fields_as_unavailable"],
                     "servo.controller_simulation_treat_unreliable_status_fields_as_unavailable"
+                );
+        }
+        if (has(sec, "controller_simulation_async_supervision_nonlatching")) {
+            cfg.servo.controller_simulation_async_supervision_nonlatching =
+                asBool(
+                    sec["controller_simulation_async_supervision_nonlatching"],
+                    "servo.controller_simulation_async_supervision_nonlatching"
                 );
         }
         if (has(sec, "allow_controller_simulation_init_error")) {

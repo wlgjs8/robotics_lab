@@ -1373,6 +1373,20 @@ LatchedDualFaultContext asyncSupervisionFaultContexts(
     return contexts;
 }
 
+std::string asyncSupervisionFaultReason(const LatchedDualFaultContext& contexts) {
+    if (!contexts.top_level.has_value()) {
+        return "unknown";
+    }
+    const FaultContext& context = *contexts.top_level;
+    if (context.backend_error.name != "None" && !context.backend_error.name.empty()) {
+        return context.backend_error.name;
+    }
+    if (!context.reason.empty()) {
+        return context.reason;
+    }
+    return "rbpodo_async_supervision_fault";
+}
+
 FaultContext contextWithReason(FaultContext context, const std::string& reason) {
     if (context.reason.empty()) {
         context.reason = reason;
@@ -1597,10 +1611,58 @@ void DualArmServoLoop::loopMain() {
     const auto period = std::chrono::nanoseconds(static_cast<long long>(1'000'000'000LL / rate_hz));
     auto next_tick = std::chrono::steady_clock::now();
     last_loop_start_ns_ = 0;
+    const bool async_supervision_nonlatching =
+        controllerSimulationMotionRequired(config_) &&
+        controllerSimulationMotionGateOpen(config_) &&
+        config_.servo.controller_simulation_async_supervision_nonlatching;
+    bool async_supervision_degraded_last_tick = false;
+    uint64_t last_async_supervision_degraded_warn_ns = 0;
+    std::string last_async_supervision_degraded_reason;
+    constexpr uint64_t kAsyncSupervisionDegradedWarnPeriodNs = 5'000'000'000ULL;
 
     while (running_) {
         next_tick += period;
         const uint64_t loop_start = nowSteadyNs();
+        bool async_supervision_degraded_this_tick = false;
+        bool async_supervision_degraded_warned_this_tick = false;
+        const auto handleAsyncSupervisionFault =
+            [&](const LatchedDualFaultContext& async_fault_contexts,
+                const RobotState& current_left_state,
+                const RobotState& current_right_state) {
+                if (!async_fault_contexts.top_level.has_value()) {
+                    return false;
+                }
+                if (async_supervision_nonlatching) {
+                    async_supervision_degraded_this_tick = true;
+                    const std::string reason =
+                        asyncSupervisionFaultReason(async_fault_contexts);
+                    const bool state_changed =
+                        !async_supervision_degraded_last_tick ||
+                        reason != last_async_supervision_degraded_reason;
+                    const bool warn_period_elapsed =
+                        last_async_supervision_degraded_warn_ns == 0 ||
+                        loop_start - last_async_supervision_degraded_warn_ns >=
+                            kAsyncSupervisionDegradedWarnPeriodNs;
+                    if (!async_supervision_degraded_warned_this_tick &&
+                        (state_changed || warn_period_elapsed)) {
+                        std::cerr
+                            << "[WARN] controller-sim async supervision degraded "
+                            << "(suppressed, not latched): " << reason << "\n";
+                        last_async_supervision_degraded_warn_ns = loop_start;
+                        last_async_supervision_degraded_reason = reason;
+                        async_supervision_degraded_warned_this_tick = true;
+                    }
+                    return false;
+                }
+                latchFault(
+                    SafetyVerdict::SendFailure,
+                    "rbpodo async streaming supervision fault",
+                    current_left_state,
+                    current_right_state,
+                    async_fault_contexts
+                );
+                return true;
+            };
         const uint64_t nominal_period_ns = static_cast<uint64_t>(period.count());
         const uint64_t actual_period_ns = last_loop_start_ns_ == 0
             ? nominal_period_ns
@@ -1687,15 +1749,7 @@ void DualArmServoLoop::loopMain() {
         if (rbpodoAsyncIoMode() && !fault_latched_.load()) {
             const LatchedDualFaultContext async_fault_contexts =
                 asyncSupervisionFaultContexts(left_async_telemetry, right_async_telemetry);
-            if (async_fault_contexts.top_level.has_value()) {
-                latchFault(
-                    SafetyVerdict::SendFailure,
-                    "rbpodo async streaming supervision fault",
-                    left_state,
-                    right_state,
-                    async_fault_contexts
-                );
-            }
+            (void)handleAsyncSupervisionFault(async_fault_contexts, left_state, right_state);
         }
 
         DualArmCommand command = command_buffer_
@@ -1941,14 +1995,7 @@ void DualArmServoLoop::loopMain() {
         if (rbpodoAsyncIoMode() && !fault_latched_.load()) {
             const LatchedDualFaultContext async_fault_contexts =
                 asyncSupervisionFaultContexts(left_async_telemetry, right_async_telemetry);
-            if (async_fault_contexts.top_level.has_value()) {
-                latchFault(
-                    SafetyVerdict::SendFailure,
-                    "rbpodo async streaming supervision fault",
-                    left_state,
-                    right_state,
-                    async_fault_contexts
-                );
+            if (handleAsyncSupervisionFault(async_fault_contexts, left_state, right_state)) {
                 safe_target = currentFaultHoldTarget();
                 safety_verdict = SafetyVerdict::FaultLatched;
             }
@@ -2081,6 +2128,7 @@ void DualArmServoLoop::loopMain() {
             std::lock_guard<std::mutex> lock(state_mutex_);
             sample.fault_latched = fault_latched_.load();
             sample.motion_state = motion_state_.load();
+            sample.async_supervision_degraded = async_supervision_degraded_this_tick;
             sample.fault_reason = fault_reason_;
             if (latched_fault_context_) {
                 sample.latched_fault_context = faultContextSnapshot(*latched_fault_context_);
@@ -2142,6 +2190,7 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_right_bone = last_self_collision_.right_bone;
             latest_snapshot_.motion_state = sample.motion_state;
             latest_snapshot_.fault_latched = sample.fault_latched;
+            latest_snapshot_.async_supervision_degraded = sample.async_supervision_degraded;
             latest_snapshot_.latched_fault_reason = latched_fault_reason_.load();
             latest_snapshot_.fault_reason = fault_reason_;
             latest_snapshot_.latched_fault_context = sample.latched_fault_context;
@@ -2188,6 +2237,7 @@ void DualArmServoLoop::loopMain() {
             logger_->push(sample);
         }
 
+        async_supervision_degraded_last_tick = async_supervision_degraded_this_tick;
         std::this_thread::sleep_until(next_tick);
     }
 }

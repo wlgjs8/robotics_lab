@@ -1462,6 +1462,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     }
     message["motion_state"] = toString(snapshot.motion_state);
     message["fault_latched"] = snapshot.fault_latched;
+    message["async_supervision_degraded"] = snapshot.async_supervision_degraded;
     message["latched_fault_reason"] = toString(snapshot.latched_fault_reason);
     message["fault_reason"] = snapshot.fault_reason;
     message["fault_context"] = faultContextJson(snapshot);

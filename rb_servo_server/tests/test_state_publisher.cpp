@@ -202,6 +202,7 @@ bool testStatePublisherSerializesAsyncStreamingFields() {
         rb_servo::RbpodoAsyncStreamingSupervisionState::Fault;
     snapshot.left_async_streaming.reference_supervision_reason = "async_q_ref_target_error";
     snapshot.left_async_streaming.reference_supervision_fault_count = 2;
+    snapshot.async_supervision_degraded = true;
 
     rb_servo::DualArmConfig cfg;
     cfg.servo.rbpodo_async_streaming.enable = true;
@@ -215,6 +216,7 @@ bool testStatePublisherSerializesAsyncStreamingFields() {
     const nlohmann::json& async = json.at("left").at("async_streaming");
 
     RB_CHECK(json.at("async_streaming_enabled").get<bool>());
+    RB_CHECK(json.at("async_supervision_degraded").get<bool>());
     RB_CHECK(json.at("async_streaming_mode").get<std::string>() == "socket_send_supervised");
     RB_CHECK(json.at("async_streaming_policy").get<std::string>() == "latest_wins");
     RB_CHECK(async.at("enabled").get<bool>());

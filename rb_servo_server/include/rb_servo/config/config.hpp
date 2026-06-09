@@ -225,6 +225,7 @@ struct ServoConfig {
     bool allow_controller_simulation_motion = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
     bool controller_simulation_treat_unreliable_status_fields_as_unavailable = false;
+    bool controller_simulation_async_supervision_nonlatching = false;
     bool allow_controller_simulation_init_error = false;
     bool allow_controller_simulation_not_activated = false;
 

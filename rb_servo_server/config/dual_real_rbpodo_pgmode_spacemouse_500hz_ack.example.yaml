@@ -63,6 +63,10 @@ servo:
   # those fields visible as unavailable in telemetry while other fault fields
   # remain enforced. Default is false; do not enable for physical real mode.
   controller_simulation_treat_unreliable_status_fields_as_unavailable: true
+  # Controller-simulation only: keep async streaming supervision observable as
+  # telemetry/WARNs without latching SendFailure when pgmode hiccups. Default is
+  # false and the server still latches in physical real mode.
+  controller_simulation_async_supervision_nonlatching: true
   rbpodo_async_streaming:
     enable: true
     mode: sdk_ack_worker
