@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import circle_tracking_benchmark as sim_bench
+import generate_rbpodo_measurement_reliability_report as reliability_report
 
 
 SCHEMA = "robotics_lab.ackon500_gene_goal_report.v1"
@@ -27,7 +28,7 @@ ACKON500_PHYSICAL_WARNING = (
 CONTROLLER_REFERENCE_EXPLANATION = "tcp_ref_stand lower-bound evidence"
 PHYSICAL_READINESS_BLOCKERS = [
     "diagnostics_suspect_unresolved",
-    "physical_reference_to_actual_error_unmeasured",
+    reliability_report.UNMEASURED_PHYSICAL_BLOCKER,
     "stop_resetFault_unverified",
     "camera_tcp_calibration_unresolved",
     "no_tiny_physical_acceptance",
@@ -222,10 +223,10 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text.rstrip() + "\n", encoding="utf-8")
 
 
-def physical_readiness() -> dict[str, Any]:
+def physical_readiness(row: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "status": "blocked",
-        "blockers": list(PHYSICAL_READINESS_BLOCKERS),
+        "blockers": reliability_report.physical_blockers_with_measurement(PHYSICAL_READINESS_BLOCKERS, row),
         "next_required_acceptance": list(NEXT_REQUIRED_ACCEPTANCE),
     }
 
@@ -237,7 +238,10 @@ def controller_reference_result(passed: bool) -> dict[str, str]:
     }
 
 
-def physical_tracking_result() -> dict[str, str]:
+def physical_tracking_result(row: dict[str, Any] | None = None) -> dict[str, Any]:
+    measured = reliability_report.measured_physical_tracking_result(row)
+    if measured is not None:
+        return measured
     return {"status": "not_measured"}
 
 
@@ -972,11 +976,11 @@ def candidate_from_summary(path: Path, ablation_rows: dict[str, dict[str, str]])
     candidate["ackon500_goal_status"] = candidate["ackon500_goal_result"]["status"]
     candidate["goal_pass"] = candidate["ackon500_goal_status"] == "pass"
     candidate["pass"] = candidate["goal_pass"]
-    candidate["physical_readiness"] = physical_readiness()
+    candidate["physical_readiness"] = physical_readiness(summary)
     candidate["controller_reference_result"] = controller_reference_result(
         candidate["goal_pass"] and candidate.get("tracking_source") == "tcp_ref_stand"
     )
-    candidate["physical_tracking_result"] = physical_tracking_result()
+    candidate["physical_tracking_result"] = physical_tracking_result(summary)
     candidate["physical_readiness_status"] = candidate["physical_readiness"]["status"]
     candidate["controller_reference_status"] = candidate["controller_reference_result"]["status"]
     candidate["physical_tracking_status"] = candidate["physical_tracking_result"]["status"]
@@ -1853,13 +1857,13 @@ def build_summary(artifact_root: Path) -> dict[str, Any]:
         "pass": result == "pass",
         "goal_pass": result == "pass",
         "official_goal_result": result,
-        "physical_readiness": physical_readiness(),
+        "physical_readiness": physical_readiness(best),
         "controller_reference_result": controller_reference_result(
             result == "pass"
             and best is not None
             and best.get("tracking_source") == "tcp_ref_stand"
         ),
-        "physical_tracking_result": physical_tracking_result(),
+        "physical_tracking_result": physical_tracking_result(best),
         "thresholds": PASS_THRESHOLDS,
         "candidate_count": len(candidates),
         "best_candidate": best,

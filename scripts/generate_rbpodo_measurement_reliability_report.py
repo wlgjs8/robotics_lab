@@ -24,9 +24,10 @@ ACKON500_PHYSICAL_WARNING = (
     "ACKON500 PASS is controller-reference lower-bound evidence, not physical TCP tracking."
 )
 CONTROLLER_REFERENCE_EXPLANATION = "tcp_ref_stand lower-bound evidence"
+UNMEASURED_PHYSICAL_BLOCKER = "physical_reference_to_actual_error_unmeasured"
 PHYSICAL_READINESS_BLOCKERS = [
     "diagnostics_suspect_unresolved",
-    "physical_reference_to_actual_error_unmeasured",
+    UNMEASURED_PHYSICAL_BLOCKER,
     "stop_resetFault_unverified",
     "camera_tcp_calibration_unresolved",
     "no_tiny_physical_acceptance",
@@ -99,6 +100,31 @@ def list_cell(values: list[str]) -> str:
 def nested_dict(row: dict[str, Any], key: str) -> dict[str, Any]:
     value = row.get(key)
     return value if isinstance(value, dict) else {}
+
+
+def measured_physical_tracking_result(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+    result = nested_dict(row, "physical_tracking_result")
+    if result.get("tracking_source") != "tcp_actual_stand":
+        return None
+    if finite_number(result.get("rms_error_m")) is None:
+        return None
+    measured = dict(result)
+    if not measured.get("status"):
+        measured["status"] = "measured"
+    return measured
+
+
+def has_measured_physical_tracking(row: dict[str, Any] | None) -> bool:
+    return measured_physical_tracking_result(row) is not None
+
+
+def physical_blockers_with_measurement(base_blockers: list[str], row: dict[str, Any] | None) -> list[str]:
+    blockers = list(base_blockers)
+    if has_measured_physical_tracking(row):
+        blockers = [blocker for blocker in blockers if blocker != UNMEASURED_PHYSICAL_BLOCKER]
+    return blockers
 
 
 def first_present(row: dict[str, Any], *keys: str) -> Any:
@@ -304,10 +330,11 @@ def base_physical_blockers(row: dict[str, Any]) -> list[str]:
         return []
     blockers = [
         "stop_resetFault_unverified",
-        "physical_reference_to_actual_error_unmeasured",
+        UNMEASURED_PHYSICAL_BLOCKER,
         "camera_tcp_calibration_unresolved",
         "no_tiny_physical_acceptance",
     ]
+    blockers = physical_blockers_with_measurement(blockers, row)
     if diagnostics_suspect_active(row):
         blockers.insert(0, "diagnostics_suspect_unresolved")
     if state_parity_failed(row):
@@ -315,15 +342,18 @@ def base_physical_blockers(row: dict[str, Any]) -> list[str]:
     return blockers
 
 
-def physical_readiness() -> dict[str, Any]:
+def physical_readiness(row: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "status": "blocked",
-        "blockers": list(PHYSICAL_READINESS_BLOCKERS),
+        "blockers": physical_blockers_with_measurement(PHYSICAL_READINESS_BLOCKERS, row),
         "next_required_acceptance": list(NEXT_REQUIRED_ACCEPTANCE),
     }
 
 
-def physical_tracking_result() -> dict[str, str]:
+def physical_tracking_result(row: dict[str, Any] | None = None) -> dict[str, Any]:
+    measured = measured_physical_tracking_result(row)
+    if measured is not None:
+        return measured
     return {"status": "not_measured"}
 
 
@@ -351,12 +381,12 @@ def grade_row(row: dict[str, Any]) -> dict[str, Any]:
             "physical_real_blockers": [],
             "reliability_reasons": ["not_rbpodo_pgmode_simulation"],
             "physical_ready_candidate": False,
-            "physical_readiness": physical_readiness(),
+            "physical_readiness": physical_readiness(row),
             "controller_reference_result": {
                 "status": "fail",
                 "explanation": CONTROLLER_REFERENCE_EXPLANATION,
             },
-            "physical_tracking_result": physical_tracking_result(),
+            "physical_tracking_result": physical_tracking_result(row),
         }
     if source == "tcp_ref_stand":
         caveats.append("tcp_ref_lower_bound_only")
@@ -459,9 +489,9 @@ def grade_row(row: dict[str, Any]) -> dict[str, Any]:
         "physical_real_blockers": unique(blockers),
         "reliability_reasons": unique(reasons),
         "physical_ready_candidate": False,
-        "physical_readiness": physical_readiness(),
+        "physical_readiness": physical_readiness(row),
         "controller_reference_result": controller_reference_result(row, level),
-        "physical_tracking_result": physical_tracking_result(),
+        "physical_tracking_result": physical_tracking_result(row),
     }
 
 
@@ -511,6 +541,14 @@ def reliability_cell_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def single_row_physical_readiness(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return physical_readiness(rows[0]) if len(rows) == 1 else physical_readiness()
+
+
+def single_row_physical_tracking_result(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return physical_tracking_result(rows[0]) if len(rows) == 1 else physical_tracking_result()
+
+
 def format_cell(value: Any) -> str:
     if value is None:
         return ""
@@ -548,10 +586,10 @@ def report_markdown(rows: list[dict[str, Any]]) -> str:
             "## Physical Readiness",
             "",
             f"- status: `{physical_readiness()['status']}`",
-            "- blockers: " + ", ".join(f"`{item}`" for item in PHYSICAL_READINESS_BLOCKERS),
+            "- default blockers: " + ", ".join(f"`{item}`" for item in PHYSICAL_READINESS_BLOCKERS),
             "- next_required_acceptance: " + ", ".join(f"`{item}`" for item in NEXT_REQUIRED_ACCEPTANCE),
             f"- controller_reference_result.explanation: {CONTROLLER_REFERENCE_EXPLANATION}",
-            "- physical_tracking_result.status: `not_measured`",
+            "- physical_tracking_result.status: copied from a `tcp_actual_stand` measurement with finite RMS; otherwise `not_measured`.",
             "",
             "Physical-ready candidate status is reserved for future physical real acceptance and is not assigned while diagnostics_suspect remains unresolved.",
         ]
@@ -577,12 +615,12 @@ def write_json(path: Path, rows: list[dict[str, Any]]) -> None:
     )
     payload = {
         "schema": SCHEMA,
-        "physical_readiness": physical_readiness(),
+        "physical_readiness": single_row_physical_readiness(rows),
         "controller_reference_result": {
             "status": controller_reference_status,
             "explanation": CONTROLLER_REFERENCE_EXPLANATION,
         },
-        "physical_tracking_result": physical_tracking_result(),
+        "physical_tracking_result": single_row_physical_tracking_result(rows),
         "rows": json_rows,
     }
     path.parent.mkdir(parents=True, exist_ok=True)

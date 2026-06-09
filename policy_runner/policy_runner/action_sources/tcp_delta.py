@@ -110,6 +110,22 @@ def tcp_twist_local_intent(
     )
 
 
+def tcp_pose_target_stand_intent(
+    *,
+    left: tuple[float, ...] | list[float] | None = None,
+    right: tuple[float, ...] | list[float] | None = None,
+    left_gripper: float | None = None,
+    right_gripper: float | None = None,
+    timeout_sec: float = 0.2,
+) -> CommandIntent:
+    return CartesianCommandIntent(
+        "TcpPoseTarget",
+        timeout_sec=timeout_sec,
+        left=_arm_payload("TcpPoseTarget", "tcp_target_stand", left, gripper_target=left_gripper),
+        right=_arm_payload("TcpPoseTarget", "tcp_target_stand", right, gripper_target=right_gripper),
+    )
+
+
 def tcp_twist_stand_intent(
     *,
     left: tuple[float, ...] | list[float] | None = None,

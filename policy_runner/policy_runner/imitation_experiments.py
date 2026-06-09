@@ -1519,8 +1519,18 @@ def _finalize_ordered_event_metrics(
         observed = row["observed"]
         pred = row["pred"]
         target = row["target"]
-        pred_left = _fill_missing_signal(pred[:, 6], observed, episode.left_gripper)
-        pred_right = _fill_missing_signal(pred[:, 13], observed, episode.right_gripper)
+        # Flow action gripper channels are deltas from the observation gripper.
+        # Event timing is based on absolute open/close signals.
+        pred_left = _fill_missing_signal(
+            pred[:, 6] + np.asarray(episode.left_gripper[: pred.shape[0]], dtype=np.float64),
+            observed,
+            episode.left_gripper,
+        )
+        pred_right = _fill_missing_signal(
+            pred[:, 13] + np.asarray(episode.right_gripper[: pred.shape[0]], dtype=np.float64),
+            observed,
+            episode.right_gripper,
+        )
         predicted_events = ordered_event_frames_from_signals(
             left_signal=pred_left,
             right_signal=pred_right,

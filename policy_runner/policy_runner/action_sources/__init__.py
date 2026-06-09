@@ -6,6 +6,7 @@ from .master_arm_joint import MasterArmJointActionSource
 from .spacemouse_cartesian import SpaceMouseCartesianActionSource
 from .spacemouse_joint_velocity import SpaceMouseJointVelocityActionSource
 from .tcp_delta import TcpDeltaActionSource
+from .umi_dual_cartesian import UmiDualCartesianActionSource
 
 __all__ = [
     "DualSpaceMouseCartesianActionSource",
@@ -16,4 +17,5 @@ __all__ = [
     "SpaceMouseCartesianActionSource",
     "SpaceMouseJointVelocityActionSource",
     "TcpDeltaActionSource",
+    "UmiDualCartesianActionSource",
 ]

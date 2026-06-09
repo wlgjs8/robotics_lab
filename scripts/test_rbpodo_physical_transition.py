@@ -239,6 +239,72 @@ class PhysicalTransitionAcceptanceTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("tracked example config must keep servo.send_servo_commands=false", stdout + stderr)
 
+    def test_p2_operator_stop_policy_verified_records_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_dir = Path(tmpdir) / "p2"
+            code, stdout, stderr = run_accept(
+                [
+                    "--stage",
+                    "stop_policy",
+                    "--dry-run",
+                    "--operator-stop-policy-verified",
+                    "--operator-stop-note",
+                    "Operator verified physical e-stop policy at pendant.",
+                    "--artifact-dir",
+                    str(artifact_dir),
+                ]
+            )
+            summary = json.loads((artifact_dir / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, 0, stderr)
+        telemetry = summary["telemetry_requirements"]
+        self.assertEqual(telemetry["stop_reset_behavior_result"], "operator_stop_policy_verified")
+        self.assertEqual(telemetry["stop_reset_behavior_note"], "Operator verified physical e-stop policy at pendant.")
+        self.assertIn("Hardware process started: false", stdout)
+
+    def test_operator_stop_policy_verified_requires_note(self) -> None:
+        code, stdout, stderr = run_accept(
+            [
+                "--stage",
+                "stop_policy",
+                "--dry-run",
+                "--operator-stop-policy-verified",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--operator-stop-note is required", stdout + stderr)
+
+    def test_operator_stop_policy_verified_refuses_non_p2_stage(self) -> None:
+        code, stdout, stderr = run_accept(
+            [
+                "--stage",
+                "read_only",
+                "--dry-run",
+                "--operator-stop-policy-verified",
+                "--operator-stop-note",
+                "Operator attestation belongs to P2 only.",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("valid only for P2 stop_policy", stdout + stderr)
+
+    def test_p2_without_operator_stop_policy_flag_stays_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_dir = Path(tmpdir) / "p2"
+            code, stdout, stderr = run_accept(
+                [
+                    "--stage",
+                    "stop_policy",
+                    "--dry-run",
+                    "--artifact-dir",
+                    str(artifact_dir),
+                ]
+            )
+            summary = json.loads((artifact_dir / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, 0, stderr)
+        telemetry = summary["telemetry_requirements"]
+        self.assertEqual(telemetry["stop_reset_behavior_result"], "unresolved")
+        self.assertIsNone(telemetry["stop_reset_behavior_note"])
+
 
 def write_stage_summary(
     root: Path,
@@ -249,6 +315,8 @@ def write_stage_summary(
     physical_source: str = "tcp_actual_stand",
     calibration_status: str | None = None,
     calibration_measured: bool | None = None,
+    stop_reset_result: str = "pass",
+    stop_reset_note: str | None = None,
 ) -> Path:
     path = root / stage_id / "summary.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -274,7 +342,8 @@ def write_stage_summary(
             "q_ref_update_rate_hz": 100.0,
             "fault_latch_status": "pass",
             "cartesian_availability": "available",
-            "stop_reset_behavior_result": "pass",
+            "stop_reset_behavior_result": stop_reset_result,
+            "stop_reset_behavior_note": stop_reset_note,
             "physical_motion_expected": physical_status == "pass",
             "physical_motion_detected": physical_status == "pass",
         },
@@ -333,6 +402,27 @@ class PhysicalTransitionReportTest(unittest.TestCase):
         self.assertEqual(row["calibration_status"], "configured_estimate")
         self.assertFalse(row["calibration_measured"])
         self.assertIn("camera_robot_calibration_not_measured", data["physical_readiness"]["blockers"])
+
+    def test_report_surfaces_operator_stop_policy_result_and_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_stage_summary(
+                root,
+                "P2",
+                stop_reset_result="operator_stop_policy_verified",
+                stop_reset_note="Operator verified physical e-stop policy at pendant.",
+            )
+            out_json = root / "report.json"
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = report.main(["--artifact-dir", str(root), "--json", str(out_json)])
+            data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(code, 0)
+        row = next(row for row in data["stage_rows"] if row["stage_id"] == "P2")
+        self.assertEqual(row["stop_reset_behavior_result"], "operator_stop_policy_verified")
+        self.assertEqual(row["stop_reset_behavior_note"], "Operator verified physical e-stop policy at pendant.")
+        self.assertIn("operator_stop_policy_verified", stdout.getvalue())
+        self.assertIn("Operator verified physical e-stop policy at pendant.", stdout.getvalue())
 
 
 if __name__ == "__main__":

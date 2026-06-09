@@ -145,6 +145,52 @@ class RbpodoDiagnosticsReportTest(unittest.TestCase):
 
         self.assertEqual(built["likely_root_cause"], "insufficient_evidence")
 
+    def test_measured_tcp_actual_stage_clears_unmeasured_blocker_only(self):
+        built = report.build_report(
+            state_dump(suspect=True, reasons=["diagnostics_suspect fixture"]),
+            parity_summary("suspect_but_consistent"),
+            raw_capture_summary(),
+            physical_stage_summary={
+                "schema": "robotics_lab.rbpodo_physical_transition.external_stage.v1",
+                "physical_tracking_result": {
+                    "status": "fail",
+                    "tracking_source": "tcp_actual_stand",
+                    "rms_error_m": 0.2,
+                    "p95_error_m": 0.25,
+                    "max_error_m": 0.3,
+                },
+            },
+        )
+
+        self.assertNotIn(
+            "physical_reference_to_actual_error_unmeasured",
+            built["physical_real_blockers"],
+        )
+        self.assertIn("diagnostics_suspect_unresolved", built["physical_real_blockers"])
+        self.assertIn("stop_resetFault_unverified", built["physical_real_blockers"])
+        self.assertEqual(built["physical_tracking_result"]["status"], "fail")
+
+    def test_tcp_ref_stage_does_not_clear_unmeasured_blocker(self):
+        built = report.build_report(
+            state_dump(),
+            parity_summary("passed"),
+            raw_capture_summary(),
+            physical_stage_summary={
+                "schema": "robotics_lab.rbpodo_physical_transition.external_stage.v1",
+                "physical_tracking_result": {
+                    "status": "pass",
+                    "tracking_source": "tcp_ref_stand",
+                    "rms_error_m": 0.001,
+                },
+            },
+        )
+
+        self.assertIn(
+            "physical_reference_to_actual_error_unmeasured",
+            built["physical_real_blockers"],
+        )
+        self.assertEqual(built["physical_tracking_result"]["status"], "not_measured")
+
     def test_cli_artifacts_include_classification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

@@ -197,3 +197,7 @@ Do not set `RB_ALLOW_REAL_CARTESIAN` or
 
 This path is not physical real robot performance validation. It is controller
 simulation readiness evidence for the manual SpaceMouse path only.
+
+For the matching two-UMI / Vive-tracker relative Cartesian teleop path, see
+`docs/runbooks/rbpodo_pgmode_umi.md`. It reuses this server profile but sends
+`TcpPoseTarget` commands from `policy_runner` through `umi_dual_cartesian`.
