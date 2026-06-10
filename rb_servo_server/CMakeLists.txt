@@ -34,6 +34,7 @@ add_library(rb_servo_core
     src/control/cartesian_controller.cpp
     src/control/cartesian_servo_controller.cpp
     src/control/cartesian_trajectory_planner.cpp
+    src/control/smd_pose_tracker.cpp
     src/math/se3.cpp
     src/control/force_controller.cpp
     src/control/dual_arm_servo_loop.cpp
@@ -150,6 +151,14 @@ if(BUILD_TESTING)
     add_executable(test_cartesian_servo_controller tests/test_cartesian_servo_controller.cpp)
     target_link_libraries(test_cartesian_servo_controller PRIVATE rb_servo_core)
     add_test(NAME cartesian_servo_controller COMMAND test_cartesian_servo_controller)
+
+    add_executable(test_smd_pose_tracker tests/test_smd_pose_tracker.cpp)
+    target_link_libraries(test_smd_pose_tracker PRIVATE rb_servo_core)
+    add_test(NAME smd_pose_tracker COMMAND test_smd_pose_tracker)
+
+    add_executable(test_joint_moving_average tests/test_joint_moving_average.cpp)
+    target_link_libraries(test_joint_moving_average PRIVATE rb_servo_core)
+    add_test(NAME joint_moving_average COMMAND test_joint_moving_average)
 
     set(RB_GUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rb_gui")
     find_package(Python3 COMPONENTS Interpreter)

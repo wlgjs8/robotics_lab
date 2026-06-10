@@ -423,6 +423,79 @@ class UmiDualCartesianTest(unittest.TestCase):
                 linear_axis_signs=(0.5, 1.0, 1.0),
             )
 
+    def test_input_moving_average_filters_position(self):
+        # window=5; 5 zero samples (latch at the first), then one 0.05 jump:
+        # buffer becomes [0,0,0,0,0.05] -> mean 0.01 -> target moves +0.01.
+        samples = [
+            {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.001 * (i + 1)}
+            for i in range(5)
+        ] + [{"pose": [0.05, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.006}]
+        reader = MockUmiPoseReader(samples)
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            input_moving_average_window=5,
+        )
+        intents = [source.next_intent(sample_state(), 0.001 * (i + 1)) for i in range(6)]
+        first = intents[0]
+        last = intents[-1]
+        assert first is not None and last is not None
+        self.assertEqual(first.left["tcp_target_stand"][0], 1.0)
+        self.assertAlmostEqual(last.left["tcp_target_stand"][0], 1.01, places=9)
+
+    def test_input_moving_average_quaternion_midpoint_and_hemisphere(self):
+        s, c = math.sin(0.1), math.cos(0.1)  # Rz(0.2)
+        # window=2: identity then Rz(0.2) -> normalized mean = exact slerp
+        # midpoint Rz(0.1). The identity is encoded as -q to also verify
+        # hemisphere alignment (q and -q are the same rotation).
+        samples = [
+            {"pose": [0, 0, 0, 0, 0, 0, -1.0], "deadman": True, "monotonic": 0.001},
+            {"pose": [0, 0, 0, 0, 0, s, c], "deadman": True, "monotonic": 0.002},
+        ]
+        reader = MockUmiPoseReader(samples)
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            max_angular_step_rad=math.pi,
+            input_moving_average_window=2,
+        )
+        _ = source.next_intent(sample_state(), 0.001)
+        intent = source.next_intent(sample_state(), 0.002)
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        got = intent.left["tcp_target_stand"]
+        self.assertAlmostEqual(got[5], 0.1, places=7)  # yaw midpoint
+        self.assertAlmostEqual(got[3], 0.0, places=9)
+        self.assertAlmostEqual(got[4], 0.0, places=9)
+
+    def test_input_moving_average_dedups_held_samples(self):
+        # The same sample replayed by sample-hold (same monotonic) must enter
+        # the window only once.
+        samples = [
+            {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.001},
+            {"pose": [0.04, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.002},
+            None,  # reader exhausted -> sample-hold replays monotonic=0.002
+        ]
+        reader = MockUmiPoseReader(samples)
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            input_moving_average_window=4,
+        )
+        _ = source.next_intent(sample_state(), 0.001)
+        second = source.next_intent(sample_state(), 0.002)
+        held = source.next_intent(sample_state(), 0.003)
+        assert second is not None and held is not None
+        # mean of [0, 0.04] = 0.02 both times (held sample not re-counted)
+        self.assertAlmostEqual(second.left["tcp_target_stand"][0], 1.02, places=9)
+        self.assertAlmostEqual(held.left["tcp_target_stand"][0], 1.02, places=9)
+
     def test_target_lpf_smooths_step_exponentially(self):
         reader = MockUmiPoseReader(
             [

@@ -748,6 +748,9 @@ void validateConfig(const DualArmConfig& cfg) {
         }
     }
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
+    if (cfg.servo.output_moving_average_window < 0 || cfg.servo.output_moving_average_window > 5000) {
+        throw std::runtime_error("servo.output_moving_average_window must be in [0, 5000]");
+    }
     validatePositiveFinite(cfg.servo.filter_dt_max_ratio, "servo.filter_dt_max_ratio");
     validatePositiveFinite(cfg.servo.worker_read_period_sec, "servo.worker_read_period_sec");
     validateNonNegativeFinite(
@@ -1085,6 +1088,33 @@ void validateConfig(const DualArmConfig& cfg) {
     }
     validatePositiveFinite(cfg.cartesian_control.circle_move.max_diameter_m, "cartesian_control.circle_move.max_diameter_m");
     validatePositiveFinite(cfg.cartesian_control.circle_move.min_period_sec, "cartesian_control.circle_move.min_period_sec");
+    validatePositiveFinite(
+        cfg.cartesian_control.pose_track_smd.damping_ratio_linear,
+        "cartesian_control.pose_track_smd.damping_ratio_linear");
+    validatePositiveFinite(
+        cfg.cartesian_control.pose_track_smd.natural_frequency_linear_hz,
+        "cartesian_control.pose_track_smd.natural_frequency_linear_hz");
+    validatePositiveFinite(
+        cfg.cartesian_control.pose_track_smd.damping_ratio_angular,
+        "cartesian_control.pose_track_smd.damping_ratio_angular");
+    validatePositiveFinite(
+        cfg.cartesian_control.pose_track_smd.natural_frequency_angular_hz,
+        "cartesian_control.pose_track_smd.natural_frequency_angular_hz");
+    for (const auto& [value, name] : {
+             std::pair<double, const char*>{
+                 cfg.cartesian_control.pose_track_smd.max_linear_velocity_m_s,
+                 "cartesian_control.pose_track_smd.max_linear_velocity_m_s"},
+             {cfg.cartesian_control.pose_track_smd.max_linear_accel_m_s2,
+              "cartesian_control.pose_track_smd.max_linear_accel_m_s2"},
+             {cfg.cartesian_control.pose_track_smd.max_angular_velocity_rad_s,
+              "cartesian_control.pose_track_smd.max_angular_velocity_rad_s"},
+             {cfg.cartesian_control.pose_track_smd.max_angular_accel_rad_s2,
+              "cartesian_control.pose_track_smd.max_angular_accel_rad_s2"},
+         }) {
+        if (!std::isfinite(value) || value < 0.0) {
+            throw std::runtime_error(std::string(name) + " must be finite and >= 0 (0 = unlimited)");
+        }
+    }
 
     if (cfg.kinematics.enable) {
         const std::string provider = lower(cfg.kinematics.provider);
@@ -1158,12 +1188,34 @@ void validateConfig(const DualArmConfig& cfg) {
         if (!(backend.servo_t1_sec >= 0.002) || !std::isfinite(backend.servo_t1_sec)) {
             throw std::runtime_error(label + ".servo_t1_sec must be finite and >= 0.002 for backend_type=rbpodo");
         }
-        if (!(backend.servo_t2_sec > 0.02 && backend.servo_t2_sec < 0.2) || !std::isfinite(backend.servo_t2_sec)) {
-            throw std::runtime_error(label + ".servo_t2_sec must be finite and in (0.02, 0.2) for backend_type=rbpodo");
-        }
-        validatePositiveFinite(backend.servo_gain, label + ".servo_gain");
-        if (!(backend.servo_alpha > 0.0 && backend.servo_alpha < 1.0) || !std::isfinite(backend.servo_alpha)) {
-            throw std::runtime_error(label + ".servo_alpha must be finite and in (0, 1) for backend_type=rbpodo");
+        // RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE=1 lifts the vendor-recommended
+        // servo_t2/gain/alpha range checks (values must still be positive and
+        // finite) for explicit servo-parameter experiments. The controller may
+        // reject or behave roughly with out-of-range values — operator owns
+        // the risk; a WARN is emitted so logs show the experiment.
+        const bool servo_param_unsafe = envIsOne("RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE");
+        if (servo_param_unsafe) {
+            validatePositiveFinite(backend.servo_t2_sec, label + ".servo_t2_sec");
+            validatePositiveFinite(backend.servo_gain, label + ".servo_gain");
+            validatePositiveFinite(backend.servo_alpha, label + ".servo_alpha");
+            warn(
+                label + ": RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE=1 — out-of-range servo params accepted: "
+                "servo_t2_sec=" + std::to_string(backend.servo_t2_sec) +
+                ", servo_gain=" + std::to_string(backend.servo_gain) +
+                ", servo_alpha=" + std::to_string(backend.servo_alpha)
+            );
+        } else {
+            if (!(backend.servo_t2_sec > 0.02 && backend.servo_t2_sec < 0.2) || !std::isfinite(backend.servo_t2_sec)) {
+                throw std::runtime_error(
+                    label + ".servo_t2_sec must be finite and in (0.02, 0.2) for backend_type=rbpodo "
+                    "(set RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE=1 to experiment outside the range)");
+            }
+            validatePositiveFinite(backend.servo_gain, label + ".servo_gain");
+            if (!(backend.servo_alpha > 0.0 && backend.servo_alpha < 1.0) || !std::isfinite(backend.servo_alpha)) {
+                throw std::runtime_error(
+                    label + ".servo_alpha must be finite and in (0, 1) for backend_type=rbpodo "
+                    "(set RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE=1 to experiment outside the range)");
+            }
         }
         const double servo_dt_sec = 1.0 / static_cast<double>(cfg.servo.rate_hz);
         const double tolerance_sec = cfg.servo.servo_t1_rate_match_tolerance_ratio * servo_dt_sec;
@@ -1348,6 +1400,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "worker_read_rate_hz",
             "filter_dt_min_ratio",
             "filter_dt_max_ratio",
+            "output_moving_average_window",
             "servo_t1_rate_match_tolerance_ratio",
             "allow_servo_t1_rate_mismatch",
             "rbpodo_async_streaming",
@@ -1431,6 +1484,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 workerReadPeriodFromRate(asDouble(sec["worker_read_rate_hz"], "servo.worker_read_rate_hz"), "servo.worker_read_rate_hz");
         }
         if (has(sec, "filter_dt_min_ratio")) cfg.servo.filter_dt_min_ratio = asDouble(sec["filter_dt_min_ratio"], "servo.filter_dt_min_ratio");
+        if (has(sec, "output_moving_average_window")) {
+            cfg.servo.output_moving_average_window =
+                asInt(sec["output_moving_average_window"], "servo.output_moving_average_window");
+        }
         if (has(sec, "filter_dt_max_ratio")) cfg.servo.filter_dt_max_ratio = asDouble(sec["filter_dt_max_ratio"], "servo.filter_dt_max_ratio");
         if (has(sec, "servo_t1_rate_match_tolerance_ratio")) {
             cfg.servo.servo_t1_rate_match_tolerance_ratio =
@@ -1687,6 +1744,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "command_actual_error_policy",
             "linear_move",
             "circle_move",
+            "pose_track_smd",
         }, "cartesian_control");
         if (has(sec, "enable")) cfg.cartesian_control.enable = asBool(sec["enable"], "cartesian_control.enable");
         if (has(sec, "allow_in_simulation")) {
@@ -1883,6 +1941,58 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(circle, "min_period_sec")) {
                 cfg.cartesian_control.circle_move.min_period_sec =
                     asDouble(circle["min_period_sec"], "cartesian_control.circle_move.min_period_sec");
+            }
+        }
+        if (has(sec, "pose_track_smd")) {
+            const YAML::Node smd = sec["pose_track_smd"];
+            validateAllowedKeys(smd, {
+                "enable",
+                "damping_ratio_linear",
+                "natural_frequency_linear_hz",
+                "damping_ratio_angular",
+                "natural_frequency_angular_hz",
+                "max_linear_velocity_m_s",
+                "max_linear_accel_m_s2",
+                "max_angular_velocity_rad_s",
+                "max_angular_accel_rad_s2",
+            }, "cartesian_control.pose_track_smd");
+            if (has(smd, "enable")) {
+                cfg.cartesian_control.pose_track_smd.enable =
+                    asBool(smd["enable"], "cartesian_control.pose_track_smd.enable");
+            }
+            if (has(smd, "damping_ratio_linear")) {
+                cfg.cartesian_control.pose_track_smd.damping_ratio_linear = asDouble(
+                    smd["damping_ratio_linear"], "cartesian_control.pose_track_smd.damping_ratio_linear");
+            }
+            if (has(smd, "natural_frequency_linear_hz")) {
+                cfg.cartesian_control.pose_track_smd.natural_frequency_linear_hz = asDouble(
+                    smd["natural_frequency_linear_hz"],
+                    "cartesian_control.pose_track_smd.natural_frequency_linear_hz");
+            }
+            if (has(smd, "damping_ratio_angular")) {
+                cfg.cartesian_control.pose_track_smd.damping_ratio_angular = asDouble(
+                    smd["damping_ratio_angular"], "cartesian_control.pose_track_smd.damping_ratio_angular");
+            }
+            if (has(smd, "natural_frequency_angular_hz")) {
+                cfg.cartesian_control.pose_track_smd.natural_frequency_angular_hz = asDouble(
+                    smd["natural_frequency_angular_hz"],
+                    "cartesian_control.pose_track_smd.natural_frequency_angular_hz");
+            }
+            if (has(smd, "max_linear_velocity_m_s")) {
+                cfg.cartesian_control.pose_track_smd.max_linear_velocity_m_s = asDouble(
+                    smd["max_linear_velocity_m_s"], "cartesian_control.pose_track_smd.max_linear_velocity_m_s");
+            }
+            if (has(smd, "max_linear_accel_m_s2")) {
+                cfg.cartesian_control.pose_track_smd.max_linear_accel_m_s2 = asDouble(
+                    smd["max_linear_accel_m_s2"], "cartesian_control.pose_track_smd.max_linear_accel_m_s2");
+            }
+            if (has(smd, "max_angular_velocity_rad_s")) {
+                cfg.cartesian_control.pose_track_smd.max_angular_velocity_rad_s = asDouble(
+                    smd["max_angular_velocity_rad_s"], "cartesian_control.pose_track_smd.max_angular_velocity_rad_s");
+            }
+            if (has(smd, "max_angular_accel_rad_s2")) {
+                cfg.cartesian_control.pose_track_smd.max_angular_accel_rad_s2 = asDouble(
+                    smd["max_angular_accel_rad_s2"], "cartesian_control.pose_track_smd.max_angular_accel_rad_s2");
             }
         }
     }

@@ -198,6 +198,38 @@ void appendReason(ArmStartupValidationSnapshot* validation, const std::string& r
     validation->invalid_reasons.push_back(reason);
 }
 
+// Streaming TcpPoseTarget smoothing: integrate received target deltas into the
+// SMD tracker's goal and replace the commanded pose with this tick's SMD
+// solution. Any other mode deactivates the tracker so re-entry re-anchors at
+// the currently sent pose (FK of the previous sent joints) with zero velocity.
+ArmCommand applyPoseTrackSmd(
+    const ArmCommand& command,
+    const PoseTrackSmdConfig& config,
+    SmdPoseTracker* tracker,
+    const std::shared_ptr<IKinematics>& kinematics,
+    const ArmMountConfig& mount,
+    const JointArray& previous_sent_q_deg,
+    double dt_sec
+) {
+    if (!tracker) return command;
+    if (!config.enable || command.mode != ControlMode::TcpPoseTarget || !command.has_tcp_target) {
+        tracker->deactivate();
+        return command;
+    }
+    if (!kinematics) {
+        // Without FK there is no safe anchor pose; pass the raw target through.
+        tracker->deactivate();
+        return command;
+    }
+    if (!tracker->active()) {
+        tracker->reset(kinematics->computeTcpStand(command.arm_id, previous_sent_q_deg, mount));
+    }
+    tracker->updateGoalFromCommand(command.tcp_target_stand);
+    ArmCommand smoothed = command;
+    smoothed.tcp_target_stand = tracker->step(dt_sec);
+    return smoothed;
+}
+
 std::string lowerAscii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -1412,6 +1444,10 @@ DualArmServoLoop::DualArmServoLoop(
     left_traj_filter_(config.servo, config.safety),
     right_traj_filter_(config.servo, config.safety),
     safety_filter_(config.safety) {
+    left_pose_track_smd_ = SmdPoseTracker(config.cartesian_control.pose_track_smd);
+    right_pose_track_smd_ = SmdPoseTracker(config.cartesian_control.pose_track_smd);
+    left_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
+    right_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
     kinematics_ = kinematics ? std::move(kinematics) : makeKinematicsProvider(config);
     resetReferenceSupervisionState(this);
 }
@@ -1896,7 +1932,14 @@ void DualArmServoLoop::loopMain() {
             }
         }
 
-        const ServoTarget attempted_target = safe_target;
+        // Final output stage: moving average over the last N safety-passed
+        // targets (convex combination — joint limits and per-tick velocity
+        // bounds preserved). prev_sent bookkeeping, logging, and tracking
+        // error all use this filtered value, i.e., what is actually sent.
+        ServoTarget output_filtered_target = safe_target;
+        output_filtered_target.left_q_target_deg = left_output_ma_.apply(safe_target.left_q_target_deg);
+        output_filtered_target.right_q_target_deg = right_output_ma_.apply(safe_target.right_q_target_deg);
+        const ServoTarget attempted_target = output_filtered_target;
         const bool fault_latched_before_send = fault_latched_.load();
         const std::string send_policy = currentSendPolicy();
         const bool send_suppressed = send_policy != "send_servo_j";
@@ -3034,6 +3077,25 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             right_cartesian_twist_hold_ = CartesianTwistHoldState{};
         }
 
+        const ArmCommand left_pose_track_command = applyPoseTrackSmd(
+            effective_command.left,
+            config_.cartesian_control.pose_track_smd,
+            &left_pose_track_smd_,
+            kinematics_,
+            config_.left_mount,
+            left_prev_sent_q_deg_,
+            dt_sec
+        );
+        const ArmCommand right_pose_track_command = applyPoseTrackSmd(
+            effective_command.right,
+            config_.cartesian_control.pose_track_smd,
+            &right_pose_track_smd_,
+            kinematics_,
+            config_.right_mount,
+            right_prev_sent_q_deg_,
+            dt_sec
+        );
+
         const RunMode left_cartesian_compute_run_mode =
             cartesianComputationRunModeForArm(config_, effective_command.left);
         const RunMode right_cartesian_compute_run_mode =
@@ -3132,7 +3194,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             )
             : isCartesianMode(effective_command.left.mode)
             ? cartesian.computeArmJointTarget(
-                effective_command.left,
+                left_pose_track_command,
                 left_state,
                 left_prev_sent_q_deg_,
                 left_cartesian_compute_run_mode
@@ -3198,7 +3260,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             )
             : isCartesianMode(effective_command.right.mode)
             ? cartesian.computeArmJointTarget(
-                effective_command.right,
+                right_pose_track_command,
                 right_state,
                 right_prev_sent_q_deg_,
                 right_cartesian_compute_run_mode

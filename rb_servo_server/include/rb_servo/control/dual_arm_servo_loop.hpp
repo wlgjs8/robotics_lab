@@ -11,6 +11,8 @@
 #include "rb_servo/control/arm_worker.hpp"
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 #include "rb_servo/control/command_buffer.hpp"
+#include "rb_servo/control/joint_moving_average.hpp"
+#include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/control/self_collision.hpp"
 #include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/safety_filter.hpp"
@@ -232,6 +234,10 @@ private:
     CartesianTwistHoldState right_cartesian_twist_hold_;
     CartesianVelocityIntegratorState left_cartesian_velocity_integrator_;
     CartesianVelocityIntegratorState right_cartesian_velocity_integrator_;
+    SmdPoseTracker left_pose_track_smd_{PoseTrackSmdConfig{}};
+    SmdPoseTracker right_pose_track_smd_{PoseTrackSmdConfig{}};
+    JointMovingAverage left_output_ma_{0};
+    JointMovingAverage right_output_ma_{0};
     StartupValidationSnapshot startup_validation_;
     ServoSnapshot latest_snapshot_;
 };

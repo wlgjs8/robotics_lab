@@ -4,6 +4,7 @@ import json
 import math
 import socket
 import time
+from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -64,6 +65,42 @@ class _ArmTeleopState:
     last_filter_monotonic: float | None = None
 
 
+class _PoseMovingAverage:
+    """Moving average over the last N distinct tracker SAMPLES (not 500 Hz
+    ticks): position is the arithmetic mean, rotation is the hemisphere-aligned
+    normalized quaternion mean. The buffer keeps filling while the deadman is
+    released so the window is already warm at clutch engage; pika_init latches
+    from the same filtered stream, so there is no engage offset."""
+
+    def __init__(self, window: int):
+        self.window = int(window)
+        self._positions: deque[tuple[float, float, float]] = deque(maxlen=max(1, self.window))
+        self._quats: deque[tuple[float, float, float, float]] = deque(maxlen=max(1, self.window))
+        self._last_monotonic: float | None = None
+
+    def filter(self, sample: UmiSample) -> UmiSample:
+        if self.window <= 1:
+            return sample
+        if self._last_monotonic is None or sample.monotonic != self._last_monotonic:
+            self._last_monotonic = sample.monotonic
+            x, y, z, qx, qy, qz, qw = sample.pose_xyzw
+            self._positions.append((x, y, z))
+            self._quats.append((qx, qy, qz, qw))
+        n = len(self._positions)
+        mean_position = (
+            sum(p[0] for p in self._positions) / n,
+            sum(p[1] for p in self._positions) / n,
+            sum(p[2] for p in self._positions) / n,
+        )
+        mean_quat = _average_quaternions(self._quats)
+        return UmiSample(
+            (*mean_position, *mean_quat),
+            sample.gripper,
+            sample.deadman,
+            sample.monotonic,
+        )
+
+
 class UmiDualCartesianActionSource:
     requirements = cartesian_action_requirements(allow_rbpodo_controller_simulation=True)
 
@@ -74,6 +111,7 @@ class UmiDualCartesianActionSource:
         *,
         max_linear_step_m: float = 0.005,
         max_angular_step_rad: float = 0.04,
+        input_moving_average_window: int = 1,
         target_lpf_tau_sec: float = 0.0,
         deadband_linear_m: float = 0.0,
         deadband_angular_rad: float = 0.0,
@@ -90,6 +128,8 @@ class UmiDualCartesianActionSource:
             raise ValueError("max_linear_step_m must be non-negative")
         if max_angular_step_rad < 0.0:
             raise ValueError("max_angular_step_rad must be non-negative")
+        if int(input_moving_average_window) < 0:
+            raise ValueError("input_moving_average_window must be non-negative")
         if target_lpf_tau_sec < 0.0:
             raise ValueError("target_lpf_tau_sec must be non-negative")
         if deadband_linear_m < 0.0:
@@ -115,14 +155,18 @@ class UmiDualCartesianActionSource:
         self.workspace_bounds = _workspace_bounds(workspace_bounds)
         self.sample_hold_timeout_sec = float(sample_hold_timeout_sec)
         self.timeout_sec = float(timeout_sec)
+        self.input_moving_average_window = int(input_moving_average_window)
         self._left = _ArmTeleopState()
         self._right = _ArmTeleopState()
+        self._left_ma = _PoseMovingAverage(self.input_moving_average_window)
+        self._right_ma = _PoseMovingAverage(self.input_moving_average_window)
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         left_pose, left_gripper, left_changed = self._target_for_side(
             "left",
             self.left_reader,
             self._left,
+            self._left_ma,
             snapshot,
             now_monotonic,
         )
@@ -130,6 +174,7 @@ class UmiDualCartesianActionSource:
             "right",
             self.right_reader,
             self._right,
+            self._right_ma,
             snapshot,
             now_monotonic,
         )
@@ -152,6 +197,7 @@ class UmiDualCartesianActionSource:
         side: str,
         reader: UmiPoseReader,
         state: _ArmTeleopState,
+        moving_average: _PoseMovingAverage,
         snapshot: StateSnapshot,
         now_monotonic: float,
     ) -> tuple[tuple[float, ...] | None, float | None, bool]:
@@ -173,6 +219,10 @@ class UmiDualCartesianActionSource:
                 return None, None, True
             _clear_latches(state)
             return None, None, False
+
+        # Input conditioning before any latch/compose math: the moving average
+        # buffer also fills while the deadman is released (warm at engage).
+        sample = moving_average.filter(sample)
 
         if not sample.deadman:
             if state.was_armed:
@@ -587,6 +637,38 @@ def _quat_to_matrix(q: Sequence[float]) -> tuple[float, ...]:
         2.0 * (qy * qz + qx * qw),
         1.0 - 2.0 * (qx * qx + qy * qy),
     )
+
+
+def _average_quaternions(
+    quats: Iterable[tuple[float, float, float, float]],
+) -> tuple[float, float, float, float]:
+    """Hemisphere-aligned normalized quaternion mean.
+
+    Each quaternion is sign-aligned to the running sum before accumulating
+    (q and -q encode the same rotation), then the sum is normalized. For the
+    nearby orientations of a tracker stream this matches the geodesic mean to
+    first order; for exactly two samples it is the exact slerp midpoint.
+    """
+    sx = sy = sz = sw = 0.0
+    count = 0
+    last = (0.0, 0.0, 0.0, 1.0)
+    for qx, qy, qz, qw in quats:
+        last = (qx, qy, qz, qw)
+        if count > 0 and (sx * qx + sy * qy + sz * qz + sw * qw) < 0.0:
+            qx, qy, qz, qw = -qx, -qy, -qz, -qw
+        sx += qx
+        sy += qy
+        sz += qz
+        sw += qw
+        count += 1
+    if count == 0:
+        return last
+    norm = math.sqrt(sx * sx + sy * sy + sz * sz + sw * sw)
+    if norm < 1e-9:
+        # Degenerate accumulation (antipodal spread) — fall back to the most
+        # recent sample rather than emit a non-unit quaternion.
+        return last
+    return (sx / norm, sy / norm, sz / norm, sw / norm)
 
 
 def _matrix_to_quat(m: Sequence[float]) -> tuple[float, float, float, float]:

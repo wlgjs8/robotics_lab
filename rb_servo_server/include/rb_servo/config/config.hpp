@@ -256,6 +256,11 @@ struct ServoConfig {
     double filter_dt_min_ratio = 0.5;
     double filter_dt_max_ratio = 1.5;
 
+    // Final-stage moving average over the last N sent joint targets (applied
+    // after the safety filter; convex combination keeps limits intact).
+    // 0/1 disables. 40 at 500 Hz = 80 ms boxcar, ~40 ms group delay.
+    int output_moving_average_window = 0;
+
     double servo_t1_rate_match_tolerance_ratio = 0.2;
     bool allow_servo_t1_rate_mismatch = false;
 
@@ -320,6 +325,25 @@ struct CircleMoveConfig {
     double min_period_sec = 3.0;
 };
 
+// Spring-Mass-Damper smoothing for the streaming TcpPoseTarget path: received
+// command deltas integrate into a goal pose, and the published target follows
+// that goal as a second-order system (mass fixed at 1.0) stepped at the servo
+// rate. Translation and rotation are tunable independently.
+struct PoseTrackSmdConfig {
+    bool enable = false;
+    double damping_ratio_linear = 1.0;
+    double natural_frequency_linear_hz = 0.5;
+    double damping_ratio_angular = 1.0;
+    double natural_frequency_angular_hz = 0.5;
+    // Saturation clamps applied as vector-norm limits each tick. Mass is fixed
+    // at 1.0, so the accel clamp IS the max-force clamp. Inside the limits the
+    // zeta/fn dynamics are exactly preserved. 0 = unlimited.
+    double max_linear_velocity_m_s = 0.0;
+    double max_linear_accel_m_s2 = 0.0;
+    double max_angular_velocity_rad_s = 0.0;
+    double max_angular_accel_rad_s2 = 0.0;
+};
+
 enum class CartesianLimitPolicy {
     Clamp,
     Reject
@@ -377,6 +401,7 @@ struct CartesianControlConfig {
         CartesianCommandActualErrorPolicy::Reset;
     LinearMoveConfig linear_move;
     CircleMoveConfig circle_move;
+    PoseTrackSmdConfig pose_track_smd;
 };
 
 struct DualArmConfig {

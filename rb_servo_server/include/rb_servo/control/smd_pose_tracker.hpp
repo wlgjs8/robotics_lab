@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rb_servo/config/config.hpp"
 #include "rb_servo/core/types.hpp"
 
 #include <optional>
@@ -20,18 +21,10 @@ namespace rb_servo {
 //
 // Translation integrates in stand frame; rotation integrates the body-frame
 // angular state via so(3) log/exp. Translation and rotation have independent
-// damping ratio / natural frequency so they can be tuned separately.
-struct SmdPoseTrackerConfig {
-    bool enable = false;
-    double damping_ratio_linear = 1.0;
-    double natural_frequency_linear_hz = 0.5;
-    double damping_ratio_angular = 1.0;
-    double natural_frequency_angular_hz = 0.5;
-};
-
+// damping ratio / natural frequency (see PoseTrackSmdConfig in config.hpp).
 class SmdPoseTracker {
 public:
-    explicit SmdPoseTracker(const SmdPoseTrackerConfig& config);
+    explicit SmdPoseTracker(const PoseTrackSmdConfig& config);
 
     bool active() const { return active_; }
 
@@ -52,7 +45,7 @@ public:
     Pose6D goalPose() const;
 
 private:
-    SmdPoseTrackerConfig config_;
+    PoseTrackSmdConfig config_;
     bool active_ = false;
     Eigen::Vector3d position_ = Eigen::Vector3d::Zero();
     Eigen::Vector3d velocity_ = Eigen::Vector3d::Zero();
