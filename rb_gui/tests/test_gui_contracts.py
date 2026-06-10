@@ -77,7 +77,14 @@ from rb_servo_gui import geometry as gui_geometry
 from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnapshot, Pose6D
 from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from rb_servo_gui.safety import OperatorSafety, Readiness, normalize_observed_mode_backend
-from rb_servo_gui.scene import _add_robot_urdfs, _add_scene_fallback, _circle_overlay_points, _robot_urdf_path, update_circle_overlay
+from rb_servo_gui.scene import (
+    _add_robot_urdfs,
+    _add_scene_fallback,
+    _circle_overlay_points,
+    _reference_ghost_active,
+    _robot_urdf_path,
+    update_circle_overlay,
+)
 from rb_servo_gui.state_receiver import StateStore
 
 
@@ -620,6 +627,31 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(latest.left.selected_tcp_source("auto"), "tcp_ref_stand")
         self.assertEqual(latest.left.selected_tcp_pose("auto").as_tuple(), (0.42, 0.22, 0.52, 0.0, 0.0, 0.0))
         self.assertFalse(latest.left.physical_motion_expected)
+
+    def test_physical_motion_expected_null_falls_back_to_cartesian_gate(self):
+        # Real-motion servers publish per-arm physical_motion_expected=null with the
+        # authoritative boolean in cartesian_gate; the ghost overlay must hide then.
+        state = self.tcp_available_state(observed_mode="real", observed_backend="rbpodo")
+        for arm in ("left", "right"):
+            state[arm]["physical_motion_expected"] = None
+            state[arm]["cartesian_gate"] = {
+                "run_mode": "real",
+                "backend_type": "rbpodo",
+                "operation_mode": "real",
+                "physical_motion_expected": True,
+            }
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        self.assertTrue(latest.left.physical_motion_expected)
+        self.assertTrue(latest.right.physical_motion_expected)
+        self.assertFalse(_reference_ghost_active(latest.left))
+        self.assertFalse(_reference_ghost_active(latest.right))
+
+    def test_reference_ghost_stays_active_for_controller_simulation(self):
+        store, _, _ = self.make_safety(self.pgmode_spacemouse_state())
+        latest = store.latest()
+        self.assertFalse(latest.left.physical_motion_expected)
+        self.assertTrue(_reference_ghost_active(latest.left))
 
     def test_pgmode_status_reports_reference_selection_and_policy_lease(self):
         store, _, _ = self.make_safety(self.pgmode_spacemouse_state())

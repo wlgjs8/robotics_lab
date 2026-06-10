@@ -468,7 +468,10 @@
   <joint name="tcp_joint" type="fixed">
     <parent link="attachment_site"/>
     <child link="tcp"/>
-    <origin xyz="0.0 0.0 0.21616" rpy="0.0 0.0 0.0"/>
+    <!-- Pika gripper fingertip plane (pika_gripper.STL z-max, mount-at-z0 authoring).
+         The previous 0.21616 matched the old tool.STL tip and left the TCP 31.5 mm
+         inside the Pika fingers. -->
+    <origin xyz="0.0 0.0 0.247642" rpy="0.0 0.0 0.0"/>
   </joint>
   <joint name="link0_fixed" type="fixed">
     <parent link="world"/>

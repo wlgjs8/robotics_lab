@@ -539,6 +539,9 @@ namespace {
 
 #ifdef RB_SERVO_ENABLE_RBPODO
 constexpr double kDefaultStateTimeoutSec = 0.2;
+// One-shot initialize-time commands (e.g. set_speed_bar) can afford a longer ack
+// wait than the streaming command_timeout_sec, which is tuned for the servo loop.
+constexpr double kInitializeCommandAckTimeoutSec = 1.0;
 constexpr uint64_t kRecentStateCacheMaxAgeNs = 1'000'000'000ULL;
 
 RbpodoSystemStateSnapshot snapshotFromSystemState(const rb::podo::SystemState& rb_state) {
@@ -815,7 +818,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
         makeBackendTiming(start, nowSteadyNs())
     );
 #else
-    if (!impl_->connected || !impl_->data_channel) {
+    if (!impl_->connected || !impl_->data_channel || !impl_->robot) {
         return failedResult<RobotState>(
             BackendOp::Initialize,
             backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
@@ -823,6 +826,29 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
         );
     }
     try {
+        // Apply the configured overall speed bar (controller UI bottom bar) so every
+        // bring-up starts from a known speed instead of whatever the pendant last had.
+        {
+            rb::podo::ResponseCollector responses;
+            const auto ret = impl_->robot->set_speed_bar(
+                responses,
+                impl_->config.speed_bar,
+                kInitializeCommandAckTimeoutSec
+            );
+            if (impl_->config.disable_waiting_ack) {
+                rb::podo::ResponseCollector drained;
+                impl_->robot->flush(drained);
+            }
+            if (!ret.is_success()) {
+                return failedResult<RobotState>(
+                    BackendOp::Initialize,
+                    commandReturnError("set_speed_bar", ret, responses),
+                    makeBackendTiming(start, nowSteadyNs())
+                );
+            }
+            std::cerr << "[INFO] RbpodoBackend applied speed_bar=" << impl_->config.speed_bar
+                      << " for " << impl_->config.name << "\n";
+        }
         const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
         if (!state) {
             std::cerr << "[ERROR] RbpodoBackend initialize failed: no state from "

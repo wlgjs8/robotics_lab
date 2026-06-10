@@ -340,7 +340,7 @@ class ArmSnapshot:
                 _field_value(data, "controller_simulation_streaming_cartesian_available", cartesian_gate, fallback_state)
             ),
             physical_motion_expected=_optional_bool(
-                _field_value(data, "physical_motion_expected", cartesian_gate, fallback_state)
+                _field_value_non_null(data, "physical_motion_expected", cartesian_gate, fallback_state)
             ),
             controller_simulation_physical_motion_detected=_optional_bool(
                 _field_value(data, "controller_simulation_physical_motion_detected", cartesian_gate, fallback_state)
@@ -458,6 +458,23 @@ def _field_value(
     for fallback in fallbacks:
         if isinstance(fallback, Mapping) and key in fallback:
             return fallback.get(key)
+    return None
+
+
+def _field_value_non_null(
+    data: Mapping[str, Any],
+    key: str,
+    *fallbacks: Mapping[str, Any] | None,
+) -> Any:
+    """Like _field_value, but an explicit null falls through to the next source.
+
+    Older servers publish per-arm physical_motion_expected=null outside controller
+    simulation while the authoritative boolean lives in cartesian_gate."""
+    for source in (data, *fallbacks):
+        if isinstance(source, Mapping):
+            value = source.get(key)
+            if value is not None:
+                return value
     return None
 
 

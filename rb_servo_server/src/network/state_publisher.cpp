@@ -1182,7 +1182,9 @@ nlohmann::json armStateJson(
             cartesian_gate.at("streaming_cartesian_physical_real_enabled")},
         {"physical_motion_expected", isRbpodoControllerSimulation(backend_config)
             ? nlohmann::json(false)
-            : nlohmann::json(nullptr)},
+            : (backend_config.run_mode == RunMode::Real
+                ? nlohmann::json(true)
+                : nlohmann::json(nullptr))},
         {"controller_simulation_mode", controllerSimulationModeJson(
             tcp,
             backend_config,

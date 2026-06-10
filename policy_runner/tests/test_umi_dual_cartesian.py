@@ -261,6 +261,256 @@ class UmiDualCartesianTest(unittest.TestCase):
         assert intent is not None
         self.assertAlmostEqual(intent.left["tcp_target_stand"][0], 1.01)
 
+    def test_axis_signs_mirror_translation_and_rotation(self):
+        s, c = math.sin(0.1), math.cos(0.1)
+        cases = [
+            # (tracker pose after latch, expected pose6 delta from [1,2,3,0,0,0])
+            ([0.05, 0, 0, 0, 0, 0, 1], (-0.05, 0.0, 0.0, 0.0, 0.0, 0.0)),  # +x -> -x
+            ([0, 0.05, 0, 0, 0, 0, 1], (0.0, -0.05, 0.0, 0.0, 0.0, 0.0)),  # +y -> -y
+            ([0, 0, 0.05, 0, 0, 0, 1], (0.0, 0.0, 0.05, 0.0, 0.0, 0.0)),  # +z kept
+            ([0, 0, 0, s, 0, 0, c], (0.0, 0.0, 0.0, -0.2, 0.0, 0.0)),  # +roll -> -roll
+            ([0, 0, 0, 0, s, 0, c], (0.0, 0.0, 0.0, 0.0, -0.2, 0.0)),  # +pitch -> -pitch
+            ([0, 0, 0, 0, 0, s, c], (0.0, 0.0, 0.0, 0.0, 0.0, -0.2)),  # +yaw -> -yaw
+        ]
+        for pose, expected in cases:
+            reader = MockUmiPoseReader(
+                [
+                    {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
+                    {"pose": pose, "deadman": True, "monotonic": 0.01},
+                ]
+            )
+            source = UmiDualCartesianActionSource(
+                reader,
+                MockUmiPoseReader([]),
+                gripper_offset=(0.0, 0.0, 0.0),
+                max_linear_step_m=1.0,
+                max_angular_step_rad=math.pi,
+                linear_axis_signs=(-1.0, -1.0, 1.0),
+                angular_axis_signs=(-1.0, -1.0, -1.0),
+            )
+            _ = source.next_intent(sample_state(), 0.0)
+            intent = source.next_intent(sample_state(), 0.01)
+            self.assertIsNotNone(intent)
+            assert intent is not None
+            got = intent.left["tcp_target_stand"]
+            base = (1.0, 2.0, 3.0, 0.0, 0.0, 0.0)
+            for axis in range(6):
+                self.assertAlmostEqual(
+                    got[axis] - base[axis], expected[axis], places=7, msg=f"pose={pose} axis={axis}"
+                )
+
+    def test_world_delta_frame_keeps_horizontal_motion_horizontal(self):
+        # Latch with the tool pitched 90deg about y; in tool mode this would
+        # rotate the delta into the tracker body frame (x motion becomes z),
+        # in world mode the horizontal world translation must stay horizontal.
+        s45, c45 = math.sin(math.pi / 4.0), math.cos(math.pi / 4.0)
+        pitched = [0.0, s45, 0.0, c45]  # quaternion for Ry(90deg)
+        reader = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, *pitched], "deadman": True, "monotonic": 0.0},
+                {"pose": [0.05, 0, 0, *pitched], "deadman": True, "monotonic": 0.01},
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            max_angular_step_rad=math.pi,
+            linear_axis_signs=(-1.0, -1.0, 1.0),
+            angular_axis_signs=(-1.0, -1.0, -1.0),
+            delta_frame="world",
+        )
+        _ = source.next_intent(sample_state(), 0.0)
+        intent = source.next_intent(sample_state(), 0.01)
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        got = intent.left["tcp_target_stand"]
+        self.assertAlmostEqual(got[0], 1.0 - 0.05, places=7)  # world +x -> stand -x
+        self.assertAlmostEqual(got[1], 2.0, places=7)
+        self.assertAlmostEqual(got[2], 3.0, places=7)  # NO z bleed despite pitched latch
+        self.assertAlmostEqual(got[3], 0.0, places=7)
+        self.assertAlmostEqual(got[4], 0.0, places=7)
+        self.assertAlmostEqual(got[5], 0.0, places=7)
+
+    def test_world_delta_frame_rotation_uses_world_axis(self):
+        # Rotate the tool about the WORLD z axis while latched pitched 90deg:
+        # world mode must output pure (mirrored) yaw on the robot.
+        s45, c45 = math.sin(math.pi / 4.0), math.cos(math.pi / 4.0)
+        s1, c1 = math.sin(0.1), math.cos(0.1)
+        # quaternion of Rz(0.2) * Ry(90deg)
+        rotated = [-s1 * s45, c1 * s45, c45 * s1, c1 * c45]
+        reader = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, 0.0, s45, 0.0, c45], "deadman": True, "monotonic": 0.0},
+                {"pose": [0, 0, 0, *rotated], "deadman": True, "monotonic": 0.01},
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            max_angular_step_rad=math.pi,
+            linear_axis_signs=(-1.0, -1.0, 1.0),
+            angular_axis_signs=(-1.0, -1.0, -1.0),
+            delta_frame="world",
+        )
+        _ = source.next_intent(sample_state(), 0.0)
+        intent = source.next_intent(sample_state(), 0.01)
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        got = intent.left["tcp_target_stand"]
+        self.assertAlmostEqual(got[0], 1.0, places=7)
+        self.assertAlmostEqual(got[1], 2.0, places=7)
+        self.assertAlmostEqual(got[2], 3.0, places=7)
+        self.assertAlmostEqual(got[3], 0.0, places=7)
+        self.assertAlmostEqual(got[4], 0.0, places=7)
+        self.assertAlmostEqual(got[5], -0.2, places=7)  # world yaw mirrored
+
+    def test_tool_delta_frame_remains_default_and_tilts_with_latch(self):
+        # Contrast case documenting the 'tool' behavior: the same pitched-latch
+        # horizontal motion DOES bleed into other axes in tool mode.
+        s45, c45 = math.sin(math.pi / 4.0), math.cos(math.pi / 4.0)
+        pitched = [0.0, s45, 0.0, c45]
+        reader = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, *pitched], "deadman": True, "monotonic": 0.0},
+                {"pose": [0.05, 0, 0, *pitched], "deadman": True, "monotonic": 0.01},
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            max_angular_step_rad=math.pi,
+            linear_axis_signs=(-1.0, -1.0, 1.0),
+            angular_axis_signs=(-1.0, -1.0, -1.0),
+        )
+        self.assertEqual(source.delta_frame, "tool")
+        _ = source.next_intent(sample_state(), 0.0)
+        intent = source.next_intent(sample_state(), 0.01)
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        got = intent.left["tcp_target_stand"]
+        self.assertGreater(abs(got[2] - 3.0), 0.01)  # z bleed in tool mode
+
+    def test_matrix_quat_roundtrip_covers_180deg_branches(self):
+        from policy_runner.action_sources.umi_dual_cartesian import _matrix_to_quat, _quat_to_matrix
+
+        quats = [
+            (0.0, 0.0, 0.0, 1.0),
+            (1.0, 0.0, 0.0, 0.0),  # 180deg about x (trace <= 0 branch)
+            (0.0, 1.0, 0.0, 0.0),  # 180deg about y
+            (0.0, 0.0, 1.0, 0.0),  # 180deg about z
+            (0.5, -0.5, 0.5, 0.5),
+            (0.1, 0.2, -0.3, 0.927),
+        ]
+        for q in quats:
+            m = _quat_to_matrix(q)
+            r = _matrix_to_quat(m)
+            # q and -q encode the same rotation; compare matrices instead.
+            m2 = _quat_to_matrix(r)
+            for a, b in zip(m, m2):
+                self.assertAlmostEqual(a, b, places=9, msg=f"q={q}")
+
+    def test_axis_signs_reject_non_unit_entries(self):
+        with self.assertRaises(ValueError):
+            UmiDualCartesianActionSource(
+                MockUmiPoseReader([]),
+                MockUmiPoseReader([]),
+                linear_axis_signs=(0.5, 1.0, 1.0),
+            )
+
+    def test_target_lpf_smooths_step_exponentially(self):
+        reader = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
+                {"pose": [0.1, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.002},
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            target_lpf_tau_sec=0.018,  # alpha = 0.002 / (0.018 + 0.002) = 0.1
+        )
+
+        first = source.next_intent(sample_state(), 0.0)
+        second = source.next_intent(sample_state(), 0.002)
+        # Reader is exhausted; sample-hold keeps the last raw target so the
+        # filter keeps converging toward it.
+        third = source.next_intent(sample_state(), 0.004)
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertIsNotNone(third)
+        assert first is not None and second is not None and third is not None
+        self.assertEqual(first.left["tcp_target_stand"][0], 1.0)
+        self.assertAlmostEqual(second.left["tcp_target_stand"][0], 1.01)
+        self.assertAlmostEqual(third.left["tcp_target_stand"][0], 1.019)
+
+    def test_deadband_freezes_micro_jitter_and_passes_real_motion(self):
+        reader = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
+                {"pose": [0.0002, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.002},
+                {"pose": [0.001, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.004},
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            deadband_linear_m=0.0003,
+            deadband_angular_rad=0.005,
+        )
+
+        first = source.next_intent(sample_state(), 0.0)
+        jitter = source.next_intent(sample_state(), 0.002)
+        motion = source.next_intent(sample_state(), 0.004)
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(jitter)
+        self.assertIsNotNone(motion)
+        assert first is not None and jitter is not None and motion is not None
+        self.assertEqual(jitter.left["tcp_target_stand"], [1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+        self.assertAlmostEqual(motion.left["tcp_target_stand"][0], 1.001)
+
+    def test_lpf_with_deadband_freezes_exactly_when_stationary(self):
+        reader = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
+                {"pose": [0.0002, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.002},
+                {"pose": [-0.0001, 0.0001, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.004},
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            target_lpf_tau_sec=0.05,
+            deadband_linear_m=0.0003,
+            deadband_angular_rad=0.005,
+        )
+
+        first = source.next_intent(sample_state(), 0.0)
+        jitter_a = source.next_intent(sample_state(), 0.002)
+        jitter_b = source.next_intent(sample_state(), 0.004)
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(jitter_a)
+        self.assertIsNotNone(jitter_b)
+        assert first is not None and jitter_a is not None and jitter_b is not None
+        # Output is bit-exact frozen, not merely close: the deadband gates the
+        # filter input so the EMA never creeps while only jitter is present.
+        self.assertEqual(jitter_a.left["tcp_target_stand"], [1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+        self.assertEqual(jitter_b.left["tcp_target_stand"], [1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+
     def test_gripper_passthrough_and_stale_sample_hold(self):
         reader = MockUmiPoseReader(
             [
@@ -354,6 +604,9 @@ class UmiDualCartesianTest(unittest.TestCase):
                 "safety": {"allow_rbpodo_controller_simulation_cartesian": True},
                 "umi_dual_cartesian": {
                     "max_linear_step_m": 0.01,
+                    "target_lpf_tau_sec": 0.05,
+                    "deadband_linear_m": 0.0003,
+                    "deadband_angular_rad": 0.005,
                     "left": {"mock_script": "pgmode_umi_smoke"},
                     "right": {"mock_script": "pgmode_umi_smoke"},
                 },
@@ -364,6 +617,10 @@ class UmiDualCartesianTest(unittest.TestCase):
 
         self.assertIsInstance(source, UmiDualCartesianActionSource)
         self.assertFalse(cfg.safety.allow_real_motion)
+        assert isinstance(source, UmiDualCartesianActionSource)
+        self.assertEqual(source.target_lpf_tau_sec, 0.05)
+        self.assertEqual(source.deadband_linear_m, 0.0003)
+        self.assertEqual(source.deadband_angular_rad, 0.005)
         source.close()
 
     def test_policy_runner_sends_tcp_pose_target_in_controller_simulation(self):

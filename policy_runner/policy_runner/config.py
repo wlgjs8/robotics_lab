@@ -256,6 +256,12 @@ class UmiDualCartesianConfig:
     )
     max_linear_step_m: float = 0.005
     max_angular_step_rad: float = 0.04
+    target_lpf_tau_sec: float = 0.0
+    deadband_linear_m: float = 0.0
+    deadband_angular_rad: float = 0.0
+    linear_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
+    angular_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
+    delta_frame: str = "tool"
     gripper_offset: tuple[float, ...] = (0.172, 0.0, -0.076)
     r_align: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     workspace_bounds: dict[str, tuple[float, float]] | tuple[float, ...] | None = None
@@ -266,6 +272,18 @@ class UmiDualCartesianConfig:
             raise ValueError("umi_dual_cartesian.max_linear_step_m must be non-negative")
         if self.max_angular_step_rad < 0.0:
             raise ValueError("umi_dual_cartesian.max_angular_step_rad must be non-negative")
+        if self.target_lpf_tau_sec < 0.0:
+            raise ValueError("umi_dual_cartesian.target_lpf_tau_sec must be non-negative")
+        if self.deadband_linear_m < 0.0:
+            raise ValueError("umi_dual_cartesian.deadband_linear_m must be non-negative")
+        if self.deadband_angular_rad < 0.0:
+            raise ValueError("umi_dual_cartesian.deadband_angular_rad must be non-negative")
+        for name in ("linear_axis_signs", "angular_axis_signs"):
+            signs = getattr(self, name)
+            if len(signs) != 3 or any(sign not in (-1.0, 1.0) for sign in signs):
+                raise ValueError(f"umi_dual_cartesian.{name} must contain 3 entries of -1 or 1")
+        if self.delta_frame not in ("tool", "world"):
+            raise ValueError("umi_dual_cartesian.delta_frame must be 'tool' or 'world'")
         if len(self.gripper_offset) != 3:
             raise ValueError("umi_dual_cartesian.gripper_offset must contain 3 values")
         if len(self.r_align) not in {3, 9}:
@@ -540,6 +558,14 @@ def _umi_dual_cartesian_config(raw: dict[str, Any]) -> UmiDualCartesianConfig:
         top_level["max_linear_step_m"] = float(top_level["max_linear_step_m"])
     if "max_angular_step_rad" in top_level:
         top_level["max_angular_step_rad"] = float(top_level["max_angular_step_rad"])
+    for key in ("target_lpf_tau_sec", "deadband_linear_m", "deadband_angular_rad"):
+        if key in top_level:
+            top_level[key] = float(top_level[key])
+    for key in ("linear_axis_signs", "angular_axis_signs"):
+        if key in top_level:
+            top_level[key] = _tuple3(top_level[key], f"umi_dual_cartesian.{key}")
+    if "delta_frame" in top_level:
+        top_level["delta_frame"] = str(top_level["delta_frame"])
     if "sample_hold_timeout_sec" in top_level:
         top_level["sample_hold_timeout_sec"] = float(top_level["sample_hold_timeout_sec"])
     if "gripper_offset" in top_level:

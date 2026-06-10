@@ -44,6 +44,29 @@ command_rate_hz: 500
 umi_dual_cartesian:
   max_linear_step_m: 0.005
   max_angular_step_rad: 0.04
+  # Target smoothing: first-order exponential LPF (alpha = dt / (tau + dt)) on
+  # the composed TCP target, plus an input-side deadband that freezes the
+  # command while the hand-held tracker only jitters in place. 0 disables
+  # either stage. tau=0.05 → cutoff ~3.2 Hz, lag ~50 ms; raise tau if the arm
+  # still trembles, lower it if tracking feels sluggish.
+  target_lpf_tau_sec: 0.08
+  # target_lpf_tau_sec: 0.20
+  # 1.5mm/0.012rad: absorbs the idle hand's natural sway so the non-operated
+  # arm stays frozen while the other arm is driven (0.3mm let it twitch).
+  deadband_linear_m: 0.0015
+  deadband_angular_rad: 0.012
+  # Per-axis mirror of the latched relative delta so robot motion matches the
+  # operator's intent: x/y translation flipped (z kept), all of roll/pitch/yaw
+  # flipped. Entries must be -1 or 1. This replaces the earlier Rz(180deg)
+  # r_align workaround (which could not flip yaw without also flipping z).
+  linear_axis_signs: [-1.0, -1.0, 1.0]
+  angular_axis_signs: [-1.0, -1.0, -1.0]
+  # world: take the tracker delta in the gravity-aligned tracker WORLD frame
+  # and apply it along stand axes, so horizontal hand motion stays horizontal
+  # at the robot regardless of the tool/TCP orientation at latch time.
+  # tool (default): latched body-frame composition (delta tilts with how the
+  # tool and TCP were oriented when the deadman was pressed).
+  delta_frame: tool #world
   gripper_offset: [0.172, 0.0, -0.076]
   r_align: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
   sample_hold_timeout_sec: 0.05
