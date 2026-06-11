@@ -244,6 +244,24 @@ class OperatorSafety:
         self.command_client.send_lifecycle(mode, timeout_sec=self.command_timeout_sec)
         return True, f"sent {mode}"
 
+    def send_set_floor_z(self, floor_z_m: float) -> tuple[bool, str]:
+        # Non-motion, leaseless safety adjustment: no motion-block check, but
+        # require a live state stream reporting the constraint enabled so the
+        # operator sees the applied value (the server bounds-checks the request).
+        latest = self.latest_valid()
+        if latest is None:
+            return False, "state stream missing or stale"
+        floor = latest.floor_constraint
+        if floor is None or not bool(floor.get("enabled", False)):
+            return False, "floor constraint disabled on server"
+        try:
+            self.command_client.send_set_safety_floor_z(
+                float(floor_z_m), timeout_sec=self.command_timeout_sec
+            )
+        except ValueError as exc:
+            return False, str(exc)
+        return True, f"sent SetSafetyFloorZ {float(floor_z_m) * 1000:.0f}mm"
+
     def init_motion_disabled_reason(self) -> str | None:
         reason = self.blocked_reason("JointTarget")
         if reason:

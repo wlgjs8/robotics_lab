@@ -144,6 +144,10 @@ if(BUILD_TESTING)
     target_link_libraries(test_self_collision PRIVATE rb_servo_core)
     add_test(NAME self_collision COMMAND test_self_collision)
 
+    add_executable(test_floor_constraint tests/test_floor_constraint.cpp)
+    target_link_libraries(test_floor_constraint PRIVATE rb_servo_core)
+    add_test(NAME floor_constraint COMMAND test_floor_constraint)
+
     add_executable(test_cartesian_planner tests/test_cartesian_planner.cpp)
     target_link_libraries(test_cartesian_planner PRIVATE rb_servo_core)
     add_test(NAME cartesian_planner COMMAND test_cartesian_planner)

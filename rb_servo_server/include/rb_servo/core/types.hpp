@@ -331,6 +331,7 @@ struct CartesianSolveTelemetry {
     double linear_move_elapsed_sec = 0.0;
     std::string orientation_mode;
     bool twist_clamped = false;
+    bool floor_vz_clamped = false;
     double requested_twist_linear_norm_m_s = 0.0;
     double requested_twist_angular_norm_rad_s = 0.0;
     double applied_twist_linear_norm_m_s = 0.0;
@@ -721,6 +722,8 @@ struct ServoSnapshot {
     double self_collision_min_clearance_m = 0.0;
     double self_collision_margin_m = 0.0;
     int self_collision_left_bone = -1;
+    std::string self_collision_pair;
+    std::string self_collision_stand_capsule;
     int self_collision_right_bone = -1;
 
     // Stand-frame floor plane constraint telemetry (safety.floor_constraint).

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import sys
 import time
@@ -44,8 +45,26 @@ def main(argv: list[str] | None = None) -> int:
     if not argv or argv[0].startswith("-"):
         parser = argparse.ArgumentParser(description="robotics_lab policy_runner")
         parser.add_argument("--config", required=True, help="policy_runner YAML config")
+        parser.add_argument(
+            "--action-source",
+            default=None,
+            help=(
+                "override config.action_source (e.g. dual_spacemouse_cartesian, "
+                "umi_dual_cartesian) — lets one stack config serve every teleop source"
+            ),
+        )
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="print live teleop input (SpaceMouse/UMI) and loop send/drop stats",
+        )
         args = parser.parse_args(argv)
+        if args.verbose:
+            # The action sources and the run loop read this env at construction.
+            os.environ["POLICY_RUNNER_TELEOP_DEBUG"] = "1"
         config = load_config(args.config)
+        if args.action_source:
+            config = dataclasses.replace(config, action_source=args.action_source)
         return run(config)
     return _main_with_subcommands(argv)
 

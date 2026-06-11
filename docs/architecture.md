@@ -235,6 +235,39 @@ real Cartesian motion. Servo J ACKs in a controller-simulation circle artifact
 do not by themselves prove that Cartesian commands executed; check the
 Cartesian gate telemetry and `tcp_ref_stand` movement.
 
+### Floor plane constraint (`safety.floor_constraint`)
+
+A stand-frame keep-out plane for the TCP: when enabled, neither arm's TCP may be
+commanded below `z = z_min_m` (default 0.010 m), regardless of motion primitive
+and regardless of run mode (mock, simulator, controller-sim, and real all pass
+through the same gate). It is enforced in two tiers:
+
+- **Tier 1 (hard backstop, all primitives)**: at the final per-tick safety gate
+  (`DualArmServoLoop::applySafety`), each arm's candidate joint target is
+  FK-checked; a target whose TCP z falls below the plane reverts that arm to its
+  last safe target (`fail_policy: clamp_hold`, non-latching) or latches a
+  `FloorViolation` fault (`fail_policy: fault_latch`). FK failure fails closed.
+  A candidate that strictly raises the TCP while already below the plane is
+  allowed (escape), so an arm that starts below the plane can be jogged out
+  without a fault reset.
+- **Tier 2 (Cartesian sliding assist)**: absolute Cartesian targets
+  (`TcpPoseTarget`, `TcpDelta*`, `TcpLinearMove`) have their stand z clamped to
+  the plane before IK, and streaming twists (`TcpTwist*`) have their downward
+  stand-frame v_z zeroed near the plane, so lateral teleop/policy motion slides
+  along the plane instead of stuttering against the Tier-1 hold. Joint-space
+  primitives get no Tier-2 assist (Tier-1 hold only).
+
+The plane height is runtime-adjustable with the **leaseless** non-motion command
+`SetSafetyFloorZ` (`{"mode": "SetSafetyFloorZ", "floor_z_m": <meters>}`):
+raising the floor is safety-tightening and must never be blocked by a teleop
+client holding the command lease, and lowering is bounded server-side to the
+config envelope `[runtime_min_z_m, runtime_max_z_m]`. Every accepted set is
+logged with its `source_id`; the effective value, per-arm TCP z / violation
+flags, and the last reject reason are published every state tick under
+`floor_constraint`. `monitor_only: true` publishes telemetry without clamping
+and is never a real-motion safety posture. Enabling the constraint requires
+`kinematics.enable: true` (TCP FK source) — enforced at config load.
+
 `TcpCircleMove` is an optional benchmark primitive for isolating server-side
 circle generation from Python UDP streaming jitter. In `rb_simulator` it
 requires `cartesian_control.enable_benchmark_primitives: true`,
@@ -343,6 +376,11 @@ force_control:
 ```
 
 ## Motion Primitive Contract
+
+Every primitive below is additionally subject to the stand-frame floor plane
+constraint when `safety.floor_constraint.enable` is set (see "Floor plane
+constraint" under Safety Gates): the final per-tick joint target is FK-checked
+and held/latched if it would put either TCP below the plane.
 
 ### `JointTarget`
 

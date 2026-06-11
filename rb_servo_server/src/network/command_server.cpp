@@ -607,6 +607,10 @@ bool isReleaseLeaseModeString(const std::string& mode) {
     return mode == "ReleaseLease" || mode == "release_lease" || mode == "releaselease";
 }
 
+// EmergencyStop and SetSafetyFloorZ are intentionally leaseless: an operator
+// must be able to stop motion or adjust the safety floor while another client
+// (e.g. policy_runner) holds the command lease. SetSafetyFloorZ is additionally
+// bounded server-side to safety.floor_constraint.[runtime_min_z_m, runtime_max_z_m].
 bool commandRequiresLease(ControlMode mode) {
     return mode == ControlMode::ArmMotion ||
            mode == ControlMode::DisarmMotion ||
@@ -914,6 +918,12 @@ bool CommandServer::parseMessage(
     if (timeout_sec <= 0.0 || !std::isfinite(timeout_sec)) return false;
     if (!readOptionalNumber(root, "timeout_sec", &timeout_sec)) return false;
     if (timeout_sec <= 0.0 || !std::isfinite(timeout_sec)) return false;
+
+    // SetSafetyFloorZ payload (top-level: the floor plane is global, not per-arm).
+    if (root.contains("floor_z_m")) {
+        if (!readOptionalNumber(root, "floor_z_m", &cmd.floor_z_m)) return false;
+        cmd.has_floor_z = true;
+    }
 
     const json left_object = root.contains("left") ? root.at("left") : json();
     const json right_object = root.contains("right") ? root.at("right") : json();

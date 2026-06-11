@@ -167,10 +167,22 @@ enum class SelfCollisionFailPolicy {
     FaultLatch,
 };
 
-// Server-side dual-arm self-collision guard (the rbpodo controller firmware does
-// not populate op_stat_self_collision). Each arm link is approximated as a capsule
-// (segment between consecutive kinematic-chain points + radius); a candidate target
-// is refused if any left/right capsule pair comes within margin_m of each other.
+// Static stand collision capsule (stand frame, meters). Derived from the stand
+// URDF collision boxes (mo_robot_descriptions dual_rb3_730e_stand_ver3).
+struct StandCapsuleConfig {
+    std::string name;
+    std::array<double, 3> p0_m{0.0, 0.0, 0.0};
+    std::array<double, 3> p1_m{0.0, 0.0, 0.0};
+    double radius_m = 0.0;
+};
+
+// Server-side self-collision guard treating stand + left arm + right arm as one
+// "self" (the rbpodo controller firmware does not populate op_stat_self_collision).
+// Each arm link is approximated as a capsule (segment between consecutive
+// kinematic-chain points + radius); the stand as a static capsule list. Checked
+// pairs are left<->right, left<->stand, right<->stand — NEVER intra-arm (adjacent
+// links touch by construction). A candidate target is refused if any checked pair
+// comes within margin_m of each other.
 struct SelfCollisionConfig {
     bool enable = false;
     double margin_m = 0.05;
@@ -185,6 +197,16 @@ struct SelfCollisionConfig {
     // collision-free trajectory. Never use monitor_only as a real-motion safety
     // posture.
     bool monitor_only = false;
+    // Pair toggles. Arm<->stand checks additionally require a non-empty
+    // stand_capsules list (empty list = stand checks are skipped, preserving the
+    // arm-arm-only behavior of older configs).
+    bool check_left_right = true;
+    bool check_left_stand = true;
+    bool check_right_stand = true;
+    std::vector<StandCapsuleConfig> stand_capsules;
+    // Arm bones excluded from the arm<->stand check. Bone 0 (base->j1) sits on
+    // the stand mount plate by construction and must be ignored.
+    std::vector<int> stand_ignore_bones{0};
 };
 
 enum class FloorConstraintFailPolicy {

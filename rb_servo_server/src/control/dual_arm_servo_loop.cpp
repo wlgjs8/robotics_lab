@@ -1756,6 +1756,29 @@ void DualArmServoLoop::loopMain() {
                 setMotionState(ServerMotionState::ConnectedHold);
             }
             command = metadata_hold(command);
+        } else if (commandRequestsSetSafetyFloorZ(command)) {
+            // Leaseless runtime adjustment of the floor plane height. Accepted only
+            // within the configured [runtime_min_z_m, runtime_max_z_m] envelope;
+            // works while fault-latched (raising the floor must never be blocked).
+            if (!command.has_floor_z) {
+                floor_last_set_reject_reason_ = "floor_z_missing";
+                std::cerr << "[WARN] SetSafetyFloorZ rejected: missing floor_z_m payload\n";
+            } else {
+                const std::optional<std::string> reject =
+                    validateFloorZRequest(command.floor_z_m, config_.safety.floor_constraint);
+                if (reject.has_value()) {
+                    floor_last_set_reject_reason_ = *reject;
+                    std::cerr << "[WARN] SetSafetyFloorZ rejected (" << *reject << "): "
+                              << command.floor_z_m << " m from source_id="
+                              << command.source.source_id << "\n";
+                } else {
+                    runtime_floor_z_m_.store(command.floor_z_m);
+                    floor_last_set_reject_reason_.clear();
+                    std::cerr << "[INFO] safety floor plane set to " << command.floor_z_m
+                              << " m by source_id=" << command.source.source_id << "\n";
+                }
+            }
+            command = metadata_hold(command);
         } else if (commandRequestsDisarmMotion(command)) {
             clearLatchedCartesianTargets();
             setMotionState(ServerMotionState::ConnectedHold);
@@ -2139,6 +2162,22 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.margin_m;
             latest_snapshot_.self_collision_left_bone = last_self_collision_.left_bone;
             latest_snapshot_.self_collision_right_bone = last_self_collision_.right_bone;
+            latest_snapshot_.self_collision_pair = last_self_collision_.pair;
+            latest_snapshot_.self_collision_stand_capsule = last_self_collision_.stand_capsule;
+            latest_snapshot_.floor_constraint_enabled = config_.safety.floor_constraint.enable;
+            latest_snapshot_.floor_constraint_monitor_only = config_.safety.floor_constraint.monitor_only;
+            latest_snapshot_.floor_constraint_z_min_m = effectiveFloorZ();
+            latest_snapshot_.floor_constraint_config_z_min_m = config_.safety.floor_constraint.z_min_m;
+            latest_snapshot_.floor_constraint_runtime_min_z_m = config_.safety.floor_constraint.runtime_min_z_m;
+            latest_snapshot_.floor_constraint_runtime_max_z_m = config_.safety.floor_constraint.runtime_max_z_m;
+            latest_snapshot_.floor_constraint_left_checked = last_floor_left_.checked;
+            latest_snapshot_.floor_constraint_left_violated = last_floor_left_.violated;
+            latest_snapshot_.floor_constraint_left_tcp_z_m = last_floor_left_.tcp_z_m;
+            latest_snapshot_.floor_constraint_right_checked = last_floor_right_.checked;
+            latest_snapshot_.floor_constraint_right_violated = last_floor_right_.violated;
+            latest_snapshot_.floor_constraint_right_tcp_z_m = last_floor_right_.tcp_z_m;
+            latest_snapshot_.floor_constraint_clamp_count = floor_clamp_count_;
+            latest_snapshot_.floor_constraint_last_set_reject_reason = floor_last_set_reject_reason_;
             latest_snapshot_.motion_state = sample.motion_state;
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.async_supervision_degraded = sample.async_supervision_degraded;
@@ -2774,9 +2813,11 @@ ArmCommand DualArmServoLoop::resolveArmCartesianDeltaCommand(
         config_.cartesian_control,
         kinematics_
     );
-    const Pose6D target_tcp_stand = command.mode == ControlMode::TcpDeltaStand
+    // Tier-2 floor clamp: latch a target that is already legal so the per-tick
+    // pose tracking never aims below the plane.
+    const Pose6D target_tcp_stand = clampPoseToFloor(command.mode == ControlMode::TcpDeltaStand
         ? cartesian.applyTcpDeltaStand(*state.tcp_stand, command.tcp_delta_stand)
-        : cartesian.applyTcpDeltaLocal(*state.tcp_stand, command.tcp_delta_local);
+        : cartesian.applyTcpDeltaLocal(*state.tcp_stand, command.tcp_delta_local));
 
     latch.seq = command_seq;
     latch.target_tcp_stand = target_tcp_stand;
@@ -2975,6 +3016,13 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             config_.cartesian_control,
             kinematics_
         );
+        // Tier-2 floor assist for streaming twists (5 mm soft margin above the plane).
+        constexpr double kFloorTwistSoftMarginM = 0.005;
+        cartesian_servo.setFloorConstraint(
+            config_.safety.floor_constraint.enable && !config_.safety.floor_constraint.monitor_only,
+            effectiveFloorZ(),
+            kFloorTwistSoftMarginM
+        );
 
         if (effective_command.left.mode != ControlMode::TcpTwistStand && effective_command.left.mode != ControlMode::TcpTwistLocal) {
             left_cartesian_twist_hold_ = CartesianTwistHoldState{};
@@ -2982,6 +3030,19 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         if (effective_command.right.mode != ControlMode::TcpTwistStand && effective_command.right.mode != ControlMode::TcpTwistLocal) {
             right_cartesian_twist_hold_ = CartesianTwistHoldState{};
         }
+
+        // Tier-2 floor clamp for absolute Cartesian targets: TcpPoseTarget aims
+        // at the clamped pose every tick; TcpLinearMove latches its path goal from
+        // this command at path start, so clamping here keeps the whole path legal
+        // (interpolation between legal start and legal goal stays legal).
+        const auto clamp_command_pose = [this](ArmCommand& cmd) {
+            if ((cmd.mode == ControlMode::TcpPoseTarget || cmd.mode == ControlMode::TcpLinearMove) &&
+                cmd.has_tcp_target) {
+                cmd.tcp_target_stand = clampPoseToFloor(cmd.tcp_target_stand);
+            }
+        };
+        clamp_command_pose(effective_command.left);
+        clamp_command_pose(effective_command.right);
 
         const ArmCommand left_pose_track_command = applyPoseTrackSmd(
             effective_command.left,
@@ -3406,9 +3467,12 @@ ServoTarget DualArmServoLoop::applySafety(
                     combined = SafetyVerdict::FaultLatched;
                     return true;
                 }
-                // FloorAction::Hold: revert only this arm (non-latching).
+                // FloorAction::Hold: revert only this arm (non-latching). Reset the
+                // twist velocity integrator so it does not keep advancing (and
+                // diverging from the held command) while the hold is active.
                 target_q = prev_sent_q;
                 ++floor_clamp_count_;
+                resetCartesianVelocityIntegrator(arm, "floor_hold");
                 if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                     combined = SafetyVerdict::FloorViolation;
                 }
@@ -3437,7 +3501,9 @@ ServoTarget DualArmServoLoop::applySafety(
             combined != SafetyVerdict::FaultLatched &&
             !fault_latched_.load()) {
             const std::string reason = sc.checked
-                ? ("self-collision: capsule clearance " + std::to_string(sc.min_clearance_m) +
+                ? ("self-collision (" + (sc.pair.empty() ? std::string("unknown") : sc.pair) +
+                   (sc.stand_capsule.empty() ? std::string() : " @" + sc.stand_capsule) +
+                   "): capsule clearance " + std::to_string(sc.min_clearance_m) +
                    " m below margin " + std::to_string(config_.safety.self_collision.margin_m) + " m")
                 : "self-collision guard: link geometry unavailable";
             if (config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch) {
@@ -3498,6 +3564,17 @@ double DualArmServoLoop::effectiveFloorZ() const {
     return runtime_floor_z_m_.load();
 }
 
+Pose6D DualArmServoLoop::clampPoseToFloor(const Pose6D& pose) const {
+    if (!config_.safety.floor_constraint.enable || config_.safety.floor_constraint.monitor_only) {
+        return pose;
+    }
+    Pose6D clamped = pose;
+    if (std::isfinite(clamped.z)) {
+        clamped.z = std::max(clamped.z, effectiveFloorZ());
+    }
+    return clamped;
+}
+
 SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
     const JointArray& left_q_deg,
     const JointArray& right_q_deg
@@ -3513,12 +3590,46 @@ SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
     } catch (const std::exception&) {
         return SelfCollisionResult{};  // checked=false -> caller fails closed
     }
-    return dualArmSelfCollisionClearance(
-        left_points,
-        right_points,
-        config_.safety.self_collision.link_radius_m,
-        config_.safety.self_collision.margin_m
-    );
+    const SelfCollisionConfig& sc_cfg = config_.safety.self_collision;
+    SelfCollisionResult combined;
+    bool any_pair = false;
+    bool all_checked = true;
+
+    if (sc_cfg.check_left_right) {
+        any_pair = true;
+        SelfCollisionResult lr = dualArmSelfCollisionClearance(
+            left_points, right_points, sc_cfg.link_radius_m, sc_cfg.margin_m);
+        all_checked = all_checked && lr.checked;
+        combined = minSelfCollisionResult(combined, lr);
+    }
+    // Arm<->stand pairs need stand geometry; an empty list skips them so older
+    // arm-arm-only configs keep their behavior.
+    if (!sc_cfg.stand_capsules.empty()) {
+        if (sc_cfg.check_left_stand) {
+            any_pair = true;
+            SelfCollisionResult ls = armStandCollisionClearance(
+                left_points, sc_cfg.link_radius_m, sc_cfg.stand_capsules,
+                sc_cfg.margin_m, sc_cfg.stand_ignore_bones);
+            ls.pair = "left_stand";
+            all_checked = all_checked && ls.checked;
+            combined = minSelfCollisionResult(combined, ls);
+        }
+        if (sc_cfg.check_right_stand) {
+            any_pair = true;
+            SelfCollisionResult rs = armStandCollisionClearance(
+                right_points, sc_cfg.link_radius_m, sc_cfg.stand_capsules,
+                sc_cfg.margin_m, sc_cfg.stand_ignore_bones);
+            rs.pair = "right_stand";
+            all_checked = all_checked && rs.checked;
+            combined = minSelfCollisionResult(combined, rs);
+        }
+    }
+    if (!any_pair || !all_checked) {
+        // Nothing evaluated, or some enabled pair lacked geometry: report
+        // unchecked so the gate fails closed.
+        return SelfCollisionResult{};
+    }
+    return combined;
 }
 
 DualSendResult DualArmServoLoop::sendTargets(

@@ -84,7 +84,10 @@ from rb_servo_gui.scene import (
     _reference_ghost_active,
     _robot_urdf_path,
     update_circle_overlay,
+    update_floor_plane,
+    update_self_collision_overlay,
 )
+from rb_servo_gui.status_panel import _format_floor_constraint_status
 from rb_servo_gui.state_receiver import StateStore
 
 
@@ -2390,6 +2393,173 @@ class GuiContractsTest(unittest.TestCase):
         cmake = Path(__file__).resolve().parents[2] / "rb_servo_server" / "CMakeLists.txt"
         cmake_text = cmake.read_text(encoding="utf-8")
         self.assertIn('option(RB_SERVO_ENABLE_PINOCCHIO "Enable Pinocchio FK/IK support" ON)', cmake_text)
+
+
+class FloorConstraintGuiTest(unittest.TestCase):
+    @staticmethod
+    def _floor_block(**overrides):
+        block = {
+            "enabled": True,
+            "monitor_only": False,
+            "z_min_m": 0.010,
+            "config_z_min_m": 0.010,
+            "runtime_min_z_m": 0.0,
+            "runtime_max_z_m": 0.5,
+            "left": {"checked": True, "violated": False, "tcp_z_m": 0.133},
+            "right": {"checked": True, "violated": False, "tcp_z_m": 0.108},
+            "clamp_count": 0,
+            "last_set_reject_reason": None,
+        }
+        block.update(overrides)
+        return block
+
+    def test_state_snapshot_parses_floor_constraint(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        snapshot = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block()))
+        self.assertIsNotNone(snapshot)
+        self.assertTrue(snapshot.floor_constraint["enabled"])
+        self.assertAlmostEqual(snapshot.floor_constraint["z_min_m"], 0.010)
+
+        without = StateSnapshot.parse(sample_state())
+        self.assertIsNotNone(without)
+        self.assertIsNone(without.floor_constraint)
+
+    def test_format_floor_constraint_status(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        self.assertEqual(_format_floor_constraint_status(None, stale=False), "floor: no state")
+
+        ok_state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block()))
+        text = _format_floor_constraint_status(ok_state, stale=False)
+        self.assertIn("floor: ON z=10mm", text)
+        self.assertIn("L:123mm", text)
+        self.assertIn("R:98mm", text)
+
+        violated_state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block(
+            left={"checked": True, "violated": True, "tcp_z_m": 0.004},
+        )))
+        self.assertIn("VIOLATED(left)", _format_floor_constraint_status(violated_state, stale=False))
+
+        disabled_state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block(enabled=False)))
+        self.assertEqual(_format_floor_constraint_status(disabled_state, stale=False), "floor: disabled")
+
+        no_block = StateSnapshot.parse(sample_state())
+        self.assertEqual(_format_floor_constraint_status(no_block, stale=False), "floor: disabled")
+
+    def test_build_set_safety_floor_z_packet(self):
+        client = CommandClient(host="127.0.0.1", port=0, source_id="rb_gui_test")
+        packet = client.build_set_safety_floor_z(0.012)
+        self.assertEqual(packet["mode"], "SetSafetyFloorZ")
+        self.assertAlmostEqual(packet["floor_z_m"], 0.012)
+        self.assertEqual(packet["left"], {})
+        self.assertEqual(packet["right"], {})
+        self.assertEqual(packet["source_id"], "rb_gui_test")
+        with self.assertRaises(ValueError):
+            client.build_set_safety_floor_z(float("nan"))
+
+    def test_update_floor_plane_no_crash_and_state(self):
+        class FakePlane:
+            def __init__(self):
+                self.position = (0.0, 0.0, 0.0)
+                self.color = None
+                self.visible = True
+
+        plane = FakePlane()
+        handles = {"floor_plane": plane}
+        # Disabled / missing block hides the plane.
+        update_floor_plane(handles, None)
+        self.assertFalse(plane.visible)
+        update_floor_plane(handles, {"enabled": False})
+        self.assertFalse(plane.visible)
+        # Enabled moves it to z and shows it.
+        update_floor_plane(handles, self._floor_block(z_min_m=0.05))
+        self.assertTrue(plane.visible)
+        self.assertAlmostEqual(plane.position[2], 0.05)
+        # Violation recolors.
+        blue = plane.color
+        update_floor_plane(handles, self._floor_block(
+            right={"checked": True, "violated": True, "tcp_z_m": 0.001},
+        ))
+        self.assertNotEqual(plane.color, blue)
+        # Missing handle is a no-op.
+        update_floor_plane({}, self._floor_block())
+
+
+class SelfCollisionOverlayTest(unittest.TestCase):
+    @staticmethod
+    def _handles():
+        return {
+            "left_base": RecordingSceneHandle(),
+            "right_base": RecordingSceneHandle(),
+            "left_base_ref": RecordingSceneHandle(),
+            "right_base_ref": RecordingSceneHandle(),
+            "left_base_collision": RecordingSceneHandle(),
+            "right_base_collision": RecordingSceneHandle(),
+            "stand_mesh": RecordingSceneHandle(),
+            "stand_mesh_collision": RecordingSceneHandle(),
+            "left_urdf_collision": RecordingUrdf(),
+            "right_urdf_collision": RecordingUrdf(),
+        }
+
+    @staticmethod
+    def _latest(*, violated, physical_real, q_actual, q_sent):
+        store = StateStore(stale_after_sec=5.0)
+        arm = {
+            "has_valid_joint_state": True,
+            "q_actual_deg": q_actual,
+            "q_sent_deg": q_sent,
+            "physical_motion_expected": physical_real,
+        }
+        payload = sample_state(
+            left=dict(arm),
+            right=dict(arm),
+            self_collision={"enabled": True, "checked": True, "violated": violated,
+                            "pair": "left_stand", "stand_capsule": "lower_column"},
+        )
+        assert store.update_from_json_bytes(json.dumps(payload).encode(), received_monotonic=time.monotonic())
+        return store.latest()
+
+    def test_real_violation_paints_actual_robot_and_stand_red(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=True,
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=[9, 9, 9, 9, 9, 9])
+        update_self_collision_overlay(handles, latest)
+        # Red overlay shown at q_actual; solid robot replaced; stand swapped red.
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertTrue(handles["stand_mesh_collision"].visible)
+        self.assertFalse(handles["stand_mesh"].visible)
+        self.assertFalse(handles["left_base"].visible)
+        self.assertFalse(handles["right_base"].visible)
+        self.assertAlmostEqual(handles["left_urdf_collision"].configs[-1][0], math.radians(1.0))
+
+    def test_sim_violation_paints_ghost_red_and_keeps_solid(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=False,
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=[9, 8, 7, 6, 5, 4])
+        update_self_collision_overlay(handles, latest)
+        # Red overlay shown at q_sent (the commanded ghost pose); ghost hidden;
+        # the solid robot keeps showing the true state.
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertFalse(handles["left_base_ref"].visible)
+        self.assertFalse(handles["right_base_ref"].visible)
+        self.assertTrue(handles["left_base"].visible)
+        self.assertTrue(handles["stand_mesh_collision"].visible)
+        self.assertAlmostEqual(handles["left_urdf_collision"].configs[-1][0], math.radians(9.0))
+
+    def test_clear_state_restores_normal_models(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=False, physical_real=True,
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertFalse(handles["left_base_collision"].visible)
+        self.assertFalse(handles["stand_mesh_collision"].visible)
+        self.assertTrue(handles["stand_mesh"].visible)
+        self.assertTrue(handles["left_base"].visible)
+        self.assertEqual(handles["left_urdf_collision"].configs, [])
 
 
 if __name__ == "__main__":

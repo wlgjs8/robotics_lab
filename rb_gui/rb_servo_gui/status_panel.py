@@ -301,6 +301,42 @@ def _format_self_collision_status(
     return f"self-collision: {status} clearance={clearance_txt} margin={margin_txt}"
 
 
+def _format_floor_constraint_status(
+    latest: StateSnapshot | None,
+    *,
+    stale: bool,
+) -> str:
+    if latest is None:
+        return "floor: no state"
+    if stale:
+        return "State stream stale"
+    floor = latest.floor_constraint
+    if not isinstance(floor, Mapping) or not bool(floor.get("enabled", False)):
+        return "floor: disabled"
+
+    z_min = floor.get("z_min_m")
+    z_txt = f"{float(z_min) * 1000:.0f}mm" if isinstance(z_min, (int, float)) else "?"
+
+    def arm_part(key: str) -> str:
+        arm = floor.get(key)
+        if not isinstance(arm, Mapping) or not bool(arm.get("checked", False)):
+            return f"{key[0].upper()}:?"
+        tcp_z = arm.get("tcp_z_m")
+        if not isinstance(tcp_z, (int, float)) or not isinstance(z_min, (int, float)):
+            return f"{key[0].upper()}:?"
+        margin_mm = (float(tcp_z) - float(z_min)) * 1000.0
+        return f"{key[0].upper()}:{margin_mm:.0f}mm"
+
+    violated_arms = [
+        key for key in ("left", "right")
+        if isinstance(floor.get(key), Mapping) and bool(floor[key].get("violated", False))
+    ]
+    monitor = " monitor_only" if bool(floor.get("monitor_only", False)) else ""
+    if violated_arms:
+        return f"floor: VIOLATED({','.join(violated_arms)}) z={z_txt}{monitor}"
+    return f"floor: ON z={z_txt} margin {arm_part('left')} {arm_part('right')}{monitor}"
+
+
 def _format_pgmode_status(
     latest: StateSnapshot | None,
     *,

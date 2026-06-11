@@ -596,6 +596,7 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"linear_move_elapsed_sec", telemetry.linear_move_elapsed_sec},
         {"orientation_mode", telemetry.orientation_mode},
         {"twist_clamped", telemetry.twist_clamped},
+        {"floor_vz_clamped", telemetry.floor_vz_clamped},
         {"requested_twist_linear_norm_m_s", telemetry.requested_twist_linear_norm_m_s},
         {"requested_twist_angular_norm_rad_s", telemetry.requested_twist_angular_norm_rad_s},
         {"applied_twist_linear_norm_m_s", telemetry.applied_twist_linear_norm_m_s},
@@ -1429,7 +1430,48 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         }
         self_collision["left_bone"] = snapshot.self_collision_left_bone;
         self_collision["right_bone"] = snapshot.self_collision_right_bone;
+        self_collision["pair"] = snapshot.self_collision_pair.empty()
+            ? nlohmann::json(nullptr)
+            : nlohmann::json(snapshot.self_collision_pair);
+        self_collision["stand_capsule"] = snapshot.self_collision_stand_capsule.empty()
+            ? nlohmann::json(nullptr)
+            : nlohmann::json(snapshot.self_collision_stand_capsule);
         message["self_collision"] = self_collision;
+    }
+    {
+        nlohmann::json floor;
+        floor["enabled"] = snapshot.floor_constraint_enabled;
+        floor["monitor_only"] = snapshot.floor_constraint_monitor_only;
+        floor["z_min_m"] = snapshot.floor_constraint_z_min_m;
+        floor["config_z_min_m"] = snapshot.floor_constraint_config_z_min_m;
+        floor["runtime_min_z_m"] = snapshot.floor_constraint_runtime_min_z_m;
+        floor["runtime_max_z_m"] = snapshot.floor_constraint_runtime_max_z_m;
+        const auto arm_json = [](bool checked, bool violated, double tcp_z_m) {
+            nlohmann::json arm;
+            arm["checked"] = checked;
+            arm["violated"] = violated;
+            if (checked && std::isfinite(tcp_z_m)) {
+                arm["tcp_z_m"] = tcp_z_m;
+            } else {
+                arm["tcp_z_m"] = nullptr;
+            }
+            return arm;
+        };
+        floor["left"] = arm_json(
+            snapshot.floor_constraint_left_checked,
+            snapshot.floor_constraint_left_violated,
+            snapshot.floor_constraint_left_tcp_z_m);
+        floor["right"] = arm_json(
+            snapshot.floor_constraint_right_checked,
+            snapshot.floor_constraint_right_violated,
+            snapshot.floor_constraint_right_tcp_z_m);
+        floor["clamp_count"] = snapshot.floor_constraint_clamp_count;
+        if (snapshot.floor_constraint_last_set_reject_reason.empty()) {
+            floor["last_set_reject_reason"] = nullptr;
+        } else {
+            floor["last_set_reject_reason"] = snapshot.floor_constraint_last_set_reject_reason;
+        }
+        message["floor_constraint"] = floor;
     }
     message["motion_state"] = toString(snapshot.motion_state);
     message["fault_latched"] = snapshot.fault_latched;

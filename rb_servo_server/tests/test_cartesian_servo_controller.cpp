@@ -348,6 +348,98 @@ bool testTcpTwistLocalMovesLocalXAndHoldsOrientation() {
     return true;
 }
 
+bool testFloorConstraintZerosDownwardVzAtPlaneAndKeepsLateral() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianServoController controller(
+        left_mount, right_mount, rb_servo::CartesianControlConfig{}, kinematics);
+    controller.setFloorConstraint(true, 0.010, 0.005);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.02, 0.0, -0.02, 0.0, 0.0, 0.0};
+
+    // Identity-orientation TCP at z = 0.012 (inside the 5 mm soft margin above the
+    // 10 mm plane): downward stand v_z must be zeroed, lateral x preserved.
+    rb_servo::CartesianTwistHoldState hold;
+    rb_servo::JointArray q = zeroJoints();
+    q[2] = 1.2;  // fake FK: z = q[2] / 100
+    const rb_servo::CartesianArmTargetResult at_floor = controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q, left_mount),
+        q,
+        rb_servo::RunMode::Simulation,
+        0.005,
+        1,
+        &hold
+    );
+    RB_CHECK(at_floor.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(at_floor.telemetry.floor_vz_clamped);
+    RB_CHECK(std::abs(kinematics->last_twist_local.z) < kEpsilon);
+    RB_CHECK(std::abs(kinematics->last_twist_local.x - 0.02) < kEpsilon);
+
+    // Well above the plane: the downward component passes through untouched.
+    rb_servo::CartesianTwistHoldState hold_above;
+    rb_servo::JointArray q_above = zeroJoints();
+    q_above[2] = 30.0;  // z = 0.30 m
+    const rb_servo::CartesianArmTargetResult above = controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q_above, left_mount),
+        q_above,
+        rb_servo::RunMode::Simulation,
+        0.005,
+        1,
+        &hold_above
+    );
+    RB_CHECK(above.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(!above.telemetry.floor_vz_clamped);
+    RB_CHECK(std::abs(kinematics->last_twist_local.z + 0.02) < kEpsilon);
+    return true;
+}
+
+bool testFloorConstraintRespectsTcpOrientationFrame() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.twist_angular_deadband_rad_s = 0.0;  // skip orientation hold for this test
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+    controller.setFloorConstraint(true, 0.010, 0.005);
+
+    // TCP yawed by 90 deg (fake FK: rz = q[5] / 100). A local +x twist maps to
+    // stand +y — horizontal, so nothing should be clamped even at the plane.
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.02, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    rb_servo::CartesianTwistHoldState hold;
+    rb_servo::JointArray q = zeroJoints();
+    q[2] = 1.0;                  // z = 0.010 m (on the plane)
+    q[5] = 100.0 * M_PI / 2.0;   // rz = pi/2
+    const rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q, left_mount),
+        q,
+        rb_servo::RunMode::Simulation,
+        0.005,
+        1,
+        &hold
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(!result.telemetry.floor_vz_clamped);
+    RB_CHECK(std::abs(kinematics->last_twist_local.x - 0.02) < 1e-6);
+    return true;
+}
+
 bool testTcpTwistAngularDeadbandMaintainsHoldForNoise() {
     auto kinematics = std::make_shared<LinearFakeKinematics>();
     rb_servo::ArmMountConfig left_mount;
@@ -1169,6 +1261,8 @@ int main() {
     if (!testLinearMoveUsesSeparatePositionAndOrientationGains()) return 1;
     if (!testLinearMoveConstantOrientationToleranceIsConfigurable()) return 1;
     if (!testTcpTwistLocalMovesLocalXAndHoldsOrientation()) return 1;
+    if (!testFloorConstraintZerosDownwardVzAtPlaneAndKeepsLateral()) return 1;
+    if (!testFloorConstraintRespectsTcpOrientationFrame()) return 1;
     if (!testTcpTwistAngularDeadbandMaintainsHoldForNoise()) return 1;
     if (!testPositiveOrientationHoldErrorReducesAfterSyntheticIntegration()) return 1;
     if (!testTcpTwistStandPositiveWorldXConvertsToLocalNegativeYAtPositiveYaw()) return 1;

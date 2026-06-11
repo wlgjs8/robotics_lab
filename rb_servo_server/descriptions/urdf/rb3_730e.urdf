@@ -468,13 +468,11 @@
   <joint name="tcp_joint" type="fixed">
     <parent link="attachment_site"/>
     <child link="tcp"/>
-    <!-- Fingertip offset intentionally disabled: with no <origin>, URDF defaults to
-         identity, so tcp == attachment_site (flange +0.1 m). Re-enable by
-         uncommenting the line below.
-         (Pika gripper fingertip plane = pika_gripper.STL z-max; the older 0.21616
-         matched the legacy tool.STL tip.)
+    <!-- Pika gripper fingertip plane = pika_gripper.STL z-max (247.642 mm), measured
+         from attachment_site (flange +0.1 m). The older 0.21616 matched the legacy
+         tool.STL tip. Disable by removing <origin> (URDF then defaults to identity,
+         tcp == attachment_site). -->
     <origin xyz="0.0 0.0 0.247642" rpy="0.0 0.0 0.0"/>
-    -->
   </joint>
   <joint name="link0_fixed" type="fixed">
     <parent link="world"/>

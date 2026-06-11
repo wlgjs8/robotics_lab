@@ -376,6 +376,21 @@ class CommandClient:
         }
         return self._with_source(packet)
 
+    def build_set_safety_floor_z(self, floor_z_m: float, *, timeout_sec: float = 0.2) -> dict[str, Any]:
+        value = float(floor_z_m)
+        if not math.isfinite(value):
+            raise ValueError("floor_z_m must be finite")
+        # Leaseless non-motion command; the server only accepts values within its
+        # configured safety.floor_constraint runtime bounds.
+        return self._with_source({
+            "seq": self.next_seq(),
+            "mode": "SetSafetyFloorZ",
+            "timeout_sec": timeout_sec,
+            "floor_z_m": value,
+            "left": {},
+            "right": {},
+        })
+
     def send(self, packet: Mapping[str, Any]) -> None:
         payload = json.dumps(packet, separators=(",", ":")).encode("utf-8")
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -384,5 +399,10 @@ class CommandClient:
 
     def send_lifecycle(self, mode: str, *, timeout_sec: float = 0.2) -> dict[str, Any]:
         packet = self.build_lifecycle(mode, timeout_sec=timeout_sec)
+        self.send(packet)
+        return packet
+
+    def send_set_safety_floor_z(self, floor_z_m: float, *, timeout_sec: float = 0.2) -> dict[str, Any]:
+        packet = self.build_set_safety_floor_z(floor_z_m, timeout_sec=timeout_sec)
         self.send(packet)
         return packet

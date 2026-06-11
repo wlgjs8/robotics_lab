@@ -36,6 +36,7 @@ Pose6D interpolateLinear(
 
 Vec6 bodyErrorLocal(const Pose6D& current_tcp_stand, const Pose6D& reference_tcp_stand);
 Vec6 twistStandToLocal(const Vec6& twist_stand, const Pose6D& current_tcp_stand);
+Vec6 twistLocalToStand(const Vec6& twist_local, const Pose6D& current_tcp_stand);
 
 double orientationDistanceRad(const Pose6D& start_tcp_stand, const Pose6D& target_tcp_stand);
 double positionDistance(const Pose6D& start_tcp_stand, const Pose6D& target_tcp_stand);

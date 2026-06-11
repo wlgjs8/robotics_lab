@@ -126,6 +126,9 @@ private:
     FloorArmEvaluation evaluateFloorArm(ArmId arm, const JointArray& q_deg) const;
     // Effective (runtime-adjustable) floor plane height in meters.
     double effectiveFloorZ() const;
+    // Tier-2 usability clamp: project a Cartesian target's stand z onto the floor
+    // plane (no-op when the constraint is disabled or monitor_only).
+    Pose6D clampPoseToFloor(const Pose6D& pose) const;
 
     DualSendResult sendTargets(
         const ServoTarget& target,

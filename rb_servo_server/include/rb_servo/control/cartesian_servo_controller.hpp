@@ -127,11 +127,20 @@ public:
         const std::string& reset_reason
     );
 
+    // Stand-frame floor plane (safety.floor_constraint Tier-2 assist): when the
+    // commanded TCP is at/below z_min_m + soft_margin_m, the negative stand-frame
+    // linear v_z of a streaming twist is zeroed so lateral motion slides along
+    // the plane instead of stuttering against the Tier-1 joint-level hold.
+    void setFloorConstraint(bool enabled, double z_min_m, double soft_margin_m);
+
 private:
     ArmMountConfig left_mount_;
     ArmMountConfig right_mount_;
     CartesianControlConfig config_;
     std::shared_ptr<IKinematics> kinematics_;
+    bool floor_enabled_ = false;
+    double floor_z_min_m_ = 0.0;
+    double floor_soft_margin_m_ = 0.0;
 };
 
 }  // namespace rb_servo

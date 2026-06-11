@@ -393,6 +393,12 @@ CartesianServoController::CartesianServoController(
     std::shared_ptr<IKinematics> kinematics
 ) : left_mount_(left_mount), right_mount_(right_mount), config_(config), kinematics_(std::move(kinematics)) {}
 
+void CartesianServoController::setFloorConstraint(bool enabled, double z_min_m, double soft_margin_m) {
+    floor_enabled_ = enabled && std::isfinite(z_min_m) && std::isfinite(soft_margin_m);
+    floor_z_min_m_ = z_min_m;
+    floor_soft_margin_m_ = std::max(soft_margin_m, 0.0);
+}
+
 CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     const ArmCommand& command,
     const RobotState& state,
@@ -764,6 +770,19 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         result.telemetry.applied_twist_angular_norm_rad_s = 0.0;
         return result;
     }
+    // Tier-2 floor assist: zero a downward stand-frame v_z when the commanded
+    // TCP is at/below the plane (+ soft margin) so lateral motion keeps sliding
+    // along the plane. `requested` is a local twist here — rotate to stand,
+    // clamp only the linear z component, rotate back.
+    if (floor_enabled_ && state.tcp_stand->z <= floor_z_min_m_ + floor_soft_margin_m_) {
+        Vec6 stand_twist = math::twistLocalToStand(requested, *state.tcp_stand);
+        if (stand_twist.z < 0.0) {
+            stand_twist.z = 0.0;
+            requested = math::twistStandToLocal(stand_twist, *state.tcp_stand);
+            result.telemetry.floor_vz_clamped = true;
+        }
+    }
+
     result.telemetry.twist_clamped = twist_clamped;
     result.telemetry.applied_twist_linear_norm_m_s = linearNorm(requested);
     result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(requested);
