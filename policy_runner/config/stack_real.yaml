@@ -54,6 +54,14 @@ spacemouse_cartesian_dual:
   angular_axis_signs: [-1.0, -1.0, 1.0]
   angular_axis_order: [ry, rx, rz]
   sample_hold_timeout_sec: 0.05
+  # Buttonless teleop: cap deflection is the intent gate (buttons reserved for
+  # future gripper open/close). IDLE->ACTIVE needs activation_deadband
+  # (hysteresis vs deadband); startup/stale-reconnect requires the cap held
+  # neutral for startup_neutral_hold_sec before motion is accepted.
+  require_deadman: false
+  activation_deadband: 0.12
+  startup_requires_neutral: true
+  startup_neutral_hold_sec: 0.3
   left:
     device: null
     path: /dev/hidraw5
@@ -72,11 +80,25 @@ umi_dual_cartesian:
   target_lpf_tau_sec: 0.0
   deadband_linear_m: 0.0015
   deadband_angular_rad: 0.012
-  linear_axis_signs: [-1.0, -1.0, 1.0]
-  angular_axis_signs: [-1.0, -1.0, 1.0]
   delta_frame: tool
-  gripper_offset: [0.172, 0.0, -0.076]
-  r_align: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  # ---- Pose-frame geometry (paired with pika publisher --pose-frame tip) ----
+  # The publisher applies the official pika_sdk tracker→gripper-tip transform
+  # (T_raw · Rx(-20°)·[Ry(-90°)·Rx(-90°)] · Trans(0.172, 0, -0.076)): the wire
+  # pose origin is already the fingertip line (axes x=approach, y=left, z=up)
+  # and pairs with the URDF tip TCP (tcp_joint z=0.247642). No offset here:
+  gripper_offset: [0.0, 0.0, 0.0]
+  # r_align maps the published tip-frame axes onto the RB TCP body axes
+  # (columns = TCP x/y/z in the tip frame: TCP x = -y(gripper right),
+  # TCP y = -z(gripper down), TCP z = +x(approach)). This subsumes the old
+  # [-1,-1,1] axis-sign mirror, so the signs return to identity:
+  r_align: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
+  linear_axis_signs: [1.0, 1.0, 1.0]
+  angular_axis_signs: [1.0, 1.0, 1.0]
+  # Legacy fallback (publisher --pose-frame tracker, raw tracker origin):
+  #   gripper_offset: [0.172, 0.0, -0.076]
+  #   r_align: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  #   linear_axis_signs: [-1.0, -1.0, 1.0]
+  #   angular_axis_signs: [-1.0, -1.0, 1.0]
   sample_hold_timeout_sec: 0.05
   left:
     udp_endpoint: "udp://0.0.0.0:50380"

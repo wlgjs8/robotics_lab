@@ -4,6 +4,7 @@ import math
 import os
 import time
 import warnings
+from dataclasses import dataclass
 
 from policy_runner.action_sources.tcp_delta import (
     CARTESIAN_ACTION_REQUIREMENTS,
@@ -32,6 +33,10 @@ class DualSpaceMouseCartesianActionSource:
         angular_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0),
         angular_axis_order: tuple[str, ...] = ("rx", "ry", "rz"),
         sample_hold_timeout_sec: float = 0.05,
+        require_deadman: bool = True,
+        activation_deadband: float | None = None,
+        startup_requires_neutral: bool = True,
+        startup_neutral_hold_sec: float = 0.3,
         left_deadman_button: int = 0,
         right_deadman_button: int = 0,
         timeout_sec: float = 0.2,
@@ -59,6 +64,10 @@ class DualSpaceMouseCartesianActionSource:
             raise ValueError("sample_hold_timeout_sec must be positive")
         if left_deadman_button < 0 or right_deadman_button < 0:
             raise ValueError("deadman buttons must be non-negative")
+        if activation_deadband is not None and activation_deadband < 0.0:
+            raise ValueError("activation_deadband must be non-negative")
+        if startup_neutral_hold_sec < 0.0:
+            raise ValueError("startup_neutral_hold_sec must be non-negative")
         self.left_reader = left_reader if left_reader is not None else HidSpaceMouseReader(device_number=0)
         self.right_reader = right_reader if right_reader is not None else HidSpaceMouseReader(device_number=1)
         self.frame = frame
@@ -70,18 +79,26 @@ class DualSpaceMouseCartesianActionSource:
         self.angular_axis_signs = _axis_signs(angular_axis_signs, "angular_axis_signs")
         self.angular_axis_order = _angular_axis_order(angular_axis_order)
         self.sample_hold_timeout_sec = float(sample_hold_timeout_sec)
+        # Buttonless (require_deadman=False): cap deflection is the intent gate.
+        # IDLE->ACTIVE needs the larger activation_deadband (hysteresis vs the
+        # per-axis deadband used while streaming); startup/reconnect requires
+        # the cap held neutral for startup_neutral_hold_sec first.
+        self.require_deadman = bool(require_deadman)
+        self.activation_deadband = (
+            float(activation_deadband)
+            if activation_deadband is not None
+            else self.deadband * 1.5
+        )
+        self.startup_requires_neutral = bool(startup_requires_neutral)
+        self.startup_neutral_hold_sec = float(startup_neutral_hold_sec)
         self.left_deadman_button = int(left_deadman_button)
         self.right_deadman_button = int(right_deadman_button)
         self.timeout_sec = timeout_sec
         self.requirements = cartesian_action_requirements(
             allow_rbpodo_controller_simulation=allow_rbpodo_controller_simulation
         )
-        self._left_was_armed = False
-        self._right_was_armed = False
-        self._left_last_twist: tuple[float, ...] | None = None
-        self._right_last_twist: tuple[float, ...] | None = None
-        self._left_last_sample_monotonic: float | None = None
-        self._right_last_sample_monotonic: float | None = None
+        self._left_state = _SideState()
+        self._right_state = _SideState()
         # POLICY_RUNNER_TELEOP_DEBUG=1: print raw samples/armed/twist at 10 Hz.
         self._debug = os.environ.get("POLICY_RUNNER_TELEOP_DEBUG", "") == "1"
         self._debug_raw: dict[str, SpaceMouseSample | None] = {"left": None, "right": None}
@@ -89,62 +106,51 @@ class DualSpaceMouseCartesianActionSource:
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         _ = snapshot
-        (
-            left,
-            self._left_was_armed,
-            left_released,
-            left_armed,
-            self._left_last_twist,
-            self._left_last_sample_monotonic,
-        ) = self._twist_from_reader(
+        left, left_released, left_present = self._twist_from_reader(
             self.left_reader,
             self.left_deadman_button,
-            self._left_was_armed,
-            self._left_last_twist,
-            self._left_last_sample_monotonic,
+            self._left_state,
             now_monotonic,
             side="left",
         )
-        (
-            right,
-            self._right_was_armed,
-            right_released,
-            right_armed,
-            self._right_last_twist,
-            self._right_last_sample_monotonic,
-        ) = self._twist_from_reader(
+        right, right_released, right_present = self._twist_from_reader(
             self.right_reader,
             self.right_deadman_button,
-            self._right_was_armed,
-            self._right_last_twist,
-            self._right_last_sample_monotonic,
+            self._right_state,
             now_monotonic,
             side="right",
         )
-        if left_armed is False and right_armed is False and (left_released or right_released):
+        if not left_present and not right_present and (left_released or right_released):
+            # An arm just disengaged and nothing is streaming: zero BOTH arms
+            # once so no stale twist survives on either side.
             left = _ZERO_TWIST
             right = _ZERO_TWIST
         if self._debug:
-            self._debug_print(left, right, left_armed, right_armed)
-        if left is None and right is None and left_armed is not True and right_armed is not True:
+            self._debug_print(left, right)
+        if left is None and right is None and not left_present and not right_present:
             return None
         return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
+
+    def _side_state_label(self, state: "_SideState") -> str:
+        if self.require_deadman:
+            return "ARMED" if state.active else "DISARMED"
+        if self.startup_requires_neutral and not state.neutral_confirmed:
+            return "NEUTRAL_WAIT"
+        return "ACTIVE" if state.active else "IDLE"
 
     def _debug_print(
         self,
         left_twist: tuple[float, ...] | None,
         right_twist: tuple[float, ...] | None,
-        left_armed: bool | None,
-        right_armed: bool | None,
     ) -> None:
         now = time.monotonic()
         if now - self._debug_last_print < 0.1:
             return
         self._debug_last_print = now
         parts = []
-        for label, side, twist, armed in (
-            ("LEFT ", "left", left_twist, left_armed),
-            ("RIGHT", "right", right_twist, right_armed),
+        for label, side, twist, state in (
+            ("LEFT ", "left", left_twist, self._left_state),
+            ("RIGHT", "right", right_twist, self._right_state),
         ):
             sample = self._debug_raw[side]
             if sample is None:
@@ -160,7 +166,9 @@ class DualSpaceMouseCartesianActionSource:
                 if twist is None
                 else ",".join(f"{v:+.3f}" for v in twist)
             )
-            parts.append(f"{label} axes=({axes}) btns={pressed} armed={armed} twist=({twist_str})")
+            parts.append(
+                f"{label} axes=({axes}) btns={pressed} state={self._side_state_label(state)} twist=({twist_str})"
+            )
         print(f"[SM] {' | '.join(parts)}", flush=True)
 
     def close(self) -> None:
@@ -171,27 +179,66 @@ class DualSpaceMouseCartesianActionSource:
         self,
         reader: SpaceMouseReader,
         deadman_button: int,
-        was_armed: bool,
-        last_twist: tuple[float, ...] | None,
-        last_sample_monotonic: float | None,
+        state: "_SideState",
         now_monotonic: float,
         *,
         side: str = "left",
-    ) -> tuple[tuple[float, ...] | None, bool, bool, bool | None, tuple[float, ...] | None, float | None]:
+    ) -> tuple[tuple[float, ...] | None, bool, bool]:
+        """Per-arm intent gate. Returns (twist, released, present).
+
+        present=True while the arm is engaged (deadman held / cap deflected);
+        released=True exactly once when it disengages (the zero-twist tick).
+
+        deadman mode (require_deadman=True): button pressed == engaged; zero
+        twist while pressed keeps streaming presence (legacy behavior).
+        buttonless mode: IDLE -> ACTIVE when the raw cap deflection exceeds
+        activation_deadband (hysteresis vs the streaming deadband); returning
+        to neutral sends one zero twist and goes back to IDLE. Startup and
+        stale-reconnect require the cap held neutral first.
+        """
         sample = reader.read(timeout_sec=0.0)
         if self._debug and sample is not None:
             self._debug_raw[side] = sample
+
         if sample is None:
-            if last_twist is None or last_sample_monotonic is None:
-                return None, was_armed, False, None, last_twist, last_sample_monotonic
-            if now_monotonic - last_sample_monotonic <= self.sample_hold_timeout_sec:
-                return last_twist, True, False, True, last_twist, last_sample_monotonic
-            return _ZERO_TWIST, False, True, False, None, None
-        armed = _deadman_active(sample, deadman_button)
-        if not armed:
-            if was_armed:
-                return _ZERO_TWIST, False, True, False, None, None
-            return None, False, False, False, None, None
+            if state.last_twist is None or state.last_sample_monotonic is None:
+                return None, False, False
+            if now_monotonic - state.last_sample_monotonic <= self.sample_hold_timeout_sec:
+                return state.last_twist, False, True
+            # Stale: zero once and drop the engagement. Buttonless mode must
+            # re-confirm neutral before moving again (the device may wake up
+            # deflected, e.g. carried while asleep).
+            was_active = state.active
+            state.reset_engagement()
+            state.reset_neutral_interlock()
+            return (_ZERO_TWIST, True, False) if was_active else (None, False, False)
+
+        if self.require_deadman:
+            if not _deadman_active(sample, deadman_button):
+                if state.active:
+                    state.reset_engagement()
+                    return _ZERO_TWIST, True, False
+                return None, False, False
+        else:
+            raw_mag = max(
+                abs(sample.tx), abs(sample.ty), abs(sample.tz),
+                abs(sample.rx), abs(sample.ry), abs(sample.rz),
+            )
+            if self.startup_requires_neutral and not state.neutral_confirmed:
+                if raw_mag <= self.deadband:
+                    if state.neutral_since is None:
+                        state.neutral_since = now_monotonic
+                    if now_monotonic - state.neutral_since >= self.startup_neutral_hold_sec:
+                        state.neutral_confirmed = True
+                else:
+                    state.neutral_since = None
+                if not state.neutral_confirmed:
+                    return None, False, False
+            if not state.active and raw_mag <= self.activation_deadband:
+                # IDLE: below the activation threshold nothing is generated
+                # (no zero-twist spam, no ArmMotion).
+                return None, False, False
+
         twist = _twist_from_sample(
             sample,
             max_linear_velocity_m_s=self.max_linear_velocity_m_s,
@@ -203,8 +250,43 @@ class DualSpaceMouseCartesianActionSource:
             angular_axis_order=self.angular_axis_order,
         )
         if all(value == 0.0 for value in twist):
-            return None, True, False, True, _ZERO_TWIST, sample.timestamp_monotonic
-        return twist, True, False, True, twist, sample.timestamp_monotonic
+            if self.require_deadman:
+                # Deadman held at neutral: stay engaged, hold zero.
+                state.active = True
+                state.last_twist = _ZERO_TWIST
+                state.last_sample_monotonic = sample.timestamp_monotonic
+                return None, False, True
+            if state.active:
+                # Buttonless: cap returned to neutral -> one zero twist, IDLE.
+                state.reset_engagement()
+                return _ZERO_TWIST, True, False
+            return None, False, False
+
+        state.active = True
+        state.last_twist = twist
+        state.last_sample_monotonic = sample.timestamp_monotonic
+        return twist, False, True
+
+
+@dataclass
+class _SideState:
+    """Per-arm engagement state for DualSpaceMouseCartesianActionSource."""
+
+    active: bool = False
+    last_twist: tuple[float, ...] | None = None
+    last_sample_monotonic: float | None = None
+    # Buttonless startup/reconnect interlock.
+    neutral_confirmed: bool = False
+    neutral_since: float | None = None
+
+    def reset_engagement(self) -> None:
+        self.active = False
+        self.last_twist = None
+        self.last_sample_monotonic = None
+
+    def reset_neutral_interlock(self) -> None:
+        self.neutral_confirmed = False
+        self.neutral_since = None
 
 
 _ZERO_TWIST = (0.0,) * 6

@@ -69,17 +69,23 @@ echo "[stack] server: $SERVER_CFG"
 PIDS+=($!)
 
 # Wait until the command server is up (or fail fast on config/RT errors).
-for _ in $(seq 1 50); do
+# Generous deadline: an automatic pgmode switch (sim<->real) can take tens of
+# seconds PER ARM on the controller before the server finishes initializing.
+for i in $(seq 1 750); do
   if grep -q "CommandServer listening" "$LOG_DIR/server.log" 2>/dev/null; then break; fi
   if ! kill -0 "${PIDS[0]}" 2>/dev/null; then
     echo "[stack] server exited during startup:" >&2
     tail -5 "$LOG_DIR/server.log" >&2
     exit 1
   fi
+  if [ $((i % 25)) -eq 0 ]; then
+    last_line=$(tail -1 "$LOG_DIR/server.log" 2>/dev/null)
+    echo "[stack] waiting for server ($((i / 5))s)... ${last_line}"
+  fi
   sleep 0.2
 done
 grep -q "CommandServer listening" "$LOG_DIR/server.log" || {
-  echo "[stack] server did not come up in 10s:" >&2; tail -5 "$LOG_DIR/server.log" >&2; exit 1; }
+  echo "[stack] server did not come up in 150s:" >&2; tail -5 "$LOG_DIR/server.log" >&2; exit 1; }
 echo "[stack] server up."
 
 echo "[stack] viser GUI: http://127.0.0.1:8080"

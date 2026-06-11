@@ -35,6 +35,7 @@ def spacemouse_sample(
     ry=0.0,
     rz=0.0,
     buttons=(True,),
+    timestamp_monotonic=None,
 ):
     return SpaceMouseSample(
         tx=tx,
@@ -44,7 +45,7 @@ def spacemouse_sample(
         ry=ry,
         rz=rz,
         buttons=tuple(buttons),
-        timestamp_monotonic=time.monotonic(),
+        timestamp_monotonic=time.monotonic() if timestamp_monotonic is None else timestamp_monotonic,
     )
 
 
@@ -217,6 +218,129 @@ class SpaceMouseMappingTest(unittest.TestCase):
                 right_reader=FakeSpaceMouseReader([]),
                 angular_axis_order=("ry", "ry", "rz"),
             )
+
+
+class ButtonlessDualSpaceMouseTest(unittest.TestCase):
+    @staticmethod
+    def _source(left_samples, right_samples=None, **kwargs):
+        from policy_runner.action_sources.dual_spacemouse_cartesian import (
+            DualSpaceMouseCartesianActionSource,
+        )
+
+        defaults = dict(
+            max_linear_velocity_m_s=0.1,
+            max_angular_velocity_rad_s=0.2,
+            deadband=0.08,
+            response_curve_gamma=1.0,
+            require_deadman=False,
+            activation_deadband=0.12,
+            startup_requires_neutral=False,
+            startup_neutral_hold_sec=0.3,
+        )
+        defaults.update(kwargs)
+        return DualSpaceMouseCartesianActionSource(
+            left_reader=FakeSpaceMouseReader(left_samples),
+            right_reader=FakeSpaceMouseReader(right_samples or []),
+            **defaults,
+        )
+
+    def test_idle_neutral_generates_no_intent(self):
+        # Neutral samples without any button: no intents, no zero-twist spam.
+        samples = [spacemouse_sample(buttons=(False,)) for _ in range(5)]
+        source = self._source(samples)
+        for i in range(5):
+            self.assertIsNone(source.next_intent(sample_state(), 1.0 + i * 0.002))
+
+    def test_activation_hysteresis_gates_idle_to_active(self):
+        # 0.10 is above the streaming deadband but below activation: stays IDLE.
+        # 0.5 exceeds activation: motion starts without any button.
+        samples = [
+            spacemouse_sample(tx=0.10, buttons=(False,)),
+            spacemouse_sample(tx=0.5, buttons=(False,)),
+        ]
+        source = self._source(samples)
+        self.assertIsNone(source.next_intent(sample_state(), 1.0))
+        intent = source.next_intent(sample_state(), 1.002)
+        self.assertIsNotNone(intent)
+        self.assertGreater(intent.left["tcp_twist_local"][0], 0.0)
+
+    def test_active_continues_below_activation_until_neutral(self):
+        # Once ACTIVE, 0.10 (>deadband, <activation) keeps streaming; dropping
+        # below the deadband sends one zero twist then goes quiet.
+        samples = [
+            spacemouse_sample(tx=0.5, buttons=(False,)),
+            spacemouse_sample(tx=0.10, buttons=(False,)),
+            spacemouse_sample(tx=0.01, buttons=(False,)),
+            spacemouse_sample(tx=0.01, buttons=(False,)),
+        ]
+        source = self._source(samples)
+        self.assertIsNotNone(source.next_intent(sample_state(), 1.0))
+        mid = source.next_intent(sample_state(), 1.002)
+        self.assertIsNotNone(mid)
+        self.assertGreater(mid.left["tcp_twist_local"][0], 0.0)
+        zero = source.next_intent(sample_state(), 1.004)
+        self.assertIsNotNone(zero)
+        self.assertEqual(zero.left["tcp_twist_local"], [0.0] * 6)
+        self.assertIsNone(source.next_intent(sample_state(), 1.006))
+
+    def test_startup_neutral_interlock_blocks_deflected_start(self):
+        # Deflected from the first sample: nothing moves until the cap is held
+        # neutral for startup_neutral_hold_sec, then motion works normally.
+        samples = [
+            spacemouse_sample(tx=0.9, buttons=(False,)),   # t=1.000 deflected
+            spacemouse_sample(tx=0.0, buttons=(False,)),   # t=1.100 neutral
+            spacemouse_sample(tx=0.0, buttons=(False,)),   # t=1.500 neutral held
+            spacemouse_sample(tx=0.9, buttons=(False,)),   # t=1.600 deflect -> move
+        ]
+        source = self._source(samples, startup_requires_neutral=True)
+        self.assertIsNone(source.next_intent(sample_state(), 1.0))
+        self.assertIsNone(source.next_intent(sample_state(), 1.1))
+        self.assertIsNone(source.next_intent(sample_state(), 1.5))
+        intent = source.next_intent(sample_state(), 1.6)
+        self.assertIsNotNone(intent)
+        self.assertGreater(intent.left["tcp_twist_local"][0], 0.0)
+
+    def test_stale_sends_zero_once_and_requires_neutral_again(self):
+        # ACTIVE then samples stop: one zero twist after the hold timeout, then
+        # silence; with the interlock on, reconnect must re-confirm neutral.
+        samples = [spacemouse_sample(tx=0.5, buttons=(False,), timestamp_monotonic=1.0)]
+        source = self._source(samples, startup_requires_neutral=True)
+        # startup neutral first (interlock on): feed neutral history
+        source._left_state.neutral_confirmed = True
+        self.assertIsNotNone(source.next_intent(sample_state(), 1.0))
+        # within hold window: last twist held
+        held = source.next_intent(sample_state(), 1.02)
+        self.assertIsNotNone(held)
+        # past hold window: zero once
+        zero = source.next_intent(sample_state(), 1.2)
+        self.assertIsNotNone(zero)
+        self.assertEqual(zero.left["tcp_twist_local"], [0.0] * 6)
+        self.assertIsNone(source.next_intent(sample_state(), 1.4))
+        self.assertFalse(source._left_state.neutral_confirmed)
+
+    def test_deadman_mode_unchanged_by_new_fields(self):
+        # require_deadman=True keeps the legacy gate: deflection without the
+        # button does nothing; with the button it streams.
+        samples = [
+            spacemouse_sample(tx=0.9, buttons=(False,)),
+            spacemouse_sample(tx=0.9, buttons=(True,)),
+        ]
+        source = self._source(samples, require_deadman=True)
+        self.assertIsNone(source.next_intent(sample_state(), 1.0))
+        intent = source.next_intent(sample_state(), 1.002)
+        self.assertIsNotNone(intent)
+        self.assertGreater(intent.left["tcp_twist_local"][0], 0.0)
+
+    def test_per_arm_independence_in_buttonless_mode(self):
+        # Left deflected, right neutral: only left streams; right stays Hold.
+        source = self._source(
+            [spacemouse_sample(tx=0.5, buttons=(False,))],
+            [spacemouse_sample(buttons=(False,))],
+        )
+        intent = source.next_intent(sample_state(), 1.0)
+        self.assertIsNotNone(intent)
+        self.assertGreater(intent.left["tcp_twist_local"][0], 0.0)
+        self.assertEqual(intent.right.get("mode"), "Hold")
 
 
 if __name__ == "__main__":

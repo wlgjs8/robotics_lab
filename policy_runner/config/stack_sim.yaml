@@ -54,6 +54,14 @@ spacemouse_cartesian_dual:
   angular_axis_signs: [-1.0, -1.0, 1.0]
   angular_axis_order: [ry, rx, rz]
   sample_hold_timeout_sec: 0.05
+  # Buttonless teleop: cap deflection is the intent gate (buttons reserved for
+  # future gripper open/close). IDLE->ACTIVE needs activation_deadband
+  # (hysteresis vs deadband); startup/stale-reconnect requires the cap held
+  # neutral for startup_neutral_hold_sec before motion is accepted.
+  require_deadman: false
+  activation_deadband: 0.12
+  startup_requires_neutral: true
+  startup_neutral_hold_sec: 0.3
   left:
     device: null
     path: /dev/hidraw5
@@ -72,11 +80,13 @@ umi_dual_cartesian:
   target_lpf_tau_sec: 0.0
   deadband_linear_m: 0.0015
   deadband_angular_rad: 0.012
-  linear_axis_signs: [-1.0, -1.0, 1.0]
-  angular_axis_signs: [-1.0, -1.0, 1.0]
   delta_frame: tool
-  gripper_offset: [0.172, 0.0, -0.076]
-  r_align: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  # Pose-frame geometry: paired with pika publisher --pose-frame tip (official
+  # tracker→gripper-tip transform on the wire; see stack_real.yaml for details).
+  gripper_offset: [0.0, 0.0, 0.0]
+  r_align: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
+  linear_axis_signs: [1.0, 1.0, 1.0]
+  angular_axis_signs: [1.0, 1.0, 1.0]
   sample_hold_timeout_sec: 0.05
   left:
     udp_endpoint: "udp://0.0.0.0:50380"

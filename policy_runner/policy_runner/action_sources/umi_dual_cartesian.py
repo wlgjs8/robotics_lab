@@ -18,7 +18,11 @@ from policy_runner.robot_state_client import StateSnapshot, parse_udp_endpoint
 from policy_runner.servo_command_client import CommandIntent
 
 
-GRIPPER_OFFSET = (0.172, 0.0, -0.076)
+# Default: no receiver-side offset — the pika publisher already streams the
+# official gripper-tip pose (pika_sdk T_raw·R_corr·Trans(0.172,0,-0.076)).
+# Legacy raw-tracker wire pairs with gripper_offset (0.172, 0.0, -0.076) in
+# config (see rbpodo_pgmode_umi_live.example.yaml fallback block).
+GRIPPER_OFFSET = (0.0, 0.0, 0.0)
 IDENTITY_R_ALIGN = (
     1.0,
     0.0,

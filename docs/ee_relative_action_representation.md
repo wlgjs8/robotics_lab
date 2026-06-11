@@ -102,8 +102,21 @@ existing checkpoints/tests are unaffected; only new training opts into `ee_local
 ### Tool offset (tracker → gripper TCP) — still required
 The recorded pose is the **tracker** pose; the robot controls the **gripper TCP**. Under
 rotation these differ by a lever-arm, so the tracker→TCP offset `T_tcp_umi_gripper`
-(known from Pika CAD, ≈ `(0.172, 0, −0.076)` m, identical Sense/Gripper geometry) must be
-applied **before** computing body-relative deltas. Reuse the existing converter:
+must be applied **before** computing body-relative deltas.
+
+> **Correction (2026-06-11):** the offset is NOT a pure translation. The official
+> pika_sdk transform is `T_tip = T_tracker(raw) · R_corr · Trans(0.172, 0, −0.076)` with
+> `R_corr = Rx(−20°)·[Ry(−90°)·Rx(−90°)]` (hardcoded in `pika_sdk
+> pika/tracker/vive_tracker.py`; the −20° compensates the tilted tracker mount). The
+> `(0.172, 0, −0.076)` translation is defined in the rotation-corrected gripper frame —
+> in the raw tracker frame the lever-arm is `R_corr·t = (0, −0.0126, +0.1876)` m.
+> Earlier text treating `(0.172, 0, −0.076)` as a raw tracker-frame translation is wrong
+> by ≈90°. `R_corr` is defined against the libsurvive raw frame; OpenVR-frame equivalence
+> is pending the calibration clip. Live teleop already ships the tip pose on the wire
+> (publisher `--pose-frame tip`); episodes recorded before 2026-06-11 carry the RAW
+> tracker pose and need the full transform above at conversion time.
+
+Reuse the existing converter:
 
 ```
 umi-convert --output-format robotics_lab_dual_arm \

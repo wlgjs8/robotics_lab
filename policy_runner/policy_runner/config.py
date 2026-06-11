@@ -210,6 +210,14 @@ class DualSpaceMouseCartesianConfig:
     angular_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
     angular_axis_order: tuple[str, ...] = ("rx", "ry", "rz")
     sample_hold_timeout_sec: float = 0.05
+    # Buttonless teleop: require_deadman=False replaces the button gate with an
+    # axis-intent gate (cap deflection beyond activation_deadband starts motion;
+    # neutral sends one zero twist). Startup/reconnect requires the cap held
+    # neutral for startup_neutral_hold_sec first.
+    require_deadman: bool = True
+    activation_deadband: float | None = None
+    startup_requires_neutral: bool = True
+    startup_neutral_hold_sec: float = 0.3
 
     def __post_init__(self) -> None:
         if self.max_linear_velocity_m_s < 0.0:
@@ -228,6 +236,10 @@ class DualSpaceMouseCartesianConfig:
             raise ValueError(
                 "spacemouse_cartesian_dual.angular_axis_order must be a permutation of rx/ry/rz"
             )
+        if self.activation_deadband is not None and self.activation_deadband < 0.0:
+            raise ValueError("spacemouse_cartesian_dual.activation_deadband must be non-negative")
+        if self.startup_neutral_hold_sec < 0.0:
+            raise ValueError("spacemouse_cartesian_dual.startup_neutral_hold_sec must be non-negative")
         if self.sample_hold_timeout_sec <= 0.0:
             raise ValueError("spacemouse_cartesian_dual.sample_hold_timeout_sec must be positive")
 
@@ -274,7 +286,10 @@ class UmiDualCartesianConfig:
     linear_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
     angular_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
     delta_frame: str = "tool"
-    gripper_offset: tuple[float, ...] = (0.172, 0.0, -0.076)
+    # The pika publisher streams the official gripper-tip pose by default
+    # (--pose-frame tip), so the receiver adds no further offset; see
+    # stack_real.yaml for the paired r_align/axis-sign geometry.
+    gripper_offset: tuple[float, ...] = (0.0, 0.0, 0.0)
     r_align: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     workspace_bounds: dict[str, tuple[float, float]] | tuple[float, ...] | None = None
     sample_hold_timeout_sec: float = 0.05
@@ -546,6 +561,14 @@ def _spacemouse_cartesian_dual_config(raw: dict[str, Any]) -> DualSpaceMouseCart
         top_level["angular_axis_order"] = tuple(
             str(axis).lower() for axis in top_level["angular_axis_order"]
         )
+    if "require_deadman" in top_level:
+        top_level["require_deadman"] = bool(top_level["require_deadman"])
+    if "activation_deadband" in top_level and top_level["activation_deadband"] is not None:
+        top_level["activation_deadband"] = float(top_level["activation_deadband"])
+    if "startup_requires_neutral" in top_level:
+        top_level["startup_requires_neutral"] = bool(top_level["startup_requires_neutral"])
+    if "startup_neutral_hold_sec" in top_level:
+        top_level["startup_neutral_hold_sec"] = float(top_level["startup_neutral_hold_sec"])
     return DualSpaceMouseCartesianConfig(left=left, right=right, **top_level)
 
 

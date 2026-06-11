@@ -2503,7 +2503,7 @@ class SelfCollisionOverlayTest(unittest.TestCase):
         }
 
     @staticmethod
-    def _latest(*, violated, physical_real, q_actual, q_sent):
+    def _latest(*, violated, physical_real, q_actual, q_sent, pair="left_stand"):
         store = StateStore(stale_after_sec=5.0)
         arm = {
             "has_valid_joint_state": True,
@@ -2515,39 +2515,68 @@ class SelfCollisionOverlayTest(unittest.TestCase):
             left=dict(arm),
             right=dict(arm),
             self_collision={"enabled": True, "checked": True, "violated": violated,
-                            "pair": "left_stand", "stand_capsule": "lower_column"},
+                            "pair": pair,
+                            "stand_capsule": "lower_column" if pair and "stand" in pair else None},
         )
         assert store.update_from_json_bytes(json.dumps(payload).encode(), received_monotonic=time.monotonic())
         return store.latest()
 
-    def test_real_violation_paints_actual_robot_and_stand_red(self):
+    def test_real_violation_paints_only_the_pair_red(self):
         handles = self._handles()
         latest = self._latest(
-            violated=True, physical_real=True,
+            violated=True, physical_real=True, pair="left_stand",
             q_actual=[1, 2, 3, 4, 5, 6], q_sent=[9, 9, 9, 9, 9, 9])
         update_self_collision_overlay(handles, latest)
-        # Red overlay shown at q_actual; solid robot replaced; stand swapped red.
+        # left_stand pair: red overlay at q_actual for the LEFT arm + stand only;
+        # the right arm stays normal.
         self.assertTrue(handles["left_base_collision"].visible)
+        self.assertFalse(handles["right_base_collision"].visible)
         self.assertTrue(handles["stand_mesh_collision"].visible)
         self.assertFalse(handles["stand_mesh"].visible)
         self.assertFalse(handles["left_base"].visible)
-        self.assertFalse(handles["right_base"].visible)
+        self.assertTrue(handles["right_base"].visible)
         self.assertAlmostEqual(handles["left_urdf_collision"].configs[-1][0], math.radians(1.0))
+        self.assertEqual(handles["right_urdf_collision"].configs, [])
 
-    def test_sim_violation_paints_ghost_red_and_keeps_solid(self):
+    def test_sim_violation_paints_ghost_pair_red_and_keeps_solid(self):
         handles = self._handles()
         latest = self._latest(
-            violated=True, physical_real=False,
+            violated=True, physical_real=False, pair="left_stand",
             q_actual=[1, 2, 3, 4, 5, 6], q_sent=[9, 8, 7, 6, 5, 4])
         update_self_collision_overlay(handles, latest)
-        # Red overlay shown at q_sent (the commanded ghost pose); ghost hidden;
-        # the solid robot keeps showing the true state.
+        # Red overlay shown at q_sent (the commanded ghost pose) for the LEFT arm;
+        # only that ghost is replaced; the right ghost and the solid robots stay.
         self.assertTrue(handles["left_base_collision"].visible)
+        self.assertFalse(handles["right_base_collision"].visible)
         self.assertFalse(handles["left_base_ref"].visible)
-        self.assertFalse(handles["right_base_ref"].visible)
+        self.assertIsNone(handles["right_base_ref"].visible)  # untouched
         self.assertTrue(handles["left_base"].visible)
         self.assertTrue(handles["stand_mesh_collision"].visible)
         self.assertAlmostEqual(handles["left_urdf_collision"].configs[-1][0], math.radians(9.0))
+
+    def test_left_right_pair_keeps_stand_normal(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair="left_right",
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertTrue(handles["right_base_collision"].visible)
+        self.assertFalse(handles["stand_mesh_collision"].visible)
+        self.assertTrue(handles["stand_mesh"].visible)
+        self.assertFalse(handles["left_base"].visible)
+        self.assertFalse(handles["right_base"].visible)
+
+    def test_unknown_pair_falls_back_to_all_red(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair=None,
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertTrue(handles["right_base_collision"].visible)
+        self.assertTrue(handles["stand_mesh_collision"].visible)
+        self.assertFalse(handles["stand_mesh"].visible)
 
     def test_clear_state_restores_normal_models(self):
         handles = self._handles()
@@ -2556,9 +2585,11 @@ class SelfCollisionOverlayTest(unittest.TestCase):
             q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
         update_self_collision_overlay(handles, latest)
         self.assertFalse(handles["left_base_collision"].visible)
+        self.assertFalse(handles["right_base_collision"].visible)
         self.assertFalse(handles["stand_mesh_collision"].visible)
         self.assertTrue(handles["stand_mesh"].visible)
         self.assertTrue(handles["left_base"].visible)
+        self.assertTrue(handles["right_base"].visible)
         self.assertEqual(handles["left_urdf_collision"].configs, [])
 
 

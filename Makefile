@@ -21,8 +21,8 @@ export FLOW_EXPECTED_GPU_COUNT FLOW_RUN_UID FLOW_RUN_GID
 #   make run MODE=sim         -> pgmode controller-simulation
 #   make run SRC=umi          -> UMI tracker teleop
 #   make run VERBOSE=1        -> live teleop input + send/drop stats
-MODE ?= sim #real
-SRC ?= umi
+MODE ?= real #real
+SRC ?= umi #spacemouse
 run:
 	./tools/run_stack.sh $(MODE) $(SRC)
 

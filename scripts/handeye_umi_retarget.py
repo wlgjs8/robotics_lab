@@ -25,8 +25,11 @@ T_tcp_umi_gripper note
 ----------------------
 The retarget's `T_tcp_umi_gripper` is the UMI *device's* tracker->gripper offset during
 data collection -- NOT the mount (Y) used here. It is known from the PIKA SDK:
-GRIPPER_OFFSET = (0.172, 0.0, -0.076) m = gripper origin expressed in the tracker-local
-frame. Downstream applies (umi_pipeline._retarget_poses):
+GRIPPER_OFFSET = (0.172, 0.0, -0.076) m. CORRECTION (2026-06-11): this translation is
+defined in the rotation-corrected gripper frame, not tracker-local — the full official
+transform is T_tip = T_raw . R_corr . Trans(0.172,0,-0.076) with R_corr =
+Rx(-20deg).[Ry(-90deg).Rx(-90deg)] (raw-frame lever-arm (0,-0.0126,+0.1876) m).
+Downstream applies (umi_pipeline._retarget_poses):
 
     converted = T_stand_source . umi_pose . inverse(T_tcp_umi_gripper)
 
