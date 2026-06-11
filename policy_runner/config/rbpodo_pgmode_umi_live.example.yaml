@@ -58,7 +58,8 @@ umi_dual_cartesian:
   # flipped. Entries must be -1 or 1. This replaces the earlier Rz(180deg)
   # r_align workaround (which could not flip yaw without also flipping z).
   linear_axis_signs: [-1.0, -1.0, 1.0]
-  angular_axis_signs: [-1.0, -1.0, -1.0]
+  # angular_axis_signs: [-1.0, -1.0, -1.0]
+  angular_axis_signs: [-1.0, -1.0, 1.0]
   # world: take the tracker delta in the gravity-aligned tracker WORLD frame
   # and apply it along stand axes, so horizontal hand motion stays horizontal
   # at the robot regardless of the tool/TCP orientation at latch time.
