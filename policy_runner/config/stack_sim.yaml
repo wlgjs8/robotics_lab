@@ -2,13 +2,17 @@ schema: robotics_lab.policy_runner.v1
 # =====================================================================================
 # STACK CONFIG (SIM) — single source of truth for `make run MODE=sim`.
 # Pairs with rb_servo_server/config/local/stack_sim.yaml (pgmode controller-simulation).
-# Both teleop sources are configured; pick one at launch:
-#   --action-source dual_spacemouse_cartesian   (default below)
-#   --action-source umi_dual_cartesian
+# Both teleop sources run side by side (action_source: teleop_mux): the first
+# source to engage (SpaceMouse cap deflection / UMI deadman) owns the whole
+# robot until it returns to idle. To isolate one source for debugging:
+#   --action-source dual_spacemouse_cartesian | umi_dual_cartesian
 # Real/sim env gates are retired; no RB_ALLOW_* envs are needed.
 # =====================================================================================
 mode: real
-action_source: dual_spacemouse_cartesian
+action_source: teleop_mux
+teleop_mux:
+  # Owner when both sources engage on the very same tick.
+  tie_break: umi
 runtime:
   startup_timeout_sec: 5.0
 geometry:

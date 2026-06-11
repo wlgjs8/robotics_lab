@@ -15,14 +15,14 @@ export FLOW_EXPECTED_GPU_COUNT FLOW_RUN_UID FLOW_RUN_GID
 .PHONY: run vm-up vm-down vm-status build deploy stop policy-train policy-flow-train-config policy-flow-train-build policy-flow-gpu-smoke policy-flow-train-preflight policy-flow-hdf5-audit policy-flow-train-up policy-flow-train-down policy-hdf5-audit-smoke policy-flow-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up pgmode-sim-build pgmode-sim-up pgmode-sim-down
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
-#   make run                  -> pgmode real, SpaceMouse
+# SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
+# owns the robot until idle; a missing SpaceMouse degrades to UMI-only).
+#   make run                  -> pgmode real
 #   make run MODE=sim         -> pgmode controller-simulation
-#   make run SRC=umi          -> UMI tracker teleop
 #   make run VERBOSE=1        -> live teleop input + send/drop stats
-MODE ?= real #real
-SRC ?= umi #spacemouse
+MODE ?= real
 run:
-	./tools/run_stack.sh $(MODE) $(SRC)
+	./tools/run_stack.sh $(MODE)
 
 # Rainbow VIRTUAL control-box VMs (vendor OVA): boot 2 VMs and map them to the
 # real controller IPs so `make run MODE=sim` works without hardware.

@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Launch the full teleop stack with one command:
-#   rb_servo_server (pgmode real|sim) + viser GUI + policy_runner (spacemouse|umi)
+#   rb_servo_server (pgmode real|sim) + viser GUI + policy_runner (teleop mux)
+#
+# Both teleop sources (SpaceMouse + UMI) run side by side: the first to engage
+# owns the robot until it returns to idle (policy_runner action_source
+# teleop_mux). A missing SpaceMouse degrades to UMI-only.
 #
 # Usage:
-#   tools/run_stack.sh [real|sim] [spacemouse|umi]
-#   make run                    # real + spacemouse
-#   make run MODE=sim SRC=umi
+#   tools/run_stack.sh [real|sim]
+#   make run                    # real
+#   make run MODE=sim
 #
 # Configs (the only two per layer — keep these the source of truth):
 #   rb_servo_server/config/local/stack_real.yaml | stack_sim.yaml
@@ -20,17 +24,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MODE="${1:-real}"
-SRC="${2:-spacemouse}"
 
 case "$MODE" in
   real|sim) ;;
-  *) echo "usage: $0 [real|sim] [spacemouse|umi]" >&2; exit 2 ;;
+  *) echo "usage: $0 [real|sim]" >&2; exit 2 ;;
 esac
-case "$SRC" in
-  spacemouse) ACTION_SOURCE="dual_spacemouse_cartesian" ;;
-  umi)        ACTION_SOURCE="umi_dual_cartesian" ;;
-  *) echo "usage: $0 [real|sim] [spacemouse|umi]" >&2; exit 2 ;;
-esac
+# Single teleop entrypoint: SpaceMouse + UMI side by side (idle handoff).
+# To isolate one source for debugging, run policy_runner manually with
+# --action-source dual_spacemouse_cartesian | umi_dual_cartesian.
+ACTION_SOURCE="teleop_mux"
 
 SERVER_BIN="rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
 SERVER_CFG="rb_servo_server/config/local/stack_${MODE}.yaml"
@@ -63,7 +65,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "[stack] mode=$MODE source=$SRC"
+echo "[stack] mode=$MODE source=$ACTION_SOURCE (spacemouse + umi side by side)"
 echo "[stack] server: $SERVER_CFG"
 "$SERVER_BIN" --config "$SERVER_CFG" >"$LOG_DIR/server.log" 2>&1 &
 PIDS+=($!)

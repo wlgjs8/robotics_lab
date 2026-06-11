@@ -16,6 +16,7 @@ from .action_sources import (
     SpaceMouseCartesianActionSource,
     SpaceMouseJointVelocityActionSource,
     TcpDeltaActionSource,
+    TeleopMuxActionSource,
     UmiDualCartesianActionSource,
 )
 from .config import PolicyRunnerConfig, load_config
@@ -49,8 +50,9 @@ def main(argv: list[str] | None = None) -> int:
             "--action-source",
             default=None,
             help=(
-                "override config.action_source (e.g. dual_spacemouse_cartesian, "
-                "umi_dual_cartesian) — lets one stack config serve every teleop source"
+                "override config.action_source (e.g. teleop_mux, "
+                "dual_spacemouse_cartesian, umi_dual_cartesian) — debug aid to "
+                "isolate one teleop source; the stack default is teleop_mux"
             ),
         )
         parser.add_argument(
@@ -298,52 +300,68 @@ def make_action_source(config: PolicyRunnerConfig):
             ),
         )
     if config.action_source == "dual_spacemouse_cartesian":
-        left = config.spacemouse_cartesian_dual.left
-        right = config.spacemouse_cartesian_dual.right
-        return DualSpaceMouseCartesianActionSource(
-            left_reader=_spacemouse_reader_from_device_config(left),
-            right_reader=_spacemouse_reader_from_device_config(right),
-            frame=config.spacemouse_cartesian_dual.frame,
-            max_linear_velocity_m_s=config.spacemouse_cartesian_dual.max_linear_velocity_m_s,
-            max_angular_velocity_rad_s=config.spacemouse_cartesian_dual.max_angular_velocity_rad_s,
-            deadband=config.spacemouse_cartesian_dual.deadband,
-            response_curve_gamma=config.spacemouse_cartesian_dual.response_curve_gamma,
-            linear_axis_signs=config.spacemouse_cartesian_dual.linear_axis_signs,
-            angular_axis_signs=config.spacemouse_cartesian_dual.angular_axis_signs,
-            angular_axis_order=config.spacemouse_cartesian_dual.angular_axis_order,
-            sample_hold_timeout_sec=config.spacemouse_cartesian_dual.sample_hold_timeout_sec,
-            require_deadman=config.spacemouse_cartesian_dual.require_deadman,
-            activation_deadband=config.spacemouse_cartesian_dual.activation_deadband,
-            startup_requires_neutral=config.spacemouse_cartesian_dual.startup_requires_neutral,
-            startup_neutral_hold_sec=config.spacemouse_cartesian_dual.startup_neutral_hold_sec,
-            left_deadman_button=left.deadman_button,
-            right_deadman_button=right.deadman_button,
-            timeout_sec=config.servo_command.timeout_sec,
-            allow_rbpodo_controller_simulation=(
-                config.safety.allow_rbpodo_controller_simulation_cartesian
-            ),
-        )
+        return _make_dual_spacemouse_cartesian_source(config)
     if config.action_source == "umi_dual_cartesian":
-        umi = config.umi_dual_cartesian
-        return UmiDualCartesianActionSource(
-            left_reader=_umi_reader_from_config(umi.left, "left"),
-            right_reader=_umi_reader_from_config(umi.right, "right"),
-            max_linear_step_m=umi.max_linear_step_m,
-            max_angular_step_rad=umi.max_angular_step_rad,
-            input_moving_average_window=umi.input_moving_average_window,
-            target_lpf_tau_sec=umi.target_lpf_tau_sec,
-            deadband_linear_m=umi.deadband_linear_m,
-            deadband_angular_rad=umi.deadband_angular_rad,
-            linear_axis_signs=umi.linear_axis_signs,
-            angular_axis_signs=umi.angular_axis_signs,
-            delta_frame=umi.delta_frame,
-            gripper_offset=umi.gripper_offset,
-            r_align=umi.r_align,
-            workspace_bounds=umi.workspace_bounds,
-            sample_hold_timeout_sec=umi.sample_hold_timeout_sec,
-            timeout_sec=config.servo_command.timeout_sec,
+        return _make_umi_dual_cartesian_source(config)
+    if config.action_source == "teleop_mux":
+        return TeleopMuxActionSource(
+            _make_dual_spacemouse_cartesian_source(config),
+            _make_umi_dual_cartesian_source(config),
+            tie_break=config.teleop_mux.tie_break,
         )
     raise ValueError(f"unknown action_source: {config.action_source}")
+
+
+def _make_dual_spacemouse_cartesian_source(
+    config: PolicyRunnerConfig,
+) -> DualSpaceMouseCartesianActionSource:
+    left = config.spacemouse_cartesian_dual.left
+    right = config.spacemouse_cartesian_dual.right
+    return DualSpaceMouseCartesianActionSource(
+        left_reader=_spacemouse_reader_from_device_config(left),
+        right_reader=_spacemouse_reader_from_device_config(right),
+        frame=config.spacemouse_cartesian_dual.frame,
+        max_linear_velocity_m_s=config.spacemouse_cartesian_dual.max_linear_velocity_m_s,
+        max_angular_velocity_rad_s=config.spacemouse_cartesian_dual.max_angular_velocity_rad_s,
+        deadband=config.spacemouse_cartesian_dual.deadband,
+        response_curve_gamma=config.spacemouse_cartesian_dual.response_curve_gamma,
+        linear_axis_signs=config.spacemouse_cartesian_dual.linear_axis_signs,
+        angular_axis_signs=config.spacemouse_cartesian_dual.angular_axis_signs,
+        angular_axis_order=config.spacemouse_cartesian_dual.angular_axis_order,
+        sample_hold_timeout_sec=config.spacemouse_cartesian_dual.sample_hold_timeout_sec,
+        require_deadman=config.spacemouse_cartesian_dual.require_deadman,
+        activation_deadband=config.spacemouse_cartesian_dual.activation_deadband,
+        startup_requires_neutral=config.spacemouse_cartesian_dual.startup_requires_neutral,
+        startup_neutral_hold_sec=config.spacemouse_cartesian_dual.startup_neutral_hold_sec,
+        left_deadman_button=left.deadman_button,
+        right_deadman_button=right.deadman_button,
+        timeout_sec=config.servo_command.timeout_sec,
+        allow_rbpodo_controller_simulation=(
+            config.safety.allow_rbpodo_controller_simulation_cartesian
+        ),
+    )
+
+
+def _make_umi_dual_cartesian_source(config: PolicyRunnerConfig) -> UmiDualCartesianActionSource:
+    umi = config.umi_dual_cartesian
+    return UmiDualCartesianActionSource(
+        left_reader=_umi_reader_from_config(umi.left, "left"),
+        right_reader=_umi_reader_from_config(umi.right, "right"),
+        max_linear_step_m=umi.max_linear_step_m,
+        max_angular_step_rad=umi.max_angular_step_rad,
+        input_moving_average_window=umi.input_moving_average_window,
+        target_lpf_tau_sec=umi.target_lpf_tau_sec,
+        deadband_linear_m=umi.deadband_linear_m,
+        deadband_angular_rad=umi.deadband_angular_rad,
+        linear_axis_signs=umi.linear_axis_signs,
+        angular_axis_signs=umi.angular_axis_signs,
+        delta_frame=umi.delta_frame,
+        gripper_offset=umi.gripper_offset,
+        r_align=umi.r_align,
+        workspace_bounds=umi.workspace_bounds,
+        sample_hold_timeout_sec=umi.sample_hold_timeout_sec,
+        timeout_sec=config.servo_command.timeout_sec,
+    )
 
 
 def _spacemouse_reader_from_device_config(device_config) -> SpaceMouseReader:

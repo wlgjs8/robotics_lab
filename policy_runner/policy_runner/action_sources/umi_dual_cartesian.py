@@ -192,6 +192,21 @@ class UmiDualCartesianActionSource:
             timeout_sec=self.timeout_sec,
         )
 
+    @property
+    def engaged(self) -> bool:
+        """True while either arm's deadman clutch is latched. Used by
+        TeleopMuxActionSource."""
+        return self._left.was_armed or self._right.was_armed
+
+    def reset_engagement(self) -> None:
+        """Clear both arms' relative-init latches (mux suppression hook): a
+        suppressed source must never accumulate clutch state, so a later
+        takeover re-latches arm_init/pika_init fresh from the live snapshot.
+        The moving-average buffers stay warm (they fill from the reader stream
+        independently of the latches)."""
+        _clear_latches(self._left)
+        _clear_latches(self._right)
+
     def close(self) -> None:
         self.left_reader.close()
         self.right_reader.close()

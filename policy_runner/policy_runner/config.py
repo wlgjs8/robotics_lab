@@ -322,6 +322,20 @@ class UmiDualCartesianConfig:
 
 
 @dataclass(frozen=True)
+class TeleopMuxConfig:
+    """SpaceMouse + UMI side-by-side teleop (action_source: teleop_mux).
+
+    tie_break picks the owner when both sources engage on the same tick;
+    otherwise the first source to engage owns the robot until it idles."""
+
+    tie_break: str = "umi"
+
+    def __post_init__(self) -> None:
+        if self.tie_break not in {"spacemouse", "umi"}:
+            raise ValueError("teleop_mux.tie_break must be spacemouse or umi")
+
+
+@dataclass(frozen=True)
 class MasterArmJointConfig:
     config_path: str = ""
     python_module_dir: str = ""
@@ -385,6 +399,7 @@ class PolicyRunnerConfig:
         default_factory=DualSpaceMouseCartesianConfig
     )
     umi_dual_cartesian: UmiDualCartesianConfig = field(default_factory=UmiDualCartesianConfig)
+    teleop_mux: TeleopMuxConfig = field(default_factory=TeleopMuxConfig)
     master_arm_joint: MasterArmJointConfig = field(default_factory=MasterArmJointConfig)
     command_rate_hz: float = 500.0
 
@@ -424,6 +439,7 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
             _section(raw, "spacemouse_cartesian_dual")
         ),
         umi_dual_cartesian=_umi_dual_cartesian_config(_section(raw, "umi_dual_cartesian")),
+        teleop_mux=_teleop_mux_config(_section(raw, "teleop_mux")),
         master_arm_joint=_master_arm_joint_config(_section(raw, "master_arm_joint")),
         command_rate_hz=float(raw.get("command_rate_hz", 500.0)),
     )
@@ -646,6 +662,12 @@ def _umi_reader_config(raw: dict[str, Any]) -> UmiPoseReaderConfig:
     if "udp_endpoint" in raw and raw["udp_endpoint"] is not None:
         raw["udp_endpoint"] = str(raw["udp_endpoint"])
     return UmiPoseReaderConfig(**raw)
+
+
+def _teleop_mux_config(raw: dict[str, Any]) -> TeleopMuxConfig:
+    if "tie_break" in raw:
+        raw["tie_break"] = str(raw["tie_break"])
+    return TeleopMuxConfig(**raw)
 
 
 def _master_arm_joint_config(raw: dict[str, Any]) -> MasterArmJointConfig:

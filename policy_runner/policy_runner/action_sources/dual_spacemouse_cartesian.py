@@ -131,6 +131,19 @@ class DualSpaceMouseCartesianActionSource:
             return None
         return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
 
+    @property
+    def engaged(self) -> bool:
+        """True while either arm is actively streaming (deadman held / cap
+        deflected past the activation gate). Used by TeleopMuxActionSource."""
+        return self._left_state.active or self._right_state.active
+
+    def reset_engagement(self) -> None:
+        """Drop both arms back to IDLE (mux suppression hook). The buttonless
+        neutral interlock is left intact: it guards startup/stale-reconnect,
+        not handoff, and the cap re-arms via activation_deadband hysteresis."""
+        self._left_state.reset_engagement()
+        self._right_state.reset_engagement()
+
     def _side_state_label(self, state: "_SideState") -> str:
         if self.require_deadman:
             return "ARMED" if state.active else "DISARMED"
