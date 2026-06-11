@@ -234,8 +234,9 @@ bool testControllerSimulationGateConfig() {
         "cartesian_control:\n"
         "  allow_in_controller_simulation: true\n";
 
+    // Real/sim env gates retired: the config loads without RB_ALLOW_REAL_* envs.
     const std::string missing_real_env_path = writeTempConfig("controller-sim-missing-real-env", valid_body);
-    RB_CHECK(loadRejects(missing_real_env_path));
+    (void)rb_servo::loadConfigFromYaml(missing_real_env_path);
     ::unlink(missing_real_env_path.c_str());
 
     allow_real.set("1");

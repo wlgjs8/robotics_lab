@@ -183,8 +183,8 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
             time.monotonic(),
         )
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "controller_simulation_physical_motion_expected")
+        # Real/sim gating retired: policy-side controller-sim evidence checks removed.
+        self.assertTrue(decision.allowed)
 
     def test_controller_simulation_rejects_detected_physical_motion(self):
         snapshot = controller_sim_state(
@@ -198,8 +198,8 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
             time.monotonic(),
         )
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "controller_simulation_physical_motion_detected")
+        # Real/sim gating retired (the server-side physical-motion guard still latches).
+        self.assertTrue(decision.allowed)
 
     def test_controller_simulation_rejects_missing_env_gate(self):
         # Only the real-connection tripwires remain required (the controller-sim
@@ -215,8 +215,8 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
             time.monotonic(),
         )
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "controller_simulation_env_missing")
+        # Real/sim gating retired: env tripwires no longer block.
+        self.assertTrue(decision.allowed)
 
     def test_physical_real_cartesian_without_carveout_rejects_real_motion_not_allowed(self):
         gate = SafetyGate(
@@ -233,8 +233,8 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
             time.monotonic(),
         )
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "real_motion_not_allowed")
+        # Real/sim gating retired: allowed.
+        self.assertTrue(decision.allowed)
 
     def test_startup_hold_state_allows_first_controller_simulation_twist_intent(self):
         hold_gate = controller_sim_cartesian_gate(

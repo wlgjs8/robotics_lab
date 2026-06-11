@@ -100,7 +100,8 @@ enum class ControlMode {
     TcpTwistStand,
     TcpTwistLocal,
     EmergencyStop,
-    ResetFault
+    ResetFault,
+    SetSafetyFloorZ
 };
 
 enum class ServerMotionState {
@@ -149,6 +150,7 @@ enum class SafetyVerdict {
     CartesianUnavailable,
     IkFailed,
     SelfCollision,
+    FloorViolation,
     UnknownError
 };
 
@@ -467,6 +469,10 @@ struct DualArmCommand {
     ArmCommand left;
     ArmCommand right;
 
+    // SetSafetyFloorZ payload: requested stand-frame floor plane height (meters).
+    double floor_z_m = 0.0;
+    bool has_floor_z = false;
+
     // Deprecated in v3. Commands are treated as coupled by default: if a packet
     // becomes stale, both arms hold. Per-arm command streams should use separate
     // timestamps in a future binary protocol.
@@ -716,6 +722,22 @@ struct ServoSnapshot {
     double self_collision_margin_m = 0.0;
     int self_collision_left_bone = -1;
     int self_collision_right_bone = -1;
+
+    // Stand-frame floor plane constraint telemetry (safety.floor_constraint).
+    bool floor_constraint_enabled = false;
+    bool floor_constraint_monitor_only = false;
+    double floor_constraint_z_min_m = 0.0;         // effective (runtime) plane height
+    double floor_constraint_config_z_min_m = 0.0;  // startup config value
+    double floor_constraint_runtime_min_z_m = 0.0;
+    double floor_constraint_runtime_max_z_m = 0.0;
+    bool floor_constraint_left_checked = false;
+    bool floor_constraint_left_violated = false;
+    double floor_constraint_left_tcp_z_m = 0.0;
+    bool floor_constraint_right_checked = false;
+    bool floor_constraint_right_violated = false;
+    double floor_constraint_right_tcp_z_m = 0.0;
+    uint64_t floor_constraint_clamp_count = 0;
+    std::string floor_constraint_last_set_reject_reason;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;

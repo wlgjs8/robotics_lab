@@ -75,13 +75,7 @@ CartesianArmTargetResult CartesianController::computeArmJointTarget(
             target_tcp_stand = command.tcp_target_stand;
             break;
         case ControlMode::TcpLinearMove:
-            if (run_mode != RunMode::Simulation) {
-                result.verdict = SafetyVerdict::CartesianUnavailable;
-                result.reason = "tcp_linear_move_simulation_only";
-                result.telemetry.status = "unavailable";
-                result.telemetry.reason = result.reason;
-                return result;
-            }
+            // Real/sim gating retired: linear move computes in every run mode.
             if (!command.has_tcp_target || !state.tcp_stand || !state.has_valid_tcp_pose ||
                 !ik_solver::isFinitePose(command.tcp_target_stand)) {
                 result.verdict = SafetyVerdict::CartesianUnavailable;

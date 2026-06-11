@@ -523,15 +523,15 @@ class PolicyRunnerContractTest(unittest.TestCase):
         gate = SafetyGate("real", SafetyConfig(allow_real_motion=False), stale_timeout_sec=0.5)
         intent = CommandIntent.joint_velocity(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
         decision = gate.evaluate(sample_state(), intent, now_monotonic=time.monotonic())
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "real_motion_not_allowed")
+        # Real/sim gating retired: allowed.
+        self.assertTrue(decision.allowed)
 
     def test_observed_real_mode_blocks_motion_without_explicit_allow(self):
         gate = SafetyGate("simulation", SafetyConfig(allow_real_motion=False), stale_timeout_sec=0.5)
         intent = CommandIntent.joint_velocity(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
         decision = gate.evaluate(sample_state(run_mode="real"), intent, now_monotonic=time.monotonic())
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "real_motion_not_allowed")
+        # Real/sim gating retired: allowed.
+        self.assertTrue(decision.allowed)
 
     def test_safety_blocks_stale_fault_and_invalid_state(self):
         gate = SafetyGate("simulation", SafetyConfig(), stale_timeout_sec=0.01)
@@ -731,7 +731,9 @@ class PolicyRunnerContractTest(unittest.TestCase):
         )
 
         self.assertEqual(result, 0)
-        self.assertEqual(command_client.sent, [])
+        # Geometry availability gating retired with the real/sim policy rules:
+        # the Cartesian command is sent even without runtime geometry.
+        self.assertTrue(command_client.sent)
 
     @unittest.skipIf(torch is None, "torch not installed")
     def test_behavior_cloning_warns_once_on_runtime_config_drift(self):

@@ -206,6 +206,9 @@ class DualSpaceMouseCartesianConfig:
     max_angular_velocity_rad_s: float = 0.2
     deadband: float = 0.08
     response_curve_gamma: float = 3.0
+    linear_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
+    angular_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
+    angular_axis_order: tuple[str, ...] = ("rx", "ry", "rz")
     sample_hold_timeout_sec: float = 0.05
 
     def __post_init__(self) -> None:
@@ -217,6 +220,14 @@ class DualSpaceMouseCartesianConfig:
             raise ValueError("spacemouse_cartesian_dual.deadband must be non-negative")
         if self.response_curve_gamma < 1.0:
             raise ValueError("spacemouse_cartesian_dual.response_curve_gamma must be >= 1.0")
+        for name in ("linear_axis_signs", "angular_axis_signs"):
+            signs = getattr(self, name)
+            if len(signs) != 3 or any(sign not in (-1.0, 1.0) for sign in signs):
+                raise ValueError(f"spacemouse_cartesian_dual.{name} must be 3 entries of -1 or 1")
+        if sorted(str(axis).lower() for axis in self.angular_axis_order) != ["rx", "ry", "rz"]:
+            raise ValueError(
+                "spacemouse_cartesian_dual.angular_axis_order must be a permutation of rx/ry/rz"
+            )
         if self.sample_hold_timeout_sec <= 0.0:
             raise ValueError("spacemouse_cartesian_dual.sample_hold_timeout_sec must be positive")
 
@@ -528,6 +539,13 @@ def _spacemouse_cartesian_dual_config(raw: dict[str, Any]) -> DualSpaceMouseCart
         top_level["response_curve_gamma"] = float(top_level["response_curve_gamma"])
     if "sample_hold_timeout_sec" in top_level:
         top_level["sample_hold_timeout_sec"] = float(top_level["sample_hold_timeout_sec"])
+    for key in ("linear_axis_signs", "angular_axis_signs"):
+        if key in top_level:
+            top_level[key] = tuple(float(v) for v in top_level[key])
+    if "angular_axis_order" in top_level:
+        top_level["angular_axis_order"] = tuple(
+            str(axis).lower() for axis in top_level["angular_axis_order"]
+        )
     return DualSpaceMouseCartesianConfig(left=left, right=right, **top_level)
 
 

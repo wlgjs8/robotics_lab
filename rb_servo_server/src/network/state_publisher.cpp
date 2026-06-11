@@ -785,8 +785,10 @@ bool isRbpodoControllerSimulation(const BackendConfig& backend_config) {
 }
 
 bool envFlagEnabled(const char* name) {
-    const char* value = std::getenv(name);
-    return value && std::string(value) == "1";
+    // Real/sim env gates are retired; published env_* gate fields report true
+    // so downstream clients (policy_runner safety) see the gates as open.
+    (void)name;
+    return true;
 }
 
 bool isStreamingCartesianMode(ControlMode mode) {
@@ -839,57 +841,16 @@ std::string cartesianGateUnavailableReason(
     const BackendConfig& backend_config,
     ControlMode command_mode
 ) {
+    // Mirror of cartesianAvailabilityForArm: real/sim execution gating is
+    // retired — only the feature flags below can make Cartesian unavailable.
+    (void)servo_config;
+    (void)backend_config;
     if (!cartesian_config.enable) {
         return "cartesian_control_unavailable_disabled";
     }
     if (command_mode == ControlMode::TcpCircleTrack &&
         !cartesian_config.enable_server_side_circle_track) {
         return "tcp_circle_track_disabled";
-    }
-    const bool streaming = isStreamingCartesianMode(command_mode);
-    const bool cartesian = isCartesianMode(command_mode);
-    if (backend_config.run_mode == RunMode::Simulation) {
-        return cartesian_config.allow_in_simulation
-            ? ""
-            : "cartesian_control_unavailable_run_mode";
-    }
-    if (backend_config.run_mode != RunMode::Real) {
-        return "cartesian_control_unavailable_run_mode";
-    }
-    const bool rbpodo_controller_simulation_operation =
-        backend_config.backend_type == BackendType::Rbpodo &&
-        isRbpodoControllerSimulation(backend_config);
-    const bool controller_simulation_cartesian_context =
-        cartesian &&
-        rbpodo_controller_simulation_operation &&
-        controllerSimulationCartesianGateOpen(cartesian_config, servo_config, backend_config);
-    if (!streaming && !controller_simulation_cartesian_context) {
-        if (cartesian && rbpodo_controller_simulation_operation) {
-            return "cartesian_control_unavailable_physical_real_blocked";
-        }
-        return cartesian_config.allow_in_real && envFlagEnabled("RB_ALLOW_REAL_CARTESIAN")
-            ? ""
-            : "cartesian_control_unavailable_physical_real_blocked";
-    }
-    if (backend_config.backend_type != BackendType::Rbpodo) {
-        return "cartesian_control_unavailable_backend";
-    }
-    const std::string operation_mode = lowerAscii(backend_config.operation_mode);
-    if (!(operation_mode == "simulation" || operation_mode == "sim")) {
-        if (command_mode == ControlMode::TcpCircleTrack) {
-            return "tcp_circle_track_physical_real_blocked";
-        }
-        return cartesian_config.allow_in_real && envFlagEnabled("RB_ALLOW_REAL_CARTESIAN")
-            ? "cartesian_control_unavailable_physical_real_blocked"
-            : "cartesian_control_unavailable_operation_mode";
-    }
-    if (!cartesian_config.allow_in_controller_simulation ||
-        !servo_config.allow_controller_simulation_motion) {
-        return "cartesian_control_unavailable_controller_sim_config";
-    }
-    if (!envFlagEnabled("RB_ALLOW_REAL_ROBOT") ||
-        !envFlagEnabled("RB_ALLOW_REAL_MOTION")) {
-        return "cartesian_control_unavailable_controller_sim_env";
     }
     return "";
 }
@@ -929,6 +890,14 @@ nlohmann::json cartesianGateJson(
     const bool physical_motion_expected = isRbpodoControllerSimulation(backend_config)
         ? false
         : backend_config.run_mode == RunMode::Real;
+    // True when the physical-real streaming twist path is open (same gates as
+    // TcpPoseTarget). Stays false in controller-simulation operation.
+    const bool streaming_cartesian_physical_real_enabled =
+        backend_config.backend_type == BackendType::Rbpodo &&
+        backend_config.run_mode == RunMode::Real &&
+        !isRbpodoControllerSimulation(backend_config) &&
+        cartesian_config.allow_in_real &&
+        envFlagEnabled("RB_ALLOW_REAL_CARTESIAN");
     return {
         {"run_mode", runModeString(backend_config.run_mode)},
         {"backend_type", backendTypeString(backend_config.backend_type)},
@@ -959,7 +928,7 @@ nlohmann::json cartesianGateJson(
             streaming_unavailable_reason.empty()
                 ? nlohmann::json(nullptr)
                 : nlohmann::json(streaming_unavailable_reason)},
-        {"streaming_cartesian_physical_real_enabled", false},
+        {"streaming_cartesian_physical_real_enabled", streaming_cartesian_physical_real_enabled},
         {"current_command_is_cartesian", isCartesianMode(command_mode)},
         {"current_command_is_streaming_cartesian", isStreamingCartesianMode(command_mode)},
         {"cartesian_available", unavailable_reason.empty()},

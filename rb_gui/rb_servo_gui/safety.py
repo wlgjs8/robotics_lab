@@ -81,7 +81,7 @@ class OperatorSafety:
         observed_backend: Backend | str | None = None,
         sim_readiness: Readiness | None = None,
         ops_available: bool = False,
-        enable_tcp_pose_commands: bool = False,
+        enable_tcp_pose_commands: bool = True,
         enable_controller_sim_cartesian: bool = False,
         max_jog_step_deg: float = 2.0,
         max_tcp_linear_step_m: float = 0.005,
@@ -171,8 +171,6 @@ class OperatorSafety:
                 fault=False,
                 no_go_reason="" if connected and self.sim_readiness.ready else (self.sim_readiness.no_go_reason or "simulation readiness tests have not passed"),
             )
-        if self.observed_server_mode == "real":
-            return Readiness(configured=True, running=True, connected=connected, ready=False, fault=fault, no_go_reason="real mode is connect/status only")
         if server_fault:
             return Readiness(configured=True, running=True, connected=connected, ready=False, fault=True, no_go_reason="server fault latched")
         if backend_fault:
@@ -182,10 +180,8 @@ class OperatorSafety:
         return Readiness(configured=True, running=True, connected=connected, ready=connected, fault=False)
 
     def blocked_reason(self, action: str) -> str | None:
-        if self.desired_mode == "real" or self.observed_server_mode == "real":
-            return "real mode is connect/status only; motion commands are disabled"
-        if self.desired_mode != self.observed_server_mode:
-            return "desired mode differs from observed server mode; no unsafe hot-switch is performed"
+        # Real/sim execution gating retired: real mode is no longer
+        # connect/status-only and mode mismatch does not block commands.
         latest = self.latest_valid()
         if latest is None:
             return "state stream missing or stale"
@@ -204,22 +200,9 @@ class OperatorSafety:
         return bool(arm_state.has_valid_tcp_pose and arm_state.tcp_stand is not None and not arm_state.tcp_deferred)
 
     def tcp_command_disabled_reason(self, arm: Literal["left", "right"] | None = None) -> str | None:
-        if not self.enable_tcp_pose_commands:
-            return "TCP pose command disabled until RB_GUI_ENABLE_TCP_POSE_COMMANDS=1"
-        if self.desired_mode == "real" or self.observed_server_mode == "real":
-            return "real mode TCP command disabled until real Cartesian acceptance passes"
-        if self.observed_server_mode != "simulation":
-            return "TCP pose command requires observed simulation mode"
-        if self.observed_backend != "simulator":
-            # pgmode simulation: an rbpodo controller-simulation backend
-            # (operation_mode=simulation) may run TCP/Cartesian commands when the
-            # operator opts in. Real motion is impossible by construction here.
-            if not (self.observed_backend == "rbpodo" and self.enable_controller_sim_cartesian):
-                return (
-                    "TCP pose command requires simulator backend, or an rbpodo "
-                    "controller-simulation backend with "
-                    "RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1"
-                )
+        # RB_GUI_ENABLE_TCP_POSE_COMMANDS / mode / backend locks retired: TCP
+        # pose commands are available in every run mode. The server remains the
+        # authority (CartesianUnavailable, safety clamps, fault latch).
         reason = self.blocked_reason("TcpDeltaStand")
         if reason:
             return reason
@@ -539,8 +522,6 @@ class OperatorSafety:
         left_quaternion_xyzw: tuple[float, ...] | None = None,
         right_quaternion_xyzw: tuple[float, ...] | None = None,
     ) -> tuple[bool, str]:
-        if not self.enable_tcp_pose_commands:
-            return False, "TCP pose command disabled until FK/IK milestone is enabled"
         reason = self.tcp_command_disabled_reason()
         if reason:
             return False, reason
@@ -596,8 +577,6 @@ class OperatorSafety:
         angular_speed_rad_s: float | None = None,
         orientation_mode: str = "constant",
     ) -> tuple[bool, str]:
-        if not self.enable_tcp_pose_commands:
-            return False, "TCP linear command disabled until FK/IK milestone is enabled"
         reason = self.tcp_command_disabled_reason()
         if reason:
             return False, reason

@@ -912,6 +912,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets, [])
 
     def test_init_motion_blocks_real_mode_and_readiness_no_go(self):
+        # Real/sim gating retired: InitMotion sends in real mode too.
         _, client, real_safety = self.make_safety(
             sample_state(motion_state="ArmedHold"),
             desired="real",
@@ -920,9 +921,8 @@ class GuiContractsTest(unittest.TestCase):
             init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
         )
         ok, reason = real_safety.send_init_motion()
-        self.assertFalse(ok)
-        self.assertIn("connect/status only", reason)
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
 
         _, client, sim_safety = self.make_safety(
             sample_state(motion_state="ArmedHold"),
@@ -990,13 +990,11 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets, [])
 
     def test_real_mode_blocks_lifecycle_and_motion(self):
+        # Real/sim gating retired: lifecycle and jog work in real mode.
         _, client, safety = self.make_safety(sample_state(), desired="real", observed="real")
         ok, reason = safety.send_lifecycle("ArmMotion")
-        self.assertFalse(ok)
-        self.assertIn("connect/status only", reason)
-        ok, reason = safety.jog_joint("left", 0, 1.0)
-        self.assertFalse(ok)
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["mode"], "ArmMotion")
 
     def test_simulation_mode_is_no_go_until_readiness_passes(self):
         _, client, safety = self.make_safety(sample_state(), desired="simulation", observed="simulation", sim_ready=False)
@@ -1022,10 +1020,12 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
 
     def test_desired_mode_does_not_claim_server_hot_switch(self):
+        # Real/sim gating retired: a desired/observed mode mismatch no longer
+        # blocks commands; desired=simulation still gates on sim readiness.
         _, client, safety = self.make_safety(sample_state(), desired="simulation", observed="mock")
         ok, reason = safety.jog_joint("left", 0, 1.0)
         self.assertFalse(ok)
-        self.assertIn("desired mode differs", reason)
+        self.assertIn("sim readiness", reason)
         safety.set_desired_mode("real")
         self.assertIn("not reconfigured", safety.status_message)
         self.assertEqual(client.sent_packets, [])
@@ -1088,12 +1088,17 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets, [])
 
     def test_tcp_pose_target_is_disabled_until_feature_flag(self):
-        _, client, safety = self.make_safety(sample_state())
+        # RB_GUI_ENABLE_TCP_POSE_COMMANDS lock retired: TCP pose sends without
+        # the feature flag whenever the state is valid.
+        _, client, safety = self.make_safety(
+            self.tcp_available_state(),
+            sim_ready=True,
+            cartesian_available=True,
+        )
         pose = (0.3, 0.1, 0.4, 0.0, 0.0, 0.0)
         ok, reason = safety.send_tcp_pose_target(left_pose=pose)
-        self.assertFalse(ok)
-        self.assertIn("TCP pose command disabled", reason)
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "TcpPoseTarget")
 
     def test_tcp_target_pose_helper_returns_finite_marker_pose(self):
         handles = {"left_tcp_target_pose": (0.31, 0.12, 0.44, 0.0, 0.0, 0.0)}
@@ -1256,18 +1261,16 @@ class GuiContractsTest(unittest.TestCase):
             cartesian_available=True,
             enable_tcp_pose=True,
         )
+        # Real/sim gating retired: real-mode TCP commands send normally.
         ok, reason = safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
-        self.assertIn("real mode TCP command disabled", reason)
+        self.assertTrue(ok, reason)
         ok, reason = safety.send_tcp_delta_local("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
-        self.assertIn("real mode TCP command disabled", reason)
+        self.assertTrue(ok, reason)
         ok, reason = safety.send_tcp_linear_move(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0), duration_sec=1.0)
-        self.assertFalse(ok)
-        self.assertIn("real mode TCP command disabled", reason)
-        self.assertTrue(safety.control_disabled_states()["tcp_pose"])
-        self.assertTrue(safety.control_disabled_states()["tcp_linear"])
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertFalse(safety.control_disabled_states()["tcp_pose"])
+        self.assertFalse(safety.control_disabled_states()["tcp_linear"])
+        self.assertTrue(client.sent_packets)
 
     def test_tcp_delta_stand_requires_simulator_backend_fk_and_readiness(self):
         state = self.tcp_available_state()
@@ -1280,7 +1283,8 @@ class GuiContractsTest(unittest.TestCase):
             cartesian_available=True,
             enable_tcp_pose=True,
         )
-        self.assertIn("simulator backend", backend_safety.tcp_command_disabled_reason("left"))
+        # Backend requirement retired: any backend may issue TCP commands.
+        self.assertIsNone(backend_safety.tcp_command_disabled_reason("left"))
 
         no_fk = sample_state()
         _, _, fk_safety = self.make_safety(
@@ -1336,10 +1340,8 @@ class GuiContractsTest(unittest.TestCase):
             enable_tcp_pose=True,
             enable_controller_sim_cartesian=False,
         )
-        self.assertIn(
-            "RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN",
-            no_optin.tcp_command_disabled_reason("left"),
-        )
+        # Controller-sim opt-in retired: allowed without the env flag.
+        self.assertIsNone(no_optin.tcp_command_disabled_reason("left"))
 
         # Real mode stays status-only even with the controller-sim opt-in set.
         _, _, real_safety = self.make_safety(
@@ -1352,7 +1354,8 @@ class GuiContractsTest(unittest.TestCase):
             enable_tcp_pose=True,
             enable_controller_sim_cartesian=True,
         )
-        self.assertIsNotNone(real_safety.tcp_command_disabled_reason("left"))
+        # Real mode is no longer status-only.
+        self.assertIsNone(real_safety.tcp_command_disabled_reason("left"))
 
         # Simulator backend behaviour is unchanged (no controller-sim opt-in needed).
         _, _, sim_safety = self.make_safety(
@@ -1404,6 +1407,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("velocity exceeds", msg)
 
     def test_tcp_twist_blocked_in_real_mode(self):
+        # Real/sim gating retired: twist and joint-velocity send in real mode.
         state = self.tcp_available_state()
         _, client, safety = self.make_safety(
             state,
@@ -1416,9 +1420,9 @@ class GuiContractsTest(unittest.TestCase):
             enable_controller_sim_cartesian=True,
         )
         ok, msg = safety.send_tcp_twist_stand("left", (0.02, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
+        self.assertTrue(ok, msg)
         ok, msg = safety.send_joint_velocity("left", (5.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
+        self.assertTrue(ok, msg)
 
     def test_tcp_circle_move_in_controller_sim(self):
         state = self.tcp_available_state()
@@ -1457,7 +1461,7 @@ class GuiContractsTest(unittest.TestCase):
             enable_controller_sim_cartesian=True,
         )
         ok, msg = real_safety.send_tcp_circle_move(0.15, 4.0)
-        self.assertFalse(ok)
+        self.assertTrue(ok, msg)
 
     def test_tcp_delta_stand_blocks_stale_and_faulted_state(self):
         state = self.tcp_available_state()
@@ -2320,13 +2324,14 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("left=unavailable", _format_cartesian_solve_status(latest, stale=False))
 
     def test_visual_disabled_state_matches_safety_blocks(self):
+        # Real/sim gating retired: real mode controls follow the same rules as
+        # any other mode (FK-less sample_state still disables TCP controls).
         _, _, real_safety = self.make_safety(sample_state(), desired="real", observed="real")
         real_states = real_safety.control_disabled_states()
-        self.assertTrue(real_states["jog"])
-        self.assertTrue(real_states["tcp_jog"])
+        self.assertFalse(real_states["jog"])
         self.assertTrue(real_states["tcp_linear"])
-        self.assertTrue(real_states["lifecycle:ArmMotion"])
-        self.assertTrue(real_states["lifecycle:Hold"])
+        self.assertFalse(real_states["lifecycle:ArmMotion"])
+        self.assertFalse(real_states["lifecycle:Hold"])
 
         _, _, stale_safety = self.make_safety(None)
         stale_states = stale_safety.control_disabled_states()

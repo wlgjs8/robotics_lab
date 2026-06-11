@@ -299,6 +299,16 @@ SelfCollisionFailPolicy parseSelfCollisionFailPolicy(
     fail("Unknown " + path + ": " + value, node);
 }
 
+FloorConstraintFailPolicy parseFloorConstraintFailPolicy(
+    const YAML::Node& node,
+    const std::string& path
+) {
+    const std::string value = lower(asString(node, path));
+    if (value == "clamp_hold" || value == "clamp_to_hold") return FloorConstraintFailPolicy::ClampToHold;
+    if (value == "fault_latch") return FloorConstraintFailPolicy::FaultLatch;
+    fail("Unknown " + path + ": " + value, node);
+}
+
 std::string getString(const YAML::Node& sec, const std::string& key, const std::string& fallback, const std::string& path) {
     return has(sec, key) ? asString(sec[key], path + "." + key) : fallback;
 }
@@ -747,6 +757,21 @@ void validateConfig(const DualArmConfig& cfg) {
                 "safety.self_collision.enable=true requires kinematics.enable=true (link geometry source)");
         }
     }
+    if (cfg.safety.floor_constraint.enable) {
+        const auto& fc = cfg.safety.floor_constraint;
+        if (!std::isfinite(fc.z_min_m) || !std::isfinite(fc.runtime_min_z_m) ||
+            !std::isfinite(fc.runtime_max_z_m)) {
+            throw std::runtime_error("safety.floor_constraint values must be finite");
+        }
+        if (fc.runtime_min_z_m > fc.z_min_m || fc.z_min_m > fc.runtime_max_z_m) {
+            throw std::runtime_error(
+                "safety.floor_constraint requires runtime_min_z_m <= z_min_m <= runtime_max_z_m");
+        }
+        if (!cfg.kinematics.enable) {
+            throw std::runtime_error(
+                "safety.floor_constraint.enable=true requires kinematics.enable=true (TCP FK source)");
+        }
+    }
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
     if (cfg.servo.output_moving_average_window < 0 || cfg.servo.output_moving_average_window > 5000) {
         throw std::runtime_error("servo.output_moving_average_window must be in [0, 5000]");
@@ -963,13 +988,7 @@ void validateConfig(const DualArmConfig& cfg) {
                 "to use run_mode=real and operation_mode=simulation"
             );
         }
-        if (!envIsOne("RB_ALLOW_REAL_ROBOT") ||
-            !envIsOne("RB_ALLOW_REAL_MOTION")) {
-            throw std::runtime_error(
-                "Refusing rbpodo async streaming without "
-                "RB_ALLOW_REAL_ROBOT=1 and RB_ALLOW_REAL_MOTION=1."
-            );
-        }
+        // Real/sim env gates retired: RB_ALLOW_REAL_ROBOT/MOTION are no longer required.
         if (async_streaming.mode == RbpodoAsyncStreamingMode::SocketSendSupervised &&
             (!cfg.left_robot.disable_waiting_ack || !cfg.right_robot.disable_waiting_ack)) {
             throw std::runtime_error(
@@ -998,12 +1017,8 @@ void validateConfig(const DualArmConfig& cfg) {
         throw std::runtime_error("force_control.enable must remain false");
     }
 
-    if (anyReal(cfg) && cfg.cartesian_control.enable && cfg.cartesian_control.allow_in_real) {
-        const char* allow_cartesian = std::getenv("RB_ALLOW_REAL_CARTESIAN");
-        if (!allow_cartesian || std::string(allow_cartesian) != "1") {
-            throw std::runtime_error("Refusing real Cartesian control. Set RB_ALLOW_REAL_CARTESIAN=1.");
-        }
-    }
+    // Real/sim env gates retired: real Cartesian control no longer requires
+    // RB_ALLOW_REAL_CARTESIAN.
     if (anyReal(cfg) && cfg.cartesian_control.allow_in_controller_simulation) {
         if (!cfg.cartesian_control.enable) {
             throw std::runtime_error(
@@ -1022,13 +1037,7 @@ void validateConfig(const DualArmConfig& cfg) {
                 "to use run_mode=real and operation_mode=simulation"
             );
         }
-        if (!envIsOne("RB_ALLOW_REAL_ROBOT") ||
-            !envIsOne("RB_ALLOW_REAL_MOTION")) {
-            throw std::runtime_error(
-                "Refusing rbpodo controller-simulation Cartesian control without "
-                "RB_ALLOW_REAL_ROBOT=1 and RB_ALLOW_REAL_MOTION=1."
-            );
-        }
+        // Real/sim env gates retired: RB_ALLOW_REAL_ROBOT/MOTION are no longer required.
     }
     validateNonNegativeFinite(cfg.cartesian_control.warn_ik_duration_us, "cartesian_control.warn_ik_duration_us");
     validateNonNegativeFinite(cfg.cartesian_control.fail_ik_duration_us, "cartesian_control.fail_ik_duration_us");
@@ -1188,34 +1197,21 @@ void validateConfig(const DualArmConfig& cfg) {
         if (!(backend.servo_t1_sec >= 0.002) || !std::isfinite(backend.servo_t1_sec)) {
             throw std::runtime_error(label + ".servo_t1_sec must be finite and >= 0.002 for backend_type=rbpodo");
         }
-        // RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE=1 lifts the vendor-recommended
-        // servo_t2/gain/alpha range checks (values must still be positive and
-        // finite) for explicit servo-parameter experiments. The controller may
-        // reject or behave roughly with out-of-range values — operator owns
-        // the risk; a WARN is emitted so logs show the experiment.
-        const bool servo_param_unsafe = envIsOne("RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE");
-        if (servo_param_unsafe) {
-            validatePositiveFinite(backend.servo_t2_sec, label + ".servo_t2_sec");
-            validatePositiveFinite(backend.servo_gain, label + ".servo_gain");
-            validatePositiveFinite(backend.servo_alpha, label + ".servo_alpha");
+        // RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE env gate retired: servo params only
+        // need to be positive and finite; out-of-vendor-range values get a WARN.
+        validatePositiveFinite(backend.servo_t2_sec, label + ".servo_t2_sec");
+        validatePositiveFinite(backend.servo_gain, label + ".servo_gain");
+        validatePositiveFinite(backend.servo_alpha, label + ".servo_alpha");
+        const bool out_of_vendor_range =
+            !(backend.servo_t2_sec > 0.02 && backend.servo_t2_sec < 0.2) ||
+            !(backend.servo_alpha > 0.0 && backend.servo_alpha < 1.0);
+        if (out_of_vendor_range) {
             warn(
-                label + ": RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE=1 — out-of-range servo params accepted: "
+                label + ": servo params outside the vendor-recommended range accepted: "
                 "servo_t2_sec=" + std::to_string(backend.servo_t2_sec) +
                 ", servo_gain=" + std::to_string(backend.servo_gain) +
                 ", servo_alpha=" + std::to_string(backend.servo_alpha)
             );
-        } else {
-            if (!(backend.servo_t2_sec > 0.02 && backend.servo_t2_sec < 0.2) || !std::isfinite(backend.servo_t2_sec)) {
-                throw std::runtime_error(
-                    label + ".servo_t2_sec must be finite and in (0.02, 0.2) for backend_type=rbpodo "
-                    "(set RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE=1 to experiment outside the range)");
-            }
-            validatePositiveFinite(backend.servo_gain, label + ".servo_gain");
-            if (!(backend.servo_alpha > 0.0 && backend.servo_alpha < 1.0) || !std::isfinite(backend.servo_alpha)) {
-                throw std::runtime_error(
-                    label + ".servo_alpha must be finite and in (0, 1) for backend_type=rbpodo "
-                    "(set RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE=1 to experiment outside the range)");
-            }
         }
         const double servo_dt_sec = 1.0 / static_cast<double>(cfg.servo.rate_hz);
         const double tolerance_sec = cfg.servo.servo_t1_rate_match_tolerance_ratio * servo_dt_sec;
@@ -1229,16 +1225,8 @@ void validateConfig(const DualArmConfig& cfg) {
             }
             warn(message + "; send_servo_commands=false so this is a warning");
         }
-        if (backend.run_mode == RunMode::Real &&
-            !isRbpodoControllerSimulationBackend(backend) &&
-            backend.disable_waiting_ack &&
-            cfg.servo.send_servo_commands &&
-            !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")) {
-            throw std::runtime_error(
-                "Refusing rbpodo real motion with disable_waiting_ack=true. "
-                "Set RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 only after explicit ACK-off acceptance."
-            );
-        }
+        // Real/sim env gates retired: disable_waiting_ack no longer requires
+        // RB_ALLOW_RBPODO_ACK_DISABLED_MOTION (ACK-off acceptance is config-driven).
     };
     validate_rbpodo_backend(cfg.left_robot, "left_robot");
     validate_rbpodo_backend(cfg.right_robot, "right_robot");
@@ -1247,14 +1235,8 @@ void validateConfig(const DualArmConfig& cfg) {
         if (cfg.servo.io_model == ServoIoModel::Worker) {
             throw std::runtime_error("Refusing servo.io_model=worker in real mode until worker I/O has real-hardware acceptance.");
         }
-        if (!envIsOne("RB_ALLOW_REAL_ROBOT")) {
-            throw std::runtime_error("Refusing real mode. Set RB_ALLOW_REAL_ROBOT=1.");
-        }
-        if (cfg.servo.send_servo_commands) {
-            if (!envIsOne("RB_ALLOW_REAL_MOTION")) {
-                throw std::runtime_error("Refusing real robot motion. Set RB_ALLOW_REAL_MOTION=1 or servo.send_servo_commands=false.");
-            }
-        }
+        // Real/sim env gates retired: real mode/motion no longer require
+        // RB_ALLOW_REAL_ROBOT/RB_ALLOW_REAL_MOTION.
         if (!cfg.servo.enable_realtime_priority) {
             throw std::runtime_error("Refusing real mode without servo.enable_realtime_priority=true.");
         }
@@ -1542,6 +1524,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "controller_simulation_physical_motion_threshold_deg",
             "controller_simulation_tracking_error_nonlatching",
             "self_collision",
+            "floor_constraint",
         }, "safety");
         if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
         if (has(sec, "q_max_deg")) cfg.safety.q_max_deg = parseJointArray(sec["q_max_deg"], "safety.q_max_deg");
@@ -1618,6 +1601,40 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     cfg.safety.self_collision.link_radius_m[i] =
                         asDouble(radii[i], "safety.self_collision.link_radius_m");
                 }
+            }
+        }
+        if (has(sec, "floor_constraint")) {
+            const YAML::Node fc = sec["floor_constraint"];
+            validateAllowedKeys(fc, {
+                "enable",
+                "z_min_m",
+                "runtime_min_z_m",
+                "runtime_max_z_m",
+                "fail_policy",
+                "monitor_only",
+            }, "safety.floor_constraint");
+            if (has(fc, "enable")) {
+                cfg.safety.floor_constraint.enable = asBool(fc["enable"], "safety.floor_constraint.enable");
+            }
+            if (has(fc, "z_min_m")) {
+                cfg.safety.floor_constraint.z_min_m =
+                    asDouble(fc["z_min_m"], "safety.floor_constraint.z_min_m");
+            }
+            if (has(fc, "runtime_min_z_m")) {
+                cfg.safety.floor_constraint.runtime_min_z_m =
+                    asDouble(fc["runtime_min_z_m"], "safety.floor_constraint.runtime_min_z_m");
+            }
+            if (has(fc, "runtime_max_z_m")) {
+                cfg.safety.floor_constraint.runtime_max_z_m =
+                    asDouble(fc["runtime_max_z_m"], "safety.floor_constraint.runtime_max_z_m");
+            }
+            if (has(fc, "fail_policy")) {
+                cfg.safety.floor_constraint.fail_policy =
+                    parseFloorConstraintFailPolicy(fc["fail_policy"], "safety.floor_constraint.fail_policy");
+            }
+            if (has(fc, "monitor_only")) {
+                cfg.safety.floor_constraint.monitor_only =
+                    asBool(fc["monitor_only"], "safety.floor_constraint.monitor_only");
             }
         }
     }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from typing import Callable, TextIO
@@ -81,6 +82,15 @@ def run(
     lease_acquired = False
     period = 1.0 / max(config.command_rate_hz, 1.0)
     startup_deadline = monotonic_fn() + max(config.runtime.startup_timeout_sec, 0.0)
+    # POLICY_RUNNER_TELEOP_DEBUG=1: 1 Hz loop stats (sent/dropped/no-intent + last drop reason).
+    teleop_debug = os.environ.get("POLICY_RUNNER_TELEOP_DEBUG", "") == "1"
+    debug_sent = 0
+    debug_dropped = 0
+    debug_no_intent = 0
+    debug_last_drop_reason = ""
+    # Lazily initialized from the loop's `now`: tests inject finite scripted
+    # monotonic_fn sequences, so no extra monotonic_fn() calls here.
+    debug_last_print: float | None = None
     try:
         while True:
             snapshot = state_client.latest
@@ -118,6 +128,21 @@ def run(
             if rollout_recorder is not None:
                 rollout_recorder.record_decision(decision)
                 rollout_recorder.record_source(source)
+            if teleop_debug:
+                if intent is None:
+                    debug_no_intent += 1
+                elif not decision.allowed:
+                    debug_dropped += 1
+                    debug_last_drop_reason = decision.reason or ""
+                if debug_last_print is None:
+                    debug_last_print = now
+                if now - debug_last_print >= 1.0:
+                    print(
+                        f"[teleop] sent={debug_sent} dropped={debug_dropped} "
+                        f"no_intent={debug_no_intent} last_drop={debug_last_drop_reason or '-'}",
+                        flush=True,
+                    )
+                    debug_last_print = now
             if decision.allowed and intent is not None:
                 if not send_commands:
                     if rollout_recorder is not None:
@@ -138,9 +163,14 @@ def run(
                     else:
                         if rollout_recorder is not None:
                             rollout_recorder.record_dropped(arm_decision.reason, arm)
+                        if teleop_debug:
+                            debug_dropped += 1
+                            debug_last_drop_reason = f"arm:{arm_decision.reason or ''}"
                         sleep_fn(period)
                         continue
                 command_client.send(intent)
+                if teleop_debug:
+                    debug_sent += 1
                 if rollout_recorder is not None:
                     rollout_recorder.record_sent(intent)
             elif intent is not None and rollout_recorder is not None:
@@ -152,6 +182,13 @@ def run(
         _close_if_supported(source)
         state_client.close()
         if command_client is not None:
+            if lease_acquired:
+                # Voluntary handoff so an immediate restart does not collide
+                # with this session's stale lease until lease_timeout_sec.
+                try:
+                    command_client.release_lease()
+                except Exception as exc:  # noqa: BLE001 - best-effort on shutdown
+                    print(f"policy_runner lease_release_failed: {exc}", file=stderr)
             command_client.close()
 
 
@@ -252,6 +289,9 @@ def make_action_source(config: PolicyRunnerConfig):
             max_angular_velocity_rad_s=config.spacemouse_cartesian_dual.max_angular_velocity_rad_s,
             deadband=config.spacemouse_cartesian_dual.deadband,
             response_curve_gamma=config.spacemouse_cartesian_dual.response_curve_gamma,
+            linear_axis_signs=config.spacemouse_cartesian_dual.linear_axis_signs,
+            angular_axis_signs=config.spacemouse_cartesian_dual.angular_axis_signs,
+            angular_axis_order=config.spacemouse_cartesian_dual.angular_axis_order,
             sample_hold_timeout_sec=config.spacemouse_cartesian_dual.sample_hold_timeout_sec,
             left_deadman_button=left.deadman_button,
             right_deadman_button=right.deadman_button,

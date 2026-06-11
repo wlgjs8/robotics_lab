@@ -22,8 +22,10 @@ namespace rb_servo {
 namespace {
 
 bool envIsOne(const char* name) {
-    const char* value = std::getenv(name);
-    return value && std::string(value) == "1";
+    // Real/sim env gates (RB_ALLOW_REAL_*, RB_ALLOW_RBPODO_*) are retired:
+    // backend behavior is config-driven only.
+    (void)name;
+    return true;
 }
 
 bool finiteJointArray(const JointArray& joints) {

@@ -187,8 +187,9 @@ bool testRealModeBlocked() {
         1,
         &path
     );
-    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-    RB_CHECK(result.reason == "tcp_linear_move_simulation_only");
+    // Real/sim gating retired: linear move computes in every run mode.
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(result.telemetry.status == "ok");
     return true;
 }
 
@@ -615,6 +616,10 @@ bool testTcpTwistOrientationHoldNearPiStaysBounded() {
 }
 
 bool testTcpTwistRealModeBlocked() {
+    // Real run mode computes a twist target (physical-real gating —
+    // cartesian_control.allow_in_real + RB_ALLOW_REAL_CARTESIAN — is enforced
+    // by the servo loop's cartesian availability gate, not here). Mock run
+    // mode stays blocked.
     auto kinematics = std::make_shared<LinearFakeKinematics>();
     rb_servo::ArmMountConfig left_mount;
     rb_servo::ArmMountConfig right_mount;
@@ -626,7 +631,7 @@ bool testTcpTwistRealModeBlocked() {
     command.tcp_twist_local = {0.02, 0.0, 0.0, 0.0, 0.0, 0.0};
     rb_servo::CartesianTwistHoldState hold;
     rb_servo::JointArray q = zeroJoints();
-    const rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+    const rb_servo::CartesianArmTargetResult real_result = controller.computeTwistTarget(
         command,
         stateFromJoints(*kinematics, q, left_mount),
         q,
@@ -635,8 +640,21 @@ bool testTcpTwistRealModeBlocked() {
         1,
         &hold
     );
-    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-    RB_CHECK(result.reason == "tcp_twist_simulation_only");
+    RB_CHECK(real_result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(real_result.telemetry.status == "ok");
+
+    rb_servo::CartesianTwistHoldState mock_hold;
+    const rb_servo::CartesianArmTargetResult mock_result = controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q, left_mount),
+        q,
+        rb_servo::RunMode::Mock,
+        0.005,
+        1,
+        &mock_hold
+    );
+    // Real/sim gating retired: twist computes in every run mode (mock included).
+    RB_CHECK(mock_result.verdict == rb_servo::SafetyVerdict::Ok);
     return true;
 }
 
@@ -1137,8 +1155,9 @@ bool testTcpCircleMoveSafetyGates() {
         &circle,
         &integrator
     );
-    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-    RB_CHECK(result.reason == "tcp_circle_move_simulation_only");
+    // Real/sim gating retired: circle move computes in Real once the benchmark
+    // feature flag is enabled.
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
     return true;
 }
 

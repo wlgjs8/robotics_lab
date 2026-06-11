@@ -152,6 +152,10 @@ if(BUILD_TESTING)
     target_link_libraries(test_cartesian_servo_controller PRIVATE rb_servo_core)
     add_test(NAME cartesian_servo_controller COMMAND test_cartesian_servo_controller)
 
+    add_executable(test_command_source_lease tests/test_command_source_lease.cpp)
+    target_link_libraries(test_command_source_lease PRIVATE rb_servo_core)
+    add_test(NAME command_source_lease COMMAND test_command_source_lease)
+
     add_executable(test_smd_pose_tracker tests/test_smd_pose_tracker.cpp)
     target_link_libraries(test_smd_pose_tracker PRIVATE rb_servo_core)
     add_test(NAME smd_pose_tracker COMMAND test_smd_pose_tracker)

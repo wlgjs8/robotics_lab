@@ -147,8 +147,8 @@ class SpaceMouseMappingTest(unittest.TestCase):
 
         decision = gate.evaluate(sample_state(), intent, source.requirements, time.monotonic())
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "real_motion_not_allowed")
+        # Real/sim gating retired: allowed.
+        self.assertTrue(decision.allowed)
 
     def test_spacemouse_config_fields_parse_without_yaml_dependency(self):
         cfg = config_from_mapping(
@@ -168,6 +168,55 @@ class SpaceMouseMappingTest(unittest.TestCase):
         self.assertEqual(cfg.spacemouse.selected_arm, "both")
         self.assertEqual(cfg.spacemouse.max_joint_velocity_deg_s, (5.0, 5.0, 5.0, 8.0, 8.0, 10.0))
         self.assertTrue(cfg.spacemouse.require_deadman)
+
+    def test_dual_axis_remap_flips_linear_and_swaps_angular(self):
+        from policy_runner.action_sources.dual_spacemouse_cartesian import (
+            DualSpaceMouseCartesianActionSource,
+        )
+
+        left = FakeSpaceMouseReader(
+            [spacemouse_sample(tx=1.0, ty=1.0, tz=1.0, rx=1.0, ry=0.0, rz=1.0)]
+        )
+        right = FakeSpaceMouseReader([spacemouse_sample()])
+        source = DualSpaceMouseCartesianActionSource(
+            left_reader=left,
+            right_reader=right,
+            max_linear_velocity_m_s=0.1,
+            max_angular_velocity_rad_s=0.2,
+            deadband=0.0,
+            response_curve_gamma=1.0,
+            linear_axis_signs=(-1.0, 1.0, -1.0),
+            angular_axis_order=("ry", "rx", "rz"),
+        )
+        intent = source.next_intent(sample_state(), time.monotonic())
+        self.assertIsNotNone(intent)
+        twist = intent.left["tcp_twist_local"]
+        # Linear: x/z mirrored, y kept.
+        self.assertAlmostEqual(twist[0], -0.1)
+        self.assertAlmostEqual(twist[1], 0.1)
+        self.assertAlmostEqual(twist[2], -0.1)
+        # Angular: output rx reads cap ry (0.0), output ry reads cap rx (1.0).
+        self.assertAlmostEqual(twist[3], 0.0)
+        self.assertAlmostEqual(twist[4], 0.2)
+        self.assertAlmostEqual(twist[5], 0.2)
+
+    def test_dual_axis_remap_rejects_invalid_configuration(self):
+        from policy_runner.action_sources.dual_spacemouse_cartesian import (
+            DualSpaceMouseCartesianActionSource,
+        )
+
+        with self.assertRaises(ValueError):
+            DualSpaceMouseCartesianActionSource(
+                left_reader=FakeSpaceMouseReader([]),
+                right_reader=FakeSpaceMouseReader([]),
+                linear_axis_signs=(-2.0, 1.0, 1.0),
+            )
+        with self.assertRaises(ValueError):
+            DualSpaceMouseCartesianActionSource(
+                left_reader=FakeSpaceMouseReader([]),
+                right_reader=FakeSpaceMouseReader([]),
+                angular_axis_order=("ry", "ry", "rz"),
+            )
 
 
 if __name__ == "__main__":

@@ -411,13 +411,8 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
     result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
 
-    if (run_mode != RunMode::Simulation) {
-        result.verdict = SafetyVerdict::CartesianUnavailable;
-        result.reason = "tcp_linear_move_simulation_only";
-        result.telemetry.status = "unavailable";
-        result.telemetry.reason = result.reason;
-        return result;
-    }
+    // Real/sim gating retired: linear move computes in every run mode.
+    (void)run_mode;
     if (!kinematics_) {
         result.verdict = SafetyVerdict::CartesianUnavailable;
         result.reason = "kinematics_unavailable";
@@ -670,13 +665,8 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
     result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
     result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
 
-    if (run_mode != RunMode::Simulation) {
-        result.verdict = SafetyVerdict::CartesianUnavailable;
-        result.reason = "tcp_twist_simulation_only";
-        result.telemetry.status = "unavailable";
-        result.telemetry.reason = result.reason;
-        return result;
-    }
+    // Real/sim gating retired: streaming twist computes in every run mode.
+    (void)run_mode;
     if (!kinematics_) {
         result.verdict = SafetyVerdict::CartesianUnavailable;
         result.reason = "kinematics_unavailable";
@@ -832,13 +822,7 @@ CartesianArmTargetResult CartesianServoController::computeCircleMoveTarget(
     result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
     result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
 
-    if (run_mode != RunMode::Simulation) {
-        result.verdict = SafetyVerdict::CartesianUnavailable;
-        result.reason = "tcp_circle_move_simulation_only";
-        result.telemetry.status = "unavailable";
-        result.telemetry.reason = result.reason;
-        return result;
-    }
+    // Real/sim gating retired: circle move computes in every run mode.
     if (!config_.enable_benchmark_primitives ||
         !config_.circle_move.allow_in_simulation ||
         config_.circle_move.allow_in_real) {

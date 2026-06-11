@@ -187,6 +187,28 @@ struct SelfCollisionConfig {
     bool monitor_only = false;
 };
 
+enum class FloorConstraintFailPolicy {
+    ClampToHold,
+    FaultLatch,
+};
+
+// Stand-frame floor plane constraint: the TCP of either arm must never go below
+// z = z_min_m (meters, stand frame), regardless of motion primitive or run mode.
+// Tier 1 (hard backstop) FK-checks every candidate joint target at the final
+// safety gate; Tier 2 clamps Cartesian targets / negative stand v_z so streaming
+// commands slide along the plane. z_min_m is runtime-adjustable via the leaseless
+// SetSafetyFloorZ command, bounded to [runtime_min_z_m, runtime_max_z_m].
+struct FloorConstraintConfig {
+    bool enable = false;
+    double z_min_m = 0.010;
+    double runtime_min_z_m = 0.0;
+    double runtime_max_z_m = 0.5;
+    FloorConstraintFailPolicy fail_policy = FloorConstraintFailPolicy::ClampToHold;
+    // Observe-only: publish per-arm tcp z / violation telemetry without clamping
+    // or latching. Never use monitor_only as a real-motion safety posture.
+    bool monitor_only = false;
+};
+
 struct SafetyConfig {
     JointArray q_min_deg{};
     JointArray q_max_deg{};
@@ -218,6 +240,7 @@ struct SafetyConfig {
     // affect the controller_simulation_physical_motion guard, which still latches.
     bool controller_simulation_tracking_error_nonlatching = false;
     SelfCollisionConfig self_collision;
+    FloorConstraintConfig floor_constraint;
 };
 
 inline constexpr JointArray rbpodoDefaultSafetyJointMinDeg() {

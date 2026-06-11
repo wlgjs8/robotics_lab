@@ -108,8 +108,8 @@ class MasterArmJointActionSourceTest(unittest.TestCase):
             source.requirements,
             time.monotonic(),
         )
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "real_motion_not_allowed")
+        # Real/sim gating retired: real motion allowed without the config flag.
+        self.assertTrue(decision.allowed)
 
     def test_left_delta_latch_does_not_require_inactive_right_state(self):
         source = MasterArmJointActionSource(

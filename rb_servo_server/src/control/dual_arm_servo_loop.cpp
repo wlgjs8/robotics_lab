@@ -167,8 +167,11 @@ std::shared_ptr<IKinematics> makeKinematicsProvider(const DualArmConfig& config)
 }
 
 bool envFlagEnabled(const char* name) {
-    const char* value = std::getenv(name);
-    return value && std::string(value) == "1";
+    // Real/sim env gates (RB_ALLOW_REAL_ROBOT/MOTION/CARTESIAN) are retired:
+    // execution is no longer gated on the real-vs-simulation distinction.
+    // run_mode/operation_mode remain as telemetry labels only.
+    (void)name;
+    return true;
 }
 
 std::string jointArrayDebugString(const JointArray& joints) {
@@ -294,6 +297,11 @@ CartesianAvailability cartesianAvailabilityForArm(
     const DualArmConfig& config,
     const ArmCommand& command
 ) {
+    // Real/sim execution gating is retired: every Cartesian mode is available
+    // whenever cartesian_control is enabled, regardless of run_mode /
+    // operation_mode. run_mode remains a telemetry label only; safety is owned
+    // by the mode-independent layers (safety filter clamps, tracking-error
+    // latch, self-collision guard, lease arbitration, deadman on the client).
     CartesianAvailability availability;
     const BackendConfig& backend = backendConfigForArm(config, command.arm_id);
 
@@ -302,124 +310,21 @@ CartesianAvailability cartesianAvailabilityForArm(
         return availability;
     }
 
-    if (command.mode == ControlMode::TcpCircleTrack) {
-        if (!config.cartesian_control.enable_server_side_circle_track) {
-            availability.reason = "tcp_circle_track_disabled";
-            availability.physical_motion_expected = false;
-            return availability;
-        }
-        if (backend.run_mode == RunMode::Simulation) {
-            availability.available = config.cartesian_control.allow_in_simulation;
-            availability.reason = availability.available
-                ? ""
-                : "cartesian_control_unavailable_run_mode";
-            availability.physical_motion_expected = false;
-            return availability;
-        }
-        if (backend.run_mode != RunMode::Real) {
-            availability.reason = "cartesian_control_unavailable_run_mode";
-            return availability;
-        }
-        if (backend.backend_type != BackendType::Rbpodo) {
-            availability.reason = "cartesian_control_unavailable_backend";
-            return availability;
-        }
-        const std::string operation_mode = lowerAscii(backend.operation_mode);
-        if (!(operation_mode == "simulation" || operation_mode == "sim")) {
-            availability.reason = "tcp_circle_track_physical_real_blocked";
-            return availability;
-        }
-        if (!config.cartesian_control.allow_in_controller_simulation ||
-            !config.servo.allow_controller_simulation_motion) {
-            availability.reason = "cartesian_control_unavailable_controller_sim_config";
-            availability.physical_motion_expected = false;
-            return availability;
-        }
-        if (!controllerSimulationCartesianGateOpen(config, backend)) {
-            availability.reason = "cartesian_control_unavailable_controller_sim_env";
-            availability.physical_motion_expected = false;
-            return availability;
-        }
-        availability.available = true;
-        availability.reason = "";
-        availability.controller_simulation_cartesian_enabled = true;
+    // TcpCircleTrack stays gated on its feature flag (unimplemented skeleton),
+    // independent of run mode.
+    if (command.mode == ControlMode::TcpCircleTrack &&
+        !config.cartesian_control.enable_server_side_circle_track) {
+        availability.reason = "tcp_circle_track_disabled";
         availability.physical_motion_expected = false;
         return availability;
     }
 
-    const bool streaming_cartesian = isStreamingCartesianMode(command.mode);
-    const bool controller_simulation_circle_move =
-        command.mode == ControlMode::TcpCircleMove &&
-        config.cartesian_control.enable_benchmark_primitives &&
-        config.cartesian_control.circle_move.allow_in_simulation &&
-        !config.cartesian_control.circle_move.allow_in_real;
-    if (backend.run_mode == RunMode::Simulation) {
-        availability.available = config.cartesian_control.allow_in_simulation;
-        availability.reason = availability.available
-            ? ""
-            : "cartesian_control_unavailable_run_mode";
-        availability.physical_motion_expected = false;
-        return availability;
-    }
-
-    if (backend.run_mode != RunMode::Real) {
-        availability.reason = "cartesian_control_unavailable_run_mode";
-        return availability;
-    }
-
-    const bool rbpodo_controller_simulation_operation =
-        isRbpodoControllerSimulationBackend(backend);
-    const bool controller_simulation_cartesian_context =
-        rbpodo_controller_simulation_operation &&
-        controllerSimulationCartesianGateOpen(config, backend);
-
-    if (!streaming_cartesian &&
-        !controller_simulation_circle_move &&
-        !controller_simulation_cartesian_context) {
-        if (rbpodo_controller_simulation_operation) {
-            availability.reason = "cartesian_control_unavailable_physical_real_blocked";
-            return availability;
-        }
-        availability.available =
-            config.cartesian_control.allow_in_real &&
-            envFlagEnabled("RB_ALLOW_REAL_CARTESIAN");
-        availability.reason = availability.available
-            ? ""
-            : "cartesian_control_unavailable_physical_real_blocked";
-        return availability;
-    }
-
-    if (backend.backend_type != BackendType::Rbpodo) {
-        availability.reason = "cartesian_control_unavailable_backend";
-        return availability;
-    }
-
-    const std::string operation_mode = lowerAscii(backend.operation_mode);
-    if (!(operation_mode == "simulation" || operation_mode == "sim")) {
-        availability.reason =
-            config.cartesian_control.allow_in_real && envFlagEnabled("RB_ALLOW_REAL_CARTESIAN")
-            ? "cartesian_control_unavailable_physical_real_blocked"
-            : "cartesian_control_unavailable_operation_mode";
-        return availability;
-    }
-
-    if (!config.cartesian_control.allow_in_controller_simulation ||
-        !config.servo.allow_controller_simulation_motion) {
-        availability.reason = "cartesian_control_unavailable_controller_sim_config";
-        availability.physical_motion_expected = false;
-        return availability;
-    }
-
-    if (!controllerSimulationCartesianGateOpen(config, backend)) {
-        availability.reason = "cartesian_control_unavailable_controller_sim_env";
-        availability.physical_motion_expected = false;
-        return availability;
-    }
-
+    const bool controller_simulation = isRbpodoControllerSimulationBackend(backend);
     availability.available = true;
     availability.reason = "";
-    availability.controller_simulation_cartesian_enabled = true;
-    availability.physical_motion_expected = false;
+    availability.controller_simulation_cartesian_enabled = controller_simulation;
+    availability.physical_motion_expected =
+        !controller_simulation && backend.run_mode == RunMode::Real;
     return availability;
 }
 
@@ -1449,6 +1354,7 @@ DualArmServoLoop::DualArmServoLoop(
     left_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
     right_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
     kinematics_ = kinematics ? std::move(kinematics) : makeKinematicsProvider(config);
+    runtime_floor_z_m_.store(config.safety.floor_constraint.z_min_m);
     resetReferenceSupervisionState(this);
 }
 
@@ -3464,6 +3370,58 @@ ServoTarget DualArmServoLoop::applySafety(
         }
     }
 
+    // Stand-frame floor plane constraint: never command a configuration that puts
+    // either TCP below z = effectiveFloorZ(). Mode-independent by design (mock /
+    // simulator / controller-sim / real all pass through here). Per-arm: only the
+    // violating arm is reverted; the escape exception allows strictly-upward motion
+    // so an arm that starts below the plane can be jogged out without a reset.
+    if (config_.safety.floor_constraint.enable) {
+        const double floor_z = effectiveFloorZ();
+        const FloorArmEvaluation left_eval = evaluateFloorArm(ArmId::Left, out.left_q_target_deg);
+        const FloorArmEvaluation right_eval = evaluateFloorArm(ArmId::Right, out.right_q_target_deg);
+        last_floor_left_ = left_eval;    // telemetry, even when already faulted
+        last_floor_right_ = right_eval;
+        if (combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+            const auto enforce_arm = [&](
+                ArmId arm,
+                const FloorArmEvaluation& eval,
+                JointArray& target_q,
+                const JointArray& prev_sent_q
+            ) {
+                FloorArmEvaluation prev_eval;
+                if (eval.checked && eval.tcp_z_m < floor_z) {
+                    prev_eval = evaluateFloorArm(arm, prev_sent_q);  // lazy: escape test only
+                }
+                const FloorAction action = decideFloorAction(
+                    eval, prev_eval, config_.safety.floor_constraint, floor_z);
+                if (action == FloorAction::Allow) return false;
+                const std::string arm_name = arm == ArmId::Left ? "left" : "right";
+                const std::string reason = eval.checked
+                    ? ("floor constraint: " + arm_name + " tcp z " + std::to_string(eval.tcp_z_m) +
+                       " m below plane z_min " + std::to_string(floor_z) + " m")
+                    : ("floor constraint: " + arm_name + " TCP FK unavailable");
+                if (action == FloorAction::Latch) {
+                    latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
+                    out = currentFaultHoldTarget();
+                    combined = SafetyVerdict::FaultLatched;
+                    return true;
+                }
+                // FloorAction::Hold: revert only this arm (non-latching).
+                target_q = prev_sent_q;
+                ++floor_clamp_count_;
+                if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
+                    combined = SafetyVerdict::FloorViolation;
+                }
+                return false;
+            };
+            const bool latched =
+                enforce_arm(ArmId::Left, left_eval, out.left_q_target_deg, left_prev_sent_q_deg_);
+            if (!latched) {
+                enforce_arm(ArmId::Right, right_eval, out.right_q_target_deg, right_prev_sent_q_deg_);
+            }
+        }
+    }
+
     // Dual-arm self-collision guard: never command a configuration that brings the
     // two arms' link capsules within the configured margin. Evaluated on the final
     // candidate targets (post per-arm filtering).
@@ -3514,6 +3472,30 @@ ServoTarget DualArmServoLoop::applySafety(
 
     if (verdict) *verdict = combined;
     return out;
+}
+
+FloorArmEvaluation DualArmServoLoop::evaluateFloorArm(ArmId arm, const JointArray& q_deg) const {
+    FloorArmEvaluation eval;
+    if (!kinematics_ || !finiteJointArray(q_deg)) {
+        return eval;  // checked=false -> caller fails closed
+    }
+    const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount : config_.right_mount;
+    try {
+        const Pose6D tcp = kinematics_->computeTcpStand(arm, q_deg, mount);
+        if (!std::isfinite(tcp.z)) {
+            return eval;  // checked=false -> caller fails closed
+        }
+        eval.checked = true;
+        eval.tcp_z_m = tcp.z;
+        eval.violated = tcp.z < effectiveFloorZ();
+    } catch (const std::exception&) {
+        return FloorArmEvaluation{};  // checked=false -> caller fails closed
+    }
+    return eval;
+}
+
+double DualArmServoLoop::effectiveFloorZ() const {
+    return runtime_floor_z_m_.load();
 }
 
 SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
@@ -3621,6 +3603,11 @@ DualArmCommand DualArmServoLoop::makeHoldCommand(
 
 bool DualArmServoLoop::commandRequestsResetFault(const DualArmCommand& command) const {
     return command.left.mode == ControlMode::ResetFault || command.right.mode == ControlMode::ResetFault;
+}
+
+bool DualArmServoLoop::commandRequestsSetSafetyFloorZ(const DualArmCommand& command) const {
+    return command.left.mode == ControlMode::SetSafetyFloorZ ||
+           command.right.mode == ControlMode::SetSafetyFloorZ;
 }
 
 bool DualArmServoLoop::commandRequestsEmergencyStop(const DualArmCommand& command) const {

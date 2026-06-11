@@ -954,7 +954,7 @@ def build_gui(
         )
         handles["tcp_status"] = server.gui.add_text(
             "TCP status",
-            initial_value="TCP PTP target disabled until RB_GUI_ENABLE_TCP_POSE_COMMANDS=1",
+            initial_value="ready",
             disabled=True,
         )
         _install_tcp_target_callbacks(handles["scene"], handles["tcp_status"])
@@ -1030,7 +1030,7 @@ def build_gui(
         )
         handles["tcp_linear_status"] = server.gui.add_text(
             "TCP Linear status",
-            initial_value="TCP Linear disabled until RB_GUI_ENABLE_TCP_POSE_COMMANDS=1",
+            initial_value="ready",
             disabled=True,
         )
         handles["tcp_linear_source"] = server.gui.add_text(
@@ -1328,7 +1328,8 @@ def main(argv: list[str] | None = None) -> None:
     observed_backend_raw = os.environ.get("RB_GUI_OBSERVED_BACKEND", "")
     observed = normalize_observed_mode_backend(observed_mode_raw, observed_backend_raw)
     ops_available = os.environ.get("RB_GUI_OPS_AVAILABLE", "0") == "1"
-    enable_tcp_pose_commands = os.environ.get("RB_GUI_ENABLE_TCP_POSE_COMMANDS", "0") == "1"
+    # RB_GUI_ENABLE_TCP_POSE_COMMANDS lock retired: TCP pose commands default on.
+    enable_tcp_pose_commands = os.environ.get("RB_GUI_ENABLE_TCP_POSE_COMMANDS", "1") == "1"
     enable_controller_sim_cartesian = os.environ.get("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", "0") == "1"
     init_left_joints = _env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG)
     init_right_joints = _env_joint6("RB_GUI_INIT_RIGHT_JOINTS", _DEFAULT_INIT_RIGHT_JOINTS_DEG)
