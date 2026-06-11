@@ -915,6 +915,64 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
                 }
             }
         }
+        // Auto-activate the robot (mc jall init) when the controller reports the
+        // servo stage not ready — covers fresh control-box (VM) boots and cold
+        // bring-ups so `make run` needs no pendant interaction. Verified by
+        // polling until the activation stage reaches servo_enabled.
+        {
+            const auto act_probe = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+            if (act_probe) {
+                const RbpodoSystemStateSnapshot probe_snapshot = snapshotFromSystemState(*act_probe);
+                const RobotState probe_mapped =
+                    mapRbpodoSystemStateSnapshot(impl_->arm_id, probe_snapshot, impl_->config);
+                if (!probe_mapped.has_error && !probe_mapped.servo_enabled) {
+                    std::cerr << "[INFO] RbpodoBackend activating robot (mc jall init) for "
+                              << impl_->config.name << " (activation stage "
+                              << probe_snapshot.init_state_info << ")\n";
+                    rb::podo::ResponseCollector responses;
+                    const auto ret = impl_->robot->activate(
+                        responses, kInitializeCommandAckTimeoutSec, true);
+                    if (impl_->config.disable_waiting_ack) {
+                        rb::podo::ResponseCollector drained;
+                        impl_->robot->flush(drained);
+                    }
+                    (void)ret;  // activation progress is judged by the state poll below
+                    bool activated = false;
+                    const uint64_t act_start_ns = nowSteadyNs();
+                    const uint64_t act_deadline_ns = act_start_ns + 60'000'000'000ULL;
+                    uint64_t act_progress_ns = act_start_ns + 5'000'000'000ULL;
+                    while (nowSteadyNs() < act_deadline_ns) {
+                        const auto verify = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+                        if (verify) {
+                            const RbpodoSystemStateSnapshot vs = snapshotFromSystemState(*verify);
+                            const RobotState vm = mapRbpodoSystemStateSnapshot(impl_->arm_id, vs, impl_->config);
+                            if (vm.servo_enabled) {
+                                activated = true;
+                                break;
+                            }
+                            if (vm.has_error) break;  // activation fault: report below
+                        }
+                        if (nowSteadyNs() >= act_progress_ns) {
+                            std::cerr << "[INFO] RbpodoBackend still waiting for activation on "
+                                      << impl_->config.name << " ("
+                                      << (nowSteadyNs() - act_start_ns) / 1'000'000'000ULL
+                                      << " s elapsed)\n";
+                            act_progress_ns += 5'000'000'000ULL;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    }
+                    if (activated) {
+                        std::cerr << "[INFO] RbpodoBackend robot activated for "
+                                  << impl_->config.name << " in "
+                                  << (nowSteadyNs() - act_start_ns) / 1'000'000'000.0 << " s\n";
+                    } else {
+                        std::cerr << "[WARN] RbpodoBackend activation not confirmed for "
+                                  << impl_->config.name
+                                  << "; continuing — startup validation will report the state\n";
+                    }
+                }
+            }
+        }
         // Apply the configured overall speed bar (controller UI bottom bar) so every
         // bring-up starts from a known speed instead of whatever the pendant last had.
         {
