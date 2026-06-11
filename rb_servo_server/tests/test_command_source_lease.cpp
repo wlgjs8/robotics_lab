@@ -146,12 +146,73 @@ bool testDefaultOffAndEmergencyOverride() {
     return true;
 }
 
+bool testReleaseLeaseAllowsImmediateTakeover() {
+    rb_servo::NetworkConfig network;
+    network.command_source_enforce_lease = true;
+    network.command_source_lease_timeout_sec = 60.0;
+    rb_servo::CommandBuffer buffer;
+    rb_servo::CommandServer server(network, &buffer);
+    rb_servo::DualArmCommand out;
+    const uint64_t now = rb_servo::nowSteadyNs();
+
+    RB_CHECK(server.parseMessage(
+        R"({"seq":1,"mode":"AcquireLease","source_id":"policy_runner","session_id":"old-session"})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.lease.active);
+    const std::string policy_token = out.lease.lease_token;
+
+    // A foreign/stale session cannot release the live owner's lease.
+    RB_CHECK(!server.parseMessage(
+        R"({"seq":1,"mode":"ReleaseLease","source_id":"policy_runner","session_id":"new-session"})",
+        now + 1,
+        &out
+    ));
+    RB_CHECK(contains(server.lastRejectReason(), "command_source_lease_release_denied"));
+
+    // A release with the wrong token is rejected.
+    RB_CHECK(!server.parseMessage(
+        R"({"seq":2,"mode":"ReleaseLease","source_id":"policy_runner","session_id":"old-session","lease_token":"wrong-token"})",
+        now + 2,
+        &out
+    ));
+    RB_CHECK(contains(server.lastRejectReason(), "command_source_lease_token_mismatch"));
+
+    // The owning session releases (with its token); lease becomes inactive.
+    const std::string release = std::string(
+        R"({"seq":3,"mode":"ReleaseLease","source_id":"policy_runner","session_id":"old-session","lease_token":")"
+    ) + policy_token + R"("})";
+    RB_CHECK(server.parseMessage(release, now + 3, &out));
+    RB_CHECK(!out.lease.active);
+
+    // A new session acquires immediately — no 60 s stale-lease wait.
+    RB_CHECK(server.parseMessage(
+        R"({"seq":1,"mode":"AcquireLease","source_id":"policy_runner","session_id":"new-session"})",
+        now + 4,
+        &out
+    ));
+    RB_CHECK(out.lease.active);
+    RB_CHECK(out.lease.session_id == "new-session");
+
+    // Releasing when no lease is active is an accepted no-op.
+    rb_servo::CommandServer idle_server(network, &buffer);
+    RB_CHECK(idle_server.parseMessage(
+        R"({"seq":1,"mode":"ReleaseLease","source_id":"policy_runner","session_id":"any-session"})",
+        now,
+        &out
+    ));
+    RB_CHECK(!out.lease.active);
+    return true;
+}
+
 }  // namespace
 
 int main() {
     if (!testAcquireLeaseAndExpiration()) return 1;
     if (!testWrongTokenRejected()) return 1;
     if (!testDefaultOffAndEmergencyOverride()) return 1;
+    if (!testReleaseLeaseAllowsImmediateTakeover()) return 1;
     std::cout << "command source lease tests passed\n";
     return 0;
 }

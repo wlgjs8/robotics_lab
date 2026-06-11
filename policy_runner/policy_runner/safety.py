@@ -90,52 +90,16 @@ class SafetyGate:
             return camera_decision
         if requirements.requires_kinematics and not self.config.kinematics_available:
             return SafetyDecision(False, "kinematics_unavailable")
-        observed_mode = _observed_mode(payload)
-        effective_mode = observed_mode or self.mode
-        controller_simulation_cartesian = False
-        if requirements.cartesian_motion and (observed_mode == "real" or self.mode == "real"):
-            if (
-                requirements.allow_rbpodo_controller_simulation_cartesian
-                and self.config.allow_rbpodo_controller_simulation_cartesian
-            ):
-                controller_decision = _evaluate_rbpodo_controller_simulation_cartesian(payload, intent)
-                if not controller_decision.allowed:
-                    return controller_decision
-                controller_simulation_cartesian = True
-                effective_mode = "controller_simulation"
-            else:
-                if intent.is_motion and not self.config.allow_real_motion:
-                    return SafetyDecision(False, "real_motion_not_allowed")
-                return SafetyDecision(False, "real_cartesian_not_allowed")
+        # Real/sim execution gating is retired: observed/configured run mode,
+        # simulation_only requirements, controller-sim gate evidence, and
+        # allow_real_motion no longer block commands. The server-reported
+        # CartesianUnavailable verdict and the mode-independent checks above
+        # (stale state, fault latch, joint state, camera, kinematics) remain.
         if requirements.cartesian_motion and str(payload.get("safety_verdict", "")) == "CartesianUnavailable":
             return SafetyDecision(False, "cartesian_unavailable")
-        if (
-            requirements.requires_observed_simulation
-            and observed_mode != "simulation"
-            and not controller_simulation_cartesian
-        ):
-            return SafetyDecision(False, "observed_mode_not_simulation")
-        if (
-            requirements.requires_observed_simulation
-            and self.mode != "simulation"
-            and not controller_simulation_cartesian
-        ):
-            return SafetyDecision(False, "configured_mode_not_simulation")
-        if requirements.requires_simulator_backend_if_available and not controller_simulation_cartesian:
-            observed_backend = _observed_backend(payload)
-            if observed_backend is not None and observed_backend != "simulator":
-                return SafetyDecision(False, "observed_backend_not_simulator")
-        geometry_decision = self._evaluate_geometry_requirements(requirements, payload, effective_mode)
+        geometry_decision = self._evaluate_geometry_requirements(requirements, payload)
         if not geometry_decision.allowed:
             return geometry_decision
-        if not controller_simulation_cartesian:
-            if observed_mode == "real" and intent.is_motion and not self.config.allow_real_motion:
-                return SafetyDecision(False, "real_motion_not_allowed")
-            if requirements.simulation_only and self.mode == "real" and intent.is_motion:
-                if not self.config.allow_real_motion:
-                    return SafetyDecision(False, "real_motion_not_allowed")
-            if self.mode == "real" and intent.is_motion and not self.config.allow_real_motion:
-                return SafetyDecision(False, "real_motion_not_allowed")
         return SafetyDecision(True)
 
     def _evaluate_camera_requirements(
@@ -168,47 +132,17 @@ class SafetyGate:
         self,
         requirements: ActionRequirements,
         payload: dict[str, Any],
-        effective_mode: str,
     ) -> SafetyDecision:
+        # Geometry/calibration quality gating was part of the retired real/sim
+        # policy rules (the old flow bypassed it for real and controller-sim
+        # Cartesian anyway). Only the live TCP-pose validity check remains;
+        # camera geometry is still required for camera-dependent policies.
         if requirements.requires_valid_tcp_pose and not _has_valid_tcp_pose(payload):
             return SafetyDecision(False, "invalid_tcp_pose")
-        if not (requirements.requires_geometry or requirements.requires_camera_geometry):
-            return SafetyDecision(True)
-        if self.geometry_status is None:
-            return SafetyDecision(False, "geometry_unavailable")
-        status = self.geometry_status
-        if status.status == "unavailable":
-            return SafetyDecision(False, status.load_error or "geometry_unavailable")
-        if not status.robot_mounts_available:
-            return SafetyDecision(False, "robot_mount_geometry_unavailable")
-        if requirements.requires_camera_geometry and not status.camera_geometry_available:
-            return SafetyDecision(False, "camera_geometry_unavailable")
-        if status.status == "configured_estimate":
-            if effective_mode == "real" and not self.config.allow_configured_estimate_geometry_in_real:
-                return SafetyDecision(False, "configured_estimate_geometry_not_allowed_in_real")
-            if effective_mode == "simulation" and not self.config.allow_configured_estimate_geometry_in_simulation:
-                return SafetyDecision(False, "configured_estimate_geometry_not_allowed_in_simulation")
-            if (
-                effective_mode == "controller_simulation"
-                and not self.config.allow_configured_estimate_geometry_in_controller_simulation
-            ):
-                return SafetyDecision(
-                    False,
-                    "configured_estimate_geometry_not_allowed_in_controller_simulation",
-                )
-        elif not _is_real_policy_geometry_status(status.status):
-            return SafetyDecision(False, "geometry_status_not_policy_ready")
-        if effective_mode == "real" and not status.geometry_valid_for_real_policy:
-            return SafetyDecision(False, "geometry_not_valid_for_real_policy")
+        if requirements.requires_camera_geometry:
+            if self.geometry_status is None or not self.geometry_status.camera_geometry_available:
+                return SafetyDecision(False, "camera_geometry_unavailable")
         return SafetyDecision(True)
-
-
-def _observed_mode(payload: dict[str, Any]) -> str | None:
-    for key in ("observed_mode", "run_mode", "mode"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.lower() in {"mock", "simulation", "real"}:
-            return value.lower()
-    return None
 
 
 def camera_readiness_from_snapshot(
@@ -233,25 +167,6 @@ def camera_readiness_from_snapshot(
     )
 
 
-def _observed_backend(payload: dict[str, Any]) -> str | None:
-    for key in ("observed_backend", "backend_type", "backend"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.lower() in {"mock", "simulator", "rbpodo"}:
-            return value.lower()
-    return None
-
-
-_CARTESIAN_ARM_MOTION_MODES = {
-    "TcpPoseTarget",
-    "TcpDeltaStand",
-    "TcpDeltaLocal",
-    "TcpLinearMove",
-    "TcpTwistStand",
-    "TcpTwistLocal",
-    "TcpCircleMove",
-    "TcpCircleTrack",
-}
-
 # Only the real-connection tripwires remain server-reported in cartesian_gate.
 # rb_servo_server moved the controller-simulation toggles
 # (RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION/CARTESIAN, RB_RBPODO_PGMODE_SIMULATION_CONFIRMED)
@@ -260,128 +175,6 @@ _CARTESIAN_ARM_MOTION_MODES = {
 # the retired env keys here made the gate report controller_simulation_env_missing
 # and drop every pgmode cartesian command. Keep the REAL_ROBOT/REAL_MOTION
 # tripwires that the server still publishes.
-_CONTROLLER_SIMULATION_ENV_KEYS = (
-    "env_RB_ALLOW_REAL_ROBOT",
-    "env_RB_ALLOW_REAL_MOTION",
-)
-
-
-def _evaluate_rbpodo_controller_simulation_cartesian(
-    payload: dict[str, Any],
-    intent: CommandIntent,
-) -> SafetyDecision:
-    observed_backend = _observed_backend(payload)
-    if observed_backend is not None and observed_backend != "rbpodo":
-        return SafetyDecision(False, "controller_simulation_backend_not_rbpodo")
-    observed_mode = _observed_mode(payload)
-    if observed_mode is not None and observed_mode != "real":
-        return SafetyDecision(False, "controller_simulation_mode_not_real")
-
-    arms = _active_cartesian_arms(intent)
-    if not arms:
-        arms = ("left", "right")
-    for arm in arms:
-        decision = _evaluate_arm_controller_simulation_cartesian(payload, arm)
-        if not decision.allowed:
-            return decision
-    return SafetyDecision(True)
-
-
-def _active_cartesian_arms(intent: CommandIntent) -> tuple[str, ...]:
-    if intent.mode == "ArmMotion":
-        return ("left", "right")
-    arms: list[str] = []
-    for arm_name, arm_payload in (("left", intent.left), ("right", intent.right)):
-        if _arm_mode(arm_payload) in _CARTESIAN_ARM_MOTION_MODES:
-            arms.append(arm_name)
-    if not arms and intent.mode in _CARTESIAN_ARM_MOTION_MODES:
-        return ("left", "right")
-    return tuple(arms)
-
-
-def _evaluate_arm_controller_simulation_cartesian(
-    payload: dict[str, Any],
-    arm: str,
-) -> SafetyDecision:
-    arm_payload = payload.get(arm, {})
-    if not isinstance(arm_payload, dict):
-        return SafetyDecision(False, "controller_simulation_arm_state_missing")
-    gate = arm_payload.get("cartesian_gate")
-    if not isinstance(gate, dict):
-        gate = payload.get("cartesian_gate")
-    if not isinstance(gate, dict):
-        return SafetyDecision(False, "controller_simulation_cartesian_gate_missing")
-
-    if _lower_str(gate.get("backend_type")) != "rbpodo":
-        return SafetyDecision(False, "controller_simulation_backend_not_rbpodo")
-    if _lower_str(gate.get("run_mode")) != "real":
-        return SafetyDecision(False, "controller_simulation_mode_not_real")
-    if _lower_str(gate.get("operation_mode")) not in {"simulation", "sim"}:
-        return SafetyDecision(False, "controller_simulation_operation_mode_not_simulation")
-    if not bool(gate.get("allow_in_controller_simulation", False)):
-        return SafetyDecision(False, "controller_simulation_cartesian_config_not_allowed")
-    if gate.get("allow_controller_simulation_motion") is False:
-        return SafetyDecision(False, "controller_simulation_cartesian_config_not_allowed")
-    if bool(gate.get("streaming_cartesian_physical_real_enabled", False)):
-        return SafetyDecision(False, "controller_simulation_physical_real_cartesian_enabled")
-    if bool(arm_payload.get("controller_simulation_physical_motion_detected", False)):
-        return SafetyDecision(False, "controller_simulation_physical_motion_detected")
-    physical_motion_expected = gate.get(
-        "physical_motion_expected",
-        arm_payload.get("physical_motion_expected"),
-    )
-    if physical_motion_expected is not False:
-        return SafetyDecision(False, "controller_simulation_physical_motion_expected")
-    for key in _CONTROLLER_SIMULATION_ENV_KEYS:
-        if gate.get(key) is not True:
-            return SafetyDecision(False, "controller_simulation_env_missing")
-
-    prospective_available = gate.get("controller_simulation_streaming_cartesian_available")
-    if isinstance(prospective_available, bool):
-        if not prospective_available:
-            return _controller_simulation_cartesian_unavailable_decision(
-                gate,
-                "controller_simulation_streaming_cartesian_unavailable_reason",
-            )
-        if bool(gate.get("current_command_is_streaming_cartesian", False)):
-            current_decision = _evaluate_current_controller_simulation_cartesian_gate(gate)
-            if not current_decision.allowed:
-                return current_decision
-        return SafetyDecision(True)
-
-    return _evaluate_current_controller_simulation_cartesian_gate(gate)
-
-
-def _evaluate_current_controller_simulation_cartesian_gate(gate: dict[str, Any]) -> SafetyDecision:
-    if not bool(gate.get("cartesian_available", False)):
-        reason = gate.get("cartesian_unavailable_reason")
-        if isinstance(reason, str) and reason:
-            return SafetyDecision(False, reason)
-        return SafetyDecision(False, "controller_simulation_cartesian_unavailable")
-    current_enabled = gate.get(
-        "controller_simulation_cartesian_enabled_for_current_command",
-        gate.get("controller_simulation_cartesian_enabled", False),
-    )
-    if not bool(current_enabled):
-        return SafetyDecision(False, "controller_simulation_cartesian_not_enabled")
-    return SafetyDecision(True)
-
-
-def _controller_simulation_cartesian_unavailable_decision(
-    gate: dict[str, Any],
-    reason_key: str,
-) -> SafetyDecision:
-    reason = gate.get(reason_key)
-    if isinstance(reason, str) and reason:
-        return SafetyDecision(False, reason)
-    return SafetyDecision(False, "controller_simulation_cartesian_unavailable")
-
-
-def _arm_mode(value: dict[str, Any] | None) -> str | None:
-    if not value:
-        return None
-    mode = value.get("mode")
-    return str(mode) if mode is not None else None
 
 
 def _lower_str(value: Any) -> str | None:
@@ -446,5 +239,3 @@ def _has_valid_tcp_pose(payload: dict[str, Any]) -> bool:
     return True
 
 
-def _is_real_policy_geometry_status(status: str) -> bool:
-    return status.strip().lower() in {"measured", "calibrated", "accepted"}

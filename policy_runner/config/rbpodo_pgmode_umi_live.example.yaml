@@ -44,8 +44,41 @@ command_rate_hz: 500
 umi_dual_cartesian:
   max_linear_step_m: 0.005
   max_angular_step_rad: 0.04
-  gripper_offset: [0.172, 0.0, -0.076]
-  r_align: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  # Input LPF DISABLED (0): smoothing now happens server-side in the SMD pose
+  # tracker (cartesian_control.pose_track_smd in the rb_servo_server config) —
+  # a policy-side LPF on top would just stack extra lag. Re-enable by setting a
+  # tau (sec, e.g. 0.05) only if the SMD stage is turned off.
+  target_lpf_tau_sec: 0.0
+  # 1.5mm/0.012rad: absorbs the idle hand's natural sway so the non-operated
+  # arm stays frozen while the other arm is driven (0.3mm let it twitch).
+  deadband_linear_m: 0.0015
+  deadband_angular_rad: 0.012
+  # world: take the tracker delta in the gravity-aligned tracker WORLD frame
+  # and apply it along stand axes, so horizontal hand motion stays horizontal
+  # at the robot regardless of the tool/TCP orientation at latch time.
+  # tool (default): latched body-frame composition (delta tilts with how the
+  # tool and TCP were oriented when the deadman was pressed).
+  delta_frame: tool #world
+  # ---- Pose-frame geometry (paired with pika publisher --pose-frame tip) ----
+  # The publisher applies the official pika_sdk tracker→gripper-tip transform
+  # (T_raw · Rx(-20°)·[Ry(-90°)·Rx(-90°)] · Trans(0.172, 0, -0.076)): the wire
+  # pose origin is the gripper fingertip line (axes x=approach, y=left, z=up)
+  # and pairs with the URDF tip TCP (tcp_joint z=0.247642). No offset here:
+  gripper_offset: [0.0, 0.0, 0.0]
+  # r_align maps the published tip-frame axes onto the RB TCP body axes
+  # (columns = TCP x/y/z in the tip frame: TCP x = -y(gripper right),
+  # TCP y = -z(gripper down), TCP z = +x(approach)). It subsumes the previous
+  # [-1,-1,1] per-axis mirror (that mirror was the same mapping expressed in
+  # the RAW tracker frame, before the -20° mount tilt was corrected), so the
+  # axis signs return to identity. Entries must be -1 or 1.
+  r_align: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
+  linear_axis_signs: [1.0, 1.0, 1.0]
+  angular_axis_signs: [1.0, 1.0, 1.0]
+  # Legacy fallback (publisher --pose-frame tracker, raw tracker origin):
+  #   gripper_offset: [0.172, 0.0, -0.076]
+  #   r_align: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  #   linear_axis_signs: [-1.0, -1.0, 1.0]
+  #   angular_axis_signs: [-1.0, -1.0, 1.0]
   sample_hold_timeout_sec: 0.05
   # Each side binds its own UDP port; the publisher sends the same combined
   # {"t","left","right"} packet to BOTH ports and each reader extracts its side.

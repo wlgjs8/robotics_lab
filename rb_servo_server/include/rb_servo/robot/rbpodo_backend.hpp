@@ -25,6 +25,10 @@ struct RbpodoSystemStateSnapshot {
 
 struct RbpodoStateDecodeOptions {
     bool controller_simulation_unreliable_status_fields_unavailable = false;
+    // True only when the REAL physical-motion suspect-diagnostics gate opened the
+    // unavailable-fields policy (operator-visible); distinct from the controller-sim
+    // carve-out so real-motion telemetry is unambiguous.
+    bool real_motion_suspect_diagnostics_accepted = false;
 };
 
 RobotState mapRbpodoSystemStateSnapshot(

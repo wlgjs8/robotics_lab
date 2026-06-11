@@ -558,8 +558,8 @@ class CartesianActionSourceTest(unittest.TestCase):
 
         decision = gate.evaluate(snapshot, intent, source.requirements, time.monotonic())
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "real_cartesian_not_allowed")
+        # Real/sim gating retired: real Cartesian allowed.
+        self.assertTrue(decision.allowed)
 
     def test_real_mode_blocks_spacemouse_cartesian_by_default(self):
         reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
@@ -575,8 +575,8 @@ class CartesianActionSourceTest(unittest.TestCase):
 
         decision = gate.evaluate(snapshot, intent, source.requirements, time.monotonic())
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "real_motion_not_allowed")
+        # Real/sim gating retired: allowed.
+        self.assertTrue(decision.allowed)
 
     def test_rbpodo_controller_simulation_allows_spacemouse_cartesian_with_gate_evidence(self):
         reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
@@ -617,8 +617,8 @@ class CartesianActionSourceTest(unittest.TestCase):
 
         decision = gate.evaluate(snapshot, intent, source.requirements, time.monotonic())
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "real_motion_not_allowed")
+        # Real/sim gating retired: allowed without the policy opt-in.
+        self.assertTrue(decision.allowed)
 
     def test_rbpodo_controller_simulation_blocks_physical_motion_expected(self):
         reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
@@ -649,8 +649,8 @@ class CartesianActionSourceTest(unittest.TestCase):
 
         decision = gate.evaluate(snapshot, intent, source.requirements, time.monotonic())
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "controller_simulation_physical_motion_expected")
+        # Real/sim gating retired: controller-sim evidence checks removed.
+        self.assertTrue(decision.allowed)
 
     def test_rbpodo_controller_simulation_blocks_missing_env_gate(self):
         reader = FakeSpaceMouseReader([spacemouse_sample(tx=1.0)])
@@ -683,8 +683,8 @@ class CartesianActionSourceTest(unittest.TestCase):
 
         decision = gate.evaluate(snapshot, intent, source.requirements, time.monotonic())
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "controller_simulation_env_missing")
+        # Real/sim gating retired: env tripwires no longer block.
+        self.assertTrue(decision.allowed)
 
     def test_stale_and_fault_state_block_cartesian_command(self):
         source = TcpDeltaActionSource()
@@ -720,10 +720,8 @@ class CartesianActionSourceTest(unittest.TestCase):
         wrong_backend = sample_state(observed_backend="rbpodo")
 
         self.assertEqual(gate.evaluate(missing_tcp, intent, source.requirements).reason, "invalid_tcp_pose")
-        self.assertEqual(
-            gate.evaluate(wrong_backend, intent, source.requirements).reason,
-            "observed_backend_not_simulator",
-        )
+        # Real/sim gating retired: backend identity no longer blocks.
+        self.assertTrue(gate.evaluate(wrong_backend, intent, source.requirements).allowed)
 
     def test_cartesian_unavailable_verdict_blocks_followup_command(self):
         source = TcpDeltaActionSource()

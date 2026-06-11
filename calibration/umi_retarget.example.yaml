@@ -1,5 +1,8 @@
 schema: robotics_lab.umi_retarget.v1
 status: configured_estimate   # measured or accepted required for physical real policy rollout
+# For the Pika tracker -> robot-TCP-equivalent device transform (T_tcp_umi_gripper),
+# see umi_retarget_eelocal.yaml — it is NOT a pure translation (official pika_sdk
+# R_corr rotation + tip translation + r_align; raw-frame lever [0,-0.0126,+0.1876] m).
 source_pose_frame: steamvr_world
 target_pose_frame: stand
 left:

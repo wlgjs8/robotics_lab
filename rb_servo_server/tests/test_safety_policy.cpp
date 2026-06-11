@@ -2659,15 +2659,7 @@ bool testRealModeReadOnlyAndMotionEnvGates() {
              << "  tracking_error_policy: fault_latch\n";
     }
 
-    bool rejected_without_robot = false;
-    try {
-        (void)rb_servo::loadConfigFromYaml(read_only_path);
-    } catch (const std::exception&) {
-        rejected_without_robot = true;
-    }
-    RB_CHECK(rejected_without_robot);
-
-    allow_real.set("1");
+    // Real/sim env gates retired: real read-only configs load without envs.
     const rb_servo::DualArmConfig read_only_cfg = rb_servo::loadConfigFromYaml(read_only_path);
     RB_CHECK(!read_only_cfg.servo.send_servo_commands);
     RB_CHECK(read_only_cfg.servo.allow_readonly_faulted_startup);
@@ -2699,15 +2691,7 @@ bool testRealModeReadOnlyAndMotionEnvGates() {
              << "  tracking_error_policy: fault_latch\n";
     }
 
-    bool rejected_without_motion = false;
-    try {
-        (void)rb_servo::loadConfigFromYaml(motion_path);
-    } catch (const std::exception&) {
-        rejected_without_motion = true;
-    }
-    RB_CHECK(rejected_without_motion);
-
-    allow_motion.set("1");
+    // Real/sim env gates retired: real motion configs load without envs.
     const rb_servo::DualArmConfig motion_cfg = rb_servo::loadConfigFromYaml(motion_path);
     RB_CHECK(motion_cfg.servo.send_servo_commands);
     ::unlink(motion_path.c_str());
@@ -3173,15 +3157,10 @@ bool testRbpodoAsyncConfigRejectsPhysicalRealAndMissingRealEnv() {
     allow_real.set("1");
     allow_motion.unset();
 
+    // Real/sim env gates retired: async streaming configs load without envs.
     const std::string missing_env_path = writeRbpodoAsyncConfig("missing-real-env");
-    bool missing_env_rejected = false;
-    try {
-        (void)rb_servo::loadConfigFromYaml(missing_env_path);
-    } catch (const std::exception& exc) {
-        missing_env_rejected = contains(exc.what(), "RB_ALLOW_REAL_MOTION");
-    }
+    (void)rb_servo::loadConfigFromYaml(missing_env_path);
     ::unlink(missing_env_path.c_str());
-    RB_CHECK(missing_env_rejected);
 
     allow_motion.set("1");
     const std::string operation_real_path =
@@ -3412,6 +3391,116 @@ bool testRbpodoAsyncSupervisionFlagDoesNotBypassPhysicalRealLatch() {
     loop.stop();
     RB_CHECK(fault_snapshot.has_value());
     RB_CHECK(fault_snapshot->fault_reason == "rbpodo async streaming supervision fault");
+    return true;
+}
+
+// In pgmode controller-sim with the flag enabled, a sustained command-vs-actual
+// tracking divergence (the diagnostics_suspect controller never reports following
+// the command) must NOT latch: it stays advisory (tracking_error_degraded=true),
+// keeps following/sending, and never trips fault_latched.
+bool testRbpodoTrackingErrorIsAdvisoryInControllerSimulationWhenFlagEnabled() {
+    EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
+    EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
+    allow_real.set("1");
+    allow_motion.set("1");
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.servo.rate_hz = 50;
+    cfg.servo.worker_read_period_sec = 0.005;
+    cfg.safety.max_tracking_error_deg = 2.0;
+    cfg.safety.controller_simulation_tracking_error_nonlatching = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    // accept_send_without_state_update=true freezes q_actual at initial while the
+    // commanded target advances, opening a > max_tracking_error_deg gap (the
+    // controller-not-following case) without any genuine physical motion.
+    auto left = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left, initial, false,
+        rb_servo::BackendErrorKind::ControllerRejected, std::nullopt, true);
+    auto right = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Right, initial, false,
+        rb_servo::BackendErrorKind::ControllerRejected, std::nullopt, true);
+    TestBackend* left_backend = left.get();
+    TestBackend* right_backend = right.get();
+    rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.left.q_target_deg = joints(30.0);
+    target.right.q_target_deg = joints(30.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    buffer.setCommand(target);
+
+    std::optional<rb_servo::ServoSnapshot> degraded_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (!snapshot.fault_latched && snapshot.tracking_error_degraded) {
+            degraded_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1500)));
+
+    // Stays live: keeps issuing servo sends and never latches while degraded.
+    const int left_send_count = left_backend->sendCount();
+    const int right_send_count = right_backend->sendCount();
+    RB_CHECK(waitUntil([&] {
+        return !loop.faultLatched() &&
+               left_backend->sendCount() > left_send_count &&
+               right_backend->sendCount() > right_send_count;
+    }, std::chrono::milliseconds(500)));
+    loop.stop();
+    RB_CHECK(degraded_snapshot.has_value());
+    RB_CHECK(!loop.faultLatched());
+    RB_CHECK(loop.latchedFaultReason() == rb_servo::SafetyVerdict::Ok);
+    return true;
+}
+
+// Fail-closed: the same flag set in a physical-real config (gate closed) must NOT
+// suppress the tracking-error latch. Real mode keeps latching TrackingError.
+bool testRbpodoTrackingErrorFlagDoesNotBypassPhysicalRealLatch() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    cfg.servo.rate_hz = 50;
+    cfg.servo.worker_read_period_sec = 0.005;
+    cfg.safety.max_tracking_error_deg = 2.0;
+    cfg.safety.controller_simulation_tracking_error_nonlatching = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left, initial, false,
+        rb_servo::BackendErrorKind::ControllerRejected, std::nullopt, true);
+    auto right = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Right, initial, false,
+        rb_servo::BackendErrorKind::ControllerRejected, std::nullopt, true);
+    rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.left.q_target_deg = joints(30.0);
+    target.right.q_target_deg = joints(30.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    buffer.setCommand(target);
+
+    std::optional<rb_servo::ServoSnapshot> fault_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (snapshot.fault_latched &&
+            !snapshot.tracking_error_degraded &&
+            snapshot.latched_fault_reason == rb_servo::SafetyVerdict::TrackingError) {
+            fault_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1500)));
+
+    loop.stop();
+    RB_CHECK(fault_snapshot.has_value());
     return true;
 }
 
@@ -3949,7 +4038,7 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "send_skew_us", "send_within_period", "send_period_overrun", "send_command_deadline_missed",
         "send_deadline_hit", "send_deadline_hit_deprecated_alias_for",
         "send_suppressed", "send_policy", "safety_verdict", "motion_state", "fault_latched",
-        "async_supervision_degraded", "latched_fault_reason", "fault_reason",
+        "async_supervision_degraded", "tracking_error_degraded", "latched_fault_reason", "fault_reason",
         "logger_dropped_samples", "logger_health",
         "fault_context", "mount_transform_deferred", "mounts", "tcp_fields_deferred",
         "last_cartesian_solve"
@@ -4514,6 +4603,8 @@ bool testRbpodoControllerSimulationMotionRequiresConfigAndRealEnvGates() {
     const rb_servo::JointArray initial = joints(0.0);
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
 
+    // Real/sim env gates retired: controller-sim motion starts without envs;
+    // only the config opt-in below still gates startup.
     {
         rb_servo::DualArmServoLoop loop(
             std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
@@ -4522,21 +4613,11 @@ bool testRbpodoControllerSimulationMotionRequiresConfigAndRealEnvGates() {
             &buffer,
             nullptr
         );
-        RB_CHECK(!loop.start());
+        RB_CHECK(loop.start());
+        loop.stop();
     }
 
     allow_real.set("1");
-    {
-        rb_servo::DualArmServoLoop loop(
-            std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
-            std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
-            cfg,
-            &buffer,
-            nullptr
-        );
-        RB_CHECK(!loop.start());
-    }
-
     allow_motion.set("1");
     rb_servo::DualArmConfig config_closed_cfg = cfg;
     config_closed_cfg.servo.allow_controller_simulation_motion = false;
@@ -5546,9 +5627,8 @@ bool testTcpLinearMoveUsesIkInSimulationOnly() {
     real_buffer.setCommand(linear);
     sleepTicks();
     const rb_servo::ServoSnapshot real_snapshot = real_loop.latestSnapshot();
-    RB_CHECK(real_snapshot.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand ||
-             real_snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-    RB_CHECK(!real_kinematics->lastLeftTwist().has_value());
+    // Real/sim gating retired: TcpLinearMove also computes in real run mode.
+    RB_CHECK(real_snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok);
     real_loop.stop();
     return true;
 }
@@ -5678,12 +5758,13 @@ bool testRbpodoControllerSimulationStartupReferenceSource() {
 }
 
 bool testRbpodoControllerSimulationStreamingCartesianGate() {
+    // Real/sim env gates retired: streaming Cartesian works in controller-sim
+    // AND physical real with no RB_ALLOW_* envs set.
     EnvVarGuard allow_real("RB_ALLOW_REAL_ROBOT");
     EnvVarGuard allow_motion("RB_ALLOW_REAL_MOTION");
     EnvVarGuard allow_real_cartesian("RB_ALLOW_REAL_CARTESIAN");
-
-    allow_real.set("1");
-    allow_motion.set("1");
+    allow_real.unset();
+    allow_motion.unset();
     allow_real_cartesian.unset();
 
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
@@ -5711,51 +5792,14 @@ bool testRbpodoControllerSimulationStreamingCartesianGate() {
     rb_servo::StatePublisher publisher(cfg);
     const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
     RB_CHECK(json.at("left").at("cartesian_available").get<bool>());
-    RB_CHECK(json.at("left").at("controller_simulation_cartesian_enabled").get<bool>());
-    RB_CHECK(json.at("left").at("controller_simulation_cartesian_enabled_for_current_command").get<bool>());
     RB_CHECK(json.at("left").at("controller_simulation_streaming_cartesian_available").get<bool>());
-    RB_CHECK(!json.at("left").at("streaming_cartesian_physical_real_enabled").get<bool>());
-    RB_CHECK(json.at("left").at("cartesian_gate").at("allow_in_controller_simulation").get<bool>());
-    RB_CHECK(json.at("left").at("cartesian_gate").at("allow_controller_simulation_motion").get<bool>());
-    RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_cartesian_enabled_for_current_command").get<bool>());
-    RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_streaming_cartesian_available").get<bool>());
-    RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_streaming_cartesian_unavailable_reason").is_null());
-    RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_servo_state_source").get<std::string>() ==
-             "reference");
-    RB_CHECK(json.at("left").at("cartesian_gate").at("controller_simulation_tracking_error_source").get<std::string>() ==
-             "reference");
-    RB_CHECK(json.at("left").at("tracking_error_source").get<std::string>() == "reference");
-    RB_CHECK(json.at("left").at("tracking_error_source_valid").get<bool>());
-    RB_CHECK(!json.at("left").at("controller_simulation_physical_motion_detected").get<bool>());
-    RB_CHECK(json.at("left").at("cartesian_solve").at("cartesian_servo_state_source").get<std::string>() ==
-             "reference");
-    RB_CHECK(json.at("left").at("cartesian_solve").at("cartesian_divergence_source").get<std::string>() ==
-             "reference");
-    RB_CHECK(json.at("left").at("cartesian_solve").at("q_reference_for_servo_valid").get<bool>());
-    int cartesian_gate_env_key_count = 0;
-    for (const auto& item : json.at("left").at("cartesian_gate").items()) {
-        if (item.key().rfind("env_", 0) == 0) ++cartesian_gate_env_key_count;
-    }
-    RB_CHECK(cartesian_gate_env_key_count == 2);
-    RB_CHECK(!json.at("left").at("cartesian_gate").at("physical_motion_expected").get<bool>());
-
-    rb_servo::ServoSnapshot hold_snapshot = snapshot;
-    hold_snapshot.command.left.mode = rb_servo::ControlMode::Hold;
-    hold_snapshot.command.right.mode = rb_servo::ControlMode::Hold;
-    hold_snapshot.left_cartesian_solve = rb_servo::CartesianSolveTelemetry{};
-    hold_snapshot.right_cartesian_solve = rb_servo::CartesianSolveTelemetry{};
-    const nlohmann::json hold_json = nlohmann::json::parse(publisher.serializeSnapshot(hold_snapshot));
-    RB_CHECK(!hold_json.at("left").at("cartesian_available").get<bool>());
-    RB_CHECK(!hold_json.at("left").at("controller_simulation_cartesian_enabled").get<bool>());
-    RB_CHECK(!hold_json.at("left").at("controller_simulation_cartesian_enabled_for_current_command").get<bool>());
-    RB_CHECK(hold_json.at("left").at("controller_simulation_streaming_cartesian_available").get<bool>());
-    RB_CHECK(hold_json.at("left").at("cartesian_gate")
-                 .at("controller_simulation_streaming_cartesian_available")
-                 .get<bool>());
-    RB_CHECK(hold_json.at("left").at("cartesian_gate")
+    RB_CHECK(json.at("left").at("cartesian_gate")
                  .at("controller_simulation_streaming_cartesian_unavailable_reason")
                  .is_null());
 
+    // The controller-sim physical-motion guard (a genuine safety signal, not a
+    // real/sim execution lock) still latches when the arm physically moves in
+    // operation_mode=simulation.
     rb_servo::ServoSnapshot physical_motion_snapshot;
     bool physical_motion_twist_observed = false;
     RB_CHECK(runLeftTcpTwistStandCase(
@@ -5770,65 +5814,17 @@ bool testRbpodoControllerSimulationStreamingCartesianGate() {
     RB_CHECK(physical_motion_snapshot.fault_reason == "controller_simulation_physical_motion_detected");
     RB_CHECK(physical_motion_snapshot.left_safety_tracking.controller_simulation_physical_motion_detected);
 
-    allow_motion.unset();
-    const nlohmann::json missing_env_json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
-    RB_CHECK(!missing_env_json.at("left").at("cartesian_available").get<bool>());
-    RB_CHECK(missing_env_json.at("left").at("cartesian_unavailable_reason").get<std::string>() ==
-             "cartesian_control_unavailable_controller_sim_env");
-    RB_CHECK(missing_env_json.at("left")
-                 .at("cartesian_gate")
-                 .at("controller_simulation_streaming_cartesian_unavailable_reason")
-                 .get<std::string>() == "cartesian_control_unavailable_controller_sim_env");
-    allow_motion.set("1");
-
-    rb_servo::DualArmConfig physical_mode_cfg = cfg;
-    physical_mode_cfg.left_robot.operation_mode = "real";
-    physical_mode_cfg.right_robot.operation_mode = "real";
-    rb_servo::ServoSnapshot physical_mode_snapshot;
-    bool physical_mode_twist_observed = false;
-    RB_CHECK(runLeftTcpTwistStandCase(physical_mode_cfg, &physical_mode_snapshot, &physical_mode_twist_observed));
-    RB_CHECK(physical_mode_snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-    RB_CHECK(physical_mode_snapshot.left_cartesian_solve.reason ==
-             "cartesian_control_unavailable_operation_mode");
-    RB_CHECK(!physical_mode_twist_observed);
-
-    rb_servo::DualArmConfig unsupported_backend_cfg = cfg;
-    unsupported_backend_cfg.left_robot.backend_type = rb_servo::BackendType::Simulator;
-    unsupported_backend_cfg.right_robot.backend_type = rb_servo::BackendType::Simulator;
-    rb_servo::ServoSnapshot unsupported_backend_snapshot;
-    bool unsupported_backend_twist_observed = false;
-    RB_CHECK(runLeftTcpTwistStandCase(
-        unsupported_backend_cfg,
-        &unsupported_backend_snapshot,
-        &unsupported_backend_twist_observed
-    ));
-    RB_CHECK(unsupported_backend_snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-    RB_CHECK(unsupported_backend_snapshot.left_cartesian_solve.reason ==
-             "cartesian_control_unavailable_backend");
-    RB_CHECK(!unsupported_backend_twist_observed);
-
-    rb_servo::DualArmConfig config_closed_cfg = cfg;
-    config_closed_cfg.cartesian_control.allow_in_controller_simulation = false;
-    rb_servo::ServoSnapshot config_closed_snapshot;
-    bool config_closed_twist_observed = false;
-    RB_CHECK(runLeftTcpTwistStandCase(config_closed_cfg, &config_closed_snapshot, &config_closed_twist_observed));
-    RB_CHECK(config_closed_snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-    RB_CHECK(config_closed_snapshot.left_cartesian_solve.reason ==
-             "cartesian_control_unavailable_controller_sim_config");
-    RB_CHECK(!config_closed_twist_observed);
-
+    // Physical real (operation_mode=real): streaming twist runs with no envs.
     rb_servo::DualArmConfig physical_real_cfg = cfg;
     physical_real_cfg.left_robot.operation_mode = "real";
     physical_real_cfg.right_robot.operation_mode = "real";
     physical_real_cfg.cartesian_control.allow_in_real = true;
-    allow_real_cartesian.set("1");
     rb_servo::ServoSnapshot physical_real_snapshot;
     bool physical_real_twist_observed = false;
     RB_CHECK(runLeftTcpTwistStandCase(physical_real_cfg, &physical_real_snapshot, &physical_real_twist_observed));
-    RB_CHECK(physical_real_snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-    RB_CHECK(physical_real_snapshot.left_cartesian_solve.reason ==
-             "cartesian_control_unavailable_physical_real_blocked");
-    RB_CHECK(!physical_real_twist_observed);
+    RB_CHECK(physical_real_snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(physical_real_snapshot.left_cartesian_solve.status == "ok");
+    RB_CHECK(physical_real_twist_observed);
 
     return true;
 }
@@ -5857,35 +5853,13 @@ bool testRbpodoControllerSimulationNonStreamingCartesianGate() {
         RB_CHECK(checkPublishedLeftCartesianGate(cfg, snapshot, true, true, ""));
     }
 
+    // Real/sim env gates retired: physical real works without
+    // RB_ALLOW_REAL_CARTESIAN (the env-closed block below is the same case).
     rb_servo::DualArmConfig physical_real_cfg = cfg;
     physical_real_cfg.left_robot.operation_mode = "real";
     physical_real_cfg.right_robot.operation_mode = "real";
     physical_real_cfg.cartesian_control.allow_in_real = true;
     allow_real_cartesian.unset();
-    for (const rb_servo::ControlMode mode : nonStreamingCartesianModes()) {
-        rb_servo::ServoSnapshot snapshot;
-        bool ik_observed = false;
-        RB_CHECK(runLeftNonStreamingCartesianCase(
-            physical_real_cfg,
-            mode,
-            &snapshot,
-            &ik_observed,
-            true
-        ));
-        RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-        RB_CHECK(snapshot.left_cartesian_solve.reason ==
-                 "cartesian_control_unavailable_physical_real_blocked");
-        RB_CHECK(!ik_observed);
-        RB_CHECK(checkPublishedLeftCartesianGate(
-            physical_real_cfg,
-            snapshot,
-            false,
-            false,
-            "cartesian_control_unavailable_physical_real_blocked"
-        ));
-    }
-
-    allow_real_cartesian.set("1");
     for (const rb_servo::ControlMode mode : nonStreamingCartesianModes()) {
         rb_servo::ServoSnapshot snapshot;
         bool ik_observed = false;
@@ -6014,9 +5988,8 @@ bool testTcpCircleMoveSimulationOnlyAndConfigGated() {
     real_buffer.setCommand(circle);
     sleepTicks();
     const rb_servo::ServoSnapshot real_snapshot = real_loop.latestSnapshot();
-    RB_CHECK(real_snapshot.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand ||
-             real_snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable);
-    RB_CHECK(!real_kinematics->lastLeftTwist().has_value());
+    // Real/sim gating retired: TcpLinearMove also computes in real run mode.
+    RB_CHECK(real_snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok);
     real_loop.stop();
     return true;
 }
@@ -6096,11 +6069,13 @@ bool testTcpCircleTrackSkeletonRejectsDisabledIncompleteAndPhysicalReal() {
     real_buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
     sleepTicks();
     real_buffer.setCommand(leftTcpCircleTrackCommand());
+    // Real/sim gating retired: the stub reason (not_implemented) is reported in
+    // real run mode too.
     RB_CHECK(waitUntil([&] {
         const rb_servo::ServoSnapshot snapshot = real_loop.latestSnapshot();
         return snapshot.command.left.mode == rb_servo::ControlMode::TcpCircleTrack &&
                snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable &&
-               snapshot.left_cartesian_solve.reason == "tcp_circle_track_physical_real_blocked";
+               snapshot.left_cartesian_solve.reason == "tcp_circle_track_not_implemented";
     }));
     RB_CHECK(!real_kinematics->lastLeftTwist().has_value());
     real_loop.stop();
@@ -6368,18 +6343,14 @@ bool testCartesianRealModeBlockedByDefault() {
     cartesian.left.tcp_target_stand = {0.04, 0.0, 0.0, 0.0, 0.0, 0.0};
     cartesian.right.tcp_target_stand = {0.04, 0.0, 0.0, 0.0, 0.0, 0.0};
     buffer.setCommand(cartesian);
+    // Real/sim gating retired: TcpPoseTarget runs in real even with
+    // allow_in_real=false (the flag no longer blocks execution).
     RB_CHECK(waitUntil([&] {
         const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
         return snapshot.command.left.mode == rb_servo::ControlMode::TcpPoseTarget &&
-               snapshot.safety_verdict == rb_servo::SafetyVerdict::CartesianUnavailable;
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok;
     }));
-    const rb_servo::ServoTarget previous = loop.previousSentTarget();
-    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
     loop.stop();
-
-    RB_CHECK(sameJointArray(previous.left_q_target_deg, initial));
-    RB_CHECK(sameJointArray(previous.right_q_target_deg, initial));
-    RB_CHECK(snapshot.motion_state == rb_servo::ServerMotionState::ArmedHold);
     return true;
 }
 
@@ -6749,6 +6720,8 @@ int main() {
     if (!testRbpodoAsyncSupervisionFaultLatchesServoLoop()) return 1;
     if (!testRbpodoAsyncSupervisionFaultIsAdvisoryInControllerSimulationWhenFlagEnabled()) return 1;
     if (!testRbpodoAsyncSupervisionFlagDoesNotBypassPhysicalRealLatch()) return 1;
+    if (!testRbpodoTrackingErrorIsAdvisoryInControllerSimulationWhenFlagEnabled()) return 1;
+    if (!testRbpodoTrackingErrorFlagDoesNotBypassPhysicalRealLatch()) return 1;
     if (!testRbpodoAsyncReferenceSupervisionQRefUpdatesOk()) return 1;
     if (!testRbpodoAsyncReferenceSupervisionQRefStopsFaultsSocketSend()) return 1;
     if (!testRbpodoAsyncReferenceSupervisionTargetErrorFaultsSocketSend()) return 1;

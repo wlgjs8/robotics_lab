@@ -4,7 +4,7 @@ import importlib.util
 import math
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .geometry import (
     _mount_pose_from_mounts,
@@ -167,6 +167,14 @@ def _joint_cfg_radians(q_values: tuple[float, ...] | None) -> tuple[float, ...]:
 # Translucent blue for the reference "ghost" robot (R, G, B, alpha in 0..1).
 _REFERENCE_GHOST_RGBA = (0.25, 0.6, 1.0, 0.35)
 
+# Fully opaque red for the self-collision overlay (shown while
+# self_collision.violated, monitor_only included). The URDF override is an
+# RGB 3-tuple on purpose: a 4-tuple routes through add_mesh_simple(opacity=a),
+# which uses the transparent material pipeline even at alpha 1.0 and renders
+# washed out / depth-sorted. RGB keeps the opaque pipeline.
+_SELF_COLLISION_RGB = (0.85, 0.08, 0.08)
+_SELF_COLLISION_STAND_RGBA = (217, 20, 20, 255)
+
 
 def _reference_ghost_enabled() -> bool:
     return os.environ.get("RB_GUI_REFERENCE_GHOST", "1").strip().lower() not in ("0", "false", "no", "off")
@@ -200,6 +208,132 @@ def _tcp_label_position(position: tuple[float, float, float]) -> tuple[float, fl
     return (position[0], position[1], position[2] + 0.045)
 
 
+_FLOOR_PLANE_BLUE = (80, 160, 255)
+_FLOOR_PLANE_RED = (220, 60, 60)
+# Stand-frame footprint of the floor plane visual: x in [-0.5, 0.5] m,
+# y in [-1.0, 0.0] m (the workspace in front of the stand).
+_FLOOR_PLANE_DIMENSIONS = (1.0, 1.0, 0.002)
+_FLOOR_PLANE_CENTER_XY = (0.0, -0.5)
+
+
+def _add_floor_plane(server: Any, handles: dict[str, Any]) -> None:
+    """Stand-frame safety floor plane (safety.floor_constraint visual).
+
+    Rendered at the server-reported effective z; red when either arm violates.
+    Hidden until the server reports the constraint enabled."""
+    try:
+        if hasattr(server.scene, "add_box"):
+            try:
+                handles["floor_plane"] = server.scene.add_box(
+                    "/stand/floor_plane",
+                    dimensions=_FLOOR_PLANE_DIMENSIONS,
+                    color=_FLOOR_PLANE_BLUE,
+                    opacity=0.25,
+                    position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
+                    visible=False,
+                )
+            except TypeError:  # older viser without opacity support
+                handles["floor_plane"] = server.scene.add_box(
+                    "/stand/floor_plane",
+                    dimensions=_FLOOR_PLANE_DIMENSIONS,
+                    color=_FLOOR_PLANE_BLUE,
+                    position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
+                    visible=False,
+                )
+        elif hasattr(server.scene, "add_grid"):
+            handles["floor_plane"] = server.scene.add_grid(
+                "/stand/floor_plane",
+                width=_FLOOR_PLANE_DIMENSIONS[0],
+                height=_FLOOR_PLANE_DIMENSIONS[1],
+                position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
+                visible=False,
+            )
+    except Exception as exc:
+        handles["floor_plane_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def update_floor_plane(scene_handles: dict[str, Any], floor: Mapping[str, Any] | None) -> None:
+    """Move/recolor the safety floor plane from the published floor_constraint block."""
+    plane = scene_handles.get("floor_plane") if isinstance(scene_handles, dict) else None
+    if plane is None:
+        return
+    if not isinstance(floor, Mapping) or not bool(floor.get("enabled", False)):
+        _set_visible(plane, False)
+        return
+    z = floor.get("z_min_m")
+    if isinstance(z, (int, float)) and math.isfinite(float(z)):
+        try:
+            # z is the stand-frame plane height (z=0 == stand origin plane).
+            plane.position = (*_FLOOR_PLANE_CENTER_XY, float(z))
+        except Exception:
+            pass
+    violated = any(
+        isinstance(floor.get(key), Mapping) and bool(floor[key].get("violated", False))
+        for key in ("left", "right")
+    )
+    try:
+        plane.color = _FLOOR_PLANE_RED if violated else _FLOOR_PLANE_BLUE
+    except Exception:
+        pass
+    _set_visible(plane, True)
+
+
+def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) -> None:
+    """Paint the colliding PAIR opaque red while self_collision.violated.
+
+    Driven by the server's self_collision telemetry, so monitor_only runs show
+    the overlay too. Only the members of the reported pair turn red
+    ("left_right" -> both arms, "left_stand"/"right_stand" -> that arm + the
+    stand); a violated state without a recognizable pair falls back to all-red
+    (conservative). pgmode real (physical_motion_expected=True): the ACTUAL
+    robot (q_actual) turns red. pgmode simulation: the commanded ghost (q_sent)
+    turns red while the solid robot keeps showing the true (stationary) state."""
+    if not isinstance(scene_handles, dict):
+        return
+    sc = getattr(latest, "self_collision", None) if latest is not None else None
+    violated = isinstance(sc, Mapping) and bool(sc.get("violated", False))
+    pair = sc.get("pair") if isinstance(sc, Mapping) else None
+    if violated and pair not in ("left_right", "left_stand", "right_stand"):
+        pair = "all"  # unknown/legacy pair info: keep the conservative all-red
+    left_red = violated and pair in ("left_right", "left_stand", "all")
+    right_red = violated and pair in ("left_right", "right_stand", "all")
+    stand_red = violated and pair in ("left_stand", "right_stand", "all")
+    physical_real = latest is not None and (
+        getattr(latest.left, "physical_motion_expected", None) is True
+        or getattr(latest.right, "physical_motion_expected", None) is True
+    )
+
+    if violated:
+        for key, arm_state, arm_red in (
+            ("left_urdf_collision", latest.left, left_red),
+            ("right_urdf_collision", latest.right, right_red),
+        ):
+            handle = scene_handles.get(key)
+            if handle is None or not arm_red:
+                continue
+            q = arm_state.q_actual_deg if physical_real else (
+                arm_state.q_sent_deg if arm_state.q_sent_deg is not None else arm_state.q_actual_deg
+            )
+            try:
+                _update_urdf_config(handle, _joint_cfg_radians(q))
+            except Exception as exc:
+                scene_handles["urdf_collision_update_error"] = f"{type(exc).__name__}: {exc}"
+
+    _set_visible(scene_handles.get("left_base_collision"), left_red)
+    _set_visible(scene_handles.get("right_base_collision"), right_red)
+    _set_visible(scene_handles.get("stand_mesh_collision"), stand_red)
+    _set_visible(scene_handles.get("stand_mesh"), not stand_red)
+    # Replace (not overlap) the model the red overlay represents to avoid
+    # z-fighting at the identical configuration — per arm, only the red one.
+    _set_visible(scene_handles.get("left_base"), not (left_red and physical_real))
+    _set_visible(scene_handles.get("right_base"), not (right_red and physical_real))
+    if violated and not physical_real:
+        if left_red:
+            _set_visible(scene_handles.get("left_base_ref"), False)
+        if right_red:
+            _set_visible(scene_handles.get("right_base_ref"), False)
+
+
 def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
     stand_mesh_path = _stand_mesh_path()
     if not stand_mesh_path.exists():
@@ -216,6 +350,19 @@ def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
             position=_pose_position(_DEFAULT_STAND_MESH_POSE),
             wxyz=_pose_wxyz(_DEFAULT_STAND_MESH_POSE),
         )
+        # Opaque-red duplicate for the self-collision overlay (hidden until violated).
+        try:
+            red = mesh.copy()
+            red.visual.face_colors = _SELF_COLLISION_STAND_RGBA
+            handles["stand_mesh_collision"] = server.scene.add_mesh_trimesh(
+                "/stand/mesh_collision",
+                mesh=red,
+                position=_pose_position(_DEFAULT_STAND_MESH_POSE),
+                wxyz=_pose_wxyz(_DEFAULT_STAND_MESH_POSE),
+                visible=False,
+            )
+        except Exception as exc:
+            handles["stand_mesh_collision_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
     except Exception as exc:
         handles["stand_mesh_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
 
@@ -245,6 +392,18 @@ def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
                     mesh_color_override=_REFERENCE_GHOST_RGBA)
             except Exception as exc:
                 handles["urdf_ref_error"] = f"{type(exc).__name__}: {exc}"
+        # Opaque-red self-collision overlay robots (hidden until violated). In
+        # pgmode real they replace the actual robot; in pgmode simulation they
+        # replace the commanded ghost.
+        try:
+            handles["left_urdf_collision"] = ViserUrdf(
+                server, urdf_path, root_node_name="/stand/left_base_collision",
+                mesh_color_override=_SELF_COLLISION_RGB)
+            handles["right_urdf_collision"] = ViserUrdf(
+                server, urdf_path, root_node_name="/stand/right_base_collision",
+                mesh_color_override=_SELF_COLLISION_RGB)
+        except Exception as exc:
+            handles["urdf_collision_error"] = f"{type(exc).__name__}: {exc}"
     except Exception as exc:
         handles["urdf_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
 
@@ -269,6 +428,9 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         # Mount frames for the translucent reference "ghost" robot (follows q_ref).
         handles["left_base_ref"] = server.scene.add_frame("/stand/left_base_ref", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
         handles["right_base_ref"] = server.scene.add_frame("/stand/right_base_ref", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
+        # Mount frames for the opaque-red self-collision overlay robots.
+        handles["left_base_collision"] = server.scene.add_frame("/stand/left_base_collision", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
+        handles["right_base_collision"] = server.scene.add_frame("/stand/right_base_collision", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
         has_transform_controls = hasattr(server.scene, "add_transform_controls")
         handles["left_tcp"] = server.scene.add_frame("/stand/left_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(0.1601, -0.1725, 0.78))
         handles["right_tcp"] = server.scene.add_frame("/stand/right_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(-0.1601, -0.1725, 0.78))
@@ -351,6 +513,7 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
             )
         _set_visible(handles.get("circle_overlay_line"), False)
         _set_visible(handles.get("circle_overlay_desired"), False)
+        _add_floor_plane(server, handles)
         _add_stand_mesh(server, handles)
         _add_robot_urdfs(server, handles)
         urdf_loaded = "left_urdf" in handles and "right_urdf" in handles
@@ -567,6 +730,8 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
         "right_base": right_base,
         "left_base_ref": left_base,
         "right_base_ref": right_base,
+        "left_base_collision": left_base,
+        "right_base_collision": right_base,
         "left_marker": _joint_marker_position(left_base, latest.left.q_actual_deg),
         "right_marker": _joint_marker_position(right_base, latest.right.q_actual_deg),
     }

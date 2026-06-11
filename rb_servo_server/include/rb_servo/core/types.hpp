@@ -100,7 +100,8 @@ enum class ControlMode {
     TcpTwistStand,
     TcpTwistLocal,
     EmergencyStop,
-    ResetFault
+    ResetFault,
+    SetSafetyFloorZ
 };
 
 enum class ServerMotionState {
@@ -149,6 +150,7 @@ enum class SafetyVerdict {
     CartesianUnavailable,
     IkFailed,
     SelfCollision,
+    FloorViolation,
     UnknownError
 };
 
@@ -329,6 +331,7 @@ struct CartesianSolveTelemetry {
     double linear_move_elapsed_sec = 0.0;
     std::string orientation_mode;
     bool twist_clamped = false;
+    bool floor_vz_clamped = false;
     double requested_twist_linear_norm_m_s = 0.0;
     double requested_twist_angular_norm_rad_s = 0.0;
     double applied_twist_linear_norm_m_s = 0.0;
@@ -466,6 +469,10 @@ struct DualArmCommand {
 
     ArmCommand left;
     ArmCommand right;
+
+    // SetSafetyFloorZ payload: requested stand-frame floor plane height (meters).
+    double floor_z_m = 0.0;
+    bool has_floor_z = false;
 
     // Deprecated in v3. Commands are treated as coupled by default: if a packet
     // becomes stale, both arms hold. Per-arm command streams should use separate
@@ -674,6 +681,7 @@ struct ServoSample {
     ServerMotionState motion_state = ServerMotionState::Disconnected;
     bool fault_latched = false;
     bool async_supervision_degraded = false;
+    bool tracking_error_degraded = false;
     std::string fault_reason;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
@@ -703,6 +711,7 @@ struct ServoSnapshot {
     ServerMotionState motion_state = ServerMotionState::Disconnected;
     bool fault_latched = false;
     bool async_supervision_degraded = false;
+    bool tracking_error_degraded = false;
     SafetyVerdict latched_fault_reason = SafetyVerdict::Ok;
     std::string fault_reason;
 
@@ -713,7 +722,25 @@ struct ServoSnapshot {
     double self_collision_min_clearance_m = 0.0;
     double self_collision_margin_m = 0.0;
     int self_collision_left_bone = -1;
+    std::string self_collision_pair;
+    std::string self_collision_stand_capsule;
     int self_collision_right_bone = -1;
+
+    // Stand-frame floor plane constraint telemetry (safety.floor_constraint).
+    bool floor_constraint_enabled = false;
+    bool floor_constraint_monitor_only = false;
+    double floor_constraint_z_min_m = 0.0;         // effective (runtime) plane height
+    double floor_constraint_config_z_min_m = 0.0;  // startup config value
+    double floor_constraint_runtime_min_z_m = 0.0;
+    double floor_constraint_runtime_max_z_m = 0.0;
+    bool floor_constraint_left_checked = false;
+    bool floor_constraint_left_violated = false;
+    double floor_constraint_left_tcp_z_m = 0.0;
+    bool floor_constraint_right_checked = false;
+    bool floor_constraint_right_violated = false;
+    double floor_constraint_right_tcp_z_m = 0.0;
+    uint64_t floor_constraint_clamp_count = 0;
+    std::string floor_constraint_last_set_reject_reason;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;

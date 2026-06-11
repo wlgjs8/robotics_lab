@@ -77,7 +77,17 @@ from rb_servo_gui import geometry as gui_geometry
 from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnapshot, Pose6D
 from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from rb_servo_gui.safety import OperatorSafety, Readiness, normalize_observed_mode_backend
-from rb_servo_gui.scene import _add_robot_urdfs, _add_scene_fallback, _circle_overlay_points, _robot_urdf_path, update_circle_overlay
+from rb_servo_gui.scene import (
+    _add_robot_urdfs,
+    _add_scene_fallback,
+    _circle_overlay_points,
+    _reference_ghost_active,
+    _robot_urdf_path,
+    update_circle_overlay,
+    update_floor_plane,
+    update_self_collision_overlay,
+)
+from rb_servo_gui.status_panel import _format_floor_constraint_status
 from rb_servo_gui.state_receiver import StateStore
 
 
@@ -621,6 +631,31 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(latest.left.selected_tcp_pose("auto").as_tuple(), (0.42, 0.22, 0.52, 0.0, 0.0, 0.0))
         self.assertFalse(latest.left.physical_motion_expected)
 
+    def test_physical_motion_expected_null_falls_back_to_cartesian_gate(self):
+        # Real-motion servers publish per-arm physical_motion_expected=null with the
+        # authoritative boolean in cartesian_gate; the ghost overlay must hide then.
+        state = self.tcp_available_state(observed_mode="real", observed_backend="rbpodo")
+        for arm in ("left", "right"):
+            state[arm]["physical_motion_expected"] = None
+            state[arm]["cartesian_gate"] = {
+                "run_mode": "real",
+                "backend_type": "rbpodo",
+                "operation_mode": "real",
+                "physical_motion_expected": True,
+            }
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        self.assertTrue(latest.left.physical_motion_expected)
+        self.assertTrue(latest.right.physical_motion_expected)
+        self.assertFalse(_reference_ghost_active(latest.left))
+        self.assertFalse(_reference_ghost_active(latest.right))
+
+    def test_reference_ghost_stays_active_for_controller_simulation(self):
+        store, _, _ = self.make_safety(self.pgmode_spacemouse_state())
+        latest = store.latest()
+        self.assertFalse(latest.left.physical_motion_expected)
+        self.assertTrue(_reference_ghost_active(latest.left))
+
     def test_pgmode_status_reports_reference_selection_and_policy_lease(self):
         store, _, _ = self.make_safety(self.pgmode_spacemouse_state())
         latest = store.latest()
@@ -880,6 +915,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets, [])
 
     def test_init_motion_blocks_real_mode_and_readiness_no_go(self):
+        # Real/sim gating retired: InitMotion sends in real mode too.
         _, client, real_safety = self.make_safety(
             sample_state(motion_state="ArmedHold"),
             desired="real",
@@ -888,9 +924,8 @@ class GuiContractsTest(unittest.TestCase):
             init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
         )
         ok, reason = real_safety.send_init_motion()
-        self.assertFalse(ok)
-        self.assertIn("connect/status only", reason)
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
 
         _, client, sim_safety = self.make_safety(
             sample_state(motion_state="ArmedHold"),
@@ -958,13 +993,11 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets, [])
 
     def test_real_mode_blocks_lifecycle_and_motion(self):
+        # Real/sim gating retired: lifecycle and jog work in real mode.
         _, client, safety = self.make_safety(sample_state(), desired="real", observed="real")
         ok, reason = safety.send_lifecycle("ArmMotion")
-        self.assertFalse(ok)
-        self.assertIn("connect/status only", reason)
-        ok, reason = safety.jog_joint("left", 0, 1.0)
-        self.assertFalse(ok)
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["mode"], "ArmMotion")
 
     def test_simulation_mode_is_no_go_until_readiness_passes(self):
         _, client, safety = self.make_safety(sample_state(), desired="simulation", observed="simulation", sim_ready=False)
@@ -990,10 +1023,12 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
 
     def test_desired_mode_does_not_claim_server_hot_switch(self):
+        # Real/sim gating retired: a desired/observed mode mismatch no longer
+        # blocks commands; desired=simulation still gates on sim readiness.
         _, client, safety = self.make_safety(sample_state(), desired="simulation", observed="mock")
         ok, reason = safety.jog_joint("left", 0, 1.0)
         self.assertFalse(ok)
-        self.assertIn("desired mode differs", reason)
+        self.assertIn("sim readiness", reason)
         safety.set_desired_mode("real")
         self.assertIn("not reconfigured", safety.status_message)
         self.assertEqual(client.sent_packets, [])
@@ -1056,12 +1091,17 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets, [])
 
     def test_tcp_pose_target_is_disabled_until_feature_flag(self):
-        _, client, safety = self.make_safety(sample_state())
+        # RB_GUI_ENABLE_TCP_POSE_COMMANDS lock retired: TCP pose sends without
+        # the feature flag whenever the state is valid.
+        _, client, safety = self.make_safety(
+            self.tcp_available_state(),
+            sim_ready=True,
+            cartesian_available=True,
+        )
         pose = (0.3, 0.1, 0.4, 0.0, 0.0, 0.0)
         ok, reason = safety.send_tcp_pose_target(left_pose=pose)
-        self.assertFalse(ok)
-        self.assertIn("TCP pose command disabled", reason)
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "TcpPoseTarget")
 
     def test_tcp_target_pose_helper_returns_finite_marker_pose(self):
         handles = {"left_tcp_target_pose": (0.31, 0.12, 0.44, 0.0, 0.0, 0.0)}
@@ -1224,18 +1264,16 @@ class GuiContractsTest(unittest.TestCase):
             cartesian_available=True,
             enable_tcp_pose=True,
         )
+        # Real/sim gating retired: real-mode TCP commands send normally.
         ok, reason = safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
-        self.assertIn("real mode TCP command disabled", reason)
+        self.assertTrue(ok, reason)
         ok, reason = safety.send_tcp_delta_local("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
-        self.assertIn("real mode TCP command disabled", reason)
+        self.assertTrue(ok, reason)
         ok, reason = safety.send_tcp_linear_move(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0), duration_sec=1.0)
-        self.assertFalse(ok)
-        self.assertIn("real mode TCP command disabled", reason)
-        self.assertTrue(safety.control_disabled_states()["tcp_pose"])
-        self.assertTrue(safety.control_disabled_states()["tcp_linear"])
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertFalse(safety.control_disabled_states()["tcp_pose"])
+        self.assertFalse(safety.control_disabled_states()["tcp_linear"])
+        self.assertTrue(client.sent_packets)
 
     def test_tcp_delta_stand_requires_simulator_backend_fk_and_readiness(self):
         state = self.tcp_available_state()
@@ -1248,7 +1286,8 @@ class GuiContractsTest(unittest.TestCase):
             cartesian_available=True,
             enable_tcp_pose=True,
         )
-        self.assertIn("simulator backend", backend_safety.tcp_command_disabled_reason("left"))
+        # Backend requirement retired: any backend may issue TCP commands.
+        self.assertIsNone(backend_safety.tcp_command_disabled_reason("left"))
 
         no_fk = sample_state()
         _, _, fk_safety = self.make_safety(
@@ -1304,10 +1343,8 @@ class GuiContractsTest(unittest.TestCase):
             enable_tcp_pose=True,
             enable_controller_sim_cartesian=False,
         )
-        self.assertIn(
-            "RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN",
-            no_optin.tcp_command_disabled_reason("left"),
-        )
+        # Controller-sim opt-in retired: allowed without the env flag.
+        self.assertIsNone(no_optin.tcp_command_disabled_reason("left"))
 
         # Real mode stays status-only even with the controller-sim opt-in set.
         _, _, real_safety = self.make_safety(
@@ -1320,7 +1357,8 @@ class GuiContractsTest(unittest.TestCase):
             enable_tcp_pose=True,
             enable_controller_sim_cartesian=True,
         )
-        self.assertIsNotNone(real_safety.tcp_command_disabled_reason("left"))
+        # Real mode is no longer status-only.
+        self.assertIsNone(real_safety.tcp_command_disabled_reason("left"))
 
         # Simulator backend behaviour is unchanged (no controller-sim opt-in needed).
         _, _, sim_safety = self.make_safety(
@@ -1372,6 +1410,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("velocity exceeds", msg)
 
     def test_tcp_twist_blocked_in_real_mode(self):
+        # Real/sim gating retired: twist and joint-velocity send in real mode.
         state = self.tcp_available_state()
         _, client, safety = self.make_safety(
             state,
@@ -1384,9 +1423,9 @@ class GuiContractsTest(unittest.TestCase):
             enable_controller_sim_cartesian=True,
         )
         ok, msg = safety.send_tcp_twist_stand("left", (0.02, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
+        self.assertTrue(ok, msg)
         ok, msg = safety.send_joint_velocity("left", (5.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
+        self.assertTrue(ok, msg)
 
     def test_tcp_circle_move_in_controller_sim(self):
         state = self.tcp_available_state()
@@ -1425,7 +1464,7 @@ class GuiContractsTest(unittest.TestCase):
             enable_controller_sim_cartesian=True,
         )
         ok, msg = real_safety.send_tcp_circle_move(0.15, 4.0)
-        self.assertFalse(ok)
+        self.assertTrue(ok, msg)
 
     def test_tcp_delta_stand_blocks_stale_and_faulted_state(self):
         state = self.tcp_available_state()
@@ -2288,13 +2327,14 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("left=unavailable", _format_cartesian_solve_status(latest, stale=False))
 
     def test_visual_disabled_state_matches_safety_blocks(self):
+        # Real/sim gating retired: real mode controls follow the same rules as
+        # any other mode (FK-less sample_state still disables TCP controls).
         _, _, real_safety = self.make_safety(sample_state(), desired="real", observed="real")
         real_states = real_safety.control_disabled_states()
-        self.assertTrue(real_states["jog"])
-        self.assertTrue(real_states["tcp_jog"])
+        self.assertFalse(real_states["jog"])
         self.assertTrue(real_states["tcp_linear"])
-        self.assertTrue(real_states["lifecycle:ArmMotion"])
-        self.assertTrue(real_states["lifecycle:Hold"])
+        self.assertFalse(real_states["lifecycle:ArmMotion"])
+        self.assertFalse(real_states["lifecycle:Hold"])
 
         _, _, stale_safety = self.make_safety(None)
         stale_states = stale_safety.control_disabled_states()
@@ -2353,6 +2393,204 @@ class GuiContractsTest(unittest.TestCase):
         cmake = Path(__file__).resolve().parents[2] / "rb_servo_server" / "CMakeLists.txt"
         cmake_text = cmake.read_text(encoding="utf-8")
         self.assertIn('option(RB_SERVO_ENABLE_PINOCCHIO "Enable Pinocchio FK/IK support" ON)', cmake_text)
+
+
+class FloorConstraintGuiTest(unittest.TestCase):
+    @staticmethod
+    def _floor_block(**overrides):
+        block = {
+            "enabled": True,
+            "monitor_only": False,
+            "z_min_m": 0.010,
+            "config_z_min_m": 0.010,
+            "runtime_min_z_m": 0.0,
+            "runtime_max_z_m": 0.5,
+            "left": {"checked": True, "violated": False, "tcp_z_m": 0.133},
+            "right": {"checked": True, "violated": False, "tcp_z_m": 0.108},
+            "clamp_count": 0,
+            "last_set_reject_reason": None,
+        }
+        block.update(overrides)
+        return block
+
+    def test_state_snapshot_parses_floor_constraint(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        snapshot = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block()))
+        self.assertIsNotNone(snapshot)
+        self.assertTrue(snapshot.floor_constraint["enabled"])
+        self.assertAlmostEqual(snapshot.floor_constraint["z_min_m"], 0.010)
+
+        without = StateSnapshot.parse(sample_state())
+        self.assertIsNotNone(without)
+        self.assertIsNone(without.floor_constraint)
+
+    def test_format_floor_constraint_status(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        self.assertEqual(_format_floor_constraint_status(None, stale=False), "floor: no state")
+
+        ok_state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block()))
+        text = _format_floor_constraint_status(ok_state, stale=False)
+        self.assertIn("floor: ON z=10mm", text)
+        self.assertIn("L:123mm", text)
+        self.assertIn("R:98mm", text)
+
+        violated_state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block(
+            left={"checked": True, "violated": True, "tcp_z_m": 0.004},
+        )))
+        self.assertIn("VIOLATED(left)", _format_floor_constraint_status(violated_state, stale=False))
+
+        disabled_state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block(enabled=False)))
+        self.assertEqual(_format_floor_constraint_status(disabled_state, stale=False), "floor: disabled")
+
+        no_block = StateSnapshot.parse(sample_state())
+        self.assertEqual(_format_floor_constraint_status(no_block, stale=False), "floor: disabled")
+
+    def test_build_set_safety_floor_z_packet(self):
+        client = CommandClient(host="127.0.0.1", port=0, source_id="rb_gui_test")
+        packet = client.build_set_safety_floor_z(0.012)
+        self.assertEqual(packet["mode"], "SetSafetyFloorZ")
+        self.assertAlmostEqual(packet["floor_z_m"], 0.012)
+        self.assertEqual(packet["left"], {})
+        self.assertEqual(packet["right"], {})
+        self.assertEqual(packet["source_id"], "rb_gui_test")
+        with self.assertRaises(ValueError):
+            client.build_set_safety_floor_z(float("nan"))
+
+    def test_update_floor_plane_no_crash_and_state(self):
+        class FakePlane:
+            def __init__(self):
+                self.position = (0.0, 0.0, 0.0)
+                self.color = None
+                self.visible = True
+
+        plane = FakePlane()
+        handles = {"floor_plane": plane}
+        # Disabled / missing block hides the plane.
+        update_floor_plane(handles, None)
+        self.assertFalse(plane.visible)
+        update_floor_plane(handles, {"enabled": False})
+        self.assertFalse(plane.visible)
+        # Enabled moves it to z and shows it.
+        update_floor_plane(handles, self._floor_block(z_min_m=0.05))
+        self.assertTrue(plane.visible)
+        self.assertAlmostEqual(plane.position[2], 0.05)
+        # Violation recolors.
+        blue = plane.color
+        update_floor_plane(handles, self._floor_block(
+            right={"checked": True, "violated": True, "tcp_z_m": 0.001},
+        ))
+        self.assertNotEqual(plane.color, blue)
+        # Missing handle is a no-op.
+        update_floor_plane({}, self._floor_block())
+
+
+class SelfCollisionOverlayTest(unittest.TestCase):
+    @staticmethod
+    def _handles():
+        return {
+            "left_base": RecordingSceneHandle(),
+            "right_base": RecordingSceneHandle(),
+            "left_base_ref": RecordingSceneHandle(),
+            "right_base_ref": RecordingSceneHandle(),
+            "left_base_collision": RecordingSceneHandle(),
+            "right_base_collision": RecordingSceneHandle(),
+            "stand_mesh": RecordingSceneHandle(),
+            "stand_mesh_collision": RecordingSceneHandle(),
+            "left_urdf_collision": RecordingUrdf(),
+            "right_urdf_collision": RecordingUrdf(),
+        }
+
+    @staticmethod
+    def _latest(*, violated, physical_real, q_actual, q_sent, pair="left_stand"):
+        store = StateStore(stale_after_sec=5.0)
+        arm = {
+            "has_valid_joint_state": True,
+            "q_actual_deg": q_actual,
+            "q_sent_deg": q_sent,
+            "physical_motion_expected": physical_real,
+        }
+        payload = sample_state(
+            left=dict(arm),
+            right=dict(arm),
+            self_collision={"enabled": True, "checked": True, "violated": violated,
+                            "pair": pair,
+                            "stand_capsule": "lower_column" if pair and "stand" in pair else None},
+        )
+        assert store.update_from_json_bytes(json.dumps(payload).encode(), received_monotonic=time.monotonic())
+        return store.latest()
+
+    def test_real_violation_paints_only_the_pair_red(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair="left_stand",
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=[9, 9, 9, 9, 9, 9])
+        update_self_collision_overlay(handles, latest)
+        # left_stand pair: red overlay at q_actual for the LEFT arm + stand only;
+        # the right arm stays normal.
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertFalse(handles["right_base_collision"].visible)
+        self.assertTrue(handles["stand_mesh_collision"].visible)
+        self.assertFalse(handles["stand_mesh"].visible)
+        self.assertFalse(handles["left_base"].visible)
+        self.assertTrue(handles["right_base"].visible)
+        self.assertAlmostEqual(handles["left_urdf_collision"].configs[-1][0], math.radians(1.0))
+        self.assertEqual(handles["right_urdf_collision"].configs, [])
+
+    def test_sim_violation_paints_ghost_pair_red_and_keeps_solid(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=False, pair="left_stand",
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=[9, 8, 7, 6, 5, 4])
+        update_self_collision_overlay(handles, latest)
+        # Red overlay shown at q_sent (the commanded ghost pose) for the LEFT arm;
+        # only that ghost is replaced; the right ghost and the solid robots stay.
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertFalse(handles["right_base_collision"].visible)
+        self.assertFalse(handles["left_base_ref"].visible)
+        self.assertIsNone(handles["right_base_ref"].visible)  # untouched
+        self.assertTrue(handles["left_base"].visible)
+        self.assertTrue(handles["stand_mesh_collision"].visible)
+        self.assertAlmostEqual(handles["left_urdf_collision"].configs[-1][0], math.radians(9.0))
+
+    def test_left_right_pair_keeps_stand_normal(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair="left_right",
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertTrue(handles["right_base_collision"].visible)
+        self.assertFalse(handles["stand_mesh_collision"].visible)
+        self.assertTrue(handles["stand_mesh"].visible)
+        self.assertFalse(handles["left_base"].visible)
+        self.assertFalse(handles["right_base"].visible)
+
+    def test_unknown_pair_falls_back_to_all_red(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair=None,
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertTrue(handles["right_base_collision"].visible)
+        self.assertTrue(handles["stand_mesh_collision"].visible)
+        self.assertFalse(handles["stand_mesh"].visible)
+
+    def test_clear_state_restores_normal_models(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=False, physical_real=True,
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertFalse(handles["left_base_collision"].visible)
+        self.assertFalse(handles["right_base_collision"].visible)
+        self.assertFalse(handles["stand_mesh_collision"].visible)
+        self.assertTrue(handles["stand_mesh"].visible)
+        self.assertTrue(handles["left_base"].visible)
+        self.assertTrue(handles["right_base"].visible)
+        self.assertEqual(handles["left_urdf_collision"].configs, [])
 
 
 if __name__ == "__main__":

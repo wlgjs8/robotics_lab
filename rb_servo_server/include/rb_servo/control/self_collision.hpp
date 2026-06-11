@@ -8,8 +8,10 @@
 #include <array>
 #include <cstddef>
 #include <limits>
+#include <string>
 #include <vector>
 
+#include "rb_servo/config/config.hpp"
 #include "rb_servo/math/capsule_distance.hpp"
 
 namespace rb_servo {
@@ -19,8 +21,25 @@ struct SelfCollisionResult {
     bool violated = false;  // min surface clearance < margin
     double min_clearance_m = std::numeric_limits<double>::infinity();
     int left_bone = -1;
-    int right_bone = -1;
+    int right_bone = -1;   // arm-arm: right arm bone; arm-stand: stand capsule index
+    // Which checked pair produced min_clearance_m:
+    // "left_right" | "left_stand" | "right_stand" | "" (not evaluated).
+    std::string pair;
+    std::string stand_capsule;  // nearest stand capsule name (arm-stand pairs only)
 };
+
+// Keep the result whose minimum clearance is smaller; an unchecked result never
+// wins over a checked one (fail-closed combination happens at the caller).
+inline SelfCollisionResult minSelfCollisionResult(
+    const SelfCollisionResult& a,
+    const SelfCollisionResult& b
+) {
+    if (!a.checked) return b;
+    if (!b.checked) return a;
+    SelfCollisionResult out = b.min_clearance_m < a.min_clearance_m ? b : a;
+    out.violated = a.violated || b.violated;
+    return out;
+}
 
 // Minimum capsule-surface clearance between left and right arm link chains.
 // *_points are ordered chain points [base, j1..j6, tcp]; consecutive points are
@@ -59,6 +78,60 @@ inline SelfCollisionResult dualArmSelfCollisionClearance(
                 result.min_clearance_m = clearance;
                 result.left_bone = static_cast<int>(li);
                 result.right_bone = static_cast<int>(rj);
+            }
+        }
+    }
+    result.violated = result.min_clearance_m < margin_m;
+    result.pair = "left_right";
+    return result;
+}
+
+// Minimum capsule-surface clearance between one arm's link chain and the static
+// stand capsules (all in the stand frame). Bones listed in ignore_bones are
+// skipped (bone 0 sits on the stand mount plate by construction). Returns
+// checked=false if the chain is too short or the stand list is empty — the
+// caller decides the fail-closed behavior. The arm bone index is reported in
+// left_bone and the stand capsule index in right_bone regardless of arm side.
+inline SelfCollisionResult armStandCollisionClearance(
+    const std::vector<std::array<double, 3>>& arm_points,
+    const std::array<double, 7>& bone_radius_m,
+    const std::vector<StandCapsuleConfig>& stand_capsules,
+    double margin_m,
+    const std::vector<int>& ignore_bones
+) {
+    SelfCollisionResult result;
+    if (arm_points.size() < 2 || stand_capsules.empty()) {
+        return result;
+    }
+    result.checked = true;
+
+    const auto as_vec = [](const std::array<double, 3>& p) {
+        return math::Vector3(p[0], p[1], p[2]);
+    };
+    const auto radius_for = [&](std::size_t bone) {
+        return bone_radius_m[std::min(bone, bone_radius_m.size() - 1)];
+    };
+    const auto ignored = [&](std::size_t bone) {
+        return std::find(ignore_bones.begin(), ignore_bones.end(), static_cast<int>(bone)) !=
+            ignore_bones.end();
+    };
+
+    for (std::size_t bi = 0; bi + 1 < arm_points.size(); ++bi) {
+        if (ignored(bi)) continue;
+        const math::Vector3 a0 = as_vec(arm_points[bi]);
+        const math::Vector3 a1 = as_vec(arm_points[bi + 1]);
+        const double ra = radius_for(bi);
+        for (std::size_t si = 0; si < stand_capsules.size(); ++si) {
+            const StandCapsuleConfig& cap = stand_capsules[si];
+            const double clearance = math::capsuleCapsuleDistance(
+                a0, a1, ra,
+                as_vec(cap.p0_m), as_vec(cap.p1_m), cap.radius_m
+            );
+            if (clearance < result.min_clearance_m) {
+                result.min_clearance_m = clearance;
+                result.left_bone = static_cast<int>(bi);
+                result.right_bone = static_cast<int>(si);
+                result.stand_capsule = cap.name;
             }
         }
     }

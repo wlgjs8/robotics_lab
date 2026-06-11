@@ -234,8 +234,9 @@ bool testControllerSimulationGateConfig() {
         "cartesian_control:\n"
         "  allow_in_controller_simulation: true\n";
 
+    // Real/sim env gates retired: the config loads without RB_ALLOW_REAL_* envs.
     const std::string missing_real_env_path = writeTempConfig("controller-sim-missing-real-env", valid_body);
-    RB_CHECK(loadRejects(missing_real_env_path));
+    (void)rb_servo::loadConfigFromYaml(missing_real_env_path);
     ::unlink(missing_real_env_path.c_str());
 
     allow_real.set("1");
@@ -485,6 +486,109 @@ bool testStatePublisherEndpointsParseAndValidate() {
     return true;
 }
 
+bool testFloorConstraintConfigParsesAndDefaults() {
+    // Values parse (enable=false skips the kinematics requirement).
+    const std::string path = writeTempConfig(
+        "floor-values",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "safety:\n"
+        "  floor_constraint:\n"
+        "    enable: false\n"
+        "    z_min_m: 0.02\n"
+        "    runtime_min_z_m: 0.005\n"
+        "    runtime_max_z_m: 0.3\n"
+        "    fail_policy: fault_latch\n"
+        "    monitor_only: true\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    ::unlink(path.c_str());
+    RB_CHECK(!cfg.safety.floor_constraint.enable);
+    RB_CHECK(near(cfg.safety.floor_constraint.z_min_m, 0.02));
+    RB_CHECK(near(cfg.safety.floor_constraint.runtime_min_z_m, 0.005));
+    RB_CHECK(near(cfg.safety.floor_constraint.runtime_max_z_m, 0.3));
+    RB_CHECK(cfg.safety.floor_constraint.fail_policy ==
+             rb_servo::FloorConstraintFailPolicy::FaultLatch);
+    RB_CHECK(cfg.safety.floor_constraint.monitor_only);
+
+    // Defaults when the block is absent.
+    const std::string default_path = writeTempConfig(
+        "floor-defaults",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+    );
+    const rb_servo::DualArmConfig defaults = rb_servo::loadConfigFromYaml(default_path);
+    ::unlink(default_path.c_str());
+    RB_CHECK(!defaults.safety.floor_constraint.enable);
+    RB_CHECK(near(defaults.safety.floor_constraint.z_min_m, 0.010));
+    RB_CHECK(near(defaults.safety.floor_constraint.runtime_min_z_m, 0.0));
+    RB_CHECK(near(defaults.safety.floor_constraint.runtime_max_z_m, 0.5));
+    RB_CHECK(defaults.safety.floor_constraint.fail_policy ==
+             rb_servo::FloorConstraintFailPolicy::ClampToHold);
+    RB_CHECK(!defaults.safety.floor_constraint.monitor_only);
+    return true;
+}
+
+bool testFloorConstraintInvalidConfigRejects() {
+    // Unknown key inside the block.
+    const std::string unknown_key = writeTempConfig(
+        "floor-unknown-key",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "safety:\n"
+        "  floor_constraint:\n"
+        "    enable: false\n"
+        "    z_max_m: 0.1\n"
+    );
+    RB_CHECK(loadRejects(unknown_key));
+    ::unlink(unknown_key.c_str());
+
+    // Unknown fail_policy string.
+    const std::string bad_policy = writeTempConfig(
+        "floor-bad-policy",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "safety:\n"
+        "  floor_constraint:\n"
+        "    fail_policy: stop\n"
+    );
+    RB_CHECK(loadRejects(bad_policy));
+    ::unlink(bad_policy.c_str());
+
+    // z_min outside the runtime envelope (enable=true triggers validation).
+    const std::string bad_bounds = writeTempConfig(
+        "floor-bad-bounds",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "safety:\n"
+        "  floor_constraint:\n"
+        "    enable: true\n"
+        "    z_min_m: 0.6\n"
+        "    runtime_max_z_m: 0.5\n"
+    );
+    RB_CHECK(loadRejects(bad_bounds));
+    ::unlink(bad_bounds.c_str());
+
+    // enable=true without kinematics (no FK source) is fail-closed at load time.
+    const std::string no_kinematics = writeTempConfig(
+        "floor-no-kinematics",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "safety:\n"
+        "  floor_constraint:\n"
+        "    enable: true\n"
+    );
+    RB_CHECK(loadRejects(no_kinematics));
+    ::unlink(no_kinematics.c_str());
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -493,5 +597,7 @@ int main() {
     if (!testControllerSimulationGateConfig()) return 1;
     if (!testRbpodoAsyncStreamingConfigContract()) return 1;
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;
+    if (!testFloorConstraintConfigParsesAndDefaults()) return 1;
+    if (!testFloorConstraintInvalidConfigRejects()) return 1;
     return 0;
 }

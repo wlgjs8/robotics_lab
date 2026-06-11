@@ -39,8 +39,11 @@ command_rate_hz: 500
 umi_dual_cartesian:
   max_linear_step_m: 0.005
   max_angular_step_rad: 0.04
-  gripper_offset: [0.172, 0.0, -0.076]
-  r_align: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  # Mock-script poses are already in the published (tip) frame; identity poses
+  # make any constant offset cancel in the relative delta, but keep the live
+  # geometry (tip frame, no offset) for consistency with stack_real.yaml.
+  gripper_offset: [0.0, 0.0, 0.0]
+  r_align: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
   sample_hold_timeout_sec: 0.05
   left:
     mock_script: pgmode_umi_smoke

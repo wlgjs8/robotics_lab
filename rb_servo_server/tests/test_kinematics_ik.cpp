@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unistd.h>
@@ -541,11 +542,65 @@ bool testInvalidTargetDoesNotThrow() {
     return true;
 }
 
+bool testIkSeedUsesPreviousSentTargetNotActualState() {
+    // The streaming TcpPoseTarget path must seed IK from the previously SENT
+    // target, not the measured joint state: an actual-state seed feeds the
+    // robot's lagged physical response back into the next command (3-5 Hz
+    // relay limit cycle with the IK tolerance dead zone at 500 Hz).
+    rb_servo::CartesianControlConfig cfg;
+    cfg.enable = true;
+    cfg.allow_in_simulation = true;
+    cfg.allow_in_real = false;
+
+    rb_servo::RobotState state;
+    state.arm_id = rb_servo::ArmId::Left;
+    state.has_valid_joint_state = true;
+    state.q_actual_deg = seedJoints();
+    state.q_actual_deg[1] += 5.0;  // physical state lags the sent target
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpPoseTarget;
+    command.has_tcp_target = true;
+    command.tcp_target_stand = {0.2, -0.1, 0.7, 0.01, 0.02, 0.03};
+
+    rb_servo::CartesianController controller(
+        leftMount(),
+        rightMount(),
+        cfg,
+        std::make_shared<LatencyKinematics>(1.0)
+    );
+    // LatencyKinematics echoes its seed as the IK solution, so the result
+    // exposes which seed was used.
+    const rb_servo::CartesianArmTargetResult result = controller.computeArmJointTarget(
+        command,
+        state,
+        seedJoints(),
+        rb_servo::RunMode::Simulation
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(closeJoints(result.q_target_deg, seedJoints(), 1e-12));
+
+    // Fallback: a non-finite previous target falls back to the actual state.
+    rb_servo::JointArray invalid_previous = seedJoints();
+    invalid_previous[0] = std::numeric_limits<double>::quiet_NaN();
+    const rb_servo::CartesianArmTargetResult fallback = controller.computeArmJointTarget(
+        command,
+        state,
+        invalid_previous,
+        rb_servo::RunMode::Simulation
+    );
+    RB_CHECK(fallback.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(closeJoints(fallback.q_target_deg, state.q_actual_deg, 1e-12));
+    return true;
+}
+
 }  // namespace
 
 int main() {
     if (!testIkConfigParsing()) return 1;
     if (!testCartesianLatencyBudgetTelemetry()) return 1;
+    if (!testIkSeedUsesPreviousSentTargetNotActualState()) return 1;
     if (!testPinocchioIk()) return 1;
     if (!testInvalidTargetDoesNotThrow()) return 1;
     return 0;

@@ -51,6 +51,13 @@ struct BackendConfig {
     bool disable_waiting_ack = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
     bool controller_simulation_treat_unreliable_status_fields_as_unavailable = false;
+    // Real (operation_mode: real) physical-motion opt-in mirror of the field above:
+    // accept the same vendor-unreliable status fields (op_stat_self_collision shape,
+    // robot_time) as UNAVAILABLE instead of latching diagnostics_suspect. Fail-closed,
+    // gated by rbpodoSuspectDiagnosticsRealMotionGateOpen (needs operation_mode==real +
+    // RB_ALLOW_REAL_ROBOT/MOTION + RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION). Does
+    // NOT suppress EMS/SOS/soft-estop/collision_occur/unknown-mode faults.
+    bool allow_real_motion_with_suspect_diagnostics = false;
     bool allow_controller_simulation_init_error = false;
 
     // rbpodo controller-simulation only: tolerate up to N consecutive transient
@@ -160,10 +167,22 @@ enum class SelfCollisionFailPolicy {
     FaultLatch,
 };
 
-// Server-side dual-arm self-collision guard (the rbpodo controller firmware does
-// not populate op_stat_self_collision). Each arm link is approximated as a capsule
-// (segment between consecutive kinematic-chain points + radius); a candidate target
-// is refused if any left/right capsule pair comes within margin_m of each other.
+// Static stand collision capsule (stand frame, meters). Derived from the stand
+// URDF collision boxes (mo_robot_descriptions dual_rb3_730e_stand_ver3).
+struct StandCapsuleConfig {
+    std::string name;
+    std::array<double, 3> p0_m{0.0, 0.0, 0.0};
+    std::array<double, 3> p1_m{0.0, 0.0, 0.0};
+    double radius_m = 0.0;
+};
+
+// Server-side self-collision guard treating stand + left arm + right arm as one
+// "self" (the rbpodo controller firmware does not populate op_stat_self_collision).
+// Each arm link is approximated as a capsule (segment between consecutive
+// kinematic-chain points + radius); the stand as a static capsule list. Checked
+// pairs are left<->right, left<->stand, right<->stand — NEVER intra-arm (adjacent
+// links touch by construction). A candidate target is refused if any checked pair
+// comes within margin_m of each other.
 struct SelfCollisionConfig {
     bool enable = false;
     double margin_m = 0.05;
@@ -177,6 +196,38 @@ struct SelfCollisionConfig {
     // do NOT clamp or latch. For tuning radii/margin in simulation against a known
     // collision-free trajectory. Never use monitor_only as a real-motion safety
     // posture.
+    bool monitor_only = false;
+    // Pair toggles. Arm<->stand checks additionally require a non-empty
+    // stand_capsules list (empty list = stand checks are skipped, preserving the
+    // arm-arm-only behavior of older configs).
+    bool check_left_right = true;
+    bool check_left_stand = true;
+    bool check_right_stand = true;
+    std::vector<StandCapsuleConfig> stand_capsules;
+    // Arm bones excluded from the arm<->stand check. Bone 0 (base->j1) sits on
+    // the stand mount plate by construction and must be ignored.
+    std::vector<int> stand_ignore_bones{0};
+};
+
+enum class FloorConstraintFailPolicy {
+    ClampToHold,
+    FaultLatch,
+};
+
+// Stand-frame floor plane constraint: the TCP of either arm must never go below
+// z = z_min_m (meters, stand frame), regardless of motion primitive or run mode.
+// Tier 1 (hard backstop) FK-checks every candidate joint target at the final
+// safety gate; Tier 2 clamps Cartesian targets / negative stand v_z so streaming
+// commands slide along the plane. z_min_m is runtime-adjustable via the leaseless
+// SetSafetyFloorZ command, bounded to [runtime_min_z_m, runtime_max_z_m].
+struct FloorConstraintConfig {
+    bool enable = false;
+    double z_min_m = 0.010;
+    double runtime_min_z_m = 0.0;
+    double runtime_max_z_m = 0.5;
+    FloorConstraintFailPolicy fail_policy = FloorConstraintFailPolicy::ClampToHold;
+    // Observe-only: publish per-arm tcp z / violation telemetry without clamping
+    // or latching. Never use monitor_only as a real-motion safety posture.
     bool monitor_only = false;
 };
 
@@ -202,7 +253,16 @@ struct SafetyConfig {
     ControllerSimulationPhysicalMotionPolicy controller_simulation_physical_motion_policy =
         ControllerSimulationPhysicalMotionPolicy::FaultLatch;
     double controller_simulation_physical_motion_threshold_deg = 0.05;
+    // pgmode controller-sim only (opt-in, default false). When the controller-sim
+    // motion gate is open, the reference/actual tracking-error divergence is treated
+    // as ADVISORY (degraded telemetry + throttled WARN) instead of latching
+    // SafetyVerdict::TrackingError. The diagnostics_suspect controller's reference
+    // readback lags the commanded joints with no physical motion, so the latch is
+    // spurious there. Inert in real mode (gate closed → keeps latching). Does NOT
+    // affect the controller_simulation_physical_motion guard, which still latches.
+    bool controller_simulation_tracking_error_nonlatching = false;
     SelfCollisionConfig self_collision;
+    FloorConstraintConfig floor_constraint;
 };
 
 inline constexpr JointArray rbpodoDefaultSafetyJointMinDeg() {
@@ -225,6 +285,8 @@ struct ServoConfig {
     bool allow_controller_simulation_motion = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
     bool controller_simulation_treat_unreliable_status_fields_as_unavailable = false;
+    // Real physical-motion (operation_mode: real) opt-in; propagated to both backends.
+    bool allow_real_motion_with_suspect_diagnostics = false;
     bool controller_simulation_async_supervision_nonlatching = false;
     bool allow_controller_simulation_init_error = false;
     bool allow_controller_simulation_not_activated = false;
@@ -238,6 +300,11 @@ struct ServoConfig {
     // create an unexpectedly large joint step.
     double filter_dt_min_ratio = 0.5;
     double filter_dt_max_ratio = 1.5;
+
+    // Final-stage moving average over the last N sent joint targets (applied
+    // after the safety filter; convex combination keeps limits intact).
+    // 0/1 disables. 40 at 500 Hz = 80 ms boxcar, ~40 ms group delay.
+    int output_moving_average_window = 0;
 
     double servo_t1_rate_match_tolerance_ratio = 0.2;
     bool allow_servo_t1_rate_mismatch = false;
@@ -303,6 +370,25 @@ struct CircleMoveConfig {
     double min_period_sec = 3.0;
 };
 
+// Spring-Mass-Damper smoothing for the streaming TcpPoseTarget path: received
+// command deltas integrate into a goal pose, and the published target follows
+// that goal as a second-order system (mass fixed at 1.0) stepped at the servo
+// rate. Translation and rotation are tunable independently.
+struct PoseTrackSmdConfig {
+    bool enable = false;
+    double damping_ratio_linear = 1.0;
+    double natural_frequency_linear_hz = 0.5;
+    double damping_ratio_angular = 1.0;
+    double natural_frequency_angular_hz = 0.5;
+    // Saturation clamps applied as vector-norm limits each tick. Mass is fixed
+    // at 1.0, so the accel clamp IS the max-force clamp. Inside the limits the
+    // zeta/fn dynamics are exactly preserved. 0 = unlimited.
+    double max_linear_velocity_m_s = 0.0;
+    double max_linear_accel_m_s2 = 0.0;
+    double max_angular_velocity_rad_s = 0.0;
+    double max_angular_accel_rad_s2 = 0.0;
+};
+
 enum class CartesianLimitPolicy {
     Clamp,
     Reject
@@ -360,6 +446,7 @@ struct CartesianControlConfig {
         CartesianCommandActualErrorPolicy::Reset;
     LinearMoveConfig linear_move;
     CircleMoveConfig circle_move;
+    PoseTrackSmdConfig pose_track_smd;
 };
 
 struct DualArmConfig {

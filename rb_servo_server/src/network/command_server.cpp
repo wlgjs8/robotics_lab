@@ -603,6 +603,14 @@ bool isAcquireLeaseModeString(const std::string& mode) {
     return mode == "AcquireLease" || mode == "acquire_lease" || mode == "acquirelease";
 }
 
+bool isReleaseLeaseModeString(const std::string& mode) {
+    return mode == "ReleaseLease" || mode == "release_lease" || mode == "releaselease";
+}
+
+// EmergencyStop and SetSafetyFloorZ are intentionally leaseless: an operator
+// must be able to stop motion or adjust the safety floor while another client
+// (e.g. policy_runner) holds the command lease. SetSafetyFloorZ is additionally
+// bounded server-side to safety.floor_constraint.[runtime_min_z_m, runtime_max_z_m].
 bool commandRequiresLease(ControlMode mode) {
     return mode == ControlMode::ArmMotion ||
            mode == ControlMode::DisarmMotion ||
@@ -897,8 +905,9 @@ bool CommandServer::parseMessage(
     if (!readOptionalString(root, "mode", &mode_string)) return false;
     ControlMode default_mode = ControlMode::Hold;
     const bool acquire_lease_only = isAcquireLeaseModeString(mode_string);
+    const bool release_lease_only = isReleaseLeaseModeString(mode_string);
     try {
-        if (!acquire_lease_only) {
+        if (!acquire_lease_only && !release_lease_only) {
             default_mode = controlModeFromString(mode_string);
         }
     } catch (const std::exception&) {
@@ -909,6 +918,12 @@ bool CommandServer::parseMessage(
     if (timeout_sec <= 0.0 || !std::isfinite(timeout_sec)) return false;
     if (!readOptionalNumber(root, "timeout_sec", &timeout_sec)) return false;
     if (timeout_sec <= 0.0 || !std::isfinite(timeout_sec)) return false;
+
+    // SetSafetyFloorZ payload (top-level: the floor plane is global, not per-arm).
+    if (root.contains("floor_z_m")) {
+        if (!readOptionalNumber(root, "floor_z_m", &cmd.floor_z_m)) return false;
+        cmd.has_floor_z = true;
+    }
 
     const json left_object = root.contains("left") ? root.at("left") : json();
     const json right_object = root.contains("right") ? root.at("right") : json();
@@ -1048,6 +1063,27 @@ bool CommandServer::parseMessage(
                 lease.source_id + " session_id=" + lease.session_id;
             return false;
         }
+    }
+
+    if (release_lease_only) {
+        // Voluntary lease handoff (e.g. client shutdown): only the owning
+        // (source_id, session_id) — with a matching token when one is provided
+        // (token mismatch already rejected above) — may clear the active
+        // lease. A foreign or stale release cannot kick a live operator.
+        // Releasing when no lease is active is an accepted no-op.
+        if (lease.active && !source_can_own_active_lease) {
+            last_reject_reason_ = "command_source_lease_release_denied: active source_id=" +
+                lease.source_id + " session_id=" + lease.session_id;
+            return false;
+        }
+        active_lease_ = CommandSourceLeaseState{};
+        active_lease_.enforce_lease = command_source_config_.enforce_lease;
+        cmd.lease = currentLeaseState(receive_time_ns);
+        cmd.lease.command_requires_lease = false;
+        cmd.lease.command_has_lease = true;
+        *out_command = cmd;
+        last_accepted_seq_by_source_[key] = cmd.seq;
+        return true;
     }
 
     if (requests_lease || (requires_lease && source_can_own_active_lease && provided_token_matches)) {

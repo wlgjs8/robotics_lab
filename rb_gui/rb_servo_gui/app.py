@@ -67,6 +67,8 @@ from .scene import (
     _stand_mesh_path,
     _update_urdf_config,
     update_circle_overlay,
+    update_floor_plane,
+    update_self_collision_overlay,
     update_scene_markers,
 )
 from .state_receiver import StateReceiver, StateStore
@@ -83,6 +85,7 @@ from .status_panel import (
     _format_fk_status,
     _format_joint_monitor_value,
     _format_joints,
+    _format_floor_constraint_status,
     _format_pgmode_status,
     _format_self_collision_status,
     _format_stand_world_pose_value,
@@ -787,6 +790,9 @@ def build_gui(
         handles["self_collision"] = server.gui.add_text(
             "Self-collision", initial_value="self-collision: no state", disabled=True
         )
+        handles["floor_constraint"] = server.gui.add_text(
+            "Safety floor", initial_value="floor: no state", disabled=True
+        )
         handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
         handles["tcp_tracking"] = server.gui.add_text("TCP tracking", initial_value="TCP tracking: no state", disabled=True)
         handles["pgmode_status"] = server.gui.add_text("pgmode simulation", initial_value="pgmode_sim: no state", disabled=True)
@@ -847,6 +853,25 @@ def build_gui(
             handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
 
         handles["last_action"] = server.gui.add_text("Last action", initial_value="none", disabled=True)
+
+        with server.gui.add_folder("Safety floor"):
+            handles["floor_applied"] = server.gui.add_text(
+                "Applied z", initial_value="no state", disabled=True
+            )
+            floor_slider = server.gui.add_slider(
+                "Set floor z mm", min=0.0, max=500.0, step=1.0, initial_value=10.0
+            )
+            handles["floor_slider"] = floor_slider
+            floor_send = server.gui.add_button("Send floor z")
+            handles["floor_send_button"] = floor_send
+            handles["floor_set_status"] = server.gui.add_text(
+                "Floor set status", initial_value="idle", disabled=True
+            )
+
+            @floor_send.on_click
+            def _(_: Any) -> None:
+                ok, message = safety.send_set_floor_z(float(floor_slider.value) / 1000.0)
+                handles["floor_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
     with tabs.add_tab("Joint jog"):
         arm_group = server.gui.add_button_group("Arm", ("left", "right"))
@@ -954,7 +979,7 @@ def build_gui(
         )
         handles["tcp_status"] = server.gui.add_text(
             "TCP status",
-            initial_value="TCP PTP target disabled until RB_GUI_ENABLE_TCP_POSE_COMMANDS=1",
+            initial_value="ready",
             disabled=True,
         )
         _install_tcp_target_callbacks(handles["scene"], handles["tcp_status"])
@@ -1030,7 +1055,7 @@ def build_gui(
         )
         handles["tcp_linear_status"] = server.gui.add_text(
             "TCP Linear status",
-            initial_value="TCP Linear disabled until RB_GUI_ENABLE_TCP_POSE_COMMANDS=1",
+            initial_value="ready",
             disabled=True,
         )
         handles["tcp_linear_source"] = server.gui.add_text(
@@ -1172,6 +1197,30 @@ def _latest_circle_overlay(
     return overlay_store.latest(), overlay_store.is_stale()
 
 
+def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
+    floor = latest.floor_constraint if latest is not None else None
+    update_floor_plane(handles.get("scene", {}), floor)
+    if "floor_applied" not in handles:
+        return
+    if not isinstance(floor, Mapping) or not bool(floor.get("enabled", False)):
+        handles["floor_applied"].value = "disabled"
+        return
+    z = floor.get("z_min_m")
+    z_txt = f"{float(z) * 1000:.0f}mm" if isinstance(z, (int, float)) else "?"
+    reject = floor.get("last_set_reject_reason")
+    handles["floor_applied"].value = z_txt + (f" (last reject: {reject})" if reject else "")
+    slider = handles.get("floor_slider")
+    if slider is not None:
+        lo = floor.get("runtime_min_z_m")
+        hi = floor.get("runtime_max_z_m")
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and float(hi) > float(lo):
+            try:
+                slider.min = float(lo) * 1000.0
+                slider.max = float(hi) * 1000.0
+            except Exception:
+                pass
+
+
 def _update_circle_overlay_gui(handles: dict[str, Any], overlay_store: CircleOverlayStore | None) -> None:
     overlay, stale = _latest_circle_overlay(overlay_store)
     if "circle_overlay" in handles:
@@ -1219,6 +1268,9 @@ def update_gui(
         handles["readiness"].value = readiness.no_go_reason or "No-Go: no state stream"
         if "self_collision" in handles:
             handles["self_collision"].value = _format_self_collision_status(None, stale=True)
+        if "floor_constraint" in handles:
+            handles["floor_constraint"].value = _format_floor_constraint_status(None, stale=True)
+        _update_floor_panel(handles, None)
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
         if "tcp_tracking" in handles:
@@ -1265,6 +1317,9 @@ def update_gui(
     handles["fault"].value = latest.fault_reason if latest.fault_latched else "none"
     if "self_collision" in handles:
         handles["self_collision"].value = _format_self_collision_status(latest, stale=stale)
+    if "floor_constraint" in handles:
+        handles["floor_constraint"].value = _format_floor_constraint_status(latest, stale=stale)
+    _update_floor_panel(handles, latest)
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
     if "tcp_tracking" in handles:
@@ -1287,6 +1342,8 @@ def update_gui(
         handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     _update_operator_monitors(handles, latest, stale=stale)
     update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
+    # After markers: the collision overlay may override ghost/solid visibility.
+    update_self_collision_overlay(handles.get("scene", {}), latest)
     if "scene_assets" in handles:
         handles["scene_assets"].value = _format_scene_asset_status(handles.get("scene", {}))
     handles["tick"].value = latest.tick
@@ -1328,7 +1385,8 @@ def main(argv: list[str] | None = None) -> None:
     observed_backend_raw = os.environ.get("RB_GUI_OBSERVED_BACKEND", "")
     observed = normalize_observed_mode_backend(observed_mode_raw, observed_backend_raw)
     ops_available = os.environ.get("RB_GUI_OPS_AVAILABLE", "0") == "1"
-    enable_tcp_pose_commands = os.environ.get("RB_GUI_ENABLE_TCP_POSE_COMMANDS", "0") == "1"
+    # RB_GUI_ENABLE_TCP_POSE_COMMANDS lock retired: TCP pose commands default on.
+    enable_tcp_pose_commands = os.environ.get("RB_GUI_ENABLE_TCP_POSE_COMMANDS", "1") == "1"
     enable_controller_sim_cartesian = os.environ.get("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", "0") == "1"
     init_left_joints = _env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG)
     init_right_joints = _env_joint6("RB_GUI_INIT_RIGHT_JOINTS", _DEFAULT_INIT_RIGHT_JOINTS_DEG)

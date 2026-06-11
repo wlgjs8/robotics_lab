@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import os
 import sys
 import time
 from typing import Callable, TextIO
@@ -14,6 +16,7 @@ from .action_sources import (
     SpaceMouseCartesianActionSource,
     SpaceMouseJointVelocityActionSource,
     TcpDeltaActionSource,
+    TeleopMuxActionSource,
     UmiDualCartesianActionSource,
 )
 from .config import PolicyRunnerConfig, load_config
@@ -43,8 +46,27 @@ def main(argv: list[str] | None = None) -> int:
     if not argv or argv[0].startswith("-"):
         parser = argparse.ArgumentParser(description="robotics_lab policy_runner")
         parser.add_argument("--config", required=True, help="policy_runner YAML config")
+        parser.add_argument(
+            "--action-source",
+            default=None,
+            help=(
+                "override config.action_source (e.g. teleop_mux, "
+                "dual_spacemouse_cartesian, umi_dual_cartesian) — debug aid to "
+                "isolate one teleop source; the stack default is teleop_mux"
+            ),
+        )
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="print live teleop input (SpaceMouse/UMI) and loop send/drop stats",
+        )
         args = parser.parse_args(argv)
+        if args.verbose:
+            # The action sources and the run loop read this env at construction.
+            os.environ["POLICY_RUNNER_TELEOP_DEBUG"] = "1"
         config = load_config(args.config)
+        if args.action_source:
+            config = dataclasses.replace(config, action_source=args.action_source)
         return run(config)
     return _main_with_subcommands(argv)
 
@@ -81,6 +103,15 @@ def run(
     lease_acquired = False
     period = 1.0 / max(config.command_rate_hz, 1.0)
     startup_deadline = monotonic_fn() + max(config.runtime.startup_timeout_sec, 0.0)
+    # POLICY_RUNNER_TELEOP_DEBUG=1: 1 Hz loop stats (sent/dropped/no-intent + last drop reason).
+    teleop_debug = os.environ.get("POLICY_RUNNER_TELEOP_DEBUG", "") == "1"
+    debug_sent = 0
+    debug_dropped = 0
+    debug_no_intent = 0
+    debug_last_drop_reason = ""
+    # Lazily initialized from the loop's `now`: tests inject finite scripted
+    # monotonic_fn sequences, so no extra monotonic_fn() calls here.
+    debug_last_print: float | None = None
     try:
         while True:
             snapshot = state_client.latest
@@ -118,6 +149,21 @@ def run(
             if rollout_recorder is not None:
                 rollout_recorder.record_decision(decision)
                 rollout_recorder.record_source(source)
+            if teleop_debug:
+                if intent is None:
+                    debug_no_intent += 1
+                elif not decision.allowed:
+                    debug_dropped += 1
+                    debug_last_drop_reason = decision.reason or ""
+                if debug_last_print is None:
+                    debug_last_print = now
+                if now - debug_last_print >= 1.0:
+                    print(
+                        f"[teleop] sent={debug_sent} dropped={debug_dropped} "
+                        f"no_intent={debug_no_intent} last_drop={debug_last_drop_reason or '-'}",
+                        flush=True,
+                    )
+                    debug_last_print = now
             if decision.allowed and intent is not None:
                 if not send_commands:
                     if rollout_recorder is not None:
@@ -138,9 +184,14 @@ def run(
                     else:
                         if rollout_recorder is not None:
                             rollout_recorder.record_dropped(arm_decision.reason, arm)
+                        if teleop_debug:
+                            debug_dropped += 1
+                            debug_last_drop_reason = f"arm:{arm_decision.reason or ''}"
                         sleep_fn(period)
                         continue
                 command_client.send(intent)
+                if teleop_debug:
+                    debug_sent += 1
                 if rollout_recorder is not None:
                     rollout_recorder.record_sent(intent)
             elif intent is not None and rollout_recorder is not None:
@@ -152,6 +203,13 @@ def run(
         _close_if_supported(source)
         state_client.close()
         if command_client is not None:
+            if lease_acquired:
+                # Voluntary handoff so an immediate restart does not collide
+                # with this session's stale lease until lease_timeout_sec.
+                try:
+                    command_client.release_lease()
+                except Exception as exc:  # noqa: BLE001 - best-effort on shutdown
+                    print(f"policy_runner lease_release_failed: {exc}", file=stderr)
             command_client.close()
 
 
@@ -242,38 +300,68 @@ def make_action_source(config: PolicyRunnerConfig):
             ),
         )
     if config.action_source == "dual_spacemouse_cartesian":
-        left = config.spacemouse_cartesian_dual.left
-        right = config.spacemouse_cartesian_dual.right
-        return DualSpaceMouseCartesianActionSource(
-            left_reader=_spacemouse_reader_from_device_config(left),
-            right_reader=_spacemouse_reader_from_device_config(right),
-            frame=config.spacemouse_cartesian_dual.frame,
-            max_linear_velocity_m_s=config.spacemouse_cartesian_dual.max_linear_velocity_m_s,
-            max_angular_velocity_rad_s=config.spacemouse_cartesian_dual.max_angular_velocity_rad_s,
-            deadband=config.spacemouse_cartesian_dual.deadband,
-            response_curve_gamma=config.spacemouse_cartesian_dual.response_curve_gamma,
-            sample_hold_timeout_sec=config.spacemouse_cartesian_dual.sample_hold_timeout_sec,
-            left_deadman_button=left.deadman_button,
-            right_deadman_button=right.deadman_button,
-            timeout_sec=config.servo_command.timeout_sec,
-            allow_rbpodo_controller_simulation=(
-                config.safety.allow_rbpodo_controller_simulation_cartesian
-            ),
-        )
+        return _make_dual_spacemouse_cartesian_source(config)
     if config.action_source == "umi_dual_cartesian":
-        umi = config.umi_dual_cartesian
-        return UmiDualCartesianActionSource(
-            left_reader=_umi_reader_from_config(umi.left, "left"),
-            right_reader=_umi_reader_from_config(umi.right, "right"),
-            max_linear_step_m=umi.max_linear_step_m,
-            max_angular_step_rad=umi.max_angular_step_rad,
-            gripper_offset=umi.gripper_offset,
-            r_align=umi.r_align,
-            workspace_bounds=umi.workspace_bounds,
-            sample_hold_timeout_sec=umi.sample_hold_timeout_sec,
-            timeout_sec=config.servo_command.timeout_sec,
+        return _make_umi_dual_cartesian_source(config)
+    if config.action_source == "teleop_mux":
+        return TeleopMuxActionSource(
+            _make_dual_spacemouse_cartesian_source(config),
+            _make_umi_dual_cartesian_source(config),
+            tie_break=config.teleop_mux.tie_break,
         )
     raise ValueError(f"unknown action_source: {config.action_source}")
+
+
+def _make_dual_spacemouse_cartesian_source(
+    config: PolicyRunnerConfig,
+) -> DualSpaceMouseCartesianActionSource:
+    left = config.spacemouse_cartesian_dual.left
+    right = config.spacemouse_cartesian_dual.right
+    return DualSpaceMouseCartesianActionSource(
+        left_reader=_spacemouse_reader_from_device_config(left),
+        right_reader=_spacemouse_reader_from_device_config(right),
+        frame=config.spacemouse_cartesian_dual.frame,
+        max_linear_velocity_m_s=config.spacemouse_cartesian_dual.max_linear_velocity_m_s,
+        max_angular_velocity_rad_s=config.spacemouse_cartesian_dual.max_angular_velocity_rad_s,
+        deadband=config.spacemouse_cartesian_dual.deadband,
+        response_curve_gamma=config.spacemouse_cartesian_dual.response_curve_gamma,
+        linear_axis_signs=config.spacemouse_cartesian_dual.linear_axis_signs,
+        angular_axis_signs=config.spacemouse_cartesian_dual.angular_axis_signs,
+        angular_axis_order=config.spacemouse_cartesian_dual.angular_axis_order,
+        sample_hold_timeout_sec=config.spacemouse_cartesian_dual.sample_hold_timeout_sec,
+        require_deadman=config.spacemouse_cartesian_dual.require_deadman,
+        activation_deadband=config.spacemouse_cartesian_dual.activation_deadband,
+        startup_requires_neutral=config.spacemouse_cartesian_dual.startup_requires_neutral,
+        startup_neutral_hold_sec=config.spacemouse_cartesian_dual.startup_neutral_hold_sec,
+        left_deadman_button=left.deadman_button,
+        right_deadman_button=right.deadman_button,
+        timeout_sec=config.servo_command.timeout_sec,
+        allow_rbpodo_controller_simulation=(
+            config.safety.allow_rbpodo_controller_simulation_cartesian
+        ),
+    )
+
+
+def _make_umi_dual_cartesian_source(config: PolicyRunnerConfig) -> UmiDualCartesianActionSource:
+    umi = config.umi_dual_cartesian
+    return UmiDualCartesianActionSource(
+        left_reader=_umi_reader_from_config(umi.left, "left"),
+        right_reader=_umi_reader_from_config(umi.right, "right"),
+        max_linear_step_m=umi.max_linear_step_m,
+        max_angular_step_rad=umi.max_angular_step_rad,
+        input_moving_average_window=umi.input_moving_average_window,
+        target_lpf_tau_sec=umi.target_lpf_tau_sec,
+        deadband_linear_m=umi.deadband_linear_m,
+        deadband_angular_rad=umi.deadband_angular_rad,
+        linear_axis_signs=umi.linear_axis_signs,
+        angular_axis_signs=umi.angular_axis_signs,
+        delta_frame=umi.delta_frame,
+        gripper_offset=umi.gripper_offset,
+        r_align=umi.r_align,
+        workspace_bounds=umi.workspace_bounds,
+        sample_hold_timeout_sec=umi.sample_hold_timeout_sec,
+        timeout_sec=config.servo_command.timeout_sec,
+    )
 
 
 def _spacemouse_reader_from_device_config(device_config) -> SpaceMouseReader:

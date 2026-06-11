@@ -41,6 +41,12 @@ spacemouse_cartesian_dual:
   max_angular_velocity_rad_s: 0.4
   deadband: 0.08
   response_curve_gamma: 3.0
+  # Operator axis remap (applied to raw cap axes before deadband/gamma):
+  # translation x/z mirrored; rot_x and rot_y swapped (output rx reads cap ry).
+  # angular_axis_signs flips the OUTPUT axes after the swap if needed.
+  linear_axis_signs: [1.0, -1.0, -1.0]
+  angular_axis_signs: [-1.0, -1.0, 1.0]
+  angular_axis_order: [ry, rx, rz]
   sample_hold_timeout_sec: 0.05
   left:
     device: null

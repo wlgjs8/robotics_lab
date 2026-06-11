@@ -167,8 +167,11 @@ std::shared_ptr<IKinematics> makeKinematicsProvider(const DualArmConfig& config)
 }
 
 bool envFlagEnabled(const char* name) {
-    const char* value = std::getenv(name);
-    return value && std::string(value) == "1";
+    // Real/sim env gates (RB_ALLOW_REAL_ROBOT/MOTION/CARTESIAN) are retired:
+    // execution is no longer gated on the real-vs-simulation distinction.
+    // run_mode/operation_mode remain as telemetry labels only.
+    (void)name;
+    return true;
 }
 
 std::string jointArrayDebugString(const JointArray& joints) {
@@ -196,6 +199,38 @@ bool containsReason(
 void appendReason(ArmStartupValidationSnapshot* validation, const std::string& reason) {
     if (!validation || containsReason(*validation, reason)) return;
     validation->invalid_reasons.push_back(reason);
+}
+
+// Streaming TcpPoseTarget smoothing: integrate received target deltas into the
+// SMD tracker's goal and replace the commanded pose with this tick's SMD
+// solution. Any other mode deactivates the tracker so re-entry re-anchors at
+// the currently sent pose (FK of the previous sent joints) with zero velocity.
+ArmCommand applyPoseTrackSmd(
+    const ArmCommand& command,
+    const PoseTrackSmdConfig& config,
+    SmdPoseTracker* tracker,
+    const std::shared_ptr<IKinematics>& kinematics,
+    const ArmMountConfig& mount,
+    const JointArray& previous_sent_q_deg,
+    double dt_sec
+) {
+    if (!tracker) return command;
+    if (!config.enable || command.mode != ControlMode::TcpPoseTarget || !command.has_tcp_target) {
+        tracker->deactivate();
+        return command;
+    }
+    if (!kinematics) {
+        // Without FK there is no safe anchor pose; pass the raw target through.
+        tracker->deactivate();
+        return command;
+    }
+    if (!tracker->active()) {
+        tracker->reset(kinematics->computeTcpStand(command.arm_id, previous_sent_q_deg, mount));
+    }
+    tracker->updateGoalFromCommand(command.tcp_target_stand);
+    ArmCommand smoothed = command;
+    smoothed.tcp_target_stand = tracker->step(dt_sec);
+    return smoothed;
 }
 
 std::string lowerAscii(std::string value) {
@@ -262,6 +297,11 @@ CartesianAvailability cartesianAvailabilityForArm(
     const DualArmConfig& config,
     const ArmCommand& command
 ) {
+    // Real/sim execution gating is retired: every Cartesian mode is available
+    // whenever cartesian_control is enabled, regardless of run_mode /
+    // operation_mode. run_mode remains a telemetry label only; safety is owned
+    // by the mode-independent layers (safety filter clamps, tracking-error
+    // latch, self-collision guard, lease arbitration, deadman on the client).
     CartesianAvailability availability;
     const BackendConfig& backend = backendConfigForArm(config, command.arm_id);
 
@@ -270,124 +310,21 @@ CartesianAvailability cartesianAvailabilityForArm(
         return availability;
     }
 
-    if (command.mode == ControlMode::TcpCircleTrack) {
-        if (!config.cartesian_control.enable_server_side_circle_track) {
-            availability.reason = "tcp_circle_track_disabled";
-            availability.physical_motion_expected = false;
-            return availability;
-        }
-        if (backend.run_mode == RunMode::Simulation) {
-            availability.available = config.cartesian_control.allow_in_simulation;
-            availability.reason = availability.available
-                ? ""
-                : "cartesian_control_unavailable_run_mode";
-            availability.physical_motion_expected = false;
-            return availability;
-        }
-        if (backend.run_mode != RunMode::Real) {
-            availability.reason = "cartesian_control_unavailable_run_mode";
-            return availability;
-        }
-        if (backend.backend_type != BackendType::Rbpodo) {
-            availability.reason = "cartesian_control_unavailable_backend";
-            return availability;
-        }
-        const std::string operation_mode = lowerAscii(backend.operation_mode);
-        if (!(operation_mode == "simulation" || operation_mode == "sim")) {
-            availability.reason = "tcp_circle_track_physical_real_blocked";
-            return availability;
-        }
-        if (!config.cartesian_control.allow_in_controller_simulation ||
-            !config.servo.allow_controller_simulation_motion) {
-            availability.reason = "cartesian_control_unavailable_controller_sim_config";
-            availability.physical_motion_expected = false;
-            return availability;
-        }
-        if (!controllerSimulationCartesianGateOpen(config, backend)) {
-            availability.reason = "cartesian_control_unavailable_controller_sim_env";
-            availability.physical_motion_expected = false;
-            return availability;
-        }
-        availability.available = true;
-        availability.reason = "";
-        availability.controller_simulation_cartesian_enabled = true;
+    // TcpCircleTrack stays gated on its feature flag (unimplemented skeleton),
+    // independent of run mode.
+    if (command.mode == ControlMode::TcpCircleTrack &&
+        !config.cartesian_control.enable_server_side_circle_track) {
+        availability.reason = "tcp_circle_track_disabled";
         availability.physical_motion_expected = false;
         return availability;
     }
 
-    const bool streaming_cartesian = isStreamingCartesianMode(command.mode);
-    const bool controller_simulation_circle_move =
-        command.mode == ControlMode::TcpCircleMove &&
-        config.cartesian_control.enable_benchmark_primitives &&
-        config.cartesian_control.circle_move.allow_in_simulation &&
-        !config.cartesian_control.circle_move.allow_in_real;
-    if (backend.run_mode == RunMode::Simulation) {
-        availability.available = config.cartesian_control.allow_in_simulation;
-        availability.reason = availability.available
-            ? ""
-            : "cartesian_control_unavailable_run_mode";
-        availability.physical_motion_expected = false;
-        return availability;
-    }
-
-    if (backend.run_mode != RunMode::Real) {
-        availability.reason = "cartesian_control_unavailable_run_mode";
-        return availability;
-    }
-
-    const bool rbpodo_controller_simulation_operation =
-        isRbpodoControllerSimulationBackend(backend);
-    const bool controller_simulation_cartesian_context =
-        rbpodo_controller_simulation_operation &&
-        controllerSimulationCartesianGateOpen(config, backend);
-
-    if (!streaming_cartesian &&
-        !controller_simulation_circle_move &&
-        !controller_simulation_cartesian_context) {
-        if (rbpodo_controller_simulation_operation) {
-            availability.reason = "cartesian_control_unavailable_physical_real_blocked";
-            return availability;
-        }
-        availability.available =
-            config.cartesian_control.allow_in_real &&
-            envFlagEnabled("RB_ALLOW_REAL_CARTESIAN");
-        availability.reason = availability.available
-            ? ""
-            : "cartesian_control_unavailable_physical_real_blocked";
-        return availability;
-    }
-
-    if (backend.backend_type != BackendType::Rbpodo) {
-        availability.reason = "cartesian_control_unavailable_backend";
-        return availability;
-    }
-
-    const std::string operation_mode = lowerAscii(backend.operation_mode);
-    if (!(operation_mode == "simulation" || operation_mode == "sim")) {
-        availability.reason =
-            config.cartesian_control.allow_in_real && envFlagEnabled("RB_ALLOW_REAL_CARTESIAN")
-            ? "cartesian_control_unavailable_physical_real_blocked"
-            : "cartesian_control_unavailable_operation_mode";
-        return availability;
-    }
-
-    if (!config.cartesian_control.allow_in_controller_simulation ||
-        !config.servo.allow_controller_simulation_motion) {
-        availability.reason = "cartesian_control_unavailable_controller_sim_config";
-        availability.physical_motion_expected = false;
-        return availability;
-    }
-
-    if (!controllerSimulationCartesianGateOpen(config, backend)) {
-        availability.reason = "cartesian_control_unavailable_controller_sim_env";
-        availability.physical_motion_expected = false;
-        return availability;
-    }
-
+    const bool controller_simulation = isRbpodoControllerSimulationBackend(backend);
     availability.available = true;
     availability.reason = "";
-    availability.controller_simulation_cartesian_enabled = true;
-    availability.physical_motion_expected = false;
+    availability.controller_simulation_cartesian_enabled = controller_simulation;
+    availability.physical_motion_expected =
+        !controller_simulation && backend.run_mode == RunMode::Real;
     return availability;
 }
 
@@ -1412,7 +1349,12 @@ DualArmServoLoop::DualArmServoLoop(
     left_traj_filter_(config.servo, config.safety),
     right_traj_filter_(config.servo, config.safety),
     safety_filter_(config.safety) {
+    left_pose_track_smd_ = SmdPoseTracker(config.cartesian_control.pose_track_smd);
+    right_pose_track_smd_ = SmdPoseTracker(config.cartesian_control.pose_track_smd);
+    left_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
+    right_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
     kinematics_ = kinematics ? std::move(kinematics) : makeKinematicsProvider(config);
+    runtime_floor_z_m_.store(config.safety.floor_constraint.z_min_m);
     resetReferenceSupervisionState(this);
 }
 
@@ -1625,6 +1567,7 @@ void DualArmServoLoop::loopMain() {
         const uint64_t loop_start = nowSteadyNs();
         bool async_supervision_degraded_this_tick = false;
         bool async_supervision_degraded_warned_this_tick = false;
+        tracking_error_degraded_this_tick_ = false;
         const auto handleAsyncSupervisionFault =
             [&](const LatchedDualFaultContext& async_fault_contexts,
                 const RobotState& current_left_state,
@@ -1813,6 +1756,29 @@ void DualArmServoLoop::loopMain() {
                 setMotionState(ServerMotionState::ConnectedHold);
             }
             command = metadata_hold(command);
+        } else if (commandRequestsSetSafetyFloorZ(command)) {
+            // Leaseless runtime adjustment of the floor plane height. Accepted only
+            // within the configured [runtime_min_z_m, runtime_max_z_m] envelope;
+            // works while fault-latched (raising the floor must never be blocked).
+            if (!command.has_floor_z) {
+                floor_last_set_reject_reason_ = "floor_z_missing";
+                std::cerr << "[WARN] SetSafetyFloorZ rejected: missing floor_z_m payload\n";
+            } else {
+                const std::optional<std::string> reject =
+                    validateFloorZRequest(command.floor_z_m, config_.safety.floor_constraint);
+                if (reject.has_value()) {
+                    floor_last_set_reject_reason_ = *reject;
+                    std::cerr << "[WARN] SetSafetyFloorZ rejected (" << *reject << "): "
+                              << command.floor_z_m << " m from source_id="
+                              << command.source.source_id << "\n";
+                } else {
+                    runtime_floor_z_m_.store(command.floor_z_m);
+                    floor_last_set_reject_reason_.clear();
+                    std::cerr << "[INFO] safety floor plane set to " << command.floor_z_m
+                              << " m by source_id=" << command.source.source_id << "\n";
+                }
+            }
+            command = metadata_hold(command);
         } else if (commandRequestsDisarmMotion(command)) {
             clearLatchedCartesianTargets();
             setMotionState(ServerMotionState::ConnectedHold);
@@ -1895,7 +1861,14 @@ void DualArmServoLoop::loopMain() {
             }
         }
 
-        const ServoTarget attempted_target = safe_target;
+        // Final output stage: moving average over the last N safety-passed
+        // targets (convex combination — joint limits and per-tick velocity
+        // bounds preserved). prev_sent bookkeeping, logging, and tracking
+        // error all use this filtered value, i.e., what is actually sent.
+        ServoTarget output_filtered_target = safe_target;
+        output_filtered_target.left_q_target_deg = left_output_ma_.apply(safe_target.left_q_target_deg);
+        output_filtered_target.right_q_target_deg = right_output_ma_.apply(safe_target.right_q_target_deg);
+        const ServoTarget attempted_target = output_filtered_target;
         const bool fault_latched_before_send = fault_latched_.load();
         const std::string send_policy = currentSendPolicy();
         const bool send_suppressed = send_policy != "send_servo_j";
@@ -2129,6 +2102,7 @@ void DualArmServoLoop::loopMain() {
             sample.fault_latched = fault_latched_.load();
             sample.motion_state = motion_state_.load();
             sample.async_supervision_degraded = async_supervision_degraded_this_tick;
+            sample.tracking_error_degraded = tracking_error_degraded_this_tick_;
             sample.fault_reason = fault_reason_;
             if (latched_fault_context_) {
                 sample.latched_fault_context = faultContextSnapshot(*latched_fault_context_);
@@ -2188,9 +2162,26 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.margin_m;
             latest_snapshot_.self_collision_left_bone = last_self_collision_.left_bone;
             latest_snapshot_.self_collision_right_bone = last_self_collision_.right_bone;
+            latest_snapshot_.self_collision_pair = last_self_collision_.pair;
+            latest_snapshot_.self_collision_stand_capsule = last_self_collision_.stand_capsule;
+            latest_snapshot_.floor_constraint_enabled = config_.safety.floor_constraint.enable;
+            latest_snapshot_.floor_constraint_monitor_only = config_.safety.floor_constraint.monitor_only;
+            latest_snapshot_.floor_constraint_z_min_m = effectiveFloorZ();
+            latest_snapshot_.floor_constraint_config_z_min_m = config_.safety.floor_constraint.z_min_m;
+            latest_snapshot_.floor_constraint_runtime_min_z_m = config_.safety.floor_constraint.runtime_min_z_m;
+            latest_snapshot_.floor_constraint_runtime_max_z_m = config_.safety.floor_constraint.runtime_max_z_m;
+            latest_snapshot_.floor_constraint_left_checked = last_floor_left_.checked;
+            latest_snapshot_.floor_constraint_left_violated = last_floor_left_.violated;
+            latest_snapshot_.floor_constraint_left_tcp_z_m = last_floor_left_.tcp_z_m;
+            latest_snapshot_.floor_constraint_right_checked = last_floor_right_.checked;
+            latest_snapshot_.floor_constraint_right_violated = last_floor_right_.violated;
+            latest_snapshot_.floor_constraint_right_tcp_z_m = last_floor_right_.tcp_z_m;
+            latest_snapshot_.floor_constraint_clamp_count = floor_clamp_count_;
+            latest_snapshot_.floor_constraint_last_set_reject_reason = floor_last_set_reject_reason_;
             latest_snapshot_.motion_state = sample.motion_state;
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.async_supervision_degraded = sample.async_supervision_degraded;
+            latest_snapshot_.tracking_error_degraded = sample.tracking_error_degraded;
             latest_snapshot_.latched_fault_reason = latched_fault_reason_.load();
             latest_snapshot_.fault_reason = fault_reason_;
             latest_snapshot_.latched_fault_context = sample.latched_fault_context;
@@ -2238,6 +2229,7 @@ void DualArmServoLoop::loopMain() {
         }
 
         async_supervision_degraded_last_tick = async_supervision_degraded_this_tick;
+        tracking_error_degraded_prev_tick_ = tracking_error_degraded_this_tick_;
         std::this_thread::sleep_until(next_tick);
     }
 }
@@ -2821,9 +2813,11 @@ ArmCommand DualArmServoLoop::resolveArmCartesianDeltaCommand(
         config_.cartesian_control,
         kinematics_
     );
-    const Pose6D target_tcp_stand = command.mode == ControlMode::TcpDeltaStand
+    // Tier-2 floor clamp: latch a target that is already legal so the per-tick
+    // pose tracking never aims below the plane.
+    const Pose6D target_tcp_stand = clampPoseToFloor(command.mode == ControlMode::TcpDeltaStand
         ? cartesian.applyTcpDeltaStand(*state.tcp_stand, command.tcp_delta_stand)
-        : cartesian.applyTcpDeltaLocal(*state.tcp_stand, command.tcp_delta_local);
+        : cartesian.applyTcpDeltaLocal(*state.tcp_stand, command.tcp_delta_local));
 
     latch.seq = command_seq;
     latch.target_tcp_stand = target_tcp_stand;
@@ -3022,6 +3016,13 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             config_.cartesian_control,
             kinematics_
         );
+        // Tier-2 floor assist for streaming twists (5 mm soft margin above the plane).
+        constexpr double kFloorTwistSoftMarginM = 0.005;
+        cartesian_servo.setFloorConstraint(
+            config_.safety.floor_constraint.enable && !config_.safety.floor_constraint.monitor_only,
+            effectiveFloorZ(),
+            kFloorTwistSoftMarginM
+        );
 
         if (effective_command.left.mode != ControlMode::TcpTwistStand && effective_command.left.mode != ControlMode::TcpTwistLocal) {
             left_cartesian_twist_hold_ = CartesianTwistHoldState{};
@@ -3029,6 +3030,38 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         if (effective_command.right.mode != ControlMode::TcpTwistStand && effective_command.right.mode != ControlMode::TcpTwistLocal) {
             right_cartesian_twist_hold_ = CartesianTwistHoldState{};
         }
+
+        // Tier-2 floor clamp for absolute Cartesian targets: TcpPoseTarget aims
+        // at the clamped pose every tick; TcpLinearMove latches its path goal from
+        // this command at path start, so clamping here keeps the whole path legal
+        // (interpolation between legal start and legal goal stays legal).
+        const auto clamp_command_pose = [this](ArmCommand& cmd) {
+            if ((cmd.mode == ControlMode::TcpPoseTarget || cmd.mode == ControlMode::TcpLinearMove) &&
+                cmd.has_tcp_target) {
+                cmd.tcp_target_stand = clampPoseToFloor(cmd.tcp_target_stand);
+            }
+        };
+        clamp_command_pose(effective_command.left);
+        clamp_command_pose(effective_command.right);
+
+        const ArmCommand left_pose_track_command = applyPoseTrackSmd(
+            effective_command.left,
+            config_.cartesian_control.pose_track_smd,
+            &left_pose_track_smd_,
+            kinematics_,
+            config_.left_mount,
+            left_prev_sent_q_deg_,
+            dt_sec
+        );
+        const ArmCommand right_pose_track_command = applyPoseTrackSmd(
+            effective_command.right,
+            config_.cartesian_control.pose_track_smd,
+            &right_pose_track_smd_,
+            kinematics_,
+            config_.right_mount,
+            right_prev_sent_q_deg_,
+            dt_sec
+        );
 
         const RunMode left_cartesian_compute_run_mode =
             cartesianComputationRunModeForArm(config_, effective_command.left);
@@ -3128,7 +3161,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             )
             : isCartesianMode(effective_command.left.mode)
             ? cartesian.computeArmJointTarget(
-                effective_command.left,
+                left_pose_track_command,
                 left_state,
                 left_prev_sent_q_deg_,
                 left_cartesian_compute_run_mode
@@ -3194,7 +3227,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             )
             : isCartesianMode(effective_command.right.mode)
             ? cartesian.computeArmJointTarget(
-                effective_command.right,
+                right_pose_track_command,
                 right_state,
                 right_prev_sent_q_deg_,
                 right_cartesian_compute_run_mode
@@ -3285,6 +3318,17 @@ ServoTarget DualArmServoLoop::applySafety(
         right_filter_state,
         right_controller_sim_physical_baseline_q_deg_
     );
+    // pgmode controller-sim tracking-error advisory gate. Fail-closed in real mode
+    // (controllerSimulationMotionGateOpen is false there). The physical-motion guard
+    // (controller_simulation_physical_motion_fault) is a genuine safety signal — an
+    // unexpected actual move in a no-motion mode — so it is excluded and still latches.
+    const bool tracking_error_nonlatching =
+        controllerSimulationMotionRequired(config_) &&
+        controllerSimulationMotionGateOpen(config_) &&
+        config_.safety.controller_simulation_tracking_error_nonlatching;
+    const bool tracking_error_physical_motion_fault =
+        left_tracking_state.controller_simulation_physical_motion_fault ||
+        right_tracking_state.controller_simulation_physical_motion_fault;
     const SafetyCheckResult left_result = safety_filter_.filterJointTarget(
         desired.left_q_target_deg,
         left_prev_sent_q_deg_,
@@ -3322,6 +3366,45 @@ ServoTarget DualArmServoLoop::applySafety(
             // 개발/mock/rbsim용 복구 정책: 현재 실제 자세를 새 안전 기준점으로 삼고 그 자리에서 멈춘다.
             out.left_q_target_deg = left_state.q_actual_deg;
             out.right_q_target_deg = right_state.q_actual_deg;
+        } else if (tracking_error_nonlatching && !tracking_error_physical_motion_fault) {
+            // pgmode controller-sim advisory: keep following the rate-limited desired
+            // target instead of holding/latching, so teleop stays live. The lag is the
+            // diagnostics_suspect controller's reference readback, with no physical
+            // motion. Surfaced as degraded telemetry + throttled WARN; real mode keeps
+            // the latch (gate closed above).
+            out.left_q_target_deg = safety_filter_.clampMotion(
+                desired.left_q_target_deg,
+                left_prev_sent_q_deg_,
+                left_prevprev_sent_q_deg_,
+                dt_sec
+            );
+            out.right_q_target_deg = safety_filter_.clampMotion(
+                desired.right_q_target_deg,
+                right_prev_sent_q_deg_,
+                right_prevprev_sent_q_deg_,
+                dt_sec
+            );
+            tracking_error_degraded_this_tick_ = true;
+            const std::string reason = combined_reason.empty()
+                ? "tracking error exceeded threshold"
+                : combined_reason;
+            constexpr uint64_t kTrackingErrorDegradedWarnPeriodNs = 5'000'000'000ULL;
+            const uint64_t now_ns = nowSteadyNs();
+            const bool state_changed =
+                !tracking_error_degraded_prev_tick_ ||
+                reason != last_tracking_error_degraded_reason_;
+            const bool warn_period_elapsed =
+                last_tracking_error_degraded_warn_ns_ == 0 ||
+                now_ns - last_tracking_error_degraded_warn_ns_ >=
+                    kTrackingErrorDegradedWarnPeriodNs;
+            if (state_changed || warn_period_elapsed) {
+                std::cerr
+                    << "[WARN] controller-sim tracking error degraded "
+                    << "(suppressed, not latched): " << reason << "\n";
+                last_tracking_error_degraded_warn_ns_ = now_ns;
+                last_tracking_error_degraded_reason_ = reason;
+            }
+            combined = SafetyVerdict::Ok;
         } else {
             latchFault(
                 SafetyVerdict::TrackingError,
@@ -3348,6 +3431,61 @@ ServoTarget DualArmServoLoop::applySafety(
         }
     }
 
+    // Stand-frame floor plane constraint: never command a configuration that puts
+    // either TCP below z = effectiveFloorZ(). Mode-independent by design (mock /
+    // simulator / controller-sim / real all pass through here). Per-arm: only the
+    // violating arm is reverted; the escape exception allows strictly-upward motion
+    // so an arm that starts below the plane can be jogged out without a reset.
+    if (config_.safety.floor_constraint.enable) {
+        const double floor_z = effectiveFloorZ();
+        const FloorArmEvaluation left_eval = evaluateFloorArm(ArmId::Left, out.left_q_target_deg);
+        const FloorArmEvaluation right_eval = evaluateFloorArm(ArmId::Right, out.right_q_target_deg);
+        last_floor_left_ = left_eval;    // telemetry, even when already faulted
+        last_floor_right_ = right_eval;
+        if (combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+            const auto enforce_arm = [&](
+                ArmId arm,
+                const FloorArmEvaluation& eval,
+                JointArray& target_q,
+                const JointArray& prev_sent_q
+            ) {
+                FloorArmEvaluation prev_eval;
+                if (eval.checked && eval.tcp_z_m < floor_z) {
+                    prev_eval = evaluateFloorArm(arm, prev_sent_q);  // lazy: escape test only
+                }
+                const FloorAction action = decideFloorAction(
+                    eval, prev_eval, config_.safety.floor_constraint, floor_z);
+                if (action == FloorAction::Allow) return false;
+                const std::string arm_name = arm == ArmId::Left ? "left" : "right";
+                const std::string reason = eval.checked
+                    ? ("floor constraint: " + arm_name + " tcp z " + std::to_string(eval.tcp_z_m) +
+                       " m below plane z_min " + std::to_string(floor_z) + " m")
+                    : ("floor constraint: " + arm_name + " TCP FK unavailable");
+                if (action == FloorAction::Latch) {
+                    latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
+                    out = currentFaultHoldTarget();
+                    combined = SafetyVerdict::FaultLatched;
+                    return true;
+                }
+                // FloorAction::Hold: revert only this arm (non-latching). Reset the
+                // twist velocity integrator so it does not keep advancing (and
+                // diverging from the held command) while the hold is active.
+                target_q = prev_sent_q;
+                ++floor_clamp_count_;
+                resetCartesianVelocityIntegrator(arm, "floor_hold");
+                if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
+                    combined = SafetyVerdict::FloorViolation;
+                }
+                return false;
+            };
+            const bool latched =
+                enforce_arm(ArmId::Left, left_eval, out.left_q_target_deg, left_prev_sent_q_deg_);
+            if (!latched) {
+                enforce_arm(ArmId::Right, right_eval, out.right_q_target_deg, right_prev_sent_q_deg_);
+            }
+        }
+    }
+
     // Dual-arm self-collision guard: never command a configuration that brings the
     // two arms' link capsules within the configured margin. Evaluated on the final
     // candidate targets (post per-arm filtering).
@@ -3363,7 +3501,9 @@ ServoTarget DualArmServoLoop::applySafety(
             combined != SafetyVerdict::FaultLatched &&
             !fault_latched_.load()) {
             const std::string reason = sc.checked
-                ? ("self-collision: capsule clearance " + std::to_string(sc.min_clearance_m) +
+                ? ("self-collision (" + (sc.pair.empty() ? std::string("unknown") : sc.pair) +
+                   (sc.stand_capsule.empty() ? std::string() : " @" + sc.stand_capsule) +
+                   "): capsule clearance " + std::to_string(sc.min_clearance_m) +
                    " m below margin " + std::to_string(config_.safety.self_collision.margin_m) + " m")
                 : "self-collision guard: link geometry unavailable";
             if (config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch) {
@@ -3400,6 +3540,41 @@ ServoTarget DualArmServoLoop::applySafety(
     return out;
 }
 
+FloorArmEvaluation DualArmServoLoop::evaluateFloorArm(ArmId arm, const JointArray& q_deg) const {
+    FloorArmEvaluation eval;
+    if (!kinematics_ || !finiteJointArray(q_deg)) {
+        return eval;  // checked=false -> caller fails closed
+    }
+    const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount : config_.right_mount;
+    try {
+        const Pose6D tcp = kinematics_->computeTcpStand(arm, q_deg, mount);
+        if (!std::isfinite(tcp.z)) {
+            return eval;  // checked=false -> caller fails closed
+        }
+        eval.checked = true;
+        eval.tcp_z_m = tcp.z;
+        eval.violated = tcp.z < effectiveFloorZ();
+    } catch (const std::exception&) {
+        return FloorArmEvaluation{};  // checked=false -> caller fails closed
+    }
+    return eval;
+}
+
+double DualArmServoLoop::effectiveFloorZ() const {
+    return runtime_floor_z_m_.load();
+}
+
+Pose6D DualArmServoLoop::clampPoseToFloor(const Pose6D& pose) const {
+    if (!config_.safety.floor_constraint.enable || config_.safety.floor_constraint.monitor_only) {
+        return pose;
+    }
+    Pose6D clamped = pose;
+    if (std::isfinite(clamped.z)) {
+        clamped.z = std::max(clamped.z, effectiveFloorZ());
+    }
+    return clamped;
+}
+
 SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
     const JointArray& left_q_deg,
     const JointArray& right_q_deg
@@ -3415,12 +3590,46 @@ SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
     } catch (const std::exception&) {
         return SelfCollisionResult{};  // checked=false -> caller fails closed
     }
-    return dualArmSelfCollisionClearance(
-        left_points,
-        right_points,
-        config_.safety.self_collision.link_radius_m,
-        config_.safety.self_collision.margin_m
-    );
+    const SelfCollisionConfig& sc_cfg = config_.safety.self_collision;
+    SelfCollisionResult combined;
+    bool any_pair = false;
+    bool all_checked = true;
+
+    if (sc_cfg.check_left_right) {
+        any_pair = true;
+        SelfCollisionResult lr = dualArmSelfCollisionClearance(
+            left_points, right_points, sc_cfg.link_radius_m, sc_cfg.margin_m);
+        all_checked = all_checked && lr.checked;
+        combined = minSelfCollisionResult(combined, lr);
+    }
+    // Arm<->stand pairs need stand geometry; an empty list skips them so older
+    // arm-arm-only configs keep their behavior.
+    if (!sc_cfg.stand_capsules.empty()) {
+        if (sc_cfg.check_left_stand) {
+            any_pair = true;
+            SelfCollisionResult ls = armStandCollisionClearance(
+                left_points, sc_cfg.link_radius_m, sc_cfg.stand_capsules,
+                sc_cfg.margin_m, sc_cfg.stand_ignore_bones);
+            ls.pair = "left_stand";
+            all_checked = all_checked && ls.checked;
+            combined = minSelfCollisionResult(combined, ls);
+        }
+        if (sc_cfg.check_right_stand) {
+            any_pair = true;
+            SelfCollisionResult rs = armStandCollisionClearance(
+                right_points, sc_cfg.link_radius_m, sc_cfg.stand_capsules,
+                sc_cfg.margin_m, sc_cfg.stand_ignore_bones);
+            rs.pair = "right_stand";
+            all_checked = all_checked && rs.checked;
+            combined = minSelfCollisionResult(combined, rs);
+        }
+    }
+    if (!any_pair || !all_checked) {
+        // Nothing evaluated, or some enabled pair lacked geometry: report
+        // unchecked so the gate fails closed.
+        return SelfCollisionResult{};
+    }
+    return combined;
 }
 
 DualSendResult DualArmServoLoop::sendTargets(
@@ -3505,6 +3714,11 @@ DualArmCommand DualArmServoLoop::makeHoldCommand(
 
 bool DualArmServoLoop::commandRequestsResetFault(const DualArmCommand& command) const {
     return command.left.mode == ControlMode::ResetFault || command.right.mode == ControlMode::ResetFault;
+}
+
+bool DualArmServoLoop::commandRequestsSetSafetyFloorZ(const DualArmCommand& command) const {
+    return command.left.mode == ControlMode::SetSafetyFloorZ ||
+           command.right.mode == ControlMode::SetSafetyFloorZ;
 }
 
 bool DualArmServoLoop::commandRequestsEmergencyStop(const DualArmCommand& command) const {

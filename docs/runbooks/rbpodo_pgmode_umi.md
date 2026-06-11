@@ -56,6 +56,9 @@ status-field decode policy:
 servo:
   controller_simulation_treat_unreliable_status_fields_as_unavailable: true
   controller_simulation_async_supervision_nonlatching: true
+safety:
+  tracking_error_policy: fault_latch              # stays enforced for real mode
+  controller_simulation_tracking_error_nonlatching: true
 ```
 
 This policy is inert unless the controller-simulation motion gate is open
@@ -74,6 +77,16 @@ When pgmode async ACK/q_ref supervision degrades, the server continues command
 handling, sets top-level state `async_supervision_degraded=true`, keeps per-arm
 async telemetry visible, and emits throttled WARN logs. Physical real mode and
 non-async fault paths still latch.
+
+The tracking-error non-latching option closes the same 1hr-stability gap on the
+synchronous safety filter. The diagnostics_suspect controller's reference readback
+lags the commanded joints, so the command-tracking divergence would otherwise
+latch `TrackingError` mid-teleop. With
+`safety.controller_simulation_tracking_error_nonlatching: true` (gated identically,
+inert in real mode), that divergence is advisory: the server keeps following the
+rate-limited desired target, sets top-level state `tracking_error_degraded=true`,
+and emits throttled WARN logs. `tracking_error_policy` stays `fault_latch`. The
+`controller_simulation_physical_motion` guard is excluded and still latches.
 
 ## Mock Preview
 
@@ -167,6 +180,38 @@ default is identity. Per-tick targets are clamped by
 `max_linear_step_m` and `max_angular_step_rad`; optional workspace bounds clamp
 target `x/y/z`.
 
+`delta_frame` selects how the latched relative delta is applied. `tool`
+(default) composes in the latched body frames
+(`arm_init ∘ pika_init⁻¹ ∘ pika_now`): the axis mapping tilts with how the
+tool and the TCP were oriented when the deadman was pressed, so a horizontal
+hand motion can bleed into stand z. `world` takes the translation delta in
+the gravity-aligned tracker world frame and the rotation delta as a
+world-frame (left) offset, applying both along stand axes — horizontal hand
+motion stays horizontal regardless of latch orientation. `world` assumes the
+tracker world vertical matches the stand vertical; in-plane yaw alignment is
+absorbed by `linear_axis_signs` / operator placement, and `r_align` cancels
+out of the rotation delta in this mode.
+
+`linear_axis_signs` / `angular_axis_signs` (3 entries of `-1`/`1`, default all
+`1`) mirror the latched relative delta per axis: linear signs flip the delta
+translation componentwise, angular signs flip the rotation-axis components
+(via the quaternion vector part, so the angle is preserved). Use these when
+the operator-perceived axes are reversed; unlike `r_align` they can express
+non-rigid mirrors such as flipping x/y translation while flipping all of
+roll/pitch/yaw. The live example uses `linear_axis_signs: [-1, -1, 1]`,
+`angular_axis_signs: [-1, -1, -1]`.
+
+Optional target smoothing (all default 0 = disabled) runs before the per-tick
+step clamp: `target_lpf_tau_sec` applies a first-order exponential low-pass
+filter (`alpha = dt / (tau + dt)`) to the composed TCP target, attenuating
+tracker jitter and ramping the staircase between lower-rate UMI samples at the
+command rate; `deadband_linear_m` / `deadband_angular_rad` gate the filter
+input so the command freezes bit-exact while the hand-held tracker only
+jitters in place. Filter state latches with the clutch and resets on
+release/re-arm. The live example uses `target_lpf_tau_sec: 0.05` (~3.2 Hz
+cutoff, ~50 ms lag), `deadband_linear_m: 0.0003`, and
+`deadband_angular_rad: 0.005`.
+
 ## UDP Wire Schema
 
 The Windows SteamVR/OpenVR publisher lives in the pika repo
@@ -242,6 +287,9 @@ Before trusting a run, inspect live state or recorder output for:
   controller-simulation fields when the decode policy is active
 - `async_supervision_degraded=false` during healthy streaming; if it becomes
   true, inspect per-arm `async_streaming` telemetry and WARN logs
+- `tracking_error_degraded=false` during healthy tracking; if it becomes true,
+  the controller reference is lagging the command (advisory, not latched) — watch
+  per-arm `command_reference_tracking_error_deg` and WARN logs
 - `fault_latched=false`
 - command-source lease active for `policy_runner`
 - `TcpPoseTarget` commands while UMI deadmen are held
