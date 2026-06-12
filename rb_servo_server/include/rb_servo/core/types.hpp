@@ -730,8 +730,9 @@ struct ServoSnapshot {
     std::string self_collision_pair;
     std::string self_collision_stand_capsule;
     int self_collision_right_bone = -1;
-    // Closest capsule-surface points of the min-clearance pair (stand frame);
-    // a = pair's first member (arm), b = second member (other arm / stand).
+    // Closest bone-axis points of the min-clearance pair (stand frame), on the
+    // members themselves; a = pair's first member (arm), b = second member
+    // (other arm / stand). Their gap = min_clearance + both capsule radii.
     bool self_collision_has_closest_points = false;
     std::array<double, 3> self_collision_closest_point_a_m{};
     std::array<double, 3> self_collision_closest_point_b_m{};

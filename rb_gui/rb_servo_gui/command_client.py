@@ -398,6 +398,10 @@ class CommandClient:
     _LEASED_MODES = {
         "ArmMotion",
         "DisarmMotion",
+        # ResetFault requires the lease server-side (commandRequiresLease);
+        # without the bracket a GUI ResetFault is rejected with
+        # command_source_lease_required whenever no lease is active.
+        "ResetFault",
         "JointTarget",
         "JointVelocity",
         "TcpPoseTarget",

@@ -2486,6 +2486,51 @@ class FloorConstraintGuiTest(unittest.TestCase):
         update_floor_plane({}, self._floor_block())
 
 
+class LeaseBracketTest(unittest.TestCase):
+    """One-shot GUI commands must be wrapped Acquire -> command -> Release so
+    the GUI never camps on the lease (blocking teleop for lease_timeout_sec),
+    while leaseless modes (EmergencyStop, SetSafetyFloorZ) stay bare."""
+
+    def _recv_packets(self, sock, count):
+        packets = []
+        sock.settimeout(1.0)
+        for _ in range(count):
+            data, _ = sock.recvfrom(65536)
+            packets.append(json.loads(data))
+        return packets
+
+    def _client_and_socket(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        return CommandClient(host="127.0.0.1", port=port, source_id="rb_gui_test"), sock
+
+    @unittest.skipUnless(_local_udp_socket_available(), "local UDP unavailable")
+    def test_leased_one_shot_is_bracketed(self):
+        for mode in ("ArmMotion", "ResetFault"):
+            client, sock = self._client_and_socket()
+            try:
+                client.send_lifecycle(mode)
+                packets = self._recv_packets(sock, 3)
+            finally:
+                sock.close()
+            self.assertEqual([p["mode"] for p in packets], ["AcquireLease", mode, "ReleaseLease"])
+            seqs = [p["seq"] for p in packets]
+            self.assertEqual(seqs, sorted(seqs))
+            self.assertTrue(all(p["source_id"] == "rb_gui_test" for p in packets))
+
+    @unittest.skipUnless(_local_udp_socket_available(), "local UDP unavailable")
+    def test_leaseless_modes_stay_bare(self):
+        client, sock = self._client_and_socket()
+        try:
+            client.send_lifecycle("EmergencyStop")
+            client.send_set_safety_floor_z(0.012)
+            packets = self._recv_packets(sock, 2)
+        finally:
+            sock.close()
+        self.assertEqual([p["mode"] for p in packets], ["EmergencyStop", "SetSafetyFloorZ"])
+
+
 class SelfCollisionOverlayTest(unittest.TestCase):
     @staticmethod
     def _handles():

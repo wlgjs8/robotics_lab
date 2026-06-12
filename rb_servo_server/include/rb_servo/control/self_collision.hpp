@@ -26,9 +26,12 @@ struct SelfCollisionResult {
     // "left_right" | "left_stand" | "right_stand" | "" (not evaluated).
     std::string pair;
     std::string stand_capsule;  // nearest stand capsule name (arm-stand pairs only)
-    // Closest capsule-SURFACE points of the min-clearance pair (stand frame).
+    // Closest bone-AXIS points of the min-clearance pair (stand frame): the
+    // closest points on each member's capsule core segment, so they lie on the
+    // physical link/stand member itself (not on the inflated capsule surface).
     // a = the pair's first member (left arm, or the arm for arm-stand pairs);
     // b = the second member (right arm or the stand capsule).
+    // |b - a| == min_clearance_m + the two capsule radii.
     bool has_closest_points = false;
     std::array<double, 3> closest_point_a_m{};
     std::array<double, 3> closest_point_b_m{};

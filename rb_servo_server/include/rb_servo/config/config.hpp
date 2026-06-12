@@ -231,6 +231,24 @@ struct FloorConstraintConfig {
     bool monitor_only = false;
 };
 
+// Joint-space SMD profile for the JointTarget primitive (the joint-space
+// mirror of cartesian_control.pose_track_smd): the sent target follows the
+// commanded goal as a second-order system (mass fixed at 1.0) stepped at the
+// servo rate, per joint:
+//   ddq = wn^2 * (goal - q) - 2 * zeta * wn * dq
+// The per-joint velocity/accel clamps are the max-force saturation; inside the
+// limits the zeta/fn dynamics are exact. These are PROFILE limits — the global
+// safety.dq_max_deg_s / ddq_max_deg_s2 clamps still apply downstream as the
+// outer hard safety bound. Disabled (default): JointTarget keeps the legacy
+// full-speed rate-limited ramp at dq_max.
+struct JointTargetSmdConfig {
+    bool enable = false;
+    double damping_ratio = 1.0;        // 1.0 = critical damping (no overshoot)
+    double natural_frequency_hz = 0.4;
+    JointArray max_velocity_deg_s{30.0, 30.0, 30.0, 45.0, 45.0, 60.0};
+    JointArray max_accel_deg_s2{150.0, 150.0, 150.0, 250.0, 250.0, 350.0};
+};
+
 struct SafetyConfig {
     JointArray q_min_deg{};
     JointArray q_max_deg{};
@@ -263,6 +281,7 @@ struct SafetyConfig {
     bool controller_simulation_tracking_error_nonlatching = false;
     SelfCollisionConfig self_collision;
     FloorConstraintConfig floor_constraint;
+    JointTargetSmdConfig joint_target_smd;
 };
 
 inline constexpr JointArray rbpodoDefaultSafetyJointMinDeg() {

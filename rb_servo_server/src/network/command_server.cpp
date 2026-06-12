@@ -850,7 +850,16 @@ void CommandServer::threadMain(std::promise<bool> startup_result) {
             if (parsed) {
                 // Lease-admin packets (AcquireLease/ReleaseLease) only mutate
                 // the lease; they must not displace the buffered motion command.
-                if (command_buffer_ && !cmd.lease_admin_only) command_buffer_->setCommand(cmd);
+                // Their lease grant/clear still has to reach the published state
+                // (the lease readback is snapshot.command.lease) — otherwise an
+                // acquiring client waits forever for a grant it already has.
+                if (command_buffer_) {
+                    if (cmd.lease_admin_only) {
+                        command_buffer_->updateLease(cmd.lease);
+                    } else {
+                        command_buffer_->setCommand(cmd);
+                    }
+                }
             } else {
                 std::cerr << "[WARN] command packet dropped";
                 if (!last_reject_reason_.empty()) {

@@ -1436,8 +1436,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         self_collision["stand_capsule"] = snapshot.self_collision_stand_capsule.empty()
             ? nlohmann::json(nullptr)
             : nlohmann::json(snapshot.self_collision_stand_capsule);
-        // Closest capsule-surface points (stand frame) of the min-clearance
-        // pair, for GUI witness-point markers.
+        // Closest bone-axis points (stand frame) of the min-clearance pair —
+        // on the members themselves — for GUI witness-point markers.
         if (snapshot.self_collision_has_closest_points) {
             self_collision["closest_point_a_m"] = snapshot.self_collision_closest_point_a_m;
             self_collision["closest_point_b_m"] = snapshot.self_collision_closest_point_b_m;

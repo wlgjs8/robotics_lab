@@ -206,6 +206,48 @@ bool testReleaseLeaseAllowsImmediateTakeover() {
     return true;
 }
 
+bool testLeaseAdminUpdatesBufferReadbackWithoutDisplacingMotion() {
+    // Regression: lease-admin packets skip CommandBuffer::setCommand so they do
+    // not displace the buffered motion command, but the lease grant must still
+    // reach the published state (lease readback = snapshot.command.lease).
+    // Without updateLease an acquiring client polls forever for a grant it
+    // already has (deadlock: lazy lease -> no motion command -> no readback).
+    rb_servo::CommandBuffer buffer;
+    const uint64_t now = rb_servo::nowSteadyNs();
+
+    rb_servo::DualArmCommand motion;
+    motion.seq = 7;
+    motion.host_time_ns = 0;  // never times out in this test
+    motion.left.mode = rb_servo::ControlMode::TcpTwistLocal;
+    motion.right.mode = rb_servo::ControlMode::Hold;
+    buffer.setCommand(motion);
+
+    rb_servo::CommandSourceLeaseState lease;
+    lease.active = true;
+    lease.source_id = "policy_runner";
+    lease.session_id = "policy-session";
+    lease.lease_token = "tok";
+    buffer.updateLease(lease);
+
+    rb_servo::DualArmCommand out = buffer.latestOrHold(now);
+    RB_CHECK(out.seq == 7);  // motion command not displaced
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpTwistLocal);
+    RB_CHECK(out.lease.active);
+    RB_CHECK(out.lease.source_id == "policy_runner");
+    RB_CHECK(out.lease.lease_token == "tok");
+
+    // Acquire at startup (empty buffer): the readback must still surface via a
+    // synthesized non-expiring Hold.
+    rb_servo::CommandBuffer empty;
+    empty.updateLease(lease);
+    out = empty.latestOrHold(now);
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(out.right.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(out.lease.active);
+    RB_CHECK(out.lease.session_id == "policy-session");
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -213,6 +255,7 @@ int main() {
     if (!testWrongTokenRejected()) return 1;
     if (!testDefaultOffAndEmergencyOverride()) return 1;
     if (!testReleaseLeaseAllowsImmediateTakeover()) return 1;
+    if (!testLeaseAdminUpdatesBufferReadbackWithoutDisplacingMotion()) return 1;
     std::cout << "command source lease tests passed\n";
     return 0;
 }

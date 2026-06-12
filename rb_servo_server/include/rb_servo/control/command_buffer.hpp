@@ -11,6 +11,12 @@ namespace rb_servo {
 class CommandBuffer {
 public:
     void setCommand(const DualArmCommand& command);
+    // Lease-admin packets (AcquireLease/ReleaseLease) must not displace the
+    // buffered motion command, but their lease grant/clear still has to reach
+    // the published state (the lease readback is snapshot.command.lease).
+    // Update only the lease snapshot of the buffered command, synthesizing a
+    // non-expiring Hold when the buffer is empty (e.g. acquire at startup).
+    void updateLease(const CommandSourceLeaseState& lease);
     DualArmCommand latestOrHold(uint64_t now_ns);
 
 private:

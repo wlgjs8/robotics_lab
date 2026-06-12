@@ -780,6 +780,13 @@ void validateConfig(const DualArmConfig& cfg) {
                 "safety.self_collision.enable=true requires kinematics.enable=true (link geometry source)");
         }
     }
+    if (cfg.safety.joint_target_smd.enable) {
+        const auto& js = cfg.safety.joint_target_smd;
+        validatePositiveFinite(js.damping_ratio, "safety.joint_target_smd.damping_ratio");
+        validatePositiveFinite(js.natural_frequency_hz, "safety.joint_target_smd.natural_frequency_hz");
+        validatePositiveFiniteArray(js.max_velocity_deg_s, "safety.joint_target_smd.max_velocity_deg_s");
+        validatePositiveFiniteArray(js.max_accel_deg_s2, "safety.joint_target_smd.max_accel_deg_s2");
+    }
     if (cfg.safety.floor_constraint.enable) {
         const auto& fc = cfg.safety.floor_constraint;
         if (!std::isfinite(fc.z_min_m) || !std::isfinite(fc.runtime_min_z_m) ||
@@ -1548,6 +1555,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "controller_simulation_tracking_error_nonlatching",
             "self_collision",
             "floor_constraint",
+            "joint_target_smd",
         }, "safety");
         if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
         if (has(sec, "q_max_deg")) cfg.safety.q_max_deg = parseJointArray(sec["q_max_deg"], "safety.q_max_deg");
@@ -1728,6 +1736,36 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(fc, "monitor_only")) {
                 cfg.safety.floor_constraint.monitor_only =
                     asBool(fc["monitor_only"], "safety.floor_constraint.monitor_only");
+            }
+        }
+        if (has(sec, "joint_target_smd")) {
+            const YAML::Node js = sec["joint_target_smd"];
+            validateAllowedKeys(js, {
+                "enable",
+                "damping_ratio",
+                "natural_frequency_hz",
+                "max_velocity_deg_s",
+                "max_accel_deg_s2",
+            }, "safety.joint_target_smd");
+            if (has(js, "enable")) {
+                cfg.safety.joint_target_smd.enable =
+                    asBool(js["enable"], "safety.joint_target_smd.enable");
+            }
+            if (has(js, "damping_ratio")) {
+                cfg.safety.joint_target_smd.damping_ratio =
+                    asDouble(js["damping_ratio"], "safety.joint_target_smd.damping_ratio");
+            }
+            if (has(js, "natural_frequency_hz")) {
+                cfg.safety.joint_target_smd.natural_frequency_hz =
+                    asDouble(js["natural_frequency_hz"], "safety.joint_target_smd.natural_frequency_hz");
+            }
+            if (has(js, "max_velocity_deg_s")) {
+                cfg.safety.joint_target_smd.max_velocity_deg_s =
+                    parseJointArray(js["max_velocity_deg_s"], "safety.joint_target_smd.max_velocity_deg_s");
+            }
+            if (has(js, "max_accel_deg_s2")) {
+                cfg.safety.joint_target_smd.max_accel_deg_s2 =
+                    parseJointArray(js["max_accel_deg_s2"], "safety.joint_target_smd.max_accel_deg_s2");
             }
         }
     }

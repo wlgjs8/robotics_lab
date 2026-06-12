@@ -292,6 +292,7 @@ def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) ->
         return
     sc = getattr(latest, "self_collision", None) if latest is not None else None
     violated = isinstance(sc, Mapping) and bool(sc.get("violated", False))
+    _update_self_collision_witness_markers(scene_handles, sc, violated)
     pair = sc.get("pair") if isinstance(sc, Mapping) else None
     if violated and pair not in ("left_right", "left_stand", "right_stand"):
         pair = "all"  # unknown/legacy pair info: keep the conservative all-red
@@ -332,6 +333,96 @@ def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) ->
             _set_visible(scene_handles.get("left_base_ref"), False)
         if right_red:
             _set_visible(scene_handles.get("right_base_ref"), False)
+
+
+def _add_self_collision_witness_markers(server: Any, handles: dict[str, Any]) -> None:
+    """Closest-point (witness) markers for the self-collision guard.
+
+    Two small spheres on the min-clearance pair's bone AXES — i.e. on the pair
+    members themselves (yellow = first member, cyan = second) — plus a
+    connecting segment and a label showing the judged capsule-surface
+    clearance. Hidden unless self_collision.violated. They answer "which spot
+    on each member was judged this close?" when the visual mesh gap looks
+    larger than the capsule clearance (the capsule radii inflate the links)."""
+    try:
+        if not hasattr(server.scene, "add_icosphere"):
+            return
+        for key, name, color in (
+            ("self_collision_point_a", "/stand/self_collision_point_a", (255, 220, 0)),
+            ("self_collision_point_b", "/stand/self_collision_point_b", (0, 229, 255)),
+        ):
+            handles[key] = server.scene.add_icosphere(
+                name,
+                radius=0.006,
+                color=color,
+                position=(0.0, 0.0, 0.0),
+                visible=False,
+            )
+        if hasattr(server.scene, "add_line_segments"):
+            import numpy as np
+
+            handles["self_collision_gap_line"] = server.scene.add_line_segments(
+                "/stand/self_collision_gap_line",
+                points=np.zeros((1, 2, 3), dtype=np.float32),
+                colors=np.full((1, 2, 3), (255, 220, 0), dtype=np.uint8),
+                line_width=3.0,
+                visible=False,
+            )
+        if hasattr(server.scene, "add_label"):
+            handles["self_collision_gap_label"] = server.scene.add_label(
+                "/stand/self_collision_gap_label",
+                text="",
+                position=(0.0, 0.0, 0.0),
+                visible=False,
+            )
+    except Exception as exc:
+        handles["self_collision_witness_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _update_self_collision_witness_markers(
+    scene_handles: dict[str, Any], sc: Mapping[str, Any] | None, violated: bool
+) -> None:
+    """Place/hide the witness-point markers from self_collision telemetry."""
+    point_a = scene_handles.get("self_collision_point_a")
+    point_b = scene_handles.get("self_collision_point_b")
+    line = scene_handles.get("self_collision_gap_line")
+    label = scene_handles.get("self_collision_gap_label")
+    if point_a is None or point_b is None:
+        return
+
+    def _xyz(value: Any) -> tuple[float, float, float] | None:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            return None
+        try:
+            p = tuple(float(v) for v in value)
+        except (TypeError, ValueError):
+            return None
+        return p if all(math.isfinite(v) for v in p) else None
+
+    a = _xyz(sc.get("closest_point_a_m")) if isinstance(sc, Mapping) else None
+    b = _xyz(sc.get("closest_point_b_m")) if isinstance(sc, Mapping) else None
+    show = bool(violated and a is not None and b is not None)
+    if show:
+        try:
+            point_a.position = a
+            point_b.position = b
+            if line is not None:
+                import numpy as np
+
+                line.points = np.array([[a, b]], dtype=np.float32)
+            if label is not None:
+                clearance = sc.get("min_clearance_m") if isinstance(sc, Mapping) else None
+                if isinstance(clearance, (int, float)) and math.isfinite(float(clearance)):
+                    label.text = f"{float(clearance) * 1000:.1f}mm"
+                label.position = (
+                    (a[0] + b[0]) / 2.0,
+                    (a[1] + b[1]) / 2.0,
+                    (a[2] + b[2]) / 2.0 + 0.02,
+                )
+        except Exception as exc:
+            scene_handles["self_collision_witness_error"] = f"{type(exc).__name__}: {exc}"
+    for handle in (point_a, point_b, line, label):
+        _set_visible(handle, show)
 
 
 def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
@@ -514,6 +605,7 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         _set_visible(handles.get("circle_overlay_line"), False)
         _set_visible(handles.get("circle_overlay_desired"), False)
         _add_floor_plane(server, handles)
+        _add_self_collision_witness_markers(server, handles)
         _add_stand_mesh(server, handles)
         _add_robot_urdfs(server, handles)
         urdf_loaded = "left_urdf" in handles and "right_urdf" in handles
