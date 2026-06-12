@@ -2,11 +2,56 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
+import re
+from pathlib import Path
 from typing import Literal
 
 from .command_client import CommandClient
 from .models import StateSnapshot
 from .state_receiver import StateStore
+
+
+_FLOOR_Z_LINE_RE = re.compile(r"^(\s*z_min_m\s*:\s*)([0-9.eE+-]+)(.*)$")
+
+
+def persist_floor_z_to_config(config_path: str | Path, floor_z_m: float) -> tuple[bool, str]:
+    """Rewrite floor_constraint.z_min_m in the server config yaml (text-level,
+    comments preserved) so a viser "Send floor z" survives a stack restart.
+
+    Only the FIRST z_min_m line inside the floor_constraint block is touched.
+    Returns (ok, short message for the GUI status field)."""
+    path = Path(config_path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError as exc:
+        return False, f"yaml unchanged: {type(exc).__name__}: {exc}"
+
+    in_floor_block = False
+    block_indent = -1
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if stripped.startswith("floor_constraint:"):
+            in_floor_block = True
+            block_indent = indent
+            continue
+        if not in_floor_block:
+            continue
+        # Leaving the block: a non-empty, non-comment line at or above the
+        # block's own indentation level.
+        if stripped and not stripped.startswith("#") and indent <= block_indent:
+            break
+        match = _FLOOR_Z_LINE_RE.match(line.rstrip("\n"))
+        if match:
+            newline = "\n" if line.endswith("\n") else ""
+            lines[index] = f"{match.group(1)}{floor_z_m:.3f}{match.group(3)}{newline}"
+            try:
+                path.write_text("".join(lines), encoding="utf-8")
+            except OSError as exc:
+                return False, f"yaml unchanged: {type(exc).__name__}: {exc}"
+            return True, f"saved z_min_m={floor_z_m:.3f} to {path.name}"
+    return False, f"yaml unchanged: floor_constraint.z_min_m not found in {path.name}"
 
 Mode = Literal["mock", "simulation", "real"]
 Backend = Literal["mock", "simulator", "rbpodo", "unknown"]
@@ -260,7 +305,16 @@ class OperatorSafety:
             )
         except ValueError as exc:
             return False, str(exc)
-        return True, f"sent SetSafetyFloorZ {float(floor_z_m) * 1000:.0f}mm"
+        sent = f"sent SetSafetyFloorZ {float(floor_z_m) * 1000:.0f}mm"
+        # Persist to the server config yaml (explicit user request: a viser
+        # "Send floor z" is also the new startup default). Requires the stack
+        # launcher to expose the config path; a send without it stays
+        # runtime-only and says so.
+        config_path = os.environ.get("RB_GUI_SERVER_CONFIG_PATH", "").strip()
+        if not config_path:
+            return True, f"{sent} (runtime only: RB_GUI_SERVER_CONFIG_PATH not set)"
+        _, save_message = persist_floor_z_to_config(config_path, float(floor_z_m))
+        return True, f"{sent} ({save_message})"
 
     def init_motion_disabled_reason(self) -> str | None:
         reason = self.blocked_reason("JointTarget")

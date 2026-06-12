@@ -101,7 +101,11 @@ cleanup() {
   wait 2>/dev/null || true
   echo "[stack] stopped. logs in $LOG_DIR/"
 }
-trap cleanup EXIT INT TERM
+# Ctrl-C is the NORMAL way to stop the stack: clean up and exit 0 so make
+# does not report "오류 130" (130 = 128+SIGINT). Error paths keep their
+# nonzero exit codes via the plain EXIT trap.
+trap 'cleanup; exit 0' INT TERM
+trap cleanup EXIT
 
 echo "[stack] mode=$MODE source=$ACTION_SOURCE (spacemouse + umi side by side)"
 echo "[stack] server: $SERVER_CFG"
@@ -134,6 +138,7 @@ PYTHONPATH=rb_gui \
   RB_GUI_STATE_BIND=0.0.0.0 RB_GUI_STATE_PORT=50366 \
   RB_GUI_COMMAND_HOST=127.0.0.1 RB_GUI_COMMAND_PORT=50256 \
   RB_GUI_CIRCLE_OVERLAY_BIND=none \
+  RB_GUI_SERVER_CONFIG_PATH="$PWD/$SERVER_CFG" \
   python3 -m rb_servo_gui.app >"$LOG_DIR/gui.log" 2>&1 &
 PIDS+=($!)
 

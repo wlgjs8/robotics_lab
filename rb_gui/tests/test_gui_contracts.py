@@ -85,6 +85,7 @@ from rb_servo_gui.scene import (
     _robot_urdf_path,
     update_circle_overlay,
     update_floor_plane,
+    update_floor_plane_preview,
     update_self_collision_overlay,
 )
 from rb_servo_gui.status_panel import _format_floor_constraint_status
@@ -2457,6 +2458,52 @@ class FloorConstraintGuiTest(unittest.TestCase):
         self.assertEqual(packet["source_id"], "rb_gui_test")
         with self.assertRaises(ValueError):
             client.build_set_safety_floor_z(float("nan"))
+
+    def test_persist_floor_z_rewrites_only_z_min_m_and_keeps_comments(self):
+        import tempfile
+        from pathlib import Path
+
+        from rb_servo_gui.safety import persist_floor_z_to_config
+
+        content = (
+            "safety:\n"
+            "  max_tracking_error_deg: 30.0\n"
+            "  # 안전 평면: z=0은 stand 원점\n"
+            "  floor_constraint:\n"
+            "    enable: true\n"
+            "    z_min_m: 0.010   # startup default\n"
+            "    runtime_min_z_m: 0.0\n"
+            "    runtime_max_z_m: 0.5\n"
+            "network:\n"
+            "  z_min_m: 99.0   # decoy outside the floor block\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stack.yaml"
+            path.write_text(content, encoding="utf-8")
+            ok, message = persist_floor_z_to_config(path, 0.05)
+            self.assertTrue(ok, message)
+            updated = path.read_text(encoding="utf-8")
+            self.assertIn("    z_min_m: 0.050   # startup default\n", updated)
+            self.assertIn("# 안전 평면: z=0은 stand 원점", updated)
+            self.assertIn("z_min_m: 99.0   # decoy outside the floor block", updated)
+            self.assertIn("runtime_max_z_m: 0.5", updated)
+
+    def test_persist_floor_z_reports_missing_file_and_missing_key(self):
+        import tempfile
+        from pathlib import Path
+
+        from rb_servo_gui.safety import persist_floor_z_to_config
+
+        ok, message = persist_floor_z_to_config("/nonexistent/stack.yaml", 0.05)
+        self.assertFalse(ok)
+        self.assertIn("yaml unchanged", message)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stack.yaml"
+            path.write_text("safety:\n  floor_constraint:\n    enable: true\n", encoding="utf-8")
+            ok, message = persist_floor_z_to_config(path, 0.05)
+            self.assertFalse(ok)
+            self.assertIn("z_min_m not found", message)
 
     def test_update_floor_plane_no_crash_and_state(self):
         class FakePlane:

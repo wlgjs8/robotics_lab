@@ -52,6 +52,60 @@ OPENPI_DEFAULT_PROMPT = (
 )
 _GRIP_DIMS = (6, 13)
 _FAKE_IMAGES_ENV = "OPENPI_REMOTE_FAKE_IMAGES"
+_SKIP_WARMUP_ENV = "OPENPI_REMOTE_SKIP_WARMUP"
+
+
+class _OpenpiWebsocketClient:
+    """Minimal openpi policy-server client (same wire protocol as
+    openpi_client.WebsocketClientPolicy) with keepalive pings DISABLED so the
+    server's first-inference warmup (torch compile/autotune, minutes) does not
+    kill the connection, plus reconnect-on-failure."""
+
+    def __init__(self, uri: str):
+        import websockets.sync.client  # lazy: only needed for the remote source
+        from openpi_client import msgpack_numpy
+
+        self._connect = websockets.sync.client.connect
+        self._msgpack = msgpack_numpy
+        self._packer = msgpack_numpy.Packer()
+        self._uri = uri
+        self._conn = None
+
+    def _ensure_connection(self) -> None:
+        if self._conn is not None:
+            return
+        conn = self._connect(
+            self._uri,
+            compression=None,
+            max_size=None,
+            ping_interval=None,  # warmup can block the server for minutes
+            close_timeout=5,
+        )
+        self._msgpack.unpackb(conn.recv())  # server metadata handshake
+        self._conn = conn
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+            self._conn = None
+
+    def infer(self, obs: dict) -> dict:
+        last_error: Exception | None = None
+        for _attempt in range(2):  # one reconnect retry
+            try:
+                self._ensure_connection()
+                self._conn.send(self._packer.pack(obs))
+                response = self._conn.recv()
+                if isinstance(response, str):
+                    raise RuntimeError(f"inference server error: {response}")
+                return self._msgpack.unpackb(response)
+            except Exception as exc:  # noqa: BLE001 - reconnect once, then surface
+                last_error = exc
+                self.close()
+        raise last_error  # type: ignore[misc]
 
 
 def _quat_xyzw_to_rotvec(q: np.ndarray) -> np.ndarray:
@@ -114,16 +168,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         url = server_url[len(OPENPI_CHECKPOINT_PREFIX):] if server_url.startswith(OPENPI_CHECKPOINT_PREFIX) else server_url
         host, _, port = url.partition(":")
         try:
-            from openpi_client import websocket_client_policy
+            self._client = _OpenpiWebsocketClient(f"ws://{host or '127.0.0.1'}:{int(port or 8000)}")
         except ImportError as exc:  # pragma: no cover - environment guard
             raise RuntimeError(
-                "openpi_client is required for OpenpiRemoteActionSource; run policy_runner "
-                "inside the openpi virtualenv (see ~/pika_umi_models_v2/README_v2.md)"
+                "openpi_client/websockets are required for OpenpiRemoteActionSource; run "
+                "policy_runner inside the openpi virtualenv (see ~/pika_umi_models_v2/README_v2.md)"
             ) from exc
-        self._client = websocket_client_policy.WebsocketClientPolicy(
-            host=host or "127.0.0.1",
-            port=int(port or 8000),
-        )
         self.prompt = str(prompt)
         self._fake_images = os.environ.get(_FAKE_IMAGES_ENV, "") == "1"
 
@@ -181,6 +231,31 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+
+        # The server's first inference triggers torch compile/kernel autotune and can
+        # take minutes; absorb that at startup so the control loop never stalls.
+        if os.environ.get(_SKIP_WARMUP_ENV, "") != "1":
+            self._warmup()
+
+    def _warmup(self) -> None:
+        import time
+
+        zero = np.zeros((480, 640, 3), dtype=np.uint8)
+        obs = {
+            "observation/left_wrist_0_rgb": zero,
+            "observation/right_wrist_0_rgb": zero,
+            "observation/state": np.zeros(14, dtype=np.float32),
+            "prompt": self.prompt,
+        }
+        print("openpi remote: warmup inference (server compile may take minutes)...", file=self.stderr, flush=True)
+        started = time.perf_counter()
+        try:
+            self._client.infer(obs)
+            self._client.infer(obs)  # second call absorbs the secondary compile path (~10s)
+        except Exception as exc:  # noqa: BLE001 - warmup failure is not fatal; runtime retries
+            print(f"openpi remote: warmup failed ({type(exc).__name__}: {exc}); continuing", file=self.stderr, flush=True)
+            return
+        print(f"openpi remote: warmup done in {time.perf_counter() - started:.1f}s", file=self.stderr, flush=True)
 
     # ------------------------------------------------------------------ obs --
     def _absolute_state(self, payload: dict[str, Any]) -> np.ndarray:
