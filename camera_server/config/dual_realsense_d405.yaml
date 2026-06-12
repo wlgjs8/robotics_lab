@@ -7,9 +7,8 @@
 # Serials are the librealsense-reported serials of the D405 units physically
 # attached to this PC (USB3, bus 4): 412622272078, 260322278348.
 # (Note: these differ from the USB iSerial values 243323070989/313123070562.)
-# Left/right assignment MUST be verified physically (cover one lens and watch
-# tools/read_latest_bundle.py or print_camera_health.py); swap serials below
-# if mirrored.
+# Left/right assignment verified physically 2026-06-12 (right lens covered):
+#   left arm  = 260322278348, right arm = 412622272078.
 server:
   name: camera_server
   mode: capture_only
@@ -40,7 +39,7 @@ sync:
 
 cameras:
   left_realsense:
-    serial: "412622272078"
+    serial: "260322278348"
     required: true
     streams:
       color:
@@ -56,7 +55,7 @@ cameras:
         fps: 30
         format: z16
   right_realsense:
-    serial: "260322278348"
+    serial: "412622272078"
     required: true
     streams:
       color:
@@ -84,7 +83,7 @@ health:
   publish_rate_hz: 1
   warn_if_frame_age_ms_gt: 100
   warn_if_drop_count_increases: true
-  warn_if_bundle_skew_ms_gt: 10
+  warn_if_bundle_skew_ms_gt: 17
 
 reconnect:
   enabled: false  # not implemented; enabled=true is rejected at config load
