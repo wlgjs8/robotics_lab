@@ -94,6 +94,7 @@ echo "[stack] viser GUI: http://127.0.0.1:8080"
 PYTHONPATH=rb_gui \
   RB_GUI_DESCRIPTIONS_DIR="$PWD/rb_servo_server/descriptions" \
   RB_GUI_STATE_BIND=0.0.0.0 RB_GUI_STATE_PORT=50366 \
+  RB_GUI_COMMAND_HOST=127.0.0.1 RB_GUI_COMMAND_PORT=50256 \
   RB_GUI_CIRCLE_OVERLAY_BIND=none \
   python3 -m rb_servo_gui.app >"$LOG_DIR/gui.log" 2>&1 &
 PIDS+=($!)

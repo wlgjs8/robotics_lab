@@ -665,37 +665,71 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertEqual(len(command_client.acquire_calls), 1)
         self.assertEqual(command_client.acquire_calls[0][1]["timeout_sec"], 0.1)
 
-    def test_run_returns_lease_timeout_when_readback_missing(self):
+    def test_run_retries_when_lease_readback_missing(self):
+        # Lazy-lease contract: the lease is only acquired on the FIRST motion
+        # intent, and a missing/busy lease readback does not kill the process —
+        # the tick is dropped with a warning and acquisition is retried.
         cfg = config_from_mapping(
             {
                 "schema": "robotics_lab.policy_runner.v1",
-                "servo_command": {"acquire_lease": True, "lease_readback_timeout_sec": 0.1},
+                "servo_command": {"acquire_lease": True, "lease_readback_timeout_sec": 0.05},
                 "geometry": {"path": ""},
-                "runtime": {"startup_timeout_sec": 0.1},
+                "runtime": {"startup_timeout_sec": 0.5},
             }
         )
         state_client = FakeStateClient([sample_state()])
+        send_socket = FakeSendSocket()
         command_client = ServoCommandClient(
             "udp://127.0.0.1:50010",
-            socket_factory=lambda *_args: FakeSendSocket(),
+            socket_factory=lambda *_args: send_socket,
             source_id="policy_runner",
             session_id="session-1",
         )
-        source = CloseableSource()
+
+        class MotionEverySource:
+            requirements = None
+
+            def next_intent(self, snapshot, now):
+                return CommandIntent.joint_velocity(
+                    left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0]
+                )
+
+            def close(self):
+                pass
+
         stderr = StringIO()
+        ticks = {"n": 0}
+
+        def stop_after(_period):
+            # The readback poll inside acquire_lease also calls sleep_fn, so
+            # stop only after the retry warning is visible (KI inside the
+            # poll would short-circuit before the TimeoutError fires).
+            ticks["n"] += 1
+            if "lease busy" in stderr.getvalue() or ticks["n"] >= 500:
+                raise KeyboardInterrupt
+            time.sleep(0.001)  # real delay so the 0.05 s readback deadline can pass
 
         result = run(
             cfg,
             state_client=state_client,
             command_client=command_client,
-            source=source,
-            monotonic_fn=iter([0.0, 0.0, 0.0, 0.2]).__next__,
-            sleep_fn=lambda _period: None,
+            source=MotionEverySource(),
+            sleep_fn=stop_after,
             stderr=stderr,
         )
 
-        self.assertEqual(result, LEASE_READBACK_TIMEOUT_EXIT_CODE)
-        self.assertIn("lease_readback_timeout", stderr.getvalue())
+        self.assertEqual(result, 0)
+        self.assertIn("lease busy", stderr.getvalue())
+        modes = [json.loads(data.decode())["mode"] for data, _addr in send_socket.sent]
+        # The acquire attempt went out, but no motion command did.
+        self.assertIn("AcquireLease", modes)
+        self.assertNotIn("ArmMotion", modes)
+        self.assertNotIn("JointVelocity", [m for m in modes])
+        for data, _addr in send_socket.sent:
+            packet = json.loads(data.decode())
+            for arm in ("left", "right"):
+                if isinstance(packet.get(arm), dict):
+                    self.assertNotEqual(packet[arm].get("mode"), "JointVelocity")
 
     def test_missing_runtime_geometry_blocks_geometry_dependent_actions(self):
         cfg = config_from_mapping(

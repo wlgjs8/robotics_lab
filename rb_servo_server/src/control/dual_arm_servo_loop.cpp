@@ -2164,6 +2164,9 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_right_bone = last_self_collision_.right_bone;
             latest_snapshot_.self_collision_pair = last_self_collision_.pair;
             latest_snapshot_.self_collision_stand_capsule = last_self_collision_.stand_capsule;
+            latest_snapshot_.self_collision_has_closest_points = last_self_collision_.has_closest_points;
+            latest_snapshot_.self_collision_closest_point_a_m = last_self_collision_.closest_point_a_m;
+            latest_snapshot_.self_collision_closest_point_b_m = last_self_collision_.closest_point_b_m;
             latest_snapshot_.floor_constraint_enabled = config_.safety.floor_constraint.enable;
             latest_snapshot_.floor_constraint_monitor_only = config_.safety.floor_constraint.monitor_only;
             latest_snapshot_.floor_constraint_z_min_m = effectiveFloorZ();

@@ -26,6 +26,12 @@ struct SelfCollisionResult {
     // "left_right" | "left_stand" | "right_stand" | "" (not evaluated).
     std::string pair;
     std::string stand_capsule;  // nearest stand capsule name (arm-stand pairs only)
+    // Closest capsule-SURFACE points of the min-clearance pair (stand frame).
+    // a = the pair's first member (left arm, or the arm for arm-stand pairs);
+    // b = the second member (right arm or the stand capsule).
+    bool has_closest_points = false;
+    std::array<double, 3> closest_point_a_m{};
+    std::array<double, 3> closest_point_b_m{};
 };
 
 // Keep the result whose minimum clearance is smaller; an unchecked result never
@@ -73,11 +79,17 @@ inline SelfCollisionResult dualArmSelfCollisionClearance(
             const math::Vector3 b0 = as_vec(right_points[rj]);
             const math::Vector3 b1 = as_vec(right_points[rj + 1]);
             const double rb = radius_for(rj);
-            const double clearance = math::capsuleCapsuleDistance(a0, a1, ra, b0, b1, rb);
+            math::Vector3 p_a;
+            math::Vector3 p_b;
+            const double clearance =
+                math::capsuleCapsuleDistanceWithPoints(a0, a1, ra, b0, b1, rb, &p_a, &p_b);
             if (clearance < result.min_clearance_m) {
                 result.min_clearance_m = clearance;
                 result.left_bone = static_cast<int>(li);
                 result.right_bone = static_cast<int>(rj);
+                result.has_closest_points = true;
+                result.closest_point_a_m = {p_a.x(), p_a.y(), p_a.z()};
+                result.closest_point_b_m = {p_b.x(), p_b.y(), p_b.z()};
             }
         }
     }
@@ -123,15 +135,21 @@ inline SelfCollisionResult armStandCollisionClearance(
         const double ra = radius_for(bi);
         for (std::size_t si = 0; si < stand_capsules.size(); ++si) {
             const StandCapsuleConfig& cap = stand_capsules[si];
-            const double clearance = math::capsuleCapsuleDistance(
+            math::Vector3 p_a;
+            math::Vector3 p_b;
+            const double clearance = math::capsuleCapsuleDistanceWithPoints(
                 a0, a1, ra,
-                as_vec(cap.p0_m), as_vec(cap.p1_m), cap.radius_m
+                as_vec(cap.p0_m), as_vec(cap.p1_m), cap.radius_m,
+                &p_a, &p_b
             );
             if (clearance < result.min_clearance_m) {
                 result.min_clearance_m = clearance;
                 result.left_bone = static_cast<int>(bi);
                 result.right_bone = static_cast<int>(si);
                 result.stand_capsule = cap.name;
+                result.has_closest_points = true;
+                result.closest_point_a_m = {p_a.x(), p_a.y(), p_a.z()};
+                result.closest_point_b_m = {p_b.x(), p_b.y(), p_b.z()};
             }
         }
     }

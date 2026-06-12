@@ -101,6 +101,7 @@ def run(
     state_client.start()
     armed_for_motion = False
     lease_acquired = False
+    lease_retry_after = float("-inf")
     period = 1.0 / max(config.command_rate_hz, 1.0)
     startup_deadline = monotonic_fn() + max(config.runtime.startup_timeout_sec, 0.0)
     # POLICY_RUNNER_TELEOP_DEBUG=1: 1 Hz loop stats (sent/dropped/no-intent + last drop reason).
@@ -131,19 +132,6 @@ def run(
                 state_sink(snapshot)
             if rollout_recorder is not None:
                 rollout_recorder.record_state(snapshot)
-            if send_commands and config.servo_command.acquire_lease and not lease_acquired:
-                assert command_client is not None
-                try:
-                    command_client.acquire_lease(
-                        StateStreamLeaseReadback(state_client),
-                        timeout_sec=config.servo_command.lease_readback_timeout_sec,
-                        monotonic_fn=monotonic_fn,
-                        sleep_fn=sleep_fn,
-                    )
-                except TimeoutError as exc:
-                    print(f"policy_runner lease_readback_timeout: {exc}", file=stderr)
-                    return LEASE_READBACK_TIMEOUT_EXIT_CODE
-                lease_acquired = True
             intent = source.next_intent(snapshot, now)
             decision = safety_gate.evaluate(snapshot, intent, getattr(source, "requirements", None), now)
             if rollout_recorder is not None:
@@ -171,6 +159,31 @@ def run(
                     sleep_fn(period)
                     continue
                 assert command_client is not None
+                # Lazy lease: acquire on the FIRST motion intent, not at startup.
+                # An idle policy_runner must not camp on the lease (it would
+                # block one-shot GUI commands like InitMotion). On conflict /
+                # readback timeout, drop this tick and retry with backoff so a
+                # temporary GUI lease holder does not kill the teleop process.
+                if config.servo_command.acquire_lease and not lease_acquired and intent.is_motion:
+                    if now < lease_retry_after:
+                        sleep_fn(period)
+                        continue
+                    try:
+                        command_client.acquire_lease(
+                            StateStreamLeaseReadback(state_client),
+                            timeout_sec=config.servo_command.lease_readback_timeout_sec,
+                            monotonic_fn=monotonic_fn,
+                            sleep_fn=sleep_fn,
+                        )
+                        lease_acquired = True
+                    except TimeoutError as exc:
+                        print(
+                            f"policy_runner lease busy (will retry): {exc}",
+                            file=stderr,
+                        )
+                        lease_retry_after = now + 2.0
+                        sleep_fn(period)
+                        continue
                 if intent.is_motion and not armed_for_motion:
                     arm = CommandIntent.arm_motion(timeout_sec=config.servo_command.timeout_sec)
                     arm_decision = safety_gate.evaluate(snapshot, arm, getattr(source, "requirements", None), now)

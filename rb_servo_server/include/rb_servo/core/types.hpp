@@ -474,6 +474,11 @@ struct DualArmCommand {
     double floor_z_m = 0.0;
     bool has_floor_z = false;
 
+    // AcquireLease / ReleaseLease packets are pure lease management. They must
+    // never enter the command buffer: the buffer is latest-wins, so their
+    // parsed Hold modes would overwrite an in-flight motion command.
+    bool lease_admin_only = false;
+
     // Deprecated in v3. Commands are treated as coupled by default: if a packet
     // becomes stale, both arms hold. Per-arm command streams should use separate
     // timestamps in a future binary protocol.
@@ -725,6 +730,11 @@ struct ServoSnapshot {
     std::string self_collision_pair;
     std::string self_collision_stand_capsule;
     int self_collision_right_bone = -1;
+    // Closest capsule-surface points of the min-clearance pair (stand frame);
+    // a = pair's first member (arm), b = second member (other arm / stand).
+    bool self_collision_has_closest_points = false;
+    std::array<double, 3> self_collision_closest_point_a_m{};
+    std::array<double, 3> self_collision_closest_point_b_m{};
 
     // Stand-frame floor plane constraint telemetry (safety.floor_constraint).
     bool floor_constraint_enabled = false;

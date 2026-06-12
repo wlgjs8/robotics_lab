@@ -391,11 +391,57 @@ class CommandClient:
             "right": {},
         })
 
+    # Modes that take (or require) the command-source lease when sent. After a
+    # one-shot GUI command the lease is released immediately so a streaming
+    # client (policy_runner teleop) can take over without waiting for the
+    # server-side lease timeout.
+    _LEASED_MODES = {
+        "ArmMotion",
+        "DisarmMotion",
+        "JointTarget",
+        "JointVelocity",
+        "TcpPoseTarget",
+        "TcpLinearMove",
+        "TcpCircleMove",
+        "TcpCircleTrack",
+        "TcpDeltaStand",
+        "TcpDeltaLocal",
+        "TcpTwistStand",
+        "TcpTwistLocal",
+        "Hold",
+    }
+
     def send(self, packet: Mapping[str, Any]) -> None:
-        payload = json.dumps(packet, separators=(",", ":")).encode("utf-8")
+        # Atomic lease bracket: only AcquireLease/ArmMotion can TAKE the lease
+        # on the server; plain motion commands (e.g. JointTarget) merely ride an
+        # existing one. Acquire right before the command and release right
+        # after, so one-shot GUI commands work without camping on the lease
+        # between clicks. The server enforces strictly increasing seq per
+        # source, so ALL THREE packets get freshly issued seqs here.
+        leased = str(packet.get("mode")) in self._LEASED_MODES
+        out = dict(packet)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.sendto(payload, (self.host, self.port))
-        self.sent_packets.append(dict(packet))
+            if leased:
+                acquire = {
+                    "schema_version": 1,
+                    "seq": self.next_seq(),
+                    "mode": "AcquireLease",
+                    "source_id": self.source_id,
+                    "session_id": self.session_id,
+                }
+                sock.sendto(json.dumps(acquire, separators=(",", ":")).encode("utf-8"), (self.host, self.port))
+                out["seq"] = self.next_seq()
+            sock.sendto(json.dumps(out, separators=(",", ":")).encode("utf-8"), (self.host, self.port))
+            if leased:
+                release = {
+                    "schema_version": 1,
+                    "seq": self.next_seq(),
+                    "mode": "ReleaseLease",
+                    "source_id": self.source_id,
+                    "session_id": self.session_id,
+                }
+                sock.sendto(json.dumps(release, separators=(",", ":")).encode("utf-8"), (self.host, self.port))
+        self.sent_packets.append(out)
 
     def send_lifecycle(self, mode: str, *, timeout_sec: float = 0.2) -> dict[str, Any]:
         packet = self.build_lifecycle(mode, timeout_sec=timeout_sec)

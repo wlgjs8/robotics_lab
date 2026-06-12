@@ -103,4 +103,34 @@ inline double capsuleCapsuleDistance(
     return segmentSegmentDistance(a0, a1, b0, b1) - radius_a - radius_b;
 }
 
+// capsuleCapsuleDistance plus the closest SURFACE points (witness points):
+// p_a/p_b sit on each capsule's surface along the closest-approach axis, so
+// |p_b - p_a| equals the returned clearance when positive. Degenerate case
+// (core segments touching/intersecting: axis undefined) returns the core
+// segment points unchanged.
+inline double capsuleCapsuleDistanceWithPoints(
+    const Vector3& a0,
+    const Vector3& a1,
+    double radius_a,
+    const Vector3& b0,
+    const Vector3& b1,
+    double radius_b,
+    Vector3* p_a,
+    Vector3* p_b
+) {
+    Vector3 c_a;
+    Vector3 c_b;
+    const double segment_distance =
+        std::sqrt(closestPointSegmentSegmentSquared(a0, a1, b0, b1, &c_a, &c_b));
+    Vector3 axis = c_b - c_a;
+    if (segment_distance > 1e-12) {
+        axis /= segment_distance;
+    } else {
+        axis.setZero();
+    }
+    if (p_a) *p_a = c_a + axis * radius_a;
+    if (p_b) *p_b = c_b - axis * radius_b;
+    return segment_distance - radius_a - radius_b;
+}
+
 }  // namespace rb_servo::math
