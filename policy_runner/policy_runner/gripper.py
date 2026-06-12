@@ -94,12 +94,13 @@ def _import_pika_gripper_class(sdk_path: str | None) -> type:
 class PikaSerialGripperBackend:
     """Drives the robot-mounted Pika grippers over local serial POSITION_CTRL.
 
-    Policy gripper actions are per-step deltas in the dataset's raw Sense
-    encoder units (rad; per the Pika manual the Sense and Gripper share motor
-    parameters, so the angle is a 1:1 passthrough — same convention as
-    scripts/umi_gripper_follow.py). Deltas integrate onto a per-arm target
-    seeded from the live motor position at connect(), clamped to
-    [min_rad, max_rad]; 'target' commands set the angle absolutely.
+    Policy gripper actions are per-step deltas in the dataset's gripper units:
+    PERCENT of the open/close range (0 = closed = min_rad, 100 = open =
+    max_rad; pika UMI conversion uses gripper_open_close_units: percent).
+    Deltas integrate onto a per-arm target seeded from the live motor position
+    at connect(), clamped to [min_rad, max_rad]; 'target' commands set the
+    percent absolutely. current_percent() exposes the live motor angle in the
+    same percent units for proprio feedback.
 
     send() never raises into the control loop: serial errors are reported as
     dropped dispatch results.
@@ -162,14 +163,32 @@ class PikaSerialGripperBackend:
     def _clamp(self, value: float) -> float:
         return max(self.min_rad, min(self.max_rad, float(value)))
 
+    def _percent_to_rad(self, percent: float) -> float:
+        return self.min_rad + (self.max_rad - self.min_rad) * float(percent) / 100.0
+
+    def _rad_to_percent(self, rad: float) -> float:
+        return (float(rad) - self.min_rad) / (self.max_rad - self.min_rad) * 100.0
+
+    def current_percent(self, arm: str) -> float | None:
+        """Live motor angle in dataset percent units (proprio feedback)."""
+        gripper = self._grippers.get(arm)
+        if gripper is None:
+            return None
+        try:
+            return self._rad_to_percent(float(gripper.get_motor_position()))
+        except Exception:
+            return None
+
     def send(self, command: GripperCommand) -> GripperDispatchResult:
         gripper = self._grippers.get(command.arm)
         if gripper is None:
             return self._result(command, accepted=False, sent=False, dropped=True, reason="gripper_arm_not_connected")
+        # Command values are in dataset percent units; motors take rad.
         if command.command_type == "target":
-            target = self._clamp(command.value)
+            target = self._clamp(self._percent_to_rad(command.value))
         else:
-            target = self._clamp(self._targets.get(command.arm, self.min_rad) + float(command.value))
+            delta_rad = (self.max_rad - self.min_rad) * float(command.value) / 100.0
+            target = self._clamp(self._targets.get(command.arm, self.min_rad) + delta_rad)
         # The integrated target always advances; deadband/rate gates only skip
         # the serial write so small deltas accumulate instead of being lost.
         self._targets[command.arm] = target

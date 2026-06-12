@@ -126,7 +126,10 @@ CartesianArmTargetResult CartesianController::computeArmJointTarget(
     return solveIkFromTcpStandTarget(command.arm_id, target_tcp_stand, state, previous_safe_sent_q_deg, run_mode);
 }
 
-CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
+CartesianArmTargetResult solveIkArmTargetFromTcpStand(
+    IKinematics& kinematics,
+    const CartesianControlConfig& config,
+    const ArmMountConfig& mount,
     ArmId arm_id,
     const Pose6D& target_tcp_stand,
     const RobotState& state,
@@ -137,8 +140,8 @@ CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
     result.q_target_deg = previous_safe_sent_q_deg;
     result.telemetry.attempted = true;
     result.telemetry.fk_duration_us = state.fk_duration_us;
-    result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
-    result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
+    result.telemetry.warn_ik_duration_us = config.warn_ik_duration_us;
+    result.telemetry.fail_ik_duration_us = config.fail_ik_duration_us;
 
     // Seed from the previously SENT target, not the measured joint state: the
     // physical state lags the command by the controller servo lag (~100 ms),
@@ -151,11 +154,11 @@ CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
     const JointArray seed_q_deg = isFiniteJoints(previous_safe_sent_q_deg)
         ? previous_safe_sent_q_deg
         : state.q_actual_deg;
-    const IkResult ik = kinematics_->solveIk(
+    const IkResult ik = kinematics.solveIk(
         arm_id,
         target_tcp_stand,
         seed_q_deg,
-        mountForArm(arm_id, left_mount_, right_mount_)
+        mount
     );
     result.telemetry.ik_duration_us = ik.duration_us;
     result.telemetry.ik_iterations = ik.iterations;
@@ -163,11 +166,11 @@ CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
     result.telemetry.orientation_error_rad = ik.orientation_error_rad;
     result.telemetry.ik_timed_out = ik.timed_out || ik.reason == ik_solver::kReasonTimeout;
     result.telemetry.ik_warn_duration_exceeded =
-        config_.warn_ik_duration_us > 0.0 && ik.duration_us > config_.warn_ik_duration_us;
+        config.warn_ik_duration_us > 0.0 && ik.duration_us > config.warn_ik_duration_us;
     result.telemetry.ik_fail_duration_exceeded =
         run_mode == RunMode::Simulation &&
-        config_.fail_ik_duration_us > 0.0 &&
-        ik.duration_us > config_.fail_ik_duration_us;
+        config.fail_ik_duration_us > 0.0 &&
+        ik.duration_us > config.fail_ik_duration_us;
     if (!ik.success) {
         result.verdict = ik.reason == ik_solver::kReasonKinematicsUnavailable
             ? SafetyVerdict::CartesianUnavailable
@@ -200,6 +203,25 @@ CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
     result.telemetry.status = "ok";
     result.telemetry.reason = ik.reason;
     return result;
+}
+
+CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
+    ArmId arm_id,
+    const Pose6D& target_tcp_stand,
+    const RobotState& state,
+    const JointArray& previous_safe_sent_q_deg,
+    RunMode run_mode
+) {
+    return solveIkArmTargetFromTcpStand(
+        *kinematics_,
+        config_,
+        mountForArm(arm_id, left_mount_, right_mount_),
+        arm_id,
+        target_tcp_stand,
+        state,
+        previous_safe_sent_q_deg,
+        run_mode
+    );
 }
 
 Pose6D CartesianController::applyTcpDeltaStand(

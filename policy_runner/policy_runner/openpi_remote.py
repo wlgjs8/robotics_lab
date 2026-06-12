@@ -42,6 +42,7 @@ from .flow_inference import (
     DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
     FlowMatchingActionSource,
     canonical_flow_command_family,
+    resolve_ee_local_r_align,
 )
 from .gripper import GripperRuntime
 
@@ -156,6 +157,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         chunk_execute_steps: int | None = None,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
+        ee_local_r_align: Any = None,
         prompt: str = OPENPI_DEFAULT_PROMPT,
         action_horizon: int = 16,
         camera_names: tuple[str, str] = ("left_realsense_color", "right_realsense_color"),
@@ -188,6 +190,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.device = device
         self.stats: dict[str, Any] = {}
         self.action_frame = "ee_local"
+        self.ee_local_r_align = resolve_ee_local_r_align(ee_local_r_align)
         self.command_family_option = canonical_flow_command_family(command_family) if command_family else "tcp_twist_local"
         if self.command_family_option not in {"tcp_twist_local", "tcp_twist_stand", "tcp_delta_stand"}:
             self.command_family_option = "tcp_twist_local"

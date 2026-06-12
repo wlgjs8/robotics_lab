@@ -717,6 +717,23 @@ def _main_with_subcommands(argv: list[str]) -> int:
         ),
     )
     flow_infer.add_argument(
+        "--allow-tcp-twist-local",
+        action="store_true",
+        help=(
+            "Allow the TcpTwistLocal flow command family for controller_sim/real_policy. "
+            "Required for ee_local checkpoints, which cannot emit tcp_twist_stand."
+        ),
+    )
+    flow_infer.add_argument(
+        "--ee-local-r-align",
+        default=None,
+        help=(
+            "Fixed rotation between the training EE body frame and the RB TCP frame for "
+            "ee_local checkpoints: preset name ('pika_tip' for pika UMI data) or 9 "
+            "row-major floats. Default: none (frames assumed identical)."
+        ),
+    )
+    flow_infer.add_argument(
         "--policy-dt-sec",
         type=float,
         default=None,
@@ -1164,6 +1181,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 rollout_policy.mode,
                 command_family,
                 allow_experimental_tcp_delta_stand=args.allow_experimental_tcp_delta_stand,
+                allow_tcp_twist_local=args.allow_tcp_twist_local,
                 dataset_stats=dataset_stats,
             )
         except (RolloutModeValidationError, ValueError) as exc:
@@ -1297,6 +1315,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 "allow_rbpodo_controller_simulation_cartesian": (
                     rollout_policy.allows_controller_simulation_cartesian
                 ),
+                "ee_local_r_align": args.ee_local_r_align,
                 "gripper_runtime": (
                     GripperRuntime(
                         rollout_mode=rollout_policy.mode.value,

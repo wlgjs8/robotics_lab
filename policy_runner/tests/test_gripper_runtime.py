@@ -145,61 +145,80 @@ class GripperRuntimeTest(unittest.TestCase):
 
 
 class PikaSerialGripperBackendTest(unittest.TestCase):
+    # Command values are dataset PERCENT units over [min_rad, max_rad]:
+    # delta_rad = pct/100 * (1.75 - 0.0).
     def test_delta_integrates_from_seeded_motor_position(self) -> None:
         backend = _pika_backend()
 
-        result = backend.send(GripperCommand("left", 0.2))
+        result = backend.send(GripperCommand("left", 20.0))
 
         self.assertTrue(result.sent_to_physical)
         self.assertFalse(result.dropped)
         self.assertEqual(result.reason, "gripper_position_sent")
-        # Seeded at 0.5 (FakePikaGripper.position) + 0.2 delta.
-        self.assertEqual(backend._grippers["left"].sent_angles, [0.7])
+        # Seeded at 0.5 rad (FakePikaGripper.position) + 20% of 1.75.
+        angles = backend._grippers["left"].sent_angles
+        self.assertEqual(len(angles), 1)
+        self.assertAlmostEqual(angles[0], 0.5 + 0.35)
 
-    def test_target_command_is_absolute_and_clamped(self) -> None:
+    def test_target_command_is_absolute_percent_and_clamped(self) -> None:
         backend = _pika_backend(min_rad=0.0, max_rad=1.75)
 
-        backend.send(GripperCommand("right", 9.0, command_type="target"))
+        backend.send(GripperCommand("right", 200.0, command_type="target"))
+        backend._test_clock["now"] = 1.0
+        backend.send(GripperCommand("right", 50.0, command_type="target"))
 
-        self.assertEqual(backend._grippers["right"].sent_angles, [1.75])
+        angles = backend._grippers["right"].sent_angles
+        self.assertEqual(len(angles), 2)
+        self.assertAlmostEqual(angles[0], 1.75)   # 200% clamps to max_rad
+        self.assertAlmostEqual(angles[1], 0.875)  # 50% of range
 
     def test_delta_clamps_at_range_and_does_not_wind_up(self) -> None:
         backend = _pika_backend(min_rad=0.0, max_rad=1.75, deadband_rad=0.0)
         backend._test_clock["now"] = 1.0
-        backend.send(GripperCommand("left", 100.0))
+        backend.send(GripperCommand("left", 1000.0))
         backend._test_clock["now"] = 2.0
 
-        backend.send(GripperCommand("left", -0.5))
+        backend.send(GripperCommand("left", -50.0))
 
-        # Without wind-up the second delta acts on the clamped 1.75, not 100.5.
-        self.assertEqual(backend._grippers["left"].sent_angles, [1.75, 1.25])
+        # Without wind-up the second delta acts on the clamped 1.75 rad.
+        angles = backend._grippers["left"].sent_angles
+        self.assertEqual(len(angles), 2)
+        self.assertAlmostEqual(angles[0], 1.75)
+        self.assertAlmostEqual(angles[1], 1.75 - 0.875)
 
     def test_rate_limit_holds_serial_write_but_keeps_integrated_target(self) -> None:
         backend = _pika_backend(max_hz=10.0, deadband_rad=0.0)
-        backend.send(GripperCommand("left", 0.2))
+        backend.send(GripperCommand("left", 20.0))
 
-        held = backend.send(GripperCommand("left", 0.2))
+        held = backend.send(GripperCommand("left", 20.0))
 
         self.assertFalse(held.sent_to_physical)
         self.assertFalse(held.dropped)
         self.assertEqual(held.reason, "gripper_rate_limited")
         backend._test_clock["now"] = 0.2
         backend.send(GripperCommand("left", 0.0))
-        # Both deltas accumulated into the next write: 0.5 + 0.2 + 0.2.
+        # Both deltas accumulated into the next write: 0.5 + 0.35 + 0.35.
         angles = backend._grippers["left"].sent_angles
         self.assertEqual(len(angles), 2)
-        self.assertAlmostEqual(angles[0], 0.7)
-        self.assertAlmostEqual(angles[1], 0.9)
+        self.assertAlmostEqual(angles[0], 0.85)
+        self.assertAlmostEqual(angles[1], 1.2)
 
     def test_deadband_skips_small_changes(self) -> None:
         backend = _pika_backend(deadband_rad=0.01, max_hz=0.0)
-        backend.send(GripperCommand("left", 0.2))
+        backend.send(GripperCommand("left", 20.0))
 
-        held = backend.send(GripperCommand("left", 0.001))
+        held = backend.send(GripperCommand("left", 0.01))
 
         self.assertFalse(held.sent_to_physical)
         self.assertEqual(held.reason, "gripper_deadband_hold")
-        self.assertEqual(backend._grippers["left"].sent_angles, [0.7])
+        self.assertEqual(len(backend._grippers["left"].sent_angles), 1)
+
+    def test_current_percent_reads_live_motor(self) -> None:
+        backend = _pika_backend(min_rad=0.0, max_rad=1.75)
+        backend._grippers["left"].position = 0.875
+
+        self.assertAlmostEqual(backend.current_percent("left"), 50.0)
+        self.assertIsNone(backend.current_percent("missing"))
 
     def test_serial_error_reports_dropped_without_raising(self) -> None:
         backend = _pika_backend()
