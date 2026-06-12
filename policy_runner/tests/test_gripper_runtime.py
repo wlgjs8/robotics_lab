@@ -8,9 +8,49 @@ from policy_runner.gripper import (
     GripperCommand,
     GripperRuntime,
     NoopGripperBackend,
+    PikaSerialGripperBackend,
     REAL_GRIPPER_ENV,
     gripper_commands_from_flow_step,
 )
+
+
+class FakePikaGripper:
+    def __init__(self, port: str):
+        self.port = port
+        self.position = 0.5
+        self.sent_angles: list[float] = []
+        self.closed_calls: list[str] = []
+
+    def connect(self) -> bool:
+        return True
+
+    def enable(self) -> bool:
+        return True
+
+    def get_motor_position(self) -> float:
+        return self.position
+
+    def set_motor_angle(self, rad: float) -> bool:
+        self.sent_angles.append(float(rad))
+        return True
+
+    def disable(self) -> None:
+        self.closed_calls.append("disable")
+
+    def disconnect(self) -> None:
+        self.closed_calls.append("disconnect")
+
+
+def _pika_backend(**kwargs) -> PikaSerialGripperBackend:
+    clock = {"now": 0.0}
+    backend = PikaSerialGripperBackend(
+        ports={"left": "/dev/ttyFAKE0", "right": "/dev/ttyFAKE1"},
+        gripper_cls=FakePikaGripper,
+        clock=lambda: clock["now"],
+        **kwargs,
+    ).connect()
+    backend._test_clock = clock  # type: ignore[attr-defined]
+    return backend
 
 
 class GripperRuntimeTest(unittest.TestCase):
@@ -102,6 +142,144 @@ class GripperRuntimeTest(unittest.TestCase):
         self.assertEqual(intent.left["gripper_target"], 0.42)
         self.assertEqual(intent.right["mode"], "Hold")
         self.assertEqual(intent.right["gripper_target"], 0.15)
+
+
+class PikaSerialGripperBackendTest(unittest.TestCase):
+    def test_delta_integrates_from_seeded_motor_position(self) -> None:
+        backend = _pika_backend()
+
+        result = backend.send(GripperCommand("left", 0.2))
+
+        self.assertTrue(result.sent_to_physical)
+        self.assertFalse(result.dropped)
+        self.assertEqual(result.reason, "gripper_position_sent")
+        # Seeded at 0.5 (FakePikaGripper.position) + 0.2 delta.
+        self.assertEqual(backend._grippers["left"].sent_angles, [0.7])
+
+    def test_target_command_is_absolute_and_clamped(self) -> None:
+        backend = _pika_backend(min_rad=0.0, max_rad=1.75)
+
+        backend.send(GripperCommand("right", 9.0, command_type="target"))
+
+        self.assertEqual(backend._grippers["right"].sent_angles, [1.75])
+
+    def test_delta_clamps_at_range_and_does_not_wind_up(self) -> None:
+        backend = _pika_backend(min_rad=0.0, max_rad=1.75, deadband_rad=0.0)
+        backend._test_clock["now"] = 1.0
+        backend.send(GripperCommand("left", 100.0))
+        backend._test_clock["now"] = 2.0
+
+        backend.send(GripperCommand("left", -0.5))
+
+        # Without wind-up the second delta acts on the clamped 1.75, not 100.5.
+        self.assertEqual(backend._grippers["left"].sent_angles, [1.75, 1.25])
+
+    def test_rate_limit_holds_serial_write_but_keeps_integrated_target(self) -> None:
+        backend = _pika_backend(max_hz=10.0, deadband_rad=0.0)
+        backend.send(GripperCommand("left", 0.2))
+
+        held = backend.send(GripperCommand("left", 0.2))
+
+        self.assertFalse(held.sent_to_physical)
+        self.assertFalse(held.dropped)
+        self.assertEqual(held.reason, "gripper_rate_limited")
+        backend._test_clock["now"] = 0.2
+        backend.send(GripperCommand("left", 0.0))
+        # Both deltas accumulated into the next write: 0.5 + 0.2 + 0.2.
+        angles = backend._grippers["left"].sent_angles
+        self.assertEqual(len(angles), 2)
+        self.assertAlmostEqual(angles[0], 0.7)
+        self.assertAlmostEqual(angles[1], 0.9)
+
+    def test_deadband_skips_small_changes(self) -> None:
+        backend = _pika_backend(deadband_rad=0.01, max_hz=0.0)
+        backend.send(GripperCommand("left", 0.2))
+
+        held = backend.send(GripperCommand("left", 0.001))
+
+        self.assertFalse(held.sent_to_physical)
+        self.assertEqual(held.reason, "gripper_deadband_hold")
+        self.assertEqual(backend._grippers["left"].sent_angles, [0.7])
+
+    def test_serial_error_reports_dropped_without_raising(self) -> None:
+        backend = _pika_backend()
+
+        def boom(_rad: float) -> bool:
+            raise OSError("serial gone")
+
+        backend._grippers["left"].set_motor_angle = boom
+
+        result = backend.send(GripperCommand("left", 0.1))
+
+        self.assertTrue(result.dropped)
+        self.assertFalse(result.sent_to_physical)
+        self.assertIn("gripper_serial_error", result.reason)
+
+    def test_close_disables_and_disconnects(self) -> None:
+        backend = _pika_backend()
+        left = backend._grippers["left"]
+
+        backend.close()
+
+        self.assertEqual(left.closed_calls, ["disable", "disconnect"])
+        self.assertEqual(backend._grippers, {})
+
+    def test_controller_sim_dispatch_honors_actuation_flag(self) -> None:
+        allowed = _pika_backend(supports_controller_simulation=True)
+        runtime = GripperRuntime(rollout_mode="controller_sim", backend=allowed)
+        results = runtime.dispatch([GripperCommand("left", 0.2)])
+        self.assertTrue(results[0].sent_to_physical)
+
+        blocked = _pika_backend(supports_controller_simulation=False)
+        runtime = GripperRuntime(rollout_mode="controller_sim", backend=blocked)
+        results = runtime.dispatch([GripperCommand("left", 0.2)])
+        self.assertTrue(results[0].dropped)
+        self.assertEqual(results[0].reason, "controller_sim_gripper_logged_noop")
+        self.assertEqual(blocked._grippers["left"].sent_angles, [])
+
+    def test_sim_dryrun_never_reaches_backend(self) -> None:
+        backend = _pika_backend(supports_controller_simulation=True)
+        runtime = GripperRuntime(rollout_mode="sim_dryrun", backend=backend)
+
+        results = runtime.dispatch([GripperCommand("left", 0.3)])
+
+        self.assertTrue(results[0].dropped)
+        self.assertEqual(results[0].reason, "sim_dryrun_gripper_logged_noop")
+        self.assertEqual(backend._grippers["left"].sent_angles, [])
+
+
+class GripperConfigTest(unittest.TestCase):
+    def test_defaults_to_fail_closed_none_backend(self) -> None:
+        cfg = config_from_mapping({"schema": "robotics_lab.policy_runner.v1"})
+        self.assertEqual(cfg.gripper.backend, "none")
+        self.assertFalse(cfg.gripper.actuate_in_controller_simulation)
+
+    def test_pika_serial_section_parses(self) -> None:
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "gripper": {
+                    "backend": "pika_serial",
+                    "left_port": "/dev/serial/by-path/left",
+                    "right_port": "/dev/serial/by-path/right",
+                    "pika_sdk_path": "/home/plaif/workspace/pika_sdk",
+                    "max_rad": 1.75,
+                    "actuate_in_controller_simulation": True,
+                },
+            }
+        )
+        self.assertEqual(cfg.gripper.backend, "pika_serial")
+        self.assertEqual(cfg.gripper.left_port, "/dev/serial/by-path/left")
+        self.assertTrue(cfg.gripper.actuate_in_controller_simulation)
+
+    def test_rejects_unknown_backend(self) -> None:
+        with self.assertRaises(ValueError):
+            config_from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.v1",
+                    "gripper": {"backend": "robotiq"},
+                }
+            )
 
 
 if __name__ == "__main__":

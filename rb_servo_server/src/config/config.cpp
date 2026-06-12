@@ -801,6 +801,19 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error(
                 "safety.floor_constraint.enable=true requires kinematics.enable=true (TCP FK source)");
         }
+        for (const FloorCheckPointConfig& point : fc.tcp_offset_points) {
+            if (point.name.empty()) {
+                throw std::runtime_error(
+                    "safety.floor_constraint.tcp_offset_points entries need a non-empty name");
+            }
+            for (double value : point.offset_m) {
+                if (!std::isfinite(value)) {
+                    throw std::runtime_error(
+                        "safety.floor_constraint.tcp_offset_points offsets must be finite (" +
+                        point.name + ")");
+                }
+            }
+        }
     }
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
     if (cfg.servo.output_moving_average_window < 0 || cfg.servo.output_moving_average_window > 5000) {
@@ -1713,6 +1726,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "runtime_max_z_m",
                 "fail_policy",
                 "monitor_only",
+                "tcp_offset_points",
             }, "safety.floor_constraint");
             if (has(fc, "enable")) {
                 cfg.safety.floor_constraint.enable = asBool(fc["enable"], "safety.floor_constraint.enable");
@@ -1736,6 +1750,33 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(fc, "monitor_only")) {
                 cfg.safety.floor_constraint.monitor_only =
                     asBool(fc["monitor_only"], "safety.floor_constraint.monitor_only");
+            }
+            if (has(fc, "tcp_offset_points")) {
+                const YAML::Node points = fc["tcp_offset_points"];
+                if (!points.IsSequence()) {
+                    fail("safety.floor_constraint.tcp_offset_points must be a sequence", points);
+                }
+                cfg.safety.floor_constraint.tcp_offset_points.clear();
+                for (std::size_t i = 0; i < points.size(); ++i) {
+                    const YAML::Node entry = points[i];
+                    validateAllowedKeys(entry, {"name", "offset_m"},
+                        "safety.floor_constraint.tcp_offset_points");
+                    FloorCheckPointConfig point;
+                    if (has(entry, "name")) {
+                        point.name = asString(entry["name"],
+                            "safety.floor_constraint.tcp_offset_points.name");
+                    }
+                    if (!has(entry, "offset_m") || !entry["offset_m"].IsSequence() ||
+                        entry["offset_m"].size() != 3) {
+                        fail("safety.floor_constraint.tcp_offset_points entries need offset_m: [x, y, z]",
+                             entry);
+                    }
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        point.offset_m[axis] = asDouble(entry["offset_m"][axis],
+                            "safety.floor_constraint.tcp_offset_points.offset_m");
+                    }
+                    cfg.safety.floor_constraint.tcp_offset_points.push_back(point);
+                }
             }
         }
         if (has(sec, "joint_target_smd")) {

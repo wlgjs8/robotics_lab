@@ -16,6 +16,8 @@ from policy_runner.camera_bundle_client import (
     CameraBundle,
     CameraBundleClient,
     CameraFrame,
+    bundle_clock_ns,
+    resolve_frame,
 )
 
 try:
@@ -208,10 +210,10 @@ class CameraBundleClientTest(unittest.TestCase):
         np.testing.assert_array_equal(frame_obj.pixels[0, 0], [4, 5, 6])
         self.assertGreaterEqual(calls["count"], 2)
 
-    def test_is_fresh_returns_false_for_old_bundle(self) -> None:
-        old = CameraBundle(
+    def _freshness_bundle(self, bundle_time_ns: int) -> CameraBundle:
+        return CameraBundle(
             bundle_seq=1,
-            bundle_time_ns=time.time_ns() - 1_000_000_000,
+            bundle_time_ns=bundle_time_ns,
             hardware_synced=False,
             complete=True,
             received_monotonic=time.monotonic(),
@@ -228,13 +230,49 @@ class CameraBundleClientTest(unittest.TestCase):
                 )
             },
         )
-        self.client._latest = old
+
+    def test_is_fresh_returns_false_for_old_bundle(self) -> None:
+        # bundle_time_ns is stamped on the camera_server clock (monotonic_raw).
+        self.client._latest = self._freshness_bundle(bundle_clock_ns() - 1_000_000_000)
+        self.assertFalse(self.client.is_fresh())
+
+    def test_is_fresh_returns_true_for_recent_bundle(self) -> None:
+        self.client._latest = self._freshness_bundle(bundle_clock_ns())
+        self.assertTrue(self.client.is_fresh())
+
+    def test_is_fresh_rejects_wall_clock_stamps(self) -> None:
+        # Epoch timestamps are not comparable to the monotonic_raw bundle clock.
+        self.client._latest = self._freshness_bundle(time.time_ns())
         self.assertFalse(self.client.is_fresh())
 
     def test_close_releases_zmq_and_shm(self) -> None:
         self.client.close()
         self.assertIsNone(self.client.poll(timeout_ms=1))
         self.client.close()
+
+
+class ResolveFrameTest(unittest.TestCase):
+    def test_exact_key_match(self) -> None:
+        frames = {"left_realsense.color": "frame"}
+        self.assertEqual(resolve_frame(frames, "left_realsense.color"), "frame")
+
+    def test_dataset_name_maps_to_bundle_key(self) -> None:
+        frames = {"left_realsense.color": "frame"}
+        self.assertEqual(resolve_frame(frames, "left_realsense_color"), "frame")
+
+    def test_exact_key_wins_over_mapped_key(self) -> None:
+        frames = {"left_realsense_color": "exact", "left_realsense.color": "mapped"}
+        self.assertEqual(resolve_frame(frames, "left_realsense_color"), "exact")
+
+    def test_dotted_name_is_not_remapped(self) -> None:
+        frames = {"left.realsense.color": "frame"}
+        self.assertIsNone(resolve_frame(frames, "left.realsense_color"))
+
+    def test_missing_and_empty(self) -> None:
+        self.assertIsNone(resolve_frame({}, "left_realsense_color"))
+        self.assertIsNone(resolve_frame(None, "left_realsense_color"))
+        self.assertIsNone(resolve_frame({"right_realsense.color": "x"}, "left_realsense_color"))
+        self.assertIsNone(resolve_frame({"head.color": "x"}, "color"))
 
 
 if __name__ == "__main__":

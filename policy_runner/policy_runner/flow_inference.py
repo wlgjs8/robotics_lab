@@ -31,6 +31,7 @@ from .flow_dataset import (
     pose_from_state_payload,
     runtime_proprio_from_state,
 )
+from .camera_bundle_client import resolve_frame
 from .flow_model import FlowMatchingPolicy, sample_action_chunks
 from .gripper import REAL_GRIPPER_ENV, GripperRuntime, gripper_commands_from_flow_step
 from .robot_state_client import StateSnapshot
@@ -558,7 +559,7 @@ class FlowMatchingActionSource:
         missing_count = 0
         bundle_frames = getattr(bundle, "frames", {}) if bundle is not None else {}
         for camera_name in self.camera_names:
-            frame = bundle_frames.get(camera_name) if isinstance(bundle_frames, dict) else None
+            frame = resolve_frame(bundle_frames, camera_name)
             pixels = getattr(frame, "pixels", None)
             if pixels is None:
                 frames.append(np.zeros((3, self.image_size, self.image_size), dtype=np.float32))
@@ -606,7 +607,7 @@ class FlowMatchingActionSource:
         missing_count = 0
         bundle_frames = getattr(bundle, "frames", {}) if bundle is not None else {}
         for camera_name in self.camera_names:
-            frame = bundle_frames.get(camera_name) if isinstance(bundle_frames, dict) else None
+            frame = resolve_frame(bundle_frames, camera_name)
             pixels = getattr(frame, "pixels", None)
             if pixels is None:
                 missing_count += 1

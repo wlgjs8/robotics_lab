@@ -1455,25 +1455,32 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         floor["config_z_min_m"] = snapshot.floor_constraint_config_z_min_m;
         floor["runtime_min_z_m"] = snapshot.floor_constraint_runtime_min_z_m;
         floor["runtime_max_z_m"] = snapshot.floor_constraint_runtime_max_z_m;
-        const auto arm_json = [](bool checked, bool violated, double tcp_z_m) {
+        const auto arm_json = [](bool checked, bool violated, double tcp_z_m,
+                                 const std::string& lowest_point) {
             nlohmann::json arm;
             arm["checked"] = checked;
             arm["violated"] = violated;
             if (checked && std::isfinite(tcp_z_m)) {
+                // Lowest checked point's z (TCP, or a configured TCP-frame
+                // offset point such as a gripper fingertip).
                 arm["tcp_z_m"] = tcp_z_m;
+                arm["lowest_point"] = lowest_point.empty() ? "tcp" : lowest_point;
             } else {
                 arm["tcp_z_m"] = nullptr;
+                arm["lowest_point"] = nullptr;
             }
             return arm;
         };
         floor["left"] = arm_json(
             snapshot.floor_constraint_left_checked,
             snapshot.floor_constraint_left_violated,
-            snapshot.floor_constraint_left_tcp_z_m);
+            snapshot.floor_constraint_left_tcp_z_m,
+            snapshot.floor_constraint_left_lowest_point);
         floor["right"] = arm_json(
             snapshot.floor_constraint_right_checked,
             snapshot.floor_constraint_right_violated,
-            snapshot.floor_constraint_right_tcp_z_m);
+            snapshot.floor_constraint_right_tcp_z_m,
+            snapshot.floor_constraint_right_lowest_point);
         floor["clamp_count"] = snapshot.floor_constraint_clamp_count;
         if (snapshot.floor_constraint_last_set_reject_reason.empty()) {
             floor["last_set_reject_reason"] = nullptr;

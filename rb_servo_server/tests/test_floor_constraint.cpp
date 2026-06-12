@@ -117,6 +117,46 @@ bool testValidateFloorZRequest() {
     return true;
 }
 
+bool testLowestZWithOffsets() {
+    // Two fingertip points +-54 mm along the TCP x-axis (PIKA gripper layout).
+    std::vector<rb_servo::FloorCheckPointConfig> points;
+    points.push_back({"tip_a", {0.054, 0.0, 0.0}});
+    points.push_back({"tip_b", {-0.054, 0.0, 0.0}});
+
+    // Identity orientation: offsets are horizontal, the TCP is the lowest point.
+    rb_servo::Pose6D level;
+    level.z = 0.100;
+    std::string lowest;
+    double z = rb_servo::floorLowestZWithOffsets(level, points, &lowest);
+    RB_CHECK(std::abs(z - 0.100) < 1e-12);
+    RB_CHECK(lowest == "tcp");
+
+    // Pitch the tool 90 deg about y: the TCP x-axis maps to -z, so tip_a hangs
+    // 54 mm BELOW the TCP point and must win the check.
+    rb_servo::Pose6D rolled = level;
+    rolled.ry = M_PI / 2.0;
+    z = rb_servo::floorLowestZWithOffsets(rolled, points, &lowest);
+    RB_CHECK(std::abs(z - (0.100 - 0.054)) < 1e-9);
+    RB_CHECK(lowest == "tip_a");
+
+    // Opposite pitch: the other fingertip leads.
+    rolled.ry = -M_PI / 2.0;
+    z = rb_servo::floorLowestZWithOffsets(rolled, points, &lowest);
+    RB_CHECK(std::abs(z - (0.100 - 0.054)) < 1e-9);
+    RB_CHECK(lowest == "tip_b");
+
+    // No offset points: plain TCP z (legacy behavior).
+    z = rb_servo::floorLowestZWithOffsets(rolled, {}, &lowest);
+    RB_CHECK(std::abs(z - 0.100) < 1e-12);
+    RB_CHECK(lowest == "tcp");
+
+    // Non-finite TCP fails closed (NaN propagates to the caller).
+    rb_servo::Pose6D invalid = level;
+    invalid.z = std::numeric_limits<double>::quiet_NaN();
+    RB_CHECK(std::isnan(rb_servo::floorLowestZWithOffsets(invalid, points, &lowest)));
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -127,6 +167,7 @@ int main() {
     if (!testFkFailureFailsClosed()) return 1;
     if (!testMonitorOnlyAllowsViolations()) return 1;
     if (!testValidateFloorZRequest()) return 1;
+    if (!testLowestZWithOffsets()) return 1;
     std::cout << "floor_constraint tests passed\n";
     return 0;
 }

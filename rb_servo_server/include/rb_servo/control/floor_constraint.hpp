@@ -9,19 +9,56 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "rb_servo/config/config.hpp"
+#include "rb_servo/core/types.hpp"
+#include "rb_servo/math/se3.hpp"
 
 namespace rb_servo {
 
 // FK evaluation of one arm's TCP against the floor plane. checked=false means
 // the TCP z could not be computed (kinematics missing, non-finite joints, FK
 // throw) — the caller treats that as fail-closed when the constraint is enabled.
+// With safety.floor_constraint.tcp_offset_points configured, tcp_z_m is the
+// LOWEST checked point's z (TCP + each TCP-frame offset point, e.g. gripper
+// fingertips) and lowest_point names which one it was.
 struct FloorArmEvaluation {
     bool checked = false;
     double tcp_z_m = std::numeric_limits<double>::quiet_NaN();
     bool violated = false;
+    std::string lowest_point = "tcp";
 };
+
+// Lowest stand-frame z over the TCP and the configured TCP-frame offset
+// points (p = tcp_position + R_tcp * offset). Returns NaN when the TCP pose
+// is non-finite. lowest_name (optional) reports which point won.
+inline double floorLowestZWithOffsets(
+    const Pose6D& tcp_stand,
+    const std::vector<FloorCheckPointConfig>& tcp_offset_points,
+    std::string* lowest_name
+) {
+    if (lowest_name) *lowest_name = "tcp";
+    if (!std::isfinite(tcp_stand.z)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    double lowest = tcp_stand.z;
+    if (!tcp_offset_points.empty()) {
+        const math::Matrix3 rotation = math::rotationFromPose(tcp_stand);
+        for (const FloorCheckPointConfig& point : tcp_offset_points) {
+            const math::Vector3 offset(point.offset_m[0], point.offset_m[1], point.offset_m[2]);
+            const double z = tcp_stand.z + (rotation * offset).z();
+            if (!std::isfinite(z)) {
+                return std::numeric_limits<double>::quiet_NaN();
+            }
+            if (z < lowest) {
+                lowest = z;
+                if (lowest_name) *lowest_name = point.name;
+            }
+        }
+    }
+    return lowest;
+}
 
 enum class FloorAction {
     Allow,

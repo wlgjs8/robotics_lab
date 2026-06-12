@@ -99,8 +99,14 @@ deps-hardware-free:
 camera-mock-up:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile mock_camera up --build camera_server_mock
 
+# Container path of the camera config (mounted from ./camera_server/config).
+# This site runs two D405 wrist cameras for flow-infer; the 3-camera
+# triple_realsense profile is available via
+#   make camera-real-up CAMERA_CONFIG=/app/config/triple_realsense.yaml
+CAMERA_CONFIG ?= /app/config/dual_realsense_d405.yaml
+
 camera-real-up:
-	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up --build camera_server
+	CAMERA_CONFIG=$(CAMERA_CONFIG) $(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up --build camera_server
 
 # --- rbpodo pgmode-simulation (native; dual Virtual ControlBox VMs) ---
 # One-command bring-up of rb_servo_server + rb_gui (viser) on this WSL box.

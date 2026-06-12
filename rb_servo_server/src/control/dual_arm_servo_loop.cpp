@@ -2176,9 +2176,11 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.floor_constraint_left_checked = last_floor_left_.checked;
             latest_snapshot_.floor_constraint_left_violated = last_floor_left_.violated;
             latest_snapshot_.floor_constraint_left_tcp_z_m = last_floor_left_.tcp_z_m;
+            latest_snapshot_.floor_constraint_left_lowest_point = last_floor_left_.lowest_point;
             latest_snapshot_.floor_constraint_right_checked = last_floor_right_.checked;
             latest_snapshot_.floor_constraint_right_violated = last_floor_right_.violated;
             latest_snapshot_.floor_constraint_right_tcp_z_m = last_floor_right_.tcp_z_m;
+            latest_snapshot_.floor_constraint_right_lowest_point = last_floor_right_.lowest_point;
             latest_snapshot_.floor_constraint_clamp_count = floor_clamp_count_;
             latest_snapshot_.floor_constraint_last_set_reject_reason = floor_last_set_reject_reason_;
             latest_snapshot_.motion_state = sample.motion_state;
@@ -3554,9 +3556,18 @@ FloorArmEvaluation DualArmServoLoop::evaluateFloorArm(ArmId arm, const JointArra
         if (!std::isfinite(tcp.z)) {
             return eval;  // checked=false -> caller fails closed
         }
+        // Lowest point over the TCP and the configured TCP-frame offset points
+        // (e.g. gripper fingertips, which dip below the TCP when the tool
+        // rotates). tcp_z_m carries the worst (lowest) z so the decision,
+        // escape, and clamp logic all act on the most exposed point.
+        const double lowest_z = floorLowestZWithOffsets(
+            tcp, config_.safety.floor_constraint.tcp_offset_points, &eval.lowest_point);
+        if (!std::isfinite(lowest_z)) {
+            return FloorArmEvaluation{};  // checked=false -> caller fails closed
+        }
         eval.checked = true;
-        eval.tcp_z_m = tcp.z;
-        eval.violated = tcp.z < effectiveFloorZ();
+        eval.tcp_z_m = lowest_z;
+        eval.violated = lowest_z < effectiveFloorZ();
     } catch (const std::exception&) {
         return FloorArmEvaluation{};  // checked=false -> caller fails closed
     }
@@ -3573,7 +3584,22 @@ Pose6D DualArmServoLoop::clampPoseToFloor(const Pose6D& pose) const {
     }
     Pose6D clamped = pose;
     if (std::isfinite(clamped.z)) {
-        clamped.z = std::max(clamped.z, effectiveFloorZ());
+        // Lift the TCP target so the LOWEST configured check point (e.g. a
+        // gripper fingertip at the target orientation) stays on/above the
+        // plane, not just the TCP point itself.
+        double min_offset_delta_z = 0.0;  // tcp itself
+        const auto& points = config_.safety.floor_constraint.tcp_offset_points;
+        if (!points.empty()) {
+            const math::Matrix3 rotation = math::rotationFromPose(clamped);
+            for (const FloorCheckPointConfig& point : points) {
+                const math::Vector3 offset(point.offset_m[0], point.offset_m[1], point.offset_m[2]);
+                const double delta_z = (rotation * offset).z();
+                if (std::isfinite(delta_z)) {
+                    min_offset_delta_z = std::min(min_offset_delta_z, delta_z);
+                }
+            }
+        }
+        clamped.z = std::max(clamped.z, effectiveFloorZ() - min_offset_delta_z);
     }
     return clamped;
 }

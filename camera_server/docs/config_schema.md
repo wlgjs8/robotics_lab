@@ -8,6 +8,12 @@ Example files:
   1280x720@30 RGB plus D405 wrists 640x360@30 RGB
 - `config/triple_realsense_640x480.yaml`: optional D405 wrist
   640x480@30 RGB variant for explicitly approved hardware sessions
+- `config/dual_realsense_d405.yaml`: two D405 wrist cameras 640x480@30 RGB for
+  flow-infer rollout on the local PC (camera names `left_realsense` /
+  `right_realsense` pair with checkpoint camera names
+  `left_realsense_color` / `right_realsense_color` via policy_runner's
+  `resolve_frame()` `X_color` → `X.color` mapping); serials are filled with
+  this site's physical units
 - `config/mock_triple_realsense.yaml`: hardware-free mock config
 
 The real-camera templates intentionally contain `REPLACE_*` serial placeholders

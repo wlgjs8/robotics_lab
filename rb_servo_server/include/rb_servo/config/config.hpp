@@ -214,6 +214,12 @@ enum class FloorConstraintFailPolicy {
     FaultLatch,
 };
 
+// One named extra floor-check point, expressed as an offset in the TCP frame.
+struct FloorCheckPointConfig {
+    std::string name;
+    std::array<double, 3> offset_m{};
+};
+
 // Stand-frame floor plane constraint: the TCP of either arm must never go below
 // z = z_min_m (meters, stand frame), regardless of motion primitive or run mode.
 // Tier 1 (hard backstop) FK-checks every candidate joint target at the final
@@ -229,6 +235,12 @@ struct FloorConstraintConfig {
     // Observe-only: publish per-arm tcp z / violation telemetry without clamping
     // or latching. Never use monitor_only as a real-motion safety posture.
     bool monitor_only = false;
+    // Additional floor-check points expressed in the TCP frame (meters). The
+    // TCP point is always checked; each entry adds one more point at
+    // tcp_position + R_tcp * offset_m — e.g. the two PIKA gripper fingertips,
+    // which dip below the TCP point when the tool rotates. The published
+    // per-arm tcp_z_m becomes the LOWEST checked point's z.
+    std::vector<FloorCheckPointConfig> tcp_offset_points;
 };
 
 // Joint-space SMD profile for the JointTarget primitive (the joint-space

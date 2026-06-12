@@ -746,10 +746,12 @@ struct ServoSnapshot {
     double floor_constraint_runtime_max_z_m = 0.0;
     bool floor_constraint_left_checked = false;
     bool floor_constraint_left_violated = false;
-    double floor_constraint_left_tcp_z_m = 0.0;
+    double floor_constraint_left_tcp_z_m = 0.0;  // lowest checked point z
+    std::string floor_constraint_left_lowest_point;
     bool floor_constraint_right_checked = false;
     bool floor_constraint_right_violated = false;
-    double floor_constraint_right_tcp_z_m = 0.0;
+    double floor_constraint_right_tcp_z_m = 0.0;  // lowest checked point z
+    std::string floor_constraint_right_lowest_point;
     uint64_t floor_constraint_clamp_count = 0;
     std::string floor_constraint_last_set_reject_reason;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;

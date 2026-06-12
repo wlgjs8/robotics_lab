@@ -1249,6 +1249,33 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 topic=config.camera.bundle_topic,
                 max_age_ms=config.camera.max_age_ms,
             )
+        # Physical gripper hardware connects (and energizes motors) only when
+        # the rollout mode could actually dispatch to it; sim_dryrun and
+        # real_readonly always stay on the fail-closed Noop backend.
+        gripper_backend = None
+        if config.gripper.backend == "pika_serial":
+            mode_value = rollout_policy.mode.value
+            wants_gripper_hardware = (
+                mode_value == "controller_sim"
+                and config.gripper.actuate_in_controller_simulation
+            ) or (mode_value == "real_policy" and config.safety.allow_real_gripper_motion)
+            if wants_gripper_hardware:
+                from .gripper import PikaSerialGripperBackend
+
+                gripper_backend = PikaSerialGripperBackend(
+                    ports={
+                        "left": config.gripper.left_port,
+                        "right": config.gripper.right_port,
+                    },
+                    sdk_path=config.gripper.pika_sdk_path or None,
+                    min_rad=config.gripper.min_rad,
+                    max_rad=config.gripper.max_rad,
+                    deadband_rad=config.gripper.deadband_rad,
+                    max_hz=config.gripper.max_hz,
+                    supports_controller_simulation=(
+                        config.gripper.actuate_in_controller_simulation
+                    ),
+                ).connect()
         try:
             policy_dt_sec = resolve_flow_policy_dt_sec(
                 rollout_policy.mode,
@@ -1270,9 +1297,17 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 "allow_rbpodo_controller_simulation_cartesian": (
                     rollout_policy.allows_controller_simulation_cartesian
                 ),
-                "gripper_runtime": GripperRuntime(
-                    rollout_mode=rollout_policy.mode.value,
-                    allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+                "gripper_runtime": (
+                    GripperRuntime(
+                        rollout_mode=rollout_policy.mode.value,
+                        allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+                        backend=gripper_backend,
+                    )
+                    if gripper_backend is not None
+                    else GripperRuntime(
+                        rollout_mode=rollout_policy.mode.value,
+                        allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+                    )
                 ),
                 "device": args.device,
             }
@@ -1344,4 +1379,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
             if camera_client is not None:
                 camera_client.close()
             raise
+        finally:
+            # Disable+disconnect the serial grippers on every exit path.
+            if gripper_backend is not None:
+                gripper_backend.close()
     raise ValueError(f"unknown policy_runner command: {args.command}")
