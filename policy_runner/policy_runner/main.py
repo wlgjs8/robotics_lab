@@ -734,6 +734,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
         ),
     )
     flow_infer.add_argument(
+        "--camera-preview",
+        action="store_true",
+        help=(
+            "Open a live OpenCV window showing the camera frames the policy consumes "
+            "(spawns policy_runner.camera_preview alongside the rollout)."
+        ),
+    )
+    flow_infer.add_argument(
         "--policy-dt-sec",
         type=float,
         default=None,
@@ -1267,6 +1275,26 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 topic=config.camera.bundle_topic,
                 max_age_ms=config.camera.max_age_ms,
             )
+        preview_process = None
+        if args.camera_preview and config.camera.enable:
+            import subprocess
+
+            # Same ZMQ bundle/shm + resolve_frame mapping as the runtime; PUB
+            # fans out so the preview never interferes with inference.
+            preview_process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "policy_runner.camera_preview",
+                    "--zmq-endpoint",
+                    config.camera.zmq_endpoint,
+                    "--topic",
+                    config.camera.bundle_topic,
+                    "--cameras",
+                    ",".join(config.camera.expected_cameras)
+                    or "left_realsense_color,right_realsense_color",
+                ],
+            )
         # Physical gripper hardware connects (and energizes motors) only when
         # the rollout mode could actually dispatch to it; sim_dryrun and
         # real_readonly always stay on the fail-closed Noop backend.
@@ -1402,4 +1430,10 @@ def _main_with_subcommands(argv: list[str]) -> int:
             # Disable+disconnect the serial grippers on every exit path.
             if gripper_backend is not None:
                 gripper_backend.close()
+            if preview_process is not None:
+                preview_process.terminate()
+                try:
+                    preview_process.wait(timeout=2.0)
+                except Exception:
+                    preview_process.kill()
     raise ValueError(f"unknown policy_runner command: {args.command}")

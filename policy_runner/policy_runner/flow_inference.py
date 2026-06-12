@@ -686,6 +686,9 @@ class FlowMatchingActionSource:
                     decode_hdf5_image_value(
                         np.asarray(pixels),
                         image_size=self.image_size,
+                        # Mirror the training preprocessing exactly (stats carry
+                        # the dataset's crop mode; default 'none').
+                        image_crop=str(self.stats.get("image_crop", "none") or "none"),
                     )
                 )
                 decode_count += 1
