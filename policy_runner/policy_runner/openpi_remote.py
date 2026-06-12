@@ -1,0 +1,266 @@
+"""Remote openpi (pi0.5) policy server as a policy_runner action source.
+
+Bridges a running `openpi serve_policy.py` websocket server (pi05_pika_umi config)
+into the standard flow-infer runtime so the pi0.5 checkpoint goes through the SAME
+camera polling, reset anchoring, TcpTwistLocal emission, clamps, rollout-mode gates
+and gripper runtime as the in-house checkpoints.
+
+Usage (after starting the server):
+    .venv/bin/python scripts/serve_policy.py policy:checkpoint \
+        --policy.config=pi05_pika_umi --policy.dir=~/pika_umi_models_v2/pi05_v2_20k
+    python3 -m policy_runner flow-infer \
+        --checkpoint "openpi://127.0.0.1:8000" \
+        --config <runtime yaml> --rollout-mode sim_dryrun
+
+Contract with the server (see pika_umi_policy.PikaUmiInputs/Outputs):
+    obs  : observation/{left,right}_wrist_0_rgb (HWC uint8 RGB, full camera res),
+           observation/state (14 = [pos(3), rotvec(3), grip/100] x left,right,
+           ABSOLUTE stand-frame), prompt (fixed task sentence)
+    out  : actions (H,14) per-step ee_local deltas; gripper dims (6,13) in /100
+           units -> converted here to percent deltas (in-house chunk convention).
+
+Smoke testing without cameras: set OPENPI_REMOTE_FAKE_IMAGES=1 to feed zero images
+(policy output is meaningless but the full pipe can be exercised in sim_dryrun).
+
+Requires `openpi_client` (and cv2 for live camera decode) in the runtime python
+environment — e.g. run policy_runner inside the openpi .venv.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from dataclasses import replace
+from typing import Any, TextIO
+
+import numpy as np
+
+from .action_sources.tcp_delta import cartesian_action_requirements
+from .flow_dataset import pose_from_state_payload
+from .flow_inference import (
+    DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S,
+    DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
+    FlowMatchingActionSource,
+    canonical_flow_command_family,
+)
+from .gripper import GripperRuntime
+
+OPENPI_CHECKPOINT_PREFIX = "openpi://"
+OPENPI_DEFAULT_PROMPT = (
+    "pick up the black bolt with the right arm and put it in the right box, "
+    "then pick up the gray bolt with the left arm and put it in the left box"
+)
+_GRIP_DIMS = (6, 13)
+_FAKE_IMAGES_ENV = "OPENPI_REMOTE_FAKE_IMAGES"
+
+
+def _quat_xyzw_to_rotvec(q: np.ndarray) -> np.ndarray:
+    """Quaternion (x,y,z,w) -> rotation vector (axis * angle), numpy only."""
+    q = np.asarray(q, dtype=np.float64)
+    norm = float(np.linalg.norm(q))
+    if norm <= 0.0:
+        return np.zeros(3, dtype=np.float64)
+    x, y, z, w = q / norm
+    sin_half = float(np.linalg.norm((x, y, z)))
+    if sin_half < 1e-12:
+        return np.zeros(3, dtype=np.float64)
+    angle = 2.0 * float(np.arctan2(sin_half, w))
+    if angle > np.pi:
+        angle -= 2.0 * np.pi
+    return np.asarray((x, y, z), dtype=np.float64) / sin_half * angle
+
+
+def _gripper_from_arm_payload(value: Any) -> float:
+    arm = value if isinstance(value, dict) else {}
+    for key in ("gripper", "gripper_position"):
+        raw = arm.get(key)
+        if isinstance(raw, dict):
+            for nested_key in ("position", "value", "percent"):
+                nested = raw.get(nested_key)
+                if isinstance(nested, (int, float)):
+                    return float(nested)
+        elif isinstance(raw, (int, float)):
+            return float(raw)
+    return 0.0
+
+
+class OpenpiRemoteActionSource(FlowMatchingActionSource):
+    """flow-infer action source backed by a remote openpi policy server."""
+
+    def __init__(  # noqa: PLR0913 - mirrors FlowMatchingActionSource construction surface.
+        self,
+        server_url: str,
+        *,
+        timeout_sec: float = 0.2,
+        camera_client: Any | None = None,
+        command_family: str | None = None,
+        policy_dt_sec: float | None = None,
+        max_linear_velocity_m_s: float | None = None,
+        max_angular_velocity_rad_s: float | None = None,
+        max_linear_step_m: float = 0.002,
+        max_angular_step_rad: float = 0.01,
+        chunk_execute_steps: int | None = None,
+        allow_rbpodo_controller_simulation_cartesian: bool = False,
+        gripper_runtime: GripperRuntime | None = None,
+        prompt: str = OPENPI_DEFAULT_PROMPT,
+        action_horizon: int = 16,
+        camera_names: tuple[str, str] = ("left_realsense_color", "right_realsense_color"),
+        sample_steps: int = 1,  # accepted for CLI symmetry; unused remotely
+        device: str = "remote",  # accepted for CLI symmetry; inference is server-side
+        stderr: TextIO = sys.stderr,
+    ):
+        # Deliberately NOT calling super().__init__: there is no local checkpoint to
+        # load. Every attribute the inherited runtime methods touch is set below.
+        url = server_url[len(OPENPI_CHECKPOINT_PREFIX):] if server_url.startswith(OPENPI_CHECKPOINT_PREFIX) else server_url
+        host, _, port = url.partition(":")
+        try:
+            from openpi_client import websocket_client_policy
+        except ImportError as exc:  # pragma: no cover - environment guard
+            raise RuntimeError(
+                "openpi_client is required for OpenpiRemoteActionSource; run policy_runner "
+                "inside the openpi virtualenv (see ~/pika_umi_models_v2/README_v2.md)"
+            ) from exc
+        self._client = websocket_client_policy.WebsocketClientPolicy(
+            host=host or "127.0.0.1",
+            port=int(port or 8000),
+        )
+        self.prompt = str(prompt)
+        self._fake_images = os.environ.get(_FAKE_IMAGES_ENV, "") == "1"
+
+        self.timeout_sec = float(timeout_sec)
+        self.camera_client = camera_client
+        self.sample_steps = int(sample_steps)
+        self.max_linear_step_m = float(max_linear_step_m)
+        self.max_angular_step_rad = float(max_angular_step_rad)
+        self.policy_label = "openpi remote policy"
+        self.gripper_command_source = "openpi_remote_policy"
+        self.stderr = stderr
+        self.device = device
+        self.stats: dict[str, Any] = {}
+        self.action_frame = "ee_local"
+        self.command_family_option = canonical_flow_command_family(command_family) if command_family else "tcp_twist_local"
+        if self.command_family_option not in {"tcp_twist_local", "tcp_twist_stand", "tcp_delta_stand"}:
+            self.command_family_option = "tcp_twist_local"
+        self.command_family = canonical_flow_command_family(self.command_family_option)
+        # Fake-image smoke mode runs camera-less so the runtime does not gate on frames.
+        self.camera_names = [] if self._fake_images else [str(name) for name in camera_names]
+        self.image_size = 224  # zero-fallback shape only; live frames are sent full-res
+        self.action_horizon = int(action_horizon)
+        default_execute = max(1, self.action_horizon // 2)
+        self.chunk_execute_steps = int(chunk_execute_steps) if chunk_execute_steps else default_execute
+        self.chunk_execute_steps = max(1, min(self.chunk_execute_steps, self.action_horizon))
+        self.policy_dt_sec = float(policy_dt_sec) if policy_dt_sec else (1.0 / 30.0)
+        self.max_linear_velocity_m_s = (
+            float(max_linear_velocity_m_s) if max_linear_velocity_m_s is not None else DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S
+        )
+        self.max_angular_velocity_rad_s = (
+            float(max_angular_velocity_rad_s)
+            if max_angular_velocity_rad_s is not None
+            else DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S
+        )
+        self.model = None  # inference happens on the server
+        self.arm_mask = np.asarray([1.0, 1.0], dtype=np.float32)
+        self.checkpoint_arm_mask = (1.0, 1.0)
+        self.checkpoint_selected_arms = ["left", "right"]
+        self.checkpoint_has_nonzero_gripper_commands = True
+        self.gripper_runtime = gripper_runtime or GripperRuntime(rollout_mode="sim_dryrun")
+        self.requirements = replace(
+            cartesian_action_requirements(
+                allow_rbpodo_controller_simulation=allow_rbpodo_controller_simulation_cartesian,
+            ),
+            requires_camera=bool(self.camera_names),
+        )
+        self._reset_left_pose: np.ndarray | None = None
+        self._reset_right_pose: np.ndarray | None = None
+        self._chunk: np.ndarray | None = None
+        self._chunk_index = 0
+        self._warned_missing_camera_client = False
+        self.last_image_decode_count = 0
+        self.last_missing_camera_count = 0
+        self.image_decode_count = 0
+        self.missing_camera_count = 0
+        self._last_nonzero_twist_by_arm = {"left": False, "right": False}
+        self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+
+    # ------------------------------------------------------------------ obs --
+    def _absolute_state(self, payload: dict[str, Any]) -> np.ndarray:
+        """14-dim absolute stand-frame state in the pi05 training convention."""
+        features: list[np.ndarray] = []
+        for side in ("left", "right"):
+            pose = pose_from_state_payload(payload, side)
+            grip = _gripper_from_arm_payload(payload.get(side, {}))
+            features.append(
+                np.concatenate(
+                    [
+                        np.asarray(pose[:3], dtype=np.float64),
+                        _quat_xyzw_to_rotvec(pose[3:7]),
+                        [grip / 100.0],
+                    ]
+                )
+            )
+        return np.concatenate(features).astype(np.float32)
+
+    def _raw_camera_images(self) -> tuple[dict[str, np.ndarray] | None, int, int]:
+        """Full-resolution HWC uint8 RGB frames keyed left/right; None if missing."""
+        if self._fake_images:
+            zero = np.zeros((480, 640, 3), dtype=np.uint8)
+            return {"left": zero, "right": zero.copy()}, 2, 0
+        bundle = self._poll_camera_bundle()
+        bundle_frames = getattr(bundle, "frames", {}) if bundle is not None else {}
+        try:
+            import cv2
+        except ImportError as exc:  # pragma: no cover - environment guard
+            raise RuntimeError("cv2 is required to decode live camera frames for openpi") from exc
+        images: dict[str, np.ndarray] = {}
+        decode_count = 0
+        missing_count = 0
+        for key, camera_name in (("left", self.camera_names[0]), ("right", self.camera_names[1])):
+            frame = bundle_frames.get(camera_name) if isinstance(bundle_frames, dict) else None
+            pixels = getattr(frame, "pixels", None)
+            if pixels is None:
+                missing_count += 1
+                continue
+            array = np.asarray(pixels)
+            if array.ndim == 3 and array.shape[-1] == 3:
+                rgb = array.astype(np.uint8)  # already decoded HWC
+            else:
+                bgr = cv2.imdecode(array.astype(np.uint8), cv2.IMREAD_COLOR)
+                if bgr is None:
+                    missing_count += 1
+                    continue
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            images[key] = rgb
+            decode_count += 1
+        if missing_count > 0 or len(images) < 2:
+            return None, decode_count, max(missing_count, 2 - len(images))
+        return images, decode_count, 0
+
+    # ---------------------------------------------------------------- infer --
+    def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
+        images, decode_count, missing_count = self._raw_camera_images()
+        self.last_image_decode_count = decode_count
+        self.last_missing_camera_count = missing_count
+        self.image_decode_count += decode_count
+        self.missing_camera_count += missing_count
+        if images is None:
+            return None  # fail-closed without frames, same as the in-house sources
+        obs = {
+            "observation/left_wrist_0_rgb": images["left"],
+            "observation/right_wrist_0_rgb": images["right"],
+            "observation/state": self._absolute_state(payload),
+            "prompt": self.prompt,
+        }
+        try:
+            result = self._client.infer(obs)
+        except Exception as exc:  # noqa: BLE001 - remote failure must not crash the loop
+            print(f"openpi remote inference failed: {type(exc).__name__}: {exc}", file=self.stderr, flush=True)
+            return None
+        chunk = np.asarray(result.get("actions"), dtype=np.float32)
+        if chunk.ndim != 2 or chunk.shape[1] < 14:
+            print(f"openpi remote returned unexpected action shape {chunk.shape}", file=self.stderr, flush=True)
+            return None
+        chunk = chunk[:, :14].copy()
+        # server gripper deltas are in /100 units; in-house chunks use percent deltas.
+        chunk[:, _GRIP_DIMS[0]] *= 100.0
+        chunk[:, _GRIP_DIMS[1]] *= 100.0
+        return chunk[: self.action_horizon]

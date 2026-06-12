@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "rb_servo/config/config.hpp"
+#include "rb_servo/core/shutdown.hpp"
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/dual_arm_servo_loop.hpp"
 #include "rb_servo/logging/servo_logger.hpp"
@@ -17,6 +18,10 @@ std::atomic<bool> g_running{true};
 
 void signalHandler(int) {
     g_running = false;
+    // Also unblock long-running startup sequences (e.g. the rbpodo pgmode
+    // switch / activation confirmation polls) so Ctrl-C during initialize
+    // exits promptly instead of leaving a zombie holding the command port.
+    rb_servo::requestShutdown();
 }
 }  // namespace
 

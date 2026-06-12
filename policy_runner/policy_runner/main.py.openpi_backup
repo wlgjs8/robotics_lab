@@ -1137,7 +1137,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
             validate_flow_command_family,
         )
         from .gripper import GripperRuntime
-        from .openpi_remote import OPENPI_CHECKPOINT_PREFIX, OpenpiRemoteActionSource
 
         config = load_config(args.config)
         rollout_policy = RolloutModePolicy.from_value(
@@ -1145,16 +1144,12 @@ def _main_with_subcommands(argv: list[str]) -> int:
             send_dryrun_commands=args.send_dryrun_commands,
         )
         try:
-            if str(args.checkpoint).startswith(OPENPI_CHECKPOINT_PREFIX):
-                checkpoint_kind = "openpi_remote"
-                dataset_stats = None
-            else:
-                checkpoint_kind = action_chunk_checkpoint_kind(args.checkpoint, device="cpu")
-                dataset_stats = load_action_chunk_checkpoint_dataset_stats(
-                    args.checkpoint,
-                    device="cpu",
-                    ensemble_name=args.ensemble_name,
-                )
+            checkpoint_kind = action_chunk_checkpoint_kind(args.checkpoint, device="cpu")
+            dataset_stats = load_action_chunk_checkpoint_dataset_stats(
+                args.checkpoint,
+                device="cpu",
+                ensemble_name=args.ensemble_name,
+            )
             command_family = resolve_flow_command_family(
                 rollout_policy.mode,
                 args.command_family,
@@ -1170,13 +1165,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
             print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
             return 2
         if rollout_policy.mode == RolloutMode.OFFLINE_EVAL:
-            if checkpoint_kind == "openpi_remote":
-                print(
-                    "policy_runner flow-infer offline_eval is not supported for openpi:// remote policies; "
-                    "use sim_dryrun (optionally OPENPI_REMOTE_FAKE_IMAGES=1) instead",
-                    file=sys.stderr,
-                )
-                return 2
             if args.episodes_dir is None:
                 print(
                     "policy_runner flow-infer offline_eval requires --episodes-dir with one or more HDF5 samples",
@@ -1276,12 +1264,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 ),
                 "device": args.device,
             }
-            if checkpoint_kind == "openpi_remote":
-                source = OpenpiRemoteActionSource(
-                    args.checkpoint,
-                    **source_kwargs,
-                )
-            elif checkpoint_kind == "direct_bc":
+            if checkpoint_kind == "direct_bc":
                 source = DirectBcImageActionSource(
                     args.checkpoint,
                     image_size=args.image_size,

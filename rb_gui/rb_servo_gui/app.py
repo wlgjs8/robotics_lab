@@ -68,6 +68,7 @@ from .scene import (
     _update_urdf_config,
     update_circle_overlay,
     update_floor_plane,
+    update_floor_plane_preview,
     update_self_collision_overlay,
     update_scene_markers,
 )
@@ -873,6 +874,15 @@ def build_gui(
                 ok, message = safety.send_set_floor_z(float(floor_slider.value) / 1000.0)
                 handles["floor_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
+            @floor_slider.on_update
+            def _(_: Any) -> None:
+                # Live preview while dragging: the yellow plane follows the
+                # pending slider value immediately; _update_floor_panel hides
+                # it again once the slider matches the server-applied z.
+                update_floor_plane_preview(
+                    handles.get("scene", {}), float(floor_slider.value) / 1000.0
+                )
+
     with tabs.add_tab("Joint jog"):
         arm_group = server.gui.add_button_group("Arm", ("left", "right"))
         joint_slider = server.gui.add_slider("Joint index", min=1, max=6, step=1, initial_value=1)
@@ -1200,16 +1210,28 @@ def _latest_circle_overlay(
 def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
     floor = latest.floor_constraint if latest is not None else None
     update_floor_plane(handles.get("scene", {}), floor)
-    if "floor_applied" not in handles:
-        return
+    slider = handles.get("floor_slider")
     if not isinstance(floor, Mapping) or not bool(floor.get("enabled", False)):
-        handles["floor_applied"].value = "disabled"
+        update_floor_plane_preview(handles.get("scene", {}), None)
+        if "floor_applied" in handles:
+            handles["floor_applied"].value = "disabled"
         return
     z = floor.get("z_min_m")
+    # Pending-value preview reconciliation: show the yellow preview plane only
+    # while the slider differs from the server-applied z (>= 0.5 mm); after a
+    # successful Send the applied plane catches up and the preview disappears.
+    if slider is not None and isinstance(z, (int, float)):
+        pending_mm = float(slider.value)
+        applied_mm = float(z) * 1000.0
+        if abs(pending_mm - applied_mm) >= 0.5:
+            update_floor_plane_preview(handles.get("scene", {}), pending_mm / 1000.0)
+        else:
+            update_floor_plane_preview(handles.get("scene", {}), None)
+    if "floor_applied" not in handles:
+        return
     z_txt = f"{float(z) * 1000:.0f}mm" if isinstance(z, (int, float)) else "?"
     reject = floor.get("last_set_reject_reason")
     handles["floor_applied"].value = z_txt + (f" (last reject: {reject})" if reject else "")
-    slider = handles.get("floor_slider")
     if slider is not None:
         lo = floor.get("runtime_min_z_m")
         hi = floor.get("runtime_max_z_m")

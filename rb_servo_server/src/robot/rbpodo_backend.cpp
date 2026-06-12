@@ -15,6 +15,7 @@
 #include <thread>
 
 #include "rb_servo/core/clock.hpp"
+#include "rb_servo/core/shutdown.hpp"
 
 #ifdef RB_SERVO_ENABLE_RBPODO
 #include <rbpodo/rbpodo.hpp>
@@ -672,6 +673,39 @@ std::optional<BackendError> configureWaitingAck(
         "rbpodo_" + operation + "_rejected"
     );
 }
+
+// Documented controller-state queries (rbpodo data_type.hpp):
+//   SD_PG_MODE         "Indicates the robot's operation mode. 0 = Real / 1 = Simulation"
+//   SD_INIT_STATE_INFO activation stage 0..6 (6 = Activation done; mask & 0x3f
+//                      as the SDK's own activate() does)
+// set_operation_mode() only waits for the ACK of the "pgmode" script command —
+// receipt, not completion — so the switch MUST be confirmed by reading these
+// back (or their data-channel equivalents real_vs_simulation_mode /
+// init_state_info, which carry the same documented semantics).
+std::optional<int> querySystemVariableInt(
+    rb::podo::Cobot<>& robot,
+    rb::podo::SystemVariable variable,
+    double timeout_sec
+) {
+    rb::podo::ResponseCollector responses;
+    double out = 0.0;
+    const auto ret = robot.get_system_variable(responses, variable, out, timeout_sec, true);
+    if (!ret.is_success()) {
+        return std::nullopt;
+    }
+    return static_cast<int>(out);
+}
+
+struct RbpodoModeProbe {
+    int pg_mode = -1;      // 0=real, 1=simulation (SD_PG_MODE semantics)
+    int init_stage = -1;   // 0..6 activation stage, -1 unknown
+};
+
+std::string rbpodoPgModeLabel(int pg_mode) {
+    if (pg_mode == 0) return "real";
+    if (pg_mode == 1) return "simulation";
+    return "unknown(" + std::to_string(pg_mode) + ")";
+}
 #endif
 
 }  // namespace
@@ -867,32 +901,86 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
                             makeBackendTiming(start, nowSteadyNs())
                         );
                     }
-                    // Verify: poll until the controller reports the expected mode.
-                    // simulation -> real powers up the servo stage and can take
-                    // tens of seconds; log progress so the operator sees it.
+                    // Verify by reading the CONTROLLER STATE back, per the SDK
+                    // contract: set_operation_mode only ACKs receipt of the
+                    // "pgmode" command (cobot.hpp), completion is reported by
+                    // SD_PG_MODE (0=real / 1=simulation, data_type.hpp) and the
+                    // activation stage SD_INIT_STATE_INFO (0..6, 6=done).
+                    // simulation -> real powers up the servo stage, so this can
+                    // legitimately take tens of seconds — we poll the state and
+                    // log every observed change so progress is visible and a
+                    // stuck controller is distinguishable from a slow one.
+                    // Primary read: SD_PG_MODE system variable on the command
+                    // channel (request/response). When ACK echoing is disabled
+                    // (disable_waiting_ack) that query cannot complete, so we
+                    // read the same documented fields from the data channel.
+                    const auto probe_mode_and_stage = [this]() -> std::optional<RbpodoModeProbe> {
+                        if (!impl_->config.disable_waiting_ack) {
+                            const auto pg = querySystemVariableInt(
+                                *impl_->robot, rb::podo::SystemVariable::SD_PG_MODE,
+                                kInitializeCommandAckTimeoutSec);
+                            if (pg) {
+                                RbpodoModeProbe probe;
+                                probe.pg_mode = *pg;
+                                const auto stage = querySystemVariableInt(
+                                    *impl_->robot, rb::podo::SystemVariable::SD_INIT_STATE_INFO,
+                                    kInitializeCommandAckTimeoutSec);
+                                probe.init_stage = stage ? (*stage & 0x3f) : -1;
+                                return probe;
+                            }
+                        }
+                        const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+                        if (!state) return std::nullopt;
+                        const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
+                        if (!rbpodoModeFieldIsKnown(snapshot.real_vs_simulation_mode)) return std::nullopt;
+                        RbpodoModeProbe probe;
+                        probe.pg_mode = snapshot.real_vs_simulation_mode;
+                        probe.init_stage = snapshot.init_state_info & 0x3f;
+                        return probe;
+                    };
+                    const int expected_pg_mode = expected_simulation ? 1 : 0;
                     bool confirmed = false;
+                    RbpodoModeProbe last_logged{-2, -2};
+                    RbpodoModeProbe last_seen{-2, -2};
                     const uint64_t verify_start_ns = nowSteadyNs();
                     const uint64_t verify_deadline_ns = verify_start_ns + kOperationModeSwitchTimeoutNs;
-                    uint64_t next_progress_ns = verify_start_ns + 5'000'000'000ULL;
+                    uint64_t next_heartbeat_ns = verify_start_ns + 10'000'000'000ULL;
                     while (nowSteadyNs() < verify_deadline_ns) {
-                        const auto verify_state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
-                        if (verify_state) {
-                            const RbpodoSystemStateSnapshot verify_snapshot =
-                                snapshotFromSystemState(*verify_state);
-                            if (operationModeMatchesConfig(impl_->config, verify_snapshot)) {
+                        if (shutdownRequested()) {
+                            return failedResult<RobotState>(
+                                BackendOp::Initialize,
+                                backendError(
+                                    BackendErrorKind::RobotNotInitialized,
+                                    "rbpodo pgmode switch confirmation aborted by shutdown signal",
+                                    "",
+                                    "rbpodo_initialize_aborted_by_shutdown"
+                                ),
+                                makeBackendTiming(start, nowSteadyNs())
+                            );
+                        }
+                        const auto probe = probe_mode_and_stage();
+                        if (probe) {
+                            last_seen = *probe;
+                            if (probe->pg_mode == expected_pg_mode) {
                                 confirmed = true;
                                 break;
                             }
+                            const bool changed = probe->pg_mode != last_logged.pg_mode ||
+                                                 probe->init_stage != last_logged.init_stage;
+                            if (changed || nowSteadyNs() >= next_heartbeat_ns) {
+                                std::cerr << "[INFO] RbpodoBackend " << impl_->config.name
+                                          << " controller reports pgmode="
+                                          << rbpodoPgModeLabel(probe->pg_mode)
+                                          << " activation_stage=" << probe->init_stage << "/6"
+                                          << " (waiting for pgmode="
+                                          << rbpodoModeName(expected_simulation) << ", "
+                                          << (nowSteadyNs() - verify_start_ns) / 1'000'000'000.0
+                                          << " s)\n";
+                                last_logged = *probe;
+                                next_heartbeat_ns = nowSteadyNs() + 10'000'000'000ULL;
+                            }
                         }
-                        if (nowSteadyNs() >= next_progress_ns) {
-                            std::cerr << "[INFO] RbpodoBackend still waiting for pgmode "
-                                      << rbpodoModeName(expected_simulation) << " on "
-                                      << impl_->config.name << " ("
-                                      << (nowSteadyNs() - verify_start_ns) / 1'000'000'000ULL
-                                      << " s elapsed)\n";
-                            next_progress_ns += 5'000'000'000ULL;
-                        }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     }
                     if (!confirmed) {
                         return failedResult<RobotState>(
@@ -900,8 +988,11 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
                             backendError(
                                 BackendErrorKind::WrongMode,
                                 "rbpodo pgmode switch to " + rbpodoModeName(expected_simulation) +
-                                    " did not take effect within " +
-                                    std::to_string(kOperationModeSwitchTimeoutNs / 1'000'000'000ULL) + " s",
+                                    " not confirmed within " +
+                                    std::to_string(kOperationModeSwitchTimeoutNs / 1'000'000'000ULL) +
+                                    " s (controller last reported pgmode=" +
+                                    rbpodoPgModeLabel(last_seen.pg_mode) + ", activation_stage=" +
+                                    std::to_string(last_seen.init_stage) + "/6)",
                                 "",
                                 "rbpodo_operation_mode_switch_unconfirmed"
                             ),
@@ -938,26 +1029,46 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
                     }
                     (void)ret;  // activation progress is judged by the state poll below
                     bool activated = false;
+                    int last_act_stage = -2;
                     const uint64_t act_start_ns = nowSteadyNs();
                     const uint64_t act_deadline_ns = act_start_ns + 60'000'000'000ULL;
-                    uint64_t act_progress_ns = act_start_ns + 5'000'000'000ULL;
+                    uint64_t act_progress_ns = act_start_ns + 10'000'000'000ULL;
                     while (nowSteadyNs() < act_deadline_ns) {
+                        if (shutdownRequested()) {
+                            return failedResult<RobotState>(
+                                BackendOp::Initialize,
+                                backendError(
+                                    BackendErrorKind::RobotNotInitialized,
+                                    "rbpodo activation confirmation aborted by shutdown signal",
+                                    "",
+                                    "rbpodo_initialize_aborted_by_shutdown"
+                                ),
+                                makeBackendTiming(start, nowSteadyNs())
+                            );
+                        }
                         const auto verify = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+                        int observed_stage = -1;
                         if (verify) {
                             const RbpodoSystemStateSnapshot vs = snapshotFromSystemState(*verify);
                             const RobotState vm = mapRbpodoSystemStateSnapshot(impl_->arm_id, vs, impl_->config);
+                            observed_stage = vs.init_state_info & 0x3f;
                             if (vm.servo_enabled) {
                                 activated = true;
                                 break;
                             }
                             if (vm.has_error) break;  // activation fault: report below
                         }
-                        if (nowSteadyNs() >= act_progress_ns) {
-                            std::cerr << "[INFO] RbpodoBackend still waiting for activation on "
+                        // Log on activation-stage CHANGE (SD_INIT_STATE_INFO
+                        // 0..6, 6=done) plus a periodic heartbeat, so the
+                        // operator sees real controller progress.
+                        if (observed_stage != last_act_stage || nowSteadyNs() >= act_progress_ns) {
+                            std::cerr << "[INFO] RbpodoBackend activation_stage="
+                                      << observed_stage << "/6 on "
                                       << impl_->config.name << " ("
-                                      << (nowSteadyNs() - act_start_ns) / 1'000'000'000ULL
-                                      << " s elapsed)\n";
-                            act_progress_ns += 5'000'000'000ULL;
+                                      << (nowSteadyNs() - act_start_ns) / 1'000'000'000.0
+                                      << " s)\n";
+                            last_act_stage = observed_stage;
+                            act_progress_ns = nowSteadyNs() + 10'000'000'000ULL;
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     }

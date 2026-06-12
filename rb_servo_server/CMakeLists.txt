@@ -17,6 +17,7 @@ add_library(rb_servo_core
     src/core/types.cpp
     src/core/clock.cpp
     src/core/realtime.cpp
+    src/core/shutdown.cpp
     src/robot/backend_result.cpp
     src/config/config.cpp
     src/kinematics/ik_solver.cpp

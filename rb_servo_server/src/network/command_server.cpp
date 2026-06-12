@@ -855,7 +855,7 @@ void CommandServer::threadMain(std::promise<bool> startup_result) {
                 // acquiring client waits forever for a grant it already has.
                 if (command_buffer_) {
                     if (cmd.lease_admin_only) {
-                        command_buffer_->updateLease(cmd.lease);
+                        command_buffer_->updateLease(cmd.lease, receive_time_ns);
                     } else {
                         command_buffer_->setCommand(cmd);
                     }

@@ -2485,6 +2485,27 @@ class FloorConstraintGuiTest(unittest.TestCase):
         # Missing handle is a no-op.
         update_floor_plane({}, self._floor_block())
 
+    def test_update_floor_plane_preview(self):
+        class FakePlane:
+            def __init__(self):
+                self.position = (0.0, 0.0, 0.0)
+                self.visible = True
+
+        plane = FakePlane()
+        handles = {"floor_plane_preview": plane}
+        # Pending value shows the preview at the slider z.
+        update_floor_plane_preview(handles, 0.123)
+        self.assertTrue(plane.visible)
+        self.assertAlmostEqual(plane.position[2], 0.123)
+        # None (slider matches applied / constraint disabled) hides it.
+        update_floor_plane_preview(handles, None)
+        self.assertFalse(plane.visible)
+        # Non-finite values hide instead of moving the plane.
+        update_floor_plane_preview(handles, float("nan"))
+        self.assertFalse(plane.visible)
+        # Missing handle is a no-op.
+        update_floor_plane_preview({}, 0.05)
+
 
 class LeaseBracketTest(unittest.TestCase):
     """One-shot GUI commands must be wrapped Acquire -> command -> Release so

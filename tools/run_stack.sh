@@ -44,6 +44,28 @@ mkdir -p "$LOG_DIR"
 [ -f "$SERVER_CFG" ] || { echo "[stack] missing $SERVER_CFG" >&2; exit 1; }
 [ -f "$POLICY_CFG" ] || { echo "[stack] missing $POLICY_CFG" >&2; exit 1; }
 
+# Preflight: a previous run interrupted mid-startup (e.g. Ctrl-C during a slow
+# pgmode switch) can leave OUR processes alive holding the command/state ports
+# -> "bind() failed: Address already in use". Kill stale instances of this
+# stack's own components (matched by our binary/module paths only) first.
+preflight_kill_stale() {
+  local label="$1"; shift
+  local pids
+  pids=$(pgrep -f "$1" 2>/dev/null | grep -vw "$$" || true)
+  [ -n "$pids" ] || return 0
+  echo "[stack] killing stale $label from a previous run (pid: $(echo $pids | tr '\n' ' '))"
+  kill $pids 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    pgrep -f "$1" >/dev/null 2>&1 || return 0
+    sleep 0.1
+  done
+  echo "[stack] stale $label ignored SIGTERM; escalating to SIGKILL" >&2
+  pkill -9 -f "$1" 2>/dev/null || true
+}
+preflight_kill_stale "rb_servo_server" "$SERVER_BIN"
+preflight_kill_stale "viser GUI"       "python3 -m rb_servo_gui.app"
+preflight_kill_stale "policy_runner"   "python3 -u -m policy_runner --config policy_runner/config/stack_"
+
 if [ "$MODE" = "real" ]; then
   echo "============================================================"
   echo "[stack] PHYSICAL REAL MODE — THE ARMS WILL MOVE."
@@ -53,12 +75,28 @@ fi
 
 PIDS=()
 cleanup() {
-  trap - EXIT INT TERM
+  # Ignore further Ctrl-C: a second ^C must not interrupt the teardown and
+  # leave a process holding the command port (-> bind Address already in use).
+  trap '' INT TERM
+  trap - EXIT
   echo
   echo "[stack] stopping..."
   # Kill in reverse order (policy first so it releases the lease, then GUI, server).
   for ((i = ${#PIDS[@]} - 1; i >= 0; i--)); do
     kill "${PIDS[$i]}" 2>/dev/null || true
+  done
+  # Bounded wait, then SIGKILL stragglers (the server now aborts its slow
+  # pgmode/activation polls on SIGTERM, so this normally returns quickly).
+  local deadline=$((SECONDS + 10))
+  for pid in "${PIDS[@]}"; do
+    while kill -0 "$pid" 2>/dev/null; do
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        echo "[stack] pid $pid did not exit in 10s; SIGKILL" >&2
+        kill -9 "$pid" 2>/dev/null || true
+        break
+      fi
+      sleep 0.1
+    done
   done
   wait 2>/dev/null || true
   echo "[stack] stopped. logs in $LOG_DIR/"

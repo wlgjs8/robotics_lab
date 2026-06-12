@@ -54,11 +54,15 @@ void CommandBuffer::setCommand(const DualArmCommand& command) {
     }
 }
 
-void CommandBuffer::updateLease(const CommandSourceLeaseState& lease) {
+void CommandBuffer::updateLease(const CommandSourceLeaseState& lease, uint64_t now_ns) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!latest_command_.has_value()) {
-        // host_time_ns == 0 -> never times out, so the lease readback stays
-        // visible while the client waits for the grant before sending motion.
+    if (!latest_command_.has_value() || !isUsableCommand(*latest_command_, now_ns)) {
+        // Absent OR EXPIRED latest command: writing the lease onto an expired
+        // command would hide it (latestOrHold falls back to a fresh empty-lease
+        // Hold), so an acquiring client's readback would never see the grant —
+        // e.g. re-engaging teleop after idle, when the buffer still holds the
+        // last timed-out streaming command. Replace with a non-expiring Hold
+        // (host_time_ns == 0) so the grant stays visible until motion resumes.
         latest_command_ = makeHold(0);
     }
     latest_command_->lease = lease;

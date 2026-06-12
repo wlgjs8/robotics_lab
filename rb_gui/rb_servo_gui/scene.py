@@ -167,13 +167,14 @@ def _joint_cfg_radians(q_values: tuple[float, ...] | None) -> tuple[float, ...]:
 # Translucent blue for the reference "ghost" robot (R, G, B, alpha in 0..1).
 _REFERENCE_GHOST_RGBA = (0.25, 0.6, 1.0, 0.35)
 
-# Fully opaque red for the self-collision overlay (shown while
-# self_collision.violated, monitor_only included). The URDF override is an
-# RGB 3-tuple on purpose: a 4-tuple routes through add_mesh_simple(opacity=a),
-# which uses the transparent material pipeline even at alpha 1.0 and renders
-# washed out / depth-sorted. RGB keeps the opaque pipeline.
-_SELF_COLLISION_RGB = (0.85, 0.08, 0.08)
-_SELF_COLLISION_STAND_RGBA = (217, 20, 20, 255)
+# Translucent red for the self-collision overlay (shown while
+# self_collision.violated, monitor_only included). The RGBA 4-tuple routes the
+# URDF override through add_mesh_simple(opacity=a) — the same transparent
+# pipeline as the reference ghost — so the colliding pair reads as a red
+# see-through highlight instead of a solid replacement.
+_SELF_COLLISION_RGBA = (0.85, 0.08, 0.08, 0.6)
+_SELF_COLLISION_STAND_RGB = (217, 20, 20)
+_SELF_COLLISION_STAND_OPACITY = 0.6
 
 
 def _reference_ghost_enabled() -> bool:
@@ -210,6 +211,9 @@ def _tcp_label_position(position: tuple[float, float, float]) -> tuple[float, fl
 
 _FLOOR_PLANE_BLUE = (80, 160, 255)
 _FLOOR_PLANE_RED = (220, 60, 60)
+# Pending (not-yet-sent) slider value preview: distinct color so it cannot be
+# mistaken for the APPLIED safety plane.
+_FLOOR_PLANE_PREVIEW_YELLOW = (235, 200, 60)
 # Stand-frame footprint of the floor plane visual: x in [-0.5, 0.5] m,
 # y in [-1.0, 0.0] m (the workspace in front of the stand).
 _FLOOR_PLANE_DIMENSIONS = (1.0, 1.0, 0.002)
@@ -250,6 +254,49 @@ def _add_floor_plane(server: Any, handles: dict[str, Any]) -> None:
             )
     except Exception as exc:
         handles["floor_plane_error"] = f"{type(exc).__name__}: {exc}"
+    # Pending-slider preview plane (yellow, more translucent): follows the
+    # "Set floor z mm" slider live so the operator can line the plane up
+    # BEFORE sending; the applied plane above keeps tracking only the
+    # server-reported effective z.
+    try:
+        if hasattr(server.scene, "add_box"):
+            try:
+                handles["floor_plane_preview"] = server.scene.add_box(
+                    "/stand/floor_plane_preview",
+                    dimensions=_FLOOR_PLANE_DIMENSIONS,
+                    color=_FLOOR_PLANE_PREVIEW_YELLOW,
+                    opacity=0.15,
+                    position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
+                    visible=False,
+                )
+            except TypeError:  # older viser without opacity support
+                handles["floor_plane_preview"] = server.scene.add_box(
+                    "/stand/floor_plane_preview",
+                    dimensions=_FLOOR_PLANE_DIMENSIONS,
+                    color=_FLOOR_PLANE_PREVIEW_YELLOW,
+                    position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
+                    visible=False,
+                )
+    except Exception as exc:
+        handles["floor_plane_preview_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def update_floor_plane_preview(scene_handles: dict[str, Any], z_m: float | None) -> None:
+    """Show the pending slider value as a translucent preview plane.
+
+    z_m=None hides the preview (slider matches the applied value, or the
+    constraint is disabled)."""
+    plane = scene_handles.get("floor_plane_preview") if isinstance(scene_handles, dict) else None
+    if plane is None:
+        return
+    if z_m is None or not isinstance(z_m, (int, float)) or not math.isfinite(float(z_m)):
+        _set_visible(plane, False)
+        return
+    try:
+        plane.position = (*_FLOOR_PLANE_CENTER_XY, float(z_m))
+    except Exception:
+        pass
+    _set_visible(plane, True)
 
 
 def update_floor_plane(scene_handles: dict[str, Any], floor: Mapping[str, Any] | None) -> None:
@@ -279,7 +326,7 @@ def update_floor_plane(scene_handles: dict[str, Any], floor: Mapping[str, Any] |
 
 
 def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) -> None:
-    """Paint the colliding PAIR opaque red while self_collision.violated.
+    """Paint the colliding PAIR translucent red while self_collision.violated.
 
     Driven by the server's self_collision telemetry, so monitor_only runs show
     the overlay too. Only the members of the reported pair turn red
@@ -441,13 +488,16 @@ def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
             position=_pose_position(_DEFAULT_STAND_MESH_POSE),
             wxyz=_pose_wxyz(_DEFAULT_STAND_MESH_POSE),
         )
-        # Opaque-red duplicate for the self-collision overlay (hidden until violated).
+        # Translucent-red duplicate for the self-collision overlay (hidden until
+        # violated). add_mesh_simple (not add_mesh_trimesh): trimesh face-color
+        # alpha is not honored, opacity= is.
         try:
-            red = mesh.copy()
-            red.visual.face_colors = _SELF_COLLISION_STAND_RGBA
-            handles["stand_mesh_collision"] = server.scene.add_mesh_trimesh(
+            handles["stand_mesh_collision"] = server.scene.add_mesh_simple(
                 "/stand/mesh_collision",
-                mesh=red,
+                vertices=mesh.vertices,
+                faces=mesh.faces,
+                color=_SELF_COLLISION_STAND_RGB,
+                opacity=_SELF_COLLISION_STAND_OPACITY,
                 position=_pose_position(_DEFAULT_STAND_MESH_POSE),
                 wxyz=_pose_wxyz(_DEFAULT_STAND_MESH_POSE),
                 visible=False,
@@ -483,16 +533,16 @@ def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
                     mesh_color_override=_REFERENCE_GHOST_RGBA)
             except Exception as exc:
                 handles["urdf_ref_error"] = f"{type(exc).__name__}: {exc}"
-        # Opaque-red self-collision overlay robots (hidden until violated). In
-        # pgmode real they replace the actual robot; in pgmode simulation they
-        # replace the commanded ghost.
+        # Translucent-red self-collision overlay robots (hidden until violated).
+        # In pgmode real they replace the actual robot; in pgmode simulation
+        # they replace the commanded ghost.
         try:
             handles["left_urdf_collision"] = ViserUrdf(
                 server, urdf_path, root_node_name="/stand/left_base_collision",
-                mesh_color_override=_SELF_COLLISION_RGB)
+                mesh_color_override=_SELF_COLLISION_RGBA)
             handles["right_urdf_collision"] = ViserUrdf(
                 server, urdf_path, root_node_name="/stand/right_base_collision",
-                mesh_color_override=_SELF_COLLISION_RGB)
+                mesh_color_override=_SELF_COLLISION_RGBA)
         except Exception as exc:
             handles["urdf_collision_error"] = f"{type(exc).__name__}: {exc}"
     except Exception as exc:
@@ -519,7 +569,7 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         # Mount frames for the translucent reference "ghost" robot (follows q_ref).
         handles["left_base_ref"] = server.scene.add_frame("/stand/left_base_ref", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
         handles["right_base_ref"] = server.scene.add_frame("/stand/right_base_ref", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
-        # Mount frames for the opaque-red self-collision overlay robots.
+        # Mount frames for the translucent-red self-collision overlay robots.
         handles["left_base_collision"] = server.scene.add_frame("/stand/left_base_collision", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
         handles["right_base_collision"] = server.scene.add_frame("/stand/right_base_collision", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
         has_transform_controls = hasattr(server.scene, "add_transform_controls")
