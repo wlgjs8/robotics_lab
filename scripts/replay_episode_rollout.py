@@ -40,9 +40,17 @@ from policy_runner.robot_state_client import (  # noqa: E402
 from policy_runner.servo_command_client import ServoCommandClient, CommandIntent  # noqa: E402
 from policy_runner.gripper import GripperRuntime  # noqa: E402
 from policy_runner.flow_inference import (  # noqa: E402
+    DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S,
+    DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
     DirectBcImageActionSource,
     FlowMatchingActionSource,
     action_chunk_checkpoint_kind,
+)
+from policy_runner.flow_dataset import pose_delta_local  # noqa: E402
+from policy_runner.action_sources.tcp_delta import (  # noqa: E402
+    cartesian_action_requirements,
+    clamp_tcp_twist,
+    tcp_twist_local_intent,
 )
 
 # rbpodo rest pose (folded, arms up, clear of floor) — GUI default InitMotion target.
@@ -116,6 +124,49 @@ def load_episode(path: str, camera_names: list[str]):
             key = f"observations/gripper_{arm}"
             gripper_by_arm[arm] = np.asarray(f[key]) if key in f else None
     return frames_by_name, gripper_by_arm, num_frames
+
+
+class GroundTruthSource:
+    """Replays the COLLECTED demonstration motion on the robot (no model).
+
+    Emits the recorded per-step ee_local body-frame deltas (pose_delta_local of the
+    recorded target poses, i.e. exactly the flow_dataset ee_local training target)
+    as TcpTwistLocal. This is the 'ideal' rollout: what the policy *should* output.
+    """
+
+    def __init__(self, episode_path: str, clock: ReplayClock, *, policy_dt_sec: float,
+                 max_lin: float = DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
+                 max_ang: float = DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S):
+        with h5py.File(episode_path, "r") as f:
+            tpL = np.asarray(f["action/target_pose_left"])
+            tpR = np.asarray(f["action/target_pose_right"])
+        n = len(tpL)
+        self.dL = np.array([pose_delta_local(tpL[i], tpL[i + 1]) for i in range(n - 1)], dtype=np.float64)
+        self.dR = np.array([pose_delta_local(tpR[i], tpR[i + 1]) for i in range(n - 1)], dtype=np.float64)
+        self.clock = clock
+        self.policy_dt_sec = float(policy_dt_sec)
+        self.max_lin = float(max_lin)
+        self.max_ang = float(max_ang)
+        self.camera_names: list[str] = []
+        self.checkpoint_arm_mask = (1.0, 1.0)
+        self.checkpoint_selected_arms = ["left", "right"]
+        self.requirements = replace(
+            cartesian_action_requirements(allow_rbpodo_controller_simulation=True),
+            requires_camera=False,
+        )
+
+    def _twist(self, delta):
+        return clamp_tcp_twist((np.asarray(delta) / self.policy_dt_sec).tolist(), self.max_lin, self.max_ang)
+
+    def next_intent(self, snapshot, now_monotonic):
+        t = self.clock.index
+        if t >= len(self.dL):
+            return None
+        return tcp_twist_local_intent(left=self._twist(self.dL[t][:6]),
+                                      right=self._twist(self.dR[t][:6]), timeout_sec=0.2)
+
+    def close(self):
+        pass
 
 
 def init_to_rest(config, *, settle_sec: float = 14.0, stderr=sys.stderr) -> None:
@@ -204,8 +255,11 @@ def fix_camera_names(source, checkpoint_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
-    ap.add_argument("--checkpoint", required=True)
+    ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--episode", required=True)
+    ap.add_argument("--ground-truth", action="store_true",
+                    help="replay the COLLECTED demonstration motion (recorded ee_local actions) on the robot "
+                         "instead of running a model; no checkpoint needed")
     ap.add_argument("--policy-dt-sec", type=float, default=0.0334)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--ee-local-r-align", default=None)
@@ -214,6 +268,12 @@ def main():
     ap.add_argument("--chunk-execute-steps", type=int, default=None)
     ap.add_argument("--no-init", action="store_true", help="skip moving to rest pose first")
     ap.add_argument("--tail-ticks", type=int, default=8, help="extra ticks after last frame to flush motion")
+    ap.add_argument("--blind", action="store_true",
+                    help="force camera_names=[] (reproduce the pre-fix blind-policy bug: no image conditioning)")
+    ap.add_argument("--open-loop", action="store_true",
+                    help="feed RECORDED proprio (training-matched) instead of live-sim proprio; the robot still "
+                         "integrates the commanded twists for visualization, but model inputs match training "
+                         "(removes the closed-loop recorded-frames-vs-diverging-robot divergence artifact)")
     args = ap.parse_args()
 
     config = load_config(args.config)
@@ -230,30 +290,64 @@ def main():
     if not args.no_init:
         init_to_rest(config)
 
-    # Build the source first (without frames) to learn the checkpoint camera names,
-    # then load the episode frames for exactly those cameras.
     clock = ReplayClock(num_frames=1)
-    replay_client = ReplayCameraClient({}, clock)
-    source, kind = build_source(args, replay_client)
-    cam_names = fix_camera_names(source, args.checkpoint)
-    if args.chunk_execute_steps is not None:
-        source.chunk_execute_steps = int(args.chunk_execute_steps)
+    if args.ground_truth:
+        # Replay the collected demonstration directly on the robot (no model).
+        source = GroundTruthSource(args.episode, clock, policy_dt_sec=args.policy_dt_sec)
+        T = len(source.dL) + 1
+        clock.num_frames = T
+        print(f"[replay] GROUND-TRUTH data replay: {T} frames (recorded ee_local actions)", file=sys.stderr)
+    else:
+        if not args.checkpoint:
+            raise SystemExit("--checkpoint is required unless --ground-truth is set")
+        # Build the source first (without frames) to learn the checkpoint camera names,
+        # then load the episode frames for exactly those cameras.
+        replay_client = ReplayCameraClient({}, clock)
+        source, kind = build_source(args, replay_client)
+        cam_names = fix_camera_names(source, args.checkpoint)
+        if args.blind:
+            # Reproduce the pre-fix bug: a vision-conditioned policy loaded with no
+            # camera names runs on zero images (output independent of the scene).
+            source.camera_names = []
+            source.requirements = replace(source.requirements, requires_camera=False)
+            print("[replay] --blind: camera_names forced to [] (policy runs WITHOUT images)", file=sys.stderr)
+        if args.chunk_execute_steps is not None:
+            source.chunk_execute_steps = int(args.chunk_execute_steps)
 
-    frames_by_name, gripper_by_arm, T = load_episode(args.episode, cam_names)
-    clock.num_frames = T
-    replay_client._frames_by_name = frames_by_name
-    print(f"[replay] kind={kind} cams={cam_names} frames={T} chunk_execute={source.chunk_execute_steps}", file=sys.stderr)
+        frames_by_name, gripper_by_arm, T = load_episode(args.episode, cam_names)
+        clock.num_frames = T
+        replay_client._frames_by_name = frames_by_name
+        print(f"[replay] kind={kind} cams={cam_names} frames={T} chunk_execute={source.chunk_execute_steps}", file=sys.stderr)
 
-    # Recorded gripper percent into the proprio gripper channel (the servo state has
-    # no gripper; without this the proprio gripper reads 0=closed and the policy
-    # behaves as if the grasp already happened -> spurious lift instead of descend).
-    def live_gripper_percent(arm):
-        arr = gripper_by_arm.get(arm)
-        if arr is None or len(arr) == 0:
-            return None
-        return float(arr[min(clock.index, len(arr) - 1)])
+        # Recorded gripper percent into the proprio gripper channel (the servo state has
+        # no gripper; without this the proprio gripper reads 0=closed and the policy
+        # behaves as if the grasp already happened -> spurious lift instead of descend).
+        def live_gripper_percent(arm):
+            arr = gripper_by_arm.get(arm)
+            if arr is None or len(arr) == 0:
+                return None
+            return float(arr[min(clock.index, len(arr) - 1)])
 
-    source._live_gripper_percent = live_gripper_percent
+        source._live_gripper_percent = live_gripper_percent
+
+        if args.open_loop:
+            # Feed the training-matched proprio (body-frame pose_delta_local from the
+            # recorded reset pose) at the current replay index, decoupled from the
+            # (visualization-only) sim robot. This isolates the model's true output
+            # quality from closed-loop divergence.
+            with h5py.File(args.episode, "r") as f:
+                obs = {a: np.asarray(f[f"observations/tcp_stand_{a}"]) for a in ("left", "right")}
+            am = source.arm_mask
+            def recorded_proprio(_payload):
+                t = min(clock.index, T - 1)
+                feats = []
+                for a in ("left", "right"):
+                    g = gripper_by_arm.get(a)
+                    gv = float(g[min(t, len(g) - 1)]) if g is not None and len(g) else 0.0
+                    feats.append(np.concatenate([pose_delta_local(obs[a][0], obs[a][t]), [gv]]))
+                return np.concatenate([feats[0], feats[1], am]).astype(np.float32)
+            source._runtime_proprio = recorded_proprio
+            print("[replay] --open-loop: proprio sourced from recorded poses (training-matched)", file=sys.stderr)
 
     # Drive the replay frame pointer from the run loop's per-tick state_sink. The
     # source resamples (and reads a frame) every chunk_execute_steps ticks; advancing

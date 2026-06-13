@@ -6,7 +6,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-CKPT="$1"; EP="$2"; OUT="$3"; PDT="${4:-0.0334}"
+CKPT="$1"; EP="$2"; OUT="$3"; PDT="${4:-0.0334}"; EXTRA="${5:-}"
 DISP=":96"
 GEOM="1600x1000"
 OUTDIR="outputs/replay_videos"
@@ -30,7 +30,7 @@ sleep 1.5
 echo "[rec] run replay driver (no-init)..."
 PYTHONPATH=policy_runner $VENV -u scripts/replay_episode_rollout.py \
   --config policy_runner/config/replay_sim.yaml \
-  --checkpoint "$CKPT" --episode "$EP" --policy-dt-sec "$PDT" --no-init \
+  --checkpoint "$CKPT" --episode "$EP" --policy-dt-sec "$PDT" --no-init $EXTRA \
   >/tmp/replay_${OUT}.log 2>&1
 RC=$?
 echo "[rec] replay rc=$RC"; tail -2 /tmp/replay_${OUT}.log
