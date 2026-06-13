@@ -15,6 +15,12 @@ struct SafetyTrackingState {
     double physical_command_actual_error_deg = 0.0;
     bool controller_simulation_physical_motion_detected = false;
     bool controller_simulation_physical_motion_fault = false;
+    // controller-simulation: the tracking "reference" is the controller's own
+    // reported jnt_ref, which does NOT advance while the (no-motion) sim servo is
+    // disabled. Comparing the streaming command to it pins the command after
+    // ~max_tracking_error_deg. When advisory, report the tracking error but do
+    // NOT snap the command back, so streaming Cartesian accumulates the full path.
+    bool tracking_error_advisory = false;
 };
 
 struct SafetyCheckResult {

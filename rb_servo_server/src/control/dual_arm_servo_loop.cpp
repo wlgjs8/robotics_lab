@@ -763,6 +763,15 @@ SafetyTrackingState trackingStateForArm(
     tracking.override_tracking_q = true;
     tracking.tracking_q_deg = state.q_target_deg;
     tracking.source = "reference";
+    // In controller-simulation the reference (jnt_ref) does not advance while the
+    // sim servo is disabled, so a streaming Cartesian command that runs ahead would
+    // be pinned by the tracking-error snap-back. Mark the tracking error advisory so
+    // the safety filter reports it without snapping the command back. Same gate as
+    // the existing non-latching advisory (controller_simulation_tracking_error_nonlatching).
+    tracking.tracking_error_advisory =
+        controllerSimulationMotionRequired(config) &&
+        controllerSimulationMotionGateOpen(config) &&
+        config.safety.controller_simulation_tracking_error_nonlatching;
     if (!state.has_valid_joint_state || !finiteJointArray(state.q_target_deg)) {
         tracking.source_valid = false;
         tracking.reason = "controller_simulation_reference_state_unavailable";
