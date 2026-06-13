@@ -331,9 +331,15 @@ class FlowMatchingActionSource:
             )
         self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
         self.command_family = canonical_flow_command_family(self.command_family_option)
-        self.camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
-        self.image_size = int(checkpoint.get("image_size", 224))
         model_config = dict(checkpoint.get("model_config", {}))
+        # camera_names may live only inside model_config (flow checkpoints) rather
+        # than at the top level. Falling through to model_config is REQUIRED: an
+        # empty camera_names makes the source treat a vision-conditioned policy as
+        # camera-free (requires_camera=False) and run it BLIND on zero images, so
+        # its output is identical across scenes -> wrong, image-independent motion.
+        _camera_names = checkpoint.get("camera_names") or model_config.get("camera_names") or []
+        self.camera_names = [str(name) for name in _camera_names]
+        self.image_size = int(checkpoint.get("image_size") or model_config.get("image_size") or 224)
         if not model_config:
             model_config = {
                 "action_horizon": int(checkpoint["action_horizon"]),
