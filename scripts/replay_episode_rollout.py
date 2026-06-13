@@ -135,6 +135,7 @@ class GroundTruthSource:
     """
 
     def __init__(self, episode_path: str, clock: ReplayClock, *, policy_dt_sec: float,
+                 r_align: np.ndarray | None = None,
                  max_lin: float = DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
                  max_ang: float = DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S):
         with h5py.File(episode_path, "r") as f:
@@ -143,6 +144,13 @@ class GroundTruthSource:
         n = len(tpL)
         self.dL = np.array([pose_delta_local(tpL[i], tpL[i + 1]) for i in range(n - 1)], dtype=np.float64)
         self.dR = np.array([pose_delta_local(tpR[i], tpR[i + 1]) for i in range(n - 1)], dtype=np.float64)
+        if r_align is not None:
+            # Rotate the body-frame linear+angular deltas into the RB TCP frame
+            # (e.g. a 180deg-about-approach correction for the steamvr->stand yaw gap).
+            R = np.asarray(r_align, dtype=np.float64)
+            for d in (self.dL, self.dR):
+                d[:, 0:3] = d[:, 0:3] @ R.T
+                d[:, 3:6] = d[:, 3:6] @ R.T
         self.clock = clock
         self.policy_dt_sec = float(policy_dt_sec)
         self.max_lin = float(max_lin)
@@ -293,7 +301,9 @@ def main():
     clock = ReplayClock(num_frames=1)
     if args.ground_truth:
         # Replay the collected demonstration directly on the robot (no model).
-        source = GroundTruthSource(args.episode, clock, policy_dt_sec=args.policy_dt_sec)
+        from policy_runner.flow_inference import resolve_ee_local_r_align
+        r_align = resolve_ee_local_r_align(args.ee_local_r_align)
+        source = GroundTruthSource(args.episode, clock, policy_dt_sec=args.policy_dt_sec, r_align=r_align)
         T = len(source.dL) + 1
         clock.num_frames = T
         print(f"[replay] GROUND-TRUTH data replay: {T} frames (recorded ee_local actions)", file=sys.stderr)
