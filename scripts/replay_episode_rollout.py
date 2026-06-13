@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""Offline-replay a trained checkpoint into the VM pgmode-sim stack for viser capture.
+
+Feeds RECORDED data_tcp HDF5 frames (+ recorded gripper percent for proprio) into a
+trained checkpoint each policy tick, and streams the resulting TcpTwistLocal commands
+into the running rb_servo_server (stack_sim) so the policy's commanded motion is
+visualized in viser. Closed-loop on the sim robot (live-sim proprio for the arm body
+deltas), open frames (recorded), recorded gripper for the proprio gripper channel.
+
+This reuses the trusted live flow-infer command pipeline; the ONLY substitution is the
+camera source (live ZMQ bundle -> recorded HDF5 frames) and the proprio gripper channel.
+
+Usage:
+  PYTHONPATH=policy_runner ~/openpi/.venv/bin/python scripts/replay_episode_rollout.py \
+      --config policy_runner/config/replay_sim.yaml \
+      --checkpoint ~/pika_umi_models_v2/flow/checkpoint.pt \
+      --episode ~/workspace/robotics_lab/data_tcp/data_20260606_134608/episode_000.hdf5 \
+      --policy-dt-sec 0.0334
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from dataclasses import replace
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "policy_runner"))
+
+import h5py  # noqa: E402
+
+from policy_runner.config import load_config  # noqa: E402
+from policy_runner.main import run  # noqa: E402
+from policy_runner.robot_state_client import (  # noqa: E402
+    RobotStateClient,
+    StateStreamLeaseReadback,
+)
+from policy_runner.servo_command_client import ServoCommandClient, CommandIntent  # noqa: E402
+from policy_runner.gripper import GripperRuntime  # noqa: E402
+from policy_runner.flow_inference import (  # noqa: E402
+    DirectBcImageActionSource,
+    FlowMatchingActionSource,
+    action_chunk_checkpoint_kind,
+)
+
+# rbpodo rest pose (folded, arms up, clear of floor) — GUI default InitMotion target.
+REST_LEFT_DEG = (-131.663, 72.989, 113.400, -80.880, -107.064, -145.949)
+REST_RIGHT_DEG = (135.099, -64.017, -114.457, 84.379, 112.485, 129.893)
+
+
+class _Frame:
+    __slots__ = ("pixels",)
+
+    def __init__(self, pixels):
+        self.pixels = pixels
+
+
+class _Bundle:
+    __slots__ = ("frames",)
+
+    def __init__(self, frames):
+        self.frames = frames
+
+
+class ReplayClock:
+    def __init__(self, num_frames: int):
+        self.index = 0
+        self.num_frames = num_frames
+
+
+class ReplayCameraClient:
+    """Camera-bundle-client stand-in that yields the recorded HDF5 frame at clock.index.
+
+    Mirrors the CameraBundleClient duck-type used by FlowMatchingActionSource:
+    poll(timeout_ms=0) -> bundle with .frames[name].pixels, is_fresh(bundle) -> bool.
+    Pixels are the raw stored HDF5 image cells (JPEG bytes); decode_hdf5_image_value
+    in the source reproduces training preprocessing exactly.
+    """
+
+    def __init__(self, frames_by_name: dict[str, list], clock: ReplayClock):
+        self._frames_by_name = frames_by_name
+        self._clock = clock
+
+    def _bundle(self):
+        i = min(self._clock.index, self._clock.num_frames - 1)
+        return _Bundle({name: _Frame(cells[i]) for name, cells in self._frames_by_name.items()})
+
+    def poll(self, timeout_ms: int = 0):
+        return self._bundle()
+
+    def latest(self):
+        return self._bundle()
+
+    def is_fresh(self, bundle) -> bool:
+        return bundle is not None
+
+    def close(self) -> None:
+        pass
+
+
+def load_episode(path: str, camera_names: list[str]):
+    """Return (frames_by_name, gripper_by_arm, num_frames)."""
+    frames_by_name: dict[str, list] = {}
+    gripper_by_arm: dict[str, np.ndarray] = {}
+    with h5py.File(path, "r") as f:
+        img_grp = f["observations/images"]
+        for name in camera_names:
+            if name not in img_grp:
+                raise KeyError(f"camera {name!r} not in episode {path}")
+            ds = img_grp[name]
+            frames_by_name[name] = [ds[i] for i in range(ds.shape[0])]
+        num_frames = len(next(iter(frames_by_name.values())))
+        for arm in ("left", "right"):
+            key = f"observations/gripper_{arm}"
+            gripper_by_arm[arm] = np.asarray(f[key]) if key in f else None
+    return frames_by_name, gripper_by_arm, num_frames
+
+
+def init_to_rest(config, *, settle_sec: float = 14.0, stderr=sys.stderr) -> None:
+    """Move both arms to the folded rest pose via JointTarget before the rollout.
+
+    Uses its own state+command clients and fully closes them before returning so
+    run()'s own RobotStateClient gets exclusive use of the state port."""
+    sc = RobotStateClient(config.robot_state.bind, config.robot_state.stale_timeout_sec)
+    sc.start()
+    cc = ServoCommandClient(config.servo_command.endpoint, config.servo_command.timeout_sec)
+    try:
+        t0 = time.monotonic()
+        while sc.latest is None and time.monotonic() - t0 < 5.0:
+            time.sleep(0.05)
+        if sc.latest is None:
+            raise RuntimeError("no robot state on " + config.robot_state.bind)
+        cc.acquire_lease(StateStreamLeaseReadback(sc), timeout_sec=4.0)
+        cc.send(CommandIntent.arm_motion(timeout_sec=0.5))
+        time.sleep(0.3)
+        jt = CommandIntent.joint_target(left=REST_LEFT_DEG, right=REST_RIGHT_DEG, timeout_sec=10.0)
+        deadline = time.monotonic() + settle_sec
+        while time.monotonic() < deadline:
+            cc.send(jt)
+            time.sleep(0.05)
+            p = sc.latest.payload
+            lq = p["left"]["q_actual_deg"]
+            rq = p["right"]["q_actual_deg"]
+            errl = max(abs(a - b) for a, b in zip(lq, REST_LEFT_DEG))
+            errr = max(abs(a - b) for a, b in zip(rq, REST_RIGHT_DEG))
+            if errl < 1.0 and errr < 1.0:
+                break
+        p = sc.latest.payload
+        print(
+            f"[replay] init rest pose: Lq={[round(x,1) for x in p['left']['q_actual_deg']]} "
+            f"Rq={[round(x,1) for x in p['right']['q_actual_deg']]} "
+            f"Lz={round(p['left'].get('tcp_actual_stand',{}).get('z',float('nan')),3)} "
+            f"verdict={p.get('safety_verdict')}",
+            file=stderr,
+            flush=True,
+        )
+        cc.release_lease()
+        time.sleep(0.5)  # let the release register before run() re-acquires
+    finally:
+        cc.close()
+        sc.close()
+        time.sleep(0.3)
+
+
+def build_source(args, camera_client):
+    kind = action_chunk_checkpoint_kind(args.checkpoint, device="cpu")
+    common = dict(
+        camera_client=camera_client,
+        command_family="tcp_twist_local",
+        policy_dt_sec=args.policy_dt_sec,
+        allow_rbpodo_controller_simulation_cartesian=True,
+        ee_local_r_align=args.ee_local_r_align,
+        gripper_runtime=GripperRuntime(rollout_mode="controller_sim"),
+        device=args.device,
+    )
+    if kind == "direct_bc":
+        source = DirectBcImageActionSource(args.checkpoint, image_size=args.image_size, **common)
+    elif kind == "flow":
+        source = FlowMatchingActionSource(args.checkpoint, sample_steps=args.sample_steps, **common)
+    else:
+        raise SystemExit(f"unsupported checkpoint kind for local replay: {kind} (openpi handled separately)")
+    return source, kind
+
+
+def fix_camera_names(source, checkpoint_path):
+    """Flow checkpoints store camera_names only inside model_config, so the source
+    loads with camera_names=[] and would run without image conditioning. Restore them."""
+    if source.camera_names:
+        return source.camera_names
+    import torch
+
+    ck = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    names = list((ck.get("model_config") or {}).get("camera_names") or [])
+    if not names:
+        raise SystemExit("checkpoint has no camera_names in model_config; cannot replay frames")
+    source.camera_names = [str(n) for n in names]
+    source.requirements = replace(source.requirements, requires_camera=True)
+    print(f"[replay] restored flow camera_names from model_config: {source.camera_names}", file=sys.stderr)
+    return source.camera_names
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--checkpoint", required=True)
+    ap.add_argument("--episode", required=True)
+    ap.add_argument("--policy-dt-sec", type=float, default=0.0334)
+    ap.add_argument("--device", default="auto")
+    ap.add_argument("--ee-local-r-align", default=None)
+    ap.add_argument("--sample-steps", type=int, default=16)
+    ap.add_argument("--image-size", type=int, default=None)
+    ap.add_argument("--chunk-execute-steps", type=int, default=None)
+    ap.add_argument("--no-init", action="store_true", help="skip moving to rest pose first")
+    ap.add_argument("--tail-ticks", type=int, default=8, help="extra ticks after last frame to flush motion")
+    args = ap.parse_args()
+
+    config = load_config(args.config)
+    # Pace the loop at the policy dt so each per-step twist (= delta / policy_dt) is
+    # held for ~policy_dt and integrates to the intended per-step delta -> the robot
+    # traverses the recorded trajectory at the recorded timescale.
+    rate = round(1.0 / args.policy_dt_sec)
+    try:
+        object.__setattr__(config, "command_rate_hz", float(rate))
+    except Exception:
+        config.command_rate_hz = float(rate)
+    print(f"[replay] command_rate_hz overridden to {rate} Hz (policy_dt={args.policy_dt_sec}s)", file=sys.stderr)
+
+    if not args.no_init:
+        init_to_rest(config)
+
+    # Build the source first (without frames) to learn the checkpoint camera names,
+    # then load the episode frames for exactly those cameras.
+    clock = ReplayClock(num_frames=1)
+    replay_client = ReplayCameraClient({}, clock)
+    source, kind = build_source(args, replay_client)
+    cam_names = fix_camera_names(source, args.checkpoint)
+    if args.chunk_execute_steps is not None:
+        source.chunk_execute_steps = int(args.chunk_execute_steps)
+
+    frames_by_name, gripper_by_arm, T = load_episode(args.episode, cam_names)
+    clock.num_frames = T
+    replay_client._frames_by_name = frames_by_name
+    print(f"[replay] kind={kind} cams={cam_names} frames={T} chunk_execute={source.chunk_execute_steps}", file=sys.stderr)
+
+    # Recorded gripper percent into the proprio gripper channel (the servo state has
+    # no gripper; without this the proprio gripper reads 0=closed and the policy
+    # behaves as if the grasp already happened -> spurious lift instead of descend).
+    def live_gripper_percent(arm):
+        arr = gripper_by_arm.get(arm)
+        if arr is None or len(arr) == 0:
+            return None
+        return float(arr[min(clock.index, len(arr) - 1)])
+
+    source._live_gripper_percent = live_gripper_percent
+
+    # Drive the replay frame pointer from the run loop's per-tick state_sink. The
+    # source resamples (and reads a frame) every chunk_execute_steps ticks; advancing
+    # the pointer once per tick keeps recorded-frame time aligned with executed-action
+    # time. Stop (KeyboardInterrupt -> run() returns 0, releases lease) at episode end.
+    # Adaptive policy_dt: the per-step twist (= delta / policy_dt) must be held for
+    # ~policy_dt to integrate to the intended per-step delta. The loop's true period
+    # is set by inference time (varies, often >> the recording dt), so we MEASURE the
+    # wall dt between ticks and feed it back as policy_dt -> twist*actual_dt == delta,
+    # i.e. the robot traverses exactly the recorded trajectory regardless of how fast
+    # inference runs (wall-clock just stretches). Without this the twist is held far
+    # longer than policy_dt and the motion is grossly overshot/divergent.
+    state = {"tick": 0, "last_t": None, "pdt": float(args.policy_dt_sec)}
+
+    def state_sink(_snapshot):
+        now = time.monotonic()
+        if state["last_t"] is not None:
+            dt = now - state["last_t"]
+            if 0.005 < dt < 1.0:
+                state["pdt"] = 0.7 * state["pdt"] + 0.3 * dt
+                source.policy_dt_sec = state["pdt"]
+        state["last_t"] = now
+        clock.index = min(state["tick"], T - 1)
+        state["tick"] += 1
+        if state["tick"] >= T + args.tail_ticks:
+            raise KeyboardInterrupt
+
+    print(f"[replay] starting rollout: {Path(args.episode).parent.name}/{Path(args.episode).name}", file=sys.stderr, flush=True)
+    rc = run(config, source=source, send_commands=True, state_sink=state_sink)
+    print(f"[replay] done rc={rc}, executed ~{min(state['tick'], T)}/{T} frames", file=sys.stderr, flush=True)
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

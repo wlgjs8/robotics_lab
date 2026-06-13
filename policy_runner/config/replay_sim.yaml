@@ -1,0 +1,51 @@
+schema: robotics_lab.policy_runner.v1
+# =====================================================================================
+# OFFLINE-REPLAY (SIM) config for scripts/replay_episode_rollout.py.
+# Feeds RECORDED data_tcp HDF5 frames into a trained checkpoint and streams the
+# resulting TcpTwistLocal commands into the VM pgmode-simulation stack so the
+# policy's commanded motion is visualized in viser (and recorded to mp4).
+# Pairs with rb_servo_server/config/local/stack_sim.yaml (ports 50256 cmd / 50376 state).
+# The live ZMQ camera client is REPLACED in code by a recorded-frame client, so
+# camera.zmq_endpoint is unused here (camera.enable=true only flips the
+# checkpoint's requires_camera path + the safety camera attestation).
+# =====================================================================================
+mode: real
+action_source: hold
+runtime:
+  startup_timeout_sec: 8.0
+geometry:
+  path: "calibration/active_calibration.yaml"
+recording:
+  output_dir: "policy_runner/episodes"
+  rate_hz: 100.0
+  format: hdf5
+robot_state:
+  bind: "udp://0.0.0.0:50376"
+  stale_timeout_sec: 0.5
+servo_command:
+  endpoint: "udp://127.0.0.1:50256"
+  timeout_sec: 0.2
+  acquire_lease: true
+  lease_readback_timeout_sec: 3.0
+camera:
+  enable: true
+  zmq_endpoint: "tcp://127.0.0.1:5600"   # unused: replaced by recorded-frame client
+  bundle_topic: "camera.bundle"
+  max_age_ms: 200.0
+  expected_cameras: [left_realsense_color, right_realsense_color]
+gripper:
+  backend: none
+safety:
+  # pgmode controller-simulation posture (mirrors the working stack_sim teleop
+  # posture). The SafetyGate execution gating is retired; the only gate that can
+  # drop a cartesian command here is camera_available (declared true; per-tick
+  # frame freshness is enforced by the replay frame client itself).
+  allow_real_motion: true
+  allow_rbpodo_controller_simulation_cartesian: true
+  allow_configured_estimate_geometry_in_controller_simulation: true
+  allow_configured_estimate_geometry_in_real: true
+  require_valid_joint_state: true
+  selected_arms: [left, right]
+  camera_available: true
+  collision_model_status: validated
+command_rate_hz: 500
