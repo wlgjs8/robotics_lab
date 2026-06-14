@@ -760,9 +760,32 @@ void validateConfig(const DualArmConfig& cfg) {
                 }
             }
         }
-        for (int bone : cfg.safety.self_collision.stand_ignore_bones) {
-            if (bone < 0 || bone > 6) {
-                throw std::runtime_error("safety.self_collision.stand_ignore_bones entries must be in [0, 6]");
+        if (cfg.safety.self_collision.arm_capsules.empty()) {
+            throw std::runtime_error(
+                "safety.self_collision.enable=true requires a non-empty arm_capsules list");
+        }
+        for (const ArmCapsuleConfig& cap : cfg.safety.self_collision.arm_capsules) {
+            if (cap.frame.empty()) {
+                throw std::runtime_error("safety.self_collision.arm_capsules entries require a frame");
+            }
+            if (!(cap.radius_m > 0.0) || !std::isfinite(cap.radius_m)) {
+                throw std::runtime_error(
+                    "safety.self_collision.arm_capsules radius_m must be finite and > 0 (" + cap.frame + ")");
+            }
+            for (int axis = 0; axis < 3; ++axis) {
+                if (!std::isfinite(cap.p0_m[axis]) || !std::isfinite(cap.p1_m[axis])) {
+                    throw std::runtime_error(
+                        "safety.self_collision.arm_capsules endpoints must be finite (" + cap.frame + ")");
+                }
+            }
+        }
+        const int arm_capsule_count =
+            static_cast<int>(cfg.safety.self_collision.arm_capsules.size());
+        for (int idx : cfg.safety.self_collision.stand_ignore_bones) {
+            if (idx < 0 || idx >= arm_capsule_count) {
+                throw std::runtime_error(
+                    "safety.self_collision.stand_ignore_bones entries must index arm_capsules [0, " +
+                    std::to_string(arm_capsule_count - 1) + "]");
             }
         }
         if (!cfg.safety.self_collision.check_left_right &&
@@ -771,14 +794,17 @@ void validateConfig(const DualArmConfig& cfg) {
                 "safety.self_collision.enable=true with check_left_right=false requires stand_capsules "
                 "(otherwise nothing is checked)");
         }
-        for (std::size_t i = 0; i < cfg.safety.self_collision.link_radius_m.size(); ++i) {
-            validatePositiveFinite(
-                cfg.safety.self_collision.link_radius_m[i], "safety.self_collision.link_radius_m");
-        }
         if (!cfg.kinematics.enable) {
             throw std::runtime_error(
                 "safety.self_collision.enable=true requires kinematics.enable=true (link geometry source)");
         }
+    }
+    if (cfg.safety.joint_target_smd.enable) {
+        const auto& js = cfg.safety.joint_target_smd;
+        validatePositiveFinite(js.damping_ratio, "safety.joint_target_smd.damping_ratio");
+        validatePositiveFinite(js.natural_frequency_hz, "safety.joint_target_smd.natural_frequency_hz");
+        validatePositiveFiniteArray(js.max_velocity_deg_s, "safety.joint_target_smd.max_velocity_deg_s");
+        validatePositiveFiniteArray(js.max_accel_deg_s2, "safety.joint_target_smd.max_accel_deg_s2");
     }
     if (cfg.safety.floor_constraint.enable) {
         const auto& fc = cfg.safety.floor_constraint;
@@ -793,6 +819,19 @@ void validateConfig(const DualArmConfig& cfg) {
         if (!cfg.kinematics.enable) {
             throw std::runtime_error(
                 "safety.floor_constraint.enable=true requires kinematics.enable=true (TCP FK source)");
+        }
+        for (const FloorCheckPointConfig& point : fc.tcp_offset_points) {
+            if (point.name.empty()) {
+                throw std::runtime_error(
+                    "safety.floor_constraint.tcp_offset_points entries need a non-empty name");
+            }
+            for (double value : point.offset_m) {
+                if (!std::isfinite(value)) {
+                    throw std::runtime_error(
+                        "safety.floor_constraint.tcp_offset_points offsets must be finite (" +
+                        point.name + ")");
+                }
+            }
         }
     }
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
@@ -1548,6 +1587,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "controller_simulation_tracking_error_nonlatching",
             "self_collision",
             "floor_constraint",
+            "joint_target_smd",
         }, "safety");
         if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
         if (has(sec, "q_max_deg")) cfg.safety.q_max_deg = parseJointArray(sec["q_max_deg"], "safety.q_max_deg");
@@ -1599,6 +1639,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "check_left_stand",
                 "check_right_stand",
                 "stand_capsules",
+                "arm_capsules",
                 "stand_ignore_bones",
             }, "safety.self_collision");
             if (has(sc, "enable")) {
@@ -1680,6 +1721,47 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     cfg.safety.self_collision.stand_capsules.push_back(cap);
                 }
             }
+            if (has(sc, "arm_capsules")) {
+                const YAML::Node caps = sc["arm_capsules"];
+                if (!caps.IsSequence()) {
+                    fail("safety.self_collision.arm_capsules must be a sequence", caps);
+                }
+                cfg.safety.self_collision.arm_capsules.clear();
+                for (std::size_t i = 0; i < caps.size(); ++i) {
+                    const YAML::Node entry = caps[i];
+                    validateAllowedKeys(entry, {
+                        "frame",
+                        "p0_m",
+                        "p1_m",
+                        "radius_m",
+                    }, "safety.self_collision.arm_capsules");
+                    ArmCapsuleConfig cap;
+                    if (!has(entry, "frame")) {
+                        fail("safety.self_collision.arm_capsules entries require frame", entry);
+                    }
+                    cap.frame = entry["frame"].as<std::string>();
+                    for (const auto& [key, target] : {
+                             std::pair<const char*, std::array<double, 3>*>{"p0_m", &cap.p0_m},
+                             {"p1_m", &cap.p1_m},
+                         }) {
+                        const YAML::Node point = entry[key];
+                        if (!point.IsSequence() || point.size() != 3) {
+                            fail("safety.self_collision.arm_capsules." + std::string(key) +
+                                     " must be a sequence of 3 values (" + cap.frame + ")",
+                                 entry);
+                        }
+                        for (std::size_t axis = 0; axis < 3; ++axis) {
+                            (*target)[axis] =
+                                asDouble(point[axis], "safety.self_collision.arm_capsules." + std::string(key));
+                        }
+                    }
+                    if (!has(entry, "radius_m")) {
+                        fail("safety.self_collision.arm_capsules entries require radius_m (" + cap.frame + ")", entry);
+                    }
+                    cap.radius_m = asDouble(entry["radius_m"], "safety.self_collision.arm_capsules.radius_m");
+                    cfg.safety.self_collision.arm_capsules.push_back(cap);
+                }
+            }
             if (has(sc, "link_radius_m")) {
                 const YAML::Node radii = sc["link_radius_m"];
                 const std::size_t expected = cfg.safety.self_collision.link_radius_m.size();
@@ -1705,6 +1787,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "runtime_max_z_m",
                 "fail_policy",
                 "monitor_only",
+                "tcp_offset_points",
             }, "safety.floor_constraint");
             if (has(fc, "enable")) {
                 cfg.safety.floor_constraint.enable = asBool(fc["enable"], "safety.floor_constraint.enable");
@@ -1728,6 +1811,63 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(fc, "monitor_only")) {
                 cfg.safety.floor_constraint.monitor_only =
                     asBool(fc["monitor_only"], "safety.floor_constraint.monitor_only");
+            }
+            if (has(fc, "tcp_offset_points")) {
+                const YAML::Node points = fc["tcp_offset_points"];
+                if (!points.IsSequence()) {
+                    fail("safety.floor_constraint.tcp_offset_points must be a sequence", points);
+                }
+                cfg.safety.floor_constraint.tcp_offset_points.clear();
+                for (std::size_t i = 0; i < points.size(); ++i) {
+                    const YAML::Node entry = points[i];
+                    validateAllowedKeys(entry, {"name", "offset_m"},
+                        "safety.floor_constraint.tcp_offset_points");
+                    FloorCheckPointConfig point;
+                    if (has(entry, "name")) {
+                        point.name = asString(entry["name"],
+                            "safety.floor_constraint.tcp_offset_points.name");
+                    }
+                    if (!has(entry, "offset_m") || !entry["offset_m"].IsSequence() ||
+                        entry["offset_m"].size() != 3) {
+                        fail("safety.floor_constraint.tcp_offset_points entries need offset_m: [x, y, z]",
+                             entry);
+                    }
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        point.offset_m[axis] = asDouble(entry["offset_m"][axis],
+                            "safety.floor_constraint.tcp_offset_points.offset_m");
+                    }
+                    cfg.safety.floor_constraint.tcp_offset_points.push_back(point);
+                }
+            }
+        }
+        if (has(sec, "joint_target_smd")) {
+            const YAML::Node js = sec["joint_target_smd"];
+            validateAllowedKeys(js, {
+                "enable",
+                "damping_ratio",
+                "natural_frequency_hz",
+                "max_velocity_deg_s",
+                "max_accel_deg_s2",
+            }, "safety.joint_target_smd");
+            if (has(js, "enable")) {
+                cfg.safety.joint_target_smd.enable =
+                    asBool(js["enable"], "safety.joint_target_smd.enable");
+            }
+            if (has(js, "damping_ratio")) {
+                cfg.safety.joint_target_smd.damping_ratio =
+                    asDouble(js["damping_ratio"], "safety.joint_target_smd.damping_ratio");
+            }
+            if (has(js, "natural_frequency_hz")) {
+                cfg.safety.joint_target_smd.natural_frequency_hz =
+                    asDouble(js["natural_frequency_hz"], "safety.joint_target_smd.natural_frequency_hz");
+            }
+            if (has(js, "max_velocity_deg_s")) {
+                cfg.safety.joint_target_smd.max_velocity_deg_s =
+                    parseJointArray(js["max_velocity_deg_s"], "safety.joint_target_smd.max_velocity_deg_s");
+            }
+            if (has(js, "max_accel_deg_s2")) {
+                cfg.safety.joint_target_smd.max_accel_deg_s2 =
+                    parseJointArray(js["max_accel_deg_s2"], "safety.joint_target_smd.max_accel_deg_s2");
             }
         }
     }

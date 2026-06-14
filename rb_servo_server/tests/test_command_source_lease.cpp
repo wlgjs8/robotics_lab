@@ -206,6 +206,69 @@ bool testReleaseLeaseAllowsImmediateTakeover() {
     return true;
 }
 
+bool testLeaseAdminUpdatesBufferReadbackWithoutDisplacingMotion() {
+    // Regression: lease-admin packets skip CommandBuffer::setCommand so they do
+    // not displace the buffered motion command, but the lease grant must still
+    // reach the published state (lease readback = snapshot.command.lease).
+    // Without updateLease an acquiring client polls forever for a grant it
+    // already has (deadlock: lazy lease -> no motion command -> no readback).
+    rb_servo::CommandBuffer buffer;
+    const uint64_t now = rb_servo::nowSteadyNs();
+
+    rb_servo::DualArmCommand motion;
+    motion.seq = 7;
+    motion.host_time_ns = 0;  // never times out in this test
+    motion.left.mode = rb_servo::ControlMode::TcpTwistLocal;
+    motion.right.mode = rb_servo::ControlMode::Hold;
+    buffer.setCommand(motion);
+
+    rb_servo::CommandSourceLeaseState lease;
+    lease.active = true;
+    lease.source_id = "policy_runner";
+    lease.session_id = "policy-session";
+    lease.lease_token = "tok";
+    buffer.updateLease(lease, now);
+
+    rb_servo::DualArmCommand out = buffer.latestOrHold(now);
+    RB_CHECK(out.seq == 7);  // motion command not displaced
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpTwistLocal);
+    RB_CHECK(out.lease.active);
+    RB_CHECK(out.lease.source_id == "policy_runner");
+    RB_CHECK(out.lease.lease_token == "tok");
+
+    // Acquire at startup (empty buffer): the readback must still surface via a
+    // synthesized non-expiring Hold.
+    rb_servo::CommandBuffer empty;
+    empty.updateLease(lease, now);
+    out = empty.latestOrHold(now);
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(out.right.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(out.lease.active);
+    RB_CHECK(out.lease.session_id == "policy-session");
+
+    // Regression (teleop re-engage after idle): the buffer still holds the
+    // LAST streaming command, already expired. Writing the lease onto that
+    // expired carrier hides it — latestOrHold falls back to a fresh empty-lease
+    // Hold and the acquiring client's readback never sees the grant. The lease
+    // must ride a synthesized non-expiring Hold instead.
+    rb_servo::CommandBuffer idle;
+    rb_servo::DualArmCommand stale;
+    stale.seq = 9;
+    stale.host_time_ns = now > 10'000'000'000ull ? now - 10'000'000'000ull : 1;  // ~10s ago
+    stale.left.mode = rb_servo::ControlMode::TcpTwistLocal;
+    stale.right.mode = rb_servo::ControlMode::TcpTwistLocal;
+    stale.left.timeout_sec = 0.3;
+    stale.right.timeout_sec = 0.3;
+    idle.setCommand(stale);
+    idle.updateLease(lease, now);
+    out = idle.latestOrHold(now);
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::Hold);  // stale motion not revived
+    RB_CHECK(out.lease.active);
+    RB_CHECK(out.lease.source_id == "policy_runner");
+    RB_CHECK(out.lease.session_id == "policy-session");
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -213,6 +276,7 @@ int main() {
     if (!testWrongTokenRejected()) return 1;
     if (!testDefaultOffAndEmergencyOverride()) return 1;
     if (!testReleaseLeaseAllowsImmediateTakeover()) return 1;
+    if (!testLeaseAdminUpdatesBufferReadbackWithoutDisplacingMotion()) return 1;
     std::cout << "command source lease tests passed\n";
     return 0;
 }

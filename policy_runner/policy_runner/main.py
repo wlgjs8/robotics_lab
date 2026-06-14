@@ -40,6 +40,11 @@ from .action_sources.umi_dual_cartesian import MockUmiPoseReader, UdpUmiPoseRead
 STARTUP_TIMEOUT_EXIT_CODE = 2
 LEASE_READBACK_TIMEOUT_EXIT_CODE = 3
 
+# Quiet period (no motion intents) after which the teleop loop voluntarily
+# releases the command-source lease so one-shot GUI commands (InitMotion / jog)
+# can run between teleop bursts; the next motion intent re-acquires lazily.
+IDLE_LEASE_RELEASE_SEC = 1.0
+
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -101,6 +106,8 @@ def run(
     state_client.start()
     armed_for_motion = False
     lease_acquired = False
+    lease_retry_after = float("-inf")
+    last_motion_intent_time: float | None = None
     period = 1.0 / max(config.command_rate_hz, 1.0)
     startup_deadline = monotonic_fn() + max(config.runtime.startup_timeout_sec, 0.0)
     # POLICY_RUNNER_TELEOP_DEBUG=1: 1 Hz loop stats (sent/dropped/no-intent + last drop reason).
@@ -131,19 +138,6 @@ def run(
                 state_sink(snapshot)
             if rollout_recorder is not None:
                 rollout_recorder.record_state(snapshot)
-            if send_commands and config.servo_command.acquire_lease and not lease_acquired:
-                assert command_client is not None
-                try:
-                    command_client.acquire_lease(
-                        StateStreamLeaseReadback(state_client),
-                        timeout_sec=config.servo_command.lease_readback_timeout_sec,
-                        monotonic_fn=monotonic_fn,
-                        sleep_fn=sleep_fn,
-                    )
-                except TimeoutError as exc:
-                    print(f"policy_runner lease_readback_timeout: {exc}", file=stderr)
-                    return LEASE_READBACK_TIMEOUT_EXIT_CODE
-                lease_acquired = True
             intent = source.next_intent(snapshot, now)
             decision = safety_gate.evaluate(snapshot, intent, getattr(source, "requirements", None), now)
             if rollout_recorder is not None:
@@ -164,6 +158,30 @@ def run(
                         flush=True,
                     )
                     debug_last_print = now
+            # Idle lease handoff: release the lease after a short quiet period
+            # (no motion intents) so one-shot GUI commands (InitMotion / jog)
+            # work BETWEEN teleop bursts instead of being rejected with
+            # lease_conflict for up to lease_timeout_sec (60s). The lazy-acquire
+            # block below re-acquires on the next motion intent. This also fixes
+            # resume-after-expiry: once the server lease expired, the stale
+            # lease_acquired flag made resumed teleop commands be dropped
+            # (lease_required) with no re-acquire.
+            if intent is not None and intent.is_motion:
+                last_motion_intent_time = now
+            elif (
+                send_commands
+                and lease_acquired
+                and config.servo_command.acquire_lease
+                and last_motion_intent_time is not None
+                and now - last_motion_intent_time >= IDLE_LEASE_RELEASE_SEC
+            ):
+                assert command_client is not None
+                try:
+                    command_client.release_lease()
+                except Exception as exc:  # noqa: BLE001 - best-effort handoff
+                    print(f"policy_runner idle lease_release_failed: {exc}", file=stderr)
+                lease_acquired = False
+                lease_retry_after = float("-inf")
             if decision.allowed and intent is not None:
                 if not send_commands:
                     if rollout_recorder is not None:
@@ -171,6 +189,31 @@ def run(
                     sleep_fn(period)
                     continue
                 assert command_client is not None
+                # Lazy lease: acquire on the FIRST motion intent, not at startup.
+                # An idle policy_runner must not camp on the lease (it would
+                # block one-shot GUI commands like InitMotion). On conflict /
+                # readback timeout, drop this tick and retry with backoff so a
+                # temporary GUI lease holder does not kill the teleop process.
+                if config.servo_command.acquire_lease and not lease_acquired and intent.is_motion:
+                    if now < lease_retry_after:
+                        sleep_fn(period)
+                        continue
+                    try:
+                        command_client.acquire_lease(
+                            StateStreamLeaseReadback(state_client),
+                            timeout_sec=config.servo_command.lease_readback_timeout_sec,
+                            monotonic_fn=monotonic_fn,
+                            sleep_fn=sleep_fn,
+                        )
+                        lease_acquired = True
+                    except TimeoutError as exc:
+                        print(
+                            f"policy_runner lease busy (will retry): {exc}",
+                            file=stderr,
+                        )
+                        lease_retry_after = now + 2.0
+                        sleep_fn(period)
+                        continue
                 if intent.is_motion and not armed_for_motion:
                     arm = CommandIntent.arm_motion(timeout_sec=config.servo_command.timeout_sec)
                     arm_decision = safety_gate.evaluate(snapshot, arm, getattr(source, "requirements", None), now)
@@ -674,6 +717,31 @@ def _main_with_subcommands(argv: list[str]) -> int:
         ),
     )
     flow_infer.add_argument(
+        "--allow-tcp-twist-local",
+        action="store_true",
+        help=(
+            "Allow the TcpTwistLocal flow command family for controller_sim/real_policy. "
+            "Required for ee_local checkpoints, which cannot emit tcp_twist_stand."
+        ),
+    )
+    flow_infer.add_argument(
+        "--ee-local-r-align",
+        default=None,
+        help=(
+            "Fixed rotation between the training EE body frame and the RB TCP frame for "
+            "ee_local checkpoints: preset name ('pika_tip' for pika UMI data) or 9 "
+            "row-major floats. Default: none (frames assumed identical)."
+        ),
+    )
+    flow_infer.add_argument(
+        "--camera-preview",
+        action="store_true",
+        help=(
+            "Open a live OpenCV window showing the camera frames the policy consumes "
+            "(spawns policy_runner.camera_preview alongside the rollout)."
+        ),
+    )
+    flow_infer.add_argument(
         "--policy-dt-sec",
         type=float,
         default=None,
@@ -1094,6 +1162,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             validate_flow_command_family,
         )
         from .gripper import GripperRuntime
+        from .openpi_remote import OPENPI_CHECKPOINT_PREFIX, OpenpiRemoteActionSource
 
         config = load_config(args.config)
         rollout_policy = RolloutModePolicy.from_value(
@@ -1101,12 +1170,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
             send_dryrun_commands=args.send_dryrun_commands,
         )
         try:
-            checkpoint_kind = action_chunk_checkpoint_kind(args.checkpoint, device="cpu")
-            dataset_stats = load_action_chunk_checkpoint_dataset_stats(
-                args.checkpoint,
-                device="cpu",
-                ensemble_name=args.ensemble_name,
-            )
+            if str(args.checkpoint).startswith(OPENPI_CHECKPOINT_PREFIX):
+                checkpoint_kind = "openpi_remote"
+                dataset_stats = None
+            else:
+                checkpoint_kind = action_chunk_checkpoint_kind(args.checkpoint, device="cpu")
+                dataset_stats = load_action_chunk_checkpoint_dataset_stats(
+                    args.checkpoint,
+                    device="cpu",
+                    ensemble_name=args.ensemble_name,
+                )
             command_family = resolve_flow_command_family(
                 rollout_policy.mode,
                 args.command_family,
@@ -1116,12 +1189,20 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 rollout_policy.mode,
                 command_family,
                 allow_experimental_tcp_delta_stand=args.allow_experimental_tcp_delta_stand,
+                allow_tcp_twist_local=args.allow_tcp_twist_local,
                 dataset_stats=dataset_stats,
             )
         except (RolloutModeValidationError, ValueError) as exc:
             print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
             return 2
         if rollout_policy.mode == RolloutMode.OFFLINE_EVAL:
+            if checkpoint_kind == "openpi_remote":
+                print(
+                    "policy_runner flow-infer offline_eval is not supported for openpi:// remote policies; "
+                    "use sim_dryrun (optionally OPENPI_REMOTE_FAKE_IMAGES=1) instead",
+                    file=sys.stderr,
+                )
+                return 2
             if args.episodes_dir is None:
                 print(
                     "policy_runner flow-infer offline_eval requires --episodes-dir with one or more HDF5 samples",
@@ -1194,6 +1275,53 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 topic=config.camera.bundle_topic,
                 max_age_ms=config.camera.max_age_ms,
             )
+        preview_process = None
+        if args.camera_preview and config.camera.enable:
+            import subprocess
+
+            # Same ZMQ bundle/shm + resolve_frame mapping as the runtime; PUB
+            # fans out so the preview never interferes with inference.
+            preview_process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "policy_runner.camera_preview",
+                    "--zmq-endpoint",
+                    config.camera.zmq_endpoint,
+                    "--topic",
+                    config.camera.bundle_topic,
+                    "--cameras",
+                    ",".join(config.camera.expected_cameras)
+                    or "left_realsense_color,right_realsense_color",
+                ],
+            )
+        # Physical gripper hardware connects (and energizes motors) only when
+        # the rollout mode could actually dispatch to it; sim_dryrun and
+        # real_readonly always stay on the fail-closed Noop backend.
+        gripper_backend = None
+        if config.gripper.backend == "pika_serial":
+            mode_value = rollout_policy.mode.value
+            wants_gripper_hardware = (
+                mode_value == "controller_sim"
+                and config.gripper.actuate_in_controller_simulation
+            ) or (mode_value == "real_policy" and config.safety.allow_real_gripper_motion)
+            if wants_gripper_hardware:
+                from .gripper import PikaSerialGripperBackend
+
+                gripper_backend = PikaSerialGripperBackend(
+                    ports={
+                        "left": config.gripper.left_port,
+                        "right": config.gripper.right_port,
+                    },
+                    sdk_path=config.gripper.pika_sdk_path or None,
+                    min_rad=config.gripper.min_rad,
+                    max_rad=config.gripper.max_rad,
+                    deadband_rad=config.gripper.deadband_rad,
+                    max_hz=config.gripper.max_hz,
+                    supports_controller_simulation=(
+                        config.gripper.actuate_in_controller_simulation
+                    ),
+                ).connect()
         try:
             policy_dt_sec = resolve_flow_policy_dt_sec(
                 rollout_policy.mode,
@@ -1215,13 +1343,27 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 "allow_rbpodo_controller_simulation_cartesian": (
                     rollout_policy.allows_controller_simulation_cartesian
                 ),
-                "gripper_runtime": GripperRuntime(
-                    rollout_mode=rollout_policy.mode.value,
-                    allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+                "ee_local_r_align": args.ee_local_r_align,
+                "gripper_runtime": (
+                    GripperRuntime(
+                        rollout_mode=rollout_policy.mode.value,
+                        allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+                        backend=gripper_backend,
+                    )
+                    if gripper_backend is not None
+                    else GripperRuntime(
+                        rollout_mode=rollout_policy.mode.value,
+                        allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+                    )
                 ),
                 "device": args.device,
             }
-            if checkpoint_kind == "direct_bc":
+            if checkpoint_kind == "openpi_remote":
+                source = OpenpiRemoteActionSource(
+                    args.checkpoint,
+                    **source_kwargs,
+                )
+            elif checkpoint_kind == "direct_bc":
                 source = DirectBcImageActionSource(
                     args.checkpoint,
                     image_size=args.image_size,
@@ -1284,4 +1426,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
             if camera_client is not None:
                 camera_client.close()
             raise
+        finally:
+            # Disable+disconnect the serial grippers on every exit path.
+            if gripper_backend is not None:
+                gripper_backend.close()
+            if preview_process is not None:
+                preview_process.terminate()
+                try:
+                    preview_process.wait(timeout=2.0)
+                except Exception:
+                    preview_process.kill()
     raise ValueError(f"unknown policy_runner command: {args.command}")

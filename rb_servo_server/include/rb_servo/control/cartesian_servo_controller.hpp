@@ -6,6 +6,7 @@
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/cartesian_controller.hpp"
 #include "rb_servo/control/cartesian_trajectory_planner.hpp"
+#include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/core/types.hpp"
 #include "rb_servo/kinematics/i_kinematics.hpp"
 
@@ -22,6 +23,12 @@ struct CartesianServoPathState {
     Pose6D start_tcp_stand;
     Pose6D target_tcp_stand;
     CartesianOrientationInterpolation orientation_mode = CartesianOrientationInterpolation::Constant;
+    // pose_track_smd smoothing of the per-tick path reference (same filter as
+    // streaming TcpPoseTarget). Null when pose_track_smd.enable is false.
+    std::shared_ptr<SmdPoseTracker> smd;
+    // Previous commanded (post-filter) pose, for telemetry velocity norms.
+    Pose6D last_commanded_tcp_stand;
+    bool has_last_commanded = false;
 };
 
 struct CartesianCircleMoveState {

@@ -12,6 +12,39 @@ _SLOT_HEADER = struct.Struct("<QQQQQQIIIIII")
 _MISSING_BUNDLE_AGE_US = 2**62
 
 
+def bundle_clock_ns() -> int:
+    """Now on the camera_server bundle clock.
+
+    camera_server stamps bundle_time_ns with its configured server.clock
+    (default monotonic_raw, see camera_server/src/core/clock.cpp). The stack
+    runs camera_server on the same host (compose network_mode/ipc: host), so
+    CLOCK_MONOTONIC_RAW is shared with the container and ages are directly
+    comparable. Wall-clock time.time_ns() is NOT comparable to these stamps.
+    """
+    return time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+
+
+def resolve_frame(frames: dict[str, Any] | None, name: str) -> Any | None:
+    """Look up a bundle frame by dataset camera name or raw bundle key.
+
+    camera_server keys frames as '<camera>.<stream>' (stream_key() in
+    camera_server/include/camera_server/core/types.hpp) while dataset and
+    checkpoint camera names use '<camera>_<stream>' (e.g.
+    'left_realsense_color'). Try the exact key first, then map the last '_'
+    to '.'.
+    """
+    if not frames or not isinstance(frames, dict):
+        return None
+    frame = frames.get(name)
+    if frame is not None:
+        return frame
+    if "." not in name:
+        base, sep, stream = name.rpartition("_")
+        if sep:
+            return frames.get(f"{base}.{stream}")
+    return None
+
+
 @dataclass(frozen=True)
 class CameraFrame:
     """Decoded camera frame with metadata."""
@@ -51,7 +84,9 @@ class _ShmCache:
             return self._mmap
         self.close()
         path = "/dev/shm/" + name.lstrip("/")
-        self._file = open(path, "r+b")
+        # Read-only: the ring is written by camera_server (often root inside
+        # the container); opening r+b fails on the host with EACCES.
+        self._file = open(path, "rb")
         self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
         self._name = name
         return self._mmap
@@ -154,7 +189,7 @@ class CameraBundleClient:
         active = bundle if bundle is not None else self._latest
         if active is None:
             return False
-        age_ns = time.time_ns() - active.bundle_time_ns
+        age_ns = bundle_clock_ns() - active.bundle_time_ns
         return age_ns >= 0 and age_ns < self._max_age_ms * 1_000_000
 
     def close(self) -> None:

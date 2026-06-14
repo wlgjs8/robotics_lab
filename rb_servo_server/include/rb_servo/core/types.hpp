@@ -474,6 +474,11 @@ struct DualArmCommand {
     double floor_z_m = 0.0;
     bool has_floor_z = false;
 
+    // AcquireLease / ReleaseLease packets are pure lease management. They must
+    // never enter the command buffer: the buffer is latest-wins, so their
+    // parsed Hold modes would overwrite an in-flight motion command.
+    bool lease_admin_only = false;
+
     // Deprecated in v3. Commands are treated as coupled by default: if a packet
     // becomes stale, both arms hold. Per-arm command streams should use separate
     // timestamps in a future binary protocol.
@@ -688,6 +693,17 @@ struct ServoSample {
     std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;
 };
 
+// Collision capsule geometry (stand frame, meters) for viewers. Generic so it
+// carries both the static stand capsules and the FK'd per-arm capsules. Kept here
+// (not config) so core/types stays independent of the config header. Published so
+// a viewer can draw the EXACT capsules the guard checks (not the visual meshes).
+struct SelfCollisionCapsuleViz {
+    std::string name;
+    std::array<double, 3> p0_m{};
+    std::array<double, 3> p1_m{};
+    double radius_m = 0.0;
+};
+
 struct ServoSnapshot {
     uint64_t tick = 0;
     uint64_t loop_start_time_ns = 0;
@@ -725,6 +741,21 @@ struct ServoSnapshot {
     std::string self_collision_pair;
     std::string self_collision_stand_capsule;
     int self_collision_right_bone = -1;
+    // Closest bone-axis points of the min-clearance pair (stand frame), on the
+    // members themselves; a = pair's first member (arm), b = second member
+    // (other arm / stand). Their gap = min_clearance + both capsule radii.
+    bool self_collision_has_closest_points = false;
+    std::array<double, 3> self_collision_closest_point_a_m{};
+    std::array<double, 3> self_collision_closest_point_b_m{};
+    // Full per-arm collision capsules (stand frame) evaluated this tick — FK'd
+    // from the arm_capsules template — so a viewer can draw the exact checked
+    // capsules over the arm mesh.
+    bool self_collision_has_capsules = false;
+    std::vector<SelfCollisionCapsuleViz> self_collision_left_capsules_m;
+    std::vector<SelfCollisionCapsuleViz> self_collision_right_capsules_m;
+    // Static stand capsules checked this tick (stand frame). Populated alongside
+    // the arm capsules.
+    std::vector<SelfCollisionCapsuleViz> self_collision_stand_capsules_m;
 
     // Stand-frame floor plane constraint telemetry (safety.floor_constraint).
     bool floor_constraint_enabled = false;
@@ -735,10 +766,12 @@ struct ServoSnapshot {
     double floor_constraint_runtime_max_z_m = 0.0;
     bool floor_constraint_left_checked = false;
     bool floor_constraint_left_violated = false;
-    double floor_constraint_left_tcp_z_m = 0.0;
+    double floor_constraint_left_tcp_z_m = 0.0;  // lowest checked point z
+    std::string floor_constraint_left_lowest_point;
     bool floor_constraint_right_checked = false;
     bool floor_constraint_right_violated = false;
-    double floor_constraint_right_tcp_z_m = 0.0;
+    double floor_constraint_right_tcp_z_m = 0.0;  // lowest checked point z
+    std::string floor_constraint_right_lowest_point;
     uint64_t floor_constraint_clamp_count = 0;
     std::string floor_constraint_last_set_reject_reason;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;

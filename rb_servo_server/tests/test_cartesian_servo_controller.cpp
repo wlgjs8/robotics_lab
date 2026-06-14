@@ -3,6 +3,8 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <utility>
+#include <vector>
 
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 #include "rb_servo/math/se3.hpp"
@@ -62,11 +64,21 @@ public:
         const rb_servo::ArmMountConfig& mount
     ) const override {
         (void)arm;
-        (void)target_tcp_stand;
-        (void)mount;
+        // Exact inverse of the linear FK above (x/y/z and yaw-only rotation).
         rb_servo::IkResult result;
         result.success = true;
         result.q_solution_deg = seed_q_deg;
+        result.q_solution_deg[0] = (target_tcp_stand.x - mount.base_pose_in_stand.x) * 100.0;
+        result.q_solution_deg[1] = (target_tcp_stand.y - mount.base_pose_in_stand.y) * 100.0;
+        result.q_solution_deg[2] = (target_tcp_stand.z - mount.base_pose_in_stand.z) * 100.0;
+        double yaw = target_tcp_stand.rz;
+        if (target_tcp_stand.quaternion_xyzw.has_value()) {
+            const auto& quat = *target_tcp_stand.quaternion_xyzw;
+            yaw = 2.0 * std::atan2(quat[2], quat[3]);
+        }
+        result.q_solution_deg[5] = yaw * 100.0;
+        last_ik_target = target_tcp_stand;
+        ++ik_call_count;
         return result;
     }
 
@@ -95,6 +107,8 @@ public:
     mutable rb_servo::Vec6 last_twist_local;
     mutable double last_damping = 0.0;
     mutable int velocity_call_count = 0;
+    mutable rb_servo::Pose6D last_ik_target;
+    mutable int ik_call_count = 0;
 };
 
 rb_servo::RobotState stateFromJoints(
@@ -193,65 +207,128 @@ bool testRealModeBlocked() {
     return true;
 }
 
-bool testLinearMoveUsesSeparatePositionAndOrientationGains() {
+bool testLinearMoveQuinticProfileEasesEndpoints() {
+    // SMD off (default config): the commanded pose IS the quintic reference.
+    // The per-tick step must ease in/out (small at both endpoints) and the
+    // peak step must stay within the quintic peak/mean ratio (15/8).
     auto kinematics = std::make_shared<LinearFakeKinematics>();
     rb_servo::ArmMountConfig left_mount;
     left_mount.arm_id = rb_servo::ArmId::Left;
     rb_servo::ArmMountConfig right_mount;
     right_mount.arm_id = rb_servo::ArmId::Right;
     rb_servo::CartesianControlConfig config;
-    config.path_kp_pos = 2.0;
-    config.path_kp_ori = 3.0;
-    config.max_linear_move_speed_m_s = 10.0;
-    config.max_angular_move_speed_rad_s = 10.0;
+    config.max_linear_move_speed_m_s = 1.0;
+    config.max_angular_move_speed_rad_s = 1.0;
     rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
 
     rb_servo::ArmCommand command;
     command.arm_id = rb_servo::ArmId::Left;
     command.mode = rb_servo::ControlMode::TcpLinearMove;
+    command.has_tcp_target = true;
+    command.linear_move_duration_sec = 0.2;
+    command.has_linear_move_duration = true;
+    command.tcp_target_stand = {0.05, 0.0, 0.0, 0.0, 0.0, 0.0};
+    command.tcp_target_stand.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
 
-    const rb_servo::JointArray q = zeroJoints();
-    rb_servo::CartesianServoPathState position_path;
-    position_path.active = true;
-    position_path.duration_sec = 1.0;
-    position_path.start_tcp_stand = {0.1, 0.0, 0.0, 0.0, 0.0, 0.0};
-    position_path.start_tcp_stand.quaternion_xyzw = yawQuaternion(0.0);
-    position_path.target_tcp_stand = position_path.start_tcp_stand;
-    position_path.orientation_mode = rb_servo::CartesianOrientationInterpolation::Constant;
+    rb_servo::CartesianServoPathState path;
+    rb_servo::JointArray q = zeroJoints();
+    constexpr int kTicks = 40;
+    std::array<double, kTicks> step{};
+    for (int tick = 0; tick < kTicks; ++tick) {
+        const double previous_x = q[0] / 100.0;
+        const rb_servo::CartesianArmTargetResult result = controller.computeLinearMoveTarget(
+            command,
+            stateFromJoints(*kinematics, q, left_mount),
+            q,
+            rb_servo::RunMode::Simulation,
+            0.005,
+            7,
+            &path
+        );
+        RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+        q = result.q_target_deg;
+        step[static_cast<std::size_t>(tick)] = std::abs(q[0] / 100.0 - previous_x);
+    }
+    const double mean_step = 0.05 / kTicks;
+    double max_step = 0.0;
+    for (double value : step) max_step = std::max(max_step, value);
+    // Eased endpoints: first/last tick steps are far below the mean step…
+    RB_CHECK(step[0] < 0.3 * mean_step);
+    RB_CHECK(step[kTicks - 1] < 0.3 * mean_step);
+    // …and the mid-path peak honors the quintic peak/mean ratio.
+    RB_CHECK(max_step > 1.5 * mean_step);
+    RB_CHECK(max_step < 1.875 * mean_step + 1e-9);
+    // The profile still lands exactly on the target.
+    RB_CHECK(std::abs(q[0] / 100.0 - 0.05) < 1e-9);
+    return true;
+}
 
-    rb_servo::CartesianArmTargetResult result = controller.computeLinearMoveTarget(
-        command,
-        stateFromJoints(*kinematics, q, left_mount),
-        q,
-        rb_servo::RunMode::Simulation,
-        0.0,
-        0,
-        &position_path
-    );
+bool testLinearMoveFeedforwardIgnoresMeasuredNoise() {
+    // Judder regression: with pose_track_smd enabled (the stack_real setup),
+    // the commanded joint stream must be IDENTICAL with and without measured
+    // joint-state noise — the chain is feedforward, measured state feeds
+    // telemetry only. The old v_ref + Kp * bodyError(measured, reference)
+    // servo re-injected measurement noise into every tick.
+    const auto run_with_noise = [](double noise_amplitude_deg) {
+        auto kinematics = std::make_shared<LinearFakeKinematics>();
+        rb_servo::ArmMountConfig left_mount;
+        left_mount.arm_id = rb_servo::ArmId::Left;
+        rb_servo::ArmMountConfig right_mount;
+        right_mount.arm_id = rb_servo::ArmId::Right;
+        rb_servo::CartesianControlConfig config;
+        config.max_linear_move_speed_m_s = 1.0;
+        config.max_angular_move_speed_rad_s = 1.0;
+        config.pose_track_smd.enable = true;
+        config.pose_track_smd.natural_frequency_linear_hz = 3.0;
+        config.pose_track_smd.natural_frequency_angular_hz = 3.0;
+        rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
 
-    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
-    RB_CHECK(std::abs(kinematics->last_twist_local.x - 0.2) < 1e-9);
+        rb_servo::ArmCommand command;
+        command.arm_id = rb_servo::ArmId::Left;
+        command.mode = rb_servo::ControlMode::TcpLinearMove;
+        command.has_tcp_target = true;
+        command.linear_move_duration_sec = 0.2;
+        command.has_linear_move_duration = true;
+        command.tcp_target_stand = {0.05, 0.0, 0.0, 0.0, 0.0, 0.0};
+        command.tcp_target_stand.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
 
-    rb_servo::CartesianServoPathState orientation_path;
-    orientation_path.active = true;
-    orientation_path.duration_sec = 1.0;
-    orientation_path.start_tcp_stand = {0.0, 0.0, 0.0, 0.0, 0.0, 0.2};
-    orientation_path.start_tcp_stand.quaternion_xyzw = yawQuaternion(0.2);
-    orientation_path.target_tcp_stand = orientation_path.start_tcp_stand;
-    orientation_path.orientation_mode = rb_servo::CartesianOrientationInterpolation::Constant;
+        rb_servo::CartesianServoPathState path;
+        rb_servo::JointArray q = zeroJoints();
+        std::vector<double> trajectory;
+        bool saw_done = false;
+        for (int tick = 0; tick < 200; ++tick) {
+            rb_servo::JointArray q_measured = q;
+            q_measured[0] += (tick % 2 == 0 ? noise_amplitude_deg : -noise_amplitude_deg);
+            const rb_servo::CartesianArmTargetResult result = controller.computeLinearMoveTarget(
+                command,
+                stateFromJoints(*kinematics, q_measured, left_mount),
+                q,
+                rb_servo::RunMode::Simulation,
+                0.005,
+                11,
+                &path
+            );
+            if (result.verdict != rb_servo::SafetyVerdict::Ok) {
+                return std::pair<std::vector<double>, bool>{{}, false};
+            }
+            q = result.q_target_deg;
+            trajectory.push_back(q[0]);
+            saw_done = saw_done || result.telemetry.path_done;
+        }
+        return std::pair<std::vector<double>, bool>{trajectory, saw_done};
+    };
 
-    result = controller.computeLinearMoveTarget(
-        command,
-        stateFromJoints(*kinematics, q, left_mount),
-        q,
-        rb_servo::RunMode::Simulation,
-        0.0,
-        0,
-        &orientation_path
-    );
-
-    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
-    RB_CHECK(std::abs(kinematics->last_twist_local.rz - 0.6) < 1e-9);
+    const auto clean = run_with_noise(0.0);
+    const auto noisy = run_with_noise(0.7);
+    RB_CHECK(clean.second);
+    RB_CHECK(noisy.second);
+    RB_CHECK(clean.first.size() == noisy.first.size());
+    RB_CHECK(!clean.first.empty());
+    for (std::size_t i = 0; i < clean.first.size(); ++i) {
+        RB_CHECK(std::abs(clean.first[i] - noisy.first[i]) < 1e-12);
+    }
+    // The smoothed move still settles on the target.
+    RB_CHECK(std::abs(clean.first.back() / 100.0 - 0.05) < 1e-3);
     return true;
 }
 
@@ -1258,7 +1335,8 @@ bool testTcpCircleMoveSafetyGates() {
 int main() {
     if (!testPureTranslationTracksLineAndKeepsOrientation()) return 1;
     if (!testRealModeBlocked()) return 1;
-    if (!testLinearMoveUsesSeparatePositionAndOrientationGains()) return 1;
+    if (!testLinearMoveQuinticProfileEasesEndpoints()) return 1;
+    if (!testLinearMoveFeedforwardIgnoresMeasuredNoise()) return 1;
     if (!testLinearMoveConstantOrientationToleranceIsConfigurable()) return 1;
     if (!testTcpTwistLocalMovesLocalXAndHoldsOrientation()) return 1;
     if (!testFloorConstraintZerosDownwardVzAtPlaneAndKeepsLateral()) return 1;

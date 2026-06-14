@@ -1436,6 +1436,39 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         self_collision["stand_capsule"] = snapshot.self_collision_stand_capsule.empty()
             ? nlohmann::json(nullptr)
             : nlohmann::json(snapshot.self_collision_stand_capsule);
+        // Closest bone-axis points (stand frame) of the min-clearance pair —
+        // on the members themselves — for GUI witness-point markers.
+        if (snapshot.self_collision_has_closest_points) {
+            self_collision["closest_point_a_m"] = snapshot.self_collision_closest_point_a_m;
+            self_collision["closest_point_b_m"] = snapshot.self_collision_closest_point_b_m;
+        } else {
+            self_collision["closest_point_a_m"] = nullptr;
+            self_collision["closest_point_b_m"] = nullptr;
+        }
+        // Full evaluated capsules (stand frame) so a viewer can draw the exact
+        // checked geometry over the meshes: per-arm capsules FK'd this tick plus
+        // the static stand capsules.
+        if (snapshot.self_collision_has_capsules) {
+            const auto caps_json = [](const std::vector<SelfCollisionCapsuleViz>& caps) {
+                nlohmann::json arr = nlohmann::json::array();
+                for (const auto& cap : caps) {
+                    nlohmann::json entry;
+                    entry["name"] = cap.name;
+                    entry["p0_m"] = cap.p0_m;
+                    entry["p1_m"] = cap.p1_m;
+                    entry["radius_m"] = cap.radius_m;
+                    arr.push_back(std::move(entry));
+                }
+                return arr;
+            };
+            self_collision["left_arm_capsules_m"] = caps_json(snapshot.self_collision_left_capsules_m);
+            self_collision["right_arm_capsules_m"] = caps_json(snapshot.self_collision_right_capsules_m);
+            self_collision["stand_capsules_m"] = caps_json(snapshot.self_collision_stand_capsules_m);
+        } else {
+            self_collision["left_arm_capsules_m"] = nullptr;
+            self_collision["right_arm_capsules_m"] = nullptr;
+            self_collision["stand_capsules_m"] = nullptr;
+        }
         message["self_collision"] = self_collision;
     }
     {
@@ -1446,25 +1479,32 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         floor["config_z_min_m"] = snapshot.floor_constraint_config_z_min_m;
         floor["runtime_min_z_m"] = snapshot.floor_constraint_runtime_min_z_m;
         floor["runtime_max_z_m"] = snapshot.floor_constraint_runtime_max_z_m;
-        const auto arm_json = [](bool checked, bool violated, double tcp_z_m) {
+        const auto arm_json = [](bool checked, bool violated, double tcp_z_m,
+                                 const std::string& lowest_point) {
             nlohmann::json arm;
             arm["checked"] = checked;
             arm["violated"] = violated;
             if (checked && std::isfinite(tcp_z_m)) {
+                // Lowest checked point's z (TCP, or a configured TCP-frame
+                // offset point such as a gripper fingertip).
                 arm["tcp_z_m"] = tcp_z_m;
+                arm["lowest_point"] = lowest_point.empty() ? "tcp" : lowest_point;
             } else {
                 arm["tcp_z_m"] = nullptr;
+                arm["lowest_point"] = nullptr;
             }
             return arm;
         };
         floor["left"] = arm_json(
             snapshot.floor_constraint_left_checked,
             snapshot.floor_constraint_left_violated,
-            snapshot.floor_constraint_left_tcp_z_m);
+            snapshot.floor_constraint_left_tcp_z_m,
+            snapshot.floor_constraint_left_lowest_point);
         floor["right"] = arm_json(
             snapshot.floor_constraint_right_checked,
             snapshot.floor_constraint_right_violated,
-            snapshot.floor_constraint_right_tcp_z_m);
+            snapshot.floor_constraint_right_tcp_z_m,
+            snapshot.floor_constraint_right_lowest_point);
         floor["clamp_count"] = snapshot.floor_constraint_clamp_count;
         if (snapshot.floor_constraint_last_set_reject_reason.empty()) {
             floor["last_set_reject_reason"] = nullptr;

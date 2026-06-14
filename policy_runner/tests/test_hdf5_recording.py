@@ -573,6 +573,36 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
             np.testing.assert_array_equal(handle["observations/images/head"][0], first)
             np.testing.assert_array_equal(handle["observations/images/head"][1], np.zeros((2, 3, 3), dtype=np.uint8))
 
+    def test_recording_maps_dataset_camera_names_to_bundle_stream_keys(self) -> None:
+        # camera_server keys frames '<camera>.<stream>'; expected_cameras may use
+        # dataset names like 'left_realsense_color' and must still record pixels.
+        pixels = np.arange(18, dtype=np.uint8).reshape(2, 3, 3)
+        camera_client = FakeCameraClient(
+            [_camera_bundle(cam_name="left_realsense.color", pixels=pixels, seq=1)]
+        )
+        recorder = Hdf5EpisodeRecorder(
+            self.tmpdir,
+            recording_rate_hz=100.0,
+            camera_client=camera_client,
+            expected_cameras=["left_realsense_color"],
+        )
+        recorder.start_episode(
+            reset_snapshot=_state_snapshot(),
+            task_description="mapped",
+            action_source="dual_spacemouse_cartesian",
+        )
+        recorder.record_frame(
+            state_snapshot=_state_snapshot(tick=1),
+            action_packet=_twist_action(seq=1),
+            action_host_time_ns=1,
+            action_seq=1,
+        )
+        path = recorder.end_episode(success=True, end_reason="operator_success")
+        with h5py.File(path, "r") as handle:
+            np.testing.assert_array_equal(
+                handle["observations/images/left_realsense_color"][0], pixels
+            )
+
     def test_recording_uses_missing_marker_when_no_bundle_exists(self) -> None:
         camera_client = FakeCameraClient([None])
         recorder = Hdf5EpisodeRecorder(

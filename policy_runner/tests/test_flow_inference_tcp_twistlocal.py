@@ -246,6 +246,78 @@ class FlowInferenceTcpTwistStandTest(unittest.TestCase):
             allow_experimental_tcp_delta_stand=True,
         )
 
+    def test_ee_local_r_align_resolution_and_rotation_semantics(self) -> None:
+        from policy_runner.flow_inference import (
+            resolve_ee_local_r_align,
+            rotate_flow_arm_vectors,
+        )
+
+        self.assertIsNone(resolve_ee_local_r_align(None))
+        self.assertIsNone(resolve_ee_local_r_align("none"))
+        with self.assertRaisesRegex(ValueError, "preset"):
+            resolve_ee_local_r_align("bogus_preset")
+        with self.assertRaisesRegex(ValueError, "orthonormal"):
+            resolve_ee_local_r_align([1.0] * 9)
+
+        r_align = resolve_ee_local_r_align("pika_tip")
+        assert r_align is not None
+        # Same matrix accepted as 9 floats text.
+        np.testing.assert_allclose(
+            resolve_ee_local_r_align("0,0,1,-1,0,0,0,-1,0"), r_align
+        )
+
+        # Action direction (v_tcp = R_alignT . v_tip): tip +x (approach) -> TCP +z,
+        # tip +z (up) -> TCP -y (TCP y points down).
+        step = np.zeros(14, dtype=np.float32)
+        step[0:3] = (1.0, 0.0, 0.0)   # left linear: approach
+        step[3:6] = (0.0, 0.0, 1.0)   # left angular: about tip up axis
+        step[6] = 0.5                  # left gripper untouched
+        step[7:10] = (0.0, 0.0, 1.0)  # right linear: up
+        step[13] = -0.25               # right gripper untouched
+        out = rotate_flow_arm_vectors(step, r_align.T)
+        np.testing.assert_allclose(out[0:3], (0.0, 0.0, 1.0), atol=1e-7)
+        np.testing.assert_allclose(out[3:6], (0.0, -1.0, 0.0), atol=1e-7)
+        self.assertAlmostEqual(float(out[6]), 0.5)
+        np.testing.assert_allclose(out[7:10], (0.0, -1.0, 0.0), atol=1e-7)
+        self.assertAlmostEqual(float(out[13]), -0.25)
+
+        # Proprio direction (v_tip = R_align . v_tcp): TCP +z (approach) -> tip +x.
+        proprio = np.zeros(16, dtype=np.float32)
+        proprio[0:3] = (0.0, 0.0, 1.0)
+        proprio[14:16] = (1.0, 1.0)   # arm_mask tail untouched
+        out = rotate_flow_arm_vectors(proprio, r_align)
+        np.testing.assert_allclose(out[0:3], (1.0, 0.0, 0.0), atol=1e-7)
+        np.testing.assert_allclose(out[14:16], (1.0, 1.0))
+
+        # Round trip and chunk shape.
+        chunk = np.random.default_rng(0).normal(size=(4, 14)).astype(np.float32)
+        round_trip = rotate_flow_arm_vectors(
+            rotate_flow_arm_vectors(chunk, r_align), r_align.T
+        )
+        np.testing.assert_allclose(round_trip, chunk, atol=1e-6)
+
+    def test_tcp_twist_local_readonly_and_optin_paths(self) -> None:
+        # real_readonly sends no commands -> family always accepted.
+        validate_flow_command_family(
+            RolloutMode.REAL_READONLY,
+            "tcp_twist_local",
+            dataset_stats={"proprio_action_frame": "ee_local"},
+        )
+        # Live modes stay rejected by default but open with the explicit opt-in.
+        for mode in (RolloutMode.CONTROLLER_SIM, RolloutMode.REAL_POLICY):
+            with self.assertRaisesRegex(RolloutModeValidationError, "allow-tcp-twist-local"):
+                validate_flow_command_family(
+                    mode,
+                    "tcp_twist_local",
+                    dataset_stats={"proprio_action_frame": "ee_local"},
+                )
+            validate_flow_command_family(
+                mode,
+                "tcp_twist_local",
+                allow_tcp_twist_local=True,
+                dataset_stats={"proprio_action_frame": "ee_local"},
+            )
+
     def test_ee_local_checkpoint_defaults_to_tcp_twist_local(self) -> None:
         assert torch is not None
         with tempfile.TemporaryDirectory() as tmp:

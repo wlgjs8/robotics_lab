@@ -31,6 +31,7 @@ from .flow_dataset import (
     pose_from_state_payload,
     runtime_proprio_from_state,
 )
+from .camera_bundle_client import resolve_frame
 from .flow_model import FlowMatchingPolicy, sample_action_chunks
 from .gripper import REAL_GRIPPER_ENV, GripperRuntime, gripper_commands_from_flow_step
 from .robot_state_client import StateSnapshot
@@ -117,6 +118,62 @@ def canonical_flow_command_family(command_family: str) -> str:
     return _FLOW_COMMAND_FAMILY_LABELS[normalize_flow_command_family(command_family)]
 
 
+# ---- ee_local body-frame alignment (training EE frame vs runtime TCP frame) ----
+# ee_local checkpoints trained on pika UMI data express body deltas in the pika
+# gripper-TIP frame (x=approach, y=left, z=up). The server interprets
+# TcpTwistLocal in the RB TCP frame (z=approach). The fixed rotation between
+# the two is the validated teleop r_align (stack_real.yaml umi_dual_cartesian):
+# rows below, columns = TCP x/y/z axes expressed in the tip frame. Mapping:
+#   v_tip = R_ALIGN · v_tcp        (runtime proprio -> training frame)
+#   v_tcp = R_ALIGNᵀ · v_tip       (policy action  -> robot TCP frame)
+EE_LOCAL_R_ALIGN_PRESETS: dict[str, tuple[float, ...]] = {
+    "pika_tip": (0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0),
+}
+
+
+def resolve_ee_local_r_align(value: Any) -> np.ndarray | None:
+    """None/'none' -> None; preset name or 9 row-major floats -> 3x3 matrix."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        key = value.strip().lower().replace("-", "_")
+        if key in {"", "none", "identity"}:
+            return None
+        if key in EE_LOCAL_R_ALIGN_PRESETS:
+            value = EE_LOCAL_R_ALIGN_PRESETS[key]
+        else:
+            try:
+                value = [float(item) for item in value.replace(",", " ").split()]
+            except ValueError as exc:
+                presets = ", ".join(sorted(EE_LOCAL_R_ALIGN_PRESETS))
+                raise ValueError(
+                    f"invalid ee-local-r-align {value!r}; expected a preset ({presets}) "
+                    "or 9 row-major floats"
+                ) from exc
+    matrix = np.asarray(list(value), dtype=np.float64)
+    if matrix.size != 9:
+        raise ValueError("ee-local-r-align must have exactly 9 elements (row-major 3x3)")
+    matrix = matrix.reshape(3, 3)
+    if not np.allclose(matrix @ matrix.T, np.eye(3), atol=1e-6):
+        raise ValueError("ee-local-r-align must be a rotation matrix (orthonormal)")
+    return matrix
+
+
+def rotate_flow_arm_vectors(array: np.ndarray, rotation: np.ndarray) -> np.ndarray:
+    """Rotate the per-arm linear+angular 3-vectors of flow proprio/action rows.
+
+    Works for proprio vectors (..., >=14) and action chunks (steps, 14): the
+    last dim holds [left dx dy dz drx dry drz grip | right ...]; gripper and
+    any trailing entries (proprio arm_mask) are untouched.
+    """
+    rotated = np.array(array, dtype=np.float32, copy=True)
+    for offset in (0, 7):
+        for start in (offset, offset + 3):
+            block = rotated[..., start : start + 3]
+            rotated[..., start : start + 3] = block @ np.asarray(rotation, dtype=np.float32).T
+    return rotated
+
+
 def _proprio_action_frame_from_stats(stats: dict[str, Any] | None) -> str:
     if not isinstance(stats, dict):
         return DEFAULT_ACTION_FRAME
@@ -142,6 +199,7 @@ def validate_flow_command_family(
     command_family: str,
     *,
     allow_experimental_tcp_delta_stand: bool = False,
+    allow_tcp_twist_local: bool = False,
     dataset_stats: dict[str, Any] | None = None,
 ) -> None:
     mode = parse_rollout_mode(rollout_mode)
@@ -153,11 +211,17 @@ def validate_flow_command_family(
     if family == "tcp_twist_stand":
         return
     if family == "tcp_twist_local":
-        if mode in {RolloutMode.OFFLINE_EVAL, RolloutMode.SIM_DRYRUN}:
+        # real_readonly never sends commands, so the family is irrelevant there.
+        if mode in {RolloutMode.OFFLINE_EVAL, RolloutMode.SIM_DRYRUN, RolloutMode.REAL_READONLY}:
+            return
+        # ee_local checkpoints can only emit tcp_twist_local; live rollout of
+        # that family is an explicit operator opt-in (mirrors the
+        # tcp_delta_stand opt-in below).
+        if allow_tcp_twist_local:
             return
         raise RolloutModeValidationError(
-            "command-family tcp_twist_local is a debug flow rollout path; "
-            "use tcp_twist_stand for controller_sim or real_policy"
+            "command-family tcp_twist_local requires --allow-tcp-twist-local for "
+            "controller_sim or real_policy (ee_local checkpoints cannot use tcp_twist_stand)"
         )
     if mode in {RolloutMode.OFFLINE_EVAL, RolloutMode.SIM_DRYRUN}:
         return
@@ -225,6 +289,7 @@ class FlowMatchingActionSource:
         chunk_execute_steps: int | None = None,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
+        ee_local_r_align: Any = None,
         device: str = "auto",
         stderr: TextIO = sys.stderr,
     ):
@@ -252,11 +317,29 @@ class FlowMatchingActionSource:
             raise ValueError(f"unsupported flow checkpoint schema: {schema}")
         self.stats = dict(checkpoint["dataset_stats"])
         self.action_frame = _proprio_action_frame_from_stats(self.stats)
+        self.ee_local_r_align = (
+            resolve_ee_local_r_align(ee_local_r_align)
+            if self.action_frame == "ee_local"
+            else None
+        )
+        if self.action_frame == "ee_local" and self.ee_local_r_align is None:
+            print(
+                f"WARNING: {self.policy_label}: ee_local checkpoint without --ee-local-r-align; "
+                "assuming the runtime TCP body frame matches the training EE frame "
+                "(pika-tip data needs --ee-local-r-align pika_tip)",
+                file=stderr,
+            )
         self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
         self.command_family = canonical_flow_command_family(self.command_family_option)
-        self.camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
-        self.image_size = int(checkpoint.get("image_size", 224))
         model_config = dict(checkpoint.get("model_config", {}))
+        # camera_names may live only inside model_config (flow checkpoints) rather
+        # than at the top level. Falling through to model_config is REQUIRED: an
+        # empty camera_names makes the source treat a vision-conditioned policy as
+        # camera-free (requires_camera=False) and run it BLIND on zero images, so
+        # its output is identical across scenes -> wrong, image-independent motion.
+        _camera_names = checkpoint.get("camera_names") or model_config.get("camera_names") or []
+        self.camera_names = [str(name) for name in _camera_names]
+        self.image_size = int(checkpoint.get("image_size") or model_config.get("image_size") or 224)
         if not model_config:
             model_config = {
                 "action_horizon": int(checkpoint["action_horizon"]),
@@ -333,9 +416,15 @@ class FlowMatchingActionSource:
             return self._no_policy_input_intent()
 
         if self._chunk is None or self._chunk_index >= self._current_chunk_execute_limit():
-            self._chunk = self._sample_chunk(payload)
-            if self._chunk is None:
+            chunk = self._sample_chunk(payload)
+            if chunk is None:
+                self._chunk = None
                 return self._no_policy_input_intent()
+            if self.ee_local_r_align is not None:
+                # Policy steps are in the training EE frame (e.g. pika tip);
+                # convert to the RB TCP body frame: v_tcp = R_alignT . v_tip.
+                chunk = rotate_flow_arm_vectors(chunk, self.ee_local_r_align.T)
+            self._chunk = chunk
             self._chunk_index = 0
         step = self._chunk[self._chunk_index]
         self._chunk_index += 1
@@ -482,6 +571,8 @@ class FlowMatchingActionSource:
             if len(self.arm_mask) <= mask_index or self.arm_mask[mask_index] <= 0.0:
                 continue
             current = _gripper_value_from_payload(payload, arm)
+            if current is None:
+                current = self._live_gripper_percent(arm)
             if self._gripper_targets_by_arm[arm] is None:
                 self._gripper_targets_by_arm[arm] = 0.0 if current is None else current
             if step.shape[0] > step_index:
@@ -504,7 +595,24 @@ class FlowMatchingActionSource:
         if callable(close):
             close()
 
-    def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
+    def _live_gripper_percent(self, arm: str) -> float | None:
+        """Best-known gripper percent for proprio: physical motor first, then
+        the integrated policy target. The servo state carries no gripper, so
+        without this the proprio gripper channel reads 0 (= fully closed) and
+        the policy behaves as if the grasp already happened."""
+        backend = getattr(self.gripper_runtime, "backend", None)
+        reader = getattr(backend, "current_percent", None)
+        if callable(reader):
+            try:
+                value = reader(arm)
+            except Exception:
+                value = None
+            if value is not None:
+                return float(value)
+        integrated = self._gripper_targets_by_arm.get(arm)
+        return None if integrated is None else float(integrated)
+
+    def _runtime_proprio(self, payload: dict[str, Any]) -> np.ndarray:
         assert self._reset_left_pose is not None
         assert self._reset_right_pose is not None
         proprio = runtime_proprio_from_state(
@@ -514,6 +622,21 @@ class FlowMatchingActionSource:
             arm_mask=self.arm_mask,
             action_frame=self.action_frame,
         )
+        for arm, index in (("left", 6), ("right", 13)):
+            if proprio.shape[0] > index and _gripper_value_from_payload(payload, arm) is None:
+                value = self._live_gripper_percent(arm)
+                if value is not None:
+                    proprio[index] = float(value)
+        if self.ee_local_r_align is not None:
+            # Runtime body deltas are in the RB TCP frame; the checkpoint was
+            # trained in the EE (pika tip) frame: v_tip = R_align . v_tcp.
+            proprio = rotate_flow_arm_vectors(proprio, self.ee_local_r_align)
+        return proprio
+
+    def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
+        assert self._reset_left_pose is not None
+        assert self._reset_right_pose is not None
+        proprio = self._runtime_proprio(payload)
         proprio = normalize_runtime_proprio(proprio, self.stats)
         images, decode_count, missing_count = self._runtime_images()
         self.last_image_decode_count = decode_count
@@ -558,7 +681,7 @@ class FlowMatchingActionSource:
         missing_count = 0
         bundle_frames = getattr(bundle, "frames", {}) if bundle is not None else {}
         for camera_name in self.camera_names:
-            frame = bundle_frames.get(camera_name) if isinstance(bundle_frames, dict) else None
+            frame = resolve_frame(bundle_frames, camera_name)
             pixels = getattr(frame, "pixels", None)
             if pixels is None:
                 frames.append(np.zeros((3, self.image_size, self.image_size), dtype=np.float32))
@@ -569,6 +692,9 @@ class FlowMatchingActionSource:
                     decode_hdf5_image_value(
                         np.asarray(pixels),
                         image_size=self.image_size,
+                        # Mirror the training preprocessing exactly (stats carry
+                        # the dataset's crop mode; default 'none').
+                        image_crop=str(self.stats.get("image_crop", "none") or "none"),
                     )
                 )
                 decode_count += 1
@@ -606,7 +732,7 @@ class FlowMatchingActionSource:
         missing_count = 0
         bundle_frames = getattr(bundle, "frames", {}) if bundle is not None else {}
         for camera_name in self.camera_names:
-            frame = bundle_frames.get(camera_name) if isinstance(bundle_frames, dict) else None
+            frame = resolve_frame(bundle_frames, camera_name)
             pixels = getattr(frame, "pixels", None)
             if pixels is None:
                 missing_count += 1
@@ -632,6 +758,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
         chunk_execute_steps: int | None = None,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
+        ee_local_r_align: Any = None,
         device: str = "auto",
         stderr: TextIO = sys.stderr,
     ):
@@ -670,6 +797,18 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
 
         self.stats = dict(checkpoint["dataset_stats"])
         self.action_frame = _proprio_action_frame_from_stats(self.stats)
+        self.ee_local_r_align = (
+            resolve_ee_local_r_align(ee_local_r_align)
+            if self.action_frame == "ee_local"
+            else None
+        )
+        if self.action_frame == "ee_local" and self.ee_local_r_align is None:
+            print(
+                f"WARNING: {self.policy_label}: ee_local checkpoint without --ee-local-r-align; "
+                "assuming the runtime TCP body frame matches the training EE frame "
+                "(pika-tip data needs --ee-local-r-align pika_tip)",
+                file=stderr,
+            )
         self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
         self.command_family = canonical_flow_command_family(self.command_family_option)
         self.camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
@@ -759,13 +898,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         assert self._reset_left_pose is not None
         assert self._reset_right_pose is not None
-        proprio = runtime_proprio_from_state(
-            payload,
-            reset_left_pose=self._reset_left_pose,
-            reset_right_pose=self._reset_right_pose,
-            arm_mask=self.arm_mask,
-            action_frame=self.action_frame,
-        )
+        proprio = self._runtime_proprio(payload)
         proprio = normalize_runtime_proprio(proprio, self.stats)
         images, decode_count, missing_count = self._runtime_images()
         self.last_image_decode_count = decode_count
@@ -804,6 +937,7 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         chunk_execute_steps: int | None = None,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
+        ee_local_r_align: Any = None,
         device: str = "auto",
         stderr: TextIO = sys.stderr,
     ):
@@ -836,6 +970,18 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         self.models = list(bundle.models)
         self.stats = dict(bundle.stats)
         self.action_frame = _proprio_action_frame_from_stats(self.stats)
+        self.ee_local_r_align = (
+            resolve_ee_local_r_align(ee_local_r_align)
+            if self.action_frame == "ee_local"
+            else None
+        )
+        if self.action_frame == "ee_local" and self.ee_local_r_align is None:
+            print(
+                f"WARNING: {self.policy_label}: ee_local checkpoint without --ee-local-r-align; "
+                "assuming the runtime TCP body frame matches the training EE frame "
+                "(pika-tip data needs --ee-local-r-align pika_tip)",
+                file=stderr,
+            )
         self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
         self.command_family = canonical_flow_command_family(self.command_family_option)
         self.camera_names = list(bundle.camera_names)
@@ -891,13 +1037,7 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         assert self._reset_left_pose is not None
         assert self._reset_right_pose is not None
-        proprio = runtime_proprio_from_state(
-            payload,
-            reset_left_pose=self._reset_left_pose,
-            reset_right_pose=self._reset_right_pose,
-            arm_mask=self.arm_mask,
-            action_frame=self.action_frame,
-        )
+        proprio = self._runtime_proprio(payload)
         proprio = normalize_runtime_proprio(proprio, self.stats)
         images, decode_count, missing_count = self._runtime_images()
         self.last_image_decode_count = decode_count

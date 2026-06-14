@@ -17,9 +17,12 @@ export FLOW_EXPECTED_GPU_COUNT FLOW_RUN_UID FLOW_RUN_GID
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
 # owns the robot until idle; a missing SpaceMouse degrades to UMI-only).
-#   make run                  -> pgmode real
+# In real mode it also starts umi_gripper_follow (UDP 50382 -> local Pika
+# Grippers), so this PC needs only `make run` — disable with GRIPPER_FOLLOW=0.
+#   make run                  -> pgmode real (+ gripper follower)
 #   make run MODE=sim         -> pgmode controller-simulation
 #   make run VERBOSE=1        -> live teleop input + send/drop stats
+#   make run GRIPPER_FOLLOW=0 -> skip the gripper follower
 MODE ?= real
 run:
 	./tools/run_stack.sh $(MODE)
@@ -99,8 +102,14 @@ deps-hardware-free:
 camera-mock-up:
 	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile mock_camera up --build camera_server_mock
 
+# Container path of the camera config (mounted from ./camera_server/config).
+# This site runs two D405 wrist cameras for flow-infer; the 3-camera
+# triple_realsense profile is available via
+#   make camera-real-up CAMERA_CONFIG=/app/config/triple_realsense.yaml
+CAMERA_CONFIG ?= /app/config/dual_realsense_d405.yaml
+
 camera-real-up:
-	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up --build camera_server
+	CAMERA_CONFIG=$(CAMERA_CONFIG) $(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up --build camera_server
 
 # --- rbpodo pgmode-simulation (native; dual Virtual ControlBox VMs) ---
 # One-command bring-up of rb_servo_server + rb_gui (viser) on this WSL box.

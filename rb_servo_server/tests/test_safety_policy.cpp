@@ -5542,7 +5542,9 @@ bool testTcpLinearMoveUsesIkInSimulationOnly() {
                snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok &&
                snapshot.left_cartesian_solve.status == "ok" &&
                snapshot.left_cartesian_solve.path_s > 0.0 &&
-               kinematics->lastLeftTwist().has_value();
+               // Linear move now runs the same position-IK feedforward chain
+               // as TcpPoseTarget (no velocity-IK on the measured state).
+               kinematics->lastLeftTarget().has_value();
     }, std::chrono::milliseconds(1000)));
     RB_CHECK(std::abs(observed_duration - 1.0) < 1e-9);
     rb_servo::ServoSnapshot continued_snapshot;
@@ -5559,7 +5561,7 @@ bool testTcpLinearMoveUsesIkInSimulationOnly() {
     RB_CHECK(std::abs(continued_snapshot.left_cartesian_solve.linear_move_duration_sec - 1.0) < 1e-9);
     RB_CHECK(max_orientation_error < 1e-9);
     RB_CHECK(max_line_deviation < 2e-3);
-    RB_CHECK(std::abs(kinematics->lastLeftTwist()->rz) < 1e-9);
+    RB_CHECK(std::abs(kinematics->lastLeftTarget()->rz) < 1e-9);
     rb_servo::ServoSnapshot done_snapshot;
     RB_CHECK(waitUntil([&] {
         done_snapshot = loop.latestSnapshot();

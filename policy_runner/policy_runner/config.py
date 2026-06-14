@@ -109,6 +109,37 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
+class GripperConfig:
+    # Physical gripper actuation backend for flow-infer rollouts. 'none' keeps
+    # the fail-closed NoopGripperBackend; 'pika_serial' drives robot-mounted
+    # Pika grippers over local serial (POSITION_CTRL rad).
+    backend: str = "none"
+    left_port: str = "/dev/ttyUSB0"
+    right_port: str = "/dev/ttyUSB1"
+    # Directory containing the 'pika' package (AgileX SDK copy).
+    pika_sdk_path: str = ""
+    min_rad: float = 0.0
+    max_rad: float = 1.75
+    deadband_rad: float = 0.005
+    max_hz: float = 60.0
+    # Whether the physical grippers actuate during controller_sim rollouts
+    # (arms are controller-simulated; grippers are separate local hardware).
+    # real_policy additionally requires safety.allow_real_gripper_motion and
+    # the RB_ALLOW_REAL_GRIPPER=1 env gate.
+    actuate_in_controller_simulation: bool = False
+
+    def __post_init__(self) -> None:
+        if self.backend not in {"none", "pika_serial"}:
+            raise ValueError("gripper.backend must be 'none' or 'pika_serial'")
+        if self.max_rad <= self.min_rad:
+            raise ValueError("gripper.max_rad must be greater than gripper.min_rad")
+        if self.deadband_rad < 0.0:
+            raise ValueError("gripper.deadband_rad must be non-negative")
+        if self.max_hz <= 0.0:
+            raise ValueError("gripper.max_hz must be positive")
+
+
+@dataclass(frozen=True)
 class JointSineConfig:
     selected_arm: str = "both"
     amplitude_deg: tuple[float, ...] = (1.0, 1.0, 1.0, 0.5, 0.5, 0.5)
@@ -387,6 +418,7 @@ class PolicyRunnerConfig:
     geometry: GeometryConfig = field(default_factory=GeometryConfig)
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
+    gripper: GripperConfig = field(default_factory=GripperConfig)
     robot_state: RobotStateConfig = field(default_factory=RobotStateConfig)
     servo_command: ServoCommandConfig = field(default_factory=ServoCommandConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
@@ -427,6 +459,7 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         geometry=GeometryConfig(**_section(raw, "geometry")),
         recording=_recording_config(_section(raw, "recording")),
         camera=_camera_config(_section(raw, "camera")),
+        gripper=_gripper_config(_section(raw, "gripper")),
         robot_state=RobotStateConfig(**_section(raw, "robot_state")),
         servo_command=_servo_command_config(_section(raw, "servo_command")),
         safety=_safety_config(_section(raw, "safety")),
@@ -484,6 +517,18 @@ def _camera_config(raw: dict[str, Any]) -> CameraConfig:
             raise ValueError("camera.expected_cameras must be a list")
         raw["expected_cameras"] = [str(item) for item in value]
     return CameraConfig(**raw)
+
+
+def _gripper_config(raw: dict[str, Any]) -> GripperConfig:
+    for key in ("backend", "left_port", "right_port", "pika_sdk_path"):
+        if key in raw:
+            raw[key] = str(raw[key])
+    for key in ("min_rad", "max_rad", "deadband_rad", "max_hz"):
+        if key in raw:
+            raw[key] = float(raw[key])
+    if "actuate_in_controller_simulation" in raw:
+        raw["actuate_in_controller_simulation"] = bool(raw["actuate_in_controller_simulation"])
+    return GripperConfig(**raw)
 
 
 def _servo_command_config(raw: dict[str, Any]) -> ServoCommandConfig:

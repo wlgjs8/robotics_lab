@@ -1,0 +1,19 @@
+# Stable names for the two robot-side Pika Grippers wired to this control PC.
+#
+# Both grippers are CH340 USB-serial chips (1a86:7522) with NO serial number,
+# so they are indistinguishable by ID_SERIAL — `by-id` only ever shows one of
+# them. The ONLY stable discriminator is the physical USB port path (KERNELS),
+# i.e. which socket each gripper is plugged into. Keep each gripper in its own
+# socket and these names stay put across reboots / ttyUSB renumbering.
+#
+# Mapping captured 2026-06-14 on this PC (matches `--swap-ports`: ttyUSB0=right):
+#   USB port 3-1.3.2.4  -> right gripper
+#   USB port 3-1.3.3.4  -> left  gripper
+# VERIFY before trusting:  python3 scripts/umi_gripper_follow.py --ident left
+# If a gripper moves to a different socket, update the KERNELS value below
+# (find it with:  udevadm info -q property -n /dev/ttyUSB0 | grep ID_PATH ).
+#
+# Install:  see tools/udev/install_pika_udev.sh
+
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7522", KERNELS=="3-1.3.2.4:1.0", SYMLINK+="pika-right", GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7522", KERNELS=="3-1.3.3.4:1.0", SYMLINK+="pika-left",  GROUP="dialout", MODE="0660"

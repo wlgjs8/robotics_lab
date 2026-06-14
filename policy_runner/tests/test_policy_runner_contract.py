@@ -155,6 +155,10 @@ class FakeCommandClient:
         self.sent.append(CommandIntent.acquire_lease())
         return None
 
+    def release_lease(self):
+        self.sent.append(CommandIntent.release_lease())
+        return len(self.sent)
+
     def close(self):
         self.closed = True
 
@@ -661,11 +665,86 @@ class PolicyRunnerContractTest(unittest.TestCase):
         )
 
         self.assertEqual(result, 0)
-        self.assertEqual([intent.mode for intent in command_client.sent], ["AcquireLease", "ArmMotion", "Hold"])
+        # Trailing ReleaseLease is the voluntary shutdown handoff (so a restart
+        # does not collide with this session's stale lease).
+        self.assertEqual(
+            [intent.mode for intent in command_client.sent],
+            ["AcquireLease", "ArmMotion", "Hold", "ReleaseLease"],
+        )
         self.assertEqual(len(command_client.acquire_calls), 1)
         self.assertEqual(command_client.acquire_calls[0][1]["timeout_sec"], 0.1)
 
-    def test_run_returns_lease_timeout_when_readback_missing(self):
+    def test_run_retries_when_lease_readback_missing(self):
+        # Lazy-lease contract: the lease is only acquired on the FIRST motion
+        # intent, and a missing/busy lease readback does not kill the process —
+        # the tick is dropped with a warning and acquisition is retried.
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "servo_command": {"acquire_lease": True, "lease_readback_timeout_sec": 0.05},
+                "geometry": {"path": ""},
+                "runtime": {"startup_timeout_sec": 0.5},
+            }
+        )
+        state_client = FakeStateClient([sample_state()])
+        send_socket = FakeSendSocket()
+        command_client = ServoCommandClient(
+            "udp://127.0.0.1:50010",
+            socket_factory=lambda *_args: send_socket,
+            source_id="policy_runner",
+            session_id="session-1",
+        )
+
+        class MotionEverySource:
+            requirements = None
+
+            def next_intent(self, snapshot, now):
+                return CommandIntent.joint_velocity(
+                    left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0]
+                )
+
+            def close(self):
+                pass
+
+        stderr = StringIO()
+        ticks = {"n": 0}
+
+        def stop_after(_period):
+            # The readback poll inside acquire_lease also calls sleep_fn, so
+            # stop only after the retry warning is visible (KI inside the
+            # poll would short-circuit before the TimeoutError fires).
+            ticks["n"] += 1
+            if "lease busy" in stderr.getvalue() or ticks["n"] >= 500:
+                raise KeyboardInterrupt
+            time.sleep(0.001)  # real delay so the 0.05 s readback deadline can pass
+
+        result = run(
+            cfg,
+            state_client=state_client,
+            command_client=command_client,
+            source=MotionEverySource(),
+            sleep_fn=stop_after,
+            stderr=stderr,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("lease busy", stderr.getvalue())
+        modes = [json.loads(data.decode())["mode"] for data, _addr in send_socket.sent]
+        # The acquire attempt went out, but no motion command did.
+        self.assertIn("AcquireLease", modes)
+        self.assertNotIn("ArmMotion", modes)
+        self.assertNotIn("JointVelocity", [m for m in modes])
+        for data, _addr in send_socket.sent:
+            packet = json.loads(data.decode())
+            for arm in ("left", "right"):
+                if isinstance(packet.get(arm), dict):
+                    self.assertNotEqual(packet[arm].get("mode"), "JointVelocity")
+
+    def test_run_releases_lease_after_idle_and_reacquires_on_resume(self):
+        # Idle lease handoff contract: after IDLE_LEASE_RELEASE_SEC without a
+        # motion intent the loop voluntarily releases the lease (so one-shot
+        # GUI commands like InitMotion work between teleop bursts) and lazily
+        # re-acquires on the next motion intent.
         cfg = config_from_mapping(
             {
                 "schema": "robotics_lab.policy_runner.v1",
@@ -674,28 +753,54 @@ class PolicyRunnerContractTest(unittest.TestCase):
                 "runtime": {"startup_timeout_sec": 0.1},
             }
         )
-        state_client = FakeStateClient([sample_state()])
-        command_client = ServoCommandClient(
-            "udp://127.0.0.1:50010",
-            socket_factory=lambda *_args: FakeSendSocket(),
-            source_id="policy_runner",
-            session_id="session-1",
-        )
-        source = CloseableSource()
-        stderr = StringIO()
+        command_client = FakeCommandClient()
+
+        class BurstIdleBurstSource:
+            requirements = ActionRequirements(requires_valid_joint_state=False)
+
+            def __init__(self):
+                self.calls = 0
+
+            def next_intent(self, snapshot, now_monotonic):
+                _ = snapshot, now_monotonic
+                self.calls += 1
+                if self.calls in (1, 4):
+                    return CommandIntent.joint_velocity(
+                        left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0]
+                    )
+                return None
+
+            def close(self):
+                pass
+
+        # monotonic_fn calls: startup deadline, then one per tick.
+        times = iter([0.0, 0.0, 2.0, 2.05, 2.1])
+        sleeps = {"n": 0}
+
+        def sleep_fn(_period):
+            sleeps["n"] += 1
+            if sleeps["n"] >= 4:
+                raise KeyboardInterrupt
 
         result = run(
             cfg,
-            state_client=state_client,
+            state_client=FakeStateClient([sample_state()]),
             command_client=command_client,
-            source=source,
-            monotonic_fn=iter([0.0, 0.0, 0.0, 0.2]).__next__,
-            sleep_fn=lambda _period: None,
-            stderr=stderr,
+            source=BurstIdleBurstSource(),
+            monotonic_fn=lambda: next(times),
+            sleep_fn=sleep_fn,
         )
 
-        self.assertEqual(result, LEASE_READBACK_TIMEOUT_EXIT_CODE)
-        self.assertIn("lease_readback_timeout", stderr.getvalue())
+        self.assertEqual(result, 0)
+        modes = [intent.mode for intent in command_client.sent]
+        # tick1 (t=0.0): lazy acquire + arm + motion; tick2 (t=2.0): idle past
+        # the quiet period -> voluntary release; tick3 (t=2.05): still idle, no
+        # double release; tick4 (t=2.1): motion resumes -> re-acquire + motion.
+        self.assertEqual(
+            modes[:6],
+            ["AcquireLease", "ArmMotion", "Hold", "ReleaseLease", "AcquireLease", "Hold"],
+        )
+        self.assertEqual(len(command_client.acquire_calls), 2)
 
     def test_missing_runtime_geometry_blocks_geometry_dependent_actions(self):
         cfg = config_from_mapping(

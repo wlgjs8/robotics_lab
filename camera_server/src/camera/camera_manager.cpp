@@ -28,7 +28,16 @@ void CameraManager::ensure_required_cameras_present() const {
   std::set<std::string> present(serials.begin(), serials.end());
   for (const auto& cam : cfg_.cameras) {
     if (cam.required && present.count(cam.serial) == 0) {
-      throw std::runtime_error("required RealSense camera missing: " + cam.name + " serial=" + cam.serial);
+      std::string connected = "none";
+      if (!serials.empty()) {
+        connected.clear();
+        for (const auto& serial : serials) {
+          if (!connected.empty()) connected += ", ";
+          connected += serial;
+        }
+      }
+      throw std::runtime_error("required RealSense camera missing: " + cam.name + " serial=" + cam.serial +
+                               " (connected serials: " + connected + ")");
     }
   }
 #else

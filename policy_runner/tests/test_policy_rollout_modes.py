@@ -189,6 +189,51 @@ class PolicyRolloutModesTest(unittest.TestCase):
 
         policy.validate_config(accepted, geometry_status=measured_geometry())
 
+    def test_real_policy_configured_estimate_geometry_carveout(self) -> None:
+        policy = RolloutModePolicy(RolloutMode.REAL_POLICY)
+        safety_gates = {
+            "allow_real_motion": True,
+            "selected_arm": "both",
+            "retarget_status": "accepted",
+            "collision_model_status": "validated",
+            "minimum_inter_arm_distance_m": 0.05,
+            "workspace_envelope_status": "validated",
+            "measured_retarget_available": True,
+            "measured_collision_model_available": True,
+            "measured_gripper_available": True,
+        }
+        estimate_geometry = geometry_status_from_mapping(
+            {
+                "schema": "robotics_lab.calibration.v1",
+                "calibration_id": "ESTIMATE_TEST",
+                "status": "configured_estimate",
+                "geometry_valid_for_real_policy": False,
+                "robot": {},
+            }
+        )
+
+        blocked = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "mode": "real",
+                "safety": dict(safety_gates),
+            }
+        )
+        with self.assertRaisesRegex(RolloutModeValidationError, "configured_estimate"):
+            policy.validate_config(blocked, geometry_status=estimate_geometry)
+
+        allowed = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "mode": "real",
+                "safety": dict(
+                    safety_gates,
+                    allow_configured_estimate_geometry_in_real=True,
+                ),
+            }
+        )
+        policy.validate_config(allowed, geometry_status=estimate_geometry)
+
     def test_rollout_summary_json_has_rollout_summary_and_counts(self) -> None:
         recorder = RolloutSummaryRecorder(
             RolloutModePolicy(RolloutMode.SIM_DRYRUN),

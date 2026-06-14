@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import threading
@@ -68,6 +69,8 @@ from .scene import (
     _update_urdf_config,
     update_circle_overlay,
     update_floor_plane,
+    update_floor_plane_preview,
+    update_self_collision_capsules,
     update_self_collision_overlay,
     update_scene_markers,
 )
@@ -111,9 +114,29 @@ _TCP_FRAME_STAND = "Stand/world"
 _TCP_FRAME_LOCAL = "TCP local"
 _TCP_FRAME_OPTIONS = (_TCP_FRAME_STAND, _TCP_FRAME_LOCAL)
 _TCP_LINEAR_ARM_OPTIONS = ("left", "right", "both")
+_TCP_PTP_ARM_OPTIONS = ("left", "right", "both")
+_TCP_PTP_AXES = (
+    ("x", 0, False),
+    ("y", 1, False),
+    ("z", 2, False),
+    ("roll", 3, True),
+    ("pitch", 4, True),
+    ("yaw", 5, True),
+)
 _TCP_LINEAR_ORIENTATION_MODES = ("constant", "slerp")
-_DEFAULT_INIT_LEFT_JOINTS_DEG = (-124.660, 32.485, 119.074, -96.294, -81.798, -30.615)
-_DEFAULT_INIT_RIGHT_JOINTS_DEG = (111.949, -49.304, -120.057, 75.305, 87.436, 49.983)
+# Default viewer camera for newly connecting clients, in stand-frame meters
+# (Z-up). Looks at the dual-arm robot from the front (-Y side, looking toward
+# +Y) at a near-level angle, so the horizon stays level. Override per launch
+# with RB_GUI_CAMERA_POSITION / RB_GUI_CAMERA_LOOK_AT / RB_GUI_CAMERA_UP
+# ("x,y,z" in meters).
+_DEFAULT_CAMERA_POSITION = (0.0, -1.9, 0.75)
+_DEFAULT_CAMERA_LOOK_AT = (0.0, -0.10, 0.50)
+_DEFAULT_CAMERA_UP = (0.0, 0.0, 1.0)
+# Captured from the live dual-arm rest pose (rbpodo CobotData jnt_ang, 2026-06-12,
+# jnt_ang == jnt_ref at rest). Override per launch with RB_GUI_INIT_LEFT_JOINTS /
+# RB_GUI_INIT_RIGHT_JOINTS ("v1,v2,v3,v4,v5,v6" in deg).
+_DEFAULT_INIT_LEFT_JOINTS_DEG = (-131.663, 72.989, 113.400, -80.880, -107.064, -145.949)
+_DEFAULT_INIT_RIGHT_JOINTS_DEG = (135.099, -64.017, -114.457, 84.379, 112.485, 129.893)
 _OPERATOR_MONITOR_WIDTH_EM = 18.0
 _OPERATOR_MONITOR_GAP_EM = 1.0
 
@@ -163,6 +186,48 @@ def _env_joint6(name: str, fallback: tuple[float, ...]) -> tuple[float, ...] | N
     if len(values) != 6 or not all(math.isfinite(value) for value in values):
         return None
     return values
+
+
+def _env_vec3(name: str, fallback: tuple[float, float, float]) -> tuple[float, float, float]:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return fallback
+    try:
+        values = tuple(float(part.strip()) for part in raw.split(","))
+    except ValueError:
+        return fallback
+    if len(values) != 3 or not all(math.isfinite(value) for value in values):
+        return fallback
+    return values  # type: ignore[return-value]
+
+
+def _install_default_camera(server: Any) -> None:
+    # Stand-frame default view for new clients (Z-up, level horizon). The world
+    # up direction keeps orbiting level; each connecting client is framed on the
+    # robot from the front. Guarded so non-viser test servers stay unaffected.
+    position = _env_vec3("RB_GUI_CAMERA_POSITION", _DEFAULT_CAMERA_POSITION)
+    look_at = _env_vec3("RB_GUI_CAMERA_LOOK_AT", _DEFAULT_CAMERA_LOOK_AT)
+    up = _env_vec3("RB_GUI_CAMERA_UP", _DEFAULT_CAMERA_UP)
+    scene = getattr(server, "scene", None)
+    if scene is not None and hasattr(scene, "set_up_direction"):
+        try:
+            scene.set_up_direction(up)
+        except Exception:
+            pass
+    if not hasattr(server, "on_client_connect"):
+        return
+
+    @server.on_client_connect
+    def _(client: Any) -> None:
+        camera = getattr(client, "camera", None)
+        if camera is None:
+            return
+        try:
+            camera.position = position
+            camera.look_at = look_at
+            camera.up_direction = up
+        except Exception:
+            pass
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -240,6 +305,20 @@ def _update_tcp_frame_buttons(handles: dict[str, Any]) -> None:
     for mode, button in handles.get("tcp_frame_buttons", {}).items():
         try:
             button.color = _mode_button_color(mode, selected)
+        except Exception:
+            pass
+
+
+def _tcp_ptp_arm(handles: dict[str, Any]) -> str:
+    selected = handles.get("tcp_ptp_arm", "left")
+    return selected if selected in _TCP_PTP_ARM_OPTIONS else "left"
+
+
+def _update_tcp_ptp_arm_buttons(handles: dict[str, Any]) -> None:
+    selected_arm = _tcp_ptp_arm(handles)
+    for arm, button in handles.get("tcp_ptp_arm_buttons", {}).items():
+        try:
+            button.color = _mode_button_color(arm, selected_arm)
         except Exception:
             pass
 
@@ -362,16 +441,14 @@ def _send_tcp_pose_target_from_marker(
     scene_handles: dict[str, Any],
     arm: str,
 ) -> tuple[bool, str]:
-    pose = _tcp_target_pose(scene_handles, arm)
-    if pose is None:
-        return False, f"{arm} TCP target unavailable"
-    wxyz = _tcp_target_wxyz(scene_handles, arm)
-    quaternion_xyzw = _wxyz_to_xyzw(wxyz) if wxyz is not None else None
+    left_pose, right_pose, left_quaternion_xyzw, right_quaternion_xyzw, error = _tcp_marker_payloads(scene_handles, arm)
+    if error:
+        return False, error
     return safety.send_tcp_pose_target(
-        left_pose=pose if arm == "left" else None,
-        right_pose=pose if arm == "right" else None,
-        left_quaternion_xyzw=quaternion_xyzw if arm == "left" else None,
-        right_quaternion_xyzw=quaternion_xyzw if arm == "right" else None,
+        left_pose=left_pose,
+        right_pose=right_pose,
+        left_quaternion_xyzw=left_quaternion_xyzw,
+        right_quaternion_xyzw=right_quaternion_xyzw,
     )
 
 
@@ -437,9 +514,221 @@ def _apply_tcp_delta_and_send_pose_target(
     delta: tuple[float, float, float, float, float, float],
     frame_mode: str,
 ) -> tuple[bool, str]:
-    if not _apply_tcp_delta_to_target(scene_handles, arm, delta, frame_mode):
-        return False, f"{arm} TCP target unavailable"
+    arms = ("left", "right") if arm == "both" else (arm,)
+    for single_arm in arms:
+        if not _apply_tcp_delta_to_target(scene_handles, single_arm, delta, frame_mode):
+            return False, f"{single_arm} TCP target unavailable"
     return _send_tcp_pose_target_from_marker(safety, scene_handles, arm)
+
+
+def _waypoints_path() -> str:
+    raw = os.environ.get("RB_GUI_WAYPOINTS_PATH", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.expanduser("~"), ".rb_servo_gui", "waypoints.json")
+
+
+def _waypoint_seq(value: Any, length: int) -> tuple[float, ...] | None:
+    if not isinstance(value, list | tuple) or len(value) != length:
+        return None
+    try:
+        out = tuple(float(item) for item in value)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(item) for item in out):
+        return None
+    return out
+
+
+def _normalize_loaded_waypoint(wp: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "left_q": _waypoint_seq(wp.get("left_q"), 6),
+        "left_pose": _waypoint_seq(wp.get("left_pose"), 6),
+        "left_quat": _waypoint_seq(wp.get("left_quat"), 4),
+        "right_q": _waypoint_seq(wp.get("right_q"), 6),
+        "right_pose": _waypoint_seq(wp.get("right_pose"), 6),
+        "right_quat": _waypoint_seq(wp.get("right_quat"), 4),
+    }
+
+
+def _load_waypoints() -> dict[str, Any]:
+    path = _waypoints_path()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for name, wp in data.items():
+        if isinstance(name, str) and name.strip() and isinstance(wp, Mapping):
+            out[name] = _normalize_loaded_waypoint(wp)
+    return out
+
+
+def _save_waypoints(waypoints: Mapping[str, Any]) -> tuple[bool, str]:
+    path = _waypoints_path()
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(waypoints, handle, indent=2, sort_keys=True)
+    except OSError as exc:
+        return False, str(exc)
+    return True, path
+
+
+def _persist_waypoints(handles: dict[str, Any]) -> str:
+    ok, info = _save_waypoints(handles.get("waypoints", {}))
+    return f"saved to {info}" if ok else f"save failed: {info}"
+
+
+def _delete_waypoint(handles: dict[str, Any]) -> tuple[bool, str]:
+    name, _ = _selected_waypoint(handles)
+    waypoints = handles.get("waypoints", {})
+    if not name or name not in waypoints:
+        return False, "no waypoint selected to delete"
+    del waypoints[name]
+    return True, name
+
+
+def _init_motion_path() -> str:
+    raw = os.environ.get("RB_GUI_INIT_MOTION_PATH", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.expanduser("~"), ".rb_servo_gui", "init_motion.json")
+
+
+def _load_init_joints() -> tuple[tuple[float, ...] | None, tuple[float, ...] | None]:
+    path = _init_motion_path()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(data, Mapping):
+        return None, None
+    return _waypoint_seq(data.get("left"), 6), _waypoint_seq(data.get("right"), 6)
+
+
+def _save_init_joints(left_q: tuple[float, ...], right_q: tuple[float, ...]) -> tuple[bool, str]:
+    path = _init_motion_path()
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"left": list(left_q), "right": list(right_q)}, handle, indent=2)
+    except OSError as exc:
+        return False, str(exc)
+    return True, path
+
+
+def _set_waypoint_as_init(handles: dict[str, Any], safety: OperatorSafety) -> tuple[bool, str]:
+    name, waypoint = _selected_waypoint(handles)
+    if waypoint is None:
+        return False, "select a captured waypoint first"
+    left_q = waypoint.get("left_q")
+    right_q = waypoint.get("right_q")
+    if left_q is None or right_q is None:
+        return False, f"'{name}' missing joint capture for one arm"
+    ok, message = safety.set_init_joints(left_q, right_q)
+    if not ok:
+        return False, message
+    saved_ok, info = _save_init_joints(left_q, right_q)
+    suffix = f"saved to {info}" if saved_ok else f"save failed: {info}"
+    return True, f"init motion set to '{name}'; {suffix}"
+
+
+def _capture_waypoint(handles: dict[str, Any], store: StateStore, name: str) -> tuple[bool, str]:
+    name = (name or "").strip()
+    if not name:
+        return False, "enter a waypoint name first"
+    latest = store.latest()
+    if latest is None or store.is_stale():
+        return False, "state stream missing or stale; cannot capture"
+
+    def _arm_capture(arm_snap: Any) -> tuple[Any, Any, Any]:
+        q = arm_snap.q_actual_deg
+        pose = arm_snap.tcp_actual_stand or arm_snap.tcp_stand
+        pose6 = None
+        quat = None
+        if pose is not None:
+            pose6 = (pose.x, pose.y, pose.z, pose.rx, pose.ry, pose.rz)
+            quat = pose.quaternion_xyzw
+        return q, pose6, quat
+
+    left_q, left_pose, left_quat = _arm_capture(latest.left)
+    right_q, right_pose, right_quat = _arm_capture(latest.right)
+    handles.setdefault("waypoints", {})[name] = {
+        "left_q": left_q,
+        "left_pose": left_pose,
+        "left_quat": left_quat,
+        "right_q": right_q,
+        "right_pose": right_pose,
+        "right_quat": right_quat,
+    }
+    return True, (
+        f"captured '{name}' "
+        f"(L joints {'ok' if left_q else 'none'}, pose {'ok' if left_pose else 'none'}; "
+        f"R joints {'ok' if right_q else 'none'}, pose {'ok' if right_pose else 'none'})"
+    )
+
+
+def _refresh_waypoint_dropdown(handles: dict[str, Any]) -> None:
+    dropdown = handles.get("waypoint_dropdown")
+    if dropdown is None:
+        return
+    names = tuple(handles.get("waypoints", {}).keys()) or ("(none)",)
+    current = dropdown.value
+    try:
+        dropdown.options = names
+        if current not in names:
+            dropdown.value = names[0]
+    except Exception:
+        pass
+
+
+def _selected_waypoint(handles: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    dropdown = handles.get("waypoint_dropdown")
+    name = dropdown.value if dropdown is not None else None
+    waypoint = handles.get("waypoints", {}).get(name)
+    return name, waypoint
+
+
+def _drive_waypoint_tcp(handles: dict[str, Any], safety: OperatorSafety) -> tuple[bool, str]:
+    name, waypoint = _selected_waypoint(handles)
+    if waypoint is None:
+        return False, "select a captured waypoint first"
+    left_pose = waypoint.get("left_pose")
+    right_pose = waypoint.get("right_pose")
+    if left_pose is None and right_pose is None:
+        return False, f"'{name}' has no stand pose"
+    ok, message = safety.send_tcp_pose_target(
+        left_pose=left_pose,
+        right_pose=right_pose,
+        left_quaternion_xyzw=waypoint.get("left_quat"),
+        right_quaternion_xyzw=waypoint.get("right_quat"),
+    )
+    return ok, f"moveL->{name}: " + ("OK: " if ok else "BLOCKED: ") + message
+
+
+def _drive_waypoint_joint(handles: dict[str, Any], safety: OperatorSafety) -> tuple[bool, str]:
+    name, waypoint = _selected_waypoint(handles)
+    if waypoint is None:
+        return False, "select a captured waypoint first"
+    left_q = waypoint.get("left_q")
+    right_q = waypoint.get("right_q")
+    if left_q is None or right_q is None:
+        return False, f"'{name}' missing joint capture for one arm"
+    ok, message = safety.send_joint_target(left_q_deg=left_q, right_q_deg=right_q)
+    return ok, f"moveJ->{name}: " + ("OK: " if ok else "BLOCKED: ") + message
 
 
 def _build_joint_monitor(server: Any, handles: dict[str, Any], *, order: float | None = None) -> None:
@@ -777,6 +1066,7 @@ def build_gui(
     handles: dict[str, Any] = {}
     handles["circle_overlay_enabled"] = overlay_store is not None
     handles["scene"] = _add_scene_fallback(server)
+    _install_default_camera(server)
 
     _build_operator_monitors(server, handles)
 
@@ -790,6 +1080,15 @@ def build_gui(
         handles["self_collision"] = server.gui.add_text(
             "Self-collision", initial_value="self-collision: no state", disabled=True
         )
+        # Translucent margin-inflated collision capsules (arm = blue, stand =
+        # orange) drawn from the server's self_collision telemetry, i.e. the
+        # EXACT geometry the guard checks. Off by default; turn on to debug
+        # suspected false positives against the real arm/stand meshes.
+        if hasattr(server.gui, "add_checkbox"):
+            capsules_default = os.environ.get("RB_GUI_SELF_COLLISION_CAPSULES_DEFAULT", "0") == "1"
+            handles["self_collision_capsules_toggle"] = server.gui.add_checkbox(
+                "검사 캡슐 표시 (반투명)", initial_value=capsules_default
+            )
         handles["floor_constraint"] = server.gui.add_text(
             "Safety floor", initial_value="floor: no state", disabled=True
         )
@@ -854,6 +1153,74 @@ def build_gui(
 
         handles["last_action"] = server.gui.add_text("Last action", initial_value="none", disabled=True)
 
+    with tabs.add_tab("WayPoint"):
+        # Waypoints persist to JSON (RB_GUI_WAYPOINTS_PATH) and auto-load here.
+        handles["waypoints"] = _load_waypoints()
+        handles["waypoint_note"] = server.gui.add_text(
+            "WayPoint",
+            initial_value=(
+                "Move the robot (TCP PTP/Linear, sim or real), then capture both arms' "
+                "joints + stand-frame pose as a teaching point. Hold moveL/moveJ to drive there."
+            ),
+            disabled=True,
+        )
+        handles["waypoint_status"] = server.gui.add_text(
+            "WayPoint status",
+            initial_value=f"loaded {len(handles['waypoints'])} waypoint(s) from {_waypoints_path()}",
+            disabled=True,
+        )
+        waypoint_name_input = server.gui.add_text("WayPoint name", initial_value="wp1")
+        capture_button = server.gui.add_button("현재 값 가져오기")
+        waypoint_dropdown = server.gui.add_dropdown("Saved waypoints", ("(none)",), initial_value="(none)")
+        handles["waypoint_dropdown"] = waypoint_dropdown
+        _refresh_waypoint_dropdown(handles)
+
+        @capture_button.on_click
+        def _(_: Any) -> None:
+            ok, message = _capture_waypoint(handles, store, waypoint_name_input.value)
+            if ok:
+                _refresh_waypoint_dropdown(handles)
+                message = f"{message}; {_persist_waypoints(handles)}"
+            handles["waypoint_status"].value = message
+
+        # moveL / moveJ are press-and-hold (deadman): on_hold re-sends the target
+        # while held, and releasing stops re-sending so the command goes stale
+        # (command_timeout_sec) and the server holds in place within a fraction
+        # of a second. moveL -> TcpPoseTarget, moveJ -> JointTarget, both arms.
+        movel_button = server.gui.add_button("moveL (hold)")
+        movej_button = server.gui.add_button("moveJ (hold)")
+        handles["waypoint_move_buttons"] = [movel_button, movej_button]
+
+        @movel_button.on_hold(callback_hz=10.0)
+        def _(_: Any) -> None:
+            _, message = _drive_waypoint_tcp(handles, safety)
+            handles["waypoint_status"].value = message
+
+        @movej_button.on_hold(callback_hz=10.0)
+        def _(_: Any) -> None:
+            _, message = _drive_waypoint_joint(handles, safety)
+            handles["waypoint_status"].value = message
+
+        # Saved-waypoints operations on the selected entry: set as the InitMotion
+        # pose (persisted to JSON) and delete (kept at the bottom).
+        set_init_button = server.gui.add_button("Init Motion 으로 설정하기")
+        delete_button = server.gui.add_button("WayPoint 삭제", color="red")
+
+        @set_init_button.on_click
+        def _(_: Any) -> None:
+            _, message = _set_waypoint_as_init(handles, safety)
+            handles["waypoint_status"].value = message
+
+        @delete_button.on_click
+        def _(_: Any) -> None:
+            ok, info = _delete_waypoint(handles)
+            if ok:
+                _refresh_waypoint_dropdown(handles)
+                handles["waypoint_status"].value = f"deleted '{info}'; {_persist_waypoints(handles)}"
+            else:
+                handles["waypoint_status"].value = info
+
+    with tabs.add_tab("Safety"):
         with server.gui.add_folder("Safety floor"):
             handles["floor_applied"] = server.gui.add_text(
                 "Applied z", initial_value="no state", disabled=True
@@ -872,6 +1239,15 @@ def build_gui(
             def _(_: Any) -> None:
                 ok, message = safety.send_set_floor_z(float(floor_slider.value) / 1000.0)
                 handles["floor_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            @floor_slider.on_update
+            def _(_: Any) -> None:
+                # Live preview while dragging: the yellow plane follows the
+                # pending slider value immediately; _update_floor_panel hides
+                # it again once the slider matches the server-applied z.
+                update_floor_plane_preview(
+                    handles.get("scene", {}), float(floor_slider.value) / 1000.0
+                )
 
     with tabs.add_tab("Joint jog"):
         arm_group = server.gui.add_button_group("Arm", ("left", "right"))
@@ -983,7 +1359,18 @@ def build_gui(
             disabled=True,
         )
         _install_tcp_target_callbacks(handles["scene"], handles["tcp_status"])
-        tcp_arm_group = server.gui.add_button_group("TCP arm", ("left", "right"))
+        handles["tcp_ptp_arm"] = "left"
+        handles["tcp_ptp_arm_buttons"] = {}
+        for arm in _TCP_PTP_ARM_OPTIONS:
+            arm_button = server.gui.add_button("TCP arm: " + arm, color=_mode_button_color(arm, _tcp_ptp_arm(handles)))
+            handles["tcp_ptp_arm_buttons"][arm] = arm_button
+
+            @arm_button.on_click
+            def _(_: Any, arm: str = arm) -> None:
+                handles["tcp_ptp_arm"] = arm
+                _update_tcp_ptp_arm_buttons(handles)
+                handles["tcp_status"].value = f"TCP arm: {arm}"
+
         handles["tcp_frame_mode"] = _TCP_FRAME_LOCAL
         handles["tcp_frame_buttons"] = {}
         for frame_mode in _TCP_FRAME_OPTIONS:
@@ -998,7 +1385,6 @@ def build_gui(
 
         linear_step = server.gui.add_slider("Linear step mm", min=0.1, max=10.0, step=0.1, initial_value=5.0)
         angular_step = server.gui.add_slider("Angular step deg", min=0.1, max=10.0, step=0.1, initial_value=1.0)
-        handles["tcp_arm_group"] = tcp_arm_group
         handles["tcp_linear_step"] = linear_step
         handles["tcp_angular_step"] = angular_step
         handles["tcp_pose_buttons"] = []
@@ -1007,45 +1393,37 @@ def build_gui(
 
         @send_target_button.on_click
         def _(_: Any) -> None:
-            arm = tcp_arm_group.value
+            arm = _tcp_ptp_arm(handles)
             ok, message = _send_tcp_pose_target_from_marker(safety, handles["scene"], arm)
             handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
         def _send_ptp_delta(delta: tuple[float, float, float, float, float, float]) -> None:
-            arm = tcp_arm_group.value
+            arm = _tcp_ptp_arm(handles)
             frame_mode = _tcp_frame_mode(handles)
             ok, message = _apply_tcp_delta_and_send_pose_target(safety, handles["scene"], arm, delta, frame_mode)
             handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-        def _add_tcp_ptp_delta_button(label: str, axis_index: int, sign: float, angular: bool = False) -> None:
-            button = server.gui.add_button(label)
-            handles["tcp_pose_buttons"].append(button)
+        def _add_tcp_ptp_axis_group(axis_label: str, axis_index: int, angular: bool) -> None:
+            # One row per axis: [-] <axis> [+], with the axis name centered
+            # between the decrement and increment buttons. Clicking the middle
+            # (axis-name) segment is a no-op. Button groups cannot be disabled
+            # in viser, so these stay live and rely on the fail-closed safety
+            # layer (send_tcp_pose_target) to reject commands when not ready.
+            group = server.gui.add_button_group("", ("-", axis_label, "+"))
 
-            @button.on_click
-            def _(_: Any, axis_index: int = axis_index, sign: float = sign, angular: bool = angular) -> None:
+            @group.on_click
+            def _(_: Any, group: Any = group, axis_index: int = axis_index, angular: bool = angular) -> None:
+                choice = group.value
+                if choice not in ("-", "+"):
+                    return
+                sign = 1.0 if choice == "+" else -1.0
                 step = _angular_step_radians(float(angular_step.value)) if angular else _linear_step_meters(float(linear_step.value))
                 delta = [0.0] * 6
                 delta[axis_index] = sign * step
                 _send_ptp_delta(tuple(delta))  # type: ignore[arg-type]
 
-        for label, index, sign in (
-            ("+X", 0, 1.0),
-            ("-X", 0, -1.0),
-            ("+Y", 1, 1.0),
-            ("-Y", 1, -1.0),
-            ("+Z", 2, 1.0),
-            ("-Z", 2, -1.0),
-        ):
-            _add_tcp_ptp_delta_button(label, index, sign)
-        for label, index, sign in (
-            ("+roll", 3, 1.0),
-            ("-roll", 3, -1.0),
-            ("+pitch", 4, 1.0),
-            ("-pitch", 4, -1.0),
-            ("+yaw", 5, 1.0),
-            ("-yaw", 5, -1.0),
-        ):
-            _add_tcp_ptp_delta_button(label, index, sign, angular=True)
+        for axis_label, axis_index, angular in _TCP_PTP_AXES:
+            _add_tcp_ptp_axis_group(axis_label, axis_index, angular)
 
     with tabs.add_tab("TCP Linear"):
         handles["tcp_linear_note"] = server.gui.add_text(
@@ -1200,16 +1578,28 @@ def _latest_circle_overlay(
 def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
     floor = latest.floor_constraint if latest is not None else None
     update_floor_plane(handles.get("scene", {}), floor)
-    if "floor_applied" not in handles:
-        return
+    slider = handles.get("floor_slider")
     if not isinstance(floor, Mapping) or not bool(floor.get("enabled", False)):
-        handles["floor_applied"].value = "disabled"
+        update_floor_plane_preview(handles.get("scene", {}), None)
+        if "floor_applied" in handles:
+            handles["floor_applied"].value = "disabled"
         return
     z = floor.get("z_min_m")
+    # Pending-value preview reconciliation: show the yellow preview plane only
+    # while the slider differs from the server-applied z (>= 0.5 mm); after a
+    # successful Send the applied plane catches up and the preview disappears.
+    if slider is not None and isinstance(z, (int, float)):
+        pending_mm = float(slider.value)
+        applied_mm = float(z) * 1000.0
+        if abs(pending_mm - applied_mm) >= 0.5:
+            update_floor_plane_preview(handles.get("scene", {}), pending_mm / 1000.0)
+        else:
+            update_floor_plane_preview(handles.get("scene", {}), None)
+    if "floor_applied" not in handles:
+        return
     z_txt = f"{float(z) * 1000:.0f}mm" if isinstance(z, (int, float)) else "?"
     reject = floor.get("last_set_reject_reason")
     handles["floor_applied"].value = z_txt + (f" (last reject: {reject})" if reject else "")
-    slider = handles.get("floor_slider")
     if slider is not None:
         lo = floor.get("runtime_min_z_m")
         hi = floor.get("runtime_max_z_m")
@@ -1252,6 +1642,8 @@ def update_gui(
 
     if "mode_buttons" in handles:
         _update_desired_mode_buttons(handles, safety.desired_mode)
+    if "tcp_ptp_arm_buttons" in handles:
+        _update_tcp_ptp_arm_buttons(handles)
     if "tcp_frame_buttons" in handles:
         _update_tcp_frame_buttons(handles)
     if "tcp_display_buttons" in handles:
@@ -1344,6 +1736,12 @@ def update_gui(
     update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
     # After markers: the collision overlay may override ghost/solid visibility.
     update_self_collision_overlay(handles.get("scene", {}), latest)
+    capsule_toggle = handles.get("self_collision_capsules_toggle")
+    update_self_collision_capsules(
+        handles.get("scene", {}),
+        latest,
+        show=bool(getattr(capsule_toggle, "value", False)),
+    )
     if "scene_assets" in handles:
         handles["scene_assets"].value = _format_scene_asset_status(handles.get("scene", {}))
     handles["tick"].value = latest.tick
@@ -1390,6 +1788,12 @@ def main(argv: list[str] | None = None) -> None:
     enable_controller_sim_cartesian = os.environ.get("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", "0") == "1"
     init_left_joints = _env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG)
     init_right_joints = _env_joint6("RB_GUI_INIT_RIGHT_JOINTS", _DEFAULT_INIT_RIGHT_JOINTS_DEG)
+    # Persisted InitMotion pose (set from a waypoint via the GUI) wins over
+    # env/default so it survives restarts without editing code.
+    saved_left_init, saved_right_init = _load_init_joints()
+    if saved_left_init is not None and saved_right_init is not None:
+        init_left_joints, init_right_joints = saved_left_init, saved_right_init
+        print(f"rb_servo_gui: loaded InitMotion pose from {_init_motion_path()}", flush=True)
     init_motion_timeout_sec = _env_float("RB_GUI_INIT_MOTION_TIMEOUT_SEC", 10.0)
 
     store = StateStore()

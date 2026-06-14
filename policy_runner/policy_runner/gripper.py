@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import sys
+import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 
 REAL_GRIPPER_ENV = "RB_ALLOW_REAL_GRIPPER"
@@ -67,6 +69,169 @@ class NoopGripperBackend:
             sent_to_physical=False,
             dropped=True,
             reason=self.reason,
+        )
+
+
+def _import_pika_gripper_class(sdk_path: str | None) -> type:
+    """Import pika.gripper.Gripper, optionally from a configured SDK copy.
+
+    The AgileX Pika SDK is not packaged on this PC's default sys.path; the
+    copy from the SteamVR PC's conda env lives at gripper.pika_sdk_path
+    (same convention as scripts/umi_gripper_follow.py).
+    """
+    if sdk_path and sdk_path not in sys.path:
+        sys.path.insert(0, sdk_path)
+    try:
+        from pika.gripper import Gripper  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError(
+            f"pika.gripper import failed ({exc}); set gripper.pika_sdk_path to the "
+            "directory containing the 'pika' package"
+        ) from exc
+    return Gripper
+
+
+class PikaSerialGripperBackend:
+    """Drives the robot-mounted Pika grippers over local serial POSITION_CTRL.
+
+    Policy gripper actions are per-step deltas in the dataset's gripper units:
+    PERCENT of the open/close range (0 = closed = min_rad, 100 = open =
+    max_rad; pika UMI conversion uses gripper_open_close_units: percent).
+    Deltas integrate onto a per-arm target seeded from the live motor position
+    at connect(), clamped to [min_rad, max_rad]; 'target' commands set the
+    percent absolutely. current_percent() exposes the live motor angle in the
+    same percent units for proprio feedback.
+
+    send() never raises into the control loop: serial errors are reported as
+    dropped dispatch results.
+    """
+
+    def __init__(
+        self,
+        ports: Mapping[str, str],
+        *,
+        sdk_path: str | None = None,
+        min_rad: float = 0.0,
+        max_rad: float = 1.75,
+        deadband_rad: float = 0.005,
+        max_hz: float = 60.0,
+        supports_controller_simulation: bool = False,
+        gripper_cls: type | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if max_rad <= min_rad:
+            raise ValueError("gripper max_rad must be greater than min_rad")
+        if deadband_rad < 0.0:
+            raise ValueError("gripper deadband_rad must be non-negative")
+        self.ports = {str(arm): str(port) for arm, port in ports.items()}
+        for arm in self.ports:
+            if arm not in {"left", "right"}:
+                raise ValueError("gripper port arms must be left or right")
+        self.sdk_path = sdk_path
+        self.min_rad = float(min_rad)
+        self.max_rad = float(max_rad)
+        self.deadband_rad = float(deadband_rad)
+        self.min_period_sec = 1.0 / float(max_hz) if max_hz > 0 else 0.0
+        self.supports_controller_simulation = bool(supports_controller_simulation)
+        self._gripper_cls = gripper_cls
+        self._clock = clock
+        self._grippers: dict[str, Any] = {}
+        self._targets: dict[str, float] = {}
+        self._last_sent: dict[str, tuple[float, float]] = {}
+
+    def connect(self) -> "PikaSerialGripperBackend":
+        gripper_cls = self._gripper_cls or _import_pika_gripper_class(self.sdk_path)
+        for arm, port in self.ports.items():
+            gripper = gripper_cls(port=port)
+            if not gripper.connect():
+                self.close()
+                raise RuntimeError(f"pika gripper {arm} connect failed on {port}")
+            if not gripper.enable():
+                self.close()
+                raise RuntimeError(f"pika gripper {arm} enable failed on {port}")
+            self._grippers[arm] = gripper
+            self._targets[arm] = self._seed_target(gripper)
+        return self
+
+    def _seed_target(self, gripper: Any) -> float:
+        try:
+            position = float(gripper.get_motor_position())
+        except Exception:
+            position = self.min_rad
+        return self._clamp(position)
+
+    def _clamp(self, value: float) -> float:
+        return max(self.min_rad, min(self.max_rad, float(value)))
+
+    def _percent_to_rad(self, percent: float) -> float:
+        return self.min_rad + (self.max_rad - self.min_rad) * float(percent) / 100.0
+
+    def _rad_to_percent(self, rad: float) -> float:
+        return (float(rad) - self.min_rad) / (self.max_rad - self.min_rad) * 100.0
+
+    def current_percent(self, arm: str) -> float | None:
+        """Live motor angle in dataset percent units (proprio feedback)."""
+        gripper = self._grippers.get(arm)
+        if gripper is None:
+            return None
+        try:
+            return self._rad_to_percent(float(gripper.get_motor_position()))
+        except Exception:
+            return None
+
+    def send(self, command: GripperCommand) -> GripperDispatchResult:
+        gripper = self._grippers.get(command.arm)
+        if gripper is None:
+            return self._result(command, accepted=False, sent=False, dropped=True, reason="gripper_arm_not_connected")
+        # Command values are in dataset percent units; motors take rad.
+        if command.command_type == "target":
+            target = self._clamp(self._percent_to_rad(command.value))
+        else:
+            delta_rad = (self.max_rad - self.min_rad) * float(command.value) / 100.0
+            target = self._clamp(self._targets.get(command.arm, self.min_rad) + delta_rad)
+        # The integrated target always advances; deadband/rate gates only skip
+        # the serial write so small deltas accumulate instead of being lost.
+        self._targets[command.arm] = target
+        now = self._clock()
+        last = self._last_sent.get(command.arm)
+        if last is not None:
+            last_time, last_rad = last
+            if self.min_period_sec > 0.0 and now - last_time < self.min_period_sec:
+                # Held, not lost: the integrated target carries to the next send.
+                return self._result(command, accepted=True, sent=False, dropped=False, reason="gripper_rate_limited")
+            if abs(target - last_rad) < self.deadband_rad:
+                return self._result(command, accepted=True, sent=False, dropped=False, reason="gripper_deadband_hold")
+        try:
+            ok = bool(gripper.set_motor_angle(target))
+        except Exception as exc:
+            return self._result(command, accepted=False, sent=False, dropped=True, reason=f"gripper_serial_error:{exc}")
+        if not ok:
+            return self._result(command, accepted=False, sent=False, dropped=True, reason="gripper_command_rejected")
+        self._last_sent[command.arm] = (now, target)
+        return self._result(command, accepted=True, sent=True, dropped=False, reason="gripper_position_sent")
+
+    def close(self) -> None:
+        for gripper in self._grippers.values():
+            for method_name in ("disable", "disconnect"):
+                method = getattr(gripper, method_name, None)
+                if method is None:
+                    continue
+                try:
+                    method()
+                except Exception:
+                    pass
+        self._grippers = {}
+
+    @staticmethod
+    def _result(
+        command: GripperCommand, *, accepted: bool, sent: bool, dropped: bool, reason: str
+    ) -> GripperDispatchResult:
+        return GripperDispatchResult(
+            command=command,
+            accepted=accepted,
+            sent_to_physical=sent,
+            dropped=dropped,
+            reason=reason,
         )
 
 
