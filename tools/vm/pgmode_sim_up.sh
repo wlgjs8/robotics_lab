@@ -2,9 +2,8 @@
 # Bring up the rbpodo pgmode-simulation stack natively on this box:
 # rb_servo_server (under sudo for realtime) + rb_gui (viser).
 # Controller-simulation only; physical_motion_expected=false. The server config
-# keeps cartesian_control.allow_in_real=false and this never sets
-# RB_ALLOW_REAL_CARTESIAN. Reaches the VirtualBox host-only controller VMs
-# directly (default WSL2 NAT routes to the host-only subnet).
+# keeps cartesian_control.allow_in_real=false. Reaches the VirtualBox host-only
+# controller VMs directly (default WSL2 NAT routes to the host-only subnet).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -50,12 +49,10 @@ if pgrep -f 'rb_servo[_]server --config' >/dev/null 2>&1; then
     echo "pgmode_sim_up: rb_servo_server already running"
 else
     echo "pgmode_sim_up: starting rb_servo_server (sudo) with $CFG"
-    # C-phase-1: the controller-simulation carve-out is config-derived now
-    # (operation_mode=simulation + servo.allow_controller_simulation_* flags).
-    # Only the real-connection tripwire env remains (retired in C-phase-2).
+    # The controller-simulation carve-out is config-derived now
+    # (operation_mode=simulation + servo.allow_controller_simulation_* flags);
+    # the legacy real/sim env gates are no-ops in the server runtime.
     nohup sudo env \
-        RB_ALLOW_REAL_ROBOT="${RB_ALLOW_REAL_ROBOT:-1}" \
-        RB_ALLOW_REAL_MOTION="${RB_ALLOW_REAL_MOTION:-1}" \
         "$BIN" --config "$CFG" > "$SERVER_LOG" 2>&1 &
     wait_for "$SERVER_LOG" "CommandServer listening" "rb_servo_server"
 fi

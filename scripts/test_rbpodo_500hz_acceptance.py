@@ -122,12 +122,7 @@ def write_config(
 
 
 def required_env() -> dict[str, str]:
-    return {
-        "RB_ALLOW_REAL_ROBOT": "1",
-        "RB_ALLOW_REAL_MOTION": "1",
-        "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION": "1",
-        "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED": "1",
-    }
+    return {}
 
 
 def fake_arm_state(
@@ -312,40 +307,29 @@ class Rbpodo500HzAcceptanceTests(unittest.TestCase):
             config_path = write_config(tmp, operation_mode="real")
             args = make_args(config_path, tmp / "artifacts")
             with mock.patch.dict(os.environ, required_env(), clear=False):
-                os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
                 with self.assertRaisesRegex(accept.Acceptance500HzError, "operation_mode is real"):
                     accept.preflight(args, run_pgmode=False)
 
-    def test_missing_cartesian_env_reported_when_config_requires_it(self) -> None:
+    def test_preserve_cartesian_control_passes_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)
             config_path = write_config(tmp, cartesian_enable=True)
             args = make_args(config_path, tmp / "artifacts")
             args.preserve_cartesian_control = True
-            env = required_env()
-            env.pop("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN", None)
-            with mock.patch.dict(os.environ, env, clear=True):
-                with self.assertRaises(accept.Acceptance500HzError) as ctx:
-                    accept.preflight(args, run_pgmode=False)
-            self.assertEqual(ctx.exception.failure_phase, "preflight")
-            self.assertEqual(
-                ctx.exception.failure_classification,
-                "preflight_env_missing_or_config_mismatch",
-            )
-            self.assertIn("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN", str(ctx.exception))
+            with mock.patch.dict(os.environ, required_env(), clear=True):
+                _config, preflight = accept.preflight(args, run_pgmode=False)
+            self.assertFalse(preflight["cartesian_control_disabled_for_noop"])
+            self.assertTrue(preflight["cartesian_control_enable"])
 
-    def test_noop_resolved_config_disables_cartesian_without_cartesian_env(self) -> None:
+    def test_noop_resolved_config_disables_cartesian(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)
             config_path = write_config(tmp, cartesian_enable=True)
             args = make_args(config_path, tmp / "artifacts")
-            env = required_env()
-            env.pop("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN", None)
-            with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch.dict(os.environ, required_env(), clear=True):
                 _config, preflight = accept.preflight(args, run_pgmode=False)
             self.assertTrue(preflight["cartesian_control_disabled_for_noop"])
             self.assertFalse(preflight["cartesian_control_enable"])
-            self.assertFalse(preflight["cartesian_env_required"])
             resolved_text = Path(preflight["resolved_config"]).read_text(encoding="utf-8")
             self.assertIn("enable: false", resolved_text)
             self.assertIn("allow_in_controller_simulation: false", resolved_text)
@@ -363,29 +347,13 @@ class Rbpodo500HzAcceptanceTests(unittest.TestCase):
             resolved_text = Path(preflight["resolved_config"]).read_text(encoding="utf-8")
             self.assertIn("command_timeout_sec: 0.02", resolved_text)
 
-    def test_ack_off_diagnostic_requires_ack_disabled_env(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_text:
-            tmp = Path(tmp_text)
-            config_path = write_config(tmp, cartesian_enable=False)
-            args = make_args(config_path, tmp / "artifacts")
-            args.disable_waiting_ack_diagnostic = True
-            env = required_env()
-            env.pop("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION", None)
-            with mock.patch.dict(os.environ, env, clear=True):
-                with self.assertRaises(accept.Acceptance500HzError) as ctx:
-                    accept.preflight(args, run_pgmode=False)
-            self.assertEqual(ctx.exception.failure_phase, "preflight")
-            self.assertEqual(ctx.exception.failure_classification, "preflight_env_missing")
-            self.assertIn("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION", str(ctx.exception))
-
     def test_ack_off_diagnostic_writes_resolved_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)
             config_path = write_config(tmp, cartesian_enable=False)
             args = make_args(config_path, tmp / "artifacts")
             args.disable_waiting_ack_diagnostic = True
-            env = {**required_env(), "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION": "1"}
-            with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch.dict(os.environ, required_env(), clear=True):
                 _config, preflight = accept.preflight(args, run_pgmode=False)
             self.assertTrue(preflight["disable_waiting_ack"])
             self.assertTrue(preflight["disable_waiting_ack_diagnostic"])

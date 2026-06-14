@@ -3,7 +3,7 @@
 
 This script is a stage-aware preflight and artifact writer. Dry-run is the
 default and never connects to hardware or sends motion commands. The non-dry-run
-path validates local config, environment gates, and operator confirmations, then
+path validates local config and operator confirmations, then
 records a supervised preflight artifact; it intentionally does not launch a
 servo server or command motion by itself.
 """
@@ -24,12 +24,7 @@ from typing import Any
 SCHEMA = "robotics_lab.rbpodo_physical_transition.stage.v1"
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 REAL_ROBOT_IPS = {"172.28.60.200", "172.28.60.201"}
-ENV_KEYS = (
-    "RB_ALLOW_REAL_ROBOT",
-    "RB_ALLOW_REAL_MOTION",
-    "RB_ALLOW_REAL_CARTESIAN",
-    "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION",
-)
+ENV_KEYS: tuple[str, ...] = ()
 MOTION_CONFIRMATIONS = (
     "i_understand_this_may_move_the_physical_robot",
     "i_have_clear_workspace",
@@ -97,7 +92,7 @@ STAGE_LIST = (
         "real_readonly_diagnostics_parity",
         "read_only",
         "Physical operation_mode real state diagnostics only.",
-        ("RB_ALLOW_REAL_ROBOT",),
+        (),
         READONLY_CONFIRMATIONS,
         {
             "servo_send_servo_commands": False,
@@ -112,7 +107,7 @@ STAGE_LIST = (
         "stop_resetFault_or_operator_stop_policy_verified",
         "read_only",
         "Verify stop/resetFault API behavior or record unresolved operator-stop policy.",
-        ("RB_ALLOW_REAL_ROBOT",),
+        (),
         READONLY_CONFIRMATIONS,
         {
             "servo_send_servo_commands": False,
@@ -127,7 +122,7 @@ STAGE_LIST = (
         "real_hold_no_motion",
         "read_only",
         "Hold startup with no Servo J sends and no physical motion expected.",
-        ("RB_ALLOW_REAL_ROBOT",),
+        (),
         READONLY_CONFIRMATIONS,
         {
             "servo_send_servo_commands": False,
@@ -142,7 +137,7 @@ STAGE_LIST = (
         "tiny_joint_noop_or_tiny_joint_motion",
         "joint_motion",
         "Tiny joint no-op or explicitly tiny supervised joint motion.",
-        ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION"),
+        (),
         MOTION_CONFIRMATIONS,
         {
             "rate_hz_policy": "accepted_real_servo_j_rate",
@@ -158,7 +153,7 @@ STAGE_LIST = (
         "tiny_cartesian_delta",
         "cartesian_motion",
         "Tiny Cartesian delta using physical actual TCP state only.",
-        ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN"),
+        (),
         MOTION_CONFIRMATIONS,
         {
             "rate_hz_policy": "accepted_real_servo_j_rate",
@@ -175,7 +170,7 @@ STAGE_LIST = (
         "slow_physical_circle_5cm_10s",
         "cartesian_motion",
         "First slow physical circle candidate.",
-        ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN"),
+        (),
         MOTION_CONFIRMATIONS,
         {
             "rate_hz_policy": "accepted_real_servo_j_rate",
@@ -192,7 +187,7 @@ STAGE_LIST = (
         "stable_physical_circle_15cm_16s",
         "cartesian_motion",
         "Stable physical 15 cm circle after 5 cm / 10 s passes.",
-        ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN"),
+        (),
         MOTION_CONFIRMATIONS,
         {
             "rate_hz_policy": "accepted_real_servo_j_rate",
@@ -209,7 +204,7 @@ STAGE_LIST = (
         "medium_physical_circle_15cm_8s",
         "cartesian_motion",
         "Medium physical 15 cm circle after stable 16 s evidence.",
-        ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN"),
+        (),
         MOTION_CONFIRMATIONS,
         {
             "rate_hz_policy": "accepted_real_servo_j_rate",
@@ -226,7 +221,7 @@ STAGE_LIST = (
         "fast_physical_circle_15cm_4s_only_after_explicit_approval",
         "fast_cartesian_motion",
         "Fast 15 cm / 4 s physical circle only after explicit approval.",
-        ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN"),
+        (),
         (*MOTION_CONFIRMATIONS, "i_have_explicit_p9_approval"),
         {
             "rate_hz_policy": "accepted_real_servo_j_rate",
@@ -462,15 +457,7 @@ def env_snapshot() -> dict[str, str | None]:
 
 
 def stage_required_env(stage: Stage, config: ParsedConfig | None) -> tuple[str, ...]:
-    required = list(stage.required_env)
-    ack_disabled = bool(
-        stage.is_motion
-        and config is not None
-        and (config.left.disable_waiting_ack or config.right.disable_waiting_ack)
-    )
-    if ack_disabled and "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION" not in required:
-        required.append("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")
-    return tuple(required)
+    return tuple(stage.required_env)
 
 
 def missing_env(required_env: tuple[str, ...]) -> list[str]:

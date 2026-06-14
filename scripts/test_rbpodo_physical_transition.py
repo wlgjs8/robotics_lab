@@ -105,9 +105,6 @@ class PhysicalTransitionAcceptanceTest(unittest.TestCase):
                     ]
                 )
         self.assertEqual(code, 0, stderr)
-        self.assertIn("RB_ALLOW_REAL_ROBOT=1", stdout)
-        self.assertIn("RB_ALLOW_REAL_MOTION=1", stdout)
-        self.assertIn("RB_ALLOW_REAL_CARTESIAN=1", stdout)
         self.assertIn("Hardware process started: false", stdout)
         self.assertIn("Motion command sent: false", stdout)
         live.assert_not_called()
@@ -131,36 +128,9 @@ class PhysicalTransitionAcceptanceTest(unittest.TestCase):
                     str(config),
                     *ALL_FLAGS,
                 ],
-                env={"RB_ALLOW_REAL_ROBOT": "1", "RB_ALLOW_REAL_MOTION": "1"},
             )
         self.assertEqual(code, 2)
         self.assertIn("requires servo.send_servo_commands=true", stdout + stderr)
-
-    def test_tiny_cartesian_refuses_without_real_cartesian_gate(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            config = write_config(
-                root,
-                "rb_servo_server/config/local/tiny_cartesian.yaml",
-                send_servo_commands=True,
-                cartesian_enable=True,
-                allow_in_real=True,
-            )
-            code, stdout, stderr = run_accept(
-                [
-                    "--root",
-                    str(root),
-                    "--stage",
-                    "tiny_cartesian",
-                    "--execute",
-                    "--config",
-                    str(config),
-                    *ALL_FLAGS,
-                ],
-                env={"RB_ALLOW_REAL_ROBOT": "1", "RB_ALLOW_REAL_MOTION": "1"},
-            )
-        self.assertEqual(code, 2)
-        self.assertIn("RB_ALLOW_REAL_CARTESIAN=1", stdout + stderr)
 
     def test_tiny_cartesian_refuses_when_cartesian_control_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -183,39 +153,9 @@ class PhysicalTransitionAcceptanceTest(unittest.TestCase):
                     str(config),
                     *ALL_FLAGS,
                 ],
-                env={
-                    "RB_ALLOW_REAL_ROBOT": "1",
-                    "RB_ALLOW_REAL_MOTION": "1",
-                    "RB_ALLOW_REAL_CARTESIAN": "1",
-                },
             )
         self.assertEqual(code, 2)
         self.assertIn("requires cartesian_control.enable=true", stdout + stderr)
-
-    def test_ack_disabled_motion_requires_ack_disabled_env_gate(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            config = write_config(
-                root,
-                "rb_servo_server/config/local/tiny_joint_ack_disabled.yaml",
-                send_servo_commands=True,
-                disable_waiting_ack=True,
-            )
-            code, stdout, stderr = run_accept(
-                [
-                    "--root",
-                    str(root),
-                    "--stage",
-                    "tiny_joint",
-                    "--execute",
-                    "--config",
-                    str(config),
-                    *ALL_FLAGS,
-                ],
-                env={"RB_ALLOW_REAL_ROBOT": "1", "RB_ALLOW_REAL_MOTION": "1"},
-            )
-        self.assertEqual(code, 2)
-        self.assertIn("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1", stdout + stderr)
 
     def test_tracked_example_refuses_send_servo_commands_true(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

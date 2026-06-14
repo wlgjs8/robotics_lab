@@ -147,10 +147,4 @@ The named ACKON500 best goal profile is created with --include-goal or
 --include-500hz:
   tools/create_rbpodo_circle_local_configs.sh --include-goal
   --server-config rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s_500hz_goal.yaml
-
-Required env gates include:
-  RB_ALLOW_REAL_ROBOT=1
-  RB_ALLOW_REAL_MOTION=1
-  RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-  RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
 EOF

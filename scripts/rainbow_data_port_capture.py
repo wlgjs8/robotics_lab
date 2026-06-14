@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import json
 import math
-import os
 import socket
 import sys
 import time
@@ -58,8 +57,7 @@ def parse_args() -> argparse.Namespace:
             "Capture raw Rainbow TCP data-port responses for measurement "
             "reliability investigation. This tool only connects to data port "
             "5001, sends the read-only reqdata request by default, and never "
-            "sends motion, pgmode, reset, or command-port traffic. Known real "
-            "controller IPs also require RB_ALLOW_REAL_ROBOT=1."
+            "sends motion, pgmode, reset, or command-port traffic."
         )
     )
     parser.add_argument("--ip", help="Single controller IP to capture.")
@@ -156,8 +154,6 @@ def validate_config(config: CaptureConfig, *, enforce_data_port: bool = True) ->
             "refusing known real controller IP without "
             f"--i-understand-this-connects-to-real-controller: {joined}"
         )
-    if real_ips and os.environ.get("RB_ALLOW_REAL_ROBOT") != "1":
-        raise CaptureError("real controller raw data-port capture requires RB_ALLOW_REAL_ROBOT=1")
     if real_ips and "artifacts" not in config.artifact_dir.resolve().parts:
         raise CaptureError("real controller raw payloads must be stored under an artifacts/ directory")
 

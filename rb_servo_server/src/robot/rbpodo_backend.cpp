@@ -24,12 +24,6 @@
 namespace rb_servo {
 namespace {
 
-bool envIsOne(const char* name) {
-    // Real/sim env gates (RB_ALLOW_REAL_*, RB_ALLOW_RBPODO_*) are retired:
-    // backend behavior is config-driven only.
-    (void)name;
-    return true;
-}
 
 bool finiteJointArray(const JointArray& joints) {
     return std::all_of(joints.begin(), joints.end(), [](double value) {
@@ -113,27 +107,22 @@ bool operationModeMatchesConfig(const BackendConfig& config, const RbpodoSystemS
 bool rbpodoControllerSimulationMotionGateOpen(const BackendConfig& config) {
     return config.backend_type == BackendType::Rbpodo &&
         config.run_mode == RunMode::Real &&
-        expectedSimulationMode(config) &&
-        envIsOne("RB_ALLOW_REAL_ROBOT") &&
-        envIsOne("RB_ALLOW_REAL_MOTION");
+        expectedSimulationMode(config);
 }
 
 // REAL physical-motion opt-in (operation_mode: real, NOT controller-sim): accept the
 // same vendor-unreliable status fields (op_stat_self_collision shape, robot_time) as
 // UNAVAILABLE instead of latching diagnostics_suspect. Fail-closed: requires the per-arm
-// config opt-in AND a real (non-sim) operation mode AND all three env gates, including
-// the dedicated RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION. Every other field
-// (EMS/SOS/soft-estop/collision_occur, unknown real_vs_sim mode, init error) keeps
-// faulting exactly as before — this only suppresses the two measured field-layout-garbage
-// fields so a physical run is not blocked by the vendor -2001 mismatch.
+// config opt-in (allow_real_motion_with_suspect_diagnostics) AND a real (non-sim)
+// operation mode. Every other field (EMS/SOS/soft-estop/collision_occur, unknown
+// real_vs_sim mode, init error) keeps faulting exactly as before — this only suppresses
+// the two measured field-layout-garbage fields so a physical run is not blocked by the
+// vendor -2001 mismatch.
 bool rbpodoSuspectDiagnosticsRealMotionGateOpen(const BackendConfig& config) {
     return config.backend_type == BackendType::Rbpodo &&
         config.run_mode == RunMode::Real &&
         !expectedSimulationMode(config) &&
-        config.allow_real_motion_with_suspect_diagnostics &&
-        envIsOne("RB_ALLOW_REAL_ROBOT") &&
-        envIsOne("RB_ALLOW_REAL_MOTION") &&
-        envIsOne("RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION");
+        config.allow_real_motion_with_suspect_diagnostics;
 }
 
 RbpodoStateDecodeOptions decodeOptionsForConfig(const BackendConfig& config) {
@@ -744,21 +733,6 @@ BackendResult<RobotState> RbpodoBackend::connect() {
         makeBackendTiming(start, nowSteadyNs())
     );
 #else
-    if (impl_->config.run_mode == RunMode::Real) {
-        if (!envIsOne("RB_ALLOW_REAL_ROBOT")) {
-            impl_->connected = false;
-            return failedResult<RobotState>(
-                BackendOp::Connect,
-                backendError(
-                    BackendErrorKind::SuppressedByPolicy,
-                    "Refusing real robot mode. Set RB_ALLOW_REAL_ROBOT=1.",
-                    "",
-                    "rbpodo_real_robot_gate_closed"
-                ),
-                makeBackendTiming(start, nowSteadyNs())
-            );
-        }
-    }
     if (impl_->config.ip.empty()) {
         std::cerr << "[ERROR] RbpodoBackend requires a non-empty controller ip for "
                   << impl_->config.name << "\n";
@@ -1265,51 +1239,6 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
         annotateRbpodoAckResult(&result, impl_->config, ack_wait_duration_us, ack_observed);
         return result;
     };
-    if (impl_->config.run_mode == RunMode::Real && !envIsOne("RB_ALLOW_REAL_MOTION")) {
-        std::cerr << "[ERROR] RbpodoBackend refused servo_j without RB_ALLOW_REAL_MOTION=1\n";
-        return with_ack_metadata(
-            rejectedSend(
-                request,
-                backendError(
-                    BackendErrorKind::SuppressedByPolicy,
-                    "RbpodoBackend refused servo_j without RB_ALLOW_REAL_MOTION=1",
-                    "",
-                    "rbpodo_motion_gate_closed"
-                ),
-                makeBackendTiming(start, nowSteadyNs()),
-                cached_state,
-                cached_source
-            ),
-            false,
-            0.0
-        );
-    }
-    // Controller-simulation (operation_mode=simulation) is exempt — ACK-off is a
-    // normal pgmode-sim streaming mode. Genuine real (operation_mode=real) keeps
-    // the byte-identical env acceptance gate.
-    if (impl_->config.run_mode == RunMode::Real &&
-        impl_->config.disable_waiting_ack &&
-        !expectedSimulationMode(impl_->config) &&
-        !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")) {
-        std::cerr << "[ERROR] RbpodoBackend refused ACK-disabled servo_j without "
-                     "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 (genuine real)\n";
-        return with_ack_metadata(
-            rejectedSend(
-                request,
-                backendError(
-                    BackendErrorKind::SuppressedByPolicy,
-                    "RbpodoBackend refused ACK-disabled servo_j without RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1",
-                    "",
-                    "rbpodo_ack_disabled_motion_gate_closed"
-                ),
-                makeBackendTiming(start, nowSteadyNs()),
-                cached_state,
-                cached_source
-            ),
-            false,
-            0.0
-        );
-    }
     if (!impl_->connected || !impl_->robot) {
         return with_ack_metadata(
             rejectedSend(

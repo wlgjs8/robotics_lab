@@ -35,10 +35,6 @@ Required safety flags:
 
 Environment behavior:
   --with-required-env  Explicitly export:
-    RB_ALLOW_REAL_ROBOT=1
-    RB_ALLOW_REAL_MOTION=1
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
     RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
 
 Without --with-required-env, those env vars must already be set.
@@ -268,10 +264,6 @@ check_realtime_caps() {
 require_env() {
   local missing=()
   for key in \
-    RB_ALLOW_REAL_ROBOT \
-    RB_ALLOW_REAL_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN \
     RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM
   do
     if [[ "${!key:-}" != "1" ]]; then
@@ -292,15 +284,8 @@ fi
 if [[ "${CONFIRM_PGMODE}" != "1" ]]; then
   fail "missing --i-confirm-controller-is-in-pgmode-simulation"
 fi
-if [[ "${RB_ALLOW_REAL_CARTESIAN:-}" == "1" ]]; then
-  fail "RB_ALLOW_REAL_CARTESIAN must not be set for controller-simulation circle benchmark"
-fi
 
 if [[ "${WITH_REQUIRED_ENV}" == "1" ]]; then
-  export RB_ALLOW_REAL_ROBOT=1
-  export RB_ALLOW_REAL_MOTION=1
-  export RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-  export RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
   export RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
 else
   require_env

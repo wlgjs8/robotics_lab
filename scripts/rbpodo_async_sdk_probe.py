@@ -9,7 +9,6 @@ import importlib
 import inspect
 import json
 import math
-import os
 import sys
 import threading
 import time
@@ -21,12 +20,6 @@ from typing import Any
 SCHEMA = "robotics_lab.rbpodo_async_sdk_probe.v1"
 SDK_CAPABILITIES_SCHEMA = "robotics_lab.rbpodo_async_sdk_capabilities.v1"
 REAL_ROBOT_IPS = {"172.28.60.200", "172.28.60.201"}
-REQUIRED_ENV = (
-    "RB_ALLOW_REAL_ROBOT",
-    "RB_ALLOW_REAL_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
-)
-ACK_DISABLED_ENV = "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION"
 M_CODES = ("M561", "M568", "M569", "M570")
 DIAGNOSTIC_FIELDS = (
     "time",
@@ -158,19 +151,6 @@ def parse_args() -> argparse.Namespace:
 
 def now_ns() -> int:
     return time.monotonic_ns()
-
-
-def env_enabled(name: str) -> bool:
-    return os.environ.get(name) == "1"
-
-
-def env_snapshot() -> dict[str, str | None]:
-    keys = list(REQUIRED_ENV) + [
-        ACK_DISABLED_ENV,
-        "RB_ALLOW_REAL_CARTESIAN",
-        "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED",
-    ]
-    return {key: os.environ.get(key) for key in keys}
 
 
 def finite_positive(value: float, name: str) -> None:
@@ -318,13 +298,6 @@ def preflight(args: argparse.Namespace, *, run_pgmode: bool = True) -> dict[str,
     if not args.allow_simulation_servo_j:
         raise AsyncSdkProbeError("missing --allow-simulation-servo-j")
     operation_modes = validate_operation_modes(args)
-    for name in REQUIRED_ENV:
-        if not env_enabled(name):
-            raise AsyncSdkProbeError(f"rbpodo async SDK probe requires {name}=1")
-    if env_enabled("RB_ALLOW_REAL_CARTESIAN"):
-        raise AsyncSdkProbeError("RB_ALLOW_REAL_CARTESIAN must not be set for this Servo J SDK probe")
-    if args.mode == "ack_off" and not env_enabled(ACK_DISABLED_ENV):
-        raise AsyncSdkProbeError(f"ack_off mode requires {ACK_DISABLED_ENV}=1")
 
     artifact_dir = args.artifact_dir.resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -342,8 +315,6 @@ def preflight(args: argparse.Namespace, *, run_pgmode: bool = True) -> dict[str,
         "physical_real_motion_refused": True,
         "user_confirmation_flag": True,
         "allow_simulation_servo_j": True,
-        "required_env": list(REQUIRED_ENV) + ([ACK_DISABLED_ENV] if args.mode == "ack_off" else []),
-        "env": env_snapshot(),
         "pgmode_simulation_confirmed": pgmode_summary.get("overall_result") == "ok",
         "pgmode_summary": pgmode_summary,
         "safety_note": (

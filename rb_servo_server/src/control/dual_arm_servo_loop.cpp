@@ -166,13 +166,6 @@ std::shared_ptr<IKinematics> makeKinematicsProvider(const DualArmConfig& config)
     }
 }
 
-bool envFlagEnabled(const char* name) {
-    // Real/sim env gates (RB_ALLOW_REAL_ROBOT/MOTION/CARTESIAN) are retired:
-    // execution is no longer gated on the real-vs-simulation distinction.
-    // run_mode/operation_mode remain as telemetry labels only.
-    (void)name;
-    return true;
-}
 
 std::string jointArrayDebugString(const JointArray& joints) {
     std::ostringstream out;
@@ -265,9 +258,7 @@ bool controllerSimulationMotionRequired(const DualArmConfig& config) {
 bool controllerSimulationMotionGateOpen(const DualArmConfig& config) {
     if (!controllerSimulationMotionRequired(config)) return true;
     return config.servo.allow_controller_simulation_motion &&
-        bothRbpodoControllerSimulationBackends(config) &&
-        envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
-        envFlagEnabled("RB_ALLOW_REAL_MOTION");
+        bothRbpodoControllerSimulationBackends(config);
 }
 
 const BackendConfig& backendConfigForArm(const DualArmConfig& config, ArmId arm_id) {
@@ -281,9 +272,7 @@ bool controllerSimulationCartesianGateOpen(
     return config.cartesian_control.enable &&
         config.cartesian_control.allow_in_controller_simulation &&
         config.servo.allow_controller_simulation_motion &&
-        isRbpodoControllerSimulationBackend(backend) &&
-        envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
-        envFlagEnabled("RB_ALLOW_REAL_MOTION");
+        isRbpodoControllerSimulationBackend(backend);
 }
 
 struct CartesianAvailability {
@@ -2800,8 +2789,7 @@ void DualArmServoLoop::logStartupValidation(
         !controllerSimulationMotionGateOpen(config_)) {
         std::cerr << "[ERROR] controller-simulation motion gate closed; refusing rbpodo "
                      "controller-simulation benchmark. Required: operation_mode=simulation, "
-                     "servo.allow_controller_simulation_motion=true, "
-                     "RB_ALLOW_REAL_ROBOT=1, and RB_ALLOW_REAL_MOTION=1.\n";
+                     "servo.allow_controller_simulation_motion=true.\n";
     }
 }
 

@@ -36,8 +36,7 @@ Safety flags for server/teleop/hdf5-record:
 
 Environment behavior:
   --with-required-env  Explicitly export the controller-simulation and async
-                       env gates for this process. The script never sets
-                       RB_ALLOW_REAL_CARTESIAN.
+                       env gates for this process.
 
 Options:
   --server PATH       rb_servo_server binary path for the server action.
@@ -62,14 +61,8 @@ note() {
 print_required_env() {
   cat <<'EOF'
 rbpodo_pgmode_spacemouse: required rbpodo pgmode simulation env flags:
-  RB_ALLOW_REAL_ROBOT=1
-  RB_ALLOW_REAL_MOTION=1
-  RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-  RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
   RB_ALLOW_RBPODO_ASYNC_STREAMING=1
   RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
-  RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
-rbpodo_pgmode_spacemouse: RB_ALLOW_REAL_CARTESIAN must remain unset for this workflow.
 EOF
 }
 
@@ -124,34 +117,21 @@ port_in_use() {
 require_confirmations() {
   [[ "${CONFIRM_CONNECTS}" == "1" ]] || fail "missing --i-understand-this-connects-to-real-controller"
   [[ "${CONFIRM_PGMODE}" == "1" ]] || fail "missing --i-confirm-controller-is-in-pgmode-simulation"
-  if [[ "${RB_ALLOW_REAL_CARTESIAN:-}" == "1" ]]; then
-    fail "RB_ALLOW_REAL_CARTESIAN must not be set for pgmode SpaceMouse simulation"
-  fi
 }
 
 set_required_env_if_requested() {
   if [[ "${WITH_REQUIRED_ENV}" != "1" ]]; then
     return 0
   fi
-  export RB_ALLOW_REAL_ROBOT=1
-  export RB_ALLOW_REAL_MOTION=1
-  export RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-  export RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
   export RB_ALLOW_RBPODO_ASYNC_STREAMING=1
   export RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
-  export RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
 }
 
 require_server_env() {
   local missing=()
   for key in \
-    RB_ALLOW_REAL_ROBOT \
-    RB_ALLOW_REAL_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN \
     RB_ALLOW_RBPODO_ASYNC_STREAMING \
-    RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM \
-    RB_RBPODO_PGMODE_SIMULATION_CONFIRMED
+    RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM
   do
     if [[ "${!key:-}" != "1" ]]; then
       missing+=("${key}=1")

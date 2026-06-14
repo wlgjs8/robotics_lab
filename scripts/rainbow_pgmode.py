@@ -34,8 +34,7 @@ class RainbowPgmodeError(RuntimeError):
 def _env_confirms_real_controller() -> bool:
     """Convenience: RB_I_UNDERSTAND_REAL_CONTROLLER=1 satisfies the connect
     acknowledgment so routine pgmode-sim tooling need not pass the flag each time.
-    This only acknowledges connecting to a real controller IP (no physical motion);
-    physical motion stays gated by RB_ALLOW_REAL_MOTION and its own confirmations."""
+    This only acknowledges connecting to a real controller IP (no physical motion)."""
     return os.environ.get("RB_I_UNDERSTAND_REAL_CONTROLLER", "").strip().lower() in (
         "1", "true", "yes", "on",
     )
@@ -219,8 +218,6 @@ def validate_common(
             "refusing known real controller IP without --i-understand-this-connects-to-real-controller "
             "(or RB_I_UNDERSTAND_REAL_CONTROLLER=1)"
         )
-    if known and os.environ.get("RB_ALLOW_REAL_ROBOT") != "1":
-        raise RainbowPgmodeError("known real controller IP requires RB_ALLOW_REAL_ROBOT=1")
 
 
 def run_pgmode(

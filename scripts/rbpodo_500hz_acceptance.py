@@ -27,8 +27,6 @@ from rbpodo_servo_acceptance import (
     ParsedConfig,
     as_bool,
     as_float,
-    env_enabled,
-    env_snapshot,
     load_config,
     parse_udp_endpoint,
     scalar_value,
@@ -36,19 +34,15 @@ from rbpodo_servo_acceptance import (
 )
 
 
+def env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 SCHEMA = "robotics_lab.rbpodo_500hz_acceptance.v1"
 MODE = "servo_j_noop_500hz"
 COMMAND_RATE_HZ = 500.0
 COMMAND_PERIOD_SEC = 1.0 / COMMAND_RATE_HZ
 ARMS = ("left", "right")
-REQUIRED_ENV = (
-    "RB_ALLOW_REAL_ROBOT",
-    "RB_ALLOW_REAL_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
-    "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED",
-)
-CONTROLLER_SIM_CARTESIAN_ENV = "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"
-ACK_DISABLED_ENV = "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION"
 ASYNC_STREAMING_ENV = "RB_ALLOW_RBPODO_ASYNC_STREAMING"
 SOCKET_SEND_ONLY_ENV = "RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING"
 ASYNC_DISABLED = "disabled"
@@ -127,10 +121,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--preserve-cartesian-control",
         action="store_true",
-        help=(
-            "Do not disable cartesian_control.enable in the no-op resolved config; "
-            f"if controller-simulation Cartesian is enabled, {CONTROLLER_SIM_CARTESIAN_ENV}=1 is required."
-        ),
+        help="Do not disable cartesian_control.enable in the no-op resolved config.",
     )
     parser.add_argument(
         "--disable-waiting-ack-diagnostic",
@@ -225,12 +216,10 @@ def bool_value(value: Any) -> bool:
 
 
 def env_snapshot_500hz() -> dict[str, str | None]:
-    snapshot = env_snapshot()
-    snapshot[CONTROLLER_SIM_CARTESIAN_ENV] = os.environ.get(CONTROLLER_SIM_CARTESIAN_ENV)
-    snapshot[ACK_DISABLED_ENV] = os.environ.get(ACK_DISABLED_ENV)
-    snapshot[ASYNC_STREAMING_ENV] = os.environ.get(ASYNC_STREAMING_ENV)
-    snapshot[SOCKET_SEND_ONLY_ENV] = os.environ.get(SOCKET_SEND_ONLY_ENV)
-    return snapshot
+    return {
+        ASYNC_STREAMING_ENV: os.environ.get(ASYNC_STREAMING_ENV),
+        SOCKET_SEND_ONLY_ENV: os.environ.get(SOCKET_SEND_ONLY_ENV),
+    }
 
 
 def async_mode_value(args: argparse.Namespace | Any) -> str:
@@ -733,12 +722,6 @@ def validate_config_and_env(
             raise Acceptance500HzError(
                 "--disable-waiting-ack-diagnostic must resolve both arms to disable_waiting_ack=true"
             )
-        if not env_enabled(ACK_DISABLED_ENV):
-            raise Acceptance500HzError(
-                f"ACK-off 500 Hz diagnostic requires {ACK_DISABLED_ENV}=1",
-                failure_phase="preflight",
-                failure_classification="preflight_env_missing",
-            )
     if async_mode == ASYNC_SOCKET_SEND_SUPERVISED:
         if set(ack_disabled_arms) != set(ARMS):
             raise Acceptance500HzError(
@@ -750,10 +733,9 @@ def validate_config_and_env(
                 failure_phase="preflight",
                 failure_classification="preflight_env_missing",
             )
-        if not (env_enabled(ACK_DISABLED_ENV) or env_enabled(SOCKET_SEND_ONLY_ENV)):
+        if not env_enabled(SOCKET_SEND_ONLY_ENV):
             raise Acceptance500HzError(
-                f"--async-mode socket_send_supervised requires {ACK_DISABLED_ENV}=1 "
-                f"or {SOCKET_SEND_ONLY_ENV}=1",
+                f"--async-mode socket_send_supervised requires {SOCKET_SEND_ONLY_ENV}=1",
                 failure_phase="preflight",
                 failure_classification="preflight_env_missing",
             )
@@ -773,22 +755,9 @@ def validate_config_and_env(
             failure_phase="preflight",
             failure_classification="preflight_env_missing",
         )
-    for name in REQUIRED_ENV:
-        if not env_enabled(name):
-            raise Acceptance500HzError(
-                f"500 Hz controller-simulation no-op requires {name}=1",
-                failure_phase="preflight",
-                failure_classification="preflight_env_missing",
-            )
     if async_mode != ASYNC_DISABLED and not env_enabled(ASYNC_STREAMING_ENV):
         raise Acceptance500HzError(
             f"--async-mode {async_mode} requires {ASYNC_STREAMING_ENV}=1",
-            failure_phase="preflight",
-            failure_classification="preflight_env_missing",
-        )
-    if env_enabled("RB_ALLOW_REAL_CARTESIAN"):
-        raise Acceptance500HzError(
-            "RB_ALLOW_REAL_CARTESIAN must not be set for 500 Hz Servo J no-op acceptance",
             failure_phase="preflight",
             failure_classification="preflight_env_missing",
         )
@@ -796,14 +765,6 @@ def validate_config_and_env(
     cartesian_control = sections.get("cartesian_control", {})
     cartesian_enabled = as_bool(cartesian_control.get("enable"), False)
     cartesian_controller_sim_allowed = as_bool(cartesian_control.get("allow_in_controller_simulation"), False)
-    cartesian_env_required = cartesian_enabled and cartesian_controller_sim_allowed
-    if cartesian_env_required and not env_enabled(CONTROLLER_SIM_CARTESIAN_ENV):
-        raise Acceptance500HzError(
-            "config enables cartesian_control.allow_in_controller_simulation with cartesian_control.enable=true; "
-            f"set {CONTROLLER_SIM_CARTESIAN_ENV}=1 or use the no-op resolved config with Cartesian disabled",
-            failure_phase="preflight",
-            failure_classification="preflight_env_missing_or_config_mismatch",
-        )
 
     send_servo_commands = as_bool(config.servo.get("send_servo_commands"), False)
     if not send_servo_commands:
@@ -898,24 +859,17 @@ def validate_config_and_env(
         "state_host": state_host,
         "state_port": state_port,
         "required_env": (
-            list(REQUIRED_ENV)
-            + ([ASYNC_STREAMING_ENV] if async_mode != ASYNC_DISABLED else [])
-            + (
-                [f"{ACK_DISABLED_ENV} or {SOCKET_SEND_ONLY_ENV}"]
-                if async_mode == ASYNC_SOCKET_SEND_SUPERVISED
-                else ([ACK_DISABLED_ENV] if ack_disabled_diagnostic else [])
-            )
+            ([ASYNC_STREAMING_ENV] if async_mode != ASYNC_DISABLED else [])
+            + ([SOCKET_SEND_ONLY_ENV] if async_mode == ASYNC_SOCKET_SEND_SUPERVISED else [])
         ),
         "env": env_snapshot_500hz(),
         "confirmation_flag": args.i_understand_this_connects_to_real_controller,
         "pgmode_confirmation_flag": args.i_confirm_controller_is_in_pgmode_simulation,
         "pgmode_simulation_confirmed": pgmode_summary.get("overall_result") == "ok",
         "pgmode_summary": pgmode_summary,
-        "server_env_overrides": {"RB_RBPODO_PGMODE_SIMULATION_CONFIRMED": "1"},
+        "server_env_overrides": {},
         "cartesian_control_enable": cartesian_enabled,
         "cartesian_control_allow_in_controller_simulation": cartesian_controller_sim_allowed,
-        "cartesian_env_required": cartesian_env_required,
-        "cartesian_env_forbidden": "RB_ALLOW_REAL_CARTESIAN",
         "network_state_pub_rate_hz": as_float(config.network.get("state_pub_rate_hz")),
         "logging_directory": sections.get("logging", {}).get("directory"),
     }
@@ -1811,13 +1765,7 @@ def classify_error_text(text: str, phase: str | None) -> str | None:
     if not text:
         return None
     lower = text.lower()
-    if (
-        CONTROLLER_SIM_CARTESIAN_ENV in text
-        or "controller-simulation cartesian" in lower
-        or "cartesian_control.allow_in_controller_simulation" in lower
-    ):
-        return "preflight_env_missing_or_config_mismatch"
-    if "requires rb_allow" in lower or "missing --" in lower or "must not be set" in lower:
+    if "requires rb_allow" in lower or "missing --" in lower:
         return "preflight_env_missing"
     if is_ack_timeout_text(text):
         if phase == "warmup":

@@ -25,8 +25,6 @@ Options:
   --cartesian        Open controller-simulation Cartesian gates.
   --exec -- CMD ...  Execute CMD with the selected environment instead of printing exports.
   -h, --help         Show this help.
-
-This script never sets RB_ALLOW_REAL_CARTESIAN.
 EOF
 }
 
@@ -96,36 +94,19 @@ apply_env() {
   else
     export ROBOT_RIGHT_IP="${RIGHT_IP}"
   fi
-  unset RB_ALLOW_REAL_CARTESIAN
 
   case "${MODE}" in
     closed)
-      unset RB_ALLOW_REAL_ROBOT
-      unset RB_ALLOW_REAL_MOTION
-      unset RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION
-      unset RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN
-      unset RB_RBPODO_PGMODE_SIMULATION_CONFIRMED
+      :
       ;;
     readonly)
-      export RB_ALLOW_REAL_ROBOT=1
-      unset RB_ALLOW_REAL_MOTION
-      unset RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION
-      unset RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN
-      unset RB_RBPODO_PGMODE_SIMULATION_CONFIRMED
+      :
       ;;
     motion)
-      export RB_ALLOW_REAL_ROBOT=1
-      export RB_ALLOW_REAL_MOTION=1
-      export RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-      export RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
-      unset RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN
+      :
       ;;
     cartesian)
-      export RB_ALLOW_REAL_ROBOT=1
-      export RB_ALLOW_REAL_MOTION=1
-      export RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-      export RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
-      export RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
+      :
       ;;
     *)
       fail "unknown mode: ${MODE}"
@@ -138,35 +119,18 @@ print_exports() {
   if [[ "${SINGLE}" == "0" ]]; then
     printf 'export ROBOT_RIGHT_IP=%q\n' "${RIGHT_IP}"
   fi
-  echo 'unset RB_ALLOW_REAL_CARTESIAN'
   case "${MODE}" in
     closed)
-      echo 'unset RB_ALLOW_REAL_ROBOT'
-      echo 'unset RB_ALLOW_REAL_MOTION'
-      echo 'unset RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION'
-      echo 'unset RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN'
-      echo 'unset RB_RBPODO_PGMODE_SIMULATION_CONFIRMED'
+      :
       ;;
     readonly)
-      echo 'export RB_ALLOW_REAL_ROBOT=1'
-      echo 'unset RB_ALLOW_REAL_MOTION'
-      echo 'unset RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION'
-      echo 'unset RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN'
-      echo 'unset RB_RBPODO_PGMODE_SIMULATION_CONFIRMED'
+      :
       ;;
     motion)
-      echo 'export RB_ALLOW_REAL_ROBOT=1'
-      echo 'export RB_ALLOW_REAL_MOTION=1'
-      echo 'export RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1'
-      echo 'export RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1'
-      echo 'unset RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN'
+      :
       ;;
     cartesian)
-      echo 'export RB_ALLOW_REAL_ROBOT=1'
-      echo 'export RB_ALLOW_REAL_MOTION=1'
-      echo 'export RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1'
-      echo 'export RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1'
-      echo 'export RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1'
+      :
       ;;
   esac
 }

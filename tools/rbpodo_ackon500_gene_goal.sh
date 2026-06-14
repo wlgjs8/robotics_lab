@@ -25,8 +25,8 @@ usage() {
 Usage: tools/rbpodo_ackon500_gene_goal.sh [options]
 
 Run ACKON500-GENE-GOAL-01 against Rainbow controllers in pgmode simulation.
-The wrapper refuses physical Cartesian real mode and never sets RB_ALLOW_*
-variables unless --with-required-env is passed.
+The wrapper never sets RB_ALLOW_* variables unless --with-required-env is
+passed.
 
 Default profile:
   --profile best  Run the named ACKON500 best controller-simulation profile.
@@ -42,13 +42,8 @@ Required safety flags:
 
 Environment behavior:
   --with-required-env  Explicitly export:
-    RB_ALLOW_REAL_ROBOT=1
-    RB_ALLOW_REAL_MOTION=1
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
     RB_ALLOW_RBPODO_ASYNC_STREAMING=1
     RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
-    RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
 
 Options:
   --profile NAME            best (default), matrix, or repeatability.
@@ -98,13 +93,8 @@ print_command() {
 require_env() {
   local missing=()
   for key in \
-    RB_ALLOW_REAL_ROBOT \
-    RB_ALLOW_REAL_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN \
     RB_ALLOW_RBPODO_ASYNC_STREAMING \
-    RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM \
-    RB_RBPODO_PGMODE_SIMULATION_CONFIRMED
+    RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM
   do
     if [[ "${!key:-}" != "1" ]]; then
       missing+=("${key}=1")
@@ -250,9 +240,6 @@ done
 
 [[ "${CONFIRM}" == "1" ]] || fail "missing --i-understand-this-connects-to-real-controller"
 [[ "${CONFIRM_PGMODE}" == "1" ]] || fail "missing --i-confirm-controller-is-in-pgmode-simulation"
-if [[ "${RB_ALLOW_REAL_CARTESIAN:-}" == "1" ]]; then
-  fail "RB_ALLOW_REAL_CARTESIAN must not be set for controller-simulation goal runs"
-fi
 
 case "${PROFILE}" in
   best)
@@ -297,13 +284,8 @@ else
 fi
 
 if [[ "${WITH_REQUIRED_ENV}" == "1" ]]; then
-  export RB_ALLOW_REAL_ROBOT=1
-  export RB_ALLOW_REAL_MOTION=1
-  export RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-  export RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
   export RB_ALLOW_RBPODO_ASYNC_STREAMING=1
   export RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
-  export RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
 elif [[ "${DRY_RUN}" == "1" ]]; then
   note "dry-run: required controller-simulation env gates were not checked or exported"
 else

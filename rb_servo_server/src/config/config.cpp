@@ -1151,13 +1151,6 @@ void validateConfig(const DualArmConfig& cfg) {
     if (cfg.cartesian_control.linear_move.max_duration_sec < cfg.cartesian_control.linear_move.min_duration_sec) {
         throw std::runtime_error("cartesian_control.linear_move.max_duration_sec must be >= min_duration_sec");
     }
-    if (cfg.cartesian_control.enable_benchmark_primitives && anyReal(cfg) &&
-        !cfg.cartesian_control.allow_in_controller_simulation) {
-        throw std::runtime_error(
-            "Refusing cartesian_control.enable_benchmark_primitives in real mode outside "
-            "rbpodo controller-simulation Cartesian gate"
-        );
-    }
     if (cfg.cartesian_control.enable_server_side_circle_track && !cfg.cartesian_control.enable) {
         throw std::runtime_error(
             "cartesian_control.enable_server_side_circle_track requires cartesian_control.enable=true"
