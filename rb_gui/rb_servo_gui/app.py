@@ -1163,6 +1163,24 @@ def _status_summary_html(
     return '<div style="display:flex;flex-wrap:wrap;padding:0.25em 0 0.1em;">' + "".join(chips) + "</div>"
 
 
+def _tab_theme_html() -> str:
+    """Color-code the tab levels so the main tab bar (상태/조작/이동/고급) and the
+    nested sub-tab bars (관절/속도/… inside 이동, etc.) are visually distinct.
+    Main = blue underline; sub = a purple tinted band (sub bars live inside a
+    `.mantine-Tabs-panel`, which is how we target only the nested level)."""
+    return """
+<style>
+  /* Main (top-level) tab bar — blue accent */
+  .mantine-Tabs-list { border-bottom: 2px solid #d4def0 !important; }
+  .mantine-Tabs-tab[data-active] { color: #2563eb !important; border-color: #2563eb !important; font-weight: 700 !important; }
+  /* Sub (nested) tab bar — purple band; .mantine-Tabs-panel scopes it to nested groups only */
+  .mantine-Tabs-panel .mantine-Tabs-list { background: #f4f1fb !important; border-radius: 7px !important; padding: 3px !important; border-bottom: 2px solid #e2d9f6 !important; }
+  .mantine-Tabs-panel .mantine-Tabs-tab { color: #6f6788 !important; }
+  .mantine-Tabs-panel .mantine-Tabs-tab[data-active] { color: #7c3aed !important; border-color: #7c3aed !important; font-weight: 700 !important; }
+</style>
+"""
+
+
 def build_gui(
     server: Any,
     safety: OperatorSafety,
@@ -1175,6 +1193,10 @@ def build_gui(
     _install_default_camera(server)
 
     _build_operator_monitors(server, handles)
+
+    _add_tab_theme = getattr(server.gui, "add_html", None)
+    if callable(_add_tab_theme):
+        handles["tab_theme"] = _add_tab_theme(_tab_theme_html())
 
     tabs = server.gui.add_tab_group(order=1.0)
     with tabs.add_tab("상태"):
@@ -1431,34 +1453,76 @@ def build_gui(
                 _add_joint_jog_row(_joint_index)
 
         with _move_tabs.add_tab("속도"):
+            # Two clearly-separated modes (were crammed in one tab). Each DoF has a
+            # [−] label [+] nudge row; the slider sets magnitude only. A click sends
+            # one velocity command (streams until it goes stale); 정지 sends zero.
             vel_arm = server.gui.add_button_group("Arm", ("left", "right"))
-            vj_index = server.gui.add_slider("Joint index", min=1, max=6, step=1, initial_value=1)
-            vj_vel = server.gui.add_slider("Joint vel deg/s", min=-10.0, max=10.0, step=0.5, initial_value=3.0)
-            vj_button = server.gui.add_button("Send joint velocity")
-            v_frame = server.gui.add_button_group("Twist frame", ("stand", "local"))
-            v_axis = server.gui.add_button_group("Twist axis", ("X", "Y", "Z", "Rx", "Ry", "Rz"))
-            v_lin = server.gui.add_slider("Linear vel m/s", min=-0.05, max=0.05, step=0.005, initial_value=0.02)
-            v_ang = server.gui.add_slider("Angular vel rad/s", min=-0.2, max=0.2, step=0.02, initial_value=0.1)
-            vt_button = server.gui.add_button("Send TCP twist")
             handles["velocity_status"] = server.gui.add_text("Velocity status", initial_value="idle", disabled=True)
 
-            @vj_button.on_click
-            def _(_: Any) -> None:
-                vel = [0.0] * 6
-                vel[int(vj_index.value) - 1] = float(vj_vel.value)
-                ok, message = safety.send_joint_velocity(vel_arm.value, tuple(vel))
+            def _set_vel_status(ok: bool, message: str) -> None:
                 handles["velocity_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-            @vt_button.on_click
-            def _(_: Any) -> None:
-                axis_index = {"X": 0, "Y": 1, "Z": 2, "Rx": 3, "Ry": 4, "Rz": 5}[v_axis.value]
-                twist = [0.0] * 6
-                twist[axis_index] = float(v_lin.value) if axis_index < 3 else float(v_ang.value)
-                if v_frame.value == "local":
-                    ok, message = safety.send_tcp_twist_local(vel_arm.value, tuple(twist))
-                else:
-                    ok, message = safety.send_tcp_twist_stand(vel_arm.value, tuple(twist))
-                handles["velocity_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+            with server.gui.add_folder("관절 속도"):
+                jv_speed = server.gui.add_slider("deg/s", min=0.5, max=10.0, step=0.5, initial_value=3.0)
+
+                def _send_joint_vel(joint_index: int, sign: float) -> None:
+                    vel = [0.0] * 6
+                    vel[joint_index] = sign * float(jv_speed.value)
+                    _set_vel_status(*safety.send_joint_velocity(vel_arm.value, tuple(vel)))
+
+                def _add_joint_vel_row(joint_index: int) -> None:
+                    group = server.gui.add_button_group("", ("-", _nudge_label(f"J{joint_index + 1}"), "+"))
+
+                    @group.on_click
+                    def _(_: Any, group: Any = group, joint_index: int = joint_index) -> None:
+                        if group.value == "-":
+                            _send_joint_vel(joint_index, -1.0)
+                        elif group.value == "+":
+                            _send_joint_vel(joint_index, 1.0)
+
+                for _vel_joint_index in range(6):
+                    _add_joint_vel_row(_vel_joint_index)
+                jv_stop = server.gui.add_button("정지 (Stop)", color="red")
+
+                @jv_stop.on_click
+                def _(_: Any) -> None:
+                    _set_vel_status(*safety.send_joint_velocity(vel_arm.value, (0.0,) * 6))
+
+            with server.gui.add_folder("TCP 트위스트"):
+                tw_frame = server.gui.add_button_group("Frame", ("stand", "local"))
+                tw_lin = server.gui.add_slider("Linear m/s", min=0.005, max=0.05, step=0.005, initial_value=0.02)
+                tw_ang = server.gui.add_slider("Angular rad/s", min=0.02, max=0.2, step=0.02, initial_value=0.1)
+                _twist_axes = (("X", 0, False), ("Y", 1, False), ("Z", 2, False),
+                               ("Rx", 3, True), ("Ry", 4, True), ("Rz", 5, True))
+
+                def _send_twist(axis_index: int, angular: bool, sign: float) -> None:
+                    twist = [0.0] * 6
+                    twist[axis_index] = sign * (float(tw_ang.value) if angular else float(tw_lin.value))
+                    if tw_frame.value == "local":
+                        _set_vel_status(*safety.send_tcp_twist_local(vel_arm.value, tuple(twist)))
+                    else:
+                        _set_vel_status(*safety.send_tcp_twist_stand(vel_arm.value, tuple(twist)))
+
+                def _add_twist_row(label: str, axis_index: int, angular: bool) -> None:
+                    group = server.gui.add_button_group("", ("-", _nudge_label(label), "+"))
+
+                    @group.on_click
+                    def _(_: Any, group: Any = group, axis_index: int = axis_index, angular: bool = angular) -> None:
+                        if group.value == "-":
+                            _send_twist(axis_index, angular, -1.0)
+                        elif group.value == "+":
+                            _send_twist(axis_index, angular, 1.0)
+
+                for _tw_label, _tw_index, _tw_angular in _twist_axes:
+                    _add_twist_row(_tw_label, _tw_index, _tw_angular)
+                tw_stop = server.gui.add_button("정지 (Stop)", color="red")
+
+                @tw_stop.on_click
+                def _(_: Any) -> None:
+                    if tw_frame.value == "local":
+                        _set_vel_status(*safety.send_tcp_twist_local(vel_arm.value, (0.0,) * 6))
+                    else:
+                        _set_vel_status(*safety.send_tcp_twist_stand(vel_arm.value, (0.0,) * 6))
 
         with _move_tabs.add_tab("TCP PTP"):
             handles["tcp_ptp_note"] = server.gui.add_text(
@@ -1522,7 +1586,7 @@ def build_gui(
                 # (axis-name) segment is a no-op. Button groups cannot be disabled
                 # in viser, so these stay live and rely on the fail-closed safety
                 # layer (send_tcp_pose_target) to reject commands when not ready.
-                group = server.gui.add_button_group("", ("-", axis_label, "+"))
+                group = server.gui.add_button_group("", ("-", _nudge_label(axis_label.capitalize()), "+"))
 
                 @group.on_click
                 def _(_: Any, group: Any = group, axis_index: int = axis_index, angular: bool = angular) -> None:
@@ -1535,8 +1599,9 @@ def build_gui(
                     delta[axis_index] = sign * step
                     _send_ptp_delta(tuple(delta))  # type: ignore[arg-type]
 
-            for axis_label, axis_index, angular in _TCP_PTP_AXES:
-                _add_tcp_ptp_axis_group(axis_label, axis_index, angular)
+            with server.gui.add_folder("축 넛지 (−/+)"):
+                for axis_label, axis_index, angular in _TCP_PTP_AXES:
+                    _add_tcp_ptp_axis_group(axis_label, axis_index, angular)
 
         with _move_tabs.add_tab("TCP Linear"):
             handles["tcp_linear_note"] = server.gui.add_text(

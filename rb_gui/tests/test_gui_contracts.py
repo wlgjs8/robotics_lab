@@ -25,7 +25,9 @@ from rb_servo_gui.app import (
     _apply_tcp_delta_and_send_pose_target,
     _apply_tcp_delta_to_target,
     _apply_init_joints_live,
+    _nudge_label,
     _status_summary_html,
+    _tab_theme_html,
     _angular_step_radians,
     _current_joints_text,
     _delete_waypoint,
@@ -1724,6 +1726,28 @@ class GuiContractsTest(unittest.TestCase):
         _update_stand_world_monitor(handles, store.latest(), stale=True)
         self.assertEqual(handles["stand_world_monitor_status"].value, "stale, xyz=mm, rpy=deg, tick=1")
         self.assertEqual(handles["stand_world_monitor_values"]["left"]["x"].value, "invalid")
+
+    def test_tab_theme_html_colors_main_and_sub_levels_differently(self):
+        css = _tab_theme_html()
+        # main tab bar styled at the top level...
+        self.assertIn(".mantine-Tabs-list", css)
+        self.assertIn("#2563eb", css)  # main accent (blue)
+        # ...sub bars scoped to nested panels with a different hue
+        self.assertIn(".mantine-Tabs-panel .mantine-Tabs-list", css)
+        self.assertIn("#7c3aed", css)  # sub accent (purple)
+        self.assertIn("<style>", css)
+
+    def test_nudge_label_pads_to_equal_width_with_nbsp(self):
+        # Different-length axis labels become the same display width so the
+        # −/+ button-group segments line up vertically across rows.
+        short = _nudge_label("X")
+        long = _nudge_label("Pitch")
+        self.assertEqual(len(short), len(long))
+        self.assertIn("X", short)
+        self.assertIn("Pitch", long)
+        self.assertIn(" ", short)  # padded with non-breaking space, not plain space
+        # the bare value is still recoverable by stripping NBSP
+        self.assertEqual(short.replace(" ", ""), "X")
 
     def test_status_summary_html_colors_chips_by_state(self):
         good = _status_summary_html(
