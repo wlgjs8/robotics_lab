@@ -45,6 +45,7 @@ from .flow_inference import (
     _gripper_value_from_payload,
     canonical_flow_command_family,
     resolve_ee_local_r_align,
+    rotate_flow_arm_vectors,
 )
 from .gripper import GripperRuntime
 
@@ -298,7 +299,16 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 live = self._live_gripper_percent(side)
                 grip = live if live is not None else _gripper_from_arm_payload(payload.get(side, {}))
             features.append(np.concatenate([pos_rel, rot_rel, [float(grip) / 100.0]]))
-        return np.concatenate(features).astype(np.float32)
+        state = np.concatenate(features).astype(np.float32)
+        if self.ee_local_r_align is not None:
+            # Mirror FlowMatchingActionSource._runtime_proprio: the reset-relative
+            # body vectors are in the RB TCP frame, but an ee_local checkpoint was
+            # trained in the EE (pika tip) frame -> v_tip = R_align . v_tcp. The
+            # inherited next_intent / _sample_and_align_chunk already convert the
+            # output back with R_align.T; without this the input/output frames are
+            # asymmetric (input left in TCP frame while output is rotated to tip).
+            state = rotate_flow_arm_vectors(state, self.ee_local_r_align)
+        return state
 
     def _raw_camera_images(self) -> tuple[dict[str, np.ndarray] | None, int, int]:
         """Full-resolution HWC uint8 RGB frames keyed left/right; None if missing."""
