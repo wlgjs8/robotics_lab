@@ -557,6 +557,93 @@ def _place_capsule(handle: Any, p0: tuple[float, float, float], p1: tuple[float,
     handle.wxyz = _capsule_axis_wxyz(seg)
 
 
+# URDF mesh self-collision close-call overlay (mesh-mode analogue of the capsule
+# overlay above). The server's self_collision.near_pairs telemetry lists the K
+# closest checked pairs as witness segments {p_a_m, p_b_m, clearance_m}; we draw a
+# thin tube per pair, red when within the hard floor, yellow when merely close.
+_SELF_COLLISION_NEAR_HARD_RGB = (235, 40, 40)
+_SELF_COLLISION_NEAR_CAUTION_RGB = (255, 210, 40)
+_SELF_COLLISION_NEAR_RADIUS_M = 0.004
+_SELF_COLLISION_NEAR_OPACITY = 0.9
+
+
+def _ensure_near_pair_handle(
+    server: Any, scene_handles: dict[str, Any], key: str, length: float, rgb: tuple[int, int, int]
+) -> Any:
+    cache = scene_handles.setdefault("_self_collision_near_cache", {})
+    entry = cache.get(key)
+    if entry is not None and abs(entry["length"] - length) < 1e-4 and entry["rgb"] == rgb:
+        return entry["handle"]
+    if entry is not None:
+        try:
+            entry["handle"].remove()
+        except Exception:
+            pass
+    try:
+        import trimesh
+
+        mesh = trimesh.creation.capsule(
+            height=max(float(length), 1e-4), radius=_SELF_COLLISION_NEAR_RADIUS_M, count=[5, 8]
+        )
+        handle = server.scene.add_mesh_simple(
+            f"/stand/self_collision_near/{key}",
+            vertices=mesh.vertices,
+            faces=mesh.faces,
+            color=rgb,
+            opacity=_SELF_COLLISION_NEAR_OPACITY,
+            visible=False,
+        )
+    except Exception as exc:
+        scene_handles["self_collision_near_error"] = f"{type(exc).__name__}: {exc}"
+        return None
+    cache[key] = {"handle": handle, "length": float(length), "rgb": rgb}
+    return handle
+
+
+def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
+    """Show/update the URDF-mesh close-call segments from self_collision.near_pairs.
+    A thin tube spans each checked pair's witness points (red within the hard floor,
+    yellow when merely close) so the viewer sees WHERE and HOW CLOSE the mesh guard
+    is — the mesh-mode counterpart of update_self_collision_capsules."""
+    if not isinstance(scene_handles, dict):
+        return
+    server = scene_handles.get("_server")
+    cache = scene_handles.setdefault("_self_collision_near_cache", {})
+    used_keys: set[str] = set()
+    if show and server is not None:
+        sc = getattr(latest, "self_collision", None) if latest is not None else None
+        if isinstance(sc, Mapping):
+            margin = sc.get("margin_m")
+            hard = (
+                float(margin)
+                if isinstance(margin, (int, float)) and math.isfinite(float(margin))
+                else 0.005
+            )
+            pairs = sc.get("near_pairs")
+            if isinstance(pairs, (list, tuple)):
+                for i, pair in enumerate(pairs):
+                    if not isinstance(pair, Mapping):
+                        continue
+                    a = _xyz3(pair.get("p_a_m"))
+                    b = _xyz3(pair.get("p_b_m"))
+                    clearance = pair.get("clearance_m")
+                    if a is None or b is None or not isinstance(clearance, (int, float)):
+                        continue
+                    is_hard = float(clearance) < hard
+                    rgb = _SELF_COLLISION_NEAR_HARD_RGB if is_hard else _SELF_COLLISION_NEAR_CAUTION_RGB
+                    key = f"{i}_{'hard' if is_hard else 'near'}"
+                    handle = _ensure_near_pair_handle(server, scene_handles, key, math.dist(a, b), rgb)
+                    if handle is None:
+                        continue
+                    try:
+                        _place_capsule(handle, a, b)
+                    except Exception:
+                        pass
+                    used_keys.add(key)
+    for key, entry in cache.items():
+        _set_visible(entry["handle"], show and key in used_keys)
+
+
 def add_self_collision_capsules(server: Any, scene_handles: dict[str, Any]) -> None:
     """Prime the collision-capsule overlay (store the server handle).
 

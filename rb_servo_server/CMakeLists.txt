@@ -38,6 +38,7 @@ add_library(rb_servo_core
     src/control/smd_pose_tracker.cpp
     src/math/se3.cpp
     src/control/force_controller.cpp
+    src/control/collision_monitor.cpp
     src/control/dual_arm_servo_loop.cpp
     src/network/command_server.cpp
     src/network/state_publisher.cpp
@@ -72,6 +73,10 @@ if(IS_DIRECTORY "/opt/openrobots")
 endif()
 find_package(Eigen3 REQUIRED)
 find_package(pinocchio REQUIRED)
+# coal (hpp-fcl successor) + pinocchio collision component: URDF mesh/box
+# self-collision in the async CollisionMonitor. pinocchio targets export
+# PINOCCHIO_WITH_HPP_FCL via INTERFACE_COMPILE_DEFINITIONS.
+find_package(coal REQUIRED)
 target_link_libraries(
     rb_servo_core
     PUBLIC
@@ -80,6 +85,8 @@ target_link_libraries(
         yaml-cpp
         Eigen3::Eigen
         pinocchio::pinocchio
+        pinocchio::pinocchio_collision
+        coal::coal
 )
 target_compile_definitions(rb_servo_core PUBLIC RB_SERVO_ENABLE_PINOCCHIO=1)
 
@@ -144,6 +151,10 @@ if(BUILD_TESTING)
     add_executable(test_self_collision tests/test_self_collision.cpp)
     target_link_libraries(test_self_collision PRIVATE rb_servo_core)
     add_test(NAME self_collision COMMAND test_self_collision)
+
+    add_executable(test_collision_monitor tests/test_collision_monitor.cpp)
+    target_link_libraries(test_collision_monitor PRIVATE rb_servo_core)
+    add_test(NAME collision_monitor COMMAND test_collision_monitor)
 
     add_executable(test_floor_constraint tests/test_floor_constraint.cpp)
     target_link_libraries(test_floor_constraint PRIVATE rb_servo_core)

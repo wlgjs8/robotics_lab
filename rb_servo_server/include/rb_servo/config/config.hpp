@@ -265,6 +265,35 @@ struct SelfCollisionConfig {
     // stay checked against the whole stand. See scripts/fit_arm_collision_capsules.py
     // and the arm<->stand clearance probe.
     std::vector<int> stand_ignore_bones{0, 1, 2};
+
+    // URDF mesh self-collision via the async CollisionMonitor (pinocchio + coal).
+    // When mesh.enable is true the servo loop uses the mesh monitor (separate
+    // thread, off the 2 ms servo_j path) + a velocity barrier INSTEAD of the
+    // capsule path above; the capsule code stays compiled but is not evaluated.
+    // Barrier params are a SINGLE shared set, common to every motion primitive
+    // (TcpPoseTarget, TcpTwistLocal, ...) — speed adaptation comes from the
+    // measured closing speed, so nothing is tuned per primitive.
+    struct MeshConfig {
+        bool enable = false;
+        std::string unified_urdf;        // stand+both-arms URDF (e.g. dual_rb3_730e_ver3.urdf)
+        std::vector<std::string> package_dirs;  // resolve mesh "../../../meshes" paths
+        std::string pika_gripper_mesh;   // optional; attached as a convex hull per arm
+        std::string left_prefix = "dual_rb3_730e_left_";
+        std::string right_prefix = "dual_rb3_730e_right_";
+        std::string stand_frame = "stand";
+        // arm geometry whose name contains any of these is NOT paired vs the stand
+        std::vector<std::string> stand_ignore_arm_substrings{"link0"};
+        // shared velocity-barrier params
+        double d_hard_m = 0.005;
+        double d_slow_m = 0.025;
+        double a_brake_m_s2 = 4.0;
+        double hyst_m = 0.005;
+        double latency_s = 0.005;
+        double max_staleness_s = 0.020;
+        int monitor_core = -1;
+        int max_near_pairs = 8;
+    };
+    MeshConfig mesh;
 };
 
 enum class FloorConstraintFailPolicy {

@@ -71,6 +71,7 @@ from .scene import (
     update_floor_plane,
     update_floor_plane_preview,
     update_self_collision_capsules,
+    update_self_collision_near_pairs,
     update_self_collision_overlay,
     update_scene_markers,
 )
@@ -1086,8 +1087,10 @@ def build_gui(
         # suspected false positives against the real arm/stand meshes.
         if hasattr(server.gui, "add_checkbox"):
             capsules_default = os.environ.get("RB_GUI_SELF_COLLISION_CAPSULES_DEFAULT", "0") == "1"
+            # Drives both the capsule overlay (capsule mode) and the URDF-mesh
+            # close-call segments (mesh mode); whichever the server is publishing.
             handles["self_collision_capsules_toggle"] = server.gui.add_checkbox(
-                "검사 캡슐 표시 (반투명)", initial_value=capsules_default
+                "자기충돌 검사 표시 (반투명)", initial_value=capsules_default
             )
         handles["floor_constraint"] = server.gui.add_text(
             "Safety floor", initial_value="floor: no state", disabled=True
@@ -1737,10 +1740,16 @@ def update_gui(
     # After markers: the collision overlay may override ghost/solid visibility.
     update_self_collision_overlay(handles.get("scene", {}), latest)
     capsule_toggle = handles.get("self_collision_capsules_toggle")
+    _self_collision_show = bool(getattr(capsule_toggle, "value", False))
     update_self_collision_capsules(
         handles.get("scene", {}),
         latest,
-        show=bool(getattr(capsule_toggle, "value", False)),
+        show=_self_collision_show,
+    )
+    update_self_collision_near_pairs(
+        handles.get("scene", {}),
+        latest,
+        show=_self_collision_show,
     )
     if "scene_assets" in handles:
         handles["scene_assets"].value = _format_scene_asset_status(handles.get("scene", {}))

@@ -1382,6 +1382,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     sample_steps=args.sample_steps,
                     **source_kwargs,
                 )
+            # Decouple chunk inference from the 500 Hz servo loop for live
+            # streaming rollouts: background prefetch + per-step hold so the loop
+            # never blocks on inference (removes the pulsed start/stop vibration).
+            if rollout_policy.mode.value in {"controller_sim", "real_policy", "real_readonly"}:
+                source.enable_async_chunking = True
             geometry_status = _load_runtime_geometry_status(config)
             rollout_policy.validate_config(
                 config,

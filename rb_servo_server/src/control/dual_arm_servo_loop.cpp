@@ -1341,6 +1341,40 @@ FaultContext contextWithReason(FaultContext context, const std::string& reason) 
 }
 }
 
+namespace {
+// Map an async mesh CollisionMonitor verdict onto the SelfCollisionResult the
+// telemetry/viser pipeline already understands (so the existing overlay + witness
+// markers render mesh-based results unchanged). violated = hard breach (red).
+SelfCollisionResult selfCollisionResultFromVerdict(
+    const CollisionVerdict& v,
+    const CollisionMonitorConfig& cfg
+) {
+    SelfCollisionResult sc;
+    sc.checked = v.valid;
+    sc.min_clearance_m = v.min_clearance_m;
+    sc.violated = v.valid && v.min_clearance_m < cfg.d_hard_m;
+    if (!v.near.empty()) {
+        const CollisionNearPair& p = v.near.front();
+        sc.has_closest_points = true;
+        sc.closest_point_a_m = {p.p_a.x(), p.p_a.y(), p.p_a.z()};
+        sc.closest_point_b_m = {p.p_b.x(), p.p_b.y(), p.p_b.z()};
+        const auto side = [](const std::string& n) {
+            if (n.find("left") != std::string::npos) return 0;
+            if (n.find("right") != std::string::npos) return 1;
+            return 2;  // stand
+        };
+        const int a = side(p.name_a);
+        const int b = side(p.name_b);
+        if ((a == 0 && b == 1) || (a == 1 && b == 0)) sc.pair = "left_right";
+        else if ((a == 0 && b == 2) || (a == 2 && b == 0)) sc.pair = "left_stand";
+        else if ((a == 1 && b == 2) || (a == 2 && b == 1)) sc.pair = "right_stand";
+        else sc.pair = "all";
+        sc.stand_capsule = (a == 2) ? p.name_a : (b == 2 ? p.name_b : std::string());
+    }
+    return sc;
+}
+}  // namespace
+
 DualArmServoLoop::DualArmServoLoop(
     std::unique_ptr<IRobotBackend> left_robot,
     std::unique_ptr<IRobotBackend> right_robot,
@@ -1364,6 +1398,34 @@ DualArmServoLoop::DualArmServoLoop(
     right_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
     kinematics_ = kinematics ? std::move(kinematics) : makeKinematicsProvider(config);
     runtime_floor_z_m_.store(config.safety.floor_constraint.z_min_m);
+    // URDF mesh self-collision: spin up the async monitor (off the servo_j path).
+    // Throws on a bad URDF/mesh path — fail closed at startup rather than run a
+    // real robot with the guard silently disabled.
+    if (config_.safety.self_collision.enable && config_.safety.self_collision.mesh.enable) {
+        const auto& m = config_.safety.self_collision.mesh;
+        collision_monitor_cfg_.enable = true;
+        collision_monitor_cfg_.unified_urdf = m.unified_urdf;
+        collision_monitor_cfg_.package_dirs = m.package_dirs;
+        collision_monitor_cfg_.pika_gripper_mesh = m.pika_gripper_mesh;
+        collision_monitor_cfg_.stand_frame = m.stand_frame;
+        collision_monitor_cfg_.left_prefix = m.left_prefix;
+        collision_monitor_cfg_.right_prefix = m.right_prefix;
+        collision_monitor_cfg_.stand_ignore_arm_substrings = m.stand_ignore_arm_substrings;
+        collision_monitor_cfg_.d_hard_m = m.d_hard_m;
+        collision_monitor_cfg_.d_slow_m = m.d_slow_m;
+        collision_monitor_cfg_.a_brake_m_s2 = m.a_brake_m_s2;
+        collision_monitor_cfg_.hyst_m = m.hyst_m;
+        collision_monitor_cfg_.latency_s = m.latency_s;
+        collision_monitor_cfg_.max_staleness_s = m.max_staleness_s;
+        collision_monitor_cfg_.monitor_core = m.monitor_core;
+        collision_monitor_cfg_.max_near_pairs = m.max_near_pairs;
+        for (int i = 0; i < kDof && i < static_cast<int>(config_.kinematics.joint_names.size()); ++i) {
+            collision_monitor_cfg_.left_joints[i] = m.left_prefix + config_.kinematics.joint_names[i];
+            collision_monitor_cfg_.right_joints[i] = m.right_prefix + config_.kinematics.joint_names[i];
+        }
+        collision_monitor_ = std::make_unique<CollisionMonitor>(collision_monitor_cfg_);
+        collision_monitor_->start();
+    }
     resetReferenceSupervisionState(this);
 }
 
@@ -2168,7 +2230,9 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_checked = last_self_collision_.checked;
             latest_snapshot_.self_collision_violated = last_self_collision_.violated;
             latest_snapshot_.self_collision_min_clearance_m = last_self_collision_.min_clearance_m;
-            latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.margin_m;
+            latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.mesh.enable
+                ? config_.safety.self_collision.mesh.d_hard_m
+                : config_.safety.self_collision.margin_m;
             latest_snapshot_.self_collision_left_bone = last_self_collision_.left_bone;
             latest_snapshot_.self_collision_right_bone = last_self_collision_.right_bone;
             latest_snapshot_.self_collision_pair = last_self_collision_.pair;
@@ -2198,6 +2262,20 @@ void DualArmServoLoop::loopMain() {
                 for (const auto& cap : config_.safety.self_collision.stand_capsules) {
                     latest_snapshot_.self_collision_stand_capsules_m.push_back(
                         SelfCollisionCapsuleViz{cap.name, cap.p0_m, cap.p1_m, cap.radius_m});
+                }
+            }
+            // URDF mesh self-collision: publish the closest near pairs (witness
+            // segments) so the viewer can draw the mesh-based close calls.
+            latest_snapshot_.self_collision_mesh = config_.safety.self_collision.mesh.enable;
+            latest_snapshot_.self_collision_near_pairs.clear();
+            if (config_.safety.self_collision.mesh.enable && last_collision_verdict_.valid) {
+                latest_snapshot_.self_collision_near_pairs.reserve(last_collision_verdict_.near.size());
+                for (const CollisionNearPair& p : last_collision_verdict_.near) {
+                    latest_snapshot_.self_collision_near_pairs.push_back(SelfCollisionNearPairViz{
+                        p.name_a, p.name_b,
+                        {p.p_a.x(), p.p_a.y(), p.p_a.z()},
+                        {p.p_b.x(), p.p_b.y(), p.p_b.z()},
+                        p.d_m});
                 }
             }
             latest_snapshot_.floor_constraint_enabled = config_.safety.floor_constraint.enable;
@@ -3527,7 +3605,54 @@ ServoTarget DualArmServoLoop::applySafety(
     // Dual-arm self-collision guard: never command a configuration that brings the
     // two arms' link capsules within the configured margin. Evaluated on the final
     // candidate targets (post per-arm filtering).
-    if (config_.safety.self_collision.enable) {
+    if (config_.safety.self_collision.enable &&
+        config_.safety.self_collision.mesh.enable && collision_monitor_) {
+        // URDF mesh self-collision (async monitor + shared velocity barrier). The
+        // monitor runs off the servo_j path; here we only feed the candidate and
+        // read the latest verdict (atomic). The barrier scales the approach toward
+        // the target so the arm can always brake before the hard floor; a stale
+        // verdict or a hard breach fails closed.
+        collision_monitor_->submitTargets(out.left_q_target_deg, out.right_q_target_deg);
+        const CollisionVerdict v = collision_monitor_->latest();
+        last_collision_verdict_ = v;
+        last_self_collision_ = selfCollisionResultFromVerdict(v, collision_monitor_cfg_);
+        const double now_s = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const bool stale =
+            collisionVerdictStale(v, now_s, collision_monitor_cfg_.max_staleness_s);
+        if (!config_.safety.self_collision.monitor_only &&
+            combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+            const bool breach = stale || v.hard_violation;
+            if (config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch &&
+                breach) {
+                const std::string reason = stale
+                    ? "self-collision mesh monitor stale (fail closed)"
+                    : ("self-collision mesh breach (" +
+                       (last_self_collision_.pair.empty() ? std::string("unknown")
+                                                          : last_self_collision_.pair) +
+                       "): clearance " + std::to_string(v.min_clearance_m) + " m below floor " +
+                       std::to_string(collision_monitor_cfg_.d_hard_m) + " m");
+                latchFault(SafetyVerdict::SelfCollision, reason, left_state, right_state);
+                out = currentFaultHoldTarget();
+                combined = SafetyVerdict::FaultLatched;
+            } else {
+                const double scale =
+                    stale ? 0.0 : collisionVelocityScale(v, collision_monitor_cfg_);
+                if (scale < 1.0) {
+                    for (int i = 0; i < kDof; ++i) {
+                        out.left_q_target_deg[i] = left_prev_sent_q_deg_[i] +
+                            scale * (out.left_q_target_deg[i] - left_prev_sent_q_deg_[i]);
+                        out.right_q_target_deg[i] = right_prev_sent_q_deg_[i] +
+                            scale * (out.right_q_target_deg[i] - right_prev_sent_q_deg_[i]);
+                    }
+                    if (scale <= 0.0 && (combined == SafetyVerdict::Ok ||
+                                         combined == SafetyVerdict::JointLimitClamped)) {
+                        combined = SafetyVerdict::SelfCollision;
+                    }
+                }
+            }
+        }
+    } else if (config_.safety.self_collision.enable) {
         const SelfCollisionResult sc =
             evaluateSelfCollision(out.left_q_target_deg, out.right_q_target_deg);
         last_self_collision_ = sc;  // telemetry, even when already faulted

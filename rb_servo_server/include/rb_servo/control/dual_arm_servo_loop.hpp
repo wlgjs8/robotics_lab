@@ -14,6 +14,7 @@
 #include "rb_servo/control/joint_moving_average.hpp"
 #include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/control/self_collision.hpp"
+#include "rb_servo/control/collision_monitor.hpp"
 #include "rb_servo/control/floor_constraint.hpp"
 #include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/safety_filter.hpp"
@@ -228,6 +229,12 @@ private:
     SafetyTrackingTelemetry left_safety_tracking_;
     SafetyTrackingTelemetry right_safety_tracking_;
     SelfCollisionResult last_self_collision_{};
+    // URDF mesh self-collision (safety.self_collision.mesh): async monitor thread
+    // off the servo_j path + the shared velocity-barrier config. Null in capsule
+    // mode. last_collision_verdict_ caches the latest verdict for telemetry.
+    std::unique_ptr<CollisionMonitor> collision_monitor_;
+    CollisionMonitorConfig collision_monitor_cfg_{};
+    CollisionVerdict last_collision_verdict_{};
     // Floor plane constraint (safety.floor_constraint): runtime-adjustable plane
     // height (SetSafetyFloorZ, bounded by config runtime_min/max) + per-arm
     // telemetry of the last evaluated candidate targets.

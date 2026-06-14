@@ -704,6 +704,18 @@ struct SelfCollisionCapsuleViz {
     double radius_m = 0.0;
 };
 
+// One near pair from the URDF mesh self-collision monitor: the two closest
+// witness points (stand frame) on the two geometries + their signed clearance.
+// Lets a viewer draw the close-call segments over the URDF meshes (the mesh-mode
+// analogue of the capsule list above).
+struct SelfCollisionNearPairViz {
+    std::string name_a;
+    std::string name_b;
+    std::array<double, 3> p_a_m{};
+    std::array<double, 3> p_b_m{};
+    double clearance_m = 0.0;
+};
+
 struct ServoSnapshot {
     uint64_t tick = 0;
     uint64_t loop_start_time_ns = 0;
@@ -756,6 +768,10 @@ struct ServoSnapshot {
     // Static stand capsules checked this tick (stand frame). Populated alongside
     // the arm capsules.
     std::vector<SelfCollisionCapsuleViz> self_collision_stand_capsules_m;
+    // URDF mesh self-collision (safety.self_collision.mesh): closest near pairs
+    // from the async CollisionMonitor (stand frame). Empty in capsule mode.
+    bool self_collision_mesh = false;
+    std::vector<SelfCollisionNearPairViz> self_collision_near_pairs;
 
     // Stand-frame floor plane constraint telemetry (safety.floor_constraint).
     bool floor_constraint_enabled = false;

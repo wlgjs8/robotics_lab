@@ -798,6 +798,21 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error(
                 "safety.self_collision.enable=true requires kinematics.enable=true (link geometry source)");
         }
+        if (cfg.safety.self_collision.mesh.enable) {
+            const auto& m = cfg.safety.self_collision.mesh;
+            if (m.unified_urdf.empty()) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.enable=true requires unified_urdf (stand+both-arms URDF)");
+            }
+            validatePositiveFinite(m.d_hard_m, "safety.self_collision.mesh.d_hard_m");
+            validatePositiveFinite(m.d_slow_m, "safety.self_collision.mesh.d_slow_m");
+            validatePositiveFinite(m.a_brake_m_s2, "safety.self_collision.mesh.a_brake_m_s2");
+            validatePositiveFinite(m.max_staleness_s, "safety.self_collision.mesh.max_staleness_s");
+            if (m.d_slow_m < m.d_hard_m) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.d_slow_m must be >= d_hard_m");
+            }
+        }
     }
     if (cfg.safety.joint_target_smd.enable) {
         const auto& js = cfg.safety.joint_target_smd;
@@ -1641,6 +1656,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "stand_capsules",
                 "arm_capsules",
                 "stand_ignore_bones",
+                "mesh",
             }, "safety.self_collision");
             if (has(sc, "enable")) {
                 cfg.safety.self_collision.enable = asBool(sc["enable"], "safety.self_collision.enable");
@@ -1776,6 +1792,70 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     cfg.safety.self_collision.link_radius_m[i] =
                         asDouble(radii[i], "safety.self_collision.link_radius_m");
                 }
+            }
+            if (has(sc, "mesh")) {
+                const YAML::Node m = sc["mesh"];
+                validateAllowedKeys(m, {
+                    "enable",
+                    "unified_urdf",
+                    "package_dirs",
+                    "pika_gripper_mesh",
+                    "left_prefix",
+                    "right_prefix",
+                    "stand_frame",
+                    "stand_ignore_arm_substrings",
+                    "d_hard_m",
+                    "d_slow_m",
+                    "a_brake_m_s2",
+                    "hyst_m",
+                    "latency_s",
+                    "max_staleness_s",
+                    "monitor_core",
+                    "max_near_pairs",
+                }, "safety.self_collision.mesh");
+                auto& mc = cfg.safety.self_collision.mesh;
+                if (has(m, "enable")) mc.enable = asBool(m["enable"], "safety.self_collision.mesh.enable");
+                if (has(m, "unified_urdf")) {
+                    mc.unified_urdf = resolvePathForConfig(
+                        asString(m["unified_urdf"], "safety.self_collision.mesh.unified_urdf"), path);
+                }
+                if (has(m, "package_dirs")) {
+                    const YAML::Node dirs = m["package_dirs"];
+                    if (!dirs.IsSequence()) {
+                        fail("safety.self_collision.mesh.package_dirs must be a sequence", dirs);
+                    }
+                    mc.package_dirs.clear();
+                    for (std::size_t i = 0; i < dirs.size(); ++i) {
+                        mc.package_dirs.push_back(resolvePathForConfig(
+                            asString(dirs[i], "safety.self_collision.mesh.package_dirs"), path));
+                    }
+                }
+                if (has(m, "pika_gripper_mesh")) {
+                    mc.pika_gripper_mesh = resolvePathForConfig(
+                        asString(m["pika_gripper_mesh"], "safety.self_collision.mesh.pika_gripper_mesh"), path);
+                }
+                if (has(m, "left_prefix")) mc.left_prefix = asString(m["left_prefix"], "safety.self_collision.mesh.left_prefix");
+                if (has(m, "right_prefix")) mc.right_prefix = asString(m["right_prefix"], "safety.self_collision.mesh.right_prefix");
+                if (has(m, "stand_frame")) mc.stand_frame = asString(m["stand_frame"], "safety.self_collision.mesh.stand_frame");
+                if (has(m, "stand_ignore_arm_substrings")) {
+                    const YAML::Node subs = m["stand_ignore_arm_substrings"];
+                    if (!subs.IsSequence()) {
+                        fail("safety.self_collision.mesh.stand_ignore_arm_substrings must be a sequence", subs);
+                    }
+                    mc.stand_ignore_arm_substrings.clear();
+                    for (std::size_t i = 0; i < subs.size(); ++i) {
+                        mc.stand_ignore_arm_substrings.push_back(
+                            asString(subs[i], "safety.self_collision.mesh.stand_ignore_arm_substrings"));
+                    }
+                }
+                if (has(m, "d_hard_m")) mc.d_hard_m = asDouble(m["d_hard_m"], "safety.self_collision.mesh.d_hard_m");
+                if (has(m, "d_slow_m")) mc.d_slow_m = asDouble(m["d_slow_m"], "safety.self_collision.mesh.d_slow_m");
+                if (has(m, "a_brake_m_s2")) mc.a_brake_m_s2 = asDouble(m["a_brake_m_s2"], "safety.self_collision.mesh.a_brake_m_s2");
+                if (has(m, "hyst_m")) mc.hyst_m = asDouble(m["hyst_m"], "safety.self_collision.mesh.hyst_m");
+                if (has(m, "latency_s")) mc.latency_s = asDouble(m["latency_s"], "safety.self_collision.mesh.latency_s");
+                if (has(m, "max_staleness_s")) mc.max_staleness_s = asDouble(m["max_staleness_s"], "safety.self_collision.mesh.max_staleness_s");
+                if (has(m, "monitor_core")) mc.monitor_core = asInt(m["monitor_core"], "safety.self_collision.mesh.monitor_core");
+                if (has(m, "max_near_pairs")) mc.max_near_pairs = asInt(m["max_near_pairs"], "safety.self_collision.mesh.max_near_pairs");
             }
         }
         if (has(sec, "floor_constraint")) {

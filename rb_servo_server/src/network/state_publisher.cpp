@@ -1469,6 +1469,25 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             self_collision["right_arm_capsules_m"] = nullptr;
             self_collision["stand_capsules_m"] = nullptr;
         }
+        // URDF mesh self-collision: closest near pairs (witness segments) so the
+        // viewer can draw the mesh-based close calls (mesh-mode analogue of the
+        // capsule list above).
+        self_collision["mesh"] = snapshot.self_collision_mesh;
+        if (snapshot.self_collision_mesh && !snapshot.self_collision_near_pairs.empty()) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& p : snapshot.self_collision_near_pairs) {
+                nlohmann::json entry;
+                entry["name_a"] = p.name_a;
+                entry["name_b"] = p.name_b;
+                entry["p_a_m"] = p.p_a_m;
+                entry["p_b_m"] = p.p_b_m;
+                entry["clearance_m"] = p.clearance_m;
+                arr.push_back(std::move(entry));
+            }
+            self_collision["near_pairs"] = std::move(arr);
+        } else {
+            self_collision["near_pairs"] = nullptr;
+        }
         message["self_collision"] = self_collision;
     }
     {
