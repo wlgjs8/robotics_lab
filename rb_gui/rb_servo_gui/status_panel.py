@@ -561,6 +561,22 @@ def _set_disabled(handle: Any, disabled: bool) -> None:
         pass
 
 
+def _reflect_gate_reason(handle: Any, reason: str | None, *, idle_text: str = "idle") -> None:
+    """Proactively surface a control's block reason in a status text handle.
+
+    viser button_groups (jog/velocity/twist nudge rows) cannot be greyed, so the
+    operator otherwise only learns a control is blocked after a rejected click.
+    This writes "DISABLED: <reason>" while blocked and clears it back to idle when
+    the gate opens — but never overwrites a fresh "OK:/BLOCKED:" click result, so
+    live command feedback is preserved."""
+    if handle is None:
+        return
+    if reason:
+        handle.value = "DISABLED: " + reason
+    elif str(getattr(handle, "value", "")).startswith("DISABLED:"):
+        handle.value = idle_text
+
+
 def _format_tcp_command_status(safety: OperatorSafety, latest: StateSnapshot | None, *, stale: bool) -> str:
     parts: list[str] = []
     if safety.last_tcp_command != "none":

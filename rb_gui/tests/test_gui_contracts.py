@@ -63,9 +63,10 @@ from rb_servo_gui.app import (
     _pose_wxyz,
     _quat_to_matrix,
     _clear_tcp_target_user_moved,
+    _reflect_gate_reason,
     _send_tcp_linear_move_from_marker,
     _send_init_motion_and_reset_targets,
-    _sim_readiness_from_env,
+    _update_lease_owner,
     _tcp_display_mode,
     _tcp_local_delta_from_target,
     _tcp_frame_mode,
@@ -89,7 +90,7 @@ from rb_servo_gui.command_client import CommandClient
 from rb_servo_gui import geometry as gui_geometry
 from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnapshot, Pose6D
 from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
-from rb_servo_gui.safety import OperatorSafety, Readiness, normalize_observed_mode_backend
+from rb_servo_gui.safety import OperatorSafety, normalize_observed_mode_backend
 from rb_servo_gui.scene import (
     _add_robot_urdfs,
     _add_scene_fallback,
@@ -402,10 +403,10 @@ class GuiContractsTest(unittest.TestCase):
         desired="mock",
         observed="mock",
         observed_backend=None,
-        sim_ready=False,
+        sim_ready=False,  # retired: readiness is state-derived (accepted for call-site compat)
         cartesian_available=None,
-        enable_tcp_pose=False,
-        enable_controller_sim_cartesian=False,
+        enable_tcp_pose=False,  # retired: TCP commands are always wired
+        enable_controller_sim_cartesian=False,  # retired: server Cartesian gate is authoritative
         stale=False,
         init_left_joint_deg=None,
         init_right_joint_deg=None,
@@ -413,6 +414,13 @@ class GuiContractsTest(unittest.TestCase):
     ):
         store = StateStore(stale_after_sec=0.5)
         if state is not None:
+            # Cartesian availability is now derived from server state, not an env
+            # flag: inject the requested value onto each arm's gate fields.
+            if cartesian_available is not None:
+                for arm in ("left", "right"):
+                    arm_state = state.setdefault(arm, {})
+                    arm_state["cartesian_available"] = cartesian_available
+                    arm_state["controller_simulation_streaming_cartesian_available"] = cartesian_available
             received = time.monotonic() - 1.0 if stale else time.monotonic()
             self.assertTrue(store.update_from_json_bytes(json.dumps(state).encode(), received_monotonic=received))
         client = RecordingClient()
@@ -422,16 +430,6 @@ class GuiContractsTest(unittest.TestCase):
             desired_mode=desired,
             observed_server_mode=observed,
             observed_backend=observed_backend,
-            sim_readiness=Readiness(
-                running=True,
-                connected=True,
-                ready=sim_ready,
-                no_go_reason="sim readiness not proven",
-                cartesian_available=cartesian_available,
-                cartesian_no_go_reason="cartesian readiness not proven",
-            ),
-            enable_tcp_pose_commands=enable_tcp_pose,
-            enable_controller_sim_cartesian=enable_controller_sim_cartesian,
             init_left_joint_deg=init_left_joint_deg,
             init_right_joint_deg=init_right_joint_deg,
             init_motion_timeout_sec=init_motion_timeout_sec,
@@ -493,6 +491,51 @@ class GuiContractsTest(unittest.TestCase):
                 "controller_simulation_physical_motion_detected": False,
             }
         return state
+
+    def test_all_actions_reachable_for_mock_simulator_and_vm_pgmode_sim(self):
+        # End-to-end gate contract for the hardware-free stacks the GUI is opened
+        # against. The server is the sole authority; the GUI mirrors it:
+        #   - mock backend (no FK): joint controls open, Cartesian honestly gated
+        #     by the server's FK/Cartesian gate (server cannot do Cartesian).
+        #   - simulator stack and VM pgmode controller-sim (FK + open Cartesian
+        #     gate): every motion primitive is reachable, no env unlock needed.
+        joint_actions = ("JointTarget", "JointVelocity")
+        # Mock backend: valid joints, no TCP pose.
+        _, _, mock_safety = self.make_safety(sample_state(), observed="mock", observed_backend="mock")
+        for action in joint_actions:
+            self.assertIsNone(mock_safety.blocked_reason(action), f"mock {action}")
+        mock_states = mock_safety.control_disabled_states()
+        self.assertFalse(mock_states["jog"])
+        self.assertFalse(mock_states["velocity"])
+        self.assertFalse(mock_states["lifecycle:ArmMotion"])
+        self.assertTrue(mock_states["tcp_pose"])  # honest: server has no Cartesian here
+        self.assertTrue(mock_states["twist"])
+        self.assertTrue(mock_states["circle"])
+
+        # Simulator stack (pinocchio FK, allow_in_simulation) and VM pgmode
+        # controller-sim (rbpodo, operation_mode=simulation, streaming Cartesian).
+        simulator_state = self.tcp_available_state(observed_mode="simulation", observed_backend="simulator")
+        for arm in ("left", "right"):
+            simulator_state[arm]["cartesian_available"] = True
+        vm_pgmode_state = self.pgmode_spacemouse_state()
+        for label, state, observed, backend in (
+            ("simulator", simulator_state, "simulation", "simulator"),
+            ("vm_pgmode_sim", vm_pgmode_state, "real", "rbpodo"),
+        ):
+            _, _, safety = self.make_safety(state, observed=observed, observed_backend=backend)
+            for action in joint_actions:
+                self.assertIsNone(safety.blocked_reason(action), f"{label} {action}")
+            self.assertIsNone(safety.tcp_command_disabled_reason(), f"{label} tcp")
+            self.assertIsNone(safety.tcp_command_disabled_reason("left"), f"{label} tcp left")
+            self.assertIsNone(safety.tcp_command_disabled_reason("right"), f"{label} tcp right")
+            states = safety.control_disabled_states()
+            for key in ("jog", "velocity", "init_motion", "tcp_pose", "tcp_linear", "twist", "circle"):
+                # init_motion needs an armed state + configured target; ignore it here.
+                if key == "init_motion":
+                    continue
+                self.assertFalse(states[key], f"{label} {key} should be enabled")
+            self.assertTrue(safety.readiness().ready, f"{label} readiness")
+            self.assertTrue(safety.readiness().cartesian_available, f"{label} cartesian")
 
     def test_valid_state_updates_latest_and_invalid_json_is_counted(self):
         store, _, safety = self.make_safety(sample_state())
@@ -930,30 +973,31 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("ArmMotion first", reason)
         self.assertEqual(client.sent_packets, [])
 
-    def test_init_motion_blocks_real_mode_and_readiness_no_go(self):
-        # Real/sim gating retired: InitMotion sends in real mode too.
-        _, client, real_safety = self.make_safety(
-            sample_state(motion_state="ArmedHold"),
-            desired="real",
-            observed="real",
-            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
-            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
-        )
-        ok, reason = real_safety.send_init_motion()
-        self.assertTrue(ok, reason)
-        self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
+    def test_init_motion_sends_in_every_mode_when_state_ready(self):
+        # Env/mode gating retired: InitMotion sends in real AND simulation mode as
+        # long as the live state is ready (armed, valid joints, no fault).
+        for mode in ("real", "simulation"):
+            _, client, safety = self.make_safety(
+                sample_state(motion_state="ArmedHold"),
+                desired=mode,
+                observed=mode,
+                init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+                init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+            )
+            ok, reason = safety.send_init_motion()
+            self.assertTrue(ok, f"{mode}: {reason}")
+            self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
 
-        _, client, sim_safety = self.make_safety(
-            sample_state(motion_state="ArmedHold"),
-            desired="simulation",
-            observed="simulation",
-            sim_ready=False,
+    def test_init_motion_blocked_by_latched_fault(self):
+        # State-derived gate: a latched fault blocks InitMotion regardless of mode.
+        _, client, safety = self.make_safety(
+            sample_state(motion_state="ArmedHold", fault_latched=True, fault_reason="self_collision"),
             init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
             init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
         )
-        ok, reason = sim_safety.send_init_motion()
+        ok, reason = safety.send_init_motion()
         self.assertFalse(ok)
-        self.assertIn("sim readiness", reason)
+        self.assertIn("fault latched", reason)
         self.assertEqual(client.sent_packets, [])
 
     def test_init_motion_sends_joint_target_with_long_timeout(self):
@@ -1015,12 +1059,13 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(ok, reason)
         self.assertEqual(client.sent_packets[-1]["mode"], "ArmMotion")
 
-    def test_simulation_mode_is_no_go_until_readiness_passes(self):
-        _, client, safety = self.make_safety(sample_state(), desired="simulation", observed="simulation", sim_ready=False)
+    def test_simulation_mode_no_longer_gated_by_env_readiness(self):
+        # Env readiness retired: a fresh, joint-valid, fault-free state means the
+        # server is the authority, so simulation jog sends without an env unlock.
+        _, client, safety = self.make_safety(sample_state(), desired="simulation", observed="simulation")
         ok, reason = safety.jog_joint("left", 0, 1.0)
-        self.assertFalse(ok)
-        self.assertIn("sim readiness", reason)
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
 
     def test_deprecated_rbsim_mode_normalizes_to_simulation_backend(self):
         observed = normalize_observed_mode_backend("rbsim_local", None)
@@ -1039,15 +1084,15 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
 
     def test_desired_mode_does_not_claim_server_hot_switch(self):
-        # Real/sim gating retired: a desired/observed mode mismatch no longer
-        # blocks commands; desired=simulation still gates on sim readiness.
+        # Mode is a display-only label now: a desired/observed mismatch never
+        # blocks commands, and set_desired_mode does not claim it reconfigured a
+        # running server.
         _, client, safety = self.make_safety(sample_state(), desired="simulation", observed="mock")
         ok, reason = safety.jog_joint("left", 0, 1.0)
-        self.assertFalse(ok)
-        self.assertIn("sim readiness", reason)
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
         safety.set_desired_mode("real")
         self.assertIn("not reconfigured", safety.status_message)
-        self.assertEqual(client.sent_packets, [])
 
     def test_desired_mode_button_color_marks_active_mode(self):
         self.assertEqual(_mode_button_color("simulation", "simulation"), "green")
@@ -1059,45 +1104,25 @@ class GuiContractsTest(unittest.TestCase):
         self.assertAlmostEqual(_angular_step_radians(0.1), math.radians(0.1))
         self.assertAlmostEqual(_angular_step_radians(10.0), math.radians(10.0))
 
-    def test_compose_sim_readiness_env_unlocks_simulator_lifecycle(self):
-        keys = (
-            "RB_GUI_SIM_READINESS_READY",
-            "RB_GUI_SIM_READINESS_RUNNING",
-            "RB_GUI_SIM_READINESS_CONNECTED",
-            "RB_GUI_CARTESIAN_AVAILABLE",
+    def test_simulator_lifecycle_enabled_from_state_without_env(self):
+        # No RB_GUI_SIM_READINESS_* / RB_GUI_CARTESIAN_AVAILABLE env unlock needed:
+        # a fresh, joint-valid, fault-free state alone enables lifecycle + jog.
+        _, _, safety = self.make_safety(
+            sample_state(),
+            desired="simulation",
+            observed="simulation",
+            observed_backend="simulator",
         )
-        old_values = {key: os.environ.get(key) for key in keys}
-        try:
-            os.environ["RB_GUI_SIM_READINESS_READY"] = "1"
-            os.environ["RB_GUI_SIM_READINESS_RUNNING"] = "1"
-            os.environ["RB_GUI_SIM_READINESS_CONNECTED"] = "1"
-            os.environ["RB_GUI_CARTESIAN_AVAILABLE"] = "0"
-            observed = normalize_observed_mode_backend("simulation", "simulator")
-            readiness = _sim_readiness_from_env(observed)
-            self.assertTrue(readiness.ready)
-            self.assertTrue(readiness.running)
-            self.assertTrue(readiness.connected)
-            self.assertFalse(readiness.cartesian_available)
-
-            store = StateStore(stale_after_sec=0.5)
-            self.assertTrue(store.update_from_json_bytes(json.dumps(sample_state()).encode(), received_monotonic=time.monotonic()))
-            safety = OperatorSafety(
-                store,
-                RecordingClient(),
-                desired_mode="simulation",
-                observed_server_mode="simulation",
-                observed_backend="simulator",
-                sim_readiness=readiness,
-            )
-            states = safety.control_disabled_states()
-            self.assertFalse(states["lifecycle:ArmMotion"])
-            self.assertFalse(states["jog"])
-        finally:
-            for key, value in old_values.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+        states = safety.control_disabled_states()
+        self.assertFalse(states["lifecycle:ArmMotion"])
+        self.assertFalse(states["jog"])
+        # And a stale stream re-locks everything (state is the sole authority).
+        _, _, stale_safety = self.make_safety(
+            sample_state(), observed="simulation", observed_backend="simulator", stale=True
+        )
+        stale_states = stale_safety.control_disabled_states()
+        self.assertTrue(stale_states["lifecycle:ArmMotion"])
+        self.assertTrue(stale_states["jog"])
 
     def test_tcp_jog_never_sends_cartesian_motion(self):
         _, client, safety = self.make_safety(sample_state())
@@ -1291,16 +1316,14 @@ class GuiContractsTest(unittest.TestCase):
         self.assertFalse(safety.control_disabled_states()["tcp_linear"])
         self.assertTrue(client.sent_packets)
 
-    def test_tcp_delta_stand_requires_simulator_backend_fk_and_readiness(self):
+    def test_tcp_command_requires_fk_and_server_cartesian_gate(self):
         state = self.tcp_available_state()
         _, _, backend_safety = self.make_safety(
             state,
             desired="simulation",
             observed="simulation",
             observed_backend="mock",
-            sim_ready=True,
             cartesian_available=True,
-            enable_tcp_pose=True,
         )
         # Backend requirement retired: any backend may issue TCP commands.
         self.assertIsNone(backend_safety.tcp_command_disabled_reason("left"))
@@ -1311,25 +1334,26 @@ class GuiContractsTest(unittest.TestCase):
             desired="simulation",
             observed="simulation",
             observed_backend="simulator",
-            sim_ready=True,
             cartesian_available=True,
-            enable_tcp_pose=True,
         )
         self.assertIn("FK/TCP pose unavailable", fk_safety.tcp_command_disabled_reason("left"))
         ok, reason = fk_safety.send_tcp_linear_move(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0), duration_sec=1.0)
         self.assertFalse(ok)
         self.assertIn("FK/TCP pose unavailable", reason)
 
+        # Server-closed Cartesian gate (state-derived) blocks with the server's
+        # own reason when present, else a clear default.
+        cart_state = self.tcp_available_state()
+        for arm in ("left", "right"):
+            cart_state[arm]["cartesian_unavailable_reason"] = "IK not implemented"
         _, _, cart_safety = self.make_safety(
-            state,
+            cart_state,
             desired="simulation",
             observed="simulation",
             observed_backend="simulator",
-            sim_ready=True,
             cartesian_available=False,
-            enable_tcp_pose=True,
         )
-        self.assertIn("cartesian readiness", cart_safety.tcp_command_disabled_reason("left"))
+        self.assertIn("IK not implemented", cart_safety.tcp_command_disabled_reason("left"))
 
     def test_tcp_command_allows_rbpodo_controller_simulation_with_optin(self):
         state = self.tcp_available_state()
@@ -2402,16 +2426,40 @@ class GuiContractsTest(unittest.TestCase):
 
         _, _, mock_safety = self.make_safety(sample_state())
         mock_states = mock_safety.control_disabled_states()
+        # Joint-space controls follow the joint gate; Cartesian controls follow the
+        # FK/Cartesian gate. FK-less sample_state -> TCP/twist/circle disabled.
         self.assertFalse(mock_states["jog"])
+        self.assertFalse(mock_states["velocity"])
         self.assertFalse(mock_states["lifecycle:ArmMotion"])
-        self.assertTrue(mock_states["tcp_jog"])
+        self.assertNotIn("tcp_jog", mock_states)
         self.assertTrue(mock_states["tcp_pose"])
         self.assertTrue(mock_states["tcp_linear"])
+        self.assertTrue(mock_states["twist"])
+        self.assertTrue(mock_states["circle"])
 
-        _, _, sim_safety = self.make_safety(sample_state(), desired="simulation", observed="simulation", sim_ready=False)
+        # Simulation mode is no longer env-gated: a valid state enables joint
+        # controls, and FK + an open server Cartesian gate enables TCP controls.
+        _, _, sim_safety = self.make_safety(
+            self.tcp_available_state(),
+            desired="simulation",
+            observed="simulation",
+            cartesian_available=True,
+        )
         sim_states = sim_safety.control_disabled_states()
-        self.assertTrue(sim_states["jog"])
-        self.assertTrue(sim_states["lifecycle:ArmMotion"])
+        self.assertFalse(sim_states["jog"])
+        self.assertFalse(sim_states["lifecycle:ArmMotion"])
+        self.assertFalse(sim_states["tcp_pose"])
+        self.assertFalse(sim_states["twist"])
+        self.assertFalse(sim_states["circle"])
+
+        # A latched fault re-disables every motion control (lifecycle reset stays
+        # live so the operator can clear it).
+        _, _, fault_safety = self.make_safety(sample_state(fault_latched=True, fault_reason="self_collision"))
+        fault_states = fault_safety.control_disabled_states()
+        self.assertTrue(fault_states["jog"])
+        self.assertTrue(fault_states["velocity"])
+        self.assertTrue(fault_states["lifecycle:ArmMotion"])
+        self.assertFalse(fault_states["lifecycle:ResetFault"])
 
     def test_lifecycle_packets_match_existing_udp_protocol(self):
         _, client, safety = self.make_safety(sample_state())
@@ -2421,16 +2469,72 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets[-1]["left"], {})
         self.assertEqual(client.sent_packets[-1]["right"], {})
 
+    def test_control_disabled_reasons_align_with_states(self):
+        # Every disabled key carries a matching reason and vice-versa.
+        _, _, safety = self.make_safety(sample_state())  # FK-less: TCP gated, joint open
+        states = safety.control_disabled_states()
+        reasons = safety.control_disabled_reasons()
+        for key, reason in reasons.items():
+            self.assertEqual(states[key], reason is not None, key)
+        self.assertIsNone(reasons["jog"])
+        self.assertIn("FK/TCP pose unavailable", reasons["twist"])
+        self.assertIn("FK/TCP pose unavailable", reasons["circle"])
+
+    def test_reflect_gate_reason_preserves_click_feedback(self):
+        class _Text:
+            def __init__(self, value):
+                self.value = value
+
+        # Blocked -> shows DISABLED note; cleared -> back to idle.
+        handle = _Text("idle")
+        _reflect_gate_reason(handle, "joint state invalid")
+        self.assertEqual(handle.value, "DISABLED: joint state invalid")
+        _reflect_gate_reason(handle, None)
+        self.assertEqual(handle.value, "idle")
+        # A fresh click result is never clobbered when the gate is open.
+        handle.value = "OK: sent JointVelocity left"
+        _reflect_gate_reason(handle, None)
+        self.assertEqual(handle.value, "OK: sent JointVelocity left")
+        _reflect_gate_reason(None, "ignored")  # no handle -> no crash
+
+    def test_lease_owner_status_flags_foreign_and_self_owner(self):
+        class _Text:
+            def __init__(self):
+                self.value = ""
+
+        store = StateStore(stale_after_sec=5.0)
+        foreign = self.pgmode_spacemouse_state()  # command_source owned by policy_runner
+        self.assertTrue(store.update_from_json_bytes(json.dumps(foreign).encode(), received_monotonic=time.monotonic()))
+        handles = {"lease_owner_status": _Text()}
+        _update_lease_owner(handles, store.latest(), "rb_gui", held=False)
+        self.assertIn("policy_runner", handles["lease_owner_status"].value)
+        self.assertIn("stop or release", handles["lease_owner_status"].value)
+
+        owned = self.pgmode_spacemouse_state()
+        owned["command_source"]["source_id"] = "rb_gui"
+        owned["command_source"]["active_source_id"] = "rb_gui"
+        store2 = StateStore(stale_after_sec=5.0)
+        self.assertTrue(store2.update_from_json_bytes(json.dumps(owned).encode(), received_monotonic=time.monotonic()))
+        _update_lease_owner(handles, store2.latest(), "rb_gui", held=True)
+        self.assertIn("held by you", handles["lease_owner_status"].value)
+        self.assertIn("Take control ON", handles["lease_owner_status"].value)
+
+        _update_lease_owner(handles, None, "rb_gui", held=False)
+        self.assertEqual(handles["lease_owner_status"].value, "no state stream")
+
     def test_compose_gui_env_uses_servo_server_and_canonical_simulation_terms(self):
         compose = Path(__file__).resolve().parents[2] / "docker-compose.yml"
         text = compose.read_text(encoding="utf-8")
         self.assertIn('RB_GUI_COMMAND_HOST: "rb_servo_server"', text)
         self.assertIn('RB_GUI_OBSERVED_MODE: "simulation"', text)
         self.assertIn('RB_GUI_OBSERVED_BACKEND: "simulator"', text)
-        self.assertIn('RB_GUI_SIM_READINESS_READY: "1"', text)
-        self.assertIn('RB_GUI_SIM_READINESS_CONNECTED: "1"', text)
-        self.assertIn('RB_GUI_CARTESIAN_AVAILABLE: "1"', text)
-        self.assertIn('RB_GUI_ENABLE_TCP_POSE_COMMANDS: "1"', text)
+        # Env readiness/Cartesian/feature-flag unlocks are retired: the GUI derives
+        # availability from the live server state, so these must NOT be in compose.
+        self.assertNotIn("RB_GUI_SIM_READINESS_READY", text)
+        self.assertNotIn("RB_GUI_SIM_READINESS_CONNECTED", text)
+        self.assertNotIn("RB_GUI_CARTESIAN_AVAILABLE", text)
+        self.assertNotIn("RB_GUI_ENABLE_TCP_POSE_COMMANDS", text)
+        self.assertNotIn("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", text)
         self.assertIn('RB_GUI_INIT_LEFT_JOINTS: "-124.660, 32.485, 119.074, -96.294, -81.798, -30.615"', text)
         self.assertIn('RB_GUI_INIT_RIGHT_JOINTS: "111.949, -49.304, -120.057, 75.305, 87.436, 49.983"', text)
         self.assertIn('RB_GUI_INIT_MOTION_TIMEOUT_SEC: "10.0"', text)
@@ -2655,6 +2759,30 @@ class LeaseBracketTest(unittest.TestCase):
         finally:
             sock.close()
         self.assertEqual([p["mode"] for p in packets], ["EmergencyStop", "SetSafetyFloorZ"])
+
+    @unittest.skipUnless(_local_udp_socket_available(), "local UDP unavailable")
+    def test_held_lease_rides_without_per_command_bracket(self):
+        # Take control ON: acquire once, then streaming motion commands ride the
+        # held lease (no Acquire/Release per packet); release once on OFF.
+        client, sock = self._client_and_socket()
+        try:
+            acquire = client.acquire_lease()
+            self.assertTrue(client.hold_lease)
+            client.send(client.build_joint_target((0,) * 6, (0,) * 6))
+            client.send(client.build_joint_target((1,) * 6, (1,) * 6))
+            release = client.release_lease()
+            self.assertFalse(client.hold_lease)
+            packets = self._recv_packets(sock, 4)
+        finally:
+            sock.close()
+        self.assertEqual(
+            [p["mode"] for p in packets],
+            ["AcquireLease", "JointTarget", "JointTarget", "ReleaseLease"],
+        )
+        self.assertEqual(acquire["mode"], "AcquireLease")
+        self.assertEqual(release["mode"], "ReleaseLease")
+        seqs = [p["seq"] for p in packets]
+        self.assertEqual(seqs, sorted(seqs))
 
 
 class SelfCollisionOverlayTest(unittest.TestCase):

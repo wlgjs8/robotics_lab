@@ -48,7 +48,7 @@ from .geometry import (
 )
 from .models import ArmSnapshot, CircleOverlaySnapshot, Pose6D, StateSnapshot
 from .overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
-from .safety import OperatorSafety, Readiness, normalize_observed_mode_backend
+from .safety import OperatorSafety, normalize_observed_mode_backend
 from .scene import (
     _DEFAULT_LEFT_POSE,
     _DEFAULT_RIGHT_POSE,
@@ -99,6 +99,7 @@ from .status_panel import (
     _joint_monitor_unit,
     _mode_button_color,
     _optional_finite,
+    _reflect_gate_reason,
     _set_disabled,
     _stand_world_monitor_unit,
     _tcp_display_mode,
@@ -158,20 +159,6 @@ def _env_int(name: str, fallback: int) -> int:
         return int(os.environ.get(name, str(fallback)))
     except ValueError:
         return fallback
-
-
-def _env_bool(name: str, fallback: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return fallback
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_optional_bool(name: str) -> bool | None:
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return None
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_float(name: str, fallback: float) -> float:
@@ -266,37 +253,6 @@ def _circle_overlay_bind_from_args_env(args: argparse.Namespace) -> tuple[str, i
     if endpoint is None:
         endpoint = os.environ.get("RB_GUI_CIRCLE_OVERLAY_BIND", "none")
     return parse_udp_bind(endpoint)
-
-
-def _sim_readiness_from_env(observed: Any) -> Readiness:
-    ready = _env_bool("RB_GUI_SIM_READINESS_READY", False)
-    running = _env_bool("RB_GUI_SIM_READINESS_RUNNING", ready)
-    connected = _env_bool("RB_GUI_SIM_READINESS_CONNECTED", ready)
-    no_go_reason = os.environ.get("RB_GUI_SIM_READINESS_NO_GO", "simulator/rbpodo readiness tests have not passed")
-    if ready:
-        no_go_reason = ""
-    # The local simulator backend is always a valid sim stack. An rbpodo
-    # controller in pgmode simulation also counts as a sim stack, but only when
-    # the operator opts in (RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1); real mode
-    # never qualifies.
-    controller_sim_optin = _env_bool("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", False)
-    valid_sim_stack = observed.mode == "simulation" and (
-        observed.backend == "simulator"
-        or (observed.backend == "rbpodo" and controller_sim_optin)
-    )
-    if not valid_sim_stack:
-        ready = False
-        running = False
-        connected = False
-        no_go_reason = "observed server is not the simulator stack"
-    return Readiness(
-        running=running,
-        connected=connected,
-        ready=ready,
-        no_go_reason=no_go_reason,
-        cartesian_available=_env_optional_bool("RB_GUI_CARTESIAN_AVAILABLE"),
-        cartesian_no_go_reason=os.environ.get("RB_GUI_CARTESIAN_NO_GO", "server Cartesian/IK readiness not proven"),
-    )
 
 
 def _update_desired_mode_buttons(handles: dict[str, Any], desired_mode: str) -> None:
@@ -1287,6 +1243,27 @@ def build_gui(
                     ok, message = safety.send_lifecycle(mode)
                     handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
 
+            # Explicit lease ownership. One-shot GUI commands bracket the lease per
+            # click; streaming controls (twist/circle/joint-vel keep-alive) need it
+            # held so the server lease is not torn down between packets. The server
+            # rejects an Acquire while another source (e.g. policy_runner teleop)
+            # owns it — the lease-owner line below makes that visible.
+            with server.gui.add_folder("제어권 (Lease)"):
+                handles["lease_owner_status"] = server.gui.add_text(
+                    "Lease owner", initial_value="unknown", disabled=True
+                )
+                take_control = server.gui.add_checkbox("Take control (hold lease)", initial_value=False)
+                handles["take_control_toggle"] = take_control
+
+                @take_control.on_update
+                def _(_: Any) -> None:
+                    if take_control.value:
+                        safety.command_client.acquire_lease()
+                        handles["last_action"].value = "OK: lease held (Take control ON)"
+                    else:
+                        safety.command_client.release_lease()
+                        handles["last_action"].value = "OK: lease released (Take control OFF)"
+
             init_button = server.gui.add_button("InitMotion")
             handles["init_motion_button"] = init_button
 
@@ -1674,6 +1651,9 @@ def build_gui(
             c_plane = server.gui.add_button_group("Plane", ("xy", "xz", "yz"))
             c_start = server.gui.add_button("Start circle (both arms)")
             c_stop = server.gui.add_button("Stop circle")
+            # Start greys out when the TCP/Cartesian gate is closed; Stop always
+            # stays live so the operator can halt a running circle.
+            handles["circle_start_button"] = c_start
             handles["circle_status"] = server.gui.add_text("Circle status", initial_value="idle", disabled=True)
             circle_stop_event = threading.Event()
             circle_state: dict[str, Any] = {"thread": None}
@@ -1857,6 +1837,35 @@ def _update_circle_overlay_gui(handles: dict[str, Any], overlay_store: CircleOve
     update_circle_overlay(handles.get("scene", {}), overlay, stale=stale)
 
 
+def _update_lease_owner(
+    handles: dict[str, Any],
+    latest: StateSnapshot | None,
+    my_source_id: str,
+    *,
+    held: bool,
+) -> None:
+    """Show who owns the command-source lease, derived from server state.
+
+    The server lease is non-preemptive: while another source (e.g. policy_runner
+    teleop) owns it, a GUI Acquire is rejected. Surfacing the owner turns a silent
+    failure into an explicit "stop/release the other source first"."""
+    handle = handles.get("lease_owner_status")
+    if handle is None:
+        return
+    if latest is None:
+        handle.value = "no state stream"
+        return
+    command_source = latest.command_source
+    owner = command_source.display_source_id
+    if not command_source.active or owner is None:
+        handle.value = "free — you hold it (pending)" if held else "free"
+        return
+    if owner == my_source_id:
+        handle.value = "held by you" + ("; Take control ON" if held else "")
+    else:
+        handle.value = f"held by {owner} — stop or release it before the GUI can take control"
+
+
 def update_gui(
     handles: dict[str, Any],
     safety: OperatorSafety,
@@ -1864,6 +1873,7 @@ def update_gui(
     overlay_store: CircleOverlayStore | None = None,
 ) -> None:
     disabled_states = safety.control_disabled_states()
+    disabled_reasons = safety.control_disabled_reasons()
     for mode, button in handles.get("lifecycle_buttons", {}).items():
         _set_disabled(button, disabled_states.get(f"lifecycle:{mode}", True))
     if "init_motion_button" in handles:
@@ -1874,6 +1884,17 @@ def update_gui(
         _set_disabled(button, disabled_states.get("tcp_pose", True))
     for button in handles.get("tcp_linear_buttons", ()):
         _set_disabled(button, disabled_states.get("tcp_linear", True))
+    # Single buttons that can be greyed (viser button_groups cannot).
+    if "circle_start_button" in handles:
+        _set_disabled(handles["circle_start_button"], disabled_states.get("circle", True))
+    # Button-group tabs (jog/velocity/twist) cannot be greyed in viser, so reflect
+    # the live gate reason into their status line proactively — never clobbering a
+    # recent click result, only the prior DISABLED note.
+    _reflect_gate_reason(handles.get("jog_status"), disabled_reasons.get("jog"))
+    _reflect_gate_reason(
+        handles.get("velocity_status"),
+        disabled_reasons.get("velocity") or disabled_reasons.get("twist"),
+    )
 
     if "mode_buttons" in handles:
         _update_desired_mode_buttons(handles, safety.desired_mode)
@@ -1888,6 +1909,7 @@ def update_gui(
     latest = store.latest()
     stale = store.is_stale()
     readiness = safety.readiness()
+    _update_lease_owner(handles, latest, safety.command_client.source_id, held=safety.command_client.hold_lease)
     _update_circle_overlay_gui(handles, overlay_store)
     if latest is None:
         _update_operator_monitors(handles, None, stale=True)
@@ -2045,9 +2067,6 @@ def main(argv: list[str] | None = None) -> None:
     observed_backend_raw = os.environ.get("RB_GUI_OBSERVED_BACKEND", "")
     observed = normalize_observed_mode_backend(observed_mode_raw, observed_backend_raw)
     ops_available = os.environ.get("RB_GUI_OPS_AVAILABLE", "0") == "1"
-    # RB_GUI_ENABLE_TCP_POSE_COMMANDS lock retired: TCP pose commands default on.
-    enable_tcp_pose_commands = os.environ.get("RB_GUI_ENABLE_TCP_POSE_COMMANDS", "1") == "1"
-    enable_controller_sim_cartesian = os.environ.get("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", "0") == "1"
     init_left_joints = _env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG)
     init_right_joints = _env_joint6("RB_GUI_INIT_RIGHT_JOINTS", _DEFAULT_INIT_RIGHT_JOINTS_DEG)
     # Persisted InitMotion pose (set from a waypoint via the GUI) wins over
@@ -2075,10 +2094,7 @@ def main(argv: list[str] | None = None) -> None:
         desired_mode=observed.mode,
         observed_server_mode=observed_mode_raw,
         observed_backend=observed_backend_raw,
-        sim_readiness=_sim_readiness_from_env(observed),
         ops_available=ops_available,
-        enable_tcp_pose_commands=enable_tcp_pose_commands,
-        enable_controller_sim_cartesian=enable_controller_sim_cartesian,
         init_left_joint_deg=init_left_joints,
         init_right_joint_deg=init_right_joints,
         init_motion_timeout_sec=init_motion_timeout_sec,
