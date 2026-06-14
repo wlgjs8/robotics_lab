@@ -2176,6 +2176,30 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_has_closest_points = last_self_collision_.has_closest_points;
             latest_snapshot_.self_collision_closest_point_a_m = last_self_collision_.closest_point_a_m;
             latest_snapshot_.self_collision_closest_point_b_m = last_self_collision_.closest_point_b_m;
+            latest_snapshot_.self_collision_has_capsules = last_self_collision_.has_capsules;
+            latest_snapshot_.self_collision_left_capsules_m.clear();
+            latest_snapshot_.self_collision_right_capsules_m.clear();
+            latest_snapshot_.self_collision_stand_capsules_m.clear();
+            // Publish the exact checked geometry (arm capsules FK'd this tick +
+            // static stand capsules) only when the guard actually evaluated.
+            if (last_self_collision_.has_capsules) {
+                const auto copy_arm = [](const std::vector<ArmCapsule>& src,
+                                         std::vector<SelfCollisionCapsuleViz>& dst) {
+                    dst.reserve(src.size());
+                    for (std::size_t i = 0; i < src.size(); ++i) {
+                        dst.push_back(SelfCollisionCapsuleViz{
+                            std::to_string(i), src[i].p0_m, src[i].p1_m, src[i].radius_m});
+                    }
+                };
+                copy_arm(last_self_collision_.left_capsules, latest_snapshot_.self_collision_left_capsules_m);
+                copy_arm(last_self_collision_.right_capsules, latest_snapshot_.self_collision_right_capsules_m);
+                latest_snapshot_.self_collision_stand_capsules_m.reserve(
+                    config_.safety.self_collision.stand_capsules.size());
+                for (const auto& cap : config_.safety.self_collision.stand_capsules) {
+                    latest_snapshot_.self_collision_stand_capsules_m.push_back(
+                        SelfCollisionCapsuleViz{cap.name, cap.p0_m, cap.p1_m, cap.radius_m});
+                }
+            }
             latest_snapshot_.floor_constraint_enabled = config_.safety.floor_constraint.enable;
             latest_snapshot_.floor_constraint_monitor_only = config_.safety.floor_constraint.monitor_only;
             latest_snapshot_.floor_constraint_z_min_m = effectiveFloorZ();
@@ -3620,23 +3644,24 @@ SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
     if (!kinematics_) {
         return SelfCollisionResult{};  // checked=false -> caller fails closed
     }
-    std::vector<std::array<double, 3>> left_points;
-    std::vector<std::array<double, 3>> right_points;
+    const SelfCollisionConfig& sc_cfg = config_.safety.self_collision;
+    std::vector<ArmCapsule> left_caps;
+    std::vector<ArmCapsule> right_caps;
     try {
-        left_points = kinematics_->linkCollisionPointsInStand(ArmId::Left, left_q_deg, config_.left_mount);
-        right_points = kinematics_->linkCollisionPointsInStand(ArmId::Right, right_q_deg, config_.right_mount);
+        left_caps = kinematics_->armCollisionCapsulesInStand(
+            ArmId::Left, left_q_deg, config_.left_mount, sc_cfg.arm_capsules);
+        right_caps = kinematics_->armCollisionCapsulesInStand(
+            ArmId::Right, right_q_deg, config_.right_mount, sc_cfg.arm_capsules);
     } catch (const std::exception&) {
         return SelfCollisionResult{};  // checked=false -> caller fails closed
     }
-    const SelfCollisionConfig& sc_cfg = config_.safety.self_collision;
     SelfCollisionResult combined;
     bool any_pair = false;
     bool all_checked = true;
 
     if (sc_cfg.check_left_right) {
         any_pair = true;
-        SelfCollisionResult lr = dualArmSelfCollisionClearance(
-            left_points, right_points, sc_cfg.link_radius_m, sc_cfg.margin_m);
+        SelfCollisionResult lr = dualArmSelfCollisionClearance(left_caps, right_caps, sc_cfg.margin_m);
         all_checked = all_checked && lr.checked;
         combined = minSelfCollisionResult(combined, lr);
     }
@@ -3646,8 +3671,7 @@ SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
         if (sc_cfg.check_left_stand) {
             any_pair = true;
             SelfCollisionResult ls = armStandCollisionClearance(
-                left_points, sc_cfg.link_radius_m, sc_cfg.stand_capsules,
-                sc_cfg.margin_m, sc_cfg.stand_ignore_bones);
+                left_caps, sc_cfg.stand_capsules, sc_cfg.margin_m, sc_cfg.stand_ignore_bones);
             ls.pair = "left_stand";
             all_checked = all_checked && ls.checked;
             combined = minSelfCollisionResult(combined, ls);
@@ -3655,8 +3679,7 @@ SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
         if (sc_cfg.check_right_stand) {
             any_pair = true;
             SelfCollisionResult rs = armStandCollisionClearance(
-                right_points, sc_cfg.link_radius_m, sc_cfg.stand_capsules,
-                sc_cfg.margin_m, sc_cfg.stand_ignore_bones);
+                right_caps, sc_cfg.stand_capsules, sc_cfg.margin_m, sc_cfg.stand_ignore_bones);
             rs.pair = "right_stand";
             all_checked = all_checked && rs.checked;
             combined = minSelfCollisionResult(combined, rs);
@@ -3667,6 +3690,11 @@ SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
         // unchecked so the gate fails closed.
         return SelfCollisionResult{};
     }
+    // Attach the full evaluated capsules for visualization — the exact geometry
+    // checked above (on this call's target config).
+    combined.has_capsules = true;
+    combined.left_capsules = std::move(left_caps);
+    combined.right_capsules = std::move(right_caps);
     return combined;
 }
 

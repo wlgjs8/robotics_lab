@@ -1445,6 +1445,30 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             self_collision["closest_point_a_m"] = nullptr;
             self_collision["closest_point_b_m"] = nullptr;
         }
+        // Full evaluated capsules (stand frame) so a viewer can draw the exact
+        // checked geometry over the meshes: per-arm capsules FK'd this tick plus
+        // the static stand capsules.
+        if (snapshot.self_collision_has_capsules) {
+            const auto caps_json = [](const std::vector<SelfCollisionCapsuleViz>& caps) {
+                nlohmann::json arr = nlohmann::json::array();
+                for (const auto& cap : caps) {
+                    nlohmann::json entry;
+                    entry["name"] = cap.name;
+                    entry["p0_m"] = cap.p0_m;
+                    entry["p1_m"] = cap.p1_m;
+                    entry["radius_m"] = cap.radius_m;
+                    arr.push_back(std::move(entry));
+                }
+                return arr;
+            };
+            self_collision["left_arm_capsules_m"] = caps_json(snapshot.self_collision_left_capsules_m);
+            self_collision["right_arm_capsules_m"] = caps_json(snapshot.self_collision_right_capsules_m);
+            self_collision["stand_capsules_m"] = caps_json(snapshot.self_collision_stand_capsules_m);
+        } else {
+            self_collision["left_arm_capsules_m"] = nullptr;
+            self_collision["right_arm_capsules_m"] = nullptr;
+            self_collision["stand_capsules_m"] = nullptr;
+        }
         message["self_collision"] = self_collision;
     }
     {

@@ -17,9 +17,12 @@ export FLOW_EXPECTED_GPU_COUNT FLOW_RUN_UID FLOW_RUN_GID
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
 # owns the robot until idle; a missing SpaceMouse degrades to UMI-only).
-#   make run                  -> pgmode real
+# In real mode it also starts umi_gripper_follow (UDP 50382 -> local Pika
+# Grippers), so this PC needs only `make run` — disable with GRIPPER_FOLLOW=0.
+#   make run                  -> pgmode real (+ gripper follower)
 #   make run MODE=sim         -> pgmode controller-simulation
 #   make run VERBOSE=1        -> live teleop input + send/drop stats
+#   make run GRIPPER_FOLLOW=0 -> skip the gripper follower
 MODE ?= real
 run:
 	./tools/run_stack.sh $(MODE)

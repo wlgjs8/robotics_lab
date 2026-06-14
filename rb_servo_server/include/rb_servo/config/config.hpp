@@ -176,6 +176,54 @@ struct StandCapsuleConfig {
     double radius_m = 0.0;
 };
 
+// A geometric collision capsule (segment endpoints + radius) in some frame.
+// Used both as the FK output (stand frame) and as a generic capsule primitive.
+struct ArmCapsule {
+    std::array<double, 3> p0_m{0.0, 0.0, 0.0};
+    std::array<double, 3> p1_m{0.0, 0.0, 0.0};
+    double radius_m = 0.0;
+};
+
+// One arm collision capsule defined in a URDF LINK frame (link0..link6,
+// attachment_site). The server FK-transforms p0_m/p1_m by that frame's placement
+// (per arm joints + mount) each tick to get the stand-frame capsule it checks.
+// Fit per collision hull from the RB3-730e URDF so the capsules follow the real
+// link "dogleg" shape (link2/link4 ship multiple hulls) instead of a single fat
+// straight capsule on the joint-origin skeleton. Regenerate with
+// scripts/fit_arm_collision_capsules.py.
+struct ArmCapsuleConfig {
+    std::string frame;
+    std::array<double, 3> p0_m{0.0, 0.0, 0.0};
+    std::array<double, 3> p1_m{0.0, 0.0, 0.0};
+    double radius_m = 0.0;
+};
+
+// RB3-730e per-link capsule template (both arms share it; FK'd per arm). Order
+// matters: indices feed stand_ignore_bones. Indices 0..1 are link0/link1 (base,
+// on/near the stand mount). Fit by scripts/fit_arm_collision_capsules.py.
+inline std::vector<ArmCapsuleConfig> defaultRb3ArmCapsules() {
+    return {
+        {"link0",           {+0.0696, -0.0007, +0.0256}, {-0.0623, +0.0023, +0.0359}, 0.0566},
+        {"link1",           {-0.0052, -0.0212, -0.0681}, {-0.0010, +0.0093, +0.0579}, 0.0647},
+        {"link2",           {-0.0003, -0.1552, -0.0497}, {+0.0011, -0.0772, +0.0790}, 0.0804},
+        {"link2",           {+0.0003, -0.1174, +0.0812}, {-0.0015, -0.1194, +0.2131}, 0.0376},
+        {"link2",           {-0.0028, -0.0744, +0.2178}, {+0.0002, -0.1501, +0.3285}, 0.0706},
+        {"link3",           {-0.0001, +0.0175, -0.0464}, {+0.0009, -0.0355, +0.0669}, 0.0624},
+        {"link4",           {+0.0014, -0.1107, +0.2140}, {-0.0026, -0.0893, +0.3132}, 0.0405},
+        {"link4",           {+0.0407, +0.0077, +0.0764}, {-0.0407, +0.0076, +0.0765}, 0.0490},
+        {"link4",           {+0.0003, -0.1457, +0.3534}, {+0.0005, -0.0296, +0.3459}, 0.0525},
+        {"link4",           {+0.0003, -0.1362, +0.2054}, {-0.0001, +0.0451, +0.1032}, 0.0513},
+        {"link5",           {+0.0034, -0.0138, +0.0650}, {-0.0017, +0.0081, -0.0486}, 0.0399},
+        {"link6",           {+0.0018, +0.0347, +0.0784}, {-0.0175, -0.0385, +0.0756}, 0.0307},
+        // Pika gripper (attachment_site frame): body column, camera (+y nub),
+        // jaw housing cross-bar (x), and fingertip bar ending ~3 mm past the tip.
+        {"attachment_site", {+0.0000, +0.0000, +0.0000}, {+0.0000, +0.0000, +0.1000}, 0.0350},
+        {"attachment_site", {+0.0000, +0.0607, +0.0810}, {+0.0000, +0.0940, +0.0810}, 0.0280},
+        {"attachment_site", {-0.1039, +0.0000, +0.1305}, {+0.1039, +0.0000, +0.1305}, 0.0317},
+        {"attachment_site", {-0.0594, +0.0000, +0.2286}, {+0.0594, +0.0000, +0.2286}, 0.0220},
+    };
+}
+
 // Server-side self-collision guard treating stand + left arm + right arm as one
 // "self" (the rbpodo controller firmware does not populate op_stat_self_collision).
 // Each arm link is approximated as a capsule (segment between consecutive
@@ -204,9 +252,19 @@ struct SelfCollisionConfig {
     bool check_left_stand = true;
     bool check_right_stand = true;
     std::vector<StandCapsuleConfig> stand_capsules;
-    // Arm bones excluded from the arm<->stand check. Bone 0 (base->j1) sits on
-    // the stand mount plate by construction and must be ignored.
-    std::vector<int> stand_ignore_bones{0};
+    // Per-link arm collision capsules (both arms share this template; FK'd per
+    // arm each tick). Defaults follow the RB3-730e collision hulls so the capsules
+    // hug the real link shape; override in YAML to retune. The legacy
+    // link_radius_m skeleton model is unused when this is non-empty.
+    std::vector<ArmCapsuleConfig> arm_capsules{defaultRb3ArmCapsules()};
+    // Arm capsule indices excluded from the arm<->stand check (indices into
+    // arm_capsules). Indices 0,1,2 are link0/link1/link2-shoulder: the arm is
+    // bolted onto the stand shoulder plates here, so these capsules permanently
+    // overlap the stand mount/shoulder capsules and would always self-trigger
+    // (a structural, not avoidable, overlap). The reach links (link3+, index 3+)
+    // stay checked against the whole stand. See scripts/fit_arm_collision_capsules.py
+    // and the arm<->stand clearance probe.
+    std::vector<int> stand_ignore_bones{0, 1, 2};
 };
 
 enum class FloorConstraintFailPolicy {

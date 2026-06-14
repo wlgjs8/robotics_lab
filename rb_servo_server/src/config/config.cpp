@@ -760,9 +760,32 @@ void validateConfig(const DualArmConfig& cfg) {
                 }
             }
         }
-        for (int bone : cfg.safety.self_collision.stand_ignore_bones) {
-            if (bone < 0 || bone > 6) {
-                throw std::runtime_error("safety.self_collision.stand_ignore_bones entries must be in [0, 6]");
+        if (cfg.safety.self_collision.arm_capsules.empty()) {
+            throw std::runtime_error(
+                "safety.self_collision.enable=true requires a non-empty arm_capsules list");
+        }
+        for (const ArmCapsuleConfig& cap : cfg.safety.self_collision.arm_capsules) {
+            if (cap.frame.empty()) {
+                throw std::runtime_error("safety.self_collision.arm_capsules entries require a frame");
+            }
+            if (!(cap.radius_m > 0.0) || !std::isfinite(cap.radius_m)) {
+                throw std::runtime_error(
+                    "safety.self_collision.arm_capsules radius_m must be finite and > 0 (" + cap.frame + ")");
+            }
+            for (int axis = 0; axis < 3; ++axis) {
+                if (!std::isfinite(cap.p0_m[axis]) || !std::isfinite(cap.p1_m[axis])) {
+                    throw std::runtime_error(
+                        "safety.self_collision.arm_capsules endpoints must be finite (" + cap.frame + ")");
+                }
+            }
+        }
+        const int arm_capsule_count =
+            static_cast<int>(cfg.safety.self_collision.arm_capsules.size());
+        for (int idx : cfg.safety.self_collision.stand_ignore_bones) {
+            if (idx < 0 || idx >= arm_capsule_count) {
+                throw std::runtime_error(
+                    "safety.self_collision.stand_ignore_bones entries must index arm_capsules [0, " +
+                    std::to_string(arm_capsule_count - 1) + "]");
             }
         }
         if (!cfg.safety.self_collision.check_left_right &&
@@ -770,10 +793,6 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error(
                 "safety.self_collision.enable=true with check_left_right=false requires stand_capsules "
                 "(otherwise nothing is checked)");
-        }
-        for (std::size_t i = 0; i < cfg.safety.self_collision.link_radius_m.size(); ++i) {
-            validatePositiveFinite(
-                cfg.safety.self_collision.link_radius_m[i], "safety.self_collision.link_radius_m");
         }
         if (!cfg.kinematics.enable) {
             throw std::runtime_error(
@@ -1620,6 +1639,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "check_left_stand",
                 "check_right_stand",
                 "stand_capsules",
+                "arm_capsules",
                 "stand_ignore_bones",
             }, "safety.self_collision");
             if (has(sc, "enable")) {
@@ -1699,6 +1719,47 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     }
                     cap.radius_m = asDouble(entry["radius_m"], "safety.self_collision.stand_capsules.radius_m");
                     cfg.safety.self_collision.stand_capsules.push_back(cap);
+                }
+            }
+            if (has(sc, "arm_capsules")) {
+                const YAML::Node caps = sc["arm_capsules"];
+                if (!caps.IsSequence()) {
+                    fail("safety.self_collision.arm_capsules must be a sequence", caps);
+                }
+                cfg.safety.self_collision.arm_capsules.clear();
+                for (std::size_t i = 0; i < caps.size(); ++i) {
+                    const YAML::Node entry = caps[i];
+                    validateAllowedKeys(entry, {
+                        "frame",
+                        "p0_m",
+                        "p1_m",
+                        "radius_m",
+                    }, "safety.self_collision.arm_capsules");
+                    ArmCapsuleConfig cap;
+                    if (!has(entry, "frame")) {
+                        fail("safety.self_collision.arm_capsules entries require frame", entry);
+                    }
+                    cap.frame = entry["frame"].as<std::string>();
+                    for (const auto& [key, target] : {
+                             std::pair<const char*, std::array<double, 3>*>{"p0_m", &cap.p0_m},
+                             {"p1_m", &cap.p1_m},
+                         }) {
+                        const YAML::Node point = entry[key];
+                        if (!point.IsSequence() || point.size() != 3) {
+                            fail("safety.self_collision.arm_capsules." + std::string(key) +
+                                     " must be a sequence of 3 values (" + cap.frame + ")",
+                                 entry);
+                        }
+                        for (std::size_t axis = 0; axis < 3; ++axis) {
+                            (*target)[axis] =
+                                asDouble(point[axis], "safety.self_collision.arm_capsules." + std::string(key));
+                        }
+                    }
+                    if (!has(entry, "radius_m")) {
+                        fail("safety.self_collision.arm_capsules entries require radius_m (" + cap.frame + ")", entry);
+                    }
+                    cap.radius_m = asDouble(entry["radius_m"], "safety.self_collision.arm_capsules.radius_m");
+                    cfg.safety.self_collision.arm_capsules.push_back(cap);
                 }
             }
             if (has(sc, "link_radius_m")) {

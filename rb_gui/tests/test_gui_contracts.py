@@ -25,6 +25,12 @@ from rb_servo_gui.app import (
     _apply_tcp_delta_and_send_pose_target,
     _apply_tcp_delta_to_target,
     _angular_step_radians,
+    _delete_waypoint,
+    _load_init_joints,
+    _load_waypoints,
+    _save_init_joints,
+    _save_waypoints,
+    _set_waypoint_as_init,
     _build_operator_monitors,
     _circle_overlay_bind_from_args_env,
     _env_joint6,
@@ -83,9 +89,11 @@ from rb_servo_gui.scene import (
     _circle_overlay_points,
     _reference_ghost_active,
     _robot_urdf_path,
+    add_self_collision_capsules,
     update_circle_overlay,
     update_floor_plane,
     update_floor_plane_preview,
+    update_self_collision_capsules,
     update_self_collision_overlay,
 )
 from rb_servo_gui.status_panel import _format_floor_constraint_status
@@ -2704,6 +2712,227 @@ class SelfCollisionOverlayTest(unittest.TestCase):
         self.assertTrue(handles["left_base"].visible)
         self.assertTrue(handles["right_base"].visible)
         self.assertEqual(handles["left_urdf_collision"].configs, [])
+
+
+class _CapsuleMeshHandle:
+    def __init__(self):
+        self.position = None
+        self.wxyz = None
+        self.visible = None
+        self.removed = False
+
+    def remove(self):
+        self.removed = True
+
+
+class _CapsuleScene:
+    """Minimal scene recording add_mesh_simple capsule meshes by node name."""
+
+    def __init__(self):
+        self.meshes = {}
+
+    def add_mesh_simple(self, name, vertices, faces, **kwargs):
+        handle = _CapsuleMeshHandle()
+        handle.visible = kwargs.get("visible", True)
+        self.meshes[name] = handle
+        return handle
+
+
+class _CapsuleServer:
+    def __init__(self):
+        self.scene = _CapsuleScene()
+
+
+class SelfCollisionCapsuleOverlayTest(unittest.TestCase):
+    @staticmethod
+    def _latest_with_geometry():
+        store = StateStore(stale_after_sec=5.0)
+        # 7 arm capsules per arm (FK'd template); one stand capsule.
+        def _arm(x):
+            return [{"name": str(i), "p0_m": [x, 0.0, i * 0.1], "p1_m": [x, 0.0, (i + 1) * 0.1],
+                     "radius_m": 0.05} for i in range(7)]
+        payload = sample_state(
+            self_collision={
+                "enabled": True,
+                "checked": True,
+                "violated": False,
+                "margin_m": 0.02,
+                "left_arm_capsules_m": _arm(0.0),
+                "right_arm_capsules_m": _arm(0.2),
+                "stand_capsules_m": [
+                    {"name": "lower_column", "p0_m": [0.0, 0.0, 0.0],
+                     "p1_m": [0.0, 0.0, 0.5], "radius_m": 0.08},
+                ],
+            },
+        )
+        assert store.update_from_json_bytes(json.dumps(payload).encode(), received_monotonic=time.monotonic())
+        return store.latest()
+
+    def _scene_handles(self):
+        server = _CapsuleServer()
+        handles: dict = {}
+        add_self_collision_capsules(server, handles)
+        self.assertIs(handles["_server"], server)
+        return server, handles
+
+    def test_show_creates_arm_and_stand_capsules(self):
+        server, handles = self._scene_handles()
+        update_self_collision_capsules(handles, self._latest_with_geometry(), show=True)
+        names = set(server.scene.meshes)
+        # 7 bones per arm + 1 stand capsule.
+        self.assertEqual(sum(n.endswith(f"/left_{i}") for i in range(7) for n in names), 7)
+        self.assertEqual(sum(n.endswith(f"/right_{i}") for i in range(7) for n in names), 7)
+        self.assertTrue(any(n.endswith("/stand_0") for n in names))
+        self.assertTrue(all(h.visible for h in server.scene.meshes.values()))
+
+    def test_toggle_off_hides_existing_capsules(self):
+        server, handles = self._scene_handles()
+        latest = self._latest_with_geometry()
+        update_self_collision_capsules(handles, latest, show=True)
+        update_self_collision_capsules(handles, latest, show=False)
+        self.assertTrue(server.scene.meshes)  # handles reused, not recreated
+        self.assertTrue(all(h.visible is False for h in server.scene.meshes.values()))
+
+    def test_no_geometry_creates_nothing(self):
+        server, handles = self._scene_handles()
+        store = StateStore(stale_after_sec=5.0)
+        payload = sample_state(self_collision={"enabled": True, "checked": False, "violated": False})
+        assert store.update_from_json_bytes(json.dumps(payload).encode(), received_monotonic=time.monotonic())
+        update_self_collision_capsules(handles, store.latest(), show=True)
+        self.assertEqual(server.scene.meshes, {})
+
+    def test_capsule_placed_at_bone_midpoint(self):
+        server, handles = self._scene_handles()
+        update_self_collision_capsules(handles, self._latest_with_geometry(), show=True)
+        # left bone 0 spans z=0.0..0.1 -> midpoint z=0.05.
+        bone0 = next(h for n, h in server.scene.meshes.items() if n.endswith("/left_0"))
+        self.assertAlmostEqual(bone0.position[2], 0.05, places=6)
+
+
+class WaypointPersistenceTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._prev = os.environ.get("RB_GUI_WAYPOINTS_PATH")
+        os.environ["RB_GUI_WAYPOINTS_PATH"] = os.path.join(self._tmp.name, "nested", "waypoints.json")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("RB_GUI_WAYPOINTS_PATH", None)
+        else:
+            os.environ["RB_GUI_WAYPOINTS_PATH"] = self._prev
+        self._tmp.cleanup()
+
+    def test_missing_file_loads_empty(self):
+        self.assertEqual(_load_waypoints(), {})
+
+    def test_save_load_roundtrip_normalizes_types(self):
+        waypoints = {
+            "home": {
+                "left_q": (0.0, -30.0, 80.0, 0.0, 60.0, 0.0),
+                "left_pose": (0.4, 0.1, 0.3, 0.0, 1.57, 0.0),
+                "left_quat": (0.0, 0.707, 0.0, 0.707),
+                "right_q": (1.0, 2.0, 3.0, 4.0, 5.0, 6.0),
+                "right_pose": (-0.2, -0.4, 0.25, 0.1, 0.2, 0.3),
+                "right_quat": None,
+            }
+        }
+        ok, path = _save_waypoints(waypoints)
+        self.assertTrue(ok, path)
+        self.assertTrue(os.path.exists(path))  # nested dir created
+        loaded = _load_waypoints()
+        self.assertEqual(list(loaded.keys()), ["home"])
+        self.assertEqual(loaded["home"]["left_q"], (0.0, -30.0, 80.0, 0.0, 60.0, 0.0))
+        self.assertIsInstance(loaded["home"]["left_q"], tuple)  # lists -> tuples
+        self.assertIsNone(loaded["home"]["right_quat"])
+
+    def test_corrupt_file_loads_empty(self):
+        path = os.environ["RB_GUI_WAYPOINTS_PATH"]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("{not valid json")
+        self.assertEqual(_load_waypoints(), {})
+
+    def test_delete_selected_waypoint(self):
+        class _Dropdown:
+            value = "home"
+
+        handles = {
+            "waypoints": {"home": {"left_q": None}, "other": {"left_q": None}},
+            "waypoint_dropdown": _Dropdown(),
+        }
+        ok, name = _delete_waypoint(handles)
+        self.assertTrue(ok)
+        self.assertEqual(name, "home")
+        self.assertEqual(list(handles["waypoints"].keys()), ["other"])
+
+        handles["waypoint_dropdown"].value = "(none)"
+        ok, message = _delete_waypoint(handles)
+        self.assertFalse(ok)
+        self.assertIn("no waypoint selected", message)
+
+
+class InitMotionPersistenceTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._prev = os.environ.get("RB_GUI_INIT_MOTION_PATH")
+        os.environ["RB_GUI_INIT_MOTION_PATH"] = os.path.join(self._tmp.name, "nested", "init_motion.json")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("RB_GUI_INIT_MOTION_PATH", None)
+        else:
+            os.environ["RB_GUI_INIT_MOTION_PATH"] = self._prev
+        self._tmp.cleanup()
+
+    def test_missing_file_loads_none(self):
+        self.assertEqual(_load_init_joints(), (None, None))
+
+    def test_save_load_roundtrip(self):
+        left = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+        right = (-1.0, -2.0, -3.0, -4.0, -5.0, -6.0)
+        ok, path = _save_init_joints(left, right)
+        self.assertTrue(ok, path)
+        self.assertTrue(os.path.exists(path))  # nested dir created
+        self.assertEqual(_load_init_joints(), (left, right))
+
+    def test_set_waypoint_as_init_updates_safety_and_persists(self):
+        store = StateStore(stale_after_sec=0.5)
+        safety = OperatorSafety(
+            store,
+            CommandClient(host="127.0.0.1", port=0, source_id="test"),
+            init_left_joint_deg=(0.0,) * 6,
+            init_right_joint_deg=(0.0,) * 6,
+        )
+        left = (10.0, 20.0, 30.0, 40.0, 50.0, 60.0)
+        right = (-10.0, -20.0, -30.0, -40.0, -50.0, -60.0)
+
+        class _Dropdown:
+            value = "home"
+
+        handles = {
+            "waypoints": {"home": {"left_q": left, "right_q": right}},
+            "waypoint_dropdown": _Dropdown(),
+        }
+        ok, message = _set_waypoint_as_init(handles, safety)
+        self.assertTrue(ok, message)
+        self.assertEqual(safety.init_left_joint_deg, left)
+        self.assertEqual(safety.init_right_joint_deg, right)
+        self.assertEqual(_load_init_joints(), (left, right))
+
+    def test_set_waypoint_as_init_rejects_missing_joints(self):
+        store = StateStore(stale_after_sec=0.5)
+        safety = OperatorSafety(store, CommandClient(host="127.0.0.1", port=0, source_id="test"))
+
+        class _Dropdown:
+            value = "partial"
+
+        handles = {
+            "waypoints": {"partial": {"left_q": None, "right_q": (1.0,) * 6}},
+            "waypoint_dropdown": _Dropdown(),
+        }
+        ok, message = _set_waypoint_as_init(handles, safety)
+        self.assertFalse(ok)
+        self.assertIn("missing joint capture", message)
 
 
 if __name__ == "__main__":

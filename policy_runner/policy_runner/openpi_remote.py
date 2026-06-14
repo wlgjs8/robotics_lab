@@ -36,11 +36,13 @@ from typing import Any, TextIO
 import numpy as np
 
 from .action_sources.tcp_delta import cartesian_action_requirements
+from .camera_bundle_client import resolve_frame
 from .flow_dataset import pose_from_state_payload
 from .flow_inference import (
     DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S,
     DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
     FlowMatchingActionSource,
+    _gripper_value_from_payload,
     canonical_flow_command_family,
     resolve_ee_local_r_align,
 )
@@ -261,21 +263,41 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         print(f"openpi remote: warmup done in {time.perf_counter() - started:.1f}s", file=self.stderr, flush=True)
 
     # ------------------------------------------------------------------ obs --
-    def _absolute_state(self, payload: dict[str, Any]) -> np.ndarray:
-        """14-dim absolute stand-frame state in the pi05 training convention."""
+    def _proprio_state(self, payload: dict[str, Any]) -> np.ndarray:
+        """14-dim RESET-RELATIVE state (pi05 reset-relative retrain convention).
+
+        Per arm: the current pose relative to the rollout reset pose, expressed
+        in the reset body frame -- pos_rel(3), rotvec_rel(3) -- then gripper
+        percent/100. Reset-relative cancels the absolute capture-world frame, the
+        gap that made the v2 absolute-pose checkpoint fail on the robot (live
+        stand-frame proprio sat ~2.7 m / z-score ~28 outside the training
+        distribution). Mirrors the in-house flow reset-relative proprio. The
+        reset anchor is latched on the first state this rollout sees, and MUST
+        match the episode-first-frame anchor used when building the training
+        dataset (examples/pika_umi/convert_pika_umi_data_to_lerobot.py)."""
+        from scipy.spatial.transform import Rotation
+
         features: list[np.ndarray] = []
-        for side in ("left", "right"):
-            pose = pose_from_state_payload(payload, side)
-            grip = _gripper_from_arm_payload(payload.get(side, {}))
-            features.append(
-                np.concatenate(
-                    [
-                        np.asarray(pose[:3], dtype=np.float64),
-                        _quat_xyzw_to_rotvec(pose[3:7]),
-                        [grip / 100.0],
-                    ]
-                )
-            )
+        for side, reset_attr in (("left", "_reset_left_pose"), ("right", "_reset_right_pose")):
+            pose = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
+            reset = getattr(self, reset_attr)
+            if reset is None:
+                reset = pose.copy()
+                setattr(self, reset_attr, reset)
+            r_reset = Rotation.from_quat(reset[3:7])
+            r_cur = Rotation.from_quat(pose[3:7])
+            pos_rel = r_reset.inv().apply(pose[:3] - reset[:3])
+            rot_rel = (r_reset.inv() * r_cur).as_rotvec()
+            # Proprio gripper: the servo state carries no gripper channel, so
+            # prefer the live physical motor percent, then the integrated policy
+            # target. Absolute percent, NOT reset-relative (matches training).
+            # Without this the channel reads 0 (= fully closed) and the policy
+            # drives the gripper command away monotonically (right-arm runaway).
+            grip = _gripper_value_from_payload(payload, side)
+            if grip is None:
+                live = self._live_gripper_percent(side)
+                grip = live if live is not None else _gripper_from_arm_payload(payload.get(side, {}))
+            features.append(np.concatenate([pos_rel, rot_rel, [float(grip) / 100.0]]))
         return np.concatenate(features).astype(np.float32)
 
     def _raw_camera_images(self) -> tuple[dict[str, np.ndarray] | None, int, int]:
@@ -293,7 +315,11 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         decode_count = 0
         missing_count = 0
         for key, camera_name in (("left", self.camera_names[0]), ("right", self.camera_names[1])):
-            frame = bundle_frames.get(camera_name) if isinstance(bundle_frames, dict) else None
+            # Bundle frames are keyed '<camera>.<stream>' (e.g. 'left_realsense.color')
+            # while checkpoint camera names use '<camera>_<stream>'
+            # ('left_realsense_color'); resolve_frame bridges the two. A plain
+            # .get() here silently missed every frame (camera fail-closed -> no motion).
+            frame = resolve_frame(bundle_frames, camera_name)
             pixels = getattr(frame, "pixels", None)
             if pixels is None:
                 missing_count += 1
@@ -325,7 +351,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         obs = {
             "observation/left_wrist_0_rgb": images["left"],
             "observation/right_wrist_0_rgb": images["right"],
-            "observation/state": self._absolute_state(payload),
+            "observation/state": self._proprio_state(payload),
             "prompt": self.prompt,
         }
         try:

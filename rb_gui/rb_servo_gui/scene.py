@@ -472,6 +472,157 @@ def _update_self_collision_witness_markers(
         _set_visible(handle, show)
 
 
+# Translucent collision-capsule overlay. Arm capsules (blue) and stand capsules
+# (orange) both come from the server's self_collision telemetry as explicit
+# {p0_m, p1_m, radius_m} lists — the EXACT capsules the guard checked this tick
+# (arm capsules FK'd per-link from the URDF-fit template). Each is inflated by
+# margin/2 so two capsule surfaces touching == the violation threshold
+# (clearance < margin). Translucent so the real arm/stand meshes show underneath.
+_SELF_COLLISION_ARM_CAPSULE_RGB = (70, 160, 255)
+_SELF_COLLISION_STAND_CAPSULE_RGB = (255, 165, 60)
+_SELF_COLLISION_CAPSULE_OPACITY = 0.30
+
+
+def _xyz3(value: Any) -> tuple[float, float, float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return None
+    try:
+        p = tuple(float(v) for v in value)
+    except (TypeError, ValueError):
+        return None
+    return p if all(math.isfinite(v) for v in p) else None  # type: ignore[return-value]
+
+
+def _capsule_axis_wxyz(direction: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """Quaternion (w,x,y,z) rotating the capsule's +Z axis onto `direction`."""
+    import numpy as np
+
+    z = np.array([0.0, 0.0, 1.0])
+    v = np.asarray(direction, dtype=float)
+    norm = float(np.linalg.norm(v))
+    if norm < 1e-9:
+        return (1.0, 0.0, 0.0, 0.0)
+    v = v / norm
+    c = float(np.clip(np.dot(z, v), -1.0, 1.0))
+    if c > 1.0 - 1e-9:
+        return (1.0, 0.0, 0.0, 0.0)
+    if c < -1.0 + 1e-9:
+        return (0.0, 1.0, 0.0, 0.0)  # 180 deg about X
+    axis = np.cross(z, v)
+    axis = axis / float(np.linalg.norm(axis))
+    half = math.acos(c) / 2.0
+    s = math.sin(half)
+    return (math.cos(half), float(axis[0] * s), float(axis[1] * s), float(axis[2] * s))
+
+
+def _ensure_capsule_handle(
+    server: Any, scene_handles: dict[str, Any], key: str, length: float, radius: float, rgb: tuple[int, int, int]
+) -> Any:
+    # Capsule core spans +/-length/2 along local Z (trimesh capsule centered at
+    # origin). Reuse the mesh while (length, radius) are unchanged — arm bone
+    # lengths are constant for a rigid arm, so this recreates at most once.
+    cache = scene_handles.setdefault("_self_collision_capsule_cache", {})
+    entry = cache.get(key)
+    if entry is not None and abs(entry["length"] - length) < 1e-4 and abs(entry["radius"] - radius) < 1e-4:
+        return entry["handle"]
+    if entry is not None:
+        try:
+            entry["handle"].remove()
+        except Exception:
+            pass
+    try:
+        import trimesh
+
+        mesh = trimesh.creation.capsule(
+            height=max(float(length), 1e-4), radius=max(float(radius), 1e-4), count=[6, 10]
+        )
+        handle = server.scene.add_mesh_simple(
+            f"/stand/self_collision_capsule/{key}",
+            vertices=mesh.vertices,
+            faces=mesh.faces,
+            color=rgb,
+            opacity=_SELF_COLLISION_CAPSULE_OPACITY,
+            visible=False,
+        )
+    except Exception as exc:
+        scene_handles["self_collision_capsule_error"] = f"{type(exc).__name__}: {exc}"
+        return None
+    cache[key] = {"handle": handle, "length": float(length), "radius": float(radius)}
+    return handle
+
+
+def _place_capsule(handle: Any, p0: tuple[float, float, float], p1: tuple[float, float, float]) -> None:
+    seg = (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
+    handle.position = ((p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0, (p0[2] + p1[2]) / 2.0)
+    handle.wxyz = _capsule_axis_wxyz(seg)
+
+
+def add_self_collision_capsules(server: Any, scene_handles: dict[str, Any]) -> None:
+    """Prime the collision-capsule overlay (store the server handle).
+
+    Both arm and stand capsules are created lazily from the server's
+    self_collision telemetry in update_self_collision_capsules, so the viewer
+    always draws the EXACT geometry the guard checked this tick — there is no
+    GUI-side copy of the stand config to drift from the server."""
+    if not isinstance(scene_handles, dict):
+        return
+    scene_handles["_server"] = server
+
+
+def update_self_collision_capsules(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
+    """Show/update the translucent collision capsules from telemetry. Arm capsules
+    come from {left,right}_arm_capsules_m (blue), stand from stand_capsules_m
+    (orange) — all explicit {p0_m, p1_m, radius_m} lists, the exact geometry the
+    server checked. Each is inflated by margin/2 so two capsule surfaces touching
+    == the violation threshold."""
+    if not isinstance(scene_handles, dict):
+        return
+    server = scene_handles.get("_server")
+    # setdefault (not get): _ensure_capsule_handle lazily creates this same dict,
+    # so binding the live reference here keeps the final visibility sweep in sync.
+    cache = scene_handles.setdefault("_self_collision_capsule_cache", {})
+    used_keys: set[str] = set()
+    if show and server is not None:
+        sc = getattr(latest, "self_collision", None) if latest is not None else None
+        if isinstance(sc, Mapping):
+            margin = sc.get("margin_m")
+            half = (
+                float(margin) / 2.0
+                if isinstance(margin, (int, float)) and math.isfinite(float(margin))
+                else 0.0
+            )
+            groups = (
+                ("left", "left_arm_capsules_m", _SELF_COLLISION_ARM_CAPSULE_RGB),
+                ("right", "right_arm_capsules_m", _SELF_COLLISION_ARM_CAPSULE_RGB),
+                ("stand", "stand_capsules_m", _SELF_COLLISION_STAND_CAPSULE_RGB),
+            )
+            for prefix, telemetry_key, rgb in groups:
+                caps = sc.get(telemetry_key)
+                if not isinstance(caps, (list, tuple)):
+                    continue
+                for i, capsule in enumerate(caps):
+                    if not isinstance(capsule, Mapping):
+                        continue
+                    p0 = _xyz3(capsule.get("p0_m"))
+                    p1 = _xyz3(capsule.get("p1_m"))
+                    radius = capsule.get("radius_m")
+                    if p0 is None or p1 is None or not isinstance(radius, (int, float)):
+                        continue
+                    key = f"{prefix}_{i}"
+                    handle = _ensure_capsule_handle(
+                        server, scene_handles, key, math.dist(p0, p1), float(radius) + half, rgb
+                    )
+                    if handle is None:
+                        continue
+                    try:
+                        _place_capsule(handle, p0, p1)
+                    except Exception:
+                        pass
+                    used_keys.add(key)
+    for key, entry in cache.items():
+        _set_visible(entry["handle"], show and key in used_keys)
+
+
 def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
     stand_mesh_path = _stand_mesh_path()
     if not stand_mesh_path.exists():
@@ -656,6 +807,7 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         _set_visible(handles.get("circle_overlay_desired"), False)
         _add_floor_plane(server, handles)
         _add_self_collision_witness_markers(server, handles)
+        add_self_collision_capsules(server, handles)
         _add_stand_mesh(server, handles)
         _add_robot_urdfs(server, handles)
         urdf_loaded = "left_urdf" in handles and "right_urdf" in handles

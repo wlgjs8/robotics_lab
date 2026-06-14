@@ -346,6 +346,21 @@ class OperatorSafety:
         )
         return True, "sent InitMotion JointTarget"
 
+    def set_init_joints(
+        self,
+        left_q_deg: tuple[float, ...] | None,
+        right_q_deg: tuple[float, ...] | None,
+    ) -> tuple[bool, str]:
+        # Update the InitMotion target pose at runtime (used by the WayPoint
+        # "set as init" button). Persistence to JSON is handled by the caller.
+        left = self._validated_joint6(left_q_deg)
+        right = self._validated_joint6(right_q_deg)
+        if left is None or right is None:
+            return False, "init joints require finite 6-DOF values for both arms"
+        self.init_left_joint_deg = left
+        self.init_right_joint_deg = right
+        return True, "init motion pose updated"
+
     def jog_joint(self, arm: Literal["left", "right"], joint_index: int, delta_deg: float) -> tuple[bool, str]:
         reason = self.blocked_reason("JointTarget")
         if reason:
@@ -368,6 +383,30 @@ class OperatorSafety:
             return False, "non-finite target rejected"
         self.command_client.send(self.command_client.build_joint_target(tuple(left), tuple(right), timeout_sec=self.command_timeout_sec))
         return True, f"sent {arm} J{joint_index + 1} jog {clamped_delta:+.3f} deg"
+
+    def send_joint_target(
+        self,
+        *,
+        left_q_deg: tuple[float, ...] | None,
+        right_q_deg: tuple[float, ...] | None,
+    ) -> tuple[bool, str]:
+        # Absolute dual-arm JointTarget (used by WayPoint moveJ). Designed to be
+        # re-sent at a hold cadence: the standard command_timeout_sec freshness
+        # acts as the deadman, so releasing the hold lets the server hold in
+        # place once commands go stale.
+        reason = self.blocked_reason("JointTarget")
+        if reason:
+            return False, reason
+        if self.latest_valid() is None:
+            return False, "state stream missing or stale"
+        left = self._validated_joint6(left_q_deg)
+        right = self._validated_joint6(right_q_deg)
+        if left is None or right is None:
+            return False, "joint target requires finite 6-DOF values for both arms"
+        self.command_client.send(
+            self.command_client.build_joint_target(left, right, timeout_sec=self.command_timeout_sec)
+        )
+        return True, "sent JointTarget"
 
     def tcp_jog_unavailable(self) -> tuple[bool, str]:
         return False, "TCP jog unavailable: FK/IK is deferred; no Cartesian motion command sent"
