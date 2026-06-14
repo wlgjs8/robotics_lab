@@ -292,10 +292,16 @@ class FlowMatchingActionSource:
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
         device: str = "auto",
+        stochastic_sampling: bool = True,
         stderr: TextIO = sys.stderr,
     ):
         if sample_steps <= 0:
             raise ValueError("sample_steps must be positive")
+        # Stochastic sampling integrates the flow ODE from random initial noise
+        # (x_T ~ N(0, I)) so the multimodal action distribution is actually sampled.
+        # Deterministic (zero init) collapses toward the mean of the modes -- wrong
+        # for multimodal tasks (e.g. horizontal vs vertical grasp). Default stochastic.
+        self.stochastic_sampling = bool(stochastic_sampling)
         self.timeout_sec = float(timeout_sec)
         self.camera_client = camera_client
         self.sample_steps = int(sample_steps)
@@ -802,6 +808,18 @@ class FlowMatchingActionSource:
             proprio = rotate_flow_arm_vectors(proprio, self.ee_local_r_align)
         return proprio
 
+    def _initial_noise(self, batch_size: int) -> "torch.Tensor | None":
+        """Random x_T ~ N(0, I) for stochastic flow sampling, or None (zero init)."""
+        if not self.stochastic_sampling:
+            return None
+        return torch.randn(
+            int(batch_size),
+            int(self.model.config.action_horizon),
+            int(self.model.config.action_dim),
+            dtype=torch.float32,
+            device=self.device,
+        )
+
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         assert self._reset_left_pose is not None
         assert self._reset_right_pose is not None
@@ -821,6 +839,7 @@ class FlowMatchingActionSource:
                 torch.as_tensor(images[None, ...], dtype=torch.float32, device=self.device),
                 torch.as_tensor(proprio[None, ...], dtype=torch.float32, device=self.device),
                 steps=self.sample_steps,
+                initial_noise=self._initial_noise(1),
             )
             chunk = _denormalize_action_numpy(chunk, self.stats)
         return chunk[0]

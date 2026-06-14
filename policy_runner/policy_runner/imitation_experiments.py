@@ -246,6 +246,7 @@ def run_imitation_experiment(
     max_val_samples: int | None = None,
     flow_sample_steps: int = 8,
     diffusion_sample_steps: int = 16,
+    eval_samples: int = 8,
     split_mode: str = "primary",
     action_frame: str = DEFAULT_ACTION_FRAME,
 ) -> dict[str, Any]:
@@ -428,6 +429,7 @@ def run_imitation_experiment(
                     lr=lr,
                     hidden_dim=hidden_dim,
                     sample_steps=flow_sample_steps,
+                    eval_samples=eval_samples,
                     device=torch_device,
                     torch=torch,
                 )
@@ -447,6 +449,7 @@ def run_imitation_experiment(
                     lr=lr,
                     hidden_dim=hidden_dim,
                     sample_steps=diffusion_sample_steps,
+                    eval_samples=eval_samples,
                     device=torch_device,
                     torch=torch,
                 )
@@ -515,6 +518,7 @@ def run_imitation_experiment(
             "max_val_samples": max_val_samples,
             "flow_sample_steps": flow_sample_steps,
             "diffusion_sample_steps": diffusion_sample_steps,
+            "eval_samples": eval_samples,
             "split_mode": split_mode,
             "models": model_names,
         },
@@ -645,6 +649,7 @@ def _train_flow(*, name: str, backbone: str, **kwargs: Any) -> dict[str, Any]:
         stats=kwargs["stats"],
         device=kwargs["device"],
         sample_steps=kwargs["sample_steps"],
+        eval_samples=kwargs.get("eval_samples", 1),
         torch=torch,
     )
     train_metrics = _evaluate_flow_model(
@@ -654,6 +659,7 @@ def _train_flow(*, name: str, backbone: str, **kwargs: Any) -> dict[str, Any]:
         stats=kwargs["stats"],
         device=kwargs["device"],
         sample_steps=kwargs["sample_steps"],
+        eval_samples=kwargs.get("eval_samples", 1),
         torch=torch,
     )
     latency = _measure_flow_latency(
@@ -743,6 +749,7 @@ def _train_diffusion(*, name: str, backbone: str, **kwargs: Any) -> dict[str, An
         stats=kwargs["stats"],
         device=kwargs["device"],
         sample_steps=kwargs["sample_steps"],
+        eval_samples=kwargs.get("eval_samples", 1),
         torch=torch,
     )
     train_metrics = _evaluate_diffusion_model(
@@ -752,6 +759,7 @@ def _train_diffusion(*, name: str, backbone: str, **kwargs: Any) -> dict[str, An
         stats=kwargs["stats"],
         device=kwargs["device"],
         sample_steps=kwargs["sample_steps"],
+        eval_samples=kwargs.get("eval_samples", 1),
         torch=torch,
     )
     latency = _measure_diffusion_latency(
@@ -1038,67 +1046,171 @@ def _evaluate_supervised_model(*, model: Any, dataset: FlowHdf5Dataset, indices:
     return _finalize_with_ordered_metrics(metrics, ordered, dataset, stats=stats)
 
 
-def _evaluate_flow_model(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, sample_steps: int, torch: Any) -> dict[str, Any]:
+def _average_numeric_leaves(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    """Average numeric leaf fields across structurally identical dicts (per-draw
+    event metrics -> expected single-shot event metrics). None leaves are skipped;
+    a leaf that is None in every draw stays None; non-numeric leaves keep draw 0."""
+    first = payloads[0]
+    out: dict[str, Any] = {}
+    for key, value in first.items():
+        if isinstance(value, dict):
+            out[key] = _average_numeric_leaves([p[key] for p in payloads])
+        elif isinstance(value, bool) or not isinstance(value, (int, float, type(None))):
+            out[key] = value
+        else:
+            values = [p[key] for p in payloads if isinstance(p.get(key), (int, float)) and not isinstance(p.get(key), bool)]
+            out[key] = float(np.mean(values)) if values else None
+    return out
+
+
+def _select_best_of_n(preds: list[np.ndarray], target: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Pick the sample whose masked chunk MSE to the demo is smallest (minADE-style).
+
+    For multimodal demos (e.g. horizontal vs vertical grasp, or grasp-then-retry) this
+    credits a policy that puts probability mass on the correct mode, instead of
+    penalizing it for not matching the single recorded mode. Returns the best draw."""
+    active = mask.astype(np.float64)
+    denom = max(float(active.sum()), 1.0)
+    best_idx = 0
+    best_err = float("inf")
+    for idx, pred in enumerate(preds):
+        err = float(((((pred - target).astype(np.float64)) ** 2) * active).sum()) / denom
+        if err < best_err:
+            best_err = err
+            best_idx = idx
+    return preds[best_idx]
+
+
+def _evaluate_flow_model(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, sample_steps: int, torch: Any, eval_samples: int = 1) -> dict[str, Any]:
     from .flow_model import sample_action_chunks
 
     model.eval()
     metrics = _empty_metric_accumulator()
     ordered = _empty_ordered_eval_accumulator(dataset)
+    do_bon = int(eval_samples) > 1
+    if do_bon:
+        metrics_bon = _empty_metric_accumulator()
+        ordered_bon = _empty_ordered_eval_accumulator(dataset)
+        # mean-over-N: expected SINGLE-shot deployment metrics. Chunk metrics are
+        # accumulated over every draw (finalize divides by count -> expectation);
+        # event metrics are finalized per draw and leaf-averaged, NOT computed on
+        # an averaged signal (that would reintroduce mode-averaging).
+        metrics_mean = _empty_metric_accumulator()
+        ordered_mean = [_empty_ordered_eval_accumulator(dataset) for _ in range(int(eval_samples))]
+    horizon = int(model.config.action_horizon)
+    action_dim = int(model.config.action_dim)
     loader = _loader(dataset, indices, batch_size=32, shuffle=False, torch=torch, include_index=True)
     with torch.no_grad():
         for batch in loader:
             sample_indices = batch.pop("_sample_index").cpu().numpy().astype(int).tolist()
             batch = _to_device(batch, device, torch=torch)
-            pred = sample_action_chunks(
-                model,
-                batch["images"].float(),
-                batch["proprio"].float(),
-                steps=sample_steps,
-            )
-            pred_raw = denormalize_actions(pred, stats).cpu().numpy()
+            images = batch["images"].float()
+            proprio = batch["proprio"].float()
             target_raw = denormalize_actions(batch["action_chunk"].float(), stats).cpu().numpy()
             mask = batch["action_mask"].float().cpu().numpy()
+            # Deterministic baseline: integrate the flow ODE from the prior mean
+            # (zero init). This is the historical single-sample metric; it cannot
+            # express multimodality (it collapses toward the average of modes).
+            pred = sample_action_chunks(model, images, proprio, steps=sample_steps)
+            pred_raw = denormalize_actions(pred, stats).cpu().numpy()
+            # Stochastic best-of-N: draw eval_samples chunks from random initial
+            # noise so the multimodal action distribution is actually sampled.
+            draws_raw: list[np.ndarray] = []
+            if do_bon:
+                for _ in range(int(eval_samples)):
+                    noise = torch.randn(
+                        proprio.shape[0], horizon, action_dim,
+                        dtype=proprio.dtype, device=proprio.device,
+                    )
+                    drawn = sample_action_chunks(model, images, proprio, steps=sample_steps, initial_noise=noise)
+                    draws_raw.append(denormalize_actions(drawn, stats).cpu().numpy())
             for row, sample_index in enumerate(sample_indices):
-                _accumulate_raw_metrics(
-                    metrics,
-                    pred_raw[row],
-                    target_raw[row],
-                    mask[row],
-                    phase=_sample_phase(dataset, sample_index),
-                )
+                phase = _sample_phase(dataset, sample_index)
+                _accumulate_raw_metrics(metrics, pred_raw[row], target_raw[row], mask[row], phase=phase)
                 _accumulate_ordered_prediction(ordered, dataset, sample_index, pred_raw[row], target_raw[row])
-    return _finalize_with_ordered_metrics(metrics, ordered, dataset, stats=stats)
+                if do_bon:
+                    best = _select_best_of_n([d[row] for d in draws_raw], target_raw[row], mask[row])
+                    _accumulate_raw_metrics(metrics_bon, best, target_raw[row], mask[row], phase=phase)
+                    _accumulate_ordered_prediction(ordered_bon, dataset, sample_index, best, target_raw[row])
+                    for k, draw in enumerate(draws_raw):
+                        _accumulate_raw_metrics(metrics_mean, draw[row], target_raw[row], mask[row], phase=phase)
+                        _accumulate_ordered_prediction(ordered_mean[k], dataset, sample_index, draw[row], target_raw[row])
+    out = _finalize_with_ordered_metrics(metrics, ordered, dataset, stats=stats)
+    out["sampling"] = "zero_init"
+    if do_bon:
+        bon = _finalize_with_ordered_metrics(metrics_bon, ordered_bon, dataset, stats=stats)
+        bon["eval_samples"] = int(eval_samples)
+        bon["sampling"] = "random_noise_best_of_n"
+        out["best_of_n"] = bon
+        mean_block = _finalize_metrics(metrics_mean, stats=stats)
+        mean_block.update(
+            _average_numeric_leaves(
+                [_finalize_ordered_event_metrics(acc, dataset) for acc in ordered_mean]
+            )
+        )
+        mean_block["eval_samples"] = int(eval_samples)
+        mean_block["sampling"] = "random_noise_mean_of_n"
+        out["mean_of_n"] = mean_block
+    return out
 
 
-def _evaluate_diffusion_model(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, sample_steps: int, torch: Any) -> dict[str, Any]:
+def _evaluate_diffusion_model(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, sample_steps: int, torch: Any, eval_samples: int = 1) -> dict[str, Any]:
     model.eval()
     metrics = _empty_metric_accumulator()
     ordered = _empty_ordered_eval_accumulator(dataset)
+    do_bon = int(eval_samples) > 1
+    if do_bon:
+        metrics_bon = _empty_metric_accumulator()
+        ordered_bon = _empty_ordered_eval_accumulator(dataset)
+        metrics_mean = _empty_metric_accumulator()
+        ordered_mean = [_empty_ordered_eval_accumulator(dataset) for _ in range(int(eval_samples))]
+    n_draws = int(eval_samples) if do_bon else 1
     loader = _loader(dataset, indices, batch_size=32, shuffle=False, torch=torch, include_index=True)
     with torch.no_grad():
         for batch in loader:
             sample_indices = batch.pop("_sample_index").cpu().numpy().astype(int).tolist()
             batch = _to_device(batch, device, torch=torch)
-            pred = _sample_diffusion_x0(
-                model=model,
-                images=batch["images"].float(),
-                proprio=batch["proprio"].float(),
-                sample_steps=sample_steps,
-                torch=torch,
-            )
-            pred_raw = denormalize_actions(pred, stats).cpu().numpy()
+            images = batch["images"].float()
+            proprio = batch["proprio"].float()
             target_raw = denormalize_actions(batch["action_chunk"].float(), stats).cpu().numpy()
             mask = batch["action_mask"].float().cpu().numpy()
-            for row, sample_index in enumerate(sample_indices):
-                _accumulate_raw_metrics(
-                    metrics,
-                    pred_raw[row],
-                    target_raw[row],
-                    mask[row],
-                    phase=_sample_phase(dataset, sample_index),
+            # Diffusion sampling is already stochastic (random x_T per call); draw
+            # n_draws samples. draw[0] is the single-sample baseline.
+            draws_raw: list[np.ndarray] = []
+            for _ in range(n_draws):
+                drawn = _sample_diffusion_x0(
+                    model=model, images=images, proprio=proprio, sample_steps=sample_steps, torch=torch,
                 )
+                draws_raw.append(denormalize_actions(drawn, stats).cpu().numpy())
+            pred_raw = draws_raw[0]
+            for row, sample_index in enumerate(sample_indices):
+                phase = _sample_phase(dataset, sample_index)
+                _accumulate_raw_metrics(metrics, pred_raw[row], target_raw[row], mask[row], phase=phase)
                 _accumulate_ordered_prediction(ordered, dataset, sample_index, pred_raw[row], target_raw[row])
-    return _finalize_with_ordered_metrics(metrics, ordered, dataset, stats=stats)
+                if do_bon:
+                    best = _select_best_of_n([d[row] for d in draws_raw], target_raw[row], mask[row])
+                    _accumulate_raw_metrics(metrics_bon, best, target_raw[row], mask[row], phase=phase)
+                    _accumulate_ordered_prediction(ordered_bon, dataset, sample_index, best, target_raw[row])
+                    for k, draw in enumerate(draws_raw):
+                        _accumulate_raw_metrics(metrics_mean, draw[row], target_raw[row], mask[row], phase=phase)
+                        _accumulate_ordered_prediction(ordered_mean[k], dataset, sample_index, draw[row], target_raw[row])
+    out = _finalize_with_ordered_metrics(metrics, ordered, dataset, stats=stats)
+    out["sampling"] = "single_sample"
+    if do_bon:
+        bon = _finalize_with_ordered_metrics(metrics_bon, ordered_bon, dataset, stats=stats)
+        bon["eval_samples"] = int(eval_samples)
+        bon["sampling"] = "best_of_n"
+        out["best_of_n"] = bon
+        mean_block = _finalize_metrics(metrics_mean, stats=stats)
+        mean_block.update(
+            _average_numeric_leaves(
+                [_finalize_ordered_event_metrics(acc, dataset) for acc in ordered_mean]
+            )
+        )
+        mean_block["eval_samples"] = int(eval_samples)
+        mean_block["sampling"] = "mean_of_n"
+        out["mean_of_n"] = mean_block
+    return out
 
 
 def _supervised_shortcut_ablations(*, model: Any, dataset: FlowHdf5Dataset, indices: list[int], stats: dict[str, Any], device: Any, torch: Any) -> dict[str, Any]:
@@ -2139,6 +2251,22 @@ def _split_entries(episodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _ranking_normalized_mse(item: dict[str, Any]) -> float:
+    """Leaderboard ranking key: EXPECTED single-shot deployment error.
+
+    Stochastic families (flow/diffusion with eval_samples>1) rank by
+    mean_of_n.normalized_action_mse — the expectation over random draws, which is
+    apples-to-apples with a deterministic model's single output. Deterministic
+    families and old runs fall back to normalized_action_mse. best_of_n is NOT
+    used for ranking: it is an oracle mode-coverage diagnostic (it would give
+    stochastic models an unfair K-tries-vs-1 advantage)."""
+    metrics = item.get("metrics", {})
+    mon = metrics.get("mean_of_n")
+    if isinstance(mon, dict) and mon.get("normalized_action_mse") is not None:
+        return float(mon["normalized_action_mse"])
+    return float(metrics.get("normalized_action_mse", math.inf))
+
+
 def _build_report(
     *,
     output_dir: Path,
@@ -2157,18 +2285,15 @@ def _build_report(
         and "normalized_action_mse" in item.get("metrics", {})
     ]
     failed_results = [item for item in results if item.get("status") == "failed"]
-    leaderboard = sorted(
-        successful_results,
-        key=lambda item: float(item["metrics"].get("normalized_action_mse", math.inf)),
-    )
+    leaderboard = sorted(successful_results, key=_ranking_normalized_mse)
     best = leaderboard[0] if leaderboard else None
     zero = _find_result(results, "zero")
     mean = _find_result(results, "train_mean")
     state = _find_result(results, "state_mlp")
     visual_warning = None
     if best and state and best.get("family") != "state_only_mlp":
-        best_mse = float(best["metrics"].get("normalized_action_mse", math.inf))
-        state_mse = float(state["metrics"].get("normalized_action_mse", math.inf))
+        best_mse = _ranking_normalized_mse(best)
+        state_mse = _ranking_normalized_mse(state)
         if best_mse >= state_mse:
             visual_warning = "best image+state model does not outperform state-only; do not claim visual grounding"
     return {
@@ -2211,6 +2336,7 @@ def _build_report(
             "action_dim_names": list(FLOW_ACTION_DIM_NAMES),
         },
         "args": args,
+        "ranking_metric": "mean_of_n.normalized_action_mse (expected single shot; fallback: normalized_action_mse — best_of_n is a diagnostic, not the ranking key)",
         "leaderboard": [
             {
                 "rank": rank,
@@ -2219,6 +2345,17 @@ def _build_report(
                 "backbone": item.get("backbone"),
                 "train_normalized_action_mse": item.get("train_metrics", {}).get("normalized_action_mse"),
                 "normalized_action_mse": item["metrics"]["normalized_action_mse"],
+                "ranking_normalized_action_mse": _ranking_normalized_mse(item),
+                "mean_of_n_normalized_action_mse": item["metrics"].get("mean_of_n", {}).get("normalized_action_mse"),
+                "mean_of_n_action_mse": item["metrics"].get("mean_of_n", {}).get("action_mse"),
+                "mean_of_n_by_phase": item["metrics"].get("mean_of_n", {}).get("by_phase", {}),
+                "mean_of_n_gripper_event_timing": item["metrics"].get("mean_of_n", {}).get("gripper_event_timing", {}),
+                "mean_of_n_critical_instant_endpoint_error": item["metrics"].get("mean_of_n", {}).get("critical_instant_endpoint_error", {}),
+                "best_of_n_normalized_action_mse": item["metrics"].get("best_of_n", {}).get("normalized_action_mse"),
+                "best_of_n_action_mse": item["metrics"].get("best_of_n", {}).get("action_mse"),
+                "best_of_n_by_phase": item["metrics"].get("best_of_n", {}).get("by_phase", {}),
+                "best_of_n_gripper_event_timing": item["metrics"].get("best_of_n", {}).get("gripper_event_timing", {}),
+                "best_of_n_critical_instant_endpoint_error": item["metrics"].get("best_of_n", {}).get("critical_instant_endpoint_error", {}),
                 "action_mse": item["metrics"]["action_mse"],
                 "translation_endpoint_error": item["metrics"]["translation_endpoint_error"],
                 "rotation_endpoint_error": item["metrics"]["rotation_endpoint_error"],
@@ -2474,7 +2611,11 @@ def aggregate_imitation_reports(
             failed_item = dict(item)
             failed_item["source_report"] = str(path)
             failed.append(failed_item)
-    rows.sort(key=lambda item: float(item.get("normalized_action_mse", math.inf)))
+    rows.sort(
+        key=lambda item: float(
+            item.get("ranking_normalized_action_mse", item.get("normalized_action_mse", math.inf))
+        )
+    )
     for rank, row in enumerate(rows, start=1):
         row["rank"] = rank
     payload = {
