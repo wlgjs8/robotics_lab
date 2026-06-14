@@ -1411,6 +1411,11 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.left_prefix = m.left_prefix;
         collision_monitor_cfg_.right_prefix = m.right_prefix;
         collision_monitor_cfg_.stand_ignore_arm_substrings = m.stand_ignore_arm_substrings;
+        collision_monitor_cfg_.left_arm_root_frame = m.left_arm_root_frame;
+        collision_monitor_cfg_.right_arm_root_frame = m.right_arm_root_frame;
+        collision_monitor_cfg_.check_intra_arm = m.check_intra_arm;
+        collision_monitor_cfg_.intra_arm_min_chain_separation = m.intra_arm_min_chain_separation;
+        collision_monitor_cfg_.swept_samples = m.swept_samples;
         collision_monitor_cfg_.d_hard_m = m.d_hard_m;
         collision_monitor_cfg_.d_slow_m = m.d_slow_m;
         collision_monitor_cfg_.a_brake_m_s2 = m.a_brake_m_s2;
@@ -1419,6 +1424,19 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.max_staleness_s = m.max_staleness_s;
         collision_monitor_cfg_.monitor_core = m.monitor_core;
         collision_monitor_cfg_.max_near_pairs = m.max_near_pairs;
+        collision_monitor_cfg_.extra_collision.clear();
+        for (const auto& e : m.extra_collision) {
+            ExtraCollisionShape s;
+            s.name = e.name;
+            s.shape = e.shape;
+            s.parent_frame = e.parent_frame;
+            s.size_m = e.size_m;
+            s.radius_m = e.radius_m;
+            s.length_m = e.length_m;
+            s.xyz_m = e.xyz_m;
+            s.rpy = e.rpy;
+            collision_monitor_cfg_.extra_collision.push_back(s);
+        }
         for (int i = 0; i < kDof && i < static_cast<int>(config_.kinematics.joint_names.size()); ++i) {
             collision_monitor_cfg_.left_joints[i] = m.left_prefix + config_.kinematics.joint_names[i];
             collision_monitor_cfg_.right_joints[i] = m.right_prefix + config_.kinematics.joint_names[i];

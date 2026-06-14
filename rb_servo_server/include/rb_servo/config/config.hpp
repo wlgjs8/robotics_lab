@@ -231,6 +231,22 @@ inline std::vector<ArmCapsuleConfig> defaultRb3ArmCapsules() {
 // pairs are left<->right, left<->stand, right<->stand — NEVER intra-arm (adjacent
 // links touch by construction). A candidate target is refused if any checked pair
 // comes within margin_m of each other.
+// Extra collision primitive for the mesh self-collision monitor — geometry the
+// URDF does not carry: wrist cameras, cable bundles, the work table/box. Attached
+// to a named frame: an ARM frame (e.g. an attachment_site) makes it move with that
+// arm (auto-classified left/right by ancestry); "stand"/"world" makes it a static
+// obstacle paired against both arms. Shapes are coal primitives.
+struct ExtraCollisionConfig {
+    std::string name;
+    std::string shape = "box";       // box | sphere | capsule | cylinder
+    std::string parent_frame;        // URDF frame to attach to (arm frame or stand/world)
+    std::array<double, 3> size_m{0.0, 0.0, 0.0};  // box: full extents (x,y,z)
+    double radius_m = 0.0;           // sphere/capsule/cylinder
+    double length_m = 0.0;           // capsule/cylinder (length between caps / height)
+    std::array<double, 3> xyz_m{0.0, 0.0, 0.0};   // offset in the parent frame
+    std::array<double, 3> rpy{0.0, 0.0, 0.0};      // orientation in the parent frame
+};
+
 struct SelfCollisionConfig {
     bool enable = false;
     double margin_m = 0.05;
@@ -283,18 +299,31 @@ struct SelfCollisionConfig {
         std::string stand_frame = "stand";
         // arm geometry whose name contains any of these is NOT paired vs the stand
         std::vector<std::string> stand_ignore_arm_substrings{"link0"};
+        // Left/right classification by kinematic-tree ancestry (robust to mesh/link
+        // renaming). Default arm root frame = "<prefix>world" if left empty.
+        std::string left_arm_root_frame;
+        std::string right_arm_root_frame;
+        // Intra-arm self-collision (an arm folding onto itself); adjacent links
+        // (chain separation < intra_arm_min_chain_separation) are skipped.
+        bool check_intra_arm = true;
+        int intra_arm_min_chain_separation = 2;
+        // Swept-volume guard: samples between consecutive evaluations (1 = endpoint
+        // only). >=2 prevents fast motion tunneling a thin obstacle between ticks.
+        int swept_samples = 2;  // 1=endpoint, >=2 sweeps (cost ~x per sample)
         // shared velocity-barrier params
         double d_hard_m = 0.005;
         double d_slow_m = 0.025;
         double a_brake_m_s2 = 4.0;
         double hyst_m = 0.005;
-        double latency_s = 0.005;
+        double latency_s = 0.010;
         // Verdict older than this -> hold (recoverable, not a latch). Loose enough
         // to ride out normal OS scheduling jitter of the (non-RT) monitor thread;
         // the monitor normally refreshes every ~1.5 ms.
         double max_staleness_s = 0.050;
         int monitor_core = -1;
         int max_near_pairs = 8;
+        // Extra collision primitives not in the URDF (wrist cameras, cables, table).
+        std::vector<ExtraCollisionConfig> extra_collision;
     };
     MeshConfig mesh;
 };

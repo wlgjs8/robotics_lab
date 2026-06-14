@@ -236,7 +236,11 @@ def _tcp_stand_from_payload(payload, side):
     arm = payload.get(side)
     if not isinstance(arm, dict):
         return None
+    if arm.get("tcp_actual_valid") is False:
+        return None  # don't capture a stale/invalid pose
     pose = arm.get("tcp_stand") or arm.get("tcp_actual_stand")
+    if isinstance(pose, (list, tuple)) and len(pose) == 7:
+        return [float(v) for v in pose]  # flat [x,y,z,qx,qy,qz,qw]
     if not isinstance(pose, dict):
         return None
     pos = pose.get("position", pose)
@@ -379,6 +383,238 @@ def cmd_capture(args):
 
 
 # ---------------------------------------------------------------------------
+# Dual-arm teleop-friendly capture (one process, both arms, live feedback).
+# ---------------------------------------------------------------------------
+
+
+def _pose_delta(p, q):
+    """(trans m, rot deg) between two pose7."""
+    D = T_inv(pose7_to_T(p)) @ pose7_to_T(q)
+    return float(np.linalg.norm(D[:3, 3])), float(math.degrees(rot_angle(D[:3, :3])))
+
+
+def _max_rot_spread(poses):
+    """Max pairwise relative rotation (deg) among pose7 list -> orientation diversity."""
+    if len(poses) < 2:
+        return 0.0
+    Ts = [pose7_to_T(p) for p in poses]
+    best = 0.0
+    for i, j in itertools.combinations(range(len(Ts)), 2):
+        a = math.degrees(rot_angle((T_inv(Ts[i]) @ Ts[j])[:3, :3]))
+        best = max(best, a)
+    return best
+
+
+def _min_delta_to(poses, p):
+    """Smallest (trans, rot) distance from p to any pose in the list."""
+    if not poses:
+        return (1e9, 1e9)
+    ds = [_pose_delta(q, p) for q in poses]
+    return (min(d[0] for d in ds), min(d[1] for d in ds))
+
+
+def _running_solve(pairs, min_rel_angle_deg):
+    """Return (X, res) once solvable, ('err', msg) if not enough info, or None (<4)."""
+    if len(pairs) < 4:
+        return None
+    A = [pose7_to_T(p["A_tcp_stand"]) for p in pairs]
+    B = [pose7_to_T(p["B_tracker_steamvr"]) for p in pairs]
+    try:
+        X, _Y, res = solve_handeye(A, B, min_rel_angle_deg=min_rel_angle_deg)
+        return X, res
+    except Exception as exc:  # not enough rotation spread yet, etc.
+        return ("err", str(exc))
+
+
+def _write_pairs(path, side, pairs):
+    out = {
+        "schema": "robotics_lab.handeye_pairs.v1",
+        "side": side,
+        "source_pose_frame": "steamvr_world",
+        "target_pose_frame": "stand",
+        "pairs": pairs,
+    }
+    with open(path, "w") as f:
+        json.dump(out, f, indent=2)
+
+
+def _window_stable(samples, key, hold_sec, still_trans, still_rot):
+    """True if all `key` poses within the last hold_sec are within thresholds of the latest."""
+    if not samples:
+        return False, None
+    now = samples[-1]["t"]
+    win = [s[key] for s in samples if s.get(key) is not None and now - s["t"] <= hold_sec]
+    if len(win) < 4:
+        return False, None
+    latest = win[-1]
+    for p in win[:-1]:
+        dt, dr = _pose_delta(latest, p)
+        if dt > still_trans or dr > still_rot:
+            return False, latest
+    return True, latest
+
+
+def cmd_capture_dual(args):
+    import select
+    from collections import deque
+
+    sides = [s for s in ("left", "right") if s in args.arms.split(",")]
+    serial = {"left": args.tracker_left, "right": args.tracker_right}
+    out = {"left": args.out_left, "right": args.out_right}
+
+    robot = RobotStateUDP(args.robot_state)
+    tracker = TrackerOpenVR()
+    print(f"[capture-dual] arms={sides}  robot-state={args.robot_state}")
+    print(f"  trackers: left={serial['left']}  right={serial['right']}")
+
+    # --- identify mode: just stream what's visible, to map serials to arms ---
+    if args.identify:
+        print("\n[identify] streaming tracker serials + arm tcp (Ctrl-C to stop)."
+              "\n  Wiggle ONE arm; the serial whose position changes is that arm's tracker.\n")
+        try:
+            while True:
+                tp = tracker.poses()
+                la = robot.tcp_stand("left"); ra = robot.tcp_stand("right")
+                msg = "  trackers: " + ", ".join(
+                    f"{sn}=({p[0]:+.2f},{p[1]:+.2f},{p[2]:+.2f})" for sn, p in tp.items()
+                ) if tp else "  trackers: (none)"
+                print(msg + f"   | L_tcp={'ok' if la else '--'} R_tcp={'ok' if ra else '--'}")
+                time.sleep(0.3)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            robot.close(); tracker.close()
+        return 0
+
+    if any(serial[s] is None for s in sides):
+        print("ERROR: pass --tracker-left/--tracker-right serials (run with --identify "
+              "first to find them).", file=sys.stderr)
+        robot.close(); tracker.close()
+        return 2
+
+    pairs = {s: [] for s in sides}
+    samples = deque(maxlen=200)
+    auto = args.auto
+
+    def snapshot(side):
+        A = robot.tcp_stand(side)
+        tp = tracker.poses()
+        B = tp.get(serial[side])
+        return A, B
+
+    def do_capture(side, force=False):
+        A, B = snapshot(side)
+        if A is None:
+            print(f"  [{side}] !! no robot tcp_stand (server publishing to {args.robot_state}?)")
+            return False
+        if B is None:
+            print(f"  [{side}] !! tracker {serial[side]} not visible (occluded / SteamVR?)")
+            return False
+        dt, dr = _min_delta_to([p["A_tcp_stand"] for p in pairs[side]], A)
+        if not force and (dt < args.min_move_trans and dr < args.min_move_deg):
+            return False  # too close to an existing pose; skip silently in auto
+        pairs[side].append({"A_tcp_stand": A, "B_tracker_steamvr": B, "t": time.time()})
+        _write_pairs(out[side], side, pairs[side])
+        spread = _max_rot_spread([p["A_tcp_stand"] for p in pairs[side]])
+        line = f"  [{side}] #{len(pairs[side])}  orient-spread={spread:5.1f}deg"
+        rs = _running_solve(pairs[side], args.min_rel_angle_deg)
+        if rs and rs[0] != "err":
+            X, res = rs
+            line += (f" | resid {res['trans_rms_m']*1000:5.1f}mm/{res['rot_rms_deg']:.2f}deg")
+        elif rs and rs[0] == "err":
+            line += " | (need more orientation variety to solve)"
+        print(line)
+        _print_crosscheck()
+        return True
+
+    def _print_crosscheck():
+        if not all(len(pairs[s]) >= 4 for s in ("left", "right") if s in sides) or len(sides) < 2:
+            return
+        rl = _running_solve(pairs["left"], args.min_rel_angle_deg)
+        rr = _running_solve(pairs["right"], args.min_rel_angle_deg)
+        if not (rl and rr and rl[0] != "err" and rr[0] != "err"):
+            return
+        Xl, Xr = rl[0], rr[0]
+        dr = math.degrees(rot_angle(Xl[:3, :3].T @ Xr[:3, :3]))
+        dt = float(np.linalg.norm(Xl[:3, 3] - Xr[:3, 3]))
+        flag = "  <-- should be ~0; >2deg means a grasp slipped / FK issue" if dr > 2.0 else "  (good)"
+        print(f"    L/R T_stand_source agreement: rot {dr:5.2f}deg, trans {dt*1000:5.1f}mm{flag}")
+
+    print("\nDrive the arms with SpaceMouse teleop. Vary ORIENTATION a lot (the solver needs")
+    print("rotational diversity), pause to let a pose settle. Commands:")
+    print("  [ENTER] capture all arms now   a) toggle auto-capture   u) undo last   "
+          "s) show solve   q) finish\n")
+    if auto:
+        print("  AUTO-CAPTURE ON: hold an arm still (and moved enough from prior poses) -> auto-snap\n")
+
+    try:
+        while True:
+            now = time.time()
+            s = {"t": now}
+            for side in sides:
+                s[side + "_A"] = robot.tcp_stand(side)
+                tp = tracker.poses()
+                s[side + "_B"] = tp.get(serial[side])
+            samples.append(s)
+
+            if auto:
+                for side in sides:
+                    ok_a, _ = _window_stable(samples, side + "_A", args.hold_sec,
+                                             args.still_trans, args.still_rot)
+                    ok_b, _ = _window_stable(samples, side + "_B", args.hold_sec,
+                                             args.still_trans_track, args.still_rot)
+                    if ok_a and ok_b:
+                        do_capture(side, force=False)
+
+            if select.select([sys.stdin], [], [], args.poll_sec)[0]:
+                line = sys.stdin.readline().strip().lower()
+                if line == "q":
+                    break
+                elif line == "a":
+                    auto = not auto
+                    print(f"  >> auto-capture {'ON' if auto else 'OFF'}")
+                elif line == "u":
+                    for side in sides:
+                        if pairs[side]:
+                            pairs[side].pop()
+                            _write_pairs(out[side], side, pairs[side])
+                    print("  >> undid last capture on all arms")
+                elif line == "s":
+                    for side in sides:
+                        rs = _running_solve(pairs[side], args.min_rel_angle_deg)
+                        if rs is None:
+                            print(f"  [{side}] {len(pairs[side])} pairs (need >=4 to solve)")
+                        elif rs[0] == "err":
+                            print(f"  [{side}] {len(pairs[side])} pairs - {rs[1]}")
+                        else:
+                            X, res = rs
+                            print(f"  [{side}] {res['n_pairs']} pairs  "
+                                  f"T_stand_source={np.round(T_to_pose7(X),4).tolist()}  "
+                                  f"resid {res['trans_rms_m']*1000:.1f}mm/{res['rot_rms_deg']:.2f}deg")
+                    _print_crosscheck()
+                else:  # ENTER -> manual capture all arms (force past the min-move gate)
+                    for side in sides:
+                        do_capture(side, force=True)
+            else:
+                time.sleep(0.0)  # select already waited poll_sec
+    finally:
+        robot.close()
+        tracker.close()
+
+    for side in sides:
+        _write_pairs(out[side], side, pairs[side])
+        print(f"[capture-dual] wrote {len(pairs[side])} pairs -> {out[side]}")
+    print("\nNext (tomorrow): solve + write the retarget yaml, e.g.")
+    pl = out.get("left"); pr = out.get("right")
+    print(f"  python3 scripts/handeye_umi_retarget.py solve "
+          f"{'--pairs-left ' + pl if 'left' in sides else ''} "
+          f"{'--pairs-right ' + pr if 'right' in sides else ''} "
+          f"--status measured --measured-date <YYYY-MM-DD> "
+          f"--out calibration/umi_retarget.yaml")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Solve + write umi_retarget.yaml
 # ---------------------------------------------------------------------------
 
@@ -510,6 +746,39 @@ def main():
                    help="Vive tracker serial (required if >1 tracker visible)")
     c.add_argument("--out", required=True)
     c.set_defaults(func=cmd_capture)
+
+    cd = sub.add_parser(
+        "capture-dual",
+        help="teleop-friendly capture: both arms, one process, auto/manual + live residual")
+    cd.add_argument("--robot-state", default="udp://127.0.0.1:50376",
+                    help="UDP bind for servo_state.v1. During SpaceMouse teleop, policy_runner "
+                         "holds 50120 -- bind a free fanout endpoint instead (stack_real.yaml "
+                         "publishes 50376). Confirm it's in network.state_pub_endpoints.")
+    cd.add_argument("--tracker-left", default=None, help="left Sense Vive tracker serial")
+    cd.add_argument("--tracker-right", default=None, help="right Sense Vive tracker serial")
+    cd.add_argument("--arms", default="left,right", help="comma list: left,right | left | right")
+    cd.add_argument("--out-left", default="calibration/handeye_pairs_left.json")
+    cd.add_argument("--out-right", default="calibration/handeye_pairs_right.json")
+    cd.add_argument("--identify", action="store_true",
+                    help="stream visible tracker serials + arm tcp to map serials->arms, then exit")
+    cd.add_argument("--auto", action="store_true",
+                    help="auto-capture when an arm holds still and is far enough from prior poses")
+    cd.add_argument("--hold-sec", type=float, default=0.4,
+                    help="stationarity window for auto-capture")
+    cd.add_argument("--still-trans", type=float, default=0.002,
+                    help="max robot tcp drift over the window to count as still (m)")
+    cd.add_argument("--still-trans-track", type=float, default=0.004,
+                    help="max tracker drift over the window to count as still (m)")
+    cd.add_argument("--still-rot", type=float, default=0.5,
+                    help="max rotation drift over the window to count as still (deg)")
+    cd.add_argument("--min-move-deg", type=float, default=8.0,
+                    help="auto-capture only if >= this rotation from every prior pose (deg)")
+    cd.add_argument("--min-move-trans", type=float, default=0.03,
+                    help="...or >= this translation from every prior pose (m)")
+    cd.add_argument("--min-rel-angle-deg", type=float, default=2.0,
+                    help="min relative rotation for a pose pair to inform the running solve")
+    cd.add_argument("--poll-sec", type=float, default=0.05)
+    cd.set_defaults(func=cmd_capture_dual)
 
     s = sub.add_parser("solve", help="solve T_stand_source and write umi_retarget.yaml")
     s.add_argument("--pairs-left", default=None)

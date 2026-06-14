@@ -1805,6 +1805,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "right_prefix",
                     "stand_frame",
                     "stand_ignore_arm_substrings",
+                    "left_arm_root_frame",
+                    "right_arm_root_frame",
+                    "check_intra_arm",
+                    "intra_arm_min_chain_separation",
+                    "swept_samples",
                     "d_hard_m",
                     "d_slow_m",
                     "a_brake_m_s2",
@@ -1813,6 +1818,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "max_staleness_s",
                     "monitor_core",
                     "max_near_pairs",
+                    "extra_collision",
                 }, "safety.self_collision.mesh");
                 auto& mc = cfg.safety.self_collision.mesh;
                 if (has(m, "enable")) mc.enable = asBool(m["enable"], "safety.self_collision.mesh.enable");
@@ -1849,6 +1855,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                             asString(subs[i], "safety.self_collision.mesh.stand_ignore_arm_substrings"));
                     }
                 }
+                if (has(m, "left_arm_root_frame")) mc.left_arm_root_frame = asString(m["left_arm_root_frame"], "safety.self_collision.mesh.left_arm_root_frame");
+                if (has(m, "right_arm_root_frame")) mc.right_arm_root_frame = asString(m["right_arm_root_frame"], "safety.self_collision.mesh.right_arm_root_frame");
+                if (has(m, "check_intra_arm")) mc.check_intra_arm = asBool(m["check_intra_arm"], "safety.self_collision.mesh.check_intra_arm");
+                if (has(m, "intra_arm_min_chain_separation")) mc.intra_arm_min_chain_separation = asInt(m["intra_arm_min_chain_separation"], "safety.self_collision.mesh.intra_arm_min_chain_separation");
+                if (has(m, "swept_samples")) mc.swept_samples = asInt(m["swept_samples"], "safety.self_collision.mesh.swept_samples");
                 if (has(m, "d_hard_m")) mc.d_hard_m = asDouble(m["d_hard_m"], "safety.self_collision.mesh.d_hard_m");
                 if (has(m, "d_slow_m")) mc.d_slow_m = asDouble(m["d_slow_m"], "safety.self_collision.mesh.d_slow_m");
                 if (has(m, "a_brake_m_s2")) mc.a_brake_m_s2 = asDouble(m["a_brake_m_s2"], "safety.self_collision.mesh.a_brake_m_s2");
@@ -1857,6 +1868,38 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 if (has(m, "max_staleness_s")) mc.max_staleness_s = asDouble(m["max_staleness_s"], "safety.self_collision.mesh.max_staleness_s");
                 if (has(m, "monitor_core")) mc.monitor_core = asInt(m["monitor_core"], "safety.self_collision.mesh.monitor_core");
                 if (has(m, "max_near_pairs")) mc.max_near_pairs = asInt(m["max_near_pairs"], "safety.self_collision.mesh.max_near_pairs");
+                if (has(m, "extra_collision")) {
+                    const YAML::Node arr = m["extra_collision"];
+                    if (!arr.IsSequence()) {
+                        fail("safety.self_collision.mesh.extra_collision must be a sequence", arr);
+                    }
+                    mc.extra_collision.clear();
+                    for (std::size_t i = 0; i < arr.size(); ++i) {
+                        const YAML::Node e = arr[i];
+                        validateAllowedKeys(e, {
+                            "name", "shape", "parent_frame", "size_m",
+                            "radius_m", "length_m", "xyz_m", "rpy",
+                        }, "safety.self_collision.mesh.extra_collision");
+                        ExtraCollisionConfig ec;
+                        if (!has(e, "name")) fail("extra_collision entry requires name", e);
+                        if (!has(e, "parent_frame")) fail("extra_collision entry requires parent_frame", e);
+                        ec.name = asString(e["name"], "extra_collision.name");
+                        ec.parent_frame = asString(e["parent_frame"], "extra_collision.parent_frame");
+                        if (has(e, "shape")) ec.shape = asString(e["shape"], "extra_collision.shape");
+                        const auto vec3 = [&](const YAML::Node& n, const char* key, std::array<double, 3>* out) {
+                            if (!n.IsSequence() || n.size() != 3)
+                                fail(std::string("extra_collision.") + key + " must be 3 values (" + ec.name + ")", n);
+                            for (std::size_t a = 0; a < 3; ++a)
+                                (*out)[a] = asDouble(n[a], std::string("extra_collision.") + key);
+                        };
+                        if (has(e, "size_m")) vec3(e["size_m"], "size_m", &ec.size_m);
+                        if (has(e, "xyz_m")) vec3(e["xyz_m"], "xyz_m", &ec.xyz_m);
+                        if (has(e, "rpy")) vec3(e["rpy"], "rpy", &ec.rpy);
+                        if (has(e, "radius_m")) ec.radius_m = asDouble(e["radius_m"], "extra_collision.radius_m");
+                        if (has(e, "length_m")) ec.length_m = asDouble(e["length_m"], "extra_collision.length_m");
+                        mc.extra_collision.push_back(ec);
+                    }
+                }
             }
         }
         if (has(sec, "floor_constraint")) {

@@ -3,11 +3,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <utility>
 
 #include <pinocchio/parsers/urdf.hpp>
+#include <pinocchio/math/rpy.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
 #include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/collision/distance.hpp>
@@ -15,6 +18,7 @@
 
 #include <coal/mesh_loader/loader.h>
 #include <coal/BVH/BVH_model.h>
+#include <coal/shape/geometric_shapes.h>
 
 #include <Eigen/Geometry>
 
@@ -79,6 +83,15 @@ struct CollisionMonitor::Impl {
     Eigen::VectorXd q;
     std::array<int, kDof> left_qidx{};
     std::array<int, kDof> right_qidx{};
+    // arm classification (frame ancestry) + chain depth (joint supports)
+    pinocchio::FrameIndex left_root_fid = 0;
+    pinocchio::FrameIndex right_root_fid = 0;
+    bool have_arm_roots = false;
+    std::array<pinocchio::JointIndex, kDof> left_jids{};
+    std::array<pinocchio::JointIndex, kDof> right_jids{};
+    // swept-volume: previous evaluated configuration
+    Eigen::VectorXd prev_eval_q;
+    bool have_prev_eval = false;
 
     // submitted targets (guarded; tiny critical section)
     mutable std::mutex in_mtx;
@@ -113,9 +126,62 @@ struct CollisionMonitor::Impl {
         data = pinocchio::Data(model);
         q = pinocchio::neutral(model);
         for (int i = 0; i < kDof; ++i) {
-            left_qidx[i] = model.joints[model.getJointId(cfg.left_joints[i])].idx_q();
-            right_qidx[i] = model.joints[model.getJointId(cfg.right_joints[i])].idx_q();
+            const auto lj = model.getJointId(cfg.left_joints[i]);
+            const auto rj = model.getJointId(cfg.right_joints[i]);
+            left_jids[i] = lj;
+            right_jids[i] = rj;
+            left_qidx[i] = model.joints[lj].idx_q();
+            right_qidx[i] = model.joints[rj].idx_q();
         }
+        // Arm root frames for ancestry-based classification (default "<prefix>world").
+        const std::string lr = cfg.left_arm_root_frame.empty() ? (cfg.left_prefix + "world")
+                                                               : cfg.left_arm_root_frame;
+        const std::string rr = cfg.right_arm_root_frame.empty() ? (cfg.right_prefix + "world")
+                                                                : cfg.right_arm_root_frame;
+        if (model.existFrame(lr) && model.existFrame(rr)) {
+            left_root_fid = model.getFrameId(lr);
+            right_root_fid = model.getFrameId(rr);
+            have_arm_roots = true;
+        }
+    }
+
+    // True if `start` frame has `root` on its parent-frame chain (kinematic ancestry).
+    bool frameDescendsFrom(pinocchio::FrameIndex start, pinocchio::FrameIndex root) const {
+        pinocchio::FrameIndex f = start;
+        for (int guard = 0; guard < 1024; ++guard) {
+            if (f == root) return true;
+            const pinocchio::FrameIndex p = model.frames[f].parentFrame;
+            if (p == f) break;  // reached the universe/root frame
+            f = p;
+        }
+        return false;
+    }
+
+    enum class Side { Left, Right, Stand };
+    Side classify(std::size_t geom_idx) const {
+        const auto& go = geom.geometryObjects[geom_idx];
+        if (have_arm_roots) {
+            if (frameDescendsFrom(go.parentFrame, left_root_fid)) return Side::Left;
+            if (frameDescendsFrom(go.parentFrame, right_root_fid)) return Side::Right;
+            return Side::Stand;
+        }
+        // Fallback: name substring (only if the arm root frames were not found).
+        if (go.name.find("left") != std::string::npos) return Side::Left;
+        if (go.name.find("right") != std::string::npos) return Side::Right;
+        return Side::Stand;
+    }
+
+    // Chain depth of an arm geometry: number of that arm's actuated joints on the
+    // path universe->parentJoint (link0->0, link1->1, ..., link6/gripper->6).
+    int chainDepth(std::size_t geom_idx, Side side) const {
+        const pinocchio::JointIndex pj = geom.geometryObjects[geom_idx].parentJoint;
+        const auto& sup = model.supports[pj];  // joints from universe to pj
+        const auto& jids = (side == Side::Left) ? left_jids : right_jids;
+        int depth = 0;
+        for (pinocchio::JointIndex j : sup)
+            for (int k = 0; k < kDof; ++k)
+                if (j == jids[k]) { depth = std::max(depth, k + 1); }
+        return depth;
     }
 
     void buildGeometry() {
@@ -146,35 +212,87 @@ struct CollisionMonitor::Impl {
                     prefix + "pika_gripper", fr.parentJoint, fr.parentFrame, place, hull));
             }
         }
+        // Extra non-URDF collision primitives (wrist cameras, cables, table). An
+        // arm-frame parent moves with the arm (classified left/right by ancestry);
+        // a stand/world parent is a static obstacle paired against both arms.
+        for (const auto& e : cfg.extra_collision) {
+            if (!model.existFrame(e.parent_frame)) {
+                throw std::runtime_error("collision_monitor: extra_collision '" + e.name +
+                                         "' parent_frame not found: " + e.parent_frame);
+            }
+            std::shared_ptr<coal::CollisionGeometry> shape = makeExtraShape(e);
+            const auto fid = model.getFrameId(e.parent_frame);
+            const auto& fr = model.frames[fid];
+            const Eigen::Matrix3d rot = pinocchio::rpy::rpyToMatrix(e.rpy[0], e.rpy[1], e.rpy[2]);
+            const pinocchio::SE3 local(rot, Eigen::Vector3d(e.xyz_m[0], e.xyz_m[1], e.xyz_m[2]));
+            geom.addGeometryObject(pinocchio::GeometryObject(
+                e.name, fr.parentJoint, fid, fr.placement * local, shape));
+        }
         curatePairs();
     }
 
-    enum class Side { Left, Right, Stand };
-    Side classify(const std::string& nm) const {
-        if (nm.find("left") != std::string::npos) return Side::Left;
-        if (nm.find("right") != std::string::npos) return Side::Right;
-        return Side::Stand;
+    static std::shared_ptr<coal::CollisionGeometry> makeExtraShape(const ExtraCollisionShape& e) {
+        if (e.shape == "box")
+            return std::make_shared<coal::Box>(e.size_m[0], e.size_m[1], e.size_m[2]);
+        if (e.shape == "sphere")
+            return std::make_shared<coal::Sphere>(e.radius_m);
+        if (e.shape == "capsule")
+            return std::make_shared<coal::Capsule>(e.radius_m, e.length_m);
+        if (e.shape == "cylinder")
+            return std::make_shared<coal::Cylinder>(e.radius_m, e.length_m);
+        throw std::runtime_error("collision_monitor: unknown extra_collision shape '" + e.shape +
+                                 "' for '" + e.name + "'");
     }
 
     void curatePairs() {
         std::vector<std::size_t> li, ri, si;
         for (std::size_t i = 0; i < geom.geometryObjects.size(); ++i) {
-            switch (classify(geom.geometryObjects[i].name)) {
+            switch (classify(i)) {
                 case Side::Left: li.push_back(i); break;
                 case Side::Right: ri.push_back(i); break;
                 case Side::Stand: si.push_back(i); break;
             }
         }
         geom.removeAllCollisionPairs();
+        std::size_t n_lr = 0, n_arm_stand = 0, n_intra = 0;
+        // left <-> right (whole arms)
         for (auto a : li)
-            for (auto b : ri) geom.addCollisionPair(pinocchio::CollisionPair(a, b));
+            for (auto b : ri) { geom.addCollisionPair(pinocchio::CollisionPair(a, b)); ++n_lr; }
+        // arm <-> stand (skip the bolted-on mount neighbors)
         for (const auto& arm : {li, ri}) {
             for (auto a : arm) {
                 if (nameContainsAny(geom.geometryObjects[a].name, cfg.stand_ignore_arm_substrings))
-                    continue;  // mount neighbor: never paired vs stand
-                for (auto b : si) geom.addCollisionPair(pinocchio::CollisionPair(a, b));
+                    continue;
+                for (auto b : si) { geom.addCollisionPair(pinocchio::CollisionPair(a, b)); ++n_arm_stand; }
             }
         }
+        // intra-arm (arm folding onto itself): only NON-adjacent links of the same arm
+        if (cfg.check_intra_arm) {
+            const int sep = cfg.intra_arm_min_chain_separation;
+            auto intra = [&](const std::vector<std::size_t>& g, Side sd) {
+                for (std::size_t x = 0; x < g.size(); ++x)
+                    for (std::size_t y = x + 1; y < g.size(); ++y) {
+                        if (std::abs(chainDepth(g[x], sd) - chainDepth(g[y], sd)) < sep) continue;
+                        geom.addCollisionPair(pinocchio::CollisionPair(g[x], g[y]));
+                        ++n_intra;
+                    }
+            };
+            intra(li, Side::Left);
+            intra(ri, Side::Right);
+        }
+        // STARTUP LOG: what the guard actually checks (operator confirmation).
+        std::cerr << "[collision_monitor] geoms=" << geom.geometryObjects.size()
+                  << " (left=" << li.size() << " right=" << ri.size() << " stand=" << si.size()
+                  << (have_arm_roots ? ", classify=frame-ancestry" : ", classify=name-substring(FALLBACK)")
+                  << ") pairs=" << geom.collisionPairs.size()
+                  << " [left-right=" << n_lr << " arm-stand=" << n_arm_stand
+                  << " intra-arm=" << n_intra << "]"
+                  << " stand_ignore=[";
+        for (std::size_t i = 0; i < cfg.stand_ignore_arm_substrings.size(); ++i)
+            std::cerr << (i ? "," : "") << cfg.stand_ignore_arm_substrings[i];
+        std::cerr << "] swept_samples=" << cfg.swept_samples
+                  << (cfg.pika_gripper_mesh.empty() ? " gripper=NONE" : " gripper=attached")
+                  << std::endl;
     }
 
     void setQ(const JointArray& l, const JointArray& r) {
@@ -236,8 +354,34 @@ struct CollisionMonitor::Impl {
     }
 
     CollisionVerdict evalLocked(const JointArray& l, const JointArray& r) {
-        setQ(l, r);
-        pinocchio::computeDistances(model, data, geom, gdata, q);
+        setQ(l, r);  // writes the target config into q
+        const int N = std::max(1, cfg.swept_samples);
+        if (N <= 1 || !have_prev_eval) {
+            pinocchio::computeDistances(model, data, geom, gdata, q);
+        } else {
+            // Swept-volume: sample prev_eval_q -> q (joint-space linear; the model
+            // is revolute-only so this is exact), keep the worst (min) sample so a
+            // fast step cannot tunnel a thin obstacle between evaluations.
+            const std::size_t np = geom.collisionPairs.size();
+            double worst = std::numeric_limits<double>::infinity();
+            double worst_alpha = 1.0;
+            Eigen::VectorXd qi(q.size());
+            for (int s = 1; s <= N; ++s) {
+                const double a = static_cast<double>(s) / static_cast<double>(N);
+                qi = prev_eval_q + a * (q - prev_eval_q);
+                pinocchio::computeDistances(model, data, geom, gdata, qi);
+                double m = std::numeric_limits<double>::infinity();
+                for (std::size_t k = 0; k < np; ++k)
+                    m = std::min(m, gdata.distanceResults[k].min_distance);
+                if (m < worst) { worst = m; worst_alpha = a; }
+            }
+            if (worst_alpha != 1.0) {  // leave gdata at the worst sample for reduce()
+                qi = prev_eval_q + worst_alpha * (q - prev_eval_q);
+                pinocchio::computeDistances(model, data, geom, gdata, qi);
+            }
+        }
+        prev_eval_q = q;
+        have_prev_eval = true;
         return reduce(nowMonotonicS());
     }
 
