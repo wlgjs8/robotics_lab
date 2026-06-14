@@ -25,7 +25,11 @@ import os
 import h5py
 import numpy as np
 
-DEFAULT_OFFSET = (0.172, 0.0, -0.076)  # Pika GRIPPER_OFFSET, tracker-frame (m)
+# CORRECTION (2026-06-11): (0.172, 0, -0.076) is defined in the R_corr-rotated gripper
+# frame, not the raw tracker frame (pika_sdk: T_tip = T_raw·R_corr·Trans(t), R_corr =
+# Rx(-20°)·[Ry(-90°)·Rx(-90°)]). The raw tracker-frame lever-arm is R_corr·t =
+# (0, -0.0126, +0.1876) m — use that when analyzing raw tracker poses.
+DEFAULT_OFFSET = (0.172, 0.0, -0.076)  # Pika SDK translation (rotation-corrected frame, m)
 
 
 def quat_to_R(q):

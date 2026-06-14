@@ -9,6 +9,7 @@ namespace {
 
 using rb_servo::math::Vector3;
 using rb_servo::math::capsuleCapsuleDistance;
+using rb_servo::math::capsuleCapsuleDistanceWithPoints;
 using rb_servo::math::closestPointSegmentSegmentSquared;
 using rb_servo::math::segmentSegmentDistance;
 
@@ -84,6 +85,29 @@ bool testCapsuleClearanceAndPenetration() {
     return true;
 }
 
+bool testCapsuleWitnessPoints() {
+    const Vector3 a0(-1, 0, 0), a1(1, 0, 0);
+    const Vector3 b0(-1, 0, 2), b1(1, 0, 2);  // parallel, 2.0 apart
+    Vector3 p_a, p_b;
+    const double clearance =
+        capsuleCapsuleDistanceWithPoints(a0, a1, 0.3, b0, b1, 0.5, &p_a, &p_b);
+    RB_CHECK(approx(clearance, 1.2));
+    // Witness points sit on the capsule CORE segments (bone axis), i.e. on the
+    // physical members: p_a.z == 0, p_b.z == 2, and their gap equals the
+    // clearance plus both radii.
+    RB_CHECK(approx(p_a.z(), 0.0));
+    RB_CHECK(approx(p_b.z(), 2.0));
+    RB_CHECK(approx((p_b - p_a).norm(), clearance + 0.3 + 0.5));
+    // Crossing core segments: witness points coincide at the intersection and
+    // the clearance is the (negative) radius sum.
+    const Vector3 c0(0, -1, 0), c1(0, 1, 0);
+    const double pen =
+        capsuleCapsuleDistanceWithPoints(a0, a1, 0.2, c0, c1, 0.4, &p_a, &p_b);
+    RB_CHECK(approx(pen, -0.6));
+    RB_CHECK(approx((p_b - p_a).norm(), 0.0));
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -93,6 +117,7 @@ int main() {
     if (!testEndpointClamping()) return 1;
     if (!testDegeneratePoints()) return 1;
     if (!testCapsuleClearanceAndPenetration()) return 1;
+    if (!testCapsuleWitnessPoints()) return 1;
     std::cout << "capsule_distance tests passed\n";
     return 0;
 }

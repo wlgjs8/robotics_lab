@@ -2,13 +2,20 @@
 
 한국어 기본 README입니다. 영어 원문은 [README.en.md](README.en.md)에 보존되어 있습니다.
 
+> **참고:** 루트의 `GOAL.md`는 프로젝트 목표 문서가 아니라 과거 단일 task 프롬프트
+> (`ACKON500-GENE-GOAL-01`, rbpodo controller-sim 500 Hz circle-tracking 튜닝)의
+> 시점 스냅샷입니다. 현재 방향은 이 README / `AGENTS.md` / `docs/architecture.md`를
+> 따르세요. 자세한 드리프트 목록은 `docs/code_architecture_map.md`에 있습니다.
+
 `robotics_lab`는 dual-arm RB3-730 시스템을 통합하기 위한 작업 공간입니다. 서보 제어, 실제 토폴로지와 같은 형태의 로컬 시뮬레이터, 카메라 캡처, `policy_runner`, 운영자 GUI를 함께 다룹니다.
 
 ## 현재 단계
 
-현재 프로젝트 단계는 **시뮬레이터 우선 Cartesian acceptance hardening**입니다.
+현재 프로젝트 단계는 **rbpodo pgmode-real 물리 로봇 브링업**입니다.
+시뮬레이터 우선 Cartesian acceptance hardening은 대부분 마무리됐고, 이제
+실제 RB3-730E 하드웨어에서 검증을 진행합니다.
 
-다음 마일스톤은 시뮬레이터 측 동작을 반복 검증하는 것입니다.
+시뮬레이터 측에서 반복 검증되어 안정화된 항목:
 
 - 팔별 독립 시뮬레이터 토폴로지
 - 구조화된 backend result 및 fault telemetry
@@ -21,7 +28,9 @@
 - command-source lease/arbitration
 - 카메라 readiness contract
 
-실제 로봇 구동은 현재 기본 마일스톤이 아닙니다.
+실제 물리 로봇에서 추가로 검증된 항목은 아래 "현재 성숙도"를 참고합니다. 실제
+모션은 여전히 운영자 감독 + E-stop 휴대 + 명시적 게이트가 필요한 fail-closed
+동작이며, simulator acceptance 통과가 곧 하드웨어 구동 허가는 아닙니다.
 
 ## 현재 성숙도
 
@@ -39,14 +48,38 @@ mock/simulation에서 지원되는 항목:
 - simulator-only Cartesian acceptance script
 - mandatory Eigen3/Pinocchio C++ Cartesian math path for `rb_servo_server`
 
-아직 production-ready가 아닌 항목:
+pgmode-real(실제 RB3-730E 하드웨어)에서 구동/검증된 항목:
 
-- 실제 RB3-730 motion
-- 실제 Cartesian/TCP motion
-- force control
-- gripper control
-- 실측 camera/robot calibration
-- 실제 camera + policy + robot closed-loop behavior
+- read-only 물리 diagnostics parity (컨트롤러 `.200`/`.201`, `tcp_actual_stand` 기준)
+- 양팔 실제 Cartesian circle 추종 — 저속, TUNED-1 프로파일, tracking 중앙값 ~1.42°
+  (`docs/runbooks/rbpodo_real_physical_circle.md`)
+- UMI 양팔 Cartesian 텔레옵(relative-init) `TcpPoseTarget` 실로봇 구동, UMI `data_tcp`
+  리플레이 실차 검증(ee_local + r_align)
+- **pi0.5(openpi) `flow-infer` `real_policy` 풀 클로즈드루프 rollout 실로봇 구동** —
+  `TcpTwistLocal` 스트리밍 + 그리퍼 명령 전송. 런타임/엔지니어링 검증 완료: 모션
+  부드러움 + in-distribution(async chunking으로 500 Hz 루프 진동 제거,
+  absolute-proprio 프레임갭은 reset-relative 재학습으로 해소). **task 성공률은 아직
+  모델 한계**(아래 참고)
+- 실제 그리퍼 구동 — Pika Gripper Backend, `RB_ALLOW_REAL_GRIPPER` +
+  `measured_gripper_available` 게이트
+- 서버측 자가충돌 가드 — async URDF-mesh `CollisionMonitor`(33 geom / 337 pair),
+  real에서 enforce(velocity barrier), stale/hard-breach는 fail-closed
+- policy측 real-Cartesian 안전 게이트 완화(PR #13) → `rb_servo_server`가 단일
+  real-motion 안전 계층
+- 컨트롤러 `-2001`(suspect diagnostics) 실모드 수용(PR #12); EMS/SOS/soft-estop/
+  `collision_occur`/unknown-mode/init-error는 계속 latch
+
+아직 미완(production-ready 아님) 항목:
+
+- **정책 task 성공률** — rollout 모션은 부드럽지만 부정확(예: 좌완이 grasp 대신
+  충돌). 런타임이 아니라 **모델 품질 / 데이터 커버리지 / appearance-domain gap**
+  문제이며 init-pose 분포 매칭이 진행 중(`umi_init_from_grasp.py`)
+- force control (`provider: null`, `enable: false` 유지)
+- 고속 물리 circle 단계 (15 cm / 16 s 이상, transition ladder P7–P9)
+- 실측 hand-eye / 카메라 calibration은 일반 geometry-의존 정책엔 여전히 미완이지만,
+  **현재 배포된 pika Sense≡Gripper + ee_local + 이미지조건 정책에는 불필요**
+  (reset-relative가 steamvr→stand R을 상쇄, tool offset은 알려진 상수) — 즉 현 정책의
+  블로커가 아님
 
 ## Source Of Truth
 
@@ -126,6 +159,24 @@ RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
 RB_ALLOW_REAL_CARTESIAN=1
 ```
 
+이 게이트들을 통해 양팔 실제 Cartesian circle이 운영자 감독 하에 실제로 구동된 바
+있습니다(`docs/runbooks/rbpodo_real_physical_circle.md`). 게이트는 여전히 필요
+조건이며, config(`cartesian_control.allow_in_real: true`)와 운영자 감독을 함께
+요구합니다.
+
+컨트롤러 `-2001`(suspect diagnostics, `op_stat_self_collision`/`robot_time`
+필드 디코딩 garbage)을 실모드에서 수용하려면 추가 게이트가 필요합니다.
+
+```bash
+RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1
+```
+
+EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error는 이 게이트와
+무관하게 계속 latch합니다. policy측 `SafetyGate`의 real-Cartesian 차단은
+PR #13으로 완화되어, 실제 모션에서는 `rb_servo_server`가 단일 안전 계층입니다
+(safety filter, tracking-error latch, URDF-캡슐 자가충돌 가드, lease, deadman).
+controller-simulation 안전 경로는 변경되지 않았습니다.
+
 Rainbow controller box를 `pgmode` simulation으로 둔 `rbpodo`
 controller-simulation circle benchmark는 hardware-free `rb_simulator`와
 future physical real robot benchmark 사이의 별도 evidence category입니다.
@@ -189,7 +240,7 @@ force_control:
 
 ## Motion Primitive 요약
 
-- `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target입니다. Cartesian path는 보장하지 않습니다.
+- `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target입니다. Cartesian path는 보장하지 않습니다. 실제 모드는 게이트 + `cartesian_control.allow_in_real: true`로 열리며 양팔 물리 circle에서 검증됐습니다.
 - `TcpLinearMove`: simulator-only MoveL-like Cartesian path primitive입니다.
 - `TcpTwistLocal` / `TcpTwistStand`: 기본은 simulator-only streaming
   Cartesian velocity primitive입니다. 예외적으로 rbpodo controller
@@ -357,8 +408,10 @@ implicitly routed by the old `mode: real` flag. Supported values are
 `run_mode=real`, `operation_mode=simulation`, controller-simulation Cartesian
 gate evidence, and `physical_motion_expected=false`. `real_readonly` is the
 current `real_supervised` observation lane and never sends motion commands.
-`real_policy` remains blocked unless real motion, measured or accepted retarget,
-collision, gripper, and geometry gates are present.
+`real_policy` requires real motion, measured or accepted retarget, collision,
+gripper, and geometry gates to all be present — a hard gate, but a satisfiable one:
+those gates were met via accepted/validated config and a full `real_policy` rollout
+has run on the physical robot.
 
 For the GENE 26.5 / ACKON500 policy-transition lane, keep `hdf5-audit`,
 `flow-infer`, `real_supervised`/`real_readonly`, and pgmode transition outputs

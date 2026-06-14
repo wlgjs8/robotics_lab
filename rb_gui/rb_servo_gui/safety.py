@@ -2,11 +2,56 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
+import re
+from pathlib import Path
 from typing import Literal
 
 from .command_client import CommandClient
 from .models import StateSnapshot
 from .state_receiver import StateStore
+
+
+_FLOOR_Z_LINE_RE = re.compile(r"^(\s*z_min_m\s*:\s*)([0-9.eE+-]+)(.*)$")
+
+
+def persist_floor_z_to_config(config_path: str | Path, floor_z_m: float) -> tuple[bool, str]:
+    """Rewrite floor_constraint.z_min_m in the server config yaml (text-level,
+    comments preserved) so a viser "Send floor z" survives a stack restart.
+
+    Only the FIRST z_min_m line inside the floor_constraint block is touched.
+    Returns (ok, short message for the GUI status field)."""
+    path = Path(config_path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError as exc:
+        return False, f"yaml unchanged: {type(exc).__name__}: {exc}"
+
+    in_floor_block = False
+    block_indent = -1
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if stripped.startswith("floor_constraint:"):
+            in_floor_block = True
+            block_indent = indent
+            continue
+        if not in_floor_block:
+            continue
+        # Leaving the block: a non-empty, non-comment line at or above the
+        # block's own indentation level.
+        if stripped and not stripped.startswith("#") and indent <= block_indent:
+            break
+        match = _FLOOR_Z_LINE_RE.match(line.rstrip("\n"))
+        if match:
+            newline = "\n" if line.endswith("\n") else ""
+            lines[index] = f"{match.group(1)}{floor_z_m:.3f}{match.group(3)}{newline}"
+            try:
+                path.write_text("".join(lines), encoding="utf-8")
+            except OSError as exc:
+                return False, f"yaml unchanged: {type(exc).__name__}: {exc}"
+            return True, f"saved z_min_m={floor_z_m:.3f} to {path.name}"
+    return False, f"yaml unchanged: floor_constraint.z_min_m not found in {path.name}"
 
 Mode = Literal["mock", "simulation", "real"]
 Backend = Literal["mock", "simulator", "rbpodo", "unknown"]
@@ -69,7 +114,20 @@ class Readiness:
 
 class OperatorSafety:
     lifecycle_modes = {"ArmMotion", "DisarmMotion", "Hold", "EmergencyStop", "ResetFault"}
-    motion_modes = {"JointTarget", "JointVelocity", "TcpPoseTarget", "TcpDeltaStand", "TcpDeltaLocal", "TcpLinearMove"}
+    motion_modes = {
+        "JointTarget",
+        "JointVelocity",
+        "TcpPoseTarget",
+        "TcpDeltaStand",
+        "TcpDeltaLocal",
+        "TcpLinearMove",
+        "TcpTwistStand",
+        "TcpTwistLocal",
+        "TcpCircleMove",
+    }
+    # Actions that are always allowed (no motion gate): emergency/stop + fault reset.
+    _non_motion_actions = {"EmergencyStop", "Hold", "ResetFault"}
+    _latched_motion_states = {"FaultLatched", "EmergencyLatched"}
 
     def __init__(
         self,
@@ -79,10 +137,7 @@ class OperatorSafety:
         desired_mode: Mode | str = "mock",
         observed_server_mode: Mode | str = "mock",
         observed_backend: Backend | str | None = None,
-        sim_readiness: Readiness | None = None,
         ops_available: bool = False,
-        enable_tcp_pose_commands: bool = False,
-        enable_controller_sim_cartesian: bool = False,
         max_jog_step_deg: float = 2.0,
         max_tcp_linear_step_m: float = 0.005,
         max_tcp_angular_step_rad: float = 0.02,
@@ -102,13 +157,7 @@ class OperatorSafety:
         self.observed_server_mode = observed.mode
         self.observed_backend = observed.backend
         self.config_warnings = desired.warnings + observed.warnings
-        self.sim_readiness = sim_readiness or Readiness(no_go_reason="simulator/rbpodo readiness not proven")
         self.ops_available = ops_available
-        self.enable_tcp_pose_commands = bool(enable_tcp_pose_commands)
-        # pgmode simulation opt-in: allow TCP/Cartesian commands against an rbpodo
-        # controller-simulation backend (operation_mode=simulation). Real mode stays
-        # status-only regardless of this flag.
-        self.enable_controller_sim_cartesian = bool(enable_controller_sim_cartesian)
         self.max_jog_step_deg = float(max_jog_step_deg)
         self.max_tcp_linear_step_m = float(max_tcp_linear_step_m)
         self.max_tcp_angular_step_rad = float(max_tcp_angular_step_rad)
@@ -148,54 +197,44 @@ class OperatorSafety:
         return parsed
 
     def readiness(self) -> Readiness:
+        # Derived purely from the live server state stream: the server is the
+        # sole motion authority, so the GUI mirrors what it reports instead of
+        # consulting launch-time env flags. cartesian_available reflects the same
+        # state-derived TCP gate the buttons use.
         latest = self.latest_valid()
         if latest is None:
             return Readiness(configured=True, no_go_reason="state stream missing or stale")
         connected = latest.left.connection_state == "Connected" and latest.right.connection_state == "Connected"
         joint_valid = latest.left.has_valid_joint_state and latest.right.has_valid_joint_state
         backend_fault = bool(latest.left.error_code or latest.right.error_code or latest.safety_verdict in {"Fault", "BackendFault", "RobotFault"})
-        server_fault = latest.fault_latched or latest.motion_state in {"FaultLatched", "EmergencyLatched"}
-        fault = server_fault or backend_fault
-        if self.observed_server_mode == "simulation":
-            if server_fault:
-                return Readiness(configured=True, running=True, connected=connected, ready=False, fault=True, no_go_reason="server fault latched")
-            if backend_fault:
-                return Readiness(configured=True, running=True, connected=connected, ready=False, fault=True, no_go_reason="robot/backend fault")
-            if not joint_valid:
-                return Readiness(configured=True, running=True, connected=connected, ready=False, fault=False, no_go_reason="joint state invalid")
-            return Readiness(
-                configured=self.sim_readiness.configured,
-                running=self.sim_readiness.running,
-                connected=connected and self.sim_readiness.connected,
-                ready=connected and self.sim_readiness.ready,
-                fault=False,
-                no_go_reason="" if connected and self.sim_readiness.ready else (self.sim_readiness.no_go_reason or "simulation readiness tests have not passed"),
-            )
-        if self.observed_server_mode == "real":
-            return Readiness(configured=True, running=True, connected=connected, ready=False, fault=fault, no_go_reason="real mode is connect/status only")
+        server_fault = latest.fault_latched or latest.motion_state in self._latched_motion_states
+        cartesian_reason = self.tcp_command_disabled_reason()
+        cartesian_kwargs = {
+            "cartesian_available": cartesian_reason is None,
+            "cartesian_no_go_reason": cartesian_reason or "",
+        }
         if server_fault:
-            return Readiness(configured=True, running=True, connected=connected, ready=False, fault=True, no_go_reason="server fault latched")
+            return Readiness(configured=True, running=True, connected=connected, ready=False, fault=True, no_go_reason="server fault latched", **cartesian_kwargs)
         if backend_fault:
-            return Readiness(configured=True, running=True, connected=connected, ready=False, fault=True, no_go_reason="robot/backend fault")
+            return Readiness(configured=True, running=True, connected=connected, ready=False, fault=True, no_go_reason="robot/backend fault", **cartesian_kwargs)
         if not joint_valid:
-            return Readiness(configured=True, running=True, connected=connected, ready=False, fault=False, no_go_reason="joint state invalid")
-        return Readiness(configured=True, running=True, connected=connected, ready=connected, fault=False)
+            return Readiness(configured=True, running=True, connected=connected, ready=False, fault=False, no_go_reason="joint state invalid", **cartesian_kwargs)
+        return Readiness(configured=True, running=True, connected=connected, ready=connected, fault=False, **cartesian_kwargs)
 
     def blocked_reason(self, action: str) -> str | None:
-        if self.desired_mode == "real" or self.observed_server_mode == "real":
-            return "real mode is connect/status only; motion commands are disabled"
-        if self.desired_mode != self.observed_server_mode:
-            return "desired mode differs from observed server mode; no unsafe hot-switch is performed"
+        # State-derived, server-as-authority gate. Real/sim execution gating and
+        # env readiness retired: mode mismatch never blocks; only a missing/stale
+        # state stream, invalid joints, or a latched fault stop a motion command.
         latest = self.latest_valid()
         if latest is None:
             return "state stream missing or stale"
-        if (not latest.left.has_valid_joint_state or not latest.right.has_valid_joint_state) and action not in {"EmergencyStop", "Hold", "ResetFault"}:
+        motion = action not in self._non_motion_actions
+        if motion and (not latest.left.has_valid_joint_state or not latest.right.has_valid_joint_state):
             return "joint state invalid"
-        if self.desired_mode == "simulation":
-            if not self.sim_readiness.ready:
-                return self.sim_readiness.no_go_reason or "simulation readiness tests have not passed"
-        if latest.fault_latched and action not in {"ResetFault", "EmergencyStop", "Hold"}:
-            return "fault is latched; reset and arm before motion"
+        if motion and latest.motion_state in self._latched_motion_states:
+            return f"motion latched ({latest.motion_state}); reset fault before motion"
+        if motion and latest.fault_latched:
+            return f"fault latched: {latest.fault_reason or 'unknown'}; reset and arm before motion"
         return None
 
     @staticmethod
@@ -203,54 +242,81 @@ class OperatorSafety:
         arm_state = latest.left if arm == "left" else latest.right
         return bool(arm_state.has_valid_tcp_pose and arm_state.tcp_stand is not None and not arm_state.tcp_deferred)
 
+    @staticmethod
+    def _arm_cartesian_reason(latest: StateSnapshot, arm: Literal["left", "right"]) -> str | None:
+        """None when this arm can take a Cartesian command, else the reason.
+
+        Availability comes straight from the server: the controller-simulation
+        streaming flag wins when present, otherwise the plain Cartesian gate.
+        An unknown (None) gate is treated as available — the server rejects the
+        command itself if Cartesian is truly closed."""
+        arm_state = latest.left if arm == "left" else latest.right
+        if not (arm_state.has_valid_tcp_pose and arm_state.tcp_stand is not None and not arm_state.tcp_deferred):
+            return f"{arm} FK/TCP pose unavailable"
+        available = arm_state.controller_simulation_cartesian_available
+        if available is None:
+            available = arm_state.cartesian_available
+        if available is False:
+            return arm_state.cartesian_unavailable_reason or f"{arm} Cartesian unavailable (server gate)"
+        return None
+
     def tcp_command_disabled_reason(self, arm: Literal["left", "right"] | None = None) -> str | None:
-        if not self.enable_tcp_pose_commands:
-            return "TCP pose command disabled until RB_GUI_ENABLE_TCP_POSE_COMMANDS=1"
-        if self.desired_mode == "real" or self.observed_server_mode == "real":
-            return "real mode TCP command disabled until real Cartesian acceptance passes"
-        if self.observed_server_mode != "simulation":
-            return "TCP pose command requires observed simulation mode"
-        if self.observed_backend != "simulator":
-            # pgmode simulation: an rbpodo controller-simulation backend
-            # (operation_mode=simulation) may run TCP/Cartesian commands when the
-            # operator opts in. Real motion is impossible by construction here.
-            if not (self.observed_backend == "rbpodo" and self.enable_controller_sim_cartesian):
-                return (
-                    "TCP pose command requires simulator backend, or an rbpodo "
-                    "controller-simulation backend with "
-                    "RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1"
-                )
+        # RB_GUI_ENABLE_TCP_POSE_COMMANDS / mode / backend / env-readiness locks
+        # retired: TCP pose commands are available in every run mode. Availability
+        # is derived from the live per-arm server Cartesian gate; the server stays
+        # the authority (CartesianUnavailable, safety clamps, fault latch).
         reason = self.blocked_reason("TcpDeltaStand")
         if reason:
             return reason
         latest = self.latest_valid()
         if latest is None:
             return "state stream missing or stale"
-        if self.sim_readiness.cartesian_available is False:
-            return self.sim_readiness.cartesian_no_go_reason or "server Cartesian/IK readiness not proven"
         if arm is not None:
-            if not self._arm_has_tcp_pose(latest, arm):
-                return f"{arm} FK/TCP pose unavailable"
-        elif not (self._arm_has_tcp_pose(latest, "left") or self._arm_has_tcp_pose(latest, "right")):
-            return "FK/TCP pose unavailable"
-        return None
+            return self._arm_cartesian_reason(latest, arm)
+        left_reason = self._arm_cartesian_reason(latest, "left")
+        right_reason = self._arm_cartesian_reason(latest, "right")
+        if left_reason is None or right_reason is None:
+            return None
+        return left_reason
 
     def control_disabled_states(self) -> dict[str, bool]:
         """Return visual disabled-state for controls.
 
         Callback-level blocking remains the authority; this method keeps the GUI
-        honest by disabling controls whenever an action would be rejected.
+        honest by disabling controls whenever an action would be rejected. Keys
+        cover every motion tab (joint jog/velocity, TCP pose/linear/twist, circle,
+        lifecycle) so a control is never live-but-dead.
         """
+        tcp_reason = self.tcp_command_disabled_reason()
         states: dict[str, bool] = {
             "jog": self.blocked_reason("JointTarget") is not None,
+            "velocity": self.blocked_reason("JointVelocity") is not None,
             "init_motion": self.init_motion_disabled_reason() is not None,
-            "tcp_jog": True,
-            "tcp_pose": self.tcp_command_disabled_reason() is not None,
-            "tcp_linear": self.tcp_command_disabled_reason() is not None,
+            "tcp_pose": tcp_reason is not None,
+            "tcp_linear": tcp_reason is not None,
+            "twist": tcp_reason is not None,
+            "circle": tcp_reason is not None,
         }
         for mode in self.lifecycle_modes:
             states[f"lifecycle:{mode}"] = self.blocked_reason(mode) is not None
         return states
+
+    def control_disabled_reasons(self) -> dict[str, str | None]:
+        """Block reason per control key (None when allowed).
+
+        Mirrors control_disabled_states but carries the human-readable reason so
+        button-group tabs (which viser cannot grey) can surface it proactively in
+        their status line instead of only after a rejected click."""
+        tcp_reason = self.tcp_command_disabled_reason()
+        return {
+            "jog": self.blocked_reason("JointTarget"),
+            "velocity": self.blocked_reason("JointVelocity"),
+            "init_motion": self.init_motion_disabled_reason(),
+            "tcp_pose": tcp_reason,
+            "tcp_linear": tcp_reason,
+            "twist": tcp_reason,
+            "circle": tcp_reason,
+        }
 
     def send_lifecycle(self, mode: str) -> tuple[bool, str]:
         if mode not in self.lifecycle_modes:
@@ -260,6 +326,33 @@ class OperatorSafety:
             return False, reason
         self.command_client.send_lifecycle(mode, timeout_sec=self.command_timeout_sec)
         return True, f"sent {mode}"
+
+    def send_set_floor_z(self, floor_z_m: float) -> tuple[bool, str]:
+        # Non-motion, leaseless safety adjustment: no motion-block check, but
+        # require a live state stream reporting the constraint enabled so the
+        # operator sees the applied value (the server bounds-checks the request).
+        latest = self.latest_valid()
+        if latest is None:
+            return False, "state stream missing or stale"
+        floor = latest.floor_constraint
+        if floor is None or not bool(floor.get("enabled", False)):
+            return False, "floor constraint disabled on server"
+        try:
+            self.command_client.send_set_safety_floor_z(
+                float(floor_z_m), timeout_sec=self.command_timeout_sec
+            )
+        except ValueError as exc:
+            return False, str(exc)
+        sent = f"sent SetSafetyFloorZ {float(floor_z_m) * 1000:.0f}mm"
+        # Persist to the server config yaml (explicit user request: a viser
+        # "Send floor z" is also the new startup default). Requires the stack
+        # launcher to expose the config path; a send without it stays
+        # runtime-only and says so.
+        config_path = os.environ.get("RB_GUI_SERVER_CONFIG_PATH", "").strip()
+        if not config_path:
+            return True, f"{sent} (runtime only: RB_GUI_SERVER_CONFIG_PATH not set)"
+        _, save_message = persist_floor_z_to_config(config_path, float(floor_z_m))
+        return True, f"{sent} ({save_message})"
 
     def init_motion_disabled_reason(self) -> str | None:
         reason = self.blocked_reason("JointTarget")
@@ -291,6 +384,21 @@ class OperatorSafety:
         )
         return True, "sent InitMotion JointTarget"
 
+    def set_init_joints(
+        self,
+        left_q_deg: tuple[float, ...] | None,
+        right_q_deg: tuple[float, ...] | None,
+    ) -> tuple[bool, str]:
+        # Update the InitMotion target pose at runtime (used by the WayPoint
+        # "set as init" button). Persistence to JSON is handled by the caller.
+        left = self._validated_joint6(left_q_deg)
+        right = self._validated_joint6(right_q_deg)
+        if left is None or right is None:
+            return False, "init joints require finite 6-DOF values for both arms"
+        self.init_left_joint_deg = left
+        self.init_right_joint_deg = right
+        return True, "init motion pose updated"
+
     def jog_joint(self, arm: Literal["left", "right"], joint_index: int, delta_deg: float) -> tuple[bool, str]:
         reason = self.blocked_reason("JointTarget")
         if reason:
@@ -313,6 +421,30 @@ class OperatorSafety:
             return False, "non-finite target rejected"
         self.command_client.send(self.command_client.build_joint_target(tuple(left), tuple(right), timeout_sec=self.command_timeout_sec))
         return True, f"sent {arm} J{joint_index + 1} jog {clamped_delta:+.3f} deg"
+
+    def send_joint_target(
+        self,
+        *,
+        left_q_deg: tuple[float, ...] | None,
+        right_q_deg: tuple[float, ...] | None,
+    ) -> tuple[bool, str]:
+        # Absolute dual-arm JointTarget (used by WayPoint moveJ). Designed to be
+        # re-sent at a hold cadence: the standard command_timeout_sec freshness
+        # acts as the deadman, so releasing the hold lets the server hold in
+        # place once commands go stale.
+        reason = self.blocked_reason("JointTarget")
+        if reason:
+            return False, reason
+        if self.latest_valid() is None:
+            return False, "state stream missing or stale"
+        left = self._validated_joint6(left_q_deg)
+        right = self._validated_joint6(right_q_deg)
+        if left is None or right is None:
+            return False, "joint target requires finite 6-DOF values for both arms"
+        self.command_client.send(
+            self.command_client.build_joint_target(left, right, timeout_sec=self.command_timeout_sec)
+        )
+        return True, "sent JointTarget"
 
     def tcp_jog_unavailable(self) -> tuple[bool, str]:
         return False, "TCP jog unavailable: FK/IK is deferred; no Cartesian motion command sent"
@@ -539,8 +671,6 @@ class OperatorSafety:
         left_quaternion_xyzw: tuple[float, ...] | None = None,
         right_quaternion_xyzw: tuple[float, ...] | None = None,
     ) -> tuple[bool, str]:
-        if not self.enable_tcp_pose_commands:
-            return False, "TCP pose command disabled until FK/IK milestone is enabled"
         reason = self.tcp_command_disabled_reason()
         if reason:
             return False, reason
@@ -596,8 +726,6 @@ class OperatorSafety:
         angular_speed_rad_s: float | None = None,
         orientation_mode: str = "constant",
     ) -> tuple[bool, str]:
-        if not self.enable_tcp_pose_commands:
-            return False, "TCP linear command disabled until FK/IK milestone is enabled"
         reason = self.tcp_command_disabled_reason()
         if reason:
             return False, reason

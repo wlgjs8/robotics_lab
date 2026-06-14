@@ -116,6 +116,9 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(!mock.force_control.enable);
     RB_CHECK(mock.servo.io_model == rb_servo::ServoIoModel::Direct);
     RB_CHECK(near(mock.servo.worker_read_period_sec, 0.002));
+    RB_CHECK(!mock.servo.controller_simulation_async_supervision_nonlatching);
+    RB_CHECK(!mock.safety.controller_simulation_tracking_error_nonlatching);
+    RB_CHECK(!mock.servo.allow_real_motion_with_suspect_diagnostics);
 
     const rb_servo::DualArmConfig simulator =
         rb_servo::loadConfigFromYaml((config_dir / "dual_simulator.yaml").string());
@@ -183,10 +186,14 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(pgmode.servo.send_servo_commands);
         RB_CHECK(pgmode.servo.allow_controller_simulation_motion);
         RB_CHECK(pgmode.servo.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(pgmode.servo.controller_simulation_treat_unreliable_status_fields_as_unavailable);
+        RB_CHECK(pgmode.servo.controller_simulation_async_supervision_nonlatching);
         RB_CHECK(!pgmode.servo.allow_controller_simulation_init_error);
         RB_CHECK(!pgmode.servo.allow_controller_simulation_not_activated);
         RB_CHECK(pgmode.left_robot.allow_controller_simulation_diagnostics_suspect);
         RB_CHECK(pgmode.right_robot.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(pgmode.left_robot.controller_simulation_treat_unreliable_status_fields_as_unavailable);
+        RB_CHECK(pgmode.right_robot.controller_simulation_treat_unreliable_status_fields_as_unavailable);
         RB_CHECK(!pgmode.left_robot.allow_controller_simulation_init_error);
         RB_CHECK(!pgmode.right_robot.allow_controller_simulation_init_error);
         RB_CHECK(near(pgmode.left_robot.servo_t1_sec, 0.002));
@@ -206,6 +213,7 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(pgmode.safety.q_max_deg[2], 360.0));
         RB_CHECK(pgmode.safety.controller_simulation_tracking_error_source ==
                  rb_servo::ControllerSimulationTrackingErrorSource::Reference);
+        RB_CHECK(pgmode.safety.controller_simulation_tracking_error_nonlatching);
         RB_CHECK(pgmode.safety.controller_simulation_physical_motion_policy ==
                  rb_servo::ControllerSimulationPhysicalMotionPolicy::FaultLatch);
         RB_CHECK(pgmode.network.command_bind == "udp://127.0.0.1:50256");
@@ -818,14 +826,15 @@ bool testRbpodoServoJParametersParseAndValidate() {
         RB_CHECK(rejected);
     }
 
+    // Vendor-range servo_t2/servo_alpha values now only WARN (the
+    // RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE gate is retired); rejection is limited
+    // to non-positive / non-finite values.
     const std::string invalid_cases[] = {
         "  command_timeout_sec: 0.0\n  servo_t1_sec: 0.002\n  servo_t2_sec: 0.05\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
         "  servo_t1_sec: 0.001\n  servo_t2_sec: 0.05\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
-        "  servo_t1_sec: 0.002\n  servo_t2_sec: 0.02\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
-        "  servo_t1_sec: 0.002\n  servo_t2_sec: 0.2\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
+        "  servo_t1_sec: 0.002\n  servo_t2_sec: 0.0\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
         "  servo_t1_sec: 0.002\n  servo_t2_sec: 0.05\n  servo_gain: 0.0\n  servo_alpha: 0.5\n",
         "  servo_t1_sec: 0.002\n  servo_t2_sec: 0.05\n  servo_gain: 1.0\n  servo_alpha: 0.0\n",
-        "  servo_t1_sec: 0.002\n  servo_t2_sec: 0.05\n  servo_gain: 1.0\n  servo_alpha: 1.0\n",
     };
     for (std::size_t i = 0; i < sizeof(invalid_cases) / sizeof(invalid_cases[0]); ++i) {
         EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
@@ -878,8 +887,8 @@ bool testRbpodoServoJParametersParseAndValidate() {
     }
 
     {
-        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
-        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
+        // Real/sim env gates retired: disable_waiting_ack loads without
+        // RB_ALLOW_RBPODO_ACK_DISABLED_MOTION.
         EnvGuard ack_disabled_motion_gate("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION", nullptr);
         const std::string path = writeTempConfig(
             "rbpodo-ack-disabled-motion-gate",
@@ -893,9 +902,9 @@ bool testRbpodoServoJParametersParseAndValidate() {
                 true
             )
         );
-        const bool rejected = loadRejects(path);
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
         ::unlink(path.c_str());
-        RB_CHECK(rejected);
+        RB_CHECK(cfg.left_robot.disable_waiting_ack);
     }
 
     {

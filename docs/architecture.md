@@ -4,9 +4,12 @@ This document is the current source of truth for the system architecture. Compon
 
 ## Current Phase
 
-The repository is currently in **simulator-first Cartesian acceptance hardening**.
+The repository is currently in **rbpodo pgmode-real physical robot bring-up**.
+Simulator-first Cartesian acceptance hardening is largely complete and now serves
+as the regression baseline; active validation has moved onto the physical
+RB3-730E hardware.
 
-The simulator stack should repeatedly validate:
+The simulator stack remains the regression baseline for:
 
 - per-arm simulator topology
 - structured backend result and fault telemetry
@@ -19,7 +22,10 @@ The simulator stack should repeatedly validate:
 - command-source lease/arbitration
 - camera readiness contracts for future policy work
 
-This is not a real robot milestone.
+Real motion is now an active, gated bring-up lane (see Maturity Boundary), not a
+deferred milestone. It stays fail-closed: gates, site-local config, operator
+supervision, and an E-stop are all required, and passing simulator acceptance is
+never permission to move hardware.
 
 ## Maturity Boundary
 
@@ -37,14 +43,44 @@ Supported for mock/simulation work:
 - Python policy_runner with joint and Cartesian simulator action sources
 - simulator-only Cartesian acceptance scripts
 
-Not production-ready:
+Run / validated on pgmode-real (physical RB3-730E hardware):
 
-- real RB3-730 motion
-- real Cartesian/TCP motion
+- read-only physical diagnostics parity against controllers `.200`/`.201`
+  using `tcp_actual_stand` (not `tcp_ref_stand`)
+- dual-arm physical Cartesian circle tracking — slow, TUNED-1 profile, median
+  tracking ~1.42° (`docs/runbooks/rbpodo_real_physical_circle.md`)
+- UMI dual-arm Cartesian teleop (relative-init) driving `TcpPoseTarget` on the
+  physical arms; UMI `data_tcp` replay verified on hardware (ee_local + r_align)
+- `flow-infer` `real_policy` full closed-loop rollout on the physical robot
+  (pi0.5/openpi): `TcpTwistLocal` streaming + gripper commands. The `real_policy`
+  rollout-mode gate stays fully enforced (`_validate_real_policy`: `mode=real`,
+  `allow_real_motion`, measured/accepted geometry + retarget, validated collision
+  model, gripper gate) and was satisfied via accepted/validated runtime config —
+  the lane is open and exercised, not blocked. Runtime is validated (smooth,
+  in-distribution; async chunking decouples ~30 Hz policy from the 500 Hz servo;
+  the absolute-proprio frame gap is fixed by reset-relative retrain). Task success
+  is still model-limited (see below)
+- real gripper motion via the Pika Gripper Backend, gated by `RB_ALLOW_REAL_GRIPPER`
+  + `measured_gripper_available` + `allow_real_gripper_motion`
+- server-side async URDF-mesh self-collision guard (`CollisionMonitor`, 33 geoms /
+  337 pairs) enforced in real motion via a velocity barrier; stale / hard-breach
+  fail closed
+- policy-side real-Cartesian safety gate relaxation (PR #13): `rb_servo_server`
+  is the sole real-motion safety layer; controller-simulation safety unchanged
+- controller `-2001` suspect-diagnostics acceptance in real mode (PR #12) with
+  EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latching
+
+Not yet production-ready:
+
+- policy task success — rollout motion is smooth but inaccurate (model quality /
+  data coverage / appearance-domain gap, not runtime); init-pose distribution
+  matching is in progress
 - force control
-- gripper control
-- measured camera/robot calibration
-- real camera + policy + robot closed-loop behavior
+- fast physical circle stages (15 cm / 16 s and above, transition ladder P7–P9)
+- measured camera/robot calibration remains `configured_estimate` and is still
+  required for general geometry-dependent policy, but is not needed for the
+  deployed pika Sense≡Gripper + ee_local + image-conditioned policy (reset-relative
+  cancels the steamvr→stand transform; the tool offset is a known constant)
 
 ## Canonical Terms
 
@@ -202,7 +238,27 @@ Real Cartesian/TCP motion is closed unless:
 RB_ALLOW_REAL_CARTESIAN=1
 ```
 
-These environment variables are necessary but not sufficient. Config and acceptance must also explicitly allow the operation.
+Accepting the controller `-2001` suspect diagnostics
+(`op_stat_self_collision`/`robot_time` field-layout garbage) in real mode is
+additionally closed unless:
+
+```bash
+RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1
+```
+
+These environment variables are necessary but not sufficient. Config
+(`cartesian_control.allow_in_real: true`) and operator-supervised acceptance must
+also explicitly allow the operation. These gates have already carried a
+supervised dual-arm physical Cartesian circle
+(`docs/runbooks/rbpodo_real_physical_circle.md`).
+
+The policy-side `SafetyGate` no longer blocks real Cartesian motion (PR #13,
+scoped to `cartesian_gate.operation_mode == "real"`); for real motion
+`rb_servo_server` is therefore the sole safety layer — safety filter (dq/ddq/
+joint limits), tracking-error fault latch, the async URDF-mesh self-collision guard (`CollisionMonitor`),
+lease arbitration, and deadman. EMS/SOS/soft-estop/`collision_occur`/unknown-mode/
+init-error continue to latch regardless of the gates above. Controller-simulation
+safety is unchanged.
 
 Rainbow controller `pgmode` simulation through the `rbpodo` backend is a
 separate evidence category from both hardware-free `rb_simulator` and future
@@ -234,6 +290,39 @@ This carve-out is not `RB_ALLOW_REAL_CARTESIAN` and does not approve physical
 real Cartesian motion. Servo J ACKs in a controller-simulation circle artifact
 do not by themselves prove that Cartesian commands executed; check the
 Cartesian gate telemetry and `tcp_ref_stand` movement.
+
+### Floor plane constraint (`safety.floor_constraint`)
+
+A stand-frame keep-out plane for the TCP: when enabled, neither arm's TCP may be
+commanded below `z = z_min_m` (default 0.010 m), regardless of motion primitive
+and regardless of run mode (mock, simulator, controller-sim, and real all pass
+through the same gate). It is enforced in two tiers:
+
+- **Tier 1 (hard backstop, all primitives)**: at the final per-tick safety gate
+  (`DualArmServoLoop::applySafety`), each arm's candidate joint target is
+  FK-checked; a target whose TCP z falls below the plane reverts that arm to its
+  last safe target (`fail_policy: clamp_hold`, non-latching) or latches a
+  `FloorViolation` fault (`fail_policy: fault_latch`). FK failure fails closed.
+  A candidate that strictly raises the TCP while already below the plane is
+  allowed (escape), so an arm that starts below the plane can be jogged out
+  without a fault reset.
+- **Tier 2 (Cartesian sliding assist)**: absolute Cartesian targets
+  (`TcpPoseTarget`, `TcpDelta*`, `TcpLinearMove`) have their stand z clamped to
+  the plane before IK, and streaming twists (`TcpTwist*`) have their downward
+  stand-frame v_z zeroed near the plane, so lateral teleop/policy motion slides
+  along the plane instead of stuttering against the Tier-1 hold. Joint-space
+  primitives get no Tier-2 assist (Tier-1 hold only).
+
+The plane height is runtime-adjustable with the **leaseless** non-motion command
+`SetSafetyFloorZ` (`{"mode": "SetSafetyFloorZ", "floor_z_m": <meters>}`):
+raising the floor is safety-tightening and must never be blocked by a teleop
+client holding the command lease, and lowering is bounded server-side to the
+config envelope `[runtime_min_z_m, runtime_max_z_m]`. Every accepted set is
+logged with its `source_id`; the effective value, per-arm TCP z / violation
+flags, and the last reject reason are published every state tick under
+`floor_constraint`. `monitor_only: true` publishes telemetry without clamping
+and is never a real-motion safety posture. Enabling the constraint requires
+`kinematics.enable: true` (TCP FK source) — enforced at config load.
 
 `TcpCircleMove` is an optional benchmark primitive for isolating server-side
 circle generation from Python UDP streaming jitter. In `rb_simulator` it
@@ -344,6 +433,11 @@ force_control:
 
 ## Motion Primitive Contract
 
+Every primitive below is additionally subject to the stand-frame floor plane
+constraint when `safety.floor_constraint.enable` is set (see "Floor plane
+constraint" under Safety Gates): the final per-tick joint target is FK-checked
+and held/latched if it would put either TCP below the plane.
+
 ### `JointTarget`
 
 Absolute joint-space target. This is a joint-space point-to-point command.
@@ -354,7 +448,7 @@ Streaming joint velocity command. Suitable for joint teleop/debug when safety ga
 
 ### `TcpPoseTarget`
 
-Cartesian point-to-point final-pose target. It is MoveJ-like at the TCP level. Final TCP pose is targeted, but the intermediate TCP path is not guaranteed to be linear.
+Cartesian point-to-point final-pose target. It is MoveJ-like at the TCP level. Final TCP pose is targeted, but the intermediate TCP path is not guaranteed to be linear. Real mode is open through the real-mode gates plus `cartesian_control.allow_in_real: true`, and has been validated on the dual-arm physical Cartesian circle.
 
 ### `TcpLinearMove`
 
@@ -369,15 +463,48 @@ Real mode remains blocked.
 
 Streaming Cartesian velocity primitives. `TcpTwistLocal` is intended for SpaceMouse/local-frame teleop. `TcpTwistStand` is the stand-frame low-level API. Server-side Cartesian velocity limits, the server-side angular deadband for orientation hold, stale-state checks, deadman behavior, and command-source arbitration are required.
 
+**Twist conditioning.** The only **always-on** conditioning of the twist input is
+a per-tick magnitude clamp (`limitTwist()` in `cartesian_servo_controller.cpp`:
+scale-to-limit or reject by `exceed_limit_policy`); there is no slew-rate limit.
+An **optional** first-order low-pass filter
+(`cartesian_control.twist_lpf_enable`, default **off** → behavior-preserving;
+`twist_lpf_tau_sec ≈ 30–50 ms`) can be enabled for anti-vibration — it ramps the
+policy's stepped ZOH velocity before the velocity IK solve, with per-arm state
+reset on lease/mode re-entry. With the LPF off, input jitter passes straight
+through to the joint integrator. Any additional teleop-side smoothing (e.g. the
+SpaceMouse/UMI input EMA) lives upstream in `policy_runner`, not here.
+
+**TrajectoryFilter defers all Cartesian modes.** `TrajectoryFilter::computeJointTarget`
+handles only joint-space modes; every Cartesian mode (`TcpPoseTarget`,
+`TcpLinearMove`, `TcpDelta*`, `TcpTwist*`, `TcpCircle*`) is intentionally
+deferred — the filter deactivates its joint SMD and returns `holdTarget()`.
+Cartesian commands are routed by `DualArmServoLoop` directly to
+`CartesianServoController`, so any SMD/joint-trajectory shaping that applies to
+joint primitives does **not** apply to the Cartesian/twist path.
+
 Velocity-level Cartesian servo targets use an explicit joint target integration
 mode. The simulator acceptance default is `previous_command`: the controller
 integrates Cartesian velocity from the last safe joint target accepted after
 SafetyFilter, rather than repeatedly generating a one-tick target from measured
 `q_actual`. The legacy `measured_actual` mode remains available for debugging,
-and `measured_actual_lookahead` can model fixed lookahead. The integrator is
-reset on holds, faults, stale/invalid state, lease loss, velocity-mode exit,
-and excessive command-vs-actual joint divergence. Real Cartesian motion remains
-blocked by the existing real-mode gates.
+and `measured_actual_lookahead` can model fixed lookahead.
+
+**Jacobian linearization point is fixed at `q_actual` in all modes.**
+`velocity_target_integration` selects only the *integration base* (where `qdot`
+is integrated from): `previous_command` integrates from the last sent joint
+target, `measured_actual`/`measured_actual_lookahead` from measured state. It
+does **not** change where the Jacobian is evaluated — `solveCartesianVelocity`
+always linearizes at `state.q_actual_deg` regardless of mode. This matters for
+controller-`pgmode` simulation: with
+`controller_simulation_divergence_source: reference` the divergence check is
+taken against the controller reference (`tcp_ref_stand`/`q_command`) while the
+Jacobian still uses measured `q_actual`, so the two operate on different joint
+configurations — expected, but a subtlety to keep in mind when tuning
+reference-tracking. The integrator is reset on holds, faults, stale/invalid
+state, lease loss, velocity-mode exit, and excessive command-vs-actual joint
+divergence. Real Cartesian motion opens through the existing real-mode gates
+plus `cartesian_control.allow_in_real: true`; the dual-arm physical circle
+bring-up drives it via `TcpPoseTarget` streaming.
 
 ### `TcpDeltaLocal` / `TcpDeltaStand`
 
@@ -436,7 +563,7 @@ or safety limits. `rt_script` is future work and remains out of scope.
 
 ## GUI And Policy Roles
 
-`rb_gui` is a viewer/operator console for mock/simulation. It may send simulator-only TCP PTP and Linear commands when the server state, mode, backend, lease, and feature flags allow it. It must keep real motion disabled.
+`rb_gui` is a viewer/operator console. It exposes every motion primitive in every run mode and no longer keeps mode-based client gates or feature-flag/env unlocks; whether a control is live is derived from the live server state stream (per-arm FK/TCP-pose validity, the server Cartesian gate, fault latch, motion state) and the command-source lease. The server is the sole real-motion authority and rejects any command its own gates (`RB_ALLOW_REAL_*` + site config + safety filter + lease + deadman) do not allow — so the GUI driving a real command does not bypass real-motion safety.
 
 `policy_runner` owns Python action sources, including SpaceMouse. SpaceMouse Cartesian uses `TcpTwistLocal`, not repeated TCP deltas. Joint-only action sources do not require camera observations. Camera-dependent sources must declare camera readiness and fail closed when camera state is stale.
 
@@ -477,5 +604,12 @@ Hardware-free validation is described in `docs/hardware_free_validation.md`.
 Cartesian simulator acceptance is described in `docs/runbooks/tcp_pose_simulator_acceptance.md`.
 
 Real three-camera acceptance is described in `docs/runbooks/camera_acceptance.md`.
+
+The conservative ladder from rbpodo `pgmode` simulation evidence to physical
+`operation_mode: real` evidence (stages P0–P9) is described in
+`docs/runbooks/pgmode_real_transition.md`; physical-pass evidence must use
+`tcp_actual_stand`, never `tcp_ref_stand`. The realized dual-arm physical
+Cartesian circle bring-up is described in
+`docs/runbooks/rbpodo_real_physical_circle.md`.
 
 Passing simulator acceptance is not permission to move hardware.

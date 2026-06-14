@@ -1,17 +1,35 @@
 schema: robotics_lab.umi_retarget.v1
-status: configured_estimate   # identity R: NOT a measured steamvr->stand alignment.
-                              # Used ONLY to apply the tracker->gripper-TCP tool offset for
-                              # EE-relative (body-frame) training. R is irrelevant to ee_local
-                              # (cancels). Must stay non-"measured" so real rollout stays blocked.
+status: configured_estimate   # identity world R: NOT a measured steamvr->stand alignment.
+                              # Used ONLY to apply the tracker->robot-TCP-equivalent device
+                              # frame for EE-relative (body-frame) training. World R is
+                              # irrelevant to ee_local (cancels). Must stay non-"measured"
+                              # so real rollout stays blocked.
 source_pose_frame: steamvr_world
 target_pose_frame: stand
+# T_tcp_umi_gripper (2026-06-12 correction): the old value was a PURE translation
+# [-0.172, 0, 0.076] — wrong frame (~90deg off; the 0.172 translation is defined in
+# the rotation-corrected gripper frame, not the raw tracker frame). The conversion
+# applies  converted = T_stand_source . pose_raw . inv(T_tcp_umi_gripper), so
+# inv(T_tcp_umi_gripper) must be the official pika_sdk tracker->tip transform
+# composed with the tip->RB-TCP axis alignment used by live teleop:
+#   X = R_corr . Trans(0.172, 0, -0.076) . R_align
+#   R_corr  = Rx(-20deg).[Ry(-90deg).Rx(-90deg)]   (pika_sdk vive_tracker.py)
+#   R_align = [0 0 1; -1 0 0; 0 -1 0]              (stack_real.yaml umi r_align)
+# i.e. converted pose = robot-TCP-equivalent frame on the device: origin at the
+# fingertip line (raw-frame lever arm [0, -0.0126, +0.1876] m), z = approach axis,
+# matching the URDF tip TCP (tcp_joint z=0.247642) and the live teleop geometry.
+# T_tcp_umi_gripper = inv(X): translation [0, -0.076, -0.172],
+# quaternion (x,y,z,w) = (0, sin10deg, cos10deg, 0).
+# NOTE: R_corr assumes the OpenVR tracker body frame matches libsurvive's
+# (pending calibration-clip confirmation; expected lever 18.8 cm, approach 20deg
+# off tracker +z). data_tcp generated with the old value must be regenerated.
 left:
-  T_stand_source: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]        # identity (R cancels for ee_local)
-  T_tcp_umi_gripper: [-0.172, 0.0, 0.076, 0.0, 0.0, 0.0, 1.0]  # inverse of Pika tracker->gripper offset
+  T_stand_source: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]        # identity (world R cancels for ee_local)
+  T_tcp_umi_gripper: [0.0, -0.076, -0.172, 0.0, 0.173648178, 0.984807753, 0.0]
   gripper_open_close_units: percent
 right:
   T_stand_source: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-  T_tcp_umi_gripper: [-0.172, 0.0, 0.076, 0.0, 0.0, 0.0, 1.0]
+  T_tcp_umi_gripper: [0.0, -0.076, -0.172, 0.0, 0.173648178, 0.984807753, 0.0]
   gripper_open_close_units: percent
 quality:
   measured_date: null

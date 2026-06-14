@@ -252,6 +252,54 @@ std::vector<std::array<double, 3>> PinocchioKinematics::linkCollisionPointsInSta
     return stand_points;
 }
 
+std::vector<ArmCapsule> PinocchioKinematics::armCollisionCapsulesInStand(
+    ArmId arm,
+    const JointArray& q_deg,
+    const ArmMountConfig& mount,
+    const std::vector<ArmCapsuleConfig>& templates
+) const {
+    (void)arm;
+    if (!impl_) {
+        throw std::runtime_error("Pinocchio kinematics is not initialized");
+    }
+    if (templates.empty()) {
+        return {};
+    }
+    Eigen::VectorXd q = toPinocchioQ(q_deg, impl_->model, impl_->joints);
+    pinocchio::forwardKinematics(impl_->model, impl_->data, q);
+    pinocchio::updateFramePlacements(impl_->model, impl_->data);
+
+    const pinocchio::SE3& world_base = impl_->data.oMf[impl_->base_frame];
+    const pinocchio::SE3 stand_T_world =
+        math::se3FromPose(mount.base_pose_in_stand) * world_base.inverse();
+
+    const auto to_stand = [&](const std::array<double, 3>& local, const pinocchio::SE3& world_T_frame) {
+        const Eigen::Vector3d wp = world_T_frame.act(Eigen::Vector3d(local[0], local[1], local[2]));
+        const Eigen::Vector3d sp = stand_T_world.act(wp);
+        if (!sp.allFinite()) {
+            throw std::runtime_error("Pinocchio self-collision FK produced a non-finite capsule point");
+        }
+        return std::array<double, 3>{sp.x(), sp.y(), sp.z()};
+    };
+
+    std::vector<ArmCapsule> capsules;
+    capsules.reserve(templates.size());
+    for (const ArmCapsuleConfig& tmpl : templates) {
+        const pinocchio::FrameIndex fid = impl_->model.getFrameId(tmpl.frame);
+        if (fid >= impl_->model.nframes) {
+            throw std::runtime_error(
+                "safety.self_collision.arm_capsules frame not found in URDF: " + tmpl.frame);
+        }
+        const pinocchio::SE3& world_T_frame = impl_->data.oMf[fid];
+        ArmCapsule cap;
+        cap.p0_m = to_stand(tmpl.p0_m, world_T_frame);
+        cap.p1_m = to_stand(tmpl.p1_m, world_T_frame);
+        cap.radius_m = tmpl.radius_m;
+        capsules.push_back(cap);
+    }
+    return capsules;
+}
+
 IkResult PinocchioKinematics::solveIk(
     ArmId arm,
     const Pose6D& target_tcp_stand,

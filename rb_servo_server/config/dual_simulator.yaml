@@ -59,6 +59,16 @@ safety:
   tracking_error_policy: snap_to_actual
   latch_fault_on_robot_state_error: true
   stop_both_arms_on_single_arm_error: true
+  # Stand-frame floor plane: neither TCP may go below z_min_m, for any motion
+  # primitive. Runtime-adjustable via the leaseless SetSafetyFloorZ command,
+  # bounded to [runtime_min_z_m, runtime_max_z_m]. Requires kinematics.enable.
+  floor_constraint:
+    enable: true
+    z_min_m: 0.010
+    runtime_min_z_m: 0.0
+    runtime_max_z_m: 0.5
+    fail_policy: clamp_hold
+    monitor_only: false
 
 network:
   command_bind: "udp://127.0.0.1:50010"

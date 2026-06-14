@@ -17,6 +17,7 @@ add_library(rb_servo_core
     src/core/types.cpp
     src/core/clock.cpp
     src/core/realtime.cpp
+    src/core/shutdown.cpp
     src/robot/backend_result.cpp
     src/config/config.cpp
     src/kinematics/ik_solver.cpp
@@ -34,8 +35,10 @@ add_library(rb_servo_core
     src/control/cartesian_controller.cpp
     src/control/cartesian_servo_controller.cpp
     src/control/cartesian_trajectory_planner.cpp
+    src/control/smd_pose_tracker.cpp
     src/math/se3.cpp
     src/control/force_controller.cpp
+    src/control/collision_monitor.cpp
     src/control/dual_arm_servo_loop.cpp
     src/network/command_server.cpp
     src/network/state_publisher.cpp
@@ -70,6 +73,10 @@ if(IS_DIRECTORY "/opt/openrobots")
 endif()
 find_package(Eigen3 REQUIRED)
 find_package(pinocchio REQUIRED)
+# coal (hpp-fcl successor) + pinocchio collision component: URDF mesh/box
+# self-collision in the async CollisionMonitor. pinocchio targets export
+# PINOCCHIO_WITH_HPP_FCL via INTERFACE_COMPILE_DEFINITIONS.
+find_package(coal REQUIRED)
 target_link_libraries(
     rb_servo_core
     PUBLIC
@@ -78,6 +85,8 @@ target_link_libraries(
         yaml-cpp
         Eigen3::Eigen
         pinocchio::pinocchio
+        pinocchio::pinocchio_collision
+        coal::coal
 )
 target_compile_definitions(rb_servo_core PUBLIC RB_SERVO_ENABLE_PINOCCHIO=1)
 
@@ -143,6 +152,14 @@ if(BUILD_TESTING)
     target_link_libraries(test_self_collision PRIVATE rb_servo_core)
     add_test(NAME self_collision COMMAND test_self_collision)
 
+    add_executable(test_collision_monitor tests/test_collision_monitor.cpp)
+    target_link_libraries(test_collision_monitor PRIVATE rb_servo_core)
+    add_test(NAME collision_monitor COMMAND test_collision_monitor)
+
+    add_executable(test_floor_constraint tests/test_floor_constraint.cpp)
+    target_link_libraries(test_floor_constraint PRIVATE rb_servo_core)
+    add_test(NAME floor_constraint COMMAND test_floor_constraint)
+
     add_executable(test_cartesian_planner tests/test_cartesian_planner.cpp)
     target_link_libraries(test_cartesian_planner PRIVATE rb_servo_core)
     add_test(NAME cartesian_planner COMMAND test_cartesian_planner)
@@ -150,6 +167,22 @@ if(BUILD_TESTING)
     add_executable(test_cartesian_servo_controller tests/test_cartesian_servo_controller.cpp)
     target_link_libraries(test_cartesian_servo_controller PRIVATE rb_servo_core)
     add_test(NAME cartesian_servo_controller COMMAND test_cartesian_servo_controller)
+
+    add_executable(test_command_source_lease tests/test_command_source_lease.cpp)
+    target_link_libraries(test_command_source_lease PRIVATE rb_servo_core)
+    add_test(NAME command_source_lease COMMAND test_command_source_lease)
+
+    add_executable(test_smd_pose_tracker tests/test_smd_pose_tracker.cpp)
+    target_link_libraries(test_smd_pose_tracker PRIVATE rb_servo_core)
+    add_test(NAME smd_pose_tracker COMMAND test_smd_pose_tracker)
+
+    add_executable(test_joint_smd_tracker tests/test_joint_smd_tracker.cpp)
+    target_link_libraries(test_joint_smd_tracker PRIVATE rb_servo_core)
+    add_test(NAME joint_smd_tracker COMMAND test_joint_smd_tracker)
+
+    add_executable(test_joint_moving_average tests/test_joint_moving_average.cpp)
+    target_link_libraries(test_joint_moving_average PRIVATE rb_servo_core)
+    add_test(NAME joint_moving_average COMMAND test_joint_moving_average)
 
     set(RB_GUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rb_gui")
     find_package(Python3 COMPONENTS Interpreter)

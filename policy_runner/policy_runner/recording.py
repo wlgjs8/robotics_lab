@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .camera_bundle_client import _MISSING_BUNDLE_AGE_US
+from .camera_bundle_client import _MISSING_BUNDLE_AGE_US, bundle_clock_ns, resolve_frame
 
 from .robot_state_client import StateSnapshot
 
@@ -749,7 +749,8 @@ class Hdf5EpisodeRecorder:
             bundle = self.camera_client.latest()
 
         if bundle is not None:
-            bundle_age_ns = time.time_ns() - int(bundle.bundle_time_ns)
+            # bundle_time_ns is on the camera_server clock (monotonic_raw), not epoch.
+            bundle_age_ns = bundle_clock_ns() - int(bundle.bundle_time_ns)
             ep.bundle_seq.append(int(bundle.bundle_seq))
             ep.bundle_time_ns.append(int(bundle.bundle_time_ns))
             ep.bundle_age_us.append(int(bundle_age_ns // 1000))
@@ -763,8 +764,11 @@ class Hdf5EpisodeRecorder:
             cameras = sorted(bundle.frames.keys())
 
         for cam_name in cameras:
-            if bundle is not None and cam_name in bundle.frames:
-                pixels = bundle.frames[cam_name].pixels
+            # expected_cameras may use dataset names ('left_realsense_color')
+            # while bundle keys are '<camera>.<stream>'; resolve_frame maps both.
+            frame = resolve_frame(bundle.frames, cam_name) if bundle is not None else None
+            if frame is not None:
+                pixels = frame.pixels
                 shape = tuple(int(dim) for dim in pixels.shape)
                 if len(shape) != 3:
                     raise RuntimeError(f"camera '{cam_name}' pixels must have shape H,W,C")

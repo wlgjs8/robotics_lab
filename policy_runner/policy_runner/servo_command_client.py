@@ -49,6 +49,10 @@ class CommandIntent:
         return cls("AcquireLease", timeout_sec=timeout_sec)
 
     @classmethod
+    def release_lease(cls, timeout_sec: float = 0.2) -> "CommandIntent":
+        return cls("ReleaseLease", timeout_sec=timeout_sec)
+
+    @classmethod
     def disarm_motion(cls, timeout_sec: float = 0.2) -> "CommandIntent":
         return cls("DisarmMotion", timeout_sec=timeout_sec)
 
@@ -166,6 +170,17 @@ class ServoCommandClient:
         lease = readback.wait_for_active_lease(**kwargs)
         self.lease_token = lease.active_lease_token
         return LeaseAcquireResult(seq=seq, readback=lease)
+
+    def release_lease(self) -> int:
+        """Best-effort voluntary lease release (fire-and-forget UDP).
+
+        Sent on shutdown so a restarted client does not collide with its own
+        stale lease for the server's lease_timeout_sec window. The server only
+        honors a release from the owning (source_id, session_id, token)."""
+        try:
+            return self.send(CommandIntent.release_lease(timeout_sec=self.timeout_sec))
+        finally:
+            self.lease_token = None
 
     def build_packet(self, intent: CommandIntent, seq: int) -> dict[str, Any]:
         packet: dict[str, Any] = {

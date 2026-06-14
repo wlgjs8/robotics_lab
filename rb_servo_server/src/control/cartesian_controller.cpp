@@ -75,13 +75,7 @@ CartesianArmTargetResult CartesianController::computeArmJointTarget(
             target_tcp_stand = command.tcp_target_stand;
             break;
         case ControlMode::TcpLinearMove:
-            if (run_mode != RunMode::Simulation) {
-                result.verdict = SafetyVerdict::CartesianUnavailable;
-                result.reason = "tcp_linear_move_simulation_only";
-                result.telemetry.status = "unavailable";
-                result.telemetry.reason = result.reason;
-                return result;
-            }
+            // Real/sim gating retired: linear move computes in every run mode.
             if (!command.has_tcp_target || !state.tcp_stand || !state.has_valid_tcp_pose ||
                 !ik_solver::isFinitePose(command.tcp_target_stand)) {
                 result.verdict = SafetyVerdict::CartesianUnavailable;
@@ -132,7 +126,10 @@ CartesianArmTargetResult CartesianController::computeArmJointTarget(
     return solveIkFromTcpStandTarget(command.arm_id, target_tcp_stand, state, previous_safe_sent_q_deg, run_mode);
 }
 
-CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
+CartesianArmTargetResult solveIkArmTargetFromTcpStand(
+    IKinematics& kinematics,
+    const CartesianControlConfig& config,
+    const ArmMountConfig& mount,
     ArmId arm_id,
     const Pose6D& target_tcp_stand,
     const RobotState& state,
@@ -143,17 +140,25 @@ CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
     result.q_target_deg = previous_safe_sent_q_deg;
     result.telemetry.attempted = true;
     result.telemetry.fk_duration_us = state.fk_duration_us;
-    result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
-    result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
+    result.telemetry.warn_ik_duration_us = config.warn_ik_duration_us;
+    result.telemetry.fail_ik_duration_us = config.fail_ik_duration_us;
 
-    const JointArray seed_q_deg = isFiniteJoints(state.q_actual_deg)
-        ? state.q_actual_deg
-        : previous_safe_sent_q_deg;
-    const IkResult ik = kinematics_->solveIk(
+    // Seed from the previously SENT target, not the measured joint state: the
+    // physical state lags the command by the controller servo lag (~100 ms),
+    // so an actual-state seed (a) sits far from the new solution during fast
+    // motion (more DLS iterations under max_step_deg), and (b) feeds the
+    // robot's physical response back into the next command, which combined
+    // with the IK tolerance dead zone produced a 3-5 Hz relay limit cycle in
+    // 500 Hz streaming TcpPoseTarget teleop. The previous sent target is one
+    // tick away from the new solution and keeps the chain feedforward.
+    const JointArray seed_q_deg = isFiniteJoints(previous_safe_sent_q_deg)
+        ? previous_safe_sent_q_deg
+        : state.q_actual_deg;
+    const IkResult ik = kinematics.solveIk(
         arm_id,
         target_tcp_stand,
         seed_q_deg,
-        mountForArm(arm_id, left_mount_, right_mount_)
+        mount
     );
     result.telemetry.ik_duration_us = ik.duration_us;
     result.telemetry.ik_iterations = ik.iterations;
@@ -161,11 +166,11 @@ CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
     result.telemetry.orientation_error_rad = ik.orientation_error_rad;
     result.telemetry.ik_timed_out = ik.timed_out || ik.reason == ik_solver::kReasonTimeout;
     result.telemetry.ik_warn_duration_exceeded =
-        config_.warn_ik_duration_us > 0.0 && ik.duration_us > config_.warn_ik_duration_us;
+        config.warn_ik_duration_us > 0.0 && ik.duration_us > config.warn_ik_duration_us;
     result.telemetry.ik_fail_duration_exceeded =
         run_mode == RunMode::Simulation &&
-        config_.fail_ik_duration_us > 0.0 &&
-        ik.duration_us > config_.fail_ik_duration_us;
+        config.fail_ik_duration_us > 0.0 &&
+        ik.duration_us > config.fail_ik_duration_us;
     if (!ik.success) {
         result.verdict = ik.reason == ik_solver::kReasonKinematicsUnavailable
             ? SafetyVerdict::CartesianUnavailable
@@ -198,6 +203,25 @@ CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
     result.telemetry.status = "ok";
     result.telemetry.reason = ik.reason;
     return result;
+}
+
+CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
+    ArmId arm_id,
+    const Pose6D& target_tcp_stand,
+    const RobotState& state,
+    const JointArray& previous_safe_sent_q_deg,
+    RunMode run_mode
+) {
+    return solveIkArmTargetFromTcpStand(
+        *kinematics_,
+        config_,
+        mountForArm(arm_id, left_mount_, right_mount_),
+        arm_id,
+        target_tcp_stand,
+        state,
+        previous_safe_sent_q_deg,
+        run_mode
+    );
 }
 
 Pose6D CartesianController::applyTcpDeltaStand(

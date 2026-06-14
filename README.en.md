@@ -4,9 +4,11 @@
 
 ## Current Phase
 
-The project is currently in **simulator-first Cartesian acceptance hardening**.
+The project is currently in **rbpodo pgmode-real physical robot bring-up**.
+Simulator-first Cartesian acceptance hardening is largely complete; validation
+now proceeds on the physical RB3-730E hardware.
 
-The next milestone is to repeatedly validate simulator-side behavior for:
+Simulator-side behavior that is repeatedly validated and stabilized:
 
 - per-arm simulator topology
 - structured backend result and fault telemetry
@@ -19,7 +21,10 @@ The next milestone is to repeatedly validate simulator-side behavior for:
 - command-source lease/arbitration
 - camera readiness contracts
 
-Real robot motion is not the current default milestone.
+What has additionally been validated on the physical robot is listed under
+"Current Maturity" below. Real motion is still a fail-closed operation requiring
+operator supervision, an E-stop in hand, and explicit gates; passing simulator
+acceptance is not permission to move hardware.
 
 ## Current Maturity
 
@@ -37,14 +42,40 @@ Supported for mock/simulation:
 - simulator-only Cartesian acceptance scripts
 - mandatory Eigen3/Pinocchio C++ Cartesian math path for `rb_servo_server`
 
-Not production-ready:
+Run / validated on pgmode-real (physical RB3-730E hardware):
 
-- real RB3-730 motion
-- real Cartesian/TCP motion
-- force control
-- gripper control
-- measured camera/robot calibration
-- real camera + policy + robot closed-loop behavior
+- read-only physical diagnostics parity (controllers `.200`/`.201`, `tcp_actual_stand`)
+- dual-arm physical Cartesian circle tracking — slow, TUNED-1 profile, median
+  tracking ~1.42° (`docs/runbooks/rbpodo_real_physical_circle.md`)
+- UMI dual-arm Cartesian teleop (relative-init) driving `TcpPoseTarget` on the real
+  robot; UMI `data_tcp` replay verified on hardware (ee_local + r_align)
+- **pi0.5 (openpi) `flow-infer` `real_policy` full closed-loop rollout on the real
+  robot** — `TcpTwistLocal` streaming + gripper commands. Runtime/engineering
+  validated: motion is smooth and in-distribution (async chunking removes the 500 Hz
+  loop vibration; the absolute-proprio frame gap is fixed by reset-relative retrain).
+  **Task success is still model-limited** (see below)
+- real gripper motion — Pika Gripper Backend, `RB_ALLOW_REAL_GRIPPER` +
+  `measured_gripper_available` gate
+- server-side self-collision guard — async URDF-mesh `CollisionMonitor` (33 geoms /
+  337 pairs), enforced in real (velocity barrier), stale/hard-breach fail-closed
+- policy-side real-Cartesian safety gate relaxation (PR #13) → `rb_servo_server`
+  is the sole real-motion safety layer
+- controller `-2001` (suspect diagnostics) accepted in real mode (PR #12);
+  EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latch
+
+Not yet production-ready:
+
+- **policy task success** — rollout motion is smooth but inaccurate (e.g. the left
+  arm reaches into a collision instead of grasping). This is a model-quality /
+  data-coverage / appearance-domain-gap problem, not a runtime one; init-pose
+  distribution matching is in progress (`umi_init_from_grasp.py`)
+- force control (`provider: null`, `enable: false`)
+- fast physical circle stages (15 cm / 16 s and above, transition ladder P7–P9)
+- measured hand-eye / camera calibration is still pending for general
+  geometry-dependent policy, but is **not needed** for the currently deployed pika
+  Sense≡Gripper + ee_local + image-conditioned policy (reset-relative cancels the
+  steamvr→stand R; the tool offset is a known constant) — so it is not a blocker for
+  the current policy
 
 ## Source Of Truth
 
@@ -111,7 +142,21 @@ Real Cartesian/TCP motion:
 RB_ALLOW_REAL_CARTESIAN=1
 ```
 
-These gates are necessary but not sufficient. Config and real-hardware acceptance must also explicitly allow the operation.
+Accepting the controller `-2001` suspect diagnostics in real mode additionally requires:
+
+```bash
+RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1
+```
+
+These gates are necessary but not sufficient. Config
+(`cartesian_control.allow_in_real: true`) and operator supervision must also
+allow the operation. Through these gates a dual-arm physical Cartesian circle has
+already run under supervision (`docs/runbooks/rbpodo_real_physical_circle.md`).
+The policy-side `SafetyGate` real-Cartesian block was relaxed in PR #13, so for
+real motion `rb_servo_server` is the sole safety layer (safety filter,
+tracking-error latch, async URDF-mesh self-collision guard (`CollisionMonitor`), lease, deadman);
+controller-simulation safety is unchanged. EMS/SOS/soft-estop/`collision_occur`/
+unknown-mode/init-error still latch regardless of these gates.
 
 Force control remains inactive:
 
@@ -123,9 +168,9 @@ force_control:
 
 ## Motion Primitive Summary
 
-- `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target; path not guaranteed.
+- `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target; path not guaranteed. Real mode opens via the gates + `cartesian_control.allow_in_real: true` and has been validated on a dual-arm physical circle.
 - `TcpLinearMove`: simulator-only MoveL-like Cartesian path primitive.
-- `TcpTwistLocal` / `TcpTwistStand`: simulator-only streaming Cartesian velocity primitives.
+- `TcpTwistLocal` / `TcpTwistStand`: streaming Cartesian velocity primitives (simulator and the rbpodo controller-simulation carve-out; real Cartesian uses the gated `allow_in_real` path).
 - `TcpDeltaLocal` / `TcpDeltaStand`: low-level one-shot/debug jog primitives.
 
 ## Common Commands

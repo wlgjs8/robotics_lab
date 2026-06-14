@@ -90,6 +90,16 @@ safety:
   tracking_error_policy: fault_latch
   latch_fault_on_robot_state_error: true
   stop_both_arms_on_single_arm_error: true
+  # Stand-frame floor plane (TCP z keep-out, all primitives, all run modes).
+  # Enabling requires kinematics.enable=true (TCP FK source). Uncomment together
+  # with a kinematics block; fault_latch is the conservative real-mode policy.
+  # floor_constraint:
+  #   enable: true
+  #   z_min_m: 0.010
+  #   runtime_min_z_m: 0.0
+  #   runtime_max_z_m: 0.5
+  #   fail_policy: fault_latch
+  #   monitor_only: false
 
 network:
   command_bind: "udp://127.0.0.1:50010"

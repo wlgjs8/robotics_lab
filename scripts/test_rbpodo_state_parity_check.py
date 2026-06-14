@@ -20,14 +20,15 @@ RAW_BASE = {
 }
 
 
-def python_sample(raw=None, q_ref=None, suspect=False):
+def python_sample(raw=None, q_actual=None, q_ref=None, suspect=False):
     raw = dict(RAW_BASE if raw is None else raw)
+    q_actual = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] if q_actual is None else q_actual
     q_ref = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0] if q_ref is None else q_ref
     return {
         "arm": "left",
         "ip": "172.28.60.200",
         "sample_time_ns": 1_000_000_000,
-        "q_actual_deg": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "q_actual_deg": q_actual,
         "q_ref_deg": q_ref,
         "q_target_deg": q_ref,
         "jnt_ref": q_ref,
@@ -39,13 +40,14 @@ def python_sample(raw=None, q_ref=None, suspect=False):
     }
 
 
-def cpp_sample(raw=None, q_ref=None, suspect=False):
+def cpp_sample(raw=None, q_actual=None, q_ref=None, suspect=False):
     raw = dict(RAW_BASE if raw is None else raw)
+    q_actual = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] if q_actual is None else q_actual
     q_ref = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0] if q_ref is None else q_ref
     return {
         "arm": "left",
         "host_time_ns": 1_000_010_000,
-        "q_actual_deg": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "q_actual_deg": q_actual,
         "q_ref_deg": q_ref,
         "q_target_deg": q_ref,
         "jnt_ref_deg": q_ref,
@@ -93,6 +95,30 @@ class RbpodoStateParityCheckTest(unittest.TestCase):
         self.assertIn("diagnostics_suspect_unresolved", summary["caveats"])
         self.assertEqual(summary["metrics"]["raw_field_match_rate"], 1.0)
         self.assertEqual(summary["metrics"]["diagnostics_suspect_agreement_rate"], 1.0)
+
+    def test_float32_sized_q_actual_diff_is_not_decode_mismatch(self):
+        raw = dict(RAW_BASE)
+        raw["op_stat_self_collision"] = 1977953904
+
+        summary, _ = parity.compare_samples(
+            [python_sample(raw=raw, q_actual=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], suspect=True)],
+            [cpp_sample(raw=raw, q_actual=[1.0002, 2.0, 3.0, 4.0, 5.0, 6.0], suspect=True)],
+        )
+
+        self.assertEqual(summary["result"], "suspect_but_consistent")
+        self.assertIn("diagnostics_suspect_unresolved", summary["caveats"])
+        self.assertNotIn("q_actual_deg", summary["reason"])
+        self.assertAlmostEqual(summary["metrics"]["max_q_actual_diff_deg"], 0.0002)
+
+    def test_large_q_actual_diff_still_fails_decode_mismatch(self):
+        summary, _ = parity.compare_samples(
+            [python_sample(q_actual=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])],
+            [cpp_sample(q_actual=[1.01, 2.0, 3.0, 4.0, 5.0, 6.0])],
+        )
+
+        self.assertEqual(summary["result"], "failed_parity_mismatch")
+        self.assertIn("q_actual_deg", summary["reason"])
+        self.assertAlmostEqual(summary["metrics"]["max_q_actual_diff_deg"], 0.01)
 
     def test_send_servo_commands_true_config_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:

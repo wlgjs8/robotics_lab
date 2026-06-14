@@ -3,6 +3,24 @@
 The active real-controller backend is `rbpodo` only. `mock` and `simulator`
 remain hardware-free validation surfaces.
 
+The repository is in **rbpodo pgmode-real physical bring-up**. Real motion is a
+gated, operator-supervised lane that has carried a dual-arm physical Cartesian
+circle (`docs/runbooks/rbpodo_real_physical_circle.md`); the conservative
+promotion ladder is `docs/runbooks/pgmode_real_transition.md`. Real motion stays
+fail-closed: env gates (`RB_ALLOW_REAL_ROBOT` / `RB_ALLOW_REAL_MOTION` /
+`RB_ALLOW_REAL_CARTESIAN`, plus `RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION`
+for the `-2001` carve-out) are still required and necessary-but-not-sufficient.
+The policy-side `SafetyGate` real-Cartesian block was relaxed (PR #13), so for
+real motion `rb_servo_server` is the sole safety layer. A full `flow-infer`
+`real_policy` closed-loop rollout (pi0.5/openpi, `TcpTwistLocal` + real gripper via
+the Pika Gripper Backend) and the async URDF-mesh `CollisionMonitor` have run on the
+physical robot; the `real_policy` rollout-mode gate stays fully enforced and was
+satisfied via accepted/validated config. Remaining gaps: policy task success
+(model-side, not runtime) and force control (still `provider: null`,
+`enable: false`). Measured hand-eye calibration is unneeded for the deployed pika
+ee_local image-conditioned policy but still required for general geometry-dependent
+policy.
+
 Supported robot command/control defaults are 500 Hz:
 
 - `servo.rate_hz: 500`

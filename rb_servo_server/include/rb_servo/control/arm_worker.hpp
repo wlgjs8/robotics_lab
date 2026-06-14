@@ -22,6 +22,7 @@ struct ArmWorkerOptions {
     RbpodoAsyncStreamingMode rbpodo_async_streaming_mode =
         RbpodoAsyncStreamingMode::Disabled;
     double rbpodo_async_max_pending_age_ms = 10.0;
+    bool controller_simulation_timing_reject_tolerance_enabled = false;
     RbpodoAsyncAckSupervisionConfig rbpodo_async_ack_supervision;
     RbpodoAsyncReferenceSupervisionConfig rbpodo_async_reference_supervision;
 };
@@ -199,6 +200,7 @@ private:
     std::optional<SendServoJRequest> last_async_sent_request_;
     std::optional<JointArray> last_async_q_ref_deg_;
     uint64_t last_async_reference_fault_sample_ns_ = 0;
+    uint64_t consecutive_async_timing_rejects_ = 0;
 
     std::thread thread_;
 };

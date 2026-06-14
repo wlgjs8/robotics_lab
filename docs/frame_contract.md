@@ -118,6 +118,39 @@ The following require stronger geometry validation before real use:
 - real camera-driven manipulation policies
 - dataset capture requiring metric replayability
 
+## Collision Geometry Asset (unified URDF)
+
+Two distinct URDF assets feed the server, and only one is tracked here:
+
+| Use | Config key | Path | Tracked in this repo? |
+|---|---|---|---|
+| FK/IK kinematics (per arm) | `kinematics.urdf` | `rb_servo_server/descriptions/urdf/rb3_730e.urdf` (single arm) | **yes** |
+| Self-collision guard (`CollisionMonitor`) | `safety.self_collision.mesh.unified_urdf` | `mo_robot_descriptions/.../robots/urdf/dual_rb3_730e/dual_rb3_730e_ver3.urdf` (stand + both arms) | **no** |
+
+The **unified** (stand + both-arms) URDF is the most important geometry input to
+the self-collision guard — `CollisionMonitor` builds its Pinocchio model and
+mesh pairs directly from it (`collision_monitor.cpp`, wired in
+`dual_arm_servo_loop.cpp`). It is **not** stored in `robotics_lab`: it lives in
+the sibling `mo_robot_descriptions` repo, which is a **separate, manually managed
+checkout — not a git submodule and not version-pinned from here**. Configs
+reference it by relative path (`../mo_robot_descriptions/...`), resolved against
+the config file location.
+
+Provenance / regeneration is currently **not documented in `mo_robot_descriptions`
+from this repo's side** — this is a known gap. When onboarding or reproducing the
+collision model, treat the following as required-but-unspecified and pin them
+explicitly in the site setup notes:
+
+- which `mo_robot_descriptions` commit/tag the `dual_rb3_730e_ver*` URDF came from
+- how the dual URDF is generated from the single-arm description + stand mount
+  geometry (which `_ver` is current, and what changed between `ver2`/`ver3`)
+- that link/mesh names stay consistent with the server's
+  `stand_ignore_arm_substrings` (`dual_rb3_730e_left_` / `dual_rb3_730e_right_`)
+  so arm-vs-stand pairing stays correct
+
+Until that is captured, a fresh clone cannot rebuild the collision model without
+out-of-band knowledge of the `mo_robot_descriptions` checkout.
+
 ## Measured Calibration Future Work
 
 Measured calibration should add:

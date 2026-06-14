@@ -22,45 +22,26 @@ std::string orientationModeName(CartesianOrientationInterpolation mode) {
     return mode == CartesianOrientationInterpolation::Slerp ? "slerp" : "constant";
 }
 
-Vec6 referenceVelocityLocal(
-    const CartesianServoPathState& path,
-    const Pose6D& reference,
-    double s
-) {
-    Vec6 out;
-    if (path.done || path.duration_sec <= 0.0) return out;
-    const Vec6 velocity_stand{
-        (path.target_tcp_stand.x - path.start_tcp_stand.x) / path.duration_sec,
-        (path.target_tcp_stand.y - path.start_tcp_stand.y) / path.duration_sec,
-        (path.target_tcp_stand.z - path.start_tcp_stand.z) / path.duration_sec,
-        0.0,
-        0.0,
-        0.0,
-    };
-    const Vec6 velocity_local = math::twistStandToLocal(velocity_stand, reference);
-    out.x = velocity_local.x;
-    out.y = velocity_local.y;
-    out.z = velocity_local.z;
+// Quintic (10t^3 - 15t^4 + 6t^5) time scaling for TcpLinearMove: zero velocity
+// AND zero acceleration at both endpoints, so the path eases in/out instead of
+// the velocity step of a constant-rate profile. Peak ds/dt is 15/8 of the mean
+// rate; the duration speed limits account for that ratio.
+constexpr double kQuinticPeakRateRatio = 15.0 / 8.0;
+// Completion tolerances for the smoothed (pose_track_smd) reference: the move
+// reports done only after the filter output has settled on the latched goal.
+constexpr double kLinearMoveSettlePositionM = 5e-4;
+constexpr double kLinearMoveSettleOrientationRad = 5e-3;
 
-    if (path.orientation_mode == CartesianOrientationInterpolation::Slerp) {
-        const double ds = std::min(1.0 - s, std::max(1e-4, 1e-3));
-        if (ds > 0.0) {
-            const double dt = ds * path.duration_sec;
-            const Pose6D next = LinearCartesianPlanner{}.sample(
-                CartesianTrajectoryRequest{
-                    path.start_tcp_stand,
-                    path.target_tcp_stand,
-                    path.orientation_mode,
-                },
-                s + ds
-            );
-            const Vec6 delta = math::bodyErrorLocal(reference, next);
-            out.rx = delta.rx / dt;
-            out.ry = delta.ry / dt;
-            out.rz = delta.rz / dt;
-        }
+double quinticTimeScaling(double tau) {
+    tau = std::clamp(tau, 0.0, 1.0);
+    return tau * tau * tau * (10.0 + tau * (-15.0 + 6.0 * tau));
+}
+
+bool finiteJoints(const JointArray& joints) {
+    for (double joint : joints) {
+        if (!std::isfinite(joint)) return false;
     }
-    return out;
+    return true;
 }
 
 bool finiteVec6(const Vec6& value) {
@@ -393,6 +374,12 @@ CartesianServoController::CartesianServoController(
     std::shared_ptr<IKinematics> kinematics
 ) : left_mount_(left_mount), right_mount_(right_mount), config_(config), kinematics_(std::move(kinematics)) {}
 
+void CartesianServoController::setFloorConstraint(bool enabled, double z_min_m, double soft_margin_m) {
+    floor_enabled_ = enabled && std::isfinite(z_min_m) && std::isfinite(soft_margin_m);
+    floor_z_min_m_ = z_min_m;
+    floor_soft_margin_m_ = std::max(soft_margin_m, 0.0);
+}
+
 CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     const ArmCommand& command,
     const RobotState& state,
@@ -411,13 +398,12 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
     result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
 
-    if (run_mode != RunMode::Simulation) {
-        result.verdict = SafetyVerdict::CartesianUnavailable;
-        result.reason = "tcp_linear_move_simulation_only";
-        result.telemetry.status = "unavailable";
-        result.telemetry.reason = result.reason;
-        return result;
-    }
+    // Real/sim gating retired: linear move computes in every run mode.
+    // The velocity-integrator plumbing is unused since the move switched to
+    // the position-IK feedforward chain (kept in the signature for ABI/call
+    // compatibility with the servo loop).
+    (void)velocity_integrator_state;
+    (void)state_context;
     if (!kinematics_) {
         result.verdict = SafetyVerdict::CartesianUnavailable;
         result.reason = "kinematics_unavailable";
@@ -451,7 +437,17 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
         *path_state = CartesianServoPathState{};
         path_state->active = true;
         path_state->seq = command_seq;
-        path_state->start_tcp_stand = *state.tcp_stand;
+        // Anchor the path at the COMMAND-side pose (FK of the previously sent
+        // joints) when available, falling back to the measured TCP: the whole
+        // chain stays feedforward and there is no measured-vs-commanded jump
+        // at path start (the physical state lags the command by the
+        // controller servo lag).
+        path_state->start_tcp_stand = finiteJoints(previous_safe_sent_q_deg)
+            ? kinematics_->computeTcpStand(
+                  command.arm_id,
+                  previous_safe_sent_q_deg,
+                  mountForArm(command.arm_id, left_mount_, right_mount_))
+            : *state.tcp_stand;
         path_state->target_tcp_stand = command.tcp_target_stand;
         path_state->orientation_mode = plannerOrientationMode(
             command.has_linear_move_orientation_mode
@@ -520,10 +516,13 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
             result.telemetry.reason = result.reason;
             return result;
         }
-        const double limited_linear_duration = position_distance / config_.max_linear_move_speed_m_s;
+        // Quintic profile: peak rate = kQuinticPeakRateRatio * mean rate, so
+        // the speed-limited duration keeps the PEAK inside the configured max.
+        const double limited_linear_duration =
+            position_distance * kQuinticPeakRateRatio / config_.max_linear_move_speed_m_s;
         const double limited_angular_duration =
             path_state->orientation_mode == CartesianOrientationInterpolation::Slerp
-                ? orientation_distance / config_.max_angular_move_speed_rad_s
+                ? orientation_distance * kQuinticPeakRateRatio / config_.max_angular_move_speed_rad_s
                 : 0.0;
         const double speed_limited_duration =
             std::max(duration_sec, std::max(limited_linear_duration, limited_angular_duration));
@@ -545,15 +544,21 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
             result.telemetry.reason = result.reason;
             return result;
         }
+        // Smooth the moving path reference with the same pose_track_smd filter
+        // streaming TcpPoseTarget uses, anchored at the command-side start.
+        if (config_.pose_track_smd.enable) {
+            path_state->smd = std::make_shared<SmdPoseTracker>(config_.pose_track_smd);
+            path_state->smd->reset(path_state->start_tcp_stand);
+        }
     }
 
     if (!path_state->done) {
         path_state->elapsed_sec = std::min(path_state->elapsed_sec + std::max(0.0, dt_sec), path_state->duration_sec);
-        path_state->done = path_state->elapsed_sec >= path_state->duration_sec - 1e-12;
     }
-    const double path_s = path_state->duration_sec > 0.0
+    const double tau = path_state->duration_sec > 0.0
         ? std::clamp(path_state->elapsed_sec / path_state->duration_sec, 0.0, 1.0)
         : 1.0;
+    const double path_s = quinticTimeScaling(tau);
     const Pose6D reference = LinearCartesianPlanner{}.sample(
         CartesianTrajectoryRequest{
             path_state->start_tcp_stand,
@@ -562,94 +567,71 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
         },
         path_s
     );
+
+    // Feedforward chain, same stack as streaming TcpPoseTarget: the quintic
+    // path reference runs through the pose_track_smd filter, then position-IK
+    // toward the filtered pose seeded from the previously SENT joints. The
+    // measured state no longer feeds the per-tick command — the previous
+    // v_ref + Kp * bodyError(measured, reference) velocity servo re-injected
+    // encoder noise and the controller's stair-stepped state updates into
+    // every tick, which is what made TcpLinearMove judder while TcpPoseTarget
+    // ran smoothly. Measured pose is kept for tracking TELEMETRY only.
+    Pose6D commanded = reference;
+    if (path_state->smd) {
+        path_state->smd->updateGoalFromCommand(reference);
+        commanded = path_state->smd->step(std::max(0.0, dt_sec));
+    }
+
+    // done = time profile finished AND the smoothing filter settled on the
+    // latched goal (with the filter disabled it settles instantly at s=1).
+    const bool time_done = path_state->elapsed_sec >= path_state->duration_sec - 1e-12;
+    const bool smd_settled = !path_state->smd ||
+        (math::positionDistance(commanded, path_state->target_tcp_stand) <= kLinearMoveSettlePositionM &&
+         math::orientationDistanceRad(commanded, path_state->target_tcp_stand) <= kLinearMoveSettleOrientationRad);
+    path_state->done = time_done && smd_settled;
+
+    // Command-side velocity norms for telemetry (post-filter pose step / dt).
+    double commanded_linear_norm_m_s = 0.0;
+    double commanded_angular_norm_rad_s = 0.0;
+    if (path_state->has_last_commanded && dt_sec > 0.0) {
+        commanded_linear_norm_m_s =
+            math::positionDistance(path_state->last_commanded_tcp_stand, commanded) / dt_sec;
+        commanded_angular_norm_rad_s =
+            math::orientationDistanceRad(path_state->last_commanded_tcp_stand, commanded) / dt_sec;
+    }
+    path_state->last_commanded_tcp_stand = commanded;
+    path_state->has_last_commanded = true;
+
     const Vec6 error = math::bodyErrorLocal(*state.tcp_stand, reference);
-    const Vec6 v_ref = referenceVelocityLocal(*path_state, reference, path_s);
-    Vec6 v_cmd{
-        v_ref.x + config_.path_kp_pos * error.x,
-        v_ref.y + config_.path_kp_pos * error.y,
-        v_ref.z + config_.path_kp_pos * error.z,
-        v_ref.rx + config_.path_kp_ori * error.rx,
-        v_ref.ry + config_.path_kp_ori * error.ry,
-        v_ref.rz + config_.path_kp_ori * error.rz,
-    };
-    if (!finiteVec6(v_cmd)) {
-        result.verdict = SafetyVerdict::IkFailed;
-        result.reason = "non_finite_cartesian_servo_command";
-        result.telemetry.status = "failed";
-        result.telemetry.reason = result.reason;
-        return result;
-    }
-    result.telemetry.requested_twist_linear_norm_m_s = linearNorm(v_cmd);
-    result.telemetry.requested_twist_angular_norm_rad_s = angularNorm(v_cmd);
-    double max_linear_velocity = config_.max_linear_move_speed_m_s;
-    double max_angular_velocity = config_.max_angular_move_speed_rad_s;
-    if (dt_sec > 0.0 && config_.max_cartesian_step_m.has_value()) {
-        max_linear_velocity = std::min(max_linear_velocity, *config_.max_cartesian_step_m / dt_sec);
-    }
-    if (dt_sec > 0.0 && config_.max_cartesian_step_rad.has_value()) {
-        max_angular_velocity = std::min(max_angular_velocity, *config_.max_cartesian_step_rad / dt_sec);
-    }
-    if (!limitTwist(
-            &v_cmd,
-            max_linear_velocity,
-            max_angular_velocity,
-            config_.exceed_limit_policy,
-            &result.telemetry.twist_clamped)) {
-        result.verdict = SafetyVerdict::InvalidCommand;
-        result.reason = "cartesian_linear_move_limit_exceeded";
-        result.telemetry.status = "failed";
-        result.telemetry.reason = result.reason;
-        result.telemetry.applied_twist_linear_norm_m_s = 0.0;
-        result.telemetry.applied_twist_angular_norm_rad_s = 0.0;
-        return result;
-    }
-    result.telemetry.applied_twist_linear_norm_m_s = linearNorm(v_cmd);
-    result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(v_cmd);
 
-    const CartesianVelocityResult velocity = kinematics_->solveCartesianVelocity(
-        command.arm_id,
-        state.q_actual_deg,
+    CartesianArmTargetResult ik_result = solveIkArmTargetFromTcpStand(
+        *kinematics_,
+        config_,
         mountForArm(command.arm_id, left_mount_, right_mount_),
-        v_cmd,
-        config_.velocity_damping
+        command.arm_id,
+        commanded,
+        state,
+        previous_safe_sent_q_deg,
+        run_mode
     );
-    if (!velocity.success) {
-        result.verdict = SafetyVerdict::IkFailed;
-        result.reason = velocity.reason.empty() ? "cartesian_velocity_solve_failed" : velocity.reason;
-        result.telemetry.status = "failed";
-        result.telemetry.reason = result.reason;
-        return result;
-    }
-
-    result.verdict = SafetyVerdict::Ok;
-    result.telemetry.success = true;
-    result.telemetry.status = "ok";
-    result.telemetry.path_active = path_state->active && !path_state->done;
-    result.telemetry.path_s = path_s;
-    result.telemetry.path_position_error_m = std::sqrt(error.x * error.x + error.y * error.y + error.z * error.z);
-    result.telemetry.path_orientation_error_rad = std::sqrt(error.rx * error.rx + error.ry * error.ry + error.rz * error.rz);
-    result.telemetry.path_line_deviation_m = math::lineDeviation(
+    ik_result.telemetry.requested_twist_linear_norm_m_s = commanded_linear_norm_m_s;
+    ik_result.telemetry.requested_twist_angular_norm_rad_s = commanded_angular_norm_rad_s;
+    ik_result.telemetry.applied_twist_linear_norm_m_s = commanded_linear_norm_m_s;
+    ik_result.telemetry.applied_twist_angular_norm_rad_s = commanded_angular_norm_rad_s;
+    ik_result.telemetry.path_active = path_state->active && !path_state->done;
+    ik_result.telemetry.path_s = path_s;
+    ik_result.telemetry.path_position_error_m = std::sqrt(error.x * error.x + error.y * error.y + error.z * error.z);
+    ik_result.telemetry.path_orientation_error_rad = std::sqrt(error.rx * error.rx + error.ry * error.ry + error.rz * error.rz);
+    ik_result.telemetry.path_line_deviation_m = math::lineDeviation(
         path_state->start_tcp_stand,
         path_state->target_tcp_stand,
         *state.tcp_stand
     );
-    result.telemetry.path_done = path_state->done;
-    result.telemetry.linear_move_duration_sec = path_state->duration_sec;
-    result.telemetry.linear_move_elapsed_sec = path_state->elapsed_sec;
-    result.telemetry.orientation_mode = orientationModeName(path_state->orientation_mode);
-    result.telemetry.position_error_m = result.telemetry.path_position_error_m;
-    result.telemetry.orientation_error_rad = result.telemetry.path_orientation_error_rad;
-    return integrateVelocityTarget(
-        result,
-        config_,
-        state.q_actual_deg,
-        velocity,
-        dt_sec,
-        ControlMode::TcpLinearMove,
-        command_seq,
-        velocity_integrator_state,
-        state_context
-    );
+    ik_result.telemetry.path_done = path_state->done;
+    ik_result.telemetry.linear_move_duration_sec = path_state->duration_sec;
+    ik_result.telemetry.linear_move_elapsed_sec = path_state->elapsed_sec;
+    ik_result.telemetry.orientation_mode = orientationModeName(path_state->orientation_mode);
+    return ik_result;
 }
 
 CartesianArmTargetResult CartesianServoController::computeTwistTarget(
@@ -670,13 +652,8 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
     result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
     result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
 
-    if (run_mode != RunMode::Simulation) {
-        result.verdict = SafetyVerdict::CartesianUnavailable;
-        result.reason = "tcp_twist_simulation_only";
-        result.telemetry.status = "unavailable";
-        result.telemetry.reason = result.reason;
-        return result;
-    }
+    // Real/sim gating retired: streaming twist computes in every run mode.
+    (void)run_mode;
     if (!kinematics_) {
         result.verdict = SafetyVerdict::CartesianUnavailable;
         result.reason = "kinematics_unavailable";
@@ -774,6 +751,48 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         result.telemetry.applied_twist_angular_norm_rad_s = 0.0;
         return result;
     }
+    // Tier-2 floor assist: zero a downward stand-frame v_z when the commanded
+    // TCP is at/below the plane (+ soft margin) so lateral motion keeps sliding
+    // along the plane. `requested` is a local twist here — rotate to stand,
+    // clamp only the linear z component, rotate back.
+    if (floor_enabled_ && state.tcp_stand->z <= floor_z_min_m_ + floor_soft_margin_m_) {
+        Vec6 stand_twist = math::twistLocalToStand(requested, *state.tcp_stand);
+        if (stand_twist.z < 0.0) {
+            stand_twist.z = 0.0;
+            requested = math::twistStandToLocal(stand_twist, *state.tcp_stand);
+            result.telemetry.floor_vz_clamped = true;
+        }
+    }
+
+    // First-order twist LPF (anti-vibration): converts the policy's ~30 Hz ZOH
+    // velocity steps into a ramp before velocity IK. Applied AFTER deadband/hold
+    // resolution (so the hold-enter decision sees the raw command) and BEFORE the
+    // IK solve. State lives in hold_state -> resets to seed on lease/mode reentry.
+    if (config_.twist_lpf_enable && dt_sec > 0.0) {
+        const double tau = std::max(1e-4, config_.twist_lpf_tau_sec);
+        const double alpha = dt_sec / (tau + dt_sec);  // 0 < alpha <= 1
+        Vec6& filtered = hold_state->filtered_twist;
+        if (!hold_state->lpf_valid) {
+            filtered = requested;  // seed: no artificial start-up lag
+            hold_state->lpf_valid = true;
+        } else {
+            filtered.x += alpha * (requested.x - filtered.x);
+            filtered.y += alpha * (requested.y - filtered.y);
+            filtered.z += alpha * (requested.z - filtered.z);
+            filtered.rx += alpha * (requested.rx - filtered.rx);
+            filtered.ry += alpha * (requested.ry - filtered.ry);
+            filtered.rz += alpha * (requested.rz - filtered.rz);
+        }
+        requested = filtered;
+        // LPF output can briefly exceed limits during transients; re-clamp.
+        limitTwist(
+            &requested,
+            config_.max_twist_linear_m_s,
+            config_.max_twist_angular_rad_s,
+            config_.exceed_limit_policy,
+            &twist_clamped);
+    }
+
     result.telemetry.twist_clamped = twist_clamped;
     result.telemetry.applied_twist_linear_norm_m_s = linearNorm(requested);
     result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(requested);
@@ -832,13 +851,7 @@ CartesianArmTargetResult CartesianServoController::computeCircleMoveTarget(
     result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
     result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
 
-    if (run_mode != RunMode::Simulation) {
-        result.verdict = SafetyVerdict::CartesianUnavailable;
-        result.reason = "tcp_circle_move_simulation_only";
-        result.telemetry.status = "unavailable";
-        result.telemetry.reason = result.reason;
-        return result;
-    }
+    // Real/sim gating retired: circle move computes in every run mode.
     if (!config_.enable_benchmark_primitives ||
         !config_.circle_move.allow_in_simulation ||
         config_.circle_move.allow_in_real) {

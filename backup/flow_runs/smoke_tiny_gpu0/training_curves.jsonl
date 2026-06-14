@@ -1,1 +1,0 @@
-{"action_mse": 0.9668615220945316, "chunk_endpoint_error": 0.011512256823707281, "epoch": 1, "gripper_mse": 6.767853089846762, "image_decode_count": 164.0, "missing_camera_count": 0.0, "train_loss": 75.94658398555987}

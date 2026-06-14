@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import threading
@@ -47,7 +48,7 @@ from .geometry import (
 )
 from .models import ArmSnapshot, CircleOverlaySnapshot, Pose6D, StateSnapshot
 from .overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
-from .safety import OperatorSafety, Readiness, normalize_observed_mode_backend
+from .safety import OperatorSafety, normalize_observed_mode_backend
 from .scene import (
     _DEFAULT_LEFT_POSE,
     _DEFAULT_RIGHT_POSE,
@@ -67,6 +68,12 @@ from .scene import (
     _stand_mesh_path,
     _update_urdf_config,
     update_circle_overlay,
+    update_floor_plane,
+    update_floor_plane_preview,
+    update_self_collision_capsules,
+    update_self_collision_check_geom,
+    update_self_collision_near_pairs,
+    update_self_collision_overlay,
     update_scene_markers,
 )
 from .state_receiver import StateReceiver, StateStore
@@ -83,6 +90,7 @@ from .status_panel import (
     _format_fk_status,
     _format_joint_monitor_value,
     _format_joints,
+    _format_floor_constraint_status,
     _format_pgmode_status,
     _format_self_collision_status,
     _format_stand_world_pose_value,
@@ -91,6 +99,7 @@ from .status_panel import (
     _joint_monitor_unit,
     _mode_button_color,
     _optional_finite,
+    _reflect_gate_reason,
     _set_disabled,
     _stand_world_monitor_unit,
     _tcp_display_mode,
@@ -108,9 +117,39 @@ _TCP_FRAME_STAND = "Stand/world"
 _TCP_FRAME_LOCAL = "TCP local"
 _TCP_FRAME_OPTIONS = (_TCP_FRAME_STAND, _TCP_FRAME_LOCAL)
 _TCP_LINEAR_ARM_OPTIONS = ("left", "right", "both")
+_TCP_PTP_ARM_OPTIONS = ("left", "right", "both")
+_TCP_PTP_AXES = (
+    ("x", 0, False),
+    ("y", 1, False),
+    ("z", 2, False),
+    ("roll", 3, True),
+    ("pitch", 4, True),
+    ("yaw", 5, True),
+)
+def _nudge_label(text: str, width: int = 6) -> str:
+    """Center a button-group middle label with non-breaking spaces so the −/+
+    segments line up vertically across rows of different label lengths
+    (e.g. 'X' vs 'Pitch'). NBSP survives viser's whitespace trimming."""
+    text = str(text)
+    pad = max(0, width - len(text))
+    left = pad // 2
+    return " " * left + text + " " * (pad - left)
+
+
 _TCP_LINEAR_ORIENTATION_MODES = ("constant", "slerp")
-_DEFAULT_INIT_LEFT_JOINTS_DEG = (-124.660, 32.485, 119.074, -96.294, -81.798, -30.615)
-_DEFAULT_INIT_RIGHT_JOINTS_DEG = (111.949, -49.304, -120.057, 75.305, 87.436, 49.983)
+# Default viewer camera for newly connecting clients, in stand-frame meters
+# (Z-up). Looks at the dual-arm robot from the front (-Y side, looking toward
+# +Y) at a near-level angle, so the horizon stays level. Override per launch
+# with RB_GUI_CAMERA_POSITION / RB_GUI_CAMERA_LOOK_AT / RB_GUI_CAMERA_UP
+# ("x,y,z" in meters).
+_DEFAULT_CAMERA_POSITION = (0.0, -1.9, 0.75)
+_DEFAULT_CAMERA_LOOK_AT = (0.0, -0.10, 0.50)
+_DEFAULT_CAMERA_UP = (0.0, 0.0, 1.0)
+# Captured from the live dual-arm rest pose (rbpodo CobotData jnt_ang, 2026-06-12,
+# jnt_ang == jnt_ref at rest). Override per launch with RB_GUI_INIT_LEFT_JOINTS /
+# RB_GUI_INIT_RIGHT_JOINTS ("v1,v2,v3,v4,v5,v6" in deg).
+_DEFAULT_INIT_LEFT_JOINTS_DEG = (-131.663, 72.989, 113.400, -80.880, -107.064, -145.949)
+_DEFAULT_INIT_RIGHT_JOINTS_DEG = (135.099, -64.017, -114.457, 84.379, 112.485, 129.893)
 _OPERATOR_MONITOR_WIDTH_EM = 18.0
 _OPERATOR_MONITOR_GAP_EM = 1.0
 
@@ -120,20 +159,6 @@ def _env_int(name: str, fallback: int) -> int:
         return int(os.environ.get(name, str(fallback)))
     except ValueError:
         return fallback
-
-
-def _env_bool(name: str, fallback: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return fallback
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_optional_bool(name: str) -> bool | None:
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return None
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_float(name: str, fallback: float) -> float:
@@ -162,6 +187,48 @@ def _env_joint6(name: str, fallback: tuple[float, ...]) -> tuple[float, ...] | N
     return values
 
 
+def _env_vec3(name: str, fallback: tuple[float, float, float]) -> tuple[float, float, float]:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return fallback
+    try:
+        values = tuple(float(part.strip()) for part in raw.split(","))
+    except ValueError:
+        return fallback
+    if len(values) != 3 or not all(math.isfinite(value) for value in values):
+        return fallback
+    return values  # type: ignore[return-value]
+
+
+def _install_default_camera(server: Any) -> None:
+    # Stand-frame default view for new clients (Z-up, level horizon). The world
+    # up direction keeps orbiting level; each connecting client is framed on the
+    # robot from the front. Guarded so non-viser test servers stay unaffected.
+    position = _env_vec3("RB_GUI_CAMERA_POSITION", _DEFAULT_CAMERA_POSITION)
+    look_at = _env_vec3("RB_GUI_CAMERA_LOOK_AT", _DEFAULT_CAMERA_LOOK_AT)
+    up = _env_vec3("RB_GUI_CAMERA_UP", _DEFAULT_CAMERA_UP)
+    scene = getattr(server, "scene", None)
+    if scene is not None and hasattr(scene, "set_up_direction"):
+        try:
+            scene.set_up_direction(up)
+        except Exception:
+            pass
+    if not hasattr(server, "on_client_connect"):
+        return
+
+    @server.on_client_connect
+    def _(client: Any) -> None:
+        camera = getattr(client, "camera", None)
+        if camera is None:
+            return
+        try:
+            camera.position = position
+            camera.look_at = look_at
+            camera.up_direction = up
+        except Exception:
+            pass
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RB servo browser GUI.")
     parser.add_argument(
@@ -188,37 +255,6 @@ def _circle_overlay_bind_from_args_env(args: argparse.Namespace) -> tuple[str, i
     return parse_udp_bind(endpoint)
 
 
-def _sim_readiness_from_env(observed: Any) -> Readiness:
-    ready = _env_bool("RB_GUI_SIM_READINESS_READY", False)
-    running = _env_bool("RB_GUI_SIM_READINESS_RUNNING", ready)
-    connected = _env_bool("RB_GUI_SIM_READINESS_CONNECTED", ready)
-    no_go_reason = os.environ.get("RB_GUI_SIM_READINESS_NO_GO", "simulator/rbpodo readiness tests have not passed")
-    if ready:
-        no_go_reason = ""
-    # The local simulator backend is always a valid sim stack. An rbpodo
-    # controller in pgmode simulation also counts as a sim stack, but only when
-    # the operator opts in (RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1); real mode
-    # never qualifies.
-    controller_sim_optin = _env_bool("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", False)
-    valid_sim_stack = observed.mode == "simulation" and (
-        observed.backend == "simulator"
-        or (observed.backend == "rbpodo" and controller_sim_optin)
-    )
-    if not valid_sim_stack:
-        ready = False
-        running = False
-        connected = False
-        no_go_reason = "observed server is not the simulator stack"
-    return Readiness(
-        running=running,
-        connected=connected,
-        ready=ready,
-        no_go_reason=no_go_reason,
-        cartesian_available=_env_optional_bool("RB_GUI_CARTESIAN_AVAILABLE"),
-        cartesian_no_go_reason=os.environ.get("RB_GUI_CARTESIAN_NO_GO", "server Cartesian/IK readiness not proven"),
-    )
-
-
 def _update_desired_mode_buttons(handles: dict[str, Any], desired_mode: str) -> None:
     for mode, button in handles.get("mode_buttons", {}).items():
         try:
@@ -237,6 +273,20 @@ def _update_tcp_frame_buttons(handles: dict[str, Any]) -> None:
     for mode, button in handles.get("tcp_frame_buttons", {}).items():
         try:
             button.color = _mode_button_color(mode, selected)
+        except Exception:
+            pass
+
+
+def _tcp_ptp_arm(handles: dict[str, Any]) -> str:
+    selected = handles.get("tcp_ptp_arm", "left")
+    return selected if selected in _TCP_PTP_ARM_OPTIONS else "left"
+
+
+def _update_tcp_ptp_arm_buttons(handles: dict[str, Any]) -> None:
+    selected_arm = _tcp_ptp_arm(handles)
+    for arm, button in handles.get("tcp_ptp_arm_buttons", {}).items():
+        try:
+            button.color = _mode_button_color(arm, selected_arm)
         except Exception:
             pass
 
@@ -359,16 +409,14 @@ def _send_tcp_pose_target_from_marker(
     scene_handles: dict[str, Any],
     arm: str,
 ) -> tuple[bool, str]:
-    pose = _tcp_target_pose(scene_handles, arm)
-    if pose is None:
-        return False, f"{arm} TCP target unavailable"
-    wxyz = _tcp_target_wxyz(scene_handles, arm)
-    quaternion_xyzw = _wxyz_to_xyzw(wxyz) if wxyz is not None else None
+    left_pose, right_pose, left_quaternion_xyzw, right_quaternion_xyzw, error = _tcp_marker_payloads(scene_handles, arm)
+    if error:
+        return False, error
     return safety.send_tcp_pose_target(
-        left_pose=pose if arm == "left" else None,
-        right_pose=pose if arm == "right" else None,
-        left_quaternion_xyzw=quaternion_xyzw if arm == "left" else None,
-        right_quaternion_xyzw=quaternion_xyzw if arm == "right" else None,
+        left_pose=left_pose,
+        right_pose=right_pose,
+        left_quaternion_xyzw=left_quaternion_xyzw,
+        right_quaternion_xyzw=right_quaternion_xyzw,
     )
 
 
@@ -434,9 +482,272 @@ def _apply_tcp_delta_and_send_pose_target(
     delta: tuple[float, float, float, float, float, float],
     frame_mode: str,
 ) -> tuple[bool, str]:
-    if not _apply_tcp_delta_to_target(scene_handles, arm, delta, frame_mode):
-        return False, f"{arm} TCP target unavailable"
+    arms = ("left", "right") if arm == "both" else (arm,)
+    for single_arm in arms:
+        if not _apply_tcp_delta_to_target(scene_handles, single_arm, delta, frame_mode):
+            return False, f"{single_arm} TCP target unavailable"
     return _send_tcp_pose_target_from_marker(safety, scene_handles, arm)
+
+
+def _waypoints_path() -> str:
+    raw = os.environ.get("RB_GUI_WAYPOINTS_PATH", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.expanduser("~"), ".rb_servo_gui", "waypoints.json")
+
+
+def _waypoint_seq(value: Any, length: int) -> tuple[float, ...] | None:
+    if not isinstance(value, list | tuple) or len(value) != length:
+        return None
+    try:
+        out = tuple(float(item) for item in value)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(item) for item in out):
+        return None
+    return out
+
+
+def _normalize_loaded_waypoint(wp: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "left_q": _waypoint_seq(wp.get("left_q"), 6),
+        "left_pose": _waypoint_seq(wp.get("left_pose"), 6),
+        "left_quat": _waypoint_seq(wp.get("left_quat"), 4),
+        "right_q": _waypoint_seq(wp.get("right_q"), 6),
+        "right_pose": _waypoint_seq(wp.get("right_pose"), 6),
+        "right_quat": _waypoint_seq(wp.get("right_quat"), 4),
+    }
+
+
+def _load_waypoints() -> dict[str, Any]:
+    path = _waypoints_path()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for name, wp in data.items():
+        if isinstance(name, str) and name.strip() and isinstance(wp, Mapping):
+            out[name] = _normalize_loaded_waypoint(wp)
+    return out
+
+
+def _save_waypoints(waypoints: Mapping[str, Any]) -> tuple[bool, str]:
+    path = _waypoints_path()
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(waypoints, handle, indent=2, sort_keys=True)
+    except OSError as exc:
+        return False, str(exc)
+    return True, path
+
+
+def _persist_waypoints(handles: dict[str, Any]) -> str:
+    ok, info = _save_waypoints(handles.get("waypoints", {}))
+    return f"saved to {info}" if ok else f"save failed: {info}"
+
+
+def _delete_waypoint(handles: dict[str, Any]) -> tuple[bool, str]:
+    name, _ = _selected_waypoint(handles)
+    waypoints = handles.get("waypoints", {})
+    if not name or name not in waypoints:
+        return False, "no waypoint selected to delete"
+    del waypoints[name]
+    return True, name
+
+
+def _init_motion_path() -> str:
+    raw = os.environ.get("RB_GUI_INIT_MOTION_PATH", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.expanduser("~"), ".rb_servo_gui", "init_motion.json")
+
+
+def _load_init_joints() -> tuple[tuple[float, ...] | None, tuple[float, ...] | None]:
+    path = _init_motion_path()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(data, Mapping):
+        return None, None
+    return _waypoint_seq(data.get("left"), 6), _waypoint_seq(data.get("right"), 6)
+
+
+def _save_init_joints(left_q: tuple[float, ...], right_q: tuple[float, ...]) -> tuple[bool, str]:
+    path = _init_motion_path()
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"left": list(left_q), "right": list(right_q)}, handle, indent=2)
+    except OSError as exc:
+        return False, str(exc)
+    return True, path
+
+
+def _format_joint6(values: tuple[float, ...] | None) -> str:
+    if values is None:
+        return ""
+    return ", ".join(f"{float(v):.3f}" for v in values)
+
+
+def _parse_joint6(text: str) -> tuple[float, ...] | None:
+    parts = [p for p in text.replace(",", " ").split() if p]
+    if len(parts) != 6:
+        return None
+    try:
+        parsed = tuple(float(p) for p in parts)
+    except ValueError:
+        return None
+    if not all(math.isfinite(v) for v in parsed):
+        return None
+    return parsed
+
+
+def _apply_init_joints_live(
+    safety: OperatorSafety, left_text: str, right_text: str
+) -> tuple[bool, str]:
+    """Set the InitMotion target from edited text and apply it at runtime.
+
+    Updates the live OperatorSafety target (used immediately by the next
+    InitMotion press) AND persists to init_motion.json — no restart needed.
+    """
+    left = _parse_joint6(left_text)
+    right = _parse_joint6(right_text)
+    if left is None or right is None:
+        return False, "each arm needs 6 finite joint values (deg), comma/space separated"
+    ok, message = safety.set_init_joints(left, right)
+    if not ok:
+        return False, message
+    saved_ok, info = _save_init_joints(left, right)
+    suffix = f"saved to {info}" if saved_ok else f"save FAILED: {info}"
+    return True, f"InitMotion updated live; {suffix}"
+
+
+def _current_joints_text(store: StateStore) -> tuple[str | None, str | None, str]:
+    """Read current q_actual for both arms as editable text. Returns (left, right, msg)."""
+    latest = store.latest()
+    if latest is None or store.is_stale():
+        return None, None, "state stream missing or stale; cannot read current pose"
+    left_q = getattr(latest.left, "q_actual_deg", None)
+    right_q = getattr(latest.right, "q_actual_deg", None)
+    if not left_q or not right_q:
+        return None, None, "current joints unavailable (arm not connected / no valid state)"
+    return _format_joint6(tuple(left_q)), _format_joint6(tuple(right_q)), "loaded current pose"
+
+
+def _set_waypoint_as_init(handles: dict[str, Any], safety: OperatorSafety) -> tuple[bool, str]:
+    name, waypoint = _selected_waypoint(handles)
+    if waypoint is None:
+        return False, "select a captured waypoint first"
+    left_q = waypoint.get("left_q")
+    right_q = waypoint.get("right_q")
+    if left_q is None or right_q is None:
+        return False, f"'{name}' missing joint capture for one arm"
+    ok, message = safety.set_init_joints(left_q, right_q)
+    if not ok:
+        return False, message
+    saved_ok, info = _save_init_joints(left_q, right_q)
+    suffix = f"saved to {info}" if saved_ok else f"save failed: {info}"
+    return True, f"init motion set to '{name}'; {suffix}"
+
+
+def _capture_waypoint(handles: dict[str, Any], store: StateStore, name: str) -> tuple[bool, str]:
+    name = (name or "").strip()
+    if not name:
+        return False, "enter a waypoint name first"
+    latest = store.latest()
+    if latest is None or store.is_stale():
+        return False, "state stream missing or stale; cannot capture"
+
+    def _arm_capture(arm_snap: Any) -> tuple[Any, Any, Any]:
+        q = arm_snap.q_actual_deg
+        pose = arm_snap.tcp_actual_stand or arm_snap.tcp_stand
+        pose6 = None
+        quat = None
+        if pose is not None:
+            pose6 = (pose.x, pose.y, pose.z, pose.rx, pose.ry, pose.rz)
+            quat = pose.quaternion_xyzw
+        return q, pose6, quat
+
+    left_q, left_pose, left_quat = _arm_capture(latest.left)
+    right_q, right_pose, right_quat = _arm_capture(latest.right)
+    handles.setdefault("waypoints", {})[name] = {
+        "left_q": left_q,
+        "left_pose": left_pose,
+        "left_quat": left_quat,
+        "right_q": right_q,
+        "right_pose": right_pose,
+        "right_quat": right_quat,
+    }
+    return True, (
+        f"captured '{name}' "
+        f"(L joints {'ok' if left_q else 'none'}, pose {'ok' if left_pose else 'none'}; "
+        f"R joints {'ok' if right_q else 'none'}, pose {'ok' if right_pose else 'none'})"
+    )
+
+
+def _refresh_waypoint_dropdown(handles: dict[str, Any]) -> None:
+    dropdown = handles.get("waypoint_dropdown")
+    if dropdown is None:
+        return
+    names = tuple(handles.get("waypoints", {}).keys()) or ("(none)",)
+    current = dropdown.value
+    try:
+        dropdown.options = names
+        if current not in names:
+            dropdown.value = names[0]
+    except Exception:
+        pass
+
+
+def _selected_waypoint(handles: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    dropdown = handles.get("waypoint_dropdown")
+    name = dropdown.value if dropdown is not None else None
+    waypoint = handles.get("waypoints", {}).get(name)
+    return name, waypoint
+
+
+def _drive_waypoint_tcp(handles: dict[str, Any], safety: OperatorSafety) -> tuple[bool, str]:
+    name, waypoint = _selected_waypoint(handles)
+    if waypoint is None:
+        return False, "select a captured waypoint first"
+    left_pose = waypoint.get("left_pose")
+    right_pose = waypoint.get("right_pose")
+    if left_pose is None and right_pose is None:
+        return False, f"'{name}' has no stand pose"
+    ok, message = safety.send_tcp_pose_target(
+        left_pose=left_pose,
+        right_pose=right_pose,
+        left_quaternion_xyzw=waypoint.get("left_quat"),
+        right_quaternion_xyzw=waypoint.get("right_quat"),
+    )
+    return ok, f"moveL->{name}: " + ("OK: " if ok else "BLOCKED: ") + message
+
+
+def _drive_waypoint_joint(handles: dict[str, Any], safety: OperatorSafety) -> tuple[bool, str]:
+    name, waypoint = _selected_waypoint(handles)
+    if waypoint is None:
+        return False, "select a captured waypoint first"
+    left_q = waypoint.get("left_q")
+    right_q = waypoint.get("right_q")
+    if left_q is None or right_q is None:
+        return False, f"'{name}' missing joint capture for one arm"
+    ok, message = safety.send_joint_target(left_q_deg=left_q, right_q_deg=right_q)
+    return ok, f"moveJ->{name}: " + ("OK: " if ok else "BLOCKED: ") + message
 
 
 def _build_joint_monitor(server: Any, handles: dict[str, Any], *, order: float | None = None) -> None:
@@ -531,8 +842,14 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float) -> str
     padding: 0.6em 0.8em 0.75em;
     border-radius: 0 0 0.45em 0.45em;
   }}
+  /* Joint Monitor (top half) and Pose Monitor (bottom half) stack in the same
+     left column. Viewport-half split keeps the deg/rad radios (which live in the
+     static header cards) stable across dynamic body refreshes. */
   .rb-monitor-joint-card {{ left: var(--rb-monitor-gap); }}
-  .rb-monitor-stand-card {{ left: calc((2 * var(--rb-monitor-gap)) + var(--rb-monitor-width)); }}
+  .rb-monitor-stand-card {{ left: var(--rb-monitor-gap); }}
+  .rb-monitor-joint-card.rb-monitor-body-card {{ max-height: calc(50vh - 6.5em); }}
+  .rb-monitor-stand-card.rb-monitor-header-card {{ top: calc(50vh + 0.5em); }}
+  .rb-monitor-stand-card.rb-monitor-body-card {{ top: calc(50vh + 4.95em); max-height: calc(50vh - 6em); }}
   .rb-monitor-title {{
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-weight: 650;
@@ -765,6 +1082,61 @@ def _update_operator_monitors(handles: dict[str, Any], latest: StateSnapshot | N
     _update_stand_world_monitor(handles, latest, stale=stale)
 
 
+# Colored at-a-glance status chips (replaces scanning the wall of Status text rows).
+# (bg, text, dot) per tone.
+_STATUS_TONES = {
+    "ok": ("#e0f5e9", "#148a4e", "#22aa63"),
+    "warn": ("#fcf3de", "#8a6410", "#e1a01e"),
+    "bad": ("#fae4e4", "#b34646", "#dc4646"),
+    "info": ("#dbe7fe", "#2563eb", "#2563eb"),
+    "muted": ("#eef0f4", "#52606d", "#9aa4b2"),
+}
+
+
+def _status_chip(label: str, value: str, tone: str) -> str:
+    bg, fg, dot = _STATUS_TONES.get(tone, _STATUS_TONES["muted"])
+    return (
+        f'<span style="display:inline-flex;align-items:center;gap:0.4em;background:{bg};'
+        f'color:{fg};border-radius:0.9em;padding:0.18em 0.7em;margin:0.15em 0.3em 0.15em 0;'
+        f'font-size:12px;font-weight:600;font-family:system-ui,-apple-system,sans-serif;'
+        f'white-space:nowrap;"><span style="width:0.5em;height:0.5em;border-radius:50%;'
+        f'background:{dot};"></span><span style="opacity:0.65;font-weight:500;">'
+        f'{escape(label)}</span>{escape(value)}</span>'
+    )
+
+
+def _status_summary_html(
+    *, connection: str, mode: str, readiness_go: bool, motion: str, fault_active: bool
+) -> str:
+    conn_tone = "ok" if connection == "live" else "warn" if connection == "stale" else "bad"
+    chips = [
+        _status_chip("연결", connection, conn_tone),
+        _status_chip("모드", mode or "—", "info"),
+        _status_chip("준비", "Go" if readiness_go else "No-Go", "ok" if readiness_go else "bad"),
+        _status_chip("상태", motion or "unknown", "muted"),
+        _status_chip("결함", "없음" if not fault_active else "FAULT", "ok" if not fault_active else "bad"),
+    ]
+    return '<div style="display:flex;flex-wrap:wrap;padding:0.25em 0 0.1em;">' + "".join(chips) + "</div>"
+
+
+def _tab_theme_html() -> str:
+    """Color-code the tab levels so the main tab bar (상태/조작/이동/고급) and the
+    nested sub-tab bars (관절/속도/… inside 이동, etc.) are visually distinct.
+    Main = blue underline; sub = a purple tinted band (sub bars live inside a
+    `.mantine-Tabs-panel`, which is how we target only the nested level)."""
+    return """
+<style>
+  /* Main (top-level) tab bar — blue accent */
+  .mantine-Tabs-list { border-bottom: 2px solid #d4def0 !important; }
+  .mantine-Tabs-tab[data-active] { color: #2563eb !important; border-color: #2563eb !important; font-weight: 700 !important; }
+  /* Sub (nested) tab bar — purple band; .mantine-Tabs-panel scopes it to nested groups only */
+  .mantine-Tabs-panel .mantine-Tabs-list { background: #f4f1fb !important; border-radius: 7px !important; padding: 3px !important; border-bottom: 2px solid #e2d9f6 !important; }
+  .mantine-Tabs-panel .mantine-Tabs-tab { color: #6f6788 !important; }
+  .mantine-Tabs-panel .mantine-Tabs-tab[data-active] { color: #7c3aed !important; border-color: #7c3aed !important; font-weight: 700 !important; }
+</style>
+"""
+
+
 def build_gui(
     server: Any,
     safety: OperatorSafety,
@@ -774,11 +1146,28 @@ def build_gui(
     handles: dict[str, Any] = {}
     handles["circle_overlay_enabled"] = overlay_store is not None
     handles["scene"] = _add_scene_fallback(server)
+    _install_default_camera(server)
 
     _build_operator_monitors(server, handles)
 
+    _add_tab_theme = getattr(server.gui, "add_html", None)
+    if callable(_add_tab_theme):
+        handles["tab_theme"] = _add_tab_theme(_tab_theme_html())
+
     tabs = server.gui.add_tab_group(order=1.0)
-    with tabs.add_tab("Status"):
+    with tabs.add_tab("상태"):
+        # Colored at-a-glance summary above the detailed rows (no scanning needed).
+        _add_status_html = getattr(server.gui, "add_html", None)
+        if callable(_add_status_html):
+            handles["status_summary"] = _add_status_html(
+                _status_summary_html(
+                    connection="disconnected",
+                    mode=safety.observed_server_mode,
+                    readiness_go=False,
+                    motion="unknown",
+                    fault_active=False,
+                )
+            )
         handles["connection"] = server.gui.add_text("Connection", initial_value="disconnected", disabled=True)
         handles["mode"] = server.gui.add_text("Observed mode/backend", initial_value=f"{safety.observed_server_mode}/{safety.observed_backend}", disabled=True)
         handles["readiness"] = server.gui.add_text("Readiness", initial_value="No-Go: no state", disabled=True)
@@ -786,6 +1175,20 @@ def build_gui(
         handles["fault"] = server.gui.add_text("Fault", initial_value="none", disabled=True)
         handles["self_collision"] = server.gui.add_text(
             "Self-collision", initial_value="self-collision: no state", disabled=True
+        )
+        # Translucent margin-inflated collision capsules (arm = blue, stand =
+        # orange) drawn from the server's self_collision telemetry, i.e. the
+        # EXACT geometry the guard checks. Off by default; turn on to debug
+        # suspected false positives against the real arm/stand meshes.
+        if hasattr(server.gui, "add_checkbox"):
+            capsules_default = os.environ.get("RB_GUI_SELF_COLLISION_CAPSULES_DEFAULT", "0") == "1"
+            # Drives both the capsule overlay (capsule mode) and the URDF-mesh
+            # close-call segments (mesh mode); whichever the server is publishing.
+            handles["self_collision_capsules_toggle"] = server.gui.add_checkbox(
+                "자기충돌 검사 표시 (반투명)", initial_value=capsules_default
+            )
+        handles["floor_constraint"] = server.gui.add_text(
+            "Safety floor", initial_value="floor: no state", disabled=True
         )
         handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
         handles["tcp_tracking"] = server.gui.add_text("TCP tracking", initial_value="TCP tracking: no state", disabled=True)
@@ -826,340 +1229,555 @@ def build_gui(
                 safety.set_desired_mode(mode)
                 _update_desired_mode_buttons(handles, safety.desired_mode)
 
-    with tabs.add_tab("Lifecycle"):
-        handles["lifecycle_buttons"] = {}
-        for mode in ("ArmMotion", "DisarmMotion", "Hold", "EmergencyStop", "ResetFault"):
-            button = server.gui.add_button(mode)
-            handles[f"button_{mode}"] = button
-            handles["lifecycle_buttons"][mode] = button
+    with tabs.add_tab("조작"):
+        _op_tabs = server.gui.add_tab_group()
+        with _op_tabs.add_tab("Lifecycle"):
+            handles["lifecycle_buttons"] = {}
+            for mode in ("ArmMotion", "DisarmMotion", "Hold", "EmergencyStop", "ResetFault"):
+                button = server.gui.add_button(mode)
+                handles[f"button_{mode}"] = button
+                handles["lifecycle_buttons"][mode] = button
 
-            @button.on_click
-            def _(_: Any, mode: str = mode) -> None:
-                ok, message = safety.send_lifecycle(mode)
+                @button.on_click
+                def _(_: Any, mode: str = mode) -> None:
+                    ok, message = safety.send_lifecycle(mode)
+                    handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            # Explicit lease ownership. One-shot GUI commands bracket the lease per
+            # click; streaming controls (twist/circle/joint-vel keep-alive) need it
+            # held so the server lease is not torn down between packets. The server
+            # rejects an Acquire while another source (e.g. policy_runner teleop)
+            # owns it — the lease-owner line below makes that visible.
+            with server.gui.add_folder("제어권 (Lease)"):
+                handles["lease_owner_status"] = server.gui.add_text(
+                    "Lease owner", initial_value="unknown", disabled=True
+                )
+                take_control = server.gui.add_checkbox("Take control (hold lease)", initial_value=False)
+                handles["take_control_toggle"] = take_control
+
+                @take_control.on_update
+                def _(_: Any) -> None:
+                    if take_control.value:
+                        safety.command_client.acquire_lease()
+                        handles["last_action"].value = "OK: lease held (Take control ON)"
+                    else:
+                        safety.command_client.release_lease()
+                        handles["last_action"].value = "OK: lease released (Take control OFF)"
+
+            init_button = server.gui.add_button("InitMotion")
+            handles["init_motion_button"] = init_button
+
+            @init_button.on_click
+            def _(_: Any) -> None:
+                ok, message = _send_init_motion_and_reset_targets(safety, handles["scene"])
                 handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-        init_button = server.gui.add_button("InitMotion")
-        handles["init_motion_button"] = init_button
+            # Edit the InitMotion target directly in viser and apply it live (no
+            # restart): set_init_joints updates the runtime target used by the next
+            # InitMotion press, and _save_init_joints persists it to init_motion.json.
+            with server.gui.add_folder("InitMotion 편집 (즉시 적용)"):
+                init_left_input = server.gui.add_text(
+                    "left J1..J6 (deg)", initial_value=_format_joint6(safety.init_left_joint_deg)
+                )
+                init_right_input = server.gui.add_text(
+                    "right J1..J6 (deg)", initial_value=_format_joint6(safety.init_right_joint_deg)
+                )
+                init_edit_status = server.gui.add_text(
+                    "InitMotion edit status", initial_value="edit + Apply, or load current pose", disabled=True
+                )
+                load_current_button = server.gui.add_button("현재 자세 불러오기")
+                apply_init_button = server.gui.add_button("InitMotion 적용 (즉시)")
 
-        @init_button.on_click
-        def _(_: Any) -> None:
-            ok, message = _send_init_motion_and_reset_targets(safety, handles["scene"])
-            handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
+                @load_current_button.on_click
+                def _(_: Any) -> None:
+                    left_text, right_text, message = _current_joints_text(store)
+                    if left_text is not None and right_text is not None:
+                        init_left_input.value = left_text
+                        init_right_input.value = right_text
+                    init_edit_status.value = message
 
-        handles["last_action"] = server.gui.add_text("Last action", initial_value="none", disabled=True)
+                @apply_init_button.on_click
+                def _(_: Any) -> None:
+                    ok, message = _apply_init_joints_live(
+                        safety, init_left_input.value, init_right_input.value
+                    )
+                    init_edit_status.value = ("OK: " if ok else "BLOCKED: ") + message
+                    handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-    with tabs.add_tab("Joint jog"):
-        arm_group = server.gui.add_button_group("Arm", ("left", "right"))
-        joint_slider = server.gui.add_slider("Joint index", min=1, max=6, step=1, initial_value=1)
-        delta_slider = server.gui.add_slider("Step deg", min=-2.0, max=2.0, step=0.1, initial_value=0.5)
-        jog_button = server.gui.add_button("Send bounded joint jog")
-        handles["jog_button"] = jog_button
-        handles["jog_status"] = server.gui.add_text("Jog status", initial_value="idle", disabled=True)
+            handles["last_action"] = server.gui.add_text("Last action", initial_value="none", disabled=True)
 
-        @jog_button.on_click
-        def _(_: Any) -> None:
-            ok, message = safety.jog_joint(arm_group.value, int(joint_slider.value) - 1, float(delta_slider.value))
-            handles["jog_status"].value = ("OK: " if ok else "BLOCKED: ") + message
-
-    with tabs.add_tab("Velocity jog"):
-        vel_arm = server.gui.add_button_group("Arm", ("left", "right"))
-        vj_index = server.gui.add_slider("Joint index", min=1, max=6, step=1, initial_value=1)
-        vj_vel = server.gui.add_slider("Joint vel deg/s", min=-10.0, max=10.0, step=0.5, initial_value=3.0)
-        vj_button = server.gui.add_button("Send joint velocity")
-        v_frame = server.gui.add_button_group("Twist frame", ("stand", "local"))
-        v_axis = server.gui.add_button_group("Twist axis", ("X", "Y", "Z", "Rx", "Ry", "Rz"))
-        v_lin = server.gui.add_slider("Linear vel m/s", min=-0.05, max=0.05, step=0.005, initial_value=0.02)
-        v_ang = server.gui.add_slider("Angular vel rad/s", min=-0.2, max=0.2, step=0.02, initial_value=0.1)
-        vt_button = server.gui.add_button("Send TCP twist")
-        handles["velocity_status"] = server.gui.add_text("Velocity status", initial_value="idle", disabled=True)
-
-        @vj_button.on_click
-        def _(_: Any) -> None:
-            vel = [0.0] * 6
-            vel[int(vj_index.value) - 1] = float(vj_vel.value)
-            ok, message = safety.send_joint_velocity(vel_arm.value, tuple(vel))
-            handles["velocity_status"].value = ("OK: " if ok else "BLOCKED: ") + message
-
-        @vt_button.on_click
-        def _(_: Any) -> None:
-            axis_index = {"X": 0, "Y": 1, "Z": 2, "Rx": 3, "Ry": 4, "Rz": 5}[v_axis.value]
-            twist = [0.0] * 6
-            twist[axis_index] = float(v_lin.value) if axis_index < 3 else float(v_ang.value)
-            if v_frame.value == "local":
-                ok, message = safety.send_tcp_twist_local(vel_arm.value, tuple(twist))
-            else:
-                ok, message = safety.send_tcp_twist_stand(vel_arm.value, tuple(twist))
-            handles["velocity_status"].value = ("OK: " if ok else "BLOCKED: ") + message
-
-    with tabs.add_tab("Circle"):
-        c_diameter = server.gui.add_slider("Diameter m", min=0.02, max=0.20, step=0.01, initial_value=0.15)
-        c_period = server.gui.add_slider("Period s", min=3.0, max=16.0, step=0.5, initial_value=4.0)
-        c_plane = server.gui.add_button_group("Plane", ("xy", "xz", "yz"))
-        c_start = server.gui.add_button("Start circle (both arms)")
-        c_stop = server.gui.add_button("Stop circle")
-        handles["circle_status"] = server.gui.add_text("Circle status", initial_value="idle", disabled=True)
-        circle_stop_event = threading.Event()
-        circle_state: dict[str, Any] = {"thread": None}
-
-        def _circle_loop(diameter: float, period: float, plane: str) -> None:
-            # ArmMotion FIRST, then build the circle packet so its seq is higher
-            # than ArmMotion's — the server drops any command whose seq <= the
-            # last accepted seq for this source. The circle packet keeps a FIXED
-            # seq + long timeout so the server traces the whole circle from one
-            # accepted command; re-sends (same seq) are harmless keep-alives.
-            safety.send_lifecycle("ArmMotion")
-            time.sleep(0.1)
-            ok, message, packet = safety.build_circle_packet(
-                diameter, period, arm="both", plane=plane, repeat=200
+        with _op_tabs.add_tab("웨이포인트"):
+            # Waypoints persist to JSON (RB_GUI_WAYPOINTS_PATH) and auto-load here.
+            handles["waypoints"] = _load_waypoints()
+            handles["waypoint_note"] = server.gui.add_text(
+                "WayPoint",
+                initial_value=(
+                    "Move the robot (TCP PTP/Linear, sim or real), then capture both arms' "
+                    "joints + stand-frame pose as a teaching point. Hold moveL/moveJ to drive there."
+                ),
+                disabled=True,
             )
-            if not ok or packet is None:
-                handles["circle_status"].value = "BLOCKED: " + message
-                return
-            handles["circle_status"].value = "running: " + message
-            while not circle_stop_event.is_set():
-                safety.command_client.send(packet)
-                circle_stop_event.wait(0.3)
-            safety.command_client.send_lifecycle("Hold")
-
-        @c_start.on_click
-        def _(_: Any) -> None:
-            existing = circle_state["thread"]
-            if existing is not None and existing.is_alive():
-                handles["circle_status"].value = "already running; press Stop first"
-                return
-            reason = safety.tcp_command_disabled_reason()
-            if reason:
-                handles["circle_status"].value = "BLOCKED: " + reason
-                return
-            circle_stop_event.clear()
-            thread = threading.Thread(
-                target=_circle_loop,
-                args=(float(c_diameter.value), float(c_period.value), str(c_plane.value)),
-                daemon=True,
+            handles["waypoint_status"] = server.gui.add_text(
+                "WayPoint status",
+                initial_value=f"loaded {len(handles['waypoints'])} waypoint(s) from {_waypoints_path()}",
+                disabled=True,
             )
-            circle_state["thread"] = thread
-            thread.start()
-            handles["circle_status"].value = "starting..."
+            waypoint_name_input = server.gui.add_text("WayPoint name", initial_value="wp1")
+            capture_button = server.gui.add_button("현재 값 가져오기")
+            waypoint_dropdown = server.gui.add_dropdown("Saved waypoints", ("(none)",), initial_value="(none)")
+            handles["waypoint_dropdown"] = waypoint_dropdown
+            _refresh_waypoint_dropdown(handles)
 
-        @c_stop.on_click
-        def _(_: Any) -> None:
-            circle_stop_event.set()
-            handles["circle_status"].value = "stopped"
+            @capture_button.on_click
+            def _(_: Any) -> None:
+                ok, message = _capture_waypoint(handles, store, waypoint_name_input.value)
+                if ok:
+                    _refresh_waypoint_dropdown(handles)
+                    message = f"{message}; {_persist_waypoints(handles)}"
+                handles["waypoint_status"].value = message
 
-    with tabs.add_tab("TCP PTP"):
-        handles["tcp_ptp_note"] = server.gui.add_text(
-            "TCP PTP",
-            initial_value="Move to TCP target, point-to-point. Cartesian path is not guaranteed.",
-            disabled=True,
-        )
-        handles["tcp_status"] = server.gui.add_text(
-            "TCP status",
-            initial_value="TCP PTP target disabled until RB_GUI_ENABLE_TCP_POSE_COMMANDS=1",
-            disabled=True,
-        )
-        _install_tcp_target_callbacks(handles["scene"], handles["tcp_status"])
-        tcp_arm_group = server.gui.add_button_group("TCP arm", ("left", "right"))
-        handles["tcp_frame_mode"] = _TCP_FRAME_LOCAL
-        handles["tcp_frame_buttons"] = {}
-        for frame_mode in _TCP_FRAME_OPTIONS:
-            frame_button = server.gui.add_button(frame_mode, color=_mode_button_color(frame_mode, _tcp_frame_mode(handles)))
-            handles["tcp_frame_buttons"][frame_mode] = frame_button
+            # moveL / moveJ are press-and-hold (deadman): on_hold re-sends the target
+            # while held, and releasing stops re-sending so the command goes stale
+            # (command_timeout_sec) and the server holds in place within a fraction
+            # of a second. moveL -> TcpPoseTarget, moveJ -> JointTarget, both arms.
+            movel_button = server.gui.add_button("moveL (hold)")
+            movej_button = server.gui.add_button("moveJ (hold)")
+            handles["waypoint_move_buttons"] = [movel_button, movej_button]
 
-            @frame_button.on_click
-            def _(_: Any, frame_mode: str = frame_mode) -> None:
-                handles["tcp_frame_mode"] = frame_mode
-                _update_tcp_frame_buttons(handles)
-                handles["tcp_status"].value = f"TCP frame: {frame_mode}"
+            @movel_button.on_hold(callback_hz=10.0)
+            def _(_: Any) -> None:
+                _, message = _drive_waypoint_tcp(handles, safety)
+                handles["waypoint_status"].value = message
 
-        linear_step = server.gui.add_slider("Linear step mm", min=0.1, max=10.0, step=0.1, initial_value=5.0)
-        angular_step = server.gui.add_slider("Angular step deg", min=0.1, max=10.0, step=0.1, initial_value=1.0)
-        handles["tcp_arm_group"] = tcp_arm_group
-        handles["tcp_linear_step"] = linear_step
-        handles["tcp_angular_step"] = angular_step
-        handles["tcp_pose_buttons"] = []
-        send_target_button = server.gui.add_button("Send TCP target")
-        handles["tcp_pose_buttons"].append(send_target_button)
+            @movej_button.on_hold(callback_hz=10.0)
+            def _(_: Any) -> None:
+                _, message = _drive_waypoint_joint(handles, safety)
+                handles["waypoint_status"].value = message
 
-        @send_target_button.on_click
-        def _(_: Any) -> None:
-            arm = tcp_arm_group.value
-            ok, message = _send_tcp_pose_target_from_marker(safety, handles["scene"], arm)
-            handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+            # Saved-waypoints operations on the selected entry: set as the InitMotion
+            # pose (persisted to JSON) and delete (kept at the bottom).
+            set_init_button = server.gui.add_button("Init Motion 으로 설정하기")
+            delete_button = server.gui.add_button("WayPoint 삭제", color="red")
 
-        def _send_ptp_delta(delta: tuple[float, float, float, float, float, float]) -> None:
-            arm = tcp_arm_group.value
-            frame_mode = _tcp_frame_mode(handles)
-            ok, message = _apply_tcp_delta_and_send_pose_target(safety, handles["scene"], arm, delta, frame_mode)
-            handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+            @set_init_button.on_click
+            def _(_: Any) -> None:
+                _, message = _set_waypoint_as_init(handles, safety)
+                handles["waypoint_status"].value = message
 
-        def _add_tcp_ptp_delta_button(label: str, axis_index: int, sign: float, angular: bool = False) -> None:
-            button = server.gui.add_button(label)
-            handles["tcp_pose_buttons"].append(button)
+            @delete_button.on_click
+            def _(_: Any) -> None:
+                ok, info = _delete_waypoint(handles)
+                if ok:
+                    _refresh_waypoint_dropdown(handles)
+                    handles["waypoint_status"].value = f"deleted '{info}'; {_persist_waypoints(handles)}"
+                else:
+                    handles["waypoint_status"].value = info
 
-            @button.on_click
-            def _(_: Any, axis_index: int = axis_index, sign: float = sign, angular: bool = angular) -> None:
-                step = _angular_step_radians(float(angular_step.value)) if angular else _linear_step_meters(float(linear_step.value))
-                delta = [0.0] * 6
-                delta[axis_index] = sign * step
-                _send_ptp_delta(tuple(delta))  # type: ignore[arg-type]
+        with _op_tabs.add_tab("안전"):
+            with server.gui.add_folder("Safety floor"):
+                handles["floor_applied"] = server.gui.add_text(
+                    "Applied z", initial_value="no state", disabled=True
+                )
+                floor_slider = server.gui.add_slider(
+                    "Set floor z mm", min=0.0, max=500.0, step=1.0, initial_value=10.0
+                )
+                handles["floor_slider"] = floor_slider
+                floor_send = server.gui.add_button("Send floor z")
+                handles["floor_send_button"] = floor_send
+                handles["floor_set_status"] = server.gui.add_text(
+                    "Floor set status", initial_value="idle", disabled=True
+                )
 
-        for label, index, sign in (
-            ("+X", 0, 1.0),
-            ("-X", 0, -1.0),
-            ("+Y", 1, 1.0),
-            ("-Y", 1, -1.0),
-            ("+Z", 2, 1.0),
-            ("-Z", 2, -1.0),
-        ):
-            _add_tcp_ptp_delta_button(label, index, sign)
-        for label, index, sign in (
-            ("+roll", 3, 1.0),
-            ("-roll", 3, -1.0),
-            ("+pitch", 4, 1.0),
-            ("-pitch", 4, -1.0),
-            ("+yaw", 5, 1.0),
-            ("-yaw", 5, -1.0),
-        ):
-            _add_tcp_ptp_delta_button(label, index, sign, angular=True)
+                @floor_send.on_click
+                def _(_: Any) -> None:
+                    ok, message = safety.send_set_floor_z(float(floor_slider.value) / 1000.0)
+                    handles["floor_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-    with tabs.add_tab("TCP Linear"):
-        handles["tcp_linear_note"] = server.gui.add_text(
-            "TCP Linear",
-            initial_value="Move linearly in Cartesian TCP space. Constant orientation keeps the start orientation.",
-            disabled=True,
-        )
-        handles["tcp_linear_status"] = server.gui.add_text(
-            "TCP Linear status",
-            initial_value="TCP Linear disabled until RB_GUI_ENABLE_TCP_POSE_COMMANDS=1",
-            disabled=True,
-        )
-        handles["tcp_linear_source"] = server.gui.add_text(
-            "Target marker source",
-            initial_value="current TCP target marker",
-            disabled=True,
-        )
-        handles["tcp_linear_arm"] = "both"
-        handles["tcp_linear_arm_buttons"] = {}
-        for arm in _TCP_LINEAR_ARM_OPTIONS:
-            arm_button = server.gui.add_button(arm, color=_mode_button_color(arm, _tcp_linear_arm(handles)))
-            handles["tcp_linear_arm_buttons"][arm] = arm_button
+                @floor_slider.on_update
+                def _(_: Any) -> None:
+                    # Live preview while dragging: the yellow plane follows the
+                    # pending slider value immediately; _update_floor_panel hides
+                    # it again once the slider matches the server-applied z.
+                    update_floor_plane_preview(
+                        handles.get("scene", {}), float(floor_slider.value) / 1000.0
+                    )
 
-            @arm_button.on_click
-            def _(_: Any, arm: str = arm) -> None:
-                handles["tcp_linear_arm"] = arm
-                _update_tcp_linear_selection_buttons(handles)
-                handles["tcp_linear_status"].value = f"TCP Linear arm: {arm}"
+    with tabs.add_tab("이동"):
+        _move_tabs = server.gui.add_tab_group()
+        with _move_tabs.add_tab("관절"):
+            # Per-joint [−] Jn [+] nudge rows (same direct pattern as TCP PTP):
+            # one click jogs that joint by ±Step. Step slider is magnitude only;
+            # the −/+ button decides the sign.
+            jog_arm = server.gui.add_button_group("Arm", ("left", "right"))
+            jog_step = server.gui.add_slider("Step deg", min=0.1, max=5.0, step=0.1, initial_value=0.5)
+            handles["jog_status"] = server.gui.add_text("Jog status", initial_value="idle", disabled=True)
 
-        linear_duration = server.gui.add_slider("duration_sec", min=0.05, max=10.0, step=0.05, initial_value=2.0)
-        linear_speed = server.gui.add_slider("linear_speed_m_s", min=0.001, max=0.05, step=0.001, initial_value=0.03)
-        angular_speed = server.gui.add_slider("angular_speed_rad_s", min=0.01, max=0.3, step=0.01, initial_value=0.2)
-        handles["tcp_linear_orientation_mode"] = "slerp"
-        handles["tcp_linear_orientation_buttons"] = {}
-        for orientation_mode in _TCP_LINEAR_ORIENTATION_MODES:
-            orientation_button = server.gui.add_button(
-                orientation_mode,
-                color=_mode_button_color(orientation_mode, _tcp_linear_orientation_mode(handles)),
+            def _jog_joint_nudge(joint_index: int, sign: float) -> None:
+                ok, message = safety.jog_joint(jog_arm.value, joint_index, sign * float(jog_step.value))
+                handles["jog_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            def _add_joint_jog_row(joint_index: int) -> None:
+                group = server.gui.add_button_group("", ("-", _nudge_label(f"J{joint_index + 1}"), "+"))
+
+                @group.on_click
+                def _(_: Any, group: Any = group, joint_index: int = joint_index) -> None:
+                    if group.value == "-":
+                        _jog_joint_nudge(joint_index, -1.0)
+                    elif group.value == "+":
+                        _jog_joint_nudge(joint_index, 1.0)
+
+            for _joint_index in range(6):
+                _add_joint_jog_row(_joint_index)
+
+        with _move_tabs.add_tab("속도"):
+            # Two clearly-separated modes (were crammed in one tab). Each DoF has a
+            # [−] label [+] nudge row; the slider sets magnitude only. A click sends
+            # one velocity command (streams until it goes stale); 정지 sends zero.
+            vel_arm = server.gui.add_button_group("Arm", ("left", "right"))
+            handles["velocity_status"] = server.gui.add_text("Velocity status", initial_value="idle", disabled=True)
+
+            def _set_vel_status(ok: bool, message: str) -> None:
+                handles["velocity_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            with server.gui.add_folder("관절 속도"):
+                jv_speed = server.gui.add_slider("deg/s", min=0.5, max=10.0, step=0.5, initial_value=3.0)
+
+                def _send_joint_vel(joint_index: int, sign: float) -> None:
+                    vel = [0.0] * 6
+                    vel[joint_index] = sign * float(jv_speed.value)
+                    _set_vel_status(*safety.send_joint_velocity(vel_arm.value, tuple(vel)))
+
+                def _add_joint_vel_row(joint_index: int) -> None:
+                    group = server.gui.add_button_group("", ("-", _nudge_label(f"J{joint_index + 1}"), "+"))
+
+                    @group.on_click
+                    def _(_: Any, group: Any = group, joint_index: int = joint_index) -> None:
+                        if group.value == "-":
+                            _send_joint_vel(joint_index, -1.0)
+                        elif group.value == "+":
+                            _send_joint_vel(joint_index, 1.0)
+
+                for _vel_joint_index in range(6):
+                    _add_joint_vel_row(_vel_joint_index)
+                jv_stop = server.gui.add_button("정지 (Stop)", color="red")
+
+                @jv_stop.on_click
+                def _(_: Any) -> None:
+                    _set_vel_status(*safety.send_joint_velocity(vel_arm.value, (0.0,) * 6))
+
+            with server.gui.add_folder("TCP 트위스트"):
+                tw_frame = server.gui.add_button_group("Frame", ("stand", "local"))
+                tw_lin = server.gui.add_slider("Linear m/s", min=0.005, max=0.05, step=0.005, initial_value=0.02)
+                tw_ang = server.gui.add_slider("Angular rad/s", min=0.02, max=0.2, step=0.02, initial_value=0.1)
+                _twist_axes = (("X", 0, False), ("Y", 1, False), ("Z", 2, False),
+                               ("Rx", 3, True), ("Ry", 4, True), ("Rz", 5, True))
+
+                def _send_twist(axis_index: int, angular: bool, sign: float) -> None:
+                    twist = [0.0] * 6
+                    twist[axis_index] = sign * (float(tw_ang.value) if angular else float(tw_lin.value))
+                    if tw_frame.value == "local":
+                        _set_vel_status(*safety.send_tcp_twist_local(vel_arm.value, tuple(twist)))
+                    else:
+                        _set_vel_status(*safety.send_tcp_twist_stand(vel_arm.value, tuple(twist)))
+
+                def _add_twist_row(label: str, axis_index: int, angular: bool) -> None:
+                    group = server.gui.add_button_group("", ("-", _nudge_label(label), "+"))
+
+                    @group.on_click
+                    def _(_: Any, group: Any = group, axis_index: int = axis_index, angular: bool = angular) -> None:
+                        if group.value == "-":
+                            _send_twist(axis_index, angular, -1.0)
+                        elif group.value == "+":
+                            _send_twist(axis_index, angular, 1.0)
+
+                for _tw_label, _tw_index, _tw_angular in _twist_axes:
+                    _add_twist_row(_tw_label, _tw_index, _tw_angular)
+                tw_stop = server.gui.add_button("정지 (Stop)", color="red")
+
+                @tw_stop.on_click
+                def _(_: Any) -> None:
+                    if tw_frame.value == "local":
+                        _set_vel_status(*safety.send_tcp_twist_local(vel_arm.value, (0.0,) * 6))
+                    else:
+                        _set_vel_status(*safety.send_tcp_twist_stand(vel_arm.value, (0.0,) * 6))
+
+        with _move_tabs.add_tab("TCP PTP"):
+            handles["tcp_ptp_note"] = server.gui.add_text(
+                "TCP PTP",
+                initial_value="Move to TCP target, point-to-point. Cartesian path is not guaranteed.",
+                disabled=True,
             )
-            handles["tcp_linear_orientation_buttons"][orientation_mode] = orientation_button
-
-            @orientation_button.on_click
-            def _(_: Any, orientation_mode: str = orientation_mode) -> None:
-                handles["tcp_linear_orientation_mode"] = orientation_mode
-                _update_tcp_linear_selection_buttons(handles)
-                handles["tcp_linear_status"].value = f"TCP Linear orientation_mode: {orientation_mode}"
-
-        handles["tcp_linear_buttons"] = []
-        send_linear_button = server.gui.add_button("Send TCP Linear Move")
-        handles["tcp_linear_buttons"].append(send_linear_button)
-
-        @send_linear_button.on_click
-        def _(_: Any) -> None:
-            ok, message = _send_tcp_linear_move_from_marker(
-                safety,
-                handles["scene"],
-                _tcp_linear_arm(handles),
-                duration_sec=float(linear_duration.value),
-                linear_speed_m_s=float(linear_speed.value),
-                angular_speed_rad_s=float(angular_speed.value),
-                orientation_mode=_tcp_linear_orientation_mode(handles),
+            handles["tcp_status"] = server.gui.add_text(
+                "TCP status",
+                initial_value="ready",
+                disabled=True,
             )
-            handles["tcp_linear_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+            _install_tcp_target_callbacks(handles["scene"], handles["tcp_status"])
+            handles["tcp_ptp_arm"] = "left"
+            handles["tcp_ptp_arm_buttons"] = {}
+            for arm in _TCP_PTP_ARM_OPTIONS:
+                arm_button = server.gui.add_button("TCP arm: " + arm, color=_mode_button_color(arm, _tcp_ptp_arm(handles)))
+                handles["tcp_ptp_arm_buttons"][arm] = arm_button
 
-    with tabs.add_tab("Low-level Delta Debug"):
-        handles["tcp_debug_note"] = server.gui.add_text(
-            "Low-level Delta Debug",
-            initial_value="Raw TcpDeltaLocal/Stand. Usually not used for normal GUI target moves.",
-            disabled=True,
-        )
-        handles["tcp_debug_status"] = server.gui.add_text(
-            "Delta debug status",
-            initial_value="Raw TcpDeltaLocal/TcpDeltaStand debug controls",
-            disabled=True,
-        )
-        tcp_debug_arm_group = server.gui.add_button_group("Arm", ("left", "right"))
+                @arm_button.on_click
+                def _(_: Any, arm: str = arm) -> None:
+                    handles["tcp_ptp_arm"] = arm
+                    _update_tcp_ptp_arm_buttons(handles)
+                    handles["tcp_status"].value = f"TCP arm: {arm}"
 
-        def _send_low_level_delta(delta: tuple[float, float, float, float, float, float]) -> None:
-            arm = tcp_debug_arm_group.value
-            frame_mode = _tcp_frame_mode(handles)
-            if frame_mode == _TCP_FRAME_LOCAL:
-                ok, message = safety.send_tcp_delta_local(arm, delta)
-            else:
-                ok, message = safety.send_tcp_delta_stand(arm, delta)
-            if ok:
-                _apply_tcp_delta_to_target(handles["scene"], arm, delta, frame_mode)
-            status = ("OK: " if ok else "BLOCKED: ") + message
-            handles["tcp_debug_status"].value = status
-            handles["tcp_status"].value = status
+            handles["tcp_frame_mode"] = _TCP_FRAME_LOCAL
+            handles["tcp_frame_buttons"] = {}
+            for frame_mode in _TCP_FRAME_OPTIONS:
+                frame_button = server.gui.add_button(frame_mode, color=_mode_button_color(frame_mode, _tcp_frame_mode(handles)))
+                handles["tcp_frame_buttons"][frame_mode] = frame_button
 
-        def _add_low_level_delta_button(label: str, axis_index: int, sign: float, angular: bool = False) -> None:
-            button = server.gui.add_button(label)
-            handles["tcp_pose_buttons"].append(button)
+                @frame_button.on_click
+                def _(_: Any, frame_mode: str = frame_mode) -> None:
+                    handles["tcp_frame_mode"] = frame_mode
+                    _update_tcp_frame_buttons(handles)
+                    handles["tcp_status"].value = f"TCP frame: {frame_mode}"
 
-            @button.on_click
-            def _(_: Any, axis_index: int = axis_index, sign: float = sign, angular: bool = angular) -> None:
-                step = _angular_step_radians(float(angular_step.value)) if angular else _linear_step_meters(float(linear_step.value))
-                delta = [0.0] * 6
-                delta[axis_index] = sign * step
-                _send_low_level_delta(tuple(delta))  # type: ignore[arg-type]
+            linear_step = server.gui.add_slider("Linear step mm", min=0.1, max=10.0, step=0.1, initial_value=5.0)
+            angular_step = server.gui.add_slider("Angular step deg", min=0.1, max=10.0, step=0.1, initial_value=1.0)
+            handles["tcp_linear_step"] = linear_step
+            handles["tcp_angular_step"] = angular_step
+            handles["tcp_pose_buttons"] = []
+            send_target_button = server.gui.add_button("Send TCP target")
+            handles["tcp_pose_buttons"].append(send_target_button)
 
-        for label, index, sign in (
-            ("+X", 0, 1.0),
-            ("-X", 0, -1.0),
-            ("+Y", 1, 1.0),
-            ("-Y", 1, -1.0),
-            ("+Z", 2, 1.0),
-            ("-Z", 2, -1.0),
-        ):
-            _add_low_level_delta_button(label, index, sign)
-        for label, index, sign in (
-            ("+roll", 3, 1.0),
-            ("-roll", 3, -1.0),
-            ("+pitch", 4, 1.0),
-            ("-pitch", 4, -1.0),
-            ("+yaw", 5, 1.0),
-            ("-yaw", 5, -1.0),
-        ):
-            _add_low_level_delta_button(label, index, sign, angular=True)
+            @send_target_button.on_click
+            def _(_: Any) -> None:
+                arm = _tcp_ptp_arm(handles)
+                ok, message = _send_tcp_pose_target_from_marker(safety, handles["scene"], arm)
+                handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-    with tabs.add_tab("Debug"):
-        handles["tick"] = server.gui.add_number("tick", initial_value=0, disabled=True)
-        handles["scene_assets"] = server.gui.add_text(
-            "scene assets",
-            initial_value=_format_scene_asset_status(handles.get("scene", {})),
-            disabled=True,
-        )
-        handles["left_q"] = server.gui.add_text("left q_actual", initial_value="[]", disabled=True)
-        handles["right_q"] = server.gui.add_text("right q_actual", initial_value="[]", disabled=True)
-        handles["left_sent"] = server.gui.add_text("left q_sent", initial_value="[]", disabled=True)
-        handles["right_sent"] = server.gui.add_text("right q_sent", initial_value="[]", disabled=True)
-        handles["left_prev_sent"] = server.gui.add_text("left previous sent", initial_value="[]", disabled=True)
-        handles["right_prev_sent"] = server.gui.add_text("right previous sent", initial_value="[]", disabled=True)
-        handles["timestamps"] = server.gui.add_text("timestamps", initial_value="n/a", disabled=True)
-        handles["timing"] = server.gui.add_text("period/jitter/filter", initial_value="n/a", disabled=True)
-        handles["send_durations"] = server.gui.add_text("send durations", initial_value="n/a", disabled=True)
-        handles["arm_modes"] = server.gui.add_text("arm modes/connections", initial_value="unknown", disabled=True)
-        handles["logger"] = server.gui.add_text("logger health", initial_value="unknown", disabled=True)
-        handles["packets"] = server.gui.add_text("state packets", initial_value="0 received / 0 invalid", disabled=True)
+            def _send_ptp_delta(delta: tuple[float, float, float, float, float, float]) -> None:
+                arm = _tcp_ptp_arm(handles)
+                frame_mode = _tcp_frame_mode(handles)
+                ok, message = _apply_tcp_delta_and_send_pose_target(safety, handles["scene"], arm, delta, frame_mode)
+                handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            def _add_tcp_ptp_axis_group(axis_label: str, axis_index: int, angular: bool) -> None:
+                # One row per axis: [-] <axis> [+], with the axis name centered
+                # between the decrement and increment buttons. Clicking the middle
+                # (axis-name) segment is a no-op. Button groups cannot be disabled
+                # in viser, so these stay live and rely on the fail-closed safety
+                # layer (send_tcp_pose_target) to reject commands when not ready.
+                group = server.gui.add_button_group("", ("-", _nudge_label(axis_label.capitalize()), "+"))
+
+                @group.on_click
+                def _(_: Any, group: Any = group, axis_index: int = axis_index, angular: bool = angular) -> None:
+                    choice = group.value
+                    if choice not in ("-", "+"):
+                        return
+                    sign = 1.0 if choice == "+" else -1.0
+                    step = _angular_step_radians(float(angular_step.value)) if angular else _linear_step_meters(float(linear_step.value))
+                    delta = [0.0] * 6
+                    delta[axis_index] = sign * step
+                    _send_ptp_delta(tuple(delta))  # type: ignore[arg-type]
+
+            with server.gui.add_folder("축 넛지 (−/+)"):
+                for axis_label, axis_index, angular in _TCP_PTP_AXES:
+                    _add_tcp_ptp_axis_group(axis_label, axis_index, angular)
+
+        with _move_tabs.add_tab("TCP Linear"):
+            handles["tcp_linear_note"] = server.gui.add_text(
+                "TCP Linear",
+                initial_value="Move linearly in Cartesian TCP space. Constant orientation keeps the start orientation.",
+                disabled=True,
+            )
+            handles["tcp_linear_status"] = server.gui.add_text(
+                "TCP Linear status",
+                initial_value="ready",
+                disabled=True,
+            )
+            handles["tcp_linear_source"] = server.gui.add_text(
+                "Target marker source",
+                initial_value="current TCP target marker",
+                disabled=True,
+            )
+            handles["tcp_linear_arm"] = "both"
+            handles["tcp_linear_arm_buttons"] = {}
+            for arm in _TCP_LINEAR_ARM_OPTIONS:
+                arm_button = server.gui.add_button(arm, color=_mode_button_color(arm, _tcp_linear_arm(handles)))
+                handles["tcp_linear_arm_buttons"][arm] = arm_button
+
+                @arm_button.on_click
+                def _(_: Any, arm: str = arm) -> None:
+                    handles["tcp_linear_arm"] = arm
+                    _update_tcp_linear_selection_buttons(handles)
+                    handles["tcp_linear_status"].value = f"TCP Linear arm: {arm}"
+
+            linear_duration = server.gui.add_slider("duration_sec", min=0.05, max=10.0, step=0.05, initial_value=2.0)
+            linear_speed = server.gui.add_slider("linear_speed_m_s", min=0.001, max=0.05, step=0.001, initial_value=0.03)
+            angular_speed = server.gui.add_slider("angular_speed_rad_s", min=0.01, max=0.3, step=0.01, initial_value=0.2)
+            handles["tcp_linear_orientation_mode"] = "slerp"
+            handles["tcp_linear_orientation_buttons"] = {}
+            for orientation_mode in _TCP_LINEAR_ORIENTATION_MODES:
+                orientation_button = server.gui.add_button(
+                    orientation_mode,
+                    color=_mode_button_color(orientation_mode, _tcp_linear_orientation_mode(handles)),
+                )
+                handles["tcp_linear_orientation_buttons"][orientation_mode] = orientation_button
+
+                @orientation_button.on_click
+                def _(_: Any, orientation_mode: str = orientation_mode) -> None:
+                    handles["tcp_linear_orientation_mode"] = orientation_mode
+                    _update_tcp_linear_selection_buttons(handles)
+                    handles["tcp_linear_status"].value = f"TCP Linear orientation_mode: {orientation_mode}"
+
+            handles["tcp_linear_buttons"] = []
+            send_linear_button = server.gui.add_button("Send TCP Linear Move")
+            handles["tcp_linear_buttons"].append(send_linear_button)
+
+            @send_linear_button.on_click
+            def _(_: Any) -> None:
+                ok, message = _send_tcp_linear_move_from_marker(
+                    safety,
+                    handles["scene"],
+                    _tcp_linear_arm(handles),
+                    duration_sec=float(linear_duration.value),
+                    linear_speed_m_s=float(linear_speed.value),
+                    angular_speed_rad_s=float(angular_speed.value),
+                    orientation_mode=_tcp_linear_orientation_mode(handles),
+                )
+                handles["tcp_linear_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+    with tabs.add_tab("고급"):
+        _adv_tabs = server.gui.add_tab_group()
+        with _adv_tabs.add_tab("Circle"):
+            c_diameter = server.gui.add_slider("Diameter m", min=0.02, max=0.20, step=0.01, initial_value=0.15)
+            c_period = server.gui.add_slider("Period s", min=3.0, max=16.0, step=0.5, initial_value=4.0)
+            c_plane = server.gui.add_button_group("Plane", ("xy", "xz", "yz"))
+            c_start = server.gui.add_button("Start circle (both arms)")
+            c_stop = server.gui.add_button("Stop circle")
+            # Start greys out when the TCP/Cartesian gate is closed; Stop always
+            # stays live so the operator can halt a running circle.
+            handles["circle_start_button"] = c_start
+            handles["circle_status"] = server.gui.add_text("Circle status", initial_value="idle", disabled=True)
+            circle_stop_event = threading.Event()
+            circle_state: dict[str, Any] = {"thread": None}
+
+            def _circle_loop(diameter: float, period: float, plane: str) -> None:
+                # ArmMotion FIRST, then build the circle packet so its seq is higher
+                # than ArmMotion's — the server drops any command whose seq <= the
+                # last accepted seq for this source. The circle packet keeps a FIXED
+                # seq + long timeout so the server traces the whole circle from one
+                # accepted command; re-sends (same seq) are harmless keep-alives.
+                safety.send_lifecycle("ArmMotion")
+                time.sleep(0.1)
+                ok, message, packet = safety.build_circle_packet(
+                    diameter, period, arm="both", plane=plane, repeat=200
+                )
+                if not ok or packet is None:
+                    handles["circle_status"].value = "BLOCKED: " + message
+                    return
+                handles["circle_status"].value = "running: " + message
+                while not circle_stop_event.is_set():
+                    safety.command_client.send(packet)
+                    circle_stop_event.wait(0.3)
+                safety.command_client.send_lifecycle("Hold")
+
+            @c_start.on_click
+            def _(_: Any) -> None:
+                existing = circle_state["thread"]
+                if existing is not None and existing.is_alive():
+                    handles["circle_status"].value = "already running; press Stop first"
+                    return
+                reason = safety.tcp_command_disabled_reason()
+                if reason:
+                    handles["circle_status"].value = "BLOCKED: " + reason
+                    return
+                circle_stop_event.clear()
+                thread = threading.Thread(
+                    target=_circle_loop,
+                    args=(float(c_diameter.value), float(c_period.value), str(c_plane.value)),
+                    daemon=True,
+                )
+                circle_state["thread"] = thread
+                thread.start()
+                handles["circle_status"].value = "starting..."
+
+            @c_stop.on_click
+            def _(_: Any) -> None:
+                circle_stop_event.set()
+                handles["circle_status"].value = "stopped"
+
+        with _adv_tabs.add_tab("Delta"):
+            handles["tcp_debug_note"] = server.gui.add_text(
+                "Low-level Delta Debug",
+                initial_value="Raw TcpDeltaLocal/Stand. Usually not used for normal GUI target moves.",
+                disabled=True,
+            )
+            handles["tcp_debug_status"] = server.gui.add_text(
+                "Delta debug status",
+                initial_value="Raw TcpDeltaLocal/TcpDeltaStand debug controls",
+                disabled=True,
+            )
+            tcp_debug_arm_group = server.gui.add_button_group("Arm", ("left", "right"))
+
+            def _send_low_level_delta(delta: tuple[float, float, float, float, float, float]) -> None:
+                arm = tcp_debug_arm_group.value
+                frame_mode = _tcp_frame_mode(handles)
+                if frame_mode == _TCP_FRAME_LOCAL:
+                    ok, message = safety.send_tcp_delta_local(arm, delta)
+                else:
+                    ok, message = safety.send_tcp_delta_stand(arm, delta)
+                if ok:
+                    _apply_tcp_delta_to_target(handles["scene"], arm, delta, frame_mode)
+                status = ("OK: " if ok else "BLOCKED: ") + message
+                handles["tcp_debug_status"].value = status
+                handles["tcp_status"].value = status
+
+            def _add_low_level_delta_button(label: str, axis_index: int, sign: float, angular: bool = False) -> None:
+                button = server.gui.add_button(label)
+                handles["tcp_pose_buttons"].append(button)
+
+                @button.on_click
+                def _(_: Any, axis_index: int = axis_index, sign: float = sign, angular: bool = angular) -> None:
+                    step = _angular_step_radians(float(angular_step.value)) if angular else _linear_step_meters(float(linear_step.value))
+                    delta = [0.0] * 6
+                    delta[axis_index] = sign * step
+                    _send_low_level_delta(tuple(delta))  # type: ignore[arg-type]
+
+            for label, index, sign in (
+                ("+X", 0, 1.0),
+                ("-X", 0, -1.0),
+                ("+Y", 1, 1.0),
+                ("-Y", 1, -1.0),
+                ("+Z", 2, 1.0),
+                ("-Z", 2, -1.0),
+            ):
+                _add_low_level_delta_button(label, index, sign)
+            for label, index, sign in (
+                ("+roll", 3, 1.0),
+                ("-roll", 3, -1.0),
+                ("+pitch", 4, 1.0),
+                ("-pitch", 4, -1.0),
+                ("+yaw", 5, 1.0),
+                ("-yaw", 5, -1.0),
+            ):
+                _add_low_level_delta_button(label, index, sign, angular=True)
+
+        with _adv_tabs.add_tab("Debug"):
+            handles["tick"] = server.gui.add_number("tick", initial_value=0, disabled=True)
+            handles["scene_assets"] = server.gui.add_text(
+                "scene assets",
+                initial_value=_format_scene_asset_status(handles.get("scene", {})),
+                disabled=True,
+            )
+            handles["left_q"] = server.gui.add_text("left q_actual", initial_value="[]", disabled=True)
+            handles["right_q"] = server.gui.add_text("right q_actual", initial_value="[]", disabled=True)
+            handles["left_sent"] = server.gui.add_text("left q_sent", initial_value="[]", disabled=True)
+            handles["right_sent"] = server.gui.add_text("right q_sent", initial_value="[]", disabled=True)
+            handles["left_prev_sent"] = server.gui.add_text("left previous sent", initial_value="[]", disabled=True)
+            handles["right_prev_sent"] = server.gui.add_text("right previous sent", initial_value="[]", disabled=True)
+            handles["timestamps"] = server.gui.add_text("timestamps", initial_value="n/a", disabled=True)
+            handles["timing"] = server.gui.add_text("period/jitter/filter", initial_value="n/a", disabled=True)
+            handles["send_durations"] = server.gui.add_text("send durations", initial_value="n/a", disabled=True)
+            handles["arm_modes"] = server.gui.add_text("arm modes/connections", initial_value="unknown", disabled=True)
+            handles["logger"] = server.gui.add_text("logger health", initial_value="unknown", disabled=True)
+            handles["packets"] = server.gui.add_text("state packets", initial_value="0 received / 0 invalid", disabled=True)
 
     return handles
 
@@ -1170,6 +1788,42 @@ def _latest_circle_overlay(
     if overlay_store is None:
         return None, True
     return overlay_store.latest(), overlay_store.is_stale()
+
+
+def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
+    floor = latest.floor_constraint if latest is not None else None
+    update_floor_plane(handles.get("scene", {}), floor)
+    slider = handles.get("floor_slider")
+    if not isinstance(floor, Mapping) or not bool(floor.get("enabled", False)):
+        update_floor_plane_preview(handles.get("scene", {}), None)
+        if "floor_applied" in handles:
+            handles["floor_applied"].value = "disabled"
+        return
+    z = floor.get("z_min_m")
+    # Pending-value preview reconciliation: show the yellow preview plane only
+    # while the slider differs from the server-applied z (>= 0.5 mm); after a
+    # successful Send the applied plane catches up and the preview disappears.
+    if slider is not None and isinstance(z, (int, float)):
+        pending_mm = float(slider.value)
+        applied_mm = float(z) * 1000.0
+        if abs(pending_mm - applied_mm) >= 0.5:
+            update_floor_plane_preview(handles.get("scene", {}), pending_mm / 1000.0)
+        else:
+            update_floor_plane_preview(handles.get("scene", {}), None)
+    if "floor_applied" not in handles:
+        return
+    z_txt = f"{float(z) * 1000:.0f}mm" if isinstance(z, (int, float)) else "?"
+    reject = floor.get("last_set_reject_reason")
+    handles["floor_applied"].value = z_txt + (f" (last reject: {reject})" if reject else "")
+    if slider is not None:
+        lo = floor.get("runtime_min_z_m")
+        hi = floor.get("runtime_max_z_m")
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and float(hi) > float(lo):
+            try:
+                slider.min = float(lo) * 1000.0
+                slider.max = float(hi) * 1000.0
+            except Exception:
+                pass
 
 
 def _update_circle_overlay_gui(handles: dict[str, Any], overlay_store: CircleOverlayStore | None) -> None:
@@ -1183,6 +1837,35 @@ def _update_circle_overlay_gui(handles: dict[str, Any], overlay_store: CircleOve
     update_circle_overlay(handles.get("scene", {}), overlay, stale=stale)
 
 
+def _update_lease_owner(
+    handles: dict[str, Any],
+    latest: StateSnapshot | None,
+    my_source_id: str,
+    *,
+    held: bool,
+) -> None:
+    """Show who owns the command-source lease, derived from server state.
+
+    The server lease is non-preemptive: while another source (e.g. policy_runner
+    teleop) owns it, a GUI Acquire is rejected. Surfacing the owner turns a silent
+    failure into an explicit "stop/release the other source first"."""
+    handle = handles.get("lease_owner_status")
+    if handle is None:
+        return
+    if latest is None:
+        handle.value = "no state stream"
+        return
+    command_source = latest.command_source
+    owner = command_source.display_source_id
+    if not command_source.active or owner is None:
+        handle.value = "free — you hold it (pending)" if held else "free"
+        return
+    if owner == my_source_id:
+        handle.value = "held by you" + ("; Take control ON" if held else "")
+    else:
+        handle.value = f"held by {owner} — stop or release it before the GUI can take control"
+
+
 def update_gui(
     handles: dict[str, Any],
     safety: OperatorSafety,
@@ -1190,6 +1873,7 @@ def update_gui(
     overlay_store: CircleOverlayStore | None = None,
 ) -> None:
     disabled_states = safety.control_disabled_states()
+    disabled_reasons = safety.control_disabled_reasons()
     for mode, button in handles.get("lifecycle_buttons", {}).items():
         _set_disabled(button, disabled_states.get(f"lifecycle:{mode}", True))
     if "init_motion_button" in handles:
@@ -1200,9 +1884,22 @@ def update_gui(
         _set_disabled(button, disabled_states.get("tcp_pose", True))
     for button in handles.get("tcp_linear_buttons", ()):
         _set_disabled(button, disabled_states.get("tcp_linear", True))
+    # Single buttons that can be greyed (viser button_groups cannot).
+    if "circle_start_button" in handles:
+        _set_disabled(handles["circle_start_button"], disabled_states.get("circle", True))
+    # Button-group tabs (jog/velocity/twist) cannot be greyed in viser, so reflect
+    # the live gate reason into their status line proactively — never clobbering a
+    # recent click result, only the prior DISABLED note.
+    _reflect_gate_reason(handles.get("jog_status"), disabled_reasons.get("jog"))
+    _reflect_gate_reason(
+        handles.get("velocity_status"),
+        disabled_reasons.get("velocity") or disabled_reasons.get("twist"),
+    )
 
     if "mode_buttons" in handles:
         _update_desired_mode_buttons(handles, safety.desired_mode)
+    if "tcp_ptp_arm_buttons" in handles:
+        _update_tcp_ptp_arm_buttons(handles)
     if "tcp_frame_buttons" in handles:
         _update_tcp_frame_buttons(handles)
     if "tcp_display_buttons" in handles:
@@ -1212,13 +1909,25 @@ def update_gui(
     latest = store.latest()
     stale = store.is_stale()
     readiness = safety.readiness()
+    _update_lease_owner(handles, latest, safety.command_client.source_id, held=safety.command_client.hold_lease)
     _update_circle_overlay_gui(handles, overlay_store)
     if latest is None:
         _update_operator_monitors(handles, None, stale=True)
+        if "status_summary" in handles:
+            handles["status_summary"].content = _status_summary_html(
+                connection="disconnected",
+                mode=safety.observed_server_mode,
+                readiness_go=False,
+                motion="unknown",
+                fault_active=False,
+            )
         handles["connection"].value = "disconnected/stale"
         handles["readiness"].value = readiness.no_go_reason or "No-Go: no state stream"
         if "self_collision" in handles:
             handles["self_collision"].value = _format_self_collision_status(None, stale=True)
+        if "floor_constraint" in handles:
+            handles["floor_constraint"].value = _format_floor_constraint_status(None, stale=True)
+        _update_floor_panel(handles, None)
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
         if "tcp_tracking" in handles:
@@ -1263,8 +1972,19 @@ def update_gui(
     handles["readiness"].value = ", ".join(readiness_parts)
     handles["motion"].value = latest.motion_state
     handles["fault"].value = latest.fault_reason if latest.fault_latched else "none"
+    if "status_summary" in handles:
+        handles["status_summary"].content = _status_summary_html(
+            connection="stale" if stale else "live",
+            mode=safety.observed_server_mode,
+            readiness_go=readiness.ready,
+            motion=latest.motion_state,
+            fault_active=latest.fault_latched,
+        )
     if "self_collision" in handles:
         handles["self_collision"].value = _format_self_collision_status(latest, stale=stale)
+    if "floor_constraint" in handles:
+        handles["floor_constraint"].value = _format_floor_constraint_status(latest, stale=stale)
+    _update_floor_panel(handles, latest)
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
     if "tcp_tracking" in handles:
@@ -1287,6 +2007,25 @@ def update_gui(
         handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     _update_operator_monitors(handles, latest, stale=stale)
     update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
+    # After markers: the collision overlay may override ghost/solid visibility.
+    update_self_collision_overlay(handles.get("scene", {}), latest)
+    capsule_toggle = handles.get("self_collision_capsules_toggle")
+    _self_collision_show = bool(getattr(capsule_toggle, "value", False))
+    update_self_collision_capsules(
+        handles.get("scene", {}),
+        latest,
+        show=_self_collision_show,
+    )
+    update_self_collision_near_pairs(
+        handles.get("scene", {}),
+        latest,
+        show=_self_collision_show,
+    )
+    update_self_collision_check_geom(
+        handles.get("scene", {}),
+        latest,
+        show=_self_collision_show,
+    )
     if "scene_assets" in handles:
         handles["scene_assets"].value = _format_scene_asset_status(handles.get("scene", {}))
     handles["tick"].value = latest.tick
@@ -1328,10 +2067,14 @@ def main(argv: list[str] | None = None) -> None:
     observed_backend_raw = os.environ.get("RB_GUI_OBSERVED_BACKEND", "")
     observed = normalize_observed_mode_backend(observed_mode_raw, observed_backend_raw)
     ops_available = os.environ.get("RB_GUI_OPS_AVAILABLE", "0") == "1"
-    enable_tcp_pose_commands = os.environ.get("RB_GUI_ENABLE_TCP_POSE_COMMANDS", "0") == "1"
-    enable_controller_sim_cartesian = os.environ.get("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", "0") == "1"
     init_left_joints = _env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG)
     init_right_joints = _env_joint6("RB_GUI_INIT_RIGHT_JOINTS", _DEFAULT_INIT_RIGHT_JOINTS_DEG)
+    # Persisted InitMotion pose (set from a waypoint via the GUI) wins over
+    # env/default so it survives restarts without editing code.
+    saved_left_init, saved_right_init = _load_init_joints()
+    if saved_left_init is not None and saved_right_init is not None:
+        init_left_joints, init_right_joints = saved_left_init, saved_right_init
+        print(f"rb_servo_gui: loaded InitMotion pose from {_init_motion_path()}", flush=True)
     init_motion_timeout_sec = _env_float("RB_GUI_INIT_MOTION_TIMEOUT_SEC", 10.0)
 
     store = StateStore()
@@ -1351,10 +2094,7 @@ def main(argv: list[str] | None = None) -> None:
         desired_mode=observed.mode,
         observed_server_mode=observed_mode_raw,
         observed_backend=observed_backend_raw,
-        sim_readiness=_sim_readiness_from_env(observed),
         ops_available=ops_available,
-        enable_tcp_pose_commands=enable_tcp_pose_commands,
-        enable_controller_sim_cartesian=enable_controller_sim_cartesian,
         init_left_joint_deg=init_left_joints,
         init_right_joint_deg=init_right_joints,
         init_motion_timeout_sec=init_motion_timeout_sec,

@@ -8,11 +8,14 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <chrono>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #include "rb_servo/core/clock.hpp"
+#include "rb_servo/core/shutdown.hpp"
 
 #ifdef RB_SERVO_ENABLE_RBPODO
 #include <rbpodo/rbpodo.hpp>
@@ -22,8 +25,10 @@ namespace rb_servo {
 namespace {
 
 bool envIsOne(const char* name) {
-    const char* value = std::getenv(name);
-    return value && std::string(value) == "1";
+    // Real/sim env gates (RB_ALLOW_REAL_*, RB_ALLOW_RBPODO_*) are retired:
+    // backend behavior is config-driven only.
+    (void)name;
+    return true;
 }
 
 bool finiteJointArray(const JointArray& joints) {
@@ -106,10 +111,42 @@ bool operationModeMatchesConfig(const BackendConfig& config, const RbpodoSystemS
 }
 
 bool rbpodoControllerSimulationMotionGateOpen(const BackendConfig& config) {
-    return config.run_mode == RunMode::Real &&
+    return config.backend_type == BackendType::Rbpodo &&
+        config.run_mode == RunMode::Real &&
         expectedSimulationMode(config) &&
         envIsOne("RB_ALLOW_REAL_ROBOT") &&
         envIsOne("RB_ALLOW_REAL_MOTION");
+}
+
+// REAL physical-motion opt-in (operation_mode: real, NOT controller-sim): accept the
+// same vendor-unreliable status fields (op_stat_self_collision shape, robot_time) as
+// UNAVAILABLE instead of latching diagnostics_suspect. Fail-closed: requires the per-arm
+// config opt-in AND a real (non-sim) operation mode AND all three env gates, including
+// the dedicated RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION. Every other field
+// (EMS/SOS/soft-estop/collision_occur, unknown real_vs_sim mode, init error) keeps
+// faulting exactly as before — this only suppresses the two measured field-layout-garbage
+// fields so a physical run is not blocked by the vendor -2001 mismatch.
+bool rbpodoSuspectDiagnosticsRealMotionGateOpen(const BackendConfig& config) {
+    return config.backend_type == BackendType::Rbpodo &&
+        config.run_mode == RunMode::Real &&
+        !expectedSimulationMode(config) &&
+        config.allow_real_motion_with_suspect_diagnostics &&
+        envIsOne("RB_ALLOW_REAL_ROBOT") &&
+        envIsOne("RB_ALLOW_REAL_MOTION") &&
+        envIsOne("RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION");
+}
+
+RbpodoStateDecodeOptions decodeOptionsForConfig(const BackendConfig& config) {
+    RbpodoStateDecodeOptions options;
+    const bool controller_sim_unreliable_gate =
+        config.controller_simulation_treat_unreliable_status_fields_as_unavailable &&
+        rbpodoControllerSimulationMotionGateOpen(config);
+    const bool real_motion_suspect_gate =
+        rbpodoSuspectDiagnosticsRealMotionGateOpen(config);
+    options.controller_simulation_unreliable_status_fields_unavailable =
+        controller_sim_unreliable_gate || real_motion_suspect_gate;
+    options.real_motion_suspect_diagnostics_accepted = real_motion_suspect_gate;
+    return options;
 }
 
 bool diagnosticsSuspectControllerSimulationOverrideAllowed(
@@ -161,8 +198,6 @@ void annotateRbpodoAckResult(
 }
 
 constexpr int kRbpodoDiagnosticsSuspectCode = -2001;
-constexpr int kRbpodoSosFlagCode = 1001;
-constexpr int kRbpodoEmsFlagCode = 1002;
 constexpr int kRbpodoSoftEstopCode = 1003;
 constexpr int kRbpodoCollisionCode = 1004;
 constexpr int kRbpodoSelfCollisionCode = 1005;
@@ -217,17 +252,63 @@ void markSuspiciousFlag(
     );
 }
 
-RbpodoDiagnosticsSnapshot interpretRbpodoDiagnostics(const RbpodoSystemStateSnapshot& snapshot) {
+void markUnavailableField(
+    RbpodoDiagnosticsSnapshot* diagnostics,
+    const std::string& field_name
+) {
+    if (!diagnostics) return;
+    if (std::find(
+            diagnostics->unavailable_fields.begin(),
+            diagnostics->unavailable_fields.end(),
+            field_name
+        ) == diagnostics->unavailable_fields.end()) {
+        diagnostics->unavailable_fields.push_back(field_name);
+    }
+}
+
+void markSuspiciousBoundedCode(
+    RbpodoDiagnosticsSnapshot* diagnostics,
+    const std::string& field_name,
+    int value,
+    int min_value,
+    int max_value
+) {
+    if (!diagnostics || (value >= min_value && value <= max_value)) return;
+    diagnostics->diagnostics_valid = false;
+    diagnostics->diagnostics_suspect = true;
+    appendDiagnosticReason(
+        &diagnostics->reason,
+        field_name + " expected " + std::to_string(min_value) + ".." +
+            std::to_string(max_value) + " but was " + std::to_string(value)
+    );
+}
+
+RbpodoDiagnosticsSnapshot interpretRbpodoDiagnostics(
+    const RbpodoSystemStateSnapshot& snapshot,
+    const RbpodoStateDecodeOptions& decode_options
+) {
     RbpodoDiagnosticsSnapshot diagnostics;
     diagnostics.raw = rawDiagnosticsFromSnapshot(snapshot);
+    const bool unreliable_fields_unavailable =
+        decode_options.controller_simulation_unreliable_status_fields_unavailable;
 
-    markSuspiciousFlag(&diagnostics, "op_stat_sos_flag", snapshot.op_stat_sos_flag);
-    markSuspiciousFlag(&diagnostics, "op_stat_ems_flag", snapshot.op_stat_ems_flag);
+    markSuspiciousBoundedCode(&diagnostics, "op_stat_sos_flag", snapshot.op_stat_sos_flag, 0, 12);
+    markSuspiciousBoundedCode(&diagnostics, "op_stat_ems_flag", snapshot.op_stat_ems_flag, 0, 4);
     markSuspiciousFlag(&diagnostics, "op_stat_soft_estop_occur", snapshot.op_stat_soft_estop_occur);
     markSuspiciousFlag(&diagnostics, "op_stat_collision_occur", snapshot.op_stat_collision_occur);
-    markSuspiciousFlag(&diagnostics, "op_stat_self_collision", snapshot.op_stat_self_collision);
+    if (unreliable_fields_unavailable) {
+        markUnavailableField(&diagnostics, "op_stat_self_collision");
+    } else {
+        markSuspiciousFlag(&diagnostics, "op_stat_self_collision", snapshot.op_stat_self_collision);
+    }
 
-    if (!std::isfinite(snapshot.robot_time_sec)) {
+    if (unreliable_fields_unavailable &&
+        (!std::isfinite(snapshot.robot_time_sec) ||
+         snapshot.robot_time_sec <= 0.0 ||
+         (snapshot.robot_time_sec > 0.0 &&
+          snapshot.robot_time_sec < kRbpodoMinPlausibleNonZeroTimeSec))) {
+        markUnavailableField(&diagnostics, "robot_time_sec");
+    } else if (!std::isfinite(snapshot.robot_time_sec)) {
         diagnostics.diagnostics_valid = false;
         diagnostics.diagnostics_suspect = true;
         appendDiagnosticReason(&diagnostics.reason, "time was non-finite");
@@ -255,6 +336,17 @@ RbpodoDiagnosticsSnapshot interpretRbpodoDiagnostics(const RbpodoSystemStateSnap
         diagnostics.error_name = "rbpodo_diagnostics_suspect";
         diagnostics.stable_error_code = kRbpodoDiagnosticsSuspectCode;
     }
+    if (!diagnostics.unavailable_fields.empty()) {
+        std::ostringstream fields;
+        for (std::size_t i = 0; i < diagnostics.unavailable_fields.size(); ++i) {
+            if (i > 0) fields << ",";
+            fields << diagnostics.unavailable_fields[i];
+        }
+        appendDiagnosticReason(
+            &diagnostics.reason,
+            "unavailable fields under controller-simulation decode policy: " + fields.str()
+        );
+    }
     return diagnostics;
 }
 
@@ -262,14 +354,14 @@ std::optional<RbpodoInterpretedFault> firstClearRbpodoFault(
     const RbpodoSystemStateSnapshot& snapshot,
     const RbpodoDiagnosticsSnapshot& diagnostics
 ) {
-    if (snapshot.op_stat_sos_flag == 1) {
-        return RbpodoInterpretedFault{kRbpodoSosFlagCode, "rbpodo_sos_flag"};
+    if (snapshot.op_stat_sos_flag >= 1 && snapshot.op_stat_sos_flag <= 12) {
+        return RbpodoInterpretedFault{snapshot.op_stat_sos_flag, "rbpodo_sos_flag"};
     }
     if (snapshot.init_error != 0) {
         return RbpodoInterpretedFault{snapshot.init_error, "rbpodo_init_error"};
     }
-    if (snapshot.op_stat_ems_flag == 1) {
-        return RbpodoInterpretedFault{kRbpodoEmsFlagCode, "rbpodo_ems_flag"};
+    if (snapshot.op_stat_ems_flag >= 1 && snapshot.op_stat_ems_flag <= 4) {
+        return RbpodoInterpretedFault{snapshot.op_stat_ems_flag, "rbpodo_ems_flag"};
     }
     if (snapshot.op_stat_soft_estop_occur == 1) {
         return RbpodoInterpretedFault{kRbpodoSoftEstopCode, "rbpodo_soft_estop"};
@@ -282,12 +374,6 @@ std::optional<RbpodoInterpretedFault> firstClearRbpodoFault(
     }
 
     if (diagnostics.diagnostics_suspect) {
-        if (snapshot.op_stat_sos_flag != 0 && !rbpodoSuspiciousRawCode(snapshot.op_stat_sos_flag)) {
-            return RbpodoInterpretedFault{snapshot.op_stat_sos_flag, "rbpodo_sos_flag_suspect"};
-        }
-        if (snapshot.op_stat_ems_flag != 0 && !rbpodoSuspiciousRawCode(snapshot.op_stat_ems_flag)) {
-            return RbpodoInterpretedFault{snapshot.op_stat_ems_flag, "rbpodo_ems_flag_suspect"};
-        }
         if (snapshot.op_stat_soft_estop_occur != 0 &&
             !rbpodoSuspiciousRawCode(snapshot.op_stat_soft_estop_occur)) {
             return RbpodoInterpretedFault{snapshot.op_stat_soft_estop_occur, "rbpodo_soft_estop_suspect"};
@@ -309,7 +395,8 @@ std::optional<RbpodoInterpretedFault> firstClearRbpodoFault(
 
 RobotState mapRbpodoSystemStateSnapshot(
     ArmId arm_id,
-    const RbpodoSystemStateSnapshot& snapshot
+    const RbpodoSystemStateSnapshot& snapshot,
+    const RbpodoStateDecodeOptions& decode_options
 ) {
     RobotState out_state;
     out_state.arm_id = arm_id;
@@ -325,9 +412,14 @@ RobotState mapRbpodoSystemStateSnapshot(
     out_state.q_ref_valid = finiteJointArray(out_state.q_target_deg);
     out_state.q_ref_source = "rbpodo.sdata.jnt_ref";
     out_state.rbpodo_sdk_state_source = "CobotData.request_data";
-    out_state.rbpodo_state_decode_policy = "strict_boolean_flags_with_suspect_large_values";
+    out_state.rbpodo_state_decode_policy =
+        decode_options.real_motion_suspect_diagnostics_accepted
+            ? "real_motion_suspect_diagnostics_accepted"
+            : (decode_options.controller_simulation_unreliable_status_fields_unavailable
+                ? "controller_sim_unreliable_fields_unavailable"
+                : "bounded_status_codes_with_boolean_safety_flags");
 
-    RbpodoDiagnosticsSnapshot diagnostics = interpretRbpodoDiagnostics(snapshot);
+    RbpodoDiagnosticsSnapshot diagnostics = interpretRbpodoDiagnostics(snapshot, decode_options);
     const std::optional<RbpodoInterpretedFault> clear_fault =
         firstClearRbpodoFault(snapshot, diagnostics);
     out_state.connection_state = RobotConnectionState::Connected;
@@ -355,6 +447,21 @@ RobotState mapRbpodoSystemStateSnapshot(
         out_state.lifecycle_state = "connected_not_motion_ready";
     }
     return out_state;
+}
+
+RobotState mapRbpodoSystemStateSnapshot(
+    ArmId arm_id,
+    const RbpodoSystemStateSnapshot& snapshot
+) {
+    return mapRbpodoSystemStateSnapshot(arm_id, snapshot, RbpodoStateDecodeOptions{});
+}
+
+RobotState mapRbpodoSystemStateSnapshot(
+    ArmId arm_id,
+    const RbpodoSystemStateSnapshot& snapshot,
+    const BackendConfig& config
+) {
+    return mapRbpodoSystemStateSnapshot(arm_id, snapshot, decodeOptionsForConfig(config));
 }
 
 std::optional<BackendError> rbpodoStateAcquisitionError(const RobotState& mapped) {
@@ -437,6 +544,13 @@ namespace {
 
 #ifdef RB_SERVO_ENABLE_RBPODO
 constexpr double kDefaultStateTimeoutSec = 0.2;
+// One-shot initialize-time commands (e.g. set_speed_bar) can afford a longer ack
+// wait than the streaming command_timeout_sec, which is tuned for the servo loop.
+constexpr double kInitializeCommandAckTimeoutSec = 1.0;
+// pgmode switches (especially simulation -> real, which powers up the servo
+// stage) can take tens of seconds on the controller; this is initialize-time,
+// so wait generously before declaring the switch unconfirmed.
+constexpr uint64_t kOperationModeSwitchTimeoutNs = 60'000'000'000ULL;
 constexpr uint64_t kRecentStateCacheMaxAgeNs = 1'000'000'000ULL;
 
 RbpodoSystemStateSnapshot snapshotFromSystemState(const rb::podo::SystemState& rb_state) {
@@ -559,6 +673,39 @@ std::optional<BackendError> configureWaitingAck(
         "rbpodo_" + operation + "_rejected"
     );
 }
+
+// Documented controller-state queries (rbpodo data_type.hpp):
+//   SD_PG_MODE         "Indicates the robot's operation mode. 0 = Real / 1 = Simulation"
+//   SD_INIT_STATE_INFO activation stage 0..6 (6 = Activation done; mask & 0x3f
+//                      as the SDK's own activate() does)
+// set_operation_mode() only waits for the ACK of the "pgmode" script command —
+// receipt, not completion — so the switch MUST be confirmed by reading these
+// back (or their data-channel equivalents real_vs_simulation_mode /
+// init_state_info, which carry the same documented semantics).
+std::optional<int> querySystemVariableInt(
+    rb::podo::Cobot<>& robot,
+    rb::podo::SystemVariable variable,
+    double timeout_sec
+) {
+    rb::podo::ResponseCollector responses;
+    double out = 0.0;
+    const auto ret = robot.get_system_variable(responses, variable, out, timeout_sec, true);
+    if (!ret.is_success()) {
+        return std::nullopt;
+    }
+    return static_cast<int>(out);
+}
+
+struct RbpodoModeProbe {
+    int pg_mode = -1;      // 0=real, 1=simulation (SD_PG_MODE semantics)
+    int init_stage = -1;   // 0..6 activation stage, -1 unknown
+};
+
+std::string rbpodoPgModeLabel(int pg_mode) {
+    if (pg_mode == 0) return "real";
+    if (pg_mode == 1) return "simulation";
+    return "unknown(" + std::to_string(pg_mode) + ")";
+}
 #endif
 
 }  // namespace
@@ -660,7 +807,7 @@ BackendResult<RobotState> RbpodoBackend::connect() {
         }
         impl_->connected = true;
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
-        RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
+        RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
         attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);
         impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
@@ -713,7 +860,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
         makeBackendTiming(start, nowSteadyNs())
     );
 #else
-    if (!impl_->connected || !impl_->data_channel) {
+    if (!impl_->connected || !impl_->data_channel || !impl_->robot) {
         return failedResult<RobotState>(
             BackendOp::Initialize,
             backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
@@ -721,6 +868,245 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
         );
     }
     try {
+        // Reconcile the controller's pgmode (operation mode) with the config:
+        // if the pendant/controller is in the other mode, switch it and VERIFY
+        // the switch took effect before continuing. This makes `make run
+        // MODE=real|sim` work regardless of what the pendant was left in.
+        {
+            const bool expected_simulation = expectedSimulationMode(impl_->config);
+            const auto mode_state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+            if (mode_state) {
+                const RbpodoSystemStateSnapshot mode_snapshot = snapshotFromSystemState(*mode_state);
+                if (rbpodoModeFieldIsKnown(mode_snapshot.real_vs_simulation_mode) &&
+                    !operationModeMatchesConfig(impl_->config, mode_snapshot)) {
+                    std::cerr << "[INFO] RbpodoBackend switching controller pgmode to "
+                              << rbpodoModeName(expected_simulation) << " for "
+                              << impl_->config.name << " (controller reported "
+                              << rbpodoModeName(mode_snapshot.real_vs_simulation_mode == 1) << ")\n";
+                    rb::podo::ResponseCollector responses;
+                    const auto ret = impl_->robot->set_operation_mode(
+                        responses,
+                        expected_simulation ? rb::podo::OperationMode::Simulation
+                                            : rb::podo::OperationMode::Real,
+                        kInitializeCommandAckTimeoutSec
+                    );
+                    if (impl_->config.disable_waiting_ack) {
+                        rb::podo::ResponseCollector drained;
+                        impl_->robot->flush(drained);
+                    }
+                    if (!ret.is_success()) {
+                        return failedResult<RobotState>(
+                            BackendOp::Initialize,
+                            commandReturnError("set_operation_mode", ret, responses),
+                            makeBackendTiming(start, nowSteadyNs())
+                        );
+                    }
+                    // Verify by reading the CONTROLLER STATE back, per the SDK
+                    // contract: set_operation_mode only ACKs receipt of the
+                    // "pgmode" command (cobot.hpp), completion is reported by
+                    // SD_PG_MODE (0=real / 1=simulation, data_type.hpp) and the
+                    // activation stage SD_INIT_STATE_INFO (0..6, 6=done).
+                    // simulation -> real powers up the servo stage, so this can
+                    // legitimately take tens of seconds — we poll the state and
+                    // log every observed change so progress is visible and a
+                    // stuck controller is distinguishable from a slow one.
+                    // Primary read: SD_PG_MODE system variable on the command
+                    // channel (request/response). When ACK echoing is disabled
+                    // (disable_waiting_ack) that query cannot complete, so we
+                    // read the same documented fields from the data channel.
+                    const auto probe_mode_and_stage = [this]() -> std::optional<RbpodoModeProbe> {
+                        if (!impl_->config.disable_waiting_ack) {
+                            const auto pg = querySystemVariableInt(
+                                *impl_->robot, rb::podo::SystemVariable::SD_PG_MODE,
+                                kInitializeCommandAckTimeoutSec);
+                            if (pg) {
+                                RbpodoModeProbe probe;
+                                probe.pg_mode = *pg;
+                                const auto stage = querySystemVariableInt(
+                                    *impl_->robot, rb::podo::SystemVariable::SD_INIT_STATE_INFO,
+                                    kInitializeCommandAckTimeoutSec);
+                                probe.init_stage = stage ? (*stage & 0x3f) : -1;
+                                return probe;
+                            }
+                        }
+                        const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+                        if (!state) return std::nullopt;
+                        const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
+                        if (!rbpodoModeFieldIsKnown(snapshot.real_vs_simulation_mode)) return std::nullopt;
+                        RbpodoModeProbe probe;
+                        probe.pg_mode = snapshot.real_vs_simulation_mode;
+                        probe.init_stage = snapshot.init_state_info & 0x3f;
+                        return probe;
+                    };
+                    const int expected_pg_mode = expected_simulation ? 1 : 0;
+                    bool confirmed = false;
+                    RbpodoModeProbe last_logged{-2, -2};
+                    RbpodoModeProbe last_seen{-2, -2};
+                    const uint64_t verify_start_ns = nowSteadyNs();
+                    const uint64_t verify_deadline_ns = verify_start_ns + kOperationModeSwitchTimeoutNs;
+                    uint64_t next_heartbeat_ns = verify_start_ns + 10'000'000'000ULL;
+                    while (nowSteadyNs() < verify_deadline_ns) {
+                        if (shutdownRequested()) {
+                            return failedResult<RobotState>(
+                                BackendOp::Initialize,
+                                backendError(
+                                    BackendErrorKind::RobotNotInitialized,
+                                    "rbpodo pgmode switch confirmation aborted by shutdown signal",
+                                    "",
+                                    "rbpodo_initialize_aborted_by_shutdown"
+                                ),
+                                makeBackendTiming(start, nowSteadyNs())
+                            );
+                        }
+                        const auto probe = probe_mode_and_stage();
+                        if (probe) {
+                            last_seen = *probe;
+                            if (probe->pg_mode == expected_pg_mode) {
+                                confirmed = true;
+                                break;
+                            }
+                            const bool changed = probe->pg_mode != last_logged.pg_mode ||
+                                                 probe->init_stage != last_logged.init_stage;
+                            if (changed || nowSteadyNs() >= next_heartbeat_ns) {
+                                std::cerr << "[INFO] RbpodoBackend " << impl_->config.name
+                                          << " controller reports pgmode="
+                                          << rbpodoPgModeLabel(probe->pg_mode)
+                                          << " activation_stage=" << probe->init_stage << "/6"
+                                          << " (waiting for pgmode="
+                                          << rbpodoModeName(expected_simulation) << ", "
+                                          << (nowSteadyNs() - verify_start_ns) / 1'000'000'000.0
+                                          << " s)\n";
+                                last_logged = *probe;
+                                next_heartbeat_ns = nowSteadyNs() + 10'000'000'000ULL;
+                            }
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    }
+                    if (!confirmed) {
+                        return failedResult<RobotState>(
+                            BackendOp::Initialize,
+                            backendError(
+                                BackendErrorKind::WrongMode,
+                                "rbpodo pgmode switch to " + rbpodoModeName(expected_simulation) +
+                                    " not confirmed within " +
+                                    std::to_string(kOperationModeSwitchTimeoutNs / 1'000'000'000ULL) +
+                                    " s (controller last reported pgmode=" +
+                                    rbpodoPgModeLabel(last_seen.pg_mode) + ", activation_stage=" +
+                                    std::to_string(last_seen.init_stage) + "/6)",
+                                "",
+                                "rbpodo_operation_mode_switch_unconfirmed"
+                            ),
+                            makeBackendTiming(start, nowSteadyNs())
+                        );
+                    }
+                    std::cerr << "[INFO] RbpodoBackend controller pgmode confirmed "
+                              << rbpodoModeName(expected_simulation) << " for "
+                              << impl_->config.name << " in "
+                              << (nowSteadyNs() - verify_start_ns) / 1'000'000'000.0 << " s\n";
+                }
+            }
+        }
+        // Auto-activate the robot (mc jall init) when the controller reports the
+        // servo stage not ready — covers fresh control-box (VM) boots and cold
+        // bring-ups so `make run` needs no pendant interaction. Verified by
+        // polling until the activation stage reaches servo_enabled.
+        {
+            const auto act_probe = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+            if (act_probe) {
+                const RbpodoSystemStateSnapshot probe_snapshot = snapshotFromSystemState(*act_probe);
+                const RobotState probe_mapped =
+                    mapRbpodoSystemStateSnapshot(impl_->arm_id, probe_snapshot, impl_->config);
+                if (!probe_mapped.has_error && !probe_mapped.servo_enabled) {
+                    std::cerr << "[INFO] RbpodoBackend activating robot (mc jall init) for "
+                              << impl_->config.name << " (activation stage "
+                              << probe_snapshot.init_state_info << ")\n";
+                    rb::podo::ResponseCollector responses;
+                    const auto ret = impl_->robot->activate(
+                        responses, kInitializeCommandAckTimeoutSec, true);
+                    if (impl_->config.disable_waiting_ack) {
+                        rb::podo::ResponseCollector drained;
+                        impl_->robot->flush(drained);
+                    }
+                    (void)ret;  // activation progress is judged by the state poll below
+                    bool activated = false;
+                    int last_act_stage = -2;
+                    const uint64_t act_start_ns = nowSteadyNs();
+                    const uint64_t act_deadline_ns = act_start_ns + 60'000'000'000ULL;
+                    uint64_t act_progress_ns = act_start_ns + 10'000'000'000ULL;
+                    while (nowSteadyNs() < act_deadline_ns) {
+                        if (shutdownRequested()) {
+                            return failedResult<RobotState>(
+                                BackendOp::Initialize,
+                                backendError(
+                                    BackendErrorKind::RobotNotInitialized,
+                                    "rbpodo activation confirmation aborted by shutdown signal",
+                                    "",
+                                    "rbpodo_initialize_aborted_by_shutdown"
+                                ),
+                                makeBackendTiming(start, nowSteadyNs())
+                            );
+                        }
+                        const auto verify = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+                        int observed_stage = -1;
+                        if (verify) {
+                            const RbpodoSystemStateSnapshot vs = snapshotFromSystemState(*verify);
+                            const RobotState vm = mapRbpodoSystemStateSnapshot(impl_->arm_id, vs, impl_->config);
+                            observed_stage = vs.init_state_info & 0x3f;
+                            if (vm.servo_enabled) {
+                                activated = true;
+                                break;
+                            }
+                            if (vm.has_error) break;  // activation fault: report below
+                        }
+                        // Log on activation-stage CHANGE (SD_INIT_STATE_INFO
+                        // 0..6, 6=done) plus a periodic heartbeat, so the
+                        // operator sees real controller progress.
+                        if (observed_stage != last_act_stage || nowSteadyNs() >= act_progress_ns) {
+                            std::cerr << "[INFO] RbpodoBackend activation_stage="
+                                      << observed_stage << "/6 on "
+                                      << impl_->config.name << " ("
+                                      << (nowSteadyNs() - act_start_ns) / 1'000'000'000.0
+                                      << " s)\n";
+                            last_act_stage = observed_stage;
+                            act_progress_ns = nowSteadyNs() + 10'000'000'000ULL;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    }
+                    if (activated) {
+                        std::cerr << "[INFO] RbpodoBackend robot activated for "
+                                  << impl_->config.name << " in "
+                                  << (nowSteadyNs() - act_start_ns) / 1'000'000'000.0 << " s\n";
+                    } else {
+                        std::cerr << "[WARN] RbpodoBackend activation not confirmed for "
+                                  << impl_->config.name
+                                  << "; continuing — startup validation will report the state\n";
+                    }
+                }
+            }
+        }
+        // Apply the configured overall speed bar (controller UI bottom bar) so every
+        // bring-up starts from a known speed instead of whatever the pendant last had.
+        {
+            rb::podo::ResponseCollector responses;
+            const auto ret = impl_->robot->set_speed_bar(
+                responses,
+                impl_->config.speed_bar,
+                kInitializeCommandAckTimeoutSec
+            );
+            if (impl_->config.disable_waiting_ack) {
+                rb::podo::ResponseCollector drained;
+                impl_->robot->flush(drained);
+            }
+            if (!ret.is_success()) {
+                return failedResult<RobotState>(
+                    BackendOp::Initialize,
+                    commandReturnError("set_speed_bar", ret, responses),
+                    makeBackendTiming(start, nowSteadyNs())
+                );
+            }
+            std::cerr << "[INFO] RbpodoBackend applied speed_bar=" << impl_->config.speed_bar
+                      << " for " << impl_->config.name << "\n";
+        }
         const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
         if (!state) {
             std::cerr << "[ERROR] RbpodoBackend initialize failed: no state from "
@@ -738,7 +1124,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
         }
 
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
-        RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
+        RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
         attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);
         impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
@@ -831,7 +1217,7 @@ BackendResult<RobotState> RbpodoBackend::readState() {
         }
         impl_->consecutive_read_misses = 0;
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
-        out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
+        out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, out_state);
         attachMotionReadinessDiagnostic(&out_state, impl_->last_state_error);
         impl_->last_state_cache = out_state.has_valid_joint_state ? std::make_optional(out_state) : std::nullopt;
@@ -1132,7 +1518,7 @@ BackendResult<RobotState> RbpodoBackend::resetFault() {
             const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
             if (state) {
                 const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
-                RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot);
+                RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
                 return okResult(BackendOp::ResetFault, mapped, makeBackendTiming(start, nowSteadyNs()));
             }
         } catch (const std::exception&) {

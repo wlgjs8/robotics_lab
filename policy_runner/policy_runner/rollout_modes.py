@@ -171,14 +171,26 @@ class RolloutModePolicy:
         if geometry_status is None:
             raise RolloutModeValidationError("real_policy requires measured runtime geometry")
         status = str(getattr(geometry_status, "status", "") or "").strip().lower()
+        allow_estimate_geometry = bool(
+            getattr(safety, "allow_configured_estimate_geometry_in_real", False)
+        )
         if status not in {"measured", "calibrated", "accepted"}:
-            raise RolloutModeValidationError(
-                f"real_policy requires measured geometry; got geometry status={status or 'unknown'}"
-            )
+            # Explicit operator carve-out: configured_estimate geometry is
+            # acceptable when the config declares it for real (e.g. ee_local
+            # checkpoints that do not consume the unmeasured tool/camera
+            # extrinsics; the robot mounts in active_calibration.yaml are
+            # mechanically measured, only the overall status stays estimate).
+            if not (status == "configured_estimate" and allow_estimate_geometry):
+                raise RolloutModeValidationError(
+                    f"real_policy requires measured geometry; got geometry status={status or 'unknown'} "
+                    "(configured_estimate is accepted only with "
+                    "safety.allow_configured_estimate_geometry_in_real=true)"
+                )
         if not bool(getattr(geometry_status, "geometry_valid_for_real_policy", False)):
-            raise RolloutModeValidationError(
-                "real_policy requires geometry_valid_for_real_policy=true"
-            )
+            if not allow_estimate_geometry:
+                raise RolloutModeValidationError(
+                    "real_policy requires geometry_valid_for_real_policy=true"
+                )
         retarget_status = str(getattr(safety, "retarget_status", "") or "missing")
         if retarget_status not in {"measured", "accepted"}:
             raise RolloutModeValidationError(

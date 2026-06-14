@@ -1,16 +1,25 @@
 # rb_servo_gui
 
 `rb_gui` is the browser GUI for `rb_servo_server` state visualization and
-operator-facing simulator controls. Real robot motion gates remain outside the
-GUI.
+operator control. It no longer keeps mode-based client gates: **the server is the
+sole real-motion authority** (safety filter, Cartesian gate, fault latch, lease,
+deadman). The GUI is a faithful frontend — it offers every motion primitive in
+every run mode and lets the server accept or reject each command.
 
-For an rbpodo controller in `pgmode` simulation (controller-simulation), the GUI
-can drive its full existing control set (joint jog, lifecycle, TCP PTP/Linear/
-Delta, plus the Velocity jog tab for streaming JointVelocity / TcpTwist, and the Circle tab for the TcpCircleMove benchmark on both arms) when
-the operator opts in with `RB_GUI_ENABLE_TCP_POSE_COMMANDS=1` and
-`RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1` (plus `RB_GUI_OBSERVED_MODE=simulation`,
-`RB_GUI_OBSERVED_BACKEND=rbpodo`). Real mode stays connect/status-only and the
-GUI never sets `RB_ALLOW_REAL_CARTESIAN`. See
+The full control set (joint jog/velocity, lifecycle, InitMotion, TCP PTP/Linear/
+Delta, streaming TcpTwist, and the Circle tab for the `TcpCircleMove` benchmark on
+both arms) is wired in every mode. Whether a control is live is **derived from the
+live server state stream** — per-arm FK/TCP-pose validity, the server Cartesian
+gate (`cartesian_available` / `controller_simulation_streaming_cartesian_available`
+/ `cartesian_unavailable_reason`), fault latch, and motion state. There is no
+longer an env unlock: the former `RB_GUI_SIM_READINESS_*`,
+`RB_GUI_CARTESIAN_AVAILABLE`, and `RB_GUI_ENABLE_TCP_POSE_COMMANDS` /
+`RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN` locks are retired (`RB_GUI_OBSERVED_MODE`
+/ `RB_GUI_OBSERVED_BACKEND` remain display-only labels).
+
+Real physical motion still requires the server's own gates
+(`RB_ALLOW_REAL_ROBOT/MOTION/CARTESIAN` + site config + operator supervision +
+E-stop); the GUI sending a real command does not bypass them. See
 `rb_servo_server/docs/gui_operator_console.md`.
 
 ## rbpodo Circle Live View

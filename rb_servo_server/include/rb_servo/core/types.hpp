@@ -100,7 +100,8 @@ enum class ControlMode {
     TcpTwistStand,
     TcpTwistLocal,
     EmergencyStop,
-    ResetFault
+    ResetFault,
+    SetSafetyFloorZ
 };
 
 enum class ServerMotionState {
@@ -149,6 +150,7 @@ enum class SafetyVerdict {
     CartesianUnavailable,
     IkFailed,
     SelfCollision,
+    FloorViolation,
     UnknownError
 };
 
@@ -232,6 +234,7 @@ struct RbpodoDiagnosticsSnapshot {
     std::string error_name;
     int stable_error_code = 0;
     RbpodoRawDiagnostics raw;
+    std::vector<std::string> unavailable_fields;
 };
 
 struct ForceControlAxis {
@@ -328,6 +331,7 @@ struct CartesianSolveTelemetry {
     double linear_move_elapsed_sec = 0.0;
     std::string orientation_mode;
     bool twist_clamped = false;
+    bool floor_vz_clamped = false;
     double requested_twist_linear_norm_m_s = 0.0;
     double requested_twist_angular_norm_rad_s = 0.0;
     double applied_twist_linear_norm_m_s = 0.0;
@@ -465,6 +469,15 @@ struct DualArmCommand {
 
     ArmCommand left;
     ArmCommand right;
+
+    // SetSafetyFloorZ payload: requested stand-frame floor plane height (meters).
+    double floor_z_m = 0.0;
+    bool has_floor_z = false;
+
+    // AcquireLease / ReleaseLease packets are pure lease management. They must
+    // never enter the command buffer: the buffer is latest-wins, so their
+    // parsed Hold modes would overwrite an in-flight motion command.
+    bool lease_admin_only = false;
 
     // Deprecated in v3. Commands are treated as coupled by default: if a packet
     // becomes stale, both arms hold. Per-arm command streams should use separate
@@ -672,10 +685,35 @@ struct ServoSample {
     SafetyVerdict safety_verdict = SafetyVerdict::Ok;
     ServerMotionState motion_state = ServerMotionState::Disconnected;
     bool fault_latched = false;
+    bool async_supervision_degraded = false;
+    bool tracking_error_degraded = false;
     std::string fault_reason;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;
+};
+
+// Collision capsule geometry (stand frame, meters) for viewers. Generic so it
+// carries both the static stand capsules and the FK'd per-arm capsules. Kept here
+// (not config) so core/types stays independent of the config header. Published so
+// a viewer can draw the EXACT capsules the guard checks (not the visual meshes).
+struct SelfCollisionCapsuleViz {
+    std::string name;
+    std::array<double, 3> p0_m{};
+    std::array<double, 3> p1_m{};
+    double radius_m = 0.0;
+};
+
+// One near pair from the URDF mesh self-collision monitor: the two closest
+// witness points (stand frame) on the two geometries + their signed clearance.
+// Lets a viewer draw the close-call segments over the URDF meshes (the mesh-mode
+// analogue of the capsule list above).
+struct SelfCollisionNearPairViz {
+    std::string name_a;
+    std::string name_b;
+    std::array<double, 3> p_a_m{};
+    std::array<double, 3> p_b_m{};
+    double clearance_m = 0.0;
 };
 
 struct ServoSnapshot {
@@ -700,6 +738,8 @@ struct ServoSnapshot {
     SafetyVerdict safety_verdict = SafetyVerdict::Ok;
     ServerMotionState motion_state = ServerMotionState::Disconnected;
     bool fault_latched = false;
+    bool async_supervision_degraded = false;
+    bool tracking_error_degraded = false;
     SafetyVerdict latched_fault_reason = SafetyVerdict::Ok;
     std::string fault_reason;
 
@@ -710,7 +750,46 @@ struct ServoSnapshot {
     double self_collision_min_clearance_m = 0.0;
     double self_collision_margin_m = 0.0;
     int self_collision_left_bone = -1;
+    std::string self_collision_pair;
+    std::string self_collision_stand_capsule;
     int self_collision_right_bone = -1;
+    // Closest bone-axis points of the min-clearance pair (stand frame), on the
+    // members themselves; a = pair's first member (arm), b = second member
+    // (other arm / stand). Their gap = min_clearance + both capsule radii.
+    bool self_collision_has_closest_points = false;
+    std::array<double, 3> self_collision_closest_point_a_m{};
+    std::array<double, 3> self_collision_closest_point_b_m{};
+    // Full per-arm collision capsules (stand frame) evaluated this tick — FK'd
+    // from the arm_capsules template — so a viewer can draw the exact checked
+    // capsules over the arm mesh.
+    bool self_collision_has_capsules = false;
+    std::vector<SelfCollisionCapsuleViz> self_collision_left_capsules_m;
+    std::vector<SelfCollisionCapsuleViz> self_collision_right_capsules_m;
+    // Static stand capsules checked this tick (stand frame). Populated alongside
+    // the arm capsules.
+    std::vector<SelfCollisionCapsuleViz> self_collision_stand_capsules_m;
+    // URDF mesh self-collision (safety.self_collision.mesh): closest near pairs
+    // from the async CollisionMonitor (stand frame). Empty in capsule mode.
+    bool self_collision_mesh = false;
+    std::vector<SelfCollisionNearPairViz> self_collision_near_pairs;
+
+    // Stand-frame floor plane constraint telemetry (safety.floor_constraint).
+    bool floor_constraint_enabled = false;
+    bool floor_constraint_monitor_only = false;
+    double floor_constraint_z_min_m = 0.0;         // effective (runtime) plane height
+    double floor_constraint_config_z_min_m = 0.0;  // startup config value
+    double floor_constraint_runtime_min_z_m = 0.0;
+    double floor_constraint_runtime_max_z_m = 0.0;
+    bool floor_constraint_left_checked = false;
+    bool floor_constraint_left_violated = false;
+    double floor_constraint_left_tcp_z_m = 0.0;  // lowest checked point z
+    std::string floor_constraint_left_lowest_point;
+    bool floor_constraint_right_checked = false;
+    bool floor_constraint_right_violated = false;
+    double floor_constraint_right_tcp_z_m = 0.0;  // lowest checked point z
+    std::string floor_constraint_right_lowest_point;
+    uint64_t floor_constraint_clamp_count = 0;
+    std::string floor_constraint_last_set_reject_reason;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;

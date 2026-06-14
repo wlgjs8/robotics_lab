@@ -2,9 +2,9 @@
 
 ## Current Project Phase
 
-`robotics_lab` is a dual-arm RB3-730 integration workspace. The current milestone is **simulator-first Cartesian acceptance hardening**.
+`robotics_lab` is a dual-arm RB3-730 integration workspace. The current milestone is **rbpodo pgmode-real physical robot bring-up**. Simulator-first Cartesian acceptance hardening is largely complete and is now the regression baseline.
 
-Before any real robot work, the simulator stack must repeatedly validate:
+The simulator stack remains the regression baseline (it must keep passing before any physical work):
 
 - per-arm simulator topology
 - structured backend result and fault telemetry
@@ -15,7 +15,7 @@ Before any real robot work, the simulator stack must repeatedly validate:
 - GUI and policy-runner safety gates
 - command-source lease/arbitration
 
-Real robot work is not the current default milestone. Passing simulator tests is not permission to move hardware.
+Real motion is now an active, gated bring-up lane: read-only diagnostics parity, a slow dual-arm physical Cartesian circle, UMI teleop/replay, and a full `flow-infer` `real_policy` closed-loop rollout (pi0.5/openpi, `TcpTwistLocal` + real gripper) have all run on hardware under operator supervision (`docs/runbooks/rbpodo_real_physical_circle.md`, ladder `docs/runbooks/pgmode_real_transition.md`). The `real_policy` gate stays fully enforced and was satisfied via accepted/validated config — the lane is open, not blocked; runtime is validated and task success is the remaining model-side gap. Real motion stays fail-closed — gates, site-local config, operator supervision, and an E-stop are all required — and passing simulator tests is never permission to move hardware. For real motion the policy-side gate was relaxed (PR #13), so `rb_servo_server` is the sole real-motion safety layer (plus the async URDF-mesh `CollisionMonitor`). Still off: force control; measured hand-eye calibration is unneeded for the deployed pika ee_local image-conditioned policy but still required for general geometry-dependent policy.
 
 ## Required Reading
 
@@ -98,6 +98,15 @@ RB_ALLOW_REAL_CARTESIAN=1
 ```
 
 Even with these environment variables, real motion must also be explicitly allowed by config and by the relevant real-hardware acceptance task. Simulator acceptance is not real-hardware acceptance.
+
+The stand-frame floor plane constraint (`safety.floor_constraint`) is
+mode-independent by design: when enabled it applies in mock, simulator,
+controller-simulation, and real, to every motion primitive, at the final
+joint-level safety gate. Enabling it requires `kinematics.enable=true`.
+Runtime adjustment uses the leaseless `SetSafetyFloorZ` command and is
+bounded server-side to the config `[runtime_min_z_m, runtime_max_z_m]`
+envelope; `monitor_only: true` is a tuning aid only and never a real-motion
+safety posture. Do not add env/mode gates that would disable it in real mode.
 
 For new rbpodo configs, use canonical Rainbow Servo J fields only:
 `servo_t1_sec`, `servo_t2_sec`, `servo_gain`, and `servo_alpha`.
@@ -210,8 +219,8 @@ Use `docs/frame_contract.md` and `calibration/active_calibration.yaml` as the fr
 - Do not claim C++ or Pinocchio runtime acceptance passed unless the command was actually run.
 - Do not introduce custom SO(3), SE(3), quaternion interpolation, or frame-conversion math in production Cartesian control when Eigen/Pinocchio can provide it.
 - Do not create production fallback math paths that bypass mandatory Eigen/Pinocchio Cartesian math.
-- Do not weaken command-source lease, deadman, stale-state, fault, or real-mode checks.
-- Do not enable real robot motion, real Cartesian motion, grippers, or force control as part of simulator hardening.
+- Do not weaken command-source lease, deadman, stale-state, fault, or real-mode checks. Real motion now relies on `rb_servo_server` as its sole safety layer (safety filter, tracking-error latch, self-collision guard, lease, deadman) — treat these as load-bearing, not optional.
+- Real motion is an explicit, operator-supervised, gated lane — never enable it incidentally as part of simulator/benchmark work, and keep grippers and force control off until separately validated.
 
 ## Expected Validation
 

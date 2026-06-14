@@ -340,7 +340,7 @@ class ArmSnapshot:
                 _field_value(data, "controller_simulation_streaming_cartesian_available", cartesian_gate, fallback_state)
             ),
             physical_motion_expected=_optional_bool(
-                _field_value(data, "physical_motion_expected", cartesian_gate, fallback_state)
+                _field_value_non_null(data, "physical_motion_expected", cartesian_gate, fallback_state)
             ),
             controller_simulation_physical_motion_detected=_optional_bool(
                 _field_value(data, "controller_simulation_physical_motion_detected", cartesian_gate, fallback_state)
@@ -461,6 +461,23 @@ def _field_value(
     return None
 
 
+def _field_value_non_null(
+    data: Mapping[str, Any],
+    key: str,
+    *fallbacks: Mapping[str, Any] | None,
+) -> Any:
+    """Like _field_value, but an explicit null falls through to the next source.
+
+    Older servers publish per-arm physical_motion_expected=null outside controller
+    simulation while the authoritative boolean lives in cartesian_gate."""
+    for source in (data, *fallbacks):
+        if isinstance(source, Mapping):
+            value = source.get(key)
+            if value is not None:
+                return value
+    return None
+
+
 @dataclass(frozen=True)
 class StateSnapshot:
     tick: int
@@ -478,6 +495,7 @@ class StateSnapshot:
     command_source: CommandSourceSnapshot
     cartesian_gate: Mapping[str, Any] | None
     self_collision: Mapping[str, Any] | None
+    floor_constraint: Mapping[str, Any] | None
     raw: Mapping[str, Any]
 
     @classmethod
@@ -521,6 +539,7 @@ class StateSnapshot:
             command_source=CommandSourceSnapshot.parse(data.get("command_source")),
             cartesian_gate=top_cartesian_gate if isinstance(top_cartesian_gate, Mapping) else None,
             self_collision=data.get("self_collision") if isinstance(data.get("self_collision"), Mapping) else None,
+            floor_constraint=data.get("floor_constraint") if isinstance(data.get("floor_constraint"), Mapping) else None,
             raw=data,
         )
 

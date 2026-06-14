@@ -17,6 +17,22 @@ struct CartesianArmTargetResult {
     CartesianSolveTelemetry telemetry;
 };
 
+// Shared position-IK step: solve full IK toward target_tcp_stand SEEDED FROM
+// THE PREVIOUSLY SENT JOINTS (feedforward chain — see the relay-limit-cycle
+// note in the implementation). Used by TcpPoseTarget (CartesianController) and
+// by the path primitives in CartesianServoController (TcpLinearMove), so both
+// share the same smooth, measurement-decoupled IK behavior.
+CartesianArmTargetResult solveIkArmTargetFromTcpStand(
+    IKinematics& kinematics,
+    const CartesianControlConfig& config,
+    const ArmMountConfig& mount,
+    ArmId arm_id,
+    const Pose6D& target_tcp_stand,
+    const RobotState& state,
+    const JointArray& previous_safe_sent_q_deg,
+    RunMode run_mode
+);
+
 class CartesianController {
 public:
     CartesianController(

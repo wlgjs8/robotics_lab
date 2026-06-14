@@ -58,6 +58,15 @@ servo:
   allow_servo_t1_rate_mismatch: false
   allow_controller_simulation_motion: true
   allow_controller_simulation_diagnostics_suspect: true
+  # Controller-simulation only: the current rbpodo SDK/controller layout can
+  # mis-decode op_stat_self_collision and controller time in pgmode. This keeps
+  # those fields visible as unavailable in telemetry while other fault fields
+  # remain enforced. Default is false; do not enable for physical real mode.
+  controller_simulation_treat_unreliable_status_fields_as_unavailable: true
+  # Controller-simulation only: keep async streaming supervision observable as
+  # telemetry/WARNs without latching SendFailure when pgmode hiccups. Default is
+  # false and the server still latches in physical real mode.
+  controller_simulation_async_supervision_nonlatching: true
   rbpodo_async_streaming:
     enable: true
     mode: sdk_ack_worker
@@ -93,10 +102,32 @@ safety:
   max_tracking_error_deg: 10.0
   tracking_error_policy: fault_latch
   controller_simulation_tracking_error_source: reference
+  # Comprehensive 1hr-stability fix (pairs with the servo async-supervision flag):
+  # in pgmode controller-sim the reference/actual tracking-error divergence is
+  # ADVISORY (degraded warning + telemetry), never a latching TrackingError. The
+  # diagnostics_suspect controller's reference readback lags the commanded joints
+  # with no physical motion, so the latch is spurious there. tracking_error_policy
+  # stays fault_latch (required + enforced in real mode); this only suppresses the
+  # latch at runtime when the controller-sim motion gate is open. The
+  # controller_simulation_physical_motion guard below is unaffected and still latches.
+  controller_simulation_tracking_error_nonlatching: true
   controller_simulation_physical_motion_policy: fault_latch
   controller_simulation_physical_motion_threshold_deg: 0.05
   latch_fault_on_robot_state_error: true
   stop_both_arms_on_single_arm_error: true
+  # Stand-frame floor plane: neither TCP may go below z_min_m, for any motion
+  # primitive and in every run mode (controller-sim AND real). Runtime-adjustable
+  # via the leaseless SetSafetyFloorZ command within
+  # [runtime_min_z_m, runtime_max_z_m]. clamp_hold reverts the violating arm to
+  # its last safe target (non-latching, upward escape allowed); fault_latch is
+  # the conservative alternative for physical-real operation.
+  floor_constraint:
+    enable: true
+    z_min_m: 0.010
+    runtime_min_z_m: 0.0
+    runtime_max_z_m: 0.5
+    fail_policy: clamp_hold
+    monitor_only: false
 
 network:
   command_bind: "udp://127.0.0.1:50256"

@@ -23,9 +23,29 @@ struct RbpodoSystemStateSnapshot {
     int op_stat_self_collision = 0;
 };
 
+struct RbpodoStateDecodeOptions {
+    bool controller_simulation_unreliable_status_fields_unavailable = false;
+    // True only when the REAL physical-motion suspect-diagnostics gate opened the
+    // unavailable-fields policy (operator-visible); distinct from the controller-sim
+    // carve-out so real-motion telemetry is unambiguous.
+    bool real_motion_suspect_diagnostics_accepted = false;
+};
+
 RobotState mapRbpodoSystemStateSnapshot(
     ArmId arm_id,
     const RbpodoSystemStateSnapshot& snapshot
+);
+
+RobotState mapRbpodoSystemStateSnapshot(
+    ArmId arm_id,
+    const RbpodoSystemStateSnapshot& snapshot,
+    const BackendConfig& config
+);
+
+RobotState mapRbpodoSystemStateSnapshot(
+    ArmId arm_id,
+    const RbpodoSystemStateSnapshot& snapshot,
+    const RbpodoStateDecodeOptions& decode_options
 );
 
 std::optional<BackendError> rbpodoStateAcquisitionError(const RobotState& mapped);

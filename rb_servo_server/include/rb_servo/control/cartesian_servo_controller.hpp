@@ -6,6 +6,7 @@
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/cartesian_controller.hpp"
 #include "rb_servo/control/cartesian_trajectory_planner.hpp"
+#include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/core/types.hpp"
 #include "rb_servo/kinematics/i_kinematics.hpp"
 
@@ -22,6 +23,12 @@ struct CartesianServoPathState {
     Pose6D start_tcp_stand;
     Pose6D target_tcp_stand;
     CartesianOrientationInterpolation orientation_mode = CartesianOrientationInterpolation::Constant;
+    // pose_track_smd smoothing of the per-tick path reference (same filter as
+    // streaming TcpPoseTarget). Null when pose_track_smd.enable is false.
+    std::shared_ptr<SmdPoseTracker> smd;
+    // Previous commanded (post-filter) pose, for telemetry velocity norms.
+    Pose6D last_commanded_tcp_stand;
+    bool has_last_commanded = false;
 };
 
 struct CartesianCircleMoveState {
@@ -46,6 +53,10 @@ struct CartesianCircleMoveState {
 struct CartesianTwistHoldState {
     bool orientation_hold_active = false;
     Pose6D hold_tcp_stand;
+    // First-order twist LPF state (anti-vibration). Persisted per arm across
+    // ticks; auto-reset to seed on lease/mode (re)entry via CartesianTwistHoldState{}.
+    Vec6 filtered_twist{};
+    bool lpf_valid = false;
 };
 
 struct CartesianVelocityIntegratorState {
@@ -127,11 +138,20 @@ public:
         const std::string& reset_reason
     );
 
+    // Stand-frame floor plane (safety.floor_constraint Tier-2 assist): when the
+    // commanded TCP is at/below z_min_m + soft_margin_m, the negative stand-frame
+    // linear v_z of a streaming twist is zeroed so lateral motion slides along
+    // the plane instead of stuttering against the Tier-1 joint-level hold.
+    void setFloorConstraint(bool enabled, double z_min_m, double soft_margin_m);
+
 private:
     ArmMountConfig left_mount_;
     ArmMountConfig right_mount_;
     CartesianControlConfig config_;
     std::shared_ptr<IKinematics> kinematics_;
+    bool floor_enabled_ = false;
+    double floor_z_min_m_ = 0.0;
+    double floor_soft_margin_m_ = 0.0;
 };
 
 }  // namespace rb_servo

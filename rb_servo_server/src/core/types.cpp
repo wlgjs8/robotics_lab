@@ -36,6 +36,7 @@ std::string toString(ControlMode mode) {
         case ControlMode::TcpTwistLocal: return "TcpTwistLocal";
         case ControlMode::EmergencyStop: return "EmergencyStop";
         case ControlMode::ResetFault: return "ResetFault";
+        case ControlMode::SetSafetyFloorZ: return "SetSafetyFloorZ";
     }
     return "Unknown";
 }
@@ -84,6 +85,7 @@ std::string toString(SafetyVerdict verdict) {
         case SafetyVerdict::CartesianUnavailable: return "CartesianUnavailable";
         case SafetyVerdict::IkFailed: return "IkFailed";
         case SafetyVerdict::SelfCollision: return "SelfCollision";
+        case SafetyVerdict::FloorViolation: return "FloorViolation";
         case SafetyVerdict::UnknownError: return "UnknownError";
     }
     return "Unknown";
@@ -142,6 +144,7 @@ ControlMode controlModeFromString(const std::string& mode) {
     if (m == "tcptwistlocal" || m == "tcp_twist_local") return ControlMode::TcpTwistLocal;
     if (m == "emergencystop" || m == "emergency_stop" || m == "estop") return ControlMode::EmergencyStop;
     if (m == "resetfault" || m == "reset_fault" || m == "reset") return ControlMode::ResetFault;
+    if (m == "setsafetyfloorz" || m == "set_safety_floor_z") return ControlMode::SetSafetyFloorZ;
     throw std::invalid_argument("Unknown ControlMode string: " + mode);
 }
 

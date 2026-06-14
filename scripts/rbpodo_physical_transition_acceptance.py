@@ -287,6 +287,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--circle-diameter-m", type=float)
     parser.add_argument("--circle-period-sec", type=float)
     parser.add_argument(
+        "--operator-stop-policy-verified",
+        action="store_true",
+        help="For P2 only, record that the physical operator-stop policy was verified.",
+    )
+    parser.add_argument(
+        "--operator-stop-note",
+        default="",
+        help="Required non-empty operator note when --operator-stop-policy-verified is set.",
+    )
+    parser.add_argument(
         "--prereq-artifact",
         action="append",
         default=[],
@@ -500,6 +510,17 @@ def validate_numeric_args(args: argparse.Namespace, stage: Stage) -> list[str]:
     return blockers
 
 
+def validate_operator_stop_policy_args(args: argparse.Namespace, stage: Stage) -> list[str]:
+    if not getattr(args, "operator_stop_policy_verified", False):
+        return []
+    blockers: list[str] = []
+    if stage.stage_id != "P2":
+        blockers.append("--operator-stop-policy-verified is valid only for P2 stop_policy")
+    if not str(getattr(args, "operator_stop_note", "") or "").strip():
+        blockers.append("--operator-stop-note is required when --operator-stop-policy-verified is set")
+    return blockers
+
+
 def validate_config_policy(args: argparse.Namespace, stage: Stage, config: ParsedConfig | None) -> list[str]:
     if config is None:
         if args.dry_run:
@@ -661,6 +682,17 @@ def build_summary(
     dry_run = bool(args.dry_run)
     result_status = "dry_run" if dry_run and not blockers else "blocked" if blockers else "preflight_pass"
     physical_status = "not_run"
+    operator_stop_note = str(getattr(args, "operator_stop_note", "") or "").strip()
+    operator_stop_verified = bool(
+        getattr(args, "operator_stop_policy_verified", False) and stage.stage_id == "P2" and operator_stop_note
+    )
+    stop_reset_behavior_result = (
+        "operator_stop_policy_verified"
+        if operator_stop_verified
+        else "unresolved"
+        if stage.stage_id in {"P2", "P3"} or stage.is_motion
+        else "not_applicable"
+    )
     return {
         "schema": SCHEMA,
         "generated_at_unix": time.time(),
@@ -710,9 +742,8 @@ def build_summary(
             "q_ref_update_rate_hz": None,
             "fault_latch_status": "not_checked" if dry_run else "unresolved",
             "cartesian_availability": "not_checked" if dry_run else "unresolved",
-            "stop_reset_behavior_result": (
-                "unresolved" if stage.stage_id in {"P2", "P3"} or stage.is_motion else "not_applicable"
-            ),
+            "stop_reset_behavior_result": stop_reset_behavior_result,
+            "stop_reset_behavior_note": operator_stop_note if operator_stop_verified else None,
             "physical_motion_expected": False if dry_run else bool(stage.is_motion),
             "physical_motion_detected": None,
         },
@@ -784,6 +815,7 @@ def main(argv: list[str] | None = None) -> int:
         prereq_artifacts = parse_prereq_artifacts(args.prereq_artifact)
         required_env = stage_required_env(stage, config)
         blockers = validate_numeric_args(args, stage)
+        blockers.extend(validate_operator_stop_policy_args(args, stage))
         blockers.extend(validate_config_policy(args, stage, config))
         if not args.dry_run:
             blockers.extend(f"missing env gate {gate}=1" for gate in missing_env(required_env))

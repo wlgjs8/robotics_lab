@@ -23,6 +23,11 @@ class CommandClient:
         self.session_id = session_id or uuid.uuid4().hex
         self._seq = time.monotonic_ns()
         self.sent_packets: list[Mapping[str, Any]] = []
+        # When True, send() rides an already-held lease instead of bracketing
+        # every command with Acquire/Release. Use for streaming controls
+        # (twist/circle/joint-vel keep-alive) so the lease is not torn down and
+        # re-taken between every packet. Toggled via acquire_lease/release_lease.
+        self.hold_lease = False
 
     def next_seq(self) -> int:
         self._seq += 1
@@ -376,13 +381,101 @@ class CommandClient:
         }
         return self._with_source(packet)
 
+    def build_set_safety_floor_z(self, floor_z_m: float, *, timeout_sec: float = 0.2) -> dict[str, Any]:
+        value = float(floor_z_m)
+        if not math.isfinite(value):
+            raise ValueError("floor_z_m must be finite")
+        # Leaseless non-motion command; the server only accepts values within its
+        # configured safety.floor_constraint runtime bounds.
+        return self._with_source({
+            "seq": self.next_seq(),
+            "mode": "SetSafetyFloorZ",
+            "timeout_sec": timeout_sec,
+            "floor_z_m": value,
+            "left": {},
+            "right": {},
+        })
+
+    # Modes that take (or require) the command-source lease when sent. After a
+    # one-shot GUI command the lease is released immediately so a streaming
+    # client (policy_runner teleop) can take over without waiting for the
+    # server-side lease timeout.
+    _LEASED_MODES = {
+        "ArmMotion",
+        "DisarmMotion",
+        # ResetFault requires the lease server-side (commandRequiresLease);
+        # without the bracket a GUI ResetFault is rejected with
+        # command_source_lease_required whenever no lease is active.
+        "ResetFault",
+        "JointTarget",
+        "JointVelocity",
+        "TcpPoseTarget",
+        "TcpLinearMove",
+        "TcpCircleMove",
+        "TcpCircleTrack",
+        "TcpDeltaStand",
+        "TcpDeltaLocal",
+        "TcpTwistStand",
+        "TcpTwistLocal",
+        "Hold",
+    }
+
     def send(self, packet: Mapping[str, Any]) -> None:
-        payload = json.dumps(packet, separators=(",", ":")).encode("utf-8")
+        # Atomic lease bracket: only AcquireLease/ArmMotion can TAKE the lease
+        # on the server; plain motion commands (e.g. JointTarget) merely ride an
+        # existing one. Acquire right before the command and release right
+        # after, so one-shot GUI commands work without camping on the lease
+        # between clicks. The server enforces strictly increasing seq per
+        # source, so ALL THREE packets get freshly issued seqs here.
+        # While a lease is explicitly held (Take control), motion commands ride
+        # it: the lease owner's commands renew the server-side lease timeout, so
+        # no per-command Acquire/Release bracket is needed (and tearing it down
+        # between streaming packets would let another source grab it).
+        bracket = str(packet.get("mode")) in self._LEASED_MODES and not self.hold_lease
+        out = dict(packet)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.sendto(payload, (self.host, self.port))
-        self.sent_packets.append(dict(packet))
+            if bracket:
+                sock.sendto(json.dumps(self._lease_packet("AcquireLease"), separators=(",", ":")).encode("utf-8"), (self.host, self.port))
+                out["seq"] = self.next_seq()
+            sock.sendto(json.dumps(out, separators=(",", ":")).encode("utf-8"), (self.host, self.port))
+            if bracket:
+                sock.sendto(json.dumps(self._lease_packet("ReleaseLease"), separators=(",", ":")).encode("utf-8"), (self.host, self.port))
+        self.sent_packets.append(out)
+
+    def _lease_packet(self, mode: str) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "seq": self.next_seq(),
+            "mode": mode,
+            "source_id": self.source_id,
+            "session_id": self.session_id,
+        }
+
+    def acquire_lease(self) -> dict[str, Any]:
+        """Explicitly take and hold the command-source lease (Take control ON).
+
+        Subsequent motion commands ride the held lease until release_lease().
+        Returns the AcquireLease packet that was sent."""
+        packet = self._lease_packet("AcquireLease")
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.sendto(json.dumps(packet, separators=(",", ":")).encode("utf-8"), (self.host, self.port))
+        self.hold_lease = True
+        return packet
+
+    def release_lease(self) -> dict[str, Any]:
+        """Release a held lease (Take control OFF) and resume one-shot bracketing."""
+        self.hold_lease = False
+        packet = self._lease_packet("ReleaseLease")
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.sendto(json.dumps(packet, separators=(",", ":")).encode("utf-8"), (self.host, self.port))
+        return packet
 
     def send_lifecycle(self, mode: str, *, timeout_sec: float = 0.2) -> dict[str, Any]:
         packet = self.build_lifecycle(mode, timeout_sec=timeout_sec)
+        self.send(packet)
+        return packet
+
+    def send_set_safety_floor_z(self, floor_z_m: float, *, timeout_sec: float = 0.2) -> dict[str, Any]:
+        packet = self.build_set_safety_floor_z(floor_z_m, timeout_sec=timeout_sec)
         self.send(packet)
         return packet

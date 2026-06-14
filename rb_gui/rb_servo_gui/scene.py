@@ -4,7 +4,7 @@ import importlib.util
 import math
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .geometry import (
     _mount_pose_from_mounts,
@@ -167,6 +167,17 @@ def _joint_cfg_radians(q_values: tuple[float, ...] | None) -> tuple[float, ...]:
 # Translucent blue for the reference "ghost" robot (R, G, B, alpha in 0..1).
 _REFERENCE_GHOST_RGBA = (0.25, 0.6, 1.0, 0.35)
 
+# Translucent red for the self-collision overlay (shown while
+# self_collision.violated, monitor_only included). The RGBA 4-tuple routes the
+# URDF override through add_mesh_simple(opacity=a) — the same transparent
+# pipeline as the reference ghost — so the colliding pair reads as a red
+# see-through highlight instead of a solid replacement.
+_SELF_COLLISION_RGBA = (0.85, 0.08, 0.08, 0.6)
+_SELF_COLLISION_STAND_RGB = (217, 20, 20)
+_SELF_COLLISION_STAND_OPACITY = 0.6
+# Translucent blue overlay of the checked collision hulls (URDF <collision> meshes).
+_SELF_COLLISION_CHECK_RGBA = (0.27, 0.62, 1.0, 0.38)
+
 
 def _reference_ghost_enabled() -> bool:
     return os.environ.get("RB_GUI_REFERENCE_GHOST", "1").strip().lower() not in ("0", "false", "no", "off")
@@ -200,6 +211,547 @@ def _tcp_label_position(position: tuple[float, float, float]) -> tuple[float, fl
     return (position[0], position[1], position[2] + 0.045)
 
 
+_FLOOR_PLANE_BLUE = (80, 160, 255)
+_FLOOR_PLANE_RED = (220, 60, 60)
+# Pending (not-yet-sent) slider value preview: distinct color so it cannot be
+# mistaken for the APPLIED safety plane.
+_FLOOR_PLANE_PREVIEW_YELLOW = (235, 200, 60)
+# Stand-frame footprint of the floor plane visual: x in [-0.5, 0.5] m,
+# y in [-1.0, 0.0] m (the workspace in front of the stand).
+_FLOOR_PLANE_DIMENSIONS = (1.0, 1.0, 0.002)
+_FLOOR_PLANE_CENTER_XY = (0.0, -0.5)
+
+
+def _add_floor_plane(server: Any, handles: dict[str, Any]) -> None:
+    """Stand-frame safety floor plane (safety.floor_constraint visual).
+
+    Rendered at the server-reported effective z; red when either arm violates.
+    Hidden until the server reports the constraint enabled."""
+    try:
+        if hasattr(server.scene, "add_box"):
+            try:
+                handles["floor_plane"] = server.scene.add_box(
+                    "/stand/floor_plane",
+                    dimensions=_FLOOR_PLANE_DIMENSIONS,
+                    color=_FLOOR_PLANE_BLUE,
+                    opacity=0.25,
+                    position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
+                    visible=False,
+                )
+            except TypeError:  # older viser without opacity support
+                handles["floor_plane"] = server.scene.add_box(
+                    "/stand/floor_plane",
+                    dimensions=_FLOOR_PLANE_DIMENSIONS,
+                    color=_FLOOR_PLANE_BLUE,
+                    position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
+                    visible=False,
+                )
+        elif hasattr(server.scene, "add_grid"):
+            handles["floor_plane"] = server.scene.add_grid(
+                "/stand/floor_plane",
+                width=_FLOOR_PLANE_DIMENSIONS[0],
+                height=_FLOOR_PLANE_DIMENSIONS[1],
+                position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
+                visible=False,
+            )
+    except Exception as exc:
+        handles["floor_plane_error"] = f"{type(exc).__name__}: {exc}"
+    # Pending-slider preview plane (yellow, more translucent): follows the
+    # "Set floor z mm" slider live so the operator can line the plane up
+    # BEFORE sending; the applied plane above keeps tracking only the
+    # server-reported effective z.
+    try:
+        if hasattr(server.scene, "add_box"):
+            try:
+                handles["floor_plane_preview"] = server.scene.add_box(
+                    "/stand/floor_plane_preview",
+                    dimensions=_FLOOR_PLANE_DIMENSIONS,
+                    color=_FLOOR_PLANE_PREVIEW_YELLOW,
+                    opacity=0.15,
+                    position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
+                    visible=False,
+                )
+            except TypeError:  # older viser without opacity support
+                handles["floor_plane_preview"] = server.scene.add_box(
+                    "/stand/floor_plane_preview",
+                    dimensions=_FLOOR_PLANE_DIMENSIONS,
+                    color=_FLOOR_PLANE_PREVIEW_YELLOW,
+                    position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
+                    visible=False,
+                )
+    except Exception as exc:
+        handles["floor_plane_preview_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def update_floor_plane_preview(scene_handles: dict[str, Any], z_m: float | None) -> None:
+    """Show the pending slider value as a translucent preview plane.
+
+    z_m=None hides the preview (slider matches the applied value, or the
+    constraint is disabled)."""
+    plane = scene_handles.get("floor_plane_preview") if isinstance(scene_handles, dict) else None
+    if plane is None:
+        return
+    if z_m is None or not isinstance(z_m, (int, float)) or not math.isfinite(float(z_m)):
+        _set_visible(plane, False)
+        return
+    try:
+        plane.position = (*_FLOOR_PLANE_CENTER_XY, float(z_m))
+    except Exception:
+        pass
+    _set_visible(plane, True)
+
+
+def update_floor_plane(scene_handles: dict[str, Any], floor: Mapping[str, Any] | None) -> None:
+    """Move/recolor the safety floor plane from the published floor_constraint block."""
+    plane = scene_handles.get("floor_plane") if isinstance(scene_handles, dict) else None
+    if plane is None:
+        return
+    if not isinstance(floor, Mapping) or not bool(floor.get("enabled", False)):
+        _set_visible(plane, False)
+        return
+    z = floor.get("z_min_m")
+    if isinstance(z, (int, float)) and math.isfinite(float(z)):
+        try:
+            # z is the stand-frame plane height (z=0 == stand origin plane).
+            plane.position = (*_FLOOR_PLANE_CENTER_XY, float(z))
+        except Exception:
+            pass
+    violated = any(
+        isinstance(floor.get(key), Mapping) and bool(floor[key].get("violated", False))
+        for key in ("left", "right")
+    )
+    try:
+        plane.color = _FLOOR_PLANE_RED if violated else _FLOOR_PLANE_BLUE
+    except Exception:
+        pass
+    _set_visible(plane, True)
+
+
+def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) -> None:
+    """Paint the colliding PAIR translucent red while self_collision.violated.
+
+    Driven by the server's self_collision telemetry, so monitor_only runs show
+    the overlay too. Only the members of the reported pair turn red
+    ("left_right" -> both arms, "left_stand"/"right_stand" -> that arm + the
+    stand); a violated state without a recognizable pair falls back to all-red
+    (conservative). pgmode real (physical_motion_expected=True): the ACTUAL
+    robot (q_actual) turns red. pgmode simulation: the commanded ghost (q_sent)
+    turns red while the solid robot keeps showing the true (stationary) state."""
+    if not isinstance(scene_handles, dict):
+        return
+    sc = getattr(latest, "self_collision", None) if latest is not None else None
+    violated = isinstance(sc, Mapping) and bool(sc.get("violated", False))
+    _update_self_collision_witness_markers(scene_handles, sc, violated)
+    pair = sc.get("pair") if isinstance(sc, Mapping) else None
+    if violated and pair not in ("left_right", "left_stand", "right_stand"):
+        pair = "all"  # unknown/legacy pair info: keep the conservative all-red
+    left_red = violated and pair in ("left_right", "left_stand", "all")
+    right_red = violated and pair in ("left_right", "right_stand", "all")
+    stand_red = violated and pair in ("left_stand", "right_stand", "all")
+    physical_real = latest is not None and (
+        getattr(latest.left, "physical_motion_expected", None) is True
+        or getattr(latest.right, "physical_motion_expected", None) is True
+    )
+
+    if violated:
+        for key, arm_state, arm_red in (
+            ("left_urdf_collision", latest.left, left_red),
+            ("right_urdf_collision", latest.right, right_red),
+        ):
+            handle = scene_handles.get(key)
+            if handle is None or not arm_red:
+                continue
+            q = arm_state.q_actual_deg if physical_real else (
+                arm_state.q_sent_deg if arm_state.q_sent_deg is not None else arm_state.q_actual_deg
+            )
+            try:
+                _update_urdf_config(handle, _joint_cfg_radians(q))
+            except Exception as exc:
+                scene_handles["urdf_collision_update_error"] = f"{type(exc).__name__}: {exc}"
+
+    _set_visible(scene_handles.get("left_base_collision"), left_red)
+    _set_visible(scene_handles.get("right_base_collision"), right_red)
+    _set_visible(scene_handles.get("stand_mesh_collision"), stand_red)
+    _set_visible(scene_handles.get("stand_mesh"), not stand_red)
+    # Replace (not overlap) the model the red overlay represents to avoid
+    # z-fighting at the identical configuration — per arm, only the red one.
+    _set_visible(scene_handles.get("left_base"), not (left_red and physical_real))
+    _set_visible(scene_handles.get("right_base"), not (right_red and physical_real))
+    if violated and not physical_real:
+        if left_red:
+            _set_visible(scene_handles.get("left_base_ref"), False)
+        if right_red:
+            _set_visible(scene_handles.get("right_base_ref"), False)
+
+
+def _add_self_collision_witness_markers(server: Any, handles: dict[str, Any]) -> None:
+    """Closest-point (witness) markers for the self-collision guard.
+
+    Two small spheres on the min-clearance pair's bone AXES — i.e. on the pair
+    members themselves (yellow = first member, cyan = second) — plus a
+    connecting segment and a label showing the judged capsule-surface
+    clearance. Hidden unless self_collision.violated. They answer "which spot
+    on each member was judged this close?" when the visual mesh gap looks
+    larger than the capsule clearance (the capsule radii inflate the links)."""
+    try:
+        if not hasattr(server.scene, "add_icosphere"):
+            return
+        for key, name, color in (
+            ("self_collision_point_a", "/stand/self_collision_point_a", (255, 220, 0)),
+            ("self_collision_point_b", "/stand/self_collision_point_b", (0, 229, 255)),
+        ):
+            handles[key] = server.scene.add_icosphere(
+                name,
+                radius=0.006,
+                color=color,
+                position=(0.0, 0.0, 0.0),
+                visible=False,
+            )
+        if hasattr(server.scene, "add_line_segments"):
+            import numpy as np
+
+            handles["self_collision_gap_line"] = server.scene.add_line_segments(
+                "/stand/self_collision_gap_line",
+                points=np.zeros((1, 2, 3), dtype=np.float32),
+                colors=np.full((1, 2, 3), (255, 220, 0), dtype=np.uint8),
+                line_width=3.0,
+                visible=False,
+            )
+        if hasattr(server.scene, "add_label"):
+            handles["self_collision_gap_label"] = server.scene.add_label(
+                "/stand/self_collision_gap_label",
+                text="",
+                position=(0.0, 0.0, 0.0),
+                visible=False,
+            )
+    except Exception as exc:
+        handles["self_collision_witness_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _update_self_collision_witness_markers(
+    scene_handles: dict[str, Any], sc: Mapping[str, Any] | None, violated: bool
+) -> None:
+    """Place/hide the witness-point markers from self_collision telemetry."""
+    point_a = scene_handles.get("self_collision_point_a")
+    point_b = scene_handles.get("self_collision_point_b")
+    line = scene_handles.get("self_collision_gap_line")
+    label = scene_handles.get("self_collision_gap_label")
+    if point_a is None or point_b is None:
+        return
+
+    def _xyz(value: Any) -> tuple[float, float, float] | None:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            return None
+        try:
+            p = tuple(float(v) for v in value)
+        except (TypeError, ValueError):
+            return None
+        return p if all(math.isfinite(v) for v in p) else None
+
+    a = _xyz(sc.get("closest_point_a_m")) if isinstance(sc, Mapping) else None
+    b = _xyz(sc.get("closest_point_b_m")) if isinstance(sc, Mapping) else None
+    show = bool(violated and a is not None and b is not None)
+    if show:
+        try:
+            point_a.position = a
+            point_b.position = b
+            if line is not None:
+                import numpy as np
+
+                line.points = np.array([[a, b]], dtype=np.float32)
+            if label is not None:
+                clearance = sc.get("min_clearance_m") if isinstance(sc, Mapping) else None
+                if isinstance(clearance, (int, float)) and math.isfinite(float(clearance)):
+                    label.text = f"{float(clearance) * 1000:.1f}mm"
+                label.position = (
+                    (a[0] + b[0]) / 2.0,
+                    (a[1] + b[1]) / 2.0,
+                    (a[2] + b[2]) / 2.0 + 0.02,
+                )
+        except Exception as exc:
+            scene_handles["self_collision_witness_error"] = f"{type(exc).__name__}: {exc}"
+    for handle in (point_a, point_b, line, label):
+        _set_visible(handle, show)
+
+
+# Translucent collision-capsule overlay. Arm capsules (blue) and stand capsules
+# (orange) both come from the server's self_collision telemetry as explicit
+# {p0_m, p1_m, radius_m} lists — the EXACT capsules the guard checked this tick
+# (arm capsules FK'd per-link from the URDF-fit template). Each is inflated by
+# margin/2 so two capsule surfaces touching == the violation threshold
+# (clearance < margin). Translucent so the real arm/stand meshes show underneath.
+_SELF_COLLISION_ARM_CAPSULE_RGB = (70, 160, 255)
+_SELF_COLLISION_STAND_CAPSULE_RGB = (255, 165, 60)
+_SELF_COLLISION_CAPSULE_OPACITY = 0.30
+
+
+def _xyz3(value: Any) -> tuple[float, float, float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return None
+    try:
+        p = tuple(float(v) for v in value)
+    except (TypeError, ValueError):
+        return None
+    return p if all(math.isfinite(v) for v in p) else None  # type: ignore[return-value]
+
+
+def _capsule_axis_wxyz(direction: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """Quaternion (w,x,y,z) rotating the capsule's +Z axis onto `direction`."""
+    import numpy as np
+
+    z = np.array([0.0, 0.0, 1.0])
+    v = np.asarray(direction, dtype=float)
+    norm = float(np.linalg.norm(v))
+    if norm < 1e-9:
+        return (1.0, 0.0, 0.0, 0.0)
+    v = v / norm
+    c = float(np.clip(np.dot(z, v), -1.0, 1.0))
+    if c > 1.0 - 1e-9:
+        return (1.0, 0.0, 0.0, 0.0)
+    if c < -1.0 + 1e-9:
+        return (0.0, 1.0, 0.0, 0.0)  # 180 deg about X
+    axis = np.cross(z, v)
+    axis = axis / float(np.linalg.norm(axis))
+    half = math.acos(c) / 2.0
+    s = math.sin(half)
+    return (math.cos(half), float(axis[0] * s), float(axis[1] * s), float(axis[2] * s))
+
+
+def _ensure_capsule_handle(
+    server: Any, scene_handles: dict[str, Any], key: str, length: float, radius: float, rgb: tuple[int, int, int]
+) -> Any:
+    # Capsule core spans +/-length/2 along local Z (trimesh capsule centered at
+    # origin). Reuse the mesh while (length, radius) are unchanged — arm bone
+    # lengths are constant for a rigid arm, so this recreates at most once.
+    cache = scene_handles.setdefault("_self_collision_capsule_cache", {})
+    entry = cache.get(key)
+    if entry is not None and abs(entry["length"] - length) < 1e-4 and abs(entry["radius"] - radius) < 1e-4:
+        return entry["handle"]
+    if entry is not None:
+        try:
+            entry["handle"].remove()
+        except Exception:
+            pass
+    try:
+        import trimesh
+
+        mesh = trimesh.creation.capsule(
+            height=max(float(length), 1e-4), radius=max(float(radius), 1e-4), count=[6, 10]
+        )
+        handle = server.scene.add_mesh_simple(
+            f"/stand/self_collision_capsule/{key}",
+            vertices=mesh.vertices,
+            faces=mesh.faces,
+            color=rgb,
+            opacity=_SELF_COLLISION_CAPSULE_OPACITY,
+            visible=False,
+        )
+    except Exception as exc:
+        scene_handles["self_collision_capsule_error"] = f"{type(exc).__name__}: {exc}"
+        return None
+    cache[key] = {"handle": handle, "length": float(length), "radius": float(radius)}
+    return handle
+
+
+def _place_capsule(handle: Any, p0: tuple[float, float, float], p1: tuple[float, float, float]) -> None:
+    seg = (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
+    handle.position = ((p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0, (p0[2] + p1[2]) / 2.0)
+    handle.wxyz = _capsule_axis_wxyz(seg)
+
+
+# URDF mesh self-collision close-call overlay (mesh-mode analogue of the capsule
+# overlay above). The server's self_collision.near_pairs telemetry lists the K
+# closest checked pairs as witness segments {p_a_m, p_b_m, clearance_m}; we draw a
+# thin tube per pair, red when within the hard floor, yellow when merely close.
+_SELF_COLLISION_NEAR_HARD_RGB = (235, 40, 40)
+_SELF_COLLISION_NEAR_CAUTION_RGB = (255, 210, 40)
+_SELF_COLLISION_NEAR_RADIUS_M = 0.004
+_SELF_COLLISION_NEAR_OPACITY = 0.9
+
+
+def _ensure_near_pair_handle(
+    server: Any, scene_handles: dict[str, Any], key: str, length: float, rgb: tuple[int, int, int]
+) -> Any:
+    cache = scene_handles.setdefault("_self_collision_near_cache", {})
+    entry = cache.get(key)
+    if entry is not None and abs(entry["length"] - length) < 1e-4 and entry["rgb"] == rgb:
+        return entry["handle"]
+    if entry is not None:
+        try:
+            entry["handle"].remove()
+        except Exception:
+            pass
+    try:
+        import trimesh
+
+        mesh = trimesh.creation.capsule(
+            height=max(float(length), 1e-4), radius=_SELF_COLLISION_NEAR_RADIUS_M, count=[5, 8]
+        )
+        handle = server.scene.add_mesh_simple(
+            f"/stand/self_collision_near/{key}",
+            vertices=mesh.vertices,
+            faces=mesh.faces,
+            color=rgb,
+            opacity=_SELF_COLLISION_NEAR_OPACITY,
+            visible=False,
+        )
+    except Exception as exc:
+        scene_handles["self_collision_near_error"] = f"{type(exc).__name__}: {exc}"
+        return None
+    cache[key] = {"handle": handle, "length": float(length), "rgb": rgb}
+    return handle
+
+
+def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
+    """Show/update the URDF-mesh close-call segments from self_collision.near_pairs.
+    A thin tube spans each checked pair's witness points (red within the hard floor,
+    yellow when merely close) so the viewer sees WHERE and HOW CLOSE the mesh guard
+    is — the mesh-mode counterpart of update_self_collision_capsules."""
+    if not isinstance(scene_handles, dict):
+        return
+    server = scene_handles.get("_server")
+    cache = scene_handles.setdefault("_self_collision_near_cache", {})
+    used_keys: set[str] = set()
+    if show and server is not None:
+        sc = getattr(latest, "self_collision", None) if latest is not None else None
+        if isinstance(sc, Mapping):
+            margin = sc.get("margin_m")
+            hard = (
+                float(margin)
+                if isinstance(margin, (int, float)) and math.isfinite(float(margin))
+                else 0.005
+            )
+            pairs = sc.get("near_pairs")
+            if isinstance(pairs, (list, tuple)):
+                for i, pair in enumerate(pairs):
+                    if not isinstance(pair, Mapping):
+                        continue
+                    a = _xyz3(pair.get("p_a_m"))
+                    b = _xyz3(pair.get("p_b_m"))
+                    clearance = pair.get("clearance_m")
+                    if a is None or b is None or not isinstance(clearance, (int, float)):
+                        continue
+                    is_hard = float(clearance) < hard
+                    rgb = _SELF_COLLISION_NEAR_HARD_RGB if is_hard else _SELF_COLLISION_NEAR_CAUTION_RGB
+                    key = f"{i}_{'hard' if is_hard else 'near'}"
+                    handle = _ensure_near_pair_handle(server, scene_handles, key, math.dist(a, b), rgb)
+                    if handle is None:
+                        continue
+                    try:
+                        _place_capsule(handle, a, b)
+                    except Exception:
+                        pass
+                    used_keys.add(key)
+    for key, entry in cache.items():
+        _set_visible(entry["handle"], show and key in used_keys)
+
+
+def add_self_collision_capsules(server: Any, scene_handles: dict[str, Any]) -> None:
+    """Prime the collision-capsule overlay (store the server handle).
+
+    Both arm and stand capsules are created lazily from the server's
+    self_collision telemetry in update_self_collision_capsules, so the viewer
+    always draws the EXACT geometry the guard checked this tick — there is no
+    GUI-side copy of the stand config to drift from the server."""
+    if not isinstance(scene_handles, dict):
+        return
+    scene_handles["_server"] = server
+
+
+def update_self_collision_capsules(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
+    """Show/update the translucent collision capsules from telemetry. Arm capsules
+    come from {left,right}_arm_capsules_m (blue), stand from stand_capsules_m
+    (orange) — all explicit {p0_m, p1_m, radius_m} lists, the exact geometry the
+    server checked. Each is inflated by margin/2 so two capsule surfaces touching
+    == the violation threshold."""
+    if not isinstance(scene_handles, dict):
+        return
+    server = scene_handles.get("_server")
+    # setdefault (not get): _ensure_capsule_handle lazily creates this same dict,
+    # so binding the live reference here keeps the final visibility sweep in sync.
+    cache = scene_handles.setdefault("_self_collision_capsule_cache", {})
+    used_keys: set[str] = set()
+    if show and server is not None:
+        sc = getattr(latest, "self_collision", None) if latest is not None else None
+        if isinstance(sc, Mapping):
+            margin = sc.get("margin_m")
+            half = (
+                float(margin) / 2.0
+                if isinstance(margin, (int, float)) and math.isfinite(float(margin))
+                else 0.0
+            )
+            groups = (
+                ("left", "left_arm_capsules_m", _SELF_COLLISION_ARM_CAPSULE_RGB),
+                ("right", "right_arm_capsules_m", _SELF_COLLISION_ARM_CAPSULE_RGB),
+                ("stand", "stand_capsules_m", _SELF_COLLISION_STAND_CAPSULE_RGB),
+            )
+            for prefix, telemetry_key, rgb in groups:
+                caps = sc.get(telemetry_key)
+                if not isinstance(caps, (list, tuple)):
+                    continue
+                for i, capsule in enumerate(caps):
+                    if not isinstance(capsule, Mapping):
+                        continue
+                    p0 = _xyz3(capsule.get("p0_m"))
+                    p1 = _xyz3(capsule.get("p1_m"))
+                    radius = capsule.get("radius_m")
+                    if p0 is None or p1 is None or not isinstance(radius, (int, float)):
+                        continue
+                    key = f"{prefix}_{i}"
+                    handle = _ensure_capsule_handle(
+                        server, scene_handles, key, math.dist(p0, p1), float(radius) + half, rgb
+                    )
+                    if handle is None:
+                        continue
+                    try:
+                        _place_capsule(handle, p0, p1)
+                    except Exception:
+                        pass
+                    used_keys.add(key)
+    for key, entry in cache.items():
+        _set_visible(entry["handle"], show and key in used_keys)
+
+
+def update_self_collision_check_geom(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
+    """Show/hide the translucent checked-collision-geometry overlay (per-link convex
+    hulls from the URDF <collision> meshes), posed to the commanded/actual config —
+    the capsule-overlay analogue for mesh mode. Driven by the same toggle."""
+    if not isinstance(scene_handles, dict):
+        return
+    for side, arm_state in (("left", latest.left), ("right", latest.right)):
+        urdf = scene_handles.get(f"{side}_urdf_checkgeom")
+        base = scene_handles.get(f"{side}_base_checkgeom")
+        if urdf is None:
+            _set_visible(base, False)
+            continue
+        if show:
+            # Hug whichever robot is shown: the commanded ghost in controller-sim,
+            # else the actual arm.
+            q = arm_state.q_sent_deg if _reference_ghost_active(arm_state) else None
+            if q is None:
+                q = arm_state.q_actual_deg
+            try:
+                _update_urdf_config(urdf, _joint_cfg_radians(q))
+            except Exception as exc:
+                scene_handles["urdf_checkgeom_update_error"] = f"{type(exc).__name__}: {exc}"
+        # The collision meshes live under ViserUrdf's own collision root frame; the
+        # outer mount frame visibility alone does not reveal them — toggle both.
+        _set_visible(base, show)
+        try:
+            urdf.show_collision = show
+        except Exception as exc:
+            scene_handles["urdf_checkgeom_show_error"] = f"{type(exc).__name__}: {exc}"
+        # The collision hulls hug the links and would be hidden inside the opaque
+        # solid robot, so showing the checked geometry = a "collision view": hide
+        # the solid visual meshes while the toggle is on, restore them when off.
+        solid = scene_handles.get(f"{side}_urdf")
+        if solid is not None:
+            try:
+                solid.show_visual = not show
+            except Exception:
+                pass
+
+
 def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
     stand_mesh_path = _stand_mesh_path()
     if not stand_mesh_path.exists():
@@ -216,6 +768,22 @@ def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
             position=_pose_position(_DEFAULT_STAND_MESH_POSE),
             wxyz=_pose_wxyz(_DEFAULT_STAND_MESH_POSE),
         )
+        # Translucent-red duplicate for the self-collision overlay (hidden until
+        # violated). add_mesh_simple (not add_mesh_trimesh): trimesh face-color
+        # alpha is not honored, opacity= is.
+        try:
+            handles["stand_mesh_collision"] = server.scene.add_mesh_simple(
+                "/stand/mesh_collision",
+                vertices=mesh.vertices,
+                faces=mesh.faces,
+                color=_SELF_COLLISION_STAND_RGB,
+                opacity=_SELF_COLLISION_STAND_OPACITY,
+                position=_pose_position(_DEFAULT_STAND_MESH_POSE),
+                wxyz=_pose_wxyz(_DEFAULT_STAND_MESH_POSE),
+                visible=False,
+            )
+        except Exception as exc:
+            handles["stand_mesh_collision_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
     except Exception as exc:
         handles["stand_mesh_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
 
@@ -245,6 +813,33 @@ def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
                     mesh_color_override=_REFERENCE_GHOST_RGBA)
             except Exception as exc:
                 handles["urdf_ref_error"] = f"{type(exc).__name__}: {exc}"
+        # Translucent-red self-collision overlay robots (hidden until violated).
+        # In pgmode real they replace the actual robot; in pgmode simulation
+        # they replace the commanded ghost.
+        try:
+            handles["left_urdf_collision"] = ViserUrdf(
+                server, urdf_path, root_node_name="/stand/left_base_collision",
+                mesh_color_override=_SELF_COLLISION_RGBA)
+            handles["right_urdf_collision"] = ViserUrdf(
+                server, urdf_path, root_node_name="/stand/right_base_collision",
+                mesh_color_override=_SELF_COLLISION_RGBA)
+        except Exception as exc:
+            handles["urdf_collision_error"] = f"{type(exc).__name__}: {exc}"
+        # Checked collision GEOMETRY overlay: the actual per-link convex hulls the
+        # self-collision guard tests (URDF <collision> meshes), shown translucent
+        # when the "자기충돌 검사 표시" toggle is on. This is the capsule-overlay
+        # analogue for mesh mode — it hugs each link like the old capsules did.
+        try:
+            handles["left_urdf_checkgeom"] = ViserUrdf(
+                server, urdf_path, root_node_name="/stand/left_base_checkgeom",
+                load_meshes=False, load_collision_meshes=True,
+                collision_mesh_color_override=_SELF_COLLISION_CHECK_RGBA)
+            handles["right_urdf_checkgeom"] = ViserUrdf(
+                server, urdf_path, root_node_name="/stand/right_base_checkgeom",
+                load_meshes=False, load_collision_meshes=True,
+                collision_mesh_color_override=_SELF_COLLISION_CHECK_RGBA)
+        except Exception as exc:
+            handles["urdf_checkgeom_error"] = f"{type(exc).__name__}: {exc}"
     except Exception as exc:
         handles["urdf_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
 
@@ -269,6 +864,12 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         # Mount frames for the translucent reference "ghost" robot (follows q_ref).
         handles["left_base_ref"] = server.scene.add_frame("/stand/left_base_ref", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
         handles["right_base_ref"] = server.scene.add_frame("/stand/right_base_ref", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
+        # Mount frames for the translucent-red self-collision overlay robots.
+        handles["left_base_collision"] = server.scene.add_frame("/stand/left_base_collision", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
+        handles["right_base_collision"] = server.scene.add_frame("/stand/right_base_collision", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
+        # Mount frames for the checked-collision-geometry overlay (toggle-driven).
+        handles["left_base_checkgeom"] = server.scene.add_frame("/stand/left_base_checkgeom", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
+        handles["right_base_checkgeom"] = server.scene.add_frame("/stand/right_base_checkgeom", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
         has_transform_controls = hasattr(server.scene, "add_transform_controls")
         handles["left_tcp"] = server.scene.add_frame("/stand/left_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(0.1601, -0.1725, 0.78))
         handles["right_tcp"] = server.scene.add_frame("/stand/right_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(-0.1601, -0.1725, 0.78))
@@ -351,6 +952,9 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
             )
         _set_visible(handles.get("circle_overlay_line"), False)
         _set_visible(handles.get("circle_overlay_desired"), False)
+        _add_floor_plane(server, handles)
+        _add_self_collision_witness_markers(server, handles)
+        add_self_collision_capsules(server, handles)
         _add_stand_mesh(server, handles)
         _add_robot_urdfs(server, handles)
         urdf_loaded = "left_urdf" in handles and "right_urdf" in handles
@@ -567,6 +1171,10 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
         "right_base": right_base,
         "left_base_ref": left_base,
         "right_base_ref": right_base,
+        "left_base_collision": left_base,
+        "right_base_collision": right_base,
+        "left_base_checkgeom": left_base,
+        "right_base_checkgeom": right_base,
         "left_marker": _joint_marker_position(left_base, latest.left.q_actual_deg),
         "right_marker": _joint_marker_position(right_base, latest.right.q_actual_deg),
     }

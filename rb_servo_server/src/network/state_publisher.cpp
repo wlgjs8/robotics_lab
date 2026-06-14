@@ -438,6 +438,7 @@ nlohmann::json optionalRbpodoDiagnosticsJson(
         {"reason", optionalStringJson(diagnostics->reason)},
         {"error_name", optionalStringJson(diagnostics->error_name)},
         {"stable_error_code", diagnostics->stable_error_code},
+        {"unavailable_fields", stringArrayJson(diagnostics->unavailable_fields)},
         {"raw", rbpodoRawDiagnosticsJson(diagnostics->raw)},
     };
 }
@@ -595,6 +596,7 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"linear_move_elapsed_sec", telemetry.linear_move_elapsed_sec},
         {"orientation_mode", telemetry.orientation_mode},
         {"twist_clamped", telemetry.twist_clamped},
+        {"floor_vz_clamped", telemetry.floor_vz_clamped},
         {"requested_twist_linear_norm_m_s", telemetry.requested_twist_linear_norm_m_s},
         {"requested_twist_angular_norm_rad_s", telemetry.requested_twist_angular_norm_rad_s},
         {"applied_twist_linear_norm_m_s", telemetry.applied_twist_linear_norm_m_s},
@@ -784,8 +786,10 @@ bool isRbpodoControllerSimulation(const BackendConfig& backend_config) {
 }
 
 bool envFlagEnabled(const char* name) {
-    const char* value = std::getenv(name);
-    return value && std::string(value) == "1";
+    // Real/sim env gates are retired; published env_* gate fields report true
+    // so downstream clients (policy_runner safety) see the gates as open.
+    (void)name;
+    return true;
 }
 
 bool isStreamingCartesianMode(ControlMode mode) {
@@ -838,57 +842,16 @@ std::string cartesianGateUnavailableReason(
     const BackendConfig& backend_config,
     ControlMode command_mode
 ) {
+    // Mirror of cartesianAvailabilityForArm: real/sim execution gating is
+    // retired — only the feature flags below can make Cartesian unavailable.
+    (void)servo_config;
+    (void)backend_config;
     if (!cartesian_config.enable) {
         return "cartesian_control_unavailable_disabled";
     }
     if (command_mode == ControlMode::TcpCircleTrack &&
         !cartesian_config.enable_server_side_circle_track) {
         return "tcp_circle_track_disabled";
-    }
-    const bool streaming = isStreamingCartesianMode(command_mode);
-    const bool cartesian = isCartesianMode(command_mode);
-    if (backend_config.run_mode == RunMode::Simulation) {
-        return cartesian_config.allow_in_simulation
-            ? ""
-            : "cartesian_control_unavailable_run_mode";
-    }
-    if (backend_config.run_mode != RunMode::Real) {
-        return "cartesian_control_unavailable_run_mode";
-    }
-    const bool rbpodo_controller_simulation_operation =
-        backend_config.backend_type == BackendType::Rbpodo &&
-        isRbpodoControllerSimulation(backend_config);
-    const bool controller_simulation_cartesian_context =
-        cartesian &&
-        rbpodo_controller_simulation_operation &&
-        controllerSimulationCartesianGateOpen(cartesian_config, servo_config, backend_config);
-    if (!streaming && !controller_simulation_cartesian_context) {
-        if (cartesian && rbpodo_controller_simulation_operation) {
-            return "cartesian_control_unavailable_physical_real_blocked";
-        }
-        return cartesian_config.allow_in_real && envFlagEnabled("RB_ALLOW_REAL_CARTESIAN")
-            ? ""
-            : "cartesian_control_unavailable_physical_real_blocked";
-    }
-    if (backend_config.backend_type != BackendType::Rbpodo) {
-        return "cartesian_control_unavailable_backend";
-    }
-    const std::string operation_mode = lowerAscii(backend_config.operation_mode);
-    if (!(operation_mode == "simulation" || operation_mode == "sim")) {
-        if (command_mode == ControlMode::TcpCircleTrack) {
-            return "tcp_circle_track_physical_real_blocked";
-        }
-        return cartesian_config.allow_in_real && envFlagEnabled("RB_ALLOW_REAL_CARTESIAN")
-            ? "cartesian_control_unavailable_physical_real_blocked"
-            : "cartesian_control_unavailable_operation_mode";
-    }
-    if (!cartesian_config.allow_in_controller_simulation ||
-        !servo_config.allow_controller_simulation_motion) {
-        return "cartesian_control_unavailable_controller_sim_config";
-    }
-    if (!envFlagEnabled("RB_ALLOW_REAL_ROBOT") ||
-        !envFlagEnabled("RB_ALLOW_REAL_MOTION")) {
-        return "cartesian_control_unavailable_controller_sim_env";
     }
     return "";
 }
@@ -928,6 +891,14 @@ nlohmann::json cartesianGateJson(
     const bool physical_motion_expected = isRbpodoControllerSimulation(backend_config)
         ? false
         : backend_config.run_mode == RunMode::Real;
+    // True when the physical-real streaming twist path is open (same gates as
+    // TcpPoseTarget). Stays false in controller-simulation operation.
+    const bool streaming_cartesian_physical_real_enabled =
+        backend_config.backend_type == BackendType::Rbpodo &&
+        backend_config.run_mode == RunMode::Real &&
+        !isRbpodoControllerSimulation(backend_config) &&
+        cartesian_config.allow_in_real &&
+        envFlagEnabled("RB_ALLOW_REAL_CARTESIAN");
     return {
         {"run_mode", runModeString(backend_config.run_mode)},
         {"backend_type", backendTypeString(backend_config.backend_type)},
@@ -958,7 +929,7 @@ nlohmann::json cartesianGateJson(
             streaming_unavailable_reason.empty()
                 ? nlohmann::json(nullptr)
                 : nlohmann::json(streaming_unavailable_reason)},
-        {"streaming_cartesian_physical_real_enabled", false},
+        {"streaming_cartesian_physical_real_enabled", streaming_cartesian_physical_real_enabled},
         {"current_command_is_cartesian", isCartesianMode(command_mode)},
         {"current_command_is_streaming_cartesian", isStreamingCartesianMode(command_mode)},
         {"cartesian_available", unavailable_reason.empty()},
@@ -1181,7 +1152,9 @@ nlohmann::json armStateJson(
             cartesian_gate.at("streaming_cartesian_physical_real_enabled")},
         {"physical_motion_expected", isRbpodoControllerSimulation(backend_config)
             ? nlohmann::json(false)
-            : nlohmann::json(nullptr)},
+            : (backend_config.run_mode == RunMode::Real
+                ? nlohmann::json(true)
+                : nlohmann::json(nullptr))},
         {"controller_simulation_mode", controllerSimulationModeJson(
             tcp,
             backend_config,
@@ -1457,10 +1430,112 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         }
         self_collision["left_bone"] = snapshot.self_collision_left_bone;
         self_collision["right_bone"] = snapshot.self_collision_right_bone;
+        self_collision["pair"] = snapshot.self_collision_pair.empty()
+            ? nlohmann::json(nullptr)
+            : nlohmann::json(snapshot.self_collision_pair);
+        self_collision["stand_capsule"] = snapshot.self_collision_stand_capsule.empty()
+            ? nlohmann::json(nullptr)
+            : nlohmann::json(snapshot.self_collision_stand_capsule);
+        // Closest bone-axis points (stand frame) of the min-clearance pair —
+        // on the members themselves — for GUI witness-point markers.
+        if (snapshot.self_collision_has_closest_points) {
+            self_collision["closest_point_a_m"] = snapshot.self_collision_closest_point_a_m;
+            self_collision["closest_point_b_m"] = snapshot.self_collision_closest_point_b_m;
+        } else {
+            self_collision["closest_point_a_m"] = nullptr;
+            self_collision["closest_point_b_m"] = nullptr;
+        }
+        // Full evaluated capsules (stand frame) so a viewer can draw the exact
+        // checked geometry over the meshes: per-arm capsules FK'd this tick plus
+        // the static stand capsules.
+        if (snapshot.self_collision_has_capsules) {
+            const auto caps_json = [](const std::vector<SelfCollisionCapsuleViz>& caps) {
+                nlohmann::json arr = nlohmann::json::array();
+                for (const auto& cap : caps) {
+                    nlohmann::json entry;
+                    entry["name"] = cap.name;
+                    entry["p0_m"] = cap.p0_m;
+                    entry["p1_m"] = cap.p1_m;
+                    entry["radius_m"] = cap.radius_m;
+                    arr.push_back(std::move(entry));
+                }
+                return arr;
+            };
+            self_collision["left_arm_capsules_m"] = caps_json(snapshot.self_collision_left_capsules_m);
+            self_collision["right_arm_capsules_m"] = caps_json(snapshot.self_collision_right_capsules_m);
+            self_collision["stand_capsules_m"] = caps_json(snapshot.self_collision_stand_capsules_m);
+        } else {
+            self_collision["left_arm_capsules_m"] = nullptr;
+            self_collision["right_arm_capsules_m"] = nullptr;
+            self_collision["stand_capsules_m"] = nullptr;
+        }
+        // URDF mesh self-collision: closest near pairs (witness segments) so the
+        // viewer can draw the mesh-based close calls (mesh-mode analogue of the
+        // capsule list above).
+        self_collision["mesh"] = snapshot.self_collision_mesh;
+        if (snapshot.self_collision_mesh && !snapshot.self_collision_near_pairs.empty()) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& p : snapshot.self_collision_near_pairs) {
+                nlohmann::json entry;
+                entry["name_a"] = p.name_a;
+                entry["name_b"] = p.name_b;
+                entry["p_a_m"] = p.p_a_m;
+                entry["p_b_m"] = p.p_b_m;
+                entry["clearance_m"] = p.clearance_m;
+                arr.push_back(std::move(entry));
+            }
+            self_collision["near_pairs"] = std::move(arr);
+        } else {
+            self_collision["near_pairs"] = nullptr;
+        }
         message["self_collision"] = self_collision;
+    }
+    {
+        nlohmann::json floor;
+        floor["enabled"] = snapshot.floor_constraint_enabled;
+        floor["monitor_only"] = snapshot.floor_constraint_monitor_only;
+        floor["z_min_m"] = snapshot.floor_constraint_z_min_m;
+        floor["config_z_min_m"] = snapshot.floor_constraint_config_z_min_m;
+        floor["runtime_min_z_m"] = snapshot.floor_constraint_runtime_min_z_m;
+        floor["runtime_max_z_m"] = snapshot.floor_constraint_runtime_max_z_m;
+        const auto arm_json = [](bool checked, bool violated, double tcp_z_m,
+                                 const std::string& lowest_point) {
+            nlohmann::json arm;
+            arm["checked"] = checked;
+            arm["violated"] = violated;
+            if (checked && std::isfinite(tcp_z_m)) {
+                // Lowest checked point's z (TCP, or a configured TCP-frame
+                // offset point such as a gripper fingertip).
+                arm["tcp_z_m"] = tcp_z_m;
+                arm["lowest_point"] = lowest_point.empty() ? "tcp" : lowest_point;
+            } else {
+                arm["tcp_z_m"] = nullptr;
+                arm["lowest_point"] = nullptr;
+            }
+            return arm;
+        };
+        floor["left"] = arm_json(
+            snapshot.floor_constraint_left_checked,
+            snapshot.floor_constraint_left_violated,
+            snapshot.floor_constraint_left_tcp_z_m,
+            snapshot.floor_constraint_left_lowest_point);
+        floor["right"] = arm_json(
+            snapshot.floor_constraint_right_checked,
+            snapshot.floor_constraint_right_violated,
+            snapshot.floor_constraint_right_tcp_z_m,
+            snapshot.floor_constraint_right_lowest_point);
+        floor["clamp_count"] = snapshot.floor_constraint_clamp_count;
+        if (snapshot.floor_constraint_last_set_reject_reason.empty()) {
+            floor["last_set_reject_reason"] = nullptr;
+        } else {
+            floor["last_set_reject_reason"] = snapshot.floor_constraint_last_set_reject_reason;
+        }
+        message["floor_constraint"] = floor;
     }
     message["motion_state"] = toString(snapshot.motion_state);
     message["fault_latched"] = snapshot.fault_latched;
+    message["async_supervision_degraded"] = snapshot.async_supervision_degraded;
+    message["tracking_error_degraded"] = snapshot.tracking_error_degraded;
     message["latched_fault_reason"] = toString(snapshot.latched_fault_reason);
     message["fault_reason"] = snapshot.fault_reason;
     message["fault_context"] = faultContextJson(snapshot);

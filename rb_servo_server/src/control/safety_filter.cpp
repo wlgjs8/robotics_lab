@@ -86,27 +86,47 @@ SafetyCheckResult SafetyFilter::filterJointTarget(
     }
 
     if (hasTrackingError(previous_q_deg, state, tracking_state)) {
-        result.ok = false;
-        result.verdict = SafetyVerdict::TrackingError;
-        result.filtered_q_deg = previous_q_deg;
-        result.reason = tracking_state.override_tracking_q
-            ? "reference tracking error exceeded threshold"
-            : "tracking error exceeded threshold";
-        result.tracking.tracking_error_reason = result.reason;
-        return result;
+        if (!tracking_state.tracking_error_advisory) {
+            result.ok = false;
+            result.verdict = SafetyVerdict::TrackingError;
+            result.filtered_q_deg = previous_q_deg;
+            result.reason = tracking_state.override_tracking_q
+                ? "reference tracking error exceeded threshold"
+                : "tracking error exceeded threshold";
+            result.tracking.tracking_error_reason = result.reason;
+            return result;
+        }
+        // controller-simulation advisory: the sim controller's reported jnt_ref does
+        // not advance while its servo is disabled, so do NOT snap the streaming
+        // command back to previous_q (that pins Cartesian motion after
+        // max_tracking_error_deg). Report it and let the command accumulate. The
+        // genuine controller_simulation_physical_motion_fault is handled above.
+        result.tracking.tracking_error_reason =
+            "reference tracking error (advisory, controller-simulation)";
     }
 
     bool clamped = false;
-    JointArray out = desired_q_deg;
-    out = clampJointLimits(out, &clamped);
-    out = clampVelocity(out, previous_q_deg, dt_sec);
-    out = clampAcceleration(out, previous_q_deg, previous_previous_q_deg, dt_sec);
+    JointArray out = clampMotion(
+        desired_q_deg, previous_q_deg, previous_previous_q_deg, dt_sec, &clamped);
 
     result.filtered_q_deg = out;
     result.joint_limit_clamped = clamped;
     result.verdict = clamped ? SafetyVerdict::JointLimitClamped : SafetyVerdict::Ok;
     result.ok = true;
     return result;
+}
+
+JointArray SafetyFilter::clampMotion(
+    const JointArray& desired_q_deg,
+    const JointArray& previous_q_deg,
+    const JointArray& previous_previous_q_deg,
+    double dt_sec,
+    bool* clamped
+) const {
+    JointArray out = clampJointLimits(desired_q_deg, clamped);
+    out = clampVelocity(out, previous_q_deg, dt_sec);
+    out = clampAcceleration(out, previous_q_deg, previous_previous_q_deg, dt_sec);
+    return out;
 }
 
 SafetyVerdict SafetyFilter::checkState(const RobotState& state) const {

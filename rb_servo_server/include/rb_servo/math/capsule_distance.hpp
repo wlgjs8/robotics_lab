@@ -103,4 +103,27 @@ inline double capsuleCapsuleDistance(
     return segmentSegmentDistance(a0, a1, b0, b1) - radius_a - radius_b;
 }
 
+// capsuleCapsuleDistance plus the closest CORE-segment points (witness
+// points): p_a/p_b are the closest points on each capsule's core segment
+// (the bone axis), so they lie ON the physical link rather than on the
+// inflated capsule surface. |p_b - p_a| == clearance + radius_a + radius_b.
+inline double capsuleCapsuleDistanceWithPoints(
+    const Vector3& a0,
+    const Vector3& a1,
+    double radius_a,
+    const Vector3& b0,
+    const Vector3& b1,
+    double radius_b,
+    Vector3* p_a,
+    Vector3* p_b
+) {
+    Vector3 c_a;
+    Vector3 c_b;
+    const double segment_distance =
+        std::sqrt(closestPointSegmentSegmentSquared(a0, a1, b0, b1, &c_a, &c_b));
+    if (p_a) *p_a = c_a;
+    if (p_b) *p_b = c_b;
+    return segment_distance - radius_a - radius_b;
+}
+
 }  // namespace rb_servo::math

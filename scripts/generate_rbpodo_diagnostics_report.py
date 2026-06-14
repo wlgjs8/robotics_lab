@@ -14,6 +14,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+import generate_rbpodo_measurement_reliability_report as reliability_report
 import rbpodo_state_dump
 
 
@@ -29,7 +30,7 @@ ROOT_CAUSES = {
 PHYSICAL_REAL_BLOCKERS = [
     "diagnostics_suspect_unresolved",
     "stop_resetFault_unverified",
-    "physical_reference_to_actual_error_unmeasured",
+    reliability_report.UNMEASURED_PHYSICAL_BLOCKER,
 ]
 RAW_FIELDS = rbpodo_state_dump.DIAGNOSTIC_FIELDS
 BOOLEAN_FAULT_FIELDS = (
@@ -56,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-dump", type=Path, help="rbpodo_state_dump.py JSON artifact.")
     parser.add_argument("--parity-summary", type=Path, help="rbpodo_state_parity_check.py summary.json.")
     parser.add_argument("--raw-capture", type=Path, help="rainbow_data_port_capture.py summary.json.")
+    parser.add_argument("--physical-stage-summary", type=Path, help="Optional rbpodo_physical_stage_measure.py summary.json.")
     parser.add_argument("--output-md", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
     return parser.parse_args()
@@ -317,7 +319,7 @@ def classify_root_cause(
     missing = [
         status["label"]
         for status in input_statuses.values()
-        if not status.get("present")
+        if not status.get("present") and not status.get("optional")
     ]
     if missing:
         return "insufficient_evidence", [
@@ -357,7 +359,11 @@ def classify_root_cause(
 
 def root_cause_checklist(root_cause: str, report: dict[str, Any]) -> list[dict[str, Any]]:
     input_statuses = report["input_statuses"]
-    missing = [status["label"] for status in input_statuses.values() if not status.get("present")]
+    missing = [
+        status["label"]
+        for status in input_statuses.values()
+        if not status.get("present") and not status.get("optional")
+    ]
     checklist = [
         {
             "item": "State dump captured with raw rbpodo diagnostic fields",
@@ -418,13 +424,33 @@ def build_report(
     parity_summary: dict[str, Any] | None,
     raw_capture: dict[str, Any] | None,
     input_statuses: dict[str, dict[str, Any]] | None = None,
+    physical_stage_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if input_statuses is None:
         input_statuses = {
             "state_dump": {"label": "state_dump", "path": None, "present": state_dump is not None, "load_error": None},
             "parity_summary": {"label": "parity_summary", "path": None, "present": parity_summary is not None, "load_error": None},
             "raw_capture": {"label": "raw_capture", "path": None, "present": raw_capture is not None, "load_error": None},
+            "physical_stage_summary": {
+                "label": "physical_stage_summary",
+                "path": None,
+                "present": physical_stage_summary is not None,
+                "load_error": None,
+                "optional": True,
+            },
         }
+    else:
+        input_statuses = dict(input_statuses)
+        input_statuses.setdefault(
+            "physical_stage_summary",
+            {
+                "label": "physical_stage_summary",
+                "path": None,
+                "present": physical_stage_summary is not None,
+                "load_error": None,
+                "optional": True,
+            },
+        )
 
     rows = raw_diagnostic_rows(state_dump)
     parity = parity_evidence(parity_summary)
@@ -457,7 +483,11 @@ def build_report(
         },
         "likely_root_cause": root_cause,
         "root_cause_reasons": root_reasons,
-        "physical_real_blockers": list(PHYSICAL_REAL_BLOCKERS),
+        "physical_real_blockers": reliability_report.physical_blockers_with_measurement(
+            PHYSICAL_REAL_BLOCKERS,
+            physical_stage_summary,
+        ),
+        "physical_tracking_result": reliability_report.physical_tracking_result(physical_stage_summary),
         "physical_ready_candidate": False,
     }
     report["root_cause_checklist"] = root_cause_checklist(root_cause, report)
@@ -619,12 +649,15 @@ def main() -> int:
     state_dump, state_status = load_json_artifact(args.state_dump, "state_dump")
     parity_summary, parity_status = load_json_artifact(args.parity_summary, "parity_summary")
     raw_capture, raw_status = load_json_artifact(args.raw_capture, "raw_capture")
+    physical_stage, physical_stage_status = load_json_artifact(args.physical_stage_summary, "physical_stage_summary")
+    physical_stage_status["optional"] = True
     statuses = {
         "state_dump": state_status,
         "parity_summary": parity_status,
         "raw_capture": raw_status,
+        "physical_stage_summary": physical_stage_status,
     }
-    report = build_report(state_dump, parity_summary, raw_capture, statuses)
+    report = build_report(state_dump, parity_summary, raw_capture, statuses, physical_stage)
     write_outputs(report, args.output_md, args.output_json)
     print(f"generate_rbpodo_diagnostics_report: {report['likely_root_cause']}")
     print(f"markdown: {args.output_md}")

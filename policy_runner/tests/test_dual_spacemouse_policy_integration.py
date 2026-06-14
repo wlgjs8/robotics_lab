@@ -215,7 +215,9 @@ class DualSpaceMousePolicyIntegrationTest(unittest.TestCase):
         self.assertEqual(stale_zero["left"]["tcp_twist_local"], [0.0] * 6)
         self.assertEqual(stale_zero["right"]["tcp_twist_local"], [0.0] * 6)
 
-    def test_safety_readback_blocks_when_operation_mode_is_not_simulation(self):
+    def test_safety_readback_allows_when_operation_mode_is_real(self):
+        # Real-test relaxation: operation_mode real no longer blocks the policy; real
+        # Cartesian commands are sent (server-enforced). (Was: asserted packets == [].)
         cfg = policy_config(
             [{"tx": 0.5, "buttons": [True], "timestamp_monotonic": 0.0}],
             [{"ty": -0.25, "buttons": [True], "timestamp_monotonic": 0.0}],
@@ -227,7 +229,7 @@ class DualSpaceMousePolicyIntegrationTest(unittest.TestCase):
             max_sleeps=1,
         )
 
-        self.assertEqual(packets, [])
+        self.assertNotEqual(packets, [])
 
 
 if __name__ == "__main__":

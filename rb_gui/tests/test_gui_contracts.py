@@ -24,7 +24,20 @@ from rb_servo_gui.app import (
     _TCP_FRAME_STAND,
     _apply_tcp_delta_and_send_pose_target,
     _apply_tcp_delta_to_target,
+    _apply_init_joints_live,
+    _nudge_label,
+    _status_summary_html,
+    _tab_theme_html,
     _angular_step_radians,
+    _current_joints_text,
+    _delete_waypoint,
+    _format_joint6,
+    _parse_joint6,
+    _load_init_joints,
+    _load_waypoints,
+    _save_init_joints,
+    _save_waypoints,
+    _set_waypoint_as_init,
     _build_operator_monitors,
     _circle_overlay_bind_from_args_env,
     _env_joint6,
@@ -50,9 +63,10 @@ from rb_servo_gui.app import (
     _pose_wxyz,
     _quat_to_matrix,
     _clear_tcp_target_user_moved,
+    _reflect_gate_reason,
     _send_tcp_linear_move_from_marker,
     _send_init_motion_and_reset_targets,
-    _sim_readiness_from_env,
+    _update_lease_owner,
     _tcp_display_mode,
     _tcp_local_delta_from_target,
     _tcp_frame_mode,
@@ -76,8 +90,21 @@ from rb_servo_gui.command_client import CommandClient
 from rb_servo_gui import geometry as gui_geometry
 from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnapshot, Pose6D
 from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
-from rb_servo_gui.safety import OperatorSafety, Readiness, normalize_observed_mode_backend
-from rb_servo_gui.scene import _add_robot_urdfs, _add_scene_fallback, _circle_overlay_points, _robot_urdf_path, update_circle_overlay
+from rb_servo_gui.safety import OperatorSafety, normalize_observed_mode_backend
+from rb_servo_gui.scene import (
+    _add_robot_urdfs,
+    _add_scene_fallback,
+    _circle_overlay_points,
+    _reference_ghost_active,
+    _robot_urdf_path,
+    add_self_collision_capsules,
+    update_circle_overlay,
+    update_floor_plane,
+    update_floor_plane_preview,
+    update_self_collision_capsules,
+    update_self_collision_overlay,
+)
+from rb_servo_gui.status_panel import _format_floor_constraint_status
 from rb_servo_gui.state_receiver import StateStore
 
 
@@ -376,10 +403,10 @@ class GuiContractsTest(unittest.TestCase):
         desired="mock",
         observed="mock",
         observed_backend=None,
-        sim_ready=False,
+        sim_ready=False,  # retired: readiness is state-derived (accepted for call-site compat)
         cartesian_available=None,
-        enable_tcp_pose=False,
-        enable_controller_sim_cartesian=False,
+        enable_tcp_pose=False,  # retired: TCP commands are always wired
+        enable_controller_sim_cartesian=False,  # retired: server Cartesian gate is authoritative
         stale=False,
         init_left_joint_deg=None,
         init_right_joint_deg=None,
@@ -387,6 +414,13 @@ class GuiContractsTest(unittest.TestCase):
     ):
         store = StateStore(stale_after_sec=0.5)
         if state is not None:
+            # Cartesian availability is now derived from server state, not an env
+            # flag: inject the requested value onto each arm's gate fields.
+            if cartesian_available is not None:
+                for arm in ("left", "right"):
+                    arm_state = state.setdefault(arm, {})
+                    arm_state["cartesian_available"] = cartesian_available
+                    arm_state["controller_simulation_streaming_cartesian_available"] = cartesian_available
             received = time.monotonic() - 1.0 if stale else time.monotonic()
             self.assertTrue(store.update_from_json_bytes(json.dumps(state).encode(), received_monotonic=received))
         client = RecordingClient()
@@ -396,16 +430,6 @@ class GuiContractsTest(unittest.TestCase):
             desired_mode=desired,
             observed_server_mode=observed,
             observed_backend=observed_backend,
-            sim_readiness=Readiness(
-                running=True,
-                connected=True,
-                ready=sim_ready,
-                no_go_reason="sim readiness not proven",
-                cartesian_available=cartesian_available,
-                cartesian_no_go_reason="cartesian readiness not proven",
-            ),
-            enable_tcp_pose_commands=enable_tcp_pose,
-            enable_controller_sim_cartesian=enable_controller_sim_cartesian,
             init_left_joint_deg=init_left_joint_deg,
             init_right_joint_deg=init_right_joint_deg,
             init_motion_timeout_sec=init_motion_timeout_sec,
@@ -467,6 +491,51 @@ class GuiContractsTest(unittest.TestCase):
                 "controller_simulation_physical_motion_detected": False,
             }
         return state
+
+    def test_all_actions_reachable_for_mock_simulator_and_vm_pgmode_sim(self):
+        # End-to-end gate contract for the hardware-free stacks the GUI is opened
+        # against. The server is the sole authority; the GUI mirrors it:
+        #   - mock backend (no FK): joint controls open, Cartesian honestly gated
+        #     by the server's FK/Cartesian gate (server cannot do Cartesian).
+        #   - simulator stack and VM pgmode controller-sim (FK + open Cartesian
+        #     gate): every motion primitive is reachable, no env unlock needed.
+        joint_actions = ("JointTarget", "JointVelocity")
+        # Mock backend: valid joints, no TCP pose.
+        _, _, mock_safety = self.make_safety(sample_state(), observed="mock", observed_backend="mock")
+        for action in joint_actions:
+            self.assertIsNone(mock_safety.blocked_reason(action), f"mock {action}")
+        mock_states = mock_safety.control_disabled_states()
+        self.assertFalse(mock_states["jog"])
+        self.assertFalse(mock_states["velocity"])
+        self.assertFalse(mock_states["lifecycle:ArmMotion"])
+        self.assertTrue(mock_states["tcp_pose"])  # honest: server has no Cartesian here
+        self.assertTrue(mock_states["twist"])
+        self.assertTrue(mock_states["circle"])
+
+        # Simulator stack (pinocchio FK, allow_in_simulation) and VM pgmode
+        # controller-sim (rbpodo, operation_mode=simulation, streaming Cartesian).
+        simulator_state = self.tcp_available_state(observed_mode="simulation", observed_backend="simulator")
+        for arm in ("left", "right"):
+            simulator_state[arm]["cartesian_available"] = True
+        vm_pgmode_state = self.pgmode_spacemouse_state()
+        for label, state, observed, backend in (
+            ("simulator", simulator_state, "simulation", "simulator"),
+            ("vm_pgmode_sim", vm_pgmode_state, "real", "rbpodo"),
+        ):
+            _, _, safety = self.make_safety(state, observed=observed, observed_backend=backend)
+            for action in joint_actions:
+                self.assertIsNone(safety.blocked_reason(action), f"{label} {action}")
+            self.assertIsNone(safety.tcp_command_disabled_reason(), f"{label} tcp")
+            self.assertIsNone(safety.tcp_command_disabled_reason("left"), f"{label} tcp left")
+            self.assertIsNone(safety.tcp_command_disabled_reason("right"), f"{label} tcp right")
+            states = safety.control_disabled_states()
+            for key in ("jog", "velocity", "init_motion", "tcp_pose", "tcp_linear", "twist", "circle"):
+                # init_motion needs an armed state + configured target; ignore it here.
+                if key == "init_motion":
+                    continue
+                self.assertFalse(states[key], f"{label} {key} should be enabled")
+            self.assertTrue(safety.readiness().ready, f"{label} readiness")
+            self.assertTrue(safety.readiness().cartesian_available, f"{label} cartesian")
 
     def test_valid_state_updates_latest_and_invalid_json_is_counted(self):
         store, _, safety = self.make_safety(sample_state())
@@ -620,6 +689,31 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(latest.left.selected_tcp_source("auto"), "tcp_ref_stand")
         self.assertEqual(latest.left.selected_tcp_pose("auto").as_tuple(), (0.42, 0.22, 0.52, 0.0, 0.0, 0.0))
         self.assertFalse(latest.left.physical_motion_expected)
+
+    def test_physical_motion_expected_null_falls_back_to_cartesian_gate(self):
+        # Real-motion servers publish per-arm physical_motion_expected=null with the
+        # authoritative boolean in cartesian_gate; the ghost overlay must hide then.
+        state = self.tcp_available_state(observed_mode="real", observed_backend="rbpodo")
+        for arm in ("left", "right"):
+            state[arm]["physical_motion_expected"] = None
+            state[arm]["cartesian_gate"] = {
+                "run_mode": "real",
+                "backend_type": "rbpodo",
+                "operation_mode": "real",
+                "physical_motion_expected": True,
+            }
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        self.assertTrue(latest.left.physical_motion_expected)
+        self.assertTrue(latest.right.physical_motion_expected)
+        self.assertFalse(_reference_ghost_active(latest.left))
+        self.assertFalse(_reference_ghost_active(latest.right))
+
+    def test_reference_ghost_stays_active_for_controller_simulation(self):
+        store, _, _ = self.make_safety(self.pgmode_spacemouse_state())
+        latest = store.latest()
+        self.assertFalse(latest.left.physical_motion_expected)
+        self.assertTrue(_reference_ghost_active(latest.left))
 
     def test_pgmode_status_reports_reference_selection_and_policy_lease(self):
         store, _, _ = self.make_safety(self.pgmode_spacemouse_state())
@@ -879,30 +973,31 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("ArmMotion first", reason)
         self.assertEqual(client.sent_packets, [])
 
-    def test_init_motion_blocks_real_mode_and_readiness_no_go(self):
-        _, client, real_safety = self.make_safety(
-            sample_state(motion_state="ArmedHold"),
-            desired="real",
-            observed="real",
-            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
-            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
-        )
-        ok, reason = real_safety.send_init_motion()
-        self.assertFalse(ok)
-        self.assertIn("connect/status only", reason)
-        self.assertEqual(client.sent_packets, [])
+    def test_init_motion_sends_in_every_mode_when_state_ready(self):
+        # Env/mode gating retired: InitMotion sends in real AND simulation mode as
+        # long as the live state is ready (armed, valid joints, no fault).
+        for mode in ("real", "simulation"):
+            _, client, safety = self.make_safety(
+                sample_state(motion_state="ArmedHold"),
+                desired=mode,
+                observed=mode,
+                init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+                init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+            )
+            ok, reason = safety.send_init_motion()
+            self.assertTrue(ok, f"{mode}: {reason}")
+            self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
 
-        _, client, sim_safety = self.make_safety(
-            sample_state(motion_state="ArmedHold"),
-            desired="simulation",
-            observed="simulation",
-            sim_ready=False,
+    def test_init_motion_blocked_by_latched_fault(self):
+        # State-derived gate: a latched fault blocks InitMotion regardless of mode.
+        _, client, safety = self.make_safety(
+            sample_state(motion_state="ArmedHold", fault_latched=True, fault_reason="self_collision"),
             init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
             init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
         )
-        ok, reason = sim_safety.send_init_motion()
+        ok, reason = safety.send_init_motion()
         self.assertFalse(ok)
-        self.assertIn("sim readiness", reason)
+        self.assertIn("fault latched", reason)
         self.assertEqual(client.sent_packets, [])
 
     def test_init_motion_sends_joint_target_with_long_timeout(self):
@@ -958,20 +1053,19 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets, [])
 
     def test_real_mode_blocks_lifecycle_and_motion(self):
+        # Real/sim gating retired: lifecycle and jog work in real mode.
         _, client, safety = self.make_safety(sample_state(), desired="real", observed="real")
         ok, reason = safety.send_lifecycle("ArmMotion")
-        self.assertFalse(ok)
-        self.assertIn("connect/status only", reason)
-        ok, reason = safety.jog_joint("left", 0, 1.0)
-        self.assertFalse(ok)
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["mode"], "ArmMotion")
 
-    def test_simulation_mode_is_no_go_until_readiness_passes(self):
-        _, client, safety = self.make_safety(sample_state(), desired="simulation", observed="simulation", sim_ready=False)
+    def test_simulation_mode_no_longer_gated_by_env_readiness(self):
+        # Env readiness retired: a fresh, joint-valid, fault-free state means the
+        # server is the authority, so simulation jog sends without an env unlock.
+        _, client, safety = self.make_safety(sample_state(), desired="simulation", observed="simulation")
         ok, reason = safety.jog_joint("left", 0, 1.0)
-        self.assertFalse(ok)
-        self.assertIn("sim readiness", reason)
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
 
     def test_deprecated_rbsim_mode_normalizes_to_simulation_backend(self):
         observed = normalize_observed_mode_backend("rbsim_local", None)
@@ -990,13 +1084,15 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
 
     def test_desired_mode_does_not_claim_server_hot_switch(self):
+        # Mode is a display-only label now: a desired/observed mismatch never
+        # blocks commands, and set_desired_mode does not claim it reconfigured a
+        # running server.
         _, client, safety = self.make_safety(sample_state(), desired="simulation", observed="mock")
         ok, reason = safety.jog_joint("left", 0, 1.0)
-        self.assertFalse(ok)
-        self.assertIn("desired mode differs", reason)
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
         safety.set_desired_mode("real")
         self.assertIn("not reconfigured", safety.status_message)
-        self.assertEqual(client.sent_packets, [])
 
     def test_desired_mode_button_color_marks_active_mode(self):
         self.assertEqual(_mode_button_color("simulation", "simulation"), "green")
@@ -1008,45 +1104,25 @@ class GuiContractsTest(unittest.TestCase):
         self.assertAlmostEqual(_angular_step_radians(0.1), math.radians(0.1))
         self.assertAlmostEqual(_angular_step_radians(10.0), math.radians(10.0))
 
-    def test_compose_sim_readiness_env_unlocks_simulator_lifecycle(self):
-        keys = (
-            "RB_GUI_SIM_READINESS_READY",
-            "RB_GUI_SIM_READINESS_RUNNING",
-            "RB_GUI_SIM_READINESS_CONNECTED",
-            "RB_GUI_CARTESIAN_AVAILABLE",
+    def test_simulator_lifecycle_enabled_from_state_without_env(self):
+        # No RB_GUI_SIM_READINESS_* / RB_GUI_CARTESIAN_AVAILABLE env unlock needed:
+        # a fresh, joint-valid, fault-free state alone enables lifecycle + jog.
+        _, _, safety = self.make_safety(
+            sample_state(),
+            desired="simulation",
+            observed="simulation",
+            observed_backend="simulator",
         )
-        old_values = {key: os.environ.get(key) for key in keys}
-        try:
-            os.environ["RB_GUI_SIM_READINESS_READY"] = "1"
-            os.environ["RB_GUI_SIM_READINESS_RUNNING"] = "1"
-            os.environ["RB_GUI_SIM_READINESS_CONNECTED"] = "1"
-            os.environ["RB_GUI_CARTESIAN_AVAILABLE"] = "0"
-            observed = normalize_observed_mode_backend("simulation", "simulator")
-            readiness = _sim_readiness_from_env(observed)
-            self.assertTrue(readiness.ready)
-            self.assertTrue(readiness.running)
-            self.assertTrue(readiness.connected)
-            self.assertFalse(readiness.cartesian_available)
-
-            store = StateStore(stale_after_sec=0.5)
-            self.assertTrue(store.update_from_json_bytes(json.dumps(sample_state()).encode(), received_monotonic=time.monotonic()))
-            safety = OperatorSafety(
-                store,
-                RecordingClient(),
-                desired_mode="simulation",
-                observed_server_mode="simulation",
-                observed_backend="simulator",
-                sim_readiness=readiness,
-            )
-            states = safety.control_disabled_states()
-            self.assertFalse(states["lifecycle:ArmMotion"])
-            self.assertFalse(states["jog"])
-        finally:
-            for key, value in old_values.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+        states = safety.control_disabled_states()
+        self.assertFalse(states["lifecycle:ArmMotion"])
+        self.assertFalse(states["jog"])
+        # And a stale stream re-locks everything (state is the sole authority).
+        _, _, stale_safety = self.make_safety(
+            sample_state(), observed="simulation", observed_backend="simulator", stale=True
+        )
+        stale_states = stale_safety.control_disabled_states()
+        self.assertTrue(stale_states["lifecycle:ArmMotion"])
+        self.assertTrue(stale_states["jog"])
 
     def test_tcp_jog_never_sends_cartesian_motion(self):
         _, client, safety = self.make_safety(sample_state())
@@ -1056,12 +1132,17 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets, [])
 
     def test_tcp_pose_target_is_disabled_until_feature_flag(self):
-        _, client, safety = self.make_safety(sample_state())
+        # RB_GUI_ENABLE_TCP_POSE_COMMANDS lock retired: TCP pose sends without
+        # the feature flag whenever the state is valid.
+        _, client, safety = self.make_safety(
+            self.tcp_available_state(),
+            sim_ready=True,
+            cartesian_available=True,
+        )
         pose = (0.3, 0.1, 0.4, 0.0, 0.0, 0.0)
         ok, reason = safety.send_tcp_pose_target(left_pose=pose)
-        self.assertFalse(ok)
-        self.assertIn("TCP pose command disabled", reason)
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "TcpPoseTarget")
 
     def test_tcp_target_pose_helper_returns_finite_marker_pose(self):
         handles = {"left_tcp_target_pose": (0.31, 0.12, 0.44, 0.0, 0.0, 0.0)}
@@ -1224,31 +1305,28 @@ class GuiContractsTest(unittest.TestCase):
             cartesian_available=True,
             enable_tcp_pose=True,
         )
+        # Real/sim gating retired: real-mode TCP commands send normally.
         ok, reason = safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
-        self.assertIn("real mode TCP command disabled", reason)
+        self.assertTrue(ok, reason)
         ok, reason = safety.send_tcp_delta_local("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
-        self.assertIn("real mode TCP command disabled", reason)
+        self.assertTrue(ok, reason)
         ok, reason = safety.send_tcp_linear_move(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0), duration_sec=1.0)
-        self.assertFalse(ok)
-        self.assertIn("real mode TCP command disabled", reason)
-        self.assertTrue(safety.control_disabled_states()["tcp_pose"])
-        self.assertTrue(safety.control_disabled_states()["tcp_linear"])
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertFalse(safety.control_disabled_states()["tcp_pose"])
+        self.assertFalse(safety.control_disabled_states()["tcp_linear"])
+        self.assertTrue(client.sent_packets)
 
-    def test_tcp_delta_stand_requires_simulator_backend_fk_and_readiness(self):
+    def test_tcp_command_requires_fk_and_server_cartesian_gate(self):
         state = self.tcp_available_state()
         _, _, backend_safety = self.make_safety(
             state,
             desired="simulation",
             observed="simulation",
             observed_backend="mock",
-            sim_ready=True,
             cartesian_available=True,
-            enable_tcp_pose=True,
         )
-        self.assertIn("simulator backend", backend_safety.tcp_command_disabled_reason("left"))
+        # Backend requirement retired: any backend may issue TCP commands.
+        self.assertIsNone(backend_safety.tcp_command_disabled_reason("left"))
 
         no_fk = sample_state()
         _, _, fk_safety = self.make_safety(
@@ -1256,25 +1334,26 @@ class GuiContractsTest(unittest.TestCase):
             desired="simulation",
             observed="simulation",
             observed_backend="simulator",
-            sim_ready=True,
             cartesian_available=True,
-            enable_tcp_pose=True,
         )
         self.assertIn("FK/TCP pose unavailable", fk_safety.tcp_command_disabled_reason("left"))
         ok, reason = fk_safety.send_tcp_linear_move(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0), duration_sec=1.0)
         self.assertFalse(ok)
         self.assertIn("FK/TCP pose unavailable", reason)
 
+        # Server-closed Cartesian gate (state-derived) blocks with the server's
+        # own reason when present, else a clear default.
+        cart_state = self.tcp_available_state()
+        for arm in ("left", "right"):
+            cart_state[arm]["cartesian_unavailable_reason"] = "IK not implemented"
         _, _, cart_safety = self.make_safety(
-            state,
+            cart_state,
             desired="simulation",
             observed="simulation",
             observed_backend="simulator",
-            sim_ready=True,
             cartesian_available=False,
-            enable_tcp_pose=True,
         )
-        self.assertIn("cartesian readiness", cart_safety.tcp_command_disabled_reason("left"))
+        self.assertIn("IK not implemented", cart_safety.tcp_command_disabled_reason("left"))
 
     def test_tcp_command_allows_rbpodo_controller_simulation_with_optin(self):
         state = self.tcp_available_state()
@@ -1304,10 +1383,8 @@ class GuiContractsTest(unittest.TestCase):
             enable_tcp_pose=True,
             enable_controller_sim_cartesian=False,
         )
-        self.assertIn(
-            "RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN",
-            no_optin.tcp_command_disabled_reason("left"),
-        )
+        # Controller-sim opt-in retired: allowed without the env flag.
+        self.assertIsNone(no_optin.tcp_command_disabled_reason("left"))
 
         # Real mode stays status-only even with the controller-sim opt-in set.
         _, _, real_safety = self.make_safety(
@@ -1320,7 +1397,8 @@ class GuiContractsTest(unittest.TestCase):
             enable_tcp_pose=True,
             enable_controller_sim_cartesian=True,
         )
-        self.assertIsNotNone(real_safety.tcp_command_disabled_reason("left"))
+        # Real mode is no longer status-only.
+        self.assertIsNone(real_safety.tcp_command_disabled_reason("left"))
 
         # Simulator backend behaviour is unchanged (no controller-sim opt-in needed).
         _, _, sim_safety = self.make_safety(
@@ -1372,6 +1450,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("velocity exceeds", msg)
 
     def test_tcp_twist_blocked_in_real_mode(self):
+        # Real/sim gating retired: twist and joint-velocity send in real mode.
         state = self.tcp_available_state()
         _, client, safety = self.make_safety(
             state,
@@ -1384,9 +1463,9 @@ class GuiContractsTest(unittest.TestCase):
             enable_controller_sim_cartesian=True,
         )
         ok, msg = safety.send_tcp_twist_stand("left", (0.02, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
+        self.assertTrue(ok, msg)
         ok, msg = safety.send_joint_velocity("left", (5.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
+        self.assertTrue(ok, msg)
 
     def test_tcp_circle_move_in_controller_sim(self):
         state = self.tcp_available_state()
@@ -1425,7 +1504,7 @@ class GuiContractsTest(unittest.TestCase):
             enable_controller_sim_cartesian=True,
         )
         ok, msg = real_safety.send_tcp_circle_move(0.15, 4.0)
-        self.assertFalse(ok)
+        self.assertTrue(ok, msg)
 
     def test_tcp_delta_stand_blocks_stale_and_faulted_state(self):
         state = self.tcp_available_state()
@@ -1672,13 +1751,56 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(handles["stand_world_monitor_status"].value, "stale, xyz=mm, rpy=deg, tick=1")
         self.assertEqual(handles["stand_world_monitor_values"]["left"]["x"].value, "invalid")
 
-    def test_operator_monitor_static_html_places_cards_on_left(self):
+    def test_tab_theme_html_colors_main_and_sub_levels_differently(self):
+        css = _tab_theme_html()
+        # main tab bar styled at the top level...
+        self.assertIn(".mantine-Tabs-list", css)
+        self.assertIn("#2563eb", css)  # main accent (blue)
+        # ...sub bars scoped to nested panels with a different hue
+        self.assertIn(".mantine-Tabs-panel .mantine-Tabs-list", css)
+        self.assertIn("#7c3aed", css)  # sub accent (purple)
+        self.assertIn("<style>", css)
+
+    def test_nudge_label_pads_to_equal_width_with_nbsp(self):
+        # Different-length axis labels become the same display width so the
+        # −/+ button-group segments line up vertically across rows.
+        short = _nudge_label("X")
+        long = _nudge_label("Pitch")
+        self.assertEqual(len(short), len(long))
+        self.assertIn("X", short)
+        self.assertIn("Pitch", long)
+        self.assertIn(" ", short)  # padded with non-breaking space, not plain space
+        # the bare value is still recoverable by stripping NBSP
+        self.assertEqual(short.replace(" ", ""), "X")
+
+    def test_status_summary_html_colors_chips_by_state(self):
+        good = _status_summary_html(
+            connection="live", mode="sim", readiness_go=True, motion="ArmedHold", fault_active=False
+        )
+        # all-good: connection/readiness/fault chips use the ok tone (green dot)...
+        self.assertIn("연결", good)
+        self.assertIn("Go", good)
+        self.assertIn("없음", good)
+        self.assertIn("#22aa63", good)  # ok dot
+        self.assertNotIn("#dc4646", good)  # no bad dot when healthy
+
+        bad = _status_summary_html(
+            connection="disconnected", mode="real", readiness_go=False, motion="FaultLatched", fault_active=True
+        )
+        self.assertIn("No-Go", bad)
+        self.assertIn("FAULT", bad)
+        self.assertIn("#dc4646", bad)  # bad dot present
+
+    def test_operator_monitor_static_html_stacks_pose_below_joint(self):
         html = _operator_monitor_static_html(18.0, 1.0)
         self.assertIn("--rb-monitor-gap: 1.000em;", html)
         self.assertIn("--rb-monitor-target-width: 18.000em;", html)
-        self.assertIn("calc((100vw - (3 * var(--rb-monitor-gap))) / 2)", html)
+        # Both monitors share the left column...
         self.assertIn(".rb-monitor-joint-card { left: var(--rb-monitor-gap); }", html)
-        self.assertIn(".rb-monitor-stand-card { left: calc((2 * var(--rb-monitor-gap)) + var(--rb-monitor-width)); }", html)
+        self.assertIn(".rb-monitor-stand-card { left: var(--rb-monitor-gap); }", html)
+        # ...with the Pose Monitor pushed to the bottom half (below Joint Monitor).
+        self.assertIn(".rb-monitor-stand-card.rb-monitor-header-card { top: calc(50vh + 0.5em); }", html)
+        self.assertIn(".rb-monitor-joint-card.rb-monitor-body-card { max-height: calc(50vh - 6.5em); }", html)
         self.assertIn("Pose Monitor", html)
         self.assertIn('id="rb-joint-unit-rad"', html)
         self.assertIn('id="rb-stand-unit-rad"', html)
@@ -2288,13 +2410,14 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("left=unavailable", _format_cartesian_solve_status(latest, stale=False))
 
     def test_visual_disabled_state_matches_safety_blocks(self):
+        # Real/sim gating retired: real mode controls follow the same rules as
+        # any other mode (FK-less sample_state still disables TCP controls).
         _, _, real_safety = self.make_safety(sample_state(), desired="real", observed="real")
         real_states = real_safety.control_disabled_states()
-        self.assertTrue(real_states["jog"])
-        self.assertTrue(real_states["tcp_jog"])
+        self.assertFalse(real_states["jog"])
         self.assertTrue(real_states["tcp_linear"])
-        self.assertTrue(real_states["lifecycle:ArmMotion"])
-        self.assertTrue(real_states["lifecycle:Hold"])
+        self.assertFalse(real_states["lifecycle:ArmMotion"])
+        self.assertFalse(real_states["lifecycle:Hold"])
 
         _, _, stale_safety = self.make_safety(None)
         stale_states = stale_safety.control_disabled_states()
@@ -2303,16 +2426,40 @@ class GuiContractsTest(unittest.TestCase):
 
         _, _, mock_safety = self.make_safety(sample_state())
         mock_states = mock_safety.control_disabled_states()
+        # Joint-space controls follow the joint gate; Cartesian controls follow the
+        # FK/Cartesian gate. FK-less sample_state -> TCP/twist/circle disabled.
         self.assertFalse(mock_states["jog"])
+        self.assertFalse(mock_states["velocity"])
         self.assertFalse(mock_states["lifecycle:ArmMotion"])
-        self.assertTrue(mock_states["tcp_jog"])
+        self.assertNotIn("tcp_jog", mock_states)
         self.assertTrue(mock_states["tcp_pose"])
         self.assertTrue(mock_states["tcp_linear"])
+        self.assertTrue(mock_states["twist"])
+        self.assertTrue(mock_states["circle"])
 
-        _, _, sim_safety = self.make_safety(sample_state(), desired="simulation", observed="simulation", sim_ready=False)
+        # Simulation mode is no longer env-gated: a valid state enables joint
+        # controls, and FK + an open server Cartesian gate enables TCP controls.
+        _, _, sim_safety = self.make_safety(
+            self.tcp_available_state(),
+            desired="simulation",
+            observed="simulation",
+            cartesian_available=True,
+        )
         sim_states = sim_safety.control_disabled_states()
-        self.assertTrue(sim_states["jog"])
-        self.assertTrue(sim_states["lifecycle:ArmMotion"])
+        self.assertFalse(sim_states["jog"])
+        self.assertFalse(sim_states["lifecycle:ArmMotion"])
+        self.assertFalse(sim_states["tcp_pose"])
+        self.assertFalse(sim_states["twist"])
+        self.assertFalse(sim_states["circle"])
+
+        # A latched fault re-disables every motion control (lifecycle reset stays
+        # live so the operator can clear it).
+        _, _, fault_safety = self.make_safety(sample_state(fault_latched=True, fault_reason="self_collision"))
+        fault_states = fault_safety.control_disabled_states()
+        self.assertTrue(fault_states["jog"])
+        self.assertTrue(fault_states["velocity"])
+        self.assertTrue(fault_states["lifecycle:ArmMotion"])
+        self.assertFalse(fault_states["lifecycle:ResetFault"])
 
     def test_lifecycle_packets_match_existing_udp_protocol(self):
         _, client, safety = self.make_safety(sample_state())
@@ -2322,16 +2469,72 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets[-1]["left"], {})
         self.assertEqual(client.sent_packets[-1]["right"], {})
 
+    def test_control_disabled_reasons_align_with_states(self):
+        # Every disabled key carries a matching reason and vice-versa.
+        _, _, safety = self.make_safety(sample_state())  # FK-less: TCP gated, joint open
+        states = safety.control_disabled_states()
+        reasons = safety.control_disabled_reasons()
+        for key, reason in reasons.items():
+            self.assertEqual(states[key], reason is not None, key)
+        self.assertIsNone(reasons["jog"])
+        self.assertIn("FK/TCP pose unavailable", reasons["twist"])
+        self.assertIn("FK/TCP pose unavailable", reasons["circle"])
+
+    def test_reflect_gate_reason_preserves_click_feedback(self):
+        class _Text:
+            def __init__(self, value):
+                self.value = value
+
+        # Blocked -> shows DISABLED note; cleared -> back to idle.
+        handle = _Text("idle")
+        _reflect_gate_reason(handle, "joint state invalid")
+        self.assertEqual(handle.value, "DISABLED: joint state invalid")
+        _reflect_gate_reason(handle, None)
+        self.assertEqual(handle.value, "idle")
+        # A fresh click result is never clobbered when the gate is open.
+        handle.value = "OK: sent JointVelocity left"
+        _reflect_gate_reason(handle, None)
+        self.assertEqual(handle.value, "OK: sent JointVelocity left")
+        _reflect_gate_reason(None, "ignored")  # no handle -> no crash
+
+    def test_lease_owner_status_flags_foreign_and_self_owner(self):
+        class _Text:
+            def __init__(self):
+                self.value = ""
+
+        store = StateStore(stale_after_sec=5.0)
+        foreign = self.pgmode_spacemouse_state()  # command_source owned by policy_runner
+        self.assertTrue(store.update_from_json_bytes(json.dumps(foreign).encode(), received_monotonic=time.monotonic()))
+        handles = {"lease_owner_status": _Text()}
+        _update_lease_owner(handles, store.latest(), "rb_gui", held=False)
+        self.assertIn("policy_runner", handles["lease_owner_status"].value)
+        self.assertIn("stop or release", handles["lease_owner_status"].value)
+
+        owned = self.pgmode_spacemouse_state()
+        owned["command_source"]["source_id"] = "rb_gui"
+        owned["command_source"]["active_source_id"] = "rb_gui"
+        store2 = StateStore(stale_after_sec=5.0)
+        self.assertTrue(store2.update_from_json_bytes(json.dumps(owned).encode(), received_monotonic=time.monotonic()))
+        _update_lease_owner(handles, store2.latest(), "rb_gui", held=True)
+        self.assertIn("held by you", handles["lease_owner_status"].value)
+        self.assertIn("Take control ON", handles["lease_owner_status"].value)
+
+        _update_lease_owner(handles, None, "rb_gui", held=False)
+        self.assertEqual(handles["lease_owner_status"].value, "no state stream")
+
     def test_compose_gui_env_uses_servo_server_and_canonical_simulation_terms(self):
         compose = Path(__file__).resolve().parents[2] / "docker-compose.yml"
         text = compose.read_text(encoding="utf-8")
         self.assertIn('RB_GUI_COMMAND_HOST: "rb_servo_server"', text)
         self.assertIn('RB_GUI_OBSERVED_MODE: "simulation"', text)
         self.assertIn('RB_GUI_OBSERVED_BACKEND: "simulator"', text)
-        self.assertIn('RB_GUI_SIM_READINESS_READY: "1"', text)
-        self.assertIn('RB_GUI_SIM_READINESS_CONNECTED: "1"', text)
-        self.assertIn('RB_GUI_CARTESIAN_AVAILABLE: "1"', text)
-        self.assertIn('RB_GUI_ENABLE_TCP_POSE_COMMANDS: "1"', text)
+        # Env readiness/Cartesian/feature-flag unlocks are retired: the GUI derives
+        # availability from the live server state, so these must NOT be in compose.
+        self.assertNotIn("RB_GUI_SIM_READINESS_READY", text)
+        self.assertNotIn("RB_GUI_SIM_READINESS_CONNECTED", text)
+        self.assertNotIn("RB_GUI_CARTESIAN_AVAILABLE", text)
+        self.assertNotIn("RB_GUI_ENABLE_TCP_POSE_COMMANDS", text)
+        self.assertNotIn("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", text)
         self.assertIn('RB_GUI_INIT_LEFT_JOINTS: "-124.660, 32.485, 119.074, -96.294, -81.798, -30.615"', text)
         self.assertIn('RB_GUI_INIT_RIGHT_JOINTS: "111.949, -49.304, -120.057, 75.305, 87.436, 49.983"', text)
         self.assertIn('RB_GUI_INIT_MOTION_TIMEOUT_SEC: "10.0"', text)
@@ -2353,6 +2556,616 @@ class GuiContractsTest(unittest.TestCase):
         cmake = Path(__file__).resolve().parents[2] / "rb_servo_server" / "CMakeLists.txt"
         cmake_text = cmake.read_text(encoding="utf-8")
         self.assertIn('option(RB_SERVO_ENABLE_PINOCCHIO "Enable Pinocchio FK/IK support" ON)', cmake_text)
+
+
+class FloorConstraintGuiTest(unittest.TestCase):
+    @staticmethod
+    def _floor_block(**overrides):
+        block = {
+            "enabled": True,
+            "monitor_only": False,
+            "z_min_m": 0.010,
+            "config_z_min_m": 0.010,
+            "runtime_min_z_m": 0.0,
+            "runtime_max_z_m": 0.5,
+            "left": {"checked": True, "violated": False, "tcp_z_m": 0.133},
+            "right": {"checked": True, "violated": False, "tcp_z_m": 0.108},
+            "clamp_count": 0,
+            "last_set_reject_reason": None,
+        }
+        block.update(overrides)
+        return block
+
+    def test_state_snapshot_parses_floor_constraint(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        snapshot = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block()))
+        self.assertIsNotNone(snapshot)
+        self.assertTrue(snapshot.floor_constraint["enabled"])
+        self.assertAlmostEqual(snapshot.floor_constraint["z_min_m"], 0.010)
+
+        without = StateSnapshot.parse(sample_state())
+        self.assertIsNotNone(without)
+        self.assertIsNone(without.floor_constraint)
+
+    def test_format_floor_constraint_status(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        self.assertEqual(_format_floor_constraint_status(None, stale=False), "floor: no state")
+
+        ok_state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block()))
+        text = _format_floor_constraint_status(ok_state, stale=False)
+        self.assertIn("floor: ON z=10mm", text)
+        self.assertIn("L:123mm", text)
+        self.assertIn("R:98mm", text)
+
+        violated_state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block(
+            left={"checked": True, "violated": True, "tcp_z_m": 0.004},
+        )))
+        self.assertIn("VIOLATED(left)", _format_floor_constraint_status(violated_state, stale=False))
+
+        disabled_state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block(enabled=False)))
+        self.assertEqual(_format_floor_constraint_status(disabled_state, stale=False), "floor: disabled")
+
+        no_block = StateSnapshot.parse(sample_state())
+        self.assertEqual(_format_floor_constraint_status(no_block, stale=False), "floor: disabled")
+
+    def test_build_set_safety_floor_z_packet(self):
+        client = CommandClient(host="127.0.0.1", port=0, source_id="rb_gui_test")
+        packet = client.build_set_safety_floor_z(0.012)
+        self.assertEqual(packet["mode"], "SetSafetyFloorZ")
+        self.assertAlmostEqual(packet["floor_z_m"], 0.012)
+        self.assertEqual(packet["left"], {})
+        self.assertEqual(packet["right"], {})
+        self.assertEqual(packet["source_id"], "rb_gui_test")
+        with self.assertRaises(ValueError):
+            client.build_set_safety_floor_z(float("nan"))
+
+    def test_persist_floor_z_rewrites_only_z_min_m_and_keeps_comments(self):
+        import tempfile
+        from pathlib import Path
+
+        from rb_servo_gui.safety import persist_floor_z_to_config
+
+        content = (
+            "safety:\n"
+            "  max_tracking_error_deg: 30.0\n"
+            "  # 안전 평면: z=0은 stand 원점\n"
+            "  floor_constraint:\n"
+            "    enable: true\n"
+            "    z_min_m: 0.010   # startup default\n"
+            "    runtime_min_z_m: 0.0\n"
+            "    runtime_max_z_m: 0.5\n"
+            "network:\n"
+            "  z_min_m: 99.0   # decoy outside the floor block\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stack.yaml"
+            path.write_text(content, encoding="utf-8")
+            ok, message = persist_floor_z_to_config(path, 0.05)
+            self.assertTrue(ok, message)
+            updated = path.read_text(encoding="utf-8")
+            self.assertIn("    z_min_m: 0.050   # startup default\n", updated)
+            self.assertIn("# 안전 평면: z=0은 stand 원점", updated)
+            self.assertIn("z_min_m: 99.0   # decoy outside the floor block", updated)
+            self.assertIn("runtime_max_z_m: 0.5", updated)
+
+    def test_persist_floor_z_reports_missing_file_and_missing_key(self):
+        import tempfile
+        from pathlib import Path
+
+        from rb_servo_gui.safety import persist_floor_z_to_config
+
+        ok, message = persist_floor_z_to_config("/nonexistent/stack.yaml", 0.05)
+        self.assertFalse(ok)
+        self.assertIn("yaml unchanged", message)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stack.yaml"
+            path.write_text("safety:\n  floor_constraint:\n    enable: true\n", encoding="utf-8")
+            ok, message = persist_floor_z_to_config(path, 0.05)
+            self.assertFalse(ok)
+            self.assertIn("z_min_m not found", message)
+
+    def test_update_floor_plane_no_crash_and_state(self):
+        class FakePlane:
+            def __init__(self):
+                self.position = (0.0, 0.0, 0.0)
+                self.color = None
+                self.visible = True
+
+        plane = FakePlane()
+        handles = {"floor_plane": plane}
+        # Disabled / missing block hides the plane.
+        update_floor_plane(handles, None)
+        self.assertFalse(plane.visible)
+        update_floor_plane(handles, {"enabled": False})
+        self.assertFalse(plane.visible)
+        # Enabled moves it to z and shows it.
+        update_floor_plane(handles, self._floor_block(z_min_m=0.05))
+        self.assertTrue(plane.visible)
+        self.assertAlmostEqual(plane.position[2], 0.05)
+        # Violation recolors.
+        blue = plane.color
+        update_floor_plane(handles, self._floor_block(
+            right={"checked": True, "violated": True, "tcp_z_m": 0.001},
+        ))
+        self.assertNotEqual(plane.color, blue)
+        # Missing handle is a no-op.
+        update_floor_plane({}, self._floor_block())
+
+    def test_update_floor_plane_preview(self):
+        class FakePlane:
+            def __init__(self):
+                self.position = (0.0, 0.0, 0.0)
+                self.visible = True
+
+        plane = FakePlane()
+        handles = {"floor_plane_preview": plane}
+        # Pending value shows the preview at the slider z.
+        update_floor_plane_preview(handles, 0.123)
+        self.assertTrue(plane.visible)
+        self.assertAlmostEqual(plane.position[2], 0.123)
+        # None (slider matches applied / constraint disabled) hides it.
+        update_floor_plane_preview(handles, None)
+        self.assertFalse(plane.visible)
+        # Non-finite values hide instead of moving the plane.
+        update_floor_plane_preview(handles, float("nan"))
+        self.assertFalse(plane.visible)
+        # Missing handle is a no-op.
+        update_floor_plane_preview({}, 0.05)
+
+
+class LeaseBracketTest(unittest.TestCase):
+    """One-shot GUI commands must be wrapped Acquire -> command -> Release so
+    the GUI never camps on the lease (blocking teleop for lease_timeout_sec),
+    while leaseless modes (EmergencyStop, SetSafetyFloorZ) stay bare."""
+
+    def _recv_packets(self, sock, count):
+        packets = []
+        sock.settimeout(1.0)
+        for _ in range(count):
+            data, _ = sock.recvfrom(65536)
+            packets.append(json.loads(data))
+        return packets
+
+    def _client_and_socket(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        return CommandClient(host="127.0.0.1", port=port, source_id="rb_gui_test"), sock
+
+    @unittest.skipUnless(_local_udp_socket_available(), "local UDP unavailable")
+    def test_leased_one_shot_is_bracketed(self):
+        for mode in ("ArmMotion", "ResetFault"):
+            client, sock = self._client_and_socket()
+            try:
+                client.send_lifecycle(mode)
+                packets = self._recv_packets(sock, 3)
+            finally:
+                sock.close()
+            self.assertEqual([p["mode"] for p in packets], ["AcquireLease", mode, "ReleaseLease"])
+            seqs = [p["seq"] for p in packets]
+            self.assertEqual(seqs, sorted(seqs))
+            self.assertTrue(all(p["source_id"] == "rb_gui_test" for p in packets))
+
+    @unittest.skipUnless(_local_udp_socket_available(), "local UDP unavailable")
+    def test_leaseless_modes_stay_bare(self):
+        client, sock = self._client_and_socket()
+        try:
+            client.send_lifecycle("EmergencyStop")
+            client.send_set_safety_floor_z(0.012)
+            packets = self._recv_packets(sock, 2)
+        finally:
+            sock.close()
+        self.assertEqual([p["mode"] for p in packets], ["EmergencyStop", "SetSafetyFloorZ"])
+
+    @unittest.skipUnless(_local_udp_socket_available(), "local UDP unavailable")
+    def test_held_lease_rides_without_per_command_bracket(self):
+        # Take control ON: acquire once, then streaming motion commands ride the
+        # held lease (no Acquire/Release per packet); release once on OFF.
+        client, sock = self._client_and_socket()
+        try:
+            acquire = client.acquire_lease()
+            self.assertTrue(client.hold_lease)
+            client.send(client.build_joint_target((0,) * 6, (0,) * 6))
+            client.send(client.build_joint_target((1,) * 6, (1,) * 6))
+            release = client.release_lease()
+            self.assertFalse(client.hold_lease)
+            packets = self._recv_packets(sock, 4)
+        finally:
+            sock.close()
+        self.assertEqual(
+            [p["mode"] for p in packets],
+            ["AcquireLease", "JointTarget", "JointTarget", "ReleaseLease"],
+        )
+        self.assertEqual(acquire["mode"], "AcquireLease")
+        self.assertEqual(release["mode"], "ReleaseLease")
+        seqs = [p["seq"] for p in packets]
+        self.assertEqual(seqs, sorted(seqs))
+
+
+class SelfCollisionOverlayTest(unittest.TestCase):
+    @staticmethod
+    def _handles():
+        return {
+            "left_base": RecordingSceneHandle(),
+            "right_base": RecordingSceneHandle(),
+            "left_base_ref": RecordingSceneHandle(),
+            "right_base_ref": RecordingSceneHandle(),
+            "left_base_collision": RecordingSceneHandle(),
+            "right_base_collision": RecordingSceneHandle(),
+            "stand_mesh": RecordingSceneHandle(),
+            "stand_mesh_collision": RecordingSceneHandle(),
+            "left_urdf_collision": RecordingUrdf(),
+            "right_urdf_collision": RecordingUrdf(),
+        }
+
+    @staticmethod
+    def _latest(*, violated, physical_real, q_actual, q_sent, pair="left_stand"):
+        store = StateStore(stale_after_sec=5.0)
+        arm = {
+            "has_valid_joint_state": True,
+            "q_actual_deg": q_actual,
+            "q_sent_deg": q_sent,
+            "physical_motion_expected": physical_real,
+        }
+        payload = sample_state(
+            left=dict(arm),
+            right=dict(arm),
+            self_collision={"enabled": True, "checked": True, "violated": violated,
+                            "pair": pair,
+                            "stand_capsule": "lower_column" if pair and "stand" in pair else None},
+        )
+        assert store.update_from_json_bytes(json.dumps(payload).encode(), received_monotonic=time.monotonic())
+        return store.latest()
+
+    def test_real_violation_paints_only_the_pair_red(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair="left_stand",
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=[9, 9, 9, 9, 9, 9])
+        update_self_collision_overlay(handles, latest)
+        # left_stand pair: red overlay at q_actual for the LEFT arm + stand only;
+        # the right arm stays normal.
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertFalse(handles["right_base_collision"].visible)
+        self.assertTrue(handles["stand_mesh_collision"].visible)
+        self.assertFalse(handles["stand_mesh"].visible)
+        self.assertFalse(handles["left_base"].visible)
+        self.assertTrue(handles["right_base"].visible)
+        self.assertAlmostEqual(handles["left_urdf_collision"].configs[-1][0], math.radians(1.0))
+        self.assertEqual(handles["right_urdf_collision"].configs, [])
+
+    def test_sim_violation_paints_ghost_pair_red_and_keeps_solid(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=False, pair="left_stand",
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=[9, 8, 7, 6, 5, 4])
+        update_self_collision_overlay(handles, latest)
+        # Red overlay shown at q_sent (the commanded ghost pose) for the LEFT arm;
+        # only that ghost is replaced; the right ghost and the solid robots stay.
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertFalse(handles["right_base_collision"].visible)
+        self.assertFalse(handles["left_base_ref"].visible)
+        self.assertIsNone(handles["right_base_ref"].visible)  # untouched
+        self.assertTrue(handles["left_base"].visible)
+        self.assertTrue(handles["stand_mesh_collision"].visible)
+        self.assertAlmostEqual(handles["left_urdf_collision"].configs[-1][0], math.radians(9.0))
+
+    def test_left_right_pair_keeps_stand_normal(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair="left_right",
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertTrue(handles["right_base_collision"].visible)
+        self.assertFalse(handles["stand_mesh_collision"].visible)
+        self.assertTrue(handles["stand_mesh"].visible)
+        self.assertFalse(handles["left_base"].visible)
+        self.assertFalse(handles["right_base"].visible)
+
+    def test_unknown_pair_falls_back_to_all_red(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair=None,
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertTrue(handles["right_base_collision"].visible)
+        self.assertTrue(handles["stand_mesh_collision"].visible)
+        self.assertFalse(handles["stand_mesh"].visible)
+
+    def test_clear_state_restores_normal_models(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=False, physical_real=True,
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertFalse(handles["left_base_collision"].visible)
+        self.assertFalse(handles["right_base_collision"].visible)
+        self.assertFalse(handles["stand_mesh_collision"].visible)
+        self.assertTrue(handles["stand_mesh"].visible)
+        self.assertTrue(handles["left_base"].visible)
+        self.assertTrue(handles["right_base"].visible)
+        self.assertEqual(handles["left_urdf_collision"].configs, [])
+
+
+class _CapsuleMeshHandle:
+    def __init__(self):
+        self.position = None
+        self.wxyz = None
+        self.visible = None
+        self.removed = False
+
+    def remove(self):
+        self.removed = True
+
+
+class _CapsuleScene:
+    """Minimal scene recording add_mesh_simple capsule meshes by node name."""
+
+    def __init__(self):
+        self.meshes = {}
+
+    def add_mesh_simple(self, name, vertices, faces, **kwargs):
+        handle = _CapsuleMeshHandle()
+        handle.visible = kwargs.get("visible", True)
+        self.meshes[name] = handle
+        return handle
+
+
+class _CapsuleServer:
+    def __init__(self):
+        self.scene = _CapsuleScene()
+
+
+class SelfCollisionCapsuleOverlayTest(unittest.TestCase):
+    @staticmethod
+    def _latest_with_geometry():
+        store = StateStore(stale_after_sec=5.0)
+        # 7 arm capsules per arm (FK'd template); one stand capsule.
+        def _arm(x):
+            return [{"name": str(i), "p0_m": [x, 0.0, i * 0.1], "p1_m": [x, 0.0, (i + 1) * 0.1],
+                     "radius_m": 0.05} for i in range(7)]
+        payload = sample_state(
+            self_collision={
+                "enabled": True,
+                "checked": True,
+                "violated": False,
+                "margin_m": 0.02,
+                "left_arm_capsules_m": _arm(0.0),
+                "right_arm_capsules_m": _arm(0.2),
+                "stand_capsules_m": [
+                    {"name": "lower_column", "p0_m": [0.0, 0.0, 0.0],
+                     "p1_m": [0.0, 0.0, 0.5], "radius_m": 0.08},
+                ],
+            },
+        )
+        assert store.update_from_json_bytes(json.dumps(payload).encode(), received_monotonic=time.monotonic())
+        return store.latest()
+
+    def _scene_handles(self):
+        server = _CapsuleServer()
+        handles: dict = {}
+        add_self_collision_capsules(server, handles)
+        self.assertIs(handles["_server"], server)
+        return server, handles
+
+    def test_show_creates_arm_and_stand_capsules(self):
+        server, handles = self._scene_handles()
+        update_self_collision_capsules(handles, self._latest_with_geometry(), show=True)
+        names = set(server.scene.meshes)
+        # 7 bones per arm + 1 stand capsule.
+        self.assertEqual(sum(n.endswith(f"/left_{i}") for i in range(7) for n in names), 7)
+        self.assertEqual(sum(n.endswith(f"/right_{i}") for i in range(7) for n in names), 7)
+        self.assertTrue(any(n.endswith("/stand_0") for n in names))
+        self.assertTrue(all(h.visible for h in server.scene.meshes.values()))
+
+    def test_toggle_off_hides_existing_capsules(self):
+        server, handles = self._scene_handles()
+        latest = self._latest_with_geometry()
+        update_self_collision_capsules(handles, latest, show=True)
+        update_self_collision_capsules(handles, latest, show=False)
+        self.assertTrue(server.scene.meshes)  # handles reused, not recreated
+        self.assertTrue(all(h.visible is False for h in server.scene.meshes.values()))
+
+    def test_no_geometry_creates_nothing(self):
+        server, handles = self._scene_handles()
+        store = StateStore(stale_after_sec=5.0)
+        payload = sample_state(self_collision={"enabled": True, "checked": False, "violated": False})
+        assert store.update_from_json_bytes(json.dumps(payload).encode(), received_monotonic=time.monotonic())
+        update_self_collision_capsules(handles, store.latest(), show=True)
+        self.assertEqual(server.scene.meshes, {})
+
+    def test_capsule_placed_at_bone_midpoint(self):
+        server, handles = self._scene_handles()
+        update_self_collision_capsules(handles, self._latest_with_geometry(), show=True)
+        # left bone 0 spans z=0.0..0.1 -> midpoint z=0.05.
+        bone0 = next(h for n, h in server.scene.meshes.items() if n.endswith("/left_0"))
+        self.assertAlmostEqual(bone0.position[2], 0.05, places=6)
+
+
+class WaypointPersistenceTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._prev = os.environ.get("RB_GUI_WAYPOINTS_PATH")
+        os.environ["RB_GUI_WAYPOINTS_PATH"] = os.path.join(self._tmp.name, "nested", "waypoints.json")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("RB_GUI_WAYPOINTS_PATH", None)
+        else:
+            os.environ["RB_GUI_WAYPOINTS_PATH"] = self._prev
+        self._tmp.cleanup()
+
+    def test_missing_file_loads_empty(self):
+        self.assertEqual(_load_waypoints(), {})
+
+    def test_save_load_roundtrip_normalizes_types(self):
+        waypoints = {
+            "home": {
+                "left_q": (0.0, -30.0, 80.0, 0.0, 60.0, 0.0),
+                "left_pose": (0.4, 0.1, 0.3, 0.0, 1.57, 0.0),
+                "left_quat": (0.0, 0.707, 0.0, 0.707),
+                "right_q": (1.0, 2.0, 3.0, 4.0, 5.0, 6.0),
+                "right_pose": (-0.2, -0.4, 0.25, 0.1, 0.2, 0.3),
+                "right_quat": None,
+            }
+        }
+        ok, path = _save_waypoints(waypoints)
+        self.assertTrue(ok, path)
+        self.assertTrue(os.path.exists(path))  # nested dir created
+        loaded = _load_waypoints()
+        self.assertEqual(list(loaded.keys()), ["home"])
+        self.assertEqual(loaded["home"]["left_q"], (0.0, -30.0, 80.0, 0.0, 60.0, 0.0))
+        self.assertIsInstance(loaded["home"]["left_q"], tuple)  # lists -> tuples
+        self.assertIsNone(loaded["home"]["right_quat"])
+
+    def test_corrupt_file_loads_empty(self):
+        path = os.environ["RB_GUI_WAYPOINTS_PATH"]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("{not valid json")
+        self.assertEqual(_load_waypoints(), {})
+
+    def test_delete_selected_waypoint(self):
+        class _Dropdown:
+            value = "home"
+
+        handles = {
+            "waypoints": {"home": {"left_q": None}, "other": {"left_q": None}},
+            "waypoint_dropdown": _Dropdown(),
+        }
+        ok, name = _delete_waypoint(handles)
+        self.assertTrue(ok)
+        self.assertEqual(name, "home")
+        self.assertEqual(list(handles["waypoints"].keys()), ["other"])
+
+        handles["waypoint_dropdown"].value = "(none)"
+        ok, message = _delete_waypoint(handles)
+        self.assertFalse(ok)
+        self.assertIn("no waypoint selected", message)
+
+
+class InitMotionPersistenceTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._prev = os.environ.get("RB_GUI_INIT_MOTION_PATH")
+        os.environ["RB_GUI_INIT_MOTION_PATH"] = os.path.join(self._tmp.name, "nested", "init_motion.json")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("RB_GUI_INIT_MOTION_PATH", None)
+        else:
+            os.environ["RB_GUI_INIT_MOTION_PATH"] = self._prev
+        self._tmp.cleanup()
+
+    def test_missing_file_loads_none(self):
+        self.assertEqual(_load_init_joints(), (None, None))
+
+    def test_save_load_roundtrip(self):
+        left = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+        right = (-1.0, -2.0, -3.0, -4.0, -5.0, -6.0)
+        ok, path = _save_init_joints(left, right)
+        self.assertTrue(ok, path)
+        self.assertTrue(os.path.exists(path))  # nested dir created
+        self.assertEqual(_load_init_joints(), (left, right))
+
+    def test_set_waypoint_as_init_updates_safety_and_persists(self):
+        store = StateStore(stale_after_sec=0.5)
+        safety = OperatorSafety(
+            store,
+            CommandClient(host="127.0.0.1", port=0, source_id="test"),
+            init_left_joint_deg=(0.0,) * 6,
+            init_right_joint_deg=(0.0,) * 6,
+        )
+        left = (10.0, 20.0, 30.0, 40.0, 50.0, 60.0)
+        right = (-10.0, -20.0, -30.0, -40.0, -50.0, -60.0)
+
+        class _Dropdown:
+            value = "home"
+
+        handles = {
+            "waypoints": {"home": {"left_q": left, "right_q": right}},
+            "waypoint_dropdown": _Dropdown(),
+        }
+        ok, message = _set_waypoint_as_init(handles, safety)
+        self.assertTrue(ok, message)
+        self.assertEqual(safety.init_left_joint_deg, left)
+        self.assertEqual(safety.init_right_joint_deg, right)
+        self.assertEqual(_load_init_joints(), (left, right))
+
+    def test_parse_joint6_accepts_comma_or_space_and_rejects_bad(self):
+        self.assertEqual(_parse_joint6("1, 2, 3, 4, 5, 6"), (1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+        self.assertEqual(_parse_joint6("1 2 3 4 5 6"), (1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+        self.assertIsNone(_parse_joint6("1 2 3 4 5"))      # too few
+        self.assertIsNone(_parse_joint6("1 2 3 4 5 6 7"))  # too many
+        self.assertIsNone(_parse_joint6("1 2 3 4 5 x"))    # non-numeric
+        self.assertIsNone(_parse_joint6("1 2 3 4 5 nan"))  # non-finite
+
+    def test_format_joint6_roundtrips_through_parse(self):
+        self.assertEqual(_format_joint6(None), "")
+        values = (-131.663, 73.0, 113.4, -80.88, -107.064, -145.949)
+        self.assertEqual(_parse_joint6(_format_joint6(values)), values)
+
+    def test_apply_init_joints_live_updates_safety_and_persists(self):
+        store = StateStore(stale_after_sec=0.5)
+        safety = OperatorSafety(
+            store,
+            CommandClient(host="127.0.0.1", port=0, source_id="test"),
+            init_left_joint_deg=(0.0,) * 6,
+            init_right_joint_deg=(0.0,) * 6,
+        )
+        ok, message = _apply_init_joints_live(
+            safety, "10, 20, 30, 40, 50, 60", "-10 -20 -30 -40 -50 -60"
+        )
+        self.assertTrue(ok, message)
+        # live runtime target updated (the next InitMotion press uses this)...
+        self.assertEqual(safety.init_left_joint_deg, (10.0, 20.0, 30.0, 40.0, 50.0, 60.0))
+        self.assertEqual(safety.init_right_joint_deg, (-10.0, -20.0, -30.0, -40.0, -50.0, -60.0))
+        # ...and persisted so it survives a restart.
+        self.assertEqual(
+            _load_init_joints(),
+            ((10.0, 20.0, 30.0, 40.0, 50.0, 60.0), (-10.0, -20.0, -30.0, -40.0, -50.0, -60.0)),
+        )
+
+    def test_apply_init_joints_live_rejects_bad_input_without_touching_target(self):
+        store = StateStore(stale_after_sec=0.5)
+        safety = OperatorSafety(
+            store,
+            CommandClient(host="127.0.0.1", port=0, source_id="test"),
+            init_left_joint_deg=(1.0,) * 6,
+            init_right_joint_deg=(2.0,) * 6,
+        )
+        ok, message = _apply_init_joints_live(safety, "1 2 3", "1 2 3 4 5 6")
+        self.assertFalse(ok)
+        self.assertIn("6 finite joint values", message)
+        self.assertEqual(safety.init_left_joint_deg, (1.0,) * 6)   # unchanged
+        self.assertEqual(safety.init_right_joint_deg, (2.0,) * 6)
+
+    def test_current_joints_text_stale_stream_returns_message(self):
+        store = StateStore(stale_after_sec=0.5)  # no state pushed -> latest() is None
+        left_text, right_text, message = _current_joints_text(store)
+        self.assertIsNone(left_text)
+        self.assertIsNone(right_text)
+        self.assertIn("stale", message)
+
+    def test_set_waypoint_as_init_rejects_missing_joints(self):
+        store = StateStore(stale_after_sec=0.5)
+        safety = OperatorSafety(store, CommandClient(host="127.0.0.1", port=0, source_id="test"))
+
+        class _Dropdown:
+            value = "partial"
+
+        handles = {
+            "waypoints": {"partial": {"left_q": None, "right_q": (1.0,) * 6}},
+            "waypoint_dropdown": _Dropdown(),
+        }
+        ok, message = _set_waypoint_as_init(handles, safety)
+        self.assertFalse(ok)
+        self.assertIn("missing joint capture", message)
 
 
 if __name__ == "__main__":
