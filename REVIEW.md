@@ -42,26 +42,36 @@ its point-in-time caveats.
 - mock camera and camera acceptance runbooks
 - mandatory Eigen3/Pinocchio-backed Cartesian math in `rb_servo_server`
 
-### Validated On pgmode-real (Physical RB3-730E)
+### Run / Validated On pgmode-real (Physical RB3-730E)
 
 - read-only physical diagnostics parity (controllers `.200`/`.201`, `tcp_actual_stand`)
 - dual-arm physical Cartesian circle tracking — slow, TUNED-1 profile, median ~1.42°
   (`docs/runbooks/rbpodo_real_physical_circle.md`)
-- UMI dual-arm Cartesian teleop (relative-init) driving `TcpPoseTarget` on real arms
-- server-side URDF-capsule self-collision guard (`clamp_to_hold`) exercised in real motion
+- UMI dual-arm Cartesian teleop (relative-init) driving `TcpPoseTarget`; UMI `data_tcp`
+  replay verified on hardware (ee_local + r_align)
+- `flow-infer` `real_policy` full closed-loop rollout (pi0.5/openpi) on the physical
+  robot — `TcpTwistLocal` streaming + gripper; the `_validate_real_policy` gate stays
+  fully enforced and was satisfied via accepted/validated config. Runtime validated
+  (smooth, in-distribution); task success is the remaining model-side gap
+- real gripper motion via the Pika Gripper Backend (`RB_ALLOW_REAL_GRIPPER` +
+  `measured_gripper_available` + `allow_real_gripper_motion`)
+- server-side async URDF-mesh self-collision guard (`CollisionMonitor`, 33 geoms /
+  337 pairs) enforced in real via a velocity barrier; stale/hard-breach fail closed
 - policy-side real-Cartesian safety gate relaxation (PR #13); `rb_servo_server` is the
   sole real-motion safety layer
 - controller `-2001` suspect-diagnostics acceptance in real (PR #12); EMS/SOS/soft-estop/
   `collision_occur`/unknown-mode/init-error still latch
 
-### Not Production-Ready
+### Not Yet Production-Ready
 
+- policy task success — rollout motion is smooth but inaccurate (model quality / data
+  coverage / appearance-domain gap, not runtime); init-pose matching in progress
 - force/admittance/impedance control
-- gripper integration
-- measured camera/robot calibration (still `configured_estimate`)
-- real three-camera plus policy plus robot closed-loop behavior (`real_policy` blocked)
 - real `servo.io_model: worker` acceptance
 - fast physical circle stages (15 cm / 16 s and above, ladder P7–P9)
+- measured camera/robot calibration remains `configured_estimate` and is still required
+  for general geometry-dependent policy, but is not needed for the deployed pika ee_local
+  image-conditioned policy (reset-relative cancels the steamvr→stand transform)
 
 ## Safety Gates
 
@@ -307,8 +317,10 @@ The GENE/UMI policy-transition documentation path keeps HDF5 `hdf5-audit`
 outputs, `flow-infer` `rollout_summary` files, controller-simulation
 repeatability reports, pgmode transition reports, and the GENE 26.5 /
 ACKON500 control-default report in an Artifact manifest / `artifact_manifest`.
-This is evidence inventory only; `real_supervised` remains read-only and
-`real_policy` remains blocked until the physical promotion ladder passes.
+This is evidence inventory only. (Status note: `real_policy` is no longer
+ladder-blocked — its gate was satisfied via accepted/validated config and a full
+`real_policy` rollout has since run on the physical robot; see "Run / Validated On
+pgmode-real" above. `real_readonly`/`real_supervised` remain the no-motion lanes.)
 
 RBPODO-CIRCLE-STATE-SOURCE-01 adds a controller-simulation-only Cartesian
 state-source policy so rbpodo pgmode simulation can integrate and guard against

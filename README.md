@@ -43,25 +43,38 @@ mock/simulation에서 지원되는 항목:
 - simulator-only Cartesian acceptance script
 - mandatory Eigen3/Pinocchio C++ Cartesian math path for `rb_servo_server`
 
-pgmode-real(실제 RB3-730E 하드웨어)에서 검증된 항목:
+pgmode-real(실제 RB3-730E 하드웨어)에서 구동/검증된 항목:
 
 - read-only 물리 diagnostics parity (컨트롤러 `.200`/`.201`, `tcp_actual_stand` 기준)
 - 양팔 실제 Cartesian circle 추종 — 저속, TUNED-1 프로파일, tracking 중앙값 ~1.42°
   (`docs/runbooks/rbpodo_real_physical_circle.md`)
-- UMI 양팔 Cartesian 텔레옵(relative-init)으로 `TcpPoseTarget` 실로봇 구동
-- 서버측 URDF-캡슐 자가충돌 가드(`clamp_to_hold`)가 실제 모션에서 동작
+- UMI 양팔 Cartesian 텔레옵(relative-init) `TcpPoseTarget` 실로봇 구동, UMI `data_tcp`
+  리플레이 실차 검증(ee_local + r_align)
+- **pi0.5(openpi) `flow-infer` `real_policy` 풀 클로즈드루프 rollout 실로봇 구동** —
+  `TcpTwistLocal` 스트리밍 + 그리퍼 명령 전송. 런타임/엔지니어링 검증 완료: 모션
+  부드러움 + in-distribution(async chunking으로 500 Hz 루프 진동 제거,
+  absolute-proprio 프레임갭은 reset-relative 재학습으로 해소). **task 성공률은 아직
+  모델 한계**(아래 참고)
+- 실제 그리퍼 구동 — Pika Gripper Backend, `RB_ALLOW_REAL_GRIPPER` +
+  `measured_gripper_available` 게이트
+- 서버측 자가충돌 가드 — async URDF-mesh `CollisionMonitor`(33 geom / 337 pair),
+  real에서 enforce(velocity barrier), stale/hard-breach는 fail-closed
 - policy측 real-Cartesian 안전 게이트 완화(PR #13) → `rb_servo_server`가 단일
   real-motion 안전 계층
 - 컨트롤러 `-2001`(suspect diagnostics) 실모드 수용(PR #12); EMS/SOS/soft-estop/
   `collision_occur`/unknown-mode/init-error는 계속 latch
 
-아직 production-ready가 아닌(미검증) 항목:
+아직 미완(production-ready 아님) 항목:
 
+- **정책 task 성공률** — rollout 모션은 부드럽지만 부정확(예: 좌완이 grasp 대신
+  충돌). 런타임이 아니라 **모델 품질 / 데이터 커버리지 / appearance-domain gap**
+  문제이며 init-pose 분포 매칭이 진행 중(`umi_init_from_grasp.py`)
 - force control (`provider: null`, `enable: false` 유지)
-- gripper control
-- 실측(measured) camera/robot calibration — 현재 `configured_estimate`, UMI 프레임갭 미해소
-- 실제 camera + policy + robot full closed-loop rollout (`flow-infer` `real_policy` lane 차단 유지)
 - 고속 물리 circle 단계 (15 cm / 16 s 이상, transition ladder P7–P9)
+- 실측 hand-eye / 카메라 calibration은 일반 geometry-의존 정책엔 여전히 미완이지만,
+  **현재 배포된 pika Sense≡Gripper + ee_local + 이미지조건 정책에는 불필요**
+  (reset-relative가 steamvr→stand R을 상쇄, tool offset은 알려진 상수) — 즉 현 정책의
+  블로커가 아님
 
 ## Source Of Truth
 
@@ -390,8 +403,10 @@ implicitly routed by the old `mode: real` flag. Supported values are
 `run_mode=real`, `operation_mode=simulation`, controller-simulation Cartesian
 gate evidence, and `physical_motion_expected=false`. `real_readonly` is the
 current `real_supervised` observation lane and never sends motion commands.
-`real_policy` remains blocked unless real motion, measured or accepted retarget,
-collision, gripper, and geometry gates are present.
+`real_policy` requires real motion, measured or accepted retarget, collision,
+gripper, and geometry gates to all be present — a hard gate, but a satisfiable one:
+those gates were met via accepted/validated config and a full `real_policy` rollout
+has run on the physical robot.
 
 For the GENE 26.5 / ACKON500 policy-transition lane, keep `hdf5-audit`,
 `flow-infer`, `real_supervised`/`real_readonly`, and pgmode transition outputs

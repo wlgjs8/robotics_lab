@@ -43,29 +43,44 @@ Supported for mock/simulation work:
 - Python policy_runner with joint and Cartesian simulator action sources
 - simulator-only Cartesian acceptance scripts
 
-Validated on pgmode-real (physical RB3-730E hardware):
+Run / validated on pgmode-real (physical RB3-730E hardware):
 
 - read-only physical diagnostics parity against controllers `.200`/`.201`
   using `tcp_actual_stand` (not `tcp_ref_stand`)
 - dual-arm physical Cartesian circle tracking — slow, TUNED-1 profile, median
   tracking ~1.42° (`docs/runbooks/rbpodo_real_physical_circle.md`)
 - UMI dual-arm Cartesian teleop (relative-init) driving `TcpPoseTarget` on the
-  physical arms
-- server-side URDF-capsule self-collision guard (`clamp_to_hold`) exercised in
-  real motion
+  physical arms; UMI `data_tcp` replay verified on hardware (ee_local + r_align)
+- `flow-infer` `real_policy` full closed-loop rollout on the physical robot
+  (pi0.5/openpi): `TcpTwistLocal` streaming + gripper commands. The `real_policy`
+  rollout-mode gate stays fully enforced (`_validate_real_policy`: `mode=real`,
+  `allow_real_motion`, measured/accepted geometry + retarget, validated collision
+  model, gripper gate) and was satisfied via accepted/validated runtime config —
+  the lane is open and exercised, not blocked. Runtime is validated (smooth,
+  in-distribution; async chunking decouples ~30 Hz policy from the 500 Hz servo;
+  the absolute-proprio frame gap is fixed by reset-relative retrain). Task success
+  is still model-limited (see below)
+- real gripper motion via the Pika Gripper Backend, gated by `RB_ALLOW_REAL_GRIPPER`
+  + `measured_gripper_available` + `allow_real_gripper_motion`
+- server-side async URDF-mesh self-collision guard (`CollisionMonitor`, 33 geoms /
+  337 pairs) enforced in real motion via a velocity barrier; stale / hard-breach
+  fail closed
 - policy-side real-Cartesian safety gate relaxation (PR #13): `rb_servo_server`
   is the sole real-motion safety layer; controller-simulation safety unchanged
 - controller `-2001` suspect-diagnostics acceptance in real mode (PR #12) with
   EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latching
 
-Not production-ready (unvalidated):
+Not yet production-ready:
 
+- policy task success — rollout motion is smooth but inaccurate (model quality /
+  data coverage / appearance-domain gap, not runtime); init-pose distribution
+  matching is in progress
 - force control
-- gripper control
-- measured camera/robot calibration (still `configured_estimate`)
-- real camera + policy + robot full closed-loop rollout (`flow-infer`
-  `real_policy` lane still blocked)
 - fast physical circle stages (15 cm / 16 s and above, transition ladder P7–P9)
+- measured camera/robot calibration remains `configured_estimate` and is still
+  required for general geometry-dependent policy, but is not needed for the
+  deployed pika Sense≡Gripper + ee_local + image-conditioned policy (reset-relative
+  cancels the steamvr→stand transform; the tool offset is a known constant)
 
 ## Canonical Terms
 
@@ -240,7 +255,7 @@ supervised dual-arm physical Cartesian circle
 The policy-side `SafetyGate` no longer blocks real Cartesian motion (PR #13,
 scoped to `cartesian_gate.operation_mode == "real"`); for real motion
 `rb_servo_server` is therefore the sole safety layer — safety filter (dq/ddq/
-joint limits), tracking-error fault latch, the URDF-capsule self-collision guard,
+joint limits), tracking-error fault latch, the async URDF-mesh self-collision guard (`CollisionMonitor`),
 lease arbitration, and deadman. EMS/SOS/soft-estop/`collision_occur`/unknown-mode/
 init-error continue to latch regardless of the gates above. Controller-simulation
 safety is unchanged.
