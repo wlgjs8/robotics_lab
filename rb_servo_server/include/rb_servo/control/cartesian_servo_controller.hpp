@@ -53,6 +53,10 @@ struct CartesianCircleMoveState {
 struct CartesianTwistHoldState {
     bool orientation_hold_active = false;
     Pose6D hold_tcp_stand;
+    // First-order twist LPF state (anti-vibration). Persisted per arm across
+    // ticks; auto-reset to seed on lease/mode (re)entry via CartesianTwistHoldState{}.
+    Vec6 filtered_twist{};
+    bool lpf_valid = false;
 };
 
 struct CartesianVelocityIntegratorState {

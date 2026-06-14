@@ -425,6 +425,47 @@ bool testTcpTwistLocalMovesLocalXAndHoldsOrientation() {
     return true;
 }
 
+bool testTwistLpfRampsAppliedTwistBehindStepCommand() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.twist_lpf_enable = true;
+    config.twist_lpf_tau_sec = 0.1;  // tau >> dt so the lag is clearly observable
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.02, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    rb_servo::CartesianTwistHoldState hold;
+    rb_servo::JointArray q = zeroJoints();
+    const double dt = 0.005;
+
+    // First tick seeds the filter to the command (no artificial start-up lag).
+    const rb_servo::CartesianArmTargetResult seeded = controller.computeTwistTarget(
+        command, stateFromJoints(*kinematics, q, left_mount), q,
+        rb_servo::RunMode::Simulation, dt, 1, &hold);
+    RB_CHECK(seeded.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(std::abs(seeded.telemetry.applied_twist_linear_norm_m_s - 0.02) < 1e-9);
+
+    // Step the command down to zero: applied twist must lag (LPF), landing
+    // strictly between the new command (0) and the previous value (0.02).
+    command.tcp_twist_local = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    const rb_servo::CartesianArmTargetResult stepped = controller.computeTwistTarget(
+        command, stateFromJoints(*kinematics, q, left_mount), q,
+        rb_servo::RunMode::Simulation, dt, 1, &hold);
+    RB_CHECK(stepped.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(stepped.telemetry.requested_twist_linear_norm_m_s < 1e-12);
+    RB_CHECK(stepped.telemetry.applied_twist_linear_norm_m_s > 1e-6);
+    RB_CHECK(stepped.telemetry.applied_twist_linear_norm_m_s < 0.02);
+    return true;
+}
+
 bool testFloorConstraintZerosDownwardVzAtPlaneAndKeepsLateral() {
     auto kinematics = std::make_shared<LinearFakeKinematics>();
     rb_servo::ArmMountConfig left_mount;
@@ -1339,6 +1380,7 @@ int main() {
     if (!testLinearMoveFeedforwardIgnoresMeasuredNoise()) return 1;
     if (!testLinearMoveConstantOrientationToleranceIsConfigurable()) return 1;
     if (!testTcpTwistLocalMovesLocalXAndHoldsOrientation()) return 1;
+    if (!testTwistLpfRampsAppliedTwistBehindStepCommand()) return 1;
     if (!testFloorConstraintZerosDownwardVzAtPlaneAndKeepsLateral()) return 1;
     if (!testFloorConstraintRespectsTcpOrientationFrame()) return 1;
     if (!testTcpTwistAngularDeadbandMaintainsHoldForNoise()) return 1;

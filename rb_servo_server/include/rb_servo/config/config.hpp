@@ -546,6 +546,10 @@ struct CartesianControlConfig {
     double path_kp_ori = 6.0;
     double twist_orientation_hold_kp = 6.0;
     double twist_angular_deadband_rad_s = 0.0001;
+    // First-order LPF on the local twist before velocity IK (anti-vibration).
+    // Default off -> behavior-preserving. tau ~ 30-50 ms.
+    bool twist_lpf_enable = false;
+    double twist_lpf_tau_sec = 0.04;
     double velocity_damping = 0.01;
     double max_twist_linear_m_s = 0.03;
     double max_twist_angular_rad_s = 0.2;

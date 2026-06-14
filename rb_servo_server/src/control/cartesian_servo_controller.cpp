@@ -764,6 +764,35 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         }
     }
 
+    // First-order twist LPF (anti-vibration): converts the policy's ~30 Hz ZOH
+    // velocity steps into a ramp before velocity IK. Applied AFTER deadband/hold
+    // resolution (so the hold-enter decision sees the raw command) and BEFORE the
+    // IK solve. State lives in hold_state -> resets to seed on lease/mode reentry.
+    if (config_.twist_lpf_enable && dt_sec > 0.0) {
+        const double tau = std::max(1e-4, config_.twist_lpf_tau_sec);
+        const double alpha = dt_sec / (tau + dt_sec);  // 0 < alpha <= 1
+        Vec6& filtered = hold_state->filtered_twist;
+        if (!hold_state->lpf_valid) {
+            filtered = requested;  // seed: no artificial start-up lag
+            hold_state->lpf_valid = true;
+        } else {
+            filtered.x += alpha * (requested.x - filtered.x);
+            filtered.y += alpha * (requested.y - filtered.y);
+            filtered.z += alpha * (requested.z - filtered.z);
+            filtered.rx += alpha * (requested.rx - filtered.rx);
+            filtered.ry += alpha * (requested.ry - filtered.ry);
+            filtered.rz += alpha * (requested.rz - filtered.rz);
+        }
+        requested = filtered;
+        // LPF output can briefly exceed limits during transients; re-clamp.
+        limitTwist(
+            &requested,
+            config_.max_twist_linear_m_s,
+            config_.max_twist_angular_rad_s,
+            config_.exceed_limit_policy,
+            &twist_clamped);
+    }
+
     result.telemetry.twist_clamped = twist_clamped;
     result.telemetry.applied_twist_linear_norm_m_s = linearNorm(requested);
     result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(requested);
