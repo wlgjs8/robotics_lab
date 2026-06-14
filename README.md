@@ -2,6 +2,11 @@
 
 한국어 기본 README입니다. 영어 원문은 [README.en.md](README.en.md)에 보존되어 있습니다.
 
+> **참고:** 루트의 `GOAL.md`는 프로젝트 목표 문서가 아니라 과거 단일 task 프롬프트
+> (`ACKON500-GENE-GOAL-01`, rbpodo controller-sim 500 Hz circle-tracking 튜닝)의
+> 시점 스냅샷입니다. 현재 방향은 이 README / `AGENTS.md` / `docs/architecture.md`를
+> 따르세요. 자세한 드리프트 목록은 `docs/code_architecture_map.md`에 있습니다.
+
 `robotics_lab`는 dual-arm RB3-730 시스템을 통합하기 위한 작업 공간입니다. 서보 제어, 실제 토폴로지와 같은 형태의 로컬 시뮬레이터, 카메라 캡처, `policy_runner`, 운영자 GUI를 함께 다룹니다.
 
 ## 현재 단계

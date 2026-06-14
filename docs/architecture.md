@@ -463,16 +463,48 @@ Real mode remains blocked.
 
 Streaming Cartesian velocity primitives. `TcpTwistLocal` is intended for SpaceMouse/local-frame teleop. `TcpTwistStand` is the stand-frame low-level API. Server-side Cartesian velocity limits, the server-side angular deadband for orientation hold, stale-state checks, deadman behavior, and command-source arbitration are required.
 
+**Twist conditioning.** The only **always-on** conditioning of the twist input is
+a per-tick magnitude clamp (`limitTwist()` in `cartesian_servo_controller.cpp`:
+scale-to-limit or reject by `exceed_limit_policy`); there is no slew-rate limit.
+An **optional** first-order low-pass filter
+(`cartesian_control.twist_lpf_enable`, default **off** → behavior-preserving;
+`twist_lpf_tau_sec ≈ 30–50 ms`) can be enabled for anti-vibration — it ramps the
+policy's stepped ZOH velocity before the velocity IK solve, with per-arm state
+reset on lease/mode re-entry. With the LPF off, input jitter passes straight
+through to the joint integrator. Any additional teleop-side smoothing (e.g. the
+SpaceMouse/UMI input EMA) lives upstream in `policy_runner`, not here.
+
+**TrajectoryFilter defers all Cartesian modes.** `TrajectoryFilter::computeJointTarget`
+handles only joint-space modes; every Cartesian mode (`TcpPoseTarget`,
+`TcpLinearMove`, `TcpDelta*`, `TcpTwist*`, `TcpCircle*`) is intentionally
+deferred — the filter deactivates its joint SMD and returns `holdTarget()`.
+Cartesian commands are routed by `DualArmServoLoop` directly to
+`CartesianServoController`, so any SMD/joint-trajectory shaping that applies to
+joint primitives does **not** apply to the Cartesian/twist path.
+
 Velocity-level Cartesian servo targets use an explicit joint target integration
 mode. The simulator acceptance default is `previous_command`: the controller
 integrates Cartesian velocity from the last safe joint target accepted after
 SafetyFilter, rather than repeatedly generating a one-tick target from measured
 `q_actual`. The legacy `measured_actual` mode remains available for debugging,
-and `measured_actual_lookahead` can model fixed lookahead. The integrator is
-reset on holds, faults, stale/invalid state, lease loss, velocity-mode exit,
-and excessive command-vs-actual joint divergence. Real Cartesian motion opens
-through the existing real-mode gates plus `cartesian_control.allow_in_real: true`;
-the dual-arm physical circle bring-up drives it via `TcpPoseTarget` streaming.
+and `measured_actual_lookahead` can model fixed lookahead.
+
+**Jacobian linearization point is fixed at `q_actual` in all modes.**
+`velocity_target_integration` selects only the *integration base* (where `qdot`
+is integrated from): `previous_command` integrates from the last sent joint
+target, `measured_actual`/`measured_actual_lookahead` from measured state. It
+does **not** change where the Jacobian is evaluated — `solveCartesianVelocity`
+always linearizes at `state.q_actual_deg` regardless of mode. This matters for
+controller-`pgmode` simulation: with
+`controller_simulation_divergence_source: reference` the divergence check is
+taken against the controller reference (`tcp_ref_stand`/`q_command`) while the
+Jacobian still uses measured `q_actual`, so the two operate on different joint
+configurations — expected, but a subtlety to keep in mind when tuning
+reference-tracking. The integrator is reset on holds, faults, stale/invalid
+state, lease loss, velocity-mode exit, and excessive command-vs-actual joint
+divergence. Real Cartesian motion opens through the existing real-mode gates
+plus `cartesian_control.allow_in_real: true`; the dual-arm physical circle
+bring-up drives it via `TcpPoseTarget` streaming.
 
 ### `TcpDeltaLocal` / `TcpDeltaStand`
 

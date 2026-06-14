@@ -40,20 +40,32 @@ config publishes FK TCP poses and enables simulator-only Cartesian IK, so the GU
 TCP target gizmos can send `TcpPoseTarget` commands after `ArmMotion` is active.
 `cartesian_control.allow_in_real` stays false.
 
-### rbpodo pgmode simulation (controller-simulation) operation
+### Execution gating (client-side lock retired)
 
-By default the GUI only allows TCP/Cartesian commands against the `simulator`
-backend. For an rbpodo controller in `pgmode` simulation (`backend_type=rbpodo`,
-`run_mode=real`, `operation_mode=simulation`, `physical_motion_expected=false`),
-the operator can opt in to the full set of existing GUI controls (joint jog,
-lifecycle, TCP PTP/Linear/Delta) by setting BOTH
-`RB_GUI_ENABLE_TCP_POSE_COMMANDS=1` and `RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN=1`
-(with `RB_GUI_OBSERVED_MODE=simulation`, `RB_GUI_OBSERVED_BACKEND=rbpodo`). The
-server side still requires its controller-simulation Cartesian gate
-(`cartesian_control.allow_in_controller_simulation` + the
-`RB_ALLOW_RBPODO_CONTROLLER_SIM_*` / `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED`
-env). Real mode (`operation_mode=real`) stays connect/status-only regardless of
-these flags, and `RB_ALLOW_REAL_CARTESIAN` is never set by the GUI.
+The GUI's client-side real/sim execution lock has been **retired** in code
+(`rb_gui/rb_servo_gui/safety.py` `blocked_reason` / `tcp_command_disabled_reason`).
+Joint, lifecycle, and TCP PTP/Linear/Delta controls are now emittable in **every**
+run mode (mock, simulation, real); the GUI no longer forces real mode to
+connect/status-only and no longer gates on a mode/backend match. The old opt-in
+env flags (`RB_GUI_ENABLE_TCP_POSE_COMMANDS`,
+`RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN`, `RB_GUI_OBSERVED_MODE/BACKEND` locks)
+are retired and no longer required.
+
+What the GUI still enforces client-side is **non-gating** readiness only: a fresh
+valid state stream, joint-state validity, simulation readiness tests (sim mode),
+fault-latch, and FK/TCP-pose availability for Cartesian.
+
+Authority for real motion has moved entirely to the **server**: the
+`RB_ALLOW_REAL_ROBOT` / `RB_ALLOW_REAL_MOTION` / `RB_ALLOW_REAL_CARTESIAN` env
+gates (still required, fail-closed), site-local config
+(`cartesian_control.allow_in_real`), the SafetyFilter, tracking-error latch,
+async URDF-mesh self-collision guard, lease, and deadman. The GUI itself never
+sets any `RB_ALLOW_*` env. For rbpodo `pgmode` simulation
+(`operation_mode=simulation`, `physical_motion_expected=false`), the server-side
+controller-simulation Cartesian gate
+(`cartesian_control.allow_in_controller_simulation` +
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_*` / `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED`)
+still applies on the server.
 
 ## Operator monitors
 
@@ -91,7 +103,7 @@ python3 tools/mock_gui_smoke.py
 
 ## Safety boundaries
 
-- Real robot motion is out of scope and disabled in the GUI. Real mode is connect/status visibility only.
+- The GUI's client-side real-motion lock is **retired** (see "Execution gating" above): controls emit in every run mode, and the server (`RB_ALLOW_REAL_*` env + config + SafetyFilter + collision guard + lease/deadman) is the sole authority for whether real motion actually executes. The GUI never sets `RB_ALLOW_*`.
 - Simulation motion is limited to the repo-local `rb_simulator` path until connect, valid state read, truthful `servo_j` send, stop/reset, hold, and low-amplitude jog tests pass with software-only artifacts. Rainbow Robotics external simulator/OVA and real robot validation remain out of scope.
 - The stand frame axes are hidden; the visible 6D controls are left/right TCP target gizmos. They initialize from `tcp_stand` when the state stream provides it, otherwise from URDF FK, and fall back to the old joint marker estimate only when TCP/FK data is unavailable.
 - TCP target buttons emit validated `TcpPoseTarget` UDP commands from the gizmo pose in mock/simulation-safe modes. The C++ Cartesian controller requires configured kinematics and Cartesian gates; when they are unavailable or disabled, it reports a safe failure and holds position.
@@ -105,5 +117,5 @@ python3 tools/mock_gui_smoke.py
 - **Simulator stack:** `rb_simulator_left`, `rb_simulator_right`, and
   `rb_servo_server` are hardware-free compose wiring only. Use
   `docs/rb_simulator_dev.md` for the supported unit and local-smoke evidence.
-- **Real guard:** motion buttons remain blocked by design. Do not use the GUI for real robot motion in this milestone.
+- **Real guard:** the client-side lock is retired — motion buttons are now emittable in real mode, and the server gates (`RB_ALLOW_REAL_*` + config + SafetyFilter) decide whether anything moves. Operate real motion only under operator supervision with E-stop in hand.
 - **Container controls disabled:** expected because the GUI has no Docker daemon authority. Start/stop remains an external manual operator action.
