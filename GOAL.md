@@ -1,3 +1,11 @@
+> **Snapshot — not project direction.** This file is the verbatim prompt for one
+> historical task (`ACKON500-GENE-GOAL-01`: tune rbpodo controller-`pgmode`
+> simulation 500 Hz ACK-ON 15 cm/4 s circle tracking). It is preserved as-is for
+> audit. The current project direction is **rbpodo pgmode-real physical bring-up**
+> — see `README.md` / `docs/architecture.md`. The ACKON500 work below is
+> controller-reference (`tcp_ref_stand`) evidence, a separate category from
+> physical-real (`tcp_actual_stand`) motion.
+
 Read AGENTS.md, REVIEW.md, docs/supported_scope.md, docs/runbooks/rbpodo_500hz_acceptance.md, docs/runbooks/rbpodo_controller_sim_circle.md, docs/runbooks/rbpodo_measurement_reliability.md, rb_servo_server/src/control/dual_arm_servo_loop.cpp, rb_servo_server/src/control/arm_worker.cpp, rb_servo_server/src/control/servo_dispatcher.cpp, rb_servo_server/src/control/cartesian_servo_controller.cpp, rb_servo_server/src/control/cartesian_trajectory_planner.cpp, rb_servo_server/src/robot/rbpodo_backend.cpp, rb_servo_server/config/dual_real_rbpodo_circle_15cm4s_500hz.example.yaml, scripts/rbpodo_500hz_acceptance.py, scripts/rbpodo_circle_tracking_benchmark.py, scripts/run_rbpodo_circle_ablation.py, scripts/generate_circle_benchmark_report.py, and the latest rbpodo artifacts first.
 
 Implement ONLY ACKON500-GENE-GOAL-01:

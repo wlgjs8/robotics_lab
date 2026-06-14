@@ -289,7 +289,10 @@ struct SelfCollisionConfig {
         double a_brake_m_s2 = 4.0;
         double hyst_m = 0.005;
         double latency_s = 0.005;
-        double max_staleness_s = 0.020;
+        // Verdict older than this -> hold (recoverable, not a latch). Loose enough
+        // to ride out normal OS scheduling jitter of the (non-RT) monitor thread;
+        // the monitor normally refreshes every ~1.5 ms.
+        double max_staleness_s = 0.050;
         int monitor_core = -1;
         int max_near_pairs = 8;
     };

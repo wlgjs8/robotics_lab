@@ -89,11 +89,13 @@ static bool run() {
     close.closing_speed_m_s = 0.05;  // closing slowly at 10 mm -> allowed full
     RB_CHECK(collisionVelocityScale(close, cfg) == 1.0);
 
-    // (4) hard violation: block approach, allow retreat; invalid -> stop.
+    // (4) hard violation: HOLD unless clearly retreating; invalid -> stop.
     CollisionVerdict hv = v; hv.hard_violation = true;
-    hv.closing_speed_m_s = 0.5;  // approaching while breached -> stop
+    hv.clearance_rate_m_s = -0.5;  // approaching (clearance shrinking) -> stop
     RB_CHECK(collisionVelocityScale(hv, cfg) == 0.0);
-    hv.closing_speed_m_s = 0.0;  // receding/holding while breached -> allow escape
+    hv.clearance_rate_m_s = 0.0;   // stationary while breached -> hold (fail safe)
+    RB_CHECK(collisionVelocityScale(hv, cfg) == 0.0);
+    hv.clearance_rate_m_s = 0.5;   // clearly retreating -> allow escape
     RB_CHECK(collisionVelocityScale(hv, cfg) == 1.0);
     CollisionVerdict inv; // default invalid
     RB_CHECK(collisionVelocityScale(inv, cfg) == 0.0);

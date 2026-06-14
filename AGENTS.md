@@ -2,9 +2,9 @@
 
 ## Current Project Phase
 
-`robotics_lab` is a dual-arm RB3-730 integration workspace. The current milestone is **simulator-first Cartesian acceptance hardening**.
+`robotics_lab` is a dual-arm RB3-730 integration workspace. The current milestone is **rbpodo pgmode-real physical robot bring-up**. Simulator-first Cartesian acceptance hardening is largely complete and is now the regression baseline.
 
-Before any real robot work, the simulator stack must repeatedly validate:
+The simulator stack remains the regression baseline (it must keep passing before any physical work):
 
 - per-arm simulator topology
 - structured backend result and fault telemetry
@@ -15,7 +15,7 @@ Before any real robot work, the simulator stack must repeatedly validate:
 - GUI and policy-runner safety gates
 - command-source lease/arbitration
 
-Real robot work is not the current default milestone. Passing simulator tests is not permission to move hardware.
+Real motion is now an active, gated bring-up lane: read-only diagnostics parity, tiny motion, and a slow dual-arm physical Cartesian circle have run under operator supervision (`docs/runbooks/rbpodo_real_physical_circle.md`, ladder `docs/runbooks/pgmode_real_transition.md`). Real motion stays fail-closed — gates, site-local config, operator supervision, and an E-stop are all required — and passing simulator tests is never permission to move hardware. Force control, grippers, measured calibration, and full `real_policy` rollout remain out of validated scope. For real motion the policy-side gate was relaxed (PR #13), so `rb_servo_server` is the sole real-motion safety layer.
 
 ## Required Reading
 
@@ -219,8 +219,8 @@ Use `docs/frame_contract.md` and `calibration/active_calibration.yaml` as the fr
 - Do not claim C++ or Pinocchio runtime acceptance passed unless the command was actually run.
 - Do not introduce custom SO(3), SE(3), quaternion interpolation, or frame-conversion math in production Cartesian control when Eigen/Pinocchio can provide it.
 - Do not create production fallback math paths that bypass mandatory Eigen/Pinocchio Cartesian math.
-- Do not weaken command-source lease, deadman, stale-state, fault, or real-mode checks.
-- Do not enable real robot motion, real Cartesian motion, grippers, or force control as part of simulator hardening.
+- Do not weaken command-source lease, deadman, stale-state, fault, or real-mode checks. Real motion now relies on `rb_servo_server` as its sole safety layer (safety filter, tracking-error latch, self-collision guard, lease, deadman) — treat these as load-bearing, not optional.
+- Real motion is an explicit, operator-supervised, gated lane — never enable it incidentally as part of simulator/benchmark work, and keep grippers and force control off until separately validated.
 
 ## Expected Validation
 

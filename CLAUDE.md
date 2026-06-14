@@ -21,7 +21,7 @@ Historical files (`TODO.md`, `CODEX_*PROMPTS*`, `MIG-*`, `HARDEN-*`, `CART-HARDE
 
 ## Current Phase
 
-The repo is in **simulator-first Cartesian acceptance hardening**. Real robot motion is NOT the current milestone, and passing simulator acceptance is never permission to move hardware. Do not enable real motion, real Cartesian, grippers, or force control as part of simulator work.
+The repo is in **rbpodo pgmode-real physical robot bring-up**. Simulator-first Cartesian acceptance hardening is largely complete and is now the regression baseline; active validation is on the physical RB3-730E hardware. Real motion is a gated, operator-supervised lane that has already carried a dual-arm physical Cartesian circle (`docs/runbooks/rbpodo_real_physical_circle.md`, ladder in `docs/runbooks/pgmode_real_transition.md`) — validated: read-only diagnostics parity, dual-arm physical Cartesian circle (TUNED-1, ~1.42°), UMI Cartesian teleop on real arms, server-side self-collision guard, PR #13 policy-gate relaxation, PR #12 `-2001` suspect-diagnostics acceptance. Still unvalidated/off: force control, grippers, measured calibration, and the full `real_policy` closed-loop rollout — do not enable these as part of simulator work. Real motion stays fail-closed (gates + site-local config + operator supervision + E-stop); passing simulator acceptance is never permission to move hardware.
 
 ## Architecture
 
@@ -63,7 +63,10 @@ Real behavior is fail-closed and never implicit. Env gates are necessary but NOT
 - `RB_ALLOW_REAL_MOTION=1` — real joint servo motion
 - `RB_ALLOW_REAL_CARTESIAN=1` — real Cartesian/TCP motion
 - `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1` — Servo J with ACK waiting off (send evidence, not acceptance)
+- `RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1` — accept the controller `-2001` suspect diagnostics (`op_stat_self_collision`/`robot_time` garbage) in real mode (PR #12); EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latch
 - rbpodo controller `pgmode` simulation carve-out (connects to real boxes but `operation_mode: simulation`, `physical_motion_expected=false`) additionally needs `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1`, `RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1`, `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1`. This is NOT `RB_ALLOW_REAL_CARTESIAN`.
+
+The policy-side `SafetyGate` real-Cartesian block was relaxed (PR #13, scoped to `cartesian_gate.operation_mode == "real"`), so for real motion `rb_servo_server` is the sole safety layer (safety filter, tracking-error latch, URDF-capsule self-collision guard, lease, deadman). Controller-simulation safety is unchanged. These server env gates are still required and remain necessary-but-not-sufficient; the 2026-06-11 working-tree experiment that removed them was not landed on `dev`.
 
 Other invariants: never reintroduce bool-only backend results (preserve `BackendResult<RobotState>`, `SendServoJResult`, `BackendErrorKind`, `BackendTiming`, `FaultContext`); don't parse error strings when structured fields exist; force control stays `provider: null, enable: false`; `servo.io_model: worker` is simulator-only. The stand-frame floor plane (`safety.floor_constraint`) applies in EVERY run mode when enabled (no env/mode gate), covers all motion primitives at the final joint-level safety gate, requires `kinematics.enable`, and its runtime lowering via the leaseless `SetSafetyFloorZ` command is bounded to the config `[runtime_min_z_m, runtime_max_z_m]`; `monitor_only` is never a real-motion posture. Tracked real config is a template only (`rb_servo_server/config/dual_real.example.yaml`); site configs go in gitignored `rb_servo_server/config/local/`. New rbpodo configs use canonical Servo J fields `servo_t1_sec` / `servo_t2_sec` / `servo_gain` / `servo_alpha` (not `servo_time_sec` / `servo_lookahead_sec` / `servo_acc`); `servo_t1_sec: 0.002` at the supported 500 Hz.
 
@@ -117,7 +120,7 @@ ML data flow: audit HDF5 episodes (`python3 -m policy_runner hdf5-audit ...`, sc
 Scattered docs don't all track the latest direction. Key gotchas (full list in `docs/code_architecture_map.md`):
 
 - **`GOAL.md` is not the project goal** — it's the verbatim text of one task prompt (`ACKON500-GENE-GOAL-01`, a 500 Hz rbpodo controller-sim circle-tracking tuning task). Treat it as a snapshot.
-- **Milestone vs. activity**: the advertised milestone is simulator-first Cartesian hardening, but recent commits, `GOAL.md`, `scripts/rbpodo_*`, `configs/rbpodo_circle_ablation/*`, and many runbooks concentrate on the rbpodo controller-`pgmode` circle-tracking benchmark (ACKON500/500 Hz), which `docs/architecture.md` frames only as a narrow carve-out.
+- **Milestone vs. activity**: the milestone is now rbpodo pgmode-real physical bring-up (real motion exercised under supervision — see `docs/runbooks/rbpodo_real_physical_circle.md`). Older `GOAL.md`, `scripts/rbpodo_*`, `configs/rbpodo_circle_ablation/*`, and the ACKON500/500 Hz controller-`pgmode` circle-tracking benchmark are the prior controller-simulation activity and remain a separate (controller-reference) evidence category from physical-real evidence — don't conflate `tcp_ref_stand` benchmark passes with `tcp_actual_stand` physical passes.
 - **`TcpCircleTrack` is a stub** (`tcp_circle_track_not_implemented`); `TcpCircleMove` is implemented.
 - **Precedence on conflict** (`AGENTS.md`): `AGENTS.md` → root `README.md` → `docs/architecture.md` → contract docs → component READMEs. `docs/current_review.md` redirects to `REVIEW.md`; `docs/archive/**` is audit-only.
 

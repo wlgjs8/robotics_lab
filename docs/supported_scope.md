@@ -3,6 +3,18 @@
 The active real-controller backend is `rbpodo` only. `mock` and `simulator`
 remain hardware-free validation surfaces.
 
+The repository is in **rbpodo pgmode-real physical bring-up**. Real motion is a
+gated, operator-supervised lane that has carried a dual-arm physical Cartesian
+circle (`docs/runbooks/rbpodo_real_physical_circle.md`); the conservative
+promotion ladder is `docs/runbooks/pgmode_real_transition.md`. Real motion stays
+fail-closed: env gates (`RB_ALLOW_REAL_ROBOT` / `RB_ALLOW_REAL_MOTION` /
+`RB_ALLOW_REAL_CARTESIAN`, plus `RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION`
+for the `-2001` carve-out) are still required and necessary-but-not-sufficient.
+The policy-side `SafetyGate` real-Cartesian block was relaxed (PR #13), so for
+real motion `rb_servo_server` is the sole safety layer. Force control, gripper
+control, measured calibration, and the full `real_policy` closed-loop rollout
+remain out of validated scope.
+
 Supported robot command/control defaults are 500 Hz:
 
 - `servo.rate_hz: 500`

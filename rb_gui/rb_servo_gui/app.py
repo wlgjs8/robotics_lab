@@ -71,6 +71,7 @@ from .scene import (
     update_floor_plane,
     update_floor_plane_preview,
     update_self_collision_capsules,
+    update_self_collision_check_geom,
     update_self_collision_near_pairs,
     update_self_collision_overlay,
     update_scene_markers,
@@ -631,6 +632,57 @@ def _save_init_joints(left_q: tuple[float, ...], right_q: tuple[float, ...]) -> 
     return True, path
 
 
+def _format_joint6(values: tuple[float, ...] | None) -> str:
+    if values is None:
+        return ""
+    return ", ".join(f"{float(v):.3f}" for v in values)
+
+
+def _parse_joint6(text: str) -> tuple[float, ...] | None:
+    parts = [p for p in text.replace(",", " ").split() if p]
+    if len(parts) != 6:
+        return None
+    try:
+        parsed = tuple(float(p) for p in parts)
+    except ValueError:
+        return None
+    if not all(math.isfinite(v) for v in parsed):
+        return None
+    return parsed
+
+
+def _apply_init_joints_live(
+    safety: OperatorSafety, left_text: str, right_text: str
+) -> tuple[bool, str]:
+    """Set the InitMotion target from edited text and apply it at runtime.
+
+    Updates the live OperatorSafety target (used immediately by the next
+    InitMotion press) AND persists to init_motion.json — no restart needed.
+    """
+    left = _parse_joint6(left_text)
+    right = _parse_joint6(right_text)
+    if left is None or right is None:
+        return False, "each arm needs 6 finite joint values (deg), comma/space separated"
+    ok, message = safety.set_init_joints(left, right)
+    if not ok:
+        return False, message
+    saved_ok, info = _save_init_joints(left, right)
+    suffix = f"saved to {info}" if saved_ok else f"save FAILED: {info}"
+    return True, f"InitMotion updated live; {suffix}"
+
+
+def _current_joints_text(store: StateStore) -> tuple[str | None, str | None, str]:
+    """Read current q_actual for both arms as editable text. Returns (left, right, msg)."""
+    latest = store.latest()
+    if latest is None or store.is_stale():
+        return None, None, "state stream missing or stale; cannot read current pose"
+    left_q = getattr(latest.left, "q_actual_deg", None)
+    right_q = getattr(latest.right, "q_actual_deg", None)
+    if not left_q or not right_q:
+        return None, None, "current joints unavailable (arm not connected / no valid state)"
+    return _format_joint6(tuple(left_q)), _format_joint6(tuple(right_q)), "loaded current pose"
+
+
 def _set_waypoint_as_init(handles: dict[str, Any], safety: OperatorSafety) -> tuple[bool, str]:
     name, waypoint = _selected_waypoint(handles)
     if waypoint is None:
@@ -824,8 +876,14 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float) -> str
     padding: 0.6em 0.8em 0.75em;
     border-radius: 0 0 0.45em 0.45em;
   }}
+  /* Joint Monitor (top half) and Pose Monitor (bottom half) stack in the same
+     left column. Viewport-half split keeps the deg/rad radios (which live in the
+     static header cards) stable across dynamic body refreshes. */
   .rb-monitor-joint-card {{ left: var(--rb-monitor-gap); }}
-  .rb-monitor-stand-card {{ left: calc((2 * var(--rb-monitor-gap)) + var(--rb-monitor-width)); }}
+  .rb-monitor-stand-card {{ left: var(--rb-monitor-gap); }}
+  .rb-monitor-joint-card.rb-monitor-body-card {{ max-height: calc(50vh - 6.5em); }}
+  .rb-monitor-stand-card.rb-monitor-header-card {{ top: calc(50vh + 0.5em); }}
+  .rb-monitor-stand-card.rb-monitor-body-card {{ top: calc(50vh + 4.95em); max-height: calc(50vh - 6em); }}
   .rb-monitor-title {{
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-weight: 650;
@@ -1058,6 +1116,43 @@ def _update_operator_monitors(handles: dict[str, Any], latest: StateSnapshot | N
     _update_stand_world_monitor(handles, latest, stale=stale)
 
 
+# Colored at-a-glance status chips (replaces scanning the wall of Status text rows).
+# (bg, text, dot) per tone.
+_STATUS_TONES = {
+    "ok": ("#e0f5e9", "#148a4e", "#22aa63"),
+    "warn": ("#fcf3de", "#8a6410", "#e1a01e"),
+    "bad": ("#fae4e4", "#b34646", "#dc4646"),
+    "info": ("#dbe7fe", "#2563eb", "#2563eb"),
+    "muted": ("#eef0f4", "#52606d", "#9aa4b2"),
+}
+
+
+def _status_chip(label: str, value: str, tone: str) -> str:
+    bg, fg, dot = _STATUS_TONES.get(tone, _STATUS_TONES["muted"])
+    return (
+        f'<span style="display:inline-flex;align-items:center;gap:0.4em;background:{bg};'
+        f'color:{fg};border-radius:0.9em;padding:0.18em 0.7em;margin:0.15em 0.3em 0.15em 0;'
+        f'font-size:12px;font-weight:600;font-family:system-ui,-apple-system,sans-serif;'
+        f'white-space:nowrap;"><span style="width:0.5em;height:0.5em;border-radius:50%;'
+        f'background:{dot};"></span><span style="opacity:0.65;font-weight:500;">'
+        f'{escape(label)}</span>{escape(value)}</span>'
+    )
+
+
+def _status_summary_html(
+    *, connection: str, mode: str, readiness_go: bool, motion: str, fault_active: bool
+) -> str:
+    conn_tone = "ok" if connection == "live" else "warn" if connection == "stale" else "bad"
+    chips = [
+        _status_chip("연결", connection, conn_tone),
+        _status_chip("모드", mode or "—", "info"),
+        _status_chip("준비", "Go" if readiness_go else "No-Go", "ok" if readiness_go else "bad"),
+        _status_chip("상태", motion or "unknown", "muted"),
+        _status_chip("결함", "없음" if not fault_active else "FAULT", "ok" if not fault_active else "bad"),
+    ]
+    return '<div style="display:flex;flex-wrap:wrap;padding:0.25em 0 0.1em;">' + "".join(chips) + "</div>"
+
+
 def build_gui(
     server: Any,
     safety: OperatorSafety,
@@ -1072,7 +1167,19 @@ def build_gui(
     _build_operator_monitors(server, handles)
 
     tabs = server.gui.add_tab_group(order=1.0)
-    with tabs.add_tab("Status"):
+    with tabs.add_tab("상태"):
+        # Colored at-a-glance summary above the detailed rows (no scanning needed).
+        _add_status_html = getattr(server.gui, "add_html", None)
+        if callable(_add_status_html):
+            handles["status_summary"] = _add_status_html(
+                _status_summary_html(
+                    connection="disconnected",
+                    mode=safety.observed_server_mode,
+                    readiness_go=False,
+                    motion="unknown",
+                    fault_active=False,
+                )
+            )
         handles["connection"] = server.gui.add_text("Connection", initial_value="disconnected", disabled=True)
         handles["mode"] = server.gui.add_text("Observed mode/backend", initial_value=f"{safety.observed_server_mode}/{safety.observed_backend}", disabled=True)
         handles["readiness"] = server.gui.add_text("Readiness", initial_value="No-Go: no state", disabled=True)
@@ -1134,7 +1241,7 @@ def build_gui(
                 safety.set_desired_mode(mode)
                 _update_desired_mode_buttons(handles, safety.desired_mode)
 
-    with tabs.add_tab("Lifecycle"):
+    with tabs.add_tab("조작"):
         handles["lifecycle_buttons"] = {}
         for mode in ("ArmMotion", "DisarmMotion", "Hold", "EmergencyStop", "ResetFault"):
             button = server.gui.add_button(mode)
@@ -1154,9 +1261,41 @@ def build_gui(
             ok, message = _send_init_motion_and_reset_targets(safety, handles["scene"])
             handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
 
+        # Edit the InitMotion target directly in viser and apply it live (no
+        # restart): set_init_joints updates the runtime target used by the next
+        # InitMotion press, and _save_init_joints persists it to init_motion.json.
+        with server.gui.add_folder("InitMotion 편집 (즉시 적용)"):
+            init_left_input = server.gui.add_text(
+                "left J1..J6 (deg)", initial_value=_format_joint6(safety.init_left_joint_deg)
+            )
+            init_right_input = server.gui.add_text(
+                "right J1..J6 (deg)", initial_value=_format_joint6(safety.init_right_joint_deg)
+            )
+            init_edit_status = server.gui.add_text(
+                "InitMotion edit status", initial_value="edit + Apply, or load current pose", disabled=True
+            )
+            load_current_button = server.gui.add_button("현재 자세 불러오기")
+            apply_init_button = server.gui.add_button("InitMotion 적용 (즉시)")
+
+            @load_current_button.on_click
+            def _(_: Any) -> None:
+                left_text, right_text, message = _current_joints_text(store)
+                if left_text is not None and right_text is not None:
+                    init_left_input.value = left_text
+                    init_right_input.value = right_text
+                init_edit_status.value = message
+
+            @apply_init_button.on_click
+            def _(_: Any) -> None:
+                ok, message = _apply_init_joints_live(
+                    safety, init_left_input.value, init_right_input.value
+                )
+                init_edit_status.value = ("OK: " if ok else "BLOCKED: ") + message
+                handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
+
         handles["last_action"] = server.gui.add_text("Last action", initial_value="none", disabled=True)
 
-    with tabs.add_tab("WayPoint"):
+    with tabs.add_tab("웨이포인트"):
         # Waypoints persist to JSON (RB_GUI_WAYPOINTS_PATH) and auto-load here.
         handles["waypoints"] = _load_waypoints()
         handles["waypoint_note"] = server.gui.add_text(
@@ -1223,7 +1362,7 @@ def build_gui(
             else:
                 handles["waypoint_status"].value = info
 
-    with tabs.add_tab("Safety"):
+    with tabs.add_tab("안전"):
         with server.gui.add_folder("Safety floor"):
             handles["floor_applied"] = server.gui.add_text(
                 "Applied z", initial_value="no state", disabled=True
@@ -1252,7 +1391,7 @@ def build_gui(
                     handles.get("scene", {}), float(floor_slider.value) / 1000.0
                 )
 
-    with tabs.add_tab("Joint jog"):
+    with tabs.add_tab("조그·관절"):
         arm_group = server.gui.add_button_group("Arm", ("left", "right"))
         joint_slider = server.gui.add_slider("Joint index", min=1, max=6, step=1, initial_value=1)
         delta_slider = server.gui.add_slider("Step deg", min=-2.0, max=2.0, step=0.1, initial_value=0.5)
@@ -1265,7 +1404,7 @@ def build_gui(
             ok, message = safety.jog_joint(arm_group.value, int(joint_slider.value) - 1, float(delta_slider.value))
             handles["jog_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-    with tabs.add_tab("Velocity jog"):
+    with tabs.add_tab("조그·속도"):
         vel_arm = server.gui.add_button_group("Arm", ("left", "right"))
         vj_index = server.gui.add_slider("Joint index", min=1, max=6, step=1, initial_value=1)
         vj_vel = server.gui.add_slider("Joint vel deg/s", min=-10.0, max=10.0, step=0.5, initial_value=3.0)
@@ -1295,7 +1434,7 @@ def build_gui(
                 ok, message = safety.send_tcp_twist_stand(vel_arm.value, tuple(twist))
             handles["velocity_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-    with tabs.add_tab("Circle"):
+    with tabs.add_tab("고급·Circle"):
         c_diameter = server.gui.add_slider("Diameter m", min=0.02, max=0.20, step=0.01, initial_value=0.15)
         c_period = server.gui.add_slider("Period s", min=3.0, max=16.0, step=0.5, initial_value=4.0)
         c_plane = server.gui.add_button_group("Plane", ("xy", "xz", "yz"))
@@ -1350,7 +1489,7 @@ def build_gui(
             circle_stop_event.set()
             handles["circle_status"].value = "stopped"
 
-    with tabs.add_tab("TCP PTP"):
+    with tabs.add_tab("TCP·PTP"):
         handles["tcp_ptp_note"] = server.gui.add_text(
             "TCP PTP",
             initial_value="Move to TCP target, point-to-point. Cartesian path is not guaranteed.",
@@ -1428,7 +1567,7 @@ def build_gui(
         for axis_label, axis_index, angular in _TCP_PTP_AXES:
             _add_tcp_ptp_axis_group(axis_label, axis_index, angular)
 
-    with tabs.add_tab("TCP Linear"):
+    with tabs.add_tab("TCP·Linear"):
         handles["tcp_linear_note"] = server.gui.add_text(
             "TCP Linear",
             initial_value="Move linearly in Cartesian TCP space. Constant orientation keeps the start orientation.",
@@ -1491,7 +1630,7 @@ def build_gui(
             )
             handles["tcp_linear_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-    with tabs.add_tab("Low-level Delta Debug"):
+    with tabs.add_tab("고급·Delta"):
         handles["tcp_debug_note"] = server.gui.add_text(
             "Low-level Delta Debug",
             initial_value="Raw TcpDeltaLocal/Stand. Usually not used for normal GUI target moves.",
@@ -1547,7 +1686,7 @@ def build_gui(
         ):
             _add_low_level_delta_button(label, index, sign, angular=True)
 
-    with tabs.add_tab("Debug"):
+    with tabs.add_tab("디버그"):
         handles["tick"] = server.gui.add_number("tick", initial_value=0, disabled=True)
         handles["scene_assets"] = server.gui.add_text(
             "scene assets",
@@ -1659,6 +1798,14 @@ def update_gui(
     _update_circle_overlay_gui(handles, overlay_store)
     if latest is None:
         _update_operator_monitors(handles, None, stale=True)
+        if "status_summary" in handles:
+            handles["status_summary"].content = _status_summary_html(
+                connection="disconnected",
+                mode=safety.observed_server_mode,
+                readiness_go=False,
+                motion="unknown",
+                fault_active=False,
+            )
         handles["connection"].value = "disconnected/stale"
         handles["readiness"].value = readiness.no_go_reason or "No-Go: no state stream"
         if "self_collision" in handles:
@@ -1710,6 +1857,14 @@ def update_gui(
     handles["readiness"].value = ", ".join(readiness_parts)
     handles["motion"].value = latest.motion_state
     handles["fault"].value = latest.fault_reason if latest.fault_latched else "none"
+    if "status_summary" in handles:
+        handles["status_summary"].content = _status_summary_html(
+            connection="stale" if stale else "live",
+            mode=safety.observed_server_mode,
+            readiness_go=readiness.ready,
+            motion=latest.motion_state,
+            fault_active=latest.fault_latched,
+        )
     if "self_collision" in handles:
         handles["self_collision"].value = _format_self_collision_status(latest, stale=stale)
     if "floor_constraint" in handles:
@@ -1747,6 +1902,11 @@ def update_gui(
         show=_self_collision_show,
     )
     update_self_collision_near_pairs(
+        handles.get("scene", {}),
+        latest,
+        show=_self_collision_show,
+    )
+    update_self_collision_check_geom(
         handles.get("scene", {}),
         latest,
         show=_self_collision_show,

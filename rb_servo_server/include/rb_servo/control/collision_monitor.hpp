@@ -85,7 +85,11 @@ struct CollisionVerdict {
     double stamp_s = 0.0;                   // monotonic time the snapshot was taken
     bool valid = false;                     // false until first eval
     double min_clearance_m = std::numeric_limits<double>::infinity();
-    double closing_speed_m_s = 0.0;         // max(0, -d/dt) of the global minimum
+    // Signed rate of the CURRENTLY-critical (global-min) pair's clearance, tracked
+    // per-pair so a switch of which pair is closest does not corrupt it.
+    // + = separating, - = approaching.
+    double clearance_rate_m_s = 0.0;
+    double closing_speed_m_s = 0.0;         // max(0, -clearance_rate_m_s)
     bool hard_violation = false;            // min_clearance_m < d_hard_m
     std::vector<CollisionNearPair> near;    // up to max_near_pairs, sorted ascending
 };

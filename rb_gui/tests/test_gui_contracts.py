@@ -24,8 +24,13 @@ from rb_servo_gui.app import (
     _TCP_FRAME_STAND,
     _apply_tcp_delta_and_send_pose_target,
     _apply_tcp_delta_to_target,
+    _apply_init_joints_live,
+    _status_summary_html,
     _angular_step_radians,
+    _current_joints_text,
     _delete_waypoint,
+    _format_joint6,
+    _parse_joint6,
     _load_init_joints,
     _load_waypoints,
     _save_init_joints,
@@ -1720,13 +1725,34 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(handles["stand_world_monitor_status"].value, "stale, xyz=mm, rpy=deg, tick=1")
         self.assertEqual(handles["stand_world_monitor_values"]["left"]["x"].value, "invalid")
 
-    def test_operator_monitor_static_html_places_cards_on_left(self):
+    def test_status_summary_html_colors_chips_by_state(self):
+        good = _status_summary_html(
+            connection="live", mode="sim", readiness_go=True, motion="ArmedHold", fault_active=False
+        )
+        # all-good: connection/readiness/fault chips use the ok tone (green dot)...
+        self.assertIn("연결", good)
+        self.assertIn("Go", good)
+        self.assertIn("없음", good)
+        self.assertIn("#22aa63", good)  # ok dot
+        self.assertNotIn("#dc4646", good)  # no bad dot when healthy
+
+        bad = _status_summary_html(
+            connection="disconnected", mode="real", readiness_go=False, motion="FaultLatched", fault_active=True
+        )
+        self.assertIn("No-Go", bad)
+        self.assertIn("FAULT", bad)
+        self.assertIn("#dc4646", bad)  # bad dot present
+
+    def test_operator_monitor_static_html_stacks_pose_below_joint(self):
         html = _operator_monitor_static_html(18.0, 1.0)
         self.assertIn("--rb-monitor-gap: 1.000em;", html)
         self.assertIn("--rb-monitor-target-width: 18.000em;", html)
-        self.assertIn("calc((100vw - (3 * var(--rb-monitor-gap))) / 2)", html)
+        # Both monitors share the left column...
         self.assertIn(".rb-monitor-joint-card { left: var(--rb-monitor-gap); }", html)
-        self.assertIn(".rb-monitor-stand-card { left: calc((2 * var(--rb-monitor-gap)) + var(--rb-monitor-width)); }", html)
+        self.assertIn(".rb-monitor-stand-card { left: var(--rb-monitor-gap); }", html)
+        # ...with the Pose Monitor pushed to the bottom half (below Joint Monitor).
+        self.assertIn(".rb-monitor-stand-card.rb-monitor-header-card { top: calc(50vh + 0.5em); }", html)
+        self.assertIn(".rb-monitor-joint-card.rb-monitor-body-card { max-height: calc(50vh - 6.5em); }", html)
         self.assertIn("Pose Monitor", html)
         self.assertIn('id="rb-joint-unit-rad"', html)
         self.assertIn('id="rb-stand-unit-rad"', html)
@@ -2918,6 +2944,61 @@ class InitMotionPersistenceTest(unittest.TestCase):
         self.assertEqual(safety.init_left_joint_deg, left)
         self.assertEqual(safety.init_right_joint_deg, right)
         self.assertEqual(_load_init_joints(), (left, right))
+
+    def test_parse_joint6_accepts_comma_or_space_and_rejects_bad(self):
+        self.assertEqual(_parse_joint6("1, 2, 3, 4, 5, 6"), (1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+        self.assertEqual(_parse_joint6("1 2 3 4 5 6"), (1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+        self.assertIsNone(_parse_joint6("1 2 3 4 5"))      # too few
+        self.assertIsNone(_parse_joint6("1 2 3 4 5 6 7"))  # too many
+        self.assertIsNone(_parse_joint6("1 2 3 4 5 x"))    # non-numeric
+        self.assertIsNone(_parse_joint6("1 2 3 4 5 nan"))  # non-finite
+
+    def test_format_joint6_roundtrips_through_parse(self):
+        self.assertEqual(_format_joint6(None), "")
+        values = (-131.663, 73.0, 113.4, -80.88, -107.064, -145.949)
+        self.assertEqual(_parse_joint6(_format_joint6(values)), values)
+
+    def test_apply_init_joints_live_updates_safety_and_persists(self):
+        store = StateStore(stale_after_sec=0.5)
+        safety = OperatorSafety(
+            store,
+            CommandClient(host="127.0.0.1", port=0, source_id="test"),
+            init_left_joint_deg=(0.0,) * 6,
+            init_right_joint_deg=(0.0,) * 6,
+        )
+        ok, message = _apply_init_joints_live(
+            safety, "10, 20, 30, 40, 50, 60", "-10 -20 -30 -40 -50 -60"
+        )
+        self.assertTrue(ok, message)
+        # live runtime target updated (the next InitMotion press uses this)...
+        self.assertEqual(safety.init_left_joint_deg, (10.0, 20.0, 30.0, 40.0, 50.0, 60.0))
+        self.assertEqual(safety.init_right_joint_deg, (-10.0, -20.0, -30.0, -40.0, -50.0, -60.0))
+        # ...and persisted so it survives a restart.
+        self.assertEqual(
+            _load_init_joints(),
+            ((10.0, 20.0, 30.0, 40.0, 50.0, 60.0), (-10.0, -20.0, -30.0, -40.0, -50.0, -60.0)),
+        )
+
+    def test_apply_init_joints_live_rejects_bad_input_without_touching_target(self):
+        store = StateStore(stale_after_sec=0.5)
+        safety = OperatorSafety(
+            store,
+            CommandClient(host="127.0.0.1", port=0, source_id="test"),
+            init_left_joint_deg=(1.0,) * 6,
+            init_right_joint_deg=(2.0,) * 6,
+        )
+        ok, message = _apply_init_joints_live(safety, "1 2 3", "1 2 3 4 5 6")
+        self.assertFalse(ok)
+        self.assertIn("6 finite joint values", message)
+        self.assertEqual(safety.init_left_joint_deg, (1.0,) * 6)   # unchanged
+        self.assertEqual(safety.init_right_joint_deg, (2.0,) * 6)
+
+    def test_current_joints_text_stale_stream_returns_message(self):
+        store = StateStore(stale_after_sec=0.5)  # no state pushed -> latest() is None
+        left_text, right_text, message = _current_joints_text(store)
+        self.assertIsNone(left_text)
+        self.assertIsNone(right_text)
+        self.assertIn("stale", message)
 
     def test_set_waypoint_as_init_rejects_missing_joints(self):
         store = StateStore(stale_after_sec=0.5)

@@ -175,6 +175,8 @@ _REFERENCE_GHOST_RGBA = (0.25, 0.6, 1.0, 0.35)
 _SELF_COLLISION_RGBA = (0.85, 0.08, 0.08, 0.6)
 _SELF_COLLISION_STAND_RGB = (217, 20, 20)
 _SELF_COLLISION_STAND_OPACITY = 0.6
+# Translucent blue overlay of the checked collision hulls (URDF <collision> meshes).
+_SELF_COLLISION_CHECK_RGBA = (0.27, 0.62, 1.0, 0.38)
 
 
 def _reference_ghost_enabled() -> bool:
@@ -710,6 +712,46 @@ def update_self_collision_capsules(scene_handles: dict[str, Any], latest: Any, s
         _set_visible(entry["handle"], show and key in used_keys)
 
 
+def update_self_collision_check_geom(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
+    """Show/hide the translucent checked-collision-geometry overlay (per-link convex
+    hulls from the URDF <collision> meshes), posed to the commanded/actual config —
+    the capsule-overlay analogue for mesh mode. Driven by the same toggle."""
+    if not isinstance(scene_handles, dict):
+        return
+    for side, arm_state in (("left", latest.left), ("right", latest.right)):
+        urdf = scene_handles.get(f"{side}_urdf_checkgeom")
+        base = scene_handles.get(f"{side}_base_checkgeom")
+        if urdf is None:
+            _set_visible(base, False)
+            continue
+        if show:
+            # Hug whichever robot is shown: the commanded ghost in controller-sim,
+            # else the actual arm.
+            q = arm_state.q_sent_deg if _reference_ghost_active(arm_state) else None
+            if q is None:
+                q = arm_state.q_actual_deg
+            try:
+                _update_urdf_config(urdf, _joint_cfg_radians(q))
+            except Exception as exc:
+                scene_handles["urdf_checkgeom_update_error"] = f"{type(exc).__name__}: {exc}"
+        # The collision meshes live under ViserUrdf's own collision root frame; the
+        # outer mount frame visibility alone does not reveal them — toggle both.
+        _set_visible(base, show)
+        try:
+            urdf.show_collision = show
+        except Exception as exc:
+            scene_handles["urdf_checkgeom_show_error"] = f"{type(exc).__name__}: {exc}"
+        # The collision hulls hug the links and would be hidden inside the opaque
+        # solid robot, so showing the checked geometry = a "collision view": hide
+        # the solid visual meshes while the toggle is on, restore them when off.
+        solid = scene_handles.get(f"{side}_urdf")
+        if solid is not None:
+            try:
+                solid.show_visual = not show
+            except Exception:
+                pass
+
+
 def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
     stand_mesh_path = _stand_mesh_path()
     if not stand_mesh_path.exists():
@@ -783,6 +825,21 @@ def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
                 mesh_color_override=_SELF_COLLISION_RGBA)
         except Exception as exc:
             handles["urdf_collision_error"] = f"{type(exc).__name__}: {exc}"
+        # Checked collision GEOMETRY overlay: the actual per-link convex hulls the
+        # self-collision guard tests (URDF <collision> meshes), shown translucent
+        # when the "자기충돌 검사 표시" toggle is on. This is the capsule-overlay
+        # analogue for mesh mode — it hugs each link like the old capsules did.
+        try:
+            handles["left_urdf_checkgeom"] = ViserUrdf(
+                server, urdf_path, root_node_name="/stand/left_base_checkgeom",
+                load_meshes=False, load_collision_meshes=True,
+                collision_mesh_color_override=_SELF_COLLISION_CHECK_RGBA)
+            handles["right_urdf_checkgeom"] = ViserUrdf(
+                server, urdf_path, root_node_name="/stand/right_base_checkgeom",
+                load_meshes=False, load_collision_meshes=True,
+                collision_mesh_color_override=_SELF_COLLISION_CHECK_RGBA)
+        except Exception as exc:
+            handles["urdf_checkgeom_error"] = f"{type(exc).__name__}: {exc}"
     except Exception as exc:
         handles["urdf_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
 
@@ -810,6 +867,9 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         # Mount frames for the translucent-red self-collision overlay robots.
         handles["left_base_collision"] = server.scene.add_frame("/stand/left_base_collision", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
         handles["right_base_collision"] = server.scene.add_frame("/stand/right_base_collision", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
+        # Mount frames for the checked-collision-geometry overlay (toggle-driven).
+        handles["left_base_checkgeom"] = server.scene.add_frame("/stand/left_base_checkgeom", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
+        handles["right_base_checkgeom"] = server.scene.add_frame("/stand/right_base_checkgeom", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
         has_transform_controls = hasattr(server.scene, "add_transform_controls")
         handles["left_tcp"] = server.scene.add_frame("/stand/left_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(0.1601, -0.1725, 0.78))
         handles["right_tcp"] = server.scene.add_frame("/stand/right_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(-0.1601, -0.1725, 0.78))
@@ -1113,6 +1173,8 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
         "right_base_ref": right_base,
         "left_base_collision": left_base,
         "right_base_collision": right_base,
+        "left_base_checkgeom": left_base,
+        "right_base_checkgeom": right_base,
         "left_marker": _joint_marker_position(left_base, latest.left.q_actual_deg),
         "right_marker": _joint_marker_position(right_base, latest.right.q_actual_deg),
     }

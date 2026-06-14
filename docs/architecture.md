@@ -4,9 +4,12 @@ This document is the current source of truth for the system architecture. Compon
 
 ## Current Phase
 
-The repository is currently in **simulator-first Cartesian acceptance hardening**.
+The repository is currently in **rbpodo pgmode-real physical robot bring-up**.
+Simulator-first Cartesian acceptance hardening is largely complete and now serves
+as the regression baseline; active validation has moved onto the physical
+RB3-730E hardware.
 
-The simulator stack should repeatedly validate:
+The simulator stack remains the regression baseline for:
 
 - per-arm simulator topology
 - structured backend result and fault telemetry
@@ -19,7 +22,10 @@ The simulator stack should repeatedly validate:
 - command-source lease/arbitration
 - camera readiness contracts for future policy work
 
-This is not a real robot milestone.
+Real motion is now an active, gated bring-up lane (see Maturity Boundary), not a
+deferred milestone. It stays fail-closed: gates, site-local config, operator
+supervision, and an E-stop are all required, and passing simulator acceptance is
+never permission to move hardware.
 
 ## Maturity Boundary
 
@@ -37,14 +43,29 @@ Supported for mock/simulation work:
 - Python policy_runner with joint and Cartesian simulator action sources
 - simulator-only Cartesian acceptance scripts
 
-Not production-ready:
+Validated on pgmode-real (physical RB3-730E hardware):
 
-- real RB3-730 motion
-- real Cartesian/TCP motion
+- read-only physical diagnostics parity against controllers `.200`/`.201`
+  using `tcp_actual_stand` (not `tcp_ref_stand`)
+- dual-arm physical Cartesian circle tracking — slow, TUNED-1 profile, median
+  tracking ~1.42° (`docs/runbooks/rbpodo_real_physical_circle.md`)
+- UMI dual-arm Cartesian teleop (relative-init) driving `TcpPoseTarget` on the
+  physical arms
+- server-side URDF-capsule self-collision guard (`clamp_to_hold`) exercised in
+  real motion
+- policy-side real-Cartesian safety gate relaxation (PR #13): `rb_servo_server`
+  is the sole real-motion safety layer; controller-simulation safety unchanged
+- controller `-2001` suspect-diagnostics acceptance in real mode (PR #12) with
+  EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latching
+
+Not production-ready (unvalidated):
+
 - force control
 - gripper control
-- measured camera/robot calibration
-- real camera + policy + robot closed-loop behavior
+- measured camera/robot calibration (still `configured_estimate`)
+- real camera + policy + robot full closed-loop rollout (`flow-infer`
+  `real_policy` lane still blocked)
+- fast physical circle stages (15 cm / 16 s and above, transition ladder P7–P9)
 
 ## Canonical Terms
 
@@ -202,7 +223,27 @@ Real Cartesian/TCP motion is closed unless:
 RB_ALLOW_REAL_CARTESIAN=1
 ```
 
-These environment variables are necessary but not sufficient. Config and acceptance must also explicitly allow the operation.
+Accepting the controller `-2001` suspect diagnostics
+(`op_stat_self_collision`/`robot_time` field-layout garbage) in real mode is
+additionally closed unless:
+
+```bash
+RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1
+```
+
+These environment variables are necessary but not sufficient. Config
+(`cartesian_control.allow_in_real: true`) and operator-supervised acceptance must
+also explicitly allow the operation. These gates have already carried a
+supervised dual-arm physical Cartesian circle
+(`docs/runbooks/rbpodo_real_physical_circle.md`).
+
+The policy-side `SafetyGate` no longer blocks real Cartesian motion (PR #13,
+scoped to `cartesian_gate.operation_mode == "real"`); for real motion
+`rb_servo_server` is therefore the sole safety layer — safety filter (dq/ddq/
+joint limits), tracking-error fault latch, the URDF-capsule self-collision guard,
+lease arbitration, and deadman. EMS/SOS/soft-estop/`collision_occur`/unknown-mode/
+init-error continue to latch regardless of the gates above. Controller-simulation
+safety is unchanged.
 
 Rainbow controller `pgmode` simulation through the `rbpodo` backend is a
 separate evidence category from both hardware-free `rb_simulator` and future
@@ -392,7 +433,7 @@ Streaming joint velocity command. Suitable for joint teleop/debug when safety ga
 
 ### `TcpPoseTarget`
 
-Cartesian point-to-point final-pose target. It is MoveJ-like at the TCP level. Final TCP pose is targeted, but the intermediate TCP path is not guaranteed to be linear.
+Cartesian point-to-point final-pose target. It is MoveJ-like at the TCP level. Final TCP pose is targeted, but the intermediate TCP path is not guaranteed to be linear. Real mode is open through the real-mode gates plus `cartesian_control.allow_in_real: true`, and has been validated on the dual-arm physical Cartesian circle.
 
 ### `TcpLinearMove`
 
@@ -414,8 +455,9 @@ SafetyFilter, rather than repeatedly generating a one-tick target from measured
 `q_actual`. The legacy `measured_actual` mode remains available for debugging,
 and `measured_actual_lookahead` can model fixed lookahead. The integrator is
 reset on holds, faults, stale/invalid state, lease loss, velocity-mode exit,
-and excessive command-vs-actual joint divergence. Real Cartesian motion remains
-blocked by the existing real-mode gates.
+and excessive command-vs-actual joint divergence. Real Cartesian motion opens
+through the existing real-mode gates plus `cartesian_control.allow_in_real: true`;
+the dual-arm physical circle bring-up drives it via `TcpPoseTarget` streaming.
 
 ### `TcpDeltaLocal` / `TcpDeltaStand`
 
@@ -515,5 +557,12 @@ Hardware-free validation is described in `docs/hardware_free_validation.md`.
 Cartesian simulator acceptance is described in `docs/runbooks/tcp_pose_simulator_acceptance.md`.
 
 Real three-camera acceptance is described in `docs/runbooks/camera_acceptance.md`.
+
+The conservative ladder from rbpodo `pgmode` simulation evidence to physical
+`operation_mode: real` evidence (stages P0–P9) is described in
+`docs/runbooks/pgmode_real_transition.md`; physical-pass evidence must use
+`tcp_actual_stand`, never `tcp_ref_stand`. The realized dual-arm physical
+Cartesian circle bring-up is described in
+`docs/runbooks/rbpodo_real_physical_circle.md`.
 
 Passing simulator acceptance is not permission to move hardware.

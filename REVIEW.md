@@ -2,10 +2,18 @@
 
 ## Review Baseline
 
-This review reflects the repository after the simulator-first Cartesian hardening work. The current milestone is not real robot motion. The current milestone is repeated simulator validation of all motion primitives and operator interfaces before any real RB3-730 bring-up.
+This review reflects the repository in **rbpodo pgmode-real physical bring-up**.
+Simulator-first Cartesian hardening is largely complete and is now the regression
+baseline; the active milestone is gated, operator-supervised validation on the
+physical RB3-730E hardware (read-only diagnostics parity, then tiny motion, then a
+slow physical circle, before any speed ladder). Real motion stays fail-closed and
+passing simulator acceptance is never permission to move hardware.
 
 This root file is the current review source of truth. `docs/current_review.md`
 is only a short redirect here so review status does not drift across copies.
+The numbered task log below (1–93) is an append-only historical audit of completed
+tasks and is preserved verbatim, even where later real-motion work has moved past
+its point-in-time caveats.
 
 ## Current Maturity
 
@@ -34,15 +42,26 @@ is only a short redirect here so review status does not drift across copies.
 - mock camera and camera acceptance runbooks
 - mandatory Eigen3/Pinocchio-backed Cartesian math in `rb_servo_server`
 
+### Validated On pgmode-real (Physical RB3-730E)
+
+- read-only physical diagnostics parity (controllers `.200`/`.201`, `tcp_actual_stand`)
+- dual-arm physical Cartesian circle tracking — slow, TUNED-1 profile, median ~1.42°
+  (`docs/runbooks/rbpodo_real_physical_circle.md`)
+- UMI dual-arm Cartesian teleop (relative-init) driving `TcpPoseTarget` on real arms
+- server-side URDF-capsule self-collision guard (`clamp_to_hold`) exercised in real motion
+- policy-side real-Cartesian safety gate relaxation (PR #13); `rb_servo_server` is the
+  sole real-motion safety layer
+- controller `-2001` suspect-diagnostics acceptance in real (PR #12); EMS/SOS/soft-estop/
+  `collision_occur`/unknown-mode/init-error still latch
+
 ### Not Production-Ready
 
-- real RB3-730 motion
-- real Cartesian/TCP motion
 - force/admittance/impedance control
 - gripper integration
-- measured camera/robot calibration
-- real three-camera plus policy plus robot closed-loop behavior
+- measured camera/robot calibration (still `configured_estimate`)
+- real three-camera plus policy plus robot closed-loop behavior (`real_policy` blocked)
 - real `servo.io_model: worker` acceptance
+- fast physical circle stages (15 cm / 16 s and above, ladder P7–P9)
 
 ## Safety Gates
 
@@ -64,13 +83,25 @@ Real Cartesian/TCP motion:
 RB_ALLOW_REAL_CARTESIAN=1
 ```
 
-These gates are necessary but not sufficient. Config and real-hardware acceptance must also explicitly allow the operation.
+Accepting the controller `-2001` suspect diagnostics in real mode:
+
+```bash
+RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1
+```
+
+These gates are necessary but not sufficient. Config
+(`cartesian_control.allow_in_real: true`) and operator supervision must also allow
+the operation; they have already carried a supervised dual-arm physical Cartesian
+circle. The policy-side `SafetyGate` real-Cartesian block was relaxed (PR #13), so
+for real motion `rb_servo_server` is the sole safety layer; controller-simulation
+safety is unchanged.
 
 ## Motion Primitive Review
 
 ### `TcpPoseTarget`
 
-Status: simulator-supported.
+Status: simulator-supported; real mode validated on the dual-arm physical
+Cartesian circle (gates + `cartesian_control.allow_in_real: true`).
 
 Meaning: point-to-point Cartesian final-pose target. This is MoveJ-like at the TCP level: final pose is targeted, but the intermediate TCP path is not guaranteed to be linear.
 
@@ -206,7 +237,12 @@ Current recorded rbpodo controller-simulation baseline:
   deterministic `repeatability_summary.csv/json` and
   `repeatability_report.md`; this does not retire the diagnostics-suspect
   caveat or approve physical real motion.
-- Real physical circle benchmark: not run and not approved.
+- Real physical circle benchmark: a slow dual-arm physical Cartesian circle has
+  now been run under operator supervision (TUNED-1, median tracking ~1.42°;
+  `docs/runbooks/rbpodo_real_physical_circle.md`). The faster/higher-speed circle
+  ladder stages (15 cm / 16 s and above, P7–P9) remain not run and not approved,
+  and `diagnostics_suspect_unresolved` (vendor `-2001` field semantics) is still
+  open.
 
 **ACKON500 PASS is controller-reference lower-bound evidence, not physical TCP tracking.**
 
@@ -393,4 +429,11 @@ When reviewing a change, check:
 
 ## Current Recommendation
 
-Stay in simulator acceptance hardening until all motion primitives pass repeated acceptance runs. Only after that should the project proceed to real robot read-only acceptance, then joint-only motion acceptance, and only later tiny Cartesian motion acceptance.
+The simulator acceptance baseline holds and the project has proceeded onto the
+physical robot through the conservative ladder: read-only diagnostics parity →
+tiny motion → slow physical Cartesian circle, all under operator supervision with
+an E-stop. Continue up the ladder one stage at a time (slow → 15 cm / 16 s →
+faster) only with explicit approval per stage, keep `rb_servo_server` as the sole
+real-motion safety layer, and do not promote force control, grippers, measured
+calibration, or full `real_policy` rollout until each is separately validated.
+Any regression in simulator acceptance still blocks physical work.

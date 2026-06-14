@@ -2269,8 +2269,12 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_mesh = config_.safety.self_collision.mesh.enable;
             latest_snapshot_.self_collision_near_pairs.clear();
             if (config_.safety.self_collision.mesh.enable && last_collision_verdict_.valid) {
+                // Only the genuinely-close pairs (within the barrier slow-zone) — a
+                // viewer should see close calls, not long segments across far links.
+                const double viz_max = config_.safety.self_collision.mesh.d_slow_m;
                 latest_snapshot_.self_collision_near_pairs.reserve(last_collision_verdict_.near.size());
                 for (const CollisionNearPair& p : last_collision_verdict_.near) {
+                    if (p.d_m > viz_max) continue;
                     latest_snapshot_.self_collision_near_pairs.push_back(SelfCollisionNearPairViz{
                         p.name_a, p.name_b,
                         {p.p_a.x(), p.p_a.y(), p.p_a.z()},
@@ -3622,16 +3626,17 @@ ServoTarget DualArmServoLoop::applySafety(
             collisionVerdictStale(v, now_s, collision_monitor_cfg_.max_staleness_s);
         if (!config_.safety.self_collision.monitor_only &&
             combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
-            const bool breach = stale || v.hard_violation;
-            if (config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch &&
-                breach) {
-                const std::string reason = stale
-                    ? "self-collision mesh monitor stale (fail closed)"
-                    : ("self-collision mesh breach (" +
-                       (last_self_collision_.pair.empty() ? std::string("unknown")
-                                                          : last_self_collision_.pair) +
-                       "): clearance " + std::to_string(v.min_clearance_m) + " m below floor " +
-                       std::to_string(collision_monitor_cfg_.d_hard_m) + " m");
+            // Only a real GEOMETRIC breach (hard_violation) escalates to fault_latch.
+            // A stale verdict is a transient scheduling issue, not a collision: hold
+            // (scale 0) and auto-recover when fresh verdicts resume — never latch on it.
+            if (!stale &&
+                config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch &&
+                v.hard_violation) {
+                const std::string reason = "self-collision mesh breach (" +
+                    (last_self_collision_.pair.empty() ? std::string("unknown")
+                                                       : last_self_collision_.pair) +
+                    "): clearance " + std::to_string(v.min_clearance_m) + " m below floor " +
+                    std::to_string(collision_monitor_cfg_.d_hard_m) + " m";
                 latchFault(SafetyVerdict::SelfCollision, reason, left_state, right_state);
                 out = currentFaultHoldTarget();
                 combined = SafetyVerdict::FaultLatched;

@@ -49,14 +49,16 @@ bool collisionVerdictStale(const CollisionVerdict& v, double now_s, double max_s
 
 double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorConfig& cfg) {
     if (!v.valid) return 0.0;            // no verdict yet -> fail closed
-    const double vc = v.closing_speed_m_s;
+    constexpr double kRetreatEps = 1e-4;  // m/s; clearance must clearly grow to pass
     if (v.hard_violation) {
-        // inside the hard floor: block further approach, but allow a retreat
-        // (closing speed <= 0) so the arm can back out of the keep-out zone.
-        return vc > 1e-6 ? 0.0 : 1.0;
+        // Inside the hard floor: HOLD (fail safe) unless the clearance is clearly
+        // increasing (a genuine retreat), so the arm can still back out but cannot
+        // sink deeper. Stationary/uncertain -> hold.
+        return v.clearance_rate_m_s > kRetreatEps ? 1.0 : 0.0;
     }
     const double d = v.min_clearance_m;
     if (d > cfg.d_slow_m) return 1.0;    // far enough: barrier inactive
+    const double vc = v.closing_speed_m_s;
     if (vc <= 1e-6) return 1.0;          // not closing (parallel/receding): free
     // Predicted clearance when the (latency-old) verdict is acted upon.
     const double d_eff = d - cfg.d_hard_m - vc * cfg.latency_s;
@@ -87,8 +89,10 @@ struct CollisionMonitor::Impl {
     // published verdict (lock-free read via atomic shared_ptr)
     std::shared_ptr<const CollisionVerdict> published;
 
-    // closing-speed estimation state (monitor thread only)
-    double prev_min = std::numeric_limits<double>::quiet_NaN();
+    // clearance-rate estimation state (monitor thread only): per-pair clearance
+    // from the previous eval, indexed by collision-pair index, so the rate of the
+    // currently-critical pair is tracked even as which pair is closest changes.
+    std::vector<double> prev_pair_clear;
     double prev_stamp = 0.0;
     std::uint64_t seq = 0;
 
@@ -188,11 +192,14 @@ struct CollisionMonitor::Impl {
         // collect (distance, pair index), partial-sort the closest K
         std::vector<std::pair<double, std::size_t>> ds;
         ds.reserve(np);
+        std::vector<double> cur(np);
         double dmin = std::numeric_limits<double>::infinity();
+        std::size_t kmin = 0;
         for (std::size_t k = 0; k < np; ++k) {
             const double d = gdata.distanceResults[k].min_distance;
+            cur[k] = d;
             ds.emplace_back(d, k);
-            if (d < dmin) dmin = d;
+            if (d < dmin) { dmin = d; kmin = k; }
         }
         v.min_clearance_m = dmin;
         v.hard_violation = dmin < cfg.d_hard_m;
@@ -216,12 +223,13 @@ struct CollisionMonitor::Impl {
             p.name_b = geom.geometryObjects[cp.second].name;
             v.near.push_back(std::move(p));
         }
-        // closing speed from consecutive global minima
-        if (std::isfinite(prev_min) && stamp > prev_stamp) {
-            const double dd = (prev_min - dmin) / (stamp - prev_stamp);
-            v.closing_speed_m_s = dd > 0.0 ? dd : 0.0;
+        // Signed clearance rate of the currently-critical pair, tracked by pair
+        // index so a switch of which pair is closest does not corrupt it.
+        if (prev_pair_clear.size() == np && stamp > prev_stamp) {
+            v.clearance_rate_m_s = (dmin - prev_pair_clear[kmin]) / (stamp - prev_stamp);
+            v.closing_speed_m_s = v.clearance_rate_m_s < 0.0 ? -v.clearance_rate_m_s : 0.0;
         }
-        prev_min = dmin;
+        prev_pair_clear = std::move(cur);
         prev_stamp = stamp;
         v.seq = ++seq;
         return v;
