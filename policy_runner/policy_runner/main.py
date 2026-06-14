@@ -616,6 +616,12 @@ def _main_with_subcommands(argv: list[str]) -> int:
     imitation_experiment.add_argument("--flow-sample-steps", type=int, default=8)
     imitation_experiment.add_argument("--diffusion-sample-steps", type=int, default=16)
     imitation_experiment.add_argument(
+        "--eval-samples",
+        type=int,
+        default=8,
+        help="best-of-N samples per eval item (minADE-style, multimodal-robust); 1 disables best-of-N",
+    )
+    imitation_experiment.add_argument(
         "--split-mode",
         choices=("primary", "session_holdout"),
         default="primary",
@@ -684,6 +690,15 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="Maximum HDF5 samples to evaluate in rollout-mode offline_eval.",
     )
     flow_infer.add_argument("--sample-steps", type=int, default=16)
+    flow_infer.add_argument(
+        "--deterministic-sampling",
+        action="store_true",
+        help=(
+            "Integrate the flow ODE from zero init (deterministic mean path) instead of "
+            "random noise. Default is stochastic sampling (x_T ~ N(0,I)), correct for "
+            "multimodal action distributions."
+        ),
+    )
     flow_infer.add_argument("--device", default="auto")
     flow_infer.add_argument(
         "--image-size",
@@ -1084,6 +1099,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             max_val_samples=args.max_val_samples,
             flow_sample_steps=args.flow_sample_steps,
             diffusion_sample_steps=args.diffusion_sample_steps,
+            eval_samples=args.eval_samples,
             split_mode=args.split_mode,
         )
         print(f"imitation leaderboard written: {report['output_dir']}/leaderboard_report.md", flush=True)
@@ -1380,6 +1396,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 source = FlowMatchingActionSource(
                     args.checkpoint,
                     sample_steps=args.sample_steps,
+                    stochastic_sampling=not args.deterministic_sampling,
                     **source_kwargs,
                 )
             # Decouple chunk inference from the 500 Hz servo loop for live
