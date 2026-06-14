@@ -16,13 +16,12 @@ services:
       RB_GUI_STATE_PORT: "50110"
       RB_GUI_COMMAND_HOST: "rb_servo_server"
       RB_GUI_COMMAND_PORT: "50010"
+      # Observed mode/backend are display-only labels. Readiness and Cartesian
+      # availability are derived from the live server state stream (the server is
+      # the sole motion authority), so the old GUI env unlocks for readiness,
+      # Cartesian, and TCP-pose feature flags are retired — none are needed here.
       RB_GUI_OBSERVED_MODE: "simulation"
       RB_GUI_OBSERVED_BACKEND: "simulator"
-      RB_GUI_SIM_READINESS_READY: "1"
-      RB_GUI_SIM_READINESS_RUNNING: "1"
-      RB_GUI_SIM_READINESS_CONNECTED: "1"
-      RB_GUI_CARTESIAN_AVAILABLE: "1"
-      RB_GUI_ENABLE_TCP_POSE_COMMANDS: "1"
       RB_GUI_OPS_AVAILABLE: "0"
       RB_GUI_INIT_LEFT_JOINTS: "-124.660, 32.485, 119.074, -96.294, -81.798, -30.615"
       RB_GUI_INIT_RIGHT_JOINTS: "111.949, -49.304, -120.057, 75.305, 87.436, 49.983"
