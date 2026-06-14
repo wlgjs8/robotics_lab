@@ -55,8 +55,8 @@ struct BackendConfig {
     // accept the same vendor-unreliable status fields (op_stat_self_collision shape,
     // robot_time) as UNAVAILABLE instead of latching diagnostics_suspect. Fail-closed,
     // gated by rbpodoSuspectDiagnosticsRealMotionGateOpen (needs operation_mode==real +
-    // RB_ALLOW_REAL_ROBOT/MOTION + RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION). Does
-    // NOT suppress EMS/SOS/soft-estop/collision_occur/unknown-mode faults.
+    // this config opt-in). Does NOT suppress EMS/SOS/soft-estop/collision_occur/
+    // unknown-mode faults.
     bool allow_real_motion_with_suspect_diagnostics = false;
     bool allow_controller_simulation_init_error = false;
 

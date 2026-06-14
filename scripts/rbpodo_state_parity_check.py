@@ -165,7 +165,6 @@ def start_server(args: argparse.Namespace, log_path: Path) -> subprocess.Popen[b
     assert args.server is not None
     assert args.server_config is not None
     env = os.environ.copy()
-    env["RB_ALLOW_REAL_ROBOT"] = "1"
     command = [str(args.server), "--config", str(args.server_config)]
     log_file = log_path.open("wb")
     process = subprocess.Popen(

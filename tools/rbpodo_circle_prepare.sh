@@ -41,7 +41,7 @@ Options:
   -h, --help                   Show this help.
 
 This script never sets RB_ALLOW_* variables. Controller-touching options
-require the explicit confirmation flag and RB_ALLOW_REAL_ROBOT=1.
+require the explicit confirmation flag.
 EOF
 }
 
@@ -118,9 +118,6 @@ fi
 require_controller_confirmation() {
   if [[ "${CONFIRM}" != "1" ]]; then
     fail "controller checks require --i-understand-this-connects-to-real-controller"
-  fi
-  if [[ "${RB_ALLOW_REAL_ROBOT:-}" != "1" ]]; then
-    fail "controller checks require RB_ALLOW_REAL_ROBOT=1"
   fi
 }
 
@@ -250,10 +247,4 @@ Next commands:
     --with-required-env \
     --i-understand-this-connects-to-real-controller \
     --i-confirm-controller-is-in-pgmode-simulation
-
-Required env gates are not set by prepare:
-  RB_ALLOW_REAL_ROBOT=1
-  RB_ALLOW_REAL_MOTION=1
-  RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-  RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
 EOF

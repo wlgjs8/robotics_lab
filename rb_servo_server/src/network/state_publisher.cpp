@@ -785,12 +785,6 @@ bool isRbpodoControllerSimulation(const BackendConfig& backend_config) {
     return operation_mode == "simulation" || operation_mode == "sim";
 }
 
-bool envFlagEnabled(const char* name) {
-    // Real/sim env gates are retired; published env_* gate fields report true
-    // so downstream clients (policy_runner safety) see the gates as open.
-    (void)name;
-    return true;
-}
 
 bool isStreamingCartesianMode(ControlMode mode) {
     return mode == ControlMode::TcpLinearMove ||
@@ -821,9 +815,7 @@ bool controllerSimulationCartesianGateOpen(
         servo_config.allow_controller_simulation_motion &&
         backend_config.backend_type == BackendType::Rbpodo &&
         backend_config.run_mode == RunMode::Real &&
-        isRbpodoControllerSimulation(backend_config) &&
-        envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
-        envFlagEnabled("RB_ALLOW_REAL_MOTION");
+        isRbpodoControllerSimulation(backend_config);
 }
 
 std::string commandFamilyString(ControlMode mode) {
@@ -897,8 +889,7 @@ nlohmann::json cartesianGateJson(
         backend_config.backend_type == BackendType::Rbpodo &&
         backend_config.run_mode == RunMode::Real &&
         !isRbpodoControllerSimulation(backend_config) &&
-        cartesian_config.allow_in_real &&
-        envFlagEnabled("RB_ALLOW_REAL_CARTESIAN");
+        cartesian_config.allow_in_real;
     return {
         {"run_mode", runModeString(backend_config.run_mode)},
         {"backend_type", backendTypeString(backend_config.backend_type)},
@@ -918,8 +909,6 @@ nlohmann::json cartesianGateJson(
             controllerSimulationPhysicalMotionPolicyString(safety_config.controller_simulation_physical_motion_policy)},
         {"controller_simulation_physical_motion_threshold_deg",
             safety_config.controller_simulation_physical_motion_threshold_deg},
-        {"env_RB_ALLOW_REAL_ROBOT", envFlagEnabled("RB_ALLOW_REAL_ROBOT")},
-        {"env_RB_ALLOW_REAL_MOTION", envFlagEnabled("RB_ALLOW_REAL_MOTION")},
         {"physical_motion_expected", physical_motion_expected},
         {"controller_simulation_cartesian_enabled", controller_sim_cartesian_enabled},
         {"controller_simulation_cartesian_enabled_for_current_command", controller_sim_cartesian_enabled},

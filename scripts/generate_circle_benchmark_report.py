@@ -634,7 +634,7 @@ def classify_rbpodo_tuning_row(row: dict[str, Any]) -> None:
         row["promotion_notes"] = (
             "server rejected Cartesian commands before attempting path; check "
             "cartesian_control.allow_in_controller_simulation, "
-            "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN, operation_mode=simulation, "
+            "operation_mode=simulation, "
             "and pgmode simulation confirmation"
         )
         return

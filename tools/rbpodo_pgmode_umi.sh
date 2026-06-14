@@ -31,7 +31,7 @@ Safety flags for server/policy/teleop/hdf5-record:
   --i-confirm-controller-is-in-pgmode-simulation
 
 Options:
-  --with-required-env  Forward to the server action only; never sets RB_ALLOW_REAL_CARTESIAN.
+  --with-required-env  Forward to the server action only.
   --server PATH        Forward server binary path to the server wrapper.
   --output-dir DIR     Recording output dir for teleop-record/hdf5-record.
   --task TEXT          Required task description for hdf5-record.
@@ -60,9 +60,6 @@ print_command() {
 require_confirmations() {
   [[ "${CONFIRM_CONNECTS}" == "1" ]] || fail "missing --i-understand-this-connects-to-real-controller"
   [[ "${CONFIRM_PGMODE}" == "1" ]] || fail "missing --i-confirm-controller-is-in-pgmode-simulation"
-  if [[ "${RB_ALLOW_REAL_CARTESIAN:-}" == "1" ]]; then
-    fail "RB_ALLOW_REAL_CARTESIAN must not be set for pgmode UMI simulation"
-  fi
 }
 
 print_policy_info() {
@@ -71,7 +68,6 @@ rbpodo_pgmode_umi: policy config: policy_runner/config/rbpodo_pgmode_umi_500hz_a
 rbpodo_pgmode_umi: action_source: umi_dual_cartesian
 rbpodo_pgmode_umi: default readers: mock_script pgmode_umi_smoke for left and right
 rbpodo_pgmode_umi: policy safety keeps allow_real_motion=false and uses only the rbpodo controller-simulation Cartesian carve-out.
-rbpodo_pgmode_umi: RB_ALLOW_REAL_CARTESIAN must remain unset for this workflow.
 EOF
 }
 
