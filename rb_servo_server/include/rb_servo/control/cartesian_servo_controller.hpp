@@ -57,6 +57,11 @@ struct CartesianTwistHoldState {
     // ticks; auto-reset to seed on lease/mode (re)entry via CartesianTwistHoldState{}.
     Vec6 filtered_twist{};
     bool lpf_valid = false;
+    // twist_via_smd: running integrated pose goal + the SMD tracker. Created on
+    // first use and reset to the current pose on lease/mode (re)entry (the whole
+    // CartesianTwistHoldState is reset to {} then, clearing twist_smd to null).
+    Pose6D twist_smd_goal{};
+    std::shared_ptr<SmdPoseTracker> twist_smd;
 };
 
 struct CartesianVelocityIntegratorState {

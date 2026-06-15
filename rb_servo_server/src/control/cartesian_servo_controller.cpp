@@ -4,7 +4,12 @@
 #include "rb_servo/math/se3.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <mutex>
 #include <utility>
 
 namespace rb_servo {
@@ -634,6 +639,62 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     return ik_result;
 }
 
+namespace {
+
+// Env-gated per-tick CSV dump of the model-output -> joint twist pipeline
+// (set RB_TWIST_PIPELINE_CSV=/path/to.csv). One row per arm per tick:
+//   model output twist -> filtered twist (clamp + LPF) ->
+//   [SMD: nan, not applied in the twist path; TcpPoseTarget/linear only] ->
+//   qdot (velocity IK) -> q_target (joint command).
+void logTwistPipelineCsv(const ArmCommand& command,
+                         const Vec6& model_out, const Vec6& filtered,
+                         const Pose6D* smd_pose, const JointArray* qdot,
+                         const JointArray& q_target, uint64_t seq) {
+    static const char* csv_path = std::getenv("RB_TWIST_PIPELINE_CSV");
+    if (csv_path == nullptr || csv_path[0] == '\0') return;
+    static std::mutex mtx;
+    static std::ofstream ofs;
+    static bool header_written = false;
+    std::lock_guard<std::mutex> lock(mtx);
+    if (!header_written) {
+        ofs.open(csv_path, std::ios::out | std::ios::trunc);
+        ofs << std::setprecision(9);
+        ofs << "host_ns,t_sec,seq,arm,mode,"
+               "mo_vx,mo_vy,mo_vz,mo_wx,mo_wy,mo_wz,"
+               "fl_vx,fl_vy,fl_vz,fl_wx,fl_wy,fl_wz,"
+               "smd_x,smd_y,smd_z,smd_rx,smd_ry,smd_rz,"
+               "qd0,qd1,qd2,qd3,qd4,qd5,"
+               "qc0,qc1,qc2,qc3,qc4,qc5\n";
+        header_written = true;
+    }
+    if (!ofs.good()) return;
+    const long long host_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    static long long first_ns = host_ns;          // first logged tick -> t_sec origin
+    const double t_sec = static_cast<double>(host_ns - first_ns) / 1e9;
+    ofs << host_ns << ',' << t_sec << ',' << seq << ','
+        << (command.arm_id == ArmId::Left ? "left" : "right") << ','
+        << toString(command.mode) << ','
+        << model_out.x << ',' << model_out.y << ',' << model_out.z << ','
+        << model_out.rx << ',' << model_out.ry << ',' << model_out.rz << ','
+        << filtered.x << ',' << filtered.y << ',' << filtered.z << ','
+        << filtered.rx << ',' << filtered.ry << ',' << filtered.rz << ',';
+    if (smd_pose != nullptr) {
+        ofs << smd_pose->x << ',' << smd_pose->y << ',' << smd_pose->z << ','
+            << smd_pose->rx << ',' << smd_pose->ry << ',' << smd_pose->rz << ',';
+    } else {
+        ofs << "nan,nan,nan,nan,nan,nan,";
+    }
+    if (qdot != nullptr) {
+        for (int i = 0; i < kDof; ++i) ofs << (*qdot)[i] << ',';
+    } else {
+        ofs << "nan,nan,nan,nan,nan,nan,";
+    }
+    for (int i = 0; i < kDof; ++i) ofs << q_target[i] << (i + 1 < kDof ? ',' : '\n');
+}
+
+}  // namespace
+
 CartesianArmTargetResult CartesianServoController::computeTwistTarget(
     const ArmCommand& command,
     const RobotState& state,
@@ -702,6 +763,7 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         result.telemetry.reason = result.reason;
         return result;
     }
+    const Vec6 model_out_twist = requested;  // received model twist, pre clamp/LPF
     result.telemetry.requested_twist_linear_norm_m_s = linearNorm(requested);
     result.telemetry.requested_twist_angular_norm_rad_s = angularNorm(requested);
     bool twist_clamped = false;
@@ -797,6 +859,52 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
     result.telemetry.applied_twist_linear_norm_m_s = linearNorm(requested);
     result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(requested);
 
+    // twist_via_smd: integrate the clamped/filtered local twist into a stand-frame
+    // pose goal, smooth it through the SMD pose tracker (same as streaming
+    // TcpPoseTarget), then position-IK the smoothed pose -> joint. Bypasses the
+    // velocity-IK + joint integrator below.
+    if (config_.twist_via_smd_enable) {
+        const double smd_dt = std::max(0.0, dt_sec);
+        if (!hold_state->twist_smd) {
+            hold_state->twist_smd = std::make_shared<SmdPoseTracker>(config_.pose_track_smd);
+            hold_state->twist_smd->reset(*state.tcp_stand);
+            hold_state->twist_smd_goal = *state.tcp_stand;
+            hold_state->twist_smd->updateGoalFromCommand(hold_state->twist_smd_goal);
+        }
+        Pose6D twist_delta;
+        twist_delta.x = requested.x * smd_dt;
+        twist_delta.y = requested.y * smd_dt;
+        twist_delta.z = requested.z * smd_dt;
+        twist_delta.rx = requested.rx * smd_dt;
+        twist_delta.ry = requested.ry * smd_dt;
+        twist_delta.rz = requested.rz * smd_dt;
+        hold_state->twist_smd_goal =
+            math::composeDeltaLocal(hold_state->twist_smd_goal, twist_delta);
+        hold_state->twist_smd->updateGoalFromCommand(hold_state->twist_smd_goal);
+        const Pose6D smd_pose = hold_state->twist_smd->step(smd_dt);
+
+        CartesianArmTargetResult smd_result = solveIkArmTargetFromTcpStand(
+            *kinematics_,
+            config_,
+            mountForArm(command.arm_id, left_mount_, right_mount_),
+            command.arm_id,
+            smd_pose,
+            state,
+            previous_safe_sent_q_deg,
+            run_mode
+        );
+        smd_result.telemetry.requested_twist_linear_norm_m_s =
+            result.telemetry.requested_twist_linear_norm_m_s;
+        smd_result.telemetry.requested_twist_angular_norm_rad_s =
+            result.telemetry.requested_twist_angular_norm_rad_s;
+        smd_result.telemetry.applied_twist_linear_norm_m_s = linearNorm(requested);
+        smd_result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(requested);
+        smd_result.telemetry.twist_clamped = twist_clamped;
+        logTwistPipelineCsv(command, model_out_twist, requested, &smd_pose, nullptr,
+                            smd_result.q_target_deg, command_seq);
+        return smd_result;
+    }
+
     const CartesianVelocityResult velocity = kinematics_->solveCartesianVelocity(
         command.arm_id,
         state.q_actual_deg,
@@ -820,7 +928,7 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
                   orientation_error.ry * orientation_error.ry +
                   orientation_error.rz * orientation_error.rz);
     result.telemetry.orientation_error_rad = result.telemetry.path_orientation_error_rad;
-    return integrateVelocityTarget(
+    CartesianArmTargetResult final_result = integrateVelocityTarget(
         result,
         config_,
         state.q_actual_deg,
@@ -831,6 +939,9 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         velocity_integrator_state,
         state_context
     );
+    logTwistPipelineCsv(command, model_out_twist, requested, nullptr, &velocity.qdot_deg_s,
+                        final_result.q_target_deg, command_seq);
+    return final_result;
 }
 
 CartesianArmTargetResult CartesianServoController::computeCircleMoveTarget(

@@ -389,6 +389,23 @@ class ArmSnapshot:
             return self.controller_simulation_cartesian_enabled_for_current_command
         return self.controller_simulation_cartesian_enabled
 
+    @property
+    def is_controller_simulation(self) -> bool:
+        """True only for the rbpodo controller-simulation carve-out.
+
+        Controller-simulation connects to the real boxes but runs the controller
+        in operation_mode=simulation (run_mode=real, backend=rbpodo). Real and
+        plain-simulation runs are NOT controller-simulation, so the
+        controller-sim-only streaming Cartesian flag must not gate them."""
+        gate = self.cartesian_gate
+        if not isinstance(gate, Mapping):
+            return False
+        return (
+            str(gate.get("backend_type", "")).lower() == "rbpodo"
+            and str(gate.get("run_mode", "")).lower() == "real"
+            and str(gate.get("operation_mode", "")).lower() not in ("", "real")
+        )
+
 
 @dataclass(frozen=True)
 class CartesianSolveSnapshot:

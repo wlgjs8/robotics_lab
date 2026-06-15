@@ -237,6 +237,17 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+        # Per-policy-step action logger (env-gated, debug only). Mirrors
+        # FlowMatchingActionSource; this class skips super().__init__, so the
+        # attributes the inherited _log_action_step touches must be set here.
+        # Set POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
+        # line per executed policy step (raw flow delta, sent twist, chunk index).
+        self._action_log: TextIO | None = None
+        self._action_log_seq = 0
+        _action_log_path = os.environ.get("POLICY_RUNNER_ACTION_LOG")
+        if _action_log_path:
+            self._action_log = open(_action_log_path, "w", buffering=1)
+            print(f"[flow-infer] logging per-step actions to {_action_log_path}", file=self.stderr)
 
         # The server's first inference triggers torch compile/kernel autotune and can
         # take minutes; absorb that at startup so the control loop never stalls.

@@ -579,6 +579,12 @@ struct CartesianControlConfig {
     // Default off -> behavior-preserving. tau ~ 30-50 ms.
     bool twist_lpf_enable = false;
     double twist_lpf_tau_sec = 0.04;
+    // Route the streaming twist through the SMD pose tracker instead of velocity
+    // IK + joint integration: integrate the (clamped) twist into a stand-frame
+    // pose goal each tick, smooth it with the pose_track_smd filter (same as
+    // streaming TcpPoseTarget), then position-IK the smoothed pose. Default off
+    // (behavior-preserving). Uses pose_track_smd's zeta/fn for the filter.
+    bool twist_via_smd_enable = false;
     double velocity_damping = 0.01;
     double max_twist_linear_m_s = 0.03;
     double max_twist_angular_rad_s = 0.2;

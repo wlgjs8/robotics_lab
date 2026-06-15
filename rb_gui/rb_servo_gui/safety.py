@@ -246,15 +246,22 @@ class OperatorSafety:
     def _arm_cartesian_reason(latest: StateSnapshot, arm: Literal["left", "right"]) -> str | None:
         """None when this arm can take a Cartesian command, else the reason.
 
-        Availability comes straight from the server: the controller-simulation
-        streaming flag wins when present, otherwise the plain Cartesian gate.
-        An unknown (None) gate is treated as available — the server rejects the
-        command itself if Cartesian is truly closed."""
+        Availability comes straight from the server. The plain Cartesian gate
+        (cartesian_available) is authoritative for real and simulation. The
+        controller-simulation streaming flag is meaningful ONLY in the rbpodo
+        controller-simulation carve-out — it is always False off that path, so
+        consulting it everywhere would wrongly block real motion (where the
+        server reports cartesian_available=True with the controller-sim flag
+        False). An unknown (None) gate is treated as available — the server
+        rejects the command itself if Cartesian is truly closed."""
         arm_state = latest.left if arm == "left" else latest.right
         if not (arm_state.has_valid_tcp_pose and arm_state.tcp_stand is not None and not arm_state.tcp_deferred):
             return f"{arm} FK/TCP pose unavailable"
-        available = arm_state.controller_simulation_cartesian_available
-        if available is None:
+        if arm_state.is_controller_simulation:
+            available = arm_state.controller_simulation_cartesian_available
+            if available is None:
+                available = arm_state.cartesian_available
+        else:
             available = arm_state.cartesian_available
         if available is False:
             return arm_state.cartesian_unavailable_reason or f"{arm} Cartesian unavailable (server gate)"

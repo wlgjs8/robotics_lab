@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TextIO
@@ -120,14 +122,25 @@ def canonical_flow_command_family(command_family: str) -> str:
 
 
 # ---- ee_local body-frame alignment (training EE frame vs runtime TCP frame) ----
-# ee_local checkpoints trained on pika UMI data express body deltas in the pika
-# gripper-TIP frame (x=approach, y=left, z=up). The server interprets
-# TcpTwistLocal in the RB TCP frame (z=approach). The fixed rotation between
-# the two is the validated teleop r_align (stack_real.yaml umi_dual_cartesian):
-# rows below, columns = TCP x/y/z axes expressed in the tip frame. Mapping:
-#   v_tip = R_ALIGN · v_tcp        (runtime proprio -> training frame)
-#   v_tcp = R_ALIGNᵀ · v_tip       (policy action  -> robot TCP frame)
+# Fixed rotation R between the training EE body frame (in the data) and the RB TCP
+# frame the server interprets TcpTwistLocal in. Applied symmetrically:
+#   v_train = R · v_tcp            (runtime proprio -> training frame)
+#   v_tcp   = Rᵀ · v_train         (policy action  -> robot TCP frame)
+#
+# MEASURED for pika UMI (axis-probe 2026-06-15, see wiki umi-axis-probe): the data's
+# baked retarget (R_corr·Trans·R_align) is correct about z=approach but carries a
+# 180° YAW about approach (x,y flipped) — the config's unconfirmed R_corr. The 6
+# single-axis ground-truth replays solve (Kabsch, 5/6 residual 0) to:
+#   R = diag(-1,-1,+1) = 180° about approach(z)  ->  preset "pika_rz180"  <-- USE THIS
+# `none` gets z right but is yaw-flipped; `pika_tip` (a 90° permutation, the old
+# guess) is a different wrong. Permanent fix = compose pika_rz180 into R_corr in
+# calibration/umi_retarget_eelocal.yaml + reconvert + retrain; until then pass
+# `--ee-local-r-align pika_rz180` (symmetric -> corrects the existing checkpoint,
+# no retrain; the wrist image is unaffected by this coordinate relabel).
 EE_LOCAL_R_ALIGN_PRESETS: dict[str, tuple[float, ...]] = {
+    # measured pika-UMI correction: 180° about approach(z) (axis-probe 2026-06-15)
+    "pika_rz180": (-1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0),
+    # legacy guess (90° permutation); axis-probe showed this is wrong for pika UMI
     "pika_tip": (0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0),
 }
 
@@ -333,7 +346,7 @@ class FlowMatchingActionSource:
             print(
                 f"WARNING: {self.policy_label}: ee_local checkpoint without --ee-local-r-align; "
                 "assuming the runtime TCP body frame matches the training EE frame "
-                "(pika-tip data needs --ee-local-r-align pika_tip)",
+                "(pika UMI data needs --ee-local-r-align pika_rz180; measured 2026-06-15)",
                 file=stderr,
             )
         self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
@@ -404,6 +417,20 @@ class FlowMatchingActionSource:
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+        # Per-policy-step action logger (env-gated, debug only). Set
+        # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
+        # line per executed policy step: raw flow delta, converted/clamped twist
+        # actually sent, chunk index and chunk-boundary marker. Used to diagnose
+        # trembling (pulsed chunk boundaries vs. delta->twist noise amplification).
+        self._action_log: TextIO | None = None
+        self._action_log_seq = 0
+        _action_log_path = os.environ.get("POLICY_RUNNER_ACTION_LOG")
+        if _action_log_path:
+            self._action_log = open(_action_log_path, "w", buffering=1)
+            print(
+                f"[flow-infer] logging per-step actions to {_action_log_path}",
+                file=sys.stderr,
+            )
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         if getattr(self, "enable_async_chunking", False):
@@ -439,12 +466,7 @@ class FlowMatchingActionSource:
         self._chunk_index += 1
         gripper_targets = self._integrate_gripper_targets(step, payload)
         self._dispatch_gripper_step(step)
-
-        if self.command_family_option == "tcp_twist_local":
-            return self._tcp_twist_local_step_intent(step, gripper_targets=gripper_targets)
-        if self.command_family_option == "tcp_twist_stand":
-            return self._tcp_twist_stand_step_intent(step, gripper_targets=gripper_targets)
-        return self._tcp_delta_stand_step_intent(step, gripper_targets=gripper_targets)
+        return self._emit_step_intent(step, gripper_targets)
 
     # ----------------------------------------------------------- streamed --
     def _next_intent_streamed(
@@ -517,10 +539,37 @@ class FlowMatchingActionSource:
         self, step: np.ndarray, gripper_targets: dict[str, float | None]
     ) -> CommandIntent | None:
         if self.command_family_option == "tcp_twist_local":
-            return self._tcp_twist_local_step_intent(step, gripper_targets=gripper_targets)
-        if self.command_family_option == "tcp_twist_stand":
-            return self._tcp_twist_stand_step_intent(step, gripper_targets=gripper_targets)
-        return self._tcp_delta_stand_step_intent(step, gripper_targets=gripper_targets)
+            intent = self._tcp_twist_local_step_intent(step, gripper_targets=gripper_targets)
+        elif self.command_family_option == "tcp_twist_stand":
+            intent = self._tcp_twist_stand_step_intent(step, gripper_targets=gripper_targets)
+        else:
+            intent = self._tcp_delta_stand_step_intent(step, gripper_targets=gripper_targets)
+        self._log_action_step(step, intent)
+        return intent
+
+    def _log_action_step(self, step: np.ndarray, intent: CommandIntent | None) -> None:
+        """Append one JSONL line per executed policy step (env-gated debug)."""
+        log = self._action_log
+        if log is None:
+            return
+        raw = np.asarray(step, dtype=np.float64).reshape(-1)
+        record = {
+            "seq": self._action_log_seq,
+            "t_mono": time.monotonic(),
+            "chunk_index": int(self._chunk_index),
+            # True on the first step of a freshly sampled chunk -> lets you see
+            # whether trembling lines up with chunk boundaries (pulsed resample).
+            "chunk_boundary": int(self._chunk_index) <= 1,
+            "command_family": self.command_family_option,
+            # Raw flow output before delta->twist conversion / clamping.
+            "raw_delta": raw.tolist(),
+            # Actual per-arm payload sent downstream (twist after /policy_dt and
+            # clamp, or None if the arm was idle / no intent emitted).
+            "left": None if intent is None else intent.left,
+            "right": None if intent is None else intent.right,
+        }
+        self._action_log_seq += 1
+        log.write(json.dumps(record) + "\n")
 
     def _activate_chunk(self, chunk: np.ndarray, now_monotonic: float) -> None:
         self._chunk = chunk
@@ -994,7 +1043,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
             print(
                 f"WARNING: {self.policy_label}: ee_local checkpoint without --ee-local-r-align; "
                 "assuming the runtime TCP body frame matches the training EE frame "
-                "(pika-tip data needs --ee-local-r-align pika_tip)",
+                "(pika UMI data needs --ee-local-r-align pika_rz180; measured 2026-06-15)",
                 file=stderr,
             )
         self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
@@ -1082,6 +1131,20 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+        # Per-policy-step action logger (env-gated, debug only). Set
+        # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
+        # line per executed policy step: raw flow delta, converted/clamped twist
+        # actually sent, chunk index and chunk-boundary marker. Used to diagnose
+        # trembling (pulsed chunk boundaries vs. delta->twist noise amplification).
+        self._action_log: TextIO | None = None
+        self._action_log_seq = 0
+        _action_log_path = os.environ.get("POLICY_RUNNER_ACTION_LOG")
+        if _action_log_path:
+            self._action_log = open(_action_log_path, "w", buffering=1)
+            print(
+                f"[flow-infer] logging per-step actions to {_action_log_path}",
+                file=sys.stderr,
+            )
 
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         assert self._reset_left_pose is not None
@@ -1167,7 +1230,7 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
             print(
                 f"WARNING: {self.policy_label}: ee_local checkpoint without --ee-local-r-align; "
                 "assuming the runtime TCP body frame matches the training EE frame "
-                "(pika-tip data needs --ee-local-r-align pika_tip)",
+                "(pika UMI data needs --ee-local-r-align pika_rz180; measured 2026-06-15)",
                 file=stderr,
             )
         self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
@@ -1221,6 +1284,20 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+        # Per-policy-step action logger (env-gated, debug only). Set
+        # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
+        # line per executed policy step: raw flow delta, converted/clamped twist
+        # actually sent, chunk index and chunk-boundary marker. Used to diagnose
+        # trembling (pulsed chunk boundaries vs. delta->twist noise amplification).
+        self._action_log: TextIO | None = None
+        self._action_log_seq = 0
+        _action_log_path = os.environ.get("POLICY_RUNNER_ACTION_LOG")
+        if _action_log_path:
+            self._action_log = open(_action_log_path, "w", buffering=1)
+            print(
+                f"[flow-infer] logging per-step actions to {_action_log_path}",
+                file=sys.stderr,
+            )
 
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         assert self._reset_left_pose is not None

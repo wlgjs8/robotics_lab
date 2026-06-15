@@ -537,6 +537,42 @@ class GuiContractsTest(unittest.TestCase):
             self.assertTrue(safety.readiness().ready, f"{label} readiness")
             self.assertTrue(safety.readiness().cartesian_available, f"{label} cartesian")
 
+    def pgmode_real_state(self):
+        # pgmode-real: connects to the real boxes in operation_mode=real. The
+        # server opens Cartesian (cartesian_available=True) but reports the
+        # controller-simulation streaming flag False (that carve-out is closed).
+        state = self.tcp_available_state(observed_mode="real", observed_backend="rbpodo")
+        for arm in ("left", "right"):
+            state[arm]["physical_motion_expected"] = True
+            state[arm]["cartesian_available"] = True
+            state[arm]["cartesian_unavailable_reason"] = None
+            state[arm]["controller_simulation_streaming_cartesian_available"] = False
+            state[arm]["cartesian_gate"] = {
+                "run_mode": "real",
+                "backend_type": "rbpodo",
+                "operation_mode": "real",
+                "allow_in_controller_simulation": False,
+                "allow_in_real": True,
+                "physical_motion_expected": True,
+                "cartesian_available": True,
+                "controller_simulation_streaming_cartesian_available": False,
+            }
+        return state
+
+    def test_tcp_reachable_in_pgmode_real_despite_controller_sim_flag_false(self):
+        # Regression: in real motion the server opens Cartesian via
+        # cartesian_available=True while the controller-sim streaming flag is
+        # False. The GUI must not let that controller-sim-only flag block real
+        # TCP commands (the live lock the operator saw with make run MODE=real).
+        _, _, safety = self.make_safety(self.pgmode_real_state(), observed="real", observed_backend="rbpodo")
+        self.assertIsNone(safety.tcp_command_disabled_reason(), "pgmode-real tcp")
+        self.assertIsNone(safety.tcp_command_disabled_reason("left"), "pgmode-real tcp left")
+        self.assertIsNone(safety.tcp_command_disabled_reason("right"), "pgmode-real tcp right")
+        states = safety.control_disabled_states()
+        for key in ("tcp_pose", "tcp_linear", "twist", "circle"):
+            self.assertFalse(states[key], f"pgmode-real {key} should be enabled")
+        self.assertTrue(safety.readiness().cartesian_available, "pgmode-real cartesian")
+
     def test_valid_state_updates_latest_and_invalid_json_is_counted(self):
         store, _, safety = self.make_safety(sample_state())
         self.assertFalse(store.is_stale())

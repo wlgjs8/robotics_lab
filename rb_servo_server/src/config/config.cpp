@@ -2096,6 +2096,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "twist_angular_deadband_rad_s",
             "twist_lpf_enable",
             "twist_lpf_tau_sec",
+            "twist_via_smd_enable",
             "velocity_damping",
             "max_twist_linear_m_s",
             "max_twist_angular_rad_s",
@@ -2182,6 +2183,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "twist_lpf_tau_sec")) {
             cfg.cartesian_control.twist_lpf_tau_sec =
                 asDouble(sec["twist_lpf_tau_sec"], "cartesian_control.twist_lpf_tau_sec");
+        }
+        if (has(sec, "twist_via_smd_enable")) {
+            cfg.cartesian_control.twist_via_smd_enable =
+                asBool(sec["twist_via_smd_enable"], "cartesian_control.twist_via_smd_enable");
         }
         if (has(sec, "velocity_damping")) {
             cfg.cartesian_control.velocity_damping = asDouble(sec["velocity_damping"], "cartesian_control.velocity_damping");
