@@ -23,7 +23,8 @@ bool isLifecycleMode(ControlMode mode) {
     return mode == ControlMode::ArmMotion ||
            mode == ControlMode::DisarmMotion ||
            mode == ControlMode::EmergencyStop ||
-           mode == ControlMode::ResetFault;
+           mode == ControlMode::ResetFault ||
+           mode == ControlMode::Freedrive;
 }
 
 bool isLifecycleCommand(const DualArmCommand& command) {

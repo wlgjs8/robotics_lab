@@ -151,6 +151,19 @@ private:
     bool commandRequestsEmergencyStop(const DualArmCommand& command) const;
     bool commandRequestsArmMotion(const DualArmCommand& command) const;
     bool commandRequestsDisarmMotion(const DualArmCommand& command) const;
+    bool commandRequestsFreedrive(const DualArmCommand& command) const;
+    // Per-arm direct-teaching (free-drive) state transitions. Issues
+    // freedrive_teach_on/off to the addressed arm's backend (worker lifecycle in
+    // worker/async I/O, direct otherwise), updates the sticky flags, and resyncs
+    // the held target on exit so re-acquiring servo control does not snap the arm
+    // back. Fail-closed: a no-op unless config servo.allow_freedrive is set.
+    void applyFreedriveTransitions(
+        const DualArmCommand& command,
+        const RobotState& left_state,
+        const RobotState& right_state
+    );
+    bool anyFreedriveActive() const;
+    void resyncArmAfterFreedrive(ArmId arm_id, const RobotState& state);
     bool commandRequestsMotion(const DualArmCommand& command) const;
     bool commandBlockedByReadOnly(const DualArmCommand& command) const;
     bool readOnlyMode() const;
@@ -214,6 +227,10 @@ private:
     JointArray right_controller_sim_physical_baseline_q_deg_{};
 
     std::atomic<ServerMotionState> motion_state_{ServerMotionState::Disconnected};
+    // Per-arm direct-teaching (free-drive) sticky state. While either is true the
+    // server suppresses servo_j to both controllers (send_policy=="freedrive").
+    std::atomic<bool> left_freedrive_active_{false};
+    std::atomic<bool> right_freedrive_active_{false};
     mutable std::mutex state_mutex_;
     std::atomic<bool> fault_latched_{false};
     std::atomic<SafetyVerdict> fault_verdict_{SafetyVerdict::Ok};

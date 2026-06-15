@@ -703,6 +703,10 @@ struct RbpodoBackend::Impl {
     ArmId arm_id;
     BackendConfig config;
     bool connected = false;
+    // Direct-teaching (free-drive) latch. While true the controller is in
+    // freedrive_teach_on and sendServoJ() refuses to write move_servo_j (a
+    // defensive backstop layered under the server's global send suppression).
+    bool freedrive_active = false;
 
 #ifdef RB_SERVO_ENABLE_RBPODO
     std::unique_ptr<rb::podo::Cobot<>> robot;
@@ -1252,6 +1256,27 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
             0.0
         );
     }
+    if (impl_->freedrive_active) {
+        // Defensive backstop: never stream move_servo_j to a controller that is
+        // in freedrive_teach_on. Policy suppression, not a fault (the fault
+        // classifier treats SuppressedByPolicy as non-latching).
+        return with_ack_metadata(
+            rejectedSend(
+                request,
+                backendError(
+                    BackendErrorKind::SuppressedByPolicy,
+                    "servo_j suppressed while controller is in freedrive (direct teaching)",
+                    "",
+                    "rbpodo_freedrive_active"
+                ),
+                makeBackendTiming(start, nowSteadyNs()),
+                cached_state,
+                cached_source
+            ),
+            false,
+            0.0
+        );
+    }
     if (!finiteJointArray(request.q_target_deg)) {
         std::cerr << "[ERROR] RbpodoBackend refused non-finite servo_j target\n";
         return with_ack_metadata(
@@ -1465,6 +1490,65 @@ BackendResult<RobotState> RbpodoBackend::resetFault() {
         ),
         makeBackendTiming(start, nowSteadyNs())
     );
+#endif
+}
+
+BackendResult<RobotState> RbpodoBackend::setFreedrive(bool on) {
+    const uint64_t start = nowSteadyNs();
+#ifndef RB_SERVO_ENABLE_RBPODO
+    return failedResult<RobotState>(
+        BackendOp::SetFreedrive,
+        backendError(BackendErrorKind::DependencyUnavailable, "RbpodoBackend requested, but RB_SERVO_ENABLE_RBPODO=OFF"),
+        makeBackendTiming(start, nowSteadyNs())
+    );
+#else
+    if (!impl_->connected || !impl_->robot) {
+        return failedResult<RobotState>(
+            BackendOp::SetFreedrive,
+            backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
+            makeBackendTiming(start, nowSteadyNs())
+        );
+    }
+    // Maps to the rbpodo SDK wrapper (cobot.hpp set_freedrive_mode →
+    // freedrive_teach_on()/freedrive_teach_off()). set_freedrive_mode only ACKs
+    // receipt of the script command; the server treats the controller's gravity-
+    // compensation hand-guiding as operator-supervised, not server-verified.
+    rb::podo::ResponseCollector responses;
+    const auto ret = impl_->robot->set_freedrive_mode(responses, on, kInitializeCommandAckTimeoutSec);
+    if (impl_->config.disable_waiting_ack) {
+        rb::podo::ResponseCollector drained;
+        impl_->robot->flush(drained);
+    }
+    if (!ret.is_success()) {
+        return failedResult<RobotState>(
+            BackendOp::SetFreedrive,
+            commandReturnError(on ? "freedrive_teach_on" : "freedrive_teach_off", ret, responses),
+            makeBackendTiming(start, nowSteadyNs())
+        );
+    }
+    impl_->freedrive_active = on;
+    std::cerr << "[INFO] RbpodoBackend " << impl_->config.name
+              << (on ? " entered freedrive (direct teaching) — servo_j suppressed"
+                     : " exited freedrive (direct teaching) — servo_j re-enabled")
+              << "\n";
+    // Best-effort fresh state read so the caller can resync its held target to
+    // the (possibly hand-moved) actual joints on exit.
+    RobotState state_after;
+    if (impl_->data_channel) {
+        try {
+            const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+            if (state) {
+                const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
+                state_after = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+                if (state_after.has_valid_joint_state) {
+                    impl_->last_state_cache = state_after;
+                }
+            }
+        } catch (const std::exception&) {
+            // Non-fatal: the server falls back to its own latest readState() for resync.
+        }
+    }
+    return okResult(BackendOp::SetFreedrive, state_after, makeBackendTiming(start, nowSteadyNs()));
 #endif
 }
 

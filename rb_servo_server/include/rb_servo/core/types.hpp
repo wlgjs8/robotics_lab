@@ -101,7 +101,12 @@ enum class ControlMode {
     TcpTwistLocal,
     EmergencyStop,
     ResetFault,
-    SetSafetyFloorZ
+    SetSafetyFloorZ,
+    // Per-arm direct-teaching (free-drive). Releases servo_j control on the
+    // addressed arm's controller (freedrive_teach_on) so an operator can hand-
+    // guide it, then re-acquires it (freedrive_teach_off) with a target resync.
+    // Sticky server state; carried by ArmCommand.freedrive_on.
+    Freedrive
 };
 
 enum class ServerMotionState {
@@ -316,6 +321,11 @@ struct CartesianSolveTelemetry {
     int ik_iterations = 0;
     double position_error_m = 0.0;
     double orientation_error_rad = 0.0;
+    // Conditioning / singularity-robust-damping diagnostics (last IK solve).
+    double ik_min_singular_value = 0.0;
+    double ik_applied_damping = 0.0;
+    double ik_solution_jump_deg = 0.0;
+    bool ik_branch_jump_suspected = false;
     bool ik_timed_out = false;
     bool ik_warn_duration_exceeded = false;
     bool ik_fail_duration_exceeded = false;
@@ -421,6 +431,13 @@ struct ArmCommand {
 
     double gripper_target = 0.0;
     double timeout_sec = 0.2;
+
+    // Freedrive (direct-teaching) request payload. When mode == Freedrive, this
+    // arm's sticky server free-drive state is set to freedrive_on. has_freedrive
+    // is true only when the parser saw an explicit boolean (so a bare Freedrive
+    // command without the flag is rejected rather than silently treated as off).
+    bool freedrive_on = false;
+    bool has_freedrive = false;
 
     // Parsed command validation flags. A command parser must set these true only
     // when the corresponding array was present and had the expected size.
@@ -740,6 +757,11 @@ struct ServoSnapshot {
     bool fault_latched = false;
     bool async_supervision_degraded = false;
     bool tracking_error_degraded = false;
+    // Per-arm direct-teaching (free-drive) sticky state. While true, that arm's
+    // controller is in freedrive_teach_on and the server sends no servo_j to
+    // either controller (send_policy == "freedrive").
+    bool left_freedrive_active = false;
+    bool right_freedrive_active = false;
     SafetyVerdict latched_fault_reason = SafetyVerdict::Ok;
     std::string fault_reason;
 

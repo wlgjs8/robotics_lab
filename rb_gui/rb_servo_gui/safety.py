@@ -361,6 +361,32 @@ class OperatorSafety:
         _, save_message = persist_floor_z_to_config(config_path, float(floor_z_m))
         return True, f"{sent} ({save_message})"
 
+    def send_freedrive(
+        self, *, left: bool | None = None, right: bool | None = None
+    ) -> tuple[bool, str]:
+        """Per-arm direct-teaching (free-drive) toggle.
+
+        left/right: True enters free-drive (hand-guidable), False exits + resyncs,
+        None leaves that arm untouched. Requires a live state stream; the server
+        is the authority (servo.allow_freedrive + lease + supervision)."""
+        if left is None and right is None:
+            return False, "specify at least one arm"
+        latest = self.latest_valid()
+        if latest is None:
+            return False, "state stream missing or stale"
+        try:
+            self.command_client.send_freedrive(
+                left=left, right=right, timeout_sec=self.command_timeout_sec
+            )
+        except ValueError as exc:
+            return False, str(exc)
+        parts: list[str] = []
+        if left is not None:
+            parts.append(f"left {'ON' if left else 'OFF'}")
+        if right is not None:
+            parts.append(f"right {'ON' if right else 'OFF'}")
+        return True, "sent Freedrive " + ", ".join(parts)
+
     def init_motion_disabled_reason(self) -> str | None:
         reason = self.blocked_reason("JointTarget")
         if reason:

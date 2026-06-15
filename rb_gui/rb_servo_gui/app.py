@@ -1274,6 +1274,53 @@ def build_gui(
                         safety.command_client.release_lease()
                         handles["last_action"].value = "OK: lease released (Take control OFF)"
 
+            # Per-arm direct teaching (free-drive). Releases servo_j authority on
+            # the chosen arm's controller so it can be hand-guided, then re-acquires
+            # it with a target resync — without tearing down `make run`. Requires
+            # servo.allow_freedrive on the server (fail-closed). The other arm holds
+            # at its last controller reference while one arm is hand-guided.
+            with server.gui.add_folder("직접교시 (Direct Teaching)"):
+                handles["freedrive_status"] = server.gui.add_text(
+                    "Freedrive", initial_value="off (no state)", disabled=True
+                )
+
+                def _freedrive(left: bool | None, right: bool | None) -> None:
+                    ok, message = safety.send_freedrive(left=left, right=right)
+                    handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+                fd_left_on = server.gui.add_button("왼팔 교시 ON")
+                fd_left_off = server.gui.add_button("왼팔 교시 OFF (재동기화)")
+                fd_right_on = server.gui.add_button("오른팔 교시 ON")
+                fd_right_off = server.gui.add_button("오른팔 교시 OFF (재동기화)")
+                fd_both_off = server.gui.add_button("양팔 교시 OFF (재동기화)")
+                handles["freedrive_buttons"] = {
+                    "left_on": fd_left_on,
+                    "left_off": fd_left_off,
+                    "right_on": fd_right_on,
+                    "right_off": fd_right_off,
+                    "both_off": fd_both_off,
+                }
+
+                @fd_left_on.on_click
+                def _(_: Any) -> None:
+                    _freedrive(left=True, right=None)
+
+                @fd_left_off.on_click
+                def _(_: Any) -> None:
+                    _freedrive(left=False, right=None)
+
+                @fd_right_on.on_click
+                def _(_: Any) -> None:
+                    _freedrive(left=None, right=True)
+
+                @fd_right_off.on_click
+                def _(_: Any) -> None:
+                    _freedrive(left=None, right=False)
+
+                @fd_both_off.on_click
+                def _(_: Any) -> None:
+                    _freedrive(left=False, right=False)
+
             init_button = server.gui.add_button("InitMotion")
             handles["init_motion_button"] = init_button
 
@@ -1669,24 +1716,43 @@ def build_gui(
             circle_state: dict[str, Any] = {"thread": None}
 
             def _circle_loop(diameter: float, period: float, plane: str) -> None:
-                # ArmMotion FIRST, then build the circle packet so its seq is higher
-                # than ArmMotion's — the server drops any command whose seq <= the
-                # last accepted seq for this source. The circle packet keeps a FIXED
-                # seq + long timeout so the server traces the whole circle from one
-                # accepted command; re-sends (same seq) are harmless keep-alives.
-                safety.send_lifecycle("ArmMotion")
-                time.sleep(0.1)
-                ok, message, packet = safety.build_circle_packet(
-                    diameter, period, arm="both", plane=plane, repeat=200
-                )
-                if not ok or packet is None:
-                    handles["circle_status"].value = "BLOCKED: " + message
-                    return
-                handles["circle_status"].value = "running: " + message
-                while not circle_stop_event.is_set():
-                    safety.command_client.send(packet)
-                    circle_stop_event.wait(0.3)
-                safety.command_client.send_lifecycle("Hold")
+                # Hold the command-source lease for the whole circle so the keep-
+                # alive re-sends carry a FIXED seq. Without a held lease, send()
+                # brackets every packet with Acquire/Release and re-issues a fresh
+                # seq each time (so one-shot commands clear the Acquire seq); for a
+                # streaming circle that fresh seq makes the server treat every
+                # 0.3 s keep-alive as a NEW command and re-init the circle to the
+                # current TCP — the arm only ever traces the first tangent step and
+                # drifts in a straight line. Holding the lease makes bracket=False,
+                # so the seq stays fixed: the server accepts ONE circle command and
+                # re-sends (same seq) are dropped as harmless keep-alives while the
+                # long timeout keeps the single command tracing the full circle.
+                #
+                # Acquire BEFORE ArmMotion/build so seq order is acquire < ArmMotion
+                # < circle (the server drops any command whose seq <= the last
+                # accepted seq). Only release a lease we took here, so an operator's
+                # explicit "Take control" is left untouched.
+                client = safety.command_client
+                took_lease = not client.hold_lease
+                if took_lease:
+                    client.acquire_lease()
+                try:
+                    safety.send_lifecycle("ArmMotion")
+                    time.sleep(0.1)
+                    ok, message, packet = safety.build_circle_packet(
+                        diameter, period, arm="both", plane=plane, repeat=200
+                    )
+                    if not ok or packet is None:
+                        handles["circle_status"].value = "BLOCKED: " + message
+                        return
+                    handles["circle_status"].value = "running: " + message
+                    while not circle_stop_event.is_set():
+                        client.send(packet)
+                        circle_stop_event.wait(0.3)
+                    client.send_lifecycle("Hold")
+                finally:
+                    if took_lease:
+                        client.release_lease()
 
             @c_start.on_click
             def _(_: Any) -> None:
@@ -1982,6 +2048,17 @@ def update_gui(
     handles["readiness"].value = ", ".join(readiness_parts)
     handles["motion"].value = latest.motion_state
     handles["fault"].value = latest.fault_reason if latest.fault_latched else "none"
+    if "freedrive_status" in handles:
+        fd = latest.freedrive or {}
+        left_on = bool(fd.get("left_active", False))
+        right_on = bool(fd.get("right_active", False))
+        if left_on or right_on:
+            active = ", ".join(
+                ([f"왼팔 ON"] if left_on else []) + ([f"오른팔 ON"] if right_on else [])
+            )
+            handles["freedrive_status"].value = f"DIRECT TEACHING — {active} (servo_j 억제됨)"
+        else:
+            handles["freedrive_status"].value = "off"
     if "status_summary" in handles:
         handles["status_summary"].content = _status_summary_html(
             connection="stale" if stale else "live",

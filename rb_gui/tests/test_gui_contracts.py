@@ -2658,6 +2658,26 @@ class FloorConstraintGuiTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.build_set_safety_floor_z(float("nan"))
 
+    def test_build_freedrive_per_arm_packet(self):
+        client = CommandClient(host="127.0.0.1", port=0, source_id="rb_gui_test")
+        # Left only: right is an untouched Hold, left carries the Freedrive payload.
+        left_on = client.build_freedrive(left=True)
+        self.assertEqual(left_on["mode"], "Freedrive")
+        self.assertEqual(left_on["left"], {"mode": "Freedrive", "freedrive_on": True})
+        self.assertEqual(left_on["right"], {"mode": "Hold"})
+        # Right off carries the explicit off payload.
+        right_off = client.build_freedrive(right=False)
+        self.assertEqual(right_off["right"], {"mode": "Freedrive", "freedrive_on": False})
+        self.assertEqual(right_off["left"], {"mode": "Hold"})
+        # Both arms in one packet.
+        both = client.build_freedrive(left=False, right=False)
+        self.assertEqual(both["left"], {"mode": "Freedrive", "freedrive_on": False})
+        self.assertEqual(both["right"], {"mode": "Freedrive", "freedrive_on": False})
+        # Freedrive is a leased mode so send() brackets it with Acquire/Release.
+        self.assertIn("Freedrive", CommandClient._LEASED_MODES)
+        with self.assertRaises(ValueError):
+            client.build_freedrive()
+
     def test_persist_floor_z_rewrites_only_z_min_m_and_keeps_comments(self):
         import tempfile
         from pathlib import Path
@@ -2820,6 +2840,55 @@ class LeaseBracketTest(unittest.TestCase):
         self.assertEqual(release["mode"], "ReleaseLease")
         seqs = [p["seq"] for p in packets]
         self.assertEqual(seqs, sorted(seqs))
+
+    @unittest.skipUnless(_local_udp_socket_available(), "local UDP unavailable")
+    def test_held_lease_keepalive_resends_keep_fixed_seq(self):
+        # Streaming server-side path primitives (TcpCircleMove/TcpLinearMove)
+        # re-send ONE prebuilt packet as keep-alives. Under a held lease, send()
+        # must NOT re-issue the seq: the server keys the circle on its seq, so a
+        # bumped seq each keep-alive would re-init the circle every tick and the
+        # arm drifts in a straight line instead of tracing the circle.
+        client, sock = self._client_and_socket()
+        try:
+            client.acquire_lease()
+            packet = client.build_tcp_circle_move(diameter_m=0.15, period_sec=4.0)
+            fixed_seq = packet["seq"]
+            client.send(packet)
+            client.send(packet)
+            client.send(packet)
+            client.release_lease()
+            packets = self._recv_packets(sock, 5)
+        finally:
+            sock.close()
+        self.assertEqual(
+            [p["mode"] for p in packets],
+            ["AcquireLease", "TcpCircleMove", "TcpCircleMove", "TcpCircleMove", "ReleaseLease"],
+        )
+        circle_seqs = [p["seq"] for p in packets[1:4]]
+        self.assertEqual(circle_seqs, [fixed_seq, fixed_seq, fixed_seq])
+
+    @unittest.skipUnless(_local_udp_socket_available(), "local UDP unavailable")
+    def test_leaseless_keepalive_resends_bump_seq(self):
+        # Without a held lease, send() brackets each packet and re-issues a fresh
+        # seq (one-shot commands need this to clear the Acquire seq). This is the
+        # behavior the circle loop must avoid by holding the lease — assert it so
+        # the contrast (and the reason the circle loop takes a lease) is explicit.
+        client, sock = self._client_and_socket()
+        try:
+            packet = client.build_tcp_circle_move(diameter_m=0.15, period_sec=4.0)
+            client.send(packet)
+            client.send(packet)
+            packets = self._recv_packets(sock, 6)
+        finally:
+            sock.close()
+        self.assertEqual(
+            [p["mode"] for p in packets],
+            [
+                "AcquireLease", "TcpCircleMove", "ReleaseLease",
+                "AcquireLease", "TcpCircleMove", "ReleaseLease",
+            ],
+        )
+        self.assertNotEqual(packets[1]["seq"], packets[4]["seq"])
 
 
 class SelfCollisionOverlayTest(unittest.TestCase):

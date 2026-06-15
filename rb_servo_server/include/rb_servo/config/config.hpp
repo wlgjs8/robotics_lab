@@ -82,6 +82,24 @@ struct IkSolverConfig {
     double position_tolerance_m = 0.001;
     double orientation_tolerance_rad = 0.02;
     JointArray max_step_deg{2.0, 2.0, 2.0, 3.0, 3.0, 4.0};
+    // Selective singularity-robust damping (Nakamura-Hanafusa). When the task
+    // Jacobian's smallest singular value sigma_min drops below
+    // singular_region_eps, damping on the (near-)singular direction is ramped
+    // up to at most damping_max, trading Cartesian accuracy in the unachievable
+    // direction for joint-space continuity. This stops the DLS step from
+    // blowing up along a degenerate direction and flipping to a distant IK
+    // branch (a ~5 deg single-tick joint jump for a ~0 mm Cartesian move near a
+    // wrist singularity). Outside the singular region the base `damping` is used
+    // unchanged, so well-conditioned tracking accuracy is preserved. Both <= 0
+    // disables the ramp (pure constant `damping`).
+    double singular_region_eps = 0.0;
+    double damping_max = 0.0;
+    // Observability guard: when > 0, flag the solve (telemetry
+    // ik_branch_jump_suspected) if the returned solution differs from the seed
+    // by more than this many degrees on any joint. Does NOT alter the solution
+    // (the downstream joint velocity clamp bounds the motion); it surfaces
+    // branch-jump events for diagnosis.
+    double max_solution_jump_deg = 0.0;
 };
 
 struct KinematicsConfig {
@@ -440,6 +458,11 @@ struct ServoConfig {
     bool controller_simulation_async_supervision_nonlatching = false;
     bool allow_controller_simulation_init_error = false;
     bool allow_controller_simulation_not_activated = false;
+    // Per-arm direct-teaching (free-drive). Fail-closed opt-in: when false, the
+    // server rejects every Freedrive command. Enable only on configs that accept
+    // releasing servo_j authority for operator hand-guiding (see
+    // docs/runbooks/freedrive_direct_teaching.md).
+    bool allow_freedrive = false;
 
     bool enable_realtime_priority = true;
     int realtime_priority = 80;
@@ -575,10 +598,6 @@ struct CartesianControlConfig {
     double path_kp_ori = 6.0;
     double twist_orientation_hold_kp = 6.0;
     double twist_angular_deadband_rad_s = 0.0001;
-    // First-order LPF on the local twist before velocity IK (anti-vibration).
-    // Default off -> behavior-preserving. tau ~ 30-50 ms.
-    bool twist_lpf_enable = false;
-    double twist_lpf_tau_sec = 0.04;
     // Route the streaming twist through the SMD pose tracker instead of velocity
     // IK + joint integration: integrate the (clamped) twist into a stand-frame
     // pose goal each tick, smooth it with the pose_track_smd filter (same as

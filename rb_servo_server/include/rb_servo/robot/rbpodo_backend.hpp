@@ -69,6 +69,7 @@ public:
 
     BackendResult<RobotState> stop() override;
     BackendResult<RobotState> resetFault() override;
+    BackendResult<RobotState> setFreedrive(bool on) override;
 
     bool isConnected() const override;
     ArmId armId() const override;

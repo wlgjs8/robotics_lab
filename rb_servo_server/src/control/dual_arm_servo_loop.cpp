@@ -1866,6 +1866,12 @@ void DualArmServoLoop::loopMain() {
                 setMotionState(ServerMotionState::ArmedHold);
             }
             command = metadata_hold(command);
+        } else if (commandRequestsFreedrive(command)) {
+            // Per-arm direct teaching. Toggling is leased (operator must hold
+            // control); the sticky flags then drive global send suppression and
+            // motion-pipeline bypass every tick until explicitly turned off.
+            applyFreedriveTransitions(command, left_state, right_state);
+            command = metadata_hold(command);
         } else if (commandRequestsMotion(command) && !motionAllowed()) {
             clearLatchedCartesianTargets();
             command = metadata_hold(command);
@@ -1909,6 +1915,15 @@ void DualArmServoLoop::loopMain() {
             safe_target.left_q_target_deg = left_prev_sent_q_deg_;
             safe_target.right_q_target_deg = right_prev_sent_q_deg_;
             safety_verdict = SafetyVerdict::InvalidCommand;
+        } else if (anyFreedriveActive()) {
+            // Direct teaching: one or both controllers are hand-guided. Bypass the
+            // motion pipeline entirely so the hand-driven actual divergence cannot
+            // latch a tracking error or trip the velocity clamp. Sends are
+            // suppressed by send_policy=="freedrive"; the held target is bookkeeping
+            // only and is resynced to actual on exit.
+            safe_target.left_q_target_deg = left_prev_sent_q_deg_;
+            safe_target.right_q_target_deg = right_prev_sent_q_deg_;
+            safety_verdict = SafetyVerdict::Ok;
         } else {
             SafetyVerdict command_verdict = SafetyVerdict::Ok;
             command = resolveCartesianDeltaCommand(command, left_state, right_state);
@@ -2309,6 +2324,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.async_supervision_degraded = sample.async_supervision_degraded;
             latest_snapshot_.tracking_error_degraded = sample.tracking_error_degraded;
+            latest_snapshot_.left_freedrive_active = left_freedrive_active_.load();
+            latest_snapshot_.right_freedrive_active = right_freedrive_active_.load();
             latest_snapshot_.latched_fault_reason = latched_fault_reason_.load();
             latest_snapshot_.fault_reason = fault_reason_;
             latest_snapshot_.latched_fault_context = sample.latched_fault_context;
@@ -3935,6 +3952,118 @@ bool DualArmServoLoop::commandRequestsDisarmMotion(const DualArmCommand& command
     return command.left.mode == ControlMode::DisarmMotion || command.right.mode == ControlMode::DisarmMotion;
 }
 
+bool DualArmServoLoop::commandRequestsFreedrive(const DualArmCommand& command) const {
+    return command.left.mode == ControlMode::Freedrive || command.right.mode == ControlMode::Freedrive;
+}
+
+bool DualArmServoLoop::anyFreedriveActive() const {
+    return left_freedrive_active_.load() || right_freedrive_active_.load();
+}
+
+void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& state) {
+    // Clear path/integrator state outside the state lock (these take their own
+    // locks, mirroring clearFaultLatch's ordering).
+    clearLatchedCartesianTarget(arm_id);
+    resetCartesianVelocityIntegrator(arm_id, "freedrive_exit");
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (arm_id == ArmId::Left) {
+        const JointArray q = chooseSafeHoldTarget(state, left_prev_sent_q_deg_);
+        left_prev_sent_q_deg_ = q;
+        left_prevprev_sent_q_deg_ = q;
+        left_fault_hold_q_deg_ = q;
+        left_controller_sim_physical_baseline_q_deg_ = state.q_actual_deg;
+        left_output_ma_.reset();
+    } else {
+        const JointArray q = chooseSafeHoldTarget(state, right_prev_sent_q_deg_);
+        right_prev_sent_q_deg_ = q;
+        right_prevprev_sent_q_deg_ = q;
+        right_fault_hold_q_deg_ = q;
+        right_controller_sim_physical_baseline_q_deg_ = state.q_actual_deg;
+        right_output_ma_.reset();
+    }
+    std::cerr << "[INFO] freedrive exit resync: " << toString(arm_id)
+              << " held target snapped to current actual joints\n";
+}
+
+void DualArmServoLoop::applyFreedriveTransitions(
+    const DualArmCommand& command,
+    const RobotState& left_state,
+    const RobotState& right_state
+) {
+    if (!config_.servo.allow_freedrive) {
+        std::cerr << "[WARN] Freedrive command rejected: servo.allow_freedrive=false "
+                     "(direct teaching is a fail-closed config opt-in)\n";
+        return;
+    }
+
+    const uint64_t start_ns = nowSteadyNs();
+    const uint64_t timeout_ns = timeoutNs(config_.servo.command_timeout_sec, 1'000'000'000);
+    const uint64_t deadline_ns = addDeadlineNs(start_ns, timeout_ns);
+
+    const auto apply_arm = [&](ArmId arm_id,
+                               const ArmCommand& arm_command,
+                               std::atomic<bool>& active_flag,
+                               ArmWorker* worker,
+                               IRobotBackend* robot,
+                               const RobotState& state) {
+        if (arm_command.mode != ControlMode::Freedrive) return;
+        if (!arm_command.has_freedrive) {
+            std::cerr << "[WARN] Freedrive command for " << toString(arm_id)
+                      << " ignored: missing freedrive_on payload\n";
+            return;
+        }
+        const bool want = arm_command.freedrive_on;
+        if (want == active_flag.load()) return;  // already in the requested state
+
+        BackendResult<RobotState> result;
+        if (workerBackedIoMode()) {
+            result = worker
+                ? worker->setFreedrive(want, tick_, deadline_ns)
+                : BackendResult<RobotState>{
+                      false,
+                      BackendOp::SetFreedrive,
+                      RobotState{},
+                      backendError(
+                          BackendErrorKind::RobotDisconnected,
+                          "arm worker unavailable for setFreedrive",
+                          "",
+                          "worker_unavailable"
+                      ),
+                      makeBackendTiming(start_ns, nowSteadyNs())
+                  };
+        } else {
+            result = robot
+                ? robot->setFreedrive(want)
+                : BackendResult<RobotState>{};
+        }
+
+        if (!result.ok) {
+            std::cerr << "[WARN] setFreedrive(" << (want ? "on" : "off") << ") failed for "
+                      << toString(arm_id) << ": " << result.error.name << ":"
+                      << result.error.message << " — sticky state unchanged\n";
+            return;
+        }
+
+        active_flag.store(want);
+        if (!want) {
+            // Re-acquiring servo control: resync held target to the (hand-moved)
+            // actual joints. Prefer the fresh state the backend returned.
+            const RobotState& fresh = result.value.has_valid_joint_state ? result.value : state;
+            resyncArmAfterFreedrive(arm_id, fresh);
+        }
+    };
+
+    apply_arm(ArmId::Left, command.left, left_freedrive_active_, left_worker_.get(), left_robot_.get(), left_state);
+    apply_arm(ArmId::Right, command.right, right_freedrive_active_, right_worker_.get(), right_robot_.get(), right_state);
+
+    // Releasing servo authority on any arm leaves the system not motion-ready;
+    // require an explicit re-arm afterwards. (No-op if already fault/emergency.)
+    if (anyFreedriveActive() && !fault_latched_.load() &&
+        motion_state_.load() != ServerMotionState::EmergencyLatched) {
+        setMotionState(ServerMotionState::ConnectedHold);
+    }
+}
+
 bool DualArmServoLoop::commandRequestsMotion(const DualArmCommand& command) const {
     return isMotionMode(command.left.mode) || isMotionMode(command.right.mode);
 }
@@ -3978,6 +4107,12 @@ std::string DualArmServoLoop::currentSendPolicy() const {
     }
     if (fault_latched_.load() || state == ServerMotionState::FaultLatched) {
         return "fault_latched";
+    }
+    if (left_freedrive_active_.load() || right_freedrive_active_.load()) {
+        // Direct teaching active on at least one arm: send no servo_j to either
+        // controller. The freedrive arm is hand-guided; the other holds at its
+        // last controller reference. Recoverable, not a fault.
+        return "freedrive";
     }
     if (controllerSimulationMotionRequired(config_) &&
         !controllerSimulationMotionGateOpen(config_)) {
