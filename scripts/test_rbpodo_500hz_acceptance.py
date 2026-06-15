@@ -97,8 +97,6 @@ def make_args(config: Path, artifact_dir: Path, duration_sec: float = 0.01) -> S
         pgmode_command_port=5000,
         preflight_only=False,
         skip_plots=True,
-        i_understand_this_connects_to_real_controller=True,
-        i_confirm_controller_is_in_pgmode_simulation=True,
     )
 
 

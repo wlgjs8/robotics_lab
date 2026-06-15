@@ -7,7 +7,6 @@ import argparse
 import importlib
 import json
 import math
-import os
 import sys
 import time
 from dataclasses import dataclass
@@ -52,15 +51,6 @@ class StateDumpError(RuntimeError):
     pass
 
 
-def _env_confirms_real_controller() -> bool:
-    """RB_I_UNDERSTAND_REAL_CONTROLLER=1 satisfies the connect acknowledgment so
-    routine pgmode-sim tooling need not pass the flag each time. Acknowledges a real
-    controller-IP connection only (read-only here); no physical motion is involved."""
-    return os.environ.get("RB_I_UNDERSTAND_REAL_CONTROLLER", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
-
-
 @dataclass
 class JointNormalization:
     normalized_value_deg: float
@@ -88,11 +78,6 @@ def parse_args() -> argparse.Namespace:
         "--print-sdk-info",
         action="store_true",
         help="Print rbpodo Python module file/version metadata and exit without connecting.",
-    )
-    parser.add_argument(
-        "--i-understand-this-connects-to-real-controller",
-        action="store_true",
-        help="Required before connecting to any controller IP.",
     )
     parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
@@ -460,10 +445,6 @@ def dump_states(args: argparse.Namespace) -> dict[str, Any]:
         raise StateDumpError("--ips is required")
     if not math.isfinite(args.timeout_sec) or args.timeout_sec <= 0.0:
         raise StateDumpError("--timeout-sec must be finite and positive")
-    if not (args.i_understand_this_connects_to_real_controller or _env_confirms_real_controller()):
-        raise StateDumpError(
-            "refusing controller connection without --i-understand-this-connects-to-real-controller "
-            "(or RB_I_UNDERSTAND_REAL_CONTROLLER=1)")
 
     q_min = parse_joint_array(args.q_min, "--q-min")
     q_max = parse_joint_array(args.q_max, "--q-max")

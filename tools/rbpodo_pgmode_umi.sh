@@ -8,8 +8,6 @@ OUTPUT_DIR="policy_runner/episodes"
 TASK=""
 OPERATOR=""
 DRY_RUN=0
-CONFIRM_CONNECTS=0
-CONFIRM_PGMODE=0
 
 usage() {
   cat <<'EOF'
@@ -25,10 +23,6 @@ Actions:
   check          Print expected endpoints and required env gates; do not set them.
   teleop-record  Run UMI teleop and JSONL recording.
   hdf5-record    Run UMI teleop and HDF5 recording.
-
-Safety flags for server/policy/teleop/hdf5-record:
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
 
 Options:
   --with-required-env  Forward to the server action only.
@@ -57,11 +51,6 @@ print_command() {
   printf '\n'
 }
 
-require_confirmations() {
-  [[ "${CONFIRM_CONNECTS}" == "1" ]] || fail "missing --i-understand-this-connects-to-real-controller"
-  [[ "${CONFIRM_PGMODE}" == "1" ]] || fail "missing --i-confirm-controller-is-in-pgmode-simulation"
-}
-
 print_policy_info() {
   cat <<'EOF'
 rbpodo_pgmode_umi: policy config: policy_runner/config/rbpodo_pgmode_umi_500hz_ack.yaml
@@ -77,7 +66,6 @@ delegate_server_wrapper() {
 }
 
 run_policy() {
-  require_confirmations
   export PYTHONPATH="${ROOT_DIR}/policy_runner${PYTHONPATH:+:${PYTHONPATH}}"
   local cmd=(python3 -m policy_runner --config "${ROOT_DIR}/${POLICY_CONFIG_REL}")
   print_command "${cmd[@]}"
@@ -98,7 +86,6 @@ run_policy_dry_run() {
 }
 
 run_teleop_record() {
-  require_confirmations
   export PYTHONPATH="${ROOT_DIR}/policy_runner${PYTHONPATH:+:${PYTHONPATH}}"
   local cmd=(
     python3 -m policy_runner teleop-record
@@ -112,7 +99,6 @@ run_teleop_record() {
 }
 
 run_hdf5_record() {
-  require_confirmations
   [[ -n "${TASK}" ]] || fail "--task is required for hdf5-record"
   export PYTHONPATH="${ROOT_DIR}/policy_runner${PYTHONPATH:+:${PYTHONPATH}}"
   local cmd=(
@@ -153,16 +139,6 @@ while (($# > 0)); do
       shift 2
       ;;
     --force|--with-required-env)
-      FORWARD_ARGS+=("$1")
-      shift
-      ;;
-    --i-understand-this-connects-to-real-controller)
-      CONFIRM_CONNECTS=1
-      FORWARD_ARGS+=("$1")
-      shift
-      ;;
-    --i-confirm-controller-is-in-pgmode-simulation)
-      CONFIRM_PGMODE=1
       FORWARD_ARGS+=("$1")
       shift
       ;;

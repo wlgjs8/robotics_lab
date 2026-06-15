@@ -128,7 +128,6 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             text=True,
         )
         self.assertIn("--dry-run", completed.stdout)
-        self.assertIn("--i-confirm-controller-is-in-pgmode-simulation", completed.stdout)
 
     def test_matrix_parser_rejects_operation_mode_real_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
@@ -169,8 +168,6 @@ class RbpodoCircleAblationTest(unittest.TestCase):
                     "--dry-run",
                     "--pgmode-summary-json",
                     str(pgmode),
-                    "--i-understand-this-connects-to-real-controller",
-                    "--i-confirm-controller-is-in-pgmode-simulation",
                 ],
                 env=env,
                 check=True,

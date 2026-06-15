@@ -11,7 +11,6 @@ DO_SETCAP=0
 CHECK_PORTS=0
 SET_PGMODE=0
 VERIFY_PGMODE=0
-CONFIRM=0
 PORT_TIMEOUT_SEC="1.0"
 
 CONTROLLER_IPS=("172.28.60.200" "172.28.60.201")
@@ -36,12 +35,9 @@ Options:
   --verify-pgmode-simulation   Verify pgmode simulation without sending pgmode.
   --server PATH                rb_servo_server binary path.
   --port-timeout-sec SEC       TCP port check timeout, default 1.0.
-  --i-understand-this-connects-to-real-controller
-                               Required for controller port checks and pgmode commands.
   -h, --help                   Show this help.
 
-This script never sets RB_ALLOW_* variables. Controller-touching options
-require the explicit confirmation flag.
+This script never sets RB_ALLOW_* variables.
 EOF
 }
 
@@ -95,10 +91,6 @@ while (($# > 0)); do
       PORT_TIMEOUT_SEC="$2"
       shift 2
       ;;
-    --i-understand-this-connects-to-real-controller)
-      CONFIRM=1
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -114,12 +106,6 @@ done
 if [[ "${SET_PGMODE}" == "1" && "${VERIFY_PGMODE}" == "1" ]]; then
   fail "--set-pgmode-simulation and --verify-pgmode-simulation are mutually exclusive"
 fi
-
-require_controller_confirmation() {
-  if [[ "${CONFIRM}" != "1" ]]; then
-    fail "controller checks require --i-understand-this-connects-to-real-controller"
-  fi
-}
 
 validate_config() {
   local config="$1"
@@ -213,7 +199,6 @@ else
 fi
 
 if [[ "${CHECK_PORTS}" == "1" ]]; then
-  require_controller_confirmation
   for ip in "${CONTROLLER_IPS[@]}"; do
     check_tcp_port "${ip}" 5000
     check_tcp_port "${ip}" 5001
@@ -221,12 +206,10 @@ if [[ "${CHECK_PORTS}" == "1" ]]; then
 fi
 
 if [[ "${SET_PGMODE}" == "1" || "${VERIFY_PGMODE}" == "1" ]]; then
-  require_controller_confirmation
   pgmode_args=(--summary-json artifacts/rbpodo_controller_sim_circle/pgmode_simulation.json)
   [[ "${VERIFY_PGMODE}" == "1" ]] && pgmode_args=(--verify-only --summary-json artifacts/rbpodo_controller_sim_circle/pgmode_verify.json)
   tools/simulation_mode.sh \
-    "${pgmode_args[@]}" \
-    --i-understand-this-connects-to-real-controller
+    "${pgmode_args[@]}"
 fi
 
 cat <<'EOF'
@@ -237,14 +220,10 @@ Next commands:
   tools/rbpodo_circle_tune.sh \
     --matrix stage2_gain_split \
     --arm left \
-    --with-required-env \
-    --i-understand-this-connects-to-real-controller \
-    --i-confirm-controller-is-in-pgmode-simulation
+    --with-required-env
 
   tools/rbpodo_circle_benchmark.sh \
     --profile stable \
     --arm left \
-    --with-required-env \
-    --i-understand-this-connects-to-real-controller \
-    --i-confirm-controller-is-in-pgmode-simulation
+    --with-required-env
 EOF

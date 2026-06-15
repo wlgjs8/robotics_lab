@@ -70,11 +70,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tolerance-deg", type=float, default=DEFAULT_TOLERANCE_DEG)
     parser.add_argument("--nearest-max-delta-sec", type=float, default=0.5)
     parser.add_argument("--request-timeout-sec", type=float, default=0.2)
-    parser.add_argument(
-        "--i-understand-this-connects-to-real-controller",
-        action="store_true",
-        help="Required before connecting to controller IPs.",
-    )
     return parser.parse_args()
 
 
@@ -131,13 +126,6 @@ def ensure_safe_args(args: argparse.Namespace) -> None:
         raise StateParityError("--tolerance-deg must be finite and non-negative")
     if not math.isfinite(args.nearest_max_delta_sec) or args.nearest_max_delta_sec <= 0.0:
         raise StateParityError("--nearest-max-delta-sec must be finite and positive")
-    if not args.i_understand_this_connects_to_real_controller:
-        real_ips = sorted(set(args.ips) & state_dump.REAL_ROBOT_IPS)
-        suffix = f" for {', '.join(real_ips)}" if real_ips else ""
-        raise StateParityError(
-            "refusing controller connection without "
-            f"--i-understand-this-connects-to-real-controller{suffix}"
-        )
     if args.server_config is not None:
         if not args.server_config.exists():
             raise StateParityError(f"--server-config does not exist: {args.server_config}")

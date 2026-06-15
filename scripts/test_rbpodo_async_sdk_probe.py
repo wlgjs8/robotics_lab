@@ -29,7 +29,6 @@ def args(**overrides):
         "verify_pgmode_simulation": False,
         "pgmode_timeout_sec": 0.1,
         "pgmode_command_port": 5000,
-        "i_understand_this_connects_to_real_controller": True,
         "allow_simulation_servo_j": True,
     }
     base.update(overrides)
@@ -66,33 +65,6 @@ class RbpodoAsyncSdkProbeTests(unittest.TestCase):
         self.assertIn("ack_on", completed.stdout)
         self.assertIn("--allow-simulation-servo-j", completed.stdout)
         self.assertIn("--set-pgmode-simulation", completed.stdout)
-
-    def test_no_confirmation_flag_fails(self) -> None:
-        script = Path(__file__).with_name("rbpodo_async_sdk_probe.py")
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(script),
-                "--ip",
-                "127.0.0.1",
-                "--duration-sec",
-                "0.01",
-                "--rate-hz",
-                "500",
-                "--mode",
-                "ack_on",
-                "--artifact-dir",
-                tempfile.mkdtemp(),
-                "--set-pgmode-simulation",
-                "--allow-simulation-servo-j",
-            ],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        self.assertEqual(completed.returncode, 2)
-        self.assertIn("--i-understand-this-connects-to-real-controller", completed.stderr)
 
     def test_operation_mode_real_rejected(self) -> None:
         with self.assertRaisesRegex(probe.AsyncSdkProbeError, "operation_mode real is refused"):

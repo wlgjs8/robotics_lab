@@ -12,8 +12,6 @@ DRY_RUN=0
 SKIP_PLOTS=0
 SKIP_NOOP=0
 VERIFY_PGMODE=0
-CONFIRM=0
-CONFIRM_PGMODE=0
 ALLOW_NO_REALTIME=0
 ALLOW_LOCAL_DIFF=0
 PGMODE_TIMEOUT_SEC="1.0"
@@ -35,10 +33,6 @@ Default profile:
   --profile repeatability
                   Run ACKON500-REPEATABILITY-VALIDATION-01: three left-arm
                   and three right-arm repetitions of the named best profile.
-
-Required safety flags:
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
 
 Environment behavior:
   --with-required-env  Explicitly export:
@@ -218,14 +212,6 @@ while (($# > 0)); do
       DRY_RUN=1
       shift
       ;;
-    --i-understand-this-connects-to-real-controller)
-      CONFIRM=1
-      shift
-      ;;
-    --i-confirm-controller-is-in-pgmode-simulation)
-      CONFIRM_PGMODE=1
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -237,9 +223,6 @@ while (($# > 0)); do
       ;;
   esac
 done
-
-[[ "${CONFIRM}" == "1" ]] || fail "missing --i-understand-this-connects-to-real-controller"
-[[ "${CONFIRM_PGMODE}" == "1" ]] || fail "missing --i-confirm-controller-is-in-pgmode-simulation"
 
 case "${PROFILE}" in
   best)
@@ -318,8 +301,6 @@ noop_cmd=(
   "${PGMODE_FLAG}"
   --pgmode-timeout-sec "${PGMODE_TIMEOUT_SEC}"
   --artifact-dir "${NOOP_ARTIFACT}"
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
 )
 
 ablation_cmd=(
@@ -329,8 +310,6 @@ ablation_cmd=(
   --server "${SERVER}"
   "${PGMODE_FLAG}"
   --pgmode-timeout-sec "${PGMODE_TIMEOUT_SEC}"
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
 )
 if [[ "${PROFILE}" == "repeatability" ]]; then
   ablation_cmd+=(--run-dir-layout run-name)

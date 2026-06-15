@@ -24,7 +24,6 @@ def config(**overrides):
         "save_each_sample": False,
         "output_prefix": "samples",
         "artifact_dir": Path(tempfile.mkdtemp()),
-        "confirmed_real_controller": False,
     }
     base.update(overrides)
     return capture.CaptureConfig(**base)
@@ -135,12 +134,8 @@ class RainbowDataPortCaptureTests(unittest.TestCase):
         self.assertEqual(summary["timeout_count"], 1)
         self.assertEqual(summary["success_count"], 0)
 
-    def test_confirmation_required_for_known_real_controller_ip(self):
-        with self.assertRaisesRegex(capture.CaptureError, "known real controller IP"):
-            capture.validate_config(config(ips=["172.28.60.200"]))
-
-    def test_real_controller_ip_requires_artifacts_dir_after_confirmation(self):
-        cfg = config(ips=["172.28.60.200"], confirmed_real_controller=True)
+    def test_real_controller_ip_requires_artifacts_dir(self):
+        cfg = config(ips=["172.28.60.200"])
         with self.assertRaisesRegex(capture.CaptureError, "artifacts/"):
             capture.validate_config(cfg)
 

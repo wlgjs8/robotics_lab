@@ -109,7 +109,6 @@ def state_probe(ip: str, artifact: Path) -> dict[str, object]:
         "--output",
         str(artifact),
         "--json",
-        "--i-understand-this-connects-to-real-controller",
     ]
     completed = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return {

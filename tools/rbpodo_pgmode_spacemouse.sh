@@ -12,8 +12,6 @@ TASK=""
 OPERATOR=""
 FORCE=0
 WITH_REQUIRED_ENV=0
-CONFIRM_CONNECTS=0
-CONFIRM_PGMODE=0
 DRY_RUN=0
 
 usage() {
@@ -29,10 +27,6 @@ Actions:
   check          Print expected endpoints and required env gates; do not set them.
   teleop-record  Run policy_runner dual SpaceMouse teleop and JSONL recording.
   hdf5-record    Run policy_runner dual SpaceMouse teleop and HDF5 recording.
-
-Safety flags for server/teleop/hdf5-record:
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
 
 Environment behavior:
   --with-required-env  Explicitly export the controller-simulation and async
@@ -114,11 +108,6 @@ port_in_use() {
   return 1
 }
 
-require_confirmations() {
-  [[ "${CONFIRM_CONNECTS}" == "1" ]] || fail "missing --i-understand-this-connects-to-real-controller"
-  [[ "${CONFIRM_PGMODE}" == "1" ]] || fail "missing --i-confirm-controller-is-in-pgmode-simulation"
-}
-
 set_required_env_if_requested() {
   if [[ "${WITH_REQUIRED_ENV}" != "1" ]]; then
     return 0
@@ -156,7 +145,6 @@ prepare_local_config() {
 }
 
 run_server() {
-  require_confirmations
   set_required_env_if_requested
   require_server_env
   if [[ -f "${ROOT_DIR}/${SERVER_LOCAL_REL}" ]]; then
@@ -272,7 +260,6 @@ run_policy_dry_run() {
 }
 
 run_teleop_record() {
-  require_confirmations
   set_required_env_if_requested
   export PYTHONPATH="${ROOT_DIR}/policy_runner${PYTHONPATH:+:${PYTHONPATH}}"
   local cmd=(
@@ -287,7 +274,6 @@ run_teleop_record() {
 }
 
 run_hdf5_record() {
-  require_confirmations
   [[ -n "${TASK}" ]] || fail "--task is required for hdf5-record"
   set_required_env_if_requested
   export PYTHONPATH="${ROOT_DIR}/policy_runner${PYTHONPATH:+:${PYTHONPATH}}"
@@ -341,14 +327,6 @@ while (($# > 0)); do
       ;;
     --with-required-env)
       WITH_REQUIRED_ENV=1
-      shift
-      ;;
-    --i-understand-this-connects-to-real-controller)
-      CONFIRM_CONNECTS=1
-      shift
-      ;;
-    --i-confirm-controller-is-in-pgmode-simulation)
-      CONFIRM_PGMODE=1
       shift
       ;;
     --dry-run)

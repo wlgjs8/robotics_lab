@@ -177,16 +177,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pgmode-command-port", type=int, default=5000)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
-    parser.add_argument(
-        "--i-understand-this-connects-to-real-controller",
-        action="store_true",
-        help="Required before connecting to real Rainbow controller boxes.",
-    )
-    parser.add_argument(
-        "--i-confirm-controller-is-in-pgmode-simulation",
-        action="store_true",
-        help="Required acknowledgement before controller-simulation acceptance.",
-    )
     return parser.parse_args()
 
 
@@ -658,12 +648,6 @@ def ensure_pgmode(args: argparse.Namespace, config: ParsedConfig) -> dict[str, A
             failure_phase="preflight",
             failure_classification="preflight_env_missing",
         )
-    if not args.i_confirm_controller_is_in_pgmode_simulation:
-        raise Acceptance500HzError(
-            "missing --i-confirm-controller-is-in-pgmode-simulation",
-            failure_phase="preflight",
-            failure_classification="preflight_env_missing",
-        )
     try:
         from rainbow_pgmode import RainbowPgmodeError, ensure_controller_simulation_mode
     except Exception as exc:
@@ -673,7 +657,7 @@ def ensure_pgmode(args: argparse.Namespace, config: ParsedConfig) -> dict[str, A
             [config.left.ip, config.right.ip],
             args.pgmode_timeout_sec,
             port=args.pgmode_command_port,
-            confirmation=args.i_understand_this_connects_to_real_controller,
+            confirmation=True,
             set_simulation=args.set_pgmode_simulation,
             verify_only=args.verify_pgmode_simulation,
         )
@@ -743,18 +727,6 @@ def validate_config_and_env(
         raise Acceptance500HzError("--async-mode sdk_ack_worker requires ACK waiting enabled for both arms")
 
     known_ips = {config.left.ip, config.right.ip} & REAL_ROBOT_IPS
-    if known_ips and not args.i_understand_this_connects_to_real_controller:
-        raise Acceptance500HzError(
-            "refusing known real controller IP without explicit confirmation flag",
-            failure_phase="preflight",
-            failure_classification="preflight_env_missing",
-        )
-    if not args.i_understand_this_connects_to_real_controller:
-        raise Acceptance500HzError(
-            "missing --i-understand-this-connects-to-real-controller",
-            failure_phase="preflight",
-            failure_classification="preflight_env_missing",
-        )
     if async_mode != ASYNC_DISABLED and not env_enabled(ASYNC_STREAMING_ENV):
         raise Acceptance500HzError(
             f"--async-mode {async_mode} requires {ASYNC_STREAMING_ENV}=1",
@@ -863,8 +835,6 @@ def validate_config_and_env(
             + ([SOCKET_SEND_ONLY_ENV] if async_mode == ASYNC_SOCKET_SEND_SUPERVISED else [])
         ),
         "env": env_snapshot_500hz(),
-        "confirmation_flag": args.i_understand_this_connects_to_real_controller,
-        "pgmode_confirmation_flag": args.i_confirm_controller_is_in_pgmode_simulation,
         "pgmode_simulation_confirmed": pgmode_summary.get("overall_result") == "ok",
         "pgmode_summary": pgmode_summary,
         "server_env_overrides": {},

@@ -146,16 +146,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-dir", type=Path, required=True)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
-    parser.add_argument(
-        "--i-understand-this-connects-to-real-controller",
-        action="store_true",
-        help="Required before connecting to known Rainbow controller IPs.",
-    )
-    parser.add_argument(
-        "--i-confirm-controller-is-in-pgmode-simulation",
-        action="store_true",
-        help="Required acknowledgement before pgmode simulation verification is accepted.",
-    )
     return parser.parse_args()
 
 
@@ -613,8 +603,6 @@ def ensure_pgmode(args: argparse.Namespace, config: ParsedConfig) -> dict[str, A
         raise BenchmarkError("--set-pgmode-simulation and --verify-pgmode-simulation are mutually exclusive")
     if args.pgmode_summary_json and (args.set_pgmode_simulation or args.verify_pgmode_simulation):
         raise BenchmarkError("--pgmode-summary-json cannot be combined with pgmode set/verify flags")
-    if not args.i_confirm_controller_is_in_pgmode_simulation:
-        raise BenchmarkError("missing --i-confirm-controller-is-in-pgmode-simulation")
     if args.pgmode_summary_json:
         summary = load_pgmode_summary(args.pgmode_summary_json, ips)
         summary = dict(summary)
@@ -629,7 +617,6 @@ def ensure_pgmode(args: argparse.Namespace, config: ParsedConfig) -> dict[str, A
             ips,
             args.pgmode_timeout_sec,
             port=args.pgmode_command_port,
-            confirmation=args.i_understand_this_connects_to_real_controller,
             set_simulation=args.set_pgmode_simulation,
             verify_only=not args.set_pgmode_simulation,
         )
@@ -721,10 +708,6 @@ def validate_config_and_env(
             raise BenchmarkError(f"{label}_robot.ip is required")
 
     known_ips = {config.left.ip, config.right.ip} & REAL_ROBOT_IPS
-    if not args.i_understand_this_connects_to_real_controller:
-        raise BenchmarkError("refusing controller connection without explicit real-controller confirmation flag")
-    if not args.i_confirm_controller_is_in_pgmode_simulation:
-        raise BenchmarkError("missing --i-confirm-controller-is-in-pgmode-simulation")
 
     send_servo_commands = as_bool(config.servo.get("send_servo_commands"), False)
     if not send_servo_commands:
@@ -810,8 +793,6 @@ def validate_config_and_env(
         "real_robot_ips_checked": sorted(REAL_ROBOT_IPS),
         "configured_ips": [config.left.ip, config.right.ip],
         "known_real_ips": sorted(known_ips),
-        "confirmation_flag": args.i_understand_this_connects_to_real_controller,
-        "pgmode_confirmation_flag": args.i_confirm_controller_is_in_pgmode_simulation,
         "pgmode_simulation_confirmed": pgmode_summary.get("overall_result") == "ok",
         "pgmode_summary": pgmode_summary,
         "env": benchmark_env_snapshot(),

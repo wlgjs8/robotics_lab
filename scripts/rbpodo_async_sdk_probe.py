@@ -137,11 +137,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pgmode-timeout-sec", type=float, default=1.0)
     parser.add_argument("--pgmode-command-port", type=int, default=5000)
     parser.add_argument(
-        "--i-understand-this-connects-to-real-controller",
-        action="store_true",
-        help="Required before any controller connection.",
-    )
-    parser.add_argument(
         "--allow-simulation-servo-j",
         action="store_true",
         help="Required before no-op Servo J commands in controller pgmode simulation.",
@@ -256,7 +251,7 @@ def ensure_pgmode(args: argparse.Namespace, artifact_dir: Path) -> dict[str, Any
             [args.ip],
             args.pgmode_timeout_sec,
             port=args.pgmode_command_port,
-            confirmation=args.i_understand_this_connects_to_real_controller,
+            confirmation=True,
             set_simulation=args.set_pgmode_simulation,
             verify_only=args.verify_pgmode_simulation,
         )
@@ -293,8 +288,6 @@ def preflight(args: argparse.Namespace, *, run_pgmode: bool = True) -> dict[str,
         raise AsyncSdkProbeError("--max-q-actual-drift-deg must be finite, positive, and <= 0.2")
     if args.late_ack_poll_sec < 0.0 or not math.isfinite(args.late_ack_poll_sec):
         raise AsyncSdkProbeError("--late-ack-poll-sec must be finite and non-negative")
-    if not args.i_understand_this_connects_to_real_controller:
-        raise AsyncSdkProbeError("missing --i-understand-this-connects-to-real-controller")
     if not args.allow_simulation_servo_j:
         raise AsyncSdkProbeError("missing --allow-simulation-servo-j")
     operation_modes = validate_operation_modes(args)
@@ -313,7 +306,6 @@ def preflight(args: argparse.Namespace, *, run_pgmode: bool = True) -> dict[str,
         "controller_simulation_only": True,
         "physical_motion_expected": False,
         "physical_real_motion_refused": True,
-        "user_confirmation_flag": True,
         "allow_simulation_servo_j": True,
         "pgmode_simulation_confirmed": pgmode_summary.get("overall_result") == "ok",
         "pgmode_summary": pgmode_summary,

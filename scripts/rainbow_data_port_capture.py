@@ -44,7 +44,6 @@ class CaptureConfig:
     save_each_sample: bool
     output_prefix: str
     artifact_dir: Path
-    confirmed_real_controller: bool
 
 
 ConnectFn = Callable[[tuple[str, int], float], Any]
@@ -88,11 +87,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-prefix", default="samples")
     parser.add_argument("--artifact-dir", type=Path, required=True)
-    parser.add_argument(
-        "--i-understand-this-connects-to-real-controller",
-        action="store_true",
-        help="Required for known real controller IPs.",
-    )
     return parser.parse_args()
 
 
@@ -126,7 +120,6 @@ def config_from_args(args: argparse.Namespace) -> CaptureConfig:
         save_each_sample=args.save_each_sample,
         output_prefix=args.output_prefix,
         artifact_dir=args.artifact_dir,
-        confirmed_real_controller=args.i_understand_this_connects_to_real_controller,
     )
 
 
@@ -148,12 +141,6 @@ def validate_config(config: CaptureConfig, *, enforce_data_port: bool = True) ->
     if not config.request_payload:
         raise CaptureError("--request-payload must not be empty")
     real_ips = sorted(set(config.ips) & rbpodo_state_dump.REAL_ROBOT_IPS)
-    if real_ips and not config.confirmed_real_controller:
-        joined = ", ".join(real_ips)
-        raise CaptureError(
-            "refusing known real controller IP without "
-            f"--i-understand-this-connects-to-real-controller: {joined}"
-        )
     if real_ips and "artifacts" not in config.artifact_dir.resolve().parts:
         raise CaptureError("real controller raw payloads must be stored under an artifacts/ directory")
 

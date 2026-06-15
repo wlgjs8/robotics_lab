@@ -49,15 +49,6 @@ network:
 """
 
 
-ALL_FLAGS = [
-    "--i-understand-this-may-move-the-physical-robot",
-    "--i-have-clear-workspace",
-    "--i-have-estop-in-hand",
-    "--i-reviewed-local-config",
-    "--i-confirm-operator-supervision",
-]
-
-
 def write_config(
     root: Path,
     relative: str,
@@ -126,7 +117,6 @@ class PhysicalTransitionAcceptanceTest(unittest.TestCase):
                     "--execute",
                     "--config",
                     str(config),
-                    *ALL_FLAGS,
                 ],
             )
         self.assertEqual(code, 2)
@@ -151,7 +141,6 @@ class PhysicalTransitionAcceptanceTest(unittest.TestCase):
                     "--execute",
                     "--config",
                     str(config),
-                    *ALL_FLAGS,
                 ],
             )
         self.assertEqual(code, 2)

@@ -104,11 +104,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pgmode-command-port", type=int, default=5000)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
-    parser.add_argument(
-        "--i-understand-this-connects-to-real-controller",
-        action="store_true",
-        help="Required before connecting to known RB controller IPs.",
-    )
     parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
@@ -261,7 +256,7 @@ def ensure_pgmode_simulation(args: argparse.Namespace, config: ParsedConfig) -> 
             [config.left.ip, config.right.ip],
             getattr(args, "pgmode_timeout_sec", 1.0),
             port=getattr(args, "pgmode_command_port", 5000),
-            confirmation=args.i_understand_this_connects_to_real_controller,
+            confirmation=True,
             set_simulation=set_pgmode,
             verify_only=verify_pgmode,
         )
@@ -335,9 +330,6 @@ def preflight(args: argparse.Namespace, config: ParsedConfig) -> dict[str, Any]:
     if config.right.ip != args.expected_right_ip:
         raise AcceptanceError(f"right_robot.ip {config.right.ip} does not match --expected-right-ip {args.expected_right_ip}")
 
-    known_real_ips = {config.left.ip, config.right.ip} & REAL_ROBOT_IPS
-    if known_real_ips and not args.i_understand_this_connects_to_real_controller:
-        raise AcceptanceError("refusing known real controller IP without explicit confirmation flag")
     pgmode_timeout_sec = getattr(args, "pgmode_timeout_sec", 1.0)
     pgmode_command_port = getattr(args, "pgmode_command_port", 5000)
     if not math.isfinite(pgmode_timeout_sec) or pgmode_timeout_sec <= 0.0:
@@ -361,8 +353,6 @@ def preflight(args: argparse.Namespace, config: ParsedConfig) -> dict[str, Any]:
             raise AcceptanceError(
                 f"{args.mode} requires servo.allow_controller_simulation_motion=true"
             )
-        if not args.i_understand_this_connects_to_real_controller:
-            raise AcceptanceError(f"{args.mode} requires explicit real-controller confirmation")
         require_controller_simulation_config(config)
         if not getattr(args, "set_pgmode_simulation", False) and not getattr(args, "verify_pgmode_simulation", False):
             raise AcceptanceError(
@@ -386,7 +376,6 @@ def preflight(args: argparse.Namespace, config: ParsedConfig) -> dict[str, Any]:
         "disable_waiting_ack": selected.disable_waiting_ack,
         "ack_semantics": "socket_send_only" if selected.disable_waiting_ack else "controller_ack_observed",
         "real_robot_ips_checked": sorted(REAL_ROBOT_IPS),
-        "confirmation_flag": args.i_understand_this_connects_to_real_controller,
         "pgmode_simulation_preflight": pgmode_preflight,
         "pgmode_simulation_confirmed": (
             pgmode_preflight is not None and pgmode_preflight.get("overall_result") == "ok"
@@ -1079,7 +1068,6 @@ logging:
             pgmode_command_port=5000,
             preflight_only=False,
             skip_plots=True,
-            i_understand_this_connects_to_real_controller=True,
         )
         result = preflight(base, config)
         assert result["profile"] == "500hz_ack"

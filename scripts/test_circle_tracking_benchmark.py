@@ -142,8 +142,6 @@ def rbpodo_args(tmp: Path, config: Path, pgmode: Path, **overrides: object) -> a
         "artifact_dir": tmp / "artifacts",
         "preflight_only": False,
         "skip_plots": True,
-        "i_understand_this_connects_to_real_controller": True,
-        "i_confirm_controller_is_in_pgmode_simulation": True,
     }
     values.update(overrides)
     return argparse.Namespace(**values)

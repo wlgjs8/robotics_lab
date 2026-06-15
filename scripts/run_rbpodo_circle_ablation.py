@@ -335,16 +335,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pgmode-summary-json", type=Path)
     parser.add_argument("--pgmode-timeout-sec", type=float, default=1.0)
     parser.add_argument("--pgmode-command-port", type=int, default=5000)
-    parser.add_argument(
-        "--i-understand-this-connects-to-real-controller",
-        action="store_true",
-        help="Required before any real controller connection can be attempted.",
-    )
-    parser.add_argument(
-        "--i-confirm-controller-is-in-pgmode-simulation",
-        action="store_true",
-        help="Required acknowledgement before controller-simulation ablation is accepted.",
-    )
     return parser.parse_args()
 
 
@@ -1080,10 +1070,6 @@ def validate_matrix_safety(args: argparse.Namespace, metadata: list[dict[str, An
         )
     if args.pgmode_summary_json and not root_path(args.root, args.pgmode_summary_json).is_file():
         raise AblationError(f"pgmode summary not found: {root_path(args.root, args.pgmode_summary_json)}")
-    if not args.i_understand_this_connects_to_real_controller:
-        raise AblationError("missing --i-understand-this-connects-to-real-controller")
-    if not args.i_confirm_controller_is_in_pgmode_simulation:
-        raise AblationError("missing --i-confirm-controller-is-in-pgmode-simulation")
     for exp, meta in zip(experiments, metadata):
         for env_name in list_value(exp.get("env_requirements")):
             if not env_enabled(env_name):
@@ -1135,8 +1121,6 @@ def benchmark_command(args: argparse.Namespace, exp: dict[str, Any], meta: dict[
         str(exp.get("tracking_source", "auto")),
         "--artifact-dir",
         str(exp_dir),
-        "--i-understand-this-connects-to-real-controller",
-        "--i-confirm-controller-is-in-pgmode-simulation",
     ]
     if sim_bench.profile_requires_fast_stress(str(exp["profile"])):
         command.append("--allow-fast-stress")

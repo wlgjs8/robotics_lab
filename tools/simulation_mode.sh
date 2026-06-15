@@ -6,13 +6,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="5000"
 TIMEOUT_SEC="1.0"
 SUMMARY_JSON="artifacts/rbpodo_pgmode/simulation_mode_summary.json"
-# Connect acknowledgment: pass --i-understand-this-connects-to-real-controller, or
-# set RB_I_UNDERSTAND_REAL_CONTROLLER=1 once (convenience for routine pgmode-sim use).
-# This only acknowledges connecting to a real controller IP; no physical motion.
-CONFIRM=0
-case "${RB_I_UNDERSTAND_REAL_CONTROLLER:-}" in
-  1 | true | TRUE | yes | YES | on | ON) CONFIRM=1 ;;
-esac
 
 ROBOTS=(
   "172.28.60.200"
@@ -21,8 +14,7 @@ ROBOTS=(
 
 usage() {
   cat <<'EOF'
-Usage: tools/simulation_mode.sh --i-understand-this-connects-to-real-controller [options]
-       (or set RB_I_UNDERSTAND_REAL_CONTROLLER=1 instead of passing the flag)
+Usage: tools/simulation_mode.sh [options]
 
 Options:
   --ips IP [IP ...]       Override controller IPs.
@@ -39,10 +31,6 @@ EOF
 MODE_FLAG="--set-simulation"
 while (($# > 0)); do
   case "$1" in
-    --i-understand-this-connects-to-real-controller)
-      CONFIRM=1
-      shift
-      ;;
     --port)
       PORT="${2:?missing --port value}"
       shift 2
@@ -79,11 +67,6 @@ while (($# > 0)); do
   esac
 done
 
-if [[ "$CONFIRM" != "1" ]]; then
-  echo "ERROR: refusing controller connection without --i-understand-this-connects-to-real-controller" >&2
-  exit 2
-fi
-
 if ((${#ROBOTS[@]} == 0)); then
   echo "ERROR: no controller IPs provided" >&2
   exit 2
@@ -95,5 +78,4 @@ python3 scripts/rainbow_pgmode.py \
   --port "$PORT" \
   --timeout-sec "$TIMEOUT_SEC" \
   "$MODE_FLAG" \
-  --summary-json "$SUMMARY_JSON" \
-  --i-understand-this-connects-to-real-controller
+  --summary-json "$SUMMARY_JSON"

@@ -6,8 +6,6 @@ SERVER="${ROOT_DIR}/rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
 PROFILE=""
 ARM=""
 WITH_REQUIRED_ENV=0
-CONFIRM=0
-CONFIRM_PGMODE=0
 VERIFY_PGMODE=0
 ALLOW_NO_REALTIME=0
 ARTIFACT_DIR=""
@@ -28,10 +26,6 @@ usage() {
 Usage: tools/rbpodo_circle_benchmark.sh --profile stable|gene --arm left|right [options]
 
 Run the rbpodo controller-simulation circle benchmark with short profile names.
-
-Required safety flags:
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
 
 Environment behavior:
   --with-required-env  Explicitly export:
@@ -159,14 +153,6 @@ while (($# > 0)); do
       SKIP_PLOTS=1
       shift
       ;;
-    --i-understand-this-connects-to-real-controller)
-      CONFIRM=1
-      shift
-      ;;
-    --i-confirm-controller-is-in-pgmode-simulation)
-      CONFIRM_PGMODE=1
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -278,13 +264,6 @@ require_env() {
   fi
 }
 
-if [[ "${CONFIRM}" != "1" ]]; then
-  fail "missing --i-understand-this-connects-to-real-controller"
-fi
-if [[ "${CONFIRM_PGMODE}" != "1" ]]; then
-  fail "missing --i-confirm-controller-is-in-pgmode-simulation"
-fi
-
 if [[ "${WITH_REQUIRED_ENV}" == "1" ]]; then
   export RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
 else
@@ -316,8 +295,6 @@ cmd=(
   --overlay-pub-rate-hz "${OVERLAY_RATE_HZ}"
   "${PGMODE_FLAG}"
   --artifact-dir "${ARTIFACT_DIR}"
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
 )
 
 if [[ "${PROFILE}" == "gene" ]]; then
