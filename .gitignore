@@ -8,6 +8,10 @@
 **/cmake_install.cmake
 **/compile_commands.json
 
+# Local secrets — sudo password for setcap automation (NEVER commit)
+.env
+/.env
+
 # Logs and runtime artifacts
 **/logs/
 **/*.log

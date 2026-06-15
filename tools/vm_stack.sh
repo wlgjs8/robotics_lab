@@ -21,6 +21,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# VBoxHeadless drops its frontend release log into the current working dir by
+# default (which is the repo root). Redirect it into logs/vm/ instead.
+VM_LOG_DIR="$PWD/logs/vm"
+mkdir -p "$VM_LOG_DIR"
+export VBOX_RELEASE_LOG_DEST="dir=$VM_LOG_DIR"
+
 LEFT_VM=rb-cb-left;   LEFT_GUEST=10.0.2.7
 RIGHT_VM=rb-cb-right; RIGHT_GUEST=10.0.2.8
 HOST_IF=vboxnet0;     HOST_IP=10.0.2.1/24

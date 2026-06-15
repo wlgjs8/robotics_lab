@@ -1792,15 +1792,16 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("#dc4646", bad)  # bad dot present
 
     def test_operator_monitor_static_html_stacks_pose_below_joint(self):
-        html = _operator_monitor_static_html(18.0, 1.0)
+        html = _operator_monitor_static_html(18.0, 1.0, 31.5)
         self.assertIn("--rb-monitor-gap: 1.000em;", html)
         self.assertIn("--rb-monitor-target-width: 18.000em;", html)
+        self.assertIn("--rb-monitor-split: min(31.500em, 60vh);", html)
         # Both monitors share the left column...
         self.assertIn(".rb-monitor-joint-card { left: var(--rb-monitor-gap); }", html)
         self.assertIn(".rb-monitor-stand-card { left: var(--rb-monitor-gap); }", html)
-        # ...with the Pose Monitor pushed to the bottom half (below Joint Monitor).
-        self.assertIn(".rb-monitor-stand-card.rb-monitor-header-card { top: calc(50vh + 0.5em); }", html)
-        self.assertIn(".rb-monitor-joint-card.rb-monitor-body-card { max-height: calc(50vh - 6.5em); }", html)
+        # ...with the Pose Monitor stacked just below the Joint Monitor's content.
+        self.assertIn(".rb-monitor-stand-card.rb-monitor-header-card { top: var(--rb-monitor-split); }", html)
+        self.assertIn(".rb-monitor-joint-card.rb-monitor-body-card { max-height: calc(var(--rb-monitor-split) - 5.45em); }", html)
         self.assertIn("Pose Monitor", html)
         self.assertIn('id="rb-joint-unit-rad"', html)
         self.assertIn('id="rb-stand-unit-rad"', html)

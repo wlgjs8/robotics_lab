@@ -139,11 +139,12 @@ def _nudge_label(text: str, width: int = 6) -> str:
 _TCP_LINEAR_ORIENTATION_MODES = ("constant", "slerp")
 # Default viewer camera for newly connecting clients, in stand-frame meters
 # (Z-up). Looks at the dual-arm robot from the front (-Y side, looking toward
-# +Y) at a near-level angle, so the horizon stays level. Override per launch
+# +Y) at a near-level angle, so the horizon stays level. Captured live from the
+# desired zoomed-in framing on the grippers/TCP (2026-06-15). Override per launch
 # with RB_GUI_CAMERA_POSITION / RB_GUI_CAMERA_LOOK_AT / RB_GUI_CAMERA_UP
 # ("x,y,z" in meters).
-_DEFAULT_CAMERA_POSITION = (0.0, -1.9, 0.75)
-_DEFAULT_CAMERA_LOOK_AT = (0.0, -0.10, 0.50)
+_DEFAULT_CAMERA_POSITION = (-0.0128, -1.3823, 0.3985)
+_DEFAULT_CAMERA_LOOK_AT = (-0.0128, -0.1381, 0.2257)
 _DEFAULT_CAMERA_UP = (0.0, 0.0, 1.0)
 # Captured from the live dual-arm rest pose (rbpodo CobotData jnt_ang, 2026-06-12,
 # jnt_ang == jnt_ref at rest). Override per launch with RB_GUI_INIT_LEFT_JOINTS /
@@ -152,6 +153,11 @@ _DEFAULT_INIT_LEFT_JOINTS_DEG = (-131.663, 72.989, 113.400, -80.880, -107.064, -
 _DEFAULT_INIT_RIGHT_JOINTS_DEG = (135.099, -64.017, -114.457, 84.379, 112.485, 129.893)
 _OPERATOR_MONITOR_WIDTH_EM = 18.0
 _OPERATOR_MONITOR_GAP_EM = 1.0
+# Vertical anchor (em, in monitor-card font size) where the Pose Monitor stacks
+# below the Joint Monitor. Sized to the Joint card's natural content height so the
+# two panels sit close together instead of being split at mid-viewport. Override
+# with RB_GUI_MONITOR_SPLIT_EM.
+_OPERATOR_MONITOR_SPLIT_EM = 31.5
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -798,14 +804,15 @@ def _build_stand_world_monitor(server: Any, handles: dict[str, Any], *, order: f
                     handles["stand_world_monitor_values"][arm][field] = handle
 
 
-def _operator_monitor_layout() -> tuple[float, float]:
+def _operator_monitor_layout() -> tuple[float, float, float]:
     return (
         _env_positive_float("RB_GUI_MONITOR_WIDTH_EM", _OPERATOR_MONITOR_WIDTH_EM),
         _env_positive_float("RB_GUI_MONITOR_GAP_EM", _OPERATOR_MONITOR_GAP_EM),
+        _env_positive_float("RB_GUI_MONITOR_SPLIT_EM", _OPERATOR_MONITOR_SPLIT_EM),
     )
 
 
-def _operator_monitor_static_html(monitor_width_em: float, gap_em: float) -> str:
+def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_em: float) -> str:
     return f"""
 <style>
   :root {{
@@ -815,6 +822,9 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float) -> str
       var(--rb-monitor-target-width),
       max(13.5em, calc((100vw - (3 * var(--rb-monitor-gap))) / 2))
     );
+    /* Pose Monitor stacks just below the Joint Monitor's natural bottom (em, in
+       card font size) — clamped so it never runs off a short viewport. */
+    --rb-monitor-split: min({split_em:.3f}em, 60vh);
   }}
   .rb-monitor-card {{
     position: fixed;
@@ -847,9 +857,9 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float) -> str
      static header cards) stable across dynamic body refreshes. */
   .rb-monitor-joint-card {{ left: var(--rb-monitor-gap); }}
   .rb-monitor-stand-card {{ left: var(--rb-monitor-gap); }}
-  .rb-monitor-joint-card.rb-monitor-body-card {{ max-height: calc(50vh - 6.5em); }}
-  .rb-monitor-stand-card.rb-monitor-header-card {{ top: calc(50vh + 0.5em); }}
-  .rb-monitor-stand-card.rb-monitor-body-card {{ top: calc(50vh + 4.95em); max-height: calc(50vh - 6em); }}
+  .rb-monitor-joint-card.rb-monitor-body-card {{ max-height: calc(var(--rb-monitor-split) - 5.45em); }}
+  .rb-monitor-stand-card.rb-monitor-header-card {{ top: var(--rb-monitor-split); }}
+  .rb-monitor-stand-card.rb-monitor-body-card {{ top: calc(var(--rb-monitor-split) + 4.45em); max-height: calc(100vh - var(--rb-monitor-split) - 5.45em); }}
   .rb-monitor-title {{
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-weight: 650;
@@ -1056,10 +1066,10 @@ def _operator_monitor_dynamic_html(latest: StateSnapshot | None, *, stale: bool)
 def _build_operator_monitors(server: Any, handles: dict[str, Any]) -> None:
     add_html = getattr(server.gui, "add_html", None)
     if callable(add_html):
-        monitor_width_em, gap_em = _operator_monitor_layout()
+        monitor_width_em, gap_em, split_em = _operator_monitor_layout()
         handles["operator_monitor_panel_mode"] = "fixed_html_overlay"
         handles["operator_monitor_style"] = add_html(
-            _operator_monitor_static_html(monitor_width_em, gap_em),
+            _operator_monitor_static_html(monitor_width_em, gap_em, split_em),
             order=0.0,
         )
         handles["operator_monitor_content"] = add_html(_operator_monitor_dynamic_html(None, stale=True), order=0.1)

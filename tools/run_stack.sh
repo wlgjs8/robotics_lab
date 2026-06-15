@@ -70,6 +70,41 @@ case "${GRIPPER_FOLLOW:-auto}" in
   *) GRIPPER_FOLLOW_ON=1 ;;
 esac
 
+# Ensure the RT capabilities the servo loop needs (real-time scheduling +
+# mlockall) are on the server binary. setcap requires root, and a rebuild
+# strips the file caps, so we (re)apply them here. Order of preference:
+#   1) already present              -> no-op
+#   2) passwordless sudo (NOPASSWD) -> sudo -n
+#   3) local ./.env SUDO_PASSWORD   -> piped to `sudo -S` over stdin (not argv,
+#                                      so it never shows up in `ps`). .env is
+#                                      chmod 600 and gitignored.
+# If none work we WARN and continue: the server still runs, just without RT
+# priority / locked memory (fine for sim, sub-optimal for real).
+RT_CAPS="cap_sys_nice,cap_ipc_lock+ep"
+ensure_rt_caps() {
+  command -v getcap >/dev/null 2>&1 || return 0
+  if getcap "$SERVER_BIN" 2>/dev/null | grep -q "cap_sys_nice"; then
+    return 0
+  fi
+  echo "[stack] RT caps missing on $SERVER_BIN; applying setcap..."
+  if sudo -n setcap "$RT_CAPS" "$SERVER_BIN" 2>/dev/null; then
+    echo "[stack] setcap applied (passwordless sudo)"
+    return 0
+  fi
+  local env_file="$PWD/.env" pw=""
+  if [ -f "$env_file" ]; then
+    pw=$(grep -E '^SUDO_PASSWORD=' "$env_file" | head -1 | cut -d= -f2-)
+  fi
+  if [ -n "$pw" ] && printf '%s\n' "$pw" | sudo -S -p '' setcap "$RT_CAPS" "$SERVER_BIN" 2>/dev/null; then
+    echo "[stack] setcap applied (./.env password)"
+    unset pw
+    return 0
+  fi
+  unset pw
+  echo "[stack] WARN: could not apply RT caps; server runs without RT priority/mlock." >&2
+  echo "[stack]       fix: sudo setcap $RT_CAPS $SERVER_BIN  (or set SUDO_PASSWORD in ./.env)" >&2
+}
+
 [ -x "$SERVER_BIN" ] || { echo "[stack] server binary missing: $SERVER_BIN (build rbpodo_real_gate first)" >&2; exit 1; }
 [ -f "$SERVER_CFG" ] || { echo "[stack] missing $SERVER_CFG" >&2; exit 1; }
 [ -f "$POLICY_CFG" ] || { echo "[stack] missing $POLICY_CFG" >&2; exit 1; }
@@ -140,6 +175,7 @@ trap cleanup EXIT
 
 echo "[stack] mode=$MODE source=$ACTION_SOURCE (spacemouse + umi side by side)"
 echo "[stack] server: $SERVER_CFG"
+ensure_rt_caps
 "$SERVER_BIN" --config "$SERVER_CFG" >"$LOG_DIR/server.log" 2>&1 &
 PIDS+=($!)
 

@@ -701,6 +701,18 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     flow_infer.add_argument("--device", default="auto")
     flow_infer.add_argument(
+        "--execute-arms",
+        choices=("both", "left", "right"),
+        default="both",
+        help=(
+            "Runtime execution mask: suppress the non-selected arm's commands "
+            "(twist + gripper) so it physically holds. The checkpoint stays "
+            "dual-arm (gate/selected_arms unchanged); only what is SENT to the "
+            "servo is masked. Use 'right' to run the right-arm-first phase with "
+            "the idle left arm held (avoids idle-arm noise creep)."
+        ),
+    )
+    flow_infer.add_argument(
         "--image-size",
         type=int,
         default=None,
@@ -1398,6 +1410,25 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     sample_steps=args.sample_steps,
                     stochastic_sampling=not args.deterministic_sampling,
                     **source_kwargs,
+                )
+            # Runtime execution mask: suppress the non-selected arm's per-step
+            # commands so it holds in place. Only source.arm_mask (the emission
+            # gate) is changed; source.checkpoint_arm_mask / selected_arms (the
+            # gate identity) stay dual-arm, so _validate_real_policy is unaffected
+            # and the suppression is strictly safer.
+            if args.execute_arms != "both":
+                import numpy as _np
+
+                _mask = _np.asarray(
+                    [1.0, 0.0] if args.execute_arms == "left" else [0.0, 1.0],
+                    dtype=_np.float32,
+                )
+                source.arm_mask = _mask
+                print(
+                    f"[flow-infer] --execute-arms={args.execute_arms}: runtime "
+                    f"arm_mask={_mask.tolist()} (other arm held; checkpoint stays "
+                    f"dual-arm {list(source.checkpoint_arm_mask)})",
+                    flush=True,
                 )
             # Decouple chunk inference from the 500 Hz servo loop for live
             # streaming rollouts: background prefetch + per-step hold so the loop
