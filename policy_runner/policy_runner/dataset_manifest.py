@@ -111,17 +111,15 @@ class DatasetManifest:
             "required_attrs": dict(self.required_attrs),
         }
 
-    def retarget_allows_physical_rollout_for(self, source_pose_frame: str, target_pose_frame: str = "stand") -> bool:
+    def retarget_allows_physical_rollout_for(self, source_pose_frame: str) -> bool:
         return (
             str(self.retarget.get("source_pose_frame", "") or "") == source_pose_frame
-            and str(self.retarget.get("target_pose_frame", "") or "") == target_pose_frame
             and str(self.retarget.get("status", "") or "") in PHYSICAL_ROLLOUT_RETARGET_STATUSES
         )
 
-    def retarget_is_measured_for(self, source_pose_frame: str, target_pose_frame: str = "stand") -> bool:
+    def retarget_is_measured_for(self, source_pose_frame: str) -> bool:
         return (
             str(self.retarget.get("source_pose_frame", "") or "") == source_pose_frame
-            and str(self.retarget.get("target_pose_frame", "") or "") == target_pose_frame
             and str(self.retarget.get("status", "") or "") == "measured"
         )
 

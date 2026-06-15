@@ -542,7 +542,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_train.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
     flow_train.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
     flow_train.add_argument("--single-arm-side", choices=("left", "right"), default=None)
-    flow_train.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
+    flow_train.add_argument("--action-frame", choices=("ee_local",), default="ee_local")
     flow_train.add_argument("--max-episodes", type=int, default=None)
     flow_train.add_argument("--checkpoint", default="outputs/flow_policy.pt")
     flow_train.add_argument("--vision-backbone", default="resnet50")
@@ -596,7 +596,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     imitation_experiment.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
     imitation_experiment.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
-    imitation_experiment.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
+    imitation_experiment.add_argument("--action-frame", choices=("ee_local",), default="ee_local")
     imitation_experiment.add_argument("--action-horizon", type=int, default=16)
     imitation_experiment.add_argument("--image-size", type=int, default=128)
     imitation_experiment.add_argument(
@@ -728,27 +728,19 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     flow_infer.add_argument(
         "--command-family",
-        choices=("tcp_twist_stand", "tcp_twist_local", "tcp_delta_stand"),
+        choices=("tcp_twist_local",),
         default=None,
         help=(
-            "Flow action command family. Defaults to tcp_twist_local for ee_local "
-            "checkpoints and tcp_twist_stand otherwise."
-        ),
-    )
-    flow_infer.add_argument(
-        "--allow-experimental-tcp-delta-stand",
-        action="store_true",
-        help=(
-            "Allow the debug TcpDeltaStand flow command family outside offline_eval/sim_dryrun. "
-            "TcpTwistStand remains the default controller-simulation path."
+            "Flow action command family. Only tcp_twist_local (ee_local body frame) "
+            "exists; world-frame stand families were removed."
         ),
     )
     flow_infer.add_argument(
         "--allow-tcp-twist-local",
         action="store_true",
         help=(
-            "Allow the TcpTwistLocal flow command family for controller_sim/real_policy. "
-            "Required for ee_local checkpoints, which cannot emit tcp_twist_stand."
+            "Allow the TcpTwistLocal flow command family for controller_sim/real_policy "
+            "(ee_local checkpoints; the only command family)."
         ),
     )
     flow_infer.add_argument(
@@ -816,7 +808,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     hdf5_view.add_argument("episode", help="HDF5 episode file")
     hdf5_view.add_argument("--single-arm-side", choices=("left", "right"), default="left")
     hdf5_view.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
-    hdf5_view.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
+    hdf5_view.add_argument("--action-frame", choices=("ee_local",), default="ee_local")
     hdf5_view.add_argument("--start-frame", type=int, default=0)
     hdf5_view.add_argument("--fps", type=float, default=None)
     hdf5_view.add_argument("--image-size", type=int, default=320)
@@ -1216,7 +1208,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
             validate_flow_command_family(
                 rollout_policy.mode,
                 command_family,
-                allow_experimental_tcp_delta_stand=args.allow_experimental_tcp_delta_stand,
                 allow_tcp_twist_local=args.allow_tcp_twist_local,
                 dataset_stats=dataset_stats,
             )

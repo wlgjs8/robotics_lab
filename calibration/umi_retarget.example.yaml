@@ -4,13 +4,13 @@ status: configured_estimate   # measured or accepted required for physical real 
 # see umi_retarget_eelocal.yaml — it is NOT a pure translation (official pika_sdk
 # R_corr rotation + tip translation + r_align; raw-frame lever [0,-0.0126,+0.1876] m).
 source_pose_frame: steamvr_world
-target_pose_frame: stand
+# Tool offset only (T_tcp_umi_gripper). No world steamvr->stand transform: it was
+# never measured and the ee_local body-frame action representation cancels it
+# (wiki umi-tcp-delta-frame).
 left:
-  T_stand_source: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
   T_tcp_umi_gripper: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
   gripper_open_close_units: percent
 right:
-  T_stand_source: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
   T_tcp_umi_gripper: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
   gripper_open_close_units: percent
 quality:

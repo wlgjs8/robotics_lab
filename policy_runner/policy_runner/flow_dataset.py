@@ -18,8 +18,13 @@ FLOW_ACTION_DIM = 14
 FLOW_ARM_DIM = 7
 FLOW_PROPRIO_DIM = 16
 DEFAULT_IMAGE_SIZE = 224
-DEFAULT_ACTION_FRAME = "stand"
-ACTION_FRAMES = ("stand", "ee_local")
+# Action/proprio are expressed only in the end-effector body frame ("ee_local").
+# The old world-frame "stand" representation was removed: with steamvr->stand
+# unmeasured (T_stand_source == I) a "stand" delta carried the unmeasured world
+# rotation and was not a valid robot-TCP action. ee_local is invariant to that
+# rotation (see wiki umi-tcp-delta-frame).
+DEFAULT_ACTION_FRAME = "ee_local"
+ACTION_FRAMES = ("ee_local",)
 IMAGE_CROP_MODES = ("none", "center_square")
 HDF5_EPISODE_SUFFIXES = {".hdf5", ".h5"}
 HDF5_SKIP_PARENT_NAMES = {
@@ -528,7 +533,7 @@ def runtime_proprio_from_state(
     action_frame: str = DEFAULT_ACTION_FRAME,
 ) -> np.ndarray:
     frame = normalize_action_frame(action_frame)
-    delta_fn = pose_delta_local if frame == "ee_local" else pose_delta
+    delta_fn = pose_delta_local
     left_pose = _pose_from_state_arm(payload.get("left", {}))
     right_pose = _pose_from_state_arm(payload.get("right", {}))
     left_gripper = _float_or_zero(_nested_first(payload.get("left", {}), "gripper", "gripper_position"))
@@ -920,7 +925,7 @@ def _proprio_vector(
     action_frame: str = DEFAULT_ACTION_FRAME,
 ) -> np.ndarray:
     frame = normalize_action_frame(action_frame)
-    delta_fn = pose_delta_local if frame == "ee_local" else pose_delta
+    delta_fn = pose_delta_local
     left_features = np.concatenate([
         delta_fn(episode.reset_left_pose, episode.left_pose[index]),
         [episode.left_gripper[index]],
@@ -940,7 +945,7 @@ def _action_chunk(
     action_frame: str = DEFAULT_ACTION_FRAME,
 ) -> np.ndarray:
     frame = normalize_action_frame(action_frame)
-    delta_fn = pose_delta_local if frame == "ee_local" else tcp_delta_stand_from_poses
+    delta_fn = pose_delta_local
     chunk = np.zeros((horizon, FLOW_ACTION_DIM), dtype=np.float32)
     for offset in range(horizon):
         index = start + offset
@@ -985,17 +990,6 @@ def _per_step_gripper_delta(
     return float(values[next_index]) - float(values[index])
 
 
-def pose_delta(reference_pose: np.ndarray, target_pose: np.ndarray) -> np.ndarray:
-    reference = _valid_pose(reference_pose)
-    target = _valid_pose(target_pose)
-    translation = target[:3] - reference[:3]
-    q_ref = _normalize_quat(reference[3:7])
-    q_target = _normalize_quat(target[3:7])
-    q_delta = _quat_multiply(_quat_inverse(q_ref), q_target)
-    rotvec = _quat_to_rotvec(q_delta)
-    return np.concatenate([translation, rotvec]).astype(np.float32)
-
-
 def pose_delta_local(reference_pose: np.ndarray, target_pose: np.ndarray) -> np.ndarray:
     reference = _valid_pose(reference_pose)
     target = _valid_pose(target_pose)
@@ -1004,17 +998,6 @@ def pose_delta_local(reference_pose: np.ndarray, target_pose: np.ndarray) -> np.
     q_ref_inverse = _quat_inverse(q_ref)
     translation = _quat_rotate_vector(q_ref_inverse, target[:3] - reference[:3])
     q_delta = _quat_multiply(q_ref_inverse, q_target)
-    rotvec = _quat_to_rotvec(q_delta)
-    return np.concatenate([translation, rotvec]).astype(np.float32)
-
-
-def tcp_delta_stand_from_poses(current_pose: np.ndarray, next_pose: np.ndarray) -> np.ndarray:
-    current = _valid_pose(current_pose)
-    target = _valid_pose(next_pose)
-    translation = target[:3] - current[:3]
-    q_current = _normalize_quat(current[3:7])
-    q_target = _normalize_quat(target[3:7])
-    q_delta = _quat_multiply(q_target, _quat_inverse(q_current))
     rotvec = _quat_to_rotvec(q_delta)
     return np.concatenate([translation, rotvec]).astype(np.float32)
 

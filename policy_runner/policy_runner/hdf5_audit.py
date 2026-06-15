@@ -449,19 +449,22 @@ def _check_pose_metadata(
     if pose_frame not in KNOWN_POSE_FRAMES:
         _append(warnings, f"unknown_pose_frame: {pose_frame}")
 
-    if pose_frame != "stand":
-        if manifest is not None and manifest.retarget_allows_physical_rollout_for(pose_frame, "stand"):
-            return
-        status = "missing"
-        if manifest is not None and manifest.retarget:
-            status = str(manifest.retarget.get("status", "missing") or "missing")
-        message = (
-            "retarget_required: pose_frame "
-            f"{pose_frame} must have measured or accepted retarget metadata to stand "
-            f"before physical real policy rollout; status={status}"
-        )
-        _append(warnings, f"deployment_blocker: {message}")
-        _append(blockers, message)
+    # Physical real rollout requires a measured/accepted retarget tool offset for
+    # this source frame. There is no world "stand" target frame anymore (the
+    # body-frame ee_local action representation cancels the unmeasured world
+    # rotation; see wiki umi-tcp-delta-frame), so the gate is status-based.
+    if manifest is not None and manifest.retarget_allows_physical_rollout_for(pose_frame):
+        return
+    status = "missing"
+    if manifest is not None and manifest.retarget:
+        status = str(manifest.retarget.get("status", "missing") or "missing")
+    message = (
+        "retarget_required: pose_frame "
+        f"{pose_frame} must have measured or accepted retarget metadata "
+        f"before physical real policy rollout; status={status}"
+    )
+    _append(warnings, f"deployment_blocker: {message}")
+    _append(blockers, message)
 
 
 def _check_timestamp_outliers(timestamps: np.ndarray, warnings: list[str]) -> None:

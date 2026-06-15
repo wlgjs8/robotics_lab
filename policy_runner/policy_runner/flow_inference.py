@@ -15,11 +15,8 @@ import torch
 
 from .action_sources.tcp_delta import (
     clamp_tcp_twist,
-    clamp_tcp_delta,
     cartesian_action_requirements,
-    tcp_delta_stand_intent,
     tcp_twist_local_intent,
-    tcp_twist_stand_intent,
 )
 from .flow_dataset import (
     DEFAULT_ACTION_FRAME,
@@ -42,11 +39,12 @@ from .rollout_modes import RolloutMode, RolloutModeValidationError, parse_rollou
 from .servo_command_client import CommandIntent
 
 
-FLOW_COMMAND_FAMILY_CHOICES = ("tcp_twist_stand", "tcp_twist_local", "tcp_delta_stand")
+# Only the body-frame (ee_local) family remains. World-frame "stand" command
+# families were removed: data/proprio are ee_local, which the server interprets as
+# TcpTwistLocal (see wiki umi-tcp-delta-frame).
+FLOW_COMMAND_FAMILY_CHOICES = ("tcp_twist_local",)
 _FLOW_COMMAND_FAMILY_LABELS = {
-    "tcp_twist_stand": "TcpTwistStand",
     "tcp_twist_local": "TcpTwistLocal",
-    "tcp_delta_stand": "TcpDeltaStand",
 }
 _ZERO_TWIST = (0.0,) * 6
 DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S = 0.30
@@ -68,7 +66,7 @@ class FlowOfflineEvalResult:
     camera_names: list[str]
     image_decode_count: int
     missing_camera_count: int
-    command_family: str = "TcpTwistStand"
+    command_family: str = "TcpTwistLocal"
     selected_arms: list[str] = field(default_factory=list)
     checkpoint_arm_mask: tuple[float, float] | None = None
     checkpoint_has_nonzero_gripper_commands: bool = False
@@ -95,19 +93,16 @@ def resolve_flow_command_family(
     """Return the normalized flow command family for a rollout mode."""
 
     _ = parse_rollout_mode(rollout_mode)
+    _ = dataset_stats  # frame is always ee_local -> tcp_twist_local
     if command_family is None:
-        if _proprio_action_frame_from_stats(dataset_stats) == "ee_local":
-            return "tcp_twist_local"
-        return "tcp_twist_stand"
+        return "tcp_twist_local"
     return normalize_flow_command_family(command_family)
 
 
 def normalize_flow_command_family(command_family: str) -> str:
     family = str(command_family or "").strip().lower().replace("-", "_")
     family = {
-        "tcptwiststand": "tcp_twist_stand",
         "tcptwistlocal": "tcp_twist_local",
-        "tcpdeltastand": "tcp_delta_stand",
     }.get(family, family)
     if family not in FLOW_COMMAND_FAMILY_CHOICES:
         choices = ", ".join(FLOW_COMMAND_FAMILY_CHOICES)
@@ -212,38 +207,22 @@ def validate_flow_command_family(
     rollout_mode: str | RolloutMode,
     command_family: str,
     *,
-    allow_experimental_tcp_delta_stand: bool = False,
     allow_tcp_twist_local: bool = False,
     dataset_stats: dict[str, Any] | None = None,
 ) -> None:
     mode = parse_rollout_mode(rollout_mode)
-    family = normalize_flow_command_family(command_family)
-    if _proprio_action_frame_from_stats(dataset_stats) == "ee_local" and family != "tcp_twist_local":
-        raise RolloutModeValidationError(
-            "ee_local checkpoints require command-family tcp_twist_local"
-        )
-    if family == "tcp_twist_stand":
+    # Only tcp_twist_local (ee_local body frame) exists; normalize raises otherwise.
+    normalize_flow_command_family(command_family)
+    _ = dataset_stats
+    # real_readonly never sends commands, so the family is irrelevant there.
+    if mode in {RolloutMode.OFFLINE_EVAL, RolloutMode.SIM_DRYRUN, RolloutMode.REAL_READONLY}:
         return
-    if family == "tcp_twist_local":
-        # real_readonly never sends commands, so the family is irrelevant there.
-        if mode in {RolloutMode.OFFLINE_EVAL, RolloutMode.SIM_DRYRUN, RolloutMode.REAL_READONLY}:
-            return
-        # ee_local checkpoints can only emit tcp_twist_local; live rollout of
-        # that family is an explicit operator opt-in (mirrors the
-        # tcp_delta_stand opt-in below).
-        if allow_tcp_twist_local:
-            return
-        raise RolloutModeValidationError(
-            "command-family tcp_twist_local requires --allow-tcp-twist-local for "
-            "controller_sim or real_policy (ee_local checkpoints cannot use tcp_twist_stand)"
-        )
-    if mode in {RolloutMode.OFFLINE_EVAL, RolloutMode.SIM_DRYRUN}:
-        return
-    if allow_experimental_tcp_delta_stand:
+    # Live rollout of body-frame twist is an explicit operator opt-in.
+    if allow_tcp_twist_local:
         return
     raise RolloutModeValidationError(
-        "command-family tcp_delta_stand is a debug/experimental flow rollout path; "
-        "use tcp_twist_stand or pass --allow-experimental-tcp-delta-stand"
+        "command-family tcp_twist_local requires --allow-tcp-twist-local for "
+        "controller_sim or real_policy"
     )
 
 
@@ -256,7 +235,7 @@ def resolve_flow_policy_dt_sec(
     dataset_stats: dict[str, Any] | None = None,
 ) -> float | None:
     family = normalize_flow_command_family(command_family)
-    if family not in {"tcp_twist_stand", "tcp_twist_local"}:
+    if family != "tcp_twist_local":
         return None
     if policy_dt_sec is not None:
         resolved = float(policy_dt_sec)
@@ -282,9 +261,9 @@ def resolve_flow_policy_dt_sec(
 class FlowMatchingActionSource:
     """Runtime source for high-level flow-policy action chunks.
 
-    The source emits bounded stand-frame streaming commands by default. TcpDeltaStand
-    and TcpTwistLocal remain debug families behind rollout-mode validation. SafetyGate
-    still decides whether the intent may be sent.
+    The source emits bounded body-frame (TcpTwistLocal) streaming commands; this is
+    the only command family (ee_local). Live rollout is behind rollout-mode
+    validation and SafetyGate still decides whether the intent may be sent.
     """
 
     def __init__(
@@ -538,12 +517,7 @@ class FlowMatchingActionSource:
     def _emit_step_intent(
         self, step: np.ndarray, gripper_targets: dict[str, float | None]
     ) -> CommandIntent | None:
-        if self.command_family_option == "tcp_twist_local":
-            intent = self._tcp_twist_local_step_intent(step, gripper_targets=gripper_targets)
-        elif self.command_family_option == "tcp_twist_stand":
-            intent = self._tcp_twist_stand_step_intent(step, gripper_targets=gripper_targets)
-        else:
-            intent = self._tcp_delta_stand_step_intent(step, gripper_targets=gripper_targets)
+        intent = self._tcp_twist_local_step_intent(step, gripper_targets=gripper_targets)
         self._log_action_step(step, intent)
         return intent
 
@@ -585,8 +559,6 @@ class FlowMatchingActionSource:
         right = _ZERO_TWIST if (len(self.arm_mask) > 1 and self.arm_mask[1] > 0.0) else None
         self._last_nonzero_twist_by_arm["left"] = False
         self._last_nonzero_twist_by_arm["right"] = False
-        if self.command_family_option == "tcp_twist_stand":
-            return tcp_twist_stand_intent(left=left, right=right, timeout_sec=self.timeout_sec)
         if self.command_family_option == "tcp_twist_local":
             return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
         return None
@@ -670,40 +642,6 @@ class FlowMatchingActionSource:
         )
         self.gripper_runtime.dispatch(commands)
 
-    def _tcp_delta_stand_step_intent(
-        self,
-        step: np.ndarray,
-        *,
-        gripper_targets: dict[str, float | None],
-    ) -> CommandIntent | None:
-        left = None
-        right = None
-        if self.arm_mask[0] > 0.0:
-            left = clamp_tcp_delta(
-                step[0:6].tolist(),
-                self.max_linear_step_m,
-                self.max_angular_step_rad,
-            )
-        if self.arm_mask[1] > 0.0:
-            right = clamp_tcp_delta(
-                step[7:13].tolist(),
-                self.max_linear_step_m,
-                self.max_angular_step_rad,
-            )
-        if left is not None and all(value == 0.0 for value in left):
-            left = None
-        if right is not None and all(value == 0.0 for value in right):
-            right = None
-        if left is None and right is None:
-            return None
-        return tcp_delta_stand_intent(
-            left=left,
-            right=right,
-            left_gripper=gripper_targets.get("left"),
-            right_gripper=gripper_targets.get("right"),
-            timeout_sec=self.timeout_sec,
-        )
-
     def _tcp_twist_local_step_intent(
         self,
         step: np.ndarray,
@@ -715,24 +653,6 @@ class FlowMatchingActionSource:
         if left is None and right is None:
             return None
         return tcp_twist_local_intent(
-            left=left,
-            right=right,
-            left_gripper=gripper_targets.get("left"),
-            right_gripper=gripper_targets.get("right"),
-            timeout_sec=self.timeout_sec,
-        )
-
-    def _tcp_twist_stand_step_intent(
-        self,
-        step: np.ndarray,
-        *,
-        gripper_targets: dict[str, float | None],
-    ) -> CommandIntent | None:
-        left = self._twist_payload_for_arm("left", step[0:6]) if self.arm_mask[0] > 0.0 else None
-        right = self._twist_payload_for_arm("right", step[7:13]) if self.arm_mask[1] > 0.0 else None
-        if left is None and right is None:
-            return None
-        return tcp_twist_stand_intent(
             left=left,
             right=right,
             left_gripper=gripper_targets.get("left"),
@@ -763,7 +683,7 @@ class FlowMatchingActionSource:
         )
 
     def _no_policy_input_intent(self) -> CommandIntent | None:
-        if self.command_family_option not in {"tcp_twist_stand", "tcp_twist_local"}:
+        if self.command_family_option != "tcp_twist_local":
             return None
         left = _ZERO_TWIST if self._last_nonzero_twist_by_arm["left"] else None
         right = _ZERO_TWIST if self._last_nonzero_twist_by_arm["right"] else None
@@ -771,8 +691,6 @@ class FlowMatchingActionSource:
             return None
         self._last_nonzero_twist_by_arm["left"] = False
         self._last_nonzero_twist_by_arm["right"] = False
-        if self.command_family_option == "tcp_twist_stand":
-            return tcp_twist_stand_intent(left=left, right=right, timeout_sec=self.timeout_sec)
         return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
 
     def _integrate_gripper_targets(
@@ -1328,7 +1246,7 @@ def run_flow_offline_eval(
     sample_steps: int = 16,
     device: str = "auto",
     max_samples: int = 1,
-    command_family: str = "TcpTwistStand",
+    command_family: str = "TcpTwistLocal",
 ) -> FlowOfflineEvalResult:
     if sample_steps <= 0:
         raise ValueError("sample_steps must be positive")
@@ -1413,7 +1331,7 @@ def run_direct_bc_offline_eval(
     episodes_dir: str | Path,
     device: str = "auto",
     max_samples: int = 1,
-    command_family: str = "TcpTwistStand",
+    command_family: str = "TcpTwistLocal",
     image_size: int | None = None,
 ) -> FlowOfflineEvalResult:
     if max_samples <= 0:
@@ -1503,7 +1421,7 @@ def run_direct_bc_ensemble_offline_eval(
     episodes_dir: str | Path,
     device: str = "auto",
     max_samples: int = 1,
-    command_family: str = "TcpTwistStand",
+    command_family: str = "TcpTwistLocal",
     image_size: int | None = None,
     ensemble_name: str | None = "top5",
 ) -> FlowOfflineEvalResult:
@@ -1910,7 +1828,7 @@ def _resolve_runtime_policy_dt_sec(
     stats: dict[str, Any],
 ) -> float | None:
     family = normalize_flow_command_family(command_family)
-    if family not in {"tcp_twist_stand", "tcp_twist_local"}:
+    if family != "tcp_twist_local":
         return None
     resolved = _positive_float(policy_dt_sec)
     if resolved is not None:

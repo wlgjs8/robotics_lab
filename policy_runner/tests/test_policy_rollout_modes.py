@@ -239,7 +239,7 @@ class PolicyRolloutModesTest(unittest.TestCase):
             RolloutModePolicy(RolloutMode.SIM_DRYRUN),
             checkpoint_path="outputs/flow_policy.pt",
             config_path="policy_runner/config/simulator_hold.yaml",
-            command_family="TcpDeltaStand",
+            command_family="TcpTwistLocal",
             camera_names=["head"],
             selected_arms=["left", "right"],
             left_arm_mask=1.0,
@@ -294,7 +294,7 @@ class PolicyRolloutModesTest(unittest.TestCase):
             RolloutModePolicy(RolloutMode.OFFLINE_EVAL),
             checkpoint_path="outputs/direct_bc_distill.pt",
             config_path="policy_runner/config/simulator_hold.yaml",
-            command_family="TcpTwistStand",
+            command_family="TcpTwistLocal",
             camera_names=["left_realsense_color", "right_realsense_color"],
             selected_arms=["left", "right"],
             left_arm_mask=1.0,
@@ -312,7 +312,7 @@ class PolicyRolloutModesTest(unittest.TestCase):
         self.assertEqual(summary["rollout_mode"], "offline_eval")
         self.assertFalse(summary["may_send_commands"])
         self.assertFalse(summary["allows_physical_real_motion"])
-        self.assertEqual(summary["command_family"], "TcpTwistStand")
+        self.assertEqual(summary["command_family"], "TcpTwistLocal")
         self.assertEqual(
             summary["camera_names"],
             ["left_realsense_color", "right_realsense_color"],
