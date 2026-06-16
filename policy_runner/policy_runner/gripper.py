@@ -176,6 +176,11 @@ class PikaSerialGripperBackend:
     def connect(self) -> "PikaSerialGripperBackend":
         if self.suppress_sdk_logs:
             suppress_pika_sdk_logging()
+        if self._gripper_cls is None:
+            for arm, port in self.ports.items():
+                if not os.path.exists(port):
+                    self.close()
+                    raise RuntimeError(f"pika gripper {arm} serial port not found: {port}")
         gripper_cls = self._gripper_cls or _import_pika_gripper_class(self.sdk_path)
         if self.suppress_sdk_logs:
             suppress_pika_sdk_logging()
@@ -183,7 +188,10 @@ class PikaSerialGripperBackend:
             gripper = gripper_cls(port=port)
             if not gripper.connect():
                 self.close()
-                raise RuntimeError(f"pika gripper {arm} connect failed on {port}")
+                detail = port
+                if os.path.islink(port):
+                    detail = f"{port} -> {os.path.realpath(port)}"
+                raise RuntimeError(f"pika gripper {arm} connect failed on {detail}")
             if not gripper.enable():
                 self.close()
                 raise RuntimeError(f"pika gripper {arm} enable failed on {port}")

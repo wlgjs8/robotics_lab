@@ -21,7 +21,15 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=tty --action=add
 
 echo "[pika-udev] done. Current symlinks:"
-ls -l /dev/pika-left /dev/pika-right 2>/dev/null || {
-  echo "[pika-udev] /dev/pika-* not present yet — unplug/replug both grippers" >&2
-  echo "[pika-udev] (or reboot), then: ls -l /dev/pika-*" >&2
-}
+missing=0
+for link in /dev/pika-left /dev/pika-right; do
+  if [ -e "$link" ]; then
+    ls -l "$link"
+  else
+    echo "[pika-udev] missing $link" >&2
+    missing=1
+  fi
+done
+if [ "$missing" = "1" ]; then
+  echo "[pika-udev] unplug/replug the missing gripper(s) or reboot, then: ls -l /dev/pika-*" >&2
+fi

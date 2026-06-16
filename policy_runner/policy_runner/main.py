@@ -1355,10 +1355,13 @@ def _main_with_subcommands(argv: list[str]) -> int:
                         config.gripper.actuate_in_controller_simulation
                     ),
                     # Homing closes both grippers to their stop and re-zeros there.
-                    # Default ON; set RB_GRIPPER_HOME_ON_CONNECT=0 to disable (e.g.
-                    # to A/B test a gripper that fails to re-open after homing).
+                    # DEFAULT OFF: homing left the LEFT gripper stuck closed (it
+                    # bottoms on its stop and fails to re-open; verified 2026-06-16
+                    # left seed 0.35 vs open 70 with homing off). Set
+                    # RB_GRIPPER_HOME_ON_CONNECT=1 to re-enable (e.g. once homing
+                    # is fixed to release/verify the jaw after re-zeroing).
                     home_on_connect=(
-                        os.environ.get("RB_GRIPPER_HOME_ON_CONNECT", "1")
+                        os.environ.get("RB_GRIPPER_HOME_ON_CONNECT", "0")
                         not in ("0", "false", "False", "no", "")
                     ),
                 ).connect()

@@ -268,6 +268,16 @@ class PikaSerialGripperBackendTest(unittest.TestCase):
         self.assertEqual(results[0].reason, "controller_sim_gripper_logged_noop")
         self.assertEqual(blocked._grippers["left"].sent_angles, [])
 
+    def test_missing_real_serial_port_fails_before_sdk_import(self) -> None:
+        backend = PikaSerialGripperBackend(
+            ports={"left": "/tmp/robotics_lab_missing_gripper_port"},
+            sdk_path="/tmp/robotics_lab_missing_pika_sdk",
+            home_on_connect=False,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "serial port not found"):
+            backend.connect()
+
 
 class PikaGripperHomingTest(unittest.TestCase):
     # home_poll_sec=0.0 keeps the settle loop fast; the fake reports a constant
@@ -356,6 +366,8 @@ class GripperConfigTest(unittest.TestCase):
     def test_defaults_to_fail_closed_none_backend(self) -> None:
         cfg = config_from_mapping({"schema": "robotics_lab.policy_runner.v1"})
         self.assertEqual(cfg.gripper.backend, "none")
+        self.assertEqual(cfg.gripper.left_port, "/dev/pika-left")
+        self.assertEqual(cfg.gripper.right_port, "/dev/pika-right")
         self.assertTrue(cfg.gripper.suppress_sdk_logs)
         self.assertFalse(cfg.gripper.actuate_in_controller_simulation)
 

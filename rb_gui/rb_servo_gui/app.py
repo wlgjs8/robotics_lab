@@ -1279,7 +1279,9 @@ def build_gui(
             # it with a target resync — without tearing down `make run`. Requires
             # servo.allow_freedrive on the server (fail-closed). The other arm holds
             # at its last controller reference while one arm is hand-guided.
-            with server.gui.add_folder("직접교시 (Direct Teaching)"):
+            # Collapsed by default: direct teaching hands control of an arm to a
+            # human guide, so it stays folded to avoid accidental toggles.
+            with server.gui.add_folder("직접교시 (Direct Teaching)", expand_by_default=False):
                 handles["freedrive_status"] = server.gui.add_text(
                     "Freedrive", initial_value="off (no state)", disabled=True
                 )

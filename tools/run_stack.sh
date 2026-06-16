@@ -215,7 +215,7 @@ if [ "$GRIPPER_FOLLOW_ON" = "1" ]; then
     python3 "$GRIPPER_FOLLOW_SCRIPT" ${GRIPPER_FOLLOW_ARGS:-} >"$LOG_DIR/gripper_follow.log" 2>&1 &
     PIDS+=($!)
     # It binds the gripper serial ports immediately; surface an early crash
-    # (missing /dev/ttyUSB*, pika_sdk, port already open) without blocking.
+    # (missing /dev/pika-* or /dev/ttyUSB*, pika_sdk, port already open) without blocking.
     sleep 1
     if ! kill -0 "${PIDS[-1]}" 2>/dev/null; then
       echo "[stack] WARNING: gripper follower exited during startup — grippers will NOT follow:" >&2

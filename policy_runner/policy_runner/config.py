@@ -114,8 +114,8 @@ class GripperConfig:
     # the fail-closed NoopGripperBackend; 'pika_serial' drives robot-mounted
     # Pika grippers over local serial (POSITION_CTRL rad).
     backend: str = "none"
-    left_port: str = "/dev/ttyUSB0"
-    right_port: str = "/dev/ttyUSB1"
+    left_port: str = "/dev/pika-left"
+    right_port: str = "/dev/pika-right"
     # Directory containing the 'pika' package (AgileX SDK copy).
     pika_sdk_path: str = ""
     min_rad: float = 0.0

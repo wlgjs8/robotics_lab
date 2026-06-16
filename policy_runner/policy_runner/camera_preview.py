@@ -20,6 +20,7 @@ import time
 from .camera_bundle_client import CameraBundleClient, resolve_frame
 
 WINDOW_TITLE = "policy camera preview (q/ESC closes)"
+DEFAULT_PANEL_SIZE = (640, 480)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -37,6 +38,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _image_window_size(image) -> tuple[int, int]:
+    """Return OpenCV resizeWindow width/height for an HWC image."""
+
+    return int(image.shape[1]), int(image.shape[0])
+
+
+def _resize_window_to_image(
+    cv2_module,
+    title: str,
+    image,
+    last_size: tuple[int, int] | None,
+) -> tuple[int, int]:
+    size = _image_window_size(image)
+    if size != last_size:
+        cv2_module.resizeWindow(title, size[0], size[1])
+    return size
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
@@ -51,7 +70,8 @@ def main(argv: list[str] | None = None) -> int:
         args.zmq_endpoint, topic=args.topic, max_age_ms=args.max_age_ms
     )
     period = 1.0 / max(float(args.refresh_hz), 1.0)
-    placeholder_shape = (480, 640, 3)
+    placeholder_shape = (DEFAULT_PANEL_SIZE[1], DEFAULT_PANEL_SIZE[0], 3)
+    last_window_size: tuple[int, int] | None = None
     cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
     try:
         while True:
@@ -65,11 +85,13 @@ def main(argv: list[str] | None = None) -> int:
                 if pixels is None:
                     panel = np.zeros(placeholder_shape, dtype=np.uint8)
                     status = "MISSING"
+                    resolution = f"{DEFAULT_PANEL_SIZE[0]}x{DEFAULT_PANEL_SIZE[1]}"
                 else:
                     panel = cv2.cvtColor(np.asarray(pixels), cv2.COLOR_RGB2BGR)
                     status = "fresh" if fresh else "STALE"
+                    resolution = f"{panel.shape[1]}x{panel.shape[0]}"
                 color = (0, 255, 0) if status == "fresh" else (0, 0, 255)
-                cv2.putText(panel, f"{name} [{status}]", (8, 24),
+                cv2.putText(panel, f"{name} {resolution} [{status}]", (8, 24),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 panels.append(panel)
             if panels:
@@ -86,6 +108,9 @@ def main(argv: list[str] | None = None) -> int:
                     cv2.putText(mosaic, f"bundle_seq={bundle.bundle_seq}",
                                 (8, mosaic.shape[0] - 10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                last_window_size = _resize_window_to_image(
+                    cv2, WINDOW_TITLE, mosaic, last_window_size
+                )
                 cv2.imshow(WINDOW_TITLE, mosaic)
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
