@@ -231,6 +231,9 @@ VERBOSE_FLAG=""
 if [ "${VERBOSE:-0}" = "1" ]; then VERBOSE_FLAG="--verbose"; fi
 echo "[stack] policy_runner: $POLICY_CFG --action-source $ACTION_SOURCE $VERBOSE_FLAG"
 echo "[stack] (VERBOSE=1 make run -> live input/loop stats; Ctrl-C stops everything)"
+# UMI 텔레옵 수신 per-step 진단 로그(KST)를 실행마다 logs/ 하위에 남긴다.
+# 기본 auto; 경로를 직접 지정하거나 빈 값으로 비활성 가능 (POLICY_RUNNER_UMI_TELEOP_LOG=...).
 PYTHONPATH=policy_runner \
+  POLICY_RUNNER_UMI_TELEOP_LOG="${POLICY_RUNNER_UMI_TELEOP_LOG-auto}" \
   python3 -u -m policy_runner --config "$POLICY_CFG" --action-source "$ACTION_SOURCE" $VERBOSE_FLAG \
   2>&1 | tee "$LOG_DIR/policy.log"

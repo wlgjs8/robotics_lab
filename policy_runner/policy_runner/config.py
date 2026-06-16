@@ -312,7 +312,6 @@ class UmiDualCartesianConfig:
     max_linear_step_m: float = 0.005
     max_angular_step_rad: float = 0.04
     input_moving_average_window: int = 1
-    target_lpf_tau_sec: float = 0.0
     deadband_linear_m: float = 0.0
     deadband_angular_rad: float = 0.0
     linear_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
@@ -333,8 +332,6 @@ class UmiDualCartesianConfig:
             raise ValueError("umi_dual_cartesian.max_angular_step_rad must be non-negative")
         if self.input_moving_average_window < 0:
             raise ValueError("umi_dual_cartesian.input_moving_average_window must be non-negative")
-        if self.target_lpf_tau_sec < 0.0:
-            raise ValueError("umi_dual_cartesian.target_lpf_tau_sec must be non-negative")
         if self.deadband_linear_m < 0.0:
             raise ValueError("umi_dual_cartesian.deadband_linear_m must be non-negative")
         if self.deadband_angular_rad < 0.0:
@@ -668,7 +665,7 @@ def _umi_dual_cartesian_config(raw: dict[str, Any]) -> UmiDualCartesianConfig:
         top_level["max_angular_step_rad"] = float(top_level["max_angular_step_rad"])
     if "input_moving_average_window" in top_level:
         top_level["input_moving_average_window"] = int(top_level["input_moving_average_window"])
-    for key in ("target_lpf_tau_sec", "deadband_linear_m", "deadband_angular_rad"):
+    for key in ("deadband_linear_m", "deadband_angular_rad"):
         if key in top_level:
             top_level[key] = float(top_level[key])
     for key in ("linear_axis_signs", "angular_axis_signs"):

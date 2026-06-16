@@ -393,7 +393,6 @@ def _make_umi_dual_cartesian_source(config: PolicyRunnerConfig) -> UmiDualCartes
         max_linear_step_m=umi.max_linear_step_m,
         max_angular_step_rad=umi.max_angular_step_rad,
         input_moving_average_window=umi.input_moving_average_window,
-        target_lpf_tau_sec=umi.target_lpf_tau_sec,
         deadband_linear_m=umi.deadband_linear_m,
         deadband_angular_rad=umi.deadband_angular_rad,
         linear_axis_signs=umi.linear_axis_signs,

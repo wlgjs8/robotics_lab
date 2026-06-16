@@ -340,9 +340,9 @@ cartesian_control:
   pose_track_smd:
     enable: true
     damping_ratio_linear: 1.0
-    natural_frequency_linear_hz: 3.0 # 2.5 #1.5 #2.5
+    natural_frequency_linear_hz: 2.5 #1.5 #2.5
     damping_ratio_angular: 1.0
-    natural_frequency_angular_hz: 2.5 #2.0 #1.0 #2.5
+    natural_frequency_angular_hz: 2.0 #1.0 #2.5
     # Velocity feedforward: damp on velocity error (goal_dot - x_dot) so a
     # constant-velocity goal tracks with ~0 lag (removes the ~16-38mm ramp lag in
     # the twist_via_smd reach). Decouples fn from accuracy: with this ON you can
@@ -365,11 +365,11 @@ cartesian_control:
     
     # max_linear_velocity_m_s: 0.35        # 250 mm/s (was 50 - capped fast teleop)
     # max_linear_accel_m_s2: 5.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
-    max_linear_velocity_m_s: 1.5        # 250 mm/s (was 50 - capped fast teleop)
-    max_linear_accel_m_s2: 40.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
+    max_linear_velocity_m_s: 1.0        # 250 mm/s (was 50 - capped fast teleop)
+    max_linear_accel_m_s2: 20.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
     # max_angular_velocity_rad_s: 0.9   # 50 deg/s
     max_angular_velocity_rad_s: 5.0   # 50 deg/s
-    max_angular_accel_rad_s2: 100.0     # 100 deg/s^2
+    max_angular_accel_rad_s2: 50.0     # 100 deg/s^2
   # max_command_actual_error_deg: [5, 5, 5, 8, 8, 10]
   max_command_actual_error_deg: [10, 10, 10, 16, 16, 20]
   reset_velocity_integrator_on_mode_change: true

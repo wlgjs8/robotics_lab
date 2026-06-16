@@ -496,35 +496,6 @@ class UmiDualCartesianTest(unittest.TestCase):
         self.assertAlmostEqual(second.left["tcp_target_stand"][0], 1.02, places=9)
         self.assertAlmostEqual(held.left["tcp_target_stand"][0], 1.02, places=9)
 
-    def test_target_lpf_smooths_step_exponentially(self):
-        reader = MockUmiPoseReader(
-            [
-                {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
-                {"pose": [0.1, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.002},
-            ]
-        )
-        source = UmiDualCartesianActionSource(
-            reader,
-            MockUmiPoseReader([]),
-            gripper_offset=(0.0, 0.0, 0.0),
-            max_linear_step_m=1.0,
-            target_lpf_tau_sec=0.018,  # alpha = 0.002 / (0.018 + 0.002) = 0.1
-        )
-
-        first = source.next_intent(sample_state(), 0.0)
-        second = source.next_intent(sample_state(), 0.002)
-        # Reader is exhausted; sample-hold keeps the last raw target so the
-        # filter keeps converging toward it.
-        third = source.next_intent(sample_state(), 0.004)
-
-        self.assertIsNotNone(first)
-        self.assertIsNotNone(second)
-        self.assertIsNotNone(third)
-        assert first is not None and second is not None and third is not None
-        self.assertEqual(first.left["tcp_target_stand"][0], 1.0)
-        self.assertAlmostEqual(second.left["tcp_target_stand"][0], 1.01)
-        self.assertAlmostEqual(third.left["tcp_target_stand"][0], 1.019)
-
     def test_deadband_freezes_micro_jitter_and_passes_real_motion(self):
         reader = MockUmiPoseReader(
             [
@@ -553,7 +524,7 @@ class UmiDualCartesianTest(unittest.TestCase):
         self.assertEqual(jitter.left["tcp_target_stand"], [1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
         self.assertAlmostEqual(motion.left["tcp_target_stand"][0], 1.001)
 
-    def test_lpf_with_deadband_freezes_exactly_when_stationary(self):
+    def test_deadband_freezes_exactly_when_stationary(self):
         reader = MockUmiPoseReader(
             [
                 {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
@@ -566,7 +537,6 @@ class UmiDualCartesianTest(unittest.TestCase):
             MockUmiPoseReader([]),
             gripper_offset=(0.0, 0.0, 0.0),
             max_linear_step_m=1.0,
-            target_lpf_tau_sec=0.05,
             deadband_linear_m=0.0003,
             deadband_angular_rad=0.005,
         )
@@ -579,8 +549,7 @@ class UmiDualCartesianTest(unittest.TestCase):
         self.assertIsNotNone(jitter_a)
         self.assertIsNotNone(jitter_b)
         assert first is not None and jitter_a is not None and jitter_b is not None
-        # Output is bit-exact frozen, not merely close: the deadband gates the
-        # filter input so the EMA never creeps while only jitter is present.
+        # Output is bit-exact frozen while only jitter is present.
         self.assertEqual(jitter_a.left["tcp_target_stand"], [1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
         self.assertEqual(jitter_b.left["tcp_target_stand"], [1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
 
@@ -677,7 +646,6 @@ class UmiDualCartesianTest(unittest.TestCase):
                 "safety": {"allow_rbpodo_controller_simulation_cartesian": True},
                 "umi_dual_cartesian": {
                     "max_linear_step_m": 0.01,
-                    "target_lpf_tau_sec": 0.05,
                     "deadband_linear_m": 0.0003,
                     "deadband_angular_rad": 0.005,
                     "left": {"mock_script": "pgmode_umi_smoke"},
@@ -691,7 +659,6 @@ class UmiDualCartesianTest(unittest.TestCase):
         self.assertIsInstance(source, UmiDualCartesianActionSource)
         self.assertFalse(cfg.safety.allow_real_motion)
         assert isinstance(source, UmiDualCartesianActionSource)
-        self.assertEqual(source.target_lpf_tau_sec, 0.05)
         self.assertEqual(source.deadband_linear_m, 0.0003)
         self.assertEqual(source.deadband_angular_rad, 0.005)
         source.close()
