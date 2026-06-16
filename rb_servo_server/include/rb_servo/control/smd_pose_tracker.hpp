@@ -53,6 +53,10 @@ private:
     Eigen::Vector3d angular_velocity_ = Eigen::Vector3d::Zero();  // body frame
     Eigen::Vector3d goal_position_ = Eigen::Vector3d::Zero();
     Eigen::Quaterniond goal_rotation_ = Eigen::Quaterniond::Identity();
+    // Goal pose at the previous step(), used to estimate the goal velocity for
+    // the optional velocity feedforward term (config_.velocity_feedforward).
+    Eigen::Vector3d previous_goal_position_ = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond previous_goal_rotation_ = Eigen::Quaterniond::Identity();
     std::optional<Pose6D> previous_command_;
 };
 

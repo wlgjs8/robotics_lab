@@ -560,6 +560,17 @@ struct PoseTrackSmdConfig {
     double max_linear_accel_m_s2 = 0.0;
     double max_angular_velocity_rad_s = 0.0;
     double max_angular_accel_rad_s2 = 0.0;
+    // Velocity feedforward: damp on the velocity ERROR (goal_dot - x_dot) rather
+    // than the absolute x_dot, so the error dynamics become
+    //   e_ddot + 2*zeta*wn*e_dot + wn^2*e = goal_ddot.
+    // A constant-velocity (ramp) goal then has ZERO steady-state lag, while jitter
+    // (the goal_ddot term) still rolls off through the 2nd-order response. This
+    // decouples natural_frequency from tracking accuracy: fn becomes a pure
+    // smoothing dial that can be lowered for more smoothing without adding lag.
+    // The goal velocity is estimated internally from the per-tick goal delta
+    // (auto stand/body frame; valid because every caller integrates the goal once
+    // per step()). Off by default = exact legacy 2nd-order SMD.
+    bool velocity_feedforward = false;
 };
 
 enum class CartesianLimitPolicy {

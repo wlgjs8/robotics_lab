@@ -2334,6 +2334,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "max_linear_accel_m_s2",
                 "max_angular_velocity_rad_s",
                 "max_angular_accel_rad_s2",
+                "velocity_feedforward",
             }, "cartesian_control.pose_track_smd");
             if (has(smd, "enable")) {
                 cfg.cartesian_control.pose_track_smd.enable =
@@ -2372,6 +2373,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(smd, "max_angular_accel_rad_s2")) {
                 cfg.cartesian_control.pose_track_smd.max_angular_accel_rad_s2 = asDouble(
                     smd["max_angular_accel_rad_s2"], "cartesian_control.pose_track_smd.max_angular_accel_rad_s2");
+            }
+            if (has(smd, "velocity_feedforward")) {
+                cfg.cartesian_control.pose_track_smd.velocity_feedforward = asBool(
+                    smd["velocity_feedforward"], "cartesian_control.pose_track_smd.velocity_feedforward");
             }
         }
     }

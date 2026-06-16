@@ -791,6 +791,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
         default=None,
         help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
     )
+    flow_infer.add_argument(
+        "--chunk-crossfade-steps",
+        type=int,
+        default=0,
+        help=(
+            "Blend the first N twists after each chunk-resample boundary from the "
+            "previously emitted twist (alpha 0->1) to remove the boundary jerk "
+            "without steady-state lag. 0 (default) disables crossfade. Try 2-3."
+        ),
+    )
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.002)
     flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.01)
 
@@ -1398,6 +1408,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 "max_linear_step_m": args.max_linear_step_m,
                 "max_angular_step_rad": args.max_angular_step_rad,
                 "chunk_execute_steps": args.chunk_execute_steps,
+                "chunk_crossfade_steps": args.chunk_crossfade_steps,
                 "allow_rbpodo_controller_simulation_cartesian": (
                     rollout_policy.allows_controller_simulation_cartesian
                 ),

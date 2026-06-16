@@ -1,0 +1,264 @@
+schema: robotics_lab.rb_servo_server.v1
+
+# =====================================================================================
+# STACK CONFIG (REAL) — single source of truth for `make run MODE=real`.
+# pgmode real: run_mode=real, operation_mode=real.
+# Real/sim env gates are retired; no RB_ALLOW_* envs are needed.
+# =====================================================================================
+left_robot:
+  backend_type: rbpodo
+  run_mode: real
+  name: left_stack_real
+  ip: "172.28.60.200"
+  operation_mode: real            # PHYSICAL MOTION
+  command_timeout_sec: 0.05
+  initial_q_deg: [0, -30, 80, 0, 60, 0]
+  speed_bar: 1.0                  # applied at backend initialize via set_speed_bar()
+  servo_t1_sec: 0.002
+  servo_t2_sec: 0.021
+  servo_gain: 1000000.0           # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
+  servo_alpha: 10.0
+  disable_waiting_ack: true    # ACK-off 500Hz streaming (requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1)
+
+right_robot:
+  backend_type: rbpodo
+  run_mode: real
+  name: right_stack_real
+  ip: "172.28.60.201"
+  operation_mode: real            # PHYSICAL MOTION
+  command_timeout_sec: 0.05
+  initial_q_deg: [0, -30, 80, 0, 60, 0]
+  speed_bar: 1.0               # applied at backend initialize via set_speed_bar()
+  servo_t1_sec: 0.002
+  servo_t2_sec: 0.021
+  servo_gain: 1000000.0                 # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
+  servo_alpha: 10.0
+  disable_waiting_ack: true    # ACK-off 500Hz streaming (requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1)
+
+left_mount:
+  base_pose_in_stand: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
+
+right_mount:
+  base_pose_in_stand: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
+
+servo:
+  rate_hz: 500
+  command_timeout_sec: 0.2
+  io_model: direct
+  startup_mode: Hold
+  send_servo_commands: true
+  enable_realtime_priority: true
+  realtime_priority: 80
+  cpu_core: 2
+  filter_dt_min_ratio: 0.5
+  # Final-stage joint MA: 40 ticks @500Hz = 80ms boxcar (~40ms delay).
+  output_moving_average_window: 1
+  filter_dt_max_ratio: 1.5
+  servo_t1_rate_match_tolerance_ratio: 0.2
+  allow_servo_t1_rate_mismatch: true   # servo param experiment: t1 != 2ms period accepted (was false)
+  # REAL physical-motion opt-in: accept the vendor -2001 (op_stat_self_collision/robot_time
+  # field-layout garbage) as unavailable instead of latching diagnostics_suspect. ONLY
+  # these two fields are suppressed; everything else still faults. Fail-closed (needs
+  # operation_mode==real + RB_ALLOW_REAL_ROBOT/MOTION + RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION).
+  allow_real_motion_with_suspect_diagnostics: true
+  # Controller-sim advisory carve-outs are intentionally OMITTED here: they are inert in
+  # real mode and must not be relied on for physical motion.
+  # Async streaming (sdk_ack_worker) is a controller-simulation-only feature and is
+  # rejected in real mode by config validation. Real motion uses the synchronous direct
+  # send path (io_model: direct above); per-command ACK was ~176us in pgmode, well within
+  # the 2ms 500Hz budget. A real send failure latches SendFailure (no advisory in real).
+  rbpodo_async_streaming:
+    enable: false
+
+safety:
+  q_min_deg: [-360, -360, -360, -360, -360, -360]
+  q_max_deg: [360, 360, 360, 360, 360, 360]
+  # Halved vs the sim profile for the first physical run.
+  # dq_max_deg_s: [60, 60, 60, 90, 90, 120]      # was halved [30,30,30,45,45,60] for first run
+  dq_max_deg_s: [120, 120, 120, 120, 120, 120]      # was halved [30,30,30,45,45,60] for first run1
+  ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]  # was halved for first run
+  joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
+  joint_wrap_for_startup_validation: false
+  joint_wrap_for_motion_safety: false
+  command_timeout_sec: 0.2
+  max_tracking_error_deg: 30.0                 # was 10: fast teleop catch-up tripped the latch
+  tracking_error_policy: fault_latch           # real: tracking error MUST latch (no advisory)
+  latch_fault_on_robot_state_error: true
+  stop_both_arms_on_single_arm_error: true
+  # Server-side dual-arm capsule self-collision guard — independent of the controller's
+  # (suppressed/untrusted) op_stat_self_collision. ClampToHold refuses to advance toward
+  # collision but never permanently latches; this is the collision net for physical motion.
+  # stand + left arm + right arm을 하나의 self로 보는 캡슐 가드.
+  # Checked pairs: left<->right, left<->stand, right<->stand (intra-arm 미검사).
+  # stand_capsules는 dual_rb3_730e_stand_ver3.urdf collision box에서 유도 (stand frame).
+  # margin_m은 radius 위에 더해지는 clearance threshold (기구 오차 여유).
+  # 초기 자세 최소 stand 여유 25.3mm (bone1<->mount_plate, 회귀 테스트로 고정).
+  # Stand-frame safety floor: TCP z of either arm may never go below z_min_m
+  # (z=0 == stand origin plane). Runtime-adjustable from the viser GUI via the
+  # leaseless SetSafetyFloorZ command within [runtime_min_z_m, runtime_max_z_m].
+  # JointTarget(InitMotion/jog) SMD 프로파일: 풀스피드 램프 대신 임계감쇠
+  # 2차계 추종으로 부드럽게 이동. 아래 한계는 프로파일용 — 전역 dq_max/ddq_max는
+  # 외곽 하드 클램프로 그대로 적용됨. (TcpPoseTarget의 pose_track_smd와 대칭)
+  joint_target_smd:
+    enable: true
+    damping_ratio: 1.0          # 임계감쇠: 오버슈트 없음
+    natural_frequency_hz: 0.4
+    max_velocity_deg_s:  [30, 30, 30, 45, 45, 60]
+    max_accel_deg_s2:    [150, 150, 150, 250, 250, 350]
+  floor_constraint:
+    enable: true
+    z_min_m: 0.015
+    runtime_min_z_m: 0.0
+    runtime_max_z_m: 0.5
+    fail_policy: clamp_hold
+    monitor_only: false
+    # PIKA 그리퍼 팁 2점 (TCP 프레임 오프셋, URDF pika_gripper.STL에서 도출:
+    # tcp 프레임 = 팁 평면(z 247.642mm @attachment_site), 팁 벌어짐 ±53.8mm는
+    # tool visual의 z+90° 회전 반영 시 TCP x축 방향). TCP가 회전했을 때 팁이
+    # TCP 점보다 아래로 내려가는 케이스를 잡는다. 체크는 팔당 3점(TCP+팁 2).
+    tcp_offset_points:
+      - { name: gripper_tip_a, offset_m: [ 0.054, 0.0, 0.0 ] }
+      - { name: gripper_tip_b, offset_m: [-0.054, 0.0, 0.0 ] }
+  self_collision:
+    enable: true
+    margin_m: 0.003
+    fail_policy: fault_latch
+    monitor_only: false  # ENFORCED for unverified-direction real-motion replay (was monitor)
+    check_left_right: true
+    check_left_stand: true
+    check_right_stand: true
+    # bone 0 (base->j1)은 mount plate 위에 장착되어 있어 제외 필수.
+    stand_ignore_bones: [0]
+    stand_capsules:
+      - { name: base_plate_1,     p0_m: [-0.1500,  0.0600, 0.0050], p1_m: [ 0.1500,  0.0600, 0.0050], radius_m: 0.0602 }
+      - { name: base_plate_2,     p0_m: [-0.1500, -0.0600, 0.0050], p1_m: [ 0.1500, -0.0600, 0.0050], radius_m: 0.0602 }
+      - { name: lower_column,     p0_m: [ 0.0000,  0.0000, 0.0000], p1_m: [ 0.0000,  0.0000, 0.4300], radius_m: 0.0943 }
+      - { name: upper_column,     p0_m: [ 0.0000,  0.0159, 0.3941], p1_m: [ 0.0000, -0.1432, 0.5532], radius_m: 0.0943 }
+      - { name: shoulder_block_1, p0_m: [-0.1050, -0.1404, 0.6034], p1_m: [ 0.1050, -0.1404, 0.6034], radius_m: 0.0530 }
+      - { name: shoulder_block_2, p0_m: [-0.1050, -0.1934, 0.6564], p1_m: [ 0.1050, -0.1934, 0.6564], radius_m: 0.0530 }
+      - { name: shoulder_block_3, p0_m: [-0.1050, -0.1934, 0.5504], p1_m: [ 0.1050, -0.1934, 0.5504], radius_m: 0.0530 }
+      - { name: shoulder_block_4, p0_m: [-0.1050, -0.2464, 0.6034], p1_m: [ 0.1050, -0.2464, 0.6034], radius_m: 0.0530 }
+      - { name: shoulder_plate_1, p0_m: [-0.2500, -0.2136, 0.6766], p1_m: [ 0.2500, -0.2135, 0.6766], radius_m: 0.0388 }
+      - { name: shoulder_plate_2, p0_m: [-0.2500, -0.2666, 0.6235], p1_m: [ 0.2500, -0.2666, 0.6235], radius_m: 0.0388 }
+      - { name: mount_plate_a_1,  p0_m: [-0.2562, -0.2172, 0.6838], p1_m: [-0.0992, -0.1062, 0.5728], radius_m: 0.0403 }
+      - { name: mount_plate_a_2,  p0_m: [-0.2562, -0.2738, 0.6272], p1_m: [-0.0992, -0.1628, 0.5162], radius_m: 0.0403 }
+      - { name: mount_plate_b_1,  p0_m: [ 0.0992, -0.1062, 0.5728], p1_m: [ 0.2562, -0.2172, 0.6838], radius_m: 0.0403 }
+      - { name: mount_plate_b_2,  p0_m: [ 0.0992, -0.1628, 0.5162], p1_m: [ 0.2562, -0.2738, 0.6272], radius_m: 0.0403 }
+
+network:
+  command_bind: "udp://127.0.0.1:50256"
+  state_pub_endpoints:
+    - "udp://127.0.0.1:50356"
+    - "udp://127.0.0.1:50366"
+    - "udp://127.0.0.1:50376"
+  state_pub_rate_hz: 100
+  command_source_allowlist: ["127.0.0.1/32"]
+
+command_source:
+  enforce_lease: true
+  lease_timeout_sec: 60.0
+
+logging:
+  enable: true
+  directory: "./logs"
+  flush_period_ms: 100
+  queue_capacity: 4096
+
+force_control:
+  provider: null
+  enable: false
+
+kinematics:
+  enable: true
+  provider: pinocchio
+  urdf: "../descriptions/urdf/rb3_730e.urdf"
+  base_link: "world"
+  tip_link: "tcp"
+  joint_names:
+    - base_joint
+    - shoulder_joint
+    - elbow_joint
+    - wrist1_joint
+    - wrist2_joint
+    - wrist3_joint
+  q_units: deg
+  publish_tcp: true
+  ik:
+    enable: true
+    max_iterations: 50
+    timeout_ms: 20.0
+    damping: 0.001
+    # ANTI-TREMBLE (was 0.002 / 0.005): the tolerance is a DEAD ZONE for the
+    # 500Hz streaming TcpPoseTarget path — solveIk returns the seed (q_actual)
+    # unchanged whenever the tracking error is inside it. At teleop speeds
+    # (10-25mm/s) the steady-state tracking error (speed x ~100ms servo lag)
+    # sits exactly at the old 2mm boundary, producing a 3-5Hz relay limit
+    # cycle (= 1/(2 x loop delay)). Tighter tolerance shrinks the dead zone
+    # so the solver actually iterates each tick; typical cost 1-3 DLS steps.
+    position_tolerance_m: 0.0000002
+    orientation_tolerance_rad: 0.000001
+    max_step_deg: [2, 2, 2, 3, 3, 4]
+
+cartesian_control:
+  enable: true
+  allow_in_simulation: true
+  allow_in_real: true                          # PHYSICAL real Cartesian (needs RB_ALLOW_REAL_CARTESIAN=1)
+  allow_in_controller_simulation: false        # must be false for a real (non-sim) config
+  enable_benchmark_primitives: false
+  warn_ik_duration_us: 3000
+  fail_ik_duration_us: 5000
+  # path_kp_* now drive only the circle benchmark primitive: TcpLinearMove
+  # runs the pose_track_smd feedforward chain (quintic profile, no measured-
+  # state feedback), same as streaming TcpPoseTarget.
+  path_kp_pos: 3.0                # anti-tremble (was 6.0): less reactive to tiny errors
+  path_kp_ori: 3.0                # anti-tremble (was 6.0)
+  twist_orientation_hold_kp: 3.0  # anti-tremble (was 6.0): smoother wrist orientation hold
+  twist_angular_deadband_rad_s: 0.0001
+  velocity_damping: 0.04          # anti-tremble (was 0.01): damp IK velocity solution
+  # Low-speed first-run Cartesian limits (sim profile used 0.2 / 0.4 / 0.002 / 0.02).
+  # Twist limits doubled (0.05/0.1 -> 0.10/0.2) for 2x spacemouse teleop speed —
+  # PHYSICAL real speed decision (operator-approved); first-run halved values retired.
+  max_twist_linear_m_s: 0.10
+  max_twist_angular_rad_s: 0.2
+  max_linear_move_speed_m_s: 0.05
+  max_angular_move_speed_rad_s: 0.1
+  max_cartesian_step_m: 0.001
+  max_cartesian_step_rad: 0.01
+  exceed_limit_policy: clamp
+  velocity_target_integration: previous_command
+  velocity_target_lookahead_sec: 0.04
+  # SMD pose tracking for streaming TcpPoseTarget (UMI teleop): received target
+  # deltas integrate into a goal pose; the published target follows it as a
+  # critically damped (zeta=1) second-order system stepped every 2ms tick.
+  # Mass is fixed at 1.0. TUNE HERE: raise natural_frequency_*_hz step by step
+  # (0.5 -> 0.8 -> 1.2 -> 2.0 ...) for snappier tracking; translation and
+  # rotation are independent. Settling time ~ 1/(zeta*2*pi*fn) * 4.
+  pose_track_smd:
+    enable: true
+    damping_ratio_linear: 1.0
+    natural_frequency_linear_hz: 3.0
+    damping_ratio_angular: 1.0
+    natural_frequency_angular_hz: 3.0
+    # Saturation clamps (vector-norm, direction-preserving). Mass=1.0 so the
+    # accel clamp IS the max-force clamp; zeta/fn dynamics stay exact inside
+    # the limits. NOTE with these numbers a full-speed (50mm/s) stop is force-
+    # limited to ~12.5mm of glide (v^2/2a) on large moves.
+    max_linear_velocity_m_s: 0.25        # 250 mm/s (was 50 - capped fast teleop)
+    max_linear_accel_m_s2: 1.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
+    max_angular_velocity_rad_s: 1.745329252  # 100 deg/s (was 50)
+    max_angular_accel_rad_s2: 6.981317008    # 400 deg/s^2 (was 100)
+  max_command_actual_error_deg: [5, 5, 5, 8, 8, 10]
+  reset_velocity_integrator_on_mode_change: true
+  command_actual_error_policy: reset
+  circle_move:
+    allow_in_simulation: false
+    allow_in_real: false
+    max_diameter_m: 0.20
+    min_period_sec: 3.0
+  linear_move:
+    min_duration_sec: 0.05
+    max_duration_sec: 10.0
+    default_linear_speed_m_s: 0.03
+    default_angular_speed_rad_s: 0.2
+    constant_orientation_tolerance_rad: 0.005
+    default_orientation_mode: constant

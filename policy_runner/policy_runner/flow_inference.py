@@ -336,6 +336,7 @@ class FlowMatchingActionSource:
         max_linear_step_m: float = 0.002,
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
+        chunk_crossfade_steps: int = 0,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
@@ -451,6 +452,16 @@ class FlowMatchingActionSource:
         self.image_decode_count = 0
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
+        # Chunk-boundary twist crossfade: blend the first `chunk_crossfade_steps`
+        # twists of a freshly activated chunk from the previously emitted twist
+        # (alpha ramps 0->1) so the velocity is continuous across the resample
+        # boundary, removing the boundary jerk without steady-state lag. 0 = off.
+        self._chunk_crossfade_steps = int(chunk_crossfade_steps)
+        self._steps_since_boundary = 0
+        self._prev_emitted_twist_by_arm: dict[str, tuple[float, ...] | None] = {
+            "left": None,
+            "right": None,
+        }
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         # Per-policy-step action logger (env-gated, debug only). Set
         # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
@@ -497,6 +508,7 @@ class FlowMatchingActionSource:
                 chunk = rotate_flow_arm_vectors(chunk, self.ee_local_r_align.T)
             self._chunk = chunk
             self._chunk_index = 0
+            self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
         step = self._chunk[self._chunk_index]
         self._chunk_index += 1
         gripper_targets = self._integrate_gripper_targets(step, payload)
@@ -574,6 +586,9 @@ class FlowMatchingActionSource:
         self, step: np.ndarray, gripper_targets: dict[str, float | None]
     ) -> CommandIntent | None:
         intent = self._tcp_twist_local_step_intent(step, gripper_targets=gripper_targets)
+        # Advance the crossfade ramp once per executed policy step (not per servo
+        # tick): the streamed path re-emits the same held intent between steps.
+        self._steps_since_boundary += 1
         self._log_action_step(step, intent)
         return intent
 
@@ -604,6 +619,7 @@ class FlowMatchingActionSource:
     def _activate_chunk(self, chunk: np.ndarray, now_monotonic: float) -> None:
         self._chunk = chunk
         self._chunk_index = 0
+        self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
         self._step_deadline = now_monotonic + float(self.policy_dt_sec)
 
     def _stream_prefetch_at(self) -> int:
@@ -615,6 +631,10 @@ class FlowMatchingActionSource:
         right = _ZERO_TWIST if (len(self.arm_mask) > 1 and self.arm_mask[1] > 0.0) else None
         self._last_nonzero_twist_by_arm["left"] = False
         self._last_nonzero_twist_by_arm["right"] = False
+        # The arm is held at zero velocity; anchor the crossfade reference at zero
+        # so the next chunk ramps in from rest (smooth restart after a stall).
+        self._prev_emitted_twist_by_arm["left"] = _ZERO_TWIST
+        self._prev_emitted_twist_by_arm["right"] = _ZERO_TWIST
         if self.command_family_option == "tcp_twist_local":
             return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
         return None
@@ -719,12 +739,31 @@ class FlowMatchingActionSource:
     def _twist_payload_for_arm(self, arm: str, delta: np.ndarray) -> tuple[float, ...] | None:
         twist = self._delta_to_twist(delta)
         if _has_nonzero(twist):
+            twist = self._apply_chunk_crossfade(arm, twist)
             self._last_nonzero_twist_by_arm[arm] = True
+            self._prev_emitted_twist_by_arm[arm] = twist
             return twist
         if self._last_nonzero_twist_by_arm[arm]:
             self._last_nonzero_twist_by_arm[arm] = False
+            self._prev_emitted_twist_by_arm[arm] = _ZERO_TWIST
             return _ZERO_TWIST
         return None
+
+    def _apply_chunk_crossfade(
+        self, arm: str, twist: tuple[float, ...]
+    ) -> tuple[float, ...]:
+        """Blend the first few twists after a chunk boundary from the previously
+        emitted twist so velocity is continuous across the resample. alpha ramps
+        from 1/(K+1) at the boundary step to 1.0 after K steps; outside the window
+        (or with no prior twist) the new twist passes through unchanged."""
+        k = self._chunk_crossfade_steps
+        if k <= 0 or self._steps_since_boundary >= k:
+            return twist
+        prev = self._prev_emitted_twist_by_arm.get(arm)
+        if prev is None:
+            return twist
+        alpha = (self._steps_since_boundary + 1) / (k + 1)
+        return tuple((1.0 - alpha) * p + alpha * t for p, t in zip(prev, twist))
 
     def _delta_to_twist(self, delta: np.ndarray) -> tuple[float, ...]:
         assert self.policy_dt_sec is not None
@@ -967,6 +1006,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
         max_linear_step_m: float = 0.002,
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
+        chunk_crossfade_steps: int = 0,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
@@ -1104,6 +1144,16 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
         self.image_decode_count = 0
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
+        # Chunk-boundary twist crossfade: blend the first `chunk_crossfade_steps`
+        # twists of a freshly activated chunk from the previously emitted twist
+        # (alpha ramps 0->1) so the velocity is continuous across the resample
+        # boundary, removing the boundary jerk without steady-state lag. 0 = off.
+        self._chunk_crossfade_steps = int(chunk_crossfade_steps)
+        self._steps_since_boundary = 0
+        self._prev_emitted_twist_by_arm: dict[str, tuple[float, ...] | None] = {
+            "left": None,
+            "right": None,
+        }
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         # Per-policy-step action logger (env-gated, debug only). Set
         # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
@@ -1160,6 +1210,7 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         max_linear_step_m: float = 0.002,
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
+        chunk_crossfade_steps: int = 0,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
@@ -1257,6 +1308,16 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         self.image_decode_count = 0
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
+        # Chunk-boundary twist crossfade: blend the first `chunk_crossfade_steps`
+        # twists of a freshly activated chunk from the previously emitted twist
+        # (alpha ramps 0->1) so the velocity is continuous across the resample
+        # boundary, removing the boundary jerk without steady-state lag. 0 = off.
+        self._chunk_crossfade_steps = int(chunk_crossfade_steps)
+        self._steps_since_boundary = 0
+        self._prev_emitted_twist_by_arm: dict[str, tuple[float, ...] | None] = {
+            "left": None,
+            "right": None,
+        }
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         # Per-policy-step action logger (env-gated, debug only). Set
         # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
