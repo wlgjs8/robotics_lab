@@ -1,10 +1,26 @@
 #include "rb_servo/logging/servo_logger.hpp"
 
+#include <ctime>
 #include <filesystem>
 #include <iostream>
 #include <string>
 
 namespace rb_servo {
+namespace {
+
+// Per-run local-time stamp, matching the policy_runner action-log convention
+// (actions_%Y%m%d_%H%M%S.jsonl). Local time = wall-clock (Korea time when the
+// host is set to KST), so runs sort and read naturally.
+std::string runStamp() {
+    std::time_t now = std::time(nullptr);
+    std::tm tm_local{};
+    localtime_r(&now, &tm_local);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm_local);
+    return std::string(buf);
+}
+
+}  // namespace
 
 ServoLogger::ServoLogger(const LoggingConfig& config) : config_(config) {}
 
@@ -17,10 +33,23 @@ bool ServoLogger::start() {
     if (running_) return true;
 
     std::filesystem::create_directories(config_.directory);
-    file_.open(config_.directory + "/servo_log.csv", std::ios::out | std::ios::trunc);
+    // One file per run: servo_log_<YYYYMMDD_HHMMSS>.csv (no longer truncated/
+    // overwritten each run). `servo_log.csv` is kept as a symlink to the latest
+    // run so existing tooling/acceptance scripts that read the fixed name still
+    // resolve to the current run.
+    const std::string run_name = "servo_log_" + runStamp() + ".csv";
+    file_.open(config_.directory + "/" + run_name, std::ios::out | std::ios::trunc);
     if (!file_) {
         std::cerr << "[ERROR] failed to open servo log file\n";
         return false;
+    }
+    const std::filesystem::path latest = std::filesystem::path(config_.directory) / "servo_log.csv";
+    std::error_code ec;
+    std::filesystem::remove(latest, ec);  // clear any prior file/symlink
+    std::filesystem::create_symlink(run_name, latest, ec);  // relative target
+    if (ec) {
+        std::cerr << "[WARN] servo log: could not update servo_log.csv symlink: "
+                  << ec.message() << "\n";
     }
     writeHeader();
 

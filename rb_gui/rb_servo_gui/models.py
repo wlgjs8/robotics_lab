@@ -513,6 +513,7 @@ class StateSnapshot:
     cartesian_gate: Mapping[str, Any] | None
     self_collision: Mapping[str, Any] | None
     floor_constraint: Mapping[str, Any] | None
+    freedrive: Mapping[str, Any] | None
     raw: Mapping[str, Any]
 
     @classmethod
@@ -557,6 +558,7 @@ class StateSnapshot:
             cartesian_gate=top_cartesian_gate if isinstance(top_cartesian_gate, Mapping) else None,
             self_collision=data.get("self_collision") if isinstance(data.get("self_collision"), Mapping) else None,
             floor_constraint=data.get("floor_constraint") if isinstance(data.get("floor_constraint"), Mapping) else None,
+            freedrive=data.get("freedrive") if isinstance(data.get("freedrive"), Mapping) else None,
             raw=data,
         )
 

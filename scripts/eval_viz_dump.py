@@ -215,7 +215,7 @@ def main() -> None:
     if payload.get("model_family") != "direct_bc_chunk":
         print(f"WARNING: model_family={payload.get('model_family')} (script tuned for direct_bc_chunk)")
     stats = payload["dataset_stats"]
-    action_frame = str(stats.get("proprio_action_frame", "stand"))
+    action_frame = str(stats.get("proprio_action_frame", "ee_local"))
     meta = _run_meta(run_dir)
     camera_names = list(payload.get("camera_names", []))
     horizon = int(payload["action_horizon"])

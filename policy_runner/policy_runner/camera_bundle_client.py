@@ -10,6 +10,9 @@ from typing import Any
 
 _SLOT_HEADER = struct.Struct("<QQQQQQIIIIII")
 _MISSING_BUNDLE_AGE_US = 2**62
+# Color formats this client can decode. camera_server may also publish depth
+# (z16) frames; those are skipped in poll() so they don't drop the whole bundle.
+_COLOR_FORMATS = frozenset({"bgr8", "rgb8", "bgra8", "rgba8"})
 
 
 def bundle_clock_ns() -> int:
@@ -163,6 +166,11 @@ class CameraBundleClient:
         decoded: dict[str, CameraFrame] = {}
         for cam_name, frame_meta in frames_meta.items():
             if not isinstance(frame_meta, dict) or not frame_meta.get("valid", False):
+                continue
+            # Skip non-color streams (e.g. depth z16) instead of dropping the
+            # whole bundle — camera_server may publish color+depth, but this
+            # client decodes color only.
+            if str(frame_meta.get("format", "")).lower() not in _COLOR_FORMATS:
                 continue
             try:
                 decoded[str(cam_name)] = self._decode_frame(str(cam_name), frame_meta)

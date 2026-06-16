@@ -14,7 +14,8 @@ enum class BackendOp {
     ReadState,
     SendServoJ,
     Stop,
-    ResetFault
+    ResetFault,
+    SetFreedrive
 };
 
 enum class BackendErrorKind {

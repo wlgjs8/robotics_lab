@@ -300,13 +300,16 @@ std::vector<ArmCapsule> PinocchioKinematics::armCollisionCapsulesInStand(
     return capsules;
 }
 
-IkResult PinocchioKinematics::solveIk(
+IkResult PinocchioKinematics::solveIkDamped(
     ArmId arm,
     const Pose6D& target_tcp_stand,
     const JointArray& seed_q_deg,
-    const ArmMountConfig& mount
+    const ArmMountConfig& mount,
+    double damping_scale
 ) const {
     (void)arm;
+    const double eff_damping = config_.ik.damping * damping_scale;
+    const double eff_damping_max = config_.ik.damping_max * damping_scale;
     const auto started = std::chrono::steady_clock::now();
     const auto elapsedUs = [&]() {
         return std::chrono::duration<double, std::micro>(
@@ -341,6 +344,10 @@ IkResult PinocchioKinematics::solveIk(
     double position_error_m = 0.0;
     double orientation_error_rad = 0.0;
     int iterations = 0;
+    // Conditioning diagnostics from the most recent DLS step (carried to the
+    // convergence return, where the step itself is not recomputed).
+    double last_min_singular_value = 0.0;
+    double last_applied_damping = eff_damping;
 
     for (; iterations <= config_.ik.max_iterations; ++iterations) {
         const auto now = std::chrono::steady_clock::now();
@@ -389,6 +396,18 @@ IkResult PinocchioKinematics::solveIk(
             result.orientation_error_rad = orientation_error_rad;
             result.duration_us = elapsedUs();
             result.iterations = iterations;
+            result.min_singular_value = last_min_singular_value;
+            result.applied_damping = last_applied_damping;
+            double solution_jump_deg = 0.0;
+            for (std::size_t i = 0; i < kDof; ++i) {
+                solution_jump_deg = std::max(
+                    solution_jump_deg,
+                    std::abs(result.q_solution_deg[i] - seed_q_deg[i]));
+            }
+            result.solution_jump_deg = solution_jump_deg;
+            result.branch_jump_suspected =
+                config_.ik.max_solution_jump_deg > 0.0 &&
+                solution_jump_deg > config_.ik.max_solution_jump_deg;
             return result;
         }
         if (iterations == config_.ik.max_iterations) break;
@@ -432,23 +451,35 @@ IkResult PinocchioKinematics::solveIk(
             );
         }
 
-        const double lambda = config_.ik.damping;
-        const Eigen::Matrix<double, 6, 6> dls_matrix =
-            task_jacobian * task_jacobian.transpose() +
-            (lambda * lambda) * Eigen::Matrix<double, 6, 6>::Identity();
-        const Eigen::LDLT<Eigen::Matrix<double, 6, 6>> ldlt(dls_matrix);
-        if (ldlt.info() != Eigen::Success) {
-            return ik_solver::failureResult(
-                ik_solver::kReasonSingularOrIllConditioned,
-                fromPinocchioQ(q, impl_->model, impl_->joints),
-                position_error_m,
-                orientation_error_rad,
-                iterations,
-                elapsedUs()
-            );
+        // Selective singularity-robust damped least squares via the SVD:
+        //   dq = -V diag(sigma_i / (sigma_i^2 + lambda_i^2)) U^T error
+        // lambda_i is the base damping outside the singular region and ramps up
+        // to `damping_max` only on directions whose singular value falls below
+        // `singular_region_eps`. This caps the inverse gain on the degenerate
+        // direction (preventing a branch-flipping joint blow-up) while leaving
+        // well-conditioned directions at full tracking accuracy.
+        const Eigen::VectorXd& singular_values = svd.singularValues();
+        const double base_lambda_sq = eff_damping * eff_damping;
+        const double eps = config_.ik.singular_region_eps;
+        const double extra_lambda_sq_max = eff_damping_max * eff_damping_max;
+        last_min_singular_value = singular_values.minCoeff();
+        double max_lambda_sq = base_lambda_sq;
+        Eigen::VectorXd inv_factors(singular_values.size());
+        for (Eigen::Index i = 0; i < singular_values.size(); ++i) {
+            const double sigma = singular_values[i];
+            double lambda_sq = base_lambda_sq;
+            if (eps > 0.0 && extra_lambda_sq_max > 0.0 && sigma < eps) {
+                const double ratio = sigma / eps;  // [0, 1)
+                lambda_sq += extra_lambda_sq_max * (1.0 - ratio * ratio);
+                max_lambda_sq = std::max(max_lambda_sq, lambda_sq);
+            }
+            inv_factors[i] = sigma / (sigma * sigma + lambda_sq);
         }
+        last_applied_damping = std::sqrt(max_lambda_sq);
 
-        const Eigen::VectorXd dq_full = -task_jacobian.transpose() * ldlt.solve(error);
+        const Eigen::VectorXd dq_full =
+            -svd.matrixV() * (inv_factors.asDiagonal() *
+                              (svd.matrixU().transpose() * error));
         if (!dq_full.array().isFinite().all()) {
             return ik_solver::failureResult(
                 ik_solver::kReasonSingularOrIllConditioned,
@@ -472,6 +503,57 @@ IkResult PinocchioKinematics::solveIk(
         iterations,
         elapsedUs()
     );
+}
+
+IkResult PinocchioKinematics::solveIk(
+    ArmId arm,
+    const Pose6D& target_tcp_stand,
+    const JointArray& seed_q_deg,
+    const ArmMountConfig& mount
+) const {
+    IkResult result = solveIkDamped(arm, target_tcp_stand, seed_q_deg, mount, 1.0);
+    const double thresh = config_.ik.max_solution_jump_deg;
+    // Feature off, solve failed, or no branch jump -> observability path unchanged.
+    if (thresh <= 0.0 || !result.success || result.solution_jump_deg <= thresh) {
+        return result;
+    }
+
+    // Branch-jump CLAMP step 1: re-solve the same tick with escalating damping so
+    // the step stays on the local IK branch instead of flipping to a distant one.
+    // The first attempt whose jump is within threshold wins; otherwise keep the
+    // most-damped successful attempt as best-effort.
+    const double scale = config_.ik.branch_jump_damping_scale;
+    const int retries = config_.ik.branch_jump_max_retries;
+    if (scale > 1.0 && retries > 0) {
+        double cur_scale = 1.0;
+        for (int r = 0; r < retries; ++r) {
+            cur_scale *= scale;
+            IkResult retry =
+                solveIkDamped(arm, target_tcp_stand, seed_q_deg, mount, cur_scale);
+            if (retry.success && retry.solution_jump_deg <= thresh) {
+                return retry;  // higher damping resolved the jump -> smooth small step
+            }
+            if (retry.success) {
+                result = retry;  // best-effort: carry the most-damped solution
+            }
+        }
+    }
+
+    // Branch-jump CLAMP step 2: still jumping (or re-solve disabled). Hold the
+    // seed so the downstream integrator produces zero motion this tick rather
+    // than a violent branch-flip. Gated, so the default (clamp off) stays pure
+    // observability (returns the flagged solution unchanged).
+    if (config_.ik.branch_jump_clamp_to_seed) {
+        IkResult held = result;
+        held.success = true;
+        held.q_solution_deg = seed_q_deg;
+        held.solution_jump_deg = 0.0;
+        held.branch_jump_suspected = true;
+        held.branch_jump_clamped = true;
+        held.reason = "branch_jump_clamped_to_seed";
+        return held;
+    }
+    return result;
 }
 
 CartesianVelocityResult PinocchioKinematics::solveCartesianVelocity(

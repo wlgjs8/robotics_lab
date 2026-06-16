@@ -53,7 +53,7 @@ class UmiPipelineTest(unittest.TestCase):
             self.assertEqual(manifest["aggregate"]["episode_count"], 1)
             self.assertEqual(manifest["retarget"]["status"], "configured_estimate")
             self.assertEqual(manifest["retarget"]["source_pose_frame"], "steamvr_world")
-            self.assertEqual(manifest["retarget"]["target_pose_frame"], "stand")
+            self.assertNotIn("target_pose_frame", manifest["retarget"])
             self.assertEqual(manifest["episodes"][0]["arm_mask"], [1.0, 1.0])
             self.assertIn("left_wrist_rgb", manifest["episodes"][0]["camera_names"])
             self.assertEqual(
@@ -61,14 +61,15 @@ class UmiPipelineTest(unittest.TestCase):
                 0,
             )
 
-            dataset = FlowHdf5Dataset(
-                output_dir,
-                action_horizon=2,
-                image_size=8,
-                normalize=False,
-                action_frame="stand",
-            )
-            sample = dataset.raw_sample(0)
+            # "stand" action_frame is gone; ee_local is the only representation.
+            with self.assertRaises(ValueError):
+                FlowHdf5Dataset(
+                    output_dir,
+                    action_horizon=2,
+                    image_size=8,
+                    normalize=False,
+                    action_frame="stand",
+                )
             ee_local_dataset = FlowHdf5Dataset(
                 output_dir,
                 action_horizon=2,
@@ -77,9 +78,8 @@ class UmiPipelineTest(unittest.TestCase):
                 action_frame="ee_local",
             )
             ee_local_sample = ee_local_dataset.raw_sample(0)
-            self.assertEqual(sample["images"].shape[0], 4)
-            self.assertEqual(int(sample["missing_camera_count"]), 0)
-            self.assertEqual(ee_local_sample["action_chunk"].shape, sample["action_chunk"].shape)
+            self.assertEqual(ee_local_sample["images"].shape[0], 4)
+            self.assertEqual(int(ee_local_sample["missing_camera_count"]), 0)
             self.assertEqual(ee_local_dataset.action_frame, "ee_local")
 
     def test_missing_right_arm_maps_arm_mask(self) -> None:
@@ -156,10 +156,11 @@ class UmiPipelineTest(unittest.TestCase):
                     sorted(dst["observations/images"].keys()),
                     ["left_overhead_rgb", "left_wrist_rgb", "right_overhead_rgb", "right_wrist_rgb"],
                 )
-                self.assertIn("tcp_delta_stand_left", dst["action"])
-                self.assertEqual(dst["action/tcp_delta_stand_left"].shape, (5, 6))
-                np.testing.assert_allclose(dst["action/tcp_delta_stand_left"][0, :3], [0.01, 0.0, 0.0], atol=1e-7)
-                np.testing.assert_allclose(dst["action/tcp_delta_stand_left"][-1], np.zeros(6), atol=1e-7)
+                # No world-frame "stand" delta is baked anymore; action is the
+                # absolute tool-offset target pose (ee_local deltas derived at load).
+                self.assertNotIn("tcp_delta_stand_left", dst["action"])
+                self.assertIn("target_pose_left", dst["action"])
+                self.assertEqual(dst["action/target_pose_left"].shape, (5, 7))
 
             index = load_flow_episode_index(output)
             self.assertEqual(index.format_name, "robotics_lab_dual_arm")
@@ -172,7 +173,7 @@ class UmiPipelineTest(unittest.TestCase):
                 )
             )
 
-    def test_convert_robotics_lab_without_action_writes_pose_per_step_delta(self) -> None:
+    def test_convert_robotics_lab_without_action_writes_target_pose(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "episode_no_action.hdf5"
@@ -189,12 +190,16 @@ class UmiPipelineTest(unittest.TestCase):
             )
 
             with h5py.File(output, "r") as dst:
-                left_delta = dst["action/tcp_delta_stand_left"][:]
-                right_delta = dst["action/tcp_delta_stand_right"][:]
-                np.testing.assert_allclose(left_delta[0, :3], [0.01, 0.0, 0.0], atol=1e-7)
-                np.testing.assert_allclose(right_delta[0, :3], [-0.01, 0.0, 0.0], atol=1e-7)
-                np.testing.assert_allclose(left_delta[-1], np.zeros(6), atol=1e-7)
-                self.assertGreater(float(np.linalg.norm(left_delta[:-1, :3])), 0.0)
+                # Action is the absolute tool-offset target pose; no baked stand delta.
+                self.assertNotIn("tcp_delta_stand_left", dst["action"])
+                left_target = dst["action/target_pose_left"][:]
+                right_target = dst["action/target_pose_right"][:]
+                self.assertEqual(left_target.shape, (5, 7))
+                self.assertEqual(right_target.shape, (5, 7))
+                # With no action group the target pose falls back to the observed pose.
+                np.testing.assert_allclose(
+                    left_target, dst["observations/tcp_stand_left"][:], atol=1e-7
+                )
 
     def test_configured_estimate_retarget_status_blocks_require_measured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -233,7 +238,7 @@ class UmiPipelineTest(unittest.TestCase):
 
             self.assertEqual(manifest["retarget"]["status"], "accepted")
             self.assertEqual(manifest["retarget"]["source_pose_frame"], "steamvr_world")
-            self.assertEqual(manifest["retarget"]["target_pose_frame"], "stand")
+            self.assertNotIn("target_pose_frame", manifest["retarget"])
             self.assertFalse(
                 any(
                     "retarget_status_not_physical_rollout_ready" in item
@@ -333,13 +338,10 @@ def _write_retarget_config(path: Path, *, status: str = "configured_estimate") -
                 "schema: robotics_lab.umi_retarget.v1",
                 f"status: {status}",
                 "source_pose_frame: steamvr_world",
-                "target_pose_frame: stand",
                 "left:",
-                "  T_stand_source: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]",
                 "  T_tcp_umi_gripper: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]",
                 "  gripper_open_close_units: percent",
                 "right:",
-                "  T_stand_source: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]",
                 "  T_tcp_umi_gripper: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]",
                 "  gripper_open_close_units: percent",
                 "quality:",

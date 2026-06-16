@@ -137,6 +137,9 @@ std::string validIkYaml(const std::string& urdf_path) {
         "    position_tolerance_m: 0.002\n"
         "    orientation_tolerance_rad: 0.03\n"
         "    max_step_deg: [1, 1, 1, 2, 2, 3]\n"
+        "    singular_region_eps: 0.05\n"
+        "    damping_max: 0.06\n"
+        "    max_solution_jump_deg: 3.0\n"
         "cartesian_control:\n"
         "  warn_ik_duration_us: 2500\n"
         "  fail_ik_duration_us: 4500\n"
@@ -227,6 +230,9 @@ bool testIkConfigParsing() {
     RB_CHECK(std::fabs(cfg.kinematics.ik.orientation_tolerance_rad - 0.03) < 1e-12);
     RB_CHECK(cfg.kinematics.ik.max_step_deg[0] == 1.0);
     RB_CHECK(cfg.kinematics.ik.max_step_deg[5] == 3.0);
+    RB_CHECK(std::fabs(cfg.kinematics.ik.singular_region_eps - 0.05) < 1e-12);
+    RB_CHECK(std::fabs(cfg.kinematics.ik.damping_max - 0.06) < 1e-12);
+    RB_CHECK(std::fabs(cfg.kinematics.ik.max_solution_jump_deg - 3.0) < 1e-12);
     RB_CHECK(std::fabs(cfg.cartesian_control.warn_ik_duration_us - 2500.0) < 1e-12);
     RB_CHECK(std::fabs(cfg.cartesian_control.fail_ik_duration_us - 4500.0) < 1e-12);
     RB_CHECK(std::fabs(cfg.cartesian_control.path_kp - 7.0) < 1e-12);
@@ -595,10 +601,132 @@ bool testIkSeedUsesPreviousSentTargetNotActualState() {
     return true;
 }
 
+bool testIkConditioningDiagnosticsPopulated() {
+    // A normal reachable solve must report a positive smallest singular value,
+    // the base damping (no singular-region ramp away from singularities), and a
+    // finite seed jump; the branch-jump flag must not fire for a small move.
+    rb_servo::KinematicsConfig cfg = testKinematicsConfig();
+    cfg.ik.singular_region_eps = 0.04;
+    cfg.ik.damping_max = 0.05;
+    cfg.ik.max_solution_jump_deg = 5.0;
+    rb_servo::PinocchioKinematics kin(cfg);
+    const rb_servo::ArmMountConfig mount = leftMount();
+    const rb_servo::JointArray seed = seedJoints();
+
+    rb_servo::JointArray target_q = seed;
+    target_q[0] += 1.0;
+    target_q[2] += 1.0;
+    const rb_servo::Pose6D target_pose = kin.computeTcpStand(rb_servo::ArmId::Left, target_q, mount);
+    const rb_servo::IkResult result = kin.solveIk(rb_servo::ArmId::Left, target_pose, seed, mount);
+
+    RB_CHECK(result.success);
+    RB_CHECK(std::isfinite(result.min_singular_value));
+    RB_CHECK(result.min_singular_value > 0.0);
+    // applied_damping is the base damping outside the singular region, ramping
+    // up to at most sqrt(damping^2 + damping_max^2) inside it.
+    const double max_applied = std::sqrt(cfg.ik.damping * cfg.ik.damping +
+                                         cfg.ik.damping_max * cfg.ik.damping_max);
+    RB_CHECK(result.applied_damping >= cfg.ik.damping - 1e-9);
+    RB_CHECK(result.applied_damping <= max_applied + 1e-9);
+    RB_CHECK(std::isfinite(result.solution_jump_deg));
+    RB_CHECK(result.solution_jump_deg >= 0.0);
+    RB_CHECK(!result.branch_jump_suspected);
+    return true;
+}
+
+bool testIkBranchJumpGuardFlagsLargeSeedDelta() {
+    // The observability guard flags (but does not alter) a solution that lands
+    // far from the seed in one solve. Seed far from the target so the converged
+    // solution differs by more than the threshold.
+    rb_servo::KinematicsConfig cfg = testKinematicsConfig();
+    cfg.ik.max_solution_jump_deg = 2.0;
+    rb_servo::PinocchioKinematics kin(cfg);
+    const rb_servo::ArmMountConfig mount = leftMount();
+    const rb_servo::JointArray seed = seedJoints();
+
+    rb_servo::JointArray target_q = seed;
+    target_q[0] += 20.0;  // >> 2 deg on joint 0
+    const rb_servo::Pose6D target_pose = kin.computeTcpStand(rb_servo::ArmId::Left, target_q, mount);
+    const rb_servo::IkResult result = kin.solveIk(rb_servo::ArmId::Left, target_pose, seed, mount);
+
+    RB_CHECK(result.success);
+    RB_CHECK(result.solution_jump_deg > 2.0);
+    RB_CHECK(result.branch_jump_suspected);
+    // The guard is observability-only: the solution still reaches the target.
+    RB_CHECK(result.position_error_m <= cfg.ik.position_tolerance_m);
+    return true;
+}
+
+bool testIkBranchJumpClampHoldsSeed() {
+    // With the clamp enabled (and no re-solve configured), a solution that jumps
+    // past the threshold is REPLACED by the seed (zero motion this tick) instead
+    // of flipping to a distant branch -- the actual correction, not just a flag.
+    rb_servo::KinematicsConfig cfg = testKinematicsConfig();
+    cfg.ik.max_solution_jump_deg = 2.0;
+    cfg.ik.branch_jump_clamp_to_seed = true;  // re-solve off (scale/retries default 0)
+    rb_servo::PinocchioKinematics kin(cfg);
+    const rb_servo::ArmMountConfig mount = leftMount();
+    const rb_servo::JointArray seed = seedJoints();
+
+    rb_servo::JointArray target_q = seed;
+    target_q[0] += 20.0;  // same >2 deg seed delta as the guard test
+    const rb_servo::Pose6D target_pose = kin.computeTcpStand(rb_servo::ArmId::Left, target_q, mount);
+    const rb_servo::IkResult result = kin.solveIk(rb_servo::ArmId::Left, target_pose, seed, mount);
+
+    RB_CHECK(result.success);
+    RB_CHECK(result.branch_jump_clamped);
+    RB_CHECK(result.branch_jump_suspected);
+    RB_CHECK(closeJoints(result.q_solution_deg, seed, 1e-12));  // held the seed
+    RB_CHECK(result.solution_jump_deg <= 1e-9);
+    return true;
+}
+
+bool testIkBranchJumpClampDefaultOffLeavesSolutionUnchanged() {
+    // Clamp fields default off => identical to the observability path: the
+    // jumping solution is returned as-is (reaches target, not held).
+    rb_servo::KinematicsConfig cfg = testKinematicsConfig();
+    cfg.ik.max_solution_jump_deg = 2.0;  // clamp fields left at defaults
+    rb_servo::PinocchioKinematics kin(cfg);
+    const rb_servo::ArmMountConfig mount = leftMount();
+    const rb_servo::JointArray seed = seedJoints();
+
+    rb_servo::JointArray target_q = seed;
+    target_q[0] += 20.0;
+    const rb_servo::Pose6D target_pose = kin.computeTcpStand(rb_servo::ArmId::Left, target_q, mount);
+    const rb_servo::IkResult result = kin.solveIk(rb_servo::ArmId::Left, target_pose, seed, mount);
+
+    RB_CHECK(result.success);
+    RB_CHECK(!result.branch_jump_clamped);
+    RB_CHECK(result.solution_jump_deg > 2.0);
+    RB_CHECK(result.position_error_m <= cfg.ik.position_tolerance_m);  // reached target
+    return true;
+}
+
+bool testIkSelectiveDampingDisabledByDefault() {
+    // With singular_region_eps/damping_max defaulting to 0, applied_damping is
+    // always the base damping (behavior-preserving).
+    rb_servo::PinocchioKinematics kin(testKinematicsConfig());
+    const rb_servo::ArmMountConfig mount = leftMount();
+    const rb_servo::JointArray seed = seedJoints();
+    rb_servo::JointArray target_q = seed;
+    target_q[1] += 1.0;
+    const rb_servo::Pose6D target_pose = kin.computeTcpStand(rb_servo::ArmId::Left, target_q, mount);
+    const rb_servo::IkResult result = kin.solveIk(rb_servo::ArmId::Left, target_pose, seed, mount);
+    RB_CHECK(result.success);
+    RB_CHECK(std::fabs(result.applied_damping - testKinematicsConfig().ik.damping) < 1e-9);
+    RB_CHECK(!result.branch_jump_suspected);  // guard off by default
+    return true;
+}
+
 }  // namespace
 
 int main() {
     if (!testIkConfigParsing()) return 1;
+    if (!testIkConditioningDiagnosticsPopulated()) return 1;
+    if (!testIkBranchJumpGuardFlagsLargeSeedDelta()) return 1;
+    if (!testIkBranchJumpClampHoldsSeed()) return 1;
+    if (!testIkBranchJumpClampDefaultOffLeavesSolutionUnchanged()) return 1;
+    if (!testIkSelectiveDampingDisabledByDefault()) return 1;
     if (!testCartesianLatencyBudgetTelemetry()) return 1;
     if (!testIkSeedUsesPreviousSentTargetNotActualState()) return 1;
     if (!testPinocchioIk()) return 1;

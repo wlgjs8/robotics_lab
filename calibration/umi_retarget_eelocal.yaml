@@ -5,12 +5,12 @@ status: configured_estimate   # identity world R: NOT a measured steamvr->stand 
                               # irrelevant to ee_local (cancels). Must stay non-"measured"
                               # so real rollout stays blocked.
 source_pose_frame: steamvr_world
-target_pose_frame: stand
 # T_tcp_umi_gripper (2026-06-12 correction): the old value was a PURE translation
 # [-0.172, 0, 0.076] — wrong frame (~90deg off; the 0.172 translation is defined in
 # the rotation-corrected gripper frame, not the raw tracker frame). The conversion
-# applies  converted = T_stand_source . pose_raw . inv(T_tcp_umi_gripper), so
-# inv(T_tcp_umi_gripper) must be the official pika_sdk tracker->tip transform
+# applies  converted = pose_raw . inv(T_tcp_umi_gripper)  (tool offset only; there is
+# NO world steamvr->stand transform — it was never measured and ee_local cancels it,
+# see wiki umi-tcp-delta-frame). inv(T_tcp_umi_gripper) is the official pika_sdk tracker->tip transform
 # composed with the tip->RB-TCP axis alignment used by live teleop:
 #   X = R_corr . Trans(0.172, 0, -0.076) . R_align
 #   R_corr  = Rx(-20deg).[Ry(-90deg).Rx(-90deg)]   (pika_sdk vive_tracker.py)
@@ -24,11 +24,9 @@ target_pose_frame: stand
 # (pending calibration-clip confirmation; expected lever 18.8 cm, approach 20deg
 # off tracker +z). data_tcp generated with the old value must be regenerated.
 left:
-  T_stand_source: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]        # identity (world R cancels for ee_local)
   T_tcp_umi_gripper: [0.0, -0.076, -0.172, 0.0, 0.173648178, 0.984807753, 0.0]
   gripper_open_close_units: percent
 right:
-  T_stand_source: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
   T_tcp_umi_gripper: [0.0, -0.076, -0.172, 0.0, 0.173648178, 0.984807753, 0.0]
   gripper_open_close_units: percent
 quality:

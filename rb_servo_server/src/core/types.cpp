@@ -37,6 +37,7 @@ std::string toString(ControlMode mode) {
         case ControlMode::EmergencyStop: return "EmergencyStop";
         case ControlMode::ResetFault: return "ResetFault";
         case ControlMode::SetSafetyFloorZ: return "SetSafetyFloorZ";
+        case ControlMode::Freedrive: return "Freedrive";
     }
     return "Unknown";
 }
@@ -145,6 +146,9 @@ ControlMode controlModeFromString(const std::string& mode) {
     if (m == "emergencystop" || m == "emergency_stop" || m == "estop") return ControlMode::EmergencyStop;
     if (m == "resetfault" || m == "reset_fault" || m == "reset") return ControlMode::ResetFault;
     if (m == "setsafetyfloorz" || m == "set_safety_floor_z") return ControlMode::SetSafetyFloorZ;
+    if (m == "freedrive" || m == "free_drive" || m == "directteaching" || m == "direct_teaching") {
+        return ControlMode::Freedrive;
+    }
     throw std::invalid_argument("Unknown ControlMode string: " + mode);
 }
 

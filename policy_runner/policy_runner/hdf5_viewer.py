@@ -19,9 +19,7 @@ from .flow_dataset import (
     decode_hdf5_image_value,
     load_flow_episode_index,
     normalize_action_frame,
-    pose_delta,
     pose_delta_local,
-    tcp_delta_stand_from_poses,
 )
 
 
@@ -249,9 +247,9 @@ def _arm_summary(
     *,
     action_frame: str = DEFAULT_ACTION_FRAME,
 ) -> dict[str, Any]:
-    frame = normalize_action_frame(action_frame)
-    reset_delta_fn = pose_delta_local if frame == "ee_local" else pose_delta
-    action_delta_fn = pose_delta_local if frame == "ee_local" else tcp_delta_stand_from_poses
+    normalize_action_frame(action_frame)  # validate ee_local
+    reset_delta_fn = pose_delta_local
+    action_delta_fn = pose_delta_local
     if side == "left":
         pose = episode.left_pose[index]
         reset_pose = episode.reset_left_pose

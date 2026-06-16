@@ -542,7 +542,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_train.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
     flow_train.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
     flow_train.add_argument("--single-arm-side", choices=("left", "right"), default=None)
-    flow_train.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
+    flow_train.add_argument("--action-frame", choices=("ee_local",), default="ee_local")
     flow_train.add_argument("--max-episodes", type=int, default=None)
     flow_train.add_argument("--checkpoint", default="outputs/flow_policy.pt")
     flow_train.add_argument("--vision-backbone", default="resnet50")
@@ -596,7 +596,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     imitation_experiment.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
     imitation_experiment.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
-    imitation_experiment.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
+    imitation_experiment.add_argument("--action-frame", choices=("ee_local",), default="ee_local")
     imitation_experiment.add_argument("--action-horizon", type=int, default=16)
     imitation_experiment.add_argument("--image-size", type=int, default=128)
     imitation_experiment.add_argument(
@@ -728,27 +728,19 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     flow_infer.add_argument(
         "--command-family",
-        choices=("tcp_twist_stand", "tcp_twist_local", "tcp_delta_stand"),
+        choices=("tcp_twist_local",),
         default=None,
         help=(
-            "Flow action command family. Defaults to tcp_twist_local for ee_local "
-            "checkpoints and tcp_twist_stand otherwise."
-        ),
-    )
-    flow_infer.add_argument(
-        "--allow-experimental-tcp-delta-stand",
-        action="store_true",
-        help=(
-            "Allow the debug TcpDeltaStand flow command family outside offline_eval/sim_dryrun. "
-            "TcpTwistStand remains the default controller-simulation path."
+            "Flow action command family. Only tcp_twist_local (ee_local body frame) "
+            "exists; world-frame stand families were removed."
         ),
     )
     flow_infer.add_argument(
         "--allow-tcp-twist-local",
         action="store_true",
         help=(
-            "Allow the TcpTwistLocal flow command family for controller_sim/real_policy. "
-            "Required for ee_local checkpoints, which cannot emit tcp_twist_stand."
+            "Allow the TcpTwistLocal flow command family for controller_sim/real_policy "
+            "(ee_local checkpoints; the only command family)."
         ),
     )
     flow_infer.add_argument(
@@ -756,8 +748,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
         default=None,
         help=(
             "Fixed rotation between the training EE body frame and the RB TCP frame for "
-            "ee_local checkpoints: preset name ('pika_tip' for pika UMI data) or 9 "
-            "row-major floats. Default: none (frames assumed identical)."
+            "ee_local checkpoints. Preset name or 9 row-major floats. Presets: "
+            "'pika_rz180' (measured pika-UMI correction, 180deg about approach(z) on BOTH "
+            "translation and rotation), 'pika_rz180_trans_only' (ablation: flip x/y "
+            "translation only, leave rotation unchanged), 'pika_tip' (legacy 90deg guess). "
+            "Default: none (frames assumed identical)."
         ),
     )
     flow_infer.add_argument(
@@ -796,6 +791,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
         default=None,
         help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
     )
+    flow_infer.add_argument(
+        "--chunk-crossfade-steps",
+        type=int,
+        default=2,
+        help=(
+            "Blend the first N twists after each chunk-resample boundary from the "
+            "previously emitted twist (alpha 0->1) to remove the boundary jerk "
+            "without steady-state lag. 0 (default) disables crossfade. Try 2-3."
+        ),
+    )
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.002)
     flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.01)
 
@@ -816,7 +821,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     hdf5_view.add_argument("episode", help="HDF5 episode file")
     hdf5_view.add_argument("--single-arm-side", choices=("left", "right"), default="left")
     hdf5_view.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
-    hdf5_view.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
+    hdf5_view.add_argument("--action-frame", choices=("ee_local",), default="ee_local")
     hdf5_view.add_argument("--start-frame", type=int, default=0)
     hdf5_view.add_argument("--fps", type=float, default=None)
     hdf5_view.add_argument("--image-size", type=int, default=320)
@@ -1189,7 +1194,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             run_flow_offline_eval,
             validate_flow_command_family,
         )
-        from .gripper import GripperRuntime
+        from .gripper import GripperCommand, GripperRuntime
         from .openpi_remote import OPENPI_CHECKPOINT_PREFIX, OpenpiRemoteActionSource
 
         config = load_config(args.config)
@@ -1216,7 +1221,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
             validate_flow_command_family(
                 rollout_policy.mode,
                 command_family,
-                allow_experimental_tcp_delta_stand=args.allow_experimental_tcp_delta_stand,
                 allow_tcp_twist_local=args.allow_tcp_twist_local,
                 dataset_stats=dataset_stats,
             )
@@ -1346,10 +1350,57 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     max_rad=config.gripper.max_rad,
                     deadband_rad=config.gripper.deadband_rad,
                     max_hz=config.gripper.max_hz,
+                    suppress_sdk_logs=config.gripper.suppress_sdk_logs,
                     supports_controller_simulation=(
                         config.gripper.actuate_in_controller_simulation
                     ),
                 ).connect()
+        gripper_runtime = (
+            GripperRuntime(
+                rollout_mode=rollout_policy.mode.value,
+                allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+                backend=gripper_backend,
+            )
+            if gripper_backend is not None
+            else GripperRuntime(
+                rollout_mode=rollout_policy.mode.value,
+                allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+            )
+        )
+        # Open both grippers fully at startup so every rollout begins from a
+        # known open pose. Routed through the same GripperRuntime gate as policy
+        # commands, so it honors real_policy + allow_real_gripper_motion +
+        # RB_ALLOW_REAL_GRIPPER and is a logged noop when the hardware lane is
+        # closed (percent units: 100 = open = max_rad).
+        if gripper_backend is not None:
+            open_results = gripper_runtime.dispatch(
+                [
+                    GripperCommand(
+                        arm=arm,
+                        value=100.0,
+                        command_type="target",
+                        source="startup_open",
+                    )
+                    for arm in ("left", "right")
+                    if arm in gripper_backend.ports
+                ],
+                # Open both grippers at once (parallel serial writes) so they
+                # actuate simultaneously, not left-then-right.
+                concurrent=True,
+            )
+            for result in open_results:
+                print(
+                    f"[flow-infer] startup gripper open {result.command.arm}: "
+                    f"sent_to_physical={result.sent_to_physical} reason={result.reason}",
+                    flush=True,
+                )
+            # Physical grippers actuate with a delay; let them finish opening
+            # before the first policy step so inference does not begin while the
+            # jaws are still moving. Only wait when a command actually reached
+            # hardware (logged noop in sim / closed gripper lane -> no wait).
+            if any(result.sent_to_physical for result in open_results):
+                time.sleep(1.5)
+                print("[flow-infer] startup gripper open settle: waited 1.5s", flush=True)
         try:
             policy_dt_sec = resolve_flow_policy_dt_sec(
                 rollout_policy.mode,
@@ -1368,22 +1419,12 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 "max_linear_step_m": args.max_linear_step_m,
                 "max_angular_step_rad": args.max_angular_step_rad,
                 "chunk_execute_steps": args.chunk_execute_steps,
+                "chunk_crossfade_steps": args.chunk_crossfade_steps,
                 "allow_rbpodo_controller_simulation_cartesian": (
                     rollout_policy.allows_controller_simulation_cartesian
                 ),
                 "ee_local_r_align": args.ee_local_r_align,
-                "gripper_runtime": (
-                    GripperRuntime(
-                        rollout_mode=rollout_policy.mode.value,
-                        allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
-                        backend=gripper_backend,
-                    )
-                    if gripper_backend is not None
-                    else GripperRuntime(
-                        rollout_mode=rollout_policy.mode.value,
-                        allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
-                    )
-                ),
+                "gripper_runtime": gripper_runtime,
                 "device": args.device,
             }
             if checkpoint_kind == "openpi_remote":

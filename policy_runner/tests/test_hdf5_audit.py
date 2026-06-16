@@ -183,7 +183,6 @@ class Hdf5AuditTest(unittest.TestCase):
                     "schema": "robotics_lab.policy_runner.dataset_manifest.v1",
                     "retarget": {
                         "source_pose_frame": "steamvr_world",
-                        "target_pose_frame": "stand",
                         "status": "measured",
                     },
                 }
@@ -203,7 +202,6 @@ class Hdf5AuditTest(unittest.TestCase):
                     "schema": "robotics_lab.policy_runner.dataset_manifest.v1",
                     "retarget": {
                         "source_pose_frame": "steamvr_world",
-                        "target_pose_frame": "stand",
                         "status": "accepted",
                     },
                 }

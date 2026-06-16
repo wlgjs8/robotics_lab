@@ -60,14 +60,14 @@ bool testBelowPlaneHoldsOrLatches() {
     return true;
 }
 
-bool testEscapeAllowsStrictlyUpwardWhileBelow() {
+bool testEscapeAllowsLateralOrUpwardWhileBelow() {
     const auto config = enabledConfig();
     // Already below the plane, candidate strictly higher than previous sent: allow.
     RB_CHECK(rb_servo::decideFloorAction(eval(0.005), eval(0.003), config, 0.01) ==
              rb_servo::FloorAction::Allow);
-    // Same height (within epsilon) while below: hold.
+    // Same height while below: allow lateral sliding at the floor.
     RB_CHECK(rb_servo::decideFloorAction(eval(0.005), eval(0.005), config, 0.01) ==
-             rb_servo::FloorAction::Hold);
+             rb_servo::FloorAction::Allow);
     // Going further down while below: hold.
     RB_CHECK(rb_servo::decideFloorAction(eval(0.003), eval(0.005), config, 0.01) ==
              rb_servo::FloorAction::Hold);
@@ -127,23 +127,27 @@ bool testLowestZWithOffsets() {
     rb_servo::Pose6D level;
     level.z = 0.100;
     std::string lowest;
-    double z = rb_servo::floorLowestZWithOffsets(level, points, &lowest);
+    rb_servo::math::Vector3 offset;
+    double z = rb_servo::floorLowestZWithOffsets(level, points, &lowest, &offset);
     RB_CHECK(std::abs(z - 0.100) < 1e-12);
     RB_CHECK(lowest == "tcp");
+    RB_CHECK(offset.norm() < 1e-12);
 
     // Pitch the tool 90 deg about y: the TCP x-axis maps to -z, so tip_a hangs
     // 54 mm BELOW the TCP point and must win the check.
     rb_servo::Pose6D rolled = level;
     rolled.ry = M_PI / 2.0;
-    z = rb_servo::floorLowestZWithOffsets(rolled, points, &lowest);
+    z = rb_servo::floorLowestZWithOffsets(rolled, points, &lowest, &offset);
     RB_CHECK(std::abs(z - (0.100 - 0.054)) < 1e-9);
     RB_CHECK(lowest == "tip_a");
+    RB_CHECK(std::abs(offset.x() - 0.054) < 1e-12);
 
     // Opposite pitch: the other fingertip leads.
     rolled.ry = -M_PI / 2.0;
-    z = rb_servo::floorLowestZWithOffsets(rolled, points, &lowest);
+    z = rb_servo::floorLowestZWithOffsets(rolled, points, &lowest, &offset);
     RB_CHECK(std::abs(z - (0.100 - 0.054)) < 1e-9);
     RB_CHECK(lowest == "tip_b");
+    RB_CHECK(std::abs(offset.x() + 0.054) < 1e-12);
 
     // No offset points: plain TCP z (legacy behavior).
     z = rb_servo::floorLowestZWithOffsets(rolled, {}, &lowest);
@@ -163,7 +167,7 @@ int main() {
     if (!testDisabledAlwaysAllows()) return 1;
     if (!testAbovePlaneAllows()) return 1;
     if (!testBelowPlaneHoldsOrLatches()) return 1;
-    if (!testEscapeAllowsStrictlyUpwardWhileBelow()) return 1;
+    if (!testEscapeAllowsLateralOrUpwardWhileBelow()) return 1;
     if (!testFkFailureFailsClosed()) return 1;
     if (!testMonitorOnlyAllowsViolations()) return 1;
     if (!testValidateFloorZRequest()) return 1;

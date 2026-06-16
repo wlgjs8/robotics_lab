@@ -82,6 +82,39 @@ struct IkSolverConfig {
     double position_tolerance_m = 0.001;
     double orientation_tolerance_rad = 0.02;
     JointArray max_step_deg{2.0, 2.0, 2.0, 3.0, 3.0, 4.0};
+    // Selective singularity-robust damping (Nakamura-Hanafusa). When the task
+    // Jacobian's smallest singular value sigma_min drops below
+    // singular_region_eps, damping on the (near-)singular direction is ramped
+    // up to at most damping_max, trading Cartesian accuracy in the unachievable
+    // direction for joint-space continuity. This stops the DLS step from
+    // blowing up along a degenerate direction and flipping to a distant IK
+    // branch (a ~5 deg single-tick joint jump for a ~0 mm Cartesian move near a
+    // wrist singularity). Outside the singular region the base `damping` is used
+    // unchanged, so well-conditioned tracking accuracy is preserved. Both <= 0
+    // disables the ramp (pure constant `damping`).
+    double singular_region_eps = 0.0;
+    double damping_max = 0.0;
+    // Observability guard: when > 0, flag the solve (telemetry
+    // ik_branch_jump_suspected) if the returned solution differs from the seed
+    // by more than this many degrees on any joint. On its own it does NOT alter
+    // the solution; it surfaces branch-jump events for diagnosis. The clamp
+    // fields below turn it into an actual correction.
+    double max_solution_jump_deg = 0.0;
+    // Branch-jump CLAMP (acts on the solution, not just observe). When
+    // max_solution_jump_deg > 0 and a converged solution jumps more than that
+    // from the seed:
+    //   1) if branch_jump_damping_scale > 1 and branch_jump_max_retries > 0,
+    //      re-solve the SAME tick with damping multiplied by the scale (escalating
+    //      per retry) to pull the step back onto the local branch — the first
+    //      attempt whose jump is within threshold wins;
+    //   2) if it still exceeds the threshold and branch_jump_clamp_to_seed is
+    //      true, return the SEED (zero motion this tick) instead of flipping to a
+    //      distant IK branch (telemetry ik_branch_jump_clamped).
+    // All default-off (scale <= 1 / retries <= 0 / clamp false) => pure
+    // observability, behavior unchanged.
+    double branch_jump_damping_scale = 0.0;
+    int branch_jump_max_retries = 0;
+    bool branch_jump_clamp_to_seed = false;
 };
 
 struct KinematicsConfig {
@@ -440,6 +473,11 @@ struct ServoConfig {
     bool controller_simulation_async_supervision_nonlatching = false;
     bool allow_controller_simulation_init_error = false;
     bool allow_controller_simulation_not_activated = false;
+    // Per-arm direct-teaching (free-drive). Fail-closed opt-in: when false, the
+    // server rejects every Freedrive command. Enable only on configs that accept
+    // releasing servo_j authority for operator hand-guiding (see
+    // docs/runbooks/freedrive_direct_teaching.md).
+    bool allow_freedrive = false;
 
     bool enable_realtime_priority = true;
     int realtime_priority = 80;
@@ -537,6 +575,17 @@ struct PoseTrackSmdConfig {
     double max_linear_accel_m_s2 = 0.0;
     double max_angular_velocity_rad_s = 0.0;
     double max_angular_accel_rad_s2 = 0.0;
+    // Velocity feedforward: damp on the velocity ERROR (goal_dot - x_dot) rather
+    // than the absolute x_dot, so the error dynamics become
+    //   e_ddot + 2*zeta*wn*e_dot + wn^2*e = goal_ddot.
+    // A constant-velocity (ramp) goal then has ZERO steady-state lag, while jitter
+    // (the goal_ddot term) still rolls off through the 2nd-order response. This
+    // decouples natural_frequency from tracking accuracy: fn becomes a pure
+    // smoothing dial that can be lowered for more smoothing without adding lag.
+    // The goal velocity is estimated internally from the per-tick goal delta
+    // (auto stand/body frame; valid because every caller integrates the goal once
+    // per step()). Off by default = exact legacy 2nd-order SMD.
+    bool velocity_feedforward = false;
 };
 
 enum class CartesianLimitPolicy {
@@ -575,16 +624,22 @@ struct CartesianControlConfig {
     double path_kp_ori = 6.0;
     double twist_orientation_hold_kp = 6.0;
     double twist_angular_deadband_rad_s = 0.0001;
-    // First-order LPF on the local twist before velocity IK (anti-vibration).
-    // Default off -> behavior-preserving. tau ~ 30-50 ms.
-    bool twist_lpf_enable = false;
-    double twist_lpf_tau_sec = 0.04;
     // Route the streaming twist through the SMD pose tracker instead of velocity
     // IK + joint integration: integrate the (clamped) twist into a stand-frame
     // pose goal each tick, smooth it with the pose_track_smd filter (same as
     // streaming TcpPoseTarget), then position-IK the smoothed pose. Default off
     // (behavior-preserving). Uses pose_track_smd's zeta/fn for the filter.
     bool twist_via_smd_enable = false;
+    // Anti-windup for the twist_via_smd goal integrator. Clamp the integrated
+    // pose goal so it never LEADS the measured TCP by more than these budgets
+    // (position m / orientation rad). In this feedforward chain the goal would
+    // otherwise run away when the arm stalls (IK clamp / fault / can't track) and
+    // lurch on recovery; clamping the goal to measured+budget is the
+    // back-calculation feedback that bounds both. Normal tracking lead is only
+    // the SMD lag (~mm / sub-deg), well under budget, so it never engages there.
+    // Both default 0 = disabled (behavior-preserving); e.g. 0.05 m / 0.2 rad.
+    double twist_smd_goal_max_lead_m = 0.0;
+    double twist_smd_goal_max_lead_rad = 0.0;
     double velocity_damping = 0.01;
     double max_twist_linear_m_s = 0.03;
     double max_twist_angular_rad_s = 0.2;

@@ -25,7 +25,9 @@ GRIPPER_UNITS = {"percent", "mm", "raw"}
 
 @dataclass(frozen=True)
 class ArmRetarget:
-    T_stand_source: tuple[float, float, float, float, float, float, float]
+    # Tracker -> robot-TCP-equivalent tool offset only. There is no world
+    # (steamvr->stand) transform: it was never measured and the body-frame
+    # (ee_local) action representation cancels it (wiki umi-tcp-delta-frame).
     T_tcp_umi_gripper: tuple[float, float, float, float, float, float, float]
     gripper_open_close_units: str
 
@@ -37,7 +39,6 @@ class UmiRetargetConfig:
     schema: str
     status: str
     source_pose_frame: str
-    target_pose_frame: str
     left: ArmRetarget
     right: ArmRetarget
     quality: dict[str, Any]
@@ -188,18 +189,14 @@ def load_umi_retarget_config(path: str | Path) -> UmiRetargetConfig:
     if status not in RETARGET_STATUSES:
         raise ValueError(f"{config_path}: status must be one of {sorted(RETARGET_STATUSES)}, got {status!r}")
     source_pose_frame = str(data.get("source_pose_frame", "") or "")
-    target_pose_frame = str(data.get("target_pose_frame", "") or "")
     if not source_pose_frame:
         raise ValueError(f"{config_path}: source_pose_frame is required")
-    if not target_pose_frame:
-        raise ValueError(f"{config_path}: target_pose_frame is required")
     return UmiRetargetConfig(
         path=config_path,
         sha256=hashlib.sha256(raw).hexdigest(),
         schema=schema,
         status=status,
         source_pose_frame=source_pose_frame,
-        target_pose_frame=target_pose_frame,
         left=_arm_retarget_from_mapping(config_path, data.get("left"), side="left"),
         right=_arm_retarget_from_mapping(config_path, data.get("right"), side="right"),
         quality=dict(data.get("quality") or {}),
@@ -299,7 +296,6 @@ def render_conversion_report_markdown(report: dict[str, Any]) -> str:
         "",
         f"- Status: `{retarget.get('status', 'missing')}`",
         f"- Source pose frame: `{retarget.get('source_pose_frame', '')}`",
-        f"- Target pose frame: `{retarget.get('target_pose_frame', '')}`",
         f"- Config hash: `{retarget.get('sha256', '')}`",
         "",
         "## Data Quality Gates",
@@ -454,7 +450,6 @@ def _arm_retarget_from_mapping(path: Path, value: Any, *, side: str) -> ArmRetar
     if units not in GRIPPER_UNITS:
         raise ValueError(f"{path}: {side}.gripper_open_close_units must be one of {sorted(GRIPPER_UNITS)}")
     return ArmRetarget(
-        T_stand_source=_pose_tuple(value.get("T_stand_source"), path=path, field=f"{side}.T_stand_source"),
         T_tcp_umi_gripper=_pose_tuple(
             value.get("T_tcp_umi_gripper"),
             path=path,
@@ -979,13 +974,6 @@ def _summary_warnings(
             "retarget_status_not_physical_rollout_ready: physical real policy rollout requires "
             f"measured or accepted UMI retarget metadata; retarget_status={retarget_status}"
         )
-    target_frame = retarget_config.target_pose_frame if retarget_config is not None else "stand"
-    if pose_frame != target_frame and retarget_status not in PHYSICAL_ROLLOUT_RETARGET_STATUSES:
-        blockers.append(
-            "retarget_required: pose_frame "
-            f"{pose_frame} requires measured or accepted retarget to {target_frame} before physical real policy rollout; "
-            f"retarget_status={retarget_status}"
-        )
     return warnings, blockers
 
 
@@ -1013,7 +1001,6 @@ def _write_robotics_lab_dual_arm_episode(
     task: str | None,
 ) -> None:
     h5py, np = _require_hdf5()
-    from .flow_dataset import tcp_delta_stand_from_poses
 
     with h5py.File(source, "r") as src, h5py.File(destination, "w") as dst:
         format_name = _detect_episode_format(src)
@@ -1025,15 +1012,10 @@ def _write_robotics_lab_dual_arm_episode(
         if length <= 0:
             raise ValueError(f"{source}: cannot convert zero-frame UMI episode")
         source_pose_frame = _pose_frame(src, format_name)
-        target_frame = retarget.target_pose_frame if retarget is not None else source_pose_frame
         if retarget is not None and retarget.source_pose_frame != source_pose_frame:
             raise ValueError(
                 f"{source}: retarget source_pose_frame={retarget.source_pose_frame} "
                 f"does not match episode pose_frame={source_pose_frame}"
-            )
-        if target_frame != "stand":
-            raise ValueError(
-                f"{source}: robotics_lab_dual_arm conversion requires retarget target_pose_frame=stand; got {target_frame}"
             )
 
         left_pose_source = _pose_or_identity(src, format_name, "left", arm_groups, length)
@@ -1046,8 +1028,6 @@ def _write_robotics_lab_dual_arm_episode(
         right_action_pose = _retarget_poses(right_action_source, retarget.right if retarget is not None else None)
         left_gripper = _gripper_or_zero(src, format_name, "left", arm_groups, length)
         right_gripper = _gripper_or_zero(src, format_name, "right", arm_groups, length)
-        left_delta = _per_step_tcp_delta_stand(left_action_pose, tcp_delta_stand_from_poses)
-        right_delta = _per_step_tcp_delta_stand(right_action_pose, tcp_delta_stand_from_poses)
 
         dst.attrs["schema"] = ROBOTICS_LAB_EPISODE_SCHEMA
         dst.attrs["source_schema"] = _decode_attr(src.attrs.get("schema")) or UMI_EPISODE_SCHEMA
@@ -1058,7 +1038,6 @@ def _write_robotics_lab_dual_arm_episode(
         dst.attrs["retarget_config_hash"] = retarget.sha256 if retarget is not None else ""
         dst.attrs["retarget_config_path"] = str(retarget.path) if retarget is not None else ""
         dst.attrs["retarget_source_pose_frame"] = retarget.source_pose_frame if retarget is not None else source_pose_frame
-        dst.attrs["retarget_target_pose_frame"] = target_frame
         dst.attrs["frame_count"] = int(length)
         dst.attrs["reset_tcp_stand_left"] = left_pose[0].astype(np.float32)
         dst.attrs["reset_tcp_stand_right"] = right_pose[0].astype(np.float32)
@@ -1074,22 +1053,15 @@ def _write_robotics_lab_dual_arm_episode(
         obs.create_dataset("gripper_right", data=right_gripper.astype(np.float32), compression="gzip", compression_opts=1)
         _copy_images_to_robotics_observations(src, obs, format_name, arm_groups)
 
+        # Action is the absolute (tool-offset) target pose only. Per-step deltas are
+        # derived at training time in the end-effector body frame (ee_local); no
+        # world-frame "tcp_delta_stand" is baked here (it carried the unmeasured
+        # steamvr->stand rotation; see wiki umi-tcp-delta-frame).
         action = dst.create_group("action")
-        action.create_dataset("tcp_delta_stand_left", data=left_delta.astype(np.float32), compression="gzip", compression_opts=1)
-        action.create_dataset("tcp_delta_stand_right", data=right_delta.astype(np.float32), compression="gzip", compression_opts=1)
         action.create_dataset("target_pose_left", data=left_action_pose.astype(np.float32), compression="gzip", compression_opts=1)
         action.create_dataset("target_pose_right", data=right_action_pose.astype(np.float32), compression="gzip", compression_opts=1)
         action.create_dataset("gripper_left", data=_action_gripper_or_current(src, format_name, "left", arm_groups, length, left_gripper))
         action.create_dataset("gripper_right", data=_action_gripper_or_current(src, format_name, "right", arm_groups, length, right_gripper))
-
-
-def _per_step_tcp_delta_stand(poses: Any, delta_fn: Any):
-    _, np = _require_hdf5()
-    array = np.asarray(poses, dtype=np.float32)
-    out = np.zeros((int(array.shape[0]), 6), dtype=np.float32)
-    for index in range(max(0, int(array.shape[0]) - 1)):
-        out[index, :] = delta_fn(array[index], array[index + 1])
-    return out
 
 
 def _write_pika_bimanual_episode(
@@ -1177,12 +1149,14 @@ def _retarget_poses(poses: Any, retarget: ArmRetarget | None):
     array = np.asarray(poses, dtype=np.float32)
     if retarget is None:
         return array.copy()
-    T_stand_source = retarget.T_stand_source
     T_tcp_umi = retarget.T_tcp_umi_gripper
     out = np.zeros_like(array, dtype=np.float32)
     inv_tcp_umi = _pose_inverse(T_tcp_umi)
+    # Only the tracker->TCP-equivalent tool offset is applied; there is no
+    # world (steamvr->stand) transform — that mapping was never measured and the
+    # body-frame (ee_local) action representation cancels it (wiki umi-tcp-delta-frame).
     for index, pose in enumerate(array):
-        converted = _pose_multiply(_pose_multiply(T_stand_source, tuple(float(item) for item in pose[:7])), inv_tcp_umi)
+        converted = _pose_multiply(tuple(float(item) for item in pose[:7]), inv_tcp_umi)
         out[index, :] = np.asarray(converted, dtype=np.float32)
     return out
 
@@ -1383,7 +1357,6 @@ def _retarget_manifest(retarget: UmiRetargetConfig | None) -> dict[str, Any]:
             "sha256": "",
             "status": "missing",
             "source_pose_frame": "",
-            "target_pose_frame": "stand",
         }
     return {
         "schema": retarget.schema,
@@ -1391,7 +1364,6 @@ def _retarget_manifest(retarget: UmiRetargetConfig | None) -> dict[str, Any]:
         "sha256": retarget.sha256,
         "status": retarget.status,
         "source_pose_frame": retarget.source_pose_frame,
-        "target_pose_frame": retarget.target_pose_frame,
         "quality": retarget.quality,
     }
 

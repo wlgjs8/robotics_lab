@@ -18,6 +18,15 @@ struct IkResult {
     int iterations = 0;
     bool timed_out = false;
     std::string reason;
+    // Conditioning / singularity-robust-damping diagnostics (last DLS step).
+    double min_singular_value = 0.0;     // smallest task-Jacobian singular value
+    double applied_damping = 0.0;        // effective lambda used on the singular dir
+    // Branch-jump guard (see IkSolverConfig). solution_jump_deg / suspected are
+    // observability; clamped=true means the solve held the seed (zero motion this
+    // tick) to avoid flipping to a distant branch.
+    double solution_jump_deg = 0.0;      // max |q_solution - seed| over joints
+    bool branch_jump_suspected = false;
+    bool branch_jump_clamped = false;
 };
 
 struct CartesianVelocityResult {

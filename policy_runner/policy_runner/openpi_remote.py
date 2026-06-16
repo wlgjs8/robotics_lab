@@ -44,6 +44,7 @@ from .flow_inference import (
     FlowMatchingActionSource,
     _gripper_value_from_payload,
     canonical_flow_command_family,
+    default_action_log_path,
     resolve_ee_local_r_align,
     rotate_flow_arm_vectors,
 )
@@ -158,6 +159,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         max_linear_step_m: float = 0.002,
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
+        chunk_crossfade_steps: int = 0,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
@@ -236,6 +238,14 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.image_decode_count = 0
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
+        # Chunk-boundary twist crossfade state (mirrors FlowMatchingActionSource;
+        # this class skips super().__init__). 0 = off.
+        self._chunk_crossfade_steps = int(chunk_crossfade_steps)
+        self._steps_since_boundary = 0
+        self._prev_emitted_twist_by_arm: dict[str, tuple[float, ...] | None] = {
+            "left": None,
+            "right": None,
+        }
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         # Per-policy-step action logger (env-gated, debug only). Mirrors
         # FlowMatchingActionSource; this class skips super().__init__, so the
@@ -244,10 +254,9 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # line per executed policy step (raw flow delta, sent twist, chunk index).
         self._action_log: TextIO | None = None
         self._action_log_seq = 0
-        _action_log_path = os.environ.get("POLICY_RUNNER_ACTION_LOG")
-        if _action_log_path:
-            self._action_log = open(_action_log_path, "w", buffering=1)
-            print(f"[flow-infer] logging per-step actions to {_action_log_path}", file=self.stderr)
+        _action_log_path = default_action_log_path()
+        self._action_log = open(_action_log_path, "w", buffering=1)
+        print(f"[flow-infer] logging per-step actions to {_action_log_path}", file=self.stderr)
 
         # The server's first inference triggers torch compile/kernel autotune and can
         # take minutes; absorb that at startup so the control loop never stalls.

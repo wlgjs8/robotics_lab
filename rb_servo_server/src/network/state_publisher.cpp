@@ -577,6 +577,12 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"ik_iterations", telemetry.ik_iterations},
         {"position_error_m", telemetry.position_error_m},
         {"orientation_error_rad", telemetry.orientation_error_rad},
+        {"ik_min_singular_value", telemetry.ik_min_singular_value},
+        {"ik_applied_damping", telemetry.ik_applied_damping},
+        {"ik_solution_jump_deg", telemetry.ik_solution_jump_deg},
+        {"ik_branch_jump_suspected", telemetry.ik_branch_jump_suspected},
+        {"ik_branch_jump_clamped", telemetry.ik_branch_jump_clamped},
+        {"twist_smd_goal_clamped", telemetry.twist_smd_goal_clamped},
         {"ik_status", telemetry.status},
         {"ik_reason", telemetry.reason},
         {"ik_timed_out", telemetry.ik_timed_out},
@@ -597,6 +603,11 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"orientation_mode", telemetry.orientation_mode},
         {"twist_clamped", telemetry.twist_clamped},
         {"floor_vz_clamped", telemetry.floor_vz_clamped},
+        {"floor_lowest_point", telemetry.floor_lowest_point},
+        {"floor_lowest_z_m", telemetry.floor_lowest_z_m},
+        {"floor_goal_clamped", telemetry.floor_goal_clamped},
+        {"goal_minus_measured_pos_m", telemetry.goal_minus_measured_pos_m},
+        {"goal_minus_measured_ori_rad", telemetry.goal_minus_measured_ori_rad},
         {"requested_twist_linear_norm_m_s", telemetry.requested_twist_linear_norm_m_s},
         {"requested_twist_angular_norm_rad_s", telemetry.requested_twist_angular_norm_rad_s},
         {"applied_twist_linear_norm_m_s", telemetry.applied_twist_linear_norm_m_s},
@@ -1525,6 +1536,14 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["fault_latched"] = snapshot.fault_latched;
     message["async_supervision_degraded"] = snapshot.async_supervision_degraded;
     message["tracking_error_degraded"] = snapshot.tracking_error_degraded;
+    message["freedrive"] = {
+        {"left_active", snapshot.left_freedrive_active},
+        {"right_active", snapshot.right_freedrive_active},
+        {"any_active", snapshot.left_freedrive_active || snapshot.right_freedrive_active},
+        {"left_stage", snapshot.left_freedrive_stage},
+        {"right_stage", snapshot.right_freedrive_stage},
+        {"note", snapshot.freedrive_note},
+    };
     message["latched_fault_reason"] = toString(snapshot.latched_fault_reason);
     message["fault_reason"] = snapshot.fault_reason;
     message["fault_context"] = faultContextJson(snapshot);

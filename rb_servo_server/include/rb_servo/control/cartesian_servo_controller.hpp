@@ -53,10 +53,6 @@ struct CartesianCircleMoveState {
 struct CartesianTwistHoldState {
     bool orientation_hold_active = false;
     Pose6D hold_tcp_stand;
-    // First-order twist LPF state (anti-vibration). Persisted per arm across
-    // ticks; auto-reset to seed on lease/mode (re)entry via CartesianTwistHoldState{}.
-    Vec6 filtered_twist{};
-    bool lpf_valid = false;
     // twist_via_smd: running integrated pose goal + the SMD tracker. Created on
     // first use and reset to the current pose on lease/mode (re)entry (the whole
     // CartesianTwistHoldState is reset to {} then, clearing twist_smd to null).
@@ -143,11 +139,18 @@ public:
         const std::string& reset_reason
     );
 
-    // Stand-frame floor plane (safety.floor_constraint Tier-2 assist): when the
-    // commanded TCP is at/below z_min_m + soft_margin_m, the negative stand-frame
-    // linear v_z of a streaming twist is zeroed so lateral motion slides along
-    // the plane instead of stuttering against the Tier-1 joint-level hold.
-    void setFloorConstraint(bool enabled, double z_min_m, double soft_margin_m);
+    // Stand-frame floor plane (safety.floor_constraint Tier-2 assist): when any
+    // configured TCP check point (TCP + fingertip offsets) is at/below
+    // z_min_m + soft_margin_m, the streaming twist is projected so that point's
+    // stand-frame vertical velocity is non-negative. This accounts for both
+    // translation and roll/pitch-induced fingertip descent while preserving
+    // lateral translation and yaw.
+    void setFloorConstraint(
+        bool enabled,
+        double z_min_m,
+        double soft_margin_m,
+        std::vector<FloorCheckPointConfig> tcp_offset_points = {}
+    );
 
 private:
     ArmMountConfig left_mount_;
@@ -157,6 +160,9 @@ private:
     bool floor_enabled_ = false;
     double floor_z_min_m_ = 0.0;
     double floor_soft_margin_m_ = 0.0;
+    std::vector<FloorCheckPointConfig> floor_tcp_offset_points_;
+    double floor_goal_pos_budget_m_ = 0.06;
+    double floor_goal_ori_budget_rad_ = 0.30;
 };
 
 }  // namespace rb_servo

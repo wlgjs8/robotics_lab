@@ -1123,7 +1123,8 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.cartesian_control.path_kp_ori, "cartesian_control.path_kp_ori");
     validatePositiveFinite(cfg.cartesian_control.twist_orientation_hold_kp, "cartesian_control.twist_orientation_hold_kp");
     validatePositiveFinite(cfg.cartesian_control.twist_angular_deadband_rad_s, "cartesian_control.twist_angular_deadband_rad_s");
-    validatePositiveFinite(cfg.cartesian_control.twist_lpf_tau_sec, "cartesian_control.twist_lpf_tau_sec");
+    validateNonNegativeFinite(cfg.cartesian_control.twist_smd_goal_max_lead_m, "cartesian_control.twist_smd_goal_max_lead_m");
+    validateNonNegativeFinite(cfg.cartesian_control.twist_smd_goal_max_lead_rad, "cartesian_control.twist_smd_goal_max_lead_rad");
     validatePositiveFinite(cfg.cartesian_control.velocity_damping, "cartesian_control.velocity_damping");
     validatePositiveFinite(cfg.cartesian_control.max_twist_linear_m_s, "cartesian_control.max_twist_linear_m_s");
     validatePositiveFinite(cfg.cartesian_control.max_twist_angular_rad_s, "cartesian_control.max_twist_angular_rad_s");
@@ -1235,6 +1236,13 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.kinematics.ik.position_tolerance_m, "kinematics.ik.position_tolerance_m");
     validatePositiveFinite(cfg.kinematics.ik.orientation_tolerance_rad, "kinematics.ik.orientation_tolerance_rad");
     validatePositiveFiniteArray(cfg.kinematics.ik.max_step_deg, "kinematics.ik.max_step_deg");
+    validateNonNegativeFinite(cfg.kinematics.ik.singular_region_eps, "kinematics.ik.singular_region_eps");
+    validateNonNegativeFinite(cfg.kinematics.ik.damping_max, "kinematics.ik.damping_max");
+    validateNonNegativeFinite(cfg.kinematics.ik.max_solution_jump_deg, "kinematics.ik.max_solution_jump_deg");
+    validateNonNegativeFinite(cfg.kinematics.ik.branch_jump_damping_scale, "kinematics.ik.branch_jump_damping_scale");
+    if (cfg.kinematics.ik.branch_jump_max_retries < 0) {
+        throw std::runtime_error("kinematics.ik.branch_jump_max_retries must be >= 0");
+    }
 
     const auto validate_simulator_backend = [](const BackendConfig& backend, const std::string& label) {
         if (backend.backend_type != BackendType::Simulator) return;
@@ -1446,6 +1454,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "controller_simulation_async_supervision_nonlatching",
             "allow_controller_simulation_init_error",
             "allow_controller_simulation_not_activated",
+            "allow_freedrive",
             "enable_realtime_priority",
             "realtime_priority",
             "cpu_core",
@@ -1523,6 +1532,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     sec["allow_controller_simulation_not_activated"],
                     "servo.allow_controller_simulation_not_activated"
                 );
+        }
+        if (has(sec, "allow_freedrive")) {
+            cfg.servo.allow_freedrive =
+                asBool(sec["allow_freedrive"], "servo.allow_freedrive");
         }
         if (has(sec, "enable_realtime_priority")) cfg.servo.enable_realtime_priority = asBool(sec["enable_realtime_priority"], "servo.enable_realtime_priority");
         if (has(sec, "realtime_priority")) cfg.servo.realtime_priority = asInt(sec["realtime_priority"], "servo.realtime_priority");
@@ -2094,9 +2107,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "path_kp_ori",
             "twist_orientation_hold_kp",
             "twist_angular_deadband_rad_s",
-            "twist_lpf_enable",
-            "twist_lpf_tau_sec",
             "twist_via_smd_enable",
+            "twist_smd_goal_max_lead_m",
+            "twist_smd_goal_max_lead_rad",
             "velocity_damping",
             "max_twist_linear_m_s",
             "max_twist_angular_rad_s",
@@ -2176,17 +2189,17 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             cfg.cartesian_control.twist_angular_deadband_rad_s =
                 asDouble(sec["twist_angular_deadband_rad_s"], "cartesian_control.twist_angular_deadband_rad_s");
         }
-        if (has(sec, "twist_lpf_enable")) {
-            cfg.cartesian_control.twist_lpf_enable =
-                asBool(sec["twist_lpf_enable"], "cartesian_control.twist_lpf_enable");
-        }
-        if (has(sec, "twist_lpf_tau_sec")) {
-            cfg.cartesian_control.twist_lpf_tau_sec =
-                asDouble(sec["twist_lpf_tau_sec"], "cartesian_control.twist_lpf_tau_sec");
-        }
         if (has(sec, "twist_via_smd_enable")) {
             cfg.cartesian_control.twist_via_smd_enable =
                 asBool(sec["twist_via_smd_enable"], "cartesian_control.twist_via_smd_enable");
+        }
+        if (has(sec, "twist_smd_goal_max_lead_m")) {
+            cfg.cartesian_control.twist_smd_goal_max_lead_m =
+                asDouble(sec["twist_smd_goal_max_lead_m"], "cartesian_control.twist_smd_goal_max_lead_m");
+        }
+        if (has(sec, "twist_smd_goal_max_lead_rad")) {
+            cfg.cartesian_control.twist_smd_goal_max_lead_rad =
+                asDouble(sec["twist_smd_goal_max_lead_rad"], "cartesian_control.twist_smd_goal_max_lead_rad");
         }
         if (has(sec, "velocity_damping")) {
             cfg.cartesian_control.velocity_damping = asDouble(sec["velocity_damping"], "cartesian_control.velocity_damping");
@@ -2337,6 +2350,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "max_linear_accel_m_s2",
                 "max_angular_velocity_rad_s",
                 "max_angular_accel_rad_s2",
+                "velocity_feedforward",
             }, "cartesian_control.pose_track_smd");
             if (has(smd, "enable")) {
                 cfg.cartesian_control.pose_track_smd.enable =
@@ -2376,6 +2390,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 cfg.cartesian_control.pose_track_smd.max_angular_accel_rad_s2 = asDouble(
                     smd["max_angular_accel_rad_s2"], "cartesian_control.pose_track_smd.max_angular_accel_rad_s2");
             }
+            if (has(smd, "velocity_feedforward")) {
+                cfg.cartesian_control.pose_track_smd.velocity_feedforward = asBool(
+                    smd["velocity_feedforward"], "cartesian_control.pose_track_smd.velocity_feedforward");
+            }
         }
     }
 
@@ -2414,6 +2432,12 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "position_tolerance_m",
                 "orientation_tolerance_rad",
                 "max_step_deg",
+                "singular_region_eps",
+                "damping_max",
+                "max_solution_jump_deg",
+                "branch_jump_damping_scale",
+                "branch_jump_max_retries",
+                "branch_jump_clamp_to_seed",
             }, "kinematics.ik");
             if (has(ik, "enable")) cfg.kinematics.ik.enable = asBool(ik["enable"], "kinematics.ik.enable");
             if (has(ik, "max_iterations")) cfg.kinematics.ik.max_iterations = asInt(ik["max_iterations"], "kinematics.ik.max_iterations");
@@ -2422,6 +2446,12 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ik, "position_tolerance_m")) cfg.kinematics.ik.position_tolerance_m = asDouble(ik["position_tolerance_m"], "kinematics.ik.position_tolerance_m");
             if (has(ik, "orientation_tolerance_rad")) cfg.kinematics.ik.orientation_tolerance_rad = asDouble(ik["orientation_tolerance_rad"], "kinematics.ik.orientation_tolerance_rad");
             if (has(ik, "max_step_deg")) cfg.kinematics.ik.max_step_deg = parseJointArray(ik["max_step_deg"], "kinematics.ik.max_step_deg");
+            if (has(ik, "singular_region_eps")) cfg.kinematics.ik.singular_region_eps = asDouble(ik["singular_region_eps"], "kinematics.ik.singular_region_eps");
+            if (has(ik, "damping_max")) cfg.kinematics.ik.damping_max = asDouble(ik["damping_max"], "kinematics.ik.damping_max");
+            if (has(ik, "max_solution_jump_deg")) cfg.kinematics.ik.max_solution_jump_deg = asDouble(ik["max_solution_jump_deg"], "kinematics.ik.max_solution_jump_deg");
+            if (has(ik, "branch_jump_damping_scale")) cfg.kinematics.ik.branch_jump_damping_scale = asDouble(ik["branch_jump_damping_scale"], "kinematics.ik.branch_jump_damping_scale");
+            if (has(ik, "branch_jump_max_retries")) cfg.kinematics.ik.branch_jump_max_retries = asInt(ik["branch_jump_max_retries"], "kinematics.ik.branch_jump_max_retries");
+            if (has(ik, "branch_jump_clamp_to_seed")) cfg.kinematics.ik.branch_jump_clamp_to_seed = asBool(ik["branch_jump_clamp_to_seed"], "kinematics.ik.branch_jump_clamp_to_seed");
         }
     }
 

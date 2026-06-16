@@ -195,9 +195,37 @@ public:
             rb_servo::backendError(rb_servo::BackendErrorKind::ControllerRejected, "test reset failed")
         );
     }
+    rb_servo::BackendResult<rb_servo::RobotState> setFreedrive(bool on) override {
+        if (on) {
+            ++freedrive_on_count_;
+            if (freedrive_on_fail_.load()) {
+                return result(
+                    rb_servo::BackendOp::SetFreedrive,
+                    currentState(),
+                    false,
+                    rb_servo::backendError(
+                        rb_servo::BackendErrorKind::ControllerRejected,
+                        "test teach_on rejected (M151)", "151", ""
+                    )
+                );
+            }
+        } else {
+            ++freedrive_off_count_;
+        }
+        // Simulate the controller engaging/releasing gravity-compensation.
+        controller_freedrive_on_.store(on);
+        return result(rb_servo::BackendOp::SetFreedrive, currentState(), true);
+    }
     bool isConnected() const override { return connected_; }
     rb_servo::ArmId armId() const override { return arm_id_; }
     std::string name() const override { return "test"; }
+
+    void setControllerMotionState(int s) { controller_motion_state_.store(s); }
+    void setControllerFreedriveOn(bool on) { controller_freedrive_on_.store(on); }
+    void setFreedriveOnFail(bool fail) { freedrive_on_fail_.store(fail); }
+    int freedriveOnCount() const { return freedrive_on_count_.load(); }
+    int freedriveOffCount() const { return freedrive_off_count_.load(); }
+    bool controllerFreedriveOn() const { return controller_freedrive_on_.load(); }
 
     void setValidJointState(bool valid) { valid_joint_state_ = valid; }
     void setReadOk(bool ok) { read_ok_ = ok; }
@@ -248,6 +276,8 @@ private:
             ? rb_servo::RobotConnectionState::Connected
             : rb_servo::RobotConnectionState::Disconnected;
         state.servo_enabled = servo_enabled_override_.value_or(initialized_);
+        state.controller_motion_state = controller_motion_state_.load();
+        state.controller_freedrive_on = controller_freedrive_on_.load();
         state.has_error = has_error_;
         state.error_code = error_code_;
         state.motion_readiness_error_kind = motion_readiness_error_kind_;
@@ -293,6 +323,13 @@ private:
     bool initialized_ = false;
     std::atomic<int> read_sleep_ms_{0};
     std::atomic<int> send_sleep_ms_{0};
+    // Free-drive controller signal simulation. controller_motion_state_: 1=Idle,
+    // 3=Moving, 0=unknown. controller_freedrive_on_ mirrors is_freedrive_mode.
+    std::atomic<int> controller_motion_state_{0};
+    std::atomic<bool> controller_freedrive_on_{false};
+    std::atomic<bool> freedrive_on_fail_{false};
+    std::atomic<int> freedrive_on_count_{0};
+    std::atomic<int> freedrive_off_count_{0};
     mutable std::atomic<uint64_t> robot_time_ns_{0};
     int read_count_ = 0;
     int reset_count_ = 0;
@@ -832,6 +869,35 @@ rb_servo::DualArmCommand command(rb_servo::ControlMode mode) {
     cmd.right.mode = mode;
     cmd.left.timeout_sec = 0.2;
     cmd.right.timeout_sec = 0.2;
+    return cmd;
+}
+
+rb_servo::DualArmCommand freedriveCommand(
+    uint64_t seq,
+    std::optional<bool> left_on,
+    std::optional<bool> right_on
+) {
+    rb_servo::DualArmCommand cmd;
+    cmd.seq = seq;
+    cmd.host_time_ns = rb_servo::nowSteadyNs();
+    cmd.left.arm_id = rb_servo::ArmId::Left;
+    cmd.right.arm_id = rb_servo::ArmId::Right;
+    cmd.left.timeout_sec = 0.2;
+    cmd.right.timeout_sec = 0.2;
+    if (left_on.has_value()) {
+        cmd.left.mode = rb_servo::ControlMode::Freedrive;
+        cmd.left.has_freedrive = true;
+        cmd.left.freedrive_on = *left_on;
+    } else {
+        cmd.left.mode = rb_servo::ControlMode::Hold;
+    }
+    if (right_on.has_value()) {
+        cmd.right.mode = rb_servo::ControlMode::Freedrive;
+        cmd.right.has_freedrive = true;
+        cmd.right.freedrive_on = *right_on;
+    } else {
+        cmd.right.mode = rb_servo::ControlMode::Hold;
+    }
     return cmd;
 }
 
@@ -6677,8 +6743,101 @@ bool testSuppressedByPolicySendDoesNotLatchFault() {
 
 }  // namespace
 
+bool testFreedriveArmingQuiescesUntilIdleThenEngages() {
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    cfg.servo.allow_freedrive = true;
+    rb_servo::CommandBuffer buffer;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left_backend = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right_backend = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    TestBackend* left = left_backend.get();
+    TestBackend* right = right_backend.get();
+    // Both controllers initially report actively executing servo motion (3).
+    left->setControllerMotionState(3);
+    right->setControllerMotionState(3);
+    rb_servo::DualArmServoLoop loop(
+        std::move(left_backend), std::move(right_backend), cfg, &buffer, nullptr);
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    // Request right-arm direct teaching while the controller is still "moving".
+    buffer.setCommand(freedriveCommand(2, std::nullopt, true));
+    rb_servo::ServoSnapshot snap;
+    RB_CHECK(waitUntil([&] {
+        snap = loop.latestSnapshot();
+        return snap.right_freedrive_stage == "arming_quiesce";
+    }, std::chrono::milliseconds(500)));
+    // Core M151 fix: teach_on must NOT be issued while the controller reports
+    // motion, and servo_j must already be suppressed so the controller can settle.
+    snap = loop.latestSnapshot();
+    RB_CHECK(right->freedriveOnCount() == 0);
+    RB_CHECK(snap.send_policy == "freedrive");
+    RB_CHECK(snap.right_freedrive_active == false);
+
+    // Controller settles to Idle (1) -> teach_on issued, engagement confirmed.
+    right->setControllerMotionState(1);
+    RB_CHECK(waitUntil([&] {
+        snap = loop.latestSnapshot();
+        return snap.right_freedrive_stage == "active";
+    }, std::chrono::milliseconds(1000)));
+    RB_CHECK(right->freedriveOnCount() == 1);
+    RB_CHECK(right->controllerFreedriveOn());
+    RB_CHECK(snap.right_freedrive_active == true);
+    RB_CHECK(snap.left_freedrive_stage == "off");
+
+    // Exit: teach_off + resync -> back to off.
+    buffer.setCommand(freedriveCommand(3, std::nullopt, false));
+    RB_CHECK(waitUntil([&] {
+        snap = loop.latestSnapshot();
+        return snap.right_freedrive_stage == "off";
+    }, std::chrono::milliseconds(1000)));
+    RB_CHECK(right->freedriveOffCount() >= 1);
+    RB_CHECK(!right->controllerFreedriveOn());
+    RB_CHECK(snap.right_freedrive_active == false);
+    loop.stop();
+    return true;
+}
+
+bool testFreedriveTeachOnFailureAbortsAndReleases() {
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    cfg.servo.allow_freedrive = true;
+    rb_servo::CommandBuffer buffer;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left_backend = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right_backend = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    TestBackend* right = right_backend.get();
+    right->setControllerMotionState(1);   // idle: machine proceeds straight to teach_on
+    right->setFreedriveOnFail(true);      // controller rejects teach_on (e.g. M151)
+    rb_servo::DualArmServoLoop loop(
+        std::move(left_backend), std::move(right_backend), cfg, &buffer, nullptr);
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    buffer.setCommand(freedriveCommand(2, std::nullopt, true));
+    RB_CHECK(waitUntil([&] {
+        return right->freedriveOnCount() >= 1;
+    }, std::chrono::milliseconds(1000)));
+    // Cancel so the stale ON command does not re-arm; the arm must settle to off.
+    buffer.setCommand(freedriveCommand(4, std::nullopt, false));
+    rb_servo::ServoSnapshot snap;
+    RB_CHECK(waitUntil([&] {
+        snap = loop.latestSnapshot();
+        return snap.right_freedrive_stage == "off";
+    }, std::chrono::milliseconds(1000)));
+    // teach_on failure must not leave the arm engaged; an abort note is surfaced.
+    RB_CHECK(snap.right_freedrive_active == false);
+    RB_CHECK(!right->controllerFreedriveOn());
+    RB_CHECK(!snap.freedrive_note.empty());
+    loop.stop();
+    return true;
+}
+
 int main() {
     if (!testCommandValidation()) return 1;
+    if (!testFreedriveArmingQuiescesUntilIdleThenEngages()) return 1;
+    if (!testFreedriveTeachOnFailureAbortsAndReleases()) return 1;
     if (!testSimulatorConfigParsesCanonicalAndAliases()) return 1;
     if (!testRbsimBackendMapsStateAndFailureResponses()) return 1;
     if (!testRbsimPersistentTransportReconnectsAfterSocketDrop()) return 1;
