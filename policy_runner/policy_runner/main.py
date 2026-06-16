@@ -1181,7 +1181,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             run_flow_offline_eval,
             validate_flow_command_family,
         )
-        from .gripper import GripperRuntime
+        from .gripper import GripperCommand, GripperRuntime
         from .openpi_remote import OPENPI_CHECKPOINT_PREFIX, OpenpiRemoteActionSource
 
         config = load_config(args.config)
@@ -1341,6 +1341,42 @@ def _main_with_subcommands(argv: list[str]) -> int:
                         config.gripper.actuate_in_controller_simulation
                     ),
                 ).connect()
+        gripper_runtime = (
+            GripperRuntime(
+                rollout_mode=rollout_policy.mode.value,
+                allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+                backend=gripper_backend,
+            )
+            if gripper_backend is not None
+            else GripperRuntime(
+                rollout_mode=rollout_policy.mode.value,
+                allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+            )
+        )
+        # Open both grippers fully at startup so every rollout begins from a
+        # known open pose. Routed through the same GripperRuntime gate as policy
+        # commands, so it honors real_policy + allow_real_gripper_motion +
+        # RB_ALLOW_REAL_GRIPPER and is a logged noop when the hardware lane is
+        # closed (percent units: 100 = open = max_rad).
+        if gripper_backend is not None:
+            open_results = gripper_runtime.dispatch(
+                [
+                    GripperCommand(
+                        arm=arm,
+                        value=100.0,
+                        command_type="target",
+                        source="startup_open",
+                    )
+                    for arm in ("left", "right")
+                    if arm in gripper_backend.ports
+                ]
+            )
+            for result in open_results:
+                print(
+                    f"[flow-infer] startup gripper open {result.command.arm}: "
+                    f"sent_to_physical={result.sent_to_physical} reason={result.reason}",
+                    flush=True,
+                )
         try:
             policy_dt_sec = resolve_flow_policy_dt_sec(
                 rollout_policy.mode,
@@ -1363,18 +1399,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     rollout_policy.allows_controller_simulation_cartesian
                 ),
                 "ee_local_r_align": args.ee_local_r_align,
-                "gripper_runtime": (
-                    GripperRuntime(
-                        rollout_mode=rollout_policy.mode.value,
-                        allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
-                        backend=gripper_backend,
-                    )
-                    if gripper_backend is not None
-                    else GripperRuntime(
-                        rollout_mode=rollout_policy.mode.value,
-                        allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
-                    )
-                ),
+                "gripper_runtime": gripper_runtime,
                 "device": args.device,
             }
             if checkpoint_kind == "openpi_remote":

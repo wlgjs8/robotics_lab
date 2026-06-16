@@ -643,13 +643,16 @@ namespace {
 
 // Env-gated per-tick CSV dump of the model-output -> joint twist pipeline
 // (set RB_TWIST_PIPELINE_CSV=/path/to.csv). One row per arm per tick:
-//   model output twist -> filtered twist (clamp + LPF) ->
-//   [SMD: nan, not applied in the twist path; TcpPoseTarget/linear only] ->
-//   qdot (velocity IK) -> q_target (joint command).
+//   model output twist -> applied twist (clamp + orientation hold + floor) ->
+//   [SMD: smoothed pose goal in the twist_via_smd path; nan otherwise] ->
+//   qdot (velocity IK; nan in the twist_via_smd path) -> q_target (joint
+//   command) -> IK conditioning diagnostics (sigma_min, applied damping,
+//   per-tick joint jump vs seed, branch-jump flag).
 void logTwistPipelineCsv(const ArmCommand& command,
-                         const Vec6& model_out, const Vec6& filtered,
+                         const Vec6& model_out, const Vec6& applied,
                          const Pose6D* smd_pose, const JointArray* qdot,
-                         const JointArray& q_target, uint64_t seq) {
+                         const JointArray& q_target,
+                         const CartesianSolveTelemetry& telem, uint64_t seq) {
     static const char* csv_path = std::getenv("RB_TWIST_PIPELINE_CSV");
     if (csv_path == nullptr || csv_path[0] == '\0') return;
     static std::mutex mtx;
@@ -661,10 +664,11 @@ void logTwistPipelineCsv(const ArmCommand& command,
         ofs << std::setprecision(9);
         ofs << "host_ns,t_sec,seq,arm,mode,"
                "mo_vx,mo_vy,mo_vz,mo_wx,mo_wy,mo_wz,"
-               "fl_vx,fl_vy,fl_vz,fl_wx,fl_wy,fl_wz,"
+               "ap_vx,ap_vy,ap_vz,ap_wx,ap_wy,ap_wz,"
                "smd_x,smd_y,smd_z,smd_rx,smd_ry,smd_rz,"
                "qd0,qd1,qd2,qd3,qd4,qd5,"
-               "qc0,qc1,qc2,qc3,qc4,qc5\n";
+               "qc0,qc1,qc2,qc3,qc4,qc5,"
+               "ik_sigma_min,ik_lambda,ik_jump_deg,ik_branch_jump\n";
         header_written = true;
     }
     if (!ofs.good()) return;
@@ -677,8 +681,8 @@ void logTwistPipelineCsv(const ArmCommand& command,
         << toString(command.mode) << ','
         << model_out.x << ',' << model_out.y << ',' << model_out.z << ','
         << model_out.rx << ',' << model_out.ry << ',' << model_out.rz << ','
-        << filtered.x << ',' << filtered.y << ',' << filtered.z << ','
-        << filtered.rx << ',' << filtered.ry << ',' << filtered.rz << ',';
+        << applied.x << ',' << applied.y << ',' << applied.z << ','
+        << applied.rx << ',' << applied.ry << ',' << applied.rz << ',';
     if (smd_pose != nullptr) {
         ofs << smd_pose->x << ',' << smd_pose->y << ',' << smd_pose->z << ','
             << smd_pose->rx << ',' << smd_pose->ry << ',' << smd_pose->rz << ',';
@@ -690,7 +694,10 @@ void logTwistPipelineCsv(const ArmCommand& command,
     } else {
         ofs << "nan,nan,nan,nan,nan,nan,";
     }
-    for (int i = 0; i < kDof; ++i) ofs << q_target[i] << (i + 1 < kDof ? ',' : '\n');
+    for (int i = 0; i < kDof; ++i) ofs << q_target[i] << ',';
+    ofs << telem.ik_min_singular_value << ',' << telem.ik_applied_damping << ','
+        << telem.ik_solution_jump_deg << ',' << (telem.ik_branch_jump_suspected ? 1 : 0)
+        << '\n';
 }
 
 }  // namespace
@@ -763,7 +770,7 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         result.telemetry.reason = result.reason;
         return result;
     }
-    const Vec6 model_out_twist = requested;  // received model twist, pre clamp/LPF
+    const Vec6 model_out_twist = requested;  // received model twist, pre clamp/hold
     result.telemetry.requested_twist_linear_norm_m_s = linearNorm(requested);
     result.telemetry.requested_twist_angular_norm_rad_s = angularNorm(requested);
     bool twist_clamped = false;
@@ -826,35 +833,6 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         }
     }
 
-    // First-order twist LPF (anti-vibration): converts the policy's ~30 Hz ZOH
-    // velocity steps into a ramp before velocity IK. Applied AFTER deadband/hold
-    // resolution (so the hold-enter decision sees the raw command) and BEFORE the
-    // IK solve. State lives in hold_state -> resets to seed on lease/mode reentry.
-    if (config_.twist_lpf_enable && dt_sec > 0.0) {
-        const double tau = std::max(1e-4, config_.twist_lpf_tau_sec);
-        const double alpha = dt_sec / (tau + dt_sec);  // 0 < alpha <= 1
-        Vec6& filtered = hold_state->filtered_twist;
-        if (!hold_state->lpf_valid) {
-            filtered = requested;  // seed: no artificial start-up lag
-            hold_state->lpf_valid = true;
-        } else {
-            filtered.x += alpha * (requested.x - filtered.x);
-            filtered.y += alpha * (requested.y - filtered.y);
-            filtered.z += alpha * (requested.z - filtered.z);
-            filtered.rx += alpha * (requested.rx - filtered.rx);
-            filtered.ry += alpha * (requested.ry - filtered.ry);
-            filtered.rz += alpha * (requested.rz - filtered.rz);
-        }
-        requested = filtered;
-        // LPF output can briefly exceed limits during transients; re-clamp.
-        limitTwist(
-            &requested,
-            config_.max_twist_linear_m_s,
-            config_.max_twist_angular_rad_s,
-            config_.exceed_limit_policy,
-            &twist_clamped);
-    }
-
     result.telemetry.twist_clamped = twist_clamped;
     result.telemetry.applied_twist_linear_norm_m_s = linearNorm(requested);
     result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(requested);
@@ -901,7 +879,7 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         smd_result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(requested);
         smd_result.telemetry.twist_clamped = twist_clamped;
         logTwistPipelineCsv(command, model_out_twist, requested, &smd_pose, nullptr,
-                            smd_result.q_target_deg, command_seq);
+                            smd_result.q_target_deg, smd_result.telemetry, command_seq);
         return smd_result;
     }
 
@@ -940,7 +918,7 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         state_context
     );
     logTwistPipelineCsv(command, model_out_twist, requested, nullptr, &velocity.qdot_deg_s,
-                        final_result.q_target_deg, command_seq);
+                        final_result.q_target_deg, final_result.telemetry, command_seq);
     return final_result;
 }
 

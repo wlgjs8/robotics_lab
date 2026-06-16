@@ -341,6 +341,10 @@ IkResult PinocchioKinematics::solveIk(
     double position_error_m = 0.0;
     double orientation_error_rad = 0.0;
     int iterations = 0;
+    // Conditioning diagnostics from the most recent DLS step (carried to the
+    // convergence return, where the step itself is not recomputed).
+    double last_min_singular_value = 0.0;
+    double last_applied_damping = config_.ik.damping;
 
     for (; iterations <= config_.ik.max_iterations; ++iterations) {
         const auto now = std::chrono::steady_clock::now();
@@ -389,6 +393,18 @@ IkResult PinocchioKinematics::solveIk(
             result.orientation_error_rad = orientation_error_rad;
             result.duration_us = elapsedUs();
             result.iterations = iterations;
+            result.min_singular_value = last_min_singular_value;
+            result.applied_damping = last_applied_damping;
+            double solution_jump_deg = 0.0;
+            for (std::size_t i = 0; i < kDof; ++i) {
+                solution_jump_deg = std::max(
+                    solution_jump_deg,
+                    std::abs(result.q_solution_deg[i] - seed_q_deg[i]));
+            }
+            result.solution_jump_deg = solution_jump_deg;
+            result.branch_jump_suspected =
+                config_.ik.max_solution_jump_deg > 0.0 &&
+                solution_jump_deg > config_.ik.max_solution_jump_deg;
             return result;
         }
         if (iterations == config_.ik.max_iterations) break;
@@ -432,23 +448,35 @@ IkResult PinocchioKinematics::solveIk(
             );
         }
 
-        const double lambda = config_.ik.damping;
-        const Eigen::Matrix<double, 6, 6> dls_matrix =
-            task_jacobian * task_jacobian.transpose() +
-            (lambda * lambda) * Eigen::Matrix<double, 6, 6>::Identity();
-        const Eigen::LDLT<Eigen::Matrix<double, 6, 6>> ldlt(dls_matrix);
-        if (ldlt.info() != Eigen::Success) {
-            return ik_solver::failureResult(
-                ik_solver::kReasonSingularOrIllConditioned,
-                fromPinocchioQ(q, impl_->model, impl_->joints),
-                position_error_m,
-                orientation_error_rad,
-                iterations,
-                elapsedUs()
-            );
+        // Selective singularity-robust damped least squares via the SVD:
+        //   dq = -V diag(sigma_i / (sigma_i^2 + lambda_i^2)) U^T error
+        // lambda_i is the base damping outside the singular region and ramps up
+        // to `damping_max` only on directions whose singular value falls below
+        // `singular_region_eps`. This caps the inverse gain on the degenerate
+        // direction (preventing a branch-flipping joint blow-up) while leaving
+        // well-conditioned directions at full tracking accuracy.
+        const Eigen::VectorXd& singular_values = svd.singularValues();
+        const double base_lambda_sq = config_.ik.damping * config_.ik.damping;
+        const double eps = config_.ik.singular_region_eps;
+        const double extra_lambda_sq_max = config_.ik.damping_max * config_.ik.damping_max;
+        last_min_singular_value = singular_values.minCoeff();
+        double max_lambda_sq = base_lambda_sq;
+        Eigen::VectorXd inv_factors(singular_values.size());
+        for (Eigen::Index i = 0; i < singular_values.size(); ++i) {
+            const double sigma = singular_values[i];
+            double lambda_sq = base_lambda_sq;
+            if (eps > 0.0 && extra_lambda_sq_max > 0.0 && sigma < eps) {
+                const double ratio = sigma / eps;  // [0, 1)
+                lambda_sq += extra_lambda_sq_max * (1.0 - ratio * ratio);
+                max_lambda_sq = std::max(max_lambda_sq, lambda_sq);
+            }
+            inv_factors[i] = sigma / (sigma * sigma + lambda_sq);
         }
+        last_applied_damping = std::sqrt(max_lambda_sq);
 
-        const Eigen::VectorXd dq_full = -task_jacobian.transpose() * ldlt.solve(error);
+        const Eigen::VectorXd dq_full =
+            -svd.matrixV() * (inv_factors.asDiagonal() *
+                              (svd.matrixU().transpose() * error));
         if (!dq_full.array().isFinite().all()) {
             return ik_solver::failureResult(
                 ik_solver::kReasonSingularOrIllConditioned,

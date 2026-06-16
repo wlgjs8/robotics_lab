@@ -463,16 +463,15 @@ Real mode remains blocked.
 
 Streaming Cartesian velocity primitives. `TcpTwistLocal` is intended for SpaceMouse/local-frame teleop. `TcpTwistStand` is the stand-frame low-level API. Server-side Cartesian velocity limits, the server-side angular deadband for orientation hold, stale-state checks, deadman behavior, and command-source arbitration are required.
 
-**Twist conditioning.** The only **always-on** conditioning of the twist input is
-a per-tick magnitude clamp (`limitTwist()` in `cartesian_servo_controller.cpp`:
-scale-to-limit or reject by `exceed_limit_policy`); there is no slew-rate limit.
-An **optional** first-order low-pass filter
-(`cartesian_control.twist_lpf_enable`, default **off** → behavior-preserving;
-`twist_lpf_tau_sec ≈ 30–50 ms`) can be enabled for anti-vibration — it ramps the
-policy's stepped ZOH velocity before the velocity IK solve, with per-arm state
-reset on lease/mode re-entry. With the LPF off, input jitter passes straight
-through to the joint integrator. Any additional teleop-side smoothing (e.g. the
-SpaceMouse/UMI input EMA) lives upstream in `policy_runner`, not here.
+**Twist conditioning.** The only conditioning of the twist input is a per-tick
+magnitude clamp (`limitTwist()` in `cartesian_servo_controller.cpp`: scale-to-limit
+or reject by `exceed_limit_policy`); there is no slew-rate limit and no twist LPF
+(the former `twist_lpf_*` option was removed — input smoothing for `TcpTwistLocal`
+is handled by the `twist_via_smd` SMD pose tracker instead). Any additional
+teleop-side smoothing (e.g. the SpaceMouse/UMI input EMA) lives upstream in
+`policy_runner`, not here. Joint-space continuity near singularities is owned by
+the shared IK solver's selective singularity-robust damping
+(`kinematics.ik.singular_region_eps` / `damping_max`), not by the twist path.
 
 **TrajectoryFilter defers all Cartesian modes.** `TrajectoryFilter::computeJointTarget`
 handles only joint-space modes; every Cartesian mode (`TcpPoseTarget`,
