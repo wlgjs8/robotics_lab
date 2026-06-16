@@ -1354,13 +1354,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     supports_controller_simulation=(
                         config.gripper.actuate_in_controller_simulation
                     ),
-                    # Homing closes both grippers to their stop and re-zeros there.
-                    # Default ON; set RB_GRIPPER_HOME_ON_CONNECT=0 to disable (e.g.
-                    # to A/B test a gripper that fails to re-open after homing).
-                    home_on_connect=(
-                        os.environ.get("RB_GRIPPER_HOME_ON_CONNECT", "1")
-                        not in ("0", "false", "False", "no", "")
-                    ),
                 ).connect()
         gripper_runtime = (
             GripperRuntime(

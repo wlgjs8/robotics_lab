@@ -66,6 +66,7 @@ from rb_servo_gui.app import (
     _reflect_gate_reason,
     _send_tcp_linear_move_from_marker,
     _send_init_motion_and_reset_targets,
+    _update_floor_panel,
     _update_lease_owner,
     _tcp_display_mode,
     _tcp_local_delta_from_target,
@@ -2775,6 +2776,52 @@ class FloorConstraintGuiTest(unittest.TestCase):
         self.assertFalse(plane.visible)
         # Missing handle is a no-op.
         update_floor_plane_preview({}, 0.05)
+
+    def test_update_floor_panel_syncs_slider_to_applied_z_once(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        class FakeSlider:
+            def __init__(self):
+                self.min = 0.0
+                self.max = 500.0
+                self.value = 10.0
+
+        class FakeText:
+            def __init__(self):
+                self.value = ""
+
+        slider = FakeSlider()
+        handles = {"floor_slider": slider, "floor_applied": FakeText()}
+        # Current applied floor is 80 mm (z_min_m=0.080), not the hardcoded 10.
+        state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block(z_min_m=0.080)))
+        _update_floor_panel(handles, state)
+        # Slider comes up at the server-applied value, and the one-time guard is set.
+        self.assertAlmostEqual(slider.value, 80.0)
+        self.assertTrue(handles.get("floor_slider_synced"))
+        # A later operator edit must not be clobbered by subsequent state updates.
+        slider.value = 123.0
+        next_state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block(z_min_m=0.080)))
+        _update_floor_panel(handles, next_state)
+        self.assertAlmostEqual(slider.value, 123.0)
+
+    def test_update_floor_panel_clamps_sync_to_slider_bounds(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        class FakeSlider:
+            def __init__(self):
+                self.min = 0.0
+                self.max = 500.0
+                self.value = 10.0
+
+        slider = FakeSlider()
+        handles = {"floor_slider": slider}
+        # Applied z above the runtime max -> bounds widen to 300mm and value clamps to it.
+        state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block(
+            z_min_m=0.450, runtime_min_z_m=0.0, runtime_max_z_m=0.300,
+        )))
+        _update_floor_panel(handles, state)
+        self.assertAlmostEqual(slider.max, 300.0)
+        self.assertAlmostEqual(slider.value, 300.0)
 
 
 class LeaseBracketTest(unittest.TestCase):

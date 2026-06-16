@@ -1882,6 +1882,32 @@ def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -
             handles["floor_applied"].value = "disabled"
         return
     z = floor.get("z_min_m")
+    # Sync the slider bounds to the server's runtime-allowed range first, so any
+    # value we write below lands inside [min, max].
+    if slider is not None:
+        lo = floor.get("runtime_min_z_m")
+        hi = floor.get("runtime_max_z_m")
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and float(hi) > float(lo):
+            try:
+                slider.min = float(lo) * 1000.0
+                slider.max = float(hi) * 1000.0
+            except Exception:
+                pass
+    # First-state init: bring the slider up at the server-applied z instead of the
+    # hardcoded default, so the operator edits from the actual current floor. Done
+    # once (guarded by a handles flag) to avoid fighting the user's later edits.
+    if (
+        slider is not None
+        and isinstance(z, (int, float))
+        and not handles.get("floor_slider_synced", False)
+    ):
+        applied_mm = float(z) * 1000.0
+        try:
+            applied_mm = max(float(slider.min), min(float(slider.max), applied_mm))
+        except Exception:
+            pass
+        slider.value = applied_mm
+        handles["floor_slider_synced"] = True
     # Pending-value preview reconciliation: show the yellow preview plane only
     # while the slider differs from the server-applied z (>= 0.5 mm); after a
     # successful Send the applied plane catches up and the preview disappears.
@@ -1897,15 +1923,6 @@ def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -
     z_txt = f"{float(z) * 1000:.0f}mm" if isinstance(z, (int, float)) else "?"
     reject = floor.get("last_set_reject_reason")
     handles["floor_applied"].value = z_txt + (f" (last reject: {reject})" if reject else "")
-    if slider is not None:
-        lo = floor.get("runtime_min_z_m")
-        hi = floor.get("runtime_max_z_m")
-        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and float(hi) > float(lo):
-            try:
-                slider.min = float(lo) * 1000.0
-                slider.max = float(hi) * 1000.0
-            except Exception:
-                pass
 
 
 def _update_circle_overlay_gui(handles: dict[str, Any], overlay_store: CircleOverlayStore | None) -> None:
