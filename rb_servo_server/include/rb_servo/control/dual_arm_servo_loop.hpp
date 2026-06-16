@@ -25,6 +25,23 @@
 
 namespace rb_servo {
 
+// Per-arm direct-teaching (free-drive) lifecycle. Real-time servo control
+// (move_servo_j streaming) and direct teaching are mutually exclusive controller
+// regimes: entering free-drive while the controller is still executing servo
+// motion is rejected with pendant error M151 ("Direct Teaching: Cannot run this
+// function"). The arming state machine quiesces the servo stream and waits for
+// the controller to report idle BEFORE issuing freedrive_teach_on, then confirms
+// engagement via the controller's is_freedrive_mode flag.
+enum class FreedriveStage {
+    Off,       // normal servoing; no direct teaching
+    Quiesce,   // ON requested: servo_j suppressed, waiting for controller idle
+    Confirm,   // freedrive_teach_on issued, waiting for is_freedrive_mode == 1
+    Active,    // direct teaching engaged and confirmed (hand-guiding)
+    Exiting,   // OFF requested: freedrive_teach_off issued, waiting for is_freedrive_mode == 0
+};
+
+const char* toString(FreedriveStage stage);
+
 class DualArmServoLoop {
 public:
     DualArmServoLoop(
@@ -152,18 +169,39 @@ private:
     bool commandRequestsArmMotion(const DualArmCommand& command) const;
     bool commandRequestsDisarmMotion(const DualArmCommand& command) const;
     bool commandRequestsFreedrive(const DualArmCommand& command) const;
-    // Per-arm direct-teaching (free-drive) state transitions. Issues
-    // freedrive_teach_on/off to the addressed arm's backend (worker lifecycle in
-    // worker/async I/O, direct otherwise), updates the sticky flags, and resyncs
-    // the held target on exit so re-acquiring servo control does not snap the arm
-    // back. Fail-closed: a no-op unless config servo.allow_freedrive is set.
-    void applyFreedriveTransitions(
+    // Per-arm direct-teaching (free-drive) requests. Translates an inbound
+    // Freedrive command into a stage transition (Off->Quiesce on ON,
+    // Active/Quiesce/Confirm->exit on OFF) without touching the controller yet.
+    // Fail-closed: a no-op unless config servo.allow_freedrive is set.
+    void requestFreedrive(
         const DualArmCommand& command,
         const RobotState& left_state,
         const RobotState& right_state
     );
+    // Per-tick advance of the per-arm free-drive state machine. Quiesces the servo
+    // stream, waits for the controller to report idle, issues freedrive_teach_on,
+    // confirms via is_freedrive_mode, and resyncs the held target on exit.
+    void advanceFreedrive(const RobotState& left_state, const RobotState& right_state);
+    // True while any arm is not Off (drives global servo_j send suppression and
+    // motion-pipeline bypass — sends stop the moment an arm enters Quiesce).
     bool anyFreedriveActive() const;
+    // True only while an arm is fully engaged (Active) — used for telemetry.
+    bool anyFreedriveEngaged() const;
+    // Issue freedrive_teach_on/off to one arm's backend (worker lifecycle in
+    // worker/async I/O, direct otherwise). Returns the backend result.
+    BackendResult<RobotState> sendFreedriveToBackend(ArmId arm_id, bool on);
+    // Whether this arm's backend reports controller state usable to gate freedrive
+    // (rbpodo). Non-rbpodo backends (mock/simulator) bypass the quiesce/confirm
+    // waits and toggle immediately.
+    bool freedriveUsesControllerSignals(ArmId arm_id) const;
     void resyncArmAfterFreedrive(ArmId arm_id, const RobotState& state);
+    void abortFreedrive(ArmId arm_id, const RobotState& state, const std::string& reason);
+    // Best-effort freedrive_teach_off for any arm still in (or arming) freedrive,
+    // issued from stop() so a Ctrl-C/shutdown mid-teaching does not leave the
+    // controller latched in freedrive_teach_on (which also blocks the pendant's
+    // hardware direct-teaching button). Called after the loop thread is joined
+    // but before the workers/backends are torn down.
+    void teardownFreedriveOnStop();
     bool commandRequestsMotion(const DualArmCommand& command) const;
     bool commandBlockedByReadOnly(const DualArmCommand& command) const;
     bool readOnlyMode() const;
@@ -227,10 +265,23 @@ private:
     JointArray right_controller_sim_physical_baseline_q_deg_{};
 
     std::atomic<ServerMotionState> motion_state_{ServerMotionState::Disconnected};
-    // Per-arm direct-teaching (free-drive) sticky state. While either is true the
-    // server suppresses servo_j to both controllers (send_policy=="freedrive").
-    std::atomic<bool> left_freedrive_active_{false};
-    std::atomic<bool> right_freedrive_active_{false};
+    // Per-arm direct-teaching (free-drive) lifecycle. While either arm is not Off
+    // the server suppresses servo_j to both controllers (send_policy=="freedrive")
+    // and bypasses the motion pipeline. Owned by the loop thread; published as
+    // atomics so currentSendPolicy()/telemetry can read them lock-free.
+    std::atomic<FreedriveStage> left_freedrive_stage_{FreedriveStage::Off};
+    std::atomic<FreedriveStage> right_freedrive_stage_{FreedriveStage::Off};
+    // Hard deadline (steady ns) for the current Quiesce/Confirm/Exiting stage;
+    // exceeding it aborts the transition. Loop-thread only.
+    uint64_t left_freedrive_deadline_ns_ = 0;
+    uint64_t right_freedrive_deadline_ns_ = 0;
+    // Steady-ns timestamp the current stage was entered (settle-time fallback for
+    // controllers that do not report a usable motion state). Loop-thread only.
+    uint64_t left_freedrive_stage_entered_ns_ = 0;
+    uint64_t right_freedrive_stage_entered_ns_ = 0;
+    // Last free-drive abort/failure reason, surfaced in state telemetry. Guarded
+    // by state_mutex_ on publish.
+    std::string freedrive_note_;
     mutable std::mutex state_mutex_;
     std::atomic<bool> fault_latched_{false};
     std::atomic<SafetyVerdict> fault_verdict_{SafetyVerdict::Ok};

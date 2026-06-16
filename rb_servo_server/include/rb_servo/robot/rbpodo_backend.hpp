@@ -21,6 +21,14 @@ struct RbpodoSystemStateSnapshot {
     int op_stat_soft_estop_occur = 0;
     int op_stat_collision_occur = 0;
     int op_stat_self_collision = 0;
+    // sdata.robot_state: 1 = Idle (no motion command), 3 = executing motion,
+    // 5 = conveyor/force, 60+ = MovePB/ITPL waypoint. Used to gate freedrive
+    // entry (direct teaching requires the controller to be idle).
+    int robot_state = 0;
+    // sdata.is_freedrive_mode: 1 = free-drive (gravity-compensation) on, 0 = off.
+    // The controller's ground-truth direct-teaching state (set_freedrive_mode only
+    // ACKs receipt, so this is the only reliable confirmation that teach engaged).
+    int is_freedrive_mode = 0;
 };
 
 struct RbpodoStateDecodeOptions {

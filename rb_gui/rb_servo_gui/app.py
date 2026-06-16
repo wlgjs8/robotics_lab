@@ -1292,12 +1292,14 @@ def build_gui(
                 fd_left_off = server.gui.add_button("왼팔 교시 OFF (재동기화)")
                 fd_right_on = server.gui.add_button("오른팔 교시 ON")
                 fd_right_off = server.gui.add_button("오른팔 교시 OFF (재동기화)")
+                fd_both_on = server.gui.add_button("양팔 교시 ON")
                 fd_both_off = server.gui.add_button("양팔 교시 OFF (재동기화)")
                 handles["freedrive_buttons"] = {
                     "left_on": fd_left_on,
                     "left_off": fd_left_off,
                     "right_on": fd_right_on,
                     "right_off": fd_right_off,
+                    "both_on": fd_both_on,
                     "both_off": fd_both_off,
                 }
 
@@ -1316,6 +1318,10 @@ def build_gui(
                 @fd_right_off.on_click
                 def _(_: Any) -> None:
                     _freedrive(left=None, right=False)
+
+                @fd_both_on.on_click
+                def _(_: Any) -> None:
+                    _freedrive(left=True, right=True)
 
                 @fd_both_off.on_click
                 def _(_: Any) -> None:
@@ -2050,13 +2056,26 @@ def update_gui(
     handles["fault"].value = latest.fault_reason if latest.fault_latched else "none"
     if "freedrive_status" in handles:
         fd = latest.freedrive or {}
-        left_on = bool(fd.get("left_active", False))
-        right_on = bool(fd.get("right_active", False))
-        if left_on or right_on:
-            active = ", ".join(
-                ([f"왼팔 ON"] if left_on else []) + ([f"오른팔 ON"] if right_on else [])
+        # Per-arm lifecycle stage: off / arming_quiesce / arming_confirm / active / exiting.
+        stage_labels = {
+            "arming_quiesce": "정지대기",
+            "arming_confirm": "확인중",
+            "active": "ON",
+            "exiting": "해제중",
+        }
+        left_stage = str(fd.get("left_stage", "off"))
+        right_stage = str(fd.get("right_stage", "off"))
+        note = str(fd.get("note", "") or "")
+        parts = (
+            ([f"왼팔 {stage_labels[left_stage]}"] if left_stage in stage_labels else [])
+            + ([f"오른팔 {stage_labels[right_stage]}"] if right_stage in stage_labels else [])
+        )
+        if parts:
+            handles["freedrive_status"].value = (
+                f"DIRECT TEACHING — {', '.join(parts)} (servo_j 억제됨)"
             )
-            handles["freedrive_status"].value = f"DIRECT TEACHING — {active} (servo_j 억제됨)"
+        elif note:
+            handles["freedrive_status"].value = f"off — {note}"
         else:
             handles["freedrive_status"].value = "off"
     if "status_summary" in handles:

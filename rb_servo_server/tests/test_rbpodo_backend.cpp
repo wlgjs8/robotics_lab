@@ -85,6 +85,26 @@ rb_servo::RbpodoSystemStateSnapshot rbpodoSnapshot() {
     return snapshot;
 }
 
+bool testFreedriveControllerSignalsMapped() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+    // Controller actively executing motion, free-drive off.
+    snapshot.robot_state = 3;
+    snapshot.is_freedrive_mode = 0;
+    rb_servo::RobotState moving =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
+    RB_CHECK(moving.controller_motion_state == 3);
+    RB_CHECK(!moving.controller_freedrive_on);
+
+    // Controller idle, free-drive engaged.
+    snapshot.robot_state = 1;
+    snapshot.is_freedrive_mode = 1;
+    rb_servo::RobotState idle_freedrive =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Right, snapshot);
+    RB_CHECK(idle_freedrive.controller_motion_state == 1);
+    RB_CHECK(idle_freedrive.controller_freedrive_on);
+    return true;
+}
+
 bool testClearSelfCollisionIsRobotFault() {
     rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
     snapshot.op_stat_self_collision = 1;
@@ -682,6 +702,7 @@ bool testStatePublisherSerializesControllerSimUnavailableFields() {
 }  // namespace
 
 int main() {
+    if (!testFreedriveControllerSignalsMapped()) return 1;
     if (!testClearSelfCollisionIsRobotFault()) return 1;
     if (!testHugeSelfCollisionIsSuspectButReadable()) return 1;
     if (!testValidSosCodeIsDeviceFaultNotBooleanViolation()) return 1;

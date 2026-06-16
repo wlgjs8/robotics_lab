@@ -2673,6 +2673,10 @@ class FloorConstraintGuiTest(unittest.TestCase):
         both = client.build_freedrive(left=False, right=False)
         self.assertEqual(both["left"], {"mode": "Freedrive", "freedrive_on": False})
         self.assertEqual(both["right"], {"mode": "Freedrive", "freedrive_on": False})
+        # Both arms ON in one packet (양팔 교시 ON).
+        both_on = client.build_freedrive(left=True, right=True)
+        self.assertEqual(both_on["left"], {"mode": "Freedrive", "freedrive_on": True})
+        self.assertEqual(both_on["right"], {"mode": "Freedrive", "freedrive_on": True})
         # Freedrive is a leased mode so send() brackets it with Acquire/Release.
         self.assertIn("Freedrive", CommandClient._LEASED_MODES)
         with self.assertRaises(ValueError):

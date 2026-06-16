@@ -301,6 +301,13 @@ struct RobotState {
     RobotConnectionState connection_state = RobotConnectionState::Disconnected;
 
     bool servo_enabled = false;
+    // Controller motion state (rbpodo sdata.robot_state): 1 = Idle (no motion
+    // command), 3 = executing motion, 0 = unknown/not reported. Gates direct-
+    // teaching entry — freedrive_teach_on requires the controller to be idle.
+    int controller_motion_state = 0;
+    // Controller free-drive state (rbpodo sdata.is_freedrive_mode == 1). The
+    // ground-truth confirmation that direct teaching actually engaged.
+    bool controller_freedrive_on = false;
     bool has_error = false;
     std::optional<bool> fault_recoverable;
     std::string lifecycle_state;
@@ -762,6 +769,11 @@ struct ServoSnapshot {
     // either controller (send_policy == "freedrive").
     bool left_freedrive_active = false;
     bool right_freedrive_active = false;
+    // Per-arm free-drive lifecycle stage (off/arming_quiesce/arming_confirm/
+    // active/exiting) and last abort/failure note, for operator telemetry.
+    std::string left_freedrive_stage = "off";
+    std::string right_freedrive_stage = "off";
+    std::string freedrive_note;
     SafetyVerdict latched_fault_reason = SafetyVerdict::Ok;
     std::string fault_reason;
 

@@ -7,6 +7,44 @@ the rbpodo SDK `set_freedrive_mode` (`freedrive_teach_on()` / `freedrive_teach_o
 so an operator can hand-guide the arm, then re-acquires control with a **target
 resync** — all from the viser GUI, **without killing `make run`**.
 
+## Why a state machine (the M151 fix)
+
+Real-time servo control (`move_servo_j` streaming) and direct teaching are mutually
+exclusive controller regimes. Issuing `freedrive_teach_on()` while the controller is
+still executing servo motion is rejected on the pendant with **M151 — "Direct
+Teaching: Cannot run this function"** (the controller's "not the right
+environment/conditions" error; not M234 "motion executing" or M206 "not activated").
+Direct teaching is also a **physical** gravity-compensation function: it only runs in
+`operation_mode: real`. In `operation_mode: simulation` the controller refuses with
+the same M151 regardless of arm state.
+
+The fix is a per-arm **arming state machine** that quiesces the servo stream and waits
+for the controller to report idle *before* engaging free-drive:
+
+```
+Off ──ON──▶ Quiesce ──idle──▶ Confirm ──is_freedrive_mode==1──▶ Active
+             │ servo_j         │ teach_on()                       │ hand-guiding
+             │ suppressed      │                                  │
+             └── timeout / teach_on M151 ──▶ abort ──▶ Off (resync, note)
+
+Active ──OFF──▶ Exiting ──teach_off + is_freedrive_mode==0──▶ Off (resync)
+```
+
+- **Quiesce**: the moment ON is requested, `send_policy=="freedrive"` suppresses
+  `servo_j` to both controllers. The server then waits for the controller's
+  `robot_state` (rbpodo `sdata.robot_state`) to reach `1` (Idle) — the prior servo
+  window (`t1+t2`) lapses and the arm settles. Only then is `freedrive_teach_on()`
+  issued, so M151 cannot occur. (If the controller never reports a usable motion
+  state, a 150 ms settle fallback applies; a 1 s hard deadline aborts.)
+- **Confirm**: engagement is verified via the controller's `is_freedrive_mode` flag
+  (`set_freedrive_mode` only ACKs *receipt*, so the flag is the only ground truth). In
+  `operation_mode: simulation` the flag may never flip (teach is a no-op there), so the
+  ACK is trusted after a short settle; in `operation_mode: real` it MUST confirm or the
+  transition aborts.
+- **Abort** (timeout, M151, or cancel) returns the arm to Off, resyncs the held target
+  to the current actual joints (no jump on servo resume), and surfaces a note in
+  telemetry.
+
 Primary use case (inline recovery): a policy misbehaves → release the policy lease →
 direct-teach the arm to a safe pose by hand → exit direct teaching (resync) →
 `InitMotion` → re-arm the policy. No process restart, no viser/camera-pipeline teardown,
@@ -51,16 +89,24 @@ Per-arm, sticky server state. One-shot lifecycle command (not streamed):
 - A `Freedrive` arm object missing `freedrive_on` is ignored with a warning
   (ambiguous; never silently treated as off).
 
-State JSON exposes:
+State JSON exposes per-arm lifecycle stage + last abort note:
 
 ```json
-"freedrive": {"left_active": true, "right_active": false, "any_active": true}
+"freedrive": {
+  "left_active": true, "right_active": false, "any_active": true,
+  "left_stage": "active", "right_stage": "off", "note": ""
+}
 ```
+
+`*_stage` ∈ `off | arming_quiesce | arming_confirm | active | exiting`. `*_active`
+is true only at `active`. `note` carries the last abort/failure reason (e.g.
+`right: freedrive aborted (teach_on failed: ...)`).
 
 ## GUI usage (viser, http://127.0.0.1:8080)
 
 Operator tab → **직접교시 (Direct Teaching)** folder:
-- `왼팔 교시 ON` / `오른팔 교시 ON` — enter free-drive on that arm.
+- `왼팔 교시 ON` / `오른팔 교시 ON` / `양팔 교시 ON` — enter free-drive on that arm
+  (or both arms in one packet).
 - `왼팔 교시 OFF (재동기화)` / `오른팔 교시 OFF (재동기화)` / `양팔 교시 OFF (재동기화)` — exit + resync.
 - `Freedrive` status line shows the live `freedrive` state from the stream.
 
@@ -109,12 +155,29 @@ the arm must not enter free-drive.
 
 - C++ `test_arm_worker` → `testSetFreedriveUsesLifecycleQueue` (worker routes
   `SetFreedrive` to the backend, on/off payload).
+- C++ `test_safety_policy` → `testFreedriveArmingQuiescesUntilIdleThenEngages`
+  (no teach_on while controller reports moving + servo_j suppressed; teach_on only
+  after idle; confirm via `is_freedrive_mode`; exit resync) and
+  `testFreedriveTeachOnFailureAbortsAndReleases` (M151/teach_on failure aborts to off,
+  arm not left engaged, note surfaced).
+- C++ `test_rbpodo_backend` → `testFreedriveControllerSignalsMapped`
+  (`robot_state`/`is_freedrive_mode` mapped to `controller_motion_state`/
+  `controller_freedrive_on`).
 - rb_gui `test_gui_contracts` → `test_build_freedrive_per_arm_packet` (per-arm packet
-  shape + `Freedrive` ∈ `_LEASED_MODES`).
+  shape, both-arms ON/OFF + `Freedrive` ∈ `_LEASED_MODES`).
 
 ## On real hardware
 
-Not authorized by this runbook. Real physical direct teaching requires a site-local real
-config opt-in (`servo.allow_freedrive: true`) plus operator supervision and E-stop, and
-should be validated on hardware separately (the virtual control box does not prove the
-controller's gravity-compensation behavior).
+Real physical direct teaching requires:
+- `operation_mode: real` (physical gravity-compensation; `simulation` always M151s), and
+- the site-local config opt-in `servo.allow_freedrive: true` (set in
+  `config/local/stack_real.yaml`), plus operator supervision and E-stop.
+
+Run with `make run` (defaults to `MODE=real` → `stack_real.yaml`). The arming state
+machine handles the M151 root cause (quiesce-before-teach); on the pendant you should
+see no M151, and the arm goes gravity-compensated only after the GUI shows
+`arming_confirm → active`. If it returns to `off` with a `note`, read the note (e.g. a
+teach_on rejection or a quiesce timeout).
+
+Both-arm ON releases both arms simultaneously — the operator must hold both (the
+opposite arm does not stiff-hold when it too is in free-drive).

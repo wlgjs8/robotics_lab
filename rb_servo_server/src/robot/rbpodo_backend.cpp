@@ -412,6 +412,8 @@ RobotState mapRbpodoSystemStateSnapshot(
     const std::optional<RbpodoInterpretedFault> clear_fault =
         firstClearRbpodoFault(snapshot, diagnostics);
     out_state.connection_state = RobotConnectionState::Connected;
+    out_state.controller_motion_state = snapshot.robot_state;
+    out_state.controller_freedrive_on = snapshot.is_freedrive_mode == 1;
     out_state.servo_enabled = snapshot.init_state_info == 6;
     out_state.has_error = clear_fault.has_value() || diagnostics.diagnostics_suspect;
     out_state.error_code = clear_fault.has_value()
@@ -553,6 +555,8 @@ RbpodoSystemStateSnapshot snapshotFromSystemState(const rb::podo::SystemState& r
     snapshot.op_stat_soft_estop_occur = rb_state.sdata.op_stat_soft_estop_occur;
     snapshot.op_stat_collision_occur = rb_state.sdata.op_stat_collision_occur;
     snapshot.op_stat_self_collision = rb_state.sdata.op_stat_self_collision;
+    snapshot.robot_state = rb_state.sdata.robot_state;
+    snapshot.is_freedrive_mode = rb_state.sdata.is_freedrive_mode;
     for (int i = 0; i < kDof; ++i) {
         snapshot.q_actual_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ang[i];
         snapshot.q_target_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ref[i];

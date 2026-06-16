@@ -1533,6 +1533,9 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         {"left_active", snapshot.left_freedrive_active},
         {"right_active", snapshot.right_freedrive_active},
         {"any_active", snapshot.left_freedrive_active || snapshot.right_freedrive_active},
+        {"left_stage", snapshot.left_freedrive_stage},
+        {"right_stage", snapshot.right_freedrive_stage},
+        {"note", snapshot.freedrive_note},
     };
     message["latched_fault_reason"] = toString(snapshot.latched_fault_reason);
     message["fault_reason"] = snapshot.fault_reason;

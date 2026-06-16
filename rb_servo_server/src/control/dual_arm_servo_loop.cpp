@@ -1466,6 +1466,11 @@ void DualArmServoLoop::stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
+    // The loop thread is joined (no race on the freedrive stage atomics) but the
+    // workers/backends are still connected — issue freedrive_teach_off now for any
+    // arm left in freedrive so a Ctrl-C/shutdown mid-teaching does not strand the
+    // controller in a program-latched freedrive_teach_on state.
+    teardownFreedriveOnStop();
     if (left_worker_) left_worker_->stop();
     if (right_worker_) right_worker_->stop();
     if (!workerBackedIoMode()) {
@@ -1868,14 +1873,22 @@ void DualArmServoLoop::loopMain() {
             command = metadata_hold(command);
         } else if (commandRequestsFreedrive(command)) {
             // Per-arm direct teaching. Toggling is leased (operator must hold
-            // control); the sticky flags then drive global send suppression and
-            // motion-pipeline bypass every tick until explicitly turned off.
-            applyFreedriveTransitions(command, left_state, right_state);
+            // control). This only records the requested stage transition; the
+            // arming state machine (advanceFreedrive, below) quiesces the servo
+            // stream and engages/exits free-drive over subsequent ticks.
+            requestFreedrive(command, left_state, right_state);
             command = metadata_hold(command);
         } else if (commandRequestsMotion(command) && !motionAllowed()) {
             clearLatchedCartesianTargets();
             command = metadata_hold(command);
         }
+
+        // Advance the per-arm free-drive arming state machine every tick. Once an
+        // arm leaves Off, anyFreedriveActive() suppresses servo_j to both
+        // controllers (currentSendPolicy()=="freedrive") so the controller settles
+        // to idle before freedrive_teach_on is issued — the M151 ("Cannot run this
+        // function") fix: real-time servo control must stop before direct teaching.
+        advanceFreedrive(left_state, right_state);
 
         ServoTarget safe_target;
         ServoTarget desired_target;
@@ -2324,8 +2337,13 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.async_supervision_degraded = sample.async_supervision_degraded;
             latest_snapshot_.tracking_error_degraded = sample.tracking_error_degraded;
-            latest_snapshot_.left_freedrive_active = left_freedrive_active_.load();
-            latest_snapshot_.right_freedrive_active = right_freedrive_active_.load();
+            const FreedriveStage left_fd_stage = left_freedrive_stage_.load();
+            const FreedriveStage right_fd_stage = right_freedrive_stage_.load();
+            latest_snapshot_.left_freedrive_active = left_fd_stage == FreedriveStage::Active;
+            latest_snapshot_.right_freedrive_active = right_fd_stage == FreedriveStage::Active;
+            latest_snapshot_.left_freedrive_stage = toString(left_fd_stage);
+            latest_snapshot_.right_freedrive_stage = toString(right_fd_stage);
+            latest_snapshot_.freedrive_note = freedrive_note_;
             latest_snapshot_.latched_fault_reason = latched_fault_reason_.load();
             latest_snapshot_.fault_reason = fault_reason_;
             latest_snapshot_.latched_fault_context = sample.latched_fault_context;
@@ -3956,8 +3974,25 @@ bool DualArmServoLoop::commandRequestsFreedrive(const DualArmCommand& command) c
     return command.left.mode == ControlMode::Freedrive || command.right.mode == ControlMode::Freedrive;
 }
 
+const char* toString(FreedriveStage stage) {
+    switch (stage) {
+        case FreedriveStage::Off: return "off";
+        case FreedriveStage::Quiesce: return "arming_quiesce";
+        case FreedriveStage::Confirm: return "arming_confirm";
+        case FreedriveStage::Active: return "active";
+        case FreedriveStage::Exiting: return "exiting";
+    }
+    return "unknown";
+}
+
 bool DualArmServoLoop::anyFreedriveActive() const {
-    return left_freedrive_active_.load() || right_freedrive_active_.load();
+    return left_freedrive_stage_.load() != FreedriveStage::Off ||
+           right_freedrive_stage_.load() != FreedriveStage::Off;
+}
+
+bool DualArmServoLoop::anyFreedriveEngaged() const {
+    return left_freedrive_stage_.load() == FreedriveStage::Active ||
+           right_freedrive_stage_.load() == FreedriveStage::Active;
 }
 
 void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& state) {
@@ -3985,7 +4020,95 @@ void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& s
               << " held target snapped to current actual joints\n";
 }
 
-void DualArmServoLoop::applyFreedriveTransitions(
+namespace {
+// Free-drive arming timings (steady ns).
+constexpr uint64_t kFreedriveQuiesceSettleNs = 150'000'000;    // fallback if motion-state unreported
+constexpr uint64_t kFreedriveQuiesceDeadlineNs = 1'000'000'000; // abort if never idle
+constexpr uint64_t kFreedriveConfirmTrustAckNs = 150'000'000;  // controller-sim no-op: trust ACK after this
+constexpr uint64_t kFreedriveConfirmDeadlineNs = 800'000'000;  // abort if is_freedrive_mode never confirms (real)
+constexpr uint64_t kFreedriveExitDeadlineNs = 800'000'000;     // resync anyway after teach_off if unconfirmed
+}  // namespace
+
+bool DualArmServoLoop::freedriveUsesControllerSignals(ArmId arm_id) const {
+    const BackendConfig& cfg = (arm_id == ArmId::Left) ? config_.left_robot : config_.right_robot;
+    return cfg.backend_type == BackendType::Rbpodo;
+}
+
+BackendResult<RobotState> DualArmServoLoop::sendFreedriveToBackend(ArmId arm_id, bool on) {
+    const uint64_t start_ns = nowSteadyNs();
+    const uint64_t timeout_ns = timeoutNs(config_.servo.command_timeout_sec, 1'000'000'000);
+    const uint64_t deadline_ns = addDeadlineNs(start_ns, timeout_ns);
+    ArmWorker* worker = (arm_id == ArmId::Left) ? left_worker_.get() : right_worker_.get();
+    IRobotBackend* robot = (arm_id == ArmId::Left) ? left_robot_.get() : right_robot_.get();
+    if (workerBackedIoMode()) {
+        if (!worker) {
+            return BackendResult<RobotState>{
+                false, BackendOp::SetFreedrive, RobotState{},
+                backendError(BackendErrorKind::RobotDisconnected,
+                             "arm worker unavailable for setFreedrive", "", "worker_unavailable"),
+                makeBackendTiming(start_ns, nowSteadyNs())};
+        }
+        return worker->setFreedrive(on, tick_, deadline_ns);
+    }
+    if (!robot) {
+        return BackendResult<RobotState>{};  // ok defaults to false -> caller aborts
+    }
+    return robot->setFreedrive(on);
+}
+
+void DualArmServoLoop::abortFreedrive(ArmId arm_id, const RobotState& state, const std::string& reason) {
+    std::atomic<FreedriveStage>& stage_atomic =
+        (arm_id == ArmId::Left) ? left_freedrive_stage_ : right_freedrive_stage_;
+    const FreedriveStage stage = stage_atomic.load();
+    // If teach_on may have already been issued (Confirm) or engaged (Active/Exiting),
+    // best-effort teach_off so we never leave the controller silently hand-guidable.
+    if (stage == FreedriveStage::Confirm || stage == FreedriveStage::Active ||
+        stage == FreedriveStage::Exiting) {
+        const BackendResult<RobotState> off = sendFreedriveToBackend(arm_id, false);
+        if (!off.ok) {
+            std::cerr << "[WARN] freedrive " << toString(arm_id)
+                      << " abort: best-effort teach_off failed: " << off.error.name << "\n";
+        }
+    }
+    stage_atomic.store(FreedriveStage::Off);
+    // Resync the held target to the current actual joints so resuming servo_j does
+    // not snap the arm. Safe even from Quiesce (the arm was only holding).
+    resyncArmAfterFreedrive(arm_id, state);
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        freedrive_note_ = std::string(toString(arm_id)) + ": freedrive aborted (" + reason + ")";
+    }
+    std::cerr << "[WARN] freedrive " << toString(arm_id) << " aborted: " << reason << "\n";
+}
+
+void DualArmServoLoop::teardownFreedriveOnStop() {
+    // Called from stop() with the loop thread already joined and the
+    // workers/backends still alive. No held-target resync is needed (the process
+    // is tearing down); the one thing that must not be skipped is teach_off, so
+    // the controller does not exit with a latched freedrive_teach_on that the
+    // pendant's hardware direct-teaching button cannot clear.
+    const auto teardown = [&](ArmId arm_id, std::atomic<FreedriveStage>& stage_atomic) {
+        const FreedriveStage stage = stage_atomic.load();
+        if (stage == FreedriveStage::Off) return;
+        // teach_on may already be live (Confirm/Active/Exiting) or not yet issued
+        // (Quiesce). teach_off is harmless if it was never on, so always send it.
+        const BackendResult<RobotState> off = sendFreedriveToBackend(arm_id, false);
+        if (!off.ok) {
+            std::cerr << "[WARN] freedrive " << toString(arm_id)
+                      << " teach_off on shutdown failed: " << off.error.name
+                      << " — controller may stay latched in freedrive; power-cycle "
+                         "the control box if hardware teaching does not return\n";
+        } else {
+            std::cerr << "[INFO] freedrive " << toString(arm_id)
+                      << " teach_off issued on shutdown\n";
+        }
+        stage_atomic.store(FreedriveStage::Off);
+    };
+    teardown(ArmId::Left, left_freedrive_stage_);
+    teardown(ArmId::Right, right_freedrive_stage_);
+}
+
+void DualArmServoLoop::requestFreedrive(
     const DualArmCommand& command,
     const RobotState& left_state,
     const RobotState& right_state
@@ -3993,75 +4116,166 @@ void DualArmServoLoop::applyFreedriveTransitions(
     if (!config_.servo.allow_freedrive) {
         std::cerr << "[WARN] Freedrive command rejected: servo.allow_freedrive=false "
                      "(direct teaching is a fail-closed config opt-in)\n";
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        freedrive_note_ = "rejected: servo.allow_freedrive=false";
         return;
     }
 
-    const uint64_t start_ns = nowSteadyNs();
-    const uint64_t timeout_ns = timeoutNs(config_.servo.command_timeout_sec, 1'000'000'000);
-    const uint64_t deadline_ns = addDeadlineNs(start_ns, timeout_ns);
-
-    const auto apply_arm = [&](ArmId arm_id,
-                               const ArmCommand& arm_command,
-                               std::atomic<bool>& active_flag,
-                               ArmWorker* worker,
-                               IRobotBackend* robot,
-                               const RobotState& state) {
+    const uint64_t now = nowSteadyNs();
+    const auto request_arm = [&](ArmId arm_id,
+                                 const ArmCommand& arm_command,
+                                 std::atomic<FreedriveStage>& stage_atomic,
+                                 uint64_t& deadline_ns,
+                                 uint64_t& entered_ns,
+                                 const RobotState& state) {
         if (arm_command.mode != ControlMode::Freedrive) return;
         if (!arm_command.has_freedrive) {
             std::cerr << "[WARN] Freedrive command for " << toString(arm_id)
                       << " ignored: missing freedrive_on payload\n";
             return;
         }
-        const bool want = arm_command.freedrive_on;
-        if (want == active_flag.load()) return;  // already in the requested state
-
-        BackendResult<RobotState> result;
-        if (workerBackedIoMode()) {
-            result = worker
-                ? worker->setFreedrive(want, tick_, deadline_ns)
-                : BackendResult<RobotState>{
-                      false,
-                      BackendOp::SetFreedrive,
-                      RobotState{},
-                      backendError(
-                          BackendErrorKind::RobotDisconnected,
-                          "arm worker unavailable for setFreedrive",
-                          "",
-                          "worker_unavailable"
-                      ),
-                      makeBackendTiming(start_ns, nowSteadyNs())
-                  };
+        const bool want_on = arm_command.freedrive_on;
+        const FreedriveStage stage = stage_atomic.load();
+        if (want_on) {
+            if (stage == FreedriveStage::Off) {
+                stage_atomic.store(FreedriveStage::Quiesce);
+                entered_ns = now;
+                deadline_ns = now + kFreedriveQuiesceDeadlineNs;
+                std::cerr << "[INFO] freedrive " << toString(arm_id)
+                          << " ON requested: quiescing servo stream before teach_on\n";
+            }
+            // else already arming/active — idempotent, ignore.
         } else {
-            result = robot
-                ? robot->setFreedrive(want)
-                : BackendResult<RobotState>{};
-        }
-
-        if (!result.ok) {
-            std::cerr << "[WARN] setFreedrive(" << (want ? "on" : "off") << ") failed for "
-                      << toString(arm_id) << ": " << result.error.name << ":"
-                      << result.error.message << " — sticky state unchanged\n";
-            return;
-        }
-
-        active_flag.store(want);
-        if (!want) {
-            // Re-acquiring servo control: resync held target to the (hand-moved)
-            // actual joints. Prefer the fresh state the backend returned.
-            const RobotState& fresh = result.value.has_valid_joint_state ? result.value : state;
-            resyncArmAfterFreedrive(arm_id, fresh);
+            if (stage == FreedriveStage::Active) {
+                const BackendResult<RobotState> off = sendFreedriveToBackend(arm_id, false);
+                if (!off.ok) {
+                    std::cerr << "[WARN] freedrive " << toString(arm_id)
+                              << " teach_off failed: " << off.error.name
+                              << " — forcing exit + resync\n";
+                }
+                stage_atomic.store(FreedriveStage::Exiting);
+                entered_ns = now;
+                deadline_ns = now + kFreedriveExitDeadlineNs;
+                std::cerr << "[INFO] freedrive " << toString(arm_id)
+                          << " OFF requested: teach_off issued, confirming exit\n";
+            } else if (stage == FreedriveStage::Quiesce || stage == FreedriveStage::Confirm) {
+                abortFreedrive(arm_id, state, "cancelled before engage");
+            }
+            // else Off/Exiting — idempotent.
         }
     };
 
-    apply_arm(ArmId::Left, command.left, left_freedrive_active_, left_worker_.get(), left_robot_.get(), left_state);
-    apply_arm(ArmId::Right, command.right, right_freedrive_active_, right_worker_.get(), right_robot_.get(), right_state);
+    request_arm(ArmId::Left, command.left, left_freedrive_stage_,
+                left_freedrive_deadline_ns_, left_freedrive_stage_entered_ns_, left_state);
+    request_arm(ArmId::Right, command.right, right_freedrive_stage_,
+                right_freedrive_deadline_ns_, right_freedrive_stage_entered_ns_, right_state);
 
-    // Releasing servo authority on any arm leaves the system not motion-ready;
+    // Arming/holding free-drive on any arm leaves the system not motion-ready;
     // require an explicit re-arm afterwards. (No-op if already fault/emergency.)
     if (anyFreedriveActive() && !fault_latched_.load() &&
         motion_state_.load() != ServerMotionState::EmergencyLatched) {
         setMotionState(ServerMotionState::ConnectedHold);
     }
+}
+
+void DualArmServoLoop::advanceFreedrive(const RobotState& left_state, const RobotState& right_state) {
+    const uint64_t now = nowSteadyNs();
+    const auto advance_arm = [&](ArmId arm_id,
+                                 std::atomic<FreedriveStage>& stage_atomic,
+                                 uint64_t& deadline_ns,
+                                 uint64_t& entered_ns,
+                                 const std::string& op_mode,
+                                 const RobotState& state) {
+        const FreedriveStage stage = stage_atomic.load();
+        if (stage == FreedriveStage::Off || stage == FreedriveStage::Active) return;
+
+        const bool uses_signals = freedriveUsesControllerSignals(arm_id);
+        const bool real_op = op_mode == "real";
+        const uint64_t in_stage_ns = now - entered_ns;
+
+        switch (stage) {
+            case FreedriveStage::Quiesce: {
+                // Direct teaching requires the controller to be idle. Wait until it
+                // reports robot_state == 1 (Idle) after the servo stream stopped.
+                // The settle-time fallback applies ONLY when the controller never
+                // reports a usable motion state (stays 0); a controller actively
+                // reporting "moving" (3) is waited out until idle or the deadline.
+                const bool reports_motion_state = state.controller_motion_state != 0;
+                const bool idle = !uses_signals ||
+                    state.controller_motion_state == 1 ||
+                    (!reports_motion_state && in_stage_ns >= kFreedriveQuiesceSettleNs);
+                if (!idle) {
+                    if (now >= deadline_ns) {
+                        abortFreedrive(arm_id, state,
+                                       "quiesce timeout: controller never reported idle");
+                    }
+                    return;
+                }
+                const BackendResult<RobotState> on = sendFreedriveToBackend(arm_id, true);
+                if (!on.ok) {
+                    abortFreedrive(arm_id, state,
+                                   "teach_on failed: " + on.error.name + ":" + on.error.message);
+                    return;
+                }
+                stage_atomic.store(FreedriveStage::Confirm);
+                entered_ns = now;
+                deadline_ns = now + kFreedriveConfirmDeadlineNs;
+                std::cerr << "[INFO] freedrive " << toString(arm_id)
+                          << " teach_on issued (controller idle); confirming engagement\n";
+                return;
+            }
+            case FreedriveStage::Confirm: {
+                // Ground-truth confirmation via is_freedrive_mode. In controller
+                // simulation the flag may never flip (teach_on is a no-op), so trust
+                // the ACK after a short settle; in real operation it MUST confirm.
+                const bool confirmed = !uses_signals ||
+                    state.controller_freedrive_on ||
+                    (!real_op && in_stage_ns >= kFreedriveConfirmTrustAckNs);
+                if (confirmed) {
+                    stage_atomic.store(FreedriveStage::Active);
+                    {
+                        std::lock_guard<std::mutex> lock(state_mutex_);
+                        freedrive_note_.clear();
+                    }
+                    std::cerr << "[INFO] freedrive " << toString(arm_id)
+                              << " ACTIVE (direct teaching engaged"
+                              << (state.controller_freedrive_on ? ", controller-confirmed"
+                                                                : ", ack-trusted")
+                              << "); servo_j suppressed\n";
+                    return;
+                }
+                if (now >= deadline_ns) {
+                    abortFreedrive(arm_id, state,
+                                   "freedrive not confirmed by controller (is_freedrive_mode stayed off)");
+                }
+                return;
+            }
+            case FreedriveStage::Exiting: {
+                const bool off_confirmed = !uses_signals ||
+                    !state.controller_freedrive_on ||
+                    (!real_op && in_stage_ns >= kFreedriveConfirmTrustAckNs);
+                if (off_confirmed || now >= deadline_ns) {
+                    if (!off_confirmed) {
+                        std::cerr << "[WARN] freedrive " << toString(arm_id)
+                                  << " exit not controller-confirmed before deadline; resyncing anyway\n";
+                    }
+                    resyncArmAfterFreedrive(arm_id, state);
+                    stage_atomic.store(FreedriveStage::Off);
+                    std::cerr << "[INFO] freedrive " << toString(arm_id)
+                              << " exited; servo_j re-enabled after resync\n";
+                }
+                return;
+            }
+            case FreedriveStage::Off:
+            case FreedriveStage::Active:
+                return;
+        }
+    };
+
+    advance_arm(ArmId::Left, left_freedrive_stage_, left_freedrive_deadline_ns_,
+                left_freedrive_stage_entered_ns_, config_.left_robot.operation_mode, left_state);
+    advance_arm(ArmId::Right, right_freedrive_stage_, right_freedrive_deadline_ns_,
+                right_freedrive_stage_entered_ns_, config_.right_robot.operation_mode, right_state);
 }
 
 bool DualArmServoLoop::commandRequestsMotion(const DualArmCommand& command) const {
@@ -4108,10 +4322,11 @@ std::string DualArmServoLoop::currentSendPolicy() const {
     if (fault_latched_.load() || state == ServerMotionState::FaultLatched) {
         return "fault_latched";
     }
-    if (left_freedrive_active_.load() || right_freedrive_active_.load()) {
-        // Direct teaching active on at least one arm: send no servo_j to either
-        // controller. The freedrive arm is hand-guided; the other holds at its
-        // last controller reference. Recoverable, not a fault.
+    if (anyFreedriveActive()) {
+        // Direct teaching arming or active on at least one arm: send no servo_j to
+        // either controller. Suppression starts at Quiesce so the controller can
+        // settle to idle before freedrive_teach_on (else M151). The freedrive arm
+        // is hand-guided; the other holds at its last reference. Recoverable.
         return "freedrive";
     }
     if (controllerSimulationMotionRequired(config_) &&
