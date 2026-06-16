@@ -261,9 +261,11 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
 
         r_align = resolve_ee_local_r_align("pika_tip")
         assert r_align is not None
+        # A plain rotation preset yields identical linear/angular channels.
+        np.testing.assert_allclose(r_align.linear, r_align.angular)
         # Same matrix accepted as 9 floats text.
         np.testing.assert_allclose(
-            resolve_ee_local_r_align("0,0,1,-1,0,0,0,-1,0"), r_align
+            resolve_ee_local_r_align("0,0,1,-1,0,0,0,-1,0").linear, r_align.linear
         )
 
         # Action direction (v_tcp = R_alignT . v_tip): tip +x (approach) -> TCP +z,
@@ -295,6 +297,49 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
             rotate_flow_arm_vectors(chunk, r_align), r_align.T
         )
         np.testing.assert_allclose(round_trip, chunk, atol=1e-6)
+
+    def test_ee_local_r_align_pika_rz180_variants(self) -> None:
+        from policy_runner.flow_inference import (
+            resolve_ee_local_r_align,
+            rotate_flow_arm_vectors,
+        )
+
+        full = resolve_ee_local_r_align("pika_rz180")
+        trans_only = resolve_ee_local_r_align("pika_rz180_trans_only")
+        assert full is not None and trans_only is not None
+
+        # pika_rz180 is a true rotation: same flip on both channels.
+        np.testing.assert_allclose(full.linear, full.angular)
+        np.testing.assert_allclose(full.linear, np.diag([-1.0, -1.0, 1.0]))
+        # trans_only flips x/y translation but leaves rotation identity.
+        np.testing.assert_allclose(trans_only.linear, np.diag([-1.0, -1.0, 1.0]))
+        np.testing.assert_allclose(trans_only.angular, np.eye(3))
+
+        # Action direction (v_tcp = R_alignT . v_train) on both arms.
+        step = np.zeros(14, dtype=np.float32)
+        step[0:3] = (1.0, 2.0, 3.0)   # left linear
+        step[3:6] = (4.0, 5.0, 6.0)   # left angular
+        step[6] = 0.5                  # left gripper untouched
+        step[7:10] = (1.0, 2.0, 3.0)  # right linear
+        step[10:13] = (4.0, 5.0, 6.0)  # right angular
+        step[13] = -0.25               # right gripper untouched
+
+        out_full = rotate_flow_arm_vectors(step, full.T)
+        # Full rz180: x,y flip on BOTH translation and rotation; z/rz unchanged.
+        np.testing.assert_allclose(out_full[0:3], (-1.0, -2.0, 3.0), atol=1e-6)
+        np.testing.assert_allclose(out_full[3:6], (-4.0, -5.0, 6.0), atol=1e-6)
+        np.testing.assert_allclose(out_full[7:10], (-1.0, -2.0, 3.0), atol=1e-6)
+        np.testing.assert_allclose(out_full[10:13], (-4.0, -5.0, 6.0), atol=1e-6)
+
+        out_trans = rotate_flow_arm_vectors(step, trans_only.T)
+        # trans_only: x,y flip on translation; rotation UNCHANGED.
+        np.testing.assert_allclose(out_trans[0:3], (-1.0, -2.0, 3.0), atol=1e-6)
+        np.testing.assert_allclose(out_trans[3:6], (4.0, 5.0, 6.0), atol=1e-6)
+        np.testing.assert_allclose(out_trans[7:10], (-1.0, -2.0, 3.0), atol=1e-6)
+        np.testing.assert_allclose(out_trans[10:13], (4.0, 5.0, 6.0), atol=1e-6)
+        # Grippers untouched.
+        self.assertAlmostEqual(float(out_trans[6]), 0.5)
+        self.assertAlmostEqual(float(out_trans[13]), -0.25)
 
     def test_tcp_twist_local_readonly_and_optin_paths(self) -> None:
         # real_readonly sends no commands -> family always accepted.

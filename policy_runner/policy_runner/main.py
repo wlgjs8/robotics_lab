@@ -748,8 +748,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
         default=None,
         help=(
             "Fixed rotation between the training EE body frame and the RB TCP frame for "
-            "ee_local checkpoints: preset name ('pika_tip' for pika UMI data) or 9 "
-            "row-major floats. Default: none (frames assumed identical)."
+            "ee_local checkpoints. Preset name or 9 row-major floats. Presets: "
+            "'pika_rz180' (measured pika-UMI correction, 180deg about approach(z) on BOTH "
+            "translation and rotation), 'pika_rz180_trans_only' (ablation: flip x/y "
+            "translation only, leave rotation unchanged), 'pika_tip' (legacy 90deg guess). "
+            "Default: none (frames assumed identical)."
         ),
     )
     flow_infer.add_argument(

@@ -147,10 +147,13 @@ class GroundTruthSource:
         if r_align is not None:
             # Rotate the body-frame linear+angular deltas into the RB TCP frame
             # (e.g. a 180deg-about-approach correction for the steamvr->stand yaw gap).
-            R = np.asarray(r_align, dtype=np.float64)
+            # linear/angular are the same matrix for a true rotation preset, and
+            # differ only for split presets (e.g. pika_rz180_trans_only).
+            R_lin = np.asarray(r_align.linear, dtype=np.float64)
+            R_ang = np.asarray(r_align.angular, dtype=np.float64)
             for d in (self.dL, self.dR):
-                d[:, 0:3] = d[:, 0:3] @ R.T
-                d[:, 3:6] = d[:, 3:6] @ R.T
+                d[:, 0:3] = d[:, 0:3] @ R_lin.T
+                d[:, 3:6] = d[:, 3:6] @ R_ang.T
         self.clock = clock
         self.policy_dt_sec = float(policy_dt_sec)
         self.max_lin = float(max_lin)

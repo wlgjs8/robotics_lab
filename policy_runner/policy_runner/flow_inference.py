@@ -140,25 +140,27 @@ EE_LOCAL_R_ALIGN_PRESETS: dict[str, tuple[float, ...]] = {
 }
 
 
-def resolve_ee_local_r_align(value: Any) -> np.ndarray | None:
-    """None/'none' -> None; preset name or 9 row-major floats -> 3x3 matrix."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        key = value.strip().lower().replace("-", "_")
-        if key in {"", "none", "identity"}:
-            return None
-        if key in EE_LOCAL_R_ALIGN_PRESETS:
-            value = EE_LOCAL_R_ALIGN_PRESETS[key]
-        else:
-            try:
-                value = [float(item) for item in value.replace(",", " ").split()]
-            except ValueError as exc:
-                presets = ", ".join(sorted(EE_LOCAL_R_ALIGN_PRESETS))
-                raise ValueError(
-                    f"invalid ee-local-r-align {value!r}; expected a preset ({presets}) "
-                    "or 9 row-major floats"
-                ) from exc
+@dataclass(frozen=True, eq=False)
+class EeLocalRAlign:
+    """Body-frame relabel for ee_local checkpoints, applied per channel.
+
+    `linear` rotates the translation 3-vectors, `angular` the rotation
+    3-vectors of every flow proprio/action row. For a true rigid frame change
+    the two are identical (a single rotation), which is the normal case. They
+    differ only for diagnostic sign-convention presets such as
+    ``pika_rz180_trans_only`` (flip x/y translation but leave rotation as-is),
+    which is NOT a valid rigid transform and exists purely for axis ablation.
+    """
+
+    linear: np.ndarray
+    angular: np.ndarray
+
+    @property
+    def T(self) -> "EeLocalRAlign":
+        return EeLocalRAlign(np.asarray(self.linear).T, np.asarray(self.angular).T)
+
+
+def _validate_r_align_matrix(value: Any) -> np.ndarray:
     matrix = np.asarray(list(value), dtype=np.float64)
     if matrix.size != 9:
         raise ValueError("ee-local-r-align must have exactly 9 elements (row-major 3x3)")
@@ -168,18 +170,72 @@ def resolve_ee_local_r_align(value: Any) -> np.ndarray | None:
     return matrix
 
 
-def rotate_flow_arm_vectors(array: np.ndarray, rotation: np.ndarray) -> np.ndarray:
+# Split presets: linear != angular, so they cannot be expressed as a single
+# orthonormal matrix. `pika_rz180_trans_only` flips x/y translation (the
+# pika_rz180 linear correction) but keeps the rotation channel untouched — an
+# ablation to test whether rx/ry actually need the same 180° flip the
+# translation does (axis-probe 2026-06-15 says they do; this lets you A/B it).
+_PIKA_RZ180 = np.array([[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]])
+EE_LOCAL_R_ALIGN_SPLIT_PRESETS: dict[str, EeLocalRAlign] = {
+    "pika_rz180_trans_only": EeLocalRAlign(linear=_PIKA_RZ180, angular=np.eye(3)),
+}
+
+
+def resolve_ee_local_r_align(value: Any) -> EeLocalRAlign | None:
+    """None/'none' -> None; preset name or 9 row-major floats -> EeLocalRAlign.
+
+    A plain rotation (preset or 9 floats) yields linear == angular; split
+    presets (e.g. ``pika_rz180_trans_only``) yield differing channels.
+    """
+    if value is None or isinstance(value, EeLocalRAlign):
+        return value
+    if isinstance(value, str):
+        key = value.strip().lower().replace("-", "_")
+        if key in {"", "none", "identity"}:
+            return None
+        if key in EE_LOCAL_R_ALIGN_SPLIT_PRESETS:
+            return EE_LOCAL_R_ALIGN_SPLIT_PRESETS[key]
+        if key in EE_LOCAL_R_ALIGN_PRESETS:
+            value = EE_LOCAL_R_ALIGN_PRESETS[key]
+        else:
+            try:
+                value = [float(item) for item in value.replace(",", " ").split()]
+            except ValueError as exc:
+                presets = ", ".join(
+                    sorted({*EE_LOCAL_R_ALIGN_PRESETS, *EE_LOCAL_R_ALIGN_SPLIT_PRESETS})
+                )
+                raise ValueError(
+                    f"invalid ee-local-r-align {value!r}; expected a preset ({presets}) "
+                    "or 9 row-major floats"
+                ) from exc
+    matrix = _validate_r_align_matrix(value)
+    return EeLocalRAlign(linear=matrix, angular=matrix)
+
+
+def rotate_flow_arm_vectors(
+    array: np.ndarray, rotation: "np.ndarray | EeLocalRAlign"
+) -> np.ndarray:
     """Rotate the per-arm linear+angular 3-vectors of flow proprio/action rows.
 
     Works for proprio vectors (..., >=14) and action chunks (steps, 14): the
     last dim holds [left dx dy dz drx dry drz grip | right ...]; gripper and
     any trailing entries (proprio arm_mask) are untouched.
+
+    `rotation` may be a single 3x3 matrix (applied to both the translation and
+    rotation 3-vectors) or an :class:`EeLocalRAlign` carrying separate `linear`
+    (translation) and `angular` (rotation) matrices.
     """
+    if isinstance(rotation, EeLocalRAlign):
+        linear = np.asarray(rotation.linear, dtype=np.float32)
+        angular = np.asarray(rotation.angular, dtype=np.float32)
+    else:
+        linear = angular = np.asarray(rotation, dtype=np.float32)
     rotated = np.array(array, dtype=np.float32, copy=True)
     for offset in (0, 7):
-        for start in (offset, offset + 3):
-            block = rotated[..., start : start + 3]
-            rotated[..., start : start + 3] = block @ np.asarray(rotation, dtype=np.float32).T
+        rotated[..., offset : offset + 3] = rotated[..., offset : offset + 3] @ linear.T
+        rotated[..., offset + 3 : offset + 6] = (
+            rotated[..., offset + 3 : offset + 6] @ angular.T
+        )
     return rotated
 
 
