@@ -261,8 +261,25 @@ kinematics:
     singular_region_eps: 0.0
     damping_max: 0.0
     max_solution_jump_deg: 2.0
+    # Branch-jump CLAMP (acts, not just observes). When a converged solve still
+    # jumps > max_solution_jump_deg from the seed: re-solve the SAME tick at
+    # branch_jump_damping_scale x damping (escalating per retry) to pull it back
+    # onto the local branch; if it still jumps, hold the SEED (zero motion this
+    # tick) instead of flipping to a distant branch. Telemetry ik_branch_jump_clamped
+    # (state + twist_pipe.csv). Selective singular damping is OFF here (0/0), so the
+    # re-solve scales the base damping only; clamp_to_seed is the final fallback.
+    branch_jump_damping_scale: 10.0
+    branch_jump_max_retries: 2
+    branch_jump_clamp_to_seed: true
 
 cartesian_control:
+  # Anti-windup for the twist_via_smd goal integrator (position m / orientation
+  # rad): the integrated goal may not lead the measured TCP by more than this,
+  # bounding run-away when the arm stalls and the recovery lurch. Engages only on
+  # the twist_via_smd path (enable twist_via_smd_enable to exercise it in sim).
+  # Telemetry smd_goal_clamped (state + twist_pipe.csv).
+  twist_smd_goal_max_lead_m: 0.05
+  twist_smd_goal_max_lead_rad: 0.2
   enable: true
   # 실기 CB pgmode simulation에서는 q_actual이 명령을 추종하지 않으므로(물리 무동작),
   # 스트리밍 Cartesian 적분 기준은 controller reference(jnt_ref)여야 함.

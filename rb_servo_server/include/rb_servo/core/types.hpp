@@ -333,6 +333,8 @@ struct CartesianSolveTelemetry {
     double ik_applied_damping = 0.0;
     double ik_solution_jump_deg = 0.0;
     bool ik_branch_jump_suspected = false;
+    bool ik_branch_jump_clamped = false;
+    bool twist_smd_goal_clamped = false;  // twist_via_smd goal anti-windup engaged
     bool ik_timed_out = false;
     bool ik_warn_duration_exceeded = false;
     bool ik_fail_duration_exceeded = false;

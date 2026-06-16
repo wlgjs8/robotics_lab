@@ -668,7 +668,8 @@ void logTwistPipelineCsv(const ArmCommand& command,
                "smd_x,smd_y,smd_z,smd_rx,smd_ry,smd_rz,"
                "qd0,qd1,qd2,qd3,qd4,qd5,"
                "qc0,qc1,qc2,qc3,qc4,qc5,"
-               "ik_sigma_min,ik_lambda,ik_jump_deg,ik_branch_jump\n";
+               "ik_sigma_min,ik_lambda,ik_jump_deg,ik_branch_jump,ik_branch_jump_clamped,"
+               "smd_goal_clamped\n";
         header_written = true;
     }
     if (!ofs.good()) return;
@@ -697,6 +698,8 @@ void logTwistPipelineCsv(const ArmCommand& command,
     for (int i = 0; i < kDof; ++i) ofs << q_target[i] << ',';
     ofs << telem.ik_min_singular_value << ',' << telem.ik_applied_damping << ','
         << telem.ik_solution_jump_deg << ',' << (telem.ik_branch_jump_suspected ? 1 : 0)
+        << ',' << (telem.ik_branch_jump_clamped ? 1 : 0)
+        << ',' << (telem.twist_smd_goal_clamped ? 1 : 0)
         << '\n';
 }
 
@@ -858,6 +861,42 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         twist_delta.rz = requested.rz * smd_dt;
         hold_state->twist_smd_goal =
             math::composeDeltaLocal(hold_state->twist_smd_goal, twist_delta);
+
+        // Anti-windup (back-calculation feedback for this feedforward integrator):
+        // clamp the integrated goal so it never LEADS the measured TCP by more
+        // than the configured budget. Without it, a stalled arm (IK clamp / fault
+        // / can't track) lets the goal run away unbounded, then lurch on recovery.
+        // During healthy tracking the lead is just the SMD lag (~mm / sub-deg), so
+        // this never engages. Position and orientation are clamped independently;
+        // both budgets <= 0 disable it (behavior-preserving).
+        bool goal_clamped = false;
+        const Pose6D& measured_tcp_stand = *state.tcp_stand;
+        Pose6D& smd_goal = hold_state->twist_smd_goal;
+        if (config_.twist_smd_goal_max_lead_m > 0.0) {
+            const double pos_lead = math::positionDistance(measured_tcp_stand, smd_goal);
+            if (pos_lead > config_.twist_smd_goal_max_lead_m) {
+                const double s = config_.twist_smd_goal_max_lead_m / pos_lead;
+                smd_goal.x = measured_tcp_stand.x + (smd_goal.x - measured_tcp_stand.x) * s;
+                smd_goal.y = measured_tcp_stand.y + (smd_goal.y - measured_tcp_stand.y) * s;
+                smd_goal.z = measured_tcp_stand.z + (smd_goal.z - measured_tcp_stand.z) * s;
+                goal_clamped = true;
+            }
+        }
+        if (config_.twist_smd_goal_max_lead_rad > 0.0) {
+            const double ori_lead = math::orientationDistanceRad(measured_tcp_stand, smd_goal);
+            if (ori_lead > config_.twist_smd_goal_max_lead_rad) {
+                const double s = config_.twist_smd_goal_max_lead_rad / ori_lead;
+                // Slerp orientation from measured toward goal by s; keep the
+                // already position-clamped translation.
+                const Pose6D ori_clamped =
+                    math::interpolateLinear(measured_tcp_stand, smd_goal, true, s);
+                smd_goal.rx = ori_clamped.rx;
+                smd_goal.ry = ori_clamped.ry;
+                smd_goal.rz = ori_clamped.rz;
+                goal_clamped = true;
+            }
+        }
+
         hold_state->twist_smd->updateGoalFromCommand(hold_state->twist_smd_goal);
         const Pose6D smd_pose = hold_state->twist_smd->step(smd_dt);
 
@@ -878,6 +917,7 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         smd_result.telemetry.applied_twist_linear_norm_m_s = linearNorm(requested);
         smd_result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(requested);
         smd_result.telemetry.twist_clamped = twist_clamped;
+        smd_result.telemetry.twist_smd_goal_clamped = goal_clamped;
         logTwistPipelineCsv(command, model_out_twist, requested, &smd_pose, nullptr,
                             smd_result.q_target_deg, smd_result.telemetry, command_seq);
         return smd_result;

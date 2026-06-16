@@ -657,6 +657,51 @@ bool testIkBranchJumpGuardFlagsLargeSeedDelta() {
     return true;
 }
 
+bool testIkBranchJumpClampHoldsSeed() {
+    // With the clamp enabled (and no re-solve configured), a solution that jumps
+    // past the threshold is REPLACED by the seed (zero motion this tick) instead
+    // of flipping to a distant branch -- the actual correction, not just a flag.
+    rb_servo::KinematicsConfig cfg = testKinematicsConfig();
+    cfg.ik.max_solution_jump_deg = 2.0;
+    cfg.ik.branch_jump_clamp_to_seed = true;  // re-solve off (scale/retries default 0)
+    rb_servo::PinocchioKinematics kin(cfg);
+    const rb_servo::ArmMountConfig mount = leftMount();
+    const rb_servo::JointArray seed = seedJoints();
+
+    rb_servo::JointArray target_q = seed;
+    target_q[0] += 20.0;  // same >2 deg seed delta as the guard test
+    const rb_servo::Pose6D target_pose = kin.computeTcpStand(rb_servo::ArmId::Left, target_q, mount);
+    const rb_servo::IkResult result = kin.solveIk(rb_servo::ArmId::Left, target_pose, seed, mount);
+
+    RB_CHECK(result.success);
+    RB_CHECK(result.branch_jump_clamped);
+    RB_CHECK(result.branch_jump_suspected);
+    RB_CHECK(closeJoints(result.q_solution_deg, seed, 1e-12));  // held the seed
+    RB_CHECK(result.solution_jump_deg <= 1e-9);
+    return true;
+}
+
+bool testIkBranchJumpClampDefaultOffLeavesSolutionUnchanged() {
+    // Clamp fields default off => identical to the observability path: the
+    // jumping solution is returned as-is (reaches target, not held).
+    rb_servo::KinematicsConfig cfg = testKinematicsConfig();
+    cfg.ik.max_solution_jump_deg = 2.0;  // clamp fields left at defaults
+    rb_servo::PinocchioKinematics kin(cfg);
+    const rb_servo::ArmMountConfig mount = leftMount();
+    const rb_servo::JointArray seed = seedJoints();
+
+    rb_servo::JointArray target_q = seed;
+    target_q[0] += 20.0;
+    const rb_servo::Pose6D target_pose = kin.computeTcpStand(rb_servo::ArmId::Left, target_q, mount);
+    const rb_servo::IkResult result = kin.solveIk(rb_servo::ArmId::Left, target_pose, seed, mount);
+
+    RB_CHECK(result.success);
+    RB_CHECK(!result.branch_jump_clamped);
+    RB_CHECK(result.solution_jump_deg > 2.0);
+    RB_CHECK(result.position_error_m <= cfg.ik.position_tolerance_m);  // reached target
+    return true;
+}
+
 bool testIkSelectiveDampingDisabledByDefault() {
     // With singular_region_eps/damping_max defaulting to 0, applied_damping is
     // always the base damping (behavior-preserving).
@@ -679,6 +724,8 @@ int main() {
     if (!testIkConfigParsing()) return 1;
     if (!testIkConditioningDiagnosticsPopulated()) return 1;
     if (!testIkBranchJumpGuardFlagsLargeSeedDelta()) return 1;
+    if (!testIkBranchJumpClampHoldsSeed()) return 1;
+    if (!testIkBranchJumpClampDefaultOffLeavesSolutionUnchanged()) return 1;
     if (!testIkSelectiveDampingDisabledByDefault()) return 1;
     if (!testCartesianLatencyBudgetTelemetry()) return 1;
     if (!testIkSeedUsesPreviousSentTargetNotActualState()) return 1;

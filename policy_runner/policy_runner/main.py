@@ -794,7 +794,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--chunk-crossfade-steps",
         type=int,
-        default=0,
+        default=2,
         help=(
             "Blend the first N twists after each chunk-resample boundary from the "
             "previously emitted twist (alpha 0->1) to remove the boundary jerk "
@@ -1382,7 +1382,10 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     )
                     for arm in ("left", "right")
                     if arm in gripper_backend.ports
-                ]
+                ],
+                # Open both grippers at once (parallel serial writes) so they
+                # actuate simultaneously, not left-then-right.
+                concurrent=True,
             )
             for result in open_results:
                 print(
@@ -1390,6 +1393,13 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     f"sent_to_physical={result.sent_to_physical} reason={result.reason}",
                     flush=True,
                 )
+            # Physical grippers actuate with a delay; let them finish opening
+            # before the first policy step so inference does not begin while the
+            # jaws are still moving. Only wait when a command actually reached
+            # hardware (logged noop in sim / closed gripper lane -> no wait).
+            if any(result.sent_to_physical for result in open_results):
+                time.sleep(1.5)
+                print("[flow-infer] startup gripper open settle: waited 1.5s", flush=True)
         try:
             policy_dt_sec = resolve_flow_policy_dt_sec(
                 rollout_policy.mode,

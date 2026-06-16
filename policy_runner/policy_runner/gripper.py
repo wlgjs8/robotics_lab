@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol
@@ -245,8 +246,19 @@ class GripperRuntime:
     dropped_count: int = 0
     results: list[GripperDispatchResult] = field(default_factory=list)
 
-    def dispatch(self, commands: list[GripperCommand] | tuple[GripperCommand, ...]) -> list[GripperDispatchResult]:
-        results: list[GripperDispatchResult] = []
+    def dispatch(
+        self,
+        commands: list[GripperCommand] | tuple[GripperCommand, ...],
+        *,
+        concurrent: bool = False,
+    ) -> list[GripperDispatchResult]:
+        # Gate first (cheap, in order). The slow part is backend.send -> the
+        # blocking per-arm serial write; with concurrent=True those run in
+        # parallel threads so both grippers move at once instead of
+        # left-then-right (each arm is an independent serial port, so concurrent
+        # writes are safe and touch disjoint backend state). Default stays
+        # sequential for the per-tick policy path.
+        plan: list[tuple[str, Any]] = []  # ("result", res) | ("send", command)
         for command in commands:
             if not command.is_nonzero:
                 continue
@@ -254,11 +266,30 @@ class GripperRuntime:
             decision = self._gate(command)
             if decision is not None:
                 self.dropped_count += 1
-                self.results.append(decision)
-                results.append(decision)
+                plan.append(("result", decision))
                 continue
-            result = self.backend.send(command)
-            if result.dropped:
+            plan.append(("send", command))
+
+        send_cmds = [item for kind, item in plan if kind == "send"]
+        sent: dict[int, GripperDispatchResult] = {}
+        if concurrent and len(send_cmds) > 1:
+            threads = []
+            for cmd in send_cmds:
+                t = threading.Thread(
+                    target=lambda c=cmd: sent.__setitem__(id(c), self.backend.send(c))
+                )
+                t.start()
+                threads.append(t)
+            for t in threads:
+                t.join()
+        else:
+            for cmd in send_cmds:
+                sent[id(cmd)] = self.backend.send(cmd)
+
+        results: list[GripperDispatchResult] = []
+        for kind, item in plan:
+            result = item if kind == "result" else sent[id(item)]
+            if kind == "send" and result.dropped:
                 self.dropped_count += 1
             self.results.append(result)
             results.append(result)

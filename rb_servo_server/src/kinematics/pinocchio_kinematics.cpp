@@ -300,13 +300,16 @@ std::vector<ArmCapsule> PinocchioKinematics::armCollisionCapsulesInStand(
     return capsules;
 }
 
-IkResult PinocchioKinematics::solveIk(
+IkResult PinocchioKinematics::solveIkDamped(
     ArmId arm,
     const Pose6D& target_tcp_stand,
     const JointArray& seed_q_deg,
-    const ArmMountConfig& mount
+    const ArmMountConfig& mount,
+    double damping_scale
 ) const {
     (void)arm;
+    const double eff_damping = config_.ik.damping * damping_scale;
+    const double eff_damping_max = config_.ik.damping_max * damping_scale;
     const auto started = std::chrono::steady_clock::now();
     const auto elapsedUs = [&]() {
         return std::chrono::duration<double, std::micro>(
@@ -344,7 +347,7 @@ IkResult PinocchioKinematics::solveIk(
     // Conditioning diagnostics from the most recent DLS step (carried to the
     // convergence return, where the step itself is not recomputed).
     double last_min_singular_value = 0.0;
-    double last_applied_damping = config_.ik.damping;
+    double last_applied_damping = eff_damping;
 
     for (; iterations <= config_.ik.max_iterations; ++iterations) {
         const auto now = std::chrono::steady_clock::now();
@@ -456,9 +459,9 @@ IkResult PinocchioKinematics::solveIk(
         // direction (preventing a branch-flipping joint blow-up) while leaving
         // well-conditioned directions at full tracking accuracy.
         const Eigen::VectorXd& singular_values = svd.singularValues();
-        const double base_lambda_sq = config_.ik.damping * config_.ik.damping;
+        const double base_lambda_sq = eff_damping * eff_damping;
         const double eps = config_.ik.singular_region_eps;
-        const double extra_lambda_sq_max = config_.ik.damping_max * config_.ik.damping_max;
+        const double extra_lambda_sq_max = eff_damping_max * eff_damping_max;
         last_min_singular_value = singular_values.minCoeff();
         double max_lambda_sq = base_lambda_sq;
         Eigen::VectorXd inv_factors(singular_values.size());
@@ -500,6 +503,57 @@ IkResult PinocchioKinematics::solveIk(
         iterations,
         elapsedUs()
     );
+}
+
+IkResult PinocchioKinematics::solveIk(
+    ArmId arm,
+    const Pose6D& target_tcp_stand,
+    const JointArray& seed_q_deg,
+    const ArmMountConfig& mount
+) const {
+    IkResult result = solveIkDamped(arm, target_tcp_stand, seed_q_deg, mount, 1.0);
+    const double thresh = config_.ik.max_solution_jump_deg;
+    // Feature off, solve failed, or no branch jump -> observability path unchanged.
+    if (thresh <= 0.0 || !result.success || result.solution_jump_deg <= thresh) {
+        return result;
+    }
+
+    // Branch-jump CLAMP step 1: re-solve the same tick with escalating damping so
+    // the step stays on the local IK branch instead of flipping to a distant one.
+    // The first attempt whose jump is within threshold wins; otherwise keep the
+    // most-damped successful attempt as best-effort.
+    const double scale = config_.ik.branch_jump_damping_scale;
+    const int retries = config_.ik.branch_jump_max_retries;
+    if (scale > 1.0 && retries > 0) {
+        double cur_scale = 1.0;
+        for (int r = 0; r < retries; ++r) {
+            cur_scale *= scale;
+            IkResult retry =
+                solveIkDamped(arm, target_tcp_stand, seed_q_deg, mount, cur_scale);
+            if (retry.success && retry.solution_jump_deg <= thresh) {
+                return retry;  // higher damping resolved the jump -> smooth small step
+            }
+            if (retry.success) {
+                result = retry;  // best-effort: carry the most-damped solution
+            }
+        }
+    }
+
+    // Branch-jump CLAMP step 2: still jumping (or re-solve disabled). Hold the
+    // seed so the downstream integrator produces zero motion this tick rather
+    // than a violent branch-flip. Gated, so the default (clamp off) stays pure
+    // observability (returns the flagged solution unchanged).
+    if (config_.ik.branch_jump_clamp_to_seed) {
+        IkResult held = result;
+        held.success = true;
+        held.q_solution_deg = seed_q_deg;
+        held.solution_jump_deg = 0.0;
+        held.branch_jump_suspected = true;
+        held.branch_jump_clamped = true;
+        held.reason = "branch_jump_clamped_to_seed";
+        return held;
+    }
+    return result;
 }
 
 CartesianVelocityResult PinocchioKinematics::solveCartesianVelocity(

@@ -80,11 +80,10 @@ safety:
   q_min_deg: [-360, -360, -360, -360, -360, -360]
   q_max_deg: [360, 360, 360, 360, 360, 360]
   # Halved vs the sim profile for the first physical run.
-  # dq_max_deg_s: [60, 60, 60, 90, 90, 120]      # was halved [30,30,30,45,45,60] for first run
-  # dq_max_deg_s: [120, 120, 120, 120, 120, 120]      # was halved [30,30,30,45,45,60] for first run1
-  # ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]  # was halved for first run
-  dq_max_deg_s: [30, 30, 30, 45, 45, 60]      # was halved for first run
-  ddq_max_deg_s2: [150, 150, 150, 250, 250, 350]  # was halved for first run
+  dq_max_deg_s: [60, 60, 60, 90, 90, 120]      # was halved [30,30,30,45,45,60] for first run
+  ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]  # was halved for first run
+  # dq_max_deg_s: [30, 30, 30, 45, 45, 60]      # was halved for first run
+  # ddq_max_deg_s2: [150, 150, 150, 250, 250, 350]  # was halved for first run
   joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
   joint_wrap_for_startup_validation: false
   joint_wrap_for_motion_safety: false
@@ -229,7 +228,7 @@ kinematics:
     enable: true
     max_iterations: 50
     timeout_ms: 20.0
-    damping: 0.001
+    damping: 0.02
     # ANTI-TREMBLE (was 0.002 / 0.005): the tolerance is a DEAD ZONE for the
     # 500Hz streaming TcpPoseTarget path — solveIk returns the seed (q_actual)
     # unchanged whenever the tracking error is inside it. At teleop speeds
@@ -237,8 +236,8 @@ kinematics:
     # sits exactly at the old 2mm boundary, producing a 3-5Hz relay limit
     # cycle (= 1/(2 x loop delay)). Tighter tolerance shrinks the dead zone
     # so the solver actually iterates each tick; typical cost 1-3 DLS steps.
-    position_tolerance_m: 0.0000002
-    orientation_tolerance_rad: 0.000001
+    position_tolerance_m: 0.0001 #0.0000002
+    orientation_tolerance_rad: 0.001
     max_step_deg: [2, 2, 2, 3, 3, 4]
     # Selective singularity-robust damping. Shared by every position-IK
     # primitive (TcpPoseTarget / TcpLinearMove / pose-track SMD / twist-via-SMD),
@@ -262,9 +261,27 @@ kinematics:
     # seed in one tick (branch-jump detector). Does not change motion; surfaces
     # the events to tune the damping above.
     max_solution_jump_deg: 2.0
+    # Branch-jump CLAMP (acts, not just observes). When a converged solve still
+    # jumps > max_solution_jump_deg from the seed: re-solve the SAME tick at
+    # branch_jump_damping_scale x damping (escalating per retry) to pull it back
+    # onto the local branch; if it still jumps, hold the SEED (zero motion this
+    # tick) instead of flipping to a distant branch. Telemetry ik_branch_jump_clamped
+    # (state + twist_pipe.csv). 2nd line of defense behind the singular damping above
+    # (1st: suppress the jump at the source). If clamp fires often, raise
+    # singular_region_eps / damping_max so it's caught earlier.
+    branch_jump_damping_scale: 10.0   # base 0.02 -> re-solve at 0.2, then 2.0
+    branch_jump_max_retries: 2
+    branch_jump_clamp_to_seed: true
 
 cartesian_control:
   twist_via_smd_enable: true
+  # Anti-windup for the twist_via_smd goal integrator: never let the integrated
+  # goal lead the measured TCP by more than this (position m / orientation rad).
+  # Bounds goal run-away when the arm stalls (IK clamp / fault / can't track) and
+  # caps the recovery lurch; never engages in healthy tracking (lead = SMD lag,
+  # ~mm/sub-deg). Telemetry smd_goal_clamped (state + twist_pipe.csv).
+  twist_smd_goal_max_lead_m: 0.05
+  twist_smd_goal_max_lead_rad: 0.2
   enable: true
   allow_in_simulation: true
   allow_in_real: true                          # PHYSICAL real Cartesian (config-gated; no env)
@@ -287,7 +304,7 @@ cartesian_control:
   # arm flow-infer commanded up to 0.237 m/s / 0.343 rad/s, clamp lost ~188mm/7deg
   # per rollout (twist_pipeline.csv). 0.25 == SMD max_linear_velocity_m_s ceiling;
   # 0.4 stays well under SMD 1.0 rad/s. OPERATOR-SUPERVISED retry, E-stop ready.
-  max_twist_linear_m_s: 0.25
+  max_twist_linear_m_s: 0.5
   max_twist_angular_rad_s: 0.4
   max_linear_move_speed_m_s: 0.05
   max_angular_move_speed_rad_s: 0.1
@@ -305,9 +322,9 @@ cartesian_control:
   pose_track_smd:
     enable: true
     damping_ratio_linear: 1.0
-    natural_frequency_linear_hz: 10 #2.5
+    natural_frequency_linear_hz: 3 #2.5
     damping_ratio_angular: 1.0
-    natural_frequency_angular_hz: 10 #2.5
+    natural_frequency_angular_hz: 3 #2.5
     # Velocity feedforward: damp on velocity error (goal_dot - x_dot) so a
     # constant-velocity goal tracks with ~0 lag (removes the ~16-38mm ramp lag in
     # the twist_via_smd reach). Decouples fn from accuracy: with this ON you can
@@ -318,8 +335,8 @@ cartesian_control:
     # accel clamp IS the max-force clamp; zeta/fn dynamics stay exact inside
     # the limits. NOTE with these numbers a full-speed (50mm/s) stop is force-
     # limited to ~12.5mm of glide (v^2/2a) on large moves.
-    max_linear_velocity_m_s: 0.25        # 250 mm/s (was 50 - capped fast teleop)
-    max_linear_accel_m_s2: 5.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
+    max_linear_velocity_m_s: 0.5        # 250 mm/s (was 50 - capped fast teleop)
+    max_linear_accel_m_s2: 10.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
     max_angular_velocity_rad_s: 1.0   # 50 deg/s
     max_angular_accel_rad_s2: 1000.0     # 100 deg/s^2
   max_command_actual_error_deg: [5, 5, 5, 8, 8, 10]

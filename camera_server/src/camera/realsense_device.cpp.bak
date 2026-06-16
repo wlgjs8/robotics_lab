@@ -4,17 +4,12 @@
 
 #include <chrono>
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
-#include <thread>
 
 #if CAMERA_SERVER_HAVE_REALSENSE
 #include <librealsense2/rs.hpp>
-#include <librealsense2/rs_advanced_mode.hpp>
 #endif
 
 namespace camera_server {
@@ -101,7 +96,6 @@ class RealSenseDevice final : public ICameraDevice {
   void start(FrameCallback cb) override {
     cb_ = std::move(cb);
     configure_hardware_sync_if_requested();
-    maybe_load_advanced_json();
     rs2::config rs_cfg;
     rs_cfg.enable_device(cfg_.serial);
     if (cfg_.color.enabled) {
@@ -119,67 +113,6 @@ class RealSenseDevice final : public ICameraDevice {
   }
 
  private:
-  // 수집(.40)과 동일한 rs400 advanced-mode JSON을 pipeline start 전에 적용한다.
-  // 경로는 env CAMERA_SERVER_REALSENSE_JSON. 실패해도 캡처는 계속(드라이버 기본값).
-  // JSON에 controls-autoexposure-auto=True가 있으면 노출은 그대로 auto 유지.
-  void maybe_load_advanced_json() {
-    const char* env = std::getenv("CAMERA_SERVER_REALSENSE_JSON");
-    if (env == nullptr || env[0] == '\0') return;
-    const std::string path(env);
-    std::ifstream f(path);
-    if (!f) {
-      std::cerr << "[CAM] advanced json not found, skipping: " << path << '\n';
-      return;
-    }
-    std::stringstream ss;
-    ss << f.rdbuf();
-    const std::string json_str = ss.str();
-    if (json_str.empty()) {
-      std::cerr << "[CAM] advanced json empty, skipping: " << path << '\n';
-      return;
-    }
-    try {
-      rs2::context ctx;
-      rs2::device dev;
-      bool found = false;
-      for (auto&& d : ctx.query_devices()) {
-        if (cfg_.serial == d.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER)) {
-          dev = d;
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        std::cerr << "[CAM] advanced json: device serial=" << cfg_.serial << " not found, skipping\n";
-        return;
-      }
-      auto adv = dev.as<rs400::advanced_mode>();
-      if (!adv) {
-        std::cerr << "[CAM] advanced json: " << cfg_.name << " does not support advanced mode, skipping\n";
-        return;
-      }
-      int tries = 0;
-      while (!adv.is_enabled() && tries < 5) {
-        adv.toggle_advanced_mode(true);
-        std::this_thread::sleep_for(std::chrono::seconds(5));  // advanced toggle -> USB 재열거
-        rs2::context ctx2;
-        for (auto&& d : ctx2.query_devices()) {
-          if (cfg_.serial == d.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER)) {
-            dev = d;
-            break;
-          }
-        }
-        adv = dev.as<rs400::advanced_mode>();
-        ++tries;
-      }
-      adv.load_json(json_str);
-      std::cerr << "[CAM] advanced json applied for " << cfg_.name << " serial=" << cfg_.serial
-                << ": " << path << '\n';
-    } catch (const std::exception& e) {
-      std::cerr << "[CAM] advanced json apply failed for " << cfg_.name << ": " << e.what() << '\n';
-    }
-  }
-
   void configure_hardware_sync_if_requested() {
     if (sync_.mode != "hardware") return;
 

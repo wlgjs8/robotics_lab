@@ -1330,6 +1330,83 @@ bool testTcpCircleMoveSafetyGates() {
     return true;
 }
 
+bool testTwistViaSmdGoalAntiWindupClampsLead() {
+    // Stalled arm (measured TCP fixed every tick) with the twist_via_smd goal
+    // integrator: anti-windup must keep the goal from leading the measured TCP by
+    // more than the budget, instead of running away unbounded (~0.5 m here).
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount; left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount; right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.twist_via_smd_enable = true;
+    config.twist_smd_goal_max_lead_m = 0.05;
+    config.twist_smd_goal_max_lead_rad = 0.2;
+    config.twist_angular_deadband_rad_s = 0.0;  // pure-linear, skip orientation hold
+    config.max_twist_linear_m_s = 1.0;          // do not clamp the twist itself
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.5, 0.0, 0.0, 0.0, 0.0, 0.0};  // 0.5 m/s +x
+
+    rb_servo::CartesianTwistHoldState hold;
+    const rb_servo::JointArray q = zeroJoints();                 // measured TCP fixed
+    const rb_servo::RobotState state = stateFromJoints(*kinematics, q, left_mount);
+
+    bool ever_clamped = false;
+    double max_lead = 0.0;
+    for (int i = 0; i < 20; ++i) {  // 0.05 s * 0.5 m/s = 0.025 m/tick -> exceeds 0.05 m
+        const rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+            command, state, q, rb_servo::RunMode::Simulation, 0.05, 1, &hold);
+        const double dx = hold.twist_smd_goal.x - state.tcp_stand->x;
+        const double dy = hold.twist_smd_goal.y - state.tcp_stand->y;
+        const double dz = hold.twist_smd_goal.z - state.tcp_stand->z;
+        max_lead = std::max(max_lead, std::sqrt(dx * dx + dy * dy + dz * dz));
+        ever_clamped = ever_clamped || result.telemetry.twist_smd_goal_clamped;
+    }
+    RB_CHECK(max_lead <= 0.05 + 1e-6);  // bounded by the budget, not ~0.5 m
+    RB_CHECK(ever_clamped);
+    return true;
+}
+
+bool testTwistViaSmdGoalAntiWindupDisabledByDefault() {
+    // Budgets default 0 => no clamp: the goal integrates unbounded (behavior
+    // preserved), confirming the feature is opt-in.
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount; left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount; right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.twist_via_smd_enable = true;          // budgets left at default 0
+    config.twist_angular_deadband_rad_s = 0.0;
+    config.max_twist_linear_m_s = 1.0;
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.5, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    rb_servo::CartesianTwistHoldState hold;
+    const rb_servo::JointArray q = zeroJoints();
+    const rb_servo::RobotState state = stateFromJoints(*kinematics, q, left_mount);
+
+    bool ever_clamped = false;
+    double max_lead = 0.0;
+    for (int i = 0; i < 20; ++i) {
+        const rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+            command, state, q, rb_servo::RunMode::Simulation, 0.05, 1, &hold);
+        const double dx = hold.twist_smd_goal.x - state.tcp_stand->x;
+        max_lead = std::max(max_lead, std::abs(dx));
+        ever_clamped = ever_clamped || result.telemetry.twist_smd_goal_clamped;
+    }
+    RB_CHECK(max_lead > 0.2);     // ran away well past any budget
+    RB_CHECK(!ever_clamped);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -1342,6 +1419,8 @@ int main() {
     if (!testFloorConstraintZerosDownwardVzAtPlaneAndKeepsLateral()) return 1;
     if (!testFloorConstraintRespectsTcpOrientationFrame()) return 1;
     if (!testTcpTwistAngularDeadbandMaintainsHoldForNoise()) return 1;
+    if (!testTwistViaSmdGoalAntiWindupClampsLead()) return 1;
+    if (!testTwistViaSmdGoalAntiWindupDisabledByDefault()) return 1;
     if (!testPositiveOrientationHoldErrorReducesAfterSyntheticIntegration()) return 1;
     if (!testTcpTwistStandPositiveWorldXConvertsToLocalNegativeYAtPositiveYaw()) return 1;
     if (!testQuaternionAndRpyYawFrameConversionMatch()) return 1;

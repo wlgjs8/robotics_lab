@@ -581,6 +581,8 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"ik_applied_damping", telemetry.ik_applied_damping},
         {"ik_solution_jump_deg", telemetry.ik_solution_jump_deg},
         {"ik_branch_jump_suspected", telemetry.ik_branch_jump_suspected},
+        {"ik_branch_jump_clamped", telemetry.ik_branch_jump_clamped},
+        {"twist_smd_goal_clamped", telemetry.twist_smd_goal_clamped},
         {"ik_status", telemetry.status},
         {"ik_reason", telemetry.reason},
         {"ik_timed_out", telemetry.ik_timed_out},

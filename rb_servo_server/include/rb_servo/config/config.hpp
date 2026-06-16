@@ -96,10 +96,25 @@ struct IkSolverConfig {
     double damping_max = 0.0;
     // Observability guard: when > 0, flag the solve (telemetry
     // ik_branch_jump_suspected) if the returned solution differs from the seed
-    // by more than this many degrees on any joint. Does NOT alter the solution
-    // (the downstream joint velocity clamp bounds the motion); it surfaces
-    // branch-jump events for diagnosis.
+    // by more than this many degrees on any joint. On its own it does NOT alter
+    // the solution; it surfaces branch-jump events for diagnosis. The clamp
+    // fields below turn it into an actual correction.
     double max_solution_jump_deg = 0.0;
+    // Branch-jump CLAMP (acts on the solution, not just observe). When
+    // max_solution_jump_deg > 0 and a converged solution jumps more than that
+    // from the seed:
+    //   1) if branch_jump_damping_scale > 1 and branch_jump_max_retries > 0,
+    //      re-solve the SAME tick with damping multiplied by the scale (escalating
+    //      per retry) to pull the step back onto the local branch — the first
+    //      attempt whose jump is within threshold wins;
+    //   2) if it still exceeds the threshold and branch_jump_clamp_to_seed is
+    //      true, return the SEED (zero motion this tick) instead of flipping to a
+    //      distant IK branch (telemetry ik_branch_jump_clamped).
+    // All default-off (scale <= 1 / retries <= 0 / clamp false) => pure
+    // observability, behavior unchanged.
+    double branch_jump_damping_scale = 0.0;
+    int branch_jump_max_retries = 0;
+    bool branch_jump_clamp_to_seed = false;
 };
 
 struct KinematicsConfig {
@@ -615,6 +630,16 @@ struct CartesianControlConfig {
     // streaming TcpPoseTarget), then position-IK the smoothed pose. Default off
     // (behavior-preserving). Uses pose_track_smd's zeta/fn for the filter.
     bool twist_via_smd_enable = false;
+    // Anti-windup for the twist_via_smd goal integrator. Clamp the integrated
+    // pose goal so it never LEADS the measured TCP by more than these budgets
+    // (position m / orientation rad). In this feedforward chain the goal would
+    // otherwise run away when the arm stalls (IK clamp / fault / can't track) and
+    // lurch on recovery; clamping the goal to measured+budget is the
+    // back-calculation feedback that bounds both. Normal tracking lead is only
+    // the SMD lag (~mm / sub-deg), well under budget, so it never engages there.
+    // Both default 0 = disabled (behavior-preserving); e.g. 0.05 m / 0.2 rad.
+    double twist_smd_goal_max_lead_m = 0.0;
+    double twist_smd_goal_max_lead_rad = 0.0;
     double velocity_damping = 0.01;
     double max_twist_linear_m_s = 0.03;
     double max_twist_angular_rad_s = 0.2;

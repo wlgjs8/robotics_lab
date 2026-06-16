@@ -168,6 +168,7 @@ CartesianArmTargetResult solveIkArmTargetFromTcpStand(
     result.telemetry.ik_applied_damping = ik.applied_damping;
     result.telemetry.ik_solution_jump_deg = ik.solution_jump_deg;
     result.telemetry.ik_branch_jump_suspected = ik.branch_jump_suspected;
+    result.telemetry.ik_branch_jump_clamped = ik.branch_jump_clamped;
     result.telemetry.ik_timed_out = ik.timed_out || ik.reason == ik_solver::kReasonTimeout;
     result.telemetry.ik_warn_duration_exceeded =
         config.warn_ik_duration_us > 0.0 && ik.duration_us > config.warn_ik_duration_us;

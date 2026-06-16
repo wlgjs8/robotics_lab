@@ -39,6 +39,21 @@ from .rollout_modes import RolloutMode, RolloutModeValidationError, parse_rollou
 from .servo_command_client import CommandIntent
 
 
+def default_action_log_path() -> str:
+    """Resolve the per-step action-log path.
+
+    Honors ``POLICY_RUNNER_ACTION_LOG`` when set; otherwise auto-accumulates one
+    timestamped file per run under the repo ``logs/`` dir, so a plain
+    ``flow-infer`` (no env var on the command line) still captures actions.
+    """
+    configured = os.environ.get("POLICY_RUNNER_ACTION_LOG")
+    if configured:
+        return configured
+    logs_dir = Path(__file__).resolve().parents[2] / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return str(logs_dir / f"actions_{time.strftime('%Y%m%d_%H%M%S')}.jsonl")
+
+
 # Only the body-frame (ee_local) family remains. World-frame "stand" command
 # families were removed: data/proprio are ee_local, which the server interprets as
 # TcpTwistLocal (see wiki umi-tcp-delta-frame).
@@ -470,13 +485,12 @@ class FlowMatchingActionSource:
         # trembling (pulsed chunk boundaries vs. delta->twist noise amplification).
         self._action_log: TextIO | None = None
         self._action_log_seq = 0
-        _action_log_path = os.environ.get("POLICY_RUNNER_ACTION_LOG")
-        if _action_log_path:
-            self._action_log = open(_action_log_path, "w", buffering=1)
-            print(
-                f"[flow-infer] logging per-step actions to {_action_log_path}",
-                file=sys.stderr,
-            )
+        _action_log_path = default_action_log_path()
+        self._action_log = open(_action_log_path, "w", buffering=1)
+        print(
+            f"[flow-infer] logging per-step actions to {_action_log_path}",
+            file=sys.stderr,
+        )
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         if getattr(self, "enable_async_chunking", False):
@@ -1162,13 +1176,12 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
         # trembling (pulsed chunk boundaries vs. delta->twist noise amplification).
         self._action_log: TextIO | None = None
         self._action_log_seq = 0
-        _action_log_path = os.environ.get("POLICY_RUNNER_ACTION_LOG")
-        if _action_log_path:
-            self._action_log = open(_action_log_path, "w", buffering=1)
-            print(
-                f"[flow-infer] logging per-step actions to {_action_log_path}",
-                file=sys.stderr,
-            )
+        _action_log_path = default_action_log_path()
+        self._action_log = open(_action_log_path, "w", buffering=1)
+        print(
+            f"[flow-infer] logging per-step actions to {_action_log_path}",
+            file=sys.stderr,
+        )
 
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         assert self._reset_left_pose is not None
@@ -1326,13 +1339,12 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         # trembling (pulsed chunk boundaries vs. delta->twist noise amplification).
         self._action_log: TextIO | None = None
         self._action_log_seq = 0
-        _action_log_path = os.environ.get("POLICY_RUNNER_ACTION_LOG")
-        if _action_log_path:
-            self._action_log = open(_action_log_path, "w", buffering=1)
-            print(
-                f"[flow-infer] logging per-step actions to {_action_log_path}",
-                file=sys.stderr,
-            )
+        _action_log_path = default_action_log_path()
+        self._action_log = open(_action_log_path, "w", buffering=1)
+        print(
+            f"[flow-infer] logging per-step actions to {_action_log_path}",
+            file=sys.stderr,
+        )
 
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         assert self._reset_left_pose is not None
