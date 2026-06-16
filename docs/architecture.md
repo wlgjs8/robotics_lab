@@ -313,6 +313,13 @@ through the same gate). It is enforced in two tiers:
   along the plane instead of stuttering against the Tier-1 hold. Joint-space
   primitives get no Tier-2 assist (Tier-1 hold only).
 
+When `tcp_offset_points` is configured, floor evaluation checks the TCP plus
+named local-frame offsets. The current local PIKA gripper stack configs check
+`gripper_tip_a` and `gripper_tip_b` at TCP-frame x offsets of `+0.059 m` and
+`-0.059 m`, based on a measured `118 mm` tip-to-tip width. These points are used
+by both the Tier-1 FK backstop and the Tier-2 Cartesian streaming floor
+projection.
+
 The plane height is runtime-adjustable with the **leaseless** non-motion command
 `SetSafetyFloorZ` (`{"mode": "SetSafetyFloorZ", "floor_z_m": <meters>}`):
 raising the floor is safety-tightening and must never be blocked by a teleop

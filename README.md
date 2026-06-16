@@ -228,6 +228,9 @@ force_control:
 
 `safety.floor_constraint`가 켜지면 위 모든 primitive는 최종 safety gate에서 floor
 plane에 대해 FK 체크됩니다(Cartesian 경로는 평면을 따라 slide, joint-space는 hold).
+로컬 stack config의 PIKA 그리퍼 `tcp_offset_points`는 TCP 원점과 양쪽 팁
+`gripper_tip_a/b`를 함께 검사합니다. 현재 팁 오프셋은 줄자 실측 tip-to-tip
+`118 mm` 기준으로 TCP x축 `±0.059 m`입니다.
 
 참고:
 

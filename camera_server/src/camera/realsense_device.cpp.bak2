@@ -4,14 +4,12 @@
 
 #include <chrono>
 #include <algorithm>
-#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
-#include <string>
 #include <thread>
 
 #if CAMERA_SERVER_HAVE_REALSENSE
@@ -177,49 +175,8 @@ class RealSenseDevice final : public ICameraDevice {
       adv.load_json(json_str);
       std::cerr << "[CAM] advanced json applied for " << cfg_.name << " serial=" << cfg_.serial
                 << ": " << path << '\n';
-      enforce_depth_units(dev, json_str);
     } catch (const std::exception& e) {
       std::cerr << "[CAM] advanced json apply failed for " << cfg_.name << ": " << e.what() << '\n';
-    }
-  }
-
-  // D405 FW에서 load_json 은 param-depthunits 를 무시하므로, .40 수집측과 동일하게
-  // RS2_OPTION_DEPTH_UNITS 를 JSON 값으로 직접 강제한다(advanced param 은 µm).
-  // 예) 100 -> 1e-4 m/LSB = 0.1mm -> max range ~6.55m. depth 비활성 시에도
-  // 디바이스 옵션은 설정해두어 depth 사용 시 .40 과 동일 scale 을 보장한다.
-  void enforce_depth_units(rs2::device& dev, const std::string& json_str) {
-    const std::string key = "\"param-depthunits\"";
-    auto p = json_str.find(key);
-    if (p == std::string::npos) return;
-    p = json_str.find(':', p + key.size());
-    if (p == std::string::npos) return;
-    size_t i = p + 1;
-    while (i < json_str.size() &&
-           (json_str[i] == ' ' || json_str[i] == '"' || json_str[i] == '\t')) ++i;
-    size_t j = i;
-    while (j < json_str.size() &&
-           (std::isdigit(static_cast<unsigned char>(json_str[j])) || json_str[j] == '.')) ++j;
-    if (j == i) return;
-    double um = 0.0;
-    try {
-      um = std::stod(json_str.substr(i, j - i));
-    } catch (...) {
-      return;
-    }
-    const double depth_units_m = um * 1e-6;
-    try {
-      for (auto&& s : dev.query_sensors()) {
-        if (!s.supports(RS2_OPTION_DEPTH_UNITS)) continue;
-        auto rng = s.get_option_range(RS2_OPTION_DEPTH_UNITS);
-        double v = std::min(std::max(depth_units_m, static_cast<double>(rng.min)),
-                            static_cast<double>(rng.max));
-        s.set_option(RS2_OPTION_DEPTH_UNITS, static_cast<float>(v));
-        std::cerr << "[CAM] depth_units=" << v << " m (param-depthunits=" << um
-                  << "um, max range~" << v * 65535.0 << " m) for " << cfg_.name << '\n';
-        return;
-      }
-    } catch (const std::exception& e) {
-      std::cerr << "[CAM] depth_units set failed for " << cfg_.name << ": " << e.what() << '\n';
     }
   }
 

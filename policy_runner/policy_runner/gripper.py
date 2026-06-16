@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import threading
@@ -10,6 +11,28 @@ from typing import Any, Callable, Mapping, Protocol
 
 REAL_GRIPPER_ENV = "RB_ALLOW_REAL_GRIPPER"
 GRIPPER_EPSILON = 1e-12
+_PIKA_SDK_LOGGER_NAMES = ("pika", "pika.serial_comm", "pika.gripper", "pika.sense")
+
+
+def suppress_pika_sdk_logging() -> None:
+    """Silence noisy logs emitted by the vendor Pika SDK.
+
+    The SDK calls logging.basicConfig() at import time and its serial reader
+    reports parse noise at ERROR level. policy_runner reports gripper command
+    outcomes through GripperDispatchResult instead.
+    """
+    names = set(_PIKA_SDK_LOGGER_NAMES)
+    names.update(
+        name
+        for name in logging.root.manager.loggerDict
+        if name == "pika" or name.startswith("pika.")
+    )
+    for name in names:
+        logger = logging.getLogger(name)
+        logger.handlers.clear()
+        logger.propagate = False
+        logger.disabled = True
+        logger.setLevel(logging.CRITICAL + 1)
 
 
 @dataclass(frozen=True)
@@ -117,8 +140,13 @@ class PikaSerialGripperBackend:
         deadband_rad: float = 0.005,
         max_hz: float = 60.0,
         supports_controller_simulation: bool = False,
+        suppress_sdk_logs: bool = True,
         gripper_cls: type | None = None,
         clock: Callable[[], float] = time.monotonic,
+        home_on_connect: bool = True,
+        home_timeout_sec: float = 3.0,
+        home_settle_eps_rad: float = 0.01,
+        home_poll_sec: float = 0.05,
     ) -> None:
         if max_rad <= min_rad:
             raise ValueError("gripper max_rad must be greater than min_rad")
@@ -134,6 +162,11 @@ class PikaSerialGripperBackend:
         self.deadband_rad = float(deadband_rad)
         self.min_period_sec = 1.0 / float(max_hz) if max_hz > 0 else 0.0
         self.supports_controller_simulation = bool(supports_controller_simulation)
+        self.suppress_sdk_logs = bool(suppress_sdk_logs)
+        self.home_on_connect = bool(home_on_connect)
+        self.home_timeout_sec = float(home_timeout_sec)
+        self.home_settle_eps_rad = float(home_settle_eps_rad)
+        self.home_poll_sec = float(home_poll_sec)
         self._gripper_cls = gripper_cls
         self._clock = clock
         self._grippers: dict[str, Any] = {}
@@ -141,7 +174,11 @@ class PikaSerialGripperBackend:
         self._last_sent: dict[str, tuple[float, float]] = {}
 
     def connect(self) -> "PikaSerialGripperBackend":
+        if self.suppress_sdk_logs:
+            suppress_pika_sdk_logging()
         gripper_cls = self._gripper_cls or _import_pika_gripper_class(self.sdk_path)
+        if self.suppress_sdk_logs:
+            suppress_pika_sdk_logging()
         for arm, port in self.ports.items():
             gripper = gripper_cls(port=port)
             if not gripper.connect():
@@ -152,7 +189,69 @@ class PikaSerialGripperBackend:
                 raise RuntimeError(f"pika gripper {arm} enable failed on {port}")
             self._grippers[arm] = gripper
             self._targets[arm] = self._seed_target(gripper)
+        if self.home_on_connect and self._grippers:
+            self._home_all_concurrent()
         return self
+
+    def _home_all_concurrent(self) -> None:
+        """Reference every gripper to its CLOSED mechanical stop and re-zero there,
+        so absolute-angle commands (set_motor_angle) map to the SAME physical
+        opening on both (identical) grippers. Without this the motor zero is the
+        arbitrary power-on position, so a 100%-open command lands at a different
+        physical opening per arm (observed: right ~39% vs left ~70% open).
+
+        Both arms home in parallel threads (independent serial ports) so the whole
+        step takes one gripper's homing time, not the sum. Failures are logged and
+        non-fatal: a connected+enabled gripper still works, just uncalibrated."""
+        threads = []
+        for arm, gripper in self._grippers.items():
+            t = threading.Thread(
+                target=self._home_one, args=(arm, gripper), name=f"gripper-home-{arm}", daemon=True
+            )
+            t.start()
+            threads.append(t)
+        # Join with margin over the per-arm settle timeout so a stuck arm can't
+        # hang startup forever.
+        for t in threads:
+            t.join(timeout=self.home_timeout_sec + 1.0)
+
+    def _home_one(self, arm: str, gripper: Any) -> None:
+        try:
+            # 1. Drive toward the closed stop (min_rad). set_motor_angle clamps
+            #    rad<0 to 0, so commanding min_rad bottoms the jaw on the stop.
+            gripper.set_motor_angle(self.min_rad)
+            # 2. Wait until the jaw stops moving (settled against the stop) so the
+            #    re-zero references the true mechanical closed position.
+            self._wait_until_settled(gripper)
+            # 3. Define the closed stop as zero. Subsequent set_motor_angle(rad) is
+            #    now consistent across both grippers; max_rad == true full open.
+            if hasattr(gripper, "set_zero"):
+                gripper.set_zero()
+            self._targets[arm] = self.min_rad
+            self._last_sent.pop(arm, None)
+            print(f"[gripper] homed {arm}: closed-stop zeroed", file=sys.stderr, flush=True)
+        except Exception as exc:  # noqa: BLE001 - homing must not crash startup
+            print(
+                f"[gripper] WARN home {arm} failed ({type(exc).__name__}: {exc}); "
+                "gripper left uncalibrated (open may be partial)",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def _wait_until_settled(self, gripper: Any) -> None:
+        """Poll the motor position until two consecutive reads agree within
+        home_settle_eps_rad (jaw stopped) or home_timeout_sec elapses."""
+        deadline = self._clock() + self.home_timeout_sec
+        last: float | None = None
+        while self._clock() < deadline:
+            time.sleep(self.home_poll_sec)
+            try:
+                pos = float(gripper.get_motor_position())
+            except Exception:
+                return  # no feedback -> fall back to the time already spent moving
+            if last is not None and abs(pos - last) < self.home_settle_eps_rad:
+                return
+            last = pos
 
     def _seed_target(self, gripper: Any) -> float:
         try:

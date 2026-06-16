@@ -122,6 +122,7 @@ class GripperConfig:
     max_rad: float = 1.75
     deadband_rad: float = 0.005
     max_hz: float = 60.0
+    suppress_sdk_logs: bool = True
     # Whether the physical grippers actuate during controller_sim rollouts
     # (arms are controller-simulated; grippers are separate local hardware).
     # real_policy additionally requires safety.allow_real_gripper_motion and
@@ -526,6 +527,8 @@ def _gripper_config(raw: dict[str, Any]) -> GripperConfig:
     for key in ("min_rad", "max_rad", "deadband_rad", "max_hz"):
         if key in raw:
             raw[key] = float(raw[key])
+    if "suppress_sdk_logs" in raw:
+        raw["suppress_sdk_logs"] = bool(raw["suppress_sdk_logs"])
     if "actuate_in_controller_simulation" in raw:
         raw["actuate_in_controller_simulation"] = bool(raw["actuate_in_controller_simulation"])
     return GripperConfig(**raw)

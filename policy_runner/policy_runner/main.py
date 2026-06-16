@@ -1350,6 +1350,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     max_rad=config.gripper.max_rad,
                     deadband_rad=config.gripper.deadband_rad,
                     max_hz=config.gripper.max_hz,
+                    suppress_sdk_logs=config.gripper.suppress_sdk_logs,
                     supports_controller_simulation=(
                         config.gripper.actuate_in_controller_simulation
                     ),

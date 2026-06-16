@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -351,6 +352,11 @@ struct CartesianSolveTelemetry {
     std::string orientation_mode;
     bool twist_clamped = false;
     bool floor_vz_clamped = false;
+    std::string floor_lowest_point = "tcp";
+    double floor_lowest_z_m = std::numeric_limits<double>::quiet_NaN();
+    bool floor_goal_clamped = false;
+    double goal_minus_measured_pos_m = 0.0;
+    double goal_minus_measured_ori_rad = 0.0;
     double requested_twist_linear_norm_m_s = 0.0;
     double requested_twist_angular_norm_rad_s = 0.0;
     double applied_twist_linear_norm_m_s = 0.0;

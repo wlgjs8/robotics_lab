@@ -32,6 +32,24 @@ std::array<double, 4> yawQuaternion(double yaw) {
     return std::array<double, 4>{0.0, 0.0, std::sin(yaw * 0.5), std::cos(yaw * 0.5)};
 }
 
+std::vector<rb_servo::FloorCheckPointConfig> gripperTipFloorPoints() {
+    return {
+        {"gripper_tip_a", {0.054, 0.0, 0.0}},
+        {"gripper_tip_b", {-0.054, 0.0, 0.0}},
+    };
+}
+
+double pointVerticalSpeed(
+    const rb_servo::Vec6& stand_twist,
+    const rb_servo::Pose6D& tcp_stand,
+    const std::array<double, 3>& offset_tcp
+) {
+    const rb_servo::math::Matrix3 rotation = rb_servo::math::rotationFromPose(tcp_stand);
+    const rb_servo::math::Vector3 offset(offset_tcp[0], offset_tcp[1], offset_tcp[2]);
+    const rb_servo::math::Vector3 r = rotation * offset;
+    return stand_twist.z + stand_twist.rx * r.y() - stand_twist.ry * r.x();
+}
+
 class LinearFakeKinematics final : public rb_servo::IKinematics {
 public:
     rb_servo::Pose6D computeTcpBase(const rb_servo::JointArray& q_deg) const override {
@@ -514,6 +532,87 @@ bool testFloorConstraintRespectsTcpOrientationFrame() {
     RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
     RB_CHECK(!result.telemetry.floor_vz_clamped);
     RB_CHECK(std::abs(kinematics->last_twist_local.x - 0.02) < 1e-6);
+    return true;
+}
+
+bool testFloorConstraintUsesTiltedTipLowestPointForDescentProjection() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.twist_angular_deadband_rad_s = 0.0;
+    config.max_twist_linear_m_s = 1.0;
+    config.max_twist_angular_rad_s = 1.0;
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+    controller.setFloorConstraint(true, 0.010, 0.005, gripperTipFloorPoints());
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistStand;
+    command.has_tcp_twist_stand = true;
+    command.tcp_twist_stand = {0.02, 0.0, -0.02, 0.0, 0.0, 0.03};
+
+    rb_servo::CartesianTwistHoldState hold;
+    rb_servo::JointArray q = zeroJoints();
+    q[2] = 6.4;  // TCP z = 0.064 m; +90 deg pitch puts tip_a at 0.010 m.
+    rb_servo::RobotState state = stateFromJoints(*kinematics, q, left_mount);
+    state.tcp_stand->ry = M_PI / 2.0;
+    state.tcp_stand->quaternion_xyzw.reset();
+
+    const rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+        command, state, q, rb_servo::RunMode::Simulation, 0.005, 1, &hold);
+
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(result.telemetry.floor_vz_clamped);
+    RB_CHECK(result.telemetry.floor_lowest_point == "gripper_tip_a");
+    RB_CHECK(std::abs(result.telemetry.floor_lowest_z_m - 0.010) < 1e-9);
+    const rb_servo::Vec6 applied =
+        rb_servo::math::twistLocalToStand(kinematics->last_twist_local, *state.tcp_stand);
+    RB_CHECK(std::abs(applied.x - 0.02) < 1e-9);
+    RB_CHECK(std::abs(applied.y) < 1e-9);
+    RB_CHECK(std::abs(applied.rz - 0.03) < 1e-9);
+    RB_CHECK(pointVerticalSpeed(applied, *state.tcp_stand, {0.054, 0.0, 0.0}) >= -1e-9);
+    return true;
+}
+
+bool testFloorConstraintBlocksRotationalTipDescentAndKeepsXYYaw() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.twist_angular_deadband_rad_s = 0.0;
+    config.max_twist_linear_m_s = 1.0;
+    config.max_twist_angular_rad_s = 1.0;
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+    controller.setFloorConstraint(true, 0.010, 0.005, gripperTipFloorPoints());
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistStand;
+    command.has_tcp_twist_stand = true;
+    // v_z is zero, but +wy lowers the +x fingertip: pdot_z = -wy * r_x.
+    command.tcp_twist_stand = {0.01, -0.02, 0.0, 0.0, 0.20, 0.04};
+
+    rb_servo::CartesianTwistHoldState hold;
+    rb_servo::JointArray q = zeroJoints();
+    q[2] = 1.0;  // all three points on the 0.010 m floor with level TCP.
+    rb_servo::RobotState state = stateFromJoints(*kinematics, q, left_mount);
+
+    const rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+        command, state, q, rb_servo::RunMode::Simulation, 0.005, 1, &hold);
+
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(result.telemetry.floor_vz_clamped);
+    const rb_servo::Vec6 applied =
+        rb_servo::math::twistLocalToStand(kinematics->last_twist_local, *state.tcp_stand);
+    RB_CHECK(std::abs(applied.x - command.tcp_twist_stand.x) < 1e-9);
+    RB_CHECK(std::abs(applied.y - command.tcp_twist_stand.y) < 1e-9);
+    RB_CHECK(std::abs(applied.rz - command.tcp_twist_stand.rz) < 1e-9);
+    RB_CHECK(pointVerticalSpeed(applied, *state.tcp_stand, {0.054, 0.0, 0.0}) >= -1e-9);
     return true;
 }
 
@@ -1371,6 +1470,38 @@ bool testTwistViaSmdGoalAntiWindupClampsLead() {
     return true;
 }
 
+bool testTwistViaSmdFloorLiftBoundsGoalAndIkPose() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount; left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount; right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.twist_via_smd_enable = true;
+    config.twist_angular_deadband_rad_s = 0.0;
+    config.max_twist_linear_m_s = 1.0;
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+    controller.setFloorConstraint(true, 0.010, 0.005);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    rb_servo::CartesianTwistHoldState hold;
+    rb_servo::JointArray q = zeroJoints();
+    q[2] = 0.5;  // measured TCP starts 5 mm below the 10 mm floor.
+    const rb_servo::RobotState state = stateFromJoints(*kinematics, q, left_mount);
+    const rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+        command, state, q, rb_servo::RunMode::Simulation, 0.005, 1, &hold);
+
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(result.telemetry.floor_goal_clamped);
+    RB_CHECK(hold.twist_smd_goal.z >= 0.010 - 1e-12);
+    RB_CHECK(kinematics->last_ik_target.z >= 0.010 - 1e-12);
+    RB_CHECK(result.telemetry.goal_minus_measured_pos_m <= 0.06 + 1e-12);
+    return true;
+}
+
 bool testTwistViaSmdGoalAntiWindupDisabledByDefault() {
     // Budgets default 0 => no clamp: the goal integrates unbounded (behavior
     // preserved), confirming the feature is opt-in.
@@ -1418,8 +1549,11 @@ int main() {
     if (!testTcpTwistLocalMovesLocalXAndHoldsOrientation()) return 1;
     if (!testFloorConstraintZerosDownwardVzAtPlaneAndKeepsLateral()) return 1;
     if (!testFloorConstraintRespectsTcpOrientationFrame()) return 1;
+    if (!testFloorConstraintUsesTiltedTipLowestPointForDescentProjection()) return 1;
+    if (!testFloorConstraintBlocksRotationalTipDescentAndKeepsXYYaw()) return 1;
     if (!testTcpTwistAngularDeadbandMaintainsHoldForNoise()) return 1;
     if (!testTwistViaSmdGoalAntiWindupClampsLead()) return 1;
+    if (!testTwistViaSmdFloorLiftBoundsGoalAndIkPose()) return 1;
     if (!testTwistViaSmdGoalAntiWindupDisabledByDefault()) return 1;
     if (!testPositiveOrientationHoldErrorReducesAfterSyntheticIntegration()) return 1;
     if (!testTcpTwistStandPositiveWorldXConvertsToLocalNegativeYAtPositiveYaw()) return 1;

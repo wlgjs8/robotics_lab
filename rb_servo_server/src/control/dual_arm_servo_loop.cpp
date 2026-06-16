@@ -46,6 +46,11 @@ bool isCartesianVelocityServoMode(ControlMode mode) {
            mode == ControlMode::TcpTwistLocal;
 }
 
+bool isTcpTwistMode(ControlMode mode) {
+    return mode == ControlMode::TcpTwistStand ||
+           mode == ControlMode::TcpTwistLocal;
+}
+
 bool isStreamingCartesianMode(ControlMode mode) {
     return isCartesianVelocityServoMode(mode);
 }
@@ -1955,7 +1960,14 @@ void DualArmServoLoop::loopMain() {
                     setMotionState(ServerMotionState::ArmedHold);
                 }
             } else {
-                safe_target = applySafety(desired, left_state, right_state, filter_dt_sec, &safety_verdict);
+                safe_target = applySafety(
+                    desired,
+                    left_state,
+                    right_state,
+                    command.left.mode,
+                    command.right.mode,
+                    filter_dt_sec,
+                    &safety_verdict);
                 if (motion_requested) {
                     if (safety_verdict == SafetyVerdict::Ok ||
                         safety_verdict == SafetyVerdict::JointLimitClamped) {
@@ -3182,13 +3194,14 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         cartesian_servo.setFloorConstraint(
             config_.safety.floor_constraint.enable && !config_.safety.floor_constraint.monitor_only,
             effectiveFloorZ(),
-            kFloorTwistSoftMarginM
+            kFloorTwistSoftMarginM,
+            config_.safety.floor_constraint.tcp_offset_points
         );
 
-        if (effective_command.left.mode != ControlMode::TcpTwistStand && effective_command.left.mode != ControlMode::TcpTwistLocal) {
+        if (!isTcpTwistMode(effective_command.left.mode)) {
             left_cartesian_twist_hold_ = CartesianTwistHoldState{};
         }
-        if (effective_command.right.mode != ControlMode::TcpTwistStand && effective_command.right.mode != ControlMode::TcpTwistLocal) {
+        if (!isTcpTwistMode(effective_command.right.mode)) {
             right_cartesian_twist_hold_ = CartesianTwistHoldState{};
         }
 
@@ -3453,6 +3466,8 @@ ServoTarget DualArmServoLoop::applySafety(
     const ServoTarget& desired,
     const RobotState& left_state,
     const RobotState& right_state,
+    ControlMode left_mode,
+    ControlMode right_mode,
     double dt_sec,
     SafetyVerdict* verdict
 ) {
@@ -3595,8 +3610,9 @@ ServoTarget DualArmServoLoop::applySafety(
     // Stand-frame floor plane constraint: never command a configuration that puts
     // either TCP below z = effectiveFloorZ(). Mode-independent by design (mock /
     // simulator / controller-sim / real all pass through here). Per-arm: only the
-    // violating arm is reverted; the escape exception allows strictly-upward motion
-    // so an arm that starts below the plane can be jogged out without a reset.
+    // violating arm is reverted; the escape exception allows lateral/upward
+    // motion so an arm that starts below the plane can slide or jog out without
+    // a reset.
     if (config_.safety.floor_constraint.enable) {
         const double floor_z = effectiveFloorZ();
         const FloorArmEvaluation left_eval = evaluateFloorArm(ArmId::Left, out.left_q_target_deg);
@@ -3604,8 +3620,30 @@ ServoTarget DualArmServoLoop::applySafety(
         last_floor_left_ = left_eval;    // telemetry, even when already faulted
         last_floor_right_ = right_eval;
         if (combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+            const auto reanchor_twist_smd_goal = [&](ArmId arm, const RobotState& state) {
+                CartesianTwistHoldState& hold = arm == ArmId::Left
+                    ? left_cartesian_twist_hold_
+                    : right_cartesian_twist_hold_;
+                if (!hold.twist_smd || !state.tcp_stand || !state.has_valid_tcp_pose) {
+                    return;
+                }
+                const Pose6D anchor = clampPoseToFloor(*state.tcp_stand);
+                hold.twist_smd_goal = anchor;
+                hold.twist_smd->reset(anchor);
+                hold.twist_smd->updateGoalFromCommand(anchor);
+                CartesianSolveTelemetry& telemetry = arm == ArmId::Left
+                    ? left_last_cartesian_solve_
+                    : right_last_cartesian_solve_;
+                telemetry.twist_smd_goal_clamped = true;
+                telemetry.floor_goal_clamped = true;
+                telemetry.goal_minus_measured_pos_m = math::positionDistance(*state.tcp_stand, anchor);
+                telemetry.goal_minus_measured_ori_rad =
+                    math::orientationDistanceRad(*state.tcp_stand, anchor);
+            };
             const auto enforce_arm = [&](
                 ArmId arm,
+                ControlMode mode,
+                const RobotState& state,
                 const FloorArmEvaluation& eval,
                 JointArray& target_q,
                 const JointArray& prev_sent_q
@@ -3614,8 +3652,11 @@ ServoTarget DualArmServoLoop::applySafety(
                 if (eval.checked && eval.tcp_z_m < floor_z) {
                     prev_eval = evaluateFloorArm(arm, prev_sent_q);  // lazy: escape test only
                 }
-                const FloorAction action = decideFloorAction(
+                FloorAction action = decideFloorAction(
                     eval, prev_eval, config_.safety.floor_constraint, floor_z);
+                if (action == FloorAction::Latch && isTcpTwistMode(mode)) {
+                    action = FloorAction::Hold;
+                }
                 if (action == FloorAction::Allow) return false;
                 const std::string arm_name = arm == ArmId::Left ? "left" : "right";
                 const std::string reason = eval.checked
@@ -3631,18 +3672,33 @@ ServoTarget DualArmServoLoop::applySafety(
                 // FloorAction::Hold: revert only this arm (non-latching). Reset the
                 // twist velocity integrator so it does not keep advancing (and
                 // diverging from the held command) while the hold is active.
+                // If twist_via_smd is active, reanchor that pose goal too; the
+                // velocity integrator reset alone does not bound the SMD goal.
                 target_q = prev_sent_q;
                 ++floor_clamp_count_;
                 resetCartesianVelocityIntegrator(arm, "floor_hold");
+                reanchor_twist_smd_goal(arm, state);
                 if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                     combined = SafetyVerdict::FloorViolation;
                 }
                 return false;
             };
             const bool latched =
-                enforce_arm(ArmId::Left, left_eval, out.left_q_target_deg, left_prev_sent_q_deg_);
+                enforce_arm(
+                    ArmId::Left,
+                    left_mode,
+                    left_state,
+                    left_eval,
+                    out.left_q_target_deg,
+                    left_prev_sent_q_deg_);
             if (!latched) {
-                enforce_arm(ArmId::Right, right_eval, out.right_q_target_deg, right_prev_sent_q_deg_);
+                enforce_arm(
+                    ArmId::Right,
+                    right_mode,
+                    right_state,
+                    right_eval,
+                    out.right_q_target_deg,
+                    right_prev_sent_q_deg_);
             }
         }
     }

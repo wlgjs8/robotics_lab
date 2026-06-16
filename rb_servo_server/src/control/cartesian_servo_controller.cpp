@@ -1,5 +1,6 @@
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 
+#include "rb_servo/control/floor_constraint.hpp"
 #include "rb_servo/kinematics/ik_solver.hpp"
 #include "rb_servo/math/se3.hpp"
 
@@ -302,6 +303,71 @@ bool limitTwist(
     return true;
 }
 
+std::vector<FloorCheckPointConfig> floorCheckPointsWithTcp(
+    const std::vector<FloorCheckPointConfig>& tcp_offset_points
+) {
+    std::vector<FloorCheckPointConfig> points;
+    points.reserve(tcp_offset_points.size() + 1);
+    points.push_back(FloorCheckPointConfig{"tcp", {0.0, 0.0, 0.0}});
+    points.insert(points.end(), tcp_offset_points.begin(), tcp_offset_points.end());
+    return points;
+}
+
+double pointZ(const Pose6D& tcp_stand, const math::Matrix3& rotation, const math::Vector3& offset_tcp) {
+    return tcp_stand.z + (rotation * offset_tcp).z();
+}
+
+bool liftPoseLowestPointToFloor(
+    Pose6D* pose,
+    const std::vector<FloorCheckPointConfig>& tcp_offset_points,
+    double floor_z_min_m,
+    std::string* lowest_name = nullptr,
+    double* lowest_z_before_m = nullptr
+) {
+    if (!pose || !std::isfinite(pose->z)) return false;
+    const double lowest_z = floorLowestZWithOffsets(*pose, tcp_offset_points, lowest_name);
+    if (lowest_z_before_m) *lowest_z_before_m = lowest_z;
+    if (!std::isfinite(lowest_z) || lowest_z >= floor_z_min_m) return false;
+    pose->z += floor_z_min_m - lowest_z;
+    return true;
+}
+
+bool projectStandTwistAwayFromFloor(
+    const Pose6D& tcp_stand,
+    const std::vector<FloorCheckPointConfig>& tcp_offset_points,
+    double floor_z_min_m,
+    double floor_soft_margin_m,
+    Vec6* stand_twist
+) {
+    if (!stand_twist) return false;
+    const math::Matrix3 rotation = math::rotationFromPose(tcp_stand);
+    const std::vector<FloorCheckPointConfig> points = floorCheckPointsWithTcp(tcp_offset_points);
+    bool clamped = false;
+    constexpr int kProjectionPasses = 2;
+    for (int pass = 0; pass < kProjectionPasses; ++pass) {
+        bool pass_clamped = false;
+        for (const FloorCheckPointConfig& point : points) {
+            const math::Vector3 offset_tcp(point.offset_m[0], point.offset_m[1], point.offset_m[2]);
+            const double z = pointZ(tcp_stand, rotation, offset_tcp);
+            if (!std::isfinite(z) || z > floor_z_min_m + floor_soft_margin_m) {
+                continue;
+            }
+            const math::Vector3 r = rotation * offset_tcp;
+            const double pdot_z = stand_twist->z + stand_twist->rx * r.y() - stand_twist->ry * r.x();
+            if (pdot_z >= 0.0) continue;
+            const double denom = 1.0 + r.x() * r.x() + r.y() * r.y();
+            const double s = pdot_z / denom;
+            stand_twist->z -= s;
+            stand_twist->rx -= s * r.y();
+            stand_twist->ry += s * r.x();
+            pass_clamped = true;
+            clamped = true;
+        }
+        if (!pass_clamped) break;
+    }
+    return clamped;
+}
+
 const ArmMountConfig& mountForArm(
     ArmId arm_id,
     const ArmMountConfig& left_mount,
@@ -377,12 +443,25 @@ CartesianServoController::CartesianServoController(
     const ArmMountConfig& right_mount,
     const CartesianControlConfig& config,
     std::shared_ptr<IKinematics> kinematics
-) : left_mount_(left_mount), right_mount_(right_mount), config_(config), kinematics_(std::move(kinematics)) {}
+) : left_mount_(left_mount), right_mount_(right_mount), config_(config), kinematics_(std::move(kinematics)) {
+    if (config_.twist_smd_goal_max_lead_m > 0.0) {
+        floor_goal_pos_budget_m_ = config_.twist_smd_goal_max_lead_m;
+    }
+    if (config_.twist_smd_goal_max_lead_rad > 0.0) {
+        floor_goal_ori_budget_rad_ = config_.twist_smd_goal_max_lead_rad;
+    }
+}
 
-void CartesianServoController::setFloorConstraint(bool enabled, double z_min_m, double soft_margin_m) {
+void CartesianServoController::setFloorConstraint(
+    bool enabled,
+    double z_min_m,
+    double soft_margin_m,
+    std::vector<FloorCheckPointConfig> tcp_offset_points
+) {
     floor_enabled_ = enabled && std::isfinite(z_min_m) && std::isfinite(soft_margin_m);
     floor_z_min_m_ = z_min_m;
     floor_soft_margin_m_ = std::max(soft_margin_m, 0.0);
+    floor_tcp_offset_points_ = std::move(tcp_offset_points);
 }
 
 CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
@@ -669,7 +748,8 @@ void logTwistPipelineCsv(const ArmCommand& command,
                "qd0,qd1,qd2,qd3,qd4,qd5,"
                "qc0,qc1,qc2,qc3,qc4,qc5,"
                "ik_sigma_min,ik_lambda,ik_jump_deg,ik_branch_jump,ik_branch_jump_clamped,"
-               "smd_goal_clamped\n";
+               "smd_goal_clamped,floor_vz_clamped,floor_lowest_point,floor_lowest_z_m,"
+               "floor_goal_clamped,goal_minus_measured_pos_m,goal_minus_measured_ori_rad\n";
         header_written = true;
     }
     if (!ofs.good()) return;
@@ -700,6 +780,12 @@ void logTwistPipelineCsv(const ArmCommand& command,
         << telem.ik_solution_jump_deg << ',' << (telem.ik_branch_jump_suspected ? 1 : 0)
         << ',' << (telem.ik_branch_jump_clamped ? 1 : 0)
         << ',' << (telem.twist_smd_goal_clamped ? 1 : 0)
+        << ',' << (telem.floor_vz_clamped ? 1 : 0)
+        << ',' << telem.floor_lowest_point
+        << ',' << telem.floor_lowest_z_m
+        << ',' << (telem.floor_goal_clamped ? 1 : 0)
+        << ',' << telem.goal_minus_measured_pos_m
+        << ',' << telem.goal_minus_measured_ori_rad
         << '\n';
 }
 
@@ -823,14 +909,26 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         result.telemetry.applied_twist_angular_norm_rad_s = 0.0;
         return result;
     }
-    // Tier-2 floor assist: zero a downward stand-frame v_z when the commanded
-    // TCP is at/below the plane (+ soft margin) so lateral motion keeps sliding
-    // along the plane. `requested` is a local twist here — rotate to stand,
-    // clamp only the linear z component, rotate back.
-    if (floor_enabled_ && state.tcp_stand->z <= floor_z_min_m_ + floor_soft_margin_m_) {
+    if (floor_enabled_) {
+        std::string lowest_name;
+        const double lowest_z = floorLowestZWithOffsets(
+            *state.tcp_stand, floor_tcp_offset_points_, &lowest_name);
+        result.telemetry.floor_lowest_point = lowest_name;
+        result.telemetry.floor_lowest_z_m = lowest_z;
+    }
+    // Tier-2 floor assist: project stand-frame twist so each configured TCP
+    // floor point in the soft band has non-negative vertical velocity. This
+    // handles both translational descent and roll/pitch descent of a fingertip;
+    // lateral translation and yaw are not in the projection gradient.
+    if (floor_enabled_ &&
+        result.telemetry.floor_lowest_z_m <= floor_z_min_m_ + floor_soft_margin_m_) {
         Vec6 stand_twist = math::twistLocalToStand(requested, *state.tcp_stand);
-        if (stand_twist.z < 0.0) {
-            stand_twist.z = 0.0;
+        if (projectStandTwistAwayFromFloor(
+                *state.tcp_stand,
+                floor_tcp_offset_points_,
+                floor_z_min_m_,
+                floor_soft_margin_m_,
+                &stand_twist)) {
             requested = math::twistStandToLocal(stand_twist, *state.tcp_stand);
             result.telemetry.floor_vz_clamped = true;
         }
@@ -862,30 +960,46 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         hold_state->twist_smd_goal =
             math::composeDeltaLocal(hold_state->twist_smd_goal, twist_delta);
 
+        bool floor_goal_clamped = false;
+        if (floor_enabled_) {
+            floor_goal_clamped = liftPoseLowestPointToFloor(
+                &hold_state->twist_smd_goal,
+                floor_tcp_offset_points_,
+                floor_z_min_m_);
+        }
+
         // Anti-windup (back-calculation feedback for this feedforward integrator):
         // clamp the integrated goal so it never LEADS the measured TCP by more
         // than the configured budget. Without it, a stalled arm (IK clamp / fault
         // / can't track) lets the goal run away unbounded, then lurch on recovery.
         // During healthy tracking the lead is just the SMD lag (~mm / sub-deg), so
         // this never engages. Position and orientation are clamped independently;
-        // both budgets <= 0 disable it (behavior-preserving).
+        // both budgets <= 0 disable it (behavior-preserving). When the floor
+        // assist is active, conservative floor budgets remain enabled even if the
+        // general config leaves the existing anti-windup defaults at 0.
         bool goal_clamped = false;
         const Pose6D& measured_tcp_stand = *state.tcp_stand;
         Pose6D& smd_goal = hold_state->twist_smd_goal;
-        if (config_.twist_smd_goal_max_lead_m > 0.0) {
+        const double pos_budget_m = floor_enabled_
+            ? floor_goal_pos_budget_m_
+            : config_.twist_smd_goal_max_lead_m;
+        const double ori_budget_rad = floor_enabled_
+            ? floor_goal_ori_budget_rad_
+            : config_.twist_smd_goal_max_lead_rad;
+        if (pos_budget_m > 0.0) {
             const double pos_lead = math::positionDistance(measured_tcp_stand, smd_goal);
-            if (pos_lead > config_.twist_smd_goal_max_lead_m) {
-                const double s = config_.twist_smd_goal_max_lead_m / pos_lead;
+            if (pos_lead > pos_budget_m) {
+                const double s = pos_budget_m / pos_lead;
                 smd_goal.x = measured_tcp_stand.x + (smd_goal.x - measured_tcp_stand.x) * s;
                 smd_goal.y = measured_tcp_stand.y + (smd_goal.y - measured_tcp_stand.y) * s;
                 smd_goal.z = measured_tcp_stand.z + (smd_goal.z - measured_tcp_stand.z) * s;
                 goal_clamped = true;
             }
         }
-        if (config_.twist_smd_goal_max_lead_rad > 0.0) {
+        if (ori_budget_rad > 0.0) {
             const double ori_lead = math::orientationDistanceRad(measured_tcp_stand, smd_goal);
-            if (ori_lead > config_.twist_smd_goal_max_lead_rad) {
-                const double s = config_.twist_smd_goal_max_lead_rad / ori_lead;
+            if (ori_lead > ori_budget_rad) {
+                const double s = ori_budget_rad / ori_lead;
                 // Slerp orientation from measured toward goal by s; keep the
                 // already position-clamped translation.
                 const Pose6D ori_clamped =
@@ -896,9 +1010,24 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
                 goal_clamped = true;
             }
         }
+        if (floor_enabled_) {
+            // Position anti-windup can pull the goal back toward a measured pose
+            // that is already slightly below the plane, so enforce the floor lift
+            // after the generic budget clamp as well.
+            floor_goal_clamped = liftPoseLowestPointToFloor(
+                &hold_state->twist_smd_goal,
+                floor_tcp_offset_points_,
+                floor_z_min_m_) || floor_goal_clamped;
+        }
 
         hold_state->twist_smd->updateGoalFromCommand(hold_state->twist_smd_goal);
-        const Pose6D smd_pose = hold_state->twist_smd->step(smd_dt);
+        Pose6D smd_pose = hold_state->twist_smd->step(smd_dt);
+        if (floor_enabled_) {
+            floor_goal_clamped = liftPoseLowestPointToFloor(
+                &smd_pose,
+                floor_tcp_offset_points_,
+                floor_z_min_m_) || floor_goal_clamped;
+        }
 
         CartesianArmTargetResult smd_result = solveIkArmTargetFromTcpStand(
             *kinematics_,
@@ -917,6 +1046,14 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         smd_result.telemetry.applied_twist_linear_norm_m_s = linearNorm(requested);
         smd_result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(requested);
         smd_result.telemetry.twist_clamped = twist_clamped;
+        smd_result.telemetry.floor_vz_clamped = result.telemetry.floor_vz_clamped;
+        smd_result.telemetry.floor_lowest_point = result.telemetry.floor_lowest_point;
+        smd_result.telemetry.floor_lowest_z_m = result.telemetry.floor_lowest_z_m;
+        smd_result.telemetry.floor_goal_clamped = floor_goal_clamped;
+        smd_result.telemetry.goal_minus_measured_pos_m =
+            math::positionDistance(measured_tcp_stand, hold_state->twist_smd_goal);
+        smd_result.telemetry.goal_minus_measured_ori_rad =
+            math::orientationDistanceRad(measured_tcp_stand, hold_state->twist_smd_goal);
         smd_result.telemetry.twist_smd_goal_clamped = goal_clamped;
         logTwistPipelineCsv(command, model_out_twist, requested, &smd_pose, nullptr,
                             smd_result.q_target_deg, smd_result.telemetry, command_seq);

@@ -126,6 +126,8 @@ private:
         const ServoTarget& desired,
         const RobotState& left_state,
         const RobotState& right_state,
+        ControlMode left_mode,
+        ControlMode right_mode,
         double dt_sec,
         SafetyVerdict* verdict
     );
