@@ -727,11 +727,12 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     flow_infer.add_argument(
         "--command-family",
-        choices=("tcp_twist_local",),
+        choices=("tcp_twist_local", "tcp_target_pose"),
         default=None,
         help=(
-            "Flow action command family. Only tcp_twist_local (ee_local body frame) "
-            "exists; world-frame stand families were removed."
+            "Flow action command family for ee_local body-frame deltas. Defaults to "
+            "tcp_twist_local; tcp_target_pose composes each delta into an absolute "
+            "TcpPoseTarget."
         ),
     )
     flow_infer.add_argument(
@@ -739,7 +740,15 @@ def _main_with_subcommands(argv: list[str]) -> int:
         action="store_true",
         help=(
             "Allow the TcpTwistLocal flow command family for controller_sim/real_policy "
-            "(ee_local checkpoints; the only command family)."
+            "(ee_local checkpoints; default command family)."
+        ),
+    )
+    flow_infer.add_argument(
+        "--allow-tcp-target-pose",
+        action="store_true",
+        help=(
+            "Allow the TcpPoseTarget flow command family for controller_sim/real_policy "
+            "(ee_local deltas composed into absolute tcp_target_stand setpoints)."
         ),
     )
     flow_infer.add_argument(
@@ -767,7 +776,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
         type=float,
         default=None,
         help=(
-            "Seconds represented by one flow action step. Controller/real twist rollout "
+            "Seconds represented by one flow action step. Controller/real flow rollout "
             "requires this value or checkpoint dataset_stats.dt_mean_sec; sim_dryrun "
             "can fall back to 1/command_rate_hz."
         ),
@@ -1221,6 +1230,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 rollout_policy.mode,
                 command_family,
                 allow_tcp_twist_local=args.allow_tcp_twist_local,
+                allow_tcp_target_pose=args.allow_tcp_target_pose,
                 dataset_stats=dataset_stats,
             )
         except (RolloutModeValidationError, ValueError) as exc:

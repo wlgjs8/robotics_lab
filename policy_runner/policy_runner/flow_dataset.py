@@ -1002,6 +1002,18 @@ def pose_delta_local(reference_pose: np.ndarray, target_pose: np.ndarray) -> np.
     return np.concatenate([translation, rotvec]).astype(np.float32)
 
 
+def pose_compose_local(reference_pose: np.ndarray, delta6: np.ndarray) -> np.ndarray:
+    reference = _valid_pose(reference_pose)
+    delta = np.asarray(delta6, dtype=np.float64).reshape(-1)
+    if delta.shape[0] != 6:
+        raise ValueError("local pose delta must contain 6 values")
+    q_ref = _normalize_quat(reference[3:7])
+    target = np.zeros(7, dtype=np.float64)
+    target[:3] = reference[:3].astype(np.float64) + _quat_rotate_vector(q_ref, delta[:3])
+    target[3:7] = _normalize_quat(_quat_multiply(q_ref, _rotvec_to_quat(delta[3:6])))
+    return target.astype(np.float32)
+
+
 def _dataset_dt_values_sec(episodes: list[FlowEpisodeIndex]) -> np.ndarray:
     values: list[np.ndarray] = []
     for episode in episodes:
@@ -1055,6 +1067,16 @@ def _quat_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+
+
+def _rotvec_to_quat(rotvec: np.ndarray) -> np.ndarray:
+    vector = np.asarray(rotvec, dtype=np.float64).reshape(3)
+    angle = float(np.linalg.norm(vector))
+    if angle < 1e-8:
+        return np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+    axis = vector / angle
+    half = 0.5 * angle
+    return _normalize_quat(np.asarray([*(axis * math.sin(half)), math.cos(half)], dtype=np.float64))
 
 
 def _quat_rotate_vector(q: np.ndarray, vector: np.ndarray) -> np.ndarray:

@@ -202,8 +202,8 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
         self.assertEqual(missing_camera_stop.left["tcp_twist_local"], [0.0] * 6)
 
     def test_command_family_defaults_and_controller_sim_local_guard(self) -> None:
-        # Only tcp_twist_local (ee_local body frame) exists; world-frame "stand"
-        # families were removed.
+        # tcp_twist_local remains the default ee_local command family; world-frame
+        # "stand" families were removed.
         self.assertEqual(
             resolve_flow_command_family(RolloutMode.CONTROLLER_SIM, None),
             "tcp_twist_local",

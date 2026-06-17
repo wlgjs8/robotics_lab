@@ -17,6 +17,7 @@ try:
         compute_dataset_statistics,
         decode_hdf5_image_value,
         load_flow_episode_index,
+        pose_compose_local,
         pose_delta_local,
     )
 except ModuleNotFoundError:
@@ -226,6 +227,36 @@ class FlowHdf5DatasetTest(unittest.TestCase):
         # A +x world displacement viewed from a +90deg-yaw body frame is -y.
         np.testing.assert_allclose(local_delta[:3], [0.0, -1.0, 0.0], atol=1e-6)
         np.testing.assert_allclose(local_delta[3:6], [0.0, 0.0, 0.0], atol=1e-6)
+
+    def test_pose_compose_local_round_trips_pose_delta_local(self) -> None:
+        rng = np.random.default_rng(42)
+        for _ in range(25):
+            q_ref = _quat_from_axis_angle(rng.normal(size=3).tolist(), float(rng.uniform(-2.5, 2.5)))
+            reference = np.asarray(
+                [
+                    float(rng.normal()),
+                    float(rng.normal()),
+                    float(rng.normal()),
+                    *q_ref,
+                ],
+                dtype=np.float32,
+            )
+            delta = np.asarray(
+                [
+                    float(rng.uniform(-0.05, 0.05)),
+                    float(rng.uniform(-0.05, 0.05)),
+                    float(rng.uniform(-0.05, 0.05)),
+                    float(rng.uniform(-0.2, 0.2)),
+                    float(rng.uniform(-0.2, 0.2)),
+                    float(rng.uniform(-0.2, 0.2)),
+                ],
+                dtype=np.float32,
+            )
+
+            target = pose_compose_local(reference, delta)
+            round_trip = pose_delta_local(reference, target)
+
+            np.testing.assert_allclose(round_trip, delta, atol=1e-6)
 
     def test_flow_dataset_ee_local_frame_invariance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

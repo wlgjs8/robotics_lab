@@ -2,6 +2,10 @@
 
 `policy_runner` is the Python action-source layer for `robotics_lab`. It sends
 UDP JSON commands to `rb_servo_server` and consumes the UDP JSON state stream.
+`flow-infer` keeps `tcp_twist_local` as its default ee_local runtime command
+family and can opt into `tcp_target_pose`, which composes each learned per-step
+ee_local delta into an absolute `TcpPoseTarget` setpoint without changing the
+model, data, or training labels.
 
 Supported action sources:
 

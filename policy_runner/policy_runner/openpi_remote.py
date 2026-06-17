@@ -45,6 +45,7 @@ from .flow_inference import (
     _gripper_value_from_payload,
     canonical_flow_command_family,
     default_action_log_path,
+    normalize_flow_command_family,
     resolve_ee_local_r_align,
     rotate_flow_arm_vectors,
 )
@@ -196,9 +197,9 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.stats: dict[str, Any] = {}
         self.action_frame = "ee_local"
         self.ee_local_r_align = resolve_ee_local_r_align(ee_local_r_align)
-        self.command_family_option = canonical_flow_command_family(command_family) if command_family else "tcp_twist_local"
-        if self.command_family_option not in {"tcp_twist_local", "tcp_twist_stand", "tcp_delta_stand"}:
-            self.command_family_option = "tcp_twist_local"
+        self.command_family_option = (
+            normalize_flow_command_family(command_family) if command_family else "tcp_twist_local"
+        )
         self.command_family = canonical_flow_command_family(self.command_family_option)
         # Fake-image smoke mode runs camera-less so the runtime does not gate on frames.
         self.camera_names = [] if self._fake_images else [str(name) for name in camera_names]
@@ -246,6 +247,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             "left": None,
             "right": None,
         }
+        self._target_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         # Per-policy-step action logger (env-gated, debug only). Mirrors
         # FlowMatchingActionSource; this class skips super().__init__, so the

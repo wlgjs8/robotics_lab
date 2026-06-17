@@ -14,8 +14,10 @@ import numpy as np
 import torch
 
 from .action_sources.tcp_delta import (
+    clamp_tcp_delta,
     clamp_tcp_twist,
     cartesian_action_requirements,
+    tcp_pose_target_stand_intent,
     tcp_twist_local_intent,
 )
 from .flow_dataset import (
@@ -28,6 +30,7 @@ from .flow_dataset import (
     decode_hdf5_image_value,
     normalize_action_frame,
     normalize_runtime_proprio,
+    pose_compose_local,
     pose_from_state_payload,
     runtime_proprio_from_state,
 )
@@ -54,12 +57,12 @@ def default_action_log_path() -> str:
     return str(logs_dir / f"actions_{time.strftime('%Y%m%d_%H%M%S')}.jsonl")
 
 
-# Only the body-frame (ee_local) family remains. World-frame "stand" command
-# families were removed: data/proprio are ee_local, which the server interprets as
-# TcpTwistLocal (see wiki umi-tcp-delta-frame).
-FLOW_COMMAND_FAMILY_CHOICES = ("tcp_twist_local",)
+# Body-frame (ee_local) policy deltas can be consumed either as velocity
+# commands or as integrated absolute TCP pose targets.
+FLOW_COMMAND_FAMILY_CHOICES = ("tcp_twist_local", "tcp_target_pose")
 _FLOW_COMMAND_FAMILY_LABELS = {
     "tcp_twist_local": "TcpTwistLocal",
+    "tcp_target_pose": "TcpPoseTarget",
 }
 _ZERO_TWIST = (0.0,) * 6
 DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S = 0.30
@@ -108,7 +111,7 @@ def resolve_flow_command_family(
     """Return the normalized flow command family for a rollout mode."""
 
     _ = parse_rollout_mode(rollout_mode)
-    _ = dataset_stats  # frame is always ee_local -> tcp_twist_local
+    _ = dataset_stats
     if command_family is None:
         return "tcp_twist_local"
     return normalize_flow_command_family(command_family)
@@ -118,6 +121,8 @@ def normalize_flow_command_family(command_family: str) -> str:
     family = str(command_family or "").strip().lower().replace("-", "_")
     family = {
         "tcptwistlocal": "tcp_twist_local",
+        "tcpposetarget": "tcp_target_pose",
+        "tcp_pose_target": "tcp_target_pose",
     }.get(family, family)
     if family not in FLOW_COMMAND_FAMILY_CHOICES:
         choices = ", ".join(FLOW_COMMAND_FAMILY_CHOICES)
@@ -269,8 +274,13 @@ def _resolve_runtime_command_family(
         command_family,
         dataset_stats=stats,
     )
-    if _proprio_action_frame_from_stats(stats) == "ee_local" and family != "tcp_twist_local":
-        raise ValueError("ee_local checkpoints require command-family tcp_twist_local")
+    if _proprio_action_frame_from_stats(stats) == "ee_local" and family not in {
+        "tcp_twist_local",
+        "tcp_target_pose",
+    }:
+        raise ValueError(
+            "ee_local checkpoints require command-family tcp_twist_local or tcp_target_pose"
+        )
     return family
 
 
@@ -279,18 +289,25 @@ def validate_flow_command_family(
     command_family: str,
     *,
     allow_tcp_twist_local: bool = False,
+    allow_tcp_target_pose: bool = False,
     dataset_stats: dict[str, Any] | None = None,
 ) -> None:
     mode = parse_rollout_mode(rollout_mode)
-    # Only tcp_twist_local (ee_local body frame) exists; normalize raises otherwise.
-    normalize_flow_command_family(command_family)
+    family = normalize_flow_command_family(command_family)
     _ = dataset_stats
     # real_readonly never sends commands, so the family is irrelevant there.
     if mode in {RolloutMode.OFFLINE_EVAL, RolloutMode.SIM_DRYRUN, RolloutMode.REAL_READONLY}:
         return
     # Live rollout of body-frame twist is an explicit operator opt-in.
-    if allow_tcp_twist_local:
+    if family == "tcp_twist_local" and allow_tcp_twist_local:
         return
+    if family == "tcp_target_pose" and allow_tcp_target_pose:
+        return
+    if family == "tcp_target_pose":
+        raise RolloutModeValidationError(
+            "command-family tcp_target_pose requires --allow-tcp-target-pose for "
+            "controller_sim or real_policy"
+        )
     raise RolloutModeValidationError(
         "command-family tcp_twist_local requires --allow-tcp-twist-local for "
         "controller_sim or real_policy"
@@ -306,7 +323,7 @@ def resolve_flow_policy_dt_sec(
     dataset_stats: dict[str, Any] | None = None,
 ) -> float | None:
     family = normalize_flow_command_family(command_family)
-    if family != "tcp_twist_local":
+    if family not in {"tcp_twist_local", "tcp_target_pose"}:
         return None
     if policy_dt_sec is not None:
         resolved = float(policy_dt_sec)
@@ -332,9 +349,10 @@ def resolve_flow_policy_dt_sec(
 class FlowMatchingActionSource:
     """Runtime source for high-level flow-policy action chunks.
 
-    The source emits bounded body-frame (TcpTwistLocal) streaming commands; this is
-    the only command family (ee_local). Live rollout is behind rollout-mode
-    validation and SafetyGate still decides whether the intent may be sent.
+    The source consumes ee_local body-frame policy deltas and emits either bounded
+    TcpTwistLocal velocity commands or integrated absolute TcpPoseTarget setpoints.
+    Live rollout is behind rollout-mode validation and SafetyGate still decides
+    whether the intent may be sent.
     """
 
     def __init__(
@@ -477,6 +495,7 @@ class FlowMatchingActionSource:
             "left": None,
             "right": None,
         }
+        self._target_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         # Per-policy-step action logger (env-gated, debug only). Set
         # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
@@ -527,7 +546,7 @@ class FlowMatchingActionSource:
         self._chunk_index += 1
         gripper_targets = self._integrate_gripper_targets(step, payload)
         self._dispatch_gripper_step(step)
-        return self._emit_step_intent(step, gripper_targets)
+        return self._emit_step_intent(step, payload, gripper_targets)
 
     # ----------------------------------------------------------- streamed --
     def _next_intent_streamed(
@@ -593,13 +612,25 @@ class FlowMatchingActionSource:
             step = self._chunk[self._chunk_index]
             gripper_targets = self._integrate_gripper_targets(step, payload)
             self._dispatch_gripper_step(step)
-            self._current_step_intent = self._emit_step_intent(step, gripper_targets)
+            self._current_step_intent = self._emit_step_intent(step, payload, gripper_targets)
         return self._current_step_intent
 
     def _emit_step_intent(
-        self, step: np.ndarray, gripper_targets: dict[str, float | None]
+        self,
+        step: np.ndarray,
+        payload: dict[str, Any],
+        gripper_targets: dict[str, float | None],
     ) -> CommandIntent | None:
-        intent = self._tcp_twist_local_step_intent(step, gripper_targets=gripper_targets)
+        if self.command_family_option == "tcp_twist_local":
+            intent = self._tcp_twist_local_step_intent(step, gripper_targets=gripper_targets)
+        elif self.command_family_option == "tcp_target_pose":
+            intent = self._tcp_target_pose_step_intent(
+                step,
+                payload=payload,
+                gripper_targets=gripper_targets,
+            )
+        else:
+            intent = None
         # Advance the crossfade ramp once per executed policy step (not per servo
         # tick): the streamed path re-emits the same held intent between steps.
         self._steps_since_boundary += 1
@@ -641,6 +672,9 @@ class FlowMatchingActionSource:
         return max(0, limit - max(2, limit // 2))
 
     def _stream_hold_intent(self) -> CommandIntent | None:
+        if self.command_family_option == "tcp_target_pose":
+            self._clear_target_pose_state()
+            return None
         left = _ZERO_TWIST if (len(self.arm_mask) > 0 and self.arm_mask[0] > 0.0) else None
         right = _ZERO_TWIST if (len(self.arm_mask) > 1 and self.arm_mask[1] > 0.0) else None
         self._last_nonzero_twist_by_arm["left"] = False
@@ -750,6 +784,63 @@ class FlowMatchingActionSource:
             timeout_sec=self.timeout_sec,
         )
 
+    def _tcp_target_pose_step_intent(
+        self,
+        step: np.ndarray,
+        *,
+        payload: dict[str, Any],
+        gripper_targets: dict[str, float | None],
+    ) -> CommandIntent | None:
+        left = (
+            self._target_payload_for_arm("left", step[0:6], payload)
+            if self.arm_mask[0] > 0.0
+            else None
+        )
+        right = (
+            self._target_payload_for_arm("right", step[7:13], payload)
+            if self.arm_mask[1] > 0.0
+            else None
+        )
+        if left is None and right is None:
+            return None
+        return tcp_pose_target_stand_intent(
+            left=left,
+            right=right,
+            left_gripper=gripper_targets.get("left"),
+            right_gripper=gripper_targets.get("right"),
+            timeout_sec=self.timeout_sec,
+        )
+
+    def _target_payload_for_arm(
+        self,
+        arm: str,
+        delta: np.ndarray,
+        payload: dict[str, Any],
+    ) -> tuple[float, ...]:
+        targets = getattr(self, "_target_pose_by_arm", None)
+        if targets is None:
+            self._target_pose_by_arm = {"left": None, "right": None}
+            targets = self._target_pose_by_arm
+        if self._steps_since_boundary == 0 or targets.get(arm) is None:
+            targets[arm] = pose_from_state_payload(payload, arm)
+        clamped_delta = self._clamp_delta_step(delta)
+        targets[arm] = pose_compose_local(targets[arm], np.asarray(clamped_delta, dtype=np.float32))
+        return tuple(float(value) for value in targets[arm].tolist())
+
+    def _clear_target_pose_state(self) -> None:
+        targets = getattr(self, "_target_pose_by_arm", None)
+        if targets is not None:
+            targets["left"] = None
+            targets["right"] = None
+
+    def _clamp_delta_step(self, delta: np.ndarray) -> tuple[float, ...]:
+        assert self.policy_dt_sec is not None
+        return clamp_tcp_delta(
+            np.asarray(delta, dtype=np.float64).reshape(-1).tolist(),
+            self.max_linear_velocity_m_s * self.policy_dt_sec,
+            self.max_angular_velocity_rad_s * self.policy_dt_sec,
+        )
+
     def _twist_payload_for_arm(self, arm: str, delta: np.ndarray) -> tuple[float, ...] | None:
         twist = self._delta_to_twist(delta)
         if _has_nonzero(twist):
@@ -792,6 +883,9 @@ class FlowMatchingActionSource:
         )
 
     def _no_policy_input_intent(self) -> CommandIntent | None:
+        if self.command_family_option == "tcp_target_pose":
+            self._clear_target_pose_state()
+            return None
         if self.command_family_option != "tcp_twist_local":
             return None
         left = _ZERO_TWIST if self._last_nonzero_twist_by_arm["left"] else None
@@ -1168,6 +1262,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
             "left": None,
             "right": None,
         }
+        self._target_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         # Per-policy-step action logger (env-gated, debug only). Set
         # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
@@ -1331,6 +1426,7 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
             "left": None,
             "right": None,
         }
+        self._target_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         # Per-policy-step action logger (env-gated, debug only). Set
         # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
@@ -1957,7 +2053,7 @@ def _resolve_runtime_policy_dt_sec(
     stats: dict[str, Any],
 ) -> float | None:
     family = normalize_flow_command_family(command_family)
-    if family != "tcp_twist_local":
+    if family not in {"tcp_twist_local", "tcp_target_pose"}:
         return None
     resolved = _positive_float(policy_dt_sec)
     if resolved is not None:

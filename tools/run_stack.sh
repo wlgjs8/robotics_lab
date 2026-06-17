@@ -33,9 +33,10 @@ case "$MODE" in
   *) echo "usage: $0 [real|sim]" >&2; exit 2 ;;
 esac
 # Single teleop entrypoint: SpaceMouse + UMI side by side (idle handoff).
-# To isolate one source for debugging, run policy_runner manually with
-# --action-source dual_spacemouse_cartesian | umi_dual_cartesian.
-ACTION_SOURCE="teleop_mux"
+# 한 소스만 격리 디버그하려면 env 로 오버라이드:
+#   ACTION_SOURCE=umi_dual_cartesian make run   (UMI 단독, SpaceMouse/mux 제외)
+#   ACTION_SOURCE=dual_spacemouse_cartesian make run
+ACTION_SOURCE="${ACTION_SOURCE:-teleop_mux}"
 
 SERVER_BIN="rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
 SERVER_CFG="rb_servo_server/config/local/stack_${MODE}.yaml"
@@ -176,7 +177,11 @@ trap cleanup EXIT
 echo "[stack] mode=$MODE source=$ACTION_SOURCE (spacemouse + umi side by side)"
 echo "[stack] server: $SERVER_CFG"
 ensure_rt_caps
-"$SERVER_BIN" --config "$SERVER_CFG" >"$LOG_DIR/server.log" 2>&1 &
+# 서버측 Cartesian 추종 텔레메트리(per-arm/tick): goal_minus_measured(SMD lag),
+# ik_branch_jump_clamped(seed 유지=0모션), ik_sigma_min(특이값), floor_goal_clamped.
+# 텔레옵 "멈춤"이 서버 IK/추종에서 나는지 진단용. 실행마다 새 파일(미설정 시).
+RB_TWIST_PIPELINE_CSV="${RB_TWIST_PIPELINE_CSV:-$PWD/logs/twist_pipe_$(date +%Y%m%d_%H%M%S).csv}" \
+  "$SERVER_BIN" --config "$SERVER_CFG" >"$LOG_DIR/server.log" 2>&1 &
 PIDS+=($!)
 
 # Wait until the command server is up (or fail fast on config/RT errors).

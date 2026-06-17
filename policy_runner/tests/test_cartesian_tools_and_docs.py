@@ -5,6 +5,8 @@ import sys
 import unittest
 from pathlib import Path
 
+from policy_runner.action_sources.tcp_delta import tcp_pose_target_stand_intent
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -21,6 +23,23 @@ def load_tool(name: str):
 
 
 class CartesianToolsAndDocsTest(unittest.TestCase):
+    def test_tcp_pose_target_intent_accepts_quaternion_pose_object(self):
+        intent = tcp_pose_target_stand_intent(
+            left=[0.1, -0.2, 0.3, 0.0, 0.0, 0.70710678, 0.70710678],
+            right=[0.4, 0.5, 0.6, 0.1, 0.2, 0.3],
+            left_gripper=42.0,
+        )
+
+        self.assertEqual(intent.left["mode"], "TcpPoseTarget")
+        self.assertEqual(intent.left["tcp_target_stand"]["x"], 0.1)
+        self.assertEqual(
+            intent.left["tcp_target_stand"]["quaternion_xyzw"],
+            [0.0, 0.0, 0.70710678, 0.70710678],
+        )
+        self.assertIn("rx", intent.left["tcp_target_stand"])
+        self.assertEqual(intent.left["gripper_target"], 42.0)
+        self.assertEqual(intent.right["tcp_target_stand"], [0.4, 0.5, 0.6, 0.1, 0.2, 0.3])
+
     def test_send_tcp_twist_builds_local_and_stand_packets(self):
         tool = load_tool("send_tcp_twist")
 
