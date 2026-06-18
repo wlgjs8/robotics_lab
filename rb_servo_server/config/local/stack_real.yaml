@@ -249,7 +249,15 @@ kinematics:
     # singular_region_eps / damping_max so it's caught earlier.
     branch_jump_damping_scale: 10.0   # base 0.02 -> re-solve at 0.2, then 2.0
     branch_jump_max_retries: 2
-    branch_jump_clamp_to_seed: true
+    branch_jump_clamp_to_seed: false
+    # RATE-LIMIT (preferred): if a solve still jumps > max_solution_jump_deg after
+    # the damping retries, scale the whole seed->solution joint delta so the
+    # largest per-joint step == max_solution_jump_deg. Advances toward the solution
+    # at a bounded joint speed (no deadlock like clamp_to_seed, no abrupt flip like
+    # plain allow). Takes precedence over branch_jump_clamp_to_seed.
+    # max_solution_jump_deg above is now the SMOOTHNESS/LAG knob: smaller =
+    # smoother but more lag through high-gain (wrist) regions; larger = snappier.
+    branch_jump_rate_limit: true
 
 cartesian_control:
   twist_via_smd_enable: true

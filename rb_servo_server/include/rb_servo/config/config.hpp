@@ -107,14 +107,28 @@ struct IkSolverConfig {
     //      re-solve the SAME tick with damping multiplied by the scale (escalating
     //      per retry) to pull the step back onto the local branch — the first
     //      attempt whose jump is within threshold wins;
-    //   2) if it still exceeds the threshold and branch_jump_clamp_to_seed is
-    //      true, return the SEED (zero motion this tick) instead of flipping to a
-    //      distant IK branch (telemetry ik_branch_jump_clamped).
-    // All default-off (scale <= 1 / retries <= 0 / clamp false) => pure
-    // observability, behavior unchanged.
+    //   2) if it still exceeds the threshold, the OVERSHOOT policy decides:
+    //      - branch_jump_rate_limit == true: scale the whole seed->solution joint
+    //        delta so the largest per-joint step equals max_solution_jump_deg —
+    //        the arm advances toward the solution along the same joint-space
+    //        direction at a bounded joint speed (no freeze, no abrupt flip). The
+    //        seed advances every tick, so there is no deadlock and the threshold
+    //        doubles as the smoothness/lag knob (telemetry reason
+    //        "branch_jump_rate_limited", ik_branch_jump_clamped stays false).
+    //      - else if branch_jump_clamp_to_seed == true: return the SEED (zero
+    //        motion this tick). WARNING: deadlocks under streaming targets — the
+    //        frozen seed keeps re-exceeding the threshold, so the arm stays
+    //        clamped until the target returns near the frozen pose. Prefer
+    //        rate_limit. (telemetry ik_branch_jump_clamped).
+    //      - else: return the flagged (most-damped) solution unchanged (allow;
+    //        can be rough on high-gain motion).
+    // branch_jump_rate_limit takes precedence over branch_jump_clamp_to_seed.
+    // All default-off (scale <= 1 / retries <= 0 / rate_limit & clamp false) =>
+    // pure observability, behavior unchanged.
     double branch_jump_damping_scale = 0.0;
     int branch_jump_max_retries = 0;
     bool branch_jump_clamp_to_seed = false;
+    bool branch_jump_rate_limit = false;
 };
 
 struct KinematicsConfig {

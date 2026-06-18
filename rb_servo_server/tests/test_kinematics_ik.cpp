@@ -702,6 +702,54 @@ bool testIkBranchJumpClampDefaultOffLeavesSolutionUnchanged() {
     return true;
 }
 
+bool testIkBranchJumpRateLimitBoundsStepTowardSolution() {
+    // With rate-limit enabled, a solution that jumps past the threshold is NOT
+    // held at the seed (no deadlock) and NOT accepted whole (no abrupt flip):
+    // the seed->solution joint delta is scaled so the largest per-joint step
+    // equals max_solution_jump_deg, advancing along the same direction.
+    rb_servo::KinematicsConfig cfg = testKinematicsConfig();
+    cfg.ik.max_solution_jump_deg = 2.0;
+    cfg.ik.branch_jump_rate_limit = true;  // re-solve off (scale/retries default 0)
+    rb_servo::PinocchioKinematics kin(cfg);
+    const rb_servo::ArmMountConfig mount = leftMount();
+    const rb_servo::JointArray seed = seedJoints();
+
+    rb_servo::JointArray target_q = seed;
+    target_q[0] += 20.0;  // same >2 deg seed delta as the clamp test
+    const rb_servo::Pose6D target_pose = kin.computeTcpStand(rb_servo::ArmId::Left, target_q, mount);
+
+    // Reference: the unaltered (jumping) solution, for direction comparison.
+    rb_servo::KinematicsConfig allow_cfg = cfg;
+    allow_cfg.ik.branch_jump_rate_limit = false;  // clamp fields all off => allow
+    rb_servo::PinocchioKinematics allow_kin(allow_cfg);
+    const rb_servo::IkResult full =
+        allow_kin.solveIk(rb_servo::ArmId::Left, target_pose, seed, mount);
+    RB_CHECK(full.success && full.solution_jump_deg > 2.0);
+
+    const rb_servo::IkResult result = kin.solveIk(rb_servo::ArmId::Left, target_pose, seed, mount);
+    RB_CHECK(result.success);
+    RB_CHECK(result.branch_jump_suspected);
+    RB_CHECK(!result.branch_jump_clamped);          // not held at the seed
+    RB_CHECK(result.reason == "branch_jump_rate_limited");
+
+    // Largest per-joint step is bounded to the threshold, and it actually moved.
+    double max_abs = 0.0;
+    for (std::size_t i = 0; i < rb_servo::kDof; ++i) {
+        max_abs = std::max(max_abs, std::fabs(result.q_solution_deg[i] - seed[i]));
+    }
+    RB_CHECK(max_abs > 1e-6);                        // advanced (no deadlock)
+    RB_CHECK(std::fabs(max_abs - 2.0) < 1e-6);       // capped at threshold
+    RB_CHECK(std::fabs(result.solution_jump_deg - 2.0) < 1e-6);
+
+    // Direction preserved: result == seed + s*(full - seed) for one scalar s.
+    const double s = 2.0 / full.solution_jump_deg;
+    for (std::size_t i = 0; i < rb_servo::kDof; ++i) {
+        const double expected = seed[i] + (full.q_solution_deg[i] - seed[i]) * s;
+        RB_CHECK(std::fabs(result.q_solution_deg[i] - expected) < 1e-9);
+    }
+    return true;
+}
+
 bool testIkSelectiveDampingDisabledByDefault() {
     // With singular_region_eps/damping_max defaulting to 0, applied_damping is
     // always the base damping (behavior-preserving).
@@ -726,6 +774,7 @@ int main() {
     if (!testIkBranchJumpGuardFlagsLargeSeedDelta()) return 1;
     if (!testIkBranchJumpClampHoldsSeed()) return 1;
     if (!testIkBranchJumpClampDefaultOffLeavesSolutionUnchanged()) return 1;
+    if (!testIkBranchJumpRateLimitBoundsStepTowardSolution()) return 1;
     if (!testIkSelectiveDampingDisabledByDefault()) return 1;
     if (!testCartesianLatencyBudgetTelemetry()) return 1;
     if (!testIkSeedUsesPreviousSentTargetNotActualState()) return 1;

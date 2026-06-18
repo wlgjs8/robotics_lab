@@ -13,13 +13,13 @@ from viser.extras import ViserUrdf
 ROOT = Path("/home/plaif/workspace/mo_robot_descriptions/mo_robot_descriptions")
 URDF = ROOT / "robots/urdf/dual_rb3_730e/dual_rb3_730e_ver4.urdf"
 
-# user's exact q_sent (deg)
-LEFT  = dict(base=312.12, shoulder=52.87, elbow=140.15, wrist1=20.47, wrist2=-134.85, wrist3=-129.05)
-RIGHT = dict(base=-233.38, shoulder=15.24, elbow=-131.67, wrist1=63.60, wrist2=101.22, wrist3=109.85)
-# monitor witness points (pinocchio world == URDF world), meters
-P_A = np.array([0.1794, 0.100177, 0.49341])   # on link5
-P_B = np.array([0.181124, 0.10244, 0.484189]) # on stand
-CLEARANCE_MM = -9.65
+# user's exact q_sent (deg) — sign-verified from the fixed Joint Monitor
+LEFT  = dict(base=303.38, shoulder=45.36, elbow=144.39, wrist1=11.28, wrist2=-124.86, wrist3=-135.65)
+RIGHT = dict(base=-228.49, shoulder=-60.56, elbow=-99.92, wrist1=63.20, wrist2=109.39, wrist3=85.18)
+# This scene renders the MONITOR's exact geometry (dual ver4 URDF) at the pose above.
+# coal reports link5 <-> stand = +24.6mm (hulls) / >30mm (exact mesh) -> NOT a collision.
+# Open alongside the live viser to compare whether link5 actually penetrates the stand.
+CLEARANCE_MM = 24.6
 
 def cfg_array(model):
     out = []
@@ -76,12 +76,10 @@ def main():
     server.scene.add_mesh_simple("/scene/link5_RED", vertices=l5v, faces=l5.faces,
                                  color=(230, 30, 30), opacity=0.95)
 
-    # witness points + penetration marker
-    server.scene.add_icosphere("/scene/witness_link5", radius=0.010, color=(255, 0, 0), position=tuple(P_A))
-    server.scene.add_icosphere("/scene/witness_stand", radius=0.010, color=(255, 160, 0), position=tuple(P_B))
-    mid = (P_A + P_B) / 2.0
-    server.scene.add_label("/scene/penetration", f"link5 <-> stand = {CLEARANCE_MM:.2f} mm (PENETRATION)",
-                           position=tuple(mid + np.array([0, 0, 0.05])))
+    # label at link5 (monitor's reported clearance to the stand at this pose)
+    server.scene.add_label("/scene/clearance",
+                           f"monitor: link5 <-> stand = +{CLEARANCE_MM:.1f} mm (NOT flagged)",
+                           position=tuple(T5[:3, 3] + np.array([0, 0, 0.08])))
 
     print("=" * 60)
     print("  viser ready -> open  http://localhost:8077")

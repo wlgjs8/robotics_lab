@@ -491,6 +491,35 @@ IkResult PinocchioKinematics::solveIk(
         }
     }
 
+    // Branch-jump RATE-LIMIT (preferred over clamp): still jumping after damping
+    // retries. Instead of freezing at the seed (which deadlocks under a moving
+    // target) or accepting the full jump (rough), scale the whole seed->solution
+    // joint delta so the largest per-joint step equals max_solution_jump_deg. The
+    // arm advances toward the solution along the SAME joint-space direction at a
+    // bounded joint speed: no deadlock (seed advances every tick) and no abrupt
+    // flip. max_solution_jump_deg is the smoothness/lag knob.
+    if (config_.ik.branch_jump_rate_limit) {
+        double max_abs = 0.0;
+        for (std::size_t i = 0; i < kDof; ++i) {
+            max_abs = std::max(max_abs, std::abs(result.q_solution_deg[i] - seed_q_deg[i]));
+        }
+        if (max_abs > thresh && max_abs > 0.0) {
+            const double s = thresh / max_abs;
+            IkResult limited = result;
+            for (std::size_t i = 0; i < kDof; ++i) {
+                limited.q_solution_deg[i] =
+                    seed_q_deg[i] + (result.q_solution_deg[i] - seed_q_deg[i]) * s;
+            }
+            limited.success = true;
+            limited.solution_jump_deg = thresh;
+            limited.branch_jump_suspected = true;
+            limited.branch_jump_clamped = false;
+            limited.reason = "branch_jump_rate_limited";
+            return limited;
+        }
+        return result;
+    }
+
     // Branch-jump CLAMP step 2: still jumping (or re-solve disabled). Hold the
     // seed so the downstream integrator produces zero motion this tick rather
     // than a violent branch-flip. Gated, so the default (clamp off) stays pure

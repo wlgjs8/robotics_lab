@@ -901,11 +901,15 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
   }}
   .rb-monitor-row {{
     display: grid;
-    grid-template-columns: minmax(7.5em, 1fr) auto;
+    grid-template-columns: minmax(6em, 1fr) auto;
     column-gap: 0.8em;
     line-height: 1.55;
     white-space: nowrap;
   }}
+  /* Label cell clips itself (ellipsis) instead of overflowing onto the value, and the
+     value is right-aligned, so the angle (incl. a leading "-" sign) is always visible. */
+  .rb-monitor-row > span:first-child {{ overflow: hidden; text-overflow: ellipsis; min-width: 0; }}
+  .rb-monitor-row > span:last-child {{ text-align: right; font-variant-numeric: tabular-nums; }}
   .rb-rad {{ display: none; }}
   body:has(#rb-joint-unit-rad:checked) .rb-monitor-joint-card .rb-deg {{ display: none; }}
   body:has(#rb-joint-unit-rad:checked) .rb-monitor-joint-card .rb-rad {{ display: inline; }}
@@ -1002,7 +1006,8 @@ def _render_joint_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> 
                     _format_joint_monitor_value(q_values, index, valid=valid, unit="deg"),
                     _format_joint_monitor_value(q_values, index, valid=valid, unit="rad"),
                 )
-            parts.append(_operator_monitor_row(f"J{index + 1} {joint_name}", value_html))
+            short_name = joint_name[:-6] if joint_name.endswith("_joint") else joint_name
+            parts.append(_operator_monitor_row(f"J{index + 1} {short_name}", value_html))
         parts.append("</div>")
     return "".join(parts)
 

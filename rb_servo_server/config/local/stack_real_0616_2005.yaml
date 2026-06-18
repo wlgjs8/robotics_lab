@@ -249,7 +249,7 @@ kinematics:
     # singular_region_eps / damping_max so it's caught earlier.
     branch_jump_damping_scale: 10.0   # base 0.02 -> re-solve at 0.2, then 2.0
     branch_jump_max_retries: 2
-    branch_jump_clamp_to_seed: true
+    branch_jump_clamp_to_seed: false
 
 cartesian_control:
   twist_via_smd_enable: true

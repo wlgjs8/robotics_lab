@@ -20,6 +20,31 @@ std::string runStamp() {
     return std::string(buf);
 }
 
+// Per-arm Cartesian IK/solve diagnostic column names. Appended to the END of
+// each row so existing column indices stay stable. Header field order MUST
+// match writeCartesianSolveColumns below.
+void writeCartesianSolveHeader(std::ostream& os, const char* side) {
+    os << ',' << side << "_cart_attempted"
+       << ',' << side << "_cart_success"
+       << ',' << side << "_cart_status"
+       << ',' << side << "_cart_ik_us"
+       << ',' << side << "_cart_ik_iters"
+       << ',' << side << "_cart_ik_timed_out"
+       << ',' << side << "_cart_ik_warn_exceeded"
+       << ',' << side << "_cart_ik_fail_exceeded"
+       << ',' << side << "_cart_min_singular"
+       << ',' << side << "_cart_applied_damping"
+       << ',' << side << "_cart_sol_jump_deg"
+       << ',' << side << "_cart_branch_jump_suspected"
+       << ',' << side << "_cart_branch_jump_clamped"
+       << ',' << side << "_cart_integrator_clamps"
+       << ',' << side << "_cart_pos_err_m"
+       << ',' << side << "_cart_ori_err_rad"
+       << ',' << side << "_cart_path_active"
+       << ',' << side << "_cart_path_done"
+       << ',' << side << "_cart_reason";
+}
+
 }  // namespace
 
 ServoLogger::ServoLogger(const LoggingConfig& config) : config_(config) {}
@@ -124,7 +149,10 @@ void ServoLogger::writeHeader() {
     for (int i = 0; i < kDof; ++i) file_ << ",right_q_actual_" << i;
     for (int i = 0; i < kDof; ++i) file_ << ",left_q_sent_" << i;
     for (int i = 0; i < kDof; ++i) file_ << ",right_q_sent_" << i;
-    file_ << ",left_error_code,right_error_code\n";
+    file_ << ",left_error_code,right_error_code";
+    writeCartesianSolveHeader(file_, "left");
+    writeCartesianSolveHeader(file_, "right");
+    file_ << '\n';
 }
 
 namespace {
@@ -161,6 +189,30 @@ std::string csvEscape(const std::string& value) {
     }
     out += '"';
     return out;
+}
+
+// Per-arm Cartesian IK/solve diagnostics row values. Field order MUST match
+// writeCartesianSolveHeader (defined above, near runStamp).
+void writeCartesianSolveColumns(std::ostream& os, const CartesianSolveTelemetry& t) {
+    os << ',' << t.attempted
+       << ',' << t.success
+       << ',' << csvEscape(t.status)
+       << ',' << t.ik_duration_us
+       << ',' << t.ik_iterations
+       << ',' << t.ik_timed_out
+       << ',' << t.ik_warn_duration_exceeded
+       << ',' << t.ik_fail_duration_exceeded
+       << ',' << t.ik_min_singular_value
+       << ',' << t.ik_applied_damping
+       << ',' << t.ik_solution_jump_deg
+       << ',' << t.ik_branch_jump_suspected
+       << ',' << t.ik_branch_jump_clamped
+       << ',' << t.integrator_clamps_total
+       << ',' << t.position_error_m
+       << ',' << t.orientation_error_rad
+       << ',' << t.path_active
+       << ',' << t.path_done
+       << ',' << csvEscape(t.reason);
 }
 }  // namespace
 
@@ -237,7 +289,10 @@ void ServoLogger::writeSample(const ServoSample& sample) {
     for (double v : sample.right_state.q_actual_deg) file_ << ',' << v;
     for (double v : sample.left_sent_q_deg) file_ << ',' << v;
     for (double v : sample.right_sent_q_deg) file_ << ',' << v;
-    file_ << ',' << sample.left_state.error_code << ',' << sample.right_state.error_code << '\n';
+    file_ << ',' << sample.left_state.error_code << ',' << sample.right_state.error_code;
+    writeCartesianSolveColumns(file_, sample.left_cartesian_solve);
+    writeCartesianSolveColumns(file_, sample.right_cartesian_solve);
+    file_ << '\n';
 }
 
 }  // namespace rb_servo

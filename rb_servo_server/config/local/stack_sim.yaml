@@ -253,7 +253,7 @@ kinematics:
     # re-solve scales the base damping only; clamp_to_seed is the final fallback.
     branch_jump_damping_scale: 10.0
     branch_jump_max_retries: 2
-    branch_jump_clamp_to_seed: true
+    branch_jump_clamp_to_seed: false
 
 cartesian_control:
   # Anti-windup for the twist_via_smd goal integrator (position m / orientation
