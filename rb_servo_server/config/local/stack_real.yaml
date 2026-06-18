@@ -138,7 +138,7 @@ safety:
     # 모든 motion primitive(TcpPoseTarget/TcpTwistLocal) 공통 — 속도는 측정된
     # closing speed로 자동 적응. d_hard 미만 hard breach 또는 verdict stale -> fault_latch.
     mesh:
-      unified_urdf: "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver3.urdf"
+      unified_urdf: "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver4.urdf"
       package_dirs:
         - "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e"
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper.STL"
@@ -204,7 +204,7 @@ kinematics:
   publish_tcp: true
   ik:
     enable: true
-    max_iterations: 50
+    max_iterations: 100
     timeout_ms: 20.0
     damping: 0.02
     # ANTI-TREMBLE (was 0.002 / 0.005): the tolerance is a DEAD ZONE for the
@@ -316,9 +316,11 @@ cartesian_control:
   pose_track_smd:
     enable: true
     damping_ratio_linear: 1.0
-    natural_frequency_linear_hz: 3.0 # 2.5 #1.5 #2.5
+    # natural_frequency_linear_hz: 3.0 # 2.5 #1.5 #2.5
+    natural_frequency_linear_hz: 1.5 # 2.5 #1.5 #2.5
     damping_ratio_angular: 1.0
-    natural_frequency_angular_hz: 2.5 #2.0 #1.0 #2.5
+    # natural_frequency_angular_hz: 2.5 #2.0 #1.0 #2.5
+    natural_frequency_angular_hz: 1.5 #2.0 #1.0 #2.5
     # Velocity feedforward: damp on velocity error (goal_dot - x_dot) so a
     # constant-velocity goal tracks with ~0 lag (removes the ~16-38mm ramp lag in
     # the twist_via_smd reach). Decouples fn from accuracy: with this ON you can

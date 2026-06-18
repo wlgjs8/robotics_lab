@@ -403,6 +403,7 @@ def _make_umi_dual_cartesian_source(config: PolicyRunnerConfig) -> UmiDualCartes
         workspace_bounds=umi.workspace_bounds,
         sample_hold_timeout_sec=umi.sample_hold_timeout_sec,
         timeout_sec=config.servo_command.timeout_sec,
+        deadman_release_grace_sec=umi.deadman_release_grace_sec,
     )
 
 

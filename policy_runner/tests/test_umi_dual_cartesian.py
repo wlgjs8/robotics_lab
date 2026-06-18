@@ -228,6 +228,7 @@ class UmiDualCartesianTest(unittest.TestCase):
             MockUmiPoseReader([]),
             gripper_offset=(0.0, 0.0, 0.0),
             max_linear_step_m=1.0,
+            deadman_release_grace_sec=0.0,  # legacy: release immediately on deadman drop
         )
 
         _ = source.next_intent(sample_state(), 0.0)
@@ -239,6 +240,65 @@ class UmiDualCartesianTest(unittest.TestCase):
         assert release is not None and relatch is not None
         self.assertEqual(release.left["mode"], "Hold")
         self.assertEqual(relatch.left["tcp_target_stand"], [1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+
+    def test_brief_deadman_drop_within_grace_holds_setpoint(self):
+        # A spurious sub-grace deadman drop must NOT tear down to Hold: the last
+        # latched TcpPoseTarget keeps streaming so the arm holds in place and the
+        # server stays fresh. On re-press the motion resumes without a re-anchor.
+        reader = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
+                {"pose": [0.1, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.01},
+                {"pose": [0.1, 0, 0, 0, 0, 0, 1], "deadman": False, "monotonic": 0.02},
+                {"pose": [0.12, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.05},
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            deadman_release_grace_sec=0.2,
+        )
+
+        _ = source.next_intent(sample_state(), 0.0)
+        engaged = source.next_intent(sample_state(), 0.01)
+        drop = source.next_intent(sample_state(), 0.02)  # within 0.2s grace
+        resume = source.next_intent(sample_state(), 0.05)
+
+        assert engaged is not None and drop is not None and resume is not None
+        # During the brief drop the arm stays in TcpPoseTarget at the last
+        # setpoint (not Hold), and the held target equals the pre-drop target.
+        self.assertEqual(drop.left["mode"], "TcpPoseTarget")
+        self.assertEqual(drop.left["tcp_target_stand"], engaged.left["tcp_target_stand"])
+        # Re-press continues tracking (no re-anchor): the target advanced.
+        self.assertEqual(resume.left["mode"], "TcpPoseTarget")
+        self.assertNotEqual(resume.left["tcp_target_stand"], engaged.left["tcp_target_stand"])
+
+    def test_sustained_deadman_drop_releases_after_grace(self):
+        # A drop sustained past the grace window is a genuine release -> Hold.
+        reader = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
+                {"pose": [0.1, 0, 0, 0, 0, 0, 1], "deadman": False, "monotonic": 0.05},
+                {"pose": [0.1, 0, 0, 0, 0, 0, 1], "deadman": False, "monotonic": 0.40},
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            deadman_release_grace_sec=0.2,
+        )
+
+        _ = source.next_intent(sample_state(), 0.0)
+        within = source.next_intent(sample_state(), 0.05)   # still within grace -> hold setpoint
+        beyond = source.next_intent(sample_state(), 0.40)    # past grace -> release
+
+        assert within is not None and beyond is not None
+        self.assertEqual(within.left["mode"], "TcpPoseTarget")
+        self.assertEqual(beyond.left["mode"], "Hold")
 
     def test_step_clamp_limits_tracker_jump(self):
         reader = MockUmiPoseReader(

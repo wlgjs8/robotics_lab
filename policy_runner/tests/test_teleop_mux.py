@@ -117,6 +117,10 @@ def make_mux(*, tie_break="umi", allow_controller_sim=True):
         right_reader=umi_right,
         gripper_offset=(0.0, 0.0, 0.0),
         r_align=IDENTITY_R_ALIGN,
+        # Arbitration tests exercise the immediate release->idle handoff on
+        # millisecond timescales; the brief-drop grace (production default) is
+        # covered in test_umi_dual_cartesian.
+        deadman_release_grace_sec=0.0,
     )
     mux = TeleopMuxActionSource(spacemouse, umi, tie_break=tie_break)
     return mux, (sm_left, sm_right), (umi_left, umi_right)

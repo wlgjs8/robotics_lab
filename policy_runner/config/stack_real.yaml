@@ -81,14 +81,16 @@ spacemouse_cartesian_dual:
     deadman_button: 0
 
 umi_dual_cartesian:
-  max_linear_step_m: 0.012
-  max_angular_step_rad: 0.10
+  # max_linear_step_m: 0.012
+  # max_angular_step_rad: 0.10
+  max_linear_step_m: 0.024
+  max_angular_step_rad: 0.20
   # 2026-06-16: 1.5mm/0.69° deadband가 빠른 텔레옵을 1.5mm 격자로 양자화 → 계단식
   # 뚝뚝(수신로그 db=1 88%, app=0). 0.3mm/0.17°로 낮춰 계단 제거(미세 떨림만 억제).
   # 떨림 재발 시 hard deadband 대신 input_moving_average_window 상향 권장.
   deadband_linear_m: 0.0000
   deadband_angular_rad: 0.000
-  input_moving_average_window: 4
+  input_moving_average_window: 8
   delta_frame: tool
   # ---- Pose-frame geometry (paired with pika publisher --pose-frame tip) ----
   # The publisher applies the official pika_sdk tracker→gripper-tip transform
@@ -108,7 +110,7 @@ umi_dual_cartesian:
   #   r_align: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
   #   linear_axis_signs: [-1.0, -1.0, 1.0]
   #   angular_axis_signs: [-1.0, -1.0, 1.0]
-  sample_hold_timeout_sec: 0.05
+  sample_hold_timeout_sec: 0.5
   left:
     udp_endpoint: "udp://0.0.0.0:50380"
   right:

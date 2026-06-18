@@ -138,7 +138,7 @@ safety:
     # 모든 motion primitive(TcpPoseTarget/TcpTwistLocal) 공통 — 속도는 측정된
     # closing speed로 자동 적응. d_hard 미만 hard breach 또는 verdict stale -> fault_latch.
     mesh:
-      unified_urdf: "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver3.urdf"
+      unified_urdf: "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver4.urdf"
       package_dirs:
         - "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e"
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper.STL"

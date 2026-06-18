@@ -69,6 +69,9 @@ class _ArmTeleopState:
     last_sample: UmiSample | None = None
     was_armed: bool = False
     deadband_target: tuple[float, ...] | None = None
+    # Monotonic time the deadman first dropped while still armed (None when the
+    # clutch is engaged). Drives the brief-drop grace window in _target_for_side.
+    deadman_drop_mono: float | None = None
 
 
 class _PoseMovingAverage:
@@ -152,7 +155,7 @@ class _TeleopStepLogger:
         self._last_mono: dict[str, float] = {}
         self._fh.write(f"# umi_dual_cartesian 수신 per-step 로그  started={_kst_now().isoformat()}\n")
         self._fh.write(
-            "# fields: <KST>  side  st=<ARMED|ENGAGE|RELEASE|HOLD_TIMEOUT|STALE>  "
+            "# fields: <KST>  side  st=<ARMED|ENGAGE|HOLD|RELEASE|HOLD_TIMEOUT|STALE>  "
             "age_ms=<수신지연>  dt_ms=<직전처리 샘플간격>  fresh=<신규수신?>  "
             "raw_mm/raw_deg=<클램프전 요구 변위>  app_mm/app_deg=<적용 변위>  "
             "clamp=<xyz|rpy 포화축>  db=<deadband동결>  tokens(GAP/CLAMP/DB)\n"
@@ -258,6 +261,7 @@ class UmiDualCartesianActionSource:
         workspace_bounds: Mapping[str, Sequence[float]] | Sequence[float] | None = None,
         sample_hold_timeout_sec: float = 0.05,
         timeout_sec: float = 0.05,
+        deadman_release_grace_sec: float = 0.2,
     ):
         if max_linear_step_m < 0.0:
             raise ValueError("max_linear_step_m must be non-negative")
@@ -271,6 +275,8 @@ class UmiDualCartesianActionSource:
             raise ValueError("deadband_angular_rad must be non-negative")
         if sample_hold_timeout_sec <= 0.0:
             raise ValueError("sample_hold_timeout_sec must be positive")
+        if deadman_release_grace_sec < 0.0:
+            raise ValueError("deadman_release_grace_sec must be non-negative")
         self.left_reader = left_reader
         self.right_reader = right_reader
         self.max_linear_step_m = float(max_linear_step_m)
@@ -287,6 +293,7 @@ class UmiDualCartesianActionSource:
         self.workspace_bounds = _workspace_bounds(workspace_bounds)
         self.sample_hold_timeout_sec = float(sample_hold_timeout_sec)
         self.timeout_sec = float(timeout_sec)
+        self.deadman_release_grace_sec = float(deadman_release_grace_sec)
         self.input_moving_average_window = int(input_moving_average_window)
         self._left = _ArmTeleopState()
         self._right = _ArmTeleopState()
@@ -385,12 +392,32 @@ class UmiDualCartesianActionSource:
 
         if not sample.deadman:
             if state.was_armed:
+                # The foot-switch clutch deadman can drop spuriously under
+                # vibration / fast motion (confirmed on the wire: bursts of
+                # deadman=False during the fastest teleop). For absolute
+                # TcpPoseTarget a brief drop is safe to ride out — keep
+                # streaming the last latched setpoint so the arm holds in place
+                # and the server stays fresh in TcpPoseTarget, instead of
+                # tearing down to Hold (which forces a re-press and a
+                # re-anchored resume). Only a drop sustained past
+                # deadman_release_grace_sec is treated as a genuine release.
+                if self.deadman_release_grace_sec > 0.0 and state.previous_target is not None:
+                    if state.deadman_drop_mono is None:
+                        state.deadman_drop_mono = now_monotonic
+                    if now_monotonic - state.deadman_drop_mono < self.deadman_release_grace_sec:
+                        if self._step_log is not None:
+                            self._step_log.log_event(side, "HOLD", sample.monotonic, now_monotonic)
+                        return state.previous_target, _gripper_percent(sample.gripper), True
                 if self._step_log is not None:
                     self._step_log.log_event(side, "RELEASE", sample.monotonic, now_monotonic)
                 _clear_latches(state)
                 return None, _gripper_percent(sample.gripper), True
             _clear_latches(state)
             return None, None, False
+
+        # Clutch is engaged this step: reset the brief-drop grace window so a
+        # later spurious drop starts a fresh grace measurement.
+        state.deadman_drop_mono = None
 
         pika_now = _tracker_transform(sample, self.gripper_offset, self.r_align)
         just_engaged = not state.was_armed
@@ -651,6 +678,7 @@ def _clear_latches(state: _ArmTeleopState) -> None:
     state.last_sample = None
     state.was_armed = False
     state.deadband_target = None
+    state.deadman_drop_mono = None
 
 
 def _script_to_samples(script: str | Iterable[Mapping[str, Any] | UmiSample | None]) -> list[UmiSample | None]:

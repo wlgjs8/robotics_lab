@@ -324,6 +324,11 @@ class UmiDualCartesianConfig:
     r_align: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     workspace_bounds: dict[str, tuple[float, float]] | tuple[float, ...] | None = None
     sample_hold_timeout_sec: float = 0.05
+    # Ride out brief clutch (foot-switch) deadman drops for absolute
+    # TcpPoseTarget: while the deadman is released for less than this window the
+    # last setpoint keeps streaming (arm holds, server stays fresh) instead of
+    # tearing down to Hold. 0.0 restores the legacy immediate-release behavior.
+    deadman_release_grace_sec: float = 0.2
 
     def __post_init__(self) -> None:
         if self.max_linear_step_m < 0.0:
@@ -348,6 +353,8 @@ class UmiDualCartesianConfig:
             raise ValueError("umi_dual_cartesian.r_align must contain 3 RPY values or 9 matrix values")
         if self.sample_hold_timeout_sec <= 0.0:
             raise ValueError("umi_dual_cartesian.sample_hold_timeout_sec must be positive")
+        if self.deadman_release_grace_sec < 0.0:
+            raise ValueError("umi_dual_cartesian.deadman_release_grace_sec must be non-negative")
 
 
 @dataclass(frozen=True)
