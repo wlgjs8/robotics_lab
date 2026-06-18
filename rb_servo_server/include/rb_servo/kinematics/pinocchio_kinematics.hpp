@@ -42,13 +42,6 @@ public:
         const ArmMountConfig& mount
     ) const override;
 
-    std::vector<ArmCapsule> armCollisionCapsulesInStand(
-        ArmId arm,
-        const JointArray& q_deg,
-        const ArmMountConfig& mount,
-        const std::vector<ArmCapsuleConfig>& templates
-    ) const override;
-
 private:
     struct Impl;
 

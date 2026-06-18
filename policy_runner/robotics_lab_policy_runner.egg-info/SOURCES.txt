@@ -45,6 +45,7 @@ robotics_lab_policy_runner.egg-info/entry_points.txt
 robotics_lab_policy_runner.egg-info/requires.txt
 robotics_lab_policy_runner.egg-info/top_level.txt
 tests/test_camera_bundle_client.py
+tests/test_camera_preview.py
 tests/test_cartesian_action_source.py
 tests/test_cartesian_tools_and_docs.py
 tests/test_chunk_crossfade.py
@@ -52,6 +53,7 @@ tests/test_dual_arm_policy_gate.py
 tests/test_dual_spacemouse_policy_integration.py
 tests/test_flow_dataset.py
 tests/test_flow_inference.py
+tests/test_flow_inference_tcp_targetpose.py
 tests/test_flow_inference_tcp_twistlocal.py
 tests/test_flow_matching.py
 tests/test_flow_training.py

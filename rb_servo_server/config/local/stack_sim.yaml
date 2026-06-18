@@ -144,24 +144,25 @@ safety:
       - { name: gripper_tip_b, offset_m: [-0.059, 0.0, 0.0 ] }
   self_collision:
     enable: true
-    margin_m: 0.003
     # clamp_hold: 충돌 방향 명령만 직전 안전 자세로 홀드(비래치, 탈출 허용) —
     # spacemouse로 충돌을 시연해도 ResetFault 없이 계속 조작 가능.
     # 빨간 pair 오버레이는 정책과 무관하게 violated면 표시됨.
     fail_policy: clamp_hold
-    monitor_only: true
+    monitor_only: false   # enforce: 충돌 방향 명령을 실제 차단(velocity barrier + clamp_hold)
     # URDF mesh self-collision (async monitor, servo_j 2ms 경로 밖) + 공통 velocity
-    # barrier를 실제 차단으로 사용. enable=true면 아래 캡슐 필드는 미평가(폴백 보존).
-    # 파라미터는 TcpPoseTarget/TcpTwistLocal 공통 — 속도는 측정 closing speed로 자동 적응.
+    # barrier를 실제 차단으로 사용. 파라미터는 TcpPoseTarget/TcpTwistLocal 공통 —
+    # 속도는 측정 closing speed로 자동 적응.
     mesh:
-      enable: true
       unified_urdf: "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver3.urdf"
       package_dirs:
         - "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e"
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper.STL"
       stand_ignore_arm_substrings: ["link0"]
+      viz_near_pairs_m: 0.06   # GUI-only: show witness tubes within 60mm (decoupled from d_slow)
       d_hard_m: 0.005
-      d_slow_m: 0.025
+      d_slow_m: 0.005   # no slow zone (= d_hard): full speed until 5mm, then hard hold.
+      # NOTE: with no braking ramp a fast approach can overshoot 5mm in one tick;
+      # swept_samples catches the in-between and holds at the last >5mm config.
       a_brake_m_s2: 4.0
       hyst_m: 0.005
       latency_s: 0.010
@@ -180,26 +181,6 @@ safety:
       #       size_m: [0.07, 0.10, 0.04], xyz_m: [0.0, 0.05, 0.05], rpy: [0,0,0] }
       #   - { name: work_table, shape: box, parent_frame: stand,
       #       size_m: [1.2, 0.8, 0.04], xyz_m: [0.0, -0.2, 0.0], rpy: [0,0,0] }
-    check_left_right: true
-    check_left_stand: true
-    check_right_stand: true
-    # bone 0 (base->j1)은 mount plate 위에 장착되어 있어 제외 필수.
-    stand_ignore_bones: [0]
-    stand_capsules:
-      - { name: base_plate_1,     p0_m: [-0.1500,  0.0600, 0.0050], p1_m: [ 0.1500,  0.0600, 0.0050], radius_m: 0.0602 }
-      - { name: base_plate_2,     p0_m: [-0.1500, -0.0600, 0.0050], p1_m: [ 0.1500, -0.0600, 0.0050], radius_m: 0.0602 }
-      - { name: lower_column,     p0_m: [ 0.0000,  0.0000, 0.0000], p1_m: [ 0.0000,  0.0000, 0.4300], radius_m: 0.0943 }
-      - { name: upper_column,     p0_m: [ 0.0000,  0.0159, 0.3941], p1_m: [ 0.0000, -0.1432, 0.5532], radius_m: 0.0943 }
-      - { name: shoulder_block_1, p0_m: [-0.1050, -0.1404, 0.6034], p1_m: [ 0.1050, -0.1404, 0.6034], radius_m: 0.0530 }
-      - { name: shoulder_block_2, p0_m: [-0.1050, -0.1934, 0.6564], p1_m: [ 0.1050, -0.1934, 0.6564], radius_m: 0.0530 }
-      - { name: shoulder_block_3, p0_m: [-0.1050, -0.1934, 0.5504], p1_m: [ 0.1050, -0.1934, 0.5504], radius_m: 0.0530 }
-      - { name: shoulder_block_4, p0_m: [-0.1050, -0.2464, 0.6034], p1_m: [ 0.1050, -0.2464, 0.6034], radius_m: 0.0530 }
-      - { name: shoulder_plate_1, p0_m: [-0.2500, -0.2136, 0.6766], p1_m: [ 0.2500, -0.2135, 0.6766], radius_m: 0.0388 }
-      - { name: shoulder_plate_2, p0_m: [-0.2500, -0.2666, 0.6235], p1_m: [ 0.2500, -0.2666, 0.6235], radius_m: 0.0388 }
-      - { name: mount_plate_a_1,  p0_m: [-0.2562, -0.2172, 0.6838], p1_m: [-0.0992, -0.1062, 0.5728], radius_m: 0.0403 }
-      - { name: mount_plate_a_2,  p0_m: [-0.2562, -0.2738, 0.6272], p1_m: [-0.0992, -0.1628, 0.5162], radius_m: 0.0403 }
-      - { name: mount_plate_b_1,  p0_m: [ 0.0992, -0.1062, 0.5728], p1_m: [ 0.2562, -0.2172, 0.6838], radius_m: 0.0403 }
-      - { name: mount_plate_b_2,  p0_m: [ 0.0992, -0.1628, 0.5162], p1_m: [ 0.2562, -0.2738, 0.6272], radius_m: 0.0403 }
 
 network:
   command_bind: "udp://127.0.0.1:50256"

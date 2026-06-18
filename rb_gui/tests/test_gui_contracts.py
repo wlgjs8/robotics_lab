@@ -95,17 +95,22 @@ from rb_servo_gui.safety import OperatorSafety, normalize_observed_mode_backend
 from rb_servo_gui.scene import (
     _add_robot_urdfs,
     _add_scene_fallback,
+    _attach_checkgeom_gripper,
     _circle_overlay_points,
+    _ensure_sc_world_frame,
     _reference_ghost_active,
     _robot_urdf_path,
-    add_self_collision_capsules,
     update_circle_overlay,
     update_floor_plane,
     update_floor_plane_preview,
-    update_self_collision_capsules,
+    update_self_collision_check_geom,
+    update_self_collision_near_pairs,
     update_self_collision_overlay,
 )
-from rb_servo_gui.status_panel import _format_floor_constraint_status
+from rb_servo_gui.status_panel import (
+    _format_floor_constraint_status,
+    _format_self_collision_status,
+)
 from rb_servo_gui.state_receiver import StateStore
 
 
@@ -3049,99 +3054,263 @@ class SelfCollisionOverlayTest(unittest.TestCase):
         self.assertEqual(handles["left_urdf_collision"].configs, [])
 
 
-class _CapsuleMeshHandle:
+class _CheckGeomUrdf:
     def __init__(self):
-        self.position = None
-        self.wxyz = None
-        self.visible = None
-        self.removed = False
+        self.configs = []
+        self.show_collision = None
 
-    def remove(self):
-        self.removed = True
+    def update_cfg(self, config):
+        self.configs.append(tuple(float(v) for v in config))
 
 
-class _CapsuleScene:
-    """Minimal scene recording add_mesh_simple capsule meshes by node name."""
-
+class _SolidUrdf:
     def __init__(self):
-        self.meshes = {}
-
-    def add_mesh_simple(self, name, vertices, faces, **kwargs):
-        handle = _CapsuleMeshHandle()
-        handle.visible = kwargs.get("visible", True)
-        self.meshes[name] = handle
-        return handle
+        self.show_visual = None
 
 
-class _CapsuleServer:
-    def __init__(self):
-        self.scene = _CapsuleScene()
-
-
-class SelfCollisionCapsuleOverlayTest(unittest.TestCase):
+class SelfCollisionCheckGeomOverlayTest(unittest.TestCase):
     @staticmethod
-    def _latest_with_geometry():
+    def _latest(*, manifest):
         store = StateStore(stale_after_sec=5.0)
-        # 7 arm capsules per arm (FK'd template); one stand capsule.
-        def _arm(x):
-            return [{"name": str(i), "p0_m": [x, 0.0, i * 0.1], "p1_m": [x, 0.0, (i + 1) * 0.1],
-                     "radius_m": 0.05} for i in range(7)]
-        payload = sample_state(
-            self_collision={
-                "enabled": True,
-                "checked": True,
-                "violated": False,
-                "margin_m": 0.02,
-                "left_arm_capsules_m": _arm(0.0),
-                "right_arm_capsules_m": _arm(0.2),
-                "stand_capsules_m": [
-                    {"name": "lower_column", "p0_m": [0.0, 0.0, 0.0],
-                     "p1_m": [0.0, 0.0, 0.5], "radius_m": 0.08},
-                ],
-            },
+        sc = {"enabled": True, "checked": True, "violated": False, "mesh": True}
+        if manifest is not None:
+            sc["manifest"] = manifest
+        payload = sample_state(self_collision=sc)
+        # Distinct left/right joints so the unified mapping order is observable.
+        payload["left"]["q_actual_deg"] = [1, 2, 3, 4, 5, 6]
+        payload["left"]["q_sent_deg"] = [1, 2, 3, 4, 5, 6]
+        payload["right"]["q_actual_deg"] = [7, 8, 9, 10, 11, 12]
+        payload["right"]["q_sent_deg"] = [7, 8, 9, 10, 11, 12]
+        assert store.update_from_json_bytes(
+            json.dumps(payload).encode(), received_monotonic=time.monotonic()
         )
+        return store.latest()
+
+    _MANIFEST = {
+        "unified_urdf": "/nonexistent/dual.urdf",
+        "left_prefix": "L_",
+        "right_prefix": "R_",
+        "joint_names": ["j0", "j1", "j2", "j3", "j4", "j5"],
+        "d_hard_m": 0.005,
+        "d_slow_m": 0.025,
+    }
+
+    def _primed_handles(self, urdf):
+        # Pre-inject the lazily-built overlay so the test does not need real viser.
+        return {
+            "checkgeom_urdf": urdf,
+            "checkgeom_manifest": {
+                "left_prefix": "L_",
+                "right_prefix": "R_",
+                "joint_names": ["j0", "j1", "j2", "j3", "j4", "j5"],
+                # Interleaved + subset: exercises lookup-by-name, not positional.
+                "actuated": ("R_j2", "L_j1", "L_j0"),
+            },
+            "left_urdf": _SolidUrdf(),
+            "right_urdf": _SolidUrdf(),
+        }
+
+    def test_joints_mapped_to_prefixed_unified_joints(self):
+        urdf = _CheckGeomUrdf()
+        handles = self._primed_handles(urdf)
+        update_self_collision_check_geom(handles, self._latest(manifest=self._MANIFEST), show=True)
+        cfg = urdf.configs[-1]
+        # actuated order (R_j2, L_j1, L_j0) -> right[2]=9, left[1]=2, left[0]=1.
+        self.assertAlmostEqual(cfg[0], math.radians(9.0))
+        self.assertAlmostEqual(cfg[1], math.radians(2.0))
+        self.assertAlmostEqual(cfg[2], math.radians(1.0))
+        self.assertTrue(urdf.show_collision)
+        # Collision view hides the solid robots while the overlay is on.
+        self.assertFalse(handles["left_urdf"].show_visual)
+        self.assertFalse(handles["right_urdf"].show_visual)
+
+    def test_toggle_off_hides_and_restores_solids(self):
+        urdf = _CheckGeomUrdf()
+        handles = self._primed_handles(urdf)
+        latest = self._latest(manifest=self._MANIFEST)
+        update_self_collision_check_geom(handles, latest, show=True)
+        update_self_collision_check_geom(handles, latest, show=False)
+        self.assertFalse(urdf.show_collision)
+        self.assertTrue(handles["left_urdf"].show_visual)
+        self.assertTrue(handles["right_urdf"].show_visual)
+
+    def test_no_manifest_builds_no_overlay(self):
+        handles = {"_server": object(), "left_urdf": _SolidUrdf(), "right_urdf": _SolidUrdf()}
+        update_self_collision_check_geom(handles, self._latest(manifest=None), show=True)
+        self.assertNotIn("checkgeom_urdf", handles)
+
+    def test_gripper_attached_at_attachment_site_frames(self):
+        import trimesh
+
+        class _Frame:
+            def __init__(self, name):
+                self.name = name
+
+        class _RecScene:
+            def __init__(self):
+                self.meshes = {}
+
+            def add_mesh_simple(self, name, **kwargs):
+                handle = type("_H", (), {"visible": kwargs.get("visible")})()
+                self.meshes[name] = handle
+                return handle
+
+        class _RecServer:
+            def __init__(self):
+                self.scene = _RecScene()
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".stl", delete=False)
+        tmp.close()
+        trimesh.creation.box((0.05, 0.05, 0.1)).export(tmp.name)
+        self.addCleanup(lambda: os.unlink(tmp.name))
+
+        root = "/stand/sc_urdf_world/collision_checkgeom"
+        overlay = type("_Overlay", (), {})()
+        overlay._joint_frames = [
+            _Frame(f"{root}/world/base/stand/sl/dual_rb3_730e_left_link6"),
+            _Frame(f"{root}/world/base/stand/sl/dual_rb3_730e_left_attachment_site"),
+            _Frame(f"{root}/world/base/stand/sr/dual_rb3_730e_right_attachment_site"),
+        ]
+        server = _RecServer()
+        handles = {"_server": server}
+        manifest = {
+            "pika_gripper_mesh": tmp.name,
+            "left_prefix": "dual_rb3_730e_left_",
+            "right_prefix": "dual_rb3_730e_right_",
+            "gripper_attach": {
+                "frame_suffix": "attachment_site",
+                "rpy": [0.0, 0.0, math.pi / 2.0],
+                "mesh_scale": 0.001,
+            },
+        }
+        _attach_checkgeom_gripper(handles, overlay, manifest)
+        names = list(server.scene.meshes)
+        self.assertTrue(any(n.endswith("dual_rb3_730e_left_attachment_site/pika_gripper") for n in names))
+        self.assertTrue(any(n.endswith("dual_rb3_730e_right_attachment_site/pika_gripper") for n in names))
+        self.assertEqual(len(handles["checkgeom_gripper"]), 2)
+
+    def test_sc_world_frame_rotates_minus_90_about_z(self):
+        # The unified URDF's world->stand fixed joint is +90deg about Z and the scene
+        # /stand frame is the URDF `stand` frame, so the overlay/witness frame must be
+        # -90deg about Z. Quaternion (w,x,y,z) for Rz(-90deg) = (cos45, 0, 0, -sin45).
+        class _RecFrameScene:
+            def __init__(self):
+                self.frames = {}
+
+            def add_frame(self, name, *, wxyz, position, show_axes):
+                self.frames[name] = (wxyz, position)
+                return object()
+
+        class _RecFrameServer:
+            def __init__(self):
+                self.scene = _RecFrameScene()
+
+        server = _RecFrameServer()
+        handles = {"_server": server}
+        path = _ensure_sc_world_frame(handles)
+        self.assertEqual(path, "/stand/sc_urdf_world")
+        wxyz, position = server.scene.frames[path]
+        self.assertAlmostEqual(wxyz[0], math.cos(math.pi / 4), places=5)
+        self.assertAlmostEqual(wxyz[3], -math.sin(math.pi / 4), places=5)
+        self.assertEqual(tuple(position), (0.0, 0.0, 0.0))
+        # Idempotent: a second call does not recreate the frame.
+        _ensure_sc_world_frame(handles)
+        self.assertEqual(len(server.scene.frames), 1)
+
+
+class SolidRobotPoseSourceTest(unittest.TestCase):
+    """In pgmode controller-sim q_actual is decoupled from the command, so the solid
+    robot must follow q_sent (what the guard checks); on real motion it follows q_actual."""
+
+    @staticmethod
+    def _latest(*, controller_sim):
+        store = StateStore(stale_after_sec=5.0)
+        payload = sample_state()
+        for side in ("left", "right"):
+            payload[side]["q_actual_deg"] = [9, 9, 9, 9, 9, 9]
+            payload[side]["q_sent_deg"] = [1, 2, 3, 4, 5, 6]
+            if controller_sim:
+                payload[side]["controller_simulation_mode"] = {"operation_mode": "simulation"}
+        assert store.update_from_json_bytes(
+            json.dumps(payload).encode(), received_monotonic=time.monotonic())
+        return store.latest()
+
+    def test_controller_sim_uses_q_sent(self):
+        left_urdf = RecordingUrdf()
+        handles = {"left_urdf": left_urdf, "right_urdf": RecordingUrdf()}
+        update_scene_markers(handles, self._latest(controller_sim=True))
+        self.assertAlmostEqual(left_urdf.configs[-1][1], math.radians(2.0))   # q_sent[1]
+        self.assertNotAlmostEqual(left_urdf.configs[-1][1], math.radians(9.0))
+
+    def test_real_motion_uses_q_actual(self):
+        left_urdf = RecordingUrdf()
+        handles = {"left_urdf": left_urdf, "right_urdf": RecordingUrdf()}
+        update_scene_markers(handles, self._latest(controller_sim=False))
+        self.assertAlmostEqual(left_urdf.configs[-1][1], math.radians(9.0))   # q_actual[1]
+
+
+class SelfCollisionNearPairVizTest(unittest.TestCase):
+    """#2 viz: near-pair tubes colored by clearance band; #3: closest-pair readout."""
+
+    @staticmethod
+    def _latest(near_pairs, *, d_slow=0.025):
+        store = StateStore(stale_after_sec=5.0)
+        payload = sample_state(self_collision={
+            "enabled": True, "checked": True, "violated": False,
+            "margin_m": 0.005,  # == d_hard
+            "manifest": {"d_hard_m": 0.005, "d_slow_m": d_slow},
+            "near_pairs": near_pairs,
+            "min_clearance_m": min((p["clearance_m"] for p in near_pairs), default=1.0),
+        })
         assert store.update_from_json_bytes(json.dumps(payload).encode(), received_monotonic=time.monotonic())
         return store.latest()
 
-    def _scene_handles(self):
-        server = _CapsuleServer()
-        handles: dict = {}
-        add_self_collision_capsules(server, handles)
-        self.assertIs(handles["_server"], server)
-        return server, handles
+    @staticmethod
+    def _pair(name_a, name_b, clearance):
+        return {"name_a": name_a, "name_b": name_b,
+                "p_a_m": [0.0, 0.0, 0.0], "p_b_m": [0.0, 0.0, clearance], "clearance_m": clearance}
 
-    def test_show_creates_arm_and_stand_capsules(self):
-        server, handles = self._scene_handles()
-        update_self_collision_capsules(handles, self._latest_with_geometry(), show=True)
-        names = set(server.scene.meshes)
-        # 7 bones per arm + 1 stand capsule.
-        self.assertEqual(sum(n.endswith(f"/left_{i}") for i in range(7) for n in names), 7)
-        self.assertEqual(sum(n.endswith(f"/right_{i}") for i in range(7) for n in names), 7)
-        self.assertTrue(any(n.endswith("/stand_0") for n in names))
-        self.assertTrue(all(h.visible for h in server.scene.meshes.values()))
+    def test_near_pair_color_bands(self):
+        from rb_servo_gui import scene
 
-    def test_toggle_off_hides_existing_capsules(self):
-        server, handles = self._scene_handles()
-        latest = self._latest_with_geometry()
-        update_self_collision_capsules(handles, latest, show=True)
-        update_self_collision_capsules(handles, latest, show=False)
-        self.assertTrue(server.scene.meshes)  # handles reused, not recreated
-        self.assertTrue(all(h.visible is False for h in server.scene.meshes.values()))
+        class _Scene:
+            def __init__(self):
+                self.colors = {}
 
-    def test_no_geometry_creates_nothing(self):
-        server, handles = self._scene_handles()
-        store = StateStore(stale_after_sec=5.0)
-        payload = sample_state(self_collision={"enabled": True, "checked": False, "violated": False})
-        assert store.update_from_json_bytes(json.dumps(payload).encode(), received_monotonic=time.monotonic())
-        update_self_collision_capsules(handles, store.latest(), show=True)
-        self.assertEqual(server.scene.meshes, {})
+            def add_frame(self, name, **kw):
+                return object()
 
-    def test_capsule_placed_at_bone_midpoint(self):
-        server, handles = self._scene_handles()
-        update_self_collision_capsules(handles, self._latest_with_geometry(), show=True)
-        # left bone 0 spans z=0.0..0.1 -> midpoint z=0.05.
-        bone0 = next(h for n, h in server.scene.meshes.items() if n.endswith("/left_0"))
-        self.assertAlmostEqual(bone0.position[2], 0.05, places=6)
+            def add_mesh_simple(self, name, **kw):
+                self.colors[name] = kw.get("color")
+                return type("_H", (), {"visible": kw.get("visible")})()
+
+        class _Server:
+            def __init__(self):
+                self.scene = _Scene()
+
+        server = _Server()
+        handles = {"_server": server}
+        latest = self._latest([
+            self._pair("a", "b", 0.003),   # < d_hard -> red
+            self._pair("c", "d", 0.012),   # [d_hard, d_slow) -> amber
+            self._pair("e", "f", 0.040),   # >= d_slow -> green
+        ], d_slow=0.025)
+        update_self_collision_near_pairs(handles, latest, show=True)
+        colors = list(server.scene.colors.values())
+        self.assertIn(scene._SELF_COLLISION_NEAR_HARD_RGB, colors)
+        self.assertIn(scene._SELF_COLLISION_NEAR_CAUTION_RGB, colors)
+        self.assertIn(scene._SELF_COLLISION_NEAR_OK_RGB, colors)
+
+    def test_status_names_closest_pair(self):
+        latest = self._latest([
+            self._pair("dual_rb3_730e_left_link4_2", "stand_body_shoulder_0", 0.008),
+            self._pair("dual_rb3_730e_left_link2_2", "dual_rb3_730e_left_link4_1", 0.030),
+        ])
+        txt = _format_self_collision_status(latest, stale=False)
+        # closest pair (8mm) named, with the verbose URDF prefixes stripped.
+        self.assertIn("left_link4_2", txt)
+        self.assertIn("shoulder_0", txt)
+        self.assertNotIn("dual_rb3_730e_", txt)
 
 
 class WaypointPersistenceTest(unittest.TestCase):

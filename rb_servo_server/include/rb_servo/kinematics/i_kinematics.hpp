@@ -82,23 +82,6 @@ public:
         return {};
     }
 
-    // Per-link arm collision capsules in the STAND frame: each template capsule
-    // (defined in a URDF link frame) FK-transformed by that frame's placement for
-    // this arm's joints + mount. This is the EXACT geometry the dual-arm
-    // self-collision guard checks. Default returns empty (geometry unavailable ->
-    // guard fails closed).
-    virtual std::vector<ArmCapsule> armCollisionCapsulesInStand(
-        ArmId arm,
-        const JointArray& q_deg,
-        const ArmMountConfig& mount,
-        const std::vector<ArmCapsuleConfig>& templates
-    ) const {
-        (void)arm;
-        (void)q_deg;
-        (void)mount;
-        (void)templates;
-        return {};
-    }
 };
 
 }  // namespace rb_servo

@@ -384,6 +384,34 @@ def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) ->
             _set_visible(scene_handles.get("right_base_ref"), False)
 
 
+# Frame that maps the monitor's URDF-WORLD-frame self-collision geometry into the
+# scene. The unified collision URDF roots at its `world` link, but the URDF carries
+# a +90deg-about-Z fixed joint on `world->stand`, and the scene's /stand frame IS
+# the URDF `stand` frame (per-arm mounts are defined stand-relative and place the
+# solid robots correctly). The async monitor's witness points (coal returns nearest
+# points in the pinocchio WORLD frame, published as-is) live in that same URDF-world
+# frame. So the collision-hull overlay AND the witness/near-pair markers must hang
+# off a frame rotated -90deg about Z to land correctly on /stand.
+_SC_WORLD_FRAME = "/stand/sc_urdf_world"
+
+
+def _ensure_sc_world_frame(scene_handles: dict[str, Any]) -> str:
+    server = scene_handles.get("_server")
+    if server is None or scene_handles.get("_sc_world_frame_made"):
+        return _SC_WORLD_FRAME
+    try:
+        server.scene.add_frame(
+            _SC_WORLD_FRAME,
+            wxyz=_pose_wxyz((0.0, 0.0, 0.0, 0.0, 0.0, -math.pi / 2.0)),
+            position=(0.0, 0.0, 0.0),
+            show_axes=False,
+        )
+        scene_handles["_sc_world_frame_made"] = True
+    except Exception as exc:
+        scene_handles["sc_world_frame_error"] = f"{type(exc).__name__}: {exc}"
+    return _SC_WORLD_FRAME
+
+
 def _add_self_collision_witness_markers(server: Any, handles: dict[str, Any]) -> None:
     """Closest-point (witness) markers for the self-collision guard.
 
@@ -396,9 +424,11 @@ def _add_self_collision_witness_markers(server: Any, handles: dict[str, Any]) ->
     try:
         if not hasattr(server.scene, "add_icosphere"):
             return
+        handles["_server"] = server
+        frame = _ensure_sc_world_frame(handles)  # witness points are in URDF-world frame
         for key, name, color in (
-            ("self_collision_point_a", "/stand/self_collision_point_a", (255, 220, 0)),
-            ("self_collision_point_b", "/stand/self_collision_point_b", (0, 229, 255)),
+            ("self_collision_point_a", f"{frame}/self_collision_point_a", (255, 220, 0)),
+            ("self_collision_point_b", f"{frame}/self_collision_point_b", (0, 229, 255)),
         ):
             handles[key] = server.scene.add_icosphere(
                 name,
@@ -411,7 +441,7 @@ def _add_self_collision_witness_markers(server: Any, handles: dict[str, Any]) ->
             import numpy as np
 
             handles["self_collision_gap_line"] = server.scene.add_line_segments(
-                "/stand/self_collision_gap_line",
+                f"{frame}/self_collision_gap_line",
                 points=np.zeros((1, 2, 3), dtype=np.float32),
                 colors=np.full((1, 2, 3), (255, 220, 0), dtype=np.uint8),
                 line_width=3.0,
@@ -419,7 +449,7 @@ def _add_self_collision_witness_markers(server: Any, handles: dict[str, Any]) ->
             )
         if hasattr(server.scene, "add_label"):
             handles["self_collision_gap_label"] = server.scene.add_label(
-                "/stand/self_collision_gap_label",
+                f"{frame}/self_collision_gap_label",
                 text="",
                 position=(0.0, 0.0, 0.0),
                 visible=False,
@@ -474,17 +504,6 @@ def _update_self_collision_witness_markers(
         _set_visible(handle, show)
 
 
-# Translucent collision-capsule overlay. Arm capsules (blue) and stand capsules
-# (orange) both come from the server's self_collision telemetry as explicit
-# {p0_m, p1_m, radius_m} lists — the EXACT capsules the guard checked this tick
-# (arm capsules FK'd per-link from the URDF-fit template). Each is inflated by
-# margin/2 so two capsule surfaces touching == the violation threshold
-# (clearance < margin). Translucent so the real arm/stand meshes show underneath.
-_SELF_COLLISION_ARM_CAPSULE_RGB = (70, 160, 255)
-_SELF_COLLISION_STAND_CAPSULE_RGB = (255, 165, 60)
-_SELF_COLLISION_CAPSULE_OPACITY = 0.30
-
-
 def _xyz3(value: Any) -> tuple[float, float, float] | None:
     if not isinstance(value, (list, tuple)) or len(value) != 3:
         return None
@@ -517,42 +536,6 @@ def _capsule_axis_wxyz(direction: tuple[float, float, float]) -> tuple[float, fl
     return (math.cos(half), float(axis[0] * s), float(axis[1] * s), float(axis[2] * s))
 
 
-def _ensure_capsule_handle(
-    server: Any, scene_handles: dict[str, Any], key: str, length: float, radius: float, rgb: tuple[int, int, int]
-) -> Any:
-    # Capsule core spans +/-length/2 along local Z (trimesh capsule centered at
-    # origin). Reuse the mesh while (length, radius) are unchanged — arm bone
-    # lengths are constant for a rigid arm, so this recreates at most once.
-    cache = scene_handles.setdefault("_self_collision_capsule_cache", {})
-    entry = cache.get(key)
-    if entry is not None and abs(entry["length"] - length) < 1e-4 and abs(entry["radius"] - radius) < 1e-4:
-        return entry["handle"]
-    if entry is not None:
-        try:
-            entry["handle"].remove()
-        except Exception:
-            pass
-    try:
-        import trimesh
-
-        mesh = trimesh.creation.capsule(
-            height=max(float(length), 1e-4), radius=max(float(radius), 1e-4), count=[6, 10]
-        )
-        handle = server.scene.add_mesh_simple(
-            f"/stand/self_collision_capsule/{key}",
-            vertices=mesh.vertices,
-            faces=mesh.faces,
-            color=rgb,
-            opacity=_SELF_COLLISION_CAPSULE_OPACITY,
-            visible=False,
-        )
-    except Exception as exc:
-        scene_handles["self_collision_capsule_error"] = f"{type(exc).__name__}: {exc}"
-        return None
-    cache[key] = {"handle": handle, "length": float(length), "radius": float(radius)}
-    return handle
-
-
 def _place_capsule(handle: Any, p0: tuple[float, float, float], p1: tuple[float, float, float]) -> None:
     seg = (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
     handle.position = ((p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0, (p0[2] + p1[2]) / 2.0)
@@ -563,8 +546,9 @@ def _place_capsule(handle: Any, p0: tuple[float, float, float], p1: tuple[float,
 # overlay above). The server's self_collision.near_pairs telemetry lists the K
 # closest checked pairs as witness segments {p_a_m, p_b_m, clearance_m}; we draw a
 # thin tube per pair, red when within the hard floor, yellow when merely close.
-_SELF_COLLISION_NEAR_HARD_RGB = (235, 40, 40)
-_SELF_COLLISION_NEAR_CAUTION_RGB = (255, 210, 40)
+_SELF_COLLISION_NEAR_HARD_RGB = (235, 40, 40)       # clearance < d_hard
+_SELF_COLLISION_NEAR_CAUTION_RGB = (255, 210, 40)   # d_hard <= clearance < d_slow
+_SELF_COLLISION_NEAR_OK_RGB = (70, 200, 90)         # clearance >= d_slow (in viz reach)
 _SELF_COLLISION_NEAR_RADIUS_M = 0.004
 _SELF_COLLISION_NEAR_OPACITY = 0.9
 
@@ -587,8 +571,9 @@ def _ensure_near_pair_handle(
         mesh = trimesh.creation.capsule(
             height=max(float(length), 1e-4), radius=_SELF_COLLISION_NEAR_RADIUS_M, count=[5, 8]
         )
+        frame = _ensure_sc_world_frame(scene_handles)  # near_pairs are in URDF-world frame
         handle = server.scene.add_mesh_simple(
-            f"/stand/self_collision_near/{key}",
+            f"{frame}/self_collision_near/{key}",
             vertices=mesh.vertices,
             faces=mesh.faces,
             color=rgb,
@@ -604,9 +589,10 @@ def _ensure_near_pair_handle(
 
 def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
     """Show/update the URDF-mesh close-call segments from self_collision.near_pairs.
-    A thin tube spans each checked pair's witness points (red within the hard floor,
-    yellow when merely close) so the viewer sees WHERE and HOW CLOSE the mesh guard
-    is — the mesh-mode counterpart of update_self_collision_capsules."""
+    A thin tube spans each checked pair's witness points, colored by clearance band:
+    red < d_hard, amber in [d_hard, d_slow), green >= d_slow (still within the server's
+    viz reach). Driven by the COMMANDED (q_sent) verdict the server publishes, so it
+    mirrors what the guard checks even when the displayed q_actual diverges."""
     if not isinstance(scene_handles, dict):
         return
     server = scene_handles.get("_server")
@@ -615,12 +601,9 @@ def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any,
     if show and server is not None:
         sc = getattr(latest, "self_collision", None) if latest is not None else None
         if isinstance(sc, Mapping):
-            margin = sc.get("margin_m")
-            hard = (
-                float(margin)
-                if isinstance(margin, (int, float)) and math.isfinite(float(margin))
-                else 0.005
-            )
+            hard = _finite_or(sc.get("margin_m"), 0.005)  # margin_m == mesh d_hard_m
+            manifest = sc.get("manifest") if isinstance(sc.get("manifest"), Mapping) else {}
+            slow = _finite_or(manifest.get("d_slow_m"), max(hard, 0.025))
             pairs = sc.get("near_pairs")
             if isinstance(pairs, (list, tuple)):
                 for i, pair in enumerate(pairs):
@@ -631,9 +614,14 @@ def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any,
                     clearance = pair.get("clearance_m")
                     if a is None or b is None or not isinstance(clearance, (int, float)):
                         continue
-                    is_hard = float(clearance) < hard
-                    rgb = _SELF_COLLISION_NEAR_HARD_RGB if is_hard else _SELF_COLLISION_NEAR_CAUTION_RGB
-                    key = f"{i}_{'hard' if is_hard else 'near'}"
+                    c = float(clearance)
+                    if c < hard:
+                        band, rgb = "hard", _SELF_COLLISION_NEAR_HARD_RGB
+                    elif c < slow:
+                        band, rgb = "caution", _SELF_COLLISION_NEAR_CAUTION_RGB
+                    else:
+                        band, rgb = "ok", _SELF_COLLISION_NEAR_OK_RGB
+                    key = f"{i}_{band}"
                     handle = _ensure_near_pair_handle(server, scene_handles, key, math.dist(a, b), rgb)
                     if handle is None:
                         continue
@@ -646,104 +634,167 @@ def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any,
         _set_visible(entry["handle"], show and key in used_keys)
 
 
-def add_self_collision_capsules(server: Any, scene_handles: dict[str, Any]) -> None:
-    """Prime the collision-capsule overlay (store the server handle).
-
-    Both arm and stand capsules are created lazily from the server's
-    self_collision telemetry in update_self_collision_capsules, so the viewer
-    always draws the EXACT geometry the guard checked this tick — there is no
-    GUI-side copy of the stand config to drift from the server."""
-    if not isinstance(scene_handles, dict):
-        return
-    scene_handles["_server"] = server
+def _finite_or(value: Any, default: float) -> float:
+    """Return float(value) if it is a finite number, else the default."""
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    return default
 
 
-def update_self_collision_capsules(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
-    """Show/update the translucent collision capsules from telemetry. Arm capsules
-    come from {left,right}_arm_capsules_m (blue), stand from stand_capsules_m
-    (orange) — all explicit {p0_m, p1_m, radius_m} lists, the exact geometry the
-    server checked. Each is inflated by margin/2 so two capsule surfaces touching
-    == the violation threshold."""
-    if not isinstance(scene_handles, dict):
-        return
+def _checkgeom_joint_config(scene_handles: dict[str, Any], latest: Any) -> Any:
+    """Build the unified-URDF actuated-joint config (radians) from the live left/right
+    joint states. The unified joint names are "<prefix>+<base>" exactly as the server
+    builds left_joints/right_joints, so the GUI maps each command-order angle onto the
+    matching unified joint, then orders by the URDF's actuated-joint list."""
+    info = scene_handles.get("checkgeom_manifest")
+    if not info or latest is None:
+        return None
+    joint_names = info.get("joint_names") or []
+    actuated = info.get("actuated") or ()
+    if not joint_names or not actuated:
+        return None
+    angles: dict[str, float] = {}
+    for side, prefix in (("left", info.get("left_prefix", "")),
+                         ("right", info.get("right_prefix", ""))):
+        arm_state = getattr(latest, side, None)
+        if arm_state is None:
+            continue
+        # The async monitor checks the COMMANDED targets (q_sent), so the checked-
+        # geometry overlay must pose to q_sent too — otherwise (e.g. pgmode
+        # controller-sim, where q_actual need not track the command) the overlay
+        # shows a different pose than the guard actually evaluates. Fall back to
+        # q_actual only when q_sent is unavailable.
+        q = arm_state.q_sent_deg
+        if q is None:
+            q = arm_state.q_actual_deg
+        if q is None:
+            continue
+        for i, base in enumerate(joint_names):
+            if i < len(q):
+                angles[f"{prefix}{base}"] = math.radians(float(q[i]))
+    return [float(angles.get(name, 0.0)) for name in actuated]
+
+
+def _build_checkgeom_overlay(scene_handles: dict[str, Any], manifest: Mapping[str, Any]) -> Any:
+    """Lazily build the unified collision-hull overlay (stand + both arms' URDF
+    <collision> convex hulls) from the manifest, once a manifest is available."""
     server = scene_handles.get("_server")
-    # setdefault (not get): _ensure_capsule_handle lazily creates this same dict,
-    # so binding the live reference here keeps the final visibility sweep in sync.
-    cache = scene_handles.setdefault("_self_collision_capsule_cache", {})
-    used_keys: set[str] = set()
-    if show and server is not None:
-        sc = getattr(latest, "self_collision", None) if latest is not None else None
-        if isinstance(sc, Mapping):
-            margin = sc.get("margin_m")
-            half = (
-                float(margin) / 2.0
-                if isinstance(margin, (int, float)) and math.isfinite(float(margin))
-                else 0.0
-            )
-            groups = (
-                ("left", "left_arm_capsules_m", _SELF_COLLISION_ARM_CAPSULE_RGB),
-                ("right", "right_arm_capsules_m", _SELF_COLLISION_ARM_CAPSULE_RGB),
-                ("stand", "stand_capsules_m", _SELF_COLLISION_STAND_CAPSULE_RGB),
-            )
-            for prefix, telemetry_key, rgb in groups:
-                caps = sc.get(telemetry_key)
-                if not isinstance(caps, (list, tuple)):
-                    continue
-                for i, capsule in enumerate(caps):
-                    if not isinstance(capsule, Mapping):
-                        continue
-                    p0 = _xyz3(capsule.get("p0_m"))
-                    p1 = _xyz3(capsule.get("p1_m"))
-                    radius = capsule.get("radius_m")
-                    if p0 is None or p1 is None or not isinstance(radius, (int, float)):
-                        continue
-                    key = f"{prefix}_{i}"
-                    handle = _ensure_capsule_handle(
-                        server, scene_handles, key, math.dist(p0, p1), float(radius) + half, rgb
-                    )
-                    if handle is None:
-                        continue
-                    try:
-                        _place_capsule(handle, p0, p1)
-                    except Exception:
-                        pass
-                    used_keys.add(key)
-    for key, entry in cache.items():
-        _set_visible(entry["handle"], show and key in used_keys)
+    urdf_path = manifest.get("unified_urdf")
+    if server is None or not isinstance(urdf_path, str) or not urdf_path:
+        return None
+    if not Path(urdf_path).exists():
+        scene_handles["urdf_checkgeom_error"] = _asset_error(f"unified URDF not found: {urdf_path}")
+        return None
+    frame = _ensure_sc_world_frame(scene_handles)
+    try:
+        from viser.extras import ViserUrdf
+
+        # Root at the URDF's `world` link under the -90deg frame so the URDF `stand`
+        # frame (world->stand is +90deg about Z) lands on the scene /stand and the
+        # arms overlay the solid robots.
+        overlay = ViserUrdf(
+            server, Path(urdf_path), root_node_name=f"{frame}/collision_checkgeom",
+            load_meshes=False, load_collision_meshes=True,
+            collision_mesh_color_override=_SELF_COLLISION_CHECK_RGBA)
+    except Exception as exc:
+        scene_handles["urdf_checkgeom_error"] = f"{type(exc).__name__}: {exc}"
+        return None
+    scene_handles["checkgeom_urdf"] = overlay
+    scene_handles["checkgeom_manifest"] = {
+        "left_prefix": manifest.get("left_prefix", ""),
+        "right_prefix": manifest.get("right_prefix", ""),
+        "joint_names": list(manifest.get("joint_names") or []),
+        "actuated": tuple(overlay.get_actuated_joint_names()),
+    }
+    _attach_checkgeom_gripper(scene_handles, overlay, manifest)
+    return overlay
+
+
+def _attach_checkgeom_gripper(scene_handles: dict[str, Any], overlay: Any, manifest: Mapping[str, Any]) -> None:
+    """Mirror the monitor's runtime Pika-gripper attach in the viewer WITHOUT touching
+    the safety URDF: load the gripper mesh from the manifest and parent it under the
+    unified overlay's "<prefix>attachment_site" link frame (Z+90deg about Z, manifest
+    scale), so the gripper shows as part of the checked geometry. The link frame is
+    located via ViserUrdf's per-joint frames; skips gracefully if unavailable."""
+    server = scene_handles.get("_server")
+    mesh_path = manifest.get("pika_gripper_mesh")
+    attach = manifest.get("gripper_attach") if isinstance(manifest.get("gripper_attach"), Mapping) else {}
+    if server is None or not isinstance(mesh_path, str) or not mesh_path or not Path(mesh_path).exists():
+        return
+    try:
+        import trimesh
+
+        scale = float(attach.get("mesh_scale", 0.001))
+        rpy = attach.get("rpy") or [0.0, 0.0, math.pi / 2.0]
+        suffix = str(attach.get("frame_suffix", "attachment_site"))
+        base_mesh = trimesh.load_mesh(mesh_path)
+        base_mesh.apply_scale(scale)
+        rgb = tuple(int(round(c * 255)) for c in _SELF_COLLISION_CHECK_RGBA[:3])
+        opacity = float(_SELF_COLLISION_CHECK_RGBA[3])
+        wxyz = _pose_wxyz((0.0, 0.0, 0.0, float(rpy[0]), float(rpy[1]), float(rpy[2])))
+        # ViserUrdf names each joint-child frame by its full kinematic path; find the
+        # two attachment_site frames (left/right) by link-name suffix.
+        frames = list(getattr(overlay, "_joint_frames", []) or [])
+        handles: list[Any] = []
+        for prefix in (manifest.get("left_prefix", ""), manifest.get("right_prefix", "")):
+            link = f"{prefix}{suffix}"
+            frame = next(
+                (f for f in frames if str(getattr(f, "name", "")).endswith("/" + link)), None)
+            if frame is None:
+                scene_handles["checkgeom_gripper_error"] = f"attachment frame not found: {link}"
+                continue
+            handles.append(server.scene.add_mesh_simple(
+                f"{frame.name}/pika_gripper",
+                vertices=base_mesh.vertices,
+                faces=base_mesh.faces,
+                color=rgb,
+                opacity=opacity,
+                wxyz=wxyz,
+                position=(0.0, 0.0, 0.0),
+                visible=False,
+            ))
+        scene_handles["checkgeom_gripper"] = handles
+    except Exception as exc:
+        scene_handles["checkgeom_gripper_error"] = f"{type(exc).__name__}: {exc}"
 
 
 def update_self_collision_check_geom(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
-    """Show/hide the translucent checked-collision-geometry overlay (per-link convex
-    hulls from the URDF <collision> meshes), posed to the commanded/actual config —
-    the capsule-overlay analogue for mesh mode. Driven by the same toggle."""
+    """Translucent collision-HULL overlay: the EXACT unified-URDF collision geometry
+    the async monitor checks (stand + both arms' <collision> convex hulls), built
+    lazily from the server's self_collision.manifest so the viewer mirrors the server
+    config (single source of truth) instead of a hardcoded viewer URDF. Posed by the
+    live left/right joint states mapped onto the unified URDF's prefixed joints. The
+    Pika gripper (which the monitor attaches at runtime, not in the URDF) is mirrored
+    as a child mesh on each attachment_site frame so it shows as checked geometry."""
     if not isinstance(scene_handles, dict):
         return
-    for side, arm_state in (("left", latest.left), ("right", latest.right)):
-        urdf = scene_handles.get(f"{side}_urdf_checkgeom")
-        base = scene_handles.get(f"{side}_base_checkgeom")
-        if urdf is None:
-            _set_visible(base, False)
-            continue
-        if show:
-            # Hug whichever robot is shown: the commanded ghost in controller-sim,
-            # else the actual arm.
-            q = arm_state.q_sent_deg if _reference_ghost_active(arm_state) else None
-            if q is None:
-                q = arm_state.q_actual_deg
+    sc = getattr(latest, "self_collision", None) if latest is not None else None
+    manifest = sc.get("manifest") if isinstance(sc, Mapping) else None
+    overlay = scene_handles.get("checkgeom_urdf")
+    if overlay is None:
+        # Build once a manifest is available and the operator wants it shown.
+        if not show or not isinstance(manifest, Mapping):
+            return
+        overlay = _build_checkgeom_overlay(scene_handles, manifest)
+        if overlay is None:
+            return
+    if show:
+        cfg = _checkgeom_joint_config(scene_handles, latest)
+        if cfg is not None:
             try:
-                _update_urdf_config(urdf, _joint_cfg_radians(q))
+                _update_urdf_config(overlay, cfg)
             except Exception as exc:
                 scene_handles["urdf_checkgeom_update_error"] = f"{type(exc).__name__}: {exc}"
-        # The collision meshes live under ViserUrdf's own collision root frame; the
-        # outer mount frame visibility alone does not reveal them — toggle both.
-        _set_visible(base, show)
-        try:
-            urdf.show_collision = show
-        except Exception as exc:
-            scene_handles["urdf_checkgeom_show_error"] = f"{type(exc).__name__}: {exc}"
-        # The collision hulls hug the links and would be hidden inside the opaque
-        # solid robot, so showing the checked geometry = a "collision view": hide
-        # the solid visual meshes while the toggle is on, restore them when off.
+    try:
+        overlay.show_collision = show
+    except Exception as exc:
+        scene_handles["urdf_checkgeom_show_error"] = f"{type(exc).__name__}: {exc}"
+    # The gripper meshes are independent child handles (not part of show_collision).
+    for handle in scene_handles.get("checkgeom_gripper", []):
+        _set_visible(handle, show)
+    # Collision view: hide the solid visual robots while the overlay is on so the
+    # hulls (which hug the links) are not occluded; restore them when off.
+    for side in ("left", "right"):
         solid = scene_handles.get(f"{side}_urdf")
         if solid is not None:
             try:
@@ -825,21 +876,10 @@ def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
                 mesh_color_override=_SELF_COLLISION_RGBA)
         except Exception as exc:
             handles["urdf_collision_error"] = f"{type(exc).__name__}: {exc}"
-        # Checked collision GEOMETRY overlay: the actual per-link convex hulls the
-        # self-collision guard tests (URDF <collision> meshes), shown translucent
-        # when the "자기충돌 검사 표시" toggle is on. This is the capsule-overlay
-        # analogue for mesh mode — it hugs each link like the old capsules did.
-        try:
-            handles["left_urdf_checkgeom"] = ViserUrdf(
-                server, urdf_path, root_node_name="/stand/left_base_checkgeom",
-                load_meshes=False, load_collision_meshes=True,
-                collision_mesh_color_override=_SELF_COLLISION_CHECK_RGBA)
-            handles["right_urdf_checkgeom"] = ViserUrdf(
-                server, urdf_path, root_node_name="/stand/right_base_checkgeom",
-                load_meshes=False, load_collision_meshes=True,
-                collision_mesh_color_override=_SELF_COLLISION_CHECK_RGBA)
-        except Exception as exc:
-            handles["urdf_checkgeom_error"] = f"{type(exc).__name__}: {exc}"
+        # The checked collision-GEOMETRY overlay is no longer two per-arm URDFs:
+        # it is a single unified stand+both-arms collision-hull URDF built lazily
+        # from the server's self_collision.manifest (so the viewer mirrors exactly
+        # what the monitor checks). See update_self_collision_check_geom.
     except Exception as exc:
         handles["urdf_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
 
@@ -867,9 +907,6 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         # Mount frames for the translucent-red self-collision overlay robots.
         handles["left_base_collision"] = server.scene.add_frame("/stand/left_base_collision", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
         handles["right_base_collision"] = server.scene.add_frame("/stand/right_base_collision", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
-        # Mount frames for the checked-collision-geometry overlay (toggle-driven).
-        handles["left_base_checkgeom"] = server.scene.add_frame("/stand/left_base_checkgeom", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
-        handles["right_base_checkgeom"] = server.scene.add_frame("/stand/right_base_checkgeom", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
         has_transform_controls = hasattr(server.scene, "add_transform_controls")
         handles["left_tcp"] = server.scene.add_frame("/stand/left_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(0.1601, -0.1725, 0.78))
         handles["right_tcp"] = server.scene.add_frame("/stand/right_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(-0.1601, -0.1725, 0.78))
@@ -954,7 +991,9 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         _set_visible(handles.get("circle_overlay_desired"), False)
         _add_floor_plane(server, handles)
         _add_self_collision_witness_markers(server, handles)
-        add_self_collision_capsules(server, handles)
+        # Keep the server handle so the self-collision checked-geometry overlay can
+        # lazily build the unified collision-hull URDF from the runtime manifest.
+        handles["_server"] = server
         _add_stand_mesh(server, handles)
         _add_robot_urdfs(server, handles)
         urdf_loaded = "left_urdf" in handles and "right_urdf" in handles
@@ -1145,8 +1184,17 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
         urdf_handle = scene_handles.get(key)
         if urdf_handle is None:
             continue
+        # In pgmode controller-simulation the controller does NOT execute the streamed
+        # command, so q_actual is decoupled from q_sent (often tens of degrees off) and
+        # the "actual" arm is misleading — it can look like it penetrates the stand
+        # while the COMMANDED pose the safety guard checks is clear. Show the command
+        # (q_sent) there so the displayed robot matches what is actually checked/sent.
+        # Real motion (q_actual tracks the command) keeps showing the true q_actual.
+        q = arm_state.q_actual_deg
+        if _arm_is_controller_sim(arm_state) and arm_state.q_sent_deg is not None:
+            q = arm_state.q_sent_deg
         try:
-            _update_urdf_config(urdf_handle, _joint_cfg_radians(arm_state.q_actual_deg))
+            _update_urdf_config(urdf_handle, _joint_cfg_radians(q))
         except Exception as exc:
             scene_handles["urdf_update_error"] = f"{type(exc).__name__}: {exc}"
 
@@ -1173,8 +1221,6 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
         "right_base_ref": right_base,
         "left_base_collision": left_base,
         "right_base_collision": right_base,
-        "left_base_checkgeom": left_base,
-        "right_base_checkgeom": right_base,
         "left_marker": _joint_marker_position(left_base, latest.left.q_actual_deg),
         "right_marker": _joint_marker_position(right_base, latest.right.q_actual_deg),
     }

@@ -148,10 +148,6 @@ if(BUILD_TESTING)
     target_link_libraries(test_capsule_distance PRIVATE rb_servo_core)
     add_test(NAME capsule_distance COMMAND test_capsule_distance)
 
-    add_executable(test_self_collision tests/test_self_collision.cpp)
-    target_link_libraries(test_self_collision PRIVATE rb_servo_core)
-    add_test(NAME self_collision COMMAND test_self_collision)
-
     add_executable(test_collision_monitor tests/test_collision_monitor.cpp)
     target_link_libraries(test_collision_monitor PRIVATE rb_servo_core)
     add_test(NAME collision_monitor COMMAND test_collision_monitor)

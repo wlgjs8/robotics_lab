@@ -200,70 +200,6 @@ enum class SelfCollisionFailPolicy {
     FaultLatch,
 };
 
-// Static stand collision capsule (stand frame, meters). Derived from the stand
-// URDF collision boxes (mo_robot_descriptions dual_rb3_730e_stand_ver3).
-struct StandCapsuleConfig {
-    std::string name;
-    std::array<double, 3> p0_m{0.0, 0.0, 0.0};
-    std::array<double, 3> p1_m{0.0, 0.0, 0.0};
-    double radius_m = 0.0;
-};
-
-// A geometric collision capsule (segment endpoints + radius) in some frame.
-// Used both as the FK output (stand frame) and as a generic capsule primitive.
-struct ArmCapsule {
-    std::array<double, 3> p0_m{0.0, 0.0, 0.0};
-    std::array<double, 3> p1_m{0.0, 0.0, 0.0};
-    double radius_m = 0.0;
-};
-
-// One arm collision capsule defined in a URDF LINK frame (link0..link6,
-// attachment_site). The server FK-transforms p0_m/p1_m by that frame's placement
-// (per arm joints + mount) each tick to get the stand-frame capsule it checks.
-// Fit per collision hull from the RB3-730e URDF so the capsules follow the real
-// link "dogleg" shape (link2/link4 ship multiple hulls) instead of a single fat
-// straight capsule on the joint-origin skeleton. Regenerate with
-// scripts/fit_arm_collision_capsules.py.
-struct ArmCapsuleConfig {
-    std::string frame;
-    std::array<double, 3> p0_m{0.0, 0.0, 0.0};
-    std::array<double, 3> p1_m{0.0, 0.0, 0.0};
-    double radius_m = 0.0;
-};
-
-// RB3-730e per-link capsule template (both arms share it; FK'd per arm). Order
-// matters: indices feed stand_ignore_bones. Indices 0..1 are link0/link1 (base,
-// on/near the stand mount). Fit by scripts/fit_arm_collision_capsules.py.
-inline std::vector<ArmCapsuleConfig> defaultRb3ArmCapsules() {
-    return {
-        {"link0",           {+0.0696, -0.0007, +0.0256}, {-0.0623, +0.0023, +0.0359}, 0.0566},
-        {"link1",           {-0.0052, -0.0212, -0.0681}, {-0.0010, +0.0093, +0.0579}, 0.0647},
-        {"link2",           {-0.0003, -0.1552, -0.0497}, {+0.0011, -0.0772, +0.0790}, 0.0804},
-        {"link2",           {+0.0003, -0.1174, +0.0812}, {-0.0015, -0.1194, +0.2131}, 0.0376},
-        {"link2",           {-0.0028, -0.0744, +0.2178}, {+0.0002, -0.1501, +0.3285}, 0.0706},
-        {"link3",           {-0.0001, +0.0175, -0.0464}, {+0.0009, -0.0355, +0.0669}, 0.0624},
-        {"link4",           {+0.0014, -0.1107, +0.2140}, {-0.0026, -0.0893, +0.3132}, 0.0405},
-        {"link4",           {+0.0407, +0.0077, +0.0764}, {-0.0407, +0.0076, +0.0765}, 0.0490},
-        {"link4",           {+0.0003, -0.1457, +0.3534}, {+0.0005, -0.0296, +0.3459}, 0.0525},
-        {"link4",           {+0.0003, -0.1362, +0.2054}, {-0.0001, +0.0451, +0.1032}, 0.0513},
-        {"link5",           {+0.0034, -0.0138, +0.0650}, {-0.0017, +0.0081, -0.0486}, 0.0399},
-        {"link6",           {+0.0018, +0.0347, +0.0784}, {-0.0175, -0.0385, +0.0756}, 0.0307},
-        // Pika gripper (attachment_site frame): body column, camera (+y nub),
-        // jaw housing cross-bar (x), and fingertip bar ending ~3 mm past the tip.
-        {"attachment_site", {+0.0000, +0.0000, +0.0000}, {+0.0000, +0.0000, +0.1000}, 0.0350},
-        {"attachment_site", {+0.0000, +0.0607, +0.0810}, {+0.0000, +0.0940, +0.0810}, 0.0280},
-        {"attachment_site", {-0.1039, +0.0000, +0.1305}, {+0.1039, +0.0000, +0.1305}, 0.0317},
-        {"attachment_site", {-0.0594, +0.0000, +0.2286}, {+0.0594, +0.0000, +0.2286}, 0.0220},
-    };
-}
-
-// Server-side self-collision guard treating stand + left arm + right arm as one
-// "self" (the rbpodo controller firmware does not populate op_stat_self_collision).
-// Each arm link is approximated as a capsule (segment between consecutive
-// kinematic-chain points + radius); the stand as a static capsule list. Checked
-// pairs are left<->right, left<->stand, right<->stand — NEVER intra-arm (adjacent
-// links touch by construction). A candidate target is refused if any checked pair
-// comes within margin_m of each other.
 // Extra collision primitive for the mesh self-collision monitor — geometry the
 // URDF does not carry: wrist cameras, cable bundles, the work table/box. Attached
 // to a named frame: an ARM frame (e.g. an attachment_site) makes it move with that
@@ -280,50 +216,30 @@ struct ExtraCollisionConfig {
     std::array<double, 3> rpy{0.0, 0.0, 0.0};      // orientation in the parent frame
 };
 
+// Server-side self-collision guard treating stand + left arm + right arm as one
+// "self" (the rbpodo controller firmware does not populate op_stat_self_collision).
+// The ONLY implementation is the async URDF-mesh CollisionMonitor (pinocchio +
+// coal): every candidate joint target is checked against the dual-arm + stand
+// collision geometry and refused (velocity barrier / fault) before it is sent.
+// There is no capsule approximation path.
 struct SelfCollisionConfig {
+    // Master switch for the URDF-mesh self-collision guard. When true the servo
+    // loop feeds every candidate target to the monitor and applies the shared
+    // velocity barrier; a hard breach, or a stale/absent monitor, fails closed.
     bool enable = false;
-    double margin_m = 0.05;
-    // Capsule radius per bone (meters). Chain points are [base, j1..j6, tcp] (8
-    // points -> 7 bones); index i is the bone from point i to point i+1. The last
-    // radius is reused if more bones exist (e.g. a future gripper). Conservative
-    // (slightly large) defaults; tune in simulation.
-    std::array<double, 7> link_radius_m{0.10, 0.09, 0.08, 0.07, 0.06, 0.06, 0.06};
     SelfCollisionFailPolicy fail_policy = SelfCollisionFailPolicy::ClampToHold;
     // Observe-only: still evaluate and publish clearance/violation telemetry, but
-    // do NOT clamp or latch. For tuning radii/margin in simulation against a known
+    // do NOT clamp or latch. For tuning d_hard/d_slow in simulation against a known
     // collision-free trajectory. Never use monitor_only as a real-motion safety
     // posture.
     bool monitor_only = false;
-    // Pair toggles. Arm<->stand checks additionally require a non-empty
-    // stand_capsules list (empty list = stand checks are skipped, preserving the
-    // arm-arm-only behavior of older configs).
-    bool check_left_right = true;
-    bool check_left_stand = true;
-    bool check_right_stand = true;
-    std::vector<StandCapsuleConfig> stand_capsules;
-    // Per-link arm collision capsules (both arms share this template; FK'd per
-    // arm each tick). Defaults follow the RB3-730e collision hulls so the capsules
-    // hug the real link shape; override in YAML to retune. The legacy
-    // link_radius_m skeleton model is unused when this is non-empty.
-    std::vector<ArmCapsuleConfig> arm_capsules{defaultRb3ArmCapsules()};
-    // Arm capsule indices excluded from the arm<->stand check (indices into
-    // arm_capsules). Indices 0,1,2 are link0/link1/link2-shoulder: the arm is
-    // bolted onto the stand shoulder plates here, so these capsules permanently
-    // overlap the stand mount/shoulder capsules and would always self-trigger
-    // (a structural, not avoidable, overlap). The reach links (link3+, index 3+)
-    // stay checked against the whole stand. See scripts/fit_arm_collision_capsules.py
-    // and the arm<->stand clearance probe.
-    std::vector<int> stand_ignore_bones{0, 1, 2};
 
-    // URDF mesh self-collision via the async CollisionMonitor (pinocchio + coal).
-    // When mesh.enable is true the servo loop uses the mesh monitor (separate
-    // thread, off the 2 ms servo_j path) + a velocity barrier INSTEAD of the
-    // capsule path above; the capsule code stays compiled but is not evaluated.
-    // Barrier params are a SINGLE shared set, common to every motion primitive
-    // (TcpPoseTarget, TcpTwistLocal, ...) — speed adaptation comes from the
-    // measured closing speed, so nothing is tuned per primitive.
+    // URDF mesh self-collision parameters (consumed only when enable is true). The
+    // monitor runs on a separate thread (off the 2 ms servo_j path) + a velocity
+    // barrier. Barrier params are a SINGLE shared set, common to every motion
+    // primitive (TcpPoseTarget, TcpTwistLocal, ...) — speed adaptation comes from
+    // the measured closing speed, so nothing is tuned per primitive.
     struct MeshConfig {
-        bool enable = false;
         std::string unified_urdf;        // stand+both-arms URDF (e.g. dual_rb3_730e_ver3.urdf)
         std::vector<std::string> package_dirs;  // resolve mesh "../../../meshes" paths
         std::string pika_gripper_mesh;   // optional; attached as a convex hull per arm
@@ -355,6 +271,11 @@ struct SelfCollisionConfig {
         double max_staleness_s = 0.050;
         int monitor_core = -1;
         int max_near_pairs = 8;
+        // VISUALIZATION ONLY (does not affect the barrier): publish near-pair witness
+        // segments to the GUI for any checked pair within this clearance. Decoupled
+        // from d_slow so close-call markers stay visible even when the barrier band
+        // (d_slow) is tuned tight. Effective threshold = max(this, d_slow).
+        double viz_near_pairs_m = 0.06;
         // Extra collision primitives not in the URDF (wrist cameras, cables, table).
         std::vector<ExtraCollisionConfig> extra_collision;
     };

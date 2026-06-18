@@ -747,71 +747,24 @@ void validateConfig(const DualArmConfig& cfg) {
     );
     validateNonNegativeFiniteArray(cfg.safety.joint_wrap_period_deg, "safety.joint_wrap_period_deg");
     if (cfg.safety.self_collision.enable) {
-        validateNonNegativeFinite(cfg.safety.self_collision.margin_m, "safety.self_collision.margin_m");
-        for (const StandCapsuleConfig& cap : cfg.safety.self_collision.stand_capsules) {
-            if (!(cap.radius_m > 0.0) || !std::isfinite(cap.radius_m)) {
-                throw std::runtime_error(
-                    "safety.self_collision.stand_capsules radius_m must be finite and > 0 (" + cap.name + ")");
-            }
-            for (int axis = 0; axis < 3; ++axis) {
-                if (!std::isfinite(cap.p0_m[axis]) || !std::isfinite(cap.p1_m[axis])) {
-                    throw std::runtime_error(
-                        "safety.self_collision.stand_capsules endpoints must be finite (" + cap.name + ")");
-                }
-            }
-        }
-        if (cfg.safety.self_collision.arm_capsules.empty()) {
-            throw std::runtime_error(
-                "safety.self_collision.enable=true requires a non-empty arm_capsules list");
-        }
-        for (const ArmCapsuleConfig& cap : cfg.safety.self_collision.arm_capsules) {
-            if (cap.frame.empty()) {
-                throw std::runtime_error("safety.self_collision.arm_capsules entries require a frame");
-            }
-            if (!(cap.radius_m > 0.0) || !std::isfinite(cap.radius_m)) {
-                throw std::runtime_error(
-                    "safety.self_collision.arm_capsules radius_m must be finite and > 0 (" + cap.frame + ")");
-            }
-            for (int axis = 0; axis < 3; ++axis) {
-                if (!std::isfinite(cap.p0_m[axis]) || !std::isfinite(cap.p1_m[axis])) {
-                    throw std::runtime_error(
-                        "safety.self_collision.arm_capsules endpoints must be finite (" + cap.frame + ")");
-                }
-            }
-        }
-        const int arm_capsule_count =
-            static_cast<int>(cfg.safety.self_collision.arm_capsules.size());
-        for (int idx : cfg.safety.self_collision.stand_ignore_bones) {
-            if (idx < 0 || idx >= arm_capsule_count) {
-                throw std::runtime_error(
-                    "safety.self_collision.stand_ignore_bones entries must index arm_capsules [0, " +
-                    std::to_string(arm_capsule_count - 1) + "]");
-            }
-        }
-        if (!cfg.safety.self_collision.check_left_right &&
-            cfg.safety.self_collision.stand_capsules.empty()) {
-            throw std::runtime_error(
-                "safety.self_collision.enable=true with check_left_right=false requires stand_capsules "
-                "(otherwise nothing is checked)");
-        }
+        // The only implementation is the async URDF-mesh CollisionMonitor, so the
+        // mesh geometry + barrier params are mandatory when the guard is enabled.
         if (!cfg.kinematics.enable) {
             throw std::runtime_error(
                 "safety.self_collision.enable=true requires kinematics.enable=true (link geometry source)");
         }
-        if (cfg.safety.self_collision.mesh.enable) {
-            const auto& m = cfg.safety.self_collision.mesh;
-            if (m.unified_urdf.empty()) {
-                throw std::runtime_error(
-                    "safety.self_collision.mesh.enable=true requires unified_urdf (stand+both-arms URDF)");
-            }
-            validatePositiveFinite(m.d_hard_m, "safety.self_collision.mesh.d_hard_m");
-            validatePositiveFinite(m.d_slow_m, "safety.self_collision.mesh.d_slow_m");
-            validatePositiveFinite(m.a_brake_m_s2, "safety.self_collision.mesh.a_brake_m_s2");
-            validatePositiveFinite(m.max_staleness_s, "safety.self_collision.mesh.max_staleness_s");
-            if (m.d_slow_m < m.d_hard_m) {
-                throw std::runtime_error(
-                    "safety.self_collision.mesh.d_slow_m must be >= d_hard_m");
-            }
+        const auto& m = cfg.safety.self_collision.mesh;
+        if (m.unified_urdf.empty()) {
+            throw std::runtime_error(
+                "safety.self_collision.enable=true requires mesh.unified_urdf (stand+both-arms URDF)");
+        }
+        validatePositiveFinite(m.d_hard_m, "safety.self_collision.mesh.d_hard_m");
+        validatePositiveFinite(m.d_slow_m, "safety.self_collision.mesh.d_slow_m");
+        validatePositiveFinite(m.a_brake_m_s2, "safety.self_collision.mesh.a_brake_m_s2");
+        validatePositiveFinite(m.max_staleness_s, "safety.self_collision.mesh.max_staleness_s");
+        if (m.d_slow_m < m.d_hard_m) {
+            throw std::runtime_error(
+                "safety.self_collision.mesh.d_slow_m must be >= d_hard_m");
         }
     }
     if (cfg.safety.joint_target_smd.enable) {
@@ -1653,16 +1606,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             const YAML::Node sc = sec["self_collision"];
             validateAllowedKeys(sc, {
                 "enable",
-                "margin_m",
-                "link_radius_m",
                 "fail_policy",
                 "monitor_only",
-                "check_left_right",
-                "check_left_stand",
-                "check_right_stand",
-                "stand_capsules",
-                "arm_capsules",
-                "stand_ignore_bones",
                 "mesh",
             }, "safety.self_collision");
             if (has(sc, "enable")) {
@@ -1672,138 +1617,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 cfg.safety.self_collision.monitor_only =
                     asBool(sc["monitor_only"], "safety.self_collision.monitor_only");
             }
-            if (has(sc, "margin_m")) {
-                cfg.safety.self_collision.margin_m = asDouble(sc["margin_m"], "safety.self_collision.margin_m");
-            }
             if (has(sc, "fail_policy")) {
                 cfg.safety.self_collision.fail_policy =
                     parseSelfCollisionFailPolicy(sc["fail_policy"], "safety.self_collision.fail_policy");
             }
-            if (has(sc, "check_left_right")) {
-                cfg.safety.self_collision.check_left_right =
-                    asBool(sc["check_left_right"], "safety.self_collision.check_left_right");
-            }
-            if (has(sc, "check_left_stand")) {
-                cfg.safety.self_collision.check_left_stand =
-                    asBool(sc["check_left_stand"], "safety.self_collision.check_left_stand");
-            }
-            if (has(sc, "check_right_stand")) {
-                cfg.safety.self_collision.check_right_stand =
-                    asBool(sc["check_right_stand"], "safety.self_collision.check_right_stand");
-            }
-            if (has(sc, "stand_ignore_bones")) {
-                const YAML::Node bones = sc["stand_ignore_bones"];
-                if (!bones.IsSequence()) {
-                    fail("safety.self_collision.stand_ignore_bones must be a sequence", bones);
-                }
-                cfg.safety.self_collision.stand_ignore_bones.clear();
-                for (std::size_t i = 0; i < bones.size(); ++i) {
-                    cfg.safety.self_collision.stand_ignore_bones.push_back(
-                        asInt(bones[i], "safety.self_collision.stand_ignore_bones"));
-                }
-            }
-            if (has(sc, "stand_capsules")) {
-                const YAML::Node caps = sc["stand_capsules"];
-                if (!caps.IsSequence()) {
-                    fail("safety.self_collision.stand_capsules must be a sequence", caps);
-                }
-                cfg.safety.self_collision.stand_capsules.clear();
-                for (std::size_t i = 0; i < caps.size(); ++i) {
-                    const YAML::Node entry = caps[i];
-                    validateAllowedKeys(entry, {
-                        "name",
-                        "p0_m",
-                        "p1_m",
-                        "radius_m",
-                    }, "safety.self_collision.stand_capsules");
-                    StandCapsuleConfig cap;
-                    if (has(entry, "name")) {
-                        cap.name = entry["name"].as<std::string>();
-                    } else {
-                        cap.name = "stand_capsule_" + std::to_string(i);
-                    }
-                    for (const auto& [key, target] : {
-                             std::pair<const char*, std::array<double, 3>*>{"p0_m", &cap.p0_m},
-                             {"p1_m", &cap.p1_m},
-                         }) {
-                        const YAML::Node point = entry[key];
-                        if (!point.IsSequence() || point.size() != 3) {
-                            fail("safety.self_collision.stand_capsules." + std::string(key) +
-                                     " must be a sequence of 3 values (" + cap.name + ")",
-                                 entry);
-                        }
-                        for (std::size_t axis = 0; axis < 3; ++axis) {
-                            (*target)[axis] =
-                                asDouble(point[axis], "safety.self_collision.stand_capsules." + std::string(key));
-                        }
-                    }
-                    if (!has(entry, "radius_m")) {
-                        fail("safety.self_collision.stand_capsules entries require radius_m (" + cap.name + ")", entry);
-                    }
-                    cap.radius_m = asDouble(entry["radius_m"], "safety.self_collision.stand_capsules.radius_m");
-                    cfg.safety.self_collision.stand_capsules.push_back(cap);
-                }
-            }
-            if (has(sc, "arm_capsules")) {
-                const YAML::Node caps = sc["arm_capsules"];
-                if (!caps.IsSequence()) {
-                    fail("safety.self_collision.arm_capsules must be a sequence", caps);
-                }
-                cfg.safety.self_collision.arm_capsules.clear();
-                for (std::size_t i = 0; i < caps.size(); ++i) {
-                    const YAML::Node entry = caps[i];
-                    validateAllowedKeys(entry, {
-                        "frame",
-                        "p0_m",
-                        "p1_m",
-                        "radius_m",
-                    }, "safety.self_collision.arm_capsules");
-                    ArmCapsuleConfig cap;
-                    if (!has(entry, "frame")) {
-                        fail("safety.self_collision.arm_capsules entries require frame", entry);
-                    }
-                    cap.frame = entry["frame"].as<std::string>();
-                    for (const auto& [key, target] : {
-                             std::pair<const char*, std::array<double, 3>*>{"p0_m", &cap.p0_m},
-                             {"p1_m", &cap.p1_m},
-                         }) {
-                        const YAML::Node point = entry[key];
-                        if (!point.IsSequence() || point.size() != 3) {
-                            fail("safety.self_collision.arm_capsules." + std::string(key) +
-                                     " must be a sequence of 3 values (" + cap.frame + ")",
-                                 entry);
-                        }
-                        for (std::size_t axis = 0; axis < 3; ++axis) {
-                            (*target)[axis] =
-                                asDouble(point[axis], "safety.self_collision.arm_capsules." + std::string(key));
-                        }
-                    }
-                    if (!has(entry, "radius_m")) {
-                        fail("safety.self_collision.arm_capsules entries require radius_m (" + cap.frame + ")", entry);
-                    }
-                    cap.radius_m = asDouble(entry["radius_m"], "safety.self_collision.arm_capsules.radius_m");
-                    cfg.safety.self_collision.arm_capsules.push_back(cap);
-                }
-            }
-            if (has(sc, "link_radius_m")) {
-                const YAML::Node radii = sc["link_radius_m"];
-                const std::size_t expected = cfg.safety.self_collision.link_radius_m.size();
-                if (!radii.IsSequence() || radii.size() != expected) {
-                    fail(
-                        "safety.self_collision.link_radius_m must be a sequence of " +
-                            std::to_string(expected) + " values",
-                        radii
-                    );
-                }
-                for (std::size_t i = 0; i < expected; ++i) {
-                    cfg.safety.self_collision.link_radius_m[i] =
-                        asDouble(radii[i], "safety.self_collision.link_radius_m");
-                }
-            }
             if (has(sc, "mesh")) {
                 const YAML::Node m = sc["mesh"];
                 validateAllowedKeys(m, {
-                    "enable",
                     "unified_urdf",
                     "package_dirs",
                     "pika_gripper_mesh",
@@ -1824,10 +1644,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "max_staleness_s",
                     "monitor_core",
                     "max_near_pairs",
+                    "viz_near_pairs_m",
                     "extra_collision",
                 }, "safety.self_collision.mesh");
                 auto& mc = cfg.safety.self_collision.mesh;
-                if (has(m, "enable")) mc.enable = asBool(m["enable"], "safety.self_collision.mesh.enable");
                 if (has(m, "unified_urdf")) {
                     mc.unified_urdf = resolvePathForConfig(
                         asString(m["unified_urdf"], "safety.self_collision.mesh.unified_urdf"), path);
@@ -1874,6 +1694,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 if (has(m, "max_staleness_s")) mc.max_staleness_s = asDouble(m["max_staleness_s"], "safety.self_collision.mesh.max_staleness_s");
                 if (has(m, "monitor_core")) mc.monitor_core = asInt(m["monitor_core"], "safety.self_collision.mesh.monitor_core");
                 if (has(m, "max_near_pairs")) mc.max_near_pairs = asInt(m["max_near_pairs"], "safety.self_collision.mesh.max_near_pairs");
+                if (has(m, "viz_near_pairs_m")) mc.viz_near_pairs_m = asDouble(m["viz_near_pairs_m"], "safety.self_collision.mesh.viz_near_pairs_m");
                 if (has(m, "extra_collision")) {
                     const YAML::Node arr = m["extra_collision"];
                     if (!arr.IsSequence()) {

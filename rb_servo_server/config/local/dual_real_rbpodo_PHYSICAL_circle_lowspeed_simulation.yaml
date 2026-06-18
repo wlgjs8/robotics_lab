@@ -106,8 +106,7 @@ safety:
   # (suppressed/untrusted) op_stat_self_collision. ClampToHold refuses to advance toward
   # collision but never permanently latches; this is the collision net for physical motion.
   self_collision:
-    enable: true
-    margin_m: 0.05
+    enable: false
     fail_policy: clamp_to_hold
     monitor_only: false
 

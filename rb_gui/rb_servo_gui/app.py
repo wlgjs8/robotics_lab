@@ -70,7 +70,6 @@ from .scene import (
     update_circle_overlay,
     update_floor_plane,
     update_floor_plane_preview,
-    update_self_collision_capsules,
     update_self_collision_check_geom,
     update_self_collision_near_pairs,
     update_self_collision_overlay,
@@ -1186,14 +1185,12 @@ def build_gui(
         handles["self_collision"] = server.gui.add_text(
             "Self-collision", initial_value="self-collision: no state", disabled=True
         )
-        # Translucent margin-inflated collision capsules (arm = blue, stand =
-        # orange) drawn from the server's self_collision telemetry, i.e. the
-        # EXACT geometry the guard checks. Off by default; turn on to debug
-        # suspected false positives against the real arm/stand meshes.
+        # Self-collision "check view": the translucent collision-hull overlay (the
+        # EXACT unified-URDF collision geometry the async monitor checks, built from
+        # the server's geometry manifest) + the close-call witness segments from
+        # self_collision.near_pairs. Off by default; turn on to debug clearance.
         if hasattr(server.gui, "add_checkbox"):
             capsules_default = os.environ.get("RB_GUI_SELF_COLLISION_CAPSULES_DEFAULT", "0") == "1"
-            # Drives both the capsule overlay (capsule mode) and the URDF-mesh
-            # close-call segments (mesh mode); whichever the server is publishing.
             handles["self_collision_capsules_toggle"] = server.gui.add_checkbox(
                 "자기충돌 검사 표시 (반투명)", initial_value=capsules_default
             )
@@ -2134,13 +2131,8 @@ def update_gui(
     update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
     # After markers: the collision overlay may override ghost/solid visibility.
     update_self_collision_overlay(handles.get("scene", {}), latest)
-    capsule_toggle = handles.get("self_collision_capsules_toggle")
-    _self_collision_show = bool(getattr(capsule_toggle, "value", False))
-    update_self_collision_capsules(
-        handles.get("scene", {}),
-        latest,
-        show=_self_collision_show,
-    )
+    toggle = handles.get("self_collision_capsules_toggle")
+    _self_collision_show = bool(getattr(toggle, "value", False))
     update_self_collision_near_pairs(
         handles.get("scene", {}),
         latest,

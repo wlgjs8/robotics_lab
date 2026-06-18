@@ -68,11 +68,15 @@ spacemouse_cartesian_dual:
   startup_neutral_hold_sec: 0.3
   left:
     device: null
-    path: /dev/hidraw5
+    # 3Dconnexion receiver A (USB 3-1.1) interface 1.0 = the 6-DOF motion
+    # node. hidraw2..5 are the same receiver's non-motion interfaces and emit
+    # NO samples (left arm stayed dead when pinned to hidraw5 = intf 1.4).
+    path: /dev/hidraw1
     device_number: 0
     deadman_button: 0
   right:
     device: null
+    # receiver B (USB 3-1.2) interface 1.0.
     path: /dev/hidraw10
     device_number: 0
     deadman_button: 0

@@ -132,14 +132,6 @@ private:
         SafetyVerdict* verdict
     );
 
-    // Dual-arm self-collision clearance for candidate joint targets (uses the
-    // configured kinematics + mounts + safety.self_collision). checked=false if
-    // link geometry is unavailable.
-    SelfCollisionResult evaluateSelfCollision(
-        const JointArray& left_q_deg,
-        const JointArray& right_q_deg
-    ) const;
-
     // Stand-frame floor plane constraint (safety.floor_constraint): FK the arm's
     // TCP for a candidate joint target. checked=false if kinematics/FK is
     // unavailable — the caller fails closed.

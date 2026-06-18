@@ -1394,8 +1394,9 @@ DualArmServoLoop::DualArmServoLoop(
     runtime_floor_z_m_.store(config.safety.floor_constraint.z_min_m);
     // URDF mesh self-collision: spin up the async monitor (off the servo_j path).
     // Throws on a bad URDF/mesh path — fail closed at startup rather than run a
-    // real robot with the guard silently disabled.
-    if (config_.safety.self_collision.enable && config_.safety.self_collision.mesh.enable) {
+    // real robot with the guard silently disabled. The single self_collision.enable
+    // flag is the sole switch; there is no capsule fallback path.
+    if (config_.safety.self_collision.enable) {
         const auto& m = config_.safety.self_collision.mesh;
         collision_monitor_cfg_.enable = true;
         collision_monitor_cfg_.unified_urdf = m.unified_urdf;
@@ -1437,6 +1438,13 @@ DualArmServoLoop::DualArmServoLoop(
         }
         collision_monitor_ = std::make_unique<CollisionMonitor>(collision_monitor_cfg_);
         collision_monitor_->start();
+    }
+    // Post-condition: the guard is requested but the monitor is absent. make_unique
+    // throws on load failure, so this is unreachable defensive code — but never let
+    // a server come up with self_collision.enable=true and no monitor behind it.
+    if (config_.safety.self_collision.enable && !collision_monitor_) {
+        throw std::runtime_error(
+            "safety.self_collision.enable=true but the CollisionMonitor failed to construct");
     }
     resetReferenceSupervisionState(this);
 }
@@ -2277,9 +2285,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_checked = last_self_collision_.checked;
             latest_snapshot_.self_collision_violated = last_self_collision_.violated;
             latest_snapshot_.self_collision_min_clearance_m = last_self_collision_.min_clearance_m;
-            latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.mesh.enable
-                ? config_.safety.self_collision.mesh.d_hard_m
-                : config_.safety.self_collision.margin_m;
+            // Telemetry "margin" is the hard floor the mesh barrier defends.
+            latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.mesh.d_hard_m;
             latest_snapshot_.self_collision_left_bone = last_self_collision_.left_bone;
             latest_snapshot_.self_collision_right_bone = last_self_collision_.right_bone;
             latest_snapshot_.self_collision_pair = last_self_collision_.pair;
@@ -2287,38 +2294,17 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_has_closest_points = last_self_collision_.has_closest_points;
             latest_snapshot_.self_collision_closest_point_a_m = last_self_collision_.closest_point_a_m;
             latest_snapshot_.self_collision_closest_point_b_m = last_self_collision_.closest_point_b_m;
-            latest_snapshot_.self_collision_has_capsules = last_self_collision_.has_capsules;
-            latest_snapshot_.self_collision_left_capsules_m.clear();
-            latest_snapshot_.self_collision_right_capsules_m.clear();
-            latest_snapshot_.self_collision_stand_capsules_m.clear();
-            // Publish the exact checked geometry (arm capsules FK'd this tick +
-            // static stand capsules) only when the guard actually evaluated.
-            if (last_self_collision_.has_capsules) {
-                const auto copy_arm = [](const std::vector<ArmCapsule>& src,
-                                         std::vector<SelfCollisionCapsuleViz>& dst) {
-                    dst.reserve(src.size());
-                    for (std::size_t i = 0; i < src.size(); ++i) {
-                        dst.push_back(SelfCollisionCapsuleViz{
-                            std::to_string(i), src[i].p0_m, src[i].p1_m, src[i].radius_m});
-                    }
-                };
-                copy_arm(last_self_collision_.left_capsules, latest_snapshot_.self_collision_left_capsules_m);
-                copy_arm(last_self_collision_.right_capsules, latest_snapshot_.self_collision_right_capsules_m);
-                latest_snapshot_.self_collision_stand_capsules_m.reserve(
-                    config_.safety.self_collision.stand_capsules.size());
-                for (const auto& cap : config_.safety.self_collision.stand_capsules) {
-                    latest_snapshot_.self_collision_stand_capsules_m.push_back(
-                        SelfCollisionCapsuleViz{cap.name, cap.p0_m, cap.p1_m, cap.radius_m});
-                }
-            }
             // URDF mesh self-collision: publish the closest near pairs (witness
             // segments) so the viewer can draw the mesh-based close calls.
-            latest_snapshot_.self_collision_mesh = config_.safety.self_collision.mesh.enable;
+            latest_snapshot_.self_collision_mesh = config_.safety.self_collision.enable;
             latest_snapshot_.self_collision_near_pairs.clear();
-            if (config_.safety.self_collision.mesh.enable && last_collision_verdict_.valid) {
-                // Only the genuinely-close pairs (within the barrier slow-zone) — a
-                // viewer should see close calls, not long segments across far links.
-                const double viz_max = config_.safety.self_collision.mesh.d_slow_m;
+            if (config_.safety.self_collision.enable && last_collision_verdict_.valid) {
+                // Publish close-call witness segments for the viewer. The viz reach is
+                // decoupled from the barrier band (d_slow) so close calls stay visible
+                // even when d_slow is tuned tight; at least d_slow so it never hides a
+                // pair the barrier is acting on.
+                const double viz_max = std::max(config_.safety.self_collision.mesh.viz_near_pairs_m,
+                                                config_.safety.self_collision.mesh.d_slow_m);
                 latest_snapshot_.self_collision_near_pairs.reserve(last_collision_verdict_.near.size());
                 for (const CollisionNearPair& p : last_collision_verdict_.near) {
                     if (p.d_m > viz_max) continue;
@@ -3704,97 +3690,98 @@ ServoTarget DualArmServoLoop::applySafety(
     }
 
     // Dual-arm self-collision guard: never command a configuration that brings the
-    // two arms' link capsules within the configured margin. Evaluated on the final
-    // candidate targets (post per-arm filtering).
-    if (config_.safety.self_collision.enable &&
-        config_.safety.self_collision.mesh.enable && collision_monitor_) {
-        // URDF mesh self-collision (async monitor + shared velocity barrier). The
-        // monitor runs off the servo_j path; here we only feed the candidate and
-        // read the latest verdict (atomic). The barrier scales the approach toward
-        // the target so the arm can always brake before the hard floor; a stale
-        // verdict or a hard breach fails closed.
-        collision_monitor_->submitTargets(out.left_q_target_deg, out.right_q_target_deg);
-        const CollisionVerdict v = collision_monitor_->latest();
-        last_collision_verdict_ = v;
-        last_self_collision_ = selfCollisionResultFromVerdict(v, collision_monitor_cfg_);
-        const double now_s = std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        const bool stale =
-            collisionVerdictStale(v, now_s, collision_monitor_cfg_.max_staleness_s);
-        if (!config_.safety.self_collision.monitor_only &&
-            combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
-            // Only a real GEOMETRIC breach (hard_violation) escalates to fault_latch.
-            // A stale verdict is a transient scheduling issue, not a collision: hold
-            // (scale 0) and auto-recover when fresh verdicts resume — never latch on it.
-            if (!stale &&
-                config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch &&
-                v.hard_violation) {
-                const std::string reason = "self-collision mesh breach (" +
-                    (last_self_collision_.pair.empty() ? std::string("unknown")
-                                                       : last_self_collision_.pair) +
-                    "): clearance " + std::to_string(v.min_clearance_m) + " m below floor " +
-                    std::to_string(collision_monitor_cfg_.d_hard_m) + " m";
-                latchFault(SafetyVerdict::SelfCollision, reason, left_state, right_state);
+    // two arms (or an arm and the stand) within the mesh barrier's hard floor.
+    // Evaluated on the final candidate targets (post per-arm filtering). The single
+    // self_collision.enable flag is the sole switch; the only implementation is the
+    // async URDF-mesh CollisionMonitor (there is no capsule fallback path).
+    if (config_.safety.self_collision.enable) {
+        if (!collision_monitor_) {
+            // LOUD fail-closed: the guard is enabled but the monitor is absent. The
+            // constructor throws on load failure, so this is unreachable defensive
+            // code — but never advance a real arm with the guard silently gone.
+            last_self_collision_ = SelfCollisionResult{};  // checked=false
+            if (combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+                latchFault(SafetyVerdict::SelfCollision,
+                    "self-collision guard enabled but CollisionMonitor unavailable",
+                    left_state, right_state);
                 out = currentFaultHoldTarget();
                 combined = SafetyVerdict::FaultLatched;
-            } else {
-                const double scale =
-                    stale ? 0.0 : collisionVelocityScale(v, collision_monitor_cfg_);
-                if (scale < 1.0) {
+            }
+        } else {
+            // URDF mesh self-collision (async monitor + shared velocity barrier). The
+            // monitor runs off the servo_j path; here we only feed the candidate and
+            // read the latest verdict (atomic). The barrier scales the approach toward
+            // the target so the arm can always brake before the hard floor; a stale
+            // verdict or a hard breach fails closed.
+            collision_monitor_->submitTargets(out.left_q_target_deg, out.right_q_target_deg);
+            const CollisionVerdict v = collision_monitor_->latest();
+            last_collision_verdict_ = v;
+            // Ground-truth diagnostic (opt-in via RB_SELF_COLLISION_LOG=1): print the
+            // EXACT closest checked pair + clearance the async monitor computes for the
+            // COMMANDED targets submitted above. Use this to see what the guard really
+            // evaluates at an apparent collision — note it checks q_sent (the command),
+            // not the displayed q_actual, which can diverge in pgmode controller-sim.
+            static const bool kSelfColLog = std::getenv("RB_SELF_COLLISION_LOG") != nullptr;
+            if (kSelfColLog && v.valid) {
+                const double t_log_s = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                static double last_log_s = 0.0;
+                if (t_log_s - last_log_s > 0.2) {  // throttle ~5 Hz
+                    last_log_s = t_log_s;
+                    const std::string pair = v.near.empty()
+                        ? std::string("(no near pairs)")
+                        : (v.near.front().name_a + " <-> " + v.near.front().name_b);
+                    // Max per-joint divergence between the ACTUAL arm (q_actual, what
+                    // the GUI solid robots / display show) and the COMMANDED target the
+                    // monitor just checked. Large here = display != checked pose (the
+                    // pgmode controller-sim artifact); ~0 = display tracks the command.
+                    double qdiv = 0.0;
                     for (int i = 0; i < kDof; ++i) {
-                        out.left_q_target_deg[i] = left_prev_sent_q_deg_[i] +
-                            scale * (out.left_q_target_deg[i] - left_prev_sent_q_deg_[i]);
-                        out.right_q_target_deg[i] = right_prev_sent_q_deg_[i] +
-                            scale * (out.right_q_target_deg[i] - right_prev_sent_q_deg_[i]);
+                        qdiv = std::max(qdiv,
+                            std::abs(left_state.q_actual_deg[i] - out.left_q_target_deg[i]));
+                        qdiv = std::max(qdiv,
+                            std::abs(right_state.q_actual_deg[i] - out.right_q_target_deg[i]));
                     }
-                    if (scale <= 0.0 && (combined == SafetyVerdict::Ok ||
-                                         combined == SafetyVerdict::JointLimitClamped)) {
-                        combined = SafetyVerdict::SelfCollision;
-                    }
+                    std::cerr << "[selfcol] min=" << (v.min_clearance_m * 1000.0) << "mm  "
+                              << pair << (v.hard_violation ? "  HARD-VIOLATION" : "")
+                              << "  | q_actual-vs-checked max=" << qdiv << "deg\n";
                 }
             }
-        }
-    } else if (config_.safety.self_collision.enable) {
-        const SelfCollisionResult sc =
-            evaluateSelfCollision(out.left_q_target_deg, out.right_q_target_deg);
-        last_self_collision_ = sc;  // telemetry, even when already faulted
-        // Fail closed on a violation, or if geometry is unavailable; skip once
-        // latched. monitor_only keeps the telemetry but never clamps/latches
-        // (tuning aid only — not a real-motion safety posture).
-        if (!config_.safety.self_collision.monitor_only &&
-            (sc.violated || !sc.checked) &&
-            combined != SafetyVerdict::FaultLatched &&
-            !fault_latched_.load()) {
-            const std::string reason = sc.checked
-                ? ("self-collision (" + (sc.pair.empty() ? std::string("unknown") : sc.pair) +
-                   (sc.stand_capsule.empty() ? std::string() : " @" + sc.stand_capsule) +
-                   "): capsule clearance " + std::to_string(sc.min_clearance_m) +
-                   " m below margin " + std::to_string(config_.safety.self_collision.margin_m) + " m")
-                : "self-collision guard: link geometry unavailable";
-            if (config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch) {
-                latchFault(SafetyVerdict::SelfCollision, reason, left_state, right_state);
-                out = currentFaultHoldTarget();
-                combined = SafetyVerdict::FaultLatched;
-            } else {
-                // ClampToHold with an escape direction: refuse to advance *toward*
-                // collision, but allow a commanded target that strictly increases
-                // clearance versus the last sent configuration (retreating out of
-                // the keep-out zone). Without the escape exception the arm is
-                // permanently frozen once it touches the margin and can never back
-                // out. Geometry-unavailable (!checked) always holds (fail closed).
-                constexpr double kEscapeEpsM = 1e-4;
-                bool allow_escape = false;
-                if (sc.checked) {
-                    const SelfCollisionResult prev =
-                        evaluateSelfCollision(left_prev_sent_q_deg_, right_prev_sent_q_deg_);
-                    allow_escape = prev.checked &&
-                        sc.min_clearance_m > prev.min_clearance_m + kEscapeEpsM;
-                }
-                if (!allow_escape) {
-                    out.left_q_target_deg = left_prev_sent_q_deg_;
-                    out.right_q_target_deg = right_prev_sent_q_deg_;
-                    if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
-                        combined = SafetyVerdict::SelfCollision;
+            last_self_collision_ = selfCollisionResultFromVerdict(v, collision_monitor_cfg_);
+            const double now_s = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const bool stale =
+                collisionVerdictStale(v, now_s, collision_monitor_cfg_.max_staleness_s);
+            if (!config_.safety.self_collision.monitor_only &&
+                combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+                // Only a real GEOMETRIC breach (hard_violation) escalates to fault_latch.
+                // A stale verdict is a transient scheduling issue, not a collision: hold
+                // (scale 0) and auto-recover when fresh verdicts resume — never latch on it.
+                if (!stale &&
+                    config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch &&
+                    v.hard_violation) {
+                    const std::string reason = "self-collision mesh breach (" +
+                        (last_self_collision_.pair.empty() ? std::string("unknown")
+                                                           : last_self_collision_.pair) +
+                        "): clearance " + std::to_string(v.min_clearance_m) + " m below floor " +
+                        std::to_string(collision_monitor_cfg_.d_hard_m) + " m";
+                    latchFault(SafetyVerdict::SelfCollision, reason, left_state, right_state);
+                    out = currentFaultHoldTarget();
+                    combined = SafetyVerdict::FaultLatched;
+                } else {
+                    const double scale =
+                        stale ? 0.0 : collisionVelocityScale(v, collision_monitor_cfg_);
+                    if (scale < 1.0) {
+                        for (int i = 0; i < kDof; ++i) {
+                            out.left_q_target_deg[i] = left_prev_sent_q_deg_[i] +
+                                scale * (out.left_q_target_deg[i] - left_prev_sent_q_deg_[i]);
+                            out.right_q_target_deg[i] = right_prev_sent_q_deg_[i] +
+                                scale * (out.right_q_target_deg[i] - right_prev_sent_q_deg_[i]);
+                        }
+                        if (scale <= 0.0 && (combined == SafetyVerdict::Ok ||
+                                             combined == SafetyVerdict::JointLimitClamped)) {
+                            combined = SafetyVerdict::SelfCollision;
+                        }
                     }
                 }
             }
@@ -3862,67 +3849,6 @@ Pose6D DualArmServoLoop::clampPoseToFloor(const Pose6D& pose) const {
         clamped.z = std::max(clamped.z, effectiveFloorZ() - min_offset_delta_z);
     }
     return clamped;
-}
-
-SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
-    const JointArray& left_q_deg,
-    const JointArray& right_q_deg
-) const {
-    if (!kinematics_) {
-        return SelfCollisionResult{};  // checked=false -> caller fails closed
-    }
-    const SelfCollisionConfig& sc_cfg = config_.safety.self_collision;
-    std::vector<ArmCapsule> left_caps;
-    std::vector<ArmCapsule> right_caps;
-    try {
-        left_caps = kinematics_->armCollisionCapsulesInStand(
-            ArmId::Left, left_q_deg, config_.left_mount, sc_cfg.arm_capsules);
-        right_caps = kinematics_->armCollisionCapsulesInStand(
-            ArmId::Right, right_q_deg, config_.right_mount, sc_cfg.arm_capsules);
-    } catch (const std::exception&) {
-        return SelfCollisionResult{};  // checked=false -> caller fails closed
-    }
-    SelfCollisionResult combined;
-    bool any_pair = false;
-    bool all_checked = true;
-
-    if (sc_cfg.check_left_right) {
-        any_pair = true;
-        SelfCollisionResult lr = dualArmSelfCollisionClearance(left_caps, right_caps, sc_cfg.margin_m);
-        all_checked = all_checked && lr.checked;
-        combined = minSelfCollisionResult(combined, lr);
-    }
-    // Arm<->stand pairs need stand geometry; an empty list skips them so older
-    // arm-arm-only configs keep their behavior.
-    if (!sc_cfg.stand_capsules.empty()) {
-        if (sc_cfg.check_left_stand) {
-            any_pair = true;
-            SelfCollisionResult ls = armStandCollisionClearance(
-                left_caps, sc_cfg.stand_capsules, sc_cfg.margin_m, sc_cfg.stand_ignore_bones);
-            ls.pair = "left_stand";
-            all_checked = all_checked && ls.checked;
-            combined = minSelfCollisionResult(combined, ls);
-        }
-        if (sc_cfg.check_right_stand) {
-            any_pair = true;
-            SelfCollisionResult rs = armStandCollisionClearance(
-                right_caps, sc_cfg.stand_capsules, sc_cfg.margin_m, sc_cfg.stand_ignore_bones);
-            rs.pair = "right_stand";
-            all_checked = all_checked && rs.checked;
-            combined = minSelfCollisionResult(combined, rs);
-        }
-    }
-    if (!any_pair || !all_checked) {
-        // Nothing evaluated, or some enabled pair lacked geometry: report
-        // unchecked so the gate fails closed.
-        return SelfCollisionResult{};
-    }
-    // Attach the full evaluated capsules for visualization — the exact geometry
-    // checked above (on this call's target config).
-    combined.has_capsules = true;
-    combined.left_capsules = std::move(left_caps);
-    combined.right_capsules = std::move(right_caps);
-    return combined;
 }
 
 DualSendResult DualArmServoLoop::sendTargets(

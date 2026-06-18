@@ -1098,7 +1098,15 @@ std::string selfCollisionConfigBody(bool with_kinematics, const std::string& sel
 bool testSelfCollisionConfig() {
     EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
 
-    // Enabled + kinematics: accepted and parsed.
+    // The single enable flag drives the URDF-mesh guard; a mesh block with a
+    // unified_urdf + barrier params is mandatory when enabled.
+    const std::string mesh_yaml =
+        "    mesh:\n"
+        "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
+        "      d_hard_m: 0.006\n"
+        "      d_slow_m: 0.03\n";
+
+    // Enabled + kinematics + mesh: accepted and parsed.
     {
         const std::string path = writeTempConfig(
             "self-collision-ok",
@@ -1107,17 +1115,16 @@ bool testSelfCollisionConfig() {
                 "  self_collision:\n"
                 "    enable: true\n"
                 "    monitor_only: true\n"
-                "    margin_m: 0.04\n"
-                "    fail_policy: clamp_hold\n"
-                "    link_radius_m: [0.10, 0.09, 0.08, 0.07, 0.06, 0.06, 0.06]\n"));
+                "    fail_policy: clamp_hold\n" +
+                mesh_yaml));
         const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
         ::unlink(path.c_str());
         RB_CHECK(cfg.safety.self_collision.enable);
         RB_CHECK(cfg.safety.self_collision.monitor_only);
-        RB_CHECK(near(cfg.safety.self_collision.margin_m, 0.04));
         RB_CHECK(cfg.safety.self_collision.fail_policy == rb_servo::SelfCollisionFailPolicy::ClampToHold);
-        RB_CHECK(near(cfg.safety.self_collision.link_radius_m[0], 0.10));
-        RB_CHECK(near(cfg.safety.self_collision.link_radius_m[6], 0.06));
+        RB_CHECK(!cfg.safety.self_collision.mesh.unified_urdf.empty());
+        RB_CHECK(near(cfg.safety.self_collision.mesh.d_hard_m, 0.006));
+        RB_CHECK(near(cfg.safety.self_collision.mesh.d_slow_m, 0.03));
     }
 
     // Disabled by default when the block is absent.
@@ -1134,19 +1141,34 @@ bool testSelfCollisionConfig() {
     {
         const std::string path = writeTempConfig(
             "self-collision-no-kinematics",
-            selfCollisionConfigBody(false, "  self_collision:\n    enable: true\n"));
+            selfCollisionConfigBody(false, "  self_collision:\n    enable: true\n" + mesh_yaml));
         const bool rejected = loadRejects(path);
         ::unlink(path.c_str());
         RB_CHECK(rejected);
     }
 
-    // Wrong link_radius_m count: rejected.
+    // Enabled but no mesh.unified_urdf: rejected (the mesh guard has no geometry).
     {
         const std::string path = writeTempConfig(
-            "self-collision-bad-radii",
+            "self-collision-no-urdf",
+            selfCollisionConfigBody(true, "  self_collision:\n    enable: true\n"));
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    // d_slow_m < d_hard_m: rejected (inverted barrier band).
+    {
+        const std::string path = writeTempConfig(
+            "self-collision-bad-band",
             selfCollisionConfigBody(
                 true,
-                "  self_collision:\n    enable: true\n    link_radius_m: [0.1, 0.1, 0.1]\n"));
+                "  self_collision:\n"
+                "    enable: true\n"
+                "    mesh:\n"
+                "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
+                "      d_hard_m: 0.03\n"
+                "      d_slow_m: 0.006\n"));
         const bool rejected = loadRejects(path);
         ::unlink(path.c_str());
         RB_CHECK(rejected);

@@ -725,17 +725,6 @@ struct ServoSample {
     std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;
 };
 
-// Collision capsule geometry (stand frame, meters) for viewers. Generic so it
-// carries both the static stand capsules and the FK'd per-arm capsules. Kept here
-// (not config) so core/types stays independent of the config header. Published so
-// a viewer can draw the EXACT capsules the guard checks (not the visual meshes).
-struct SelfCollisionCapsuleViz {
-    std::string name;
-    std::array<double, 3> p0_m{};
-    std::array<double, 3> p1_m{};
-    double radius_m = 0.0;
-};
-
 // One near pair from the URDF mesh self-collision monitor: the two closest
 // witness points (stand frame) on the two geometries + their signed clearance.
 // Lets a viewer draw the close-call segments over the URDF meshes (the mesh-mode
@@ -801,17 +790,9 @@ struct ServoSnapshot {
     bool self_collision_has_closest_points = false;
     std::array<double, 3> self_collision_closest_point_a_m{};
     std::array<double, 3> self_collision_closest_point_b_m{};
-    // Full per-arm collision capsules (stand frame) evaluated this tick — FK'd
-    // from the arm_capsules template — so a viewer can draw the exact checked
-    // capsules over the arm mesh.
-    bool self_collision_has_capsules = false;
-    std::vector<SelfCollisionCapsuleViz> self_collision_left_capsules_m;
-    std::vector<SelfCollisionCapsuleViz> self_collision_right_capsules_m;
-    // Static stand capsules checked this tick (stand frame). Populated alongside
-    // the arm capsules.
-    std::vector<SelfCollisionCapsuleViz> self_collision_stand_capsules_m;
-    // URDF mesh self-collision (safety.self_collision.mesh): closest near pairs
-    // from the async CollisionMonitor (stand frame). Empty in capsule mode.
+    // URDF mesh self-collision (safety.self_collision): closest near pairs from
+    // the async CollisionMonitor (stand frame). Empty when the guard is disabled
+    // or no pair is within the slow zone.
     bool self_collision_mesh = false;
     std::vector<SelfCollisionNearPairViz> self_collision_near_pairs;
 
