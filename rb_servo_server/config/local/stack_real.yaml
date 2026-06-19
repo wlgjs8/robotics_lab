@@ -16,8 +16,8 @@ left_robot:
   speed_bar: 1.0                  # applied at backend initialize via set_speed_bar()
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
-  servo_gain: 1000000.0           # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
-  servo_alpha: 0.99 #10.0
+  servo_gain: 1.0           # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
+  servo_alpha: 10 #10.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming (requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1)
 
 right_robot:
@@ -31,8 +31,8 @@ right_robot:
   speed_bar: 1.0               # applied at backend initialize via set_speed_bar()
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
-  servo_gain: 1000000.0                 # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
-  servo_alpha: 0.99 #10.0
+  servo_gain: 1.0                 # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
+  servo_alpha: 10 #10.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming (requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1)
 
 left_mount:
@@ -129,10 +129,12 @@ safety:
       - { name: gripper_tip_a, offset_m: [ 0.059, 0.0, 0.0 ] }
       - { name: gripper_tip_b, offset_m: [-0.059, 0.0, 0.0 ] }
   self_collision:
-    enable: false
-    fail_policy: fault_latch
+    enable: true
+    fail_policy: clamp_hold
     # mesh(URDF) self-collision을 실제 차단으로 사용. 캡슐 경로는 미평가(기능 보존).
-    monitor_only: true
+    # 2026-06-19: real에서도 enforce 활성화 + clamp_hold(충돌 방향만 직전 안전자세로
+    # 홀드, 비충돌/후퇴 방향은 계속 이동 가능, 비래치 → ResetFault 불필요). sim과 동일.
+    monitor_only: false
     # URDF mesh self-collision (async monitor, servo_j 2ms 경로 밖) + 공통 velocity
     # barrier. enable=true면 아래 캡슐 필드는 평가하지 않음(폴백용 보존). 파라미터는
     # 모든 motion primitive(TcpPoseTarget/TcpTwistLocal) 공통 — 속도는 측정된
@@ -143,7 +145,7 @@ safety:
         - "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e"
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
       stand_ignore_arm_substrings: ["link0"]
-      d_hard_m: 0.005
+      d_hard_m: 0.015   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       d_slow_m: 0.025
       a_brake_m_s2: 4.0
       hyst_m: 0.005
@@ -152,6 +154,9 @@ safety:
       check_intra_arm: true     # arm folding onto itself (non-adjacent links)
       max_staleness_s: 0.050
       max_near_pairs: 8
+      # 2026-06-19: 검사 스레드를 servo RT 코어(cpu_core=2)와 분리된 전용 코어에 핀
+      # (미설정 -1이면 OS가 떠돌아 500Hz servo 코어 침범 가능). eval ~2.4ms 평균(~417Hz).
+      monitor_core: 4
       # 항목 6: URDF에 없는 collision geometry(손목 카메라/케이블/작업 테이블)를
       # 추가 검사. 팔 프레임에 붙이면 그 팔로 자동 분류(좌/우), stand/world면 정적
       # 장애물로 양팔과 페어링. shape: box|sphere|capsule|cylinder.

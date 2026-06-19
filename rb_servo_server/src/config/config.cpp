@@ -1234,9 +1234,16 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFinite(backend.servo_t2_sec, label + ".servo_t2_sec");
         validatePositiveFinite(backend.servo_gain, label + ".servo_gain");
         validatePositiveFinite(backend.servo_alpha, label + ".servo_alpha");
+        // Rainbow scales move_servo_j gain/alpha by 0.1 INSIDE the controller
+        // (vendor-confirmed): the script-level value we send is 10x the
+        // effective value. So the effective vendor range 0 < alpha < 1 maps to
+        // a script-level range 0 < servo_alpha < 10, and servo_alpha=10 is the
+        // intended "effective 1.0 = LPF off" value (server SMD owns smoothing).
+        // The range check below is in script-level units to avoid spuriously
+        // warning on that vendor-correct value.
         const bool out_of_vendor_range =
             !(backend.servo_t2_sec > 0.02 && backend.servo_t2_sec < 0.2) ||
-            !(backend.servo_alpha > 0.0 && backend.servo_alpha < 1.0);
+            !(backend.servo_alpha > 0.0 && backend.servo_alpha <= 10.0);
         if (out_of_vendor_range) {
             warn(
                 label + ": servo params outside the vendor-recommended range accepted: "

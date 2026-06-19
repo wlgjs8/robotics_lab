@@ -35,15 +35,26 @@ The config mapping is:
 | --- | --- | --- |
 | `servo_t1_sec` | `t1` | command arrival/time parameter; match streaming period |
 | `servo_t2_sec` | `t2` | controller hold time, not UR-style lookahead |
-| `servo_gain` | `gain` | Servo J gain |
-| `servo_alpha` | `alpha` | low-pass-filter gain, not acceleration |
+| `servo_gain` | `gain` | Servo J gain (0.1-scaled inside controller, see below) |
+| `servo_alpha` | `alpha` | low-pass-filter gain, not acceleration (0.1-scaled inside controller, see below) |
 
-Official validation ranges:
+**0.1 internal scaling (vendor-confirmed):** Rainbow scales `gain` and `alpha`
+by 0.1 INSIDE the controller, so the script-level value we send via
+`move_servo_j` is 10x the effective value. Therefore `servo_alpha: 10` →
+effective `1.0` = **LPF off** (Rainbow's internal low-pass disabled so the
+`rb_servo_server` SMD owns all smoothing). Do NOT lower `servo_alpha` back into
+`(0, 1)` thinking it is out of range — that drives the effective alpha down to
+~0.1 and turns the controller LPF strongly back on. The same 10x convention
+applies to `servo_gain`.
+
+Official validation ranges (effective vendor range in parentheses; config /
+script-level values use the 10x convention for gain/alpha):
 
 - `servo_t1_sec >= 0.002`
 - `0.02 < servo_t2_sec < 0.2`
-- `servo_gain > 0`
-- `0 < servo_alpha < 1`
+- `servo_gain > 0` (script-level; effective = `servo_gain * 0.1`)
+- `0 < servo_alpha <= 10` (script-level; effective `0 < alpha <= 1`, so
+  `servo_alpha: 10` = effective `1.0` = LPF off)
 
 Do not use `servo_acc`; use `servo_alpha`. Do not use
 `servo_lookahead_sec`; use `servo_t2_sec`. Old aliases are deprecated and

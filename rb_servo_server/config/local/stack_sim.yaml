@@ -159,8 +159,9 @@ safety:
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
       stand_ignore_arm_substrings: ["link0"]
       viz_near_pairs_m: 0.06   # GUI-only: show witness tubes within 60mm (decoupled from d_slow)
-      d_hard_m: 0.005
-      d_slow_m: 0.005   # no slow zone (= d_hard): full speed until 5mm, then hard hold.
+      d_hard_m: 0.015   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
+      d_slow_m: 0.025   # 2026-06-19: slow zone 10->25mm so the velocity barrier brakes
+                        # BEFORE d_hard (was =d_hard: no ramp -> overshoot past 10mm).
       # NOTE: with no braking ramp a fast approach can overshoot 5mm in one tick;
       # swept_samples catches the in-between and holds at the last >5mm config.
       a_brake_m_s2: 4.0
@@ -170,6 +171,10 @@ safety:
       check_intra_arm: true     # arm folding onto itself (non-adjacent links)
       max_staleness_s: 0.050
       max_near_pairs: 8
+      # 2026-06-19: 검사 스레드를 servo RT 코어(cpu_core=2)와 분리된 전용 코어에 핀.
+      # 미설정(-1) 시 OS가 코어를 떠돌아 500Hz servo 코어를 침범할 수 있음. 측정상
+      # eval ~2.4ms 평균(~417Hz)/worst 4.6ms이라 servo와 코어 공유 시 둘 다 손해.
+      monitor_core: 4
       # 항목 6: URDF에 없는 collision geometry(손목 카메라/케이블/작업 테이블)를
       # 추가 검사. 팔 프레임에 붙이면 그 팔로 자동 분류(좌/우), stand/world면 정적
       # 장애물로 양팔과 페어링. shape: box|sphere|capsule|cylinder.
