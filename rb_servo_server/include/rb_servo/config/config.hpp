@@ -278,6 +278,11 @@ struct SelfCollisionConfig {
         double d_slow_m = 0.025;
         double a_brake_m_s2 = 4.0;
         double hyst_m = 0.005;
+        // Velocity-damper projection (Stage 2): Gauss-Seidel sweeps over active near
+        // pairs, and optional active push-out speed below d_hard (0 = only block
+        // deeper penetration, do not push the arm out).
+        int projection_iterations = 3;
+        double recover_speed_m_s = 0.0;
         double latency_s = 0.010;
         // Verdict older than this -> hold (recoverable, not a latch). Loose enough
         // to ride out normal OS scheduling jitter of the (non-RT) monitor thread;

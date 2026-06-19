@@ -1415,6 +1415,8 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.d_slow_m = m.d_slow_m;
         collision_monitor_cfg_.a_brake_m_s2 = m.a_brake_m_s2;
         collision_monitor_cfg_.hyst_m = m.hyst_m;
+        collision_monitor_cfg_.projection_iterations = m.projection_iterations;
+        collision_monitor_cfg_.recover_speed_m_s = m.recover_speed_m_s;
         collision_monitor_cfg_.latency_s = m.latency_s;
         collision_monitor_cfg_.max_staleness_s = m.max_staleness_s;
         collision_monitor_cfg_.monitor_core = m.monitor_core;
@@ -3775,32 +3777,61 @@ ServoTarget DualArmServoLoop::applySafety(
                     latchFault(SafetyVerdict::SelfCollision, reason, left_state, right_state);
                     out = currentFaultHoldTarget();
                     combined = SafetyVerdict::FaultLatched;
+                } else if (stale) {
+                    // Fail-closed: no fresh verdict -> hold at the previous sent pose
+                    // (qdot = 0) and reanchor so nothing winds up while we wait. Auto-
+                    // recovers once fresh verdicts resume (never latches on staleness).
+                    out.left_q_target_deg = left_prev_sent_q_deg_;
+                    out.right_q_target_deg = right_prev_sent_q_deg_;
+                    resetCartesianVelocityIntegrator(ArmId::Left, "self_collision_stale");
+                    resetCartesianVelocityIntegrator(ArmId::Right, "self_collision_stale");
+                    reanchor_twist_smd_goal(ArmId::Left, left_state);
+                    reanchor_twist_smd_goal(ArmId::Right, right_state);
+                    if (combined == SafetyVerdict::Ok ||
+                        combined == SafetyVerdict::JointLimitClamped) {
+                        combined = SafetyVerdict::SelfCollision;
+                    }
                 } else {
-                    const double scale =
-                        stale ? 0.0
-                              : collisionVelocityScale(v, collision_monitor_cfg_, now_s - v.stamp_s);
-                    if (scale < 1.0) {
-                        for (int i = 0; i < kDof; ++i) {
-                            out.left_q_target_deg[i] = left_prev_sent_q_deg_[i] +
-                                scale * (out.left_q_target_deg[i] - left_prev_sent_q_deg_[i]);
-                            out.right_q_target_deg[i] = right_prev_sent_q_deg_[i] +
-                                scale * (out.right_q_target_deg[i] - right_prev_sent_q_deg_[i]);
-                        }
-                        if (scale <= 0.0) {
-                            // Windup guard (Issue 1c), symmetric with the floor Hold path:
-                            // while the barrier fully blocks, pin both arms' twist-SMD goals
-                            // and Cartesian velocity integrators to the current measured pose
-                            // so the upstream goal cannot wind into the obstacle and lurch
-                            // when the barrier releases. Conservative: reanchor BOTH arms
-                            // (Stage 2 refines this to the near-pair's offending side).
-                            resetCartesianVelocityIntegrator(ArmId::Left, "self_collision_hold");
-                            resetCartesianVelocityIntegrator(ArmId::Right, "self_collision_hold");
-                            reanchor_twist_smd_goal(ArmId::Left, left_state);
-                            reanchor_twist_smd_goal(ArmId::Right, right_state);
-                            if (combined == SafetyVerdict::Ok ||
-                                combined == SafetyVerdict::JointLimitClamped) {
-                                combined = SafetyVerdict::SelfCollision;
-                            }
+                    // Directional velocity-damper projection (Stage 2): remove only the
+                    // closing component of the command for each near pair. Chatter-free
+                    // (no 0<->1 toggle), escape-free (tangential/retreat untouched), and
+                    // fast-safe (closing speed pre-limited to the braking distance).
+                    const CollisionProjectionResult proj = applyCollisionVelocityProjection(
+                        v, collision_monitor_cfg_,
+                        left_prev_sent_q_deg_, right_prev_sent_q_deg_,
+                        out.left_q_target_deg, out.right_q_target_deg,
+                        dt_sec, now_s - v.stamp_s,
+                        config_.safety.joint_target_smd.max_velocity_deg_s);
+                    // "Meaningfully blocked" (vs merely slowed while sliding) gates BOTH
+                    // the windup reanchor and the safety verdict, so tangential motion
+                    // near a neighbor stays Running and is never frozen.
+                    constexpr double kReanchorDegPerSec = 2.0;
+                    const bool left_blocked = proj.left_correction_deg_s > kReanchorDegPerSec;
+                    const bool right_blocked = proj.right_correction_deg_s > kReanchorDegPerSec;
+                    if (left_blocked) {
+                        resetCartesianVelocityIntegrator(ArmId::Left, "self_collision_block");
+                        reanchor_twist_smd_goal(ArmId::Left, left_state);
+                    }
+                    if (right_blocked) {
+                        resetCartesianVelocityIntegrator(ArmId::Right, "self_collision_block");
+                        reanchor_twist_smd_goal(ArmId::Right, right_state);
+                    }
+                    if ((left_blocked || right_blocked) &&
+                        (combined == SafetyVerdict::Ok ||
+                         combined == SafetyVerdict::JointLimitClamped)) {
+                        combined = SafetyVerdict::SelfCollision;
+                    }
+                    if (kSelfColLog && proj.active) {
+                        static double last_proj_log_s = 0.0;
+                        const double tt = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+                        if (tt - last_proj_log_s > 0.2) {
+                            last_proj_log_s = tt;
+                            std::cerr << "[selfcol-proj] active_pairs=" << proj.active_pairs
+                                      << " corr(L/R)=" << proj.left_correction_deg_s << "/"
+                                      << proj.right_correction_deg_s << " deg/s"
+                                      << ((left_blocked || right_blocked) ? "  BLOCKED" : "")
+                                      << "\n";
                         }
                     }
                 }

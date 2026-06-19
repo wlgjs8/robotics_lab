@@ -80,6 +80,89 @@ double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorC
     return scale < 0.0 ? 0.0 : (scale > 1.0 ? 1.0 : scale);
 }
 
+CollisionProjectionResult applyCollisionVelocityProjection(
+    const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+    const JointArray& left_prev_deg, const JointArray& right_prev_deg,
+    JointArray& left_target_deg, JointArray& right_target_deg,
+    double dt_sec, double verdict_age_s, const JointArray& max_joint_vel_deg_s) {
+    CollisionProjectionResult out;
+    if (!v.valid || dt_sec <= 1e-6 || v.near.empty()) return out;
+
+    constexpr int N = 2 * kDof;
+    using Vec = Eigen::Matrix<double, N, 1>;
+    Vec qprev, qtgt;
+    for (int i = 0; i < kDof; ++i) {
+        qprev[i] = left_prev_deg[i] * kDeg2Rad;
+        qprev[kDof + i] = right_prev_deg[i] * kDeg2Rad;
+        qtgt[i] = left_target_deg[i] * kDeg2Rad;
+        qtgt[kDof + i] = right_target_deg[i] * kDeg2Rad;
+    }
+    const Vec qdot_des = (qtgt - qprev) / dt_sec;  // rad/s (J_n is per-rad)
+    Vec qdot = qdot_des;
+
+    // Active constraint set: near pairs within d_slow, with age-extrapolated
+    // clearance d_now and braking limit xi (ddot >= -xi). Sort closest-first.
+    struct Active { Vec Jn; double xi; double d_now; };
+    std::vector<Active> act;
+    act.reserve(v.near.size());
+    const double age = std::max(0.0, verdict_age_s);
+    for (const auto& p : v.near) {
+        const double closing = p.rate_m_s < 0.0 ? -p.rate_m_s : 0.0;
+        const double d_now = p.d_m - closing * age;
+        if (d_now >= cfg.d_slow_m) continue;
+        Active a;
+        for (int i = 0; i < kDof; ++i) {
+            a.Jn[i] = p.Jn_left[i];
+            a.Jn[kDof + i] = p.Jn_right[i];
+        }
+        if (a.Jn.squaredNorm() < 1e-18) continue;  // pair not actuated by this command
+        const double margin = d_now - cfg.d_hard_m;
+        a.xi = margin > 0.0 ? std::sqrt(2.0 * cfg.a_brake_m_s2 * margin)
+                            : -cfg.recover_speed_m_s;  // below floor: block (or push out)
+        a.d_now = d_now;
+        act.push_back(std::move(a));
+    }
+    if (act.empty()) return out;
+    std::sort(act.begin(), act.end(),
+              [](const Active& x, const Active& y) { return x.d_now < y.d_now; });
+
+    // Gauss-Seidel: enforce ddot = J_n.qdot >= -xi for each pair, closest first.
+    const int M = std::max(1, cfg.projection_iterations);
+    for (int s = 0; s < M; ++s) {
+        for (const auto& a : act) {
+            const double ddot = a.Jn.dot(qdot);
+            if (ddot < -a.xi) {
+                const double alpha = (-a.xi - ddot) / std::max(a.Jn.squaredNorm(), 1e-9);
+                qdot += alpha * a.Jn;  // alpha > 0: cancels only the excess closing
+            }
+        }
+    }
+
+    // Per-joint velocity clamp (approximate; the exact joint-limit-aware solve is
+    // Stage 4 QP). Same ceiling for both arms.
+    for (int i = 0; i < kDof; ++i) {
+        const double lim = max_joint_vel_deg_s[i] * kDeg2Rad;
+        if (lim > 0.0) {
+            qdot[i] = std::clamp(qdot[i], -lim, lim);
+            qdot[kDof + i] = std::clamp(qdot[kDof + i], -lim, lim);
+        }
+    }
+
+    const Vec dq = qdot - qdot_des;
+    const Vec qnew = qprev + qdot * dt_sec;
+    for (int i = 0; i < kDof; ++i) {
+        left_target_deg[i] = qnew[i] / kDeg2Rad;
+        right_target_deg[i] = qnew[kDof + i] / kDeg2Rad;
+    }
+    const double rad2deg = 1.0 / kDeg2Rad;
+    out.active = true;
+    out.active_pairs = static_cast<int>(act.size());
+    out.left_correction_deg_s = dq.head(kDof).norm() * rad2deg;
+    out.right_correction_deg_s = dq.tail(kDof).norm() * rad2deg;
+    out.max_correction_deg_s = dq.norm() * rad2deg;
+    return out;
+}
+
 struct CollisionMonitor::Impl {
     CollisionMonitorConfig cfg;
 

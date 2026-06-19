@@ -199,7 +199,119 @@ static bool run() {
     return true;
 }
 
+// Synthetic single-pair verdict for the pure projection tests (no URDF needed).
+static CollisionVerdict makePairVerdict(double d_m, double rate,
+                                        const std::array<double, kDof>& jl,
+                                        const std::array<double, kDof>& jr) {
+    CollisionVerdict v;
+    v.valid = true;
+    v.stamp_s = 0.0;
+    v.min_clearance_m = d_m;
+    v.hard_violation = d_m < 0.015;
+    CollisionNearPair p;
+    p.d_m = d_m;
+    p.rate_m_s = rate;
+    for (int i = 0; i < kDof; ++i) {
+        p.Jn_left[i] = jl[i];
+        p.Jn_right[i] = jr[i];
+    }
+    v.near.push_back(p);
+    return v;
+}
+
+// Stage 2: directional velocity-damper projection (pure function; analytic checks).
+static bool runProjection() {
+    CollisionMonitorConfig pc;
+    pc.d_hard_m = 0.015;
+    pc.d_slow_m = 0.035;
+    pc.a_brake_m_s2 = 4.0;
+    pc.projection_iterations = 3;
+    pc.recover_speed_m_s = 0.0;
+    const JointArray zero{0, 0, 0, 0, 0, 0};
+    // Non-binding joint-vel ceiling (test commands use large per-tick deltas to make
+    // the projection math easy to read; we are not exercising the clamp here).
+    const JointArray big{1e7, 1e7, 1e7, 1e7, 1e7, 1e7};
+    const double dt = 0.002;
+    const double deg2rad = 3.14159265358979323846 / 180.0;
+    // Pair clearance Jacobian: +qdot on left joint0 SEPARATES (Jn_left[0] = -1 means
+    // a +command closes -> ddot = -qdot). Right columns zero -> arm-stand-like.
+    const std::array<double, kDof> jl = {-1.0, 0, 0, 0, 0, 0};
+    const std::array<double, kDof> jr = {0, 0, 0, 0, 0, 0};
+
+    // (1) closing too fast: reduced to the braking limit xi, not toggled/zeroed.
+    // d=20mm, margin=5mm, xi=sqrt(2*4*0.005)=0.2 m/s -> qdot_left0 -> 0.2 rad/s.
+    {
+        CollisionVerdict v = makePairVerdict(0.020, 0.0, jl, jr);
+        JointArray lt = zero, rt = zero;
+        lt[0] = 1.0;  // +1 deg/tick command (closing)
+        const auto r = applyCollisionVelocityProjection(v, pc, zero, zero, lt, rt, dt, 0.0, big);
+        const double expect_deg = 0.2 * dt / deg2rad;  // ~0.0229 deg
+        std::cout << "proj close: lt0=" << lt[0] << " expect=" << expect_deg << "\n";
+        RB_CHECK(r.active && r.left_correction_deg_s > 0.0);
+        RB_CHECK(std::abs(lt[0] - expect_deg) < 2e-3);
+        for (int i = 1; i < kDof; ++i) RB_CHECK(lt[i] == 0.0 && rt[i] == 0.0);
+        RB_CHECK(rt[0] == 0.0);  // independent DOF untouched
+    }
+    // (2) separating motion is free (no change), even inside d_slow.
+    {
+        CollisionVerdict v = makePairVerdict(0.020, 0.0, jl, jr);
+        JointArray lt = zero, rt = zero;
+        lt[0] = -1.0;  // command separates
+        const auto r = applyCollisionVelocityProjection(v, pc, zero, zero, lt, rt, dt, 0.0, big);
+        RB_CHECK(std::abs(lt[0] - (-1.0)) < 1e-9);  // untouched
+        RB_CHECK(r.left_correction_deg_s < 1e-6);
+    }
+    // (3) tangential + independent arm free: command joint1 (Jn=0) and right joint0.
+    {
+        CollisionVerdict v = makePairVerdict(0.020, 0.0, jl, jr);
+        JointArray lt = zero, rt = zero;
+        lt[1] = 1.0;  // tangential to the constraint
+        rt[0] = 5.0;  // other arm; Jn_right = 0
+        applyCollisionVelocityProjection(v, pc, zero, zero, lt, rt, dt, 0.0, big);
+        RB_CHECK(std::abs(lt[1] - 1.0) < 1e-9 && lt[0] == 0.0);
+        RB_CHECK(std::abs(rt[0] - 5.0) < 1e-9);  // independent arm untouched
+    }
+    // (4) below d_hard: closing fully blocked (xi=0 -> qdot_left0 -> 0); escape free.
+    {
+        CollisionVerdict v = makePairVerdict(0.010, 0.0, jl, jr);  // < d_hard
+        JointArray lt = zero, rt = zero;
+        lt[0] = 1.0;  // closing
+        applyCollisionVelocityProjection(v, pc, zero, zero, lt, rt, dt, 0.0, big);
+        RB_CHECK(std::abs(lt[0]) < 2e-4);  // ~0: no deeper
+        JointArray lt2 = zero, rt2 = zero;
+        lt2[0] = -1.0;  // escaping
+        applyCollisionVelocityProjection(v, pc, zero, zero, lt2, rt2, dt, 0.0, big);
+        RB_CHECK(std::abs(lt2[0] - (-1.0)) < 1e-9);  // escape unrestricted
+    }
+    // (5) far (> d_slow): inactive, command unchanged.
+    {
+        CollisionVerdict v = makePairVerdict(0.050, 0.0, jl, jr);
+        JointArray lt = zero, rt = zero;
+        lt[0] = 1.0;
+        const auto r = applyCollisionVelocityProjection(v, pc, zero, zero, lt, rt, dt, 0.0, big);
+        RB_CHECK(!r.active && std::abs(lt[0] - 1.0) < 1e-9);
+    }
+    // (6) age extrapolation pulls a closing pair from beyond d_slow into the active
+    // set: d=40mm (>d_slow) but closing 1 m/s for 10 ms -> d_now=30mm (active).
+    {
+        CollisionVerdict v = makePairVerdict(0.040, -1.0, jl, jr);  // rate<0 = closing
+        JointArray lt = zero, rt = zero;
+        lt[0] = 1.0;
+        const auto r0 = applyCollisionVelocityProjection(v, pc, zero, zero, lt, rt, dt, 0.0, big);
+        RB_CHECK(!r0.active && std::abs(lt[0] - 1.0) < 1e-9);  // age 0: still far/inactive
+        JointArray lt2 = zero, rt2 = zero;
+        lt2[0] = 1.0;
+        const auto r1 = applyCollisionVelocityProjection(v, pc, zero, zero, lt2, rt2, dt, 0.010, big);
+        RB_CHECK(r1.active && lt2[0] < 1.0 && lt2[0] > 0.0);  // age 10ms: now braking
+    }
+    return true;
+}
+
 int main() {
+    if (!runProjection()) {
+        std::cerr << "test_collision_monitor (projection) FAILED\n";
+        return 1;
+    }
     if (!run()) {
         std::cerr << "test_collision_monitor FAILED\n";
         return 1;

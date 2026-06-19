@@ -91,6 +91,9 @@ struct CollisionMonitorConfig {
     double d_slow_m = 0.025;       // above this clearance the barrier is inactive
     double a_brake_m_s2 = 4.0;     // emergency decel the barrier assumes
     double hyst_m = 0.005;         // release hysteresis for the discrete fault flag
+    // Velocity-damper projection (Stage 2).
+    int projection_iterations = 3;     // Gauss-Seidel sweeps over active near pairs
+    double recover_speed_m_s = 0.0;    // active push-out below d_hard (0 = block deeper only)
     double latency_s = 0.010;      // assumed worst monitor->servo reaction latency
     double max_staleness_s = 0.020;  // verdict older than this -> fail closed
 
@@ -158,6 +161,30 @@ bool collisionVerdictStale(const CollisionVerdict& v, double now_s, double max_s
 // latency_s floor). When < 0 (default) the fixed cfg.latency_s is used.
 double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
                               double verdict_age_s = -1.0);
+
+// Outcome of the velocity-damper projection (Stage 2).
+struct CollisionProjectionResult {
+    bool active = false;               // >=1 near pair engaged (command modified)
+    int active_pairs = 0;
+    double max_correction_deg_s = 0.0; // ||qdot - qdot_desired|| (both arms), deg/s
+    double left_correction_deg_s = 0.0;
+    double right_correction_deg_s = 0.0;
+};
+
+// Directional velocity-damper projection (Stage 2) — the chatter-free, fast-safe
+// replacement for the scalar collisionVelocityScale. For each near pair within
+// d_slow it removes ONLY the closing component of the commanded joint velocity
+// (per-pair clearance Jacobian J_n), bounding the allowed closing speed by the
+// braking limit sqrt(2 a_brake (d_now - d_hard)); tangential and separating motion
+// pass through untouched, so the boundary never toggles and escape is always free.
+// d_now is age-extrapolated (verdict_age_s). Joint targets (degrees) are modified
+// in place; q velocity is clamped per joint to max_joint_vel_deg_s. A no-op (returns
+// active=false) when the verdict is invalid, dt<=0, or nothing is within d_slow.
+CollisionProjectionResult applyCollisionVelocityProjection(
+    const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+    const JointArray& left_prev_deg, const JointArray& right_prev_deg,
+    JointArray& left_target_deg, JointArray& right_target_deg,
+    double dt_sec, double verdict_age_s, const JointArray& max_joint_vel_deg_s);
 
 // Owns the geometry model + the monitor thread + the published verdict.
 class CollisionMonitor {
