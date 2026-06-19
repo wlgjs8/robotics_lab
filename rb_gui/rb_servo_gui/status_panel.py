@@ -366,6 +366,40 @@ def _format_floor_constraint_status(
     return f"floor: ON z={z_txt} margin {arm_part('left')} {arm_part('right')}{monitor}"
 
 
+def _format_roi_box_status(
+    latest: StateSnapshot | None,
+    *,
+    stale: bool,
+) -> str:
+    if latest is None:
+        return "roi: no state"
+    if stale:
+        return "State stream stale"
+    roi = latest.roi_box
+    if not isinstance(roi, Mapping) or not bool(roi.get("enabled", False)):
+        return "roi: disabled"
+
+    def arm_part(key: str) -> str:
+        arm = roi.get(key)
+        if not isinstance(arm, Mapping) or not bool(arm.get("checked", False)):
+            return f"{key[0].upper()}:?"
+        margin = arm.get("min_margin_m")
+        face = arm.get("closest_face")
+        if not isinstance(margin, (int, float)):
+            return f"{key[0].upper()}:?"
+        face_txt = f"@{face}" if isinstance(face, str) else ""
+        return f"{key[0].upper()}:{float(margin) * 1000:.0f}mm{face_txt}"
+
+    violated_arms = [
+        key for key in ("left", "right")
+        if isinstance(roi.get(key), Mapping) and bool(roi[key].get("violated", False))
+    ]
+    monitor = " monitor_only" if bool(roi.get("monitor_only", False)) else ""
+    if violated_arms:
+        return f"roi: OUTSIDE({','.join(violated_arms)}){monitor}"
+    return f"roi: ON margin {arm_part('left')} {arm_part('right')}{monitor}"
+
+
 def _format_pgmode_status(
     latest: StateSnapshot | None,
     *,

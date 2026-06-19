@@ -129,6 +129,20 @@ safety:
     tcp_offset_points:
       - { name: gripper_tip_a, offset_m: [ 0.059, 0.0, 0.0 ] }
       - { name: gripper_tip_b, offset_m: [-0.059, 0.0, 0.0 ] }
+  # Stand-frame ROI box (workspace limit), viser "Safety ROI box"에서 조정.
+  roi_box:
+    enable: true
+    min_m: [-0.6, -1.1, 0.0]
+    max_m: [0.6, 0.1, 1.1]
+    runtime_min_m: [-1.2, -1.6, -0.2]
+    runtime_max_m: [1.2, 0.6, 1.6]
+    fail_policy: clamp_hold
+    monitor_only: true
+    a_brake_m_s2: 4.0
+    d_slow_m: 0.05
+    tcp_offset_points:
+      - { name: gripper_tip_a, offset_m: [ 0.059, 0.0, 0.0 ] }
+      - { name: gripper_tip_b, offset_m: [-0.059, 0.0, 0.0 ] }
   self_collision:
     enable: false
     # clamp_hold: 충돌 방향 명령만 직전 안전 자세로 홀드(비래치, 탈출 허용) —

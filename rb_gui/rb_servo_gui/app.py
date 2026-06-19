@@ -70,6 +70,8 @@ from .scene import (
     update_circle_overlay,
     update_floor_plane,
     update_floor_plane_preview,
+    update_roi_box,
+    update_roi_box_preview,
     update_self_collision_check_geom,
     update_self_collision_near_pairs,
     update_self_collision_overlay,
@@ -90,6 +92,7 @@ from .status_panel import (
     _format_joint_monitor_value,
     _format_joints,
     _format_floor_constraint_status,
+    _format_roi_box_status,
     _format_pgmode_status,
     _format_self_collision_status,
     _format_stand_world_pose_value,
@@ -1202,6 +1205,9 @@ def build_gui(
         handles["floor_constraint"] = server.gui.add_text(
             "Safety floor", initial_value="floor: no state", disabled=True
         )
+        handles["roi_box"] = server.gui.add_text(
+            "Safety ROI", initial_value="roi: no state", disabled=True
+        )
         handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
         handles["tcp_tracking"] = server.gui.add_text("TCP tracking", initial_value="TCP tracking: no state", disabled=True)
         handles["pgmode_status"] = server.gui.add_text("pgmode simulation", initial_value="pgmode_sim: no state", disabled=True)
@@ -1468,6 +1474,62 @@ def build_gui(
                     update_floor_plane_preview(
                         handles.get("scene", {}), float(floor_slider.value) / 1000.0
                     )
+
+            with server.gui.add_folder("Safety ROI box"):
+                handles["roi_applied"] = server.gui.add_text(
+                    "Applied box", initial_value="no state", disabled=True
+                )
+                # Six per-axis bound sliders (stand frame, mm). _update_roi_panel
+                # syncs their ranges to the server's runtime envelope and brings
+                # them up at the applied bounds on the first state.
+                _roi_axis_defaults_mm = {
+                    "x": (-500.0, 500.0),
+                    "y": (-1000.0, 0.0),
+                    "z": (0.0, 1000.0),
+                }
+                for _axis in ("x", "y", "z"):
+                    _lo_default, _hi_default = _roi_axis_defaults_mm[_axis]
+                    handles[f"roi_{_axis}_min"] = server.gui.add_slider(
+                        f"{_axis.upper()} min mm", min=-1500.0, max=1500.0, step=5.0,
+                        initial_value=_lo_default,
+                    )
+                    handles[f"roi_{_axis}_max"] = server.gui.add_slider(
+                        f"{_axis.upper()} max mm", min=-1500.0, max=1500.0, step=5.0,
+                        initial_value=_hi_default,
+                    )
+                roi_send = server.gui.add_button("Send ROI box")
+                handles["roi_send_button"] = roi_send
+                handles["roi_set_status"] = server.gui.add_text(
+                    "ROI set status", initial_value="idle", disabled=True
+                )
+
+                def _roi_slider_bounds() -> tuple[
+                    tuple[float, float, float], tuple[float, float, float]
+                ]:
+                    lo = tuple(
+                        float(handles[f"roi_{a}_min"].value) / 1000.0 for a in ("x", "y", "z")
+                    )
+                    hi = tuple(
+                        float(handles[f"roi_{a}_max"].value) / 1000.0 for a in ("x", "y", "z")
+                    )
+                    return lo, hi  # type: ignore[return-value]
+
+                handles["roi_slider_bounds_fn"] = _roi_slider_bounds
+
+                @roi_send.on_click
+                def _(_: Any) -> None:
+                    lo, hi = _roi_slider_bounds()
+                    ok, message = safety.send_set_roi_bounds(lo, hi)
+                    handles["roi_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+                def _roi_preview(_: Any) -> None:
+                    # Live yellow preview box while dragging any bound slider.
+                    lo, hi = _roi_slider_bounds()
+                    update_roi_box_preview(handles.get("scene", {}), lo, hi)
+
+                for _axis in ("x", "y", "z"):
+                    handles[f"roi_{_axis}_min"].on_update(_roi_preview)
+                    handles[f"roi_{_axis}_max"].on_update(_roi_preview)
 
     with tabs.add_tab("이동"):
         _move_tabs = server.gui.add_tab_group()
@@ -1929,6 +1991,86 @@ def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -
     handles["floor_applied"].value = z_txt + (f" (last reject: {reject})" if reject else "")
 
 
+def _roi_bounds_floats(value: Any) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return None
+    try:
+        out = [float(v) for v in value]
+    except (TypeError, ValueError):
+        return None
+    if any(not math.isfinite(v) for v in out):
+        return None
+    return out
+
+
+def _update_roi_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
+    roi = latest.roi_box if latest is not None else None
+    update_roi_box(handles.get("scene", {}), roi)
+    axes = ("x", "y", "z")
+    have_sliders = all(f"roi_{a}_min" in handles and f"roi_{a}_max" in handles for a in axes)
+    if not isinstance(roi, Mapping) or not bool(roi.get("enabled", False)):
+        update_roi_box_preview(handles.get("scene", {}), None, None)
+        if "roi_applied" in handles:
+            handles["roi_applied"].value = "disabled"
+        return
+    applied_min = _roi_bounds_floats(roi.get("min_m"))
+    applied_max = _roi_bounds_floats(roi.get("max_m"))
+    runtime_min = _roi_bounds_floats(roi.get("runtime_min_m"))
+    runtime_max = _roi_bounds_floats(roi.get("runtime_max_m"))
+    # Sync slider ranges to the server's per-axis runtime envelope first.
+    if have_sliders and runtime_min is not None and runtime_max is not None:
+        for k, a in enumerate(axes):
+            if runtime_max[k] > runtime_min[k]:
+                for suffix in ("min", "max"):
+                    try:
+                        handles[f"roi_{a}_{suffix}"].min = runtime_min[k] * 1000.0
+                        handles[f"roi_{a}_{suffix}"].max = runtime_max[k] * 1000.0
+                    except Exception:
+                        pass
+    # First-state init: bring the sliders up at the server-applied bounds (once).
+    if (
+        have_sliders
+        and applied_min is not None
+        and applied_max is not None
+        and not handles.get("roi_sliders_synced", False)
+    ):
+        for k, a in enumerate(axes):
+            try:
+                lo_h = handles[f"roi_{a}_min"]
+                hi_h = handles[f"roi_{a}_max"]
+                lo_h.value = max(float(lo_h.min), min(float(lo_h.max), applied_min[k] * 1000.0))
+                hi_h.value = max(float(hi_h.min), min(float(hi_h.max), applied_max[k] * 1000.0))
+            except Exception:
+                pass
+        handles["roi_sliders_synced"] = True
+    # Pending-value preview reconciliation: show the yellow preview box only while
+    # any slider differs from the server-applied bound (>= 0.5 mm).
+    if have_sliders and applied_min is not None and applied_max is not None:
+        fn = handles.get("roi_slider_bounds_fn")
+        slider_lo, slider_hi = fn() if callable(fn) else (None, None)
+        if slider_lo is not None and slider_hi is not None:
+            differs = any(
+                abs(slider_lo[k] - applied_min[k]) >= 0.0005
+                or abs(slider_hi[k] - applied_max[k]) >= 0.0005
+                for k in range(3)
+            )
+            if differs:
+                update_roi_box_preview(handles.get("scene", {}), slider_lo, slider_hi)
+            else:
+                update_roi_box_preview(handles.get("scene", {}), None, None)
+    if "roi_applied" not in handles:
+        return
+    if applied_min is not None and applied_max is not None:
+        txt = " ".join(
+            f"{a}[{applied_min[k] * 1000:.0f},{applied_max[k] * 1000:.0f}]"
+            for k, a in enumerate(axes)
+        ) + "mm"
+    else:
+        txt = "?"
+    reject = roi.get("last_set_reject_reason")
+    handles["roi_applied"].value = txt + (f" (last reject: {reject})" if reject else "")
+
+
 def _update_circle_overlay_gui(handles: dict[str, Any], overlay_store: CircleOverlayStore | None) -> None:
     overlay, stale = _latest_circle_overlay(overlay_store)
     if "circle_overlay" in handles:
@@ -2031,6 +2173,9 @@ def update_gui(
         if "floor_constraint" in handles:
             handles["floor_constraint"].value = _format_floor_constraint_status(None, stale=True)
         _update_floor_panel(handles, None)
+        if "roi_box" in handles:
+            handles["roi_box"].value = _format_roi_box_status(None, stale=True)
+        _update_roi_panel(handles, None)
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
         if "tcp_tracking" in handles:
@@ -2112,6 +2257,9 @@ def update_gui(
     if "floor_constraint" in handles:
         handles["floor_constraint"].value = _format_floor_constraint_status(latest, stale=stale)
     _update_floor_panel(handles, latest)
+    if "roi_box" in handles:
+        handles["roi_box"].value = _format_roi_box_status(latest, stale=stale)
+    _update_roi_panel(handles, latest)
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
     if "tcp_tracking" in handles:

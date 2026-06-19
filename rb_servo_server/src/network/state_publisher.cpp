@@ -1565,6 +1565,45 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         }
         message["floor_constraint"] = floor;
     }
+    {
+        nlohmann::json roi;
+        roi["enabled"] = snapshot.roi_box_enabled;
+        roi["monitor_only"] = snapshot.roi_box_monitor_only;
+        const auto vec3 = [](const std::array<double, 3>& v) {
+            return nlohmann::json::array({v[0], v[1], v[2]});
+        };
+        roi["min_m"] = vec3(snapshot.roi_box_min_m);          // effective (runtime)
+        roi["max_m"] = vec3(snapshot.roi_box_max_m);
+        roi["runtime_min_m"] = vec3(snapshot.roi_box_runtime_min_m);
+        roi["runtime_max_m"] = vec3(snapshot.roi_box_runtime_max_m);
+        const auto arm_json = [](bool checked, bool violated, double min_margin_m,
+                                 const std::string& closest_face) {
+            nlohmann::json arm;
+            arm["checked"] = checked;
+            arm["violated"] = violated;
+            if (checked && std::isfinite(min_margin_m)) {
+                arm["min_margin_m"] = min_margin_m;
+                arm["closest_face"] = closest_face.empty() ? "?" : closest_face;
+            } else {
+                arm["min_margin_m"] = nullptr;
+                arm["closest_face"] = nullptr;
+            }
+            return arm;
+        };
+        roi["left"] = arm_json(
+            snapshot.roi_box_left_checked, snapshot.roi_box_left_violated,
+            snapshot.roi_box_left_min_margin_m, snapshot.roi_box_left_closest_face);
+        roi["right"] = arm_json(
+            snapshot.roi_box_right_checked, snapshot.roi_box_right_violated,
+            snapshot.roi_box_right_min_margin_m, snapshot.roi_box_right_closest_face);
+        roi["clamp_count"] = snapshot.roi_box_clamp_count;
+        if (snapshot.roi_box_last_set_reject_reason.empty()) {
+            roi["last_set_reject_reason"] = nullptr;
+        } else {
+            roi["last_set_reject_reason"] = snapshot.roi_box_last_set_reject_reason;
+        }
+        message["roi_box"] = roi;
+    }
     message["motion_state"] = toString(snapshot.motion_state);
     message["fault_latched"] = snapshot.fault_latched;
     message["async_supervision_degraded"] = snapshot.async_supervision_degraded;

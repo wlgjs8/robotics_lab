@@ -103,6 +103,9 @@ enum class ControlMode {
     EmergencyStop,
     ResetFault,
     SetSafetyFloorZ,
+    // Leaseless runtime adjustment of the stand-frame ROI box bounds
+    // (safety.roi_box), bounded server-side to the configured runtime envelope.
+    SetSafetyRoiBounds,
     // Per-arm direct-teaching (free-drive). Releases servo_j control on the
     // addressed arm's controller (freedrive_teach_on) so an operator can hand-
     // guide it, then re-acquires it (freedrive_teach_off) with a target resync.
@@ -157,6 +160,7 @@ enum class SafetyVerdict {
     IkFailed,
     SelfCollision,
     FloorViolation,
+    RoiViolation,
     UnknownError
 };
 
@@ -506,6 +510,12 @@ struct DualArmCommand {
     double floor_z_m = 0.0;
     bool has_floor_z = false;
 
+    // SetSafetyRoiBounds payload (top-level: the ROI box is global, not per-arm):
+    // requested stand-frame axis-aligned box bounds [min, max] in meters.
+    std::array<double, 3> roi_min_m{};
+    std::array<double, 3> roi_max_m{};
+    bool has_roi_bounds = false;
+
     // AcquireLease / ReleaseLease packets are pure lease management. They must
     // never enter the command buffer: the buffer is latest-wins, so their
     // parsed Hold modes would overwrite an in-flight motion command.
@@ -813,6 +823,24 @@ struct ServoSnapshot {
     std::string floor_constraint_right_lowest_point;
     uint64_t floor_constraint_clamp_count = 0;
     std::string floor_constraint_last_set_reject_reason;
+
+    // Stand-frame ROI box (workspace limit) telemetry (safety.roi_box).
+    bool roi_box_enabled = false;
+    bool roi_box_monitor_only = false;
+    std::array<double, 3> roi_box_min_m{};         // effective (runtime) bounds
+    std::array<double, 3> roi_box_max_m{};
+    std::array<double, 3> roi_box_runtime_min_m{};  // SetSafetyRoiBounds envelope
+    std::array<double, 3> roi_box_runtime_max_m{};
+    bool roi_box_left_checked = false;
+    bool roi_box_left_violated = false;
+    double roi_box_left_min_margin_m = 0.0;  // closest face margin (>=0 inside)
+    std::string roi_box_left_closest_face;
+    bool roi_box_right_checked = false;
+    bool roi_box_right_violated = false;
+    double roi_box_right_min_margin_m = 0.0;
+    std::string roi_box_right_closest_face;
+    uint64_t roi_box_clamp_count = 0;
+    std::string roi_box_last_set_reject_reason;
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;

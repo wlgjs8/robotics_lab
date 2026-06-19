@@ -1392,6 +1392,10 @@ DualArmServoLoop::DualArmServoLoop(
     right_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
     kinematics_ = kinematics ? std::move(kinematics) : makeKinematicsProvider(config);
     runtime_floor_z_m_.store(config.safety.floor_constraint.z_min_m);
+    for (int k = 0; k < 3; ++k) {
+        runtime_roi_min_m_[k].store(config.safety.roi_box.min_m[k]);
+        runtime_roi_max_m_[k].store(config.safety.roi_box.max_m[k]);
+    }
     // URDF mesh self-collision: spin up the async monitor (off the servo_j path).
     // Throws on a bad URDF/mesh path — fail closed at startup rather than run a
     // real robot with the guard silently disabled. The single self_collision.enable
@@ -1877,6 +1881,34 @@ void DualArmServoLoop::loopMain() {
                 }
             }
             command = metadata_hold(command);
+        } else if (commandRequestsSetSafetyRoiBounds(command)) {
+            // Leaseless runtime adjustment of the stand-frame ROI box bounds.
+            // Accepted only within the configured per-axis runtime envelope; works
+            // while fault-latched (shrinking/raising the box must never be blocked).
+            if (!command.has_roi_bounds) {
+                roi_last_set_reject_reason_ = "roi_bounds_missing";
+                std::cerr << "[WARN] SetSafetyRoiBounds rejected: missing roi_min_m/roi_max_m payload\n";
+            } else {
+                const std::optional<std::string> reject = validateRoiBoundsRequest(
+                    command.roi_min_m, command.roi_max_m, config_.safety.roi_box);
+                if (reject.has_value()) {
+                    roi_last_set_reject_reason_ = *reject;
+                    std::cerr << "[WARN] SetSafetyRoiBounds rejected (" << *reject
+                              << ") from source_id=" << command.source.source_id << "\n";
+                } else {
+                    for (int k = 0; k < 3; ++k) {
+                        runtime_roi_min_m_[k].store(command.roi_min_m[k]);
+                        runtime_roi_max_m_[k].store(command.roi_max_m[k]);
+                    }
+                    roi_last_set_reject_reason_.clear();
+                    std::cerr << "[INFO] safety ROI box set to min["
+                              << command.roi_min_m[0] << "," << command.roi_min_m[1] << ","
+                              << command.roi_min_m[2] << "] max[" << command.roi_max_m[0] << ","
+                              << command.roi_max_m[1] << "," << command.roi_max_m[2]
+                              << "] m by source_id=" << command.source.source_id << "\n";
+                }
+            }
+            command = metadata_hold(command);
         } else if (commandRequestsDisarmMotion(command)) {
             clearLatchedCartesianTargets();
             setMotionState(ServerMotionState::ConnectedHold);
@@ -2333,6 +2365,22 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.floor_constraint_right_lowest_point = last_floor_right_.lowest_point;
             latest_snapshot_.floor_constraint_clamp_count = floor_clamp_count_;
             latest_snapshot_.floor_constraint_last_set_reject_reason = floor_last_set_reject_reason_;
+            latest_snapshot_.roi_box_enabled = config_.safety.roi_box.enable;
+            latest_snapshot_.roi_box_monitor_only = config_.safety.roi_box.monitor_only;
+            latest_snapshot_.roi_box_min_m = effectiveRoiMin();
+            latest_snapshot_.roi_box_max_m = effectiveRoiMax();
+            latest_snapshot_.roi_box_runtime_min_m = config_.safety.roi_box.runtime_min_m;
+            latest_snapshot_.roi_box_runtime_max_m = config_.safety.roi_box.runtime_max_m;
+            latest_snapshot_.roi_box_left_checked = last_roi_left_.checked;
+            latest_snapshot_.roi_box_left_violated = last_roi_left_.violated;
+            latest_snapshot_.roi_box_left_min_margin_m = last_roi_left_.min_margin_m;
+            latest_snapshot_.roi_box_left_closest_face = last_roi_left_.closest_face;
+            latest_snapshot_.roi_box_right_checked = last_roi_right_.checked;
+            latest_snapshot_.roi_box_right_violated = last_roi_right_.violated;
+            latest_snapshot_.roi_box_right_min_margin_m = last_roi_right_.min_margin_m;
+            latest_snapshot_.roi_box_right_closest_face = last_roi_right_.closest_face;
+            latest_snapshot_.roi_box_clamp_count = roi_clamp_count_;
+            latest_snapshot_.roi_box_last_set_reject_reason = roi_last_set_reject_reason_;
             latest_snapshot_.motion_state = sample.motion_state;
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.async_supervision_degraded = sample.async_supervision_degraded;
@@ -2974,11 +3022,12 @@ ArmCommand DualArmServoLoop::resolveArmCartesianDeltaCommand(
         config_.cartesian_control,
         kinematics_
     );
-    // Tier-2 floor clamp: latch a target that is already legal so the per-tick
-    // pose tracking never aims below the plane.
-    const Pose6D target_tcp_stand = clampPoseToFloor(command.mode == ControlMode::TcpDeltaStand
-        ? cartesian.applyTcpDeltaStand(*state.tcp_stand, command.tcp_delta_stand)
-        : cartesian.applyTcpDeltaLocal(*state.tcp_stand, command.tcp_delta_local));
+    // Tier-2 floor + ROI clamp: latch a target that is already legal so the
+    // per-tick pose tracking never aims below the plane or outside the box.
+    const Pose6D target_tcp_stand = clampPoseToRoi(clampPoseToFloor(
+        command.mode == ControlMode::TcpDeltaStand
+            ? cartesian.applyTcpDeltaStand(*state.tcp_stand, command.tcp_delta_stand)
+            : cartesian.applyTcpDeltaLocal(*state.tcp_stand, command.tcp_delta_local)));
 
     latch.seq = command_seq;
     latch.target_tcp_stand = target_tcp_stand;
@@ -3200,7 +3249,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         const auto clamp_command_pose = [this](ArmCommand& cmd) {
             if ((cmd.mode == ControlMode::TcpPoseTarget || cmd.mode == ControlMode::TcpLinearMove) &&
                 cmd.has_tcp_target) {
-                cmd.tcp_target_stand = clampPoseToFloor(cmd.tcp_target_stand);
+                cmd.tcp_target_stand = clampPoseToRoi(clampPoseToFloor(cmd.tcp_target_stand));
             }
         };
         clamp_command_pose(effective_command.left);
@@ -3608,7 +3657,7 @@ ServoTarget DualArmServoLoop::applySafety(
         if (!hold.twist_smd || !state.tcp_stand || !state.has_valid_tcp_pose) {
             return;
         }
-        const Pose6D anchor = clampPoseToFloor(*state.tcp_stand);
+        const Pose6D anchor = clampPoseToRoi(clampPoseToFloor(*state.tcp_stand));
         hold.twist_smd_goal = anchor;
         hold.twist_smd->reset(anchor);
         hold.twist_smd->updateGoalFromCommand(anchor);
@@ -3631,6 +3680,7 @@ ServoTarget DualArmServoLoop::applySafety(
     // scalar barrier. Latch / FK-fail-closed / monitor_only semantics are preserved.
     std::vector<VelocityConstraint> safety_cons;
     bool floor_engaged = false;       // a floor row is within its engage band
+    bool roi_engaged = false;          // a ROI-box face row is within its engage band
     bool self_collision_hold = false;  // stale verdict -> whole-arm hold, skip solve
 
     // ---- Floor plane: synchronous FK + per-point z-velocity Jacobian ----
@@ -3723,6 +3773,111 @@ ServoTarget DualArmServoLoop::applySafety(
                                  out.left_q_target_deg, left_prev_sent_q_deg_)) {
                 build_floor_arm(ArmId::Right, right_mode, right_state, right_eval,
                                 out.right_q_target_deg, right_prev_sent_q_deg_);
+            }
+        }
+    }
+
+    // ---- ROI box (workspace limit): synchronous FK + per-face stand-axis ----
+    // The 3D generalization of the floor plane: the TCP (and each offset point)
+    // must stay inside the stand-frame box. Each of the 6 faces within its engage
+    // band adds one closing-velocity row to the SAME shared solve, so the box, the
+    // floor, and self-collision are all reconciled in one Gauss-Seidel pass.
+    if (config_.safety.roi_box.enable) {
+        const std::array<double, 3> roi_min = effectiveRoiMin();
+        const std::array<double, 3> roi_max = effectiveRoiMax();
+        const RoiArmEvaluation left_eval = evaluateRoiArm(ArmId::Left, out.left_q_target_deg);
+        const RoiArmEvaluation right_eval = evaluateRoiArm(ArmId::Right, out.right_q_target_deg);
+        last_roi_left_ = left_eval;    // telemetry, even when already faulted
+        last_roi_right_ = right_eval;
+        if (!config_.safety.roi_box.monitor_only &&
+            combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+            const auto& rb = config_.safety.roi_box;
+            // Returns true if it LATCHED (caller stops processing the other arm).
+            const auto build_roi_arm = [&](
+                ArmId arm, ControlMode mode, const RobotState& state,
+                const RoiArmEvaluation& eval, JointArray& target_q,
+                const JointArray& prev_sent_q) -> bool {
+                const std::string arm_name = arm == ArmId::Left ? "left" : "right";
+                const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount
+                                                                 : config_.right_mount;
+                const auto fail_closed_hold = [&](const char* why) {
+                    target_q = prev_sent_q;  // hold this arm
+                    resetCartesianVelocityIntegrator(arm, why);
+                    reanchor_twist_smd_goal(arm, state);
+                    if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
+                        combined = SafetyVerdict::RoiViolation;
+                    }
+                };
+                if (!eval.checked) {
+                    // TCP FK unavailable -> fail closed (cannot build a Jacobian).
+                    const std::string reason = "roi box: " + arm_name + " TCP FK unavailable";
+                    if (rb.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
+                        !isTcpTwistMode(mode)) {
+                        latchFault(SafetyVerdict::RoiViolation, reason, left_state, right_state);
+                        out = currentFaultHoldTarget();
+                        combined = SafetyVerdict::FaultLatched;
+                        return true;
+                    }
+                    fail_closed_hold("roi_fk_unavailable");
+                    return false;
+                }
+                // Hard latch (mirror of floor): FaultLatch policy + non-twist (PTP/
+                // jog) + outside the box + not escaping (outside-depth not shrinking
+                // vs the previous sent pose).
+                if (rb.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
+                    !isTcpTwistMode(mode) && eval.violated) {
+                    const RoiArmEvaluation prev_eval = evaluateRoiArm(arm, prev_sent_q);
+                    const bool escaping = prev_eval.checked &&
+                        std::isfinite(prev_eval.outside_depth_m) &&
+                        eval.outside_depth_m < prev_eval.outside_depth_m + kRoiEscapeEpsilonM;
+                    if (!escaping) {
+                        const std::string reason = "roi box: " + arm_name + " outside box (closest face " +
+                            eval.closest_face + ", margin " + std::to_string(eval.min_margin_m) + " m)";
+                        latchFault(SafetyVerdict::RoiViolation, reason, left_state, right_state);
+                        out = currentFaultHoldTarget();
+                        combined = SafetyVerdict::FaultLatched;
+                        return true;
+                    }
+                }
+                // Within the engage band of any face: add a closing-velocity damper
+                // row for that face's most-exposed point. Lower face (side 0): the
+                // point's stand-axis speed >= -sqrt(2 a margin) (block decreasing
+                // past min); upper face (side 1): <= +sqrt(...) (block increasing
+                // past max). Below the face (margin<0) xi=0 (block deeper, slide/
+                // return free).
+                const int base = arm == ArmId::Left ? 0 : kDof;
+                for (int axis = 0; axis < 3; ++axis) {
+                    for (int side = 0; side < 2; ++side) {
+                        const double margin = eval.faces[axis][side].margin_m;
+                        if (!std::isfinite(margin) || margin >= rb.d_slow_m) continue;
+                        const math::Vector3& off = eval.faces[axis][side].offset_tcp;
+                        const std::array<double, 3> offset{off.x(), off.y(), off.z()};
+                        JointArray Jaxis{};
+                        if (kinematics_ &&
+                            kinematics_->computeStandAxisJacobian(arm, target_q, mount, offset,
+                                                                  axis, Jaxis)) {
+                            VelocityConstraint c;
+                            const double sign = side == 0 ? 1.0 : -1.0;  // lower=+, upper=-
+                            for (int i = 0; i < kDof; ++i) c.J[base + i] = sign * Jaxis[i];
+                            if (c.J.squaredNorm() > 1e-18) {
+                                c.xi = margin > 0.0 ? std::sqrt(2.0 * rb.a_brake_m_s2 * margin) : 0.0;
+                                c.d_now = margin;
+                                safety_cons.push_back(std::move(c));
+                                roi_engaged = true;
+                            }
+                        } else {
+                            // Jacobian unavailable -> fail closed (revert this arm).
+                            fail_closed_hold("roi_jacobian_unavailable");
+                            return false;
+                        }
+                    }
+                }
+                return false;
+            };
+            if (!build_roi_arm(ArmId::Left, left_mode, left_state, left_eval,
+                               out.left_q_target_deg, left_prev_sent_q_deg_)) {
+                build_roi_arm(ArmId::Right, right_mode, right_state, right_eval,
+                              out.right_q_target_deg, right_prev_sent_q_deg_);
             }
         }
     }
@@ -3859,8 +4014,10 @@ ServoTarget DualArmServoLoop::applySafety(
         }
         if (left_blocked || right_blocked) {
             if (floor_engaged) ++floor_clamp_count_;
+            if (roi_engaged) ++roi_clamp_count_;
             if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                 combined = floor_engaged ? SafetyVerdict::FloorViolation
+                         : roi_engaged   ? SafetyVerdict::RoiViolation
                                          : SafetyVerdict::SelfCollision;
             }
         }
@@ -3873,6 +4030,7 @@ ServoTarget DualArmServoLoop::applySafety(
                 last_proj_log_s = tt;
                 std::cerr << "[safety-proj] cons=" << proj.active_pairs
                           << (floor_engaged ? " (incl floor)" : "")
+                          << (roi_engaged ? " (incl roi)" : "")
                           << " corr(L/R)=" << proj.left_correction_deg_s << "/"
                           << proj.right_correction_deg_s << " deg/s"
                           << ((left_blocked || right_blocked) ? "  BLOCKED" : "") << "\n";
@@ -3916,6 +4074,81 @@ FloorArmEvaluation DualArmServoLoop::evaluateFloorArm(ArmId arm, const JointArra
 
 double DualArmServoLoop::effectiveFloorZ() const {
     return runtime_floor_z_m_.load();
+}
+
+RoiArmEvaluation DualArmServoLoop::evaluateRoiArm(ArmId arm, const JointArray& q_deg) const {
+    RoiArmEvaluation eval;
+    if (!kinematics_ || !finiteJointArray(q_deg)) {
+        return eval;  // checked=false -> caller fails closed
+    }
+    const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount : config_.right_mount;
+    try {
+        const Pose6D tcp = kinematics_->computeTcpStand(arm, q_deg, mount);
+        // Evaluate the TCP + configured offset points against the effective
+        // (runtime) box bounds; checked=false (fail closed) when FK is non-finite.
+        if (!roiEvaluateBox(tcp, config_.safety.roi_box.tcp_offset_points,
+                            effectiveRoiMin(), effectiveRoiMax(), &eval)) {
+            return RoiArmEvaluation{};
+        }
+    } catch (const std::exception&) {
+        return RoiArmEvaluation{};  // checked=false -> caller fails closed
+    }
+    return eval;
+}
+
+std::array<double, 3> DualArmServoLoop::effectiveRoiMin() const {
+    return {runtime_roi_min_m_[0].load(), runtime_roi_min_m_[1].load(),
+            runtime_roi_min_m_[2].load()};
+}
+
+std::array<double, 3> DualArmServoLoop::effectiveRoiMax() const {
+    return {runtime_roi_max_m_[0].load(), runtime_roi_max_m_[1].load(),
+            runtime_roi_max_m_[2].load()};
+}
+
+Pose6D DualArmServoLoop::clampPoseToRoi(const Pose6D& pose) const {
+    if (!config_.safety.roi_box.enable || config_.safety.roi_box.monitor_only) {
+        return pose;
+    }
+    if (!std::isfinite(pose.x) || !std::isfinite(pose.y) || !std::isfinite(pose.z)) {
+        return pose;
+    }
+    Pose6D clamped = pose;
+    const std::array<double, 3> lo = effectiveRoiMin();
+    const std::array<double, 3> hi = effectiveRoiMax();
+    // Pull the TCP point into the box per stand axis, shrinking the interval by the
+    // tool's offset-point extents so each configured check point (e.g. a gripper
+    // fingertip at the target orientation) also stays inside. If a tool spans more
+    // than the box on some axis, aim at the box center on that axis.
+    std::array<double, 3> delta_lo{0.0, 0.0, 0.0};  // most-negative offset delta per axis
+    std::array<double, 3> delta_hi{0.0, 0.0, 0.0};  // most-positive offset delta per axis
+    const auto& points = config_.safety.roi_box.tcp_offset_points;
+    if (!points.empty()) {
+        const math::Matrix3 rotation = math::rotationFromPose(clamped);
+        for (const FloorCheckPointConfig& point : points) {
+            const math::Vector3 offset(point.offset_m[0], point.offset_m[1], point.offset_m[2]);
+            const math::Vector3 w = rotation * offset;
+            for (int k = 0; k < 3; ++k) {
+                if (!std::isfinite(w[k])) continue;
+                delta_lo[k] = std::min(delta_lo[k], w[k]);
+                delta_hi[k] = std::max(delta_hi[k], w[k]);
+            }
+        }
+    }
+    std::array<double, 3> pos{clamped.x, clamped.y, clamped.z};
+    for (int k = 0; k < 3; ++k) {
+        const double low = lo[k] - delta_lo[k];   // TCP lower bound so min point >= lo
+        const double high = hi[k] - delta_hi[k];  // TCP upper bound so max point <= hi
+        if (low <= high) {
+            pos[k] = std::min(std::max(pos[k], low), high);
+        } else {
+            pos[k] = 0.5 * (lo[k] + hi[k]);  // tool wider than box: aim at center
+        }
+    }
+    clamped.x = pos[0];
+    clamped.y = pos[1];
+    clamped.z = pos[2];
+    return clamped;
 }
 
 Pose6D DualArmServoLoop::clampPoseToFloor(const Pose6D& pose) const {
@@ -4031,6 +4264,11 @@ bool DualArmServoLoop::commandRequestsResetFault(const DualArmCommand& command) 
 bool DualArmServoLoop::commandRequestsSetSafetyFloorZ(const DualArmCommand& command) const {
     return command.left.mode == ControlMode::SetSafetyFloorZ ||
            command.right.mode == ControlMode::SetSafetyFloorZ;
+}
+
+bool DualArmServoLoop::commandRequestsSetSafetyRoiBounds(const DualArmCommand& command) const {
+    return command.left.mode == ControlMode::SetSafetyRoiBounds ||
+           command.right.mode == ControlMode::SetSafetyRoiBounds;
 }
 
 bool DualArmServoLoop::commandRequestsEmergencyStop(const DualArmCommand& command) const {

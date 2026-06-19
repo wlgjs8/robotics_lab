@@ -432,6 +432,33 @@ class CommandClient:
             "right": {},
         })
 
+    def build_set_safety_roi_bounds(
+        self,
+        roi_min_m: tuple[float, float, float],
+        roi_max_m: tuple[float, float, float],
+        *,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        if len(roi_min_m) != 3 or len(roi_max_m) != 3:
+            raise ValueError("roi_min_m and roi_max_m must each have 3 values")
+        lo = [float(v) for v in roi_min_m]
+        hi = [float(v) for v in roi_max_m]
+        if any(not math.isfinite(v) for v in lo + hi):
+            raise ValueError("roi bounds must be finite")
+        if any(lo[k] > hi[k] for k in range(3)):
+            raise ValueError("roi_min_m must not exceed roi_max_m on any axis")
+        # Leaseless non-motion command; the server only accepts bounds within its
+        # configured safety.roi_box runtime envelope (per axis).
+        return self._with_source({
+            "seq": self.next_seq(),
+            "mode": "SetSafetyRoiBounds",
+            "timeout_sec": timeout_sec,
+            "roi_min_m": lo,
+            "roi_max_m": hi,
+            "left": {},
+            "right": {},
+        })
+
     # Modes that take (or require) the command-source lease when sent. After a
     # one-shot GUI command the lease is released immediately so a streaming
     # client (policy_runner teleop) can take over without waiting for the
@@ -517,5 +544,16 @@ class CommandClient:
 
     def send_set_safety_floor_z(self, floor_z_m: float, *, timeout_sec: float = 0.2) -> dict[str, Any]:
         packet = self.build_set_safety_floor_z(floor_z_m, timeout_sec=timeout_sec)
+        self.send(packet)
+        return packet
+
+    def send_set_safety_roi_bounds(
+        self,
+        roi_min_m: tuple[float, float, float],
+        roi_max_m: tuple[float, float, float],
+        *,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        packet = self.build_set_safety_roi_bounds(roi_min_m, roi_max_m, timeout_sec=timeout_sec)
         self.send(packet)
         return packet

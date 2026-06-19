@@ -50,6 +50,15 @@ public:
         JointArray& Jz_out
     ) const override;
 
+    bool computeStandAxisJacobian(
+        ArmId arm,
+        const JointArray& q_deg,
+        const ArmMountConfig& mount,
+        const std::array<double, 3>& tcp_offset_m,
+        int axis,
+        JointArray& J_out
+    ) const override;
+
 private:
     struct Impl;
 

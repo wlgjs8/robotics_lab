@@ -607,10 +607,12 @@ bool isReleaseLeaseModeString(const std::string& mode) {
     return mode == "ReleaseLease" || mode == "release_lease" || mode == "releaselease";
 }
 
-// EmergencyStop and SetSafetyFloorZ are intentionally leaseless: an operator
-// must be able to stop motion or adjust the safety floor while another client
-// (e.g. policy_runner) holds the command lease. SetSafetyFloorZ is additionally
-// bounded server-side to safety.floor_constraint.[runtime_min_z_m, runtime_max_z_m].
+// EmergencyStop, SetSafetyFloorZ and SetSafetyRoiBounds are intentionally
+// leaseless: an operator must be able to stop motion or adjust the safety
+// floor / ROI box while another client (e.g. policy_runner) holds the command
+// lease. SetSafetyFloorZ is bounded server-side to
+// safety.floor_constraint.[runtime_min_z_m, runtime_max_z_m]; SetSafetyRoiBounds
+// to safety.roi_box.[runtime_min_m, runtime_max_m] per axis.
 bool commandRequiresLease(ControlMode mode) {
     return mode == ControlMode::ArmMotion ||
            mode == ControlMode::DisarmMotion ||
@@ -941,6 +943,26 @@ bool CommandServer::parseMessage(
     if (root.contains("floor_z_m")) {
         if (!readOptionalNumber(root, "floor_z_m", &cmd.floor_z_m)) return false;
         cmd.has_floor_z = true;
+    }
+
+    // SetSafetyRoiBounds payload (top-level: the ROI box is global). Both
+    // roi_min_m and roi_max_m must be present together as [x, y, z] arrays of
+    // finite numbers; the server bounds-checks against the runtime envelope.
+    if (root.contains("roi_min_m") || root.contains("roi_max_m")) {
+        const auto read_vec3 = [](const json& object, const char* key,
+                                  std::array<double, 3>* out) -> bool {
+            const auto it = object.find(key);
+            if (it == object.end() || !it->is_array() || it->size() != 3) return false;
+            for (std::size_t i = 0; i < 3; ++i) {
+                double v = 0.0;
+                if (!isFiniteNumber((*it)[i], &v)) return false;
+                (*out)[i] = v;
+            }
+            return true;
+        };
+        if (!read_vec3(root, "roi_min_m", &cmd.roi_min_m)) return false;
+        if (!read_vec3(root, "roi_max_m", &cmd.roi_max_m)) return false;
+        cmd.has_roi_bounds = true;
     }
 
     const json left_object = root.contains("left") ? root.at("left") : json();

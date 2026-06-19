@@ -16,6 +16,7 @@
 #include "rb_servo/control/self_collision.hpp"
 #include "rb_servo/control/collision_monitor.hpp"
 #include "rb_servo/control/floor_constraint.hpp"
+#include "rb_servo/control/roi_box.hpp"
 #include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/safety_filter.hpp"
 #include "rb_servo/control/trajectory_filter.hpp"
@@ -142,6 +143,17 @@ private:
     // plane (no-op when the constraint is disabled or monitor_only).
     Pose6D clampPoseToFloor(const Pose6D& pose) const;
 
+    // Stand-frame ROI box constraint (safety.roi_box): FK the arm's TCP for a
+    // candidate joint target and evaluate it against the 6 box faces.
+    // checked=false if kinematics/FK is unavailable — the caller fails closed.
+    RoiArmEvaluation evaluateRoiArm(ArmId arm, const JointArray& q_deg) const;
+    // Effective (runtime-adjustable) ROI box bounds in meters (stand frame).
+    std::array<double, 3> effectiveRoiMin() const;
+    std::array<double, 3> effectiveRoiMax() const;
+    // Tier-2 usability clamp: pull a Cartesian target's stand position inside the
+    // ROI box (no-op when the constraint is disabled or monitor_only).
+    Pose6D clampPoseToRoi(const Pose6D& pose) const;
+
     DualSendResult sendTargets(
         const ServoTarget& target,
         uint64_t command_seq,
@@ -159,6 +171,7 @@ private:
 
     bool commandRequestsResetFault(const DualArmCommand& command) const;
     bool commandRequestsSetSafetyFloorZ(const DualArmCommand& command) const;
+    bool commandRequestsSetSafetyRoiBounds(const DualArmCommand& command) const;
     bool commandRequestsEmergencyStop(const DualArmCommand& command) const;
     bool commandRequestsArmMotion(const DualArmCommand& command) const;
     bool commandRequestsDisarmMotion(const DualArmCommand& command) const;
@@ -305,6 +318,15 @@ private:
     FloorArmEvaluation last_floor_right_{};
     uint64_t floor_clamp_count_ = 0;
     std::string floor_last_set_reject_reason_;
+    // ROI box constraint (safety.roi_box): runtime-adjustable stand-frame bounds
+    // (SetSafetyRoiBounds, bounded by config runtime_min/max per axis) + per-arm
+    // telemetry of the last evaluated candidate targets.
+    std::array<std::atomic<double>, 3> runtime_roi_min_m_{};
+    std::array<std::atomic<double>, 3> runtime_roi_max_m_{};
+    RoiArmEvaluation last_roi_left_{};
+    RoiArmEvaluation last_roi_right_{};
+    uint64_t roi_clamp_count_ = 0;
+    std::string roi_last_set_reject_reason_;
     // Controller-sim tracking-error advisory (safety.controller_simulation_tracking_error_nonlatching).
     // Reset each tick in loopMain; set in applySafety when a reference/actual tracking
     // divergence is suppressed (not latched). Surfaced as published telemetry

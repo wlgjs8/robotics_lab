@@ -53,6 +53,67 @@ def persist_floor_z_to_config(config_path: str | Path, floor_z_m: float) -> tupl
             return True, f"saved z_min_m={floor_z_m:.3f} to {path.name}"
     return False, f"yaml unchanged: floor_constraint.z_min_m not found in {path.name}"
 
+
+_ROI_MIN_LINE_RE = re.compile(r"^(\s*min_m\s*:\s*)\[[^\]]*\](.*)$")
+_ROI_MAX_LINE_RE = re.compile(r"^(\s*max_m\s*:\s*)\[[^\]]*\](.*)$")
+
+
+def _fmt_vec3(values: tuple[float, float, float]) -> str:
+    return "[" + ", ".join(f"{float(v):.3f}" for v in values) + "]"
+
+
+def persist_roi_bounds_to_config(
+    config_path: str | Path,
+    roi_min_m: tuple[float, float, float],
+    roi_max_m: tuple[float, float, float],
+) -> tuple[bool, str]:
+    """Rewrite roi_box.min_m / roi_box.max_m in the server config yaml (text-level,
+    comments preserved) so a viser "Send ROI box" survives a stack restart.
+
+    Only the FIRST min_m / max_m lines inside the roi_box block are touched.
+    Returns (ok, short message for the GUI status field)."""
+    path = Path(config_path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError as exc:
+        return False, f"yaml unchanged: {type(exc).__name__}: {exc}"
+
+    in_roi_block = False
+    block_indent = -1
+    wrote_min = False
+    wrote_max = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if stripped.startswith("roi_box:"):
+            in_roi_block = True
+            block_indent = indent
+            continue
+        if not in_roi_block:
+            continue
+        if stripped and not stripped.startswith("#") and indent <= block_indent:
+            break  # left the roi_box block
+        newline = "\n" if line.endswith("\n") else ""
+        if not wrote_min:
+            m = _ROI_MIN_LINE_RE.match(line.rstrip("\n"))
+            if m:
+                lines[index] = f"{m.group(1)}{_fmt_vec3(roi_min_m)}{m.group(2)}{newline}"
+                wrote_min = True
+                continue
+        if not wrote_max:
+            m = _ROI_MAX_LINE_RE.match(line.rstrip("\n"))
+            if m:
+                lines[index] = f"{m.group(1)}{_fmt_vec3(roi_max_m)}{m.group(2)}{newline}"
+                wrote_max = True
+                continue
+    if not (wrote_min and wrote_max):
+        return False, f"yaml unchanged: roi_box.min_m/max_m not found in {path.name}"
+    try:
+        path.write_text("".join(lines), encoding="utf-8")
+    except OSError as exc:
+        return False, f"yaml unchanged: {type(exc).__name__}: {exc}"
+    return True, f"saved roi_box bounds to {path.name}"
+
 Mode = Literal["mock", "simulation", "real"]
 Backend = Literal["mock", "simulator", "rbpodo", "unknown"]
 
@@ -359,6 +420,40 @@ class OperatorSafety:
         if not config_path:
             return True, f"{sent} (runtime only: RB_GUI_SERVER_CONFIG_PATH not set)"
         _, save_message = persist_floor_z_to_config(config_path, float(floor_z_m))
+        return True, f"{sent} ({save_message})"
+
+    def send_set_roi_bounds(
+        self,
+        roi_min_m: tuple[float, float, float],
+        roi_max_m: tuple[float, float, float],
+    ) -> tuple[bool, str]:
+        # Non-motion, leaseless safety adjustment (mirror of send_set_floor_z):
+        # require a live state stream reporting roi_box enabled; the server
+        # bounds-checks the request against its per-axis runtime envelope.
+        latest = self.latest_valid()
+        if latest is None:
+            return False, "state stream missing or stale"
+        roi = latest.roi_box
+        if roi is None or not bool(roi.get("enabled", False)):
+            return False, "roi box disabled on server"
+        try:
+            self.command_client.send_set_safety_roi_bounds(
+                roi_min_m, roi_max_m, timeout_sec=self.command_timeout_sec
+            )
+        except ValueError as exc:
+            return False, str(exc)
+        sent = (
+            "sent SetSafetyRoiBounds "
+            + " ".join(
+                f"{a}[{roi_min_m[k] * 1000:.0f},{roi_max_m[k] * 1000:.0f}]"
+                for k, a in enumerate(("x", "y", "z"))
+            )
+            + "mm"
+        )
+        config_path = os.environ.get("RB_GUI_SERVER_CONFIG_PATH", "").strip()
+        if not config_path:
+            return True, f"{sent} (runtime only: RB_GUI_SERVER_CONFIG_PATH not set)"
+        _, save_message = persist_roi_bounds_to_config(config_path, roi_min_m, roi_max_m)
         return True, f"{sent} ({save_message})"
 
     def send_freedrive(

@@ -156,6 +156,10 @@ if(BUILD_TESTING)
     target_link_libraries(test_floor_constraint PRIVATE rb_servo_core)
     add_test(NAME floor_constraint COMMAND test_floor_constraint)
 
+    add_executable(test_roi_box tests/test_roi_box.cpp)
+    target_link_libraries(test_roi_box PRIVATE rb_servo_core)
+    add_test(NAME roi_box COMMAND test_roi_box)
+
     add_executable(test_cartesian_planner tests/test_cartesian_planner.cpp)
     target_link_libraries(test_cartesian_planner PRIVATE rb_servo_core)
     add_test(NAME cartesian_planner COMMAND test_cartesian_planner)

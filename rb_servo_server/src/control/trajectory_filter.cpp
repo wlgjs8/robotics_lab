@@ -37,6 +37,7 @@ JointArray TrajectoryFilter::computeJointTarget(
         case ControlMode::EmergencyStop:
         case ControlMode::ResetFault:
         case ControlMode::SetSafetyFloorZ:
+        case ControlMode::SetSafetyRoiBounds:
             joint_smd_.deactivate();
             out = holdTarget(previous_sent_target);
             break;

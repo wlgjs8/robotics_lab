@@ -341,6 +341,39 @@ struct FloorConstraintConfig {
     double d_slow_m = 0.05;  // engage band above the plane (0 => always active)
 };
 
+// Stand-frame axis-aligned ROI box (workspace limit): the TCP of either arm —
+// and each configured TCP-frame offset point — must stay INSIDE the box
+// min_m[k] <= p_k <= max_m[k] for stand-frame axes k in {x, y, z}, regardless of
+// motion primitive or run mode. Independent of safety.floor_constraint: both
+// apply when enabled (the box's z lower face and the floor plane may overlap;
+// the stricter wins). Enforced with the SAME velocity-damper projection as the
+// floor — each of the 6 box faces contributes one closing-velocity row to the
+// shared Gauss-Seidel solve, so the commanded speed of the most-exposed point
+// toward a face is limited to sqrt(2 a_brake (margin)) and brakes to zero AT the
+// face (tangential/inward motion stays free). Tier-2 clamps Cartesian targets so
+// streaming commands slide along a face. Bounds are runtime-adjustable via the
+// leaseless SetSafetyRoiBounds command, each value bounded to
+// [runtime_min_m[k], runtime_max_m[k]]. monitor_only publishes telemetry without
+// clamping or latching (never a real-motion posture).
+struct RoiBoxConfig {
+    bool enable = false;
+    std::array<double, 3> min_m{-0.5, -1.0, 0.0};  // stand frame, startup bounds
+    std::array<double, 3> max_m{0.5, 0.0, 1.0};
+    // SetSafetyRoiBounds envelope: a runtime request is rejected unless
+    // runtime_min_m[k] <= requested_min_m[k] <= requested_max_m[k] <= runtime_max_m[k].
+    std::array<double, 3> runtime_min_m{-1.0, -1.5, -0.2};
+    std::array<double, 3> runtime_max_m{1.0, 0.5, 1.5};
+    FloorConstraintFailPolicy fail_policy = FloorConstraintFailPolicy::ClampToHold;
+    bool monitor_only = false;
+    // Additional check points expressed in the TCP frame (meters), same as the
+    // floor's tcp_offset_points (e.g. the two PIKA gripper fingertips). The TCP
+    // point is always checked; each face binds on the most-exposed point in that
+    // face's direction.
+    std::vector<FloorCheckPointConfig> tcp_offset_points;
+    double a_brake_m_s2 = 4.0;
+    double d_slow_m = 0.05;  // engage band inside each face (0 => always active)
+};
+
 // Joint-space SMD profile for the JointTarget primitive (the joint-space
 // mirror of cartesian_control.pose_track_smd): the sent target follows the
 // commanded goal as a second-order system (mass fixed at 1.0) stepped at the
@@ -391,6 +424,7 @@ struct SafetyConfig {
     bool controller_simulation_tracking_error_nonlatching = false;
     SelfCollisionConfig self_collision;
     FloorConstraintConfig floor_constraint;
+    RoiBoxConfig roi_box;
     JointTargetSmdConfig joint_target_smd;
 };
 

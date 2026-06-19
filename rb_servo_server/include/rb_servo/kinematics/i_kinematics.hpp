@@ -102,6 +102,30 @@ public:
         return false;
     }
 
+    // Stand-frame single-axis velocity Jacobian of a TCP-frame offset point
+    // (Stage 3 ROI-box velocity projection): fills J_out (1x6, per arm joint,
+    // rad) such that d(p_axis_stand)/dt = J_out . qdot, where p = TCP + R_tcp *
+    // tcp_offset_m and axis in {0=x, 1=y, 2=z} selects the stand-frame axis. The
+    // generalization of computeFloorPointZJacobian (which is axis=2). Returns
+    // false (and leaves J_out zero) when kinematics/FK is unavailable, non-finite,
+    // or axis is out of range. Default: unsupported -> false (caller fails closed).
+    virtual bool computeStandAxisJacobian(
+        ArmId arm,
+        const JointArray& q_deg,
+        const ArmMountConfig& mount,
+        const std::array<double, 3>& tcp_offset_m,
+        int axis,
+        JointArray& J_out
+    ) const {
+        (void)arm;
+        (void)q_deg;
+        (void)mount;
+        (void)tcp_offset_m;
+        (void)axis;
+        J_out = JointArray{};
+        return false;
+    }
+
 };
 
 }  // namespace rb_servo

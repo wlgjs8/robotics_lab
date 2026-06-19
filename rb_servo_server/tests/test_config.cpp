@@ -589,6 +589,116 @@ bool testFloorConstraintInvalidConfigRejects() {
     return true;
 }
 
+bool testRoiBoxConfigParsesAndDefaults() {
+    // Values parse (enable=false skips the kinematics requirement).
+    const std::string path = writeTempConfig(
+        "roi-values",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "safety:\n"
+        "  roi_box:\n"
+        "    enable: false\n"
+        "    min_m: [-0.4, -0.9, 0.05]\n"
+        "    max_m: [0.4, 0.1, 0.9]\n"
+        "    runtime_min_m: [-1.0, -1.5, -0.2]\n"
+        "    runtime_max_m: [1.0, 0.5, 1.5]\n"
+        "    fail_policy: fault_latch\n"
+        "    monitor_only: true\n"
+        "    a_brake_m_s2: 3.0\n"
+        "    d_slow_m: 0.04\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    ::unlink(path.c_str());
+    RB_CHECK(!cfg.safety.roi_box.enable);
+    RB_CHECK(near(cfg.safety.roi_box.min_m[0], -0.4));
+    RB_CHECK(near(cfg.safety.roi_box.max_m[2], 0.9));
+    RB_CHECK(near(cfg.safety.roi_box.runtime_min_m[1], -1.5));
+    RB_CHECK(cfg.safety.roi_box.fail_policy == rb_servo::FloorConstraintFailPolicy::FaultLatch);
+    RB_CHECK(cfg.safety.roi_box.monitor_only);
+    RB_CHECK(near(cfg.safety.roi_box.a_brake_m_s2, 3.0));
+    RB_CHECK(near(cfg.safety.roi_box.d_slow_m, 0.04));
+
+    // Defaults when the block is absent.
+    const std::string default_path = writeTempConfig(
+        "roi-defaults",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+    );
+    const rb_servo::DualArmConfig defaults = rb_servo::loadConfigFromYaml(default_path);
+    ::unlink(default_path.c_str());
+    RB_CHECK(!defaults.safety.roi_box.enable);
+    RB_CHECK(near(defaults.safety.roi_box.min_m[0], -0.5));
+    RB_CHECK(near(defaults.safety.roi_box.max_m[1], 0.0));
+    RB_CHECK(defaults.safety.roi_box.fail_policy == rb_servo::FloorConstraintFailPolicy::ClampToHold);
+    return true;
+}
+
+bool testRoiBoxInvalidConfigRejects() {
+    // Unknown key inside the block.
+    const std::string unknown_key = writeTempConfig(
+        "roi-unknown-key",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "safety:\n"
+        "  roi_box:\n"
+        "    enable: false\n"
+        "    depth_m: 0.1\n"
+    );
+    RB_CHECK(loadRejects(unknown_key));
+    ::unlink(unknown_key.c_str());
+
+    // min above max on an axis (enable=true triggers validation).
+    const std::string bad_order = writeTempConfig(
+        "roi-bad-order",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "safety:\n"
+        "  roi_box:\n"
+        "    enable: true\n"
+        "    min_m: [0.6, -1.0, 0.0]\n"
+        "    max_m: [0.5, 0.0, 1.0]\n"
+        "    runtime_min_m: [-1.0, -1.5, -0.2]\n"
+        "    runtime_max_m: [1.0, 0.5, 1.5]\n"
+    );
+    RB_CHECK(loadRejects(bad_order));
+    ::unlink(bad_order.c_str());
+
+    // min below the runtime envelope.
+    const std::string out_of_envelope = writeTempConfig(
+        "roi-out-of-envelope",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "safety:\n"
+        "  roi_box:\n"
+        "    enable: true\n"
+        "    min_m: [-2.0, -1.0, 0.0]\n"
+        "    max_m: [0.5, 0.0, 1.0]\n"
+        "    runtime_min_m: [-1.0, -1.5, -0.2]\n"
+        "    runtime_max_m: [1.0, 0.5, 1.5]\n"
+    );
+    RB_CHECK(loadRejects(out_of_envelope));
+    ::unlink(out_of_envelope.c_str());
+
+    // enable=true without kinematics (no FK source) is fail-closed at load time.
+    const std::string no_kinematics = writeTempConfig(
+        "roi-no-kinematics",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "safety:\n"
+        "  roi_box:\n"
+        "    enable: true\n"
+    );
+    RB_CHECK(loadRejects(no_kinematics));
+    ::unlink(no_kinematics.c_str());
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -599,5 +709,7 @@ int main() {
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;
     if (!testFloorConstraintConfigParsesAndDefaults()) return 1;
     if (!testFloorConstraintInvalidConfigRejects()) return 1;
+    if (!testRoiBoxConfigParsesAndDefaults()) return 1;
+    if (!testRoiBoxInvalidConfigRejects()) return 1;
     return 0;
 }
