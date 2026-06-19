@@ -802,6 +802,43 @@ void validateConfig(const DualArmConfig& cfg) {
             }
         }
     }
+    if (cfg.safety.roi_box.enable) {
+        const auto& rb = cfg.safety.roi_box;
+        for (int k = 0; k < 3; ++k) {
+            if (!std::isfinite(rb.min_m[k]) || !std::isfinite(rb.max_m[k]) ||
+                !std::isfinite(rb.runtime_min_m[k]) || !std::isfinite(rb.runtime_max_m[k])) {
+                throw std::runtime_error("safety.roi_box bounds must be finite");
+            }
+            // runtime_min <= min <= max <= runtime_max on every axis.
+            if (rb.runtime_min_m[k] > rb.min_m[k] || rb.min_m[k] > rb.max_m[k] ||
+                rb.max_m[k] > rb.runtime_max_m[k]) {
+                throw std::runtime_error(
+                    "safety.roi_box requires runtime_min_m <= min_m <= max_m <= runtime_max_m on each axis");
+            }
+        }
+        if (!std::isfinite(rb.a_brake_m_s2) || rb.a_brake_m_s2 <= 0.0) {
+            throw std::runtime_error("safety.roi_box.a_brake_m_s2 must be finite and positive");
+        }
+        if (!std::isfinite(rb.d_slow_m) || rb.d_slow_m < 0.0) {
+            throw std::runtime_error("safety.roi_box.d_slow_m must be finite and non-negative");
+        }
+        if (!cfg.kinematics.enable) {
+            throw std::runtime_error(
+                "safety.roi_box.enable=true requires kinematics.enable=true (TCP FK source)");
+        }
+        for (const FloorCheckPointConfig& point : rb.tcp_offset_points) {
+            if (point.name.empty()) {
+                throw std::runtime_error(
+                    "safety.roi_box.tcp_offset_points entries need a non-empty name");
+            }
+            for (double value : point.offset_m) {
+                if (!std::isfinite(value)) {
+                    throw std::runtime_error(
+                        "safety.roi_box.tcp_offset_points offsets must be finite (" + point.name + ")");
+                }
+            }
+        }
+    }
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
     if (cfg.servo.output_moving_average_window < 0 || cfg.servo.output_moving_average_window > 5000) {
         throw std::runtime_error("servo.output_moving_average_window must be in [0, 5000]");
@@ -1569,6 +1606,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "controller_simulation_tracking_error_nonlatching",
             "self_collision",
             "floor_constraint",
+            "roi_box",
             "joint_target_smd",
         }, "safety");
         if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
@@ -1809,6 +1847,83 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                             "safety.floor_constraint.tcp_offset_points.offset_m");
                     }
                     cfg.safety.floor_constraint.tcp_offset_points.push_back(point);
+                }
+            }
+        }
+        if (has(sec, "roi_box")) {
+            const YAML::Node rb = sec["roi_box"];
+            validateAllowedKeys(rb, {
+                "enable",
+                "min_m",
+                "max_m",
+                "runtime_min_m",
+                "runtime_max_m",
+                "fail_policy",
+                "monitor_only",
+                "tcp_offset_points",
+                "a_brake_m_s2",
+                "d_slow_m",
+            }, "safety.roi_box");
+            const auto parseVec3 = [&](const YAML::Node& node, const std::string& path,
+                                       std::array<double, 3>& out) {
+                if (!node.IsSequence() || node.size() != 3) {
+                    fail(path + " must be a [x, y, z] sequence", node);
+                }
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    out[axis] = asDouble(node[axis], path);
+                }
+            };
+            if (has(rb, "enable")) {
+                cfg.safety.roi_box.enable = asBool(rb["enable"], "safety.roi_box.enable");
+            }
+            if (has(rb, "min_m")) parseVec3(rb["min_m"], "safety.roi_box.min_m", cfg.safety.roi_box.min_m);
+            if (has(rb, "max_m")) parseVec3(rb["max_m"], "safety.roi_box.max_m", cfg.safety.roi_box.max_m);
+            if (has(rb, "runtime_min_m")) {
+                parseVec3(rb["runtime_min_m"], "safety.roi_box.runtime_min_m",
+                          cfg.safety.roi_box.runtime_min_m);
+            }
+            if (has(rb, "runtime_max_m")) {
+                parseVec3(rb["runtime_max_m"], "safety.roi_box.runtime_max_m",
+                          cfg.safety.roi_box.runtime_max_m);
+            }
+            if (has(rb, "fail_policy")) {
+                cfg.safety.roi_box.fail_policy =
+                    parseFloorConstraintFailPolicy(rb["fail_policy"], "safety.roi_box.fail_policy");
+            }
+            if (has(rb, "monitor_only")) {
+                cfg.safety.roi_box.monitor_only = asBool(rb["monitor_only"], "safety.roi_box.monitor_only");
+            }
+            if (has(rb, "a_brake_m_s2")) {
+                cfg.safety.roi_box.a_brake_m_s2 = asDouble(rb["a_brake_m_s2"], "safety.roi_box.a_brake_m_s2");
+            }
+            if (has(rb, "d_slow_m")) {
+                cfg.safety.roi_box.d_slow_m = asDouble(rb["d_slow_m"], "safety.roi_box.d_slow_m");
+            }
+            if (has(rb, "tcp_offset_points")) {
+                const YAML::Node points = rb["tcp_offset_points"];
+                if (!points.IsSequence()) {
+                    fail("safety.roi_box.tcp_offset_points must be a sequence", points);
+                }
+                cfg.safety.roi_box.tcp_offset_points.clear();
+                for (std::size_t i = 0; i < points.size(); ++i) {
+                    const YAML::Node entry = points[i];
+                    validateAllowedKeys(entry, {"name", "offset_m"},
+                        "safety.roi_box.tcp_offset_points");
+                    FloorCheckPointConfig point;
+                    if (has(entry, "name")) {
+                        point.name = asString(entry["name"],
+                            "safety.roi_box.tcp_offset_points.name");
+                    }
+                    if (!has(entry, "offset_m") || !entry["offset_m"].IsSequence() ||
+                        entry["offset_m"].size() != 3) {
+                        fail("safety.roi_box.tcp_offset_points entries need offset_m: [x, y, z]",
+                             entry);
+                    }
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        point.offset_m[axis] = asDouble(entry["offset_m"][axis],
+                            "safety.roi_box.tcp_offset_points.offset_m");
+                    }
+                    cfg.safety.roi_box.tcp_offset_points.push_back(point);
                 }
             }
         }

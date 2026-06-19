@@ -67,6 +67,7 @@ from rb_servo_gui.app import (
     _send_tcp_linear_move_from_marker,
     _send_init_motion_and_reset_targets,
     _update_floor_panel,
+    _update_roi_panel,
     _update_lease_owner,
     _tcp_display_mode,
     _tcp_local_delta_from_target,
@@ -103,12 +104,15 @@ from rb_servo_gui.scene import (
     update_circle_overlay,
     update_floor_plane,
     update_floor_plane_preview,
+    update_roi_box,
+    update_roi_box_preview,
     update_self_collision_check_geom,
     update_self_collision_near_pairs,
     update_self_collision_overlay,
 )
 from rb_servo_gui.status_panel import (
     _format_floor_constraint_status,
+    _format_roi_box_status,
     _format_self_collision_status,
 )
 from rb_servo_gui.state_receiver import StateStore
@@ -2828,6 +2832,173 @@ class FloorConstraintGuiTest(unittest.TestCase):
         _update_floor_panel(handles, state)
         self.assertAlmostEqual(slider.max, 300.0)
         self.assertAlmostEqual(slider.value, 300.0)
+
+
+class RoiBoxGuiTest(unittest.TestCase):
+    @staticmethod
+    def _roi_block(**overrides):
+        block = {
+            "enabled": True,
+            "monitor_only": False,
+            "min_m": [-0.5, -1.0, 0.0],
+            "max_m": [0.5, 0.0, 1.0],
+            "runtime_min_m": [-1.0, -1.5, -0.2],
+            "runtime_max_m": [1.0, 0.5, 1.5],
+            "left": {"checked": True, "violated": False, "min_margin_m": 0.12,
+                     "closest_face": "x_max"},
+            "right": {"checked": True, "violated": False, "min_margin_m": 0.08,
+                      "closest_face": "z_min"},
+            "clamp_count": 0,
+            "last_set_reject_reason": None,
+        }
+        block.update(overrides)
+        return block
+
+    def test_state_snapshot_parses_roi_box(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        snapshot = StateSnapshot.parse(sample_state(roi_box=self._roi_block()))
+        self.assertIsNotNone(snapshot)
+        self.assertTrue(snapshot.roi_box["enabled"])
+        self.assertEqual(snapshot.roi_box["max_m"], [0.5, 0.0, 1.0])
+
+        without = StateSnapshot.parse(sample_state())
+        self.assertIsNotNone(without)
+        self.assertIsNone(without.roi_box)
+
+    def test_format_roi_box_status(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        self.assertEqual(_format_roi_box_status(None, stale=False), "roi: no state")
+
+        ok_state = StateSnapshot.parse(sample_state(roi_box=self._roi_block()))
+        text = _format_roi_box_status(ok_state, stale=False)
+        self.assertIn("roi: ON", text)
+        self.assertIn("L:120mm@x_max", text)
+        self.assertIn("R:80mm@z_min", text)
+
+        violated = StateSnapshot.parse(sample_state(roi_box=self._roi_block(
+            left={"checked": True, "violated": True, "min_margin_m": -0.01,
+                  "closest_face": "x_max"},
+        )))
+        self.assertIn("OUTSIDE(left)", _format_roi_box_status(violated, stale=False))
+
+        disabled = StateSnapshot.parse(sample_state(roi_box=self._roi_block(enabled=False)))
+        self.assertEqual(_format_roi_box_status(disabled, stale=False), "roi: disabled")
+
+        no_block = StateSnapshot.parse(sample_state())
+        self.assertEqual(_format_roi_box_status(no_block, stale=False), "roi: disabled")
+
+    def test_build_set_safety_roi_bounds_packet(self):
+        client = CommandClient(host="127.0.0.1", port=0, source_id="rb_gui_test")
+        packet = client.build_set_safety_roi_bounds((-0.5, -1.0, 0.0), (0.5, 0.0, 1.0))
+        self.assertEqual(packet["mode"], "SetSafetyRoiBounds")
+        self.assertEqual(packet["roi_min_m"], [-0.5, -1.0, 0.0])
+        self.assertEqual(packet["roi_max_m"], [0.5, 0.0, 1.0])
+        self.assertEqual(packet["left"], {})
+        self.assertEqual(packet["right"], {})
+        self.assertEqual(packet["source_id"], "rb_gui_test")
+        # Leaseless (not a leased mode) -> send() must not bracket it.
+        self.assertNotIn("SetSafetyRoiBounds", CommandClient._LEASED_MODES)
+        with self.assertRaises(ValueError):
+            client.build_set_safety_roi_bounds((0.0, 0.0, float("nan")), (1.0, 1.0, 1.0))
+        with self.assertRaises(ValueError):  # min > max on an axis
+            client.build_set_safety_roi_bounds((0.6, 0.0, 0.0), (0.5, 1.0, 1.0))
+
+    def test_update_roi_box_resizes_recolors_and_hides(self):
+        class FakeBox:
+            def __init__(self):
+                self.dimensions = (1.0, 1.0, 1.0)
+                self.position = (0.0, 0.0, 0.0)
+                self.color = None
+                self.visible = True
+
+        box = FakeBox()
+        handles = {"roi_box": box}
+        update_roi_box(handles, None)
+        self.assertFalse(box.visible)
+        update_roi_box(handles, {"enabled": False})
+        self.assertFalse(box.visible)
+        # Enabled: dimensions = extent, position = center.
+        update_roi_box(handles, self._roi_block())
+        self.assertTrue(box.visible)
+        self.assertAlmostEqual(box.dimensions[0], 1.0)   # x extent 0.5-(-0.5)
+        self.assertAlmostEqual(box.dimensions[1], 1.0)   # y extent 0-(-1.0)
+        self.assertAlmostEqual(box.position[1], -0.5)    # y center
+        teal = box.color
+        update_roi_box(handles, self._roi_block(
+            right={"checked": True, "violated": True, "min_margin_m": -0.02,
+                   "closest_face": "z_min"},
+        ))
+        self.assertNotEqual(box.color, teal)
+        update_roi_box({}, self._roi_block())  # missing handle is a no-op
+
+    def test_update_roi_box_preview(self):
+        class FakeBox:
+            def __init__(self):
+                self.dimensions = (1.0, 1.0, 1.0)
+                self.position = (0.0, 0.0, 0.0)
+                self.color = None
+                self.visible = True
+
+        box = FakeBox()
+        handles = {"roi_box_preview": box}
+        update_roi_box_preview(handles, (-0.2, -0.2, 0.1), (0.2, 0.2, 0.5))
+        self.assertTrue(box.visible)
+        self.assertAlmostEqual(box.dimensions[2], 0.4)
+        self.assertAlmostEqual(box.position[2], 0.3)
+        update_roi_box_preview(handles, None, None)
+        self.assertFalse(box.visible)
+        update_roi_box_preview({}, (-0.2, -0.2, 0.1), (0.2, 0.2, 0.5))  # no-op
+
+    def test_update_roi_panel_syncs_sliders_once(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        class FakeSlider:
+            def __init__(self):
+                self.min = -1500.0
+                self.max = 1500.0
+                self.value = 0.0
+
+        sliders = {f"roi_{a}_{s}": FakeSlider() for a in ("x", "y", "z") for s in ("min", "max")}
+        handles = dict(sliders)
+        state = StateSnapshot.parse(sample_state(roi_box=self._roi_block()))
+        _update_roi_panel(handles, state)
+        # Sliders come up at the applied bounds (mm) once.
+        self.assertAlmostEqual(handles["roi_x_min"].value, -500.0)
+        self.assertAlmostEqual(handles["roi_z_max"].value, 1000.0)
+        self.assertTrue(handles.get("roi_sliders_synced"))
+        # A later operator edit is not clobbered by subsequent state.
+        handles["roi_x_min"].value = -250.0
+        _update_roi_panel(handles, state)
+        self.assertAlmostEqual(handles["roi_x_min"].value, -250.0)
+
+    def test_persist_roi_bounds_rewrites_min_max_and_keeps_comments(self):
+        import tempfile
+        from pathlib import Path
+
+        from rb_servo_gui.safety import persist_roi_bounds_to_config
+
+        content = (
+            "safety:\n"
+            "  roi_box:\n"
+            "    enable: true\n"
+            "    min_m: [-0.5, -1.0, 0.0]   # startup box min\n"
+            "    max_m: [0.5, 0.0, 1.0]\n"
+            "    runtime_min_m: [-1.0, -1.5, -0.2]\n"
+            "network:\n"
+            "  min_m: [9, 9, 9]   # decoy outside the block\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stack.yaml"
+            path.write_text(content, encoding="utf-8")
+            ok, message = persist_roi_bounds_to_config(path, (-0.3, -0.8, 0.05), (0.3, 0.1, 0.9))
+            self.assertTrue(ok, message)
+            updated = path.read_text(encoding="utf-8")
+            self.assertIn("    min_m: [-0.300, -0.800, 0.050]   # startup box min\n", updated)
+            self.assertIn("    max_m: [0.300, 0.100, 0.900]\n", updated)
+            self.assertIn("runtime_min_m: [-1.0, -1.5, -0.2]", updated)
+            self.assertIn("min_m: [9, 9, 9]   # decoy outside the block", updated)
 
 
 class LeaseBracketTest(unittest.TestCase):

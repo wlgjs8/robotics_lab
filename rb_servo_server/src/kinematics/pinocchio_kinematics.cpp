@@ -259,8 +259,22 @@ bool PinocchioKinematics::computeFloorPointZJacobian(
     const std::array<double, 3>& tcp_offset_m,
     JointArray& Jz_out
 ) const {
+    // The floor plane is the stand-frame z (axis=2) face of the general ROI box;
+    // share one implementation so the numerics stay identical.
+    return computeStandAxisJacobian(arm, q_deg, mount, tcp_offset_m, 2, Jz_out);
+}
+
+bool PinocchioKinematics::computeStandAxisJacobian(
+    ArmId arm,
+    const JointArray& q_deg,
+    const ArmMountConfig& mount,
+    const std::array<double, 3>& tcp_offset_m,
+    int axis,
+    JointArray& J_out
+) const {
     (void)arm;
-    Jz_out = JointArray{};
+    J_out = JointArray{};
+    if (axis < 0 || axis > 2) return false;
     if (!config_.enable || !impl_) return false;
     if (!ik_solver::isFiniteJoints(q_deg)) return false;
 
@@ -290,13 +304,16 @@ bool PinocchioKinematics::computeFloorPointZJacobian(
     Eigen::Matrix3d S;
     S << 0.0, -r.z(), r.y(), r.z(), 0.0, -r.x(), -r.y(), r.x(), 0.0;
     const Eigen::Matrix<double, 3, 6> Jp = J.template topRows<3>() - S * J.template bottomRows<3>();
-    // Stand-frame z direction expressed in world axes (mount rotation is constant).
+    // Selected stand-frame axis direction expressed in world axes (mount rotation
+    // is constant). axis 0/1/2 -> stand x/y/z.
     const pinocchio::SE3 stand_T_world =
         math::se3FromPose(mount.base_pose_in_stand) * world_base.inverse();
-    const Eigen::Vector3d n = stand_T_world.rotation().transpose() * Eigen::Vector3d::UnitZ();
-    const Eigen::Matrix<double, 1, 6> Jz = n.transpose() * Jp;
-    if (!Jz.allFinite()) return false;
-    for (int i = 0; i < kDof; ++i) Jz_out[i] = Jz(i);
+    Eigen::Vector3d axis_unit = Eigen::Vector3d::Zero();
+    axis_unit(axis) = 1.0;
+    const Eigen::Vector3d n = stand_T_world.rotation().transpose() * axis_unit;
+    const Eigen::Matrix<double, 1, 6> Jaxis = n.transpose() * Jp;
+    if (!Jaxis.allFinite()) return false;
+    for (int i = 0; i < kDof; ++i) J_out[i] = Jaxis(i);
     return true;
 }
 

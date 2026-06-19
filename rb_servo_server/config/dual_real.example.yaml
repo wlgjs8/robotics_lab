@@ -101,6 +101,29 @@ safety:
   #   fail_policy: fault_latch
   #   monitor_only: false
 
+  # Stand-frame axis-aligned ROI box (workspace limit): the TCP of either arm
+  # must stay inside [min_m, max_m] (stand frame). Independent of
+  # floor_constraint (both apply when enabled). Same velocity-damper enforcement
+  # (slides along a face) + Tier-2 Cartesian clamp. Bounds are runtime-adjustable
+  # from viser ("Safety ROI box") within [runtime_min_m, runtime_max_m] per axis.
+  # Requires kinematics.enable=true. clamp_hold slides at the faces (recommended);
+  # fault_latch hard-latches when a candidate pushes outside (PTP/jog only).
+  # roi_box:
+  #   enable: true
+  #   min_m: [-0.5, -1.0, 0.0]
+  #   max_m: [0.5, 0.0, 1.0]
+  #   runtime_min_m: [-1.0, -1.5, -0.2]
+  #   runtime_max_m: [1.0, 0.5, 1.5]
+  #   fail_policy: clamp_hold
+  #   monitor_only: false
+  #   a_brake_m_s2: 4.0
+  #   d_slow_m: 0.05
+  #   # Optional extra check points in the TCP frame (e.g. gripper fingertips);
+  #   # every face binds on the most-exposed point.
+  #   # tcp_offset_points:
+  #   #   - { name: tip_a, offset_m: [0.054, 0.0, 0.0] }
+  #   #   - { name: tip_b, offset_m: [-0.054, 0.0, 0.0] }
+
 network:
   command_bind: "udp://127.0.0.1:50010"
   state_pub_endpoint: "udp://127.0.0.1:50110"

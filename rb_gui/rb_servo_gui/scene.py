@@ -327,6 +327,124 @@ def update_floor_plane(scene_handles: dict[str, Any], floor: Mapping[str, Any] |
     _set_visible(plane, True)
 
 
+# Stand-frame ROI box (safety.roi_box) visual: a translucent box the TCP must
+# stay inside. Applied box = teal (red when an arm is outside); pending-slider
+# preview = yellow, like the floor plane preview.
+_ROI_BOX_TEAL = (60, 200, 170)
+_ROI_BOX_RED = (220, 60, 60)
+_ROI_BOX_PREVIEW_YELLOW = (235, 200, 60)
+
+
+def _roi_box_geometry(
+    min_m: Any, max_m: Any
+) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    """(dimensions, center) for an AABB, or None if bounds are malformed."""
+    if (
+        not isinstance(min_m, (list, tuple))
+        or not isinstance(max_m, (list, tuple))
+        or len(min_m) != 3
+        or len(max_m) != 3
+    ):
+        return None
+    try:
+        lo = [float(v) for v in min_m]
+        hi = [float(v) for v in max_m]
+    except (TypeError, ValueError):
+        return None
+    if any(not math.isfinite(v) for v in lo + hi):
+        return None
+    # Clamp to a positive minimum so a degenerate (zero-width) face still renders.
+    dims = tuple(max(1e-3, hi[k] - lo[k]) for k in range(3))
+    center = tuple((hi[k] + lo[k]) * 0.5 for k in range(3))
+    return dims, center  # type: ignore[return-value]
+
+
+def _add_roi_box(server: Any, handles: dict[str, Any]) -> None:
+    """Stand-frame ROI box (safety.roi_box visual): applied box + pending preview.
+
+    Hidden until the server reports the constraint enabled. Both are created with
+    a placeholder geometry; update_roi_box / update_roi_box_preview move and
+    resize them."""
+    if not hasattr(server.scene, "add_box"):
+        return
+    dims = (1.0, 1.0, 1.0)
+    center = (0.0, -0.5, 0.5)
+    for key, name, color, opacity in (
+        ("roi_box", "/stand/roi_box", _ROI_BOX_TEAL, 0.12),
+        ("roi_box_preview", "/stand/roi_box_preview", _ROI_BOX_PREVIEW_YELLOW, 0.10),
+    ):
+        try:
+            try:
+                handles[key] = server.scene.add_box(
+                    name, dimensions=dims, color=color, opacity=opacity,
+                    position=center, visible=False,
+                )
+            except TypeError:  # older viser without opacity support
+                handles[key] = server.scene.add_box(
+                    name, dimensions=dims, color=color, position=center, visible=False,
+                )
+        except Exception as exc:
+            handles[f"{key}_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _apply_roi_box(handle: Any, dims: tuple[float, ...], center: tuple[float, ...],
+                   color: tuple[int, int, int]) -> None:
+    # Set dimensions when the viser handle supports it (live resize); position and
+    # color always. Wrapped per-attribute so a viser without settable dimensions
+    # still tracks position/color.
+    try:
+        handle.dimensions = dims
+    except Exception:
+        pass
+    try:
+        handle.position = center
+    except Exception:
+        pass
+    try:
+        handle.color = color
+    except Exception:
+        pass
+
+
+def update_roi_box_preview(
+    scene_handles: dict[str, Any], min_m: Any, max_m: Any
+) -> None:
+    """Show the pending slider bounds as a translucent yellow preview box.
+
+    min_m/max_m=None (or malformed) hides the preview."""
+    box = scene_handles.get("roi_box_preview") if isinstance(scene_handles, dict) else None
+    if box is None:
+        return
+    geom = _roi_box_geometry(min_m, max_m) if min_m is not None and max_m is not None else None
+    if geom is None:
+        _set_visible(box, False)
+        return
+    dims, center = geom
+    _apply_roi_box(box, dims, center, _ROI_BOX_PREVIEW_YELLOW)
+    _set_visible(box, True)
+
+
+def update_roi_box(scene_handles: dict[str, Any], roi: Mapping[str, Any] | None) -> None:
+    """Move/resize/recolor the ROI box from the published roi_box block."""
+    box = scene_handles.get("roi_box") if isinstance(scene_handles, dict) else None
+    if box is None:
+        return
+    if not isinstance(roi, Mapping) or not bool(roi.get("enabled", False)):
+        _set_visible(box, False)
+        return
+    geom = _roi_box_geometry(roi.get("min_m"), roi.get("max_m"))
+    if geom is None:
+        _set_visible(box, False)
+        return
+    dims, center = geom
+    violated = any(
+        isinstance(roi.get(key), Mapping) and bool(roi[key].get("violated", False))
+        for key in ("left", "right")
+    )
+    _apply_roi_box(box, dims, center, _ROI_BOX_RED if violated else _ROI_BOX_TEAL)
+    _set_visible(box, True)
+
+
 def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) -> None:
     """Paint the colliding PAIR translucent red while self_collision.violated.
 
@@ -990,6 +1108,7 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         _set_visible(handles.get("circle_overlay_line"), False)
         _set_visible(handles.get("circle_overlay_desired"), False)
         _add_floor_plane(server, handles)
+        _add_roi_box(server, handles)
         _add_self_collision_witness_markers(server, handles)
         # Keep the server handle so the self-collision checked-geometry overlay can
         # lazily build the unified collision-hull URDF from the runtime manifest.
