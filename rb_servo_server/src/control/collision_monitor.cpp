@@ -12,6 +12,7 @@
 #include <pinocchio/parsers/urdf.hpp>
 #include <pinocchio/math/rpy.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
+#include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/collision/distance.hpp>
 #include <pinocchio/multibody/geometry.hpp>
@@ -89,6 +90,11 @@ struct CollisionMonitor::Impl {
     Eigen::VectorXd q;
     std::array<int, kDof> left_qidx{};
     std::array<int, kDof> right_qidx{};
+    // velocity-space (idx_v) columns for the actuated joints — the Jacobian column
+    // index for each command DOF (== idx_q for a fixed-base revolute chain, but
+    // idx_v is the correct mapping). Used to slice J_n into Jn_left/Jn_right.
+    std::array<int, kDof> left_vidx{};
+    std::array<int, kDof> right_vidx{};
     // arm classification (frame ancestry) + chain depth (joint supports)
     pinocchio::FrameIndex left_root_fid = 0;
     pinocchio::FrameIndex right_root_fid = 0;
@@ -138,6 +144,8 @@ struct CollisionMonitor::Impl {
             right_jids[i] = rj;
             left_qidx[i] = model.joints[lj].idx_q();
             right_qidx[i] = model.joints[rj].idx_q();
+            left_vidx[i] = model.joints[lj].idx_v();
+            right_vidx[i] = model.joints[rj].idx_v();
         }
         // Arm root frames for ancestry-based classification (default "<prefix>world").
         const std::string lr = cfg.left_arm_root_frame.empty() ? (cfg.left_prefix + "world")
@@ -308,7 +316,7 @@ struct CollisionMonitor::Impl {
         }
     }
 
-    CollisionVerdict reduce(double stamp) {
+    CollisionVerdict reduce(double stamp, const Eigen::VectorXd& q_eval) {
         CollisionVerdict v;
         v.stamp_s = stamp;
         v.valid = true;
@@ -330,6 +338,27 @@ struct CollisionMonitor::Impl {
         const std::size_t K = std::min<std::size_t>(cfg.max_near_pairs, ds.size());
         std::partial_sort(ds.begin(), ds.begin() + K, ds.end(),
                           [](const auto& a, const auto& b) { return a.first < b.first; });
+
+        // Per-pair clearance Jacobian (Stage 1). computeDistances leaves data.oMi at
+        // q_eval but does NOT compute joint Jacobians; do it once here for the K near
+        // pairs. The witness-point translational Jacobian is the joint LWA Jacobian
+        // shifted to the witness point: J_p = J_lin - skew(p - o) * J_ang.
+        pinocchio::computeJointJacobians(model, data, q_eval);
+        const int nv = model.nv;
+        Eigen::Matrix<double, 6, Eigen::Dynamic> J6(6, nv);
+        const auto jacobianOfPoint =
+            [&](pinocchio::JointIndex jid, const Eigen::Vector3d& p) -> Eigen::MatrixXd {
+            Eigen::MatrixXd Jp = Eigen::MatrixXd::Zero(3, nv);
+            if (jid == 0) return Jp;  // universe (static geometry): no motion
+            J6.setZero();
+            pinocchio::getJointJacobian(model, data, jid, pinocchio::LOCAL_WORLD_ALIGNED, J6);
+            const Eigen::Vector3d r = p - data.oMi[jid].translation();
+            Eigen::Matrix3d S;
+            S << 0.0, -r.z(), r.y(), r.z(), 0.0, -r.x(), -r.y(), r.x(), 0.0;
+            Jp = J6.topRows<3>() - S * J6.bottomRows<3>();
+            return Jp;
+        };
+
         v.near.reserve(K);
         for (std::size_t i = 0; i < K; ++i) {
             const std::size_t k = ds[i].second;
@@ -345,6 +374,19 @@ struct CollisionMonitor::Impl {
             p.n = delta.norm() > 1e-9 ? Eigen::Vector3d(delta.normalized()) : Eigen::Vector3d::UnitZ();
             p.name_a = geom.geometryObjects[cp.first].name;
             p.name_b = geom.geometryObjects[cp.second].name;
+            // d_dot = n^T (v_b - v_a) = J_n * qdot. Slice into command left/right cols.
+            const pinocchio::JointIndex ja = geom.geometryObjects[cp.first].parentJoint;
+            const pinocchio::JointIndex jb = geom.geometryObjects[cp.second].parentJoint;
+            const Eigen::MatrixXd Jrel = jacobianOfPoint(jb, p.p_b) - jacobianOfPoint(ja, p.p_a);
+            const Eigen::RowVectorXd Jn = p.n.transpose() * Jrel;  // 1 x nv
+            for (int c = 0; c < kDof; ++c) {
+                p.Jn_left[c] = Jn(left_vidx[c]);
+                p.Jn_right[c] = Jn(right_vidx[c]);
+            }
+            // Per-pair signed clearance rate (+ = separating), tracked by pair index.
+            if (prev_pair_clear.size() == np && stamp > prev_stamp) {
+                p.rate_m_s = (cur[k] - prev_pair_clear[k]) / (stamp - prev_stamp);
+            }
             v.near.push_back(std::move(p));
         }
         // Signed clearance rate of the currently-critical pair, tracked by pair
@@ -362,6 +404,7 @@ struct CollisionMonitor::Impl {
     CollisionVerdict evalLocked(const JointArray& l, const JointArray& r) {
         setQ(l, r);  // writes the target config into q
         const int N = std::max(1, cfg.swept_samples);
+        Eigen::VectorXd q_eval = q;  // configuration gdata ends up at (for J_n)
         if (N <= 1 || !have_prev_eval) {
             pinocchio::computeDistances(model, data, geom, gdata, q);
         } else {
@@ -385,10 +428,11 @@ struct CollisionMonitor::Impl {
                 qi = prev_eval_q + worst_alpha * (q - prev_eval_q);
                 pinocchio::computeDistances(model, data, geom, gdata, qi);
             }
+            q_eval = prev_eval_q + worst_alpha * (q - prev_eval_q);
         }
         prev_eval_q = q;
         have_prev_eval = true;
-        return reduce(nowMonotonicS());
+        return reduce(nowMonotonicS(), q_eval);
     }
 
     void publish(CollisionVerdict v) {

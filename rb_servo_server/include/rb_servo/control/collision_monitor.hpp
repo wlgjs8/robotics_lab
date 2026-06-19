@@ -112,6 +112,14 @@ struct CollisionNearPair {
     Eigen::Vector3d n = Eigen::Vector3d::Zero();  // unit a->b
     std::string name_a;
     std::string name_b;
+    // Per-pair clearance Jacobian rows (Stage 1): d(clearance)/dt = J_n * qdot,
+    // split into this command's actuated left/right joint columns (command order,
+    // idx_v mapping). For an arm<->stand pair only the arm's row is non-zero, so the
+    // velocity projection that consumes this acts only on the offending DOFs.
+    Eigen::Matrix<double, 1, kDof> Jn_left = Eigen::Matrix<double, 1, kDof>::Zero();
+    Eigen::Matrix<double, 1, kDof> Jn_right = Eigen::Matrix<double, 1, kDof>::Zero();
+    // Signed clearance rate of THIS pair (+ = separating), tracked by pair index.
+    double rate_m_s = 0.0;
 };
 
 // A published snapshot. Consumed by servo_j read-only.

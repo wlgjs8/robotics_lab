@@ -124,6 +124,47 @@ static bool run() {
     RB_CHECK(s_age_big <= s_default);   // older verdict -> never less conservative
     RB_CHECK(s_age_big == 0.0);         // 0.020-0.005-0.5*0.040 = -0.005 <= 0 -> halt
 
+    // (5c) per-pair clearance Jacobian J_n (Stage 1): central finite-difference.
+    // Use a NO-SWEEP monitor so each eval is a pure endpoint distance (the swept
+    // guard mixes configs and would break finite differencing).
+    {
+        CollisionMonitorConfig cfg1 = cfg;
+        cfg1.swept_samples = 1;
+        CollisionMonitor mon1(cfg1);
+        const JointArray base = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+        const CollisionVerdict v0 = mon1.evalOnce(base, base);
+        RB_CHECK(!v0.near.empty());
+        const CollisionNearPair pr = v0.near.front();  // closest pair to validate
+        RB_CHECK(pr.Jn_left.allFinite() && pr.Jn_right.allFinite());
+        RB_CHECK(pr.Jn_left.norm() + pr.Jn_right.norm() > 1e-6);  // not all-zero
+        const JointArray dl = {0.4, -0.5, 0.6, 0.3, -0.2, 0.5};   // deg perturbation
+        const JointArray dr = {-0.3, 0.4, -0.5, 0.2, 0.6, -0.4};
+        JointArray lp, lm, rp, rm;
+        for (int i = 0; i < kDof; ++i) {
+            lp[i] = base[i] + dl[i]; lm[i] = base[i] - dl[i];
+            rp[i] = base[i] + dr[i]; rm[i] = base[i] - dr[i];
+        }
+        const CollisionVerdict vp = mon1.evalOnce(lp, rp);
+        const CollisionVerdict vm = mon1.evalOnce(lm, rm);
+        const auto find = [&](const CollisionVerdict& vv) -> const CollisionNearPair* {
+            for (const auto& np : vv.near)
+                if (np.geom_a == pr.geom_a && np.geom_b == pr.geom_b) return &np;
+            return nullptr;
+        };
+        const CollisionNearPair* pp = find(vp);
+        const CollisionNearPair* pm = find(vm);
+        RB_CHECK(pp != nullptr && pm != nullptr);  // same pair survives the step
+        const double dd_fd = pp->d_m - pm->d_m;     // central diff over +-delta
+        const double k = 3.14159265358979323846 / 180.0;
+        double dd_pred = 0.0;
+        for (int i = 0; i < kDof; ++i) {
+            dd_pred += pr.Jn_left[i] * (2.0 * dl[i] * k) + pr.Jn_right[i] * (2.0 * dr[i] * k);
+        }
+        std::cout << "Jn FD: pred=" << dd_pred * 1000.0 << " mm  actual=" << dd_fd * 1000.0
+                  << " mm\n";
+        RB_CHECK(std::abs(dd_pred - dd_fd) < 5e-4);  // <0.5 mm agreement over the step
+    }
+
     // (6) threaded publish/consume: start, submit, see a fresh verdict.
     mon.start();
     mon.submitTargets(init, init);
@@ -138,6 +179,23 @@ static bool run() {
     RB_CHECK(std::isfinite(t.min_clearance_m));
     std::cout << "threaded verdict seq=" << t.seq << " min=" << t.min_clearance_m * 1000.0
               << " mm\n";
+
+    // (7) eval-time guard (Stage 1 cost gate): the per-pair J_n computation runs in
+    // the async monitor, not the 2 ms servo path, but it must still stay well within
+    // the ~5 ms reaction budget. Time evalOnce over a few configs and assert a loose
+    // ceiling (typical ~0.4-1.5 ms; bound generous to absorb CI noise).
+    {
+        const JointArray a = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+        const JointArray b = {10.0, -20.0, 60.0, 15.0, 40.0, -10.0};
+        for (int i = 0; i < 5; ++i) mon.evalOnce(a, b);  // warm up
+        const int iters = 50;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < iters; ++i) mon.evalOnce((i % 2) ? a : b, (i % 2) ? b : a);
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0).count() / iters;
+        std::cout << "evalOnce mean (with J_n) = " << ms << " ms\n";
+        RB_CHECK(ms < 5.0);  // must not blow the reaction-latency budget
+    }
     return true;
 }
 
