@@ -3000,6 +3000,54 @@ class RoiBoxGuiTest(unittest.TestCase):
             self.assertIn("runtime_min_m: [-1.0, -1.5, -0.2]", updated)
             self.assertIn("min_m: [9, 9, 9]   # decoy outside the block", updated)
 
+    def test_update_roi_box_visible_flag(self):
+        class FakeBox:
+            def __init__(self):
+                self.dimensions = (1.0, 1.0, 1.0)
+                self.position = (0.0, 0.0, 0.0)
+                self.color = None
+                self.visible = True
+
+        box = FakeBox()
+        handles = {"roi_box": box}
+        # visible=False hides even with valid bounds.
+        update_roi_box(handles, self._roi_block(), visible=False)
+        self.assertFalse(box.visible)
+        # Disabled enforcement but valid bounds still draws when visible (the box
+        # is a reference region independent of server enforcement).
+        update_roi_box(handles, self._roi_block(enabled=False), visible=True)
+        self.assertTrue(box.visible)
+
+    def test_update_roi_panel_visibility_toggle(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        class FakeBox:
+            def __init__(self):
+                self.dimensions = (1.0, 1.0, 1.0)
+                self.position = (0.0, 0.0, 0.0)
+                self.color = None
+                self.visible = True
+
+        class FakeToggle:
+            def __init__(self, v):
+                self.value = v
+
+        box = FakeBox()
+        scene = {"roi_box": box, "roi_box_preview": FakeBox()}
+        handles = {"scene": scene, "roi_box_visible_toggle": FakeToggle(False)}
+        state = StateSnapshot.parse(sample_state(roi_box=self._roi_block()))
+        # Toggle OFF -> box hidden even though the server reports it enabled.
+        _update_roi_panel(handles, state)
+        self.assertFalse(box.visible)
+        # Toggle ON -> box drawn.
+        handles["roi_box_visible_toggle"].value = True
+        _update_roi_panel(handles, state)
+        self.assertTrue(box.visible)
+        # Disabled enforcement but toggle ON -> still drawn (reference region).
+        disabled = StateSnapshot.parse(sample_state(roi_box=self._roi_block(enabled=False)))
+        _update_roi_panel(handles, disabled)
+        self.assertTrue(box.visible)
+
 
 class LeaseBracketTest(unittest.TestCase):
     """One-shot GUI commands must be wrapped Acquire -> command -> Release so

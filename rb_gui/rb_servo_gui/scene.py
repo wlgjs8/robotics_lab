@@ -424,12 +424,19 @@ def update_roi_box_preview(
     _set_visible(box, True)
 
 
-def update_roi_box(scene_handles: dict[str, Any], roi: Mapping[str, Any] | None) -> None:
-    """Move/resize/recolor the ROI box from the published roi_box block."""
+def update_roi_box(
+    scene_handles: dict[str, Any], roi: Mapping[str, Any] | None, *, visible: bool = True
+) -> None:
+    """Move/resize/recolor the ROI box from the published roi_box block.
+
+    Drawn whenever `visible` (the GUI "ROI 영역 표시" toggle) is set and the
+    published bounds are valid — independent of server enforcement (enabled), so
+    the configured region stays a visible reference by default. Red when an arm
+    is reported outside the box, teal otherwise."""
     box = scene_handles.get("roi_box") if isinstance(scene_handles, dict) else None
     if box is None:
         return
-    if not isinstance(roi, Mapping) or not bool(roi.get("enabled", False)):
+    if not visible or not isinstance(roi, Mapping):
         _set_visible(box, False)
         return
     geom = _roi_box_geometry(roi.get("min_m"), roi.get("max_m"))

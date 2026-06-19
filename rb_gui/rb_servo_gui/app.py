@@ -1451,8 +1451,10 @@ def build_gui(
                 handles["floor_applied"] = server.gui.add_text(
                     "Applied z", initial_value="no state", disabled=True
                 )
+                # Draggable slider + compact integrated number box (viser slider
+                # renders both side by side).
                 floor_slider = server.gui.add_slider(
-                    "Set floor z mm", min=0.0, max=500.0, step=1.0, initial_value=10.0
+                    "Floor z mm", min=0.0, max=500.0, step=1.0, initial_value=10.0
                 )
                 handles["floor_slider"] = floor_slider
                 floor_send = server.gui.add_button("Send floor z")
@@ -1476,12 +1478,20 @@ def build_gui(
                     )
 
             with server.gui.add_folder("Safety ROI box"):
+                # Show/hide the ROI box in the 3D scene (default ON). Independent of
+                # whether the server is enforcing it — the configured region is
+                # always drawable as a reference.
+                if hasattr(server.gui, "add_checkbox"):
+                    handles["roi_box_visible_toggle"] = server.gui.add_checkbox(
+                        "ROI 영역 표시", initial_value=True
+                    )
                 handles["roi_applied"] = server.gui.add_text(
                     "Applied box", initial_value="no state", disabled=True
                 )
-                # Six per-axis bound sliders (stand frame, mm). _update_roi_panel
-                # syncs their ranges to the server's runtime envelope and brings
-                # them up at the applied bounds on the first state.
+                # Six per-axis bound sliders (stand frame, mm): a draggable slider
+                # plus viser's compact integrated number box. _update_roi_panel
+                # syncs their range to the server's runtime envelope and brings them
+                # up at the applied bounds on the first state.
                 _roi_axis_defaults_mm = {
                     "x": (-500.0, 500.0),
                     "y": (-1000.0, 0.0),
@@ -2005,19 +2015,20 @@ def _roi_bounds_floats(value: Any) -> list[float] | None:
 
 def _update_roi_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
     roi = latest.roi_box if latest is not None else None
-    update_roi_box(handles.get("scene", {}), roi)
+    # The "ROI 영역 표시" checkbox (default ON) controls scene visibility,
+    # independent of whether the server is enforcing the box. The box is drawn
+    # from the published bounds whenever the toggle is on and bounds are valid.
+    toggle = handles.get("roi_box_visible_toggle")
+    visible = bool(getattr(toggle, "value", True))
+    update_roi_box(handles.get("scene", {}), roi, visible=visible)
     axes = ("x", "y", "z")
     have_sliders = all(f"roi_{a}_min" in handles and f"roi_{a}_max" in handles for a in axes)
-    if not isinstance(roi, Mapping) or not bool(roi.get("enabled", False)):
-        update_roi_box_preview(handles.get("scene", {}), None, None)
-        if "roi_applied" in handles:
-            handles["roi_applied"].value = "disabled"
-        return
-    applied_min = _roi_bounds_floats(roi.get("min_m"))
-    applied_max = _roi_bounds_floats(roi.get("max_m"))
-    runtime_min = _roi_bounds_floats(roi.get("runtime_min_m"))
-    runtime_max = _roi_bounds_floats(roi.get("runtime_max_m"))
-    # Sync slider ranges to the server's per-axis runtime envelope first.
+    enabled = isinstance(roi, Mapping) and bool(roi.get("enabled", False))
+    applied_min = _roi_bounds_floats(roi.get("min_m")) if isinstance(roi, Mapping) else None
+    applied_max = _roi_bounds_floats(roi.get("max_m")) if isinstance(roi, Mapping) else None
+    runtime_min = _roi_bounds_floats(roi.get("runtime_min_m")) if isinstance(roi, Mapping) else None
+    runtime_max = _roi_bounds_floats(roi.get("runtime_max_m")) if isinstance(roi, Mapping) else None
+    # Sync number-input soft range to the server's per-axis runtime envelope first.
     if have_sliders and runtime_min is not None and runtime_max is not None:
         for k, a in enumerate(axes):
             if runtime_max[k] > runtime_min[k]:
@@ -2027,7 +2038,7 @@ def _update_roi_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> 
                         handles[f"roi_{a}_{suffix}"].max = runtime_max[k] * 1000.0
                     except Exception:
                         pass
-    # First-state init: bring the sliders up at the server-applied bounds (once).
+    # First-state init: bring the inputs up at the server-applied bounds (once).
     if (
         have_sliders
         and applied_min is not None
@@ -2044,8 +2055,8 @@ def _update_roi_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> 
                 pass
         handles["roi_sliders_synced"] = True
     # Pending-value preview reconciliation: show the yellow preview box only while
-    # any slider differs from the server-applied bound (>= 0.5 mm).
-    if have_sliders and applied_min is not None and applied_max is not None:
+    # visible AND any input differs from the server-applied bound (>= 0.5 mm).
+    if visible and have_sliders and applied_min is not None and applied_max is not None:
         fn = handles.get("roi_slider_bounds_fn")
         slider_lo, slider_hi = fn() if callable(fn) else (None, None)
         if slider_lo is not None and slider_hi is not None:
@@ -2058,7 +2069,12 @@ def _update_roi_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> 
                 update_roi_box_preview(handles.get("scene", {}), slider_lo, slider_hi)
             else:
                 update_roi_box_preview(handles.get("scene", {}), None, None)
+    else:
+        update_roi_box_preview(handles.get("scene", {}), None, None)
     if "roi_applied" not in handles:
+        return
+    if not enabled:
+        handles["roi_applied"].value = "disabled"
         return
     if applied_min is not None and applied_max is not None:
         txt = " ".join(
