@@ -291,6 +291,30 @@ static bool runProjection() {
         const auto r = applyCollisionVelocityProjection(v, pc, zero, zero, lt, rt, dt, 0.0, big);
         RB_CHECK(!r.active && std::abs(lt[0] - 1.0) < 1e-9);
     }
+    // (6b) combined solve (Stage 3): a collision-like row and a floor-like row that
+    // share a joint are BOTH satisfied after the unified Gauss-Seidel (no fighting).
+    {
+        std::vector<VelocityConstraint> cons(2);
+        cons[0].J[0] = -1.0;                 // collision: joint0 closing
+        cons[0].xi = 0.20;
+        cons[0].d_now = 0.020;
+        cons[1].J[0] = -1.0; cons[1].J[1] = -1.0;  // floor-like: couples joint0 + joint1
+        cons[1].xi = 0.10;
+        cons[1].d_now = 0.010;               // closest -> relaxed first
+        JointArray lt = zero, rt = zero;
+        lt[0] = 1.0;
+        lt[1] = 0.5;
+        solveVelocityProjection(cons, zero, zero, lt, rt, dt, 10, big);
+        const double qd0 = lt[0] * deg2rad / dt;
+        const double qd1 = lt[1] * deg2rad / dt;
+        const double ddot0 = -qd0;            // cons[0]
+        const double ddot1 = -qd0 - qd1;      // cons[1]
+        std::cout << "combined: ddot0=" << ddot0 << " (>= -0.20)  ddot1=" << ddot1
+                  << " (>= -0.10)\n";
+        RB_CHECK(ddot0 >= -0.20 - 1e-3);      // both constraints feasible
+        RB_CHECK(ddot1 >= -0.10 - 1e-3);
+    }
+
     // (6) age extrapolation pulls a closing pair from beyond d_slow into the active
     // set: d=40mm (>d_slow) but closing 1 m/s for 10 ms -> d_now=30mm (active).
     {

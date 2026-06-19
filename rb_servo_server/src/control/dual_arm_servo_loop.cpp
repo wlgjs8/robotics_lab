@@ -3622,78 +3622,107 @@ ServoTarget DualArmServoLoop::applySafety(
             math::orientationDistanceRad(*state.tcp_stand, anchor);
     };
 
-    // Stand-frame floor plane constraint: never command a configuration that puts
-    // either TCP below z = effectiveFloorZ(). Mode-independent by design (mock /
-    // simulator / controller-sim / real all pass through here). Per-arm: only the
-    // violating arm is reverted; the escape exception allows lateral/upward
-    // motion so an arm that starts below the plane can slide or jog out without
-    // a reset.
+    // === Unified safety velocity projection (Stage 3) ===
+    // Floor plane and dual-arm self-collision are both expressed as linear velocity
+    // constraints (d(constraint)/dt = J . qdot >= -xi) on the commanded joint
+    // velocity and solved together in ONE Gauss-Seidel pass, so they cannot fight
+    // and each removes ONLY the closing component (tangential/separating motion is
+    // free). This replaces the floor binary Hold-revert and the self-collision
+    // scalar barrier. Latch / FK-fail-closed / monitor_only semantics are preserved.
+    std::vector<VelocityConstraint> safety_cons;
+    bool floor_engaged = false;       // a floor row is within its engage band
+    bool self_collision_hold = false;  // stale verdict -> whole-arm hold, skip solve
+
+    // ---- Floor plane: synchronous FK + per-point z-velocity Jacobian ----
     if (config_.safety.floor_constraint.enable) {
         const double floor_z = effectiveFloorZ();
         const FloorArmEvaluation left_eval = evaluateFloorArm(ArmId::Left, out.left_q_target_deg);
         const FloorArmEvaluation right_eval = evaluateFloorArm(ArmId::Right, out.right_q_target_deg);
         last_floor_left_ = left_eval;    // telemetry, even when already faulted
         last_floor_right_ = right_eval;
-        if (combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
-            const auto enforce_arm = [&](
-                ArmId arm,
-                ControlMode mode,
-                const RobotState& state,
-                const FloorArmEvaluation& eval,
-                JointArray& target_q,
-                const JointArray& prev_sent_q
-            ) {
-                FloorArmEvaluation prev_eval;
-                if (eval.checked && eval.tcp_z_m < floor_z) {
-                    prev_eval = evaluateFloorArm(arm, prev_sent_q);  // lazy: escape test only
-                }
-                FloorAction action = decideFloorAction(
-                    eval, prev_eval, config_.safety.floor_constraint, floor_z);
-                if (action == FloorAction::Latch && isTcpTwistMode(mode)) {
-                    action = FloorAction::Hold;
-                }
-                if (action == FloorAction::Allow) return false;
+        if (!config_.safety.floor_constraint.monitor_only &&
+            combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+            const auto& fc = config_.safety.floor_constraint;
+            // Returns true if it LATCHED (caller stops processing the other arm).
+            const auto build_floor_arm = [&](
+                ArmId arm, ControlMode mode, const RobotState& state,
+                const FloorArmEvaluation& eval, JointArray& target_q,
+                const JointArray& prev_sent_q) -> bool {
                 const std::string arm_name = arm == ArmId::Left ? "left" : "right";
-                const std::string reason = eval.checked
-                    ? ("floor constraint: " + arm_name + " tcp z " + std::to_string(eval.tcp_z_m) +
-                       " m below plane z_min " + std::to_string(floor_z) + " m")
-                    : ("floor constraint: " + arm_name + " TCP FK unavailable");
-                if (action == FloorAction::Latch) {
-                    latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
-                    out = currentFaultHoldTarget();
-                    combined = SafetyVerdict::FaultLatched;
-                    return true;
+                const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount
+                                                                 : config_.right_mount;
+                if (!eval.checked) {
+                    // TCP FK unavailable -> fail closed (cannot build a Jacobian).
+                    const std::string reason = "floor constraint: " + arm_name + " TCP FK unavailable";
+                    if (fc.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
+                        !isTcpTwistMode(mode)) {
+                        latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
+                        out = currentFaultHoldTarget();
+                        combined = SafetyVerdict::FaultLatched;
+                        return true;
+                    }
+                    target_q = prev_sent_q;  // hold this arm
+                    resetCartesianVelocityIntegrator(arm, "floor_fk_unavailable");
+                    reanchor_twist_smd_goal(arm, state);
+                    if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
+                        combined = SafetyVerdict::FloorViolation;
+                    }
+                    return false;
                 }
-                // FloorAction::Hold: revert only this arm (non-latching). Reset the
-                // twist velocity integrator so it does not keep advancing (and
-                // diverging from the held command) while the hold is active.
-                // If twist_via_smd is active, reanchor that pose goal too; the
-                // velocity integrator reset alone does not bound the SMD goal.
-                target_q = prev_sent_q;
-                ++floor_clamp_count_;
-                resetCartesianVelocityIntegrator(arm, "floor_hold");
-                reanchor_twist_smd_goal(arm, state);
-                if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
-                    combined = SafetyVerdict::FloorViolation;
+                // Hard latch (preserved): FaultLatch policy + non-twist (PTP/jog) +
+                // descending below the plane (not escaping vs the previous sent pose).
+                if (fc.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
+                    !isTcpTwistMode(mode) && eval.tcp_z_m < floor_z) {
+                    const FloorArmEvaluation prev_eval = evaluateFloorArm(arm, prev_sent_q);
+                    const bool escaping = prev_eval.checked && std::isfinite(prev_eval.tcp_z_m) &&
+                        eval.tcp_z_m > prev_eval.tcp_z_m - kFloorEscapeEpsilonM;
+                    if (!escaping) {
+                        const std::string reason = "floor constraint: " + arm_name + " tcp z " +
+                            std::to_string(eval.tcp_z_m) + " m below plane z_min " +
+                            std::to_string(floor_z) + " m";
+                        latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
+                        out = currentFaultHoldTarget();
+                        combined = SafetyVerdict::FaultLatched;
+                        return true;
+                    }
+                }
+                // Within the engage band: add a z-velocity damper constraint. zdot of
+                // the lowest point >= -sqrt(2 a (z - z_min)); below the plane xi=0
+                // (block deeper, slide/lift free).
+                const double margin = eval.tcp_z_m - floor_z;
+                if (margin < fc.d_slow_m) {
+                    JointArray Jz{};
+                    const std::array<double, 3> offset{eval.lowest_offset_tcp.x(),
+                                                       eval.lowest_offset_tcp.y(),
+                                                       eval.lowest_offset_tcp.z()};
+                    if (kinematics_ &&
+                        kinematics_->computeFloorPointZJacobian(arm, target_q, mount, offset, Jz)) {
+                        VelocityConstraint c;
+                        const int base = arm == ArmId::Left ? 0 : kDof;
+                        for (int i = 0; i < kDof; ++i) c.J[base + i] = Jz[i];
+                        if (c.J.squaredNorm() > 1e-18) {
+                            c.xi = margin > 0.0 ? std::sqrt(2.0 * fc.a_brake_m_s2 * margin) : 0.0;
+                            c.d_now = margin;
+                            safety_cons.push_back(std::move(c));
+                            floor_engaged = true;
+                        }
+                    } else {
+                        // Jacobian unavailable -> fail closed (revert this arm).
+                        target_q = prev_sent_q;
+                        resetCartesianVelocityIntegrator(arm, "floor_jacobian_unavailable");
+                        reanchor_twist_smd_goal(arm, state);
+                        if (combined == SafetyVerdict::Ok ||
+                            combined == SafetyVerdict::JointLimitClamped) {
+                            combined = SafetyVerdict::FloorViolation;
+                        }
+                    }
                 }
                 return false;
             };
-            const bool latched =
-                enforce_arm(
-                    ArmId::Left,
-                    left_mode,
-                    left_state,
-                    left_eval,
-                    out.left_q_target_deg,
-                    left_prev_sent_q_deg_);
-            if (!latched) {
-                enforce_arm(
-                    ArmId::Right,
-                    right_mode,
-                    right_state,
-                    right_eval,
-                    out.right_q_target_deg,
-                    right_prev_sent_q_deg_);
+            if (!build_floor_arm(ArmId::Left, left_mode, left_state, left_eval,
+                                 out.left_q_target_deg, left_prev_sent_q_deg_)) {
+                build_floor_arm(ArmId::Right, right_mode, right_state, right_eval,
+                                out.right_q_target_deg, right_prev_sent_q_deg_);
             }
         }
     }
@@ -3787,54 +3816,66 @@ ServoTarget DualArmServoLoop::applySafety(
                     resetCartesianVelocityIntegrator(ArmId::Right, "self_collision_stale");
                     reanchor_twist_smd_goal(ArmId::Left, left_state);
                     reanchor_twist_smd_goal(ArmId::Right, right_state);
+                    self_collision_hold = true;  // skip the combined solve (qdot already 0)
                     if (combined == SafetyVerdict::Ok ||
                         combined == SafetyVerdict::JointLimitClamped) {
                         combined = SafetyVerdict::SelfCollision;
                     }
                 } else {
-                    // Directional velocity-damper projection (Stage 2): remove only the
-                    // closing component of the command for each near pair. Chatter-free
-                    // (no 0<->1 toggle), escape-free (tangential/retreat untouched), and
-                    // fast-safe (closing speed pre-limited to the braking distance).
-                    const CollisionProjectionResult proj = applyCollisionVelocityProjection(
-                        v, collision_monitor_cfg_,
-                        left_prev_sent_q_deg_, right_prev_sent_q_deg_,
-                        out.left_q_target_deg, out.right_q_target_deg,
-                        dt_sec, now_s - v.stamp_s,
-                        config_.safety.joint_target_smd.max_velocity_deg_s);
-                    // "Meaningfully blocked" (vs merely slowed while sliding) gates BOTH
-                    // the windup reanchor and the safety verdict, so tangential motion
-                    // near a neighbor stays Running and is never frozen.
-                    constexpr double kReanchorDegPerSec = 2.0;
-                    const bool left_blocked = proj.left_correction_deg_s > kReanchorDegPerSec;
-                    const bool right_blocked = proj.right_correction_deg_s > kReanchorDegPerSec;
-                    if (left_blocked) {
-                        resetCartesianVelocityIntegrator(ArmId::Left, "self_collision_block");
-                        reanchor_twist_smd_goal(ArmId::Left, left_state);
-                    }
-                    if (right_blocked) {
-                        resetCartesianVelocityIntegrator(ArmId::Right, "self_collision_block");
-                        reanchor_twist_smd_goal(ArmId::Right, right_state);
-                    }
-                    if ((left_blocked || right_blocked) &&
-                        (combined == SafetyVerdict::Ok ||
-                         combined == SafetyVerdict::JointLimitClamped)) {
-                        combined = SafetyVerdict::SelfCollision;
-                    }
-                    if (kSelfColLog && proj.active) {
-                        static double last_proj_log_s = 0.0;
-                        const double tt = std::chrono::duration<double>(
-                            std::chrono::steady_clock::now().time_since_epoch()).count();
-                        if (tt - last_proj_log_s > 0.2) {
-                            last_proj_log_s = tt;
-                            std::cerr << "[selfcol-proj] active_pairs=" << proj.active_pairs
-                                      << " corr(L/R)=" << proj.left_correction_deg_s << "/"
-                                      << proj.right_correction_deg_s << " deg/s"
-                                      << ((left_blocked || right_blocked) ? "  BLOCKED" : "")
-                                      << "\n";
-                        }
-                    }
+                    // Collect self-collision velocity constraints (per near pair within
+                    // d_slow, age-extrapolated) into the shared list; the combined solve
+                    // below removes only the closing component of the command.
+                    buildCollisionConstraints(v, collision_monitor_cfg_, now_s - v.stamp_s,
+                                              safety_cons);
                 }
+            }
+        }
+    }
+
+    // ---- Combined Gauss-Seidel solve (floor + self-collision together) ----
+    if (!safety_cons.empty() && !self_collision_hold &&
+        combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+        int iters = 3;
+        if (config_.safety.self_collision.enable) {
+            iters = std::max(iters, collision_monitor_cfg_.projection_iterations);
+        }
+        const CollisionProjectionResult proj = solveVelocityProjection(
+            safety_cons, left_prev_sent_q_deg_, right_prev_sent_q_deg_,
+            out.left_q_target_deg, out.right_q_target_deg, dt_sec, iters,
+            config_.safety.joint_target_smd.max_velocity_deg_s);
+        // "Meaningfully blocked" (vs merely slowed while sliding) gates the windup
+        // reanchor AND the safety verdict, so tangential motion stays Running and is
+        // never frozen.
+        constexpr double kReanchorDegPerSec = 2.0;
+        const bool left_blocked = proj.left_correction_deg_s > kReanchorDegPerSec;
+        const bool right_blocked = proj.right_correction_deg_s > kReanchorDegPerSec;
+        if (left_blocked) {
+            resetCartesianVelocityIntegrator(ArmId::Left, "safety_projection_block");
+            reanchor_twist_smd_goal(ArmId::Left, left_state);
+        }
+        if (right_blocked) {
+            resetCartesianVelocityIntegrator(ArmId::Right, "safety_projection_block");
+            reanchor_twist_smd_goal(ArmId::Right, right_state);
+        }
+        if (left_blocked || right_blocked) {
+            if (floor_engaged) ++floor_clamp_count_;
+            if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
+                combined = floor_engaged ? SafetyVerdict::FloorViolation
+                                         : SafetyVerdict::SelfCollision;
+            }
+        }
+        static const bool kProjLog = std::getenv("RB_SELF_COLLISION_LOG") != nullptr;
+        if (kProjLog && proj.active) {
+            static double last_proj_log_s = 0.0;
+            const double tt = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (tt - last_proj_log_s > 0.2) {
+                last_proj_log_s = tt;
+                std::cerr << "[safety-proj] cons=" << proj.active_pairs
+                          << (floor_engaged ? " (incl floor)" : "")
+                          << " corr(L/R)=" << proj.left_correction_deg_s << "/"
+                          << proj.right_correction_deg_s << " deg/s"
+                          << ((left_blocked || right_blocked) ? "  BLOCKED" : "") << "\n";
             }
         }
     }
@@ -3859,7 +3900,8 @@ FloorArmEvaluation DualArmServoLoop::evaluateFloorArm(ArmId arm, const JointArra
         // rotates). tcp_z_m carries the worst (lowest) z so the decision,
         // escape, and clamp logic all act on the most exposed point.
         const double lowest_z = floorLowestZWithOffsets(
-            tcp, config_.safety.floor_constraint.tcp_offset_points, &eval.lowest_point);
+            tcp, config_.safety.floor_constraint.tcp_offset_points, &eval.lowest_point,
+            &eval.lowest_offset_tcp);
         if (!std::isfinite(lowest_z)) {
             return FloorArmEvaluation{};  // checked=false -> caller fails closed
         }

@@ -82,6 +82,26 @@ public:
         return {};
     }
 
+    // Stand-frame z-velocity Jacobian of a TCP-frame offset point (Stage 3 floor
+    // velocity projection): fills Jz_out (1x6, per arm joint, rad) such that
+    // d(p_z_stand)/dt = Jz_out . qdot, where p = TCP + R_tcp * tcp_offset_m. Returns
+    // false (and leaves Jz_out zero) when kinematics/FK is unavailable or non-finite.
+    // Default: unsupported -> false (caller fails closed / keeps the FK backstop).
+    virtual bool computeFloorPointZJacobian(
+        ArmId arm,
+        const JointArray& q_deg,
+        const ArmMountConfig& mount,
+        const std::array<double, 3>& tcp_offset_m,
+        JointArray& Jz_out
+    ) const {
+        (void)arm;
+        (void)q_deg;
+        (void)mount;
+        (void)tcp_offset_m;
+        Jz_out = JointArray{};
+        return false;
+    }
+
 };
 
 }  // namespace rb_servo

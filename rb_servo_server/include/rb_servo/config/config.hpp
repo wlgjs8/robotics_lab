@@ -333,6 +333,12 @@ struct FloorConstraintConfig {
     // which dip below the TCP point when the tool rotates. The published
     // per-arm tcp_z_m becomes the LOWEST checked point's z.
     std::vector<FloorCheckPointConfig> tcp_offset_points;
+    // Velocity-damper projection (Stage 3): when within d_slow_m of the plane the
+    // commanded downward (closing) speed of the lowest point is limited to
+    // sqrt(2 a_brake (z - z_min)) so it brakes to zero AT the plane and slides
+    // along it; lateral/upward motion is free. Replaces the binary Hold revert.
+    double a_brake_m_s2 = 4.0;
+    double d_slow_m = 0.05;  // engage band above the plane (0 => always active)
 };
 
 // Joint-space SMD profile for the JointTarget primitive (the joint-space

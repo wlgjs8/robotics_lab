@@ -11,6 +11,7 @@
 #include "rb_servo/control/cartesian_controller.hpp"
 #include "rb_servo/kinematics/ik_solver.hpp"
 #include "rb_servo/kinematics/pinocchio_kinematics.hpp"
+#include "rb_servo/math/se3.hpp"
 
 namespace {
 
@@ -768,7 +769,40 @@ bool testIkSelectiveDampingDisabledByDefault() {
 
 }  // namespace
 
+bool testFloorPointZJacobianFiniteDifference() {
+    // Stage 3: validate computeFloorPointZJacobian (stand-frame z-velocity Jacobian
+    // of a TCP-frame offset point) against a central finite difference of the
+    // offset point's stand-frame z through computeTcpStand.
+    rb_servo::PinocchioKinematics kin(testKinematicsConfig());
+    for (const rb_servo::ArmMountConfig mount : {leftMount(), rightMount()}) {
+        const rb_servo::JointArray base = seedJoints();
+        const std::array<double, 3> offset = {0.059, 0.0, 0.03};  // tip-like, off-axis
+        rb_servo::JointArray Jz{};
+        RB_CHECK(kin.computeFloorPointZJacobian(rb_servo::ArmId::Left, base, mount, offset, Jz));
+        const auto pz = [&](const rb_servo::JointArray& q) {
+            const rb_servo::Pose6D tcp = kin.computeTcpStand(rb_servo::ArmId::Left, q, mount);
+            const rb_servo::math::Matrix3 R = rb_servo::math::rotationFromPose(tcp);
+            const rb_servo::math::Vector3 off(offset[0], offset[1], offset[2]);
+            return tcp.z + (R * off).z();
+        };
+        const double k = 3.14159265358979323846 / 180.0;
+        const double h = 0.2;  // deg
+        double max_err = 0.0;
+        for (int j = 0; j < rb_servo::kDof; ++j) {
+            rb_servo::JointArray qp = base, qm = base;
+            qp[j] += h;
+            qm[j] -= h;
+            const double fd = (pz(qp) - pz(qm)) / (2.0 * h * k);  // d(p_z)/dq_j [m/rad]
+            max_err = std::max(max_err, std::abs(fd - Jz[j]));
+        }
+        std::cout << "floor Jz FD max err = " << max_err << " m/rad\n";
+        RB_CHECK(max_err < 1e-3);
+    }
+    return true;
+}
+
 int main() {
+    if (!testFloorPointZJacobianFiniteDifference()) return 1;
     if (!testIkConfigParsing()) return 1;
     if (!testIkConditioningDiagnosticsPopulated()) return 1;
     if (!testIkBranchJumpGuardFlagsLargeSeedDelta()) return 1;

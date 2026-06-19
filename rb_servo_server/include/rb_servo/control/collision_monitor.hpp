@@ -164,12 +164,37 @@ double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorC
 
 // Outcome of the velocity-damper projection (Stage 2).
 struct CollisionProjectionResult {
-    bool active = false;               // >=1 near pair engaged (command modified)
+    bool active = false;               // >=1 constraint engaged (command modified)
     int active_pairs = 0;
     double max_correction_deg_s = 0.0; // ||qdot - qdot_desired|| (both arms), deg/s
     double left_correction_deg_s = 0.0;
     double right_correction_deg_s = 0.0;
 };
+
+// One linear inequality on the commanded joint velocity (Stage 3, unified solver):
+// d(constraint)/dt = J . qdot >= -xi, with qdot the 12-vector [left6; right6] in
+// rad/s. Self-collision near pairs and floor-plane points are both expressed this
+// way and solved together so they cannot fight. d_now is only a sort key (closest
+// constraint relaxed first in Gauss-Seidel).
+struct VelocityConstraint {
+    Eigen::Matrix<double, 2 * kDof, 1> J = Eigen::Matrix<double, 2 * kDof, 1>::Zero();
+    double xi = 0.0;
+    double d_now = 0.0;
+};
+
+// Build the self-collision velocity constraints from a verdict (per near pair within
+// d_slow, age-extrapolated). Appends to `out` (so floor rows can be added too).
+void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+                               double verdict_age_s, std::vector<VelocityConstraint>& out);
+
+// Solve a set of velocity constraints by Gauss-Seidel projection (closest first),
+// modifying the joint targets (degrees) in place. Pure; shared by self-collision and
+// floor. `cons` is sorted in place. Returns per-arm correction magnitudes.
+CollisionProjectionResult solveVelocityProjection(
+    std::vector<VelocityConstraint>& cons,
+    const JointArray& left_prev_deg, const JointArray& right_prev_deg,
+    JointArray& left_target_deg, JointArray& right_target_deg,
+    double dt_sec, int iterations, const JointArray& max_joint_vel_deg_s);
 
 // Directional velocity-damper projection (Stage 2) — the chatter-free, fast-safe
 // replacement for the scalar collisionVelocityScale. For each near pair within

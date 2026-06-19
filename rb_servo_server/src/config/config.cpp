@@ -1750,6 +1750,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "fail_policy",
                 "monitor_only",
                 "tcp_offset_points",
+                "a_brake_m_s2",
+                "d_slow_m",
             }, "safety.floor_constraint");
             if (has(fc, "enable")) {
                 cfg.safety.floor_constraint.enable = asBool(fc["enable"], "safety.floor_constraint.enable");
@@ -1773,6 +1775,14 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(fc, "monitor_only")) {
                 cfg.safety.floor_constraint.monitor_only =
                     asBool(fc["monitor_only"], "safety.floor_constraint.monitor_only");
+            }
+            if (has(fc, "a_brake_m_s2")) {
+                cfg.safety.floor_constraint.a_brake_m_s2 =
+                    asDouble(fc["a_brake_m_s2"], "safety.floor_constraint.a_brake_m_s2");
+            }
+            if (has(fc, "d_slow_m")) {
+                cfg.safety.floor_constraint.d_slow_m =
+                    asDouble(fc["d_slow_m"], "safety.floor_constraint.d_slow_m");
             }
             if (has(fc, "tcp_offset_points")) {
                 const YAML::Node points = fc["tcp_offset_points"];
