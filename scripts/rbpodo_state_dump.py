@@ -11,7 +11,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 REAL_ROBOT_IPS = {"172.28.60.200", "172.28.60.201"}
@@ -45,6 +45,25 @@ ENUM_STATUS_RANGES = {
     "op_stat_sos_flag": (0, 12),
     "op_stat_ems_flag": (0, 4),
 }
+# Rainbow controller op_stat_* status fields are bit-packed: only the documented low
+# bits carry the status, the upper bits are reserved/undefined (e.g. op_stat_self_collision
+# arrives as 0x76904aa0 with bit0 = 0 on healthy hardware). Mask to the valid bits before
+# validating shape/range, mirroring the C++ kRbpodo*Mask constants in rbpodo_backend.cpp.
+# Ref: rainbowrobotics.github.io rb_cobot_docs technical_docs/data_structure (items 33-37).
+STATUS_FIELD_BIT_MASKS = {
+    "op_stat_collision_occur": 0b11,     # item 33: lower 2 bits
+    "op_stat_self_collision": 0b11,      # item 35: bits 0-1 = self-collision flag
+    "op_stat_sos_flag": 0b111111,        # item 34: lower 6 bits
+    "op_stat_ems_flag": 0b111111,        # item 37: lower 6 bits
+}
+
+
+def masked_status(field: str, value: Optional[int]) -> Optional[int]:
+    """Mask a bit-packed op_stat_* field to its documented valid bits (no-op otherwise)."""
+    if value is None:
+        return None
+    mask = STATUS_FIELD_BIT_MASKS.get(field)
+    return value & mask if mask is not None else value
 
 
 class StateDumpError(RuntimeError):
@@ -289,14 +308,14 @@ def diagnostic_interpretation(raw: dict[str, Any]) -> tuple[bool, list[str], lis
         suspect_reasons.append(f"time is implausible: {time_value}")
 
     for field, (minimum, maximum) in ENUM_STATUS_RANGES.items():
-        value = integer(raw.get(field))
+        value = masked_status(field, integer(raw.get(field)))
         if value is None or value < minimum or value > maximum:
             suspect_reasons.append(f"{field} is outside expected range [{minimum}, {maximum}]: {raw.get(field)}")
         elif value != 0 and field in ERROR_FIELD_ORDER:
             clear_errors.append(field)
 
     for field in BOOLEAN_STATUS_FIELDS:
-        value = integer(raw.get(field))
+        value = masked_status(field, integer(raw.get(field)))
         if value not in {0, 1}:
             suspect_reasons.append(f"{field} expected 0/1, got {raw.get(field)}")
         elif value == 1:
@@ -306,7 +325,12 @@ def diagnostic_interpretation(raw: dict[str, Any]) -> tuple[bool, list[str], lis
     if init_error is not None and init_error != 0:
         clear_errors.append("init_error")
 
+    # Huge-value garbage check applies only to NON-bit-packed fields: the upper bits of
+    # bit-packed op_stat_* fields are reserved/undefined and legitimately non-zero, so they
+    # are masked above instead of flagged here.
     for field in ERROR_FIELD_ORDER:
+        if field in STATUS_FIELD_BIT_MASKS:
+            continue
         value = integer(raw.get(field))
         if value is not None and abs(value) >= 1_000_000:
             suspect_reasons.append(f"{field} has huge value: {value}")
@@ -526,6 +550,9 @@ def run_self_test() -> int:
     else:
         raise AssertionError("expected bad joint array to fail")
 
+    # Bit-packed op_stat_self_collision: healthy hardware sends 0x76904aa0 (bit0 = 0).
+    # The reserved upper bits must be masked, not flagged as garbage. Here a tiny
+    # implausible time is the only genuine suspect signal.
     raw = {
         "time": 3.096e-41,
         "real_vs_simulation_mode": 1,
@@ -535,12 +562,24 @@ def run_self_test() -> int:
         "op_stat_ems_flag": 0,
         "op_stat_soft_estop_occur": 0,
         "op_stat_collision_occur": 0,
-        "op_stat_self_collision": 1977953904,
+        "op_stat_self_collision": 1989167776,  # 0x76904aa0, bit0 = 0 -> healthy
     }
     suspect, reasons, clear = diagnostic_interpretation(raw)
-    assert suspect
+    assert suspect  # from the implausible time only
     assert not clear
-    assert any("op_stat_self_collision" in reason for reason in reasons)
+    assert any("time" in reason for reason in reasons)
+    assert not any("op_stat_self_collision" in reason for reason in reasons)
+
+    # Same reserved-bit garbage but a valid time decodes fully healthy (no suspect).
+    healthy = dict(raw, time=12.5)
+    suspect_healthy, _, clear_healthy = diagnostic_interpretation(healthy)
+    assert not suspect_healthy
+    assert not clear_healthy
+
+    # A real self-collision (bit0 = 1) must still be reported through garbage upper bits.
+    collided = dict(healthy, op_stat_self_collision=1989167777)  # 0x76904aa1, bit0 = 1
+    _, _, clear_collided = diagnostic_interpretation(collided)
+    assert "op_stat_self_collision" in clear_collided
     assert controller_mode_name(1) == "simulation"
     assert controller_mode_name(0) == "real"
     assert controller_mode_warning(0) == "controller not confirmed in pgmode simulation: real_vs_simulation_mode=0"
