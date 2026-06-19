@@ -2,6 +2,10 @@
 
 `policy_runner` is the Python action-source layer for `robotics_lab`. It sends
 UDP JSON commands to `rb_servo_server` and consumes the UDP JSON state stream.
+`flow-infer` keeps `tcp_twist_local` as its default ee_local runtime command
+family and can opt into `tcp_target_pose`, which composes each learned per-step
+ee_local delta into an absolute `TcpPoseTarget` setpoint without changing the
+model, data, or training labels.
 
 Supported action sources:
 
@@ -610,6 +614,9 @@ resampling; the default is half the checkpoint action horizon. Flow gripper
 channels remain separately gated by `GripperRuntime`; simulator/controller-sim
 packets may carry an integrated `gripper_target`, while physical gripper output
 still requires `allow_real_gripper_motion=true` and `RB_ALLOW_REAL_GRIPPER=1`.
+The Pika serial backend suppresses the vendor SDK's `pika.*` console logging by
+default; set `gripper.suppress_sdk_logs: false` only for SDK-level serial
+debugging.
 Required camera frames must be available when sampling or continuing a chunk;
 otherwise the source emits no new nonzero motion intent and sends a one-shot
 zero twist if needed to stop a previous stream. All inference intents remain

@@ -34,7 +34,6 @@ from cartesian_acceptance import (
 
 
 REAL_ROBOT_IPS = ("172.28.60.200", "172.28.60.201")
-REAL_GATE_ENV = ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN")
 RECOMMENDED_PROFILE_CONTROLLERS = ("twist_stand", "twist_stand_feedback")
 
 
@@ -602,10 +601,6 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
     if args.warmup_sec < 0.0 or args.settle_sec < 0.0:
         raise AcceptanceError("--warmup-sec and --settle-sec must be non-negative")
 
-    configured_real_gates = [name for name in REAL_GATE_ENV if os.environ.get(name)]
-    if configured_real_gates:
-        raise AcceptanceError("real robot environment gates must not be set for this simulator benchmark: " + ", ".join(configured_real_gates))
-
     server_text = read_text(args.server_config, "server config")
     left_text = read_text(args.left_config, "left simulator config")
     right_text = read_text(args.right_config, "right simulator config")
@@ -677,7 +672,6 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         "passed": True,
         "simulator_only": True,
         "refused_markers": ["run_mode: real", "backend_type: rbpodo", "allow_in_real: true", *REAL_ROBOT_IPS],
-        "real_gate_env_checked": list(REAL_GATE_ENV),
         "max_twist_linear_m_s": max_twist,
         "max_twist_angular_rad_s": max_twist_angular,
         "max_linear_move_speed_m_s": max_linear,
@@ -1878,8 +1872,6 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             right_host, right_port = parse_tcp_endpoint(right_config.control_bind)
             rbsim_command = shlex.split(args.rbsim_command)
             env = os.environ.copy()
-            for gate in REAL_GATE_ENV:
-                env.pop(gate, None)
             sim_src = args.root / "rb_simulator" / "src"
             env["PYTHONPATH"] = str(sim_src) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
             left_proc = start_process([*rbsim_command, "--config", str(args.left_config.resolve())], args.root, artifact_dir / "left_simulator.log", env)
@@ -1887,8 +1879,6 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             right_proc = start_process([*rbsim_command, "--config", str(args.right_config.resolve())], args.root, artifact_dir / "right_simulator.log", env)
             wait_tcp(right_host, right_port, args.startup_timeout_sec, "right simulator")
             server_env = os.environ.copy()
-            for gate in REAL_GATE_ENV:
-                server_env.pop(gate, None)
             server_proc = start_process([str(args.server.resolve()), "--config", str(args.server_config.resolve())], artifact_dir, artifact_dir / "rb_servo_server.log", server_env)
         else:
             for name in ("left_simulator.log", "right_simulator.log", "rb_servo_server.log"):

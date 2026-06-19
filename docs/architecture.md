@@ -52,14 +52,16 @@ Run / validated on pgmode-real (physical RB3-730E hardware):
 - UMI dual-arm Cartesian teleop (relative-init) driving `TcpPoseTarget` on the
   physical arms; UMI `data_tcp` replay verified on hardware (ee_local + r_align)
 - `flow-infer` `real_policy` full closed-loop rollout on the physical robot
-  (pi0.5/openpi): `TcpTwistLocal` streaming + gripper commands. The `real_policy`
+  (pi0.5/openpi): default `TcpTwistLocal` streaming + gripper commands. The `real_policy`
   rollout-mode gate stays fully enforced (`_validate_real_policy`: `mode=real`,
   `allow_real_motion`, measured/accepted geometry + retarget, validated collision
   model, gripper gate) and was satisfied via accepted/validated runtime config —
   the lane is open and exercised, not blocked. Runtime is validated (smooth,
   in-distribution; async chunking decouples ~30 Hz policy from the 500 Hz servo;
   the absolute-proprio frame gap is fixed by reset-relative retrain). Task success
-  is still model-limited (see below)
+  is still model-limited (see below). The same ee_local action deltas may also be
+  converted at runtime into opt-in `tcp_target_pose` absolute `TcpPoseTarget`
+  setpoints; this changes only runtime command emission, not model/data/training
 - real gripper motion via the Pika Gripper Backend, gated by `RB_ALLOW_REAL_GRIPPER`
   + `measured_gripper_available` + `allow_real_gripper_motion`
 - server-side async URDF-mesh self-collision guard (`CollisionMonitor`, 33 geoms /
@@ -313,6 +315,13 @@ through the same gate). It is enforced in two tiers:
   along the plane instead of stuttering against the Tier-1 hold. Joint-space
   primitives get no Tier-2 assist (Tier-1 hold only).
 
+When `tcp_offset_points` is configured, floor evaluation checks the TCP plus
+named local-frame offsets. The current local PIKA gripper stack configs check
+`gripper_tip_a` and `gripper_tip_b` at TCP-frame x offsets of `+0.059 m` and
+`-0.059 m`, based on a measured `118 mm` tip-to-tip width. These points are used
+by both the Tier-1 FK backstop and the Tier-2 Cartesian streaming floor
+projection.
+
 The plane height is runtime-adjustable with the **leaseless** non-motion command
 `SetSafetyFloorZ` (`{"mode": "SetSafetyFloorZ", "floor_z_m": <meters>}`):
 raising the floor is safety-tightening and must never be blocked by a teleop
@@ -450,6 +459,13 @@ Streaming joint velocity command. Suitable for joint teleop/debug when safety ga
 
 Cartesian point-to-point final-pose target. It is MoveJ-like at the TCP level. Final TCP pose is targeted, but the intermediate TCP path is not guaranteed to be linear. Real mode is open through the real-mode gates plus `cartesian_control.allow_in_real: true`, and has been validated on the dual-arm physical Cartesian circle.
 
+`policy_runner flow-infer --command-family tcp_target_pose` composes each
+ee_local per-step policy delta onto the measured or running TCP pose and emits
+absolute `tcp_target_stand` `TcpPoseTarget` setpoints. This is an opt-in runtime
+conversion of the same trained action labels; the default flow-infer family
+remains `tcp_twist_local`, and live `tcp_target_pose` rollout requires the
+explicit policy-runner opt-in flag.
+
 ### `TcpLinearMove`
 
 Simulator-only MoveL-like Cartesian path primitive. It plans a Cartesian path with explicit timing/speed semantics and orientation interpolation semantics. Current modes are:
@@ -463,16 +479,15 @@ Real mode remains blocked.
 
 Streaming Cartesian velocity primitives. `TcpTwistLocal` is intended for SpaceMouse/local-frame teleop. `TcpTwistStand` is the stand-frame low-level API. Server-side Cartesian velocity limits, the server-side angular deadband for orientation hold, stale-state checks, deadman behavior, and command-source arbitration are required.
 
-**Twist conditioning.** The only **always-on** conditioning of the twist input is
-a per-tick magnitude clamp (`limitTwist()` in `cartesian_servo_controller.cpp`:
-scale-to-limit or reject by `exceed_limit_policy`); there is no slew-rate limit.
-An **optional** first-order low-pass filter
-(`cartesian_control.twist_lpf_enable`, default **off** → behavior-preserving;
-`twist_lpf_tau_sec ≈ 30–50 ms`) can be enabled for anti-vibration — it ramps the
-policy's stepped ZOH velocity before the velocity IK solve, with per-arm state
-reset on lease/mode re-entry. With the LPF off, input jitter passes straight
-through to the joint integrator. Any additional teleop-side smoothing (e.g. the
-SpaceMouse/UMI input EMA) lives upstream in `policy_runner`, not here.
+**Twist conditioning.** The only conditioning of the twist input is a per-tick
+magnitude clamp (`limitTwist()` in `cartesian_servo_controller.cpp`: scale-to-limit
+or reject by `exceed_limit_policy`); there is no slew-rate limit and no twist LPF
+(the former `twist_lpf_*` option was removed — input smoothing for `TcpTwistLocal`
+is handled by the `twist_via_smd` SMD pose tracker instead). Any additional
+teleop-side smoothing (e.g. the SpaceMouse/UMI input EMA) lives upstream in
+`policy_runner`, not here. Joint-space continuity near singularities is owned by
+the shared IK solver's selective singularity-robust damping
+(`kinematics.ik.singular_region_eps` / `damping_max`), not by the twist path.
 
 **TrajectoryFilter defers all Cartesian modes.** `TrajectoryFilter::computeJointTarget`
 handles only joint-space modes; every Cartesian mode (`TcpPoseTarget`,
@@ -565,7 +580,7 @@ or safety limits. `rt_script` is future work and remains out of scope.
 
 `rb_gui` is a viewer/operator console. It exposes every motion primitive in every run mode and no longer keeps mode-based client gates or feature-flag/env unlocks; whether a control is live is derived from the live server state stream (per-arm FK/TCP-pose validity, the server Cartesian gate, fault latch, motion state) and the command-source lease. The server is the sole real-motion authority and rejects any command its own gates (`RB_ALLOW_REAL_*` + site config + safety filter + lease + deadman) do not allow — so the GUI driving a real command does not bypass real-motion safety.
 
-`policy_runner` owns Python action sources, including SpaceMouse. SpaceMouse Cartesian uses `TcpTwistLocal`, not repeated TCP deltas. Joint-only action sources do not require camera observations. Camera-dependent sources must declare camera readiness and fail closed when camera state is stale.
+`policy_runner` owns Python action sources, including SpaceMouse. SpaceMouse Cartesian uses `TcpTwistLocal`, not repeated TCP deltas. `flow-infer` ee_local policy deltas can be emitted as the default `tcp_twist_local` velocity commands or as opt-in `tcp_target_pose` absolute `TcpPoseTarget` setpoints. Joint-only action sources do not require camera observations. Camera-dependent sources must declare camera readiness and fail closed when camera state is stale.
 
 For rbpodo controller-simulation circle live visualization, `rb_gui` is a
 state and overlay consumer. It should show both actual/reference TCP telemetry

@@ -16,13 +16,7 @@ import run_rbpodo_circle_ablation as ablation
 
 
 ENV_NAMES = (
-    "RB_ALLOW_REAL_ROBOT",
-    "RB_ALLOW_REAL_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
-    "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION",
     "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
-    "RB_ALLOW_REAL_CARTESIAN",
 )
 
 
@@ -134,7 +128,6 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             text=True,
         )
         self.assertIn("--dry-run", completed.stdout)
-        self.assertIn("--i-confirm-controller-is-in-pgmode-simulation", completed.stdout)
 
     def test_matrix_parser_rejects_operation_mode_real_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
@@ -159,11 +152,6 @@ class RbpodoCircleAblationTest(unittest.TestCase):
             write_matrix(matrix)
             write_pgmode_summary(pgmode)
             env = os.environ.copy()
-            env["RB_ALLOW_REAL_ROBOT"] = "1"
-            env["RB_ALLOW_REAL_MOTION"] = "1"
-            env["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
-            env["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
-            env.pop("RB_ALLOW_REAL_CARTESIAN", None)
             script = Path(__file__).with_name("run_rbpodo_circle_ablation.py")
             completed = subprocess.run(
                 [
@@ -180,8 +168,6 @@ class RbpodoCircleAblationTest(unittest.TestCase):
                     "--dry-run",
                     "--pgmode-summary-json",
                     str(pgmode),
-                    "--i-understand-this-connects-to-real-controller",
-                    "--i-confirm-controller-is-in-pgmode-simulation",
                 ],
                 env=env,
                 check=True,

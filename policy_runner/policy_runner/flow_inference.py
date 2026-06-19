@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TextIO
@@ -12,12 +14,11 @@ import numpy as np
 import torch
 
 from .action_sources.tcp_delta import (
-    clamp_tcp_twist,
     clamp_tcp_delta,
+    clamp_tcp_twist,
     cartesian_action_requirements,
-    tcp_delta_stand_intent,
+    tcp_pose_target_stand_intent,
     tcp_twist_local_intent,
-    tcp_twist_stand_intent,
 )
 from .flow_dataset import (
     DEFAULT_ACTION_FRAME,
@@ -29,6 +30,7 @@ from .flow_dataset import (
     decode_hdf5_image_value,
     normalize_action_frame,
     normalize_runtime_proprio,
+    pose_compose_local,
     pose_from_state_payload,
     runtime_proprio_from_state,
 )
@@ -40,11 +42,27 @@ from .rollout_modes import RolloutMode, RolloutModeValidationError, parse_rollou
 from .servo_command_client import CommandIntent
 
 
-FLOW_COMMAND_FAMILY_CHOICES = ("tcp_twist_stand", "tcp_twist_local", "tcp_delta_stand")
+def default_action_log_path() -> str:
+    """Resolve the per-step action-log path.
+
+    Honors ``POLICY_RUNNER_ACTION_LOG`` when set; otherwise auto-accumulates one
+    timestamped file per run under the repo ``logs/`` dir, so a plain
+    ``flow-infer`` (no env var on the command line) still captures actions.
+    """
+    configured = os.environ.get("POLICY_RUNNER_ACTION_LOG")
+    if configured:
+        return configured
+    logs_dir = Path(__file__).resolve().parents[2] / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return str(logs_dir / f"actions_{time.strftime('%Y%m%d_%H%M%S')}.jsonl")
+
+
+# Body-frame (ee_local) policy deltas can be consumed either as velocity
+# commands or as integrated absolute TCP pose targets.
+FLOW_COMMAND_FAMILY_CHOICES = ("tcp_twist_local", "tcp_target_pose")
 _FLOW_COMMAND_FAMILY_LABELS = {
-    "tcp_twist_stand": "TcpTwistStand",
     "tcp_twist_local": "TcpTwistLocal",
-    "tcp_delta_stand": "TcpDeltaStand",
+    "tcp_target_pose": "TcpPoseTarget",
 }
 _ZERO_TWIST = (0.0,) * 6
 DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S = 0.30
@@ -66,7 +84,7 @@ class FlowOfflineEvalResult:
     camera_names: list[str]
     image_decode_count: int
     missing_camera_count: int
-    command_family: str = "TcpTwistStand"
+    command_family: str = "TcpTwistLocal"
     selected_arms: list[str] = field(default_factory=list)
     checkpoint_arm_mask: tuple[float, float] | None = None
     checkpoint_has_nonzero_gripper_commands: bool = False
@@ -93,19 +111,18 @@ def resolve_flow_command_family(
     """Return the normalized flow command family for a rollout mode."""
 
     _ = parse_rollout_mode(rollout_mode)
+    _ = dataset_stats
     if command_family is None:
-        if _proprio_action_frame_from_stats(dataset_stats) == "ee_local":
-            return "tcp_twist_local"
-        return "tcp_twist_stand"
+        return "tcp_twist_local"
     return normalize_flow_command_family(command_family)
 
 
 def normalize_flow_command_family(command_family: str) -> str:
     family = str(command_family or "").strip().lower().replace("-", "_")
     family = {
-        "tcptwiststand": "tcp_twist_stand",
         "tcptwistlocal": "tcp_twist_local",
-        "tcpdeltastand": "tcp_delta_stand",
+        "tcpposetarget": "tcp_target_pose",
+        "tcp_pose_target": "tcp_target_pose",
     }.get(family, family)
     if family not in FLOW_COMMAND_FAMILY_CHOICES:
         choices = ", ".join(FLOW_COMMAND_FAMILY_CHOICES)
@@ -120,37 +137,50 @@ def canonical_flow_command_family(command_family: str) -> str:
 
 
 # ---- ee_local body-frame alignment (training EE frame vs runtime TCP frame) ----
-# ee_local checkpoints trained on pika UMI data express body deltas in the pika
-# gripper-TIP frame (x=approach, y=left, z=up). The server interprets
-# TcpTwistLocal in the RB TCP frame (z=approach). The fixed rotation between
-# the two is the validated teleop r_align (stack_real.yaml umi_dual_cartesian):
-# rows below, columns = TCP x/y/z axes expressed in the tip frame. Mapping:
-#   v_tip = R_ALIGN · v_tcp        (runtime proprio -> training frame)
-#   v_tcp = R_ALIGNᵀ · v_tip       (policy action  -> robot TCP frame)
+# Fixed rotation R between the training EE body frame (in the data) and the RB TCP
+# frame the server interprets TcpTwistLocal in. Applied symmetrically:
+#   v_train = R · v_tcp            (runtime proprio -> training frame)
+#   v_tcp   = Rᵀ · v_train         (policy action  -> robot TCP frame)
+#
+# MEASURED for pika UMI (axis-probe 2026-06-15, see wiki umi-axis-probe): the data's
+# baked retarget (R_corr·Trans·R_align) is correct about z=approach but carries a
+# 180° YAW about approach (x,y flipped) — the config's unconfirmed R_corr. The 6
+# single-axis ground-truth replays solve (Kabsch, 5/6 residual 0) to:
+#   R = diag(-1,-1,+1) = 180° about approach(z)  ->  preset "pika_rz180"  <-- USE THIS
+# `none` gets z right but is yaw-flipped; `pika_tip` (a 90° permutation, the old
+# guess) is a different wrong. Permanent fix = compose pika_rz180 into R_corr in
+# calibration/umi_retarget_eelocal.yaml + reconvert + retrain; until then pass
+# `--ee-local-r-align pika_rz180` (symmetric -> corrects the existing checkpoint,
+# no retrain; the wrist image is unaffected by this coordinate relabel).
 EE_LOCAL_R_ALIGN_PRESETS: dict[str, tuple[float, ...]] = {
+    # measured pika-UMI correction: 180° about approach(z) (axis-probe 2026-06-15)
+    "pika_rz180": (-1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0),
+    # legacy guess (90° permutation); axis-probe showed this is wrong for pika UMI
     "pika_tip": (0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0),
 }
 
 
-def resolve_ee_local_r_align(value: Any) -> np.ndarray | None:
-    """None/'none' -> None; preset name or 9 row-major floats -> 3x3 matrix."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        key = value.strip().lower().replace("-", "_")
-        if key in {"", "none", "identity"}:
-            return None
-        if key in EE_LOCAL_R_ALIGN_PRESETS:
-            value = EE_LOCAL_R_ALIGN_PRESETS[key]
-        else:
-            try:
-                value = [float(item) for item in value.replace(",", " ").split()]
-            except ValueError as exc:
-                presets = ", ".join(sorted(EE_LOCAL_R_ALIGN_PRESETS))
-                raise ValueError(
-                    f"invalid ee-local-r-align {value!r}; expected a preset ({presets}) "
-                    "or 9 row-major floats"
-                ) from exc
+@dataclass(frozen=True, eq=False)
+class EeLocalRAlign:
+    """Body-frame relabel for ee_local checkpoints, applied per channel.
+
+    `linear` rotates the translation 3-vectors, `angular` the rotation
+    3-vectors of every flow proprio/action row. For a true rigid frame change
+    the two are identical (a single rotation), which is the normal case. They
+    differ only for diagnostic sign-convention presets such as
+    ``pika_rz180_trans_only`` (flip x/y translation but leave rotation as-is),
+    which is NOT a valid rigid transform and exists purely for axis ablation.
+    """
+
+    linear: np.ndarray
+    angular: np.ndarray
+
+    @property
+    def T(self) -> "EeLocalRAlign":
+        return EeLocalRAlign(np.asarray(self.linear).T, np.asarray(self.angular).T)
+
+
+def _validate_r_align_matrix(value: Any) -> np.ndarray:
     matrix = np.asarray(list(value), dtype=np.float64)
     if matrix.size != 9:
         raise ValueError("ee-local-r-align must have exactly 9 elements (row-major 3x3)")
@@ -160,18 +190,72 @@ def resolve_ee_local_r_align(value: Any) -> np.ndarray | None:
     return matrix
 
 
-def rotate_flow_arm_vectors(array: np.ndarray, rotation: np.ndarray) -> np.ndarray:
+# Split presets: linear != angular, so they cannot be expressed as a single
+# orthonormal matrix. `pika_rz180_trans_only` flips x/y translation (the
+# pika_rz180 linear correction) but keeps the rotation channel untouched — an
+# ablation to test whether rx/ry actually need the same 180° flip the
+# translation does (axis-probe 2026-06-15 says they do; this lets you A/B it).
+_PIKA_RZ180 = np.array([[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]])
+EE_LOCAL_R_ALIGN_SPLIT_PRESETS: dict[str, EeLocalRAlign] = {
+    "pika_rz180_trans_only": EeLocalRAlign(linear=_PIKA_RZ180, angular=np.eye(3)),
+}
+
+
+def resolve_ee_local_r_align(value: Any) -> EeLocalRAlign | None:
+    """None/'none' -> None; preset name or 9 row-major floats -> EeLocalRAlign.
+
+    A plain rotation (preset or 9 floats) yields linear == angular; split
+    presets (e.g. ``pika_rz180_trans_only``) yield differing channels.
+    """
+    if value is None or isinstance(value, EeLocalRAlign):
+        return value
+    if isinstance(value, str):
+        key = value.strip().lower().replace("-", "_")
+        if key in {"", "none", "identity"}:
+            return None
+        if key in EE_LOCAL_R_ALIGN_SPLIT_PRESETS:
+            return EE_LOCAL_R_ALIGN_SPLIT_PRESETS[key]
+        if key in EE_LOCAL_R_ALIGN_PRESETS:
+            value = EE_LOCAL_R_ALIGN_PRESETS[key]
+        else:
+            try:
+                value = [float(item) for item in value.replace(",", " ").split()]
+            except ValueError as exc:
+                presets = ", ".join(
+                    sorted({*EE_LOCAL_R_ALIGN_PRESETS, *EE_LOCAL_R_ALIGN_SPLIT_PRESETS})
+                )
+                raise ValueError(
+                    f"invalid ee-local-r-align {value!r}; expected a preset ({presets}) "
+                    "or 9 row-major floats"
+                ) from exc
+    matrix = _validate_r_align_matrix(value)
+    return EeLocalRAlign(linear=matrix, angular=matrix)
+
+
+def rotate_flow_arm_vectors(
+    array: np.ndarray, rotation: "np.ndarray | EeLocalRAlign"
+) -> np.ndarray:
     """Rotate the per-arm linear+angular 3-vectors of flow proprio/action rows.
 
     Works for proprio vectors (..., >=14) and action chunks (steps, 14): the
     last dim holds [left dx dy dz drx dry drz grip | right ...]; gripper and
     any trailing entries (proprio arm_mask) are untouched.
+
+    `rotation` may be a single 3x3 matrix (applied to both the translation and
+    rotation 3-vectors) or an :class:`EeLocalRAlign` carrying separate `linear`
+    (translation) and `angular` (rotation) matrices.
     """
+    if isinstance(rotation, EeLocalRAlign):
+        linear = np.asarray(rotation.linear, dtype=np.float32)
+        angular = np.asarray(rotation.angular, dtype=np.float32)
+    else:
+        linear = angular = np.asarray(rotation, dtype=np.float32)
     rotated = np.array(array, dtype=np.float32, copy=True)
     for offset in (0, 7):
-        for start in (offset, offset + 3):
-            block = rotated[..., start : start + 3]
-            rotated[..., start : start + 3] = block @ np.asarray(rotation, dtype=np.float32).T
+        rotated[..., offset : offset + 3] = rotated[..., offset : offset + 3] @ linear.T
+        rotated[..., offset + 3 : offset + 6] = (
+            rotated[..., offset + 3 : offset + 6] @ angular.T
+        )
     return rotated
 
 
@@ -190,8 +274,13 @@ def _resolve_runtime_command_family(
         command_family,
         dataset_stats=stats,
     )
-    if _proprio_action_frame_from_stats(stats) == "ee_local" and family != "tcp_twist_local":
-        raise ValueError("ee_local checkpoints require command-family tcp_twist_local")
+    if _proprio_action_frame_from_stats(stats) == "ee_local" and family not in {
+        "tcp_twist_local",
+        "tcp_target_pose",
+    }:
+        raise ValueError(
+            "ee_local checkpoints require command-family tcp_twist_local or tcp_target_pose"
+        )
     return family
 
 
@@ -199,38 +288,29 @@ def validate_flow_command_family(
     rollout_mode: str | RolloutMode,
     command_family: str,
     *,
-    allow_experimental_tcp_delta_stand: bool = False,
     allow_tcp_twist_local: bool = False,
+    allow_tcp_target_pose: bool = False,
     dataset_stats: dict[str, Any] | None = None,
 ) -> None:
     mode = parse_rollout_mode(rollout_mode)
     family = normalize_flow_command_family(command_family)
-    if _proprio_action_frame_from_stats(dataset_stats) == "ee_local" and family != "tcp_twist_local":
+    _ = dataset_stats
+    # real_readonly never sends commands, so the family is irrelevant there.
+    if mode in {RolloutMode.OFFLINE_EVAL, RolloutMode.SIM_DRYRUN, RolloutMode.REAL_READONLY}:
+        return
+    # Live rollout of body-frame twist is an explicit operator opt-in.
+    if family == "tcp_twist_local" and allow_tcp_twist_local:
+        return
+    if family == "tcp_target_pose" and allow_tcp_target_pose:
+        return
+    if family == "tcp_target_pose":
         raise RolloutModeValidationError(
-            "ee_local checkpoints require command-family tcp_twist_local"
+            "command-family tcp_target_pose requires --allow-tcp-target-pose for "
+            "controller_sim or real_policy"
         )
-    if family == "tcp_twist_stand":
-        return
-    if family == "tcp_twist_local":
-        # real_readonly never sends commands, so the family is irrelevant there.
-        if mode in {RolloutMode.OFFLINE_EVAL, RolloutMode.SIM_DRYRUN, RolloutMode.REAL_READONLY}:
-            return
-        # ee_local checkpoints can only emit tcp_twist_local; live rollout of
-        # that family is an explicit operator opt-in (mirrors the
-        # tcp_delta_stand opt-in below).
-        if allow_tcp_twist_local:
-            return
-        raise RolloutModeValidationError(
-            "command-family tcp_twist_local requires --allow-tcp-twist-local for "
-            "controller_sim or real_policy (ee_local checkpoints cannot use tcp_twist_stand)"
-        )
-    if mode in {RolloutMode.OFFLINE_EVAL, RolloutMode.SIM_DRYRUN}:
-        return
-    if allow_experimental_tcp_delta_stand:
-        return
     raise RolloutModeValidationError(
-        "command-family tcp_delta_stand is a debug/experimental flow rollout path; "
-        "use tcp_twist_stand or pass --allow-experimental-tcp-delta-stand"
+        "command-family tcp_twist_local requires --allow-tcp-twist-local for "
+        "controller_sim or real_policy"
     )
 
 
@@ -243,7 +323,7 @@ def resolve_flow_policy_dt_sec(
     dataset_stats: dict[str, Any] | None = None,
 ) -> float | None:
     family = normalize_flow_command_family(command_family)
-    if family not in {"tcp_twist_stand", "tcp_twist_local"}:
+    if family not in {"tcp_twist_local", "tcp_target_pose"}:
         return None
     if policy_dt_sec is not None:
         resolved = float(policy_dt_sec)
@@ -269,9 +349,10 @@ def resolve_flow_policy_dt_sec(
 class FlowMatchingActionSource:
     """Runtime source for high-level flow-policy action chunks.
 
-    The source emits bounded stand-frame streaming commands by default. TcpDeltaStand
-    and TcpTwistLocal remain debug families behind rollout-mode validation. SafetyGate
-    still decides whether the intent may be sent.
+    The source consumes ee_local body-frame policy deltas and emits either bounded
+    TcpTwistLocal velocity commands or integrated absolute TcpPoseTarget setpoints.
+    Live rollout is behind rollout-mode validation and SafetyGate still decides
+    whether the intent may be sent.
     """
 
     def __init__(
@@ -288,6 +369,7 @@ class FlowMatchingActionSource:
         max_linear_step_m: float = 0.002,
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
+        chunk_crossfade_steps: int = 0,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
@@ -333,7 +415,7 @@ class FlowMatchingActionSource:
             print(
                 f"WARNING: {self.policy_label}: ee_local checkpoint without --ee-local-r-align; "
                 "assuming the runtime TCP body frame matches the training EE frame "
-                "(pika-tip data needs --ee-local-r-align pika_tip)",
+                "(pika UMI data needs --ee-local-r-align pika_rz180; measured 2026-06-15)",
                 file=stderr,
             )
         self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
@@ -403,7 +485,31 @@ class FlowMatchingActionSource:
         self.image_decode_count = 0
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
+        # Chunk-boundary twist crossfade: blend the first `chunk_crossfade_steps`
+        # twists of a freshly activated chunk from the previously emitted twist
+        # (alpha ramps 0->1) so the velocity is continuous across the resample
+        # boundary, removing the boundary jerk without steady-state lag. 0 = off.
+        self._chunk_crossfade_steps = int(chunk_crossfade_steps)
+        self._steps_since_boundary = 0
+        self._prev_emitted_twist_by_arm: dict[str, tuple[float, ...] | None] = {
+            "left": None,
+            "right": None,
+        }
+        self._target_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+        # Per-policy-step action logger (env-gated, debug only). Set
+        # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
+        # line per executed policy step: raw flow delta, converted/clamped twist
+        # actually sent, chunk index and chunk-boundary marker. Used to diagnose
+        # trembling (pulsed chunk boundaries vs. delta->twist noise amplification).
+        self._action_log: TextIO | None = None
+        self._action_log_seq = 0
+        _action_log_path = default_action_log_path()
+        self._action_log = open(_action_log_path, "w", buffering=1)
+        print(
+            f"[flow-infer] logging per-step actions to {_action_log_path}",
+            file=sys.stderr,
+        )
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         if getattr(self, "enable_async_chunking", False):
@@ -435,16 +541,12 @@ class FlowMatchingActionSource:
                 chunk = rotate_flow_arm_vectors(chunk, self.ee_local_r_align.T)
             self._chunk = chunk
             self._chunk_index = 0
+            self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
         step = self._chunk[self._chunk_index]
         self._chunk_index += 1
         gripper_targets = self._integrate_gripper_targets(step, payload)
         self._dispatch_gripper_step(step)
-
-        if self.command_family_option == "tcp_twist_local":
-            return self._tcp_twist_local_step_intent(step, gripper_targets=gripper_targets)
-        if self.command_family_option == "tcp_twist_stand":
-            return self._tcp_twist_stand_step_intent(step, gripper_targets=gripper_targets)
-        return self._tcp_delta_stand_step_intent(step, gripper_targets=gripper_targets)
+        return self._emit_step_intent(step, payload, gripper_targets)
 
     # ----------------------------------------------------------- streamed --
     def _next_intent_streamed(
@@ -510,21 +612,59 @@ class FlowMatchingActionSource:
             step = self._chunk[self._chunk_index]
             gripper_targets = self._integrate_gripper_targets(step, payload)
             self._dispatch_gripper_step(step)
-            self._current_step_intent = self._emit_step_intent(step, gripper_targets)
+            self._current_step_intent = self._emit_step_intent(step, payload, gripper_targets)
         return self._current_step_intent
 
     def _emit_step_intent(
-        self, step: np.ndarray, gripper_targets: dict[str, float | None]
+        self,
+        step: np.ndarray,
+        payload: dict[str, Any],
+        gripper_targets: dict[str, float | None],
     ) -> CommandIntent | None:
         if self.command_family_option == "tcp_twist_local":
-            return self._tcp_twist_local_step_intent(step, gripper_targets=gripper_targets)
-        if self.command_family_option == "tcp_twist_stand":
-            return self._tcp_twist_stand_step_intent(step, gripper_targets=gripper_targets)
-        return self._tcp_delta_stand_step_intent(step, gripper_targets=gripper_targets)
+            intent = self._tcp_twist_local_step_intent(step, gripper_targets=gripper_targets)
+        elif self.command_family_option == "tcp_target_pose":
+            intent = self._tcp_target_pose_step_intent(
+                step,
+                payload=payload,
+                gripper_targets=gripper_targets,
+            )
+        else:
+            intent = None
+        # Advance the crossfade ramp once per executed policy step (not per servo
+        # tick): the streamed path re-emits the same held intent between steps.
+        self._steps_since_boundary += 1
+        self._log_action_step(step, intent)
+        return intent
+
+    def _log_action_step(self, step: np.ndarray, intent: CommandIntent | None) -> None:
+        """Append one JSONL line per executed policy step (env-gated debug)."""
+        log = self._action_log
+        if log is None:
+            return
+        raw = np.asarray(step, dtype=np.float64).reshape(-1)
+        record = {
+            "seq": self._action_log_seq,
+            "t_mono": time.monotonic(),
+            "chunk_index": int(self._chunk_index),
+            # True on the first step of a freshly sampled chunk -> lets you see
+            # whether trembling lines up with chunk boundaries (pulsed resample).
+            "chunk_boundary": int(self._chunk_index) <= 1,
+            "command_family": self.command_family_option,
+            # Raw flow output before delta->twist conversion / clamping.
+            "raw_delta": raw.tolist(),
+            # Actual per-arm payload sent downstream (twist after /policy_dt and
+            # clamp, or None if the arm was idle / no intent emitted).
+            "left": None if intent is None else intent.left,
+            "right": None if intent is None else intent.right,
+        }
+        self._action_log_seq += 1
+        log.write(json.dumps(record) + "\n")
 
     def _activate_chunk(self, chunk: np.ndarray, now_monotonic: float) -> None:
         self._chunk = chunk
         self._chunk_index = 0
+        self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
         self._step_deadline = now_monotonic + float(self.policy_dt_sec)
 
     def _stream_prefetch_at(self) -> int:
@@ -532,12 +672,17 @@ class FlowMatchingActionSource:
         return max(0, limit - max(2, limit // 2))
 
     def _stream_hold_intent(self) -> CommandIntent | None:
+        if self.command_family_option == "tcp_target_pose":
+            self._clear_target_pose_state()
+            return None
         left = _ZERO_TWIST if (len(self.arm_mask) > 0 and self.arm_mask[0] > 0.0) else None
         right = _ZERO_TWIST if (len(self.arm_mask) > 1 and self.arm_mask[1] > 0.0) else None
         self._last_nonzero_twist_by_arm["left"] = False
         self._last_nonzero_twist_by_arm["right"] = False
-        if self.command_family_option == "tcp_twist_stand":
-            return tcp_twist_stand_intent(left=left, right=right, timeout_sec=self.timeout_sec)
+        # The arm is held at zero velocity; anchor the crossfade reference at zero
+        # so the next chunk ramps in from rest (smooth restart after a stall).
+        self._prev_emitted_twist_by_arm["left"] = _ZERO_TWIST
+        self._prev_emitted_twist_by_arm["right"] = _ZERO_TWIST
         if self.command_family_option == "tcp_twist_local":
             return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
         return None
@@ -621,40 +766,6 @@ class FlowMatchingActionSource:
         )
         self.gripper_runtime.dispatch(commands)
 
-    def _tcp_delta_stand_step_intent(
-        self,
-        step: np.ndarray,
-        *,
-        gripper_targets: dict[str, float | None],
-    ) -> CommandIntent | None:
-        left = None
-        right = None
-        if self.arm_mask[0] > 0.0:
-            left = clamp_tcp_delta(
-                step[0:6].tolist(),
-                self.max_linear_step_m,
-                self.max_angular_step_rad,
-            )
-        if self.arm_mask[1] > 0.0:
-            right = clamp_tcp_delta(
-                step[7:13].tolist(),
-                self.max_linear_step_m,
-                self.max_angular_step_rad,
-            )
-        if left is not None and all(value == 0.0 for value in left):
-            left = None
-        if right is not None and all(value == 0.0 for value in right):
-            right = None
-        if left is None and right is None:
-            return None
-        return tcp_delta_stand_intent(
-            left=left,
-            right=right,
-            left_gripper=gripper_targets.get("left"),
-            right_gripper=gripper_targets.get("right"),
-            timeout_sec=self.timeout_sec,
-        )
-
     def _tcp_twist_local_step_intent(
         self,
         step: np.ndarray,
@@ -673,17 +784,26 @@ class FlowMatchingActionSource:
             timeout_sec=self.timeout_sec,
         )
 
-    def _tcp_twist_stand_step_intent(
+    def _tcp_target_pose_step_intent(
         self,
         step: np.ndarray,
         *,
+        payload: dict[str, Any],
         gripper_targets: dict[str, float | None],
     ) -> CommandIntent | None:
-        left = self._twist_payload_for_arm("left", step[0:6]) if self.arm_mask[0] > 0.0 else None
-        right = self._twist_payload_for_arm("right", step[7:13]) if self.arm_mask[1] > 0.0 else None
+        left = (
+            self._target_payload_for_arm("left", step[0:6], payload)
+            if self.arm_mask[0] > 0.0
+            else None
+        )
+        right = (
+            self._target_payload_for_arm("right", step[7:13], payload)
+            if self.arm_mask[1] > 0.0
+            else None
+        )
         if left is None and right is None:
             return None
-        return tcp_twist_stand_intent(
+        return tcp_pose_target_stand_intent(
             left=left,
             right=right,
             left_gripper=gripper_targets.get("left"),
@@ -691,15 +811,64 @@ class FlowMatchingActionSource:
             timeout_sec=self.timeout_sec,
         )
 
+    def _target_payload_for_arm(
+        self,
+        arm: str,
+        delta: np.ndarray,
+        payload: dict[str, Any],
+    ) -> tuple[float, ...]:
+        targets = getattr(self, "_target_pose_by_arm", None)
+        if targets is None:
+            self._target_pose_by_arm = {"left": None, "right": None}
+            targets = self._target_pose_by_arm
+        if self._steps_since_boundary == 0 or targets.get(arm) is None:
+            targets[arm] = pose_from_state_payload(payload, arm)
+        clamped_delta = self._clamp_delta_step(delta)
+        targets[arm] = pose_compose_local(targets[arm], np.asarray(clamped_delta, dtype=np.float32))
+        return tuple(float(value) for value in targets[arm].tolist())
+
+    def _clear_target_pose_state(self) -> None:
+        targets = getattr(self, "_target_pose_by_arm", None)
+        if targets is not None:
+            targets["left"] = None
+            targets["right"] = None
+
+    def _clamp_delta_step(self, delta: np.ndarray) -> tuple[float, ...]:
+        assert self.policy_dt_sec is not None
+        return clamp_tcp_delta(
+            np.asarray(delta, dtype=np.float64).reshape(-1).tolist(),
+            self.max_linear_velocity_m_s * self.policy_dt_sec,
+            self.max_angular_velocity_rad_s * self.policy_dt_sec,
+        )
+
     def _twist_payload_for_arm(self, arm: str, delta: np.ndarray) -> tuple[float, ...] | None:
         twist = self._delta_to_twist(delta)
         if _has_nonzero(twist):
+            twist = self._apply_chunk_crossfade(arm, twist)
             self._last_nonzero_twist_by_arm[arm] = True
+            self._prev_emitted_twist_by_arm[arm] = twist
             return twist
         if self._last_nonzero_twist_by_arm[arm]:
             self._last_nonzero_twist_by_arm[arm] = False
+            self._prev_emitted_twist_by_arm[arm] = _ZERO_TWIST
             return _ZERO_TWIST
         return None
+
+    def _apply_chunk_crossfade(
+        self, arm: str, twist: tuple[float, ...]
+    ) -> tuple[float, ...]:
+        """Blend the first few twists after a chunk boundary from the previously
+        emitted twist so velocity is continuous across the resample. alpha ramps
+        from 1/(K+1) at the boundary step to 1.0 after K steps; outside the window
+        (or with no prior twist) the new twist passes through unchanged."""
+        k = self._chunk_crossfade_steps
+        if k <= 0 or self._steps_since_boundary >= k:
+            return twist
+        prev = self._prev_emitted_twist_by_arm.get(arm)
+        if prev is None:
+            return twist
+        alpha = (self._steps_since_boundary + 1) / (k + 1)
+        return tuple((1.0 - alpha) * p + alpha * t for p, t in zip(prev, twist))
 
     def _delta_to_twist(self, delta: np.ndarray) -> tuple[float, ...]:
         assert self.policy_dt_sec is not None
@@ -714,7 +883,10 @@ class FlowMatchingActionSource:
         )
 
     def _no_policy_input_intent(self) -> CommandIntent | None:
-        if self.command_family_option not in {"tcp_twist_stand", "tcp_twist_local"}:
+        if self.command_family_option == "tcp_target_pose":
+            self._clear_target_pose_state()
+            return None
+        if self.command_family_option != "tcp_twist_local":
             return None
         left = _ZERO_TWIST if self._last_nonzero_twist_by_arm["left"] else None
         right = _ZERO_TWIST if self._last_nonzero_twist_by_arm["right"] else None
@@ -722,8 +894,6 @@ class FlowMatchingActionSource:
             return None
         self._last_nonzero_twist_by_arm["left"] = False
         self._last_nonzero_twist_by_arm["right"] = False
-        if self.command_family_option == "tcp_twist_stand":
-            return tcp_twist_stand_intent(left=left, right=right, timeout_sec=self.timeout_sec)
         return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
 
     def _integrate_gripper_targets(
@@ -944,6 +1114,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
         max_linear_step_m: float = 0.002,
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
+        chunk_crossfade_steps: int = 0,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
@@ -994,7 +1165,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
             print(
                 f"WARNING: {self.policy_label}: ee_local checkpoint without --ee-local-r-align; "
                 "assuming the runtime TCP body frame matches the training EE frame "
-                "(pika-tip data needs --ee-local-r-align pika_tip)",
+                "(pika UMI data needs --ee-local-r-align pika_rz180; measured 2026-06-15)",
                 file=stderr,
             )
         self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
@@ -1081,7 +1252,31 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
         self.image_decode_count = 0
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
+        # Chunk-boundary twist crossfade: blend the first `chunk_crossfade_steps`
+        # twists of a freshly activated chunk from the previously emitted twist
+        # (alpha ramps 0->1) so the velocity is continuous across the resample
+        # boundary, removing the boundary jerk without steady-state lag. 0 = off.
+        self._chunk_crossfade_steps = int(chunk_crossfade_steps)
+        self._steps_since_boundary = 0
+        self._prev_emitted_twist_by_arm: dict[str, tuple[float, ...] | None] = {
+            "left": None,
+            "right": None,
+        }
+        self._target_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+        # Per-policy-step action logger (env-gated, debug only). Set
+        # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
+        # line per executed policy step: raw flow delta, converted/clamped twist
+        # actually sent, chunk index and chunk-boundary marker. Used to diagnose
+        # trembling (pulsed chunk boundaries vs. delta->twist noise amplification).
+        self._action_log: TextIO | None = None
+        self._action_log_seq = 0
+        _action_log_path = default_action_log_path()
+        self._action_log = open(_action_log_path, "w", buffering=1)
+        print(
+            f"[flow-infer] logging per-step actions to {_action_log_path}",
+            file=sys.stderr,
+        )
 
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         assert self._reset_left_pose is not None
@@ -1123,6 +1318,7 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         max_linear_step_m: float = 0.002,
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
+        chunk_crossfade_steps: int = 0,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
@@ -1167,7 +1363,7 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
             print(
                 f"WARNING: {self.policy_label}: ee_local checkpoint without --ee-local-r-align; "
                 "assuming the runtime TCP body frame matches the training EE frame "
-                "(pika-tip data needs --ee-local-r-align pika_tip)",
+                "(pika UMI data needs --ee-local-r-align pika_rz180; measured 2026-06-15)",
                 file=stderr,
             )
         self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
@@ -1220,7 +1416,31 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         self.image_decode_count = 0
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
+        # Chunk-boundary twist crossfade: blend the first `chunk_crossfade_steps`
+        # twists of a freshly activated chunk from the previously emitted twist
+        # (alpha ramps 0->1) so the velocity is continuous across the resample
+        # boundary, removing the boundary jerk without steady-state lag. 0 = off.
+        self._chunk_crossfade_steps = int(chunk_crossfade_steps)
+        self._steps_since_boundary = 0
+        self._prev_emitted_twist_by_arm: dict[str, tuple[float, ...] | None] = {
+            "left": None,
+            "right": None,
+        }
+        self._target_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+        # Per-policy-step action logger (env-gated, debug only). Set
+        # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
+        # line per executed policy step: raw flow delta, converted/clamped twist
+        # actually sent, chunk index and chunk-boundary marker. Used to diagnose
+        # trembling (pulsed chunk boundaries vs. delta->twist noise amplification).
+        self._action_log: TextIO | None = None
+        self._action_log_seq = 0
+        _action_log_path = default_action_log_path()
+        self._action_log = open(_action_log_path, "w", buffering=1)
+        print(
+            f"[flow-infer] logging per-step actions to {_action_log_path}",
+            file=sys.stderr,
+        )
 
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         assert self._reset_left_pose is not None
@@ -1251,7 +1471,7 @@ def run_flow_offline_eval(
     sample_steps: int = 16,
     device: str = "auto",
     max_samples: int = 1,
-    command_family: str = "TcpTwistStand",
+    command_family: str = "TcpTwistLocal",
 ) -> FlowOfflineEvalResult:
     if sample_steps <= 0:
         raise ValueError("sample_steps must be positive")
@@ -1336,7 +1556,7 @@ def run_direct_bc_offline_eval(
     episodes_dir: str | Path,
     device: str = "auto",
     max_samples: int = 1,
-    command_family: str = "TcpTwistStand",
+    command_family: str = "TcpTwistLocal",
     image_size: int | None = None,
 ) -> FlowOfflineEvalResult:
     if max_samples <= 0:
@@ -1426,7 +1646,7 @@ def run_direct_bc_ensemble_offline_eval(
     episodes_dir: str | Path,
     device: str = "auto",
     max_samples: int = 1,
-    command_family: str = "TcpTwistStand",
+    command_family: str = "TcpTwistLocal",
     image_size: int | None = None,
     ensemble_name: str | None = "top5",
 ) -> FlowOfflineEvalResult:
@@ -1833,7 +2053,7 @@ def _resolve_runtime_policy_dt_sec(
     stats: dict[str, Any],
 ) -> float | None:
     family = normalize_flow_command_family(command_family)
-    if family not in {"tcp_twist_stand", "tcp_twist_local"}:
+    if family not in {"tcp_twist_local", "tcp_target_pose"}:
         return None
     resolved = _positive_float(policy_dt_sec)
     if resolved is not None:

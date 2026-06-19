@@ -8,6 +8,10 @@
 **/cmake_install.cmake
 **/compile_commands.json
 
+# Local secrets — sudo password for setcap automation (NEVER commit)
+.env
+/.env
+
 # Logs and runtime artifacts
 **/logs/
 **/*.log
@@ -17,11 +21,11 @@
 **/checkpoints/
 outputs/
 camera_server/episodes/
-rb_servo_server/config/local/*.yaml
-rb_servo_server/config/local/*.yml
+# rb_servo_server/config/local/*.yaml
+# rb_servo_server/config/local/*.yml
 rb_servo_server/config/local/*.env
-rb_servo_server/config/local/**/*.yaml
-rb_servo_server/config/local/**/*.yml
+# rb_servo_server/config/local/**/*.yaml
+# rb_servo_server/config/local/**/*.yml
 !rb_servo_server/config/local/.gitkeep
 !rb_servo_server/config/local/*.example.yaml
 !rb_servo_server/config/local/*.example.yml

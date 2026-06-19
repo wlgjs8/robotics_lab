@@ -15,8 +15,6 @@ CHECK_CONTROLLER=0
 ALLOW_NO_REALTIME=0
 DRY_RUN=0
 SKIP_PLOTS=0
-CONFIRM=0
-CONFIRM_PGMODE=0
 PORT_TIMEOUT_SEC="1.0"
 
 CONTROLLER_IPS=("172.28.60.200" "172.28.60.201")
@@ -37,16 +35,8 @@ Supported matrices:
   stage2_pub_speed
   stage2_8s_middle
 
-Required safety flags for every run, including dry-run:
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
-
 Environment behavior:
   --with-required-env  Explicitly export:
-    RB_ALLOW_REAL_ROBOT=1
-    RB_ALLOW_REAL_MOTION=1
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
     RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
 
 Without --with-required-env, those env vars must already be set.
@@ -153,14 +143,6 @@ while (($# > 0)); do
       SKIP_PLOTS=1
       shift
       ;;
-    --i-understand-this-connects-to-real-controller)
-      CONFIRM=1
-      shift
-      ;;
-    --i-confirm-controller-is-in-pgmode-simulation)
-      CONFIRM_PGMODE=1
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -213,22 +195,9 @@ else
   ARTIFACT_ROOT="$(abs_from_root "${ARTIFACT_ROOT}")"
 fi
 
-require_confirmations() {
-  if [[ "${CONFIRM}" != "1" ]]; then
-    fail "missing --i-understand-this-connects-to-real-controller"
-  fi
-  if [[ "${CONFIRM_PGMODE}" != "1" ]]; then
-    fail "missing --i-confirm-controller-is-in-pgmode-simulation"
-  fi
-}
-
 require_env() {
   local missing=()
   for key in \
-    RB_ALLOW_REAL_ROBOT \
-    RB_ALLOW_REAL_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN \
     RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM
   do
     if [[ "${!key:-}" != "1" ]]; then
@@ -340,16 +309,7 @@ print_command() {
   printf '\n'
 }
 
-require_confirmations
-if [[ "${RB_ALLOW_REAL_CARTESIAN:-}" == "1" ]]; then
-  fail "RB_ALLOW_REAL_CARTESIAN must not be set for controller-simulation circle tuning"
-fi
-
 if [[ "${WITH_REQUIRED_ENV}" == "1" ]]; then
-  export RB_ALLOW_REAL_ROBOT=1
-  export RB_ALLOW_REAL_MOTION=1
-  export RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-  export RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
   export RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
 else
   require_env
@@ -362,8 +322,6 @@ cmd=(
   --matrix "${MATRIX_FILE}"
   --artifact-root "${ARTIFACT_ROOT}"
   --server "${SERVER}"
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
 )
 
 if [[ "${SET_PGMODE}" == "1" ]]; then
@@ -372,7 +330,6 @@ if [[ "${SET_PGMODE}" == "1" ]]; then
     tools/simulation_mode.sh
     --summary-json "${PGMODE_SUMMARY}"
     --timeout-sec "${PORT_TIMEOUT_SEC}"
-    --i-understand-this-connects-to-real-controller
   )
   cmd+=(--pgmode-summary-json "${PGMODE_SUMMARY}")
 else

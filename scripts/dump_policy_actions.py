@@ -84,7 +84,7 @@ def main() -> None:
     ckpt_path = Path(args.checkpoint)
     payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     stats = payload["dataset_stats"]
-    action_frame = str(stats.get("proprio_action_frame", "stand"))
+    action_frame = str(stats.get("proprio_action_frame", "ee_local"))
     meta = _run_meta(run_dir)
     camera_names = list(payload.get("camera_names", []))
     horizon = int(payload["action_horizon"])

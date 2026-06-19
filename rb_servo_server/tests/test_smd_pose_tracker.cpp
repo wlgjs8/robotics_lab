@@ -163,6 +163,45 @@ bool testClampsInactiveForSmallMotionsPreserveDynamics() {
     return true;
 }
 
+// Drives a constant-velocity ramp goal and returns the steady-state position
+// lag (goal.x - x) after the transient has settled. With feedforward the lag
+// must collapse to ~0; without it the lag is the classic 2*zeta/wn * v.
+double rampSteadyStateLag(bool feedforward, double v_m_s) {
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.natural_frequency_linear_hz = 1.0;
+    cfg.velocity_feedforward = feedforward;
+    rb_servo::SmdPoseTracker tracker(cfg);
+    tracker.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});  // latch reference
+    double cmd_x = 0.0;
+    double x = 0.0;
+    double goal_x = 0.0;
+    for (int i = 0; i < 8000; ++i) {  // 16 s >> settling time for fn=1 Hz
+        cmd_x += v_m_s * kDt;  // command advances at constant velocity
+        tracker.updateGoalFromCommand({cmd_x, 0.0, 0.0, 0.0, 0.0, 0.0});
+        x = tracker.step(kDt).x;
+        goal_x = tracker.goalPose().x;
+    }
+    return goal_x - x;  // steady-state position lag along the ramp
+}
+
+bool testVelocityFeedforwardZeroesRampLag() {
+    const double v = 0.05;  // 50 mm/s constant-velocity goal
+    const double wn = 2.0 * M_PI * 1.0;
+    const double analytic_lag = 2.0 * 1.0 * v / wn;  // 2*zeta/wn * v, zeta=1
+
+    const double lag_off = rampSteadyStateLag(/*feedforward=*/false, v);
+    const double lag_on = rampSteadyStateLag(/*feedforward=*/true, v);
+
+    // Legacy SMD lags a ramp by the analytic 2*zeta/wn*v (~15.9 mm here).
+    RB_CHECK(std::abs(lag_off - analytic_lag) < 0.1 * analytic_lag);
+    // Feedforward collapses it to ~0 (discretization floor only).
+    RB_CHECK(std::abs(lag_on) < 1e-4);
+    // And it is a real, large improvement, not a wash.
+    RB_CHECK(std::abs(lag_on) < 0.02 * std::abs(lag_off));
+    return true;
+}
+
 bool testDeactivateAndReanchor() {
     rb_servo::SmdPoseTracker tracker(defaultConfig());
     tracker.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
@@ -187,6 +226,7 @@ int main() {
     if (!testRotationConvergesAndAxesAreIndependent()) return 1;
     if (!testForceAndVelocityClampsSaturateAndConverge()) return 1;
     if (!testClampsInactiveForSmallMotionsPreserveDynamics()) return 1;
+    if (!testVelocityFeedforwardZeroesRampLag()) return 1;
     if (!testDeactivateAndReanchor()) return 1;
     std::cout << "smd_pose_tracker tests passed\n";
     return 0;

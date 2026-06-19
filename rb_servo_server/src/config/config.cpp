@@ -747,71 +747,24 @@ void validateConfig(const DualArmConfig& cfg) {
     );
     validateNonNegativeFiniteArray(cfg.safety.joint_wrap_period_deg, "safety.joint_wrap_period_deg");
     if (cfg.safety.self_collision.enable) {
-        validateNonNegativeFinite(cfg.safety.self_collision.margin_m, "safety.self_collision.margin_m");
-        for (const StandCapsuleConfig& cap : cfg.safety.self_collision.stand_capsules) {
-            if (!(cap.radius_m > 0.0) || !std::isfinite(cap.radius_m)) {
-                throw std::runtime_error(
-                    "safety.self_collision.stand_capsules radius_m must be finite and > 0 (" + cap.name + ")");
-            }
-            for (int axis = 0; axis < 3; ++axis) {
-                if (!std::isfinite(cap.p0_m[axis]) || !std::isfinite(cap.p1_m[axis])) {
-                    throw std::runtime_error(
-                        "safety.self_collision.stand_capsules endpoints must be finite (" + cap.name + ")");
-                }
-            }
-        }
-        if (cfg.safety.self_collision.arm_capsules.empty()) {
-            throw std::runtime_error(
-                "safety.self_collision.enable=true requires a non-empty arm_capsules list");
-        }
-        for (const ArmCapsuleConfig& cap : cfg.safety.self_collision.arm_capsules) {
-            if (cap.frame.empty()) {
-                throw std::runtime_error("safety.self_collision.arm_capsules entries require a frame");
-            }
-            if (!(cap.radius_m > 0.0) || !std::isfinite(cap.radius_m)) {
-                throw std::runtime_error(
-                    "safety.self_collision.arm_capsules radius_m must be finite and > 0 (" + cap.frame + ")");
-            }
-            for (int axis = 0; axis < 3; ++axis) {
-                if (!std::isfinite(cap.p0_m[axis]) || !std::isfinite(cap.p1_m[axis])) {
-                    throw std::runtime_error(
-                        "safety.self_collision.arm_capsules endpoints must be finite (" + cap.frame + ")");
-                }
-            }
-        }
-        const int arm_capsule_count =
-            static_cast<int>(cfg.safety.self_collision.arm_capsules.size());
-        for (int idx : cfg.safety.self_collision.stand_ignore_bones) {
-            if (idx < 0 || idx >= arm_capsule_count) {
-                throw std::runtime_error(
-                    "safety.self_collision.stand_ignore_bones entries must index arm_capsules [0, " +
-                    std::to_string(arm_capsule_count - 1) + "]");
-            }
-        }
-        if (!cfg.safety.self_collision.check_left_right &&
-            cfg.safety.self_collision.stand_capsules.empty()) {
-            throw std::runtime_error(
-                "safety.self_collision.enable=true with check_left_right=false requires stand_capsules "
-                "(otherwise nothing is checked)");
-        }
+        // The only implementation is the async URDF-mesh CollisionMonitor, so the
+        // mesh geometry + barrier params are mandatory when the guard is enabled.
         if (!cfg.kinematics.enable) {
             throw std::runtime_error(
                 "safety.self_collision.enable=true requires kinematics.enable=true (link geometry source)");
         }
-        if (cfg.safety.self_collision.mesh.enable) {
-            const auto& m = cfg.safety.self_collision.mesh;
-            if (m.unified_urdf.empty()) {
-                throw std::runtime_error(
-                    "safety.self_collision.mesh.enable=true requires unified_urdf (stand+both-arms URDF)");
-            }
-            validatePositiveFinite(m.d_hard_m, "safety.self_collision.mesh.d_hard_m");
-            validatePositiveFinite(m.d_slow_m, "safety.self_collision.mesh.d_slow_m");
-            validatePositiveFinite(m.a_brake_m_s2, "safety.self_collision.mesh.a_brake_m_s2");
-            validatePositiveFinite(m.max_staleness_s, "safety.self_collision.mesh.max_staleness_s");
-            if (m.d_slow_m < m.d_hard_m) {
-                throw std::runtime_error(
-                    "safety.self_collision.mesh.d_slow_m must be >= d_hard_m");
-            }
+        const auto& m = cfg.safety.self_collision.mesh;
+        if (m.unified_urdf.empty()) {
+            throw std::runtime_error(
+                "safety.self_collision.enable=true requires mesh.unified_urdf (stand+both-arms URDF)");
+        }
+        validatePositiveFinite(m.d_hard_m, "safety.self_collision.mesh.d_hard_m");
+        validatePositiveFinite(m.d_slow_m, "safety.self_collision.mesh.d_slow_m");
+        validatePositiveFinite(m.a_brake_m_s2, "safety.self_collision.mesh.a_brake_m_s2");
+        validatePositiveFinite(m.max_staleness_s, "safety.self_collision.mesh.max_staleness_s");
+        if (m.d_slow_m < m.d_hard_m) {
+            throw std::runtime_error(
+                "safety.self_collision.mesh.d_slow_m must be >= d_hard_m");
         }
     }
     if (cfg.safety.joint_target_smd.enable) {
@@ -1123,7 +1076,8 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.cartesian_control.path_kp_ori, "cartesian_control.path_kp_ori");
     validatePositiveFinite(cfg.cartesian_control.twist_orientation_hold_kp, "cartesian_control.twist_orientation_hold_kp");
     validatePositiveFinite(cfg.cartesian_control.twist_angular_deadband_rad_s, "cartesian_control.twist_angular_deadband_rad_s");
-    validatePositiveFinite(cfg.cartesian_control.twist_lpf_tau_sec, "cartesian_control.twist_lpf_tau_sec");
+    validateNonNegativeFinite(cfg.cartesian_control.twist_smd_goal_max_lead_m, "cartesian_control.twist_smd_goal_max_lead_m");
+    validateNonNegativeFinite(cfg.cartesian_control.twist_smd_goal_max_lead_rad, "cartesian_control.twist_smd_goal_max_lead_rad");
     validatePositiveFinite(cfg.cartesian_control.velocity_damping, "cartesian_control.velocity_damping");
     validatePositiveFinite(cfg.cartesian_control.max_twist_linear_m_s, "cartesian_control.max_twist_linear_m_s");
     validatePositiveFinite(cfg.cartesian_control.max_twist_angular_rad_s, "cartesian_control.max_twist_angular_rad_s");
@@ -1150,13 +1104,6 @@ void validateConfig(const DualArmConfig& cfg) {
     );
     if (cfg.cartesian_control.linear_move.max_duration_sec < cfg.cartesian_control.linear_move.min_duration_sec) {
         throw std::runtime_error("cartesian_control.linear_move.max_duration_sec must be >= min_duration_sec");
-    }
-    if (cfg.cartesian_control.enable_benchmark_primitives && anyReal(cfg) &&
-        !cfg.cartesian_control.allow_in_controller_simulation) {
-        throw std::runtime_error(
-            "Refusing cartesian_control.enable_benchmark_primitives in real mode outside "
-            "rbpodo controller-simulation Cartesian gate"
-        );
     }
     if (cfg.cartesian_control.enable_server_side_circle_track && !cfg.cartesian_control.enable) {
         throw std::runtime_error(
@@ -1242,6 +1189,13 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.kinematics.ik.position_tolerance_m, "kinematics.ik.position_tolerance_m");
     validatePositiveFinite(cfg.kinematics.ik.orientation_tolerance_rad, "kinematics.ik.orientation_tolerance_rad");
     validatePositiveFiniteArray(cfg.kinematics.ik.max_step_deg, "kinematics.ik.max_step_deg");
+    validateNonNegativeFinite(cfg.kinematics.ik.singular_region_eps, "kinematics.ik.singular_region_eps");
+    validateNonNegativeFinite(cfg.kinematics.ik.damping_max, "kinematics.ik.damping_max");
+    validateNonNegativeFinite(cfg.kinematics.ik.max_solution_jump_deg, "kinematics.ik.max_solution_jump_deg");
+    validateNonNegativeFinite(cfg.kinematics.ik.branch_jump_damping_scale, "kinematics.ik.branch_jump_damping_scale");
+    if (cfg.kinematics.ik.branch_jump_max_retries < 0) {
+        throw std::runtime_error("kinematics.ik.branch_jump_max_retries must be >= 0");
+    }
 
     const auto validate_simulator_backend = [](const BackendConfig& backend, const std::string& label) {
         if (backend.backend_type != BackendType::Simulator) return;
@@ -1453,6 +1407,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "controller_simulation_async_supervision_nonlatching",
             "allow_controller_simulation_init_error",
             "allow_controller_simulation_not_activated",
+            "allow_freedrive",
             "enable_realtime_priority",
             "realtime_priority",
             "cpu_core",
@@ -1530,6 +1485,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     sec["allow_controller_simulation_not_activated"],
                     "servo.allow_controller_simulation_not_activated"
                 );
+        }
+        if (has(sec, "allow_freedrive")) {
+            cfg.servo.allow_freedrive =
+                asBool(sec["allow_freedrive"], "servo.allow_freedrive");
         }
         if (has(sec, "enable_realtime_priority")) cfg.servo.enable_realtime_priority = asBool(sec["enable_realtime_priority"], "servo.enable_realtime_priority");
         if (has(sec, "realtime_priority")) cfg.servo.realtime_priority = asInt(sec["realtime_priority"], "servo.realtime_priority");
@@ -1647,16 +1606,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             const YAML::Node sc = sec["self_collision"];
             validateAllowedKeys(sc, {
                 "enable",
-                "margin_m",
-                "link_radius_m",
                 "fail_policy",
                 "monitor_only",
-                "check_left_right",
-                "check_left_stand",
-                "check_right_stand",
-                "stand_capsules",
-                "arm_capsules",
-                "stand_ignore_bones",
                 "mesh",
             }, "safety.self_collision");
             if (has(sc, "enable")) {
@@ -1666,138 +1617,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 cfg.safety.self_collision.monitor_only =
                     asBool(sc["monitor_only"], "safety.self_collision.monitor_only");
             }
-            if (has(sc, "margin_m")) {
-                cfg.safety.self_collision.margin_m = asDouble(sc["margin_m"], "safety.self_collision.margin_m");
-            }
             if (has(sc, "fail_policy")) {
                 cfg.safety.self_collision.fail_policy =
                     parseSelfCollisionFailPolicy(sc["fail_policy"], "safety.self_collision.fail_policy");
             }
-            if (has(sc, "check_left_right")) {
-                cfg.safety.self_collision.check_left_right =
-                    asBool(sc["check_left_right"], "safety.self_collision.check_left_right");
-            }
-            if (has(sc, "check_left_stand")) {
-                cfg.safety.self_collision.check_left_stand =
-                    asBool(sc["check_left_stand"], "safety.self_collision.check_left_stand");
-            }
-            if (has(sc, "check_right_stand")) {
-                cfg.safety.self_collision.check_right_stand =
-                    asBool(sc["check_right_stand"], "safety.self_collision.check_right_stand");
-            }
-            if (has(sc, "stand_ignore_bones")) {
-                const YAML::Node bones = sc["stand_ignore_bones"];
-                if (!bones.IsSequence()) {
-                    fail("safety.self_collision.stand_ignore_bones must be a sequence", bones);
-                }
-                cfg.safety.self_collision.stand_ignore_bones.clear();
-                for (std::size_t i = 0; i < bones.size(); ++i) {
-                    cfg.safety.self_collision.stand_ignore_bones.push_back(
-                        asInt(bones[i], "safety.self_collision.stand_ignore_bones"));
-                }
-            }
-            if (has(sc, "stand_capsules")) {
-                const YAML::Node caps = sc["stand_capsules"];
-                if (!caps.IsSequence()) {
-                    fail("safety.self_collision.stand_capsules must be a sequence", caps);
-                }
-                cfg.safety.self_collision.stand_capsules.clear();
-                for (std::size_t i = 0; i < caps.size(); ++i) {
-                    const YAML::Node entry = caps[i];
-                    validateAllowedKeys(entry, {
-                        "name",
-                        "p0_m",
-                        "p1_m",
-                        "radius_m",
-                    }, "safety.self_collision.stand_capsules");
-                    StandCapsuleConfig cap;
-                    if (has(entry, "name")) {
-                        cap.name = entry["name"].as<std::string>();
-                    } else {
-                        cap.name = "stand_capsule_" + std::to_string(i);
-                    }
-                    for (const auto& [key, target] : {
-                             std::pair<const char*, std::array<double, 3>*>{"p0_m", &cap.p0_m},
-                             {"p1_m", &cap.p1_m},
-                         }) {
-                        const YAML::Node point = entry[key];
-                        if (!point.IsSequence() || point.size() != 3) {
-                            fail("safety.self_collision.stand_capsules." + std::string(key) +
-                                     " must be a sequence of 3 values (" + cap.name + ")",
-                                 entry);
-                        }
-                        for (std::size_t axis = 0; axis < 3; ++axis) {
-                            (*target)[axis] =
-                                asDouble(point[axis], "safety.self_collision.stand_capsules." + std::string(key));
-                        }
-                    }
-                    if (!has(entry, "radius_m")) {
-                        fail("safety.self_collision.stand_capsules entries require radius_m (" + cap.name + ")", entry);
-                    }
-                    cap.radius_m = asDouble(entry["radius_m"], "safety.self_collision.stand_capsules.radius_m");
-                    cfg.safety.self_collision.stand_capsules.push_back(cap);
-                }
-            }
-            if (has(sc, "arm_capsules")) {
-                const YAML::Node caps = sc["arm_capsules"];
-                if (!caps.IsSequence()) {
-                    fail("safety.self_collision.arm_capsules must be a sequence", caps);
-                }
-                cfg.safety.self_collision.arm_capsules.clear();
-                for (std::size_t i = 0; i < caps.size(); ++i) {
-                    const YAML::Node entry = caps[i];
-                    validateAllowedKeys(entry, {
-                        "frame",
-                        "p0_m",
-                        "p1_m",
-                        "radius_m",
-                    }, "safety.self_collision.arm_capsules");
-                    ArmCapsuleConfig cap;
-                    if (!has(entry, "frame")) {
-                        fail("safety.self_collision.arm_capsules entries require frame", entry);
-                    }
-                    cap.frame = entry["frame"].as<std::string>();
-                    for (const auto& [key, target] : {
-                             std::pair<const char*, std::array<double, 3>*>{"p0_m", &cap.p0_m},
-                             {"p1_m", &cap.p1_m},
-                         }) {
-                        const YAML::Node point = entry[key];
-                        if (!point.IsSequence() || point.size() != 3) {
-                            fail("safety.self_collision.arm_capsules." + std::string(key) +
-                                     " must be a sequence of 3 values (" + cap.frame + ")",
-                                 entry);
-                        }
-                        for (std::size_t axis = 0; axis < 3; ++axis) {
-                            (*target)[axis] =
-                                asDouble(point[axis], "safety.self_collision.arm_capsules." + std::string(key));
-                        }
-                    }
-                    if (!has(entry, "radius_m")) {
-                        fail("safety.self_collision.arm_capsules entries require radius_m (" + cap.frame + ")", entry);
-                    }
-                    cap.radius_m = asDouble(entry["radius_m"], "safety.self_collision.arm_capsules.radius_m");
-                    cfg.safety.self_collision.arm_capsules.push_back(cap);
-                }
-            }
-            if (has(sc, "link_radius_m")) {
-                const YAML::Node radii = sc["link_radius_m"];
-                const std::size_t expected = cfg.safety.self_collision.link_radius_m.size();
-                if (!radii.IsSequence() || radii.size() != expected) {
-                    fail(
-                        "safety.self_collision.link_radius_m must be a sequence of " +
-                            std::to_string(expected) + " values",
-                        radii
-                    );
-                }
-                for (std::size_t i = 0; i < expected; ++i) {
-                    cfg.safety.self_collision.link_radius_m[i] =
-                        asDouble(radii[i], "safety.self_collision.link_radius_m");
-                }
-            }
             if (has(sc, "mesh")) {
                 const YAML::Node m = sc["mesh"];
                 validateAllowedKeys(m, {
-                    "enable",
                     "unified_urdf",
                     "package_dirs",
                     "pika_gripper_mesh",
@@ -1805,6 +1631,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "right_prefix",
                     "stand_frame",
                     "stand_ignore_arm_substrings",
+                    "left_arm_root_frame",
+                    "right_arm_root_frame",
+                    "check_intra_arm",
+                    "intra_arm_min_chain_separation",
+                    "swept_samples",
                     "d_hard_m",
                     "d_slow_m",
                     "a_brake_m_s2",
@@ -1813,9 +1644,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "max_staleness_s",
                     "monitor_core",
                     "max_near_pairs",
+                    "viz_near_pairs_m",
+                    "extra_collision",
                 }, "safety.self_collision.mesh");
                 auto& mc = cfg.safety.self_collision.mesh;
-                if (has(m, "enable")) mc.enable = asBool(m["enable"], "safety.self_collision.mesh.enable");
                 if (has(m, "unified_urdf")) {
                     mc.unified_urdf = resolvePathForConfig(
                         asString(m["unified_urdf"], "safety.self_collision.mesh.unified_urdf"), path);
@@ -1849,6 +1681,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                             asString(subs[i], "safety.self_collision.mesh.stand_ignore_arm_substrings"));
                     }
                 }
+                if (has(m, "left_arm_root_frame")) mc.left_arm_root_frame = asString(m["left_arm_root_frame"], "safety.self_collision.mesh.left_arm_root_frame");
+                if (has(m, "right_arm_root_frame")) mc.right_arm_root_frame = asString(m["right_arm_root_frame"], "safety.self_collision.mesh.right_arm_root_frame");
+                if (has(m, "check_intra_arm")) mc.check_intra_arm = asBool(m["check_intra_arm"], "safety.self_collision.mesh.check_intra_arm");
+                if (has(m, "intra_arm_min_chain_separation")) mc.intra_arm_min_chain_separation = asInt(m["intra_arm_min_chain_separation"], "safety.self_collision.mesh.intra_arm_min_chain_separation");
+                if (has(m, "swept_samples")) mc.swept_samples = asInt(m["swept_samples"], "safety.self_collision.mesh.swept_samples");
                 if (has(m, "d_hard_m")) mc.d_hard_m = asDouble(m["d_hard_m"], "safety.self_collision.mesh.d_hard_m");
                 if (has(m, "d_slow_m")) mc.d_slow_m = asDouble(m["d_slow_m"], "safety.self_collision.mesh.d_slow_m");
                 if (has(m, "a_brake_m_s2")) mc.a_brake_m_s2 = asDouble(m["a_brake_m_s2"], "safety.self_collision.mesh.a_brake_m_s2");
@@ -1857,6 +1694,39 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 if (has(m, "max_staleness_s")) mc.max_staleness_s = asDouble(m["max_staleness_s"], "safety.self_collision.mesh.max_staleness_s");
                 if (has(m, "monitor_core")) mc.monitor_core = asInt(m["monitor_core"], "safety.self_collision.mesh.monitor_core");
                 if (has(m, "max_near_pairs")) mc.max_near_pairs = asInt(m["max_near_pairs"], "safety.self_collision.mesh.max_near_pairs");
+                if (has(m, "viz_near_pairs_m")) mc.viz_near_pairs_m = asDouble(m["viz_near_pairs_m"], "safety.self_collision.mesh.viz_near_pairs_m");
+                if (has(m, "extra_collision")) {
+                    const YAML::Node arr = m["extra_collision"];
+                    if (!arr.IsSequence()) {
+                        fail("safety.self_collision.mesh.extra_collision must be a sequence", arr);
+                    }
+                    mc.extra_collision.clear();
+                    for (std::size_t i = 0; i < arr.size(); ++i) {
+                        const YAML::Node e = arr[i];
+                        validateAllowedKeys(e, {
+                            "name", "shape", "parent_frame", "size_m",
+                            "radius_m", "length_m", "xyz_m", "rpy",
+                        }, "safety.self_collision.mesh.extra_collision");
+                        ExtraCollisionConfig ec;
+                        if (!has(e, "name")) fail("extra_collision entry requires name", e);
+                        if (!has(e, "parent_frame")) fail("extra_collision entry requires parent_frame", e);
+                        ec.name = asString(e["name"], "extra_collision.name");
+                        ec.parent_frame = asString(e["parent_frame"], "extra_collision.parent_frame");
+                        if (has(e, "shape")) ec.shape = asString(e["shape"], "extra_collision.shape");
+                        const auto vec3 = [&](const YAML::Node& n, const char* key, std::array<double, 3>* out) {
+                            if (!n.IsSequence() || n.size() != 3)
+                                fail(std::string("extra_collision.") + key + " must be 3 values (" + ec.name + ")", n);
+                            for (std::size_t a = 0; a < 3; ++a)
+                                (*out)[a] = asDouble(n[a], std::string("extra_collision.") + key);
+                        };
+                        if (has(e, "size_m")) vec3(e["size_m"], "size_m", &ec.size_m);
+                        if (has(e, "xyz_m")) vec3(e["xyz_m"], "xyz_m", &ec.xyz_m);
+                        if (has(e, "rpy")) vec3(e["rpy"], "rpy", &ec.rpy);
+                        if (has(e, "radius_m")) ec.radius_m = asDouble(e["radius_m"], "extra_collision.radius_m");
+                        if (has(e, "length_m")) ec.length_m = asDouble(e["length_m"], "extra_collision.length_m");
+                        mc.extra_collision.push_back(ec);
+                    }
+                }
             }
         }
         if (has(sec, "floor_constraint")) {
@@ -2058,8 +1928,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "path_kp_ori",
             "twist_orientation_hold_kp",
             "twist_angular_deadband_rad_s",
-            "twist_lpf_enable",
-            "twist_lpf_tau_sec",
+            "twist_via_smd_enable",
+            "twist_smd_goal_max_lead_m",
+            "twist_smd_goal_max_lead_rad",
             "velocity_damping",
             "max_twist_linear_m_s",
             "max_twist_angular_rad_s",
@@ -2139,13 +2010,17 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             cfg.cartesian_control.twist_angular_deadband_rad_s =
                 asDouble(sec["twist_angular_deadband_rad_s"], "cartesian_control.twist_angular_deadband_rad_s");
         }
-        if (has(sec, "twist_lpf_enable")) {
-            cfg.cartesian_control.twist_lpf_enable =
-                asBool(sec["twist_lpf_enable"], "cartesian_control.twist_lpf_enable");
+        if (has(sec, "twist_via_smd_enable")) {
+            cfg.cartesian_control.twist_via_smd_enable =
+                asBool(sec["twist_via_smd_enable"], "cartesian_control.twist_via_smd_enable");
         }
-        if (has(sec, "twist_lpf_tau_sec")) {
-            cfg.cartesian_control.twist_lpf_tau_sec =
-                asDouble(sec["twist_lpf_tau_sec"], "cartesian_control.twist_lpf_tau_sec");
+        if (has(sec, "twist_smd_goal_max_lead_m")) {
+            cfg.cartesian_control.twist_smd_goal_max_lead_m =
+                asDouble(sec["twist_smd_goal_max_lead_m"], "cartesian_control.twist_smd_goal_max_lead_m");
+        }
+        if (has(sec, "twist_smd_goal_max_lead_rad")) {
+            cfg.cartesian_control.twist_smd_goal_max_lead_rad =
+                asDouble(sec["twist_smd_goal_max_lead_rad"], "cartesian_control.twist_smd_goal_max_lead_rad");
         }
         if (has(sec, "velocity_damping")) {
             cfg.cartesian_control.velocity_damping = asDouble(sec["velocity_damping"], "cartesian_control.velocity_damping");
@@ -2296,6 +2171,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "max_linear_accel_m_s2",
                 "max_angular_velocity_rad_s",
                 "max_angular_accel_rad_s2",
+                "velocity_feedforward",
             }, "cartesian_control.pose_track_smd");
             if (has(smd, "enable")) {
                 cfg.cartesian_control.pose_track_smd.enable =
@@ -2335,6 +2211,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 cfg.cartesian_control.pose_track_smd.max_angular_accel_rad_s2 = asDouble(
                     smd["max_angular_accel_rad_s2"], "cartesian_control.pose_track_smd.max_angular_accel_rad_s2");
             }
+            if (has(smd, "velocity_feedforward")) {
+                cfg.cartesian_control.pose_track_smd.velocity_feedforward = asBool(
+                    smd["velocity_feedforward"], "cartesian_control.pose_track_smd.velocity_feedforward");
+            }
         }
     }
 
@@ -2373,6 +2253,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "position_tolerance_m",
                 "orientation_tolerance_rad",
                 "max_step_deg",
+                "singular_region_eps",
+                "damping_max",
+                "max_solution_jump_deg",
+                "branch_jump_damping_scale",
+                "branch_jump_max_retries",
+                "branch_jump_clamp_to_seed",
+                "branch_jump_rate_limit",
             }, "kinematics.ik");
             if (has(ik, "enable")) cfg.kinematics.ik.enable = asBool(ik["enable"], "kinematics.ik.enable");
             if (has(ik, "max_iterations")) cfg.kinematics.ik.max_iterations = asInt(ik["max_iterations"], "kinematics.ik.max_iterations");
@@ -2381,6 +2268,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ik, "position_tolerance_m")) cfg.kinematics.ik.position_tolerance_m = asDouble(ik["position_tolerance_m"], "kinematics.ik.position_tolerance_m");
             if (has(ik, "orientation_tolerance_rad")) cfg.kinematics.ik.orientation_tolerance_rad = asDouble(ik["orientation_tolerance_rad"], "kinematics.ik.orientation_tolerance_rad");
             if (has(ik, "max_step_deg")) cfg.kinematics.ik.max_step_deg = parseJointArray(ik["max_step_deg"], "kinematics.ik.max_step_deg");
+            if (has(ik, "singular_region_eps")) cfg.kinematics.ik.singular_region_eps = asDouble(ik["singular_region_eps"], "kinematics.ik.singular_region_eps");
+            if (has(ik, "damping_max")) cfg.kinematics.ik.damping_max = asDouble(ik["damping_max"], "kinematics.ik.damping_max");
+            if (has(ik, "max_solution_jump_deg")) cfg.kinematics.ik.max_solution_jump_deg = asDouble(ik["max_solution_jump_deg"], "kinematics.ik.max_solution_jump_deg");
+            if (has(ik, "branch_jump_damping_scale")) cfg.kinematics.ik.branch_jump_damping_scale = asDouble(ik["branch_jump_damping_scale"], "kinematics.ik.branch_jump_damping_scale");
+            if (has(ik, "branch_jump_max_retries")) cfg.kinematics.ik.branch_jump_max_retries = asInt(ik["branch_jump_max_retries"], "kinematics.ik.branch_jump_max_retries");
+            if (has(ik, "branch_jump_clamp_to_seed")) cfg.kinematics.ik.branch_jump_clamp_to_seed = asBool(ik["branch_jump_clamp_to_seed"], "kinematics.ik.branch_jump_clamp_to_seed");
+            if (has(ik, "branch_jump_rate_limit")) cfg.kinematics.ik.branch_jump_rate_limit = asBool(ik["branch_jump_rate_limit"], "kinematics.ik.branch_jump_rate_limit");
         }
     }
 

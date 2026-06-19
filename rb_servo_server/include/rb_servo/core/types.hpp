@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -101,7 +102,12 @@ enum class ControlMode {
     TcpTwistLocal,
     EmergencyStop,
     ResetFault,
-    SetSafetyFloorZ
+    SetSafetyFloorZ,
+    // Per-arm direct-teaching (free-drive). Releases servo_j control on the
+    // addressed arm's controller (freedrive_teach_on) so an operator can hand-
+    // guide it, then re-acquires it (freedrive_teach_off) with a target resync.
+    // Sticky server state; carried by ArmCommand.freedrive_on.
+    Freedrive
 };
 
 enum class ServerMotionState {
@@ -296,6 +302,13 @@ struct RobotState {
     RobotConnectionState connection_state = RobotConnectionState::Disconnected;
 
     bool servo_enabled = false;
+    // Controller motion state (rbpodo sdata.robot_state): 1 = Idle (no motion
+    // command), 3 = executing motion, 0 = unknown/not reported. Gates direct-
+    // teaching entry — freedrive_teach_on requires the controller to be idle.
+    int controller_motion_state = 0;
+    // Controller free-drive state (rbpodo sdata.is_freedrive_mode == 1). The
+    // ground-truth confirmation that direct teaching actually engaged.
+    bool controller_freedrive_on = false;
     bool has_error = false;
     std::optional<bool> fault_recoverable;
     std::string lifecycle_state;
@@ -316,6 +329,13 @@ struct CartesianSolveTelemetry {
     int ik_iterations = 0;
     double position_error_m = 0.0;
     double orientation_error_rad = 0.0;
+    // Conditioning / singularity-robust-damping diagnostics (last IK solve).
+    double ik_min_singular_value = 0.0;
+    double ik_applied_damping = 0.0;
+    double ik_solution_jump_deg = 0.0;
+    bool ik_branch_jump_suspected = false;
+    bool ik_branch_jump_clamped = false;
+    bool twist_smd_goal_clamped = false;  // twist_via_smd goal anti-windup engaged
     bool ik_timed_out = false;
     bool ik_warn_duration_exceeded = false;
     bool ik_fail_duration_exceeded = false;
@@ -332,6 +352,11 @@ struct CartesianSolveTelemetry {
     std::string orientation_mode;
     bool twist_clamped = false;
     bool floor_vz_clamped = false;
+    std::string floor_lowest_point = "tcp";
+    double floor_lowest_z_m = std::numeric_limits<double>::quiet_NaN();
+    bool floor_goal_clamped = false;
+    double goal_minus_measured_pos_m = 0.0;
+    double goal_minus_measured_ori_rad = 0.0;
     double requested_twist_linear_norm_m_s = 0.0;
     double requested_twist_angular_norm_rad_s = 0.0;
     double applied_twist_linear_norm_m_s = 0.0;
@@ -421,6 +446,13 @@ struct ArmCommand {
 
     double gripper_target = 0.0;
     double timeout_sec = 0.2;
+
+    // Freedrive (direct-teaching) request payload. When mode == Freedrive, this
+    // arm's sticky server free-drive state is set to freedrive_on. has_freedrive
+    // is true only when the parser saw an explicit boolean (so a bare Freedrive
+    // command without the flag is rejected rather than silently treated as off).
+    bool freedrive_on = false;
+    bool has_freedrive = false;
 
     // Parsed command validation flags. A command parser must set these true only
     // when the corresponding array was present and had the expected size.
@@ -693,17 +725,6 @@ struct ServoSample {
     std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;
 };
 
-// Collision capsule geometry (stand frame, meters) for viewers. Generic so it
-// carries both the static stand capsules and the FK'd per-arm capsules. Kept here
-// (not config) so core/types stays independent of the config header. Published so
-// a viewer can draw the EXACT capsules the guard checks (not the visual meshes).
-struct SelfCollisionCapsuleViz {
-    std::string name;
-    std::array<double, 3> p0_m{};
-    std::array<double, 3> p1_m{};
-    double radius_m = 0.0;
-};
-
 // One near pair from the URDF mesh self-collision monitor: the two closest
 // witness points (stand frame) on the two geometries + their signed clearance.
 // Lets a viewer draw the close-call segments over the URDF meshes (the mesh-mode
@@ -740,6 +761,16 @@ struct ServoSnapshot {
     bool fault_latched = false;
     bool async_supervision_degraded = false;
     bool tracking_error_degraded = false;
+    // Per-arm direct-teaching (free-drive) sticky state. While true, that arm's
+    // controller is in freedrive_teach_on and the server sends no servo_j to
+    // either controller (send_policy == "freedrive").
+    bool left_freedrive_active = false;
+    bool right_freedrive_active = false;
+    // Per-arm free-drive lifecycle stage (off/arming_quiesce/arming_confirm/
+    // active/exiting) and last abort/failure note, for operator telemetry.
+    std::string left_freedrive_stage = "off";
+    std::string right_freedrive_stage = "off";
+    std::string freedrive_note;
     SafetyVerdict latched_fault_reason = SafetyVerdict::Ok;
     std::string fault_reason;
 
@@ -759,17 +790,9 @@ struct ServoSnapshot {
     bool self_collision_has_closest_points = false;
     std::array<double, 3> self_collision_closest_point_a_m{};
     std::array<double, 3> self_collision_closest_point_b_m{};
-    // Full per-arm collision capsules (stand frame) evaluated this tick — FK'd
-    // from the arm_capsules template — so a viewer can draw the exact checked
-    // capsules over the arm mesh.
-    bool self_collision_has_capsules = false;
-    std::vector<SelfCollisionCapsuleViz> self_collision_left_capsules_m;
-    std::vector<SelfCollisionCapsuleViz> self_collision_right_capsules_m;
-    // Static stand capsules checked this tick (stand frame). Populated alongside
-    // the arm capsules.
-    std::vector<SelfCollisionCapsuleViz> self_collision_stand_capsules_m;
-    // URDF mesh self-collision (safety.self_collision.mesh): closest near pairs
-    // from the async CollisionMonitor (stand frame). Empty in capsule mode.
+    // URDF mesh self-collision (safety.self_collision): closest near pairs from
+    // the async CollisionMonitor (stand frame). Empty when the guard is disabled
+    // or no pair is within the slow zone.
     bool self_collision_mesh = false;
     std::vector<SelfCollisionNearPairViz> self_collision_near_pairs;
 

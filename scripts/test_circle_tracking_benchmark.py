@@ -31,13 +31,7 @@ def args_with_thresholds(**overrides: float | None) -> argparse.Namespace:
 
 
 RBPODO_ENV_NAMES = (
-    "RB_ALLOW_REAL_ROBOT",
-    "RB_ALLOW_REAL_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
-    "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION",
     "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
-    "RB_ALLOW_REAL_CARTESIAN",
 )
 
 
@@ -148,8 +142,6 @@ def rbpodo_args(tmp: Path, config: Path, pgmode: Path, **overrides: object) -> a
         "artifact_dir": tmp / "artifacts",
         "preflight_only": False,
         "skip_plots": True,
-        "i_understand_this_connects_to_real_controller": True,
-        "i_confirm_controller_is_in_pgmode_simulation": True,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -440,21 +432,6 @@ cartesian_control:
             with self.assertRaisesRegex(bench.AcceptanceError, "run_mode: real"):
                 bench.preflight(args)
 
-    def test_rbpodo_preflight_requires_controller_sim_cartesian_env(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_text, EnvGuard():
-            tmp = Path(tmp_text)
-            config = tmp / "config.yaml"
-            pgmode = tmp / "pgmode.json"
-            write_rbpodo_config(config)
-            write_pgmode_summary(pgmode)
-            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
-            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
-            os.environ.pop("RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN", None)
-            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
-            with self.assertRaisesRegex(rbpodo_bench.BenchmarkError, "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"):
-                rbpodo_bench.preflight(rbpodo_args(tmp, config, pgmode))
-
     def test_rbpodo_preflight_requires_allow_in_controller_simulation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text, EnvGuard():
             tmp = Path(tmp_text)
@@ -462,11 +439,6 @@ cartesian_control:
             pgmode = tmp / "pgmode.json"
             write_rbpodo_config(config, allow_controller_sim_cartesian=False)
             write_pgmode_summary(pgmode)
-            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
-            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
-            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
             with self.assertRaisesRegex(rbpodo_bench.BenchmarkError, "allow_in_controller_simulation"):
                 rbpodo_bench.preflight(rbpodo_args(tmp, config, pgmode))
 

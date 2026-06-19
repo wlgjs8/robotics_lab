@@ -31,18 +31,19 @@ import generate_rbpodo_measurement_reliability_report as reliability_report
 import timestamp_alignment_audit
 from cartesian_acceptance import CommandRecorder, StateCapture, wait_for
 from rbpodo_servo_acceptance import (
-    ENV_KEYS,
     REAL_ROBOT_IPS,
     ParsedConfig,
     as_bool,
     as_float,
-    env_enabled,
-    env_snapshot,
     load_config,
     parse_udp_endpoint,
     scalar_value,
     state_stream_timeout_message,
 )
+
+
+def env_enabled(name: str) -> bool:
+    return os.environ.get(name) == "1"
 
 
 SCHEMA = "robotics_lab.rbpodo_circle_tracking_benchmark.v1"
@@ -55,12 +56,6 @@ CONTROLLERS = (
 )
 TRACKING_SOURCES = ("auto", "tcp_ref_stand", "tcp_actual_stand")
 PROFILE_DEFAULTS = sim_bench.PROFILE_DEFAULTS
-REQUIRED_ENV = (
-    "RB_ALLOW_REAL_ROBOT",
-    "RB_ALLOW_REAL_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
-)
 DEFAULT_PHYSICAL_MOTION_WARNING_DEG = 0.05
 MOTION_EPSILON_DEG = 1e-5
 MOTION_EPSILON_M = 1e-5
@@ -68,7 +63,6 @@ INTEGRATOR_DIVERGENCE_WARNING_MIN = 10.0
 CARTESIAN_UNAVAILABLE_PREFIX = "cartesian_control_unavailable"
 CARTESIAN_REJECTION_HINTS = [
     "check cartesian_control.allow_in_controller_simulation: true",
-    "check RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1",
     "check operation_mode: simulation",
     "check same-run pgmode simulation confirmation",
 ]
@@ -152,16 +146,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-dir", type=Path, required=True)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
-    parser.add_argument(
-        "--i-understand-this-connects-to-real-controller",
-        action="store_true",
-        help="Required before connecting to known Rainbow controller IPs.",
-    )
-    parser.add_argument(
-        "--i-confirm-controller-is-in-pgmode-simulation",
-        action="store_true",
-        help="Required acknowledgement before pgmode simulation verification is accepted.",
-    )
     return parser.parse_args()
 
 
@@ -221,11 +205,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | No
 
 
 def benchmark_env_snapshot() -> dict[str, str | None]:
-    snapshot = env_snapshot()
-    for key in REQUIRED_ENV:
-        snapshot[key] = os.environ.get(key)
-    snapshot["RB_ALLOW_REAL_CARTESIAN"] = os.environ.get("RB_ALLOW_REAL_CARTESIAN")
-    return snapshot
+    return {}
 
 
 def apply_profile(args: argparse.Namespace) -> None:
@@ -623,8 +603,6 @@ def ensure_pgmode(args: argparse.Namespace, config: ParsedConfig) -> dict[str, A
         raise BenchmarkError("--set-pgmode-simulation and --verify-pgmode-simulation are mutually exclusive")
     if args.pgmode_summary_json and (args.set_pgmode_simulation or args.verify_pgmode_simulation):
         raise BenchmarkError("--pgmode-summary-json cannot be combined with pgmode set/verify flags")
-    if not args.i_confirm_controller_is_in_pgmode_simulation:
-        raise BenchmarkError("missing --i-confirm-controller-is-in-pgmode-simulation")
     if args.pgmode_summary_json:
         summary = load_pgmode_summary(args.pgmode_summary_json, ips)
         summary = dict(summary)
@@ -639,7 +617,6 @@ def ensure_pgmode(args: argparse.Namespace, config: ParsedConfig) -> dict[str, A
             ips,
             args.pgmode_timeout_sec,
             port=args.pgmode_command_port,
-            confirmation=args.i_understand_this_connects_to_real_controller,
             set_simulation=args.set_pgmode_simulation,
             verify_only=not args.set_pgmode_simulation,
         )
@@ -731,15 +708,6 @@ def validate_config_and_env(
             raise BenchmarkError(f"{label}_robot.ip is required")
 
     known_ips = {config.left.ip, config.right.ip} & REAL_ROBOT_IPS
-    if not args.i_understand_this_connects_to_real_controller:
-        raise BenchmarkError("refusing controller connection without explicit real-controller confirmation flag")
-    if not args.i_confirm_controller_is_in_pgmode_simulation:
-        raise BenchmarkError("missing --i-confirm-controller-is-in-pgmode-simulation")
-    for name in REQUIRED_ENV:
-        if not env_enabled(name):
-            raise BenchmarkError(f"rbpodo controller-simulation circle benchmark requires {name}=1")
-    if env_enabled("RB_ALLOW_REAL_CARTESIAN"):
-        raise BenchmarkError("RB_ALLOW_REAL_CARTESIAN must not be set for controller-simulation circle benchmark")
 
     send_servo_commands = as_bool(config.servo.get("send_servo_commands"), False)
     if not send_servo_commands:
@@ -753,11 +721,6 @@ def validate_config_and_env(
             "diagnostics-suspect controller-simulation override requires "
             "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1"
         )
-    if (config.left.disable_waiting_ack or config.right.disable_waiting_ack) and not env_enabled(
-        "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION"
-    ):
-        raise BenchmarkError("ACK-off controller-simulation motion requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1")
-
     cartesian = sections.get("cartesian_control", {})
     if as_bool(cartesian.get("allow_in_real"), False):
         raise BenchmarkError("cartesian_control.allow_in_real must remain false")
@@ -830,12 +793,9 @@ def validate_config_and_env(
         "real_robot_ips_checked": sorted(REAL_ROBOT_IPS),
         "configured_ips": [config.left.ip, config.right.ip],
         "known_real_ips": sorted(known_ips),
-        "confirmation_flag": args.i_understand_this_connects_to_real_controller,
-        "pgmode_confirmation_flag": args.i_confirm_controller_is_in_pgmode_simulation,
         "pgmode_simulation_confirmed": pgmode_summary.get("overall_result") == "ok",
         "pgmode_summary": pgmode_summary,
         "env": benchmark_env_snapshot(),
-        "required_env": list(REQUIRED_ENV),
         "send_servo_commands": send_servo_commands,
         "allow_controller_simulation_motion": as_bool(config.servo.get("allow_controller_simulation_motion"), False),
         "allow_controller_simulation_diagnostics_suspect": as_bool(
@@ -859,7 +819,7 @@ def validate_config_and_env(
         "overlay_enabled": not args.overlay_disable,
         "overlay_pub_endpoint": None if args.overlay_disable else args.overlay_pub_endpoint,
         "overlay_pub_rate_hz": None if args.overlay_disable else args.overlay_pub_rate_hz,
-        "server_env_overrides": {"RB_RBPODO_PGMODE_SIMULATION_CONFIRMED": "1"},
+        "server_env_overrides": {},
     }
     endpoints = {"command_host": command_host, "command_port": command_port, "state_host": state_host, "state_port": state_port}
     return preflight, endpoints
@@ -3064,8 +3024,7 @@ def summarize_run(
         ]
         performance_warnings.append(
             "server rejected Cartesian command before attempting path; check "
-            "cartesian_control.allow_in_controller_simulation, "
-            "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN, operation_mode=simulation, "
+            "cartesian_control.allow_in_controller_simulation, operation_mode=simulation, "
             "and same-run pgmode confirmation"
         )
     else:

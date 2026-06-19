@@ -463,12 +463,16 @@ def command_family_from_intent(intent: Any | None) -> str:
     if intent is None:
         return "unknown"
     mode = str(getattr(intent, "mode", "") or "")
+    if mode == "TcpPoseTarget":
+        return "tcp_target_pose"
     if mode and mode != "Hold":
         return mode
     for arm in ("left", "right"):
         arm_payload = getattr(intent, arm, None)
         if isinstance(arm_payload, dict):
             arm_mode = arm_payload.get("mode")
+            if arm_mode == "TcpPoseTarget":
+                return "tcp_target_pose"
             if isinstance(arm_mode, str) and arm_mode and arm_mode != "Hold":
                 return arm_mode
     return mode or "unknown"

@@ -71,24 +71,23 @@ list is:
   and `RB_ALLOW_REAL_GRIPPER=1`
 
 Flow actions are 14D, with per-arm Cartesian channels and separate gripper
-delta channels. The Cartesian action contract is per-step stand-frame delta:
-`p[k+1] - p[k]` plus `rotvec(q[k+1] * inverse(q[k]))`. Runtime converts that
-delta to `TcpTwistStand` by dividing by policy dt. In `controller_sim`, gripper
-proposals are logged and dropped by the noop gripper backend unless an explicit
-simulator gripper backend is configured; physical gripper motion remains
-blocked by default.
-
-For flow-policy actions, `--command-family tcp_twist_stand` is the default and
-the controller-simulation path. It divides the learned 6D per-step delta by
-`--policy-dt-sec` or checkpoint `dataset_stats.dt_mean_sec`, then clamps the
-final `TcpTwistStand` velocity with checkpoint action statistics unless
-`--max-linear-velocity-m-s` and `--max-angular-velocity-rad-s` are supplied.
-`controller_sim` and `real_policy` require policy dt from the CLI or checkpoint
-stats; dry-run/read-only modes may use the documented `1 / command_rate_hz`
-fallback. `--command-family tcp_twist_local` and
-`--command-family tcp_delta_stand` are offline/simulator debug paths;
-`tcp_delta_stand` requires `--allow-experimental-tcp-delta-stand` outside
-those debug lanes.
+delta channels. The Cartesian action contract is per-step ee_local body-frame
+pose delta: translation plus rotation vector, with no division by dt in the
+training label. Runtime command-family selection controls only how that same
+delta is emitted. The default `--command-family tcp_twist_local` divides the
+delta by `--policy-dt-sec` or checkpoint `dataset_stats.dt_mean_sec`, then clamps
+the final `TcpTwistLocal` velocity with checkpoint action statistics unless
+`--max-linear-velocity-m-s` and `--max-angular-velocity-rad-s` are supplied. The
+opt-in `--command-family tcp_target_pose` clamps the per-step delta by the same
+velocity limits times policy dt, composes it onto the running measured TCP pose,
+and emits absolute `TcpPoseTarget` `tcp_target_stand` setpoints. `controller_sim`
+and `real_policy` require policy dt from the CLI or checkpoint stats; dry-run and
+read-only modes may use the documented `1 / command_rate_hz` fallback. Live
+rollout requires the matching explicit opt-in flag:
+`--allow-tcp-twist-local` or `--allow-tcp-target-pose`. In `controller_sim`,
+gripper proposals are logged and dropped by the noop gripper backend unless an
+explicit simulator gripper backend is configured; physical gripper motion
+remains blocked by default.
 
 ## Episode Metadata
 
@@ -166,6 +165,7 @@ Record both the normalized command packet and raw teleop inputs when available:
 | `mode` | `Hold`, `JointTarget`, `JointVelocity`, `TcpTwistLocal`, `TcpTwistStand`, etc. |
 | `tcp_twist_local` | SpaceMouse local-frame twist in m/s and rad/s |
 | `tcp_twist_stand` | flow-policy stand-frame twist in m/s and rad/s |
+| `tcp_target_stand` | absolute `TcpPoseTarget` pose; quaternion_xyzw is authoritative when present |
 | `q_target_deg` | joint target command |
 | `dq_target_deg_s` | joint velocity command |
 | `spacemouse_axes` | raw six-axis SpaceMouse sample before policy scaling, if captured |

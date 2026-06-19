@@ -309,10 +309,6 @@ run_optional_rbpodo_measurement_readonly() {
     echo "ERROR: CODEX_RUN_RBPODO_MEASUREMENT=1 requires CODEX_RBPODO_MEASUREMENT_ARGS with explicit read-only script arguments" >&2
     return 1
   fi
-  if [[ "${CODEX_RBPODO_MEASUREMENT_ARGS}" != *"--i-understand-this-connects-to-real-controller"* ]]; then
-    echo "ERROR: CODEX_RBPODO_MEASUREMENT_ARGS must include the tool-level real-controller confirmation flag" >&2
-    return 1
-  fi
 
   local required_arg
   for required_arg in "$@"; do
@@ -1370,9 +1366,7 @@ run_optional_rbpodo_500hz_controller_sim() {
     "--server" \
     "--config" \
     "--mode servo_j_noop_500hz" \
-    "--artifact-dir" \
-    "--i-understand-this-connects-to-real-controller" \
-    "--i-confirm-controller-is-in-pgmode-simulation"
+    "--artifact-dir"
   do
     if [[ "${CODEX_RBPODO_500HZ_ARGS}" != *"${required_arg}"* ]]; then
       echo "ERROR: CODEX_RBPODO_500HZ_ARGS must include ${required_arg}" >&2
@@ -1454,9 +1448,7 @@ run_optional_rbpodo_async_500hz_controller_sim() {
     return 1
   fi
   for required_arg in \
-    "--artifact" \
-    "--i-understand-this-connects-to-real-controller" \
-    "--i-confirm-controller-is-in-pgmode-simulation"
+    "--artifact"
   do
     if [[ "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"${required_arg}"* ]]; then
       echo "ERROR: CODEX_RBPODO_ASYNC_500HZ_ARGS must include ${required_arg}" >&2
@@ -1784,9 +1776,7 @@ run_gene_umi_controller_sim_repeatability_gate() {
   tools/rbpodo_ackon500_gene_goal.sh \
     --profile repeatability \
     --dry-run \
-    --with-required-env \
-    --i-understand-this-connects-to-real-controller \
-    --i-confirm-controller-is-in-pgmode-simulation
+    --with-required-env
   grep_existing "best_left_run01|best_right_run01|repeatability|physical_readiness" \
     configs/rbpodo_circle_ablation scripts docs/runbooks REVIEW.md
 }
@@ -2151,9 +2141,7 @@ run_optional_rbpodo_p1_circle_ablation() {
   fi
   for required_arg in \
     "--matrix" \
-    "--artifact-root" \
-    "--i-understand-this-connects-to-real-controller" \
-    "--i-confirm-controller-is-in-pgmode-simulation"
+    "--artifact-root"
   do
     if [[ "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}" != *"${required_arg}"* ]]; then
       echo "ERROR: CODEX_RBPODO_CIRCLE_ABLATION_ARGS must include ${required_arg}" >&2

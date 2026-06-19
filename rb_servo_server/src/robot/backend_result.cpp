@@ -73,6 +73,7 @@ std::string toString(BackendOp op) {
         case BackendOp::SendServoJ: return "SendServoJ";
         case BackendOp::Stop: return "Stop";
         case BackendOp::ResetFault: return "ResetFault";
+        case BackendOp::SetFreedrive: return "SetFreedrive";
     }
     return "Unknown";
 }

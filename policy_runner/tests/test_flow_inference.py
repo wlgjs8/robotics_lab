@@ -29,6 +29,8 @@ class FlowInferenceCliTest(unittest.TestCase):
         self.assertIn("controller_sim", result.stdout)
         self.assertIn("--command-family", result.stdout)
         self.assertIn("tcp_twist_local", result.stdout)
+        self.assertIn("tcp_target_pose", result.stdout)
+        self.assertIn("--allow-tcp-target-pose", result.stdout)
         self.assertIn("--policy-dt-sec", result.stdout)
 
     def test_controller_sim_requirement_helper_allows_rbpodo_carveout(self) -> None:

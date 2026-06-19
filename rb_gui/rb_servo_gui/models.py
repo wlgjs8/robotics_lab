@@ -389,6 +389,23 @@ class ArmSnapshot:
             return self.controller_simulation_cartesian_enabled_for_current_command
         return self.controller_simulation_cartesian_enabled
 
+    @property
+    def is_controller_simulation(self) -> bool:
+        """True only for the rbpodo controller-simulation carve-out.
+
+        Controller-simulation connects to the real boxes but runs the controller
+        in operation_mode=simulation (run_mode=real, backend=rbpodo). Real and
+        plain-simulation runs are NOT controller-simulation, so the
+        controller-sim-only streaming Cartesian flag must not gate them."""
+        gate = self.cartesian_gate
+        if not isinstance(gate, Mapping):
+            return False
+        return (
+            str(gate.get("backend_type", "")).lower() == "rbpodo"
+            and str(gate.get("run_mode", "")).lower() == "real"
+            and str(gate.get("operation_mode", "")).lower() not in ("", "real")
+        )
+
 
 @dataclass(frozen=True)
 class CartesianSolveSnapshot:
@@ -496,6 +513,7 @@ class StateSnapshot:
     cartesian_gate: Mapping[str, Any] | None
     self_collision: Mapping[str, Any] | None
     floor_constraint: Mapping[str, Any] | None
+    freedrive: Mapping[str, Any] | None
     raw: Mapping[str, Any]
 
     @classmethod
@@ -540,6 +558,7 @@ class StateSnapshot:
             cartesian_gate=top_cartesian_gate if isinstance(top_cartesian_gate, Mapping) else None,
             self_collision=data.get("self_collision") if isinstance(data.get("self_collision"), Mapping) else None,
             floor_constraint=data.get("floor_constraint") if isinstance(data.get("floor_constraint"), Mapping) else None,
+            freedrive=data.get("freedrive") if isinstance(data.get("freedrive"), Mapping) else None,
             raw=data,
         )
 

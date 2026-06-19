@@ -12,7 +12,7 @@ POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 export FLOW_EXPECTED_GPU_COUNT FLOW_RUN_UID FLOW_RUN_GID
 
-.PHONY: run vm-up vm-down vm-status build deploy stop policy-train policy-flow-train-config policy-flow-train-build policy-flow-gpu-smoke policy-flow-train-preflight policy-flow-hdf5-audit policy-flow-train-up policy-flow-train-down policy-hdf5-audit-smoke policy-flow-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up pgmode-sim-build pgmode-sim-up pgmode-sim-down
+.PHONY: run build-stack vm-up vm-down vm-status build deploy stop policy-train policy-flow-train-config policy-flow-train-build policy-flow-gpu-smoke policy-flow-train-preflight policy-flow-hdf5-audit policy-flow-train-up policy-flow-train-down policy-hdf5-audit-smoke policy-flow-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up pgmode-sim-build pgmode-sim-up pgmode-sim-down
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -26,6 +26,14 @@ export FLOW_EXPECTED_GPU_COUNT FLOW_RUN_UID FLOW_RUN_GID
 MODE ?= real
 run:
 	./tools/run_stack.sh $(MODE)
+
+# Source-build the full local stack for DIRECT real-controller work (no VM):
+# rb_servo_server (rbpodo backend, RB_SERVO_ENABLE_RBPODO=ON) into the path
+# `make run` launches, + setcap, + rb_gui/policy_runner editable installs.
+# Run this after editing source, then `make run`. Idempotent (rbpodo SDK
+# install is one-time). Override jobs with BUILD_JOBS=N.
+build-stack:
+	./tools/build_stack.sh
 
 # Rainbow VIRTUAL control-box VMs (vendor OVA): boot 2 VMs and map them to the
 # real controller IPs so `make run MODE=sim` works without hardware.

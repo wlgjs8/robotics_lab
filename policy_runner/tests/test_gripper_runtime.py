@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import logging
 import unittest
 
 from policy_runner.config import config_from_mapping
@@ -11,6 +13,7 @@ from policy_runner.gripper import (
     PikaSerialGripperBackend,
     REAL_GRIPPER_ENV,
     gripper_commands_from_flow_step,
+    suppress_pika_sdk_logging,
 )
 
 
@@ -20,6 +23,7 @@ class FakePikaGripper:
         self.position = 0.5
         self.sent_angles: list[float] = []
         self.closed_calls: list[str] = []
+        self.zero_calls = 0
 
     def connect(self) -> bool:
         return True
@@ -34,6 +38,11 @@ class FakePikaGripper:
         self.sent_angles.append(float(rad))
         return True
 
+    def set_zero(self) -> bool:
+        self.zero_calls += 1
+        self.position = 0.0  # closed stop becomes the new zero
+        return True
+
     def disable(self) -> None:
         self.closed_calls.append("disable")
 
@@ -43,6 +52,9 @@ class FakePikaGripper:
 
 def _pika_backend(**kwargs) -> PikaSerialGripperBackend:
     clock = {"now": 0.0}
+    # Default OFF for the send/clamp tests below: homing would prepend a
+    # closed-stop write and reset the seeded target. Homing has its own tests.
+    kwargs.setdefault("home_on_connect", False)
     backend = PikaSerialGripperBackend(
         ports={"left": "/dev/ttyFAKE0", "right": "/dev/ttyFAKE1"},
         gripper_cls=FakePikaGripper,
@@ -256,6 +268,59 @@ class PikaSerialGripperBackendTest(unittest.TestCase):
         self.assertEqual(results[0].reason, "controller_sim_gripper_logged_noop")
         self.assertEqual(blocked._grippers["left"].sent_angles, [])
 
+    def test_missing_real_serial_port_fails_before_sdk_import(self) -> None:
+        backend = PikaSerialGripperBackend(
+            ports={"left": "/tmp/robotics_lab_missing_gripper_port"},
+            sdk_path="/tmp/robotics_lab_missing_pika_sdk",
+            home_on_connect=False,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "serial port not found"):
+            backend.connect()
+
+
+class PikaGripperHomingTest(unittest.TestCase):
+    # home_poll_sec=0.0 keeps the settle loop fast; the fake reports a constant
+    # position so it settles on the second poll regardless.
+    def test_homing_closes_to_stop_and_zeroes_both_arms(self) -> None:
+        backend = _pika_backend(
+            min_rad=0.0, max_rad=1.75, home_on_connect=True, home_poll_sec=0.0
+        )
+        for arm in ("left", "right"):
+            g = backend._grippers[arm]
+            # Drove to the closed stop (min_rad) ...
+            self.assertEqual(g.sent_angles, [0.0])
+            # ... then re-zeroed there, and the target tracks the closed stop.
+            self.assertEqual(g.zero_calls, 1)
+            self.assertAlmostEqual(backend._targets[arm], 0.0)
+
+    def test_homing_makes_a_full_open_command_reach_max_rad(self) -> None:
+        # After homing, a 100% target maps to true max_rad on each identical arm.
+        backend = _pika_backend(
+            min_rad=0.0, max_rad=2.3738, home_on_connect=True, home_poll_sec=0.0
+        )
+        backend.send(GripperCommand("right", 100.0, command_type="target"))
+        # Homing write (0.0) then the open write (max_rad).
+        self.assertEqual(backend._grippers["right"].sent_angles, [0.0, 2.3738])
+
+    def test_homing_failure_is_nonfatal(self) -> None:
+        backend = PikaSerialGripperBackend(
+            ports={"left": "/dev/ttyFAKE0"},
+            gripper_cls=FakePikaGripper,
+            home_on_connect=True,
+            home_poll_sec=0.0,
+        )
+
+        def boom(_rad: float) -> bool:
+            raise OSError("serial gone")
+
+        backend._gripper_cls = type(
+            "BoomGripper", (FakePikaGripper,), {"set_motor_angle": lambda self, rad: boom(rad)}
+        )
+        # connect() must still succeed even if homing raises.
+        backend.connect()
+        self.assertIn("left", backend._grippers)
+
     def test_sim_dryrun_never_reaches_backend(self) -> None:
         backend = _pika_backend(supports_controller_simulation=True)
         runtime = GripperRuntime(rollout_mode="sim_dryrun", backend=backend)
@@ -266,11 +331,44 @@ class PikaSerialGripperBackendTest(unittest.TestCase):
         self.assertEqual(results[0].reason, "sim_dryrun_gripper_logged_noop")
         self.assertEqual(backend._grippers["left"].sent_angles, [])
 
+    def test_pika_sdk_logging_is_suppressed(self) -> None:
+        logger = logging.getLogger("pika.serial_comm")
+        old_disabled = logger.disabled
+        old_level = logger.level
+        old_propagate = logger.propagate
+        old_handlers = list(logger.handlers)
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        logger.handlers.clear()
+        logger.addHandler(handler)
+        logger.disabled = False
+        logger.propagate = False
+        logger.setLevel(logging.INFO)
+
+        def restore_logger() -> None:
+            logger.handlers.clear()
+            logger.handlers.extend(old_handlers)
+            logger.disabled = old_disabled
+            logger.propagate = old_propagate
+            logger.setLevel(old_level)
+
+        self.addCleanup(restore_logger)
+
+        suppress_pika_sdk_logging()
+        logger.error("JSON解析错误")
+
+        self.assertEqual(stream.getvalue(), "")
+        self.assertTrue(logger.disabled)
+        self.assertFalse(logger.propagate)
+
 
 class GripperConfigTest(unittest.TestCase):
     def test_defaults_to_fail_closed_none_backend(self) -> None:
         cfg = config_from_mapping({"schema": "robotics_lab.policy_runner.v1"})
         self.assertEqual(cfg.gripper.backend, "none")
+        self.assertEqual(cfg.gripper.left_port, "/dev/pika-left")
+        self.assertEqual(cfg.gripper.right_port, "/dev/pika-right")
+        self.assertTrue(cfg.gripper.suppress_sdk_logs)
         self.assertFalse(cfg.gripper.actuate_in_controller_simulation)
 
     def test_pika_serial_section_parses(self) -> None:
@@ -283,12 +381,14 @@ class GripperConfigTest(unittest.TestCase):
                     "right_port": "/dev/serial/by-path/right",
                     "pika_sdk_path": "/home/plaif/workspace/pika_sdk",
                     "max_rad": 1.75,
+                    "suppress_sdk_logs": False,
                     "actuate_in_controller_simulation": True,
                 },
             }
         )
         self.assertEqual(cfg.gripper.backend, "pika_serial")
         self.assertEqual(cfg.gripper.left_port, "/dev/serial/by-path/left")
+        self.assertFalse(cfg.gripper.suppress_sdk_logs)
         self.assertTrue(cfg.gripper.actuate_in_controller_simulation)
 
     def test_rejects_unknown_backend(self) -> None:

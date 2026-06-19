@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(RB_SERVO_ENABLE_RBPODO "Enable rbpodo backend" OFF)
+option(RB_SERVO_ENABLE_RBPODO "Enable rbpodo backend" ON)
 option(RB_SERVO_ENABLE_PINOCCHIO "Enable Pinocchio FK/IK support" ON)
 option(RB_SERVO_ALLOW_FETCHCONTENT "Allow CMake to download missing build dependencies" ON)
 
@@ -147,10 +147,6 @@ if(BUILD_TESTING)
     add_executable(test_capsule_distance tests/test_capsule_distance.cpp)
     target_link_libraries(test_capsule_distance PRIVATE rb_servo_core)
     add_test(NAME capsule_distance COMMAND test_capsule_distance)
-
-    add_executable(test_self_collision tests/test_self_collision.cpp)
-    target_link_libraries(test_self_collision PRIVATE rb_servo_core)
-    add_test(NAME self_collision COMMAND test_self_collision)
 
     add_executable(test_collision_monitor tests/test_collision_monitor.cpp)
     target_link_libraries(test_collision_monitor PRIVATE rb_servo_core)

@@ -39,7 +39,7 @@ camera_server (C++) ──────┘ (RealSense/mock, shared-memory image t
 - **`rb_servo_server`** (C++17) is the control owner. `DualArmServoLoop` owns command freshness, command-source lease/arbitration, FK/IK and Cartesian target generation, safety filtering, fault latching, dual-arm aggregation, and state publication. Per-arm blocking backend I/O lives behind `ArmWorker` → `IRobotBackend` (`MockBackend`, `RbsimBackend`, `RbpodoBackend`). Cartesian math (FK/IK, SO(3)/SE(3), orientation interpolation, frame conversion) MUST use Eigen3/Pinocchio — no local fallback math paths. Key dirs: `src/control/`, `src/robot/`, `src/kinematics/`, `src/math/`, `include/rb_servo/`.
 - **`rb_simulator`** (Python, `src/rbsim/`) is one local controller endpoint per arm over a persistent JSON-lines TCP transport. Run with `PYTHONPATH=rb_simulator/src`.
 - **`rb_gui`** (Python, `rb_servo_gui/`) is a mock/simulation viewer/operator console. It may send simulator-only TCP PTP/Linear commands; it must keep real motion disabled.
-- **`policy_runner`** (Python package) owns action sources (`action_sources/`), recording, HDF5 audit, and flow-matching ML training/inference (`flow_*.py`). SpaceMouse Cartesian uses `TcpTwistLocal`, not repeated TCP deltas.
+- **`policy_runner`** (Python package) owns action sources (`action_sources/`), recording, HDF5 audit, and flow-matching ML training/inference (`flow_*.py`). SpaceMouse Cartesian uses `TcpTwistLocal`, not repeated TCP deltas; `flow-infer` ee_local deltas can run as the default `tcp_twist_local` conversion or opt-in `tcp_target_pose` absolute `TcpPoseTarget` setpoints.
 - **`camera_server`** (C++) owns capture, shared-memory ring-buffer transport, metadata, and health. Camera acceptance is separate from robot motion acceptance.
 
 State fanout: `rb_servo_server` is the sole owner of UDP state publication via `network.state_pub_endpoints` (list). Commands go directly to `network.command_bind`. Benchmark overlay streams (desired geometry/metrics) are separate from robot state and must never carry commands.
@@ -57,16 +57,20 @@ backend_type: mock | simulator | rbpodo
 
 ## Safety Rules (do not weaken)
 
-Real behavior is fail-closed and never implicit. Env gates are necessary but NOT sufficient — config and an explicit acceptance task must also allow the operation:
+Real behavior is fail-closed and never implicit, but it is **no longer gated on env vars**. The legacy execution gates — `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`, `RB_ALLOW_REAL_CARTESIAN`, `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION`, `RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION`, `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION`, `RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN`, `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` — are removed from the server runtime (some acceptance scripts under `scripts/` still set the old names, but they no longer affect server gating). `run_mode`/`operation_mode` are telemetry labels only and do not decide whether motion is allowed.
 
-- `RB_ALLOW_REAL_ROBOT=1` — real controller connection
-- `RB_ALLOW_REAL_MOTION=1` — real joint servo motion
-- `RB_ALLOW_REAL_CARTESIAN=1` — real Cartesian/TCP motion
-- `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1` — Servo J with ACK waiting off (send evidence, not acceptance)
-- `RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1` — accept the controller `-2001` suspect diagnostics (`op_stat_self_collision`/`robot_time` garbage) in real mode (PR #12); EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latch
-- rbpodo controller `pgmode` simulation carve-out (connects to real boxes but `operation_mode: simulation`, `physical_motion_expected=false`) additionally needs `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1`, `RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1`, `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1`. This is NOT `RB_ALLOW_REAL_CARTESIAN`.
+Real motion is owned solely by **site-local config + the mode-independent safety layers** — these are what "do not weaken" now protects:
 
-The policy-side `SafetyGate` real-Cartesian block was relaxed (PR #13, scoped to `cartesian_gate.operation_mode == "real"`), so for real motion `rb_servo_server` is the sole safety layer (safety filter, tracking-error latch, async URDF-mesh self-collision guard via `CollisionMonitor`, lease, deadman). Controller-simulation safety is unchanged. These server env gates are still required and remain necessary-but-not-sufficient; the 2026-06-11 working-tree experiment that removed them was not landed on `dev`.
+- safety filter (joint clamp, stand-frame floor plane)
+- tracking-error latch
+- async URDF-mesh self-collision guard (`CollisionMonitor`)
+- command-source lease / arbitration
+- client deadman
+- operator supervision + hardware E-stop
+
+Config is the single decider: real motion requires the gitignored site config (`rb_servo_server/config/local/`) to enable it explicitly. The controller `-2001` suspect-diagnostics acceptance is now a per-arm config opt-in (`allow_real_motion_with_suspect_diagnostics: true`, no env); EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latch. The rbpodo `pgmode` controller-simulation carve-out (connects to real boxes but `operation_mode: simulation`, `physical_motion_expected=false`) is config-driven via `cartesian_control.allow_in_controller_simulation: true` + `servo.allow_controller_simulation_motion: true` (no env). The `TcpCircleMove` benchmark primitive is enabled by `cartesian_control.enable_benchmark_primitives: true` in any run_mode (no env).
+
+The policy-side `SafetyGate` real-Cartesian block was relaxed (PR #13, scoped to `cartesian_gate.operation_mode == "real"`), so for real motion `rb_servo_server` is the sole safety layer. Controller-simulation safety is unchanged.
 
 Other invariants: never reintroduce bool-only backend results (preserve `BackendResult<RobotState>`, `SendServoJResult`, `BackendErrorKind`, `BackendTiming`, `FaultContext`); don't parse error strings when structured fields exist; force control stays `provider: null, enable: false`; `servo.io_model: worker` is simulator-only. The stand-frame floor plane (`safety.floor_constraint`) applies in EVERY run mode when enabled (no env/mode gate), covers all motion primitives at the final joint-level safety gate, requires `kinematics.enable`, and its runtime lowering via the leaseless `SetSafetyFloorZ` command is bounded to the config `[runtime_min_z_m, runtime_max_z_m]`; `monitor_only` is never a real-motion posture. Tracked real config is a template only (`rb_servo_server/config/dual_real.example.yaml`); site configs go in gitignored `rb_servo_server/config/local/`. New rbpodo configs use canonical Servo J fields `servo_t1_sec` / `servo_t2_sec` / `servo_gain` / `servo_alpha` (not `servo_time_sec` / `servo_lookahead_sec` / `servo_acc`); `servo_t1_sec: 0.002` at the supported 500 Hz.
 

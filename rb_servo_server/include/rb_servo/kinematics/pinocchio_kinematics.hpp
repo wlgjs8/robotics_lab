@@ -42,15 +42,19 @@ public:
         const ArmMountConfig& mount
     ) const override;
 
-    std::vector<ArmCapsule> armCollisionCapsulesInStand(
-        ArmId arm,
-        const JointArray& q_deg,
-        const ArmMountConfig& mount,
-        const std::vector<ArmCapsuleConfig>& templates
-    ) const override;
-
 private:
     struct Impl;
+
+    // Core damped-least-squares solve; damping_scale multiplies the base and
+    // singular-region damping (1.0 = configured damping). solveIk() wraps this
+    // with the branch-jump clamp (re-solve at higher damping / hold seed).
+    IkResult solveIkDamped(
+        ArmId arm,
+        const Pose6D& target_tcp_stand,
+        const JointArray& seed_q_deg,
+        const ArmMountConfig& mount,
+        double damping_scale
+    ) const;
 
     KinematicsConfig config_;
     std::unique_ptr<Impl> impl_;

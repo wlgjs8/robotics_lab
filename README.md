@@ -131,84 +131,52 @@ rb_servo_server
 
 시뮬레이터는 팔마다 독립 controller endpoint를 갖는 실제 토폴로지를 반영해야 합니다. 기본값으로 실제 로봇 IP를 재사용하면 안 됩니다.
 
-## Safety Gates
+## Safety
 
-실제 로봇 연결:
+실제 로봇 연결과 모션은 **더 이상 env 게이트로 제어하지 않습니다.** 과거의
+`RB_ALLOW_REAL_ROBOT` / `RB_ALLOW_REAL_MOTION` / `RB_ALLOW_REAL_CARTESIAN` /
+`RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` /
+`RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION` /
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION` /
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN` /
+`RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` 게이트는 서버 런타임에서 모두
+제거됐습니다(일부 인수-테스트 스크립트에 과거 이름이 남아 있을 수 있으나 서버
+동작에는 영향이 없습니다). `run_mode`/`operation_mode`는 이제 telemetry
+라벨이며 실행 허용 여부를 결정하지 않습니다.
 
-```bash
-RB_ALLOW_REAL_ROBOT=1
-```
+실제 모션의 안전은 **site-local config + `rb_servo_server`의 mode-독립 안전
+계층**이 단독으로 책임집니다.
 
-실제 joint servo motion:
+- safety filter (joint clamp, stand-frame floor plane)
+- tracking-error latch
+- URDF-캡슐 async self-collision 가드 (`CollisionMonitor`)
+- command-source lease / arbitration
+- client deadman
+- 그리고 운영자 감독 + 하드웨어 E-stop
 
-```bash
-RB_ALLOW_REAL_MOTION=1
-```
-
-`rbpodo`에서 controller ACK 대기를 끈 상태로 Servo J motion을 테스트하려면
-추가 gate가 필요합니다. ACK-off 성공은 controller acceptance가 아니라
-socket/API send evidence입니다.
-
-```bash
-RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
-```
-
-실제 Cartesian/TCP motion:
-
-```bash
-RB_ALLOW_REAL_CARTESIAN=1
-```
-
-이 게이트들을 통해 양팔 실제 Cartesian circle이 운영자 감독 하에 실제로 구동된 바
-있습니다(`docs/runbooks/rbpodo_real_physical_circle.md`). 게이트는 여전히 필요
-조건이며, config(`cartesian_control.allow_in_real: true`)와 운영자 감독을 함께
-요구합니다.
+실제 동작은 `rb_servo_server/config/local/`의 site config가 명시적으로 허용해야
+하며, **config가 단일 결정자**입니다. (policy측 `SafetyGate`의 real-Cartesian
+차단은 PR #13으로 완화되어, 실제 모션에서는 `rb_servo_server`가 단일 안전
+계층입니다.)
 
 컨트롤러 `-2001`(suspect diagnostics, `op_stat_self_collision`/`robot_time`
-필드 디코딩 garbage)을 실모드에서 수용하려면 추가 게이트가 필요합니다.
-
-```bash
-RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1
-```
-
-EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error는 이 게이트와
-무관하게 계속 latch합니다. policy측 `SafetyGate`의 real-Cartesian 차단은
-PR #13으로 완화되어, 실제 모션에서는 `rb_servo_server`가 단일 안전 계층입니다
-(safety filter, tracking-error latch, URDF-캡슐 자가충돌 가드, lease, deadman).
-controller-simulation 안전 경로는 변경되지 않았습니다.
+필드 디코딩 garbage)은 per-arm config
+`allow_real_motion_with_suspect_diagnostics: true`로만 수용합니다(env 불필요).
+EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error는 이 옵션과
+무관하게 계속 latch합니다.
 
 Rainbow controller box를 `pgmode` simulation으로 둔 `rbpodo`
-controller-simulation circle benchmark는 hardware-free `rb_simulator`와
-future physical real robot benchmark 사이의 별도 evidence category입니다.
-이 경로는 실제 controller IP에 접속하므로 config는 `run_mode: real`,
-`backend_type: rbpodo`를 쓰지만, robot `operation_mode: simulation`이어야
-하고 physical robot should not move입니다. Tracking은 보통 controller
-reference인 `tcp_ref_stand`를 사용하며 summary에는
-`physical_motion_expected=false`가 기록되어야 합니다.
+controller-simulation 경로는 실제 controller IP에 접속하므로 config는
+`run_mode: real`, `backend_type: rbpodo`를 쓰되 robot
+`operation_mode: simulation`이어야 하고 physical robot은 움직이지
+않습니다(`physical_motion_expected=false`). 이 carve-out은
+`cartesian_control.allow_in_controller_simulation: true`와
+`servo.allow_controller_simulation_motion: true` config로 열립니다(env 불필요).
+Tracking은 보통 controller reference인 `tcp_ref_stand`를 사용합니다.
 
-Streaming Cartesian primitive를 controller simulation에서만 열려면 config와
-env가 모두 필요합니다.
-
-```yaml
-cartesian_control:
-  allow_in_controller_simulation: true
-  allow_in_real: false
-```
-
-```bash
-RB_ALLOW_REAL_ROBOT=1
-RB_ALLOW_REAL_MOTION=1
-RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
-RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
-```
-
-`RB_ALLOW_REAL_CARTESIAN`은 이 workflow에 사용하지 않습니다. Servo J ACK가
-보여도 circle이 실행되었다는 뜻은 아닙니다. `cartesian_solve.status`가
-`unavailable`이고 `circle_fit`이 singular이면 tracking failure가 아니라
-server-side Cartesian gate/configuration 문제입니다.
-
-이 gate들은 필요 조건일 뿐 충분 조건은 아닙니다. Config와 real-hardware acceptance도 해당 동작을 명시적으로 허용해야 합니다.
+`make run`(real, `operation_mode: real`)과 `make run MODE=sim`(pgmode-sim,
+`operation_mode: simulation`)이 사용하는 두 stack config가 단일 진실원천이며,
+실제/시뮬레이션 구분을 config만으로 결정합니다.
 
 `rbpodo` real config의 Rainbow Servo J parameter는 새 이름만 사용합니다.
 
@@ -240,13 +208,36 @@ force_control:
 
 ## Motion Primitive 요약
 
-- `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target입니다. Cartesian path는 보장하지 않습니다. 실제 모드는 게이트 + `cartesian_control.allow_in_real: true`로 열리며 양팔 물리 circle에서 검증됐습니다.
-- `TcpLinearMove`: simulator-only MoveL-like Cartesian path primitive입니다.
-- `TcpTwistLocal` / `TcpTwistStand`: 기본은 simulator-only streaming
-  Cartesian velocity primitive입니다. 예외적으로 rbpodo controller
-  `pgmode` simulation carve-out은 `operation_mode: simulation`과
-  `physical_motion_expected=false` telemetry가 확인될 때만 허용됩니다.
-- `TcpDeltaLocal` / `TcpDeltaStand`: low-level one-shot/debug jog primitive입니다.
+현재 **9가지** motion primitive를 지원합니다(개발 완료/활성 기준). 모두
+`run_mode` 무관하게 동작 가능하며, 실제 동작 여부는 config가 결정합니다.
+
+1. `JointTarget` — 절대 joint PTP. 목표 관절각으로 이동.
+2. `JointVelocity` — streaming joint velocity 명령.
+3. `TcpPoseTarget` — Cartesian final-pose PTP (MoveJ-like). Cartesian path는
+   보장하지 않습니다. UMI 등 streaming teleop은 서버측 SMD pose tracking으로 추종.
+4. `TcpLinearMove` — MoveL-like Cartesian 선형 경로 primitive
+   (`constant`/`slerp` orientation mode).
+5. `TcpCircleMove` — 서버측 자율 원 추적 benchmark primitive.
+   `cartesian_control.enable_benchmark_primitives: true`로 활성화되며 viser
+   "Circle" 버튼으로 구동합니다.
+6. `TcpTwistLocal` — local frame streaming Cartesian velocity (SpaceMouse teleop).
+   deadman / lease / 서버측 velocity limit 필요.
+7. `TcpTwistStand` — stand frame streaming Cartesian velocity.
+8. `TcpDeltaLocal` — local frame low-level one-shot/debug jog primitive.
+9. `TcpDeltaStand` — stand frame low-level one-shot/debug jog primitive.
+
+`safety.floor_constraint`가 켜지면 위 모든 primitive는 최종 safety gate에서 floor
+plane에 대해 FK 체크됩니다(Cartesian 경로는 평면을 따라 slide, joint-space는 hold).
+로컬 stack config의 PIKA 그리퍼 `tcp_offset_points`는 TCP 원점과 양쪽 팁
+`gripper_tip_a/b`를 함께 검사합니다. 현재 팁 오프셋은 줄자 실측 tip-to-tip
+`118 mm` 기준으로 TCP x축 `±0.059 m`입니다.
+
+참고:
+
+- `TcpCircleTrack`은 미구현 비활성 스켈레톤입니다
+  (`tcp_circle_track_not_implemented`). 위 9가지에 포함되지 않습니다.
+- `SetSafetyFloorZ`는 motion primitive가 아니라 floor plane 높이를 config 범위
+  내에서 조정하는 leaseless non-motion 명령입니다.
 
 ## 자주 쓰는 명령
 
@@ -323,10 +314,10 @@ overlay:
 ```
 
 Runbook: `docs/runbooks/rbpodo_controller_sim_circle.md`.
-Use `tcp_ref_stand` as the tracking source in pgmode simulation, keep
-`physical_motion_expected=false`, and include
-`RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1` only for the controller-simulation
-Cartesian carve-out. `policy_runner` is separate from this live view; GUI and
+Use `tcp_ref_stand` as the tracking source in pgmode simulation and keep
+`physical_motion_expected=false`. The controller-simulation Cartesian carve-out
+is config-driven (`cartesian_control.allow_in_controller_simulation: true`); no
+env gate is required. `policy_runner` is separate from this live view; GUI and
 benchmark state consumers do not route commands through it.
 
 Supported scope hygiene:

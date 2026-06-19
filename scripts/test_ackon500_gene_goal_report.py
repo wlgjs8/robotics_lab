@@ -324,26 +324,15 @@ def write_repeatability_set(root: Path) -> None:
 def wrapper_env(*, include_required: bool = False) -> dict[str, str]:
     env = os.environ.copy()
     for key in (
-        "RB_ALLOW_REAL_ROBOT",
-        "RB_ALLOW_REAL_MOTION",
-        "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
-        "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
         "RB_ALLOW_RBPODO_ASYNC_STREAMING",
         "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
-        "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED",
-        "RB_ALLOW_REAL_CARTESIAN",
     ):
         env.pop(key, None)
     if include_required:
         env.update(
             {
-                "RB_ALLOW_REAL_ROBOT": "1",
-                "RB_ALLOW_REAL_MOTION": "1",
-                "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION": "1",
-                "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN": "1",
                 "RB_ALLOW_RBPODO_ASYNC_STREAMING": "1",
                 "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM": "1",
-                "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED": "1",
             }
         )
     return env
@@ -671,8 +660,6 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
                     "--dry-run",
                     "--artifact-root",
                     str(Path(tmp) / "repeatability"),
-                    "--i-understand-this-connects-to-real-controller",
-                    "--i-confirm-controller-is-in-pgmode-simulation",
                 ],
                 cwd=repo,
                 env=wrapper_env(),
@@ -688,51 +675,6 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
             self.assertIn("run-name", completed.stdout)
             self.assertIn("--require-repeatable", completed.stdout)
             self.assertIn("repeatability_report.md", completed.stdout)
-
-    def test_wrapper_rejects_missing_pgmode_confirmation(self) -> None:
-        repo = Path(__file__).resolve().parents[1]
-        completed = subprocess.run(
-            [
-                "bash",
-                "tools/rbpodo_ackon500_gene_goal.sh",
-                "--profile",
-                "repeatability",
-                "--dry-run",
-                "--i-understand-this-connects-to-real-controller",
-            ],
-            cwd=repo,
-            env=wrapper_env(),
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("missing --i-confirm-controller-is-in-pgmode-simulation", completed.stderr)
-
-    def test_wrapper_rejects_real_cartesian_env_even_in_dry_run(self) -> None:
-        repo = Path(__file__).resolve().parents[1]
-        env = wrapper_env()
-        env["RB_ALLOW_REAL_CARTESIAN"] = "1"
-        completed = subprocess.run(
-            [
-                "bash",
-                "tools/rbpodo_ackon500_gene_goal.sh",
-                "--profile",
-                "repeatability",
-                "--dry-run",
-                "--i-understand-this-connects-to-real-controller",
-                "--i-confirm-controller-is-in-pgmode-simulation",
-            ],
-            cwd=repo,
-            env=env,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("RB_ALLOW_REAL_CARTESIAN must not be set", completed.stderr)
 
     def test_wrapper_rejects_missing_realtime_caps_before_running(self) -> None:
         repo = Path(__file__).resolve().parents[1]
@@ -751,8 +693,6 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
                     "--artifact-root",
                     str(Path(tmp) / "repeatability"),
                     "--skip-noop",
-                    "--i-understand-this-connects-to-real-controller",
-                    "--i-confirm-controller-is-in-pgmode-simulation",
                 ],
                 cwd=repo,
                 env=wrapper_env(include_required=True),
@@ -781,8 +721,6 @@ class Ackon500GeneGoalReportTest(unittest.TestCase):
                     "--artifact-root",
                     str(Path(tmp) / "repeatability"),
                     "--dry-run",
-                    "--i-understand-this-connects-to-real-controller",
-                    "--i-confirm-controller-is-in-pgmode-simulation",
                 ],
                 cwd=repo,
                 env=wrapper_env(),

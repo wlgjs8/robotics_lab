@@ -624,7 +624,8 @@ bool commandRequiresLease(ControlMode mode) {
            mode == ControlMode::TcpDeltaLocal ||
            mode == ControlMode::TcpTwistStand ||
            mode == ControlMode::TcpTwistLocal ||
-           mode == ControlMode::ResetFault;
+           mode == ControlMode::ResetFault ||
+           mode == ControlMode::Freedrive;
 }
 
 bool dualCommandRequiresLease(const DualArmCommand& command) {
@@ -695,6 +696,11 @@ bool parseArmObject(
         } else if (object.contains("gripper")) {
             if (!readOptionalNumber(object, "gripper", &gripper)) return false;
             out->gripper_target = gripper;
+        }
+
+        if (object.contains("freedrive_on")) {
+            if (!readOptionalBool(object, "freedrive_on", &out->freedrive_on)) return false;
+            out->has_freedrive = true;
         }
 
         bool present = false;

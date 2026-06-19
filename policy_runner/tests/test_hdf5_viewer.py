@@ -12,7 +12,7 @@ try:
     import h5py
     import numpy as np
 
-    from policy_runner.flow_dataset import pose_delta_local, tcp_delta_stand_from_poses
+    from policy_runner.flow_dataset import pose_delta_local
     from policy_runner.hdf5_viewer import (
         frame_summary,
         load_viewer_episode,
@@ -56,20 +56,13 @@ class Hdf5ViewerTest(unittest.TestCase):
             self.assertEqual(canvas.shape[2], 3)
             self.assertGreater(int(canvas.sum()), 0)
 
-    def test_action_delta_matches_per_step_stand_delta(self) -> None:
+    def test_stand_action_frame_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "episode_001.hdf5"
             _write_single_arm_episode(path)
-
-            viewer = load_viewer_episode(path, action_frame="stand")
-            summary = frame_summary(viewer, 0)
-            expected = tcp_delta_stand_from_poses(
-                viewer.episode.action_left_pose[0],
-                viewer.episode.action_left_pose[1],
-            )
-
-            self.assertTrue(np.allclose(summary["arms"]["left"]["action"][:6], expected))
-            self.assertAlmostEqual(float(summary["arms"]["left"]["action"][6]), 0.0)
+            # The world-frame "stand" representation was removed; only ee_local remains.
+            with self.assertRaises(ValueError):
+                load_viewer_episode(path, action_frame="stand")
 
     def test_action_delta_matches_ee_local_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -96,7 +89,7 @@ class Hdf5ViewerTest(unittest.TestCase):
             episode="episode_002.hdf5",
             single_arm_side="left",
             camera_names=None,
-            action_frame="stand",
+            action_frame="ee_local",
             start_frame=0,
             fps=None,
             image_size=16,

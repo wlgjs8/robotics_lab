@@ -276,6 +276,10 @@ services:
     environment:
       # Container path; override with CAMERA_CONFIG (see Makefile camera-real-up).
       CAMERA_SERVER_CONFIG: ${CAMERA_CONFIG:-/app/config/triple_realsense.yaml}
+      # rs400 advanced-mode JSON applied per device before streaming, so the
+      # capture PC (.40) and this inference PC share identical camera settings.
+      # Empty value disables it (falls back to driver defaults).
+      CAMERA_SERVER_REALSENSE_JSON: ${CAMERA_REALSENSE_JSON:-/app/config/realsense_d405_advanced.json}
     command: ["--config", "${CAMERA_CONFIG:-/app/config/triple_realsense.yaml}"]
     labels:
       rb-servo.role: "real-camera"

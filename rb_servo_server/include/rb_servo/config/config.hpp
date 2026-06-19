@@ -55,8 +55,8 @@ struct BackendConfig {
     // accept the same vendor-unreliable status fields (op_stat_self_collision shape,
     // robot_time) as UNAVAILABLE instead of latching diagnostics_suspect. Fail-closed,
     // gated by rbpodoSuspectDiagnosticsRealMotionGateOpen (needs operation_mode==real +
-    // RB_ALLOW_REAL_ROBOT/MOTION + RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION). Does
-    // NOT suppress EMS/SOS/soft-estop/collision_occur/unknown-mode faults.
+    // this config opt-in). Does NOT suppress EMS/SOS/soft-estop/collision_occur/
+    // unknown-mode faults.
     bool allow_real_motion_with_suspect_diagnostics = false;
     bool allow_controller_simulation_init_error = false;
 
@@ -82,6 +82,53 @@ struct IkSolverConfig {
     double position_tolerance_m = 0.001;
     double orientation_tolerance_rad = 0.02;
     JointArray max_step_deg{2.0, 2.0, 2.0, 3.0, 3.0, 4.0};
+    // Selective singularity-robust damping (Nakamura-Hanafusa). When the task
+    // Jacobian's smallest singular value sigma_min drops below
+    // singular_region_eps, damping on the (near-)singular direction is ramped
+    // up to at most damping_max, trading Cartesian accuracy in the unachievable
+    // direction for joint-space continuity. This stops the DLS step from
+    // blowing up along a degenerate direction and flipping to a distant IK
+    // branch (a ~5 deg single-tick joint jump for a ~0 mm Cartesian move near a
+    // wrist singularity). Outside the singular region the base `damping` is used
+    // unchanged, so well-conditioned tracking accuracy is preserved. Both <= 0
+    // disables the ramp (pure constant `damping`).
+    double singular_region_eps = 0.0;
+    double damping_max = 0.0;
+    // Observability guard: when > 0, flag the solve (telemetry
+    // ik_branch_jump_suspected) if the returned solution differs from the seed
+    // by more than this many degrees on any joint. On its own it does NOT alter
+    // the solution; it surfaces branch-jump events for diagnosis. The clamp
+    // fields below turn it into an actual correction.
+    double max_solution_jump_deg = 0.0;
+    // Branch-jump CLAMP (acts on the solution, not just observe). When
+    // max_solution_jump_deg > 0 and a converged solution jumps more than that
+    // from the seed:
+    //   1) if branch_jump_damping_scale > 1 and branch_jump_max_retries > 0,
+    //      re-solve the SAME tick with damping multiplied by the scale (escalating
+    //      per retry) to pull the step back onto the local branch — the first
+    //      attempt whose jump is within threshold wins;
+    //   2) if it still exceeds the threshold, the OVERSHOOT policy decides:
+    //      - branch_jump_rate_limit == true: scale the whole seed->solution joint
+    //        delta so the largest per-joint step equals max_solution_jump_deg —
+    //        the arm advances toward the solution along the same joint-space
+    //        direction at a bounded joint speed (no freeze, no abrupt flip). The
+    //        seed advances every tick, so there is no deadlock and the threshold
+    //        doubles as the smoothness/lag knob (telemetry reason
+    //        "branch_jump_rate_limited", ik_branch_jump_clamped stays false).
+    //      - else if branch_jump_clamp_to_seed == true: return the SEED (zero
+    //        motion this tick). WARNING: deadlocks under streaming targets — the
+    //        frozen seed keeps re-exceeding the threshold, so the arm stays
+    //        clamped until the target returns near the frozen pose. Prefer
+    //        rate_limit. (telemetry ik_branch_jump_clamped).
+    //      - else: return the flagged (most-damped) solution unchanged (allow;
+    //        can be rough on high-gain motion).
+    // branch_jump_rate_limit takes precedence over branch_jump_clamp_to_seed.
+    // All default-off (scale <= 1 / retries <= 0 / rate_limit & clamp false) =>
+    // pure observability, behavior unchanged.
+    double branch_jump_damping_scale = 0.0;
+    int branch_jump_max_retries = 0;
+    bool branch_jump_clamp_to_seed = false;
+    bool branch_jump_rate_limit = false;
 };
 
 struct KinematicsConfig {
@@ -167,114 +214,46 @@ enum class SelfCollisionFailPolicy {
     FaultLatch,
 };
 
-// Static stand collision capsule (stand frame, meters). Derived from the stand
-// URDF collision boxes (mo_robot_descriptions dual_rb3_730e_stand_ver3).
-struct StandCapsuleConfig {
+// Extra collision primitive for the mesh self-collision monitor — geometry the
+// URDF does not carry: wrist cameras, cable bundles, the work table/box. Attached
+// to a named frame: an ARM frame (e.g. an attachment_site) makes it move with that
+// arm (auto-classified left/right by ancestry); "stand"/"world" makes it a static
+// obstacle paired against both arms. Shapes are coal primitives.
+struct ExtraCollisionConfig {
     std::string name;
-    std::array<double, 3> p0_m{0.0, 0.0, 0.0};
-    std::array<double, 3> p1_m{0.0, 0.0, 0.0};
-    double radius_m = 0.0;
+    std::string shape = "box";       // box | sphere | capsule | cylinder
+    std::string parent_frame;        // URDF frame to attach to (arm frame or stand/world)
+    std::array<double, 3> size_m{0.0, 0.0, 0.0};  // box: full extents (x,y,z)
+    double radius_m = 0.0;           // sphere/capsule/cylinder
+    double length_m = 0.0;           // capsule/cylinder (length between caps / height)
+    std::array<double, 3> xyz_m{0.0, 0.0, 0.0};   // offset in the parent frame
+    std::array<double, 3> rpy{0.0, 0.0, 0.0};      // orientation in the parent frame
 };
-
-// A geometric collision capsule (segment endpoints + radius) in some frame.
-// Used both as the FK output (stand frame) and as a generic capsule primitive.
-struct ArmCapsule {
-    std::array<double, 3> p0_m{0.0, 0.0, 0.0};
-    std::array<double, 3> p1_m{0.0, 0.0, 0.0};
-    double radius_m = 0.0;
-};
-
-// One arm collision capsule defined in a URDF LINK frame (link0..link6,
-// attachment_site). The server FK-transforms p0_m/p1_m by that frame's placement
-// (per arm joints + mount) each tick to get the stand-frame capsule it checks.
-// Fit per collision hull from the RB3-730e URDF so the capsules follow the real
-// link "dogleg" shape (link2/link4 ship multiple hulls) instead of a single fat
-// straight capsule on the joint-origin skeleton. Regenerate with
-// scripts/fit_arm_collision_capsules.py.
-struct ArmCapsuleConfig {
-    std::string frame;
-    std::array<double, 3> p0_m{0.0, 0.0, 0.0};
-    std::array<double, 3> p1_m{0.0, 0.0, 0.0};
-    double radius_m = 0.0;
-};
-
-// RB3-730e per-link capsule template (both arms share it; FK'd per arm). Order
-// matters: indices feed stand_ignore_bones. Indices 0..1 are link0/link1 (base,
-// on/near the stand mount). Fit by scripts/fit_arm_collision_capsules.py.
-inline std::vector<ArmCapsuleConfig> defaultRb3ArmCapsules() {
-    return {
-        {"link0",           {+0.0696, -0.0007, +0.0256}, {-0.0623, +0.0023, +0.0359}, 0.0566},
-        {"link1",           {-0.0052, -0.0212, -0.0681}, {-0.0010, +0.0093, +0.0579}, 0.0647},
-        {"link2",           {-0.0003, -0.1552, -0.0497}, {+0.0011, -0.0772, +0.0790}, 0.0804},
-        {"link2",           {+0.0003, -0.1174, +0.0812}, {-0.0015, -0.1194, +0.2131}, 0.0376},
-        {"link2",           {-0.0028, -0.0744, +0.2178}, {+0.0002, -0.1501, +0.3285}, 0.0706},
-        {"link3",           {-0.0001, +0.0175, -0.0464}, {+0.0009, -0.0355, +0.0669}, 0.0624},
-        {"link4",           {+0.0014, -0.1107, +0.2140}, {-0.0026, -0.0893, +0.3132}, 0.0405},
-        {"link4",           {+0.0407, +0.0077, +0.0764}, {-0.0407, +0.0076, +0.0765}, 0.0490},
-        {"link4",           {+0.0003, -0.1457, +0.3534}, {+0.0005, -0.0296, +0.3459}, 0.0525},
-        {"link4",           {+0.0003, -0.1362, +0.2054}, {-0.0001, +0.0451, +0.1032}, 0.0513},
-        {"link5",           {+0.0034, -0.0138, +0.0650}, {-0.0017, +0.0081, -0.0486}, 0.0399},
-        {"link6",           {+0.0018, +0.0347, +0.0784}, {-0.0175, -0.0385, +0.0756}, 0.0307},
-        // Pika gripper (attachment_site frame): body column, camera (+y nub),
-        // jaw housing cross-bar (x), and fingertip bar ending ~3 mm past the tip.
-        {"attachment_site", {+0.0000, +0.0000, +0.0000}, {+0.0000, +0.0000, +0.1000}, 0.0350},
-        {"attachment_site", {+0.0000, +0.0607, +0.0810}, {+0.0000, +0.0940, +0.0810}, 0.0280},
-        {"attachment_site", {-0.1039, +0.0000, +0.1305}, {+0.1039, +0.0000, +0.1305}, 0.0317},
-        {"attachment_site", {-0.0594, +0.0000, +0.2286}, {+0.0594, +0.0000, +0.2286}, 0.0220},
-    };
-}
 
 // Server-side self-collision guard treating stand + left arm + right arm as one
 // "self" (the rbpodo controller firmware does not populate op_stat_self_collision).
-// Each arm link is approximated as a capsule (segment between consecutive
-// kinematic-chain points + radius); the stand as a static capsule list. Checked
-// pairs are left<->right, left<->stand, right<->stand — NEVER intra-arm (adjacent
-// links touch by construction). A candidate target is refused if any checked pair
-// comes within margin_m of each other.
+// The ONLY implementation is the async URDF-mesh CollisionMonitor (pinocchio +
+// coal): every candidate joint target is checked against the dual-arm + stand
+// collision geometry and refused (velocity barrier / fault) before it is sent.
+// There is no capsule approximation path.
 struct SelfCollisionConfig {
+    // Master switch for the URDF-mesh self-collision guard. When true the servo
+    // loop feeds every candidate target to the monitor and applies the shared
+    // velocity barrier; a hard breach, or a stale/absent monitor, fails closed.
     bool enable = false;
-    double margin_m = 0.05;
-    // Capsule radius per bone (meters). Chain points are [base, j1..j6, tcp] (8
-    // points -> 7 bones); index i is the bone from point i to point i+1. The last
-    // radius is reused if more bones exist (e.g. a future gripper). Conservative
-    // (slightly large) defaults; tune in simulation.
-    std::array<double, 7> link_radius_m{0.10, 0.09, 0.08, 0.07, 0.06, 0.06, 0.06};
     SelfCollisionFailPolicy fail_policy = SelfCollisionFailPolicy::ClampToHold;
     // Observe-only: still evaluate and publish clearance/violation telemetry, but
-    // do NOT clamp or latch. For tuning radii/margin in simulation against a known
+    // do NOT clamp or latch. For tuning d_hard/d_slow in simulation against a known
     // collision-free trajectory. Never use monitor_only as a real-motion safety
     // posture.
     bool monitor_only = false;
-    // Pair toggles. Arm<->stand checks additionally require a non-empty
-    // stand_capsules list (empty list = stand checks are skipped, preserving the
-    // arm-arm-only behavior of older configs).
-    bool check_left_right = true;
-    bool check_left_stand = true;
-    bool check_right_stand = true;
-    std::vector<StandCapsuleConfig> stand_capsules;
-    // Per-link arm collision capsules (both arms share this template; FK'd per
-    // arm each tick). Defaults follow the RB3-730e collision hulls so the capsules
-    // hug the real link shape; override in YAML to retune. The legacy
-    // link_radius_m skeleton model is unused when this is non-empty.
-    std::vector<ArmCapsuleConfig> arm_capsules{defaultRb3ArmCapsules()};
-    // Arm capsule indices excluded from the arm<->stand check (indices into
-    // arm_capsules). Indices 0,1,2 are link0/link1/link2-shoulder: the arm is
-    // bolted onto the stand shoulder plates here, so these capsules permanently
-    // overlap the stand mount/shoulder capsules and would always self-trigger
-    // (a structural, not avoidable, overlap). The reach links (link3+, index 3+)
-    // stay checked against the whole stand. See scripts/fit_arm_collision_capsules.py
-    // and the arm<->stand clearance probe.
-    std::vector<int> stand_ignore_bones{0, 1, 2};
 
-    // URDF mesh self-collision via the async CollisionMonitor (pinocchio + coal).
-    // When mesh.enable is true the servo loop uses the mesh monitor (separate
-    // thread, off the 2 ms servo_j path) + a velocity barrier INSTEAD of the
-    // capsule path above; the capsule code stays compiled but is not evaluated.
-    // Barrier params are a SINGLE shared set, common to every motion primitive
-    // (TcpPoseTarget, TcpTwistLocal, ...) — speed adaptation comes from the
-    // measured closing speed, so nothing is tuned per primitive.
+    // URDF mesh self-collision parameters (consumed only when enable is true). The
+    // monitor runs on a separate thread (off the 2 ms servo_j path) + a velocity
+    // barrier. Barrier params are a SINGLE shared set, common to every motion
+    // primitive (TcpPoseTarget, TcpTwistLocal, ...) — speed adaptation comes from
+    // the measured closing speed, so nothing is tuned per primitive.
     struct MeshConfig {
-        bool enable = false;
         std::string unified_urdf;        // stand+both-arms URDF (e.g. dual_rb3_730e_ver3.urdf)
         std::vector<std::string> package_dirs;  // resolve mesh "../../../meshes" paths
         std::string pika_gripper_mesh;   // optional; attached as a convex hull per arm
@@ -283,18 +262,36 @@ struct SelfCollisionConfig {
         std::string stand_frame = "stand";
         // arm geometry whose name contains any of these is NOT paired vs the stand
         std::vector<std::string> stand_ignore_arm_substrings{"link0"};
+        // Left/right classification by kinematic-tree ancestry (robust to mesh/link
+        // renaming). Default arm root frame = "<prefix>world" if left empty.
+        std::string left_arm_root_frame;
+        std::string right_arm_root_frame;
+        // Intra-arm self-collision (an arm folding onto itself); adjacent links
+        // (chain separation < intra_arm_min_chain_separation) are skipped.
+        bool check_intra_arm = true;
+        int intra_arm_min_chain_separation = 2;
+        // Swept-volume guard: samples between consecutive evaluations (1 = endpoint
+        // only). >=2 prevents fast motion tunneling a thin obstacle between ticks.
+        int swept_samples = 2;  // 1=endpoint, >=2 sweeps (cost ~x per sample)
         // shared velocity-barrier params
         double d_hard_m = 0.005;
         double d_slow_m = 0.025;
         double a_brake_m_s2 = 4.0;
         double hyst_m = 0.005;
-        double latency_s = 0.005;
+        double latency_s = 0.010;
         // Verdict older than this -> hold (recoverable, not a latch). Loose enough
         // to ride out normal OS scheduling jitter of the (non-RT) monitor thread;
         // the monitor normally refreshes every ~1.5 ms.
         double max_staleness_s = 0.050;
         int monitor_core = -1;
         int max_near_pairs = 8;
+        // VISUALIZATION ONLY (does not affect the barrier): publish near-pair witness
+        // segments to the GUI for any checked pair within this clearance. Decoupled
+        // from d_slow so close-call markers stay visible even when the barrier band
+        // (d_slow) is tuned tight. Effective threshold = max(this, d_slow).
+        double viz_near_pairs_m = 0.06;
+        // Extra collision primitives not in the URDF (wrist cameras, cables, table).
+        std::vector<ExtraCollisionConfig> extra_collision;
     };
     MeshConfig mesh;
 };
@@ -411,6 +408,11 @@ struct ServoConfig {
     bool controller_simulation_async_supervision_nonlatching = false;
     bool allow_controller_simulation_init_error = false;
     bool allow_controller_simulation_not_activated = false;
+    // Per-arm direct-teaching (free-drive). Fail-closed opt-in: when false, the
+    // server rejects every Freedrive command. Enable only on configs that accept
+    // releasing servo_j authority for operator hand-guiding (see
+    // docs/runbooks/freedrive_direct_teaching.md).
+    bool allow_freedrive = false;
 
     bool enable_realtime_priority = true;
     int realtime_priority = 80;
@@ -508,6 +510,17 @@ struct PoseTrackSmdConfig {
     double max_linear_accel_m_s2 = 0.0;
     double max_angular_velocity_rad_s = 0.0;
     double max_angular_accel_rad_s2 = 0.0;
+    // Velocity feedforward: damp on the velocity ERROR (goal_dot - x_dot) rather
+    // than the absolute x_dot, so the error dynamics become
+    //   e_ddot + 2*zeta*wn*e_dot + wn^2*e = goal_ddot.
+    // A constant-velocity (ramp) goal then has ZERO steady-state lag, while jitter
+    // (the goal_ddot term) still rolls off through the 2nd-order response. This
+    // decouples natural_frequency from tracking accuracy: fn becomes a pure
+    // smoothing dial that can be lowered for more smoothing without adding lag.
+    // The goal velocity is estimated internally from the per-tick goal delta
+    // (auto stand/body frame; valid because every caller integrates the goal once
+    // per step()). Off by default = exact legacy 2nd-order SMD.
+    bool velocity_feedforward = false;
 };
 
 enum class CartesianLimitPolicy {
@@ -546,10 +559,22 @@ struct CartesianControlConfig {
     double path_kp_ori = 6.0;
     double twist_orientation_hold_kp = 6.0;
     double twist_angular_deadband_rad_s = 0.0001;
-    // First-order LPF on the local twist before velocity IK (anti-vibration).
-    // Default off -> behavior-preserving. tau ~ 30-50 ms.
-    bool twist_lpf_enable = false;
-    double twist_lpf_tau_sec = 0.04;
+    // Route the streaming twist through the SMD pose tracker instead of velocity
+    // IK + joint integration: integrate the (clamped) twist into a stand-frame
+    // pose goal each tick, smooth it with the pose_track_smd filter (same as
+    // streaming TcpPoseTarget), then position-IK the smoothed pose. Default off
+    // (behavior-preserving). Uses pose_track_smd's zeta/fn for the filter.
+    bool twist_via_smd_enable = false;
+    // Anti-windup for the twist_via_smd goal integrator. Clamp the integrated
+    // pose goal so it never LEADS the measured TCP by more than these budgets
+    // (position m / orientation rad). In this feedforward chain the goal would
+    // otherwise run away when the arm stalls (IK clamp / fault / can't track) and
+    // lurch on recovery; clamping the goal to measured+budget is the
+    // back-calculation feedback that bounds both. Normal tracking lead is only
+    // the SMD lag (~mm / sub-deg), well under budget, so it never engages there.
+    // Both default 0 = disabled (behavior-preserving); e.g. 0.05 m / 0.2 rad.
+    double twist_smd_goal_max_lead_m = 0.0;
+    double twist_smd_goal_max_lead_rad = 0.0;
     double velocity_damping = 0.01;
     double max_twist_linear_m_s = 0.03;
     double max_twist_angular_rad_s = 0.2;

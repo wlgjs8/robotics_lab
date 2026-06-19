@@ -361,6 +361,55 @@ nlohmann::json kinematicsSnapshotJson(const KinematicsConfig& config) {
     };
 }
 
+// Self-collision geometry manifest: the EXACT inputs the async CollisionMonitor
+// builds its coal geometry from, so the GUI loads the same unified URDF (collision
+// meshes), attaches the same Pika gripper hull, and adds the same extra primitives
+// — instead of hardcoding a viewer-side URDF. Mirrors collision_monitor.cpp's
+// geometry build (gripper hull at "<prefix>attachment_site" rotated +90° about Z,
+// STL in mm so scale 0.001). Static (config-derived); the GUI reads it once.
+nlohmann::json selfCollisionManifestJson(
+    const SelfCollisionConfig& sc, const std::vector<std::string>& joint_names) {
+    const auto& m = sc.mesh;
+    nlohmann::json extra = nlohmann::json::array();
+    for (const auto& e : m.extra_collision) {
+        extra.push_back({
+            {"name", e.name},
+            {"shape", e.shape},
+            {"parent_frame", e.parent_frame},
+            {"size_m", e.size_m},
+            {"radius_m", e.radius_m},
+            {"length_m", e.length_m},
+            {"xyz_m", e.xyz_m},
+            {"rpy", e.rpy},
+        });
+    }
+    return {
+        {"schema", "robotics_lab.self_collision_manifest.v1"},
+        {"unified_urdf", m.unified_urdf},
+        {"package_dirs", stringArrayJson(m.package_dirs)},
+        {"pika_gripper_mesh", m.pika_gripper_mesh},
+        {"left_prefix", m.left_prefix},
+        {"right_prefix", m.right_prefix},
+        {"stand_frame", m.stand_frame},
+        // Base actuated-joint names (command order); the GUI forms the unified-URDF
+        // joint names as "<left_prefix>+name" / "<right_prefix>+name", exactly as
+        // collision_monitor.cpp builds left_joints/right_joints.
+        {"joint_names", stringArrayJson(joint_names)},
+        // How collision_monitor.cpp attaches the Pika hull (mirror exactly).
+        {"gripper_attach", {
+            {"frame_suffix", "attachment_site"},  // attaches at "<prefix>attachment_site"
+            {"object_suffix", "pika_gripper"},    // coal object name "<prefix>pika_gripper"
+            {"xyz_m", std::array<double, 3>{0.0, 0.0, 0.0}},
+            {"rpy", std::array<double, 3>{0.0, 0.0, M_PI / 2.0}},  // +90° about Z
+            {"mesh_scale", 0.001},                // STL in mm -> m
+        }},
+        {"extra_collision", std::move(extra)},
+        // Clearance thresholds so the viewer colors near pairs consistently.
+        {"d_hard_m", m.d_hard_m},
+        {"d_slow_m", m.d_slow_m},
+    };
+}
+
 nlohmann::json quaternionJson(const std::optional<std::array<double, 4>>& quaternion_xyzw) {
     if (!quaternion_xyzw) return nullptr;
     const auto& q = *quaternion_xyzw;
@@ -577,6 +626,12 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"ik_iterations", telemetry.ik_iterations},
         {"position_error_m", telemetry.position_error_m},
         {"orientation_error_rad", telemetry.orientation_error_rad},
+        {"ik_min_singular_value", telemetry.ik_min_singular_value},
+        {"ik_applied_damping", telemetry.ik_applied_damping},
+        {"ik_solution_jump_deg", telemetry.ik_solution_jump_deg},
+        {"ik_branch_jump_suspected", telemetry.ik_branch_jump_suspected},
+        {"ik_branch_jump_clamped", telemetry.ik_branch_jump_clamped},
+        {"twist_smd_goal_clamped", telemetry.twist_smd_goal_clamped},
         {"ik_status", telemetry.status},
         {"ik_reason", telemetry.reason},
         {"ik_timed_out", telemetry.ik_timed_out},
@@ -597,6 +652,11 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"orientation_mode", telemetry.orientation_mode},
         {"twist_clamped", telemetry.twist_clamped},
         {"floor_vz_clamped", telemetry.floor_vz_clamped},
+        {"floor_lowest_point", telemetry.floor_lowest_point},
+        {"floor_lowest_z_m", telemetry.floor_lowest_z_m},
+        {"floor_goal_clamped", telemetry.floor_goal_clamped},
+        {"goal_minus_measured_pos_m", telemetry.goal_minus_measured_pos_m},
+        {"goal_minus_measured_ori_rad", telemetry.goal_minus_measured_ori_rad},
         {"requested_twist_linear_norm_m_s", telemetry.requested_twist_linear_norm_m_s},
         {"requested_twist_angular_norm_rad_s", telemetry.requested_twist_angular_norm_rad_s},
         {"applied_twist_linear_norm_m_s", telemetry.applied_twist_linear_norm_m_s},
@@ -785,12 +845,6 @@ bool isRbpodoControllerSimulation(const BackendConfig& backend_config) {
     return operation_mode == "simulation" || operation_mode == "sim";
 }
 
-bool envFlagEnabled(const char* name) {
-    // Real/sim env gates are retired; published env_* gate fields report true
-    // so downstream clients (policy_runner safety) see the gates as open.
-    (void)name;
-    return true;
-}
 
 bool isStreamingCartesianMode(ControlMode mode) {
     return mode == ControlMode::TcpLinearMove ||
@@ -821,9 +875,7 @@ bool controllerSimulationCartesianGateOpen(
         servo_config.allow_controller_simulation_motion &&
         backend_config.backend_type == BackendType::Rbpodo &&
         backend_config.run_mode == RunMode::Real &&
-        isRbpodoControllerSimulation(backend_config) &&
-        envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
-        envFlagEnabled("RB_ALLOW_REAL_MOTION");
+        isRbpodoControllerSimulation(backend_config);
 }
 
 std::string commandFamilyString(ControlMode mode) {
@@ -897,8 +949,7 @@ nlohmann::json cartesianGateJson(
         backend_config.backend_type == BackendType::Rbpodo &&
         backend_config.run_mode == RunMode::Real &&
         !isRbpodoControllerSimulation(backend_config) &&
-        cartesian_config.allow_in_real &&
-        envFlagEnabled("RB_ALLOW_REAL_CARTESIAN");
+        cartesian_config.allow_in_real;
     return {
         {"run_mode", runModeString(backend_config.run_mode)},
         {"backend_type", backendTypeString(backend_config.backend_type)},
@@ -918,8 +969,6 @@ nlohmann::json cartesianGateJson(
             controllerSimulationPhysicalMotionPolicyString(safety_config.controller_simulation_physical_motion_policy)},
         {"controller_simulation_physical_motion_threshold_deg",
             safety_config.controller_simulation_physical_motion_threshold_deg},
-        {"env_RB_ALLOW_REAL_ROBOT", envFlagEnabled("RB_ALLOW_REAL_ROBOT")},
-        {"env_RB_ALLOW_REAL_MOTION", envFlagEnabled("RB_ALLOW_REAL_MOTION")},
         {"physical_motion_expected", physical_motion_expected},
         {"controller_simulation_cartesian_enabled", controller_sim_cartesian_enabled},
         {"controller_simulation_cartesian_enabled_for_current_command", controller_sim_cartesian_enabled},
@@ -1445,33 +1494,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             self_collision["closest_point_a_m"] = nullptr;
             self_collision["closest_point_b_m"] = nullptr;
         }
-        // Full evaluated capsules (stand frame) so a viewer can draw the exact
-        // checked geometry over the meshes: per-arm capsules FK'd this tick plus
-        // the static stand capsules.
-        if (snapshot.self_collision_has_capsules) {
-            const auto caps_json = [](const std::vector<SelfCollisionCapsuleViz>& caps) {
-                nlohmann::json arr = nlohmann::json::array();
-                for (const auto& cap : caps) {
-                    nlohmann::json entry;
-                    entry["name"] = cap.name;
-                    entry["p0_m"] = cap.p0_m;
-                    entry["p1_m"] = cap.p1_m;
-                    entry["radius_m"] = cap.radius_m;
-                    arr.push_back(std::move(entry));
-                }
-                return arr;
-            };
-            self_collision["left_arm_capsules_m"] = caps_json(snapshot.self_collision_left_capsules_m);
-            self_collision["right_arm_capsules_m"] = caps_json(snapshot.self_collision_right_capsules_m);
-            self_collision["stand_capsules_m"] = caps_json(snapshot.self_collision_stand_capsules_m);
-        } else {
-            self_collision["left_arm_capsules_m"] = nullptr;
-            self_collision["right_arm_capsules_m"] = nullptr;
-            self_collision["stand_capsules_m"] = nullptr;
-        }
         // URDF mesh self-collision: closest near pairs (witness segments) so the
-        // viewer can draw the mesh-based close calls (mesh-mode analogue of the
-        // capsule list above).
+        // viewer can draw the mesh-based close calls (witness points + clearance).
         self_collision["mesh"] = snapshot.self_collision_mesh;
         if (snapshot.self_collision_mesh && !snapshot.self_collision_near_pairs.empty()) {
             nlohmann::json arr = nlohmann::json::array();
@@ -1487,6 +1511,15 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             self_collision["near_pairs"] = std::move(arr);
         } else {
             self_collision["near_pairs"] = nullptr;
+        }
+        // Static collision-geometry manifest so the GUI mirrors exactly what the
+        // monitor checks (single source of truth: the server config, not a
+        // hardcoded viewer URDF). Present only when the guard is enabled.
+        if (config_.safety.self_collision.enable) {
+            self_collision["manifest"] = selfCollisionManifestJson(
+                config_.safety.self_collision, config_.kinematics.joint_names);
+        } else {
+            self_collision["manifest"] = nullptr;
         }
         message["self_collision"] = self_collision;
     }
@@ -1536,6 +1569,14 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["fault_latched"] = snapshot.fault_latched;
     message["async_supervision_degraded"] = snapshot.async_supervision_degraded;
     message["tracking_error_degraded"] = snapshot.tracking_error_degraded;
+    message["freedrive"] = {
+        {"left_active", snapshot.left_freedrive_active},
+        {"right_active", snapshot.right_freedrive_active},
+        {"any_active", snapshot.left_freedrive_active || snapshot.right_freedrive_active},
+        {"left_stage", snapshot.left_freedrive_stage},
+        {"right_stage", snapshot.right_freedrive_stage},
+        {"note", snapshot.freedrive_note},
+    };
     message["latched_fault_reason"] = toString(snapshot.latched_fault_reason);
     message["fault_reason"] = snapshot.fault_reason;
     message["fault_context"] = faultContextJson(snapshot);

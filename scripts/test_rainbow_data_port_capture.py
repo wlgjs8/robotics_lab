@@ -5,7 +5,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 import rainbow_data_port_capture as capture
 import rainbow_data_fixture_report as fixture_report
@@ -25,7 +24,6 @@ def config(**overrides):
         "save_each_sample": False,
         "output_prefix": "samples",
         "artifact_dir": Path(tempfile.mkdtemp()),
-        "confirmed_real_controller": False,
     }
     base.update(overrides)
     return capture.CaptureConfig(**base)
@@ -136,21 +134,10 @@ class RainbowDataPortCaptureTests(unittest.TestCase):
         self.assertEqual(summary["timeout_count"], 1)
         self.assertEqual(summary["success_count"], 0)
 
-    def test_confirmation_required_for_known_real_controller_ip(self):
-        with self.assertRaisesRegex(capture.CaptureError, "known real controller IP"):
-            capture.validate_config(config(ips=["172.28.60.200"]))
-
-    def test_real_controller_ip_requires_env_gate_after_confirmation(self):
-        cfg = config(ips=["172.28.60.200"], confirmed_real_controller=True)
-        with mock.patch.dict("os.environ", {}, clear=True):
-            with self.assertRaisesRegex(capture.CaptureError, "RB_ALLOW_REAL_ROBOT=1"):
-                capture.validate_config(cfg)
-
-    def test_real_controller_ip_requires_artifacts_dir_after_env_gate(self):
-        cfg = config(ips=["172.28.60.200"], confirmed_real_controller=True)
-        with mock.patch.dict("os.environ", {"RB_ALLOW_REAL_ROBOT": "1"}, clear=True):
-            with self.assertRaisesRegex(capture.CaptureError, "artifacts/"):
-                capture.validate_config(cfg)
+    def test_real_controller_ip_requires_artifacts_dir(self):
+        cfg = config(ips=["172.28.60.200"])
+        with self.assertRaisesRegex(capture.CaptureError, "artifacts/"):
+            capture.validate_config(cfg)
 
     def test_non_data_port_is_rejected(self):
         with self.assertRaisesRegex(capture.CaptureError, "--port must be 5001"):

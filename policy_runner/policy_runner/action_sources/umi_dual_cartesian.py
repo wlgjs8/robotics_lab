@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import datetime
 import json
 import math
+import os
 import socket
 import time
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from policy_runner.action_sources.tcp_delta import (
@@ -65,8 +68,10 @@ class _ArmTeleopState:
     previous_target: tuple[float, ...] | None = None
     last_sample: UmiSample | None = None
     was_armed: bool = False
-    filtered_target: tuple[float, ...] | None = None
-    last_filter_monotonic: float | None = None
+    deadband_target: tuple[float, ...] | None = None
+    # Monotonic time the deadman first dropped while still armed (None when the
+    # clutch is engaged). Drives the brief-drop grace window in _target_for_side.
+    deadman_drop_mono: float | None = None
 
 
 class _PoseMovingAverage:
@@ -105,6 +110,136 @@ class _PoseMovingAverage:
         )
 
 
+# 한국 표준시(KST, UTC+9) — 서버 시스템 TZ 와 무관하게 항상 KST 타임스탬프.
+# .40 publisher(umi_teleop_publish.py)의 송신 로그와 대칭으로 수신측을 기록한다.
+_KST = datetime.timezone(datetime.timedelta(hours=9), name="KST")
+# 120Hz publish 기준 정상 간격 8.3ms — 이보다 크게 벌어지면 수신 적체/누락 의심.
+_RECV_GAP_MS = 20.0
+
+
+def _kst_now() -> datetime.datetime:
+    return datetime.datetime.now(_KST)
+
+
+def _resolve_teleop_log_path() -> str | None:
+    """``POLICY_RUNNER_UMI_TELEOP_LOG`` 게이트.
+
+    - 미설정/빈값 → None (로깅 비활성, 단위테스트·기본 경로에서 파일을 안 만든다).
+    - '1'/'on'/'auto'/'true' → repo logs/ 하위에 실행마다 KST 타임스탬프 새 파일.
+    - 그 외 값 → 명시 파일 경로로 사용.
+    """
+    configured = os.environ.get("POLICY_RUNNER_UMI_TELEOP_LOG")
+    if not configured:
+        return None
+    if configured.lower() in ("1", "on", "auto", "true", "yes"):
+        logs_dir = Path(__file__).resolve().parents[3] / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        return str(logs_dir / f"umi_teleop_recv_{_kst_now().strftime('%Y%m%d_%H%M%S')}_KST.log")
+    return configured
+
+
+class _TeleopStepLogger:
+    """텔레옵 수신 경로 per-step 진단 로거 (실행마다 새 파일, KST 기준).
+
+    .40 publisher 송신 로그와 대칭. 무장(armed)된 매 스텝에 대해:
+      - recv 타이밍: 처리한 샘플의 publisher monotonic age(수신 지연) + 직전
+        처리 샘플과의 dt(누락/적체 → [GAP])
+      - raw 스텝(클램프 전, 손이 실제 요구한 변위) vs applied 스텝(클램프 후)
+      - 축별 클램프 히트([CLAMP]) / deadband 동결([DB])
+    "빠르면 끊김"이 클램프 포화/수신 누락 때문인지 데이터로 판별하기 위함.
+    """
+
+    def __init__(self, path: str):
+        self._fh = open(path, "w", buffering=1, encoding="utf-8")
+        self.path = path
+        self._last_mono: dict[str, float] = {}
+        self._fh.write(f"# umi_dual_cartesian 수신 per-step 로그  started={_kst_now().isoformat()}\n")
+        self._fh.write(
+            "# fields: <KST>  side  st=<ARMED|ENGAGE|HOLD|RELEASE|HOLD_TIMEOUT|STALE>  "
+            "age_ms=<수신지연>  dt_ms=<직전처리 샘플간격>  fresh=<신규수신?>  "
+            "raw_mm/raw_deg=<클램프전 요구 변위>  app_mm/app_deg=<적용 변위>  "
+            "clamp=<xyz|rpy 포화축>  db=<deadband동결>  tokens(GAP/CLAMP/DB)\n"
+        )
+
+    def _dt_ms(self, side: str, mono: float) -> float:
+        prev = self._last_mono.get(side)
+        self._last_mono[side] = mono
+        return -1.0 if prev is None else (mono - prev) * 1000.0
+
+    def log_event(self, side: str, status: str, sample_mono: float | None, now_monotonic: float) -> None:
+        age = -1.0 if sample_mono is None else (now_monotonic - sample_mono) * 1000.0
+        self._fh.write(
+            f"{_kst_now().strftime('%H:%M:%S.%f')[:-3]}  side={side[0].upper()}  "
+            f"st={status}  age_ms={age:7.1f}\n"
+        )
+
+    def log_step(
+        self,
+        side: str,
+        *,
+        sample_mono: float,
+        now_monotonic: float,
+        fresh: bool,
+        just_engaged: bool,
+        prev_target: tuple[float, ...] | None,
+        prev_deadband: tuple[float, ...] | None,
+        raw_pose6: tuple[float, ...],
+        deadband_pose6: tuple[float, ...],
+        applied_pose6: tuple[float, ...],
+        deadband_linear_m: float,
+        deadband_angular_rad: float,
+        max_linear_step_m: float,
+        max_angular_step_rad: float,
+    ) -> None:
+        age = (now_monotonic - sample_mono) * 1000.0
+        dt = self._dt_ms(side, sample_mono)
+        base = prev_target if prev_target is not None else applied_pose6
+        # raw = 손이 요구한 변위(deadband·클램프 전), app = 실제 적용된 변위(클램프 후)
+        raw_lin = math.sqrt(sum((raw_pose6[i] - base[i]) ** 2 for i in range(3)))
+        raw_ang = math.sqrt(sum(_angle_diff(raw_pose6[3 + i], base[3 + i]) ** 2 for i in range(3)))
+        app_lin = math.sqrt(sum((applied_pose6[i] - base[i]) ** 2 for i in range(3)))
+        app_ang = math.sqrt(sum(_angle_diff(applied_pose6[3 + i], base[3 + i]) ** 2 for i in range(3)))
+        # 클램프는 (deadband-applied - prev_target)를 축별로 자른다 → 그 기준으로 포화축 판정
+        lin_axes = "xyz"
+        ang_axes = "rpy"
+        clamp = ""
+        for i in range(3):
+            if abs(deadband_pose6[i] - base[i]) > max_linear_step_m * 0.999:
+                clamp += lin_axes[i]
+        clamp += "|"
+        for i in range(3):
+            if abs(_angle_diff(deadband_pose6[3 + i], base[3 + i])) > max_angular_step_rad * 0.999:
+                clamp += ang_axes[i]
+        # deadband 동결 판정 (_apply_target_deadband 조건 복제)
+        db_hit = False
+        if (deadband_linear_m > 0.0 or deadband_angular_rad > 0.0) and prev_deadband is not None:
+            ld = math.sqrt(sum((raw_pose6[i] - prev_deadband[i]) ** 2 for i in range(3)))
+            ad = math.sqrt(sum(_angle_diff(raw_pose6[3 + i], prev_deadband[3 + i]) ** 2 for i in range(3)))
+            db_hit = ld <= deadband_linear_m and ad <= deadband_angular_rad
+        tokens = ""
+        if dt > _RECV_GAP_MS:
+            tokens += " [GAP]"
+        if clamp not in ("", "|"):
+            tokens += " [CLAMP]"
+        if db_hit:
+            tokens += " [DB]"
+        st = "ENGAGE" if just_engaged else "ARMED"
+        self._fh.write(
+            f"{_kst_now().strftime('%H:%M:%S.%f')[:-3]}  side={side[0].upper()}  st={st}  "
+            f"age_ms={age:6.1f}  dt_ms={dt:6.1f}  fresh={int(fresh)}  "
+            f"raw_mm={raw_lin * 1000:6.2f} raw_deg={math.degrees(raw_ang):5.2f}  "
+            f"app_mm={app_lin * 1000:6.2f} app_deg={math.degrees(app_ang):5.2f}  "
+            f"clamp={clamp}  db={int(db_hit)}{tokens}\n"
+        )
+
+    def close(self) -> None:
+        try:
+            self._fh.write(f"# closed={_kst_now().isoformat()}\n")
+            self._fh.close()
+        except (OSError, ValueError):
+            pass
+
+
 class UmiDualCartesianActionSource:
     requirements = cartesian_action_requirements(allow_rbpodo_controller_simulation=True)
 
@@ -116,7 +251,6 @@ class UmiDualCartesianActionSource:
         max_linear_step_m: float = 0.005,
         max_angular_step_rad: float = 0.04,
         input_moving_average_window: int = 1,
-        target_lpf_tau_sec: float = 0.0,
         deadband_linear_m: float = 0.0,
         deadband_angular_rad: float = 0.0,
         linear_axis_signs: Sequence[float] = (1.0, 1.0, 1.0),
@@ -127,6 +261,7 @@ class UmiDualCartesianActionSource:
         workspace_bounds: Mapping[str, Sequence[float]] | Sequence[float] | None = None,
         sample_hold_timeout_sec: float = 0.05,
         timeout_sec: float = 0.05,
+        deadman_release_grace_sec: float = 0.2,
     ):
         if max_linear_step_m < 0.0:
             raise ValueError("max_linear_step_m must be non-negative")
@@ -134,19 +269,18 @@ class UmiDualCartesianActionSource:
             raise ValueError("max_angular_step_rad must be non-negative")
         if int(input_moving_average_window) < 0:
             raise ValueError("input_moving_average_window must be non-negative")
-        if target_lpf_tau_sec < 0.0:
-            raise ValueError("target_lpf_tau_sec must be non-negative")
         if deadband_linear_m < 0.0:
             raise ValueError("deadband_linear_m must be non-negative")
         if deadband_angular_rad < 0.0:
             raise ValueError("deadband_angular_rad must be non-negative")
         if sample_hold_timeout_sec <= 0.0:
             raise ValueError("sample_hold_timeout_sec must be positive")
+        if deadman_release_grace_sec < 0.0:
+            raise ValueError("deadman_release_grace_sec must be non-negative")
         self.left_reader = left_reader
         self.right_reader = right_reader
         self.max_linear_step_m = float(max_linear_step_m)
         self.max_angular_step_rad = float(max_angular_step_rad)
-        self.target_lpf_tau_sec = float(target_lpf_tau_sec)
         self.deadband_linear_m = float(deadband_linear_m)
         self.deadband_angular_rad = float(deadband_angular_rad)
         self.linear_axis_signs = _signs3(linear_axis_signs, "linear_axis_signs")
@@ -159,11 +293,15 @@ class UmiDualCartesianActionSource:
         self.workspace_bounds = _workspace_bounds(workspace_bounds)
         self.sample_hold_timeout_sec = float(sample_hold_timeout_sec)
         self.timeout_sec = float(timeout_sec)
+        self.deadman_release_grace_sec = float(deadman_release_grace_sec)
         self.input_moving_average_window = int(input_moving_average_window)
         self._left = _ArmTeleopState()
         self._right = _ArmTeleopState()
         self._left_ma = _PoseMovingAverage(self.input_moving_average_window)
         self._right_ma = _PoseMovingAverage(self.input_moving_average_window)
+        # 수신 per-step 진단 로그 (POLICY_RUNNER_UMI_TELEOP_LOG 게이트, 기본 비활성)
+        log_path = _resolve_teleop_log_path()
+        self._step_log = _TeleopStepLogger(log_path) if log_path else None
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         left_pose, left_gripper, left_changed = self._target_for_side(
@@ -210,6 +348,8 @@ class UmiDualCartesianActionSource:
     def close(self) -> None:
         self.left_reader.close()
         self.right_reader.close()
+        if self._step_log is not None:
+            self._step_log.close()
 
     def _target_for_side(
         self,
@@ -221,10 +361,15 @@ class UmiDualCartesianActionSource:
         now_monotonic: float,
     ) -> tuple[tuple[float, ...] | None, float | None, bool]:
         sample = reader.read()
+        fresh = sample is not None
         if sample is None:
             sample = state.last_sample
             if sample is None or now_monotonic - sample.monotonic > self.sample_hold_timeout_sec:
                 if state.was_armed:
+                    if self._step_log is not None:
+                        self._step_log.log_event(
+                            side, "HOLD_TIMEOUT",
+                            sample.monotonic if sample is not None else None, now_monotonic)
                     _clear_latches(state)
                     return None, None, True
                 _clear_latches(state)
@@ -234,6 +379,8 @@ class UmiDualCartesianActionSource:
 
         if now_monotonic - sample.monotonic > self.sample_hold_timeout_sec:
             if state.was_armed:
+                if self._step_log is not None:
+                    self._step_log.log_event(side, "STALE", sample.monotonic, now_monotonic)
                 _clear_latches(state)
                 return None, None, True
             _clear_latches(state)
@@ -245,12 +392,35 @@ class UmiDualCartesianActionSource:
 
         if not sample.deadman:
             if state.was_armed:
+                # The foot-switch clutch deadman can drop spuriously under
+                # vibration / fast motion (confirmed on the wire: bursts of
+                # deadman=False during the fastest teleop). For absolute
+                # TcpPoseTarget a brief drop is safe to ride out — keep
+                # streaming the last latched setpoint so the arm holds in place
+                # and the server stays fresh in TcpPoseTarget, instead of
+                # tearing down to Hold (which forces a re-press and a
+                # re-anchored resume). Only a drop sustained past
+                # deadman_release_grace_sec is treated as a genuine release.
+                if self.deadman_release_grace_sec > 0.0 and state.previous_target is not None:
+                    if state.deadman_drop_mono is None:
+                        state.deadman_drop_mono = now_monotonic
+                    if now_monotonic - state.deadman_drop_mono < self.deadman_release_grace_sec:
+                        if self._step_log is not None:
+                            self._step_log.log_event(side, "HOLD", sample.monotonic, now_monotonic)
+                        return state.previous_target, _gripper_percent(sample.gripper), True
+                if self._step_log is not None:
+                    self._step_log.log_event(side, "RELEASE", sample.monotonic, now_monotonic)
                 _clear_latches(state)
                 return None, _gripper_percent(sample.gripper), True
             _clear_latches(state)
             return None, None, False
 
+        # Clutch is engaged this step: reset the brief-drop grace window so a
+        # later spurious drop starts a fresh grace measurement.
+        state.deadman_drop_mono = None
+
         pika_now = _tracker_transform(sample, self.gripper_offset, self.r_align)
+        just_engaged = not state.was_armed
         if not state.was_armed:
             arm_init = _tcp_stand_transform(snapshot, side)
             if arm_init is None:
@@ -268,9 +438,29 @@ class UmiDualCartesianActionSource:
         else:
             delta = self._apply_axis_signs(_compose(_inverse(state.pika_init), pika_now))
             target = _compose(state.arm_init, delta)
-        pose6 = _clamp_workspace(_transform_to_pose6(target), self.workspace_bounds)
-        pose6 = self._filter_target(state, pose6, now_monotonic)
-        pose6 = self._clamp_against_previous(state, pose6)
+        raw_pose6 = _clamp_workspace(_transform_to_pose6(target), self.workspace_bounds)
+        # 진단: deadband/클램프 전후를 모두 잡기 위해 prev 상태를 미리 보관
+        prev_target = state.previous_target
+        prev_deadband = state.deadband_target
+        deadband_pose6 = self._apply_target_deadband(state, raw_pose6)
+        pose6 = self._clamp_against_previous(state, deadband_pose6)
+        if self._step_log is not None:
+            self._step_log.log_step(
+                side,
+                sample_mono=sample.monotonic,
+                now_monotonic=now_monotonic,
+                fresh=fresh,
+                just_engaged=just_engaged,
+                prev_target=prev_target,
+                prev_deadband=prev_deadband,
+                raw_pose6=raw_pose6,
+                deadband_pose6=deadband_pose6,
+                applied_pose6=pose6,
+                deadband_linear_m=self.deadband_linear_m,
+                deadband_angular_rad=self.deadband_angular_rad,
+                max_linear_step_m=self.max_linear_step_m,
+                max_angular_step_rad=self.max_angular_step_rad,
+            )
         state.previous_target = pose6
         return pose6, _gripper_percent(sample.gripper), True
 
@@ -330,56 +520,33 @@ class UmiDualCartesianActionSource:
             _quat_to_matrix((ax * qx, ay * qy, az * qz, qw)),
         )
 
-    def _filter_target(
+    def _apply_target_deadband(
         self,
         state: _ArmTeleopState,
         pose6: tuple[float, ...],
-        now_monotonic: float,
     ) -> tuple[float, ...]:
-        if (
-            self.target_lpf_tau_sec <= 0.0
-            and self.deadband_linear_m <= 0.0
-            and self.deadband_angular_rad <= 0.0
-        ):
+        if self.deadband_linear_m <= 0.0 and self.deadband_angular_rad <= 0.0:
             return pose6
-        filtered = state.filtered_target
-        if filtered is None:
-            state.filtered_target = pose6
-            state.last_filter_monotonic = now_monotonic
+        previous = state.deadband_target
+        if previous is None:
+            state.deadband_target = pose6
             return pose6
-        # Deadband gates the filter INPUT against the current filtered output so
-        # the command freezes exactly while the hand-held tracker only jitters
-        # in place; a deadband on the output would let the EMA keep creeping.
+        # Freeze against the current deadband output so the command stays
+        # bit-exact while the hand-held tracker only jitters in place.
         linear_dist = math.sqrt(
-            (pose6[0] - filtered[0]) ** 2
-            + (pose6[1] - filtered[1]) ** 2
-            + (pose6[2] - filtered[2]) ** 2
+            (pose6[0] - previous[0]) ** 2
+            + (pose6[1] - previous[1]) ** 2
+            + (pose6[2] - previous[2]) ** 2
         )
         angular_dist = math.sqrt(
-            _angle_diff(pose6[3], filtered[3]) ** 2
-            + _angle_diff(pose6[4], filtered[4]) ** 2
-            + _angle_diff(pose6[5], filtered[5]) ** 2
+            _angle_diff(pose6[3], previous[3]) ** 2
+            + _angle_diff(pose6[4], previous[4]) ** 2
+            + _angle_diff(pose6[5], previous[5]) ** 2
         )
-        target = pose6
         if linear_dist <= self.deadband_linear_m and angular_dist <= self.deadband_angular_rad:
-            target = filtered
-        if self.target_lpf_tau_sec > 0.0:
-            last = state.last_filter_monotonic
-            dt = now_monotonic - last if last is not None else 0.0
-            if dt > 0.0:
-                alpha = dt / (self.target_lpf_tau_sec + dt)
-                target = (
-                    filtered[0] + alpha * (target[0] - filtered[0]),
-                    filtered[1] + alpha * (target[1] - filtered[1]),
-                    filtered[2] + alpha * (target[2] - filtered[2]),
-                    _wrap_pi(filtered[3] + alpha * _angle_diff(target[3], filtered[3])),
-                    _wrap_pi(filtered[4] + alpha * _angle_diff(target[4], filtered[4])),
-                    _wrap_pi(filtered[5] + alpha * _angle_diff(target[5], filtered[5])),
-                )
-            else:
-                target = filtered
-        state.filtered_target = target
-        state.last_filter_monotonic = now_monotonic
+            return previous
+        target = pose6
+        state.deadband_target = target
         return target
 
     def _clamp_against_previous(
@@ -510,8 +677,8 @@ def _clear_latches(state: _ArmTeleopState) -> None:
     state.previous_target = None
     state.last_sample = None
     state.was_armed = False
-    state.filtered_target = None
-    state.last_filter_monotonic = None
+    state.deadband_target = None
+    state.deadman_drop_mono = None
 
 
 def _script_to_samples(script: str | Iterable[Mapping[str, Any] | UmiSample | None]) -> list[UmiSample | None]:

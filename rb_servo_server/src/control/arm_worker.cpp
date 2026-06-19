@@ -29,6 +29,8 @@ BackendOp backendOpForCommand(ArmWorkerCommandKind kind) {
             return BackendOp::ResetFault;
         case ArmWorkerCommandKind::Stop:
             return BackendOp::Stop;
+        case ArmWorkerCommandKind::SetFreedrive:
+            return BackendOp::SetFreedrive;
         case ArmWorkerCommandKind::ServoJ:
             return BackendOp::SendServoJ;
     }
@@ -350,6 +352,28 @@ BackendResult<RobotState> ArmWorker::resetFault(uint64_t command_seq, uint64_t d
     const uint64_t now = nowSteadyNs();
     ArmWorkerCommand command;
     command.kind = ArmWorkerCommandKind::ResetFault;
+    command.command_seq = command_seq;
+    command.host_time_ns = now;
+    command.deadline_ns = deadline_ns == 0 ? now + 1'000'000'000 : deadline_ns;
+
+    const BackendResult<RobotState> enqueue_result = enqueueLifecycleCommand(command);
+    if (!enqueue_result.ok) {
+        return enqueue_result;
+    }
+
+    const std::optional<ArmWorkerLifecycleResult> result =
+        waitForLifecycleResult(command, now, command.deadline_ns);
+    if (!result.has_value()) {
+        return lifecycleTimeoutResult(command, now, nowSteadyNs());
+    }
+    return result->result;
+}
+
+BackendResult<RobotState> ArmWorker::setFreedrive(bool on, uint64_t command_seq, uint64_t deadline_ns) {
+    const uint64_t now = nowSteadyNs();
+    ArmWorkerCommand command;
+    command.kind = ArmWorkerCommandKind::SetFreedrive;
+    command.freedrive_on = on;
     command.command_seq = command_seq;
     command.host_time_ns = now;
     command.deadline_ns = deadline_ns == 0 ? now + 1'000'000'000 : deadline_ns;
@@ -915,6 +939,11 @@ BackendResult<RobotState> ArmWorker::executeLifecycleCommand(
                 backend_ready = false;
             }
             return result;
+        }
+        case ArmWorkerCommandKind::SetFreedrive: {
+            // Free-drive toggles servo authority but keeps the backend connected
+            // and readable, so backend_ready is intentionally left unchanged.
+            return backend_->setFreedrive(command.freedrive_on);
         }
         case ArmWorkerCommandKind::ServoJ:
             break;

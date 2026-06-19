@@ -8,12 +8,13 @@
 #
 # Mapping captured 2026-06-14 on this PC (matches `--swap-ports`: ttyUSB0=right):
 #   USB port 3-1.3.2.4  -> right gripper
-#   USB port 3-1.3.3.4  -> left  gripper
+#   USB port 3-1.3.1.4  -> left  gripper
 # VERIFY before trusting:  python3 scripts/umi_gripper_follow.py --ident left
-# If a gripper moves to a different socket, update the KERNELS value below
-# (find it with:  udevadm info -q property -n /dev/ttyUSB0 | grep ID_PATH ).
+# If a gripper moves to a different socket, update the KERNELS value below.
+# Find it with `udevadm info -a -n /dev/ttyUSB0`; use the USB device KERNELS
+# value next to idVendor/idProduct, not the interface suffix ending in `:1.0`.
 #
 # Install:  see tools/udev/install_pika_udev.sh
 
-SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7522", KERNELS=="3-1.3.2.4:1.0", SYMLINK+="pika-right", GROUP="dialout", MODE="0660"
-SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7522", KERNELS=="3-1.3.3.4:1.0", SYMLINK+="pika-left",  GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7522", KERNELS=="3-1.3.2.4", SYMLINK+="pika-right", GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7522", KERNELS=="3-1.3.1.4", SYMLINK+="pika-left",  GROUP="dialout", MODE="0660"

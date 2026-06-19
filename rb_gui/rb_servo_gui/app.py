@@ -70,7 +70,6 @@ from .scene import (
     update_circle_overlay,
     update_floor_plane,
     update_floor_plane_preview,
-    update_self_collision_capsules,
     update_self_collision_check_geom,
     update_self_collision_near_pairs,
     update_self_collision_overlay,
@@ -139,11 +138,12 @@ def _nudge_label(text: str, width: int = 6) -> str:
 _TCP_LINEAR_ORIENTATION_MODES = ("constant", "slerp")
 # Default viewer camera for newly connecting clients, in stand-frame meters
 # (Z-up). Looks at the dual-arm robot from the front (-Y side, looking toward
-# +Y) at a near-level angle, so the horizon stays level. Override per launch
+# +Y) at a near-level angle, so the horizon stays level. Captured live from the
+# desired zoomed-in framing on the grippers/TCP (2026-06-15). Override per launch
 # with RB_GUI_CAMERA_POSITION / RB_GUI_CAMERA_LOOK_AT / RB_GUI_CAMERA_UP
 # ("x,y,z" in meters).
-_DEFAULT_CAMERA_POSITION = (0.0, -1.9, 0.75)
-_DEFAULT_CAMERA_LOOK_AT = (0.0, -0.10, 0.50)
+_DEFAULT_CAMERA_POSITION = (-0.0128, -1.3823, 0.3985)
+_DEFAULT_CAMERA_LOOK_AT = (-0.0128, -0.1381, 0.2257)
 _DEFAULT_CAMERA_UP = (0.0, 0.0, 1.0)
 # Captured from the live dual-arm rest pose (rbpodo CobotData jnt_ang, 2026-06-12,
 # jnt_ang == jnt_ref at rest). Override per launch with RB_GUI_INIT_LEFT_JOINTS /
@@ -152,6 +152,11 @@ _DEFAULT_INIT_LEFT_JOINTS_DEG = (-131.663, 72.989, 113.400, -80.880, -107.064, -
 _DEFAULT_INIT_RIGHT_JOINTS_DEG = (135.099, -64.017, -114.457, 84.379, 112.485, 129.893)
 _OPERATOR_MONITOR_WIDTH_EM = 18.0
 _OPERATOR_MONITOR_GAP_EM = 1.0
+# Vertical anchor (em, in monitor-card font size) where the Pose Monitor stacks
+# below the Joint Monitor. Sized to the Joint card's natural content height so the
+# two panels sit close together instead of being split at mid-viewport. Override
+# with RB_GUI_MONITOR_SPLIT_EM.
+_OPERATOR_MONITOR_SPLIT_EM = 31.5
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -798,14 +803,15 @@ def _build_stand_world_monitor(server: Any, handles: dict[str, Any], *, order: f
                     handles["stand_world_monitor_values"][arm][field] = handle
 
 
-def _operator_monitor_layout() -> tuple[float, float]:
+def _operator_monitor_layout() -> tuple[float, float, float]:
     return (
         _env_positive_float("RB_GUI_MONITOR_WIDTH_EM", _OPERATOR_MONITOR_WIDTH_EM),
         _env_positive_float("RB_GUI_MONITOR_GAP_EM", _OPERATOR_MONITOR_GAP_EM),
+        _env_positive_float("RB_GUI_MONITOR_SPLIT_EM", _OPERATOR_MONITOR_SPLIT_EM),
     )
 
 
-def _operator_monitor_static_html(monitor_width_em: float, gap_em: float) -> str:
+def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_em: float) -> str:
     return f"""
 <style>
   :root {{
@@ -815,6 +821,9 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float) -> str
       var(--rb-monitor-target-width),
       max(13.5em, calc((100vw - (3 * var(--rb-monitor-gap))) / 2))
     );
+    /* Pose Monitor stacks just below the Joint Monitor's natural bottom (em, in
+       card font size) — clamped so it never runs off a short viewport. */
+    --rb-monitor-split: min({split_em:.3f}em, 60vh);
   }}
   .rb-monitor-card {{
     position: fixed;
@@ -847,9 +856,9 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float) -> str
      static header cards) stable across dynamic body refreshes. */
   .rb-monitor-joint-card {{ left: var(--rb-monitor-gap); }}
   .rb-monitor-stand-card {{ left: var(--rb-monitor-gap); }}
-  .rb-monitor-joint-card.rb-monitor-body-card {{ max-height: calc(50vh - 6.5em); }}
-  .rb-monitor-stand-card.rb-monitor-header-card {{ top: calc(50vh + 0.5em); }}
-  .rb-monitor-stand-card.rb-monitor-body-card {{ top: calc(50vh + 4.95em); max-height: calc(50vh - 6em); }}
+  .rb-monitor-joint-card.rb-monitor-body-card {{ max-height: calc(var(--rb-monitor-split) - 5.45em); }}
+  .rb-monitor-stand-card.rb-monitor-header-card {{ top: var(--rb-monitor-split); }}
+  .rb-monitor-stand-card.rb-monitor-body-card {{ top: calc(var(--rb-monitor-split) + 4.45em); max-height: calc(100vh - var(--rb-monitor-split) - 5.45em); }}
   .rb-monitor-title {{
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-weight: 650;
@@ -892,11 +901,15 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float) -> str
   }}
   .rb-monitor-row {{
     display: grid;
-    grid-template-columns: minmax(7.5em, 1fr) auto;
+    grid-template-columns: minmax(6em, 1fr) auto;
     column-gap: 0.8em;
     line-height: 1.55;
     white-space: nowrap;
   }}
+  /* Label cell clips itself (ellipsis) instead of overflowing onto the value, and the
+     value is right-aligned, so the angle (incl. a leading "-" sign) is always visible. */
+  .rb-monitor-row > span:first-child {{ overflow: hidden; text-overflow: ellipsis; min-width: 0; }}
+  .rb-monitor-row > span:last-child {{ text-align: right; font-variant-numeric: tabular-nums; }}
   .rb-rad {{ display: none; }}
   body:has(#rb-joint-unit-rad:checked) .rb-monitor-joint-card .rb-deg {{ display: none; }}
   body:has(#rb-joint-unit-rad:checked) .rb-monitor-joint-card .rb-rad {{ display: inline; }}
@@ -993,7 +1006,8 @@ def _render_joint_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> 
                     _format_joint_monitor_value(q_values, index, valid=valid, unit="deg"),
                     _format_joint_monitor_value(q_values, index, valid=valid, unit="rad"),
                 )
-            parts.append(_operator_monitor_row(f"J{index + 1} {joint_name}", value_html))
+            short_name = joint_name[:-6] if joint_name.endswith("_joint") else joint_name
+            parts.append(_operator_monitor_row(f"J{index + 1} {short_name}", value_html))
         parts.append("</div>")
     return "".join(parts)
 
@@ -1056,10 +1070,10 @@ def _operator_monitor_dynamic_html(latest: StateSnapshot | None, *, stale: bool)
 def _build_operator_monitors(server: Any, handles: dict[str, Any]) -> None:
     add_html = getattr(server.gui, "add_html", None)
     if callable(add_html):
-        monitor_width_em, gap_em = _operator_monitor_layout()
+        monitor_width_em, gap_em, split_em = _operator_monitor_layout()
         handles["operator_monitor_panel_mode"] = "fixed_html_overlay"
         handles["operator_monitor_style"] = add_html(
-            _operator_monitor_static_html(monitor_width_em, gap_em),
+            _operator_monitor_static_html(monitor_width_em, gap_em, split_em),
             order=0.0,
         )
         handles["operator_monitor_content"] = add_html(_operator_monitor_dynamic_html(None, stale=True), order=0.1)
@@ -1176,14 +1190,12 @@ def build_gui(
         handles["self_collision"] = server.gui.add_text(
             "Self-collision", initial_value="self-collision: no state", disabled=True
         )
-        # Translucent margin-inflated collision capsules (arm = blue, stand =
-        # orange) drawn from the server's self_collision telemetry, i.e. the
-        # EXACT geometry the guard checks. Off by default; turn on to debug
-        # suspected false positives against the real arm/stand meshes.
+        # Self-collision "check view": the translucent collision-hull overlay (the
+        # EXACT unified-URDF collision geometry the async monitor checks, built from
+        # the server's geometry manifest) + the close-call witness segments from
+        # self_collision.near_pairs. Off by default; turn on to debug clearance.
         if hasattr(server.gui, "add_checkbox"):
             capsules_default = os.environ.get("RB_GUI_SELF_COLLISION_CAPSULES_DEFAULT", "0") == "1"
-            # Drives both the capsule overlay (capsule mode) and the URDF-mesh
-            # close-call segments (mesh mode); whichever the server is publishing.
             handles["self_collision_capsules_toggle"] = server.gui.add_checkbox(
                 "자기충돌 검사 표시 (반투명)", initial_value=capsules_default
             )
@@ -1263,6 +1275,61 @@ def build_gui(
                     else:
                         safety.command_client.release_lease()
                         handles["last_action"].value = "OK: lease released (Take control OFF)"
+
+            # Per-arm direct teaching (free-drive). Releases servo_j authority on
+            # the chosen arm's controller so it can be hand-guided, then re-acquires
+            # it with a target resync — without tearing down `make run`. Requires
+            # servo.allow_freedrive on the server (fail-closed). The other arm holds
+            # at its last controller reference while one arm is hand-guided.
+            # Collapsed by default: direct teaching hands control of an arm to a
+            # human guide, so it stays folded to avoid accidental toggles.
+            with server.gui.add_folder("직접교시 (Direct Teaching)", expand_by_default=False):
+                handles["freedrive_status"] = server.gui.add_text(
+                    "Freedrive", initial_value="off (no state)", disabled=True
+                )
+
+                def _freedrive(left: bool | None, right: bool | None) -> None:
+                    ok, message = safety.send_freedrive(left=left, right=right)
+                    handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+                fd_left_on = server.gui.add_button("왼팔 교시 ON")
+                fd_left_off = server.gui.add_button("왼팔 교시 OFF (재동기화)")
+                fd_right_on = server.gui.add_button("오른팔 교시 ON")
+                fd_right_off = server.gui.add_button("오른팔 교시 OFF (재동기화)")
+                fd_both_on = server.gui.add_button("양팔 교시 ON")
+                fd_both_off = server.gui.add_button("양팔 교시 OFF (재동기화)")
+                handles["freedrive_buttons"] = {
+                    "left_on": fd_left_on,
+                    "left_off": fd_left_off,
+                    "right_on": fd_right_on,
+                    "right_off": fd_right_off,
+                    "both_on": fd_both_on,
+                    "both_off": fd_both_off,
+                }
+
+                @fd_left_on.on_click
+                def _(_: Any) -> None:
+                    _freedrive(left=True, right=None)
+
+                @fd_left_off.on_click
+                def _(_: Any) -> None:
+                    _freedrive(left=False, right=None)
+
+                @fd_right_on.on_click
+                def _(_: Any) -> None:
+                    _freedrive(left=None, right=True)
+
+                @fd_right_off.on_click
+                def _(_: Any) -> None:
+                    _freedrive(left=None, right=False)
+
+                @fd_both_on.on_click
+                def _(_: Any) -> None:
+                    _freedrive(left=True, right=True)
+
+                @fd_both_off.on_click
+                def _(_: Any) -> None:
+                    _freedrive(left=False, right=False)
 
             init_button = server.gui.add_button("InitMotion")
             handles["init_motion_button"] = init_button
@@ -1659,24 +1726,43 @@ def build_gui(
             circle_state: dict[str, Any] = {"thread": None}
 
             def _circle_loop(diameter: float, period: float, plane: str) -> None:
-                # ArmMotion FIRST, then build the circle packet so its seq is higher
-                # than ArmMotion's — the server drops any command whose seq <= the
-                # last accepted seq for this source. The circle packet keeps a FIXED
-                # seq + long timeout so the server traces the whole circle from one
-                # accepted command; re-sends (same seq) are harmless keep-alives.
-                safety.send_lifecycle("ArmMotion")
-                time.sleep(0.1)
-                ok, message, packet = safety.build_circle_packet(
-                    diameter, period, arm="both", plane=plane, repeat=200
-                )
-                if not ok or packet is None:
-                    handles["circle_status"].value = "BLOCKED: " + message
-                    return
-                handles["circle_status"].value = "running: " + message
-                while not circle_stop_event.is_set():
-                    safety.command_client.send(packet)
-                    circle_stop_event.wait(0.3)
-                safety.command_client.send_lifecycle("Hold")
+                # Hold the command-source lease for the whole circle so the keep-
+                # alive re-sends carry a FIXED seq. Without a held lease, send()
+                # brackets every packet with Acquire/Release and re-issues a fresh
+                # seq each time (so one-shot commands clear the Acquire seq); for a
+                # streaming circle that fresh seq makes the server treat every
+                # 0.3 s keep-alive as a NEW command and re-init the circle to the
+                # current TCP — the arm only ever traces the first tangent step and
+                # drifts in a straight line. Holding the lease makes bracket=False,
+                # so the seq stays fixed: the server accepts ONE circle command and
+                # re-sends (same seq) are dropped as harmless keep-alives while the
+                # long timeout keeps the single command tracing the full circle.
+                #
+                # Acquire BEFORE ArmMotion/build so seq order is acquire < ArmMotion
+                # < circle (the server drops any command whose seq <= the last
+                # accepted seq). Only release a lease we took here, so an operator's
+                # explicit "Take control" is left untouched.
+                client = safety.command_client
+                took_lease = not client.hold_lease
+                if took_lease:
+                    client.acquire_lease()
+                try:
+                    safety.send_lifecycle("ArmMotion")
+                    time.sleep(0.1)
+                    ok, message, packet = safety.build_circle_packet(
+                        diameter, period, arm="both", plane=plane, repeat=200
+                    )
+                    if not ok or packet is None:
+                        handles["circle_status"].value = "BLOCKED: " + message
+                        return
+                    handles["circle_status"].value = "running: " + message
+                    while not circle_stop_event.is_set():
+                        client.send(packet)
+                        circle_stop_event.wait(0.3)
+                    client.send_lifecycle("Hold")
+                finally:
+                    if took_lease:
+                        client.release_lease()
 
             @c_start.on_click
             def _(_: Any) -> None:
@@ -1800,6 +1886,32 @@ def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -
             handles["floor_applied"].value = "disabled"
         return
     z = floor.get("z_min_m")
+    # Sync the slider bounds to the server's runtime-allowed range first, so any
+    # value we write below lands inside [min, max].
+    if slider is not None:
+        lo = floor.get("runtime_min_z_m")
+        hi = floor.get("runtime_max_z_m")
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and float(hi) > float(lo):
+            try:
+                slider.min = float(lo) * 1000.0
+                slider.max = float(hi) * 1000.0
+            except Exception:
+                pass
+    # First-state init: bring the slider up at the server-applied z instead of the
+    # hardcoded default, so the operator edits from the actual current floor. Done
+    # once (guarded by a handles flag) to avoid fighting the user's later edits.
+    if (
+        slider is not None
+        and isinstance(z, (int, float))
+        and not handles.get("floor_slider_synced", False)
+    ):
+        applied_mm = float(z) * 1000.0
+        try:
+            applied_mm = max(float(slider.min), min(float(slider.max), applied_mm))
+        except Exception:
+            pass
+        slider.value = applied_mm
+        handles["floor_slider_synced"] = True
     # Pending-value preview reconciliation: show the yellow preview plane only
     # while the slider differs from the server-applied z (>= 0.5 mm); after a
     # successful Send the applied plane catches up and the preview disappears.
@@ -1815,15 +1927,6 @@ def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -
     z_txt = f"{float(z) * 1000:.0f}mm" if isinstance(z, (int, float)) else "?"
     reject = floor.get("last_set_reject_reason")
     handles["floor_applied"].value = z_txt + (f" (last reject: {reject})" if reject else "")
-    if slider is not None:
-        lo = floor.get("runtime_min_z_m")
-        hi = floor.get("runtime_max_z_m")
-        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and float(hi) > float(lo):
-            try:
-                slider.min = float(lo) * 1000.0
-                slider.max = float(hi) * 1000.0
-            except Exception:
-                pass
 
 
 def _update_circle_overlay_gui(handles: dict[str, Any], overlay_store: CircleOverlayStore | None) -> None:
@@ -1972,6 +2075,30 @@ def update_gui(
     handles["readiness"].value = ", ".join(readiness_parts)
     handles["motion"].value = latest.motion_state
     handles["fault"].value = latest.fault_reason if latest.fault_latched else "none"
+    if "freedrive_status" in handles:
+        fd = latest.freedrive or {}
+        # Per-arm lifecycle stage: off / arming_quiesce / arming_confirm / active / exiting.
+        stage_labels = {
+            "arming_quiesce": "정지대기",
+            "arming_confirm": "확인중",
+            "active": "ON",
+            "exiting": "해제중",
+        }
+        left_stage = str(fd.get("left_stage", "off"))
+        right_stage = str(fd.get("right_stage", "off"))
+        note = str(fd.get("note", "") or "")
+        parts = (
+            ([f"왼팔 {stage_labels[left_stage]}"] if left_stage in stage_labels else [])
+            + ([f"오른팔 {stage_labels[right_stage]}"] if right_stage in stage_labels else [])
+        )
+        if parts:
+            handles["freedrive_status"].value = (
+                f"DIRECT TEACHING — {', '.join(parts)} (servo_j 억제됨)"
+            )
+        elif note:
+            handles["freedrive_status"].value = f"off — {note}"
+        else:
+            handles["freedrive_status"].value = "off"
     if "status_summary" in handles:
         handles["status_summary"].content = _status_summary_html(
             connection="stale" if stale else "live",
@@ -2009,13 +2136,8 @@ def update_gui(
     update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
     # After markers: the collision overlay may override ghost/solid visibility.
     update_self_collision_overlay(handles.get("scene", {}), latest)
-    capsule_toggle = handles.get("self_collision_capsules_toggle")
-    _self_collision_show = bool(getattr(capsule_toggle, "value", False))
-    update_self_collision_capsules(
-        handles.get("scene", {}),
-        latest,
-        show=_self_collision_show,
-    )
+    toggle = handles.get("self_collision_capsules_toggle")
+    _self_collision_show = bool(getattr(toggle, "value", False))
     update_self_collision_near_pairs(
         handles.get("scene", {}),
         latest,

@@ -33,9 +33,10 @@ case "$MODE" in
   *) echo "usage: $0 [real|sim]" >&2; exit 2 ;;
 esac
 # Single teleop entrypoint: SpaceMouse + UMI side by side (idle handoff).
-# To isolate one source for debugging, run policy_runner manually with
-# --action-source dual_spacemouse_cartesian | umi_dual_cartesian.
-ACTION_SOURCE="teleop_mux"
+# 한 소스만 격리 디버그하려면 env 로 오버라이드:
+#   ACTION_SOURCE=umi_dual_cartesian make run   (UMI 단독, SpaceMouse/mux 제외)
+#   ACTION_SOURCE=dual_spacemouse_cartesian make run
+ACTION_SOURCE="${ACTION_SOURCE:-teleop_mux}"
 
 SERVER_BIN="rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
 SERVER_CFG="rb_servo_server/config/local/stack_${MODE}.yaml"
@@ -69,6 +70,41 @@ case "${GRIPPER_FOLLOW:-auto}" in
   0|no|off|false) GRIPPER_FOLLOW_ON=0 ;;
   *) GRIPPER_FOLLOW_ON=1 ;;
 esac
+
+# Ensure the RT capabilities the servo loop needs (real-time scheduling +
+# mlockall) are on the server binary. setcap requires root, and a rebuild
+# strips the file caps, so we (re)apply them here. Order of preference:
+#   1) already present              -> no-op
+#   2) passwordless sudo (NOPASSWD) -> sudo -n
+#   3) local ./.env SUDO_PASSWORD   -> piped to `sudo -S` over stdin (not argv,
+#                                      so it never shows up in `ps`). .env is
+#                                      chmod 600 and gitignored.
+# If none work we WARN and continue: the server still runs, just without RT
+# priority / locked memory (fine for sim, sub-optimal for real).
+RT_CAPS="cap_sys_nice,cap_ipc_lock+ep"
+ensure_rt_caps() {
+  command -v getcap >/dev/null 2>&1 || return 0
+  if getcap "$SERVER_BIN" 2>/dev/null | grep -q "cap_sys_nice"; then
+    return 0
+  fi
+  echo "[stack] RT caps missing on $SERVER_BIN; applying setcap..."
+  if sudo -n setcap "$RT_CAPS" "$SERVER_BIN" 2>/dev/null; then
+    echo "[stack] setcap applied (passwordless sudo)"
+    return 0
+  fi
+  local env_file="$PWD/.env" pw=""
+  if [ -f "$env_file" ]; then
+    pw=$(grep -E '^SUDO_PASSWORD=' "$env_file" | head -1 | cut -d= -f2-)
+  fi
+  if [ -n "$pw" ] && printf '%s\n' "$pw" | sudo -S -p '' setcap "$RT_CAPS" "$SERVER_BIN" 2>/dev/null; then
+    echo "[stack] setcap applied (./.env password)"
+    unset pw
+    return 0
+  fi
+  unset pw
+  echo "[stack] WARN: could not apply RT caps; server runs without RT priority/mlock." >&2
+  echo "[stack]       fix: sudo setcap $RT_CAPS $SERVER_BIN  (or set SUDO_PASSWORD in ./.env)" >&2
+}
 
 [ -x "$SERVER_BIN" ] || { echo "[stack] server binary missing: $SERVER_BIN (build rbpodo_real_gate first)" >&2; exit 1; }
 [ -f "$SERVER_CFG" ] || { echo "[stack] missing $SERVER_CFG" >&2; exit 1; }
@@ -140,7 +176,12 @@ trap cleanup EXIT
 
 echo "[stack] mode=$MODE source=$ACTION_SOURCE (spacemouse + umi side by side)"
 echo "[stack] server: $SERVER_CFG"
-"$SERVER_BIN" --config "$SERVER_CFG" >"$LOG_DIR/server.log" 2>&1 &
+ensure_rt_caps
+# 서버측 Cartesian 추종 텔레메트리(per-arm/tick): goal_minus_measured(SMD lag),
+# ik_branch_jump_clamped(seed 유지=0모션), ik_sigma_min(특이값), floor_goal_clamped.
+# 텔레옵 "멈춤"이 서버 IK/추종에서 나는지 진단용. 실행마다 새 파일(미설정 시).
+RB_TWIST_PIPELINE_CSV="${RB_TWIST_PIPELINE_CSV:-$PWD/logs/twist_pipe_$(date +%Y%m%d_%H%M%S).csv}" \
+  "$SERVER_BIN" --config "$SERVER_CFG" >"$LOG_DIR/server.log" 2>&1 &
 PIDS+=($!)
 
 # Wait until the command server is up (or fail fast on config/RT errors).
@@ -179,7 +220,7 @@ if [ "$GRIPPER_FOLLOW_ON" = "1" ]; then
     python3 "$GRIPPER_FOLLOW_SCRIPT" ${GRIPPER_FOLLOW_ARGS:-} >"$LOG_DIR/gripper_follow.log" 2>&1 &
     PIDS+=($!)
     # It binds the gripper serial ports immediately; surface an early crash
-    # (missing /dev/ttyUSB*, pika_sdk, port already open) without blocking.
+    # (missing /dev/pika-* or /dev/ttyUSB*, pika_sdk, port already open) without blocking.
     sleep 1
     if ! kill -0 "${PIDS[-1]}" 2>/dev/null; then
       echo "[stack] WARNING: gripper follower exited during startup — grippers will NOT follow:" >&2
@@ -195,6 +236,9 @@ VERBOSE_FLAG=""
 if [ "${VERBOSE:-0}" = "1" ]; then VERBOSE_FLAG="--verbose"; fi
 echo "[stack] policy_runner: $POLICY_CFG --action-source $ACTION_SOURCE $VERBOSE_FLAG"
 echo "[stack] (VERBOSE=1 make run -> live input/loop stats; Ctrl-C stops everything)"
+# UMI 텔레옵 수신 per-step 진단 로그(KST)를 실행마다 logs/ 하위에 남긴다.
+# 기본 auto; 경로를 직접 지정하거나 빈 값으로 비활성 가능 (POLICY_RUNNER_UMI_TELEOP_LOG=...).
 PYTHONPATH=policy_runner \
+  POLICY_RUNNER_UMI_TELEOP_LOG="${POLICY_RUNNER_UMI_TELEOP_LOG-auto}" \
   python3 -u -m policy_runner --config "$POLICY_CFG" --action-source "$ACTION_SOURCE" $VERBOSE_FLAG \
   2>&1 | tee "$LOG_DIR/policy.log"

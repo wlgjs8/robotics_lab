@@ -17,9 +17,8 @@ try:
         compute_dataset_statistics,
         decode_hdf5_image_value,
         load_flow_episode_index,
-        pose_delta,
+        pose_compose_local,
         pose_delta_local,
-        tcp_delta_stand_from_poses,
     )
 except ModuleNotFoundError:
     h5py = None
@@ -183,25 +182,19 @@ class FlowHdf5DatasetTest(unittest.TestCase):
             self.assertTrue(np.isfinite(sample["proprio"]).all())
             self.assertTrue(np.isfinite(sample["action_chunk"]).all())
 
-    def test_action_chunk_is_per_step_stand_delta_not_start_anchored(self) -> None:
+    def test_stand_action_frame_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "episode_001.hdf5"
             self._write_pika_episode(path, image_count=1)
-
-            dataset = FlowHdf5Dataset(
-                path,
-                action_horizon=2,
-                image_size=8,
-                normalize=False,
-                action_frame="stand",
-            )
-            sample = dataset.raw_sample(0)
-
-            self.assertEqual(len(dataset), 2)
-            np.testing.assert_allclose(sample["action_chunk"][0, 0:3], [0.01, 0.0, 0.0])
-            np.testing.assert_allclose(sample["action_chunk"][1, 0:3], [0.01, 0.0, 0.0])
-            self.assertAlmostEqual(float(sample["action_chunk"][0, 6]), 1.0 / 3.0, places=6)
-            self.assertAlmostEqual(float(sample["action_chunk"][1, 6]), 1.0 / 3.0, places=6)
+            # The world-frame "stand" representation was removed; only ee_local remains.
+            with self.assertRaises(ValueError):
+                FlowHdf5Dataset(
+                    path,
+                    action_horizon=2,
+                    image_size=8,
+                    normalize=False,
+                    action_frame="stand",
+                )
 
     def test_action_chunk_ee_local_uses_body_frame_translation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -224,31 +217,46 @@ class FlowHdf5DatasetTest(unittest.TestCase):
             np.testing.assert_allclose(sample["action_chunk"][0, 0:3], [0.0, -0.01, 0.0], atol=1e-6)
             np.testing.assert_allclose(sample["action_chunk"][1, 0:3], [0.0, -0.01, 0.0], atol=1e-6)
 
-    def test_tcp_delta_stand_from_poses_uses_spatial_rotation_order(self) -> None:
-        q_current = _quat_from_axis_angle([0.0, 0.0, 1.0], 0.4)
-        q_spatial_delta = _quat_from_axis_angle([1.0, 0.0, 0.0], 0.3)
-        q_target = _quat_multiply(q_spatial_delta, q_current)
-        current = np.asarray([0.1, 0.2, 0.3, *q_current], dtype=np.float32)
-        target = np.asarray([0.12, 0.18, 0.35, *q_target], dtype=np.float32)
-
-        state_delta = pose_delta(current, target)
-        action_delta = tcp_delta_stand_from_poses(current, target)
-
-        np.testing.assert_allclose(action_delta[:3], target[:3] - current[:3])
-        np.testing.assert_allclose(action_delta[3:6], [0.3, 0.0, 0.0], atol=1e-6)
-        self.assertGreater(float(np.linalg.norm(state_delta[4:6])), 0.05)
-
     def test_pose_delta_local_rotates_translation_into_reference_body(self) -> None:
         q_ref = _quat_from_axis_angle([0.0, 0.0, 1.0], np.pi / 2.0)
         reference = np.asarray([0.0, 0.0, 0.0, *q_ref], dtype=np.float32)
         target = np.asarray([1.0, 0.0, 0.0, *q_ref], dtype=np.float32)
 
-        stand_delta = pose_delta(reference, target)
         local_delta = pose_delta_local(reference, target)
 
-        np.testing.assert_allclose(stand_delta[:3], [1.0, 0.0, 0.0], atol=1e-6)
+        # A +x world displacement viewed from a +90deg-yaw body frame is -y.
         np.testing.assert_allclose(local_delta[:3], [0.0, -1.0, 0.0], atol=1e-6)
         np.testing.assert_allclose(local_delta[3:6], [0.0, 0.0, 0.0], atol=1e-6)
+
+    def test_pose_compose_local_round_trips_pose_delta_local(self) -> None:
+        rng = np.random.default_rng(42)
+        for _ in range(25):
+            q_ref = _quat_from_axis_angle(rng.normal(size=3).tolist(), float(rng.uniform(-2.5, 2.5)))
+            reference = np.asarray(
+                [
+                    float(rng.normal()),
+                    float(rng.normal()),
+                    float(rng.normal()),
+                    *q_ref,
+                ],
+                dtype=np.float32,
+            )
+            delta = np.asarray(
+                [
+                    float(rng.uniform(-0.05, 0.05)),
+                    float(rng.uniform(-0.05, 0.05)),
+                    float(rng.uniform(-0.05, 0.05)),
+                    float(rng.uniform(-0.2, 0.2)),
+                    float(rng.uniform(-0.2, 0.2)),
+                    float(rng.uniform(-0.2, 0.2)),
+                ],
+                dtype=np.float32,
+            )
+
+            target = pose_compose_local(reference, delta)
+            round_trip = pose_delta_local(reference, target)
+
+            np.testing.assert_allclose(round_trip, delta, atol=1e-6)
 
     def test_flow_dataset_ee_local_frame_invariance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

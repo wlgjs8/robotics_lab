@@ -381,6 +381,42 @@ class CommandClient:
         }
         return self._with_source(packet)
 
+    def build_freedrive(
+        self,
+        *,
+        left: bool | None = None,
+        right: bool | None = None,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        """Per-arm direct-teaching (free-drive) toggle.
+
+        left/right: True enters free-drive (hand-guidable), False exits and
+        resyncs, None leaves that arm untouched (Hold). At least one arm must be
+        specified. Server-side this is a sticky lifecycle command gated by
+        servo.allow_freedrive.
+        """
+        if left is None and right is None:
+            raise ValueError("freedrive requires at least one of left/right")
+        packet: dict[str, Any] = {
+            "seq": self.next_seq(),
+            "mode": "Freedrive",
+            "timeout_sec": timeout_sec,
+            "left": {"mode": "Freedrive", "freedrive_on": bool(left)} if left is not None else {"mode": "Hold"},
+            "right": {"mode": "Freedrive", "freedrive_on": bool(right)} if right is not None else {"mode": "Hold"},
+        }
+        return self._with_source(packet)
+
+    def send_freedrive(
+        self,
+        *,
+        left: bool | None = None,
+        right: bool | None = None,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        packet = self.build_freedrive(left=left, right=right, timeout_sec=timeout_sec)
+        self.send(packet)
+        return packet
+
     def build_set_safety_floor_z(self, floor_z_m: float, *, timeout_sec: float = 0.2) -> dict[str, Any]:
         value = float(floor_z_m)
         if not math.isfinite(value):
@@ -417,6 +453,10 @@ class CommandClient:
         "TcpDeltaLocal",
         "TcpTwistStand",
         "TcpTwistLocal",
+        # Per-arm direct teaching (free-drive) toggles servo authority and
+        # requires the lease server-side (commandRequiresLease), so it brackets
+        # like ResetFault/ArmMotion.
+        "Freedrive",
         "Hold",
     }
 

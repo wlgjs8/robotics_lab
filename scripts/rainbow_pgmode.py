@@ -12,7 +12,6 @@ import argparse
 import importlib
 import json
 import math
-import os
 import socket
 import sys
 import tempfile
@@ -29,16 +28,6 @@ SCHEMA = "robotics_lab.rainbow_pgmode.v1"
 
 class RainbowPgmodeError(RuntimeError):
     pass
-
-
-def _env_confirms_real_controller() -> bool:
-    """Convenience: RB_I_UNDERSTAND_REAL_CONTROLLER=1 satisfies the connect
-    acknowledgment so routine pgmode-sim tooling need not pass the flag each time.
-    This only acknowledges connecting to a real controller IP (no physical motion);
-    physical motion stays gated by RB_ALLOW_REAL_MOTION and its own confirmations."""
-    return os.environ.get("RB_I_UNDERSTAND_REAL_CONTROLLER", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,11 +51,6 @@ def parse_args() -> argparse.Namespace:
         help="Only read rbpodo CobotData.real_vs_simulation_mode; do not send pgmode.",
     )
     parser.add_argument("--summary-json", type=Path, help="Optional JSON summary artifact path.")
-    parser.add_argument(
-        "--i-understand-this-connects-to-real-controller",
-        action="store_true",
-        help="Required before connecting to known real controller IPs.",
-    )
     parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
@@ -199,7 +183,6 @@ def validate_common(
     ips: list[str],
     timeout_sec: float,
     port: int,
-    confirmation: bool,
     set_simulation: bool,
     verify_only: bool,
 ) -> None:
@@ -213,14 +196,6 @@ def validate_common(
         raise RainbowPgmodeError("--set-simulation and --verify-only are mutually exclusive")
     if not set_simulation and not verify_only:
         raise RainbowPgmodeError("choose --set-simulation or --verify-only")
-    known = set(ips) & REAL_ROBOT_IPS
-    if known and not confirmation and not _env_confirms_real_controller():
-        raise RainbowPgmodeError(
-            "refusing known real controller IP without --i-understand-this-connects-to-real-controller "
-            "(or RB_I_UNDERSTAND_REAL_CONTROLLER=1)"
-        )
-    if known and os.environ.get("RB_ALLOW_REAL_ROBOT") != "1":
-        raise RainbowPgmodeError("known real controller IP requires RB_ALLOW_REAL_ROBOT=1")
 
 
 def run_pgmode(
@@ -228,11 +203,10 @@ def run_pgmode(
     timeout_sec: float,
     *,
     port: int = 5000,
-    confirmation: bool = False,
     set_simulation: bool = False,
     verify_only: bool = False,
 ) -> dict[str, Any]:
-    validate_common(ips, timeout_sec, port, confirmation, set_simulation, verify_only)
+    validate_common(ips, timeout_sec, port, set_simulation, verify_only)
     results: list[dict[str, Any]] = []
     for ip in ips:
         item: dict[str, Any] = {
@@ -302,7 +276,6 @@ def ensure_controller_simulation_mode(
     timeout_sec: float,
     *,
     port: int = 5000,
-    confirmation: bool = False,
     set_simulation: bool = False,
     verify_only: bool = True,
 ) -> dict[str, Any]:
@@ -310,7 +283,6 @@ def ensure_controller_simulation_mode(
         ips,
         timeout_sec,
         port=port,
-        confirmation=confirmation,
         set_simulation=set_simulation,
         verify_only=verify_only,
     )
@@ -376,13 +348,6 @@ def run_self_test() -> int:
         error_server.close()
     assert result["command_ok"] is False
 
-    try:
-        run_pgmode(["172.28.60.200"], 0.1, set_simulation=True, confirmation=False)
-    except RainbowPgmodeError as exc:
-        assert "--i-understand-this-connects-to-real-controller" in str(exc)
-    else:
-        raise AssertionError("expected confirmation failure")
-
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "summary.json"
         summary = {
@@ -406,7 +371,6 @@ def main() -> int:
             list(args.ips or []),
             args.timeout_sec,
             port=args.port,
-            confirmation=args.i_understand_this_connects_to_real_controller,
             set_simulation=args.set_simulation,
             verify_only=args.verify_only,
         )

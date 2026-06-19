@@ -298,7 +298,36 @@ def _format_self_collision_status(
     )
     violated = bool(sc.get("violated", False))
     status = "VIOLATED" if violated else "ok"
-    return f"self-collision: {status} clearance={clearance_txt} margin={margin_txt}"
+    out = f"self-collision: {status} clearance={clearance_txt} margin={margin_txt}"
+    # Name the closest checked pair (the COMMANDED-pose verdict the guard acts on)
+    # so the operator sees WHICH parts are closest without reading server logs.
+    pair_txt = _closest_pair_text(sc)
+    if pair_txt:
+        out += f" [{pair_txt}]"
+    return out
+
+
+def _short_geom(name: Any) -> str:
+    """Shorten a collision-geometry name for display, e.g.
+    'dual_rb3_730e_left_link4_2' -> 'left_link4_2', 'stand_body_shoulder_0' -> 'shoulder_0'."""
+    if not isinstance(name, str) or not name:
+        return "?"
+    return name.replace("dual_rb3_730e_", "").replace("stand_body_", "").replace("stand_", "")
+
+
+def _closest_pair_text(sc: Mapping[str, Any]) -> str:
+    pairs = sc.get("near_pairs")
+    if not isinstance(pairs, (list, tuple)) or not pairs:
+        return ""
+    closest = None
+    for p in pairs:
+        if not isinstance(p, Mapping) or not isinstance(p.get("clearance_m"), (int, float)):
+            continue
+        if closest is None or float(p["clearance_m"]) < float(closest["clearance_m"]):
+            closest = p
+    if closest is None:
+        return ""
+    return f"{_short_geom(closest.get('name_a'))} ↔ {_short_geom(closest.get('name_b'))}"
 
 
 def _format_floor_constraint_status(

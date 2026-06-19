@@ -8,8 +8,6 @@ OUTPUT_DIR="policy_runner/episodes"
 TASK=""
 OPERATOR=""
 DRY_RUN=0
-CONFIRM_CONNECTS=0
-CONFIRM_PGMODE=0
 
 usage() {
   cat <<'EOF'
@@ -26,12 +24,8 @@ Actions:
   teleop-record  Run UMI teleop and JSONL recording.
   hdf5-record    Run UMI teleop and HDF5 recording.
 
-Safety flags for server/policy/teleop/hdf5-record:
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
-
 Options:
-  --with-required-env  Forward to the server action only; never sets RB_ALLOW_REAL_CARTESIAN.
+  --with-required-env  Forward to the server action only.
   --server PATH        Forward server binary path to the server wrapper.
   --output-dir DIR     Recording output dir for teleop-record/hdf5-record.
   --task TEXT          Required task description for hdf5-record.
@@ -57,21 +51,12 @@ print_command() {
   printf '\n'
 }
 
-require_confirmations() {
-  [[ "${CONFIRM_CONNECTS}" == "1" ]] || fail "missing --i-understand-this-connects-to-real-controller"
-  [[ "${CONFIRM_PGMODE}" == "1" ]] || fail "missing --i-confirm-controller-is-in-pgmode-simulation"
-  if [[ "${RB_ALLOW_REAL_CARTESIAN:-}" == "1" ]]; then
-    fail "RB_ALLOW_REAL_CARTESIAN must not be set for pgmode UMI simulation"
-  fi
-}
-
 print_policy_info() {
   cat <<'EOF'
 rbpodo_pgmode_umi: policy config: policy_runner/config/rbpodo_pgmode_umi_500hz_ack.yaml
 rbpodo_pgmode_umi: action_source: umi_dual_cartesian
 rbpodo_pgmode_umi: default readers: mock_script pgmode_umi_smoke for left and right
 rbpodo_pgmode_umi: policy safety keeps allow_real_motion=false and uses only the rbpodo controller-simulation Cartesian carve-out.
-rbpodo_pgmode_umi: RB_ALLOW_REAL_CARTESIAN must remain unset for this workflow.
 EOF
 }
 
@@ -81,7 +66,6 @@ delegate_server_wrapper() {
 }
 
 run_policy() {
-  require_confirmations
   export PYTHONPATH="${ROOT_DIR}/policy_runner${PYTHONPATH:+:${PYTHONPATH}}"
   local cmd=(python3 -m policy_runner --config "${ROOT_DIR}/${POLICY_CONFIG_REL}")
   print_command "${cmd[@]}"
@@ -102,7 +86,6 @@ run_policy_dry_run() {
 }
 
 run_teleop_record() {
-  require_confirmations
   export PYTHONPATH="${ROOT_DIR}/policy_runner${PYTHONPATH:+:${PYTHONPATH}}"
   local cmd=(
     python3 -m policy_runner teleop-record
@@ -116,7 +99,6 @@ run_teleop_record() {
 }
 
 run_hdf5_record() {
-  require_confirmations
   [[ -n "${TASK}" ]] || fail "--task is required for hdf5-record"
   export PYTHONPATH="${ROOT_DIR}/policy_runner${PYTHONPATH:+:${PYTHONPATH}}"
   local cmd=(
@@ -157,16 +139,6 @@ while (($# > 0)); do
       shift 2
       ;;
     --force|--with-required-env)
-      FORWARD_ARGS+=("$1")
-      shift
-      ;;
-    --i-understand-this-connects-to-real-controller)
-      CONFIRM_CONNECTS=1
-      FORWARD_ARGS+=("$1")
-      shift
-      ;;
-    --i-confirm-controller-is-in-pgmode-simulation)
-      CONFIRM_PGMODE=1
       FORWARD_ARGS+=("$1")
       shift
       ;;

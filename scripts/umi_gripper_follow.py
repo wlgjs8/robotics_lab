@@ -27,7 +27,7 @@ This script binds its own port because the pose readers already own theirs.
 
 Usage (robot PC, grippers on local serial):
   python3 scripts/umi_gripper_follow.py \
-      [--listen 0.0.0.0:50382] [--left-port /dev/ttyUSB0] [--right-port /dev/ttyUSB1]
+      [--listen 0.0.0.0:50382] [--left-port /dev/pika-left] [--right-port /dev/pika-right]
 
   --swap-ports          flip the left/right serial mapping (use --ident to check)
   --ident left|right    wiggle one gripper open/close to identify the mapping
@@ -44,6 +44,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import socket
 import sys
 import time
@@ -153,9 +154,14 @@ class GripperDriver:
     def start(self):
         logging.getLogger("pika.serial_comm").addFilter(_LogThrottle(2.0))
         for side, port in self.ports.items():
+            if not os.path.exists(port):
+                raise RuntimeError(f"[gripper:{side}] serial port not found: {port}")
             g = self._gripper_cls(port=port)
             if not g.connect():
-                raise RuntimeError(f"[gripper:{side}] {port} connect failed")
+                detail = port
+                if os.path.islink(port):
+                    detail = f"{port} -> {os.path.realpath(port)}"
+                raise RuntimeError(f"[gripper:{side}] {detail} connect failed")
             if not g.enable():
                 raise RuntimeError(f"[gripper:{side}] {port} enable failed")
             self.grippers[side] = g
@@ -242,9 +248,9 @@ def get_arguments() -> argparse.Namespace:
                     help="validate pure helpers without hardware, then exit")
     ap.add_argument("--listen", default="0.0.0.0:50382",
                     help="UDP bind host:port for the publisher's gripper stream")
-    ap.add_argument("--left-port", default="/dev/ttyUSB0",
+    ap.add_argument("--left-port", default="/dev/pika-left",
                     help="serial port of the LEFT robot arm's Pika Gripper")
-    ap.add_argument("--right-port", default="/dev/ttyUSB1",
+    ap.add_argument("--right-port", default="/dev/pika-right",
                     help="serial port of the RIGHT robot arm's Pika Gripper")
     ap.add_argument("--swap-ports", action="store_true",
                     help="flip the left/right serial mapping")

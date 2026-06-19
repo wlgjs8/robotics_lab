@@ -114,14 +114,15 @@ class GripperConfig:
     # the fail-closed NoopGripperBackend; 'pika_serial' drives robot-mounted
     # Pika grippers over local serial (POSITION_CTRL rad).
     backend: str = "none"
-    left_port: str = "/dev/ttyUSB0"
-    right_port: str = "/dev/ttyUSB1"
+    left_port: str = "/dev/pika-left"
+    right_port: str = "/dev/pika-right"
     # Directory containing the 'pika' package (AgileX SDK copy).
     pika_sdk_path: str = ""
     min_rad: float = 0.0
     max_rad: float = 1.75
     deadband_rad: float = 0.005
     max_hz: float = 60.0
+    suppress_sdk_logs: bool = True
     # Whether the physical grippers actuate during controller_sim rollouts
     # (arms are controller-simulated; grippers are separate local hardware).
     # real_policy additionally requires safety.allow_real_gripper_motion and
@@ -311,7 +312,6 @@ class UmiDualCartesianConfig:
     max_linear_step_m: float = 0.005
     max_angular_step_rad: float = 0.04
     input_moving_average_window: int = 1
-    target_lpf_tau_sec: float = 0.0
     deadband_linear_m: float = 0.0
     deadband_angular_rad: float = 0.0
     linear_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
@@ -324,6 +324,11 @@ class UmiDualCartesianConfig:
     r_align: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     workspace_bounds: dict[str, tuple[float, float]] | tuple[float, ...] | None = None
     sample_hold_timeout_sec: float = 0.05
+    # Ride out brief clutch (foot-switch) deadman drops for absolute
+    # TcpPoseTarget: while the deadman is released for less than this window the
+    # last setpoint keeps streaming (arm holds, server stays fresh) instead of
+    # tearing down to Hold. 0.0 restores the legacy immediate-release behavior.
+    deadman_release_grace_sec: float = 0.2
 
     def __post_init__(self) -> None:
         if self.max_linear_step_m < 0.0:
@@ -332,8 +337,6 @@ class UmiDualCartesianConfig:
             raise ValueError("umi_dual_cartesian.max_angular_step_rad must be non-negative")
         if self.input_moving_average_window < 0:
             raise ValueError("umi_dual_cartesian.input_moving_average_window must be non-negative")
-        if self.target_lpf_tau_sec < 0.0:
-            raise ValueError("umi_dual_cartesian.target_lpf_tau_sec must be non-negative")
         if self.deadband_linear_m < 0.0:
             raise ValueError("umi_dual_cartesian.deadband_linear_m must be non-negative")
         if self.deadband_angular_rad < 0.0:
@@ -350,6 +353,8 @@ class UmiDualCartesianConfig:
             raise ValueError("umi_dual_cartesian.r_align must contain 3 RPY values or 9 matrix values")
         if self.sample_hold_timeout_sec <= 0.0:
             raise ValueError("umi_dual_cartesian.sample_hold_timeout_sec must be positive")
+        if self.deadman_release_grace_sec < 0.0:
+            raise ValueError("umi_dual_cartesian.deadman_release_grace_sec must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -526,6 +531,8 @@ def _gripper_config(raw: dict[str, Any]) -> GripperConfig:
     for key in ("min_rad", "max_rad", "deadband_rad", "max_hz"):
         if key in raw:
             raw[key] = float(raw[key])
+    if "suppress_sdk_logs" in raw:
+        raw["suppress_sdk_logs"] = bool(raw["suppress_sdk_logs"])
     if "actuate_in_controller_simulation" in raw:
         raw["actuate_in_controller_simulation"] = bool(raw["actuate_in_controller_simulation"])
     return GripperConfig(**raw)
@@ -665,7 +672,7 @@ def _umi_dual_cartesian_config(raw: dict[str, Any]) -> UmiDualCartesianConfig:
         top_level["max_angular_step_rad"] = float(top_level["max_angular_step_rad"])
     if "input_moving_average_window" in top_level:
         top_level["input_moving_average_window"] = int(top_level["input_moving_average_window"])
-    for key in ("target_lpf_tau_sec", "deadband_linear_m", "deadband_angular_rad"):
+    for key in ("deadband_linear_m", "deadband_angular_rad"):
         if key in top_level:
             top_level[key] = float(top_level[key])
     for key in ("linear_axis_signs", "angular_axis_signs"):

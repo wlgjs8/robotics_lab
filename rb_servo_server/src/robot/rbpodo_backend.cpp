@@ -24,12 +24,6 @@
 namespace rb_servo {
 namespace {
 
-bool envIsOne(const char* name) {
-    // Real/sim env gates (RB_ALLOW_REAL_*, RB_ALLOW_RBPODO_*) are retired:
-    // backend behavior is config-driven only.
-    (void)name;
-    return true;
-}
 
 bool finiteJointArray(const JointArray& joints) {
     return std::all_of(joints.begin(), joints.end(), [](double value) {
@@ -113,27 +107,22 @@ bool operationModeMatchesConfig(const BackendConfig& config, const RbpodoSystemS
 bool rbpodoControllerSimulationMotionGateOpen(const BackendConfig& config) {
     return config.backend_type == BackendType::Rbpodo &&
         config.run_mode == RunMode::Real &&
-        expectedSimulationMode(config) &&
-        envIsOne("RB_ALLOW_REAL_ROBOT") &&
-        envIsOne("RB_ALLOW_REAL_MOTION");
+        expectedSimulationMode(config);
 }
 
 // REAL physical-motion opt-in (operation_mode: real, NOT controller-sim): accept the
 // same vendor-unreliable status fields (op_stat_self_collision shape, robot_time) as
 // UNAVAILABLE instead of latching diagnostics_suspect. Fail-closed: requires the per-arm
-// config opt-in AND a real (non-sim) operation mode AND all three env gates, including
-// the dedicated RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION. Every other field
-// (EMS/SOS/soft-estop/collision_occur, unknown real_vs_sim mode, init error) keeps
-// faulting exactly as before — this only suppresses the two measured field-layout-garbage
-// fields so a physical run is not blocked by the vendor -2001 mismatch.
+// config opt-in (allow_real_motion_with_suspect_diagnostics) AND a real (non-sim)
+// operation mode. Every other field (EMS/SOS/soft-estop/collision_occur, unknown
+// real_vs_sim mode, init error) keeps faulting exactly as before — this only suppresses
+// the two measured field-layout-garbage fields so a physical run is not blocked by the
+// vendor -2001 mismatch.
 bool rbpodoSuspectDiagnosticsRealMotionGateOpen(const BackendConfig& config) {
     return config.backend_type == BackendType::Rbpodo &&
         config.run_mode == RunMode::Real &&
         !expectedSimulationMode(config) &&
-        config.allow_real_motion_with_suspect_diagnostics &&
-        envIsOne("RB_ALLOW_REAL_ROBOT") &&
-        envIsOne("RB_ALLOW_REAL_MOTION") &&
-        envIsOne("RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION");
+        config.allow_real_motion_with_suspect_diagnostics;
 }
 
 RbpodoStateDecodeOptions decodeOptionsForConfig(const BackendConfig& config) {
@@ -423,6 +412,8 @@ RobotState mapRbpodoSystemStateSnapshot(
     const std::optional<RbpodoInterpretedFault> clear_fault =
         firstClearRbpodoFault(snapshot, diagnostics);
     out_state.connection_state = RobotConnectionState::Connected;
+    out_state.controller_motion_state = snapshot.robot_state;
+    out_state.controller_freedrive_on = snapshot.is_freedrive_mode == 1;
     out_state.servo_enabled = snapshot.init_state_info == 6;
     out_state.has_error = clear_fault.has_value() || diagnostics.diagnostics_suspect;
     out_state.error_code = clear_fault.has_value()
@@ -564,6 +555,8 @@ RbpodoSystemStateSnapshot snapshotFromSystemState(const rb::podo::SystemState& r
     snapshot.op_stat_soft_estop_occur = rb_state.sdata.op_stat_soft_estop_occur;
     snapshot.op_stat_collision_occur = rb_state.sdata.op_stat_collision_occur;
     snapshot.op_stat_self_collision = rb_state.sdata.op_stat_self_collision;
+    snapshot.robot_state = rb_state.sdata.robot_state;
+    snapshot.is_freedrive_mode = rb_state.sdata.is_freedrive_mode;
     for (int i = 0; i < kDof; ++i) {
         snapshot.q_actual_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ang[i];
         snapshot.q_target_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ref[i];
@@ -714,6 +707,10 @@ struct RbpodoBackend::Impl {
     ArmId arm_id;
     BackendConfig config;
     bool connected = false;
+    // Direct-teaching (free-drive) latch. While true the controller is in
+    // freedrive_teach_on and sendServoJ() refuses to write move_servo_j (a
+    // defensive backstop layered under the server's global send suppression).
+    bool freedrive_active = false;
 
 #ifdef RB_SERVO_ENABLE_RBPODO
     std::unique_ptr<rb::podo::Cobot<>> robot;
@@ -744,21 +741,6 @@ BackendResult<RobotState> RbpodoBackend::connect() {
         makeBackendTiming(start, nowSteadyNs())
     );
 #else
-    if (impl_->config.run_mode == RunMode::Real) {
-        if (!envIsOne("RB_ALLOW_REAL_ROBOT")) {
-            impl_->connected = false;
-            return failedResult<RobotState>(
-                BackendOp::Connect,
-                backendError(
-                    BackendErrorKind::SuppressedByPolicy,
-                    "Refusing real robot mode. Set RB_ALLOW_REAL_ROBOT=1.",
-                    "",
-                    "rbpodo_real_robot_gate_closed"
-                ),
-                makeBackendTiming(start, nowSteadyNs())
-            );
-        }
-    }
     if (impl_->config.ip.empty()) {
         std::cerr << "[ERROR] RbpodoBackend requires a non-empty controller ip for "
                   << impl_->config.name << "\n";
@@ -1265,56 +1247,32 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
         annotateRbpodoAckResult(&result, impl_->config, ack_wait_duration_us, ack_observed);
         return result;
     };
-    if (impl_->config.run_mode == RunMode::Real && !envIsOne("RB_ALLOW_REAL_MOTION")) {
-        std::cerr << "[ERROR] RbpodoBackend refused servo_j without RB_ALLOW_REAL_MOTION=1\n";
-        return with_ack_metadata(
-            rejectedSend(
-                request,
-                backendError(
-                    BackendErrorKind::SuppressedByPolicy,
-                    "RbpodoBackend refused servo_j without RB_ALLOW_REAL_MOTION=1",
-                    "",
-                    "rbpodo_motion_gate_closed"
-                ),
-                makeBackendTiming(start, nowSteadyNs()),
-                cached_state,
-                cached_source
-            ),
-            false,
-            0.0
-        );
-    }
-    // Controller-simulation (operation_mode=simulation) is exempt — ACK-off is a
-    // normal pgmode-sim streaming mode. Genuine real (operation_mode=real) keeps
-    // the byte-identical env acceptance gate.
-    if (impl_->config.run_mode == RunMode::Real &&
-        impl_->config.disable_waiting_ack &&
-        !expectedSimulationMode(impl_->config) &&
-        !envIsOne("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")) {
-        std::cerr << "[ERROR] RbpodoBackend refused ACK-disabled servo_j without "
-                     "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1 (genuine real)\n";
-        return with_ack_metadata(
-            rejectedSend(
-                request,
-                backendError(
-                    BackendErrorKind::SuppressedByPolicy,
-                    "RbpodoBackend refused ACK-disabled servo_j without RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1",
-                    "",
-                    "rbpodo_ack_disabled_motion_gate_closed"
-                ),
-                makeBackendTiming(start, nowSteadyNs()),
-                cached_state,
-                cached_source
-            ),
-            false,
-            0.0
-        );
-    }
     if (!impl_->connected || !impl_->robot) {
         return with_ack_metadata(
             rejectedSend(
                 request,
                 backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
+                makeBackendTiming(start, nowSteadyNs()),
+                cached_state,
+                cached_source
+            ),
+            false,
+            0.0
+        );
+    }
+    if (impl_->freedrive_active) {
+        // Defensive backstop: never stream move_servo_j to a controller that is
+        // in freedrive_teach_on. Policy suppression, not a fault (the fault
+        // classifier treats SuppressedByPolicy as non-latching).
+        return with_ack_metadata(
+            rejectedSend(
+                request,
+                backendError(
+                    BackendErrorKind::SuppressedByPolicy,
+                    "servo_j suppressed while controller is in freedrive (direct teaching)",
+                    "",
+                    "rbpodo_freedrive_active"
+                ),
                 makeBackendTiming(start, nowSteadyNs()),
                 cached_state,
                 cached_source
@@ -1536,6 +1494,65 @@ BackendResult<RobotState> RbpodoBackend::resetFault() {
         ),
         makeBackendTiming(start, nowSteadyNs())
     );
+#endif
+}
+
+BackendResult<RobotState> RbpodoBackend::setFreedrive(bool on) {
+    const uint64_t start = nowSteadyNs();
+#ifndef RB_SERVO_ENABLE_RBPODO
+    return failedResult<RobotState>(
+        BackendOp::SetFreedrive,
+        backendError(BackendErrorKind::DependencyUnavailable, "RbpodoBackend requested, but RB_SERVO_ENABLE_RBPODO=OFF"),
+        makeBackendTiming(start, nowSteadyNs())
+    );
+#else
+    if (!impl_->connected || !impl_->robot) {
+        return failedResult<RobotState>(
+            BackendOp::SetFreedrive,
+            backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
+            makeBackendTiming(start, nowSteadyNs())
+        );
+    }
+    // Maps to the rbpodo SDK wrapper (cobot.hpp set_freedrive_mode →
+    // freedrive_teach_on()/freedrive_teach_off()). set_freedrive_mode only ACKs
+    // receipt of the script command; the server treats the controller's gravity-
+    // compensation hand-guiding as operator-supervised, not server-verified.
+    rb::podo::ResponseCollector responses;
+    const auto ret = impl_->robot->set_freedrive_mode(responses, on, kInitializeCommandAckTimeoutSec);
+    if (impl_->config.disable_waiting_ack) {
+        rb::podo::ResponseCollector drained;
+        impl_->robot->flush(drained);
+    }
+    if (!ret.is_success()) {
+        return failedResult<RobotState>(
+            BackendOp::SetFreedrive,
+            commandReturnError(on ? "freedrive_teach_on" : "freedrive_teach_off", ret, responses),
+            makeBackendTiming(start, nowSteadyNs())
+        );
+    }
+    impl_->freedrive_active = on;
+    std::cerr << "[INFO] RbpodoBackend " << impl_->config.name
+              << (on ? " entered freedrive (direct teaching) — servo_j suppressed"
+                     : " exited freedrive (direct teaching) — servo_j re-enabled")
+              << "\n";
+    // Best-effort fresh state read so the caller can resync its held target to
+    // the (possibly hand-moved) actual joints on exit.
+    RobotState state_after;
+    if (impl_->data_channel) {
+        try {
+            const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+            if (state) {
+                const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
+                state_after = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+                if (state_after.has_valid_joint_state) {
+                    impl_->last_state_cache = state_after;
+                }
+            }
+        } catch (const std::exception&) {
+            // Non-fatal: the server falls back to its own latest readState() for resync.
+        }
+    }
+    return okResult(BackendOp::SetFreedrive, state_after, makeBackendTiming(start, nowSteadyNs()));
 #endif
 }
 

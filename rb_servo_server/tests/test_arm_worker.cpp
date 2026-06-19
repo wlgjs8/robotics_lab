@@ -185,6 +185,13 @@ public:
         return backendStateResult(rb_servo::BackendOp::ResetFault, state_);
     }
 
+    rb_servo::BackendResult<rb_servo::RobotState> setFreedrive(bool on) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++freedrive_count_;
+        last_freedrive_on_ = on;
+        return backendStateResult(rb_servo::BackendOp::SetFreedrive, state_);
+    }
+
     bool isConnected() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
@@ -284,6 +291,16 @@ public:
         return stop_count_;
     }
 
+    int freedriveCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return freedrive_count_;
+    }
+
+    std::optional<bool> lastFreedriveOn() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_freedrive_on_;
+    }
+
     std::optional<rb_servo::SendServoJRequest> lastRequest() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return last_request_;
@@ -313,6 +330,8 @@ private:
     int send_count_ = 0;
     int reset_count_ = 0;
     int stop_count_ = 0;
+    int freedrive_count_ = 0;
+    std::optional<bool> last_freedrive_on_;
     rb_servo::RobotState state_;
     std::optional<rb_servo::SendServoJRequest> last_request_;
 };
@@ -661,6 +680,36 @@ bool testResetFaultUsesLifecycleQueue() {
     return true;
 }
 
+bool testSetFreedriveUsesLifecycleQueue() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None,
+        true
+    );
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorker worker(std::move(backend));
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForFirstReadEntered(std::chrono::milliseconds(200)));
+    RB_CHECK(raw_backend->freedriveCount() == 0);
+
+    raw_backend->releaseFirstRead();
+    const uint64_t deadline = rb_servo::nowSteadyNs() + 1'000'000'000;
+    const rb_servo::BackendResult<rb_servo::RobotState> on_result =
+        worker.setFreedrive(true, 50, deadline);
+    RB_CHECK(on_result.ok);
+    RB_CHECK(on_result.op == rb_servo::BackendOp::SetFreedrive);
+    RB_CHECK(raw_backend->freedriveCount() == 1);
+    RB_CHECK(raw_backend->lastFreedriveOn().value_or(false) == true);
+
+    const rb_servo::BackendResult<rb_servo::RobotState> off_result =
+        worker.setFreedrive(false, 51, rb_servo::nowSteadyNs() + 1'000'000'000);
+    RB_CHECK(off_result.ok);
+    RB_CHECK(raw_backend->freedriveCount() == 2);
+    RB_CHECK(raw_backend->lastFreedriveOn().value_or(true) == false);
+    worker.stop();
+    return true;
+}
+
 bool testLifecycleQueueFullIsExplicit() {
     auto backend = std::make_unique<WorkerTestBackend>(
         rb_servo::ArmId::Left,
@@ -985,6 +1034,7 @@ int main() {
     if (!testLatestQueuedCommandWins()) return 1;
     if (!testNoDropCountedAfterImmediateDispatch()) return 1;
     if (!testResetFaultUsesLifecycleQueue()) return 1;
+    if (!testSetFreedriveUsesLifecycleQueue()) return 1;
     if (!testLifecycleQueueFullIsExplicit()) return 1;
     if (!testStopJoinsThreadAndRejectsNewCommand()) return 1;
     if (!testNoDeadlockOnDestruction()) return 1;

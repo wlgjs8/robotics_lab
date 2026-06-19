@@ -121,8 +121,8 @@ def tcp_pose_target_stand_intent(
     return CartesianCommandIntent(
         "TcpPoseTarget",
         timeout_sec=timeout_sec,
-        left=_arm_payload("TcpPoseTarget", "tcp_target_stand", left, gripper_target=left_gripper),
-        right=_arm_payload("TcpPoseTarget", "tcp_target_stand", right, gripper_target=right_gripper),
+        left=_pose_target_arm_payload(left, gripper_target=left_gripper),
+        right=_pose_target_arm_payload(right, gripper_target=right_gripper),
     )
 
 
@@ -193,6 +193,39 @@ def _arm_payload(
     if len(delta) != 6:
         raise ValueError(f"{key} must contain 6 values")
     payload = {"mode": mode, key: [float(value) for value in delta]}
+    if gripper_target is not None:
+        payload["gripper_target"] = float(gripper_target)
+    return payload
+
+
+def _pose_target_arm_payload(
+    pose: tuple[float, ...] | list[float] | None,
+    *,
+    gripper_target: float | None = None,
+) -> dict:
+    if pose is None:
+        payload = {"mode": "Hold"}
+        if gripper_target is not None:
+            payload["gripper_target"] = float(gripper_target)
+        return payload
+    values = [float(value) for value in pose]
+    if len(values) == 6:
+        payload = {"mode": "TcpPoseTarget", "tcp_target_stand": values}
+    elif len(values) == 7:
+        payload = {
+            "mode": "TcpPoseTarget",
+            "tcp_target_stand": {
+                "x": values[0],
+                "y": values[1],
+                "z": values[2],
+                "rx": 0.0,
+                "ry": 0.0,
+                "rz": 0.0,
+                "quaternion_xyzw": values[3:7],
+            },
+        }
+    else:
+        raise ValueError("tcp_target_stand must contain 6 or 7 values")
     if gripper_target is not None:
         payload["gripper_target"] = float(gripper_target)
     return payload

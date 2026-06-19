@@ -246,15 +246,22 @@ class OperatorSafety:
     def _arm_cartesian_reason(latest: StateSnapshot, arm: Literal["left", "right"]) -> str | None:
         """None when this arm can take a Cartesian command, else the reason.
 
-        Availability comes straight from the server: the controller-simulation
-        streaming flag wins when present, otherwise the plain Cartesian gate.
-        An unknown (None) gate is treated as available — the server rejects the
-        command itself if Cartesian is truly closed."""
+        Availability comes straight from the server. The plain Cartesian gate
+        (cartesian_available) is authoritative for real and simulation. The
+        controller-simulation streaming flag is meaningful ONLY in the rbpodo
+        controller-simulation carve-out — it is always False off that path, so
+        consulting it everywhere would wrongly block real motion (where the
+        server reports cartesian_available=True with the controller-sim flag
+        False). An unknown (None) gate is treated as available — the server
+        rejects the command itself if Cartesian is truly closed."""
         arm_state = latest.left if arm == "left" else latest.right
         if not (arm_state.has_valid_tcp_pose and arm_state.tcp_stand is not None and not arm_state.tcp_deferred):
             return f"{arm} FK/TCP pose unavailable"
-        available = arm_state.controller_simulation_cartesian_available
-        if available is None:
+        if arm_state.is_controller_simulation:
+            available = arm_state.controller_simulation_cartesian_available
+            if available is None:
+                available = arm_state.cartesian_available
+        else:
             available = arm_state.cartesian_available
         if available is False:
             return arm_state.cartesian_unavailable_reason or f"{arm} Cartesian unavailable (server gate)"
@@ -353,6 +360,32 @@ class OperatorSafety:
             return True, f"{sent} (runtime only: RB_GUI_SERVER_CONFIG_PATH not set)"
         _, save_message = persist_floor_z_to_config(config_path, float(floor_z_m))
         return True, f"{sent} ({save_message})"
+
+    def send_freedrive(
+        self, *, left: bool | None = None, right: bool | None = None
+    ) -> tuple[bool, str]:
+        """Per-arm direct-teaching (free-drive) toggle.
+
+        left/right: True enters free-drive (hand-guidable), False exits + resyncs,
+        None leaves that arm untouched. Requires a live state stream; the server
+        is the authority (servo.allow_freedrive + lease + supervision)."""
+        if left is None and right is None:
+            return False, "specify at least one arm"
+        latest = self.latest_valid()
+        if latest is None:
+            return False, "state stream missing or stale"
+        try:
+            self.command_client.send_freedrive(
+                left=left, right=right, timeout_sec=self.command_timeout_sec
+            )
+        except ValueError as exc:
+            return False, str(exc)
+        parts: list[str] = []
+        if left is not None:
+            parts.append(f"left {'ON' if left else 'OFF'}")
+        if right is not None:
+            parts.append(f"right {'ON' if right else 'OFF'}")
+        return True, "sent Freedrive " + ", ".join(parts)
 
     def init_motion_disabled_reason(self) -> str | None:
         reason = self.blocked_reason("JointTarget")

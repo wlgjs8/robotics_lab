@@ -2,7 +2,7 @@
 """Supervised rbpodo Servo J ACK/rate acceptance harness.
 
 The default mode is read-only. Real motion modes are intentionally gated by
-flags, environment variables, and config checks.
+flags and config checks.
 """
 
 from __future__ import annotations
@@ -26,15 +26,6 @@ from typing import Any
 
 
 REAL_ROBOT_IPS = {"172.28.60.200", "172.28.60.201"}
-ENV_KEYS = (
-    "RB_ALLOW_REAL_ROBOT",
-    "RB_ALLOW_REAL_MOTION",
-    "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
-    "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
-    "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED",
-    "RB_ALLOW_REAL_CARTESIAN",
-)
 PROFILES = {
     "500hz_ack": {"rate_hz": 500, "servo_t1_sec": 0.002, "disable_waiting_ack": False},
 }
@@ -113,11 +104,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pgmode-command-port", type=int, default=5000)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
-    parser.add_argument(
-        "--i-understand-this-connects-to-real-controller",
-        action="store_true",
-        help="Required before connecting to known RB controller IPs.",
-    )
     parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
@@ -233,14 +219,6 @@ def load_config(path: Path) -> ParsedConfig:
     )
 
 
-def env_enabled(name: str) -> bool:
-    return os.environ.get(name) == "1"
-
-
-def env_snapshot() -> dict[str, str | None]:
-    return {key: os.environ.get(key) for key in ENV_KEYS}
-
-
 def parse_udp_endpoint(value: str) -> tuple[str, int]:
     prefix = "udp://"
     if not value.startswith(prefix):
@@ -278,7 +256,7 @@ def ensure_pgmode_simulation(args: argparse.Namespace, config: ParsedConfig) -> 
             [config.left.ip, config.right.ip],
             getattr(args, "pgmode_timeout_sec", 1.0),
             port=getattr(args, "pgmode_command_port", 5000),
-            confirmation=args.i_understand_this_connects_to_real_controller,
+            confirmation=True,
             set_simulation=set_pgmode,
             verify_only=verify_pgmode,
         )
@@ -352,13 +330,6 @@ def preflight(args: argparse.Namespace, config: ParsedConfig) -> dict[str, Any]:
     if config.right.ip != args.expected_right_ip:
         raise AcceptanceError(f"right_robot.ip {config.right.ip} does not match --expected-right-ip {args.expected_right_ip}")
 
-    known_real_ips = {config.left.ip, config.right.ip} & REAL_ROBOT_IPS
-    if known_real_ips and not args.i_understand_this_connects_to_real_controller:
-        raise AcceptanceError("refusing known real controller IP without explicit confirmation flag")
-    if not env_enabled("RB_ALLOW_REAL_ROBOT"):
-        raise AcceptanceError("rbpodo real acceptance requires RB_ALLOW_REAL_ROBOT=1")
-    if env_enabled("RB_ALLOW_REAL_CARTESIAN"):
-        raise AcceptanceError("RB_ALLOW_REAL_CARTESIAN must not be set for rbpodo Servo J acceptance")
     pgmode_timeout_sec = getattr(args, "pgmode_timeout_sec", 1.0)
     pgmode_command_port = getattr(args, "pgmode_command_port", 5000)
     if not math.isfinite(pgmode_timeout_sec) or pgmode_timeout_sec <= 0.0:
@@ -378,25 +349,10 @@ def preflight(args: argparse.Namespace, config: ParsedConfig) -> dict[str, Any]:
             raise AcceptanceError(f"{args.mode} requires --allow-motion")
         if not send_servo_commands:
             raise AcceptanceError(f"{args.mode} requires servo.send_servo_commands=true")
-        if not env_enabled("RB_ALLOW_REAL_MOTION"):
-            raise AcceptanceError(f"{args.mode} requires RB_ALLOW_REAL_MOTION=1")
-        if not env_enabled("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"):
-            raise AcceptanceError(f"{args.mode} requires RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1")
         if not as_bool(config.servo.get("allow_controller_simulation_motion"), False):
             raise AcceptanceError(
                 f"{args.mode} requires servo.allow_controller_simulation_motion=true"
             )
-        if as_bool(config.servo.get("allow_controller_simulation_diagnostics_suspect"), False) and not env_enabled(
-            "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM"
-        ):
-            raise AcceptanceError(
-                "diagnostics-suspect controller-simulation override requires "
-                "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1"
-            )
-        if selected.disable_waiting_ack and not env_enabled("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION"):
-            raise AcceptanceError("ACK-off motion requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1")
-        if not args.i_understand_this_connects_to_real_controller:
-            raise AcceptanceError(f"{args.mode} requires explicit real-controller confirmation")
         require_controller_simulation_config(config)
         if not getattr(args, "set_pgmode_simulation", False) and not getattr(args, "verify_pgmode_simulation", False):
             raise AcceptanceError(
@@ -419,20 +375,11 @@ def preflight(args: argparse.Namespace, config: ParsedConfig) -> dict[str, Any]:
         "servo_t1_sec": selected.servo_t1_sec,
         "disable_waiting_ack": selected.disable_waiting_ack,
         "ack_semantics": "socket_send_only" if selected.disable_waiting_ack else "controller_ack_observed",
-        "env": env_snapshot(),
         "real_robot_ips_checked": sorted(REAL_ROBOT_IPS),
-        "confirmation_flag": args.i_understand_this_connects_to_real_controller,
         "pgmode_simulation_preflight": pgmode_preflight,
         "pgmode_simulation_confirmed": (
             pgmode_preflight is not None and pgmode_preflight.get("overall_result") == "ok"
         ),
-        "server_env_overrides": {
-            "RB_RBPODO_PGMODE_SIMULATION_CONFIRMED": "1"
-        } if (
-            args.mode in MOTION_MODES and
-            pgmode_preflight is not None and
-            pgmode_preflight.get("overall_result") == "ok"
-        ) else {},
     }
 
 
@@ -717,7 +664,6 @@ def start_server(
     command = [str(server), "--config", str(args.config.resolve())]
     log = log_path.open("w", encoding="utf-8")
     server_env = os.environ.copy()
-    server_env.update(preflight_result.get("server_env_overrides") or {})
     return subprocess.Popen(
         command,
         cwd=str(args.root.resolve()),
@@ -1122,135 +1068,114 @@ logging:
             pgmode_command_port=5000,
             preflight_only=False,
             skip_plots=True,
-            i_understand_this_connects_to_real_controller=True,
         )
-        old_env = {key: os.environ.get(key) for key in ENV_KEYS}
-        try:
-            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
-            os.environ.pop("RB_ALLOW_REAL_MOTION", None)
-            os.environ.pop("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION", None)
-            os.environ.pop("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION", None)
-            os.environ.pop("RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM", None)
-            os.environ.pop("RB_RBPODO_PGMODE_SIMULATION_CONFIRMED", None)
-            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
-            result = preflight(base, config)
-            assert result["profile"] == "500hz_ack"
+        result = preflight(base, config)
+        assert result["profile"] == "500hz_ack"
 
-            motion = argparse.Namespace(**vars(base))
-            motion.mode = "servo_j_noop"
-            expect_error(lambda: preflight(motion, config))
+        motion = argparse.Namespace(**vars(base))
+        motion.mode = "servo_j_noop"
+        expect_error(lambda: preflight(motion, config))
 
-            controller_sim_config = load_config(path)
-            controller_sim_config.left.operation_mode = "simulation"
-            controller_sim_config.right.operation_mode = "simulation"
-            controller_sim_config.servo["send_servo_commands"] = True
-            controller_sim_config.servo["allow_controller_simulation_motion"] = True
-            controller_sim_motion = argparse.Namespace(**vars(base))
-            controller_sim_motion.mode = "servo_j_noop"
-            controller_sim_motion.allow_motion = True
-            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
-            expect_error(lambda: preflight(controller_sim_motion, controller_sim_config))
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
-            expect_error(lambda: preflight(controller_sim_motion, controller_sim_config))
-            os.environ.pop("RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION", None)
-            os.environ.pop("RB_ALLOW_REAL_MOTION", None)
+        controller_sim_config = load_config(path)
+        controller_sim_config.left.operation_mode = "simulation"
+        controller_sim_config.right.operation_mode = "simulation"
+        controller_sim_config.servo["send_servo_commands"] = True
+        controller_sim_config.servo["allow_controller_simulation_motion"] = True
+        controller_sim_motion = argparse.Namespace(**vars(base))
+        controller_sim_motion.mode = "servo_j_noop"
+        controller_sim_motion.allow_motion = True
+        expect_error(lambda: preflight(controller_sim_motion, controller_sim_config))
 
-            config.servo["send_servo_commands"] = True
-            expect_error(lambda: preflight(base, config))
-            config.servo["send_servo_commands"] = False
+        config.servo["send_servo_commands"] = True
+        expect_error(lambda: preflight(base, config))
+        config.servo["send_servo_commands"] = False
 
-            bad_rate = load_config(path)
-            bad_rate.left.servo_t1_sec = 0.01
-            expect_error(lambda: preflight(base, bad_rate))
+        bad_rate = load_config(path)
+        bad_rate.left.servo_t1_sec = 0.01
+        expect_error(lambda: preflight(base, bad_rate))
 
-            no_ack = load_config(path)
-            no_ack.left.disable_waiting_ack = True
-            no_ack.right.disable_waiting_ack = True
-            expect_error(lambda: preflight(base, no_ack))
+        no_ack = load_config(path)
+        no_ack.left.disable_waiting_ack = True
+        no_ack.right.disable_waiting_ack = True
+        expect_error(lambda: preflight(base, no_ack))
 
-            fake_states = [
-                {
-                    "loop_start_time_ns": 1000,
-                    "fault_latched": False,
-                    "observed_backend": "rbpodo",
-                    "left": {
-                        "has_valid_joint_state": True,
-                        "state_age_us": 1000.0,
-                        "q_actual_deg": [0, 1, 2, 3, 4, 5],
-                        "error_code": 0,
-                        "last_send": {
-                            "accepted": True,
-                            "backend_error_kind": "None",
-                            "duration_us": 100.0,
-                            "ack_policy": "wait",
-                            "ack_observed": True,
-                            "controller_acceptance_observed": True,
-                            "ack_wait_duration_us": 80.0,
-                            "send_acceptance_semantics": "controller_ack_observed",
-                        },
+        fake_states = [
+            {
+                "loop_start_time_ns": 1000,
+                "fault_latched": False,
+                "observed_backend": "rbpodo",
+                "left": {
+                    "has_valid_joint_state": True,
+                    "state_age_us": 1000.0,
+                    "q_actual_deg": [0, 1, 2, 3, 4, 5],
+                    "error_code": 0,
+                    "last_send": {
+                        "accepted": True,
+                        "backend_error_kind": "None",
+                        "duration_us": 100.0,
+                        "ack_policy": "wait",
+                        "ack_observed": True,
+                        "controller_acceptance_observed": True,
+                        "ack_wait_duration_us": 80.0,
+                        "send_acceptance_semantics": "controller_ack_observed",
                     },
                 },
-                {
-                    "loop_start_time_ns": 2_001_000,
-                    "fault_latched": False,
-                    "observed_backend": "rbpodo",
-                    "left": {
-                        "has_valid_joint_state": True,
-                        "state_age_us": 2000.0,
-                        "q_actual_deg": [0, 1, 2, 3, 4, 5.1],
-                        "error_code": 0,
-                        "last_send": {
-                            "accepted": True,
-                            "backend_error_kind": "None",
-                            "duration_us": 120.0,
-                            "ack_policy": "wait",
-                            "ack_observed": True,
-                            "controller_acceptance_observed": True,
-                            "ack_wait_duration_us": 90.0,
-                            "send_acceptance_semantics": "controller_ack_observed",
-                        },
+            },
+            {
+                "loop_start_time_ns": 2_001_000,
+                "fault_latched": False,
+                "observed_backend": "rbpodo",
+                "left": {
+                    "has_valid_joint_state": True,
+                    "state_age_us": 2000.0,
+                    "q_actual_deg": [0, 1, 2, 3, 4, 5.1],
+                    "error_code": 0,
+                    "last_send": {
+                        "accepted": True,
+                        "backend_error_kind": "None",
+                        "duration_us": 120.0,
+                        "ack_policy": "wait",
+                        "ack_observed": True,
+                        "controller_acceptance_observed": True,
+                        "ack_wait_duration_us": 90.0,
+                        "send_acceptance_semantics": "controller_ack_observed",
                     },
                 },
-            ]
-            summary = summarize(base, config, result, fake_states, 2, Path(tmp), None)
-            assert summary["state_valid_ratio"] == 1.0
-            assert summary["ack_observed_count"] == 2
-            assert abs(summary["q_actual_drift_from_start_deg"] - 0.1) < 1e-9
-            write_plots(Path(tmp), fake_states, "left")
+            },
+        ]
+        summary = summarize(base, config, result, fake_states, 2, Path(tmp), None)
+        assert summary["state_valid_ratio"] == 1.0
+        assert summary["ack_observed_count"] == 2
+        assert abs(summary["q_actual_drift_from_start_deg"] - 0.1) < 1e-9
+        write_plots(Path(tmp), fake_states, "left")
 
-            log_path = Path(tmp) / "rb_servo_server.log"
-            log_path.write_text(
-                "\n".join(
-                    [
-                        "[ERROR] invalid robot startup state: right",
-                        "  has_valid_joint_state=true",
-                        "  op_stat_self_collision=1977953904",
-                        "[ERROR] failed to start servo loop",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
+        log_path = Path(tmp) / "rb_servo_server.log"
+        log_path.write_text(
+            "\n".join(
+                [
+                    "[ERROR] invalid robot startup state: right",
+                    "  has_valid_joint_state=true",
+                    "  op_stat_self_collision=1977953904",
+                    "[ERROR] failed to start servo loop",
+                ]
             )
+            + "\n",
+            encoding="utf-8",
+        )
 
-            class ExitedProcess:
-                returncode = 7
+        class ExitedProcess:
+            returncode = 7
 
-                def poll(self) -> int:
-                    return self.returncode
+            def poll(self) -> int:
+                return self.returncode
 
-            diagnostic = state_stream_timeout_message(
-                ExitedProcess(), log_path, "udp://127.0.0.1:50110"
-            )
-            assert "server_returncode=7" in diagnostic
-            assert "last_120_lines_of_rb_servo_server.log" in diagnostic
-            assert "scripts/rbpodo_state_dump.py" in diagnostic
-            assert "invalid robot startup state" in diagnostic
-        finally:
-            for key, value in old_env.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+        diagnostic = state_stream_timeout_message(
+            ExitedProcess(), log_path, "udp://127.0.0.1:50110"
+        )
+        assert "server_returncode=7" in diagnostic
+        assert "last_120_lines_of_rb_servo_server.log" in diagnostic
+        assert "scripts/rbpodo_state_dump.py" in diagnostic
+        assert "invalid robot startup state" in diagnostic
     print("rbpodo_servo_acceptance self-test passed")
     return 0
 

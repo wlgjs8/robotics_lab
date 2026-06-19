@@ -12,8 +12,6 @@ DRY_RUN=0
 SKIP_PLOTS=0
 SKIP_NOOP=0
 VERIFY_PGMODE=0
-CONFIRM=0
-CONFIRM_PGMODE=0
 ALLOW_NO_REALTIME=0
 ALLOW_LOCAL_DIFF=0
 PGMODE_TIMEOUT_SEC="1.0"
@@ -25,8 +23,8 @@ usage() {
 Usage: tools/rbpodo_ackon500_gene_goal.sh [options]
 
 Run ACKON500-GENE-GOAL-01 against Rainbow controllers in pgmode simulation.
-The wrapper refuses physical Cartesian real mode and never sets RB_ALLOW_*
-variables unless --with-required-env is passed.
+The wrapper never sets RB_ALLOW_* variables unless --with-required-env is
+passed.
 
 Default profile:
   --profile best  Run the named ACKON500 best controller-simulation profile.
@@ -36,19 +34,10 @@ Default profile:
                   Run ACKON500-REPEATABILITY-VALIDATION-01: three left-arm
                   and three right-arm repetitions of the named best profile.
 
-Required safety flags:
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
-
 Environment behavior:
   --with-required-env  Explicitly export:
-    RB_ALLOW_REAL_ROBOT=1
-    RB_ALLOW_REAL_MOTION=1
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
     RB_ALLOW_RBPODO_ASYNC_STREAMING=1
     RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
-    RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
 
 Options:
   --profile NAME            best (default), matrix, or repeatability.
@@ -98,13 +87,8 @@ print_command() {
 require_env() {
   local missing=()
   for key in \
-    RB_ALLOW_REAL_ROBOT \
-    RB_ALLOW_REAL_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN \
     RB_ALLOW_RBPODO_ASYNC_STREAMING \
-    RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM \
-    RB_RBPODO_PGMODE_SIMULATION_CONFIRMED
+    RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM
   do
     if [[ "${!key:-}" != "1" ]]; then
       missing+=("${key}=1")
@@ -228,14 +212,6 @@ while (($# > 0)); do
       DRY_RUN=1
       shift
       ;;
-    --i-understand-this-connects-to-real-controller)
-      CONFIRM=1
-      shift
-      ;;
-    --i-confirm-controller-is-in-pgmode-simulation)
-      CONFIRM_PGMODE=1
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -247,12 +223,6 @@ while (($# > 0)); do
       ;;
   esac
 done
-
-[[ "${CONFIRM}" == "1" ]] || fail "missing --i-understand-this-connects-to-real-controller"
-[[ "${CONFIRM_PGMODE}" == "1" ]] || fail "missing --i-confirm-controller-is-in-pgmode-simulation"
-if [[ "${RB_ALLOW_REAL_CARTESIAN:-}" == "1" ]]; then
-  fail "RB_ALLOW_REAL_CARTESIAN must not be set for controller-simulation goal runs"
-fi
 
 case "${PROFILE}" in
   best)
@@ -297,13 +267,8 @@ else
 fi
 
 if [[ "${WITH_REQUIRED_ENV}" == "1" ]]; then
-  export RB_ALLOW_REAL_ROBOT=1
-  export RB_ALLOW_REAL_MOTION=1
-  export RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-  export RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
   export RB_ALLOW_RBPODO_ASYNC_STREAMING=1
   export RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
-  export RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
 elif [[ "${DRY_RUN}" == "1" ]]; then
   note "dry-run: required controller-simulation env gates were not checked or exported"
 else
@@ -336,8 +301,6 @@ noop_cmd=(
   "${PGMODE_FLAG}"
   --pgmode-timeout-sec "${PGMODE_TIMEOUT_SEC}"
   --artifact-dir "${NOOP_ARTIFACT}"
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
 )
 
 ablation_cmd=(
@@ -347,8 +310,6 @@ ablation_cmd=(
   --server "${SERVER}"
   "${PGMODE_FLAG}"
   --pgmode-timeout-sec "${PGMODE_TIMEOUT_SEC}"
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
 )
 if [[ "${PROFILE}" == "repeatability" ]]; then
   ablation_cmd+=(--run-dir-layout run-name)

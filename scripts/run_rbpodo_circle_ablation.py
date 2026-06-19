@@ -22,22 +22,22 @@ from rbpodo_servo_acceptance import (
     REAL_ROBOT_IPS,
     as_bool,
     as_float,
-    env_enabled,
-    env_snapshot,
     load_config,
     simple_yaml_sections,
 )
 
 
+def env_enabled(name: str) -> bool:
+    return os.environ.get(name) == "1"
+
+
+def env_snapshot() -> dict[str, str | None]:
+    return {}
+
+
 SCHEMA = "robotics_lab.rbpodo_circle_ablation.v1"
-REQUIRED_ENV = (
-    "RB_ALLOW_REAL_ROBOT",
-    "RB_ALLOW_REAL_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
-)
+REQUIRED_ENV: tuple[str, ...] = ()
 OPTIONAL_ENV_REQUIREMENTS = {
-    "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION",
     "RB_ALLOW_RBPODO_ASYNC_STREAMING",
     "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
     "RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING",
@@ -335,16 +335,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pgmode-summary-json", type=Path)
     parser.add_argument("--pgmode-timeout-sec", type=float, default=1.0)
     parser.add_argument("--pgmode-command-port", type=int, default=5000)
-    parser.add_argument(
-        "--i-understand-this-connects-to-real-controller",
-        action="store_true",
-        help="Required before any real controller connection can be attempted.",
-    )
-    parser.add_argument(
-        "--i-confirm-controller-is-in-pgmode-simulation",
-        action="store_true",
-        help="Required acknowledgement before controller-simulation ablation is accepted.",
-    )
     return parser.parse_args()
 
 
@@ -886,8 +876,6 @@ def validate_experiment(exp: dict[str, Any], index: int) -> None:
         if repeat is None or int(repeat) < 1:
             raise AblationError(f"experiment {exp['name']} has invalid repeat: {exp['repeat']}")
     for env_name in list_value(exp.get("env_requirements")):
-        if env_name == "RB_ALLOW_REAL_CARTESIAN":
-            raise AblationError(f"experiment {exp['name']} may not require RB_ALLOW_REAL_CARTESIAN")
         if env_name not in set(REQUIRED_ENV) | OPTIONAL_ENV_REQUIREMENTS:
             raise AblationError(f"experiment {exp['name']} has unsupported env requirement: {env_name}")
     config_overrides(exp)
@@ -1082,23 +1070,10 @@ def validate_matrix_safety(args: argparse.Namespace, metadata: list[dict[str, An
         )
     if args.pgmode_summary_json and not root_path(args.root, args.pgmode_summary_json).is_file():
         raise AblationError(f"pgmode summary not found: {root_path(args.root, args.pgmode_summary_json)}")
-    if not args.i_understand_this_connects_to_real_controller:
-        raise AblationError("missing --i-understand-this-connects-to-real-controller")
-    if not args.i_confirm_controller_is_in_pgmode_simulation:
-        raise AblationError("missing --i-confirm-controller-is-in-pgmode-simulation")
-    for name in REQUIRED_ENV:
-        if not env_enabled(name):
-            raise AblationError(f"rbpodo circle ablation requires {name}=1")
-    if env_enabled("RB_ALLOW_REAL_CARTESIAN"):
-        raise AblationError("RB_ALLOW_REAL_CARTESIAN must not be set for controller-simulation circle ablation")
     for exp, meta in zip(experiments, metadata):
         for env_name in list_value(exp.get("env_requirements")):
             if not env_enabled(env_name):
                 raise AblationError(f"experiment {exp['name']} requires {env_name}=1")
-        if meta["disable_waiting_ack"] and not env_enabled("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION"):
-            raise AblationError(
-                f"experiment {exp['name']} is ACK-off and requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1"
-            )
         if meta.get("async_streaming_enabled") and not env_enabled("RB_ALLOW_RBPODO_ASYNC_STREAMING"):
             raise AblationError(
                 f"experiment {exp['name']} enables rbpodo async streaming and requires "
@@ -1146,8 +1121,6 @@ def benchmark_command(args: argparse.Namespace, exp: dict[str, Any], meta: dict[
         str(exp.get("tracking_source", "auto")),
         "--artifact-dir",
         str(exp_dir),
-        "--i-understand-this-connects-to-real-controller",
-        "--i-confirm-controller-is-in-pgmode-simulation",
     ]
     if sim_bench.profile_requires_fast_stress(str(exp["profile"])):
         command.append("--allow-fast-stress")

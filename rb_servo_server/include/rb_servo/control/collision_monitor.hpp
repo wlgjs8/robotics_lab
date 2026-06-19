@@ -29,6 +29,20 @@
 
 namespace rb_servo {
 
+// Extra collision primitive (geometry the URDF lacks: wrist camera, cable, table).
+// Attached to a named frame — an arm frame moves with the arm (auto left/right by
+// ancestry); "stand"/"world" is a static obstacle paired against both arms.
+struct ExtraCollisionShape {
+    std::string name;
+    std::string shape = "box";   // box | sphere | capsule | cylinder
+    std::string parent_frame;
+    std::array<double, 3> size_m{0.0, 0.0, 0.0};  // box: full extents
+    double radius_m = 0.0;
+    double length_m = 0.0;
+    std::array<double, 3> xyz_m{0.0, 0.0, 0.0};
+    std::array<double, 3> rpy{0.0, 0.0, 0.0};
+};
+
 // One-time setup + the single shared barrier parameter set.
 struct CollisionMonitorConfig {
     bool enable = false;
@@ -52,12 +66,32 @@ struct CollisionMonitorConfig {
     // flange bolted to the stand — structurally overlaps; link1/link2 are checked.
     std::vector<std::string> stand_ignore_arm_substrings{"link0"};
 
+    // Left/right arm classification is by KINEMATIC-TREE ancestry, not by name
+    // substring: a geometry is "left" iff this frame is on its parent-frame chain.
+    // Defaults are derived from the prefixes ("<prefix>world") if left empty.
+    std::string left_arm_root_frame;
+    std::string right_arm_root_frame;
+
+    // Intra-arm self-collision: also check a link of an arm against NON-adjacent
+    // links of the SAME arm (an arm folding onto itself). Adjacency is measured by
+    // chain depth (number of the arm's actuated joints between the two geometries);
+    // pairs with separation < intra_arm_min_chain_separation are skipped (adjacent
+    // links touch by construction).
+    bool check_intra_arm = true;
+    int intra_arm_min_chain_separation = 2;
+
+    // Swept-volume guard: each evaluation also samples intermediate configurations
+    // between the previous evaluated config and the current target and keeps the
+    // worst (min) clearance, so fast motion cannot tunnel a thin obstacle between
+    // ticks. 1 = endpoint only (no sweep). >=2 adds interior samples.
+    int swept_samples = 2;  // 1=endpoint, >=2 sweeps (cost ~x per sample)
+
     // ---- shared velocity-barrier params (common to ALL primitives) ----
     double d_hard_m = 0.005;       // hard floor: never cross; clamp_hold below this
     double d_slow_m = 0.025;       // above this clearance the barrier is inactive
     double a_brake_m_s2 = 4.0;     // emergency decel the barrier assumes
     double hyst_m = 0.005;         // release hysteresis for the discrete fault flag
-    double latency_s = 0.005;      // assumed worst monitor->servo reaction latency
+    double latency_s = 0.010;      // assumed worst monitor->servo reaction latency
     double max_staleness_s = 0.020;  // verdict older than this -> fail closed
 
     // Thread placement (-1 = no affinity). Pin to an isolated core for stable
@@ -65,6 +99,7 @@ struct CollisionMonitorConfig {
     int monitor_core = -1;
 
     int max_near_pairs = 8;        // how many closest pairs to report in a verdict
+    std::vector<ExtraCollisionShape> extra_collision;  // non-URDF geometry (camera/table/...)
 };
 
 // One reported near pair (witness points + approach direction in stand frame).

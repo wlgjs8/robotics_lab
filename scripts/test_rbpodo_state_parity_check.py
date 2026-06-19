@@ -132,7 +132,6 @@ class RbpodoStateParityCheckTest(unittest.TestCase):
                 tolerance_deg=0.0,
                 nearest_max_delta_sec=0.1,
                 ips=["172.28.60.200"],
-                i_understand_this_connects_to_real_controller=True,
                 use_running_server=True,
                 server=None,
                 server_config=config,

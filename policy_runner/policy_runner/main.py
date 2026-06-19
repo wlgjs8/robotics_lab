@@ -393,7 +393,6 @@ def _make_umi_dual_cartesian_source(config: PolicyRunnerConfig) -> UmiDualCartes
         max_linear_step_m=umi.max_linear_step_m,
         max_angular_step_rad=umi.max_angular_step_rad,
         input_moving_average_window=umi.input_moving_average_window,
-        target_lpf_tau_sec=umi.target_lpf_tau_sec,
         deadband_linear_m=umi.deadband_linear_m,
         deadband_angular_rad=umi.deadband_angular_rad,
         linear_axis_signs=umi.linear_axis_signs,
@@ -404,6 +403,7 @@ def _make_umi_dual_cartesian_source(config: PolicyRunnerConfig) -> UmiDualCartes
         workspace_bounds=umi.workspace_bounds,
         sample_hold_timeout_sec=umi.sample_hold_timeout_sec,
         timeout_sec=config.servo_command.timeout_sec,
+        deadman_release_grace_sec=umi.deadman_release_grace_sec,
     )
 
 
@@ -542,7 +542,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_train.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
     flow_train.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
     flow_train.add_argument("--single-arm-side", choices=("left", "right"), default=None)
-    flow_train.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
+    flow_train.add_argument("--action-frame", choices=("ee_local",), default="ee_local")
     flow_train.add_argument("--max-episodes", type=int, default=None)
     flow_train.add_argument("--checkpoint", default="outputs/flow_policy.pt")
     flow_train.add_argument("--vision-backbone", default="resnet50")
@@ -596,7 +596,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     imitation_experiment.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
     imitation_experiment.add_argument("--exclude-camera-names", default=None, help="Comma-separated camera deny-list")
-    imitation_experiment.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
+    imitation_experiment.add_argument("--action-frame", choices=("ee_local",), default="ee_local")
     imitation_experiment.add_argument("--action-horizon", type=int, default=16)
     imitation_experiment.add_argument("--image-size", type=int, default=128)
     imitation_experiment.add_argument(
@@ -701,6 +701,18 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     flow_infer.add_argument("--device", default="auto")
     flow_infer.add_argument(
+        "--execute-arms",
+        choices=("both", "left", "right"),
+        default="both",
+        help=(
+            "Runtime execution mask: suppress the non-selected arm's commands "
+            "(twist + gripper) so it physically holds. The checkpoint stays "
+            "dual-arm (gate/selected_arms unchanged); only what is SENT to the "
+            "servo is masked. Use 'right' to run the right-arm-first phase with "
+            "the idle left arm held (avoids idle-arm noise creep)."
+        ),
+    )
+    flow_infer.add_argument(
         "--image-size",
         type=int,
         default=None,
@@ -716,27 +728,28 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     flow_infer.add_argument(
         "--command-family",
-        choices=("tcp_twist_stand", "tcp_twist_local", "tcp_delta_stand"),
+        choices=("tcp_twist_local", "tcp_target_pose"),
         default=None,
         help=(
-            "Flow action command family. Defaults to tcp_twist_local for ee_local "
-            "checkpoints and tcp_twist_stand otherwise."
-        ),
-    )
-    flow_infer.add_argument(
-        "--allow-experimental-tcp-delta-stand",
-        action="store_true",
-        help=(
-            "Allow the debug TcpDeltaStand flow command family outside offline_eval/sim_dryrun. "
-            "TcpTwistStand remains the default controller-simulation path."
+            "Flow action command family for ee_local body-frame deltas. Defaults to "
+            "tcp_twist_local; tcp_target_pose composes each delta into an absolute "
+            "TcpPoseTarget."
         ),
     )
     flow_infer.add_argument(
         "--allow-tcp-twist-local",
         action="store_true",
         help=(
-            "Allow the TcpTwistLocal flow command family for controller_sim/real_policy. "
-            "Required for ee_local checkpoints, which cannot emit tcp_twist_stand."
+            "Allow the TcpTwistLocal flow command family for controller_sim/real_policy "
+            "(ee_local checkpoints; default command family)."
+        ),
+    )
+    flow_infer.add_argument(
+        "--allow-tcp-target-pose",
+        action="store_true",
+        help=(
+            "Allow the TcpPoseTarget flow command family for controller_sim/real_policy "
+            "(ee_local deltas composed into absolute tcp_target_stand setpoints)."
         ),
     )
     flow_infer.add_argument(
@@ -744,8 +757,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
         default=None,
         help=(
             "Fixed rotation between the training EE body frame and the RB TCP frame for "
-            "ee_local checkpoints: preset name ('pika_tip' for pika UMI data) or 9 "
-            "row-major floats. Default: none (frames assumed identical)."
+            "ee_local checkpoints. Preset name or 9 row-major floats. Presets: "
+            "'pika_rz180' (measured pika-UMI correction, 180deg about approach(z) on BOTH "
+            "translation and rotation), 'pika_rz180_trans_only' (ablation: flip x/y "
+            "translation only, leave rotation unchanged), 'pika_tip' (legacy 90deg guess). "
+            "Default: none (frames assumed identical)."
         ),
     )
     flow_infer.add_argument(
@@ -761,7 +777,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
         type=float,
         default=None,
         help=(
-            "Seconds represented by one flow action step. Controller/real twist rollout "
+            "Seconds represented by one flow action step. Controller/real flow rollout "
             "requires this value or checkpoint dataset_stats.dt_mean_sec; sim_dryrun "
             "can fall back to 1/command_rate_hz."
         ),
@@ -784,6 +800,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
         default=None,
         help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
     )
+    flow_infer.add_argument(
+        "--chunk-crossfade-steps",
+        type=int,
+        default=2,
+        help=(
+            "Blend the first N twists after each chunk-resample boundary from the "
+            "previously emitted twist (alpha 0->1) to remove the boundary jerk "
+            "without steady-state lag. 0 (default) disables crossfade. Try 2-3."
+        ),
+    )
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.002)
     flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.01)
 
@@ -804,7 +830,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     hdf5_view.add_argument("episode", help="HDF5 episode file")
     hdf5_view.add_argument("--single-arm-side", choices=("left", "right"), default="left")
     hdf5_view.add_argument("--camera-names", default=None, help="Comma-separated camera allow-list")
-    hdf5_view.add_argument("--action-frame", choices=("stand", "ee_local"), default="stand")
+    hdf5_view.add_argument("--action-frame", choices=("ee_local",), default="ee_local")
     hdf5_view.add_argument("--start-frame", type=int, default=0)
     hdf5_view.add_argument("--fps", type=float, default=None)
     hdf5_view.add_argument("--image-size", type=int, default=320)
@@ -1177,7 +1203,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             run_flow_offline_eval,
             validate_flow_command_family,
         )
-        from .gripper import GripperRuntime
+        from .gripper import GripperCommand, GripperRuntime
         from .openpi_remote import OPENPI_CHECKPOINT_PREFIX, OpenpiRemoteActionSource
 
         config = load_config(args.config)
@@ -1204,8 +1230,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
             validate_flow_command_family(
                 rollout_policy.mode,
                 command_family,
-                allow_experimental_tcp_delta_stand=args.allow_experimental_tcp_delta_stand,
                 allow_tcp_twist_local=args.allow_tcp_twist_local,
+                allow_tcp_target_pose=args.allow_tcp_target_pose,
                 dataset_stats=dataset_stats,
             )
         except (RolloutModeValidationError, ValueError) as exc:
@@ -1334,10 +1360,67 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     max_rad=config.gripper.max_rad,
                     deadband_rad=config.gripper.deadband_rad,
                     max_hz=config.gripper.max_hz,
+                    suppress_sdk_logs=config.gripper.suppress_sdk_logs,
                     supports_controller_simulation=(
                         config.gripper.actuate_in_controller_simulation
                     ),
+                    # Homing closes both grippers to their stop and re-zeros there.
+                    # DEFAULT OFF: homing left the LEFT gripper stuck closed (it
+                    # bottoms on its stop and fails to re-open; verified 2026-06-16
+                    # left seed 0.35 vs open 70 with homing off). Set
+                    # RB_GRIPPER_HOME_ON_CONNECT=1 to re-enable (e.g. once homing
+                    # is fixed to release/verify the jaw after re-zeroing).
+                    home_on_connect=(
+                        os.environ.get("RB_GRIPPER_HOME_ON_CONNECT", "0")
+                        not in ("0", "false", "False", "no", "")
+                    ),
                 ).connect()
+        gripper_runtime = (
+            GripperRuntime(
+                rollout_mode=rollout_policy.mode.value,
+                allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+                backend=gripper_backend,
+            )
+            if gripper_backend is not None
+            else GripperRuntime(
+                rollout_mode=rollout_policy.mode.value,
+                allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
+            )
+        )
+        # Open both grippers fully at startup so every rollout begins from a
+        # known open pose. Routed through the same GripperRuntime gate as policy
+        # commands, so it honors real_policy + allow_real_gripper_motion +
+        # RB_ALLOW_REAL_GRIPPER and is a logged noop when the hardware lane is
+        # closed (percent units: 100 = open = max_rad).
+        if gripper_backend is not None:
+            open_results = gripper_runtime.dispatch(
+                [
+                    GripperCommand(
+                        arm=arm,
+                        value=100.0,
+                        command_type="target",
+                        source="startup_open",
+                    )
+                    for arm in ("left", "right")
+                    if arm in gripper_backend.ports
+                ],
+                # Open both grippers at once (parallel serial writes) so they
+                # actuate simultaneously, not left-then-right.
+                concurrent=True,
+            )
+            for result in open_results:
+                print(
+                    f"[flow-infer] startup gripper open {result.command.arm}: "
+                    f"sent_to_physical={result.sent_to_physical} reason={result.reason}",
+                    flush=True,
+                )
+            # Physical grippers actuate with a delay; let them finish opening
+            # before the first policy step so inference does not begin while the
+            # jaws are still moving. Only wait when a command actually reached
+            # hardware (logged noop in sim / closed gripper lane -> no wait).
+            if any(result.sent_to_physical for result in open_results):
+                time.sleep(1.5)
+                print("[flow-infer] startup gripper open settle: waited 1.5s", flush=True)
         try:
             policy_dt_sec = resolve_flow_policy_dt_sec(
                 rollout_policy.mode,
@@ -1356,22 +1439,12 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 "max_linear_step_m": args.max_linear_step_m,
                 "max_angular_step_rad": args.max_angular_step_rad,
                 "chunk_execute_steps": args.chunk_execute_steps,
+                "chunk_crossfade_steps": args.chunk_crossfade_steps,
                 "allow_rbpodo_controller_simulation_cartesian": (
                     rollout_policy.allows_controller_simulation_cartesian
                 ),
                 "ee_local_r_align": args.ee_local_r_align,
-                "gripper_runtime": (
-                    GripperRuntime(
-                        rollout_mode=rollout_policy.mode.value,
-                        allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
-                        backend=gripper_backend,
-                    )
-                    if gripper_backend is not None
-                    else GripperRuntime(
-                        rollout_mode=rollout_policy.mode.value,
-                        allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
-                    )
-                ),
+                "gripper_runtime": gripper_runtime,
                 "device": args.device,
             }
             if checkpoint_kind == "openpi_remote":
@@ -1398,6 +1471,25 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     sample_steps=args.sample_steps,
                     stochastic_sampling=not args.deterministic_sampling,
                     **source_kwargs,
+                )
+            # Runtime execution mask: suppress the non-selected arm's per-step
+            # commands so it holds in place. Only source.arm_mask (the emission
+            # gate) is changed; source.checkpoint_arm_mask / selected_arms (the
+            # gate identity) stay dual-arm, so _validate_real_policy is unaffected
+            # and the suppression is strictly safer.
+            if args.execute_arms != "both":
+                import numpy as _np
+
+                _mask = _np.asarray(
+                    [1.0, 0.0] if args.execute_arms == "left" else [0.0, 1.0],
+                    dtype=_np.float32,
+                )
+                source.arm_mask = _mask
+                print(
+                    f"[flow-infer] --execute-arms={args.execute_arms}: runtime "
+                    f"arm_mask={_mask.tolist()} (other arm held; checkpoint stays "
+                    f"dual-arm {list(source.checkpoint_arm_mask)})",
+                    flush=True,
                 )
             # Decouple chunk inference from the 500 Hz servo loop for live
             # streaming rollouts: background prefetch + per-step hold so the loop

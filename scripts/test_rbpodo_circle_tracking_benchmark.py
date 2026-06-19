@@ -19,13 +19,7 @@ import run_rbpodo_circle_ablation as rbpodo_ablation
 
 
 ENV_NAMES = (
-    "RB_ALLOW_REAL_ROBOT",
-    "RB_ALLOW_REAL_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION",
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN",
-    "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION",
     "RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM",
-    "RB_ALLOW_REAL_CARTESIAN",
 )
 
 
@@ -148,8 +142,6 @@ def make_args(tmp: Path, config: Path, pgmode: Path, **overrides: object) -> arg
         "artifact_dir": tmp / "artifacts",
         "preflight_only": False,
         "skip_plots": True,
-        "i_understand_this_connects_to_real_controller": True,
-        "i_confirm_controller_is_in_pgmode_simulation": True,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -235,7 +227,6 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
         self.assertIn("--allow-fast-stress", completed.stdout)
         self.assertIn("--overlay-pub-endpoint", completed.stdout)
         self.assertIn("--phase-advance-sec", completed.stdout)
-        self.assertIn("--i-confirm-controller-is-in-pgmode-simulation", completed.stdout)
 
     def test_phase_advance_changes_command_reference_pose(self) -> None:
         args = argparse.Namespace(period_sec=4.0, phase_advance_sec=1.0)
@@ -330,11 +321,6 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
             pgmode = tmp / "pgmode.json"
             write_config(config)
             write_pgmode_summary(pgmode)
-            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
-            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
-            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
             args = make_args(tmp, config, pgmode, profile="circle_15cm_8s")
             _config, _sections, preflight, _endpoints = bench.preflight(args)
             self.assertEqual(preflight["profile"], "circle_15cm_8s")
@@ -351,11 +337,6 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
             pgmode = tmp / "pgmode.json"
             write_config(config)
             write_pgmode_summary(pgmode)
-            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
-            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
-            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
             args = make_args(tmp, config, pgmode, profile="gene_15cm_4s")
             with self.assertRaisesRegex(bench.BenchmarkError, "allow-fast-stress"):
                 bench.preflight(args)
@@ -371,11 +352,6 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
             pgmode = tmp / "pgmode.json"
             write_config(config)
             write_pgmode_summary(pgmode)
-            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
-            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
-            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
             args = make_args(tmp, config, pgmode, feedback_kp_pos=0.5, feedback_kp_ori=0.0)
             _config, _sections, preflight, _endpoints = bench.preflight(args)
             self.assertTrue(preflight["passed"])
@@ -389,11 +365,6 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
             pgmode = tmp / "pgmode.json"
             write_config(config)
             write_pgmode_summary(pgmode)
-            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
-            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
-            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
             args = make_args(tmp, config, pgmode, controller="server_circle")
             with self.assertRaisesRegex(bench.BenchmarkError, "enable_benchmark_primitives"):
                 bench.preflight(args)
@@ -550,27 +521,8 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
             pgmode = tmp / "pgmode.json"
             write_config(config, operation_mode="real")
             write_pgmode_summary(pgmode)
-            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
-            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
-            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
             args = make_args(tmp, config, pgmode)
             with self.assertRaisesRegex(bench.BenchmarkError, "operation_mode is real"):
-                bench.preflight(args)
-
-    def test_preflight_rejects_missing_pgmode_confirmation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_text, EnvGuard():
-            tmp = Path(tmp_text)
-            config = tmp / "config.yaml"
-            pgmode = tmp / "pgmode.json"
-            write_config(config)
-            write_pgmode_summary(pgmode)
-            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
-            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
-            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
-            args = make_args(tmp, config, pgmode, i_confirm_controller_is_in_pgmode_simulation=False)
-            with self.assertRaisesRegex(bench.BenchmarkError, "i-confirm-controller"):
                 bench.preflight(args)
 
     def test_preflight_uses_first_state_pub_endpoint_from_fanout(self) -> None:
@@ -580,11 +532,6 @@ class RbpodoCircleTrackingBenchmarkTest(unittest.TestCase):
             pgmode = tmp / "pgmode.json"
             write_config(config, state_fanout=True)
             write_pgmode_summary(pgmode)
-            os.environ["RB_ALLOW_REAL_ROBOT"] = "1"
-            os.environ["RB_ALLOW_REAL_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION"] = "1"
-            os.environ["RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN"] = "1"
-            os.environ.pop("RB_ALLOW_REAL_CARTESIAN", None)
             args = make_args(tmp, config, pgmode)
             _config, _sections, preflight, endpoints = bench.preflight(args)
             self.assertEqual(preflight["state_endpoint"], "udp://127.0.0.1:50151")

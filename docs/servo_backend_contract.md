@@ -96,6 +96,26 @@ Expected fields include:
 }
 ```
 
+## Direct Teaching (Free-drive)
+
+`IRobotBackend::setFreedrive(bool)` (op `BackendOp::SetFreedrive`) releases/re-acquires
+`servo_j` authority for per-arm direct teaching. The default implementation is a benign
+no-op success for hardware-free backends (mock/simulator); `RbpodoBackend` overrides it to
+call the rbpodo SDK `set_freedrive_mode` (`freedrive_teach_on()` / `freedrive_teach_off()`).
+While its free-drive latch is set, `RbpodoBackend::sendServoJ()` refuses to write
+`move_servo_j` and returns `SuppressedByPolicy` (`rbpodo_freedrive_active`) — a defensive
+backstop under the server's global suppression.
+
+It is fail-closed behind `servo.allow_freedrive` (default `false`), is a leased lifecycle
+command, and is routed through the `ArmWorker` lifecycle queue in worker/async I/O (direct
+backend call otherwise). While any arm is in free-drive the servo loop sets
+`send_policy == "freedrive"` (suppressing `servo_j` to both controllers, after the
+fault/emergency checks) and bypasses the motion pipeline so the hand-driven actual
+divergence cannot latch a tracking error. On exit the held target is resynced to the
+current actual joints. State JSON exposes top-level
+`freedrive.{left_active,right_active,any_active}`. See
+`docs/runbooks/freedrive_direct_teaching.md`.
+
 ## Direct I/O And Worker I/O
 
 ### Direct I/O

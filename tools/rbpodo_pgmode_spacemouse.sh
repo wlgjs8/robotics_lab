@@ -12,8 +12,6 @@ TASK=""
 OPERATOR=""
 FORCE=0
 WITH_REQUIRED_ENV=0
-CONFIRM_CONNECTS=0
-CONFIRM_PGMODE=0
 DRY_RUN=0
 
 usage() {
@@ -30,14 +28,9 @@ Actions:
   teleop-record  Run policy_runner dual SpaceMouse teleop and JSONL recording.
   hdf5-record    Run policy_runner dual SpaceMouse teleop and HDF5 recording.
 
-Safety flags for server/teleop/hdf5-record:
-  --i-understand-this-connects-to-real-controller
-  --i-confirm-controller-is-in-pgmode-simulation
-
 Environment behavior:
   --with-required-env  Explicitly export the controller-simulation and async
-                       env gates for this process. The script never sets
-                       RB_ALLOW_REAL_CARTESIAN.
+                       env gates for this process.
 
 Options:
   --server PATH       rb_servo_server binary path for the server action.
@@ -62,14 +55,8 @@ note() {
 print_required_env() {
   cat <<'EOF'
 rbpodo_pgmode_spacemouse: required rbpodo pgmode simulation env flags:
-  RB_ALLOW_REAL_ROBOT=1
-  RB_ALLOW_REAL_MOTION=1
-  RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-  RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
   RB_ALLOW_RBPODO_ASYNC_STREAMING=1
   RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
-  RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
-rbpodo_pgmode_spacemouse: RB_ALLOW_REAL_CARTESIAN must remain unset for this workflow.
 EOF
 }
 
@@ -121,37 +108,19 @@ port_in_use() {
   return 1
 }
 
-require_confirmations() {
-  [[ "${CONFIRM_CONNECTS}" == "1" ]] || fail "missing --i-understand-this-connects-to-real-controller"
-  [[ "${CONFIRM_PGMODE}" == "1" ]] || fail "missing --i-confirm-controller-is-in-pgmode-simulation"
-  if [[ "${RB_ALLOW_REAL_CARTESIAN:-}" == "1" ]]; then
-    fail "RB_ALLOW_REAL_CARTESIAN must not be set for pgmode SpaceMouse simulation"
-  fi
-}
-
 set_required_env_if_requested() {
   if [[ "${WITH_REQUIRED_ENV}" != "1" ]]; then
     return 0
   fi
-  export RB_ALLOW_REAL_ROBOT=1
-  export RB_ALLOW_REAL_MOTION=1
-  export RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-  export RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
   export RB_ALLOW_RBPODO_ASYNC_STREAMING=1
   export RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
-  export RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
 }
 
 require_server_env() {
   local missing=()
   for key in \
-    RB_ALLOW_REAL_ROBOT \
-    RB_ALLOW_REAL_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN \
     RB_ALLOW_RBPODO_ASYNC_STREAMING \
-    RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM \
-    RB_RBPODO_PGMODE_SIMULATION_CONFIRMED
+    RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM
   do
     if [[ "${!key:-}" != "1" ]]; then
       missing+=("${key}=1")
@@ -176,7 +145,6 @@ prepare_local_config() {
 }
 
 run_server() {
-  require_confirmations
   set_required_env_if_requested
   require_server_env
   if [[ -f "${ROOT_DIR}/${SERVER_LOCAL_REL}" ]]; then
@@ -292,7 +260,6 @@ run_policy_dry_run() {
 }
 
 run_teleop_record() {
-  require_confirmations
   set_required_env_if_requested
   export PYTHONPATH="${ROOT_DIR}/policy_runner${PYTHONPATH:+:${PYTHONPATH}}"
   local cmd=(
@@ -307,7 +274,6 @@ run_teleop_record() {
 }
 
 run_hdf5_record() {
-  require_confirmations
   [[ -n "${TASK}" ]] || fail "--task is required for hdf5-record"
   set_required_env_if_requested
   export PYTHONPATH="${ROOT_DIR}/policy_runner${PYTHONPATH:+:${PYTHONPATH}}"
@@ -361,14 +327,6 @@ while (($# > 0)); do
       ;;
     --with-required-env)
       WITH_REQUIRED_ENV=1
-      shift
-      ;;
-    --i-understand-this-connects-to-real-controller)
-      CONFIRM_CONNECTS=1
-      shift
-      ;;
-    --i-confirm-controller-is-in-pgmode-simulation)
-      CONFIRM_PGMODE=1
       shift
       ;;
     --dry-run)

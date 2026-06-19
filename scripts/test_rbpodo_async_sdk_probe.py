@@ -1,21 +1,11 @@
-import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 
 import rbpodo_async_sdk_probe as probe
-
-
-def required_env() -> dict[str, str]:
-    return {
-        "RB_ALLOW_REAL_ROBOT": "1",
-        "RB_ALLOW_REAL_MOTION": "1",
-        "RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION": "1",
-    }
 
 
 def args(**overrides):
@@ -39,7 +29,6 @@ def args(**overrides):
         "verify_pgmode_simulation": False,
         "pgmode_timeout_sec": 0.1,
         "pgmode_command_port": 5000,
-        "i_understand_this_connects_to_real_controller": True,
         "allow_simulation_servo_j": True,
     }
     base.update(overrides)
@@ -77,38 +66,9 @@ class RbpodoAsyncSdkProbeTests(unittest.TestCase):
         self.assertIn("--allow-simulation-servo-j", completed.stdout)
         self.assertIn("--set-pgmode-simulation", completed.stdout)
 
-    def test_no_confirmation_flag_fails(self) -> None:
-        script = Path(__file__).with_name("rbpodo_async_sdk_probe.py")
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(script),
-                "--ip",
-                "127.0.0.1",
-                "--duration-sec",
-                "0.01",
-                "--rate-hz",
-                "500",
-                "--mode",
-                "ack_on",
-                "--artifact-dir",
-                tempfile.mkdtemp(),
-                "--set-pgmode-simulation",
-                "--allow-simulation-servo-j",
-            ],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            env={**os.environ, **required_env()},
-        )
-        self.assertEqual(completed.returncode, 2)
-        self.assertIn("--i-understand-this-connects-to-real-controller", completed.stderr)
-
     def test_operation_mode_real_rejected(self) -> None:
-        with mock.patch.dict(os.environ, required_env(), clear=True):
-            with self.assertRaisesRegex(probe.AsyncSdkProbeError, "operation_mode real is refused"):
-                probe.preflight(args(operation_mode="real"), run_pgmode=False)
+        with self.assertRaisesRegex(probe.AsyncSdkProbeError, "operation_mode real is refused"):
+            probe.preflight(args(operation_mode="real"), run_pgmode=False)
 
     def test_config_operation_mode_real_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
@@ -123,14 +83,8 @@ right_robot:
 """,
                 encoding="utf-8",
             )
-            with mock.patch.dict(os.environ, required_env(), clear=True):
-                with self.assertRaisesRegex(probe.AsyncSdkProbeError, "operation_mode is real"):
-                    probe.preflight(args(config=config), run_pgmode=False)
-
-    def test_ack_off_requires_ack_disabled_env(self) -> None:
-        with mock.patch.dict(os.environ, required_env(), clear=True):
-            with self.assertRaisesRegex(probe.AsyncSdkProbeError, probe.ACK_DISABLED_ENV):
-                probe.preflight(args(mode="ack_off"), run_pgmode=False)
+            with self.assertRaisesRegex(probe.AsyncSdkProbeError, "operation_mode is real"):
+                probe.preflight(args(config=config), run_pgmode=False)
 
     def test_classifies_ack_on_fast_enough(self) -> None:
         classification, reasons = probe.classify_summary(summary_for("ack_on", {

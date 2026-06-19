@@ -30,7 +30,8 @@ struct ArmWorkerOptions {
 enum class ArmWorkerCommandKind {
     ServoJ,
     ResetFault,
-    Stop
+    Stop,
+    SetFreedrive
 };
 
 struct ArmWorkerCommand {
@@ -39,6 +40,7 @@ struct ArmWorkerCommand {
     uint64_t command_seq = 0;
     uint64_t host_time_ns = 0;
     uint64_t deadline_ns = 0;
+    bool freedrive_on = false;  // SetFreedrive payload.
 };
 
 struct ArmWorkerLifecycleResult {
@@ -80,6 +82,7 @@ public:
     ArmSendResult enqueueAsyncServoJ(SendServoJRequest request);
     BackendResult<RobotState> enqueueLifecycleCommand(ArmWorkerCommand command);
     BackendResult<RobotState> resetFault(uint64_t command_seq = 0, uint64_t deadline_ns = 0);
+    BackendResult<RobotState> setFreedrive(bool on, uint64_t command_seq = 0, uint64_t deadline_ns = 0);
     std::optional<ArmWorkerLifecycleResult> lastLifecycleResult() const;
     std::optional<ArmWorkerLifecycleResult> waitForLifecycleResult(
         const ArmWorkerCommand& command,

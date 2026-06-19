@@ -49,7 +49,7 @@ cameras:
         fps: 30
         format: rgb8
       depth:
-        enabled: false
+        enabled: true
         width: 640
         height: 480
         fps: 30
@@ -65,7 +65,7 @@ cameras:
         fps: 30
         format: rgb8
       depth:
-        enabled: false
+        enabled: true
         width: 640
         height: 480
         fps: 30

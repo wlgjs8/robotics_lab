@@ -136,6 +136,7 @@ class GroundTruthSource:
 
     def __init__(self, episode_path: str, clock: ReplayClock, *, policy_dt_sec: float,
                  r_align: np.ndarray | None = None,
+                 action_scale: float = 1.0,
                  max_lin: float = DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
                  max_ang: float = DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S):
         with h5py.File(episode_path, "r") as f:
@@ -147,10 +148,25 @@ class GroundTruthSource:
         if r_align is not None:
             # Rotate the body-frame linear+angular deltas into the RB TCP frame
             # (e.g. a 180deg-about-approach correction for the steamvr->stand yaw gap).
-            R = np.asarray(r_align, dtype=np.float64)
+            # linear/angular are the same matrix for a true rotation preset, and
+            # differ only for split presets (e.g. pika_rz180_trans_only).
+            R_lin = np.asarray(r_align.linear, dtype=np.float64)
+            R_ang = np.asarray(r_align.angular, dtype=np.float64)
             for d in (self.dL, self.dR):
-                d[:, 0:3] = d[:, 0:3] @ R.T
-                d[:, 3:6] = d[:, 3:6] @ R.T
+                d[:, 0:3] = d[:, 0:3] @ R_lin.T
+                d[:, 3:6] = d[:, 3:6] @ R_ang.T
+        # Uniformly shrink the per-step body-frame delta (translation + rotation)
+        # so the integrated sweep stays inside the reachable workspace while the
+        # per-step DIRECTION (the axis under test) is unchanged. The absolute
+        # recorded poses are in steamvr_world (not robot stand), so we can only
+        # replay relative deltas; a large reciprocation (~0.5 m) integrated from
+        # an arbitrary robot start config can leave reach (elbow +-150 deg /
+        # singularity / self-collision / floor). Scaling keeps the trajectory
+        # shape, just smaller. 1.0 = faithful amplitude.
+        self.action_scale = float(action_scale)
+        if self.action_scale != 1.0:
+            self.dL *= self.action_scale
+            self.dR *= self.action_scale
         self.clock = clock
         self.policy_dt_sec = float(policy_dt_sec)
         self.max_lin = float(max_lin)
@@ -271,6 +287,10 @@ def main():
     ap.add_argument("--policy-dt-sec", type=float, default=0.0334)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--ee-local-r-align", default=None)
+    ap.add_argument("--action-scale", type=float, default=1.0,
+                    help="ground-truth only: scale per-step ee_local deltas (translation+rotation) "
+                         "by this factor to keep the swept trajectory in reach; axis direction is "
+                         "preserved (1.0 = faithful amplitude, e.g. 0.5 = half-size reciprocation)")
     ap.add_argument("--sample-steps", type=int, default=16)
     ap.add_argument("--image-size", type=int, default=None)
     ap.add_argument("--chunk-execute-steps", type=int, default=None)
@@ -303,10 +323,12 @@ def main():
         # Replay the collected demonstration directly on the robot (no model).
         from policy_runner.flow_inference import resolve_ee_local_r_align
         r_align = resolve_ee_local_r_align(args.ee_local_r_align)
-        source = GroundTruthSource(args.episode, clock, policy_dt_sec=args.policy_dt_sec, r_align=r_align)
+        source = GroundTruthSource(args.episode, clock, policy_dt_sec=args.policy_dt_sec,
+                                   r_align=r_align, action_scale=args.action_scale)
         T = len(source.dL) + 1
         clock.num_frames = T
-        print(f"[replay] GROUND-TRUTH data replay: {T} frames (recorded ee_local actions)", file=sys.stderr)
+        print(f"[replay] GROUND-TRUTH data replay: {T} frames (recorded ee_local actions), "
+              f"action_scale={source.action_scale}", file=sys.stderr)
     else:
         if not args.checkpoint:
             raise SystemExit("--checkpoint is required unless --ground-truth is set")

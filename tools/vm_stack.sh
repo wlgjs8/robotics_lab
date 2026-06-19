@@ -21,6 +21,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# VBoxHeadless drops its frontend release log into the current working dir by
+# default (which is the repo root). Redirect it into logs/vm/ instead. The
+# --putenv flags below cover the VM process even when a long-lived VBoxSVC was
+# started before this shell inherited VBOX_*.
+VM_LOG_DIR="$PWD/logs/vm"
+mkdir -p "$VM_LOG_DIR"
+export VBOX_RELEASE_LOG_DEST="dir=$VM_LOG_DIR"
+export VBOX_LOG_DEST="dir=$VM_LOG_DIR"
+
 LEFT_VM=rb-cb-left;   LEFT_GUEST=10.0.2.7
 RIGHT_VM=rb-cb-right; RIGHT_GUEST=10.0.2.8
 HOST_IF=vboxnet0;     HOST_IP=10.0.2.1/24
@@ -52,8 +61,25 @@ map_down() {
 
 vm_running() { vboxmanage list runningvms | grep -q "\"$1\""; }
 
+relocate_vbox_logs() {
+  local log
+  shopt -s nullglob
+  for log in "$PWD"/*-VBoxHeadless-*.log; do
+    [[ -f "$log" ]] || continue
+    mv -n -- "$log" "$VM_LOG_DIR/"
+  done
+  shopt -u nullglob
+}
+
 start_vm() {
-  vm_running "$1" || vboxmanage startvm "$1" --type headless >/dev/null
+  if ! vm_running "$1"; then
+    vboxmanage startvm \
+      "--putenv=VBOX_RELEASE_LOG_DEST=dir=$VM_LOG_DIR" \
+      "--putenv=VBOX_LOG_DEST=dir=$VM_LOG_DIR" \
+      --type headless \
+      "$1" >/dev/null
+  fi
+  relocate_vbox_logs
 }
 
 wait_port() { # $1=ip

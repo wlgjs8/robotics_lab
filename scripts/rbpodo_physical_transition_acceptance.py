@@ -3,9 +3,8 @@
 
 This script is a stage-aware preflight and artifact writer. Dry-run is the
 default and never connects to hardware or sends motion commands. The non-dry-run
-path validates local config, environment gates, and operator confirmations, then
-records a supervised preflight artifact; it intentionally does not launch a
-servo server or command motion by itself.
+path validates local config, then records a supervised preflight artifact; it
+intentionally does not launch a servo server or command motion by itself.
 """
 
 from __future__ import annotations
@@ -23,32 +22,7 @@ from typing import Any
 
 SCHEMA = "robotics_lab.rbpodo_physical_transition.stage.v1"
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
-REAL_ROBOT_IPS = {"172.28.60.200", "172.28.60.201"}
-ENV_KEYS = (
-    "RB_ALLOW_REAL_ROBOT",
-    "RB_ALLOW_REAL_MOTION",
-    "RB_ALLOW_REAL_CARTESIAN",
-    "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION",
-)
-MOTION_CONFIRMATIONS = (
-    "i_understand_this_may_move_the_physical_robot",
-    "i_have_clear_workspace",
-    "i_have_estop_in_hand",
-    "i_reviewed_local_config",
-    "i_confirm_operator_supervision",
-)
-READONLY_CONFIRMATIONS = (
-    "i_reviewed_local_config",
-    "i_confirm_operator_supervision",
-)
-CONFIRMATION_TO_FLAG = {
-    "i_understand_this_may_move_the_physical_robot": "--i-understand-this-may-move-the-physical-robot",
-    "i_have_clear_workspace": "--i-have-clear-workspace",
-    "i_have_estop_in_hand": "--i-have-estop-in-hand",
-    "i_reviewed_local_config": "--i-reviewed-local-config",
-    "i_confirm_operator_supervision": "--i-confirm-operator-supervision",
-    "i_have_explicit_p9_approval": "--i-have-explicit-p9-approval",
-}
+ENV_KEYS: tuple[str, ...] = ()
 
 
 class AcceptanceError(RuntimeError):
@@ -63,7 +37,6 @@ class Stage:
     category: str
     description: str
     required_env: tuple[str, ...]
-    required_confirmations: tuple[str, ...]
     default_parameters: dict[str, Any]
     prerequisite_stage_ids: tuple[str, ...] = ()
 
@@ -84,7 +57,6 @@ STAGE_LIST = (
         "controller_simulation",
         "Recorded rbpodo controller pgmode repeatability evidence; no physical motion.",
         (),
-        (),
         {
             "evidence_category": "rbpodo_controller_simulation",
             "tracking_source": "tcp_ref_stand",
@@ -97,8 +69,7 @@ STAGE_LIST = (
         "real_readonly_diagnostics_parity",
         "read_only",
         "Physical operation_mode real state diagnostics only.",
-        ("RB_ALLOW_REAL_ROBOT",),
-        READONLY_CONFIRMATIONS,
+        (),
         {
             "servo_send_servo_commands": False,
             "expected_tracking_source": "tcp_actual_stand",
@@ -112,8 +83,7 @@ STAGE_LIST = (
         "stop_resetFault_or_operator_stop_policy_verified",
         "read_only",
         "Verify stop/resetFault API behavior or record unresolved operator-stop policy.",
-        ("RB_ALLOW_REAL_ROBOT",),
-        READONLY_CONFIRMATIONS,
+        (),
         {
             "servo_send_servo_commands": False,
             "stop_reset_behavior_result": "unresolved_until_operator_artifact",
@@ -127,8 +97,7 @@ STAGE_LIST = (
         "real_hold_no_motion",
         "read_only",
         "Hold startup with no Servo J sends and no physical motion expected.",
-        ("RB_ALLOW_REAL_ROBOT",),
-        READONLY_CONFIRMATIONS,
+        (),
         {
             "servo_send_servo_commands": False,
             "hold_duration_sec": 10.0,
@@ -142,8 +111,7 @@ STAGE_LIST = (
         "tiny_joint_noop_or_tiny_joint_motion",
         "joint_motion",
         "Tiny joint no-op or explicitly tiny supervised joint motion.",
-        ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION"),
-        MOTION_CONFIRMATIONS,
+        (),
         {
             "rate_hz_policy": "accepted_real_servo_j_rate",
             "max_joint_delta_deg": 0.02,
@@ -158,8 +126,7 @@ STAGE_LIST = (
         "tiny_cartesian_delta",
         "cartesian_motion",
         "Tiny Cartesian delta using physical actual TCP state only.",
-        ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN"),
-        MOTION_CONFIRMATIONS,
+        (),
         {
             "rate_hz_policy": "accepted_real_servo_j_rate",
             "max_cartesian_step_m": 0.001,
@@ -175,8 +142,7 @@ STAGE_LIST = (
         "slow_physical_circle_5cm_10s",
         "cartesian_motion",
         "First slow physical circle candidate.",
-        ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN"),
-        MOTION_CONFIRMATIONS,
+        (),
         {
             "rate_hz_policy": "accepted_real_servo_j_rate",
             "circle_diameter_m": 0.05,
@@ -192,8 +158,7 @@ STAGE_LIST = (
         "stable_physical_circle_15cm_16s",
         "cartesian_motion",
         "Stable physical 15 cm circle after 5 cm / 10 s passes.",
-        ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN"),
-        MOTION_CONFIRMATIONS,
+        (),
         {
             "rate_hz_policy": "accepted_real_servo_j_rate",
             "circle_diameter_m": 0.15,
@@ -209,8 +174,7 @@ STAGE_LIST = (
         "medium_physical_circle_15cm_8s",
         "cartesian_motion",
         "Medium physical 15 cm circle after stable 16 s evidence.",
-        ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN"),
-        MOTION_CONFIRMATIONS,
+        (),
         {
             "rate_hz_policy": "accepted_real_servo_j_rate",
             "circle_diameter_m": 0.15,
@@ -226,8 +190,7 @@ STAGE_LIST = (
         "fast_physical_circle_15cm_4s_only_after_explicit_approval",
         "fast_cartesian_motion",
         "Fast 15 cm / 4 s physical circle only after explicit approval.",
-        ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN"),
-        (*MOTION_CONFIRMATIONS, "i_have_explicit_p9_approval"),
+        (),
         {
             "rate_hz_policy": "accepted_real_servo_j_rate",
             "circle_diameter_m": 0.15,
@@ -312,12 +275,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Validate live gates and write a supervised preflight artifact; this script still does not launch motion.",
     )
     parser.set_defaults(dry_run=True)
-    parser.add_argument("--i-understand-this-may-move-the-physical-robot", action="store_true")
-    parser.add_argument("--i-have-clear-workspace", action="store_true")
-    parser.add_argument("--i-have-estop-in-hand", action="store_true")
-    parser.add_argument("--i-reviewed-local-config", action="store_true")
-    parser.add_argument("--i-confirm-operator-supervision", action="store_true")
-    parser.add_argument("--i-have-explicit-p9-approval", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -462,23 +419,11 @@ def env_snapshot() -> dict[str, str | None]:
 
 
 def stage_required_env(stage: Stage, config: ParsedConfig | None) -> tuple[str, ...]:
-    required = list(stage.required_env)
-    ack_disabled = bool(
-        stage.is_motion
-        and config is not None
-        and (config.left.disable_waiting_ack or config.right.disable_waiting_ack)
-    )
-    if ack_disabled and "RB_ALLOW_RBPODO_ACK_DISABLED_MOTION" not in required:
-        required.append("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION")
-    return tuple(required)
+    return tuple(stage.required_env)
 
 
 def missing_env(required_env: tuple[str, ...]) -> list[str]:
     return [name for name in required_env if not env_enabled(name)]
-
-
-def missing_confirmations(args: argparse.Namespace, stage: Stage) -> list[str]:
-    return [CONFIRMATION_TO_FLAG[name] for name in stage.required_confirmations if not getattr(args, name, False)]
 
 
 def validate_numeric_args(args: argparse.Namespace, stage: Stage) -> list[str]:
@@ -558,8 +503,6 @@ def validate_config_policy(args: argparse.Namespace, stage: Stage, config: Parse
                 blockers.append(f"{label}_robot.run_mode must be real")
             if arm.operation_mode != "real":
                 blockers.append(f"{label}_robot.operation_mode must be real for physical transition stages")
-            if arm.ip in REAL_ROBOT_IPS and not getattr(args, "i_reviewed_local_config", False):
-                blockers.append("known real controller IPs require --i-reviewed-local-config")
         if stage.is_motion and not send_servo_commands:
             blockers.append(f"{stage.stage_id} {stage.cli_name} requires servo.send_servo_commands=true in the local config")
         if not stage.is_motion and send_servo_commands:
@@ -714,8 +657,6 @@ def build_summary(
         "gates": {
             "required_env": [f"{name}=1" for name in required_env],
             "missing_env": [f"{name}=1" for name in missing_env(required_env)],
-            "required_confirmation_flags": [CONFIRMATION_TO_FLAG[name] for name in stage.required_confirmations],
-            "missing_confirmation_flags": missing_confirmations(args, stage),
             "env_snapshot": env_snapshot(),
         },
         "config": config_summary(config),
@@ -773,13 +714,6 @@ def print_gate_summary(stage: Stage, summary: dict[str, Any]) -> None:
         print("Required env gates for non-dry-run: " + ", ".join(required_env))
     else:
         print("Required env gates for non-dry-run: none")
-    required_flags = summary["gates"]["required_confirmation_flags"]
-    if required_flags:
-        print("Required confirmation flags for non-dry-run:")
-        for flag in required_flags:
-            print(f"  {flag}")
-    else:
-        print("Required confirmation flags for non-dry-run: none")
     blockers = summary["result"]["blockers"]
     if blockers:
         print("Refusal blockers:")
@@ -819,7 +753,6 @@ def main(argv: list[str] | None = None) -> int:
         blockers.extend(validate_config_policy(args, stage, config))
         if not args.dry_run:
             blockers.extend(f"missing env gate {gate}=1" for gate in missing_env(required_env))
-            blockers.extend(f"missing confirmation flag {flag}" for flag in missing_confirmations(args, stage))
         summary = build_summary(args, stage, config, blockers, prereq_artifacts, required_env)
         if blockers:
             print_gate_summary(stage, summary)

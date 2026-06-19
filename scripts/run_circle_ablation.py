@@ -16,7 +16,6 @@ from typing import Any
 
 
 REAL_ROBOT_IPS = ("172.28.60.200", "172.28.60.201")
-REAL_GATE_ENV = ("RB_ALLOW_REAL_ROBOT", "RB_ALLOW_REAL_MOTION", "RB_ALLOW_REAL_CARTESIAN")
 PROFILES = {"safe_5cm_10s", "circle_15cm_16s", "circle_15cm_8s", "gene_15cm_4s"}
 STRESS_PROFILES = {"circle_15cm_8s", "gene_15cm_4s"}
 CONTROLLERS = {"twist_stand", "twist_local", "linear_segments"}
@@ -263,12 +262,6 @@ def validate_experiment(exp: dict[str, Any], index: int) -> None:
     for map_key in ("server_config_overrides", "left_config_overrides", "right_config_overrides"):
         if map_key in exp and not isinstance(exp[map_key], dict):
             raise AblationError(f"experiment {exp['name']} key {map_key} must be a mapping")
-
-
-def validate_real_gate_env() -> None:
-    configured = [name for name in REAL_GATE_ENV if os.environ.get(name)]
-    if configured:
-        raise AblationError("real robot environment gates must not be set: " + ", ".join(configured))
 
 
 def reject_unsafe_text(text: str, label: str) -> None:
@@ -531,8 +524,6 @@ def benchmark_command(args: argparse.Namespace, exp: dict[str, Any], configs: di
 
 def subprocess_env(root: Path) -> dict[str, str]:
     env = os.environ.copy()
-    for gate in REAL_GATE_ENV:
-        env.pop(gate, None)
     sim_src = str((root / "rb_simulator" / "src").resolve())
     env["PYTHONPATH"] = sim_src + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     return env
@@ -826,7 +817,6 @@ def plot_rows(artifact_root: Path, rows: list[dict[str, Any]]) -> list[str]:
 
 
 def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
-    validate_real_gate_env()
     if args.max_workers < 1:
         raise AblationError("--max-workers must be >= 1")
     experiments = load_matrix(args.matrix)
@@ -848,7 +838,6 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
             "max_workers_requested": args.max_workers,
             "max_workers_effective": 1,
             "simulator_only": True,
-            "real_gate_env_checked": list(REAL_GATE_ENV),
             "rows": rows,
             "skipped_plots": skipped_plots,
         },

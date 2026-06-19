@@ -46,6 +46,11 @@ bool isCartesianVelocityServoMode(ControlMode mode) {
            mode == ControlMode::TcpTwistLocal;
 }
 
+bool isTcpTwistMode(ControlMode mode) {
+    return mode == ControlMode::TcpTwistStand ||
+           mode == ControlMode::TcpTwistLocal;
+}
+
 bool isStreamingCartesianMode(ControlMode mode) {
     return isCartesianVelocityServoMode(mode);
 }
@@ -166,13 +171,6 @@ std::shared_ptr<IKinematics> makeKinematicsProvider(const DualArmConfig& config)
     }
 }
 
-bool envFlagEnabled(const char* name) {
-    // Real/sim env gates (RB_ALLOW_REAL_ROBOT/MOTION/CARTESIAN) are retired:
-    // execution is no longer gated on the real-vs-simulation distinction.
-    // run_mode/operation_mode remain as telemetry labels only.
-    (void)name;
-    return true;
-}
 
 std::string jointArrayDebugString(const JointArray& joints) {
     std::ostringstream out;
@@ -265,9 +263,7 @@ bool controllerSimulationMotionRequired(const DualArmConfig& config) {
 bool controllerSimulationMotionGateOpen(const DualArmConfig& config) {
     if (!controllerSimulationMotionRequired(config)) return true;
     return config.servo.allow_controller_simulation_motion &&
-        bothRbpodoControllerSimulationBackends(config) &&
-        envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
-        envFlagEnabled("RB_ALLOW_REAL_MOTION");
+        bothRbpodoControllerSimulationBackends(config);
 }
 
 const BackendConfig& backendConfigForArm(const DualArmConfig& config, ArmId arm_id) {
@@ -281,9 +277,7 @@ bool controllerSimulationCartesianGateOpen(
     return config.cartesian_control.enable &&
         config.cartesian_control.allow_in_controller_simulation &&
         config.servo.allow_controller_simulation_motion &&
-        isRbpodoControllerSimulationBackend(backend) &&
-        envFlagEnabled("RB_ALLOW_REAL_ROBOT") &&
-        envFlagEnabled("RB_ALLOW_REAL_MOTION");
+        isRbpodoControllerSimulationBackend(backend);
 }
 
 struct CartesianAvailability {
@@ -1400,8 +1394,9 @@ DualArmServoLoop::DualArmServoLoop(
     runtime_floor_z_m_.store(config.safety.floor_constraint.z_min_m);
     // URDF mesh self-collision: spin up the async monitor (off the servo_j path).
     // Throws on a bad URDF/mesh path — fail closed at startup rather than run a
-    // real robot with the guard silently disabled.
-    if (config_.safety.self_collision.enable && config_.safety.self_collision.mesh.enable) {
+    // real robot with the guard silently disabled. The single self_collision.enable
+    // flag is the sole switch; there is no capsule fallback path.
+    if (config_.safety.self_collision.enable) {
         const auto& m = config_.safety.self_collision.mesh;
         collision_monitor_cfg_.enable = true;
         collision_monitor_cfg_.unified_urdf = m.unified_urdf;
@@ -1411,6 +1406,11 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.left_prefix = m.left_prefix;
         collision_monitor_cfg_.right_prefix = m.right_prefix;
         collision_monitor_cfg_.stand_ignore_arm_substrings = m.stand_ignore_arm_substrings;
+        collision_monitor_cfg_.left_arm_root_frame = m.left_arm_root_frame;
+        collision_monitor_cfg_.right_arm_root_frame = m.right_arm_root_frame;
+        collision_monitor_cfg_.check_intra_arm = m.check_intra_arm;
+        collision_monitor_cfg_.intra_arm_min_chain_separation = m.intra_arm_min_chain_separation;
+        collision_monitor_cfg_.swept_samples = m.swept_samples;
         collision_monitor_cfg_.d_hard_m = m.d_hard_m;
         collision_monitor_cfg_.d_slow_m = m.d_slow_m;
         collision_monitor_cfg_.a_brake_m_s2 = m.a_brake_m_s2;
@@ -1419,12 +1419,32 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.max_staleness_s = m.max_staleness_s;
         collision_monitor_cfg_.monitor_core = m.monitor_core;
         collision_monitor_cfg_.max_near_pairs = m.max_near_pairs;
+        collision_monitor_cfg_.extra_collision.clear();
+        for (const auto& e : m.extra_collision) {
+            ExtraCollisionShape s;
+            s.name = e.name;
+            s.shape = e.shape;
+            s.parent_frame = e.parent_frame;
+            s.size_m = e.size_m;
+            s.radius_m = e.radius_m;
+            s.length_m = e.length_m;
+            s.xyz_m = e.xyz_m;
+            s.rpy = e.rpy;
+            collision_monitor_cfg_.extra_collision.push_back(s);
+        }
         for (int i = 0; i < kDof && i < static_cast<int>(config_.kinematics.joint_names.size()); ++i) {
             collision_monitor_cfg_.left_joints[i] = m.left_prefix + config_.kinematics.joint_names[i];
             collision_monitor_cfg_.right_joints[i] = m.right_prefix + config_.kinematics.joint_names[i];
         }
         collision_monitor_ = std::make_unique<CollisionMonitor>(collision_monitor_cfg_);
         collision_monitor_->start();
+    }
+    // Post-condition: the guard is requested but the monitor is absent. make_unique
+    // throws on load failure, so this is unreachable defensive code — but never let
+    // a server come up with self_collision.enable=true and no monitor behind it.
+    if (config_.safety.self_collision.enable && !collision_monitor_) {
+        throw std::runtime_error(
+            "safety.self_collision.enable=true but the CollisionMonitor failed to construct");
     }
     resetReferenceSupervisionState(this);
 }
@@ -1459,6 +1479,11 @@ void DualArmServoLoop::stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
+    // The loop thread is joined (no race on the freedrive stage atomics) but the
+    // workers/backends are still connected — issue freedrive_teach_off now for any
+    // arm left in freedrive so a Ctrl-C/shutdown mid-teaching does not strand the
+    // controller in a program-latched freedrive_teach_on state.
+    teardownFreedriveOnStop();
     if (left_worker_) left_worker_->stop();
     if (right_worker_) right_worker_->stop();
     if (!workerBackedIoMode()) {
@@ -1859,10 +1884,24 @@ void DualArmServoLoop::loopMain() {
                 setMotionState(ServerMotionState::ArmedHold);
             }
             command = metadata_hold(command);
+        } else if (commandRequestsFreedrive(command)) {
+            // Per-arm direct teaching. Toggling is leased (operator must hold
+            // control). This only records the requested stage transition; the
+            // arming state machine (advanceFreedrive, below) quiesces the servo
+            // stream and engages/exits free-drive over subsequent ticks.
+            requestFreedrive(command, left_state, right_state);
+            command = metadata_hold(command);
         } else if (commandRequestsMotion(command) && !motionAllowed()) {
             clearLatchedCartesianTargets();
             command = metadata_hold(command);
         }
+
+        // Advance the per-arm free-drive arming state machine every tick. Once an
+        // arm leaves Off, anyFreedriveActive() suppresses servo_j to both
+        // controllers (currentSendPolicy()=="freedrive") so the controller settles
+        // to idle before freedrive_teach_on is issued — the M151 ("Cannot run this
+        // function") fix: real-time servo control must stop before direct teaching.
+        advanceFreedrive(left_state, right_state);
 
         ServoTarget safe_target;
         ServoTarget desired_target;
@@ -1902,6 +1941,15 @@ void DualArmServoLoop::loopMain() {
             safe_target.left_q_target_deg = left_prev_sent_q_deg_;
             safe_target.right_q_target_deg = right_prev_sent_q_deg_;
             safety_verdict = SafetyVerdict::InvalidCommand;
+        } else if (anyFreedriveActive()) {
+            // Direct teaching: one or both controllers are hand-guided. Bypass the
+            // motion pipeline entirely so the hand-driven actual divergence cannot
+            // latch a tracking error or trip the velocity clamp. Sends are
+            // suppressed by send_policy=="freedrive"; the held target is bookkeeping
+            // only and is resynced to actual on exit.
+            safe_target.left_q_target_deg = left_prev_sent_q_deg_;
+            safe_target.right_q_target_deg = right_prev_sent_q_deg_;
+            safety_verdict = SafetyVerdict::Ok;
         } else {
             SafetyVerdict command_verdict = SafetyVerdict::Ok;
             command = resolveCartesianDeltaCommand(command, left_state, right_state);
@@ -1920,7 +1968,14 @@ void DualArmServoLoop::loopMain() {
                     setMotionState(ServerMotionState::ArmedHold);
                 }
             } else {
-                safe_target = applySafety(desired, left_state, right_state, filter_dt_sec, &safety_verdict);
+                safe_target = applySafety(
+                    desired,
+                    left_state,
+                    right_state,
+                    command.left.mode,
+                    command.right.mode,
+                    filter_dt_sec,
+                    &safety_verdict);
                 if (motion_requested) {
                     if (safety_verdict == SafetyVerdict::Ok ||
                         safety_verdict == SafetyVerdict::JointLimitClamped) {
@@ -2230,9 +2285,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_checked = last_self_collision_.checked;
             latest_snapshot_.self_collision_violated = last_self_collision_.violated;
             latest_snapshot_.self_collision_min_clearance_m = last_self_collision_.min_clearance_m;
-            latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.mesh.enable
-                ? config_.safety.self_collision.mesh.d_hard_m
-                : config_.safety.self_collision.margin_m;
+            // Telemetry "margin" is the hard floor the mesh barrier defends.
+            latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.mesh.d_hard_m;
             latest_snapshot_.self_collision_left_bone = last_self_collision_.left_bone;
             latest_snapshot_.self_collision_right_bone = last_self_collision_.right_bone;
             latest_snapshot_.self_collision_pair = last_self_collision_.pair;
@@ -2240,38 +2294,17 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_has_closest_points = last_self_collision_.has_closest_points;
             latest_snapshot_.self_collision_closest_point_a_m = last_self_collision_.closest_point_a_m;
             latest_snapshot_.self_collision_closest_point_b_m = last_self_collision_.closest_point_b_m;
-            latest_snapshot_.self_collision_has_capsules = last_self_collision_.has_capsules;
-            latest_snapshot_.self_collision_left_capsules_m.clear();
-            latest_snapshot_.self_collision_right_capsules_m.clear();
-            latest_snapshot_.self_collision_stand_capsules_m.clear();
-            // Publish the exact checked geometry (arm capsules FK'd this tick +
-            // static stand capsules) only when the guard actually evaluated.
-            if (last_self_collision_.has_capsules) {
-                const auto copy_arm = [](const std::vector<ArmCapsule>& src,
-                                         std::vector<SelfCollisionCapsuleViz>& dst) {
-                    dst.reserve(src.size());
-                    for (std::size_t i = 0; i < src.size(); ++i) {
-                        dst.push_back(SelfCollisionCapsuleViz{
-                            std::to_string(i), src[i].p0_m, src[i].p1_m, src[i].radius_m});
-                    }
-                };
-                copy_arm(last_self_collision_.left_capsules, latest_snapshot_.self_collision_left_capsules_m);
-                copy_arm(last_self_collision_.right_capsules, latest_snapshot_.self_collision_right_capsules_m);
-                latest_snapshot_.self_collision_stand_capsules_m.reserve(
-                    config_.safety.self_collision.stand_capsules.size());
-                for (const auto& cap : config_.safety.self_collision.stand_capsules) {
-                    latest_snapshot_.self_collision_stand_capsules_m.push_back(
-                        SelfCollisionCapsuleViz{cap.name, cap.p0_m, cap.p1_m, cap.radius_m});
-                }
-            }
             // URDF mesh self-collision: publish the closest near pairs (witness
             // segments) so the viewer can draw the mesh-based close calls.
-            latest_snapshot_.self_collision_mesh = config_.safety.self_collision.mesh.enable;
+            latest_snapshot_.self_collision_mesh = config_.safety.self_collision.enable;
             latest_snapshot_.self_collision_near_pairs.clear();
-            if (config_.safety.self_collision.mesh.enable && last_collision_verdict_.valid) {
-                // Only the genuinely-close pairs (within the barrier slow-zone) — a
-                // viewer should see close calls, not long segments across far links.
-                const double viz_max = config_.safety.self_collision.mesh.d_slow_m;
+            if (config_.safety.self_collision.enable && last_collision_verdict_.valid) {
+                // Publish close-call witness segments for the viewer. The viz reach is
+                // decoupled from the barrier band (d_slow) so close calls stay visible
+                // even when d_slow is tuned tight; at least d_slow so it never hides a
+                // pair the barrier is acting on.
+                const double viz_max = std::max(config_.safety.self_collision.mesh.viz_near_pairs_m,
+                                                config_.safety.self_collision.mesh.d_slow_m);
                 latest_snapshot_.self_collision_near_pairs.reserve(last_collision_verdict_.near.size());
                 for (const CollisionNearPair& p : last_collision_verdict_.near) {
                     if (p.d_m > viz_max) continue;
@@ -2302,6 +2335,13 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.async_supervision_degraded = sample.async_supervision_degraded;
             latest_snapshot_.tracking_error_degraded = sample.tracking_error_degraded;
+            const FreedriveStage left_fd_stage = left_freedrive_stage_.load();
+            const FreedriveStage right_fd_stage = right_freedrive_stage_.load();
+            latest_snapshot_.left_freedrive_active = left_fd_stage == FreedriveStage::Active;
+            latest_snapshot_.right_freedrive_active = right_fd_stage == FreedriveStage::Active;
+            latest_snapshot_.left_freedrive_stage = toString(left_fd_stage);
+            latest_snapshot_.right_freedrive_stage = toString(right_fd_stage);
+            latest_snapshot_.freedrive_note = freedrive_note_;
             latest_snapshot_.latched_fault_reason = latched_fault_reason_.load();
             latest_snapshot_.fault_reason = fault_reason_;
             latest_snapshot_.latched_fault_context = sample.latched_fault_context;
@@ -2782,8 +2822,7 @@ void DualArmServoLoop::logStartupValidation(
         !controllerSimulationMotionGateOpen(config_)) {
         std::cerr << "[ERROR] controller-simulation motion gate closed; refusing rbpodo "
                      "controller-simulation benchmark. Required: operation_mode=simulation, "
-                     "servo.allow_controller_simulation_motion=true, "
-                     "RB_ALLOW_REAL_ROBOT=1, and RB_ALLOW_REAL_MOTION=1.\n";
+                     "servo.allow_controller_simulation_motion=true.\n";
     }
 }
 
@@ -3141,13 +3180,14 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         cartesian_servo.setFloorConstraint(
             config_.safety.floor_constraint.enable && !config_.safety.floor_constraint.monitor_only,
             effectiveFloorZ(),
-            kFloorTwistSoftMarginM
+            kFloorTwistSoftMarginM,
+            config_.safety.floor_constraint.tcp_offset_points
         );
 
-        if (effective_command.left.mode != ControlMode::TcpTwistStand && effective_command.left.mode != ControlMode::TcpTwistLocal) {
+        if (!isTcpTwistMode(effective_command.left.mode)) {
             left_cartesian_twist_hold_ = CartesianTwistHoldState{};
         }
-        if (effective_command.right.mode != ControlMode::TcpTwistStand && effective_command.right.mode != ControlMode::TcpTwistLocal) {
+        if (!isTcpTwistMode(effective_command.right.mode)) {
             right_cartesian_twist_hold_ = CartesianTwistHoldState{};
         }
 
@@ -3412,6 +3452,8 @@ ServoTarget DualArmServoLoop::applySafety(
     const ServoTarget& desired,
     const RobotState& left_state,
     const RobotState& right_state,
+    ControlMode left_mode,
+    ControlMode right_mode,
     double dt_sec,
     SafetyVerdict* verdict
 ) {
@@ -3554,8 +3596,9 @@ ServoTarget DualArmServoLoop::applySafety(
     // Stand-frame floor plane constraint: never command a configuration that puts
     // either TCP below z = effectiveFloorZ(). Mode-independent by design (mock /
     // simulator / controller-sim / real all pass through here). Per-arm: only the
-    // violating arm is reverted; the escape exception allows strictly-upward motion
-    // so an arm that starts below the plane can be jogged out without a reset.
+    // violating arm is reverted; the escape exception allows lateral/upward
+    // motion so an arm that starts below the plane can slide or jog out without
+    // a reset.
     if (config_.safety.floor_constraint.enable) {
         const double floor_z = effectiveFloorZ();
         const FloorArmEvaluation left_eval = evaluateFloorArm(ArmId::Left, out.left_q_target_deg);
@@ -3563,8 +3606,30 @@ ServoTarget DualArmServoLoop::applySafety(
         last_floor_left_ = left_eval;    // telemetry, even when already faulted
         last_floor_right_ = right_eval;
         if (combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+            const auto reanchor_twist_smd_goal = [&](ArmId arm, const RobotState& state) {
+                CartesianTwistHoldState& hold = arm == ArmId::Left
+                    ? left_cartesian_twist_hold_
+                    : right_cartesian_twist_hold_;
+                if (!hold.twist_smd || !state.tcp_stand || !state.has_valid_tcp_pose) {
+                    return;
+                }
+                const Pose6D anchor = clampPoseToFloor(*state.tcp_stand);
+                hold.twist_smd_goal = anchor;
+                hold.twist_smd->reset(anchor);
+                hold.twist_smd->updateGoalFromCommand(anchor);
+                CartesianSolveTelemetry& telemetry = arm == ArmId::Left
+                    ? left_last_cartesian_solve_
+                    : right_last_cartesian_solve_;
+                telemetry.twist_smd_goal_clamped = true;
+                telemetry.floor_goal_clamped = true;
+                telemetry.goal_minus_measured_pos_m = math::positionDistance(*state.tcp_stand, anchor);
+                telemetry.goal_minus_measured_ori_rad =
+                    math::orientationDistanceRad(*state.tcp_stand, anchor);
+            };
             const auto enforce_arm = [&](
                 ArmId arm,
+                ControlMode mode,
+                const RobotState& state,
                 const FloorArmEvaluation& eval,
                 JointArray& target_q,
                 const JointArray& prev_sent_q
@@ -3573,8 +3638,11 @@ ServoTarget DualArmServoLoop::applySafety(
                 if (eval.checked && eval.tcp_z_m < floor_z) {
                     prev_eval = evaluateFloorArm(arm, prev_sent_q);  // lazy: escape test only
                 }
-                const FloorAction action = decideFloorAction(
+                FloorAction action = decideFloorAction(
                     eval, prev_eval, config_.safety.floor_constraint, floor_z);
+                if (action == FloorAction::Latch && isTcpTwistMode(mode)) {
+                    action = FloorAction::Hold;
+                }
                 if (action == FloorAction::Allow) return false;
                 const std::string arm_name = arm == ArmId::Left ? "left" : "right";
                 const std::string reason = eval.checked
@@ -3590,114 +3658,130 @@ ServoTarget DualArmServoLoop::applySafety(
                 // FloorAction::Hold: revert only this arm (non-latching). Reset the
                 // twist velocity integrator so it does not keep advancing (and
                 // diverging from the held command) while the hold is active.
+                // If twist_via_smd is active, reanchor that pose goal too; the
+                // velocity integrator reset alone does not bound the SMD goal.
                 target_q = prev_sent_q;
                 ++floor_clamp_count_;
                 resetCartesianVelocityIntegrator(arm, "floor_hold");
+                reanchor_twist_smd_goal(arm, state);
                 if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                     combined = SafetyVerdict::FloorViolation;
                 }
                 return false;
             };
             const bool latched =
-                enforce_arm(ArmId::Left, left_eval, out.left_q_target_deg, left_prev_sent_q_deg_);
+                enforce_arm(
+                    ArmId::Left,
+                    left_mode,
+                    left_state,
+                    left_eval,
+                    out.left_q_target_deg,
+                    left_prev_sent_q_deg_);
             if (!latched) {
-                enforce_arm(ArmId::Right, right_eval, out.right_q_target_deg, right_prev_sent_q_deg_);
+                enforce_arm(
+                    ArmId::Right,
+                    right_mode,
+                    right_state,
+                    right_eval,
+                    out.right_q_target_deg,
+                    right_prev_sent_q_deg_);
             }
         }
     }
 
     // Dual-arm self-collision guard: never command a configuration that brings the
-    // two arms' link capsules within the configured margin. Evaluated on the final
-    // candidate targets (post per-arm filtering).
-    if (config_.safety.self_collision.enable &&
-        config_.safety.self_collision.mesh.enable && collision_monitor_) {
-        // URDF mesh self-collision (async monitor + shared velocity barrier). The
-        // monitor runs off the servo_j path; here we only feed the candidate and
-        // read the latest verdict (atomic). The barrier scales the approach toward
-        // the target so the arm can always brake before the hard floor; a stale
-        // verdict or a hard breach fails closed.
-        collision_monitor_->submitTargets(out.left_q_target_deg, out.right_q_target_deg);
-        const CollisionVerdict v = collision_monitor_->latest();
-        last_collision_verdict_ = v;
-        last_self_collision_ = selfCollisionResultFromVerdict(v, collision_monitor_cfg_);
-        const double now_s = std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        const bool stale =
-            collisionVerdictStale(v, now_s, collision_monitor_cfg_.max_staleness_s);
-        if (!config_.safety.self_collision.monitor_only &&
-            combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
-            // Only a real GEOMETRIC breach (hard_violation) escalates to fault_latch.
-            // A stale verdict is a transient scheduling issue, not a collision: hold
-            // (scale 0) and auto-recover when fresh verdicts resume — never latch on it.
-            if (!stale &&
-                config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch &&
-                v.hard_violation) {
-                const std::string reason = "self-collision mesh breach (" +
-                    (last_self_collision_.pair.empty() ? std::string("unknown")
-                                                       : last_self_collision_.pair) +
-                    "): clearance " + std::to_string(v.min_clearance_m) + " m below floor " +
-                    std::to_string(collision_monitor_cfg_.d_hard_m) + " m";
-                latchFault(SafetyVerdict::SelfCollision, reason, left_state, right_state);
+    // two arms (or an arm and the stand) within the mesh barrier's hard floor.
+    // Evaluated on the final candidate targets (post per-arm filtering). The single
+    // self_collision.enable flag is the sole switch; the only implementation is the
+    // async URDF-mesh CollisionMonitor (there is no capsule fallback path).
+    if (config_.safety.self_collision.enable) {
+        if (!collision_monitor_) {
+            // LOUD fail-closed: the guard is enabled but the monitor is absent. The
+            // constructor throws on load failure, so this is unreachable defensive
+            // code — but never advance a real arm with the guard silently gone.
+            last_self_collision_ = SelfCollisionResult{};  // checked=false
+            if (combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+                latchFault(SafetyVerdict::SelfCollision,
+                    "self-collision guard enabled but CollisionMonitor unavailable",
+                    left_state, right_state);
                 out = currentFaultHoldTarget();
                 combined = SafetyVerdict::FaultLatched;
-            } else {
-                const double scale =
-                    stale ? 0.0 : collisionVelocityScale(v, collision_monitor_cfg_);
-                if (scale < 1.0) {
+            }
+        } else {
+            // URDF mesh self-collision (async monitor + shared velocity barrier). The
+            // monitor runs off the servo_j path; here we only feed the candidate and
+            // read the latest verdict (atomic). The barrier scales the approach toward
+            // the target so the arm can always brake before the hard floor; a stale
+            // verdict or a hard breach fails closed.
+            collision_monitor_->submitTargets(out.left_q_target_deg, out.right_q_target_deg);
+            const CollisionVerdict v = collision_monitor_->latest();
+            last_collision_verdict_ = v;
+            // Ground-truth diagnostic (opt-in via RB_SELF_COLLISION_LOG=1): print the
+            // EXACT closest checked pair + clearance the async monitor computes for the
+            // COMMANDED targets submitted above. Use this to see what the guard really
+            // evaluates at an apparent collision — note it checks q_sent (the command),
+            // not the displayed q_actual, which can diverge in pgmode controller-sim.
+            static const bool kSelfColLog = std::getenv("RB_SELF_COLLISION_LOG") != nullptr;
+            if (kSelfColLog && v.valid) {
+                const double t_log_s = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                static double last_log_s = 0.0;
+                if (t_log_s - last_log_s > 0.2) {  // throttle ~5 Hz
+                    last_log_s = t_log_s;
+                    const std::string pair = v.near.empty()
+                        ? std::string("(no near pairs)")
+                        : (v.near.front().name_a + " <-> " + v.near.front().name_b);
+                    // Max per-joint divergence between the ACTUAL arm (q_actual, what
+                    // the GUI solid robots / display show) and the COMMANDED target the
+                    // monitor just checked. Large here = display != checked pose (the
+                    // pgmode controller-sim artifact); ~0 = display tracks the command.
+                    double qdiv = 0.0;
                     for (int i = 0; i < kDof; ++i) {
-                        out.left_q_target_deg[i] = left_prev_sent_q_deg_[i] +
-                            scale * (out.left_q_target_deg[i] - left_prev_sent_q_deg_[i]);
-                        out.right_q_target_deg[i] = right_prev_sent_q_deg_[i] +
-                            scale * (out.right_q_target_deg[i] - right_prev_sent_q_deg_[i]);
+                        qdiv = std::max(qdiv,
+                            std::abs(left_state.q_actual_deg[i] - out.left_q_target_deg[i]));
+                        qdiv = std::max(qdiv,
+                            std::abs(right_state.q_actual_deg[i] - out.right_q_target_deg[i]));
                     }
-                    if (scale <= 0.0 && (combined == SafetyVerdict::Ok ||
-                                         combined == SafetyVerdict::JointLimitClamped)) {
-                        combined = SafetyVerdict::SelfCollision;
-                    }
+                    std::cerr << "[selfcol] min=" << (v.min_clearance_m * 1000.0) << "mm  "
+                              << pair << (v.hard_violation ? "  HARD-VIOLATION" : "")
+                              << "  | q_actual-vs-checked max=" << qdiv << "deg\n";
                 }
             }
-        }
-    } else if (config_.safety.self_collision.enable) {
-        const SelfCollisionResult sc =
-            evaluateSelfCollision(out.left_q_target_deg, out.right_q_target_deg);
-        last_self_collision_ = sc;  // telemetry, even when already faulted
-        // Fail closed on a violation, or if geometry is unavailable; skip once
-        // latched. monitor_only keeps the telemetry but never clamps/latches
-        // (tuning aid only — not a real-motion safety posture).
-        if (!config_.safety.self_collision.monitor_only &&
-            (sc.violated || !sc.checked) &&
-            combined != SafetyVerdict::FaultLatched &&
-            !fault_latched_.load()) {
-            const std::string reason = sc.checked
-                ? ("self-collision (" + (sc.pair.empty() ? std::string("unknown") : sc.pair) +
-                   (sc.stand_capsule.empty() ? std::string() : " @" + sc.stand_capsule) +
-                   "): capsule clearance " + std::to_string(sc.min_clearance_m) +
-                   " m below margin " + std::to_string(config_.safety.self_collision.margin_m) + " m")
-                : "self-collision guard: link geometry unavailable";
-            if (config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch) {
-                latchFault(SafetyVerdict::SelfCollision, reason, left_state, right_state);
-                out = currentFaultHoldTarget();
-                combined = SafetyVerdict::FaultLatched;
-            } else {
-                // ClampToHold with an escape direction: refuse to advance *toward*
-                // collision, but allow a commanded target that strictly increases
-                // clearance versus the last sent configuration (retreating out of
-                // the keep-out zone). Without the escape exception the arm is
-                // permanently frozen once it touches the margin and can never back
-                // out. Geometry-unavailable (!checked) always holds (fail closed).
-                constexpr double kEscapeEpsM = 1e-4;
-                bool allow_escape = false;
-                if (sc.checked) {
-                    const SelfCollisionResult prev =
-                        evaluateSelfCollision(left_prev_sent_q_deg_, right_prev_sent_q_deg_);
-                    allow_escape = prev.checked &&
-                        sc.min_clearance_m > prev.min_clearance_m + kEscapeEpsM;
-                }
-                if (!allow_escape) {
-                    out.left_q_target_deg = left_prev_sent_q_deg_;
-                    out.right_q_target_deg = right_prev_sent_q_deg_;
-                    if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
-                        combined = SafetyVerdict::SelfCollision;
+            last_self_collision_ = selfCollisionResultFromVerdict(v, collision_monitor_cfg_);
+            const double now_s = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const bool stale =
+                collisionVerdictStale(v, now_s, collision_monitor_cfg_.max_staleness_s);
+            if (!config_.safety.self_collision.monitor_only &&
+                combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+                // Only a real GEOMETRIC breach (hard_violation) escalates to fault_latch.
+                // A stale verdict is a transient scheduling issue, not a collision: hold
+                // (scale 0) and auto-recover when fresh verdicts resume — never latch on it.
+                if (!stale &&
+                    config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch &&
+                    v.hard_violation) {
+                    const std::string reason = "self-collision mesh breach (" +
+                        (last_self_collision_.pair.empty() ? std::string("unknown")
+                                                           : last_self_collision_.pair) +
+                        "): clearance " + std::to_string(v.min_clearance_m) + " m below floor " +
+                        std::to_string(collision_monitor_cfg_.d_hard_m) + " m";
+                    latchFault(SafetyVerdict::SelfCollision, reason, left_state, right_state);
+                    out = currentFaultHoldTarget();
+                    combined = SafetyVerdict::FaultLatched;
+                } else {
+                    const double scale =
+                        stale ? 0.0 : collisionVelocityScale(v, collision_monitor_cfg_);
+                    if (scale < 1.0) {
+                        for (int i = 0; i < kDof; ++i) {
+                            out.left_q_target_deg[i] = left_prev_sent_q_deg_[i] +
+                                scale * (out.left_q_target_deg[i] - left_prev_sent_q_deg_[i]);
+                            out.right_q_target_deg[i] = right_prev_sent_q_deg_[i] +
+                                scale * (out.right_q_target_deg[i] - right_prev_sent_q_deg_[i]);
+                        }
+                        if (scale <= 0.0 && (combined == SafetyVerdict::Ok ||
+                                             combined == SafetyVerdict::JointLimitClamped)) {
+                            combined = SafetyVerdict::SelfCollision;
+                        }
                     }
                 }
             }
@@ -3765,67 +3849,6 @@ Pose6D DualArmServoLoop::clampPoseToFloor(const Pose6D& pose) const {
         clamped.z = std::max(clamped.z, effectiveFloorZ() - min_offset_delta_z);
     }
     return clamped;
-}
-
-SelfCollisionResult DualArmServoLoop::evaluateSelfCollision(
-    const JointArray& left_q_deg,
-    const JointArray& right_q_deg
-) const {
-    if (!kinematics_) {
-        return SelfCollisionResult{};  // checked=false -> caller fails closed
-    }
-    const SelfCollisionConfig& sc_cfg = config_.safety.self_collision;
-    std::vector<ArmCapsule> left_caps;
-    std::vector<ArmCapsule> right_caps;
-    try {
-        left_caps = kinematics_->armCollisionCapsulesInStand(
-            ArmId::Left, left_q_deg, config_.left_mount, sc_cfg.arm_capsules);
-        right_caps = kinematics_->armCollisionCapsulesInStand(
-            ArmId::Right, right_q_deg, config_.right_mount, sc_cfg.arm_capsules);
-    } catch (const std::exception&) {
-        return SelfCollisionResult{};  // checked=false -> caller fails closed
-    }
-    SelfCollisionResult combined;
-    bool any_pair = false;
-    bool all_checked = true;
-
-    if (sc_cfg.check_left_right) {
-        any_pair = true;
-        SelfCollisionResult lr = dualArmSelfCollisionClearance(left_caps, right_caps, sc_cfg.margin_m);
-        all_checked = all_checked && lr.checked;
-        combined = minSelfCollisionResult(combined, lr);
-    }
-    // Arm<->stand pairs need stand geometry; an empty list skips them so older
-    // arm-arm-only configs keep their behavior.
-    if (!sc_cfg.stand_capsules.empty()) {
-        if (sc_cfg.check_left_stand) {
-            any_pair = true;
-            SelfCollisionResult ls = armStandCollisionClearance(
-                left_caps, sc_cfg.stand_capsules, sc_cfg.margin_m, sc_cfg.stand_ignore_bones);
-            ls.pair = "left_stand";
-            all_checked = all_checked && ls.checked;
-            combined = minSelfCollisionResult(combined, ls);
-        }
-        if (sc_cfg.check_right_stand) {
-            any_pair = true;
-            SelfCollisionResult rs = armStandCollisionClearance(
-                right_caps, sc_cfg.stand_capsules, sc_cfg.margin_m, sc_cfg.stand_ignore_bones);
-            rs.pair = "right_stand";
-            all_checked = all_checked && rs.checked;
-            combined = minSelfCollisionResult(combined, rs);
-        }
-    }
-    if (!any_pair || !all_checked) {
-        // Nothing evaluated, or some enabled pair lacked geometry: report
-        // unchecked so the gate fails closed.
-        return SelfCollisionResult{};
-    }
-    // Attach the full evaluated capsules for visualization — the exact geometry
-    // checked above (on this call's target config).
-    combined.has_capsules = true;
-    combined.left_capsules = std::move(left_caps);
-    combined.right_capsules = std::move(right_caps);
-    return combined;
 }
 
 DualSendResult DualArmServoLoop::sendTargets(
@@ -3929,6 +3952,314 @@ bool DualArmServoLoop::commandRequestsDisarmMotion(const DualArmCommand& command
     return command.left.mode == ControlMode::DisarmMotion || command.right.mode == ControlMode::DisarmMotion;
 }
 
+bool DualArmServoLoop::commandRequestsFreedrive(const DualArmCommand& command) const {
+    return command.left.mode == ControlMode::Freedrive || command.right.mode == ControlMode::Freedrive;
+}
+
+const char* toString(FreedriveStage stage) {
+    switch (stage) {
+        case FreedriveStage::Off: return "off";
+        case FreedriveStage::Quiesce: return "arming_quiesce";
+        case FreedriveStage::Confirm: return "arming_confirm";
+        case FreedriveStage::Active: return "active";
+        case FreedriveStage::Exiting: return "exiting";
+    }
+    return "unknown";
+}
+
+bool DualArmServoLoop::anyFreedriveActive() const {
+    return left_freedrive_stage_.load() != FreedriveStage::Off ||
+           right_freedrive_stage_.load() != FreedriveStage::Off;
+}
+
+bool DualArmServoLoop::anyFreedriveEngaged() const {
+    return left_freedrive_stage_.load() == FreedriveStage::Active ||
+           right_freedrive_stage_.load() == FreedriveStage::Active;
+}
+
+void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& state) {
+    // Clear path/integrator state outside the state lock (these take their own
+    // locks, mirroring clearFaultLatch's ordering).
+    clearLatchedCartesianTarget(arm_id);
+    resetCartesianVelocityIntegrator(arm_id, "freedrive_exit");
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (arm_id == ArmId::Left) {
+        const JointArray q = chooseSafeHoldTarget(state, left_prev_sent_q_deg_);
+        left_prev_sent_q_deg_ = q;
+        left_prevprev_sent_q_deg_ = q;
+        left_fault_hold_q_deg_ = q;
+        left_controller_sim_physical_baseline_q_deg_ = state.q_actual_deg;
+        left_output_ma_.reset();
+    } else {
+        const JointArray q = chooseSafeHoldTarget(state, right_prev_sent_q_deg_);
+        right_prev_sent_q_deg_ = q;
+        right_prevprev_sent_q_deg_ = q;
+        right_fault_hold_q_deg_ = q;
+        right_controller_sim_physical_baseline_q_deg_ = state.q_actual_deg;
+        right_output_ma_.reset();
+    }
+    std::cerr << "[INFO] freedrive exit resync: " << toString(arm_id)
+              << " held target snapped to current actual joints\n";
+}
+
+namespace {
+// Free-drive arming timings (steady ns).
+constexpr uint64_t kFreedriveQuiesceSettleNs = 150'000'000;    // fallback if motion-state unreported
+constexpr uint64_t kFreedriveQuiesceDeadlineNs = 1'000'000'000; // abort if never idle
+constexpr uint64_t kFreedriveConfirmTrustAckNs = 150'000'000;  // controller-sim no-op: trust ACK after this
+constexpr uint64_t kFreedriveConfirmDeadlineNs = 800'000'000;  // abort if is_freedrive_mode never confirms (real)
+constexpr uint64_t kFreedriveExitDeadlineNs = 800'000'000;     // resync anyway after teach_off if unconfirmed
+}  // namespace
+
+bool DualArmServoLoop::freedriveUsesControllerSignals(ArmId arm_id) const {
+    const BackendConfig& cfg = (arm_id == ArmId::Left) ? config_.left_robot : config_.right_robot;
+    return cfg.backend_type == BackendType::Rbpodo;
+}
+
+BackendResult<RobotState> DualArmServoLoop::sendFreedriveToBackend(ArmId arm_id, bool on) {
+    const uint64_t start_ns = nowSteadyNs();
+    const uint64_t timeout_ns = timeoutNs(config_.servo.command_timeout_sec, 1'000'000'000);
+    const uint64_t deadline_ns = addDeadlineNs(start_ns, timeout_ns);
+    ArmWorker* worker = (arm_id == ArmId::Left) ? left_worker_.get() : right_worker_.get();
+    IRobotBackend* robot = (arm_id == ArmId::Left) ? left_robot_.get() : right_robot_.get();
+    if (workerBackedIoMode()) {
+        if (!worker) {
+            return BackendResult<RobotState>{
+                false, BackendOp::SetFreedrive, RobotState{},
+                backendError(BackendErrorKind::RobotDisconnected,
+                             "arm worker unavailable for setFreedrive", "", "worker_unavailable"),
+                makeBackendTiming(start_ns, nowSteadyNs())};
+        }
+        return worker->setFreedrive(on, tick_, deadline_ns);
+    }
+    if (!robot) {
+        return BackendResult<RobotState>{};  // ok defaults to false -> caller aborts
+    }
+    return robot->setFreedrive(on);
+}
+
+void DualArmServoLoop::abortFreedrive(ArmId arm_id, const RobotState& state, const std::string& reason) {
+    std::atomic<FreedriveStage>& stage_atomic =
+        (arm_id == ArmId::Left) ? left_freedrive_stage_ : right_freedrive_stage_;
+    const FreedriveStage stage = stage_atomic.load();
+    // If teach_on may have already been issued (Confirm) or engaged (Active/Exiting),
+    // best-effort teach_off so we never leave the controller silently hand-guidable.
+    if (stage == FreedriveStage::Confirm || stage == FreedriveStage::Active ||
+        stage == FreedriveStage::Exiting) {
+        const BackendResult<RobotState> off = sendFreedriveToBackend(arm_id, false);
+        if (!off.ok) {
+            std::cerr << "[WARN] freedrive " << toString(arm_id)
+                      << " abort: best-effort teach_off failed: " << off.error.name << "\n";
+        }
+    }
+    stage_atomic.store(FreedriveStage::Off);
+    // Resync the held target to the current actual joints so resuming servo_j does
+    // not snap the arm. Safe even from Quiesce (the arm was only holding).
+    resyncArmAfterFreedrive(arm_id, state);
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        freedrive_note_ = std::string(toString(arm_id)) + ": freedrive aborted (" + reason + ")";
+    }
+    std::cerr << "[WARN] freedrive " << toString(arm_id) << " aborted: " << reason << "\n";
+}
+
+void DualArmServoLoop::teardownFreedriveOnStop() {
+    // Called from stop() with the loop thread already joined and the
+    // workers/backends still alive. No held-target resync is needed (the process
+    // is tearing down); the one thing that must not be skipped is teach_off, so
+    // the controller does not exit with a latched freedrive_teach_on that the
+    // pendant's hardware direct-teaching button cannot clear.
+    const auto teardown = [&](ArmId arm_id, std::atomic<FreedriveStage>& stage_atomic) {
+        const FreedriveStage stage = stage_atomic.load();
+        if (stage == FreedriveStage::Off) return;
+        // teach_on may already be live (Confirm/Active/Exiting) or not yet issued
+        // (Quiesce). teach_off is harmless if it was never on, so always send it.
+        const BackendResult<RobotState> off = sendFreedriveToBackend(arm_id, false);
+        if (!off.ok) {
+            std::cerr << "[WARN] freedrive " << toString(arm_id)
+                      << " teach_off on shutdown failed: " << off.error.name
+                      << " — controller may stay latched in freedrive; power-cycle "
+                         "the control box if hardware teaching does not return\n";
+        } else {
+            std::cerr << "[INFO] freedrive " << toString(arm_id)
+                      << " teach_off issued on shutdown\n";
+        }
+        stage_atomic.store(FreedriveStage::Off);
+    };
+    teardown(ArmId::Left, left_freedrive_stage_);
+    teardown(ArmId::Right, right_freedrive_stage_);
+}
+
+void DualArmServoLoop::requestFreedrive(
+    const DualArmCommand& command,
+    const RobotState& left_state,
+    const RobotState& right_state
+) {
+    if (!config_.servo.allow_freedrive) {
+        std::cerr << "[WARN] Freedrive command rejected: servo.allow_freedrive=false "
+                     "(direct teaching is a fail-closed config opt-in)\n";
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        freedrive_note_ = "rejected: servo.allow_freedrive=false";
+        return;
+    }
+
+    const uint64_t now = nowSteadyNs();
+    const auto request_arm = [&](ArmId arm_id,
+                                 const ArmCommand& arm_command,
+                                 std::atomic<FreedriveStage>& stage_atomic,
+                                 uint64_t& deadline_ns,
+                                 uint64_t& entered_ns,
+                                 const RobotState& state) {
+        if (arm_command.mode != ControlMode::Freedrive) return;
+        if (!arm_command.has_freedrive) {
+            std::cerr << "[WARN] Freedrive command for " << toString(arm_id)
+                      << " ignored: missing freedrive_on payload\n";
+            return;
+        }
+        const bool want_on = arm_command.freedrive_on;
+        const FreedriveStage stage = stage_atomic.load();
+        if (want_on) {
+            if (stage == FreedriveStage::Off) {
+                stage_atomic.store(FreedriveStage::Quiesce);
+                entered_ns = now;
+                deadline_ns = now + kFreedriveQuiesceDeadlineNs;
+                std::cerr << "[INFO] freedrive " << toString(arm_id)
+                          << " ON requested: quiescing servo stream before teach_on\n";
+            }
+            // else already arming/active — idempotent, ignore.
+        } else {
+            if (stage == FreedriveStage::Active) {
+                const BackendResult<RobotState> off = sendFreedriveToBackend(arm_id, false);
+                if (!off.ok) {
+                    std::cerr << "[WARN] freedrive " << toString(arm_id)
+                              << " teach_off failed: " << off.error.name
+                              << " — forcing exit + resync\n";
+                }
+                stage_atomic.store(FreedriveStage::Exiting);
+                entered_ns = now;
+                deadline_ns = now + kFreedriveExitDeadlineNs;
+                std::cerr << "[INFO] freedrive " << toString(arm_id)
+                          << " OFF requested: teach_off issued, confirming exit\n";
+            } else if (stage == FreedriveStage::Quiesce || stage == FreedriveStage::Confirm) {
+                abortFreedrive(arm_id, state, "cancelled before engage");
+            }
+            // else Off/Exiting — idempotent.
+        }
+    };
+
+    request_arm(ArmId::Left, command.left, left_freedrive_stage_,
+                left_freedrive_deadline_ns_, left_freedrive_stage_entered_ns_, left_state);
+    request_arm(ArmId::Right, command.right, right_freedrive_stage_,
+                right_freedrive_deadline_ns_, right_freedrive_stage_entered_ns_, right_state);
+
+    // Arming/holding free-drive on any arm leaves the system not motion-ready;
+    // require an explicit re-arm afterwards. (No-op if already fault/emergency.)
+    if (anyFreedriveActive() && !fault_latched_.load() &&
+        motion_state_.load() != ServerMotionState::EmergencyLatched) {
+        setMotionState(ServerMotionState::ConnectedHold);
+    }
+}
+
+void DualArmServoLoop::advanceFreedrive(const RobotState& left_state, const RobotState& right_state) {
+    const uint64_t now = nowSteadyNs();
+    const auto advance_arm = [&](ArmId arm_id,
+                                 std::atomic<FreedriveStage>& stage_atomic,
+                                 uint64_t& deadline_ns,
+                                 uint64_t& entered_ns,
+                                 const std::string& op_mode,
+                                 const RobotState& state) {
+        const FreedriveStage stage = stage_atomic.load();
+        if (stage == FreedriveStage::Off || stage == FreedriveStage::Active) return;
+
+        const bool uses_signals = freedriveUsesControllerSignals(arm_id);
+        const bool real_op = op_mode == "real";
+        const uint64_t in_stage_ns = now - entered_ns;
+
+        switch (stage) {
+            case FreedriveStage::Quiesce: {
+                // Direct teaching requires the controller to be idle. Wait until it
+                // reports robot_state == 1 (Idle) after the servo stream stopped.
+                // The settle-time fallback applies ONLY when the controller never
+                // reports a usable motion state (stays 0); a controller actively
+                // reporting "moving" (3) is waited out until idle or the deadline.
+                const bool reports_motion_state = state.controller_motion_state != 0;
+                const bool idle = !uses_signals ||
+                    state.controller_motion_state == 1 ||
+                    (!reports_motion_state && in_stage_ns >= kFreedriveQuiesceSettleNs);
+                if (!idle) {
+                    if (now >= deadline_ns) {
+                        abortFreedrive(arm_id, state,
+                                       "quiesce timeout: controller never reported idle");
+                    }
+                    return;
+                }
+                const BackendResult<RobotState> on = sendFreedriveToBackend(arm_id, true);
+                if (!on.ok) {
+                    abortFreedrive(arm_id, state,
+                                   "teach_on failed: " + on.error.name + ":" + on.error.message);
+                    return;
+                }
+                stage_atomic.store(FreedriveStage::Confirm);
+                entered_ns = now;
+                deadline_ns = now + kFreedriveConfirmDeadlineNs;
+                std::cerr << "[INFO] freedrive " << toString(arm_id)
+                          << " teach_on issued (controller idle); confirming engagement\n";
+                return;
+            }
+            case FreedriveStage::Confirm: {
+                // Ground-truth confirmation via is_freedrive_mode. In controller
+                // simulation the flag may never flip (teach_on is a no-op), so trust
+                // the ACK after a short settle; in real operation it MUST confirm.
+                const bool confirmed = !uses_signals ||
+                    state.controller_freedrive_on ||
+                    (!real_op && in_stage_ns >= kFreedriveConfirmTrustAckNs);
+                if (confirmed) {
+                    stage_atomic.store(FreedriveStage::Active);
+                    {
+                        std::lock_guard<std::mutex> lock(state_mutex_);
+                        freedrive_note_.clear();
+                    }
+                    std::cerr << "[INFO] freedrive " << toString(arm_id)
+                              << " ACTIVE (direct teaching engaged"
+                              << (state.controller_freedrive_on ? ", controller-confirmed"
+                                                                : ", ack-trusted")
+                              << "); servo_j suppressed\n";
+                    return;
+                }
+                if (now >= deadline_ns) {
+                    abortFreedrive(arm_id, state,
+                                   "freedrive not confirmed by controller (is_freedrive_mode stayed off)");
+                }
+                return;
+            }
+            case FreedriveStage::Exiting: {
+                const bool off_confirmed = !uses_signals ||
+                    !state.controller_freedrive_on ||
+                    (!real_op && in_stage_ns >= kFreedriveConfirmTrustAckNs);
+                if (off_confirmed || now >= deadline_ns) {
+                    if (!off_confirmed) {
+                        std::cerr << "[WARN] freedrive " << toString(arm_id)
+                                  << " exit not controller-confirmed before deadline; resyncing anyway\n";
+                    }
+                    resyncArmAfterFreedrive(arm_id, state);
+                    stage_atomic.store(FreedriveStage::Off);
+                    std::cerr << "[INFO] freedrive " << toString(arm_id)
+                              << " exited; servo_j re-enabled after resync\n";
+                }
+                return;
+            }
+            case FreedriveStage::Off:
+            case FreedriveStage::Active:
+                return;
+        }
+    };
+
+    advance_arm(ArmId::Left, left_freedrive_stage_, left_freedrive_deadline_ns_,
+                left_freedrive_stage_entered_ns_, config_.left_robot.operation_mode, left_state);
+    advance_arm(ArmId::Right, right_freedrive_stage_, right_freedrive_deadline_ns_,
+                right_freedrive_stage_entered_ns_, config_.right_robot.operation_mode, right_state);
+}
+
 bool DualArmServoLoop::commandRequestsMotion(const DualArmCommand& command) const {
     return isMotionMode(command.left.mode) || isMotionMode(command.right.mode);
 }
@@ -3972,6 +4303,13 @@ std::string DualArmServoLoop::currentSendPolicy() const {
     }
     if (fault_latched_.load() || state == ServerMotionState::FaultLatched) {
         return "fault_latched";
+    }
+    if (anyFreedriveActive()) {
+        // Direct teaching arming or active on at least one arm: send no servo_j to
+        // either controller. Suppression starts at Quiesce so the controller can
+        // settle to idle before freedrive_teach_on (else M151). The freedrive arm
+        // is hand-guided; the other holds at its last reference. Recoverable.
+        return "freedrive";
     }
     if (controllerSimulationMotionRequired(config_) &&
         !controllerSimulationMotionGateOpen(config_)) {

@@ -201,16 +201,12 @@ non-rigid mirrors such as flipping x/y translation while flipping all of
 roll/pitch/yaw. The live example uses `linear_axis_signs: [-1, -1, 1]`,
 `angular_axis_signs: [-1, -1, -1]`.
 
-Optional target smoothing (all default 0 = disabled) runs before the per-tick
-step clamp: `target_lpf_tau_sec` applies a first-order exponential low-pass
-filter (`alpha = dt / (tau + dt)`) to the composed TCP target, attenuating
-tracker jitter and ramping the staircase between lower-rate UMI samples at the
-command rate; `deadband_linear_m` / `deadband_angular_rad` gate the filter
-input so the command freezes bit-exact while the hand-held tracker only
-jitters in place. Filter state latches with the clutch and resets on
-release/re-arm. The live example uses `target_lpf_tau_sec: 0.05` (~3.2 Hz
-cutoff, ~50 ms lag), `deadband_linear_m: 0.0003`, and
-`deadband_angular_rad: 0.005`.
+Policy-side target deadband runs before the per-tick step clamp:
+`deadband_linear_m` / `deadband_angular_rad` freeze the command bit-exact while
+the hand-held tracker only jitters in place. Deadband state latches with the
+clutch and resets on release/re-arm. Continuous target smoothing is handled by
+the server-side SMD pose tracker (`cartesian_control.pose_track_smd`); keeping a
+second policy-side LPF here would stack extra lag.
 
 ## UDP Wire Schema
 

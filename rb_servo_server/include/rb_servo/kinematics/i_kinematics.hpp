@@ -18,6 +18,15 @@ struct IkResult {
     int iterations = 0;
     bool timed_out = false;
     std::string reason;
+    // Conditioning / singularity-robust-damping diagnostics (last DLS step).
+    double min_singular_value = 0.0;     // smallest task-Jacobian singular value
+    double applied_damping = 0.0;        // effective lambda used on the singular dir
+    // Branch-jump guard (see IkSolverConfig). solution_jump_deg / suspected are
+    // observability; clamped=true means the solve held the seed (zero motion this
+    // tick) to avoid flipping to a distant branch.
+    double solution_jump_deg = 0.0;      // max |q_solution - seed| over joints
+    bool branch_jump_suspected = false;
+    bool branch_jump_clamped = false;
 };
 
 struct CartesianVelocityResult {
@@ -73,23 +82,6 @@ public:
         return {};
     }
 
-    // Per-link arm collision capsules in the STAND frame: each template capsule
-    // (defined in a URDF link frame) FK-transformed by that frame's placement for
-    // this arm's joints + mount. This is the EXACT geometry the dual-arm
-    // self-collision guard checks. Default returns empty (geometry unavailable ->
-    // guard fails closed).
-    virtual std::vector<ArmCapsule> armCollisionCapsulesInStand(
-        ArmId arm,
-        const JointArray& q_deg,
-        const ArmMountConfig& mount,
-        const std::vector<ArmCapsuleConfig>& templates
-    ) const {
-        (void)arm;
-        (void)q_deg;
-        (void)mount;
-        (void)templates;
-        return {};
-    }
 };
 
 }  // namespace rb_servo
