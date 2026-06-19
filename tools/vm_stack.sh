@@ -36,7 +36,26 @@ HOST_IF=vboxnet0;     HOST_IP=10.0.2.1/24
 REAL_LEFT=172.28.60.200
 REAL_RIGHT=172.28.60.201
 
+# Load SUDO_PASSWORD from .env (repo root, gitignored) so `make vm-*` does not
+# prompt interactively. The password is fed to `sudo -A` through a private
+# askpass helper (mode 0700, removed on exit) instead of the env/argv, so it
+# never leaks into the process table or shell history.
+if [ -z "${SUDO_PASSWORD:-}" ] && [ -f .env ]; then
+  SUDO_PASSWORD="$(sed -n 's/^[[:space:]]*SUDO_PASSWORD[[:space:]]*=[[:space:]]*//p' .env | tail -n1)"
+  # strip optional surrounding quotes
+  SUDO_PASSWORD="${SUDO_PASSWORD%\"}"; SUDO_PASSWORD="${SUDO_PASSWORD#\"}"
+  SUDO_PASSWORD="${SUDO_PASSWORD%\'}"; SUDO_PASSWORD="${SUDO_PASSWORD#\'}"
+fi
+
 SUDO="sudo"
+if [ -n "${SUDO_PASSWORD:-}" ] && [ -z "${SUDO_ASKPASS:-}" ]; then
+  ASKPASS_FILE="$(mktemp)"
+  chmod 700 "$ASKPASS_FILE"
+  trap 'rm -f "$ASKPASS_FILE"' EXIT
+  printf '#!/usr/bin/env bash\nprintf %%s "$SUDO_PASSWORD"\n' >"$ASKPASS_FILE"
+  export SUDO_PASSWORD
+  export SUDO_ASKPASS="$ASKPASS_FILE"
+fi
 if [ -n "${SUDO_ASKPASS:-}" ]; then SUDO="sudo -A"; fi
 
 dnat_rule() { # $1=-A|-D|-C  $2=real ip  $3=guest ip
