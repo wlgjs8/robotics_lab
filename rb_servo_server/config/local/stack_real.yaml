@@ -141,7 +141,7 @@ safety:
       unified_urdf: "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver4.urdf"
       package_dirs:
         - "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e"
-      pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper.STL"
+      pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
       stand_ignore_arm_substrings: ["link0"]
       d_hard_m: 0.005
       d_slow_m: 0.025
@@ -294,21 +294,8 @@ cartesian_control:
   max_twist_linear_m_s: 0.5
   max_twist_angular_rad_s: 0.4
 
-  # max_linear_move_speed_m_s: 0.05
-  # max_angular_move_speed_rad_s: 0.1
-  # max_cartesian_step_m: 0.001
-  # max_cartesian_step_rad: 0.01
-
-  # max_linear_move_speed_m_s: 0.1
-  # max_angular_move_speed_rad_s: 0.2
-  # max_cartesian_step_m: 0.002
-  # max_cartesian_step_rad: 0.02
-  
-  max_linear_move_speed_m_s: 0.1
-  max_angular_move_speed_rad_s: 0.2
-  # max_cartesian_step_m: 0.005
-  # max_cartesian_step_rad: 0.05
-
+  max_linear_move_speed_m_s: 0.05
+  max_angular_move_speed_rad_s: 0.1
   max_cartesian_step_m: 0.01
   max_cartesian_step_rad: 0.1
 
@@ -324,11 +311,9 @@ cartesian_control:
   pose_track_smd:
     enable: true
     damping_ratio_linear: 1.0
-    # natural_frequency_linear_hz: 3.0 # 2.5 #1.5 #2.5
-    natural_frequency_linear_hz: 1.5 # 2.5 #1.5 #2.5
-    damping_ratio_angular: 1.0
-    # natural_frequency_angular_hz: 2.5 #2.0 #1.0 #2.5
-    natural_frequency_angular_hz: 1.5 #2.0 #1.0 #2.5
+    natural_frequency_linear_hz: 2.0 # 2.5 #1.5 #2.5
+    damping_ratio_angular: 1.0 #1.0
+    natural_frequency_angular_hz: 2.0 #2.0 #1.0 #2.5
     # Velocity feedforward: damp on velocity error (goal_dot - x_dot) so a
     # constant-velocity goal tracks with ~0 lag (removes the ~16-38mm ramp lag in
     # the twist_via_smd reach). Decouples fn from accuracy: with this ON you can
@@ -339,24 +324,20 @@ cartesian_control:
     # accel clamp IS the max-force clamp; zeta/fn dynamics stay exact inside
     # the limits. NOTE with these numbers a full-speed (50mm/s) stop is force-
     # limited to ~12.5mm of glide (v^2/2a) on large moves.
-    # max_linear_velocity_m_s: 0.5        # 250 mm/s (was 50 - capped fast teleop)
-    # max_linear_accel_m_s2: 10.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
-    # max_angular_velocity_rad_s: 1.0   # 50 deg/s
-    # max_angular_accel_rad_s2: 50.0     # 100 deg/s^2
-
-    # max_linear_velocity_m_s: 0.25        # 250 mm/s (was 50 - capped fast teleop)
-    # max_linear_accel_m_s2: 3.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
-    # max_angular_velocity_rad_s: 0.8   # 50 deg/s
-    # max_angular_accel_rad_s2: 10.0     # 100 deg/s^2
-    
-    # max_linear_velocity_m_s: 0.35        # 250 mm/s (was 50 - capped fast teleop)
-    # max_linear_accel_m_s2: 5.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
-    max_linear_velocity_m_s: 1.5        # 250 mm/s (was 50 - capped fast teleop)
-    max_linear_accel_m_s2: 40.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
-    # max_angular_velocity_rad_s: 0.9   # 50 deg/s
-    max_angular_velocity_rad_s: 5.0   # 50 deg/s
-    max_angular_accel_rad_s2: 100.0     # 100 deg/s^2
-  # max_command_actual_error_deg: [5, 5, 5, 8, 8, 10]
+    # 2026-06-19 (jhkim): anti-tremble for right-arm fast UMI teleop. Servo-log
+    # 134617 showed q_sent joint velocity pinned at the GLOBAL dq_max (60 deg/s on
+    # j1/j2, line ~83) during fast motion -> following error 1-3 deg accumulates ->
+    # the rbpodo low-level servo catches up in bursts up to ~226 deg/s -> broadband
+    # roughness (q_actual HF 15x q_sent). Root cause = SMD Cartesian velocity demand
+    # exceeds dq_max. fn does NOT fix this (steady-state velocity still tracks).
+    # Fix: cap SMD Cartesian velocity so joint demand stays UNDER dq_max with margin
+    # (0.5 -> 0.3 m/s gives ~36 deg/s on j1/j2). Only fast swings are speed-limited;
+    # slow precise motion keeps responsiveness. If j1/j2 still saturate in the next
+    # servo log, drop to 0.25/0.5; if too slow on reach, raise toward 0.4/0.8.
+    max_linear_velocity_m_s: 0.3        # was 0.5 (anti-tremble: keep joint demand < dq_max 60 deg/s)
+    max_linear_accel_m_s2: 10.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
+    max_angular_velocity_rad_s: 0.6   # was 1.0 (anti-tremble: ~34 deg/s, under wrist dq_max)
+    max_angular_accel_rad_s2: 50.0     # 100 deg/s^2
   max_command_actual_error_deg: [10, 10, 10, 16, 16, 20]
   reset_velocity_integrator_on_mode_change: true
   command_actual_error_policy: reset
