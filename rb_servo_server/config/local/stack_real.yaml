@@ -334,10 +334,16 @@ cartesian_control:
     # (0.5 -> 0.3 m/s gives ~36 deg/s on j1/j2). Only fast swings are speed-limited;
     # slow precise motion keeps responsiveness. If j1/j2 still saturate in the next
     # servo log, drop to 0.25/0.5; if too slow on reach, raise toward 0.4/0.8.
-    max_linear_velocity_m_s: 0.3        # was 0.5 (anti-tremble: keep joint demand < dq_max 60 deg/s)
-    max_linear_accel_m_s2: 10.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
-    max_angular_velocity_rad_s: 0.6   # was 1.0 (anti-tremble: ~34 deg/s, under wrist dq_max)
-    max_angular_accel_rad_s2: 50.0     # 100 deg/s^2
+    # 2026-06-19 step2 (jhkim): step1 (0.5->0.3) helped — log 140058 showed right
+    # vel_sent p99 60->47, catch-up burst 226->124 deg/s. Residual: right j1/j2 still
+    # touch 60 at peaks AND left j3 now pins dq_max 90 (left arm active) -> still some
+    # saturation + onset bursts. Further nudge: lower velocity caps for more headroom
+    # under dq_max, AND lower accel caps so velocity ramps gentler (smooths the abrupt
+    # onset that excites tremble, costs a little lag on direction changes — operator OK).
+    max_linear_velocity_m_s: 0.25       # step1 0.3 (was 0.5); more headroom under dq_max 60
+    max_linear_accel_m_s2: 6.0            # was 10.0 (gentler velocity ramp = less onset burst)
+    max_angular_velocity_rad_s: 0.5   # step1 0.6 (was 1.0)
+    max_angular_accel_rad_s2: 30.0     # was 50.0 (gentler wrist ramp)
   max_command_actual_error_deg: [10, 10, 10, 16, 16, 20]
   reset_velocity_integrator_on_mode_change: true
   command_actual_error_policy: reset
