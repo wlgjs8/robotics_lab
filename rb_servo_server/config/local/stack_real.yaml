@@ -347,10 +347,18 @@ cartesian_control:
     # saturation + onset bursts. Further nudge: lower velocity caps for more headroom
     # under dq_max, AND lower accel caps so velocity ramps gentler (smooths the abrupt
     # onset that excites tremble, costs a little lag on direction changes — operator OK).
-    max_linear_velocity_m_s: 0.25       # step1 0.3 (was 0.5); more headroom under dq_max 60
-    max_linear_accel_m_s2: 6.0            # was 10.0 (gentler velocity ramp = less onset burst)
-    max_angular_velocity_rad_s: 0.5   # step1 0.6 (was 1.0)
-    max_angular_accel_rad_s2: 30.0     # was 50.0 (gentler wrist ramp)
+    # 2026-06-19 step3 (jhkim): step2 (0.25/0.5, accel 6/30) fully killed fast+slow
+    # tremble — log 141555: right vel_sent p99 18-24 (huge margin under dq_max 60),
+    # catch-up burst gone. But added ~50-100ms feel (cmd->actual lag 130ms right; most
+    # is intrinsic SMD+servo, the added part = accel cut + 0.25 velocity truncation).
+    # Recover responsiveness WITHOUT bringing tremble back: restore accel (onset, no
+    # peak-velocity change = no saturation) + raise velocity cap to 0.32 (right stays
+    # ~31 deg/s << 60, so no right-arm saturation). Caveat: left j3 is high-gain and
+    # already pins dq_max 90 at 0.25, so 0.32 makes left j3 saturate a touch more.
+    max_linear_velocity_m_s: 0.32       # step2 0.25 (was 0.5); recover fast-swing responsiveness, right still < dq_max
+    max_linear_accel_m_s2: 10.0           # restored from step2 6.0 (onset responsiveness, no tremble risk)
+    max_angular_velocity_rad_s: 0.6   # step2 0.5
+    max_angular_accel_rad_s2: 50.0     # restored from step2 30.0
   max_command_actual_error_deg: [10, 10, 10, 16, 16, 20]
   reset_velocity_integrator_on_mode_change: true
   command_actual_error_policy: reset
