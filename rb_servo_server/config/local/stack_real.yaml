@@ -146,7 +146,11 @@ safety:
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
       stand_ignore_arm_substrings: ["link0"]
       d_hard_m: 0.015   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
-      d_slow_m: 0.025
+      # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
+      # can brake a head-on approach at the command ceiling before the hard floor.
+      # v_max(max_linear_velocity)=0.32, a_brake=4.0 -> d_hard+0.0128=0.0278; 0.035
+      # leaves a ~20mm slow zone (stoppable up to ~0.4 m/s). (Stage 0c)
+      d_slow_m: 0.035
       a_brake_m_s2: 4.0
       hyst_m: 0.005
       latency_s: 0.010
@@ -323,9 +327,9 @@ cartesian_control:
   pose_track_smd:
     enable: true
     damping_ratio_linear: 1.0
-    natural_frequency_linear_hz: 2.0 # 2.5 #1.5 #2.5
+    natural_frequency_linear_hz: 1.5 # 2026-06-19 LPF off(alpha=10): fn↓ for smoothing (was 2.0) # 2.5 #1.5 #2.5
     damping_ratio_angular: 1.0 #1.0
-    natural_frequency_angular_hz: 2.0 #2.0 #1.0 #2.5
+    natural_frequency_angular_hz: 1.5 # 2026-06-19 LPF off(alpha=10): fn↓ for smoothing (was 2.0) # 1.0 #2.5
     # Velocity feedforward: damp on velocity error (goal_dot - x_dot) so a
     # constant-velocity goal tracks with ~0 lag (removes the ~16-38mm ramp lag in
     # the twist_via_smd reach). Decouples fn from accuracy: with this ON you can

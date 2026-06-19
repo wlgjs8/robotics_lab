@@ -51,7 +51,8 @@ bool collisionVerdictStale(const CollisionVerdict& v, double now_s, double max_s
     return (now_s - v.stamp_s) > max_staleness_s;
 }
 
-double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorConfig& cfg) {
+double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+                              double verdict_age_s) {
     if (!v.valid) return 0.0;            // no verdict yet -> fail closed
     constexpr double kRetreatEps = 1e-4;  // m/s; clearance must clearly grow to pass
     if (v.hard_violation) {
@@ -64,8 +65,13 @@ double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorC
     if (d > cfg.d_slow_m) return 1.0;    // far enough: barrier inactive
     const double vc = v.closing_speed_m_s;
     if (vc <= 1e-6) return 1.0;          // not closing (parallel/receding): free
+    // Latency compensation, age-extrapolated (Issue 2a): use the larger of the
+    // fixed floor and the actual verdict age so a lagging async verdict never
+    // under-compensates the closing distance travelled before the command lands.
+    const double comp_s =
+        verdict_age_s >= 0.0 ? std::max(cfg.latency_s, verdict_age_s) : cfg.latency_s;
     // Predicted clearance when the (latency-old) verdict is acted upon.
-    const double d_eff = d - cfg.d_hard_m - vc * cfg.latency_s;
+    const double d_eff = d - cfg.d_hard_m - vc * comp_s;
     if (d_eff <= 0.0) return 0.0;        // cannot guarantee a stop -> halt
     const double v_allow = std::sqrt(2.0 * cfg.a_brake_m_s2 * d_eff);
     if (vc <= v_allow) return 1.0;

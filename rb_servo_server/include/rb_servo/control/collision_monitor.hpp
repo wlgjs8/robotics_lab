@@ -143,7 +143,13 @@ bool collisionVerdictStale(const CollisionVerdict& v, double now_s, double max_s
 //   - closing too fast to brake       -> v_allow/v_c  (smooth slow-down)
 // Staleness must be checked separately (needs current time): a stale verdict
 // should be treated as scale 0.0 by the caller.
-double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorConfig& cfg);
+//
+// verdict_age_s: actual age of the verdict (now - v.stamp_s). When >= 0 the
+// latency compensation uses max(cfg.latency_s, verdict_age_s) so a stale verdict
+// never under-compensates (Issue 2a: the async monitor can lag the fixed
+// latency_s floor). When < 0 (default) the fixed cfg.latency_s is used.
+double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+                              double verdict_age_s = -1.0);
 
 // Owns the geometry model + the monitor thread + the published verdict.
 class CollisionMonitor {

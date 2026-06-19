@@ -3593,6 +3593,33 @@ ServoTarget DualArmServoLoop::applySafety(
         }
     }
 
+    // Reanchor an arm's twist-SMD pose goal + Cartesian velocity integrator to the
+    // current measured (floor-clamped) pose. Shared by the floor Hold path and the
+    // self-collision hold path so that, while either constraint blocks motion, the
+    // upstream goal cannot wind into the keep-out region and lurch on release.
+    // clampPoseToFloor is a no-op when the floor constraint is off, so this anchors
+    // to the plain measured pose for the self-collision-only case.
+    const auto reanchor_twist_smd_goal = [&](ArmId arm, const RobotState& state) {
+        CartesianTwistHoldState& hold = arm == ArmId::Left
+            ? left_cartesian_twist_hold_
+            : right_cartesian_twist_hold_;
+        if (!hold.twist_smd || !state.tcp_stand || !state.has_valid_tcp_pose) {
+            return;
+        }
+        const Pose6D anchor = clampPoseToFloor(*state.tcp_stand);
+        hold.twist_smd_goal = anchor;
+        hold.twist_smd->reset(anchor);
+        hold.twist_smd->updateGoalFromCommand(anchor);
+        CartesianSolveTelemetry& telemetry = arm == ArmId::Left
+            ? left_last_cartesian_solve_
+            : right_last_cartesian_solve_;
+        telemetry.twist_smd_goal_clamped = true;
+        telemetry.floor_goal_clamped = true;
+        telemetry.goal_minus_measured_pos_m = math::positionDistance(*state.tcp_stand, anchor);
+        telemetry.goal_minus_measured_ori_rad =
+            math::orientationDistanceRad(*state.tcp_stand, anchor);
+    };
+
     // Stand-frame floor plane constraint: never command a configuration that puts
     // either TCP below z = effectiveFloorZ(). Mode-independent by design (mock /
     // simulator / controller-sim / real all pass through here). Per-arm: only the
@@ -3606,26 +3633,6 @@ ServoTarget DualArmServoLoop::applySafety(
         last_floor_left_ = left_eval;    // telemetry, even when already faulted
         last_floor_right_ = right_eval;
         if (combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
-            const auto reanchor_twist_smd_goal = [&](ArmId arm, const RobotState& state) {
-                CartesianTwistHoldState& hold = arm == ArmId::Left
-                    ? left_cartesian_twist_hold_
-                    : right_cartesian_twist_hold_;
-                if (!hold.twist_smd || !state.tcp_stand || !state.has_valid_tcp_pose) {
-                    return;
-                }
-                const Pose6D anchor = clampPoseToFloor(*state.tcp_stand);
-                hold.twist_smd_goal = anchor;
-                hold.twist_smd->reset(anchor);
-                hold.twist_smd->updateGoalFromCommand(anchor);
-                CartesianSolveTelemetry& telemetry = arm == ArmId::Left
-                    ? left_last_cartesian_solve_
-                    : right_last_cartesian_solve_;
-                telemetry.twist_smd_goal_clamped = true;
-                telemetry.floor_goal_clamped = true;
-                telemetry.goal_minus_measured_pos_m = math::positionDistance(*state.tcp_stand, anchor);
-                telemetry.goal_minus_measured_ori_rad =
-                    math::orientationDistanceRad(*state.tcp_stand, anchor);
-            };
             const auto enforce_arm = [&](
                 ArmId arm,
                 ControlMode mode,
@@ -3770,7 +3777,8 @@ ServoTarget DualArmServoLoop::applySafety(
                     combined = SafetyVerdict::FaultLatched;
                 } else {
                     const double scale =
-                        stale ? 0.0 : collisionVelocityScale(v, collision_monitor_cfg_);
+                        stale ? 0.0
+                              : collisionVelocityScale(v, collision_monitor_cfg_, now_s - v.stamp_s);
                     if (scale < 1.0) {
                         for (int i = 0; i < kDof; ++i) {
                             out.left_q_target_deg[i] = left_prev_sent_q_deg_[i] +
@@ -3778,9 +3786,21 @@ ServoTarget DualArmServoLoop::applySafety(
                             out.right_q_target_deg[i] = right_prev_sent_q_deg_[i] +
                                 scale * (out.right_q_target_deg[i] - right_prev_sent_q_deg_[i]);
                         }
-                        if (scale <= 0.0 && (combined == SafetyVerdict::Ok ||
-                                             combined == SafetyVerdict::JointLimitClamped)) {
-                            combined = SafetyVerdict::SelfCollision;
+                        if (scale <= 0.0) {
+                            // Windup guard (Issue 1c), symmetric with the floor Hold path:
+                            // while the barrier fully blocks, pin both arms' twist-SMD goals
+                            // and Cartesian velocity integrators to the current measured pose
+                            // so the upstream goal cannot wind into the obstacle and lurch
+                            // when the barrier releases. Conservative: reanchor BOTH arms
+                            // (Stage 2 refines this to the near-pair's offending side).
+                            resetCartesianVelocityIntegrator(ArmId::Left, "self_collision_hold");
+                            resetCartesianVelocityIntegrator(ArmId::Right, "self_collision_hold");
+                            reanchor_twist_smd_goal(ArmId::Left, left_state);
+                            reanchor_twist_smd_goal(ArmId::Right, right_state);
+                            if (combined == SafetyVerdict::Ok ||
+                                combined == SafetyVerdict::JointLimitClamped) {
+                                combined = SafetyVerdict::SelfCollision;
+                            }
                         }
                     }
                 }

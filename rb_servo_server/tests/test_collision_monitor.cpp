@@ -107,6 +107,23 @@ static bool run() {
     RB_CHECK(!collisionVerdictStale(v, v.stamp_s + 0.001, cfg.max_staleness_s));
     RB_CHECK(collisionVerdictStale(v, v.stamp_s + 1.0, cfg.max_staleness_s));
 
+    // (5b) age extrapolation (Issue 2a): a larger actual verdict age compensates a
+    // larger closing distance, so the barrier is monotonically MORE restrictive as
+    // the verdict ages. The default (age < 0) and age <= latency_s reproduce the
+    // fixed-latency_s behavior exactly (backward compatible).
+    CollisionVerdict aged = v;
+    aged.min_clearance_m = 0.020;       // inside slow-zone (d_slow 25mm)
+    aged.closing_speed_m_s = 0.5;       // fast head-on
+    const double s_default = collisionVelocityScale(aged, cfg);            // fixed latency_s
+    const double s_age_lat = collisionVelocityScale(aged, cfg, cfg.latency_s);
+    const double s_age_small = collisionVelocityScale(aged, cfg, 0.0);     // age 0 -> max(lat,0)=lat
+    RB_CHECK(s_default == s_age_lat);   // default arg == explicit latency
+    RB_CHECK(s_age_small == s_default); // age below latency floor -> latency_s used
+    RB_CHECK(s_default > 0.0 && s_default < 1.0);  // fixed latency: partial slow-down
+    const double s_age_big = collisionVelocityScale(aged, cfg, 0.040);     // stale verdict
+    RB_CHECK(s_age_big <= s_default);   // older verdict -> never less conservative
+    RB_CHECK(s_age_big == 0.0);         // 0.020-0.005-0.5*0.040 = -0.005 <= 0 -> halt
+
     // (6) threaded publish/consume: start, submit, see a fresh verdict.
     mon.start();
     mon.submitTargets(init, init);
