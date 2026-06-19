@@ -142,6 +142,23 @@ safety:
     tcp_offset_points:
       - { name: gripper_tip_a, offset_m: [ 0.059, 0.0, 0.0 ] }
       - { name: gripper_tip_b, offset_m: [-0.059, 0.0, 0.0 ] }
+  # Stand-frame ROI box (workspace limit), viser "Safety ROI box"에서 조정.
+  # enable=true라야 viser Send가 허용된다(서버가 enabled 보고). monitor_only=true로
+  # 시작: 박스/여유(margin)/closest_face 관찰 + bounds 튜닝만 하고 강제는 안 함.
+  # 실제 차단(면 슬라이드/홀드)을 보려면 monitor_only=false로 전환.
+  roi_box:
+    enable: true
+    min_m: [-0.6, -1.1, 0.0]
+    max_m: [0.6, 0.1, 1.1]
+    runtime_min_m: [-1.2, -1.6, -0.2]
+    runtime_max_m: [1.2, 0.6, 1.6]
+    fail_policy: clamp_hold
+    monitor_only: true   # 관찰 시작; 강제하려면 false
+    a_brake_m_s2: 4.0
+    d_slow_m: 0.05
+    tcp_offset_points:
+      - { name: gripper_tip_a, offset_m: [ 0.059, 0.0, 0.0 ] }
+      - { name: gripper_tip_b, offset_m: [-0.059, 0.0, 0.0 ] }
   self_collision:
     enable: true
     # clamp_hold: 충돌 방향 명령만 직전 안전 자세로 홀드(비래치, 탈출 허용) —
