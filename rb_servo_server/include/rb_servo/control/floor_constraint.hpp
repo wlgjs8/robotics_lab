@@ -28,6 +28,9 @@ struct FloorArmEvaluation {
     double tcp_z_m = std::numeric_limits<double>::quiet_NaN();
     bool violated = false;
     std::string lowest_point = "tcp";
+    // TCP-frame offset of the lowest checked point ({0,0,0} = the TCP itself). Used
+    // to build that point's z-velocity Jacobian for the floor velocity projection.
+    math::Vector3 lowest_offset_tcp = math::Vector3::Zero();
 };
 
 // Lowest stand-frame z over the TCP and the configured TCP-frame offset

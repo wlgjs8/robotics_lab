@@ -91,6 +91,9 @@ struct CollisionMonitorConfig {
     double d_slow_m = 0.025;       // above this clearance the barrier is inactive
     double a_brake_m_s2 = 4.0;     // emergency decel the barrier assumes
     double hyst_m = 0.005;         // release hysteresis for the discrete fault flag
+    // Velocity-damper projection (Stage 2).
+    int projection_iterations = 3;     // Gauss-Seidel sweeps over active near pairs
+    double recover_speed_m_s = 0.0;    // active push-out below d_hard (0 = block deeper only)
     double latency_s = 0.010;      // assumed worst monitor->servo reaction latency
     double max_staleness_s = 0.020;  // verdict older than this -> fail closed
 
@@ -112,6 +115,14 @@ struct CollisionNearPair {
     Eigen::Vector3d n = Eigen::Vector3d::Zero();  // unit a->b
     std::string name_a;
     std::string name_b;
+    // Per-pair clearance Jacobian rows (Stage 1): d(clearance)/dt = J_n * qdot,
+    // split into this command's actuated left/right joint columns (command order,
+    // idx_v mapping). For an arm<->stand pair only the arm's row is non-zero, so the
+    // velocity projection that consumes this acts only on the offending DOFs.
+    Eigen::Matrix<double, 1, kDof> Jn_left = Eigen::Matrix<double, 1, kDof>::Zero();
+    Eigen::Matrix<double, 1, kDof> Jn_right = Eigen::Matrix<double, 1, kDof>::Zero();
+    // Signed clearance rate of THIS pair (+ = separating), tracked by pair index.
+    double rate_m_s = 0.0;
 };
 
 // A published snapshot. Consumed by servo_j read-only.
@@ -143,7 +154,62 @@ bool collisionVerdictStale(const CollisionVerdict& v, double now_s, double max_s
 //   - closing too fast to brake       -> v_allow/v_c  (smooth slow-down)
 // Staleness must be checked separately (needs current time): a stale verdict
 // should be treated as scale 0.0 by the caller.
-double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorConfig& cfg);
+//
+// verdict_age_s: actual age of the verdict (now - v.stamp_s). When >= 0 the
+// latency compensation uses max(cfg.latency_s, verdict_age_s) so a stale verdict
+// never under-compensates (Issue 2a: the async monitor can lag the fixed
+// latency_s floor). When < 0 (default) the fixed cfg.latency_s is used.
+double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+                              double verdict_age_s = -1.0);
+
+// Outcome of the velocity-damper projection (Stage 2).
+struct CollisionProjectionResult {
+    bool active = false;               // >=1 constraint engaged (command modified)
+    int active_pairs = 0;
+    double max_correction_deg_s = 0.0; // ||qdot - qdot_desired|| (both arms), deg/s
+    double left_correction_deg_s = 0.0;
+    double right_correction_deg_s = 0.0;
+};
+
+// One linear inequality on the commanded joint velocity (Stage 3, unified solver):
+// d(constraint)/dt = J . qdot >= -xi, with qdot the 12-vector [left6; right6] in
+// rad/s. Self-collision near pairs and floor-plane points are both expressed this
+// way and solved together so they cannot fight. d_now is only a sort key (closest
+// constraint relaxed first in Gauss-Seidel).
+struct VelocityConstraint {
+    Eigen::Matrix<double, 2 * kDof, 1> J = Eigen::Matrix<double, 2 * kDof, 1>::Zero();
+    double xi = 0.0;
+    double d_now = 0.0;
+};
+
+// Build the self-collision velocity constraints from a verdict (per near pair within
+// d_slow, age-extrapolated). Appends to `out` (so floor rows can be added too).
+void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+                               double verdict_age_s, std::vector<VelocityConstraint>& out);
+
+// Solve a set of velocity constraints by Gauss-Seidel projection (closest first),
+// modifying the joint targets (degrees) in place. Pure; shared by self-collision and
+// floor. `cons` is sorted in place. Returns per-arm correction magnitudes.
+CollisionProjectionResult solveVelocityProjection(
+    std::vector<VelocityConstraint>& cons,
+    const JointArray& left_prev_deg, const JointArray& right_prev_deg,
+    JointArray& left_target_deg, JointArray& right_target_deg,
+    double dt_sec, int iterations, const JointArray& max_joint_vel_deg_s);
+
+// Directional velocity-damper projection (Stage 2) — the chatter-free, fast-safe
+// replacement for the scalar collisionVelocityScale. For each near pair within
+// d_slow it removes ONLY the closing component of the commanded joint velocity
+// (per-pair clearance Jacobian J_n), bounding the allowed closing speed by the
+// braking limit sqrt(2 a_brake (d_now - d_hard)); tangential and separating motion
+// pass through untouched, so the boundary never toggles and escape is always free.
+// d_now is age-extrapolated (verdict_age_s). Joint targets (degrees) are modified
+// in place; q velocity is clamped per joint to max_joint_vel_deg_s. A no-op (returns
+// active=false) when the verdict is invalid, dt<=0, or nothing is within d_slow.
+CollisionProjectionResult applyCollisionVelocityProjection(
+    const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+    const JointArray& left_prev_deg, const JointArray& right_prev_deg,
+    JointArray& left_target_deg, JointArray& right_target_deg,
+    double dt_sec, double verdict_age_s, const JointArray& max_joint_vel_deg_s);
 
 // Owns the geometry model + the monitor thread + the published verdict.
 class CollisionMonitor {

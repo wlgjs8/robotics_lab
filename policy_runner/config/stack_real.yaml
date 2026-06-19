@@ -90,7 +90,7 @@ umi_dual_cartesian:
   # 떨림 재발 시 hard deadband 대신 input_moving_average_window 상향 권장.
   deadband_linear_m: 0.0000
   deadband_angular_rad: 0.000
-  input_moving_average_window: 8
+  input_moving_average_window: 16  # 2026-06-19 P3: 12→16 clean tracker noise at source → less goal_dot HF for vff to inject (~67ms→still acceptable)
   delta_frame: tool
   # ---- Pose-frame geometry (paired with pika publisher --pose-frame tip) ----
   # The publisher applies the official pika_sdk tracker→gripper-tip transform

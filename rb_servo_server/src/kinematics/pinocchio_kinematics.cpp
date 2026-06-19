@@ -252,6 +252,54 @@ std::vector<std::array<double, 3>> PinocchioKinematics::linkCollisionPointsInSta
     return stand_points;
 }
 
+bool PinocchioKinematics::computeFloorPointZJacobian(
+    ArmId arm,
+    const JointArray& q_deg,
+    const ArmMountConfig& mount,
+    const std::array<double, 3>& tcp_offset_m,
+    JointArray& Jz_out
+) const {
+    (void)arm;
+    Jz_out = JointArray{};
+    if (!config_.enable || !impl_) return false;
+    if (!ik_solver::isFiniteJoints(q_deg)) return false;
+
+    const Eigen::VectorXd q = toPinocchioQ(q_deg, impl_->model, impl_->joints);
+    pinocchio::forwardKinematics(impl_->model, impl_->data, q);
+    pinocchio::computeJointJacobians(impl_->model, impl_->data, q);
+    pinocchio::updateFramePlacements(impl_->model, impl_->data);
+
+    // Tip-frame spatial Jacobian in world axes (linear = tip-origin velocity, angular
+    // = angular velocity), sliced to the arm's 6 joint columns.
+    Eigen::Matrix<double, 6, Eigen::Dynamic> Jf(6, impl_->model.nv);
+    Jf.setZero();
+    pinocchio::getFrameJacobian(impl_->model, impl_->data, impl_->tip_frame,
+                                pinocchio::LOCAL_WORLD_ALIGNED, Jf);
+    Eigen::Matrix<double, 6, 6> J;
+    J.setZero();
+    for (std::size_t i = 0; i < impl_->joints.size() && i < kDof; ++i) {
+        J.col(static_cast<Eigen::Index>(i)) = Jf.col(impl_->model.idx_vs[impl_->joints[i]]);
+    }
+
+    const pinocchio::SE3& world_base = impl_->data.oMf[impl_->base_frame];
+    const pinocchio::SE3& world_tip = impl_->data.oMf[impl_->tip_frame];
+    // Offset point velocity in world axes: p = tip_origin + r, r = R_tip * offset.
+    // pdot = Jv qdot + omega x r = [Jv - skew(r) Jw] qdot.
+    const Eigen::Vector3d offset(tcp_offset_m[0], tcp_offset_m[1], tcp_offset_m[2]);
+    const Eigen::Vector3d r = world_tip.rotation() * offset;
+    Eigen::Matrix3d S;
+    S << 0.0, -r.z(), r.y(), r.z(), 0.0, -r.x(), -r.y(), r.x(), 0.0;
+    const Eigen::Matrix<double, 3, 6> Jp = J.template topRows<3>() - S * J.template bottomRows<3>();
+    // Stand-frame z direction expressed in world axes (mount rotation is constant).
+    const pinocchio::SE3 stand_T_world =
+        math::se3FromPose(mount.base_pose_in_stand) * world_base.inverse();
+    const Eigen::Vector3d n = stand_T_world.rotation().transpose() * Eigen::Vector3d::UnitZ();
+    const Eigen::Matrix<double, 1, 6> Jz = n.transpose() * Jp;
+    if (!Jz.allFinite()) return false;
+    for (int i = 0; i < kDof; ++i) Jz_out[i] = Jz(i);
+    return true;
+}
+
 IkResult PinocchioKinematics::solveIkDamped(
     ArmId arm,
     const Pose6D& target_tcp_stand,

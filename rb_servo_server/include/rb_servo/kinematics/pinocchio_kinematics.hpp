@@ -42,6 +42,14 @@ public:
         const ArmMountConfig& mount
     ) const override;
 
+    bool computeFloorPointZJacobian(
+        ArmId arm,
+        const JointArray& q_deg,
+        const ArmMountConfig& mount,
+        const std::array<double, 3>& tcp_offset_m,
+        JointArray& Jz_out
+    ) const override;
+
 private:
     struct Impl;
 

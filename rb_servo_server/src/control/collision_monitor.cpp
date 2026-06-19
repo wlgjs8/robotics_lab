@@ -12,6 +12,7 @@
 #include <pinocchio/parsers/urdf.hpp>
 #include <pinocchio/math/rpy.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
+#include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/collision/distance.hpp>
 #include <pinocchio/multibody/geometry.hpp>
@@ -51,7 +52,8 @@ bool collisionVerdictStale(const CollisionVerdict& v, double now_s, double max_s
     return (now_s - v.stamp_s) > max_staleness_s;
 }
 
-double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorConfig& cfg) {
+double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+                              double verdict_age_s) {
     if (!v.valid) return 0.0;            // no verdict yet -> fail closed
     constexpr double kRetreatEps = 1e-4;  // m/s; clearance must clearly grow to pass
     if (v.hard_violation) {
@@ -64,13 +66,115 @@ double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorC
     if (d > cfg.d_slow_m) return 1.0;    // far enough: barrier inactive
     const double vc = v.closing_speed_m_s;
     if (vc <= 1e-6) return 1.0;          // not closing (parallel/receding): free
+    // Latency compensation, age-extrapolated (Issue 2a): use the larger of the
+    // fixed floor and the actual verdict age so a lagging async verdict never
+    // under-compensates the closing distance travelled before the command lands.
+    const double comp_s =
+        verdict_age_s >= 0.0 ? std::max(cfg.latency_s, verdict_age_s) : cfg.latency_s;
     // Predicted clearance when the (latency-old) verdict is acted upon.
-    const double d_eff = d - cfg.d_hard_m - vc * cfg.latency_s;
+    const double d_eff = d - cfg.d_hard_m - vc * comp_s;
     if (d_eff <= 0.0) return 0.0;        // cannot guarantee a stop -> halt
     const double v_allow = std::sqrt(2.0 * cfg.a_brake_m_s2 * d_eff);
     if (vc <= v_allow) return 1.0;
     const double scale = v_allow / vc;
     return scale < 0.0 ? 0.0 : (scale > 1.0 ? 1.0 : scale);
+}
+
+void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+                               double verdict_age_s, std::vector<VelocityConstraint>& out) {
+    if (!v.valid) return;
+    const double age = std::max(0.0, verdict_age_s);
+    for (const auto& p : v.near) {
+        const double closing = p.rate_m_s < 0.0 ? -p.rate_m_s : 0.0;
+        const double d_now = p.d_m - closing * age;  // age-extrapolated clearance
+        if (d_now >= cfg.d_slow_m) continue;
+        VelocityConstraint c;
+        for (int i = 0; i < kDof; ++i) {
+            c.J[i] = p.Jn_left[i];
+            c.J[kDof + i] = p.Jn_right[i];
+        }
+        if (c.J.squaredNorm() < 1e-18) continue;  // pair not actuated by this command
+        const double margin = d_now - cfg.d_hard_m;
+        c.xi = margin > 0.0 ? std::sqrt(2.0 * cfg.a_brake_m_s2 * margin)
+                            : -cfg.recover_speed_m_s;  // below floor: block (or push out)
+        c.d_now = d_now;
+        out.push_back(std::move(c));
+    }
+}
+
+CollisionProjectionResult solveVelocityProjection(
+    std::vector<VelocityConstraint>& cons,
+    const JointArray& left_prev_deg, const JointArray& right_prev_deg,
+    JointArray& left_target_deg, JointArray& right_target_deg,
+    double dt_sec, int iterations, const JointArray& max_joint_vel_deg_s) {
+    CollisionProjectionResult out;
+    if (dt_sec <= 1e-6 || cons.empty()) return out;
+
+    constexpr int N = 2 * kDof;
+    using Vec = Eigen::Matrix<double, N, 1>;
+    Vec qprev, qtgt;
+    for (int i = 0; i < kDof; ++i) {
+        qprev[i] = left_prev_deg[i] * kDeg2Rad;
+        qprev[kDof + i] = right_prev_deg[i] * kDeg2Rad;
+        qtgt[i] = left_target_deg[i] * kDeg2Rad;
+        qtgt[kDof + i] = right_target_deg[i] * kDeg2Rad;
+    }
+    const Vec qdot_des = (qtgt - qprev) / dt_sec;  // rad/s (J is per-rad)
+    Vec qdot = qdot_des;
+
+    // Gauss-Seidel, closest constraint first: enforce ddot = J.qdot >= -xi.
+    std::sort(cons.begin(), cons.end(),
+              [](const VelocityConstraint& x, const VelocityConstraint& y) {
+                  return x.d_now < y.d_now;
+              });
+    const int M = std::max(1, iterations);
+    for (int s = 0; s < M; ++s) {
+        for (const auto& c : cons) {
+            const double ddot = c.J.dot(qdot);
+            if (ddot < -c.xi) {
+                const double alpha = (-c.xi - ddot) / std::max(c.J.squaredNorm(), 1e-9);
+                qdot += alpha * c.J;  // alpha > 0: cancels only the excess closing
+            }
+        }
+    }
+
+    // Per-joint velocity clamp (approximate; the exact joint-limit-aware solve is
+    // Stage 4 QP). Same ceiling for both arms.
+    for (int i = 0; i < kDof; ++i) {
+        const double lim = max_joint_vel_deg_s[i] * kDeg2Rad;
+        if (lim > 0.0) {
+            qdot[i] = std::clamp(qdot[i], -lim, lim);
+            qdot[kDof + i] = std::clamp(qdot[kDof + i], -lim, lim);
+        }
+    }
+
+    const Vec dq = qdot - qdot_des;
+    const Vec qnew = qprev + qdot * dt_sec;
+    for (int i = 0; i < kDof; ++i) {
+        left_target_deg[i] = qnew[i] / kDeg2Rad;
+        right_target_deg[i] = qnew[kDof + i] / kDeg2Rad;
+    }
+    const double rad2deg = 1.0 / kDeg2Rad;
+    out.active = true;
+    out.active_pairs = static_cast<int>(cons.size());
+    out.left_correction_deg_s = dq.head(kDof).norm() * rad2deg;
+    out.right_correction_deg_s = dq.tail(kDof).norm() * rad2deg;
+    out.max_correction_deg_s = dq.norm() * rad2deg;
+    return out;
+}
+
+CollisionProjectionResult applyCollisionVelocityProjection(
+    const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+    const JointArray& left_prev_deg, const JointArray& right_prev_deg,
+    JointArray& left_target_deg, JointArray& right_target_deg,
+    double dt_sec, double verdict_age_s, const JointArray& max_joint_vel_deg_s) {
+    if (!v.valid || dt_sec <= 1e-6 || v.near.empty()) return CollisionProjectionResult{};
+    std::vector<VelocityConstraint> cons;
+    cons.reserve(v.near.size());
+    buildCollisionConstraints(v, cfg, verdict_age_s, cons);
+    return solveVelocityProjection(cons, left_prev_deg, right_prev_deg, left_target_deg,
+                                   right_target_deg, dt_sec, cfg.projection_iterations,
+                                   max_joint_vel_deg_s);
 }
 
 struct CollisionMonitor::Impl {
@@ -83,6 +187,11 @@ struct CollisionMonitor::Impl {
     Eigen::VectorXd q;
     std::array<int, kDof> left_qidx{};
     std::array<int, kDof> right_qidx{};
+    // velocity-space (idx_v) columns for the actuated joints — the Jacobian column
+    // index for each command DOF (== idx_q for a fixed-base revolute chain, but
+    // idx_v is the correct mapping). Used to slice J_n into Jn_left/Jn_right.
+    std::array<int, kDof> left_vidx{};
+    std::array<int, kDof> right_vidx{};
     // arm classification (frame ancestry) + chain depth (joint supports)
     pinocchio::FrameIndex left_root_fid = 0;
     pinocchio::FrameIndex right_root_fid = 0;
@@ -132,6 +241,8 @@ struct CollisionMonitor::Impl {
             right_jids[i] = rj;
             left_qidx[i] = model.joints[lj].idx_q();
             right_qidx[i] = model.joints[rj].idx_q();
+            left_vidx[i] = model.joints[lj].idx_v();
+            right_vidx[i] = model.joints[rj].idx_v();
         }
         // Arm root frames for ancestry-based classification (default "<prefix>world").
         const std::string lr = cfg.left_arm_root_frame.empty() ? (cfg.left_prefix + "world")
@@ -302,7 +413,7 @@ struct CollisionMonitor::Impl {
         }
     }
 
-    CollisionVerdict reduce(double stamp) {
+    CollisionVerdict reduce(double stamp, const Eigen::VectorXd& q_eval) {
         CollisionVerdict v;
         v.stamp_s = stamp;
         v.valid = true;
@@ -324,6 +435,27 @@ struct CollisionMonitor::Impl {
         const std::size_t K = std::min<std::size_t>(cfg.max_near_pairs, ds.size());
         std::partial_sort(ds.begin(), ds.begin() + K, ds.end(),
                           [](const auto& a, const auto& b) { return a.first < b.first; });
+
+        // Per-pair clearance Jacobian (Stage 1). computeDistances leaves data.oMi at
+        // q_eval but does NOT compute joint Jacobians; do it once here for the K near
+        // pairs. The witness-point translational Jacobian is the joint LWA Jacobian
+        // shifted to the witness point: J_p = J_lin - skew(p - o) * J_ang.
+        pinocchio::computeJointJacobians(model, data, q_eval);
+        const int nv = model.nv;
+        Eigen::Matrix<double, 6, Eigen::Dynamic> J6(6, nv);
+        const auto jacobianOfPoint =
+            [&](pinocchio::JointIndex jid, const Eigen::Vector3d& p) -> Eigen::MatrixXd {
+            Eigen::MatrixXd Jp = Eigen::MatrixXd::Zero(3, nv);
+            if (jid == 0) return Jp;  // universe (static geometry): no motion
+            J6.setZero();
+            pinocchio::getJointJacobian(model, data, jid, pinocchio::LOCAL_WORLD_ALIGNED, J6);
+            const Eigen::Vector3d r = p - data.oMi[jid].translation();
+            Eigen::Matrix3d S;
+            S << 0.0, -r.z(), r.y(), r.z(), 0.0, -r.x(), -r.y(), r.x(), 0.0;
+            Jp = J6.topRows<3>() - S * J6.bottomRows<3>();
+            return Jp;
+        };
+
         v.near.reserve(K);
         for (std::size_t i = 0; i < K; ++i) {
             const std::size_t k = ds[i].second;
@@ -339,6 +471,19 @@ struct CollisionMonitor::Impl {
             p.n = delta.norm() > 1e-9 ? Eigen::Vector3d(delta.normalized()) : Eigen::Vector3d::UnitZ();
             p.name_a = geom.geometryObjects[cp.first].name;
             p.name_b = geom.geometryObjects[cp.second].name;
+            // d_dot = n^T (v_b - v_a) = J_n * qdot. Slice into command left/right cols.
+            const pinocchio::JointIndex ja = geom.geometryObjects[cp.first].parentJoint;
+            const pinocchio::JointIndex jb = geom.geometryObjects[cp.second].parentJoint;
+            const Eigen::MatrixXd Jrel = jacobianOfPoint(jb, p.p_b) - jacobianOfPoint(ja, p.p_a);
+            const Eigen::RowVectorXd Jn = p.n.transpose() * Jrel;  // 1 x nv
+            for (int c = 0; c < kDof; ++c) {
+                p.Jn_left[c] = Jn(left_vidx[c]);
+                p.Jn_right[c] = Jn(right_vidx[c]);
+            }
+            // Per-pair signed clearance rate (+ = separating), tracked by pair index.
+            if (prev_pair_clear.size() == np && stamp > prev_stamp) {
+                p.rate_m_s = (cur[k] - prev_pair_clear[k]) / (stamp - prev_stamp);
+            }
             v.near.push_back(std::move(p));
         }
         // Signed clearance rate of the currently-critical pair, tracked by pair
@@ -356,6 +501,7 @@ struct CollisionMonitor::Impl {
     CollisionVerdict evalLocked(const JointArray& l, const JointArray& r) {
         setQ(l, r);  // writes the target config into q
         const int N = std::max(1, cfg.swept_samples);
+        Eigen::VectorXd q_eval = q;  // configuration gdata ends up at (for J_n)
         if (N <= 1 || !have_prev_eval) {
             pinocchio::computeDistances(model, data, geom, gdata, q);
         } else {
@@ -379,10 +525,11 @@ struct CollisionMonitor::Impl {
                 qi = prev_eval_q + worst_alpha * (q - prev_eval_q);
                 pinocchio::computeDistances(model, data, geom, gdata, qi);
             }
+            q_eval = prev_eval_q + worst_alpha * (q - prev_eval_q);
         }
         prev_eval_q = q;
         have_prev_eval = true;
-        return reduce(nowMonotonicS());
+        return reduce(nowMonotonicS(), q_eval);
     }
 
     void publish(CollisionVerdict v) {

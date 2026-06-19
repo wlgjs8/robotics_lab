@@ -1647,6 +1647,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "d_slow_m",
                     "a_brake_m_s2",
                     "hyst_m",
+                    "projection_iterations",
+                    "recover_speed_m_s",
                     "latency_s",
                     "max_staleness_s",
                     "monitor_core",
@@ -1697,6 +1699,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 if (has(m, "d_slow_m")) mc.d_slow_m = asDouble(m["d_slow_m"], "safety.self_collision.mesh.d_slow_m");
                 if (has(m, "a_brake_m_s2")) mc.a_brake_m_s2 = asDouble(m["a_brake_m_s2"], "safety.self_collision.mesh.a_brake_m_s2");
                 if (has(m, "hyst_m")) mc.hyst_m = asDouble(m["hyst_m"], "safety.self_collision.mesh.hyst_m");
+                if (has(m, "projection_iterations")) mc.projection_iterations = asInt(m["projection_iterations"], "safety.self_collision.mesh.projection_iterations");
+                if (has(m, "recover_speed_m_s")) mc.recover_speed_m_s = asDouble(m["recover_speed_m_s"], "safety.self_collision.mesh.recover_speed_m_s");
                 if (has(m, "latency_s")) mc.latency_s = asDouble(m["latency_s"], "safety.self_collision.mesh.latency_s");
                 if (has(m, "max_staleness_s")) mc.max_staleness_s = asDouble(m["max_staleness_s"], "safety.self_collision.mesh.max_staleness_s");
                 if (has(m, "monitor_core")) mc.monitor_core = asInt(m["monitor_core"], "safety.self_collision.mesh.monitor_core");
@@ -1746,6 +1750,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "fail_policy",
                 "monitor_only",
                 "tcp_offset_points",
+                "a_brake_m_s2",
+                "d_slow_m",
             }, "safety.floor_constraint");
             if (has(fc, "enable")) {
                 cfg.safety.floor_constraint.enable = asBool(fc["enable"], "safety.floor_constraint.enable");
@@ -1769,6 +1775,14 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(fc, "monitor_only")) {
                 cfg.safety.floor_constraint.monitor_only =
                     asBool(fc["monitor_only"], "safety.floor_constraint.monitor_only");
+            }
+            if (has(fc, "a_brake_m_s2")) {
+                cfg.safety.floor_constraint.a_brake_m_s2 =
+                    asDouble(fc["a_brake_m_s2"], "safety.floor_constraint.a_brake_m_s2");
+            }
+            if (has(fc, "d_slow_m")) {
+                cfg.safety.floor_constraint.d_slow_m =
+                    asDouble(fc["d_slow_m"], "safety.floor_constraint.d_slow_m");
             }
             if (has(fc, "tcp_offset_points")) {
                 const YAML::Node points = fc["tcp_offset_points"];

@@ -119,6 +119,10 @@ safety:
     runtime_max_z_m: 0.5
     fail_policy: clamp_hold
     monitor_only: false
+    # 2026-06-19 anti-chatter: Stage3 velocity-damper를 더 부드럽게 (기본 4.0/0.05).
+    # 평면 접근 시 √(2·a_brake·(z−z_min))로 감속 — a_brake↓ + 밴드↑ = 가장자리 jerk↓.
+    a_brake_m_s2: 3.0
+    d_slow_m: 0.06
     # PIKA 그리퍼 팁 2점 (TCP 프레임 오프셋, 줄자 실측 tip-to-tip 118mm:
     # tcp 프레임 = 팁 평면(z 247.642mm @attachment_site), 팁 양끝은
     # tool visual의 z+90° 회전 반영 시 TCP x축 방향 ±59.0mm). TCP가 회전했을 때
@@ -146,10 +150,14 @@ safety:
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
       stand_ignore_arm_substrings: ["link0"]
       d_hard_m: 0.015   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
-      d_slow_m: 0.025
-      a_brake_m_s2: 4.0
-      hyst_m: 0.005
-      latency_s: 0.010
+      # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
+      # can brake a head-on approach at the command ceiling before the hard floor.
+      # v_max(max_linear_velocity)=0.32, a_brake=4.0 -> d_hard+0.0128=0.0278; 0.035
+      # leaves a ~20mm slow zone (stoppable up to ~0.4 m/s). (Stage 0c)
+      d_slow_m: 0.05    # 2026-06-19 anti-chatter: 0.035→0.05 (gentler velocity gradient; ≥d_hard+vmax²/2a_brake=0.032)
+      a_brake_m_s2: 3.0  # 2026-06-19 anti-chatter: 4.0→3.0 (softer braking ramp = quieter onset at boundary)
+      hyst_m: 0.010      # 2026-06-19 anti-chatter: 0.005→0.010 (break on/off limit-cycle toggle)
+      latency_s: 0.003   # 2026-06-19 LPF off + new fw(no actuation latency): 0.010→0.003 (cut vc·comp_s feedback that drives the brake↔release limit cycle; comp_s=max(latency_s,verdict_age) so stale verdicts still floor it)
       swept_samples: 2          # 1=endpoint only; >=2 swept-volume (catches tunneling)
       check_intra_arm: true     # arm folding onto itself (non-adjacent links)
       max_staleness_s: 0.050
@@ -323,9 +331,9 @@ cartesian_control:
   pose_track_smd:
     enable: true
     damping_ratio_linear: 1.0
-    natural_frequency_linear_hz: 2.0 # 2.5 #1.5 #2.5
+    natural_frequency_linear_hz: 1.0 # 2026-06-19 P3: 1.5→1.0 cut vff 30Hz transmission(2ζωn↓); vff keeps lag~0 (was 2.0)
     damping_ratio_angular: 1.0 #1.0
-    natural_frequency_angular_hz: 2.0 #2.0 #1.0 #2.5
+    natural_frequency_angular_hz: 1.0 # 2026-06-19 P3: 1.5→1.0 cut vff 30Hz transmission (was 2.0)
     # Velocity feedforward: damp on velocity error (goal_dot - x_dot) so a
     # constant-velocity goal tracks with ~0 lag (removes the ~16-38mm ramp lag in
     # the twist_via_smd reach). Decouples fn from accuracy: with this ON you can
@@ -361,9 +369,9 @@ cartesian_control:
     # ~31 deg/s << 60, so no right-arm saturation). Caveat: left j3 is high-gain and
     # already pins dq_max 90 at 0.25, so 0.32 makes left j3 saturate a touch more.
     max_linear_velocity_m_s: 0.32       # step2 0.25 (was 0.5); recover fast-swing responsiveness, right still < dq_max
-    max_linear_accel_m_s2: 10.0           # restored from step2 6.0 (onset responsiveness, no tremble risk)
+    max_linear_accel_m_s2: 6.0            # 2026-06-19 Phase2a: 10→6 (LPF off → soften dq_max saturation edges, no top-speed/reach loss)
     max_angular_velocity_rad_s: 0.6   # step2 0.5
-    max_angular_accel_rad_s2: 50.0     # restored from step2 30.0
+    max_angular_accel_rad_s2: 30.0     # 2026-06-19 Phase2a: 50→30 (LPF off → soften saturation edges)
   max_command_actual_error_deg: [10, 10, 10, 16, 16, 20]
   reset_velocity_integrator_on_mode_change: true
   command_actual_error_policy: reset

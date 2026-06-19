@@ -160,7 +160,11 @@ safety:
       stand_ignore_arm_substrings: ["link0"]
       viz_near_pairs_m: 0.06   # GUI-only: show witness tubes within 60mm (decoupled from d_slow)
       d_hard_m: 0.015   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
-      d_slow_m: 0.025   # 2026-06-19: slow zone 10->25mm so the velocity barrier brakes
+      # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
+      # can brake a head-on approach at the command ceiling before the hard floor.
+      # v_max(max_linear_velocity)=0.25, a_brake=4.0 -> d_hard+0.0078=0.0228; 0.035
+      # leaves a ~20mm slow zone (stoppable up to ~0.4 m/s). (Stage 0c)
+      d_slow_m: 0.035   # 2026-06-19: slow zone so the velocity barrier brakes
                         # BEFORE d_hard (was =d_hard: no ramp -> overshoot past 10mm).
       # NOTE: with no braking ramp a fast approach can overshoot 5mm in one tick;
       # swept_samples catches the in-between and holds at the last >5mm config.
