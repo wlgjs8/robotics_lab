@@ -193,6 +193,21 @@ constexpr int kRbpodoSelfCollisionCode = 1005;
 constexpr int kRbpodoSuspiciousRawCodeCutoff = 1'000'000;
 constexpr double kRbpodoMinPlausibleNonZeroTimeSec = 1e-6;
 
+// Rainbow controller op_stat_* status fields are BIT-PACKED: only the documented
+// low bits carry the status, the upper bits are reserved/undefined and routinely
+// observed carrying uninitialised values (e.g. op_stat_self_collision arrives as
+// 0x76904aa0 with bit0 = 0). They MUST be masked before validating the boolean/code
+// shape or interpreting a fault, otherwise a healthy field reads as "garbage" (false
+// diagnostics_suspect) and, worse, a real fault with non-zero upper bits is missed by
+// an `== 1` test. Ref: rainbowrobotics.github.io rb_cobot_docs technical_docs/data_structure
+//   item 33 op_stat_collision_occur : lower 2 bits  (0/1)
+//   item 34 op_stat_sos_flag        : lower 6 bits  (device code 0..12)
+//   item 35 op_stat_self_collision  : bits 0-1 self-collision (0/1), bits 2-3 last out-collision source
+//   item 37 op_stat_ems_flag        : lower 6 bits  (kinematic e-stop code 0..4)
+constexpr int kRbpodoCollisionOccurMask = 0b11;    // item 33: lower 2 bits valid
+constexpr int kRbpodoSelfCollisionMask = 0b11;     // item 35: bits 0-1 = self-collision flag
+constexpr int kRbpodoStatusCodeMask = 0b111111;    // items 34/37: lower 6 bits valid
+
 struct RbpodoInterpretedFault {
     int code = 0;
     std::string name;
@@ -281,14 +296,23 @@ RbpodoDiagnosticsSnapshot interpretRbpodoDiagnostics(
     const bool unreliable_fields_unavailable =
         decode_options.controller_simulation_unreliable_status_fields_unavailable;
 
-    markSuspiciousBoundedCode(&diagnostics, "op_stat_sos_flag", snapshot.op_stat_sos_flag, 0, 12);
-    markSuspiciousBoundedCode(&diagnostics, "op_stat_ems_flag", snapshot.op_stat_ems_flag, 0, 4);
+    // Mask to the documented valid bits before shape-validating (see kRbpodo*Mask).
+    markSuspiciousBoundedCode(
+        &diagnostics, "op_stat_sos_flag", snapshot.op_stat_sos_flag & kRbpodoStatusCodeMask, 0, 12);
+    markSuspiciousBoundedCode(
+        &diagnostics, "op_stat_ems_flag", snapshot.op_stat_ems_flag & kRbpodoStatusCodeMask, 0, 4);
+    // op_stat_soft_estop_occur is documented as a plain 0/1 (no reserved upper bits), so it is
+    // validated unmasked — a non-boolean value there is a genuine anomaly.
     markSuspiciousFlag(&diagnostics, "op_stat_soft_estop_occur", snapshot.op_stat_soft_estop_occur);
-    markSuspiciousFlag(&diagnostics, "op_stat_collision_occur", snapshot.op_stat_collision_occur);
+    markSuspiciousFlag(
+        &diagnostics, "op_stat_collision_occur",
+        snapshot.op_stat_collision_occur & kRbpodoCollisionOccurMask);
     if (unreliable_fields_unavailable) {
         markUnavailableField(&diagnostics, "op_stat_self_collision");
     } else {
-        markSuspiciousFlag(&diagnostics, "op_stat_self_collision", snapshot.op_stat_self_collision);
+        markSuspiciousFlag(
+            &diagnostics, "op_stat_self_collision",
+            snapshot.op_stat_self_collision & kRbpodoSelfCollisionMask);
     }
 
     if (unreliable_fields_unavailable &&
@@ -343,22 +367,27 @@ std::optional<RbpodoInterpretedFault> firstClearRbpodoFault(
     const RbpodoSystemStateSnapshot& snapshot,
     const RbpodoDiagnosticsSnapshot& diagnostics
 ) {
-    if (snapshot.op_stat_sos_flag >= 1 && snapshot.op_stat_sos_flag <= 12) {
-        return RbpodoInterpretedFault{snapshot.op_stat_sos_flag, "rbpodo_sos_flag"};
+    // Mask to the documented valid bits before interpreting a fault (see kRbpodo*Mask).
+    // Using the raw value here would miss a real fault whenever the reserved upper bits
+    // are non-zero (e.g. self-collision arriving as 0x...01 never equals 1).
+    const int sos_flag = snapshot.op_stat_sos_flag & kRbpodoStatusCodeMask;
+    if (sos_flag >= 1 && sos_flag <= 12) {
+        return RbpodoInterpretedFault{sos_flag, "rbpodo_sos_flag"};
     }
     if (snapshot.init_error != 0) {
         return RbpodoInterpretedFault{snapshot.init_error, "rbpodo_init_error"};
     }
-    if (snapshot.op_stat_ems_flag >= 1 && snapshot.op_stat_ems_flag <= 4) {
-        return RbpodoInterpretedFault{snapshot.op_stat_ems_flag, "rbpodo_ems_flag"};
+    const int ems_flag = snapshot.op_stat_ems_flag & kRbpodoStatusCodeMask;
+    if (ems_flag >= 1 && ems_flag <= 4) {
+        return RbpodoInterpretedFault{ems_flag, "rbpodo_ems_flag"};
     }
     if (snapshot.op_stat_soft_estop_occur == 1) {
         return RbpodoInterpretedFault{kRbpodoSoftEstopCode, "rbpodo_soft_estop"};
     }
-    if (snapshot.op_stat_collision_occur == 1) {
+    if ((snapshot.op_stat_collision_occur & kRbpodoCollisionOccurMask) == 1) {
         return RbpodoInterpretedFault{kRbpodoCollisionCode, "rbpodo_collision"};
     }
-    if (snapshot.op_stat_self_collision == 1) {
+    if ((snapshot.op_stat_self_collision & kRbpodoSelfCollisionMask) == 1) {
         return RbpodoInterpretedFault{kRbpodoSelfCollisionCode, "rbpodo_self_collision"};
     }
 

@@ -129,41 +129,69 @@ bool testClearSelfCollisionIsRobotFault() {
     return true;
 }
 
-bool testHugeSelfCollisionIsSuspectButReadable() {
+// op_stat_self_collision is bit-packed: bit0-1 are the flag, the upper bits are
+// reserved/undefined. 0x76904aa0 (= 1989167776) is a value observed live on real
+// hardware: its low bits are 0, so the field is HEALTHY and must NOT be flagged as
+// garbage/suspect once masked. (Pre-fix this whole int was checked against 0/1 and
+// latched a false -2001 diagnostics_suspect.)
+bool testSelfCollisionUpperBitsAreMaskedToHealthy() {
     rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
-    snapshot.op_stat_self_collision = 1977953904;
+    snapshot.op_stat_self_collision = 1989167776;  // 0x76904aa0, bit0 = 0 -> no self-collision
 
     const rb_servo::RobotState state =
         rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Right, snapshot);
     RB_CHECK(state.has_valid_joint_state);
-    RB_CHECK(state.has_error);
-    RB_CHECK(state.error_code != snapshot.op_stat_self_collision);
-    RB_CHECK(state.lifecycle_state == "diagnostics_suspect");
-    RB_CHECK(state.diagnostic_error_source == "rbpodo_diagnostics_suspect");
+    RB_CHECK(!state.has_error);
+    RB_CHECK(state.lifecycle_state == "servo_enabled");
     RB_CHECK(state.rbpodo_diagnostics.has_value());
-    RB_CHECK(!state.rbpodo_diagnostics->diagnostics_valid);
-    RB_CHECK(state.rbpodo_diagnostics->diagnostics_suspect);
-    RB_CHECK(state.rbpodo_diagnostics->raw.op_stat_self_collision == 1977953904);
-    RB_CHECK(contains(state.rbpodo_diagnostics->reason, "op_stat_self_collision"));
+    RB_CHECK(state.rbpodo_diagnostics->diagnostics_valid);
+    RB_CHECK(!state.rbpodo_diagnostics->diagnostics_suspect);
+    // The raw value is preserved verbatim for telemetry/transparency.
+    RB_CHECK(state.rbpodo_diagnostics->raw.op_stat_self_collision == 1989167776);
     RB_CHECK(!rb_servo::rbpodoStateAcquisitionError(state).has_value());
+    RB_CHECK(!rb_servo::rbpodoMotionReadinessError(rbpodoConfig(), snapshot, state).has_value());
+    return true;
+}
+
+// Safety-critical: a REAL self-collision (bit0 = 1) must still latch even when the
+// reserved upper bits are non-zero. Pre-fix the `== 1` test silently missed this.
+bool testRealSelfCollisionFaultsThroughGarbageUpperBits() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+    snapshot.op_stat_self_collision = 1989167777;  // 0x76904aa1, bit0 = 1 -> self-collision
+
+    const rb_servo::RobotState state =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
+    RB_CHECK(state.has_valid_joint_state);
+    RB_CHECK(state.has_error);
+    RB_CHECK(state.lifecycle_state == "faulted");
+    RB_CHECK(state.diagnostic_error_source == "rbpodo_self_collision");
+    RB_CHECK(state.rbpodo_diagnostics.has_value());
+    RB_CHECK(state.rbpodo_diagnostics->diagnostics_valid);
+    RB_CHECK(!state.rbpodo_diagnostics->diagnostics_suspect);
+    RB_CHECK(state.rbpodo_diagnostics->raw.op_stat_self_collision == 1989167777);
 
     const std::optional<rb_servo::BackendError> readiness =
         rb_servo::rbpodoMotionReadinessError(rbpodoConfig(), snapshot, state);
     RB_CHECK(readiness.has_value());
     RB_CHECK(readiness->kind == rb_servo::BackendErrorKind::RobotFault);
-    RB_CHECK(readiness->name == "rbpodo_diagnostics_suspect");
-    RB_CHECK(contains(readiness->message, "op_stat_self_collision"));
+    RB_CHECK(readiness->name == "rbpodo_self_collision");
+    return true;
+}
 
-    rb_servo::SendServoJRequest request;
-    request.command_seq = 9;
-    request.q_target_deg = joints(0.0);
-    const rb_servo::SendServoJResult rejected =
-        rb_servo::rejectedSend(request, *readiness, {}, state, "cache");
-    RB_CHECK(!rejected.accepted);
-    RB_CHECK(rejected.error.kind == rb_servo::BackendErrorKind::RobotFault);
-    RB_CHECK(rejected.error.name == "rbpodo_diagnostics_suspect");
-    RB_CHECK(rejected.state_after.has_value());
-    RB_CHECK(rejected.state_after->rbpodo_diagnostics.has_value());
+// A device code (sos/ems) carried in the low 6 bits must still be interpreted as the
+// real fault code even with reserved upper bits set.
+bool testSosCodeMaskedThroughGarbageUpperBits() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
+    snapshot.op_stat_sos_flag = static_cast<int>(0x76900000) | 5;  // upper garbage + code 5
+
+    const rb_servo::RobotState state =
+        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
+    RB_CHECK(state.has_error);
+    RB_CHECK(state.error_code == 5);
+    RB_CHECK(state.lifecycle_state == "faulted");
+    RB_CHECK(state.diagnostic_error_source == "rbpodo_sos_flag");
+    RB_CHECK(state.rbpodo_diagnostics.has_value());
+    RB_CHECK(!state.rbpodo_diagnostics->diagnostics_suspect);
     return true;
 }
 
@@ -332,7 +360,9 @@ rb_servo::RbpodoSystemStateSnapshot controllerSimGarbageSelfCollisionSnapshot() 
     snapshot.op_stat_ems_flag = 0;
     snapshot.op_stat_soft_estop_occur = 0;
     snapshot.op_stat_collision_occur = 0;
-    snapshot.op_stat_self_collision = 1984732816;
+    // Low 2 bits = 2 (an undefined self-collision value) so the field is genuinely
+    // suspect after masking; the controller-sim policy then marks it unavailable.
+    snapshot.op_stat_self_collision = 1984732818;
     return snapshot;
 }
 
@@ -412,7 +442,7 @@ bool testControllerSimUnavailableFieldPolicySuppressesOnlyCapturedBadFields() {
     RB_CHECK(state.rbpodo_diagnostics.has_value());
     RB_CHECK(state.rbpodo_diagnostics->diagnostics_valid);
     RB_CHECK(!state.rbpodo_diagnostics->diagnostics_suspect);
-    RB_CHECK(state.rbpodo_diagnostics->raw.op_stat_self_collision == 1984732816);
+    RB_CHECK(state.rbpodo_diagnostics->raw.op_stat_self_collision == 1984732818);
     RB_CHECK(containsField(state.rbpodo_diagnostics->unavailable_fields, "op_stat_self_collision"));
     RB_CHECK(containsField(state.rbpodo_diagnostics->unavailable_fields, "robot_time_sec"));
     RB_CHECK(contains(state.rbpodo_diagnostics->reason, "unavailable fields"));
@@ -503,7 +533,7 @@ bool testRealMotionSuspectDiagnosticsAcceptedWhenGateOpen() {
     RB_CHECK(state.rbpodo_diagnostics.has_value());
     RB_CHECK(state.rbpodo_diagnostics->diagnostics_valid);
     RB_CHECK(!state.rbpodo_diagnostics->diagnostics_suspect);
-    RB_CHECK(state.rbpodo_diagnostics->raw.op_stat_self_collision == 1984732816);
+    RB_CHECK(state.rbpodo_diagnostics->raw.op_stat_self_collision == 1984732818);
     RB_CHECK(containsField(state.rbpodo_diagnostics->unavailable_fields, "op_stat_self_collision"));
     RB_CHECK(containsField(state.rbpodo_diagnostics->unavailable_fields, "robot_time_sec"));
     RB_CHECK(!rb_servo::rbpodoStateAcquisitionError(state).has_value());
@@ -689,7 +719,7 @@ bool testStatePublisherSerializesControllerSimUnavailableFields() {
         "controller_sim_unreliable_fields_unavailable"
     );
     RB_CHECK(!diagnostics.at("diagnostics_suspect").get<bool>());
-    RB_CHECK(diagnostics.at("raw").at("op_stat_self_collision").get<int>() == 1984732816);
+    RB_CHECK(diagnostics.at("raw").at("op_stat_self_collision").get<int>() == 1984732818);
     RB_CHECK(diagnostics.at("raw").at("time").get<double>() == 0.0);
     RB_CHECK(diagnostics.at("unavailable_fields").is_array());
     RB_CHECK(diagnostics.at("unavailable_fields").size() == 2);
@@ -704,7 +734,9 @@ bool testStatePublisherSerializesControllerSimUnavailableFields() {
 int main() {
     if (!testFreedriveControllerSignalsMapped()) return 1;
     if (!testClearSelfCollisionIsRobotFault()) return 1;
-    if (!testHugeSelfCollisionIsSuspectButReadable()) return 1;
+    if (!testSelfCollisionUpperBitsAreMaskedToHealthy()) return 1;
+    if (!testRealSelfCollisionFaultsThroughGarbageUpperBits()) return 1;
+    if (!testSosCodeMaskedThroughGarbageUpperBits()) return 1;
     if (!testValidSosCodeIsDeviceFaultNotBooleanViolation()) return 1;
     if (!testValidEmsCodeIsDeviceFaultNotBooleanViolation()) return 1;
     if (!testOutOfRangeSosAndEmsCodesAreSuspect()) return 1;
