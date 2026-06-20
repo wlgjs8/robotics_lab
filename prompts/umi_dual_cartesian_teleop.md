@@ -13,7 +13,7 @@ This must reach a working `pgmode` simulation demo with a **mock/replay tracker
 reader** (hardware-free), plus a defined UDP wire schema for the real Windows
 SteamVR publisher.
 
-## Non-negotiable constraints (read AGENTS.md, GOAL.md, REVIEW.md first)
+## Non-negotiable constraints (read AGENTS.md, REVIEW.md first)
 
 - rbpodo backend only; `operation_mode: simulation`; `physical_motion_expected: false`.
 - Do NOT enable physical real motion. No `RB_ALLOW_REAL_CARTESIAN`, no
