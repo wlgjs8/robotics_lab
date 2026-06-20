@@ -109,6 +109,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--i-am-at-the-estop", action="store_true")
     parser.add_argument("--source-id", default="tcp_pose_batch_replay")
     parser.add_argument("--state-timeout-sec", type=float, default=2.0)
+    parser.add_argument(
+        "--allow-controller-sim-arm-error",
+        action="store_true",
+        help="Pass through replay-only rbpodo pgmode controller-sim not-activated arm-error tolerance.",
+    )
     return parser.parse_args(argv)
 
 
@@ -334,6 +339,7 @@ def return_to_init_pose(args: argparse.Namespace, server: driver.ServerRuntimeCo
             tol_deg=float(args.init_tol_deg),
             timeout_sec=float(args.init_timeout_sec),
             init_lease_grace_sec=float(args.init_lease_grace_sec),
+            allow_controller_sim_arm_error=bool(args.allow_controller_sim_arm_error),
         )
         result.start_delta_deg = compute_joint_delta(start_q, target)
         if not result.arrived:
@@ -373,6 +379,7 @@ def drive_joint_target_until_arrived(
     timeout_sec: float,
     period_sec: float = 0.05,
     init_lease_grace_sec: float = 0.4,
+    allow_controller_sim_arm_error: bool = False,
 ) -> InitReturnResult:
     start = time.monotonic()
     deadline = start + timeout_sec
@@ -387,7 +394,11 @@ def drive_joint_target_until_arrived(
         elif state_client.is_latest_stale():
             cause = "stale robot state during init return"
         else:
-            cause = driver.watchdog_cause(snapshot.payload, command_client)
+            cause = driver.watchdog_cause(
+                snapshot.payload,
+                command_client,
+                allow_controller_sim_arm_error=allow_controller_sim_arm_error,
+            )
         if cause:
             now = time.monotonic()
             if (
@@ -459,6 +470,8 @@ def build_driver_command(args: argparse.Namespace, episode_path: Path, batch_nam
         cmd.extend(["--max-linear-speed-m-s", str(args.max_linear_speed_m_s)])
     if args.max_angular_speed_rad_s is not None:
         cmd.extend(["--max-angular-speed-rad-s", str(args.max_angular_speed_rad_s)])
+    if args.allow_controller_sim_arm_error:
+        cmd.append("--allow-controller-sim-arm-error")
     if dry_run:
         cmd.extend(["--mock-current-pose", str(args.mock_current_pose)])
     else:

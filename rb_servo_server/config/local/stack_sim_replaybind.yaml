@@ -211,8 +211,6 @@ network:
   command_bind: "udp://127.0.0.1:50256"
   state_pub_endpoints:
     - "udp://127.0.0.1:50356"
-    - "udp://127.0.0.1:50366"
-    - "udp://127.0.0.1:50376"
   state_pub_rate_hz: 100
   command_source_allowlist: ["127.0.0.1/32"]
 
@@ -266,8 +264,8 @@ kinematics:
     # flip; the arm keeps tracking with a small Cartesian lag, never holds.
     # DEFAULT OFF until tuned: sigma_min is ~0.004 even in healthy poses, so set
     # eps below that from the ik_sigma_min telemetry at an ik_branch_jump=1 tick.
-    singular_region_eps: 0.06   # TUNE-3 (2026-06-20): left sigma_min drops to ~0.039 before IkFailed -> engage damping just above it
-    damping_max: 0.08           # TUNE-3: ramp damping toward this as sigma_min->0 so DLS tracks with small lag instead of failing
+    singular_region_eps: 0.0
+    damping_max: 0.0
     max_solution_jump_deg: 2.0
     # Branch-jump CLAMP (acts, not just observes). When a converged solve still
     # jumps > max_solution_jump_deg from the seed: re-solve the SAME tick at
@@ -279,7 +277,6 @@ kinematics:
     branch_jump_damping_scale: 10.0
     branch_jump_max_retries: 2
     branch_jump_clamp_to_seed: false
-    branch_jump_rate_limit: true    # TUNE-2 (2026-06-20): was MISSING in sim (real has it). Scale seed->solution delta so largest joint step = max_solution_jump_deg; smooth advance toward solution instead of "plain allow" branch FLIP. The real lever for these jumps.
 
 cartesian_control:
   # Anti-windup for the twist_via_smd goal integrator (position m / orientation

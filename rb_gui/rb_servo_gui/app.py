@@ -1678,13 +1678,79 @@ def build_gui(
 
         with _move_tabs.add_tab("속도"):
             # Two clearly-separated modes (were crammed in one tab). Each DoF has a
-            # [−] label [+] nudge row; the slider sets magnitude only. A click sends
-            # one velocity command (streams until it goes stale); 정지 sends zero.
+            # [−] label [+] row; the slider sets magnitude only. A click STARTS (or
+            # switches) a continuous jog: a keep-alive thread re-sends the selected
+            # velocity every 0.1 s (< the server's 0.2 s command timeout) while
+            # holding the command lease, so the arm moves continuously until 정지 —
+            # the same streaming model as the Circle tab, instead of a one-click
+            # ~200 ms burst that was choppy for fine manipulation.
             vel_arm = server.gui.add_button_group("Arm", ("left", "right"))
             handles["velocity_status"] = server.gui.add_text("Velocity status", initial_value="idle", disabled=True)
 
             def _set_vel_status(ok: bool, message: str) -> None:
                 handles["velocity_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            # Shared continuous-jog controller for BOTH folders below (joint velocity
+            # and TCP twist are mutually exclusive — only one motion at a time). The
+            # running loop reads the current command from a single dict key (atomic
+            # under the GIL), so switching direction/axis just updates it without
+            # tearing down the thread or churning the lease. Per-thread stop event +
+            # join-before-restart avoids the start/stop lifecycle race.
+            vel_jog: dict[str, Any] = {"thread": None, "stop": None, "cmd": None}
+            vel_jog_lock = threading.Lock()
+
+            def _vel_jog_loop(stop_event: threading.Event) -> None:
+                client = safety.command_client
+                took_lease = not client.hold_lease
+                if took_lease:
+                    client.acquire_lease()
+                last_target: tuple[Any, str] | None = None
+                try:
+                    while not stop_event.is_set():
+                        cmd = vel_jog["cmd"]  # single atomic read
+                        if cmd is None:
+                            break
+                        sender, arm, vec, label = cmd
+                        last_target = (sender, arm)
+                        ok, message = sender(arm, vec)
+                        _set_vel_status(ok, f"{label}: {message}")
+                        if not ok:  # gate closed / limit: stop streaming, fail-safe
+                            break
+                        stop_event.wait(0.1)
+                    if last_target is not None:  # best-effort zero on stop
+                        sender, arm = last_target
+                        try:
+                            sender(arm, (0.0,) * 6)
+                        except Exception:
+                            pass
+                finally:
+                    if took_lease:
+                        client.release_lease()
+
+            def _vel_jog_start(sender: Any, arm: str, vec: tuple[float, ...], label: str) -> None:
+                with vel_jog_lock:
+                    vel_jog["cmd"] = (sender, arm, vec, label)
+                    thread = vel_jog["thread"]
+                    if thread is not None and thread.is_alive():
+                        _set_vel_status(True, f"jogging {label}")
+                        return  # the running loop picks up the new command
+                    stop = threading.Event()
+                    thread = threading.Thread(target=_vel_jog_loop, args=(stop,), daemon=True)
+                    vel_jog["thread"], vel_jog["stop"] = thread, stop
+                    thread.start()
+                _set_vel_status(True, f"jogging {label} (정지로 멈춤)")
+
+            def _vel_jog_stop() -> None:
+                with vel_jog_lock:
+                    vel_jog["cmd"] = None
+                    stop = vel_jog["stop"]
+                    if stop is not None:
+                        stop.set()
+                    thread = vel_jog["thread"]
+                    if thread is not None and thread.is_alive():
+                        thread.join(timeout=1.0)
+                    vel_jog["thread"], vel_jog["stop"] = None, None
+                _set_vel_status(True, "stopped")
 
             with server.gui.add_folder("관절 속도"):
                 jv_speed = server.gui.add_slider("deg/s", min=0.5, max=10.0, step=0.5, initial_value=3.0)
@@ -1692,7 +1758,11 @@ def build_gui(
                 def _send_joint_vel(joint_index: int, sign: float) -> None:
                     vel = [0.0] * 6
                     vel[joint_index] = sign * float(jv_speed.value)
-                    _set_vel_status(*safety.send_joint_velocity(vel_arm.value, tuple(vel)))
+                    arrow = "+" if sign > 0 else "−"
+                    _vel_jog_start(
+                        safety.send_joint_velocity, vel_arm.value, tuple(vel),
+                        f"{vel_arm.value} J{joint_index + 1}{arrow} {float(jv_speed.value):g}deg/s",
+                    )
 
                 def _add_joint_vel_row(joint_index: int) -> None:
                     group = server.gui.add_button_group("", ("-", _nudge_label(f"J{joint_index + 1}"), "+"))
@@ -1710,7 +1780,7 @@ def build_gui(
 
                 @jv_stop.on_click
                 def _(_: Any) -> None:
-                    _set_vel_status(*safety.send_joint_velocity(vel_arm.value, (0.0,) * 6))
+                    _vel_jog_stop()
 
             with server.gui.add_folder("TCP 트위스트"):
                 tw_frame = server.gui.add_button_group("Frame", ("stand", "local"))
@@ -1719,23 +1789,28 @@ def build_gui(
                 _twist_axes = (("X", 0, False), ("Y", 1, False), ("Z", 2, False),
                                ("Rx", 3, True), ("Ry", 4, True), ("Rz", 5, True))
 
-                def _send_twist(axis_index: int, angular: bool, sign: float) -> None:
+                def _send_twist(label: str, axis_index: int, angular: bool, sign: float) -> None:
                     twist = [0.0] * 6
                     twist[axis_index] = sign * (float(tw_ang.value) if angular else float(tw_lin.value))
-                    if tw_frame.value == "local":
-                        _set_vel_status(*safety.send_tcp_twist_local(vel_arm.value, tuple(twist)))
-                    else:
-                        _set_vel_status(*safety.send_tcp_twist_stand(vel_arm.value, tuple(twist)))
+                    sender = (
+                        safety.send_tcp_twist_local if tw_frame.value == "local"
+                        else safety.send_tcp_twist_stand
+                    )
+                    arrow = "+" if sign > 0 else "−"
+                    _vel_jog_start(
+                        sender, vel_arm.value, tuple(twist),
+                        f"{vel_arm.value} {tw_frame.value} {label}{arrow}",
+                    )
 
                 def _add_twist_row(label: str, axis_index: int, angular: bool) -> None:
                     group = server.gui.add_button_group("", ("-", _nudge_label(label), "+"))
 
                     @group.on_click
-                    def _(_: Any, group: Any = group, axis_index: int = axis_index, angular: bool = angular) -> None:
+                    def _(_: Any, group: Any = group, label: str = label, axis_index: int = axis_index, angular: bool = angular) -> None:
                         if group.value == "-":
-                            _send_twist(axis_index, angular, -1.0)
+                            _send_twist(label, axis_index, angular, -1.0)
                         elif group.value == "+":
-                            _send_twist(axis_index, angular, 1.0)
+                            _send_twist(label, axis_index, angular, 1.0)
 
                 for _tw_label, _tw_index, _tw_angular in _twist_axes:
                     _add_twist_row(_tw_label, _tw_index, _tw_angular)
@@ -1743,10 +1818,7 @@ def build_gui(
 
                 @tw_stop.on_click
                 def _(_: Any) -> None:
-                    if tw_frame.value == "local":
-                        _set_vel_status(*safety.send_tcp_twist_local(vel_arm.value, (0.0,) * 6))
-                    else:
-                        _set_vel_status(*safety.send_tcp_twist_stand(vel_arm.value, (0.0,) * 6))
+                    _vel_jog_stop()
 
         with _move_tabs.add_tab("TCP PTP"):
             handles["tcp_ptp_note"] = server.gui.add_text(
@@ -1902,10 +1974,13 @@ def build_gui(
             # stays live so the operator can halt a running circle.
             handles["circle_start_button"] = c_start
             handles["circle_status"] = server.gui.add_text("Circle status", initial_value="idle", disabled=True)
-            circle_stop_event = threading.Event()
-            circle_state: dict[str, Any] = {"thread": None}
+            # Per-run stop event stored WITH its thread (not a single shared Event):
+            # Start joins any prior thread before launching, so a quick Stop→Start no
+            # longer hits "already running" and there is no shared-event clear/recheck
+            # race between an outgoing thread and the incoming one.
+            circle_state: dict[str, Any] = {"thread": None, "stop": None}
 
-            def _circle_loop(diameter: float, period: float, plane: str) -> None:
+            def _circle_loop(diameter: float, period: float, plane: str, stop_event: threading.Event) -> None:
                 # Hold the command-source lease for the whole circle so the keep-
                 # alive re-sends carry a FIXED seq. Without a held lease, send()
                 # brackets every packet with Acquire/Release and re-issues a fresh
@@ -1936,9 +2011,9 @@ def build_gui(
                         handles["circle_status"].value = "BLOCKED: " + message
                         return
                     handles["circle_status"].value = "running: " + message
-                    while not circle_stop_event.is_set():
+                    while not stop_event.is_set():
                         client.send(packet)
-                        circle_stop_event.wait(0.3)
+                        stop_event.wait(0.3)
                     client.send_lifecycle("Hold")
                 finally:
                     if took_lease:
@@ -1946,27 +2021,32 @@ def build_gui(
 
             @c_start.on_click
             def _(_: Any) -> None:
-                existing = circle_state["thread"]
+                # Cleanly tear down any prior run BEFORE starting: signal its own
+                # stop event and join so it has released the lease and sent Hold.
+                existing, existing_stop = circle_state["thread"], circle_state["stop"]
                 if existing is not None and existing.is_alive():
-                    handles["circle_status"].value = "already running; press Stop first"
-                    return
+                    if existing_stop is not None:
+                        existing_stop.set()
+                    existing.join(timeout=1.5)
                 reason = safety.tcp_command_disabled_reason()
                 if reason:
                     handles["circle_status"].value = "BLOCKED: " + reason
                     return
-                circle_stop_event.clear()
+                stop_event = threading.Event()
                 thread = threading.Thread(
                     target=_circle_loop,
-                    args=(float(c_diameter.value), float(c_period.value), str(c_plane.value)),
+                    args=(float(c_diameter.value), float(c_period.value), str(c_plane.value), stop_event),
                     daemon=True,
                 )
-                circle_state["thread"] = thread
+                circle_state["thread"], circle_state["stop"] = thread, stop_event
                 thread.start()
                 handles["circle_status"].value = "starting..."
 
             @c_stop.on_click
             def _(_: Any) -> None:
-                circle_stop_event.set()
+                stop_event = circle_state["stop"]
+                if stop_event is not None:
+                    stop_event.set()
                 handles["circle_status"].value = "stopped"
 
         with _adv_tabs.add_tab("Delta"):

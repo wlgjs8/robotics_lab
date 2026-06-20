@@ -22,6 +22,11 @@ def pose(x: float, y: float = 0.0, z: float = 0.2, q: np.ndarray = Q) -> np.ndar
     return np.asarray([x, y, z, *q], dtype=np.float64)
 
 
+class FakeCommandClient:
+    source_id = "tcp_pose_replay"
+    session_id = "session-1"
+
+
 class RealReplayDriverTest(unittest.TestCase):
     def test_dry_run_npz_with_mock_current_pose_writes_plan_and_sends_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,6 +108,61 @@ class RealReplayDriverTest(unittest.TestCase):
         self.assertEqual(replay.watchdog_cause({"safety_verdict": "EmergencyStop"}), "safety_verdict=EmergencyStop")
         payload = {"left": {"cartesian_solve": {"ik_timed_out": True}}}
         self.assertEqual(replay.watchdog_cause(payload), "left.cartesian_solve.ik_timed_out")
+
+    def test_controller_sim_not_activated_arm_error_is_flag_gated(self) -> None:
+        payload = pgmode_not_activated_payload()
+
+        self.assertEqual(replay.watchdog_cause(payload), "right.has_error")
+        self.assertIsNone(replay.watchdog_cause(payload, allow_controller_sim_arm_error=True))
+
+    def test_controller_sim_not_activated_arm_error_does_not_mask_ems_fault(self) -> None:
+        payload = pgmode_not_activated_payload(raw_overrides={"op_stat_ems_flag": 1})
+
+        self.assertFalse(replay.arm_error_is_controller_sim_not_activated(payload, "right"))
+        self.assertEqual(
+            replay.watchdog_cause(payload, allow_controller_sim_arm_error=True),
+            "right.has_error",
+        )
+
+    def test_controller_sim_not_activated_arm_error_does_not_mask_unexpected_startup_reason(self) -> None:
+        payload = pgmode_not_activated_payload(right_overrides={"startup_invalid_reasons": ["servo_disabled", "wrong_mode"]})
+
+        self.assertFalse(replay.arm_error_is_controller_sim_not_activated(payload, "right"))
+        self.assertEqual(
+            replay.watchdog_cause(payload, allow_controller_sim_arm_error=True),
+            "right.has_error",
+        )
+
+    def test_controller_sim_arm_error_tolerance_keeps_other_watchdogs_fail_closed(self) -> None:
+        client = FakeCommandClient()
+        self.assertEqual(
+            replay.watchdog_cause({"fault_latched": True}, client, allow_controller_sim_arm_error=True),
+            "fault_latched",
+        )
+        self.assertEqual(
+            replay.watchdog_cause({"tracking_error_latched": True}, client, allow_controller_sim_arm_error=True),
+            "tracking_error",
+        )
+        lease_lost = {
+            "command_source": {
+                "enforce_lease": True,
+                "active_source_id": "other",
+                "active_session_id": "session-1",
+            }
+        }
+        self.assertEqual(
+            replay.watchdog_cause(lease_lost, client, allow_controller_sim_arm_error=True),
+            "command_source_lease_lost",
+        )
+
+    def test_controller_sim_arm_error_tolerance_is_not_real_mode(self) -> None:
+        payload = pgmode_not_activated_payload(top_overrides={"operation_mode": "real", "observed_mode": "real"})
+
+        self.assertFalse(replay.arm_error_is_controller_sim_not_activated(payload, "right"))
+        self.assertEqual(
+            replay.watchdog_cause(payload, allow_controller_sim_arm_error=True),
+            "right.has_error",
+        )
 
     def test_pose_delta_local_round_trip_preserves_trajectory_shape(self) -> None:
         trajectory = np.stack(
@@ -326,6 +386,49 @@ network:
         encoding="utf-8",
     )
     return path
+
+
+def pgmode_not_activated_payload(
+    *,
+    top_overrides: dict | None = None,
+    right_overrides: dict | None = None,
+    raw_overrides: dict | None = None,
+) -> dict:
+    raw = {
+        "init_state_info": 0,
+        "init_error": 2,
+        "op_stat_ems_flag": 0,
+        "op_stat_sos_flag": 0,
+        "op_stat_soft_estop_occur": 0,
+        "op_stat_collision_occur": 0,
+        "op_stat_self_collision": 0,
+    }
+    if raw_overrides:
+        raw.update(raw_overrides)
+    right = {
+        "has_error": True,
+        "servo_enabled": False,
+        "error_code": 2,
+        "startup_invalid_reasons": ["robot_fault", "servo_disabled"],
+        "diagnostic_error_source": "rbpodo_init_error",
+        "rbpodo_diagnostics": {"raw": raw},
+    }
+    if right_overrides:
+        right.update(right_overrides)
+    payload = {
+        "observed_mode": "simulation",
+        "operation_mode": "simulation",
+        "physical_motion_expected": False,
+        "left": {
+            "has_error": False,
+            "servo_enabled": True,
+            "rbpodo_diagnostics": {"raw": {"init_state_info": 6, "init_error": 0}},
+        },
+        "right": right,
+    }
+    if top_overrides:
+        payload.update(top_overrides)
+    return payload
 
 
 def write_data_tcp(path: Path) -> Path:

@@ -99,6 +99,21 @@ class BatchReplayEpisodesTest(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertEqual(attempted, ["episode_000.hdf5", "episode_001.hdf5"])
 
+    def test_controller_sim_arm_error_flag_is_passed_to_driver_command(self) -> None:
+        args = batch.parse_args(
+            [
+                "--episodes-dir",
+                "episodes",
+                "--init-mode",
+                "rest_stow",
+                "--allow-controller-sim-arm-error",
+            ]
+        )
+
+        cmd = batch.build_driver_command(args, Path("episodes/episode_000.hdf5"), "batch_test", dry_run=True)
+
+        self.assertIn("--allow-controller-sim-arm-error", cmd)
+
     def test_init_return_arrival_and_timeout_logic(self) -> None:
         server = replay.ServerRuntimeConfig(
             path=Path("server.yaml"),

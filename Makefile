@@ -15,7 +15,8 @@ POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 #   make run MODE=sim         -> pgmode controller-simulation
 #   make run VERBOSE=1        -> live teleop input + send/drop stats
 #   make run GRIPPER_FOLLOW=0 -> skip the gripper follower
-MODE ?= real
+#   ACTION_SOURCE=none make run
+MODE ?= sim
 run:
 	./tools/run_stack.sh $(MODE)
 

@@ -42,6 +42,8 @@ from policy_runner.servo_command_client import CommandIntent, ServoCommandClient
 
 
 ARMS = ("left", "right")
+CONTROLLER_SIM_NOT_ACTIVATED_REASONS = frozenset(("robot_fault", "servo_disabled"))
+_TOLERATED_CONTROLLER_SIM_ARM_ERRORS: set[str] = set()
 DEFAULT_SERVER_CONFIG_CANDIDATES = (
     ROOT / "rb_servo_server" / "config" / "local" / "stack_real.yaml",
     ROOT / "rb_servo_server" / "config" / "local" / "stack_real_replay.yaml",
@@ -210,6 +212,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--i-am-at-the-estop", action="store_true")
     parser.add_argument("--source-id", default="tcp_pose_replay")
     parser.add_argument("--state-timeout-sec", type=float, default=2.0)
+    parser.add_argument(
+        "--allow-controller-sim-arm-error",
+        action="store_true",
+        help="In rbpodo pgmode controller-sim only, tolerate a per-arm not-activated has_error so replay can collect IK telemetry.",
+    )
     parser.add_argument("--non-interactive", action="store_true", help="Skip only the two typed physical-motion confirmations.")
     parser.add_argument("--run-name", default=None, help="Override the run directory name under <out-dir>/<episode_id>/runs/.")
     return parser.parse_args(argv)
@@ -1042,6 +1049,7 @@ def write_would_be_log(plan: ReplayPlan, args: argparse.Namespace, server: Serve
 
 
 def run_execute(plan: ReplayPlan, args: argparse.Namespace, server: ServerRuntimeConfig) -> None:
+    _TOLERATED_CONTROLLER_SIM_ARM_ERRORS.clear()
     state_client = RobotStateClient(bind=server.state_bind or "", stale_timeout_sec=float(args.state_timeout_sec))
     command_client = ServoCommandClient(
         server.command_endpoint,
@@ -1085,7 +1093,7 @@ def stream_init_premove(
     count = max(len(poses) for poses in plan.init_poses.values())
     period = 1.0 / float(args.rate_hz or server.servo_rate_hz)
     for i in range(count):
-        check_watchdog(state_client, client)
+        check_watchdog(state_client, client, allow_controller_sim_arm_error=bool(args.allow_controller_sim_arm_error))
         left = _pose_at_fractional_index(plan.init_poses.get("left"), i, count) if "left" in plan.selected_arms else None
         right = _pose_at_fractional_index(plan.init_poses.get("right"), i, count) if "right" in plan.selected_arms else None
         client.send(tcp_pose_target_stand_intent(left=_pose_list(left), right=_pose_list(right), timeout_sec=server.command_timeout_sec))
@@ -1102,7 +1110,7 @@ def stream_conditioned_goals(
 ) -> None:
     period = float(args.time_scale) / float(args.rate_hz or server.servo_rate_hz)
     for i in range(plan.t_servo.size):
-        check_watchdog(state_client, client)
+        check_watchdog(state_client, client, allow_controller_sim_arm_error=bool(args.allow_controller_sim_arm_error))
         snapshot = state_client.latest.payload if state_client.latest is not None else None
         left = plan.goals["left"][i] if "left" in plan.selected_arms else None
         right = plan.goals["right"][i] if "right" in plan.selected_arms else None
@@ -1131,18 +1139,28 @@ def stream_conditioned_goals(
         time.sleep(period)
 
 
-def check_watchdog(state_client: RobotStateClient, client: ServoCommandClient) -> None:
+def check_watchdog(
+    state_client: RobotStateClient,
+    client: ServoCommandClient,
+    *,
+    allow_controller_sim_arm_error: bool = False,
+) -> None:
     snapshot = state_client.latest
     if snapshot is None:
         raise WatchdogStop("no state snapshot")
     if state_client.is_latest_stale():
         raise WatchdogStop("stale state")
-    cause = watchdog_cause(snapshot.payload, client)
+    cause = watchdog_cause(snapshot.payload, client, allow_controller_sim_arm_error=allow_controller_sim_arm_error)
     if cause:
         raise WatchdogStop(cause)
 
 
-def watchdog_cause(payload: dict[str, Any], client: ServoCommandClient | None = None) -> str | None:
+def watchdog_cause(
+    payload: dict[str, Any],
+    client: ServoCommandClient | None = None,
+    *,
+    allow_controller_sim_arm_error: bool = False,
+) -> str | None:
     if payload.get("fault_latched") is True:
         return "fault_latched"
     verdict = payload.get("safety_verdict")
@@ -1159,6 +1177,9 @@ def watchdog_cause(payload: dict[str, Any], client: ServoCommandClient | None = 
         if not isinstance(arm_state, dict):
             continue
         if arm_state.get("has_error") is True:
+            if allow_controller_sim_arm_error and arm_error_is_controller_sim_not_activated(payload, arm):
+                _log_tolerated_controller_sim_arm_error(arm)
+                continue
             return f"{arm}.has_error"
         solve = arm_state.get("cartesian_solve")
         if isinstance(solve, dict):
@@ -1166,6 +1187,93 @@ def watchdog_cause(payload: dict[str, Any], client: ServoCommandClient | None = 
                 if solve.get(key) is True:
                     return f"{arm}.cartesian_solve.{key}"
     return None
+
+
+def arm_error_is_controller_sim_not_activated(payload: dict[str, Any], arm: str) -> bool:
+    if arm not in ARMS or not isinstance(payload, dict):
+        return False
+    if not _payload_is_controller_simulation(payload, arm):
+        return False
+    arm_state = payload.get(arm)
+    if not isinstance(arm_state, dict):
+        return False
+    reasons = arm_state.get("startup_invalid_reasons")
+    if not isinstance(reasons, (list, tuple, set)) or not reasons:
+        return False
+    reason_set = {str(item) for item in reasons}
+    if not reason_set.issubset(CONTROLLER_SIM_NOT_ACTIVATED_REASONS):
+        return False
+    diagnostics = arm_state.get("rbpodo_diagnostics")
+    raw = diagnostics.get("raw") if isinstance(diagnostics, dict) else None
+    if not isinstance(raw, dict):
+        return False
+    for key in ("op_stat_ems_flag", "op_stat_sos_flag", "op_stat_soft_estop_occur", "op_stat_collision_occur"):
+        if _int_value(raw.get(key)) != 0:
+            return False
+    self_collision = _int_value(raw.get("op_stat_self_collision"))
+    if self_collision is None or self_collision == 1:
+        return False
+    error_code = _optional_int_value(arm_state.get("error_code"))
+    init_error = _optional_int_value(raw.get("init_error"))
+    if error_code is not None and init_error is not None and error_code not in {0, init_error}:
+        return False
+    diagnostic_source = arm_state.get("diagnostic_error_source")
+    if diagnostic_source not in (None, "", "rbpodo_init_error"):
+        return False
+    return True
+
+
+def _payload_is_controller_simulation(payload: dict[str, Any], arm: str) -> bool:
+    for container in (payload, payload.get(arm)):
+        if not isinstance(container, dict):
+            continue
+        for key in ("operation_mode", "observed_mode"):
+            if str(container.get(key, "")).lower() == "simulation":
+                return True
+        for key in (
+            "controller_simulation_cartesian_enabled",
+            "controller_simulation_cartesian_enabled_for_current_command",
+            "controller_simulation_streaming_cartesian_available",
+            "allow_in_controller_simulation",
+            "allow_controller_simulation_motion",
+        ):
+            if container.get(key) is True:
+                return True
+    physical_motion_expected = payload.get("physical_motion_expected")
+    if physical_motion_expected is False and str(payload.get("operation_mode", "")).lower() == "simulation":
+        return True
+    return False
+
+
+def _int_value(value: Any) -> int | None:
+    try:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str) and value.strip():
+            return int(value.strip())
+    except ValueError:
+        return None
+    return None
+
+
+def _optional_int_value(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    return _int_value(value)
+
+
+def _log_tolerated_controller_sim_arm_error(arm: str) -> None:
+    if arm in _TOLERATED_CONTROLLER_SIM_ARM_ERRORS:
+        return
+    _TOLERATED_CONTROLLER_SIM_ARM_ERRORS.add(arm)
+    print(
+        f"[controller-sim] tolerating {arm} not-activated has_error "
+        "(servo_disabled/init_error); server-side IK still captured"
+    )
 
 
 def actual_tcp_pose_from_state(payload: dict[str, Any], arm: str) -> np.ndarray:
@@ -1246,6 +1354,11 @@ def log_row(
         "ik_pos_err": solve.get("position_error_m", np.nan),
         "ik_ori_err": solve.get("orientation_error_rad", np.nan),
         "ik_solution_jump_deg": solve.get("ik_solution_jump_deg", np.nan),
+        "ik_min_singular_value": solve.get("ik_min_singular_value", np.nan),
+        "ik_applied_damping": solve.get("ik_applied_damping", np.nan),
+        "ik_status": solve.get("ik_status", ""),
+        "ik_reason": solve.get("ik_reason", ""),
+        "ik_branch_jump_clamped": _boolish(solve.get("ik_branch_jump_clamped")),
         "branch_jump_flag": _boolish(solve.get("ik_branch_jump_suspected")),
         "singular_damping_flag": _boolish(solve.get("singular_damping_flag")),
         "safety_proj_flag": _boolish((snapshot or {}).get("safety_projection_active")),
@@ -1340,21 +1453,18 @@ def print_plan_summary(plan: ReplayPlan, server: ServerRuntimeConfig, args: argp
 
 
 def confirm_start(selected_arms: tuple[str, ...], args: argparse.Namespace | None = None) -> None:
-    if args is not None and bool(getattr(args, "non_interactive", False)):
-        return
-    token = ",".join(selected_arms)
-    answer = input(f"Physical motion gate 1: type {token} to confirm: ").strip()
-    if answer != token:
-        raise ReplayRefusal("start confirmation token mismatch")
+    # Interactive typed gate removed by operator request. Motion still requires the
+    # explicit --execute --i-am-at-the-estop flags (dry-run remains the default), and
+    # the operator launches this command with an E-stop in hand. The typed prompt also
+    # created a command gap during typing that dropped the command-source lease at
+    # stream start (false command_source_lease_lost), so removing it fixes that too.
+    print(f"Physical motion gate 1: confirmed for {','.join(selected_arms)} (interactive prompt removed)")
 
 
 def confirm_after_init(selected_arms: tuple[str, ...], args: argparse.Namespace | None = None) -> None:
-    if args is not None and bool(getattr(args, "non_interactive", False)):
-        return
-    token = ",".join(selected_arms)
-    answer = input(f"Physical motion gate 2 after init pre-move: type {token} to stream: ").strip()
-    if answer != token:
-        raise ReplayRefusal("post-init confirmation token mismatch")
+    # See confirm_start: no typed prompt; streaming proceeds immediately after the init
+    # pre-move so the command-source lease stays continuously held.
+    print(f"Physical motion gate 2 (after init pre-move): streaming {','.join(selected_arms)} (interactive prompt removed)")
 
 
 def wait_for_fresh_state(client: RobotStateClient, *, timeout_sec: float) -> None:

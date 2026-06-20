@@ -235,15 +235,39 @@ def _reach_envelope_path() -> Path:
     return _asset_path("RB_GUI_REACH_ENVELOPE", "reach_envelope_rb3_730e.npz")
 
 
+def _orient_faces_outward(verts: Any, faces: Any) -> Any:
+    """Re-wind triangles so every face normal points away from the mesh centroid.
+
+    The reach-envelope shell (tools/reach_envelope.py) is a lat/lon grid with no
+    guaranteed winding, so side="back" can't be trusted to cull the NEAR faces
+    until the normals are made consistently outward. The shell is roughly
+    star-shaped from its centroid, so "normal·(face_center - centroid) >= 0" is a
+    reliable outward test for it. Faces failing it get two indices swapped."""
+    import numpy as np
+
+    centroid = verts.mean(axis=0)
+    v0, v1, v2 = verts[faces[:, 0]], verts[faces[:, 1]], verts[faces[:, 2]]
+    normals = np.cross(v1 - v0, v2 - v0)
+    outward = (v0 + v1 + v2) / 3.0 - centroid
+    flip = np.einsum("ij,ij->i", normals, outward) < 0.0
+    fixed = faces.copy()
+    fixed[flip, 1] = faces[flip, 2]
+    fixed[flip, 2] = faces[flip, 1]
+    return fixed
+
+
 def _add_reachability_cloud(server: Any, handles: dict[str, Any]) -> None:
     """Per-arm reachable-workspace shell mesh (tools/reach_envelope.py output).
 
     The saved vertices are in the arm-base frame, so attaching the SAME mesh under
     each arm's /stand/<side>_base node renders it correctly placed and mirrored via
     the mount transform (no manual per-arm transform needed). Drawn translucent and
-    double-sided so the robot/stand show through. Skips gracefully if the asset is
-    missing (run tools/reach_envelope.py to generate it) or viser has no mesh
-    support. Static geometry — visibility is toggled from the GUI."""
+    back-sided (after orienting normals outward): the near hemisphere is culled so
+    it never writes depth over the translucent geometry INSIDE the shell (the
+    reference ghost and the red self-collision overlays), while the robot/stand
+    still show through and the shell stays visible from inside. Skips gracefully if
+    the asset is missing (run tools/reach_envelope.py to generate it) or viser has
+    no mesh support. Static geometry — visibility is toggled from the GUI."""
     if not hasattr(server.scene, "add_mesh_simple"):
         return
     path = _reach_envelope_path()
@@ -261,6 +285,7 @@ def _add_reachability_cloud(server: Any, handles: dict[str, Any]) -> None:
         if verts.ndim != 2 or verts.shape[1] != 3 or len(verts) == 0 or len(faces) == 0:
             handles["reach_envelope_error"] = f"reach envelope malformed: {path}"
             return
+        faces = _orient_faces_outward(verts, faces)  # make side="back" reliable
         handles["reach_envelope_r_max_m"] = float(data["r_max_recommended_m"])
         handles["reach_envelope_r_min_m"] = float(data["r_min_recommended_m"])
         for arm in ("left", "right"):
@@ -271,7 +296,9 @@ def _add_reachability_cloud(server: Any, handles: dict[str, Any]) -> None:
                     faces=faces,
                     color=_REACH_ENVELOPE_GREEN,
                     opacity=_REACH_ENVELOPE_OPACITY,
-                    side="double",      # visible from inside the shell too
+                    # back-sided: cull the near hemisphere so it doesn't write depth
+                    # over the translucent overlays inside; still visible from inside.
+                    side="back",
                     flat_shading=False,
                     visible=False,      # brought up by the GUI "도달영역 표시" toggle
                 )
@@ -308,10 +335,11 @@ def _add_floor_plane(server: Any, handles: dict[str, Any]) -> None:
                     dimensions=_FLOOR_PLANE_DIMENSIONS,
                     color=_FLOOR_PLANE_BLUE,
                     opacity=0.25,
+                    side="back",  # don't let the near face occlude geometry above it
                     position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
                     visible=False,
                 )
-            except TypeError:  # older viser without opacity support
+            except TypeError:  # older viser without opacity/side support
                 handles["floor_plane"] = server.scene.add_box(
                     "/stand/floor_plane",
                     dimensions=_FLOOR_PLANE_DIMENSIONS,
@@ -341,6 +369,7 @@ def _add_floor_plane(server: Any, handles: dict[str, Any]) -> None:
                     dimensions=_FLOOR_PLANE_DIMENSIONS,
                     color=_FLOOR_PLANE_PREVIEW_YELLOW,
                     opacity=0.15,
+                    side="back",  # don't let the near face occlude geometry above it
                     position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
                     visible=False,
                 )
@@ -523,11 +552,17 @@ def _add_roi_box(server: Any, handles: dict[str, Any]) -> None:
     ):
         try:
             try:
+                # side="back" renders only the far interior walls, so the near
+                # walls don't write the depth buffer and occlude the translucent
+                # geometry INSIDE the box (the reference ghost robot and the red
+                # self-collision overlays). viser meshes keep depthWrite=true even
+                # when transparent, so a default front-sided box hides those
+                # overlays whenever the ROI region is shown.
                 handles[key] = server.scene.add_box(
                     name, dimensions=dims, color=color, opacity=opacity,
-                    position=center, visible=False,
+                    side="back", position=center, visible=False,
                 )
-            except TypeError:  # older viser without opacity support
+            except TypeError:  # older viser without opacity/side support
                 handles[key] = server.scene.add_box(
                     name, dimensions=dims, color=color, position=center, visible=False,
                 )
