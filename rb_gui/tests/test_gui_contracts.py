@@ -24,7 +24,9 @@ from rb_servo_gui.app import (
     _TCP_FRAME_STAND,
     _apply_tcp_delta_and_send_pose_target,
     _apply_tcp_delta_to_target,
+    _gripper_cmd_endpoint,
     _push_gripper_percent,
+    _send_gripper_command,
     _apply_init_joints_live,
     _nudge_label,
     _status_summary_html,
@@ -928,6 +930,46 @@ class GuiContractsTest(unittest.TestCase):
                           "wrist1_joint", "wrist2_joint", "wrist3_joint"))
         _update_urdf_config(plain, arm, gripper_percent=0.0)
         self.assertEqual(plain.last, list(arm))
+
+    def test_gripper_cmd_endpoint_default_and_env(self):
+        old = os.environ.pop("RB_GUI_GRIPPER_CMD_ENDPOINT", None)
+        try:
+            self.assertEqual(_gripper_cmd_endpoint(), ("127.0.0.1", 50410))
+            os.environ["RB_GUI_GRIPPER_CMD_ENDPOINT"] = "udp://10.0.0.5:51000"
+            self.assertEqual(_gripper_cmd_endpoint(), ("10.0.0.5", 51000))
+        finally:
+            os.environ.pop("RB_GUI_GRIPPER_CMD_ENDPOINT", None)
+            if old is not None:
+                os.environ["RB_GUI_GRIPPER_CMD_ENDPOINT"] = old
+
+    def test_send_gripper_command_builds_and_sends_packet(self):
+        class _Slider:
+            def __init__(self, v):
+                self.value = v
+
+        class _Sock:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, data, endpoint):
+                self.sent.append((json.loads(data.decode()), endpoint))
+
+        sock = _Sock()
+        handles = {
+            "gripper_slider_left": _Slider(30.0),
+            "gripper_slider_right": _Slider(80.0),
+            "gripper_cmd_sock": sock,
+            "gripper_cmd_endpoint": ("127.0.0.1", 50410),
+            "gripper_cmd_seq": 0,
+        }
+        _send_gripper_command(handles)
+        self.assertEqual(len(sock.sent), 1)
+        msg, endpoint = sock.sent[0]
+        self.assertEqual(endpoint, ("127.0.0.1", 50410))
+        self.assertEqual(msg["schema"], "robotics_lab.gripper_cmd.v1")
+        self.assertTrue(msg["deadman"])
+        self.assertEqual(msg["left"], {"percent": 30.0, "valid": True})
+        self.assertEqual(msg["right"], {"percent": 80.0, "valid": True})
+        self.assertEqual(handles["gripper_cmd_seq"], 1)  # seq advances
 
     def test_arm_snapshot_parses_gripper_feedback_block(self):
         from rb_servo_gui.models import StateSnapshot

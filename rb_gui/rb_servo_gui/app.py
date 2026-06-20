@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import socket
 import threading
 import time
 from html import escape
@@ -1654,18 +1655,35 @@ def build_gui(
                 )
 
         with _op_tabs.add_tab("그리퍼"):
-            with server.gui.add_folder("그리퍼 표시"):
-                # Drives the articulated-gripper fingers in the 3D view (no-op on the
-                # plain single-mesh gripper URDF). 100 = open, 0 = closed; continuous
-                # values show partial closure. This slider is the interim source until
-                # the gripper-state feed (see docs/plans/gripper_server_design.md)
-                # lands; the per-tick value is pushed into scene_handles by _refresh.
+            with server.gui.add_folder("그리퍼 제어"):
+                # Operator gripper control. Each slider sends a gripper_cmd.v1
+                # setpoint to gripper_server (UDP, default 127.0.0.1:50410), which
+                # drives the sim/real gripper; its feedback (state JSON) then moves
+                # the articulated-gripper viz. When gripper_server is absent the
+                # slider still previews the viz directly (see _push_gripper_percent).
+                # 100 = open, 0 = closed. Endpoint: RB_GUI_GRIPPER_CMD_ENDPOINT.
                 if hasattr(server.gui, "add_slider"):
-                    handles["gripper_slider_left"] = server.gui.add_slider(
+                    g_left = server.gui.add_slider(
                         "Left gripper %", min=0.0, max=100.0, step=1.0, initial_value=100.0
                     )
-                    handles["gripper_slider_right"] = server.gui.add_slider(
+                    g_right = server.gui.add_slider(
                         "Right gripper %", min=0.0, max=100.0, step=1.0, initial_value=100.0
+                    )
+                    handles["gripper_slider_left"] = g_left
+                    handles["gripper_slider_right"] = g_right
+                    handles["gripper_cmd_endpoint"] = _gripper_cmd_endpoint()
+                    handles["gripper_cmd_sock"] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    handles["gripper_cmd_seq"] = 0
+
+                    def _on_gripper_slider(_: Any = None) -> None:
+                        _send_gripper_command(handles)
+
+                    g_left.on_update(_on_gripper_slider)
+                    g_right.on_update(_on_gripper_slider)
+                    handles["gripper_control_status"] = server.gui.add_text(
+                        "Gripper cmd",
+                        initial_value=f"-> gripper_server {handles['gripper_cmd_endpoint'][0]}:{handles['gripper_cmd_endpoint'][1]}",
+                        disabled=True,
                     )
 
     with tabs.add_tab("이동"):
@@ -2153,6 +2171,47 @@ def _latest_circle_overlay(
     if overlay_store is None:
         return None, True
     return overlay_store.latest(), overlay_store.is_stale()
+
+
+def _gripper_cmd_endpoint() -> tuple[str, int]:
+    """gripper_server command endpoint (gripper_cmd.v1 destination). Override with
+    RB_GUI_GRIPPER_CMD_ENDPOINT=udp://host:port (default matches the stack config)."""
+    raw = os.environ.get("RB_GUI_GRIPPER_CMD_ENDPOINT", "udp://127.0.0.1:50410")
+    text = raw[len("udp://"):] if raw.startswith("udp://") else raw
+    host, _, port = text.rpartition(":")
+    try:
+        return (host or "127.0.0.1", int(port))
+    except ValueError:
+        return ("127.0.0.1", 50410)
+
+
+def _send_gripper_command(handles: dict[str, Any]) -> None:
+    """Send the current gripper slider values to gripper_server as gripper_cmd.v1.
+
+    Operator manual control: gripper_server drives the sim/real gripper and its
+    feedback (state JSON) moves the viz. Coexists with teleop/policy gripper
+    commands (gripper_server applies the latest setpoint)."""
+    sock = handles.get("gripper_cmd_sock")
+    endpoint = handles.get("gripper_cmd_endpoint")
+    if sock is None or endpoint is None:
+        return
+    seq = int(handles.get("gripper_cmd_seq", 0)) + 1
+    handles["gripper_cmd_seq"] = seq
+    msg: dict[str, Any] = {"schema": "robotics_lab.gripper_cmd.v1", "seq": seq, "deadman": True}
+    for side in ("left", "right"):
+        slider = handles.get(f"gripper_slider_{side}")
+        if slider is None:
+            continue
+        try:
+            msg[side] = {"percent": float(slider.value), "valid": True}
+        except (TypeError, ValueError, AttributeError):
+            pass
+    if "left" not in msg and "right" not in msg:
+        return
+    try:
+        sock.sendto(json.dumps(msg).encode("utf-8"), endpoint)
+    except OSError:
+        pass
 
 
 def _push_gripper_percent(handles: dict[str, Any], latest: StateSnapshot | None = None) -> None:
