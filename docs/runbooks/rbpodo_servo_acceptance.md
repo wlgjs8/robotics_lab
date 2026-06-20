@@ -17,13 +17,6 @@ The supported rbpodo profile is:
 | --- | --- | ---: | ---: | --- | --- | --- |
 | `500hz_ack` | `rb_servo_server/config/dual_real.example.yaml` | 500 Hz | 0.002 s | ACK-on | site-local | disabled |
 
-Controller-simulation no-op acceptance is handled by
-`scripts/rbpodo_500hz_acceptance.py` and 500 Hz rbpodo controller-simulation
-configs.
-
-Circle controller-simulation templates are documented in
-`docs/runbooks/rbpodo_controller_sim_circle.md`.
-
 `servo_t1_sec` must match the supported command period: 0.002 s at 500 Hz.
 
 ## Servo J Parameters

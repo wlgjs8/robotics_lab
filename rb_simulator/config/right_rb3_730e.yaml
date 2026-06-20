@@ -15,7 +15,6 @@ simulator:
 
 arm:
   name: "right_simulator"
-  initial_q_deg: [0, -30, 80, 0, 60, 0]
   # Rotation is canonical URDF/ROS RPY converted from MJCF euler xyz.
   mount: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
 

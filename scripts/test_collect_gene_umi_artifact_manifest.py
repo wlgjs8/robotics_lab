@@ -31,11 +31,12 @@ class ArtifactManifestTest(unittest.TestCase):
         self.assertIn("--include-missing", completed.stdout)
 
     def test_manifest_includes_existing_files(self) -> None:
+        body = b"schema: robotics_lab.pgmode.v1\n"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            path = root / "configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml"
+            path = root / "artifacts/rbpodo_pgmode/simulation_mode_summary.json"
             path.parent.mkdir(parents=True)
-            path.write_text("schema: robotics_lab.control_defaults.v1\n", encoding="utf-8")
+            path.write_bytes(body)
 
             result = manifest.build_manifest(root)
             items = result["items"]
@@ -43,13 +44,11 @@ class ArtifactManifestTest(unittest.TestCase):
         self.assertEqual(result["schema"], manifest.SCHEMA)
         self.assertIn(
             {
-                "kind": "control_defaults",
-                "path": "configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml",
+                "kind": "pgmode_transition",
+                "path": "artifacts/rbpodo_pgmode/simulation_mode_summary.json",
                 "exists": True,
-                "sha256": hashlib.sha256(
-                    b"schema: robotics_lab.control_defaults.v1\n"
-                ).hexdigest(),
-                "size_bytes": len(b"schema: robotics_lab.control_defaults.v1\n"),
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "size_bytes": len(body),
                 "modified_at": items[0]["modified_at"],
             },
             items,
@@ -63,7 +62,7 @@ class ArtifactManifestTest(unittest.TestCase):
         missing = [
             item
             for item in result["items"]
-            if item["path"] == "artifacts/control_defaults/gene_26_5_defaults_report.md"
+            if item["path"] == "outputs/flow_policy.pt"
         ]
         self.assertEqual(len(missing), 1)
         self.assertFalse(missing[0]["exists"])

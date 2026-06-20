@@ -163,24 +163,6 @@ viewers should bind separate UDP ports and receive identical server-published
 state JSON; benchmark tee/rebroadcast processes are not the primary state path.
 Command traffic still goes directly to `network.command_bind`.
 
-For rbpodo controller-simulation circle live visualization, state fanout and
-benchmark overlay are intentionally separate:
-
-```text
-rb_servo_server
-  state_pub_endpoints[0] udp://127.0.0.1:50151 -> benchmark recorder
-  state_pub_endpoints[1] udp://127.0.0.1:50161 -> rb_gui state receiver
-
-rbpodo_circle_tracking_benchmark
-  --overlay-pub-endpoint udp://127.0.0.1:50261 -> rb_gui circle overlay receiver
-```
-
-The state stream is robot/server telemetry, including `tcp_actual_stand`,
-`tcp_ref_stand`, Cartesian gate fields, and
-`physical_motion_expected=false` for pgmode simulation. The overlay stream is
-desired benchmark geometry and live metrics only; it is not robot state and
-must not carry commands.
-
 ### Docker Compose Simulator Topology
 
 ```text
@@ -457,6 +439,14 @@ Manual non-500 YAML overrides may remain parseable for compatibility, but they
 are not supported profiles. ACK-off rbpodo settings are not a real baseline
 until the supervised acceptance sequence passes with state-age, ACK, error-code,
 and q_ref/q_actual evidence.
+
+These four Servo J fields are pinned to a *transparent-executor* profile
+(`t1=0.002, t2=0.021, gain=1.0, alpha=10.0`; `alpha=10` script-level = effective
+`1.0` after the controller's `0.1` scaling = inner LPF off), so the controller
+adds no smoothing of its own and all responsiveness/smoothness/accuracy is owned
+by the server-side control loop (`TcpPoseTarget` → `cartesian_control.pose_track_smd`).
+They are a contract, not a tuning surface — see `docs/servo_backend_contract.md`
+→ "Servo J Is A Fixed Transparent Executor".
 
 Deprecated simulator config names are archived under `docs/archive/configs/`
 for historical reference only. They are not runnable source-of-truth profiles

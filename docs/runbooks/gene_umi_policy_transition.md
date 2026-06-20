@@ -20,31 +20,12 @@ Non-goals:
 - no force-control, gripper, or camera-driven physical policy promotion
 - no replacement of the simulator-first Cartesian acceptance milestone
 
-## Current Best GENE 26.5 / ACKON500 Controller-Sim Default
+## Why Controller-Sim Is Not Physical Real Robot Performance
 
-The current GENE 26.5 / ACKON500 default is
-`configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml`. It records
-the controller-simulation high-performance profile only:
-
-- rbpodo controller `pgmode` simulation
-- 500 Hz `sdk_ack_worker`
-- ACK-observed command semantics
-- `tracking_source=tcp_ref_stand`
-- `physical_motion_expected=false`
-
-Validate the registry with:
-
-```bash
-python3 scripts/validate_control_defaults.py \
-  --defaults configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml \
-  --write-report artifacts/control_defaults/gene_26_5_defaults_report.md
-```
-
-## Why This Is Not Physical Real Robot Performance
-
-ACKON500 controller-reference success is a lower-bound controller-simulation
-signal, not physical TCP tracking. A report that scores `tcp_ref_stand` in
-`pgmode` simulation does not prove that `tcp_actual_stand` followed the
+Controller-reference (`pgmode` simulation) success is a lower-bound
+controller-simulation signal, not physical TCP tracking. A report that scores
+`tcp_ref_stand` in `pgmode` simulation does not prove that `tcp_actual_stand`
+followed the
 trajectory, does not clear diagnostics-suspect caveats, and does not approve
 physical real Cartesian motion.
 

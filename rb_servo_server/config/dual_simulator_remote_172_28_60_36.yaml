@@ -16,7 +16,6 @@ left_robot:
   simulator_send_timeout_sec: 0.2
   simulator_stop_timeout_sec: 0.2
   simulator_reset_timeout_sec: 0.2
-  initial_q_deg: [0, -30, 80, 0, 60, 0]
 
 right_robot:
   backend_type: simulator
@@ -29,7 +28,6 @@ right_robot:
   simulator_send_timeout_sec: 0.2
   simulator_stop_timeout_sec: 0.2
   simulator_reset_timeout_sec: 0.2
-  initial_q_deg: [0, -30, 80, 0, 60, 0]
 
 left_mount:
   # Rotation is canonical URDF/ROS RPY converted from MJCF euler xyz.

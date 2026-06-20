@@ -459,132 +459,6 @@ run_cart_accept_gate() {
   fi
 }
 
-run_circle_benchmark_gate() {
-  run_shell_syntax_checks
-  python3 -m compileall -q scripts
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_tracking_benchmark.py'
-  python3 scripts/circle_tracking_benchmark.py --help >/dev/null
-  python3 scripts/compare_circle_benchmarks.py --help >/dev/null
-  grep_existing "circle_tracking_benchmark.py|BENCH-CIRCLE-01|GENE-style|15 cm" \
-    docs/runbooks/circle_tracking_benchmark.md docs/runbooks/tcp_pose_simulator_acceptance.md README.md REVIEW.md
-  PYTHONPATH=rb_simulator/src python3 scripts/circle_tracking_benchmark.py \
-    --root . \
-    --mode start-local \
-    --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-    --server-config rb_servo_server/config/dual_simulator_tcp_acceptance.yaml \
-    --left-config rb_simulator/config/left_rb3_730e.yaml \
-    --right-config rb_simulator/config/right_rb3_730e.yaml \
-    --profile safe_5cm_10s \
-    --artifact-dir artifacts/circle_tracking/preflight_gate \
-    --preflight-only >/dev/null
-  PYTHONPATH=rb_simulator/src python3 scripts/circle_tracking_benchmark.py \
-    --root . \
-    --mode start-local \
-    --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-    --server-config rb_servo_server/config/dual_simulator_circle_stress.yaml \
-    --left-config rb_simulator/config/left_rb3_730e.yaml \
-    --right-config rb_simulator/config/right_rb3_730e.yaml \
-    --profile gene_15cm_4s \
-    --allow-fast-stress \
-    --artifact-dir artifacts/circle_tracking/gene_preflight_gate \
-    --preflight-only >/dev/null
-  run_gui_tests
-  run_policy_runner_tests
-  run_simulator_tests
-
-  if [[ "${CODEX_RUN_CIRCLE_BENCHMARK:-0}" == "1" || "${CODEX_RUN_GENE_STYLE_CIRCLE:-0}" == "1" ]]; then
-    if ! rb_servo_cpp_deps_available; then
-      if [[ "${CODEX_SKIP_MISSING_CPP_DEPS:-0}" == "1" ]]; then
-        echo "codex_gate: skipping circle benchmark runtime; required C++ deps are missing"
-        return 0
-      fi
-      echo "ERROR: circle benchmark runtime requires yaml-cpp, nlohmann_json, Eigen3, and pinocchio" >&2
-      return 1
-    fi
-    if ! loopback_socket_available; then
-      echo "codex_gate: skipping circle benchmark runtime; AF_INET loopback sockets are unavailable"
-      return 0
-    fi
-    build_servo_server_only
-  fi
-
-  if [[ "${CODEX_RUN_CIRCLE_BENCHMARK:-0}" == "1" ]]; then
-    PYTHONPATH=rb_simulator/src python3 scripts/circle_tracking_benchmark.py \
-      --root . \
-      --mode start-local \
-      --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-      --server-config rb_servo_server/config/dual_simulator_tcp_acceptance.yaml \
-      --left-config rb_simulator/config/left_rb3_730e.yaml \
-      --right-config rb_simulator/config/right_rb3_730e.yaml \
-      --arm left \
-      --controller twist_stand \
-      --plane xy \
-      --profile safe_5cm_10s \
-      --repeat 1 \
-      --command-rate-hz 50 \
-      --max-allowed-rms-error-m 0.01 \
-      --max-allowed-p95-error-m 0.02 \
-      --max-allowed-orientation-drift-rad 0.1 \
-      --artifact-dir artifacts/circle_tracking/bench_circle_01
-  else
-    echo "codex_gate: skipping full circle tracking benchmark; set CODEX_RUN_CIRCLE_BENCHMARK=1 to enable"
-  fi
-
-  if [[ "${CODEX_RUN_GENE_STYLE_CIRCLE:-0}" == "1" ]]; then
-    PYTHONPATH=rb_simulator/src python3 scripts/circle_tracking_benchmark.py \
-      --root . \
-      --mode start-local \
-      --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-      --server-config rb_servo_server/config/dual_simulator_circle_stress.yaml \
-      --left-config rb_simulator/config/left_rb3_730e.yaml \
-      --right-config rb_simulator/config/right_rb3_730e.yaml \
-      --arm left \
-      --controller twist_stand \
-      --plane xy \
-      --profile gene_15cm_4s \
-      --allow-fast-stress \
-      --repeat 1 \
-      --command-rate-hz 100 \
-      --artifact-dir artifacts/circle_tracking/gene_15cm_4s
-  else
-    echo "codex_gate: skipping GENE-style 15 cm / 4 s circle stress; set CODEX_RUN_GENE_STYLE_CIRCLE=1 to enable"
-  fi
-}
-
-run_conservative_circle_benchmark_runtime() {
-  if ! rb_servo_cpp_deps_available; then
-    if [[ "${CODEX_SKIP_MISSING_CPP_DEPS:-0}" == "1" ]]; then
-      echo "codex_gate: skipping circle benchmark runtime; required C++ deps are missing"
-      return 0
-    fi
-    echo "ERROR: circle benchmark runtime requires yaml-cpp, nlohmann_json, Eigen3, and pinocchio" >&2
-    return 1
-  fi
-  if ! loopback_socket_available; then
-    echo "codex_gate: skipping circle benchmark runtime; AF_INET loopback sockets are unavailable"
-    return 0
-  fi
-
-  build_servo_server_only
-  PYTHONPATH=rb_simulator/src python3 scripts/circle_tracking_benchmark.py \
-    --root . \
-    --mode start-local \
-    --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-    --server-config rb_servo_server/config/dual_simulator_tcp_acceptance.yaml \
-    --left-config rb_simulator/config/left_rb3_730e.yaml \
-    --right-config rb_simulator/config/right_rb3_730e.yaml \
-    --arm left \
-    --controller twist_stand \
-    --plane xy \
-    --profile safe_5cm_10s \
-    --repeat 1 \
-    --command-rate-hz 50 \
-    --max-allowed-rms-error-m 0.01 \
-    --max-allowed-p95-error-m 0.02 \
-    --max-allowed-orientation-drift-rad 0.1 \
-    --artifact-dir artifacts/circle_tracking/bench_circle_01
-}
-
 run_cart_servo_01_gate() {
   run_shell_syntax_checks
   run_servo_gate_or_skip_missing_deps
@@ -596,59 +470,19 @@ run_cart_servo_01_gate() {
 run_cart_servo_02_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_tracking_benchmark.py'
-  python3 scripts/circle_tracking_benchmark.py --help >/dev/null
-  python3 scripts/compare_circle_benchmarks.py --help >/dev/null
   run_simulator_tests
   run_gui_tests
   run_policy_runner_tests
-  if [[ "${CODEX_RUN_CIRCLE_BENCHMARK:-0}" == "1" ]]; then
-    run_conservative_circle_benchmark_runtime
-  else
-    echo "codex_gate: skipping full circle tracking benchmark; set CODEX_RUN_CIRCLE_BENCHMARK=1 to enable"
-  fi
 }
 
 run_cart_servo_03_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts
-  python3 scripts/circle_tracking_benchmark.py --help >/dev/null
-  python3 scripts/compare_circle_benchmarks.py --help >/dev/null
   run_servo_gate_or_skip_missing_deps
   if [[ "${CODEX_RUN_CARTESIAN_ACCEPTANCE:-0}" == "1" ]]; then
     run_cart_harden_05_gate
   else
     echo "codex_gate: skipping full Cartesian simulator acceptance; set CODEX_RUN_CARTESIAN_ACCEPTANCE=1 to enable"
-  fi
-  if [[ "${CODEX_RUN_CIRCLE_BENCHMARK:-0}" == "1" ]]; then
-    run_conservative_circle_benchmark_runtime
-  else
-    echo "codex_gate: skipping full circle tracking benchmark; set CODEX_RUN_CIRCLE_BENCHMARK=1 to enable"
-  fi
-}
-
-run_bench_ablation_gate() {
-  run_shell_syntax_checks
-  python3 -m compileall -q scripts
-  python3 scripts/run_circle_ablation.py --help >/dev/null
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_run_circle_ablation.py'
-  python3 scripts/circle_tracking_benchmark.py --help >/dev/null
-  run_optional_python_help scripts/compare_circle_benchmarks.py
-  run_python_surface_tests
-  if [[ "${CODEX_RUN_CIRCLE_ABLATION:-0}" == "1" ]]; then
-    local matrix
-    matrix="${CODEX_CIRCLE_ABLATION_MATRIX:-configs/circle_ablation_baseline.yaml}"
-    if [[ -f "${matrix}" ]]; then
-      PYTHONPATH=rb_simulator/src python3 scripts/run_circle_ablation.py \
-        --root . \
-        --matrix "${matrix}" \
-        --artifact-root artifacts/circle_tracking/ablation_gate \
-        --max-workers 1
-    else
-      echo "codex_gate: skipping full circle ablation; matrix not found: ${matrix}"
-    fi
-  else
-    echo "codex_gate: skipping full circle ablation; set CODEX_RUN_CIRCLE_ABLATION=1 to enable"
   fi
 }
 
@@ -656,118 +490,6 @@ run_cart_tune_02_gate() {
   run_shell_syntax_checks
   run_servo_gate_or_skip_missing_deps
   run_python_surface_tests
-  grep_existing "safe_5cm_10s|circle_15cm_16s|circle_15cm_8s|gene_15cm_4s" \
-    scripts/circle_tracking_benchmark.py docs/runbooks/circle_tracking_benchmark.md rb_servo_server/config
-  local circle_profiles=(
-    rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml
-    rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml
-    rb_servo_server/config/dual_simulator_circle_real_candidate_conservative.yaml
-  )
-  local profile
-  for profile in "${circle_profiles[@]}"; do
-    if [[ ! -f "${profile}" ]]; then
-      echo "ERROR: missing circle tuning profile: ${profile}" >&2
-      return 1
-    fi
-    grep_existing "backend_type:[[:space:]]*simulator" "${profile}"
-    grep_existing "run_mode:[[:space:]]*simulation" "${profile}"
-    grep_existing "allow_in_simulation:[[:space:]]*true" "${profile}"
-    grep_existing "allow_in_real:[[:space:]]*false" "${profile}"
-    local required_key
-    for required_key in \
-      "servo:" \
-      "rate_hz:" \
-      "state_pub_rate_hz:" \
-      "velocity_target_integration:" \
-      "path_kp_pos:" \
-      "path_kp_ori:" \
-      "twist_orientation_hold_kp:" \
-      "twist_angular_deadband_rad_s:" \
-      "velocity_damping:" \
-      "max_twist_linear_m_s:" \
-      "max_twist_angular_rad_s:" \
-      "max_command_actual_error_deg:" \
-      "command_actual_error_policy:"
-    do
-      grep_existing "${required_key}" "${profile}"
-    done
-  done
-  grep_existing "simulator_baseline|simulator_stress|real_candidate_conservative" "${circle_profiles[@]}" docs/runbooks/circle_tracking_benchmark.md REVIEW.md README.md
-  grep_absent "run_mode:[[:space:]]*real|backend_type:[[:space:]]*rbpodo|allow_in_real:[[:space:]]*true|172\\.28\\.60\\.200|172\\.28\\.60\\.201" "${circle_profiles[@]}"
-  grep_existing "dual_simulator_circle_baseline_15cm16s|dual_simulator_circle_stress_15cm4s|dual_simulator_circle_real_candidate_conservative" \
-    docs/runbooks/circle_tracking_benchmark.md README.md REVIEW.md
-}
-
-run_bench_circle_feedback_gate() {
-  run_shell_syntax_checks
-  python3 -m compileall -q scripts
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_tracking_benchmark.py'
-  python3 scripts/circle_tracking_benchmark.py --help >/dev/null
-  grep_existing "twist_stand_feedback|twist_local_feedback|feedback-kp-pos" \
-    scripts/circle_tracking_benchmark.py docs/runbooks/circle_tracking_benchmark.md
-  run_python_surface_tests
-  if [[ "${CODEX_RUN_CIRCLE_BENCHMARK:-0}" == "1" ]]; then
-    if ! rb_servo_cpp_deps_available; then
-      if [[ "${CODEX_SKIP_MISSING_CPP_DEPS:-0}" == "1" ]]; then
-        echo "codex_gate: skipping circle feedback benchmark runtime; required C++ deps are missing"
-        return 0
-      fi
-      echo "ERROR: circle feedback benchmark runtime requires yaml-cpp, nlohmann_json, Eigen3, and pinocchio" >&2
-      return 1
-    fi
-    if ! loopback_socket_available; then
-      echo "codex_gate: skipping circle feedback benchmark runtime; AF_INET loopback sockets are unavailable"
-      return 0
-    fi
-    build_servo_server_only
-    PYTHONPATH=rb_simulator/src python3 scripts/circle_tracking_benchmark.py \
-      --root . \
-      --mode start-local \
-      --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-      --server-config rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml \
-      --left-config rb_simulator/config/left_rb3_730e.yaml \
-      --right-config rb_simulator/config/right_rb3_730e.yaml \
-      --arm left \
-      --controller twist_stand_feedback \
-      --plane xy \
-      --profile safe_5cm_10s \
-      --repeat 1 \
-      --command-rate-hz 50 \
-      --max-allowed-rms-error-m 0.01 \
-      --max-allowed-p95-error-m 0.02 \
-      --max-allowed-orientation-drift-rad 0.1 \
-      --artifact-dir artifacts/circle_tracking/bench_circle_feedback_01
-  else
-    echo "codex_gate: skipping full circle feedback benchmark; set CODEX_RUN_CIRCLE_BENCHMARK=1 to enable"
-  fi
-}
-
-run_cart_circle_server_gate() {
-  run_servo_gate_or_skip_missing_deps
-  run_shell_syntax_checks
-  run_python_surface_tests
-  if [[ "${CODEX_RUN_CIRCLE_SERVER:-0}" == "1" ]]; then
-    if [[ -f scripts/run_circle_server_benchmark.py ]]; then
-      PYTHONPATH=rb_simulator/src python3 scripts/run_circle_server_benchmark.py \
-        --root . \
-        --artifact-dir artifacts/circle_tracking/server_circle_gate
-    else
-      echo "codex_gate: skipping server-side circle benchmark; scripts/run_circle_server_benchmark.py is not present"
-    fi
-  else
-    echo "codex_gate: skipping server-side circle benchmark; set CODEX_RUN_CIRCLE_SERVER=1 to enable"
-  fi
-}
-
-run_bench_report_gate() {
-  run_shell_syntax_checks
-  python3 -m compileall -q scripts
-  run_optional_python_help scripts/report_circle_benchmarks.py
-  run_optional_python_help scripts/circle_benchmark_report.py
-  run_optional_python_help scripts/generate_circle_benchmark_report.py
-  grep_existing "baseline|stress|safe_5cm_10s|gene_15cm_4s" \
-    docs/runbooks/circle_tracking_benchmark.md REVIEW.md
-  echo "codex_gate: skipping full benchmark reporting run by default"
 }
 
 run_supported_scope_name_scan() {
@@ -989,19 +711,6 @@ run_rbpodo_doc_gate() {
   grep_existing "RB_ALLOW_REAL_MOTION" README.md REVIEW.md AGENTS.md docs rb_servo_server/docs rb_servo_server/config
 }
 
-run_rbpodo_circle_config_gate() {
-  run_shell_syntax_checks
-  grep_existing "rbpodo" README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config configs
-  grep_existing "pgmode simulation|controller simulation|operation_mode:[[:space:]]*simulation" \
-    README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config configs
-  grep_existing "send_servo_commands:[[:space:]]*false|send_servo_commands:[[:space:]]*true" \
-    rb_servo_server/config configs docs/runbooks REVIEW.md
-  grep_existing "RB_ALLOW_REAL_ROBOT" README.md REVIEW.md AGENTS.md docs rb_servo_server/docs rb_servo_server/config configs
-  grep_existing "RB_ALLOW_REAL_MOTION" README.md REVIEW.md AGENTS.md docs rb_servo_server/docs rb_servo_server/config configs
-  run_python_surface_tests
-  run_servo_gate_or_skip_missing_deps
-}
-
 run_rbpodo_pgmode_sim_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts tools
@@ -1036,16 +745,12 @@ run_rbpodo_controller_sim_gate() {
   run_shell_syntax_checks
   run_servo_gate_or_skip_missing_deps
   run_optional_python_help scripts/rbpodo_servo_acceptance.py
-  run_optional_python_help scripts/rbpodo_circle_tracking_benchmark.py
   if [[ "${CODEX_RUN_RBPODO_CONTROLLER_SIM:-0}" == "1" ]]; then
     if [[ -z "${CODEX_RBPODO_CONTROLLER_SIM_ARGS:-}" ]]; then
       echo "ERROR: CODEX_RUN_RBPODO_CONTROLLER_SIM=1 requires CODEX_RBPODO_CONTROLLER_SIM_ARGS with explicit script arguments and safety preflight flags" >&2
       return 1
     fi
-    if [[ -f scripts/rbpodo_circle_tracking_benchmark.py ]]; then
-      # shellcheck disable=SC2086
-      python3 scripts/rbpodo_circle_tracking_benchmark.py ${CODEX_RBPODO_CONTROLLER_SIM_ARGS}
-    elif [[ -f scripts/rbpodo_servo_acceptance.py ]]; then
+    if [[ -f scripts/rbpodo_servo_acceptance.py ]]; then
       # shellcheck disable=SC2086
       python3 scripts/rbpodo_servo_acceptance.py ${CODEX_RBPODO_CONTROLLER_SIM_ARGS}
     else
@@ -1055,135 +760,6 @@ run_rbpodo_controller_sim_gate() {
   else
     echo "codex_gate: skipping rbpodo controller-simulation run; set CODEX_RUN_RBPODO_CONTROLLER_SIM=1 with explicit args to enable"
   fi
-}
-
-run_rbpodo_circle_bench_gate() {
-  python3 -m compileall -q scripts
-  run_optional_python_help scripts/rbpodo_circle_tracking_benchmark.py
-  python3 scripts/circle_tracking_benchmark.py --help >/dev/null
-  if [[ "${CODEX_RUN_RBPODO_CIRCLE:-0}" == "1" ]]; then
-    if [[ ! -f scripts/rbpodo_circle_tracking_benchmark.py ]]; then
-      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE=1 but scripts/rbpodo_circle_tracking_benchmark.py is missing" >&2
-      return 1
-    fi
-    if [[ -z "${CODEX_RBPODO_CIRCLE_ARGS:-}" ]]; then
-      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE=1 requires CODEX_RBPODO_CIRCLE_ARGS with explicit controller-simulation script arguments and safety preflight flags" >&2
-      return 1
-    fi
-    # shellcheck disable=SC2086
-    python3 scripts/rbpodo_circle_tracking_benchmark.py ${CODEX_RBPODO_CIRCLE_ARGS}
-  else
-    echo "codex_gate: skipping rbpodo controller-simulation circle benchmark; set CODEX_RUN_RBPODO_CIRCLE=1 with explicit args to enable"
-  fi
-}
-
-run_rbpodo_circle_ablation_gate() {
-  python3 -m compileall -q scripts
-  run_optional_python_help scripts/run_rbpodo_circle_ablation.py
-  if [[ "${CODEX_RUN_RBPODO_CIRCLE_ABLATION:-0}" == "1" ]]; then
-    if [[ ! -f scripts/run_rbpodo_circle_ablation.py ]]; then
-      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 but scripts/run_rbpodo_circle_ablation.py is missing" >&2
-      return 1
-    fi
-    if [[ -z "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS:-}" ]]; then
-      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 requires CODEX_RBPODO_CIRCLE_ABLATION_ARGS with explicit matrix/script arguments and safety preflight flags" >&2
-      return 1
-    fi
-    # shellcheck disable=SC2086
-    python3 scripts/run_rbpodo_circle_ablation.py ${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}
-  else
-    echo "codex_gate: skipping rbpodo controller-simulation circle ablation; set CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 with explicit args to enable"
-  fi
-}
-
-run_rbpodo_circle_report_gate() {
-  run_optional_python_help scripts/generate_rbpodo_circle_report.py
-  run_optional_python_help scripts/rbpodo_circle_report.py
-  python3 scripts/generate_circle_benchmark_report.py --help >/dev/null
-  for token in \
-    "rbpodo" \
-    "pgmode simulation" \
-    "controller simulation" \
-    "q_ref" \
-    "tcp_reference" \
-    "15cm" \
-    "4s"
-  do
-    grep_existing "${token}" README.md REVIEW.md docs rb_servo_server/docs
-  done
-}
-
-run_rbpodo_circle_profile_tuning_gate() {
-  python3 -m compileall -q scripts
-  python3 scripts/rbpodo_circle_tracking_benchmark.py --help >/dev/null
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_tracking_benchmark.py'
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_tracking_benchmark.py'
-  echo "codex_gate: skipping rbpodo controller-simulation benchmark run by default"
-}
-
-run_rbpodo_circle_ablation_overrides_gate() {
-  python3 -m compileall -q scripts
-  python3 scripts/run_rbpodo_circle_ablation.py --help >/dev/null
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_ablation.py'
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_run_circle_ablation.py'
-  if [[ "${CODEX_RUN_RBPODO_CIRCLE_ABLATION:-0}" == "1" ]]; then
-    if [[ ! -f scripts/run_rbpodo_circle_ablation.py ]]; then
-      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 but scripts/run_rbpodo_circle_ablation.py is missing" >&2
-      return 1
-    fi
-    if [[ -z "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS:-}" ]]; then
-      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 requires CODEX_RBPODO_CIRCLE_ABLATION_ARGS with explicit matrix/script arguments and safety preflight flags" >&2
-      return 1
-    fi
-    # shellcheck disable=SC2086
-    python3 scripts/run_rbpodo_circle_ablation.py ${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}
-  else
-    echo "codex_gate: skipping rbpodo controller-simulation circle ablation; set CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 with explicit args to enable"
-  fi
-}
-
-run_rbpodo_circle_stage2_matrices_gate() {
-  python3 -m compileall -q scripts
-  python3 scripts/run_rbpodo_circle_ablation.py --help >/dev/null
-  run_yaml_parse_checks_if_available configs/rbpodo_circle_ablation/*.yaml
-  run_rbpodo_circle_matrix_schema_checks
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_ablation.py'
-  echo "codex_gate: skipping rbpodo controller-simulation matrix run by default"
-}
-
-run_rbpodo_circle_matrix_schema_checks() {
-  local matrices=()
-  local path
-  for path in configs/rbpodo_circle_ablation/*.yaml; do
-    if [[ -e "${path}" ]]; then
-      matrices+=("${path}")
-    fi
-  done
-
-  if [[ "${#matrices[@]}" -eq 0 ]]; then
-    echo "codex_gate: skipping rbpodo circle matrix schema checks; no matrix YAML files found"
-    return 0
-  fi
-
-  PYTHONPATH=scripts python3 - "${matrices[@]}" <<'PY'
-import sys
-from pathlib import Path
-
-import run_rbpodo_circle_ablation as ablation
-
-for raw_path in sys.argv[1:]:
-    path = Path(raw_path)
-    experiments = ablation.load_matrix(path)
-    for index, experiment in enumerate(experiments, start=1):
-        ablation.validate_experiment(experiment, index)
-PY
-}
-
-run_rbpodo_circle_tuning_report_gate() {
-  python3 -m compileall -q scripts
-  python3 scripts/generate_rbpodo_circle_report.py --help >/dev/null
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_benchmark_report.py'
-  echo "codex_gate: skipping rbpodo controller-simulation report generation by default"
 }
 
 run_tools_shell_syntax_checks() {
@@ -1199,29 +775,6 @@ run_tools_shell_syntax_checks() {
   if [[ "${found}" != "1" ]]; then
     echo "codex_gate: skipping tools shell syntax checks; no tools/*.sh files found"
   fi
-}
-
-run_rbpodo_circle_wrapper_help_checks() {
-  local wrapper
-  for wrapper in \
-    tools/create_rbpodo_circle_local_configs.sh \
-    tools/rbpodo_circle_prepare.sh \
-    tools/rbpodo_circle_benchmark.sh \
-    tools/rbpodo_circle_gui.sh \
-    tools/simulation_mode.sh
-  do
-    if [[ -f "${wrapper}" ]]; then
-      bash "${wrapper}" --help >/dev/null
-    else
-      echo "codex_gate: optional wrapper not present: ${wrapper}"
-    fi
-  done
-}
-
-run_rbpodo_circle_tune_runners_gate() {
-  run_tools_shell_syntax_checks
-  run_rbpodo_circle_wrapper_help_checks
-  echo "codex_gate: skipping rbpodo controller-simulation wrapper runs by default"
 }
 
 run_rbpodo_measure_state_parity_gate() {
@@ -1256,24 +809,11 @@ run_rbpodo_measure_timestamp_gate() {
   echo "codex_gate: skipping rbpodo measurement controller run by default"
 }
 
-run_rbpodo_circle_error_decomp_gate() {
-  run_shell_syntax_checks
-  python3 -m compileall -q scripts
-  python3 scripts/generate_rbpodo_circle_report.py --help >/dev/null
-  run_optional_python_help scripts/rbpodo_circle_error_decomposition.py
-  run_optional_python_help scripts/decompose_rbpodo_circle_error.py
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_tracking_benchmark.py'
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_benchmark_report.py'
-  run_optional_script_tests 'test_rbpodo_circle_error*.py'
-  echo "codex_gate: skipping rbpodo controller-simulation circle benchmark by default"
-}
-
 run_rbpodo_measure_reliability_report_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts
   run_optional_python_help scripts/rbpodo_measure_reliability_report.py
   run_optional_python_help scripts/generate_rbpodo_measurement_report.py
-  python3 scripts/generate_rbpodo_circle_report.py --help >/dev/null
   run_optional_script_tests 'test_rbpodo_measure_reliability*.py'
   for token in \
     "diagnostics_suspect" \
@@ -1334,12 +874,8 @@ run_p0_raw_payload_fixture_gate() {
 run_p0_measurement_gating_gate() {
   run_rbpodo_p0_measurement_common_gate
   python3 scripts/timestamp_alignment_audit.py --help >/dev/null
-  python3 scripts/generate_circle_benchmark_report.py --help >/dev/null
   python3 scripts/generate_rbpodo_measurement_reliability_report.py --help >/dev/null
-  run_optional_python_help scripts/error_decomposition.py
   PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_timestamp_alignment_audit.py'
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_error_decomposition.py'
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_benchmark_report.py'
   for token in \
     "diagnostics_suspect" \
     "tcp_ref_stand" \
@@ -1353,432 +889,49 @@ run_p0_measurement_gating_gate() {
   echo "codex_gate: skipping rbpodo measurement controller run by default"
 }
 
-run_optional_rbpodo_500hz_controller_sim() {
-  if [[ "${CODEX_RUN_RBPODO_500HZ:-0}" != "1" ]]; then
-    echo "codex_gate: skipping rbpodo 500Hz controller-simulation probe; set CODEX_RUN_RBPODO_500HZ=1 with explicit CODEX_RBPODO_500HZ_ARGS to enable"
-    return 0
-  fi
-  if [[ -z "${CODEX_RBPODO_500HZ_ARGS:-}" ]]; then
-    echo "ERROR: CODEX_RUN_RBPODO_500HZ=1 requires CODEX_RBPODO_500HZ_ARGS with explicit controller-simulation arguments" >&2
-    return 1
-  fi
-  for required_arg in \
-    "--server" \
-    "--config" \
-    "--mode servo_j_noop_500hz" \
-    "--artifact-dir"
-  do
-    if [[ "${CODEX_RBPODO_500HZ_ARGS}" != *"${required_arg}"* ]]; then
-      echo "ERROR: CODEX_RBPODO_500HZ_ARGS must include ${required_arg}" >&2
-      return 1
-    fi
-  done
-  if [[ "${CODEX_RBPODO_500HZ_ARGS}" != *"--verify-pgmode-simulation"* && "${CODEX_RBPODO_500HZ_ARGS}" != *"--set-pgmode-simulation"* ]]; then
-    echo "ERROR: CODEX_RBPODO_500HZ_ARGS must include --verify-pgmode-simulation or --set-pgmode-simulation" >&2
-    return 1
-  fi
-  if [[ "${CODEX_RBPODO_500HZ_ARGS}" == *"tiny_joint_motion"* || "${CODEX_RBPODO_500HZ_ARGS}" == *"--allow-ack-disabled"* ]]; then
-    echo "ERROR: rbpodo 500Hz gates only allow ACK-on rbpodo pgmode-simulation probes; tiny physical motion and ACK-off are out of scope" >&2
-    return 1
-  fi
-  if [[ "${RB_ALLOW_REAL_CARTESIAN:-0}" == "1" ]]; then
-    echo "ERROR: RB_ALLOW_REAL_CARTESIAN must not be set for rbpodo 500Hz controller-simulation gates" >&2
-    return 1
-  fi
-  # shellcheck disable=SC2086
-  python3 scripts/rbpodo_500hz_acceptance.py ${CODEX_RBPODO_500HZ_ARGS}
-}
-
-run_rbpodo_500hz_common_gate() {
-  run_shell_syntax_checks
-  python3 -m compileall -q scripts
-  python3 scripts/rbpodo_500hz_acceptance.py --help >/dev/null
-  python3 scripts/rbpodo_servo_acceptance.py --help >/dev/null
-  python3 scripts/rbpodo_circle_tracking_benchmark.py --help >/dev/null
-  run_yaml_parse_checks_if_available \
-    rb_servo_server/config/dual_real_rbpodo_readonly.example.yaml \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm*.example.yaml \
-    configs/rbpodo_circle_ablation/*.yaml
-  grep_existing "500 Hz|500Hz" scripts/rbpodo_500hz_acceptance.py docs/runbooks/rbpodo_controller_sim_circle.md REVIEW.md
-  grep_existing "pgmode simulation|controller pgmode simulation only|operation_mode:[[:space:]]*simulation" \
-    docs/runbooks/rbpodo_controller_sim_circle.md rb_servo_server/config/dual_real_rbpodo_*.example.yaml
-}
-
-run_rbpodo_500hz_config_gate() {
-  run_rbpodo_500hz_common_gate
-  echo "codex_gate: skipping rbpodo 500Hz controller run by default"
-}
-
-run_rbpodo_500hz_accept_gate() {
-  run_rbpodo_500hz_common_gate
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_500hz_acceptance.py'
-  run_optional_rbpodo_500hz_controller_sim
-}
-
-run_rbpodo_500hz_circle_matrix_gate() {
-  run_rbpodo_500hz_common_gate
-  python3 scripts/run_rbpodo_circle_ablation.py --help >/dev/null
-  run_rbpodo_circle_matrix_schema_checks
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_ablation.py'
-  echo "codex_gate: skipping rbpodo 500Hz circle matrix run by default; set CODEX_RUN_RBPODO_500HZ=1 for the explicit rate probe only"
-}
-
-run_rbpodo_500hz_report_gate() {
-  run_rbpodo_500hz_common_gate
-  python3 scripts/generate_circle_benchmark_report.py --help >/dev/null
-  run_optional_python_help scripts/generate_rbpodo_measurement_reliability_report.py
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_benchmark_report.py'
-  echo "codex_gate: skipping rbpodo 500Hz report generation by default"
-}
-
-run_optional_rbpodo_async_500hz_controller_sim() {
-  local script="$1"
-  local require_cartesian="${2:-0}"
-
-  if [[ "${CODEX_RUN_RBPODO_ASYNC_500HZ:-0}" != "1" ]]; then
-    echo "codex_gate: skipping rbpodo async ACK-supervised 500Hz controller-simulation run; set CODEX_RUN_RBPODO_ASYNC_500HZ=1 with explicit CODEX_RBPODO_ASYNC_500HZ_ARGS to enable"
-    return 0
-  fi
-  if [[ ! -f "${script}" ]]; then
-    echo "ERROR: CODEX_RUN_RBPODO_ASYNC_500HZ=1 but ${script} is missing" >&2
-    return 1
-  fi
-  if [[ -z "${CODEX_RBPODO_ASYNC_500HZ_ARGS:-}" ]]; then
-    echo "ERROR: CODEX_RUN_RBPODO_ASYNC_500HZ=1 requires CODEX_RBPODO_ASYNC_500HZ_ARGS with explicit controller-simulation arguments" >&2
-    return 1
-  fi
-  for required_arg in \
-    "--artifact"
-  do
-    if [[ "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"${required_arg}"* ]]; then
-      echo "ERROR: CODEX_RBPODO_ASYNC_500HZ_ARGS must include ${required_arg}" >&2
-      return 1
-    fi
-  done
-  if [[ "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"--verify-pgmode-simulation"* && \
-        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"--set-pgmode-simulation"* && \
-        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"--pgmode-summary-json"* ]]; then
-    echo "ERROR: CODEX_RBPODO_ASYNC_500HZ_ARGS must include pgmode simulation evidence" >&2
-    return 1
-  fi
-  if [[ "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"--async-ack-supervised"* && \
-        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"--ack-mode async-supervised"* && \
-        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" != *"--ack-mode=async-supervised"* ]]; then
-    echo "ERROR: CODEX_RBPODO_ASYNC_500HZ_ARGS must request an explicit async ACK-supervised mode" >&2
-    return 1
-  fi
-  if [[ "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"--disable-waiting-ack-diagnostic"* || \
-        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"--allow-ack-disabled"* || \
-        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"disable_waiting_ack"* || \
-        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"socket_send_only"* || \
-        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"ackoff"* || \
-        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"ack-off"* || \
-        "${CODEX_RBPODO_ASYNC_500HZ_ARGS}" == *"operation_mode: real"* ]]; then
-    echo "ERROR: rbpodo async ACK-supervised gates do not allow ACK-off/socket-send-only or operation_mode=real evidence" >&2
-    return 1
-  fi
-  run_rbpodo_async_controller_config_preflight
-  for required_env in \
-    RB_ALLOW_REAL_ROBOT \
-    RB_ALLOW_REAL_MOTION \
-    RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION \
-    RB_RBPODO_PGMODE_SIMULATION_CONFIRMED \
-    RB_ALLOW_RBPODO_ASYNC_ACK_SUPERVISED
-  do
-    if [[ "${!required_env:-0}" != "1" ]]; then
-      echo "ERROR: ${required_env}=1 is required for opt-in rbpodo async ACK-supervised controller-simulation gates" >&2
-      return 1
-    fi
-  done
-  if [[ "${require_cartesian}" == "1" && "${RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN:-0}" != "1" ]]; then
-    echo "ERROR: RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1 is required for opt-in rbpodo async circle matrix gates" >&2
-    return 1
-  fi
-  if [[ "${RB_ALLOW_REAL_CARTESIAN:-0}" == "1" ]]; then
-    echo "ERROR: RB_ALLOW_REAL_CARTESIAN must not be set for rbpodo async ACK-supervised controller-simulation gates" >&2
-    return 1
-  fi
-
-  # shellcheck disable=SC2086
-  python3 "${script}" ${CODEX_RBPODO_ASYNC_500HZ_ARGS}
-}
-
-run_rbpodo_async_controller_config_preflight() {
-  python3 - "$REPO_ROOT" <<'PY'
-import os
-import shlex
-import sys
-from pathlib import Path
-
-try:
-    import yaml
-except ModuleNotFoundError:
-    print(
-        "ERROR: PyYAML is required to verify async rbpodo controller-simulation configs",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
-
-repo = Path(sys.argv[1])
-try:
-    args = shlex.split(os.environ.get("CODEX_RBPODO_ASYNC_500HZ_ARGS", ""))
-except ValueError as exc:
-    print(f"ERROR: failed to parse CODEX_RBPODO_ASYNC_500HZ_ARGS: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-
-def arg_values(names):
-    values = []
-    i = 0
-    while i < len(args):
-        item = args[i]
-        for name in names:
-            if item == name and i + 1 < len(args):
-                values.append(args[i + 1])
-                i += 1
-                break
-            prefix = name + "="
-            if item.startswith(prefix):
-                values.append(item[len(prefix):])
-                break
-        i += 1
-    return values
-
-def as_bool(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return False
-
-def resolve(path_text):
-    path = Path(path_text)
-    if not path.is_absolute():
-        path = repo / path
-    return path
-
-def load_yaml(path):
-    if not path.exists():
-        print(f"ERROR: async rbpodo gate config path does not exist: {path}", file=sys.stderr)
-        raise SystemExit(1)
-    with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle)
-    return data if isinstance(data, dict) else {}
-
-def check_config(path):
-    data = load_yaml(path)
-    for arm_key in ("left_robot", "right_robot"):
-        arm = data.get(arm_key)
-        if not isinstance(arm, dict):
-            continue
-        operation_mode = str(arm.get("operation_mode", "")).strip().lower()
-        if operation_mode == "real":
-            print(
-                f"ERROR: async rbpodo gates refuse operation_mode=real in {path}:{arm_key}",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-        if as_bool(arm.get("disable_waiting_ack")):
-            print(
-                f"ERROR: async rbpodo gates refuse disable_waiting_ack=true in {path}:{arm_key}",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-    cartesian = data.get("cartesian_control")
-    if isinstance(cartesian, dict) and as_bool(cartesian.get("allow_in_real")):
-        print(
-            f"ERROR: async rbpodo gates refuse cartesian_control.allow_in_real=true in {path}",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
-def check_matrix(path):
-    data = load_yaml(path)
-    experiments = data.get("experiments")
-    if not isinstance(experiments, list):
-        print(f"ERROR: async rbpodo matrix must contain an experiments list: {path}", file=sys.stderr)
-        raise SystemExit(1)
-    for item in experiments:
-        if not isinstance(item, dict):
-            continue
-        config = item.get("config")
-        if config:
-            check_config(resolve(str(config)))
-        overrides = item.get("config_overrides")
-        if isinstance(overrides, dict):
-            for key, value in overrides.items():
-                key_text = str(key)
-                if key_text.endswith(".operation_mode") and str(value).strip().lower() == "real":
-                    print(
-                        f"ERROR: async rbpodo gates refuse operation_mode=real override in {path}",
-                        file=sys.stderr,
-                    )
-                    raise SystemExit(1)
-                if key_text.endswith(".disable_waiting_ack") and as_bool(value):
-                    print(
-                        f"ERROR: async rbpodo gates refuse disable_waiting_ack=true override in {path}",
-                        file=sys.stderr,
-                    )
-                    raise SystemExit(1)
-                if key_text == "cartesian_control.allow_in_real" and as_bool(value):
-                    print(
-                        f"ERROR: async rbpodo gates refuse cartesian_control.allow_in_real=true override in {path}",
-                        file=sys.stderr,
-                    )
-                    raise SystemExit(1)
-
-config_paths = [resolve(value) for value in arg_values(("--config", "--server-config"))]
-matrix_paths = [resolve(value) for value in arg_values(("--matrix",))]
-if not config_paths and not matrix_paths:
-    print(
-        "ERROR: async rbpodo controller runs must provide --config, --server-config, or --matrix",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
-for config_path in config_paths:
-    check_config(config_path)
-for matrix_path in matrix_paths:
-    check_matrix(matrix_path)
-PY
-}
-
 run_rbpodo_async_common_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts
-  run_optional_python_help scripts/rbpodo_500hz_acceptance.py
-  run_optional_python_help scripts/rbpodo_circle_tracking_benchmark.py
-  run_optional_python_help scripts/run_rbpodo_circle_ablation.py
-  grep_existing "500 Hz|ACK|pgmode simulation" \
-    docs/runbooks/rbpodo_500hz_acceptance.md REVIEW.md scripts/rbpodo_500hz_acceptance.py
+  grep_existing "500 Hz|ACK|pgmode simulation" REVIEW.md
 }
 
 run_rbpodo_async_contract_probe_gate() {
   run_rbpodo_async_common_gate
-  run_optional_script_tests 'test_rbpodo_500hz_acceptance.py'
   echo "codex_gate: skipping rbpodo async ACK-supervised controller probe by default"
 }
 
 run_rbpodo_async_cpp_gate() {
   run_rbpodo_async_common_gate
   run_servo_gate_or_skip_missing_deps
-  run_optional_script_tests 'test_rbpodo_500hz_acceptance.py'
   echo "codex_gate: skipping rbpodo async ACK-supervised controller run by default"
-}
-
-run_rbpodo_async_acceptance_gate() {
-  run_rbpodo_async_common_gate
-  python3 scripts/rbpodo_500hz_acceptance.py --help >/dev/null
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_500hz_acceptance.py'
-  run_optional_rbpodo_async_500hz_controller_sim scripts/rbpodo_500hz_acceptance.py 0
-}
-
-run_rbpodo_async_circle_matrix_gate() {
-  run_rbpodo_async_common_gate
-  python3 scripts/run_rbpodo_circle_ablation.py --help >/dev/null
-  run_rbpodo_circle_matrix_schema_checks
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_ablation.py'
-  run_optional_rbpodo_async_500hz_controller_sim scripts/run_rbpodo_circle_ablation.py 1
 }
 
 run_rbpodo_async_report_gate() {
   run_rbpodo_async_common_gate
-  run_optional_python_help scripts/generate_circle_benchmark_report.py
   run_optional_python_help scripts/generate_rbpodo_measurement_reliability_report.py
-  run_optional_script_tests 'test_circle_benchmark_report.py'
   echo "codex_gate: skipping rbpodo async ACK-supervised report generation by default"
 }
 
 run_rbpodo_async_runbook_gate() {
   run_rbpodo_async_common_gate
-  grep_existing "async|ACK-supervised|500 Hz|pgmode simulation" \
-    docs/runbooks/rbpodo_500hz_acceptance.md REVIEW.md
+  grep_existing "async|ACK-supervised|500 Hz|pgmode simulation" REVIEW.md
   echo "codex_gate: skipping rbpodo async ACK-supervised controller run by default"
 }
 
 run_ackon500_followup_common_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts
-  run_optional_python_help scripts/rbpodo_circle_tracking_benchmark.py
-  run_optional_python_help scripts/run_rbpodo_circle_ablation.py
-  run_optional_python_help scripts/generate_ackon500_gene_goal_report.py
-  run_optional_python_help scripts/generate_circle_benchmark_report.py
   run_optional_python_help scripts/generate_rbpodo_measurement_reliability_report.py
-  run_yaml_parse_checks_if_available configs/rbpodo_circle_ablation/*.yaml
   run_optional_script_tests 'test_*.py'
   run_gui_tests
   run_policy_runner_tests
   run_simulator_tests
 }
 
-run_ackon500_rate_accounting_gate() {
-  run_ackon500_followup_common_gate
-  run_servo_gate_or_skip_missing_deps
-}
-
-run_benchmark_lane_canonicalize_gate() {
-  run_ackon500_followup_common_gate
-  run_servo_gate_or_skip_missing_deps
-}
-
-run_ackon500_best_profile_promotion_gate() {
-  run_ackon500_followup_common_gate
-  bash -n tools/rbpodo_ackon500_gene_goal.sh
-  bash -n tools/create_rbpodo_circle_local_configs.sh
-  grep_existing "sdk_ack_worker" \
-    tools/rbpodo_ackon500_gene_goal.sh \
-    tools/create_rbpodo_circle_local_configs.sh \
-    configs/rbpodo_circle_ablation \
-    rb_servo_server/config
-  grep_existing "not physical real|controller-reference lower-bound|physical_motion_expected" \
-    docs/runbooks/rbpodo_500hz_acceptance.md \
-    docs/runbooks/rbpodo_controller_sim_circle.md \
-    REVIEW.md \
-    README.md
-}
-
-run_ackon500_repeatability_validation_gate() {
-  run_ackon500_followup_common_gate
-  run_yaml_parse_checks_if_available configs/rbpodo_circle_ablation/ackon500_gene_repeatability.yaml
-  grep_existing "repeatability|repeatable_pass|not_repeatable|insufficient_evidence" \
-    scripts docs/runbooks REVIEW.md configs/rbpodo_circle_ablation
-}
-
 run_physical_readiness_blockers_clarity_gate() {
   run_ackon500_followup_common_gate
   grep_existing "physical_readiness|physical_tracking_result|controller-reference lower-bound|not physical" \
     scripts docs/runbooks REVIEW.md README.md
-}
-
-run_gene_umi_control_defaults_gate() {
-  run_shell_syntax_checks
-  python3 -m compileall -q scripts
-  run_required_python_help scripts/validate_control_defaults.py
-  run_required_script_tests 'test_validate_control_defaults.py'
-  run_yaml_parse_checks_if_available configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml
-  python3 scripts/validate_control_defaults.py \
-    --defaults configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml
-  grep_existing "controller_sim_high_performance_gene_26_5|physical_real_conservative_seed" \
-    configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml
-  grep_existing "The GENE 26.5 / ACKON500 default is a controller-simulation high-performance default only" \
-    docs/runbooks/rbpodo_controller_sim_circle.md \
-    docs/runbooks/policy_data_collection.md \
-    REVIEW.md
-}
-
-run_gene_umi_controller_sim_repeatability_gate() {
-  run_shell_syntax_checks
-  python3 -m compileall -q scripts
-  bash -n tools/rbpodo_ackon500_gene_goal.sh
-  run_required_python_help scripts/generate_ackon500_gene_goal_report.py
-  run_yaml_parse_checks_if_available configs/rbpodo_circle_ablation/ackon500_gene_repeatability.yaml
-  run_required_script_tests 'test_*ackon500*.py'
-  tools/rbpodo_ackon500_gene_goal.sh \
-    --profile repeatability \
-    --dry-run \
-    --with-required-env
-  grep_existing "best_left_run01|best_right_run01|repeatability|physical_readiness" \
-    configs/rbpodo_circle_ablation scripts docs/runbooks REVIEW.md
 }
 
 run_gene_umi_physical_transition_gate() {
@@ -2130,83 +1283,15 @@ run_vm_parity_guardrails_gate() {
     docs/runbooks/vm_network_bringup.md docs/runbooks/vm_real_parity.md scripts/check_vm_artifact_tagging.py tools/vm
 }
 
-run_optional_rbpodo_p1_circle_ablation() {
-  if [[ "${CODEX_RUN_RBPODO_CIRCLE_ABLATION:-0}" != "1" ]]; then
-    echo "codex_gate: skipping rbpodo P1 controller-simulation ablation; set CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 with explicit CODEX_RBPODO_CIRCLE_ABLATION_ARGS to enable"
-    return 0
-  fi
-  if [[ -z "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS:-}" ]]; then
-    echo "ERROR: CODEX_RUN_RBPODO_CIRCLE_ABLATION=1 requires CODEX_RBPODO_CIRCLE_ABLATION_ARGS with explicit matrix/script arguments and safety preflight flags" >&2
-    return 1
-  fi
-  for required_arg in \
-    "--matrix" \
-    "--artifact-root"
-  do
-    if [[ "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}" != *"${required_arg}"* ]]; then
-      echo "ERROR: CODEX_RBPODO_CIRCLE_ABLATION_ARGS must include ${required_arg}" >&2
-      return 1
-    fi
-  done
-  if [[ "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}" != *"--verify-pgmode-simulation"* && "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}" != *"--set-pgmode-simulation"* && "${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}" != *"--pgmode-summary-json"* ]]; then
-    echo "ERROR: CODEX_RBPODO_CIRCLE_ABLATION_ARGS must include pgmode simulation evidence" >&2
-    return 1
-  fi
-  if [[ "${RB_ALLOW_REAL_CARTESIAN:-0}" == "1" ]]; then
-    echo "ERROR: RB_ALLOW_REAL_CARTESIAN must not be set for rbpodo P1 controller-simulation ablation" >&2
-    return 1
-  fi
-  # shellcheck disable=SC2086
-  python3 scripts/run_rbpodo_circle_ablation.py ${CODEX_RBPODO_CIRCLE_ABLATION_ARGS}
-}
-
 run_rbpodo_p1_common_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts
-  python3 scripts/rbpodo_circle_tracking_benchmark.py --help >/dev/null
-  python3 scripts/run_rbpodo_circle_ablation.py --help >/dev/null
-  python3 scripts/generate_circle_benchmark_report.py --help >/dev/null
-  run_yaml_parse_checks_if_available configs/rbpodo_circle_ablation/*.yaml
-  run_rbpodo_circle_matrix_schema_checks
-}
-
-run_p1_circle_factor_matrix_gate() {
-  run_rbpodo_p1_common_gate
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_ablation.py'
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_benchmark_report.py'
-  run_optional_rbpodo_p1_circle_ablation
-}
-
-run_p1_orientation_diag_gate() {
-  run_rbpodo_p1_common_gate
-  run_optional_python_help scripts/error_decomposition.py
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_error_decomposition.py'
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_benchmark_report.py'
-  grep_existing "orientation|orientation_limited|orientation_position_equiv" scripts docs REVIEW.md
-  echo "codex_gate: skipping rbpodo orientation diagnostic controller run by default"
-}
-
-run_p1_deadtime_phase_advance_gate() {
-  run_rbpodo_p1_common_gate
-  python3 scripts/timestamp_alignment_audit.py --help >/dev/null
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_timestamp_alignment_audit.py'
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_circle_error_decomposition.py'
-  grep_existing "phase_lag|estimated_latency|timestamp_alignment|ack_spike" scripts docs REVIEW.md
-  echo "codex_gate: skipping rbpodo deadtime/phase controller run by default"
 }
 
 run_p1_servo_param_sweep_gate() {
   run_rbpodo_p1_common_gate
   grep_existing "servo_t1_sec|servo_t2_sec|servo_gain|servo_alpha|speed_bar" \
     scripts docs REVIEW.md rb_servo_server/config
-  run_optional_rbpodo_p1_circle_ablation
-}
-
-run_p1_server_side_circle_track_skeleton_gate() {
-  run_rbpodo_p1_common_gate
-  grep_existing "server_circle" scripts/rbpodo_circle_tracking_benchmark.py scripts/test_rbpodo_circle_tracking_benchmark.py
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_rbpodo_circle_tracking_benchmark.py'
-  echo "codex_gate: skipping server-side circle tracking runtime by default"
 }
 
 run_yaml_parse_checks_if_available() {
@@ -2254,68 +1339,6 @@ run_rbpodo_controller_sim_cartesian_gate() {
   echo "codex_gate: skipping rbpodo controller-simulation Cartesian controller run by default"
 }
 
-run_rbpodo_circle_config_fix_gate() {
-  run_shell_syntax_checks
-  grep_existing "dual_real_rbpodo_circle_15cm16s|dual_real_rbpodo_circle_15cm4s" \
-    README.md REVIEW.md docs rb_servo_server/docs rb_servo_server/config
-  grep_existing "backend_type:[[:space:]]*rbpodo" \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
-  grep_existing "operation_mode:[[:space:]]*simulation" \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
-  grep_existing "controller pgmode simulation only|physical robot must not move" \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml \
-    docs/runbooks/rbpodo_controller_sim_circle.md
-  grep_existing "cartesian_control:" \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
-  grep_existing "allow_in_real:[[:space:]]*false" \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml
-  run_yaml_parse_checks_if_available \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm16s.example.yaml \
-    rb_servo_server/config/dual_real_rbpodo_circle_15cm4s.example.yaml \
-    rb_servo_server/config/local/dual_real_rbpodo_circle_15cm16s.yaml \
-    rb_servo_server/config/local/dual_real_rbpodo_circle_15cm4s.yaml
-  run_python_surface_tests
-  run_servo_gate_or_skip_missing_deps
-}
-
-run_rbpodo_circle_bench_fix_gate() {
-  python3 -m compileall -q scripts
-  python3 scripts/rbpodo_circle_tracking_benchmark.py --help >/dev/null
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_*.py'
-  if [[ "${CODEX_RUN_RBPODO_CIRCLE:-0}" == "1" ]]; then
-    if [[ ! -f scripts/rbpodo_circle_tracking_benchmark.py ]]; then
-      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE=1 but scripts/rbpodo_circle_tracking_benchmark.py is missing" >&2
-      return 1
-    fi
-    if [[ -z "${CODEX_RBPODO_CIRCLE_ARGS:-}" ]]; then
-      echo "ERROR: CODEX_RUN_RBPODO_CIRCLE=1 requires CODEX_RBPODO_CIRCLE_ARGS with explicit controller-simulation script arguments and safety preflight flags" >&2
-      return 1
-    fi
-    # shellcheck disable=SC2086
-    python3 scripts/rbpodo_circle_tracking_benchmark.py ${CODEX_RBPODO_CIRCLE_ARGS}
-  else
-    echo "codex_gate: skipping rbpodo controller-simulation circle benchmark; set CODEX_RUN_RBPODO_CIRCLE=1 with explicit args to enable"
-  fi
-}
-
-run_rbpodo_circle_doc_fix_gate() {
-  for token in \
-    "allow_in_controller_simulation" \
-    "RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN" \
-    "pgmode simulation" \
-    "physical_motion_expected=false" \
-    "tcp_ref_stand" \
-    "cartesian_control_unavailable"
-  do
-    grep_existing "${token}" README.md REVIEW.md docs rb_servo_server/docs
-  done
-}
-
 run_state_fanout_gate() {
   run_servo_gate_or_skip_missing_deps
   run_yaml_parse_checks_if_available rb_servo_server/config/*.yaml rb_servo_server/config/local/*.yaml configs/**/*.yaml
@@ -2325,32 +1348,6 @@ run_state_fanout_gate() {
 run_gui_tcp_ref_actual_gate() {
   run_gui_tests
   python3 -m compileall -q rb_gui/rb_servo_gui
-}
-
-run_bench_overlay_udp_gate() {
-  python3 -m compileall -q scripts
-  python3 scripts/rbpodo_circle_tracking_benchmark.py --help >/dev/null
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_*.py'
-  echo "codex_gate: skipping rbpodo controller-simulation benchmark; BENCH-OVERLAY-UDP-01 is validation-only by default"
-}
-
-run_gui_circle_overlay_gate() {
-  run_gui_tests
-  python3 -m compileall -q rb_gui/rb_servo_gui
-  PYTHONPATH=scripts python3 -m unittest discover scripts -p 'test_*.py'
-  echo "codex_gate: skipping controller and benchmark runs; GUI-CIRCLE-OVERLAY-01 is visualization-only by default"
-}
-
-run_rbpodo_circle_live_runbook_gate() {
-  for token in \
-    "state_pub_endpoints" \
-    "overlay-pub-endpoint" \
-    "tcp_ref_stand" \
-    "pgmode simulation" \
-    "rb_gui"
-  do
-    grep_existing "${token}" README.md REVIEW.md docs rb_servo_server/docs
-  done
 }
 
 run_policy_dataset_schema_gate() {
@@ -2720,21 +1717,6 @@ case "$TASK" in
   CART-SERVO-03)
     run_cart_servo_03_gate
     ;;
-  BENCH-CIRCLE-01)
-    run_circle_benchmark_gate
-    ;;
-  BENCH-ABLATION-01)
-    run_bench_ablation_gate
-    ;;
-  BENCH-CIRCLE-FEEDBACK-01)
-    run_bench_circle_feedback_gate
-    ;;
-  CART-CIRCLE-SERVER-01)
-    run_cart_circle_server_gate
-    ;;
-  BENCH-REPORT-01)
-    run_bench_report_gate
-    ;;
   GATE-RBPODO-00)
     run_shell_syntax_checks
     ;;
@@ -2769,12 +1751,6 @@ case "$TASK" in
   RBPODO-DOC-01)
     run_rbpodo_doc_gate
     ;;
-  GATE-RBPODO-CIRCLE-00)
-    run_shell_syntax_checks
-    ;;
-  RBPODO-CIRCLE-CONFIG-01)
-    run_rbpodo_circle_config_gate
-    ;;
   RBPODO-PGMODE-SIM-01)
     run_rbpodo_pgmode_sim_gate
     ;;
@@ -2784,29 +1760,11 @@ case "$TASK" in
   RBPODO-CONTROLLER-SIM-GATE-01)
     run_rbpodo_controller_sim_gate
     ;;
-  RBPODO-CIRCLE-BENCH-01)
-    run_rbpodo_circle_bench_gate
-    ;;
-  RBPODO-CIRCLE-ABLATION-01)
-    run_rbpodo_circle_ablation_gate
-    ;;
-  RBPODO-CIRCLE-REPORT-01)
-    run_rbpodo_circle_report_gate
-    ;;
   RBPODO-CONTROLLER-SIM-CARTESIAN-00)
     run_shell_syntax_checks
     ;;
   RBPODO-CONTROLLER-SIM-CARTESIAN-01)
     run_rbpodo_controller_sim_cartesian_gate
-    ;;
-  RBPODO-CIRCLE-CONFIG-FIX-01)
-    run_rbpodo_circle_config_fix_gate
-    ;;
-  RBPODO-CIRCLE-BENCH-FIX-01)
-    run_rbpodo_circle_bench_fix_gate
-    ;;
-  RBPODO-CIRCLE-DOC-01)
-    run_rbpodo_circle_doc_fix_gate
     ;;
   RBPODO-LIVE-VIZ-00)
     run_shell_syntax_checks
@@ -2817,32 +1775,8 @@ case "$TASK" in
   GUI-TCP-REF-ACTUAL-01)
     run_gui_tcp_ref_actual_gate
     ;;
-  BENCH-OVERLAY-UDP-01)
-    run_bench_overlay_udp_gate
-    ;;
-  GUI-CIRCLE-OVERLAY-01)
-    run_gui_circle_overlay_gate
-    ;;
-  RBPODO-CIRCLE-LIVE-RUNBOOK-01)
-    run_rbpodo_circle_live_runbook_gate
-    ;;
   RBPODO-TUNE-GATE-00)
     run_shell_syntax_checks
-    ;;
-  RBPODO-CIRCLE-PROFILES-02)
-    run_rbpodo_circle_profile_tuning_gate
-    ;;
-  RBPODO-CIRCLE-ABLATION-OVERRIDES-01)
-    run_rbpodo_circle_ablation_overrides_gate
-    ;;
-  RBPODO-CIRCLE-STAGE2-MATRICES-01)
-    run_rbpodo_circle_stage2_matrices_gate
-    ;;
-  RBPODO-CIRCLE-TUNING-REPORT-01)
-    run_rbpodo_circle_tuning_report_gate
-    ;;
-  RBPODO-CIRCLE-TUNE-RUNNERS-01)
-    run_rbpodo_circle_tune_runners_gate
     ;;
   MEASURE-P0-GATE-00)
     run_shell_syntax_checks
@@ -2855,9 +1789,6 @@ case "$TASK" in
     ;;
   RBPODO-MEASURE-TIMESTAMP-01)
     run_rbpodo_measure_timestamp_gate
-    ;;
-  RBPODO-CIRCLE-ERROR-DECOMP-01)
-    run_rbpodo_circle_error_decomp_gate
     ;;
   RBPODO-MEASURE-RELIABILITY-REPORT-01)
     run_rbpodo_measure_reliability_report_gate
@@ -2877,18 +1808,6 @@ case "$TASK" in
   P0-MEASUREMENT-GATING-01)
     run_p0_measurement_gating_gate
     ;;
-  RBPODO-500HZ-CONFIG-01)
-    run_rbpodo_500hz_config_gate
-    ;;
-  RBPODO-500HZ-ACCEPT-01)
-    run_rbpodo_500hz_accept_gate
-    ;;
-  RBPODO-500HZ-CIRCLE-MATRIX-01)
-    run_rbpodo_500hz_circle_matrix_gate
-    ;;
-  RBPODO-500HZ-REPORT-01)
-    run_rbpodo_500hz_report_gate
-    ;;
   RBPODO-ASYNC-GATE-00)
     run_shell_syntax_checks
     ;;
@@ -2904,29 +1823,11 @@ case "$TASK" in
   RBPODO-ASYNC-REFERENCE-SUPERVISOR-01)
     run_rbpodo_async_cpp_gate
     ;;
-  RBPODO-ASYNC-500HZ-ACCEPT-01)
-    run_rbpodo_async_acceptance_gate
-    ;;
-  RBPODO-ASYNC-CIRCLE-MATRIX-01)
-    run_rbpodo_async_circle_matrix_gate
-    ;;
   RBPODO-ASYNC-REPORT-01)
     run_rbpodo_async_report_gate
     ;;
   RBPODO-ASYNC-RUNBOOK-01)
     run_rbpodo_async_runbook_gate
-    ;;
-  ACKON500-RATE-ACCOUNTING-01)
-    run_ackon500_rate_accounting_gate
-    ;;
-  BENCHMARK-LANE-CANONICALIZE-01)
-    run_benchmark_lane_canonicalize_gate
-    ;;
-  01_promote_ackon500_defaults)
-    run_gene_umi_control_defaults_gate
-    ;;
-  02_controller_sim_repeatability)
-    run_gene_umi_controller_sim_repeatability_gate
     ;;
   03_pgmode_real_transition_acceptance)
     run_gene_umi_physical_transition_gate
@@ -2979,29 +1880,11 @@ case "$TASK" in
   10_source_hygiene_local_configs)
     run_source_hygiene_local_configs_gate
     ;;
-  ACKON500-BEST-PROFILE-PROMOTION-01)
-    run_ackon500_best_profile_promotion_gate
-    ;;
-  ACKON500-REPEATABILITY-VALIDATION-01)
-    run_ackon500_repeatability_validation_gate
-    ;;
   PHYSICAL-READINESS-BLOCKERS-CLARITY-01)
     run_physical_readiness_blockers_clarity_gate
     ;;
-  P1-CIRCLE-FACTOR-MATRIX-01)
-    run_p1_circle_factor_matrix_gate
-    ;;
-  P1-ORIENTATION-DIAG-01)
-    run_p1_orientation_diag_gate
-    ;;
-  P1-DEADTIME-PHASE-ADVANCE-01)
-    run_p1_deadtime_phase_advance_gate
-    ;;
   P1-SERVO-PARAM-SWEEP-01)
     run_p1_servo_param_sweep_gate
-    ;;
-  P1-SERVER-SIDE-CIRCLE-TRACK-SKELETON-01)
-    run_p1_server_side_circle_track_skeleton_gate
     ;;
   POLICY-DATASET-SCHEMA-01)
     run_policy_dataset_schema_gate

@@ -63,12 +63,16 @@ Do not use deprecated aliases in new configs:
 - `servo_lookahead_sec`
 - `servo_acc`
 
-Official Servo J ranges remain part of config validation:
+Servo J range checks in config validation (see
+`docs/servo_backend_contract.md` → "Rbpodo Servo J Parameters"):
 
-- `servo_t1_sec >= 0.002`
-- `0.02 < servo_t2_sec < 0.2`
+- `servo_t1_sec >= 0.002` (refused otherwise; real motion must match `1 / servo.rate_hz`)
+- `0.02 < servo_t2_sec < 0.2` (vendor-recommended; outside → WARN only)
 - `servo_gain > 0`
-- `0 < servo_alpha < 1`
+- `0 < servo_alpha <= 10` — **script-level** units. The controller scales
+  `gain`/`alpha` by `0.1` internally, so effective `0 < alpha < 1` maps to
+  script-level `0 < servo_alpha <= 10`; `servo_alpha: 10.0` = effective `1.0` =
+  inner LPF OFF (the server-side SMD owns smoothing).
 
 For later motion configs, `servo_t1_sec` must match the supported command
 period:

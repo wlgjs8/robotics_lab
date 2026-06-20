@@ -24,33 +24,6 @@ class ArtifactSpec:
 
 ARTIFACT_SPECS: tuple[ArtifactSpec, ...] = (
     ArtifactSpec(
-        kind="control_defaults",
-        fixed_paths=(
-            "configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml",
-            "artifacts/control_defaults/gene_26_5_defaults_report.md",
-        ),
-        glob_patterns=(
-            "artifacts/control_defaults/**/*",
-        ),
-    ),
-    ArtifactSpec(
-        kind="repeatability_results",
-        fixed_paths=(
-            "configs/rbpodo_circle_ablation/ackon500_gene_repeatability.yaml",
-            "artifacts/rbpodo_circle_ablation/ackon500_gene_goal/repeatability_summary.json",
-            "artifacts/rbpodo_circle_ablation/ackon500_gene_goal/repeatability_summary.csv",
-            "artifacts/rbpodo_circle_ablation/ackon500_gene_goal/repeatability_report.md",
-        ),
-        glob_patterns=(
-            "artifacts/rbpodo_circle_ablation/**/repeatability_summary.json",
-            "artifacts/rbpodo_circle_ablation/**/repeatability_summary.csv",
-            "artifacts/rbpodo_circle_ablation/**/repeatability_report.md",
-            "artifacts/rbpodo_500hz*/**/repeatability_summary.json",
-            "artifacts/rbpodo_500hz*/**/repeatability_summary.csv",
-            "artifacts/rbpodo_500hz*/**/repeatability_report.md",
-        ),
-    ),
-    ArtifactSpec(
         kind="hdf5_audit",
         fixed_paths=(
             "data/umi_episodes/audit.json",
@@ -112,9 +85,8 @@ ARTIFACT_SPECS: tuple[ArtifactSpec, ...] = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Collect a JSON/Markdown artifact_manifest for GENE 26.5, "
-            "ACKON500, UMI HDF5 audit, flow training, rollout, and pgmode "
-            "transition evidence."
+            "Collect a JSON/Markdown artifact_manifest for UMI HDF5 audit, "
+            "flow training, rollout, and pgmode transition evidence."
         )
     )
     parser.add_argument("--output-json", type=Path, help="Path to write manifest JSON.")

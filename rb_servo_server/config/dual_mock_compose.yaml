@@ -4,13 +4,11 @@ left_robot:
   backend_type: mock
   run_mode: mock
   name: left_mock
-  initial_q_deg: [0, -30, 80, 0, 60, 0]
 
 right_robot:
   backend_type: mock
   run_mode: mock
   name: right_mock
-  initial_q_deg: [0, -30, 80, 0, 60, 0]
 
 left_mount:
   # Rotation is canonical URDF/ROS RPY converted from MJCF euler xyz.

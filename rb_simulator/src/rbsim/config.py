@@ -69,8 +69,24 @@ def load_simulator_config(path: str | Path) -> SimulatorConfig:
         raise ValueError(f"missing simulator config field: {exc.args[0]}") from exc
 
 
+# Canonical hardware-free startup pose, shared with the C++ servo-server default
+# in loadConfigFromYaml (rb_servo_server/src/config/config.cpp). Configs no longer
+# carry initial_q_deg; this is the single source of the simulator start pose.
+DEFAULT_INITIAL_Q_DEG: tuple[float, float, float, float, float, float] = (
+    0.0,
+    -30.0,
+    80.0,
+    0.0,
+    60.0,
+    0.0,
+)
+
+
 def _parse_arm(raw: dict[str, Any]) -> ArmConfig:
-    initial_q = _six_joint_tuple(raw["initial_q_deg"], "initial_q_deg")
+    if "initial_q_deg" in raw:
+        initial_q = _six_joint_tuple(raw["initial_q_deg"], "initial_q_deg")
+    else:
+        initial_q = DEFAULT_INITIAL_Q_DEG
     mount = tuple(float(value) for value in raw.get("mount", ()))
     return ArmConfig(name=str(raw["name"]), initial_q_deg=initial_q, mount=mount)
 

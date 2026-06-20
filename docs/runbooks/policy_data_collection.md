@@ -22,12 +22,11 @@ status can differ from the software simulator. Do not mix
 controller-simulation episodes with future physical real episodes unless the
 training loader explicitly filters by these labels.
 
-The GENE 26.5 / ACKON500 default is a controller-simulation high-performance default only. It is not the physical-real default until the physical promotion ladder produces actual TCP tracking evidence.
-
-When a collection workflow says to use the best ACKON500 default, resolve it
-through `configs/control_defaults/gene_26_5_ackon500_controller_sim.yaml` and
-keep the episode category `rbpodo_controller_simulation` unless a future
-physical promotion artifact explicitly changes this contract.
+Controller-simulation (`pgmode` simulation) tuning is a high-performance
+controller-reference signal only. It is not the physical-real default until the
+physical promotion ladder produces actual TCP tracking evidence. Keep
+controller-simulation episodes under the category `rbpodo_controller_simulation`
+unless a future physical promotion artifact explicitly changes this contract.
 
 For rbpodo controller pgmode collection,
 `policy_runner.safety.allow_real_motion=false` is the expected policy setting.

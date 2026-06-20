@@ -107,7 +107,6 @@ Follow `docs/runbooks/vm_real_parity.md` "Recommended Sequence" exactly:
 - WU-03: local VM config under `rb_servo_server/config/local/` using `${ROBOT_LEFT_IP}` (env-indirected; gitignored).
 - WU-04: no-op Servo J streaming, then tiny controller-simulation joint motion with explicit motion gates (`--motion`).
 - WU-05: prove Cartesian rejected with closed gates, then accepted only with controller-simulation Cartesian gates (`--cartesian`), `physical_motion_expected=false`.
-- Then 500Hz no-op -> circle ladder per `docs/runbooks/rbpodo_500hz_acceptance.md` and `rbpodo_controller_sim_circle.md`.
 - Artifact hygiene: every artifact under `artifacts/vm_parity/` carries `{"source":"controller_simulation_vm","physical_motion":false}`; run `python3 scripts/check_vm_artifact_tagging.py`.
 
 ### Stage 5 — Dual-arm expansion

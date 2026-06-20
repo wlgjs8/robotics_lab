@@ -2,10 +2,10 @@
 
 한국어 기본 README입니다. 영어 원문은 [README.en.md](README.en.md)에 보존되어 있습니다.
 
-> **참고:** 루트의 `GOAL.md`는 프로젝트 목표 문서가 아니라 과거 단일 task 프롬프트
-> (`ACKON500-GENE-GOAL-01`, rbpodo controller-sim 500 Hz circle-tracking 튜닝)의
-> 시점 스냅샷입니다. 현재 방향은 이 README / `AGENTS.md` / `docs/architecture.md`를
-> 따르세요. 자세한 드리프트 목록은 `docs/code_architecture_map.md`에 있습니다.
+> **참고:** ACKON500 circle-tracking benchmark와 그 시점 스냅샷 프롬프트(`GOAL.md`)는
+> 2026-06-20에 제거됐습니다. 현재 방향은 이 README / `AGENTS.md` /
+> `docs/architecture.md`를 따르세요. 자세한 드리프트 목록은
+> `docs/code_architecture_map.md`에 있습니다.
 
 `robotics_lab`는 dual-arm RB3-730 시스템을 통합하기 위한 작업 공간입니다. 서보 제어, 실제 토폴로지와 같은 형태의 로컬 시뮬레이터, 카메라 캡처, `policy_runner`, 운영자 GUI를 함께 다룹니다.
 
@@ -191,6 +191,16 @@ deprecated입니다. 지원되는 robot-control profile은 500 Hz이며
 `docs/runbooks/rbpodo_servo_acceptance.md`와
 `docs/runbooks/real_robot_readonly.md`를 봅니다.
 
+이 4개 Servo J 값은 *투명 실행기(transparent-executor)* 프로파일
+(`t1=0.002, t2=0.021, gain=1.0, alpha=10.0`)로 **고정**합니다. 컨트롤러가
+`gain`/`alpha`를 내부에서 `0.1` 스케일하므로 script값 `alpha=10`은 실효 `1.0`,
+즉 컨트롤러 내부 LPF off입니다. 그러면 Rainbow 컨트롤러 inner loop는 어떤
+스무딩도 추가하지 않는 투명 pass-through가 되고, 반응성·부드러움·정확성은
+모두 서버 측 제어루프(`TcpPoseTarget` → `cartesian_control.pose_track_smd`)가
+책임집니다. 이 4값은 튜닝 대상이 아니라 **계약**입니다 —
+`docs/servo_backend_contract.md`의 "Servo J Is A Fixed Transparent Executor"
+참고.
+
 `rbpodo` joint state와 command는 raw controller degree 값을 보존합니다.
 tracked real rbpodo template의 supported safety range는 명시적 per-joint
 `q_min_deg: [-360, -360, -360, -360, -360, -360]` /
@@ -271,54 +281,6 @@ Cartesian simulator acceptance:
 ```bash
 CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 ```
-
-Circle tracking benchmark:
-
-```bash
-./scripts/codex_gate.sh BENCH-CIRCLE-01
-```
-
-See `docs/runbooks/circle_tracking_benchmark.md` for simulator-only benchmark
-profiles and artifact interpretation.
-
-rbpodo controller-simulation circle templates:
-
-```bash
-tools/create_rbpodo_circle_local_configs.sh
-tools/rbpodo_circle_tune.sh --matrix stage2_gain_split --arm left --help
-less docs/runbooks/rbpodo_controller_sim_circle.md
-```
-
-Async ACK-supervised 500Hz runbook: `docs/runbooks/rbpodo_500hz_acceptance.md`.
-The named ACKON500 best controller-simulation profile is
-`tools/rbpodo_ackon500_gene_goal.sh --profile best`; it is controller-reference
-lower-bound evidence only, not physical real tracking.
-
-**ACKON500 PASS is controller-reference lower-bound evidence, not physical TCP tracking.**
-ACKON500 reports must keep `physical_readiness.status=blocked` and
-`physical_tracking_result.status=not_measured` until diagnostics parity, tiny
-physical acceptance, and slow physical-circle acceptance are complete.
-
-These configs target Rainbow controller boxes in `pgmode` simulation only; they
-do not approve physical Cartesian motion.
-
-Live `rb_gui` visualization for the rbpodo controller-simulation circle
-benchmark uses server-side state fanout plus a separate benchmark overlay:
-
-```text
-state_pub_endpoints:
-  50151 -> benchmark recorder
-  50161 -> rb_gui
-overlay:
-  50261 -> rb_gui desired circle / live metrics
-```
-
-Runbook: `docs/runbooks/rbpodo_controller_sim_circle.md`.
-Use `tcp_ref_stand` as the tracking source in pgmode simulation and keep
-`physical_motion_expected=false`. The controller-simulation Cartesian carve-out
-is config-driven (`cartesian_control.allow_in_controller_simulation: true`); no
-env gate is required. `policy_runner` is separate from this live view; GUI and
-benchmark state consumers do not route commands through it.
 
 Supported scope hygiene:
 
@@ -404,7 +366,7 @@ gripper, and geometry gates to all be present — a hard gate, but a satisfiable
 those gates were met via accepted/validated config and a full `real_policy` rollout
 has run on the physical robot.
 
-For the GENE 26.5 / ACKON500 policy-transition lane, keep `hdf5-audit`,
+For the GENE-UMI policy-transition lane, keep `hdf5-audit`,
 `flow-infer`, `real_supervised`/`real_readonly`, and pgmode transition outputs
 in an Artifact manifest / `artifact_manifest`. Generate it with
 `scripts/collect_gene_umi_artifact_manifest.py`; the manifest is documentation
@@ -424,16 +386,7 @@ Servo server simulation configs:
 - `rb_servo_server/config/dual_simulator_compose.yaml`
 - `rb_servo_server/config/dual_simulator_worker.yaml`
 - `rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`
-- `rb_servo_server/config/dual_simulator_circle_stress.yaml`
 - `rb_servo_server/config/dual_simulator_remote_172_28_60_36.yaml`
-- `rb_servo_server/config/dual_simulator_circle_baseline_15cm16s.yaml`
-- `rb_servo_server/config/dual_simulator_circle_stress_15cm4s.yaml`
-- `rb_servo_server/config/dual_simulator_circle_real_candidate_conservative.yaml`
-
-Circle benchmark profiles are simulator-only. Use the baseline profile for
-15 cm / 16 s evidence, the stress profile only for explicit 15 cm / 4 s stress,
-and the real-candidate conservative profile only as a simulator seed for future
-low-speed planning.
 
 Simulator configs:
 

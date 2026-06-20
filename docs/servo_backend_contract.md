@@ -498,16 +498,31 @@ UI Script `move_servo_j(jnt, t1, t2, gain, alpha)`:
 - `servo_t2_sec` -> `t2`, the controller hold time. This is not UR-style
   lookahead.
 - `servo_gain` -> `gain`.
-- `servo_alpha` -> `alpha`, the low-pass-filter gain. This is not
-  acceleration.
+- `servo_alpha` -> `alpha`, the controller's inner low-pass-filter gain (not
+  acceleration). Note the controller's internal `0.1` scaling — see the range
+  note below.
 
-Rainbow joint targets are in degrees. Config validation enforces the documented
-Servo J ranges before the backend is used:
+Rainbow joint targets are in degrees. Config validation refuses only
+`servo_t1_sec` below `0.002` (and, for real motion, a `servo_t1_sec` that does
+not match the `1 / servo.rate_hz` period). `servo_t2_sec`, `servo_gain`, and
+`servo_alpha` only have to be finite and positive; values outside the
+vendor-recommended range are accepted with a WARN, not refused
+(`config.cpp` `validate_rbpodo_backend`):
 
-- `servo_t1_sec >= 0.002`
-- `0.02 < servo_t2_sec < 0.2`
-- `servo_gain > 0`
-- `0 < servo_alpha < 1`
+- `servo_t1_sec >= 0.002` — refused otherwise; in real motion must equal
+  `1 / servo.rate_hz` (`0.002` at 500 Hz) unless
+  `servo.allow_servo_t1_rate_mismatch=true`.
+- `0.02 < servo_t2_sec < 0.2` — vendor-recommended; outside this range only
+  WARNs.
+- `servo_gain > 0`.
+- `0 < servo_alpha <= 10` — **script-level units**. The Rainbow controller
+  scales `gain`/`alpha` by `0.1` internally (vendor-confirmed), so the script
+  value we send is 10x the effective value. The effective vendor range
+  `0 < alpha < 1` therefore maps to script-level `0 < servo_alpha <= 10`, and
+  `servo_alpha: 10.0` is the intended "effective 1.0 = inner LPF OFF" setting.
+  The range check is in script-level units so this vendor-correct value does not
+  spuriously warn. (Earlier docs stating `0 < servo_alpha < 1` were in effective
+  units and are superseded by this script-level range.)
 
 Deprecated aliases remain accepted with warnings while configs migrate:
 
@@ -526,6 +541,54 @@ mismatch warning, but the warning is not motion approval.
 New configs must not use `servo_acc`; use `servo_alpha`. New configs must not
 use `servo_lookahead_sec`; use `servo_t2_sec`. The old names are compatibility
 aliases only.
+
+### Servo J Is A Fixed Transparent Executor
+
+The four `move_servo_j` parameters are pinned to a *transparent-executor*
+profile. They are a CONTRACT, not a tuning surface. The supported streaming
+profile is:
+
+```yaml
+servo_t1_sec: 0.002   # == 1 / servo.rate_hz at 500 Hz (command arrival/period)
+servo_t2_sec: 0.021   # controller hold time, just above the 0.02 vendor floor
+servo_gain:   1.0      # unity, no command scaling
+servo_alpha: 10.0      # script-level; effective 1.0 after the controller's 0.1 scaling => inner LPF OFF
+```
+
+With `servo_alpha: 10.0` (effective `1.0`) the controller's inner low-pass
+filter is off, so `move_servo_j` is a transparent pass-through of the per-tick
+joint targets the server streams: the Rainbow controller's inner loop adds no
+smoothing, lag, or shaping of its own. Pin these values; do not treat them as
+knobs.
+
+Because the controller is transparent, ALL responsiveness, smoothness, and
+accuracy are owned by the `rb_servo_server` control loop, not by the controller.
+For Cartesian setpoint streaming (`TcpPoseTarget` / `tcp_target_pose`) the
+server-side tuning surface is:
+
+- `cartesian_control.pose_track_smd.*` — second-order (spring-mass-damper)
+  target tracker. `natural_frequency_linear_hz` / `natural_frequency_angular_hz`
+  set responsiveness; `damping_ratio_linear` / `damping_ratio_angular` set
+  overshoot (keep `1.0` for no-tremble); `max_linear_velocity_m_s` /
+  `max_linear_accel_m_s2` / `max_angular_velocity_rad_s` /
+  `max_angular_accel_rad_s2` saturate the tracker; `velocity_feedforward: true`
+  removes steady-state lag on ramps.
+- `kinematics.ik.*` — feedforward seed (previous *sent* `q`, not measured
+  state), convergence tolerances, and branch-jump handling
+  (`max_solution_jump_deg`, `branch_jump_rate_limit`,
+  `branch_jump_damping_scale`) to keep IK jump-free under fast moves.
+- `safety.dq_max_deg_s` / `safety.ddq_max_deg_s2` — the outer per-joint
+  velocity/accel ceiling, plus optional `servo.output_moving_average_window`
+  for final-stage boxcar smoothing.
+
+Trade-off across the two regimes: for large/fast UMI teleop moves raise
+`pose_track_smd.natural_frequency_*` (and the velocity/accel caps); for
+wrist-camera-stable imitation rollout keep damping critical (`1.0`) and the
+velocity/accel caps bounded so the camera view does not shake. The servo J
+profile above stays fixed in BOTH regimes. Tracked example configs that predate
+this profile may still carry legacy `servo_t2_sec` / `servo_alpha` values
+(e.g. `0.05` / `0.5`); new and migrated configs use the transparent-executor
+profile above.
 
 ### Rbpodo Real Acceptance Sequence
 

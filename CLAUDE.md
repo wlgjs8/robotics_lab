@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docs/code_architecture_map.md` — code-verified component map, ports/wire-formats, and a doc-vs-code drift list
 - the component README/docs for whatever module you change
 
-Historical files (`TODO.md`, `CODEX_*PROMPTS*`, `MIG-*`, `HARDEN-*`, `CART-HARDEN-*`, `docs/archive/**`) are audit context only. `GOAL.md` and `REVIEW.md` are point-in-time snapshots, not direction — see the drift notes below.
+Historical files (`TODO.md`, `CODEX_*PROMPTS*`, `MIG-*`, `HARDEN-*`, `CART-HARDEN-*`, `docs/archive/**`) are audit context only. `REVIEW.md` is a point-in-time snapshot, not direction — see the drift notes below. (The ACKON500 circle-tracking benchmark and its `GOAL.md` snapshot were removed 2026-06-20.)
 
 ## Current Phase
 
@@ -101,7 +101,6 @@ Gates (`scripts/codex_gate.sh <TASK>`) wrap build/test/acceptance:
 ./scripts/codex_gate.sh HARDEN-10                                  # hardware-free C++ gate
 ./scripts/codex_gate.sh CART-MATH-03                               # Cartesian math rebaseline
 CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05   # Cartesian sim acceptance
-./scripts/codex_gate.sh BENCH-CIRCLE-01                            # circle tracking benchmark
 make sim-smoke                                                     # ./scripts/hardware_free_validation.sh
 ```
 
@@ -123,8 +122,8 @@ ML data flow: audit HDF5 episodes (`python3 -m policy_runner hdf5-audit ...`, sc
 
 Scattered docs don't all track the latest direction. Key gotchas (full list in `docs/code_architecture_map.md`):
 
-- **`GOAL.md` is not the project goal** — it's the verbatim text of one task prompt (`ACKON500-GENE-GOAL-01`, a 500 Hz rbpodo controller-sim circle-tracking tuning task). Treat it as a snapshot.
-- **Milestone vs. activity**: the milestone is now rbpodo pgmode-real physical bring-up (real motion exercised under supervision — see `docs/runbooks/rbpodo_real_physical_circle.md`). Older `GOAL.md`, `scripts/rbpodo_*`, `configs/rbpodo_circle_ablation/*`, and the ACKON500/500 Hz controller-`pgmode` circle-tracking benchmark are the prior controller-simulation activity and remain a separate (controller-reference) evidence category from physical-real evidence — don't conflate `tcp_ref_stand` benchmark passes with `tcp_actual_stand` physical passes.
+- **The ACKON500 circle-tracking benchmark was removed** — the 500 Hz rbpodo controller-sim circle-tracking benchmark subsystem (its scripts, `configs/rbpodo_circle_ablation/*`, ablation/report tooling, runbooks, and the `GOAL.md` task snapshot) was deleted 2026-06-20. Older notes that called `GOAL.md` "a snapshot of the ACKON500 task" are obsolete.
+- **Milestone**: the milestone is rbpodo pgmode-real physical bring-up (real motion exercised under supervision — see `docs/runbooks/rbpodo_real_physical_circle.md`). The Cartesian-circle evidence that matters is physical-real (`tcp_actual_stand`); the prior controller-reference (`tcp_ref_stand`) benchmark lane is gone.
 - **`TcpCircleTrack` is a stub** (`tcp_circle_track_not_implemented`); `TcpCircleMove` is implemented.
 - **Precedence on conflict** (`AGENTS.md`): `AGENTS.md` → root `README.md` → `docs/architecture.md` → contract docs → component READMEs. `docs/current_review.md` redirects to `REVIEW.md`; `docs/archive/**` is audit-only.
 

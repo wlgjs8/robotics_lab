@@ -11,7 +11,6 @@ left_robot:
   ip: "172.28.60.200"
   operation_mode: real
   command_timeout_sec: 0.05
-  initial_q_deg: [0, -30, 80, 0, 60, 0]
   speed_bar: 0.05
   servo_t1_sec: 0.002
   servo_t2_sec: 0.05
@@ -26,7 +25,6 @@ right_robot:
   ip: "172.28.60.201"
   operation_mode: real
   command_timeout_sec: 0.05
-  initial_q_deg: [0, -30, 80, 0, 60, 0]
   speed_bar: 0.05
   servo_t1_sec: 0.002
   servo_t2_sec: 0.05
