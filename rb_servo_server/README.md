@@ -5,7 +5,7 @@ C++ control server for synchronizing two Rainbow RB3-730 arms through a shared `
 The server is designed for:
 
 1. fast mock-mode development without robots,
-2. later Rainbow simulator / real robot backends through `IRobotBackend`,
+2. later Rainbow real robot backends through `IRobotBackend`,
 3. Python VLA / imitation policy integration through UDP commands,
 4. future Cartesian TCP and force/admittance control layers.
 
@@ -15,7 +15,6 @@ Implemented in this server:
 
 - dual-arm same-tick servo loop
 - mock backend
-- per-arm local simulator backend through the `RbsimBackend` protocol client
 - guarded `RbpodoBackend` integration path, disabled unless built and gated
 - actual UDP JSON command receiver
 - minimal YAML config parser for the provided config files
@@ -26,11 +25,11 @@ Implemented in this server:
 - Hold mode using previous sent target
 - capped filter dt so one late tick does not create a large motion step
 - servo period/jitter/filter-dt/safety logging
-- structured backend result taxonomy for mock, simulator, and rbpodo paths
-- direct and worker backend I/O models for simulator validation
+- structured backend result taxonomy for mock and rbpodo paths
+- direct and worker backend I/O models for hardware-free/mock validation
 - mandatory Pinocchio/Eigen FK, IK, and Cartesian math support
-- simulator-only Cartesian command routing when kinematics and Cartesian config
-  gates are enabled
+- Cartesian command routing when kinematics and Cartesian config gates are
+  enabled
 - force-control design types, config, and optional controller scaffold
 
 Still pending:
@@ -82,29 +81,15 @@ Inspect timing:
 python3 tools/plot_servo_log.py logs/servo_log.csv
 ```
 
-## Run hardware-free rb_simulator mode
+## Hardware-free validation
 
-Use the repo-local software simulator for backend integration checks. The
-current topology is one simulator process per arm.
+Hardware-free validation runs in mock mode (`config/dual_mock.yaml`) and checks
+Cartesian behavior against an already-running rbpodo or mock server with
+`scripts/cartesian_acceptance.py --mode assume-running`. For controller-level
+simulation, use the rbpodo controller `pgmode` simulation (`make run MODE=sim`)
+or the Rainbow virtual control-box VMs.
 
-From the repository root, run the full validation gate:
-
-```bash
-./scripts/hardware_free_validation.sh
-```
-
-For a focused simulator smoke after the hardware-free CMake build exists:
-
-```bash
-PYTHONPATH=rb_simulator/src python3 rb_simulator/tools/rbsim_servo_smoke.py \
-  --left-simulator-config rb_simulator/config/left_rb3_730e.yaml \
-  --right-simulator-config rb_simulator/config/right_rb3_730e.yaml \
-  --server rb_servo_server/build/hardware_free_gate/rb_servo_server \
-  --server-config rb_servo_server/config/dual_simulator.yaml \
-  --artifact-dir rb_simulator/artifacts/rbsim_servo_smoke
-```
-
-The simulator path is not Rainbow Robotics rbsim/OVA, real robot, privileged
+This lane is not Rainbow Robotics external simulator/OVA, real robot, privileged
 Docker, or production network validation.
 
 ## Fault behavior
@@ -120,7 +105,7 @@ stale command   → Hold
 Cartesian/IK not available → previous safe sent target
 EmergencyStop   → latch current/last-safe pose and ignore motion commands
 real tracking error → fault latch by default
-mock/rbsim tracking error → snap target to actual by default
+mock tracking error → snap target to actual by default
 ```
 
 Reset a latched fault:
@@ -132,7 +117,7 @@ python3 tools/send_reset_fault.py
 ## Real robot guard
 
 Real mode refuses to start unless explicitly enabled. Do not run real robot
-configs in the hardware-free simulator phase; real validation is a separate
+configs during hardware-free validation; real validation is a separate
 human-gated task. Start from the tracked
 `config/dual_real.example.yaml` template, then create a site-owned
 `config/local/dual_real_readonly.yaml` for read-only bring-up or
@@ -186,10 +171,9 @@ side by side; `MODE=sim` uses the rbpodo controller-simulation path, and the
 plain `make run` targets the real controllers. Build/install the stack first
 with `make build` after editing source. The GUI receives UDP state
 snapshots and sends only validated UDP JSON commands; the server is built with
-Pinocchio enabled so simulator-only FK/IK powers the GUI TCP target tests. See
+Pinocchio enabled so FK/IK powers the GUI TCP target tests. See
 `docs/gui_operator_console.md`.
 
-For hardware-free simulator runs, start `rb_servo_server` directly with
-`config/dual_simulator.yaml` against the per-arm `rb_simulator` processes (see
-`docs/rb_simulator_dev.md`). Docker remains in use only for `camera_server` /
-`camera_server_mock`.
+For hardware-free runs, start `rb_servo_server` directly with
+`config/dual_mock.yaml` (MockBackend). Docker remains in use only for
+`camera_server` / `camera_server_mock`.

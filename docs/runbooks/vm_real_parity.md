@@ -17,10 +17,9 @@ evidence only, not physical acceptance.
 | evidence tag | `source=controller_simulation_vm` | physical run-specific source |
 | `physical_motion_expected` | `false` | true only in approved physical acceptance |
 
-`rb_simulator` remains a separate hardware-free contract mock using JSON/TCP
-endpoints. It is useful for deterministic backend tests, but it does not
-exercise rbpodo SDK, Rainbow controller protocol, firmware state decoding, or
-Servo J ACK semantics.
+The mock backend remains a hardware-free surface for deterministic backend
+tests, but it does not exercise rbpodo SDK, Rainbow controller protocol,
+firmware state decoding, or Servo J ACK semantics.
 
 ## Local Config Pattern
 

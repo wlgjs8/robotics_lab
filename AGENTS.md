@@ -4,9 +4,8 @@
 
 `robotics_lab` is a dual-arm RB3-730 integration workspace. The current milestone is **rbpodo pgmode-real physical robot bring-up**. Simulator-first Cartesian acceptance hardening is largely complete and is now the regression baseline.
 
-The simulator stack remains the regression baseline (it must keep passing before any physical work):
+The mock / rbpodo controller-simulation (pgmode) stack remains the regression baseline (it must keep passing before any physical work):
 
-- per-arm simulator topology
 - structured backend result and fault telemetry
 - joint commands: `JointTarget`, `JointVelocity`
 - Cartesian point-to-point: `TcpPoseTarget`
@@ -29,7 +28,6 @@ Always read the current source-of-truth docs before editing code:
 - `docs/frame_contract.md`
 - `docs/joint_range_policy.md`
 - `docs/hardware_free_validation.md`
-- `docs/runbooks/tcp_pose_simulator_acceptance.md`
 - the component README/docs for the module being changed
 
 Historical prompt/planning files such as `TODO.md`, `CODEX_*PROMPTS*.md`, `MIG-*`, `HARDEN-*`, and `CART-HARDEN-*` notes are audit context only unless a task explicitly names them. When those files conflict with the current source-of-truth docs, the current source-of-truth docs win.
@@ -40,14 +38,17 @@ Use these values in config, docs, GUI labels, logs, and tests:
 
 ```yaml
 run_mode: mock | simulation | real
-backend_type: mock | simulator | rbpodo
+backend_type: mock | rbpodo
 ```
 
-Do not introduce new public terms such as `rbsim_local`, public `rbsim`, or mixed simulator aliases. Legacy filenames may exist for compatibility, but new work should use `simulator`.
+Do not introduce new public terms such as `rbsim_local`, public `rbsim`, the
+removed `simulator` backend, or mixed simulator aliases. `run_mode: simulation`
+now refers only to the rbpodo controller `pgmode` simulation flavor.
 
-Supported real-controller scope is rbpodo only. Mock and simulator backends
-remain for hardware-free validation; raw script TCP comparison backends are no
-longer part of the active code, config, gate, or runbook surface.
+Supported real-controller scope is rbpodo only. The `MockBackend` remains for
+hardware-free validation; the `rb_simulator` software-simulator backend and raw
+script TCP comparison backends are no longer part of the active code, config,
+gate, or runbook surface.
 
 ## Target Topology
 
@@ -59,15 +60,10 @@ rb_servo_server
   right_robot backend_type=rbpodo -> 172.28.60.201
 ```
 
-Simulator topology mirrors the controller shape, not the physical IP addresses:
-
-```text
-rb_servo_server
-  left_robot  backend_type=simulator -> rb_simulator_left
-  right_robot backend_type=simulator -> rb_simulator_right
-```
-
-Do not make simulator configs use `172.28.60.200` or `172.28.60.201` as defaults.
+The rbpodo controller `pgmode` simulation topology mirrors this controller shape
+(one rbpodo endpoint per arm), targeting either a Virtual ControlBox VM or a
+physical box held in `pgmode`. Site/VM configs live under gitignored
+`rb_servo_server/config/local/`.
 
 ## Hard Safety Rules
 
@@ -100,7 +96,7 @@ RB_ALLOW_REAL_CARTESIAN=1
 Even with these environment variables, real motion must also be explicitly allowed by config and by the relevant real-hardware acceptance task. Simulator acceptance is not real-hardware acceptance.
 
 The stand-frame floor plane constraint (`safety.floor_constraint`) is
-mode-independent by design: when enabled it applies in mock, simulator,
+mode-independent by design: when enabled it applies in mock,
 controller-simulation, and real, to every motion primitive, at the final
 joint-level safety gate. Enabling it requires `kinematics.enable=true`.
 Runtime adjustment uses the leaseless `SetSafetyFloorZ` command and is
@@ -161,7 +157,7 @@ Cartesian point-to-point final-pose target. It is MoveJ-like in the sense that t
 
 ### TcpLinearMove
 
-Simulator-only MoveL-like Cartesian path primitive. It must have explicit timing/speed semantics and orientation interpolation semantics. It is not real-motion-ready until a future real-hardware acceptance task says so.
+MoveL-like Cartesian path primitive. It must have explicit timing/speed semantics and orientation interpolation semantics. It is not real-motion-ready until a future real-hardware acceptance task says so.
 
 ### TcpTwistLocal / TcpTwistStand
 
@@ -183,11 +179,11 @@ Backend APIs must preserve structured results:
 - `BackendTiming`
 - `FaultContext`
 
-Do not parse backend error strings to infer safety behavior if structured fields are available. Simulator, mock, and rbpodo backends should all map failures to the shared backend taxonomy.
+Do not parse backend error strings to infer safety behavior if structured fields are available. Mock and rbpodo backends should both map failures to the shared backend taxonomy.
 
 Unsupported raw script TCP comparison paths must not be reintroduced. Rbpodo is
-the only supported real backend; mock and simulator paths remain hardware-free
-test surfaces.
+the only supported real backend; the mock path remains the hardware-free test
+surface.
 
 ## Servo Loop And I/O Architecture
 
@@ -202,7 +198,7 @@ CommandBuffer
 
 The servo loop owns command freshness, lifecycle, target generation, FK/IK, Cartesian planning, safety filtering, fault classification, and dual-arm aggregation. Blocking backend I/O should live behind backend/worker boundaries and must produce structured result telemetry.
 
-`servo.io_model: worker` is simulator-only unless a future real-hardware acceptance task explicitly opens it.
+`servo.io_model: worker` is hardware-free/mock-only unless a future real-hardware acceptance task explicitly opens it.
 
 ## Calibration And Frames
 
@@ -224,13 +220,12 @@ Use `docs/frame_contract.md` and `calibration/active_calibration.yaml` as the fr
 
 ## Expected Validation
 
-For Python and simulator-facing changes, run as applicable:
+For Python changes, run as applicable:
 
 ```bash
 python3 -m unittest discover rb_gui/tests
 python3 -m unittest discover policy_runner/tests
-PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
-python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner rb_simulator/src scripts
+python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner scripts
 ```
 
 For C++ servo changes, run the hardware-free C++ gate when dependencies are installed:
@@ -239,11 +234,9 @@ For C++ servo changes, run the hardware-free C++ gate when dependencies are inst
 ./scripts/codex_gate.sh HARDEN-10
 ```
 
-For Cartesian behavior, run simulator acceptance when Pinocchio and C++ deps are installed:
-
-```bash
-CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
-```
+For Cartesian behavior, run `scripts/cartesian_acceptance.py --mode assume-running`
+against an already-running rbpodo/mock server, and validate on rbpodo
+pgmode-simulation / VM / real.
 
 ## Required Final Report
 

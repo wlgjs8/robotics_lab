@@ -27,14 +27,11 @@ IRobotBackend
 
 ```text
 IRobotBackend
-  ├── MockBackend
-  ├── RbsimBackend for backend_type=simulator
+  ├── MockBackend for backend_type=mock
   └── RbpodoBackend for backend_type=rbpodo
 ```
 
-The policy process should not know whether the backend is mock, simulator, or
-real. Public config and operator docs use `backend_type: simulator` and
-`run_mode: simulation`; `rbsim` remains only an internal package/protocol name.
+The policy process should not know whether the backend is mock or real.
 
 ## Current active command path
 

@@ -141,20 +141,6 @@ object.
 
 Lifecycle commands such as reset/stop should not be silently overwritten by streaming servo targets. They should use a separate lane or explicit policy.
 
-## RbsimBackend Transport
-
-`RbsimBackend` keeps a persistent JSON-lines TCP socket per simulator backend during healthy operation.
-
-- Transport/protocol corruption closes the socket.
-- A later request may reconnect, but reconnect attempts are rate-limited with exponential backoff to avoid a retry storm while the simulator is restarting or down.
-- Simulator reconnect backoff starts at 50 ms and caps at 1000 ms. Calls made before the next retry window do not call `getaddrinfo()`, `socket()`, or `connect()`.
-- Suppressed reconnects are reported as retryable transport failures with error name `rbsim_connect_backoff`; they are not robot/controller faults and must not be treated as successful reads.
-- Robot/controller-level simulator errors such as `RobotFault` or `ServoDisabled` are structured backend results and do not imply TCP transport corruption.
-- Transport counters should be available for diagnostics, including connect attempts, connect failures, suppressed connect attempts, last connect error name/message, and next retry timing.
-- Simulator sockets use `TCP_NODELAY` and `SO_KEEPALIVE`. Linux builds also request conservative TCP keepalive probe timing for development use; keepalive option failures are warnings and do not fail an otherwise healthy simulator connection.
-
-This hardening applies to the simulator backend only. It does not change rbpodo transport behavior or authorize real robot motion.
-
 ## RbpodoBackend Semantics
 
 State acquisition and motion readiness are separate.
@@ -644,10 +630,6 @@ State JSON should expose:
 - worker telemetry, including `command_drops_total`,
   `pending_overwrites_total`, `last_dropped_seq`, `last_enqueued_seq`,
   `last_dispatched_seq`, and `last_completed_seq`
-- simulator transport telemetry, including connect attempts, failures,
-  suppressed attempts, reconnect counts, request/syscall counters, last connect
-  error, next retry timing, and last transport error kind when using
-  `RbsimBackend`
 - rbpodo raw diagnostics and interpretation status under
   `rbpodo_diagnostics` when using `RbpodoBackend`
 - rbpodo async streaming contract fields, including top-level

@@ -76,31 +76,6 @@ private:
     std::string previous_;
 };
 
-bool assertSimulatorCartesianConfig(const rb_servo::DualArmConfig& cfg) {
-    RB_CHECK(cfg.left_robot.backend_type == rb_servo::BackendType::Simulator);
-    RB_CHECK(cfg.right_robot.backend_type == rb_servo::BackendType::Simulator);
-    RB_CHECK(cfg.left_robot.run_mode == rb_servo::RunMode::Simulation);
-    RB_CHECK(cfg.right_robot.run_mode == rb_servo::RunMode::Simulation);
-    RB_CHECK(cfg.kinematics.enable);
-    RB_CHECK(cfg.kinematics.provider == "pinocchio");
-    RB_CHECK(std::filesystem::is_regular_file(cfg.kinematics.urdf));
-    RB_CHECK(cfg.kinematics.base_link == "world");
-    RB_CHECK(cfg.kinematics.tip_link == "tcp");
-    RB_CHECK(cfg.kinematics.joint_names.size() == rb_servo::kDof);
-    RB_CHECK(cfg.kinematics.q_units == "deg");
-    RB_CHECK(cfg.kinematics.publish_tcp);
-    RB_CHECK(cfg.kinematics.ik.enable);
-    RB_CHECK(cfg.cartesian_control.enable);
-    RB_CHECK(cfg.cartesian_control.allow_in_simulation);
-    RB_CHECK(!cfg.cartesian_control.allow_in_real);
-    RB_CHECK(!cfg.cartesian_control.allow_in_controller_simulation);
-    RB_CHECK(!cfg.cartesian_control.enable_server_side_circle_track);
-    RB_CHECK(near(cfg.cartesian_control.linear_move.constant_orientation_tolerance_rad, 0.005));
-    RB_CHECK(cfg.force_control.provider == "null");
-    RB_CHECK(!cfg.force_control.enable);
-    return true;
-}
-
 bool testRepositoryConfigsParse() {
     const std::filesystem::path config_dir =
         std::filesystem::path(__FILE__).parent_path().parent_path() / "config";
@@ -119,35 +94,6 @@ bool testRepositoryConfigsParse() {
     RB_CHECK(!mock.servo.controller_simulation_async_supervision_nonlatching);
     RB_CHECK(!mock.safety.controller_simulation_tracking_error_nonlatching);
     RB_CHECK(!mock.servo.allow_real_motion_with_suspect_diagnostics);
-
-    const rb_servo::DualArmConfig simulator =
-        rb_servo::loadConfigFromYaml((config_dir / "dual_simulator.yaml").string());
-    RB_CHECK(assertSimulatorCartesianConfig(simulator));
-    RB_CHECK(simulator.left_robot.simulator_control_endpoint == "tcp://127.0.0.1:50200");
-    RB_CHECK(simulator.right_robot.simulator_control_endpoint == "tcp://127.0.0.1:50210");
-    RB_CHECK(near(simulator.cartesian_control.path_kp_pos, 6.0));
-    RB_CHECK(near(simulator.cartesian_control.path_kp_ori, 6.0));
-    RB_CHECK(near(simulator.cartesian_control.twist_angular_deadband_rad_s, 0.0001));
-
-    const rb_servo::DualArmConfig remote_simulator =
-        rb_servo::loadConfigFromYaml((config_dir / "dual_simulator_remote_172_28_60_36.yaml").string());
-    RB_CHECK(assertSimulatorCartesianConfig(remote_simulator));
-    RB_CHECK(remote_simulator.left_robot.simulator_control_endpoint == "tcp://172.28.60.36:50200");
-    RB_CHECK(remote_simulator.right_robot.simulator_control_endpoint == "tcp://172.28.60.36:50210");
-    RB_CHECK(!remote_simulator.cartesian_control.allow_in_real);
-
-    const rb_servo::DualArmConfig simulator_worker =
-        rb_servo::loadConfigFromYaml((config_dir / "dual_simulator_worker.yaml").string());
-    RB_CHECK(assertSimulatorCartesianConfig(simulator_worker));
-    RB_CHECK(simulator_worker.servo.io_model == rb_servo::ServoIoModel::Worker);
-    RB_CHECK(near(simulator_worker.servo.worker_read_period_sec, 0.01));
-
-    const rb_servo::DualArmConfig tcp_acceptance =
-        rb_servo::loadConfigFromYaml((config_dir / "dual_simulator_tcp_acceptance.yaml").string());
-    RB_CHECK(tcp_acceptance.left_robot.backend_type == rb_servo::BackendType::Simulator);
-    RB_CHECK(tcp_acceptance.right_robot.backend_type == rb_servo::BackendType::Simulator);
-    RB_CHECK(tcp_acceptance.command_source.enforce_lease);
-    RB_CHECK(tcp_acceptance.network.command_source_enforce_lease);
 
     {
         EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
@@ -345,41 +291,6 @@ bool testUnknownKeysAndSchemaFail() {
     const bool unknown_schema_rejected = loadRejects(unknown_schema_path);
     ::unlink(unknown_schema_path.c_str());
     RB_CHECK(unknown_schema_rejected);
-    return true;
-}
-
-bool testDeprecatedAliasesWarnAndParse() {
-    const std::string path = writeTempConfig(
-        "deprecated-alias",
-        "schema: robotics_lab.rb_servo_server.v1\n"
-        "left_robot:\n"
-        "  backend_type: rbsim_local\n"
-        "  run_mode: rbsim_local\n"
-        "  rbsim_control_endpoint: \"tcp://127.0.0.1:50200\"\n"
-        "right_robot:\n"
-        "  backend_type: mock\n"
-        "  run_mode: mock\n"
-        "network:\n"
-        "  state_pub_bind: \"udp://127.0.0.1:55110\"\n"
-        "  state_pub_rate_hz: 33\n"
-    );
-
-    std::ostringstream warnings;
-    auto* const old_cerr = std::cerr.rdbuf(warnings.rdbuf());
-    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
-    std::cerr.rdbuf(old_cerr);
-    ::unlink(path.c_str());
-
-    RB_CHECK(cfg.left_robot.backend_type == rb_servo::BackendType::Simulator);
-    RB_CHECK(cfg.left_robot.run_mode == rb_servo::RunMode::Simulation);
-    RB_CHECK(cfg.left_robot.simulator_control_endpoint == "tcp://127.0.0.1:50200");
-    RB_CHECK(cfg.left_robot.rbsim_control_endpoint == cfg.left_robot.simulator_control_endpoint);
-    RB_CHECK(cfg.network.state_pub_endpoint == "udp://127.0.0.1:55110");
-    RB_CHECK(cfg.network.state_pub_bind == cfg.network.state_pub_endpoint);
-    RB_CHECK(cfg.network.state_pub_endpoints.size() == 1);
-    RB_CHECK(cfg.network.state_pub_endpoints.front() == cfg.network.state_pub_endpoint);
-    RB_CHECK(cfg.network.state_pub_rate_hz == 33);
-    RB_CHECK(warnings.str().find("deprecated") != std::string::npos);
     return true;
 }
 
@@ -1183,7 +1094,6 @@ int main() {
     if (!testRepositoryConfigsParse()) return 1;
     if (!testServoIoModelParsesAndValidates()) return 1;
     if (!testUnknownKeysAndSchemaFail()) return 1;
-    if (!testDeprecatedAliasesWarnAndParse()) return 1;
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;
     if (!testForceControlStaysDisabled()) return 1;
     if (!testCommandSourceConfigParsesAndValidates()) return 1;

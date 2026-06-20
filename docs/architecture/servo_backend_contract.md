@@ -12,10 +12,8 @@ Current backend architecture summary:
 
 - backends return structured `BackendResult<RobotState>` and `SendServoJResult`
 - `FaultClassifier` maps backend truth to safety verdicts
-- simulator uses one endpoint/backend per arm
-- `RbsimBackend` uses persistent JSON-line transport during healthy operation
 - `ArmWorker` owns per-arm blocking I/O in worker mode
-- worker mode remains simulator-only until real-hardware acceptance exists
+- worker mode is gated out of real mode until real-hardware acceptance exists
 - real rbpodo state acquisition is separate from motion readiness
 
 For details, read `../servo_backend_contract.md`.

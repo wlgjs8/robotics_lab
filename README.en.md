@@ -1,6 +1,6 @@
 # robotics_lab
 
-`robotics_lab` is the integration workspace for a dual-arm RB3-730 system with servo control, a topology-isomorphic local simulator, camera capture, policy_runner, and an operator GUI.
+`robotics_lab` is the integration workspace for a dual-arm RB3-730 system with servo control, the rbpodo backend (real robot + controller `pgmode` simulation), camera capture, policy_runner, and an operator GUI.
 
 ## Current Phase
 
@@ -8,9 +8,8 @@ The project is currently in **rbpodo pgmode-real physical robot bring-up**.
 Simulator-first Cartesian acceptance hardening is largely complete; validation
 now proceeds on the physical RB3-730E hardware.
 
-Simulator-side behavior that is repeatedly validated and stabilized:
+Mock / rbpodo controller-simulation (pgmode) behavior that is repeatedly validated and stabilized:
 
-- per-arm simulator topology
 - structured backend result and fault telemetry
 - `JointTarget` / `JointVelocity`
 - `TcpPoseTarget`
@@ -28,18 +27,15 @@ acceptance is not permission to move hardware.
 
 ## Current Maturity
 
-Supported for mock/simulation:
+Supported for mock / controller-simulation:
 
 - mock dual-arm servo control
-- per-arm local simulator backend
-- persistent simulator JSON-line transport
-- simulator direct and worker I/O modes
+- direct and worker I/O modes (mock / hardware-free)
 - FK/TCP state publication with quaternion fields
-- simulator-only TCP PTP, Linear, and Twist commands
+- TCP PTP, Linear, and Twist commands
 - mock camera server
 - GUI viewer/operator console for mock/simulation
-- policy_runner joint and Cartesian simulator action sources
-- simulator-only Cartesian acceptance scripts
+- policy_runner joint and Cartesian action sources
 - mandatory Eigen3/Pinocchio C++ Cartesian math path for `rb_servo_server`
 
 Run / validated on pgmode-real (physical RB3-730E hardware):
@@ -89,7 +85,6 @@ Start here:
 - `docs/servo_backend_contract.md`: backend result, fault, worker I/O, and state telemetry contract
 - `docs/frame_contract.md`: shared frames and calibration status
 - `docs/hardware_free_validation.md`: hardware-free validation boundary
-- `docs/runbooks/tcp_pose_simulator_acceptance.md`: Cartesian simulator acceptance
 - `docs/runbooks/camera_acceptance.md`: real three-camera acceptance
 - `calibration/active_calibration.yaml`: configured-estimate robot/camera/stand setup registry
 
@@ -99,10 +94,13 @@ Historical prompt/planning files are audit context. When they conflict with the 
 
 ```yaml
 run_mode: mock | simulation | real
-backend_type: mock | simulator | rbpodo
+backend_type: mock | rbpodo
 ```
 
-## Real And Simulator Topology
+`run_mode: simulation` now refers only to the rbpodo controller `pgmode`
+simulation flavor; the `rb_simulator` software-simulator backend was removed.
+
+## Real And Controller-Simulation Topology
 
 Physical system:
 
@@ -112,15 +110,10 @@ rb_servo_server
   right_robot backend_type=rbpodo -> 172.28.60.201
 ```
 
-Simulator:
-
-```text
-rb_servo_server
-  left_robot  backend_type=simulator -> rb_simulator_left
-  right_robot backend_type=simulator -> rb_simulator_right
-```
-
-The simulator mirrors one-controller-per-arm topology. It must not reuse real robot IPs as defaults.
+The rbpodo controller `pgmode` simulation reuses this per-arm rbpodo endpoint
+shape, targeting either a Virtual ControlBox VM or a physical box held in
+`pgmode`. Site/VM configs live under gitignored
+`rb_servo_server/config/local/`.
 
 ## Safety Gates
 
@@ -169,7 +162,7 @@ force_control:
 ## Motion Primitive Summary
 
 - `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target; path not guaranteed. Real mode opens via the gates + `cartesian_control.allow_in_real: true` and has been validated on a dual-arm physical circle.
-- `TcpLinearMove`: simulator-only MoveL-like Cartesian path primitive.
+- `TcpLinearMove`: MoveL-like Cartesian path primitive; not real-motion-ready.
 - `TcpTwistLocal` / `TcpTwistStand`: streaming Cartesian velocity primitives (simulator and the rbpodo controller-simulation carve-out; real Cartesian uses the gated `allow_in_real` path).
 - `TcpDeltaLocal` / `TcpDeltaStand`: low-level one-shot/debug jog primitives.
 
@@ -180,7 +173,6 @@ Python checks:
 ```bash
 python3 -m unittest discover rb_gui/tests
 python3 -m unittest discover policy_runner/tests
-PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
 ```
 
 Hardware-free gate:
@@ -200,11 +192,15 @@ Cartesian math rebaseline:
 ./scripts/codex_gate.sh CART-MATH-03
 ```
 
-Cartesian simulator acceptance:
+Cartesian acceptance now runs against an already-running rbpodo/mock server:
 
 ```bash
-CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
+python3 scripts/cartesian_acceptance.py --mode assume-running
 ```
+
+Behavior is additionally validated on rbpodo pgmode-simulation / VM / real. The
+prior simulator-first hardware-free Cartesian acceptance lane was retired with
+`rb_simulator`.
 
 Start the integrated operator stack (native, not Docker). `make run` brings up
 `rb_servo_server` + the viser GUI + `policy_runner` (SpaceMouse + UMI teleop):
@@ -226,29 +222,18 @@ http://127.0.0.1:8080
 
 ## Canonical Configs
 
-Servo server simulation configs:
+Mock config:
 
-- `rb_servo_server/config/dual_simulator.yaml`
-- `rb_servo_server/config/dual_simulator_worker.yaml`
-- `rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`
-
-Simulator configs:
-
-- `rb_simulator/config/left_rb3_730e.yaml`
-- `rb_simulator/config/right_rb3_730e.yaml`
+- `rb_servo_server/config/dual_mock.yaml`
 
 Real robot template:
 
 - `rb_servo_server/config/dual_real.example.yaml`
 
-Site-local real configs:
+Site-local real / controller-simulation (VM·onbox) configs (gitignored):
 
 - `rb_servo_server/config/local/dual_real_readonly.yaml`
 - `rb_servo_server/config/local/dual_real_motion.yaml`
 
-No tracked runnable real robot config should be added.
-
-Deprecated simulator config names are archived under `docs/archive/configs/`
-for historical reference only. They are not runnable source-of-truth configs
-and must not be used for new smoke or acceptance evidence. `README.md` is the
+No tracked runnable real robot config should be added. `README.md` is the
 canonical root README; this English README is a best-effort translation.

@@ -81,8 +81,6 @@ enum class RunMode { Real, Simulation, Mock };
 enum class BackendType {
     Rbpodo,
     Mock,
-    Simulator,
-    Rbsim = Simulator  // Deprecated compatibility name.
 };
 
 enum class ControlMode {

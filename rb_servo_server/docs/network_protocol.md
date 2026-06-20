@@ -27,26 +27,10 @@ The command server drops UDP packets whose source IP is not in
 the list must be non-empty. The Docker Compose mock config is explicitly
 dev-only and allows loopback plus Docker bridge private addresses.
 
-The hardware-free simulator config, `config/dual_simulator.yaml`, is stricter:
-it binds `command_bind` and `state_pub_endpoint` to `127.0.0.1` and points each
-arm at its own simulator endpoint:
-
-```yaml
-left_robot:
-  backend_type: simulator
-  run_mode: simulation
-  simulator_control_endpoint: "tcp://127.0.0.1:50200"
-
-right_robot:
-  backend_type: simulator
-  run_mode: simulation
-  simulator_control_endpoint: "tcp://127.0.0.1:50210"
-```
-
-The root compose stack uses service DNS names instead:
-`tcp://rb_simulator_left:50200` and `tcp://rb_simulator_right:50200`.
-Simulator endpoints may use loopback or compose service hostnames, but
-`backend_type: simulator` with `run_mode: real` fails closed.
+Hardware-free runs use `config/dual_mock.yaml` (MockBackend), which binds
+`command_bind` and `state_pub_endpoint` to `127.0.0.1`. The `rbpodo` backend
+(real robot plus the controller `pgmode` simulation flavor) is the controller
+backend.
 
 ## State publisher
 
@@ -123,7 +107,7 @@ tracked per source/session, and `ArmMotion` or `AcquireLease` updates the
 published active lease, but non-owner commands are not rejected.
 Packets without source metadata use a legacy source identity so older
 hardware-free tools can still acquire and refresh a lease after enforcement is
-enabled in simulator acceptance profiles.
+enabled in acceptance profiles.
 
 When `command_source.enforce_lease` is `true`, normal motion commands require
 the active lease. A source acquires the lease by sending `ArmMotion` or a
@@ -269,15 +253,14 @@ The accepted Cartesian command modes are `TcpPoseTarget`, `TcpDeltaStand`,
 `TcpDeltaLocal`, `TcpLinearMove`, `TcpCircleMove`, `TcpTwistStand`, and
 `TcpTwistLocal`. Runtime Cartesian verdicts include `Ok`,
 `CartesianUnavailable`, `InvalidCommand`, and `IkFailed`. `TcpCircleMove` is a
-simulation-only diagnostic benchmark primitive and is rejected unless
-`cartesian_control.enable_benchmark_primitives: true` is set in a simulator
-config. `TcpTwist*`, `TcpLinearMove`, and `TcpCircleMove` are bounded by
+diagnostic benchmark primitive and is rejected unless
+`cartesian_control.enable_benchmark_primitives: true` is set. `TcpTwist*`, `TcpLinearMove`, and `TcpCircleMove` are bounded by
 server-side `cartesian_control` limits before Jacobian velocity solving.
 `TcpLinearMove` and `TcpCircleMove` path feedback use
 `cartesian_control.path_kp_pos` for position error and
 `cartesian_control.path_kp_ori` for orientation error. Constant-orientation
 linear moves reject target orientation mismatch greater than
-`cartesian_control.linear_move.constant_orientation_tolerance_rad`; simulator
+`cartesian_control.linear_move.constant_orientation_tolerance_rad`; hardware-free
 configs set this to `0.005` rad. Real Cartesian motion remains closed unless
 real mode is explicitly enabled, Cartesian control is configured for real, and
 `RB_ALLOW_REAL_CARTESIAN=1` is set.
@@ -416,8 +399,9 @@ engages or maintains server-side orientation hold:
 }
 ```
 
-`TcpLinearMove` is a MoveL-like simulator-only Cartesian straight-line path
-primitive. The target pose is in the `stand` frame. `duration_sec` is seconds,
+`TcpLinearMove` is a MoveL-like Cartesian straight-line path
+primitive; it is not real-motion-ready (real mode blocked). The target pose is
+in the `stand` frame. `duration_sec` is seconds,
 `linear_speed_m_s` is meters/second (`m/s`), and `angular_speed_rad_s` is
 radians/second (`rad/s`). Explicit `duration_sec` takes precedence over
 speed-based timing; server limits can extend or reject the move if the implied
@@ -450,7 +434,7 @@ linear or angular speed is excessive. `orientation_mode` is `constant` or
 }
 ```
 
-`TcpCircleMove` is an optional simulation-only benchmark primitive. It starts
+`TcpCircleMove` is an optional benchmark-only primitive (real mode blocked). It starts
 from the current TCP pose without an initial jump, chooses the circle center so
 the current pose is on the circle at phase zero, generates reference position
 and velocity inside the servo loop, and holds the initial orientation. It is
@@ -547,19 +531,19 @@ After reset succeeds, the server re-baselines previous targets to a freshly read
 If backend reset fails or fresh state is invalid, the latch remains active.
 Successful reset stays in `ConnectedHold`; send `ArmMotion` again before motion targets.
 
-For rb_simulator smoke evidence, capture state/log artifacts that show the
+For hardware-free smoke evidence, capture state/log artifacts that show the
 reset did not silently resume motion. A valid reset artifact has a fresh valid
 state, `ConnectedHold`, no new sent motion target until a later `ArmMotion`, and
 an unchanged command-source allowlist.
 
 ## Stop and fault evidence
 
-The rb_simulator admin endpoint can inject invalid state, disconnects, tracking
-bias/frozen motion, and send/stop/reset failures for software-only regression
-checks. Use those hooks only through `rb_simulator` tests or the local smoke
-runner artifacts.
+These stop and fault behaviors are validated through mock-mode tests and the
+rbpodo controller `pgmode` simulation. The checks cover invalid state,
+disconnects, tracking bias/frozen motion, and send/stop/reset failures for
+software-only regression.
 
-Acceptable simulator evidence includes:
+Acceptable evidence includes:
 
 - Stop: state and CSV rows show the last safe target is held after stop.
 - Send failure: `left_send_ok` or `right_send_ok` becomes false and the server

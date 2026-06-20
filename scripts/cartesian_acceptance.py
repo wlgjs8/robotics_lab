@@ -98,15 +98,16 @@ class StateCapture:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Simulator-only Cartesian acceptance runner")
+    parser = argparse.ArgumentParser(
+        description="Cartesian acceptance runner (against an already-running rbpodo/mock server)"
+    )
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--mode", choices=("start-local", "assume-running"), default="start-local")
+    parser.add_argument("--mode", choices=("assume-running",), default="assume-running")
     parser.add_argument("--artifact-dir", type=Path, required=True)
     parser.add_argument("--server", type=Path, required=True)
     parser.add_argument("--server-config", type=Path, required=True)
     parser.add_argument("--left-config", type=Path, required=True)
     parser.add_argument("--right-config", type=Path, required=True)
-    parser.add_argument("--rbsim-command", default="python3 -m rbsim")
     parser.add_argument("--command-host", default="127.0.0.1")
     parser.add_argument("--command-port", type=int, default=50010)
     parser.add_argument("--state-host", default="127.0.0.1")
@@ -168,26 +169,30 @@ def preflight(args: argparse.Namespace) -> None:
     if args.skip_slerp and args.require_slerp:
         raise AcceptanceError("--skip-slerp and --require-slerp are mutually exclusive")
     server_text = read_text(args.server_config, "server config")
-    left_text = read_text(args.left_config, "left simulator config")
-    right_text = read_text(args.right_config, "right simulator config")
-    combined = "\n".join((server_text, left_text, right_text))
+    combined = "\n".join(
+        text
+        for text in (
+            server_text,
+            read_text(args.left_config, "left config") if args.left_config else "",
+            read_text(args.right_config, "right config") if args.right_config else "",
+        )
+        if text
+    )
+    # Hardware-free / controller-simulation only: refuse any config that could move
+    # the real robot. Mock (operation_mode: simulation) and rbpodo controller
+    # `pgmode` simulation (run_mode: real + operation_mode: simulation) are allowed.
     unsafe: list[str] = []
     for ip in REAL_ROBOT_IPS:
         if ip in combined:
             unsafe.append(f"real robot IP {ip}")
-    if "run_mode: real" in server_text:
-        unsafe.append("run_mode: real")
-    if "backend_type: rbpodo" in server_text:
-        unsafe.append("backend_type: rbpodo")
+    if "operation_mode: real" in server_text:
+        unsafe.append("operation_mode: real")
     if "allow_in_real: true" in server_text:
         unsafe.append("cartesian_control.allow_in_real: true")
     required = (
-        "backend_type: simulator",
-        "run_mode: simulation",
         "provider: pinocchio",
         "publish_tcp: true",
         "cartesian_control:",
-        "allow_in_simulation: true",
         "allow_in_real: false",
         "send_servo_commands: true",
         "orientation_tolerance_rad: 0.005",
@@ -197,7 +202,7 @@ def preflight(args: argparse.Namespace) -> None:
         if not (args.root / "rb_servo_server" / "tools" / tool).is_file():
             missing.append(f"rb_servo_server/tools/{tool}")
     if unsafe:
-        raise AcceptanceError("simulator-only safety preflight failed: " + ", ".join(unsafe))
+        raise AcceptanceError("non-real-motion safety preflight failed: " + ", ".join(unsafe))
     if missing:
         raise AcceptanceError("acceptance config/tool preflight failed, missing: " + ", ".join(missing))
 
@@ -207,14 +212,6 @@ def parse_tcp_endpoint(endpoint: str) -> tuple[str, int]:
     if parsed.scheme != "tcp" or parsed.hostname is None or parsed.port is None:
         raise AcceptanceError(f"expected tcp://host:port endpoint, got {endpoint!r}")
     return parsed.hostname, int(parsed.port)
-
-
-def load_simulator_config(path: Path) -> Any:
-    try:
-        from rbsim import load_simulator_config as load_config
-    except ModuleNotFoundError as exc:
-        raise AcceptanceError("rbsim import failed; set PYTHONPATH=rb_simulator/src") from exc
-    return load_config(path.resolve())
 
 
 def wait_tcp(host: str, port: int, timeout_sec: float, label: str) -> None:
@@ -286,26 +283,6 @@ def scalar_string_value(config_text: str, key: str) -> str | None:
     if match is None:
         return None
     return match.group(1)
-
-
-def prepare_start_local_server_config(args: argparse.Namespace, artifact_dir: Path) -> None:
-    command_port = select_udp_port(args.command_host, args.command_port, "command")
-    state_port = select_udp_port(args.state_host, args.state_port, "state capture")
-    config_text = args.server_config.read_text(encoding="utf-8")
-    urdf_value = scalar_string_value(config_text, "urdf")
-    if urdf_value:
-        urdf_path = Path(urdf_value)
-        if not urdf_path.is_absolute():
-            urdf_path = (args.server_config.parent / urdf_path).resolve()
-        if urdf_path.is_file():
-            config_text = replace_scalar_string(config_text, "urdf", str(urdf_path))
-    config_text = replace_udp_endpoint(config_text, "command_bind", args.command_host, command_port)
-    config_text = replace_udp_endpoint(config_text, "state_pub_endpoint", args.state_host, state_port)
-    runtime_config = artifact_dir / "runtime_server_config.yaml"
-    runtime_config.write_text(config_text, encoding="utf-8")
-    args.command_port = command_port
-    args.state_port = state_port
-    args.server_config = runtime_config
 
 
 def terminate_process(proc: subprocess.Popen[str] | None) -> None:
@@ -1148,9 +1125,6 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         }
         write_summaries(artifact_dir, summary)
         return summary
-    if args.mode == "start-local":
-        prepare_start_local_server_config(args, artifact_dir)
-
     left_proc: subprocess.Popen[str] | None = None
     right_proc: subprocess.Popen[str] | None = None
     server_proc: subprocess.Popen[str] | None = None
@@ -1158,41 +1132,8 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
     commands = CommandRecorder(artifact_dir / "command_packets.jsonl")
     capture.start()
     try:
-        if args.mode == "start-local":
-            if not args.server.is_file() or not os.access(args.server, os.X_OK):
-                raise AcceptanceError(f"server binary missing or not executable: {args.server}")
-            left_config = load_simulator_config(args.left_config)
-            right_config = load_simulator_config(args.right_config)
-            if left_config.arm != "left" or right_config.arm != "right":
-                raise AcceptanceError("simulator configs do not declare left/right arms")
-            left_host, left_port = parse_tcp_endpoint(left_config.control_bind)
-            right_host, right_port = parse_tcp_endpoint(right_config.control_bind)
-            rbsim_command = shlex.split(args.rbsim_command)
-            env = os.environ.copy()
-            sim_src = args.root / "rb_simulator" / "src"
-            env["PYTHONPATH"] = str(sim_src) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-            left_proc = start_process(
-                [*rbsim_command, "--config", str(args.left_config.resolve())],
-                args.root,
-                artifact_dir / "left_simulator.log",
-                env,
-            )
-            wait_tcp(left_host, left_port, args.startup_timeout_sec, "left simulator")
-            right_proc = start_process(
-                [*rbsim_command, "--config", str(args.right_config.resolve())],
-                args.root,
-                artifact_dir / "right_simulator.log",
-                env,
-            )
-            wait_tcp(right_host, right_port, args.startup_timeout_sec, "right simulator")
-            server_proc = start_process(
-                [str(args.server.resolve()), "--config", str(args.server_config.resolve())],
-                artifact_dir,
-                artifact_dir / "rb_servo_server.log",
-            )
-        else:
-            for name in ("left_simulator.log", "right_simulator.log", "rb_servo_server.log"):
-                (artifact_dir / name).write_text("not captured: --assume-running was used\n", encoding="utf-8")
+        for name in ("left_simulator.log", "right_simulator.log", "rb_servo_server.log"):
+            (artifact_dir / name).write_text("not captured: runs against an already-running server\n", encoding="utf-8")
 
         wait_for(capture, valid_state, args.startup_timeout_sec, "valid FK TCP state")
         scenarios = selected_scenarios(args)

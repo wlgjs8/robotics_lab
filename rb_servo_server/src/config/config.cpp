@@ -173,11 +173,6 @@ BackendType parseBackendType(const YAML::Node& node, const std::string& path) {
     const std::string value = lower(asString(node, path));
     if (value == "mock") return BackendType::Mock;
     if (value == "rbpodo") return BackendType::Rbpodo;
-    if (value == "simulator") return BackendType::Simulator;
-    if (value == "rbsim" || value == "rbsim_local") {
-        warnDeprecatedValue(path, value, "simulator");
-        return BackendType::Simulator;
-    }
     fail("Unknown backend_type: " + value, node);
 }
 
@@ -186,7 +181,7 @@ RunMode parseRunMode(const YAML::Node& node, const std::string& path) {
     if (value == "mock") return RunMode::Mock;
     if (value == "simulation") return RunMode::Simulation;
     if (value == "real") return RunMode::Real;
-    if (value == "sim" || value == "rbsim" || value == "rbsim_local") {
+    if (value == "sim") {
         warnDeprecatedValue(path, value, "simulation");
         return RunMode::Simulation;
     }
@@ -363,26 +358,6 @@ std::string expandEnvReferences(
     return expanded;
 }
 
-void applySimulatorTimeoutAlias(
-    const YAML::Node& sec,
-    const std::string& canonical,
-    const std::string& deprecated,
-    const std::string& path,
-    double* target
-) {
-    const bool has_canonical = has(sec, canonical);
-    const bool has_deprecated = has(sec, deprecated);
-    if (has_canonical && has_deprecated) {
-        fail(path + " cannot set both " + canonical + " and deprecated " + deprecated, sec[deprecated]);
-    }
-    if (has_canonical) {
-        *target = asDouble(sec[canonical], path + "." + canonical);
-    } else if (has_deprecated) {
-        warnDeprecatedKey(path + "." + deprecated, path + "." + canonical);
-        *target = asDouble(sec[deprecated], path + "." + deprecated);
-    }
-}
-
 void applyDeprecatedDoubleAlias(
     const YAML::Node& sec,
     const std::string& canonical,
@@ -518,20 +493,6 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
         "name",
         "ip",
         "operation_mode",
-        "simulator_control_endpoint",
-        "simulator_request_timeout_sec",
-        "simulator_connect_timeout_sec",
-        "simulator_read_timeout_sec",
-        "simulator_send_timeout_sec",
-        "simulator_stop_timeout_sec",
-        "simulator_reset_timeout_sec",
-        "rbsim_control_endpoint",
-        "rbsim_request_timeout_sec",
-        "rbsim_connect_timeout_sec",
-        "rbsim_read_timeout_sec",
-        "rbsim_send_timeout_sec",
-        "rbsim_stop_timeout_sec",
-        "rbsim_reset_timeout_sec",
         "command_timeout_sec",
         "initial_q_deg",
         "speed_bar",
@@ -553,39 +514,6 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
         ? expandEnvReferences(asString(sec["ip"], path + ".ip"), path + ".ip", sec["ip"])
         : cfg->ip;
     cfg->operation_mode = getString(sec, "operation_mode", cfg->operation_mode, path);
-
-    if (has(sec, "simulator_control_endpoint") && has(sec, "rbsim_control_endpoint")) {
-        fail(path + " cannot set both simulator_control_endpoint and deprecated rbsim_control_endpoint", sec["rbsim_control_endpoint"]);
-    }
-    if (has(sec, "simulator_control_endpoint")) {
-        cfg->simulator_control_endpoint = asString(sec["simulator_control_endpoint"], path + ".simulator_control_endpoint");
-    } else if (has(sec, "rbsim_control_endpoint")) {
-        warnDeprecatedKey(path + ".rbsim_control_endpoint", path + ".simulator_control_endpoint");
-        cfg->simulator_control_endpoint = asString(sec["rbsim_control_endpoint"], path + ".rbsim_control_endpoint");
-    }
-    cfg->rbsim_control_endpoint = cfg->simulator_control_endpoint;
-
-    double request_timeout = cfg->rbsim_request_timeout_sec;
-    applySimulatorTimeoutAlias(
-        sec,
-        "simulator_request_timeout_sec",
-        "rbsim_request_timeout_sec",
-        path,
-        &request_timeout
-    );
-    if (request_timeout != cfg->rbsim_request_timeout_sec) {
-        cfg->rbsim_request_timeout_sec = request_timeout;
-        cfg->rbsim_connect_timeout_sec = request_timeout;
-        cfg->rbsim_read_timeout_sec = request_timeout;
-        cfg->rbsim_send_timeout_sec = request_timeout;
-        cfg->rbsim_stop_timeout_sec = request_timeout;
-        cfg->rbsim_reset_timeout_sec = request_timeout;
-    }
-    applySimulatorTimeoutAlias(sec, "simulator_connect_timeout_sec", "rbsim_connect_timeout_sec", path, &cfg->rbsim_connect_timeout_sec);
-    applySimulatorTimeoutAlias(sec, "simulator_read_timeout_sec", "rbsim_read_timeout_sec", path, &cfg->rbsim_read_timeout_sec);
-    applySimulatorTimeoutAlias(sec, "simulator_send_timeout_sec", "rbsim_send_timeout_sec", path, &cfg->rbsim_send_timeout_sec);
-    applySimulatorTimeoutAlias(sec, "simulator_stop_timeout_sec", "rbsim_stop_timeout_sec", path, &cfg->rbsim_stop_timeout_sec);
-    applySimulatorTimeoutAlias(sec, "simulator_reset_timeout_sec", "rbsim_reset_timeout_sec", path, &cfg->rbsim_reset_timeout_sec);
 
     if (has(sec, "command_timeout_sec")) cfg->command_timeout_sec = asDouble(sec["command_timeout_sec"], path + ".command_timeout_sec");
 
@@ -932,18 +860,6 @@ void validateConfig(const DualArmConfig& cfg) {
     );
     validatePositiveFinite(static_cast<double>(cfg.network.state_pub_rate_hz), "network.state_pub_rate_hz");
     validatePositiveFinite(cfg.command_source.lease_timeout_sec, "command_source.lease_timeout_sec");
-    validatePositiveFinite(cfg.left_robot.rbsim_request_timeout_sec, "left_robot.simulator_request_timeout_sec");
-    validatePositiveFinite(cfg.right_robot.rbsim_request_timeout_sec, "right_robot.simulator_request_timeout_sec");
-    validatePositiveFinite(cfg.left_robot.rbsim_connect_timeout_sec, "left_robot.simulator_connect_timeout_sec");
-    validatePositiveFinite(cfg.right_robot.rbsim_connect_timeout_sec, "right_robot.simulator_connect_timeout_sec");
-    validatePositiveFinite(cfg.left_robot.rbsim_read_timeout_sec, "left_robot.simulator_read_timeout_sec");
-    validatePositiveFinite(cfg.right_robot.rbsim_read_timeout_sec, "right_robot.simulator_read_timeout_sec");
-    validatePositiveFinite(cfg.left_robot.rbsim_send_timeout_sec, "left_robot.simulator_send_timeout_sec");
-    validatePositiveFinite(cfg.right_robot.rbsim_send_timeout_sec, "right_robot.simulator_send_timeout_sec");
-    validatePositiveFinite(cfg.left_robot.rbsim_stop_timeout_sec, "left_robot.simulator_stop_timeout_sec");
-    validatePositiveFinite(cfg.right_robot.rbsim_stop_timeout_sec, "right_robot.simulator_stop_timeout_sec");
-    validatePositiveFinite(cfg.left_robot.rbsim_reset_timeout_sec, "left_robot.simulator_reset_timeout_sec");
-    validatePositiveFinite(cfg.right_robot.rbsim_reset_timeout_sec, "right_robot.simulator_reset_timeout_sec");
     {
         const auto validate_read_miss_tolerance = [](const BackendConfig& robot, const std::string& name) {
             if (robot.max_consecutive_read_misses < 0) {
@@ -1269,22 +1185,6 @@ void validateConfig(const DualArmConfig& cfg) {
     if (cfg.kinematics.ik.branch_jump_max_retries < 0) {
         throw std::runtime_error("kinematics.ik.branch_jump_max_retries must be >= 0");
     }
-
-    const auto validate_simulator_backend = [](const BackendConfig& backend, const std::string& label) {
-        if (backend.backend_type != BackendType::Simulator) return;
-        const std::string host = bindHost(backend.simulator_control_endpoint);
-        if (host.empty()) {
-            throw std::runtime_error(label + ".simulator_control_endpoint must use tcp://host:port");
-        }
-        if (host == "0.0.0.0" || host == "::" || host == "*") {
-            throw std::runtime_error(label + ".simulator_control_endpoint must name a reachable simulator host, not a wildcard bind");
-        }
-        if (backend.run_mode == RunMode::Real) {
-            throw std::runtime_error(label + " backend_type=simulator cannot use run_mode=real");
-        }
-    };
-    validate_simulator_backend(cfg.left_robot, "left_robot");
-    validate_simulator_backend(cfg.right_robot, "right_robot");
 
     const auto validate_rbpodo_backend = [&cfg](const BackendConfig& backend, const std::string& label) {
         if (backend.backend_type != BackendType::Rbpodo) return;

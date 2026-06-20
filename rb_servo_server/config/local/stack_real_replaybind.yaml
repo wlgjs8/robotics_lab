@@ -1,0 +1,408 @@
+schema: robotics_lab.rb_servo_server.v1
+
+# =====================================================================================
+# STACK CONFIG (REAL) — single source of truth for `make run MODE=real`.
+# pgmode real: run_mode=real, operation_mode=real.
+# Real/sim env gates are retired; no RB_ALLOW_* envs are needed.
+# =====================================================================================
+left_robot:
+  backend_type: rbpodo
+  run_mode: real
+  name: left_stack_real
+  ip: "172.28.60.200"
+  operation_mode: real            # PHYSICAL MOTION
+  command_timeout_sec: 0.05
+  speed_bar: 1.0                  # applied at backend initialize via set_speed_bar()
+  servo_t1_sec: 0.002
+  servo_t2_sec: 0.021
+  servo_gain: 1.0           # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
+  servo_alpha: 10.0 #10.0
+  disable_waiting_ack: true    # ACK-off 500Hz streaming (requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1)
+
+right_robot:
+  backend_type: rbpodo
+  run_mode: real
+  name: right_stack_real
+  ip: "172.28.60.201"
+  operation_mode: real            # PHYSICAL MOTION
+  command_timeout_sec: 0.05
+  speed_bar: 1.0               # applied at backend initialize via set_speed_bar()
+  servo_t1_sec: 0.002
+  servo_t2_sec: 0.021
+  servo_gain: 1.0                 # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
+  servo_alpha: 10.0 #10.0
+  disable_waiting_ack: true    # ACK-off 500Hz streaming (requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1)
+
+left_mount:
+  base_pose_in_stand: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
+
+right_mount:
+  base_pose_in_stand: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
+
+servo:
+  rate_hz: 500
+  command_timeout_sec: 0.2
+  io_model: direct
+  startup_mode: Hold
+  send_servo_commands: true
+  enable_realtime_priority: true
+  realtime_priority: 80
+  cpu_core: 2
+  filter_dt_min_ratio: 0.5
+  # Final-stage joint MA: 40 ticks @500Hz = 80ms boxcar (~40ms delay).
+  output_moving_average_window: 1
+  filter_dt_max_ratio: 1.5
+  servo_t1_rate_match_tolerance_ratio: 0.2
+  allow_servo_t1_rate_mismatch: true   # servo param experiment: t1 != 2ms period accepted (was false)
+  # REAL physical-motion opt-in: accept the vendor -2001 (op_stat_self_collision/robot_time
+  # field-layout garbage) as unavailable instead of latching diagnostics_suspect. ONLY
+  # these two fields are suppressed; everything else still faults. Fail-closed (needs
+  # operation_mode==real + this config opt-in; no env gate).
+  allow_real_motion_with_suspect_diagnostics: true
+  # Per-arm direct teaching (free-drive) opt-in. Fail-closed: without this the server
+  # rejects every Freedrive command (servo.allow_freedrive=false). Direct teaching is a
+  # physical gravity-compensation function and only runs with operation_mode: real (in
+  # operation_mode: simulation the controller refuses with pendant error M151 "Direct
+  # Teaching: Cannot run this function"). Operator-supervised + E-stop required.
+  allow_freedrive: true
+  # Controller-sim advisory carve-outs are intentionally OMITTED here: they are inert in
+  # real mode and must not be relied on for physical motion.
+  # Async streaming (sdk_ack_worker) is a controller-simulation-only feature and is
+  # rejected in real mode by config validation. Real motion uses the synchronous direct
+  # send path (io_model: direct above); per-command ACK was ~176us in pgmode, well within
+  # the 2ms 500Hz budget. A real send failure latches SendFailure (no advisory in real).
+  rbpodo_async_streaming:
+    enable: false
+
+safety:
+  q_min_deg: [-360, -360, -360, -360, -360, -360]
+  q_max_deg: [360, 360, 360, 360, 360, 360]
+  # Halved vs the sim profile for the first physical run.
+  dq_max_deg_s: [60, 60, 60, 90, 90, 120]      # was halved [30,30,30,45,45,60] for first run
+  ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]  # was halved for first run
+  # dq_max_deg_s: [30, 30, 30, 45, 45, 60]      # was halved for first run
+  # ddq_max_deg_s2: [150, 150, 150, 250, 250, 350]  # was halved for first run
+  joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
+  joint_wrap_for_startup_validation: false
+  joint_wrap_for_motion_safety: false
+  command_timeout_sec: 0.2
+  max_tracking_error_deg: 30.0                 # was 10: fast teleop catch-up tripped the latch
+  tracking_error_policy: fault_latch           # real: tracking error MUST latch (no advisory)
+  latch_fault_on_robot_state_error: true
+  stop_both_arms_on_single_arm_error: true
+  # Server-side dual-arm capsule self-collision guard — independent of the controller's
+  # (suppressed/untrusted) op_stat_self_collision. ClampToHold refuses to advance toward
+  # collision but never permanently latches; this is the collision net for physical motion.
+  # stand + left arm + right arm을 하나의 self로 보는 캡슐 가드.
+  # Checked pairs: left<->right, left<->stand, right<->stand (intra-arm 미검사).
+  # stand_capsules는 dual_rb3_730e_stand_ver3.urdf collision box에서 유도 (stand frame).
+  # margin_m은 radius 위에 더해지는 clearance threshold (기구 오차 여유).
+  # 초기 자세 최소 stand 여유 25.3mm (bone1<->mount_plate, 회귀 테스트로 고정).
+  # Stand-frame safety floor: TCP z of either arm may never go below z_min_m
+  # (z=0 == stand origin plane). Runtime-adjustable from the viser GUI via the
+  # leaseless SetSafetyFloorZ command within [runtime_min_z_m, runtime_max_z_m].
+  # JointTarget(InitMotion/jog) SMD 프로파일: 풀스피드 램프 대신 임계감쇠
+  # 2차계 추종으로 부드럽게 이동. 아래 한계는 프로파일용 — 전역 dq_max/ddq_max는
+  # 외곽 하드 클램프로 그대로 적용됨. (TcpPoseTarget의 pose_track_smd와 대칭)
+  joint_target_smd:
+    enable: true
+    damping_ratio: 1.0          # 임계감쇠: 오버슈트 없음
+    natural_frequency_hz: 0.4
+    max_velocity_deg_s:  [30, 30, 30, 45, 45, 60]
+    max_accel_deg_s2:    [150, 150, 150, 250, 250, 350]
+  floor_constraint:
+    enable: true
+    z_min_m: 0.012
+    runtime_min_z_m: 0.0
+    runtime_max_z_m: 0.5
+    fail_policy: clamp_hold
+    monitor_only: false
+    # 2026-06-19 anti-chatter: Stage3 velocity-damper를 더 부드럽게 (기본 4.0/0.05).
+    # 평면 접근 시 √(2·a_brake·(z−z_min))로 감속 — a_brake↓ + 밴드↑ = 가장자리 jerk↓.
+    a_brake_m_s2: 3.0
+    d_slow_m: 0.06
+    # PIKA 그리퍼 팁 2점 (TCP 프레임 오프셋, 줄자 실측 tip-to-tip 118mm:
+    # tcp 프레임 = 팁 평면(z 247.642mm @attachment_site), 팁 양끝은
+    # tool visual의 z+90° 회전 반영 시 TCP x축 방향 ±59.0mm). TCP가 회전했을 때
+    # 팁이 TCP 점보다 아래로 내려가는 케이스를 잡는다. 체크는 팔당 3점(TCP+팁 2)이며,
+    # 최종 FK backstop뿐 아니라 TcpTwistLocal/TcpTwistStand의 streaming floor
+    # projection도 같은 점들을 사용한다.
+    tcp_offset_points:
+      - { name: gripper_tip_a, offset_m: [ 0.059, 0.0, 0.0 ] }
+      - { name: gripper_tip_b, offset_m: [-0.059, 0.0, 0.0 ] }
+  # Stand-frame ROI box (workspace limit), viser "Safety ROI box"에서 조정.
+  # enable=true라야 viser Send가 허용된다(서버가 enabled 보고). bounds/면(face)
+  # velocity-damper/fail-closed/escape 로직은 전부 C++ 서버(config-driven)이고
+  # sim/real 코드 경로가 동일 — 이 블록이 빠지면 enable 기본값 false로 비활성.
+  # 2026-06-20: pgmode simulation에서 강제 거동 검증 완료 → real enforce로 승격.
+  # bounds는 sim에서 검증한 값 재사용, 강제(monitor_only=false)는 real floor와 동일.
+  roi_box:
+    enable: true
+    min_m: [-0.500, -0.900, 0.020]
+    max_m: [0.500, 0.050, 0.500]
+    runtime_min_m: [-1.2, -1.6, -0.2]
+    runtime_max_m: [1.2, 0.6, 1.6]
+    fail_policy: clamp_hold
+    monitor_only: false   # real enforce: 박스 면에서 velocity-damper 감속/홀드
+    # real anti-chatter 튜닝 (floor_constraint real과 동일: 기본 sim 4.0/0.05).
+    # 면 접근 시 √(2·a_brake·margin)로 감속 — a_brake↓ + 밴드↑ = 가장자리 jerk↓.
+    a_brake_m_s2: 3.0
+    d_slow_m: 0.06
+    # floor_constraint와 동일한 PIKA 그리퍼 팁 2점(TCP 프레임 ±59.0mm). 박스 6면
+    # 체크는 팔당 3점(TCP+팁 2)을 사용한다.
+    tcp_offset_points:
+      - { name: gripper_tip_a, offset_m: [ 0.059, 0.0, 0.0 ] }
+      - { name: gripper_tip_b, offset_m: [-0.059, 0.0, 0.0 ] }
+  self_collision:
+    enable: true
+    fail_policy: clamp_hold
+    # mesh(URDF) self-collision을 실제 차단으로 사용. 캡슐 경로는 미평가(기능 보존).
+    # 2026-06-19: real에서도 enforce 활성화 + clamp_hold(충돌 방향만 직전 안전자세로
+    # 홀드, 비충돌/후퇴 방향은 계속 이동 가능, 비래치 → ResetFault 불필요). sim과 동일.
+    monitor_only: false
+    # URDF mesh self-collision (async monitor, servo_j 2ms 경로 밖) + 공통 velocity
+    # barrier. enable=true면 아래 캡슐 필드는 평가하지 않음(폴백용 보존). 파라미터는
+    # 모든 motion primitive(TcpPoseTarget/TcpTwistLocal) 공통 — 속도는 측정된
+    # closing speed로 자동 적응. d_hard 미만 hard breach 또는 verdict stale -> fault_latch.
+    mesh:
+      unified_urdf: "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver4.urdf"
+      package_dirs:
+        - "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e"
+      pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
+      stand_ignore_arm_substrings: ["link0"]
+      d_hard_m: 0.015   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
+      # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
+      # can brake a head-on approach at the command ceiling before the hard floor.
+      # v_max(max_linear_velocity)=0.32, a_brake=4.0 -> d_hard+0.0128=0.0278; 0.035
+      # leaves a ~20mm slow zone (stoppable up to ~0.4 m/s). (Stage 0c)
+      d_slow_m: 0.05    # 2026-06-19 anti-chatter: 0.035→0.05 (gentler velocity gradient; ≥d_hard+vmax²/2a_brake=0.032)
+      a_brake_m_s2: 3.0  # 2026-06-19 anti-chatter: 4.0→3.0 (softer braking ramp = quieter onset at boundary)
+      hyst_m: 0.010      # 2026-06-19 anti-chatter: 0.005→0.010 (break on/off limit-cycle toggle)
+      latency_s: 0.003   # 2026-06-19 LPF off + new fw(no actuation latency): 0.010→0.003 (cut vc·comp_s feedback that drives the brake↔release limit cycle; comp_s=max(latency_s,verdict_age) so stale verdicts still floor it)
+      swept_samples: 2          # 1=endpoint only; >=2 swept-volume (catches tunneling)
+      check_intra_arm: true     # arm folding onto itself (non-adjacent links)
+      max_staleness_s: 0.050
+      max_near_pairs: 8
+      # 2026-06-19: 검사 스레드를 servo RT 코어(cpu_core=2)와 분리된 전용 코어에 핀
+      # (미설정 -1이면 OS가 떠돌아 500Hz servo 코어 침범 가능). eval ~2.4ms 평균(~417Hz).
+      monitor_core: 4
+      # 항목 6: URDF에 없는 collision geometry(손목 카메라/케이블/작업 테이블)를
+      # 추가 검사. 팔 프레임에 붙이면 그 팔로 자동 분류(좌/우), stand/world면 정적
+      # 장애물로 양팔과 페어링. shape: box|sphere|capsule|cylinder.
+      # TODO(operator): 실제 치수/장착 오프셋으로 채운 뒤 주석 해제할 것(추측값 금지).
+      extra_collision: []
+      #   - { name: left_wrist_camera,  shape: box, parent_frame: dual_rb3_730e_left_attachment_site,
+      #       size_m: [0.07, 0.10, 0.04], xyz_m: [0.0, 0.05, 0.05], rpy: [0,0,0] }
+      #   - { name: right_wrist_camera, shape: box, parent_frame: dual_rb3_730e_right_attachment_site,
+      #       size_m: [0.07, 0.10, 0.04], xyz_m: [0.0, 0.05, 0.05], rpy: [0,0,0] }
+      #   - { name: work_table, shape: box, parent_frame: stand,
+      #       size_m: [1.2, 0.8, 0.04], xyz_m: [0.0, -0.2, 0.0], rpy: [0,0,0] }
+
+network:
+  command_bind: "udp://127.0.0.1:50256"
+  state_pub_endpoints:
+    - "udp://127.0.0.1:50356"
+  state_pub_rate_hz: 500   # was 100; raised to see the 500 Hz servo command stream in PlotJuggler. Watch send_period_overrun / send_deadline_hit — revert to 100 if the control loop overruns.
+  command_source_allowlist: ["127.0.0.1/32"]
+
+command_source:
+  enforce_lease: true
+  lease_timeout_sec: 60.0
+
+logging:
+  enable: true
+  directory: "./logs"
+  flush_period_ms: 100
+  queue_capacity: 4096
+
+force_control:
+  provider: null
+  enable: false
+
+kinematics:
+  enable: true
+  provider: pinocchio
+  urdf: "../descriptions/urdf/rb3_730e.urdf"
+  base_link: "world"
+  tip_link: "tcp"
+  joint_names:
+    - base_joint
+    - shoulder_joint
+    - elbow_joint
+    - wrist1_joint
+    - wrist2_joint
+    - wrist3_joint
+  q_units: deg
+  publish_tcp: true
+  ik:
+    enable: true
+    max_iterations: 100
+    timeout_ms: 20.0
+    damping: 0.02
+    # ANTI-TREMBLE (was 0.002 / 0.005): the tolerance is a DEAD ZONE for the
+    # 500Hz streaming TcpPoseTarget path — solveIk returns the seed (q_actual)
+    # unchanged whenever the tracking error is inside it. At teleop speeds
+    # (10-25mm/s) the steady-state tracking error (speed x ~100ms servo lag)
+    # sits exactly at the old 2mm boundary, producing a 3-5Hz relay limit
+    # cycle (= 1/(2 x loop delay)). Tighter tolerance shrinks the dead zone
+    # so the solver actually iterates each tick; typical cost 1-3 DLS steps.
+    # 2026-06-19 (jhkim): SLOW-motion tremble fix. servo_log 140451 slow ticks:
+    # pos_err pinned at the 1e-4 boundary (p99 9.94e-5) and ik_iters==0 (dead-zone
+    # = IK returns seed) in 44% of slow ticks -> boundary relay -> q_sent ripple
+    # (slow reversals 7-22) -> robot stop-go stick-slip (q_actual hold 35%). Fast
+    # motion unaffected (error >> tolerance, dead-zone never fires). Shrink dead-zone
+    # 5x so the solver iterates every tick. Do NOT go to 2e-7 (#-out above) — too
+    # tight, solver can't hit it -> oscillates. If slow tremble persists, try 1e-5.
+    position_tolerance_m: 0.00002 #0.0001 #0.0000002
+    orientation_tolerance_rad: 0.0002 #0.001
+    max_step_deg: [2, 2, 2, 3, 3, 4]
+    # Selective singularity-robust damping. Shared by every position-IK
+    # primitive (TcpPoseTarget / TcpLinearMove / pose-track SMD / twist-via-SMD),
+    # so it also covers the occasional MODE=real teleop lurch — not just
+    # TcpTwistLocal. When the task-Jacobian sigma_min drops below
+    # singular_region_eps, damping on that direction ramps up to damping_max,
+    # keeping the solver on the seed branch (no ~5 deg single-tick joint flip for
+    # a ~0 mm Cartesian move) at the cost of a small Cartesian lag near the
+    # singularity. The arm keeps moving toward the command — it never holds.
+    #
+    # DEFAULT OFF (0.0/0.0) until tuned: for this arm sigma_min is ~0.004 even in
+    # a healthy pose (mixed m/rad task units), so a too-high eps would damp normal
+    # motion and add tracking lag everywhere. TUNE FROM TELEMETRY: capture a log
+    # with RB_TWIST_PIPELINE_CSV and read ik_sigma_min at the tick where
+    # ik_branch_jump=1; set singular_region_eps just above that value (expected
+    # well below the ~0.004 healthy-pose floor) and raise damping_max until the
+    # branch-jump flag stops firing there. Only then enable.
+    singular_region_eps: 0.10
+    damping_max: 0.08
+    # Observability ON: flag a solve whose joint solution jumps > N deg from the
+    # seed in one tick (branch-jump detector). Does not change motion; surfaces
+    # the events to tune the damping above.
+    max_solution_jump_deg: 2.0
+    # Branch-jump CLAMP (acts, not just observes). When a converged solve still
+    # jumps > max_solution_jump_deg from the seed: re-solve the SAME tick at
+    # branch_jump_damping_scale x damping (escalating per retry) to pull it back
+    # onto the local branch; if it still jumps, hold the SEED (zero motion this
+    # tick) instead of flipping to a distant branch. Telemetry ik_branch_jump_clamped
+    # (state + twist_pipe.csv). 2nd line of defense behind the singular damping above
+    # (1st: suppress the jump at the source). If clamp fires often, raise
+    # singular_region_eps / damping_max so it's caught earlier.
+    branch_jump_damping_scale: 10.0   # base 0.02 -> re-solve at 0.2, then 2.0
+    branch_jump_max_retries: 2
+    branch_jump_clamp_to_seed: false
+    # RATE-LIMIT (preferred): if a solve still jumps > max_solution_jump_deg after
+    # the damping retries, scale the whole seed->solution joint delta so the
+    # largest per-joint step == max_solution_jump_deg. Advances toward the solution
+    # at a bounded joint speed (no deadlock like clamp_to_seed, no abrupt flip like
+    # plain allow). Takes precedence over branch_jump_clamp_to_seed.
+    # max_solution_jump_deg above is now the SMOOTHNESS/LAG knob: smaller =
+    # smoother but more lag through high-gain (wrist) regions; larger = snappier.
+    branch_jump_rate_limit: true
+
+cartesian_control:
+  twist_via_smd_enable: true
+  # Anti-windup for the twist_via_smd goal integrator: never let the integrated
+  # goal lead the measured TCP by more than this (position m / orientation rad).
+  # Bounds goal run-away when the arm stalls (IK clamp / fault / can't track) and
+  # caps the recovery lurch; never engages in healthy tracking (lead = SMD lag,
+  # ~mm/sub-deg). Floor-enabled twist also reports floor_goal_clamped and
+  # goal_minus_measured_* in state + twist_pipe.csv.
+  twist_smd_goal_max_lead_m: 0.05
+  twist_smd_goal_max_lead_rad: 0.2
+  enable: true
+  allow_in_simulation: true
+  allow_in_real: true                          # PHYSICAL real Cartesian (config-gated; no env)
+  allow_in_controller_simulation: false        # must be false for a real (non-sim) config
+  enable_benchmark_primitives: true   # TcpCircleMove (viser "Circle"); enabled by config in every run_mode
+  warn_ik_duration_us: 3000
+  fail_ik_duration_us: 5000
+  # path_kp_* now drive only the circle benchmark primitive: TcpLinearMove
+  # runs the pose_track_smd feedforward chain (quintic profile, no measured-
+  # state feedback), same as streaming TcpPoseTarget.
+  path_kp_pos: 3.0                # anti-tremble (was 6.0): less reactive to tiny errors
+  path_kp_ori: 3.0                # anti-tremble (was 6.0)
+  twist_orientation_hold_kp: 3.0  # anti-tremble (was 6.0): smoother wrist orientation hold
+  twist_angular_deadband_rad_s: 0.01
+  velocity_damping: 0.08          # anti-tremble (was 0.01): damp IK velocity solution
+  # Low-speed first-run Cartesian limits (sim profile used 0.2 / 0.4 / 0.002 / 0.02).
+  # Twist limits doubled (0.05/0.1 -> 0.10/0.2) for 2x spacemouse teleop speed —
+  # PHYSICAL real speed decision (operator-approved); first-run halved values retired.
+  # 2026-06-16 raised 0.10/0.2 -> 0.25/0.4 to stop policy-reach truncation: right
+  # arm flow-infer commanded up to 0.237 m/s / 0.343 rad/s, clamp lost ~188mm/7deg
+  # per rollout (twist_pipeline.csv). 0.25 == SMD max_linear_velocity_m_s ceiling;
+  # 0.4 stays well under SMD 1.0 rad/s. OPERATOR-SUPERVISED retry, E-stop ready.
+  max_twist_linear_m_s: 0.5
+  max_twist_angular_rad_s: 0.4
+
+  max_linear_move_speed_m_s: 0.05
+  max_angular_move_speed_rad_s: 0.1
+  max_cartesian_step_m: 0.01
+  max_cartesian_step_rad: 0.1
+
+  exceed_limit_policy: clamp
+  velocity_target_integration: previous_command
+  velocity_target_lookahead_sec: 0.04
+  # SMD pose tracking for streaming TcpPoseTarget (UMI teleop): received target
+  # deltas integrate into a goal pose; the published target follows it as a
+  # critically damped (zeta=1) second-order system stepped every 2ms tick.
+  # Mass is fixed at 1.0. TUNE HERE: raise natural_frequency_*_hz step by step
+  # (0.5 -> 0.8 -> 1.2 -> 2.0 ...) for snappier tracking; translation and
+  # rotation are independent. Settling time ~ 1/(zeta*2*pi*fn) * 4.
+  pose_track_smd:
+    enable: true
+    damping_ratio_linear: 1.0
+    natural_frequency_linear_hz: 1.0 # 2026-06-19 P3: 1.5→1.0 cut vff 30Hz transmission(2ζωn↓); vff keeps lag~0 (was 2.0)
+    damping_ratio_angular: 1.0 #1.0
+    natural_frequency_angular_hz: 1.0 # 2026-06-19 P3: 1.5→1.0 cut vff 30Hz transmission (was 2.0)
+    # Velocity feedforward: damp on velocity error (goal_dot - x_dot) so a
+    # constant-velocity goal tracks with ~0 lag (removes the ~16-38mm ramp lag in
+    # the twist_via_smd reach). Decouples fn from accuracy: with this ON you can
+    # LOWER natural_frequency_*_hz (currently 10, raised to brute-force the lag)
+    # back toward 2-3 for smoothing WITHOUT re-introducing lag. 2026-06-16 (jhkim).
+    velocity_feedforward: true
+    # Saturation clamps (vector-norm, direction-preserving). Mass=1.0 so the
+    # accel clamp IS the max-force clamp; zeta/fn dynamics stay exact inside
+    # the limits. NOTE with these numbers a full-speed (50mm/s) stop is force-
+    # limited to ~12.5mm of glide (v^2/2a) on large moves.
+    # 2026-06-19 (jhkim): anti-tremble for right-arm fast UMI teleop. Servo-log
+    # 134617 showed q_sent joint velocity pinned at the GLOBAL dq_max (60 deg/s on
+    # j1/j2, line ~83) during fast motion -> following error 1-3 deg accumulates ->
+    # the rbpodo low-level servo catches up in bursts up to ~226 deg/s -> broadband
+    # roughness (q_actual HF 15x q_sent). Root cause = SMD Cartesian velocity demand
+    # exceeds dq_max. fn does NOT fix this (steady-state velocity still tracks).
+    # Fix: cap SMD Cartesian velocity so joint demand stays UNDER dq_max with margin
+    # (0.5 -> 0.3 m/s gives ~36 deg/s on j1/j2). Only fast swings are speed-limited;
+    # slow precise motion keeps responsiveness. If j1/j2 still saturate in the next
+    # servo log, drop to 0.25/0.5; if too slow on reach, raise toward 0.4/0.8.
+    # 2026-06-19 step2 (jhkim): step1 (0.5->0.3) helped — log 140058 showed right
+    # vel_sent p99 60->47, catch-up burst 226->124 deg/s. Residual: right j1/j2 still
+    # touch 60 at peaks AND left j3 now pins dq_max 90 (left arm active) -> still some
+    # saturation + onset bursts. Further nudge: lower velocity caps for more headroom
+    # under dq_max, AND lower accel caps so velocity ramps gentler (smooths the abrupt
+    # onset that excites tremble, costs a little lag on direction changes — operator OK).
+    # 2026-06-19 step3 (jhkim): step2 (0.25/0.5, accel 6/30) fully killed fast+slow
+    # tremble — log 141555: right vel_sent p99 18-24 (huge margin under dq_max 60),
+    # catch-up burst gone. But added ~50-100ms feel (cmd->actual lag 130ms right; most
+    # is intrinsic SMD+servo, the added part = accel cut + 0.25 velocity truncation).
+    # Recover responsiveness WITHOUT bringing tremble back: restore accel (onset, no
+    # peak-velocity change = no saturation) + raise velocity cap to 0.32 (right stays
+    # ~31 deg/s << 60, so no right-arm saturation). Caveat: left j3 is high-gain and
+    # already pins dq_max 90 at 0.25, so 0.32 makes left j3 saturate a touch more.
+    max_linear_velocity_m_s: 0.32       # step2 0.25 (was 0.5); recover fast-swing responsiveness, right still < dq_max
+    max_linear_accel_m_s2: 6.0            # 2026-06-19 Phase2a: 10→6 (LPF off → soften dq_max saturation edges, no top-speed/reach loss)
+    max_angular_velocity_rad_s: 0.6   # step2 0.5
+    max_angular_accel_rad_s2: 30.0     # 2026-06-19 Phase2a: 50→30 (LPF off → soften saturation edges)
+  max_command_actual_error_deg: [10, 10, 10, 16, 16, 20]
+  reset_velocity_integrator_on_mode_change: true
+  command_actual_error_policy: reset
+  circle_move:
+    allow_in_simulation: true    # benchmark-circle compute-enable (misnamed: applies to every run_mode, NOT sim-only)
+    allow_in_real: false         # must remain false (validator-enforced); compute-enable is allow_in_simulation above
+    max_diameter_m: 0.20
+    min_period_sec: 3.0
+  linear_move:
+    min_duration_sec: 0.05
+    max_duration_sec: 10.0
+    default_linear_speed_m_s: 0.03
+    default_angular_speed_rad_s: 0.2
+    constant_orientation_tolerance_rad: 0.005
+    default_orientation_mode: constant

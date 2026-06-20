@@ -3,11 +3,12 @@
 ## Review Baseline
 
 This review reflects the repository in **rbpodo pgmode-real physical bring-up**.
-Simulator-first Cartesian hardening is largely complete and is now the regression
-baseline; the active milestone is gated, operator-supervised validation on the
-physical RB3-730E hardware (read-only diagnostics parity, then tiny motion, then a
-slow physical circle, before any speed ladder). Real motion stays fail-closed and
-passing simulator acceptance is never permission to move hardware.
+The regression baseline is now mock / rbpodo controller-simulation acceptance (the
+simulator-first lane was retired); the active milestone is gated,
+operator-supervised validation on the physical RB3-730E hardware (read-only
+diagnostics parity, then tiny motion, then a slow physical circle, before any speed
+ladder). Real motion stays fail-closed and passing hardware-free / controller-sim
+acceptance is never permission to move hardware.
 
 This root file is the current review source of truth. `docs/current_review.md`
 is only a short redirect here so review status does not drift across copies.
@@ -17,17 +18,15 @@ its point-in-time caveats.
 
 ## Current Maturity
 
-### Supported For Hardware-Free / Simulator Validation
+### Supported For Hardware-Free / Controller-Simulation Validation
 
-- one simulated controller endpoint per arm
 - structured backend result contract
-- direct and worker servo I/O modes for simulator/mock use
-- persistent simulator JSON-line transport
+- direct and worker servo I/O modes for mock use
 - command-source lease/arbitration
 - FK/TCP state publication with quaternion fields
 - `TcpPoseTarget` point-to-point Cartesian target
-- `TcpLinearMove` simulator-only Cartesian path primitive
-- `TcpTwistLocal` and `TcpTwistStand` simulator-only Cartesian velocity primitives
+- `TcpLinearMove` Cartesian path primitive (not real-motion-ready)
+- `TcpTwistLocal` and `TcpTwistStand` Cartesian velocity primitives
 - GUI TCP PTP target controls
 - GUI TCP Linear controls
 - GUI Cartesian solve/path telemetry display
@@ -38,7 +37,6 @@ its point-in-time caveats.
   slider/plane visual; unit + config + GUI contract tests (note: pre-existing
   `tests/test_safety_filter.cpp` and `tests/test_state_publisher.cpp` are still
   not registered in CMakeLists — discovered during this work, left as-is)
-- simulator-only Cartesian acceptance scripts
 - mock camera and camera acceptance runbooks
 - mandatory Eigen3/Pinocchio-backed Cartesian math in `rb_servo_server`
 
@@ -110,8 +108,8 @@ safety is unchanged.
 
 ### `TcpPoseTarget`
 
-Status: simulator-supported; real mode validated on the dual-arm physical
-Cartesian circle (gates + `cartesian_control.allow_in_real: true`).
+Status: hardware-free / controller-simulation supported; real mode validated on
+the dual-arm physical Cartesian circle (gates + `cartesian_control.allow_in_real: true`).
 
 Meaning: point-to-point Cartesian final-pose target. This is MoveJ-like at the TCP level: final pose is targeted, but the intermediate TCP path is not guaranteed to be linear.
 
@@ -123,7 +121,8 @@ Review requirements:
 
 ### `TcpLinearMove`
 
-Status: simulator acceptance candidate, plus a narrow rbpodo controller
+Status: controller-simulation acceptance candidate (not real-motion-ready), plus
+a narrow rbpodo controller
 `pgmode` simulation carve-out when `operation_mode=simulation` and
 `physical_motion_expected=false` are reported by server telemetry.
 
@@ -134,7 +133,7 @@ Meaning: MoveL-like Cartesian path primitive. The TCP position reference should 
 
 Review requirements before real work:
 
-- full mandatory-Pinocchio simulator acceptance must pass
+- full mandatory-Pinocchio Cartesian acceptance must pass
 - `path_done` telemetry must remain visible long enough for state subscribers and acceptance capture
 - path line deviation must be checked over sampled state, not only final pose
 - orientation deviation must be checked over sampled state
@@ -142,7 +141,7 @@ Review requirements before real work:
 
 ### `TcpTwistLocal` / `TcpTwistStand`
 
-Status: simulator acceptance candidate.
+Status: hardware-free / controller-simulation supported.
 
 Meaning: streaming Cartesian velocity primitives.
 
@@ -168,7 +167,6 @@ Expected Python checks:
 ```bash
 python3 -m unittest discover rb_gui/tests
 python3 -m unittest discover policy_runner/tests
-PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
 ```
 
 Expected C++ hardware-free gate after dependencies are installed:
@@ -183,11 +181,13 @@ Expected Cartesian math rebaseline after Pinocchio is installed:
 ./scripts/codex_gate.sh CART-MATH-03
 ```
 
-Expected Cartesian simulator acceptance after Pinocchio is installed:
+Cartesian acceptance now runs against an already-running rbpodo/mock server:
 
 ```bash
-CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
+python3 scripts/cartesian_acceptance.py --mode assume-running
 ```
+
+plus rbpodo pgmode-simulation / VM / real validation.
 
 ## Current Physical Circle Status
 
@@ -215,14 +215,14 @@ pgmode-real" above. `real_readonly`/`real_supervised` remain the no-motion lanes
 RBPODO-CIRCLE-STATE-SOURCE-01 adds a controller-simulation-only Cartesian
 state-source policy so rbpodo pgmode simulation can integrate and guard against
 controller reference `q_ref` / `tcp_ref_stand` while still publishing and
-monitoring physical `q_actual` separately. Physical real and rb_simulator paths
-remain actual-state based.
+monitoring physical `q_actual` separately. Physical real paths remain
+actual-state based.
 
 ## Open Review Items Before Real Robot
 
 1. Full C++ hardware-free gate must pass on the development machine.
 2. Mandatory Eigen3/Pinocchio Cartesian math gate must pass.
-3. Full Cartesian simulator acceptance must pass repeatedly and preserve `acceptance_results.json` / `.csv` artifacts.
+3. Full Cartesian acceptance (`scripts/cartesian_acceptance.py --mode assume-running` + rbpodo pgmode-sim) must pass repeatedly.
 4. `TcpLinearMove path_done` telemetry persistence must remain covered by C++ tests.
 5. Constant-orientation mismatch semantics must be explicit and tested.
 6. Real rbpodo read-only acceptance must be run separately.
@@ -325,11 +325,11 @@ When reviewing a change, check:
 
 ## Current Recommendation
 
-The simulator acceptance baseline holds and the project has proceeded onto the
+The hardware-free / controller-simulation acceptance baseline holds and the project has proceeded onto the
 physical robot through the conservative ladder: read-only diagnostics parity →
 tiny motion → slow physical Cartesian circle, all under operator supervision with
 an E-stop. Continue up the ladder one stage at a time (slow → 15 cm / 16 s →
 faster) only with explicit approval per stage, keep `rb_servo_server` as the sole
 real-motion safety layer, and do not promote force control, grippers, measured
 calibration, or full `real_policy` rollout until each is separately validated.
-Any regression in simulator acceptance still blocks physical work.
+Any regression in the hardware-free / controller-simulation acceptance baseline still blocks physical work.

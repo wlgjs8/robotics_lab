@@ -9,9 +9,8 @@ Simulator-first Cartesian acceptance hardening is largely complete and now serve
 as the regression baseline; active validation has moved onto the physical
 RB3-730E hardware.
 
-The simulator stack remains the regression baseline for:
+The mock / rbpodo controller-simulation (pgmode) stack remains the regression baseline for:
 
-- per-arm simulator topology
 - structured backend result and fault telemetry
 - `JointTarget` and `JointVelocity`
 - `TcpPoseTarget`
@@ -29,19 +28,16 @@ never permission to move hardware.
 
 ## Maturity Boundary
 
-Supported for mock/simulation work:
+Supported for mock / controller-simulation work:
 
 - mock dual-arm servo control
-- one local simulator endpoint per arm
-- persistent simulator JSON-line transport
-- simulator direct and worker I/O modes
+- direct and worker I/O modes (mock / hardware-free)
 - FK/TCP state publication with quaternion fields
-- simulator-only Cartesian PTP, Linear, and Twist commands
+- Cartesian PTP, Linear, and Twist commands
 - mandatory Eigen3/Pinocchio-backed Cartesian math in `rb_servo_server`
 - mock camera server
 - GUI viewer/operator console for mock/simulation
-- Python policy_runner with joint and Cartesian simulator action sources
-- simulator-only Cartesian acceptance scripts
+- Python policy_runner with joint and Cartesian action sources
 
 Run / validated on pgmode-real (physical RB3-730E hardware):
 
@@ -90,28 +86,29 @@ Use only these values in public config, docs, GUI labels, and operator-facing lo
 
 ```yaml
 run_mode: mock | simulation | real
-backend_type: mock | simulator | rbpodo
+backend_type: mock | rbpodo
 ```
 
-`run_mode` describes the environment. `backend_type` describes the backend implementation. Deprecated terms such as `rbsim_local`, public `rbsim`, or mixed simulator aliases must not be introduced in new public docs/configs.
+`run_mode` describes the environment. `backend_type` describes the backend implementation. Deprecated terms such as `rbsim_local`, public `rbsim`, the removed `simulator` backend, or mixed simulator aliases must not be introduced in new public docs/configs.
 
-Supported real-controller scope is rbpodo only. Mock and simulator backends are
-hardware-free validation surfaces; unsupported raw script TCP comparison paths
-must not be presented as runnable backends.
+Supported real-controller scope is rbpodo only. The `MockBackend` is the
+hardware-free validation surface; the `rb_simulator` software-simulator backend
+and unsupported raw script TCP comparison paths are removed and must not be
+presented as runnable backends.
 
 ### Simulation flavors (name them precisely)
 
-Three distinct things are loosely called "simulation". Name them by their
-canonical config keys, never by the bare word "simulation":
+"Simulation" now means exactly one thing — rbpodo controller `pgmode`
+simulation. The former `rb_simulator` software-simulator flavor (`run_mode:
+simulation`, `backend_type: simulator`) was removed. Name the remaining flavor by
+its canonical config keys, never by the bare word "simulation":
 
 | Flavor | Canonical name | `run_mode` | `backend_type` | `operation_mode` | Connects to |
 |---|---|---|---|---|---|
-| Software simulation | `rb_simulator` / simulator backend | `simulation` | `simulator` | — | hardware-free Python `ArmSimulator` over local TCP |
 | Controller simulation | rbpodo `pgmode` controller-sim | `real` | `rbpodo` | `simulation` | a real rbpodo controller running in `pgmode` |
 
-`run_mode` is `simulation` only for the software simulator. Controller simulation
-is `run_mode: real` (it really connects to a controller) with the controller's
-`operation_mode: simulation`.
+Controller simulation is `run_mode: real` (it really connects to a controller)
+with the controller's `operation_mode: simulation`.
 
 Within controller simulation the **target** may be a Virtual ControlBox **VM** or
 a **physical** controller box in `pgmode`. These are behaviourally identical to
@@ -134,15 +131,10 @@ rb_servo_server
   right_robot backend_type=rbpodo -> 172.28.60.201
 ```
 
-The simulator mirrors that controller shape:
-
-```text
-rb_servo_server
-  left_robot  backend_type=simulator -> rb_simulator_left
-  right_robot backend_type=simulator -> rb_simulator_right
-```
-
-The simulator topology is isomorphic to the physical topology by endpoint count and ownership, not by IP address. Simulator configs must not default to the real controller IPs.
+The rbpodo controller `pgmode` simulation reuses this same per-arm rbpodo
+endpoint shape, but targets a Virtual ControlBox VM or a physical box held in
+`pgmode` (site/VM configs under gitignored `rb_servo_server/config/local/`),
+distinguished only by deployment target.
 
 ## State Publication Fanout
 
@@ -162,18 +154,6 @@ tools. Do not configure both fields together. Benchmark recorders and GUI
 viewers should bind separate UDP ports and receive identical server-published
 state JSON; benchmark tee/rebroadcast processes are not the primary state path.
 Command traffic still goes directly to `network.command_bind`.
-
-### Host-Local Simulator Topology
-
-```text
-left simulator
-  control: tcp://127.0.0.1:50200
-  admin:   tcp://127.0.0.1:50201
-
-right simulator
-  control: tcp://127.0.0.1:50210
-  admin:   tcp://127.0.0.1:50211
-```
 
 ## Safety Gates
 
@@ -225,7 +205,7 @@ init-error continue to latch regardless of the gates above. Controller-simulatio
 safety is unchanged.
 
 Rainbow controller `pgmode` simulation through the `rbpodo` backend is a
-separate evidence category from both hardware-free `rb_simulator` and future
+separate evidence category from both hardware-free mock and future
 physical real motion. It connects to real controller boxes, so configs use
 `run_mode: real` and `backend_type: rbpodo`, but each robot must use
 `operation_mode: simulation` and the controller must be confirmed in `pgmode`
@@ -326,11 +306,11 @@ viser overlay renders translucent + double-sided ("도달영역 표시" toggle) 
 operator sees the reach boundary through the robot/stand.
 
 `TcpCircleMove` is an optional benchmark primitive for isolating server-side
-circle generation from Python UDP streaming jitter. In `rb_simulator` it
-requires `cartesian_control.enable_benchmark_primitives: true`,
+circle generation from Python UDP streaming jitter. It requires
+`cartesian_control.enable_benchmark_primitives: true`,
 `circle_move.allow_in_simulation: true`, and
 `circle_move.allow_in_real: false`. In rbpodo controller `pgmode` simulation,
-the same primitive is allowed only through the controller-simulation carve-out
+the primitive is allowed only through the controller-simulation carve-out
 above, with `operation_mode: simulation`, controller-reference state, and
 `physical_motion_expected=false`. Its optional `phase_advance_sec` is visible
 telemetry and must not be interpreted as proof of physical system latency.
@@ -368,11 +348,11 @@ generation from Python into `rb_servo_server`. The long-term path is:
 
 1. Parser/schema: accept a trajectory-parameter command and publish structured
    accepted/rejected telemetry without sending motion.
-2. Simulator implementation: compute desired pose/twist and feedback inside the
-   servo tick using fresh simulator state.
+2. Mock implementation: compute desired pose/twist and feedback inside the
+   servo tick using fresh mock state.
 3. Rbpodo controller-simulation implementation: run the same tick-local control
    against controller-reference state in Rainbow `pgmode` simulation only.
-4. Acceptance matrix: compare simulator, rbpodo controller-simulation, and
+4. Acceptance matrix: compare mock, rbpodo controller-simulation, and
    future physical-real evidence as separate categories.
 
 The skeleton is disabled by default:
@@ -468,7 +448,7 @@ explicit policy-runner opt-in flag.
 
 ### `TcpLinearMove`
 
-Simulator-only MoveL-like Cartesian path primitive. It plans a Cartesian path with explicit timing/speed semantics and orientation interpolation semantics. Current modes are:
+MoveL-like Cartesian path primitive (not real-motion-ready). It plans a Cartesian path with explicit timing/speed semantics and orientation interpolation semantics. Current modes are:
 
 - `constant`: keep start orientation along the path
 - `slerp`: interpolate start orientation to target orientation
@@ -551,7 +531,7 @@ CommandBuffer
 orientation interpolation, frame conversion, and nontrivial SO(3)/SE(3)
 operations must use Eigen/Pinocchio instead of local fallback math.
 
-`ArmWorker` owns blocking per-arm backend I/O in worker mode. Worker mode is simulator-only until separate real-hardware acceptance exists.
+`ArmWorker` owns blocking per-arm backend I/O in worker mode. Worker mode is hardware-free/mock-only until separate real-hardware acceptance exists.
 
 ## Backend Architecture
 
@@ -564,8 +544,6 @@ Backends must return structured operation results:
 - `FaultContext`
 
 Bool-only backend results must not be reintroduced.
-
-`RbsimBackend` keeps one persistent JSON-lines TCP connection per simulator backend instance during healthy operation. Transport/protocol corruption closes the socket; robot/controller-level errors such as `RobotFault` remain structured backend results.
 
 `RbpodoBackend` separates state acquisition from motion readiness. Valid joint feedback with `servo_enabled=false` is a valid read state, not motion readiness. Real `servo_j` sends remain blocked unless real gates and controller readiness are satisfied. Real stop/reset API wiring remains conservative until verified.
 
@@ -589,12 +567,12 @@ commands through `policy_runner`. `policy_runner` remains a separate command
 source for policy workflows, not a visualization broker.
 
 Policy and teleop datasets must preserve the collection environment as
-metadata. The required categories are hardware-free `rb_simulator`, rbpodo
+metadata. The required categories are hardware-free mock, rbpodo
 controller `pgmode` simulation, and future physical real demonstrations.
 Controller-simulation data uses `backend_type: rbpodo`, `run_mode: real`,
 `operation_mode: simulation`, and `physical_motion_expected=false`; it should
 record both `tcp_actual_stand` and `tcp_ref_stand` when available. It is not
-the same evidence class as simulator data and must not be mixed with future
+the same evidence class as mock data and must not be mixed with future
 physical real data without explicit metadata filtering. The dataset schema is
 documented in `docs/runbooks/policy_data_collection.md`.
 
@@ -616,7 +594,9 @@ Current geometry is `configured_estimate`, not measured calibration. It may be u
 
 Hardware-free validation is described in `docs/hardware_free_validation.md`.
 
-Cartesian simulator acceptance is described in `docs/runbooks/tcp_pose_simulator_acceptance.md`.
+Cartesian behavior is validated against an already-running rbpodo/mock server
+(`scripts/cartesian_acceptance.py --mode assume-running`) and on rbpodo
+pgmode-simulation / VM / real.
 
 Real three-camera acceptance is described in `docs/runbooks/camera_acceptance.md`.
 

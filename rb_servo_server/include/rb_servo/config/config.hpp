@@ -19,15 +19,6 @@ struct BackendConfig {
     std::string name;
     std::string ip;
     std::string operation_mode = "real";
-    std::string simulator_control_endpoint = "tcp://127.0.0.1:50200";
-    // Deprecated compatibility alias. Keep synchronized with simulator_control_endpoint.
-    std::string rbsim_control_endpoint = "tcp://127.0.0.1:50200";
-    double rbsim_request_timeout_sec = 0.2;
-    double rbsim_connect_timeout_sec = 0.2;
-    double rbsim_read_timeout_sec = 0.2;
-    double rbsim_send_timeout_sec = 0.2;
-    double rbsim_stop_timeout_sec = 0.2;
-    double rbsim_reset_timeout_sec = 0.2;
 
     double command_timeout_sec = 0.2;
 
@@ -436,7 +427,7 @@ struct SafetyConfig {
     double command_timeout_sec = 0.2;
     double max_tracking_error_deg = 10.0;
 
-    // mock/rbsim can use SnapToActual for fast iteration. real should use FaultLatch.
+    // mock can use SnapToActual for fast iteration. real should use FaultLatch.
     TrackingErrorPolicy tracking_error_policy = TrackingErrorPolicy::FaultLatch;
 
     bool stop_both_arms_on_single_arm_error = true;

@@ -7,12 +7,16 @@ This document defines the default validation boundary for development without ph
 Hardware-free validation may exercise:
 
 - mock servo backend
-- per-arm simulator backend
 - rb_gui parser/safety/model tests
 - policy_runner action-source tests
 - camera mock/stub paths
 - C++ unit tests that do not require hardware
-- simulator-only smoke tests
+- mock-mode smoke tests
+
+> The `rb_simulator` per-arm software-simulator backend and its hardware-free
+> simulator lane were retired. Hardware-free validation now uses the mock
+> backend; controller behavior beyond mock is validated on rbpodo controller
+> `pgmode` simulation (VM or onbox) and real.
 
 It does not prove:
 
@@ -30,8 +34,7 @@ Python checks:
 ```bash
 python3 -m unittest discover rb_gui/tests
 python3 -m unittest discover policy_runner/tests
-PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
-python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner rb_simulator/src scripts
+python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner scripts
 ```
 
 Shell syntax checks:
@@ -40,8 +43,6 @@ Shell syntax checks:
 bash -n scripts/codex_gate.sh
 bash -n scripts/codex_run_sequence.sh
 bash -n scripts/check_deps.sh
-bash -n scripts/hardware_free_validation.sh
-bash -n scripts/tcp_pose_simulator_acceptance.sh
 ```
 
 C++ gate:
@@ -50,10 +51,10 @@ C++ gate:
 ./scripts/codex_gate.sh HARDEN-10
 ```
 
-Full simulator Cartesian acceptance:
+Cartesian acceptance (against an already-running rbpodo/mock server):
 
 ```bash
-CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
+python3 scripts/cartesian_acceptance.py --mode assume-running
 ```
 
 ## Dependency Preflight
@@ -78,26 +79,20 @@ reported as `Missing CMake package: pinocchio`; it may be skipped only when
 `CODEX_SKIP_MISSING_CPP_DEPS=1` is explicitly set, and skipped C++ gates are
 not acceptance evidence.
 
-## Simulator Smoke
+## Mock Smoke
 
-The simulator must run one process/container per arm.
-
-Host-local ports:
-
-```text
-left  control/admin: 127.0.0.1:50200 / 50201
-right control/admin: 127.0.0.1:50210 / 50211
-```
-
-Wrong-arm requests must fail closed.
+Run `rb_servo_server` with `config/dual_mock.yaml` (MockBackend) and drive it
+with the bundled sender tools; the state stream and servo log are the smoke
+evidence. Controller behavior beyond mock is validated on rbpodo controller
+`pgmode` simulation (VM or onbox).
 
 ## Direct And Worker I/O
 
-Direct mode and worker mode are both simulator validation targets.
+Direct mode and worker mode are both hardware-free (mock) validation targets.
 
 Direct mode validates the straightforward servo loop/backends path.
 
-Worker mode validates the long-term architecture where each arm worker owns blocking backend I/O. Worker mode is still simulator-only unless a future real-hardware acceptance explicitly opens it.
+Worker mode validates the long-term architecture where each arm worker owns blocking backend I/O. Worker mode is still hardware-free/mock-only unless a future real-hardware acceptance explicitly opens it.
 
 ## Expected State Telemetry
 
@@ -121,10 +116,10 @@ A hardware-free validation run is useful only when:
 
 - tests are not skipped silently
 - skipped checks are clearly reported with the missing dependency
-- no real robot IPs are used in simulator configs
+- no real robot IPs are used in mock configs
 - no real robot env gates are required
 - no force control is enabled
-- simulator motion primitives remain simulation-only
+- mock-mode motion primitives stay hardware-free
 
 ## Not A Hardware Acceptance
 

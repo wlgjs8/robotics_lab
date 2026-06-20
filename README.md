@@ -7,7 +7,7 @@
 > `docs/architecture.md`를 따르세요. 자세한 드리프트 목록은
 > `docs/code_architecture_map.md`에 있습니다.
 
-`robotics_lab`는 dual-arm RB3-730 시스템을 통합하기 위한 작업 공간입니다. 서보 제어, 실제 토폴로지와 같은 형태의 로컬 시뮬레이터, 카메라 캡처, `policy_runner`, 운영자 GUI를 함께 다룹니다.
+`robotics_lab`는 dual-arm RB3-730 시스템을 통합하기 위한 작업 공간입니다. 서보 제어, rbpodo 백엔드(실로봇 + 컨트롤러 `pgmode` 시뮬레이션), 카메라 캡처, `policy_runner`, 운영자 GUI를 함께 다룹니다.
 
 ## 현재 단계
 
@@ -15,9 +15,8 @@
 시뮬레이터 우선 Cartesian acceptance hardening은 대부분 마무리됐고, 이제
 실제 RB3-730E 하드웨어에서 검증을 진행합니다.
 
-시뮬레이터 측에서 반복 검증되어 안정화된 항목:
+mock / rbpodo 컨트롤러 시뮬레이션(pgmode) 측에서 반복 검증되어 안정화된 항목:
 
-- 팔별 독립 시뮬레이터 토폴로지
 - 구조화된 backend result 및 fault telemetry
 - `JointTarget` / `JointVelocity`
 - `TcpPoseTarget`
@@ -34,18 +33,15 @@
 
 ## 현재 성숙도
 
-mock/simulation에서 지원되는 항목:
+mock / 컨트롤러 시뮬레이션에서 지원되는 항목:
 
 - mock dual-arm servo control
-- 팔별 로컬 simulator backend
-- persistent simulator JSON-line transport
-- simulator direct 및 worker I/O mode
+- direct 및 worker I/O mode (mock/하드웨어프리)
 - quaternion 필드를 포함한 FK/TCP state publication
-- simulator-only TCP PTP, Linear, Twist command
+- TCP PTP, Linear, Twist command
 - mock camera server
 - mock/simulation용 GUI viewer/operator console
-- `policy_runner` joint 및 Cartesian simulator action source
-- simulator-only Cartesian acceptance script
+- `policy_runner` joint 및 Cartesian action source
 - mandatory Eigen3/Pinocchio C++ Cartesian math path for `rb_servo_server`
 
 pgmode-real(실제 RB3-730E 하드웨어)에서 구동/검증된 항목:
@@ -94,7 +90,6 @@ pgmode-real(실제 RB3-730E 하드웨어)에서 구동/검증된 항목:
 - `docs/frame_contract.md`: 공통 frame 및 calibration 상태
 - `docs/joint_range_policy.md`: rbpodo raw joint angle/range policy
 - `docs/hardware_free_validation.md`: hardware-free validation boundary
-- `docs/runbooks/tcp_pose_simulator_acceptance.md`: Cartesian simulator acceptance
 - `docs/runbooks/camera_acceptance.md`: 실제 3-camera acceptance
 - `calibration/active_calibration.yaml`: configured-estimate robot/camera/stand setup registry
 
@@ -104,14 +99,16 @@ pgmode-real(실제 RB3-730E 하드웨어)에서 구동/검증된 항목:
 
 ```yaml
 run_mode: mock | simulation | real
-backend_type: mock | simulator | rbpodo
+backend_type: mock | rbpodo
 ```
 
-지원되는 real-controller backend는 `rbpodo` 하나뿐입니다. `mock`과
-`simulator`는 hardware-free 검증용으로 유지하며, unsupported raw script TCP
-비교 경로는 active code/config/gate/runbook surface에서 제거되었습니다.
+지원되는 real-controller backend는 `rbpodo` 하나뿐입니다. `mock`은
+hardware-free 검증용으로 유지하며, `run_mode: simulation`은 이제 rbpodo
+컨트롤러 `pgmode` 시뮬레이션 flavor만 지칭합니다. 제거된 `rb_simulator`
+소프트웨어 시뮬레이터와 unsupported raw script TCP 비교 경로는 active
+code/config/gate/runbook surface에 없습니다.
 
-## 실제 및 시뮬레이터 토폴로지
+## 실제 및 컨트롤러 시뮬레이션 토폴로지
 
 실제 시스템:
 
@@ -121,15 +118,9 @@ rb_servo_server
   right_robot backend_type=rbpodo -> 172.28.60.201
 ```
 
-시뮬레이터:
-
-```text
-rb_servo_server
-  left_robot  backend_type=simulator -> rb_simulator_left
-  right_robot backend_type=simulator -> rb_simulator_right
-```
-
-시뮬레이터는 팔마다 독립 controller endpoint를 갖는 실제 토폴로지를 반영해야 합니다. 기본값으로 실제 로봇 IP를 재사용하면 안 됩니다.
+rbpodo 컨트롤러 `pgmode` 시뮬레이션은 위와 같은 팔별 rbpodo endpoint 구조를
+그대로 쓰되, 대상이 Virtual ControlBox VM 또는 `pgmode`로 둔 실제 box입니다.
+site/VM config는 gitignore된 `rb_servo_server/config/local/`에 둡니다.
 
 ## Safety
 
@@ -256,7 +247,6 @@ Python checks:
 ```bash
 python3 -m unittest discover rb_gui/tests
 python3 -m unittest discover policy_runner/tests
-PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
 ```
 
 Hardware-free gate:
@@ -276,11 +266,15 @@ Cartesian math rebaseline:
 ./scripts/codex_gate.sh CART-MATH-03
 ```
 
-Cartesian simulator acceptance:
+Cartesian acceptance now runs against an already-running rbpodo/mock server:
 
 ```bash
-CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
+python3 scripts/cartesian_acceptance.py --mode assume-running
 ```
+
+추가로 rbpodo pgmode-simulation / VM / real에서 거동을 검증합니다. (이전의
+simulator-우선 hardware-free Cartesian acceptance lane은 `rb_simulator`와 함께
+제거됐습니다.)
 
 Supported scope hygiene:
 
@@ -366,29 +360,17 @@ http://127.0.0.1:8080
 
 ## 표준 Config
 
-Servo server simulation configs:
+Mock config:
 
-- `rb_servo_server/config/dual_simulator.yaml`
-- `rb_servo_server/config/dual_simulator_worker.yaml`
-- `rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`
-- `rb_servo_server/config/dual_simulator_remote_172_28_60_36.yaml`
-
-Simulator configs:
-
-- `rb_simulator/config/left_rb3_730e.yaml`
-- `rb_simulator/config/right_rb3_730e.yaml`
+- `rb_servo_server/config/dual_mock.yaml`
 
 Real robot template:
 
 - `rb_servo_server/config/dual_real.example.yaml`
 
-Site-local real configs:
+Site-local real / 컨트롤러 시뮬레이션(VM·onbox) config (gitignore):
 
 - `rb_servo_server/config/local/dual_real_readonly.yaml`
 - `rb_servo_server/config/local/dual_real_motion.yaml`
 
 실행 가능한 tracked real robot config는 추가하면 안 됩니다.
-
-Deprecated simulator config names are archived under `docs/archive/configs/`
-for historical reference only. They are not runnable source-of-truth configs
-and must not be used for new smoke or acceptance evidence.

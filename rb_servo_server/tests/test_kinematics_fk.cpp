@@ -329,42 +329,6 @@ bool testKinematicsConfigValidation() {
     return true;
 }
 
-bool testTcpAcceptanceConfigContract() {
-    const std::filesystem::path config_path =
-        servoRoot() / "config" / "dual_simulator_tcp_acceptance.yaml";
-    RB_CHECK(std::filesystem::is_regular_file(config_path));
-
-    std::ifstream file(config_path);
-    std::ostringstream buffer;
-    buffer << file.rdbuf();
-    const std::string text = buffer.str();
-    RB_CHECK(text.find("172.28.60.200") == std::string::npos);
-    RB_CHECK(text.find("172.28.60.201") == std::string::npos);
-    RB_CHECK(text.find("allow_in_real: true") == std::string::npos);
-
-    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(config_path.string());
-    RB_CHECK(cfg.left_robot.backend_type == rb_servo::BackendType::Simulator);
-    RB_CHECK(cfg.right_robot.backend_type == rb_servo::BackendType::Simulator);
-    RB_CHECK(cfg.left_robot.run_mode == rb_servo::RunMode::Simulation);
-    RB_CHECK(cfg.right_robot.run_mode == rb_servo::RunMode::Simulation);
-    RB_CHECK(cfg.left_robot.simulator_control_endpoint == "tcp://127.0.0.1:50200");
-    RB_CHECK(cfg.right_robot.simulator_control_endpoint == "tcp://127.0.0.1:50210");
-    RB_CHECK(cfg.left_robot.simulator_control_endpoint != cfg.right_robot.simulator_control_endpoint);
-    RB_CHECK(cfg.servo.send_servo_commands);
-    RB_CHECK(cfg.kinematics.enable);
-    RB_CHECK(cfg.kinematics.provider == "pinocchio");
-    RB_CHECK(cfg.kinematics.publish_tcp);
-    RB_CHECK(cfg.kinematics.ik.enable);
-    RB_CHECK(cfg.cartesian_control.enable);
-    RB_CHECK(cfg.cartesian_control.allow_in_simulation);
-    RB_CHECK(!cfg.cartesian_control.allow_in_real);
-    RB_CHECK(std::fabs(cfg.cartesian_control.warn_ik_duration_us - 3000.0) < 1e-12);
-    RB_CHECK(std::fabs(cfg.cartesian_control.fail_ik_duration_us - 5000.0) < 1e-12);
-    RB_CHECK(cfg.force_control.provider == "null");
-    RB_CHECK(!cfg.force_control.enable);
-    return true;
-}
-
 bool testIkRemainsUnavailable() {
     static_assert(!HasComputeIk<rb_servo::IKinematics>::value, "P2-A must not add IK to IKinematics");
     static_assert(!HasComputeIk<rb_servo::PinocchioKinematics>::value, "P2-A must not add IK to PinocchioKinematics");
@@ -482,7 +446,7 @@ bool testLinkCollisionPointsInStand() {
 }
 
 bool testConfiguredMountNormals() {
-    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml((servoRoot() / "config" / "dual_simulator.yaml").string());
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml((servoRoot() / "config" / "dual_mock.yaml").string());
     const std::array<double, 3> left_normal = shoulderMountNormal(cfg.left_mount.base_pose_in_stand, rb_servo::ArmId::Left);
     const std::array<double, 3> right_normal = shoulderMountNormal(cfg.right_mount.base_pose_in_stand, rb_servo::ArmId::Right);
 
@@ -755,7 +719,6 @@ bool testServoLoopOmitsReferenceTcpForInvalidReferenceJoints() {
 
 int main() {
     if (!testKinematicsConfigValidation()) return 1;
-    if (!testTcpAcceptanceConfigContract()) return 1;
     if (!testIkRemainsUnavailable()) return 1;
     if (!testConfiguredMountNormals()) return 1;
     if (!testPinocchioFk()) return 1;

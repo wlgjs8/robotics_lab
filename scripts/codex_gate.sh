@@ -200,10 +200,6 @@ finally:
 PY
 }
 
-run_simulator_tests() {
-  PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
-}
-
 run_gui_tests() {
   python3 -m unittest discover rb_gui/tests
 }
@@ -215,7 +211,6 @@ run_policy_runner_tests() {
 run_python_surface_tests() {
   run_gui_tests
   run_policy_runner_tests
-  run_simulator_tests
 }
 
 run_optional_python_help() {
@@ -324,8 +319,6 @@ run_optional_rbpodo_measurement_readonly() {
 
 run_python_compile_checks() {
   python3 -m compileall -q \
-    rb_simulator/src \
-    rb_simulator/tools \
     rb_gui/rb_servo_gui \
     policy_runner/policy_runner \
     scripts
@@ -335,8 +328,6 @@ run_shell_syntax_checks() {
   bash -n scripts/codex_gate.sh
   bash -n scripts/codex_run_sequence.sh
   bash -n scripts/check_deps.sh
-  bash -n scripts/hardware_free_validation.sh
-  bash -n scripts/tcp_pose_simulator_acceptance.sh
   if [[ -f scripts/install_deps_ubuntu.sh ]]; then
     bash -n scripts/install_deps_ubuntu.sh
   fi
@@ -386,22 +377,15 @@ grep_absent() {
 }
 
 run_optional_tcp_pose_acceptance() {
-  if ! cmake_package_available pinocchio; then
-    if [[ "${CODEX_SKIP_MISSING_CPP_DEPS:-0}" == "1" ]]; then
-      echo "codex_gate: skipping simulator TCP pose acceptance; Missing CMake package: pinocchio"
-      return 0
-    fi
-    echo "ERROR: simulator TCP pose acceptance requires Pinocchio" >&2
-    echo "Missing CMake package: pinocchio" >&2
-    return 1
+  # The hardware-free software-simulator TCP pose acceptance lane was retired
+  # along with its deleted launcher script. cartesian_acceptance.py now only
+  # runs --mode assume-running against an already-running server, so this gate
+  # is reduced to a CLI smoke check of the surviving harness.
+  if [[ -f scripts/cartesian_acceptance.py ]]; then
+    python3 scripts/cartesian_acceptance.py --help >/dev/null
+  else
+    echo "codex_gate: optional Cartesian acceptance harness not present: scripts/cartesian_acceptance.py"
   fi
-
-  if ! loopback_socket_available; then
-    echo "codex_gate: skipping simulator TCP pose acceptance; AF_INET loopback sockets are unavailable"
-    return 0
-  fi
-
-  ./scripts/tcp_pose_simulator_acceptance.sh
 }
 
 run_cart_harden_05_gate() {
@@ -410,21 +394,19 @@ run_cart_harden_05_gate() {
   python3 rb_servo_server/tools/send_tcp_linear_move.py --help >/dev/null
   python3 rb_servo_server/tools/send_tcp_twist.py --help >/dev/null
   grep_existing "TcpPoseTarget|TcpLinearMove|TcpTwistLocal|TcpTwistStand|TcpDeltaLocal|TcpDeltaStand" \
-    rb_servo_server/docs/network_protocol.md docs/runbooks/tcp_pose_simulator_acceptance.md
+    rb_servo_server/docs/network_protocol.md
   grep_existing "path_s|path_line_deviation_m|orientation preservation|quaternion" \
-    docs/runbooks/tcp_pose_simulator_acceptance.md rb_servo_server/docs/network_protocol.md
+    rb_servo_server/docs/network_protocol.md
   if [[ "${CODEX_RUN_CARTESIAN_ACCEPTANCE:-0}" == "1" ]]; then
     run_servo_pinocchio_gate
-    ./scripts/tcp_pose_simulator_acceptance.sh --all
   else
-    echo "codex_gate: skipping full Cartesian simulator acceptance; set CODEX_RUN_CARTESIAN_ACCEPTANCE=1 to enable"
+    echo "codex_gate: skipping full Cartesian Pinocchio gate; set CODEX_RUN_CARTESIAN_ACCEPTANCE=1 to enable"
   fi
 }
 
 run_cart_math_gate() {
   run_shell_syntax_checks
   run_python_compile_checks
-  run_simulator_tests
   run_gui_tests
   run_policy_runner_tests
   local pinocchio_var
@@ -433,11 +415,6 @@ run_cart_math_gate() {
   forbidden_pinocchio_off="-D${pinocchio_var}=OFF"
   grep_absent "${forbidden_pinocchio_off}" scripts rb_servo_server README.md docs AGENTS.md REVIEW.md
   run_servo_pinocchio_gate
-  if [[ "${CODEX_RUN_CARTESIAN_ACCEPTANCE:-0}" == "1" ]]; then
-    ./scripts/tcp_pose_simulator_acceptance.sh --all
-  else
-    echo "codex_gate: skipping full Cartesian simulator acceptance; set CODEX_RUN_CARTESIAN_ACCEPTANCE=1 to enable"
-  fi
 }
 
 run_cart_accept_gate() {
@@ -453,16 +430,14 @@ run_cart_accept_gate() {
   fi
   if [[ "${CODEX_RUN_CARTESIAN_ACCEPTANCE:-0}" == "1" ]]; then
     run_servo_pinocchio_gate
-    ./scripts/tcp_pose_simulator_acceptance.sh --all
   else
-    echo "codex_gate: skipping full Cartesian simulator acceptance; set CODEX_RUN_CARTESIAN_ACCEPTANCE=1 to enable"
+    echo "codex_gate: skipping full Cartesian Pinocchio gate; set CODEX_RUN_CARTESIAN_ACCEPTANCE=1 to enable"
   fi
 }
 
 run_cart_servo_01_gate() {
   run_shell_syntax_checks
   run_servo_gate_or_skip_missing_deps
-  run_simulator_tests
   run_gui_tests
   run_policy_runner_tests
 }
@@ -470,7 +445,6 @@ run_cart_servo_01_gate() {
 run_cart_servo_02_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts
-  run_simulator_tests
   run_gui_tests
   run_policy_runner_tests
 }
@@ -925,7 +899,6 @@ run_ackon500_followup_common_gate() {
   run_optional_script_tests 'test_*.py'
   run_gui_tests
   run_policy_runner_tests
-  run_simulator_tests
 }
 
 run_physical_readiness_blockers_clarity_gate() {
@@ -1450,10 +1423,7 @@ check_worker_docs() {
 check_canonical_config_docs() {
   check_real_config_safety_docs
   grep_existing "Canonical Config Names" README.md docs rb_servo_server/docs || true
-  grep_existing "dual_simulator.yaml" README.md docs rb_servo_server/docs rb_servo_server/config
-  grep_existing "dual_simulator_worker.yaml" README.md docs rb_servo_server/docs rb_servo_server/config
-  grep_existing "left_rb3_730e" README.md docs rb_simulator/README.md rb_simulator/docs rb_simulator/config
-  grep_existing "right_rb3_730e" README.md docs rb_simulator/README.md rb_simulator/docs rb_simulator/config
+  grep_existing "dual_mock.yaml" README.md docs rb_servo_server/docs rb_servo_server/config
   grep_absent "dual_real\.yaml" README.md docs AGENTS.md rb_servo_server/docs
 }
 
@@ -1465,8 +1435,6 @@ check_command_source_docs() {
 }
 
 check_tcp_pose_docs() {
-  grep_existing "tcp_pose_simulator_acceptance.sh" README.md docs rb_servo_server/docs
-  grep_existing "dual_simulator_tcp_acceptance.yaml" README.md docs rb_servo_server/docs rb_servo_server/config
   grep_existing "quaternion_xyzw|qx|qy|qz|qw" README.md docs rb_servo_server/docs rb_gui/README.md || true
   grep_existing "ik_duration_us|fk_duration_us|cartesian_solve" README.md docs rb_servo_server/docs || true
 }
@@ -1484,7 +1452,7 @@ check_dev_env_docs() {
 
 run_p3f_gate() {
   run_shell_syntax_checks
-  grep_existing "RB_ALLOW_REAL_CARTESIAN" docs/runbooks/tcp_pose_simulator_acceptance.md README.md rb_servo_server/docs
+  grep_existing "RB_ALLOW_REAL_CARTESIAN" README.md rb_servo_server/docs
   run_servo_pinocchio_gate
   run_optional_tcp_pose_acceptance
 }
@@ -1494,7 +1462,6 @@ run_mig12_gate() {
   check_real_config_safety_docs
   check_backend_contract_docs
   check_worker_docs
-  run_simulator_tests
   run_gui_tests
   run_policy_runner_tests
   run_servo_gate_or_skip_missing_deps
@@ -1503,7 +1470,6 @@ run_mig12_gate() {
 
 run_mig13_gate() {
   run_shell_syntax_checks
-  run_simulator_tests
   run_servo_gate_or_skip_missing_deps
 }
 
@@ -1529,16 +1495,10 @@ run_mig26_gate() {
     ./scripts/check_deps.sh --profile hardware-free || true
   fi
   run_python_compile_checks
-  run_simulator_tests
   run_gui_tests
   run_policy_runner_tests
   run_camera_gate_or_skip_missing_deps
   run_servo_gate_or_skip_missing_deps
-  if [[ "${CODEX_RUN_FULL_SMOKE:-0}" == "1" ]]; then
-    ./scripts/hardware_free_validation.sh
-  else
-    echo "codex_gate: skipping full hardware_free_validation.sh; set CODEX_RUN_FULL_SMOKE=1 to enable"
-  fi
   run_servo_pinocchio_gate
   if [[ "${CODEX_RUN_TCP_ACCEPTANCE:-0}" == "1" ]]; then
     run_optional_tcp_pose_acceptance
@@ -1552,7 +1512,7 @@ case "$TASK" in
     grep_existing "RB_ALLOW_REAL_MOTION" README.md docs
     ;;
   P0-B)
-    run_simulator_tests
+    :
     ;;
   P0-D|P1-A|P1-B|P1-F|P2-A|P2-C|P3-A|P3-B|P3-C)
     run_servo_gate_or_skip_missing_deps
@@ -1564,11 +1524,7 @@ case "$TASK" in
     run_gui_tests
     ;;
   P1-C)
-    run_simulator_tests
     run_servo_gate_or_skip_missing_deps
-    if [[ "${CODEX_RUN_FULL_SMOKE:-0}" == "1" ]]; then
-      ./scripts/hardware_free_validation.sh
-    fi
     ;;
   P1-D|P1-E|P2-E|P3-E)
     run_policy_runner_tests
@@ -1589,15 +1545,10 @@ case "$TASK" in
     run_servo_gate_or_skip_missing_deps
     ;;
   MIG-03)
-    run_simulator_tests
     run_servo_gate_or_skip_missing_deps
     ;;
   MIG-10)
-    run_simulator_tests
     run_servo_gate_or_skip_missing_deps
-    if [[ "${CODEX_RUN_FULL_SMOKE:-0}" == "1" ]]; then
-      ./scripts/hardware_free_validation.sh
-    fi
     ;;
   MIG-12)
     run_mig12_gate
@@ -1614,13 +1565,11 @@ case "$TASK" in
   MIG-18)
     run_shell_syntax_checks
     check_canonical_config_docs
-    run_simulator_tests
     run_gui_tests
     run_policy_runner_tests
     ;;
   MIG-19|MIG-25)
     run_shell_syntax_checks
-    run_simulator_tests
     run_gui_tests
     run_policy_runner_tests
     ;;
@@ -1640,7 +1589,6 @@ case "$TASK" in
     ;;
   HARDEN-02)
     run_shell_syntax_checks
-    run_simulator_tests
     run_servo_gate_or_skip_missing_deps
     ;;
   HARDEN-03)
@@ -1681,7 +1629,6 @@ case "$TASK" in
     check_backend_contract_docs
     check_worker_docs
     check_command_source_docs
-    run_simulator_tests
     run_gui_tests
     run_policy_runner_tests
     ;;
@@ -1695,7 +1642,6 @@ case "$TASK" in
     run_cart_math_gate
     ;;
   SIM-HARDEN-01)
-    run_simulator_tests
     run_servo_gate_or_skip_missing_deps
     ;;
   CART-TUNE-01|FAULT-DIAG-01)

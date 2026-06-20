@@ -785,7 +785,6 @@ std::string backendTypeString(BackendType backend_type) {
     switch (backend_type) {
         case BackendType::Rbpodo: return "rbpodo";
         case BackendType::Mock: return "mock";
-        case BackendType::Simulator: return "simulator";
     }
     return "unknown";
 }

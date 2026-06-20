@@ -11,16 +11,12 @@ Keep these categories separate in every episode and report:
 
 | Category | `backend_type` | `run_mode` | `operation_mode` | Physical motion |
 | --- | --- | --- | --- | --- |
-| `rb_simulator` software simulation | `simulator` | `simulation` | `simulation` when present | none |
 | `rbpodo_controller_simulation` | `rbpodo` | `real` | `simulation` | `physical_motion_expected=false` |
 | future physical real robot | `rbpodo` | `real` | `real` | future acceptance only |
 
-Simulator data is not identical to rbpodo controller-simulation data. The
-controller-simulation path uses real Rainbow controller boxes in `pgmode`
-simulation, so timing, ACK behavior, controller reference telemetry, and fault
-status can differ from the software simulator. Do not mix
-controller-simulation episodes with future physical real episodes unless the
-training loader explicitly filters by these labels.
+The controller-simulation path uses real Rainbow controller boxes in `pgmode`
+simulation. Do not mix controller-simulation episodes with future physical real
+episodes unless the training loader explicitly filters by these labels.
 
 Controller-simulation (`pgmode` simulation) tuning is a high-performance
 controller-reference signal only. It is not the physical-real default until the
@@ -99,7 +95,7 @@ before training data is promoted:
   "schema": "robotics_lab.policy_runner.dataset_metadata.v1",
   "git_commit": "string",
   "config_hash": "sha256 or string",
-  "backend_type": "mock | simulator | rbpodo",
+  "backend_type": "mock | rbpodo",
   "run_mode": "mock | simulation | real",
   "operation_mode": "simulation | real | unknown",
   "physical_motion_expected": false,

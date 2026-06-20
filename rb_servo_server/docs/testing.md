@@ -33,61 +33,29 @@ Full milestone budget checks use the stdlib analyzer:
 
 ```bash
 python3 tools/analyze_servo_log.py --profile mock200 logs/servo_log.csv
-python3 tools/analyze_servo_log.py --profile rbsim-local100 logs/servo_log.csv
-python3 tools/analyze_servo_log.py --profile rbsim100 logs/servo_log.csv
 ```
 
-`mock200` expects a 60 s, 200 Hz mock run. `rbsim-local100` is the short
-local simulator-backed profile for 2 s, 100 Hz smoke logs. `rbsim100` is the
-longer optional simulator-backed profile for 30 s, 100 Hz logs. The analyzer
+`mock200` expects a 60 s, 200 Hz mock run. The analyzer
 fails closed on missing send/timing/joint columns, malformed send timestamps,
 dropped samples, send failures, bad duration/rate/jitter/skew/send-duration
 budgets, and tracking error above 2 deg.
 
-The simulator analyzer profiles validate only the hardware-free rb_simulator +
-rb_servo_server loopback logs. They do not prove Rainbow external simulator
+The mock analyzer profile validates only the hardware-free mock +
+rb_servo_server loopback logs. It does not prove Rainbow external simulator
 timing, network/host scheduling readiness, or real robot timing acceptance;
 those remain separate human-gated hardware tasks.
 
-## Hardware-free rb_simulator path
+## Hardware-free path
 
-The local simulator path is documented in `docs/rb_simulator_dev.md`. Use
-`config/dual_simulator.yaml` with
-`../rb_simulator/config/left_rb3_730e.yaml` and
-`../rb_simulator/config/right_rb3_730e.yaml`; all host-run endpoints bind only
-loopback in this phase.
+Hardware-free testing uses mock mode (`config/dual_mock.yaml`) and validates
+Cartesian behavior against an already-running rbpodo or mock server with
+`scripts/cartesian_acceptance.py --mode assume-running`. Controller-level
+simulation uses the rbpodo controller `pgmode` simulation (`make run MODE=sim`)
+or the Rainbow virtual control-box VMs.
 
-Simulator unit and contract checks:
-
-```bash
-PYTHONPATH=../rb_simulator/src python3 -m unittest discover ../rb_simulator/tests
-python3 ../rb_simulator/tools/rbsim_servo_smoke.py --self-test
-```
-
-When the local `rb_servo_server` binary exists, the bounded smoke command is:
-
-```bash
-PYTHONPATH=../rb_simulator/src \
-python3 ../rb_simulator/tools/rbsim_servo_smoke.py \
-  --left-simulator-command "python3 -m rbsim" \
-  --right-simulator-command "python3 -m rbsim" \
-  --left-simulator-config ../rb_simulator/config/left_rb3_730e.yaml \
-  --right-simulator-config ../rb_simulator/config/right_rb3_730e.yaml \
-  --server build/rb_servo_server \
-  --server-config config/dual_simulator.yaml \
-  --artifacts-dir ../rb_simulator/artifacts/rbsim_servo_smoke
-```
-
-Pass evidence must include state packets, a servo CSV log, zero send failures,
-zero dropped logger samples, and matching sent-joint rows for the small target.
-Stop/reset/fault evidence must come from local simulator hooks and artifacts:
-`stop` holds the last safe target, `reset_fault` returns only to
-`ConnectedHold` and requires a new `ArmMotion`, and injected invalid state or
-send/stop/reset/disconnect failures produce explicit hold or latch behavior.
-
-This path does not validate Rainbow Robotics external simulator/OVA, `rbpodo`,
-real robot motion, realtime scheduling acceptance, privileged Docker, broad
-network exposure, or credentialed operations.
+This path does not validate Rainbow Robotics external simulator/OVA, real robot
+motion, realtime scheduling acceptance, privileged Docker, broad network
+exposure, or credentialed operations.
 
 ## Out-of-scope hardware gates
 

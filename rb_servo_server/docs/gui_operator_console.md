@@ -4,15 +4,15 @@ This milestone adds a browser operator console without changing ownership of the
 
 ## Services and ports
 
-The operator stack (`rb_gui` + per-arm `rb_simulator` + `rb_servo_server`) runs
+The operator stack (`rb_gui` + `rb_servo_server`) runs
 natively, not in Docker:
 
 - `rb_gui`: Python viser web GUI, HTTP `8080`, UDP state listener `50110`.
-- `rb_simulator` (left/right): repo-local hardware-free simulator, one process per arm.
 - `rb_servo_server`: C++ server, UDP command listener `50010`, using
-  `config/dual_simulator.yaml` for the simulator operator stack.
+  `config/dual_mock.yaml` for hardware-free mock, or the rbpodo controller
+  `pgmode` simulation via `make run MODE=sim`.
 
-## Simulator GUI stack
+## GUI stack
 
 The native operator stack runs via the repository-root `Makefile`:
 
@@ -25,14 +25,9 @@ Build/install the stack first with `make build` after editing source. The
 server binds commands on `udp://0.0.0.0:50010` and publishes state to the GUI's
 `50110` listener.
 
-For split-PC simulator operation, the server profile
-`config/dual_simulator_remote_172_28_60_36.yaml` points at simulator processes on
-`172.28.60.36`; run those processes with `RB_SIMULATOR_ALLOW_NON_LOOPBACK=1` and
-run the GUI/control stack against that remote profile.
-
-The server is built with Pinocchio enabled. The simulator config publishes FK TCP
-poses and enables simulator-only Cartesian IK, so the GUI TCP target gizmos can
-send `TcpPoseTarget` commands after `ArmMotion` is active.
+The server is built with Pinocchio enabled. The mock / controller-simulation
+config publishes FK TCP poses and enables Cartesian IK, so the GUI TCP target
+gizmos can send `TcpPoseTarget` commands after `ArmMotion` is active.
 `cartesian_control.allow_in_real` stays false.
 
 ### Execution gating (client-side lock retired)
@@ -99,7 +94,7 @@ python3 tools/mock_gui_smoke.py
 ## Safety boundaries
 
 - The GUI's client-side real-motion lock is **retired** (see "Execution gating" above): controls emit in every run mode, and the server (`RB_ALLOW_REAL_*` env + config + SafetyFilter + collision guard + lease/deadman) is the sole authority for whether real motion actually executes. The GUI never sets `RB_ALLOW_*`.
-- Simulation motion is limited to the repo-local `rb_simulator` path until connect, valid state read, truthful `servo_j` send, stop/reset, hold, and low-amplitude jog tests pass with software-only artifacts. Rainbow Robotics external simulator/OVA and real robot validation remain out of scope.
+- Simulation motion is limited to mock mode and the rbpodo controller `pgmode` simulation until connect, valid state read, truthful `servo_j` send, stop/reset, hold, and low-amplitude jog tests pass with software-only artifacts. Rainbow Robotics external simulator/OVA and real robot validation remain out of scope.
 - The stand frame axes are hidden; the visible 6D controls are left/right TCP target gizmos. They initialize from `tcp_stand` when the state stream provides it, otherwise from URDF FK, and fall back to the old joint marker estimate only when TCP/FK data is unavailable.
 - TCP target buttons emit validated `TcpPoseTarget` UDP commands from the gizmo pose in mock/simulation-safe modes. The C++ Cartesian controller requires configured kinematics and Cartesian gates; when they are unavailable or disabled, it reports a safe failure and holds position.
 - Joint jog requires a fresh valid state snapshot, clamps per-command step size, sets a bounded timeout, and never synthesizes `[0,0,0,0,0,0]` when state is missing or invalid.
@@ -109,7 +104,7 @@ python3 tools/mock_gui_smoke.py
 ## Troubleshooting
 
 - **Disconnected/stale GUI:** confirm `rb_servo_server` is running and `state_pub_endpoint` targets the GUI listener (`127.0.0.1:50110` for host smoke).
-- **Simulator stack:** the per-arm `rb_simulator` processes and `rb_servo_server`
-  are hardware-free native wiring only. Use
-  `docs/rb_simulator_dev.md` for the supported unit and local-smoke evidence.
+- **Hardware-free stack:** `rb_servo_server` in mock mode
+  (`config/dual_mock.yaml`) is hardware-free native wiring only. Controller-level
+  simulation uses the rbpodo `pgmode` simulation (`make run MODE=sim`).
 - **Real guard:** the client-side lock is retired — motion buttons are now emittable in real mode, and the server gates (`RB_ALLOW_REAL_*` + config + SafetyFilter) decide whether anything moves. Operate real motion only under operator supervision with E-stop in hand.

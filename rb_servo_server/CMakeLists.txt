@@ -24,7 +24,6 @@ add_library(rb_servo_core
     src/kinematics/pinocchio_kinematics.cpp
     src/robot/mock_backend.cpp
     src/robot/rbpodo_backend.cpp
-    src/robot/rbsim_backend.cpp
     src/robot/backend_factory.cpp
     src/control/command_buffer.cpp
     src/control/trajectory_filter.cpp
@@ -215,18 +214,6 @@ if(BUILD_TESTING)
                 -m unittest discover
                 -s ${CMAKE_CURRENT_SOURCE_DIR}/tests
                 -p test_*.py
-        )
-        add_test(
-            NAME rbsim_hardware_free_gate
-            COMMAND
-                ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_rbsim_hardware_free_gate.py
-        )
-        set_tests_properties(
-            rbsim_hardware_free_gate
-            PROPERTIES
-                ENVIRONMENT
-                    "RB_SERVO_SERVER_BIN=$<TARGET_FILE:rb_servo_server>;PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../rb_simulator/src:${CMAKE_CURRENT_SOURCE_DIR}/tools"
         )
     else()
         message(WARNING "Python3 interpreter not found; rb_servo Python unittests will not be registered")

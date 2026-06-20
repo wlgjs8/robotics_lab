@@ -25,7 +25,7 @@ The repo is in **rbpodo pgmode-real physical robot bring-up**. Simulator-first C
 
 ## Architecture
 
-Five cooperating services (real and simulator topology are isomorphic by endpoint count, not by IP):
+Four cooperating services (real and controller-simulation topology are isomorphic by endpoint count, not by IP):
 
 ```
                          policy_runner (Python action sources, SpaceMouse, flow ML)
@@ -36,24 +36,23 @@ rb_gui (viewer/operator) ─┐                       │
 camera_server (C++) ──────┘ (RealSense/mock, shared-memory image transport)
 ```
 
-- **`rb_servo_server`** (C++17) is the control owner. `DualArmServoLoop` owns command freshness, command-source lease/arbitration, FK/IK and Cartesian target generation, safety filtering, fault latching, dual-arm aggregation, and state publication. Per-arm blocking backend I/O lives behind `ArmWorker` → `IRobotBackend` (`MockBackend`, `RbsimBackend`, `RbpodoBackend`). Cartesian math (FK/IK, SO(3)/SE(3), orientation interpolation, frame conversion) MUST use Eigen3/Pinocchio — no local fallback math paths. Key dirs: `src/control/`, `src/robot/`, `src/kinematics/`, `src/math/`, `include/rb_servo/`.
-- **`rb_simulator`** (Python, `src/rbsim/`) is one local controller endpoint per arm over a persistent JSON-lines TCP transport. Run with `PYTHONPATH=rb_simulator/src`.
-- **`rb_gui`** (Python, `rb_servo_gui/`) is a mock/simulation viewer/operator console. It may send simulator-only TCP PTP/Linear commands; it must keep real motion disabled.
+- **`rb_servo_server`** (C++17) is the control owner. `DualArmServoLoop` owns command freshness, command-source lease/arbitration, FK/IK and Cartesian target generation, safety filtering, fault latching, dual-arm aggregation, and state publication. Per-arm blocking backend I/O lives behind `ArmWorker` → `IRobotBackend` (`MockBackend`, `RbpodoBackend`). Cartesian math (FK/IK, SO(3)/SE(3), orientation interpolation, frame conversion) MUST use Eigen3/Pinocchio — no local fallback math paths. Key dirs: `src/control/`, `src/robot/`, `src/kinematics/`, `src/math/`, `include/rb_servo/`.
+- **`rb_gui`** (Python, `rb_servo_gui/`) is a viewer/operator console. It exposes every motion primitive in every run mode; real-motion authority sits entirely on the server.
 - **`policy_runner`** (Python package) owns action sources (`action_sources/`), recording, HDF5 audit, and flow-matching ML training/inference (`flow_*.py`). SpaceMouse Cartesian uses `TcpTwistLocal`, not repeated TCP deltas; `flow-infer` ee_local deltas can run as the default `tcp_twist_local` conversion or opt-in `tcp_target_pose` absolute `TcpPoseTarget` setpoints.
 - **`camera_server`** (C++) owns capture, shared-memory ring-buffer transport, metadata, and health. Camera acceptance is separate from robot motion acceptance.
 
 State fanout: `rb_servo_server` is the sole owner of UDP state publication via `network.state_pub_endpoints` (list). Commands go directly to `network.command_bind`. Benchmark overlay streams (desired geometry/metrics) are separate from robot state and must never carry commands.
 
-Ports/protocols (verified against compose + config; full table in `docs/code_architecture_map.md`): command in `UDP 50010`; state out fanout to `UDP 50110` (gui) + `UDP 50120` (policy); server↔simulator `TCP 50200` (control) / `50201` (admin) per arm with JSON-lines schema `rbsim.v1`; camera metadata `ZMQ 5600` (`camera.bundle`/`camera.health`) with images in a POSIX shared-memory ring (`/camera_server_frames`); GUI web `HTTP 8080`; optional circle overlay `UDP 50261`. Command JSON `{seq, mode, left{…}, right{…}}` (`mode` parsed by `controlModeFromString` in `src/core/types.cpp`); state JSON schema `robotics_lab.servo_state.v1`.
+Ports/protocols (verified against compose + config; full table in `docs/code_architecture_map.md`): command in `UDP 50010`; state out fanout to `UDP 50110` (gui) + `UDP 50120` (policy); camera metadata `ZMQ 5600` (`camera.bundle`/`camera.health`) with images in a POSIX shared-memory ring (`/camera_server_frames`); GUI web `HTTP 8080`; optional circle overlay `UDP 50261`. Command JSON `{seq, mode, left{…}, right{…}}` (`mode` parsed by `controlModeFromString` in `src/core/types.cpp`); state JSON schema `robotics_lab.servo_state.v1`.
 
 ## Canonical Terminology (use everywhere — config, docs, GUI, logs, tests)
 
 ```yaml
 run_mode: mock | simulation | real
-backend_type: mock | simulator | rbpodo
+backend_type: mock | rbpodo
 ```
 
-`rbpodo` is the only supported real-controller backend. Do not introduce `rbsim_local`, public `rbsim`, mixed simulator aliases, or raw-script TCP comparison backends.
+`rbpodo` is the only supported real-controller backend. Do not introduce `rbsim_local`, public `rbsim`, simulator-backend aliases, or raw-script TCP comparison backends. (`run_mode: simulation` now refers only to the rbpodo controller `pgmode` simulation flavor — see `docs/architecture.md`.)
 
 ## Safety Rules (do not weaken)
 
@@ -72,11 +71,11 @@ Config is the single decider: real motion requires the gitignored site config (`
 
 The policy-side `SafetyGate` real-Cartesian block was relaxed (PR #13, scoped to `cartesian_gate.operation_mode == "real"`), so for real motion `rb_servo_server` is the sole safety layer. Controller-simulation safety is unchanged.
 
-Other invariants: never reintroduce bool-only backend results (preserve `BackendResult<RobotState>`, `SendServoJResult`, `BackendErrorKind`, `BackendTiming`, `FaultContext`); don't parse error strings when structured fields exist; force control stays `provider: null, enable: false`; `servo.io_model: worker` is simulator-only. The stand-frame floor plane (`safety.floor_constraint`) applies in EVERY run mode when enabled (no env/mode gate), covers all motion primitives at the final joint-level safety gate, requires `kinematics.enable`, and its runtime lowering via the leaseless `SetSafetyFloorZ` command is bounded to the config `[runtime_min_z_m, runtime_max_z_m]`; `monitor_only` is never a real-motion posture. Tracked real config is a template only (`rb_servo_server/config/dual_real.example.yaml`); site configs go in gitignored `rb_servo_server/config/local/`. New rbpodo configs use canonical Servo J fields `servo_t1_sec` / `servo_t2_sec` / `servo_gain` / `servo_alpha` (not `servo_time_sec` / `servo_lookahead_sec` / `servo_acc`); `servo_t1_sec: 0.002` at the supported 500 Hz.
+Other invariants: never reintroduce bool-only backend results (preserve `BackendResult<RobotState>`, `SendServoJResult`, `BackendErrorKind`, `BackendTiming`, `FaultContext`); don't parse error strings when structured fields exist; force control stays `provider: null, enable: false`; `servo.io_model: worker` is hardware-free/mock-only until a real-hardware acceptance task opens it. The stand-frame floor plane (`safety.floor_constraint`) applies in EVERY run mode when enabled (no env/mode gate), covers all motion primitives at the final joint-level safety gate, requires `kinematics.enable`, and its runtime lowering via the leaseless `SetSafetyFloorZ` command is bounded to the config `[runtime_min_z_m, runtime_max_z_m]`; `monitor_only` is never a real-motion posture. Tracked real config is a template only (`rb_servo_server/config/dual_real.example.yaml`); site configs go in gitignored `rb_servo_server/config/local/`. New rbpodo configs use canonical Servo J fields `servo_t1_sec` / `servo_t2_sec` / `servo_gain` / `servo_alpha` (not `servo_time_sec` / `servo_lookahead_sec` / `servo_acc`); `servo_t1_sec: 0.002` at the supported 500 Hz.
 
 ## Motion Primitives (don't blur)
 
-`JointTarget` (absolute joint PTP) · `JointVelocity` (streaming joint vel) · `TcpPoseTarget` (Cartesian final-pose PTP, path not guaranteed linear) · `TcpLinearMove` (simulator-only MoveL with `constant`/`slerp` orientation modes) · `TcpTwistLocal`/`TcpTwistStand` (streaming Cartesian velocity; need deadman, lease arbitration, server-side velocity limits) · `TcpDeltaLocal`/`TcpDeltaStand` (low-level debug jog, not the default GUI move). `TcpCircleMove` is an optional benchmark primitive; `TcpCircleTrack` is a disabled, not-implemented skeleton. `SetSafetyFloorZ` is a leaseless non-motion command that adjusts the floor plane height within config bounds. When `safety.floor_constraint` is enabled, every primitive above is FK-checked against the floor plane at the final safety gate (Cartesian paths additionally slide along the plane; joint-space primitives hold).
+`JointTarget` (absolute joint PTP) · `JointVelocity` (streaming joint vel) · `TcpPoseTarget` (Cartesian final-pose PTP, path not guaranteed linear) · `TcpLinearMove` (MoveL with `constant`/`slerp` orientation modes; not real-motion-ready) · `TcpTwistLocal`/`TcpTwistStand` (streaming Cartesian velocity; need deadman, lease arbitration, server-side velocity limits) · `TcpDeltaLocal`/`TcpDeltaStand` (low-level debug jog, not the default GUI move). `TcpCircleMove` is an optional benchmark primitive; `TcpCircleTrack` is a disabled, not-implemented skeleton. `SetSafetyFloorZ` is a leaseless non-motion command that adjusts the floor plane height within config bounds. When `safety.floor_constraint` is enabled, every primitive above is FK-checked against the floor plane at the final safety gate (Cartesian paths additionally slide along the plane; joint-space primitives hold).
 
 ## Commands
 
@@ -84,8 +83,7 @@ Python tests (per component):
 ```bash
 python3 -m unittest discover rb_gui/tests
 python3 -m unittest discover policy_runner/tests
-PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
-python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner rb_simulator/src scripts
+python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner scripts
 ```
 Run a single Python test: `python3 -m unittest policy_runner.tests.test_geometry_safety` (or `... -k <name>`).
 
@@ -100,9 +98,12 @@ Gates (`scripts/codex_gate.sh <TASK>`) wrap build/test/acceptance:
 ```bash
 ./scripts/codex_gate.sh HARDEN-10                                  # hardware-free C++ gate
 ./scripts/codex_gate.sh CART-MATH-03                               # Cartesian math rebaseline
-CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05   # Cartesian sim acceptance
-./scripts/hardware_free_validation.sh                             # hardware-free simulator smoke
 ```
+
+Cartesian behavior is now validated against an already-running rbpodo/mock server
+(`scripts/cartesian_acceptance.py --mode assume-running`) and on rbpodo
+pgmode-simulation / VM / real; the prior simulator-first hardware-free Cartesian
+acceptance lane was retired with `rb_simulator`.
 
 Operator stacks (native via `Makefile`; the GUI/servo/policy stack runs without Docker):
 ```bash

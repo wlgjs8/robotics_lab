@@ -194,8 +194,8 @@ timestamps.
 
 Dataset provenance and future demonstration labels are defined in
 `docs/runbooks/policy_data_collection.md`. New policy datasets must distinguish
-hardware-free `rb_simulator`, rbpodo controller `pgmode` simulation, and future
-physical real demonstrations. Controller-simulation episodes should carry
+rbpodo controller `pgmode` simulation and future physical real demonstrations.
+Controller-simulation episodes should carry
 `backend_type: rbpodo`, `run_mode: real`, `operation_mode: simulation`, and
 `physical_motion_expected: false`; they must not be mixed with physical real
 episodes without explicit filtering.

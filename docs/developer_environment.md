@@ -1,6 +1,6 @@
 # Developer Environment
 
-This page documents reproducible local setup for simulator-first development. It does not enable real robot connection, real robot motion, RealSense capture, or real Cartesian/TCP motion.
+This page documents reproducible local setup for hardware-free (mock) development. It does not enable real robot connection, real robot motion, RealSense capture, or real Cartesian/TCP motion.
 
 ## Ubuntu Hardware-Free Dependencies
 
@@ -57,8 +57,7 @@ Conda/mamba or other source installs are also acceptable when they expose the
 ```bash
 python3 -m unittest discover rb_gui/tests
 python3 -m unittest discover policy_runner/tests
-PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests
-python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner rb_simulator/src scripts
+python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner scripts
 ```
 
 ## C++ Hardware-Free Gate
@@ -82,17 +81,21 @@ gate, including near-pi SO(3), quaternion convention, body-error convention, and
 stand/local frame-conversion tests. Missing Pinocchio is a dependency failure
 unless an explicit temporary skip variable is set.
 
-## Cartesian Simulator Acceptance
+## Cartesian Acceptance
 
-After C++ dependencies are available:
+Cartesian PTP, Linear, and Twist behavior is validated against an
+already-running rbpodo/mock server:
 
 ```bash
-CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
+python3 scripts/cartesian_acceptance.py --mode assume-running
 ```
 
-This validates simulator-only PTP, Linear, and Twist primitives. It does not enable real robot motion.
+Run it against a mock server for hardware-free checks, or against rbpodo
+controller `pgmode` simulation / VM for controller-sim evidence. It does not
+enable real robot motion. (The prior simulator-first hardware-free Cartesian
+acceptance lane was retired with `rb_simulator`.)
 
-## Native Simulator Stack
+## Native Stack
 
 The operator stack (`rb_servo_server` + viser GUI + `policy_runner`) runs
 natively, not in Docker:
@@ -101,8 +104,8 @@ natively, not in Docker:
 make run MODE=sim
 ```
 
-Build/install the stack first with `make build` after editing source.
-Open:
+`MODE=sim` is the rbpodo controller `pgmode` simulation path. Build/install the
+stack first with `make build` after editing source. Open:
 
 ```text
 http://127.0.0.1:8080
@@ -110,10 +113,9 @@ http://127.0.0.1:8080
 
 Stop with `Ctrl+C`.
 
-For a split-PC simulator stack, run the per-arm `rb_simulator` processes on
-`172.28.60.36` (with `RB_SIMULATOR_ALLOW_NON_LOOPBACK=1`) and point the server at
-`rb_servo_server/config/dual_simulator_remote_172_28_60_36.yaml` from the
-control/GUI PC.
+For hardware-free controller-simulation without physical boxes, boot the two
+Rainbow virtual control-box VMs with `make vm-up` and then run
+`make run MODE=sim` (`make vm-down` / `make vm-status`).
 
 ## Real Camera Dependencies
 
@@ -127,7 +129,7 @@ Real robot work requires rbpodo and site-specific network access. Do not add or 
 
 1. Run Python/unit checks.
 2. Run hardware-free C++ gate.
-3. Run simulator stack manually in GUI.
-4. Run Cartesian simulator acceptance.
-5. Repeat until simulator behavior is stable.
+3. Run the mock / controller-sim stack manually in the GUI.
+4. Run Cartesian acceptance (`scripts/cartesian_acceptance.py --mode assume-running`).
+5. Repeat until behavior is stable.
 6. Only then start a separate real robot read-only acceptance workflow.

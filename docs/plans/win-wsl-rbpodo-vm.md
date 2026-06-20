@@ -79,7 +79,7 @@ Stages 0-1 are environment; Stages 2-3 are the new Windows/WSL2/VM layer; Stage 
 ### Stage 1 — Build & hardware-free sanity (no VM yet)
 - `./scripts/install_deps_ubuntu.sh --profile hardware-free` (Eigen3 + Pinocchio via robotpkg at `/opt/openrobots`).
 - `./scripts/check_deps.sh --profile hardware-free`.
-- Python: `python3 -m unittest discover rb_gui/tests`, `policy_runner/tests`, `PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests`.
+- Python: `python3 -m unittest discover rb_gui/tests`, `python3 -m unittest discover policy_runner/tests`.
 - C++ gates: `./scripts/codex_gate.sh HARDEN-10`, then `./scripts/codex_gate.sh CART-MATH-03`.
 - (Optional confidence) build the native stack with `make build`, then verify the viser GUI loads at http://127.0.0.1:8080.
 - Pass check: deps check ok, Python suites pass, HARDEN-10 + CART-MATH-03 pass. This proves the toolchain before adding VM complexity.

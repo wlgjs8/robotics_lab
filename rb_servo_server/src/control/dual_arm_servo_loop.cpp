@@ -3576,7 +3576,7 @@ ServoTarget DualArmServoLoop::applySafety(
 
     if (combined == SafetyVerdict::TrackingError) {
         if (config_.safety.tracking_error_policy == TrackingErrorPolicy::SnapToActual) {
-            // 개발/mock/rbsim용 복구 정책: 현재 실제 자세를 새 안전 기준점으로 삼고 그 자리에서 멈춘다.
+            // 개발/mock용 복구 정책: 현재 실제 자세를 새 안전 기준점으로 삼고 그 자리에서 멈춘다.
             out.left_q_target_deg = left_state.q_actual_deg;
             out.right_q_target_deg = right_state.q_actual_deg;
         } else if (tracking_error_nonlatching && !tracking_error_physical_motion_fault) {
