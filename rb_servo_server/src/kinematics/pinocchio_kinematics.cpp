@@ -272,11 +272,29 @@ bool PinocchioKinematics::computeStandAxisJacobian(
     int axis,
     JointArray& J_out
 ) const {
-    (void)arm;
     J_out = JointArray{};
     if (axis < 0 || axis > 2) return false;
+    // A stand-frame axis is just the unit direction in that axis; reuse the
+    // general directional projection so the numerics stay identical.
+    std::array<double, 3> dir_stand{0.0, 0.0, 0.0};
+    dir_stand[static_cast<std::size_t>(axis)] = 1.0;
+    return computeStandDirectionJacobian(arm, q_deg, mount, tcp_offset_m, dir_stand, J_out);
+}
+
+bool PinocchioKinematics::computeStandDirectionJacobian(
+    ArmId arm,
+    const JointArray& q_deg,
+    const ArmMountConfig& mount,
+    const std::array<double, 3>& tcp_offset_m,
+    const std::array<double, 3>& dir_stand,
+    JointArray& J_out
+) const {
+    (void)arm;
+    J_out = JointArray{};
     if (!config_.enable || !impl_) return false;
     if (!ik_solver::isFiniteJoints(q_deg)) return false;
+    const Eigen::Vector3d dir(dir_stand[0], dir_stand[1], dir_stand[2]);
+    if (!dir.allFinite() || dir.squaredNorm() < 1e-18) return false;
 
     const Eigen::VectorXd q = toPinocchioQ(q_deg, impl_->model, impl_->joints);
     pinocchio::forwardKinematics(impl_->model, impl_->data, q);
@@ -304,16 +322,14 @@ bool PinocchioKinematics::computeStandAxisJacobian(
     Eigen::Matrix3d S;
     S << 0.0, -r.z(), r.y(), r.z(), 0.0, -r.x(), -r.y(), r.x(), 0.0;
     const Eigen::Matrix<double, 3, 6> Jp = J.template topRows<3>() - S * J.template bottomRows<3>();
-    // Selected stand-frame axis direction expressed in world axes (mount rotation
-    // is constant). axis 0/1/2 -> stand x/y/z.
+    // Requested stand-frame direction expressed in world axes (mount rotation is
+    // constant). d(dir . p_stand)/dt = (R_world_stand dir)^T pdot_world.
     const pinocchio::SE3 stand_T_world =
         math::se3FromPose(mount.base_pose_in_stand) * world_base.inverse();
-    Eigen::Vector3d axis_unit = Eigen::Vector3d::Zero();
-    axis_unit(axis) = 1.0;
-    const Eigen::Vector3d n = stand_T_world.rotation().transpose() * axis_unit;
-    const Eigen::Matrix<double, 1, 6> Jaxis = n.transpose() * Jp;
-    if (!Jaxis.allFinite()) return false;
-    for (int i = 0; i < kDof; ++i) J_out[i] = Jaxis(i);
+    const Eigen::Vector3d n = stand_T_world.rotation().transpose() * dir;
+    const Eigen::Matrix<double, 1, 6> Jdir = n.transpose() * Jp;
+    if (!Jdir.allFinite()) return false;
+    for (int i = 0; i < kDof; ++i) J_out[i] = Jdir(i);
     return true;
 }
 

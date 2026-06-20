@@ -374,6 +374,40 @@ struct RoiBoxConfig {
     double d_slow_m = 0.05;  // engage band inside each face (0 => always active)
 };
 
+// Per-arm reachable-workspace shell limit. The TCP (and each configured
+// TCP-frame offset point) must stay inside the spherical shell
+// r_min_m <= ||p_stand - base_stand|| <= r_max_m, where base_stand is the arm's
+// mount origin in the stand frame (left_mount/right_mount.base_pose_in_stand).
+// This bounds the radial distance from the shoulder so a Cartesian command never
+// drives the TCP past the arm's actual reach (where IK fails / the arm hits a
+// full-extension singularity and the legacy behavior was to silently stop). It is
+// enforced with the SAME velocity-damper projection as the floor and ROI box: the
+// outer shell adds one closing-velocity row limiting d(r)/dt of the farthest
+// point to <= +sqrt(2 a_brake (r_max - r)), the inner shell limits the nearest
+// point's d(r)/dt to >= -sqrt(2 a_brake (r - r_min)); both brake to zero AT the
+// shell and let tangential / returning motion stay free, so the TCP slides along
+// the reach boundary instead of stalling. r_max_m/r_min_m MUST be measured with
+// tools/reach_envelope.py (FK Monte-Carlo of THIS urdf's tip frame) minus a safety
+// margin; the defaults below are the measured RB3-730E `tcp`-frame envelope
+// (radius from the arm base/mount origin, which includes the tool offset, so the
+// raw reach is ~1.09 m, not the 0.73 m nominal arm reach). monitor_only publishes
+// telemetry without clamping or latching (never a real-motion posture). r_min_m
+// <= 0 disables the inner shell.
+struct ReachConstraintConfig {
+    bool enable = false;
+    double r_max_m = 1.050;  // outer reach shell (m), measured raw ~1.088 - margin
+    double r_min_m = 0.130;  // inner shell (m); <= 0 disables the inner limit
+    FloorConstraintFailPolicy fail_policy = FloorConstraintFailPolicy::ClampToHold;
+    bool monitor_only = false;
+    // Additional check points in the TCP frame (meters), same as the floor/ROI
+    // tcp_offset_points (e.g. the two PIKA gripper fingertips). The TCP point is
+    // always checked; the outer shell binds on the farthest point, the inner shell
+    // on the nearest.
+    std::vector<FloorCheckPointConfig> tcp_offset_points;
+    double a_brake_m_s2 = 4.0;
+    double d_slow_m = 0.05;  // engage band inside each shell (0 => always active)
+};
+
 // Joint-space SMD profile for the JointTarget primitive (the joint-space
 // mirror of cartesian_control.pose_track_smd): the sent target follows the
 // commanded goal as a second-order system (mass fixed at 1.0) stepped at the
@@ -425,6 +459,7 @@ struct SafetyConfig {
     SelfCollisionConfig self_collision;
     FloorConstraintConfig floor_constraint;
     RoiBoxConfig roi_box;
+    ReachConstraintConfig reach_constraint;
     JointTargetSmdConfig joint_target_smd;
 };
 

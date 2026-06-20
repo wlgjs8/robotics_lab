@@ -124,6 +124,30 @@ safety:
   #   #   - { name: tip_a, offset_m: [0.054, 0.0, 0.0] }
   #   #   - { name: tip_b, offset_m: [-0.054, 0.0, 0.0] }
 
+  # Reachable-workspace shell (reach limit): the TCP of either arm must stay in
+  # the spherical shell r_min_m <= ||tcp - arm_base|| <= r_max_m (base = the
+  # mount origin, *_mount.base_pose_in_stand). Bounds how far a Cartesian command
+  # can drive the TCP from the shoulder so it never asks for a pose past the arm's
+  # reach (where IK fails and the arm used to silently stop); the outer shell also
+  # keeps it off the full-extension singularity. Same velocity-damper enforcement
+  # as floor/roi (brakes to zero radial speed AT the shell, slides tangentially /
+  # returns inward). Requires kinematics.enable=true. MEASURE r_min/r_max with
+  # `python3 tools/reach_envelope.py` (FK Monte-Carlo of this URDF's tip frame);
+  # the values below are the measured RB3-730E `tcp`-frame envelope minus a 0.03 m
+  # margin. r_min_m <= 0 disables the inner shell. clamp_hold slides at the shell
+  # (recommended); fault_latch hard-latches on a PTP/jog push outside.
+  # reach_constraint:
+  #   enable: true
+  #   r_min_m: 0.13
+  #   r_max_m: 1.05
+  #   fail_policy: clamp_hold
+  #   monitor_only: false
+  #   a_brake_m_s2: 4.0
+  #   d_slow_m: 0.05
+  #   # tcp_offset_points:
+  #   #   - { name: tip_a, offset_m: [0.054, 0.0, 0.0] }
+  #   #   - { name: tip_b, offset_m: [-0.054, 0.0, 0.0] }
+
 network:
   command_bind: "udp://127.0.0.1:50010"
   state_pub_endpoint: "udp://127.0.0.1:50110"

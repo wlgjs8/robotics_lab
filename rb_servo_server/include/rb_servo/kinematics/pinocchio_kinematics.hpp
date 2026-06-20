@@ -59,6 +59,15 @@ public:
         JointArray& J_out
     ) const override;
 
+    bool computeStandDirectionJacobian(
+        ArmId arm,
+        const JointArray& q_deg,
+        const ArmMountConfig& mount,
+        const std::array<double, 3>& tcp_offset_m,
+        const std::array<double, 3>& dir_stand,
+        JointArray& J_out
+    ) const override;
+
 private:
     struct Impl;
 

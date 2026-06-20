@@ -222,6 +222,79 @@ _FLOOR_PLANE_DIMENSIONS = (1.0, 1.0, 0.002)
 _FLOOR_PLANE_CENTER_XY = (0.0, -0.5)
 
 
+# Reachable-workspace OUTER-SHELL surface (tools/reach_envelope.py output): only
+# the farthest reachable points, triangulated into a closed surface and rendered
+# translucent + double-sided so the robot and stand stay visible through it. The
+# shell's outer face is the reach boundary the safety.reach_constraint damper
+# enforces.
+_REACH_ENVELOPE_GREEN = (90, 200, 150)
+_REACH_ENVELOPE_OPACITY = 0.22
+
+
+def _reach_envelope_path() -> Path:
+    return _asset_path("RB_GUI_REACH_ENVELOPE", "reach_envelope_rb3_730e.npz")
+
+
+def _add_reachability_cloud(server: Any, handles: dict[str, Any]) -> None:
+    """Per-arm reachable-workspace shell mesh (tools/reach_envelope.py output).
+
+    The saved vertices are in the arm-base frame, so attaching the SAME mesh under
+    each arm's /stand/<side>_base node renders it correctly placed and mirrored via
+    the mount transform (no manual per-arm transform needed). Drawn translucent and
+    double-sided so the robot/stand show through. Skips gracefully if the asset is
+    missing (run tools/reach_envelope.py to generate it) or viser has no mesh
+    support. Static geometry — visibility is toggled from the GUI."""
+    if not hasattr(server.scene, "add_mesh_simple"):
+        return
+    path = _reach_envelope_path()
+    if not path.exists():
+        handles["reach_envelope_error"] = (
+            f"reach envelope not found: {path} (run tools/reach_envelope.py)"
+        )
+        return
+    try:
+        import numpy as np
+
+        data = np.load(path)
+        verts = np.asarray(data["shell_vertices_base_m"], dtype=np.float32)
+        faces = np.asarray(data["shell_faces"], dtype=np.int32)
+        if verts.ndim != 2 or verts.shape[1] != 3 or len(verts) == 0 or len(faces) == 0:
+            handles["reach_envelope_error"] = f"reach envelope malformed: {path}"
+            return
+        handles["reach_envelope_r_max_m"] = float(data["r_max_recommended_m"])
+        handles["reach_envelope_r_min_m"] = float(data["r_min_recommended_m"])
+        for arm in ("left", "right"):
+            try:
+                handles[f"{arm}_reach_envelope"] = server.scene.add_mesh_simple(
+                    f"/stand/{arm}_base/reach_envelope",
+                    vertices=verts,
+                    faces=faces,
+                    color=_REACH_ENVELOPE_GREEN,
+                    opacity=_REACH_ENVELOPE_OPACITY,
+                    side="double",      # visible from inside the shell too
+                    flat_shading=False,
+                    visible=False,      # brought up by the GUI "도달영역 표시" toggle
+                )
+            except TypeError:  # older viser without opacity/side support
+                handles[f"{arm}_reach_envelope"] = server.scene.add_mesh_simple(
+                    f"/stand/{arm}_base/reach_envelope",
+                    vertices=verts,
+                    faces=faces,
+                    color=_REACH_ENVELOPE_GREEN,
+                    visible=False,
+                )
+    except Exception as exc:
+        handles["reach_envelope_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def set_reach_envelope_visible(scene_handles: dict[str, Any], visible: bool) -> None:
+    """Show/hide both arms' reachable-workspace clouds (GUI toggle)."""
+    if not isinstance(scene_handles, dict):
+        return
+    for arm in ("left", "right"):
+        _set_visible(scene_handles.get(f"{arm}_reach_envelope"), visible)
+
+
 def _add_floor_plane(server: Any, handles: dict[str, Any]) -> None:
     """Stand-frame safety floor plane (safety.floor_constraint visual).
 
@@ -1116,6 +1189,7 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         _set_visible(handles.get("circle_overlay_desired"), False)
         _add_floor_plane(server, handles)
         _add_roi_box(server, handles)
+        _add_reachability_cloud(server, handles)
         _add_self_collision_witness_markers(server, handles)
         # Keep the server handle so the self-collision checked-geometry overlay can
         # lazily build the unified collision-hull URDF from the runtime manifest.

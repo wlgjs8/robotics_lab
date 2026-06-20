@@ -843,9 +843,58 @@ bool testStandAxisJacobianFiniteDifference() {
     return true;
 }
 
+// Reach shell (Stage 3): validate computeStandDirectionJacobian for an arbitrary
+// (non-axis, normalized) stand-frame direction against a central finite difference
+// of the offset point's projection onto that direction. A unit axis must also
+// reproduce computeStandAxisJacobian exactly (shared impl).
+bool testStandDirectionJacobianFiniteDifference() {
+    rb_servo::PinocchioKinematics kin(testKinematicsConfig());
+    for (const rb_servo::ArmMountConfig mount : {leftMount(), rightMount()}) {
+        const rb_servo::JointArray base = seedJoints();
+        const std::array<double, 3> offset = {0.059, 0.0, 0.03};  // tip-like, off-axis
+        // A skew direction, normalized (the reach path passes the radial unit vector).
+        std::array<double, 3> dir = {0.6, -0.48, 0.64};  // already unit-norm
+        rb_servo::JointArray Jdir{};
+        RB_CHECK(kin.computeStandDirectionJacobian(rb_servo::ArmId::Left, base, mount, offset,
+                                                   dir, Jdir));
+        const auto pk = [&](const rb_servo::JointArray& q) {
+            const rb_servo::Pose6D tcp = kin.computeTcpStand(rb_servo::ArmId::Left, q, mount);
+            const rb_servo::math::Matrix3 R = rb_servo::math::rotationFromPose(tcp);
+            const rb_servo::math::Vector3 off(offset[0], offset[1], offset[2]);
+            const std::array<double, 3> p{tcp.x + (R * off).x(), tcp.y + (R * off).y(),
+                                          tcp.z + (R * off).z()};
+            return dir[0] * p[0] + dir[1] * p[1] + dir[2] * p[2];  // dir . p_stand
+        };
+        const double k = 3.14159265358979323846 / 180.0;
+        const double h = 0.2;  // deg
+        double max_err = 0.0;
+        for (int j = 0; j < rb_servo::kDof; ++j) {
+            rb_servo::JointArray qp = base, qm = base;
+            qp[j] += h;
+            qm[j] -= h;
+            const double fd = (pk(qp) - pk(qm)) / (2.0 * h * k);
+            max_err = std::max(max_err, std::abs(fd - Jdir[j]));
+        }
+        std::cout << "stand direction J FD max err = " << max_err << " m/rad\n";
+        RB_CHECK(max_err < 1e-3);
+        // Unit +x direction must equal computeStandAxisJacobian(axis=0) exactly.
+        rb_servo::JointArray Jx_dir{}, Jx_axis{};
+        RB_CHECK(kin.computeStandDirectionJacobian(rb_servo::ArmId::Left, base, mount, offset,
+                                                   {1.0, 0.0, 0.0}, Jx_dir));
+        RB_CHECK(kin.computeStandAxisJacobian(rb_servo::ArmId::Left, base, mount, offset, 0, Jx_axis));
+        for (int j = 0; j < rb_servo::kDof; ++j) RB_CHECK(std::abs(Jx_dir[j] - Jx_axis[j]) < 1e-12);
+        // A ~zero direction must fail (no constraint row).
+        rb_servo::JointArray Jzero{};
+        RB_CHECK(!kin.computeStandDirectionJacobian(rb_servo::ArmId::Left, base, mount, offset,
+                                                    {0.0, 0.0, 0.0}, Jzero));
+    }
+    return true;
+}
+
 int main() {
     if (!testFloorPointZJacobianFiniteDifference()) return 1;
     if (!testStandAxisJacobianFiniteDifference()) return 1;
+    if (!testStandDirectionJacobianFiniteDifference()) return 1;
     if (!testIkConfigParsing()) return 1;
     if (!testIkConditioningDiagnosticsPopulated()) return 1;
     if (!testIkBranchJumpGuardFlagsLargeSeedDelta()) return 1;

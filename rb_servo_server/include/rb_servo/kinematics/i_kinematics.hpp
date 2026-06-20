@@ -126,6 +126,31 @@ public:
         return false;
     }
 
+    // Stand-frame directional velocity Jacobian of a TCP-frame offset point
+    // (Stage 3 reach-shell velocity projection): fills J_out (1x6, per arm joint,
+    // rad) such that d(dir . p_stand)/dt = J_out . qdot, where p = TCP + R_tcp *
+    // tcp_offset_m and dir_stand is a STAND-frame direction (need not be unit; the
+    // caller passes the radial unit vector from the arm base to the point). The
+    // generalization of computeStandAxisJacobian (axis = a unit stand axis). Returns
+    // false (and leaves J_out zero) when kinematics/FK is unavailable, non-finite,
+    // or dir_stand is ~zero. Default: unsupported -> false (caller fails closed).
+    virtual bool computeStandDirectionJacobian(
+        ArmId arm,
+        const JointArray& q_deg,
+        const ArmMountConfig& mount,
+        const std::array<double, 3>& tcp_offset_m,
+        const std::array<double, 3>& dir_stand,
+        JointArray& J_out
+    ) const {
+        (void)arm;
+        (void)q_deg;
+        (void)mount;
+        (void)tcp_offset_m;
+        (void)dir_stand;
+        J_out = JointArray{};
+        return false;
+    }
+
 };
 
 }  // namespace rb_servo

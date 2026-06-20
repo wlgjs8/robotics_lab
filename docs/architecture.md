@@ -333,6 +333,36 @@ flags, and the last reject reason are published every state tick under
 and is never a real-motion safety posture. Enabling the constraint requires
 `kinematics.enable: true` (TCP FK source) — enforced at config load.
 
+### Reachable-workspace shell constraint (`safety.reach_constraint`)
+
+The radial generalization of the floor/ROI keep-out, centered on each arm's
+shoulder: when enabled, the TCP (and each configured `tcp_offset_points`) must
+stay inside the stand-frame spherical shell `r_min_m <= ||tcp − arm_base|| <=
+r_max_m`, where `arm_base` is the mount origin (`left_mount`/`right_mount`
+`.base_pose_in_stand`). It bounds how far a Cartesian command can drive the TCP
+from the base so the controller never asks for a pose past the arm's reach —
+the regime where IK fails (max iterations / joint limit) or hits a
+full-extension singularity and the legacy behavior was for the arm to silently
+**stop** at the boundary. It is enforced by the SAME unified Stage-3
+velocity-damper projection as the floor plane and ROI box (`DualArmServoLoop`
+`applySafety`): within `d_slow_m` of a shell, one closing-velocity row limits the
+binding point's radial speed `d(r)/dt` to `±sqrt(2·a_brake·margin)` along that
+point's radial direction (`computeStandDirectionJacobian`), so the TCP brakes to
+zero radial speed AT the shell and is free to slide tangentially or return
+inward. Outer shell binds the farthest checked point; inner shell binds the
+nearest (`r_min_m <= 0` disables the inner shell). FK failure fails closed; a
+candidate already outside that is not getting deeper outside is allowed (escape),
+matching floor/ROI. `clamp_hold` slides at the shell (recommended); `fault_latch`
+hard-latches on a PTP/jog push outside. Requires `kinematics.enable: true`. Each
+tick the per-arm radial margins are evaluated at the safety gate and clamp
+events are counted (`reach_clamp_count_`); a published `reach_constraint` state
+block, mirroring `floor_constraint`/`roi_box`, is a follow-up.
+`r_min_m`/`r_max_m` are measured with `tools/reach_envelope.py` (FK Monte-Carlo
+of the URDF tip frame), which also exports the per-arm reachable-workspace
+OUTER-SHELL surface mesh (per-direction max-radius, triangulated) that the rb_gui
+viser overlay renders translucent + double-sided ("도달영역 표시" toggle) so the
+operator sees the reach boundary through the robot/stand.
+
 `TcpCircleMove` is an optional benchmark primitive for isolating server-side
 circle generation from Python UDP streaming jitter. In `rb_simulator` it
 requires `cartesian_control.enable_benchmark_primitives: true`,
