@@ -146,17 +146,15 @@ def canonical_flow_command_family(command_family: str) -> str:
 # baked retarget (R_corr·Trans·R_align) is correct about z=approach but carries a
 # 180° YAW about approach (x,y flipped) — the config's unconfirmed R_corr. The 6
 # single-axis ground-truth replays solve (Kabsch, 5/6 residual 0) to:
-#   R = diag(-1,-1,+1) = 180° about approach(z)  ->  preset "pika_rz180"  <-- USE THIS
-# `none` gets z right but is yaw-flipped; `pika_tip` (a 90° permutation, the old
-# guess) is a different wrong. Permanent fix = compose pika_rz180 into R_corr in
-# calibration/umi_retarget_eelocal.yaml + reconvert + retrain; until then pass
-# `--ee-local-r-align pika_rz180` (symmetric -> corrects the existing checkpoint,
-# no retrain; the wrist image is unaffected by this coordinate relabel).
+#   R = diag(-1,-1,+1) = 180° about approach(z)  ->  preset "pika_rz180"  <-- ALWAYS USE THIS
+# `none` gets z right but is yaw-flipped. Permanent fix = compose pika_rz180 into
+# R_corr in calibration/umi_retarget_eelocal.yaml + reconvert + retrain; until then
+# pass `--ee-local-r-align pika_rz180` (symmetric -> corrects the existing
+# checkpoint, no retrain; the wrist image is unaffected by this coordinate relabel).
+# (The old "pika_tip" 90°-permutation guess was removed — pika UMI always uses pika_rz180.)
 EE_LOCAL_R_ALIGN_PRESETS: dict[str, tuple[float, ...]] = {
     # measured pika-UMI correction: 180° about approach(z) (axis-probe 2026-06-15)
     "pika_rz180": (-1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0),
-    # legacy guess (90° permutation); axis-probe showed this is wrong for pika UMI
-    "pika_tip": (0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0),
 }
 
 

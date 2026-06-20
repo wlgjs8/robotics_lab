@@ -259,14 +259,15 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "orthonormal"):
             resolve_ee_local_r_align([1.0] * 9)
 
-        r_align = resolve_ee_local_r_align("pika_tip")
+        # The removed "pika_tip" preset is now rejected as an unknown preset.
+        with self.assertRaisesRegex(ValueError, "preset"):
+            resolve_ee_local_r_align("pika_tip")
+
+        # 9-float rotation (the matrix the removed pika_tip preset used) still
+        # resolves; a plain rotation yields identical linear/angular channels.
+        r_align = resolve_ee_local_r_align("0,0,1,-1,0,0,0,-1,0")
         assert r_align is not None
-        # A plain rotation preset yields identical linear/angular channels.
         np.testing.assert_allclose(r_align.linear, r_align.angular)
-        # Same matrix accepted as 9 floats text.
-        np.testing.assert_allclose(
-            resolve_ee_local_r_align("0,0,1,-1,0,0,0,-1,0").linear, r_align.linear
-        )
 
         # Action direction (v_tcp = R_alignT . v_tip): tip +x (approach) -> TCP +z,
         # tip +z (up) -> TCP -y (TCP y points down).
