@@ -146,7 +146,7 @@ safety:
   # 실제 차단(면 슬라이드/홀드)을 보려면 monitor_only=false로 전환.
   roi_box:
     enable: true
-    min_m: [-0.500, -0.900, 0.050]
+    min_m: [-0.500, -0.900, 0.020]
     max_m: [0.500, 0.050, 0.500]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
