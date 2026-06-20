@@ -27,7 +27,6 @@ class ActionRequirements:
     requires_valid_joint_state: bool = True
     simulation_only: bool = False
     requires_observed_simulation: bool = False
-    requires_simulator_backend_if_available: bool = False
     allow_rbpodo_controller_simulation_cartesian: bool = False
     cartesian_motion: bool = False
 

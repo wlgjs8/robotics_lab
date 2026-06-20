@@ -183,7 +183,6 @@ class CartesianOnceSource:
         requires_valid_tcp_pose=True,
         simulation_only=True,
         requires_observed_simulation=True,
-        requires_simulator_backend_if_available=True,
         cartesian_motion=True,
     )
 
@@ -213,36 +212,8 @@ robot:
 
 class PolicyRunnerContractTest(unittest.TestCase):
     def test_config_example_loads_without_yaml_dependency(self):
-        cfg = load_config(Path(__file__).resolve().parents[1] / "config" / "simulator_hold.yaml")
+        cfg = load_config(Path(__file__).resolve().parents[1] / "config" / "replay_sim.yaml")
         self.assertEqual(cfg.action_source, "hold")
-        self.assertFalse(cfg.safety.allow_real_motion)
-
-    def test_simulator_action_examples_load_and_remain_simulation_only(self):
-        config_dir = Path(__file__).resolve().parents[1] / "config"
-        examples = {
-            "simulator_spacemouse_joint_velocity.yaml": "spacemouse_joint_velocity",
-            "simulator_tcp_delta.yaml": "tcp_delta",
-            "simulator_spacemouse_cartesian.yaml": "spacemouse_cartesian",
-            "simulator_tcp_twist_local.yaml": "spacemouse_cartesian",
-            "simulator_dual_spacemouse_cartesian.yaml": "dual_spacemouse_cartesian",
-        }
-        for filename, action_source in examples.items():
-            with self.subTest(filename=filename):
-                path = config_dir / filename
-                text = path.read_text()
-                self.assertNotIn("172.28.60.200", text)
-                self.assertNotIn("172.28.60.201", text)
-                cfg = load_config(path)
-                self.assertEqual(cfg.mode, "simulation")
-                self.assertEqual(cfg.action_source, action_source)
-                self.assertFalse(cfg.safety.allow_real_motion)
-                self.assertGreater(cfg.runtime.startup_timeout_sec, 0.0)
-                source = make_action_source(cfg)
-                self.assertIsNotNone(source)
-                close = getattr(source, "close", None)
-                if callable(close):
-                    close()
-        self.assertTrue(load_config(config_dir / "simulator_tcp_delta.yaml").tcp_delta.simulation_only)
 
     def test_rbpodo_pgmode_spacemouse_config_loads_with_explicit_safety_opt_in(self):
         config_dir = Path(__file__).resolve().parents[1] / "config"

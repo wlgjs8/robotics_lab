@@ -238,7 +238,7 @@ class PolicyRolloutModesTest(unittest.TestCase):
         recorder = RolloutSummaryRecorder(
             RolloutModePolicy(RolloutMode.SIM_DRYRUN),
             checkpoint_path="outputs/flow_policy.pt",
-            config_path="policy_runner/config/simulator_hold.yaml",
+            config_path="policy_runner/config/stack_sim.yaml",
             command_family="TcpTwistLocal",
             camera_names=["head"],
             selected_arms=["left", "right"],
@@ -293,7 +293,7 @@ class PolicyRolloutModesTest(unittest.TestCase):
         recorder = RolloutSummaryRecorder(
             RolloutModePolicy(RolloutMode.OFFLINE_EVAL),
             checkpoint_path="outputs/direct_bc_distill.pt",
-            config_path="policy_runner/config/simulator_hold.yaml",
+            config_path="policy_runner/config/stack_sim.yaml",
             command_family="TcpTwistLocal",
             camera_names=["left_realsense_color", "right_realsense_color"],
             selected_arms=["left", "right"],

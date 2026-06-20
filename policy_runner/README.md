@@ -106,27 +106,26 @@ simultaneously.
 
 ## Example
 
+The canonical way to drive teleop in simulation is the full controller-sim
+stack:
+
 ```bash
-python3 -m policy_runner --config policy_runner/config/simulator_hold.yaml
+make run MODE=sim
 ```
 
-The default command endpoint is `udp://127.0.0.1:50010`. The state subscriber
-bind must match the `rb_servo_server` state publisher destination.
+This launches `rb_servo_server` + viser GUI + `policy_runner` (SpaceMouse + UMI)
+against the rbpodo controller `pgmode` simulation using
+`policy_runner/config/stack_sim.yaml`. The default command endpoint is
+`udp://127.0.0.1:50010`. The state subscriber bind must match the
+`rb_servo_server` state publisher destination.
 
-Simulation-only example configs:
+Kept example configs:
 
-- `policy_runner/config/simulator_hold.yaml`: no-op runner for state/command
-  wiring checks.
-- `policy_runner/config/simulator_spacemouse_joint_velocity.yaml`:
-  SpaceMouse joint velocity teleop.
-- `policy_runner/config/simulator_tcp_delta.yaml`: scripted stand-frame
-  `TcpDeltaStand`.
-- `policy_runner/config/simulator_spacemouse_cartesian.yaml`: SpaceMouse
-  local-frame `TcpTwistLocal`.
-- `policy_runner/config/simulator_tcp_twist_local.yaml`: same SpaceMouse
-  `TcpTwistLocal` path with velocity-unit field names called out.
-- `policy_runner/config/simulator_dual_spacemouse_cartesian.yaml`: two
-  SpaceMouse devices mapped to left/right simulator TCP twists.
+- `policy_runner/config/stack_sim.yaml`: the `make run MODE=sim` teleop_mux
+  stack (SpaceMouse + UMI) for rbpodo controller `pgmode` simulation.
+- `policy_runner/config/stack_real.yaml`: the `make run` real teleop_mux stack.
+- `policy_runner/config/replay_sim.yaml`: offline replay / no-command
+  state-and-checkpoint review for wiring checks and `offline_eval`.
 
 Real joint-only example configs:
 
@@ -134,9 +133,10 @@ Real joint-only example configs:
   joint-space teleop wiring. It is motion-blocked by default with
   `allow_real_motion: false` and uses loopback UDP endpoints.
 
-The simulator examples use loopback simulator endpoints and do not enable real
-motion or real Cartesian motion. The real master-arm example also keeps motion
-blocked by default; it only defines policy-runner command/state wiring.
+The simulation stack and replay examples use loopback endpoints and do not
+enable real motion or real Cartesian motion. The real master-arm example also
+keeps motion blocked by default; it only defines policy-runner command/state
+wiring.
 
 Rbpodo controller pgmode simulation example:
 
@@ -174,12 +174,12 @@ Run `policy_runner` natively to record episodes. A passive recorder receives the
 `policy_runner/episodes` without sending commands:
 
 ```bash
-python3 -m policy_runner --config policy_runner/config/simulator_hold.yaml
+python3 -m policy_runner --config policy_runner/config/replay_sim.yaml
 ```
 
 SpaceMouse teleop collection sends simulator motion commands, so it is an
-explicit mode. Use a dual-SpaceMouse Cartesian config (for example
-`policy_runner/config/simulator_dual_spacemouse_cartesian.yaml`) with
+explicit mode. Use the dual-SpaceMouse rbpodo controller-sim config
+(`policy_runner/config/rbpodo_pgmode_spacemouse_500hz_ack.yaml`) with
 `hdf5-record` (see below) to record both states and actions in the same episode.
 The default HID paths are `/dev/hidraw1` for the left SpaceMouse and
 `/dev/hidraw6` for the right SpaceMouse.
@@ -206,7 +206,7 @@ Record teleop episodes to ACT-compatible HDF5 files, one file per episode:
 
 ```bash
 python3 -m policy_runner hdf5-record \
-  --config policy_runner/config/simulator_dual_spacemouse_cartesian.yaml \
+  --config policy_runner/config/rbpodo_pgmode_spacemouse_500hz_ack.yaml \
   --task "pick up cup with left arm" \
   --operator user_a
 ```
@@ -248,7 +248,7 @@ and pass `--with-camera`:
 ```bash
 python3 -m pip install -e "policy_runner[camera]"
 python3 -m policy_runner hdf5-record \
-  --config policy_runner/config/simulator_dual_spacemouse_cartesian.yaml \
+  --config policy_runner/config/rbpodo_pgmode_spacemouse_500hz_ack.yaml \
   --task "pick up cup with left arm" \
   --with-camera
 ```
@@ -407,7 +407,7 @@ Example offline and read-only invocations:
 
 ```bash
 python3 -m policy_runner flow-infer \
-  --config policy_runner/config/simulator_hold.yaml \
+  --config policy_runner/config/replay_sim.yaml \
   --checkpoint outputs/flow_policy.pt \
   --rollout-mode offline_eval \
   --episodes-dir data/episodes \
@@ -567,7 +567,7 @@ Run a trained checkpoint as a simulator Cartesian action source:
 ```bash
 python3 -m policy_runner flow-infer \
   --checkpoint outputs/flow_policy.pt \
-  --config policy_runner/config/simulator_dual_spacemouse_cartesian.yaml \
+  --config policy_runner/config/rbpodo_pgmode_spacemouse_500hz_ack.yaml \
   --rollout-mode sim_dryrun \
   --policy-dt-sec 0.01
 ```

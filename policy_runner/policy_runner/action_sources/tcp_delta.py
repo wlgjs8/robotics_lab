@@ -10,7 +10,6 @@ CARTESIAN_ACTION_REQUIREMENTS = ActionRequirements(
     requires_valid_tcp_pose=True,
     simulation_only=True,
     requires_observed_simulation=True,
-    requires_simulator_backend_if_available=True,
     cartesian_motion=True,
 )
 
@@ -19,7 +18,6 @@ RBPODO_CONTROLLER_SIMULATION_CARTESIAN_ACTION_REQUIREMENTS = ActionRequirements(
     requires_valid_tcp_pose=True,
     simulation_only=True,
     requires_observed_simulation=True,
-    requires_simulator_backend_if_available=True,
     allow_rbpodo_controller_simulation_cartesian=True,
     cartesian_motion=True,
 )
