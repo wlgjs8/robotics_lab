@@ -157,10 +157,10 @@ _DEFAULT_INIT_RIGHT_JOINTS_DEG = (135.099, -64.017, -114.457, 84.379, 112.485, 1
 _OPERATOR_MONITOR_WIDTH_EM = 18.0
 _OPERATOR_MONITOR_GAP_EM = 1.0
 # Vertical anchor (em, in monitor-card font size) where the Pose Monitor stacks
-# below the Joint Monitor. Sized to the Joint card's natural content height so the
-# two panels sit close together instead of being split at mid-viewport. Override
-# with RB_GUI_MONITOR_SPLIT_EM.
-_OPERATOR_MONITOR_SPLIT_EM = 31.5
+# below the Joint Monitor. Sized to clear the Joint card's full content (12 joint
+# rows + status) so it never needs an inner scrollbar, plus a small gap so the two
+# panels sit slightly apart instead of touching. Override with RB_GUI_MONITOR_SPLIT_EM.
+_OPERATOR_MONITOR_SPLIT_EM = 35.5
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -982,12 +982,16 @@ def _arm_is_controller_sim(arm_state: Any) -> bool:
     return operation_mode in ("simulation", "sim")
 
 
-def _render_joint_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str:
+def _render_joint_monitor_rows(
+    latest: StateSnapshot | None, *, stale: bool, uptime: str | None = None
+) -> str:
     if latest is None:
         status = "No state stream"
         arms = (("left", None), ("right", None))
     else:
         status = f"{'stale' if stale else 'live'}, tick={latest.tick}"
+        if uptime:
+            status += f", up={uptime}"
         arms = (("left", latest.left), ("right", latest.right))
     parts = [f'<div class="rb-monitor-status">{escape(status)}</div>']
     for arm, arm_state in arms:
@@ -1016,12 +1020,16 @@ def _render_joint_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> 
     return "".join(parts)
 
 
-def _render_stand_world_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str:
+def _render_stand_world_monitor_rows(
+    latest: StateSnapshot | None, *, stale: bool, uptime: str | None = None
+) -> str:
     if latest is None:
         status = "No state stream, xyz=mm"
         arms = (("left", None), ("right", None))
     else:
         status = f"{'stale' if stale else 'live'}, xyz=mm, tick={latest.tick}"
+        if uptime:
+            status += f", up={uptime}"
         arms = (("left", latest.left), ("right", latest.right))
     parts = [f'<div class="rb-monitor-status">{escape(status)}</div>']
     for arm, arm_state in arms:
@@ -1060,15 +1068,67 @@ def _render_stand_world_monitor_rows(latest: StateSnapshot | None, *, stale: boo
     return "".join(parts)
 
 
-def _operator_monitor_dynamic_html(latest: StateSnapshot | None, *, stale: bool) -> str:
+def _operator_monitor_dynamic_html(
+    latest: StateSnapshot | None, *, stale: bool, uptime: str | None = None
+) -> str:
     return (
         '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-joint-card">'
-        + _render_joint_monitor_rows(latest, stale=stale)
+        + _render_joint_monitor_rows(latest, stale=stale, uptime=uptime)
         + "</div>"
         + '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-stand-card">'
-        + _render_stand_world_monitor_rows(latest, stale=stale)
+        + _render_stand_world_monitor_rows(latest, stale=stale, uptime=uptime)
         + "</div>"
     )
+
+
+def _format_hms(seconds: float) -> str:
+    """seconds -> 'hh:mm:ss' (hours grow past 99 for multi-day uptimes)."""
+    total = int(seconds)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _server_uptime_hms(handles: dict[str, Any], latest: StateSnapshot | None) -> str | None:
+    """rb_servo_server run-time as 'hh:mm:ss', or None if it can't be derived.
+
+    The server has no uptime field, but `tick` starts at 0 at server start and
+    `loop_start_time_ns` is a steady clock, so uptime == tick * loop_period. We
+    estimate the loop period from the (loop_start, tick) delta since the first
+    sample this GUI saw (self-correcting as it runs); before two distinct ticks
+    are seen we fall back to the published per-loop `period_ms`, then 500 Hz."""
+    if latest is None:
+        return None
+    raw = latest.raw if isinstance(latest.raw, Mapping) else {}
+    try:
+        loop_ns = int(raw.get("loop_start_time_ns"))
+    except (TypeError, ValueError):
+        return None
+    if loop_ns <= 0:
+        return None
+    tick = latest.tick
+    anchor = handles.get("monitor_uptime_anchor")
+    if not (isinstance(anchor, tuple) and len(anchor) == 2):
+        anchor = (tick, loop_ns)
+        handles["monitor_uptime_anchor"] = anchor
+    t0, l0 = anchor
+    # Server restart (tick rewound or clock reset): re-anchor on the new run.
+    if tick < t0 or loop_ns < l0:
+        anchor = (tick, loop_ns)
+        handles["monitor_uptime_anchor"] = anchor
+        t0, l0 = anchor
+    if tick > t0 and loop_ns > l0:
+        period_ns = (loop_ns - l0) / (tick - t0)  # measured average loop period
+    else:
+        try:
+            period_ms = float(raw.get("period_ms"))
+        except (TypeError, ValueError):
+            period_ms = 0.0
+        period_ns = period_ms * 1e6 if period_ms > 0.0 else 2.0e6  # else nominal 500 Hz
+    uptime_sec = tick * period_ns / 1e9
+    if not math.isfinite(uptime_sec) or uptime_sec < 0:
+        return None
+    return _format_hms(uptime_sec)
 
 
 def _build_operator_monitors(server: Any, handles: dict[str, Any]) -> None:
@@ -1090,9 +1150,10 @@ def _build_operator_monitors(server: Any, handles: dict[str, Any]) -> None:
 
 def _update_operator_monitors(handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool) -> None:
     content = handles.get("operator_monitor_content")
+    uptime = _server_uptime_hms(handles, latest)
     if content is not None:
         try:
-            content.content = _operator_monitor_dynamic_html(latest, stale=stale)
+            content.content = _operator_monitor_dynamic_html(latest, stale=stale, uptime=uptime)
             return
         except Exception:
             pass

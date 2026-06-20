@@ -143,6 +143,105 @@ class BatchReplayEpisodesTest(unittest.TestCase):
         self.assertTrue(timed_out.timeout)
         self.assertIn("hold", timeout_client.sent)
 
+    def test_init_return_graces_startup_lease_until_source_is_active(self) -> None:
+        server = make_server_config()
+        target = batch.JointTargets((1.0, 2.0, 3.0, 4.0, 5.0, 6.0), (-1.0, -2.0, -3.0, -4.0, -5.0, -6.0))
+        state = SequencedLeaseState(
+            target,
+            active_sources=[None, None, None, "fake"],
+            active_sessions=[None, None, None, "fake-session"],
+        )
+        client = FakeCommandClient()
+
+        result = batch.drive_joint_target_until_arrived(
+            state,
+            client,
+            server,
+            target,
+            tol_deg=0.1,
+            timeout_sec=0.1,
+            period_sec=0.001,
+            init_lease_grace_sec=0.05,
+        )
+
+        self.assertTrue(result.arrived)
+        self.assertIsNone(result.fault)
+        self.assertGreaterEqual(client.sent.count("command"), 4)
+        self.assertNotIn("hold", client.sent)
+
+    def test_init_return_faults_with_lease_lost_after_grace(self) -> None:
+        server = make_server_config()
+        target = batch.JointTargets((1.0, 2.0, 3.0, 4.0, 5.0, 6.0), (-1.0, -2.0, -3.0, -4.0, -5.0, -6.0))
+        state = SequencedLeaseState(
+            target,
+            active_sources=[None, None, None, None, None, None],
+            active_sessions=[None, None, None, None, None, None],
+        )
+        client = FakeCommandClient()
+
+        result = batch.drive_joint_target_until_arrived(
+            state,
+            client,
+            server,
+            target,
+            tol_deg=0.1,
+            timeout_sec=0.1,
+            period_sec=0.001,
+            init_lease_grace_sec=0.003,
+        )
+
+        self.assertFalse(result.arrived)
+        self.assertEqual(result.fault, "command_source_lease_lost")
+        self.assertGreater(client.sent.count("command"), 1)
+        self.assertEqual(client.sent[-1], "hold")
+
+    def test_init_return_does_not_grace_non_lease_faults(self) -> None:
+        server = make_server_config()
+        target = batch.JointTargets((1.0, 2.0, 3.0, 4.0, 5.0, 6.0), (-1.0, -2.0, -3.0, -4.0, -5.0, -6.0))
+        state = SequencedLeaseState(
+            target,
+            active_sources=[None],
+            active_sessions=[None],
+            extra={"fault_latched": True},
+        )
+        client = FakeCommandClient()
+
+        result = batch.drive_joint_target_until_arrived(
+            state,
+            client,
+            server,
+            target,
+            tol_deg=0.1,
+            timeout_sec=0.1,
+            period_sec=0.001,
+            init_lease_grace_sec=0.05,
+        )
+
+        self.assertFalse(result.arrived)
+        self.assertEqual(result.fault, "fault_latched")
+        self.assertEqual(client.sent, ["command", "hold"])
+
+    def test_init_return_arrives_when_lease_is_already_held(self) -> None:
+        server = make_server_config()
+        target = batch.JointTargets((1.0, 2.0, 3.0, 4.0, 5.0, 6.0), (-1.0, -2.0, -3.0, -4.0, -5.0, -6.0))
+        state = SequencedLeaseState(target, active_sources=["fake"], active_sessions=["fake-session"])
+        client = FakeCommandClient()
+
+        result = batch.drive_joint_target_until_arrived(
+            state,
+            client,
+            server,
+            target,
+            tol_deg=0.1,
+            timeout_sec=0.1,
+            period_sec=0.001,
+            init_lease_grace_sec=0.05,
+        )
+
+        self.assertTrue(result.arrived)
+        self.assertIsNone(result.fault)
+        self.assertEqual(client.sent, ["command"])
+
     def test_driver_non_interactive_still_dry_runs_without_execute(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -197,6 +296,42 @@ class FakeState:
         return False
 
 
+class SequencedLeaseState:
+    def __init__(
+        self,
+        joints: batch.JointTargets,
+        *,
+        active_sources: list[str | None],
+        active_sessions: list[str | None],
+        extra: dict | None = None,
+    ):
+        self._joints = joints
+        self._active_sources = active_sources
+        self._active_sessions = active_sessions
+        self._extra = extra or {}
+        self._index = 0
+
+    @property
+    def latest(self) -> FakeLatest:
+        index = min(self._index, len(self._active_sources) - 1)
+        session_index = min(self._index, len(self._active_sessions) - 1)
+        self._index += 1
+        payload = {
+            "left": {"q_actual_deg": list(self._joints.left)},
+            "right": {"q_actual_deg": list(self._joints.right)},
+            "command_source": {
+                "enforce_lease": True,
+                "active_source_id": self._active_sources[index],
+                "active_session_id": self._active_sessions[session_index],
+            },
+            **self._extra,
+        }
+        return FakeLatest(payload)
+
+    def is_latest_stale(self) -> bool:
+        return False
+
+
 class FakeCommandClient:
     source_id = "fake"
     session_id = "fake-session"
@@ -207,6 +342,22 @@ class FakeCommandClient:
     def send(self, intent):
         is_plain_hold = getattr(intent, "mode", None) == "Hold" and not getattr(intent, "left", None) and not getattr(intent, "right", None)
         self.sent.append("hold" if is_plain_hold else "command")
+
+
+def make_server_config() -> replay.ServerRuntimeConfig:
+    return replay.ServerRuntimeConfig(
+        path=Path("server.yaml"),
+        command_endpoint="udp://127.0.0.1:1",
+        state_bind=None,
+        servo_rate_hz=10.0,
+        command_timeout_sec=0.2,
+        smd_max_linear_velocity_m_s=1.0,
+        smd_max_angular_velocity_rad_s=1.0,
+        floor_z_min_m=None,
+        roi_min_m=None,
+        roi_max_m=None,
+        raw={},
+    )
 
 
 def write_data_tcp(path: Path, *, offset: float = 0.0) -> Path:

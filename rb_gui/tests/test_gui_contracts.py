@@ -56,8 +56,10 @@ from rb_servo_gui.app import (
     _mode_button_color,
     _mount_position,
     _mount_pose_from_mounts,
+    _format_hms,
     _operator_monitor_dynamic_html,
     _operator_monitor_static_html,
+    _server_uptime_hms,
     _pose6_from_mounts,
     _pose_orientation_wxyz,
     _pose_wxyz,
@@ -1918,6 +1920,28 @@ class GuiContractsTest(unittest.TestCase):
         _update_operator_monitors(handles, store.latest(), stale=False)
         self.assertIn("live, tick=1", handles["operator_monitor_content"].content)
         self.assertIn("live, xyz=mm, tick=1", handles["operator_monitor_content"].content)
+        # Server uptime (hh:mm:ss) is shown next to the tick on both monitors.
+        self.assertIn("tick=1, up=00:00:00", handles["operator_monitor_content"].content)
+
+    def test_server_uptime_hms_from_tick_and_loop_clock(self):
+        # tick starts at 0 at server start; loop_start_time_ns is a steady clock,
+        # so uptime == tick * loop_period. First sample uses the published period_ms
+        # (5 ms here) as the fallback period; later samples self-calibrate the period
+        # from the (loop_start, tick) delta.
+        handles = {}
+        first = self.make_safety(
+            self.tcp_available_state(tick=600_000, loop_start_time_ns=5_000_000_000)
+        )[0].latest()
+        # 600000 ticks * 5 ms = 3000 s = 00:50:00
+        self.assertEqual(_server_uptime_hms(handles, first), "00:50:00")
+        # 1 s later (tick +500, loop +1e9 ns) the measured period is 2 ms.
+        second = self.make_safety(
+            self.tcp_available_state(tick=600_500, loop_start_time_ns=6_000_000_000)
+        )[0].latest()
+        # 600500 * 2 ms = 1201 s = 00:20:01
+        self.assertEqual(_server_uptime_hms(handles, second), "00:20:01")
+        self.assertIsNone(_server_uptime_hms({}, None))
+        self.assertEqual(_format_hms(90_061), "25:01:01")
 
     def test_default_mount_normals_match_stand_shoulder_faces(self):
         left_matrix = _quat_to_matrix(_pose_orientation_wxyz(_DEFAULT_LEFT_POSE))

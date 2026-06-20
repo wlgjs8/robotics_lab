@@ -102,6 +102,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--init-right-joints", default=None)
     parser.add_argument("--init-tol-deg", type=float, default=1.0)
     parser.add_argument("--init-timeout-sec", type=float, default=20.0)
+    parser.add_argument("--init-lease-grace-sec", type=float, default=0.4)
     parser.add_argument("--dwell-sec", type=float, default=0.5)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -126,6 +127,8 @@ def run_batch(
         raise BatchHalt("--init-tol-deg must be positive")
     if args.init_timeout_sec <= 0.0:
         raise BatchHalt("--init-timeout-sec must be positive")
+    if args.init_lease_grace_sec < 0.0:
+        raise BatchHalt("--init-lease-grace-sec must be non-negative")
 
     server = None if dry_run and not args.server_config else driver.load_server_config(_server_config_path(args))
     init_target = resolve_init_target(args, dry_run=dry_run, server=server)
@@ -315,6 +318,13 @@ def return_to_init_pose(args: argparse.Namespace, server: driver.ServerRuntimeCo
         start_q = _targets_from_payload(state_client.latest.payload)
         command_client.acquire_lease(StateStreamLeaseReadback(state_client), timeout_sec=4.0)
         command_client.send(CommandIntent.arm_motion(timeout_sec=server.command_timeout_sec))
+        command_client.send(
+            CommandIntent.joint_target(
+                left=target.left,
+                right=target.right,
+                timeout_sec=max(float(args.init_timeout_sec), server.command_timeout_sec),
+            )
+        )
         time.sleep(0.3)
         result = drive_joint_target_until_arrived(
             state_client,
@@ -323,6 +333,7 @@ def return_to_init_pose(args: argparse.Namespace, server: driver.ServerRuntimeCo
             target,
             tol_deg=float(args.init_tol_deg),
             timeout_sec=float(args.init_timeout_sec),
+            init_lease_grace_sec=float(args.init_lease_grace_sec),
         )
         result.start_delta_deg = compute_joint_delta(start_q, target)
         if not result.arrived:
@@ -361,11 +372,15 @@ def drive_joint_target_until_arrived(
     tol_deg: float,
     timeout_sec: float,
     period_sec: float = 0.05,
+    init_lease_grace_sec: float = 0.4,
 ) -> InitReturnResult:
-    deadline = time.monotonic() + timeout_sec
+    start = time.monotonic()
+    deadline = start + timeout_sec
+    lease_grace_deadline = start + init_lease_grace_sec
     jt = CommandIntent.joint_target(left=target.left, right=target.right, timeout_sec=max(timeout_sec, server.command_timeout_sec))
     last_delta: dict[str, float] | None = None
     while time.monotonic() < deadline:
+        command_client.send(jt)
         snapshot = getattr(state_client, "latest", None)
         if snapshot is None:
             cause = "no robot state during init return"
@@ -374,9 +389,18 @@ def drive_joint_target_until_arrived(
         else:
             cause = driver.watchdog_cause(snapshot.payload, command_client)
         if cause:
+            now = time.monotonic()
+            if (
+                cause == "command_source_lease_lost"
+                and now < lease_grace_deadline
+                and not _lease_source_observed(snapshot.payload, command_client)
+            ):
+                q = _targets_from_payload(snapshot.payload)
+                last_delta = compute_joint_delta(q, target)
+                time.sleep(period_sec)
+                continue
             command_client.send(CommandIntent.hold(timeout_sec=server.command_timeout_sec))
             return InitReturnResult(start_delta_deg={}, final_delta_deg=last_delta, arrived=False, fault=cause)
-        command_client.send(jt)
         q = _targets_from_payload(snapshot.payload)
         last_delta = compute_joint_delta(q, target)
         if max(last_delta.values()) <= tol_deg:
@@ -384,6 +408,11 @@ def drive_joint_target_until_arrived(
         time.sleep(period_sec)
     command_client.send(CommandIntent.hold(timeout_sec=server.command_timeout_sec))
     return InitReturnResult(start_delta_deg={}, final_delta_deg=last_delta, arrived=False, timeout=True)
+
+
+def _lease_source_observed(payload: dict[str, Any], command_client: Any) -> bool:
+    lease = payload.get("command_source") if isinstance(payload.get("command_source"), dict) else {}
+    return lease.get("active_source_id") == getattr(command_client, "source_id", None)
 
 
 def _targets_from_payload(payload: dict[str, Any]) -> JointTargets:
