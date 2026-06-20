@@ -122,8 +122,15 @@ def convert_umi_episode(
     retarget_config: str | Path | UmiRetargetConfig | None = None,
     require_measured_retarget: bool = False,
     task: str | None = None,
+    poses_only: bool = False,
 ) -> dict[str, Any]:
-    """Convert one UMI episode to a FlowHdf5Dataset-compatible HDF5 target."""
+    """Convert one UMI episode to a FlowHdf5Dataset-compatible HDF5 target.
+
+    When ``poses_only`` is set, camera image datasets are skipped. The poses,
+    grippers, timestamps, and attrs are written as usual; the output is a slim
+    episode suitable for motion (TcpTargetPose) replay/profiling that never reads
+    images. The training data flow keeps the default (images included).
+    """
 
     if output_format not in {"robotics_lab_dual_arm", "pika_bimanual"}:
         raise ValueError("output_format must be robotics_lab_dual_arm or pika_bimanual")
@@ -140,8 +147,10 @@ def convert_umi_episode(
     _check_retarget_requirement(retarget, require_measured_retarget)
 
     if output_format == "robotics_lab_dual_arm":
-        _write_robotics_lab_dual_arm_episode(source, destination, retarget=retarget, task=task)
+        _write_robotics_lab_dual_arm_episode(source, destination, retarget=retarget, task=task, poses_only=poses_only)
     else:
+        if poses_only:
+            raise ValueError("--poses-only is only supported for --format robotics_lab_dual_arm")
         _write_pika_bimanual_episode(source, destination, retarget=retarget)
 
     summary = summarize_umi_episode(destination, retarget_config=retarget)
@@ -397,6 +406,7 @@ def run_umi_convert_cli(args: argparse.Namespace) -> int:
             output_format=args.format,
             retarget_config=args.retarget_config,
             require_measured_retarget=args.require_measured_retarget,
+            poses_only=getattr(args, "poses_only", False),
         )
     except Exception as exc:
         print(f"policy_runner umi-convert failed: {exc}", flush=True)
@@ -999,6 +1009,7 @@ def _write_robotics_lab_dual_arm_episode(
     *,
     retarget: UmiRetargetConfig | None,
     task: str | None,
+    poses_only: bool = False,
 ) -> None:
     h5py, np = _require_hdf5()
 
@@ -1051,7 +1062,10 @@ def _write_robotics_lab_dual_arm_episode(
         obs.create_dataset("tcp_stand_right", data=right_pose.astype(np.float32), compression="gzip", compression_opts=1)
         obs.create_dataset("gripper_left", data=left_gripper.astype(np.float32), compression="gzip", compression_opts=1)
         obs.create_dataset("gripper_right", data=right_gripper.astype(np.float32), compression="gzip", compression_opts=1)
-        _copy_images_to_robotics_observations(src, obs, format_name, arm_groups)
+        if poses_only:
+            dst.attrs["poses_only"] = True
+        else:
+            _copy_images_to_robotics_observations(src, obs, format_name, arm_groups)
 
         # Action is the absolute (tool-offset) target pose only. Per-step deltas are
         # derived at training time in the end-effector body frame (ee_local); no

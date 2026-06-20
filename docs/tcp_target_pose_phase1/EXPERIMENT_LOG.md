@@ -112,6 +112,12 @@ ACTION_SOURCE=none make run MODE=sim
 **라이브 검증(2026-06-20, pgmode-sim, real_vs_simulation_mode==1)**: episode_000 scale 0.5 재생 → 양팔 모두 **−y(박스)·하강** 방향(right Δy=−0.164m, z 0.22→0.16; left Δy=−0.161m, z 0.21→0.14). 5678틱 완주, fault_latched=False. pika_tip(옛) 대비 방향 반전 확인.
 **함의(중요)**: D절의 scale/IK 실험(000-003 완주, 손목 특이점=full-amplitude 한계 등)은 **전부 잘못된 방향(pika_tip, +y/stand 뒤쪽)으로 재생된 것** → −y(박스, 앞쪽)로 바로잡으면 워크스페이스의 다른 영역을 지나므로 손목 특이점/floor/reach 거동이 달라질 수 있음. **scale/IK 결론은 방향 수정 후 재프로파일 필요**.
 
+## D3. 배치 fault 캐스케이드 + 비단조 거동 (2026-06-20, 방향수정 후)
+- **"한 에피소드 부드럽게 → 그 뒤 엄청 빠르게 끝" 정체**: 페이싱/파라미터 차이 아님(전 에피소드 동일하게 full setpoint 500Hz 스트림, 측정상 ok 에피소드는 비례 시간 ~40–64s). 한 에피소드가 **컨트롤러 RobotFault(code 1005)를 latch**하면 그 뒤 에피소드는 전부 init-return에서 `fault_latched`로 **즉시 SKIP** → viser에서 순삭처럼 보임. "부드러운 것=fault 전, 빠른 것=fault 후 no-op 스킵".
+- **scale 비단조 fault(이상)**: scale 0.5 → ep000-004 ok, **ep005 fault**(left wrist). scale **0.4(더 낮음) → ep000 ok, ep001에서 더 빨리 fault**. 진폭↓인데 더 일찍 터짐 = 손목 특이점 진폭 단일 원인으로 설명 안 됨. 가설: (a) fault-clear 토글 직후 앵커/레퍼런스 미정착, (b) init-return JointTarget 자체가 유발, (c) controller-sim 비결정성. **미해결 — 재현·격리 필요**.
+- **배치 구조적 한계 재확인**: 배치는 컨트롤러 fault를 in-process로 못 푼다(stop→real/sim 토글→restart만). 따라서 fault 한 번=나머지 전멸. 13개 완주하려면 fault를 아예 안 내야 함.
+- **정리**: 세션 종료 시 `bp3vzebem` make run 정지 → real/sim 토글로 latch 클리어(simulation 복귀, servo_power_changed=false) → 전 프로세스 down 확인.
+
 ## F. 알려진 한계 & 다음
 - **pgmode 추종 데이터는 무효**(q_actual 동결 → trackP95는 모션크기, 추종 아님). **서버측 IK(branch-jump/sigma_min/solve_us)만 유효**. 실추종은 J5 수리 후 real.
 - **full-amplitude(scale≥0.6) replay는 손목 특이점에 막힘** — IK 튜닝으로 근접영역까진 견디나 exact singularity는 불가. 실용: scale ≤0.5, 또는 init-pose 재앵커로 특이영역 회피.

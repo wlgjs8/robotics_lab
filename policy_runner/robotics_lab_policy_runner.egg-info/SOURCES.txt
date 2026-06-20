@@ -12,6 +12,7 @@ policy_runner/flow_model.py
 policy_runner/flow_training.py
 policy_runner/geometry.py
 policy_runner/gripper.py
+policy_runner/gripper_server.py
 policy_runner/hdf5_audit.py
 policy_runner/hdf5_viewer.py
 policy_runner/imitation_experiments.py
@@ -59,6 +60,7 @@ tests/test_flow_matching.py
 tests/test_flow_training.py
 tests/test_geometry_safety.py
 tests/test_gripper_runtime.py
+tests/test_gripper_server.py
 tests/test_hdf5_audit.py
 tests/test_hdf5_recording.py
 tests/test_hdf5_viewer.py

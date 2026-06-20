@@ -875,6 +875,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
         action="store_true",
         help="Fail unless the retarget config has status=measured or status=accepted",
     )
+    umi_convert.add_argument(
+        "--poses-only",
+        action="store_true",
+        help="Skip camera image datasets (slim output for TcpTargetPose motion replay/profiling)",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "record":
