@@ -150,14 +150,15 @@ _TCP_LINEAR_ORIENTATION_MODES = ("constant", "slerp")
 _DEFAULT_CAMERA_POSITION = (-0.0128, -1.3823, 0.3985)
 _DEFAULT_CAMERA_LOOK_AT = (-0.0128, -0.1381, 0.2257)
 _DEFAULT_CAMERA_UP = (0.0, 0.0, 1.0)
-# GRIPPER-DOWN (tool z ~ stand -z) controller-consistent rest pose (rbpodo CobotData jnt_ang;
-# ran the 115712 session 12/12, episodes complete in reach). An offline position-optimized
-# anchor claimed higher coverage but FAILED live (episodes ran out of reach) — offline FK/IK
-# does not replicate the server reach/IK/conditioner, so anchor position must be validated
-# server-in-the-loop, not offline. Mirrors scripts/batch_replay_episodes.py PROFILE_ANCHOR_*.
-# Override per launch with RB_GUI_INIT_LEFT_JOINTS / RB_GUI_INIT_RIGHT_JOINTS.
+# TcpTargetPose replay/profiling InitMotion anchor (2026-06-21): GRIPPER-DOWN (tool z ~ stand
+# -z), max single-rest coverage. Left = controller-consistent rest; right = rest + 10deg about
+# y (within +/-20deg tool budget; recovers episode_0096). Server-CALIBRATED offline model
+# (single-arm rb3_730e.urdf + stack_sim mount, exact ee_local incl r_align=pika_rz180;
+# reproduces live REST=12/12, FWD=0/12). Coverage 383/387; the 4 unrecoverable left-wrist
+# singularities (0043,0220,0291,0373) were removed from data_tcp. Mirrors
+# scripts/batch_replay_episodes.py PROFILE_ANCHOR_*. Override with RB_GUI_INIT_*_JOINTS.
 _DEFAULT_INIT_LEFT_JOINTS_DEG = (259.0, 75.6, 129.5, -55.6, -131.2, -161.7)
-_DEFAULT_INIT_RIGHT_JOINTS_DEG = (-236.5, -65.6, -132.5, 80.6, 126.1, 163.0)
+_DEFAULT_INIT_RIGHT_JOINTS_DEG = (-253.7, -76.9, -127.6, 65.7, 143.7, 166.9)
 _OPERATOR_MONITOR_WIDTH_EM = 18.0
 _OPERATOR_MONITOR_GAP_EM = 1.0
 # Vertical anchor (em, in monitor-card font size) where the Pose Monitor stacks

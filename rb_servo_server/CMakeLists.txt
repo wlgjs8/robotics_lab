@@ -98,6 +98,12 @@ endif()
 add_executable(rb_servo_server src/main.cpp)
 target_link_libraries(rb_servo_server PRIVATE rb_servo_core)
 
+# Offline IK-feasibility grid sampler (feeds tools/ik_infeasible_region.py, which
+# turns the reachability grid into the viser "IK 불가 영역" overlay mesh). Reuses
+# the real Pinocchio IK solver in rb_servo_core for fidelity.
+add_executable(ik_feasibility_grid tools/ik_feasibility_grid.cpp)
+target_link_libraries(ik_feasibility_grid PRIVATE rb_servo_core)
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(test_backend_result tests/test_backend_result.cpp)

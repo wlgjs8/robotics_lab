@@ -35,14 +35,15 @@ DEFAULT_OUT_DIR = ROOT / "outputs" / "tcp_tuning"
 # Validated folded stow JointTarget from scripts/replay_episode_rollout.py.
 REST_LEFT_DEG = (-131.663, 72.989, 113.400, -80.880, -107.064, -145.949)
 REST_RIGHT_DEG = (135.099, -64.017, -114.457, 84.379, 112.485, 129.893)
-# TcpTargetPose replay/profiling anchor: the GRIPPER-DOWN (tool z ~ stand -z) controller-
-# consistent rest pose (rbpodo raw jnt; ran the 115712 session 12/12, ROI-safe). An offline
-# position-optimized anchor (server-matching FK) claimed higher coverage but FAILED live: the
-# server IK (branch-jump/singularity) and the clean_foh_se3 conditioner extent are NOT
-# replicated offline, so offline coverage is unreliable. A better anchor must be found
-# server-in-the-loop (test candidate positions live, measure real coverage), not offline.
+# TcpTargetPose replay/profiling anchor (2026-06-21): GRIPPER-DOWN (tool z ~ stand -z),
+# max single-rest coverage over all episodes. Left = controller-consistent rest; right =
+# rest + 10deg about y (within the +/-20deg tool-rotation budget) which recovers episode_0096.
+# Found offline with a server-CALIBRATED model (single-arm rb3_730e.urdf + stack_sim mount,
+# exact ee_local composition incl. r_align=pika_rz180; reproduces live REST=12/12, FWD=0/12).
+# Coverage 383/387; the 4 unrecoverable (0043,0220,0291,0373 = left full-amplitude wrist
+# singularities) were removed from data_tcp/replay_profiling_20260620 -> remaining all complete.
 PROFILE_ANCHOR_LEFT_DEG = (259.0, 75.6, 129.5, -55.6, -131.2, -161.7)
-PROFILE_ANCHOR_RIGHT_DEG = (-236.5, -65.6, -132.5, 80.6, 126.1, 163.0)
+PROFILE_ANCHOR_RIGHT_DEG = (-253.7, -76.9, -127.6, 65.7, 143.7, 166.9)
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mode", default="clean_foh_se3", choices=["clean_foh_se3"])
     parser.add_argument("--segment", default="auto-largest")
     parser.add_argument("--action-scale", type=float, default=1.0)
-    parser.add_argument("--time-scale", type=float, default=2.0)
+    parser.add_argument("--time-scale", type=float, default=1.0)
     parser.add_argument("--server-config", default=None)
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--arms", default="left,right")
