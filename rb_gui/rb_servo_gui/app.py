@@ -1653,7 +1653,8 @@ def build_gui(
                     "Reach envelope", initial_value=reach_status, disabled=True
                 )
 
-            with server.gui.add_folder("그리퍼 표시 (preview)"):
+        with _op_tabs.add_tab("그리퍼"):
+            with server.gui.add_folder("그리퍼 표시"):
                 # Drives the articulated-gripper fingers in the 3D view (no-op on the
                 # plain single-mesh gripper URDF). 100 = open, 0 = closed; continuous
                 # values show partial closure. This slider is the interim source until

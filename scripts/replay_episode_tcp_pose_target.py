@@ -53,7 +53,13 @@ DEFAULT_MODE = "clean_foh_se3"
 FALLBACK_MAX_LINEAR_SPEED_M_S = 0.03
 FALLBACK_MAX_ANGULAR_SPEED_RAD_S = 0.25
 DEFAULT_RETARGET_CONFIG = ROOT / "calibration" / "umi_retarget_eelocal.yaml"
-DEFAULT_R_ALIGN = "0.0,0.0,1.0,-1.0,0.0,0.0,0.0,-1.0,0.0"
+# MEASURED pika-UMI correction (axis-probe 2026-06-15, Kabsch 5/6 residual 0):
+# 180° about approach(z), preset "pika_rz180" = diag(-1,-1,+1). The old default
+# was the "pika_tip" 90°-permutation guess (0,0,1,-1,0,0,0,-1,0), which the
+# axis-probe proved is "a different wrong" — it left the x,y reach FLIPPED so
+# replays drove toward +y (the stand) instead of -y (the box). See wiki
+# umi-axis-probe / flow_inference.EE_LOCAL_R_ALIGN_PRESETS.
+DEFAULT_R_ALIGN = "pika_rz180"
 DEFAULT_MOCK_CURRENT_POSES = {
     "left": np.asarray([-0.18, -0.42, 0.24, 0.0, 0.0, 0.0, 1.0], dtype=np.float64),
     "right": np.asarray([0.18, -0.42, 0.24, 0.0, 0.0, 0.0, 1.0], dtype=np.float64),
@@ -661,13 +667,22 @@ def _resolve_r_align_without_torch(value: Any) -> EeLocalRAlignValue | None:
         key = value.strip().lower().replace("-", "_")
         if key in {"", "none", "identity"}:
             return None
-        try:
-            value = [float(item) for item in value.replace(",", " ").split()]
-        except ValueError as exc:
-            raise ReplayRefusal(
-                "policy_runner.flow_inference requires torch for r-align presets in this environment; "
-                "pass 'identity' or 9 row-major floats"
-            ) from exc
+        # Mirror flow_inference.EE_LOCAL_R_ALIGN_PRESETS so canonical preset names
+        # resolve even without torch (e.g. the measured pika_rz180 correction).
+        _PRESETS = {
+            "pika_rz180": (-1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0),
+            "pika_tip": (0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0),
+        }
+        if key in _PRESETS:
+            value = list(_PRESETS[key])
+        else:
+            try:
+                value = [float(item) for item in value.replace(",", " ").split()]
+            except ValueError as exc:
+                raise ReplayRefusal(
+                    "policy_runner.flow_inference requires torch for r-align presets in this environment; "
+                    "pass a known preset (pika_rz180/pika_tip), 'identity', or 9 row-major floats"
+                ) from exc
     matrix = np.asarray(list(value), dtype=np.float64)
     if matrix.size != 9:
         raise ReplayRefusal("--r-align must be a preset or exactly 9 row-major floats")

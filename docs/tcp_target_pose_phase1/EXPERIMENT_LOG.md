@@ -104,6 +104,14 @@ ACTION_SOURCE=none make run MODE=sim
 - 드라이버 로그에 `ik_min_singular_value`/`ik_applied_damping`/`ik_status`/`ik_reason` 추가(특이점 진단).
 - **앵커**: capture_current는 pgmode 레퍼런스 드리프트에 취약 → 배치 전 **working 자세(z~0.2)에 둘 것**.
 
+## D2. 방향 버그 — `pika_tip` r_align (root cause, 2026-06-20)
+**증상**: 변환된 data_tcp 재생이 박스(stand −y)로 안 가고 엉뚱한 방향(+y/stand 쪽). episode_012만 그럴듯(접근축/회전 위주 세그먼트라 x,y flip이 안 드러남).
+**원인**: 드라이버 `DEFAULT_R_ALIGN`이 `"0.0,0.0,1.0,-1.0,0.0,0.0,0.0,-1.0,0.0"` = **`pika_tip` 프리셋**(90° 순열, flow_inference.py:159). axis-probe(2026-06-15, Kabsch 6프로브 5/6 residual 0)가 **"a different wrong"**으로 판정한 옛 추측값. 측정된 정답은 **`pika_rz180` = diag(−1,−1,+1)**(접근축 z 기준 180° yaw, x·y만 flip). wiki umi-axis-probe / umi-data-replay-frames와 정확히 일치(증상 "Z 맞고 X,Y reach flip → +y(stand)로 감").
+**적용 규약 동일성 확인**: 드라이버 `compose_ee_local_from_anchor`의 `deltas[:,0:3] @ r_lin.T` / `[:,3:6] @ r_ang.T`가 측정도구 `replay_episode_rollout.GroundTruthSource`(line 156-157)와 **바이트 동일** → 그 측정의 r_align이 그대로 유효.
+**수정**: `DEFAULT_R_ALIGN = "pika_rz180"`(scripts/replay_episode_tcp_pose_target.py:56). batch는 override 없이 드라이버 기본 상속. 무-torch 환경용으로 `_resolve_r_align_without_torch`에 preset 이름맵(pika_rz180/pika_tip) 추가.
+**라이브 검증(2026-06-20, pgmode-sim, real_vs_simulation_mode==1)**: episode_000 scale 0.5 재생 → 양팔 모두 **−y(박스)·하강** 방향(right Δy=−0.164m, z 0.22→0.16; left Δy=−0.161m, z 0.21→0.14). 5678틱 완주, fault_latched=False. pika_tip(옛) 대비 방향 반전 확인.
+**함의(중요)**: D절의 scale/IK 실험(000-003 완주, 손목 특이점=full-amplitude 한계 등)은 **전부 잘못된 방향(pika_tip, +y/stand 뒤쪽)으로 재생된 것** → −y(박스, 앞쪽)로 바로잡으면 워크스페이스의 다른 영역을 지나므로 손목 특이점/floor/reach 거동이 달라질 수 있음. **scale/IK 결론은 방향 수정 후 재프로파일 필요**.
+
 ## F. 알려진 한계 & 다음
 - **pgmode 추종 데이터는 무효**(q_actual 동결 → trackP95는 모션크기, 추종 아님). **서버측 IK(branch-jump/sigma_min/solve_us)만 유효**. 실추종은 J5 수리 후 real.
 - **full-amplitude(scale≥0.6) replay는 손목 특이점에 막힘** — IK 튜닝으로 근접영역까진 견디나 exact singularity는 불가. 실용: scale ≤0.5, 또는 init-pose 재앵커로 특이영역 회피.

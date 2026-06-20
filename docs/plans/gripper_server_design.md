@@ -2,7 +2,21 @@
 
 Status: **proposal**. Date: 2026-06-20.
 
-Implemented so far (on `dev`, GUI-only, no server/hardware yet):
+Implemented so far (on `dev`):
+
+- **Phase 1 — gripper_server** (`policy_runner/policy_runner/gripper_server.py`).
+  Standalone native process wrapping `PikaSerialGripperBackend`: UDP command-in
+  (`gripper_cmd.v1`) → drive grippers → UDP state-out (`gripper_state.v1`), with
+  stale/deadman handling (`on_stale` hold/open/close). Runs hardware-free via
+  `--backend sim` (a `SimPikaGripper` whose feedback eases toward the commanded
+  position). CLI: run / `--monitor` / `--send left=50,right=80`. Verified:
+  11 tests (parse, stale policy, sim easing, build_state, UDP round-trip) + live
+  smoke (command in → feedback tracks target → state published); full
+  policy_runner suite (330) green. Not yet wired: policy/UMI as senders (they
+  still drive serial directly) and GUI/server consumption of the feed — that is
+  Phase 2 (server routing) + Phase 3 (state JSON + GUI).
+
+Earlier (GUI-only viz):
 - **B2a articulated-gripper visualization.** `pika_gripper.STL` split into
   `pika_gripper_base.STL` + `pika_finger_left/right.STL` (fingers separated as the
   two STL components reaching the fingertip plane; +90° Z baked in). GUI-only
