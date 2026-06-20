@@ -4,7 +4,7 @@ PROJECT ?= robotics_lab
 POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 
-.PHONY: run build-stack vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up pgmode-sim-build pgmode-sim-up pgmode-sim-down
+.PHONY: run build vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up pgmode-sim-build pgmode-sim-up pgmode-sim-down
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -24,7 +24,7 @@ run:
 # `make run` launches, + setcap, + rb_gui/policy_runner editable installs.
 # Run this after editing source, then `make run`. Idempotent (rbpodo SDK
 # install is one-time). Override jobs with BUILD_JOBS=N.
-build-stack:
+build:
 	./tools/build_stack.sh
 
 # Rainbow VIRTUAL control-box VMs (vendor OVA): boot 2 VMs and map them to the
