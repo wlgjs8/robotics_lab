@@ -29,9 +29,10 @@ followed the
 trajectory, does not clear diagnostics-suspect caveats, and does not approve
 physical real Cartesian motion.
 
-Do not set `RB_ALLOW_REAL_CARTESIAN` for controller-simulation policy work.
-Future physical evidence must be gathered through a separate real-hardware
-acceptance plan.
+Do not enable `cartesian_control.allow_in_real` for controller-simulation policy
+work (the legacy `RB_ALLOW_REAL_*` env gates were removed; real motion is now
+config-driven). Future physical evidence must be gathered through a separate
+real-hardware acceptance plan.
 
 ## UMI HDF5 Audit/Import/Convert Path
 
@@ -82,7 +83,7 @@ Keep these lanes separate:
 | Lane | Command authority | Motion evidence |
 | --- | --- | --- |
 | `offline_eval` | none | checkpoint plus HDF5 action chunk review |
-| `sim_dryrun` | dropped by default | mock/simulator state and SafetyGate decisions |
+| `sim_dryrun` | dropped by default | mock state and SafetyGate decisions |
 | `controller_sim` | rbpodo controller `pgmode` simulation only | controller reference with `physical_motion_expected=false` |
 | `real_readonly` / `real_supervised` | none | real state/camera observation and rollout summary |
 | `real_policy` | future only | blocked until measured or accepted retarget, collision, gripper, camera, and geometry gates pass |
@@ -132,7 +133,6 @@ Every transition run should produce or update an Artifact manifest /
 The manifest must include paths and metadata for:
 
 - control default validation reports
-- ACKON500 repeatability summaries and reports
 - `hdf5-audit` JSON/Markdown outputs
 - `flow-train` checkpoints plus `flow_eval_summary` and reports
 - `flow-infer` `rollout_summary` JSON
@@ -182,7 +182,6 @@ Run the focused checks:
 python3 scripts/collect_gene_umi_artifact_manifest.py --help
 PYTHONPATH=scripts python3 -m unittest discover -s scripts -p 'test_collect_gene_umi_artifact_manifest.py' -v
 make -n policy-hdf5-audit-smoke
-make -n policy-flow-smoke
 make -n pgmode-transition-dry-run
 CODEX_SKIP_MISSING_CPP_DEPS=1 ./scripts/codex_gate.sh 09_docs_ci_artifact_manifest
 ```

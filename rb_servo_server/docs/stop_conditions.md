@@ -119,7 +119,7 @@ record.
 
 | ID | Blocker | Evidence required |
 |----|---------|---|
-| A | Real-hardware-required regression: a critic objection can only be falsified by running against a real robot or rbsim build. | Critic objection text + the loop context's own note (§Unknowns) confirming "Real hardware… cannot be proven on this host." |
+| A | Real-hardware-required regression: a critic objection can only be falsified by running against a real robot or rbpodo controller `pgmode` simulation. | Critic objection text + the loop context's own note (§Unknowns) confirming "Real hardware… cannot be proven on this host." |
 | B | Fail-safe invariant breach lands on disk: any committed code path synthesizes `[0,0,0,0,0,0]` outside a validated user command. | Commit hash + grep hit + reference to [`docs/fail_safe_policy.md`](fail_safe_policy.md) §Invariant. |
 | C | Real-mode env-var guard weakened: a commit makes G5 (real-mode guard) pass even with `RB_ALLOW_REAL_ROBOT` unset. | `./build/rb_servo_server --config config/local/dual_real_readonly.yaml` exit code 0 + commit hash. Per loop context constraint, this must never happen; if it does, the loop is in a state the architect/critic process cannot self-correct. |
 | D | A test was deleted to make the build green. | `git log -- tests/` showing a deletion + the commit's `Tested:` trailer claiming pass. Loop context constraint. |

@@ -9,7 +9,6 @@ The control layer must preserve truth from each backend operation. It must not c
 The contract should support:
 
 - mock backend
-- per-arm simulator backend
 - rbpodo backend
 - direct servo I/O
 - worker servo I/O
@@ -100,7 +99,7 @@ Expected fields include:
 
 `IRobotBackend::setFreedrive(bool)` (op `BackendOp::SetFreedrive`) releases/re-acquires
 `servo_j` authority for per-arm direct teaching. The default implementation is a benign
-no-op success for hardware-free backends (mock/simulator); `RbpodoBackend` overrides it to
+no-op success for the hardware-free mock backend; `RbpodoBackend` overrides it to
 call the rbpodo SDK `set_freedrive_mode` (`freedrive_teach_on()` / `freedrive_teach_off()`).
 While its free-drive latch is set, `RbpodoBackend::sendServoJ()` refuses to write
 `move_servo_j` and returns `SuppressedByPolicy` (`rbpodo_freedrive_active`) — a defensive
@@ -126,7 +125,7 @@ The servo loop calls per-arm backend operations directly. This is simple and rem
 
 Each `ArmWorker` owns one backend and one thread. The servo loop reads cached state and dispatches bounded send requests through worker interfaces. Worker mode allows left/right endpoint I/O to proceed independently.
 
-Worker mode is simulator-only until separately accepted on hardware.
+Worker mode is hardware-free/mock-only until separately accepted on hardware.
 
 ## ArmWorker Command Policy
 
@@ -193,8 +192,9 @@ two-field suppression (`op_stat_self_collision` shape, `robot_time`) to real
 motion, for sites that have accepted the vendor `-2001` field-layout mismatch and
 choose to run physical motion without trusting the controller's self-collision
 status. It defaults to `false` and is fail-closed: it requires
-`operation_mode: real` plus `RB_ALLOW_REAL_ROBOT=1`, `RB_ALLOW_REAL_MOTION=1`, and
-the dedicated `RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1`. When active it
+`operation_mode: real` and the per-arm config opt-in itself (the legacy
+`RB_ALLOW_REAL_*` / `RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION` env gates
+were removed from the server runtime). When active it
 sets `rbpodo_state_decode_policy` to `real_motion_suspect_diagnostics_accepted`
 (distinct from the controller-sim string so physical-motion telemetry is
 unambiguous). It suppresses ONLY those two fields; SOS, EMS, soft-estop,
@@ -207,20 +207,15 @@ Rainbow Virtual ControlBox controller-simulation targets may permanently
 report `init_error != 0` and `init_state_info != 6` even while accepting
 simulation `move_servo_j` commands and updating controller reference joints.
 The server may tolerate only tightly-scoped controller-simulation shapes when
-all matching gates are open: `operation_mode: simulation`,
-`servo.allow_controller_simulation_motion: true`,
-`RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1`,
-`RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1`, plus the normal real-controller
-connection/motion env gates required for rbpodo controller simulation.
+all matching config gates are open: `operation_mode: simulation` and
+`servo.allow_controller_simulation_motion: true` with the controller confirmed
+in `pgmode` simulation (the legacy controller-sim env gates were removed from
+the server runtime).
 
 `diagnostic_error_source == "rbpodo_init_error"` additionally requires:
 
 ```yaml
 servo.allow_controller_simulation_init_error: true
-```
-
-```bash
-RB_ALLOW_RBPODO_INIT_ERROR_CONTROLLER_SIM=1
 ```
 
 The init-error tolerance is limited to startup invalid reasons confined to
@@ -232,10 +227,6 @@ controller-simulation override. It additionally requires:
 
 ```yaml
 servo.allow_controller_simulation_not_activated: true
-```
-
-```bash
-RB_ALLOW_RBPODO_NOT_ACTIVATED_CONTROLLER_SIM=1
 ```
 
 When that not-activated gate is open, an otherwise-accepted
@@ -310,31 +301,27 @@ Real `sendServoJ()` requires:
 - valid state acquisition
 - controller motion readiness
 - config `send_servo_commands: true`
-- `RB_ALLOW_REAL_ROBOT=1`
-- `RB_ALLOW_REAL_MOTION=1`
+- site-local config that enables real motion (the legacy `RB_ALLOW_REAL_*` env
+  gates were removed from the server runtime)
 
-Streaming Cartesian primitives remain simulator-first. In `run_mode: simulation`,
-`TcpTwistStand`, `TcpTwistLocal`, `TcpLinearMove`, and
+Streaming Cartesian primitives are config-gated. In `run_mode: simulation`
+(mock), `TcpTwistStand`, `TcpTwistLocal`, `TcpLinearMove`, and
 `TcpCircleMove` require `cartesian_control.enable: true` and
 `cartesian_control.allow_in_simulation: true`.
 
 The only real-controller carve-out is rbpodo controller `pgmode` simulation.
 For those same streaming primitives, `run_mode: real` may execute Cartesian
 target generation only when the selected backend is `rbpodo`, the robot
-`operation_mode` is `simulation`,
-`cartesian_control.allow_in_controller_simulation: true`,
-`servo.allow_controller_simulation_motion: true`, and all of these env
-gates are set:
+`operation_mode` is `simulation`, the controller is confirmed in `pgmode`
+simulation, and these config gates are set (no env):
 
-- `RB_ALLOW_REAL_ROBOT=1`
-- `RB_ALLOW_REAL_MOTION=1`
-- `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1`
-- `RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1`
-- `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1`
+- `cartesian_control.allow_in_controller_simulation: true`
+- `servo.allow_controller_simulation_motion: true`
+- `cartesian_control.allow_in_real: false`
 
 This is not physical real Cartesian enablement. `operation_mode: real` remains
-blocked for streaming Cartesian primitives even if `RB_ALLOW_REAL_CARTESIAN=1`
-is present. State JSON must expose `cartesian_available`,
+blocked for streaming Cartesian primitives unless the site config explicitly sets
+`cartesian_control.allow_in_real: true`. State JSON must expose `cartesian_available`,
 `cartesian_unavailable_reason`, and a `cartesian_gate` object with the
 backend/run-mode/config/env decision fields so a controller-simulation
 benchmark cannot be mistaken for physical motion approval. The gate separates
@@ -380,11 +367,9 @@ telemetry must show:
 - `rbpodo_waiting_ack: false`
 
 ACK-off is an experimental supervised acceptance mode, not a safe mode. Real
-motion with ACK waiting disabled requires the normal real gates plus:
-
-```bash
-RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
-```
+motion with ACK waiting disabled is config-driven and must be enabled explicitly
+in the site-local config (the legacy `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env
+gate was removed from the server runtime).
 
 ACK-off runs need stronger monitoring because immediate controller rejection is
 not observed on the command call. At minimum, review `readState()`, controller
@@ -444,22 +429,15 @@ Allowed modes:
 
 When `enable: true`, config/startup must fail unless both arms are
 `backend_type: rbpodo`, `run_mode: real`, and `operation_mode: simulation`.
-Physical `operation_mode: real` is explicitly refused. The runtime gates are:
-
-```bash
-RB_ALLOW_RBPODO_ASYNC_STREAMING=1
-RB_ALLOW_REAL_ROBOT=1
-RB_ALLOW_REAL_MOTION=1
-RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
-```
-
-`socket_send_supervised` additionally requires one of:
-
-```bash
-RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
-RB_ALLOW_RBPODO_SOCKET_SEND_ONLY_STREAMING=1
-```
+Physical `operation_mode: real` is explicitly refused. The legacy
+`RB_ALLOW_RBPODO_ASYNC_STREAMING` / `RB_ALLOW_REAL_*` /
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION` / `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED`
+env gates were removed from the server runtime; the controller-simulation
+carve-out is now config-driven
+(`servo.allow_controller_simulation_motion: true`,
+`cartesian_control.allow_in_controller_simulation: true`,
+`cartesian_control.allow_in_real: false`) with the controller confirmed in
+`pgmode` simulation.
 
 This is a Rainbow controller `pgmode` simulation carve-out only. Async
 supervision is not proof of physical real safety, does not authorize
@@ -611,8 +589,8 @@ Required log and state fields for review include:
 Unsupported raw script TCP comparison backends were removed from the active
 backend contract. Do not reintroduce direct raw script command paths as
 production or comparison backends. Real-controller integration is supported
-through `RbpodoBackend`; mock and simulator backends remain hardware-free test
-surfaces.
+through `RbpodoBackend`; the mock backend remains the hardware-free test
+surface.
 
 `rt_script` is future work. It is not part of the current backend contract and
 must not be introduced as an undocumented controller setting or hidden bypass.

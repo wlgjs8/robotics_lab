@@ -67,33 +67,21 @@ physical box held in `pgmode`. Site/VM configs live under gitignored
 
 ## Hard Safety Rules
 
-Never enable real robot behavior implicitly.
+Never enable real robot behavior implicitly. Real behavior is fail-closed, but
+it is **no longer gated on env vars**: the legacy execution gates
+(`RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`, `RB_ALLOW_REAL_CARTESIAN`,
+`RB_ALLOW_RBPODO_ACK_DISABLED_MOTION`, and the other `RB_ALLOW_*`) were removed
+from the server runtime. `run_mode`/`operation_mode` are telemetry labels only
+and do not decide whether motion is allowed.
 
-Real robot connection requires:
-
-```bash
-RB_ALLOW_REAL_ROBOT=1
-```
-
-Real joint servo motion requires:
-
-```bash
-RB_ALLOW_REAL_MOTION=1
-```
-
-Real rbpodo Servo J motion with controller ACK waiting disabled additionally requires:
-
-```bash
-RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
-```
-
-Real Cartesian/TCP motion requires:
-
-```bash
-RB_ALLOW_REAL_CARTESIAN=1
-```
-
-Even with these environment variables, real motion must also be explicitly allowed by config and by the relevant real-hardware acceptance task. Simulator acceptance is not real-hardware acceptance.
+Real motion is owned solely by **site-local config
+(`rb_servo_server/config/local/`) + the mode-independent safety layers**, and
+config is the single decider. Real motion requires the site config to enable it
+explicitly (e.g. `cartesian_control.allow_in_real: true`) plus the relevant
+real-hardware acceptance task and operator supervision. The controller `-2001`
+suspect-diagnostics acceptance and the rbpodo `pgmode` controller-simulation
+carve-out are likewise config opt-ins (no env). Simulator acceptance is not
+real-hardware acceptance.
 
 The stand-frame floor plane constraint (`safety.floor_constraint`) is
 mode-independent by design: when enabled it applies in mock,

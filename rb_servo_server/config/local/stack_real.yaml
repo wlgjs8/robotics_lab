@@ -139,7 +139,7 @@ safety:
   roi_box:
     enable: true
     min_m: [-0.500, -0.900, 0.020]
-    max_m: [0.500, 0.050, 0.500]
+    max_m: [0.500, 0.050, 0.800]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
     fail_policy: clamp_hold

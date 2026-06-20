@@ -17,9 +17,11 @@ longer an env unlock: the former `RB_GUI_SIM_READINESS_*`,
 `RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN` locks are retired (`RB_GUI_OBSERVED_MODE`
 / `RB_GUI_OBSERVED_BACKEND` remain display-only labels).
 
-Real physical motion still requires the server's own gates
-(`RB_ALLOW_REAL_ROBOT/MOTION/CARTESIAN` + site config + operator supervision +
-E-stop); the GUI sending a real command does not bypass them. See
+Real physical motion is still owned entirely by the server (site-local config
+that enables it — e.g. `cartesian_control.allow_in_real: true` — + the
+mode-independent safety layers + operator supervision + E-stop; the legacy
+`RB_ALLOW_REAL_*` env gates were removed from the server runtime). The GUI
+sending a real command does not bypass that authority. See
 `rb_servo_server/docs/gui_operator_console.md`.
 
 ## Asset Check

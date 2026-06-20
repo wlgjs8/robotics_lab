@@ -397,7 +397,7 @@ Reliability levels:
 
 Important caveats:
 
-**ACKON500 PASS is controller-reference lower-bound evidence, not physical TCP tracking.**
+**Controller `pgmode` simulation PASS is controller-reference lower-bound evidence, not physical TCP tracking.**
 
 - `tcp_ref_stand` is FK from controller reference joints and is a lower bound
   on controller-reference tracking. It is not physical TCP tracking.

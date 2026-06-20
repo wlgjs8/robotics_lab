@@ -115,41 +115,28 @@ shape, targeting either a Virtual ControlBox VM or a physical box held in
 `pgmode`. Site/VM configs live under gitignored
 `rb_servo_server/config/local/`.
 
-## Safety Gates
+## Safety
 
-Real robot connection:
+Real robot connection and motion are **no longer gated on env vars.** The legacy
+`RB_ALLOW_REAL_ROBOT` / `RB_ALLOW_REAL_MOTION` / `RB_ALLOW_REAL_CARTESIAN` /
+`RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION` (and the other `RB_ALLOW_*`)
+execution gates were removed from the server runtime. `run_mode`/`operation_mode`
+are telemetry labels only and do not decide whether motion is allowed.
 
-```bash
-RB_ALLOW_REAL_ROBOT=1
-```
-
-Real joint servo motion:
-
-```bash
-RB_ALLOW_REAL_MOTION=1
-```
-
-Real Cartesian/TCP motion:
-
-```bash
-RB_ALLOW_REAL_CARTESIAN=1
-```
-
-Accepting the controller `-2001` suspect diagnostics in real mode additionally requires:
-
-```bash
-RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1
-```
-
-These gates are necessary but not sufficient. Config
-(`cartesian_control.allow_in_real: true`) and operator supervision must also
-allow the operation. Through these gates a dual-arm physical Cartesian circle has
-already run under supervision (`docs/runbooks/rbpodo_real_physical_circle.md`).
+Real motion is owned solely by **site-local config
+(`rb_servo_server/config/local/`) + the mode-independent safety layer**, and
+config is the single decider: real motion requires the site config to enable it
+explicitly (`cartesian_control.allow_in_real: true`) plus operator supervision.
+Through this config-driven path a dual-arm physical Cartesian circle has already
+run under supervision (`docs/runbooks/rbpodo_real_physical_circle.md`).
 The policy-side `SafetyGate` real-Cartesian block was relaxed in PR #13, so for
 real motion `rb_servo_server` is the sole safety layer (safety filter,
 tracking-error latch, async URDF-mesh self-collision guard (`CollisionMonitor`), lease, deadman);
-controller-simulation safety is unchanged. EMS/SOS/soft-estop/`collision_occur`/
-unknown-mode/init-error still latch regardless of these gates.
+controller-simulation safety is unchanged. Accepting the controller `-2001`
+suspect diagnostics in real mode is a per-arm config opt-in
+(`allow_real_motion_with_suspect_diagnostics: true`, no env).
+EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latch
+regardless of config.
 
 Force control remains inactive:
 
@@ -161,9 +148,9 @@ force_control:
 
 ## Motion Primitive Summary
 
-- `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target; path not guaranteed. Real mode opens via the gates + `cartesian_control.allow_in_real: true` and has been validated on a dual-arm physical circle.
+- `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target; path not guaranteed. Real mode opens via `cartesian_control.allow_in_real: true` and has been validated on a dual-arm physical circle.
 - `TcpLinearMove`: MoveL-like Cartesian path primitive; not real-motion-ready.
-- `TcpTwistLocal` / `TcpTwistStand`: streaming Cartesian velocity primitives (simulator and the rbpodo controller-simulation carve-out; real Cartesian uses the gated `allow_in_real` path).
+- `TcpTwistLocal` / `TcpTwistStand`: streaming Cartesian velocity primitives (mock and the rbpodo controller-simulation carve-out; real Cartesian uses the config `allow_in_real` path).
 - `TcpDeltaLocal` / `TcpDeltaStand`: low-level one-shot/debug jog primitives.
 
 ## Common Commands

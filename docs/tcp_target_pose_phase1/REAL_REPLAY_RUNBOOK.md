@@ -99,6 +99,11 @@ Read the output before any execute attempt:
   segmentation (`dt > 3 * median_dt` or `dt > 0.100 s`). Use `--segment <int>`
   only after reviewing the segment list. `--segment all` preserves historical
   behavior and may include gap reanchors.
+- Real replay MUST NOT use a full-episode `clean_foh_se3` NPZ -- it carries a
+  one-tick velocity spike at each gap->next-segment boundary. Use a gap-free
+  single segment: either `generate_replay_target.py --segment auto-largest|N|start:stop`,
+  or the runtime path `scripts/replay_episode_tcp_pose_target.py --segment auto-largest|1`
+  which segments before conditioning.
 - `init_delta` is current TCP to first conditioned setpoint. In ee_local anchored
   replay it should be zero by construction; nonzero means the anchor path or
   generated target should be inspected before continuing.

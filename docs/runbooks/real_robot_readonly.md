@@ -4,7 +4,7 @@ This runbook is the first real-controller stage. It allows state acquisition
 only. It does not approve Servo J motion, Cartesian motion, `rt_script`, force
 control, or collision-threshold changes.
 
-**ACKON500 PASS is controller-reference lower-bound evidence, not physical TCP tracking.**
+**Controller `pgmode` simulation PASS is controller-reference lower-bound evidence, not physical TCP tracking.**
 
 Read-only evidence is required after controller `pgmode` simulation and before
 tiny physical acceptance. It must not be interpreted as motion readiness by

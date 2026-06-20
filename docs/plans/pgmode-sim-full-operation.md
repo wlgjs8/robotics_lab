@@ -104,8 +104,8 @@ Introduce ONE shared predicate used at the three+ gate sites:
 
 ```
 // true when Cartesian "simulation-only" primitives may run for this arm/run:
-//   - RunMode::Simulation (rbsim), OR
-//   - controller-simulation Cartesian gate open (operation_mode==simulation + existing env/config gate)
+//   - RunMode::Simulation (mock), OR
+//   - controller-simulation Cartesian gate open (operation_mode==simulation + existing config gate)
 bool cartesianSimContextAllowed(run_mode, backend_cfg, dual_cfg /*+ env*/)
 ```
 
@@ -121,7 +121,7 @@ bool cartesianSimContextAllowed(run_mode, backend_cfg, dual_cfg /*+ env*/)
   run_mode→sim-context substitution behind the controller-sim gate.
 - Tests: for each primitive, (i) accepted in controller-sim with the gate open, (ii) still rejected in
   controller-sim with the gate closed, (iii) real mode (`operation_mode==real`) behavior unchanged,
-  (iv) rbsim `RunMode::Simulation` unchanged.
+  (iv) mock `RunMode::Simulation` unchanged.
 - Live acceptance: with `vm_dual_cartesian.yaml` + full controller-sim cartesian env, drive
   TcpLinearMove / TcpTwistLocal / TcpCircleMove via policy_runner (tcp_delta/twist) or rb_gui and observe
   TCP/q_ref tracking; physical q_actual stays 0.

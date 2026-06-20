@@ -112,8 +112,9 @@ with the controller's `operation_mode: simulation`.
 
 Within controller simulation the **target** may be a Virtual ControlBox **VM** or
 a **physical** controller box in `pgmode`. These are behaviourally identical to
-the server — same `rbpodo` backend, same `operation_mode: simulation`, same env
-gates — so they must NOT get new `run_mode`/`backend_type` values. Distinguish
+the server — same `rbpodo` backend, same `operation_mode: simulation`, same
+config-driven carve-out — so they must NOT get new `run_mode`/`backend_type`
+values. Distinguish
 them only by deployment target, via config filename suffix and docs:
 
 - `…controller_sim_vm.yaml` — target is a Virtual ControlBox VM (no physical hardware on the wire)
@@ -157,89 +158,68 @@ Command traffic still goes directly to `network.command_bind`.
 
 ## Safety Gates
 
-Real robot connection is closed unless:
+Real behavior is fail-closed and never implicit, but it is **no longer gated on
+env vars**. The legacy execution gates — `RB_ALLOW_REAL_ROBOT`,
+`RB_ALLOW_REAL_MOTION`, `RB_ALLOW_REAL_CARTESIAN`,
+`RB_ALLOW_RBPODO_ACK_DISABLED_MOTION`,
+`RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION`,
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION`,
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN`,
+`RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` — were removed from the server runtime
+(some acceptance scripts under `scripts/` still set the old names, but they no
+longer affect server gating). `run_mode`/`operation_mode` are telemetry labels
+only and do not decide whether motion is allowed.
 
-```bash
-RB_ALLOW_REAL_ROBOT=1
-```
-
-Real joint servo motion is closed unless:
-
-```bash
-RB_ALLOW_REAL_MOTION=1
-```
-
-Rbpodo Servo J motion with controller ACK waiting disabled is additionally
-closed unless:
-
-```bash
-RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
-```
-
-Real Cartesian/TCP motion is closed unless:
-
-```bash
-RB_ALLOW_REAL_CARTESIAN=1
-```
-
-Accepting the controller `-2001` suspect diagnostics
-(`op_stat_self_collision`/`robot_time` field-layout garbage) in real mode is
-additionally closed unless:
-
-```bash
-RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1
-```
-
-These environment variables are necessary but not sufficient. Config
-(`cartesian_control.allow_in_real: true`) and operator-supervised acceptance must
-also explicitly allow the operation. These gates have already carried a
-supervised dual-arm physical Cartesian circle
-(`docs/runbooks/rbpodo_real_physical_circle.md`).
+Real motion is owned solely by **site-local config
+(`rb_servo_server/config/local/`) + the mode-independent safety layers**, and
+config is the single decider. Real motion requires the site config to enable it
+explicitly (`cartesian_control.allow_in_real: true`) and operator-supervised
+acceptance. This config-driven path has already carried a supervised dual-arm
+physical Cartesian circle (`docs/runbooks/rbpodo_real_physical_circle.md`).
 
 The policy-side `SafetyGate` no longer blocks real Cartesian motion (PR #13,
 scoped to `cartesian_gate.operation_mode == "real"`); for real motion
 `rb_servo_server` is therefore the sole safety layer — safety filter (dq/ddq/
 joint limits), tracking-error fault latch, the async URDF-mesh self-collision guard (`CollisionMonitor`),
 lease arbitration, and deadman. EMS/SOS/soft-estop/`collision_occur`/unknown-mode/
-init-error continue to latch regardless of the gates above. Controller-simulation
+init-error continue to latch regardless of config. Controller-simulation
 safety is unchanged.
 
+Accepting the controller `-2001` suspect diagnostics
+(`op_stat_self_collision`/`robot_time` field-layout garbage) in real mode is a
+per-arm config opt-in (`allow_real_motion_with_suspect_diagnostics: true`, no
+env); EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latch.
+
 Rainbow controller `pgmode` simulation through the `rbpodo` backend is a
-separate evidence category from both hardware-free mock and future
-physical real motion. It connects to real controller boxes, so configs use
+separate evidence category from both hardware-free mock and physical real
+motion. It connects to real controller boxes, so configs use
 `run_mode: real` and `backend_type: rbpodo`, but each robot must use
 `operation_mode: simulation` and the controller must be confirmed in `pgmode`
 simulation. Controller-simulation circle tracking should use
 `tcp_ref_stand`/controller reference telemetry with
 `physical_motion_expected=false`.
 
-The narrow rbpodo controller-simulation streaming Cartesian carve-out requires
-all normal real-controller/motion gates plus:
-
-```bash
-RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN=1
-RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1
-```
-
-The config must explicitly keep physical real Cartesian blocked:
+The narrow rbpodo controller-simulation streaming Cartesian carve-out is
+config-driven (no env):
 
 ```yaml
 cartesian_control:
   allow_in_controller_simulation: true
   allow_in_real: false
+servo:
+  allow_controller_simulation_motion: true
 ```
 
-This carve-out is not `RB_ALLOW_REAL_CARTESIAN` and does not approve physical
-real Cartesian motion. Servo J ACKs in a controller-simulation circle artifact
-do not by themselves prove that Cartesian commands executed; check the
-Cartesian gate telemetry and `tcp_ref_stand` movement.
+This carve-out does not approve physical real Cartesian motion; the config must
+explicitly keep `allow_in_real: false`. Servo J ACKs in a controller-simulation
+circle artifact do not by themselves prove that Cartesian commands executed;
+check the Cartesian gate telemetry and `tcp_ref_stand` movement.
 
 ### Floor plane constraint (`safety.floor_constraint`)
 
 A stand-frame keep-out plane for the TCP: when enabled, neither arm's TCP may be
 commanded below `z = z_min_m` (default 0.010 m), regardless of motion primitive
-and regardless of run mode (mock, simulator, controller-sim, and real all pass
+and regardless of run mode (mock, controller-sim, and real all pass
 through the same gate). It is enforced in two tiers:
 
 - **Tier 1 (hard backstop, all primitives)**: at the final per-tick safety gate
@@ -323,23 +303,12 @@ group them without breaking backward compatibility. `TcpCircleMove` is the
 implemented benchmark command today; `TcpCircleTrack` remains a disabled
 closed-loop skeleton until a future acceptance task implements it.
 
-Rbpodo async ACK-supervised 500 Hz streaming is another controller-simulation
-only carve-out. It requires `operation_mode: simulation`,
-`physical_motion_expected=false`, `RB_ALLOW_RBPODO_ASYNC_STREAMING=1`, normal
-real-controller/motion gates, controller-simulation motion gates, and same-run
-pgmode confirmation. `sdk_ack_worker` moves ACK waiting into a worker lane;
-`socket_send_supervised` is `socket_send_only` evidence and must be guarded by
-q_ref/tcp_ref watchdogs. This is no physical real approval and does not change
-the default servo rate.
-
-Benchmark summaries and reports must include canonical lane metadata:
-`benchmark_lane`, `control_loop_location`,
-`trajectory_generation_location`, `feedback_loop_location`,
-`low_level_send_mode`, `acceptance_semantics`, `tracking_source`, and
-`physical_motion_expected`. The ACKON500 official pass lane is
-`rbpodo_server_side_circle_ackon500_sdk_worker`. The
-`rbpodo_server_side_circle_500hz_socket_send_supervised` lane is send-only
-evidence and must not be grouped as an ACKON500 pass.
+> The 500 Hz ACKON500 / async-ACK-supervised circle-tracking BENCHMARK
+> subsystem (its benchmark-lane metadata, `configs/rbpodo_circle_ablation/*`
+> configs, ablation/report tooling, runbooks, and the `GOAL.md` task snapshot)
+> was removed 2026-06-20. The live `TcpCircleMove` motion primitive and its GUI
+> "Circle" button remain; the current circle milestone is the physical lane in
+> `docs/runbooks/rbpodo_real_physical_circle.md`.
 
 ### Server-Side Circle Tracking Skeleton
 
@@ -367,8 +336,8 @@ When disabled, `TcpCircleTrack` is rejected with
 rejects with `tcp_circle_track_not_implemented`; it does not produce Cartesian
 twist targets. Physical real `operation_mode: real` is rejected with
 `tcp_circle_track_physical_real_blocked`. Future controller-simulation work
-must keep `operation_mode: simulation`, `allow_in_real: false`, and the existing
-controller-simulation env gates.
+must keep `operation_mode: simulation`, `allow_in_real: false`, and the
+config-driven controller-simulation carve-out (no env gates).
 
 Tracked real config is a template only:
 
@@ -478,7 +447,7 @@ Cartesian commands are routed by `DualArmServoLoop` directly to
 joint primitives does **not** apply to the Cartesian/twist path.
 
 Velocity-level Cartesian servo targets use an explicit joint target integration
-mode. The simulator acceptance default is `previous_command`: the controller
+mode. The acceptance default is `previous_command`: the controller
 integrates Cartesian velocity from the last safe joint target accepted after
 SafetyFilter, rather than repeatedly generating a one-tick target from measured
 `q_actual`. The legacy `measured_actual` mode remains available for debugging,

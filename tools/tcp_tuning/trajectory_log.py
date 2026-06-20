@@ -188,6 +188,8 @@ def _fieldnames(rows: list[dict[str, Any]]) -> list[str]:
 
 
 def _parse_scalar(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value
     if value == "":
         return np.nan
     if isinstance(value, str):
@@ -209,4 +211,3 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
     return value
-

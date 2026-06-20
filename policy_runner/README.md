@@ -141,7 +141,7 @@ wiring.
 Rbpodo controller pgmode simulation example:
 
 - `policy_runner/config/rbpodo_pgmode_spacemouse_500hz_ack.yaml`: dual
-  SpaceMouse `TcpTwistLocal` teleop for the ACKON500 500 Hz controller
+  SpaceMouse `TcpTwistLocal` teleop for the 500 Hz controller
   simulation profile. It sends commands to `udp://127.0.0.1:50256`, listens to
   server state on `50376`, acquires the command-source lease, and requires
   server telemetry to report controller-simulation Cartesian enabled with
@@ -445,7 +445,7 @@ blockers are stricter: any non-`stand` `pose_frame`, including
 `steamvr_world`, remains blocked for real policy rollout unless a retarget
 manifest supplies a measured transform to `stand`.
 
-For the GENE 26.5 / ACKON500 transition workflow, preserve `hdf5-audit`
+For the GENE-UMI policy-transition workflow, preserve `hdf5-audit`
 outputs, `flow-train` reports/checkpoints, `flow-infer` `rollout_summary`
 files, controller-simulation repeatability reports, and pgmode transition
 reports in an Artifact manifest / `artifact_manifest`. Use

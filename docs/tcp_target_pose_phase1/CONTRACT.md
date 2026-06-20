@@ -166,6 +166,12 @@ One npz per (episode, mode), filename `<mode>_<rate>hz.npz`, keys:
 - `segments` (S,2) int source-index ranges, `gaps` (G,2) (t_before, t_after)
 - `meta_json` str (JSON: git commit, config dump, detected schema, nominal_rate flag)
 
+Real replay MUST NOT use a full-episode `clean_foh_se3` NPZ -- it carries a
+one-tick velocity spike at each gap->next-segment boundary. Use a gap-free
+single segment: either `generate_replay_target.py --segment auto-largest|N|start:stop`,
+or the runtime path `scripts/replay_episode_tcp_pose_target.py --segment auto-largest|1`
+which segments before conditioning.
+
 `reference_after_B`, `q_target`, `q_actual`, `actual_tcp` columns are RESERVED in the
 schema (present as NaN-filled or absent-with-note) — they get filled by the future
 runtime/sim path. Phase-1 generated files carry A-stage data; metrics must handle

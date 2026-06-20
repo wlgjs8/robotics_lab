@@ -27,7 +27,7 @@
 ## Robot Backends
 
 - `include/rb_servo/robot/i_robot_backend.hpp`  
-  Real/rbsim/mock abstraction.
+  rbpodo/mock backend abstraction.
 
 - `include/rb_servo/robot/mock_backend.hpp` / `src/robot/mock_backend.cpp`  
   First-order mock plant for no-robot development.

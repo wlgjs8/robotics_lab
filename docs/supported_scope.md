@@ -1,15 +1,19 @@
 # Supported Scope
 
-The active real-controller backend is `rbpodo` only. `mock` and `simulator`
-remain hardware-free validation surfaces.
+The active real-controller backend is `rbpodo` only. `mock` is the
+hardware-free validation surface; the `rb_simulator` software-simulator
+backend was removed.
 
 The repository is in **rbpodo pgmode-real physical bring-up**. Real motion is a
 gated, operator-supervised lane that has carried a dual-arm physical Cartesian
 circle (`docs/runbooks/rbpodo_real_physical_circle.md`); the conservative
 promotion ladder is `docs/runbooks/pgmode_real_transition.md`. Real motion stays
-fail-closed: env gates (`RB_ALLOW_REAL_ROBOT` / `RB_ALLOW_REAL_MOTION` /
-`RB_ALLOW_REAL_CARTESIAN`, plus `RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION`
-for the `-2001` carve-out) are still required and necessary-but-not-sufficient.
+fail-closed, but is **no longer gated on env vars**: the legacy
+`RB_ALLOW_REAL_*` execution gates were removed from the server runtime, and real
+motion is now decided solely by site-local config + the mode-independent safety
+layers (`rb_servo_server/config/local/`). The `-2001` suspect-diagnostics
+acceptance is a per-arm config opt-in
+(`allow_real_motion_with_suspect_diagnostics: true`, no env).
 The policy-side `SafetyGate` real-Cartesian block was relaxed (PR #13), so for
 real motion `rb_servo_server` is the sole safety layer. A full `flow-infer`
 `real_policy` closed-loop rollout (pi0.5/openpi, `TcpTwistLocal` + real gripper via
@@ -45,4 +49,4 @@ config, gate, test, and runbook surface. Do not reintroduce direct raw script
 controller command paths without a new accepted safety plan.
 
 This scope does not change unrelated rates such as state publication,
-recording, camera, simulator update, or timeout settings.
+recording, camera, or timeout settings.

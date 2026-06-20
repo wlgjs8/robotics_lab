@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ReplayRefusal("conditioned stream exceeds client speed clamp; regenerate slower targets or raise limits deliberately")
         if plan.would_abort_large_init and not args.allow_large_init_move:
             raise ReplayRefusal("initial pose delta exceeds threshold; jog closer or pass --allow-large-init-move")
-        confirm_start(selected_arms)
+        confirm_start(selected_arms, args)
         run_execute(plan, args, server)
         return 0
     except ReplayRefusal as exc:
@@ -210,6 +210,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--i-am-at-the-estop", action="store_true")
     parser.add_argument("--source-id", default="tcp_pose_replay")
     parser.add_argument("--state-timeout-sec", type=float, default=2.0)
+    parser.add_argument("--non-interactive", action="store_true", help="Skip only the two typed physical-motion confirmations.")
+    parser.add_argument("--run-name", default=None, help="Override the run directory name under <out-dir>/<episode_id>/runs/.")
     return parser.parse_args(argv)
 
 
@@ -879,7 +881,7 @@ def build_replay_plan(
         )
         for arm in selected_arms
     }
-    run_name = time.strftime("real_replay_%Y%m%dT%H%M%S") + ("_dryrun" if dry_run else "_execute")
+    run_name = str(args.run_name) if args.run_name else time.strftime("real_replay_%Y%m%dT%H%M%S") + ("_dryrun" if dry_run else "_execute")
     run_dir = Path(args.out_dir) / episode_name / "runs" / run_name
     paths = ReplayPaths(
         episode_id=episode_name,
@@ -1054,7 +1056,7 @@ def run_execute(plan: ReplayPlan, args: argparse.Namespace, server: ServerRuntim
         command_client.send(CommandIntent.arm_motion(timeout_sec=server.command_timeout_sec))
         stream_init_premove(plan, args, server, command_client, state_client)
         command_client.send(CommandIntent.hold(timeout_sec=server.command_timeout_sec))
-        confirm_after_init(plan.selected_arms)
+        confirm_after_init(plan.selected_arms, args)
         stream_conditioned_goals(plan, args, server, command_client, state_client, writer)
         command_client.send(CommandIntent.hold(timeout_sec=server.command_timeout_sec))
     except KeyboardInterrupt:
@@ -1337,14 +1339,18 @@ def print_plan_summary(plan: ReplayPlan, server: ServerRuntimeConfig, args: argp
         print(f"runtime log path: {plan.paths.log_path}")
 
 
-def confirm_start(selected_arms: tuple[str, ...]) -> None:
+def confirm_start(selected_arms: tuple[str, ...], args: argparse.Namespace | None = None) -> None:
+    if args is not None and bool(getattr(args, "non_interactive", False)):
+        return
     token = ",".join(selected_arms)
     answer = input(f"Physical motion gate 1: type {token} to confirm: ").strip()
     if answer != token:
         raise ReplayRefusal("start confirmation token mismatch")
 
 
-def confirm_after_init(selected_arms: tuple[str, ...]) -> None:
+def confirm_after_init(selected_arms: tuple[str, ...], args: argparse.Namespace | None = None) -> None:
+    if args is not None and bool(getattr(args, "non_interactive", False)):
+        return
     token = ",".join(selected_arms)
     answer = input(f"Physical motion gate 2 after init pre-move: type {token} to stream: ").strip()
     if answer != token:

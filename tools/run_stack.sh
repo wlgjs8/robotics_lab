@@ -36,6 +36,9 @@ esac
 # 한 소스만 격리 디버그하려면 env 로 오버라이드:
 #   ACTION_SOURCE=umi_dual_cartesian make run   (UMI 단독, SpaceMouse/mux 제외)
 #   ACTION_SOURCE=dual_spacemouse_cartesian make run
+#   ACTION_SOURCE=none make run                 (policy_runner 미기동: 서버+GUI만,
+#                                                외부 command source[리플레이 드라이버 등]가
+#                                                lease 단독 보유하도록 teleop_mux 경쟁 제거)
 ACTION_SOURCE="${ACTION_SOURCE:-teleop_mux}"
 
 SERVER_BIN="rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
@@ -234,11 +237,25 @@ fi
 
 VERBOSE_FLAG=""
 if [ "${VERBOSE:-0}" = "1" ]; then VERBOSE_FLAG="--verbose"; fi
-echo "[stack] policy_runner: $POLICY_CFG --action-source $ACTION_SOURCE $VERBOSE_FLAG"
-echo "[stack] (VERBOSE=1 make run -> live input/loop stats; Ctrl-C stops everything)"
-# UMI 텔레옵 수신 per-step 진단 로그(KST)를 실행마다 logs/ 하위에 남긴다.
-# 기본 auto; 경로를 직접 지정하거나 빈 값으로 비활성 가능 (POLICY_RUNNER_UMI_TELEOP_LOG=...).
-PYTHONPATH=policy_runner \
-  POLICY_RUNNER_UMI_TELEOP_LOG="${POLICY_RUNNER_UMI_TELEOP_LOG-auto}" \
-  python3 -u -m policy_runner --config "$POLICY_CFG" --action-source "$ACTION_SOURCE" $VERBOSE_FLAG \
-  2>&1 | tee "$LOG_DIR/policy.log"
+# ACTION_SOURCE=none|off|"" -> run the server (+GUI/gripper) WITHOUT the
+# policy_runner command source, so an EXTERNAL command source (e.g. the recorded
+# replay driver scripts/replay_episode_tcp_pose_target.py) can own the
+# command-source lease without teleop_mux competing for it. The stack stays up on
+# `wait`; Ctrl-C tears it down via the same cleanup trap.
+case "$ACTION_SOURCE" in
+  none|off|"")
+    echo "[stack] policy_runner: DISABLED (ACTION_SOURCE=$ACTION_SOURCE) — no teleop/command source."
+    echo "[stack] server (+GUI/gripper) only; drive via an external command source. Ctrl-C stops everything."
+    wait
+    ;;
+  *)
+    echo "[stack] policy_runner: $POLICY_CFG --action-source $ACTION_SOURCE $VERBOSE_FLAG"
+    echo "[stack] (VERBOSE=1 make run -> live input/loop stats; Ctrl-C stops everything)"
+    # UMI 텔레옵 수신 per-step 진단 로그(KST)를 실행마다 logs/ 하위에 남긴다.
+    # 기본 auto; 경로를 직접 지정하거나 빈 값으로 비활성 가능 (POLICY_RUNNER_UMI_TELEOP_LOG=...).
+    PYTHONPATH=policy_runner \
+      POLICY_RUNNER_UMI_TELEOP_LOG="${POLICY_RUNNER_UMI_TELEOP_LOG-auto}" \
+      python3 -u -m policy_runner --config "$POLICY_CFG" --action-source "$ACTION_SOURCE" $VERBOSE_FLAG \
+      2>&1 | tee "$LOG_DIR/policy.log"
+    ;;
+esac

@@ -188,8 +188,8 @@ Reports must carry:
 
 ## Parameter Policy
 
-The GENE 26.5 / ACKON500 controller-simulation profile is only a seed record.
-It must not be copied directly into physical motion.
+Any controller-simulation profile is only a seed record. It must not be copied
+directly into physical motion.
 
 Physical defaults remain conservative until accepted:
 
