@@ -206,11 +206,17 @@ Cartesian simulator acceptance:
 CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 ```
 
-Start simulator operator stack:
+Start the integrated operator stack (native, not Docker). `make run` brings up
+`rb_servo_server` + the viser GUI + `policy_runner` (SpaceMouse + UMI teleop):
 
 ```bash
-make sim-up
+make run            # pgmode real (+ gripper follower)
+make run MODE=sim   # pgmode controller-simulation
 ```
+
+After editing source, build/install the stack first with `make build-stack`.
+For hardware-free controller-simulation, boot the two Rainbow virtual
+control-box VMs with `make vm-up` and then run `make run MODE=sim`.
 
 Open:
 
@@ -223,7 +229,6 @@ http://127.0.0.1:8080
 Servo server simulation configs:
 
 - `rb_servo_server/config/dual_simulator.yaml`
-- `rb_servo_server/config/dual_simulator_compose.yaml`
 - `rb_servo_server/config/dual_simulator_worker.yaml`
 - `rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`
 
@@ -231,8 +236,6 @@ Simulator configs:
 
 - `rb_simulator/config/left_rb3_730e.yaml`
 - `rb_simulator/config/right_rb3_730e.yaml`
-- `rb_simulator/config/left_rb3_730e_compose.yaml`
-- `rb_simulator/config/right_rb3_730e_compose.yaml`
 
 Real robot template:
 

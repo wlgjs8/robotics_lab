@@ -39,23 +39,9 @@ right_robot:
   simulator_control_endpoint: "tcp://127.0.0.1:50210"
 ```
 
-Use `config/dual_simulator_compose.yaml` for Docker Compose checks. Each
-simulator runs in its own container, so both services use internal port
-`50200` behind different service DNS names:
-
-```yaml
-left_robot:
-  backend_type: simulator
-  run_mode: simulation
-  name: left_simulator
-  simulator_control_endpoint: "tcp://rb_simulator_left:50200"
-
-right_robot:
-  backend_type: simulator
-  run_mode: simulation
-  name: right_simulator
-  simulator_control_endpoint: "tcp://rb_simulator_right:50200"
-```
+For a split-PC simulator stack, `config/dual_simulator_remote_172_28_60_36.yaml`
+points the per-arm endpoints at simulator processes on `172.28.60.36` instead of
+loopback.
 
 The deprecated `dual_rb_simulator.yaml`, `dual_rb_simulator_compose.yaml`, and
 `dual_rbsim.yaml` names have been moved out of the active config directory to

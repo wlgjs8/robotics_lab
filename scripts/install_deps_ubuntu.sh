@@ -191,7 +191,7 @@ configure_robotpkg_repo() {
     exit 2
   fi
   if [[ "${codename}" != "jammy" && -z "${ROBOTPKG_DIST:-}" ]]; then
-    echo "install_deps_ubuntu: robotpkg auto-setup is pinned to jammy to match scripts/docker/rb_servo_server.hardware_free.Dockerfile." >&2
+    echo "install_deps_ubuntu: robotpkg auto-setup is pinned to jammy for robotpkg binary compatibility (the hardware-free build baseline)." >&2
     echo "install_deps_ubuntu: set ROBOTPKG_DIST=${codename} explicitly if robotpkg supports your distribution." >&2
     exit 2
   fi

@@ -2570,41 +2570,6 @@ class GuiContractsTest(unittest.TestCase):
         _update_lease_owner(handles, None, "rb_gui", held=False)
         self.assertEqual(handles["lease_owner_status"].value, "no state stream")
 
-    def test_compose_gui_env_uses_servo_server_and_canonical_simulation_terms(self):
-        compose = Path(__file__).resolve().parents[2] / "docker-compose.yml"
-        text = compose.read_text(encoding="utf-8")
-        self.assertIn('RB_GUI_COMMAND_HOST: "rb_servo_server"', text)
-        self.assertIn('RB_GUI_OBSERVED_MODE: "simulation"', text)
-        self.assertIn('RB_GUI_OBSERVED_BACKEND: "simulator"', text)
-        # Env readiness/Cartesian/feature-flag unlocks are retired: the GUI derives
-        # availability from the live server state, so these must NOT be in compose.
-        self.assertNotIn("RB_GUI_SIM_READINESS_READY", text)
-        self.assertNotIn("RB_GUI_SIM_READINESS_CONNECTED", text)
-        self.assertNotIn("RB_GUI_CARTESIAN_AVAILABLE", text)
-        self.assertNotIn("RB_GUI_ENABLE_TCP_POSE_COMMANDS", text)
-        self.assertNotIn("RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN", text)
-        self.assertIn('RB_GUI_INIT_LEFT_JOINTS: "-124.660, 32.485, 119.074, -96.294, -81.798, -30.615"', text)
-        self.assertIn('RB_GUI_INIT_RIGHT_JOINTS: "111.949, -49.304, -120.057, 75.305, 87.436, 49.983"', text)
-        self.assertIn('RB_GUI_INIT_MOTION_TIMEOUT_SEC: "10.0"', text)
-        self.assertNotIn('RB_GUI_OBSERVED_MODE: "rbsim_local"', text)
-
-        config = Path(__file__).resolve().parents[2] / "rb_servo_server" / "config" / "dual_simulator_compose.yaml"
-        config_text = config.read_text(encoding="utf-8")
-        self.assertIn("provider: pinocchio", config_text)
-        self.assertIn("publish_tcp: true", config_text)
-        self.assertIn("orientation_tolerance_rad: 0.005", config_text)
-        self.assertIn("allow_in_simulation: true", config_text)
-        self.assertIn("allow_in_real: false", config_text)
-
-        dockerfile = Path(__file__).resolve().parents[2] / "scripts" / "docker" / "rb_servo_server.hardware_free.Dockerfile"
-        docker_text = dockerfile.read_text(encoding="utf-8")
-        self.assertIn("robotpkg-pinocchio", docker_text)
-        self.assertIn("-DRB_SERVO_ENABLE_PINOCCHIO=ON", docker_text)
-
-        cmake = Path(__file__).resolve().parents[2] / "rb_servo_server" / "CMakeLists.txt"
-        cmake_text = cmake.read_text(encoding="utf-8")
-        self.assertIn('option(RB_SERVO_ENABLE_PINOCCHIO "Enable Pinocchio FK/IK support" ON)', cmake_text)
-
 
 class FloorConstraintGuiTest(unittest.TestCase):
     @staticmethod

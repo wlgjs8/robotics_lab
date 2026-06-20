@@ -301,38 +301,24 @@ Start with read-only. Do not copy `dual_real.example.yaml` directly as a
 ready-to-run real motion config; site-specific real configs live under
 `rb_servo_server/config/local/` and are gitignored.
 
-시뮬레이터 운영자 stack 시작:
+통합 운영자 stack 시작(native — Docker 아님). `make run`이
+`rb_servo_server` + viser GUI + `policy_runner`(SpaceMouse + UMI teleop)를 한
+번에 띄웁니다:
 
 ```bash
-make sim-local-up
+make run            # pgmode real (+ gripper follower)
+make run MODE=sim   # pgmode controller-simulation
 ```
 
-`make sim-local-up` starts the same-PC GUI, servo server, per-arm simulators,
-and a passive `policy_runner` recorder. `make sim-up` remains a compatibility
-alias for this same-PC stack. The recorder writes
-robot-state JSONL episodes to `policy_runner/episodes` and does not send motion
-commands.
+소스를 고친 뒤에는 먼저 `make build-stack`으로 stack을 빌드/설치합니다(rbpodo
+backend 포함). 하드웨어 없이 controller-simulation을 돌리려면 Rainbow 가상
+control-box VM 2대를 `make vm-up`으로 띄운 뒤 `make run MODE=sim`을 씁니다
+(`make vm-down` / `make vm-status`).
 
-Split-PC simulator stack:
-
-```bash
-# On simulator PC 172.28.60.36:
-make sim-backend-up
-
-# On the control/GUI PC:
-make sim-control-up
-```
-
-`sim-backend-up` publishes simulator TCP ports on all interfaces by default.
-Use `SIM_BACKEND_BIND=172.28.60.36 make sim-backend-up` to bind only that NIC.
-
-SpaceMouse teleop data collection and policy inference are explicit modes:
-
-```bash
-make sim-teleop-up
-make policy-train
-make sim-infer-up
-```
+SpaceMouse / UMI teleop는 `make run`이 띄우는 `policy_runner`에서 상시 동시
+운용됩니다(별도 teleop 모드 불필요). policy 학습은 GPU 서버에서 native
+`python3 -m policy_runner flow-train`으로 수행하며, inference는
+`python3 -m policy_runner flow-infer`(아래 `--rollout-mode` 참고)로 실행합니다.
 
 HDF5 policy episodes should be audited before `flow-train`:
 
@@ -383,7 +369,6 @@ http://127.0.0.1:8080
 Servo server simulation configs:
 
 - `rb_servo_server/config/dual_simulator.yaml`
-- `rb_servo_server/config/dual_simulator_compose.yaml`
 - `rb_servo_server/config/dual_simulator_worker.yaml`
 - `rb_servo_server/config/dual_simulator_tcp_acceptance.yaml`
 - `rb_servo_server/config/dual_simulator_remote_172_28_60_36.yaml`
@@ -392,8 +377,6 @@ Simulator configs:
 
 - `rb_simulator/config/left_rb3_730e.yaml`
 - `rb_simulator/config/right_rb3_730e.yaml`
-- `rb_simulator/config/left_rb3_730e_compose.yaml`
-- `rb_simulator/config/right_rb3_730e_compose.yaml`
 
 Real robot template:
 

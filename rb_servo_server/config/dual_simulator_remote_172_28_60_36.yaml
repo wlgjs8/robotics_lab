@@ -2,7 +2,7 @@ schema: robotics_lab.rb_servo_server.v1
 
 # Hardware-free profile for a split-PC simulator stack.
 # Run rb_gui/rb_servo_server on the control PC and run both rb_simulator
-# containers on 172.28.60.36 with make sim-backend-up.
+# processes (PYTHONPATH=rb_simulator/src) natively on 172.28.60.36.
 # This profile is not real robot evidence.
 
 left_robot:

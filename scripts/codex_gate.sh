@@ -1368,7 +1368,7 @@ run_doc_hygiene_gate() {
     return 1
   fi
   if [[ -e rb_servo_server/docker-compose.yml ]]; then
-    echo "ERROR: rb_servo_server/docker-compose.yml must not exist; use repository-root docker-compose.yml via make sim-up" >&2
+    echo "ERROR: rb_servo_server/docker-compose.yml must not exist; use the repository-root docker-compose.yml (camera_server)" >&2
     return 1
   fi
 
@@ -1451,7 +1451,6 @@ check_canonical_config_docs() {
   check_real_config_safety_docs
   grep_existing "Canonical Config Names" README.md docs rb_servo_server/docs || true
   grep_existing "dual_simulator.yaml" README.md docs rb_servo_server/docs rb_servo_server/config
-  grep_existing "dual_simulator_compose.yaml" README.md docs rb_servo_server/docs rb_servo_server/config
   grep_existing "dual_simulator_worker.yaml" README.md docs rb_servo_server/docs rb_servo_server/config
   grep_existing "left_rb3_730e" README.md docs rb_simulator/README.md rb_simulator/docs rb_simulator/config
   grep_existing "right_rb3_730e" README.md docs rb_simulator/README.md rb_simulator/docs rb_simulator/config

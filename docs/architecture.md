@@ -163,26 +163,6 @@ viewers should bind separate UDP ports and receive identical server-published
 state JSON; benchmark tee/rebroadcast processes are not the primary state path.
 Command traffic still goes directly to `network.command_bind`.
 
-### Docker Compose Simulator Topology
-
-```text
-rb_simulator_left container
-  arm: left
-  control: tcp://0.0.0.0:50200
-  admin:   tcp://0.0.0.0:50201
-
-rb_simulator_right container
-  arm: right
-  control: tcp://0.0.0.0:50200
-  admin:   tcp://0.0.0.0:50201
-```
-
-Separate containers can reuse internal ports. Compose uses compose-specific configs and sets:
-
-```bash
-RB_SIMULATOR_ALLOW_NON_LOOPBACK=1
-```
-
 ### Host-Local Simulator Topology
 
 ```text

@@ -1,6 +1,0 @@
-services:
-  rb_servo_server:
-    command: ["--config", "config/dual_simulator_remote_172_28_60_36.yaml"]
-    depends_on: !override
-      rb_gui:
-        condition: service_started

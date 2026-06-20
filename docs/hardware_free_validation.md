@@ -89,13 +89,6 @@ left  control/admin: 127.0.0.1:50200 / 50201
 right control/admin: 127.0.0.1:50210 / 50211
 ```
 
-Compose uses service DNS and container-internal ports:
-
-```text
-rb_simulator_left:50200
-rb_simulator_right:50200
-```
-
 Wrong-arm requests must fail closed.
 
 ## Direct And Worker I/O

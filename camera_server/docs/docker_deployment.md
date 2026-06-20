@@ -32,22 +32,17 @@ services:
       - ./episodes:/data/episodes
     environment:
       - CAMERA_SERVER_CONFIG=/app/config/triple_realsense.yaml
-
-  policy_runner:
-    image: policy_runner:latest
-    container_name: policy_runner
-    ipc: host
-    shm_size: "2gb"
-    network_mode: host
-    volumes:
-      - ./config:/app/config:ro
 ```
+
+`policy_runner` runs natively (not in Docker) and opens the same POSIX shared
+memory directly; `ipc: host` on the camera container is what makes that shared
+memory visible to host processes.
 
 Key fields:
 
 ```text
 ipc: host
-  - allows policy_runner to open same POSIX shared memory
+  - lets host-native policy_runner open the same POSIX shared memory
 
 shm_size
   - Docker default 64 MB is too small
@@ -74,7 +69,7 @@ metadata:
   pub_bind: "tcp://127.0.0.1:5600"
 ```
 
-If using `network_mode: host`, `127.0.0.1` works across host processes but not across separate network namespaces. With host networking, both containers share host network namespace.
+If using `network_mode: host`, `127.0.0.1` works across host processes but not across separate network namespaces. With host networking, the camera container shares the host network namespace, so host-native `policy_runner` can reach it on `127.0.0.1`.
 
 ## 5. Shared memory naming
 

@@ -169,28 +169,24 @@ policy command and does not execute it.
 
 ## Imitation Data Collection
 
-The Docker simulator stack can run a passive policy recorder with `make sim-up`.
-The recorder receives the `rb_servo_server` state stream and writes JSONL
-episodes under `policy_runner/episodes` without sending commands.
-
-SpaceMouse teleop collection is an explicit mode because it sends simulator
-motion commands:
+Run `policy_runner` natively to record episodes. A passive recorder receives the
+`rb_servo_server` state stream and writes JSONL episodes under
+`policy_runner/episodes` without sending commands:
 
 ```bash
-make sim-teleop-up
+python3 -m policy_runner --config policy_runner/config/simulator_hold.yaml
 ```
 
-This uses `policy_runner/config/simulator_dual_spacemouse_cartesian_compose.yaml`
-and records both `robot_state.jsonl` and `actions.jsonl` in the same episode.
+SpaceMouse teleop collection sends simulator motion commands, so it is an
+explicit mode. Use a dual-SpaceMouse Cartesian config (for example
+`policy_runner/config/simulator_dual_spacemouse_cartesian.yaml`) with
+`hdf5-record` (see below) to record both states and actions in the same episode.
 The default HID paths are `/dev/hidraw1` for the left SpaceMouse and
 `/dev/hidraw6` for the right SpaceMouse.
 
-Train and run the V1 behavior-cloning baseline with:
-
-```bash
-make policy-train
-make sim-infer-up
-```
+Train and run the V1 behavior-cloning baseline natively with
+`python3 -m policy_runner flow-train` and `python3 -m policy_runner flow-infer`
+(see the flow sections below).
 
 The V1 dataset is robot-state plus policy-command JSONL only. Camera/image
 episodes remain a later merge step using camera timestamps and robot state
@@ -290,57 +286,21 @@ python3 -m policy_runner flow-train \
   --write-eval-report outputs/flow_eval_report.md
 ```
 
-Run the prepared 8-GPU independent experiment sweep with Docker Compose:
+For multi-GPU experiment sweeps, run `flow-train` natively on the GPU server, one
+invocation per GPU. Each is an independent single-GPU experiment (not distributed
+training); select the GPU with `CUDA_VISIBLE_DEVICES` and point each run at its
+own output directory. For example, to launch one experiment on GPU 0:
 
 ```bash
-make policy-flow-train-config
-make policy-flow-train-build
-make policy-flow-gpu-smoke
-make policy-flow-train-preflight
-make policy-flow-hdf5-audit
-make policy-flow-train-up
-```
-
-The sweep is defined in `docker-compose.flow-train.yml`. It mounts `./data` as
-read-only HDF5 input, writes outputs under `outputs/flow_runs`, uses
-`--val-split 0.2`, and pins `policy_flow_train_gpu0` through
-`policy_flow_train_gpu7` to host GPU IDs `0` through `7`. These are independent
-single-GPU experiments, not distributed training. The first sweep uses
-`left_realsense_color,right_realsense_color` and excludes depth cameras.
-`make policy-flow-gpu-smoke` runs the same CUDA ML image with all GPUs exposed
-and fails unless PyTorch can see `FLOW_EXPECTED_GPU_COUNT`, which defaults to
-`8`. Flow training containers run as `FLOW_RUN_UID:FLOW_RUN_GID`, defaulting to
-the current host user from the Makefile, so generated reports and checkpoints
-remain writable from the host.
-
-The target host must have NVIDIA Container Toolkit and Docker Compose GPU
-reservation support. On smaller hosts, run a subset:
-
-```bash
-FLOW_TRAIN_SERVICES=policy_flow_train_gpu0 make policy-flow-train-up
-```
-
-If Compose GPU reservation is unavailable, run one experiment directly:
-
-```bash
-docker build \
-  -f policy_runner/docker/policy_runner.Dockerfile \
-  --target cuda-ml \
-  -t robotics_lab/policy_runner:cuda-ml .
-
-docker run --rm --gpus '"device=0"' \
-  -v "$PWD/data:/data/policy_episodes:ro" \
-  -v "$PWD/outputs/flow_runs:/outputs/flow_runs" \
-  robotics_lab/policy_runner:cuda-ml \
-  flow-train \
-  --episodes-dir /data/policy_episodes \
+CUDA_VISIBLE_DEVICES=0 python3 -m policy_runner flow-train \
+  --episodes-dir data/policy_episodes \
   --camera-names left_realsense_color,right_realsense_color \
   --exclude-camera-names left_realsense_depth,right_realsense_depth \
   --val-split 0.2 \
   --sample-steps 16 \
   --device auto \
-  --checkpoint /outputs/flow_runs/gpu0_resnet18_transformer_h16/flow_policy.pt \
-  --write-eval-report /outputs/flow_runs/gpu0_resnet18_transformer_h16/flow_eval_report.md \
+  --checkpoint outputs/flow_runs/gpu0_resnet18_transformer_h16/flow_policy.pt \
+  --write-eval-report outputs/flow_runs/gpu0_resnet18_transformer_h16/flow_eval_report.md \
   --vision-backbone resnet18 \
   --condition-encoder transformer \
   --action-horizon 16 \
@@ -349,6 +309,10 @@ docker run --rm --gpus '"device=0"' \
   --batch-size 32 \
   --epochs 100
 ```
+
+Repeat with `CUDA_VISIBLE_DEVICES=1`, `=2`, ... for additional GPUs, using a
+distinct output directory per run so reports and checkpoints do not collide. Use
+`ml-preflight` (below) to confirm CUDA/torchvision readiness before launching.
 
 The checkpoint schema is `robotics_lab.policy_runner.flow_matching.v1`.
 Training also writes `dataset_stats.json` and `training_curves.jsonl` beside the

@@ -4,10 +4,10 @@ This page documents reproducible local setup for simulator-first development. It
 
 ## Ubuntu Hardware-Free Dependencies
 
-Install the base C++ and Python dependencies. On Ubuntu jammy, or when
-`ROBOTPKG_DIST` is set explicitly, this helper follows the hardware-free
-Dockerfile and installs Pinocchio from robotpkg as `robotpkg-pinocchio` under
-`/opt/openrobots`. On non-jammy hosts such as Ubuntu 24.04 noble with
+Install the base C++ and Python dependencies natively. On Ubuntu jammy, or when
+`ROBOTPKG_DIST` is set explicitly, this helper installs Pinocchio from robotpkg
+as `robotpkg-pinocchio` under `/opt/openrobots`. On non-jammy hosts such as
+Ubuntu 24.04 noble with
 `ROBOTPKG_DIST` unset, it builds pinned Pinocchio source release `v3.9.0` with
 URDF support and installs it under the same prefix:
 
@@ -43,9 +43,9 @@ Check availability:
 ./scripts/check_deps.sh --profile hardware-free
 ```
 
-The supported Ubuntu helper path keeps robotpkg as the jammy default, matching
-`scripts/docker/rb_servo_server.hardware_free.Dockerfile`, and uses a pinned
-source build for non-jammy hosts when robotpkg is not selected. Set
+The supported Ubuntu helper path (`scripts/install_deps_ubuntu.sh --profile
+hardware-free`) keeps robotpkg as the jammy default and uses a pinned source
+build for non-jammy hosts when robotpkg is not selected. Set
 `RB_PINOCCHIO_SOURCE=1` to force source or `PINOCCHIO_VERSION=<tag>` to override
 the source tag. Source builds use an automatic memory-capped job limit to avoid
 OOM on low-RAM WSL2 hosts; set `PINOCCHIO_BUILD_JOBS=<N>` to override it.
@@ -92,35 +92,28 @@ CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05
 
 This validates simulator-only PTP, Linear, and Twist primitives. It does not enable real robot motion.
 
-## Docker Compose Simulator Stack
+## Native Simulator Stack
+
+The operator stack (`rb_servo_server` + viser GUI + `policy_runner`) runs
+natively, not in Docker:
 
 ```bash
-make sim-local-up
+make run MODE=sim
 ```
 
+Build/install the stack first with `make build-stack` after editing source.
 Open:
 
 ```text
 http://127.0.0.1:8080
 ```
 
-Stop with `Ctrl+C`, then:
+Stop with `Ctrl+C`.
 
-```bash
-make sim-down
-```
-
-For a split-PC simulator stack, run the simulator backend on `172.28.60.36`:
-
-```bash
-make sim-backend-up
-```
-
-Then run the GUI/control stack on the control PC:
-
-```bash
-make sim-control-up
-```
+For a split-PC simulator stack, run the per-arm `rb_simulator` processes on
+`172.28.60.36` (with `RB_SIMULATOR_ALLOW_NON_LOOPBACK=1`) and point the server at
+`rb_servo_server/config/dual_simulator_remote_172_28_60_36.yaml` from the
+control/GUI PC.
 
 ## Real Camera Dependencies
 

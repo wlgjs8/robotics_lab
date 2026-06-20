@@ -5,8 +5,8 @@
 one RB3-730 arm per process, matching the real system topology of one
 controller per arm.
 
-It does not use `rbpodo`, robot hardware, privileged Docker, real robot
-networks, or Rainbow Robotics simulator images.
+It does not use `rbpodo`, robot hardware, real robot networks, or Rainbow
+Robotics simulator images. It runs natively (no Docker).
 
 ## Scope
 
@@ -37,8 +37,6 @@ rb_simulator/
   config/
     left_rb3_730e.yaml
     right_rb3_730e.yaml
-    left_rb3_730e_compose.yaml
-    right_rb3_730e_compose.yaml
   docs/
     architecture.md
     protocol_v1.md
@@ -49,7 +47,7 @@ rb_simulator/
 
 ## Topology
 
-Host-run default:
+Host-run default (one process per arm, loopback only):
 
 ```text
 rb_servo_server
@@ -67,29 +65,8 @@ right simulator process
   admin:   tcp://127.0.0.1:50211
 ```
 
-Compose-run container profile:
-
-```text
-rb_servo_server
-  left backend_type=simulator  -> tcp://rb_simulator_left:50200
-  right backend_type=simulator -> tcp://rb_simulator_right:50200
-
-left simulator container
-  config: rb_simulator/config/left_rb3_730e_compose.yaml
-  arm: left
-  control: tcp://0.0.0.0:50200
-  admin:   tcp://0.0.0.0:50201
-
-right simulator container
-  config: rb_simulator/config/right_rb3_730e_compose.yaml
-  arm: right
-  control: tcp://0.0.0.0:50200
-  admin:   tcp://0.0.0.0:50201
-```
-
-Compose sets `RB_SIMULATOR_ALLOW_NON_LOOPBACK=1` for the simulator services.
-Without that explicit gate, non-loopback binds are rejected. There is no socat
-bridge or runtime YAML rewrite in the simulator image.
+Non-loopback binds are rejected unless `RB_SIMULATOR_ALLOW_NON_LOOPBACK=1` is set
+explicitly (used for split-PC simulator runs that bind a specific NIC).
 
 ## Running
 
@@ -100,8 +77,8 @@ PYTHONPATH=rb_simulator/src python3 -m rbsim --config rb_simulator/config/left_r
 PYTHONPATH=rb_simulator/src python3 -m rbsim --config rb_simulator/config/right_rb3_730e.yaml
 ```
 
-Compose startup uses the compose profiles through `docker-compose.yml`; the
-host-run profiles above remain loopback-only.
+These host-run profiles are loopback-only and are the supported way to start the
+simulator processes.
 
 The Python module name and protocol schema retain the existing `rbsim` names
 for compatibility. Public configuration should use `backend_type: simulator`

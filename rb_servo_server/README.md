@@ -171,22 +171,25 @@ The C++ receive timestamp is used for timeout checks.
 
 Force control is present as a design scaffold only. It is disabled by default and not connected to the joint-only control path. See `docs/force_control.md`.
 
-## Docker + viser operator GUI
+## Viser operator GUI
 
-The root Docker Compose stack defines the simulator operator path:
+The native operator stack runs `rb_servo_server` together with the viser GUI and
+`policy_runner` (no Docker):
 
 ```bash
 cd /home/plaif/workspace/robotics_lab
-make sim-up
+make run MODE=sim
 ```
 
-It starts `rb_gui`, `rb_simulator_left`, `rb_simulator_right`, and
-`rb_servo_server` with `config/dual_simulator_compose.yaml`. Host GUI ports are
-pinned to loopback. The GUI receives UDP state snapshots and sends only
-validated UDP JSON commands. The compose image builds with Pinocchio enabled,
-and the compose config enables simulator-only FK/IK for GUI TCP target tests.
-Real motion is disabled, and the GUI does not mount the raw Docker socket. See
+`make run` launches the servo server, the viser GUI, and `policy_runner`
+side by side; `MODE=sim` uses the rbpodo controller-simulation path, and the
+plain `make run` targets the real controllers. Build/install the stack first
+with `make build-stack` after editing source. The GUI receives UDP state
+snapshots and sends only validated UDP JSON commands; the server is built with
+Pinocchio enabled so simulator-only FK/IK powers the GUI TCP target tests. See
 `docs/gui_operator_console.md`.
 
-The old component-local `rb_servo_server/docker-compose.yml` has been removed;
-use the repository-root `docker-compose.yml` through `make sim-up`.
+For hardware-free simulator runs, start `rb_servo_server` directly with
+`config/dual_simulator.yaml` against the per-arm `rb_simulator` processes (see
+`docs/rb_simulator_dev.md`). Docker remains in use only for `camera_server` /
+`camera_server_mock`.

@@ -101,20 +101,19 @@ Gates (`scripts/codex_gate.sh <TASK>`) wrap build/test/acceptance:
 ./scripts/codex_gate.sh HARDEN-10                                  # hardware-free C++ gate
 ./scripts/codex_gate.sh CART-MATH-03                               # Cartesian math rebaseline
 CODEX_RUN_CARTESIAN_ACCEPTANCE=1 ./scripts/codex_gate.sh CART-HARDEN-05   # Cartesian sim acceptance
-make sim-smoke                                                     # ./scripts/hardware_free_validation.sh
+./scripts/hardware_free_validation.sh                             # hardware-free simulator smoke
 ```
 
-Docker/operator stacks (via `Makefile`):
+Operator stacks (native via `Makefile`; the GUI/servo/policy stack runs without Docker):
 ```bash
-make sim-local-up      # same-PC: GUI + servo server + per-arm simulators + passive recorder (alias: sim-up)
-make sim-backend-up    # split-PC: simulators only (on the sim PC)
-make sim-control-up    # split-PC: GUI + servo server (on the control PC)
-make sim-teleop-up     # SpaceMouse teleop + recording
-make policy-train      # imitation training
-make sim-infer-up      # policy inference
-make camera-mock-up / make camera-real-up
+make run               # full local teleop stack: rb_servo_server + viser GUI + policy_runner (SpaceMouse + UMI); pgmode real
+make run MODE=sim      # same stack, pgmode controller-simulation
+make build-stack       # source-build + install the native stack (rbpodo backend) into the path `make run` launches
+make vm-up / vm-down / vm-status   # boot/stop the Rainbow virtual control-box VMs for hardware-free MODE=sim
+make pgmode-sim-up / pgmode-sim-down   # native rb_servo_server + rb_gui controller-sim bring-up
+make camera-mock-up / make camera-real-up   # the only Docker stacks: camera_server (real) / camera_server_mock
 ```
-GUI: `http://127.0.0.1:8080`. Flow-matching multi-GPU training uses `docker-compose.flow-train.yml` (`make policy-flow-train-*`).
+GUI: `http://127.0.0.1:8080`. Docker is used ONLY for `camera_server` / `camera_server_mock`; everything else runs natively. Flow-matching training runs natively on the GPU server with `python3 -m policy_runner flow-train`.
 
 ML data flow: audit HDF5 episodes (`python3 -m policy_runner hdf5-audit ...`, schema `robotics_lab.policy_runner.hdf5_audit.v1`) before flow-train. `flow-infer` requires explicit `--rollout-mode` (`offline_eval` / `sim_dryrun` / `controller_sim` / `real_readonly` / `real_policy`); `real_policy` enforces measured/accepted retarget, collision, gripper, and geometry gates — satisfiable, and exercised live (a full real_policy rollout has run on hardware).
 

@@ -68,64 +68,38 @@ Parser and artifact validator only:
 python3 rb_simulator/tools/rbsim_servo_smoke.py --self-test
 ```
 
-## Compose Profile
+## Operator Stack (native)
 
-The repository root `docker-compose.yml` includes a per-arm simulator operator
-stack:
-
-- `rb_gui`: browser GUI on `http://127.0.0.1:8080`.
-- `rb_simulator_left`: left-arm Python JSONL simulator.
-- `rb_simulator_right`: right-arm Python JSONL simulator.
-- `rb_servo_server`: C++ server using `config/dual_simulator_compose.yaml`.
-
-Run it from the repository root:
+The full operator stack — `rb_servo_server` + the viser GUI
+(`http://127.0.0.1:8080`) + `policy_runner` — runs natively (no Docker) via the
+repository-root `Makefile`:
 
 ```bash
-make sim-local-up
+make run MODE=sim
 ```
 
-Stop and clean up:
+`MODE=sim` uses the rbpodo controller-simulation path. Build/install the stack
+first with `make build-stack` after editing source. For a pure hardware-free
+`rb_simulator` operator run, start `rb_servo_server` directly with
+`config/dual_simulator.yaml` against the two per-arm simulator processes shown in
+the Config Pair above.
 
-```bash
-make sim-down
-```
+For a split-PC simulator stack, the server profile
+`config/dual_simulator_remote_172_28_60_36.yaml` points left simulator traffic at
+`tcp://172.28.60.36:50200` and right simulator traffic at
+`tcp://172.28.60.36:50210`. Run the simulator processes on `172.28.60.36` and set
+`RB_SIMULATOR_ALLOW_NON_LOOPBACK=1` so they may bind the LAN NIC; the
+control/GUI PC then runs the server against that remote profile.
 
-`make sim-up` remains a compatibility alias for `make sim-local-up`.
+Notes:
 
-For a split-PC simulator stack, run this on simulator PC `172.28.60.36`:
-
-```bash
-make sim-backend-up
-```
-
-Then run this on the control/GUI PC:
-
-```bash
-make sim-control-up
-```
-
-By default `sim-backend-up` publishes simulator TCP ports on all simulator-PC
-interfaces. To bind only the simulator LAN NIC, run
-`SIM_BACKEND_BIND=172.28.60.36 make sim-backend-up`.
-
-The split-PC server profile uses
-`config/dual_simulator_remote_172_28_60_36.yaml`; left simulator traffic goes to
-`tcp://172.28.60.36:50200`, and right simulator traffic goes to
-`tcp://172.28.60.36:50210`.
-
-The compose stack is intentionally bounded:
-
-- It uses the repo-local simulator image, not `mo_rbsim_docker` and not a
-  Rainbow Robotics OVA.
-- It does not request `privileged`, host networking, USB devices, or real robot
+- The simulator is the repo-local Python JSONL backend, not `mo_rbsim_docker` and
+  not a Rainbow Robotics OVA.
+- It does not require `privileged`, host networking, USB devices, or real robot
   environment variables.
-- Each simulator service has its own network namespace, so both containers may
-  use internal port `50200`; `rb_servo_server` reaches them through
-  `tcp://rb_simulator_left:50200` and `tcp://rb_simulator_right:50200`.
-- The server image builds with mandatory Pinocchio/Eigen support. The compose config publishes
-  FK TCP poses and enables simulator-only Cartesian IK for GUI TCP target tests;
-  real Cartesian motion remains disabled.
-- The default GUI/mock port mappings are pinned to `127.0.0.1`.
+- The server is built with mandatory Pinocchio/Eigen support, publishes FK TCP
+  poses, and enables simulator-only Cartesian IK for GUI TCP target tests; real
+  Cartesian motion remains disabled.
 
 The hardware-free validation gate and the local smoke runner above remain the
 primary regression evidence paths.

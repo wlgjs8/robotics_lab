@@ -1329,12 +1329,6 @@ bool testSimulatorConfigParsesCanonicalAndAliases() {
     RB_CHECK(cfg.network.state_pub_bind == "udp://127.0.0.1:50110");
     RB_CHECK(cfg.network.state_pub_rate_hz == 20);
 
-    const std::filesystem::path compose_config_path =
-        std::filesystem::path(__FILE__).parent_path().parent_path() / "config" / "dual_simulator_compose.yaml";
-    const rb_servo::DualArmConfig compose_cfg = rb_servo::loadConfigFromYaml(compose_config_path.string());
-    RB_CHECK(compose_cfg.left_robot.simulator_control_endpoint == "tcp://rb_simulator_left:50200");
-    RB_CHECK(compose_cfg.right_robot.simulator_control_endpoint == "tcp://rb_simulator_right:50200");
-
     const std::string alias_path = "/tmp/rb-servo-simulator-alias-" + std::to_string(getpid()) + ".yaml";
     {
         std::ofstream file(alias_path);
