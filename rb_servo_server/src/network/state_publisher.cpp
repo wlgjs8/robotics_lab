@@ -1058,6 +1058,23 @@ nlohmann::json controllerSimulationModeJson(
     };
 }
 
+nlohmann::json gripperFeedbackJson(const GripperArmFeedback& fb) {
+    // Stamped from the latest gripper_state.v1 feedback the bridge cached. When no
+    // fresh feedback exists (disabled / never received / stale) -> {valid:false}.
+    if (!fb.valid) {
+        return nlohmann::json{{"valid", false}, {"stale", true}, {"ok", false}};
+    }
+    return nlohmann::json{
+        {"valid", true},
+        {"stale", false},
+        {"percent", fb.percent},
+        {"target_percent", fb.target_percent},
+        {"moving", fb.moving},
+        {"ok", fb.ok},
+        {"fault", fb.fault.empty() ? nlohmann::json(nullptr) : nlohmann::json(fb.fault)},
+    };
+}
+
 nlohmann::json armStateJson(
     const RobotState& state,
     const ArmCommand& command,
@@ -1088,7 +1105,8 @@ nlohmann::json armStateJson(
     const SafetyConfig& safety_config,
     const CartesianSolveTelemetry& cartesian_solve,
     const SafetyTrackingTelemetry& safety_tracking,
-    const ArmStartupValidationSnapshot& startup_validation
+    const ArmStartupValidationSnapshot& startup_validation,
+    const GripperArmFeedback& gripper_feedback
 ) {
     const TcpPublication tcp = tcpPublicationForState(state);
     const bool diagnostic_override_active = controllerSimulationDiagnosticOverrideActive(
@@ -1108,6 +1126,7 @@ nlohmann::json armStateJson(
     return {
         {"mode", toString(command.mode)},
         {"command_family", optionalStringJson(commandFamilyString(command.mode))},
+        {"gripper", gripperFeedbackJson(gripper_feedback)},
         {"q_actual_deg", jointArrayJson(state.q_actual_deg)},
         {"q_target_deg", jointArrayJson(state.q_target_deg)},
         {"q_ref_deg", jointArrayJson(state.q_target_deg)},
@@ -1333,6 +1352,9 @@ void normalizeStatePublisherNetworkConfig(NetworkConfig* config) {
 StatePublisher::StatePublisher(const DualArmConfig& config, SnapshotProvider provider)
     : config_(config), snapshot_provider_(std::move(provider)) {
     normalizeStatePublisherNetworkConfig(&config_.network);
+    if (config_.gripper.enable) {
+        gripper_bridge_ = std::make_unique<GripperBridge>(config_.gripper);
+    }
 }
 
 StatePublisher::StatePublisher(const NetworkConfig& config) {
@@ -1407,7 +1429,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         config_.safety,
         snapshot.left_cartesian_solve,
         snapshot.left_safety_tracking,
-        snapshot.startup_validation.left
+        snapshot.startup_validation.left,
+        gripper_bridge_ ? gripper_bridge_->latest(ArmId::Left) : GripperArmFeedback{}
     );
     message["right"] = armStateJson(
         snapshot.right_state,
@@ -1439,7 +1462,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         config_.safety,
         snapshot.right_cartesian_solve,
         snapshot.right_safety_tracking,
-        snapshot.startup_validation.right
+        snapshot.startup_validation.right,
+        gripper_bridge_ ? gripper_bridge_->latest(ArmId::Right) : GripperArmFeedback{}
     );
     message["last_cartesian_solve"] = {
         {"left", cartesianSolveJson(snapshot.left_cartesian_solve)},
@@ -1646,6 +1670,11 @@ bool StatePublisher::start() {
         return false;
     }
 
+    if (gripper_bridge_ && !gripper_bridge_->start()) {
+        std::cerr << "[ERROR] StatePublisher failed to start gripper bridge\n";
+        return false;
+    }
+
     running_ = true;
     thread_ = std::thread(&StatePublisher::threadMain, this);
     return true;
@@ -1656,6 +1685,7 @@ void StatePublisher::stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
+    if (gripper_bridge_) gripper_bridge_->stop();
 }
 
 void StatePublisher::threadMain() {
@@ -1684,6 +1714,10 @@ void StatePublisher::threadMain() {
             std::lock_guard<std::mutex> lock(snapshot_mutex_);
             snapshot = latest_snapshot_;
         }
+
+        // Forward the arbitrated gripper setpoint to gripper_server (rate-limited
+        // inside the bridge). Off the RT loop, non-blocking.
+        if (gripper_bridge_) gripper_bridge_->forward(snapshot.command);
 
         const std::string payload = serializeSnapshot(snapshot);
         for (const UdpDestination& destination : destinations) {

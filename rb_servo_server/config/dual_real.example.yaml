@@ -152,6 +152,15 @@ network:
   state_pub_rate_hz: 20
   command_source_allowlist: ["127.0.0.1/32"]
 
+# Gripper bridge to the out-of-process gripper_server (docs/plans/gripper_server_design.md).
+# Forwards arbitrated per-arm gripper setpoints (left/right.gripper) and stamps
+# gripper_state.v1 feedback into the published state JSON. Disabled by default.
+# gripper:
+#   enable: true
+#   command_endpoint: "udp://127.0.0.1:50410"   # -> gripper_server command bind
+#   feedback_bind: "udp://127.0.0.1:50420"       # <- gripper_server state publish
+#   forward_rate_hz: 50
+
 logging:
   enable: true
   directory: "./logs"

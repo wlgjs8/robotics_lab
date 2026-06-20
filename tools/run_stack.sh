@@ -47,31 +47,26 @@ POLICY_CFG="policy_runner/config/stack_${MODE}.yaml"
 LOG_DIR="logs/stack"
 mkdir -p "$LOG_DIR"
 
-# Robot-side Pika Gripper follower: replays the UMI Sense encoder angle (UDP
-# 50382 from pika/scripts/umi_teleop_publish.py) onto the grippers now wired
-# directly to THIS control PC. So `make run` is the only command this PC needs.
-# Default: on in real mode (the grippers physically move), off in sim. Override
-# with GRIPPER_FOLLOW=0|1. Requires the local serial grippers and the pika_sdk;
-# if it can't connect it logs and exits without taking the rest of the stack
-# down.
-#
-# GRIPPER_FOLLOW_ARGS: extra flags for the follower. If the stable udev names
-# (/dev/pika-left, /dev/pika-right — see tools/udev/) are installed we bind them
-# by name, immune to ttyUSB renumbering. Until then we fall back to /dev/ttyUSB*
-# with --swap-ports, because at this site ttyUSB0 is the RIGHT gripper so the
-# raw mapping comes out mirrored (the publisher's --swap-lr is already in the
-# data; this is purely the serial port order). Override anytime by setting
-# GRIPPER_FOLLOW_ARGS yourself (GRIPPER_FOLLOW_ARGS='' clears it).
-GRIPPER_FOLLOW_SCRIPT="scripts/umi_gripper_follow.py"
-if [ -e /dev/pika-left ] && [ -e /dev/pika-right ]; then
-  GRIPPER_FOLLOW_ARGS="${GRIPPER_FOLLOW_ARGS---left-port /dev/pika-left --right-port /dev/pika-right}"
+# Gripper server (docs/plans/gripper_server_design.md): single owner of the Pika
+# grippers. rb_servo_server forwards the arbitrated per-arm gripper setpoint
+# (left/right.gripper in the command packet) to it as gripper_cmd.v1 (:50410) and
+# stamps its gripper_state.v1 feedback (:50420) into the published state JSON,
+# which drives the viser gripper viz. This REPLACES the old umi_gripper_follow
+# serial bridge: gripper now rides the same command stream + lease as arm motion.
+# Backend: 'sim' (hardware-free; feedback eases toward the command, so the viz
+# moves even without hardware) for mock/sim; 'pika' (local serial) for real.
+# Toggle with GRIPPER_SERVER=auto|0|1 (GRIPPER_FOLLOW kept as a deprecated alias);
+# default on in every mode. Endpoints match the server config's gripper block.
+if [ "$MODE" = "real" ]; then
+  GRIPPER_BACKEND="pika"
+  GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS---left-port /dev/pika-left --right-port /dev/pika-right}"
 else
-  GRIPPER_FOLLOW_ARGS="${GRIPPER_FOLLOW_ARGS---swap-ports}"
+  GRIPPER_BACKEND="sim"
+  GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS-}"
 fi
-case "${GRIPPER_FOLLOW:-auto}" in
-  auto) [ "$MODE" = "real" ] && GRIPPER_FOLLOW_ON=1 || GRIPPER_FOLLOW_ON=0 ;;
-  0|no|off|false) GRIPPER_FOLLOW_ON=0 ;;
-  *) GRIPPER_FOLLOW_ON=1 ;;
+case "${GRIPPER_SERVER:-${GRIPPER_FOLLOW:-auto}}" in
+  0|no|off|false) GRIPPER_SERVER_ON=0 ;;
+  *) GRIPPER_SERVER_ON=1 ;;
 esac
 
 # Ensure the RT capabilities the servo loop needs (real-time scheduling +
@@ -134,7 +129,7 @@ preflight_kill_stale() {
 preflight_kill_stale "rb_servo_server" "$SERVER_BIN"
 preflight_kill_stale "viser GUI"       "python3 -m rb_servo_gui.app"
 preflight_kill_stale "policy_runner"   "python3 -u -m policy_runner --config policy_runner/config/stack_"
-[ "$GRIPPER_FOLLOW_ON" = "1" ] && preflight_kill_stale "gripper follower" "$GRIPPER_FOLLOW_SCRIPT"
+[ "$GRIPPER_SERVER_ON" = "1" ] && preflight_kill_stale "gripper_server" "python3 -u -m policy_runner.gripper_server"
 
 if [ "$MODE" = "real" ]; then
   echo "============================================================"
@@ -217,21 +212,20 @@ PYTHONPATH=rb_gui \
   python3 -m rb_servo_gui.app >"$LOG_DIR/gui.log" 2>&1 &
 PIDS+=($!)
 
-if [ "$GRIPPER_FOLLOW_ON" = "1" ]; then
-  if [ -f "$GRIPPER_FOLLOW_SCRIPT" ]; then
-    echo "[stack] gripper follower: $GRIPPER_FOLLOW_SCRIPT (UDP 50382 -> local serial grippers) ${GRIPPER_FOLLOW_ARGS:-}"
-    python3 "$GRIPPER_FOLLOW_SCRIPT" ${GRIPPER_FOLLOW_ARGS:-} >"$LOG_DIR/gripper_follow.log" 2>&1 &
-    PIDS+=($!)
-    # It binds the gripper serial ports immediately; surface an early crash
-    # (missing /dev/pika-* or /dev/ttyUSB*, pika_sdk, port already open) without blocking.
-    sleep 1
-    if ! kill -0 "${PIDS[-1]}" 2>/dev/null; then
-      echo "[stack] WARNING: gripper follower exited during startup — grippers will NOT follow:" >&2
-      tail -5 "$LOG_DIR/gripper_follow.log" >&2
-      echo "[stack] (stack continues; fix serial/pika_sdk and rerun, or GRIPPER_FOLLOW=0 to silence)" >&2
-    fi
-  else
-    echo "[stack] WARNING: GRIPPER_FOLLOW on but $GRIPPER_FOLLOW_SCRIPT not found; skipping" >&2
+if [ "$GRIPPER_SERVER_ON" = "1" ]; then
+  echo "[stack] gripper_server: backend=$GRIPPER_BACKEND cmd<-127.0.0.1:50410 feedback->127.0.0.1:50420 ${GRIPPER_SERVER_ARGS:-}"
+  python3 -u -m policy_runner.gripper_server \
+    --backend "$GRIPPER_BACKEND" --bind 127.0.0.1:50410 --state-endpoint 127.0.0.1:50420 \
+    ${GRIPPER_SERVER_ARGS:-} >"$LOG_DIR/gripper_server.log" 2>&1 &
+  PIDS+=($!)
+  # pika backend binds the serial ports immediately; surface an early crash
+  # (missing /dev/pika-*, pika_sdk, port already open) without blocking. The sim
+  # backend never fails this way.
+  sleep 1
+  if ! kill -0 "${PIDS[-1]}" 2>/dev/null; then
+    echo "[stack] WARNING: gripper_server exited during startup — gripper will NOT move/update:" >&2
+    tail -5 "$LOG_DIR/gripper_server.log" >&2
+    echo "[stack] (stack continues; fix serial/pika_sdk and rerun, or GRIPPER_SERVER=0 to silence)" >&2
   fi
 fi
 

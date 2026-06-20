@@ -2,12 +2,14 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/core/types.hpp"
+#include "rb_servo/network/gripper_bridge.hpp"
 
 namespace rb_servo {
 
@@ -37,6 +39,12 @@ private:
 
     mutable std::mutex snapshot_mutex_;
     ServoSnapshot latest_snapshot_;
+
+    // Out-of-process gripper bridge (null when gripper.enable=false). Forwarded
+    // each publish cycle and stamped into the per-arm state JSON. All gripper I/O
+    // runs on this publisher thread + the bridge's own receive thread, never the
+    // RT control loop.
+    std::unique_ptr<GripperBridge> gripper_bridge_;
 
     std::atomic<bool> running_{false};
     std::thread thread_;

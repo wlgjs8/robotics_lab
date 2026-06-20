@@ -216,6 +216,16 @@ network:
   state_pub_rate_hz: 100
   command_source_allowlist: ["127.0.0.1/32"]
 
+# Forward arbitrated per-arm gripper setpoints (left/right.gripper in the command
+# packet) to the out-of-process gripper_server, and stamp its gripper_state.v1
+# feedback into the published state JSON (consumed by the viser gripper viz).
+# Launched by tools/run_stack.sh (sim backend in MODE=sim).
+gripper:
+  enable: true
+  command_endpoint: "udp://127.0.0.1:50410"   # -> gripper_server command bind
+  feedback_bind: "udp://127.0.0.1:50420"       # <- gripper_server state publish
+  forward_rate_hz: 50
+
 command_source:
   enforce_lease: true
   lease_timeout_sec: 60.0

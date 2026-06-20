@@ -2155,15 +2155,22 @@ def _latest_circle_overlay(
     return overlay_store.latest(), overlay_store.is_stale()
 
 
-def _push_gripper_percent(handles: dict[str, Any]) -> None:
+def _push_gripper_percent(handles: dict[str, Any], latest: StateSnapshot | None = None) -> None:
     """Publish the gripper open-percentage (0..100) into scene_handles so
-    update_scene_markers can drive the articulated-gripper fingers. Interim source
-    is the GUI preview slider; swap for published gripper state once the feed exists
-    (docs/plans/gripper_server_design.md)."""
+    update_scene_markers can drive the articulated-gripper fingers.
+
+    Source priority: the server's published gripper feedback (gripper_state.v1
+    stamped into the state JSON) when valid; otherwise the GUI preview slider.
+    So once gripper_server is wired the fingers track the real gripper, and the
+    slider stays a manual fallback when there is no feed."""
     scene = handles.get("scene")
     if not isinstance(scene, dict):
         return
     for side in ("left", "right"):
+        published = getattr(getattr(latest, side, None), "gripper_percent", None) if latest is not None else None
+        if isinstance(published, (int, float)):
+            scene[f"gripper_percent_{side}"] = float(published)
+            continue
         slider = handles.get(f"gripper_slider_{side}")
         if slider is None:
             continue
@@ -2522,7 +2529,7 @@ def update_gui(
     if "tcp_linear_status" in handles:
         handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     _update_operator_monitors(handles, latest, stale=stale)
-    _push_gripper_percent(handles)
+    _push_gripper_percent(handles, latest)
     update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
     # After markers: the collision overlay may override ghost/solid visibility.
     update_self_collision_overlay(handles.get("scene", {}), latest)

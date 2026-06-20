@@ -675,6 +675,19 @@ struct CartesianControlConfig {
     PoseTrackSmdConfig pose_track_smd;
 };
 
+// Bridge to the out-of-process gripper_server (docs/plans/gripper_server_design.md).
+// When enabled, the server forwards the arbitrated per-arm gripper setpoint
+// (left/right.gripper from the command packet) to gripper_server as gripper_cmd.v1
+// and stamps the gripper_state.v1 feedback into the published state JSON. The
+// gripper is NOT a motion-safety constraint; this only routes setpoints/feedback.
+struct GripperConfig {
+    bool enable = false;
+    std::string command_endpoint = "udp://127.0.0.1:50410";  // -> gripper_server
+    std::string feedback_bind = "udp://127.0.0.1:50420";     // <- gripper_server
+    int forward_rate_hz = 50;
+    double feedback_stale_timeout_ms = 500.0;
+};
+
 struct DualArmConfig {
     BackendConfig left_robot;
     BackendConfig right_robot;
@@ -690,6 +703,7 @@ struct DualArmConfig {
     ForceControlConfig force_control;
     CartesianControlConfig cartesian_control;
     KinematicsConfig kinematics;
+    GripperConfig gripper;
 };
 
 DualArmConfig loadConfigFromYaml(const std::string& path);

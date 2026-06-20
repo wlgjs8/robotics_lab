@@ -695,9 +695,11 @@ bool parseArmObject(
         if (object.contains("gripper_target")) {
             if (!readOptionalNumber(object, "gripper_target", &gripper)) return false;
             out->gripper_target = gripper;
+            out->has_gripper = true;  // open-percentage setpoint present this command
         } else if (object.contains("gripper")) {
             if (!readOptionalNumber(object, "gripper", &gripper)) return false;
             out->gripper_target = gripper;
+            out->has_gripper = true;
         }
 
         if (object.contains("freedrive_on")) {

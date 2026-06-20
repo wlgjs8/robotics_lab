@@ -447,6 +447,7 @@ struct ArmCommand {
     ForceControlCommand force_control;
 
     double gripper_target = 0.0;
+    bool has_gripper = false;
     double timeout_sec = 0.2;
 
     // Freedrive (direct-teaching) request payload. When mode == Freedrive, this

@@ -24,6 +24,7 @@ from rb_servo_gui.app import (
     _TCP_FRAME_STAND,
     _apply_tcp_delta_and_send_pose_target,
     _apply_tcp_delta_to_target,
+    _push_gripper_percent,
     _apply_init_joints_live,
     _nudge_label,
     _status_summary_html,
@@ -927,6 +928,35 @@ class GuiContractsTest(unittest.TestCase):
                           "wrist1_joint", "wrist2_joint", "wrist3_joint"))
         _update_urdf_config(plain, arm, gripper_percent=0.0)
         self.assertEqual(plain.last, list(arm))
+
+    def test_arm_snapshot_parses_gripper_feedback_block(self):
+        from rb_servo_gui.models import StateSnapshot
+        state = sample_state()
+        state["left"]["gripper"] = {"valid": True, "percent": 42.5, "moving": True}
+        state["right"]["gripper"] = {"valid": False, "stale": True}
+        snap = StateSnapshot.parse(state)
+        self.assertAlmostEqual(snap.left.gripper_percent, 42.5)
+        self.assertTrue(snap.left.gripper_moving)
+        self.assertIsNone(snap.right.gripper_percent)  # invalid feed -> None
+
+    def test_push_gripper_prefers_published_then_slider(self):
+        from rb_servo_gui.models import StateSnapshot
+        class _Slider:
+            def __init__(self, v):
+                self.value = v
+
+        scene: dict = {}
+        handles = {"scene": scene, "gripper_slider_left": _Slider(100.0), "gripper_slider_right": _Slider(100.0)}
+        state = sample_state()
+        state["left"]["gripper"] = {"valid": True, "percent": 30.0}  # published
+        # right: no valid gripper feed -> slider fallback
+        _push_gripper_percent(handles, StateSnapshot.parse(state))
+        self.assertAlmostEqual(scene["gripper_percent_left"], 30.0)
+        self.assertAlmostEqual(scene["gripper_percent_right"], 100.0)
+        # no state at all -> slider drives
+        scene.clear()
+        _push_gripper_percent(handles, None)
+        self.assertAlmostEqual(scene["gripper_percent_left"], 100.0)
 
     def test_robot_urdf_path_uses_descriptions_dir_env(self):
         descriptions_dir = Path(__file__).resolve().parents[2] / "rb_servo_server" / "descriptions"

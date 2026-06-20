@@ -41,6 +41,7 @@ add_library(rb_servo_core
     src/control/dual_arm_servo_loop.cpp
     src/network/command_server.cpp
     src/network/state_publisher.cpp
+    src/network/gripper_bridge.cpp
     src/sensor/mock_force_torque_sensor.cpp
     src/logging/servo_logger.cpp
 )
@@ -126,6 +127,10 @@ if(BUILD_TESTING)
     add_executable(test_config tests/test_config.cpp)
     target_link_libraries(test_config PRIVATE rb_servo_core)
     add_test(NAME config COMMAND test_config)
+
+    add_executable(test_gripper_bridge tests/test_gripper_bridge.cpp)
+    target_link_libraries(test_gripper_bridge PRIVATE rb_servo_core)
+    add_test(NAME gripper_bridge COMMAND test_gripper_bridge)
 
     add_executable(test_rbpodo_backend tests/test_rbpodo_backend.cpp)
     target_link_libraries(test_rbpodo_backend PRIVATE rb_servo_core)

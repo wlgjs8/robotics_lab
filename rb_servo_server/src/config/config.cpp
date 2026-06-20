@@ -1313,6 +1313,7 @@ void validateRootKeys(const YAML::Node& root) {
         "force_control",
         "cartesian_control",
         "kinematics",
+        "gripper",
     }, "config");
 }
 
@@ -2009,6 +2010,31 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         cfg.network.state_pub_endpoints = {cfg.network.state_pub_endpoint};
     }
     cfg.network.command_timeout_sec = cfg.servo.command_timeout_sec;
+
+    if (has(root, "gripper")) {
+        const YAML::Node sec = root["gripper"];
+        validateAllowedKeys(sec, {
+            "enable",
+            "command_endpoint",
+            "feedback_bind",
+            "forward_rate_hz",
+            "feedback_stale_timeout_ms",
+        }, "gripper");
+        if (has(sec, "enable")) cfg.gripper.enable = asBool(sec["enable"], "gripper.enable");
+        if (has(sec, "command_endpoint")) cfg.gripper.command_endpoint = asString(sec["command_endpoint"], "gripper.command_endpoint");
+        if (has(sec, "feedback_bind")) cfg.gripper.feedback_bind = asString(sec["feedback_bind"], "gripper.feedback_bind");
+        if (has(sec, "forward_rate_hz")) cfg.gripper.forward_rate_hz = asInt(sec["forward_rate_hz"], "gripper.forward_rate_hz");
+        if (has(sec, "feedback_stale_timeout_ms")) cfg.gripper.feedback_stale_timeout_ms = asDouble(sec["feedback_stale_timeout_ms"], "gripper.feedback_stale_timeout_ms");
+        if (cfg.gripper.enable) {
+            if (cfg.gripper.command_endpoint.rfind("udp://", 0) != 0) {
+                fail("gripper.command_endpoint must be udp://host:port", sec);
+            }
+            if (cfg.gripper.feedback_bind.rfind("udp://", 0) != 0) {
+                fail("gripper.feedback_bind must be udp://host:port", sec);
+            }
+            if (cfg.gripper.forward_rate_hz <= 0) fail("gripper.forward_rate_hz must be > 0", sec);
+        }
+    }
 
     if (has(root, "command_source")) {
         const YAML::Node sec = root["command_source"];

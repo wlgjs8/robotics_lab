@@ -256,6 +256,10 @@ class ArmSnapshot:
     tcp_deferred: bool = True
     send_duration_us: float | None = None
     cartesian_solve: "CartesianSolveSnapshot | None" = None
+    # Live gripper opening % (0 closed .. 100 open) from the server's gripper block
+    # (gripper_state.v1 feedback stamped by the bridge). None when no valid feed.
+    gripper_percent: float | None = None
+    gripper_moving: bool = False
 
     @classmethod
     def parse(
@@ -298,6 +302,14 @@ class ArmSnapshot:
         cartesian_gate = data.get("cartesian_gate")
         if not isinstance(cartesian_gate, Mapping):
             cartesian_gate = fallback_cartesian_gate if isinstance(fallback_cartesian_gate, Mapping) else None
+        gripper_block = data.get("gripper")
+        gripper_percent = None
+        gripper_moving = False
+        if isinstance(gripper_block, Mapping) and bool(gripper_block.get("valid", False)):
+            pct = gripper_block.get("percent")
+            if isinstance(pct, (int, float)) and math.isfinite(float(pct)):
+                gripper_percent = float(pct)
+            gripper_moving = bool(gripper_block.get("moving", False))
         return cls(
             mode=str(data.get("mode", "Unknown")),
             q_actual_deg=q_actual,
@@ -351,6 +363,8 @@ class ArmSnapshot:
             tcp_deferred=tcp_deferred,
             send_duration_us=float(data["send_duration_us"]) if isinstance(data.get("send_duration_us"), int | float) else None,
             cartesian_solve=CartesianSolveSnapshot.parse(data.get("cartesian_solve")),
+            gripper_percent=gripper_percent,
+            gripper_moving=gripper_moving,
         )
 
     def selected_tcp_pose(self, mode: str = "auto") -> Pose6D | None:
