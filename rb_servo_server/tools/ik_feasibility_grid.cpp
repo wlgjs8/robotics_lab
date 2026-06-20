@@ -23,13 +23,16 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <Eigen/Core>
@@ -57,10 +60,11 @@ struct Args {
     std::string out;          // output grid JSON
     double spacing_m = 0.05;
     int orientations = 18;
-    int seeds = 4;            // extra IK seeds before declaring an orientation infeasible
+    int seeds = 4;            // IK seeds tried per orientation before giving up
     int max_iterations = 200;
     double timeout_ms = 10.0;
     double r_max_override = 0.0;  // 0 => read from reach_json (fallback 1.06)
+    int threads = 0;             // 0 => hardware_concurrency
 };
 
 [[noreturn]] void usage(const char* argv0, const std::string& msg = "") {
@@ -75,9 +79,10 @@ struct Args {
         "  --spacing-m F        grid spacing (default 0.05)\n"
         "  --orientations N     approach directions per cell (default 18)\n"
         "  --seeds N            IK seeds tried per orientation (default 4)\n"
-        "  --max-iterations N   IK iterations budget (default 150)\n"
-        "  --timeout-ms F       IK timeout per solve (default 50)\n"
-        "  --r-max F            clip radius override (default: reach r_max, else 1.06)\n";
+        "  --max-iterations N   IK iterations budget (default 200)\n"
+        "  --timeout-ms F       IK timeout per solve (default 10)\n"
+        "  --r-max F            clip radius override (default: reach r_max, else 1.06)\n"
+        "  --threads N          worker threads (default: hardware concurrency)\n";
     std::exit(2);
 }
 
@@ -99,6 +104,7 @@ Args parseArgs(int argc, char** argv) {
         else if (k == "--max-iterations") a.max_iterations = std::stoi(need(i));
         else if (k == "--timeout-ms") a.timeout_ms = std::stod(need(i));
         else if (k == "--r-max") a.r_max_override = std::stod(need(i));
+        else if (k == "--threads") a.threads = std::stoi(need(i));
         else if (k == "-h" || k == "--help") usage(argv[0]);
         else usage(argv[0], "unknown argument: " + k);
     }
@@ -195,12 +201,42 @@ double readReachRMin(const std::string& path, double fallback) {
 
 }  // namespace
 
+// A cell is FEASIBLE if the TCP can be placed there for AT LEAST ONE sampled
+// approach direction (any seed). We early-out on the first success, so reachable
+// cells — the vast majority — cost ~1-2 solves; only the genuine "holes" pay the
+// full orientations*seeds budget. Returns true if feasible.
+bool cellFeasible(const rb_servo::IKinematics& kin, const rb_servo::ArmMountConfig& mount,
+                  const std::vector<Eigen::Quaterniond>& orientations, int seeds,
+                  double x, double y, double z, std::mt19937& rng) {
+    static const rb_servo::JointArray neutral = {0.0, -30.0, 60.0, 0.0, 30.0, 0.0};
+    std::uniform_real_distribution<double> wide(-180.0, 180.0);
+    std::uniform_real_distribution<double> elbow(-150.0, 150.0);
+    for (const auto& q : orientations) {
+        rb_servo::Pose6D target;
+        target.x = x;
+        target.y = y;
+        target.z = z;
+        target.quaternion_xyzw = std::array<double, 4>{q.x(), q.y(), q.z(), q.w()};
+        for (int s = 0; s < seeds; ++s) {
+            rb_servo::JointArray seed = neutral;
+            if (s > 0) {
+                seed = {wide(rng), wide(rng), elbow(rng), wide(rng), wide(rng), wide(rng)};
+            }
+            if (kin.solveIk(rb_servo::ArmId::Left, target, seed, mount).success) {
+                return true;  // reachable with some orientation -> not an IK hole
+            }
+        }
+    }
+    return false;
+}
+
 int main(int argc, char** argv) {
     const Args args = parseArgs(argc, argv);
 
-    std::shared_ptr<rb_servo::IKinematics> kin;
+    // Validate kinematics once up front (clear error if the URDF/Pinocchio fails).
     try {
-        kin = std::make_shared<rb_servo::PinocchioKinematics>(kinematicsConfig(args));
+        rb_servo::PinocchioKinematics probe(kinematicsConfig(args));
+        (void)probe;
     } catch (const std::exception& exc) {
         std::cerr << "failed to init kinematics: " << exc.what() << "\n";
         return 1;
@@ -215,75 +251,58 @@ int main(int argc, char** argv) {
     const int half = static_cast<int>(std::ceil(r_max / args.spacing_m));
     const int dim = 2 * half + 1;
     const double origin = -half * args.spacing_m;
-
-    // Identity mount => stand-frame targets ARE base-frame targets.
-    rb_servo::ArmMountConfig mount;
-    mount.arm_id = rb_servo::ArmId::Left;
-    mount.base_pose_in_stand = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-
     const auto orientations = approachOrientations(args.orientations);
 
-    // Deterministic seed set: a neutral elbow-up pose plus a few pseudo-random
-    // configs, so a single local minimum does not falsely mark a cell infeasible.
-    std::mt19937 rng(12345);
-    std::uniform_real_distribution<double> wide(-180.0, 180.0);
-    std::uniform_real_distribution<double> elbow(-150.0, 150.0);
-    const rb_servo::JointArray neutral = {0.0, -30.0, 60.0, 0.0, 30.0, 0.0};
+    unsigned int nthreads = args.threads > 0 ? static_cast<unsigned int>(args.threads)
+                                             : std::thread::hardware_concurrency();
+    if (nthreads == 0) nthreads = 1;
 
     std::cerr << "IK feasibility grid: dim=" << dim << "^3 spacing=" << args.spacing_m
               << "m r=[" << r_min << "," << r_max << "] N_orient=" << args.orientations
-              << " seeds=" << args.seeds << " (ik max_iter=" << args.max_iterations
-              << " timeout=" << args.timeout_ms << "ms)\n";
+              << " seeds=" << args.seeds << " threads=" << nthreads
+              << " (ik max_iter=" << args.max_iterations
+              << " timeout=" << args.timeout_ms << "ms, early-out feasibility)\n";
 
-    std::vector<float> R(static_cast<std::size_t>(dim) * dim * dim, 1.0f);
-    long tested = 0, occupied_half = 0;
-    double sum_R = 0.0;
+    // occupied[idx] = 1 means "inside reach but IK-infeasible" (the drawn region).
+    std::vector<std::uint8_t> occupied(static_cast<std::size_t>(dim) * dim * dim, 0);
+    std::atomic<long> tested{0}, occupied_count{0};
+    std::atomic<int> next_slice{0};
 
-    for (int iz = 0; iz < dim; ++iz) {
-        const double z = origin + iz * args.spacing_m;
-        for (int iy = 0; iy < dim; ++iy) {
-            const double y = origin + iy * args.spacing_m;
-            for (int ix = 0; ix < dim; ++ix) {
-                const double x = origin + ix * args.spacing_m;
-                const double radius = std::sqrt(x * x + y * y + z * z);
-                const std::size_t idx =
-                    (static_cast<std::size_t>(iz) * dim + iy) * dim + ix;
-                if (radius > r_max) {
-                    R[idx] = 1.0f;  // beyond reach => "reach 부족", not drawn as IK hole
-                    continue;
-                }
-                int solved = 0;
-                for (const auto& q : orientations) {
-                    rb_servo::Pose6D target;
-                    target.x = x;
-                    target.y = y;
-                    target.z = z;
-                    target.quaternion_xyzw =
-                        std::array<double, 4>{q.x(), q.y(), q.z(), q.w()};
-                    bool ok = false;
-                    for (int s = 0; s < args.seeds && !ok; ++s) {
-                        rb_servo::JointArray seed = neutral;
-                        if (s > 0) {
-                            seed = {wide(rng), wide(rng), elbow(rng),
-                                    wide(rng), wide(rng), wide(rng)};
-                        }
-                        const rb_servo::IkResult res =
-                            kin->solveIk(rb_servo::ArmId::Left, target, seed, mount);
-                        ok = res.success;
+    auto worker = [&](unsigned int tid) {
+        // Pinocchio Data is not thread-safe, so each worker owns its own solver.
+        rb_servo::PinocchioKinematics kin(kinematicsConfig(args));
+        rb_servo::ArmMountConfig mount;  // identity mount => base-frame targets
+        mount.arm_id = rb_servo::ArmId::Left;
+        mount.base_pose_in_stand = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        std::mt19937 rng(98765u + tid);
+        for (int iz = next_slice.fetch_add(1); iz < dim; iz = next_slice.fetch_add(1)) {
+            const double z = origin + iz * args.spacing_m;
+            long slice_tested = 0, slice_occ = 0;
+            for (int iy = 0; iy < dim; ++iy) {
+                const double y = origin + iy * args.spacing_m;
+                for (int ix = 0; ix < dim; ++ix) {
+                    const double x = origin + ix * args.spacing_m;
+                    if (x * x + y * y + z * z > r_max * r_max) continue;  // reach 부족
+                    ++slice_tested;
+                    if (!cellFeasible(kin, mount, orientations, args.seeds, x, y, z, rng)) {
+                        const std::size_t idx =
+                            (static_cast<std::size_t>(iz) * dim + iy) * dim + ix;
+                        occupied[idx] = 1;
+                        ++slice_occ;
                     }
-                    if (ok) ++solved;
                 }
-                const float r_index =
-                    static_cast<float>(solved) / static_cast<float>(args.orientations);
-                R[idx] = r_index;
-                ++tested;
-                sum_R += r_index;
-                if (r_index < 0.5f) ++occupied_half;
             }
+            tested += slice_tested;
+            occupied_count += slice_occ;
+            std::cerr << "  z-slice " << (iz + 1) << "/" << dim
+                      << " tested=" << tested.load() << " occ=" << occupied_count.load()
+                      << "\r" << std::flush;
         }
-        std::cerr << "  z-slice " << (iz + 1) << "/" << dim
-                  << " tested=" << tested << "\r" << std::flush;
-    }
+    };
+
+    std::vector<std::thread> pool;
+    for (unsigned int t = 0; t < nthreads; ++t) pool.emplace_back(worker, t);
+    for (auto& th : pool) th.join();
     std::cerr << "\n";
 
     nlohmann::json out;
@@ -296,7 +315,7 @@ int main(int argc, char** argv) {
     out["orientations"] = args.orientations;
     out["seeds"] = args.seeds;
     out["ik"] = {{"max_iterations", args.max_iterations}, {"timeout_ms", args.timeout_ms}};
-    out["R"] = R;
+    out["occupied"] = occupied;  // uint8 flat array, x-fastest then y then z
 
     std::ofstream of(args.out);
     if (!of) {
@@ -306,9 +325,8 @@ int main(int argc, char** argv) {
     of << out.dump();
     of.close();
 
-    const double mean_R = tested > 0 ? sum_R / static_cast<double>(tested) : 0.0;
-    std::cerr << "done: tested=" << tested << " cells, mean R=" << mean_R
-              << ", R<0.5 fraction=" << (tested > 0 ? double(occupied_half) / tested : 0.0)
-              << "\n  wrote " << args.out << "\n";
+    const long t = tested.load(), o = occupied_count.load();
+    std::cerr << "done: tested=" << t << " cells, infeasible(occupied)=" << o
+              << " (" << (t > 0 ? 100.0 * o / t : 0.0) << "%)\n  wrote " << args.out << "\n";
     return 0;
 }

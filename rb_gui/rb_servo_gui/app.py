@@ -68,6 +68,7 @@ from .scene import (
     _robot_urdf_path,
     _stand_mesh_path,
     _update_urdf_config,
+    set_ik_infeasible_region_visible,
     set_reach_envelope_visible,
     update_circle_overlay,
     update_floor_plane,
@@ -1710,6 +1711,41 @@ def build_gui(
                     reach_toggle.on_update(_reach_toggle)
                 handles["reach_envelope_status"] = server.gui.add_text(
                     "Reach envelope", initial_value=reach_status, disabled=True
+                )
+
+            with server.gui.add_folder("IK 불가 영역"):
+                # Show/hide the per-arm IK-infeasible region (tools/ik_infeasible_
+                # region.py, computed with the server's real Pinocchio IK solver).
+                # Distinct from reach: these are positions INSIDE the reach radius
+                # that have no IK solution for any approach direction — the inner
+                # dead zone, lower/back pockets, and the near-full-extension shell
+                # where orientation freedom collapses. Static viewer aid, default OFF.
+                ik_status = "no asset"
+                scene = handles.get("scene", {})
+                if isinstance(scene, dict) and (
+                    "left_ik_infeasible" in scene or "right_ik_infeasible" in scene
+                ):
+                    cells = scene.get("ik_infeasible_cells")
+                    ik_status = (
+                        f"region loaded ({cells} cells)" if cells is not None
+                        else "region loaded"
+                    )
+                elif isinstance(scene, dict) and scene.get("ik_infeasible_error"):
+                    ik_status = str(scene["ik_infeasible_error"])
+                if hasattr(server.gui, "add_checkbox"):
+                    ik_toggle = server.gui.add_checkbox(
+                        "IK 불가 영역 표시", initial_value=False
+                    )
+                    handles["ik_infeasible_visible_toggle"] = ik_toggle
+
+                    def _ik_infeasible_toggle(_: Any) -> None:
+                        set_ik_infeasible_region_visible(
+                            handles.get("scene", {}), bool(ik_toggle.value)
+                        )
+
+                    ik_toggle.on_update(_ik_infeasible_toggle)
+                handles["ik_infeasible_status"] = server.gui.add_text(
+                    "IK infeasible", initial_value=ik_status, disabled=True
                 )
 
         with _op_tabs.add_tab("그리퍼"):

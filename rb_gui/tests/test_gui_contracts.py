@@ -99,15 +99,18 @@ from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnap
 from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from rb_servo_gui.safety import OperatorSafety, normalize_observed_mode_backend
 from rb_servo_gui.scene import (
+    _add_ik_infeasible_region,
     _add_robot_urdfs,
     _add_scene_fallback,
     _attach_checkgeom_gripper,
     _circle_overlay_points,
     _ensure_sc_world_frame,
     _finger_position_m,
+    _ik_infeasible_path,
     _reference_ghost_active,
     _robot_urdf_path,
     _update_urdf_config,
+    set_ik_infeasible_region_visible,
     update_circle_overlay,
     update_floor_plane,
     update_floor_plane_preview,
