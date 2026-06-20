@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -3859,6 +3860,87 @@ class InitMotionPersistenceTest(unittest.TestCase):
         ok, message = _set_waypoint_as_init(handles, safety)
         self.assertFalse(ok)
         self.assertIn("missing joint capture", message)
+
+
+class IkInfeasibleRegionTest(unittest.TestCase):
+    """The IK-infeasible region overlay (scene loader + visibility toggle)."""
+
+    @staticmethod
+    def _mesh_scene_server():
+        class _Scene:
+            def __init__(self):
+                self.meshes = {}
+
+            def add_mesh_simple(self, name, **kwargs):
+                handle = RecordingSceneHandle()
+                handle.visible = kwargs.get("visible", True)
+                handle.kwargs = kwargs
+                self.meshes[name] = handle
+                return handle
+
+        class _Server:
+            def __init__(self):
+                self.scene = _Scene()
+
+        return _Server()
+
+    def _write_asset(self, **extra):
+        verts = np.array([[0, 0, 0], [0.1, 0, 0], [0.1, 0.1, 0], [0, 0.1, 0.1]],
+                         dtype=np.float32)
+        faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+        path = tempfile.NamedTemporaryFile(suffix=".npz", delete=False)
+        path.close()
+        self.addCleanup(lambda: os.path.exists(path.name) and os.unlink(path.name))
+        np.savez_compressed(path.name, shell_vertices_base_m=verts,
+                            shell_faces=faces, **extra)
+        return path.name
+
+    def test_toggle_shows_and_hides_both_arms(self):
+        handles = {
+            "left_ik_infeasible": RecordingSceneHandle(),
+            "right_ik_infeasible": RecordingSceneHandle(),
+        }
+        set_ik_infeasible_region_visible(handles, True)
+        self.assertTrue(handles["left_ik_infeasible"].visible)
+        self.assertTrue(handles["right_ik_infeasible"].visible)
+        set_ik_infeasible_region_visible(handles, False)
+        self.assertFalse(handles["left_ik_infeasible"].visible)
+        self.assertFalse(handles["right_ik_infeasible"].visible)
+
+    def test_toggle_is_safe_without_handles(self):
+        set_ik_infeasible_region_visible({}, True)  # no-op, must not raise
+        set_ik_infeasible_region_visible(None, True)
+
+    def test_loads_asset_to_both_arm_bases(self):
+        asset = self._write_asset(occupied_cells=4321)
+        server = self._mesh_scene_server()
+        handles: dict = {}
+        with mock.patch.dict(os.environ, {"RB_GUI_IK_INFEASIBLE": asset}):
+            _add_ik_infeasible_region(server, handles)
+        self.assertIn("left_ik_infeasible", handles)
+        self.assertIn("right_ik_infeasible", handles)
+        self.assertNotIn("ik_infeasible_error", handles)
+        self.assertEqual(handles["ik_infeasible_cells"], 4321)
+        # both attached under the per-arm base node, hidden by default, red+double
+        self.assertIn("/stand/left_base/ik_infeasible", server.scene.meshes)
+        self.assertIn("/stand/right_base/ik_infeasible", server.scene.meshes)
+        left = server.scene.meshes["/stand/left_base/ik_infeasible"]
+        self.assertFalse(left.visible)
+        self.assertEqual(left.kwargs.get("side"), "double")
+        self.assertEqual(tuple(left.kwargs.get("color")), (220, 70, 70))
+
+    def test_missing_asset_records_error(self):
+        server = self._mesh_scene_server()
+        handles: dict = {}
+        missing = os.path.join(tempfile.gettempdir(), "no_such_ik_asset.npz")
+        with mock.patch.dict(os.environ, {"RB_GUI_IK_INFEASIBLE": missing}):
+            _add_ik_infeasible_region(server, handles)
+        self.assertNotIn("left_ik_infeasible", handles)
+        self.assertIn("ik_infeasible_error", handles)
+
+    def test_asset_path_honors_env_override(self):
+        with mock.patch.dict(os.environ, {"RB_GUI_IK_INFEASIBLE": "/tmp/custom_ik.npz"}):
+            self.assertEqual(str(_ik_infeasible_path()), "/tmp/custom_ik.npz")
 
 
 if __name__ == "__main__":

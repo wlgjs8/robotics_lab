@@ -4,7 +4,7 @@ PROJECT ?= robotics_lab
 POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 
-.PHONY: run build vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up pgmode-sim-build pgmode-sim-up pgmode-sim-down
+.PHONY: run build vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -30,6 +30,19 @@ build:
 
 # Rainbow VIRTUAL control-box VMs (vendor OVA): boot 2 VMs and map them to the
 # real controller IPs so `make run MODE=sim` works without hardware.
+# Regenerate the viser "IK 불가 영역" overlay asset: builds the C++ feasibility
+# sampler (reuses the server's real Pinocchio IK), samples the workspace grid,
+# and writes rb_servo_server/descriptions/ik_infeasible_rb3_730e.npz. Slow
+# (minutes); only needed when the URDF / mount geometry changes. Tunables:
+# IK_SPACING, IK_ORIENTATIONS, IK_SEEDS.
+ik-infeasible:
+	cmake -S rb_servo_server -B rb_servo_server/build
+	cmake --build rb_servo_server/build --target ik_feasibility_grid -j
+	python3 tools/ik_infeasible_region.py \
+		--spacing-m $(or $(IK_SPACING),0.05) \
+		--orientations $(or $(IK_ORIENTATIONS),18) \
+		--seeds $(or $(IK_SEEDS),2)
+
 vm-up:
 	./tools/vm_stack.sh up
 vm-down:
