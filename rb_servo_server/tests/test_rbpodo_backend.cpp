@@ -499,6 +499,58 @@ bool testControllerSimUnavailableFieldPolicyStillFaultsRealSafetyFields() {
     return true;
 }
 
+rb_servo::BackendConfig controllerSimDemoteSelfCollisionConfig() {
+    rb_servo::BackendConfig config = rbpodoConfig("simulation");
+    config.controller_simulation_demote_self_collision_fault = true;
+    return config;
+}
+
+// Explicit opt-in: in controller-simulation (pgmode) a CLEAN op_stat_self_collision (1005)
+// is demoted to non-latching ONLY when controller_simulation_demote_self_collision_fault is
+// set, deferring to the server's URDF-mesh CollisionMonitor. Default-off still latches, and
+// the gate is controller-sim only so real (operation_mode: real) motion always latches.
+bool testControllerSimDemoteSelfCollisionFaultOptIn() {
+    rb_servo::RbpodoSystemStateSnapshot snapshot = controllerSimGarbageSelfCollisionSnapshot();
+    snapshot.op_stat_self_collision = 1;  // clean self-collision bit (masked == 1)
+
+    // Opt-in OFF (default pgmode): clean self-collision still latches.
+    {
+        const rb_servo::BackendConfig config = rbpodoConfig("simulation");
+        const rb_servo::RobotState state =
+            rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot, config);
+        RB_CHECK(state.has_error);
+        RB_CHECK(state.diagnostic_error_source == "rbpodo_self_collision");
+    }
+
+    // Opt-in ON (controller-sim): demoted — no hard fault, streaming allowed.
+    {
+        const rb_servo::BackendConfig config = controllerSimDemoteSelfCollisionConfig();
+        const rb_servo::RobotState state =
+            rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot, config);
+        RB_CHECK(state.has_valid_joint_state);
+        RB_CHECK(!state.has_error);
+        RB_CHECK(state.lifecycle_state == "servo_enabled");
+        RB_CHECK(state.diagnostic_error_source != "rbpodo_self_collision");
+        const std::optional<rb_servo::BackendError> readiness =
+            rb_servo::rbpodoMotionReadinessError(config, snapshot, state);
+        RB_CHECK(!readiness.has_value() || readiness->name != "rbpodo_self_collision");
+    }
+
+    // Real (operation_mode: real) with the flag set must STILL latch: the gate is
+    // controller-sim only, so real motion is never affected.
+    {
+        rb_servo::BackendConfig config = rbpodoConfig("real");
+        config.controller_simulation_demote_self_collision_fault = true;
+        rb_servo::RbpodoSystemStateSnapshot real_snapshot = snapshot;
+        real_snapshot.real_vs_simulation_mode = 0;
+        const rb_servo::RobotState state =
+            rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, real_snapshot, config);
+        RB_CHECK(state.has_error);
+        RB_CHECK(state.diagnostic_error_source == "rbpodo_self_collision");
+    }
+    return true;
+}
+
 rb_servo::BackendConfig realSuspectDiagnosticsConfig() {
     rb_servo::BackendConfig config = rbpodoConfig("real");
     config.allow_real_motion_with_suspect_diagnostics = true;
@@ -746,6 +798,7 @@ int main() {
     if (!testControllerSimUnavailableFieldPolicyRequiresConfigAndGate()) return 1;
     if (!testControllerSimUnavailableFieldPolicySuppressesOnlyCapturedBadFields()) return 1;
     if (!testControllerSimUnavailableFieldPolicyStillFaultsRealSafetyFields()) return 1;
+    if (!testControllerSimDemoteSelfCollisionFaultOptIn()) return 1;
     if (!testRealMotionSuspectDiagnosticsAcceptedWhenGateOpen()) return 1;
     if (!testRealMotionSuspectDiagnosticsFailClosed()) return 1;
     if (!testRealMotionSuspectGateStillFaultsRealSafetyFields()) return 1;

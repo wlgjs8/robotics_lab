@@ -44,6 +44,15 @@ public:
 
     Pose6D goalPose() const;
 
+    // The SMD's currently-tracked (published) pose.
+    Pose6D currentPose() const;
+
+    // True if the tracker's held pose has drifted from `reference` beyond either
+    // tolerance. Used to detect that another control path (JointTarget, fault hold,
+    // command gap) moved the robot while the tracker stayed active with stale state,
+    // so the caller can re-anchor before integrating the next command delta.
+    bool driftedFrom(const Pose6D& reference, double pos_tol_m, double ang_tol_rad) const;
+
 private:
     PoseTrackSmdConfig config_;
     bool active_ = false;

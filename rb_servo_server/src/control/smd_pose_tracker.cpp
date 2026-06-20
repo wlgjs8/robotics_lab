@@ -136,4 +136,16 @@ Pose6D SmdPoseTracker::goalPose() const {
     return poseFrom(goal_position_, goal_rotation_);
 }
 
+Pose6D SmdPoseTracker::currentPose() const {
+    return poseFrom(position_, rotation_);
+}
+
+bool SmdPoseTracker::driftedFrom(const Pose6D& reference, double pos_tol_m, double ang_tol_rad) const {
+    const double pos_drift = (positionOf(reference) - position_).norm();
+    if (pos_drift > pos_tol_m) return true;
+    const double ang_drift =
+        math::log3((rotation_.conjugate() * rotationOf(reference)).toRotationMatrix()).norm();
+    return ang_drift > ang_tol_rad;
+}
+
 }  // namespace rb_servo

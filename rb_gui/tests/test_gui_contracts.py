@@ -1916,14 +1916,24 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(handles["stand_world_monitor_values"]["left"]["x"].value, "invalid")
 
     def test_tab_theme_html_colors_main_and_sub_levels_differently(self):
-        css = _tab_theme_html()
+        light = _tab_theme_html(dark=False)
         # main tab bar styled at the top level...
-        self.assertIn(".mantine-Tabs-list", css)
-        self.assertIn("#2563eb", css)  # main accent (blue)
+        self.assertIn(".mantine-Tabs-list", light)
+        self.assertIn("#2563eb", light)  # main accent (blue)
         # ...sub bars scoped to nested panels with a different hue
-        self.assertIn(".mantine-Tabs-panel .mantine-Tabs-list", css)
-        self.assertIn("#7c3aed", css)  # sub accent (purple)
-        self.assertIn("<style>", css)
+        self.assertIn(".mantine-Tabs-panel .mantine-Tabs-list", light)
+        self.assertIn("#7c3aed", light)  # sub accent (purple)
+        self.assertIn("<style>", light)
+
+    def test_tab_theme_html_dark_palette_distinct_from_light(self):
+        dark = _tab_theme_html(dark=True)
+        # Dark is the default and uses brighter accents for legibility on the
+        # dark panel surface (and is what _tab_theme_html() returns by default).
+        self.assertEqual(dark, _tab_theme_html())
+        self.assertIn("#5b8cff", dark)  # main accent (brighter blue)
+        self.assertIn("#a07bff", dark)  # sub accent (brighter purple)
+        self.assertNotIn("#2563eb", dark)
+        self.assertIn(".mantine-Tabs-panel .mantine-Tabs-list", dark)
 
     def test_nudge_label_pads_to_equal_width_with_nbsp(self):
         # Different-length axis labels become the same display width so the

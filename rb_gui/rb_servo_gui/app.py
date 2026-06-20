@@ -150,11 +150,14 @@ _TCP_LINEAR_ORIENTATION_MODES = ("constant", "slerp")
 _DEFAULT_CAMERA_POSITION = (-0.0128, -1.3823, 0.3985)
 _DEFAULT_CAMERA_LOOK_AT = (-0.0128, -0.1381, 0.2257)
 _DEFAULT_CAMERA_UP = (0.0, 0.0, 1.0)
-# Captured from the live dual-arm rest pose (rbpodo CobotData jnt_ang, 2026-06-12,
-# jnt_ang == jnt_ref at rest). Override per launch with RB_GUI_INIT_LEFT_JOINTS /
-# RB_GUI_INIT_RIGHT_JOINTS ("v1,v2,v3,v4,v5,v6" in deg).
-_DEFAULT_INIT_LEFT_JOINTS_DEG = (-131.663, 72.989, 113.400, -80.880, -107.064, -145.949)
-_DEFAULT_INIT_RIGHT_JOINTS_DEG = (135.099, -64.017, -114.457, 84.379, 112.485, 129.893)
+# GRIPPER-DOWN (tool z ~ stand -z) controller-consistent rest pose (rbpodo CobotData jnt_ang;
+# ran the 115712 session 12/12, episodes complete in reach). An offline position-optimized
+# anchor claimed higher coverage but FAILED live (episodes ran out of reach) — offline FK/IK
+# does not replicate the server reach/IK/conditioner, so anchor position must be validated
+# server-in-the-loop, not offline. Mirrors scripts/batch_replay_episodes.py PROFILE_ANCHOR_*.
+# Override per launch with RB_GUI_INIT_LEFT_JOINTS / RB_GUI_INIT_RIGHT_JOINTS.
+_DEFAULT_INIT_LEFT_JOINTS_DEG = (259.0, 75.6, 129.5, -55.6, -131.2, -161.7)
+_DEFAULT_INIT_RIGHT_JOINTS_DEG = (-236.5, -65.6, -132.5, 80.6, 126.1, 163.0)
 _OPERATOR_MONITOR_WIDTH_EM = 18.0
 _OPERATOR_MONITOR_GAP_EM = 1.0
 # Vertical anchor (em, in monitor-card font size) where the Pose Monitor stacks
@@ -1199,22 +1202,59 @@ def _status_summary_html(
     return '<div style="display:flex;flex-wrap:wrap;padding:0.25em 0 0.1em;">' + "".join(chips) + "</div>"
 
 
-def _tab_theme_html() -> str:
+def _tab_theme_html(dark: bool = True) -> str:
     """Color-code the tab levels so the main tab bar (상태/조작/이동/고급) and the
     nested sub-tab bars (관절/속도/… inside 이동, etc.) are visually distinct.
     Main = blue underline; sub = a purple tinted band (sub bars live inside a
-    `.mantine-Tabs-panel`, which is how we target only the nested level)."""
-    return """
+    `.mantine-Tabs-panel`, which is how we target only the nested level).
+
+    Two palettes: viser's built-in ``dark_mode`` only restyles the panel chrome,
+    so the custom tab accents need a dark variant to stay legible on the dark
+    surface (brighter blue/purple, translucent band) vs. the original light one."""
+    if dark:
+        main_border, main_active = "#2a313c", "#5b8cff"
+        sub_bg, sub_border = "rgba(160,123,255,0.12)", "rgba(160,123,255,0.30)"
+        sub_text, sub_active = "#9aa3b2", "#a07bff"
+    else:
+        main_border, main_active = "#d4def0", "#2563eb"
+        sub_bg, sub_border = "#f4f1fb", "#e2d9f6"
+        sub_text, sub_active = "#6f6788", "#7c3aed"
+    return f"""
 <style>
   /* Main (top-level) tab bar — blue accent */
-  .mantine-Tabs-list { border-bottom: 2px solid #d4def0 !important; }
-  .mantine-Tabs-tab[data-active] { color: #2563eb !important; border-color: #2563eb !important; font-weight: 700 !important; }
+  .mantine-Tabs-list {{ border-bottom: 2px solid {main_border} !important; }}
+  .mantine-Tabs-tab[data-active] {{ color: {main_active} !important; border-color: {main_active} !important; font-weight: 700 !important; }}
   /* Sub (nested) tab bar — purple band; .mantine-Tabs-panel scopes it to nested groups only */
-  .mantine-Tabs-panel .mantine-Tabs-list { background: #f4f1fb !important; border-radius: 7px !important; padding: 3px !important; border-bottom: 2px solid #e2d9f6 !important; }
-  .mantine-Tabs-panel .mantine-Tabs-tab { color: #6f6788 !important; }
-  .mantine-Tabs-panel .mantine-Tabs-tab[data-active] { color: #7c3aed !important; border-color: #7c3aed !important; font-weight: 700 !important; }
+  .mantine-Tabs-panel .mantine-Tabs-list {{ background: {sub_bg} !important; border-radius: 7px !important; padding: 3px !important; border-bottom: 2px solid {sub_border} !important; }}
+  .mantine-Tabs-panel .mantine-Tabs-tab {{ color: {sub_text} !important; }}
+  .mantine-Tabs-panel .mantine-Tabs-tab[data-active] {{ color: {sub_active} !important; border-color: {sub_active} !important; font-weight: 700 !important; }}
 </style>
 """
+
+
+_GUI_BRAND_COLOR = (96, 200, 140)
+
+
+def _apply_gui_theme(server: Any, *, dark: bool) -> None:
+    """Push viser's built-in panel theme (panel chrome + 3D canvas background)."""
+    configure = getattr(server.gui, "configure_theme", None)
+    if not callable(configure):
+        return
+    try:
+        configure(dark_mode=dark, brand_color=_GUI_BRAND_COLOR)
+    except Exception:
+        pass
+
+
+def _set_dark_mode(server: Any, handles: dict[str, Any], dark: bool) -> None:
+    """Apply dark/light across both viser's theme and the custom tab CSS."""
+    _apply_gui_theme(server, dark=dark)
+    tab_theme = handles.get("tab_theme")
+    if tab_theme is not None:
+        try:
+            tab_theme.content = _tab_theme_html(dark=dark)
+        except Exception:
+            pass
 
 
 def build_gui(
@@ -1225,6 +1265,10 @@ def build_gui(
 ) -> dict[str, Any]:
     handles: dict[str, Any] = {}
     handles["circle_overlay_enabled"] = overlay_store is not None
+    # Dark mode is the default; set RB_GUI_DARK_MODE=0 to launch in light mode.
+    dark_default = os.environ.get("RB_GUI_DARK_MODE", "1") != "0"
+    handles["dark_mode"] = dark_default
+    _apply_gui_theme(server, dark=dark_default)
     handles["scene"] = _add_scene_fallback(server)
     _install_default_camera(server)
 
@@ -1232,10 +1276,23 @@ def build_gui(
 
     _add_tab_theme = getattr(server.gui, "add_html", None)
     if callable(_add_tab_theme):
-        handles["tab_theme"] = _add_tab_theme(_tab_theme_html())
+        handles["tab_theme"] = _add_tab_theme(_tab_theme_html(dark=dark_default))
 
     tabs = server.gui.add_tab_group(order=1.0)
     with tabs.add_tab("상태"):
+        # Dark/light theme toggle (default dark). Re-applies viser's panel theme
+        # and the custom tab CSS live so the operator can flip it without restart.
+        if hasattr(server.gui, "add_checkbox"):
+            handles["dark_mode_toggle"] = server.gui.add_checkbox(
+                "🌙 다크 모드", initial_value=dark_default
+            )
+
+            @handles["dark_mode_toggle"].on_update
+            def _(_: Any) -> None:
+                dark = bool(handles["dark_mode_toggle"].value)
+                handles["dark_mode"] = dark
+                _set_dark_mode(server, handles, dark)
+
         # Colored at-a-glance summary above the detailed rows (no scanning needed).
         _add_status_html = getattr(server.gui, "add_html", None)
         if callable(_add_status_html):

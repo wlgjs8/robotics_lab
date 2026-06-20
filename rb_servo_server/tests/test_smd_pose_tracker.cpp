@@ -80,6 +80,29 @@ bool testFirstCommandLatchesWithoutJump() {
     return true;
 }
 
+bool testDriftDetectionForExternalMove() {
+    rb_servo::SmdPoseTracker tracker(defaultConfig());
+    tracker.reset({0.5, 0.2, 0.3, 0.0, 0.0, 0.0});
+    // Track a small streamed delta; the held pose stays near the anchor.
+    tracker.updateGoalFromCommand({0.5, 0.2, 0.3, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.52, 0.2, 0.3, 0.0, 0.0, 0.0});
+    for (int i = 0; i < 200; ++i) tracker.step(kDt);
+    // The live reference still matches the held pose (no external move) -> no drift.
+    RB_CHECK(!tracker.driftedFrom(tracker.currentPose(), 0.05, 0.10));
+    RB_CHECK(!tracker.driftedFrom({0.52, 0.2, 0.3, 0.0, 0.0, 0.0}, 0.05, 0.10));
+    // An external control path (e.g. a JointTarget init-return) moved the robot far away:
+    // the live reference now diverges from the tracker's held pose -> drift is detected.
+    RB_CHECK(tracker.driftedFrom({0.9, -0.3, 0.5, 0.0, 0.0, 0.0}, 0.05, 0.10));
+    // A pure orientation move beyond the angular tolerance also trips.
+    RB_CHECK(tracker.driftedFrom({0.52, 0.2, 0.3, 0.0, 0.0, 0.6}, 0.05, 0.10));
+    // After re-anchoring at the live reference, drift clears and there is no jump.
+    tracker.reset({0.9, -0.3, 0.5, 0.0, 0.0, 0.0});
+    RB_CHECK(!tracker.driftedFrom({0.9, -0.3, 0.5, 0.0, 0.0, 0.0}, 0.05, 0.10));
+    const rb_servo::Pose6D p = tracker.currentPose();
+    RB_CHECK(std::abs(p.x - 0.9) < 1e-9 && std::abs(p.y + 0.3) < 1e-9 && std::abs(p.z - 0.5) < 1e-9);
+    return true;
+}
+
 bool testRotationConvergesAndAxesAreIndependent() {
     rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
     cfg.natural_frequency_linear_hz = 2.0;   // fast translation
@@ -223,6 +246,7 @@ bool testDeactivateAndReanchor() {
 int main() {
     if (!testCriticallyDampedStepHasNoOvershootAndConverges()) return 1;
     if (!testFirstCommandLatchesWithoutJump()) return 1;
+    if (!testDriftDetectionForExternalMove()) return 1;
     if (!testRotationConvergesAndAxesAreIndependent()) return 1;
     if (!testForceAndVelocityClampsSaturateAndConverge()) return 1;
     if (!testClampsInactiveForSmallMotionsPreserveDynamics()) return 1;

@@ -199,6 +199,14 @@ void appendReason(ArmStartupValidationSnapshot* validation, const std::string& r
     validation->invalid_reasons.push_back(reason);
 }
 
+// Re-anchor the pose-track SMD when the live reference (FK of the last sent joints) has
+// drifted this far from the tracker's held pose — i.e., another control path (JointTarget
+// init-return, fault hold, command-buffer gap) moved the robot while the tracker stayed
+// active with stale state. Generous vs. normal per-tick tracking/IK residual (sub-cm) yet far
+// below an inter-episode swing (tens of cm), so it isolates external moves without false trips.
+constexpr double kPoseTrackReanchorPosTolM = 0.05;
+constexpr double kPoseTrackReanchorAngTolRad = 0.10;
+
 // Streaming TcpPoseTarget smoothing: integrate received target deltas into the
 // SMD tracker's goal and replace the commanded pose with this tick's SMD
 // solution. Any other mode deactivates the tracker so re-entry re-anchors at
@@ -224,6 +232,21 @@ ArmCommand applyPoseTrackSmd(
     }
     if (!tracker->active()) {
         tracker->reset(kinematics->computeTcpStand(command.arm_id, previous_sent_q_deg, mount));
+    } else {
+        // Re-anchor if the live reference (FK of the last sent joints) has drifted far from
+        // the tracker's held pose. The command buffer holds the previous episode's last
+        // TcpPoseTarget across the inter-episode gap, so the tracker can stay active while a
+        // JointTarget init-return (or fault hold) moves the robot elsewhere; the first stream
+        // tick would then snap the output from the stale pose toward the live reference — an
+        // out-and-back jerk at each episode transition. During normal streaming the SMD output
+        // IS the sent command, so currentPose ~= FK(prev_sent_q) within IK/safety residual and
+        // the generous tolerances below never trip. Re-anchoring only ever starts the tracker
+        // from where the robot actually is; it cannot inject motion.
+        const Pose6D reference =
+            kinematics->computeTcpStand(command.arm_id, previous_sent_q_deg, mount);
+        if (tracker->driftedFrom(reference, kPoseTrackReanchorPosTolM, kPoseTrackReanchorAngTolRad)) {
+            tracker->reset(reference);
+        }
     }
     tracker->updateGoalFromCommand(command.tcp_target_stand);
     ArmCommand smoothed = command;

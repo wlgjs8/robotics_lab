@@ -1384,6 +1384,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "allow_controller_simulation_motion",
             "allow_controller_simulation_diagnostics_suspect",
             "controller_simulation_treat_unreliable_status_fields_as_unavailable",
+            "controller_simulation_demote_self_collision_fault",
             "allow_real_motion_with_suspect_diagnostics",
             "controller_simulation_async_supervision_nonlatching",
             "allow_controller_simulation_init_error",
@@ -1437,6 +1438,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 asBool(
                     sec["controller_simulation_treat_unreliable_status_fields_as_unavailable"],
                     "servo.controller_simulation_treat_unreliable_status_fields_as_unavailable"
+                );
+        }
+        if (has(sec, "controller_simulation_demote_self_collision_fault")) {
+            cfg.servo.controller_simulation_demote_self_collision_fault =
+                asBool(
+                    sec["controller_simulation_demote_self_collision_fault"],
+                    "servo.controller_simulation_demote_self_collision_fault"
                 );
         }
         if (has(sec, "allow_real_motion_with_suspect_diagnostics")) {
@@ -1513,6 +1521,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         cfg.servo.controller_simulation_treat_unreliable_status_fields_as_unavailable;
     cfg.right_robot.controller_simulation_treat_unreliable_status_fields_as_unavailable =
         cfg.servo.controller_simulation_treat_unreliable_status_fields_as_unavailable;
+    cfg.left_robot.controller_simulation_demote_self_collision_fault =
+        cfg.servo.controller_simulation_demote_self_collision_fault;
+    cfg.right_robot.controller_simulation_demote_self_collision_fault =
+        cfg.servo.controller_simulation_demote_self_collision_fault;
     cfg.left_robot.allow_real_motion_with_suspect_diagnostics =
         cfg.servo.allow_real_motion_with_suspect_diagnostics;
     cfg.right_robot.allow_real_motion_with_suspect_diagnostics =

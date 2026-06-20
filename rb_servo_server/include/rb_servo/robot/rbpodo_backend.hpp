@@ -37,6 +37,10 @@ struct RbpodoStateDecodeOptions {
     // unavailable-fields policy (operator-visible); distinct from the controller-sim
     // carve-out so real-motion telemetry is unambiguous.
     bool real_motion_suspect_diagnostics_accepted = false;
+    // Controller-simulation (pgmode) ONLY: skip the hard op_stat_self_collision (1005)
+    // fault, deferring to the server's URDF-mesh CollisionMonitor. Set only when the
+    // controller-sim motion gate is open AND config opts in; never for real motion.
+    bool demote_self_collision_fault = false;
 };
 
 RobotState mapRbpodoSystemStateSnapshot(

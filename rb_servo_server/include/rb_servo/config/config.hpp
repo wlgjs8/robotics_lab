@@ -42,6 +42,14 @@ struct BackendConfig {
     bool disable_waiting_ack = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
     bool controller_simulation_treat_unreliable_status_fields_as_unavailable = false;
+    // Controller-simulation (pgmode) ONLY: demote the rbpodo controller's CLEAN
+    // op_stat_self_collision (code 1005) hard RobotFault to non-latching, deferring to the
+    // server's trusted async URDF-mesh CollisionMonitor (which keeps enforcing). The vendor
+    // self-collision flag false-positives at full-amplitude TcpPoseTarget replay in pgmode.
+    // Default false (clean self_collision still latches); effective only when the
+    // controller-sim motion gate is open, so it can NEVER affect real (operation_mode: real)
+    // motion. Does NOT touch EMS/SOS/soft-estop/collision_occur/init faults.
+    bool controller_simulation_demote_self_collision_fault = false;
     // Real (operation_mode: real) physical-motion opt-in mirror of the field above:
     // accept the same vendor-unreliable status fields (op_stat_self_collision shape,
     // robot_time) as UNAVAILABLE instead of latching diagnostics_suspect. Fail-closed,
@@ -479,6 +487,10 @@ struct ServoConfig {
     bool allow_controller_simulation_motion = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
     bool controller_simulation_treat_unreliable_status_fields_as_unavailable = false;
+    // Controller-simulation (pgmode) ONLY: demote the rbpodo controller's clean
+    // op_stat_self_collision (1005) hard fault to non-latching; the server's URDF-mesh
+    // CollisionMonitor stays the trusted self-collision guard. See servo struct comment.
+    bool controller_simulation_demote_self_collision_fault = false;
     // Real physical-motion (operation_mode: real) opt-in; propagated to both backends.
     bool allow_real_motion_with_suspect_diagnostics = false;
     bool controller_simulation_async_supervision_nonlatching = false;

@@ -35,6 +35,14 @@ DEFAULT_OUT_DIR = ROOT / "outputs" / "tcp_tuning"
 # Validated folded stow JointTarget from scripts/replay_episode_rollout.py.
 REST_LEFT_DEG = (-131.663, 72.989, 113.400, -80.880, -107.064, -145.949)
 REST_RIGHT_DEG = (135.099, -64.017, -114.457, 84.379, 112.485, 129.893)
+# TcpTargetPose replay/profiling anchor: the GRIPPER-DOWN (tool z ~ stand -z) controller-
+# consistent rest pose (rbpodo raw jnt; ran the 115712 session 12/12, ROI-safe). An offline
+# position-optimized anchor (server-matching FK) claimed higher coverage but FAILED live: the
+# server IK (branch-jump/singularity) and the clean_foh_se3 conditioner extent are NOT
+# replicated offline, so offline coverage is unreliable. A better anchor must be found
+# server-in-the-loop (test candidate positions live, measure real coverage), not offline.
+PROFILE_ANCHOR_LEFT_DEG = (259.0, 75.6, 129.5, -55.6, -131.2, -161.7)
+PROFILE_ANCHOR_RIGHT_DEG = (-236.5, -65.6, -132.5, 80.6, 126.1, 163.0)
 
 
 @dataclass(frozen=True)
@@ -111,7 +119,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mock-q-actual", default=None, help="'rest_stow', six joint degrees, or JSON/list/dict for dry-run init delta.")
     parser.add_argument("--max-linear-speed-m-s", type=float, default=None)
     parser.add_argument("--max-angular-speed-rad-s", type=float, default=None)
-    parser.add_argument("--init-mode", choices=["capture_current", "rest_stow", "joints"], default="capture_current")
+    parser.add_argument("--init-mode", choices=["capture_current", "rest_stow", "joints", "profile_anchor"], default="capture_current")
     parser.add_argument("--init-left-joints", default=None)
     parser.add_argument("--init-right-joints", default=None)
     parser.add_argument("--init-tol-deg", type=float, default=1.0)
@@ -241,6 +249,8 @@ def _server_config_path(args: argparse.Namespace) -> Path:
 def resolve_init_target(args: argparse.Namespace, *, dry_run: bool, server: driver.ServerRuntimeConfig | None) -> JointTargets:
     if args.init_mode == "rest_stow":
         return JointTargets(tuple(REST_LEFT_DEG), tuple(REST_RIGHT_DEG))
+    if args.init_mode == "profile_anchor":
+        return JointTargets(tuple(PROFILE_ANCHOR_LEFT_DEG), tuple(PROFILE_ANCHOR_RIGHT_DEG))
     if args.init_mode == "joints":
         if not args.init_left_joints or not args.init_right_joints:
             raise BatchHalt("--init-mode joints requires --init-left-joints and --init-right-joints")

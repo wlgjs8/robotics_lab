@@ -135,6 +135,11 @@ RbpodoStateDecodeOptions decodeOptionsForConfig(const BackendConfig& config) {
     options.controller_simulation_unreliable_status_fields_unavailable =
         controller_sim_unreliable_gate || real_motion_suspect_gate;
     options.real_motion_suspect_diagnostics_accepted = real_motion_suspect_gate;
+    // Controller-simulation ONLY: gated by the controller-sim motion gate (never real),
+    // so a clean op_stat_self_collision (1005) defers to the server's mesh CollisionMonitor.
+    options.demote_self_collision_fault =
+        config.controller_simulation_demote_self_collision_fault &&
+        rbpodoControllerSimulationMotionGateOpen(config);
     return options;
 }
 
@@ -365,7 +370,8 @@ RbpodoDiagnosticsSnapshot interpretRbpodoDiagnostics(
 
 std::optional<RbpodoInterpretedFault> firstClearRbpodoFault(
     const RbpodoSystemStateSnapshot& snapshot,
-    const RbpodoDiagnosticsSnapshot& diagnostics
+    const RbpodoDiagnosticsSnapshot& diagnostics,
+    const RbpodoStateDecodeOptions& decode_options
 ) {
     // Mask to the documented valid bits before interpreting a fault (see kRbpodo*Mask).
     // Using the raw value here would miss a real fault whenever the reserved upper bits
@@ -387,7 +393,15 @@ std::optional<RbpodoInterpretedFault> firstClearRbpodoFault(
     if ((snapshot.op_stat_collision_occur & kRbpodoCollisionOccurMask) == 1) {
         return RbpodoInterpretedFault{kRbpodoCollisionCode, "rbpodo_collision"};
     }
-    if ((snapshot.op_stat_self_collision & kRbpodoSelfCollisionMask) == 1) {
+    // A CLEAN self-collision bit (masked == 1) is the vendor "self-collision asserted"
+    // signal and normally latches a hard RobotFault even under the unavailable-field policy
+    // (which only demotes garbage/undefined shapes). In controller-simulation (pgmode) the
+    // flag false-positives at full-amplitude TcpPoseTarget replay, so the explicit
+    // controller_simulation_demote_self_collision_fault opt-in skips it here and defers to
+    // the server's trusted async URDF-mesh CollisionMonitor. Gated to controller-sim only
+    // (decode_options.demote_self_collision_fault is never set for real motion).
+    if (!decode_options.demote_self_collision_fault &&
+        (snapshot.op_stat_self_collision & kRbpodoSelfCollisionMask) == 1) {
         return RbpodoInterpretedFault{kRbpodoSelfCollisionCode, "rbpodo_self_collision"};
     }
 
@@ -439,7 +453,7 @@ RobotState mapRbpodoSystemStateSnapshot(
 
     RbpodoDiagnosticsSnapshot diagnostics = interpretRbpodoDiagnostics(snapshot, decode_options);
     const std::optional<RbpodoInterpretedFault> clear_fault =
-        firstClearRbpodoFault(snapshot, diagnostics);
+        firstClearRbpodoFault(snapshot, diagnostics, decode_options);
     out_state.connection_state = RobotConnectionState::Connected;
     out_state.controller_motion_state = snapshot.robot_state;
     out_state.controller_freedrive_on = snapshot.is_freedrive_mode == 1;

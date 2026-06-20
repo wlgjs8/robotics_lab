@@ -63,6 +63,12 @@ servo:
   allow_controller_simulation_motion: true
   allow_controller_simulation_diagnostics_suspect: true
   controller_simulation_treat_unreliable_status_fields_as_unavailable: true
+  # pgmode ONLY: the rbpodo controller's op_stat_self_collision (1005) false-positives at
+  # full-amplitude TcpPoseTarget replay (verified: server URDF-mesh CollisionMonitor sees no
+  # real approach; ver5 FK global min clearance stays at the static rest baseline). Demote the
+  # clean flag to non-latching here so scale-1.0 replay/profiling runs; the mesh CollisionMonitor
+  # stays the trusted self-collision guard. Controller-sim gated → never affects real motion.
+  controller_simulation_demote_self_collision_fault: true
   # Per-arm direct teaching (free-drive) opt-in. Fail-closed: without this the
   # server rejects every Freedrive command. Enabled here for VM-sim verification
   # of the toggle/resync path against the virtual control boxes.
