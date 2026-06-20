@@ -401,11 +401,16 @@ def update_floor_plane(scene_handles: dict[str, Any], floor: Mapping[str, Any] |
 
 
 # Stand-frame ROI box (safety.roi_box) visual: a translucent box the TCP must
-# stay inside. Applied box = teal (red when an arm is outside); pending-slider
+# stay inside. Applied box = blue (red when an arm is outside); pending-slider
 # preview = yellow, like the floor plane preview.
-_ROI_BOX_TEAL = (60, 200, 170)
+_ROI_BOX_BLUE = (40, 110, 245)
 _ROI_BOX_RED = (220, 60, 60)
 _ROI_BOX_PREVIEW_YELLOW = (235, 200, 60)
+# Boundary emphasis: opaque edges + corner vertices drawn over the translucent
+# fill so the ROI outline reads clearly even through other geometry. They recolor
+# red together with the fill on violation. Brighter than the fill on purpose.
+_ROI_BOX_EDGE_BLUE = (150, 200, 255)
+_ROI_BOX_EDGE_RED = (255, 120, 120)
 
 
 def _roi_box_geometry(
@@ -432,6 +437,76 @@ def _roi_box_geometry(
     return dims, center  # type: ignore[return-value]
 
 
+def _roi_box_outline(dims: tuple[float, ...], center: tuple[float, ...]) -> Any:
+    """(edge segments (12,2,3), corner vertices (8,3)) float32 for an AABB.
+
+    Used to draw the ROI box boundary (12 edges) and its 8 corner vertices as
+    opaque emphasis over the translucent fill."""
+    import numpy as np
+
+    h = [d * 0.5 for d in dims]
+    corners = np.array(
+        [
+            [center[0] + sx * h[0], center[1] + sy * h[1], center[2] + sz * h[2]]
+            for sx in (-1.0, 1.0)
+            for sy in (-1.0, 1.0)
+            for sz in (-1.0, 1.0)
+        ],
+        dtype=np.float32,
+    )
+
+    def _i(sx: int, sy: int, sz: int) -> int:
+        # corners are ordered sx-major, then sy, then sz (see comprehension above)
+        return (1 if sx > 0 else 0) * 4 + (1 if sy > 0 else 0) * 2 + (1 if sz > 0 else 0)
+
+    pairs = []
+    for sy in (-1, 1):  # 4 edges along x
+        for sz in (-1, 1):
+            pairs.append((_i(-1, sy, sz), _i(1, sy, sz)))
+    for sx in (-1, 1):  # 4 edges along y
+        for sz in (-1, 1):
+            pairs.append((_i(sx, -1, sz), _i(sx, 1, sz)))
+    for sx in (-1, 1):  # 4 edges along z
+        for sy in (-1, 1):
+            pairs.append((_i(sx, sy, -1), _i(sx, sy, 1)))
+    segments = np.array([[corners[a], corners[b]] for a, b in pairs], dtype=np.float32)
+    return segments, corners
+
+
+def _apply_roi_box_outline(
+    scene_handles: dict[str, Any],
+    dims: tuple[float, ...],
+    center: tuple[float, ...],
+    edge_color: tuple[int, int, int],
+) -> None:
+    """Resize/recolor the ROI box edge lines + corner vertices to match the fill."""
+    import numpy as np
+
+    seg, corners = _roi_box_outline(dims, center)
+    col = np.asarray(edge_color, dtype=np.uint8)
+    edges = scene_handles.get("roi_box_edges")
+    if edges is not None:
+        for attr, value in (("points", seg), ("colors", col)):
+            try:
+                setattr(edges, attr, value)
+            except Exception:
+                pass
+        _set_visible(edges, True)
+    verts = scene_handles.get("roi_box_verts")
+    if verts is not None:
+        for attr, value in (("points", corners), ("colors", col)):
+            try:
+                setattr(verts, attr, value)
+            except Exception:
+                pass
+        _set_visible(verts, True)
+
+
+def _hide_roi_box_outline(scene_handles: dict[str, Any]) -> None:
+    for key in ("roi_box_edges", "roi_box_verts"):
+        _set_visible(scene_handles.get(key), False)
+
+
 def _add_roi_box(server: Any, handles: dict[str, Any]) -> None:
     """Stand-frame ROI box (safety.roi_box visual): applied box + pending preview.
 
@@ -443,7 +518,7 @@ def _add_roi_box(server: Any, handles: dict[str, Any]) -> None:
     dims = (1.0, 1.0, 1.0)
     center = (0.0, -0.5, 0.5)
     for key, name, color, opacity in (
-        ("roi_box", "/stand/roi_box", _ROI_BOX_TEAL, 0.12),
+        ("roi_box", "/stand/roi_box", _ROI_BOX_BLUE, 0.12),
         ("roi_box_preview", "/stand/roi_box_preview", _ROI_BOX_PREVIEW_YELLOW, 0.10),
     ):
         try:
@@ -458,6 +533,26 @@ def _add_roi_box(server: Any, handles: dict[str, Any]) -> None:
                 )
         except Exception as exc:
             handles[f"{key}_error"] = f"{type(exc).__name__}: {exc}"
+    # Emphasised boundary for the APPLIED box: opaque edges (line segments) +
+    # corner vertices (point cloud). update_roi_box moves/resizes/recolors them
+    # alongside the fill; placeholder geometry until then.
+    seg, corners = _roi_box_outline(dims, center)
+    if hasattr(server.scene, "add_line_segments"):
+        try:
+            handles["roi_box_edges"] = server.scene.add_line_segments(
+                "/stand/roi_box_edges", points=seg, colors=_ROI_BOX_EDGE_BLUE,
+                line_width=4.0, visible=False,
+            )
+        except Exception as exc:
+            handles["roi_box_edges_error"] = f"{type(exc).__name__}: {exc}"
+    if hasattr(server.scene, "add_point_cloud"):
+        try:
+            handles["roi_box_verts"] = server.scene.add_point_cloud(
+                "/stand/roi_box_verts", points=corners, colors=_ROI_BOX_EDGE_BLUE,
+                point_size=0.018, point_shape="circle", visible=False,
+            )
+        except Exception as exc:
+            handles["roi_box_verts_error"] = f"{type(exc).__name__}: {exc}"
 
 
 def _apply_roi_box(handle: Any, dims: tuple[float, ...], center: tuple[float, ...],
@@ -511,17 +606,23 @@ def update_roi_box(
         return
     if not visible or not isinstance(roi, Mapping):
         _set_visible(box, False)
+        _hide_roi_box_outline(scene_handles)
         return
     geom = _roi_box_geometry(roi.get("min_m"), roi.get("max_m"))
     if geom is None:
         _set_visible(box, False)
+        _hide_roi_box_outline(scene_handles)
         return
     dims, center = geom
     violated = any(
         isinstance(roi.get(key), Mapping) and bool(roi[key].get("violated", False))
         for key in ("left", "right")
     )
-    _apply_roi_box(box, dims, center, _ROI_BOX_RED if violated else _ROI_BOX_TEAL)
+    _apply_roi_box(box, dims, center, _ROI_BOX_RED if violated else _ROI_BOX_BLUE)
+    _apply_roi_box_outline(
+        scene_handles, dims, center,
+        _ROI_BOX_EDGE_RED if violated else _ROI_BOX_EDGE_BLUE,
+    )
     _set_visible(box, True)
 
 
@@ -1128,12 +1229,21 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
                     visible=False,
                 )
         if has_transform_controls:
-            handles["left_tcp_target"] = server.scene.add_transform_controls(
-                "/stand/left_tcp_target", scale=0.16, line_width=3.0, position=(0.1601, -0.1725, 0.78)
-            )
-            handles["right_tcp_target"] = server.scene.add_transform_controls(
-                "/stand/right_tcp_target", scale=0.16, line_width=3.0, position=(-0.1601, -0.1725, 0.78)
-            )
+            # depth_test=False keeps the TCP gizmos drawn ON TOP of the translucent
+            # safety visuals (ROI box / reach envelope). Those meshes write the depth
+            # buffer, so without this the gizmo sitting inside them gets occluded by
+            # the near mesh face and disappears when the operator turns them on.
+            for side in ("left", "right"):
+                pos = (0.1601 if side == "left" else -0.1601, -0.1725, 0.78)
+                try:
+                    handles[f"{side}_tcp_target"] = server.scene.add_transform_controls(
+                        f"/stand/{side}_tcp_target", scale=0.16, line_width=3.0,
+                        depth_test=False, position=pos,
+                    )
+                except TypeError:  # older viser without depth_test support
+                    handles[f"{side}_tcp_target"] = server.scene.add_transform_controls(
+                        f"/stand/{side}_tcp_target", scale=0.16, line_width=3.0, position=pos,
+                    )
         if hasattr(server.scene, "add_point_cloud"):
             for arm, actual_color, ref_color in (
                 ("left", (80, 160, 255), (60, 210, 110)),

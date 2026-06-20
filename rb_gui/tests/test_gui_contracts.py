@@ -2898,6 +2898,34 @@ class RoiBoxGuiTest(unittest.TestCase):
         self.assertNotEqual(box.color, teal)
         update_roi_box({}, self._roi_block())  # missing handle is a no-op
 
+    def test_update_roi_box_outline_tracks_box(self):
+        # Emphasised edges (12 segments) + corner vertices (8 points) follow the
+        # applied fill box and hide/recolor with it.
+        class FakeBox:
+            def __init__(self):
+                self.dimensions = (1.0, 1.0, 1.0)
+                self.position = (0.0, 0.0, 0.0)
+                self.color = None
+                self.visible = True
+
+        edges = RecordingSceneHandle()
+        verts = RecordingSceneHandle()
+        handles = {"roi_box": FakeBox(), "roi_box_edges": edges, "roi_box_verts": verts}
+        update_roi_box(handles, self._roi_block())
+        self.assertTrue(edges.visible and verts.visible)
+        self.assertEqual(np.asarray(edges.points).shape, (12, 2, 3))
+        self.assertEqual(np.asarray(verts.points).shape, (8, 3))
+        normal_edge_color = np.asarray(edges.colors).copy()
+        # Violation recolors the outline.
+        update_roi_box(handles, self._roi_block(
+            right={"checked": True, "violated": True, "min_margin_m": -0.02,
+                   "closest_face": "z_min"},
+        ))
+        self.assertFalse(np.array_equal(np.asarray(edges.colors), normal_edge_color))
+        # Hidden when the toggle is off.
+        update_roi_box(handles, self._roi_block(), visible=False)
+        self.assertFalse(edges.visible or verts.visible)
+
     def test_update_roi_box_preview(self):
         class FakeBox:
             def __init__(self):
