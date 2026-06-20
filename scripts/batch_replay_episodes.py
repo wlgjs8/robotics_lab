@@ -93,6 +93,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--arms", default="left,right")
     parser.add_argument("--anchor", choices=["live", "mock"], default=None)
+    parser.add_argument(
+        "--anchor-pose-source",
+        choices=["actual", "reference", "auto"],
+        default="auto",
+        help="ee_local live-anchor pose source passed to the driver (auto/reference avoid the "
+        "pgmode inter-episode catch-up jump; see replay_episode_tcp_pose_target).",
+    )
+    parser.add_argument(
+        "--init-joint-source",
+        choices=["actual", "reference", "auto"],
+        default="auto",
+        help="Joint source for init-return delta/arrival: q_ref_deg (auto/reference) vs q_actual_deg "
+        "(actual). pgmode freezes q_actual so auto/reference make init-return actually settle.",
+    )
     parser.add_argument("--mock-current-pose", default="default")
     parser.add_argument("--mock-q-actual", default=None, help="'rest_stow', six joint degrees, or JSON/list/dict for dry-run init delta.")
     parser.add_argument("--max-linear-speed-m-s", type=float, default=None)
@@ -127,6 +141,8 @@ def run_batch(
     *,
     driver_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
 ) -> int:
+    global _JOINT_SOURCE
+    _JOINT_SOURCE = getattr(args, "init_joint_source", "auto")
     episodes = discover_episodes(Path(args.episodes_dir), args.episodes)
     dry_run = not (bool(args.execute) and not bool(args.dry_run) and bool(args.i_am_at_the_estop))
     if dry_run:
@@ -296,16 +312,33 @@ def read_live_joints(server: driver.ServerRuntimeConfig, *, timeout_sec: float) 
         state_client.close()
 
 
-def extract_q_actual(payload: dict[str, Any]) -> dict[str, list[float]]:
+# Joint source for init-return delta + arrival. In pgmode controller-simulation the
+# physical arm is stationary so q_actual_deg is FROZEN; the controller reference
+# (q_ref_deg) is what the JointTarget return actually drives. Reading the frozen
+# actual makes init-return delta always ~0 and declares arrival before the reference
+# has settled, leaving the next replay to yank the reference (the inter-episode jump).
+# "auto"/"reference" therefore key off q_ref_deg; "actual" forces the old behavior.
+_JOINT_SOURCE = "auto"
+
+
+def extract_q_actual(payload: dict[str, Any], source: str | None = None) -> dict[str, list[float]]:
+    source = source or _JOINT_SOURCE
+    keys = ("q_ref_deg", "q_actual_deg") if source in ("auto", "reference") else ("q_actual_deg",)
     out: dict[str, list[float]] = {}
     for arm in ARMS:
         arm_state = payload.get(arm) if isinstance(payload, dict) else None
-        q = arm_state.get("q_actual_deg") if isinstance(arm_state, dict) else None
-        if not isinstance(q, (list, tuple)) or len(q) != 6:
-            raise BatchHalt(f"state missing {arm}.q_actual_deg")
+        q = None
+        if isinstance(arm_state, dict):
+            for key in keys:
+                cand = arm_state.get(key)
+                if isinstance(cand, (list, tuple)) and len(cand) == 6:
+                    q = cand
+                    break
+        if q is None:
+            raise BatchHalt(f"state missing {arm}.{'/'.join(keys)}")
         values = [float(item) for item in q]
         if not np.isfinite(np.asarray(values, dtype=np.float64)).all():
-            raise BatchHalt(f"state {arm}.q_actual_deg contains non-finite values")
+            raise BatchHalt(f"state {arm} joints contain non-finite values")
         out[arm] = values
     return out
 
@@ -470,6 +503,8 @@ def build_driver_command(args: argparse.Namespace, episode_path: Path, batch_nam
         args.arms,
         "--anchor",
         anchor,
+        "--anchor-pose-source",
+        args.anchor_pose_source,
         "--segment",
         args.segment,
         "--action-scale",

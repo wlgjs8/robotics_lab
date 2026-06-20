@@ -58,6 +58,33 @@ def _line_segment_colors_array(colors: Any = ()) -> Any:
     return np.asarray(colors, dtype=np.uint8).reshape((-1, 2, 3))
 
 
+def _trail_line_arrays(points: Any, base_color: tuple[int, int, int]) -> tuple[Any, Any]:
+    """Turn a list of trail positions into a glowing 'comet trail' line.
+
+    Consecutive points become line segments; per-vertex colour fades the base
+    arm colour from dim (oldest sample) to full brightness (newest sample), so
+    the most recent motion glows and the tail trails off smoothly.
+    """
+    import numpy as np
+
+    pts = np.asarray(points, dtype=np.float32).reshape((-1, 3))
+    n = pts.shape[0]
+    if n < 2:
+        return (
+            np.zeros((0, 2, 3), dtype=np.float32),
+            np.zeros((0, 2, 3), dtype=np.uint8),
+        )
+    segments = np.stack([pts[:-1], pts[1:]], axis=1)  # (n-1, 2, 3)
+    base = np.asarray(base_color, dtype=np.float32)
+    # Ease-in fade so recent samples stay bright while the tail dims toward black.
+    lo, hi = 0.10, 1.0
+    t = np.linspace(0.0, 1.0, n, dtype=np.float32) ** 1.6
+    fade = lo + (hi - lo) * t
+    vert_colors = np.clip(base[None, :] * fade[:, None], 0.0, 255.0)  # (n, 3)
+    seg_colors = np.stack([vert_colors[:-1], vert_colors[1:]], axis=1)  # (n-1, 2, 3)
+    return segments, seg_colors.astype(np.uint8)
+
+
 def _repo_descriptions_dir() -> Path:
     workspace_root = Path(__file__).resolve().parents[2]
     candidates = (
@@ -1330,25 +1357,31 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
                     handles[f"{side}_tcp_target"] = server.scene.add_transform_controls(
                         f"/stand/{side}_tcp_target", scale=0.16, line_width=3.0, position=pos,
                     )
-        if hasattr(server.scene, "add_point_cloud"):
+        _trail_as_line = hasattr(server.scene, "add_line_segments")
+        handles["tcp_trail_mode"] = "line" if _trail_as_line else "point"
+        if _trail_as_line or hasattr(server.scene, "add_point_cloud"):
             for arm, actual_color, ref_color in (
                 ("left", (80, 160, 255), (60, 210, 110)),
                 ("right", (255, 160, 80), (60, 210, 110)),
             ):
                 handles[f"{arm}_tcp_trail_points"] = []
                 handles[f"{arm}_tcp_ref_trail_points"] = []
-                handles[f"{arm}_tcp_trail"] = server.scene.add_point_cloud(
-                    f"/stand/{arm}_tcp_trail",
-                    points=_points_array(),
-                    colors=_colors_array(),
-                    point_size=0.012,
-                )
-                handles[f"{arm}_tcp_ref_trail"] = server.scene.add_point_cloud(
-                    f"/stand/{arm}_tcp_ref_trail",
-                    points=_points_array(),
-                    colors=_colors_array(),
-                    point_size=0.012,
-                )
+                for key in (f"{arm}_tcp_trail", f"{arm}_tcp_ref_trail"):
+                    if _trail_as_line:
+                        handles[key] = server.scene.add_line_segments(
+                            f"/stand/{key}",
+                            points=_line_segments_array(),
+                            colors=_line_segment_colors_array(),
+                            line_width=3.5,
+                        )
+                    else:
+                        handles[key] = server.scene.add_point_cloud(
+                            f"/stand/{key}",
+                            points=_points_array(),
+                            colors=_colors_array(),
+                            point_size=0.012,
+                            point_shape="rounded",
+                        )
                 handles[f"{arm}_tcp_trail_color"] = actual_color
                 handles[f"{arm}_tcp_ref_trail_color"] = ref_color
         if hasattr(server.scene, "add_line_segments"):
@@ -1471,9 +1504,15 @@ def _update_tcp_trail(
         del points[:-_TCP_TRAIL_LIMIT]
     color = scene_handles.get(f"{key_prefix}_trail_color", (160, 160, 160))
     try:
-        handle.points = _points_array(tuple(points))
-        handle.colors = _colors_array(tuple(color for _ in points))
-        handle.visible = visible
+        if scene_handles.get("tcp_trail_mode") == "line":
+            segments, seg_colors = _trail_line_arrays(points, color)
+            handle.points = segments
+            handle.colors = seg_colors
+            handle.visible = visible and len(points) >= 2
+        else:
+            handle.points = _points_array(tuple(points))
+            handle.colors = _colors_array(tuple(color for _ in points))
+            handle.visible = visible
     except Exception:
         pass
 

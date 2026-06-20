@@ -197,6 +197,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--action-scale", type=float, default=1.0, help="Uniform scale for per-step ee_local body deltas.")
     parser.add_argument("--segment", default="all", help="ee_local source segment: all, auto-largest, or a zero-based segment index.")
     parser.add_argument("--anchor", choices=["live", "mock"], default=None, help="Anchor ee_local replay at live server TCP or mock stand poses.")
+    parser.add_argument(
+        "--anchor-pose-source",
+        choices=["actual", "reference", "auto"],
+        default="auto",
+        help="Live-anchor pose source: 'reference' (tcp_ref_stand), 'actual' (tcp_actual_stand), "
+        "or 'auto' (reference-preferred). pgmode freezes actual, so auto/reference avoid the "
+        "inter-episode catch-up jump.",
+    )
     parser.add_argument("--mode", default=DEFAULT_MODE, choices=["clean_foh_se3"])
     parser.add_argument("--arms", default="left,right")
     parser.add_argument("--server-config", default=None)
@@ -790,7 +798,8 @@ def resolve_ee_local_anchor(
     snapshot = read_state_snapshot(server.state_bind, timeout_sec=float(args.state_timeout_sec))
     if snapshot is None:
         raise ReplayRefusal(f"no fresh state snapshot received on {server.state_bind}")
-    return {arm: actual_tcp_pose_from_state_strict(snapshot.payload, arm) for arm in selected_arms}
+    source = getattr(args, "anchor_pose_source", "auto")
+    return {arm: live_anchor_pose_from_state(snapshot.payload, arm, source) for arm in selected_arms}
 
 
 def read_state_snapshot(bind: str, *, timeout_sec: float) -> StateSnapshot | None:
@@ -1309,6 +1318,33 @@ def actual_tcp_pose_from_state_strict(payload: dict[str, Any], arm: str) -> np.n
         return pose_dict_to_pose7(arm_state.get("tcp_actual_stand"))
     except (TypeError, ValueError) as exc:
         raise ReplayRefusal(f"state missing finite live {arm}.tcp_actual_stand") from exc
+
+
+def live_anchor_pose_from_state(payload: dict[str, Any], arm: str, source: str = "auto") -> np.ndarray:
+    """Live anchor pose for ee_local replay.
+
+    In rbpodo pgmode controller-simulation the physical arm is stationary, so the
+    published ``tcp_actual_stand`` is FROZEN while the controller *reference*
+    (``tcp_ref_stand``) is the pose the servo loop actually continues from. Anchoring
+    a new episode on the frozen actual yanks the reference back to a stale pose at
+    each replay start (the inter-episode "fast catch-up"). ``auto`` therefore prefers
+    the reference and falls back to the actual; ``reference``/``actual`` force one.
+    """
+    arm_state = payload.get(arm)
+    if not isinstance(arm_state, dict):
+        raise ReplayRefusal(f"state missing {arm} arm")
+    if source == "actual":
+        order = ("tcp_actual_stand",)
+    elif source == "reference":
+        order = ("tcp_ref_stand",)
+    else:  # auto
+        order = ("tcp_ref_stand", "tcp_actual_stand")
+    for key in order:
+        try:
+            return pose_dict_to_pose7(arm_state.get(key))
+        except (TypeError, ValueError):
+            continue
+    raise ReplayRefusal(f"state missing finite live {arm} anchor (source={source}, tried {order})")
 
 
 def pose_dict_to_pose7(raw: Any) -> np.ndarray:

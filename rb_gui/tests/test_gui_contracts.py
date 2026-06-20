@@ -2236,8 +2236,9 @@ class GuiContractsTest(unittest.TestCase):
         handles = _add_scene_fallback(server)
         self.assertNotIn("scene_error", handles)
         self.assertIn("stand_mesh", handles)
-        self.assertGreaterEqual(len(scene.point_clouds), 4)
-        self.assertGreaterEqual(len(scene.line_segments), 1)
+        # The four TCP trails (left/right × actual/reference) render as gradient
+        # comet-trail line segments, plus the circle overlay line.
+        self.assertGreaterEqual(len(scene.line_segments), 5)
 
     def test_circle_overlay_points_support_standard_planes(self):
         xy = CircleOverlaySnapshot.parse(sample_circle_overlay(plane="xy", axis1_stand=None, axis2_stand=None))
