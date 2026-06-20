@@ -4,7 +4,9 @@ Status: planning seed (for Claude Code to refine into a code-level spec, then Co
 Scope: bring up the **control system** on a home Windows laptop, **without a physical robot**, using the official Rainbow **Virtual ControlBox** as an rbpodo controller endpoint in **pgmode simulation** on **WSL2 (Ubuntu)**.
 
 Controller-simulation evidence only. This plan does **not** authorize physical robot motion.
-`physical_motion_expected=false`, `RB_ALLOW_REAL_CARTESIAN` is never set.
+`physical_motion_expected=false`; real Cartesian stays disabled
+(`cartesian_control.allow_in_real: false` — config-driven, the legacy
+`RB_ALLOW_REAL_CARTESIAN` env gate was removed from the server runtime).
 
 ---
 

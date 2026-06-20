@@ -72,65 +72,45 @@ log must be interpreted using:
 - `send_acceptance_semantics`
 - `ack_wait_duration_us`
 
-ACK-off real motion additionally requires:
-
-```bash
-RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
-```
+ACK-off real motion is config-driven (the site-local config must opt into
+disabling controller ACK waiting via the rbpodo `disable_waiting_ack` arm
+option); the legacy `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env gate was removed
+from the server runtime.
 
 ACK-off settings are not a real baseline until ACK-off acceptance passes.
 They require stronger monitoring because immediate controller rejection is not
 observed.
 
-## Environment Gates
+## Config Gates
 
-Read-only real connection requires:
+Motion is config-driven, not env-gated — the legacy `RB_ALLOW_REAL_*` /
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION` / `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED`
+/ `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env gates were removed from the server
+runtime. Real motion is enabled solely by the site-local config under
+`rb_servo_server/config/local/` plus the mode-independent safety layers,
+operator supervision, and the hardware E-stop:
 
-```bash
-RB_ALLOW_REAL_ROBOT=1
-```
+- Read-only real connection: keep `servo.send_servo_commands: false`.
+- Real joint Servo J motion: `servo.send_servo_commands: true` in a real config.
+- Rbpodo controller `pgmode` simulation Servo J: `operation_mode: simulation`
+  + `servo.allow_controller_simulation_motion: true`; the acceptance tool
+  confirms the controller `pgmode` simulation state for the same run via
+  `--set-pgmode-simulation`/`--verify-pgmode-simulation` rather than an env var.
+- ACK-off real joint Servo J motion: the site-local config opts into the rbpodo
+  `disable_waiting_ack` arm option.
 
-Real joint Servo J motion requires:
-
-```bash
-RB_ALLOW_REAL_MOTION=1
-```
-
-Rbpodo controller `pgmode` simulation Servo J commands additionally require:
-
-```bash
-RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION=1
-```
-
-The acceptance tool sets `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED=1` only for the
-server process after the same run successfully sends or verifies controller
-`pgmode` simulation. Do not set this variable by hand for ordinary runs.
-
-The temporary diagnostics-suspect bridge for controller simulation additionally
-requires both the YAML opt-in
-`servo.allow_controller_simulation_diagnostics_suspect: true` and:
-
-```bash
-RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
-```
+The temporary diagnostics-suspect bridge for controller simulation requires the
+YAML opt-in `servo.allow_controller_simulation_diagnostics_suspect: true` and
+the env var `RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1` (still read by
+the prepared tooling for controller-sim diagnostics).
 
 This is not real motion approval. It is limited to `operation_mode:
 simulation`, known rbpodo suspicious status layouts, finite joint state, no
 range violation, no explicit E-stop/SOS/soft E-stop/collision fault, and a
 confirmed controller `pgmode` simulation run.
 
-ACK-off real joint Servo J motion additionally requires:
-
-```bash
-RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
-```
-
-Real Cartesian/TCP motion is out of scope for this runbook and must remain
-unset:
-
-```bash
-RB_ALLOW_REAL_CARTESIAN=1
-```
+Real Cartesian/TCP motion is out of scope for this runbook; keep
+`cartesian_control.allow_in_real: false` in the site-local config.
 
 ## Required Staging
 
@@ -195,8 +175,8 @@ to avoid discontinuities.
 Controller-simulation no-op acceptance is separate from the read-only template.
 Use an artifact-local or site-local 500 Hz controller-simulation config only
 after controller `pgmode` simulation has been verified by the acceptance tool
-and the normal real-controller/motion env gates are set. The local copy must
-explicitly set:
+and the site-local config explicitly opts into controller-simulation motion. The
+local copy must explicitly set:
 
 ```yaml
 servo:
@@ -215,7 +195,6 @@ acceptance configs and do not approve ACK-off or Cartesian motion.
 send motion:
 
 ```bash
-RB_ALLOW_REAL_ROBOT=1 \
 python3 scripts/rainbow_pgmode.py \
   --ips 172.28.60.200 172.28.60.201 \
   --set-simulation \
@@ -256,7 +235,6 @@ its diagnostics with the server startup validation.
 Use a local copy under `rb_servo_server/config/local/`, not a tracked template.
 
 ```bash
-RB_ALLOW_REAL_ROBOT=1 \
 python3 scripts/rbpodo_servo_acceptance.py \
   --config rb_servo_server/config/local/dual_real_500hz_ack.yaml \
   --arm left \
@@ -331,5 +309,5 @@ Record and compare at least:
 ## Safety Policy
 
 Do not run real motion unattended. Do not use `rt_script`. Do not change
-collision thresholds or undocumented controller settings. Do not set
-`RB_ALLOW_REAL_CARTESIAN` for this runbook.
+collision thresholds or undocumented controller settings. Keep
+`cartesian_control.allow_in_real: false` for this runbook.

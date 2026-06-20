@@ -58,10 +58,10 @@ servo:
 ```
 
 The option defaults to `false` and is active only when the rbpodo
-controller-simulation motion gate is open: `run_mode: real`,
-`backend_type: rbpodo`, `operation_mode: simulation`,
-`servo.allow_controller_simulation_motion: true`, `RB_ALLOW_REAL_ROBOT=1`, and
-`RB_ALLOW_REAL_MOTION=1`. It is not a physical-real decode policy.
+controller-simulation motion carve-out is open in the site-local config:
+`run_mode: real`, `backend_type: rbpodo`, `operation_mode: simulation`,
+`servo.allow_controller_simulation_motion: true` (config-driven, no env gate).
+It is not a physical-real decode policy.
 
 When active, the decoder treats only `op_stat_self_collision` shape validation
 and controller time plausibility as unavailable. The state stream must expose
@@ -102,7 +102,6 @@ for the intended read-only or controller-simulation diagnostic session.
 ## Read-Only State Dump
 
 ```bash
-RB_ALLOW_REAL_ROBOT=1 \
 python3 scripts/rbpodo_state_dump.py \
   --ips 172.28.60.200 172.28.60.201 \
   --output artifacts/rbpodo_measurement/state_dump.json \
@@ -126,7 +125,6 @@ question is whether the rbpodo SDK, Python binding, firmware field layout,
 C++ mapping, or raw 5001 payload interpretation is responsible.
 
 ```bash
-RB_ALLOW_REAL_ROBOT=1 \
 python3 scripts/rainbow_data_port_capture.py \
   --ip 172.28.60.200 \
   --port 5001 \
@@ -147,7 +145,6 @@ and `last_payload.bin`. Use `--save-each-sample` only when a supervised
 investigation needs one binary fixture per sample:
 
 ```bash
-RB_ALLOW_REAL_ROBOT=1 \
 python3 scripts/rainbow_data_port_capture.py \
   --ip 172.28.60.200 \
   --port 5001 \

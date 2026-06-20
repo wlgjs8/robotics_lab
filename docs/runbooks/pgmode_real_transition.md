@@ -90,33 +90,18 @@ Tracked templates that set `servo.send_servo_commands: true`,
 
 ## Required Gates
 
-Read-only physical diagnostics:
+Motion is config-driven, not env-gated — the legacy `RB_ALLOW_REAL_*` /
+`RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env gates were removed from the server
+runtime. Each stage is enabled by the site-local config under
+`rb_servo_server/config/local/`:
 
-```bash
-RB_ALLOW_REAL_ROBOT=1
-```
-
-Real joint motion stages:
-
-```bash
-RB_ALLOW_REAL_ROBOT=1
-RB_ALLOW_REAL_MOTION=1
-```
-
-If a site-local rbpodo motion config disables controller ACK waiting, the
-motion stage also requires:
-
-```bash
-RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
-```
-
-Real Cartesian stages:
-
-```bash
-RB_ALLOW_REAL_ROBOT=1
-RB_ALLOW_REAL_MOTION=1
-RB_ALLOW_REAL_CARTESIAN=1
-```
+- Read-only physical diagnostics: keep `servo.send_servo_commands: false`,
+  `cartesian_control.allow_in_real: false`.
+- Real joint motion stages: `servo.send_servo_commands: true`.
+- ACK-off motion (site-local rbpodo config disables controller ACK waiting):
+  the config opts into the rbpodo `disable_waiting_ack` arm option.
+- Real Cartesian stages: `cartesian_control.enable: true` +
+  `cartesian_control.allow_in_real: true`.
 
 Motion stages also require:
 
@@ -149,9 +134,7 @@ The acceptance script refuses non-dry-run stages when:
 - A motion stage has `servo.send_servo_commands: false`.
 - A Cartesian motion stage does not have site-local
   `cartesian_control.enable: true` and `cartesian_control.allow_in_real: true`.
-- A motion stage disables rbpodo ACK waiting without
-  `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1`.
-- Required env gates or confirmation flags are missing.
+- Required confirmation flags are missing.
 - `force_control` is enabled or has a provider.
 - P4 exceeds `--max-joint-delta-deg 0.05`.
 - P5 or later exceeds `--max-cartesian-step-m 0.005`.

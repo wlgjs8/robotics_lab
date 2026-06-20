@@ -27,7 +27,7 @@ upstream; never skip ahead.
 | G2 | `ctest` (unit) | `tests/test_safety_policy.cpp` invariants still hold | Yes |
 | G3 | Mock smoke (server only) | Server starts under `config/dual_mock.yaml` and exits cleanly | Yes |
 | G4 | Mock smoke (server + driver) | Sine driver completes a short loop without faulting the server | Yes |
-| G5 | Real-mode env-var guard | Server refuses to launch under `config/local/dual_real_readonly.yaml` without `RB_ALLOW_REAL_ROBOT=1` | Yes |
+| G5 | Real-mode config guard | Real motion stays fail-closed under `config/local/dual_real_readonly.yaml`: motion is off unless the site-local config explicitly enables it (`servo.send_servo_commands: true`, `cartesian_control.allow_in_real: true`). Real motion is config-driven, not env-gated (`RB_ALLOW_REAL_*` retired). | Yes |
 | G6 | Touched-area regression | A behavior changed in this iteration is covered by a new or strengthened assertion in `tests/` | Yes for any behavioral change |
 | G7 | Doc parity | Any policy or behavior change is reflected in `docs/fail_safe_policy.md`, `docs/network_protocol.md`, or `docs/testing.md` | Yes for any policy change |
 
@@ -102,16 +102,19 @@ Pass criteria:
   locks at the unit level; the smoke is the integration-level check)
 - log output contains no `[0,0,0,0,0,0]` synthesized targets
 
-### G5 — real-mode env-var guard
+### G5 — real-mode config guard
 
 ```bash
 ./build/rb_servo_server --config config/local/dual_real_readonly.yaml
 ```
 
-This **must** fail-fast before opening a socket to hardware. Specifically,
-without `RB_ALLOW_REAL_ROBOT=1` and the full real-mode guard set documented
-in `docs/fail_safe_policy.md` §Real mode guard, the process exits non-zero.
-A green build that does not fail this gate is **not** Go.
+Real motion is config-driven, not env-gated (`RB_ALLOW_REAL_*` retired). A
+read-only real config (`servo.send_servo_commands: false`,
+`cartesian_control.allow_in_real: false`) **must** keep motion off and stay
+fail-closed: no `servo_j` transmission, no real Cartesian. Conversely the server
+must refuse to send motion unless the site-local config explicitly enables it,
+per `docs/fail_safe_policy.md` §Real mode guard. A green build that lets real
+motion proceed without explicit config opt-in is **not** Go.
 
 ### G6 — touched-area regression
 
@@ -203,7 +206,7 @@ Tested:
   - G2 ctest: 3 passed, 0 failed
   - G3 mock-server smoke: clean exit
   - G4 mock + sine driver: ArmMotion gate honored, no zero synth
-  - G5 real-mode guard: fails without RB_ALLOW_REAL_ROBOT (expected)
+  - G5 real-mode config guard: read-only config keeps motion off; fail-closed (expected)
   - G6 touched-area regression: <test name> added/strengthened
 Not-tested:
   - real hardware (out of scope per loop context)

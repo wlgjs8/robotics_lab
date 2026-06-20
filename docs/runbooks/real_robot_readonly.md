@@ -28,18 +28,16 @@ Use this before any rbpodo motion acceptance:
 1. Copy a tracked real template to `rb_servo_server/config/local/`.
 2. Keep `servo.send_servo_commands: false`.
 3. Confirm both arms use `backend_type: rbpodo` and `run_mode: real`.
-4. Start with `RB_ALLOW_REAL_ROBOT=1` only.
+4. Keep the site-local config read-only: `servo.send_servo_commands: false`,
+   `cartesian_control.allow_in_real: false`.
 5. Verify valid state, low state age, no fault latch, and expected backend.
 
-Do not set:
-
-```bash
-RB_ALLOW_REAL_MOTION=1
-RB_ALLOW_REAL_CARTESIAN=1
-RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1
-```
-
-Those gates belong to later supervised acceptance stages, not read-only.
+Real motion is config-driven, not env-gated (the legacy `RB_ALLOW_REAL_*` /
+`RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env gates were removed from the server
+runtime). Do not opt into any motion config field for this stage — keep
+`servo.send_servo_commands: false`, `cartesian_control.allow_in_real: false`,
+and ACK waiting enabled. Servo J transmission, real Cartesian, and ACK-off
+motion belong to later supervised acceptance stages, not read-only.
 
 ## Config Rules
 
@@ -84,7 +82,6 @@ period:
 Example for the left arm 500 Hz ACK-on profile:
 
 ```bash
-RB_ALLOW_REAL_ROBOT=1 \
 python3 scripts/rbpodo_servo_acceptance.py \
   --config rb_servo_server/config/local/dual_real_500hz_ack.yaml \
   --arm left \

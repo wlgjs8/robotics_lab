@@ -23,7 +23,7 @@ synthetic UMI sender ─UDP→ policy_runner (umi_dual_cartesian, relative-init)
   EMS / SOS / soft-estop / `collision_occur` / unknown-mode / init-error still latch.
 - **Policy (PR #13)** — the `SafetyGate` no longer blocks real Cartesian motion (scoped to
   `cartesian_gate.operation_mode == "real"`). Controller-simulation safety is unchanged.
-- **Remaining safety = rb_servo_server**: `allow_in_real` + `RB_ALLOW_REAL_CARTESIAN`,
+- **Remaining safety = rb_servo_server**: `cartesian_control.allow_in_real: true` (site-local config),
   `speed`/`step` clamps, `max_tracking_error_deg=10` **fault-latch**, `dq`/`ddq` limits, and the
   **URDF-capsule self-collision guard** (`clamp_to_hold`). The controller's own self-collision
   status is NOT trusted (see Known issues).
@@ -38,14 +38,19 @@ synthetic UMI sender ─UDP→ policy_runner (umi_dual_cartesian, relative-init)
 4. Local config: `rb_servo_server/config/local/dual_real_rbpodo_PHYSICAL_circle_lowspeed.yaml`
    (gitignored, site-local; key values in **Config** below).
 
-## Required env (server is run as root for RT priority)
+## Required config (server is run as root for RT priority)
 
-```
-RB_ALLOW_REAL_ROBOT=1 RB_ALLOW_REAL_MOTION=1 RB_ALLOW_REAL_CARTESIAN=1
-RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1
+Real motion is **config-driven, not env-gated** — the legacy `RB_ALLOW_REAL_*` /
+`RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION` env gates were removed from the server runtime.
+The site-local config below enables it explicitly:
+
+```yaml
+cartesian_control: { allow_in_real: true }
+servo: { allow_real_motion_with_suspect_diagnostics: true }   # accepts the -2001 suspect diagnostics in real
 ```
 
-(The controller-simulation gates `RB_ALLOW_RBPODO_CONTROLLER_SIM_*` / `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` are **not** used here.)
+(The controller-simulation carve-out `cartesian_control.allow_in_controller_simulation` /
+`servo.allow_controller_simulation_motion` is **not** used here.)
 
 ## Config (key values — TUNED-1, anti-tremble)
 
@@ -92,8 +97,6 @@ PYTHONPATH=rb_gui RB_GUI_DESCRIPTIONS_DIR="$PWD/rb_servo_server/descriptions" \
 ```bash
 cd robotics_lab
 SUDO_ASKPASS=/path/to/askpass sudo -A env \
-  RB_ALLOW_REAL_ROBOT=1 RB_ALLOW_REAL_MOTION=1 RB_ALLOW_REAL_CARTESIAN=1 \
-  RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION=1 \
   rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
   --config rb_servo_server/config/local/dual_real_rbpodo_PHYSICAL_circle_lowspeed.yaml
 ```
@@ -107,7 +110,7 @@ Wait for `CommandServer listening on udp://127.0.0.1:50256`, then **verify (stil
 
 ```bash
 cd robotics_lab
-PYTHONPATH=policy_runner RB_ALLOW_REAL_ROBOT=1 RB_ALLOW_REAL_MOTION=1 RB_ALLOW_REAL_CARTESIAN=1 \
+PYTHONPATH=policy_runner \
   python3 -u -m policy_runner --config policy_runner/config/rbpodo_pgmode_umi_live.example.yaml
 ```
 

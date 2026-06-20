@@ -261,9 +261,10 @@ server-side `cartesian_control` limits before Jacobian velocity solving.
 `cartesian_control.path_kp_ori` for orientation error. Constant-orientation
 linear moves reject target orientation mismatch greater than
 `cartesian_control.linear_move.constant_orientation_tolerance_rad`; hardware-free
-configs set this to `0.005` rad. Real Cartesian motion remains closed unless
-real mode is explicitly enabled, Cartesian control is configured for real, and
-`RB_ALLOW_REAL_CARTESIAN=1` is set.
+configs set this to `0.005` rad. Real Cartesian motion remains closed unless the
+site-local config explicitly enables it (`cartesian_control.allow_in_real: true`);
+it is config-driven, not env-gated (the legacy `RB_ALLOW_REAL_CARTESIAN` env gate
+was removed from the server runtime).
 
 ## Joint target command
 

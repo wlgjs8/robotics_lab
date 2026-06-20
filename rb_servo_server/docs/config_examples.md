@@ -47,11 +47,14 @@ servo:
   send_servo_commands: false
 ```
 
-Real robot startup remains gated outside the hardware-free workflow:
-`RB_ALLOW_REAL_ROBOT=1` is required for read-only real connection, and
-`RB_ALLOW_REAL_MOTION=1` plus `servo.send_servo_commands=true` is required for
-real `servo_j` motion. Real Cartesian/TCP motion additionally requires
-`RB_ALLOW_REAL_CARTESIAN=1`. The rbpodo `disable_waiting_ack` arm option is
+Real robot behavior remains gated outside the hardware-free workflow, but it is
+config-driven, not env-gated (the legacy `RB_ALLOW_REAL_*` env gates were removed
+from the server runtime). Read-only real connection keeps
+`servo.send_servo_commands: false`; real `servo_j` motion requires
+`servo.send_servo_commands: true` in a site-local real config; real Cartesian/TCP
+motion additionally requires `cartesian_control.allow_in_real: true`. Together
+with the mode-independent safety layers, operator supervision, and the hardware
+E-stop, the site-local config is the sole decider. The rbpodo `disable_waiting_ack` arm option is
 wired to the SDK ACK-wait toggle and defaults to `false` in the tracked real
 template; only change it in site-local motion configs after command-path
 acceptance.

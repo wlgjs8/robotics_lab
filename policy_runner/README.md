@@ -98,7 +98,8 @@ controller `pgmode` simulation: `mode: real`, `backend_type: rbpodo`,
 `operation_mode: simulation`, `physical_motion_expected=false`, explicit
 policy-runner opt-in, command-source lease, and server-published
 `cartesian_gate` evidence. Physical real Cartesian commands remain blocked;
-do not set `RB_ALLOW_REAL_CARTESIAN` for this workflow.
+keep the server's `cartesian_control.allow_in_real: false` for this workflow
+(real motion is config-driven on the server, not env-gated).
 
 Only one command source should be active at a time. Do not run GUI teleop and
 `policy_runner` teleop against the same `rb_servo_server` command port

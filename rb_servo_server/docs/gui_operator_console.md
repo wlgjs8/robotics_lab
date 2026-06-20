@@ -45,17 +45,18 @@ What the GUI still enforces client-side is **non-gating** readiness only: a fres
 valid state stream, joint-state validity, simulation readiness tests (sim mode),
 fault-latch, and FK/TCP-pose availability for Cartesian.
 
-Authority for real motion has moved entirely to the **server**: the
-`RB_ALLOW_REAL_ROBOT` / `RB_ALLOW_REAL_MOTION` / `RB_ALLOW_REAL_CARTESIAN` env
-gates (still required, fail-closed), site-local config
+Authority for real motion has moved entirely to the **server**, and is now
+config-driven, not env-gated (the legacy `RB_ALLOW_REAL_*` /
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_*` / `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` env
+gates were removed from the server runtime): the site-local config
 (`cartesian_control.allow_in_real`), the SafetyFilter, tracking-error latch,
-async URDF-mesh self-collision guard, lease, and deadman. The GUI itself never
-sets any `RB_ALLOW_*` env. For rbpodo `pgmode` simulation
-(`operation_mode=simulation`, `physical_motion_expected=false`), the server-side
-controller-simulation Cartesian gate
-(`cartesian_control.allow_in_controller_simulation` +
-`RB_ALLOW_RBPODO_CONTROLLER_SIM_*` / `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED`)
-still applies on the server.
+async URDF-mesh self-collision guard, lease, deadman, operator supervision, and
+the hardware E-stop, all fail-closed. The GUI itself never sets any `RB_ALLOW_*`
+env. For rbpodo `pgmode` simulation (`operation_mode=simulation`,
+`physical_motion_expected=false`), the server-side controller-simulation
+Cartesian carve-out is likewise config-driven
+(`cartesian_control.allow_in_controller_simulation: true` +
+`servo.allow_controller_simulation_motion: true`) and still applies on the server.
 
 ## Operator monitors
 

@@ -28,13 +28,15 @@ For rbpodo controller pgmode collection,
 `policy_runner.safety.allow_real_motion=false` is the expected policy setting.
 The runner may send Cartesian SpaceMouse commands only when
 `allow_rbpodo_controller_simulation_cartesian=true` and the server state proves
-`backend_type=rbpodo`, `run_mode=real`, `operation_mode=simulation`, required
-controller-simulation env gates, and `physical_motion_expected=false`.
-Server-side env flags such as `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`,
-`RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION`,
-`RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN`, and
-`RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` are not policy-runner physical-motion
-approval.
+`backend_type=rbpodo`, `run_mode=real`, `operation_mode=simulation`, the
+server's controller-simulation carve-out active (config-driven:
+`servo.allow_controller_simulation_motion: true` +
+`cartesian_control.allow_in_controller_simulation: true`), and
+`physical_motion_expected=false`. The server's own real/controller-sim
+authority is config-driven (the legacy `RB_ALLOW_REAL_*` /
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_*` / `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` env
+gates were removed from the server runtime); none of that is policy-runner
+physical-motion approval.
 
 Flow-policy rollout must also declare `--rollout-mode`; the policy runner must
 not infer rollout authority from `mode: real` alone. Use `offline_eval` for
@@ -105,11 +107,7 @@ before training data is promoted:
   "selected_arm": "left | right | both",
   "collision_model_status": "missing | configured_estimate | measured | validated",
   "command_source_id": "policy_runner",
-  "benchmark_linkage": {
-    "circle_profile": "circle_15cm_16s",
-    "overlay_run_id": "optional overlay stream id",
-    "tracking_error_summary": "optional artifact-relative path"
-  }
+  "benchmark_linkage": {}
 }
 ```
 
@@ -176,18 +174,10 @@ those checks.
 
 ## Benchmark Linkage
 
-Controller-simulation benchmark episodes may include linkage to circle
-benchmark artifacts:
-
-- `circle_profile`, such as `circle_15cm_16s` or `gene_15cm_4s`
-- overlay `run_id`
-- desired/reference tracking source, normally `tcp_ref_stand`
-- summary metrics such as RMS error, p95 error, radius gain, and estimated
-  latency
-
-Benchmark overlay UDP is a visualization/metrics stream, not robot state and
-not a command source. The state stream remains the source of truth for dataset
-state samples.
+`benchmark_linkage` is a generic optional metadata dict
+(`build_dataset_metadata` defaults it to `{}`). The circle-tracking benchmark it
+previously linked to was removed, so it is normally empty. The state stream
+remains the source of truth for dataset state samples.
 
 ## Recorder Compatibility
 

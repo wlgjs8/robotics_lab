@@ -73,10 +73,12 @@ After reset succeeds, the server re-baselines previous targets to the freshly re
 
 ## Real mode guard
 
-Real mode requires:
+Real mode is config-driven, not env-gated (the legacy `RB_ALLOW_REAL_*` execution
+gates were removed from the server runtime). Real mode requires:
 
-- `RB_ALLOW_REAL_ROBOT=1`
-- `RB_ALLOW_REAL_MOTION=1` when `servo.send_servo_commands=true`
+- a site-local real config (`rb_servo_server/config/local/`) explicitly enabling
+  real motion: `servo.send_servo_commands: true` (and
+  `cartesian_control.allow_in_real: true` for real Cartesian/TCP)
 - `servo.enable_realtime_priority=true`
 - successful realtime setup in the servo loop
 - `safety.tracking_error_policy=fault_latch`
@@ -90,8 +92,10 @@ Startup requires both backends to return a connected, error-free, finite joint s
 
 `RbpodoBackend` must report valid state only after reading real joint data from
 a trusted rbpodo controller path. Compiling with `RB_SERVO_ENABLE_RBPODO=ON`
-does not bypass `RB_ALLOW_REAL_ROBOT=1` for real connection or
-`RB_ALLOW_REAL_MOTION=1` for `servo_j` transmission.
+does not bypass the config-driven real-motion gating: real connection and
+`servo_j` transmission still require a site-local real config that explicitly
+enables them (`servo.send_servo_commands: true`), plus the mode-independent
+safety layers.
 
 ## Future Cartesian/IK rule
 

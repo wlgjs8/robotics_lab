@@ -9,8 +9,10 @@ joint-only acceptance run after read-only state publishing has been verified.
 - `RB_SERVO_ENABLE_RBPODO=ON` build completed locally.
 - Hardware-free CMake gate completed immediately before the run.
 - Real read-only run completed first with `servo.send_servo_commands=false`.
-- `RB_ALLOW_REAL_ROBOT=1` set for any real connection.
-- `RB_ALLOW_REAL_MOTION=1` set only for the first-motion run.
+- Real motion is config-driven, not env-gated (the legacy `RB_ALLOW_REAL_*` env
+  gates were removed from the server runtime): the site-local real config keeps
+  `servo.send_servo_commands: false` for any read-only real connection and is set
+  to `true` only for the first-motion run.
 - Command and state endpoints remain loopback unless separately reviewed.
 - Cartesian/TCP and force control remain disabled.
 - `RbpodoBackend::initialize()` is read-only: it must not enter operation mode

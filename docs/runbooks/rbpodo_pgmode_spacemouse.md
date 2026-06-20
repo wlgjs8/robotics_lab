@@ -92,13 +92,15 @@ tools/rbpodo_pgmode_spacemouse.sh server \
   --with-required-env
 ```
 
-`--with-required-env` sets server-side rbpodo controller-simulation gates such
-as `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`,
-`RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION`,
-`RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN`, and
-`RB_RBPODO_PGMODE_SIMULATION_CONFIRMED`. These env flags are required because
-the server connects to real controller boxes in `pgmode` simulation. They are
-separate from `policy_runner.safety.allow_real_motion`, which stays `false`.
+`--with-required-env` exports the still-live rbpodo wrapper env vars
+`RB_ALLOW_RBPODO_ASYNC_STREAMING=1` and
+`RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1`. The controller-simulation
+carve-out itself is config-driven, not env-gated (the legacy `RB_ALLOW_REAL_*` /
+`RB_ALLOW_RBPODO_CONTROLLER_SIM_*` / `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` env
+gates were removed from the server runtime): the site-local config enables it via
+`servo.allow_controller_simulation_motion: true` +
+`cartesian_control.allow_in_controller_simulation: true`. These are separate from
+`policy_runner.safety.allow_real_motion`, which stays `false`.
 
 2. Start the viewer:
 
@@ -181,7 +183,7 @@ Before trusting a run, inspect live state or recorder output for:
 - `async_streaming_enabled=true`
 - `async_streaming_mode=sdk_ack_worker`
 
-Do not set `RB_ALLOW_REAL_CARTESIAN` or
+Do not enable `cartesian_control.allow_in_real` or
 `policy_runner.safety.allow_real_motion=true` for this workflow.
 
 ## Abort And Stop

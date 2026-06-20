@@ -44,8 +44,8 @@ safety:
 ```
 
 The server must report per-arm `cartesian_gate.operation_mode=simulation` and
-`physical_motion_expected=false`. Do not set `RB_ALLOW_REAL_CARTESIAN` for this
-workflow. Do not modify measured calibration or `calibration/umi_retarget*.yaml`;
+`physical_motion_expected=false`. Do not enable `cartesian_control.allow_in_real`
+for this workflow. Do not modify measured calibration or `calibration/umi_retarget*.yaml`;
 UMI live teleop uses relative-from-init clutching, not measured hand-eye
 retarget.
 
@@ -61,10 +61,10 @@ safety:
   controller_simulation_tracking_error_nonlatching: true
 ```
 
-This policy is inert unless the controller-simulation motion gate is open
-(`run_mode: real`, `backend_type: rbpodo`, `operation_mode: simulation`,
-`servo.allow_controller_simulation_motion: true`, `RB_ALLOW_REAL_ROBOT=1`, and
-`RB_ALLOW_REAL_MOTION=1`). When active, only `op_stat_self_collision` shape
+This policy is inert unless the controller-simulation motion carve-out is open
+in the site-local config (`run_mode: real`, `backend_type: rbpodo`,
+`operation_mode: simulation`, `servo.allow_controller_simulation_motion: true`;
+config-driven, no env gate). When active, only `op_stat_self_collision` shape
 validation and controller time plausibility are treated as unavailable. State
 telemetry must still publish `rbpodo_diagnostics.raw`,
 `rbpodo_diagnostics.unavailable_fields`, and
@@ -124,8 +124,11 @@ tools/rbpodo_pgmode_umi.sh server \
   --with-required-env
 ```
 
-The delegated server wrapper may set controller-simulation env gates when
-`--with-required-env` is present. It must not set `RB_ALLOW_REAL_CARTESIAN`.
+The delegated server wrapper exports the still-live rbpodo wrapper env vars
+(`RB_ALLOW_RBPODO_ASYNC_STREAMING`, `RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM`)
+when `--with-required-env` is present. The controller-simulation carve-out itself
+is config-driven; the site-local config must not enable
+`cartesian_control.allow_in_real`.
 
 3. Start the viewer:
 

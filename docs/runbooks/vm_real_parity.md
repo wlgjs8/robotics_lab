@@ -13,7 +13,7 @@ evidence only, not physical acceptance.
 | `operation_mode` | `simulation` | `real` |
 | IPs | two VM IPs | site controller IPs |
 | command/data ports | rbpodo fixed `5000/5001` | rbpodo fixed `5000/5001` |
-| Cartesian real gate | never `RB_ALLOW_REAL_CARTESIAN` | future physical acceptance only |
+| Cartesian real gate | never `cartesian_control.allow_in_real` | future physical acceptance only |
 | evidence tag | `source=controller_simulation_vm` | physical run-specific source |
 | `physical_motion_expected` | `false` | true only in approved physical acceptance |
 
@@ -71,7 +71,9 @@ Controller-simulation Cartesian:
 eval "$(tools/vm/home_vm_env.sh --left-ip <left-vm-ip> --right-ip <right-vm-ip> --cartesian)"
 ```
 
-The helper never sets `RB_ALLOW_REAL_CARTESIAN`.
+The helper only exports the VM IPs and never enables real Cartesian motion; real
+Cartesian is config-driven (`cartesian_control.allow_in_real: true`), which the
+controller-simulation VM config keeps `false`.
 
 ## Recommended Sequence
 
