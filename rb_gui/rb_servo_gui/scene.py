@@ -82,7 +82,18 @@ def _asset_path(env_name: str, relative_default: str) -> Path:
 
 
 def _robot_urdf_path() -> Path:
-    return _asset_path("RB_GUI_ROBOT_URDF", "urdf/rb3_730e.urdf")
+    # Prefer the GUI-only articulated-gripper URDF (base + two prismatic fingers) so
+    # the viewer can show continuous open/close; fall back to the plain single-mesh
+    # gripper if that asset is absent. RB_GUI_ROBOT_URDF still forces a specific
+    # file. The C++ Pinocchio FK/IK is unaffected (it loads its own rb3_730e.urdf
+    # via kinematics.urdf, never this one).
+    configured = os.environ.get("RB_GUI_ROBOT_URDF")
+    if configured:
+        return Path(configured)
+    articulated = _descriptions_dir() / "urdf/rb3_730e_pika_articulated.urdf"
+    if articulated.exists():
+        return articulated
+    return _descriptions_dir() / "urdf/rb3_730e.urdf"
 
 
 def _stand_mesh_path() -> Path:
@@ -162,6 +173,25 @@ def _joint_cfg_radians(q_values: tuple[float, ...] | None) -> tuple[float, ...]:
         return tuple(0.0 for _ in _ROBOT_JOINT_NAMES)
     padded = tuple(float(q_values[index]) if index < len(q_values) else 0.0 for index in range(len(_ROBOT_JOINT_NAMES)))
     return tuple(math.radians(value) for value in padded)
+
+
+# Articulated-gripper finger joints (only present in rb3_730e_pika_articulated.urdf).
+# Each finger travels up to _GRIPPER_FINGER_TRAVEL_M from the open (STL) pose to
+# closed; finger_left moves +X, finger_right -X (jaw axis = X in the baked mesh
+# frame). gripper percent: 100 = open (travel 0), 0 = closed (full travel).
+_GRIPPER_FINGER_TRAVEL_M = 0.047
+_GRIPPER_FINGER_JOINT_SIGN = {"finger_left_joint": 1.0, "finger_right_joint": -1.0}
+
+
+def _finger_position_m(gripper_percent: float | None) -> float:
+    """Per-finger prismatic travel (m) for a gripper open percentage (0..100)."""
+    if gripper_percent is None:
+        return 0.0
+    try:
+        pct = max(0.0, min(100.0, float(gripper_percent)))
+    except (TypeError, ValueError):
+        return 0.0
+    return (1.0 - pct / 100.0) * _GRIPPER_FINGER_TRAVEL_M
 
 
 # Translucent blue for the reference "ghost" robot (R, G, B, alpha in 0..1).
@@ -1218,13 +1248,34 @@ def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
         handles["urdf_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
 
 
-def _update_urdf_config(urdf_handle: Any, cfg_radians: tuple[float, ...]) -> None:
+def _update_urdf_config(
+    urdf_handle: Any, cfg_radians: tuple[float, ...], gripper_percent: float | None = None
+) -> None:
+    """Drive a ViserUrdf. cfg_radians is the 6 arm-joint values (in
+    _ROBOT_JOINT_NAMES order); gripper_percent (0..100) drives the prismatic finger
+    joints IF this URDF is the articulated variant. Works for both the plain
+    6-joint URDF and the 8-joint articulated one: the config is rebuilt in the
+    handle's actuated-joint order, so unknown joints default to 0 and the finger
+    joints are filled only when present."""
+    try:
+        names = tuple(urdf_handle.get_actuated_joint_names())
+    except Exception:
+        names = ()
+    arm_map = dict(zip(_ROBOT_JOINT_NAMES, cfg_radians))
+    if names and (set(names) - set(_ROBOT_JOINT_NAMES)):
+        finger_pos = _finger_position_m(gripper_percent)
+        values = [
+            arm_map.get(name, _GRIPPER_FINGER_JOINT_SIGN.get(name, 0.0) * finger_pos)
+            for name in names
+        ]
+    else:
+        values = list(cfg_radians)  # plain URDF: arm joints only, original behavior
     try:
         import numpy as np
 
-        payload: Any = np.array(cfg_radians)
+        payload: Any = np.array(values)
     except Exception:
-        payload = cfg_radians
+        payload = values
     urdf_handle.update_cfg(payload)
 
 
@@ -1538,8 +1589,14 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
         q = arm_state.q_actual_deg
         if _arm_is_controller_sim(arm_state) and arm_state.q_sent_deg is not None:
             q = arm_state.q_sent_deg
+        # Gripper open percentage drives the prismatic fingers on the articulated
+        # URDF (no-op on the plain URDF). Source is published gripper state if
+        # present, else the GUI "Gripper %" preview slider (written into
+        # scene_handles by the app each update); None leaves the fingers open.
+        side = "left" if key == "left_urdf" else "right"
+        gripper_pct = scene_handles.get(f"gripper_percent_{side}")
         try:
-            _update_urdf_config(urdf_handle, _joint_cfg_radians(q))
+            _update_urdf_config(urdf_handle, _joint_cfg_radians(q), gripper_percent=gripper_pct)
         except Exception as exc:
             scene_handles["urdf_update_error"] = f"{type(exc).__name__}: {exc}"
 

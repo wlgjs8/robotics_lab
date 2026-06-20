@@ -101,8 +101,10 @@ from rb_servo_gui.scene import (
     _attach_checkgeom_gripper,
     _circle_overlay_points,
     _ensure_sc_world_frame,
+    _finger_position_m,
     _reference_ghost_active,
     _robot_urdf_path,
+    _update_urdf_config,
     update_circle_overlay,
     update_floor_plane,
     update_floor_plane_preview,
@@ -888,12 +890,54 @@ class GuiContractsTest(unittest.TestCase):
             else:
                 os.environ["RB_GUI_CIRCLE_OVERLAY_BIND"] = old_value
 
+    def test_finger_position_maps_gripper_percent_to_travel(self):
+        self.assertAlmostEqual(_finger_position_m(100.0), 0.0)        # open
+        self.assertAlmostEqual(_finger_position_m(0.0), 0.047)        # closed (full travel)
+        self.assertAlmostEqual(_finger_position_m(50.0), 0.0235)      # half
+        self.assertAlmostEqual(_finger_position_m(None), 0.0)         # unknown -> open
+        self.assertAlmostEqual(_finger_position_m(150.0), 0.0)        # clamp high -> open
+        self.assertAlmostEqual(_finger_position_m(-10.0), 0.047)      # clamp low -> closed
+
+    def test_update_urdf_config_drives_finger_joints_only_when_present(self):
+        class FakeUrdf:
+            def __init__(self, names):
+                self._names = names
+                self.last = None
+            def get_actuated_joint_names(self):
+                return self._names
+            def update_cfg(self, cfg):
+                self.last = list(np.asarray(cfg, dtype=float))
+
+        arm = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)  # 6 arm joint values (radians)
+        # Articulated URDF (8 joints): fingers filled from gripper percent.
+        art = FakeUrdf((
+            "base_joint", "shoulder_joint", "elbow_joint", "wrist1_joint",
+            "wrist2_joint", "wrist3_joint", "finger_left_joint", "finger_right_joint",
+        ))
+        _update_urdf_config(art, arm, gripper_percent=0.0)  # closed
+        self.assertEqual(len(art.last), 8)
+        self.assertEqual(art.last[:6], list(arm))
+        self.assertAlmostEqual(art.last[6], +0.047)   # finger_left +X
+        self.assertAlmostEqual(art.last[7], -0.047)   # finger_right -X
+        _update_urdf_config(art, arm, gripper_percent=100.0)  # open
+        self.assertAlmostEqual(art.last[6], 0.0)
+        self.assertAlmostEqual(art.last[7], 0.0)
+        # Plain 6-joint URDF: gripper percent ignored, arm values passed through.
+        plain = FakeUrdf(("base_joint", "shoulder_joint", "elbow_joint",
+                          "wrist1_joint", "wrist2_joint", "wrist3_joint"))
+        _update_urdf_config(plain, arm, gripper_percent=0.0)
+        self.assertEqual(plain.last, list(arm))
+
     def test_robot_urdf_path_uses_descriptions_dir_env(self):
         descriptions_dir = Path(__file__).resolve().parents[2] / "rb_servo_server" / "descriptions"
         old_value = os.environ.get("RB_GUI_DESCRIPTIONS_DIR")
         try:
             os.environ["RB_GUI_DESCRIPTIONS_DIR"] = str(descriptions_dir)
-            self.assertEqual(_robot_urdf_path(), descriptions_dir / "urdf" / "rb3_730e.urdf")
+            # Default prefers the GUI-only articulated-gripper URDF when present
+            # (falls back to the plain rb3_730e.urdf otherwise).
+            self.assertEqual(
+                _robot_urdf_path(), descriptions_dir / "urdf" / "rb3_730e_pika_articulated.urdf"
+            )
             self.assertTrue(_robot_urdf_path().exists())
         finally:
             if old_value is None:

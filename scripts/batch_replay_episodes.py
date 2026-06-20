@@ -331,6 +331,14 @@ def return_to_init_pose(args: argparse.Namespace, server: driver.ServerRuntimeCo
         driver.wait_for_fresh_state(state_client, timeout_sec=float(args.state_timeout_sec))
         start_q = _targets_from_payload(state_client.latest.payload)
         command_client.acquire_lease(StateStreamLeaseReadback(state_client), timeout_sec=4.0)
+        # Clear any fault latched by a PREVIOUS episode (e.g. a singularity IkFailed),
+        # otherwise this episode's init-return motion is blocked by fault_latched and
+        # every subsequent episode skips. reset_fault is a no-op when nothing is latched.
+        snap = state_client.latest
+        if snap is not None and isinstance(snap.payload, dict) and snap.payload.get("fault_latched"):
+            command_client.send(CommandIntent.reset_fault(timeout_sec=server.command_timeout_sec))
+            time.sleep(0.5)
+            driver.wait_for_fresh_state(state_client, timeout_sec=float(args.state_timeout_sec))
         command_client.send(CommandIntent.arm_motion(timeout_sec=server.command_timeout_sec))
         command_client.send(
             CommandIntent.joint_target(

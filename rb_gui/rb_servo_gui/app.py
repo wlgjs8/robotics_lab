@@ -1653,6 +1653,20 @@ def build_gui(
                     "Reach envelope", initial_value=reach_status, disabled=True
                 )
 
+            with server.gui.add_folder("그리퍼 표시 (preview)"):
+                # Drives the articulated-gripper fingers in the 3D view (no-op on the
+                # plain single-mesh gripper URDF). 100 = open, 0 = closed; continuous
+                # values show partial closure. This slider is the interim source until
+                # the gripper-state feed (see docs/plans/gripper_server_design.md)
+                # lands; the per-tick value is pushed into scene_handles by _refresh.
+                if hasattr(server.gui, "add_slider"):
+                    handles["gripper_slider_left"] = server.gui.add_slider(
+                        "Left gripper %", min=0.0, max=100.0, step=1.0, initial_value=100.0
+                    )
+                    handles["gripper_slider_right"] = server.gui.add_slider(
+                        "Right gripper %", min=0.0, max=100.0, step=1.0, initial_value=100.0
+                    )
+
     with tabs.add_tab("이동"):
         _move_tabs = server.gui.add_tab_group()
         with _move_tabs.add_tab("관절"):
@@ -2140,6 +2154,24 @@ def _latest_circle_overlay(
     return overlay_store.latest(), overlay_store.is_stale()
 
 
+def _push_gripper_percent(handles: dict[str, Any]) -> None:
+    """Publish the gripper open-percentage (0..100) into scene_handles so
+    update_scene_markers can drive the articulated-gripper fingers. Interim source
+    is the GUI preview slider; swap for published gripper state once the feed exists
+    (docs/plans/gripper_server_design.md)."""
+    scene = handles.get("scene")
+    if not isinstance(scene, dict):
+        return
+    for side in ("left", "right"):
+        slider = handles.get(f"gripper_slider_{side}")
+        if slider is None:
+            continue
+        try:
+            scene[f"gripper_percent_{side}"] = float(slider.value)
+        except (TypeError, ValueError, AttributeError):
+            pass
+
+
 def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
     floor = latest.floor_constraint if latest is not None else None
     update_floor_plane(handles.get("scene", {}), floor)
@@ -2489,6 +2521,7 @@ def update_gui(
     if "tcp_linear_status" in handles:
         handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     _update_operator_monitors(handles, latest, stale=stale)
+    _push_gripper_percent(handles)
     update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
     # After markers: the collision overlay may override ghost/solid visibility.
     update_self_collision_overlay(handles.get("scene", {}), latest)
