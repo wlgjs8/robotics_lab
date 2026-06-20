@@ -1716,10 +1716,11 @@ def build_gui(
             with server.gui.add_folder("IK 불가 영역"):
                 # Show/hide the per-arm IK-infeasible region (tools/ik_infeasible_
                 # region.py, computed with the server's real Pinocchio IK solver).
-                # Distinct from reach: these are positions INSIDE the reach radius
-                # that have no IK solution for any approach direction — the inner
-                # dead zone, lower/back pockets, and the near-full-extension shell
-                # where orientation freedom collapses. Static viewer aid, default OFF.
+                # Distinct from reach: these are positions the arm CAN reach (with
+                # some orientation) but where the gripper cannot point straight DOWN
+                # — the red shell wrapping the central top-down grasp zone. Reach-
+                # impossible cells are excluded (that's the reach overlay's job).
+                # Static viewer aid, default OFF.
                 ik_status = "no asset"
                 scene = handles.get("scene", {})
                 if isinstance(scene, dict) and (

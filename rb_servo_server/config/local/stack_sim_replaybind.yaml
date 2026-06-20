@@ -175,7 +175,7 @@ safety:
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
       stand_ignore_arm_substrings: ["link0"]
       viz_near_pairs_m: 0.06   # GUI-only: show witness tubes within 60mm (decoupled from d_slow)
-      d_hard_m: 0.015   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
+      d_hard_m: 0.010   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
       # v_max(max_linear_velocity)=0.25, a_brake=4.0 -> d_hard+0.0078=0.0228; 0.035

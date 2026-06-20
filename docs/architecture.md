@@ -286,18 +286,22 @@ viser overlay renders translucent + double-sided ("도달영역 표시" toggle) 
 operator sees the reach boundary through the robot/stand.
 
 A complementary viewer-only overlay marks the **IK-infeasible region** — positions
-INSIDE the reach radius that nonetheless have no IK solution for any sampled
-approach direction (the inner dead zone, the lower/back hemisphere the
-shoulder-mounted arm cannot fold into, and the near-full-extension shell where
-orientation freedom collapses). It is distinct from the reach envelope: reach =
-"too far"; IK-infeasible = "close enough but no IK solution". Feasibility is
-sampled by the C++ `ik_feasibility_grid` tool, which reuses the server's REAL
-Pinocchio IK solver (`rb_servo_core`) over a base-frame grid (mount-independent, so
-one mesh serves both arms); `tools/ik_infeasible_region.py` turns the occupancy
-grid into the translucent red surface mesh
-(`descriptions/ik_infeasible_rb3_730e.npz`). It is a static, precomputed viewer
-aid only (no safety enforcement) — regenerate with `make ik-infeasible` if the URDF
-or mount geometry changes. Toggle: "IK 불가 영역 표시" in the 조작 → 안전 tab.
+the arm CAN reach (its TCP fits there with SOME orientation) yet where the gripper
+cannot be placed pointing straight DOWN (top-down grasp). It is the red shell
+wrapping the central zone where top-down IK actually solves. This is deliberately
+distinct from the reach envelope: reach = "too far to reach at all"; IK-infeasible =
+"reachable, but not in the orientation you need". Reach-impossible cells are
+excluded — that boundary is the reach overlay's job. The region is computed by the
+C++ `ik_feasibility_grid` tool, which reuses the server's REAL Pinocchio IK solver
+(`rb_servo_core`): for each grid cell it tests (1) reachable with any of N approach
+directions, then (2) solvable with the tool pointing down (over M wrist rolls);
+occupancy = reachable AND NOT top-down-solvable. Because the left/right mount tilt
+makes "down" a different base-frame orientation, the asset stores a SEPARATE mesh
+per arm (the cheap reachability test is shared). `tools/ik_infeasible_region.py`
+turns the per-arm occupancy grids into translucent red surface meshes
+(`descriptions/ik_infeasible_rb3_730e.npz`). Static, precomputed viewer aid only (no
+safety enforcement) — regenerate with `make ik-infeasible` if the URDF or mount
+geometry changes. Toggle: "IK 불가 영역 표시" in the 조작 → 안전 tab.
 
 `TcpCircleMove` is an optional benchmark primitive for isolating server-side
 circle generation from Python UDP streaming jitter. It requires

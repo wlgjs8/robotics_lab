@@ -60,6 +60,7 @@ struct Args {
     std::string out;          // output grid JSON
     double spacing_m = 0.05;
     int orientations = 18;
+    int down_rolls = 8;       // wrist-roll samples about the top-down approach axis
     int seeds = 4;            // IK seeds tried per orientation before giving up
     int max_iterations = 200;
     double timeout_ms = 10.0;
@@ -77,7 +78,8 @@ struct Args {
         "                       (default: descriptions/reach_envelope_rb3_730e.json)\n"
         "  --out PATH           output grid JSON (default: /tmp/ik_feasibility_grid.json)\n"
         "  --spacing-m F        grid spacing (default 0.05)\n"
-        "  --orientations N     approach directions per cell (default 18)\n"
+        "  --orientations N     approach directions for the reachability test (default 18)\n"
+        "  --down-rolls N       wrist-roll samples for the top-down IK test (default 8)\n"
         "  --seeds N            IK seeds tried per orientation (default 4)\n"
         "  --max-iterations N   IK iterations budget (default 200)\n"
         "  --timeout-ms F       IK timeout per solve (default 10)\n"
@@ -100,6 +102,7 @@ Args parseArgs(int argc, char** argv) {
         else if (k == "--out") a.out = need(i);
         else if (k == "--spacing-m") a.spacing_m = std::stod(need(i));
         else if (k == "--orientations") a.orientations = std::stoi(need(i));
+        else if (k == "--down-rolls") a.down_rolls = std::stoi(need(i));
         else if (k == "--seeds") a.seeds = std::stoi(need(i));
         else if (k == "--max-iterations") a.max_iterations = std::stoi(need(i));
         else if (k == "--timeout-ms") a.timeout_ms = std::stod(need(i));
@@ -171,6 +174,37 @@ std::vector<Eigen::Quaterniond> approachOrientations(int n) {
         out.push_back(Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d::UnitZ(), dir));
     }
     return out;
+}
+
+// Top-down approach orientations in the ARM-BASE frame: the tool z-axis points
+// straight DOWN in the stand/world frame (-Z), with the wrist roll about that axis
+// sampled m ways (a gripper's roll is usually a free DOF, so "top-down reachable"
+// means SOME roll solves). `R_mount` is stand<-base; we map the fixed stand-frame
+// down-orientation into the base frame so the per-arm mount tilt is accounted for.
+std::vector<Eigen::Quaterniond> topDownOrientations(int m, const Eigen::Matrix3d& R_mount) {
+    // Stand-frame frame with tool z = (0,0,-1): columns [x=+X, y=-Y, z=-Z].
+    Eigen::Matrix3d R0;
+    R0.col(0) = Eigen::Vector3d(1, 0, 0);
+    R0.col(1) = Eigen::Vector3d(0, -1, 0);
+    R0.col(2) = Eigen::Vector3d(0, 0, -1);
+    std::vector<Eigen::Quaterniond> out;
+    out.reserve(m);
+    for (int i = 0; i < m; ++i) {
+        const double roll = 2.0 * M_PI * i / static_cast<double>(m);
+        const Eigen::Matrix3d R_stand =
+            R0 * Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+        out.emplace_back(R_mount.transpose() * R_stand);  // express in base frame
+    }
+    return out;
+}
+
+// Per-arm mount rotation (stand<-base) from the base_pose_in_stand RPY.
+Eigen::Matrix3d mountRotation(const std::array<double, 6>& pose) {
+    rb_servo::Pose6D p;
+    p.rx = pose[3];
+    p.ry = pose[4];
+    p.rz = pose[5];
+    return rb_servo::math::rotationFromPose(p);
 }
 
 double readReachRMax(const std::string& path, double fallback) {
@@ -251,21 +285,45 @@ int main(int argc, char** argv) {
     const int half = static_cast<int>(std::ceil(r_max / args.spacing_m));
     const int dim = 2 * half + 1;
     const double origin = -half * args.spacing_m;
-    const auto orientations = approachOrientations(args.orientations);
+    const auto reach_orientations = approachOrientations(args.orientations);
+
+    // Per-arm mounts (stand<-base). Source from the server config if given, else the
+    // canonical RB3-730E dual mounts. The mount tilt makes the stand-frame "top-down"
+    // orientation differ per arm, hence a separate occupancy mesh for each.
+    std::array<double, 6> left_pose = {0.15707, -0.17036, 0.58036, 2.186649, 0.523831, 2.526296};
+    std::array<double, 6> right_pose = {-0.15707, -0.17036, 0.58036, 2.186649, -0.523831, -2.526296};
+    if (!args.config.empty()) {
+        try {
+            const auto cfg = rb_servo::loadConfigFromYaml(args.config);
+            const auto& l = cfg.left_mount.base_pose_in_stand;
+            const auto& r = cfg.right_mount.base_pose_in_stand;
+            left_pose = {l.x, l.y, l.z, l.rx, l.ry, l.rz};
+            right_pose = {r.x, r.y, r.z, r.rx, r.ry, r.rz};
+        } catch (const std::exception& exc) {
+            std::cerr << "warning: could not read mounts from --config (" << exc.what()
+                      << "); using defaults\n";
+        }
+    }
+    const auto topdown_left = topDownOrientations(args.down_rolls, mountRotation(left_pose));
+    const auto topdown_right = topDownOrientations(args.down_rolls, mountRotation(right_pose));
 
     unsigned int nthreads = args.threads > 0 ? static_cast<unsigned int>(args.threads)
                                              : std::thread::hardware_concurrency();
     if (nthreads == 0) nthreads = 1;
 
-    std::cerr << "IK feasibility grid: dim=" << dim << "^3 spacing=" << args.spacing_m
-              << "m r=[" << r_min << "," << r_max << "] N_orient=" << args.orientations
-              << " seeds=" << args.seeds << " threads=" << nthreads
-              << " (ik max_iter=" << args.max_iterations
-              << " timeout=" << args.timeout_ms << "ms, early-out feasibility)\n";
+    std::cerr << "IK-infeasible grid: dim=" << dim << "^3 spacing=" << args.spacing_m
+              << "m r=[" << r_min << "," << r_max << "] reach_orient=" << args.orientations
+              << " down_rolls=" << args.down_rolls << " seeds=" << args.seeds
+              << " threads=" << nthreads << " (ik max_iter=" << args.max_iterations
+              << " timeout=" << args.timeout_ms << "ms)\n"
+              << "  region = reachable(any orientation) AND NOT top-down-IK-solvable\n";
 
-    // occupied[idx] = 1 means "inside reach but IK-infeasible" (the drawn region).
-    std::vector<std::uint8_t> occupied(static_cast<std::size_t>(dim) * dim * dim, 0);
-    std::atomic<long> tested{0}, occupied_count{0};
+    // occupied = 1 means "position is reachable with some orientation, but the
+    // gripper cannot be placed there pointing straight down" — reach 되지만 top-down
+    // IK 안 되는 구역. Computed per arm (different mount tilt).
+    const std::size_t cells = static_cast<std::size_t>(dim) * dim * dim;
+    std::vector<std::uint8_t> left_occupied(cells, 0), right_occupied(cells, 0);
+    std::atomic<long> reachable{0}, left_occ{0}, right_occ{0};
     std::atomic<int> next_slice{0};
 
     auto worker = [&](unsigned int tid) {
@@ -277,26 +335,36 @@ int main(int argc, char** argv) {
         std::mt19937 rng(98765u + tid);
         for (int iz = next_slice.fetch_add(1); iz < dim; iz = next_slice.fetch_add(1)) {
             const double z = origin + iz * args.spacing_m;
-            long slice_tested = 0, slice_occ = 0;
+            long s_reach = 0, s_lo = 0, s_ro = 0;
             for (int iy = 0; iy < dim; ++iy) {
                 const double y = origin + iy * args.spacing_m;
                 for (int ix = 0; ix < dim; ++ix) {
                     const double x = origin + ix * args.spacing_m;
                     if (x * x + y * y + z * z > r_max * r_max) continue;  // reach 부족
-                    ++slice_tested;
-                    if (!cellFeasible(kin, mount, orientations, args.seeds, x, y, z, rng)) {
-                        const std::size_t idx =
-                            (static_cast<std::size_t>(iz) * dim + iy) * dim + ix;
-                        occupied[idx] = 1;
-                        ++slice_occ;
+                    // 1) position reachable with SOME orientation? (mount-independent)
+                    if (!cellFeasible(kin, mount, reach_orientations, args.seeds, x, y, z, rng)) {
+                        continue;  // reach-impossible -> the reach overlay's job, skip
+                    }
+                    ++s_reach;
+                    const std::size_t idx =
+                        (static_cast<std::size_t>(iz) * dim + iy) * dim + ix;
+                    // 2) reachable, but can the gripper point straight DOWN here?
+                    if (!cellFeasible(kin, mount, topdown_left, args.seeds, x, y, z, rng)) {
+                        left_occupied[idx] = 1;
+                        ++s_lo;
+                    }
+                    if (!cellFeasible(kin, mount, topdown_right, args.seeds, x, y, z, rng)) {
+                        right_occupied[idx] = 1;
+                        ++s_ro;
                     }
                 }
             }
-            tested += slice_tested;
-            occupied_count += slice_occ;
+            reachable += s_reach;
+            left_occ += s_lo;
+            right_occ += s_ro;
             std::cerr << "  z-slice " << (iz + 1) << "/" << dim
-                      << " tested=" << tested.load() << " occ=" << occupied_count.load()
-                      << "\r" << std::flush;
+                      << " reachable=" << reachable.load() << " L_occ=" << left_occ.load()
+                      << " R_occ=" << right_occ.load() << "\r" << std::flush;
         }
     };
 
@@ -307,15 +375,18 @@ int main(int argc, char** argv) {
 
     nlohmann::json out;
     out["frame"] = "base";
+    out["region"] = "reachable_and_not_topdown";
     out["spacing_m"] = args.spacing_m;
     out["origin_m"] = {origin, origin, origin};
     out["dims"] = {dim, dim, dim};
     out["r_min_m"] = r_min;
     out["r_max_m"] = r_max;
     out["orientations"] = args.orientations;
+    out["down_rolls"] = args.down_rolls;
     out["seeds"] = args.seeds;
     out["ik"] = {{"max_iterations", args.max_iterations}, {"timeout_ms", args.timeout_ms}};
-    out["occupied"] = occupied;  // uint8 flat array, x-fastest then y then z
+    out["left_occupied"] = left_occupied;    // uint8 flat, x-fastest then y then z
+    out["right_occupied"] = right_occupied;
 
     std::ofstream of(args.out);
     if (!of) {
@@ -325,8 +396,9 @@ int main(int argc, char** argv) {
     of << out.dump();
     of.close();
 
-    const long t = tested.load(), o = occupied_count.load();
-    std::cerr << "done: tested=" << t << " cells, infeasible(occupied)=" << o
-              << " (" << (t > 0 ? 100.0 * o / t : 0.0) << "%)\n  wrote " << args.out << "\n";
+    const long rc = reachable.load(), lo = left_occ.load(), ro = right_occ.load();
+    std::cerr << "done: reachable=" << rc << " cells; reach-but-not-top-down  left=" << lo
+              << " (" << (rc > 0 ? 100.0 * lo / rc : 0.0) << "%)  right=" << ro
+              << " (" << (rc > 0 ? 100.0 * ro / rc : 0.0) << "%)\n  wrote " << args.out << "\n";
     return 0;
 }

@@ -1384,6 +1384,10 @@ def log_row(
 ) -> dict[str, Any]:
     arm_state = snapshot.get(arm, {}) if isinstance(snapshot, dict) else {}
     actual = _state_pose_or_nan(arm_state, "tcp_actual_stand")
+    # Controller reference pose (tcp_ref_stand). In rbpodo pgmode controller-sim the
+    # physical arm is stationary so tcp_actual_stand is FROZEN, but tcp_ref_stand is
+    # what the servo loop actually tracks — it is the meaningful tracking series there.
+    reference = _state_pose_or_nan(arm_state, "tcp_ref_stand")
     q_actual = arm_state.get("q_actual_deg") if isinstance(arm_state, dict) else None
     q_target = arm_state.get("q_target_deg") if isinstance(arm_state, dict) else None
     solve = arm_state.get("cartesian_solve") if isinstance(arm_state, dict) and isinstance(arm_state.get("cartesian_solve"), dict) else {}
@@ -1395,6 +1399,7 @@ def log_row(
         "source_raw_target": np.asarray(source_raw_target, dtype=np.float64),
         "conditioned_goal_after_A": np.asarray(conditioned_goal, dtype=np.float64),
         "conditioned_twist_after_A": np.asarray(conditioned_twist, dtype=np.float64),
+        "reference_after_B": reference,
         "q_target": _vec_or_nan(q_target, 6),
         "q_actual": _vec_or_nan(q_actual, 6),
         "actual_tcp": actual,

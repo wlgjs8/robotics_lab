@@ -63,7 +63,83 @@ def tracking_metrics(
         max_lag_sec=config.lag_max_sec,
         metric_name="actual_tcp_lag_vs_conditioned_goal",
     )
+
+    # pgmode controller-simulation does not physically move the arm, so the published
+    # tcp_actual_stand stays frozen while conditioned_goal / reference_after_B move.
+    # In that case the actual_tcp comparisons are not tracking *failures*, they are
+    # simply *not measured* (no physical TCP feedback). Detect that and relabel the
+    # affected metrics so a frozen-actual run is not misread as a large tracking error.
+    physical = physical_tracking_status(actual_tcp, reference_after_B, conditioned_goal)
+    out["physical_tracking"] = physical
+    if physical["status"] == "not_measured":
+        reason = (
+            "actual_tcp appears frozen while conditioned_goal/reference_after_B moves; "
+            "pgmode controller simulation does not provide physical TCP tracking"
+        )
+        for key in (
+            "actual_tcp_vs_reference_after_B",
+            "actual_tcp_vs_conditioned_goal",
+            "actual_tcp_lag_vs_reference_after_B",
+            "actual_tcp_lag_vs_conditioned_goal",
+        ):
+            out[key] = _not_measured(
+                key,
+                reason,
+                tracking_source=physical["tracking_source"],
+                expected_position_span_m=physical["expected_position_span_m"],
+                actual_position_span_m=physical["actual_position_span_m"],
+            )
     return out
+
+
+def position_span(pose: np.ndarray | None) -> float:
+    """Bounding-box diagonal of the finite TCP positions in a pose series.
+
+    Returns 0.0 when the series is missing or has fewer than two finite rows.
+    This is a robust proxy for "how far did this series move".
+    """
+
+    arr = _pose_series(pose)
+    if arr is None:
+        return 0.0
+    positions = arr[:, :3]
+    finite = positions[np.isfinite(positions).all(axis=1)]
+    if finite.shape[0] < 2:
+        return 0.0
+    span = np.max(finite, axis=0) - np.min(finite, axis=0)
+    return float(np.linalg.norm(span))
+
+
+def physical_tracking_status(
+    actual_tcp: np.ndarray | None,
+    reference_after_B: np.ndarray | None,
+    conditioned_goal: np.ndarray | None,
+    *,
+    tracking_source: str = "tcp_actual_stand",
+) -> dict[str, Any]:
+    """Classify whether actual_tcp carries physically meaningful tracking.
+
+    - ``absent``: actual_tcp has no finite samples (no feedback at all) — callers
+      should leave dependent metrics as ``null`` (data missing).
+    - ``not_measured``: conditioned_goal/reference_after_B moved (>1 mm) but actual_tcp
+      barely moved (<0.2 mm or <5% of the expected motion) — frozen actual, no physical
+      tracking (e.g. pgmode controller simulation).
+    - ``measured``: actual_tcp moved comparably to the commanded motion.
+    """
+
+    expected_span = max(position_span(conditioned_goal), position_span(reference_after_B))
+    actual_span = position_span(actual_tcp)
+    detail = {
+        "expected_position_span_m": expected_span,
+        "actual_position_span_m": actual_span,
+        "tracking_source": tracking_source,
+        "notes": [],
+    }
+    if _pose_series(actual_tcp) is None:
+        return {**detail, "status": "absent"}
+    if expected_span > 1e-3 and actual_span < max(2e-4, 0.05 * expected_span):
+        return {**detail, "status": "not_measured"}
+    return {**detail, "status": "measured"}
 
 
 def pose_error_metrics(lhs: np.ndarray | None, rhs: np.ndarray | None, *, metric_name: str = "pose_error") -> dict[str, Any]:
@@ -616,3 +692,15 @@ def _max(values: np.ndarray) -> float | None:
 
 def _null(metric_name: str, reason: str) -> dict[str, Any]:
     return {"status": "null", "value": None, "reason": reason, "notes": [reason], "metric": metric_name}
+
+
+def _not_measured(metric_name: str, reason: str, **extra: Any) -> dict[str, Any]:
+    """Metric whose inputs exist but carry no physical meaning (e.g. frozen actual_tcp).
+
+    Distinct from ``_null`` ("data absent"): here the data is present but the comparison
+    is physically meaningless, so it must not be read as a tracking failure.
+    """
+
+    out = {"status": "not_measured", "value": None, "reason": reason, "notes": [reason], "metric": metric_name}
+    out.update(extra)
+    return out

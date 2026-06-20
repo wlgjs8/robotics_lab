@@ -32,6 +32,32 @@ class MetricsAnalysisTest(unittest.TestCase):
         self.assertIsNone(actual_vs_goal["value"])
         self.assertIn("missing", actual_vs_goal["reason"])
 
+    def test_frozen_actual_tcp_marked_not_measured(self) -> None:
+        t = np.arange(50, dtype=np.float64) * 0.002
+        moving = pose_series(t, np.linspace(0.0, 0.05, t.size))  # 50 mm of motion
+        frozen = pose_series(t, np.full(t.size, 0.0))  # actual never moves
+        metrics = tracking_metrics(
+            t,
+            actual_tcp=frozen,
+            reference_after_B=moving,
+            conditioned_goal=moving,
+        )
+        self.assertEqual(metrics["physical_tracking"]["status"], "not_measured")
+        actual_vs_goal = metrics["actual_tcp_vs_conditioned_goal"]
+        self.assertEqual(actual_vs_goal["status"], "not_measured")
+        self.assertEqual(actual_vs_goal["tracking_source"], "tcp_actual_stand")
+        self.assertEqual(metrics["actual_tcp_vs_reference_after_B"]["status"], "not_measured")
+        # The pgmode-meaningful metric stays a real comparison, not relabeled.
+        self.assertEqual(metrics["reference_after_B_vs_conditioned_goal"]["status"], "ok")
+
+    def test_moving_actual_tcp_stays_measured(self) -> None:
+        t = np.arange(50, dtype=np.float64) * 0.002
+        goal = pose_series(t, np.linspace(0.0, 0.05, t.size))
+        actual = pose_series(t, np.linspace(0.0, 0.049, t.size))  # tracks the goal
+        metrics = tracking_metrics(t, actual_tcp=actual, reference_after_B=goal, conditioned_goal=goal)
+        self.assertEqual(metrics["physical_tracking"]["status"], "measured")
+        self.assertEqual(metrics["actual_tcp_vs_conditioned_goal"]["status"], "ok")
+
     def test_sinusoid_smoothness_recovers_dominant_frequency(self) -> None:
         sample_rate_hz = 200.0
         frequency_hz = 3.0

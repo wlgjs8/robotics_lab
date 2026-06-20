@@ -379,14 +379,16 @@ def set_reach_envelope_visible(scene_handles: dict[str, Any], visible: bool) -> 
         _set_visible(scene_handles.get(f"{arm}_reach_envelope"), visible)
 
 
-# IK-infeasible region: positions INSIDE the reach radius that nonetheless have no
-# IK solution for any sampled approach direction (tools/ik_infeasible_region.py,
-# fed by the C++ ik_feasibility_grid which reuses the server's real solver). This
-# is the complement of the reach envelope — it answers "reach 안인데 IK로 못 가는
-# 영역" (inner dead zone + lower/back pockets + near-full-extension shell). Drawn
-# red and DOUBLE-sided: unlike the star-shaped reach shell, this region is concave,
-# so back-face culling can't be trusted; double-sided keeps it correct from any
-# angle (the builder already fixes winding, and it stays translucent).
+# IK-infeasible region: positions that ARE reachable (the arm can place its TCP
+# there with SOME orientation) yet have no IK solution with the gripper pointing
+# straight DOWN — "reach 되지만 top-down IK 못 푸는 구역". Distinct from the reach
+# envelope (which marks positions too FAR to reach at all): this is the red shell
+# wrapping the central zone where top-down grasps actually work. Computed PER ARM
+# (tools/ik_infeasible_region.py via the C++ ik_feasibility_grid + the server's
+# real IK solver) because the left/right mount tilt makes top-down a different
+# base-frame orientation. Drawn red and DOUBLE-sided: the region is concave so
+# back-face culling can't be trusted; the builder fixes winding and it stays
+# translucent.
 _IK_INFEASIBLE_RED = (220, 70, 70)
 _IK_INFEASIBLE_OPACITY = 0.20
 
@@ -396,14 +398,13 @@ def _ik_infeasible_path() -> Path:
 
 
 def _add_ik_infeasible_region(server: Any, handles: dict[str, Any]) -> None:
-    """Per-arm IK-infeasible region mesh (tools/ik_infeasible_region.py output).
+    """Per-arm IK-infeasible region meshes (tools/ik_infeasible_region.py output).
 
-    Same base-frame-mesh-on-both-arms trick as the reach envelope: the saved
-    vertices are in the arm-base frame, so attaching the SAME mesh under each
-    /stand/<side>_base node renders it correctly placed and mirrored per arm via
-    the mount transform. Skips gracefully if the asset is missing (run
-    tools/ik_infeasible_region.py) or viser lacks mesh support. Static geometry —
-    visibility is toggled from the GUI 안전 tab."""
+    The asset holds a SEPARATE base-frame mesh per arm (left/right top-down dead
+    zones differ with the mount tilt); each is attached under its /stand/<side>_base
+    node. Skips gracefully if the asset is missing (run tools/ik_infeasible_region.
+    py) or viser lacks mesh support. Static geometry — visibility is toggled from
+    the GUI 안전 tab."""
     if not hasattr(server.scene, "add_mesh_simple"):
         return
     path = _ik_infeasible_path()
@@ -416,14 +417,15 @@ def _add_ik_infeasible_region(server: Any, handles: dict[str, Any]) -> None:
         import numpy as np
 
         data = np.load(path)
-        verts = np.asarray(data["shell_vertices_base_m"], dtype=np.float32)
-        faces = np.asarray(data["shell_faces"], dtype=np.int32)
-        if verts.ndim != 2 or verts.shape[1] != 3 or len(verts) == 0 or len(faces) == 0:
-            handles["ik_infeasible_error"] = f"IK-infeasible asset empty: {path}"
-            return
-        if "occupied_cells" in data:
-            handles["ik_infeasible_cells"] = int(data["occupied_cells"])
+        total_cells = 0
+        added = False
         for arm in ("left", "right"):
+            verts = np.asarray(data[f"{arm}_vertices_base_m"], dtype=np.float32)
+            faces = np.asarray(data[f"{arm}_faces"], dtype=np.int32)
+            if verts.ndim != 2 or verts.shape[1] != 3 or len(verts) == 0 or len(faces) == 0:
+                continue  # this arm has no infeasible region (or empty) — skip it
+            if f"{arm}_cells" in data:
+                total_cells += int(data[f"{arm}_cells"])
             try:
                 handles[f"{arm}_ik_infeasible"] = server.scene.add_mesh_simple(
                     f"/stand/{arm}_base/ik_infeasible",
@@ -443,6 +445,11 @@ def _add_ik_infeasible_region(server: Any, handles: dict[str, Any]) -> None:
                     color=_IK_INFEASIBLE_RED,
                     visible=False,
                 )
+            added = True
+        if not added:
+            handles["ik_infeasible_error"] = f"IK-infeasible asset empty: {path}"
+            return
+        handles["ik_infeasible_cells"] = total_cells
     except Exception as exc:
         handles["ik_infeasible_error"] = f"{type(exc).__name__}: {exc}"
 

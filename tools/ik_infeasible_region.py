@@ -120,9 +120,10 @@ def exposed_surface(occ: np.ndarray, spacing: float, origin: float) -> tuple:
     return V, F
 
 
-def build_mesh(grid: dict, smooth_iters: int) -> tuple:
+def build_arm_mesh(grid: dict, occ_key: str, smooth_iters: int) -> tuple:
+    """One arm's occupancy grid -> smoothed surface mesh (base frame)."""
     dims = grid["dims"]
-    occ_flat = np.asarray(grid["occupied"], dtype=np.uint8)
+    occ_flat = np.asarray(grid[occ_key], dtype=np.uint8)
     # flat layout is x-fastest then y then z -> reshape [z,y,x] then to [x,y,z]
     occ = occ_flat.reshape(dims[2], dims[1], dims[0]).transpose(2, 1, 0).astype(bool)
     spacing = float(grid["spacing_m"])
@@ -176,43 +177,46 @@ def main() -> int:
         grid_path = tmp
 
     grid = json.loads(Path(grid_path).read_text())
-    verts, faces, occ_count = build_mesh(grid, args.smooth_iters)
+    lv, lf, lcount = build_arm_mesh(grid, "left_occupied", args.smooth_iters)
+    rv, rf, rcount = build_arm_mesh(grid, "right_occupied", args.smooth_iters)
 
-    if len(verts) == 0:
-        print("WARNING: no IK-infeasible cells found — nothing to render. "
+    if lcount == 0 and rcount == 0:
+        print("WARNING: no reach-but-not-top-down cells found — nothing to render. "
               "Lower spacing/orientations or check the grid.")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         args.out,
-        shell_vertices_base_m=verts,
-        shell_faces=faces,
+        left_vertices_base_m=lv, left_faces=lf,
+        right_vertices_base_m=rv, right_faces=rf,
         r_min_m=float(grid["r_min_m"]),
         r_max_m=float(grid["r_max_m"]),
         spacing_m=float(grid["spacing_m"]),
         orientations=int(grid["orientations"]),
+        down_rolls=int(grid.get("down_rolls", 0)),
         seeds=int(grid["seeds"]),
-        occupied_cells=occ_count,
+        left_cells=lcount, right_cells=rcount,
     )
     sidecar = args.out.with_suffix(".json")
     sidecar.write_text(json.dumps({
+        "region": grid.get("region", "reachable_and_not_topdown"),
         "r_min_m": float(grid["r_min_m"]),
         "r_max_m": float(grid["r_max_m"]),
         "spacing_m": float(grid["spacing_m"]),
         "orientations": int(grid["orientations"]),
+        "down_rolls": int(grid.get("down_rolls", 0)),
         "seeds": int(grid["seeds"]),
-        "occupied_cells": occ_count,
-        "vertices": int(len(verts)),
-        "faces": int(len(faces)),
+        "left_cells": lcount, "right_cells": rcount,
+        "left_vertices": int(len(lv)), "right_vertices": int(len(rv)),
         "ik": grid.get("ik", {}),
     }, indent=2))
 
-    print(f"RB3-730E IK-infeasible region (base frame)")
+    print(f"RB3-730E IK-infeasible (reach 되지만 top-down 불가) region — base frame")
     print(f"  grid            : spacing={grid['spacing_m']} m, r_max={grid['r_max_m']} m, "
-          f"N_orient={grid['orientations']}, seeds={grid['seeds']}")
-    print(f"  occupied cells  : {occ_count}")
-    print(f"  mesh            : {len(verts)} verts, {len(faces)} faces "
-          f"(smooth {args.smooth_iters})")
+          f"N_orient={grid['orientations']}, down_rolls={grid.get('down_rolls')}, "
+          f"seeds={grid['seeds']}")
+    print(f"  left  : {lcount} cells -> {len(lv)} verts, {len(lf)} faces")
+    print(f"  right : {rcount} cells -> {len(rv)} verts, {len(rf)} faces")
     print(f"  saved           : {args.out}")
     print(f"                    {sidecar}")
     return 0

@@ -3891,8 +3891,9 @@ class IkInfeasibleRegionTest(unittest.TestCase):
         path = tempfile.NamedTemporaryFile(suffix=".npz", delete=False)
         path.close()
         self.addCleanup(lambda: os.path.exists(path.name) and os.unlink(path.name))
-        np.savez_compressed(path.name, shell_vertices_base_m=verts,
-                            shell_faces=faces, **extra)
+        np.savez_compressed(path.name,
+                            left_vertices_base_m=verts, left_faces=faces,
+                            right_vertices_base_m=verts, right_faces=faces, **extra)
         return path.name
 
     def test_toggle_shows_and_hides_both_arms(self):
@@ -3912,7 +3913,7 @@ class IkInfeasibleRegionTest(unittest.TestCase):
         set_ik_infeasible_region_visible(None, True)
 
     def test_loads_asset_to_both_arm_bases(self):
-        asset = self._write_asset(occupied_cells=4321)
+        asset = self._write_asset(left_cells=2000, right_cells=2321)
         server = self._mesh_scene_server()
         handles: dict = {}
         with mock.patch.dict(os.environ, {"RB_GUI_IK_INFEASIBLE": asset}):
