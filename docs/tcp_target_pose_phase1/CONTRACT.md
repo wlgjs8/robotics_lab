@@ -229,8 +229,27 @@ absent column such as `actual_tcp`):
 ## 11. Experimental protocol the tooling must make easy
 
 Baseline (raw_zoh) vs raw_foh_se3 vs clean_foh_se3 on the same episode, plus later
-SMD/FF/MA sweeps. Sweep VALUES are config-driven (do not run real robot):
-nat_freq_lin [0.8,1.0,1.3,1.6], nat_freq_ang [0.6,0.8,1.0,1.2],
-damp_lin [1.0,1.2,1.5], damp_ang [1.0,1.2,1.5], vel_ff [true,false],
-max_lin_vel [0.32,0.40], max_ang_vel [0.8,1.0], ma_window [1,4,8,12,16].
-Provide a helper to emit a sweep config matrix (no execution).
+SMD/FF/MA sweeps. Sweep VALUES are config-driven (do not run real robot). Use the
+REAL C++ config key names (verified in 01_inspection_report.md §"CONTRACT Cross-Check");
+the left column is the tooling shorthand only:
+
+| shorthand | REAL key | sweep values |
+|---|---|---|
+| nat_freq_lin | `cartesian_control.pose_track_smd.natural_frequency_linear_hz` | [0.8, 1.0, 1.3, 1.6] |
+| nat_freq_ang | `cartesian_control.pose_track_smd.natural_frequency_angular_hz` | [0.6, 0.8, 1.0, 1.2] |
+| damp_lin | `cartesian_control.pose_track_smd.damping_ratio_linear` | [1.0, 1.2, 1.5] |
+| damp_ang | `cartesian_control.pose_track_smd.damping_ratio_angular` | [1.0, 1.2, 1.5] |
+| vel_ff | `cartesian_control.pose_track_smd.velocity_feedforward` | [true, false] |
+| max_lin_vel | `cartesian_control.pose_track_smd.max_linear_velocity_m_s` | [0.32, 0.40] |
+| max_ang_vel | `cartesian_control.pose_track_smd.max_angular_velocity_rad_s` | [0.8, 1.0] |
+| ma_window | `servo.output_moving_average_window` | [1, 4, 8, 12, 16] |
+
+Provide a helper to emit a sweep config matrix (no execution). The emitted matrix
+must use the REAL key names so a later sprint can apply it directly.
+
+NOTE (from inspection): the runtime SMD goal is **delta-integrated** and anchored at
+`FK(previous_sent_q)` (`smd_pose_tracker.cpp` `updateGoalFromCommand`), NOT a direct
+filter of absolute samples; `velocity_feedforward` finite-differences the goal at the
+2 ms servo tick. Phase-1 only produces A-stage conditioned absolute goals (reference_after_B
+stays NaN); a later offline SMD reference generator must mirror this delta-integrated,
+tick-finite-difference behavior to reproduce the one-tick spike.

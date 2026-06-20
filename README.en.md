@@ -214,7 +214,7 @@ make run            # pgmode real (+ gripper follower)
 make run MODE=sim   # pgmode controller-simulation
 ```
 
-After editing source, build/install the stack first with `make build-stack`.
+After editing source, build/install the stack first with `make build`.
 For hardware-free controller-simulation, boot the two Rainbow virtual
 control-box VMs with `make vm-up` and then run `make run MODE=sim`.
 

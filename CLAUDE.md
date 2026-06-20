@@ -108,7 +108,7 @@ Operator stacks (native via `Makefile`; the GUI/servo/policy stack runs without 
 ```bash
 make run               # full local teleop stack: rb_servo_server + viser GUI + policy_runner (SpaceMouse + UMI); pgmode real
 make run MODE=sim      # same stack, pgmode controller-simulation
-make build-stack       # source-build + install the native stack (rbpodo backend) into the path `make run` launches
+make build       # source-build + install the native stack (rbpodo backend) into the path `make run` launches
 make vm-up / vm-down / vm-status   # boot/stop the Rainbow virtual control-box VMs for hardware-free MODE=sim
 make pgmode-sim-up / pgmode-sim-down   # native rb_servo_server + rb_gui controller-sim bring-up
 make camera-mock-up / make camera-real-up   # the only Docker stacks: camera_server (real) / camera_server_mock

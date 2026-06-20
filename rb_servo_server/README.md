@@ -184,7 +184,7 @@ make run MODE=sim
 `make run` launches the servo server, the viser GUI, and `policy_runner`
 side by side; `MODE=sim` uses the rbpodo controller-simulation path, and the
 plain `make run` targets the real controllers. Build/install the stack first
-with `make build-stack` after editing source. The GUI receives UDP state
+with `make build` after editing source. The GUI receives UDP state
 snapshots and sends only validated UDP JSON commands; the server is built with
 Pinocchio enabled so simulator-only FK/IK powers the GUI TCP target tests. See
 `docs/gui_operator_console.md`.

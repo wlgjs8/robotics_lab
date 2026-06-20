@@ -101,7 +101,7 @@ natively, not in Docker:
 make run MODE=sim
 ```
 
-Build/install the stack first with `make build-stack` after editing source.
+Build/install the stack first with `make build` after editing source.
 Open:
 
 ```text

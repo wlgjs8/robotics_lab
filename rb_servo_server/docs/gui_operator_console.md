@@ -21,7 +21,7 @@ cd /home/plaif/workspace/robotics_lab
 make run MODE=sim
 ```
 
-Build/install the stack first with `make build-stack` after editing source. The
+Build/install the stack first with `make build` after editing source. The
 server binds commands on `udp://0.0.0.0:50010` and publishes state to the GUI's
 `50110` listener.
 

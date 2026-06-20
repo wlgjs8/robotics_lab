@@ -27,7 +27,7 @@ else PY="python3"; fi
 # Non-interactive sudo: passwordless first, then the gitignored ./.env
 # SUDO_PASSWORD (chmod 600; piped via stdin so it never lands in `ps`/argv),
 # then interactive as a last resort. Used for the rbpodo /usr/local install
-# and the setcap below so `make build-stack` never blocks on a prompt.
+# and the setcap below so `make build` never blocks on a prompt.
 SUDO_PASSWORD=""
 [ -f "$ROOT/.env" ] && SUDO_PASSWORD=$(grep -E '^SUDO_PASSWORD=' "$ROOT/.env" | head -1 | cut -d= -f2-)
 run_sudo() {

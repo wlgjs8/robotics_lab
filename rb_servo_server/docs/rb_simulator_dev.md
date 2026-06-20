@@ -79,7 +79,7 @@ make run MODE=sim
 ```
 
 `MODE=sim` uses the rbpodo controller-simulation path. Build/install the stack
-first with `make build-stack` after editing source. For a pure hardware-free
+first with `make build` after editing source. For a pure hardware-free
 `rb_simulator` operator run, start `rb_servo_server` directly with
 `config/dual_simulator.yaml` against the two per-arm simulator processes shown in
 the Config Pair above.

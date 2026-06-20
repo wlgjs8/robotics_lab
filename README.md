@@ -310,7 +310,7 @@ make run            # pgmode real (+ gripper follower)
 make run MODE=sim   # pgmode controller-simulation
 ```
 
-소스를 고친 뒤에는 먼저 `make build-stack`으로 stack을 빌드/설치합니다(rbpodo
+소스를 고친 뒤에는 먼저 `make build`으로 stack을 빌드/설치합니다(rbpodo
 backend 포함). 하드웨어 없이 controller-simulation을 돌리려면 Rainbow 가상
 control-box VM 2대를 `make vm-up`으로 띄운 뒤 `make run MODE=sim`을 씁니다
 (`make vm-down` / `make vm-status`).

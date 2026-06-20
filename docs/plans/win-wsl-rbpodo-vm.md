@@ -81,7 +81,7 @@ Stages 0-1 are environment; Stages 2-3 are the new Windows/WSL2/VM layer; Stage 
 - `./scripts/check_deps.sh --profile hardware-free`.
 - Python: `python3 -m unittest discover rb_gui/tests`, `policy_runner/tests`, `PYTHONPATH=rb_simulator/src python3 -m unittest discover rb_simulator/tests`.
 - C++ gates: `./scripts/codex_gate.sh HARDEN-10`, then `./scripts/codex_gate.sh CART-MATH-03`.
-- (Optional confidence) build the native stack with `make build-stack`, then verify the viser GUI loads at http://127.0.0.1:8080.
+- (Optional confidence) build the native stack with `make build`, then verify the viser GUI loads at http://127.0.0.1:8080.
 - Pass check: deps check ok, Python suites pass, HARDEN-10 + CART-MATH-03 pass. This proves the toolchain before adding VM complexity.
 - Investigate: does rbpodo backend need an SDK install separate from the hardware-free profile? Document the rbpodo SDK acquisition/build step here (gap in current docs for the home setup).
 
