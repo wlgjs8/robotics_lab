@@ -33,10 +33,10 @@ right_robot:
   disable_waiting_ack: false
 
 left_mount:
-  base_pose_in_stand: [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
+  base_pose_in_stand: [0.15707, -0.17036, 0.58036, 2.186649, 0.523831, 2.526296]
 
 right_mount:
-  base_pose_in_stand: [-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296]
+  base_pose_in_stand: [-0.15707, -0.17036, 0.58036, 2.186649, -0.523831, -2.526296]
 
 servo:
   rate_hz: 500

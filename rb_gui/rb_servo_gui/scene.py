@@ -25,9 +25,9 @@ _ROBOT_JOINT_NAMES = (
     "wrist3_joint",
 )
 # Rotation values are canonical URDF/ROS RPY converted from MJCF euler xyz.
-_DEFAULT_LEFT_POSE = (0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296)
-_DEFAULT_RIGHT_POSE = (-0.1601, -0.1725, 0.5825, 2.186649, -0.523831, -2.526296)
-_DEFAULT_STAND_MESH_POSE = (0.0, 0.0, 0.01, 0.0, 0.0, -1.57078)
+_DEFAULT_LEFT_POSE = (0.15707, -0.17036, 0.58036, 2.186649, 0.523831, 2.526296)
+_DEFAULT_RIGHT_POSE = (-0.15707, -0.17036, 0.58036, 2.186649, -0.523831, -2.526296)
+_DEFAULT_STAND_MESH_POSE = (0.0, 0.0, 0.001, 0.0, 0.0, -1.57078)
 _TCP_DISPLAY_MODES = ("auto", "actual", "reference", "both")
 _TCP_TRAIL_LIMIT = 200
 _CIRCLE_OVERLAY_POINT_COUNT = 96
@@ -86,7 +86,7 @@ def _robot_urdf_path() -> Path:
 
 
 def _stand_mesh_path() -> Path:
-    return _asset_path("RB_GUI_STAND_MESH", "meshes/stands/dual_rb3_730e/dual_rb3_730e_stand_ver3.stl")
+    return _asset_path("RB_GUI_STAND_MESH", "meshes/stands/dual_rb3_730e/dual_rb3_730e_stand_ver2_clean.stl")
 
 
 def _module_available(module_name: str) -> bool:

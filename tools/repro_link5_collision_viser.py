@@ -11,12 +11,12 @@ import viser
 from viser.extras import ViserUrdf
 
 ROOT = Path("/home/plaif/workspace/mo_robot_descriptions/mo_robot_descriptions")
-URDF = ROOT / "robots/urdf/dual_rb3_730e/dual_rb3_730e_ver4.urdf"
+URDF = ROOT / "robots/urdf/dual_rb3_730e/dual_rb3_730e_ver5.urdf"
 
 # user's exact q_sent (deg) — sign-verified from the fixed Joint Monitor
 LEFT  = dict(base=303.38, shoulder=45.36, elbow=144.39, wrist1=11.28, wrist2=-124.86, wrist3=-135.65)
 RIGHT = dict(base=-228.49, shoulder=-60.56, elbow=-99.92, wrist1=63.20, wrist2=109.39, wrist3=85.18)
-# This scene renders the MONITOR's exact geometry (dual ver4 URDF) at the pose above.
+# This scene renders the MONITOR's exact geometry (dual ver5 URDF) at the pose above.
 # coal reports link5 <-> stand = +24.6mm (hulls) / >30mm (exact mesh) -> NOT a collision.
 # Open alongside the live viser to compare whether link5 actually penetrates the stand.
 CLEARANCE_MM = 24.6
@@ -64,7 +64,7 @@ def main():
     # stand visual mesh for context (gray)
     T_stand = model.get_transform("stand", collision_geometry=False)
     o = model.link_map["stand"].visuals[0].origin
-    sm = trimesh.load(str(ROOT / "meshes/stands/dual_rb3_730e/dual_rb3_730e_stand_ver3.stl"), force="mesh")
+    sm = trimesh.load(str(ROOT / "meshes/stands/dual_rb3_730e/dual_rb3_730e_stand_ver2_clean.stl"), force="mesh")
     sm.apply_scale(0.001)
     sm.apply_transform(T_stand @ o)
     server.scene.add_mesh_trimesh("/scene/stand_visual", mesh=sm)

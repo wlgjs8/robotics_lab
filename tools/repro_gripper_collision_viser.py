@@ -13,7 +13,7 @@ import viser
 from viser.extras import ViserUrdf
 
 ROOT = Path("/home/plaif/workspace/mo_robot_descriptions/mo_robot_descriptions")
-URDF = ROOT / "robots/urdf/dual_rb3_730e/dual_rb3_730e_ver4.urdf"
+URDF = ROOT / "robots/urdf/dual_rb3_730e/dual_rb3_730e_ver5.urdf"
 GRIPPER_STL = Path("/home/plaif/workspace/robotics_lab/rb_servo_server/descriptions/"
                    "meshes/robots/rb3_730e/visual/tool/pika_gripper.STL")
 
@@ -59,7 +59,7 @@ def main():
 
     # stand visual (gray)
     o = model.link_map["stand"].visuals[0].origin
-    sm = trimesh.load(str(ROOT / "meshes/stands/dual_rb3_730e/dual_rb3_730e_stand_ver3.stl"), force="mesh")
+    sm = trimesh.load(str(ROOT / "meshes/stands/dual_rb3_730e/dual_rb3_730e_stand_ver2_clean.stl"), force="mesh")
     sm.apply_scale(0.001); sm.apply_transform(model.get_transform("stand") @ o)
     server.scene.add_mesh_trimesh("/scene/stand", mesh=sm)
 
