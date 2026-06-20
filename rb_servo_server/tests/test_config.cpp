@@ -523,7 +523,7 @@ bool testFloorConstraintConfigParsesAndDefaults() {
     ::unlink(default_path.c_str());
     RB_CHECK(!defaults.safety.floor_constraint.enable);
     RB_CHECK(near(defaults.safety.floor_constraint.z_min_m, 0.010));
-    RB_CHECK(near(defaults.safety.floor_constraint.runtime_min_z_m, 0.0));
+    RB_CHECK(near(defaults.safety.floor_constraint.runtime_min_z_m, -0.2));
     RB_CHECK(near(defaults.safety.floor_constraint.runtime_max_z_m, 0.5));
     RB_CHECK(defaults.safety.floor_constraint.fail_policy ==
              rb_servo::FloorConstraintFailPolicy::ClampToHold);

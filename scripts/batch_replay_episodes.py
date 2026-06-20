@@ -107,6 +107,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--i-am-at-the-estop", action="store_true")
+    parser.add_argument(
+        "--skip-failed-episodes",
+        action="store_true",
+        help="On a per-episode failure (pre-flight REFUSED or mid-motion fault), record it and CONTINUE to the next episode instead of halting the whole batch. Intended for pgmode-sim data collection (no physical motion). Default off keeps the fail-closed halt for real motion.",
+    )
     parser.add_argument("--source-id", default="tcp_pose_batch_replay")
     parser.add_argument("--state-timeout-sec", type=float, default=2.0)
     parser.add_argument(
@@ -180,9 +185,13 @@ def run_batch(
             results.append(build_episode_result(episode_path, run_dir, init_result, metrics_path, tracking, branch, ik))
             time.sleep(float(args.dwell_sec))
         except BatchHalt as exc:
+            cause = str(exc)
+            results.append(build_failed_result(episode_path, run_dir, init_result, cause))
+            if getattr(args, "skip_failed_episodes", False):
+                print(f"SKIP (continue): {episode_path.name}: {cause}", file=sys.stderr)
+                continue
             halted = True
-            refusal = str(exc)
-            results.append(build_failed_result(episode_path, run_dir, init_result, refusal))
+            refusal = cause
             print(f"BATCH HALT: {refusal}", file=sys.stderr)
             break
 

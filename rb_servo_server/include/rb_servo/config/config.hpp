@@ -312,7 +312,12 @@ struct FloorCheckPointConfig {
 struct FloorConstraintConfig {
     bool enable = false;
     double z_min_m = 0.010;
-    double runtime_min_z_m = 0.0;
+    // Operator-adjustable lower bound for SetSafetyFloorZ. Allowed below the stand
+    // origin (down to -0.2 m) so the floor can be lowered under z=0; this only
+    // widens what the operator MAY set — the applied floor stays z_min_m until a
+    // SetSafetyFloorZ command moves it. Config validation still requires
+    // runtime_min_z_m <= z_min_m <= runtime_max_z_m.
+    double runtime_min_z_m = -0.2;
     double runtime_max_z_m = 0.5;
     FloorConstraintFailPolicy fail_policy = FloorConstraintFailPolicy::ClampToHold;
     // Observe-only: publish per-arm tcp z / violation telemetry without clamping

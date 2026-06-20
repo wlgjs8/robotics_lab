@@ -1531,8 +1531,12 @@ def build_gui(
                 )
                 # Draggable slider + compact integrated number box (viser slider
                 # renders both side by side).
+                # min spans below the stand origin (down to -200 mm) so the floor
+                # can be lowered under z=0; the actual allowed range is governed by
+                # the server's [runtime_min_z_m, runtime_max_z_m] and re-synced onto
+                # this slider in _update_floor_panel once state arrives.
                 floor_slider = server.gui.add_slider(
-                    "Floor z mm", min=0.0, max=500.0, step=1.0, initial_value=10.0
+                    "Floor z mm", min=-200.0, max=500.0, step=1.0, initial_value=10.0
                 )
                 handles["floor_slider"] = floor_slider
                 floor_send = server.gui.add_button("Send floor z")

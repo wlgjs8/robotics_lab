@@ -127,8 +127,8 @@ safety:
     max_accel_deg_s2:    [150, 150, 150, 250, 250, 350]
   floor_constraint:
     enable: true
-    z_min_m: 0.015
-    runtime_min_z_m: 0.0
+    z_min_m: 0.000
+    runtime_min_z_m: -0.2
     runtime_max_z_m: 0.5
     fail_policy: clamp_hold
     monitor_only: true   # TEMP (replay reposition): floor monitors only, no clamp/hold
@@ -147,7 +147,7 @@ safety:
   # 실제 차단(면 슬라이드/홀드)을 보려면 monitor_only=false로 전환.
   roi_box:
     enable: true
-    min_m: [-0.500, -0.900, 0.020]
+    min_m: [-0.500, -0.900, -0.055]
     max_m: [0.500, 0.050, 0.800]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
@@ -164,7 +164,7 @@ safety:
     # spacemouse로 충돌을 시연해도 ResetFault 없이 계속 조작 가능.
     # 빨간 pair 오버레이는 정책과 무관하게 violated면 표시됨.
     fail_policy: clamp_hold
-    monitor_only: false   # enforce: 충돌 방향 명령을 실제 차단(velocity barrier + clamp_hold)
+    monitor_only: true    # SIM-ONLY (2026-06-20 replay analysis): detect+telemetry but DO NOT block, so full-amplitude pgmode replay runs through the self-colliding region for analysis. pgmode = no physical motion. NEVER set true in stack_real.yaml (real keeps enforce).
     # URDF mesh self-collision (async monitor, servo_j 2ms 경로 밖) + 공통 velocity
     # barrier를 실제 차단으로 사용. 파라미터는 TcpPoseTarget/TcpTwistLocal 공통 —
     # 속도는 측정 closing speed로 자동 적응.
@@ -267,7 +267,7 @@ kinematics:
     # DEFAULT OFF until tuned: sigma_min is ~0.004 even in healthy poses, so set
     # eps below that from the ik_sigma_min telemetry at an ik_branch_jump=1 tick.
     singular_region_eps: 0.06   # TUNE-3 (2026-06-20): left sigma_min drops to ~0.039 before IkFailed -> engage damping just above it
-    damping_max: 0.08           # TUNE-3: ramp damping toward this as sigma_min->0 so DLS tracks with small lag instead of failing
+    damping_max: 0.08           # TUNE-4 reverted: 0.20 made it FAIL EARLIER (over-damped). exact wrist singularity (sigma_min=0) cannot be solved by damping at any strength.
     max_solution_jump_deg: 2.0
     # Branch-jump CLAMP (acts, not just observes). When a converged solve still
     # jumps > max_solution_jump_deg from the seed: re-solve the SAME tick at

@@ -115,7 +115,7 @@ safety:
   floor_constraint:
     enable: true
     z_min_m: 0.015
-    runtime_min_z_m: 0.0
+    runtime_min_z_m: -0.2
     runtime_max_z_m: 0.5
     fail_policy: clamp_hold
     monitor_only: true
