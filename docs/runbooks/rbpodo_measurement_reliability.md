@@ -271,7 +271,7 @@ and before interpreting RMS, p95, or max tracking error as controller behavior:
 
 ```bash
 python3 scripts/timestamp_alignment_audit.py \
-  --artifact-dir artifacts/rbpodo_circle_ablation/gene4s_stage1/.../02_fb_kp05_ori05_pub50_speed01 \
+  --artifact-dir artifacts/rbpodo_measurement/<run_id> \
   --output-md alignment_report.md \
   --output-json alignment_summary.json
 ```
@@ -371,7 +371,7 @@ For ablation summaries:
 
 ```bash
 python3 scripts/generate_rbpodo_measurement_reliability_report.py \
-  --ablation-summary-csv artifacts/rbpodo_circle_ablation/gene4s_stage1/ablation_summary.csv \
+  --ablation-summary-csv artifacts/rbpodo_measurement/<run_id>/ablation_summary.csv \
   --artifact-dir artifacts/rbpodo_measurement/reliability_report
 ```
 
