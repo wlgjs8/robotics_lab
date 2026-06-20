@@ -41,6 +41,7 @@ ik-infeasible:
 	python3 tools/ik_infeasible_region.py \
 		--spacing-m $(or $(IK_SPACING),0.05) \
 		--orientations $(or $(IK_ORIENTATIONS),18) \
+		--down-rolls $(or $(IK_DOWN_ROLLS),8) \
 		--seeds $(or $(IK_SEEDS),2)
 
 vm-up:

@@ -49,7 +49,7 @@ def _default_out() -> Path:
 
 
 def run_grid_tool(exe: Path, out_json: Path, spacing: float, orientations: int,
-                  seeds: int, threads: int) -> None:
+                  down_rolls: int, seeds: int, threads: int) -> None:
     """Invoke the C++ feasibility sampler to produce the occupancy grid JSON."""
     if not exe.exists():
         raise SystemExit(
@@ -57,7 +57,7 @@ def run_grid_tool(exe: Path, out_json: Path, spacing: float, orientations: int,
             f"  build it first: cmake --build rb_servo_server/build --target ik_feasibility_grid"
         )
     cmd = [str(exe), "--spacing-m", str(spacing), "--orientations", str(orientations),
-           "--seeds", str(seeds), "--out", str(out_json)]
+           "--down-rolls", str(down_rolls), "--seeds", str(seeds), "--out", str(out_json)]
     if threads > 0:
         cmd += ["--threads", str(threads)]
     print("running:", " ".join(cmd))
@@ -161,7 +161,10 @@ def main() -> int:
                     help="path to the built ik_feasibility_grid tool")
     ap.add_argument("--out", type=Path, default=_default_out())
     ap.add_argument("--spacing-m", type=float, default=0.05)
-    ap.add_argument("--orientations", type=int, default=18)
+    ap.add_argument("--orientations", type=int, default=18,
+                    help="approach directions for the reachability test")
+    ap.add_argument("--down-rolls", type=int, default=8,
+                    help="wrist-roll samples for the top-down IK test")
     ap.add_argument("--seeds", type=int, default=2)
     ap.add_argument("--threads", type=int, default=0)
     ap.add_argument("--smooth-iters", type=int, default=8,
@@ -173,7 +176,7 @@ def main() -> int:
     else:
         tmp = Path(tempfile.gettempdir()) / "ik_feasibility_grid.json"
         run_grid_tool(args.exe, tmp, args.spacing_m, args.orientations,
-                      args.seeds, args.threads)
+                      args.down_rolls, args.seeds, args.threads)
         grid_path = tmp
 
     grid = json.loads(Path(grid_path).read_text())
