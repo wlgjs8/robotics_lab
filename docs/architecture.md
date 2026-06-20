@@ -285,6 +285,20 @@ OUTER-SHELL surface mesh (per-direction max-radius, triangulated) that the rb_gu
 viser overlay renders translucent + double-sided ("도달영역 표시" toggle) so the
 operator sees the reach boundary through the robot/stand.
 
+A complementary viewer-only overlay marks the **IK-infeasible region** — positions
+INSIDE the reach radius that nonetheless have no IK solution for any sampled
+approach direction (the inner dead zone, the lower/back hemisphere the
+shoulder-mounted arm cannot fold into, and the near-full-extension shell where
+orientation freedom collapses). It is distinct from the reach envelope: reach =
+"too far"; IK-infeasible = "close enough but no IK solution". Feasibility is
+sampled by the C++ `ik_feasibility_grid` tool, which reuses the server's REAL
+Pinocchio IK solver (`rb_servo_core`) over a base-frame grid (mount-independent, so
+one mesh serves both arms); `tools/ik_infeasible_region.py` turns the occupancy
+grid into the translucent red surface mesh
+(`descriptions/ik_infeasible_rb3_730e.npz`). It is a static, precomputed viewer
+aid only (no safety enforcement) — regenerate with `make ik-infeasible` if the URDF
+or mount geometry changes. Toggle: "IK 불가 영역 표시" in the 조작 → 안전 tab.
+
 `TcpCircleMove` is an optional benchmark primitive for isolating server-side
 circle generation from Python UDP streaming jitter. It requires
 `cartesian_control.enable_benchmark_primitives: true`,
