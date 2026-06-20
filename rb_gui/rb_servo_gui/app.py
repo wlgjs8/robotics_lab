@@ -67,6 +67,7 @@ from .scene import (
     _robot_urdf_path,
     _stand_mesh_path,
     _update_urdf_config,
+    set_reach_envelope_visible,
     update_circle_overlay,
     update_floor_plane,
     update_floor_plane_preview,
@@ -1355,6 +1356,12 @@ def build_gui(
                 init_right_input = server.gui.add_text(
                     "right J1..J6 (deg)", initial_value=_format_joint6(safety.init_right_joint_deg)
                 )
+                # Exposed in handles so other tabs (e.g. the WayPoint "set as init"
+                # button) can mirror the live InitMotion target back into these
+                # editor boxes — otherwise they keep showing the build-time value
+                # and the update looks like it never happened.
+                handles["init_left_input"] = init_left_input
+                handles["init_right_input"] = init_right_input
                 init_edit_status = server.gui.add_text(
                     "InitMotion edit status", initial_value="edit + Apply, or load current pose", disabled=True
                 )
@@ -1434,7 +1441,17 @@ def build_gui(
 
             @set_init_button.on_click
             def _(_: Any) -> None:
-                _, message = _set_waypoint_as_init(handles, safety)
+                ok, message = _set_waypoint_as_init(handles, safety)
+                if ok:
+                    # Mirror the new target into the InitMotion editor boxes so the
+                    # change is visible there (they are populated once at build time
+                    # and would otherwise keep showing the previous pose).
+                    left_input = handles.get("init_left_input")
+                    right_input = handles.get("init_right_input")
+                    if left_input is not None:
+                        left_input.value = _format_joint6(safety.init_left_joint_deg)
+                    if right_input is not None:
+                        right_input.value = _format_joint6(safety.init_right_joint_deg)
                 handles["waypoint_status"].value = message
 
             @delete_button.on_click
@@ -1540,6 +1557,36 @@ def build_gui(
                 for _axis in ("x", "y", "z"):
                     handles[f"roi_{_axis}_min"].on_update(_roi_preview)
                     handles[f"roi_{_axis}_max"].on_update(_roi_preview)
+
+            with server.gui.add_folder("도달영역(reach)"):
+                # Show/hide the per-arm reachable-workspace cloud (FK envelope from
+                # tools/reach_envelope.py). Static geometry — purely a viewer aid for
+                # seeing where each arm can actually go (the outer shell is the reach
+                # limit the safety.reach_constraint damper enforces). Default OFF
+                # (the cloud is dense); toggling is instant.
+                reach_status = "no asset"
+                scene = handles.get("scene", {})
+                if isinstance(scene, dict) and (
+                    "left_reach_envelope" in scene or "right_reach_envelope" in scene
+                ):
+                    r_max = scene.get("reach_envelope_r_max_m")
+                    r_min = scene.get("reach_envelope_r_min_m")
+                    reach_status = f"shell r=[{r_min:.3f}, {r_max:.3f}] m"
+                elif isinstance(scene, dict) and scene.get("reach_envelope_error"):
+                    reach_status = str(scene["reach_envelope_error"])
+                if hasattr(server.gui, "add_checkbox"):
+                    reach_toggle = server.gui.add_checkbox("도달영역 표시", initial_value=False)
+                    handles["reach_envelope_visible_toggle"] = reach_toggle
+
+                    def _reach_toggle(_: Any) -> None:
+                        set_reach_envelope_visible(
+                            handles.get("scene", {}), bool(reach_toggle.value)
+                        )
+
+                    reach_toggle.on_update(_reach_toggle)
+                handles["reach_envelope_status"] = server.gui.add_text(
+                    "Reach envelope", initial_value=reach_status, disabled=True
+                )
 
     with tabs.add_tab("이동"):
         _move_tabs = server.gui.add_tab_group()

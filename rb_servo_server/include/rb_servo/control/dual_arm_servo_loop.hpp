@@ -17,6 +17,7 @@
 #include "rb_servo/control/collision_monitor.hpp"
 #include "rb_servo/control/floor_constraint.hpp"
 #include "rb_servo/control/roi_box.hpp"
+#include "rb_servo/control/reach_constraint.hpp"
 #include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/safety_filter.hpp"
 #include "rb_servo/control/trajectory_filter.hpp"
@@ -150,6 +151,12 @@ private:
     // Effective (runtime-adjustable) ROI box bounds in meters (stand frame).
     std::array<double, 3> effectiveRoiMin() const;
     std::array<double, 3> effectiveRoiMax() const;
+
+    // Stand-frame reachable-shell constraint (safety.reach_constraint): FK the
+    // arm's TCP for a candidate joint target and evaluate its radial distance from
+    // the arm base against the inner/outer shells. checked=false if kinematics/FK
+    // is unavailable — the caller fails closed.
+    ReachArmEvaluation evaluateReachArm(ArmId arm, const JointArray& q_deg) const;
     // Tier-2 usability clamp: pull a Cartesian target's stand position inside the
     // ROI box (no-op when the constraint is disabled or monitor_only).
     Pose6D clampPoseToRoi(const Pose6D& pose) const;
@@ -327,6 +334,12 @@ private:
     RoiArmEvaluation last_roi_right_{};
     uint64_t roi_clamp_count_ = 0;
     std::string roi_last_set_reject_reason_;
+    // Reachable-shell constraint (safety.reach_constraint): per-arm telemetry of the
+    // last evaluated candidate targets (radial distance from the arm base vs the
+    // inner/outer shells). No runtime-adjust command (shell radii are config-fixed).
+    ReachArmEvaluation last_reach_left_{};
+    ReachArmEvaluation last_reach_right_{};
+    uint64_t reach_clamp_count_ = 0;
     // Controller-sim tracking-error advisory (safety.controller_simulation_tracking_error_nonlatching).
     // Reset each tick in loopMain; set in applySafety when a reference/actual tracking
     // divergence is suppressed (not latched). Surfaced as published telemetry

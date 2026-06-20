@@ -3681,6 +3681,7 @@ ServoTarget DualArmServoLoop::applySafety(
     std::vector<VelocityConstraint> safety_cons;
     bool floor_engaged = false;       // a floor row is within its engage band
     bool roi_engaged = false;          // a ROI-box face row is within its engage band
+    bool reach_engaged = false;        // a reach-shell row is within its engage band
     bool self_collision_hold = false;  // stale verdict -> whole-arm hold, skip solve
 
     // ---- Floor plane: synchronous FK + per-point z-velocity Jacobian ----
@@ -3882,6 +3883,111 @@ ServoTarget DualArmServoLoop::applySafety(
         }
     }
 
+    // ---- Reach shell (workspace reach limit): synchronous FK + per-shell radial ----
+    // The radial generalization of the floor/ROI faces: the TCP (and each offset
+    // point) must stay inside the spherical shell [r_min, r_max] centered on the arm
+    // base. Each shell within its engage band adds one closing-velocity row (along
+    // the binding point's radial direction) to the SAME shared solve, so reach,
+    // floor, ROI box, and self-collision are all reconciled in one Gauss-Seidel pass.
+    // This brakes the TCP to zero radial speed AT the reach boundary and lets it
+    // slide tangentially / return inward, instead of commanding a pose past the
+    // arm's reach where IK fails and the legacy behavior was to silently stop.
+    if (config_.safety.reach_constraint.enable) {
+        const ReachArmEvaluation left_eval = evaluateReachArm(ArmId::Left, out.left_q_target_deg);
+        const ReachArmEvaluation right_eval = evaluateReachArm(ArmId::Right, out.right_q_target_deg);
+        last_reach_left_ = left_eval;    // telemetry, even when already faulted
+        last_reach_right_ = right_eval;
+        if (!config_.safety.reach_constraint.monitor_only &&
+            combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+            const auto& rc = config_.safety.reach_constraint;
+            // Returns true if it LATCHED (caller stops processing the other arm).
+            const auto build_reach_arm = [&](
+                ArmId arm, ControlMode mode, const RobotState& state,
+                const ReachArmEvaluation& eval, JointArray& target_q,
+                const JointArray& prev_sent_q) -> bool {
+                const std::string arm_name = arm == ArmId::Left ? "left" : "right";
+                const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount
+                                                                 : config_.right_mount;
+                const auto fail_closed_hold = [&](const char* why) {
+                    target_q = prev_sent_q;  // hold this arm
+                    resetCartesianVelocityIntegrator(arm, why);
+                    reanchor_twist_smd_goal(arm, state);
+                    if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
+                        combined = SafetyVerdict::RoiViolation;
+                    }
+                };
+                if (!eval.checked) {
+                    // TCP FK unavailable -> fail closed (cannot build a Jacobian).
+                    const std::string reason = "reach shell: " + arm_name + " TCP FK unavailable";
+                    if (rc.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
+                        !isTcpTwistMode(mode)) {
+                        latchFault(SafetyVerdict::RoiViolation, reason, left_state, right_state);
+                        out = currentFaultHoldTarget();
+                        combined = SafetyVerdict::FaultLatched;
+                        return true;
+                    }
+                    fail_closed_hold("reach_fk_unavailable");
+                    return false;
+                }
+                // Hard latch (mirror of floor/ROI): FaultLatch policy + non-twist
+                // (PTP/jog) + outside a shell + not escaping (outside-depth not
+                // shrinking vs the previous sent pose).
+                if (rc.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
+                    !isTcpTwistMode(mode) && eval.violated) {
+                    const ReachArmEvaluation prev_eval = evaluateReachArm(arm, prev_sent_q);
+                    const bool escaping = prev_eval.checked &&
+                        std::isfinite(prev_eval.outside_depth_m) &&
+                        eval.outside_depth_m < prev_eval.outside_depth_m + kReachEscapeEpsilonM;
+                    if (!escaping) {
+                        const std::string reason = "reach shell: " + arm_name + " outside shell (closest " +
+                            eval.closest_shell + ", margin " + std::to_string(eval.min_margin_m) + " m)";
+                        latchFault(SafetyVerdict::RoiViolation, reason, left_state, right_state);
+                        out = currentFaultHoldTarget();
+                        combined = SafetyVerdict::FaultLatched;
+                        return true;
+                    }
+                }
+                // Within the engage band of either shell: add a radial closing-velocity
+                // damper row for that shell's binding point. Inner shell (0): radial
+                // speed >= -sqrt(2 a margin) (block decreasing past r_min); outer shell
+                // (1): <= +sqrt(...) (block increasing past r_max). Outside (margin<0)
+                // xi=0 (block deeper, slide/return free).
+                const int base = arm == ArmId::Left ? 0 : kDof;
+                for (int shell = 0; shell < 2; ++shell) {
+                    const double margin = eval.shells[shell].margin_m;
+                    if (!std::isfinite(margin) || margin >= rc.d_slow_m) continue;  // inf inner = disabled
+                    const math::Vector3& off = eval.shells[shell].offset_tcp;
+                    const std::array<double, 3> offset{off.x(), off.y(), off.z()};
+                    const std::array<double, 3>& dir = eval.shells[shell].dir_stand;
+                    JointArray Jr{};
+                    if (kinematics_ &&
+                        kinematics_->computeStandDirectionJacobian(arm, target_q, mount, offset,
+                                                                   dir, Jr)) {
+                        VelocityConstraint c;
+                        const double sign = shell == 0 ? 1.0 : -1.0;  // inner=+, outer=-
+                        for (int i = 0; i < kDof; ++i) c.J[base + i] = sign * Jr[i];
+                        if (c.J.squaredNorm() > 1e-18) {
+                            c.xi = margin > 0.0 ? std::sqrt(2.0 * rc.a_brake_m_s2 * margin) : 0.0;
+                            c.d_now = margin;
+                            safety_cons.push_back(std::move(c));
+                            reach_engaged = true;
+                        }
+                    } else {
+                        // Jacobian unavailable -> fail closed (revert this arm).
+                        fail_closed_hold("reach_jacobian_unavailable");
+                        return false;
+                    }
+                }
+                return false;
+            };
+            if (!build_reach_arm(ArmId::Left, left_mode, left_state, left_eval,
+                                 out.left_q_target_deg, left_prev_sent_q_deg_)) {
+                build_reach_arm(ArmId::Right, right_mode, right_state, right_eval,
+                                out.right_q_target_deg, right_prev_sent_q_deg_);
+            }
+        }
+    }
+
     // Dual-arm self-collision guard: never command a configuration that brings the
     // two arms (or an arm and the stand) within the mesh barrier's hard floor.
     // Evaluated on the final candidate targets (post per-arm filtering). The single
@@ -4015,9 +4121,11 @@ ServoTarget DualArmServoLoop::applySafety(
         if (left_blocked || right_blocked) {
             if (floor_engaged) ++floor_clamp_count_;
             if (roi_engaged) ++roi_clamp_count_;
+            if (reach_engaged) ++reach_clamp_count_;
             if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                 combined = floor_engaged ? SafetyVerdict::FloorViolation
                          : roi_engaged   ? SafetyVerdict::RoiViolation
+                         : reach_engaged ? SafetyVerdict::RoiViolation
                                          : SafetyVerdict::SelfCollision;
             }
         }
@@ -4031,6 +4139,7 @@ ServoTarget DualArmServoLoop::applySafety(
                 std::cerr << "[safety-proj] cons=" << proj.active_pairs
                           << (floor_engaged ? " (incl floor)" : "")
                           << (roi_engaged ? " (incl roi)" : "")
+                          << (reach_engaged ? " (incl reach)" : "")
                           << " corr(L/R)=" << proj.left_correction_deg_s << "/"
                           << proj.right_correction_deg_s << " deg/s"
                           << ((left_blocked || right_blocked) ? "  BLOCKED" : "") << "\n";
@@ -4092,6 +4201,30 @@ RoiArmEvaluation DualArmServoLoop::evaluateRoiArm(ArmId arm, const JointArray& q
         }
     } catch (const std::exception&) {
         return RoiArmEvaluation{};  // checked=false -> caller fails closed
+    }
+    return eval;
+}
+
+ReachArmEvaluation DualArmServoLoop::evaluateReachArm(ArmId arm, const JointArray& q_deg) const {
+    ReachArmEvaluation eval;
+    if (!kinematics_ || !finiteJointArray(q_deg)) {
+        return eval;  // checked=false -> caller fails closed
+    }
+    const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount : config_.right_mount;
+    // The shell is centered on the arm's mount (shoulder) origin in the stand frame.
+    const std::array<double, 3> base_stand{mount.base_pose_in_stand.x,
+                                           mount.base_pose_in_stand.y,
+                                           mount.base_pose_in_stand.z};
+    try {
+        const Pose6D tcp = kinematics_->computeTcpStand(arm, q_deg, mount);
+        if (!reachEvaluateShell(tcp, base_stand,
+                                config_.safety.reach_constraint.tcp_offset_points,
+                                config_.safety.reach_constraint.r_min_m,
+                                config_.safety.reach_constraint.r_max_m, &eval)) {
+            return ReachArmEvaluation{};  // checked=false -> caller fails closed
+        }
+    } catch (const std::exception&) {
+        return ReachArmEvaluation{};  // checked=false -> caller fails closed
     }
     return eval;
 }

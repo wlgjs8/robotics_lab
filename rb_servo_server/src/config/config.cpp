@@ -839,6 +839,42 @@ void validateConfig(const DualArmConfig& cfg) {
             }
         }
     }
+    if (cfg.safety.reach_constraint.enable) {
+        const auto& rc = cfg.safety.reach_constraint;
+        if (!std::isfinite(rc.r_max_m) || rc.r_max_m <= 0.0) {
+            throw std::runtime_error("safety.reach_constraint.r_max_m must be finite and positive");
+        }
+        if (!std::isfinite(rc.r_min_m)) {
+            throw std::runtime_error("safety.reach_constraint.r_min_m must be finite");
+        }
+        // r_min_m <= 0 disables the inner shell; when active it must be below r_max.
+        if (rc.r_min_m > 0.0 && rc.r_min_m >= rc.r_max_m) {
+            throw std::runtime_error(
+                "safety.reach_constraint requires r_min_m < r_max_m when the inner shell is active");
+        }
+        if (!std::isfinite(rc.a_brake_m_s2) || rc.a_brake_m_s2 <= 0.0) {
+            throw std::runtime_error("safety.reach_constraint.a_brake_m_s2 must be finite and positive");
+        }
+        if (!std::isfinite(rc.d_slow_m) || rc.d_slow_m < 0.0) {
+            throw std::runtime_error("safety.reach_constraint.d_slow_m must be finite and non-negative");
+        }
+        if (!cfg.kinematics.enable) {
+            throw std::runtime_error(
+                "safety.reach_constraint.enable=true requires kinematics.enable=true (TCP FK source)");
+        }
+        for (const FloorCheckPointConfig& point : rc.tcp_offset_points) {
+            if (point.name.empty()) {
+                throw std::runtime_error(
+                    "safety.reach_constraint.tcp_offset_points entries need a non-empty name");
+            }
+            for (double value : point.offset_m) {
+                if (!std::isfinite(value)) {
+                    throw std::runtime_error(
+                        "safety.reach_constraint.tcp_offset_points offsets must be finite (" + point.name + ")");
+                }
+            }
+        }
+    }
     validatePositiveFinite(cfg.servo.filter_dt_min_ratio, "servo.filter_dt_min_ratio");
     if (cfg.servo.output_moving_average_window < 0 || cfg.servo.output_moving_average_window > 5000) {
         throw std::runtime_error("servo.output_moving_average_window must be in [0, 5000]");
@@ -1607,6 +1643,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "self_collision",
             "floor_constraint",
             "roi_box",
+            "reach_constraint",
             "joint_target_smd",
         }, "safety");
         if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
@@ -1924,6 +1961,74 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                             "safety.roi_box.tcp_offset_points.offset_m");
                     }
                     cfg.safety.roi_box.tcp_offset_points.push_back(point);
+                }
+            }
+        }
+        if (has(sec, "reach_constraint")) {
+            const YAML::Node rc = sec["reach_constraint"];
+            validateAllowedKeys(rc, {
+                "enable",
+                "r_max_m",
+                "r_min_m",
+                "fail_policy",
+                "monitor_only",
+                "tcp_offset_points",
+                "a_brake_m_s2",
+                "d_slow_m",
+            }, "safety.reach_constraint");
+            if (has(rc, "enable")) {
+                cfg.safety.reach_constraint.enable =
+                    asBool(rc["enable"], "safety.reach_constraint.enable");
+            }
+            if (has(rc, "r_max_m")) {
+                cfg.safety.reach_constraint.r_max_m =
+                    asDouble(rc["r_max_m"], "safety.reach_constraint.r_max_m");
+            }
+            if (has(rc, "r_min_m")) {
+                cfg.safety.reach_constraint.r_min_m =
+                    asDouble(rc["r_min_m"], "safety.reach_constraint.r_min_m");
+            }
+            if (has(rc, "fail_policy")) {
+                cfg.safety.reach_constraint.fail_policy =
+                    parseFloorConstraintFailPolicy(rc["fail_policy"], "safety.reach_constraint.fail_policy");
+            }
+            if (has(rc, "monitor_only")) {
+                cfg.safety.reach_constraint.monitor_only =
+                    asBool(rc["monitor_only"], "safety.reach_constraint.monitor_only");
+            }
+            if (has(rc, "a_brake_m_s2")) {
+                cfg.safety.reach_constraint.a_brake_m_s2 =
+                    asDouble(rc["a_brake_m_s2"], "safety.reach_constraint.a_brake_m_s2");
+            }
+            if (has(rc, "d_slow_m")) {
+                cfg.safety.reach_constraint.d_slow_m =
+                    asDouble(rc["d_slow_m"], "safety.reach_constraint.d_slow_m");
+            }
+            if (has(rc, "tcp_offset_points")) {
+                const YAML::Node points = rc["tcp_offset_points"];
+                if (!points.IsSequence()) {
+                    fail("safety.reach_constraint.tcp_offset_points must be a sequence", points);
+                }
+                cfg.safety.reach_constraint.tcp_offset_points.clear();
+                for (std::size_t i = 0; i < points.size(); ++i) {
+                    const YAML::Node entry = points[i];
+                    validateAllowedKeys(entry, {"name", "offset_m"},
+                        "safety.reach_constraint.tcp_offset_points");
+                    FloorCheckPointConfig point;
+                    if (has(entry, "name")) {
+                        point.name = asString(entry["name"],
+                            "safety.reach_constraint.tcp_offset_points.name");
+                    }
+                    if (!has(entry, "offset_m") || !entry["offset_m"].IsSequence() ||
+                        entry["offset_m"].size() != 3) {
+                        fail("safety.reach_constraint.tcp_offset_points entries need offset_m: [x, y, z]",
+                             entry);
+                    }
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        point.offset_m[axis] = asDouble(entry["offset_m"][axis],
+                            "safety.reach_constraint.tcp_offset_points.offset_m");
+                    }
+                    cfg.safety.reach_constraint.tcp_offset_points.push_back(point);
                 }
             }
         }

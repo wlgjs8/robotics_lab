@@ -160,6 +160,10 @@ if(BUILD_TESTING)
     target_link_libraries(test_roi_box PRIVATE rb_servo_core)
     add_test(NAME roi_box COMMAND test_roi_box)
 
+    add_executable(test_reach_constraint tests/test_reach_constraint.cpp)
+    target_link_libraries(test_reach_constraint PRIVATE rb_servo_core)
+    add_test(NAME reach_constraint COMMAND test_reach_constraint)
+
     add_executable(test_cartesian_planner tests/test_cartesian_planner.cpp)
     target_link_libraries(test_cartesian_planner PRIVATE rb_servo_core)
     add_test(NAME cartesian_planner COMMAND test_cartesian_planner)
