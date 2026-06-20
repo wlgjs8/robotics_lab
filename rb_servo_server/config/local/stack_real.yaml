@@ -17,7 +17,7 @@ left_robot:
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
   servo_gain: 1.0           # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
-  servo_alpha: 10 #10.0
+  servo_alpha: 10.0 #10.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming (requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1)
 
 right_robot:
@@ -32,7 +32,7 @@ right_robot:
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
   servo_gain: 1.0                 # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
-  servo_alpha: 10 #10.0
+  servo_alpha: 10.0 #10.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming (requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1)
 
 left_mount:

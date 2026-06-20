@@ -33,7 +33,7 @@ left_robot:
   speed_bar: 1.0                  # applied at backend initialize via set_speed_bar()
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
-  servo_gain: 1000000.0           # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
+  servo_gain: 1.0           # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
   servo_alpha: 10.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming (requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1)
 
@@ -48,7 +48,7 @@ right_robot:
   speed_bar: 1.0               # applied at backend initialize via set_speed_bar()
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
-  servo_gain: 1000000.0                 # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
+  servo_gain: 1.0                 # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
   servo_alpha: 10.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming (requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1)
 
