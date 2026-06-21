@@ -121,7 +121,7 @@ _DESIRED_MODES = ("simulation", "real")
 _TCP_FRAME_STAND = "Stand/world"
 _TCP_FRAME_LOCAL = "TCP local"
 _TCP_FRAME_OPTIONS = (_TCP_FRAME_STAND, _TCP_FRAME_LOCAL)
-_TCP_LINEAR_ARM_OPTIONS = ("left", "right", "both")
+_TCP_LINEAR_ARM_OPTIONS = ("both", "left", "right")
 _TCP_PTP_ARM_OPTIONS = ("both", "left", "right")
 _TCP_PTP_AXES = (
     ("x", 0, False),
@@ -951,8 +951,12 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
   }}
   .rb-monitor-header-card {{
     top: 1em;
+    /* Extra room below the deg/rad radios comes from min-height only — NOT from
+       padding-bottom. Padding counts toward content height, and if content grows
+       past min-height the header card overflows and overlaps the body card,
+       stacking two 0.96-alpha backgrounds into a brighter seam in the gap. */
     min-height: 4.95em;
-    padding: 0.65em 0.8em 1.05em;
+    padding: 0.65em 0.8em 0.55em;
     border-radius: 0.45em 0.45em 0 0;
     border-bottom: 0;
   }}
@@ -1031,7 +1035,7 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
     .rb-monitor-card {{ font-size: 11px; }}
     .rb-monitor-header-card {{
       min-height: 4.5em;
-      padding: 0.55em 0.65em 0.95em;
+      padding: 0.55em 0.65em 0.45em;
     }}
     .rb-monitor-body-card {{
       top: 5.5em;
@@ -1815,7 +1819,7 @@ def build_gui(
                     "Reach envelope", initial_value=reach_status, disabled=True
                 )
 
-            with server.gui.add_folder("A 영역 (특이점 원통)"):
+            with server.gui.add_folder("IK 불가 영역 (특이점 원통)"):
                 # Show/hide the per-arm base-axis singularity cylinder (tools/
                 # ik_infeasible_region.py). Vendor "A 영역": the column along each
                 # arm's J1 axis where Move J is fine but Cartesian/Move L control
@@ -1837,7 +1841,7 @@ def build_gui(
                     ik_status = str(scene["ik_infeasible_error"])
                 if hasattr(server.gui, "add_checkbox"):
                     ik_toggle = server.gui.add_checkbox(
-                        "A 영역(특이점 원통) 표시", initial_value=False
+                        "IK 불가 영역(특이점 원통) 표시", initial_value=False
                     )
                     handles["ik_infeasible_visible_toggle"] = ik_toggle
 
@@ -1848,7 +1852,7 @@ def build_gui(
 
                     ik_toggle.on_update(_ik_infeasible_toggle)
                 handles["ik_infeasible_status"] = server.gui.add_text(
-                    "A 영역", initial_value=ik_status, disabled=True
+                    "IK 불가 영역", initial_value=ik_status, disabled=True
                 )
 
         with _op_tabs.add_tab("그리퍼"):

@@ -232,6 +232,10 @@ _REFERENCE_GHOST_RGBA = (0.25, 0.6, 1.0, 0.35)
 _SELF_COLLISION_RGBA = (0.85, 0.08, 0.08, 0.6)
 _SELF_COLLISION_STAND_RGB = (217, 20, 20)
 _SELF_COLLISION_STAND_OPACITY = 0.6
+# Neutral mid-dark gray for the stand. (The RB3-730E URDF "dark_gray" material
+# reads near-black with a green-cyan cast, since its rgba 0.07227/0.09084/0.09759
+# is neither neutral nor light; this flat (90, 90, 90) is true gray and lighter.)
+_RB3_DARK_GRAY_RGB = (90, 90, 90)
 # Translucent blue overlay of the checked collision hulls (URDF <collision> meshes).
 _SELF_COLLISION_CHECK_RGBA = (0.27, 0.62, 1.0, 0.38)
 
@@ -415,7 +419,7 @@ def _ik_infeasible_path() -> Path:
 
 
 def _cylinder_outline_segments(
-    radius: float, z_lo: float, z_hi: float, *, n_around: int = 48, n_verticals: int = 6
+    radius: float, z_lo: float, z_hi: float, *, n_around: int = 48, n_verticals: int = 0
 ) -> Any:
     """Line segments (M,2,3) outlining a z-axis cylinder: top + bottom rim circles
     plus a few vertical generator lines. Coaxial with base z, centered at xy=(0,0)."""
@@ -429,9 +433,10 @@ def _cylinder_outline_segments(
         ring = np.stack([cos, sin, np.full_like(cos, z)], axis=1)
         for i in range(len(ring)):
             segments.append([ring[i], ring[(i + 1) % len(ring)]])
-    step = max(1, int(n_around) // int(max(1, n_verticals)))
-    for i in range(0, int(n_around), step):  # vertical generators
-        segments.append([[cos[i], sin[i], float(z_lo)], [cos[i], sin[i], float(z_hi)]])
+    if int(n_verticals) > 0:  # vertical generators (n_verticals=0 -> rim circles only)
+        step = max(1, int(n_around) // int(n_verticals))
+        for i in range(0, int(n_around), step):
+            segments.append([[cos[i], sin[i], float(z_lo)], [cos[i], sin[i], float(z_hi)]])
     return np.asarray(segments, dtype=np.float32)
 
 
@@ -1422,6 +1427,12 @@ def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
 
         mesh = trimesh.load_mesh(str(stand_mesh_path))
         mesh.apply_scale(0.001)
+        # Paint the stand the RB3-730E dark gray (STL carries no color, so trimesh
+        # otherwise defaults to a lighter (102, 102, 102) gray).
+        try:
+            mesh.visual.face_colors = (*_RB3_DARK_GRAY_RGB, 255)
+        except Exception as exc:
+            handles["stand_mesh_color_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
         handles["stand_mesh"] = server.scene.add_mesh_trimesh(
             "/stand/mesh",
             mesh=mesh,

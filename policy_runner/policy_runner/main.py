@@ -1426,6 +1426,47 @@ def _main_with_subcommands(argv: list[str]) -> int:
             if any(result.sent_to_physical for result in open_results):
                 time.sleep(1.5)
                 print("[flow-infer] startup gripper open settle: waited 1.5s", flush=True)
+        elif (
+            rollout_policy.mode.value == "real_policy"
+            and bool(config.safety.allow_real_gripper_motion)
+            and os.environ.get("RB_ALLOW_REAL_GRIPPER") == "1"
+        ):
+            # Gripper rides the COMMAND STREAM (gripper.backend != pika_serial -> no direct
+            # backend here; a separate gripper_server owns the pika serial). The direct-backend
+            # startup-open above is skipped, so open both grippers via a Hold + gripper_target=100
+            # command instead: rb_servo_server forwards the gripper setpoint to the gripper_server
+            # regardless of arm mode, so inference still begins from a known OPEN pose.
+            from .robot_state_client import RobotStateClient, StateStreamLeaseReadback
+
+            _osc = RobotStateClient(config.robot_state.bind, config.robot_state.stale_timeout_sec)
+            _osc.start()
+            _occ = ServoCommandClient(config.servo_command.endpoint, config.servo_command.timeout_sec)
+            try:
+                _ot0 = time.monotonic()
+                while _osc.latest is None and time.monotonic() - _ot0 < 5.0:
+                    time.sleep(0.05)
+                if _osc.latest is None:
+                    print("[flow-infer] startup gripper open (command-stream) SKIPPED: no robot state", flush=True)
+                else:
+                    _occ.acquire_lease(StateStreamLeaseReadback(_osc), timeout_sec=4.0)
+                    _occ.send(CommandIntent.arm_motion(timeout_sec=0.5))
+                    time.sleep(0.2)
+                    _open_intent = CommandIntent(
+                        "Hold",
+                        timeout_sec=1.0,
+                        left={"mode": "Hold", "gripper_target": 100.0},
+                        right={"mode": "Hold", "gripper_target": 100.0},
+                    )
+                    _odl = time.monotonic() + 1.5
+                    while time.monotonic() < _odl:
+                        _occ.send(_open_intent)
+                        time.sleep(0.05)
+                    _occ.release_lease()
+                    time.sleep(0.3)
+                    print("[flow-infer] startup gripper open via command stream (both -> 100%)", flush=True)
+            finally:
+                _occ.close()
+                _osc.close()
         try:
             policy_dt_sec = resolve_flow_policy_dt_sec(
                 rollout_policy.mode,
