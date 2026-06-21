@@ -1391,6 +1391,16 @@ def log_row(
     q_actual = arm_state.get("q_actual_deg") if isinstance(arm_state, dict) else None
     q_target = arm_state.get("q_target_deg") if isinstance(arm_state, dict) else None
     solve = arm_state.get("cartesian_solve") if isinstance(arm_state, dict) and isinstance(arm_state.get("cartesian_solve"), dict) else {}
+    # Safety telemetry lives in top-level objects (per-arm sub-dicts) plus the
+    # per-arm cartesian_solve clamp flags. The legacy *_active snapshot keys do
+    # not exist in the published state schema (robotics_lab.servo_state.v1).
+    snap = snapshot if isinstance(snapshot, dict) else {}
+    roi_box = snap.get("roi_box") if isinstance(snap.get("roi_box"), dict) else {}
+    floor_obj = snap.get("floor_constraint") if isinstance(snap.get("floor_constraint"), dict) else {}
+    self_coll = snap.get("self_collision") if isinstance(snap.get("self_collision"), dict) else {}
+    roi_arm = roi_box.get(arm) if isinstance(roi_box.get(arm), dict) else {}
+    floor_arm = floor_obj.get(arm) if isinstance(floor_obj.get(arm), dict) else {}
+    verdict = str(snap.get("safety_verdict", "")).strip().lower()
     row = {
         "t": t,
         "t_source": t_source,
@@ -1414,10 +1424,21 @@ def log_row(
         "ik_branch_jump_clamped": _boolish(solve.get("ik_branch_jump_clamped")),
         "branch_jump_flag": _boolish(solve.get("ik_branch_jump_suspected")),
         "singular_damping_flag": _boolish(solve.get("singular_damping_flag")),
-        "safety_proj_flag": _boolish((snapshot or {}).get("safety_projection_active")),
-        "self_collision_flag": _boolish((snapshot or {}).get("self_collision_active")),
-        "floor_flag": _boolish((snapshot or {}).get("floor_active")),
-        "roi_flag": _boolish((snapshot or {}).get("roi_active")),
+        "safety_proj_flag": _boolish(bool(verdict) and verdict != "ok"),
+        "self_collision_flag": _boolish(bool(self_coll.get("violated"))),
+        "floor_flag": _boolish(bool(floor_arm.get("violated")) or bool(solve.get("floor_goal_clamped"))),
+        "roi_flag": _boolish(bool(roi_arm.get("violated"))),
+        # SMD / velocity clamp (the controller-side speed-limit signal): when the
+        # streamed goal exceeds the SMD max velocity the reference is rate-limited.
+        "smd_goal_clamped_flag": _boolish(bool(solve.get("twist_smd_goal_clamped")) or bool(solve.get("twist_clamped"))),
+        "self_collision_min_clearance_m": _finite_or_nan(self_coll.get("min_clearance_m")),
+        "roi_min_margin_m": _finite_or_nan(roi_arm.get("min_margin_m")),
+        "floor_tcp_z_m": _finite_or_nan(floor_arm.get("tcp_z_m")),
+        # command-vs-reference tracking error (deg) — the latch-relevant series in
+        # pgmode (physical q_actual is frozen so physical_command_actual is N/A).
+        "command_reference_tracking_error_deg": _finite_or_nan(
+            arm_state.get("command_reference_tracking_error_deg") if isinstance(arm_state, dict) else None
+        ),
     }
     if isinstance(snapshot, dict):
         row.update(
@@ -1646,6 +1667,14 @@ def _boolish(value: Any) -> bool | float:
     if isinstance(value, bool):
         return value
     return np.nan
+
+
+def _finite_or_nan(value: Any) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return out if np.isfinite(out) else float("nan")
 
 
 def _jsonable(value: Any) -> Any:

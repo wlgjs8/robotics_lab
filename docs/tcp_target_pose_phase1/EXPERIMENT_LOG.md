@@ -118,6 +118,13 @@ ACTION_SOURCE=none make run MODE=sim
 - **배치 구조적 한계 재확인**: 배치는 컨트롤러 fault를 in-process로 못 푼다(stop→real/sim 토글→restart만). 따라서 fault 한 번=나머지 전멸. 13개 완주하려면 fault를 아예 안 내야 함.
 - **정리**: 세션 종료 시 `bp3vzebem` make run 정지 → real/sim 토글로 latch 클리어(simulation 복귀, servo_power_changed=false) → 전 프로세스 down 확인.
 
+## E2. 전수 pgprofile 캠페인 (2026-06-21, scale=1.0 / ts=1.0 고정, 383개)
+383개(`data_tcp/replay_profiling_20260620/`)를 **scale 1.0·time_scale 1.0 고정**으로 pgmode 전수 재생·분류. 실패는 고치지 않고 분류, 서버 profile(`outputs/tcp_pgprofile/current_smd/as_tested_stack_sim.yaml`) **무튜닝 평가**. 도구: `scripts/{build_pgprofile_manifest,analyze_pgprofile_run,run_pgprofile_campaign,plot_pgprofile,report_pgprofile}.py`. 산출물: `outputs/tcp_pgprofile/`(manifest.{json,csv}, per-ep audit/result, current_smd/{REPORT.md, plots/, as_tested yaml}).
+
+- **3계층 goal metric**(사용자 명확화): A goal_conditioning_quality / **B controller_reference_goal_following = reference_after_B(tcp_ref_stand) vs conditioned_goal + IK·safety (pgmode HEADLINE)** / C physical_goal_tracking(=**not_measured**, q_actual frozen·span≈0 자동판정). actual_tcp 임계값 N/A 명시(무조작).
+- **결과**: 컨트롤러 fault **0회**(방향 pika_rz180 수정 후 손목 특이점 cascade 비재현). 분류 — SPEED_LIMITED 286(74.7%), SELF_COLLISION_RISK 32(8.4%), TRACKING_LAG_HIGH 22(5.7%), IK_FAILURE 21(5.5%, mid-stream `safety_verdict=IkFailed`=손목 특이점), IK_BRANCH_RISK 17(4.4%), SINGULARITY_RISK 5(1.3%), **REAL_READY_TS_1P0 0**.
+- **핵심**: B-tier 일관 우수(span_ratio≈1.0, endpoint p50 2.7mm, lag p50 94ms<150); pointwise pos p95(p50 24mm)는 SMD lag 산물(왜곡 아님→TRACKING_LAG_HIGH 보수적). IK 비병목(solve p95 ~14µs≪2ms). ts=1.0 속도budget 통과 25/383(제약=linear 0.25 m/s; required_ts p50 1.29). full amplitude 최대 실위험=양팔 self-collision 근접. → **scale 1.0/ts 1.0 동시 고정에선 REAL_READY 0 = 기하·속도적으로 미달성**(속도캡·self-collision·손목특이점). 드라이버 client 속도가드만 5.0/10.0로 올려 서버 SMD가 실제 클램프하게 함(서버 config 불변).
+
 ## F. 알려진 한계 & 다음
 - **pgmode 추종 데이터는 무효**(q_actual 동결 → trackP95는 모션크기, 추종 아님). **서버측 IK(branch-jump/sigma_min/solve_us)만 유효**. 실추종은 J5 수리 후 real.
 - **full-amplitude(scale≥0.6) replay는 손목 특이점에 막힘** — IK 튜닝으로 근접영역까진 견디나 exact singularity는 불가. 실용: scale ≤0.5, 또는 init-pose 재앵커로 특이영역 회피.

@@ -541,6 +541,10 @@ def _scalar_str(value: Any) -> str:
 def _value(value: Any) -> float:
     if value is None or value == "":
         return np.nan
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "false"):
+            return 1.0 if low == "true" else 0.0
     try:
         return float(value)
     except (TypeError, ValueError):

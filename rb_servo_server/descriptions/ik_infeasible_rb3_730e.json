@@ -1,12 +1,15 @@
 {
+  "region": "reachable_and_not_topdown",
   "r_min_m": 0.1331,
   "r_max_m": 1.0583,
   "spacing_m": 0.05,
   "orientations": 18,
+  "down_rolls": 8,
   "seeds": 2,
-  "occupied_cells": 11597,
-  "vertices": 12863,
-  "faces": 26560,
+  "left_cells": 19593,
+  "right_cells": 19563,
+  "left_vertices": 10384,
+  "right_vertices": 10243,
   "ik": {
     "max_iterations": 200,
     "timeout_ms": 10.0
