@@ -388,10 +388,10 @@ cartesian_control:
     # peak-velocity change = no saturation) + raise velocity cap to 0.32 (right stays
     # ~31 deg/s << 60, so no right-arm saturation). Caveat: left j3 is high-gain and
     # already pins dq_max 90 at 0.25, so 0.32 makes left j3 saturate a touch more.
-    max_linear_velocity_m_s: 0.32       # step2 0.25 (was 0.5); recover fast-swing responsiveness, right still < dq_max
-    max_linear_accel_m_s2: 6.0            # 2026-06-19 Phase2a: 10→6 (LPF off → soften dq_max saturation edges, no top-speed/reach loss)
-    max_angular_velocity_rad_s: 0.6   # step2 0.5
-    max_angular_accel_rad_s2: 30.0     # 2026-06-19 Phase2a: 50→30 (LPF off → soften saturation edges)
+    max_linear_velocity_m_s: 0.25       # SYNCED-TO-stack_real (driver pre-flight guard == server SMD ceiling)
+    max_linear_accel_m_s2: 1.0          # SYNCED-TO-stack_real
+    max_angular_velocity_rad_s: 1.745329252   # SYNCED-TO-stack_real (100 deg/s)
+    max_angular_accel_rad_s2: 6.981317008     # SYNCED-TO-stack_real (400 deg/s^2)
   max_command_actual_error_deg: [10, 10, 10, 16, 16, 20]
   reset_velocity_integrator_on_mode_change: true
   command_actual_error_policy: reset
