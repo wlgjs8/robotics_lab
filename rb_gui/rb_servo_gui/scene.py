@@ -401,13 +401,56 @@ def set_reach_envelope_visible(scene_handles: dict[str, Any], visible: bool) -> 
 # of radius R = v_ref/dq_max, axial extent FK-clipped to the reach envelope, built
 # by tools/ik_infeasible_region.py. The same base-frame cylinder serves both arms
 # (the singularity is mount-independent in base frame); each /stand/<side>_base node
-# applies the mount tilt. Drawn red; back-face culling is fine (convex watertight).
-_IK_INFEASIBLE_RED = (220, 70, 70)
-_IK_INFEASIBLE_OPACITY = 0.20
+# applies the mount tilt. Drawn vivid red; back-face culling is fine (convex
+# watertight). A cylinder has no real edges, so the rim is emphasised separately with
+# bright opaque line segments (top/bottom circles + vertical generators) so the column
+# reads clearly even through the translucent fill (see _cylinder_outline_segments).
+_IK_INFEASIBLE_RED = (255, 45, 45)
+_IK_INFEASIBLE_OPACITY = 0.22
+_IK_INFEASIBLE_EDGE_RED = (255, 130, 130)
 
 
 def _ik_infeasible_path() -> Path:
     return _asset_path("RB_GUI_IK_INFEASIBLE", "ik_infeasible_rb3_730e.npz")
+
+
+def _cylinder_outline_segments(
+    radius: float, z_lo: float, z_hi: float, *, n_around: int = 48, n_verticals: int = 6
+) -> Any:
+    """Line segments (M,2,3) outlining a z-axis cylinder: top + bottom rim circles
+    plus a few vertical generator lines. Coaxial with base z, centered at xy=(0,0)."""
+    import numpy as np
+
+    theta = np.linspace(0.0, 2.0 * np.pi, int(n_around), endpoint=False)
+    cos = np.cos(theta) * float(radius)
+    sin = np.sin(theta) * float(radius)
+    segments = []
+    for z in (float(z_lo), float(z_hi)):  # two rim circles
+        ring = np.stack([cos, sin, np.full_like(cos, z)], axis=1)
+        for i in range(len(ring)):
+            segments.append([ring[i], ring[(i + 1) % len(ring)]])
+    step = max(1, int(n_around) // int(max(1, n_verticals)))
+    for i in range(0, int(n_around), step):  # vertical generators
+        segments.append([[cos[i], sin[i], float(z_lo)], [cos[i], sin[i], float(z_hi)]])
+    return np.asarray(segments, dtype=np.float32)
+
+
+def _ik_infeasible_outline_geometry(data: Any, arm: str) -> Any:
+    """Cylinder rim segments from the asset (radius_m/z_lo_m/z_hi_m), or from the
+    arm's vertices as a fallback. Returns None if geometry can't be derived."""
+    import numpy as np
+
+    verts = np.asarray(data[f"{arm}_vertices_base_m"], dtype=np.float64)
+    if verts.ndim != 2 or verts.shape[1] != 3 or len(verts) == 0:
+        return None
+    radius = float(data["radius_m"]) if "radius_m" in data else float(
+        np.max(np.sqrt(verts[:, 0] ** 2 + verts[:, 1] ** 2))
+    )
+    z_lo = float(data["z_lo_m"]) if "z_lo_m" in data else float(np.min(verts[:, 2]))
+    z_hi = float(data["z_hi_m"]) if "z_hi_m" in data else float(np.max(verts[:, 2]))
+    if not (math.isfinite(radius) and radius > 0.0 and z_hi > z_lo):
+        return None
+    return _cylinder_outline_segments(radius, z_lo, z_hi)
 
 
 def _add_ik_infeasible_region(server: Any, handles: dict[str, Any]) -> None:
@@ -460,6 +503,23 @@ def _add_ik_infeasible_region(server: Any, handles: dict[str, Any]) -> None:
                     color=_IK_INFEASIBLE_RED,
                     visible=False,
                 )
+            # Bright opaque rim outline (top/bottom circles + vertical generators) so
+            # the cylinder reads clearly through the translucent fill. Same /stand/
+            # <arm>_base parent as the mesh, so it inherits the mount tilt; toggled
+            # together with the fill in set_ik_infeasible_region_visible.
+            if hasattr(server.scene, "add_line_segments"):
+                try:
+                    outline = _ik_infeasible_outline_geometry(data, arm)
+                    if outline is not None:
+                        handles[f"{arm}_ik_infeasible_outline"] = server.scene.add_line_segments(
+                            f"/stand/{arm}_base/ik_infeasible_outline",
+                            points=outline,
+                            colors=_IK_INFEASIBLE_EDGE_RED,
+                            line_width=3.0,
+                            visible=False,
+                        )
+                except Exception as exc:
+                    handles[f"{arm}_ik_infeasible_outline_error"] = f"{type(exc).__name__}: {exc}"
             added = True
         if not added:
             handles["ik_infeasible_error"] = f"IK-infeasible asset empty: {path}"
@@ -472,11 +532,12 @@ def _add_ik_infeasible_region(server: Any, handles: dict[str, Any]) -> None:
 
 
 def set_ik_infeasible_region_visible(scene_handles: dict[str, Any], visible: bool) -> None:
-    """Show/hide both arms' IK-infeasible region meshes (GUI toggle)."""
+    """Show/hide both arms' IK-infeasible region meshes + rim outlines (GUI toggle)."""
     if not isinstance(scene_handles, dict):
         return
     for arm in ("left", "right"):
         _set_visible(scene_handles.get(f"{arm}_ik_infeasible"), visible)
+        _set_visible(scene_handles.get(f"{arm}_ik_infeasible_outline"), visible)
 
 
 def _add_floor_plane(server: Any, handles: dict[str, Any]) -> None:

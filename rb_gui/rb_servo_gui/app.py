@@ -459,17 +459,17 @@ def _set_tcp_axis_absolute_and_send(
     return _send_tcp_pose_target_from_marker(safety, scene_handles, arm)
 
 
-def _refresh_tcp_ptp_axis_fields(handles: dict[str, Any], *, force: bool = False) -> None:
-    """Populate the TCP PTP per-axis number fields.
+def _refresh_tcp_ptp_axis_fields(handles: dict[str, Any]) -> bool:
+    """Populate the TCP PTP per-axis number fields; return True if values were set.
 
     In TCP-local frame the fields are relative deltas, so they read 0. In
-    stand/world frame they mirror the live stand-frame TCP target (mm / deg) of
-    the display arm. Auto-refresh (force=False) stops once the target is
-    user-moved so it never fights a value the operator just typed or nudged;
-    force=True repaints after an explicit edit/nudge."""
+    stand/world frame they mirror the stand-frame TCP target (mm / deg) of the
+    display arm. This is event-driven (arm/frame switch, nudge, commit) plus a
+    one-shot fill on first state, never a periodic repaint — so it never fights a
+    value the operator is mid-typing."""
     fields = handles.get("tcp_ptp_axis_fields")
     if not fields:
-        return
+        return False
     scene_handles = handles.get("scene", {})
     frame_mode = _tcp_frame_mode(handles)
     arm = _tcp_ptp_arm(handles)
@@ -477,11 +477,9 @@ def _refresh_tcp_ptp_axis_fields(handles: dict[str, Any], *, force: bool = False
     if frame_mode == _TCP_FRAME_LOCAL:
         values = [0.0] * 6
     else:
-        if not force and scene_handles.get(f"{display_arm}_tcp_target_user_moved"):
-            return
         target = _tcp_target_position_wxyz(scene_handles, display_arm)
         if target is None:
-            return
+            return False
         position, wxyz = target
         roll, pitch, yaw = _wxyz_to_rpy(wxyz)
         values = [
@@ -504,6 +502,7 @@ def _refresh_tcp_ptp_axis_fields(handles: dict[str, Any], *, force: bool = False
                 pass
     finally:
         handles["_tcp_ptp_field_updating"] = False
+    return True
 
 
 def _clear_tcp_target_user_moved(scene_handles: dict[str, Any], arms: tuple[str, ...] = ("left", "right")) -> None:
@@ -2086,7 +2085,7 @@ def build_gui(
                 def _(_: Any, arm: str = arm) -> None:
                     handles["tcp_ptp_arm"] = arm
                     _update_tcp_ptp_arm_buttons(handles)
-                    _refresh_tcp_ptp_axis_fields(handles, force=True)
+                    _refresh_tcp_ptp_axis_fields(handles)
                     handles["tcp_status"].value = f"TCP arm: {arm}"
 
             handles["tcp_frame_mode"] = _TCP_FRAME_STAND
@@ -2101,7 +2100,7 @@ def build_gui(
                     _update_tcp_frame_buttons(handles)
                     # Stand/world: fields show the live absolute pose; TCP local:
                     # they reset to 0,0,0,0,0,0 as relative-delta entry boxes.
-                    _refresh_tcp_ptp_axis_fields(handles, force=True)
+                    _refresh_tcp_ptp_axis_fields(handles)
                     handles["tcp_status"].value = f"TCP frame: {frame_mode}"
 
             linear_step = server.gui.add_slider("Linear step mm", min=0.1, max=10.0, step=0.1, initial_value=5.0)
@@ -2124,28 +2123,77 @@ def build_gui(
                 ok, message = _apply_tcp_delta_and_send_pose_target(safety, handles["scene"], arm, delta, frame_mode)
                 handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-            def _add_tcp_ptp_axis_group(axis_label: str, axis_index: int, angular: bool) -> None:
-                # One row per axis: [-] <axis> [+], with the axis name centered
-                # between the decrement and increment buttons. Clicking the middle
-                # (axis-name) segment is a no-op. Button groups cannot be disabled
-                # in viser, so these stay live and rely on the fail-closed safety
-                # layer (send_tcp_pose_target) to reject commands when not ready.
-                group = server.gui.add_button_group("", ("-", _nudge_label(axis_label.capitalize()), "+"))
+            def _nudge_ptp_axis(axis_index: int, angular: bool, sign: float) -> None:
+                step = _angular_step_radians(float(angular_step.value)) if angular else _linear_step_meters(float(linear_step.value))
+                delta = [0.0] * 6
+                delta[axis_index] = sign * step
+                _send_ptp_delta(tuple(delta))  # type: ignore[arg-type]
+                _refresh_tcp_ptp_axis_fields(handles)
+
+            def _commit_ptp_axis(axis_index: int, angular: bool) -> None:
+                # Programmatic .value writes set this guard so this callback only
+                # fires for operator-entered values, never our own field repaints.
+                if handles.get("_tcp_ptp_field_updating"):
+                    return
+                field = handles["tcp_ptp_axis_fields"].get(axis_index)
+                if field is None:
+                    return
+                try:
+                    raw = float(field.value)
+                except Exception:
+                    return
+                arm = _tcp_ptp_arm(handles)
+                frame_mode = _tcp_frame_mode(handles)
+                if frame_mode == _TCP_FRAME_LOCAL:
+                    # Relative jog: typed value is a TCP-local delta (mm / deg).
+                    delta = [0.0] * 6
+                    delta[axis_index] = math.radians(raw) if angular else raw * 0.001
+                    ok, message = _apply_tcp_delta_and_send_pose_target(
+                        safety, handles["scene"], arm, tuple(delta), frame_mode  # type: ignore[arg-type]
+                    )
+                    handles["_tcp_ptp_field_updating"] = True
+                    try:
+                        field.value = 0.0
+                    finally:
+                        handles["_tcp_ptp_field_updating"] = False
+                else:
+                    # Absolute set: typed value is the stand-frame coordinate.
+                    ok, message = _set_tcp_axis_absolute_and_send(
+                        safety, handles["scene"], arm, axis_index, angular, raw
+                    )
+                    _refresh_tcp_ptp_axis_fields(handles)
+                handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            def _add_tcp_ptp_axis_row(axis_label: str, axis_index: int, angular: bool, unit: str) -> None:
+                # Per axis: an editable number field (current stand-frame value, or
+                # 0 as a relative-delta entry in TCP-local frame) over a full-width
+                # [−][+] nudge group. Button groups cannot be disabled in viser, so
+                # they stay live and rely on the fail-closed safety layer
+                # (send_tcp_pose_target) to reject commands when not ready.
+                field = server.gui.add_number(f"{axis_label} ({unit})", initial_value=0.0, step=0.1)
+                handles["tcp_ptp_axis_fields"][axis_index] = field
+
+                @field.on_update
+                def _(_: Any, axis_index: int = axis_index, angular: bool = angular) -> None:
+                    _commit_ptp_axis(axis_index, angular)
+
+                group = server.gui.add_button_group("", ("−", "+"))
 
                 @group.on_click
                 def _(_: Any, group: Any = group, axis_index: int = axis_index, angular: bool = angular) -> None:
                     choice = group.value
-                    if choice not in ("-", "+"):
+                    if choice not in ("−", "+"):
                         return
-                    sign = 1.0 if choice == "+" else -1.0
-                    step = _angular_step_radians(float(angular_step.value)) if angular else _linear_step_meters(float(linear_step.value))
-                    delta = [0.0] * 6
-                    delta[axis_index] = sign * step
-                    _send_ptp_delta(tuple(delta))  # type: ignore[arg-type]
+                    _nudge_ptp_axis(axis_index, angular, 1.0 if choice == "+" else -1.0)
 
-            with server.gui.add_folder("축 넛지 (−/+)"):
-                for axis_label, axis_index, angular in _TCP_PTP_AXES:
-                    _add_tcp_ptp_axis_group(axis_label, axis_index, angular)
+            handles["tcp_ptp_axis_fields"] = {}
+            with server.gui.add_folder("Position (mm)"):
+                for axis_label, axis_index, angular in _TCP_PTP_AXES[:3]:
+                    _add_tcp_ptp_axis_row(axis_label.upper(), axis_index, angular, "mm")
+            with server.gui.add_folder("Rotation (deg)"):
+                for axis_label, axis_index, angular in _TCP_PTP_AXES[3:]:
+                    _add_tcp_ptp_axis_row(axis_label.capitalize(), axis_index, angular, "deg")
+            _refresh_tcp_ptp_axis_fields(handles)
 
         with _move_tabs.add_tab("TCP Linear"):
             handles["tcp_linear_note"] = server.gui.add_text(
@@ -2717,6 +2765,12 @@ def update_gui(
         _update_tcp_ptp_arm_buttons(handles)
     if "tcp_frame_buttons" in handles:
         _update_tcp_frame_buttons(handles)
+    if "tcp_ptp_axis_fields" in handles and not handles.get("tcp_ptp_fields_initialized"):
+        # One-shot fill once the first state makes a TCP target available; after
+        # that the fields are event-driven (arm/frame switch, nudge, commit) so a
+        # periodic repaint never clobbers a value the operator is mid-typing.
+        if _refresh_tcp_ptp_axis_fields(handles):
+            handles["tcp_ptp_fields_initialized"] = True
     if "tcp_display_buttons" in handles:
         _update_tcp_display_buttons(handles)
     if "tcp_linear_arm_buttons" in handles or "tcp_linear_orientation_buttons" in handles:

@@ -2040,7 +2040,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn(".rb-monitor-stand-card { left: var(--rb-monitor-gap); }", html)
         # ...with the Pose Monitor stacked just below the Joint Monitor's content.
         self.assertIn(".rb-monitor-stand-card.rb-monitor-header-card { top: var(--rb-monitor-split); }", html)
-        self.assertIn(".rb-monitor-joint-card.rb-monitor-body-card { max-height: calc(var(--rb-monitor-split) - 5.45em); }", html)
+        self.assertIn(".rb-monitor-joint-card.rb-monitor-body-card { max-height: calc(var(--rb-monitor-split) - 5.95em); }", html)
         self.assertIn("Pose Monitor", html)
         self.assertIn('id="rb-joint-unit-rad"', html)
         self.assertIn('id="rb-stand-unit-rad"', html)
@@ -2064,7 +2064,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("-30.00 deg", html)  # negative angle renders with its sign (J2 shoulder)
         self.assertIn("0.00 deg", html)
         self.assertIn("0.0000 rad", html)
-        self.assertIn("live, xyz=mm, tick=1", html)
+        # The Pose Monitor status no longer carries the "xyz=mm" unit hint.
+        self.assertNotIn("xyz=mm", html)
         self.assertIn("310.0 mm", html)
         self.assertIn("90.00 deg", html)
         self.assertIn("1.5708 rad", html)
@@ -2072,13 +2073,15 @@ class GuiContractsTest(unittest.TestCase):
     def test_operator_monitor_dynamic_html_marks_unavailable_pose_invalid(self):
         store, _, _ = self.make_safety(sample_state())
         html = _operator_monitor_dynamic_html(store.latest(), stale=False)
-        self.assertIn("live, xyz=mm, tick=1", html)
+        self.assertIn("live, tick=1", html)
+        self.assertNotIn("xyz=mm", html)
         self.assertIn("invalid", html)
 
         state = self.tcp_available_state()
         store, _, _ = self.make_safety(state)
         stale_html = _operator_monitor_dynamic_html(store.latest(), stale=True)
-        self.assertIn("stale, xyz=mm, tick=1", stale_html)
+        self.assertIn("stale, tick=1", stale_html)
+        self.assertNotIn("xyz=mm", stale_html)
         self.assertIn("invalid", stale_html)
 
     def test_operator_monitors_use_fixed_html_overlay_when_available(self):
@@ -2110,7 +2113,7 @@ class GuiContractsTest(unittest.TestCase):
         store, _, _ = self.make_safety(state)
         _update_operator_monitors(handles, store.latest(), stale=False)
         self.assertIn("live, tick=1", handles["operator_monitor_content"].content)
-        self.assertIn("live, xyz=mm, tick=1", handles["operator_monitor_content"].content)
+        self.assertNotIn("xyz=mm", handles["operator_monitor_content"].content)
         # Server uptime (hh:mm:ss) is shown next to the tick on both monitors.
         self.assertIn("tick=1, up=00:00:00", handles["operator_monitor_content"].content)
 
@@ -2475,22 +2478,22 @@ class GuiContractsTest(unittest.TestCase):
         self.assertNotIn("tcp_delta_local", packet["left"])
         self.assertEqual(packet["left"]["target_tcp_stand"]["quaternion_xyzw"], list(_wxyz_to_xyzw(handles["left_tcp_target_wxyz"])))
 
-    def test_tcp_frame_defaults_to_local_and_updates_button_colors(self):
+    def test_tcp_frame_defaults_to_stand_and_updates_button_colors(self):
         handles = {
             "tcp_frame_buttons": {
                 _TCP_FRAME_STAND: RecordingButton(),
                 _TCP_FRAME_LOCAL: RecordingButton(),
             }
         }
-        self.assertEqual(_tcp_frame_mode(handles), _TCP_FRAME_LOCAL)
-        _update_tcp_frame_buttons(handles)
-        self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_STAND].color, "gray")
-        self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_LOCAL].color, "green")
-
-        handles["tcp_frame_mode"] = _TCP_FRAME_STAND
+        self.assertEqual(_tcp_frame_mode(handles), _TCP_FRAME_STAND)
         _update_tcp_frame_buttons(handles)
         self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_STAND].color, "green")
         self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_LOCAL].color, "gray")
+
+        handles["tcp_frame_mode"] = _TCP_FRAME_LOCAL
+        _update_tcp_frame_buttons(handles)
+        self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_STAND].color, "gray")
+        self.assertEqual(handles["tcp_frame_buttons"][_TCP_FRAME_LOCAL].color, "green")
 
     def test_tcp_display_defaults_to_auto_and_updates_button_colors(self):
         handles = {"tcp_display_buttons": {mode: RecordingButton() for mode in _TCP_DISPLAY_MODES}}
@@ -3967,6 +3970,13 @@ class IkInfeasibleRegionTest(unittest.TestCase):
                 self.meshes[name] = handle
                 return handle
 
+            def add_line_segments(self, name, **kwargs):
+                handle = RecordingSceneHandle()
+                handle.visible = kwargs.get("visible", True)
+                handle.kwargs = kwargs
+                self.meshes[name] = handle
+                return handle
+
         class _Server:
             def __init__(self):
                 self.scene = _Scene()
@@ -3989,13 +3999,42 @@ class IkInfeasibleRegionTest(unittest.TestCase):
         handles = {
             "left_ik_infeasible": RecordingSceneHandle(),
             "right_ik_infeasible": RecordingSceneHandle(),
+            "left_ik_infeasible_outline": RecordingSceneHandle(),
+            "right_ik_infeasible_outline": RecordingSceneHandle(),
         }
         set_ik_infeasible_region_visible(handles, True)
         self.assertTrue(handles["left_ik_infeasible"].visible)
         self.assertTrue(handles["right_ik_infeasible"].visible)
+        # The bright rim outline toggles together with the fill.
+        self.assertTrue(handles["left_ik_infeasible_outline"].visible)
+        self.assertTrue(handles["right_ik_infeasible_outline"].visible)
         set_ik_infeasible_region_visible(handles, False)
         self.assertFalse(handles["left_ik_infeasible"].visible)
         self.assertFalse(handles["right_ik_infeasible"].visible)
+        self.assertFalse(handles["left_ik_infeasible_outline"].visible)
+        self.assertFalse(handles["right_ik_infeasible_outline"].visible)
+
+    def test_loads_rim_outline_with_cylinder_geometry(self):
+        asset = self._write_asset(
+            left_cells=96, right_cells=96, radius_m=0.2, z_lo_m=-0.3, z_hi_m=0.5,
+        )
+        server = self._mesh_scene_server()
+        handles: dict = {}
+        with mock.patch.dict(os.environ, {"RB_GUI_IK_INFEASIBLE": asset}):
+            _add_ik_infeasible_region(server, handles)
+        self.assertIn("left_ik_infeasible_outline", handles)
+        node = server.scene.meshes["/stand/left_base/ik_infeasible_outline"]
+        seg = np.asarray(node.kwargs["points"])
+        self.assertEqual(seg.ndim, 3)
+        self.assertEqual(seg.shape[1:], (2, 3))
+        # Rim circles sit at z_lo / z_hi; the radius matches the asset.
+        zs = np.unique(seg[:, :, 2])
+        self.assertTrue(np.any(np.isclose(zs, -0.3, atol=1e-5)))
+        self.assertTrue(np.any(np.isclose(zs, 0.5, atol=1e-5)))
+        radii = np.sqrt(seg[:, :, 0] ** 2 + seg[:, :, 1] ** 2)
+        self.assertAlmostEqual(float(radii.max()), 0.2, places=5)
+        self.assertEqual(tuple(node.kwargs.get("colors")), (255, 130, 130))
+        self.assertFalse(node.kwargs.get("visible", True))
 
     def test_toggle_is_safe_without_handles(self):
         set_ik_infeasible_region_visible({}, True)  # no-op, must not raise
@@ -4018,7 +4057,7 @@ class IkInfeasibleRegionTest(unittest.TestCase):
         self.assertFalse(left.visible)
         # convex watertight cylinder -> back-cull (was "double" for the old concave shell)
         self.assertEqual(left.kwargs.get("side"), "back")
-        self.assertEqual(tuple(left.kwargs.get("color")), (220, 70, 70))
+        self.assertEqual(tuple(left.kwargs.get("color")), (255, 45, 45))
 
     def test_loads_cylinder_radius_for_status(self):
         asset = self._write_asset(left_cells=96, right_cells=96, radius_m=0.191)
