@@ -122,7 +122,7 @@ _TCP_FRAME_STAND = "Stand/world"
 _TCP_FRAME_LOCAL = "TCP local"
 _TCP_FRAME_OPTIONS = (_TCP_FRAME_STAND, _TCP_FRAME_LOCAL)
 _TCP_LINEAR_ARM_OPTIONS = ("left", "right", "both")
-_TCP_PTP_ARM_OPTIONS = ("left", "right", "both")
+_TCP_PTP_ARM_OPTIONS = ("both", "left", "right")
 _TCP_PTP_AXES = (
     ("x", 0, False),
     ("y", 1, False),
@@ -279,8 +279,8 @@ def _update_desired_mode_buttons(handles: dict[str, Any], desired_mode: str) -> 
 
 
 def _tcp_frame_mode(handles: dict[str, Any]) -> str:
-    mode = handles.get("tcp_frame_mode", _TCP_FRAME_LOCAL)
-    return mode if mode in _TCP_FRAME_OPTIONS else _TCP_FRAME_LOCAL
+    mode = handles.get("tcp_frame_mode", _TCP_FRAME_STAND)
+    return mode if mode in _TCP_FRAME_OPTIONS else _TCP_FRAME_STAND
 
 
 def _update_tcp_frame_buttons(handles: dict[str, Any]) -> None:
@@ -293,8 +293,8 @@ def _update_tcp_frame_buttons(handles: dict[str, Any]) -> None:
 
 
 def _tcp_ptp_arm(handles: dict[str, Any]) -> str:
-    selected = handles.get("tcp_ptp_arm", "left")
-    return selected if selected in _TCP_PTP_ARM_OPTIONS else "left"
+    selected = handles.get("tcp_ptp_arm", "both")
+    return selected if selected in _TCP_PTP_ARM_OPTIONS else "both"
 
 
 def _update_tcp_ptp_arm_buttons(handles: dict[str, Any]) -> None:
@@ -401,6 +401,109 @@ def _apply_tcp_delta_to_target(
         except Exception:
             pass
     return True
+
+
+def _set_tcp_axis_absolute_to_target(
+    scene_handles: dict[str, Any],
+    arm: str,
+    axis_index: int,
+    angular: bool,
+    value: float,
+) -> bool:
+    """Set one axis of the arm's TCP target to an absolute stand-frame value.
+
+    Linear axes take millimetres, angular axes take degrees (stand-frame RPY).
+    The other five axes are left at the target's current value."""
+    target = _tcp_target_position_wxyz(scene_handles, arm)
+    if target is None:
+        return False
+    position, wxyz = target
+    position = list(position)
+    if angular:
+        roll, pitch, yaw = _wxyz_to_rpy(wxyz)
+        rpy = [roll, pitch, yaw]
+        rpy[axis_index - 3] = math.radians(float(value))
+        next_wxyz = _normalize_wxyz(_rpy_to_wxyz(rpy[0], rpy[1], rpy[2]))
+    else:
+        position[axis_index] = float(value) * 0.001
+        next_wxyz = _normalize_wxyz(wxyz)
+    pose6 = _pose6_from_transform(tuple(position), next_wxyz)
+    scene_handles[f"{arm}_tcp_target_pose"] = pose6
+    scene_handles[f"{arm}_tcp_target_wxyz"] = next_wxyz
+    scene_handles[f"{arm}_tcp_target_user_moved"] = True
+    handle = scene_handles.get(f"{arm}_tcp_target")
+    if handle is not None:
+        try:
+            handle.position = pose6[:3]
+        except Exception:
+            pass
+        try:
+            handle.wxyz = next_wxyz
+        except Exception:
+            pass
+    return True
+
+
+def _set_tcp_axis_absolute_and_send(
+    safety: OperatorSafety,
+    scene_handles: dict[str, Any],
+    arm: str,
+    axis_index: int,
+    angular: bool,
+    value: float,
+) -> tuple[bool, str]:
+    arms = ("left", "right") if arm == "both" else (arm,)
+    for single_arm in arms:
+        if not _set_tcp_axis_absolute_to_target(scene_handles, single_arm, axis_index, angular, value):
+            return False, f"{single_arm} TCP target unavailable"
+    return _send_tcp_pose_target_from_marker(safety, scene_handles, arm)
+
+
+def _refresh_tcp_ptp_axis_fields(handles: dict[str, Any], *, force: bool = False) -> None:
+    """Populate the TCP PTP per-axis number fields.
+
+    In TCP-local frame the fields are relative deltas, so they read 0. In
+    stand/world frame they mirror the live stand-frame TCP target (mm / deg) of
+    the display arm. Auto-refresh (force=False) stops once the target is
+    user-moved so it never fights a value the operator just typed or nudged;
+    force=True repaints after an explicit edit/nudge."""
+    fields = handles.get("tcp_ptp_axis_fields")
+    if not fields:
+        return
+    scene_handles = handles.get("scene", {})
+    frame_mode = _tcp_frame_mode(handles)
+    arm = _tcp_ptp_arm(handles)
+    display_arm = "left" if arm in ("both", "left") else "right"
+    if frame_mode == _TCP_FRAME_LOCAL:
+        values = [0.0] * 6
+    else:
+        if not force and scene_handles.get(f"{display_arm}_tcp_target_user_moved"):
+            return
+        target = _tcp_target_position_wxyz(scene_handles, display_arm)
+        if target is None:
+            return
+        position, wxyz = target
+        roll, pitch, yaw = _wxyz_to_rpy(wxyz)
+        values = [
+            position[0] * 1000.0,
+            position[1] * 1000.0,
+            position[2] * 1000.0,
+            math.degrees(roll),
+            math.degrees(pitch),
+            math.degrees(yaw),
+        ]
+    handles["_tcp_ptp_field_updating"] = True
+    try:
+        for _axis_label, axis_index, _angular in _TCP_PTP_AXES:
+            field = fields.get(axis_index)
+            if field is None:
+                continue
+            try:
+                field.value = float(values[axis_index])
+            except Exception:
+                pass
+    finally:
+        handles["_tcp_ptp_field_updating"] = False
 
 
 def _clear_tcp_target_user_moved(scene_handles: dict[str, Any], arms: tuple[str, ...] = ("left", "right")) -> None:
@@ -849,14 +952,14 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
   }}
   .rb-monitor-header-card {{
     top: 1em;
-    min-height: 4.45em;
-    padding: 0.65em 0.8em 0.55em;
+    min-height: 4.95em;
+    padding: 0.65em 0.8em 1.05em;
     border-radius: 0.45em 0.45em 0 0;
     border-bottom: 0;
   }}
   .rb-monitor-body-card {{
-    top: 5.45em;
-    max-height: calc(100vh - 6.45em);
+    top: 5.95em;
+    max-height: calc(100vh - 6.95em);
     overflow: auto;
     padding: 0.6em 0.8em 0.75em;
     border-radius: 0 0 0.45em 0.45em;
@@ -866,9 +969,9 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
      static header cards) stable across dynamic body refreshes. */
   .rb-monitor-joint-card {{ left: var(--rb-monitor-gap); }}
   .rb-monitor-stand-card {{ left: var(--rb-monitor-gap); }}
-  .rb-monitor-joint-card.rb-monitor-body-card {{ max-height: calc(var(--rb-monitor-split) - 5.45em); }}
+  .rb-monitor-joint-card.rb-monitor-body-card {{ max-height: calc(var(--rb-monitor-split) - 5.95em); }}
   .rb-monitor-stand-card.rb-monitor-header-card {{ top: var(--rb-monitor-split); }}
-  .rb-monitor-stand-card.rb-monitor-body-card {{ top: calc(var(--rb-monitor-split) + 4.45em); max-height: calc(100vh - var(--rb-monitor-split) - 5.45em); }}
+  .rb-monitor-stand-card.rb-monitor-body-card {{ top: calc(var(--rb-monitor-split) + 4.95em); max-height: calc(100vh - var(--rb-monitor-split) - 5.95em); }}
   .rb-monitor-title {{
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-weight: 650;
@@ -928,12 +1031,12 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
   @media (max-width: 960px) {{
     .rb-monitor-card {{ font-size: 11px; }}
     .rb-monitor-header-card {{
-      min-height: 4.0em;
-      padding: 0.55em 0.65em 0.45em;
+      min-height: 4.5em;
+      padding: 0.55em 0.65em 0.95em;
     }}
     .rb-monitor-body-card {{
-      top: 5.0em;
-      max-height: calc(100vh - 6.0em);
+      top: 5.5em;
+      max-height: calc(100vh - 6.5em);
       padding: 0.5em 0.65em 0.65em;
     }}
     .rb-monitor-title {{ font-size: 12px; }}
@@ -1030,10 +1133,10 @@ def _render_stand_world_monitor_rows(
     latest: StateSnapshot | None, *, stale: bool, uptime: str | None = None
 ) -> str:
     if latest is None:
-        status = "No state stream, xyz=mm"
+        status = "No state stream"
         arms = (("left", None), ("right", None))
     else:
-        status = f"{'stale' if stale else 'live'}, xyz=mm, tick={latest.tick}"
+        status = f"{'stale' if stale else 'live'}, tick={latest.tick}"
         if uptime:
             status += f", up={uptime}"
         arms = (("left", latest.left), ("right", latest.right))
@@ -1770,6 +1873,15 @@ def build_gui(
                     handles["gripper_cmd_sock"] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                     handles["gripper_cmd_seq"] = 0
 
+                    # Each slider is BOTH a command setpoint and a live actual-%
+                    # readout: _update_gripper_feedback writes the real gripper opening
+                    # (server gripper_state.v1) back into the slider every frame so the
+                    # slider + its number box track the hardware. _send_gripper_command
+                    # suppresses the echo from those programmatic writes and only emits a
+                    # gripper_cmd when the OPERATOR moves a slider; a manual move then
+                    # holds (pauses auto-sync) briefly so the operator's value is not
+                    # instantly overwritten before the gripper starts moving.
+                    handles["gripper_manual_hold_sec"] = 1.0
                     def _on_gripper_slider(_: Any = None) -> None:
                         _send_gripper_command(handles)
 
@@ -1779,17 +1891,6 @@ def build_gui(
                         "Gripper cmd",
                         initial_value=f"-> gripper_server {handles['gripper_cmd_endpoint'][0]}:{handles['gripper_cmd_endpoint'][1]}",
                         disabled=True,
-                    )
-                    # Live read-only feedback of the REAL gripper opening (0 closed ..
-                    # 100 open) from the server's gripper_state.v1 block. The sliders
-                    # above are command setpoints (write-only); these readouts are kept
-                    # in sync with actual hardware in _update_gripper_feedback so the
-                    # operator sees the true opening instead of just the last command.
-                    handles["gripper_actual_left"] = server.gui.add_text(
-                        "Left gripper 실제 %", initial_value="—", disabled=True
-                    )
-                    handles["gripper_actual_right"] = server.gui.add_text(
-                        "Right gripper 실제 %", initial_value="—", disabled=True
                     )
 
     with tabs.add_tab("이동"):
@@ -1975,7 +2076,7 @@ def build_gui(
                 disabled=True,
             )
             _install_tcp_target_callbacks(handles["scene"], handles["tcp_status"])
-            handles["tcp_ptp_arm"] = "left"
+            handles["tcp_ptp_arm"] = "both"
             handles["tcp_ptp_arm_buttons"] = {}
             for arm in _TCP_PTP_ARM_OPTIONS:
                 arm_button = server.gui.add_button("TCP arm: " + arm, color=_mode_button_color(arm, _tcp_ptp_arm(handles)))
@@ -1985,9 +2086,10 @@ def build_gui(
                 def _(_: Any, arm: str = arm) -> None:
                     handles["tcp_ptp_arm"] = arm
                     _update_tcp_ptp_arm_buttons(handles)
+                    _refresh_tcp_ptp_axis_fields(handles, force=True)
                     handles["tcp_status"].value = f"TCP arm: {arm}"
 
-            handles["tcp_frame_mode"] = _TCP_FRAME_LOCAL
+            handles["tcp_frame_mode"] = _TCP_FRAME_STAND
             handles["tcp_frame_buttons"] = {}
             for frame_mode in _TCP_FRAME_OPTIONS:
                 frame_button = server.gui.add_button(frame_mode, color=_mode_button_color(frame_mode, _tcp_frame_mode(handles)))
@@ -1997,6 +2099,9 @@ def build_gui(
                 def _(_: Any, frame_mode: str = frame_mode) -> None:
                     handles["tcp_frame_mode"] = frame_mode
                     _update_tcp_frame_buttons(handles)
+                    # Stand/world: fields show the live absolute pose; TCP local:
+                    # they reset to 0,0,0,0,0,0 as relative-delta entry boxes.
+                    _refresh_tcp_ptp_axis_fields(handles, force=True)
                     handles["tcp_status"].value = f"TCP frame: {frame_mode}"
 
             linear_step = server.gui.add_slider("Linear step mm", min=0.1, max=10.0, step=0.1, initial_value=5.0)
@@ -2291,27 +2396,47 @@ def _gripper_cmd_endpoint() -> tuple[str, int]:
         return ("127.0.0.1", 50410)
 
 
-def _send_gripper_command(handles: dict[str, Any]) -> None:
-    """Send the current gripper slider values to gripper_server as gripper_cmd.v1.
+_GRIPPER_SYNC_EPS = 0.5  # % tolerance to tell our own feedback write from an operator move
 
-    Operator manual control: gripper_server drives the sim/real gripper and its
-    feedback (state JSON) moves the viz. Coexists with teleop/policy gripper
-    commands (gripper_server applies the latest setpoint)."""
+
+def _send_gripper_command(handles: dict[str, Any]) -> None:
+    """Send the gripper slider values to gripper_server as gripper_cmd.v1.
+
+    Each slider doubles as a live actual-% readout (see _update_gripper_feedback),
+    so this on_update fires both when the OPERATOR moves a slider and when we write
+    the real gripper feedback back into it. We must only emit a command for the
+    former: a side whose current value still matches the last value we synced from
+    feedback (within _GRIPPER_SYNC_EPS) is treated as a feedback echo and skipped.
+    A genuine operator move also starts a manual-hold window so _update_gripper_feedback
+    stops overwriting that slider until the gripper has had time to react.
+
+    gripper_server drives the sim/real gripper; its feedback (state JSON) moves the
+    viz. Coexists with teleop/policy gripper commands (latest setpoint wins)."""
     sock = handles.get("gripper_cmd_sock")
     endpoint = handles.get("gripper_cmd_endpoint")
     if sock is None or endpoint is None:
         return
-    seq = int(handles.get("gripper_cmd_seq", 0)) + 1
-    handles["gripper_cmd_seq"] = seq
-    msg: dict[str, Any] = {"schema": "robotics_lab.gripper_cmd.v1", "seq": seq, "deadman": True}
+    msg: dict[str, Any] = {"schema": "robotics_lab.gripper_cmd.v1", "deadman": True}
+    operator_moved = False
+    hold_sec = float(handles.get("gripper_manual_hold_sec", 1.0))
     for side in ("left", "right"):
         slider = handles.get(f"gripper_slider_{side}")
         if slider is None:
             continue
         try:
-            msg[side] = {"percent": float(slider.value), "valid": True}
+            value = float(slider.value)
         except (TypeError, ValueError, AttributeError):
-            pass
+            continue
+        msg[side] = {"percent": value, "valid": True}
+        synced = handles.get(f"gripper_synced_value_{side}")
+        if synced is None or abs(value - float(synced)) > _GRIPPER_SYNC_EPS:
+            operator_moved = True
+            handles[f"gripper_manual_hold_until_{side}"] = time.monotonic() + hold_sec
+    if not operator_moved:
+        return  # only feedback echoes — do not command the gripper to its own position
+    seq = int(handles.get("gripper_cmd_seq", 0)) + 1
+    handles["gripper_cmd_seq"] = seq
+    msg["seq"] = seq
     if "left" not in msg and "right" not in msg:
         return
     try:
@@ -2345,27 +2470,36 @@ def _push_gripper_percent(handles: dict[str, Any], latest: StateSnapshot | None 
             pass
 
 
-def _format_gripper_feedback(arm_snapshot: Any, *, stale: bool) -> str:
-    """One-line live actual-gripper-opening readout for the gripper control panel."""
-    pct = getattr(arm_snapshot, "gripper_percent", None) if arm_snapshot is not None else None
-    if not isinstance(pct, (int, float)) or not math.isfinite(float(pct)):
-        return "no feed"
-    text = f"{float(pct):.0f}% open"
-    if getattr(arm_snapshot, "gripper_moving", False):
-        text += " (moving)"
-    if stale:
-        text += " [stale]"
-    return text
-
-
 def _update_gripper_feedback(handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool) -> None:
-    """Sync the read-only actual-gripper readouts with the live server gripper feed."""
+    """Drive each gripper slider (and its number box) to the live actual opening %.
+
+    The real opening comes from the server gripper_state.v1 feedback
+    (latest.<side>.gripper_percent). Writing it into the slider keeps the slider +
+    number box in sync with the hardware. We record the synced value so the slider's
+    on_update (which fires on this programmatic write too) can tell the echo from a
+    real operator move in _send_gripper_command, and we skip a side whose manual-hold
+    window is still open so an operator's just-commanded value is not yanked back."""
+    if stale:
+        return  # don't chase a frozen/last-known reading while the feed is stale
+    now = time.monotonic()
     for side in ("left", "right"):
-        text = handles.get(f"gripper_actual_{side}")
-        if text is None:
+        slider = handles.get(f"gripper_slider_{side}")
+        if slider is None:
             continue
+        hold_until = handles.get(f"gripper_manual_hold_until_{side}")
+        if isinstance(hold_until, (int, float)) and now < float(hold_until):
+            continue  # operator just moved this slider; leave their value in place
         arm = getattr(latest, side, None) if latest is not None else None
-        text.value = _format_gripper_feedback(arm, stale=stale)
+        pct = getattr(arm, "gripper_percent", None) if arm is not None else None
+        if not isinstance(pct, (int, float)) or not math.isfinite(float(pct)):
+            continue  # no valid feed -> leave the slider as the operator's last setpoint
+        value = float(pct)
+        # Record BEFORE writing so the resulting on_update sees value == synced.
+        handles[f"gripper_synced_value_{side}"] = value
+        try:
+            slider.value = value
+        except (TypeError, ValueError, AttributeError):
+            pass
 
 
 def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:

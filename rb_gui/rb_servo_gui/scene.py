@@ -268,11 +268,20 @@ def _tcp_label_position(position: tuple[float, float, float]) -> tuple[float, fl
     return (position[0], position[1], position[2] + 0.045)
 
 
-_FLOOR_PLANE_BLUE = (80, 160, 255)
+# Applied safety floor plane fill: emerald-green so it is clearly distinct from the
+# blue ROI box (the operator keeps the ROI colors but wants the floor to stand out).
+# Red when an arm violates the plane.
+_FLOOR_PLANE_GREEN = (45, 205, 130)
 _FLOOR_PLANE_RED = (220, 60, 60)
 # Pending (not-yet-sent) slider value preview: distinct color so it cannot be
 # mistaken for the APPLIED safety plane.
 _FLOOR_PLANE_PREVIEW_YELLOW = (235, 200, 60)
+# Boundary emphasis for the applied plane: opaque edges + corner vertices drawn over
+# the translucent fill so the outline reads clearly even where the ROI box overlaps
+# it. Brighter than the fill; recolor red together with the fill on violation.
+# Mirrors the ROI box boundary treatment.
+_FLOOR_PLANE_EDGE_GREEN = (170, 255, 205)
+_FLOOR_PLANE_EDGE_RED = (255, 120, 120)
 # Stand-frame footprint of the floor plane visual: an 800 x 800 mm square whose
 # near (+y) edge is aligned to the stand's +y back face so the plane "starts" where
 # the stand URDF does. The rendered stand mesh (dual_rb3_730e_stand_ver2_clean.stl,
@@ -481,7 +490,7 @@ def _add_floor_plane(server: Any, handles: dict[str, Any]) -> None:
                 handles["floor_plane"] = server.scene.add_box(
                     "/stand/floor_plane",
                     dimensions=_FLOOR_PLANE_DIMENSIONS,
-                    color=_FLOOR_PLANE_BLUE,
+                    color=_FLOOR_PLANE_GREEN,
                     opacity=0.25,
                     side="back",  # don't let the near face occlude geometry above it
                     position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
@@ -491,7 +500,7 @@ def _add_floor_plane(server: Any, handles: dict[str, Any]) -> None:
                 handles["floor_plane"] = server.scene.add_box(
                     "/stand/floor_plane",
                     dimensions=_FLOOR_PLANE_DIMENSIONS,
-                    color=_FLOOR_PLANE_BLUE,
+                    color=_FLOOR_PLANE_GREEN,
                     position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
                     visible=False,
                 )
@@ -531,6 +540,52 @@ def _add_floor_plane(server: Any, handles: dict[str, Any]) -> None:
                 )
     except Exception as exc:
         handles["floor_plane_preview_error"] = f"{type(exc).__name__}: {exc}"
+    # Emphasised boundary for the APPLIED plane: opaque edges (line segments) +
+    # corner vertices (point cloud), drawn over the translucent fill like the ROI
+    # box so the plane outline stays readable where the ROI region overlaps it.
+    # update_floor_plane moves/recolors them with the fill; placeholder until then.
+    seg, corners = _roi_box_outline(_FLOOR_PLANE_DIMENSIONS, (*_FLOOR_PLANE_CENTER_XY, 0.0))
+    if hasattr(server.scene, "add_line_segments"):
+        try:
+            handles["floor_plane_edges"] = server.scene.add_line_segments(
+                "/stand/floor_plane_edges", points=seg, colors=_FLOOR_PLANE_EDGE_GREEN,
+                line_width=4.0, visible=False,
+            )
+        except Exception as exc:
+            handles["floor_plane_edges_error"] = f"{type(exc).__name__}: {exc}"
+    if hasattr(server.scene, "add_point_cloud"):
+        try:
+            handles["floor_plane_verts"] = server.scene.add_point_cloud(
+                "/stand/floor_plane_verts", points=corners, colors=_FLOOR_PLANE_EDGE_GREEN,
+                point_size=0.02, point_shape="circle", visible=False,
+            )
+        except Exception as exc:
+            handles["floor_plane_verts_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _apply_floor_plane_outline(
+    scene_handles: dict[str, Any], z_m: float, edge_color: tuple[int, int, int]
+) -> None:
+    """Resize/recolor the floor-plane edge lines + corner vertices at plane height z."""
+    import numpy as np
+
+    seg, corners = _roi_box_outline(_FLOOR_PLANE_DIMENSIONS, (*_FLOOR_PLANE_CENTER_XY, float(z_m)))
+    col = np.asarray(edge_color, dtype=np.uint8)
+    for key, pts in (("floor_plane_edges", seg), ("floor_plane_verts", corners)):
+        handle = scene_handles.get(key)
+        if handle is None:
+            continue
+        for attr, value in (("points", pts), ("colors", col)):
+            try:
+                setattr(handle, attr, value)
+            except Exception:
+                pass
+        _set_visible(handle, True)
+
+
+def _hide_floor_plane_outline(scene_handles: dict[str, Any]) -> None:
+    for key in ("floor_plane_edges", "floor_plane_verts"):
+        _set_visible(scene_handles.get(key), False)
 
 
 def update_floor_plane_preview(scene_handles: dict[str, Any], z_m: float | None) -> None:
@@ -558,12 +613,14 @@ def update_floor_plane(scene_handles: dict[str, Any], floor: Mapping[str, Any] |
         return
     if not isinstance(floor, Mapping) or not bool(floor.get("enabled", False)):
         _set_visible(plane, False)
+        _hide_floor_plane_outline(scene_handles)
         return
     z = floor.get("z_min_m")
-    if isinstance(z, (int, float)) and math.isfinite(float(z)):
+    z_val = float(z) if isinstance(z, (int, float)) and math.isfinite(float(z)) else None
+    if z_val is not None:
         try:
             # z is the stand-frame plane height (z=0 == stand origin plane).
-            plane.position = (*_FLOOR_PLANE_CENTER_XY, float(z))
+            plane.position = (*_FLOOR_PLANE_CENTER_XY, z_val)
         except Exception:
             pass
     violated = any(
@@ -571,10 +628,19 @@ def update_floor_plane(scene_handles: dict[str, Any], floor: Mapping[str, Any] |
         for key in ("left", "right")
     )
     try:
-        plane.color = _FLOOR_PLANE_RED if violated else _FLOOR_PLANE_BLUE
+        plane.color = _FLOOR_PLANE_RED if violated else _FLOOR_PLANE_GREEN
     except Exception:
         pass
     _set_visible(plane, True)
+    # Emphasised outline (edges + corner vertices) tracks the fill at plane height z;
+    # red on violation, green otherwise. Hidden when z is unknown.
+    if z_val is not None:
+        _apply_floor_plane_outline(
+            scene_handles, z_val,
+            _FLOOR_PLANE_EDGE_RED if violated else _FLOOR_PLANE_EDGE_GREEN,
+        )
+    else:
+        _hide_floor_plane_outline(scene_handles)
 
 
 # Stand-frame ROI box (safety.roi_box) visual: a translucent box the TCP must

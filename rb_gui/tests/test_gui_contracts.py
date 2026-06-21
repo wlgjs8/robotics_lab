@@ -25,7 +25,6 @@ from rb_servo_gui.app import (
     _TCP_FRAME_STAND,
     _apply_tcp_delta_and_send_pose_target,
     _apply_tcp_delta_to_target,
-    _format_gripper_feedback,
     _gripper_cmd_endpoint,
     _push_gripper_percent,
     _update_gripper_feedback,
@@ -1006,31 +1005,65 @@ class GuiContractsTest(unittest.TestCase):
         _push_gripper_percent(handles, None)
         self.assertAlmostEqual(scene["gripper_percent_left"], 100.0)
 
-    def test_gripper_feedback_readout_tracks_live_state(self):
+    def test_gripper_feedback_drives_slider_value(self):
         from rb_servo_gui.models import StateSnapshot
-        class _Text:
-            def __init__(self):
-                self.value = "—"
+        class _Slider:
+            def __init__(self, v):
+                self.value = v
 
-        handles = {"gripper_actual_left": _Text(), "gripper_actual_right": _Text()}
+        handles = {"gripper_slider_left": _Slider(100.0), "gripper_slider_right": _Slider(100.0)}
         state = sample_state()
         state["left"]["gripper"] = {"valid": True, "percent": 30.0, "moving": True}
         state["right"]["gripper"] = {"valid": False}
         _update_gripper_feedback(handles, StateSnapshot.parse(state), stale=False)
-        self.assertEqual(handles["gripper_actual_left"].value, "30% open (moving)")
-        self.assertEqual(handles["gripper_actual_right"].value, "no feed")
-        # stale annotation surfaces; no state -> no feed
-        _update_gripper_feedback(handles, None, stale=True)
-        self.assertEqual(handles["gripper_actual_left"].value, "no feed")
+        # Valid feed -> slider tracks actual %, and the synced value is recorded.
+        self.assertAlmostEqual(handles["gripper_slider_left"].value, 30.0)
+        self.assertAlmostEqual(handles["gripper_synced_value_left"], 30.0)
+        # No valid feed -> slider left as the operator's setpoint (unchanged).
+        self.assertAlmostEqual(handles["gripper_slider_right"].value, 100.0)
+        self.assertNotIn("gripper_synced_value_right", handles)
+        # Stale feed is ignored (don't chase a frozen reading).
+        handles["gripper_slider_left"].value = 55.0
+        _update_gripper_feedback(handles, StateSnapshot.parse(state), stale=True)
+        self.assertAlmostEqual(handles["gripper_slider_left"].value, 55.0)
 
-    def test_format_gripper_feedback_variants(self):
+    def test_gripper_feedback_echo_does_not_command(self):
         from rb_servo_gui.models import StateSnapshot
+        class _Slider:
+            def __init__(self, v):
+                self.value = v
+        class _Sock:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, payload, endpoint):
+                self.sent.append((payload, endpoint))
+
+        sock = _Sock()
+        handles = {
+            "gripper_slider_left": _Slider(100.0),
+            "gripper_slider_right": _Slider(100.0),
+            "gripper_cmd_sock": sock,
+            "gripper_cmd_endpoint": ("127.0.0.1", 50410),
+            "gripper_manual_hold_sec": 1.0,
+        }
         state = sample_state()
-        state["left"]["gripper"] = {"valid": True, "percent": 0.0, "moving": False}
+        state["left"]["gripper"] = {"valid": True, "percent": 30.0}
+        state["right"]["gripper"] = {"valid": True, "percent": 70.0}
         snap = StateSnapshot.parse(state)
-        self.assertEqual(_format_gripper_feedback(snap.left, stale=False), "0% open")
-        self.assertEqual(_format_gripper_feedback(snap.left, stale=True), "0% open [stale]")
-        self.assertEqual(_format_gripper_feedback(None, stale=False), "no feed")
+        # Feedback writes the sliders; the resulting on_update echo must NOT command.
+        _update_gripper_feedback(handles, snap, stale=False)
+        _send_gripper_command(handles)
+        self.assertEqual(sock.sent, [])
+        # A genuine operator move (beyond the eps) DOES command, and opens a hold.
+        handles["gripper_slider_left"].value = 10.0
+        _send_gripper_command(handles)
+        self.assertEqual(len(sock.sent), 1)
+        payload = json.loads(sock.sent[0][0].decode("utf-8"))
+        self.assertAlmostEqual(payload["left"]["percent"], 10.0)
+        self.assertIn("gripper_manual_hold_until_left", handles)
+        # While the hold is open, feedback does not yank the operator's value back.
+        _update_gripper_feedback(handles, snap, stale=False)
+        self.assertAlmostEqual(handles["gripper_slider_left"].value, 10.0)
 
     def test_robot_urdf_path_uses_descriptions_dir_env(self):
         descriptions_dir = Path(__file__).resolve().parents[2] / "rb_servo_server" / "descriptions"
@@ -2913,6 +2946,34 @@ class FloorConstraintGuiTest(unittest.TestCase):
         self.assertNotEqual(plane.color, blue)
         # Missing handle is a no-op.
         update_floor_plane({}, self._floor_block())
+
+    def test_update_floor_plane_outline_tracks_plane(self):
+        # Emphasised edges (12 segments) + corner vertices (8 points) follow the
+        # applied floor plane at height z and hide/recolor with it.
+        class FakePlane:
+            def __init__(self):
+                self.position = (0.0, 0.0, 0.0)
+                self.color = None
+                self.visible = True
+
+        edges = RecordingSceneHandle()
+        verts = RecordingSceneHandle()
+        handles = {"floor_plane": FakePlane(), "floor_plane_edges": edges, "floor_plane_verts": verts}
+        update_floor_plane(handles, self._floor_block(z_min_m=0.05))
+        self.assertTrue(edges.visible and verts.visible)
+        self.assertEqual(np.asarray(edges.points).shape, (12, 2, 3))
+        self.assertEqual(np.asarray(verts.points).shape, (8, 3))
+        # Outline sits at the plane height z (corners within the 2 mm slab thickness).
+        self.assertTrue(np.allclose(np.asarray(verts.points)[:, 2], 0.05, atol=2e-3))
+        normal_edge_color = np.asarray(edges.colors).copy()
+        # Violation recolors the outline.
+        update_floor_plane(handles, self._floor_block(
+            z_min_m=0.05, right={"checked": True, "violated": True, "tcp_z_m": 0.001},
+        ))
+        self.assertFalse(np.array_equal(np.asarray(edges.colors), normal_edge_color))
+        # Disabled hides the outline too.
+        update_floor_plane(handles, {"enabled": False})
+        self.assertFalse(edges.visible or verts.visible)
 
     def test_update_floor_plane_preview(self):
         class FakePlane:

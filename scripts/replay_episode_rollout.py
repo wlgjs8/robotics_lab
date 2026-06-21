@@ -345,7 +345,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--checkpoint", default=None)
-    ap.add_argument("--episode", required=True)
+    ap.add_argument("--episode", default=None,
+                    help="recorded episode HDF5 (offline replay / --ground-truth); omit for --live-camera")
+    ap.add_argument("--live-camera", action="store_true",
+                    help="LIVE rollout: stream frames from the running camera_server (ZMQ bundle) instead of "
+                         "recorded episode frames -> real-camera closed-loop inference. Needs camera_server up. "
+                         "Reuses the same validated run()/SafetyGate pipeline as offline replay (not flow-infer "
+                         "real_policy, so no measured-geometry/collision attestation gate).")
+    ap.add_argument("--duration", type=float, default=30.0,
+                    help="--live-camera only: stop after this many seconds (Ctrl-C also stops). 0 = run until killed.")
     ap.add_argument("--ground-truth", action="store_true",
                     help="replay the COLLECTED demonstration motion (recorded ee_local actions) on the robot "
                          "instead of running a model; no checkpoint needed")
@@ -414,6 +422,38 @@ def main():
 
     if not args.no_init:
         init_to_rest(config)
+
+    if args.live_camera:
+        # LIVE: real-camera closed-loop inference. Frames come from the running
+        # camera_server ZMQ bundle (not recorded); proprio gripper is read from the
+        # live robot-state payload by the source (no recorded-gripper injection); the
+        # source's camera-freshness check (max_age_ms) fail-closes if the camera stalls.
+        from policy_runner.camera_bundle_client import CameraBundleClient
+        if not args.checkpoint:
+            raise SystemExit("--checkpoint is required for --live-camera")
+        cam = CameraBundleClient()  # tcp://127.0.0.1:5600 / camera.bundle (camera_server defaults)
+        source, kind = build_source(args, cam)
+        fix_camera_names(source, args.checkpoint)
+        print(f"[replay] LIVE CAMERA: kind={kind} cams={source.camera_names} "
+              f"command_family={getattr(args, 'command_family', None)} "
+              f"r_align={args.ee_local_r_align} duration={args.duration}s", file=sys.stderr)
+        live = {"t0": None}
+
+        def live_sink(_snapshot):
+            now = time.monotonic()
+            if live["t0"] is None:
+                live["t0"] = now
+            if args.duration and now - live["t0"] >= args.duration:
+                raise KeyboardInterrupt
+
+        print("[replay] starting LIVE rollout (Ctrl-C or --duration to stop)", file=sys.stderr, flush=True)
+        rc = run(config, source=source, send_commands=True, state_sink=live_sink)
+        try:
+            cam.close()
+        except Exception:
+            pass
+        print(f"[replay] LIVE done rc={rc}", file=sys.stderr, flush=True)
+        return rc
 
     clock = ReplayClock(num_frames=1)
     if args.ground_truth:
