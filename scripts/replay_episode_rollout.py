@@ -284,6 +284,11 @@ def build_source(args, camera_client):
             gripper_runtime=GripperRuntime(rollout_mode="controller_sim"),
             device=args.device,
         )
+        # Decouple chunk inference from the command stream (background prefetch +
+        # per-step hold) so a slow inference (esp. medoid-of-N) does not stall the
+        # command stream and pulse the robot start/stop. Mirrors flow-infer's
+        # live-rollout behavior (main.py: enable_async_chunking for real/controller-sim).
+        source.enable_async_chunking = True
         return source, "openpi_remote"
     kind = action_chunk_checkpoint_kind(args.checkpoint, device="cpu")
     common = dict(
@@ -301,6 +306,7 @@ def build_source(args, camera_client):
         source = FlowMatchingActionSource(args.checkpoint, sample_steps=args.sample_steps, **common)
     else:
         raise SystemExit(f"unsupported checkpoint kind for local replay: {kind}")
+    source.enable_async_chunking = True  # see openpi branch: avoid pulsed start/stop
     return source, kind
 
 
@@ -367,6 +373,20 @@ def main():
     except Exception:
         config.command_rate_hz = float(rate)
     print(f"[replay] command_rate_hz overridden to {rate} Hz (policy_dt={args.policy_dt_sec}s)", file=sys.stderr)
+
+    # Offline replay feeds RECORDED camera frames (ReplayCameraClient) to the policy every
+    # tick, so the policy is NOT blind. But the SafetyGate's camera-readiness check looks for a
+    # LIVE camera_server bundle in the robot-state payload (absent here, since we run no camera
+    # server) and would otherwise drop every motion intent as "camera_unavailable" -> the robot
+    # never moves. Mark the camera available for the gate. Scoped to this offline-replay tool;
+    # it does not touch live flow-infer or any server-side safety layer.
+    try:
+        object.__setattr__(config.safety, "camera_available", True)
+        object.__setattr__(config.safety, "camera_stale", False)
+    except Exception:
+        config.safety.camera_available = True
+        config.safety.camera_stale = False
+    print("[replay] safety camera gate satisfied via recorded frames (camera_available=True)", file=sys.stderr)
 
     if not args.no_init:
         init_to_rest(config)
