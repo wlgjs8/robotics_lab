@@ -801,6 +801,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
     )
     flow_infer.add_argument(
+        "--gripper-open-hold-steps",
+        type=int,
+        default=0,
+        help="Hold the gripper fully OPEN for the first N executed policy steps so the arm can "
+             "reach before the policy is allowed to close it (avoids premature grasp at start). "
+             "0 = disabled (policy controls the gripper from step 0).",
+    )
+    flow_infer.add_argument(
         "--chunk-crossfade-steps",
         type=int,
         default=2,
@@ -1542,6 +1550,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
             # never blocks on inference (removes the pulsed start/stop vibration).
             if rollout_policy.mode.value in {"controller_sim", "real_policy", "real_readonly"}:
                 source.enable_async_chunking = True
+            # Hold the gripper open for the first N policy steps (reach-before-grasp).
+            source.gripper_open_hold_steps = int(getattr(args, "gripper_open_hold_steps", 0) or 0)
             geometry_status = _load_runtime_geometry_status(config)
             rollout_policy.validate_config(
                 config,

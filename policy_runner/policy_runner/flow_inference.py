@@ -666,13 +666,24 @@ class FlowMatchingActionSource:
         self._step_deadline = now_monotonic + float(self.policy_dt_sec)
 
     def _stream_prefetch_at(self) -> int:
+        # Kick the next inference EARLY (after ~1/4 of the chunk) so it has the most wall-clock
+        # to finish before the executable window drains -> fewer boundary stalls (= fewer
+        # pauses in the motion). Was limit//2 (half-chunk lead); a slow medoid/remote inference
+        # could not finish in that window and stalled every chunk. Trade-off: the next chunk is
+        # inferred from a slightly older frame (~quarter-chunk), but it re-anchors to the current
+        # pose at its boundary, so only the IMAGE is marginally staler.
         limit = self._current_chunk_execute_limit()
-        return max(0, limit - max(2, limit // 2))
+        return max(0, min(2, limit - 1))
 
     def _stream_hold_intent(self) -> CommandIntent | None:
         if self.command_family_option == "tcp_target_pose":
-            self._clear_target_pose_state()
-            return None
+            # Stall (next chunk not ready): re-emit the LAST absolute TcpPoseTarget so the
+            # command stays fresh and the arm holds steady at the target. Returning None
+            # here let the command go stale (real timeout 0.05s) -> the servo jerks/stops,
+            # which is the pulsed "뚝뚝" motion. We do NOT clear the target accumulator: the
+            # next chunk re-anchors at its own boundary (_steps_since_boundary==0) anyway, so
+            # holding the last target until then gives a smooth pause instead of a stale jerk.
+            return getattr(self, "_current_step_intent", None)
         left = _ZERO_TWIST if (len(self.arm_mask) > 0 and self.arm_mask[0] > 0.0) else None
         right = _ZERO_TWIST if (len(self.arm_mask) > 1 and self.arm_mask[1] > 0.0) else None
         self._last_nonzero_twist_by_arm["left"] = False
@@ -902,6 +913,13 @@ class FlowMatchingActionSource:
         targets: dict[str, float | None] = {"left": None, "right": None}
         if not self._allow_gripper_targets_in_motion_packet():
             return targets
+        # Optionally hold the gripper fully OPEN for the first N executed policy steps so the
+        # arm can reach toward the object before the policy is allowed to close it (avoids a
+        # premature grasp at rollout start). Set via `source.gripper_open_hold_steps`.
+        open_hold_steps = int(getattr(self, "gripper_open_hold_steps", 0) or 0)
+        step_idx = int(getattr(self, "_gripper_integrate_count", 0))
+        self._gripper_integrate_count = step_idx + 1
+        hold_open = step_idx < open_hold_steps
         for arm, mask_index, step_index in (("left", 0, 6), ("right", 1, 13)):
             if len(self.arm_mask) <= mask_index or self.arm_mask[mask_index] <= 0.0:
                 continue
@@ -912,6 +930,10 @@ class FlowMatchingActionSource:
                 self._gripper_targets_by_arm[arm] = 0.0 if current is None else current
             if step.shape[0] > step_index:
                 self._gripper_targets_by_arm[arm] = float(self._gripper_targets_by_arm[arm]) + float(step[step_index])
+            if hold_open:
+                # Pin to fully open AND reset the integrator there, so when the hold ends the
+                # policy resumes closing from the open state (not from a drifted accumulator).
+                self._gripper_targets_by_arm[arm] = 100.0
             targets[arm] = self._gripper_targets_by_arm[arm]
         return targets
 

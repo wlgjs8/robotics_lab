@@ -301,6 +301,7 @@ def build_source(args, camera_client):
         # command stream and pulse the robot start/stop. Mirrors flow-infer's
         # live-rollout behavior (main.py: enable_async_chunking for real/controller-sim).
         source.enable_async_chunking = True
+        source.gripper_open_hold_steps = int(getattr(args, "gripper_open_hold_steps", 0) or 0)
         return source, "openpi_remote"
     kind = action_chunk_checkpoint_kind(args.checkpoint, device="cpu")
     common = dict(
@@ -321,6 +322,7 @@ def build_source(args, camera_client):
     else:
         raise SystemExit(f"unsupported checkpoint kind for local replay: {kind}")
     source.enable_async_chunking = True  # see openpi branch: avoid pulsed start/stop
+    source.gripper_open_hold_steps = int(getattr(args, "gripper_open_hold_steps", 0) or 0)
     return source, kind
 
 
@@ -378,6 +380,9 @@ def main():
                          "(measured: per-step max ~9mm). Lower it to slow/limit the motion.")
     ap.add_argument("--max-angular-step-rad", type=float, default=0.01,
                     help="per-step Cartesian rotation clamp for tcp_target_pose (default 0.01 rad)")
+    ap.add_argument("--gripper-open-hold-steps", type=int, default=0,
+                    help="hold the gripper fully OPEN for the first N policy steps (reach-before-grasp); "
+                         "0 = policy controls the gripper from step 0")
     ap.add_argument("--allow-real-gripper", action="store_true",
                     help="drive the REAL gripper from the model's gripper action (real_policy gripper "
                          "path + RB_ALLOW_REAL_GRIPPER=1). Without it the gripper is a logged no-op "
