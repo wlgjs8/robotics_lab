@@ -267,7 +267,17 @@ def init_to_rest(config, *, settle_sec: float = 14.0, stderr=sys.stderr) -> None
 
 
 def build_source(args, camera_client):
+    import os
+
     command_family = getattr(args, "command_family", None) or "tcp_twist_local"
+    # Gripper: drive the REAL gripper from the model only when explicitly allowed
+    # (real_policy path + RB_ALLOW_REAL_GRIPPER=1). Default = controller_sim (logged
+    # no-op gripper) so a sim/dry run never actuates hardware.
+    if getattr(args, "allow_real_gripper", False):
+        os.environ["RB_ALLOW_REAL_GRIPPER"] = "1"
+        gripper_runtime = GripperRuntime(rollout_mode="real_policy", allow_real_gripper_motion=True)
+    else:
+        gripper_runtime = GripperRuntime(rollout_mode="controller_sim")
     # openpi:// served checkpoint -> remote inference source (camera bundle substituted by the
     # ReplayCameraClient). The live flow-infer command pipeline is reused unchanged; the only
     # substitution here is the camera source + the recorded proprio gripper (main() injects it).
@@ -279,9 +289,11 @@ def build_source(args, camera_client):
             camera_client=camera_client,
             command_family=command_family,
             policy_dt_sec=args.policy_dt_sec,
+            max_linear_step_m=args.max_linear_step_m,
+            max_angular_step_rad=args.max_angular_step_rad,
             allow_rbpodo_controller_simulation_cartesian=True,
             ee_local_r_align=args.ee_local_r_align,
-            gripper_runtime=GripperRuntime(rollout_mode="controller_sim"),
+            gripper_runtime=gripper_runtime,
             device=args.device,
         )
         # Decouple chunk inference from the command stream (background prefetch +
@@ -295,9 +307,11 @@ def build_source(args, camera_client):
         camera_client=camera_client,
         command_family=command_family,
         policy_dt_sec=args.policy_dt_sec,
+        max_linear_step_m=args.max_linear_step_m,
+        max_angular_step_rad=args.max_angular_step_rad,
         allow_rbpodo_controller_simulation_cartesian=True,
         ee_local_r_align=args.ee_local_r_align,
-        gripper_runtime=GripperRuntime(rollout_mode="controller_sim"),
+        gripper_runtime=gripper_runtime,
         device=args.device,
     )
     if kind == "direct_bc":
@@ -350,6 +364,16 @@ def main():
                     help="ground-truth only: scale per-step ee_local deltas (translation+rotation) "
                          "by this factor to keep the swept trajectory in reach; axis direction is "
                          "preserved (1.0 = faithful amplitude, e.g. 0.5 = half-size reciprocation)")
+    ap.add_argument("--max-linear-step-m", type=float, default=0.010,
+                    help="per-step Cartesian translation clamp for tcp_target_pose (default 0.010=10mm). "
+                         "Recorded demos reach up to ~8mm/step; 10mm leaves the policy's reach untruncated "
+                         "(measured: per-step max ~9mm). Lower it to slow/limit the motion.")
+    ap.add_argument("--max-angular-step-rad", type=float, default=0.01,
+                    help="per-step Cartesian rotation clamp for tcp_target_pose (default 0.01 rad)")
+    ap.add_argument("--allow-real-gripper", action="store_true",
+                    help="drive the REAL gripper from the model's gripper action (real_policy gripper "
+                         "path + RB_ALLOW_REAL_GRIPPER=1). Without it the gripper is a logged no-op "
+                         "(controller_sim). Use only on the real stack with the pika gripper backend.")
     ap.add_argument("--sample-steps", type=int, default=16)
     ap.add_argument("--image-size", type=int, default=None)
     ap.add_argument("--chunk-execute-steps", type=int, default=None)

@@ -25,8 +25,10 @@ from rb_servo_gui.app import (
     _TCP_FRAME_STAND,
     _apply_tcp_delta_and_send_pose_target,
     _apply_tcp_delta_to_target,
+    _format_gripper_feedback,
     _gripper_cmd_endpoint,
     _push_gripper_percent,
+    _update_gripper_feedback,
     _send_gripper_command,
     _apply_init_joints_live,
     _nudge_label,
@@ -1003,6 +1005,32 @@ class GuiContractsTest(unittest.TestCase):
         scene.clear()
         _push_gripper_percent(handles, None)
         self.assertAlmostEqual(scene["gripper_percent_left"], 100.0)
+
+    def test_gripper_feedback_readout_tracks_live_state(self):
+        from rb_servo_gui.models import StateSnapshot
+        class _Text:
+            def __init__(self):
+                self.value = "—"
+
+        handles = {"gripper_actual_left": _Text(), "gripper_actual_right": _Text()}
+        state = sample_state()
+        state["left"]["gripper"] = {"valid": True, "percent": 30.0, "moving": True}
+        state["right"]["gripper"] = {"valid": False}
+        _update_gripper_feedback(handles, StateSnapshot.parse(state), stale=False)
+        self.assertEqual(handles["gripper_actual_left"].value, "30% open (moving)")
+        self.assertEqual(handles["gripper_actual_right"].value, "no feed")
+        # stale annotation surfaces; no state -> no feed
+        _update_gripper_feedback(handles, None, stale=True)
+        self.assertEqual(handles["gripper_actual_left"].value, "no feed")
+
+    def test_format_gripper_feedback_variants(self):
+        from rb_servo_gui.models import StateSnapshot
+        state = sample_state()
+        state["left"]["gripper"] = {"valid": True, "percent": 0.0, "moving": False}
+        snap = StateSnapshot.parse(state)
+        self.assertEqual(_format_gripper_feedback(snap.left, stale=False), "0% open")
+        self.assertEqual(_format_gripper_feedback(snap.left, stale=True), "0% open [stale]")
+        self.assertEqual(_format_gripper_feedback(None, stale=False), "no feed")
 
     def test_robot_urdf_path_uses_descriptions_dir_env(self):
         descriptions_dir = Path(__file__).resolve().parents[2] / "rb_servo_server" / "descriptions"

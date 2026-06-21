@@ -1780,6 +1780,17 @@ def build_gui(
                         initial_value=f"-> gripper_server {handles['gripper_cmd_endpoint'][0]}:{handles['gripper_cmd_endpoint'][1]}",
                         disabled=True,
                     )
+                    # Live read-only feedback of the REAL gripper opening (0 closed ..
+                    # 100 open) from the server's gripper_state.v1 block. The sliders
+                    # above are command setpoints (write-only); these readouts are kept
+                    # in sync with actual hardware in _update_gripper_feedback so the
+                    # operator sees the true opening instead of just the last command.
+                    handles["gripper_actual_left"] = server.gui.add_text(
+                        "Left gripper 실제 %", initial_value="—", disabled=True
+                    )
+                    handles["gripper_actual_right"] = server.gui.add_text(
+                        "Right gripper 실제 %", initial_value="—", disabled=True
+                    )
 
     with tabs.add_tab("이동"):
         _move_tabs = server.gui.add_tab_group()
@@ -2334,6 +2345,29 @@ def _push_gripper_percent(handles: dict[str, Any], latest: StateSnapshot | None 
             pass
 
 
+def _format_gripper_feedback(arm_snapshot: Any, *, stale: bool) -> str:
+    """One-line live actual-gripper-opening readout for the gripper control panel."""
+    pct = getattr(arm_snapshot, "gripper_percent", None) if arm_snapshot is not None else None
+    if not isinstance(pct, (int, float)) or not math.isfinite(float(pct)):
+        return "no feed"
+    text = f"{float(pct):.0f}% open"
+    if getattr(arm_snapshot, "gripper_moving", False):
+        text += " (moving)"
+    if stale:
+        text += " [stale]"
+    return text
+
+
+def _update_gripper_feedback(handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool) -> None:
+    """Sync the read-only actual-gripper readouts with the live server gripper feed."""
+    for side in ("left", "right"):
+        text = handles.get(f"gripper_actual_{side}")
+        if text is None:
+            continue
+        arm = getattr(latest, side, None) if latest is not None else None
+        text.value = _format_gripper_feedback(arm, stale=stale)
+
+
 def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
     floor = latest.floor_constraint if latest is not None else None
     update_floor_plane(handles.get("scene", {}), floor)
@@ -2684,6 +2718,7 @@ def update_gui(
         handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     _update_operator_monitors(handles, latest, stale=stale)
     _push_gripper_percent(handles, latest)
+    _update_gripper_feedback(handles, latest, stale=stale)
     update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
     # After markers: the collision overlay may override ghost/solid visibility.
     update_self_collision_overlay(handles.get("scene", {}), latest)

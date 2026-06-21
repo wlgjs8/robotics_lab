@@ -273,10 +273,16 @@ _FLOOR_PLANE_RED = (220, 60, 60)
 # Pending (not-yet-sent) slider value preview: distinct color so it cannot be
 # mistaken for the APPLIED safety plane.
 _FLOOR_PLANE_PREVIEW_YELLOW = (235, 200, 60)
-# Stand-frame footprint of the floor plane visual: x in [-0.5, 0.5] m,
-# y in [-1.0, 0.0] m (the workspace in front of the stand).
-_FLOOR_PLANE_DIMENSIONS = (1.0, 1.0, 0.002)
-_FLOOR_PLANE_CENTER_XY = (0.0, -0.5)
+# Stand-frame footprint of the floor plane visual: an 800 x 800 mm square whose
+# near (+y) edge is aligned to the stand's +y back face so the plane "starts" where
+# the stand URDF does. The rendered stand mesh (dual_rb3_730e_stand_ver2_clean.stl,
+# placed under /stand/mesh) spans y in [-0.269, +0.120] m in the stand frame; the
+# plane's +y edge sits at that +0.120 back face and the square extends 0.8 m forward
+# into the workspace (-y). With width 0.8 and the +y edge at +0.120, the center is
+# y = 0.120 - 0.4 = -0.28; x stays centered (x in [-0.4, 0.4] m). This is a visual
+# footprint only — the actual safety constraint is the server-side z-plane.
+_FLOOR_PLANE_DIMENSIONS = (0.8, 0.8, 0.002)
+_FLOOR_PLANE_CENTER_XY = (0.0, -0.28)
 
 
 # Reachable-workspace OUTER-SHELL surface (tools/reach_envelope.py output): only
