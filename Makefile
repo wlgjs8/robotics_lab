@@ -34,11 +34,11 @@ build:
 # (J1) velocity-singularity cylinder (vendor "A 영역"), radius R = v_ref/dq_max,
 # axial extent FK-clipped to the reach envelope. Pure Python (seconds); only
 # needed when the URDF / mount geometry or the speed cap changes. Tunables:
-# IK_CYL_SPEED (m/s, default 0.2), IK_CYL_DQMAX (deg/s, default 60),
-# IK_CYL_RADIUS (m, explicit override).
+# IK_CYL_SPEED (m/s, default 0.25 = SMD max_linear_velocity_m_s), IK_CYL_DQMAX
+# (deg/s, default 60), IK_CYL_RADIUS (m, explicit override).
 ik-infeasible:
 	python3 tools/ik_infeasible_region.py \
-		--speed-mps $(or $(IK_CYL_SPEED),0.20) \
+		--speed-mps $(or $(IK_CYL_SPEED),0.25) \
 		--dqmax-deg $(or $(IK_CYL_DQMAX),60) \
 		$(if $(IK_CYL_RADIUS),--radius-m $(IK_CYL_RADIUS),)
 

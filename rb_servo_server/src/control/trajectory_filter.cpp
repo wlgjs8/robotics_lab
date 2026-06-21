@@ -15,6 +15,59 @@ bool nearlyEqualJointArray(const JointArray& a, const JointArray& b, double tol_
     return true;
 }
 
+// Choose the shortest-path representation of an absolute JointTarget goal.
+//
+// The robot operates on RAW continuous joint angles in [q_min_deg, q_max_deg]
+// (= [-360, 360] for the supported rbpodo scope, see docs/joint_range_policy.md),
+// so a single physical orientation has up to three valid raw representations
+// (theta, theta+/-360). A bare absolute target can therefore sit a full
+// revolution away from where the joint currently is (e.g. q=251.8 deg, target=-131.66
+// deg => -383 deg "the long way"), making an InitMotion/PTP spin ~360 deg to reach
+// an equivalent pose. This is the "continuous motion-safe unwrapping" the joint
+// range policy deferred: pick, per joint, the equivalent angle (target + 360*k)
+// that is in-range AND closest to the reference (the current sent target). It is
+// limit-bounded (never returns an out-of-range angle) and endpoint-equivalent (same
+// physical pose mod 360), so when no closer in-range equivalent exists it returns the
+// raw target unchanged (e.g. a near-limit target keeps the only legal long way around).
+// This selects the GOAL only; the downstream ramp/SMD is still monotonic from the
+// reference (no mid-trajectory period wrapping, which stays rejected).
+JointArray shortestPathJointGoal(
+    const JointArray& raw_target,
+    const JointArray& reference,
+    const JointArray& q_min_deg,
+    const JointArray& q_max_deg
+) {
+    JointArray out = raw_target;
+    for (int i = 0; i < kDof; ++i) {
+        if (!(std::isfinite(raw_target[i]) && std::isfinite(reference[i]))) {
+            continue;
+        }
+        // Only normalize when a valid in-range window exists for this joint; an
+        // unset/degenerate [q_min, q_max] (default zero arrays) disables it safely.
+        if (!(q_max_deg[i] > q_min_deg[i])) {
+            continue;
+        }
+        double best = raw_target[i];
+        double best_dist = std::abs(raw_target[i] - reference[i]);
+        for (int k = -3; k <= 3; ++k) {
+            if (k == 0) {
+                continue;
+            }
+            const double cand = raw_target[i] + 360.0 * static_cast<double>(k);
+            if (cand < q_min_deg[i] || cand > q_max_deg[i]) {
+                continue;
+            }
+            const double dist = std::abs(cand - reference[i]);
+            if (dist < best_dist) {
+                best_dist = dist;
+                best = cand;
+            }
+        }
+        out[i] = best;
+    }
+    return out;
+}
+
 }  // namespace
 
 TrajectoryFilter::TrajectoryFilter(const ServoConfig& servo_config, const SafetyConfig& safety_config)
@@ -41,11 +94,19 @@ JointArray TrajectoryFilter::computeJointTarget(
             joint_smd_.deactivate();
             out = holdTarget(previous_sent_target);
             break;
-        case ControlMode::JointTarget:
+        case ControlMode::JointTarget: {
+            // Reach the commanded joint pose by the shortest in-range path: pick the
+            // nearest equivalent (target +/- 360*k) to where the joint currently is,
+            // so an InitMotion/PTP does not spin a full revolution to an equivalent
+            // pose (docs/joint_range_policy.md "continuous motion-safe unwrapping").
+            const JointArray goal = shortestPathJointGoal(
+                command.q_target_deg, previous_sent_target,
+                safety_config_.q_min_deg, safety_config_.q_max_deg);
             out = safety_config_.joint_target_smd.enable
-                ? smdJointTarget(command.q_target_deg, previous_sent_target, dt_sec)
-                : filterJointTarget(command.q_target_deg, previous_sent_target, dt_sec);
+                ? smdJointTarget(goal, previous_sent_target, dt_sec)
+                : filterJointTarget(goal, previous_sent_target, dt_sec);
             break;
+        }
         case ControlMode::JointVelocity:
             joint_smd_.deactivate();
             out = integrateJointVelocity(command.dq_target_deg_s, previous_sent_target, dt_sec);

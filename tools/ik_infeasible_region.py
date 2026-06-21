@@ -17,9 +17,12 @@ base joint must spin v_ref / r; when r < R that exceeds the joint speed limit an
 Cartesian tracking breaks down (the source of the dq_max-saturation tremble). The
 defaults mirror the deployed config:
 
-    v_ref     = cartesian_control.max_linear_move_speed_m_s   (0.20 m/s)
-    dq_max    = safety.dq_max_deg_s[0]  (J1)                  (60 deg/s)
-    => R ~= 0.20 / (60*pi/180) ~= 0.191 m
+    v_ref  = smd.max_linear_velocity_m_s  (0.25 m/s)  # SMD pose-tracker Cartesian
+             ceiling — the BINDING speed for the deployed TcpTargetPose lane and the
+             path where dq_max saturation/tremble actually occurs (not the MoveL-only
+             max_linear_move_speed_m_s).
+    dq_max = safety.dq_max_deg_s[0]  (J1)             (60 deg/s)
+    => R ~= 0.25 / (60*pi/180) ~= 0.239 m
 
 The cylinder is NOT a fixed object: it GROWS with commanded speed (R proportional
 to v_ref). Regenerate if the speed cap changes (pass --speed-mps / --dqmax-deg or
@@ -37,7 +40,7 @@ Output mirrors the prior npz schema (left/right ``_vertices_base_m`` / ``_faces`
 so rb_gui/scene.py renders it unchanged.
 
 Usage:
-    python3 tools/ik_infeasible_region.py                 # default R from 0.2 m/s
+    python3 tools/ik_infeasible_region.py                 # default R from 0.25 m/s (~239 mm)
     python3 tools/ik_infeasible_region.py --speed-mps 0.3 # fatter cylinder
     python3 tools/ik_infeasible_region.py --radius-m 0.22 # explicit radius override
 """
@@ -117,8 +120,9 @@ def main() -> int:
     # Radius (option 1): R = v_ref / dq_max, unless --radius-m overrides.
     ap.add_argument("--radius-m", type=float, default=None,
                     help="explicit cylinder radius [m]; overrides --speed-mps/--dqmax-deg")
-    ap.add_argument("--speed-mps", type=float, default=0.20,
-                    help="reference Cartesian speed [m/s] (config max_linear_move_speed_m_s)")
+    ap.add_argument("--speed-mps", type=float, default=0.25,
+                    help="reference Cartesian speed [m/s] (config smd.max_linear_velocity_m_s, "
+                         "the binding SMD pose-tracker ceiling)")
     ap.add_argument("--dqmax-deg", type=float, default=60.0,
                     help="base-joint (J1) speed limit [deg/s] (config dq_max_deg_s[0])")
     # Axial extent: measured from FK unless both overrides are given.

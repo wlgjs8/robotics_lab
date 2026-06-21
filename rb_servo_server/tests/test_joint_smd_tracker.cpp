@@ -133,6 +133,59 @@ SafetyConfig safetyConfigWithSmd(bool enable) {
     return safety;
 }
 
+// As above, plus the supported rbpodo raw range [-360, 360] so the shortest-path
+// JointTarget goal selection is active (it is a no-op when q_min/q_max are unset).
+SafetyConfig safetyConfigWithRange() {
+    SafetyConfig safety = safetyConfigWithSmd(false);  // legacy ramp path, run to settle
+    safety.q_min_deg = {-360.0, -360.0, -360.0, -360.0, -360.0, -360.0};
+    safety.q_max_deg = {360.0, 360.0, 360.0, 360.0, 360.0, 360.0};
+    return safety;
+}
+
+// Ramp the legacy (smd-disabled) filter to convergence and return the resting target.
+JointArray runJointTargetToSettle(const JointArray& prev, const JointArray& goal, const SafetyConfig& safety) {
+    TrajectoryFilter filter(ServoConfig{}, safety);
+    JointArray q = prev;
+    for (int tick = 0; tick < 20000; ++tick) {  // 40 s @ 500 Hz: plenty for a <360 deg ramp
+        q = filter.computeJointTarget(jointTargetCommand(goal), RobotState{}, q, kDt);
+    }
+    return q;
+}
+
+// J1 at 251.8 deg, target -131.66 deg: same physical pose as +228.34 deg (= -131.66 + 360).
+// The shortest in-range path is the +228.34 representation (~23 deg), NOT -131.66 (~383 deg
+// the long way). The robot must settle at 228.34 and never swing past it toward -131.
+bool testJointTargetTakesShortestInRangePath() {
+    const JointArray prev{251.8, 79.7, 128.5, -65.9, -129.9, -167.4};
+    const JointArray goal{-131.663, 72.989, 113.400, -80.880, -107.064, -145.949};
+    const JointArray out = runJointTargetToSettle(prev, goal, safetyConfigWithRange());
+    RB_CHECK(std::abs(out[0] - (goal[0] + 360.0)) < 0.5);   // settled at +228.34, the short way
+    RB_CHECK(out[0] > 200.0);                                // never went the long way toward -131
+    for (int i = 1; i < kDof; ++i) {                         // other joints (|delta|<180) untouched
+        RB_CHECK(std::abs(out[i] - goal[i]) < 0.5);
+    }
+    return true;
+}
+
+// A near-limit target has no closer in-range equivalent (10 + 360 = 370 > q_max 360),
+// so it must KEEP the literal target and take the long way — limits win over shortness.
+bool testJointTargetNearLimitKeepsLiteralTarget() {
+    JointArray prev{}; prev[0] = 350.0;
+    JointArray goal{}; goal[0] = 10.0;  // 370 deg out of range -> stays 10
+    const JointArray out = runJointTargetToSettle(prev, goal, safetyConfigWithRange());
+    RB_CHECK(std::abs(out[0] - 10.0) < 0.5);
+    return true;
+}
+
+// Within a revolution (|target - current| < 180): no wrap, settle exactly on the target.
+bool testJointTargetNoSpuriousWrap() {
+    JointArray prev{}; prev[0] = 10.0;
+    JointArray goal{}; goal[0] = 20.0;
+    const JointArray out = runJointTargetToSettle(prev, goal, safetyConfigWithRange());
+    RB_CHECK(std::abs(out[0] - 20.0) < 0.5);
+    return true;
+}
+
 // enable=false keeps the legacy behavior: full-speed rate-limited ramp.
 bool testTrajectoryFilterDisabledKeepsLegacyRamp() {
     TrajectoryFilter filter(ServoConfig{}, safetyConfigWithSmd(false));
@@ -209,6 +262,9 @@ int main() {
     if (!testTrajectoryFilterDisabledKeepsLegacyRamp()) return 1;
     if (!testTrajectoryFilterSmdProfile()) return 1;
     if (!testTrajectoryFilterRebaselinesAfterExternalMove()) return 1;
+    if (!testJointTargetTakesShortestInRangePath()) return 1;
+    if (!testJointTargetNearLimitKeepsLiteralTarget()) return 1;
+    if (!testJointTargetNoSpuriousWrap()) return 1;
     std::cout << "joint_smd_tracker tests passed\n";
     return 0;
 }

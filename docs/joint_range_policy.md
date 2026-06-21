@@ -43,10 +43,32 @@ behavior.
 `q_range_wrapped` and `q_actual_normalized_for_safety_deg`, but state JSON must
 still preserve raw `q_actual_deg`.
 
-`joint_wrap_for_motion_safety` remains rejected. Motion targets are not wrapped
-across `+/-180` or any other period; they clamp to configured raw
-`q_min_deg`/`q_max_deg` until continuous motion-safe unwrapping is implemented
-and accepted.
+`joint_wrap_for_motion_safety` remains rejected: a target is never wrapped
+*mid-trajectory* across `+/-180` or any other period, and out-of-range targets
+clamp to configured raw `q_min_deg`/`q_max_deg`.
+
+**Accepted (2026-06-21): shortest-path `JointTarget` goal selection.** The
+"continuous motion-safe unwrapping" that was deferred above is now implemented and
+accepted for absolute `JointTarget` PTP *goals only*
+(`TrajectoryFilter::computeJointTarget` -> `shortestPathJointGoal`,
+`src/control/trajectory_filter.cpp`). Because one physical orientation has up to
+three valid raw representations (`theta`, `theta +/- 360`) inside the supported
+`[-360, 360]` range, a bare absolute target can sit a full revolution from the
+joint's current angle and make an InitMotion/PTP spin ~360 deg to an equivalent
+pose (observed: `q1 = 251.8 deg`, target `-131.66 deg` -> `-383 deg` the long way).
+The filter now picks, per joint, the equivalent angle `target + 360*k` that is
+**in-range AND closest to the current sent target**. Properties that keep this
+motion-safe (NOT the rejected mid-trajectory wrap):
+
+- **Limit-bounded** — a candidate is used only if it lies within `q_min_deg`/
+  `q_max_deg`; if no closer in-range equivalent exists the literal target is kept
+  (a near-limit target still takes the only legal long way around).
+- **Endpoint-equivalent** — the chosen goal is the same physical pose mod 360.
+- **Goal-only / monotonic ramp** — only the goal representation is chosen; the
+  downstream rate-limit / SMD ramp from the current target stays monotonic, so no
+  angle is wrapped while moving.
+- **No-op when range is unset** — a degenerate `q_min >= q_max` (default zero
+  arrays) disables it, so configs without explicit raw limits are unaffected.
 
 ## Kinematics Alignment
 

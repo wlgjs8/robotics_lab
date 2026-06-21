@@ -293,9 +293,10 @@ a *velocity/Jacobian* singularity, not a position hole (the TCP can be placed th
 with Move J). It is deliberately distinct from the reach envelope: reach = "too far
 to reach at all"; A 영역 = "reachable, but Cartesian motion through here saturates the
 base joint". Geometry: a capped cylinder coaxial with the J1 axis, radius
-`R = v_ref / dq_max` (v_ref = `cartesian_control.max_linear_move_speed_m_s`, dq_max =
-`safety.dq_max_deg_s[0]`; default ≈ 0.191 m at 0.2 m/s — it GROWS with commanded
-speed), axial extent FK-clipped to the reachable z-range. The cylinder is identical
+`R = v_ref / dq_max` (v_ref = `smd.max_linear_velocity_m_s` = the binding SMD
+pose-tracker Cartesian ceiling, dq_max = `safety.dq_max_deg_s[0]`; default ≈ 0.239 m
+at 0.25 m/s — it GROWS with commanded speed), axial extent FK-clipped to the
+reachable z-range. The cylinder is identical
 in both arms' base frames (the singularity is mount-independent there), so one mesh
 serves both; each `/stand/<side>_base` node applies the mount tilt. Built by
 `tools/ik_infeasible_region.py` (pure Python, no C++ grid) into

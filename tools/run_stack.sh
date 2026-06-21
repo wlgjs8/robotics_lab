@@ -59,7 +59,13 @@ mkdir -p "$LOG_DIR"
 # default on in every mode. Endpoints match the server config's gripper block.
 if [ "$MODE" = "real" ]; then
   GRIPPER_BACKEND="pika"
-  GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS---left-port /dev/pika-left --right-port /dev/pika-right}"
+  # The AgileX Pika SDK ('pika' package) is NOT on this PC's default sys.path;
+  # the copy from the SteamVR PC's conda env lives at PIKA_SDK_PATH (same
+  # convention/default as scripts/umi_gripper_follow.py). Without it the pika
+  # backend dies at startup with "No module named 'pika'" and the gripper viz
+  # never updates. Pass it through so `make run` alone works.
+  PIKA_SDK_PATH="${PIKA_SDK_PATH:-/home/plaif/workspace/pika_sdk}"
+  GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS---left-port /dev/pika-left --right-port /dev/pika-right --pika-sdk-path $PIKA_SDK_PATH}"
 else
   GRIPPER_BACKEND="sim"
   GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS-}"

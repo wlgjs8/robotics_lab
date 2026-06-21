@@ -109,20 +109,47 @@ class ReplayCameraClient:
 
 
 def load_episode(path: str, camera_names: list[str]):
-    """Return (frames_by_name, gripper_by_arm, num_frames)."""
+    """Return (frames_by_name, gripper_by_arm, num_frames).
+
+    Handles two on-disk layouts transparently:
+      * data_tcp_v2 flat:  observations/images/<name>,           observations/gripper_<arm>
+      * raw data/ nested:  observations/<arm>/images/realsense_color, observations/<arm>/gripper (T,2)
+    The raw layout is what the saved UMI validation episodes use (poses-only data_tcp drops
+    images), so loading raw data/ episodes here is how offline camera frames feed inference.
+    """
     frames_by_name: dict[str, list] = {}
     gripper_by_arm: dict[str, np.ndarray] = {}
+
+    def _arm_of(name: str) -> str:
+        return "left" if str(name).startswith("left") else "right"
+
     with h5py.File(path, "r") as f:
-        img_grp = f["observations/images"]
+        flat = "observations/images" in f
         for name in camera_names:
-            if name not in img_grp:
-                raise KeyError(f"camera {name!r} not in episode {path}")
-            ds = img_grp[name]
+            if flat:
+                img_grp = f["observations/images"]
+                if name not in img_grp:
+                    raise KeyError(f"camera {name!r} not in episode {path}")
+                ds = img_grp[name]
+            else:
+                key = f"observations/{_arm_of(name)}/images/realsense_color"
+                if key not in f:
+                    raise KeyError(f"camera {name!r} ({key}) not in episode {path}")
+                ds = f[key]
             frames_by_name[name] = [ds[i] for i in range(ds.shape[0])]
         num_frames = len(next(iter(frames_by_name.values())))
         for arm in ("left", "right"):
-            key = f"observations/gripper_{arm}"
-            gripper_by_arm[arm] = np.asarray(f[key]) if key in f else None
+            if flat:
+                key = f"observations/gripper_{arm}"
+                gripper_by_arm[arm] = np.asarray(f[key]) if key in f else None
+            else:
+                key = f"observations/{arm}/gripper"
+                if key in f:
+                    g = np.asarray(f[key])
+                    # raw layout stores (T,2): col0 = measured/actual %, col1 = commanded.
+                    gripper_by_arm[arm] = g[:, 0] if g.ndim == 2 else g
+                else:
+                    gripper_by_arm[arm] = None
     return frames_by_name, gripper_by_arm, num_frames
 
 
@@ -240,10 +267,28 @@ def init_to_rest(config, *, settle_sec: float = 14.0, stderr=sys.stderr) -> None
 
 
 def build_source(args, camera_client):
+    command_family = getattr(args, "command_family", None) or "tcp_twist_local"
+    # openpi:// served checkpoint -> remote inference source (camera bundle substituted by the
+    # ReplayCameraClient). The live flow-infer command pipeline is reused unchanged; the only
+    # substitution here is the camera source + the recorded proprio gripper (main() injects it).
+    from policy_runner.openpi_remote import OPENPI_CHECKPOINT_PREFIX, OpenpiRemoteActionSource
+
+    if str(args.checkpoint or "").startswith(OPENPI_CHECKPOINT_PREFIX):
+        source = OpenpiRemoteActionSource(
+            args.checkpoint,
+            camera_client=camera_client,
+            command_family=command_family,
+            policy_dt_sec=args.policy_dt_sec,
+            allow_rbpodo_controller_simulation_cartesian=True,
+            ee_local_r_align=args.ee_local_r_align,
+            gripper_runtime=GripperRuntime(rollout_mode="controller_sim"),
+            device=args.device,
+        )
+        return source, "openpi_remote"
     kind = action_chunk_checkpoint_kind(args.checkpoint, device="cpu")
     common = dict(
         camera_client=camera_client,
-        command_family="tcp_twist_local",
+        command_family=command_family,
         policy_dt_sec=args.policy_dt_sec,
         allow_rbpodo_controller_simulation_cartesian=True,
         ee_local_r_align=args.ee_local_r_align,
@@ -255,7 +300,7 @@ def build_source(args, camera_client):
     elif kind == "flow":
         source = FlowMatchingActionSource(args.checkpoint, sample_steps=args.sample_steps, **common)
     else:
-        raise SystemExit(f"unsupported checkpoint kind for local replay: {kind} (openpi handled separately)")
+        raise SystemExit(f"unsupported checkpoint kind for local replay: {kind}")
     return source, kind
 
 
@@ -287,6 +332,14 @@ def main():
     ap.add_argument("--policy-dt-sec", type=float, default=0.0334)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--ee-local-r-align", default=None)
+    ap.add_argument(
+        "--command-family",
+        choices=("tcp_twist_local", "tcp_target_pose"),
+        default="tcp_twist_local",
+        help="how the policy's ee_local deltas are sent to rb_servo_server: tcp_twist_local "
+             "(velocity) or tcp_target_pose (compose into absolute TcpPoseTarget position "
+             "setpoints — the stabilized deploy lane, see wiki pi05-openpi-deployment)",
+    )
     ap.add_argument("--action-scale", type=float, default=1.0,
                     help="ground-truth only: scale per-step ee_local deltas (translation+rotation) "
                          "by this factor to keep the swept trajectory in reach; axis direction is "
