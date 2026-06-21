@@ -379,16 +379,14 @@ def set_reach_envelope_visible(scene_handles: dict[str, Any], visible: bool) -> 
         _set_visible(scene_handles.get(f"{arm}_reach_envelope"), visible)
 
 
-# IK-infeasible region: positions that ARE reachable (the arm can place its TCP
-# there with SOME orientation) yet have no IK solution with the gripper pointing
-# straight DOWN — "reach 되지만 top-down IK 못 푸는 구역". Distinct from the reach
-# envelope (which marks positions too FAR to reach at all): this is the red shell
-# wrapping the central zone where top-down grasps actually work. Computed PER ARM
-# (tools/ik_infeasible_region.py via the C++ ik_feasibility_grid + the server's
-# real IK solver) because the left/right mount tilt makes top-down a different
-# base-frame orientation. Drawn red and DOUBLE-sided: the region is concave so
-# back-face culling can't be trusted; the builder fixes winding and it stays
-# translucent.
+# "A 영역" base-axis singularity cylinder: the column along each arm's J1 axis
+# where Move J reaches fine but Cartesian/Move L control forces runaway joint speed
+# (vendor "A 영역", rb_cobot_docs). Distinct from the reach envelope (positions too
+# FAR to reach): this marks the inner velocity-singularity core. A capped cylinder
+# of radius R = v_ref/dq_max, axial extent FK-clipped to the reach envelope, built
+# by tools/ik_infeasible_region.py. The same base-frame cylinder serves both arms
+# (the singularity is mount-independent in base frame); each /stand/<side>_base node
+# applies the mount tilt. Drawn red; back-face culling is fine (convex watertight).
 _IK_INFEASIBLE_RED = (220, 70, 70)
 _IK_INFEASIBLE_OPACITY = 0.20
 
@@ -398,13 +396,15 @@ def _ik_infeasible_path() -> Path:
 
 
 def _add_ik_infeasible_region(server: Any, handles: dict[str, Any]) -> None:
-    """Per-arm IK-infeasible region meshes (tools/ik_infeasible_region.py output).
+    """Per-arm "A 영역" base-axis singularity cylinder (tools/ik_infeasible_region.py).
 
-    The asset holds a SEPARATE base-frame mesh per arm (left/right top-down dead
-    zones differ with the mount tilt); each is attached under its /stand/<side>_base
-    node. Skips gracefully if the asset is missing (run tools/ik_infeasible_region.
-    py) or viser lacks mesh support. Static geometry — visibility is toggled from
-    the GUI 안전 tab."""
+    The asset holds a base-frame capped cylinder coaxial with each arm's J1 axis
+    (vendor "A 영역": the base-axis velocity singularity where Cartesian/Move L
+    control forces runaway joint speed). The cylinder is identical in both arms'
+    base frames; each is attached under its /stand/<side>_base node so the mount
+    tilt is applied automatically. Skips gracefully if the asset is missing (run
+    tools/ik_infeasible_region.py) or viser lacks mesh support. Static geometry —
+    visibility is toggled from the GUI 안전 tab."""
     if not hasattr(server.scene, "add_mesh_simple"):
         return
     path = _ik_infeasible_path()
@@ -433,9 +433,9 @@ def _add_ik_infeasible_region(server: Any, handles: dict[str, Any]) -> None:
                     faces=faces,
                     color=_IK_INFEASIBLE_RED,
                     opacity=_IK_INFEASIBLE_OPACITY,
-                    side="double",      # concave region: don't rely on back-cull
+                    side="back",        # convex watertight cylinder: cull near faces for clean translucency
                     flat_shading=False,
-                    visible=False,      # brought up by the GUI "IK 불가 영역 표시" toggle
+                    visible=False,      # brought up by the GUI "A 영역(특이점 원통) 표시" toggle
                 )
             except TypeError:  # older viser without opacity/side support
                 handles[f"{arm}_ik_infeasible"] = server.scene.add_mesh_simple(
@@ -450,6 +450,8 @@ def _add_ik_infeasible_region(server: Any, handles: dict[str, Any]) -> None:
             handles["ik_infeasible_error"] = f"IK-infeasible asset empty: {path}"
             return
         handles["ik_infeasible_cells"] = total_cells
+        if "radius_m" in data:
+            handles["ik_infeasible_radius_m"] = float(data["radius_m"])
     except Exception as exc:
         handles["ik_infeasible_error"] = f"{type(exc).__name__}: {exc}"
 

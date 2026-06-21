@@ -3922,13 +3922,22 @@ class IkInfeasibleRegionTest(unittest.TestCase):
         self.assertIn("right_ik_infeasible", handles)
         self.assertNotIn("ik_infeasible_error", handles)
         self.assertEqual(handles["ik_infeasible_cells"], 4321)
-        # both attached under the per-arm base node, hidden by default, red+double
+        # both attached under the per-arm base node, hidden by default, red+back-cull
         self.assertIn("/stand/left_base/ik_infeasible", server.scene.meshes)
         self.assertIn("/stand/right_base/ik_infeasible", server.scene.meshes)
         left = server.scene.meshes["/stand/left_base/ik_infeasible"]
         self.assertFalse(left.visible)
-        self.assertEqual(left.kwargs.get("side"), "double")
+        # convex watertight cylinder -> back-cull (was "double" for the old concave shell)
+        self.assertEqual(left.kwargs.get("side"), "back")
         self.assertEqual(tuple(left.kwargs.get("color")), (220, 70, 70))
+
+    def test_loads_cylinder_radius_for_status(self):
+        asset = self._write_asset(left_cells=96, right_cells=96, radius_m=0.191)
+        server = self._mesh_scene_server()
+        handles: dict = {}
+        with mock.patch.dict(os.environ, {"RB_GUI_IK_INFEASIBLE": asset}):
+            _add_ik_infeasible_region(server, handles)
+        self.assertAlmostEqual(handles["ik_infeasible_radius_m"], 0.191, places=6)
 
     def test_missing_asset_records_error(self):
         server = self._mesh_scene_server()

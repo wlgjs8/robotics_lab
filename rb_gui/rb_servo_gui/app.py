@@ -1713,29 +1713,29 @@ def build_gui(
                     "Reach envelope", initial_value=reach_status, disabled=True
                 )
 
-            with server.gui.add_folder("IK 불가 영역"):
-                # Show/hide the per-arm IK-infeasible region (tools/ik_infeasible_
-                # region.py, computed with the server's real Pinocchio IK solver).
-                # Distinct from reach: these are positions the arm CAN reach (with
-                # some orientation) but where the gripper cannot point straight DOWN
-                # — the red shell wrapping the central top-down grasp zone. Reach-
-                # impossible cells are excluded (that's the reach overlay's job).
-                # Static viewer aid, default OFF.
+            with server.gui.add_folder("A 영역 (특이점 원통)"):
+                # Show/hide the per-arm base-axis singularity cylinder (tools/
+                # ik_infeasible_region.py). Vendor "A 영역": the column along each
+                # arm's J1 axis where Move J is fine but Cartesian/Move L control
+                # forces runaway joint speed (radius R = v_ref/dq_max, grows with
+                # commanded speed). Distinct from reach (too far) and from the old
+                # top-down shell. Static viewer aid, default OFF.
                 ik_status = "no asset"
                 scene = handles.get("scene", {})
                 if isinstance(scene, dict) and (
                     "left_ik_infeasible" in scene or "right_ik_infeasible" in scene
                 ):
-                    cells = scene.get("ik_infeasible_cells")
+                    radius_m = scene.get("ik_infeasible_radius_m")
                     ik_status = (
-                        f"region loaded ({cells} cells)" if cells is not None
-                        else "region loaded"
+                        f"cylinder loaded (R={radius_m*1000:.0f} mm)"
+                        if isinstance(radius_m, (int, float))
+                        else "cylinder loaded"
                     )
                 elif isinstance(scene, dict) and scene.get("ik_infeasible_error"):
                     ik_status = str(scene["ik_infeasible_error"])
                 if hasattr(server.gui, "add_checkbox"):
                     ik_toggle = server.gui.add_checkbox(
-                        "IK 불가 영역 표시", initial_value=False
+                        "A 영역(특이점 원통) 표시", initial_value=False
                     )
                     handles["ik_infeasible_visible_toggle"] = ik_toggle
 
@@ -1746,7 +1746,7 @@ def build_gui(
 
                     ik_toggle.on_update(_ik_infeasible_toggle)
                 handles["ik_infeasible_status"] = server.gui.add_text(
-                    "IK infeasible", initial_value=ik_status, disabled=True
+                    "A 영역", initial_value=ik_status, disabled=True
                 )
 
         with _op_tabs.add_tab("그리퍼"):

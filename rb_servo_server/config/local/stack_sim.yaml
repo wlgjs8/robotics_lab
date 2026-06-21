@@ -263,9 +263,12 @@ kinematics:
   publish_tcp: true
   ik:
     enable: true
-    max_iterations: 50
+    # UNIFIED-TO-REAL (2026-06-21): control/IK tuning matched to stack_real.yaml so
+    # sim validates exactly what real runs. Real's values are the more conservative
+    # (more DLS damping, wider singular region, more iterations, looser tol).
+    max_iterations: 100
     timeout_ms: 20.0
-    damping: 0.001
+    damping: 0.02
     # ANTI-TREMBLE (was 0.002 / 0.005): the tolerance is a DEAD ZONE for the
     # 500Hz streaming TcpPoseTarget path — solveIk returns the seed (q_actual)
     # unchanged whenever the tracking error is inside it. At teleop speeds
@@ -273,8 +276,8 @@ kinematics:
     # sits exactly at the old 2mm boundary, producing a 3-5Hz relay limit
     # cycle (= 1/(2 x loop delay)). Tighter tolerance shrinks the dead zone
     # so the solver actually iterates each tick; typical cost 1-3 DLS steps.
-    position_tolerance_m: 0.0000002
-    orientation_tolerance_rad: 0.000001
+    position_tolerance_m: 0.00002
+    orientation_tolerance_rad: 0.0002
     max_step_deg: [2, 2, 2, 3, 3, 4]
     # Selective singularity-robust damping (shared by all position-IK
     # primitives). Keeps the solver on the seed branch near a singularity so a
@@ -282,7 +285,7 @@ kinematics:
     # flip; the arm keeps tracking with a small Cartesian lag, never holds.
     # DEFAULT OFF until tuned: sigma_min is ~0.004 even in healthy poses, so set
     # eps below that from the ik_sigma_min telemetry at an ik_branch_jump=1 tick.
-    singular_region_eps: 0.06   # TUNE-3 (2026-06-20): left sigma_min drops to ~0.039 before IkFailed -> engage damping just above it
+    singular_region_eps: 0.1   # UNIFIED-TO-REAL (was 0.06 TUNE-3): wider singular region = earlier damping = safer
     damping_max: 0.08           # TUNE-4 reverted: 0.20 made it FAIL EARLIER (over-damped). exact wrist singularity (sigma_min=0) cannot be solved by damping at any strength.
     max_solution_jump_deg: 2.0
     # Branch-jump CLAMP (acts, not just observes). When a converged solve still
@@ -347,10 +350,16 @@ cartesian_control:
   # rotation are independent. Settling time ~ 1/(zeta*2*pi*fn) * 4.
   pose_track_smd:
     enable: true
+    # UNIFIED-TO-REAL (2026-06-21): vff on + fn=1.0 to match stack_real.yaml.
+    # velocity_feedforward removes SMD phase lag (sim 22-ep clean subset: pos p95
+    # 17.9->1.75mm, lag 90->22ms, 21/22 REAL_READY). fn=1.0 (vs sim's old 3.0) is
+    # the mild low-pass that holds wrist-band HF down so vff's accuracy gain does
+    # not cost camera blur — the accurate+smooth combination for real ts=1.0.
+    velocity_feedforward: true
     damping_ratio_linear: 1.0
-    natural_frequency_linear_hz: 3.0
+    natural_frequency_linear_hz: 1.0
     damping_ratio_angular: 1.0
-    natural_frequency_angular_hz: 3.0
+    natural_frequency_angular_hz: 1.0
     # Saturation clamps (vector-norm, direction-preserving). Mass=1.0 so the
     # accel clamp IS the max-force clamp; zeta/fn dynamics stay exact inside
     # the limits. NOTE with these numbers a full-speed (50mm/s) stop is force-

@@ -285,23 +285,25 @@ OUTER-SHELL surface mesh (per-direction max-radius, triangulated) that the rb_gu
 viser overlay renders translucent + double-sided ("도달영역 표시" toggle) so the
 operator sees the reach boundary through the robot/stand.
 
-A complementary viewer-only overlay marks the **IK-infeasible region** — positions
-the arm CAN reach (its TCP fits there with SOME orientation) yet where the gripper
-cannot be placed pointing straight DOWN (top-down grasp). It is the red shell
-wrapping the central zone where top-down IK actually solves. This is deliberately
-distinct from the reach envelope: reach = "too far to reach at all"; IK-infeasible =
-"reachable, but not in the orientation you need". Reach-impossible cells are
-excluded — that boundary is the reach overlay's job. The region is computed by the
-C++ `ik_feasibility_grid` tool, which reuses the server's REAL Pinocchio IK solver
-(`rb_servo_core`): for each grid cell it tests (1) reachable with any of N approach
-directions, then (2) solvable with the tool pointing down (over M wrist rolls);
-occupancy = reachable AND NOT top-down-solvable. Because the left/right mount tilt
-makes "down" a different base-frame orientation, the asset stores a SEPARATE mesh
-per arm (the cheap reachability test is shared). `tools/ik_infeasible_region.py`
-turns the per-arm occupancy grids into translucent red surface meshes
-(`descriptions/ik_infeasible_rb3_730e.npz`). Static, precomputed viewer aid only (no
-safety enforcement) — regenerate with `make ik-infeasible` if the URDF or mount
-geometry changes. Toggle: "IK 불가 영역 표시" in the 조작 → 안전 tab.
+A complementary viewer-only overlay marks the **"A 영역" base-axis singularity
+cylinder** — the column along each arm's J1 (base) axis where Move J reaches fine
+but Cartesian/Move L (and streaming twist) control forces runaway joint speed. This
+is the vendor's documented "A 영역" (rb_cobot_docs product_introduction/robot_workarea):
+a *velocity/Jacobian* singularity, not a position hole (the TCP can be placed there
+with Move J). It is deliberately distinct from the reach envelope: reach = "too far
+to reach at all"; A 영역 = "reachable, but Cartesian motion through here saturates the
+base joint". Geometry: a capped cylinder coaxial with the J1 axis, radius
+`R = v_ref / dq_max` (v_ref = `cartesian_control.max_linear_move_speed_m_s`, dq_max =
+`safety.dq_max_deg_s[0]`; default ≈ 0.191 m at 0.2 m/s — it GROWS with commanded
+speed), axial extent FK-clipped to the reachable z-range. The cylinder is identical
+in both arms' base frames (the singularity is mount-independent there), so one mesh
+serves both; each `/stand/<side>_base` node applies the mount tilt. Built by
+`tools/ik_infeasible_region.py` (pure Python, no C++ grid) into
+`descriptions/ik_infeasible_rb3_730e.npz`. Static, precomputed viewer aid only (no
+safety enforcement — a matching inner-cylinder velocity-damper guard is a possible
+follow-up) — regenerate with `make ik-infeasible` (tunable `IK_CYL_SPEED` /
+`IK_CYL_DQMAX` / `IK_CYL_RADIUS`) if the URDF, mount geometry, or speed cap changes.
+Toggle: "A 영역(특이점 원통) 표시" in the 조작 → 안전 tab.
 
 `TcpCircleMove` is an optional benchmark primitive for isolating server-side
 circle generation from Python UDP streaming jitter. It requires

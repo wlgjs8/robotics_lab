@@ -1,36 +1,51 @@
 #!/usr/bin/env python3
-"""Build the viser "IK 불가 영역" overlay mesh from an IK-feasibility grid.
+"""Build the viser "A 영역 (특이점 원통)" overlay — per-arm base-axis singularity cylinder.
 
-Companion to tools/reach_envelope.py. Where the reach envelope is the FK OUTER
-shell (positions too FAR to reach), this marks positions that are INSIDE the
-reach radius yet have NO inverse-kinematics solution for any sampled approach
-direction — the genuine "IK holes" (inner dead zone, lower/back pockets, and the
-near-full-extension shell where orientation freedom collapses).
+This REPLACES the former top-down IK-infeasible *shell*. Within the reach
+envelope, the genuine no-go core for Cartesian (Move L / streaming twist) control
+is the base-axis (J1) **velocity singularity column** — Rainbow's documented
+"A 영역" (rb_cobot_docs product_introduction/robot_workarea): the region directly
+above/below the base where Move J is fine but Cartesian motion forces runaway
+joint speed. We render it as a capped cylinder coaxial with each arm's J1 axis.
 
-The feasibility itself is computed by the C++ tool `ik_feasibility_grid`, which
-reuses the SERVER's real Pinocchio IK solver (rb_servo_core) so the map matches
-the deployed solver rather than a re-implementation. This script only turns the
-resulting occupancy grid into a translucent surface mesh:
+Radius (option 1 — velocity singularity, the operator-meaningful definition):
 
-  occupied voxels --(exposed-face extraction, 6-neighbour)--> blocky boundary
-                  --(trimesh Humphrey smoothing)--> rounded isosurface
+    R = v_ref / dq_max_base          # tangential Cartesian speed that saturates J1
 
-Output mirrors the reach-envelope npz schema (shell_vertices_base_m / shell_faces
-in the ARM-BASE frame) so rb_servo_gui/scene.py renders it under each arm's
-/stand/<side>_base node — one base-frame mesh, mirrored for both arms.
+i.e. to translate the TCP at v_ref tangentially at radius r from the J1 axis the
+base joint must spin v_ref / r; when r < R that exceeds the joint speed limit and
+Cartesian tracking breaks down (the source of the dq_max-saturation tremble). The
+defaults mirror the deployed config:
+
+    v_ref     = cartesian_control.max_linear_move_speed_m_s   (0.20 m/s)
+    dq_max    = safety.dq_max_deg_s[0]  (J1)                  (60 deg/s)
+    => R ~= 0.20 / (60*pi/180) ~= 0.191 m
+
+The cylinder is NOT a fixed object: it GROWS with commanded speed (R proportional
+to v_ref). Regenerate if the speed cap changes (pass --speed-mps / --dqmax-deg or
+--radius-m).
+
+Geometry note — why one cylinder serves both arms: in each arm's
+``/stand/<side>_base`` frame the J1 axis is exactly +Z through the origin
+(link0 is a pure Z-rotation of the base node), and the base-axis singularity is
+mount-independent in that frame. So we compute ONE cylinder in the base frame and
+write it for both arms; scene.py applies each arm's mount tilt via its
+``/stand/<side>_base`` node. The axial extent is clipped to the reachable z-range
+(measured by FK) so only the in-reach segment of the column is drawn.
+
+Output mirrors the prior npz schema (left/right ``_vertices_base_m`` / ``_faces``)
+so rb_gui/scene.py renders it unchanged.
 
 Usage:
-    # generate the grid (slow) + build the mesh in one go:
-    python3 tools/ik_infeasible_region.py
-    # reuse an already-computed grid:
-    python3 tools/ik_infeasible_region.py --grid /tmp/ik_feasibility_grid.json
+    python3 tools/ik_infeasible_region.py                 # default R from 0.2 m/s
+    python3 tools/ik_infeasible_region.py --speed-mps 0.3 # fatter cylinder
+    python3 tools/ik_infeasible_region.py --radius-m 0.22 # explicit radius override
 """
 from __future__ import annotations
 
 import argparse
 import json
-import subprocess
-import tempfile
+import math
 from pathlib import Path
 
 import numpy as np
@@ -40,186 +55,132 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _default_grid_exe() -> Path:
-    return _repo_root() / "rb_servo_server" / "build" / "ik_feasibility_grid"
+def _default_urdf() -> Path:
+    return _repo_root() / "rb_servo_server" / "descriptions" / "urdf" / "rb3_730e.urdf"
 
 
 def _default_out() -> Path:
     return _repo_root() / "rb_servo_server" / "descriptions" / "ik_infeasible_rb3_730e.npz"
 
 
-def run_grid_tool(exe: Path, out_json: Path, spacing: float, orientations: int,
-                  down_rolls: int, seeds: int, threads: int) -> None:
-    """Invoke the C++ feasibility sampler to produce the occupancy grid JSON."""
-    if not exe.exists():
-        raise SystemExit(
-            f"feasibility tool not built: {exe}\n"
-            f"  build it first: cmake --build rb_servo_server/build --target ik_feasibility_grid"
-        )
-    cmd = [str(exe), "--spacing-m", str(spacing), "--orientations", str(orientations),
-           "--down-rolls", str(down_rolls), "--seeds", str(seeds), "--out", str(out_json)]
-    if threads > 0:
-        cmd += ["--threads", str(threads)]
-    print("running:", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+def cylinder_mesh(radius: float, z_lo: float, z_hi: float, sections: int) -> tuple:
+    """Capped cylinder coaxial with the base-frame +Z axis (x=y=0), z in [z_lo, z_hi].
 
-
-def exposed_surface(occ: np.ndarray, spacing: float, origin: float) -> tuple:
-    """Boundary surface of the occupied voxel set (no internal faces).
-
-    occ is a boolean array indexed [ix, iy, iz]. For each occupied voxel we emit a
-    quad only on the faces whose neighbour is empty (or outside) — the exposed
-    surface — so the translucent mesh has a single clean skin instead of the
-    double-counted internal walls `as_boxes()` would produce. Returns (vertices
-    Nx3 float, faces Mx3 int) with vertices at voxel-corner coordinates in the
-    arm-base frame."""
-    nx, ny, nz = occ.shape
-    h = spacing / 2.0
-
-    def centers(mask: np.ndarray) -> np.ndarray:
-        ix, iy, iz = np.nonzero(mask)
-        return np.stack([origin + ix * spacing, origin + iy * spacing,
-                         origin + iz * spacing], axis=1)
-
-    # 6 face directions: (axis, sign, the 4 corner offsets in ± half-steps)
-    faces_def = [
-        ((+1, 0, 0), [(+1, -1, -1), (+1, +1, -1), (+1, +1, +1), (+1, -1, +1)]),
-        ((-1, 0, 0), [(-1, -1, -1), (-1, -1, +1), (-1, +1, +1), (-1, +1, -1)]),
-        ((0, +1, 0), [(-1, +1, -1), (-1, +1, +1), (+1, +1, +1), (+1, +1, -1)]),
-        ((0, -1, 0), [(-1, -1, -1), (+1, -1, -1), (+1, -1, +1), (-1, -1, +1)]),
-        ((0, 0, +1), [(-1, -1, +1), (+1, -1, +1), (+1, +1, +1), (-1, +1, +1)]),
-        ((0, 0, -1), [(-1, -1, -1), (-1, +1, -1), (+1, +1, -1), (+1, -1, -1)]),
-    ]
-    dims = (nx, ny, nz)
-    verts: list = []
-    faces: list = []
-    for (dx, dy, dz), corners in faces_def:
-        # neighbour[p] = occ[p + (dx,dy,dz)]; a face is exposed where the cell is
-        # occupied but the neighbour in that direction is empty (or off-grid).
-        d = (dx, dy, dz)
-        dst = tuple(slice(max(0, -d[a]), dims[a] - max(0, d[a])) for a in range(3))
-        src = tuple(slice(max(0, d[a]), dims[a] - max(0, -d[a])) for a in range(3))
-        neighbour = np.zeros_like(occ)
-        neighbour[dst] = occ[src]
-        exposed = occ & ~neighbour
-        c = centers(exposed)
-        if len(c) == 0:
-            continue
-        base = sum(len(v) for v in verts)
-        quad = np.stack([c + np.array([ox * h, oy * h, oz * h])
-                         for (ox, oy, oz) in corners], axis=1)  # (k,4,3)
-        k = quad.shape[0]
-        verts.append(quad.reshape(-1, 3))
-        vi = base + np.arange(k * 4).reshape(k, 4)
-        faces.append(np.stack([vi[:, 0], vi[:, 1], vi[:, 2]], axis=1))
-        faces.append(np.stack([vi[:, 0], vi[:, 2], vi[:, 3]], axis=1))
-    if not verts:
-        return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.int32)
-    V = np.concatenate(verts, axis=0).astype(np.float64)
-    F = np.concatenate(faces, axis=0).astype(np.int64)
-    return V, F
-
-
-def build_arm_mesh(grid: dict, occ_key: str, smooth_iters: int) -> tuple:
-    """One arm's occupancy grid -> smoothed surface mesh (base frame)."""
-    dims = grid["dims"]
-    occ_flat = np.asarray(grid[occ_key], dtype=np.uint8)
-    # flat layout is x-fastest then y then z -> reshape [z,y,x] then to [x,y,z]
-    occ = occ_flat.reshape(dims[2], dims[1], dims[0]).transpose(2, 1, 0).astype(bool)
-    spacing = float(grid["spacing_m"])
-    origin = float(grid["origin_m"][0])
-
-    V, F = exposed_surface(occ, spacing, origin)
-    if len(V) == 0:
-        return V.astype(np.float32), F.astype(np.int32), int(occ.sum())
-
+    Returns (vertices Nx3 float32, faces Mx3 int32) in the ARM-BASE frame."""
     import trimesh
 
-    mesh = trimesh.Trimesh(vertices=V, faces=F, process=True)
-    mesh.merge_vertices()
-    try:
-        mesh.fix_normals()  # consistent winding (the region is not star-shaped)
-    except Exception:
-        pass
-    if smooth_iters > 0 and len(mesh.faces) > 0:
-        # Humphrey smoothing rounds the blocky boundary into an isosurface while
-        # resisting the shrinkage plain Laplacian causes.
-        try:
-            trimesh.smoothing.filter_humphrey(mesh, iterations=smooth_iters)
-        except Exception:
-            trimesh.smoothing.filter_laplacian(mesh, iterations=smooth_iters)
-    return (mesh.vertices.astype(np.float32), mesh.faces.astype(np.int32),
-            int(occ.sum()))
+    height = float(z_hi - z_lo)
+    if height <= 0:
+        raise SystemExit(f"empty axial extent: z_lo={z_lo} >= z_hi={z_hi}")
+    mesh = trimesh.creation.cylinder(radius=float(radius), height=height, sections=int(sections))
+    # trimesh centers the cylinder at the origin along +Z; lift it to span [z_lo, z_hi].
+    mesh.apply_translation([0.0, 0.0, 0.5 * (z_lo + z_hi)])
+    return mesh.vertices.astype(np.float32), mesh.faces.astype(np.int32)
+
+
+def measure_axial_extent(urdf_path: Path, radius: float, samples: int,
+                         tcp_frame: str, seed: int) -> tuple:
+    """FK-measure the reachable z-range (base frame) of TCP points inside the cylinder.
+
+    Mirrors tools/reach_envelope.py's sampler (same yourdfpy URDF + tcp frame) so the
+    'within reach' clip matches the reach overlay. Returns (z_lo, z_hi) in metres."""
+    import yourdfpy
+
+    urdf = yourdfpy.URDF.load(str(urdf_path))
+    joint_names = list(urdf.actuated_joint_names)
+    lowers = np.array([urdf.joint_map[n].limit.lower for n in joint_names], dtype=float)
+    uppers = np.array([urdf.joint_map[n].limit.upper for n in joint_names], dtype=float)
+    rng = np.random.default_rng(seed)
+    qs = rng.uniform(lowers, uppers, size=(samples, len(joint_names)))
+
+    zin: list[float] = []
+    r2 = radius * radius
+    for i in range(samples):
+        urdf.update_cfg(qs[i])
+        p = urdf.get_transform(tcp_frame)[:3, 3]  # tcp in URDF root (arm-base) frame
+        if p[0] * p[0] + p[1] * p[1] <= r2:       # inside the J1-axis cylinder
+            zin.append(float(p[2]))
+    if not zin:
+        raise SystemExit(
+            f"no reachable TCP samples inside radius {radius:.3f} m — increase --samples "
+            f"or --radius-m")
+    z = np.asarray(zin)
+    return float(z.min()), float(z.max())
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--grid", type=Path, default=None,
-                    help="existing ik_feasibility_grid JSON to reuse (skip the C++ run)")
-    ap.add_argument("--exe", type=Path, default=_default_grid_exe(),
-                    help="path to the built ik_feasibility_grid tool")
+    ap.add_argument("--urdf", type=Path, default=_default_urdf())
     ap.add_argument("--out", type=Path, default=_default_out())
-    ap.add_argument("--spacing-m", type=float, default=0.05)
-    ap.add_argument("--orientations", type=int, default=18,
-                    help="approach directions for the reachability test")
-    ap.add_argument("--down-rolls", type=int, default=8,
-                    help="wrist-roll samples for the top-down IK test")
-    ap.add_argument("--seeds", type=int, default=2)
-    ap.add_argument("--threads", type=int, default=0)
-    ap.add_argument("--smooth-iters", type=int, default=8,
-                    help="Humphrey smoothing passes (0 = blocky/no smoothing)")
+    ap.add_argument("--tcp-frame", default="tcp")
+    # Radius (option 1): R = v_ref / dq_max, unless --radius-m overrides.
+    ap.add_argument("--radius-m", type=float, default=None,
+                    help="explicit cylinder radius [m]; overrides --speed-mps/--dqmax-deg")
+    ap.add_argument("--speed-mps", type=float, default=0.20,
+                    help="reference Cartesian speed [m/s] (config max_linear_move_speed_m_s)")
+    ap.add_argument("--dqmax-deg", type=float, default=60.0,
+                    help="base-joint (J1) speed limit [deg/s] (config dq_max_deg_s[0])")
+    # Axial extent: measured from FK unless both overrides are given.
+    ap.add_argument("--z-lo", type=float, default=None, help="override lower z bound [m]")
+    ap.add_argument("--z-hi", type=float, default=None, help="override upper z bound [m]")
+    ap.add_argument("--samples", type=int, default=200_000,
+                    help="FK samples for axial-extent measurement")
+    ap.add_argument("--sections", type=int, default=48, help="radial segments of the cylinder")
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    if args.grid is not None:
-        grid_path = args.grid
+    if not args.urdf.exists():
+        raise SystemExit(f"URDF not found: {args.urdf}")
+
+    if args.radius_m is not None:
+        radius = float(args.radius_m)
+        radius_src = "explicit --radius-m"
     else:
-        tmp = Path(tempfile.gettempdir()) / "ik_feasibility_grid.json"
-        run_grid_tool(args.exe, tmp, args.spacing_m, args.orientations,
-                      args.down_rolls, args.seeds, args.threads)
-        grid_path = tmp
+        radius = float(args.speed_mps) / math.radians(float(args.dqmax_deg))
+        radius_src = f"v_ref/dq_max = {args.speed_mps} / {args.dqmax_deg}deg_s"
 
-    grid = json.loads(Path(grid_path).read_text())
-    lv, lf, lcount = build_arm_mesh(grid, "left_occupied", args.smooth_iters)
-    rv, rf, rcount = build_arm_mesh(grid, "right_occupied", args.smooth_iters)
+    if args.z_lo is not None and args.z_hi is not None:
+        z_lo, z_hi = float(args.z_lo), float(args.z_hi)
+        extent_src = "explicit --z-lo/--z-hi"
+    else:
+        z_lo, z_hi = measure_axial_extent(args.urdf, radius, args.samples,
+                                          args.tcp_frame, args.seed)
+        extent_src = f"FK-measured ({args.samples} samples, in-reach)"
 
-    if lcount == 0 and rcount == 0:
-        print("WARNING: no reach-but-not-top-down cells found — nothing to render. "
-              "Lower spacing/orientations or check the grid.")
+    verts, faces = cylinder_mesh(radius, z_lo, z_hi, args.sections)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         args.out,
-        left_vertices_base_m=lv, left_faces=lf,
-        right_vertices_base_m=rv, right_faces=rf,
-        r_min_m=float(grid["r_min_m"]),
-        r_max_m=float(grid["r_max_m"]),
-        spacing_m=float(grid["spacing_m"]),
-        orientations=int(grid["orientations"]),
-        down_rolls=int(grid.get("down_rolls", 0)),
-        seeds=int(grid["seeds"]),
-        left_cells=lcount, right_cells=rcount,
+        # both arms share the identical base-frame cylinder (mount-independent here)
+        left_vertices_base_m=verts, left_faces=faces,
+        right_vertices_base_m=verts, right_faces=faces,
+        radius_m=float(radius),
+        z_lo_m=float(z_lo), z_hi_m=float(z_hi),
+        v_ref_mps=float(args.speed_mps), dqmax_deg=float(args.dqmax_deg),
+        sections=int(args.sections),
+        region="base_axis_singularity_cylinder",
+        # kept for scene/app back-compat (the status text counts these)
+        left_cells=int(len(verts)), right_cells=int(len(verts)),
     )
     sidecar = args.out.with_suffix(".json")
     sidecar.write_text(json.dumps({
-        "region": grid.get("region", "reachable_and_not_topdown"),
-        "r_min_m": float(grid["r_min_m"]),
-        "r_max_m": float(grid["r_max_m"]),
-        "spacing_m": float(grid["spacing_m"]),
-        "orientations": int(grid["orientations"]),
-        "down_rolls": int(grid.get("down_rolls", 0)),
-        "seeds": int(grid["seeds"]),
-        "left_cells": lcount, "right_cells": rcount,
-        "left_vertices": int(len(lv)), "right_vertices": int(len(rv)),
-        "ik": grid.get("ik", {}),
+        "region": "base_axis_singularity_cylinder",
+        "radius_m": float(radius),
+        "radius_source": radius_src,
+        "z_lo_m": float(z_lo), "z_hi_m": float(z_hi),
+        "extent_source": extent_src,
+        "v_ref_mps": float(args.speed_mps),
+        "dqmax_deg": float(args.dqmax_deg),
+        "sections": int(args.sections),
+        "note": "R = v_ref/dq_max (vendor A-region velocity singularity); grows with speed",
     }, indent=2))
 
-    print(f"RB3-730E IK-infeasible (reach 되지만 top-down 불가) region — base frame")
-    print(f"  grid            : spacing={grid['spacing_m']} m, r_max={grid['r_max_m']} m, "
-          f"N_orient={grid['orientations']}, down_rolls={grid.get('down_rolls')}, "
-          f"seeds={grid['seeds']}")
-    print(f"  left  : {lcount} cells -> {len(lv)} verts, {len(lf)} faces")
-    print(f"  right : {rcount} cells -> {len(rv)} verts, {len(rf)} faces")
+    print("RB3-730E A 영역 (base-axis singularity cylinder) — arm-base frame, both arms identical")
+    print(f"  radius          : {radius*1000:.0f} mm  ({radius_src})")
+    print(f"  axial extent z  : [{z_lo:.3f}, {z_hi:.3f}] m  ({extent_src})")
+    print(f"  mesh            : {len(verts)} verts, {len(faces)} faces (sections={args.sections})")
     print(f"  saved           : {args.out}")
     print(f"                    {sidecar}")
     return 0

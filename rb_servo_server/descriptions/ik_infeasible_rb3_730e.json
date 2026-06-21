@@ -1,17 +1,12 @@
 {
-  "region": "reachable_and_not_topdown",
-  "r_min_m": 0.1331,
-  "r_max_m": 1.0583,
-  "spacing_m": 0.05,
-  "orientations": 18,
-  "down_rolls": 8,
-  "seeds": 2,
-  "left_cells": 19593,
-  "right_cells": 19563,
-  "left_vertices": 10384,
-  "right_vertices": 10243,
-  "ik": {
-    "max_iterations": 200,
-    "timeout_ms": 10.0
-  }
+  "region": "base_axis_singularity_cylinder",
+  "radius_m": 0.19098593171027445,
+  "radius_source": "v_ref/dq_max = 0.2 / 60.0deg_s",
+  "z_lo_m": -0.8318749771954398,
+  "z_hi_m": 1.12263155621189,
+  "extent_source": "FK-measured (200000 samples, in-reach)",
+  "v_ref_mps": 0.2,
+  "dqmax_deg": 60.0,
+  "sections": 48,
+  "note": "R = v_ref/dq_max (vendor A-region velocity singularity); grows with speed"
 }

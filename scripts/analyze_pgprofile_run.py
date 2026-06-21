@@ -215,7 +215,13 @@ def ik_safety_feasibility(arm: dict[str, Any]) -> dict[str, Any]:
     ik_ok = sum(1 for s in status if s in ("ok", "success", ""))
     ik_fail = sum(1 for s in status if s and s not in ("ok", "success"))
     solve = arm["ik_solve_us"]
-    sigma = arm["ik_min_singular_value"]
+    # ik_min_singular_value is reported as 0.0 on dead-zone ticks where the solver
+    # returns the seed without iterating (more frequent with a looser position
+    # tolerance). 0.0 means "not computed", NOT "exactly singular" — a genuinely
+    # singular solve IkFails. Use only the nonzero finite sigma for the proximity
+    # statistic so the dead-zone zeros do not masquerade as singularity.
+    sigma_raw = arm["ik_min_singular_value"]
+    sigma = sigma_raw[np.isfinite(sigma_raw) & (sigma_raw > 0.0)]
     branch = int(np.count_nonzero(arm["branch_jump_flag"])) + int(np.count_nonzero(arm["ik_branch_jump_clamped"]))
     return {
         "ik_success_ratio": (ik_ok / n) if n else None,
@@ -231,8 +237,8 @@ def ik_safety_feasibility(arm: dict[str, Any]) -> dict[str, Any]:
         "ik_solution_jump_deg_p95": _pct(arm["ik_solution_jump_deg"], 95),
         "ik_solution_jump_deg_max": _mx(arm["ik_solution_jump_deg"]),
         "ik_branch_jump_count": branch,
-        "ik_min_singular_value_p05": _pct(sigma, 5),
-        "ik_min_singular_value_min": (float(np.nanmin(sigma)) if np.isfinite(sigma).any() else None),
+        "ik_min_singular_value_p05": (float(np.percentile(sigma, 5)) if sigma.size else None),
+        "ik_min_singular_value_min": (float(sigma.min()) if sigma.size else None),
         "singular_damping_count": int(np.count_nonzero(arm["singular_damping_flag"])),
         "safety_projection_count": int(np.count_nonzero(arm["safety_proj_flag"])),
         "floor_clamp_count": int(np.count_nonzero(arm["floor_flag"])),

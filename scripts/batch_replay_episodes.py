@@ -367,6 +367,30 @@ def max_abs_joint_error(actual: Any, target: Any) -> float:
     return float(np.max(np.abs(a - b)))
 
 
+def wrap_targets_to_nearest(
+    target: JointTargets, current: JointTargets, *, q_min: float = -360.0, q_max: float = 360.0
+) -> JointTargets:
+    """Re-express each init joint target as the 360°-equivalent nearest to the live
+    joint, staying within [q_min, q_max]. A target pose given on a different
+    revolution branch than where the arm currently sits (same Cartesian pose, e.g.
+    J0 -131.7° vs the arm parked at +231.6°) would otherwise make the JointTarget
+    unwind a full turn (~363°). Joints with a 360° period unwrap to the short path;
+    physically identical pose, minimal motion. No-op for capture_current (target==current)."""
+
+    def wrap_one(t_arr: Any, c_arr: Any) -> tuple[float, ...]:
+        out: list[float] = []
+        for t, c in zip(np.asarray(t_arr, dtype=float).reshape(6), np.asarray(c_arr, dtype=float).reshape(6)):
+            cand = t + 360.0 * round((float(c) - float(t)) / 360.0)
+            while cand > q_max:
+                cand -= 360.0
+            while cand < q_min:
+                cand += 360.0
+            out.append(float(cand))
+        return tuple(out)
+
+    return JointTargets(wrap_one(target.left, current.left), wrap_one(target.right, current.right))
+
+
 def return_to_init_pose(args: argparse.Namespace, server: driver.ServerRuntimeConfig, target: JointTargets) -> InitReturnResult:
     state_client = RobotStateClient(bind=server.state_bind or "", stale_timeout_sec=float(args.state_timeout_sec))
     command_client = ServoCommandClient(server.command_endpoint, timeout_sec=float(server.command_timeout_sec), source_id=str(args.source_id))
@@ -374,6 +398,17 @@ def return_to_init_pose(args: argparse.Namespace, server: driver.ServerRuntimeCo
         state_client.start()
         driver.wait_for_fresh_state(state_client, timeout_sec=float(args.state_timeout_sec))
         start_q = _targets_from_payload(state_client.latest.payload)
+        # Unwrap the init target to the revolution branch nearest the live joints so
+        # InitMotion takes the short path (no full-turn unwind on a wrap-free joint).
+        wrapped = wrap_targets_to_nearest(target, start_q)
+        if (max_abs_joint_error(wrapped.left, target.left) > 1e-6
+                or max_abs_joint_error(wrapped.right, target.right) > 1e-6):
+            print(f"init wrap-to-nearest: L {tuple(round(x,1) for x in target.left)} -> "
+                  f"{tuple(round(x,1) for x in wrapped.left)} | R {tuple(round(x,1) for x in target.right)} -> "
+                  f"{tuple(round(x,1) for x in wrapped.right)} "
+                  f"(short-path delta L={compute_joint_delta(start_q, wrapped)['left']:.1f} "
+                  f"R={compute_joint_delta(start_q, wrapped)['right']:.1f} deg)")
+        target = wrapped
         command_client.acquire_lease(StateStreamLeaseReadback(state_client), timeout_sec=4.0)
         # Clear any fault latched by a PREVIOUS episode (e.g. a singularity IkFailed),
         # otherwise this episode's init-return motion is blocked by fault_latched and

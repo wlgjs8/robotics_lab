@@ -77,6 +77,11 @@ def _run(cmd: list[str], timeout: float = 120.0, env: dict | None = None) -> sub
                           timeout=timeout, env=env, check=False)
 
 
+def _server_running() -> bool:
+    r = _run(["pgrep", "-f", "rb_servo_server --config"], timeout=10)
+    return bool(r.stdout.strip())
+
+
 def stop_stack() -> None:
     for pat in ("run_stack.sh", "rb_servo_server --config", "rb_servo_gui.app",
                 "gripper_server", "policy_runner"):
@@ -253,14 +258,22 @@ def main(argv: list[str] | None = None) -> int:
         spp = mrow.get("speed_precheck_pass")
         vclass = mrow.get("validity_class")
 
-        # health check
-        st = read_state(2.0)
+        # health check — retry state read before concluding the stack is gone, and
+        # NEVER start a second stack if a server process is already running (that
+        # spawned duplicate stacks fighting over the command port / control boxes).
+        st = None
+        for _ in range(3):
+            st = read_state(2.0)
+            if st is not None:
+                break
         if is_faulted(st) and not args.no_recover:
             recover(log)
-        elif st is None:
-            log(f"  [{i+1}/{len(stems)}] {stem}: no state; attempting restart")
+        elif st is None and not _server_running():
+            log(f"  [{i+1}/{len(stems)}] {stem}: no state AND no server process; starting stack")
             if not args.no_recover:
                 start_stack()
+        elif st is None:
+            log(f"  [{i+1}/{len(stems)}] {stem}: state read timed out but server is up; proceeding")
 
         log(f"[{i+1}/{len(stems)}] {stem}  (speed_ok={spp})")
         summ = run_episode(stem, args, log)
