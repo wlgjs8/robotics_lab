@@ -113,7 +113,7 @@ safety:
     max_accel_deg_s2:    [150, 150, 150, 250, 250, 350]
   floor_constraint:
     enable: true
-    z_min_m: 0.013
+    z_min_m: 0.012
     runtime_min_z_m: -0.2
     runtime_max_z_m: 0.5
     fail_policy: clamp_hold
@@ -171,7 +171,7 @@ safety:
         - "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e"
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
       stand_ignore_arm_substrings: ["link0"]
-      d_hard_m: 0.003   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
+      d_hard_m: 0.007   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
       # v_max(max_linear_velocity)=0.32, a_brake=4.0 -> d_hard+0.0128=0.0278; 0.035
