@@ -730,6 +730,8 @@ bool parseArmObject(
         out->has_tcp_twist_stand = present;
         if (!readOptionalVec6(object, "tcp_twist_local", &out->tcp_twist_local, &present)) return false;
         out->has_tcp_twist_local = present;
+        if (!readOptionalVec6(object, "tcp_target_twist_stand", &out->tcp_target_twist_stand, &present)) return false;
+        out->has_tcp_target_twist_stand = present;
         if (!readOptionalLinearMoveFields(object, out)) return false;
         if (out->mode == ControlMode::TcpCircleMove &&
             !readOptionalCircleMoveFields(object, out)) {
@@ -1046,6 +1048,11 @@ bool CommandServer::parseMessage(
         cmd.left.has_tcp_twist_local = cmd.left.has_tcp_twist_local || present;
         cmd.right.tcp_twist_local = cmd.left.tcp_twist_local;
         cmd.right.has_tcp_twist_local = cmd.right.has_tcp_twist_local || present;
+
+        if (!readOptionalVec6(root, "tcp_target_twist_stand", &cmd.left.tcp_target_twist_stand, &present)) return false;
+        cmd.left.has_tcp_target_twist_stand = cmd.left.has_tcp_target_twist_stand || present;
+        cmd.right.tcp_target_twist_stand = cmd.left.tcp_target_twist_stand;
+        cmd.right.has_tcp_target_twist_stand = cmd.right.has_tcp_target_twist_stand || present;
 
         if (!readOptionalLinearMoveFields(root, &cmd.left)) return false;
         cmd.right.linear_move_duration_sec = cmd.left.linear_move_duration_sec;

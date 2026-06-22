@@ -2,10 +2,10 @@
 
 `policy_runner` is the Python action-source layer for `robotics_lab`. It sends
 UDP JSON commands to `rb_servo_server` and consumes the UDP JSON state stream.
-`flow-infer` keeps `tcp_twist_local` as its default ee_local runtime command
-family and can opt into `tcp_target_pose`, which composes each learned per-step
-ee_local delta into an absolute `TcpPoseTarget` setpoint without changing the
-model, data, or training labels.
+`flow-infer` uses `tcp_target_pose` as its default ee_local runtime command
+family — it composes each learned per-step ee_local delta into an absolute
+`TcpPoseTarget` setpoint without changing the model, data, or training labels —
+and can opt back into `tcp_twist_local` streaming velocity commands.
 
 Supported action sources:
 
@@ -386,9 +386,10 @@ runtime action source is implemented for them. The modes are:
 The `real_policy` validator checks `safety.measured_retarget_available`,
 `safety.measured_collision_model_available`, and
 `safety.measured_gripper_available` in addition to measured runtime geometry.
-`flow-infer` defaults to `--command-family tcp_twist_stand` for
-`controller_sim`, `sim_dryrun`, and offline reporting. For live `TcpTwistStand`
-conversion, each 6D per-step action delta is divided by `--policy-dt-sec` or
+`flow-infer` defaults to `--command-family tcp_target_pose` for
+`controller_sim`, `sim_dryrun`, and offline reporting. For the opt-in
+`tcp_twist_local`/`TcpTwistStand` velocity conversion, each 6D per-step action
+delta is divided by `--policy-dt-sec` or
 checkpoint `dataset_stats.dt_mean_sec`, then clamped by checkpoint action
 distribution statistics unless `--max-linear-velocity-m-s` or
 `--max-angular-velocity-rad-s` is supplied. In `controller_sim` and

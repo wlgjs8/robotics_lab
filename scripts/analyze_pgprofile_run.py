@@ -134,6 +134,13 @@ def load_arms(log_path: Path) -> dict[str, dict[str, Any]]:
         d["t"] = _as_float_array([r.get("t") for r in arm_rows])
         for key in ("source_raw_target", "conditioned_goal_after_A", "reference_after_B", "actual_tcp"):
             d[key] = _stack_pose(arm_rows, key)
+        # Optional pure-SMD reference (Patch 4/5 server telemetry); absent today.
+        d["smd_ref_stand"] = _stack_pose(arm_rows, "smd_ref_stand")
+        # Optional C-stage final-polish (output moving-average) joint vectors.
+        d["q_target_before_output_ma_deg"] = _stack_pose(arm_rows, "q_target_before_output_ma_deg", width=6)
+        d["q_target_after_output_ma_deg"] = _stack_pose(arm_rows, "q_target_after_output_ma_deg", width=6)
+        d["q_target"] = _stack_pose(arm_rows, "q_target", width=6)
+        d["q_actual"] = _stack_pose(arm_rows, "q_actual", width=6)
         for key in ("ik_solve_us", "ik_pos_err", "ik_ori_err", "ik_solution_jump_deg",
                     "ik_min_singular_value", "ik_applied_damping",
                     "self_collision_min_clearance_m", "roi_min_margin_m",
@@ -184,13 +191,25 @@ def tier_a(arm: dict[str, Any], cfg) -> dict[str, Any]:
 
 
 def tier_b(arm: dict[str, Any], cfg) -> dict[str, Any]:
-    """controller_reference_goal_following: conditioned_goal -> reference_after_B (tcp_ref_stand)."""
+    """B reference_generation: conditioned_goal_after_A -> reference.
+
+    Prefers the pure-SMD reference (``smd_ref_stand``, Patch 4/5 server telemetry) when
+    present; otherwise falls back to ``reference_after_B`` (= ``tcp_ref_stand``), which is
+    POST IK/safety/MA and therefore NOT pure SMD output. A warning is emitted on fallback
+    so B-tier numbers are never silently misattributed to the SMD alone.
+    """
     t = arm["t"]
     cg = arm.get("conditioned_goal_after_A")
-    ref = arm.get("reference_after_B")
-    err = pose_error_metrics(ref, cg, metric_name="reference_after_B_vs_conditioned_goal")
+    smd_ref = arm.get("smd_ref_stand")
+    has_smd = smd_ref is not None and np.isfinite(smd_ref).any()
+    ref = smd_ref if has_smd else arm.get("reference_after_B")
+    reference_source = "smd_ref_stand" if has_smd else "tcp_ref_stand"
+    warning = None if has_smd else (
+        "smd_ref_stand unavailable; B uses tcp_ref_stand which is post-IK/safety/MA, not pure SMD"
+    )
+    err = pose_error_metrics(ref, cg, metric_name="reference_vs_conditioned_goal")
     lag = cross_correlation_lag(t, cg, ref, max_lag_sec=cfg.lag_max_sec,
-                                metric_name="tcp_ref_lag_vs_conditioned_goal")
+                                metric_name="reference_lag_vs_conditioned_goal")
     span_cg = position_span(cg)
     span_ref = position_span(ref)
     span_ratio = (span_ref / span_cg) if span_cg and span_cg > 1e-6 else None
@@ -199,14 +218,67 @@ def tier_b(arm: dict[str, Any], cfg) -> dict[str, Any]:
     plen_ref = _path_length(ref)
     plen_ratio = (plen_ref / plen_cg) if plen_cg and plen_cg > 1e-6 else None
     return {
+        "reference_source": reference_source,
+        "warning": warning,
+        # back-compat alias key kept for existing campaign/report consumers
         "reference_after_B_vs_conditioned_goal": err,
+        "reference_vs_conditioned_goal": err,
         "tcp_ref_lag_vs_conditioned_goal": lag,
+        "reference_lag_vs_conditioned_goal": lag,
         "reference_span_ratio": span_ratio,
         "reference_endpoint_error_m": endpoint_err,
         "reference_path_length_ratio": plen_ratio,
         "smd_goal_clamped_count": int(np.count_nonzero(arm["smd_goal_clamped_flag"])),
         "command_reference_tracking_error_deg_p95": _pct(arm["command_reference_tracking_error_deg"], 95),
     }
+
+
+def c_final_polish(arm: dict[str, Any], cfg) -> dict[str, Any]:
+    """C final_polish: q_target before vs after the output moving-average (Patch 4).
+
+    Reports the HF reduction and added lag from the joint output MA. When the
+    before/after MA telemetry is absent (today), returns status ``unavailable``.
+    """
+    before = arm.get("q_target_before_output_ma_deg")
+    after = arm.get("q_target_after_output_ma_deg")
+    have = (before is not None and np.isfinite(before).any()
+            and after is not None and np.isfinite(after).any())
+    if not have:
+        return {
+            "status": "unavailable",
+            "reason": "q_target_before/after_output_ma_deg not in log (server output-MA telemetry absent)",
+        }
+    t = arm["t"]
+    sm_before = smoothness_metrics(t, _pad_pose(before), cfg=cfg, policy_rate_hz=cfg.chunk_rate_hz,
+                                   metric_name="q_target_before_ma")
+    sm_after = smoothness_metrics(t, _pad_pose(after), cfg=cfg, policy_rate_hz=cfg.chunk_rate_hz,
+                                  metric_name="q_target_after_ma")
+    hf_before = _nested(sm_before, "linear_velocity_spectrum", "power_above_cutoff")
+    hf_after = _nested(sm_after, "linear_velocity_spectrum", "power_above_cutoff")
+    reduction = None
+    if hf_before is not None and hf_after is not None and hf_before > 0:
+        reduction = float(1.0 - hf_after / hf_before)
+    lag = cross_correlation_lag(t, _pad_pose(before), _pad_pose(after), max_lag_sec=cfg.lag_max_sec,
+                                metric_name="output_ma_added_lag")
+    return {
+        "status": "measured",
+        "q_target_hf_power_before": hf_before,
+        "q_target_hf_power_after": hf_after,
+        "hf_reduction_ratio": reduction,
+        "added_lag_sec": (lag.get("lag_sec") if isinstance(lag, dict) else None),
+    }
+
+
+def _pad_pose(joints: np.ndarray | None) -> np.ndarray | None:
+    """Adapt a (N,6) joint series to the (N,7) pose interface used by metric helpers
+    (first 3 cols are treated as 'position' by smoothness/lag; the rest are zero-padded)."""
+    if joints is None:
+        return None
+    n = joints.shape[0]
+    out = np.zeros((n, 7), dtype=np.float64)
+    out[:, : min(6, joints.shape[1])] = joints[:, :6]
+    out[:, 6] = 1.0
+    return out
 
 
 def ik_safety_feasibility(arm: dict[str, Any]) -> dict[str, Any]:
@@ -434,19 +506,35 @@ def analyze_run(log_path: Path, cfg_metrics, *, speed_precheck_pass: bool | None
             "tier_b": tier_b(data, cfg_metrics),
             "ik_safety": ik_safety_feasibility(data),
             "tier_c": tier_c(data, cfg_metrics),
+            "c_final_polish": c_final_polish(data, cfg_metrics),
         }
     classification = classify(per_arm, speed_precheck_pass=speed_precheck_pass,
                               validity_class=validity_class)
+    # A/B/C/D architecture-aligned warnings (deduped, e.g. SMD telemetry unavailable).
+    warnings: list[str] = []
+    for a in per_arm:
+        w = per_arm[a]["tier_b"].get("warning")
+        if w and w not in warnings:
+            warnings.append(w)
+    if all(per_arm[a]["c_final_polish"].get("status") == "unavailable" for a in per_arm):
+        warnings.append("C final-polish (output-MA) telemetry unavailable; C metrics not computed")
     return {
         "schema": RESULT_SCHEMA,
         "episode_id": episode_id,
         "log_path": str(log_path),
         "speed_precheck_pass": speed_precheck_pass,
         "validity_class": validity_class,
+        "warnings": warnings,
+        # back-compat keys (unchanged consumers)
         "goal_conditioning_quality_A": {a: per_arm[a]["tier_a"] for a in per_arm},
         "controller_reference_goal_following_B": {a: per_arm[a]["tier_b"] for a in per_arm},
         "ik_safety_feasibility": {a: per_arm[a]["ik_safety"] for a in per_arm},
         "physical_goal_tracking_C": {a: per_arm[a]["tier_c"] for a in per_arm},
+        # A/B/C/D architecture-aligned grouping (Patch 6)
+        "A_conditioning": {a: per_arm[a]["tier_a"] for a in per_arm},
+        "B_reference_generation": {a: per_arm[a]["tier_b"] for a in per_arm},
+        "C_final_polish": {a: per_arm[a]["c_final_polish"] for a in per_arm},
+        "D_physical_tracking": {a: per_arm[a]["tier_c"] for a in per_arm},
         "classification": classification,
     }
 
@@ -460,8 +548,15 @@ def render_summary(result: dict[str, Any]) -> str:
         f"- risk_flags: {', '.join(c['risk_flags']) or '(none)'}",
         f"- hard_counts_zero: {c['aggregate']['hard_counts_zero']}",
         f"- speed_precheck_pass(ts=1.0): {result.get('speed_precheck_pass')}",
+    ]
+    warnings = result.get("warnings") or []
+    if warnings:
+        lines.append("- warnings: " + "; ".join(warnings))
+    b_any = next(iter(result["controller_reference_goal_following_B"].values()), {})
+    lines += [
+        f"- B reference_source: {b_any.get('reference_source', 'tcp_ref_stand')}",
         "",
-        "## B — controller reference following (headline; pgmode-measurable)",
+        "## B — reference generation (conditioned_goal -> reference)",
         "| arm | ref_vs_cond pos_p95(mm) | ori_p95(deg) | lag(ms) | span_ratio | endpoint_err(mm) | smd_clamp |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
@@ -482,7 +577,16 @@ def render_summary(result: dict[str, Any]) -> str:
             f"{f.get('ik_over_budget_2ms_count')} | {f.get('roi_clamp_count')} | "
             f"{f.get('floor_clamp_count')} | {f.get('self_collision_count')} |"
         )
-    lines += ["", "## C — physical tracking"]
+    lines += ["", "## C — final polish (output moving-average)"]
+    for a, cc in result.get("C_final_polish", {}).items():
+        if cc.get("status") == "measured":
+            lines.append(
+                f"- {a}: hf_reduction={_f(cc.get('hf_reduction_ratio'))} "
+                f"added_lag={_f(cc.get('added_lag_sec'))}s"
+            )
+        else:
+            lines.append(f"- {a}: **{cc.get('status')}** ({cc.get('reason')})")
+    lines += ["", "## D — physical tracking"]
     for a, cc in result["physical_goal_tracking_C"].items():
         lines.append(f"- {a}: **{cc['status']}** ({cc['reason']})")
     return "\n".join(lines) + "\n"

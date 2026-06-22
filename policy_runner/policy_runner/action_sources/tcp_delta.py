@@ -114,13 +114,15 @@ def tcp_pose_target_stand_intent(
     right: tuple[float, ...] | list[float] | None = None,
     left_gripper: float | None = None,
     right_gripper: float | None = None,
+    left_twist: tuple[float, ...] | list[float] | None = None,
+    right_twist: tuple[float, ...] | list[float] | None = None,
     timeout_sec: float = 0.2,
 ) -> CommandIntent:
     return CartesianCommandIntent(
         "TcpPoseTarget",
         timeout_sec=timeout_sec,
-        left=_pose_target_arm_payload(left, gripper_target=left_gripper),
-        right=_pose_target_arm_payload(right, gripper_target=right_gripper),
+        left=_pose_target_arm_payload(left, gripper_target=left_gripper, twist=left_twist),
+        right=_pose_target_arm_payload(right, gripper_target=right_gripper, twist=right_twist),
     )
 
 
@@ -200,6 +202,7 @@ def _pose_target_arm_payload(
     pose: tuple[float, ...] | list[float] | None,
     *,
     gripper_target: float | None = None,
+    twist: tuple[float, ...] | list[float] | None = None,
 ) -> dict:
     if pose is None:
         payload = {"mode": "Hold"}
@@ -226,6 +229,11 @@ def _pose_target_arm_payload(
         raise ValueError("tcp_target_stand must contain 6 or 7 values")
     if gripper_target is not None:
         payload["gripper_target"] = float(gripper_target)
+    if twist is not None:
+        twist_values = [float(value) for value in twist]
+        if len(twist_values) != 6:
+            raise ValueError("tcp_target_twist_stand must contain 6 values")
+        payload["tcp_target_twist_stand"] = twist_values
     return payload
 
 

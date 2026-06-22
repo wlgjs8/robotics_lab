@@ -755,6 +755,12 @@ struct RbpodoBackend::Impl {
     // defensive backstop layered under the server's global send suppression).
     bool freedrive_active = false;
 
+    // Soft-entry gain ramp state for move_servo_j RT-servo (re)engagement.
+    // ramp_start==0 means "ramp not armed yet" (first send arms it); it also
+    // re-arms when the stream resumes after a gap (see sendServoJ()).
+    uint64_t servo_engage_ramp_start_ns = 0;
+    uint64_t last_servo_j_send_ns = 0;
+
 #ifdef RB_SERVO_ENABLE_RBPODO
     std::unique_ptr<rb::podo::Cobot<>> robot;
     std::unique_ptr<rb::podo::CobotData> data_channel;
@@ -892,6 +898,10 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
             makeBackendTiming(start, nowSteadyNs())
         );
     }
+    // Arm the move_servo_j soft-entry gain ramp so the first servo_j after this
+    // (re)initialize eases into the transparent gain instead of clunking.
+    impl_->servo_engage_ramp_start_ns = 0;
+    impl_->last_servo_j_send_ns = 0;
     try {
         // Reconcile the controller's pgmode (operation mode) with the config:
         // if the pendant/controller is in the other mode, switch it and VERIFY
@@ -1381,6 +1391,37 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
     }
 
     try {
+        // Soft-entry gain ramp on RT-servo (re)engagement (see BackendConfig
+        // docs): spread the one-tick stiffen / backlash take-up over
+        // servo_soft_entry_sec so the controller eases into the transparent gain
+        // instead of clunking. Transient only — steady state is always
+        // impl_->config.servo_gain. Re-arms after any stream gap.
+        double servo_gain_effective = impl_->config.servo_gain;
+        if (impl_->config.servo_soft_entry_enable && impl_->config.servo_soft_entry_sec > 0.0) {
+            const uint64_t now_ramp_ns = nowSteadyNs();
+            const uint64_t rearm_gap_ns =
+                static_cast<uint64_t>(impl_->config.servo_soft_entry_rearm_gap_sec * 1e9);
+            const bool rearm =
+                impl_->servo_engage_ramp_start_ns == 0 ||
+                (impl_->last_servo_j_send_ns != 0 &&
+                 now_ramp_ns - impl_->last_servo_j_send_ns > rearm_gap_ns);
+            if (rearm) {
+                impl_->servo_engage_ramp_start_ns = now_ramp_ns;
+                std::cerr << "[INFO] RbpodoBackend servo_j soft-entry gain ramp armed ("
+                          << impl_->config.servo_soft_entry_sec << " s, start_scale="
+                          << impl_->config.servo_soft_entry_gain_start_scale << ") for "
+                          << impl_->config.name << "\n";
+            }
+            double progress =
+                static_cast<double>(now_ramp_ns - impl_->servo_engage_ramp_start_ns) / 1e9 /
+                impl_->config.servo_soft_entry_sec;
+            if (progress < 0.0) progress = 0.0;
+            if (progress > 1.0) progress = 1.0;
+            const double gain_start =
+                impl_->config.servo_gain * impl_->config.servo_soft_entry_gain_start_scale;
+            servo_gain_effective = gain_start + (impl_->config.servo_gain - gain_start) * progress;
+            impl_->last_servo_j_send_ns = now_ramp_ns;
+        }
         rb::podo::ResponseCollector responses;
         const uint64_t ack_start = nowSteadyNs();
         const auto ret = impl_->robot->move_servo_j(
@@ -1388,7 +1429,7 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
             request.q_target_deg,
             impl_->config.servo_t1_sec,
             impl_->config.servo_t2_sec,
-            impl_->config.servo_gain,
+            servo_gain_effective,
             impl_->config.servo_alpha,
             impl_->config.command_timeout_sec,
             true

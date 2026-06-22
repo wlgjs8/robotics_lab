@@ -22,11 +22,13 @@ Pose6D poseFrom(const Eigen::Vector3d& position, const Eigen::Quaterniond& rotat
     return math::poseFromSe3(pinocchio::SE3(rotation.toRotationMatrix(), position));
 }
 
-// Direction-preserving norm clamp; max_norm <= 0 means unlimited.
-Eigen::Vector3d clampNorm(const Eigen::Vector3d& value, double max_norm) {
+// Direction-preserving norm clamp; max_norm <= 0 means unlimited. Sets
+// `clipped` when the input norm exceeded the limit (telemetry only).
+Eigen::Vector3d clampNorm(const Eigen::Vector3d& value, double max_norm, bool* clipped = nullptr) {
     if (max_norm <= 0.0) return value;
     const double norm = value.norm();
     if (norm <= max_norm) return value;
+    if (clipped) *clipped = true;
     return value * (max_norm / norm);
 }
 
@@ -35,6 +37,7 @@ Eigen::Vector3d clampNorm(const Eigen::Vector3d& value, double max_norm) {
 SmdPoseTracker::SmdPoseTracker(const PoseTrackSmdConfig& config) : config_(config) {}
 
 void SmdPoseTracker::reset(const Pose6D& pose) {
+    if (active_) ++reanchor_count_;  // reset() while active == a genuine re-anchor
     position_ = positionOf(pose);
     velocity_.setZero();
     rotation_ = rotationOf(pose);
@@ -44,12 +47,22 @@ void SmdPoseTracker::reset(const Pose6D& pose) {
     previous_goal_position_ = position_;
     previous_goal_rotation_ = rotation_;
     previous_command_.reset();
+    command_linear_velocity_.reset();
+    command_angular_velocity_.reset();
     active_ = true;
 }
 
 void SmdPoseTracker::deactivate() {
     active_ = false;
     previous_command_.reset();
+    command_linear_velocity_.reset();
+    command_angular_velocity_.reset();
+}
+
+void SmdPoseTracker::setCommandTwist(const std::optional<Eigen::Vector3d>& linear,
+                                     const std::optional<Eigen::Vector3d>& angular) {
+    command_linear_velocity_ = linear;
+    command_angular_velocity_ = angular;
 }
 
 void SmdPoseTracker::updateGoalFromCommand(const Pose6D& command_pose) {
@@ -79,25 +92,48 @@ Pose6D SmdPoseTracker::step(double dt_sec) {
         return poseFrom(position_, rotation_);
     }
 
-    // Optional velocity feedforward: estimate the goal velocity from the goal
-    // delta accrued since the previous step() (every caller integrates the goal
-    // exactly once per step(), so this delta spans exactly `dt`). The damping
-    // term below then acts on the velocity ERROR (x_dot - goal_dot) instead of
-    // the absolute x_dot, zeroing the steady-state lag for ramp goals. The
-    // estimate is clamped to the configured max tracking velocity so a sparse /
-    // out-of-contract goal update can never inject a feedforward spike.
+    SmdStepInfo info;
+    info.velocity_feedforward_used = config_.velocity_feedforward;
+
+    // Optional velocity feedforward. The damping term acts on the velocity ERROR
+    // (x_dot - goal_dot) instead of the absolute x_dot, zeroing steady-state lag
+    // for ramp goals. The goal velocity comes from one of:
+    //   finite_difference: the goal delta accrued since the previous step()
+    //     (legacy; every caller integrates the goal once per step() so the delta
+    //     spans exactly `dt`).
+    //   command_twist: the conditioned twist supplied with the command (Patch 5),
+    //     closing the A/B contract — falls back to finite_difference (and flags it)
+    //     when the twist is absent/non-finite.
+    //   auto: command twist when present, else finite_difference.
+    // The estimate is clamped to the max tracking velocity so a sparse / out-of-
+    // contract update can never inject a feedforward spike.
     Eigen::Vector3d goal_linear_velocity = Eigen::Vector3d::Zero();
     Eigen::Vector3d goal_angular_velocity = Eigen::Vector3d::Zero();
     if (config_.velocity_feedforward) {
-        goal_linear_velocity = clampNorm(
-            (goal_position_ - previous_goal_position_) / dt, config_.max_linear_velocity_m_s);
-        // Body-frame angular velocity of the goal (so(3) log of the goal rotation
-        // delta). Coincides with the state body frame when the tracking error is
-        // small, which is exactly the regime feedforward operates in.
-        goal_angular_velocity = clampNorm(
-            math::log3((previous_goal_rotation_.conjugate() * goal_rotation_).toRotationMatrix()) / dt,
-            config_.max_angular_velocity_rad_s);
+        const std::string& source = config_.velocity_feedforward_source;
+        const bool want_command = (source == "command_twist" || source == "auto");
+        const bool have_command =
+            command_linear_velocity_.has_value() && command_angular_velocity_.has_value() &&
+            command_linear_velocity_->allFinite() && command_angular_velocity_->allFinite();
+        if (want_command && have_command) {
+            goal_linear_velocity = *command_linear_velocity_;
+            goal_angular_velocity = *command_angular_velocity_;
+            info.velocity_feedforward_source = "command_twist";
+        } else {
+            goal_linear_velocity = (goal_position_ - previous_goal_position_) / dt;
+            // Body-frame angular velocity of the goal (so(3) log of the goal
+            // rotation delta); coincides with the state body frame when the
+            // tracking error is small (the regime feedforward operates in).
+            goal_angular_velocity =
+                math::log3((previous_goal_rotation_.conjugate() * goal_rotation_).toRotationMatrix()) / dt;
+            info.velocity_feedforward_source = "finite_difference";
+            if (source == "command_twist") info.command_twist_fallback = true;
+        }
+        goal_linear_velocity = clampNorm(goal_linear_velocity, config_.max_linear_velocity_m_s);
+        goal_angular_velocity = clampNorm(goal_angular_velocity, config_.max_angular_velocity_rad_s);
     }
+    info.goal_linear_velocity = goal_linear_velocity;
+    info.goal_angular_velocity = goal_angular_velocity;
     previous_goal_position_ = goal_position_;
     previous_goal_rotation_ = goal_rotation_;
 
@@ -109,11 +145,12 @@ Pose6D SmdPoseTracker::step(double dt_sec) {
     const Eigen::Vector3d linear_accel = clampNorm(
         wn_lin * wn_lin * (goal_position_ - position_) -
             2.0 * config_.damping_ratio_linear * wn_lin * (velocity_ - goal_linear_velocity),
-        config_.max_linear_accel_m_s2
+        config_.max_linear_accel_m_s2, &info.linear_accel_clipped
     );
     // Semi-implicit Euler keeps the discrete system stable well past the
     // frequencies reachable at the 500 Hz servo rate.
-    velocity_ = clampNorm(velocity_ + linear_accel * dt, config_.max_linear_velocity_m_s);
+    velocity_ = clampNorm(velocity_ + linear_accel * dt, config_.max_linear_velocity_m_s,
+                          &info.linear_velocity_clipped);
     position_ += velocity_ * dt;
 
     const double wn_ang = kTwoPi * config_.natural_frequency_angular_hz;
@@ -123,12 +160,14 @@ Pose6D SmdPoseTracker::step(double dt_sec) {
     const Eigen::Vector3d angular_accel = clampNorm(
         wn_ang * wn_ang * orientation_error -
             2.0 * config_.damping_ratio_angular * wn_ang * (angular_velocity_ - goal_angular_velocity),
-        config_.max_angular_accel_rad_s2
+        config_.max_angular_accel_rad_s2, &info.angular_accel_clipped
     );
     angular_velocity_ = clampNorm(
-        angular_velocity_ + angular_accel * dt, config_.max_angular_velocity_rad_s);
+        angular_velocity_ + angular_accel * dt, config_.max_angular_velocity_rad_s,
+        &info.angular_velocity_clipped);
     rotation_ = (rotation_ * Eigen::Quaterniond(math::exp3(angular_velocity_ * dt))).normalized();
 
+    last_step_info_ = info;
     return poseFrom(position_, rotation_);
 }
 

@@ -83,6 +83,10 @@ from rb_servo_gui.app import (
     _tcp_linear_orientation_mode,
     _tcp_target_pose,
     _tcp_target_wxyz,
+    _read_ptp_arm_fields,
+    _refresh_tcp_ptp_axis_fields,
+    _set_tcp_pose_absolute_and_send,
+    _stand_world_monitor_pose,
     _update_joint_monitor,
     _update_joint_monitor_unit_buttons,
     _update_operator_monitors,
@@ -653,6 +657,109 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(latest.left.tcp_base.quaternion_xyzw, (0.0, 0.0, 0.0, 1.0))
         self.assertTrue(latest.left.has_valid_tcp_pose)
         self.assertFalse(latest.left.tcp_deferred)
+
+    def _fake_ptp_handles(self):
+        # Per-axis vector2 widget: .value is a (left, right) tuple, like viser's.
+        class _Vec:
+            def __init__(self):
+                self.value = (0.0, 0.0)
+
+        vecs = {axis: _Vec() for axis in range(6)}
+        handles = {
+            "tcp_ptp_axis_vec": vecs,
+            "tcp_frame_mode": _TCP_FRAME_STAND,
+            "tcp_ptp_arm": "both",
+            "scene": {},
+        }
+        return handles, vecs
+
+    def test_pose_monitor_and_ptp_mirror_share_pose_selection(self):
+        # The TCP PTP "current pose" mirror and the Pose Monitor must read the
+        # exact same pose (incl. the server's rx/ry/rz euler) so they never
+        # disagree. _stand_world_monitor_pose is the single shared selector.
+        state = self.tcp_available_state()
+        state["left"]["tcp_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.2, "ry": -0.3, "rz": 1.1}
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        pose, valid, is_sim = _stand_world_monitor_pose(latest.left, stale=False)
+        self.assertTrue(valid)
+        self.assertFalse(is_sim)
+        self.assertEqual(pose.as_tuple(), latest.left.tcp_stand.as_tuple())
+        # Stale stream invalidates the readout (matches the Monitor).
+        _, valid_stale, _ = _stand_world_monitor_pose(latest.left, stale=True)
+        self.assertFalse(valid_stale)
+
+    def test_tcp_ptp_fields_mirror_current_pose_per_arm(self):
+        # Each axis vector2 mirrors (left, right) live stand-frame pose
+        # (mm / deg, server euler), per arm, in one paired row.
+        state = self.tcp_available_state()
+        state["left"]["tcp_stand"] = {"x": 0.31, "y": 0.12, "z": 0.44, "rx": 0.0, "ry": 0.0, "rz": math.pi}
+        state["right"]["tcp_stand"] = {"x": -0.25, "y": 0.10, "z": 0.40, "rx": 0.1, "ry": 0.2, "rz": -0.3}
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        handles, vecs = self._fake_ptp_handles()
+        handles["_latest_state"] = latest
+        handles["_state_stale"] = False
+        self.assertTrue(_refresh_tcp_ptp_axis_fields(handles))
+        # axis 0 = X: (left mm, right mm)
+        self.assertAlmostEqual(vecs[0].value[0], 310.0, places=3)
+        self.assertAlmostEqual(vecs[0].value[1], -250.0, places=3)
+        self.assertAlmostEqual(vecs[1].value[0], 120.0, places=3)
+        self.assertAlmostEqual(vecs[1].value[1], 100.0, places=3)
+        # axis 5 = yaw (deg)
+        self.assertAlmostEqual(vecs[5].value[0], math.degrees(math.pi), places=3)
+        self.assertAlmostEqual(vecs[5].value[1], math.degrees(-0.3), places=3)
+        # axis 3 = roll (deg)
+        self.assertAlmostEqual(vecs[3].value[0], 0.0, places=3)
+        self.assertAlmostEqual(vecs[3].value[1], math.degrees(0.1), places=3)
+        # _read_ptp_arm_fields pulls one arm's six values from the vector2 slots.
+        right_vals = _read_ptp_arm_fields(handles, "right")
+        self.assertAlmostEqual(right_vals[0], -250.0, places=3)
+        self.assertAlmostEqual(right_vals[5], math.degrees(-0.3), places=3)
+
+    def test_tcp_ptp_fields_local_frame_read_zero(self):
+        state = self.tcp_available_state()
+        store, _, _ = self.make_safety(state)
+        handles, vecs = self._fake_ptp_handles()
+        handles["tcp_frame_mode"] = _TCP_FRAME_LOCAL
+        handles["_latest_state"] = store.latest()
+        handles["_state_stale"] = False
+        _refresh_tcp_ptp_axis_fields(handles)
+        for axis in range(6):
+            self.assertEqual(vecs[axis].value, (0.0, 0.0))
+
+    def test_tcp_ptp_absolute_commit_reproduces_orientation_without_drift(self):
+        # Committing the mirrored values unchanged must command the EXACT current
+        # orientation: the server builds rotation as Rz·Ry·Rx and so does
+        # _rpy_to_wxyz, so feeding back the displayed euler causes no drift.
+        from rb_servo_gui.geometry import _rpy_to_wxyz, _wxyz_to_xyzw
+
+        class _CaptureSafety:
+            def __init__(self):
+                self.calls = []
+
+            def send_tcp_pose_target(self, *, left_pose, right_pose, left_quaternion_xyzw, right_quaternion_xyzw):
+                self.calls.append(
+                    (left_pose, right_pose, left_quaternion_xyzw, right_quaternion_xyzw)
+                )
+                return True, "ok"
+
+        safety = _CaptureSafety()
+        scene = {}
+        rx, ry, rz = 0.2, -0.3, 1.1
+        values = [310.0, 120.0, 440.0, math.degrees(rx), math.degrees(ry), math.degrees(rz)]
+        ok, message = _set_tcp_pose_absolute_and_send(safety, scene, "left", values)
+        self.assertTrue(ok, message)
+        self.assertEqual(len(safety.calls), 1)
+        left_pose, right_pose, left_quat, right_quat = safety.calls[0]
+        self.assertIsNone(right_pose)
+        self.assertIsNone(right_quat)
+        self.assertAlmostEqual(left_pose[0], 0.310, places=6)
+        self.assertAlmostEqual(left_pose[1], 0.120, places=6)
+        self.assertAlmostEqual(left_pose[2], 0.440, places=6)
+        expected = _wxyz_to_xyzw(_rpy_to_wxyz(rx, ry, rz))
+        for got, want in zip(left_quat, expected):
+            self.assertAlmostEqual(got, want, places=9)
 
     def test_parser_preserves_actual_and_reference_tcp_pose_fields(self):
         state = sample_state()

@@ -682,6 +682,29 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"circle_position_error_m", telemetry.circle_position_error_m},
         {"circle_orientation_error_rad", telemetry.circle_orientation_error_rad},
         {"circle_done", telemetry.circle_done},
+        // A/B/C separation telemetry (Patch 4). Absent/false on non-SMD paths.
+        {"smd_active", telemetry.smd_active},
+        {"smd_goal_stand", optionalPoseJson(telemetry.smd_goal_stand)},
+        {"smd_ref_stand", optionalPoseJson(telemetry.smd_ref_stand)},
+        {"smd_velocity_feedforward_used", telemetry.smd_velocity_feedforward_used},
+        {"smd_velocity_feedforward_source", telemetry.smd_velocity_feedforward_source},
+        {"smd_velocity_feedforward_fallback", telemetry.smd_velocity_feedforward_fallback},
+        {"smd_linear_velocity_clipped", telemetry.smd_linear_velocity_clipped},
+        {"smd_linear_accel_clipped", telemetry.smd_linear_accel_clipped},
+        {"smd_angular_velocity_clipped", telemetry.smd_angular_velocity_clipped},
+        {"smd_angular_accel_clipped", telemetry.smd_angular_accel_clipped},
+        {"smd_goal_linear_velocity_norm_m_s", telemetry.smd_goal_linear_velocity_norm_m_s},
+        {"smd_goal_angular_velocity_norm_rad_s", telemetry.smd_goal_angular_velocity_norm_rad_s},
+        {"smd_reanchor_count", telemetry.smd_reanchor_count},
+        {"output_ma_present", telemetry.output_ma_present},
+        {"output_ma_window", telemetry.output_ma_window},
+        {"output_ma_active", telemetry.output_ma_present && telemetry.output_ma_window > 1},
+        {"q_target_before_output_ma_deg",
+         telemetry.output_ma_present ? jointArrayJson(telemetry.q_target_before_output_ma_deg)
+                                     : nlohmann::json(nullptr)},
+        {"q_target_after_output_ma_deg",
+         telemetry.output_ma_present ? jointArrayJson(telemetry.q_target_after_output_ma_deg)
+                                     : nlohmann::json(nullptr)},
     };
 }
 

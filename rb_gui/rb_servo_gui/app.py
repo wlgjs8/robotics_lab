@@ -43,7 +43,6 @@ from .geometry import (
     _tcp_pose_from_urdf,
     _transform_to_pose6,
     _transpose3,
-    _wxyz_to_rpy,
     _wxyz_to_xyzw,
     _xyzw_to_wxyz,
 )
@@ -403,33 +402,39 @@ def _apply_tcp_delta_to_target(
     return True
 
 
-def _set_tcp_axis_absolute_to_target(
+def _set_tcp_pose_absolute_and_send(
+    safety: OperatorSafety,
     scene_handles: dict[str, Any],
     arm: str,
-    axis_index: int,
-    angular: bool,
-    value: float,
-) -> bool:
-    """Set one axis of the arm's TCP target to an absolute stand-frame value.
+    values_mm_deg: list[float] | tuple[float, ...],
+) -> tuple[bool, str]:
+    """Set one arm's TCP target to the absolute stand-frame pose held in its six
+    PTP fields (x/y/z mm, roll/pitch/yaw deg) and send a TcpPoseTarget.
 
-    Linear axes take millimetres, angular axes take degrees (stand-frame RPY).
-    The other five axes are left at the target's current value."""
-    target = _tcp_target_position_wxyz(scene_handles, arm)
-    if target is None:
-        return False
-    position, wxyz = target
-    position = list(position)
-    if angular:
-        roll, pitch, yaw = _wxyz_to_rpy(wxyz)
-        rpy = [roll, pitch, yaw]
-        rpy[axis_index - 3] = math.radians(float(value))
-        next_wxyz = _normalize_wxyz(_rpy_to_wxyz(rpy[0], rpy[1], rpy[2]))
-    else:
-        position[axis_index] = float(value) * 0.001
-        next_wxyz = _normalize_wxyz(wxyz)
-    pose6 = _pose6_from_transform(tuple(position), next_wxyz)
+    The orientation is rebuilt with `_rpy_to_wxyz` (Rz·Ry·Rx) — the SAME
+    composition the server uses in `rotationFromPose` — so feeding back the
+    server's published `rx/ry/rz` reproduces the exact current orientation (no
+    drift on an unedited commit), and the commanded pose always matches the
+    numbers the operator sees."""
+    if arm not in {"left", "right"}:
+        return False, f"unsupported TCP arm {arm}"
+    if len(values_mm_deg) != 6 or not all(math.isfinite(float(v)) for v in values_mm_deg):
+        return False, f"{arm} TCP fields invalid"
+    position = (
+        float(values_mm_deg[0]) * 0.001,
+        float(values_mm_deg[1]) * 0.001,
+        float(values_mm_deg[2]) * 0.001,
+    )
+    wxyz = _normalize_wxyz(
+        _rpy_to_wxyz(
+            math.radians(float(values_mm_deg[3])),
+            math.radians(float(values_mm_deg[4])),
+            math.radians(float(values_mm_deg[5])),
+        )
+    )
+    pose6 = _pose6_from_transform(position, wxyz)
     scene_handles[f"{arm}_tcp_target_pose"] = pose6
-    scene_handles[f"{arm}_tcp_target_wxyz"] = next_wxyz
+    scene_handles[f"{arm}_tcp_target_wxyz"] = wxyz
     scene_handles[f"{arm}_tcp_target_user_moved"] = True
     handle = scene_handles.get(f"{arm}_tcp_target")
     if handle is not None:
@@ -438,71 +443,100 @@ def _set_tcp_axis_absolute_to_target(
         except Exception:
             pass
         try:
-            handle.wxyz = next_wxyz
+            handle.wxyz = wxyz
         except Exception:
             pass
-    return True
-
-
-def _set_tcp_axis_absolute_and_send(
-    safety: OperatorSafety,
-    scene_handles: dict[str, Any],
-    arm: str,
-    axis_index: int,
-    angular: bool,
-    value: float,
-) -> tuple[bool, str]:
-    arms = ("left", "right") if arm == "both" else (arm,)
-    for single_arm in arms:
-        if not _set_tcp_axis_absolute_to_target(scene_handles, single_arm, axis_index, angular, value):
-            return False, f"{single_arm} TCP target unavailable"
     return _send_tcp_pose_target_from_marker(safety, scene_handles, arm)
 
 
-def _refresh_tcp_ptp_axis_fields(handles: dict[str, Any]) -> bool:
-    """Populate the TCP PTP per-axis number fields; return True if values were set.
+def _ptp_arm_pose_values(handles: dict[str, Any], arm: str) -> list[float] | None:
+    """Six stand-frame values (x/y/z mm, roll/pitch/yaw deg) the PTP fields should
+    show for one arm: the live current pose (same selection as the Pose Monitor),
+    or all-zero relative deltas in TCP-local frame. None if no fresh/valid pose."""
+    if _tcp_frame_mode(handles) == _TCP_FRAME_LOCAL:
+        return [0.0] * 6
+    latest = handles.get("_latest_state")
+    stale = bool(handles.get("_state_stale"))
+    arm_state = getattr(latest, arm, None) if latest is not None else None
+    pose, valid, _is_sim = _stand_world_monitor_pose(arm_state, stale=stale)
+    if pose is None or not valid:
+        return None
+    return [
+        pose.x * 1000.0,
+        pose.y * 1000.0,
+        pose.z * 1000.0,
+        math.degrees(pose.rx),
+        math.degrees(pose.ry),
+        math.degrees(pose.rz),
+    ]
 
-    In TCP-local frame the fields are relative deltas, so they read 0. In
-    stand/world frame they mirror the stand-frame TCP target (mm / deg) of the
-    display arm. This is event-driven (arm/frame switch, nudge, commit) plus a
-    one-shot fill on first state, never a periodic repaint — so it never fights a
-    value the operator is mid-typing."""
-    fields = handles.get("tcp_ptp_axis_fields")
-    if not fields:
+
+def _read_ptp_arm_fields(handles: dict[str, Any], arm: str) -> list[float] | None:
+    """Current values (mm / deg) of one arm's six PTP slots, read from the per-axis
+    vector2 widgets (slot 0 = left, slot 1 = right)."""
+    vecs = handles.get("tcp_ptp_axis_vec")
+    if not vecs:
+        return None
+    slot = 0 if arm == "left" else 1
+    values: list[float] = []
+    for _axis_label, axis_index, _angular in _TCP_PTP_AXES:
+        vec = vecs.get(axis_index)
+        if vec is None:
+            return None
+        try:
+            values.append(float(vec.value[slot]))
+        except Exception:
+            return None
+    return values
+
+
+def _refresh_tcp_ptp_axis_fields(handles: dict[str, Any]) -> bool:
+    """Mirror the live current pose into the per-axis [left | right] vector2 fields.
+
+    In stand/world frame each axis shows the same stand-frame pose as the Pose
+    Monitor (mm / deg, server `rx/ry/rz`) for left (slot 0) and right (slot 1). In
+    TCP-local frame the fields are relative deltas, so they read 0. The patched
+    viser VectorInput ignores server updates for a slot while it is focused, so
+    this can repaint every tick without fighting a value the operator is typing;
+    the `_tcp_ptp_field_updating` guard additionally keeps these writes from
+    re-triggering the commit callback. `_tcp_ptp_shown` records the last value
+    written to each slot — the commit handler diffs against it to find which arm
+    the operator actually edited."""
+    vecs = handles.get("tcp_ptp_axis_vec")
+    if not vecs:
         return False
-    scene_handles = handles.get("scene", {})
-    frame_mode = _tcp_frame_mode(handles)
-    arm = _tcp_ptp_arm(handles)
-    display_arm = "left" if arm in ("both", "left") else "right"
-    if frame_mode == _TCP_FRAME_LOCAL:
-        values = [0.0] * 6
-    else:
-        target = _tcp_target_position_wxyz(scene_handles, display_arm)
-        if target is None:
-            return False
-        position, wxyz = target
-        roll, pitch, yaw = _wxyz_to_rpy(wxyz)
-        values = [
-            position[0] * 1000.0,
-            position[1] * 1000.0,
-            position[2] * 1000.0,
-            math.degrees(roll),
-            math.degrees(pitch),
-            math.degrees(yaw),
-        ]
+    shown = handles.setdefault("_tcp_ptp_shown", {})
+    left_values = _ptp_arm_pose_values(handles, "left")
+    right_values = _ptp_arm_pose_values(handles, "right")
+    did_set = False
     handles["_tcp_ptp_field_updating"] = True
     try:
         for _axis_label, axis_index, _angular in _TCP_PTP_AXES:
-            field = fields.get(axis_index)
-            if field is None:
+            vec = vecs.get(axis_index)
+            if vec is None:
+                continue
+            prev = shown.get(axis_index)
+            left_val = (
+                float(left_values[axis_index]) if left_values is not None
+                else (prev[0] if prev is not None else 0.0)
+            )
+            right_val = (
+                float(right_values[axis_index]) if right_values is not None
+                else (prev[1] if prev is not None else 0.0)
+            )
+            new_value = (left_val, right_val)
+            # Skip no-op writes (sub-0.001 mm/deg) to keep websocket churn low.
+            if prev is not None and abs(prev[0] - left_val) < 1e-3 and abs(prev[1] - right_val) < 1e-3:
                 continue
             try:
-                field.value = float(values[axis_index])
+                vec.value = new_value
+                shown[axis_index] = new_value
+                did_set = True
             except Exception:
                 pass
     finally:
         handles["_tcp_ptp_field_updating"] = False
-    return True
+    return did_set
 
 
 def _clear_tcp_target_user_moved(scene_handles: dict[str, Any], arms: tuple[str, ...] = ("left", "right")) -> None:
@@ -1094,6 +1128,28 @@ def _arm_is_controller_sim(arm_state: Any) -> bool:
     return operation_mode in ("simulation", "sim")
 
 
+def _stand_world_monitor_pose(arm_state: Any, *, stale: bool) -> tuple[Pose6D | None, bool, bool]:
+    """Pose, validity, and is-controller-sim shown in the Stand/World (Pose) Monitor
+    for one arm. Controller (pgmode) simulation shows the commanded TCP (FK of
+    q_sent) because q_actual does not track the command and jnt_ref-derived
+    tcp_ref is noisy at rest; otherwise the actual TCP (`tcp_stand`).
+
+    The TCP PTP "current pose" mirror reuses this SAME selection so its numbers
+    are identical to the Pose Monitor (including the server's `rx/ry/rz` euler,
+    which differs from a quaternion round-trip — see se3.cpp eulerAngles(2,1,0))."""
+    if arm_state is None:
+        return None, False, False
+    if _arm_is_controller_sim(arm_state) and arm_state.tcp_command_stand is not None:
+        return arm_state.tcp_command_stand, (not stale), True
+    valid = bool(
+        not stale
+        and arm_state.has_valid_tcp_pose
+        and arm_state.tcp_stand is not None
+        and not arm_state.tcp_deferred
+    )
+    return arm_state.tcp_stand, valid, False
+
+
 def _render_joint_monitor_rows(
     latest: StateSnapshot | None, *, stale: bool, uptime: str | None = None
 ) -> str:
@@ -1145,28 +1201,11 @@ def _render_stand_world_monitor_rows(
         arms = (("left", latest.left), ("right", latest.right))
     parts = [f'<div class="rb-monitor-status">{escape(status)}</div>']
     for arm, arm_state in arms:
-        # In controller (pgmode) simulation show the commanded TCP (stand frame) from
-        # FK(q_sent), since the actual TCP (from q_actual) does not track the command
-        # and the jnt_ref-derived tcp_ref is noisy at rest.
-        use_ref = (
-            arm_state is not None
-            and _arm_is_controller_sim(arm_state)
-            and arm_state.tcp_command_stand is not None
-        )
+        # Same pose selection the TCP PTP "current pose" mirror uses, so the two
+        # displays never disagree (controller-sim shows the commanded TCP).
+        pose, valid, use_ref = _stand_world_monitor_pose(arm_state, stale=stale)
         title = f"{arm} · tcp_command_stand (controller-sim)" if use_ref else arm
         parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(title)}</div>')
-        if use_ref:
-            valid = bool(arm_state is not None and not stale and arm_state.tcp_command_stand is not None)
-            pose = arm_state.tcp_command_stand if arm_state is not None else None
-        else:
-            valid = bool(
-                arm_state is not None
-                and not stale
-                and arm_state.has_valid_tcp_pose
-                and arm_state.tcp_stand is not None
-                and not arm_state.tcp_deferred
-            )
-            pose = arm_state.tcp_stand if arm_state is not None else None
         for field in _STAND_WORLD_POSE_FIELDS:
             if field in ("x", "y", "z"):
                 value_html = escape(_format_stand_world_pose_value(pose, field, valid=valid, unit="deg"))
@@ -2073,6 +2112,11 @@ def build_gui(
                 initial_value="Move to TCP target, point-to-point. Cartesian path is not guaranteed.",
                 disabled=True,
             )
+            handles["tcp_ptp_help"] = server.gui.add_text(
+                "Number entry",
+                initial_value="Each row: left box = left arm, right box = right arm (mirror the live pose = Pose Monitor). Edit a box and press Enter to move that arm. The single −/+ jogs the arm(s) chosen by 'TCP arm' (both/left/right).",
+                disabled=True,
+            )
             handles["tcp_status"] = server.gui.add_text(
                 "TCP status",
                 initial_value="ready",
@@ -2090,7 +2134,7 @@ def build_gui(
                     handles["tcp_ptp_arm"] = arm
                     _update_tcp_ptp_arm_buttons(handles)
                     _refresh_tcp_ptp_axis_fields(handles)
-                    handles["tcp_status"].value = f"TCP arm: {arm}"
+                    handles["tcp_status"].value = f"TCP arm (−/+ and Send scope): {arm}"
 
             handles["tcp_frame_mode"] = _TCP_FRAME_STAND
             handles["tcp_frame_buttons"] = {}
@@ -2121,63 +2165,100 @@ def build_gui(
                 ok, message = _send_tcp_pose_target_from_marker(safety, handles["scene"], arm)
                 handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-            def _send_ptp_delta(delta: tuple[float, float, float, float, float, float]) -> None:
-                arm = _tcp_ptp_arm(handles)
-                frame_mode = _tcp_frame_mode(handles)
-                ok, message = _apply_tcp_delta_and_send_pose_target(safety, handles["scene"], arm, delta, frame_mode)
-                handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
-
-            def _nudge_ptp_axis(axis_index: int, angular: bool, sign: float) -> None:
-                step = _angular_step_radians(float(angular_step.value)) if angular else _linear_step_meters(float(linear_step.value))
-                delta = [0.0] * 6
-                delta[axis_index] = sign * step
-                _send_ptp_delta(tuple(delta))  # type: ignore[arg-type]
-                _refresh_tcp_ptp_axis_fields(handles)
-
-            def _commit_ptp_axis(axis_index: int, angular: bool) -> None:
-                # Programmatic .value writes set this guard so this callback only
-                # fires for operator-entered values, never our own field repaints.
-                if handles.get("_tcp_ptp_field_updating"):
-                    return
-                field = handles["tcp_ptp_axis_fields"].get(axis_index)
-                if field is None:
-                    return
-                try:
-                    raw = float(field.value)
-                except Exception:
-                    return
-                arm = _tcp_ptp_arm(handles)
+            def _nudge_ptp_axis(arm: str, axis_index: int, angular: bool, sign: float) -> tuple[bool, str]:
                 frame_mode = _tcp_frame_mode(handles)
                 if frame_mode == _TCP_FRAME_LOCAL:
-                    # Relative jog: typed value is a TCP-local delta (mm / deg).
+                    # Relative jog in the TCP-local frame (debug-style), anchored on
+                    # the live target marker.
+                    step = (
+                        _angular_step_radians(float(angular_step.value))
+                        if angular
+                        else _linear_step_meters(float(linear_step.value))
+                    )
                     delta = [0.0] * 6
-                    delta[axis_index] = math.radians(raw) if angular else raw * 0.001
-                    ok, message = _apply_tcp_delta_and_send_pose_target(
+                    delta[axis_index] = sign * step
+                    return _apply_tcp_delta_and_send_pose_target(
                         safety, handles["scene"], arm, tuple(delta), frame_mode  # type: ignore[arg-type]
                     )
-                    handles["_tcp_ptp_field_updating"] = True
-                    try:
-                        field.value = 0.0
-                    finally:
-                        handles["_tcp_ptp_field_updating"] = False
+                # Stand frame: nudge from the mirrored current value so −/+ tracks
+                # exactly what the field (and Pose Monitor) shows.
+                values = _read_ptp_arm_fields(handles, arm)
+                if values is None:
+                    return False, f"{arm} TCP fields unavailable"
+                step_disp = float(angular_step.value) if angular else float(linear_step.value)
+                values[axis_index] += sign * step_disp
+                return _set_tcp_pose_absolute_and_send(safety, handles["scene"], arm, values)
+
+            def _nudge_ptp_axis_selected(axis_index: int, angular: bool, sign: float) -> None:
+                # ONE [−][+] per axis: nudge the arm(s) the operator selected above —
+                # both → left+right together, otherwise just that arm.
+                arm_sel = _tcp_ptp_arm(handles)
+                arms = ("left", "right") if arm_sel == "both" else (arm_sel,)
+                parts = []
+                for arm in arms:
+                    ok, message = _nudge_ptp_axis(arm, axis_index, angular, sign)
+                    parts.append(("OK " if ok else "BLOCKED ") + f"{arm}: {message}")
+                handles["tcp_status"].value = " | ".join(parts)
+
+            def _commit_ptp_axis(axis_index: int, angular: bool) -> None:
+                # Fires on Enter in either slot of this axis's [left | right] vector2
+                # (the patched viser VectorInput only emits on Enter). Programmatic
+                # mirror writes set the guard so they never re-trigger this.
+                if handles.get("_tcp_ptp_field_updating"):
+                    return
+                vec = handles.get("tcp_ptp_axis_vec", {}).get(axis_index)
+                if vec is None:
+                    return
+                try:
+                    new_left = float(vec.value[0])
+                    new_right = float(vec.value[1])
+                except Exception:
+                    return
+                # Diff against the last mirrored values to find which arm the operator
+                # actually edited — commit only that arm (so the unedited arm, which
+                # holds its live pose, never moves). First commit before any mirror:
+                # treat both as edited.
+                shown = handles.get("_tcp_ptp_shown", {}).get(axis_index)
+                edited: list[tuple[str, float]] = []
+                if shown is None:
+                    edited = [("left", new_left), ("right", new_right)]
                 else:
-                    # Absolute set: typed value is the stand-frame coordinate.
-                    ok, message = _set_tcp_axis_absolute_and_send(
-                        safety, handles["scene"], arm, axis_index, angular, raw
-                    )
-                    _refresh_tcp_ptp_axis_fields(handles)
-                handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+                    if abs(new_left - float(shown[0])) > 1e-4:
+                        edited.append(("left", new_left))
+                    if abs(new_right - float(shown[1])) > 1e-4:
+                        edited.append(("right", new_right))
+                if not edited:
+                    return
+                frame_mode = _tcp_frame_mode(handles)
+                parts = []
+                for arm, raw in edited:
+                    if frame_mode == _TCP_FRAME_LOCAL:
+                        # Relative jog: typed value is a TCP-local delta (mm / deg).
+                        delta = [0.0] * 6
+                        delta[axis_index] = math.radians(raw) if angular else raw * 0.001
+                        ok, message = _apply_tcp_delta_and_send_pose_target(
+                            safety, handles["scene"], arm, tuple(delta), frame_mode  # type: ignore[arg-type]
+                        )
+                    else:
+                        # Absolute set: send the whole pose held in this arm's six
+                        # slots (only the edited axis differs from its live pose).
+                        values = _read_ptp_arm_fields(handles, arm)
+                        if values is None:
+                            ok, message = False, f"{arm} TCP fields unavailable"
+                        else:
+                            ok, message = _set_tcp_pose_absolute_and_send(safety, handles["scene"], arm, values)
+                    parts.append(("OK " if ok else "BLOCKED ") + f"{arm}: {message}")
+                handles["tcp_status"].value = " | ".join(parts)
 
-            def _add_tcp_ptp_axis_row(axis_label: str, axis_index: int, angular: bool, unit: str) -> None:
-                # Per axis: an editable number field (current stand-frame value, or
-                # 0 as a relative-delta entry in TCP-local frame) over a full-width
-                # [−][+] nudge group. Button groups cannot be disabled in viser, so
-                # they stay live and rely on the fail-closed safety layer
-                # (send_tcp_pose_target) to reject commands when not ready.
-                field = server.gui.add_number(f"{axis_label} ({unit})", initial_value=0.0, step=0.1)
-                handles["tcp_ptp_axis_fields"][axis_index] = field
+            def _add_ptp_axis_row(axis_label: str, axis_index: int, angular: bool) -> None:
+                # One row per axis: a single label (X/Roll/…) over a [left | right]
+                # pair of half-width number boxes (vector2), then ONE full-width
+                # [−][+] nudge group that acts on the selected arm(s). The unit lives
+                # in the section header, the arm in the box order (left | right).
+                vec = server.gui.add_vector2(axis_label, initial_value=(0.0, 0.0), step=0.1)
+                handles["tcp_ptp_axis_vec"][axis_index] = vec
 
-                @field.on_update
+                @vec.on_update
                 def _(_: Any, axis_index: int = axis_index, angular: bool = angular) -> None:
                     _commit_ptp_axis(axis_index, angular)
 
@@ -2188,15 +2269,19 @@ def build_gui(
                     choice = group.value
                     if choice not in ("−", "+"):
                         return
-                    _nudge_ptp_axis(axis_index, angular, 1.0 if choice == "+" else -1.0)
+                    _nudge_ptp_axis_selected(axis_index, angular, 1.0 if choice == "+" else -1.0)
 
-            handles["tcp_ptp_axis_fields"] = {}
-            with server.gui.add_folder("Position (mm)"):
-                for axis_label, axis_index, angular in _TCP_PTP_AXES[:3]:
-                    _add_tcp_ptp_axis_row(axis_label.upper(), axis_index, angular, "mm")
-            with server.gui.add_folder("Rotation (deg)"):
-                for axis_label, axis_index, angular in _TCP_PTP_AXES[3:]:
-                    _add_tcp_ptp_axis_row(axis_label.capitalize(), axis_index, angular, "deg")
+            # Per-axis [left | right] paired layout: one label + two half-width boxes,
+            # both arms always visible. Each box mirrors its arm's live pose and, on
+            # Enter, moves that arm. The single −/+ per axis acts on the arm(s) the
+            # "TCP arm" selector chooses (both / left / right).
+            handles["tcp_ptp_axis_vec"] = {}
+            with server.gui.add_folder("Position — left | right (mm)", expand_by_default=True):
+                for label, index, angular in _TCP_PTP_AXES[:3]:
+                    _add_ptp_axis_row(label.upper(), index, angular)
+            with server.gui.add_folder("Rotation — left | right (deg)", expand_by_default=True):
+                for label, index, angular in _TCP_PTP_AXES[3:]:
+                    _add_ptp_axis_row(label.capitalize(), index, angular)
             _refresh_tcp_ptp_axis_fields(handles)
 
         with _move_tabs.add_tab("TCP Linear"):
@@ -2769,18 +2854,19 @@ def update_gui(
         _update_tcp_ptp_arm_buttons(handles)
     if "tcp_frame_buttons" in handles:
         _update_tcp_frame_buttons(handles)
-    if "tcp_ptp_axis_fields" in handles and not handles.get("tcp_ptp_fields_initialized"):
-        # One-shot fill once the first state makes a TCP target available; after
-        # that the fields are event-driven (arm/frame switch, nudge, commit) so a
-        # periodic repaint never clobbers a value the operator is mid-typing.
-        if _refresh_tcp_ptp_axis_fields(handles):
-            handles["tcp_ptp_fields_initialized"] = True
     if "tcp_display_buttons" in handles:
         _update_tcp_display_buttons(handles)
     if "tcp_linear_arm_buttons" in handles or "tcp_linear_orientation_buttons" in handles:
         _update_tcp_linear_selection_buttons(handles)
     latest = store.latest()
     stale = store.is_stale()
+    # Stash the live snapshot so the TCP PTP fields can mirror the current pose
+    # every tick (the patched viser NumberInput ignores server updates while it is
+    # focused, so a periodic repaint never clobbers a value the operator is typing).
+    handles["_latest_state"] = latest
+    handles["_state_stale"] = stale
+    if "tcp_ptp_axis_vec" in handles:
+        _refresh_tcp_ptp_axis_fields(handles)
     readiness = safety.readiness()
     _update_lease_owner(handles, latest, safety.command_client.source_id, held=safety.command_client.hold_lease)
     _update_circle_overlay_gui(handles, overlay_store)

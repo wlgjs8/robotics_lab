@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
+#include <string>
 
 namespace {
 
@@ -225,6 +227,106 @@ bool testVelocityFeedforwardZeroesRampLag() {
     return true;
 }
 
+// Patch 5: command-twist feedforward source. A constant-velocity command twist
+// should zero the ramp lag just like finite-difference feedforward.
+double rampLagWithCommandTwist(const std::string& source, double v_m_s, bool supply_twist) {
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.natural_frequency_linear_hz = 1.0;
+    cfg.velocity_feedforward = true;
+    cfg.velocity_feedforward_source = source;
+    rb_servo::SmdPoseTracker tracker(cfg);
+    tracker.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    double cmd_x = 0.0;
+    double x = 0.0;
+    double goal_x = 0.0;
+    for (int i = 0; i < 8000; ++i) {
+        cmd_x += v_m_s * kDt;
+        tracker.updateGoalFromCommand({cmd_x, 0.0, 0.0, 0.0, 0.0, 0.0});
+        if (supply_twist) {
+            tracker.setCommandTwist(Eigen::Vector3d(v_m_s, 0.0, 0.0), Eigen::Vector3d::Zero());
+        }
+        x = tracker.step(kDt).x;
+        goal_x = tracker.goalPose().x;
+    }
+    return goal_x - x;
+}
+
+bool testCommandTwistFeedforwardZeroesRampLag() {
+    const double v = 0.05;
+    const double lag = rampLagWithCommandTwist("command_twist", v, /*supply_twist=*/true);
+    RB_CHECK(std::abs(lag) < 1e-4);  // command twist feedforward zeroes the lag
+    // The diagnostics report command_twist as the effective source, no fallback.
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.velocity_feedforward = true;
+    cfg.velocity_feedforward_source = "command_twist";
+    rb_servo::SmdPoseTracker tracker(cfg);
+    tracker.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.01, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.setCommandTwist(Eigen::Vector3d(0.05, 0.0, 0.0), Eigen::Vector3d::Zero());
+    tracker.step(kDt);
+    RB_CHECK(tracker.lastStepInfo().velocity_feedforward_source == "command_twist");
+    RB_CHECK(!tracker.lastStepInfo().command_twist_fallback);
+    RB_CHECK(std::abs(tracker.lastStepInfo().goal_linear_velocity.x() - 0.05) < 1e-9);
+    return true;
+}
+
+bool testCommandTwistMissingFallsBackToFiniteDifference() {
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.velocity_feedforward = true;
+    cfg.velocity_feedforward_source = "command_twist";
+    rb_servo::SmdPoseTracker tracker(cfg);
+    tracker.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.01, 0.0, 0.0, 0.0, 0.0, 0.0});
+    // No setCommandTwist() -> must fall back, flagged, and not crash.
+    tracker.step(kDt);
+    RB_CHECK(tracker.lastStepInfo().velocity_feedforward_source == "finite_difference");
+    RB_CHECK(tracker.lastStepInfo().command_twist_fallback);
+
+    // Non-finite twist is ignored (also a safe fallback).
+    rb_servo::SmdPoseTracker tracker2(cfg);
+    tracker2.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker2.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker2.updateGoalFromCommand({0.01, 0.0, 0.0, 0.0, 0.0, 0.0});
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    tracker2.setCommandTwist(Eigen::Vector3d(nan, 0.0, 0.0), Eigen::Vector3d::Zero());
+    const rb_servo::Pose6D out = tracker2.step(kDt);
+    RB_CHECK(std::isfinite(out.x));
+    RB_CHECK(tracker2.lastStepInfo().command_twist_fallback);
+    return true;
+}
+
+bool testStepInfoClipFlagsAndReanchorCount() {
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.natural_frequency_linear_hz = 1.0;
+    cfg.max_linear_velocity_m_s = 0.05;  // tight velocity cap to force velocity clipping
+    cfg.max_linear_accel_m_s2 = 1.0;     // accel cap also clips on the big initial step
+    rb_servo::SmdPoseTracker tracker(cfg);
+    tracker.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({1.0, 0.0, 0.0, 0.0, 0.0, 0.0});  // big step -> saturate
+    bool saw_accel_clip = false;
+    bool saw_vel_clip = false;
+    for (int i = 0; i < 200; ++i) {
+        tracker.step(kDt);
+        saw_accel_clip = saw_accel_clip || tracker.lastStepInfo().linear_accel_clipped;
+        saw_vel_clip = saw_vel_clip || tracker.lastStepInfo().linear_velocity_clipped;
+    }
+    RB_CHECK(saw_accel_clip);
+    RB_CHECK(saw_vel_clip);
+
+    // reanchorCount counts reset() only while already active (not the first reset).
+    rb_servo::SmdPoseTracker t2(defaultConfig());
+    RB_CHECK(t2.reanchorCount() == 0);
+    t2.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});  // initial activation, not a re-anchor
+    RB_CHECK(t2.reanchorCount() == 0);
+    t2.reset({0.1, 0.0, 0.0, 0.0, 0.0, 0.0});  // re-anchor while active
+    RB_CHECK(t2.reanchorCount() == 1);
+    return true;
+}
+
 bool testDeactivateAndReanchor() {
     rb_servo::SmdPoseTracker tracker(defaultConfig());
     tracker.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
@@ -251,6 +353,9 @@ int main() {
     if (!testForceAndVelocityClampsSaturateAndConverge()) return 1;
     if (!testClampsInactiveForSmallMotionsPreserveDynamics()) return 1;
     if (!testVelocityFeedforwardZeroesRampLag()) return 1;
+    if (!testCommandTwistFeedforwardZeroesRampLag()) return 1;
+    if (!testCommandTwistMissingFallsBackToFiniteDifference()) return 1;
+    if (!testStepInfoClipFlagsAndReanchorCount()) return 1;
     if (!testDeactivateAndReanchor()) return 1;
     std::cout << "smd_pose_tracker tests passed\n";
     return 0;

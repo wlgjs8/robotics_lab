@@ -50,6 +50,7 @@ from .flow_inference import (
     rotate_flow_arm_vectors,
 )
 from .gripper import GripperRuntime
+from .tcp_target_pose_conditioner import CONDITIONING_MODES, REANCHOR_MODES
 
 OPENPI_CHECKPOINT_PREFIX = "openpi://"
 OPENPI_DEFAULT_PROMPT = (
@@ -161,6 +162,10 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
         chunk_crossfade_steps: int = 0,
+        tcp_target_pose_conditioning: str = "legacy_step_hold",
+        tcp_target_pose_reanchor_mode: str = "measured_blend",
+        tcp_target_pose_blend_steps: int = 2,
+        tcp_target_pose_send_twist: bool = False,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
@@ -249,6 +254,19 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         }
         self._target_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+        # Patch 3: online tcp_target_pose A-stage conditioning (this class skips
+        # super().__init__, so the state the inherited foh helpers touch is set here).
+        if str(tcp_target_pose_conditioning) not in CONDITIONING_MODES:
+            raise ValueError(f"tcp_target_pose_conditioning must be one of {CONDITIONING_MODES}")
+        if str(tcp_target_pose_reanchor_mode) not in REANCHOR_MODES:
+            raise ValueError(f"tcp_target_pose_reanchor_mode must be one of {REANCHOR_MODES}")
+        self._tcp_tp_mode = str(tcp_target_pose_conditioning)
+        self._tcp_tp_reanchor_mode = str(tcp_target_pose_reanchor_mode)
+        self._tcp_tp_blend_steps = int(tcp_target_pose_blend_steps)
+        self._tcp_tp_send_twist = bool(tcp_target_pose_send_twist)
+        self._tcp_tp_conditioners = None
+        self._tcp_tp_chunk_seq = 0
+        self._current_gripper_targets: dict[str, float | None] = {"left": None, "right": None}
         # Per-policy-step action logger (env-gated, debug only). Mirrors
         # FlowMatchingActionSource; this class skips super().__init__, so the
         # attributes the inherited _log_action_step touches must be set here.

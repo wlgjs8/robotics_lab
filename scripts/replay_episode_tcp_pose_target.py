@@ -27,6 +27,8 @@ from generate_replay_target import git_commit as phase1_git_commit
 from generate_replay_target import servo_times as phase1_servo_times
 from generate_replay_target import build_npz_arrays as phase1_build_npz_arrays
 from tcp_tuning.config import Config as Phase1Config
+from tcp_tuning.config import apply_cli_overrides as apply_conditioning_cli_overrides
+from tcp_tuning.config import load_config as load_tcp_tuning_config
 from tcp_tuning.command_conditioner import CommandConditioner
 from tcp_tuning.hdf5_io import EpisodeData
 from tcp_tuning.hdf5_io import load_episode
@@ -106,6 +108,9 @@ class ReplayPlan:
     grippers: dict[str, np.ndarray]
     src_lo: np.ndarray
     src_hi: np.ndarray
+    hold: np.ndarray
+    gap: np.ndarray
+    dropout: np.ndarray
     current_poses: dict[str, np.ndarray]
     init_deltas: dict[str, InitDelta]
     init_poses: dict[str, np.ndarray]
@@ -209,7 +214,36 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--arms", default="left,right")
     parser.add_argument("--server-config", default=None)
     parser.add_argument("--time-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--time-scale-mode",
+        choices=["wall_clock_resample", "legacy_sleep"],
+        default="wall_clock_resample",
+        help="wall_clock_resample (default): dispatch at the full wall-clock rate_hz and "
+        "advance episode time by 1/(rate_hz*time_scale) per tick (no server-side ZOH on "
+        "intervening ticks). legacy_sleep: send stored ticks at period=time_scale/rate_hz "
+        "(reproduces pre-2026-06 logs).",
+    )
     parser.add_argument("--rate-hz", type=float, default=None)
+    # --- Patch 2: A-stage command-conditioning config (tunable, logged) -----------
+    parser.add_argument(
+        "--conditioning-config",
+        default=None,
+        help="Optional tcp_tuning YAML (conditioning/smoothing sections) merged over defaults.",
+    )
+    parser.add_argument("--smoothing-method", choices=["none", "savgol", "lowpass", "cubic"], default=None)
+    parser.add_argument("--smoothing-window-samples", type=int, default=None)
+    parser.add_argument("--smoothing-polyorder", type=int, default=None)
+    parser.add_argument("--lowpass-cutoff-hz", type=float, default=None)
+    parser.add_argument("--cubic-smoothing", type=float, default=None)
+    parser.add_argument("--gap-median-multiplier", type=float, default=None)
+    parser.add_argument("--gap-absolute-threshold-sec", type=float, default=None)
+    parser.add_argument(
+        "--send-conditioned-twist",
+        action="store_true",
+        help="Attach the A-stage conditioned twist (scaled by 1/time_scale to wall-clock) "
+        "to each TcpPoseTarget as tcp_target_twist_stand (Patch 5). The server SMD uses it "
+        "only when velocity_feedforward_source is command_twist/auto; ignored otherwise.",
+    )
     parser.add_argument("--max-linear-speed-m-s", type=float, default=None)
     parser.add_argument("--max-angular-speed-rad-s", type=float, default=None)
     parser.add_argument("--init-move-sec", type=float, default=5.0)
@@ -359,7 +393,7 @@ def prepare_npz(args: argparse.Namespace, selected_arms: tuple[str, ...], rate_h
     if not episode_path.exists():
         raise ReplayRefusal(f"episode does not exist: {episode_path}")
     episode = load_episode(str(episode_path), nominal_rate_hz=Phase1Config().conditioning.nominal_source_rate_hz)
-    cfg = _phase1_config(rate_hz, args.seed)
+    cfg = _phase1_config(args, rate_hz)
     out_dir = Path(args.out_dir) / hdf5_episode_id(episode_path)
     out_dir.mkdir(parents=True, exist_ok=True)
     return generate_replay_npz(episode, args.mode, out_dir, cfg, selected_arms=selected_arms, seed=args.seed)
@@ -412,7 +446,7 @@ def prepare_ee_local_npz(
     current_poses: dict[str, np.ndarray],
     rate_hz: float,
 ) -> Path:
-    cfg = _phase1_config(rate_hz, args.seed)
+    cfg = _phase1_config(args, rate_hz)
     episode, source_meta = anchored_ee_local_episode(
         data_tcp_path,
         selected_arms,
@@ -744,10 +778,50 @@ def effective_timestamps_for_episode(episode: EpisodeData, nominal_rate_hz: floa
     return np.arange(count, dtype=np.float64) / float(nominal_rate_hz), True
 
 
-def _phase1_config(rate_hz: float, seed: int | None) -> Phase1Config:
+def _smoothing_tag(args: argparse.Namespace, rate_hz: float) -> str:
+    """Short filename-safe tag describing the effective A-stage smoothing (Patch 2)."""
+
+    cfg = _phase1_config(args, rate_hz).smoothing
+    method = str(cfg.method).lower()
+    if method in {"none", "off", "identity"}:
+        return "_smnone"
+    if method.startswith("savgol") or method in {"savitzky_golay", "savitzky-golay"}:
+        return f"_savgol_w{int(cfg.window_samples)}p{int(cfg.polyorder)}"
+    if method.startswith("low") or method in {"butter", "butterworth"}:
+        return f"_lowpass{_num_tag(cfg.lowpass_cutoff_hz)}hz"
+    if method.startswith("cubic") or method in {"spline", "smoothing_spline"}:
+        return f"_cubic{_num_tag(cfg.cubic_smoothing)}"
+    return ""
+
+
+def _num_tag(value: float) -> str:
+    return f"{float(value):g}".replace(".", "p")
+
+
+def _phase1_config(args: argparse.Namespace, rate_hz: float) -> Phase1Config:
+    """Build the effective Phase-1 conditioning/smoothing config.
+
+    Precedence (low -> high): dataclass defaults -> ``--conditioning-config`` YAML ->
+    CLI smoothing/gap overrides. The servo rate is always forced to the wall-clock
+    dispatch rate, and the synthetic seed comes from ``--seed`` when given.
+    """
+
     from dataclasses import replace
 
-    cfg = Phase1Config()
+    cfg = load_tcp_tuning_config(getattr(args, "conditioning_config", None))
+    cfg = apply_conditioning_cli_overrides(
+        cfg,
+        {
+            "smoothing_method": getattr(args, "smoothing_method", None),
+            "smoothing_window_samples": getattr(args, "smoothing_window_samples", None),
+            "smoothing_polyorder": getattr(args, "smoothing_polyorder", None),
+            "lowpass_cutoff_hz": getattr(args, "lowpass_cutoff_hz", None),
+            "cubic_smoothing": getattr(args, "cubic_smoothing", None),
+            "gap_median_multiplier": getattr(args, "gap_median_multiplier", None),
+            "gap_absolute_threshold_sec": getattr(args, "gap_absolute_threshold_sec", None),
+        },
+    )
+    seed = getattr(args, "seed", None)
     synthetic = cfg.synthetic if seed is None else replace(cfg.synthetic, seed=int(seed))
     conditioning = replace(cfg.conditioning, servo_rate_hz=float(rate_hz))
     return replace(cfg, conditioning=conditioning, synthetic=synthetic)
@@ -871,6 +945,19 @@ def build_replay_plan(
         }
         src_lo = np.asarray(data[f"{selected_arms[0]}_src_id_lo"], dtype=np.int64)
         src_hi = np.asarray(data[f"{selected_arms[0]}_src_id_hi"], dtype=np.int64)
+        # Per-tick conditioner flags (genuine source hold / gap / dropout). Combine
+        # across selected arms so a hold on either arm marks the tick. Older npz files
+        # without these arrays fall back to "no genuine hold".
+        def _flag_array(name: str) -> np.ndarray:
+            combined = np.zeros(t_servo.shape, dtype=bool)
+            for arm in selected_arms:
+                key = f"{arm}_{name}"
+                if key in data.files:
+                    combined = combined | np.asarray(data[key], dtype=bool)
+            return combined
+        hold = _flag_array("hold")
+        gap = _flag_array("gap")
+        dropout = _flag_array("dropout")
         meta = _meta_from_npz(data)
         episode_name = _episode_id_from_meta_or_path(npz_path, meta)
         segment_selection = dict(meta.get("segment_selection") or {})
@@ -909,7 +996,11 @@ def build_replay_plan(
         )
         for arm in selected_arms
     }
-    run_name = str(args.run_name) if args.run_name else time.strftime("real_replay_%Y%m%dT%H%M%S") + ("_dryrun" if dry_run else "_execute")
+    run_name = str(args.run_name) if args.run_name else (
+        time.strftime("real_replay_%Y%m%dT%H%M%S")
+        + _smoothing_tag(args, rate_hz)
+        + ("_dryrun" if dry_run else "_execute")
+    )
     run_dir = Path(args.out_dir) / episode_name / "runs" / run_name
     paths = ReplayPaths(
         episode_id=episode_name,
@@ -928,6 +1019,9 @@ def build_replay_plan(
         grippers=grippers,
         src_lo=src_lo,
         src_hi=src_hi,
+        hold=hold,
+        gap=gap,
+        dropout=dropout,
         current_poses=current_poses,
         init_deltas=init_deltas,
         init_poses=init_poses,
@@ -1051,22 +1145,231 @@ def make_init_premove(
     return np.asarray(poses, dtype=np.float64)
 
 
+@dataclass
+class WallClockStream:
+    """Conditioned trajectory resampled onto a wall-clock 500 Hz dispatch grid.
+
+    ``time_scale`` slows only episode-time sampling, not the wall-clock dispatch
+    frequency: episode time advances by ``1/(rate_hz*time_scale)`` per wall tick, so the
+    server never sees a held/ZOH target on intervening ticks (it does at genuine source
+    hold/gap/dropout, which ``hold`` marks).
+    """
+
+    t_wall: np.ndarray
+    t_episode: np.ndarray
+    src_idx_lo: np.ndarray
+    src_idx_hi: np.ndarray
+    interp_alpha: np.ndarray
+    hold: np.ndarray
+    goals: dict[str, np.ndarray]
+    twists: dict[str, np.ndarray]
+    grippers: dict[str, np.ndarray]
+    raw_targets: dict[str, np.ndarray]
+
+    @property
+    def size(self) -> int:
+        return int(self.t_wall.size)
+
+
+def build_wall_clock_replay_stream(plan: ReplayPlan, time_scale: float, rate_hz: float) -> WallClockStream:
+    """Resample ``plan``'s episode-time conditioned trajectory to a wall-clock grid.
+
+    The stored trajectory lives on the episode-time 500 Hz grid (``plan.t_servo``).
+    Wall ticks fire at ``rate_hz``; episode time at wall tick ``k`` is
+    ``t_servo[0] + (k/rate_hz)/time_scale``. Poses use SE(3) FOH (position lerp +
+    quaternion slerp), conditioned twist is linearly resampled (episode-time units),
+    grippers and source-raw targets hold the nearest previous source sample.
+    """
+
+    ts = float(time_scale)
+    rate = float(rate_hz)
+    if ts <= 0.0 or rate <= 0.0:
+        raise ReplayRefusal("time_scale and rate_hz must be positive for wall-clock resampling")
+    t_servo = np.asarray(plan.t_servo, dtype=np.float64)
+    n = int(t_servo.size)
+    if n == 0:
+        raise ReplayRefusal("conditioned plan has no servo ticks")
+    t0 = float(t_servo[0])
+    t_end = float(t_servo[-1])
+    span = t_end - t0
+    dt_ep = (1.0 / rate) / ts
+    if n == 1 or span <= 0.0:
+        t_episode = np.asarray([t0], dtype=np.float64)
+    else:
+        n_steps = int(math.floor(span / dt_ep + 1e-9))
+        t_episode = t0 + dt_ep * np.arange(n_steps + 1, dtype=np.float64)
+        if t_episode[-1] < t_end - 1e-9:
+            t_episode = np.append(t_episode, t_end)
+        t_episode = np.minimum(t_episode, t_end)
+    m = int(t_episode.size)
+    t_wall = (1.0 / rate) * np.arange(m, dtype=np.float64)
+    lo = np.clip(np.searchsorted(t_servo, t_episode, side="right") - 1, 0, n - 1)
+    hi = np.clip(lo + 1, 0, n - 1)
+    denom = t_servo[hi] - t_servo[lo]
+    safe_denom = np.where(denom > 0.0, denom, 1.0)
+    alpha = np.clip(np.where(denom > 0.0, (t_episode - t_servo[lo]) / safe_denom, 0.0), 0.0, 1.0)
+    src_lo_arr = np.asarray(plan.src_lo, dtype=np.int64)
+    src_hi_arr = np.asarray(plan.src_hi, dtype=np.int64)
+    src_idx_lo = src_lo_arr[lo] if src_lo_arr.size == n else np.full(m, -1, dtype=np.int64)
+    src_idx_hi = src_hi_arr[hi] if src_hi_arr.size == n else np.full(m, -1, dtype=np.int64)
+    hold = (np.asarray(plan.hold, dtype=bool)[lo] if plan.hold.size == n else np.zeros(m, dtype=bool)) | (lo == hi)
+    goals: dict[str, np.ndarray] = {}
+    twists: dict[str, np.ndarray] = {}
+    grippers: dict[str, np.ndarray] = {}
+    raw_targets: dict[str, np.ndarray] = {}
+    for arm in plan.selected_arms:
+        g = plan.goals[arm]
+        tw = plan.twists[arm]
+        out_g = np.empty((m, 7), dtype=np.float64)
+        out_tw = np.full((m, 6), np.nan, dtype=np.float64)
+        for k in range(m):
+            a = float(alpha[k])
+            i0 = int(lo[k])
+            i1 = int(hi[k])
+            if i0 == i1 or a <= 0.0:
+                out_g[k] = g[i0]
+            elif a >= 1.0:
+                out_g[k] = g[i1]
+            else:
+                p, q = foh_pose(a, 0.0, g[i0, :3], g[i0, 3:7], 1.0, g[i1, :3], g[i1, 3:7])
+                out_g[k, :3] = p
+                out_g[k, 3:7] = q
+            out_tw[k] = tw[i0] if i0 == i1 else (1.0 - a) * tw[i0] + a * tw[i1]
+        goals[arm] = out_g
+        twists[arm] = out_tw
+        grippers[arm] = np.asarray(plan.grippers[arm], dtype=np.float64)[lo]
+        raw_targets[arm] = np.asarray(plan.raw_targets[arm], dtype=np.float64)[lo]
+    return WallClockStream(
+        t_wall=t_wall,
+        t_episode=t_episode,
+        src_idx_lo=src_idx_lo,
+        src_idx_hi=src_idx_hi,
+        interp_alpha=alpha,
+        hold=hold,
+        goals=goals,
+        twists=twists,
+        grippers=grippers,
+        raw_targets=raw_targets,
+    )
+
+
+def _conditioned_twist_payload(twist: np.ndarray, time_scale: float) -> list[float] | None:
+    """A-stage conditioned twist (episode-time) scaled to wall-clock for command_twist
+    feedforward: wall goal velocity = episode twist / time_scale. None if non-finite."""
+    arr = np.asarray(twist, dtype=np.float64).reshape(-1)
+    if arr.size != 6 or not np.all(np.isfinite(arr)):
+        return None
+    ts = float(time_scale) if float(time_scale) > 0.0 else 1.0
+    return [float(v) / ts for v in arr]
+
+
+def _stale_repeated_count(stream: WallClockStream, selected_arms: tuple[str, ...]) -> int:
+    """Ticks whose emitted goal equals the previous tick on every arm but are NOT a
+    genuine source hold/gap/dropout — i.e. unexpected ZOH repeats (should be ~0)."""
+
+    count = 0
+    for k in range(1, stream.size):
+        if bool(stream.hold[k]):
+            continue
+        same = all(
+            float(np.max(np.abs(stream.goals[arm][k] - stream.goals[arm][k - 1]))) < 1e-12
+            for arm in selected_arms
+        )
+        if same:
+            count += 1
+    return count
+
+
 def write_would_be_log(plan: ReplayPlan, args: argparse.Namespace, server: ServerRuntimeConfig) -> None:
+    rate_hz = float(args.rate_hz or server.servo_rate_hz)
+    mode = str(getattr(args, "time_scale_mode", "wall_clock_resample"))
     metadata = run_metadata(plan, args, server)
     writer = TrajectoryLogWriter(plan.paths.log_path, metadata=metadata)
-    for i, t_value in enumerate(plan.t_servo):
-        for arm in plan.selected_arms:
-            writer.append(log_row(
-                t=float(t_value) * float(args.time_scale),
-                t_source=float(t_value),
-                src_idx=int(plan.src_lo[i]) if i < plan.src_lo.size else -1,
-                arm=arm,
-                source_raw_target=plan.raw_targets[arm][i],
-                conditioned_goal=plan.goals[arm][i],
-                conditioned_twist=plan.twists[arm][i],
-                snapshot=None,
-            ))
+    if mode == "wall_clock_resample":
+        stream = build_wall_clock_replay_stream(plan, float(args.time_scale), rate_hz)
+        for k in range(stream.size):
+            for arm in plan.selected_arms:
+                writer.append(log_row(
+                    t=float(stream.t_wall[k]),
+                    t_source=float(stream.t_episode[k]),
+                    src_idx=int(stream.src_idx_lo[k]),
+                    arm=arm,
+                    source_raw_target=stream.raw_targets[arm][k],
+                    conditioned_goal=stream.goals[arm][k],
+                    conditioned_twist=stream.twists[arm][k],
+                    snapshot=None,
+                    t_episode=float(stream.t_episode[k]),
+                    src_idx_lo=int(stream.src_idx_lo[k]),
+                    src_idx_hi=int(stream.src_idx_hi[k]),
+                    interpolation_alpha=float(stream.interp_alpha[k]),
+                    time_scale=float(args.time_scale),
+                    time_scale_mode=mode,
+                    effective_command_rate_hz=rate_hz,
+                    hold=bool(stream.hold[k]),
+                ))
+        writer.metadata.update(_wall_clock_meta(stream, plan, rate_hz, mode, effective_rates=None))
+    else:
+        for i, t_value in enumerate(plan.t_servo):
+            for arm in plan.selected_arms:
+                writer.append(log_row(
+                    t=float(t_value) * float(args.time_scale),
+                    t_source=float(t_value),
+                    src_idx=int(plan.src_lo[i]) if i < plan.src_lo.size else -1,
+                    arm=arm,
+                    source_raw_target=plan.raw_targets[arm][i],
+                    conditioned_goal=plan.goals[arm][i],
+                    conditioned_twist=plan.twists[arm][i],
+                    snapshot=None,
+                    t_episode=float(t_value),
+                    src_idx_lo=int(plan.src_lo[i]) if i < plan.src_lo.size else -1,
+                    src_idx_hi=int(plan.src_hi[i]) if i < plan.src_hi.size else -1,
+                    interpolation_alpha=0.0,
+                    time_scale=float(args.time_scale),
+                    time_scale_mode=mode,
+                    effective_command_rate_hz=rate_hz / float(args.time_scale),
+                    hold=bool(plan.hold[i]) if i < plan.hold.size else False,
+                ))
+        writer.metadata.update({
+            "time_scale_mode": mode,
+            "wall_clock_dispatch_rate_hz": rate_hz / float(args.time_scale),
+            "effective_command_rate_hz": {
+                "p50": rate_hz / float(args.time_scale),
+                "p95": rate_hz / float(args.time_scale),
+                "min": rate_hz / float(args.time_scale),
+            },
+            "held_tick_count": int(np.count_nonzero(plan.hold)),
+            "stale_or_repeated_target_count": 0,
+            "tick_count": int(plan.t_servo.size),
+        })
     writer.write()
+
+
+def _wall_clock_meta(
+    stream: WallClockStream,
+    plan: ReplayPlan,
+    rate_hz: float,
+    mode: str,
+    *,
+    effective_rates: list[float] | None,
+) -> dict[str, Any]:
+    if effective_rates:
+        arr = np.asarray(effective_rates, dtype=np.float64)
+        arr = arr[np.isfinite(arr)]
+        eff = {
+            "p50": float(np.percentile(arr, 50)) if arr.size else None,
+            "p95": float(np.percentile(arr, 95)) if arr.size else None,
+            "min": float(arr.min()) if arr.size else None,
+        }
+    else:
+        eff = {"p50": rate_hz, "p95": rate_hz, "min": rate_hz}
+    return {
+        "time_scale_mode": mode,
+        "wall_clock_dispatch_rate_hz": rate_hz,
+        "effective_command_rate_hz": eff,
+        "held_tick_count": int(np.count_nonzero(stream.hold)),
+        "stale_or_repeated_target_count": _stale_repeated_count(stream, plan.selected_arms),
+        "tick_count": int(stream.size),
+    }
 
 
 def run_execute(plan: ReplayPlan, args: argparse.Namespace, server: ServerRuntimeConfig) -> None:
@@ -1129,7 +1432,17 @@ def stream_conditioned_goals(
     state_client: RobotStateClient,
     writer: TrajectoryLogWriter,
 ) -> None:
-    period = float(args.time_scale) / float(args.rate_hz or server.servo_rate_hz)
+    rate_hz = float(args.rate_hz or server.servo_rate_hz)
+    mode = str(getattr(args, "time_scale_mode", "wall_clock_resample"))
+    if mode == "wall_clock_resample":
+        stream = build_wall_clock_replay_stream(plan, float(args.time_scale), rate_hz)
+        _stream_wall_clock(stream, plan, args, server, client, state_client, writer, rate_hz, mode)
+        return
+
+    # legacy_sleep: send the stored episode-grid ticks, slowing the sleep period.
+    period = float(args.time_scale) / rate_hz
+    effective_rates: list[float] = []
+    last_wall: float | None = None
     for i in range(plan.t_servo.size):
         check_watchdog(state_client, client, allow_controller_sim_arm_error=bool(args.allow_controller_sim_arm_error))
         snapshot = state_client.latest.payload if state_client.latest is not None else None
@@ -1137,6 +1450,10 @@ def stream_conditioned_goals(
         right = plan.goals["right"][i] if "right" in plan.selected_arms else None
         left_g = _finite_float_or_none(plan.grippers["left"][i]) if "left" in plan.selected_arms else None
         right_g = _finite_float_or_none(plan.grippers["right"][i]) if "right" in plan.selected_arms else None
+        now = time.perf_counter()
+        if last_wall is not None and now > last_wall:
+            effective_rates.append(1.0 / (now - last_wall))
+        last_wall = now
         client.send(
             tcp_pose_target_stand_intent(
                 left=_pose_list(left),
@@ -1156,8 +1473,97 @@ def stream_conditioned_goals(
                 conditioned_goal=plan.goals[arm][i],
                 conditioned_twist=plan.twists[arm][i],
                 snapshot=snapshot,
+                t_episode=float(plan.t_servo[i]),
+                src_idx_lo=int(plan.src_lo[i]) if i < plan.src_lo.size else -1,
+                src_idx_hi=int(plan.src_hi[i]) if i < plan.src_hi.size else -1,
+                interpolation_alpha=0.0,
+                time_scale=float(args.time_scale),
+                time_scale_mode=mode,
+                effective_command_rate_hz=(effective_rates[-1] if effective_rates else rate_hz / float(args.time_scale)),
+                hold=bool(plan.hold[i]) if i < plan.hold.size else False,
             ))
         time.sleep(period)
+    arr = np.asarray(effective_rates, dtype=np.float64)
+    writer.metadata.update({
+        "time_scale_mode": mode,
+        "wall_clock_dispatch_rate_hz": rate_hz / float(args.time_scale),
+        "effective_command_rate_hz": {
+            "p50": (float(np.percentile(arr, 50)) if arr.size else None),
+            "p95": (float(np.percentile(arr, 95)) if arr.size else None),
+            "min": (float(arr.min()) if arr.size else None),
+        },
+        "held_tick_count": int(np.count_nonzero(plan.hold)),
+        "stale_or_repeated_target_count": 0,
+        "tick_count": int(plan.t_servo.size),
+    })
+
+
+def _stream_wall_clock(
+    stream: WallClockStream,
+    plan: ReplayPlan,
+    args: argparse.Namespace,
+    server: ServerRuntimeConfig,
+    client: ServoCommandClient,
+    state_client: RobotStateClient,
+    writer: TrajectoryLogWriter,
+    rate_hz: float,
+    mode: str,
+) -> None:
+    period = 1.0 / rate_hz
+    effective_rates: list[float] = []
+    last_wall: float | None = None
+    start = time.perf_counter()
+    for k in range(stream.size):
+        check_watchdog(state_client, client, allow_controller_sim_arm_error=bool(args.allow_controller_sim_arm_error))
+        snapshot = state_client.latest.payload if state_client.latest is not None else None
+        left = stream.goals["left"][k] if "left" in plan.selected_arms else None
+        right = stream.goals["right"][k] if "right" in plan.selected_arms else None
+        left_g = _finite_float_or_none(stream.grippers["left"][k]) if "left" in plan.selected_arms else None
+        right_g = _finite_float_or_none(stream.grippers["right"][k]) if "right" in plan.selected_arms else None
+        send_twist = bool(getattr(args, "send_conditioned_twist", False))
+        left_tw = _conditioned_twist_payload(stream.twists["left"][k], args.time_scale) if (send_twist and "left" in plan.selected_arms) else None
+        right_tw = _conditioned_twist_payload(stream.twists["right"][k], args.time_scale) if (send_twist and "right" in plan.selected_arms) else None
+        now = time.perf_counter()
+        if last_wall is not None and now > last_wall:
+            effective_rates.append(1.0 / (now - last_wall))
+        last_wall = now
+        client.send(
+            tcp_pose_target_stand_intent(
+                left=_pose_list(left),
+                right=_pose_list(right),
+                left_gripper=left_g,
+                right_gripper=right_g,
+                left_twist=left_tw,
+                right_twist=right_tw,
+                timeout_sec=server.command_timeout_sec,
+            )
+        )
+        eff_rate = effective_rates[-1] if effective_rates else rate_hz
+        for arm in plan.selected_arms:
+            writer.append(log_row(
+                t=float(stream.t_wall[k]),
+                t_source=float(stream.t_episode[k]),
+                src_idx=int(stream.src_idx_lo[k]),
+                arm=arm,
+                source_raw_target=stream.raw_targets[arm][k],
+                conditioned_goal=stream.goals[arm][k],
+                conditioned_twist=stream.twists[arm][k],
+                snapshot=snapshot,
+                t_episode=float(stream.t_episode[k]),
+                src_idx_lo=int(stream.src_idx_lo[k]),
+                src_idx_hi=int(stream.src_idx_hi[k]),
+                interpolation_alpha=float(stream.interp_alpha[k]),
+                time_scale=float(args.time_scale),
+                time_scale_mode=mode,
+                effective_command_rate_hz=eff_rate,
+                hold=bool(stream.hold[k]),
+            ))
+        # Pace to wall-clock rate using absolute target times to avoid drift.
+        target = start + (k + 1) * period
+        sleep_for = target - time.perf_counter()
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+    writer.metadata.update(_wall_clock_meta(stream, plan, rate_hz, mode, effective_rates=effective_rates))
 
 
 def check_watchdog(
@@ -1381,6 +1787,14 @@ def log_row(
     conditioned_goal: np.ndarray,
     conditioned_twist: np.ndarray,
     snapshot: dict[str, Any] | None,
+    t_episode: float | None = None,
+    src_idx_lo: int | None = None,
+    src_idx_hi: int | None = None,
+    interpolation_alpha: float | None = None,
+    time_scale: float | None = None,
+    time_scale_mode: str | None = None,
+    effective_command_rate_hz: float | None = None,
+    hold: bool | None = None,
 ) -> dict[str, Any]:
     arm_state = snapshot.get(arm, {}) if isinstance(snapshot, dict) else {}
     actual = _state_pose_or_nan(arm_state, "tcp_actual_stand")
@@ -1439,7 +1853,32 @@ def log_row(
         "command_reference_tracking_error_deg": _finite_or_nan(
             arm_state.get("command_reference_tracking_error_deg") if isinstance(arm_state, dict) else None
         ),
+        # Patch 4: A/B/C separation telemetry (from cartesian_solve when the server
+        # publishes it; NaN/absent on older servers -> analyzer falls back + warns).
+        "smd_ref_stand": _state_pose_or_nan(solve, "smd_ref_stand"),
+        "smd_goal_stand": _state_pose_or_nan(solve, "smd_goal_stand"),
+        "q_target_before_output_ma_deg": _vec_or_nan(solve.get("q_target_before_output_ma_deg"), 6),
+        "q_target_after_output_ma_deg": _vec_or_nan(solve.get("q_target_after_output_ma_deg"), 6),
+        "smd_velocity_feedforward_source": solve.get("smd_velocity_feedforward_source", ""),
+        "smd_velocity_feedforward_fallback": _boolish(solve.get("smd_velocity_feedforward_fallback")),
+        "smd_linear_velocity_clipped": _boolish(solve.get("smd_linear_velocity_clipped")),
+        "smd_angular_velocity_clipped": _boolish(solve.get("smd_angular_velocity_clipped")),
+        "smd_reanchor_count": _finite_or_nan(solve.get("smd_reanchor_count")),
+        "output_ma_window": _finite_or_nan(solve.get("output_ma_window")),
     }
+    # Patch 1: wall-clock dispatch / resampling telemetry (only set when provided).
+    for key, value in (
+        ("t_episode", t_episode),
+        ("src_idx_lo", src_idx_lo),
+        ("src_idx_hi", src_idx_hi),
+        ("interpolation_alpha", interpolation_alpha),
+        ("time_scale", time_scale),
+        ("time_scale_mode", time_scale_mode),
+        ("effective_command_rate_hz", effective_command_rate_hz),
+        ("hold", hold),
+    ):
+        if value is not None:
+            row[key] = value
     if isinstance(snapshot, dict):
         row.update(
             {
@@ -1467,6 +1906,22 @@ def run_metadata(plan: ReplayPlan, args: argparse.Namespace, server: ServerRunti
         "stream_speed_stats": plan.stream_speed_stats,
         "bounds_notes": plan.bounds_notes,
         "segment_selection": plan.segment_selection,
+        "time_scale": float(args.time_scale),
+        "time_scale_mode": str(getattr(args, "time_scale_mode", "wall_clock_resample")),
+        "wall_clock_dispatch_rate_hz": float(args.rate_hz or server.servo_rate_hz),
+        "conditioning_config": _conditioning_config_dump(args, server),
+    }
+
+
+def _conditioning_config_dump(args: argparse.Namespace, server: ServerRuntimeConfig) -> dict[str, Any]:
+    """Effective A-stage conditioning/smoothing config (Patch 2), for reproducibility."""
+
+    rate_hz = float(args.rate_hz or server.servo_rate_hz)
+    cfg = _phase1_config(args, rate_hz)
+    return {
+        "conditioning": _jsonable(cfg.conditioning.__dict__),
+        "smoothing": _jsonable(cfg.smoothing.__dict__),
+        "conditioning_config_path": getattr(args, "conditioning_config", None),
     }
 
 

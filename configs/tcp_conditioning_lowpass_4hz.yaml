@@ -1,0 +1,19 @@
+# tcp_tuning A-stage command-conditioning config (Patch 2).
+# Zero-phase Butterworth low-pass at 4 Hz: removes the >~4 Hz content (incl. the
+# ~5-6 Hz command-origin tremor) from the conditioned goal before it reaches the SMD,
+# so the resonance is not excited at the source rather than masked downstream (C-stage).
+conditioning:
+  servo_rate_hz: 500.0
+  nominal_source_rate_hz: 30.0
+  gap_median_multiplier: 3.0
+  gap_absolute_threshold_sec: 0.100
+  reanchor_after_gap: true
+  hold_on_dropout: true
+
+smoothing:
+  method: lowpass
+  window_samples: 7
+  polyorder: 3
+  lowpass_cutoff_hz: 4.0
+  cubic_smoothing: 0.0
+  segment_min_samples: 5

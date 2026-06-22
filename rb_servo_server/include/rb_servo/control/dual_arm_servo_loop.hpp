@@ -362,6 +362,22 @@ private:
     SmdPoseTracker right_pose_track_smd_{PoseTrackSmdConfig{}};
     JointMovingAverage left_output_ma_{0};
     JointMovingAverage right_output_ma_{0};
+    // A/B/C separation telemetry (Patch 4), captured each tick from the SMD step
+    // and the output-MA stage, merged into the per-arm cartesian_solve sample.
+    struct AbcTelemetry {
+        bool smd_active = false;
+        std::optional<Pose6D> smd_ref_stand;
+        std::optional<Pose6D> smd_goal_stand;
+        SmdStepInfo smd_step_info;
+        std::uint64_t smd_reanchor_count = 0;
+        bool output_ma_present = false;
+        JointArray q_target_before_output_ma_deg{};
+        JointArray q_target_after_output_ma_deg{};
+    };
+    AbcTelemetry left_abc_telemetry_;
+    AbcTelemetry right_abc_telemetry_;
+    static void mergeAbcTelemetry(CartesianSolveTelemetry& solve, const AbcTelemetry& abc,
+                                  int output_ma_window);
     StartupValidationSnapshot startup_validation_;
     ServoSnapshot latest_snapshot_;
 };

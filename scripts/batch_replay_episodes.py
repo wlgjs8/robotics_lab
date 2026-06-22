@@ -98,7 +98,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--segment", default="auto-largest")
     parser.add_argument("--action-scale", type=float, default=1.0)
     parser.add_argument("--time-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--time-scale-mode",
+        choices=["wall_clock_resample", "legacy_sleep"],
+        default="wall_clock_resample",
+        help="Passed through to replay_episode_tcp_pose_target (Patch 1).",
+    )
     parser.add_argument("--server-config", default=None)
+    # --- Patch 2: A-stage conditioning overrides, passed through to the driver ----
+    parser.add_argument("--conditioning-config", default=None)
+    parser.add_argument("--smoothing-method", choices=["none", "savgol", "lowpass", "cubic"], default=None)
+    parser.add_argument("--smoothing-window-samples", type=int, default=None)
+    parser.add_argument("--smoothing-polyorder", type=int, default=None)
+    parser.add_argument("--lowpass-cutoff-hz", type=float, default=None)
+    parser.add_argument("--cubic-smoothing", type=float, default=None)
+    parser.add_argument("--gap-median-multiplier", type=float, default=None)
+    parser.add_argument("--gap-absolute-threshold-sec", type=float, default=None)
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--arms", default="left,right")
     parser.add_argument("--anchor", choices=["live", "mock"], default=None)
@@ -557,6 +572,8 @@ def build_driver_command(args: argparse.Namespace, episode_path: Path, batch_nam
         str(args.action_scale),
         "--time-scale",
         str(args.time_scale),
+        "--time-scale-mode",
+        str(args.time_scale_mode),
         "--out-dir",
         str(args.out_dir),
         "--run-name",
@@ -564,6 +581,19 @@ def build_driver_command(args: argparse.Namespace, episode_path: Path, batch_nam
     ]
     if args.server_config:
         cmd.extend(["--server-config", str(args.server_config)])
+    # Patch 2: forward A-stage conditioning overrides only when explicitly set.
+    for flag, value in (
+        ("--conditioning-config", args.conditioning_config),
+        ("--smoothing-method", args.smoothing_method),
+        ("--smoothing-window-samples", args.smoothing_window_samples),
+        ("--smoothing-polyorder", args.smoothing_polyorder),
+        ("--lowpass-cutoff-hz", args.lowpass_cutoff_hz),
+        ("--cubic-smoothing", args.cubic_smoothing),
+        ("--gap-median-multiplier", args.gap_median_multiplier),
+        ("--gap-absolute-threshold-sec", args.gap_absolute_threshold_sec),
+    ):
+        if value is not None:
+            cmd.extend([flag, str(value)])
     if args.max_linear_speed_m_s is not None:
         cmd.extend(["--max-linear-speed-m-s", str(args.max_linear_speed_m_s)])
     if args.max_angular_speed_rad_s is not None:

@@ -37,6 +37,25 @@ struct BackendConfig {
     double servo_lookahead_sec = 0.05;
     double servo_acc = 0.5;
 
+    // Soft-entry gain ramp for move_servo_j RT-servo (re)engagement.
+    // On every server (re)start the controller transitions from soft
+    // position-hold into stiff real-time servo_j streaming. With the transparent
+    // executor profile (servo_gain=1.0, LPF off) the joints stiffen in a single
+    // 2 ms tick and take up gearbox backlash/compliance on the gravity-loaded
+    // joints (J0/J2) -> an audible "clunk" + a few-mm settle on every bring-up
+    // (independent of pgmode/activation). Ramping ONLY the proportional gain from
+    // servo_gain*servo_soft_entry_gain_start_scale up to servo_gain over
+    // servo_soft_entry_sec spreads that take-up out so the joints stiffen
+    // gradually. This is a TRANSIENT shaping of how the gain is reached at
+    // engagement; it never changes the steady-state servo_gain (the
+    // transparent-executor contract value) nor t1/t2/alpha. The ramp re-arms
+    // whenever servo_j streaming resumes after a gap > servo_soft_entry_rearm_gap_sec
+    // (the same RT-servo re-engagement clunk happens after any stream interruption).
+    bool servo_soft_entry_enable = true;
+    double servo_soft_entry_sec = 0.08;
+    double servo_soft_entry_gain_start_scale = 0.1;  // start gain = servo_gain * this
+    double servo_soft_entry_rearm_gap_sec = 0.05;    // stream gap that re-arms the ramp
+
     // rbpodo-only. When true, Cobot::disable_waiting_ack() makes command calls
     // return after socket send instead of waiting for controller ACK.
     bool disable_waiting_ack = false;
@@ -609,6 +628,13 @@ struct PoseTrackSmdConfig {
     // (auto stand/body frame; valid because every caller integrates the goal once
     // per step()). Off by default = exact legacy 2nd-order SMD.
     bool velocity_feedforward = false;
+    // Feedforward velocity source (Patch 5), used only when velocity_feedforward:
+    //   "finite_difference" (default): per-tick goal delta (legacy behavior).
+    //   "command_twist": the conditioned twist supplied with the TcpPoseTarget
+    //       command; falls back to finite_difference when absent/non-finite.
+    //   "auto": command twist when present, else finite_difference.
+    // Unknown values are treated as finite_difference.
+    std::string velocity_feedforward_source = "finite_difference";
 };
 
 enum class CartesianLimitPolicy {

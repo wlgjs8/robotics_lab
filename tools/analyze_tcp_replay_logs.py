@@ -118,7 +118,16 @@ def analyze_single_input(item: dict[str, Any], cfg: MetricsConfig) -> dict[str, 
             continue
         t = arm_data.get("t")
         conditioned = arm_data.get("conditioned_goal")
+        smd_ref = arm_data.get("smd_ref_stand")
+        has_smd = smd_ref is not None and np.isfinite(np.asarray(smd_ref, dtype=np.float64)).any()
         arms[arm] = {
+            "reference_generation": {
+                "reference_source": "smd_ref_stand" if has_smd else "tcp_ref_stand",
+                "warning": None if has_smd else (
+                    "smd_ref_stand unavailable; reference_after_B is tcp_ref_stand "
+                    "(post-IK/safety/MA), not pure SMD output"
+                ),
+            },
             "tracking": tracking_metrics(
                 t,
                 actual_tcp=arm_data.get("actual_tcp"),
@@ -428,6 +437,8 @@ def _columns_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     for key in JOINT_KEYS:
         out[key] = _stack_vector(rows, key, 6)
     out["conditioned_twist"] = _stack_vector(rows, aliases["conditioned_twist"], 6)
+    # Optional pure-SMD reference (Patch 4/5); used to attribute B-tier correctly.
+    out["smd_ref_stand"] = _stack_vector(rows, "smd_ref_stand", 7)
     for key in HEALTH_KEYS:
         if any(key in row for row in rows):
             out[key] = np.asarray([_value(row.get(key)) for row in rows], dtype=np.float64)

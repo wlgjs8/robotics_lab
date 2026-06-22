@@ -732,8 +732,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
         default=None,
         help=(
             "Flow action command family for ee_local body-frame deltas. Defaults to "
-            "tcp_twist_local; tcp_target_pose composes each delta into an absolute "
-            "TcpPoseTarget."
+            "tcp_target_pose, which composes each delta into an absolute TcpPoseTarget; "
+            "tcp_twist_local converts each delta into a streaming TcpTwistLocal velocity."
         ),
     )
     flow_infer.add_argument(
@@ -741,7 +741,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
         action="store_true",
         help=(
             "Allow the TcpTwistLocal flow command family for controller_sim/real_policy "
-            "(ee_local checkpoints; default command family)."
+            "(ee_local checkpoints; opt-in, no longer the default command family)."
         ),
     )
     flow_infer.add_argument(
@@ -820,6 +820,39 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.002)
     flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.01)
+    flow_infer.add_argument(
+        "--tcp-target-pose-conditioning",
+        choices=["legacy_step_hold", "foh_se3"],
+        default="legacy_step_hold",
+        help=(
+            "A-stage conditioning for the streamed tcp_target_pose path. legacy_step_hold "
+            "(default) holds each ~30 Hz step target between policy ticks (ZOH into the SMD). "
+            "foh_se3 emits an SE(3)-interpolated absolute target every servo tick (smooth 500 Hz "
+            "command). Only affects async-streamed rollout (real/sim); twist path unchanged."
+        ),
+    )
+    flow_infer.add_argument(
+        "--tcp-target-pose-reanchor-mode",
+        choices=["measured_legacy", "last_emitted_continuous", "measured_blend"],
+        default="measured_blend",
+        help=(
+            "Chunk-boundary handling for foh_se3. measured_blend (default): anchor the new "
+            "chunk to the measured pose for drift correction but blend in from the last emitted "
+            "target (no one-tick jump). measured_legacy: reanchor straight to measured. "
+            "last_emitted_continuous: perfect continuity, no drift correction (tests/sim)."
+        ),
+    )
+    flow_infer.add_argument("--tcp-target-pose-blend-steps", type=int, default=2)
+    flow_infer.add_argument(
+        "--send-conditioned-twist",
+        action="store_true",
+        help=(
+            "With --tcp-target-pose-conditioning foh_se3, attach the conditioner's "
+            "estimated goal twist to each TcpPoseTarget (tcp_target_twist_stand). The "
+            "server SMD uses it as the velocity-feedforward source only when its config "
+            "velocity_feedforward_source is command_twist/auto; otherwise it is ignored."
+        ),
+    )
 
     hdf5_audit = sub.add_parser(
         "hdf5-audit",
@@ -1501,10 +1534,19 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 "gripper_runtime": gripper_runtime,
                 "device": args.device,
             }
+            # tcp_target_pose A-stage conditioning (Patch 3): only the flow / openpi
+            # sources accept these; the DirectBc sources keep the legacy step-hold path.
+            tcp_tp_kwargs = {
+                "tcp_target_pose_conditioning": args.tcp_target_pose_conditioning,
+                "tcp_target_pose_reanchor_mode": args.tcp_target_pose_reanchor_mode,
+                "tcp_target_pose_blend_steps": args.tcp_target_pose_blend_steps,
+                "tcp_target_pose_send_twist": args.send_conditioned_twist,
+            }
             if checkpoint_kind == "openpi_remote":
                 source = OpenpiRemoteActionSource(
                     args.checkpoint,
                     **source_kwargs,
+                    **tcp_tp_kwargs,
                 )
             elif checkpoint_kind == "direct_bc":
                 source = DirectBcImageActionSource(
@@ -1525,6 +1567,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     sample_steps=args.sample_steps,
                     stochastic_sampling=not args.deterministic_sampling,
                     **source_kwargs,
+                    **tcp_tp_kwargs,
                 )
             # Runtime execution mask: suppress the non-selected arm's per-step
             # commands so it holds in place. Only source.arm_mask (the emission

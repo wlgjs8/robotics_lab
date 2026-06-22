@@ -503,6 +503,10 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
         "servo_gain",
         "servo_alpha",
         "servo_acc",
+        "servo_soft_entry_enable",
+        "servo_soft_entry_sec",
+        "servo_soft_entry_gain_start_scale",
+        "servo_soft_entry_rearm_gap_sec",
         "disable_waiting_ack",
         "max_consecutive_read_misses",
     }, path);
@@ -526,6 +530,10 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
     cfg->servo_time_sec = cfg->servo_t1_sec;
     cfg->servo_lookahead_sec = cfg->servo_t2_sec;
     cfg->servo_acc = cfg->servo_alpha;
+    if (has(sec, "servo_soft_entry_enable")) cfg->servo_soft_entry_enable = asBool(sec["servo_soft_entry_enable"], path + ".servo_soft_entry_enable");
+    if (has(sec, "servo_soft_entry_sec")) cfg->servo_soft_entry_sec = asDouble(sec["servo_soft_entry_sec"], path + ".servo_soft_entry_sec");
+    if (has(sec, "servo_soft_entry_gain_start_scale")) cfg->servo_soft_entry_gain_start_scale = asDouble(sec["servo_soft_entry_gain_start_scale"], path + ".servo_soft_entry_gain_start_scale");
+    if (has(sec, "servo_soft_entry_rearm_gap_sec")) cfg->servo_soft_entry_rearm_gap_sec = asDouble(sec["servo_soft_entry_rearm_gap_sec"], path + ".servo_soft_entry_rearm_gap_sec");
     if (has(sec, "disable_waiting_ack")) cfg->disable_waiting_ack = asBool(sec["disable_waiting_ack"], path + ".disable_waiting_ack");
     if (has(sec, "max_consecutive_read_misses")) cfg->max_consecutive_read_misses = asInt(sec["max_consecutive_read_misses"], path + ".max_consecutive_read_misses");
 }
@@ -2351,6 +2359,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "max_angular_velocity_rad_s",
                 "max_angular_accel_rad_s2",
                 "velocity_feedforward",
+                "velocity_feedforward_source",
             }, "cartesian_control.pose_track_smd");
             if (has(smd, "enable")) {
                 cfg.cartesian_control.pose_track_smd.enable =
@@ -2393,6 +2402,17 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(smd, "velocity_feedforward")) {
                 cfg.cartesian_control.pose_track_smd.velocity_feedforward = asBool(
                     smd["velocity_feedforward"], "cartesian_control.pose_track_smd.velocity_feedforward");
+            }
+            if (has(smd, "velocity_feedforward_source")) {
+                const std::string source = lower(asString(
+                    smd["velocity_feedforward_source"],
+                    "cartesian_control.pose_track_smd.velocity_feedforward_source"));
+                if (source != "finite_difference" && source != "command_twist" && source != "auto") {
+                    throw std::runtime_error(
+                        "cartesian_control.pose_track_smd.velocity_feedforward_source must be "
+                        "finite_difference, command_twist, or auto");
+                }
+                cfg.cartesian_control.pose_track_smd.velocity_feedforward_source = source;
             }
         }
     }

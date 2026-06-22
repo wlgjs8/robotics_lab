@@ -71,13 +71,13 @@ Flow actions are 14D, with per-arm Cartesian channels and separate gripper
 delta channels. The Cartesian action contract is per-step ee_local body-frame
 pose delta: translation plus rotation vector, with no division by dt in the
 training label. Runtime command-family selection controls only how that same
-delta is emitted. The default `--command-family tcp_twist_local` divides the
-delta by `--policy-dt-sec` or checkpoint `dataset_stats.dt_mean_sec`, then clamps
-the final `TcpTwistLocal` velocity with checkpoint action statistics unless
-`--max-linear-velocity-m-s` and `--max-angular-velocity-rad-s` are supplied. The
-opt-in `--command-family tcp_target_pose` clamps the per-step delta by the same
-velocity limits times policy dt, composes it onto the running measured TCP pose,
-and emits absolute `TcpPoseTarget` `tcp_target_stand` setpoints. `controller_sim`
+delta is emitted. The default `--command-family tcp_target_pose` clamps the
+per-step delta by the velocity limits times policy dt, composes it onto the
+running measured TCP pose, and emits absolute `TcpPoseTarget` `tcp_target_stand`
+setpoints. The opt-in `--command-family tcp_twist_local` divides the delta by
+`--policy-dt-sec` or checkpoint `dataset_stats.dt_mean_sec`, then clamps the
+final `TcpTwistLocal` velocity with checkpoint action statistics unless
+`--max-linear-velocity-m-s` and `--max-angular-velocity-rad-s` are supplied. `controller_sim`
 and `real_policy` require policy dt from the CLI or checkpoint stats; dry-run and
 read-only modes may use the documented `1 / command_rate_hz` fallback. Live
 rollout requires the matching explicit opt-in flag:

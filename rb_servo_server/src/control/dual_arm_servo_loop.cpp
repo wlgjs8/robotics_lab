@@ -249,6 +249,16 @@ ArmCommand applyPoseTrackSmd(
         }
     }
     tracker->updateGoalFromCommand(command.tcp_target_stand);
+    // Patch 5: feed the optional conditioned command twist to the SMD velocity
+    // feedforward (consumed only when velocity_feedforward_source is
+    // command_twist/auto; ignored otherwise). Cleared when absent so a stale twist
+    // never persists across commands that stop supplying one.
+    if (command.has_tcp_target_twist_stand) {
+        const Vec6& t = command.tcp_target_twist_stand;
+        tracker->setCommandTwist(Eigen::Vector3d(t.x, t.y, t.z), Eigen::Vector3d(t.rx, t.ry, t.rz));
+    } else {
+        tracker->setCommandTwist(std::nullopt, std::nullopt);
+    }
     ArmCommand smoothed = command;
     smoothed.tcp_target_stand = tracker->step(dt_sec);
     return smoothed;
@@ -2051,6 +2061,13 @@ void DualArmServoLoop::loopMain() {
         ServoTarget output_filtered_target = safe_target;
         output_filtered_target.left_q_target_deg = left_output_ma_.apply(safe_target.left_q_target_deg);
         output_filtered_target.right_q_target_deg = right_output_ma_.apply(safe_target.right_q_target_deg);
+        // Patch 4: C-stage telemetry — joint target before/after the output MA.
+        left_abc_telemetry_.output_ma_present = true;
+        left_abc_telemetry_.q_target_before_output_ma_deg = safe_target.left_q_target_deg;
+        left_abc_telemetry_.q_target_after_output_ma_deg = output_filtered_target.left_q_target_deg;
+        right_abc_telemetry_.output_ma_present = true;
+        right_abc_telemetry_.q_target_before_output_ma_deg = safe_target.right_q_target_deg;
+        right_abc_telemetry_.q_target_after_output_ma_deg = output_filtered_target.right_q_target_deg;
         const ServoTarget attempted_target = output_filtered_target;
         const bool fault_latched_before_send = fault_latched_.load();
         const std::string send_policy = currentSendPolicy();
@@ -2236,6 +2253,10 @@ void DualArmServoLoop::loopMain() {
         sample.right_last_send = sendCallSnapshot(right_send_result);
         sample.left_cartesian_solve = left_last_cartesian_solve_;
         sample.right_cartesian_solve = right_last_cartesian_solve_;
+        mergeAbcTelemetry(sample.left_cartesian_solve, left_abc_telemetry_,
+                          config_.servo.output_moving_average_window);
+        mergeAbcTelemetry(sample.right_cartesian_solve, right_abc_telemetry_,
+                          config_.servo.output_moving_average_window);
         sample.left_safety_tracking = left_safety_tracking_;
         sample.right_safety_tracking = right_safety_tracking_;
         if (!left_ok) {
@@ -3064,6 +3085,30 @@ ArmCommand DualArmServoLoop::resolveArmCartesianDeltaCommand(
     return resolved;
 }
 
+void DualArmServoLoop::mergeAbcTelemetry(
+    CartesianSolveTelemetry& solve, const AbcTelemetry& abc, int output_ma_window) {
+    solve.smd_active = abc.smd_active;
+    solve.smd_goal_stand = abc.smd_goal_stand;
+    solve.smd_ref_stand = abc.smd_ref_stand;
+    const SmdStepInfo& info = abc.smd_step_info;
+    solve.smd_velocity_feedforward_used = info.velocity_feedforward_used;
+    solve.smd_velocity_feedforward_source = info.velocity_feedforward_source;
+    solve.smd_velocity_feedforward_fallback = info.command_twist_fallback;
+    solve.smd_linear_velocity_clipped = info.linear_velocity_clipped;
+    solve.smd_linear_accel_clipped = info.linear_accel_clipped;
+    solve.smd_angular_velocity_clipped = info.angular_velocity_clipped;
+    solve.smd_angular_accel_clipped = info.angular_accel_clipped;
+    solve.smd_goal_linear_velocity_norm_m_s = info.goal_linear_velocity.norm();
+    solve.smd_goal_angular_velocity_norm_rad_s = info.goal_angular_velocity.norm();
+    solve.smd_reanchor_count = abc.smd_reanchor_count;
+    solve.output_ma_present = abc.output_ma_present;
+    solve.output_ma_window = output_ma_window;
+    if (abc.output_ma_present) {
+        solve.q_target_before_output_ma_deg = abc.q_target_before_output_ma_deg;
+        solve.q_target_after_output_ma_deg = abc.q_target_after_output_ma_deg;
+    }
+}
+
 ServoTarget DualArmServoLoop::computeServoTarget(
     const RobotState& left_state,
     const RobotState& right_state,
@@ -3296,6 +3341,25 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             right_prev_sent_q_deg_,
             dt_sec
         );
+
+        // Patch 4: capture SMD (B-stage) telemetry right after the step, before any
+        // later cartesian-solve return path can reset the per-arm solve telemetry.
+        // Merged into the published cartesian_solve sample in loopMain.
+        auto capture_smd_abc = [](const SmdPoseTracker& tracker, AbcTelemetry& abc) {
+            abc.smd_active = tracker.active();
+            if (tracker.active()) {
+                abc.smd_ref_stand = tracker.currentPose();
+                abc.smd_goal_stand = tracker.goalPose();
+                abc.smd_step_info = tracker.lastStepInfo();
+                abc.smd_reanchor_count = tracker.reanchorCount();
+            } else {
+                abc.smd_ref_stand.reset();
+                abc.smd_goal_stand.reset();
+                abc.smd_step_info = SmdStepInfo{};
+            }
+        };
+        capture_smd_abc(left_pose_track_smd_, left_abc_telemetry_);
+        capture_smd_abc(right_pose_track_smd_, right_abc_telemetry_);
 
         const RunMode left_cartesian_compute_run_mode =
             cartesianComputationRunModeForArm(config_, effective_command.left);

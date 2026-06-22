@@ -36,6 +36,11 @@ from .flow_dataset import (
 )
 from .camera_bundle_client import resolve_frame
 from .flow_model import FlowMatchingPolicy, sample_action_chunks
+from .tcp_target_pose_conditioner import (
+    CONDITIONING_MODES,
+    REANCHOR_MODES,
+    OnlineTcpTargetPoseConditioner,
+)
 from .gripper import REAL_GRIPPER_ENV, GripperRuntime, gripper_commands_from_flow_step
 from .robot_state_client import StateSnapshot
 from .rollout_modes import RolloutMode, RolloutModeValidationError, parse_rollout_mode
@@ -113,7 +118,7 @@ def resolve_flow_command_family(
     _ = parse_rollout_mode(rollout_mode)
     _ = dataset_stats
     if command_family is None:
-        return "tcp_twist_local"
+        return "tcp_target_pose"
     return normalize_flow_command_family(command_family)
 
 
@@ -368,6 +373,10 @@ class FlowMatchingActionSource:
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
         chunk_crossfade_steps: int = 0,
+        tcp_target_pose_conditioning: str = "legacy_step_hold",
+        tcp_target_pose_reanchor_mode: str = "measured_blend",
+        tcp_target_pose_blend_steps: int = 2,
+        tcp_target_pose_send_twist: bool = False,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
@@ -382,6 +391,18 @@ class FlowMatchingActionSource:
         # Deterministic (zero init) collapses toward the mean of the modes -- wrong
         # for multimodal tasks (e.g. horizontal vs vertical grasp). Default stochastic.
         self.stochastic_sampling = bool(stochastic_sampling)
+        # Patch 3: online A-stage conditioning config for streamed tcp_target_pose.
+        # legacy_step_hold (default) preserves per-step ZOH; foh_se3 interpolates the
+        # absolute target at every servo tick. Other state is lazy-initialised (so the
+        # DirectBc subclasses, which do not forward these params, default to legacy).
+        if str(tcp_target_pose_conditioning) not in CONDITIONING_MODES:
+            raise ValueError(f"tcp_target_pose_conditioning must be one of {CONDITIONING_MODES}")
+        if str(tcp_target_pose_reanchor_mode) not in REANCHOR_MODES:
+            raise ValueError(f"tcp_target_pose_reanchor_mode must be one of {REANCHOR_MODES}")
+        self._tcp_tp_mode = str(tcp_target_pose_conditioning)
+        self._tcp_tp_reanchor_mode = str(tcp_target_pose_reanchor_mode)
+        self._tcp_tp_blend_steps = int(tcp_target_pose_blend_steps)
+        self._tcp_tp_send_twist = bool(tcp_target_pose_send_twist)
         self.timeout_sec = float(timeout_sec)
         self.camera_client = camera_client
         self.sample_steps = int(sample_steps)
@@ -594,6 +615,11 @@ class FlowMatchingActionSource:
                     self._stream_stall_count += 1
                     self._chunk = None
                     self._request_prefetch(payload)
+                    if self._tcp_tp_foh_active():
+                        # Re-emit the last absolute target (no abrupt jump); flag stall.
+                        self._current_step_intent = self._foh_tick_intent(now_monotonic, stall=True)
+                        self._log_foh_action(None, self._current_step_intent, now_monotonic)
+                        return self._current_step_intent
                     return self._stream_hold_intent()
 
         # Kick the next inference once far enough into the chunk that it should
@@ -606,11 +632,25 @@ class FlowMatchingActionSource:
         ):
             self._request_prefetch(payload)
 
+        foh = self._tcp_tp_foh_active()
         if advanced and self._chunk is not None:
             step = self._chunk[self._chunk_index]
             gripper_targets = self._integrate_gripper_targets(step, payload)
             self._dispatch_gripper_step(step)
-            self._current_step_intent = self._emit_step_intent(step, payload, gripper_targets)
+            self._current_gripper_targets = gripper_targets
+            if foh:
+                # On a fresh chunk activation (index 0) install its FOH knots, then emit
+                # the per-tick interpolated target. Gripper stays step-based.
+                if self._chunk_index == 0:
+                    self._foh_begin_chunk(payload, now_monotonic)
+                self._steps_since_boundary += 1
+                self._current_step_intent = self._foh_tick_intent(now_monotonic, stall=False)
+                self._log_foh_action(step, self._current_step_intent, now_monotonic)
+            else:
+                self._current_step_intent = self._emit_step_intent(step, payload, gripper_targets)
+        elif foh and self._chunk is not None:
+            # Between policy steps: re-interpolate the absolute target every servo tick.
+            self._current_step_intent = self._foh_tick_intent(now_monotonic, stall=False)
         return self._current_step_intent
 
     def _emit_step_intent(
@@ -841,6 +881,149 @@ class FlowMatchingActionSource:
         if targets is not None:
             targets["left"] = None
             targets["right"] = None
+
+    # ----------------------------------------------- foh_se3 conditioning (Patch 3) --
+    def _tcp_tp_foh_active(self) -> bool:
+        """True only for the streamed tcp_target_pose path with foh_se3 selected.
+
+        Uses getattr defaults so the DirectBc subclasses (which never set _tcp_tp_mode)
+        always evaluate False -> unchanged legacy behavior."""
+        return (
+            self.command_family_option == "tcp_target_pose"
+            and getattr(self, "_tcp_tp_mode", "legacy_step_hold") == "foh_se3"
+        )
+
+    def _ensure_tcp_tp_conditioners(self) -> dict[str, "OnlineTcpTargetPoseConditioner"]:
+        conds = getattr(self, "_tcp_tp_conditioners", None)
+        if conds is None:
+            assert self.policy_dt_sec is not None
+            conds = {
+                arm: OnlineTcpTargetPoseConditioner(
+                    mode="foh_se3",
+                    reanchor_mode=getattr(self, "_tcp_tp_reanchor_mode", "measured_blend"),
+                    policy_dt_sec=float(self.policy_dt_sec),
+                    blend_steps=int(getattr(self, "_tcp_tp_blend_steps", 2)),
+                )
+                for arm in ("left", "right")
+            }
+            self._tcp_tp_conditioners = conds
+        return conds
+
+    def _foh_arm_indices(self) -> tuple[tuple[str, int, slice], ...]:
+        return (("left", 0, slice(0, 6)), ("right", 1, slice(7, 13)))
+
+    def _foh_begin_chunk(self, payload: dict[str, Any], now_monotonic: float) -> None:
+        """Install the freshly activated chunk's per-step absolute targets as FOH knots."""
+        conds = self._ensure_tcp_tp_conditioners()
+        limit = self._current_chunk_execute_limit()
+        chunk = self._chunk
+        if chunk is None or limit <= 0:
+            return
+        self._tcp_tp_chunk_seq = int(getattr(self, "_tcp_tp_chunk_seq", 0)) + 1
+        for arm, idx, sl in self._foh_arm_indices():
+            if self.arm_mask[idx] <= 0.0:
+                continue
+            cond = conds[arm]
+            measured_anchor = np.asarray(pose_from_state_payload(payload, arm), dtype=np.float64)
+            last_emitted = cond.last_emitted
+            measured: list[np.ndarray] = []
+            continuous: list[np.ndarray] | None = [] if last_emitted is not None else None
+            cur_m = measured_anchor
+            cur_c = None if last_emitted is None else np.asarray(last_emitted, dtype=np.float64)
+            for i in range(limit):
+                delta = np.asarray(self._clamp_delta_step(chunk[i][sl]), dtype=np.float64)
+                cur_m = np.asarray(pose_compose_local(cur_m, delta), dtype=np.float64)
+                measured.append(cur_m.copy())
+                if continuous is not None:
+                    cur_c = np.asarray(pose_compose_local(cur_c, delta), dtype=np.float64)
+                    continuous.append(cur_c.copy())
+            cond.begin_chunk(
+                measured_anchor=measured_anchor,
+                measured_targets=np.asarray(measured, dtype=np.float64),
+                continuous_targets=(np.asarray(continuous, dtype=np.float64) if continuous else None),
+                t_wall_start=float(now_monotonic),
+                chunk_id=self._tcp_tp_chunk_seq,
+            )
+
+    def _foh_tick_intent(self, now_monotonic: float, *, stall: bool) -> CommandIntent | None:
+        """Emit a fresh SE(3)-interpolated TcpPoseTarget for the current servo tick."""
+        conds = self._ensure_tcp_tp_conditioners()
+        gripper = getattr(self, "_current_gripper_targets", {"left": None, "right": None})
+        send_twist = bool(getattr(self, "_tcp_tp_send_twist", False))
+        results: dict[str, Any] = {}
+        payload_arms: dict[str, tuple[float, ...] | None] = {"left": None, "right": None}
+        twist_arms: dict[str, tuple[float, ...] | None] = {"left": None, "right": None}
+        for arm, idx, _sl in self._foh_arm_indices():
+            if self.arm_mask[idx] <= 0.0:
+                continue
+            cond = conds[arm]
+            if cond.last_emitted is None and stall:
+                continue  # no chunk has produced a target yet -> emit nothing (no jump to origin)
+            ct = cond.hold() if stall else cond.sample(now_monotonic)
+            results[arm] = ct
+            payload_arms[arm] = tuple(float(v) for v in ct.pose.tolist())
+            if send_twist and ct.twist is not None and np.all(np.isfinite(ct.twist)):
+                twist_arms[arm] = tuple(float(v) for v in np.asarray(ct.twist).tolist())
+        self._foh_last_targets = results
+        if payload_arms["left"] is None and payload_arms["right"] is None:
+            return None
+        return tcp_pose_target_stand_intent(
+            left=payload_arms["left"],
+            right=payload_arms["right"],
+            left_gripper=gripper.get("left"),
+            right_gripper=gripper.get("right"),
+            left_twist=twist_arms["left"],
+            right_twist=twist_arms["right"],
+            timeout_sec=self.timeout_sec,
+        )
+
+    def _log_foh_action(
+        self,
+        step: np.ndarray | None,
+        intent: CommandIntent | None,
+        now_monotonic: float,
+    ) -> None:
+        """One JSONL line per executed policy step for the foh_se3 path (Patch 3)."""
+        log = self._action_log
+        if log is None:
+            return
+        raw = None if step is None else np.asarray(step, dtype=np.float64).reshape(-1).tolist()
+        record: dict[str, Any] = {
+            "seq": self._action_log_seq,
+            "t_mono": time.monotonic(),
+            "t_wall": float(now_monotonic),
+            "command_family": self.command_family_option,
+            "tcp_target_pose_conditioning": getattr(self, "_tcp_tp_mode", "legacy_step_hold"),
+            "reanchor_mode": getattr(self, "_tcp_tp_reanchor_mode", "measured_blend"),
+            "chunk_index": int(self._chunk_index),
+            "raw_delta": raw,
+            "left": None if intent is None else intent.left,
+            "right": None if intent is None else intent.right,
+        }
+        last = getattr(self, "_foh_last_targets", {}) or {}
+        for arm, _idx, sl in self._foh_arm_indices():
+            arm_rec: dict[str, Any] = {}
+            if step is not None:
+                arm_rec["clamped_delta"] = list(self._clamp_delta_step(np.asarray(step)[sl]))
+            ct = last.get(arm)
+            if ct is not None:
+                arm_rec.update({
+                    "t_policy_source": float(now_monotonic),
+                    "chunk_id": int(ct.chunk_id),
+                    "chunk_index_lo": int(ct.chunk_index_lo),
+                    "chunk_index_hi": int(ct.chunk_index_hi),
+                    "interpolation_alpha": float(ct.interpolation_alpha),
+                    "reanchor": bool(ct.reanchor),
+                    "hold": bool(ct.hold),
+                    "stall": bool(ct.stall),
+                    "dropout": bool(ct.dropout),
+                    "emitted_target": [float(v) for v in ct.pose.tolist()],
+                    "emitted_delta_from_prev": [float(v) for v in ct.emitted_delta_from_prev.tolist()],
+                    "conditioned_twist": (None if ct.twist is None else [float(v) for v in ct.twist.tolist()]),
+                })
+            record[f"{arm}_conditioner"] = arm_rec
+        self._action_log_seq += 1
+        log.write(json.dumps(record) + "\n")
 
     def _clamp_delta_step(self, delta: np.ndarray) -> tuple[float, ...]:
         assert self.policy_dt_sec is not None

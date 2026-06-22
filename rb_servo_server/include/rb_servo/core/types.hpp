@@ -384,6 +384,28 @@ struct CartesianSolveTelemetry {
     double circle_position_error_m = 0.0;
     double circle_orientation_error_rad = 0.0;
     bool circle_done = false;
+
+    // --- A/B/C separation telemetry (Patch 4). Populated by the pose-track SMD path
+    // and the final output moving-average stage; absent/false otherwise. Pure
+    // telemetry — does not affect control. ---
+    bool smd_active = false;
+    std::optional<Pose6D> smd_goal_stand;   // integrated SMD goal (B input)
+    std::optional<Pose6D> smd_ref_stand;    // SMD step output, BEFORE IK (B output)
+    bool smd_velocity_feedforward_used = false;
+    std::string smd_velocity_feedforward_source;  // effective: finite_difference|command_twist|none
+    bool smd_velocity_feedforward_fallback = false;  // configured command_twist but fell back
+    bool smd_linear_velocity_clipped = false;
+    bool smd_linear_accel_clipped = false;
+    bool smd_angular_velocity_clipped = false;
+    bool smd_angular_accel_clipped = false;
+    double smd_goal_linear_velocity_norm_m_s = 0.0;
+    double smd_goal_angular_velocity_norm_rad_s = 0.0;
+    uint64_t smd_reanchor_count = 0;
+    // Final-stage output moving average (C). q_target before/after the boxcar.
+    bool output_ma_present = false;
+    int output_ma_window = 0;
+    JointArray q_target_before_output_ma_deg{};
+    JointArray q_target_after_output_ma_deg{};
 };
 
 struct SafetyTrackingTelemetry {
@@ -437,6 +459,11 @@ struct ArmCommand {
     Pose6D tcp_delta_local;
     Vec6 tcp_twist_stand;
     Vec6 tcp_twist_local;
+    // Optional conditioned goal twist accompanying a TcpPoseTarget (Patch 5). Used
+    // by the SMD velocity feedforward when velocity_feedforward_source is
+    // command_twist/auto. Stand-frame linear (x,y,z m/s) + body-frame angular
+    // (rx,ry,rz rad/s). Optional: existing clients omit it (finite_difference).
+    Vec6 tcp_target_twist_stand;
     TcpCircleMoveCommand tcp_circle_move;
     TcpCircleTrackCommand tcp_circle_track;
     double linear_move_duration_sec = 0.0;
@@ -466,6 +493,7 @@ struct ArmCommand {
     bool has_tcp_delta_local = false;
     bool has_tcp_twist_stand = false;
     bool has_tcp_twist_local = false;
+    bool has_tcp_target_twist_stand = false;
     bool has_tcp_circle_move = false;
     bool has_tcp_circle_track = false;
     bool has_linear_move_duration = false;

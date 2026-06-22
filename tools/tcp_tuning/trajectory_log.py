@@ -13,6 +13,11 @@ VECTOR_COLUMNS: dict[str, int] = {
     "conditioned_goal_after_A": 7,
     "conditioned_twist_after_A": 6,
     "reference_after_B": 7,
+    # Optional A/B/C separation telemetry (Patch 4/5 server fields; absent in old logs).
+    "smd_goal_stand": 7,
+    "smd_ref_stand": 7,
+    "q_target_before_output_ma_deg": 6,
+    "q_target_after_output_ma_deg": 6,
     "q_target": 6,
     "q_actual": 6,
     "actual_tcp": 7,

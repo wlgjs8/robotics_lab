@@ -118,6 +118,44 @@ def load_config(path: str | Path | None) -> Config:
     return _merge_dataclass(cfg, data)
 
 
+# Flat CLI override name -> (config section, dataclass field). Used by the replay /
+# batch / generate drivers so A-stage conditioning + smoothing can be tuned from the
+# command line without hard-coding values; CLI overrides are applied AFTER any YAML
+# config so they win, and they still flow through the same dataclass merge (unknown
+# keys fail loudly in load_config).
+CONDITIONING_CLI_OVERRIDES: dict[str, tuple[str, str]] = {
+    "smoothing_method": ("smoothing", "method"),
+    "smoothing_window_samples": ("smoothing", "window_samples"),
+    "smoothing_polyorder": ("smoothing", "polyorder"),
+    "lowpass_cutoff_hz": ("smoothing", "lowpass_cutoff_hz"),
+    "cubic_smoothing": ("smoothing", "cubic_smoothing"),
+    "gap_median_multiplier": ("conditioning", "gap_median_multiplier"),
+    "gap_absolute_threshold_sec": ("conditioning", "gap_absolute_threshold_sec"),
+}
+
+
+def apply_cli_overrides(cfg: Config, overrides: dict[str, Any]) -> Config:
+    """Merge flat CLI conditioning/smoothing overrides into ``cfg``.
+
+    ``overrides`` keys are the flat names in ``CONDITIONING_CLI_OVERRIDES``; a value of
+    ``None`` means "not supplied on the CLI" and is skipped (the YAML/default value is
+    kept). Returns a new merged ``Config`` via the same dataclass merge as YAML, so the
+    same validation applies.
+    """
+
+    nested: dict[str, dict[str, Any]] = {}
+    for flat_name, value in overrides.items():
+        if value is None:
+            continue
+        if flat_name not in CONDITIONING_CLI_OVERRIDES:
+            raise ValueError(f"unknown conditioning CLI override: {flat_name}")
+        section, field_name = CONDITIONING_CLI_OVERRIDES[flat_name]
+        nested.setdefault(section, {})[field_name] = value
+    if not nested:
+        return cfg
+    return _merge_dataclass(cfg, nested)
+
+
 def _merge_dataclass(instance: Any, overrides: dict[str, Any]) -> Any:
     if not is_dataclass(instance):
         return overrides

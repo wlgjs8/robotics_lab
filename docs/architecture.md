@@ -548,7 +548,7 @@ or safety limits. `rt_script` is future work and remains out of scope.
 
 `rb_gui` is a viewer/operator console. It exposes every motion primitive in every run mode and no longer keeps mode-based client gates or feature-flag/env unlocks; whether a control is live is derived from the live server state stream (per-arm FK/TCP-pose validity, the server Cartesian gate, fault latch, motion state) and the command-source lease. The server is the sole real-motion authority and rejects any command its own gates (`RB_ALLOW_REAL_*` + site config + safety filter + lease + deadman) do not allow — so the GUI driving a real command does not bypass real-motion safety.
 
-`policy_runner` owns Python action sources, including SpaceMouse. SpaceMouse Cartesian uses `TcpTwistLocal`, not repeated TCP deltas. `flow-infer` ee_local policy deltas can be emitted as the default `tcp_twist_local` velocity commands or as opt-in `tcp_target_pose` absolute `TcpPoseTarget` setpoints. Joint-only action sources do not require camera observations. Camera-dependent sources must declare camera readiness and fail closed when camera state is stale.
+`policy_runner` owns Python action sources, including SpaceMouse. SpaceMouse Cartesian uses `TcpTwistLocal`, not repeated TCP deltas. `flow-infer` ee_local policy deltas are emitted as the default `tcp_target_pose` absolute `TcpPoseTarget` setpoints or as opt-in `tcp_twist_local` velocity commands. Joint-only action sources do not require camera observations. Camera-dependent sources must declare camera readiness and fail closed when camera state is stale.
 
 For rbpodo controller-simulation circle live visualization, `rb_gui` is a
 state and overlay consumer. It should show both actual/reference TCP telemetry

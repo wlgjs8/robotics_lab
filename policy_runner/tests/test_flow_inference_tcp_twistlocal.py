@@ -45,6 +45,7 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
 
             source = FlowMatchingActionSource(
                 checkpoint,
+                command_family="tcp_twist_local",
                 device="cpu",
                 policy_dt_sec=0.01,
                 allow_rbpodo_controller_simulation_cartesian=True,
@@ -63,6 +64,7 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
             _write_flow_checkpoint(checkpoint)
             source = FlowMatchingActionSource(
                 checkpoint,
+                command_family="tcp_twist_local",
                 device="cpu",
                 policy_dt_sec=0.01,
                 max_linear_velocity_m_s=0.2,
@@ -90,6 +92,7 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
             _write_flow_checkpoint(checkpoint)
             source = FlowMatchingActionSource(
                 checkpoint,
+                command_family="tcp_twist_local",
                 device="cpu",
                 policy_dt_sec=0.01,
                 max_linear_velocity_m_s=0.2,
@@ -114,6 +117,7 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
             _write_flow_checkpoint(checkpoint, arm_mask_counts={"left": 0, "right": 1})
             source = FlowMatchingActionSource(
                 checkpoint,
+                command_family="tcp_twist_local",
                 device="cpu",
                 policy_dt_sec=0.01,
                 max_linear_velocity_m_s=0.5,
@@ -144,6 +148,7 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
             _write_flow_checkpoint(checkpoint, action_horizon=3)
             source = FlowMatchingActionSource(
                 checkpoint,
+                command_family="tcp_twist_local",
                 device="cpu",
                 policy_dt_sec=0.01,
                 max_linear_velocity_m_s=0.2,
@@ -178,6 +183,7 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
             camera_client = FakeCameraClient([_camera_bundle("head"), None])
             source = FlowMatchingActionSource(
                 checkpoint,
+                command_family="tcp_twist_local",
                 device="cpu",
                 camera_client=camera_client,
                 policy_dt_sec=0.01,
@@ -202,11 +208,11 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
         self.assertEqual(missing_camera_stop.left["tcp_twist_local"], [0.0] * 6)
 
     def test_command_family_defaults_and_controller_sim_local_guard(self) -> None:
-        # tcp_twist_local remains the default ee_local command family; world-frame
+        # tcp_target_pose is now the default ee_local command family; world-frame
         # "stand" families were removed.
         self.assertEqual(
             resolve_flow_command_family(RolloutMode.CONTROLLER_SIM, None),
-            "tcp_twist_local",
+            "tcp_target_pose",
         )
         self.assertEqual(
             resolve_flow_command_family(
@@ -214,7 +220,7 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
                 None,
                 dataset_stats={"proprio_action_frame": "ee_local"},
             ),
-            "tcp_twist_local",
+            "tcp_target_pose",
         )
         self.assertEqual(canonical_flow_command_family("tcp_twist_local"), "TcpTwistLocal")
         # Removed stand families are no longer valid command-family names.
@@ -364,13 +370,14 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
                 dataset_stats={"proprio_action_frame": "ee_local"},
             )
 
-    def test_ee_local_checkpoint_defaults_to_tcp_twist_local(self) -> None:
+    def test_ee_local_checkpoint_tcp_twist_local_family_emits_twist(self) -> None:
         assert torch is not None
         with tempfile.TemporaryDirectory() as tmp:
             checkpoint = Path(tmp) / "flow_policy.pt"
             _write_flow_checkpoint(checkpoint, proprio_action_frame="ee_local")
             source = FlowMatchingActionSource(
                 checkpoint,
+                command_family="tcp_twist_local",
                 device="cpu",
                 policy_dt_sec=0.01,
                 max_linear_velocity_m_s=0.2,
@@ -396,6 +403,7 @@ class FlowInferenceTcpTwistLocalTest(unittest.TestCase):
             _write_flow_checkpoint(checkpoint, action_horizon=4)
             source = FlowMatchingActionSource(
                 checkpoint,
+                command_family="tcp_twist_local",
                 device="cpu",
                 policy_dt_sec=0.01,
                 max_linear_velocity_m_s=1.0,

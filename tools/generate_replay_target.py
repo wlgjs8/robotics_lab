@@ -17,7 +17,7 @@ for path in (str(REPO_ROOT), str(SCRIPT_DIR)):
         sys.path.insert(0, path)
 
 from tcp_tuning.command_conditioner import CommandConditioner
-from tcp_tuning.config import Config, load_config
+from tcp_tuning.config import Config, apply_cli_overrides, load_config
 from tcp_tuning.hdf5_io import EpisodeData, load_episode
 from tcp_tuning.smoothing import split_segments
 
@@ -33,6 +33,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", default="outputs/tcp_tuning", help="Base output directory")
     parser.add_argument("--servo-rate-hz", type=float, default=500.0)
     parser.add_argument("--config", help="Optional YAML config override")
+    # CLI conditioning/smoothing overrides (consistent with replay/batch; win over --config).
+    parser.add_argument("--smoothing-method", choices=["none", "savgol", "lowpass", "cubic"], default=None)
+    parser.add_argument("--smoothing-window-samples", type=int, default=None)
+    parser.add_argument("--smoothing-polyorder", type=int, default=None)
+    parser.add_argument("--lowpass-cutoff-hz", type=float, default=None)
+    parser.add_argument("--cubic-smoothing", type=float, default=None)
+    parser.add_argument("--gap-median-multiplier", type=float, default=None)
+    parser.add_argument("--gap-absolute-threshold-sec", type=float, default=None)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--arms", default="left,right", help="Comma-separated arms to emit: left,right")
     parser.add_argument(
@@ -43,7 +51,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--emit-sweep-matrix", help="Write the Phase-1 sweep key matrix to this path and exit")
     args = parser.parse_args(argv)
 
-    cfg = _with_cli_overrides(load_config(args.config), args.servo_rate_hz, args.seed)
+    cfg = apply_cli_overrides(
+        load_config(args.config),
+        {
+            "smoothing_method": args.smoothing_method,
+            "smoothing_window_samples": args.smoothing_window_samples,
+            "smoothing_polyorder": args.smoothing_polyorder,
+            "lowpass_cutoff_hz": args.lowpass_cutoff_hz,
+            "cubic_smoothing": args.cubic_smoothing,
+            "gap_median_multiplier": args.gap_median_multiplier,
+            "gap_absolute_threshold_sec": args.gap_absolute_threshold_sec,
+        },
+    )
+    cfg = _with_cli_overrides(cfg, args.servo_rate_hz, args.seed)
     if args.emit_sweep_matrix:
         return emit_sweep_matrix(Path(args.emit_sweep_matrix), cfg)
     if not args.episode or not args.mode:

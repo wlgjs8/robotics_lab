@@ -132,6 +132,114 @@ class FlowInferenceTcpTargetPoseTest(unittest.TestCase):
         np.testing.assert_allclose(first_target[:3], [1.001, 0.0, 0.0], atol=1e-7)
         np.testing.assert_allclose(second_target[:3], [2.001, 0.0, 0.0], atol=1e-7)
 
+    # ------------------------------------------------ Patch 3: foh_se3 conditioning --
+    def _streamed_source(self, tmp: str, conditioning: str, reanchor: str = "measured_legacy",
+                         send_twist: bool = False):
+        checkpoint = Path(tmp) / "flow_policy.pt"
+        _write_flow_checkpoint(checkpoint, action_horizon=8)
+        source = FlowMatchingActionSource(
+            checkpoint,
+            device="cpu",
+            command_family="tcp_target_pose",
+            policy_dt_sec=0.02,
+            max_linear_velocity_m_s=1.0,
+            max_angular_velocity_rad_s=1.0,
+            chunk_execute_steps=8,
+            tcp_target_pose_conditioning=conditioning,
+            tcp_target_pose_reanchor_mode=reanchor,
+            tcp_target_pose_send_twist=send_twist,
+        )
+        source.enable_async_chunking = True
+        return source
+
+    def test_foh_se3_emits_distinct_interpolated_targets_within_a_policy_step(self) -> None:
+        assert torch is not None and np is not None
+        measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])
+        chunk = _action_chunk(*([[0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * 8))
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._streamed_source(tmp, "foh_se3")
+            try:
+                with mock.patch(
+                    "policy_runner.flow_inference.sample_action_chunks", return_value=chunk
+                ):
+                    state = _sample_state(left_pose=measured)
+                    # t=0 activates the chunk and emits the anchor (alpha 0)
+                    a = source.next_intent(state, 0.0)
+                    # ticks WITHIN the first policy step [0, 0.02) -> interpolated, not held
+                    b = source.next_intent(state, 0.004)
+                    c = source.next_intent(state, 0.008)
+            finally:
+                source.close()
+        xs = [
+            _pose_from_target_payload(i.left["tcp_target_stand"])[0]
+            for i in (a, b, c)
+        ]
+        # strictly increasing interpolation between the anchor and the first step target
+        self.assertLess(xs[0], xs[1])
+        self.assertLess(xs[1], xs[2])
+
+    def test_legacy_step_hold_holds_target_between_policy_steps(self) -> None:
+        assert torch is not None and np is not None
+        measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])
+        chunk = _action_chunk(*([[0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * 8))
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._streamed_source(tmp, "legacy_step_hold")
+            try:
+                with mock.patch(
+                    "policy_runner.flow_inference.sample_action_chunks", return_value=chunk
+                ):
+                    state = _sample_state(left_pose=measured)
+                    a = source.next_intent(state, 0.0)
+                    b = source.next_intent(state, 0.004)
+                    c = source.next_intent(state, 0.008)
+            finally:
+                source.close()
+        xs = [
+            _pose_from_target_payload(i.left["tcp_target_stand"])[0]
+            for i in (a, b, c)
+        ]
+        # legacy holds the same per-step target between policy ticks (ZOH)
+        np.testing.assert_allclose(xs, [xs[0]] * 3, atol=1e-9)
+
+    def test_foh_se3_hits_first_step_target_at_step_boundary_time(self) -> None:
+        assert torch is not None and np is not None
+        measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])
+        chunk = _action_chunk(*([[0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * 8))
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._streamed_source(tmp, "foh_se3")
+            try:
+                with mock.patch(
+                    "policy_runner.flow_inference.sample_action_chunks", return_value=chunk
+                ):
+                    state = _sample_state(left_pose=measured)
+                    source.next_intent(state, 0.0)  # anchor at measured
+                    at_boundary = source.next_intent(state, 0.02)  # t = 1*policy_dt -> S_0
+            finally:
+                source.close()
+        x = _pose_from_target_payload(at_boundary.left["tcp_target_stand"])[0]
+        # S_0 = measured.x + one clamped step (0.01 m, within the 1.0 m/s * 0.02 s cap)
+        self.assertAlmostEqual(x, 0.4 + 0.01, places=4)
+
+    def test_foh_se3_send_twist_attaches_tcp_target_twist_stand(self) -> None:
+        assert torch is not None and np is not None
+        measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])
+        chunk = _action_chunk(*([[0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * 8))
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._streamed_source(tmp, "foh_se3", send_twist=True)
+            try:
+                with mock.patch(
+                    "policy_runner.flow_inference.sample_action_chunks", return_value=chunk
+                ):
+                    state = _sample_state(left_pose=measured)
+                    source.next_intent(state, 0.0)
+                    mid = source.next_intent(state, 0.004)
+            finally:
+                source.close()
+        self.assertIn("tcp_target_twist_stand", mid.left)
+        twist = mid.left["tcp_target_twist_stand"]
+        self.assertEqual(len(twist), 6)
+        self.assertGreater(twist[0], 0.0)  # +x goal velocity from the +x ramp
+
 
 def _sample_state(*, left_pose: np.ndarray) -> StateSnapshot:
     right_pose = _pose7([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])
