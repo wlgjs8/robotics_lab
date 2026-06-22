@@ -24,11 +24,13 @@ Open the printed viser URL, press "Start (1s delay)", teleop a pick&place, press
 """
 from __future__ import annotations
 import argparse, sys, threading, time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import cv2
 import viser
+from scipy.spatial.transform import Rotation
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "policy_runner"))
@@ -53,13 +55,18 @@ def _pos_or_zero(v):
 
 
 def gripper_from_payload(payload, arm):
+    """Read per-arm gripper open-% from the servo state. The bridge stamps
+    payload[arm]['gripper'] = {'percent':.., 'valid':bool, 'moving':bool}
+    (see rb_servo_gui/models.py). 'percent' is the key; honor 'valid'."""
     ap = payload.get(arm, {})
     if not isinstance(ap, dict):
         return None
     for cn in ("gripper", "gripper_state"):
         c = ap.get(cn)
         if isinstance(c, dict):
-            for k in ("gripper_position", "position", "target", "value"):
+            if c.get("valid") is False:  # explicitly invalid feed -> skip
+                continue
+            for k in ("percent", "target_percent", "gripper_position", "position", "target", "value"):
                 v = _pos_or_zero(c.get(k))
                 if v is not None:
                     return v
@@ -84,20 +91,51 @@ def encode_png(frame) -> np.ndarray:
     return np.asarray(arr, np.uint8).reshape(-1)  # already encoded -> pass through
 
 
+def encode_depth(frame) -> np.ndarray:
+    """uint16 (H,W) depth -> 16-bit PNG (png16) 1D uint8 array (pika depth convention;
+    episode_writer tags keys ending 'depth' as encoding=png16)."""
+    d = np.asarray(frame.pixels)
+    if d.dtype != np.uint16:
+        d = d.astype(np.uint16)
+    ok, buf = cv2.imencode(".png", d)
+    if not ok:
+        raise RuntimeError("depth png16 encode failed")
+    return np.asarray(buf, np.uint8).reshape(-1)
+
+
+def encode_stream(stream, frame) -> np.ndarray:
+    return encode_depth(frame) if stream.endswith("depth") else encode_png(frame)
+
+
 class Collector:
     def __init__(self, args):
         self.args = args
         self.arms = [a.strip() for a in args.arms.split(",") if a.strip()]
-        self.cam = CameraBundleClient(zmq_endpoint=args.camera_zmq, max_age_ms=args.max_age_ms)
+        self.streams = [s.strip() for s in args.streams.split(",") if s.strip()]
+        self.cam = CameraBundleClient(
+            zmq_endpoint=args.camera_zmq, max_age_ms=args.max_age_ms,
+            include_depth=any(s.endswith("depth") for s in self.streams),
+        )
         self.state = RobotStateClient(args.state_bind, stale_timeout_sec=1.0)
         self.state.start()
-        self.cam_keys = {a: f"{a}_realsense_color" for a in self.arms}
+        # bundle lookup key per (arm, stream) = "{arm}_{stream}" (resolve_frame maps '_'->'.').
+        # pose convention: "robot_stand" = raw FK; "umi" = right-multiply orientation by
+        # pika_rz180 (180deg about approach z) so on-robot ee_local lands in the UMI
+        # data frame (GT-replay-verified robot<->data difference) -> safe to fine-tune /
+        # co-train the UMI-trained model. position unchanged (reset-relative cancels T_SW).
+        self.pose_convention = args.pose_convention
+        self.depth_scale = float(args.depth_scale)  # m per z16 LSB (D405 100um param -> 1e-4)
+        self._rz180 = Rotation.from_rotvec([0.0, 0.0, np.pi]) if args.pose_convention == "umi" else None
         self._frames: list[dict] = []
         self._recording = False
         self._lock = threading.Lock()
         self._stop = False
         self.status = "idle"
         self.dropped = 0
+        # PNG encoding off the capture thread (cv2.imencode releases the GIL) so the
+        # 30 Hz loop is not blocked by 6 encodes/tick (esp. png16 depth). Mirrors the
+        # pika recorder's threadpool-encode design; futures resolved at save time.
+        self._pool = ThreadPoolExecutor(max_workers=8)
         self._cap = threading.Thread(target=self._capture_loop, daemon=True)
         self._cap.start()
 
@@ -121,17 +159,27 @@ class Collector:
             arms_frame = []
             ok = True
             for a in self.arms:
-                fr = resolve_frame(bundle.frames, self.cam_keys[a])
-                if fr is None or getattr(fr, "pixels", None) is None:
-                    ok = False; break
-                pose = np.asarray(pose_from_state_payload(payload, a), np.float32)  # [7] tcp_stand
+                imgs = {}
+                miss = False
+                for stream in self.streams:  # realsense_color / realsense_depth / fisheye_color
+                    fr = resolve_frame(bundle.frames, f"{a}_{stream}")
+                    if fr is None or getattr(fr, "pixels", None) is None:
+                        miss = True
+                        break
+                    imgs[stream] = self._pool.submit(encode_stream, stream, fr)  # fr.pixels is a copy
+                if miss:
+                    ok = False
+                    break
+                pose = np.asarray(pose_from_state_payload(payload, a), np.float32)  # [7] tcp_stand (xyz,qxyzw)
+                if self._rz180 is not None:  # align orientation to UMI data frame (q' = q_robot * Rz180)
+                    pose[3:7] = (Rotation.from_quat(pose[3:7]) * self._rz180).as_quat().astype(np.float32)
                 g = gripper_from_payload(payload, a)
                 g = float(g) if g is not None else 0.0
                 arms_frame.append({
                     "pose": pose.tolist(),
                     "gripper": [g, g],            # [measured, commanded]
                     "command": 1,                  # recording-active marker
-                    "png": {"realsense_color": encode_png(fr)},
+                    "png": imgs,                   # {stream: encoded}
                 })
             if not ok:
                 self.dropped += 1; continue
@@ -168,7 +216,7 @@ class Collector:
                 "pose": [f["arms"][ai]["pose"] for f in frames],
                 "gripper": [f["arms"][ai]["gripper"] for f in frames],
                 "command": [f["arms"][ai]["command"] for f in frames],
-                "images": {"realsense_color": [f["arms"][ai]["png"]["realsense_color"] for f in frames]},
+                "images": {st: [f["arms"][ai]["png"][st].result() for f in frames] for st in self.streams},
             })
             arms_meta.append({"realsense_sn": "", "tracker_sn": "", "fisheye_dev": "", "calib": None})
         payload = {
@@ -177,18 +225,41 @@ class Collector:
             "arms_meta": arms_meta, "arms_data": arms_data,
         }
         out_dir = Path(self.args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
-        idx = len(list(out_dir.glob("episode_*.hdf5")))
+        # next index = max existing + 1 (gap-safe: never overwrites if a middle
+        # episode was deleted; count-based naming would collide on gaps).
+        nums = []
+        for p in out_dir.glob("episode_*.hdf5"):
+            try:
+                nums.append(int(p.stem.split("_")[-1]))
+            except ValueError:
+                pass
+        idx = (max(nums) + 1) if nums else 0
         path = out_dir / f"episode_{idx:04d}.hdf5"
         write_episode_payload(str(path), payload)
         # honest frame label: this is robot stand, not steamvr
         with h5py.File(path, "a") as h:
-            h.attrs["pose_frame"] = "stand"
+            h.attrs["pose_frame"] = "stand_umi_rz180" if self.pose_convention == "umi" else "stand"
+            h.attrs["pose_convention"] = self.pose_convention
             h.attrs["source"] = "onrobot_teleop_passive"
-        self.status = f"saved {path.name} ({len(frames)} frames, {self.dropped} dropped)"
+            # Depth is raw z16 LSB; record the scale so it is self-describing in meters.
+            # camera_server sets RS2_OPTION_DEPTH_UNITS from param-depthunits (um); the
+            # D405 advanced json uses 100um -> 1e-4 m/LSB (0.1mm). Stored at the pika
+            # camera_calib location (cc.attrs['depth_scale']) + a root attr.
+            if any(s.endswith("depth") for s in self.streams):
+                h.attrs["depth_scale"] = float(self.depth_scale)
+                for a in names:
+                    cc = h[f"observations/{a}"].require_group("camera_calib")
+                    cc.attrs["depth_scale"] = float(self.depth_scale)
+                    cc.attrs["depth_units_note"] = "meters_per_lsb (depth_m = z16 * depth_scale)"
+        grip_all = np.array([[f["arms"][ai]["gripper"][0] for ai in range(len(names))] for f in frames])
+        warn = "  ⚠GRIPPER ALL 0 (check gripper_server)" if float(np.abs(grip_all).max()) == 0.0 else ""
+        self.status = f"saved {path.name} ({len(frames)} frames, {self.dropped} dropped){warn}"
         return str(path)
 
     def close(self):
         self._stop = True
+        try: self._pool.shutdown(wait=False, cancel_futures=True)
+        except Exception: pass
         try: self.cam.close()
         except Exception: pass
         try: self.state.close()
@@ -204,6 +275,16 @@ def main():
     ap.add_argument("--max-age-ms", type=float, default=200.0)
     ap.add_argument("--record-hz", type=float, default=30.0)
     ap.add_argument("--arms", default="left,right")
+    ap.add_argument("--streams", default="realsense_color,realsense_depth,fisheye_color",
+                    help="per-arm bundle streams to record (.40 parity). color->png, depth->png16. "
+                         "Needs camera_server publishing them (quad_realsense_fisheye.yaml for fisheye). "
+                         "Trim to 'realsense_color,realsense_depth' if no fisheye hardware.")
+    ap.add_argument("--depth-scale", type=float, default=1e-4,
+                    help="meters per z16 LSB stored as camera_calib/depth_scale (D405 "
+                         "param-depthunits=100um -> 1e-4 = 0.1mm). depth_m = z16 * depth_scale")
+    ap.add_argument("--pose-convention", choices=["robot_stand", "umi"], default="umi",
+                    help="robot_stand=raw FK pose; umi=apply pika_rz180 to orientation so ee_local "
+                         "matches the UMI data frame (use for fine-tune/co-train the UMI model)")
     ap.add_argument("--viser-port", type=int, default=8081)
     args = ap.parse_args()
 

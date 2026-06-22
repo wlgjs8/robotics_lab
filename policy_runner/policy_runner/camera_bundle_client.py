@@ -13,6 +13,7 @@ _MISSING_BUNDLE_AGE_US = 2**62
 # Color formats this client can decode. camera_server may also publish depth
 # (z16) frames; those are skipped in poll() so they don't drop the whole bundle.
 _COLOR_FORMATS = frozenset({"bgr8", "rgb8", "bgra8", "rgba8"})
+_DEPTH_FORMATS = frozenset({"z16", "mono16"})  # opt-in (include_depth); decoded as uint16 (H,W)
 
 
 def bundle_clock_ns() -> int:
@@ -113,6 +114,7 @@ class CameraBundleClient:
         topic: str = "camera.bundle",
         *,
         max_age_ms: float = 100.0,
+        include_depth: bool = False,
     ):
         try:
             import numpy  # noqa: F401
@@ -144,6 +146,7 @@ class CameraBundleClient:
         self._endpoint = zmq_endpoint
         self._topic = topic
         self._max_age_ms = float(max_age_ms)
+        self._include_depth = bool(include_depth)  # opt-in z16 decode (collection only)
         self._shm_cache = _ShmCache()
         self._latest: CameraBundle | None = None
         self._closed = False
@@ -180,8 +183,10 @@ class CameraBundleClient:
                 continue
             # Skip non-color streams (e.g. depth z16) instead of dropping the
             # whole bundle — camera_server may publish color+depth, but this
-            # client decodes color only.
-            if str(frame_meta.get("format", "")).lower() not in _COLOR_FORMATS:
+            # client decodes color only (UNLESS include_depth: then z16 is kept
+            # as a uint16 frame, for collection/RGB-D capture).
+            fmt = str(frame_meta.get("format", "")).lower()
+            if fmt not in _COLOR_FORMATS and not (self._include_depth and fmt in _DEPTH_FORMATS):
                 continue
             try:
                 decoded[str(cam_name)] = self._decode_frame(str(cam_name), frame_meta)
@@ -275,6 +280,17 @@ class CameraBundleClient:
         expected = height * stride
         if arr.size != expected:
             raise RuntimeError(f"payload size {arr.size} != height*stride={expected} for {camera_name}")
+        if fmt in _DEPTH_FORMATS:  # z16/mono16 -> uint16 (H,W), no channel/BGR handling
+            if stride % 2 != 0:
+                raise RuntimeError(f"odd depth stride {stride} for {camera_name}")
+            depth = np.frombuffer(payload, dtype=np.uint16).reshape(height, stride // 2)[:, :width]
+            return CameraFrame(
+                camera_name=camera_name, width=width, height=height,
+                pixels=np.ascontiguousarray(depth), format=fmt,
+                frame_number=int(frame_meta.get("frame_number", 0) or 0),
+                host_arrival_time_ns=int(frame_meta.get("host_arrival_time_ns", 0) or 0),
+                sensor_timestamp_ns=int(frame_meta.get("sensor_timestamp_ns", 0) or 0),
+            )
         if fmt in {"bgr8", "rgb8"}:
             channels = 3
         elif fmt in {"bgra8", "rgba8"}:
