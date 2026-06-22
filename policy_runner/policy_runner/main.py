@@ -1583,10 +1583,20 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 "tcp_target_pose_send_twist": args.send_conditioned_twist,
             }
             if checkpoint_kind == "openpi_remote":
+                # Which physical camera feeds the checkpoint's left/right_wrist_0_rgb.
+                # 'fisheye' (the fe65 deploy) reads the camera_server fisheye streams and
+                # applies the training-time 0.65 center-crop; 'realsense' is the default.
+                _wrist_camera_names = (
+                    ("left_fisheye_color", "right_fisheye_color")
+                    if config.camera.wrist_source == "fisheye"
+                    else ("left_realsense_color", "right_realsense_color")
+                )
                 source = OpenpiRemoteActionSource(
                     args.checkpoint,
                     **source_kwargs,
                     **tcp_tp_kwargs,
+                    camera_names=_wrist_camera_names,
+                    wrist_crop_frac=float(config.camera.wrist_crop_frac),
                     rtc_enabled=bool(getattr(args, "rtc", False)),
                     rtc_inference_delay=int(getattr(args, "rtc_inference_delay", 2)),
                     rtc_prefix_attention_schedule=str(getattr(args, "rtc_schedule", "exp")),

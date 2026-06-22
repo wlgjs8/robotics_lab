@@ -64,6 +64,46 @@ python3 scripts/report_pgprofile.py ...        # REAL_READY는 REAL_READY_TS_<ts
 python3 scripts/compare_pgprofile_stages.py ... # 스테이지 비교
 ```
 
+## 라이브 세션 프로파일링 (UMI 텔레옵 / 모델 rollout)
+`replay`와 **같은 analyzer/표**로 라이브를 보려면, 서버 state-fanout(50356, recorder 슬롯; make run 시
+50366=viser·50376=policy만 점유하고 50356은 비어 있음)을 `profile_live_session.py`로 수동(passive) 녹화한다.
+명령 권한·lease 없이 순수 구독이라 안전. 캡처되는 계층: **B(smd_goal→smd_ref) · C(출력 MA) · D(actual_tcp
+vs ref = 물리추종/떨림, real에서만 유효)**. A-tier(raw source→conditioned)는 commander 로그에 있음(아래).
+
+**UMI 텔레옵** (`make run MODE=real`로 텔레옵 기동 후, 별 터미널에서):
+```bash
+python3 scripts/profile_live_session.py --label teleop_run1 --analyze
+# ... 손동작(느린/빠른/큰) 수행 ... Ctrl-C로 정지+분석
+```
+A-tier 원천: 텔레옵 수신측 per-step 로그(`POLICY_RUNNER_UMI_TELEOP_LOG`, pika/logs).
+
+**모델 rollout** (`ACTION_SOURCE=none make run MODE=real` + flow-infer; 별 터미널에서 레코더):
+```bash
+python3 scripts/profile_live_session.py --label rollout_h8 --analyze
+# flow-infer 예:
+DISPLAY=:1 PYTHONPATH=policy_runner OPENPI_REMOTE_SKIP_WARMUP=1 RB_ALLOW_REAL_GRIPPER=1 \
+  ~/openpi/.venv/bin/python -m policy_runner flow-infer \
+  --checkpoint openpi://127.0.0.1:8000 --config policy_runner/config/flow_real.yaml \
+  --rollout-mode real_policy --command-family tcp_target_pose --allow-tcp-target-pose \
+  --ee-local-r-align pika_rz180 --max-linear-step-m 0.010 --policy-dt-sec 0.0334 \
+  --chunk-execute-steps 8 --camera-preview \
+  --tcp-target-pose-conditioning foh_se3   # A-stage를 replay와 동일 형태로 (전이성 위해 권장)
+```
+A-tier 원천: flow-infer per-step action 로그(`actions_*.jsonl`, raw_delta·emitted_target·conditioner telemetry).
+`--chunk-execute-steps`(=action_horizon//2 실행)와 reanchor는 policy 고유라 이 캡처에서 함께 관찰된다.
+
+→ 산출 `outputs/tcp_live_profile/<label>/{pgprofile_result.json, pgprofile_summary.md, run_meta.json}`.
+raw `log.csv`(~1MB/s)는 `--analyze` 후 자동 삭제(원본 유지=`--keep-log`). replay 표와 나란히 비교하면
+"단일 제어기 config가 replay·텔레옵·rollout 셋 다 만족하는지"를 같은 지표로 검증.
+
+**반복 누적:** 같은 `--label`로 다시 돌리면 **덮어쓰지 않고** `<label>_02`, `_03`... 으로 쌓인다(한 log에
+append 금지 — lag/span/HF가 런 경계에서 깨짐). 여러 런 비교:
+```bash
+python3 scripts/profile_live_session.py --out-dir outputs/tcp_live_profile --aggregate
+# -> aggregate_table.csv: run/class/B_pos_p95/D_actual_vs_ref_p95·max/clip/branch/selfcol
+```
+반복은 **run-to-run 변동성·다양 조건·task success** 용도이고, 제어 파라미터 프로파일 자체는 1~몇 회면 충분.
+
 ## 경고
 
 - **camera 안정성은 B-tier 추종만으로 판단하지 말 것** — D(물리 actual_tcp HF)와 실제 wrist-cam으로 확인.

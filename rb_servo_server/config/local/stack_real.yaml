@@ -289,7 +289,7 @@ kinematics:
     # Observability ON: flag a solve whose joint solution jumps > N deg from the
     # seed in one tick (branch-jump detector). Does not change motion; surfaces
     # the events to tune the damping above.
-    max_solution_jump_deg: 2.0
+    max_solution_jump_deg: 4.0
     # Branch-jump CLAMP (acts, not just observes). When a converged solve still
     # jumps > max_solution_jump_deg from the seed: re-solve the SAME tick at
     # branch_jump_damping_scale x damping (escalating per retry) to pull it back
@@ -403,7 +403,7 @@ cartesian_control:
     # peak-velocity change = no saturation) + raise velocity cap to 0.32 (right stays
     # ~31 deg/s << 60, so no right-arm saturation). Caveat: left j3 is high-gain and
     # already pins dq_max 90 at 0.25, so 0.32 makes left j3 saturate a touch more.
-    max_linear_velocity_m_s: 0.25        # 250 mm/s (was 50 - capped fast teleop)
+    max_linear_velocity_m_s: 0.40        # 250 mm/s (was 50 - capped fast teleop)
     max_linear_accel_m_s2: 1.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
     max_angular_velocity_rad_s: 1.745329252  # 100 deg/s (was 50)
     max_angular_accel_rad_s2: 6.981317008    # 400 deg/s^2 (was 100)

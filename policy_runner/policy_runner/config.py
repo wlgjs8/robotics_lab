@@ -102,10 +102,21 @@ class CameraConfig:
     max_age_ms: float = 100.0
     expected_cameras: list[str] = field(default_factory=list)
     record_zero_on_missing: bool = True
+    # Which physical camera feeds the checkpoint's left/right_wrist_0_rgb inputs.
+    # "realsense" -> left/right_realsense_color; "fisheye" -> left/right_fisheye_color
+    # (the fe65 deploy). Only consumed by the openpi remote source.
+    wrist_source: str = "realsense"
+    # Center-crop fraction applied to each wrist frame before inference (openpi remote
+    # only). 0.0 = off; 0.65 reproduces the fisheye fe65 training crop (640x480 -> 416x312).
+    wrist_crop_frac: float = 0.0
 
     def __post_init__(self) -> None:
         if self.max_age_ms <= 0.0:
             raise ValueError("camera.max_age_ms must be positive")
+        if self.wrist_source not in ("realsense", "fisheye"):
+            raise ValueError("camera.wrist_source must be 'realsense' or 'fisheye'")
+        if not 0.0 <= self.wrist_crop_frac <= 1.0:
+            raise ValueError("camera.wrist_crop_frac must be in [0.0, 1.0]")
 
 
 @dataclass(frozen=True)
@@ -521,6 +532,10 @@ def _camera_config(raw: dict[str, Any]) -> CameraConfig:
         if not isinstance(value, list):
             raise ValueError("camera.expected_cameras must be a list")
         raw["expected_cameras"] = [str(item) for item in value]
+    if "wrist_source" in raw:
+        raw["wrist_source"] = str(raw["wrist_source"])
+    if "wrist_crop_frac" in raw:
+        raw["wrist_crop_frac"] = float(raw["wrist_crop_frac"])
     return CameraConfig(**raw)
 
 

@@ -115,6 +115,21 @@ class _OpenpiWebsocketClient:
         raise last_error  # type: ignore[misc]
 
 
+def _center_crop(img: np.ndarray, frac: float) -> np.ndarray:
+    """Centered crop keeping `frac` of each dimension (aspect preserved).
+
+    Byte-for-byte mirror of the training-time crop baked into the fisheye LeRobot
+    dataset (openpi examples/pika_umi/convert_pika_umi_storage_video.py `_center_crop`):
+    frac=0.65 on a 480x640 fisheye frame -> 312x416. The openpi server only
+    resize_with_pads, so this crop is what keeps the live wrist images in
+    distribution for the fe65 checkpoints.
+    """
+    h, w = img.shape[:2]
+    ch, cw = int(round(h * frac)), int(round(w * frac))
+    y0, x0 = (h - ch) // 2, (w - cw) // 2
+    return img[y0 : y0 + ch, x0 : x0 + cw]
+
+
 def _quat_xyzw_to_rotvec(q: np.ndarray) -> np.ndarray:
     """Quaternion (x,y,z,w) -> rotation vector (axis * angle), numpy only."""
     q = np.asarray(q, dtype=np.float64)
@@ -172,6 +187,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         prompt: str = OPENPI_DEFAULT_PROMPT,
         action_horizon: int = 16,
         camera_names: tuple[str, str] = ("left_realsense_color", "right_realsense_color"),
+        wrist_crop_frac: float = 0.0,
         sample_steps: int = 1,  # accepted for CLI symmetry; unused remotely
         device: str = "remote",  # accepted for CLI symmetry; inference is server-side
         rtc_enabled: bool = False,
@@ -220,6 +236,13 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.command_family = canonical_flow_command_family(self.command_family_option)
         # Fake-image smoke mode runs camera-less so the runtime does not gate on frames.
         self.camera_names = [] if self._fake_images else [str(name) for name in camera_names]
+        # Center-crop fraction applied to each wrist frame before sending to the server.
+        # 0.0 = off (send full frame). The fisheye fe65 checkpoints were trained on a
+        # 0.65 center-crop of the 640x480 fisheye (-> 416x312) baked in at LeRobot
+        # conversion time (openpi convert_pika_umi_storage_video.py `_center_crop`); the
+        # openpi server only resize_with_pads, so the SAME crop MUST be applied here or
+        # the wrist images are out-of-distribution. Realsense deploys leave this 0.0.
+        self.wrist_crop_frac = float(wrist_crop_frac)
         self.image_size = 224  # zero-fallback shape only; live frames are sent full-res
         self.action_horizon = int(action_horizon)
         default_execute = max(1, self.action_horizon // 2)
@@ -303,6 +326,14 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         _action_log_path = default_action_log_path()
         self._action_log = open(_action_log_path, "w", buffering=1)
         print(f"[flow-infer] logging per-step actions to {_action_log_path}", file=self.stderr)
+        # Wrist-camera routing + crop, so the deploy provenance is visible at startup.
+        print(
+            f"[flow-infer] wrist cameras={self.camera_names} crop_frac={self.wrist_crop_frac}"
+            + (" (no crop)" if self.wrist_crop_frac <= 0.0 else ""),
+            file=self.stderr,
+            flush=True,
+        )
+        self._logged_wrist_shape = False
 
         # The server's first inference triggers torch compile/kernel autotune and can
         # take minutes; absorb that at startup so the control loop never stalls.
@@ -409,10 +440,22 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                     missing_count += 1
                     continue
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            if self.wrist_crop_frac > 0.0:
+                rgb = _center_crop(rgb, self.wrist_crop_frac)
             images[key] = rgb
             decode_count += 1
         if missing_count > 0 or len(images) < 2:
             return None, decode_count, max(missing_count, 2 - len(images))
+        # One-time proof of the actual image fed to the server (HWC). With crop_frac=0.65
+        # on a 480x640 fisheye this prints (312, 416, 3); uncropped it prints (480, 640, 3).
+        if not getattr(self, "_logged_wrist_shape", False):
+            print(
+                f"[flow-infer] sending wrist images shape={images['left'].shape} "
+                f"(crop_frac={self.wrist_crop_frac})",
+                file=self.stderr,
+                flush=True,
+            )
+            self._logged_wrist_shape = True
         return images, decode_count, 0
 
     def reset_rtc(self) -> None:

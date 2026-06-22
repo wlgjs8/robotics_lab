@@ -99,7 +99,13 @@ class UvcDevice final : public ICameraDevice {
     cap_.set(cv::CAP_PROP_FRAME_WIDTH, cfg_.color.width);
     cap_.set(cv::CAP_PROP_FRAME_HEIGHT, cfg_.color.height);
     cap_.set(cv::CAP_PROP_FPS, cfg_.color.fps);
-    cap_.set(cv::CAP_PROP_BUFFERSIZE, 1);  // smallest driver buffer -> lowest latency
+    // NOTE: do NOT set CAP_PROP_BUFFERSIZE=1 here. On these DECXIN UVC cameras the
+    // V4L2 backend with a single MMAP buffer cannot double-buffer (the driver has no
+    // free buffer to fill while we hold/decode the current one), which HALVES the
+    // capture rate to ~15 fps. The default buffering sustains the full 30 fps and the
+    // tight read loop below keeps latency at ~1 frame anyway. Matches pika fisheye.py
+    // (which also leaves the buffer count at the driver default). Measured 2026-06-22:
+    // BUFFERSIZE=1 -> 15 fps, default -> 30 fps (single and dual, same USB2 bus).
     const int aw = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH));
     const int ah = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT));
     std::cerr << "[CAM] uvc " << cfg_.name << " open " << aw << "x" << ah << "@" << cfg_.color.fps
