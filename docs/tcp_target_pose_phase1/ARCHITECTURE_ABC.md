@@ -84,6 +84,37 @@ capture → `mergeAbcTelemetry`로 `CartesianSolveTelemetry`에 병합 → `stat
 | policy 롤아웃(openpi/flow) | ✅ foh_se3 online(async-stream) | ✅ SMD(+command_twist) | ✅ output MA | ✅ |
 | teleop(UMI) | ⛔ online A 컨디셔너 미연결 | ✅ SMD | ✅ output MA | ✅ |
 
+## Replay ↔ Policy 전이성 (replay 튜닝이 rollout에 얼마나 옮겨가나)
+
+replay와 policy 롤아웃은 **같은 서버**에 `TcpPoseTarget`을 흘려보내므로 B/C 뒤단은 동일하다. 어디까지
+전이되고 어디부터 policy 고유인지:
+
+**전이됨 (replay로 튜닝 → rollout에 그대로 적용):**
+- **B (`pose_track_smd` fn/ζ/캡/`max_solution_jump_deg`/vff) + C (출력 MA) + safety/dq_max.** 명령을 누가
+  주든 서버 뒤단은 같다. replay는 deterministic·모델/카메라 불필요라 이 부분의 **유효한 프록시**.
+
+**조건부 전이 (A-stage 형태가 같아야):**
+- replay는 `clean_foh_se3 + wall_clock_resample`로 **500Hz FOH**를 SMD에 넣는다. policy가
+  **`legacy_step_hold`** 면 SMD 입력이 **30Hz ZOH 계단**이라 더 거칠어 → replay에서 굳힌 smoothness가
+  그대로 안 나온다. **policy를 `--tcp-target-pose-conditioning foh_se3`로 돌려야** A-stage가 replay와
+  같은 모양이 되어 충실히 전이된다.
+
+**전이 안 됨 (policy 고유 — 롤아웃에서 별도 측정):**
+- **chunk 경계 reanchor/blend** (`action_horizon//2` step마다 측정 pose 재앵커). replay는 한 연속 궤적.
+- **`action_horizon`(8/16/24)** — replan 주기 + open-loop feed-forward 길이 + prefetch 여유를 바꾸는
+  **policy 노브이고 서버 SMD와 직교**. step당 hold(policy_dt)는 horizon과 무관, horizon은 "몇 step마다
+  새 obs로 재추론/재앵커"만 바꾼다.
+- **stall/dropout** (다음 chunk 지연 시 hold). replay는 미리 계산돼 stall 없음.
+- **궤적 내용** — replay=데모 GT delta, policy=모델 예측 delta(노이즈·OOD·idle-arm creep). SMD가 추종할
+  *모션* 자체가 다르다.
+
+**권장 2단계:** ① B/C는 replay로 먼저 굳힌다(저비용·결정적). ② policy는 `foh_se3`로 돌려 A 형태를 맞추고,
+경계·horizon·stall·모델 궤적은 롤아웃에서 검증. **단, 이 검증에 "반복 rollout"이 필요한 건 아니다** —
+서버 telemetry(`cartesian_solve`의 smd_ref/clip/MA)는 명령 주체와 무관하게 동일하게 발행되므로, **대표
+rollout 1~수 회의 명령 스트림을 같은 analyzer로 캡처·오프라인 분석**하면 A+경계+horizon 효과가 잡힌다
+(policy action-log JSONL + 서버 state 로그). 반복 rollout이 진짜 필요한 건 **task success(모델 품질, 제어
+아님)** 와 **엣지 케이스 run-to-run 변동성** 뿐이다.
+
 ## 알려진 한계 / 미구현
 
 - **jerk-limited OTG/Ruckig 미구현** — B는 현재 2차 SMD만. (의도적 보류; 먼저 SMD 구조를 측정 가능하게.)

@@ -17,7 +17,15 @@ struct CameraStreamConfig {
 
 struct CameraConfig {
   std::string name;
+  // Capture backend: "realsense" (librealsense, depth-capable) or "uvc"
+  // (generic V4L2 UVC camera via OpenCV, MJPG transport, color-only — used for
+  // the DECXIN/Sunplus wrist fisheye cameras).
+  std::string backend{"realsense"};
   std::string serial;
+  // UVC only: V4L2 device. Accepts a /dev/videoN node, an integer index, or a
+  // /dev/v4l/by-path/... symlink (preferred — stable across reboots). Ignored by
+  // the realsense backend (which selects devices by serial).
+  std::string device;
   bool required{true};
   CameraStreamConfig color;
   CameraStreamConfig depth;

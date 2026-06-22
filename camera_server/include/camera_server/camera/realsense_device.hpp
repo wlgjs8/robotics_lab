@@ -43,4 +43,17 @@ std::unique_ptr<ICameraDevice> make_realsense_device(const CameraConfig& cfg, Cl
 std::unique_ptr<ICameraDevice> make_realsense_device(const CameraConfig& cfg, ClockKind clock, const SyncConfig& sync);
 std::unique_ptr<ICameraDevice> make_mock_camera_device(const CameraConfig& cfg, ClockKind clock);
 
+// UVC (V4L2) camera, MJPG transport, color-only — the DECXIN/Sunplus wrist fisheye.
+// Decodes MJPG to BGR then converts to RGB so the shared-memory payload matches the
+// realsense `rgb8` format (policy_runner treats every 3-channel frame as RGB).
+std::unique_ptr<ICameraDevice> make_uvc_device(const CameraConfig& cfg, ClockKind clock);
+
+// Resolve a config `device` string (/dev/videoN, integer index, or a
+// /dev/v4l/by-path/... symlink) to a V4L2 index, or -1 if it cannot be resolved
+// to an index (caller may still try opening the raw path). Pure filesystem/string
+// logic; available regardless of the OpenCV build.
+int resolve_v4l2_index(const std::string& device);
+// True if the configured UVC device currently resolves to an existing /dev/videoN.
+bool uvc_device_present(const std::string& device);
+
 }  // namespace camera_server

@@ -110,7 +110,9 @@ AppConfig load_config(const std::string& path) {
       CameraConfig cam;
       cam.name = it.first.as<std::string>();
       const auto n = it.second;
+      cam.backend = node_as(n["backend"], std::string("realsense"));
       cam.serial = node_as(n["serial"], std::string());
+      cam.device = node_as(n["device"], std::string());
       cam.required = node_as(n["required"], true);
       cam.color.enabled = true;
       cam.color.format = "rgb8";
@@ -194,12 +196,27 @@ void validate_config(const AppConfig& cfg) {
   }
   for (const auto& cam : cfg.cameras) {
     if (cam.name.empty()) throw std::runtime_error("camera name cannot be empty");
-    if (cam.required && cam.serial.empty()) throw std::runtime_error("required camera " + cam.name + " has empty serial");
-    if (is_disallowed_serial_placeholder(cam.serial)) {
-      throw std::runtime_error("camera " + cam.name + " has invalid serial placeholder: " + cam.serial);
+    if (cam.backend != "realsense" && cam.backend != "uvc") {
+      throw std::runtime_error("camera " + cam.name + " has unsupported backend: " + cam.backend);
     }
-    if (!cfg.server.simulate_cameras && starts_with(uppercase_ascii(cam.serial), "MOCK_")) {
-      throw std::runtime_error("camera " + cam.name + " uses MOCK_* serial but server.simulate_cameras=false");
+    if (cam.backend == "uvc") {
+      // UVC fisheye is selected by V4L2 device path, not serial. The DECXIN/Sunplus
+      // wrist cameras share a fixed serial ("01.00.00") so serial-based discovery is
+      // impossible; bypass the serial placeholder/MOCK checks and require a device.
+      if (cam.required && cam.device.empty()) {
+        throw std::runtime_error("required uvc camera " + cam.name + " has empty device");
+      }
+      if (cam.depth.enabled) {
+        throw std::runtime_error("uvc camera " + cam.name + " does not support a depth stream");
+      }
+    } else {
+      if (cam.required && cam.serial.empty()) throw std::runtime_error("required camera " + cam.name + " has empty serial");
+      if (is_disallowed_serial_placeholder(cam.serial)) {
+        throw std::runtime_error("camera " + cam.name + " has invalid serial placeholder: " + cam.serial);
+      }
+      if (!cfg.server.simulate_cameras && starts_with(uppercase_ascii(cam.serial), "MOCK_")) {
+        throw std::runtime_error("camera " + cam.name + " uses MOCK_* serial but server.simulate_cameras=false");
+      }
     }
     const CameraStreamConfig streams[] = {cam.color, cam.depth};
     const char* names[] = {"color", "depth"};

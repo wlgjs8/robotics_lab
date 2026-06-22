@@ -3,7 +3,7 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake pkg-config ca-certificates curl gnupg apt-transport-https \
-    libyaml-cpp-dev libzmq3-dev python3 python3-pip \
+    libyaml-cpp-dev libzmq3-dev libopencv-dev python3 python3-pip \
     && mkdir -p /etc/apt/keyrings \
     && gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys FB0B24895113F120 && gpg --batch --export FB0B24895113F120 > /etc/apt/keyrings/librealsense.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo jammy main" > /etc/apt/sources.list.d/librealsense.list \

@@ -1,0 +1,127 @@
+# Quad profile for flow-infer fisheye deploy on the local PC: two D405 wrist
+# RealSense (color + depth) PLUS two DECXIN/Sunplus UVC fisheye cameras, all
+# published in every bundle so policy_runner selects which the checkpoint consumes
+# (the pi05 fe65 checkpoint uses the fisheye color as left/right_wrist_0_rgb;
+# RealSense + depth stay available for fallback / debug).
+#
+# Bundle keys are '<camera>.<stream>': left_realsense.color / .depth,
+# right_realsense.color / .depth, left_fisheye.color, right_fisheye.color.
+# policy_runner's resolve_frame() maps checkpoint name 'X_color' -> 'X.color'.
+#
+# RealSense (librealsense serials, from dual_realsense_d405.yaml; left/right
+# verified physically 2026-06-12): left=260322278348, right=412622272078.
+#
+# Fisheye selected by USB by-path (stable across reboots), paired to the RealSense
+# on the SAME USB hub (mirrors pika/pika_win/fisheye.py hub mapping). On this host:
+#   hub 1.3.1: RealSense USB-iSerial 313123070562 + fisheye /dev/video12 (1.3.1.1)
+#   hub 1.3.2: RealSense USB-iSerial 243323070989 + fisheye /dev/video14 (1.3.2.1)
+# !!! VERIFY left/right by covering each fisheye lens before trusting a rollout:
+#     left_fisheye MUST be on the same arm as left_realsense (260322278348). If the
+#     left RealSense sits on hub 1.3.2, swap the two device paths below.
+server:
+  name: camera_server
+  mode: capture_only
+  clock: monotonic_raw
+  simulate_cameras: false
+
+shared_memory:
+  name: "/camera_server_frames"
+  size_mb: 1024
+  ring_slots: 4
+  unlink_on_start: true
+
+metadata:
+  transport: zmq_pub
+  pub_bind: "tcp://127.0.0.1:5600"
+  health_topic: "camera.health"
+  bundle_topic: "camera.bundle"
+
+sync:
+  mode: software
+  master_camera: left_realsense
+  bundle_policy: nearest_timestamp
+  # Four free-running 30 fps color cameras (2 RealSense + 2 fisheye; the depth
+  # streams share their color frame's host timestamp) can sit up to ~half a frame
+  # period apart. 17 ms sufficed for two RealSense; widen to 25 ms so adding the two
+  # independent fisheye cameras does not starve complete bundles. Tune from the
+  # measured camera.health bundle skew on this host.
+  max_bundle_time_diff_ms: 25.0
+  publish_incomplete_bundles: false
+
+cameras:
+  left_realsense:
+    backend: realsense
+    serial: "260322278348"
+    required: true
+    streams:
+      color:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 30
+        format: rgb8
+      depth:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 30
+        format: z16
+  right_realsense:
+    backend: realsense
+    serial: "412622272078"
+    required: true
+    streams:
+      color:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 30
+        format: rgb8
+      depth:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 30
+        format: z16
+  left_fisheye:
+    backend: uvc
+    # Same hub as left_realsense — VERIFY (see header).
+    device: "/dev/v4l/by-path/pci-0000:09:00.3-usb-0:1.3.1.1:1.0-video-index0"
+    required: true
+    streams:
+      color:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 30
+        format: rgb8
+  right_fisheye:
+    backend: uvc
+    device: "/dev/v4l/by-path/pci-0000:09:00.3-usb-0:1.3.2.1:1.0-video-index0"
+    required: true
+    streams:
+      color:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 30
+        format: rgb8
+
+recording:
+  enabled: false
+  output_dir: "/data/episodes"
+  queue_capacity_frames: 300
+  writer_threads: 4
+  drop_policy: drop_oldest
+  raw_format: true
+
+health:
+  publish_rate_hz: 1
+  warn_if_frame_age_ms_gt: 100
+  warn_if_drop_count_increases: true
+  warn_if_bundle_skew_ms_gt: 25
+
+reconnect:
+  enabled: false  # not implemented; enabled=true is rejected at config load
+  max_attempts: 0
+  retry_interval_ms: 1000

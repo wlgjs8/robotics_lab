@@ -9,6 +9,7 @@ option(CAMERA_SERVER_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(CAMERA_SERVER_BUILD_TESTS "Build camera_server tests" ON)
 option(CAMERA_SERVER_FORCE_MOCK_CAMERA "Do not compile RealSense backend" OFF)
 option(CAMERA_SERVER_FORCE_ZMQ_STUB "Do not compile ZeroMQ publisher backend" OFF)
+option(CAMERA_SERVER_FORCE_NO_OPENCV "Do not compile the UVC/OpenCV fisheye backend" OFF)
 
 find_package(Threads REQUIRED)
 find_package(yaml-cpp REQUIRED)
@@ -35,6 +36,14 @@ if(NOT CAMERA_SERVER_FORCE_ZMQ_STUB AND PkgConfig_FOUND)
   endif()
 endif()
 
+set(CAMERA_SERVER_HAVE_OPENCV 0)
+if(NOT CAMERA_SERVER_FORCE_NO_OPENCV)
+  find_package(OpenCV QUIET COMPONENTS imgproc videoio)
+  if(OpenCV_FOUND)
+    set(CAMERA_SERVER_HAVE_OPENCV 1)
+  endif()
+endif()
+
 add_library(camera_server_lib
   src/core/clock.cpp
   src/config/config.cpp
@@ -45,6 +54,7 @@ add_library(camera_server_lib
   src/health/health_monitor.cpp
   src/camera/camera_manager.cpp
   src/camera/realsense_device.cpp
+  src/camera/uvc_device.cpp
 )
 
 target_include_directories(camera_server_lib PUBLIC include)
@@ -52,7 +62,13 @@ target_link_libraries(camera_server_lib PUBLIC yaml-cpp Threads::Threads rt)
 target_compile_definitions(camera_server_lib PUBLIC
   CAMERA_SERVER_HAVE_REALSENSE=$<BOOL:${CAMERA_SERVER_HAVE_REALSENSE}>
   CAMERA_SERVER_HAVE_ZMQ=$<BOOL:${CAMERA_SERVER_HAVE_ZMQ}>
+  CAMERA_SERVER_HAVE_OPENCV=$<BOOL:${CAMERA_SERVER_HAVE_OPENCV}>
 )
+
+if(CAMERA_SERVER_HAVE_OPENCV)
+  target_link_libraries(camera_server_lib PUBLIC ${OpenCV_LIBS})
+  target_include_directories(camera_server_lib PUBLIC ${OpenCV_INCLUDE_DIRS})
+endif()
 
 if(CAMERA_SERVER_HAVE_REALSENSE)
   if(realsense2_FOUND)
@@ -88,4 +104,4 @@ if(CAMERA_SERVER_BUILD_TESTS)
   set_tests_properties(camera_server_tests PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
-message(STATUS "camera_server: RealSense backend=${CAMERA_SERVER_HAVE_REALSENSE}, ZeroMQ backend=${CAMERA_SERVER_HAVE_ZMQ}")
+message(STATUS "camera_server: RealSense backend=${CAMERA_SERVER_HAVE_REALSENSE}, ZeroMQ backend=${CAMERA_SERVER_HAVE_ZMQ}, OpenCV/UVC backend=${CAMERA_SERVER_HAVE_OPENCV}")

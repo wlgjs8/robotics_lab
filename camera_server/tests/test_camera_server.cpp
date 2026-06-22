@@ -1,3 +1,4 @@
+#include "camera_server/camera/realsense_device.hpp"
 #include "camera_server/config/config.hpp"
 #include "camera_server/core/bounded_queue.hpp"
 #include "camera_server/core/clock.hpp"
@@ -144,6 +145,88 @@ void test_real_placeholder_config_fails() {
   std::string path = "config/triple_realsense.yaml";
   if (!std::ifstream(path).good()) path = "../config/triple_realsense.yaml";
   expect_config_failure([&] { (void)load_config(path); }, "invalid serial placeholder");
+}
+
+AppConfig make_realsense_plus_fisheye_config() {
+  AppConfig cfg;
+  cfg.server.name = "camera_server";
+  cfg.server.simulate_cameras = false;
+  cfg.shared_memory.name = "/camera_server_unit_test";
+  cfg.shared_memory.size_mb = 64;
+  cfg.shared_memory.ring_slots = 4;
+  cfg.metadata.pub_bind = "tcp://127.0.0.1:5999";
+  CameraConfig rs;
+  rs.name = "left_realsense";
+  rs.backend = "realsense";
+  rs.serial = "260322278348";
+  rs.required = true;
+  rs.color.enabled = true;
+  rs.color.format = "rgb8";
+  CameraConfig fe;
+  fe.name = "left_fisheye";
+  fe.backend = "uvc";
+  fe.device = "/dev/video12";
+  fe.required = true;
+  fe.color.enabled = true;
+  fe.color.format = "rgb8";
+  fe.depth.enabled = false;
+  cfg.cameras = {rs, fe};
+  return cfg;
+}
+
+void test_config_uvc_fisheye_backend() {
+  auto cfg = make_realsense_plus_fisheye_config();
+  validate_config(cfg);  // uvc selects by device path, no serial required
+  assert(required_stream_keys(cfg).size() == 2);
+
+  // uvc bypasses the realsense serial placeholder / MOCK rules (the DECXIN fisheye
+  // shares a fixed serial, so serial-based discovery is impossible).
+  auto shared_serial = cfg;
+  shared_serial.cameras[1].serial = "UNKNOWN";  // would fail for a realsense camera
+  validate_config(shared_serial);
+
+  auto no_device = cfg;
+  no_device.cameras[1].device = "";
+  expect_config_failure([&] { validate_config(no_device); }, "empty device");
+
+  auto with_depth = cfg;
+  with_depth.cameras[1].depth.enabled = true;
+  expect_config_failure([&] { validate_config(with_depth); }, "does not support a depth stream");
+
+  auto bad_backend = cfg;
+  bad_backend.cameras[1].backend = "zed";
+  expect_config_failure([&] { validate_config(bad_backend); }, "unsupported backend");
+}
+
+void test_uvc_device_resolution() {
+  assert(resolve_v4l2_index("12") == 12);
+  assert(resolve_v4l2_index("/dev/video7") == 7);  // filename parse, even if absent
+  assert(resolve_v4l2_index("garbage") == -1);
+  assert(resolve_v4l2_index("") == -1);
+  assert(!uvc_device_present(""));
+  assert(!uvc_device_present("/dev/v4l/by-path/does-not-exist-video-index0"));
+}
+
+void test_quad_fisheye_config_parses() {
+  std::string path = "config/quad_realsense_fisheye.yaml";
+  if (!std::ifstream(path).good()) path = "../config/quad_realsense_fisheye.yaml";
+  auto cfg = load_config(path);
+  assert(cfg.cameras.size() == 4);
+  int uvc = 0;
+  int realsense = 0;
+  for (const auto& cam : cfg.cameras) {
+    if (cam.backend == "uvc") {
+      ++uvc;
+      assert(!cam.device.empty());
+      assert(!cam.depth.enabled);
+      assert(cam.color.enabled);
+    } else {
+      ++realsense;
+    }
+  }
+  assert(uvc == 2 && realsense == 2);
+  // 2 realsense color + 2 realsense depth + 2 fisheye color
+  assert(required_stream_keys(cfg).size() == 6);
 }
 
 void test_shared_memory_roundtrip() {
@@ -398,6 +481,9 @@ int main() {
   test_config_validation_rejects_invalid_sync_combinations();
   test_config_validation_rejects_reconnect_until_implemented();
   test_real_placeholder_config_fails();
+  test_config_uvc_fisheye_backend();
+  test_uvc_device_resolution();
+  test_quad_fisheye_config_parses();
   test_shared_memory_roundtrip();
   test_shared_memory_rejects_oversized_slot_metadata();
   test_shared_memory_open_rejects_invalid_slot_offsets();

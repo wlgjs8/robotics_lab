@@ -23,10 +23,20 @@ CameraManager::~CameraManager() { stop(); }
 
 void CameraManager::ensure_required_cameras_present() const {
   if (cfg_.server.simulate_cameras) return;
+  // UVC fisheye cameras are matched by V4L2 device path, not serial: verify the
+  // configured device node currently resolves.
+  for (const auto& cam : cfg_.cameras) {
+    if (cam.backend != "uvc") continue;
+    if (cam.required && !uvc_device_present(cam.device)) {
+      throw std::runtime_error("required uvc camera missing: " + cam.name + " device=" + cam.device +
+                               " (not present on this host)");
+    }
+  }
 #if CAMERA_SERVER_HAVE_REALSENSE
   const auto serials = discover_realsense_serials();
   std::set<std::string> present(serials.begin(), serials.end());
   for (const auto& cam : cfg_.cameras) {
+    if (cam.backend == "uvc") continue;
     if (cam.required && present.count(cam.serial) == 0) {
       std::string connected = "none";
       if (!serials.empty()) {
@@ -42,6 +52,7 @@ void CameraManager::ensure_required_cameras_present() const {
   }
 #else
   for (const auto& cam : cfg_.cameras) {
+    if (cam.backend == "uvc") continue;  // checked by device-path probe above
     if (cam.required) throw std::runtime_error("RealSense backend not compiled; set server.simulate_cameras=true for mock runs");
   }
 #endif
@@ -58,16 +69,24 @@ void CameraManager::start() {
   metadata_thread_ = std::thread(&CameraManager::metadata_loop, this);
   for (const auto& cam : cfg_.cameras) {
     std::unique_ptr<ICameraDevice> dev;
-    if (cfg_.server.simulate_cameras) dev = make_mock_camera_device(cam, cfg_.server.clock);
-    else dev = make_realsense_device(cam, cfg_.server.clock, cfg_.sync);
+    const char* backend_label;
+    if (cfg_.server.simulate_cameras) {
+      dev = make_mock_camera_device(cam, cfg_.server.clock);
+      backend_label = " (mock)";
+    } else if (cam.backend == "uvc") {
+      dev = make_uvc_device(cam, cfg_.server.clock);
+      backend_label = " (uvc)";
+    } else {
+      dev = make_realsense_device(cam, cfg_.server.clock, cfg_.sync);
+      backend_label = " (RealSense)";
+    }
     {
       std::lock_guard<std::mutex> lk(mu_);
       connected_[cam.name] = true;
     }
     dev->start([this](CapturedFrame&& f) { handle_frame(std::move(f)); });
     devices_.push_back(std::move(dev));
-    std::cerr << "[CAM] started " << cam.name << " serial=" << cam.serial
-              << (cfg_.server.simulate_cameras ? " (mock)" : " (RealSense)") << '\n';
+    std::cerr << "[CAM] started " << cam.name << " serial=" << cam.serial << backend_label << '\n';
   }
 }
 

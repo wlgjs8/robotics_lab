@@ -15,6 +15,11 @@ Example files:
   `resolve_frame()` `X_color` → `X.color` mapping); serials are filled with
   this site's physical units
 - `config/mock_triple_realsense.yaml`: hardware-free mock config
+- `config/quad_realsense_fisheye.yaml`: flow-infer fisheye-deploy profile — two
+  D405 wrist RealSense (color + depth) PLUS two DECXIN/Sunplus UVC fisheye cameras
+  (`backend: uvc`, color-only, MJPG transport), all published in every bundle so
+  policy_runner selects which the checkpoint consumes (`left_fisheye.color` /
+  `right_fisheye.color` ↔ checkpoint `left_fisheye_color` / `right_fisheye_color`)
 
 The real-camera templates intentionally contain `REPLACE_*` serial placeholders
 and must fail validation until copied and filled with approved physical serials.
@@ -47,7 +52,9 @@ sync:
 
 cameras:
   head:
+    backend: realsense      # realsense (default, depth-capable) | uvc (V4L2 fisheye)
     serial: "REPLACE_HEAD_SERIAL"
+    # device: "/dev/v4l/by-path/...-video-index0"   # uvc only (path/index/by-path)
     required: true
     streams:
       color:
@@ -107,9 +114,28 @@ reconnect:
   retry_interval_ms: 1000
 ```
 
+## Camera backends
+
+- `backend: realsense` (default): librealsense device selected by `serial`,
+  color + optional depth. Subject to the serial placeholder / MOCK rules below.
+- `backend: uvc`: generic V4L2 UVC camera opened via OpenCV with an MJPG transport
+  (low USB bandwidth, mirrors `pika/pika_win/fisheye.py`), used for the
+  DECXIN/Sunplus wrist fisheye. Selected by `device` (a `/dev/videoN` node, an
+  integer index, or a `/dev/v4l/by-path/...` symlink — by-path is preferred,
+  stable across reboots). Color-only (no depth). The MJPG frame is decoded and
+  converted BGR→RGB so the shared-memory payload is `rgb8`, identical to the
+  realsense color format (policy_runner treats every 3-channel frame as RGB).
+  Requires the OpenCV backend at build time (`libopencv-dev`); a `uvc` camera in a
+  build without OpenCV fails at startup.
+
 ## Validation rules
 
-- all required camera serials must be present
+- `backend` must be `realsense` or `uvc`
+- a `uvc` camera must not enable a depth stream
+- a required `uvc` camera must set a non-empty `device`; its presence is checked at
+  startup by resolving the device path (not by serial — the DECXIN fisheye share a
+  fixed serial, so serial/MOCK placeholder rules do not apply to `uvc`)
+- all required RealSense camera serials must be present
 - real-camera serial placeholders fail validation:
   - empty required serial
   - `REPLACE_*`

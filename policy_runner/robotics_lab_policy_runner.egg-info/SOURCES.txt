@@ -55,6 +55,7 @@ tests/test_dual_arm_policy_gate.py
 tests/test_dual_spacemouse_policy_integration.py
 tests/test_flow_dataset.py
 tests/test_flow_inference.py
+tests/test_flow_inference_gripper_mode.py
 tests/test_flow_inference_tcp_targetpose.py
 tests/test_flow_inference_tcp_twistlocal.py
 tests/test_flow_matching.py
@@ -66,6 +67,7 @@ tests/test_hdf5_audit.py
 tests/test_hdf5_recording.py
 tests/test_hdf5_viewer.py
 tests/test_master_arm_joint.py
+tests/test_openpi_remote_rtc.py
 tests/test_phase_metrics.py
 tests/test_policy_rollout_modes.py
 tests/test_policy_runner_contract.py
