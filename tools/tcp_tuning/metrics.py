@@ -7,6 +7,9 @@ import numpy as np
 from scipy.signal import correlate, correlation_lags, periodogram
 from scipy.spatial.transform import Rotation
 
+# np.trapezoid is the numpy>=2.0 name; np.trapz is the <2.0 name (openpi venv has 1.26).
+_TRAPZ = getattr(np, "trapezoid", getattr(np, "trapz", None))
+
 from .config import MetricsConfig
 from . import se3
 
@@ -609,7 +612,7 @@ def _vector_norm_stats(values: np.ndarray) -> dict[str, float | None]:
 def _integrate_power(freqs: np.ndarray, power: np.ndarray, mask: np.ndarray) -> float:
     if int(np.count_nonzero(mask)) < 2:
         return 0.0
-    return float(np.trapezoid(power[mask], freqs[mask]))
+    return float(_TRAPZ(power[mask], freqs[mask]))
 
 
 def _count_failures(columns: Mapping[str, Any]) -> dict[str, Any]:

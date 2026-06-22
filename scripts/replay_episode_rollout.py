@@ -46,7 +46,8 @@ from policy_runner.flow_inference import (  # noqa: E402
     FlowMatchingActionSource,
     action_chunk_checkpoint_kind,
 )
-from policy_runner.flow_dataset import pose_delta_local  # noqa: E402
+from policy_runner.flow_dataset import pose_delta_local, pose_from_state_payload  # noqa: E402
+from policy_runner.flow_inference import _gripper_value_from_payload  # noqa: E402
 from policy_runner.action_sources.tcp_delta import (  # noqa: E402
     cartesian_action_requirements,
     clamp_tcp_twist,
@@ -213,8 +214,31 @@ class GroundTruthSource:
         t = self.clock.index
         if t >= len(self.dL):
             return None
-        return tcp_twist_local_intent(left=self._twist(self.dL[t][:6]),
-                                      right=self._twist(self.dR[t][:6]), timeout_sec=0.2)
+        dL, dR = self.dL[t][:6], self.dR[t][:6]
+        twL, twR = self._twist(dL), self._twist(dR)
+        # Per-step ACTION (recorded ee_local delta, post r_align+scale) + PROPRIO
+        # (live-sim measured TCP pose this tick) so the frame/direction is visible.
+        def _fmt(v, n):
+            return " ".join(f"{x:+.4f}" for x in np.asarray(v).reshape(-1)[:n])
+
+        try:
+            pL = np.asarray(pose_from_state_payload(snapshot.payload, "left"))
+            pR = np.asarray(pose_from_state_payload(snapshot.payload, "right"))
+            gL = _gripper_value_from_payload(snapshot.payload, "left")
+            gR = _gripper_value_from_payload(snapshot.payload, "right")
+            propR = f"pos=[{_fmt(pR[:3],3)}] quat=[{_fmt(pR[3:7],4)}] grip={gR}"
+            propL = f"pos=[{_fmt(pL[:3],3)}] quat=[{_fmt(pL[3:7],4)}] grip={gL}"
+        except Exception as exc:  # noqa: BLE001
+            propR = propL = f"n/a ({exc})"
+        print(
+            f"[t{t:3d}] ACT R(dxyz|rxyz)=[{_fmt(dR[:3],3)} | {_fmt(dR[3:6],3)}] "
+            f"twR=[{twR[0]:+.3f} {twR[1]:+.3f} {twR[2]:+.3f}]\n"
+            f"        ACT L=[{_fmt(dL[:3],3)} | {_fmt(dL[3:6],3)}]\n"
+            f"        PROP R {propR}\n"
+            f"        PROP L {propL}",
+            flush=True,
+        )
+        return tcp_twist_local_intent(left=twL, right=twR, timeout_sec=0.2)
 
     def close(self):
         pass

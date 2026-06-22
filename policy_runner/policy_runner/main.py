@@ -775,7 +775,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--policy-dt-sec",
         type=float,
-        default=None,
+        default=0.05,
         help=(
             "Seconds represented by one flow action step. Controller/real flow rollout "
             "requires this value or checkpoint dataset_stats.dt_mean_sec; sim_dryrun "
@@ -785,13 +785,13 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--max-linear-velocity-m-s",
         type=float,
-        default=None,
+        default=0.15,
         help="Override flow twist linear clamp; omitted uses checkpoint action statistics.",
     )
     flow_infer.add_argument(
         "--max-angular-velocity-rad-s",
         type=float,
-        default=None,
+        default=0.8,
         help="Override flow twist angular clamp; omitted uses checkpoint action statistics.",
     )
     flow_infer.add_argument(
@@ -867,7 +867,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             "without steady-state lag. 0 (default) disables crossfade. Try 2-3."
         ),
     )
-    flow_infer.add_argument("--max-linear-step-m", type=float, default=0.002)
+    flow_infer.add_argument("--max-linear-step-m", type=float, default=0.005)
     flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.01)
     flow_infer.add_argument(
         "--tcp-target-pose-conditioning",

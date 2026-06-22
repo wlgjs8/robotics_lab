@@ -669,6 +669,7 @@ class FlowMatchingActionSource:
                 self._steps_since_boundary += 1
                 self._current_step_intent = self._foh_tick_intent(now_monotonic, stall=False)
                 self._log_foh_action(step, self._current_step_intent, now_monotonic)
+                self._print_step_debug(step, payload)  # per-policy-step (foh_se3), not per servo tick
             else:
                 self._current_step_intent = self._emit_step_intent(step, payload, gripper_targets)
         elif foh and self._chunk is not None:
@@ -696,7 +697,35 @@ class FlowMatchingActionSource:
         # tick): the streamed path re-emits the same held intent between steps.
         self._steps_since_boundary += 1
         self._log_action_step(step, intent)
+        self._print_step_debug(step, payload)
         return intent
+
+    def _print_step_debug(self, step: np.ndarray, payload: dict[str, Any]) -> None:
+        """Per-step ACTION (post r_align ee_local delta + gripper) and PROPRIO
+        (live measured pose pos/quat + gripper) to the terminal. Gated by
+        POLICY_RUNNER_PRINT_STEPS=1 so it never affects normal runs."""
+        if os.environ.get("POLICY_RUNNER_PRINT_STEPS", "") != "1":
+            return
+        s = np.asarray(step, dtype=np.float64).reshape(-1)
+
+        def f(v, n):
+            return " ".join(f"{x:+.4f}" for x in np.asarray(v).reshape(-1)[:n])
+
+        aL, aR = s[0:7], s[7:14]
+        lines = [
+            f"[step idx={self._chunk_index}] ACT R(dxyz|rxyz|grip)=[{f(aR[:3],3)} | {f(aR[3:6],3)} | {aR[6]:+.2f}]",
+            f"            ACT L=[{f(aL[:3],3)} | {f(aL[3:6],3)} | {aL[6]:+.2f}]",
+        ]
+        try:
+            pR = np.asarray(pose_from_state_payload(payload, "right"))
+            pL = np.asarray(pose_from_state_payload(payload, "left"))
+            gR = _gripper_value_from_payload(payload, "right")
+            gL = _gripper_value_from_payload(payload, "left")
+            lines.append(f"            PROP R pos=[{f(pR[:3],3)}] quat=[{f(pR[3:7],4)}] grip={gR}")
+            lines.append(f"            PROP L pos=[{f(pL[:3],3)}] quat=[{f(pL[3:7],4)}] grip={gL}")
+        except Exception as exc:  # noqa: BLE001 - debug print must never break the loop
+            lines.append(f"            PROP n/a ({exc})")
+        print("\n".join(lines), flush=True)
 
     def _log_action_step(self, step: np.ndarray, intent: CommandIntent | None) -> None:
         """Append one JSONL line per executed policy step (env-gated debug)."""

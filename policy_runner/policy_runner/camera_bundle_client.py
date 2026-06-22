@@ -128,7 +128,18 @@ class CameraBundleClient:
         self._ctx = zmq.Context.instance()
         self._sock = self._ctx.socket(zmq.SUB)
         self._sock.setsockopt_string(zmq.SUBSCRIBE, topic)
-        self._sock.setsockopt(zmq.RCVHWM, 4)
+        # Receive buffer depth. ZMQ SUB drops the NEWEST bundles when the queue is
+        # full (keep-oldest), so a small HWM makes poll() return a STALE bundle after
+        # any polling gap: flow-infer only polls at chunk boundaries (every
+        # chunk_execute_steps, ~400 ms at 12 steps x 33 ms) plus the blocking server
+        # inference. With HWM=4 (~133 ms) the queue fills mid-gap and the freshest
+        # surviving bundle ages past max_age_ms -> intermittent "stale" even though
+        # camera_server streams a solid 30 fps. Sizing the buffer to cover ~2 s of
+        # 30 fps bundles means nothing is dropped during a gap, so draining to the
+        # tail yields a genuinely fresh frame. (CONFLATE would be ideal but does not
+        # work with the multipart [topic, json] bundle messages.) Measured 2026-06-22:
+        # HWM=4 -> 400 ms gap gives a 427 ms-old frame (stale); HWM>=16 -> ~30 ms.
+        self._sock.setsockopt(zmq.RCVHWM, 60)
         self._sock.connect(zmq_endpoint)
         self._endpoint = zmq_endpoint
         self._topic = topic
