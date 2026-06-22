@@ -142,6 +142,25 @@ class GripperRuntimeTest(unittest.TestCase):
         self.assertEqual([command.value for command in commands], [0.2, -0.3])
         self.assertTrue(all(command.command_type == "delta" for command in commands))
 
+    def test_zero_delta_skipped_but_zero_target_reaches_backend(self) -> None:
+        # Idle-suppression is DELTA-only: a ~zero delta = no change, skip it.
+        # An absolute "target" of 0 = fully closed, a real goal, must be sent.
+        env = {REAL_GRIPPER_ENV: "1"}
+        backend = NoopGripperBackend()
+        runtime = GripperRuntime(
+            rollout_mode="real_policy",
+            allow_real_gripper_motion=True,
+            backend=backend,
+            env=env,
+        )
+
+        runtime.dispatch([GripperCommand("left", 0.0, command_type="delta")])
+        self.assertEqual(backend.commands, [])  # zero delta dropped before backend
+
+        target = GripperCommand("right", 0.0, command_type="target")
+        runtime.dispatch([target])
+        self.assertEqual(backend.commands, [target])  # zero target still sent
+
     def test_cartesian_intent_can_carry_gripper_targets(self) -> None:
         intent = tcp_twist_stand_intent(
             left=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0],

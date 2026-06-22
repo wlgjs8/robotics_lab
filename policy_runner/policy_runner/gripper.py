@@ -367,7 +367,11 @@ class GripperRuntime:
         # sequential for the per-tick policy path.
         plan: list[tuple[str, Any]] = []  # ("result", res) | ("send", command)
         for command in commands:
-            if not command.is_nonzero:
+            # Idle-suppression is DELTA-only: a ~zero delta means "no change", skip
+            # it. For a "target" command, value 0 is a legitimate goal (fully
+            # closed), so never skip it here -- the backend deadband/rate gate
+            # decides whether the integrated target needs an actual serial write.
+            if command.command_type == "delta" and not command.is_nonzero:
                 continue
             self.command_count += 1
             decision = self._gate(command)

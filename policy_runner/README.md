@@ -578,8 +578,14 @@ python3 -m policy_runner flow-infer \
 executes only the first `--chunk-execute-steps` sampled actions before
 resampling; the default is half the checkpoint action horizon. Flow gripper
 channels remain separately gated by `GripperRuntime`; simulator/controller-sim
-packets may carry an integrated `gripper_target`, while physical gripper output
+packets may carry a `gripper_target`, while physical gripper output
 still requires `allow_real_gripper_motion=true` and `RB_ALLOW_REAL_GRIPPER=1`.
+`--gripper-action-mode` selects how the checkpoint's action gripper dim is
+interpreted: `absolute` (DEFAULT) treats it as the next-step opening percent and
+commands it directly (matches the latest openpi `--gripper-mode absolute`
+checkpoints); `delta` integrates a per-step opening change `(target-current)/100`
+onto the current opening (legacy relative-gripper checkpoints). Absolute is a
+self-correcting target with no per-step integration drift.
 The Pika serial backend suppresses the vendor SDK's `pika.*` console logging by
 default; set `gripper.suppress_sdk_logs: false` only for SDK-level serial
 debugging.

@@ -809,6 +809,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
              "0 = disabled (policy controls the gripper from step 0).",
     )
     flow_infer.add_argument(
+        "--gripper-action-mode",
+        choices=["absolute", "delta"],
+        default="absolute",
+        help="How to interpret the checkpoint's action gripper dim. 'absolute' (DEFAULT, matches "
+             "the latest openpi `--gripper-mode absolute` checkpoints): the action IS the next-step "
+             "opening percent -> command it directly (no integration). 'delta' (legacy): the action "
+             "is a per-step opening change `(target-current)/100` -> integrate it onto the current "
+             "opening. Use 'delta' only for older checkpoints trained with the relative gripper action.",
+    )
+    flow_infer.add_argument(
         "--chunk-crossfade-steps",
         type=int,
         default=2,
@@ -1595,6 +1605,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 source.enable_async_chunking = True
             # Hold the gripper open for the first N policy steps (reach-before-grasp).
             source.gripper_open_hold_steps = int(getattr(args, "gripper_open_hold_steps", 0) or 0)
+            # Interpret the action gripper dim as an absolute opening (default,
+            # latest openpi) vs a per-step delta to integrate (legacy checkpoints).
+            source.gripper_action_absolute = (
+                str(getattr(args, "gripper_action_mode", "absolute")) == "absolute"
+            )
+            print(
+                f"[flow-infer] gripper action mode = "
+                f"{'absolute' if source.gripper_action_absolute else 'delta'}",
+                flush=True,
+            )
             geometry_status = _load_runtime_geometry_status(config)
             rollout_policy.validate_config(
                 config,

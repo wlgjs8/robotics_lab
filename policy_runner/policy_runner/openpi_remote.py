@@ -197,6 +197,14 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.max_angular_step_rad = float(max_angular_step_rad)
         self.policy_label = "openpi remote policy"
         self.gripper_command_source = "openpi_remote_policy"
+        # Interpret the action gripper dim as an ABSOLUTE next-step opening percent
+        # (default; the latest openpi `--gripper-mode absolute` checkpoints) rather
+        # than a per-step delta. The server returns it in /100 units; _sample_chunk
+        # scales it to percent below, then _integrate_gripper_targets /
+        # _dispatch_gripper_step command it directly. main.py overrides this from
+        # the `--gripper-action-mode` flag; the default keeps direct construction
+        # (e.g. tests) consistent with the base FlowMatchingActionSource default.
+        self.gripper_action_absolute = True
         self.stderr = stderr
         self.device = device
         self.stats: dict[str, Any] = {}
@@ -414,7 +422,11 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             print(f"openpi remote returned unexpected action shape {chunk.shape}", file=self.stderr, flush=True)
             return None
         chunk = chunk[:, :14].copy()
-        # server gripper deltas are in /100 units; in-house chunks use percent deltas.
+        # The server emits the gripper dim in /100 units (opening fraction) for BOTH
+        # the legacy delta convention `(target-current)/100` and the absolute
+        # `--gripper-mode absolute` convention `grip/100`. Scale to percent here; the
+        # delta-vs-absolute interpretation is handled downstream by
+        # gripper_action_absolute (_integrate_gripper_targets / _dispatch_gripper_step).
         chunk[:, _GRIP_DIMS[0]] *= 100.0
         chunk[:, _GRIP_DIMS[1]] *= 100.0
         return chunk[: self.action_horizon]

@@ -426,6 +426,13 @@ class FlowMatchingActionSource:
         self.max_angular_step_rad = float(max_angular_step_rad)
         self.policy_label = "flow policy"
         self.gripper_command_source = "flow_policy"
+        # How to interpret the action gripper dim (already scaled to percent units
+        # by the source, e.g. openpi_remote's *100). True (default) = ABSOLUTE
+        # next-step opening percent -> command it directly (latest openpi
+        # `--gripper-mode absolute` checkpoints). False = per-step percent DELTA
+        # to integrate (legacy `(target-current)/100` checkpoints). Set from the
+        # `--gripper-action-mode` CLI flag in main.py.
+        self.gripper_action_absolute = True
         self.stderr = stderr
         self.device = _resolve_device(device)
 
@@ -818,10 +825,14 @@ class FlowMatchingActionSource:
         return int(self.gripper_runtime.dropped_count)
 
     def _dispatch_gripper_step(self, step: np.ndarray) -> None:
+        # ABSOLUTE checkpoints emit the next-step opening percent -> drive the
+        # gripper backend as a "target" (set the opening directly); legacy DELTA
+        # checkpoints emit a per-step change -> "delta" (accumulate on the motor).
+        command_type = "target" if getattr(self, "gripper_action_absolute", True) else "delta"
         commands = gripper_commands_from_flow_step(
             step.tolist(),
             arm_mask=self.arm_mask.tolist(),
-            command_type="delta",
+            command_type=command_type,
             source=self.gripper_command_source,
         )
         self.gripper_runtime.dispatch(commands)
@@ -1123,7 +1134,17 @@ class FlowMatchingActionSource:
             if self._gripper_targets_by_arm[arm] is None:
                 self._gripper_targets_by_arm[arm] = 0.0 if current is None else current
             if step.shape[0] > step_index:
-                self._gripper_targets_by_arm[arm] = float(self._gripper_targets_by_arm[arm]) + float(step[step_index])
+                if getattr(self, "gripper_action_absolute", True):
+                    # ABSOLUTE: the action dim IS the next-step opening percent;
+                    # command it directly (clamped), never integrate.
+                    self._gripper_targets_by_arm[arm] = float(
+                        np.clip(float(step[step_index]), 0.0, 100.0)
+                    )
+                else:
+                    # DELTA (legacy): accumulate the per-step opening change.
+                    self._gripper_targets_by_arm[arm] = float(
+                        self._gripper_targets_by_arm[arm]
+                    ) + float(step[step_index])
             if hold_open:
                 # Pin to fully open AND reset the integrator there, so when the hold ends the
                 # policy resumes closing from the open state (not from a drifted accumulator).
