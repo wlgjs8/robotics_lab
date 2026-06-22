@@ -80,6 +80,18 @@ class ConditionerFohTest(unittest.TestCase):
         np.testing.assert_allclose(cond.sample(2 * DT).pose, tgt[1], atol=1e-6)
         np.testing.assert_allclose(cond.sample(3 * DT).pose, tgt[2], atol=1e-6)
 
+    def test_last_emitted_property_tracks_emitted_pose(self) -> None:
+        cond = self._make()
+        self.assertIsNone(cond.last_emitted)  # before any chunk
+        a0 = _pose(0.0)
+        cond.begin_chunk(measured_anchor=a0, measured_targets=_targets(a0, [np.array([0.01, 0, 0, 0, 0, 0])]),
+                         continuous_targets=None, t_wall_start=0.0, chunk_id=0)
+        ct = cond.sample(DT)
+        np.testing.assert_allclose(cond.last_emitted, ct.pose, atol=1e-12)
+        # returns a copy (mutating it must not corrupt internal state)
+        cond.last_emitted[0] = 999.0
+        np.testing.assert_allclose(cond.last_emitted, ct.pose, atol=1e-12)
+
     def test_reanchor_flag_only_on_first_sample(self) -> None:
         cond = self._make()
         anchor = _pose(0.0)

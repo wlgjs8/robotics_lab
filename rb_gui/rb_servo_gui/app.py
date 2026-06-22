@@ -402,14 +402,15 @@ def _apply_tcp_delta_to_target(
     return True
 
 
-def _set_tcp_pose_absolute_and_send(
-    safety: OperatorSafety,
+def _set_tcp_pose_absolute_marker(
     scene_handles: dict[str, Any],
     arm: str,
     values_mm_deg: list[float] | tuple[float, ...],
-) -> tuple[bool, str]:
-    """Set one arm's TCP target to the absolute stand-frame pose held in its six
-    PTP fields (x/y/z mm, roll/pitch/yaw deg) and send a TcpPoseTarget.
+) -> bool:
+    """Set one arm's TCP target marker to the absolute stand-frame pose held in its
+    six PTP fields (x/y/z mm, roll/pitch/yaw deg). Does NOT send — the caller sends
+    once, covering all the arms it moved, so a single-arm packet never resets the
+    other arm to Hold.
 
     The orientation is rebuilt with `_rpy_to_wxyz` (Rz·Ry·Rx) — the SAME
     composition the server uses in `rotationFromPose` — so feeding back the
@@ -417,9 +418,9 @@ def _set_tcp_pose_absolute_and_send(
     drift on an unedited commit), and the commanded pose always matches the
     numbers the operator sees."""
     if arm not in {"left", "right"}:
-        return False, f"unsupported TCP arm {arm}"
+        return False
     if len(values_mm_deg) != 6 or not all(math.isfinite(float(v)) for v in values_mm_deg):
-        return False, f"{arm} TCP fields invalid"
+        return False
     position = (
         float(values_mm_deg[0]) * 0.001,
         float(values_mm_deg[1]) * 0.001,
@@ -446,7 +447,36 @@ def _set_tcp_pose_absolute_and_send(
             handle.wxyz = wxyz
         except Exception:
             pass
-    return _send_tcp_pose_target_from_marker(safety, scene_handles, arm)
+    return True
+
+
+def _send_tcp_poses_absolute(
+    safety: OperatorSafety,
+    scene_handles: dict[str, Any],
+    arm_values: dict[str, list[float] | tuple[float, ...]],
+) -> tuple[bool, str]:
+    """Set the absolute stand-frame target(s) for one or BOTH arms, then send a
+    SINGLE TcpPoseTarget packet covering exactly those arms. Sending both arms in
+    one packet is required: a single-arm packet resets the other arm to Hold on the
+    server, so two back-to-back single-arm packets make the second clobber the
+    first (only one arm ends up moving)."""
+    if not arm_values:
+        return False, "no TCP target selected"
+    for arm, values in arm_values.items():
+        if not _set_tcp_pose_absolute_marker(scene_handles, arm, values):
+            return False, f"{arm} TCP target unavailable"
+    scope = "both" if set(arm_values) == {"left", "right"} else next(iter(arm_values))
+    return _send_tcp_pose_target_from_marker(safety, scene_handles, scope)
+
+
+def _set_tcp_pose_absolute_and_send(
+    safety: OperatorSafety,
+    scene_handles: dict[str, Any],
+    arm: str,
+    values_mm_deg: list[float] | tuple[float, ...],
+) -> tuple[bool, str]:
+    """Single-arm convenience wrapper around `_send_tcp_poses_absolute`."""
+    return _send_tcp_poses_absolute(safety, scene_handles, {arm: list(values_mm_deg)})
 
 
 def _ptp_arm_pose_values(handles: dict[str, Any], arm: str) -> list[float] | None:
@@ -2165,11 +2195,17 @@ def build_gui(
                 ok, message = _send_tcp_pose_target_from_marker(safety, handles["scene"], arm)
                 handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-            def _nudge_ptp_axis(arm: str, axis_index: int, angular: bool, sign: float) -> tuple[bool, str]:
+            def _nudge_ptp_axis_selected(axis_index: int, angular: bool, sign: float) -> None:
+                # ONE [−][+] per axis: nudge the arm(s) the operator selected above —
+                # both → left+right TOGETHER (in a single packet), otherwise just
+                # that arm. Both arms MUST go in one packet: a single-arm TcpPoseTarget
+                # resets the other arm to Hold on the server.
+                arm_sel = _tcp_ptp_arm(handles)
+                arms = ("left", "right") if arm_sel == "both" else (arm_sel,)
                 frame_mode = _tcp_frame_mode(handles)
                 if frame_mode == _TCP_FRAME_LOCAL:
-                    # Relative jog in the TCP-local frame (debug-style), anchored on
-                    # the live target marker.
+                    # Relative jog: same delta to each selected arm; the helper sets
+                    # both markers then sends one packet for the scope.
                     step = (
                         _angular_step_radians(float(angular_step.value))
                         if angular
@@ -2177,28 +2213,24 @@ def build_gui(
                     )
                     delta = [0.0] * 6
                     delta[axis_index] = sign * step
-                    return _apply_tcp_delta_and_send_pose_target(
-                        safety, handles["scene"], arm, tuple(delta), frame_mode  # type: ignore[arg-type]
+                    ok, message = _apply_tcp_delta_and_send_pose_target(
+                        safety, handles["scene"], arm_sel, tuple(delta), frame_mode  # type: ignore[arg-type]
                     )
-                # Stand frame: nudge from the mirrored current value so −/+ tracks
-                # exactly what the field (and Pose Monitor) shows.
-                values = _read_ptp_arm_fields(handles, arm)
-                if values is None:
-                    return False, f"{arm} TCP fields unavailable"
+                    handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+                    return
+                # Stand frame: nudge each selected arm from its mirrored current value,
+                # then send ALL of them in a single packet.
                 step_disp = float(angular_step.value) if angular else float(linear_step.value)
-                values[axis_index] += sign * step_disp
-                return _set_tcp_pose_absolute_and_send(safety, handles["scene"], arm, values)
-
-            def _nudge_ptp_axis_selected(axis_index: int, angular: bool, sign: float) -> None:
-                # ONE [−][+] per axis: nudge the arm(s) the operator selected above —
-                # both → left+right together, otherwise just that arm.
-                arm_sel = _tcp_ptp_arm(handles)
-                arms = ("left", "right") if arm_sel == "both" else (arm_sel,)
-                parts = []
+                arm_values: dict[str, list[float]] = {}
                 for arm in arms:
-                    ok, message = _nudge_ptp_axis(arm, axis_index, angular, sign)
-                    parts.append(("OK " if ok else "BLOCKED ") + f"{arm}: {message}")
-                handles["tcp_status"].value = " | ".join(parts)
+                    values = _read_ptp_arm_fields(handles, arm)
+                    if values is None:
+                        handles["tcp_status"].value = f"BLOCKED: {arm} TCP fields unavailable"
+                        return
+                    values[axis_index] += sign * step_disp
+                    arm_values[arm] = values
+                ok, message = _send_tcp_poses_absolute(safety, handles["scene"], arm_values)
+                handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
             def _commit_ptp_axis(axis_index: int, angular: bool) -> None:
                 # Fires on Enter in either slot of this axis's [left | right] vector2
@@ -2215,8 +2247,7 @@ def build_gui(
                 except Exception:
                     return
                 # Diff against the last mirrored values to find which arm the operator
-                # actually edited — commit only that arm (so the unedited arm, which
-                # holds its live pose, never moves). First commit before any mirror:
+                # actually edited — move only that arm. First commit before any mirror:
                 # treat both as edited.
                 shown = handles.get("_tcp_ptp_shown", {}).get(axis_index)
                 edited: list[tuple[str, float]] = []
@@ -2230,25 +2261,30 @@ def build_gui(
                 if not edited:
                     return
                 frame_mode = _tcp_frame_mode(handles)
-                parts = []
-                for arm, raw in edited:
-                    if frame_mode == _TCP_FRAME_LOCAL:
-                        # Relative jog: typed value is a TCP-local delta (mm / deg).
+                if frame_mode == _TCP_FRAME_LOCAL:
+                    # Relative jog per edited arm into its marker, then ONE packet.
+                    scope_arms: list[str] = []
+                    for arm, raw in edited:
                         delta = [0.0] * 6
                         delta[axis_index] = math.radians(raw) if angular else raw * 0.001
-                        ok, message = _apply_tcp_delta_and_send_pose_target(
-                            safety, handles["scene"], arm, tuple(delta), frame_mode  # type: ignore[arg-type]
-                        )
-                    else:
-                        # Absolute set: send the whole pose held in this arm's six
-                        # slots (only the edited axis differs from its live pose).
+                        if not _apply_tcp_delta_to_target(handles["scene"], arm, tuple(delta), frame_mode):  # type: ignore[arg-type]
+                            handles["tcp_status"].value = f"BLOCKED: {arm} TCP target unavailable"
+                            return
+                        scope_arms.append(arm)
+                    scope = "both" if set(scope_arms) == {"left", "right"} else scope_arms[0]
+                    ok, message = _send_tcp_pose_target_from_marker(safety, handles["scene"], scope)
+                else:
+                    # Absolute set: each edited arm's whole pose (only its edited axis
+                    # differs from its live pose); send all edited arms in one packet.
+                    arm_values: dict[str, list[float]] = {}
+                    for arm, _raw in edited:
                         values = _read_ptp_arm_fields(handles, arm)
                         if values is None:
-                            ok, message = False, f"{arm} TCP fields unavailable"
-                        else:
-                            ok, message = _set_tcp_pose_absolute_and_send(safety, handles["scene"], arm, values)
-                    parts.append(("OK " if ok else "BLOCKED ") + f"{arm}: {message}")
-                handles["tcp_status"].value = " | ".join(parts)
+                            handles["tcp_status"].value = f"BLOCKED: {arm} TCP fields unavailable"
+                            return
+                        arm_values[arm] = values
+                    ok, message = _send_tcp_poses_absolute(safety, handles["scene"], arm_values)
+                handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
 
             def _add_ptp_axis_row(axis_label: str, axis_index: int, angular: bool) -> None:
                 # One row per axis: a single label (X/Roll/…) over a [left | right]

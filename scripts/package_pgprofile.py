@@ -143,7 +143,8 @@ def build_summary(results: dict, manifest: dict) -> dict[str, Any]:
     return {
         "n_episodes": results.get("n_done", len(eps)),
         "class_histogram": dict(sorted(hist.items())),
-        "real_ready_count": hist.get("REAL_READY_TS_1P0", 0),
+        # Fix 5: REAL_READY is time_scale-aware (REAL_READY_TS_<ts>); sum all variants.
+        "real_ready_count": sum(v for k, v in hist.items() if str(k).startswith("REAL_READY")),
         "overall": stat_block(),
         "per_class": per_class,
         "speed_precheck_pass_count": sum(1 for e in manifest.get("episodes", []) if e.get("speed_precheck_pass")),

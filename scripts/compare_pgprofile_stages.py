@@ -100,13 +100,21 @@ def main(argv=None):
     def row(label, getter):
         return "| " + label + " | " + " | ".join(_fmt(getter(stages[n])) for n in names) + " |"
 
+    def real_ready_total(s):  # Fix 5: sum all time_scale-aware REAL_READY_TS_* variants
+        return sum(v for k, v in s["hist"].items() if str(k).startswith("REAL_READY"))
+
+    # Ordered union: known classes first, then any extra keys present (e.g. new TS variants).
+    ordered_classes = ALL_CLASSES + sorted(
+        {k for n in names for k in stages[n]["hist"]} - set(ALL_CLASSES)
+    )
+
     L.append(row("episodes", lambda s: s["n"]))
-    L.append(row("REAL_READY_TS_1P0", lambda s: s["hist"].get("REAL_READY_TS_1P0", 0)))
+    L.append(row("REAL_READY (all TS)", real_ready_total))
     L.append("")
     L.append("## class histogram")
     L.append("| class | " + " | ".join(names) + " |")
     L.append("|---|" + "---|" * len(names))
-    for c in ALL_CLASSES:
+    for c in ordered_classes:
         if any(stages[n]["hist"].get(c) for n in names):
             L.append("| " + c + " | " + " | ".join(str(stages[n]["hist"].get(c, 0)) for n in names) + " |")
     L.append("")
@@ -123,7 +131,7 @@ def main(argv=None):
 
     # bar chart of class histograms
     fig, ax = plt.subplots(figsize=(13, 6))
-    classes = [c for c in ALL_CLASSES if any(stages[n]["hist"].get(c) for n in names)]
+    classes = [c for c in ordered_classes if any(stages[n]["hist"].get(c) for n in names)]
     x = np.arange(len(classes))
     w = 0.8 / len(names)
     for i, n in enumerate(names):
@@ -138,7 +146,7 @@ def main(argv=None):
     plt.close(fig)
 
     print(f"wrote {out}/comparison.md, comparison.json, class_histogram_comparison.png")
-    print("REAL_READY per stage:", {n: stages[n]["hist"].get("REAL_READY_TS_1P0", 0) for n in names})
+    print("REAL_READY per stage:", {n: real_ready_total(stages[n]) for n in names})
     return 0
 
 

@@ -3098,6 +3098,8 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.smd_linear_accel_clipped = info.linear_accel_clipped;
     solve.smd_angular_velocity_clipped = info.angular_velocity_clipped;
     solve.smd_angular_accel_clipped = info.angular_accel_clipped;
+    solve.smd_goal_linear_velocity_ff_clipped = info.goal_linear_velocity_ff_clipped;
+    solve.smd_goal_angular_velocity_ff_clipped = info.goal_angular_velocity_ff_clipped;
     solve.smd_goal_linear_velocity_norm_m_s = info.goal_linear_velocity.norm();
     solve.smd_goal_angular_velocity_norm_rad_s = info.goal_angular_velocity.norm();
     solve.smd_reanchor_count = abc.smd_reanchor_count;

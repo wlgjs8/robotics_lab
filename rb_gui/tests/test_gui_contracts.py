@@ -85,6 +85,7 @@ from rb_servo_gui.app import (
     _tcp_target_wxyz,
     _read_ptp_arm_fields,
     _refresh_tcp_ptp_axis_fields,
+    _send_tcp_poses_absolute,
     _set_tcp_pose_absolute_and_send,
     _stand_world_monitor_pose,
     _update_joint_monitor,
@@ -760,6 +761,32 @@ class GuiContractsTest(unittest.TestCase):
         expected = _wxyz_to_xyzw(_rpy_to_wxyz(rx, ry, rz))
         for got, want in zip(left_quat, expected):
             self.assertAlmostEqual(got, want, places=9)
+
+    def test_tcp_ptp_both_arms_sent_in_single_packet(self):
+        # Regression: nudging/committing BOTH arms must send ONE packet carrying
+        # both poses. Two back-to-back single-arm packets make the server reset the
+        # other arm to Hold, so only the second arm moves.
+        class _CaptureSafety:
+            def __init__(self):
+                self.calls = []
+
+            def send_tcp_pose_target(self, *, left_pose, right_pose, left_quaternion_xyzw, right_quaternion_xyzw):
+                self.calls.append((left_pose, right_pose, left_quaternion_xyzw, right_quaternion_xyzw))
+                return True, "ok"
+
+        safety = _CaptureSafety()
+        scene = {}
+        left_vals = [310.0, 120.0, 440.0, 0.0, 0.0, 0.0]
+        right_vals = [-250.0, 100.0, 400.0, 0.0, 0.0, 0.0]
+        ok, message = _send_tcp_poses_absolute(safety, scene, {"left": left_vals, "right": right_vals})
+        self.assertTrue(ok, message)
+        # Exactly ONE packet, carrying BOTH arms.
+        self.assertEqual(len(safety.calls), 1)
+        left_pose, right_pose, left_quat, right_quat = safety.calls[0]
+        self.assertIsNotNone(left_pose)
+        self.assertIsNotNone(right_pose)
+        self.assertAlmostEqual(left_pose[0], 0.310, places=6)
+        self.assertAlmostEqual(right_pose[0], -0.250, places=6)
 
     def test_parser_preserves_actual_and_reference_tcp_pose_fields(self):
         state = sample_state()

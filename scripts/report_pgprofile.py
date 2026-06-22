@@ -53,7 +53,9 @@ def main(argv: list[str] | None = None) -> int:
     hist = results.get("class_histogram", {})
     n_total = manifest.get("n_episodes", len(eps_m))
     n_done = results.get("n_done", len(eps_r))
-    real_ready = hist.get("REAL_READY_TS_1P0", 0)
+    # Fix 5: REAL_READY is now time_scale-aware (REAL_READY_TS_<ts>); sum all variants.
+    real_ready = sum(v for k, v in hist.items() if str(k).startswith("REAL_READY"))
+    real_ready_labels = sorted(k for k in hist if str(k).startswith("REAL_READY"))
 
     req = [float(e["required_time_scale_estimate"]) for e in eps_m
            if e.get("required_time_scale_estimate") is not None]
@@ -83,7 +85,8 @@ def main(argv: list[str] | None = None) -> int:
     L.append(f"- episodes (offline manifest): **{n_total}**, all VALID classes; "
              f"live campaign done: **{n_done}/{n_total}**"
              + ("" if n_done >= n_total else "  _(partial — campaign in progress)_"))
-    L.append(f"- REAL_READY_TS_1P0: **{real_ready}/{n_done}**")
+    L.append(f"- REAL_READY ({', '.join(real_ready_labels) or 'REAL_READY_TS_*'}): "
+             f"**{real_ready}/{n_done}**")
     L.append("")
     L.append("## Goal-metric structure (3 tiers)")
     L.append("```")

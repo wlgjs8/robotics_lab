@@ -76,8 +76,12 @@ def foh_pose(t, t0, p0, q0, t1, p1, q1) -> tuple[np.ndarray, np.ndarray]:
 def twist_from_poses(p0, q0, p1, q1, dt) -> tuple[np.ndarray, np.ndarray]:
     """Finite-difference twist from pose0 to pose1.
 
-    Linear velocity is expressed in the episode pose frame. Angular velocity is
-    the rotation-vector rate of R1 * R0.inv(), also expressed in that pose frame.
+    Linear velocity is expressed in the stand/episode pose frame. Angular velocity is
+    the rotation-vector rate of the BODY-frame delta R0.inv() * R1 — matching the
+    server SMD goal angular-velocity convention (`R_prev.conjugate() * R_goal`,
+    smd_pose_tracker.cpp) so the conditioned twist can feed the SMD command-twist
+    velocity feedforward directly. For magnitude-only consumers (audit / metrics /
+    speed precheck) the frame is immaterial: ||R0.inv()*R1|| == ||R1*R0.inv()||.
     Quaternions are scipy xyzw and are sign-continuized before differencing.
     """
 
@@ -89,7 +93,8 @@ def twist_from_poses(p0, q0, p1, q1, dt) -> tuple[np.ndarray, np.ndarray]:
     q0_arr = quat_canonical(q0)
     q1_arr = quat_canonical(q1, ref=q0_arr)
     v = (p1_arr - p0_arr) / dt_sec
-    delta = quat_to_rotation(q1_arr) * quat_to_rotation(q0_arr).inv()
+    # Body-frame angular delta (R0^-1 R1), matching the SMD's body-frame goal twist.
+    delta = quat_to_rotation(q0_arr).inv() * quat_to_rotation(q1_arr)
     w = delta.as_rotvec() / dt_sec
     return v.astype(np.float64), w.astype(np.float64)
 

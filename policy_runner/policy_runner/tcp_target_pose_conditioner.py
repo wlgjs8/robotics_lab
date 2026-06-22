@@ -129,6 +129,15 @@ class OnlineTcpTargetPoseConditioner:
         self._chunk_id = -1
         self._first_sample = False
 
+    @property
+    def last_emitted(self) -> np.ndarray | None:
+        """The last emitted absolute target pose (7,), or None before the first sample.
+
+        Used by the runtime to seed continuity / measured_blend at chunk boundaries."""
+        if self._prev_emitted is None:
+            return None
+        return self._prev_emitted.copy()
+
     def reset(self) -> None:
         self._prev_emitted = None
         self._knots = None

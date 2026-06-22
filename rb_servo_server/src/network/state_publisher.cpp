@@ -693,6 +693,8 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"smd_linear_accel_clipped", telemetry.smd_linear_accel_clipped},
         {"smd_angular_velocity_clipped", telemetry.smd_angular_velocity_clipped},
         {"smd_angular_accel_clipped", telemetry.smd_angular_accel_clipped},
+        {"smd_goal_linear_velocity_ff_clipped", telemetry.smd_goal_linear_velocity_ff_clipped},
+        {"smd_goal_angular_velocity_ff_clipped", telemetry.smd_goal_angular_velocity_ff_clipped},
         {"smd_goal_linear_velocity_norm_m_s", telemetry.smd_goal_linear_velocity_norm_m_s},
         {"smd_goal_angular_velocity_norm_rad_s", telemetry.smd_goal_angular_velocity_norm_rad_s},
         {"smd_reanchor_count", telemetry.smd_reanchor_count},

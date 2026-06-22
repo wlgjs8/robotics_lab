@@ -398,6 +398,8 @@ struct CartesianSolveTelemetry {
     bool smd_linear_accel_clipped = false;
     bool smd_angular_velocity_clipped = false;
     bool smd_angular_accel_clipped = false;
+    bool smd_goal_linear_velocity_ff_clipped = false;
+    bool smd_goal_angular_velocity_ff_clipped = false;
     double smd_goal_linear_velocity_norm_m_s = 0.0;
     double smd_goal_angular_velocity_norm_rad_s = 0.0;
     uint64_t smd_reanchor_count = 0;

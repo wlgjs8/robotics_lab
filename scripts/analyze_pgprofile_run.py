@@ -54,7 +54,8 @@ IK_SOLVE_P95_US = 1000.0
 IK_SOLVE_MAX_US = 3000.0
 IK_BUDGET_US = 2000.0  # 500 Hz servo tick budget
 # --- classification labels ----------------------------------------------------
-REAL_READY = "REAL_READY_TS_1P0"
+REAL_READY = "REAL_READY_TS_1P0"  # legacy alias (time_scale=1.0); see real_ready_label()
+REAL_READY_PREFIX = "REAL_READY_TS_"
 SPEED_LIMITED = "SPEED_LIMITED"
 IK_BRANCH_RISK = "IK_BRANCH_RISK"
 IK_FAILURE = "IK_FAILURE"
@@ -67,6 +68,19 @@ TRACKING_LAG_HIGH = "TRACKING_LAG_HIGH"
 SMOOTHNESS_HF_HIGH = "SMOOTHNESS_HF_HIGH"
 DATA_QUALITY_BAD = "DATA_QUALITY_BAD"
 NEEDS_MANUAL_REVIEW = "NEEDS_MANUAL_REVIEW"
+
+
+def ts_token(time_scale: float) -> str:
+    """Format a time_scale as a class-name token: 1.0->1P0, 1.25->1P25, 2.0->2P0."""
+    s = f"{float(time_scale):g}"  # drop trailing zeros: 1.0->'1', 1.25->'1.25'
+    if "." not in s:
+        s += ".0"
+    return s.replace(".", "P")
+
+
+def real_ready_label(time_scale: float) -> str:
+    """time_scale-aware REAL_READY label (Fix 5): REAL_READY_TS_<token>."""
+    return f"{REAL_READY_PREFIX}{ts_token(time_scale)}"
 
 
 # ------------------------------------------------------------------ loading ---
@@ -144,12 +158,21 @@ def load_arms(log_path: Path) -> dict[str, dict[str, Any]]:
         for key in ("ik_solve_us", "ik_pos_err", "ik_ori_err", "ik_solution_jump_deg",
                     "ik_min_singular_value", "ik_applied_damping",
                     "self_collision_min_clearance_m", "roi_min_margin_m",
-                    "command_reference_tracking_error_deg"):
+                    "command_reference_tracking_error_deg",
+                    "smd_goal_linear_velocity_norm_m_s", "smd_goal_angular_velocity_norm_rad_s"):
             d[key] = _as_float_array([r.get(key) for r in arm_rows])
         for key in ("ik_branch_jump_clamped", "branch_jump_flag", "singular_damping_flag",
                     "safety_proj_flag", "self_collision_flag", "floor_flag", "roi_flag",
-                    "smd_goal_clamped_flag"):
+                    "smd_goal_clamped_flag",
+                    # Patch 4: separated SMD clip flags (replace the lumped goal-clamped).
+                    "smd_linear_velocity_clipped", "smd_linear_accel_clipped",
+                    "smd_angular_velocity_clipped", "smd_angular_accel_clipped",
+                    "smd_goal_linear_velocity_ff_clipped", "smd_goal_angular_velocity_ff_clipped",
+                    "smd_velocity_feedforward_used"):
             d[key] = _as_bool_array([r.get(key) for r in arm_rows])
+        d["smd_velocity_feedforward_source"] = [
+            str(r.get("smd_velocity_feedforward_source", "")).strip().lower() for r in arm_rows
+        ]
         d["ik_status"] = [str(r.get("ik_status", "")).strip().lower() for r in arm_rows]
         d["fault_latched"] = _as_bool_array([r.get("fault_latched") for r in arm_rows])
         out[arm] = d
@@ -228,7 +251,24 @@ def tier_b(arm: dict[str, Any], cfg) -> dict[str, Any]:
         "reference_span_ratio": span_ratio,
         "reference_endpoint_error_m": endpoint_err,
         "reference_path_length_ratio": plen_ratio,
+        # Legacy lumped clamp (kept for back-compat consumers).
         "smd_goal_clamped_count": int(np.count_nonzero(arm["smd_goal_clamped_flag"])),
+        # Patch 4: separated SMD clip telemetry with distinct reasons. State vel/accel
+        # clips bound the SMD output; the ff clips flag a feedforward goal-velocity spike.
+        "smd_clip": {
+            "linear_velocity_clipped_count": int(np.count_nonzero(arm["smd_linear_velocity_clipped"])),
+            "linear_accel_clipped_count": int(np.count_nonzero(arm["smd_linear_accel_clipped"])),
+            "angular_velocity_clipped_count": int(np.count_nonzero(arm["smd_angular_velocity_clipped"])),
+            "angular_accel_clipped_count": int(np.count_nonzero(arm["smd_angular_accel_clipped"])),
+            "goal_linear_velocity_ff_clipped_count": int(np.count_nonzero(arm["smd_goal_linear_velocity_ff_clipped"])),
+            "goal_angular_velocity_ff_clipped_count": int(np.count_nonzero(arm["smd_goal_angular_velocity_ff_clipped"])),
+        },
+        "smd_velocity_feedforward_used_ratio": (
+            float(np.count_nonzero(arm["smd_velocity_feedforward_used"])) / arm["n"] if arm["n"] else None
+        ),
+        "smd_velocity_feedforward_source": _dominant_nonempty(arm.get("smd_velocity_feedforward_source")),
+        "smd_goal_linear_velocity_p95_m_s": _pct(arm["smd_goal_linear_velocity_norm_m_s"], 95),
+        "smd_goal_angular_velocity_p95_rad_s": _pct(arm["smd_goal_angular_velocity_norm_rad_s"], 95),
         "command_reference_tracking_error_deg_p95": _pct(arm["command_reference_tracking_error_deg"], 95),
     }
 
@@ -355,7 +395,7 @@ def tier_c(arm: dict[str, Any], cfg) -> dict[str, Any]:
 
 # --------------------------------------------------------------- classify -----
 def classify(per_arm: dict[str, Any], *, speed_precheck_pass: bool | None,
-             validity_class: str | None) -> dict[str, Any]:
+             validity_class: str | None, time_scale: float = 1.0) -> dict[str, Any]:
     risks: list[str] = []
     agg: dict[str, Any] = {}
     # aggregate hard counts across arms
@@ -445,7 +485,7 @@ def classify(per_arm: dict[str, Any], *, speed_precheck_pass: bool | None,
     elif hf_fail:
         primary = SMOOTHNESS_HF_HIGH
     else:
-        primary = REAL_READY
+        primary = real_ready_label(time_scale)
 
     for name, cond in (
         (IK_FAILURE, ik_fail > 0), (IK_BRANCH_RISK, branch > 0),
@@ -462,6 +502,20 @@ def classify(per_arm: dict[str, Any], *, speed_precheck_pass: bool | None,
 
 
 # ------------------------------------------------------------------ helpers ---
+def _dominant_nonempty(values: list[Any] | None) -> str | None:
+    """Most frequent non-empty string in a per-tick list (e.g. the vff source)."""
+    if not values:
+        return None
+    counts: dict[str, int] = {}
+    for v in values:
+        s = str(v).strip()
+        if s:
+            counts[s] = counts.get(s, 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
 def _nested(d: dict, *keys) -> Any:
     cur = d
     for k in keys:
@@ -496,7 +550,8 @@ def _path_length(pose: np.ndarray | None) -> float | None:
 
 
 def analyze_run(log_path: Path, cfg_metrics, *, speed_precheck_pass: bool | None = None,
-                validity_class: str | None = None, episode_id: str | None = None) -> dict[str, Any]:
+                validity_class: str | None = None, episode_id: str | None = None,
+                time_scale: float = 1.0) -> dict[str, Any]:
     arms_raw = load_arms(log_path)
     per_arm: dict[str, Any] = {}
     for arm, data in arms_raw.items():
@@ -509,7 +564,7 @@ def analyze_run(log_path: Path, cfg_metrics, *, speed_precheck_pass: bool | None
             "c_final_polish": c_final_polish(data, cfg_metrics),
         }
     classification = classify(per_arm, speed_precheck_pass=speed_precheck_pass,
-                              validity_class=validity_class)
+                              validity_class=validity_class, time_scale=time_scale)
     # A/B/C/D architecture-aligned warnings (deduped, e.g. SMD telemetry unavailable).
     warnings: list[str] = []
     for a in per_arm:
@@ -524,6 +579,7 @@ def analyze_run(log_path: Path, cfg_metrics, *, speed_precheck_pass: bool | None
         "log_path": str(log_path),
         "speed_precheck_pass": speed_precheck_pass,
         "validity_class": validity_class,
+        "time_scale": float(time_scale),
         "warnings": warnings,
         # back-compat keys (unchanged consumers)
         "goal_conditioning_quality_A": {a: per_arm[a]["tier_a"] for a in per_arm},
@@ -608,6 +664,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--episode-id", default=None)
     parser.add_argument("--speed-precheck-pass", choices=["true", "false"], default=None)
     parser.add_argument("--validity-class", default=None)
+    parser.add_argument("--time-scale", type=float, default=1.0,
+                        help="Replay time_scale; sets the REAL_READY_TS_<ts> class label (Fix 5).")
     parser.add_argument("--config", default=None)
     args = parser.parse_args(argv)
 
@@ -617,7 +675,8 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     spp = None if args.speed_precheck_pass is None else (args.speed_precheck_pass == "true")
     result = analyze_run(log_path, cfg.metrics, speed_precheck_pass=spp,
-                         validity_class=args.validity_class, episode_id=args.episode_id)
+                         validity_class=args.validity_class, episode_id=args.episode_id,
+                         time_scale=args.time_scale)
     (out_dir / "pgprofile_result.json").write_text(
         json.dumps(result, indent=2, allow_nan=False, default=lambda o: None) + "\n", encoding="utf-8")
     (out_dir / "pgprofile_summary.md").write_text(render_summary(result), encoding="utf-8")

@@ -272,6 +272,18 @@ bool testCommandTwistFeedforwardZeroesRampLag() {
     return true;
 }
 
+bool testCommandTwistMatchesFiniteDifferenceOnRamp() {
+    // Fix 3: a correct body/stand-frame command twist must drive the SMD to the same
+    // steady state as finite-difference feedforward on a constant-velocity ramp.
+    const double v = 0.05;
+    const double lag_fd = rampSteadyStateLag(/*feedforward=*/true, v);  // finite_difference
+    const double lag_cmd = rampLagWithCommandTwist("command_twist", v, /*supply_twist=*/true);
+    RB_CHECK(std::abs(lag_fd) < 1e-4);
+    RB_CHECK(std::abs(lag_cmd) < 1e-4);
+    RB_CHECK(std::abs(lag_cmd - lag_fd) < 1e-4);  // equivalent steady state
+    return true;
+}
+
 bool testCommandTwistMissingFallsBackToFiniteDifference() {
     rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
     cfg.velocity_feedforward = true;
@@ -354,6 +366,7 @@ int main() {
     if (!testClampsInactiveForSmallMotionsPreserveDynamics()) return 1;
     if (!testVelocityFeedforwardZeroesRampLag()) return 1;
     if (!testCommandTwistFeedforwardZeroesRampLag()) return 1;
+    if (!testCommandTwistMatchesFiniteDifferenceOnRamp()) return 1;
     if (!testCommandTwistMissingFallsBackToFiniteDifference()) return 1;
     if (!testStepInfoClipFlagsAndReanchorCount()) return 1;
     if (!testDeactivateAndReanchor()) return 1;

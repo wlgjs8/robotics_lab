@@ -64,6 +64,19 @@ class Phase1FoundationTest(unittest.TestCase):
         np.testing.assert_allclose(v01, v12, atol=1e-12)
         np.testing.assert_allclose(w01, w12, atol=1e-12)
 
+    def test_twist_angular_is_body_frame(self) -> None:
+        # Fix 3: angular velocity must be the BODY-frame delta R0^-1 R1 (matching the
+        # SMD), NOT the world-frame R1 R0^-1. With R0 = Rz(90deg) and a body-frame
+        # +x rotation, the body delta is about +x while the world delta is about +y.
+        from scipy.spatial.transform import Rotation
+
+        r0 = Rotation.from_euler("z", 90.0, degrees=True)
+        body_delta = Rotation.from_rotvec([0.2, 0.0, 0.0])  # +0.2 rad about body x
+        r1 = r0 * body_delta
+        p = np.zeros(3)
+        _v, w = twist_from_poses(p, r0.as_quat(), p, r1.as_quat(), 1.0)
+        np.testing.assert_allclose(w, [0.2, 0.0, 0.0], atol=1e-9)  # body x, not world y
+
     def test_load_episode_tolerates_renamed_and_missing_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "renamed_episode.hdf5"

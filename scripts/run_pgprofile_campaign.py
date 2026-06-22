@@ -291,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 result = ana.analyze_run(Path(log_path), cfg.metrics,
                                          speed_precheck_pass=spp, validity_class=vclass,
-                                         episode_id=eid)
+                                         episode_id=eid, time_scale=float(args.time_scale))
                 rd = Path(run_dir)
                 (rd / "pgprofile_result.json").write_text(
                     json.dumps(result, indent=2, allow_nan=False, default=lambda o: None) + "\n")

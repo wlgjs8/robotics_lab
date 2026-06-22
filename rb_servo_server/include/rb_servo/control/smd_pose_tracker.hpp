@@ -19,6 +19,11 @@ struct SmdStepInfo {
     bool linear_accel_clipped = false;
     bool angular_velocity_clipped = false;
     bool angular_accel_clipped = false;
+    // Whether the feedforward goal-velocity estimate itself was norm-clamped to the
+    // max tracking velocity (VFF spike guard) — distinct from the state vel/accel
+    // clips above. Important for verifying command_twist / VFF spikes.
+    bool goal_linear_velocity_ff_clipped = false;
+    bool goal_angular_velocity_ff_clipped = false;
     bool velocity_feedforward_used = false;
     // Effective feedforward source THIS step: "finite_difference" | "command_twist"
     // | "none" (ff off). When configured command_twist but the command twist was

@@ -271,11 +271,16 @@ def _proprio_action_frame_from_stats(stats: dict[str, Any] | None) -> str:
 def _resolve_runtime_command_family(
     command_family: str | None,
     stats: dict[str, Any],
+    *,
+    default_command_family: str = "tcp_target_pose",
 ) -> str:
-    family = resolve_flow_command_family(
-        RolloutMode.SIM_DRYRUN,
-        command_family,
-        dataset_stats=stats,
+    # When command_family is unset, fall back to the source-specific default:
+    # tcp_target_pose for the flow / openpi rollout sources (position-control deploy
+    # lane), tcp_twist_local for the DirectBC sources (their trained/streamed default).
+    family = (
+        normalize_flow_command_family(command_family)
+        if command_family
+        else normalize_flow_command_family(default_command_family)
     )
     if _proprio_action_frame_from_stats(stats) == "ee_local" and family not in {
         "tcp_twist_local",
@@ -358,6 +363,11 @@ class FlowMatchingActionSource:
     whether the intent may be sent.
     """
 
+    # Default command family when --command-family is unset. The flow / openpi
+    # rollout sources deploy on position control (tcp_target_pose); the DirectBC
+    # subclasses override this to their streamed tcp_twist_local default.
+    _default_command_family = "tcp_target_pose"
+
     def __init__(
         self,
         checkpoint_path: str | Path,
@@ -437,7 +447,8 @@ class FlowMatchingActionSource:
                 "(pika UMI data needs --ee-local-r-align pika_rz180; measured 2026-06-15)",
                 file=stderr,
             )
-        self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
+        self.command_family_option = _resolve_runtime_command_family(
+            command_family, self.stats, default_command_family=self._default_command_family)
         self.command_family = canonical_flow_command_family(self.command_family_option)
         model_config = dict(checkpoint.get("model_config", {}))
         # camera_names may live only inside model_config (flow checkpoints) rather
@@ -1303,6 +1314,8 @@ class FlowMatchingActionSource:
 class DirectBcImageActionSource(FlowMatchingActionSource):
     """Runtime source for supervised image action-chunk imitation checkpoints."""
 
+    _default_command_family = "tcp_twist_local"
+
     def __init__(
         self,
         checkpoint_path: str | Path,
@@ -1371,7 +1384,8 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
                 "(pika UMI data needs --ee-local-r-align pika_rz180; measured 2026-06-15)",
                 file=stderr,
             )
-        self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
+        self.command_family_option = _resolve_runtime_command_family(
+            command_family, self.stats, default_command_family=self._default_command_family)
         self.command_family = canonical_flow_command_family(self.command_family_option)
         self.camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
         checkpoint_image_size = _positive_int(checkpoint.get("image_size"))
@@ -1506,6 +1520,8 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
 class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
     """Runtime source for prediction-averaged direct-BC checkpoint ensembles."""
 
+    _default_command_family = "tcp_twist_local"
+
     def __init__(
         self,
         report_path: str | Path,
@@ -1569,7 +1585,8 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
                 "(pika UMI data needs --ee-local-r-align pika_rz180; measured 2026-06-15)",
                 file=stderr,
             )
-        self.command_family_option = _resolve_runtime_command_family(command_family, self.stats)
+        self.command_family_option = _resolve_runtime_command_family(
+            command_family, self.stats, default_command_family=self._default_command_family)
         self.command_family = canonical_flow_command_family(self.command_family_option)
         self.camera_names = list(bundle.camera_names)
         self.image_size = int(bundle.image_size)

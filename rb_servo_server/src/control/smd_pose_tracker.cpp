@@ -129,8 +129,10 @@ Pose6D SmdPoseTracker::step(double dt_sec) {
             info.velocity_feedforward_source = "finite_difference";
             if (source == "command_twist") info.command_twist_fallback = true;
         }
-        goal_linear_velocity = clampNorm(goal_linear_velocity, config_.max_linear_velocity_m_s);
-        goal_angular_velocity = clampNorm(goal_angular_velocity, config_.max_angular_velocity_rad_s);
+        goal_linear_velocity = clampNorm(goal_linear_velocity, config_.max_linear_velocity_m_s,
+                                         &info.goal_linear_velocity_ff_clipped);
+        goal_angular_velocity = clampNorm(goal_angular_velocity, config_.max_angular_velocity_rad_s,
+                                          &info.goal_angular_velocity_ff_clipped);
     }
     info.goal_linear_velocity = goal_linear_velocity;
     info.goal_angular_velocity = goal_angular_velocity;

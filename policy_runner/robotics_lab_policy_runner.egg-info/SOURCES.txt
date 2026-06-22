@@ -26,6 +26,7 @@ policy_runner/rollout_modes.py
 policy_runner/safety.py
 policy_runner/servo_command_client.py
 policy_runner/spacemouse.py
+policy_runner/tcp_target_pose_conditioner.py
 policy_runner/training.py
 policy_runner/umi_pipeline.py
 policy_runner/action_sources/__init__.py
@@ -73,6 +74,7 @@ tests/test_recording_and_training.py
 tests/test_soft_deadband.py
 tests/test_spacemouse_hid_reader.py
 tests/test_spacemouse_mapping.py
+tests/test_tcp_target_pose_conditioner.py
 tests/test_teleop_mux.py
 tests/test_umi_dual_cartesian.py
 tests/test_umi_pipeline.py
