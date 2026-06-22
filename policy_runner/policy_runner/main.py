@@ -819,6 +819,15 @@ def _main_with_subcommands(argv: list[str]) -> int:
              "opening. Use 'delta' only for older checkpoints trained with the relative gripper action.",
     )
     flow_infer.add_argument(
+        "--gripper-close-bias",
+        type=float,
+        default=0.0,
+        help="Percent subtracted from the ABSOLUTE gripper opening target so grasps close more "
+             "firmly (lower opening = more closed). E.g. 1.0 turns an 18%% command into 17%%; use it "
+             "when the policy stops a hair short of clamping the object. Clamped to [0,100]; 0 = off "
+             "(DEFAULT). No effect in --gripper-action-mode delta.",
+    )
+    flow_infer.add_argument(
         "--rtc",
         action="store_true",
         help="Enable Real-Time Chunking (RTC) for the openpi remote source: the server freezes the "
@@ -1654,9 +1663,13 @@ def _main_with_subcommands(argv: list[str]) -> int:
             source.gripper_action_absolute = (
                 str(getattr(args, "gripper_action_mode", "absolute")) == "absolute"
             )
+            # Close-bias: subtract a few percent from the absolute opening target so
+            # a marginal grasp clamps (no effect in delta mode).
+            source.gripper_close_bias = float(getattr(args, "gripper_close_bias", 0.0) or 0.0)
             print(
                 f"[flow-infer] gripper action mode = "
-                f"{'absolute' if source.gripper_action_absolute else 'delta'}",
+                f"{'absolute' if source.gripper_action_absolute else 'delta'}"
+                f"{f', close-bias={source.gripper_close_bias:g}%' if source.gripper_close_bias else ''}",
                 flush=True,
             )
             geometry_status = _load_runtime_geometry_status(config)

@@ -47,6 +47,7 @@ def _make_source(*, absolute: bool) -> "FlowMatchingActionSource":
     )
     source._gripper_targets_by_arm = {"left": None, "right": None}
     source.gripper_action_absolute = bool(absolute)
+    source.gripper_close_bias = 0.0
     return source
 
 
@@ -79,6 +80,37 @@ class GripperActionModeTest(unittest.TestCase):
         source._dispatch_gripper_step(_step(42.0, 88.0))
         types = [r.command.command_type for r in source.gripper_runtime.results]
         self.assertEqual(types, ["delta", "delta"])
+
+    def test_close_bias_lowers_absolute_motion_packet_target(self) -> None:
+        source = _make_source(absolute=True)
+        source.gripper_close_bias = 1.0
+        targets = source._integrate_gripper_targets(_step(18.0, 0.5), payload={})
+        self.assertAlmostEqual(targets["left"], 17.0)   # 18 - 1
+        self.assertAlmostEqual(targets["right"], 0.0)   # 0.5 - 1 -> clamped to 0
+
+    def test_close_bias_lowers_absolute_dispatch_value(self) -> None:
+        source = _make_source(absolute=True)
+        source.gripper_close_bias = 1.0
+        source._dispatch_gripper_step(_step(18.0, 88.0))
+        values = [r.command.value for r in source.gripper_runtime.results]
+        self.assertEqual(values, [17.0, 87.0])
+
+    def test_close_bias_ignored_in_delta_mode(self) -> None:
+        source = _make_source(absolute=False)
+        source.gripper_close_bias = 1.0  # no effect in delta mode
+        source._gripper_targets_by_arm = {"left": 50.0, "right": 50.0}
+        targets = source._integrate_gripper_targets(_step(10.0, -5.0), payload={})
+        self.assertAlmostEqual(targets["left"], 60.0)   # integrated, not biased
+        self.assertAlmostEqual(targets["right"], 45.0)
+        source._dispatch_gripper_step(_step(10.0, -5.0))
+        values = [r.command.value for r in source.gripper_runtime.results]
+        self.assertEqual(values, [10.0, -5.0])          # raw deltas, unbiased
+
+    def test_close_bias_zero_is_noop(self) -> None:
+        source = _make_source(absolute=True)  # default bias 0.0
+        targets = source._integrate_gripper_targets(_step(42.0, 88.0), payload={})
+        self.assertAlmostEqual(targets["left"], 42.0)
+        self.assertAlmostEqual(targets["right"], 88.0)
 
 
 if __name__ == "__main__":

@@ -225,6 +225,9 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # the `--gripper-action-mode` flag; the default keeps direct construction
         # (e.g. tests) consistent with the base FlowMatchingActionSource default.
         self.gripper_action_absolute = True
+        # Close-bias (percent subtracted from the absolute opening target so a
+        # marginal grasp clamps); main.py overrides from --gripper-close-bias.
+        self.gripper_close_bias = 0.0
         self.stderr = stderr
         self.device = device
         self.stats: dict[str, Any] = {}

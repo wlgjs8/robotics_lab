@@ -433,6 +433,11 @@ class FlowMatchingActionSource:
         # to integrate (legacy `(target-current)/100` checkpoints). Set from the
         # `--gripper-action-mode` CLI flag in main.py.
         self.gripper_action_absolute = True
+        # Percent subtracted from the ABSOLUTE gripper opening target so grasps
+        # close more firmly (lower opening = more closed): e.g. 1.0 turns an 18%
+        # command into 17%. 0 = off. No effect in delta mode. Set from the
+        # `--gripper-close-bias` CLI flag in main.py.
+        self.gripper_close_bias = 0.0
         self.stderr = stderr
         self.device = _resolve_device(device)
 
@@ -824,11 +829,27 @@ class FlowMatchingActionSource:
     def gripper_dropped_count(self) -> int:
         return int(self.gripper_runtime.dropped_count)
 
+    def _gripper_close_bias(self) -> float:
+        """Percent subtracted from the ABSOLUTE gripper opening target so grasps
+        close more firmly (e.g. 1.0 turns an 18% command into 17%). 0 in delta
+        mode (the action is a relative change, biasing it would compound)."""
+        if not getattr(self, "gripper_action_absolute", True):
+            return 0.0
+        return float(getattr(self, "gripper_close_bias", 0.0) or 0.0)
+
     def _dispatch_gripper_step(self, step: np.ndarray) -> None:
         # ABSOLUTE checkpoints emit the next-step opening percent -> drive the
         # gripper backend as a "target" (set the opening directly); legacy DELTA
         # checkpoints emit a per-step change -> "delta" (accumulate on the motor).
         command_type = "target" if getattr(self, "gripper_action_absolute", True) else "delta"
+        bias = self._gripper_close_bias()
+        if bias:
+            # Close-bias (absolute only): pull the opening target down a notch so a
+            # marginal grasp actually clamps. Clamped to [0, 100]. Arm dims untouched.
+            step = step.copy()
+            for idx in (6, 13):  # left, right gripper dims in the 14-D action step
+                if step.shape[0] > idx:
+                    step[idx] = float(np.clip(float(step[idx]) - bias, 0.0, 100.0))
         commands = gripper_commands_from_flow_step(
             step.tolist(),
             arm_mask=self.arm_mask.tolist(),
@@ -1136,9 +1157,10 @@ class FlowMatchingActionSource:
             if step.shape[0] > step_index:
                 if getattr(self, "gripper_action_absolute", True):
                     # ABSOLUTE: the action dim IS the next-step opening percent;
-                    # command it directly (clamped), never integrate.
+                    # command it directly (clamped), never integrate. close-bias
+                    # pulls the target down a notch so a marginal grasp clamps.
                     self._gripper_targets_by_arm[arm] = float(
-                        np.clip(float(step[step_index]), 0.0, 100.0)
+                        np.clip(float(step[step_index]) - self._gripper_close_bias(), 0.0, 100.0)
                     )
                 else:
                     # DELTA (legacy): accumulate the per-step opening change.

@@ -171,12 +171,12 @@ safety:
         - "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e"
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
       stand_ignore_arm_substrings: ["link0"]
-      d_hard_m: 0.010   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
+      d_hard_m: 0.003   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
       # v_max(max_linear_velocity)=0.32, a_brake=4.0 -> d_hard+0.0128=0.0278; 0.035
       # leaves a ~20mm slow zone (stoppable up to ~0.4 m/s). (Stage 0c)
-      d_slow_m: 0.05    # 2026-06-19 anti-chatter: 0.035→0.05 (gentler velocity gradient; ≥d_hard+vmax²/2a_brake=0.032)
+      d_slow_m: 0.01    # 2026-06-19 anti-chatter: 0.035→0.05 (gentler velocity gradient; ≥d_hard+vmax²/2a_brake=0.032)
       a_brake_m_s2: 3.0  # 2026-06-19 anti-chatter: 4.0→3.0 (softer braking ramp = quieter onset at boundary)
       hyst_m: 0.010      # 2026-06-19 anti-chatter: 0.005→0.010 (break on/off limit-cycle toggle)
       latency_s: 0.003   # 2026-06-19 LPF off + new fw(no actuation latency): 0.010→0.003 (cut vc·comp_s feedback that drives the brake↔release limit cycle; comp_s=max(latency_s,verdict_age) so stale verdicts still floor it)
