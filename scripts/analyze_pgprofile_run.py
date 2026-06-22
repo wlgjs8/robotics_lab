@@ -324,8 +324,13 @@ def _pad_pose(joints: np.ndarray | None) -> np.ndarray | None:
 def ik_safety_feasibility(arm: dict[str, Any]) -> dict[str, Any]:
     n = arm["n"]
     status = arm["ik_status"]
+    # "not_attempted" is NOT a failure: it is the warm-up / anchor / Hold ticks where the
+    # cartesian solve simply did not run (CartesianSolveTelemetry default status). Counting
+    # it as an IK failure produced false IK_FAILURE classifications on clean episodes.
+    NON_FAILURE = ("ok", "success", "", "not_attempted")
     ik_ok = sum(1 for s in status if s in ("ok", "success", ""))
-    ik_fail = sum(1 for s in status if s and s not in ("ok", "success"))
+    ik_not_attempted = sum(1 for s in status if s == "not_attempted")
+    ik_fail = sum(1 for s in status if s and s not in NON_FAILURE)
     solve = arm["ik_solve_us"]
     # ik_min_singular_value is reported as 0.0 on dead-zone ticks where the solver
     # returns the seed without iterating (more frequent with a looser position
@@ -338,6 +343,7 @@ def ik_safety_feasibility(arm: dict[str, Any]) -> dict[str, Any]:
     return {
         "ik_success_ratio": (ik_ok / n) if n else None,
         "ik_failure_count": ik_fail,
+        "ik_not_attempted_count": ik_not_attempted,
         "ik_pos_err_p95_m": _pct(arm["ik_pos_err"], 95),
         "ik_pos_err_max_m": _mx(arm["ik_pos_err"]),
         "ik_ori_err_p95_rad": _pct(arm["ik_ori_err"], 95),

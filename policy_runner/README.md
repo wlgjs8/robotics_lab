@@ -586,6 +586,14 @@ commands it directly (matches the latest openpi `--gripper-mode absolute`
 checkpoints); `delta` integrates a per-step opening change `(target-current)/100`
 onto the current opening (legacy relative-gripper checkpoints). Absolute is a
 self-correcting target with no per-step integration drift.
+`--rtc` enables Real-Time Chunking for the openpi remote source (DEFAULT OFF): the
+server freezes the first `--rtc-inference-delay` actions of the next chunk and
+inpaints the rest toward the previous chunk, so a long action horizon keeps its
+commitment while async replan stays smooth (the boundary crossfade is disabled
+when on). The client round-trips the server's model-space `rtc_raw_actions` as the
+previous chunk; it needs an openpi server that returns that field (otherwise it
+logs once and stays vanilla). Tune with `--rtc-schedule {exp,linear,zeros}` and
+`--rtc-max-guidance-weight` (5.0 per the paper). See `docs/rtc_design.md`.
 The Pika serial backend suppresses the vendor SDK's `pika.*` console logging by
 default; set `gripper.suppress_sdk_logs: false` only for SDK-level serial
 debugging.

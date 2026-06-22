@@ -174,6 +174,10 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         camera_names: tuple[str, str] = ("left_realsense_color", "right_realsense_color"),
         sample_steps: int = 1,  # accepted for CLI symmetry; unused remotely
         device: str = "remote",  # accepted for CLI symmetry; inference is server-side
+        rtc_enabled: bool = False,
+        rtc_inference_delay: int = 2,
+        rtc_prefix_attention_schedule: str = "exp",
+        rtc_max_guidance_weight: float = 5.0,
         stderr: TextIO = sys.stderr,
     ):
         # Deliberately NOT calling super().__init__: there is no local checkpoint to
@@ -252,9 +256,23 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.image_decode_count = 0
         self.missing_camera_count = 0
         self._last_nonzero_twist_by_arm = {"left": False, "right": False}
+        # Real-Time Chunking (RTC). When enabled, each infer sends the previous
+        # chunk back to the server (`prev_action_chunk`) so it freezes the first
+        # `inference_delay` actions and inpaints the rest -- smooth async replan
+        # without the boundary crossfade. The prev chunk MUST be the server's
+        # MODEL-SPACE output (`rtc_raw_actions`), round-tripped untouched (NOT the
+        # gripper-rescaled / r_aligned `actions`). RTC stays OFF by default. See
+        # robotics_lab/docs/rtc_design.md and openpi models_pytorch/rtc.py.
+        self.rtc_enabled = bool(rtc_enabled)
+        self.rtc_inference_delay = int(rtc_inference_delay)
+        self.rtc_prefix_attention_schedule = str(rtc_prefix_attention_schedule)
+        self.rtc_max_guidance_weight = float(rtc_max_guidance_weight)
+        self._rtc_prev_raw_chunk: np.ndarray | None = None
+        self._rtc_warned_no_raw = False
         # Chunk-boundary twist crossfade state (mirrors FlowMatchingActionSource;
-        # this class skips super().__init__). 0 = off.
-        self._chunk_crossfade_steps = int(chunk_crossfade_steps)
+        # this class skips super().__init__). 0 = off. RTC subsumes the crossfade
+        # (it makes boundaries continuous at the flow level), so disable it when on.
+        self._chunk_crossfade_steps = 0 if self.rtc_enabled else int(chunk_crossfade_steps)
         self._steps_since_boundary = 0
         self._prev_emitted_twist_by_arm: dict[str, tuple[float, ...] | None] = {
             "left": None,
@@ -397,6 +415,15 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             return None, decode_count, max(missing_count, 2 - len(images))
         return images, decode_count, 0
 
+    def reset_rtc(self) -> None:
+        """Drop the cached previous chunk so the next infer cold-starts (vanilla).
+
+        Call on rollout reset so RTC does not guide a new rollout's first chunk
+        toward the previous rollout's committed plan.
+        """
+        self._rtc_prev_raw_chunk = None
+        self._rtc_warned_no_raw = False
+
     # ---------------------------------------------------------------- infer --
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         images, decode_count, missing_count = self._raw_camera_images()
@@ -412,6 +439,15 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             "observation/state": self._proprio_state(payload),
             "prompt": self.prompt,
         }
+        if self.rtc_enabled and self._rtc_prev_raw_chunk is not None:
+            # Round-trip the previous MODEL-SPACE chunk so the server freezes the
+            # first `inference_delay` actions and inpaints the rest toward it.
+            # execute_horizon = the committed steps per replan (chunk_execute_steps).
+            obs["prev_action_chunk"] = self._rtc_prev_raw_chunk
+            obs["inference_delay"] = int(np.clip(self.rtc_inference_delay, 0, self.chunk_execute_steps))
+            obs["execute_horizon"] = int(self.chunk_execute_steps)
+            obs["prefix_attention_schedule"] = self.rtc_prefix_attention_schedule
+            obs["max_guidance_weight"] = float(self.rtc_max_guidance_weight)
         try:
             result = self._client.infer(obs)
         except Exception as exc:  # noqa: BLE001 - remote failure must not crash the loop
@@ -422,6 +458,21 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             print(f"openpi remote returned unexpected action shape {chunk.shape}", file=self.stderr, flush=True)
             return None
         chunk = chunk[:, :14].copy()
+        if self.rtc_enabled:
+            # Cache the server's MODEL-SPACE chunk (pre output-transform) to seed
+            # the next infer's prev_action_chunk. Round-tripped opaque: NOT the
+            # gripper-rescaled `actions` below. Absent => server too old => vanilla.
+            raw = result.get("rtc_raw_actions")
+            if raw is not None:
+                self._rtc_prev_raw_chunk = np.asarray(raw, dtype=np.float32)
+            elif not self._rtc_warned_no_raw:
+                print(
+                    "[flow-infer] RTC enabled but server returned no 'rtc_raw_actions' -> "
+                    "staying vanilla; update the openpi server (policy.py rtc_raw_actions).",
+                    file=self.stderr,
+                    flush=True,
+                )
+                self._rtc_warned_no_raw = True
         # The server emits the gripper dim in /100 units (opening fraction) for BOTH
         # the legacy delta convention `(target-current)/100` and the absolute
         # `--gripper-mode absolute` convention `grip/100`. Scale to percent here; the

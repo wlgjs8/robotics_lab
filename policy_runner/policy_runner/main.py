@@ -819,6 +819,36 @@ def _main_with_subcommands(argv: list[str]) -> int:
              "opening. Use 'delta' only for older checkpoints trained with the relative gripper action.",
     )
     flow_infer.add_argument(
+        "--rtc",
+        action="store_true",
+        help="Enable Real-Time Chunking (RTC) for the openpi remote source: the server freezes the "
+             "first --rtc-inference-delay actions of the next chunk and inpaints the rest toward the "
+             "previous chunk, so async replan is smooth without the boundary crossfade (which is then "
+             "disabled). Keeps long-horizon commitment AND reactivity. DEFAULT OFF (vanilla sampling). "
+             "Requires an openpi server that returns 'rtc_raw_actions' (else it stays vanilla).",
+    )
+    flow_infer.add_argument(
+        "--rtc-inference-delay",
+        type=int,
+        default=2,
+        help="RTC delay d (policy steps guaranteed to execute during inference latency); the first d "
+             "actions are hard-frozen to the previous chunk. ~ceil(inference_latency / policy_dt); "
+             "clamped to [0, chunk_execute_steps]. Only used with --rtc.",
+    )
+    flow_infer.add_argument(
+        "--rtc-schedule",
+        choices=["exp", "linear", "zeros"],
+        default="exp",
+        help="RTC soft-mask schedule over the guided region: 'exp' (DEFAULT, the paper's convex ramp), "
+             "'linear' (plain ramp), or 'zeros' (hard freeze only, no soft guidance). Only used with --rtc.",
+    )
+    flow_infer.add_argument(
+        "--rtc-max-guidance-weight",
+        type=float,
+        default=5.0,
+        help="RTC guidance-weight clip (beta); 5.0 per the paper. Only used with --rtc.",
+    )
+    flow_infer.add_argument(
         "--chunk-crossfade-steps",
         type=int,
         default=2,
@@ -1557,6 +1587,10 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     args.checkpoint,
                     **source_kwargs,
                     **tcp_tp_kwargs,
+                    rtc_enabled=bool(getattr(args, "rtc", False)),
+                    rtc_inference_delay=int(getattr(args, "rtc_inference_delay", 2)),
+                    rtc_prefix_attention_schedule=str(getattr(args, "rtc_schedule", "exp")),
+                    rtc_max_guidance_weight=float(getattr(args, "rtc_max_guidance_weight", 5.0)),
                 )
             elif checkpoint_kind == "direct_bc":
                 source = DirectBcImageActionSource(

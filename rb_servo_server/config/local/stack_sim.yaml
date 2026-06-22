@@ -287,7 +287,7 @@ kinematics:
     # eps below that from the ik_sigma_min telemetry at an ik_branch_jump=1 tick.
     singular_region_eps: 0.1   # UNIFIED-TO-REAL (was 0.06 TUNE-3): wider singular region = earlier damping = safer
     damping_max: 0.08           # TUNE-4 reverted: 0.20 made it FAIL EARLIER (over-damped). exact wrist singularity (sigma_min=0) cannot be solved by damping at any strength.
-    max_solution_jump_deg: 2.0
+    max_solution_jump_deg: 4.0
     # Branch-jump CLAMP (acts, not just observes). When a converged solve still
     # jumps > max_solution_jump_deg from the seed: re-solve the SAME tick at
     # branch_jump_damping_scale x damping (escalating per retry) to pull it back
@@ -364,7 +364,7 @@ cartesian_control:
     # accel clamp IS the max-force clamp; zeta/fn dynamics stay exact inside
     # the limits. NOTE with these numbers a full-speed (50mm/s) stop is force-
     # limited to ~12.5mm of glide (v^2/2a) on large moves.
-    max_linear_velocity_m_s: 0.25        # 250 mm/s (was 50 - capped fast teleop)
+    max_linear_velocity_m_s: 0.40 # 250 mm/s (was 50 - capped fast teleop)
     max_linear_accel_m_s2: 1.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
     max_angular_velocity_rad_s: 1.745329252  # 100 deg/s (was 50)
     max_angular_accel_rad_s2: 6.981317008    # 400 deg/s^2 (was 100)
