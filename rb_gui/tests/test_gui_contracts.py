@@ -3649,9 +3649,17 @@ class SelfCollisionOverlayTest(unittest.TestCase):
 
 
 class _CheckGeomUrdf:
-    def __init__(self):
+    # Mirror the real viser ViserUrdf: it exposes get_actuated_joint_names()
+    # returning the unified URDF's PREFIXED joint names. Without this the overlay
+    # posing path could silently re-map via the 6 short _ROBOT_JOINT_NAMES and
+    # freeze the hull fully extended (the bug this overlay must not regress to).
+    def __init__(self, actuated=("R_j2", "L_j1", "L_j0")):
         self.configs = []
         self.show_collision = None
+        self._actuated = tuple(actuated)
+
+    def get_actuated_joint_names(self):
+        return self._actuated
 
     def update_cfg(self, config):
         self.configs.append(tuple(float(v) for v in config))

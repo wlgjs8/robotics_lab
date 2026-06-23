@@ -230,8 +230,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--duration-sec", type=float, default=0.0, help="auto-stop after N sec (0 = until Ctrl-C)")
     p.add_argument("--max-samples", type=int, default=0, help="auto-stop after N ticks (0 = unlimited)")
     p.add_argument("--idle-timeout-sec", type=float, default=2.0)
-    p.add_argument("--analyze", action="store_true", help="run the A/B/C/D analyzer after recording")
-    p.add_argument("--keep-log", action="store_true",
+    p.add_argument("--analyze", action="store_true", default=True, help="run the A/B/C/D analyzer after recording")
+    p.add_argument("--keep-log", action="store_true", default=True,
                    help="keep the raw per-tick log.csv (~1MB/s). Default: drop it after --analyze to save disk.")
     p.add_argument("--aggregate", action="store_true",
                    help="don't record; combine all analyzed runs under --out-dir into aggregate_table.csv")

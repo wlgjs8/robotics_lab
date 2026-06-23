@@ -1396,7 +1396,13 @@ def update_self_collision_check_geom(scene_handles: dict[str, Any], latest: Any,
         cfg = _checkgeom_joint_config(scene_handles, latest)
         if cfg is not None:
             try:
-                _update_urdf_config(overlay, cfg)
+                # cfg is already built in the unified URDF's actuated-joint order
+                # (prefixed names, all 12 arm joints) by _checkgeom_joint_config, so
+                # apply it DIRECTLY. Do NOT route it through _update_urdf_config: that
+                # helper re-maps via the 6 short _ROBOT_JOINT_NAMES, which never match
+                # the unified URDF's prefixed joints -> every joint falls back to 0
+                # and the overlay freezes fully extended (it never tracks q_sent/q_actual).
+                _apply_urdf_cfg_direct(overlay, cfg)
             except Exception as exc:
                 scene_handles["urdf_checkgeom_update_error"] = f"{type(exc).__name__}: {exc}"
     try:
@@ -1502,6 +1508,20 @@ def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
         # what the monitor checks). See update_self_collision_check_geom.
     except Exception as exc:
         handles["urdf_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
+
+
+def _apply_urdf_cfg_direct(urdf_handle: Any, cfg_radians: Any) -> None:
+    """Push a config that is ALREADY in the handle's actuated-joint order/length
+    straight to ViserUrdf.update_cfg (no _ROBOT_JOINT_NAMES re-mapping). Used by the
+    unified collision-hull overlay, whose actuated joints are the prefixed
+    "<prefix>+<base>" names that _checkgeom_joint_config orders the cfg by."""
+    try:
+        import numpy as np
+
+        payload: Any = np.array(cfg_radians, dtype=float)
+    except Exception:
+        payload = list(cfg_radians)
+    urdf_handle.update_cfg(payload)
 
 
 def _update_urdf_config(
