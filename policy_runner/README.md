@@ -583,9 +583,23 @@ still requires `allow_real_gripper_motion=true` and `RB_ALLOW_REAL_GRIPPER=1`.
 `--gripper-action-mode` selects how the checkpoint's action gripper dim is
 interpreted: `absolute` (DEFAULT) treats it as the next-step opening percent and
 commands it directly (matches the latest openpi `--gripper-mode absolute`
-checkpoints); `delta` integrates a per-step opening change `(target-current)/100`
-onto the current opening (legacy relative-gripper checkpoints). Absolute is a
-self-correcting target with no per-step integration drift.
+checkpoints); `binary` is for checkpoints trained with a binarized open/close
+gripper (e.g. openpi `binary 25`): the model output is bimodal, so it is
+thresholded at `--gripper-binary-threshold` (DEFAULT 50%, the midpoint of the
+0/100 output) and snapped to the physical presets `--gripper-open-percent`
+(DEFAULT 50) / `--gripper-close-percent` (DEFAULT 7); `delta` integrates a
+per-step opening change `(target-current)/100` onto the current opening (legacy
+relative-gripper checkpoints). Absolute/binary are self-correcting targets with no
+per-step integration drift. `absolute` and `binary` apply the open/close mapping
+to BOTH gripper sinks — the motion-packet `gripper_target` and the physical serial
+backend — and `--gripper-open-hold-steps` likewise forces the OPEN level on both
+during the reach-before-grasp window (so it holds the real gripper, not only the
+motion packet). The proprio/state gripper dim is always the continuous absolute
+opening (never binarized), matching the openpi converter `_state`.
+For `openpi://` checkpoints, the model action horizon is discovered from the
+server metadata when available. With older servers, pass `--action-horizon`
+explicitly (`8`, `24`, `50`, etc.); `--chunk-execute-steps` must be less than or
+equal to that full model horizon and is no longer silently clipped.
 `--rtc` enables Real-Time Chunking for the openpi remote source (DEFAULT OFF): the
 server freezes the first `--rtc-inference-delay` actions of the next chunk and
 inpaints the rest toward the previous chunk, so a long action horizon keeps its

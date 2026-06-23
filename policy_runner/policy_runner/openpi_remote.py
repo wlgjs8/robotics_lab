@@ -60,6 +60,52 @@ OPENPI_DEFAULT_PROMPT = (
 _GRIP_DIMS = (6, 13)
 _FAKE_IMAGES_ENV = "OPENPI_REMOTE_FAKE_IMAGES"
 _SKIP_WARMUP_ENV = "OPENPI_REMOTE_SKIP_WARMUP"
+_LEGACY_OPENPI_ACTION_HORIZON = 16
+
+
+def _action_horizon_from_metadata(metadata: Any) -> int | None:
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("action_horizon")
+    if raw is None:
+        return None
+    horizon = int(raw)
+    if horizon <= 0:
+        raise ValueError(f"openpi server metadata action_horizon must be positive, got {raw!r}")
+    return horizon
+
+
+def _resolve_openpi_action_horizon(action_horizon: int | None, metadata: Any) -> int:
+    metadata_horizon = _action_horizon_from_metadata(metadata)
+    if action_horizon is not None:
+        resolved = int(action_horizon)
+        if resolved <= 0:
+            raise ValueError("openpi action_horizon must be positive")
+        if metadata_horizon is not None and metadata_horizon != resolved:
+            raise ValueError(
+                "openpi action_horizon mismatch: "
+                f"CLI requested {resolved}, server metadata reports {metadata_horizon}"
+            )
+        return resolved
+    if metadata_horizon is not None:
+        return metadata_horizon
+    return _LEGACY_OPENPI_ACTION_HORIZON
+
+
+def _resolve_openpi_chunk_execute_steps(value: int | None, action_horizon: int) -> int:
+    if action_horizon <= 0:
+        raise ValueError("openpi action_horizon must be positive")
+    if value is None:
+        return max(1, int(action_horizon) // 2)
+    resolved = int(value)
+    if resolved <= 0:
+        raise ValueError("chunk_execute_steps must be positive")
+    if resolved > int(action_horizon):
+        raise ValueError(
+            "chunk_execute_steps must not exceed openpi action_horizon "
+            f"({resolved} > {int(action_horizon)})"
+        )
+    return resolved
 
 
 class _OpenpiWebsocketClient:
@@ -77,6 +123,7 @@ class _OpenpiWebsocketClient:
         self._packer = msgpack_numpy.Packer()
         self._uri = uri
         self._conn = None
+        self._metadata: dict[str, Any] = {}
 
     def _ensure_connection(self) -> None:
         if self._conn is not None:
@@ -88,8 +135,24 @@ class _OpenpiWebsocketClient:
             ping_interval=None,  # warmup can block the server for minutes
             close_timeout=5,
         )
-        self._msgpack.unpackb(conn.recv())  # server metadata handshake
+        try:
+            metadata = self._msgpack.unpackb(conn.recv())  # server metadata handshake
+        except Exception:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - best effort cleanup before retry.
+                pass
+            raise
+        self._metadata = dict(metadata) if isinstance(metadata, dict) else {}
         self._conn = conn
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return dict(self._metadata)
+
+    def fetch_metadata(self) -> dict[str, Any]:
+        self._ensure_connection()
+        return self.metadata
 
     def close(self) -> None:
         if self._conn is not None:
@@ -185,7 +248,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
         prompt: str = OPENPI_DEFAULT_PROMPT,
-        action_horizon: int = 16,
+        action_horizon: int | None = None,
         camera_names: tuple[str, str] = ("left_realsense_color", "right_realsense_color"),
         wrist_crop_frac: float = 0.0,
         sample_steps: int = 1,  # accepted for CLI symmetry; unused remotely
@@ -228,6 +291,14 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # Close-bias (percent subtracted from the absolute opening target so a
         # marginal grasp clamps); main.py overrides from --gripper-close-bias.
         self.gripper_close_bias = 0.0
+        # BINARY gripper (binarized open/close checkpoints, e.g. openpi `binary 25`):
+        # threshold the model's bimodal gripper output and snap to the open/close
+        # presets. A flavour of the absolute path. main.py overrides these from
+        # --gripper-action-mode binary / --gripper-open|close-percent / --gripper-binary-threshold.
+        self.gripper_binary = False
+        self.gripper_open_percent = 50.0
+        self.gripper_close_percent = 7.0
+        self.gripper_binary_threshold = 50.0
         self.stderr = stderr
         self.device = device
         self.stats: dict[str, Any] = {}
@@ -247,10 +318,35 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # the wrist images are out-of-distribution. Realsense deploys leave this 0.0.
         self.wrist_crop_frac = float(wrist_crop_frac)
         self.image_size = 224  # zero-fallback shape only; live frames are sent full-res
-        self.action_horizon = int(action_horizon)
-        default_execute = max(1, self.action_horizon // 2)
-        self.chunk_execute_steps = int(chunk_execute_steps) if chunk_execute_steps else default_execute
-        self.chunk_execute_steps = max(1, min(self.chunk_execute_steps, self.action_horizon))
+        server_metadata: dict[str, Any] = {}
+        metadata_error: Exception | None = None
+        try:
+            server_metadata = self._client.fetch_metadata()
+        except Exception as exc:  # noqa: BLE001 - old/offline servers fall back below; inference retries later.
+            metadata_error = exc
+        self.action_horizon = _resolve_openpi_action_horizon(action_horizon, server_metadata)
+        metadata_horizon = _action_horizon_from_metadata(server_metadata)
+        if metadata_horizon is None:
+            if metadata_error is not None:
+                print(
+                    "[flow-infer] openpi server metadata unavailable "
+                    f"({type(metadata_error).__name__}: {metadata_error}); "
+                    f"using action_horizon={self.action_horizon}",
+                    file=self.stderr,
+                    flush=True,
+                )
+            elif action_horizon is None:
+                print(
+                    "[flow-infer] openpi server metadata has no action_horizon; "
+                    f"using legacy default action_horizon={self.action_horizon}. "
+                    "Pass --action-horizon for h8/h24/h50 checkpoints.",
+                    file=self.stderr,
+                    flush=True,
+                )
+        self.chunk_execute_steps = _resolve_openpi_chunk_execute_steps(
+            chunk_execute_steps,
+            self.action_horizon,
+        )
         self.policy_dt_sec = float(policy_dt_sec) if policy_dt_sec else (1.0 / 30.0)
         self.max_linear_velocity_m_s = (
             float(max_linear_velocity_m_s) if max_linear_velocity_m_s is not None else DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S
@@ -333,6 +429,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         print(
             f"[flow-infer] wrist cameras={self.camera_names} crop_frac={self.wrist_crop_frac}"
             + (" (no crop)" if self.wrist_crop_frac <= 0.0 else ""),
+            file=self.stderr,
+            flush=True,
+        )
+        print(
+            f"[flow-infer] openpi action_horizon={self.action_horizon} "
+            f"chunk_execute_steps={self.chunk_execute_steps}",
             file=self.stderr,
             flush=True,
         )
@@ -503,6 +605,15 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         if chunk.ndim != 2 or chunk.shape[1] < 14:
             print(f"openpi remote returned unexpected action shape {chunk.shape}", file=self.stderr, flush=True)
             return None
+        if int(chunk.shape[0]) != int(self.action_horizon):
+            print(
+                "openpi remote returned action_horizon "
+                f"{int(chunk.shape[0])}, expected {int(self.action_horizon)}; "
+                "check --action-horizon and the served openpi checkpoint config",
+                file=self.stderr,
+                flush=True,
+            )
+            return None
         chunk = chunk[:, :14].copy()
         if self.rtc_enabled:
             # Cache the server's MODEL-SPACE chunk (pre output-transform) to seed
@@ -526,4 +637,4 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # gripper_action_absolute (_integrate_gripper_targets / _dispatch_gripper_step).
         chunk[:, _GRIP_DIMS[0]] *= 100.0
         chunk[:, _GRIP_DIMS[1]] *= 100.0
-        return chunk[: self.action_horizon]
+        return chunk

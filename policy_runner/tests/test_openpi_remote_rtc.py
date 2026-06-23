@@ -19,10 +19,16 @@ import unittest
 try:
     import numpy as np
 
-    from policy_runner.openpi_remote import OpenpiRemoteActionSource
+    from policy_runner.openpi_remote import (
+        OpenpiRemoteActionSource,
+        _resolve_openpi_action_horizon,
+        _resolve_openpi_chunk_execute_steps,
+    )
 except Exception:  # torch (a transitive import) may be absent
     np = None
     OpenpiRemoteActionSource = None  # type: ignore[assignment]
+    _resolve_openpi_action_horizon = None  # type: ignore[assignment]
+    _resolve_openpi_chunk_execute_steps = None  # type: ignore[assignment]
 
 _HORIZON = 4
 _GRIP_LEFT, _GRIP_RIGHT = 6, 13
@@ -44,21 +50,27 @@ class _FakeClient:
         return out
 
 
-def _make_source(*, rtc_enabled: bool, raw=None) -> "OpenpiRemoteActionSource":
+def _make_source(
+    *,
+    rtc_enabled: bool,
+    raw=None,
+    horizon: int = _HORIZON,
+    chunk_execute_steps: int = 3,
+) -> "OpenpiRemoteActionSource":
     assert OpenpiRemoteActionSource is not None
     src = OpenpiRemoteActionSource.__new__(OpenpiRemoteActionSource)
     # actions: gripper dims at 0.5 (-> *100 = 50 in the returned chunk).
-    actions = np.zeros((_HORIZON, 14), dtype=np.float32)
+    actions = np.zeros((horizon, 14), dtype=np.float32)
     actions[:, _GRIP_LEFT] = 0.5
     actions[:, _GRIP_RIGHT] = 0.5
     # raw (model space) is a DISTINCT constant so we can tell it apart from actions.
-    raw_chunk = np.full((_HORIZON, 14), 7.0, dtype=np.float32) if raw is None else raw
+    raw_chunk = np.full((horizon, 14), 7.0, dtype=np.float32) if raw is None else raw
     src._client = _FakeClient(actions, raw_chunk if rtc_enabled else None)
     # Stub the obs builders so _sample_chunk runs without cameras / a model.
     src._raw_camera_images = lambda: ({"left": object(), "right": object()}, 2, 0)
     src._proprio_state = lambda payload: np.zeros(14, dtype=np.float32)
     src.prompt = "task"
-    src.action_horizon = _HORIZON
+    src.action_horizon = horizon
     src.stderr = __import__("sys").stderr
     src.last_image_decode_count = 0
     src.last_missing_camera_count = 0
@@ -67,12 +79,39 @@ def _make_source(*, rtc_enabled: bool, raw=None) -> "OpenpiRemoteActionSource":
     # RTC state.
     src.rtc_enabled = rtc_enabled
     src.rtc_inference_delay = 2
-    src.chunk_execute_steps = 3
+    src.chunk_execute_steps = chunk_execute_steps
     src.rtc_prefix_attention_schedule = "exp"
     src.rtc_max_guidance_weight = 5.0
     src._rtc_prev_raw_chunk = None
     src._rtc_warned_no_raw = False
     return src, raw_chunk
+
+
+@unittest.skipIf(OpenpiRemoteActionSource is None, "torch is not installed")
+class OpenpiRemoteHorizonTest(unittest.TestCase):
+    def test_metadata_horizon_supports_h8_h24_h50(self) -> None:
+        assert _resolve_openpi_action_horizon is not None
+        for horizon in (8, 24, 50):
+            self.assertEqual(
+                _resolve_openpi_action_horizon(None, {"action_horizon": horizon}),
+                horizon,
+            )
+
+    def test_cli_horizon_validates_metadata(self) -> None:
+        assert _resolve_openpi_action_horizon is not None
+        self.assertEqual(_resolve_openpi_action_horizon(24, {"action_horizon": 24}), 24)
+        with self.assertRaisesRegex(ValueError, "action_horizon mismatch"):
+            _resolve_openpi_action_horizon(24, {"action_horizon": 8})
+
+    def test_legacy_default_requires_execute_steps_within_horizon(self) -> None:
+        assert _resolve_openpi_action_horizon is not None
+        assert _resolve_openpi_chunk_execute_steps is not None
+        self.assertEqual(_resolve_openpi_action_horizon(None, {}), 16)
+        self.assertEqual(_resolve_openpi_chunk_execute_steps(8, 8), 8)
+        self.assertEqual(_resolve_openpi_chunk_execute_steps(24, 24), 24)
+        self.assertEqual(_resolve_openpi_chunk_execute_steps(24, 50), 24)
+        with self.assertRaisesRegex(ValueError, "must not exceed"):
+            _resolve_openpi_chunk_execute_steps(24, 8)
 
 
 @unittest.skipIf(OpenpiRemoteActionSource is None, "torch is not installed")
@@ -108,6 +147,17 @@ class OpenpiRemoteRtcTest(unittest.TestCase):
         self.assertEqual(obs["prefix_attention_schedule"], "exp")
         self.assertEqual(obs["max_guidance_weight"], 5.0)
 
+    def test_rtc_h24_sends_full_execute_horizon_and_keeps_full_raw_chunk(self) -> None:
+        src, raw = _make_source(rtc_enabled=True, horizon=24, chunk_execute_steps=24)
+        out = src._sample_chunk({})  # cold start seeds prev
+        self.assertEqual(out.shape[0], 24)
+        src._sample_chunk({})  # warm call sends prev
+        obs = src._client.sent_obs[-1]
+        self.assertEqual(obs["execute_horizon"], 24)
+        self.assertEqual(obs["inference_delay"], 2)
+        self.assertEqual(obs["prev_action_chunk"].shape[0], 24)
+        self.assertTrue(np.allclose(obs["prev_action_chunk"], raw))
+
     def test_inference_delay_clamped_to_execute_horizon(self) -> None:
         src, _ = _make_source(rtc_enabled=True)
         src.rtc_inference_delay = 10
@@ -132,6 +182,11 @@ class OpenpiRemoteRtcTest(unittest.TestCase):
         src._sample_chunk({})
         self.assertIsNone(src._rtc_prev_raw_chunk)
         self.assertTrue(src._rtc_warned_no_raw)
+
+    def test_action_shape_mismatch_fails_closed_instead_of_truncating(self) -> None:
+        src, _ = _make_source(rtc_enabled=False, horizon=16)
+        src.action_horizon = 24
+        self.assertIsNone(src._sample_chunk({}))
 
 
 if __name__ == "__main__":

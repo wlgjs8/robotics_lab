@@ -438,6 +438,16 @@ class FlowMatchingActionSource:
         # command into 17%. 0 = off. No effect in delta mode. Set from the
         # `--gripper-close-bias` CLI flag in main.py.
         self.gripper_close_bias = 0.0
+        # BINARY gripper (for checkpoints trained with a binarized open/close
+        # gripper, e.g. openpi `binary 25`): the model's gripper-action output is
+        # bimodal, so threshold it and snap to the physical open/close presets
+        # instead of commanding the raw opening. A flavour of the absolute path
+        # (gripper_action_absolute stays True). Set from `--gripper-action-mode
+        # binary` + `--gripper-open/close-percent` / `--gripper-binary-threshold`.
+        self.gripper_binary = False
+        self.gripper_open_percent = 50.0
+        self.gripper_close_percent = 7.0
+        self.gripper_binary_threshold = 50.0
         self.stderr = stderr
         self.device = _resolve_device(device)
 
@@ -861,24 +871,63 @@ class FlowMatchingActionSource:
     def _gripper_close_bias(self) -> float:
         """Percent subtracted from the ABSOLUTE gripper opening target so grasps
         close more firmly (e.g. 1.0 turns an 18% command into 17%). 0 in delta
-        mode (the action is a relative change, biasing it would compound)."""
+        mode (the action is a relative change, biasing it would compound), and 0
+        in binary mode (the value snaps to the open/close presets)."""
         if not getattr(self, "gripper_action_absolute", True):
+            return 0.0
+        if getattr(self, "gripper_binary", False):
             return 0.0
         return float(getattr(self, "gripper_close_bias", 0.0) or 0.0)
 
+    def _map_gripper_opening(self, raw_percent: float) -> float:
+        """Map the model's raw gripper-action opening percent (already in percent
+        units) to the opening percent to command. Used by both gripper sinks
+        (motion-packet target and serial-backend dispatch) in the target-command
+        modes (absolute / binary); DELTA never calls this.
+
+        binary: the checkpoint was trained with a binarized open/close gripper
+        (e.g. openpi `binary 25`), so the model output is bimodal -- threshold it
+        and snap to the physical open/close presets (`--gripper-open-percent` /
+        `--gripper-close-percent`). absolute: pass the opening through, minus the
+        close-bias. Both clamp to the [0, 100] opening range."""
+        if getattr(self, "gripper_binary", False):
+            threshold = float(getattr(self, "gripper_binary_threshold", 50.0))
+            target = (
+                float(getattr(self, "gripper_open_percent", 50.0))
+                if float(raw_percent) >= threshold
+                else float(getattr(self, "gripper_close_percent", 7.0))
+            )
+            return float(np.clip(target, 0.0, 100.0))
+        return float(np.clip(float(raw_percent) - self._gripper_close_bias(), 0.0, 100.0))
+
+    def _gripper_hold_open_value(self) -> float:
+        """Opening percent commanded while holding the gripper open during the
+        reach-before-grasp window: the binary OPEN preset (so binary stays on its
+        two physical levels), otherwise fully open."""
+        if getattr(self, "gripper_binary", False):
+            return float(np.clip(getattr(self, "gripper_open_percent", 50.0), 0.0, 100.0))
+        return 100.0
+
     def _dispatch_gripper_step(self, step: np.ndarray) -> None:
-        # ABSOLUTE checkpoints emit the next-step opening percent -> drive the
-        # gripper backend as a "target" (set the opening directly); legacy DELTA
+        # ABSOLUTE/BINARY checkpoints emit an opening target -> drive the gripper
+        # backend as a "target" (set the opening directly); legacy DELTA
         # checkpoints emit a per-step change -> "delta" (accumulate on the motor).
+        # This serial-backend dispatch drives the PHYSICAL gripper in real_policy
+        # (PikaSerialGripperBackend), so the binary open/close mapping and the
+        # reach-before-grasp hold-open must be applied here too (not only on the
+        # motion-packet target in _integrate_gripper_targets).
         command_type = "target" if getattr(self, "gripper_action_absolute", True) else "delta"
-        bias = self._gripper_close_bias()
-        if bias:
-            # Close-bias (absolute only): pull the opening target down a notch so a
-            # marginal grasp actually clamps. Clamped to [0, 100]. Arm dims untouched.
+        if command_type == "target":
+            # _gripper_hold_open_now is set for THIS step by _integrate_gripper_targets,
+            # which always runs immediately before dispatch.
+            hold_open = bool(getattr(self, "_gripper_hold_open_now", False))
+            hold_value = self._gripper_hold_open_value()
             step = step.copy()
             for idx in (6, 13):  # left, right gripper dims in the 14-D action step
                 if step.shape[0] > idx:
-                    step[idx] = float(np.clip(float(step[idx]) - bias, 0.0, 100.0))
+                    step[idx] = (
+                        hold_value if hold_open else self._map_gripper_opening(float(step[idx]))
+                    )
         commands = gripper_commands_from_flow_step(
             step.tolist(),
             arm_mask=self.arm_mask.tolist(),
@@ -1166,15 +1215,21 @@ class FlowMatchingActionSource:
         payload: dict[str, Any],
     ) -> dict[str, float | None]:
         targets: dict[str, float | None] = {"left": None, "right": None}
-        if not self._allow_gripper_targets_in_motion_packet():
-            return targets
-        # Optionally hold the gripper fully OPEN for the first N executed policy steps so the
-        # arm can reach toward the object before the policy is allowed to close it (avoids a
-        # premature grasp at rollout start). Set via `source.gripper_open_hold_steps`.
+        # Reach-before-grasp: hold the gripper OPEN for the first N executed policy
+        # steps so the arm can reach toward the object before the policy is allowed
+        # to close it (avoids a premature grasp at rollout start). Set via
+        # `source.gripper_open_hold_steps`. The step counter and the per-step
+        # hold-open flag are computed here (this method always runs once per
+        # executed step, immediately before _dispatch_gripper_step) and the flag is
+        # shared with dispatch so the PHYSICAL serial backend honours the hold too.
         open_hold_steps = int(getattr(self, "gripper_open_hold_steps", 0) or 0)
         step_idx = int(getattr(self, "_gripper_integrate_count", 0))
         self._gripper_integrate_count = step_idx + 1
         hold_open = step_idx < open_hold_steps
+        self._gripper_hold_open_now = hold_open
+        if not self._allow_gripper_targets_in_motion_packet():
+            return targets
+        hold_value = self._gripper_hold_open_value()
         for arm, mask_index, step_index in (("left", 0, 6), ("right", 1, 13)):
             if len(self.arm_mask) <= mask_index or self.arm_mask[mask_index] <= 0.0:
                 continue
@@ -1185,11 +1240,11 @@ class FlowMatchingActionSource:
                 self._gripper_targets_by_arm[arm] = 0.0 if current is None else current
             if step.shape[0] > step_index:
                 if getattr(self, "gripper_action_absolute", True):
-                    # ABSOLUTE: the action dim IS the next-step opening percent;
-                    # command it directly (clamped), never integrate. close-bias
-                    # pulls the target down a notch so a marginal grasp clamps.
-                    self._gripper_targets_by_arm[arm] = float(
-                        np.clip(float(step[step_index]) - self._gripper_close_bias(), 0.0, 100.0)
+                    # ABSOLUTE/BINARY: the action dim IS the next-step opening;
+                    # command it directly (never integrate). absolute applies the
+                    # close-bias; binary snaps to the open/close presets. Clamped.
+                    self._gripper_targets_by_arm[arm] = self._map_gripper_opening(
+                        float(step[step_index])
                     )
                 else:
                     # DELTA (legacy): accumulate the per-step opening change.
@@ -1197,9 +1252,10 @@ class FlowMatchingActionSource:
                         self._gripper_targets_by_arm[arm]
                     ) + float(step[step_index])
             if hold_open:
-                # Pin to fully open AND reset the integrator there, so when the hold ends the
-                # policy resumes closing from the open state (not from a drifted accumulator).
-                self._gripper_targets_by_arm[arm] = 100.0
+                # Pin to OPEN (binary preset, else fully open) AND reset the integrator
+                # there, so when the hold ends the policy resumes closing from the open
+                # state (not from a drifted accumulator).
+                self._gripper_targets_by_arm[arm] = hold_value
             targets[arm] = self._gripper_targets_by_arm[arm]
         return targets
 

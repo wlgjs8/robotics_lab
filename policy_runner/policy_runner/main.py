@@ -801,6 +801,15 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
     )
     flow_infer.add_argument(
+        "--action-horizon",
+        type=int,
+        default=None,
+        help=(
+            "OpenPI remote model action horizon. New servers report this in websocket metadata; "
+            "set explicitly for old servers or to validate h8/h24/h50 deploys."
+        ),
+    )
+    flow_infer.add_argument(
         "--gripper-open-hold-steps",
         type=int,
         default=0,
@@ -810,13 +819,39 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     flow_infer.add_argument(
         "--gripper-action-mode",
-        choices=["absolute", "delta"],
+        choices=["absolute", "delta", "binary"],
         default="absolute",
         help="How to interpret the checkpoint's action gripper dim. 'absolute' (DEFAULT, matches "
              "the latest openpi `--gripper-mode absolute` checkpoints): the action IS the next-step "
-             "opening percent -> command it directly (no integration). 'delta' (legacy): the action "
+             "opening percent -> command it directly (no integration). 'binary' (for checkpoints "
+             "trained with a binarized open/close gripper, e.g. openpi `binary 25`): the action is "
+             "bimodal -> threshold it (--gripper-binary-threshold) and snap to the physical open/close "
+             "presets (--gripper-open-percent / --gripper-close-percent). 'delta' (legacy): the action "
              "is a per-step opening change `(target-current)/100` -> integrate it onto the current "
              "opening. Use 'delta' only for older checkpoints trained with the relative gripper action.",
+    )
+    flow_infer.add_argument(
+        "--gripper-open-percent",
+        type=float,
+        default=50.0,
+        help="Opening percent commanded for the OPEN level in --gripper-action-mode binary "
+             "(DEFAULT 50). Clamped to [0,100]. Also used as the hold value for "
+             "--gripper-open-hold-steps in binary mode.",
+    )
+    flow_infer.add_argument(
+        "--gripper-close-percent",
+        type=float,
+        default=7.0,
+        help="Opening percent commanded for the CLOSE level in --gripper-action-mode binary "
+             "(DEFAULT 7). Clamped to [0,100].",
+    )
+    flow_infer.add_argument(
+        "--gripper-binary-threshold",
+        type=float,
+        default=50.0,
+        help="Decision threshold (opening percent) for --gripper-action-mode binary: the model's "
+             "gripper output >= threshold -> OPEN, else CLOSE (DEFAULT 50, the midpoint of the "
+             "model's bimodal 0/100 output). Only used in binary mode.",
     )
     flow_infer.add_argument(
         "--gripper-close-bias",
@@ -1606,6 +1641,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     **tcp_tp_kwargs,
                     camera_names=_wrist_camera_names,
                     wrist_crop_frac=float(config.camera.wrist_crop_frac),
+                    action_horizon=args.action_horizon,
                     rtc_enabled=bool(getattr(args, "rtc", False)),
                     rtc_inference_delay=int(getattr(args, "rtc_inference_delay", 2)),
                     rtc_prefix_attention_schedule=str(getattr(args, "rtc_schedule", "exp")),
@@ -1659,17 +1695,35 @@ def _main_with_subcommands(argv: list[str]) -> int:
             # Hold the gripper open for the first N policy steps (reach-before-grasp).
             source.gripper_open_hold_steps = int(getattr(args, "gripper_open_hold_steps", 0) or 0)
             # Interpret the action gripper dim as an absolute opening (default,
-            # latest openpi) vs a per-step delta to integrate (legacy checkpoints).
-            source.gripper_action_absolute = (
-                str(getattr(args, "gripper_action_mode", "absolute")) == "absolute"
+            # latest openpi), a binarized open/close target (binary checkpoints),
+            # or a per-step delta to integrate (legacy checkpoints). 'binary' is a
+            # flavour of the absolute (target-command) path.
+            gripper_mode = str(getattr(args, "gripper_action_mode", "absolute"))
+            source.gripper_action_absolute = gripper_mode in ("absolute", "binary")
+            source.gripper_binary = gripper_mode == "binary"
+            source.gripper_open_percent = float(getattr(args, "gripper_open_percent", 50.0))
+            source.gripper_close_percent = float(getattr(args, "gripper_close_percent", 7.0))
+            source.gripper_binary_threshold = float(
+                getattr(args, "gripper_binary_threshold", 50.0)
             )
             # Close-bias: subtract a few percent from the absolute opening target so
-            # a marginal grasp clamps (no effect in delta mode).
+            # a marginal grasp clamps (no effect in delta or binary mode).
             source.gripper_close_bias = float(getattr(args, "gripper_close_bias", 0.0) or 0.0)
+            if source.gripper_binary:
+                detail = (
+                    f", open={source.gripper_open_percent:g}% close={source.gripper_close_percent:g}%"
+                    f" threshold={source.gripper_binary_threshold:g}%"
+                )
+            elif source.gripper_action_absolute:
+                detail = (
+                    f", close-bias={source.gripper_close_bias:g}%"
+                    if source.gripper_close_bias
+                    else ""
+                )
+            else:
+                detail = ""
             print(
-                f"[flow-infer] gripper action mode = "
-                f"{'absolute' if source.gripper_action_absolute else 'delta'}"
-                f"{f', close-bias={source.gripper_close_bias:g}%' if source.gripper_close_bias else ''}",
+                f"[flow-infer] gripper action mode = {gripper_mode}{detail}",
                 flush=True,
             )
             geometry_status = _load_runtime_geometry_status(config)
