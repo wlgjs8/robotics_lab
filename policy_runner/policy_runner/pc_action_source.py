@@ -107,6 +107,11 @@ class PointCloudFlowActionSource(FlowMatchingActionSource):
         self._proprio_mode, self._velocity_steps = _infer_proprio_layout(total_proprio)
         self._proprio_mean = np.asarray(self.stats.get("proprio_mean", []), dtype=np.float32)
         self._proprio_std = np.asarray(self.stats.get("proprio_std", []), dtype=np.float32)
+        # Cloud normalization stats (MUST match pc_dataset.normalize_pc_sample, or
+        # the PointNet encoder sees an out-of-distribution scale, saturates, and
+        # the policy effectively ignores the scene).
+        self._pc_xyz_mean = np.asarray(self.stats.get("pc_xyz_mean", [0.0, 0.0, 0.0]), dtype=np.float32)
+        self._pc_xyz_std = np.maximum(np.asarray(self.stats.get("pc_xyz_std", [1.0, 1.0, 1.0]), dtype=np.float32), 1e-6)
         self._vel = RuntimeVelocityBuffer(self._velocity_steps)
         # EE-frame chunk we produced last (pre r_align / rotation-mask), used to
         # feed the velocity buffer the deltas actually executed (W-invariant).
@@ -209,6 +214,12 @@ class PointCloudFlowActionSource(FlowMatchingActionSource):
         cloud = self._build_runtime_cloud(payload)
         if cloud is None:
             return None
+        # Normalize the cloud EXACTLY like training (pc_dataset.normalize_pc_sample):
+        # xyz standardized by pc_xyz stats, rgb [0,1] -> [-1,1]. Applied to the whole
+        # (V,N,6) array including zero-padded inactive arms (training does the same).
+        cloud = cloud.copy()
+        cloud[..., :3] = (cloud[..., :3] - self._pc_xyz_mean) / self._pc_xyz_std
+        cloud[..., 3:6] = (cloud[..., 3:6] - 0.5) / 0.5
 
         proprio_raw = self._build_runtime_proprio(payload)
         if self._proprio_mean.size == proprio_raw.size and self._proprio_std.size == proprio_raw.size:
