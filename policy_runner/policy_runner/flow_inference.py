@@ -909,6 +909,37 @@ class FlowMatchingActionSource:
         return 100.0
 
     def _dispatch_gripper_step(self, step: np.ndarray) -> None:
+        # RAW RIGHT-ARM action as predicted by the model, BEFORE the gripper binary
+        # threshold / open-close snap (_map_gripper_opening) is applied: pose delta
+        # (dxyz, rxyz) + the model's raw gripper opening prediction in percent
+        # (step[13]). Printed unconditionally so it shows on a plain flow-infer run.
+        _raw = np.asarray(step, dtype=np.float64).reshape(-1)
+        if _raw.shape[0] > 13:
+            # Post-threshold commanded gripper value: replicate exactly what the
+            # dispatch below sends for each gripper -- the reach-before-grasp
+            # hold-open value if active, else the binary threshold / absolute
+            # clip mapping (_map_gripper_opening).
+            def _grip_cmd_str(raw_grip: float) -> str:
+                if not getattr(self, "gripper_action_absolute", True):
+                    return " -> delta (no threshold)"
+                if bool(getattr(self, "_gripper_hold_open_now", False)):
+                    grip_cmd = self._gripper_hold_open_value()
+                else:
+                    grip_cmd = self._map_gripper_opening(float(raw_grip))
+                if getattr(self, "gripper_binary", False):
+                    thr = float(getattr(self, "gripper_binary_threshold", 50.0))
+                    decision = "OPEN" if float(raw_grip) >= thr else "CLOSE"
+                    return f" -> {decision} {grip_cmd:.1f}% (thr={thr:g})"
+                return f" -> cmd={grip_cmd:.1f}%"
+
+            for _arm, _v in (("R", _raw[7:14]), ("L", _raw[0:7])):
+                print(
+                    f"[flow-infer] RAW {_arm} action (pre-threshold) "
+                    f"dxyz=[{_v[0]:+.4f} {_v[1]:+.4f} {_v[2]:+.4f}] "
+                    f"rxyz=[{_v[3]:+.4f} {_v[4]:+.4f} {_v[5]:+.4f}] "
+                    f"grip={_v[6]:+.2f}{_grip_cmd_str(float(_v[6]))}",
+                    flush=True,
+                )
         # ABSOLUTE/BINARY checkpoints emit an opening target -> drive the gripper
         # backend as a "target" (set the opening directly); legacy DELTA
         # checkpoints emit a per-step change -> "delta" (accumulate on the motor).

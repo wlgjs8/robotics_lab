@@ -703,7 +703,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--execute-arms",
         choices=("both", "left", "right"),
-        default="both",
+        default="right",
         help=(
             "Runtime execution mask: suppress the non-selected arm's commands "
             "(twist + gripper) so it physically holds. The checkpoint stays "
@@ -715,7 +715,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--image-size",
         type=int,
-        default=None,
+        default=224,
         help=(
             "Image size for direct-BC imitation checkpoints or ensembles that do not store image_size; "
             "must match training."
@@ -729,7 +729,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--command-family",
         choices=("tcp_twist_local", "tcp_target_pose"),
-        default=None,
+        default="tcp_target_pose",
         help=(
             "Flow action command family for ee_local body-frame deltas. Defaults to "
             "tcp_target_pose, which composes each delta into an absolute TcpPoseTarget; "
@@ -754,19 +754,20 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     flow_infer.add_argument(
         "--ee-local-r-align",
-        default=None,
+        default="pika_rz180",
         help=(
             "Fixed rotation between the training EE body frame and the RB TCP frame for "
             "ee_local checkpoints. Preset name or 9 row-major floats. Presets: "
             "'pika_rz180' (measured pika-UMI correction, 180deg about approach(z) on BOTH "
             "translation and rotation; pika UMI always uses this), 'pika_rz180_trans_only' "
             "(ablation: flip x/y translation only, leave rotation unchanged). "
-            "Default: none (frames assumed identical)."
+            "Default: pika_rz180 (frames assumed identical)."
         ),
     )
     flow_infer.add_argument(
         "--camera-preview",
         action="store_true",
+        default=True,
         help=(
             "Open a live OpenCV window showing the camera frames the policy consumes "
             "(spawns policy_runner.camera_preview alongside the rollout)."
@@ -775,7 +776,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--policy-dt-sec",
         type=float,
-        default=0.05,
+        default=0.0334,
         help=(
             "Seconds represented by one flow action step. Controller/real flow rollout "
             "requires this value or checkpoint dataset_stats.dt_mean_sec; sim_dryrun "
@@ -797,13 +798,13 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--chunk-execute-steps",
         type=int,
-        default=None,
+        default=8,
         help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
     )
     flow_infer.add_argument(
         "--action-horizon",
         type=int,
-        default=None,
+        default=50,
         help=(
             "OpenPI remote model action horizon. New servers report this in websocket metadata; "
             "set explicitly for old servers or to validate h8/h24/h50 deploys."
@@ -820,7 +821,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-action-mode",
         choices=["absolute", "delta", "binary"],
-        default="absolute",
+        default="binary",
         help="How to interpret the checkpoint's action gripper dim. 'absolute' (DEFAULT, matches "
              "the latest openpi `--gripper-mode absolute` checkpoints): the action IS the next-step "
              "opening percent -> command it directly (no integration). 'binary' (for checkpoints "
@@ -833,9 +834,9 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-open-percent",
         type=float,
-        default=50.0,
+        default=100.0,
         help="Opening percent commanded for the OPEN level in --gripper-action-mode binary "
-             "(DEFAULT 50). Clamped to [0,100]. Also used as the hold value for "
+             "(DEFAULT 75). Clamped to [0,100]. Also used as the hold value for "
              "--gripper-open-hold-steps in binary mode.",
     )
     flow_infer.add_argument(
@@ -850,7 +851,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
         type=float,
         default=50.0,
         help="Decision threshold (opening percent) for --gripper-action-mode binary: the model's "
-             "gripper output >= threshold -> OPEN, else CLOSE (DEFAULT 50, the midpoint of the "
+             "gripper output >= threshold -> OPEN, else CLOSE (DEFAULT 35, the midpoint of the "
              "model's bimodal 0/100 output). Only used in binary mode.",
     )
     flow_infer.add_argument(
@@ -874,7 +875,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--rtc-inference-delay",
         type=int,
-        default=2,
+        default=0,
         help="RTC delay d (policy steps guaranteed to execute during inference latency); the first d "
              "actions are hard-frozen to the previous chunk. ~ceil(inference_latency / policy_dt); "
              "clamped to [0, chunk_execute_steps]. Only used with --rtc.",
@@ -895,14 +896,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--chunk-crossfade-steps",
         type=int,
-        default=2,
+        default=0,
         help=(
             "Blend the first N twists after each chunk-resample boundary from the "
             "previously emitted twist (alpha 0->1) to remove the boundary jerk "
             "without steady-state lag. 0 (default) disables crossfade. Try 2-3."
         ),
     )
-    flow_infer.add_argument("--max-linear-step-m", type=float, default=0.005)
+    flow_infer.add_argument("--max-linear-step-m", type=float, default=0.015)
     flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.01)
     flow_infer.add_argument(
         "--tcp-target-pose-conditioning",
@@ -918,7 +919,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--tcp-target-pose-reanchor-mode",
         choices=["measured_legacy", "last_emitted_continuous", "measured_blend"],
-        default="measured_blend",
+        default="measured_legacy",
         help=(
             "Chunk-boundary handling for foh_se3. measured_blend (default): anchor the new "
             "chunk to the measured pose for drift correction but blend in from the last emitted "
@@ -926,7 +927,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             "last_emitted_continuous: perfect continuity, no drift correction (tests/sim)."
         ),
     )
-    flow_infer.add_argument("--tcp-target-pose-blend-steps", type=int, default=2)
+    flow_infer.add_argument("--tcp-target-pose-blend-steps", type=int, default=0)
     flow_infer.add_argument(
         "--send-conditioned-twist",
         action="store_true",
@@ -1573,22 +1574,34 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 if _osc.latest is None:
                     print("[flow-infer] startup gripper open (command-stream) SKIPPED: no robot state", flush=True)
                 else:
+                    # Open to the configured OPEN level (--gripper-open-percent, the
+                    # same value the policy commands for "open" in binary mode) so the
+                    # rollout begins from the policy's own open pose, not a hardcoded
+                    # 100%.
+                    _open_pct = max(0.0, min(100.0, float(getattr(args, "gripper_open_percent", 50.0))))
                     _occ.acquire_lease(StateStreamLeaseReadback(_osc), timeout_sec=4.0)
                     _occ.send(CommandIntent.arm_motion(timeout_sec=0.5))
                     time.sleep(0.2)
                     _open_intent = CommandIntent(
                         "Hold",
                         timeout_sec=1.0,
-                        left={"mode": "Hold", "gripper_target": 100.0},
-                        right={"mode": "Hold", "gripper_target": 100.0},
+                        left={"mode": "Hold", "gripper_target": _open_pct},
+                        right={"mode": "Hold", "gripper_target": _open_pct},
                     )
                     _odl = time.monotonic() + 1.5
                     while time.monotonic() < _odl:
                         _occ.send(_open_intent)
                         time.sleep(0.05)
                     _occ.release_lease()
-                    time.sleep(0.3)
-                    print("[flow-infer] startup gripper open via command stream (both -> 100%)", flush=True)
+                    print(
+                        f"[flow-infer] startup gripper open via command stream (both -> {_open_pct:g}%)",
+                        flush=True,
+                    )
+                    # Physical jaws keep moving after the last setpoint; settle before
+                    # signalling the policy so the first inference sees a stable open
+                    # pose, not jaws still in motion.
+                    time.sleep(1.5)
+                    print("[flow-infer] startup gripper open settle: waited 1.5s", flush=True)
             finally:
                 _occ.close()
                 _osc.close()
