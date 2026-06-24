@@ -48,6 +48,7 @@ robotics_lab_policy_runner.egg-info/requires.txt
 robotics_lab_policy_runner.egg-info/top_level.txt
 tests/test_camera_bundle_client.py
 tests/test_camera_preview.py
+tests/test_camera_wrist_source_config.py
 tests/test_cartesian_action_source.py
 tests/test_cartesian_tools_and_docs.py
 tests/test_chunk_crossfade.py
@@ -67,6 +68,7 @@ tests/test_hdf5_audit.py
 tests/test_hdf5_recording.py
 tests/test_hdf5_viewer.py
 tests/test_master_arm_joint.py
+tests/test_openpi_remote_fisheye.py
 tests/test_openpi_remote_rtc.py
 tests/test_phase_metrics.py
 tests/test_policy_rollout_modes.py
