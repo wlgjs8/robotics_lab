@@ -798,7 +798,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--chunk-execute-steps",
         type=int,
-        default=8,
+        default=30,
         help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
     )
     flow_infer.add_argument(
@@ -908,7 +908,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--tcp-target-pose-conditioning",
         choices=["legacy_step_hold", "foh_se3"],
-        default="legacy_step_hold",
+        default="foh_se3",
         help=(
             "A-stage conditioning for the streamed tcp_target_pose path. legacy_step_hold "
             "(default) holds each ~30 Hz step target between policy ticks (ZOH into the SMD). "
