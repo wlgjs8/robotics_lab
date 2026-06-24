@@ -600,6 +600,15 @@ For `openpi://` checkpoints, the model action horizon is discovered from the
 server metadata when available. With older servers, pass `--action-horizon`
 explicitly (`8`, `24`, `50`, etc.); `--chunk-execute-steps` must be less than or
 equal to that full model horizon and is no longer silently clipped.
+`--proprio-mode {pose,velocity,velocity_grip}` (DEFAULT `pose`) selects the
+`observation/state` representation and MUST match the served checkpoint's
+training distribution (openpi convert `--state-mode`): `pose` = 14-D
+reset-relative pose; `velocity` = 12-D ee_local velocity (init-pose-independent,
+no gripper); `velocity_grip` = 14-D ee_local velocity + absolute gripper. The
+velocity modes are finite-differenced from the robot TCP pose between proprio
+samples and rescaled to one policy step, so use a small `--chunk-execute-steps`
+(ideally `1`) for the cleanest per-step velocity. `nostate`/`zero_state`
+checkpoints ignore the state server-side, so `pose` is fine there.
 `--rtc` enables Real-Time Chunking for the openpi remote source (DEFAULT OFF): the
 server freezes the first `--rtc-inference-delay` actions of the next chunk and
 inpaints the rest toward the previous chunk, so a long action horizon keeps its

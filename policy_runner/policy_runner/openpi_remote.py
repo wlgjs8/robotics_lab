@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from dataclasses import replace
 from typing import Any, TextIO
 
@@ -193,6 +194,23 @@ def _center_crop(img: np.ndarray, frac: float) -> np.ndarray:
     return img[y0 : y0 + ch, x0 : x0 + cw]
 
 
+def _depth_to_image(
+    depth_raw: np.ndarray, z_near_mm: float = 120.0, z_far_mm: float = 700.0, depth_units_m: float = 1e-4
+) -> np.ndarray:
+    """Live D405 raw depth (uint16, `depth_units_m` m/count) -> 3ch uint8, for the SigLIP encoder.
+
+    MUST stay BIT-IDENTICAL to openpi examples/pika_umi/convert_pika_umi_storage_video.py
+    `_depth_to_image` (same z_near/z_far/units, hole=far, 3ch replicate) so the depth channel is
+    in-distribution at inference. The bundle client (include_depth=True) hands raw z16 as uint16
+    (H,W) — same as the stored training depth — so the same transform applies."""
+    valid = depth_raw > 0
+    d_mm = depth_raw.astype(np.float32) * (depth_units_m * 1000.0)
+    d = np.clip((d_mm - z_near_mm) / (z_far_mm - z_near_mm), 0.0, 1.0)
+    d[~valid] = 1.0
+    g = (d * 255.0).astype(np.uint8)
+    return np.repeat(g[..., None], 3, axis=2)
+
+
 def _quat_xyzw_to_rotvec(q: np.ndarray) -> np.ndarray:
     """Quaternion (x,y,z,w) -> rotation vector (axis * angle), numpy only."""
     q = np.asarray(q, dtype=np.float64)
@@ -247,10 +265,15 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
+        proprio_mode: str = "pose",
         prompt: str = OPENPI_DEFAULT_PROMPT,
         action_horizon: int | None = None,
         camera_names: tuple[str, str] = ("left_realsense_color", "right_realsense_color"),
         wrist_crop_frac: float = 0.0,
+        include_depth: bool = False,
+        depth_z_near_mm: float = 120.0,
+        depth_z_far_mm: float = 700.0,
+        depth_units_m: float = 1e-4,
         sample_steps: int = 1,  # accepted for CLI symmetry; unused remotely
         device: str = "remote",  # accepted for CLI symmetry; inference is server-side
         rtc_enabled: bool = False,
@@ -304,12 +327,41 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.stats: dict[str, Any] = {}
         self.action_frame = "ee_local"
         self.ee_local_r_align = resolve_ee_local_r_align(ee_local_r_align)
+        # Proprio representation sent as observation/state, MUST match the served
+        # checkpoint's training distribution (openpi convert --state-mode):
+        #   pose          -> 14-D reset-relative pose [pos3, rotvec3, grip] x L,R (default; legacy)
+        #   velocity      -> 12-D ee_local velocity   [pos_vel3, rot_vel3]    x L,R (no gripper)
+        #   velocity_grip -> 14-D ee_local velocity + abs gripper [pos_vel3, rot_vel3, grip] x L,R
+        # nostate (zero_state=True) checkpoints ignore this server-side, so any mode works there.
+        # velocity/velocity_grip are init-pose-INDEPENDENT (egocentric) -> avoid the per-episode
+        # rotated reset frame that makes reset-relative pose non-ego-centric (see the velproprio
+        # configs in openpi training/config.py). The velocity is finite-differenced from the robot
+        # TCP pose between proprio samples and normalized to one policy step (the training per-frame
+        # delta); see _proprio_state_velocity.
+        if str(proprio_mode) not in ("pose", "velocity", "velocity_grip"):
+            raise ValueError(
+                f"proprio_mode must be 'pose', 'velocity', or 'velocity_grip', got {proprio_mode!r}"
+            )
+        self.proprio_mode = str(proprio_mode)
+        self._state_dim = 12 if self.proprio_mode == "velocity" else 14
+        # Velocity-proprio finite-difference memory (per arm): the previous proprio-sample TCP pose
+        # and the wall-clock of that sample (to rescale a multi-step displacement to one policy step).
+        self._vel_prev_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
+        self._vel_prev_sample_t: float | None = None
         self.command_family_option = (
             normalize_flow_command_family(command_family) if command_family else "tcp_twist_local"
         )
         self.command_family = canonical_flow_command_family(self.command_family_option)
         # Fake-image smoke mode runs camera-less so the runtime does not gate on frames.
         self.camera_names = [] if self._fake_images else [str(name) for name in camera_names]
+        # Depth (Option A): an include_depth checkpoint also gets *_wrist_0_depth through the same
+        # SigLIP. The live D405 depth stream names are the color names with color->depth; the camera
+        # bundle client MUST be built with include_depth=True (main.py) so z16 is decoded.
+        self.include_depth = bool(include_depth)
+        self.depth_camera_names = [n.replace("color", "depth") for n in self.camera_names]
+        self.depth_z_near_mm = float(depth_z_near_mm)
+        self.depth_z_far_mm = float(depth_z_far_mm)
+        self.depth_units_m = float(depth_units_m)
         # Center-crop fraction applied to each wrist frame before sending to the server.
         # 0.0 = off (send full frame). The fisheye fe65 checkpoints were trained on a
         # 0.65 center-crop of the 640x480 fisheye (-> 416x312) baked in at LeRobot
@@ -438,6 +490,17 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             file=self.stderr,
             flush=True,
         )
+        print(
+            f"[flow-infer] proprio_mode={self.proprio_mode} (state_dim={self._state_dim}) "
+            + (
+                "-- MUST match the served checkpoint's --state-mode; velocity is finite-differenced "
+                "from TCP pose (use a small --chunk-execute-steps for the cleanest per-step velocity)"
+                if self.proprio_mode != "pose"
+                else "-- 14-D reset-relative pose"
+            ),
+            file=self.stderr,
+            flush=True,
+        )
         self._logged_wrist_shape = False
 
         # The server's first inference triggers torch compile/kernel autotune and can
@@ -452,9 +515,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         obs = {
             "observation/left_wrist_0_rgb": zero,
             "observation/right_wrist_0_rgb": zero,
-            "observation/state": np.zeros(14, dtype=np.float32),
+            "observation/state": np.zeros(self._state_dim, dtype=np.float32),
             "prompt": self.prompt,
         }
+        if getattr(self, "include_depth", False):
+            obs["observation/left_wrist_0_depth"] = zero.copy()
+            obs["observation/right_wrist_0_depth"] = zero.copy()
         print("openpi remote: warmup inference (server compile may take minutes)...", file=self.stderr, flush=True)
         started = time.perf_counter()
         try:
@@ -478,6 +544,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         reset anchor is latched on the first state this rollout sees, and MUST
         match the episode-first-frame anchor used when building the training
         dataset (examples/pika_umi/convert_pika_umi_data_to_lerobot.py)."""
+        if self.proprio_mode in ("velocity", "velocity_grip"):
+            return self._proprio_state_velocity(payload)
         from scipy.spatial.transform import Rotation
 
         features: list[np.ndarray] = []
@@ -511,6 +579,80 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             # asymmetric (input left in TCP frame while output is rotated to tip).
             state = rotate_flow_arm_vectors(state, self.ee_local_r_align)
         return state
+
+    @staticmethod
+    def _rotate_vel6(vel6: np.ndarray, r_align: Any) -> np.ndarray:
+        """Rotate a per-arm [pos_vel(3), rot_vel(3)] body vector by an r_align.
+
+        Mirrors rotate_flow_arm_vectors (v @ R.T) but on a bare 6-vector, so it is
+        layout-agnostic (works for the 12-D velocity state whose arms sit at
+        offsets 0/6, where rotate_flow_arm_vectors' fixed 0/7 offsets do not fit).
+        Accepts an EeLocalRAlign (separate linear/angular) or a plain 3x3 matrix.
+        """
+        linear = np.asarray(getattr(r_align, "linear", r_align), dtype=np.float64)
+        angular = np.asarray(getattr(r_align, "angular", r_align), dtype=np.float64)
+        out = np.asarray(vel6, dtype=np.float64).copy()
+        out[0:3] = out[0:3] @ linear.T
+        out[3:6] = out[3:6] @ angular.T
+        return out
+
+    def _proprio_state_velocity(self, payload: dict[str, Any]) -> np.ndarray:
+        """ee_local VELOCITY proprio (--state-mode velocity / velocity_grip).
+
+        Per arm the proprio is the INCOMING per-step motion in the previous body
+        frame -- pos_vel(3), rot_vel(3) [, grip] -- the exact quantity the training
+        converter bakes (openpi `_arm_velocity`: cur^-1 . (p_next - p_cur),
+        cur^-1 . R_next). Because it is a body-frame delta it is W-invariant AND
+        init-pose-INDEPENDENT (no per-episode reset anchor), the whole point of the
+        velproprio variant over reset-relative pose.
+
+        Cadence note: proprio is sampled at chunk-replan boundaries, not every
+        policy step, so the raw pose difference spans `chunk_execute_steps` steps.
+        We rescale it to ONE policy step (policy_dt / wall_dt, clamped <=1) so the
+        magnitude matches the training per-frame delta the server's norm-stats
+        expect. Exact when --chunk-execute-steps is 1; a close approximation for a
+        few steps (the body frame barely rotates over ~0.1 s). The first sample of
+        a rollout (and after reset_rtc) has no previous pose -> velocity 0 (matches
+        the converter's vel[0]=0 / segment-start zeroing)."""
+        now = time.perf_counter()
+        wall_dt = (now - self._vel_prev_sample_t) if self._vel_prev_sample_t is not None else None
+        self._vel_prev_sample_t = now
+        # Rescale the multi-step displacement down to one policy step. Never amplify
+        # (clamp <=1); a long stall (wall_dt large) -> ~0 velocity (stale, report rest).
+        scale = 1.0
+        if wall_dt is not None and wall_dt > 1e-6:
+            scale = float(np.clip(float(self.policy_dt_sec) / wall_dt, 0.0, 1.0))
+
+        from scipy.spatial.transform import Rotation
+
+        include_grip = self.proprio_mode == "velocity_grip"
+        features: list[np.ndarray] = []
+        for side in ("left", "right"):
+            pose = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
+            prev = self._vel_prev_pose_by_arm[side]
+            if prev is None:
+                vel = np.zeros(6, dtype=np.float64)
+            else:
+                r_prev = Rotation.from_quat(prev[3:7])
+                pos_vel = r_prev.inv().apply(pose[:3] - prev[:3]) * scale
+                rot_vel = (r_prev.inv() * Rotation.from_quat(pose[3:7])).as_rotvec() * scale
+                vel = np.concatenate([pos_vel, rot_vel])
+            self._vel_prev_pose_by_arm[side] = pose.copy()
+            if self.ee_local_r_align is not None:
+                # Body deltas are in the RB TCP frame; the checkpoint trained in the
+                # EE (pika tip) frame -> v_tip = R_align . v_tcp (same as the pose path).
+                vel = self._rotate_vel6(vel, self.ee_local_r_align)
+            if include_grip:
+                # velocity_grip keeps the ABSOLUTE gripper opening (matches the converter's
+                # _state_velocity_grip), read exactly like the pose-state gripper dim.
+                grip = _gripper_value_from_payload(payload, side)
+                if grip is None:
+                    live = self._live_gripper_percent(side)
+                    grip = live if live is not None else _gripper_from_arm_payload(payload.get(side, {}))
+                features.append(np.concatenate([vel, [float(grip) / 100.0]]))
+            else:
+                features.append(vel)
+        return np.concatenate(features).astype(np.float32)
 
     def _raw_camera_images(self) -> tuple[dict[str, np.ndarray] | None, int, int]:
         """Full-resolution HWC uint8 RGB frames keyed left/right; None if missing."""
@@ -551,6 +693,18 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             decode_count += 1
         if missing_count > 0 or len(images) < 2:
             return None, decode_count, max(missing_count, 2 - len(images))
+        if getattr(self, "include_depth", False):
+            # Resolve the live D405 depth (z16 -> uint16 HxW from the bundle client when its
+            # include_depth=True) and encode it with the SAME _depth_to_image as the training
+            # converter. Fail-closed if depth is missing (an include_depth checkpoint needs it).
+            for key, depth_name in (("left_depth", self.depth_camera_names[0]), ("right_depth", self.depth_camera_names[1])):
+                frame = resolve_frame(bundle_frames, depth_name)
+                px = getattr(frame, "pixels", None)
+                if px is None:
+                    return None, decode_count, 2
+                images[key] = _depth_to_image(
+                    np.asarray(px), self.depth_z_near_mm, self.depth_z_far_mm, self.depth_units_m
+                )
         # One-time proof of the actual image fed to the server (HWC). With crop_frac=0.65
         # on a 480x640 fisheye this prints (312, 416, 3); uncropped it prints (480, 640, 3).
         if not getattr(self, "_logged_wrist_shape", False):
@@ -571,6 +725,11 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         """
         self._rtc_prev_raw_chunk = None
         self._rtc_warned_no_raw = False
+        # Velocity-proprio is a per-step finite difference; drop the previous-pose
+        # memory so a new rollout's first sample reports rest (vel 0), not a jump
+        # across the reset teleport.
+        self._vel_prev_pose_by_arm = {"left": None, "right": None}
+        self._vel_prev_sample_t = None
 
     # ---------------------------------------------------------------- infer --
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
@@ -587,6 +746,9 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             "observation/state": self._proprio_state(payload),
             "prompt": self.prompt,
         }
+        if getattr(self, "include_depth", False):
+            obs["observation/left_wrist_0_depth"] = images["left_depth"]
+            obs["observation/right_wrist_0_depth"] = images["right_depth"]
         if self.rtc_enabled and self._rtc_prev_raw_chunk is not None:
             # Round-trip the previous MODEL-SPACE chunk so the server freezes the
             # first `inference_delay` actions and inpaints the rest toward it.

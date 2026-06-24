@@ -448,6 +448,14 @@ class FlowMatchingActionSource:
         self.gripper_open_percent = 50.0
         self.gripper_close_percent = 7.0
         self.gripper_binary_threshold = 50.0
+        # ROTATION-AXIS MASK: per-axis gate over the policy's per-arm rotation
+        # action (rx, ry, rz at action indices 3/4/5 and 10/11/12). Each entry
+        # True keeps that axis, False zeros it before the action is applied so the
+        # arm holds that orientation component. Default keeps all three (no
+        # masking); (False, False, False) is translation-only. Translation (dxyz)
+        # and gripper dims are always untouched. Set from `--rotation-axes` /
+        # `--translation-only` in main.py.
+        self.rotation_axes_enabled = (True, True, True)
         self.stderr = stderr
         self.device = _resolve_device(device)
 
@@ -591,6 +599,7 @@ class FlowMatchingActionSource:
                 # Policy steps are in the training EE frame (e.g. pika tip);
                 # convert to the RB TCP body frame: v_tcp = R_alignT . v_tip.
                 chunk = rotate_flow_arm_vectors(chunk, self.ee_local_r_align.T)
+            chunk = self._apply_rotation_axis_mask(chunk)
             self._chunk = chunk
             self._chunk_index = 0
             self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
@@ -798,13 +807,29 @@ class FlowMatchingActionSource:
             return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
         return None
 
+    def _apply_rotation_axis_mask(self, chunk: np.ndarray) -> np.ndarray:
+        """Zero the per-arm rotation-action axes disabled in
+        ``self.rotation_axes_enabled`` (rx, ry, rz at action indices 3/4/5 and
+        10/11/12) so the arms hold those orientation components. Translation
+        (dxyz) and gripper dims are left untouched. No-op when all three axes
+        are enabled."""
+        keep = getattr(self, "rotation_axes_enabled", (True, True, True))
+        if all(keep):
+            return chunk
+        masked = np.array(chunk, copy=True)
+        for offset in (0, 7):  # left arm at 0, right arm at 7
+            for axis, enabled in enumerate(keep):  # axis 0=rx, 1=ry, 2=rz
+                if not enabled:
+                    masked[..., offset + 3 + axis] = 0.0
+        return masked
+
     def _sample_and_align_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         chunk = self._sample_chunk(payload)
         if chunk is None:
             return None
         if self.ee_local_r_align is not None:
             chunk = rotate_flow_arm_vectors(chunk, self.ee_local_r_align.T)
-        return chunk
+        return self._apply_rotation_axis_mask(chunk)
 
     def _ensure_stream_state(self) -> None:
         if getattr(self, "_stream_inited", False):

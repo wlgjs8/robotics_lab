@@ -425,6 +425,26 @@ def _umi_reader_from_config(reader_config, side: str) -> UmiPoseReader:
     return MockUmiPoseReader("pgmode_umi_smoke")
 
 
+def _parse_rotation_axes(args) -> tuple[bool, bool, bool]:
+    """Resolve which per-arm rotation axes (rx, ry, rz) the policy may command
+    from --rotation-axes / --translation-only into a 3-tuple of keep flags.
+    --translation-only forces all-off; otherwise --rotation-axes is a subset of
+    x/y/z to keep ('none'/'' = keep none, 'all'/'xyz' = keep all)."""
+    if bool(getattr(args, "translation_only", False)):
+        return (False, False, False)
+    spec = str(getattr(args, "rotation_axes", "xyz") or "").strip().lower()
+    if spec in ("none", "off"):
+        return (False, False, False)
+    if spec == "all":
+        return (True, True, True)
+    invalid = sorted(set(spec) - set("xyz"))
+    if invalid:
+        raise SystemExit(
+            f"--rotation-axes: invalid axis {invalid}; use any subset of x,y,z or 'none'"
+        )
+    return ("x" in spec, "y" in spec, "z" in spec)
+
+
 def _load_runtime_geometry_status(config: PolicyRunnerConfig) -> GeometryStatus:
     if not config.geometry.path:
         return GeometryStatus.unavailable("geometry_path_missing")
@@ -765,6 +785,36 @@ def _main_with_subcommands(argv: list[str]) -> int:
         ),
     )
     flow_infer.add_argument(
+        "--proprio-mode",
+        default="velocity",
+        choices=("pose", "velocity", "velocity_grip"),
+        help=(
+            "observation/state representation sent to an openpi server; MUST match the served "
+            "checkpoint's training distribution (openpi convert --state-mode). 'pose' (default) = "
+            "14-D reset-relative pose; 'velocity' = 12-D ee_local velocity (init-pose-independent, "
+            "no gripper); 'velocity_grip' = 14-D ee_local velocity + absolute gripper. velocity* are "
+            "finite-differenced from the robot TCP pose (use a small --chunk-execute-steps for the "
+            "cleanest per-step velocity). nostate (zero_state) checkpoints ignore state, so any value "
+            "works there. Only the openpi-remote source uses this."
+        ),
+    )
+    flow_infer.add_argument(
+        "--include-depth",
+        action="store_true",
+        help=(
+            "For an RGB-D (include_depth) openpi checkpoint: also send the live D405 depth as "
+            "observation/*_wrist_0_depth (z16 -> _depth_to_image, BIT-IDENTICAL to the converter). "
+            "Enables z16 decode on the camera bundle client. MUST match the checkpoint's training "
+            "(--include-depth converter) AND the same --depth-z-near/far-mm + --depth-units-m."
+        ),
+    )
+    flow_infer.add_argument("--depth-z-near-mm", type=float, default=120.0, help="depth clip near (mm); match training")
+    flow_infer.add_argument("--depth-z-far-mm", type=float, default=700.0, help="depth clip far (mm); match training")
+    flow_infer.add_argument(
+        "--depth-units-m", type=float, default=1e-4,
+        help="metres per stored-depth count (Pika D405: 1e-4 = 100um; check collect.log + match training)",
+    )
+    flow_infer.add_argument(
         "--camera-preview",
         action="store_true",
         default=True,
@@ -798,7 +848,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--chunk-execute-steps",
         type=int,
-        default=30,
+        default=20,
         help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
     )
     flow_infer.add_argument(
@@ -849,7 +899,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-binary-threshold",
         type=float,
-        default=50.0,
+        default=40.0,
         help="Decision threshold (opening percent) for --gripper-action-mode binary: the model's "
              "gripper output >= threshold -> OPEN, else CLOSE (DEFAULT 35, the midpoint of the "
              "model's bimodal 0/100 output). Only used in binary mode.",
@@ -906,9 +956,26 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.015)
     flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.01)
     flow_infer.add_argument(
+        "--rotation-axes",
+        default="xyz",
+        help=(
+            "Which per-arm rotation axes the policy may command: any subset of x,y,z "
+            "(e.g. 'z' = yaw only, 'xy', 'xyz' = all, the default). Use 'none' or '' to "
+            "drop all rotation (translation only). Disabled axes are zeroed so the arm "
+            "holds that orientation component; translation (dxyz) and gripper actions "
+            "are unchanged. Useful when a checkpoint/task has unreliable predicted "
+            "rotation on some axes."
+        ),
+    )
+    flow_infer.add_argument(
+        "--translation-only",
+        action="store_true",
+        help="Shortcut for --rotation-axes none: zero all per-arm rotation action.",
+    )
+    flow_infer.add_argument(
         "--tcp-target-pose-conditioning",
         choices=["legacy_step_hold", "foh_se3"],
-        default="foh_se3",
+        default="legacy_step_hold",
         help=(
             "A-stage conditioning for the streamed tcp_target_pose path. legacy_step_hold "
             "(default) holds each ~30 Hz step target between policy ticks (ZOH into the SMD). "
@@ -919,7 +986,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--tcp-target-pose-reanchor-mode",
         choices=["measured_legacy", "last_emitted_continuous", "measured_blend"],
-        default="measured_legacy",
+        default="measured_blend",
         help=(
             "Chunk-boundary handling for foh_se3. measured_blend (default): anchor the new "
             "chunk to the measured pose for drift correction but blend in from the last emitted "
@@ -1447,6 +1514,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 zmq_endpoint=config.camera.zmq_endpoint,
                 topic=config.camera.bundle_topic,
                 max_age_ms=config.camera.max_age_ms,
+                include_depth=bool(getattr(args, "include_depth", False)),  # z16 decode for RGB-D checkpoints
             )
         preview_process = None
         if args.camera_preview and config.camera.enable:
@@ -1655,6 +1723,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     camera_names=_wrist_camera_names,
                     wrist_crop_frac=float(config.camera.wrist_crop_frac),
                     action_horizon=args.action_horizon,
+                    proprio_mode=args.proprio_mode,
+                    include_depth=bool(args.include_depth),
+                    depth_z_near_mm=float(args.depth_z_near_mm),
+                    depth_z_far_mm=float(args.depth_z_far_mm),
+                    depth_units_m=float(args.depth_units_m),
                     rtc_enabled=bool(getattr(args, "rtc", False)),
                     rtc_inference_delay=int(getattr(args, "rtc_inference_delay", 2)),
                     rtc_prefix_attention_schedule=str(getattr(args, "rtc_schedule", "exp")),
@@ -1722,6 +1795,21 @@ def _main_with_subcommands(argv: list[str]) -> int:
             # Close-bias: subtract a few percent from the absolute opening target so
             # a marginal grasp clamps (no effect in delta or binary mode).
             source.gripper_close_bias = float(getattr(args, "gripper_close_bias", 0.0) or 0.0)
+            # Per-axis rotation gate: keep only the selected rx/ry/rz axes of the
+            # per-arm rotation action; disabled axes are zeroed so the arm holds
+            # that orientation component (translation + gripper unchanged). Applies
+            # to every source kind (flow / openpi / direct_bc).
+            rotation_axes_enabled = _parse_rotation_axes(args)
+            source.rotation_axes_enabled = rotation_axes_enabled
+            if not all(rotation_axes_enabled):
+                _kept = [
+                    n for n, e in zip(("rx", "ry", "rz"), rotation_axes_enabled) if e
+                ] or ["none"]
+                print(
+                    f"[flow-infer] rotation axes kept={','.join(_kept)} "
+                    "(disabled axes zeroed; dxyz translation + gripper unchanged)",
+                    flush=True,
+                )
             if source.gripper_binary:
                 detail = (
                     f", open={source.gripper_open_percent:g}% close={source.gripper_close_percent:g}%"
