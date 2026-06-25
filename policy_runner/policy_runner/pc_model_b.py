@@ -215,7 +215,14 @@ class PointCloudRGBFlowPolicy(nn.Module):
     def forward(self, pointcloud, image, proprio, x_t, t) -> torch.Tensor:
         if x_t.ndim != 3 or x_t.shape[1] != self.config.action_horizon:
             raise ValueError("x_t must be B,H,A with H matching config")
-        cond = self.encode_condition(pointcloud, image, proprio) + self.time_embedding(t)
+        return self.decode_with_condition(self.encode_condition(pointcloud, image, proprio), x_t, t)
+
+    def decode_with_condition(self, cond_base: torch.Tensor, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Velocity head given the PRE-COMPUTED observation condition (encode_condition
+        output, before the time embedding). The condition is constant over the flow ODE
+        integration, so callers cache it once per chunk instead of re-running the (heavy
+        DINOv3 ConvNeXt) encoder at every sampling step."""
+        cond = cond_base + self.time_embedding(t)
         step_ids = torch.arange(self.config.action_horizon, device=x_t.device)
         step_tokens = self.step_embedding(step_ids)[None, :, :] + cond[:, None, :]
         return self.decoder(torch.cat([x_t, step_tokens], dim=-1))
@@ -246,7 +253,12 @@ def pc_b_sample_action_chunks(model, pointcloud, image, proprio, *, steps: int =
     else:
         x = initial_noise.to(device=proprio.device, dtype=proprio.dtype)
     dt = 1.0 / float(steps)
+    # Encode the (image/cloud/proprio) condition ONCE — it is constant over the
+    # flow integration. Re-running it per step re-ran the DINOv3 ConvNeXt 16x
+    # (~134ms of a 157ms chunk), overflowing the async-chunk budget and stalling
+    # the arm. Caching drops the chunk to ~25ms.
+    cond_base = model.encode_condition(pointcloud, image, proprio)
     for step in range(steps):
         t = torch.full((bsz,), (step + 0.5) / float(steps), dtype=proprio.dtype, device=proprio.device)
-        x = x + dt * model(pointcloud, image, proprio, x, t)
+        x = x + dt * model.decode_with_condition(cond_base, x, t)
     return x

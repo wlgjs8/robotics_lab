@@ -205,7 +205,12 @@ class PointCloudFlowPolicy(nn.Module):
     ) -> torch.Tensor:
         if x_t.ndim != 3 or x_t.shape[1] != self.config.action_horizon:
             raise ValueError("x_t must be B,H,A with H matching config")
-        cond = self.encode_condition(pointcloud, proprio) + self.time_embedding(t)
+        return self.decode_with_condition(self.encode_condition(pointcloud, proprio), x_t, t)
+
+    def decode_with_condition(self, cond_base: torch.Tensor, x_t: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Velocity head from a PRE-COMPUTED condition (constant over the flow ODE),
+        so the sampler runs the cloud encoder once per chunk, not once per step."""
+        cond = cond_base + self.time_embedding(t)
         step_ids = torch.arange(self.config.action_horizon, device=x_t.device)
         step_tokens = self.step_embedding(step_ids)[None, :, :] + cond[:, None, :]
         return self.decoder(torch.cat([x_t, step_tokens], dim=-1))
@@ -245,7 +250,10 @@ def pc_sample_action_chunks(
     else:
         x = initial_noise.to(device=proprio.device, dtype=proprio.dtype)
     dt = 1.0 / float(steps)
+    # Cache the condition once (constant over the flow integration) instead of
+    # re-running the cloud encoder at every sampling step.
+    cond_base = model.encode_condition(pointcloud, proprio)
     for step in range(steps):
         t = torch.full((bsz,), (step + 0.5) / float(steps), dtype=proprio.dtype, device=proprio.device)
-        x = x + dt * model(pointcloud, proprio, x, t)
+        x = x + dt * model.decode_with_condition(cond_base, x, t)
     return x
