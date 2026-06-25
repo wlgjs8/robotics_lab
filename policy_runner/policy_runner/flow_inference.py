@@ -36,6 +36,7 @@ from .flow_dataset import (
 )
 from .camera_bundle_client import resolve_frame
 from .flow_model import FlowMatchingPolicy, sample_action_chunks
+from .pc_dataset import PC_CHECKPOINT_SCHEMA
 from .tcp_target_pose_conditioner import (
     CONDITIONING_MODES,
     REANCHOR_MODES,
@@ -461,8 +462,8 @@ class FlowMatchingActionSource:
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         schema = str(checkpoint.get("schema", "") or "")
-        if schema != FLOW_CHECKPOINT_SCHEMA:
-            raise ValueError(f"unsupported flow checkpoint schema: {schema}")
+        # Subclasses (e.g. the point-cloud source) accept their own schema here.
+        self._validate_checkpoint_schema(schema)
         self.stats = dict(checkpoint["dataset_stats"])
         self.action_frame = _proprio_action_frame_from_stats(self.stats)
         self.ee_local_r_align = (
@@ -517,9 +518,9 @@ class FlowMatchingActionSource:
             names=("left_drx", "left_dry", "left_drz", "right_drx", "right_dry", "right_drz"),
             fallback=DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S,
         )
-        self.model = FlowMatchingPolicy.from_checkpoint_config(model_config).to(self.device)
-        self.model.load_state_dict(checkpoint["model_state"])
-        self.model.eval()
+        # Subclasses override _build_policy_model to load a different policy
+        # (e.g. the point-cloud flow policy) from the same checkpoint dict.
+        self.model = self._build_policy_model(model_config, checkpoint)
 
         self.arm_mask = _arm_mask_from_stats(self.stats)
         self.checkpoint_arm_mask = tuple(float(value) for value in self.arm_mask.tolist())
@@ -570,6 +571,22 @@ class FlowMatchingActionSource:
             f"[flow-infer] logging per-step actions to {_action_log_path}",
             file=sys.stderr,
         )
+
+    # --------------------------------------------------------- override hooks --
+    def _validate_checkpoint_schema(self, schema: str) -> None:
+        """Reject checkpoints whose schema this source cannot run. The base flow
+        source only accepts RGB-image flow checkpoints; subclasses override to
+        accept their own schema (e.g. the point-cloud flow policy)."""
+        if schema != FLOW_CHECKPOINT_SCHEMA:
+            raise ValueError(f"unsupported flow checkpoint schema: {schema}")
+
+    def _build_policy_model(self, model_config: dict[str, Any], checkpoint: dict[str, Any]) -> Any:
+        """Construct and load the policy network from the checkpoint dict.
+        Subclasses override to build a different architecture."""
+        model = FlowMatchingPolicy.from_checkpoint_config(model_config).to(self.device)
+        model.load_state_dict(checkpoint["model_state"])
+        model.eval()
+        return model
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         if getattr(self, "enable_async_chunking", False):
@@ -2132,6 +2149,8 @@ def action_chunk_checkpoint_kind(
     schema = str(checkpoint.get("schema", "") or "")
     if schema == FLOW_CHECKPOINT_SCHEMA:
         return "flow"
+    if schema == PC_CHECKPOINT_SCHEMA:
+        return "pc"
     if schema == IMITATION_CHECKPOINT_SCHEMA:
         family = str(checkpoint.get("model_family", "") or "")
         if family in DIRECT_BC_RUNTIME_FAMILIES:
@@ -2158,7 +2177,7 @@ def load_action_chunk_checkpoint_dataset_stats(
         return dict(stats) if isinstance(stats, dict) else {}
     checkpoint = torch.load(checkpoint_path, map_location=_resolve_device(device), weights_only=False)
     schema = str(checkpoint.get("schema", "") or "")
-    if schema not in {FLOW_CHECKPOINT_SCHEMA, IMITATION_CHECKPOINT_SCHEMA}:
+    if schema not in {FLOW_CHECKPOINT_SCHEMA, PC_CHECKPOINT_SCHEMA, IMITATION_CHECKPOINT_SCHEMA}:
         raise ValueError(f"unsupported action-chunk checkpoint schema: {schema}")
     if schema == IMITATION_CHECKPOINT_SCHEMA:
         family = str(checkpoint.get("model_family", "") or "")

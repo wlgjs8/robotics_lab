@@ -815,6 +815,17 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="metres per stored-depth count (Pika D405: 1e-4 = 100um; check collect.log + match training)",
     )
     flow_infer.add_argument(
+        "--pc-intrinsics", default=None,
+        help=(
+            "point-cloud (pc_v1) checkpoints only: per-arm RealSense color intrinsics + depth scale "
+            "as 'fx,fy,ppx,ppy,depth_scale_m' applied to BOTH arms (override per-arm with "
+            "--pc-intrinsics-left/right). Default = the D405 calib baked in the training data."
+        ),
+    )
+    flow_infer.add_argument("--pc-intrinsics-left", default=None, help="pc_v1: left-arm intrinsics override (see --pc-intrinsics)")
+    flow_infer.add_argument("--pc-intrinsics-right", default=None, help="pc_v1: right-arm intrinsics override (see --pc-intrinsics)")
+    flow_infer.add_argument("--pc-num-points", type=int, default=None, help="pc_v1: override cloud point count (default = checkpoint stats)")
+    flow_infer.add_argument(
         "--camera-preview",
         action="store_true",
         default=True,
@@ -1403,6 +1414,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
         )
         from .gripper import GripperCommand, GripperRuntime
         from .openpi_remote import OPENPI_CHECKPOINT_PREFIX, OpenpiRemoteActionSource
+        from .pc_action_source import PointCloudFlowActionSource
 
         config = load_config(args.config)
         rollout_policy = RolloutModePolicy.from_value(
@@ -1420,6 +1432,10 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     device="cpu",
                     ensemble_name=args.ensemble_name,
                 )
+            if checkpoint_kind == "pc":
+                # pc_v1 back-projects the live wrist depth into the egocentric
+                # cloud, so the camera client MUST surface z16 depth frames.
+                args.include_depth = True
             command_family = resolve_flow_command_family(
                 rollout_policy.mode,
                 args.command_family,
@@ -1745,6 +1761,23 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     ensemble_name=args.ensemble_name,
                     image_size=args.image_size,
                     **source_kwargs,
+                )
+            elif checkpoint_kind == "pc":
+                from .pc_infer import parse_intrinsics
+
+                _base_intr = parse_intrinsics(args.pc_intrinsics)
+                _intrinsics_by_arm = {
+                    "left": parse_intrinsics(args.pc_intrinsics_left) if args.pc_intrinsics_left else _base_intr,
+                    "right": parse_intrinsics(args.pc_intrinsics_right) if args.pc_intrinsics_right else _base_intr,
+                }
+                source = PointCloudFlowActionSource(
+                    args.checkpoint,
+                    sample_steps=args.sample_steps,
+                    stochastic_sampling=not args.deterministic_sampling,
+                    intrinsics_by_arm=_intrinsics_by_arm,
+                    num_points=args.pc_num_points,
+                    **source_kwargs,
+                    **tcp_tp_kwargs,
                 )
             else:
                 source = FlowMatchingActionSource(
