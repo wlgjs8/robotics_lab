@@ -1349,7 +1349,7 @@ class GuiContractsTest(unittest.TestCase):
             )
             ok, reason = safety.send_init_motion()
             self.assertTrue(ok, f"{mode}: {reason}")
-            self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
+            self.assertEqual(client.sent_packets[-1]["mode"], "InitMotion")
 
     def test_init_motion_blocked_by_latched_fault(self):
         # State-derived gate: a latched fault blocks InitMotion regardless of mode.
@@ -1363,7 +1363,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("fault latched", reason)
         self.assertEqual(client.sent_packets, [])
 
-    def test_init_motion_sends_joint_target_with_long_timeout(self):
+    def test_init_motion_sends_init_motion_with_long_timeout(self):
         _, client, safety = self.make_safety(
             sample_state(motion_state="ArmedHold"),
             init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
@@ -1373,7 +1373,10 @@ class GuiContractsTest(unittest.TestCase):
         ok, reason = safety.send_init_motion()
         self.assertTrue(ok, reason)
         packet = client.sent_packets[-1]
-        self.assertEqual(packet["mode"], "JointTarget")
+        # InitMotion is its own mode now: the server plans a collision-free + floor-safe
+        # path to the init pose and streams it (falling back to a direct JointTarget if
+        # the planner is disabled). The q_target/timeout payload mirrors JointTarget.
+        self.assertEqual(packet["mode"], "InitMotion")
         self.assertEqual(packet["left"]["q_target_deg"], list(_DEFAULT_INIT_LEFT_JOINTS_DEG))
         self.assertEqual(packet["right"]["q_target_deg"], list(_DEFAULT_INIT_RIGHT_JOINTS_DEG))
         self.assertEqual(packet["timeout_sec"], 10.0)
@@ -1395,7 +1398,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertNotIn("left_tcp_target_user_moved", handles)
         self.assertNotIn("right_tcp_target_user_moved", handles)
         self.assertEqual(handles["left_tcp_target_pose"], (1.0, 2.0, 3.0, 0.0, 0.0, 0.0))
-        self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
+        self.assertEqual(client.sent_packets[-1]["mode"], "InitMotion")
         self.assertIn("follow current TCP", reason)
 
     def test_init_motion_blocked_preserves_tcp_target_follow_flags(self):
@@ -2961,7 +2964,7 @@ class FloorConstraintGuiTest(unittest.TestCase):
 
         ok_state = StateSnapshot.parse(sample_state(floor_constraint=self._floor_block()))
         text = _format_floor_constraint_status(ok_state, stale=False)
-        self.assertIn("floor: ON z=10mm", text)
+        self.assertIn("floor: ON z=10.0mm", text)
         self.assertIn("L:123mm", text)
         self.assertIn("R:98mm", text)
 
@@ -3035,7 +3038,7 @@ class FloorConstraintGuiTest(unittest.TestCase):
             ok, message = persist_floor_z_to_config(path, 0.05)
             self.assertTrue(ok, message)
             updated = path.read_text(encoding="utf-8")
-            self.assertIn("    z_min_m: 0.050   # startup default\n", updated)
+            self.assertIn("    z_min_m: 0.0500   # startup default\n", updated)
             self.assertIn("# 안전 평면: z=0은 stand 원점", updated)
             self.assertIn("z_min_m: 99.0   # decoy outside the floor block", updated)
             self.assertIn("runtime_max_z_m: 0.5", updated)

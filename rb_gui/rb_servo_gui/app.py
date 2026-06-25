@@ -48,6 +48,7 @@ from .geometry import (
 )
 from .models import ArmSnapshot, CircleOverlaySnapshot, Pose6D, StateSnapshot
 from .overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
+from .plane_fit import fit_plane, tilt_deg
 from .safety import OperatorSafety, normalize_observed_mode_backend
 from .scene import (
     _DEFAULT_LEFT_POSE,
@@ -95,6 +96,7 @@ from .status_panel import (
     _format_joints,
     _format_floor_constraint_status,
     _format_roi_box_status,
+    _format_user_floor_constraint_status,
     _format_pgmode_status,
     _format_self_collision_status,
     _format_stand_world_pose_value,
@@ -743,6 +745,141 @@ def _delete_waypoint(handles: dict[str, Any]) -> tuple[bool, str]:
         return False, "no waypoint selected to delete"
     del waypoints[name]
     return True, name
+
+
+# ---- User Safety Floor: captured floor-contact points + fitted plane ----
+
+
+def _user_floor_path() -> str:
+    raw = os.environ.get("RB_GUI_USER_FLOOR_PATH", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.expanduser("~"), ".rb_servo_gui", "user_floor.json")
+
+
+def _user_floor_state(handles: dict[str, Any]) -> dict[str, Any]:
+    """Mutable user-floor GUI state, lazily initialised. points is a list of
+    {"arm": "left"|"right", "p": [x, y, z]} captured floor-contact samples."""
+    return handles.setdefault(
+        "user_floor",
+        {"points": [], "plane": None, "margin_mm": 0.0, "enabled": False},
+    )
+
+
+def _load_user_floor() -> dict[str, Any]:
+    path = _user_floor_path()
+    state: dict[str, Any] = {"points": [], "plane": None, "margin_mm": 0.0, "enabled": False}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return state
+    except (OSError, json.JSONDecodeError):
+        return state
+    if not isinstance(data, Mapping):
+        return state
+    points: list[dict[str, Any]] = []
+    for entry in data.get("points", []) or []:
+        if not isinstance(entry, Mapping):
+            continue
+        p = _waypoint_seq(entry.get("p"), 3)
+        arm = entry.get("arm")
+        if p is not None and arm in ("left", "right"):
+            points.append({"arm": arm, "p": list(p)})
+    state["points"] = points
+    plane = data.get("plane")
+    if isinstance(plane, Mapping):
+        point = _waypoint_seq(plane.get("point"), 3)
+        normal = _waypoint_seq(plane.get("normal"), 3)
+        if point is not None and normal is not None:
+            state["plane"] = {"point": list(point), "normal": list(normal)}
+    margin = data.get("margin_mm")
+    if isinstance(margin, (int, float)) and math.isfinite(margin):
+        state["margin_mm"] = float(margin)
+    state["enabled"] = bool(data.get("enabled", False))
+    return state
+
+
+def _save_user_floor(state: Mapping[str, Any]) -> tuple[bool, str]:
+    path = _user_floor_path()
+    payload = {
+        "points": [{"arm": e["arm"], "p": list(e["p"])} for e in state.get("points", [])],
+        "plane": state.get("plane"),
+        "margin_mm": float(state.get("margin_mm", 0.0)),
+        "enabled": bool(state.get("enabled", False)),
+    }
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    except OSError as exc:
+        return False, str(exc)
+    return True, path
+
+
+def _user_floor_contact_point(latest: StateSnapshot | None, arm: str) -> tuple[float, float, float] | None:
+    """The arm's lowest floor-contact point (xyz, stand frame) from floor telemetry.
+
+    Prefers floor_constraint.<arm>.lowest_point_m (the most-exposed gripper-tip point
+    the server checks against the floor); falls back to the live TCP origin when the
+    floor constraint is disabled so capture still works without an active floor."""
+    if latest is None:
+        return None
+    floor = latest.floor_constraint
+    if isinstance(floor, Mapping):
+        arm_block = floor.get(arm)
+        if isinstance(arm_block, Mapping):
+            lp = arm_block.get("lowest_point_m")
+            pt = _waypoint_seq(lp, 3)
+            if pt is not None:
+                return pt
+    arm_snap = getattr(latest, arm, None)
+    pose = getattr(arm_snap, "tcp_actual_stand", None) or getattr(arm_snap, "tcp_stand", None)
+    if pose is not None and all(math.isfinite(v) for v in (pose.x, pose.y, pose.z)):
+        return (float(pose.x), float(pose.y), float(pose.z))
+    return None
+
+
+def _capture_user_floor_point(
+    handles: dict[str, Any], store: StateStore, arm: str
+) -> tuple[bool, str]:
+    latest = store.latest()
+    if latest is None or store.is_stale():
+        return False, "state stream missing or stale; cannot capture"
+    point = _user_floor_contact_point(latest, arm)
+    if point is None:
+        return False, f"no {arm} contact point available (FK/floor telemetry missing)"
+    state = _user_floor_state(handles)
+    state["points"].append({"arm": arm, "p": [float(point[0]), float(point[1]), float(point[2])]})
+    counts = _user_floor_point_counts(state)
+    return True, (
+        f"captured {arm} pt @[{point[0] * 1000:.0f},{point[1] * 1000:.0f},{point[2] * 1000:.0f}]mm "
+        f"({counts})"
+    )
+
+
+def _user_floor_point_counts(state: Mapping[str, Any]) -> str:
+    pts = state.get("points", [])
+    left = sum(1 for e in pts if e.get("arm") == "left")
+    right = sum(1 for e in pts if e.get("arm") == "right")
+    return f"{len(pts)} pts: L{left} R{right}"
+
+
+def _fit_user_floor_plane(handles: dict[str, Any]) -> tuple[bool, str]:
+    """Fit a plane through the captured points and store it on the GUI state.
+    Does not send anything to the server — that is the Fit & Apply / Enforce step."""
+    state = _user_floor_state(handles)
+    pts = [e["p"] for e in state.get("points", [])]
+    if len(pts) < 3:
+        return False, f"need >= 3 points to fit ({_user_floor_point_counts(state)})"
+    try:
+        point, normal = fit_plane(pts)
+    except ValueError as exc:
+        return False, f"fit failed: {exc}"
+    state["plane"] = {"point": list(point), "normal": list(normal)}
+    return True, f"fit plane tilt={tilt_deg(normal):.1f}° from {_user_floor_point_counts(state)}"
 
 
 def _init_motion_path() -> str:
@@ -1771,7 +1908,7 @@ def build_gui(
                 # the server's [runtime_min_z_m, runtime_max_z_m] and re-synced onto
                 # this slider in _update_floor_panel once state arrives.
                 floor_slider = server.gui.add_slider(
-                    "Floor z mm", min=-200.0, max=500.0, step=1.0, initial_value=10.0
+                    "Floor z mm", min=-200.0, max=500.0, step=0.1, initial_value=10.0
                 )
                 handles["floor_slider"] = floor_slider
                 floor_send = server.gui.add_button("Send floor z")
@@ -2717,13 +2854,13 @@ def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -
     if slider is not None and isinstance(z, (int, float)):
         pending_mm = float(slider.value)
         applied_mm = float(z) * 1000.0
-        if abs(pending_mm - applied_mm) >= 0.5:
+        if abs(pending_mm - applied_mm) >= 0.05:
             update_floor_plane_preview(handles.get("scene", {}), pending_mm / 1000.0)
         else:
             update_floor_plane_preview(handles.get("scene", {}), None)
     if "floor_applied" not in handles:
         return
-    z_txt = f"{float(z) * 1000:.0f}mm" if isinstance(z, (int, float)) else "?"
+    z_txt = f"{float(z) * 1000:.1f}mm" if isinstance(z, (int, float)) else "?"
     reject = floor.get("last_set_reject_reason")
     handles["floor_applied"].value = z_txt + (f" (last reject: {reject})" if reject else "")
 

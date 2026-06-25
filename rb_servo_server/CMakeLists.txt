@@ -38,6 +38,7 @@ add_library(rb_servo_core
     src/math/se3.cpp
     src/control/force_controller.cpp
     src/control/collision_monitor.cpp
+    src/control/init_motion_planner.cpp
     src/control/dual_arm_servo_loop.cpp
     src/network/command_server.cpp
     src/network/state_publisher.cpp
@@ -162,6 +163,10 @@ if(BUILD_TESTING)
     target_link_libraries(test_collision_monitor PRIVATE rb_servo_core)
     add_test(NAME collision_monitor COMMAND test_collision_monitor)
 
+    add_executable(test_init_motion_planner tests/test_init_motion_planner.cpp)
+    target_link_libraries(test_init_motion_planner PRIVATE rb_servo_core)
+    add_test(NAME init_motion_planner COMMAND test_init_motion_planner)
+
     add_executable(test_floor_constraint tests/test_floor_constraint.cpp)
     target_link_libraries(test_floor_constraint PRIVATE rb_servo_core)
     add_test(NAME floor_constraint COMMAND test_floor_constraint)
@@ -173,6 +178,10 @@ if(BUILD_TESTING)
     add_executable(test_reach_constraint tests/test_reach_constraint.cpp)
     target_link_libraries(test_reach_constraint PRIVATE rb_servo_core)
     add_test(NAME reach_constraint COMMAND test_reach_constraint)
+
+    add_executable(test_user_floor_constraint tests/test_user_floor_constraint.cpp)
+    target_link_libraries(test_user_floor_constraint PRIVATE rb_servo_core)
+    add_test(NAME user_floor_constraint COMMAND test_user_floor_constraint)
 
     add_executable(test_cartesian_planner tests/test_cartesian_planner.cpp)
     target_link_libraries(test_cartesian_planner PRIVATE rb_servo_core)

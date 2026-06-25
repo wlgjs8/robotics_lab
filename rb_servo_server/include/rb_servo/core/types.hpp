@@ -89,6 +89,13 @@ enum class ControlMode {
     ArmMotion,
     DisarmMotion,
     JointTarget,
+    // Collision-free InitMotion: same q_target_deg payload as JointTarget, but the
+    // server plans a collision-free + floor-safe joint path (12-DOF RRT-Connect,
+    // safety.init_motion_planner) and streams its waypoints as JointTargets through
+    // the full safety gate, so the arms REACH the init pose from any start pose
+    // without self-collision or dipping below the floor. Falls back to a direct
+    // JointTarget when the planner is disabled. Carried by ArmCommand.q_target_deg.
+    InitMotion,
     JointVelocity,
     TcpPoseTarget,
     TcpLinearMove,
@@ -104,6 +111,10 @@ enum class ControlMode {
     // Leaseless runtime adjustment of the stand-frame ROI box bounds
     // (safety.roi_box), bounded server-side to the configured runtime envelope.
     SetSafetyRoiBounds,
+    // Leaseless runtime set/enable of the user-defined tilted floor plane
+    // (safety.user_floor_constraint): carries a stand-frame point + unit normal +
+    // margin + enable flag, validated server-side by validateUserFloorPlaneRequest.
+    SetUserSafetyFloorPlane,
     // Per-arm direct-teaching (free-drive). Releases servo_j control on the
     // addressed arm's controller (freedrive_teach_on) so an operator can hand-
     // guide it, then re-acquires it (freedrive_teach_off) with a target resync.
@@ -545,6 +556,15 @@ struct DualArmCommand {
     std::array<double, 3> roi_max_m{};
     bool has_roi_bounds = false;
 
+    // SetUserSafetyFloorPlane payload (top-level: the plane is global, not per-arm):
+    // a stand-frame point + unit normal defining the half-space n.(p-point) >= margin,
+    // plus an enable flag (false turns the constraint off unconditionally).
+    std::array<double, 3> user_floor_point_m{};
+    std::array<double, 3> user_floor_normal{0.0, 0.0, 1.0};
+    double user_floor_margin_m = 0.0;
+    bool user_floor_enable = false;
+    bool has_user_floor_plane = false;
+
     // AcquireLease / ReleaseLease packets are pure lease management. They must
     // never enter the command buffer: the buffer is latest-wins, so their
     // parsed Hold modes would overwrite an in-flight motion command.
@@ -846,10 +866,12 @@ struct ServoSnapshot {
     bool floor_constraint_left_violated = false;
     double floor_constraint_left_tcp_z_m = 0.0;  // lowest checked point z
     std::string floor_constraint_left_lowest_point;
+    std::array<double, 3> floor_constraint_left_lowest_point_m{};  // lowest point xyz (stand)
     bool floor_constraint_right_checked = false;
     bool floor_constraint_right_violated = false;
     double floor_constraint_right_tcp_z_m = 0.0;  // lowest checked point z
     std::string floor_constraint_right_lowest_point;
+    std::array<double, 3> floor_constraint_right_lowest_point_m{};  // lowest point xyz (stand)
     uint64_t floor_constraint_clamp_count = 0;
     std::string floor_constraint_last_set_reject_reason;
 
@@ -870,6 +892,26 @@ struct ServoSnapshot {
     std::string roi_box_right_closest_face;
     uint64_t roi_box_clamp_count = 0;
     std::string roi_box_last_set_reject_reason;
+
+    // User-defined tilted floor plane (safety.user_floor_constraint).
+    bool user_floor_constraint_enabled = false;
+    bool user_floor_constraint_monitor_only = false;
+    std::array<double, 3> user_floor_constraint_point_m{};      // effective (runtime) plane point
+    std::array<double, 3> user_floor_constraint_normal{0.0, 0.0, 1.0};
+    double user_floor_constraint_margin_m = 0.0;
+    bool user_floor_constraint_left_checked = false;
+    bool user_floor_constraint_left_violated = false;
+    double user_floor_constraint_left_signed_dist_m = 0.0;  // lowest signed distance to plane
+    std::string user_floor_constraint_left_lowest_point;
+    std::array<double, 3> user_floor_constraint_left_lowest_point_m{};
+    bool user_floor_constraint_right_checked = false;
+    bool user_floor_constraint_right_violated = false;
+    double user_floor_constraint_right_signed_dist_m = 0.0;
+    std::string user_floor_constraint_right_lowest_point;
+    std::array<double, 3> user_floor_constraint_right_lowest_point_m{};
+    uint64_t user_floor_constraint_clamp_count = 0;
+    std::string user_floor_constraint_last_set_reject_reason;
+
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;

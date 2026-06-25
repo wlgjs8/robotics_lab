@@ -106,7 +106,7 @@ safety:
 # held by another process (e.g. teleop) or the SDK path is wrong it RAISES and
 # flow-infer exits (fail-loud, not silent drop).
 gripper:
-  backend: pika_serial
+  backend: none
   left_port: /dev/pika-left
   right_port: /dev/pika-right
   pika_sdk_path: /home/plaif/workspace/pika_sdk

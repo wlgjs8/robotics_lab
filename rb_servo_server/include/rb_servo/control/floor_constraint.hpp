@@ -31,6 +31,10 @@ struct FloorArmEvaluation {
     // TCP-frame offset of the lowest checked point ({0,0,0} = the TCP itself). Used
     // to build that point's z-velocity Jacobian for the floor velocity projection.
     math::Vector3 lowest_offset_tcp = math::Vector3::Zero();
+    // Stand-frame xyz of the lowest checked point (tcp_position + R_tcp * offset).
+    // Published as floor telemetry so the GUI can capture the true floor-contact
+    // point (the most-exposed gripper-tip point) when fitting a user floor plane.
+    math::Vector3 lowest_point_stand = math::Vector3::Zero();
 };
 
 // Lowest stand-frame z over the TCP and the configured TCP-frame offset
@@ -42,10 +46,14 @@ inline double floorLowestZWithOffsets(
     const Pose6D& tcp_stand,
     const std::vector<FloorCheckPointConfig>& tcp_offset_points,
     std::string* lowest_name,
-    math::Vector3* lowest_offset_tcp = nullptr
+    math::Vector3* lowest_offset_tcp = nullptr,
+    math::Vector3* lowest_point_stand = nullptr
 ) {
     if (lowest_name) *lowest_name = "tcp";
     if (lowest_offset_tcp) *lowest_offset_tcp = math::Vector3::Zero();
+    if (lowest_point_stand) {
+        *lowest_point_stand = math::Vector3(tcp_stand.x, tcp_stand.y, tcp_stand.z);
+    }
     if (!std::isfinite(tcp_stand.z)) {
         return std::numeric_limits<double>::quiet_NaN();
     }
@@ -54,7 +62,8 @@ inline double floorLowestZWithOffsets(
         const math::Matrix3 rotation = math::rotationFromPose(tcp_stand);
         for (const FloorCheckPointConfig& point : tcp_offset_points) {
             const math::Vector3 offset(point.offset_m[0], point.offset_m[1], point.offset_m[2]);
-            const double z = tcp_stand.z + (rotation * offset).z();
+            const math::Vector3 world = rotation * offset;
+            const double z = tcp_stand.z + world.z();
             if (!std::isfinite(z)) {
                 return std::numeric_limits<double>::quiet_NaN();
             }
@@ -62,6 +71,11 @@ inline double floorLowestZWithOffsets(
                 lowest = z;
                 if (lowest_name) *lowest_name = point.name;
                 if (lowest_offset_tcp) *lowest_offset_tcp = offset;
+                if (lowest_point_stand) {
+                    *lowest_point_stand = math::Vector3(tcp_stand.x + world.x(),
+                                                        tcp_stand.y + world.y(),
+                                                        tcp_stand.z + world.z());
+                }
             }
         }
     }

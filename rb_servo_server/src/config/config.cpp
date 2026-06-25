@@ -16,6 +16,8 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include "rb_servo/control/user_floor_constraint.hpp"  // validateUserFloorPlaneRequest
+
 namespace rb_servo {
 namespace {
 
@@ -710,6 +712,28 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFiniteArray(js.max_velocity_deg_s, "safety.joint_target_smd.max_velocity_deg_s");
         validatePositiveFiniteArray(js.max_accel_deg_s2, "safety.joint_target_smd.max_accel_deg_s2");
     }
+    if (cfg.safety.init_motion_planner.enable) {
+        const auto& ip = cfg.safety.init_motion_planner;
+        // The planner's collision+floor oracle IS the mesh self-collision model, so
+        // the mesh guard must be configured. Fail-closed: refuse to come up enabled
+        // without it (otherwise InitMotion would plan against nothing).
+        if (!cfg.safety.self_collision.enable) {
+            throw std::runtime_error(
+                "safety.init_motion_planner.enable requires safety.self_collision.enable "
+                "(the mesh model is the planner's collision oracle)");
+        }
+        validatePositiveFinite(ip.max_planning_time_sec, "safety.init_motion_planner.max_planning_time_sec");
+        validatePositiveFinite(ip.step_size_rad, "safety.init_motion_planner.step_size_rad");
+        validatePositiveFinite(ip.edge_resolution_rad, "safety.init_motion_planner.edge_resolution_rad");
+        validatePositiveFinite(ip.waypoint_tol_deg, "safety.init_motion_planner.waypoint_tol_deg");
+        validatePositiveFinite(ip.max_segment_deg, "safety.init_motion_planner.max_segment_deg");
+        if (ip.max_iterations <= 0) {
+            throw std::runtime_error("safety.init_motion_planner.max_iterations must be > 0");
+        }
+        if (ip.goal_bias < 0.0 || ip.goal_bias > 1.0) {
+            throw std::runtime_error("safety.init_motion_planner.goal_bias must be in [0, 1]");
+        }
+    }
     if (cfg.safety.floor_constraint.enable) {
         const auto& fc = cfg.safety.floor_constraint;
         if (!std::isfinite(fc.z_min_m) || !std::isfinite(fc.runtime_min_z_m) ||
@@ -808,6 +832,52 @@ void validateConfig(const DualArmConfig& cfg) {
                     throw std::runtime_error(
                         "safety.reach_constraint.tcp_offset_points offsets must be finite (" + point.name + ")");
                 }
+            }
+        }
+    }
+    if (cfg.safety.user_floor_constraint.enable) {
+        const auto& uf = cfg.safety.user_floor_constraint;
+        if (!std::isfinite(uf.a_brake_m_s2) || uf.a_brake_m_s2 <= 0.0) {
+            throw std::runtime_error("safety.user_floor_constraint.a_brake_m_s2 must be finite and positive");
+        }
+        if (!std::isfinite(uf.d_slow_m) || uf.d_slow_m < 0.0) {
+            throw std::runtime_error("safety.user_floor_constraint.d_slow_m must be finite and non-negative");
+        }
+        if (!std::isfinite(uf.max_tilt_deg) || uf.max_tilt_deg < 0.0 || uf.max_tilt_deg >= 90.0) {
+            throw std::runtime_error("safety.user_floor_constraint.max_tilt_deg must be in [0, 90)");
+        }
+        if (!std::isfinite(uf.runtime_min_point_z_m) || !std::isfinite(uf.runtime_max_point_z_m) ||
+            uf.runtime_min_point_z_m > uf.runtime_max_point_z_m) {
+            throw std::runtime_error(
+                "safety.user_floor_constraint requires finite runtime_min_point_z_m <= runtime_max_point_z_m");
+        }
+        if (!std::isfinite(uf.max_margin_m) || uf.max_margin_m < 0.0) {
+            throw std::runtime_error("safety.user_floor_constraint.max_margin_m must be finite and non-negative");
+        }
+        if (!cfg.kinematics.enable) {
+            throw std::runtime_error(
+                "safety.user_floor_constraint.enable=true requires kinematics.enable=true (TCP FK source)");
+        }
+        for (const FloorCheckPointConfig& point : uf.tcp_offset_points) {
+            if (point.name.empty()) {
+                throw std::runtime_error(
+                    "safety.user_floor_constraint.tcp_offset_points entries need a non-empty name");
+            }
+            for (double value : point.offset_m) {
+                if (!std::isfinite(value)) {
+                    throw std::runtime_error(
+                        "safety.user_floor_constraint.tcp_offset_points offsets must be finite (" + point.name + ")");
+                }
+            }
+        }
+        // A config-provided initial plane must satisfy the SAME envelope the runtime
+        // SetUserSafetyFloorPlane command is held to (one validator for both paths).
+        if (uf.has_initial_plane) {
+            const std::optional<std::string> reject =
+                validateUserFloorPlaneRequest(uf.point_m, uf.normal, uf.margin_m, uf);
+            if (reject) {
+                throw std::runtime_error(
+                    "safety.user_floor_constraint initial plane invalid: " + *reject);
             }
         }
     }
@@ -1565,7 +1635,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "floor_constraint",
             "roi_box",
             "reach_constraint",
+            "user_floor_constraint",
             "joint_target_smd",
+            "init_motion_planner",
         }, "safety");
         if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
         if (has(sec, "q_max_deg")) cfg.safety.q_max_deg = parseJointArray(sec["q_max_deg"], "safety.q_max_deg");
@@ -1651,6 +1723,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "max_near_pairs",
                     "viz_near_pairs_m",
                     "extra_collision",
+                    "ground_plane",
                 }, "safety.self_collision.mesh");
                 auto& mc = cfg.safety.self_collision.mesh;
                 if (has(m, "unified_urdf")) {
@@ -1732,6 +1805,24 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                         if (has(e, "radius_m")) ec.radius_m = asDouble(e["radius_m"], "extra_collision.radius_m");
                         if (has(e, "length_m")) ec.length_m = asDouble(e["length_m"], "extra_collision.length_m");
                         mc.extra_collision.push_back(ec);
+                    }
+                }
+                if (has(m, "ground_plane")) {
+                    const YAML::Node gp = m["ground_plane"];
+                    validateAllowedKeys(gp, {
+                        "enable", "z_m", "size_m", "thickness_m", "parent_frame",
+                    }, "safety.self_collision.mesh.ground_plane");
+                    auto& g = mc.ground_plane;
+                    if (has(gp, "enable")) g.enable = asBool(gp["enable"], "safety.self_collision.mesh.ground_plane.enable");
+                    if (has(gp, "z_m")) g.z_m = asDouble(gp["z_m"], "safety.self_collision.mesh.ground_plane.z_m");
+                    if (has(gp, "thickness_m")) g.thickness_m = asDouble(gp["thickness_m"], "safety.self_collision.mesh.ground_plane.thickness_m");
+                    if (has(gp, "parent_frame")) g.parent_frame = asString(gp["parent_frame"], "safety.self_collision.mesh.ground_plane.parent_frame");
+                    if (has(gp, "size_m")) {
+                        const YAML::Node sz = gp["size_m"];
+                        if (!sz.IsSequence() || sz.size() != 2)
+                            fail("safety.self_collision.mesh.ground_plane.size_m must be 2 values [Lx, Ly]", sz);
+                        g.size_m[0] = asDouble(sz[0], "safety.self_collision.mesh.ground_plane.size_m");
+                        g.size_m[1] = asDouble(sz[1], "safety.self_collision.mesh.ground_plane.size_m");
                     }
                 }
             }
@@ -1953,6 +2044,111 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 }
             }
         }
+        if (has(sec, "user_floor_constraint")) {
+            const YAML::Node uf = sec["user_floor_constraint"];
+            validateAllowedKeys(uf, {
+                "enable",
+                "point_m",
+                "normal",
+                "margin_m",
+                "max_tilt_deg",
+                "runtime_min_point_z_m",
+                "runtime_max_point_z_m",
+                "max_margin_m",
+                "fail_policy",
+                "monitor_only",
+                "tcp_offset_points",
+                "a_brake_m_s2",
+                "d_slow_m",
+            }, "safety.user_floor_constraint");
+            const auto parseVec3 = [&](const YAML::Node& node, const std::string& path,
+                                       std::array<double, 3>& out) {
+                if (!node.IsSequence() || node.size() != 3) {
+                    fail(path + " must be a [x, y, z] sequence", node);
+                }
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    out[axis] = asDouble(node[axis], path);
+                }
+            };
+            if (has(uf, "enable")) {
+                cfg.safety.user_floor_constraint.enable =
+                    asBool(uf["enable"], "safety.user_floor_constraint.enable");
+            }
+            // point_m and/or normal present => treat the config plane as usable at startup.
+            if (has(uf, "point_m")) {
+                parseVec3(uf["point_m"], "safety.user_floor_constraint.point_m",
+                          cfg.safety.user_floor_constraint.point_m);
+                cfg.safety.user_floor_constraint.has_initial_plane = true;
+            }
+            if (has(uf, "normal")) {
+                parseVec3(uf["normal"], "safety.user_floor_constraint.normal",
+                          cfg.safety.user_floor_constraint.normal);
+                cfg.safety.user_floor_constraint.has_initial_plane = true;
+            }
+            if (has(uf, "margin_m")) {
+                cfg.safety.user_floor_constraint.margin_m =
+                    asDouble(uf["margin_m"], "safety.user_floor_constraint.margin_m");
+            }
+            if (has(uf, "max_tilt_deg")) {
+                cfg.safety.user_floor_constraint.max_tilt_deg =
+                    asDouble(uf["max_tilt_deg"], "safety.user_floor_constraint.max_tilt_deg");
+            }
+            if (has(uf, "runtime_min_point_z_m")) {
+                cfg.safety.user_floor_constraint.runtime_min_point_z_m =
+                    asDouble(uf["runtime_min_point_z_m"], "safety.user_floor_constraint.runtime_min_point_z_m");
+            }
+            if (has(uf, "runtime_max_point_z_m")) {
+                cfg.safety.user_floor_constraint.runtime_max_point_z_m =
+                    asDouble(uf["runtime_max_point_z_m"], "safety.user_floor_constraint.runtime_max_point_z_m");
+            }
+            if (has(uf, "max_margin_m")) {
+                cfg.safety.user_floor_constraint.max_margin_m =
+                    asDouble(uf["max_margin_m"], "safety.user_floor_constraint.max_margin_m");
+            }
+            if (has(uf, "fail_policy")) {
+                cfg.safety.user_floor_constraint.fail_policy =
+                    parseFloorConstraintFailPolicy(uf["fail_policy"], "safety.user_floor_constraint.fail_policy");
+            }
+            if (has(uf, "monitor_only")) {
+                cfg.safety.user_floor_constraint.monitor_only =
+                    asBool(uf["monitor_only"], "safety.user_floor_constraint.monitor_only");
+            }
+            if (has(uf, "a_brake_m_s2")) {
+                cfg.safety.user_floor_constraint.a_brake_m_s2 =
+                    asDouble(uf["a_brake_m_s2"], "safety.user_floor_constraint.a_brake_m_s2");
+            }
+            if (has(uf, "d_slow_m")) {
+                cfg.safety.user_floor_constraint.d_slow_m =
+                    asDouble(uf["d_slow_m"], "safety.user_floor_constraint.d_slow_m");
+            }
+            if (has(uf, "tcp_offset_points")) {
+                const YAML::Node points = uf["tcp_offset_points"];
+                if (!points.IsSequence()) {
+                    fail("safety.user_floor_constraint.tcp_offset_points must be a sequence", points);
+                }
+                cfg.safety.user_floor_constraint.tcp_offset_points.clear();
+                for (std::size_t i = 0; i < points.size(); ++i) {
+                    const YAML::Node entry = points[i];
+                    validateAllowedKeys(entry, {"name", "offset_m"},
+                        "safety.user_floor_constraint.tcp_offset_points");
+                    FloorCheckPointConfig point;
+                    if (has(entry, "name")) {
+                        point.name = asString(entry["name"],
+                            "safety.user_floor_constraint.tcp_offset_points.name");
+                    }
+                    if (!has(entry, "offset_m") || !entry["offset_m"].IsSequence() ||
+                        entry["offset_m"].size() != 3) {
+                        fail("safety.user_floor_constraint.tcp_offset_points entries need offset_m: [x, y, z]",
+                             entry);
+                    }
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        point.offset_m[axis] = asDouble(entry["offset_m"][axis],
+                            "safety.user_floor_constraint.tcp_offset_points.offset_m");
+                    }
+                    cfg.safety.user_floor_constraint.tcp_offset_points.push_back(point);
+                }
+            }
+        }
         if (has(sec, "joint_target_smd")) {
             const YAML::Node js = sec["joint_target_smd"];
             validateAllowedKeys(js, {
@@ -1982,6 +2178,36 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 cfg.safety.joint_target_smd.max_accel_deg_s2 =
                     parseJointArray(js["max_accel_deg_s2"], "safety.joint_target_smd.max_accel_deg_s2");
             }
+        }
+        if (has(sec, "init_motion_planner")) {
+            const YAML::Node ip = sec["init_motion_planner"];
+            validateAllowedKeys(ip, {
+                "enable",
+                "max_planning_time_sec",
+                "max_iterations",
+                "step_size_rad",
+                "edge_resolution_rad",
+                "goal_bias",
+                "shortcut_passes",
+                "sample_margin_deg",
+                "collision_margin_m",
+                "seed",
+                "waypoint_tol_deg",
+                "max_segment_deg",
+            }, "safety.init_motion_planner");
+            auto& ipc = cfg.safety.init_motion_planner;
+            if (has(ip, "enable")) ipc.enable = asBool(ip["enable"], "safety.init_motion_planner.enable");
+            if (has(ip, "max_planning_time_sec")) ipc.max_planning_time_sec = asDouble(ip["max_planning_time_sec"], "safety.init_motion_planner.max_planning_time_sec");
+            if (has(ip, "max_iterations")) ipc.max_iterations = asInt(ip["max_iterations"], "safety.init_motion_planner.max_iterations");
+            if (has(ip, "step_size_rad")) ipc.step_size_rad = asDouble(ip["step_size_rad"], "safety.init_motion_planner.step_size_rad");
+            if (has(ip, "edge_resolution_rad")) ipc.edge_resolution_rad = asDouble(ip["edge_resolution_rad"], "safety.init_motion_planner.edge_resolution_rad");
+            if (has(ip, "goal_bias")) ipc.goal_bias = asDouble(ip["goal_bias"], "safety.init_motion_planner.goal_bias");
+            if (has(ip, "shortcut_passes")) ipc.shortcut_passes = asInt(ip["shortcut_passes"], "safety.init_motion_planner.shortcut_passes");
+            if (has(ip, "sample_margin_deg")) ipc.sample_margin_deg = asDouble(ip["sample_margin_deg"], "safety.init_motion_planner.sample_margin_deg");
+            if (has(ip, "collision_margin_m")) ipc.collision_margin_m = asDouble(ip["collision_margin_m"], "safety.init_motion_planner.collision_margin_m");
+            if (has(ip, "seed")) ipc.seed = static_cast<unsigned int>(asInt(ip["seed"], "safety.init_motion_planner.seed"));
+            if (has(ip, "waypoint_tol_deg")) ipc.waypoint_tol_deg = asDouble(ip["waypoint_tol_deg"], "safety.init_motion_planner.waypoint_tol_deg");
+            if (has(ip, "max_segment_deg")) ipc.max_segment_deg = asDouble(ip["max_segment_deg"], "safety.init_motion_planner.max_segment_deg");
         }
     }
 

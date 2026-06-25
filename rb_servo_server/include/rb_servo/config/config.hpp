@@ -315,6 +315,23 @@ struct SelfCollisionConfig {
         double viz_near_pairs_m = 0.06;
         // Extra collision primitives not in the URDF (wrist cameras, cables, table).
         std::vector<ExtraCollisionConfig> extra_collision;
+        // Whole-arm floor: a large thin box injected as a static (world-frame)
+        // collision obstacle so the SAME mesh barrier that guards arm<->arm /
+        // arm<->stand also keeps EVERY arm link above the floor (the
+        // floor_constraint plane only checks the TCP + its offset points, so an
+        // elbow/wrist can dip below it). When enable is true a box of lateral
+        // extent size_m=[Lx,Ly] and thickness_m is attached to parent_frame at
+        // z = z_m (its top face), classified as Stand and paired against both
+        // arms (minus stand_ignore_arm_substrings). Keep z_m <= the TCP floor
+        // (floor_constraint.z_min_m) so the two floors do not fight.
+        struct GroundPlaneConfig {
+            bool enable = false;
+            double z_m = 0.0;                  // top face height in parent_frame (m)
+            std::array<double, 2> size_m{4.0, 4.0};  // lateral full extents [Lx, Ly] (m)
+            double thickness_m = 0.10;         // box thickness below z_m (m)
+            std::string parent_frame = "world";  // static frame (world/stand)
+        };
+        GroundPlaneConfig ground_plane;
     };
     MeshConfig mesh;
 };
@@ -431,6 +448,44 @@ struct ReachConstraintConfig {
     double d_slow_m = 0.05;  // engage band inside each shell (0 => always active)
 };
 
+// Stand-frame USER-defined tilted floor plane (half-space): the TCP of either arm
+// — and each configured TCP-frame offset point — must satisfy
+// n . (p_stand - point_m) >= margin_m, where n is a unit normal pointing into the
+// allowed (upper) half-space. Unlike floor_constraint (a HORIZONTAL plane
+// z >= z_min_m), this plane may be tilted, so it can be fit to a physical floor
+// that is not parallel to the stand z=0 plane. The plane is fit in the GUI from
+// >= 3 captured floor-contact points (both arms) and pushed at runtime via the
+// leaseless SetUserSafetyFloorPlane command (bounded by validateUserFloorPlaneRequest:
+// unit normal, max_tilt_deg from vertical with n.z > 0, point z within
+// [runtime_min_point_z_m, runtime_max_point_z_m], margin within [0, max_margin_m]).
+// Independent of and ADDITIVE to floor_constraint / roi_box / reach_constraint:
+// every enabled constraint applies (the stricter wins), enforced with the SAME
+// velocity-damper projection using n as the stand-frame direction for every point.
+// monitor_only publishes telemetry without clamping/latching (never a real posture).
+struct UserFloorConstraintConfig {
+    bool enable = false;
+    // Whether point_m/normal hold a usable plane at startup. false (default) keeps
+    // the constraint inert (always Allow) until a SetUserSafetyFloorPlane arrives,
+    // even when enable=true — so a site can opt in without baking in a stale plane.
+    bool has_initial_plane = false;
+    std::array<double, 3> point_m{0.0, 0.0, 0.0};   // p0, stand frame
+    std::array<double, 3> normal{0.0, 0.0, 1.0};    // n, unit, into allowed half-space
+    double margin_m = 0.0;                           // lift the plane up by this much
+    // Runtime-request envelope (the tilted-plane analog of floor runtime_min/max_z):
+    double max_tilt_deg = 35.0;            // max angle of n from vertical (+z); n.z must be > 0
+    double runtime_min_point_z_m = -0.2;   // point_m z bounds
+    double runtime_max_point_z_m = 0.5;
+    double max_margin_m = 0.2;
+    FloorConstraintFailPolicy fail_policy = FloorConstraintFailPolicy::ClampToHold;
+    bool monitor_only = false;
+    // Additional check points in the TCP frame (meters), same as floor/ROI/reach
+    // tcp_offset_points (e.g. the PIKA gripper fingertips). The TCP point is always
+    // checked; the most-exposed point (lowest signed distance) binds the plane.
+    std::vector<FloorCheckPointConfig> tcp_offset_points;
+    double a_brake_m_s2 = 4.0;
+    double d_slow_m = 0.05;  // engage band above the plane (0 => always active)
+};
+
 // Joint-space SMD profile for the JointTarget primitive (the joint-space
 // mirror of cartesian_control.pose_track_smd): the sent target follows the
 // commanded goal as a second-order system (mass fixed at 1.0) stepped at the
@@ -447,6 +502,30 @@ struct JointTargetSmdConfig {
     double natural_frequency_hz = 0.4;
     JointArray max_velocity_deg_s{30.0, 30.0, 30.0, 45.0, 45.0, 60.0};
     JointArray max_accel_deg_s2{150.0, 150.0, 150.0, 250.0, 250.0, 350.0};
+};
+
+// Collision-free InitMotion planner (server-side). The legacy InitMotion is a
+// single JointTarget PTP whose straight joint-space interpolation can pass through
+// a self-colliding or floor-violating configuration; the reactive barrier then
+// brakes the arms at the boundary and they never REACH the init pose. When enabled,
+// a ControlMode::InitMotion command instead triggers a 12-DOF (both arms) RRT-Connect
+// that plans a collision-free + floor-safe joint path (oracle = a private
+// CollisionMonitor incl. the ground plane), which the server streams as ordinary
+// JointTarget setpoints through the full safety gate. Requires self_collision.enable
+// (the mesh model is the planner's oracle). Fail-closed: planning failure holds.
+struct InitMotionPlannerConfig {
+    bool enable = false;
+    double max_planning_time_sec = 2.0;   // wall-clock budget per plan (off the RT loop)
+    int max_iterations = 20000;           // RRT-Connect node cap before giving up
+    double step_size_rad = 0.20;          // RRT extension step (per-joint, combined space)
+    double edge_resolution_rad = 0.02;    // local-planner collision sampling step
+    double goal_bias = 0.10;              // probability of sampling the goal directly
+    int shortcut_passes = 200;            // post-process straightening attempts
+    double sample_margin_deg = 30.0;      // per-joint sampling band beyond [start,goal]
+    double collision_margin_m = 0.005;    // oracle clearance threshold (extra over d_hard)
+    unsigned int seed = 12345;            // RNG seed (reproducible plans/tests)
+    double waypoint_tol_deg = 1.5;        // advance to next waypoint within this tol
+    double max_segment_deg = 5.0;         // densify so no segment exceeds this per joint
 };
 
 struct SafetyConfig {
@@ -483,7 +562,9 @@ struct SafetyConfig {
     FloorConstraintConfig floor_constraint;
     RoiBoxConfig roi_box;
     ReachConstraintConfig reach_constraint;
+    UserFloorConstraintConfig user_floor_constraint;
     JointTargetSmdConfig joint_target_smd;
+    InitMotionPlannerConfig init_motion_planner;
 };
 
 inline constexpr JointArray rbpodoDefaultSafetyJointMinDeg() {

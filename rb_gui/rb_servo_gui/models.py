@@ -528,6 +528,7 @@ class StateSnapshot:
     self_collision: Mapping[str, Any] | None
     floor_constraint: Mapping[str, Any] | None
     roi_box: Mapping[str, Any] | None
+    user_floor_constraint: Mapping[str, Any] | None
     freedrive: Mapping[str, Any] | None
     raw: Mapping[str, Any]
 
@@ -574,6 +575,7 @@ class StateSnapshot:
             self_collision=data.get("self_collision") if isinstance(data.get("self_collision"), Mapping) else None,
             floor_constraint=data.get("floor_constraint") if isinstance(data.get("floor_constraint"), Mapping) else None,
             roi_box=data.get("roi_box") if isinstance(data.get("roi_box"), Mapping) else None,
+            user_floor_constraint=data.get("user_floor_constraint") if isinstance(data.get("user_floor_constraint"), Mapping) else None,
             freedrive=data.get("freedrive") if isinstance(data.get("freedrive"), Mapping) else None,
             raw=data,
         )

@@ -1580,7 +1580,8 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         floor["runtime_min_z_m"] = snapshot.floor_constraint_runtime_min_z_m;
         floor["runtime_max_z_m"] = snapshot.floor_constraint_runtime_max_z_m;
         const auto arm_json = [](bool checked, bool violated, double tcp_z_m,
-                                 const std::string& lowest_point) {
+                                 const std::string& lowest_point,
+                                 const std::array<double, 3>& lowest_point_m) {
             nlohmann::json arm;
             arm["checked"] = checked;
             arm["violated"] = violated;
@@ -1589,9 +1590,14 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
                 // offset point such as a gripper fingertip).
                 arm["tcp_z_m"] = tcp_z_m;
                 arm["lowest_point"] = lowest_point.empty() ? "tcp" : lowest_point;
+                // Full stand-frame xyz of that lowest point, so the GUI can capture
+                // the true floor-contact sample when fitting a user floor plane.
+                arm["lowest_point_m"] = nlohmann::json::array(
+                    {lowest_point_m[0], lowest_point_m[1], lowest_point_m[2]});
             } else {
                 arm["tcp_z_m"] = nullptr;
                 arm["lowest_point"] = nullptr;
+                arm["lowest_point_m"] = nullptr;
             }
             return arm;
         };
@@ -1599,12 +1605,14 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             snapshot.floor_constraint_left_checked,
             snapshot.floor_constraint_left_violated,
             snapshot.floor_constraint_left_tcp_z_m,
-            snapshot.floor_constraint_left_lowest_point);
+            snapshot.floor_constraint_left_lowest_point,
+            snapshot.floor_constraint_left_lowest_point_m);
         floor["right"] = arm_json(
             snapshot.floor_constraint_right_checked,
             snapshot.floor_constraint_right_violated,
             snapshot.floor_constraint_right_tcp_z_m,
-            snapshot.floor_constraint_right_lowest_point);
+            snapshot.floor_constraint_right_lowest_point,
+            snapshot.floor_constraint_right_lowest_point_m);
         floor["clamp_count"] = snapshot.floor_constraint_clamp_count;
         if (snapshot.floor_constraint_last_set_reject_reason.empty()) {
             floor["last_set_reject_reason"] = nullptr;
@@ -1651,6 +1659,53 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             roi["last_set_reject_reason"] = snapshot.roi_box_last_set_reject_reason;
         }
         message["roi_box"] = roi;
+    }
+    {
+        nlohmann::json uf;
+        uf["enabled"] = snapshot.user_floor_constraint_enabled;
+        uf["monitor_only"] = snapshot.user_floor_constraint_monitor_only;
+        const auto vec3 = [](const std::array<double, 3>& v) {
+            return nlohmann::json::array({v[0], v[1], v[2]});
+        };
+        uf["point_m"] = vec3(snapshot.user_floor_constraint_point_m);   // effective (runtime)
+        uf["normal"] = vec3(snapshot.user_floor_constraint_normal);
+        uf["margin_m"] = snapshot.user_floor_constraint_margin_m;
+        const auto arm_json = [&](bool checked, bool violated, double signed_dist_m,
+                                  const std::string& lowest_point,
+                                  const std::array<double, 3>& lowest_point_m) {
+            nlohmann::json arm;
+            arm["checked"] = checked;
+            arm["violated"] = violated;
+            if (checked && std::isfinite(signed_dist_m)) {
+                arm["signed_dist_m"] = signed_dist_m;
+                arm["lowest_point"] = lowest_point.empty() ? "tcp" : lowest_point;
+                arm["lowest_point_m"] = vec3(lowest_point_m);
+            } else {
+                arm["signed_dist_m"] = nullptr;
+                arm["lowest_point"] = nullptr;
+                arm["lowest_point_m"] = nullptr;
+            }
+            return arm;
+        };
+        uf["left"] = arm_json(
+            snapshot.user_floor_constraint_left_checked,
+            snapshot.user_floor_constraint_left_violated,
+            snapshot.user_floor_constraint_left_signed_dist_m,
+            snapshot.user_floor_constraint_left_lowest_point,
+            snapshot.user_floor_constraint_left_lowest_point_m);
+        uf["right"] = arm_json(
+            snapshot.user_floor_constraint_right_checked,
+            snapshot.user_floor_constraint_right_violated,
+            snapshot.user_floor_constraint_right_signed_dist_m,
+            snapshot.user_floor_constraint_right_lowest_point,
+            snapshot.user_floor_constraint_right_lowest_point_m);
+        uf["clamp_count"] = snapshot.user_floor_constraint_clamp_count;
+        if (snapshot.user_floor_constraint_last_set_reject_reason.empty()) {
+            uf["last_set_reject_reason"] = nullptr;
+        } else {
+            uf["last_set_reject_reason"] = snapshot.user_floor_constraint_last_set_reject_reason;
+        }
+        message["user_floor_constraint"] = uf;
     }
     message["motion_state"] = toString(snapshot.motion_state);
     message["fault_latched"] = snapshot.fault_latched;

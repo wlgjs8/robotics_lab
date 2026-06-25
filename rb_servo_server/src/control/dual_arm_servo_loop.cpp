@@ -57,6 +57,7 @@ bool isStreamingCartesianMode(ControlMode mode) {
 
 bool isMotionMode(ControlMode mode) {
     return mode == ControlMode::JointTarget ||
+           mode == ControlMode::InitMotion ||
            mode == ControlMode::JointVelocity ||
            mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
@@ -130,6 +131,7 @@ bool isReadOnlyBlockedMode(ControlMode mode) {
 bool isCommandModeMissingPayload(const ArmCommand& command) {
     switch (command.mode) {
         case ControlMode::JointTarget:
+        case ControlMode::InitMotion:
             return !command.has_joint_target;
         case ControlMode::JointVelocity:
             return !command.has_joint_velocity;
@@ -1429,6 +1431,16 @@ DualArmServoLoop::DualArmServoLoop(
         runtime_roi_min_m_[k].store(config.safety.roi_box.min_m[k]);
         runtime_roi_max_m_[k].store(config.safety.roi_box.max_m[k]);
     }
+    // Seed the user floor plane from config. It is only active once a usable plane
+    // is configured (has_initial_plane); otherwise it stays disabled until a
+    // SetUserSafetyFloorPlane command arrives, even when enable=true.
+    for (int k = 0; k < 3; ++k) {
+        runtime_user_floor_point_m_[k].store(config.safety.user_floor_constraint.point_m[k]);
+        runtime_user_floor_normal_[k].store(config.safety.user_floor_constraint.normal[k]);
+    }
+    runtime_user_floor_margin_m_.store(config.safety.user_floor_constraint.margin_m);
+    runtime_user_floor_enabled_.store(config.safety.user_floor_constraint.enable &&
+                                      config.safety.user_floor_constraint.has_initial_plane);
     // URDF mesh self-collision: spin up the async monitor (off the servo_j path).
     // Throws on a bad URDF/mesh path — fail closed at startup rather than run a
     // real robot with the guard silently disabled. The single self_collision.enable
@@ -1471,6 +1483,22 @@ DualArmServoLoop::DualArmServoLoop(
             s.rpy = e.rpy;
             collision_monitor_cfg_.extra_collision.push_back(s);
         }
+        // Whole-arm floor: inject a large thin static box (world/stand frame) so the
+        // SAME mesh barrier that guards arm<->arm / arm<->stand also keeps EVERY arm
+        // link above the floor. The floor_constraint plane only checks the TCP + its
+        // offset points (an elbow/wrist can dip below it); this box closes that gap
+        // and is also what the InitMotion planner's oracle avoids. Top face at z_m.
+        if (m.ground_plane.enable) {
+            const auto& g = m.ground_plane;
+            ExtraCollisionShape s;
+            s.name = "ground_plane";
+            s.shape = "box";
+            s.parent_frame = g.parent_frame;
+            s.size_m = {g.size_m[0], g.size_m[1], g.thickness_m};
+            s.xyz_m = {0.0, 0.0, g.z_m - g.thickness_m * 0.5};
+            s.rpy = {0.0, 0.0, 0.0};
+            collision_monitor_cfg_.extra_collision.push_back(s);
+        }
         for (int i = 0; i < kDof && i < static_cast<int>(config_.kinematics.joint_names.size()); ++i) {
             collision_monitor_cfg_.left_joints[i] = m.left_prefix + config_.kinematics.joint_names[i];
             collision_monitor_cfg_.right_joints[i] = m.right_prefix + config_.kinematics.joint_names[i];
@@ -1484,6 +1512,18 @@ DualArmServoLoop::DualArmServoLoop(
     if (config_.safety.self_collision.enable && !collision_monitor_) {
         throw std::runtime_error(
             "safety.self_collision.enable=true but the CollisionMonitor failed to construct");
+    }
+    // Collision-free InitMotion planner. Built from the SAME geometry config as the
+    // servo monitor (collision_monitor_cfg_ already carries the ground plane) so it
+    // plans against exactly what the runtime barrier enforces. Config validation
+    // guarantees self_collision.enable when the planner is enabled. The planner owns
+    // its own private (unstarted) CollisionMonitor; it never touches collision_monitor_.
+    if (config_.safety.init_motion_planner.enable && config_.safety.self_collision.enable) {
+        init_motion_planner_ = std::make_unique<InitMotionPlanner>(
+            collision_monitor_cfg_,
+            config_.safety.init_motion_planner,
+            config_.safety.q_min_deg,
+            config_.safety.q_max_deg);
     }
     resetReferenceSupervisionState(this);
 }
@@ -1942,6 +1982,45 @@ void DualArmServoLoop::loopMain() {
                 }
             }
             command = metadata_hold(command);
+        } else if (commandRequestsSetUserSafetyFloorPlane(command)) {
+            // Leaseless runtime set/enable of the user-defined tilted floor plane.
+            // A disable request (enable=false) is accepted unconditionally; an enable
+            // request must pass validateUserFloorPlaneRequest. Works while fault-latched
+            // (turning the constraint on/off must never be blocked).
+            if (!command.has_user_floor_plane) {
+                user_floor_last_set_reject_reason_ = "user_floor_plane_missing";
+                std::cerr << "[WARN] SetUserSafetyFloorPlane rejected: missing payload\n";
+            } else if (!command.user_floor_enable) {
+                runtime_user_floor_enabled_.store(false);
+                user_floor_last_set_reject_reason_.clear();
+                std::cerr << "[INFO] user safety floor plane DISABLED by source_id="
+                          << command.source.source_id << "\n";
+            } else {
+                const std::optional<std::string> reject = validateUserFloorPlaneRequest(
+                    command.user_floor_point_m, command.user_floor_normal,
+                    command.user_floor_margin_m, config_.safety.user_floor_constraint);
+                if (reject.has_value()) {
+                    user_floor_last_set_reject_reason_ = *reject;
+                    std::cerr << "[WARN] SetUserSafetyFloorPlane rejected (" << *reject
+                              << ") from source_id=" << command.source.source_id << "\n";
+                } else {
+                    for (int k = 0; k < 3; ++k) {
+                        runtime_user_floor_point_m_[k].store(command.user_floor_point_m[k]);
+                        runtime_user_floor_normal_[k].store(command.user_floor_normal[k]);
+                    }
+                    runtime_user_floor_margin_m_.store(command.user_floor_margin_m);
+                    runtime_user_floor_enabled_.store(true);
+                    user_floor_last_set_reject_reason_.clear();
+                    std::cerr << "[INFO] user safety floor plane set to point["
+                              << command.user_floor_point_m[0] << "," << command.user_floor_point_m[1]
+                              << "," << command.user_floor_point_m[2] << "] normal["
+                              << command.user_floor_normal[0] << "," << command.user_floor_normal[1]
+                              << "," << command.user_floor_normal[2] << "] margin="
+                              << command.user_floor_margin_m << " m by source_id="
+                              << command.source.source_id << "\n";
+                }
+            }
+            command = metadata_hold(command);
         } else if (commandRequestsDisarmMotion(command)) {
             clearLatchedCartesianTargets();
             setMotionState(ServerMotionState::ConnectedHold);
@@ -2020,6 +2099,10 @@ void DualArmServoLoop::loopMain() {
         } else {
             SafetyVerdict command_verdict = SafetyVerdict::Ok;
             command = resolveCartesianDeltaCommand(command, left_state, right_state);
+            // Collision-free InitMotion: rewrite a ControlMode::InitMotion into a dual
+            // JointTarget toward the current planned waypoint (or a hold while planning /
+            // on failure), so the trajectory + safety pipeline below is unchanged.
+            command = applyInitMotionSequencer(command, left_state, right_state);
             const bool motion_requested = commandRequestsMotion(command);
             ServoTarget desired = computeServoTarget(left_state, right_state, command, filter_dt_sec, &command_verdict);
             desired_target = desired;
@@ -2403,10 +2486,16 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.floor_constraint_left_violated = last_floor_left_.violated;
             latest_snapshot_.floor_constraint_left_tcp_z_m = last_floor_left_.tcp_z_m;
             latest_snapshot_.floor_constraint_left_lowest_point = last_floor_left_.lowest_point;
+            latest_snapshot_.floor_constraint_left_lowest_point_m = {
+                last_floor_left_.lowest_point_stand.x(), last_floor_left_.lowest_point_stand.y(),
+                last_floor_left_.lowest_point_stand.z()};
             latest_snapshot_.floor_constraint_right_checked = last_floor_right_.checked;
             latest_snapshot_.floor_constraint_right_violated = last_floor_right_.violated;
             latest_snapshot_.floor_constraint_right_tcp_z_m = last_floor_right_.tcp_z_m;
             latest_snapshot_.floor_constraint_right_lowest_point = last_floor_right_.lowest_point;
+            latest_snapshot_.floor_constraint_right_lowest_point_m = {
+                last_floor_right_.lowest_point_stand.x(), last_floor_right_.lowest_point_stand.y(),
+                last_floor_right_.lowest_point_stand.z()};
             latest_snapshot_.floor_constraint_clamp_count = floor_clamp_count_;
             latest_snapshot_.floor_constraint_last_set_reject_reason = floor_last_set_reject_reason_;
             latest_snapshot_.roi_box_enabled = config_.safety.roi_box.enable;
@@ -2425,6 +2514,35 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.roi_box_right_closest_face = last_roi_right_.closest_face;
             latest_snapshot_.roi_box_clamp_count = roi_clamp_count_;
             latest_snapshot_.roi_box_last_set_reject_reason = roi_last_set_reject_reason_;
+            {
+                const math::Vector3 uf_point = effectiveUserFloorPoint();
+                const math::Vector3 uf_normal = effectiveUserFloorNormal();
+                latest_snapshot_.user_floor_constraint_enabled = userFloorActive();
+                latest_snapshot_.user_floor_constraint_monitor_only =
+                    config_.safety.user_floor_constraint.monitor_only;
+                latest_snapshot_.user_floor_constraint_point_m = {uf_point.x(), uf_point.y(), uf_point.z()};
+                latest_snapshot_.user_floor_constraint_normal = {uf_normal.x(), uf_normal.y(), uf_normal.z()};
+                latest_snapshot_.user_floor_constraint_margin_m = effectiveUserFloorMargin();
+                latest_snapshot_.user_floor_constraint_left_checked = last_user_floor_left_.checked;
+                latest_snapshot_.user_floor_constraint_left_violated = last_user_floor_left_.violated;
+                latest_snapshot_.user_floor_constraint_left_signed_dist_m = last_user_floor_left_.signed_dist_m;
+                latest_snapshot_.user_floor_constraint_left_lowest_point = last_user_floor_left_.lowest_point;
+                latest_snapshot_.user_floor_constraint_left_lowest_point_m = {
+                    last_user_floor_left_.lowest_point_stand.x(),
+                    last_user_floor_left_.lowest_point_stand.y(),
+                    last_user_floor_left_.lowest_point_stand.z()};
+                latest_snapshot_.user_floor_constraint_right_checked = last_user_floor_right_.checked;
+                latest_snapshot_.user_floor_constraint_right_violated = last_user_floor_right_.violated;
+                latest_snapshot_.user_floor_constraint_right_signed_dist_m = last_user_floor_right_.signed_dist_m;
+                latest_snapshot_.user_floor_constraint_right_lowest_point = last_user_floor_right_.lowest_point;
+                latest_snapshot_.user_floor_constraint_right_lowest_point_m = {
+                    last_user_floor_right_.lowest_point_stand.x(),
+                    last_user_floor_right_.lowest_point_stand.y(),
+                    last_user_floor_right_.lowest_point_stand.z()};
+                latest_snapshot_.user_floor_constraint_clamp_count = user_floor_clamp_count_;
+                latest_snapshot_.user_floor_constraint_last_set_reject_reason =
+                    user_floor_last_set_reject_reason_;
+            }
             latest_snapshot_.motion_state = sample.motion_state;
             latest_snapshot_.fault_latched = sample.fault_latched;
             latest_snapshot_.async_supervision_degraded = sample.async_supervision_degraded;
@@ -3771,6 +3889,7 @@ ServoTarget DualArmServoLoop::applySafety(
     bool floor_engaged = false;       // a floor row is within its engage band
     bool roi_engaged = false;          // a ROI-box face row is within its engage band
     bool reach_engaged = false;        // a reach-shell row is within its engage band
+    bool user_floor_engaged = false;   // a user-floor-plane row is within its engage band
     bool self_collision_hold = false;  // stale verdict -> whole-arm hold, skip solve
 
     // ---- Floor plane: synchronous FK + per-point z-velocity Jacobian ----
@@ -4077,6 +4196,103 @@ ServoTarget DualArmServoLoop::applySafety(
         }
     }
 
+    // ---- User-defined tilted floor plane: synchronous FK + per-point normal-velocity
+    // Jacobian. Parallel to the (horizontal) floor_constraint above and ADDITIVE: both
+    // apply when enabled, sharing the same Gauss-Seidel safety solve. Uses the plane
+    // normal n as the constant stand-frame direction for the velocity damper. ----
+    if (userFloorActive()) {
+        const UserFloorArmEvaluation left_eval = evaluateUserFloorArm(ArmId::Left, out.left_q_target_deg);
+        const UserFloorArmEvaluation right_eval = evaluateUserFloorArm(ArmId::Right, out.right_q_target_deg);
+        last_user_floor_left_ = left_eval;    // telemetry, even when already faulted
+        last_user_floor_right_ = right_eval;
+        const auto& uf = config_.safety.user_floor_constraint;
+        if (!uf.monitor_only &&
+            combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+            const math::Vector3 normal = effectiveUserFloorNormal();
+            const std::array<double, 3> dir{normal.x(), normal.y(), normal.z()};
+            // Returns true if it LATCHED (caller stops processing the other arm).
+            const auto build_user_floor_arm = [&](
+                ArmId arm, ControlMode mode, const RobotState& state,
+                const UserFloorArmEvaluation& eval, JointArray& target_q,
+                const JointArray& prev_sent_q) -> bool {
+                const std::string arm_name = arm == ArmId::Left ? "left" : "right";
+                const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount
+                                                                 : config_.right_mount;
+                const auto fail_closed_hold = [&](const char* why) {
+                    target_q = prev_sent_q;  // hold this arm
+                    resetCartesianVelocityIntegrator(arm, why);
+                    reanchor_twist_smd_goal(arm, state);
+                    if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
+                        combined = SafetyVerdict::FloorViolation;
+                    }
+                };
+                if (!eval.checked) {
+                    // TCP FK unavailable -> fail closed (cannot build a Jacobian).
+                    const std::string reason = "user floor: " + arm_name + " TCP FK unavailable";
+                    if (uf.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
+                        !isTcpTwistMode(mode)) {
+                        latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
+                        out = currentFaultHoldTarget();
+                        combined = SafetyVerdict::FaultLatched;
+                        return true;
+                    }
+                    fail_closed_hold("user_floor_fk_unavailable");
+                    return false;
+                }
+                // Hard latch (mirror of floor): FaultLatch policy + non-twist (PTP/jog) +
+                // below the plane (signed_dist < 0) + not escaping (signed distance not
+                // increasing vs the previous sent pose).
+                if (uf.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
+                    !isTcpTwistMode(mode) && eval.signed_dist_m < 0.0) {
+                    const UserFloorArmEvaluation prev_eval = evaluateUserFloorArm(arm, prev_sent_q);
+                    const bool escaping = prev_eval.checked && std::isfinite(prev_eval.signed_dist_m) &&
+                        eval.signed_dist_m > prev_eval.signed_dist_m - kFloorEscapeEpsilonM;
+                    if (!escaping) {
+                        const std::string reason = "user floor: " + arm_name + " signed dist " +
+                            std::to_string(eval.signed_dist_m) + " m below plane";
+                        latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
+                        out = currentFaultHoldTarget();
+                        combined = SafetyVerdict::FaultLatched;
+                        return true;
+                    }
+                }
+                // Within the engage band: add a normal-velocity damper row for the
+                // lowest point. d(signed_dist)/dt >= -sqrt(2 a margin) brakes the closing
+                // motion to zero AT the plane; lateral/lifting motion stays free, and
+                // below the plane (margin<0) xi=0 (block deeper, slide/lift free).
+                const double margin = eval.signed_dist_m;
+                if (margin < uf.d_slow_m) {
+                    const math::Vector3& off = eval.lowest_offset_tcp;
+                    const std::array<double, 3> offset{off.x(), off.y(), off.z()};
+                    JointArray Jn{};
+                    if (kinematics_ &&
+                        kinematics_->computeStandDirectionJacobian(arm, target_q, mount, offset,
+                                                                   dir, Jn)) {
+                        VelocityConstraint c;
+                        const int base = arm == ArmId::Left ? 0 : kDof;
+                        for (int i = 0; i < kDof; ++i) c.J[base + i] = Jn[i];
+                        if (c.J.squaredNorm() > 1e-18) {
+                            c.xi = margin > 0.0 ? std::sqrt(2.0 * uf.a_brake_m_s2 * margin) : 0.0;
+                            c.d_now = margin;
+                            safety_cons.push_back(std::move(c));
+                            user_floor_engaged = true;
+                        }
+                    } else {
+                        // Jacobian unavailable -> fail closed (revert this arm).
+                        fail_closed_hold("user_floor_jacobian_unavailable");
+                        return false;
+                    }
+                }
+                return false;
+            };
+            if (!build_user_floor_arm(ArmId::Left, left_mode, left_state, left_eval,
+                                      out.left_q_target_deg, left_prev_sent_q_deg_)) {
+                build_user_floor_arm(ArmId::Right, right_mode, right_state, right_eval,
+                                     out.right_q_target_deg, right_prev_sent_q_deg_);
+            }
+        }
+    }
+
     // Dual-arm self-collision guard: never command a configuration that brings the
     // two arms (or an arm and the stand) within the mesh barrier's hard floor.
     // Evaluated on the final candidate targets (post per-arm filtering). The single
@@ -4211,11 +4427,13 @@ ServoTarget DualArmServoLoop::applySafety(
             if (floor_engaged) ++floor_clamp_count_;
             if (roi_engaged) ++roi_clamp_count_;
             if (reach_engaged) ++reach_clamp_count_;
+            if (user_floor_engaged) ++user_floor_clamp_count_;
             if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
-                combined = floor_engaged ? SafetyVerdict::FloorViolation
-                         : roi_engaged   ? SafetyVerdict::RoiViolation
-                         : reach_engaged ? SafetyVerdict::RoiViolation
-                                         : SafetyVerdict::SelfCollision;
+                combined = floor_engaged      ? SafetyVerdict::FloorViolation
+                         : user_floor_engaged ? SafetyVerdict::FloorViolation
+                         : roi_engaged         ? SafetyVerdict::RoiViolation
+                         : reach_engaged       ? SafetyVerdict::RoiViolation
+                                               : SafetyVerdict::SelfCollision;
             }
         }
         static const bool kProjLog = std::getenv("RB_SELF_COLLISION_LOG") != nullptr;
@@ -4229,6 +4447,7 @@ ServoTarget DualArmServoLoop::applySafety(
                           << (floor_engaged ? " (incl floor)" : "")
                           << (roi_engaged ? " (incl roi)" : "")
                           << (reach_engaged ? " (incl reach)" : "")
+                          << (user_floor_engaged ? " (incl user_floor)" : "")
                           << " corr(L/R)=" << proj.left_correction_deg_s << "/"
                           << proj.right_correction_deg_s << " deg/s"
                           << ((left_blocked || right_blocked) ? "  BLOCKED" : "") << "\n";
@@ -4257,7 +4476,7 @@ FloorArmEvaluation DualArmServoLoop::evaluateFloorArm(ArmId arm, const JointArra
         // escape, and clamp logic all act on the most exposed point.
         const double lowest_z = floorLowestZWithOffsets(
             tcp, config_.safety.floor_constraint.tcp_offset_points, &eval.lowest_point,
-            &eval.lowest_offset_tcp);
+            &eval.lowest_offset_tcp, &eval.lowest_point_stand);
         if (!std::isfinite(lowest_z)) {
             return FloorArmEvaluation{};  // checked=false -> caller fails closed
         }
@@ -4326,6 +4545,47 @@ std::array<double, 3> DualArmServoLoop::effectiveRoiMin() const {
 std::array<double, 3> DualArmServoLoop::effectiveRoiMax() const {
     return {runtime_roi_max_m_[0].load(), runtime_roi_max_m_[1].load(),
             runtime_roi_max_m_[2].load()};
+}
+
+bool DualArmServoLoop::userFloorActive() const {
+    return runtime_user_floor_enabled_.load();
+}
+
+math::Vector3 DualArmServoLoop::effectiveUserFloorPoint() const {
+    return math::Vector3(runtime_user_floor_point_m_[0].load(),
+                         runtime_user_floor_point_m_[1].load(),
+                         runtime_user_floor_point_m_[2].load());
+}
+
+math::Vector3 DualArmServoLoop::effectiveUserFloorNormal() const {
+    return math::Vector3(runtime_user_floor_normal_[0].load(),
+                         runtime_user_floor_normal_[1].load(),
+                         runtime_user_floor_normal_[2].load());
+}
+
+double DualArmServoLoop::effectiveUserFloorMargin() const {
+    return runtime_user_floor_margin_m_.load();
+}
+
+UserFloorArmEvaluation DualArmServoLoop::evaluateUserFloorArm(ArmId arm, const JointArray& q_deg) const {
+    UserFloorArmEvaluation eval;
+    if (!kinematics_ || !finiteJointArray(q_deg)) {
+        return eval;  // checked=false -> caller fails closed
+    }
+    const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount : config_.right_mount;
+    try {
+        const Pose6D tcp = kinematics_->computeTcpStand(arm, q_deg, mount);
+        // Signed distance of the most-exposed point (TCP + configured offset points)
+        // to the runtime plane; checked=false (fail closed) when FK is non-finite.
+        if (!userFloorEvaluatePlane(tcp, config_.safety.user_floor_constraint.tcp_offset_points,
+                                    effectiveUserFloorPoint(), effectiveUserFloorNormal(),
+                                    effectiveUserFloorMargin(), &eval)) {
+            return UserFloorArmEvaluation{};
+        }
+    } catch (const std::exception&) {
+        return UserFloorArmEvaluation{};  // checked=false -> caller fails closed
+    }
+    return eval;
 }
 
 Pose6D DualArmServoLoop::clampPoseToRoi(const Pose6D& pose) const {
@@ -4491,6 +4751,11 @@ bool DualArmServoLoop::commandRequestsSetSafetyFloorZ(const DualArmCommand& comm
 bool DualArmServoLoop::commandRequestsSetSafetyRoiBounds(const DualArmCommand& command) const {
     return command.left.mode == ControlMode::SetSafetyRoiBounds ||
            command.right.mode == ControlMode::SetSafetyRoiBounds;
+}
+
+bool DualArmServoLoop::commandRequestsSetUserSafetyFloorPlane(const DualArmCommand& command) const {
+    return command.left.mode == ControlMode::SetUserSafetyFloorPlane ||
+           command.right.mode == ControlMode::SetUserSafetyFloorPlane;
 }
 
 bool DualArmServoLoop::commandRequestsEmergencyStop(const DualArmCommand& command) const {
@@ -4815,6 +5080,145 @@ void DualArmServoLoop::advanceFreedrive(const RobotState& left_state, const Robo
 
 bool DualArmServoLoop::commandRequestsMotion(const DualArmCommand& command) const {
     return isMotionMode(command.left.mode) || isMotionMode(command.right.mode);
+}
+
+DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
+    DualArmCommand command,
+    const RobotState& left_state,
+    const RobotState& right_state
+) {
+    (void)left_state;
+    (void)right_state;
+    const bool is_init = command.left.mode == ControlMode::InitMotion ||
+                         command.right.mode == ControlMode::InitMotion;
+
+    // Rewrite both arms to an absolute dual JointTarget (the downstream pipeline only
+    // ever sees JointTarget/Hold — never InitMotion).
+    const auto as_joint_target = [](DualArmCommand& c, const JointArray& l, const JointArray& r) {
+        c.left.mode = ControlMode::JointTarget;
+        c.right.mode = ControlMode::JointTarget;
+        c.left.q_target_deg = l;
+        c.right.q_target_deg = r;
+        c.left.has_joint_target = true;
+        c.right.has_joint_target = true;
+    };
+    const auto as_hold = [](DualArmCommand& c) {
+        c.left.mode = ControlMode::Hold;
+        c.right.mode = ControlMode::Hold;
+    };
+    const auto reached = [](const JointArray& a, const JointArray& b, double tol) {
+        for (int i = 0; i < kDof; ++i) {
+            if (std::abs(a[i] - b[i]) > tol) return false;
+        }
+        return true;
+    };
+
+    if (!is_init) {
+        // Cancellation: any non-InitMotion command resets the sequencer so the next
+        // InitMotion plans fresh. A discarded in-flight future detaches (its async
+        // task completes harmlessly on the private oracle).
+        if (init_motion_exec_.status != InitMotionStatus::Idle) {
+            init_motion_exec_ = InitMotionExec{};
+        }
+        return command;
+    }
+
+    // Planner disabled -> fall back to a direct JointTarget to the init pose (the
+    // legacy behavior; the reactive barrier + floor still guard each tick).
+    if (!init_motion_planner_) {
+        as_joint_target(command, command.left.q_target_deg, command.right.q_target_deg);
+        return command;
+    }
+
+    const JointArray target_left = command.left.q_target_deg;
+    const JointArray target_right = command.right.q_target_deg;
+    auto& ex = init_motion_exec_;
+    const bool new_target = !ex.has_target ||
+        !reached(target_left, ex.target_left, 1e-6) ||
+        !reached(target_right, ex.target_right, 1e-6);
+
+    // Launch (or relaunch on a changed target) a plan from the CURRENT sent pose.
+    // While Planning we never relaunch (let the in-flight plan resolve first).
+    const auto launch_plan = [&]() {
+        ex.target_left = target_left;
+        ex.target_right = target_right;
+        ex.has_target = true;
+        ex.waypoints.clear();
+        ex.index = 0;
+        ex.status = InitMotionStatus::Planning;
+        ex.message = "planning";
+        const JointArray start_left = left_prev_sent_q_deg_;
+        const JointArray start_right = right_prev_sent_q_deg_;
+        InitMotionPlanner* planner = init_motion_planner_.get();
+        ex.future = std::async(std::launch::async,
+            [planner, start_left, start_right, target_left, target_right]() {
+                return planner->plan(start_left, start_right, target_left, target_right);
+            });
+        std::cerr << "[INFO] InitMotion: planning collision-free path from current pose\n";
+    };
+
+    if (ex.status == InitMotionStatus::Idle ||
+        ((ex.status == InitMotionStatus::Executing ||
+          ex.status == InitMotionStatus::Done ||
+          ex.status == InitMotionStatus::Failed) && new_target)) {
+        launch_plan();
+    }
+
+    // Poll the async plan (non-blocking) and transition Planning -> Executing/Failed.
+    if (ex.status == InitMotionStatus::Planning && ex.future.valid() &&
+        ex.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        InitMotionPlanResult result = ex.future.get();
+        if (result.success && !result.waypoints.empty()) {
+            ex.waypoints = std::move(result.waypoints);
+            ex.index = 0;
+            ex.status = InitMotionStatus::Executing;
+            ex.message = "executing";
+            std::cerr << "[INFO] InitMotion: plan found ("
+                      << ex.waypoints.size() << " waypoints, "
+                      << result.iterations << " iters, "
+                      << result.planning_time_s << " s); streaming\n";
+        } else {
+            ex.status = InitMotionStatus::Failed;
+            ex.message = result.message;
+            std::cerr << "[WARN] InitMotion: planning failed (" << result.message
+                      << "); holding (fail-closed)\n";
+        }
+    }
+
+    switch (ex.status) {
+        case InitMotionStatus::Executing: {
+            const double tol = config_.safety.init_motion_planner.waypoint_tol_deg;
+            // Advance through every waypoint already reached this tick (the SMD ramp
+            // may settle several short densified segments between ticks).
+            while (ex.index + 1 < ex.waypoints.size() &&
+                   reached(left_prev_sent_q_deg_, ex.waypoints[ex.index].first, tol) &&
+                   reached(right_prev_sent_q_deg_, ex.waypoints[ex.index].second, tol)) {
+                ++ex.index;
+            }
+            const auto& wp = ex.waypoints[ex.index];
+            if (ex.index + 1 == ex.waypoints.size() &&
+                reached(left_prev_sent_q_deg_, wp.first, tol) &&
+                reached(right_prev_sent_q_deg_, wp.second, tol)) {
+                ex.status = InitMotionStatus::Done;
+                ex.message = "done";
+                std::cerr << "[INFO] InitMotion: reached init pose\n";
+            }
+            as_joint_target(command, wp.first, wp.second);
+            break;
+        }
+        case InitMotionStatus::Done:
+            // Hold at the (planned) goal so the arm resists drift until the command
+            // expires or the operator issues something else.
+            as_joint_target(command, ex.target_left, ex.target_right);
+            break;
+        case InitMotionStatus::Planning:
+        case InitMotionStatus::Failed:
+        default:
+            // Hold in place: while planning, or fail-closed after a planning failure.
+            as_hold(command);
+            break;
+    }
+    return command;
 }
 
 bool DualArmServoLoop::commandBlockedByReadOnly(const DualArmCommand& command) const {

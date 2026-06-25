@@ -344,7 +344,7 @@ def _format_floor_constraint_status(
         return "floor: disabled"
 
     z_min = floor.get("z_min_m")
-    z_txt = f"{float(z_min) * 1000:.0f}mm" if isinstance(z_min, (int, float)) else "?"
+    z_txt = f"{float(z_min) * 1000:.1f}mm" if isinstance(z_min, (int, float)) else "?"
 
     def arm_part(key: str) -> str:
         arm = floor.get(key)
@@ -364,6 +364,46 @@ def _format_floor_constraint_status(
     if violated_arms:
         return f"floor: VIOLATED({','.join(violated_arms)}) z={z_txt}{monitor}"
     return f"floor: ON z={z_txt} margin {arm_part('left')} {arm_part('right')}{monitor}"
+
+
+def _format_user_floor_constraint_status(
+    latest: StateSnapshot | None,
+    *,
+    stale: bool,
+) -> str:
+    if latest is None:
+        return "user floor: no state"
+    if stale:
+        return "State stream stale"
+    uf = latest.user_floor_constraint
+    if not isinstance(uf, Mapping) or not bool(uf.get("enabled", False)):
+        return "user floor: off"
+
+    def arm_part(key: str) -> str:
+        arm = uf.get(key)
+        if not isinstance(arm, Mapping) or not bool(arm.get("checked", False)):
+            return f"{key[0].upper()}:?"
+        sd = arm.get("signed_dist_m")
+        if not isinstance(sd, (int, float)):
+            return f"{key[0].upper()}:?"
+        return f"{key[0].upper()}:{float(sd) * 1000:.0f}mm"
+
+    normal = uf.get("normal")
+    tilt_txt = "?"
+    if isinstance(normal, (list, tuple)) and len(normal) == 3:
+        try:
+            nz = max(-1.0, min(1.0, float(normal[2])))
+            tilt_txt = f"{math.degrees(math.acos(nz)):.0f}°"
+        except (TypeError, ValueError):
+            tilt_txt = "?"
+    violated_arms = [
+        key for key in ("left", "right")
+        if isinstance(uf.get(key), Mapping) and bool(uf[key].get("violated", False))
+    ]
+    monitor = " monitor_only" if bool(uf.get("monitor_only", False)) else ""
+    if violated_arms:
+        return f"user floor: VIOLATED({','.join(violated_arms)}) tilt={tilt_txt}{monitor}"
+    return f"user floor: ON tilt={tilt_txt} dist {arm_part('left')} {arm_part('right')}{monitor}"
 
 
 def _format_roi_box_status(

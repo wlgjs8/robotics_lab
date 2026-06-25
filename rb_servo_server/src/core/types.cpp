@@ -25,6 +25,7 @@ std::string toString(ControlMode mode) {
         case ControlMode::ArmMotion: return "ArmMotion";
         case ControlMode::DisarmMotion: return "DisarmMotion";
         case ControlMode::JointTarget: return "JointTarget";
+        case ControlMode::InitMotion: return "InitMotion";
         case ControlMode::JointVelocity: return "JointVelocity";
         case ControlMode::TcpPoseTarget: return "TcpPoseTarget";
         case ControlMode::TcpLinearMove: return "TcpLinearMove";
@@ -38,6 +39,7 @@ std::string toString(ControlMode mode) {
         case ControlMode::ResetFault: return "ResetFault";
         case ControlMode::SetSafetyFloorZ: return "SetSafetyFloorZ";
         case ControlMode::SetSafetyRoiBounds: return "SetSafetyRoiBounds";
+        case ControlMode::SetUserSafetyFloorPlane: return "SetUserSafetyFloorPlane";
         case ControlMode::Freedrive: return "Freedrive";
     }
     return "Unknown";
@@ -131,6 +133,7 @@ ControlMode controlModeFromString(const std::string& mode) {
     if (m == "armmotion" || m == "arm_motion" || m == "arm") return ControlMode::ArmMotion;
     if (m == "disarmmotion" || m == "disarm_motion" || m == "disarm") return ControlMode::DisarmMotion;
     if (m == "jointtarget" || m == "joint_target") return ControlMode::JointTarget;
+    if (m == "initmotion" || m == "init_motion") return ControlMode::InitMotion;
     if (m == "jointvelocity" || m == "joint_velocity") return ControlMode::JointVelocity;
     if (m == "tcpposetarget" || m == "tcp_pose_target") return ControlMode::TcpPoseTarget;
     if (m == "tcplinearmove" || m == "tcp_linear_move") return ControlMode::TcpLinearMove;
@@ -149,6 +152,9 @@ ControlMode controlModeFromString(const std::string& mode) {
     if (m == "resetfault" || m == "reset_fault" || m == "reset") return ControlMode::ResetFault;
     if (m == "setsafetyfloorz" || m == "set_safety_floor_z") return ControlMode::SetSafetyFloorZ;
     if (m == "setsafetyroibounds" || m == "set_safety_roi_bounds") return ControlMode::SetSafetyRoiBounds;
+    if (m == "setusersafetyfloorplane" || m == "set_user_safety_floor_plane") {
+        return ControlMode::SetUserSafetyFloorPlane;
+    }
     if (m == "freedrive" || m == "free_drive" || m == "directteaching" || m == "direct_teaching") {
         return ControlMode::Freedrive;
     }

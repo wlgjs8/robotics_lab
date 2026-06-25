@@ -146,6 +146,52 @@ safety:
   #   #   - { name: tip_a, offset_m: [0.054, 0.0, 0.0] }
   #   #   - { name: tip_b, offset_m: [-0.054, 0.0, 0.0] }
 
+  # URDF-mesh self-collision guard (async monitor + shared velocity barrier). See
+  # the active local configs for the full mesh block. Two additions enable the
+  # collision-free InitMotion feature:
+  #
+  # self_collision:
+  #   enable: true
+  #   fail_policy: clamp_hold
+  #   monitor_only: false
+  #   mesh:
+  #     unified_urdf: ".../dual_rb3_730e_ver5.urdf"
+  #     package_dirs: [ ".../dual_rb3_730e" ]
+  #     d_hard_m: 0.010
+  #     d_slow_m: 0.035
+  #     swept_samples: 2
+  #     # WHOLE-ARM floor: a large thin static box (world frame) so the SAME mesh
+  #     # barrier that guards arm<->arm / arm<->stand also keeps EVERY arm link
+  #     # above the floor (floor_constraint only checks the TCP + offset points).
+  #     # Top face at z_m; keep z_m <= floor_constraint.z_min_m so the two agree.
+  #     ground_plane:
+  #       enable: true
+  #       z_m: 0.0
+  #       size_m: [4.0, 4.0]   # lateral extents [Lx, Ly]
+  #       thickness_m: 0.10
+  #       parent_frame: world
+
+  # Collision-free InitMotion planner (requires self_collision.enable — the mesh
+  # model is the planner's collision+floor oracle). When enabled, a ControlMode
+  # InitMotion command plans a collision-free + floor-safe 12-DOF (both arms)
+  # RRT-Connect path to the init pose and streams it through the safety gate, so
+  # InitMotion REACHES the pose from any start without self-collision or dipping
+  # below the floor (overlapping arm paths are allowed). Disabled -> InitMotion
+  # falls back to a direct JointTarget. Fail-closed: planning failure holds.
+  # init_motion_planner:
+  #   enable: true
+  #   max_planning_time_sec: 2.0
+  #   max_iterations: 20000
+  #   step_size_rad: 0.20
+  #   edge_resolution_rad: 0.02
+  #   goal_bias: 0.10
+  #   shortcut_passes: 200
+  #   sample_margin_deg: 30.0
+  #   collision_margin_m: 0.005
+  #   seed: 12345
+  #   waypoint_tol_deg: 1.5
+  #   max_segment_deg: 5.0
+
 network:
   command_bind: "udp://127.0.0.1:50010"
   state_pub_endpoint: "udp://127.0.0.1:50110"

@@ -96,6 +96,29 @@ class CommandClient:
             "right": {"q_target_deg": [float(v) for v in right_q]},
         })
 
+    def build_init_motion(
+        self,
+        left_q: tuple[float, ...],
+        right_q: tuple[float, ...],
+        *,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        # Collision-free InitMotion: same q_target_deg payload as a JointTarget, but
+        # mode "InitMotion" tells the server to plan a collision-free + floor-safe
+        # joint path to the init pose and stream it. The server falls back to a direct
+        # JointTarget if the planner is disabled. The long timeout must cover plan +
+        # execution (the single command stays fresh for the whole move).
+        if len(left_q) != 6 or len(right_q) != 6:
+            raise ValueError("joint targets must have 6 values per arm")
+        return self._with_source({
+            "seq": self.next_seq(),
+            "mode": "InitMotion",
+            "timeout_sec": timeout_sec,
+            "coupled_timeout": True,
+            "left": {"q_target_deg": [float(v) for v in left_q]},
+            "right": {"q_target_deg": [float(v) for v in right_q]},
+        })
+
     def build_tcp_pose_target(
         self,
         *,
@@ -459,6 +482,42 @@ class CommandClient:
             "right": {},
         })
 
+    def build_set_user_safety_floor_plane(
+        self,
+        point_m: tuple[float, float, float],
+        normal: tuple[float, float, float],
+        *,
+        margin_m: float = 0.0,
+        enable: bool = True,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        if len(point_m) != 3 or len(normal) != 3:
+            raise ValueError("point_m and normal must each have 3 values")
+        point = [float(v) for v in point_m]
+        n = [float(v) for v in normal]
+        margin = float(margin_m)
+        if any(not math.isfinite(v) for v in point + n) or not math.isfinite(margin):
+            raise ValueError("user floor plane values must be finite")
+        norm = math.sqrt(sum(v * v for v in n))
+        if norm < 1e-9:
+            raise ValueError("user floor normal must be non-degenerate")
+        # Normalize client-side so the server's unit-normal check passes; the server
+        # still validates tilt / point bounds / margin against safety.user_floor_constraint.
+        n = [v / norm for v in n]
+        # Leaseless non-motion command. enable=False turns the constraint off
+        # unconditionally (the point/normal are ignored server-side in that case).
+        return self._with_source({
+            "seq": self.next_seq(),
+            "mode": "SetUserSafetyFloorPlane",
+            "timeout_sec": timeout_sec,
+            "user_floor_point_m": point,
+            "user_floor_normal": n,
+            "user_floor_margin_m": margin,
+            "user_floor_enable": bool(enable),
+            "left": {},
+            "right": {},
+        })
+
     # Modes that take (or require) the command-source lease when sent. After a
     # one-shot GUI command the lease is released immediately so a streaming
     # client (policy_runner teleop) can take over without waiting for the
@@ -471,6 +530,10 @@ class CommandClient:
         # command_source_lease_required whenever no lease is active.
         "ResetFault",
         "JointTarget",
+        # InitMotion requires the lease server-side (commandRequiresLease); it rides
+        # the same one-shot acquire/command/release bracket as JointTarget, and the
+        # buffered command stays fresh (timeout_sec) for the whole plan + execution.
+        "InitMotion",
         "JointVelocity",
         "TcpPoseTarget",
         "TcpLinearMove",
@@ -555,5 +618,19 @@ class CommandClient:
         timeout_sec: float = 0.2,
     ) -> dict[str, Any]:
         packet = self.build_set_safety_roi_bounds(roi_min_m, roi_max_m, timeout_sec=timeout_sec)
+        self.send(packet)
+        return packet
+
+    def send_set_user_safety_floor_plane(
+        self,
+        point_m: tuple[float, float, float],
+        normal: tuple[float, float, float],
+        *,
+        margin_m: float = 0.0,
+        enable: bool = True,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        packet = self.build_set_user_safety_floor_plane(
+            point_m, normal, margin_m=margin_m, enable=enable, timeout_sec=timeout_sec)
         self.send(packet)
         return packet

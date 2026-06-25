@@ -45,12 +45,12 @@ def persist_floor_z_to_config(config_path: str | Path, floor_z_m: float) -> tupl
         match = _FLOOR_Z_LINE_RE.match(line.rstrip("\n"))
         if match:
             newline = "\n" if line.endswith("\n") else ""
-            lines[index] = f"{match.group(1)}{floor_z_m:.3f}{match.group(3)}{newline}"
+            lines[index] = f"{match.group(1)}{floor_z_m:.4f}{match.group(3)}{newline}"
             try:
                 path.write_text("".join(lines), encoding="utf-8")
             except OSError as exc:
                 return False, f"yaml unchanged: {type(exc).__name__}: {exc}"
-            return True, f"saved z_min_m={floor_z_m:.3f} to {path.name}"
+            return True, f"saved z_min_m={floor_z_m:.4f} to {path.name}"
     return False, f"yaml unchanged: floor_constraint.z_min_m not found in {path.name}"
 
 
@@ -411,7 +411,7 @@ class OperatorSafety:
             )
         except ValueError as exc:
             return False, str(exc)
-        sent = f"sent SetSafetyFloorZ {float(floor_z_m) * 1000:.0f}mm"
+        sent = f"sent SetSafetyFloorZ {float(floor_z_m) * 1000:.1f}mm"
         # Persist to the server config yaml (explicit user request: a viser
         # "Send floor z" is also the new startup default). Requires the stack
         # launcher to expose the config path; a send without it stays
@@ -455,6 +455,41 @@ class OperatorSafety:
             return True, f"{sent} (runtime only: RB_GUI_SERVER_CONFIG_PATH not set)"
         _, save_message = persist_roi_bounds_to_config(config_path, roi_min_m, roi_max_m)
         return True, f"{sent} ({save_message})"
+
+    def send_set_user_floor_plane(
+        self,
+        point_m: tuple[float, float, float],
+        normal: tuple[float, float, float],
+        *,
+        margin_m: float = 0.0,
+        enable: bool = True,
+    ) -> tuple[bool, str]:
+        # Non-motion, leaseless safety adjustment (mirror of send_set_floor_z): a live
+        # state stream is required so the operator sees the applied plane. The server
+        # bounds-checks the request (unit normal, tilt vs max_tilt_deg, point z,
+        # margin) and rejects an enable when safety.user_floor_constraint.enable=false.
+        # A disable (enable=False) is accepted unconditionally. Plane persistence
+        # across restarts is handled GUI-side (user_floor.json re-sent on startup),
+        # so there is no server-config YAML rewrite here.
+        latest = self.latest_valid()
+        if latest is None:
+            return False, "state stream missing or stale"
+        try:
+            self.command_client.send_set_user_safety_floor_plane(
+                point_m, normal, margin_m=margin_m, enable=enable,
+                timeout_sec=self.command_timeout_sec,
+            )
+        except ValueError as exc:
+            return False, str(exc)
+        if not enable:
+            return True, "sent SetUserSafetyFloorPlane disable"
+        return True, (
+            "sent SetUserSafetyFloorPlane point["
+            + ",".join(f"{v * 1000:.0f}" for v in point_m)
+            + "]mm n["
+            + ",".join(f"{v:.3f}" for v in normal)
+            + f"] margin {margin_m * 1000:.1f}mm"
+        )
 
     def send_freedrive(
         self, *, left: bool | None = None, right: bool | None = None
@@ -504,13 +539,13 @@ class OperatorSafety:
         assert self.init_left_joint_deg is not None
         assert self.init_right_joint_deg is not None
         self.command_client.send(
-            self.command_client.build_joint_target(
+            self.command_client.build_init_motion(
                 self.init_left_joint_deg,
                 self.init_right_joint_deg,
                 timeout_sec=self.init_motion_timeout_sec,
             )
         )
-        return True, "sent InitMotion JointTarget"
+        return True, "sent InitMotion (collision-free plan)"
 
     def set_init_joints(
         self,

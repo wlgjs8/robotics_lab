@@ -560,6 +560,7 @@ bool readOptionalCircleMoveFields(const json& object, ArmCommand* out) {
 
 bool requiresPayload(ControlMode mode) {
     return mode == ControlMode::JointTarget ||
+           mode == ControlMode::InitMotion ||
            mode == ControlMode::JointVelocity ||
            mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
@@ -574,6 +575,7 @@ bool requiresPayload(ControlMode mode) {
 bool hasRequiredPayload(const ArmCommand& command) {
     switch (command.mode) {
         case ControlMode::JointTarget:
+        case ControlMode::InitMotion:
             return command.has_joint_target;
         case ControlMode::JointVelocity:
             return command.has_joint_velocity;
@@ -607,16 +609,18 @@ bool isReleaseLeaseModeString(const std::string& mode) {
     return mode == "ReleaseLease" || mode == "release_lease" || mode == "releaselease";
 }
 
-// EmergencyStop, SetSafetyFloorZ and SetSafetyRoiBounds are intentionally
-// leaseless: an operator must be able to stop motion or adjust the safety
-// floor / ROI box while another client (e.g. policy_runner) holds the command
-// lease. SetSafetyFloorZ is bounded server-side to
-// safety.floor_constraint.[runtime_min_z_m, runtime_max_z_m]; SetSafetyRoiBounds
-// to safety.roi_box.[runtime_min_m, runtime_max_m] per axis.
+// EmergencyStop, SetSafetyFloorZ, SetSafetyRoiBounds and SetUserSafetyFloorPlane
+// are intentionally leaseless: an operator must be able to stop motion or adjust
+// the safety floor / ROI box / user floor plane while another client (e.g.
+// policy_runner) holds the command lease. SetSafetyFloorZ is bounded server-side
+// to safety.floor_constraint.[runtime_min_z_m, runtime_max_z_m]; SetSafetyRoiBounds
+// to safety.roi_box.[runtime_min_m, runtime_max_m] per axis; SetUserSafetyFloorPlane
+// to safety.user_floor_constraint via validateUserFloorPlaneRequest.
 bool commandRequiresLease(ControlMode mode) {
     return mode == ControlMode::ArmMotion ||
            mode == ControlMode::DisarmMotion ||
            mode == ControlMode::JointTarget ||
+           mode == ControlMode::InitMotion ||
            mode == ControlMode::JointVelocity ||
            mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
@@ -967,6 +971,30 @@ bool CommandServer::parseMessage(
         if (!read_vec3(root, "roi_min_m", &cmd.roi_min_m)) return false;
         if (!read_vec3(root, "roi_max_m", &cmd.roi_max_m)) return false;
         cmd.has_roi_bounds = true;
+    }
+
+    // SetUserSafetyFloorPlane payload (top-level: the plane is global). point + normal
+    // present together as [x, y, z] arrays; optional margin_m (>=0) and enable bool.
+    // The server validates the plane via validateUserFloorPlaneRequest before applying;
+    // an enable=false request turns the constraint off unconditionally.
+    if (root.contains("user_floor_point_m") || root.contains("user_floor_normal")) {
+        const auto read_vec3 = [](const json& object, const char* key,
+                                  std::array<double, 3>* out) -> bool {
+            const auto it = object.find(key);
+            if (it == object.end() || !it->is_array() || it->size() != 3) return false;
+            for (std::size_t i = 0; i < 3; ++i) {
+                double v = 0.0;
+                if (!isFiniteNumber((*it)[i], &v)) return false;
+                (*out)[i] = v;
+            }
+            return true;
+        };
+        if (!read_vec3(root, "user_floor_point_m", &cmd.user_floor_point_m)) return false;
+        if (!read_vec3(root, "user_floor_normal", &cmd.user_floor_normal)) return false;
+        if (!readOptionalNumber(root, "user_floor_margin_m", &cmd.user_floor_margin_m)) return false;
+        cmd.user_floor_enable = true;  // default: a plane payload enables the constraint
+        if (!readOptionalBool(root, "user_floor_enable", &cmd.user_floor_enable)) return false;
+        cmd.has_user_floor_plane = true;
     }
 
     const json left_object = root.contains("left") ? root.at("left") : json();

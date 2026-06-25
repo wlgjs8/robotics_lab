@@ -1,11 +1,14 @@
 #pragma once
 
 #include <atomic>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/arm_worker.hpp"
@@ -15,9 +18,11 @@
 #include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/control/self_collision.hpp"
 #include "rb_servo/control/collision_monitor.hpp"
+#include "rb_servo/control/init_motion_planner.hpp"
 #include "rb_servo/control/floor_constraint.hpp"
 #include "rb_servo/control/roi_box.hpp"
 #include "rb_servo/control/reach_constraint.hpp"
+#include "rb_servo/control/user_floor_constraint.hpp"
 #include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/safety_filter.hpp"
 #include "rb_servo/control/trajectory_filter.hpp"
@@ -134,6 +139,21 @@ private:
         SafetyVerdict* verdict
     );
 
+    // Collision-free InitMotion sequencer. When `command` is a ControlMode::InitMotion,
+    // this drives an async plan (off the RT loop) from the current sent pose to the
+    // commanded init pose, then REWRITES the command into an ordinary dual JointTarget
+    // toward the current planned waypoint (so the downstream trajectory/safety pipeline
+    // is unchanged). While planning it holds in place; on planning failure it holds and
+    // latches the Failed status (fail-closed, never an un-planned motion). If the
+    // planner is disabled it falls back to a direct JointTarget to the target. Commands
+    // that are not InitMotion reset the sequencer (cancellation). Runs on the servo
+    // thread; only polls the future non-blocking.
+    DualArmCommand applyInitMotionSequencer(
+        DualArmCommand command,
+        const RobotState& left_state,
+        const RobotState& right_state
+    );
+
     // Stand-frame floor plane constraint (safety.floor_constraint): FK the arm's
     // TCP for a candidate joint target. checked=false if kinematics/FK is
     // unavailable — the caller fails closed.
@@ -161,6 +181,16 @@ private:
     // ROI box (no-op when the constraint is disabled or monitor_only).
     Pose6D clampPoseToRoi(const Pose6D& pose) const;
 
+    // Stand-frame user-defined tilted floor plane (safety.user_floor_constraint):
+    // FK the arm's TCP for a candidate joint target and evaluate its signed distance
+    // to the runtime plane. checked=false if kinematics/FK is unavailable — the
+    // caller fails closed. The effective plane is read from the runtime atomics.
+    UserFloorArmEvaluation evaluateUserFloorArm(ArmId arm, const JointArray& q_deg) const;
+    bool userFloorActive() const;  // enabled at runtime AND constraint configured
+    math::Vector3 effectiveUserFloorPoint() const;
+    math::Vector3 effectiveUserFloorNormal() const;
+    double effectiveUserFloorMargin() const;
+
     DualSendResult sendTargets(
         const ServoTarget& target,
         uint64_t command_seq,
@@ -179,6 +209,7 @@ private:
     bool commandRequestsResetFault(const DualArmCommand& command) const;
     bool commandRequestsSetSafetyFloorZ(const DualArmCommand& command) const;
     bool commandRequestsSetSafetyRoiBounds(const DualArmCommand& command) const;
+    bool commandRequestsSetUserSafetyFloorPlane(const DualArmCommand& command) const;
     bool commandRequestsEmergencyStop(const DualArmCommand& command) const;
     bool commandRequestsArmMotion(const DualArmCommand& command) const;
     bool commandRequestsDisarmMotion(const DualArmCommand& command) const;
@@ -316,6 +347,23 @@ private:
     // mode. last_collision_verdict_ caches the latest verdict for telemetry.
     std::unique_ptr<CollisionMonitor> collision_monitor_;
     CollisionMonitorConfig collision_monitor_cfg_{};
+
+    // Collision-free InitMotion planner + sequencer state (safety.init_motion_planner).
+    // The planner owns a PRIVATE CollisionMonitor (incl. the ground plane) and is null
+    // when the feature is disabled (then InitMotion falls back to a direct JointTarget).
+    std::unique_ptr<InitMotionPlanner> init_motion_planner_;
+    enum class InitMotionStatus { Idle, Planning, Executing, Done, Failed };
+    struct InitMotionExec {
+        InitMotionStatus status = InitMotionStatus::Idle;
+        bool has_target = false;
+        JointArray target_left{};
+        JointArray target_right{};
+        std::future<InitMotionPlanResult> future;
+        std::vector<std::pair<JointArray, JointArray>> waypoints;
+        std::size_t index = 0;
+        std::string message;
+    };
+    InitMotionExec init_motion_exec_;
     CollisionVerdict last_collision_verdict_{};
     // Floor plane constraint (safety.floor_constraint): runtime-adjustable plane
     // height (SetSafetyFloorZ, bounded by config runtime_min/max) + per-arm
@@ -340,6 +388,18 @@ private:
     ReachArmEvaluation last_reach_left_{};
     ReachArmEvaluation last_reach_right_{};
     uint64_t reach_clamp_count_ = 0;
+    // User-defined tilted floor plane (safety.user_floor_constraint): runtime
+    // enable + plane (point/normal/margin), set via SetUserSafetyFloorPlane and
+    // bounded by validateUserFloorPlaneRequest, plus per-arm telemetry of the last
+    // evaluated candidate targets (signed distance to the plane).
+    std::atomic<bool> runtime_user_floor_enabled_{false};
+    std::array<std::atomic<double>, 3> runtime_user_floor_point_m_{};
+    std::array<std::atomic<double>, 3> runtime_user_floor_normal_{};
+    std::atomic<double> runtime_user_floor_margin_m_{0.0};
+    UserFloorArmEvaluation last_user_floor_left_{};
+    UserFloorArmEvaluation last_user_floor_right_{};
+    uint64_t user_floor_clamp_count_ = 0;
+    std::string user_floor_last_set_reject_reason_;
     // Controller-sim tracking-error advisory (safety.controller_simulation_tracking_error_nonlatching).
     // Reset each tick in loopMain; set in applySafety when a reference/actual tracking
     // divergence is suppressed (not latched). Surfaced as published telemetry
