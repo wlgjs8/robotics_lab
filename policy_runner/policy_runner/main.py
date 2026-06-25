@@ -1432,10 +1432,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     device="cpu",
                     ensemble_name=args.ensemble_name,
                 )
+            pc_variant = "a"
             if checkpoint_kind == "pc":
-                # pc_v1 back-projects the live wrist depth into the egocentric
-                # cloud, so the camera client MUST surface z16 depth frames.
-                args.include_depth = True
+                # pc_v1 has two model families: variant a (cloud, needs live depth)
+                # and variant b (RGB image policy, depth not required).
+                import torch as _torch
+                _mc = _torch.load(args.checkpoint, map_location="cpu", weights_only=False).get("model_config", {})
+                pc_variant = str(_mc.get("variant", "a"))
+                if pc_variant != "b":
+                    # cloud variant back-projects the live wrist depth -> need z16 frames.
+                    args.include_depth = True
             command_family = resolve_flow_command_family(
                 rollout_policy.mode,
                 args.command_family,
@@ -1761,6 +1767,18 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     ensemble_name=args.ensemble_name,
                     image_size=args.image_size,
                     **source_kwargs,
+                )
+            elif checkpoint_kind == "pc" and pc_variant == "b":
+                # variant b: RGB image policy (DINOv3 ConvNeXt, spatial head); RGB-only.
+                from .pc_action_source import PointCloudRGBFlowActionSource
+
+                source = PointCloudRGBFlowActionSource(
+                    args.checkpoint,
+                    sample_steps=args.sample_steps,
+                    stochastic_sampling=not args.deterministic_sampling,
+                    num_points=args.pc_num_points,
+                    **source_kwargs,
+                    **tcp_tp_kwargs,
                 )
             elif checkpoint_kind == "pc":
                 from .pc_infer import parse_intrinsics

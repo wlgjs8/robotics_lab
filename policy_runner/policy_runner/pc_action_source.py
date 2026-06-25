@@ -37,7 +37,13 @@ from .pc_dataset import (
     POSE_DELTA_DIMS,
     _build_arm_cloud_static,
 )
+from .pc_dataset import denormalize_actions
 from .pc_infer import DEFAULT_INTRINSICS, RuntimeVelocityBuffer, sample_pc_chunk
+
+# ImageNet normalization (must match pc_dataset.normalize_pc_sample image branch).
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
+_IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
+_DEFAULT_IMAGE_SIZE = 224
 
 
 def _infer_proprio_layout(total_dim: int) -> tuple[str, int]:
@@ -239,3 +245,85 @@ class PointCloudFlowActionSource(FlowMatchingActionSource):
         chunk = np.asarray(chunk, dtype=np.float32)
         self._chunk_ee = chunk.copy()
         return chunk
+
+
+class PointCloudRGBFlowActionSource(PointCloudFlowActionSource):
+    """Deploy source for the variant-B RGB policy (pc_v1, model_config.variant=="b").
+
+    Same pc_v1 schema as the cloud-only source, but the network is a
+    PointCloudRGBFlowPolicy whose condition comes from a finetuned DINOv3 ConvNeXt
+    over the LIVE wrist RGB (image_head=spatial -> 7x7 feature-map tokens for
+    localization). RGB-only (use_pointcloud False) -> NO depth needed; the cloud
+    arg is a zero placeholder the model ignores. Everything downstream (ee_local
+    delta -> TcpPoseTarget, gripper, gating) is inherited unchanged.
+    """
+
+    def __init__(self, checkpoint_path: str, **kwargs: Any):
+        super().__init__(checkpoint_path, **kwargs)
+        self.policy_label = "pc-rgb flow policy"
+        self.gripper_command_source = "pc_rgb_flow_policy"
+        self._image_size = int(_DEFAULT_IMAGE_SIZE)
+        self._use_pointcloud = bool(getattr(self.model.config, "use_pointcloud", False))
+        # RGB-only: the camera gate only needs the COLOR streams (no depth).
+        self.camera_names = [
+            f"{side}_{self._color_stream}"
+            for idx, side in enumerate(ARM_SIDES)
+            if float(self.arm_mask[idx]) > 0.0
+        ]
+        self.requirements = replace(self.requirements, requires_camera=True)
+        print(
+            f"[flow-infer] pc_v1 variant=b (RGB): image_head spatial, use_pointcloud={self._use_pointcloud}, "
+            f"image_size={self._image_size}, color stream={self._color_stream}",
+            flush=True,
+        )
+
+    def _build_policy_model(self, model_config: dict[str, Any], checkpoint: dict[str, Any]) -> Any:
+        from .pc_model_b import PointCloudRGBFlowConfig, PointCloudRGBFlowPolicy
+
+        model = PointCloudRGBFlowPolicy(PointCloudRGBFlowConfig.from_mapping(dict(model_config))).to(self.device)
+        model.load_state_dict(checkpoint["model_state"])
+        model.eval()
+        return model
+
+    def _runtime_image(self, payload: dict[str, Any]) -> np.ndarray | None:
+        """Live wrist RGB -> (V, 3, S, S) ImageNet-normalized, matching training
+        (pc_preprocess._decode_resize_rgb: RGB, BILINEAR resize to S, no crop)."""
+        from PIL import Image
+
+        bundle = self._poll_camera_bundle()
+        bundle_frames = getattr(bundle, "frames", {}) if bundle is not None else {}
+        s = self._image_size
+        views = []
+        for idx, side in enumerate(ARM_SIDES):
+            if float(self.arm_mask[idx]) <= 0.0:
+                views.append(np.zeros((3, s, s), dtype=np.float32))
+                continue
+            frame = resolve_frame(bundle_frames, f"{side}_{self._color_stream}")
+            pixels = getattr(frame, "pixels", None)
+            if pixels is None:
+                return None
+            im = Image.fromarray(np.asarray(pixels)).convert("RGB").resize((s, s), Image.BILINEAR)
+            arr = np.asarray(im, dtype=np.float32).transpose(2, 0, 1) / 255.0  # (3,S,S)
+            views.append((arr - _IMAGENET_MEAN) / _IMAGENET_STD)
+        return np.stack(views, axis=0)  # (V,3,S,S)
+
+    def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
+        import torch
+        from .pc_model_b import pc_b_sample_action_chunks
+
+        image = self._runtime_image(payload)
+        if image is None:
+            return None
+        v = image.shape[0]
+        # Zero cloud placeholder (use_pointcloud=False -> ignored by the model).
+        cloud = np.zeros((v, self.num_points, 6), dtype=np.float32)
+        # proprio_mode is "none" for the vision-only variant-B runs -> 1-dim placeholder.
+        proprio = self._build_runtime_proprio(payload)
+
+        pc = torch.as_tensor(cloud[None], dtype=torch.float32, device=self.device)
+        im = torch.as_tensor(image[None], dtype=torch.float32, device=self.device)
+        pr = torch.as_tensor(proprio[None], dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            chunk = pc_b_sample_action_chunks(self.model, pc, im, pr, steps=self.sample_steps)
+            chunk = denormalize_actions(chunk, self.stats)
+        return np.asarray(chunk.squeeze(0).cpu().numpy(), dtype=np.float32)
