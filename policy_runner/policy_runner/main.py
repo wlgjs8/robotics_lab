@@ -723,7 +723,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--execute-arms",
         choices=("both", "left", "right"),
-        default="right",
+        default="both",
         help=(
             "Runtime execution mask: suppress the non-selected arm's commands "
             "(twist + gripper) so it physically holds. The checkpoint stays "
@@ -859,7 +859,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--chunk-execute-steps",
         type=int,
-        default=20,
+        default=12,
         help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
     )
     flow_infer.add_argument(
@@ -918,7 +918,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-close-bias",
         type=float,
-        default=0.0,
+        default=3.0,
         help="Percent subtracted from the ABSOLUTE gripper opening target so grasps close more "
              "firmly (lower opening = more closed). E.g. 1.0 turns an 18%% command into 17%%; use it "
              "when the policy stops a hair short of clamping the object. Clamped to [0,100]; 0 = off "
@@ -986,7 +986,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--tcp-target-pose-conditioning",
         choices=["legacy_step_hold", "foh_se3"],
-        default="legacy_step_hold",
+        default="foh_se3",
         help=(
             "A-stage conditioning for the streamed tcp_target_pose path. legacy_step_hold "
             "(default) holds each ~30 Hz step target between policy ticks (ZOH into the SMD). "
@@ -997,12 +997,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--tcp-target-pose-reanchor-mode",
         choices=["measured_legacy", "last_emitted_continuous", "measured_blend"],
-        default="measured_blend",
+        default="measured_legacy",
         help=(
-            "Chunk-boundary handling for foh_se3. measured_blend (default): anchor the new "
-            "chunk to the measured pose for drift correction but blend in from the last emitted "
-            "target (no one-tick jump). measured_legacy: reanchor straight to measured. "
-            "last_emitted_continuous: perfect continuity, no drift correction (tests/sim)."
+            "Chunk-boundary handling for foh_se3. measured_legacy (default): reanchor straight to measured. "
+            "measured_blend: anchor the new chunk to the measured pose for drift correction but blend in from the last emitted "
+            "target (no one-tick jump). last_emitted_continuous: perfect continuity, no drift correction (tests/sim)."
         ),
     )
     flow_infer.add_argument("--tcp-target-pose-blend-steps", type=int, default=0)
