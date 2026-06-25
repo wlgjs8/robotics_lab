@@ -71,10 +71,13 @@ from .scene import (
     set_ik_infeasible_region_visible,
     set_reach_envelope_visible,
     update_circle_overlay,
+    update_floor_check_points,
     update_floor_plane,
     update_floor_plane_preview,
     update_roi_box,
     update_roi_box_preview,
+    update_user_floor_plane,
+    update_user_floor_capture_points,
     update_self_collision_check_geom,
     update_self_collision_near_pairs,
     update_self_collision_overlay,
@@ -822,19 +825,16 @@ def _save_user_floor(state: Mapping[str, Any]) -> tuple[bool, str]:
 def _user_floor_contact_point(latest: StateSnapshot | None, arm: str) -> tuple[float, float, float] | None:
     """The arm's lowest floor-contact point (xyz, stand frame) from floor telemetry.
 
-    Prefers floor_constraint.<arm>.lowest_point_m (the most-exposed gripper-tip point
-    the server checks against the floor); falls back to the live TCP origin when the
-    floor constraint is disabled so capture still works without an active floor."""
+    Uses the MEASURED actual TCP (tcp_actual_stand), which tracks hand-guided
+    (direct-teaching / freedrive) motion. The floor's lowest_point_m is intentionally
+    NOT used: it is derived from the held servo target and goes stale during freedrive
+    (the servo loop stops commanding), so every capture would read the same point.
+    Because this captures the TCP ORIGIN, the user floor enforces on the TCP origin
+    (no gripper-tip offsets) so capture and enforcement live in the same space: the
+    fitted plane is the TCP-origin locus when the tip touches the floor, and keeping
+    the TCP origin above it keeps the tip above the real floor."""
     if latest is None:
         return None
-    floor = latest.floor_constraint
-    if isinstance(floor, Mapping):
-        arm_block = floor.get(arm)
-        if isinstance(arm_block, Mapping):
-            lp = arm_block.get("lowest_point_m")
-            pt = _waypoint_seq(lp, 3)
-            if pt is not None:
-                return pt
     arm_snap = getattr(latest, arm, None)
     pose = getattr(arm_snap, "tcp_actual_stand", None) or getattr(arm_snap, "tcp_stand", None)
     if pose is not None and all(math.isfinite(v) for v in (pose.x, pose.y, pose.z)):
@@ -854,9 +854,13 @@ def _capture_user_floor_point(
     state = _user_floor_state(handles)
     state["points"].append({"arm": arm, "p": [float(point[0]), float(point[1]), float(point[2])]})
     counts = _user_floor_point_counts(state)
+    # Show the running (x, y) bounding-box span so the operator immediately sees
+    # whether the captures are actually spreading out (a fit needs spatial spread;
+    # near-zero span here means the captured points are duplicates).
+    span = _user_floor_xy_span(state)
     return True, (
         f"captured {arm} pt @[{point[0] * 1000:.0f},{point[1] * 1000:.0f},{point[2] * 1000:.0f}]mm "
-        f"({counts})"
+        f"({counts}, xy-span {span[0] * 1000:.0f}x{span[1] * 1000:.0f}mm)"
     )
 
 
@@ -865,6 +869,16 @@ def _user_floor_point_counts(state: Mapping[str, Any]) -> str:
     left = sum(1 for e in pts if e.get("arm") == "left")
     right = sum(1 for e in pts if e.get("arm") == "right")
     return f"{len(pts)} pts: L{left} R{right}"
+
+
+def _user_floor_xy_span(state: Mapping[str, Any]) -> tuple[float, float]:
+    """(x_extent, y_extent) in meters of the captured points' bounding box."""
+    pts = [e["p"] for e in state.get("points", []) if isinstance(e.get("p"), (list, tuple))]
+    if not pts:
+        return (0.0, 0.0)
+    xs = [float(p[0]) for p in pts]
+    ys = [float(p[1]) for p in pts]
+    return (max(xs) - min(xs), max(ys) - min(ys))
 
 
 def _fit_user_floor_plane(handles: dict[str, Any]) -> tuple[bool, str]:
@@ -1636,11 +1650,23 @@ def build_gui(
             handles["self_collision_capsules_toggle"] = server.gui.add_checkbox(
                 "자기충돌 검사 표시 (반투명)", initial_value=capsules_default
             )
+        # Floor/ROI collision check points: the TCP point + 4 gripper-tip offset
+        # points (safety.floor_constraint.tcp_offset_points) the server samples
+        # against the floor plane, shown as orange dots riding the live TCP pose.
+        # Off by default; turn on to see exactly what the floor guard checks.
+        if hasattr(server.gui, "add_checkbox"):
+            floor_points_default = os.environ.get("RB_GUI_FLOOR_CHECK_POINTS_DEFAULT", "0") == "1"
+            handles["floor_check_points_toggle"] = server.gui.add_checkbox(
+                "바닥 충돌 검사점 표시 (TCP+팁 4점, 주황)", initial_value=floor_points_default
+            )
         handles["floor_constraint"] = server.gui.add_text(
-            "Safety floor", initial_value="floor: no state", disabled=True
+            "Stand Safety floor", initial_value="floor: no state", disabled=True
         )
         handles["roi_box"] = server.gui.add_text(
             "Safety ROI", initial_value="roi: no state", disabled=True
+        )
+        handles["user_floor_constraint"] = server.gui.add_text(
+            "User Safety floor", initial_value="user floor: no state", disabled=True
         )
         handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
         handles["tcp_tracking"] = server.gui.add_text("TCP tracking", initial_value="TCP tracking: no state", disabled=True)
@@ -1897,7 +1923,20 @@ def build_gui(
                     handles["waypoint_status"].value = info
 
         with _op_tabs.add_tab("안전"):
-            with server.gui.add_folder("Safety floor"):
+            with server.gui.add_folder("Stand Safety Floor"):
+                # Runtime enforce on/off. Synced from telemetry on the first state
+                # (see _update_floor_panel), then operator-controlled. Only effective
+                # when floor_constraint.enable=true in the server config.
+                if hasattr(server.gui, "add_checkbox"):
+                    floor_enforce = server.gui.add_checkbox(
+                        "Enforce stand floor", initial_value=True
+                    )
+                    handles["floor_enforce_toggle"] = floor_enforce
+
+                    @floor_enforce.on_update
+                    def _(_: Any) -> None:
+                        ok, message = safety.send_set_floor_enabled(bool(floor_enforce.value))
+                        handles["floor_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
                 handles["floor_applied"] = server.gui.add_text(
                     "Applied z", initial_value="no state", disabled=True
                 )
@@ -1994,6 +2033,142 @@ def build_gui(
                 for _axis in ("x", "y", "z"):
                     handles[f"roi_{_axis}_min"].on_update(_roi_preview)
                     handles[f"roi_{_axis}_max"].on_update(_roi_preview)
+
+            with server.gui.add_folder("User Safety Floor"):
+                # A user-defined TILTED floor plane fit from >= 3 captured floor-contact
+                # points (both arms, alternating). Unlike the (horizontal) Stand Safety
+                # Floor it can match a physical floor that is not level. Capture -> Fit ->
+                # Enforce; both floors are independent and additive (the stricter wins).
+                # State is restored from ~/.rb_servo_gui/user_floor.json on startup;
+                # if it was enabled, the plane is re-sent to the server once the state
+                # stream is live (see the one-shot in update_gui).
+                handles["user_floor"] = _load_user_floor()
+                uf_state = handles["user_floor"]
+                handles["user_floor_points_text"] = server.gui.add_text(
+                    "Captured", initial_value=_user_floor_point_counts(uf_state), disabled=True
+                )
+                handles["user_floor_plane_text"] = server.gui.add_text(
+                    "Fitted plane", initial_value="none", disabled=True
+                )
+                handles["user_floor_set_status"] = server.gui.add_text(
+                    "User floor status", initial_value="idle", disabled=True
+                )
+                capture_left = server.gui.add_button("Capture LEFT contact")
+                capture_right = server.gui.add_button("Capture RIGHT contact")
+                remove_last = server.gui.add_button("Remove last point")
+                clear_points = server.gui.add_button("Clear points")
+                handles["user_floor_margin_slider"] = server.gui.add_slider(
+                    "Lift margin mm", min=0.0, max=50.0, step=0.5,
+                    initial_value=float(uf_state.get("margin_mm", 0.0)),
+                )
+                fit_apply = server.gui.add_button("Fit & Apply plane")
+                if hasattr(server.gui, "add_checkbox"):
+                    handles["user_floor_enforce_toggle"] = server.gui.add_checkbox(
+                        "Enforce user floor", initial_value=bool(uf_state.get("enabled", False))
+                    )
+
+                def _refresh_user_floor_texts() -> None:
+                    state = _user_floor_state(handles)
+                    handles["user_floor_points_text"].value = _user_floor_point_counts(state)
+                    plane = state.get("plane")
+                    if isinstance(plane, Mapping):
+                        n = plane.get("normal", [0.0, 0.0, 1.0])
+                        try:
+                            handles["user_floor_plane_text"].value = (
+                                f"tilt={tilt_deg(n):.1f}° n=["
+                                + ",".join(f"{float(v):.2f}" for v in n) + "]"
+                            )
+                        except (ValueError, TypeError):
+                            handles["user_floor_plane_text"].value = "invalid"
+                    else:
+                        handles["user_floor_plane_text"].value = "none"
+                    update_user_floor_capture_points(handles.get("scene", {}), state.get("points", []))
+
+                handles["user_floor_refresh_fn"] = _refresh_user_floor_texts
+
+                @capture_left.on_click
+                def _(_: Any) -> None:
+                    ok, message = _capture_user_floor_point(handles, store, "left")
+                    handles["user_floor_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+                    _refresh_user_floor_texts()
+                    _save_user_floor(_user_floor_state(handles))
+
+                @capture_right.on_click
+                def _(_: Any) -> None:
+                    ok, message = _capture_user_floor_point(handles, store, "right")
+                    handles["user_floor_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+                    _refresh_user_floor_texts()
+                    _save_user_floor(_user_floor_state(handles))
+
+                @remove_last.on_click
+                def _(_: Any) -> None:
+                    state = _user_floor_state(handles)
+                    if state["points"]:
+                        state["points"].pop()
+                        handles["user_floor_set_status"].value = f"removed last ({_user_floor_point_counts(state)})"
+                    else:
+                        handles["user_floor_set_status"].value = "no points to remove"
+                    _refresh_user_floor_texts()
+                    _save_user_floor(state)
+
+                @clear_points.on_click
+                def _(_: Any) -> None:
+                    state = _user_floor_state(handles)
+                    state["points"] = []
+                    state["plane"] = None
+                    handles["user_floor_set_status"].value = "cleared captured points"
+                    _refresh_user_floor_texts()
+                    _save_user_floor(state)
+
+                @fit_apply.on_click
+                def _(_: Any) -> None:
+                    ok, message = _fit_user_floor_plane(handles)
+                    if not ok:
+                        handles["user_floor_set_status"].value = "BLOCKED: " + message
+                        _refresh_user_floor_texts()
+                        return
+                    state = _user_floor_state(handles)
+                    plane = state["plane"]
+                    margin_m = float(handles["user_floor_margin_slider"].value) / 1000.0
+                    state["margin_mm"] = float(handles["user_floor_margin_slider"].value)
+                    enforce = bool(handles.get("user_floor_enforce_toggle").value) \
+                        if "user_floor_enforce_toggle" in handles else True
+                    ok2, send_msg = safety.send_set_user_floor_plane(
+                        tuple(plane["point"]), tuple(plane["normal"]),
+                        margin_m=margin_m, enable=enforce,
+                    )
+                    state["enabled"] = enforce and ok2
+                    handles["user_floor_set_status"].value = (
+                        ("OK: " if ok2 else "BLOCKED: ") + f"{message}; {send_msg}"
+                    )
+                    _refresh_user_floor_texts()
+                    _save_user_floor(state)
+
+                if "user_floor_enforce_toggle" in handles:
+                    @handles["user_floor_enforce_toggle"].on_update
+                    def _(_: Any) -> None:
+                        state = _user_floor_state(handles)
+                        enforce = bool(handles["user_floor_enforce_toggle"].value)
+                        plane = state.get("plane")
+                        if enforce and not isinstance(plane, Mapping):
+                            handles["user_floor_set_status"].value = "BLOCKED: fit a plane first"
+                            handles["user_floor_enforce_toggle"].value = False
+                            return
+                        if not enforce:
+                            ok2, send_msg = safety.send_set_user_floor_plane(
+                                (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), margin_m=0.0, enable=False,
+                            )
+                        else:
+                            margin_m = float(handles["user_floor_margin_slider"].value) / 1000.0
+                            ok2, send_msg = safety.send_set_user_floor_plane(
+                                tuple(plane["point"]), tuple(plane["normal"]),
+                                margin_m=margin_m, enable=True,
+                            )
+                        state["enabled"] = enforce and ok2
+                        handles["user_floor_set_status"].value = ("OK: " if ok2 else "BLOCKED: ") + send_msg
+                        _save_user_floor(state)
+
+                _refresh_user_floor_texts()
 
             with server.gui.add_folder("도달영역(reach)"):
                 # Show/hide the per-arm reachable-workspace cloud (FK envelope from
@@ -2815,6 +2990,18 @@ def _update_gripper_feedback(handles: dict[str, Any], latest: StateSnapshot | No
 def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
     floor = latest.floor_constraint if latest is not None else None
     update_floor_plane(handles.get("scene", {}), floor)
+    # One-shot: bring the enforce checkbox up at the server-reported state, then leave
+    # it operator-controlled (guarded by a flag so we don't fight the user's clicks).
+    if (
+        "floor_enforce_toggle" in handles
+        and isinstance(floor, Mapping)
+        and not handles.get("floor_enforce_synced", False)
+    ):
+        try:
+            handles["floor_enforce_toggle"].value = bool(floor.get("enabled", False))
+        except Exception:
+            pass
+        handles["floor_enforce_synced"] = True
     slider = handles.get("floor_slider")
     if not isinstance(floor, Mapping) or not bool(floor.get("enabled", False)):
         update_floor_plane_preview(handles.get("scene", {}), None)
@@ -3063,6 +3250,9 @@ def update_gui(
         if "roi_box" in handles:
             handles["roi_box"].value = _format_roi_box_status(None, stale=True)
         _update_roi_panel(handles, None)
+        if "user_floor_constraint" in handles:
+            handles["user_floor_constraint"].value = _format_user_floor_constraint_status(None, stale=True)
+        update_user_floor_plane(handles.get("scene", {}), None)
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
         if "tcp_tracking" in handles:
@@ -3147,6 +3337,24 @@ def update_gui(
     if "roi_box" in handles:
         handles["roi_box"].value = _format_roi_box_status(latest, stale=stale)
     _update_roi_panel(handles, latest)
+    if "user_floor_constraint" in handles:
+        handles["user_floor_constraint"].value = _format_user_floor_constraint_status(latest, stale=stale)
+    update_user_floor_plane(handles.get("scene", {}), latest.user_floor_constraint)
+    update_user_floor_capture_points(
+        handles.get("scene", {}), _user_floor_state(handles).get("points", []))
+    # One-shot: restore a persisted, previously-enabled user floor plane once the
+    # state stream is live (the server starts with it disabled until commanded).
+    if not stale and not handles.get("user_floor_resent", False):
+        uf_state = _user_floor_state(handles)
+        plane = uf_state.get("plane")
+        if bool(uf_state.get("enabled", False)) and isinstance(plane, Mapping):
+            ok, msg = safety.send_set_user_floor_plane(
+                tuple(plane["point"]), tuple(plane["normal"]),
+                margin_m=float(uf_state.get("margin_mm", 0.0)) / 1000.0, enable=True,
+            )
+            if "user_floor_set_status" in handles:
+                handles["user_floor_set_status"].value = ("restored: " if ok else "restore failed: ") + msg
+        handles["user_floor_resent"] = True
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
     if "tcp_tracking" in handles:
@@ -3171,6 +3379,14 @@ def update_gui(
     _push_gripper_percent(handles, latest)
     _update_gripper_feedback(handles, latest, stale=stale)
     update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
+    # After markers (TCP frames now posed): toggle the orange floor-check points,
+    # which are parented under /stand/<arm>_tcp and ride those poses.
+    _floor_points_toggle = handles.get("floor_check_points_toggle")
+    update_floor_check_points(
+        handles.get("scene", {}),
+        latest,
+        show=bool(getattr(_floor_points_toggle, "value", False)),
+    )
     # After markers: the collision overlay may override ghost/solid visibility.
     update_self_collision_overlay(handles.get("scene", {}), latest)
     toggle = handles.get("self_collision_capsules_toggle")

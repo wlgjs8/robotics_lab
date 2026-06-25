@@ -422,6 +422,21 @@ class OperatorSafety:
         _, save_message = persist_floor_z_to_config(config_path, float(floor_z_m))
         return True, f"{sent} ({save_message})"
 
+    def send_set_floor_enabled(self, enabled: bool) -> tuple[bool, str]:
+        # Non-motion, leaseless: runtime enforce on/off for the stand floor. Requires
+        # a live state stream; the server honours enable=true only when the floor is
+        # opted in at config (floor_constraint.enable=true).
+        latest = self.latest_valid()
+        if latest is None:
+            return False, "state stream missing or stale"
+        try:
+            self.command_client.send_set_safety_floor_enabled(
+                bool(enabled), timeout_sec=self.command_timeout_sec
+            )
+        except ValueError as exc:
+            return False, str(exc)
+        return True, f"sent SetSafetyFloorEnabled {'ON' if enabled else 'OFF'}"
+
     def send_set_roi_bounds(
         self,
         roi_min_m: tuple[float, float, float],

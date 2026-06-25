@@ -438,12 +438,27 @@ explicit policy-runner opt-in flag.
 
 ### `TcpLinearMove`
 
-MoveL-like Cartesian path primitive (not real-motion-ready). It plans a Cartesian path with explicit timing/speed semantics and orientation interpolation semantics. Current modes are:
+MoveL-like Cartesian path primitive. It plans a Cartesian path with explicit timing/speed semantics and orientation interpolation semantics. Current modes are:
 
 - `constant`: keep start orientation along the path
 - `slerp`: interpolate start orientation to target orientation
 
-Real mode remains blocked.
+Optional **collision-free MoveL** (`cartesian_control.linear_move.collision_free: true`, requires
+`safety.init_motion_planner.enable`): on each move the server first checks (off-thread, with a
+private IK + the planner's collision/floor oracle incl. the ground plane) whether the straight
+Cartesian path is clear. If clear it runs the exact straight MoveL (orientation mode preserved);
+if the straight path would self-collide or cross a safety plane it falls back to a collision-free
+joint-space detour (the InitMotion RRT-Connect) to the IK'd target and streams that with
+pure-pursuit. Either way the move reaches the target without collision; default off (strict
+straight MoveL guarded only by the reactive barrier).
+
+Real-motion-ready and exercised on the physical arms (the legacy run-mode execution gate
+was retired; `TcpLinearMove` computes in every run mode, same as `TcpPoseTarget`). The move
+is a FINITE, bounded path (`linear_move.max_duration_sec`): once it starts it drives to
+completion from a single command even if that command's freshness/lease lapses, so one click
+always reaches the target; an explicit command-mode change, a fault, or E-stop still abort it,
+and the per-tick safety gate (floor / ROI / reach / self-collision barrier) applies on every
+streamed target.
 
 ### `TcpTwistLocal` / `TcpTwistStand`
 

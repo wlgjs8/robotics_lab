@@ -145,7 +145,7 @@ Cartesian point-to-point final-pose target. It is MoveJ-like in the sense that t
 
 ### TcpLinearMove
 
-MoveL-like Cartesian path primitive. It must have explicit timing/speed semantics and orientation interpolation semantics. It is not real-motion-ready until a future real-hardware acceptance task says so.
+MoveL-like Cartesian path primitive. It has explicit timing/speed semantics and orientation interpolation semantics (`constant`/`slerp`). Real-motion-ready and used on the physical arms (the run-mode execution gate was retired; it computes in every run mode). It is a finite, bounded path (`linear_move.max_duration_sec`): once started it drives to completion from a single command even if the command's freshness/lease lapses, so one click always reaches the target; an explicit command-mode change, fault, or E-stop aborts it, and the per-tick safety gate still applies.
 
 ### TcpTwistLocal / TcpTwistStand
 

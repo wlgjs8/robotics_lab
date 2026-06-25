@@ -160,6 +160,9 @@ private:
     FloorArmEvaluation evaluateFloorArm(ArmId arm, const JointArray& q_deg) const;
     // Effective (runtime-adjustable) floor plane height in meters.
     double effectiveFloorZ() const;
+    // Effective stand-floor enforcement state: config opt-in AND the runtime toggle
+    // (SetSafetyFloorEnabled). config.enable=false is a hard off (no runtime enable).
+    bool floorConstraintActive() const;
     // Tier-2 usability clamp: project a Cartesian target's stand z onto the floor
     // plane (no-op when the constraint is disabled or monitor_only).
     Pose6D clampPoseToFloor(const Pose6D& pose) const;
@@ -208,6 +211,7 @@ private:
 
     bool commandRequestsResetFault(const DualArmCommand& command) const;
     bool commandRequestsSetSafetyFloorZ(const DualArmCommand& command) const;
+    bool commandRequestsSetSafetyFloorEnabled(const DualArmCommand& command) const;
     bool commandRequestsSetSafetyRoiBounds(const DualArmCommand& command) const;
     bool commandRequestsSetUserSafetyFloorPlane(const DualArmCommand& command) const;
     bool commandRequestsEmergencyStop(const DualArmCommand& command) const;
@@ -362,13 +366,57 @@ private:
         std::vector<std::pair<JointArray, JointArray>> waypoints;
         std::size_t index = 0;
         std::string message;
+        uint64_t start_ns = 0;  // steady-clock stamp when this sequence began (runaway bound)
     };
     InitMotionExec init_motion_exec_;
+
+    // Collision-free TcpLinearMove (cartesian_control.linear_move.collision_free): decide
+    // async whether the straight Cartesian path is clear (Straight -> run the exact MoveL)
+    // or blocked (Detour -> stream an RRT joint detour to the IK'd goal). Reuses
+    // init_motion_planner_ + pursueWaypoints.
+    enum class LinearMoveStatus { Idle, Deciding, Straight, Detour, Done, Failed };
+    struct LinearMoveExec {
+        LinearMoveStatus status = LinearMoveStatus::Idle;
+        bool has_target = false;
+        bool left_active = false;
+        bool right_active = false;
+        bool slerp = false;
+        Pose6D target_left{};
+        Pose6D target_right{};
+        std::future<InitMotionLinearResult> future;
+        std::vector<std::pair<JointArray, JointArray>> waypoints;
+        std::size_t index = 0;
+        std::string message;
+        uint64_t start_ns = 0;
+    };
+    LinearMoveExec linear_move_exec_;
+
+    // Collision-free TcpLinearMove sequencer (sibling of applyInitMotionSequencer): when
+    // collision_free is enabled, decides Straight vs Detour for a TcpLinearMove and either
+    // passes the command through (Straight, exact MoveL) or rewrites it to a streamed
+    // JointTarget detour. Non-TcpLinearMove commands reset it.
+    DualArmCommand applyCollisionFreeLinearMove(
+        DualArmCommand command,
+        const RobotState& left_state,
+        const RobotState& right_state
+    );
+
+    // Pure-pursuit over a planned waypoint list using the current sent pose: advances
+    // `index` past reached waypoints, returns the farthest waypoint within the execution
+    // lookahead (so the SMD runs near max velocity), and sets `done` at the final
+    // waypoint. Shared by InitMotion and the collision-free linear detour.
+    std::pair<JointArray, JointArray> pursueWaypoints(
+        const std::vector<std::pair<JointArray, JointArray>>& waypoints,
+        std::size_t& index,
+        bool& done
+    ) const;
     CollisionVerdict last_collision_verdict_{};
     // Floor plane constraint (safety.floor_constraint): runtime-adjustable plane
     // height (SetSafetyFloorZ, bounded by config runtime_min/max) + per-arm
     // telemetry of the last evaluated candidate targets.
     std::atomic<double> runtime_floor_z_m_{0.0};
+    // Runtime enforce on/off (SetSafetyFloorEnabled), seeded from config.enable.
+    std::atomic<bool> runtime_floor_enabled_{false};
     FloorArmEvaluation last_floor_left_{};
     FloorArmEvaluation last_floor_right_{};
     uint64_t floor_clamp_count_ = 0;

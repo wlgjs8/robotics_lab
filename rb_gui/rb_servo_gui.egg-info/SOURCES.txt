@@ -6,6 +6,7 @@ rb_servo_gui/command_client.py
 rb_servo_gui/geometry.py
 rb_servo_gui/models.py
 rb_servo_gui/overlay_receiver.py
+rb_servo_gui/plane_fit.py
 rb_servo_gui/safety.py
 rb_servo_gui/scene.py
 rb_servo_gui/state_receiver.py

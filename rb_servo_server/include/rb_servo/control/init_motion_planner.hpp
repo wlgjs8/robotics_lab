@@ -31,6 +31,7 @@
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/collision_monitor.hpp"
 #include "rb_servo/core/types.hpp"
+#include "rb_servo/kinematics/i_kinematics.hpp"
 
 namespace rb_servo {
 
@@ -45,16 +46,36 @@ struct InitMotionPlanResult {
     double planning_time_s = 0.0;
 };
 
+// Outcome of a collision-free TcpLinearMove decision.
+struct InitMotionLinearResult {
+    enum class Decision { Straight, Detour, Failed };
+    Decision decision = Decision::Failed;
+    JointArray goal_left{};   // IK'd target joint config (Straight & Detour)
+    JointArray goal_right{};
+    // Collision-free detour waypoints (Detour only), start..goal inclusive.
+    std::vector<std::pair<JointArray, JointArray>> waypoints;
+    std::string message;
+    double planning_time_s = 0.0;
+};
+
 class InitMotionPlanner {
 public:
     // Builds the private collision oracle from monitor_cfg (which should already
     // carry the ground plane). The instance is NOT started (no monitor thread);
     // swept_samples is forced to 1 — the planner does its own dense edge sampling.
     // Throws if the geometry model fails to load (same as the servo monitor).
+    //
+    // kinematics (optional): a PRIVATE IKinematics instance (own pinocchio Data, NOT
+    // the servo loop's) used by planLinearMove for off-thread IK/FK; pass nullptr if
+    // collision-free TcpLinearMove is not used. left_mount/right_mount are the arm
+    // mount frames the IK/FK need.
     InitMotionPlanner(CollisionMonitorConfig monitor_cfg,
                       InitMotionPlannerConfig planner_cfg,
                       JointArray q_min_deg,
-                      JointArray q_max_deg);
+                      JointArray q_max_deg,
+                      std::shared_ptr<IKinematics> kinematics = nullptr,
+                      ArmMountConfig left_mount = {},
+                      ArmMountConfig right_mount = {});
     ~InitMotionPlanner();  // defined in the .cpp (pimpl: Impl is incomplete here)
     InitMotionPlanner(const InitMotionPlanner&) = delete;
     InitMotionPlanner& operator=(const InitMotionPlanner&) = delete;
@@ -64,6 +85,19 @@ public:
     // thread off the 500 Hz servo loop. Not re-entrant (mutates the private oracle).
     InitMotionPlanResult plan(const JointArray& start_left, const JointArray& start_right,
                               const JointArray& goal_left, const JointArray& goal_right);
+
+    // Collision-free TcpLinearMove decision (single-threaded; run on a worker). IK the
+    // target pose(s), then densely sample the straight Cartesian path and oracle-check
+    // each config: if all clear -> Decision::Straight (caller runs the exact MoveL); if
+    // any sample collides / dips below the floor / IK-fails -> plan a joint-space detour
+    // (RRT-Connect) to the IK'd goal -> Decision::Detour with waypoints. Decision::Failed
+    // if the goal IK fails or no detour is found. left_active/right_active select which
+    // arms move (an inactive arm holds at its start config across the whole path).
+    InitMotionLinearResult planLinearMove(
+        const JointArray& start_left, const JointArray& start_right,
+        bool left_active, const Pose6D& goal_pose_left,
+        bool right_active, const Pose6D& goal_pose_right,
+        bool slerp, int check_samples);
 
     // State-validity oracle: true iff the combined config clears the hard floor by at
     // least collision_margin_m (no self-collision, no floor penetration). Exposed for

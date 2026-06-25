@@ -170,7 +170,7 @@ safety:
     # spacemouse로 충돌을 시연해도 ResetFault 없이 계속 조작 가능.
     # 빨간 pair 오버레이는 정책과 무관하게 violated면 표시됨.
     fail_policy: clamp_hold
-    monitor_only: true    # SIM-ONLY (2026-06-20 replay analysis): detect+telemetry but DO NOT block, so full-amplitude pgmode replay runs through the self-colliding region for analysis. pgmode = no physical motion. NEVER set true in stack_real.yaml (real keeps enforce).
+    monitor_only: false    # SIM-ONLY (2026-06-20 replay analysis): detect+telemetry but DO NOT block, so full-amplitude pgmode replay runs through the self-colliding region for analysis. pgmode = no physical motion. NEVER set true in stack_real.yaml (real keeps enforce).
     # URDF mesh self-collision (async monitor, servo_j 2ms 경로 밖) + 공통 velocity
     # barrier를 실제 차단으로 사용. 파라미터는 TcpPoseTarget/TcpTwistLocal 공통 —
     # 속도는 측정 closing speed로 자동 적응.
@@ -212,6 +212,40 @@ safety:
       #       size_m: [0.07, 0.10, 0.04], xyz_m: [0.0, 0.05, 0.05], rpy: [0,0,0] }
       #   - { name: work_table, shape: box, parent_frame: stand,
       #       size_m: [1.2, 0.8, 0.04], xyz_m: [0.0, -0.2, 0.0], rpy: [0,0,0] }
+      # WHOLE-ARM floor: a large thin static box (world frame) so the SAME mesh
+      # barrier that guards arm<->arm / arm<->stand also keeps EVERY arm link above
+      # the floor (floor_constraint above only checks the TCP + offset points, so an
+      # elbow/wrist can dip below it). Top face at z_m; kept == floor_constraint.z_min_m
+      # so the two floors agree. The InitMotion planner avoids this box too. Raise z_m
+      # to exercise whole-arm floor braking more aggressively in sim.
+      ground_plane:
+        enable: true
+        z_m: -0.200             # == floor_constraint.z_min_m
+        size_m: [4.0, 4.0]      # lateral extents [Lx, Ly]
+        thickness_m: 0.10
+        parent_frame: world
+
+  # Collision-free InitMotion planner (requires self_collision.enable — the mesh
+  # model is the planner's collision+floor oracle). A ControlMode::InitMotion command
+  # plans a collision-free + floor-safe 12-DOF (both arms) RRT-Connect path to the
+  # init pose and streams it through the safety gate, so InitMotion REACHES the pose
+  # from any start without self-collision or dipping below the floor (overlapping arm
+  # paths allowed). Fail-closed: planning failure holds. Disabled -> direct JointTarget.
+  init_motion_planner:
+    enable: true
+    max_planning_time_sec: 2.0
+    max_iterations: 20000
+    step_size_rad: 0.20
+    edge_resolution_rad: 0.02
+    goal_bias: 0.10
+    shortcut_passes: 200
+    sample_margin_deg: 30.0
+    collision_margin_m: 0.005
+    seed: 12345
+    waypoint_tol_deg: 1.5
+    max_segment_deg: 5.0
+    execution_lookahead_deg: 25.0   # pure-pursuit: bigger = faster (barrier nets corner cuts)
+    execution_timeout_sec: 30.0     # once started, drive to completion across command staleness (one click); give up after this
 
 network:
   command_bind: "udp://127.0.0.1:50256"
@@ -383,3 +417,8 @@ cartesian_control:
     default_angular_speed_rad_s: 0.2
     constant_orientation_tolerance_rad: 0.005
     default_orientation_mode: constant
+    # Collision-free MoveL (requires safety.init_motion_planner.enable): run the exact
+    # straight path when it is collision/floor-clear, else stream an RRT joint detour to
+    # the IK'd target. One click always reaches the target; reactive barrier is the net.
+    collision_free: true
+    collision_check_samples: 40

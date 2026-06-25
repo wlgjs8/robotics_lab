@@ -455,6 +455,18 @@ class CommandClient:
             "right": {},
         })
 
+    def build_set_safety_floor_enabled(self, enabled: bool, *, timeout_sec: float = 0.2) -> dict[str, Any]:
+        # Leaseless non-motion command: runtime enforce on/off for the stand floor.
+        # The server only honours enable=true when floor_constraint.enable=true in config.
+        return self._with_source({
+            "seq": self.next_seq(),
+            "mode": "SetSafetyFloorEnabled",
+            "timeout_sec": timeout_sec,
+            "floor_enabled": bool(enabled),
+            "left": {},
+            "right": {},
+        })
+
     def build_set_safety_roi_bounds(
         self,
         roi_min_m: tuple[float, float, float],
@@ -607,6 +619,11 @@ class CommandClient:
 
     def send_set_safety_floor_z(self, floor_z_m: float, *, timeout_sec: float = 0.2) -> dict[str, Any]:
         packet = self.build_set_safety_floor_z(floor_z_m, timeout_sec=timeout_sec)
+        self.send(packet)
+        return packet
+
+    def send_set_safety_floor_enabled(self, enabled: bool, *, timeout_sec: float = 0.2) -> dict[str, Any]:
+        packet = self.build_set_safety_floor_enabled(enabled, timeout_sec=timeout_sec)
         self.send(packet)
         return packet
 

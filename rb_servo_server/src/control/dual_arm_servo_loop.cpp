@@ -1427,6 +1427,7 @@ DualArmServoLoop::DualArmServoLoop(
     right_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
     kinematics_ = kinematics ? std::move(kinematics) : makeKinematicsProvider(config);
     runtime_floor_z_m_.store(config.safety.floor_constraint.z_min_m);
+    runtime_floor_enabled_.store(config.safety.floor_constraint.enable);
     for (int k = 0; k < 3; ++k) {
         runtime_roi_min_m_[k].store(config.safety.roi_box.min_m[k]);
         runtime_roi_max_m_[k].store(config.safety.roi_box.max_m[k]);
@@ -1519,11 +1520,18 @@ DualArmServoLoop::DualArmServoLoop(
     // guarantees self_collision.enable when the planner is enabled. The planner owns
     // its own private (unstarted) CollisionMonitor; it never touches collision_monitor_.
     if (config_.safety.init_motion_planner.enable && config_.safety.self_collision.enable) {
+        // Private IK/FK instance (own pinocchio Data) for collision-free TcpLinearMove's
+        // off-thread straight-path precheck + detour-goal IK — never the RT kinematics_.
+        std::shared_ptr<IKinematics> planner_kin =
+            config_.kinematics.enable ? makeKinematicsProvider(config_) : nullptr;
         init_motion_planner_ = std::make_unique<InitMotionPlanner>(
             collision_monitor_cfg_,
             config_.safety.init_motion_planner,
             config_.safety.q_min_deg,
-            config_.safety.q_max_deg);
+            config_.safety.q_max_deg,
+            planner_kin,
+            config_.left_mount,
+            config_.right_mount);
     }
     resetReferenceSupervisionState(this);
 }
@@ -1954,6 +1962,24 @@ void DualArmServoLoop::loopMain() {
                 }
             }
             command = metadata_hold(command);
+        } else if (commandRequestsSetSafetyFloorEnabled(command)) {
+            // Leaseless runtime enforce on/off for the stand floor. config.enable is a
+            // hard master (opt-in + startup kinematics validation): a runtime enable is
+            // rejected when the floor is not opted in at config. Works while fault-latched.
+            if (!command.has_floor_enabled) {
+                floor_last_set_reject_reason_ = "floor_enabled_missing";
+            } else if (command.floor_enabled && !config_.safety.floor_constraint.enable) {
+                floor_last_set_reject_reason_ = "floor_constraint_disabled_in_config";
+                std::cerr << "[WARN] SetSafetyFloorEnabled(true) rejected: "
+                             "floor_constraint.enable=false in config\n";
+            } else {
+                runtime_floor_enabled_.store(command.floor_enabled);
+                floor_last_set_reject_reason_.clear();
+                std::cerr << "[INFO] safety floor enforcement "
+                          << (command.floor_enabled ? "ENABLED" : "DISABLED")
+                          << " by source_id=" << command.source.source_id << "\n";
+            }
+            command = metadata_hold(command);
         } else if (commandRequestsSetSafetyRoiBounds(command)) {
             // Leaseless runtime adjustment of the stand-frame ROI box bounds.
             // Accepted only within the configured per-axis runtime envelope; works
@@ -2099,6 +2125,9 @@ void DualArmServoLoop::loopMain() {
         } else {
             SafetyVerdict command_verdict = SafetyVerdict::Ok;
             command = resolveCartesianDeltaCommand(command, left_state, right_state);
+            // Collision-free TcpLinearMove: decide Straight (pass through to the exact
+            // MoveL) vs Detour (rewrite to a streamed JointTarget collision-free path).
+            command = applyCollisionFreeLinearMove(command, left_state, right_state);
             // Collision-free InitMotion: rewrite a ControlMode::InitMotion into a dual
             // JointTarget toward the current planned waypoint (or a hold while planning /
             // on failure), so the trajectory + safety pipeline below is unchanged.
@@ -2476,7 +2505,7 @@ void DualArmServoLoop::loopMain() {
                         p.d_m});
                 }
             }
-            latest_snapshot_.floor_constraint_enabled = config_.safety.floor_constraint.enable;
+            latest_snapshot_.floor_constraint_enabled = floorConstraintActive();
             latest_snapshot_.floor_constraint_monitor_only = config_.safety.floor_constraint.monitor_only;
             latest_snapshot_.floor_constraint_z_min_m = effectiveFloorZ();
             latest_snapshot_.floor_constraint_config_z_min_m = config_.safety.floor_constraint.z_min_m;
@@ -3268,10 +3297,18 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     if (right_cartesian_circle_move_.active && !isValidJointState(right_state)) {
         clear_right_circle_move();
     }
-    if (linearPathLeaseExpired(left_cartesian_servo_path_, command.host_time_ns)) {
+    // TcpLinearMove is a FINITE, bounded path (duration_sec <= linear_move.max_duration_sec).
+    // Once it is running, let it drive to completion even if the (one-shot) command's
+    // lease lapses — a single click must always reach the target. The deadman still
+    // applies once the path is DONE (cleared below), and an explicit command-mode change,
+    // a fault, or an invalid joint state still abort it immediately above/below; E-stop
+    // latches regardless. So only a FINISHED path is torn down on lease expiry.
+    if (left_cartesian_servo_path_.done &&
+        linearPathLeaseExpired(left_cartesian_servo_path_, command.host_time_ns)) {
         clear_left_linear_path();
     }
-    if (linearPathLeaseExpired(right_cartesian_servo_path_, command.host_time_ns)) {
+    if (right_cartesian_servo_path_.done &&
+        linearPathLeaseExpired(right_cartesian_servo_path_, command.host_time_ns)) {
         clear_right_linear_path();
     }
     if (circlePathLeaseExpired(left_cartesian_circle_move_, command.host_time_ns)) {
@@ -3417,7 +3454,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // Tier-2 floor assist for streaming twists (5 mm soft margin above the plane).
         constexpr double kFloorTwistSoftMarginM = 0.005;
         cartesian_servo.setFloorConstraint(
-            config_.safety.floor_constraint.enable && !config_.safety.floor_constraint.monitor_only,
+            floorConstraintActive() && !config_.safety.floor_constraint.monitor_only,
             effectiveFloorZ(),
             kFloorTwistSoftMarginM,
             config_.safety.floor_constraint.tcp_offset_points
@@ -3893,7 +3930,7 @@ ServoTarget DualArmServoLoop::applySafety(
     bool self_collision_hold = false;  // stale verdict -> whole-arm hold, skip solve
 
     // ---- Floor plane: synchronous FK + per-point z-velocity Jacobian ----
-    if (config_.safety.floor_constraint.enable) {
+    if (floorConstraintActive()) {
         const double floor_z = effectiveFloorZ();
         const FloorArmEvaluation left_eval = evaluateFloorArm(ArmId::Left, out.left_q_target_deg);
         const FloorArmEvaluation right_eval = evaluateFloorArm(ArmId::Right, out.right_q_target_deg);
@@ -4493,6 +4530,10 @@ double DualArmServoLoop::effectiveFloorZ() const {
     return runtime_floor_z_m_.load();
 }
 
+bool DualArmServoLoop::floorConstraintActive() const {
+    return config_.safety.floor_constraint.enable && runtime_floor_enabled_.load();
+}
+
 RoiArmEvaluation DualArmServoLoop::evaluateRoiArm(ArmId arm, const JointArray& q_deg) const {
     RoiArmEvaluation eval;
     if (!kinematics_ || !finiteJointArray(q_deg)) {
@@ -4634,7 +4675,7 @@ Pose6D DualArmServoLoop::clampPoseToRoi(const Pose6D& pose) const {
 }
 
 Pose6D DualArmServoLoop::clampPoseToFloor(const Pose6D& pose) const {
-    if (!config_.safety.floor_constraint.enable || config_.safety.floor_constraint.monitor_only) {
+    if (!floorConstraintActive() || config_.safety.floor_constraint.monitor_only) {
         return pose;
     }
     Pose6D clamped = pose;
@@ -4746,6 +4787,11 @@ bool DualArmServoLoop::commandRequestsResetFault(const DualArmCommand& command) 
 bool DualArmServoLoop::commandRequestsSetSafetyFloorZ(const DualArmCommand& command) const {
     return command.left.mode == ControlMode::SetSafetyFloorZ ||
            command.right.mode == ControlMode::SetSafetyFloorZ;
+}
+
+bool DualArmServoLoop::commandRequestsSetSafetyFloorEnabled(const DualArmCommand& command) const {
+    return command.left.mode == ControlMode::SetSafetyFloorEnabled ||
+           command.right.mode == ControlMode::SetSafetyFloorEnabled;
 }
 
 bool DualArmServoLoop::commandRequestsSetSafetyRoiBounds(const DualArmCommand& command) const {
@@ -5113,55 +5159,86 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         return true;
     };
 
+    auto& ex = init_motion_exec_;
+    // A plan that has begun (planning or streaming) is a committed go-to-init move.
+    const bool sequence_active = ex.status == InitMotionStatus::Planning ||
+                                 ex.status == InitMotionStatus::Executing;
+    // The deadman synthesises a seq==0 Hold/Hold once the one-shot InitMotion command
+    // ages out of its freshness window. That is NOT an operator cancel — keep driving
+    // the in-flight move to completion (the per-tick safety gate stays active). An
+    // EXPLICIT command (real seq: Hold/Disarm/E-stop/new motion) does cancel.
+    const bool deadman_hold = isSyntheticHoldCommand(command);
+
     if (!is_init) {
-        // Cancellation: any non-InitMotion command resets the sequencer so the next
-        // InitMotion plans fresh. A discarded in-flight future detaches (its async
-        // task completes harmlessly on the private oracle).
-        if (init_motion_exec_.status != InitMotionStatus::Idle) {
-            init_motion_exec_ = InitMotionExec{};
+        if (sequence_active && deadman_hold && init_motion_planner_) {
+            // Continuation across command staleness: fall through to the status machine
+            // WITHOUT recomputing the target (command carries no init pose now) and
+            // WITHOUT relaunching. exec.target/waypoints already hold the committed move.
+        } else {
+            // Explicit non-InitMotion command, or no active sequence -> cancel/reset so
+            // the next InitMotion plans fresh. A discarded in-flight future detaches.
+            if (ex.status != InitMotionStatus::Idle) {
+                ex = InitMotionExec{};
+            }
+            return command;
         }
-        return command;
     }
 
     // Planner disabled -> fall back to a direct JointTarget to the init pose (the
     // legacy behavior; the reactive barrier + floor still guard each tick).
-    if (!init_motion_planner_) {
+    if (is_init && !init_motion_planner_) {
         as_joint_target(command, command.left.q_target_deg, command.right.q_target_deg);
         return command;
     }
 
-    const JointArray target_left = command.left.q_target_deg;
-    const JointArray target_right = command.right.q_target_deg;
-    auto& ex = init_motion_exec_;
-    const bool new_target = !ex.has_target ||
-        !reached(target_left, ex.target_left, 1e-6) ||
-        !reached(target_right, ex.target_right, 1e-6);
+    // Launch (or relaunch on a changed target) a plan from the CURRENT sent pose. Only
+    // an EXPLICIT InitMotion command (re)launches; while Planning we never relaunch
+    // (let the in-flight plan resolve first), and a deadman-hold continuation never
+    // launches (it has no fresh target).
+    if (is_init) {
+        const JointArray target_left = command.left.q_target_deg;
+        const JointArray target_right = command.right.q_target_deg;
+        const bool new_target = !ex.has_target ||
+            !reached(target_left, ex.target_left, 1e-6) ||
+            !reached(target_right, ex.target_right, 1e-6);
+        const auto launch_plan = [&]() {
+            ex.target_left = target_left;
+            ex.target_right = target_right;
+            ex.has_target = true;
+            ex.waypoints.clear();
+            ex.index = 0;
+            ex.status = InitMotionStatus::Planning;
+            ex.message = "planning";
+            ex.start_ns = nowSteadyNs();
+            const JointArray start_left = left_prev_sent_q_deg_;
+            const JointArray start_right = right_prev_sent_q_deg_;
+            InitMotionPlanner* planner = init_motion_planner_.get();
+            ex.future = std::async(std::launch::async,
+                [planner, start_left, start_right, target_left, target_right]() {
+                    return planner->plan(start_left, start_right, target_left, target_right);
+                });
+            std::cerr << "[INFO] InitMotion: planning collision-free path from current pose\n";
+        };
+        if (ex.status == InitMotionStatus::Idle ||
+            ((ex.status == InitMotionStatus::Executing ||
+              ex.status == InitMotionStatus::Done ||
+              ex.status == InitMotionStatus::Failed) && new_target)) {
+            launch_plan();
+        }
+    }
 
-    // Launch (or relaunch on a changed target) a plan from the CURRENT sent pose.
-    // While Planning we never relaunch (let the in-flight plan resolve first).
-    const auto launch_plan = [&]() {
-        ex.target_left = target_left;
-        ex.target_right = target_right;
-        ex.has_target = true;
-        ex.waypoints.clear();
-        ex.index = 0;
-        ex.status = InitMotionStatus::Planning;
-        ex.message = "planning";
-        const JointArray start_left = left_prev_sent_q_deg_;
-        const JointArray start_right = right_prev_sent_q_deg_;
-        InitMotionPlanner* planner = init_motion_planner_.get();
-        ex.future = std::async(std::launch::async,
-            [planner, start_left, start_right, target_left, target_right]() {
-                return planner->plan(start_left, start_right, target_left, target_right);
-            });
-        std::cerr << "[INFO] InitMotion: planning collision-free path from current pose\n";
-    };
-
-    if (ex.status == InitMotionStatus::Idle ||
-        ((ex.status == InitMotionStatus::Executing ||
-          ex.status == InitMotionStatus::Done ||
-          ex.status == InitMotionStatus::Failed) && new_target)) {
-        launch_plan();
+    // Runaway bound: a committed sequence that has not finished within the configured
+    // budget gives up (Failed -> hold) so a permanently barrier-blocked corner cannot
+    // hold motion authority forever.
+    if (sequence_active && ex.start_ns != 0) {
+        const double age_s = static_cast<double>(nowSteadyNs() - ex.start_ns) * 1e-9;
+        if (age_s > config_.safety.init_motion_planner.execution_timeout_sec) {
+            ex.status = InitMotionStatus::Failed;
+            ex.message = "execution timeout";
+            std::cerr << "[WARN] InitMotion: execution exceeded "
+                      << config_.safety.init_motion_planner.execution_timeout_sec
+                      << " s budget; holding (fail-closed)\n";
+        }
     }
 
     // Poll the async plan (non-blocking) and transition Planning -> Executing/Failed.
@@ -5187,18 +5264,10 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
 
     switch (ex.status) {
         case InitMotionStatus::Executing: {
-            const double tol = config_.safety.init_motion_planner.waypoint_tol_deg;
-            // Advance through every waypoint already reached this tick (the SMD ramp
-            // may settle several short densified segments between ticks).
-            while (ex.index + 1 < ex.waypoints.size() &&
-                   reached(left_prev_sent_q_deg_, ex.waypoints[ex.index].first, tol) &&
-                   reached(right_prev_sent_q_deg_, ex.waypoints[ex.index].second, tol)) {
-                ++ex.index;
-            }
-            const auto& wp = ex.waypoints[ex.index];
-            if (ex.index + 1 == ex.waypoints.size() &&
-                reached(left_prev_sent_q_deg_, wp.first, tol) &&
-                reached(right_prev_sent_q_deg_, wp.second, tol)) {
+            bool done = false;
+            const std::pair<JointArray, JointArray> wp =
+                pursueWaypoints(ex.waypoints, ex.index, done);
+            if (done) {
                 ex.status = InitMotionStatus::Done;
                 ex.message = "done";
                 std::cerr << "[INFO] InitMotion: reached init pose\n";
@@ -5219,6 +5288,225 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             break;
     }
     return command;
+}
+
+std::pair<JointArray, JointArray> DualArmServoLoop::pursueWaypoints(
+    const std::vector<std::pair<JointArray, JointArray>>& waypoints,
+    std::size_t& index,
+    bool& done
+) const {
+    done = false;
+    if (waypoints.empty()) {
+        return {left_prev_sent_q_deg_, right_prev_sent_q_deg_};
+    }
+    const double tol = config_.safety.init_motion_planner.waypoint_tol_deg;
+    const double lookahead = config_.safety.init_motion_planner.execution_lookahead_deg;
+    const auto reached = [&](const JointArray& a, const JointArray& b) {
+        for (int i = 0; i < kDof; ++i) {
+            if (std::abs(a[i] - b[i]) > tol) return false;
+        }
+        return true;
+    };
+    // Joint-space chord (max per-joint angle over BOTH arms) from the current sent pose.
+    const auto chord = [&](const std::pair<JointArray, JointArray>& w) {
+        double m = 0.0;
+        for (int i = 0; i < kDof; ++i) {
+            m = std::max(m, std::abs(left_prev_sent_q_deg_[i] - w.first[i]));
+            m = std::max(m, std::abs(right_prev_sent_q_deg_[i] - w.second[i]));
+        }
+        return m;
+    };
+    // Progress pointer: advance past every waypoint we have essentially reached.
+    while (index + 1 < waypoints.size() &&
+           reached(left_prev_sent_q_deg_, waypoints[index].first) &&
+           reached(right_prev_sent_q_deg_, waypoints[index].second)) {
+        ++index;
+    }
+    // Pure-pursuit: aim at the farthest forward waypoint still within `lookahead` of the
+    // current pose, so the SMD always sees a large error and runs near max velocity (no
+    // stop-and-go at every densified node). The path stays the planned collision-free
+    // polyline; any corner the chord cuts into a keep-out is braked by the reactive
+    // barrier (slow only at that corner, never collide).
+    std::size_t tgt = index;
+    while (tgt + 1 < waypoints.size() && chord(waypoints[tgt + 1]) <= lookahead) {
+        ++tgt;
+    }
+    if (index + 1 == waypoints.size() &&
+        reached(left_prev_sent_q_deg_, waypoints.back().first) &&
+        reached(right_prev_sent_q_deg_, waypoints.back().second)) {
+        done = true;
+    }
+    return waypoints[tgt];
+}
+
+DualArmCommand DualArmServoLoop::applyCollisionFreeLinearMove(
+    DualArmCommand command,
+    const RobotState& left_state,
+    const RobotState& right_state
+) {
+    (void)left_state;
+    (void)right_state;
+    const bool enabled = config_.cartesian_control.linear_move.collision_free &&
+                         init_motion_planner_ != nullptr;
+    const bool is_lin = command.left.mode == ControlMode::TcpLinearMove ||
+                        command.right.mode == ControlMode::TcpLinearMove;
+    auto& lx = linear_move_exec_;
+    const bool sequence_active = lx.status == LinearMoveStatus::Deciding ||
+                                 lx.status == LinearMoveStatus::Detour;
+    const bool deadman_hold = isSyntheticHoldCommand(command);
+
+    const auto as_joint_target = [](DualArmCommand& c, const JointArray& l, const JointArray& r) {
+        c.left.mode = ControlMode::JointTarget;
+        c.right.mode = ControlMode::JointTarget;
+        c.left.q_target_deg = l;
+        c.right.q_target_deg = r;
+        c.left.has_joint_target = true;
+        c.right.has_joint_target = true;
+    };
+    const auto as_hold = [](DualArmCommand& c) {
+        c.left.mode = ControlMode::Hold;
+        c.right.mode = ControlMode::Hold;
+    };
+
+    if (!enabled) {
+        if (lx.status != LinearMoveStatus::Idle) lx = LinearMoveExec{};
+        return command;  // feature off -> normal straight MoveL / other handling
+    }
+
+    if (!is_lin) {
+        // Continue an in-flight Deciding/Detour across command staleness (deadman),
+        // mirroring InitMotion; any explicit non-linear command cancels. NOTE: a
+        // decided Straight is intentionally NOT continued here — its in-flight Cartesian
+        // path is carried to completion by the executor's own linear-path continuation.
+        if (sequence_active && deadman_hold) {
+            // fall through to the status machine without relaunching.
+        } else {
+            if (lx.status != LinearMoveStatus::Idle) lx = LinearMoveExec{};
+            return command;
+        }
+    }
+
+    // Determine the active arms + target poses for a fresh linear command.
+    if (is_lin) {
+        const bool left_active = command.left.mode == ControlMode::TcpLinearMove &&
+                                 command.left.has_tcp_target;
+        const bool right_active = command.right.mode == ControlMode::TcpLinearMove &&
+                                  command.right.has_tcp_target;
+        const bool slerp = (command.left.has_linear_move_orientation_mode
+                                ? command.left.linear_move_orientation_mode
+                                : config_.cartesian_control.linear_move.default_orientation_mode) ==
+                           LinearMoveOrientationMode::Slerp;
+        const auto pose_near = [](const Pose6D& a, const Pose6D& b) {
+            return std::abs(a.x - b.x) < 1e-6 && std::abs(a.y - b.y) < 1e-6 &&
+                   std::abs(a.z - b.z) < 1e-6 && std::abs(a.rx - b.rx) < 1e-6 &&
+                   std::abs(a.ry - b.ry) < 1e-6 && std::abs(a.rz - b.rz) < 1e-6;
+        };
+        const bool new_target = !lx.has_target ||
+            left_active != lx.left_active || right_active != lx.right_active ||
+            !pose_near(command.left.tcp_target_stand, lx.target_left) ||
+            !pose_near(command.right.tcp_target_stand, lx.target_right);
+        const auto launch_decide = [&]() {
+            lx.has_target = true;
+            lx.left_active = left_active;
+            lx.right_active = right_active;
+            lx.slerp = slerp;
+            lx.target_left = command.left.tcp_target_stand;
+            lx.target_right = command.right.tcp_target_stand;
+            lx.waypoints.clear();
+            lx.index = 0;
+            lx.status = LinearMoveStatus::Deciding;
+            lx.message = "deciding";
+            lx.start_ns = nowSteadyNs();
+            const JointArray start_left = left_prev_sent_q_deg_;
+            const JointArray start_right = right_prev_sent_q_deg_;
+            const Pose6D goal_left = command.left.tcp_target_stand;
+            const Pose6D goal_right = command.right.tcp_target_stand;
+            const int samples = config_.cartesian_control.linear_move.collision_check_samples;
+            InitMotionPlanner* planner = init_motion_planner_.get();
+            lx.future = std::async(std::launch::async,
+                [planner, start_left, start_right, left_active, goal_left,
+                 right_active, goal_right, slerp, samples]() {
+                    return planner->planLinearMove(start_left, start_right,
+                                                   left_active, goal_left,
+                                                   right_active, goal_right, slerp, samples);
+                });
+            std::cerr << "[INFO] TcpLinearMove(collision-free): checking straight path\n";
+        };
+        if (lx.status == LinearMoveStatus::Idle ||
+            ((lx.status == LinearMoveStatus::Straight ||
+              lx.status == LinearMoveStatus::Detour ||
+              lx.status == LinearMoveStatus::Done ||
+              lx.status == LinearMoveStatus::Failed) && new_target)) {
+            launch_decide();
+        }
+    }
+
+    // Runaway bound (same as InitMotion).
+    if (sequence_active && lx.start_ns != 0) {
+        const double age_s = static_cast<double>(nowSteadyNs() - lx.start_ns) * 1e-9;
+        if (age_s > config_.safety.init_motion_planner.execution_timeout_sec) {
+            lx.status = LinearMoveStatus::Failed;
+            lx.message = "execution timeout";
+            std::cerr << "[WARN] TcpLinearMove(collision-free): timeout; holding\n";
+        }
+    }
+
+    // Poll the async decision.
+    if (lx.status == LinearMoveStatus::Deciding && lx.future.valid() &&
+        lx.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        InitMotionLinearResult r = lx.future.get();
+        if (r.decision == InitMotionLinearResult::Decision::Straight) {
+            lx.status = LinearMoveStatus::Straight;
+            lx.message = "straight";
+            std::cerr << "[INFO] TcpLinearMove(collision-free): straight path clear; running MoveL\n";
+        } else if (r.decision == InitMotionLinearResult::Decision::Detour) {
+            lx.waypoints = std::move(r.waypoints);
+            lx.index = 0;
+            lx.status = LinearMoveStatus::Detour;
+            lx.message = "detour";
+            std::cerr << "[INFO] TcpLinearMove(collision-free): straight path blocked; "
+                      << "streaming collision-free detour (" << lx.waypoints.size()
+                      << " waypoints)\n";
+        } else {
+            lx.status = LinearMoveStatus::Failed;
+            lx.message = r.message;
+            std::cerr << "[WARN] TcpLinearMove(collision-free): " << r.message
+                      << "; holding (fail-closed)\n";
+        }
+    }
+
+    switch (lx.status) {
+        case LinearMoveStatus::Straight:
+            // Pass the original TcpLinearMove through untouched -> the Cartesian executor
+            // runs the exact straight MoveL (and its own finite-path continuation carries
+            // it to completion across command/lease staleness).
+            return command;
+        case LinearMoveStatus::Detour: {
+            bool done = false;
+            const std::pair<JointArray, JointArray> wp =
+                pursueWaypoints(lx.waypoints, lx.index, done);
+            if (done) {
+                lx.status = LinearMoveStatus::Done;
+                lx.message = "done";
+                std::cerr << "[INFO] TcpLinearMove(collision-free): detour reached target\n";
+            }
+            as_joint_target(command, wp.first, wp.second);
+            return command;
+        }
+        case LinearMoveStatus::Done:
+            // Hold at the detour goal.
+            as_joint_target(command, lx.waypoints.empty()
+                                         ? left_prev_sent_q_deg_
+                                         : lx.waypoints.back().first,
+                            lx.waypoints.empty() ? right_prev_sent_q_deg_
+                                                 : lx.waypoints.back().second);
+            return command;
+        case LinearMoveStatus::Deciding:
+        case LinearMoveStatus::Failed:
+        default:
+            as_hold(command);
+            return command;
+    }
 }
 
 bool DualArmServoLoop::commandBlockedByReadOnly(const DualArmCommand& command) const {

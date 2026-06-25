@@ -10,6 +10,7 @@
 
 #include "rb_servo/control/collision_monitor.hpp"
 #include "rb_servo/control/init_motion_planner.hpp"
+#include "rb_servo/kinematics/pinocchio_kinematics.hpp"
 
 #define RB_CHECK(expr)                                                          \
     do {                                                                       \
@@ -61,6 +62,30 @@ static InitMotionPlannerConfig makePlannerConfig() {
     p.waypoint_tol_deg = 1.5;
     p.max_segment_deg = 5.0;
     return p;
+}
+
+static KinematicsConfig testKinematicsConfig(const fs::path& ws) {
+    KinematicsConfig cfg;
+    cfg.enable = true;
+    cfg.provider = "pinocchio";
+    cfg.urdf = (ws / "robotics_lab/rb_servo_server/descriptions/urdf/rb3_730e.urdf").string();
+    cfg.base_link = "world";
+    cfg.tip_link = "tcp";
+    cfg.joint_names = {"base_joint", "shoulder_joint", "elbow_joint",
+                       "wrist1_joint", "wrist2_joint", "wrist3_joint"};
+    cfg.q_units = "deg";
+    cfg.ik.enable = true;
+    cfg.ik.timeout_ms = 250.0;
+    return cfg;
+}
+
+static ArmMountConfig mountFor(ArmId arm) {
+    ArmMountConfig m;
+    m.arm_id = arm;
+    m.base_pose_in_stand = arm == ArmId::Left
+        ? Pose6D{0.15707, -0.17036, 0.58036, 2.186649, 0.523831, 2.526296}
+        : Pose6D{-0.15707, -0.17036, 0.58036, 2.186649, -0.523831, -2.526296};
+    return m;
 }
 
 static bool run() {
@@ -162,6 +187,61 @@ static bool run() {
         std::cout << "blocked goal: success=" << bad.success << " (" << bad.message << ")\n";
         RB_CHECK(!bad.success);
         RB_CHECK(bad.waypoints.empty());
+    }
+
+    // ---- (4) Collision-free TcpLinearMove (planLinearMove). ----
+    // (4a) Without a private kinematics -> graceful Failed (no crash).
+    {
+        InitMotionPlanner no_kin(cfg, makePlannerConfig(), qmin, qmax);
+        const InitMotionLinearResult r = no_kin.planLinearMove(
+            init, init, true, Pose6D{}, true, Pose6D{}, false, 20);
+        RB_CHECK(r.decision == InitMotionLinearResult::Decision::Failed);
+    }
+
+    const fs::path rb3_urdf =
+        ws / "robotics_lab/rb_servo_server/descriptions/urdf/rb3_730e.urdf";
+    if (fs::is_regular_file(rb3_urdf)) {
+        auto kin = std::make_shared<PinocchioKinematics>(testKinematicsConfig(ws));
+        const ArmMountConfig lm = mountFor(ArmId::Left);
+        const ArmMountConfig rm = mountFor(ArmId::Right);
+
+        // (4b) Zero-move (goal == current TCP): the straight path stays at the clear
+        // init config -> Decision::Straight, no detour waypoints. Robust to mount
+        // calibration (every sample is ~the known-clear init pose).
+        {
+            InitMotionPlanner planner_k(cfg, makePlannerConfig(), qmin, qmax, kin, lm, rm);
+            const Pose6D pose_l = kin->computeTcpStand(ArmId::Left, init, lm);
+            const Pose6D pose_r = kin->computeTcpStand(ArmId::Right, init, rm);
+            const InitMotionLinearResult r = planner_k.planLinearMove(
+                init, init, true, pose_l, true, pose_r, /*slerp=*/false, 24);
+            std::cout << "linear zero-move: decision="
+                      << static_cast<int>(r.decision) << " (" << r.message << ")\n";
+            RB_CHECK(r.decision == InitMotionLinearResult::Decision::Straight);
+            RB_CHECK(r.waypoints.empty());
+        }
+
+        // (4c) Blocked: with an engulfing ground plane every config collides, so the
+        // straight path is not clear AND the detour goal is not clear -> fail-closed.
+        {
+            CollisionMonitorConfig engulf = cfg;
+            ExtraCollisionShape box;
+            box.name = "ground_plane";
+            box.shape = "box";
+            box.parent_frame = "stand";
+            box.size_m = {6.0, 6.0, 6.0};
+            box.xyz_m = {0.0, 0.0, 0.0};
+            engulf.extra_collision.push_back(box);
+            InitMotionPlanner planner_b(engulf, makePlannerConfig(), qmin, qmax, kin, lm, rm);
+            const Pose6D pose_l = kin->computeTcpStand(ArmId::Left, init, lm);
+            const Pose6D pose_r = kin->computeTcpStand(ArmId::Right, init, rm);
+            const InitMotionLinearResult r = planner_b.planLinearMove(
+                init, init, true, pose_l, true, pose_r, false, 24);
+            std::cout << "linear blocked: decision="
+                      << static_cast<int>(r.decision) << " (" << r.message << ")\n";
+            RB_CHECK(r.decision != InitMotionLinearResult::Decision::Straight);
+        }
+    } else {
+        std::cout << "SKIP (4b/4c): rb3_730e kinematics URDF not found\n";
     }
 
     std::cout << "test_init_motion_planner: OK\n";

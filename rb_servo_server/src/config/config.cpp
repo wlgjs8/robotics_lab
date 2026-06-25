@@ -2194,6 +2194,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "seed",
                 "waypoint_tol_deg",
                 "max_segment_deg",
+                "execution_lookahead_deg",
+                "execution_timeout_sec",
             }, "safety.init_motion_planner");
             auto& ipc = cfg.safety.init_motion_planner;
             if (has(ip, "enable")) ipc.enable = asBool(ip["enable"], "safety.init_motion_planner.enable");
@@ -2208,6 +2210,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ip, "seed")) ipc.seed = static_cast<unsigned int>(asInt(ip["seed"], "safety.init_motion_planner.seed"));
             if (has(ip, "waypoint_tol_deg")) ipc.waypoint_tol_deg = asDouble(ip["waypoint_tol_deg"], "safety.init_motion_planner.waypoint_tol_deg");
             if (has(ip, "max_segment_deg")) ipc.max_segment_deg = asDouble(ip["max_segment_deg"], "safety.init_motion_planner.max_segment_deg");
+            if (has(ip, "execution_lookahead_deg")) ipc.execution_lookahead_deg = asDouble(ip["execution_lookahead_deg"], "safety.init_motion_planner.execution_lookahead_deg");
+            if (has(ip, "execution_timeout_sec")) ipc.execution_timeout_sec = asDouble(ip["execution_timeout_sec"], "safety.init_motion_planner.execution_timeout_sec");
         }
     }
 
@@ -2518,6 +2522,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "default_angular_speed_rad_s",
                 "constant_orientation_tolerance_rad",
                 "default_orientation_mode",
+                "collision_free",
+                "collision_check_samples",
             }, "cartesian_control.linear_move");
             if (has(linear, "min_duration_sec")) {
                 cfg.cartesian_control.linear_move.min_duration_sec =
@@ -2545,6 +2551,14 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(linear, "default_orientation_mode")) {
                 cfg.cartesian_control.linear_move.default_orientation_mode =
                     parseLinearMoveOrientationMode(linear["default_orientation_mode"], "cartesian_control.linear_move.default_orientation_mode");
+            }
+            if (has(linear, "collision_free")) {
+                cfg.cartesian_control.linear_move.collision_free =
+                    asBool(linear["collision_free"], "cartesian_control.linear_move.collision_free");
+            }
+            if (has(linear, "collision_check_samples")) {
+                cfg.cartesian_control.linear_move.collision_check_samples =
+                    asInt(linear["collision_check_samples"], "cartesian_control.linear_move.collision_check_samples");
             }
         }
         if (has(sec, "circle_move")) {

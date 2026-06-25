@@ -119,6 +119,7 @@ from rb_servo_gui.scene import (
     _update_urdf_config,
     set_ik_infeasible_region_visible,
     update_circle_overlay,
+    update_floor_check_points,
     update_floor_plane,
     update_floor_plane_preview,
     update_roi_box,
@@ -129,6 +130,7 @@ from rb_servo_gui.scene import (
 )
 from rb_servo_gui.status_panel import (
     _format_floor_constraint_status,
+    _format_user_floor_constraint_status,
     _format_roi_box_status,
     _format_self_collision_status,
 )
@@ -2436,6 +2438,30 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(left_tcp_label.visible)
         self.assertFalse(left_ref_label.visible)
 
+    def test_floor_check_points_toggle_gated_on_actual_tcp(self):
+        state = sample_state()
+        # Left has a valid actual TCP pose; right does not (deferred FK).
+        state["left"]["tcp_actual_stand"] = {"x": 0.3, "y": 0.1, "z": 0.4, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+        state["left"]["has_valid_tcp_pose"] = True
+        state["left"]["tcp_actual_valid"] = True
+        state["left"]["tcp_deferred"] = False
+        state["right"]["tcp_actual_valid"] = False
+        state["right"]["tcp_deferred"] = True
+        store, _, _ = self.make_safety(state)
+        left_pts = RecordingSceneHandle()
+        right_pts = RecordingSceneHandle()
+        handles = {"left_floor_check_points": left_pts, "right_floor_check_points": right_pts}
+
+        # Toggle off: both hidden regardless of TCP validity.
+        update_floor_check_points(handles, store.latest(), show=False)
+        self.assertFalse(left_pts.visible)
+        self.assertFalse(right_pts.visible)
+
+        # Toggle on: only the arm with a valid actual TCP shows its points.
+        update_floor_check_points(handles, store.latest(), show=True)
+        self.assertTrue(left_pts.visible)
+        self.assertFalse(right_pts.visible)
+
     def test_scene_fallback_labels_actual_and_reference_tcp_markers(self):
         server = RecordingServer(scene=RecordingScene())
         _add_scene_fallback(server)
@@ -2989,6 +3015,133 @@ class FloorConstraintGuiTest(unittest.TestCase):
         self.assertEqual(packet["source_id"], "rb_gui_test")
         with self.assertRaises(ValueError):
             client.build_set_safety_floor_z(float("nan"))
+
+    def test_build_set_safety_floor_enabled_packet(self):
+        client = CommandClient(host="127.0.0.1", port=0, source_id="rb_gui_test")
+        on = client.build_set_safety_floor_enabled(True)
+        self.assertEqual(on["mode"], "SetSafetyFloorEnabled")
+        self.assertIs(on["floor_enabled"], True)
+        self.assertEqual(on["left"], {})
+        self.assertEqual(on["right"], {})
+        off = client.build_set_safety_floor_enabled(False)
+        self.assertIs(off["floor_enabled"], False)
+        # Leaseless: not bracketed with Acquire/Release.
+        self.assertNotIn("SetSafetyFloorEnabled", CommandClient._LEASED_MODES)
+
+    def test_build_set_user_safety_floor_plane_packet(self):
+        client = CommandClient(host="127.0.0.1", port=0, source_id="rb_gui_test")
+        # A non-unit normal is normalized client-side; enable defaults True.
+        packet = client.build_set_user_safety_floor_plane(
+            (0.0, -0.28, 0.01), (0.0, 0.0, 2.0), margin_m=0.002)
+        self.assertEqual(packet["mode"], "SetUserSafetyFloorPlane")
+        self.assertEqual(packet["user_floor_point_m"], [0.0, -0.28, 0.01])
+        # Normalized to a unit normal.
+        self.assertAlmostEqual(
+            sum(v * v for v in packet["user_floor_normal"]) ** 0.5, 1.0, places=9)
+        self.assertAlmostEqual(packet["user_floor_normal"][2], 1.0)
+        self.assertAlmostEqual(packet["user_floor_margin_m"], 0.002)
+        self.assertTrue(packet["user_floor_enable"])
+        self.assertEqual(packet["left"], {})
+        self.assertEqual(packet["right"], {})
+        # Disable carries enable=False.
+        disable = client.build_set_user_safety_floor_plane(
+            (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), enable=False)
+        self.assertFalse(disable["user_floor_enable"])
+        # Degenerate / non-finite inputs are rejected.
+        with self.assertRaises(ValueError):
+            client.build_set_user_safety_floor_plane((0, 0, 0), (0, 0, 0))
+        with self.assertRaises(ValueError):
+            client.build_set_user_safety_floor_plane((0, 0, float("nan")), (0, 0, 1))
+
+    def test_fit_plane_horizontal_and_tilted(self):
+        from rb_servo_gui.plane_fit import fit_plane, tilt_deg
+
+        # Horizontal plane at z=0.1 -> normal +z, tilt ~0.
+        point, normal = fit_plane([[0, 0, 0.1], [1, 0, 0.1], [0, 1, 0.1], [1, 1, 0.1]])
+        self.assertAlmostEqual(normal[2], 1.0, places=6)
+        self.assertLess(tilt_deg(normal), 1e-3)
+        self.assertAlmostEqual(point[2], 0.1, places=6)
+        # A plane tilted 30deg about x: points satisfy z = tan(30)*y.
+        import math as _m
+        t = _m.tan(_m.radians(30.0))
+        pts = [[0, 0, 0], [1, 0, 0], [0, 1, t], [1, 1, t]]
+        _p, n = fit_plane(pts)
+        self.assertGreater(n[2], 0.0)  # oriented upward
+        self.assertAlmostEqual(tilt_deg(n), 30.0, places=4)
+        # Colinear-in-XY points CONVERGE (min-norm): tilt only along the captured
+        # direction, zero perpendicular. Points along +x with rising z -> tilt about y.
+        s = _m.tan(_m.radians(10.0))
+        _pc, nc = fit_plane([[0, 0, 0], [1, 0, s], [2, 0, 2 * s]])
+        self.assertGreater(nc[2], 0.0)
+        self.assertAlmostEqual(tilt_deg(nc), 10.0, places=4)
+        # Flat colinear points -> horizontal plane (no raise).
+        _ph, nh = fit_plane([[0, 0, 0], [1, 0, 0], [2, 0, 0]])
+        self.assertLess(tilt_deg(nh), 1e-6)
+        # All points at the same (x, y) is rejected (no spatial spread).
+        with self.assertRaises(ValueError):
+            fit_plane([[0.1, -0.2, 0.0], [0.1, -0.2, 0.01], [0.1, -0.2, 0.02]])
+        # Fewer than 3 points is rejected.
+        with self.assertRaises(ValueError):
+            fit_plane([[0, 0, 0], [1, 0, 0]])
+
+    def test_user_floor_json_round_trip(self):
+        import os
+        import tempfile
+        from rb_servo_gui import app as gui_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "user_floor.json")
+            os.environ["RB_GUI_USER_FLOOR_PATH"] = path
+            try:
+                state = {
+                    "points": [
+                        {"arm": "left", "p": [0.1, -0.2, 0.0]},
+                        {"arm": "right", "p": [-0.1, -0.3, 0.005]},
+                        {"arm": "left", "p": [0.0, -0.25, 0.002]},
+                    ],
+                    "plane": {"point": [0.0, -0.25, 0.002], "normal": [0.0, 0.1, 0.995]},
+                    "margin_mm": 1.5,
+                    "enabled": True,
+                }
+                ok, _ = gui_app._save_user_floor(state)
+                self.assertTrue(ok)
+                loaded = gui_app._load_user_floor()
+                self.assertEqual(len(loaded["points"]), 3)
+                self.assertEqual(loaded["points"][0]["arm"], "left")
+                self.assertTrue(loaded["enabled"])
+                self.assertAlmostEqual(loaded["margin_mm"], 1.5)
+                self.assertIsNotNone(loaded["plane"])
+            finally:
+                os.environ.pop("RB_GUI_USER_FLOOR_PATH", None)
+
+    def test_state_snapshot_parses_user_floor_constraint(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        uf = {
+            "enabled": True,
+            "monitor_only": False,
+            "point_m": [0.0, -0.25, 0.0],
+            "normal": [0.0, 0.0, 1.0],
+            "margin_m": 0.0,
+            "left": {"checked": True, "violated": False, "signed_dist_m": 0.12,
+                     "lowest_point": "tcp", "lowest_point_m": [0.1, -0.2, 0.12]},
+            "right": {"checked": True, "violated": True, "signed_dist_m": -0.01,
+                      "lowest_point": "gripper_tip_a_yp", "lowest_point_m": [-0.1, -0.2, -0.01]},
+            "clamp_count": 2,
+            "last_set_reject_reason": None,
+        }
+        snap = StateSnapshot.parse(sample_state(user_floor_constraint=uf))
+        self.assertIsNotNone(snap)
+        self.assertTrue(snap.user_floor_constraint["enabled"])
+        text = _format_user_floor_constraint_status(snap, stale=False)
+        self.assertIn("VIOLATED(right)", text)
+        # Disabled / absent -> "off" / "no state".
+        off = StateSnapshot.parse(sample_state(user_floor_constraint={"enabled": False}))
+        self.assertEqual(_format_user_floor_constraint_status(off, stale=False), "user floor: off")
+        absent = StateSnapshot.parse(sample_state())
+        self.assertIsNone(absent.user_floor_constraint)
+        self.assertEqual(
+            _format_user_floor_constraint_status(absent, stale=False), "user floor: off")
 
     def test_build_freedrive_per_arm_packet(self):
         client = CommandClient(host="127.0.0.1", port=0, source_id="rb_gui_test")

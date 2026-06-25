@@ -113,7 +113,7 @@ safety:
     max_accel_deg_s2:    [150, 150, 150, 250, 250, 350]
   floor_constraint:
     enable: true
-    z_min_m: 0.0095
+    z_min_m: 0.0000
     runtime_min_z_m: -0.2
     runtime_max_z_m: 0.5
     fail_policy: clamp_hold
@@ -159,6 +159,26 @@ safety:
       - { name: gripper_tip_a_yn, offset_m: [ 0.059, -0.012, 0.0 ] }
       - { name: gripper_tip_b_yp, offset_m: [-0.059,  0.012, 0.0 ] }
       - { name: gripper_tip_b_yn, offset_m: [-0.059, -0.012, 0.0 ] }
+  # User-defined TILTED floor plane (viser "User Safety Floor"). enable=true라야
+  # viser Send가 허용된다(서버가 enabled 보고). 초기 평면은 비워둠(has_initial_plane
+  # false) → viser에서 양팔 접촉점 ≥3 캡처 후 Fit & Apply 하기 전까지는 inert.
+  # 런타임 SetUserSafetyFloorPlane은 검증됨: 단위 법선 + max_tilt_deg 이내(n.z>0) +
+  # point z ∈ [runtime_min/max_point_z_m] + margin ∈ [0, max_margin_m].
+  # stand floor와 독립·가법(둘 다 켜지면 더 엄격한 쪽이 이긴다).
+  # tcp_offset_points 없음(의도적): viser 캡처가 측정 TCP 원점(tcp_actual_stand,
+  # freedrive 추종)을 쓰므로 enforce도 TCP 원점 기준이어야 캡처-집행이 같은 공간에
+  # 있다. 팁이 바닥 닿을 때의 TCP 원점 자취 = 평면 → "TCP 원점이 평면 위" = "팁이
+  # 실제 바닥 위". 팁 자체의 수평 backstop은 stand floor가 계속 담당.
+  user_floor_constraint:
+    enable: true
+    max_tilt_deg: 35.0
+    runtime_min_point_z_m: -0.2
+    runtime_max_point_z_m: 0.5
+    max_margin_m: 0.2
+    fail_policy: clamp_hold
+    monitor_only: false
+    a_brake_m_s2: 3.0
+    d_slow_m: 0.06
   self_collision:
     enable: true
     fail_policy: clamp_hold
@@ -203,6 +223,40 @@ safety:
       #       size_m: [0.07, 0.10, 0.04], xyz_m: [0.0, 0.05, 0.05], rpy: [0,0,0] }
       #   - { name: work_table, shape: box, parent_frame: stand,
       #       size_m: [1.2, 0.8, 0.04], xyz_m: [0.0, -0.2, 0.0], rpy: [0,0,0] }
+      # WHOLE-ARM floor: a large thin static box (world frame) so the SAME mesh
+      # barrier that guards arm<->arm / arm<->stand also keeps EVERY arm link above
+      # the floor (floor_constraint only checks the TCP + offset points, so an
+      # elbow/wrist can dip below it). Top face at z_m == floor_constraint.z_min_m
+      # (the measured table surface), so the two floors agree. The InitMotion planner
+      # avoids this box too.
+      ground_plane:
+        enable: true
+        z_m: 0.0095             # == floor_constraint.z_min_m (real table surface)
+        size_m: [4.0, 4.0]      # lateral extents [Lx, Ly]
+        thickness_m: 0.10
+        parent_frame: world
+
+  # Collision-free InitMotion planner (requires self_collision.enable — the mesh
+  # model is the planner's collision+floor oracle). A ControlMode::InitMotion command
+  # plans a collision-free + floor-safe 12-DOF (both arms) RRT-Connect path to the
+  # init pose and streams it through the safety gate, so InitMotion REACHES the pose
+  # from any start without self-collision or dipping below the floor (overlapping arm
+  # paths allowed). Fail-closed: planning failure holds. Disabled -> direct JointTarget.
+  init_motion_planner:
+    enable: true
+    max_planning_time_sec: 2.0
+    max_iterations: 20000
+    step_size_rad: 0.20
+    edge_resolution_rad: 0.02
+    goal_bias: 0.10
+    shortcut_passes: 200
+    sample_margin_deg: 30.0
+    collision_margin_m: 0.005
+    seed: 12345
+    waypoint_tol_deg: 1.5
+    max_segment_deg: 5.0
+    execution_lookahead_deg: 25.0   # pure-pursuit: bigger = faster (barrier nets corner cuts)
+    execution_timeout_sec: 30.0     # once started, drive to completion across command staleness (one click); give up after this
 
 network:
   command_bind: "udp://127.0.0.1:50256"
@@ -429,3 +483,8 @@ cartesian_control:
     default_angular_speed_rad_s: 0.2
     constant_orientation_tolerance_rad: 0.005
     default_orientation_mode: constant
+    # Collision-free MoveL (requires safety.init_motion_planner.enable): run the exact
+    # straight path when it is collision/floor-clear, else stream an RRT joint detour to
+    # the IK'd target. One click always reaches the target; reactive barrier is the net.
+    collision_free: true
+    collision_check_samples: 40

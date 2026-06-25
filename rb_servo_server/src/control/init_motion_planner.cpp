@@ -5,7 +5,10 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <random>
+
+#include "rb_servo/math/se3.hpp"
 
 namespace rb_servo {
 namespace {
@@ -76,6 +79,11 @@ struct InitMotionPlanner::Impl {
     double clear_threshold_m = 0.0;  // d_hard + collision_margin
     std::unique_ptr<CollisionMonitor> oracle;
     std::mt19937 rng;
+    // Private IK/FK for collision-free TcpLinearMove (own pinocchio Data; never the
+    // servo loop's kinematics). Null when linear collision-free is unused.
+    std::shared_ptr<IKinematics> kin;
+    ArmMountConfig left_mount{};
+    ArmMountConfig right_mount{};
 
     struct Node {
         Config q;
@@ -83,8 +91,10 @@ struct InitMotionPlanner::Impl {
     };
 
     Impl(CollisionMonitorConfig monitor_cfg, InitMotionPlannerConfig planner_cfg,
-         JointArray qmin, JointArray qmax)
-        : cfg(planner_cfg), q_min_deg(qmin), q_max_deg(qmax), rng(planner_cfg.seed) {
+         JointArray qmin, JointArray qmax,
+         std::shared_ptr<IKinematics> kinematics, ArmMountConfig lmount, ArmMountConfig rmount)
+        : cfg(planner_cfg), q_min_deg(qmin), q_max_deg(qmax), rng(planner_cfg.seed),
+          kin(std::move(kinematics)), left_mount(lmount), right_mount(rmount) {
         clear_threshold_m = monitor_cfg.d_hard_m + cfg.collision_margin_m;
         // Endpoint-only eval: the planner does its own dense edge sampling, so the
         // private oracle must not sweep between arbitrary RRT node checks.
@@ -215,8 +225,11 @@ struct InitMotionPlanner::Impl {
 
 InitMotionPlanner::InitMotionPlanner(CollisionMonitorConfig monitor_cfg,
                                      InitMotionPlannerConfig planner_cfg,
-                                     JointArray q_min_deg, JointArray q_max_deg)
-    : impl_(std::make_unique<Impl>(std::move(monitor_cfg), planner_cfg, q_min_deg, q_max_deg)) {}
+                                     JointArray q_min_deg, JointArray q_max_deg,
+                                     std::shared_ptr<IKinematics> kinematics,
+                                     ArmMountConfig left_mount, ArmMountConfig right_mount)
+    : impl_(std::make_unique<Impl>(std::move(monitor_cfg), planner_cfg, q_min_deg, q_max_deg,
+                                   std::move(kinematics), left_mount, right_mount)) {}
 
 InitMotionPlanner::~InitMotionPlanner() = default;
 
@@ -334,6 +347,97 @@ InitMotionPlanResult InitMotionPlanner::plan(
     result.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
     result.message = "ok";
     return result;
+}
+
+InitMotionLinearResult InitMotionPlanner::planLinearMove(
+    const JointArray& start_left, const JointArray& start_right,
+    bool left_active, const Pose6D& goal_pose_left,
+    bool right_active, const Pose6D& goal_pose_right,
+    bool slerp, int check_samples) {
+    using Clock = std::chrono::steady_clock;
+    const auto t0 = Clock::now();
+    InitMotionLinearResult res;
+    Impl& d = *impl_;
+    res.goal_left = start_left;
+    res.goal_right = start_right;
+    if (!d.kin) {
+        res.message = "linear move: no private kinematics";
+        return res;
+    }
+    if (!left_active && !right_active) {
+        res.message = "linear move: no active arm";
+        return res;
+    }
+
+    // IK the target pose(s) to a joint goal (seeded from start -> nearest branch).
+    if (left_active) {
+        const IkResult ik = d.kin->solveIk(ArmId::Left, goal_pose_left, start_left, d.left_mount);
+        if (!ik.success) {
+            res.message = "linear move: left goal IK failed";
+            return res;
+        }
+        res.goal_left = ik.q_solution_deg;
+    }
+    if (right_active) {
+        const IkResult ik = d.kin->solveIk(ArmId::Right, goal_pose_right, start_right, d.right_mount);
+        if (!ik.success) {
+            res.message = "linear move: right goal IK failed";
+            return res;
+        }
+        res.goal_right = ik.q_solution_deg;
+    }
+
+    // Straight Cartesian-path feasibility: sample the exact MoveL path, per-sample IK
+    // (seeded for joint continuity), oracle-check each combined config. An inactive arm
+    // holds at its start config across the whole path.
+    const Pose6D start_pose_left = left_active
+        ? d.kin->computeTcpStand(ArmId::Left, start_left, d.left_mount) : Pose6D{};
+    const Pose6D start_pose_right = right_active
+        ? d.kin->computeTcpStand(ArmId::Right, start_right, d.right_mount) : Pose6D{};
+    const int n = std::max(1, check_samples);
+    JointArray prev_left = start_left;
+    JointArray prev_right = start_right;
+    bool straight_clear = true;
+    for (int s = 1; s <= n; ++s) {
+        const double frac = static_cast<double>(s) / static_cast<double>(n);
+        JointArray q_left = start_left;
+        JointArray q_right = start_right;
+        if (left_active) {
+            const Pose6D p = math::interpolateLinear(start_pose_left, goal_pose_left, slerp, frac);
+            const IkResult ik = d.kin->solveIk(ArmId::Left, p, prev_left, d.left_mount);
+            if (!ik.success) { straight_clear = false; break; }
+            q_left = ik.q_solution_deg;
+        }
+        if (right_active) {
+            const Pose6D p = math::interpolateLinear(start_pose_right, goal_pose_right, slerp, frac);
+            const IkResult ik = d.kin->solveIk(ArmId::Right, p, prev_right, d.right_mount);
+            if (!ik.success) { straight_clear = false; break; }
+            q_right = ik.q_solution_deg;
+        }
+        if (!d.clear(join(q_left, q_right))) { straight_clear = false; break; }
+        prev_left = q_left;
+        prev_right = q_right;
+    }
+
+    if (straight_clear) {
+        res.decision = InitMotionLinearResult::Decision::Straight;
+        res.message = "straight path clear";
+        res.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
+        return res;
+    }
+
+    // Straight path blocked -> joint-space collision-free detour to the IK'd goal.
+    InitMotionPlanResult plan_res = plan(start_left, start_right, res.goal_left, res.goal_right);
+    res.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
+    if (plan_res.success && !plan_res.waypoints.empty()) {
+        res.decision = InitMotionLinearResult::Decision::Detour;
+        res.waypoints = std::move(plan_res.waypoints);
+        res.message = "detour: " + plan_res.message;
+    } else {
+        res.decision = InitMotionLinearResult::Decision::Failed;
+        res.message = "detour planning failed: " + plan_res.message;
+    }
+    return res;
 }
 
 }  // namespace rb_servo

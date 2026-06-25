@@ -67,12 +67,12 @@ The `rbpodo` backend also serves **controller (`pgmode`) simulation** (`run_mode
 |---|---|---|
 | `JointTarget` / `JointVelocity` | implemented | passthrough / `dq*dt` integration |
 | `TcpPoseTarget` | implemented | IK; MoveJ-like (intermediate TCP path not guaranteed linear) |
-| `TcpLinearMove` | implemented | MoveL, not real-motion-ready; `orientation_mode` `constant`/`slerp` |
+| `TcpLinearMove` | implemented | MoveL, real-motion-ready (used on real); `orientation_mode` `constant`/`slerp`; finite path completes from one click across lease/command lapse |
 | `TcpDelta{Stand,Local}` / `TcpTwist{Stand,Local}` | implemented | debug jog / streaming velocity |
 | `TcpCircleMove` | implemented | benchmark-only, gated by `cartesian_control.circle_move.allow_*` |
 | `TcpCircleTrack` | **stub** | returns `SafetyVerdict::CartesianUnavailable`, reason `tcp_circle_track_not_implemented` (matches the docs' "disabled skeleton") |
 
-Real Cartesian (`TcpPoseTarget` and `TcpTwist*`) is opened by the real-mode gates plus `cartesian_control.allow_in_real: true`, and has been driven on the physical arms via `TcpPoseTarget` (dual-arm slow circle). `TcpLinearMove` remains not real-motion-ready (real mode blocked).
+Real Cartesian execution is no longer run-mode gated (the legacy gate was retired; `cartesian_control.allow_in_real` is now a vestigial telemetry flag, NOT a motion block). `TcpPoseTarget` / `TcpTwist*` / `TcpLinearMove` all compute in every run mode and are exercised on the physical arms (`TcpPoseTarget` dual-arm slow circle; `TcpLinearMove` MoveL with `constant`/`slerp`). Only `TcpCircleMove` stays gated by `cartesian_control.circle_move.allow_in_real` (benchmark-only), and `TcpCircleTrack` is a stub. The mode-independent safety layers (safety filter, floor/ROI/reach, self-collision barrier, tracking-error latch, lease/deadman, E-stop) own real-motion safety.
 
 ## Safety gates (checked in code)
 

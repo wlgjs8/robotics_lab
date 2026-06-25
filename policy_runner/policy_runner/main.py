@@ -936,7 +936,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--rtc-inference-delay",
         type=int,
-        default=0,
+        default=8,
         help="RTC delay d (policy steps guaranteed to execute during inference latency); the first d "
              "actions are hard-frozen to the previous chunk. ~ceil(inference_latency / policy_dt); "
              "clamped to [0, chunk_execute_steps]. Only used with --rtc.",

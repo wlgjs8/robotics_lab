@@ -297,6 +297,36 @@ _FLOOR_PLANE_EDGE_RED = (255, 120, 120)
 _FLOOR_PLANE_DIMENSIONS = (0.8, 0.8, 0.002)
 _FLOOR_PLANE_CENTER_XY = (0.0, -0.28)
 
+# User Safety Floor (safety.user_floor_constraint) visual: a TILTED plane oriented
+# by the fitted normal. Purple when compliant, red on violation. Captured contact
+# points render as a small point cloud (left=cyan, right=magenta) so the operator
+# sees the samples the plane was fit through.
+_USER_FLOOR_PLANE_PURPLE = (150, 90, 220)
+_USER_FLOOR_PLANE_RED = (220, 60, 60)
+_USER_FLOOR_PLANE_DIMENSIONS = (0.8, 0.8, 0.002)
+_USER_FLOOR_POINT_LEFT = (60, 210, 230)
+_USER_FLOOR_POINT_RIGHT = (230, 90, 210)
+
+# Floor/ROI collision check points (safety.floor_constraint.tcp_offset_points):
+# the exact samples the server's floor/ROI guards FK-check against the plane —
+# the TCP point itself plus the configured TCP-frame offset points (PIKA gripper
+# fingertips). Offsets are expressed in the TCP body frame, so the point cloud is
+# parented under /stand/<arm>_tcp and inherits the live TCP pose for free (no
+# per-tick transform math in the GUI). Mirrors the 4-point set in the real stack
+# config (rb_servo_server/config/local/stack_real.yaml: x +/-0.059, y +/-0.012);
+# the leading (0,0,0) is the TCP point. The GUI is a pure network client and the
+# server does not publish these offsets, so they live here as a constant — keep
+# in sync with floor_constraint.tcp_offset_points if the gripper geometry changes.
+# Rendered as orange dots, hidden until the operator enables the GUI toggle.
+_FLOOR_CHECK_POINT_ORANGE = (255, 140, 0)
+_FLOOR_CHECK_POINTS_TCP_FRAME = (
+    (0.0, 0.0, 0.0),        # tcp (the TCP point checked against the floor)
+    (0.059, 0.012, 0.0),    # gripper_tip_a_yp
+    (0.059, -0.012, 0.0),   # gripper_tip_a_yn
+    (-0.059, 0.012, 0.0),   # gripper_tip_b_yp
+    (-0.059, -0.012, 0.0),  # gripper_tip_b_yn
+)
+
 
 # Reachable-workspace OUTER-SHELL surface (tools/reach_envelope.py output): only
 # the farthest reachable points, triangulated into a closed surface and rendered
@@ -707,6 +737,196 @@ def update_floor_plane(scene_handles: dict[str, Any], floor: Mapping[str, Any] |
         )
     else:
         _hide_floor_plane_outline(scene_handles)
+
+
+def _add_floor_check_points(server: Any, handles: dict[str, Any]) -> None:
+    """Per-arm orange point cloud of the floor/ROI collision check samples
+    (TCP point + configured TCP-frame offset points). Parented under each
+    /stand/<arm>_tcp frame so the points ride the live TCP pose; hidden until
+    the GUI toggle enables them. Static local geometry — only visibility ever
+    changes after setup."""
+    if not hasattr(server.scene, "add_point_cloud"):
+        return
+    import numpy as np
+
+    pts = np.asarray(_FLOOR_CHECK_POINTS_TCP_FRAME, dtype=np.float32)
+    col = np.tile(np.asarray(_FLOOR_CHECK_POINT_ORANGE, dtype=np.uint8), (pts.shape[0], 1))
+    for arm in ("left", "right"):
+        try:
+            handles[f"{arm}_floor_check_points"] = server.scene.add_point_cloud(
+                f"/stand/{arm}_tcp/floor_check_points",
+                points=pts,
+                colors=col,
+                point_size=0.006,
+                point_shape="circle",
+                visible=False,
+            )
+        except Exception as exc:
+            handles[f"{arm}_floor_check_points_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def update_floor_check_points(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
+    """Show/hide the per-arm floor-check point clouds (GUI toggle).
+
+    Each arm's points appear only when that arm has a valid actual TCP pose (the
+    same gate the TCP frame itself uses), so stale orange dots never linger where
+    FK is unavailable. The clouds are children of /stand/<arm>_tcp, so they track
+    the TCP pose without any per-tick repositioning here."""
+    if not isinstance(scene_handles, dict):
+        return
+    for arm in ("left", "right"):
+        handle = scene_handles.get(f"{arm}_floor_check_points")
+        if handle is None:
+            continue
+        arm_state = getattr(latest, arm, None) if latest is not None else None
+        actual_pose = None
+        if arm_state is not None:
+            actual_pose = getattr(arm_state, "tcp_actual_stand", None) or getattr(arm_state, "tcp_stand", None)
+        has_tcp = bool(
+            arm_state is not None
+            and getattr(arm_state, "tcp_actual_valid", False)
+            and actual_pose is not None
+            and not getattr(arm_state, "tcp_deferred", True)
+        )
+        _set_visible(handle, bool(show) and has_tcp)
+
+
+def _wxyz_from_normal(normal: Any) -> tuple[float, float, float, float]:
+    """Quaternion (w, x, y, z) rotating local +z onto the given (upward) normal,
+    so a thin box rendered flat in its local z appears as the tilted plane."""
+    import numpy as np
+
+    n = np.asarray(normal, dtype=float)
+    nn = float(np.linalg.norm(n))
+    if nn < 1e-9:
+        return (1.0, 0.0, 0.0, 0.0)
+    n = n / nn
+    c = float(np.clip(n[2], -1.0, 1.0))  # dot(+z, n)
+    if c > 1.0 - 1e-9:
+        return (1.0, 0.0, 0.0, 0.0)  # already +z
+    if c < -1.0 + 1e-9:
+        return (0.0, 1.0, 0.0, 0.0)  # 180deg about x (n.z > 0 makes this unreachable)
+    axis = np.cross(np.array([0.0, 0.0, 1.0]), n)
+    axis = axis / float(np.linalg.norm(axis))
+    angle = math.acos(c)
+    s = math.sin(angle / 2.0)
+    return (math.cos(angle / 2.0), float(axis[0] * s), float(axis[1] * s), float(axis[2] * s))
+
+
+def _add_user_floor_plane(server: Any, handles: dict[str, Any]) -> None:
+    """User Safety Floor visual: a tilted translucent plane + captured-point cloud.
+    Hidden until update_user_floor_plane reports the constraint enabled."""
+    try:
+        if hasattr(server.scene, "add_box"):
+            try:
+                handles["user_floor_plane"] = server.scene.add_box(
+                    "/stand/user_floor_plane",
+                    dimensions=_USER_FLOOR_PLANE_DIMENSIONS,
+                    color=_USER_FLOOR_PLANE_PURPLE,
+                    opacity=0.25,
+                    side="back",
+                    position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
+                    visible=False,
+                )
+            except TypeError:  # older viser without opacity/side support
+                handles["user_floor_plane"] = server.scene.add_box(
+                    "/stand/user_floor_plane",
+                    dimensions=_USER_FLOOR_PLANE_DIMENSIONS,
+                    color=_USER_FLOOR_PLANE_PURPLE,
+                    position=(*_FLOOR_PLANE_CENTER_XY, 0.0),
+                    visible=False,
+                )
+    except Exception as exc:
+        handles["user_floor_plane_error"] = f"{type(exc).__name__}: {exc}"
+    # Captured contact-point markers (point cloud). Starts empty/hidden.
+    try:
+        import numpy as np
+
+        if hasattr(server.scene, "add_point_cloud"):
+            handles["user_floor_points"] = server.scene.add_point_cloud(
+                "/stand/user_floor_points",
+                points=np.zeros((1, 3), dtype=np.float32),
+                colors=np.array([_USER_FLOOR_POINT_LEFT], dtype=np.uint8),
+                point_size=0.012,
+                visible=False,
+            )
+    except Exception as exc:
+        handles["user_floor_points_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def update_user_floor_plane(
+    scene_handles: dict[str, Any], user_floor: Mapping[str, Any] | None
+) -> None:
+    """Move/orient/recolor the user floor plane from the published
+    user_floor_constraint block (point_m + normal + per-arm violated)."""
+    plane = scene_handles.get("user_floor_plane") if isinstance(scene_handles, dict) else None
+    if plane is None:
+        return
+    if not isinstance(user_floor, Mapping) or not bool(user_floor.get("enabled", False)):
+        _set_visible(plane, False)
+        return
+    point = user_floor.get("point_m")
+    normal = user_floor.get("normal")
+    if (
+        not isinstance(point, (list, tuple)) or len(point) != 3
+        or not isinstance(normal, (list, tuple)) or len(normal) != 3
+    ):
+        _set_visible(plane, False)
+        return
+    try:
+        pos = tuple(float(v) for v in point)
+        if not all(math.isfinite(v) for v in pos):
+            _set_visible(plane, False)
+            return
+        plane.position = pos
+        plane.wxyz = _wxyz_from_normal(normal)
+    except Exception:
+        pass
+    violated = any(
+        isinstance(user_floor.get(key), Mapping) and bool(user_floor[key].get("violated", False))
+        for key in ("left", "right")
+    )
+    try:
+        plane.color = _USER_FLOOR_PLANE_RED if violated else _USER_FLOOR_PLANE_PURPLE
+    except Exception:
+        pass
+    _set_visible(plane, True)
+
+
+def update_user_floor_capture_points(
+    scene_handles: dict[str, Any], points: Any
+) -> None:
+    """Refresh the captured floor-contact point cloud (left=cyan, right=magenta)."""
+    cloud = scene_handles.get("user_floor_points") if isinstance(scene_handles, dict) else None
+    if cloud is None:
+        return
+    import numpy as np
+
+    coords: list[list[float]] = []
+    colors: list[tuple[int, int, int]] = []
+    for entry in points or []:
+        if not isinstance(entry, Mapping):
+            continue
+        p = entry.get("p")
+        if not isinstance(p, (list, tuple)) or len(p) != 3:
+            continue
+        try:
+            xyz = [float(v) for v in p]
+        except (TypeError, ValueError):
+            continue
+        if not all(math.isfinite(v) for v in xyz):
+            continue
+        coords.append(xyz)
+        colors.append(_USER_FLOOR_POINT_RIGHT if entry.get("arm") == "right" else _USER_FLOOR_POINT_LEFT)
+    if not coords:
+        _set_visible(cloud, False)
+        return
+    try:
+        cloud.points = np.asarray(coords, dtype=np.float32)
+        cloud.colors = np.asarray(colors, dtype=np.uint8)
+        _set_visible(cloud, True)
+    except Exception:
+        pass
 
 
 # Stand-frame ROI box (safety.roi_box) visual: a translucent box the TCP must
@@ -1666,7 +1886,9 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         _set_visible(handles.get("circle_overlay_line"), False)
         _set_visible(handles.get("circle_overlay_desired"), False)
         _add_floor_plane(server, handles)
+        _add_floor_check_points(server, handles)
         _add_roi_box(server, handles)
+        _add_user_floor_plane(server, handles)
         _add_reachability_cloud(server, handles)
         _add_ik_infeasible_region(server, handles)
         _add_self_collision_witness_markers(server, handles)

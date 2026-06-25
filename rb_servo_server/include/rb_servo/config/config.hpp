@@ -524,8 +524,25 @@ struct InitMotionPlannerConfig {
     double sample_margin_deg = 30.0;      // per-joint sampling band beyond [start,goal]
     double collision_margin_m = 0.005;    // oracle clearance threshold (extra over d_hard)
     unsigned int seed = 12345;            // RNG seed (reproducible plans/tests)
-    double waypoint_tol_deg = 1.5;        // advance to next waypoint within this tol
+    double waypoint_tol_deg = 1.5;        // arrival tolerance at the FINAL waypoint
     double max_segment_deg = 5.0;         // densify so no segment exceeds this per joint
+    // Execution pure-pursuit lookahead: each tick the streamed JointTarget aims at the
+    // farthest planned waypoint within this joint-space chord of the current pose, so
+    // the SMD always sees a large error and runs near max velocity (instead of settling
+    // at every densified waypoint -> stop-and-go crawl). Larger = faster but cuts path
+    // corners more (the reactive barrier nets any cut into a keep-out); smaller hugs the
+    // planned path. ~25 deg saturates the default joint_target_smd profile.
+    double execution_lookahead_deg = 25.0;
+    // InitMotion is a one-shot command but the move can outlast the command's
+    // freshness window (timeout_sec). Once a plan starts executing the server keeps
+    // driving it to completion EVEN IF the one-shot command goes stale (deadman
+    // synthesises a Hold) — a brief barrier pause is fine, the move still finishes
+    // from a single click. An explicit operator command (Hold/Disarm/E-stop/new
+    // motion) still cancels immediately, and the per-tick safety gate stays active.
+    // This is the runaway bound: if the sequence has not finished within this many
+    // seconds it gives up (Failed -> hold), so a permanently barrier-blocked corner
+    // cannot hold motion authority forever.
+    double execution_timeout_sec = 30.0;
 };
 
 struct SafetyConfig {
@@ -672,6 +689,16 @@ struct LinearMoveConfig {
     double default_angular_speed_rad_s = 0.2;
     double constant_orientation_tolerance_rad = 0.005;
     LinearMoveOrientationMode default_orientation_mode = LinearMoveOrientationMode::Constant;
+    // Collision-free MoveL (requires safety.init_motion_planner.enable — reuses its
+    // planner + private collision/floor oracle + a private IK). When true, a
+    // TcpLinearMove first checks whether the straight Cartesian path is collision- and
+    // floor-clear: if so it runs the exact straight MoveL (orientation constant/slerp
+    // preserved); if the straight path would collide it falls back to a collision-free
+    // joint-space detour (RRT-Connect) to the IK'd target and streams that, so the move
+    // still reaches the target without self-collision or crossing a safety plane.
+    // Default off (strict straight MoveL, guarded only by the reactive barrier).
+    bool collision_free = false;
+    int collision_check_samples = 40;  // dense samples along the straight path for the precheck
 };
 
 struct CircleMoveConfig {

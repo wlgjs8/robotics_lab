@@ -108,6 +108,10 @@ enum class ControlMode {
     EmergencyStop,
     ResetFault,
     SetSafetyFloorZ,
+    // Leaseless runtime enable/disable of the stand-frame floor plane
+    // (safety.floor_constraint). Only effective when the floor is opted in at config
+    // (floor_constraint.enable=true); it toggles whether that floor is enforced.
+    SetSafetyFloorEnabled,
     // Leaseless runtime adjustment of the stand-frame ROI box bounds
     // (safety.roi_box), bounded server-side to the configured runtime envelope.
     SetSafetyRoiBounds,
@@ -549,6 +553,10 @@ struct DualArmCommand {
     // SetSafetyFloorZ payload: requested stand-frame floor plane height (meters).
     double floor_z_m = 0.0;
     bool has_floor_z = false;
+
+    // SetSafetyFloorEnabled payload: runtime enforce on/off for the stand floor.
+    bool floor_enabled = false;
+    bool has_floor_enabled = false;
 
     // SetSafetyRoiBounds payload (top-level: the ROI box is global, not per-arm):
     // requested stand-frame axis-aligned box bounds [min, max] in meters.

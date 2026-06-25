@@ -19,6 +19,11 @@ policy_runner/imitation_experiments.py
 policy_runner/main.py
 policy_runner/ml_preflight.py
 policy_runner/openpi_remote.py
+policy_runner/pc_action_source.py
+policy_runner/pc_dataset.py
+policy_runner/pc_infer.py
+policy_runner/pc_model.py
+policy_runner/pc_model_b.py
 policy_runner/phase_segmentation.py
 policy_runner/recording.py
 policy_runner/robot_state_client.py
@@ -70,6 +75,7 @@ tests/test_hdf5_viewer.py
 tests/test_master_arm_joint.py
 tests/test_openpi_remote_fisheye.py
 tests/test_openpi_remote_rtc.py
+tests/test_openpi_remote_velproprio.py
 tests/test_phase_metrics.py
 tests/test_policy_rollout_modes.py
 tests/test_policy_runner_contract.py

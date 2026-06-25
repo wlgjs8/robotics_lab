@@ -38,6 +38,7 @@ std::string toString(ControlMode mode) {
         case ControlMode::EmergencyStop: return "EmergencyStop";
         case ControlMode::ResetFault: return "ResetFault";
         case ControlMode::SetSafetyFloorZ: return "SetSafetyFloorZ";
+        case ControlMode::SetSafetyFloorEnabled: return "SetSafetyFloorEnabled";
         case ControlMode::SetSafetyRoiBounds: return "SetSafetyRoiBounds";
         case ControlMode::SetUserSafetyFloorPlane: return "SetUserSafetyFloorPlane";
         case ControlMode::Freedrive: return "Freedrive";
@@ -151,6 +152,9 @@ ControlMode controlModeFromString(const std::string& mode) {
     if (m == "emergencystop" || m == "emergency_stop" || m == "estop") return ControlMode::EmergencyStop;
     if (m == "resetfault" || m == "reset_fault" || m == "reset") return ControlMode::ResetFault;
     if (m == "setsafetyfloorz" || m == "set_safety_floor_z") return ControlMode::SetSafetyFloorZ;
+    if (m == "setsafetyfloorenabled" || m == "set_safety_floor_enabled") {
+        return ControlMode::SetSafetyFloorEnabled;
+    }
     if (m == "setsafetyroibounds" || m == "set_safety_roi_bounds") return ControlMode::SetSafetyRoiBounds;
     if (m == "setusersafetyfloorplane" || m == "set_user_safety_floor_plane") {
         return ControlMode::SetUserSafetyFloorPlane;

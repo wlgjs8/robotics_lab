@@ -146,6 +146,27 @@ safety:
   #   #   - { name: tip_a, offset_m: [0.054, 0.0, 0.0] }
   #   #   - { name: tip_b, offset_m: [-0.054, 0.0, 0.0] }
 
+  # User-defined TILTED floor plane (viser "User Safety Floor"), for a physical
+  # floor that is not parallel to the stand z=0 plane. enable=true lets the operator
+  # capture >=3 floor-contact points (both arms) in viser, fit a plane, and enforce
+  # n.(p - point) >= margin. Independent of and additive to floor_constraint. Leave
+  # point_m/normal out to start inert until a SetUserSafetyFloorPlane command arrives.
+  # Runtime requests are bounded: unit normal, tilt <= max_tilt_deg with n.z>0, point
+  # z in [runtime_min/max_point_z_m], margin in [0, max_margin_m].
+  # user_floor_constraint:
+  #   enable: true
+  #   max_tilt_deg: 35.0
+  #   runtime_min_point_z_m: -0.2
+  #   runtime_max_point_z_m: 0.5
+  #   max_margin_m: 0.2
+  #   fail_policy: clamp_hold
+  #   monitor_only: false
+  #   a_brake_m_s2: 4.0
+  #   d_slow_m: 0.05
+  #   # tcp_offset_points: (same gripper-tip points as floor_constraint)
+  #   #   - { name: tip_a, offset_m: [0.054, 0.0, 0.0] }
+  #   #   - { name: tip_b, offset_m: [-0.054, 0.0, 0.0] }
+
   # URDF-mesh self-collision guard (async monitor + shared velocity barrier). See
   # the active local configs for the full mesh block. Two additions enable the
   # collision-free InitMotion feature:

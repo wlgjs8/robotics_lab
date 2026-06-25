@@ -609,8 +609,9 @@ bool isReleaseLeaseModeString(const std::string& mode) {
     return mode == "ReleaseLease" || mode == "release_lease" || mode == "releaselease";
 }
 
-// EmergencyStop, SetSafetyFloorZ, SetSafetyRoiBounds and SetUserSafetyFloorPlane
-// are intentionally leaseless: an operator must be able to stop motion or adjust
+// EmergencyStop, SetSafetyFloorZ, SetSafetyFloorEnabled, SetSafetyRoiBounds and
+// SetUserSafetyFloorPlane are intentionally leaseless: an operator must be able to
+// stop motion or adjust
 // the safety floor / ROI box / user floor plane while another client (e.g.
 // policy_runner) holds the command lease. SetSafetyFloorZ is bounded server-side
 // to safety.floor_constraint.[runtime_min_z_m, runtime_max_z_m]; SetSafetyRoiBounds
@@ -951,6 +952,11 @@ bool CommandServer::parseMessage(
     if (root.contains("floor_z_m")) {
         if (!readOptionalNumber(root, "floor_z_m", &cmd.floor_z_m)) return false;
         cmd.has_floor_z = true;
+    }
+    // SetSafetyFloorEnabled payload (top-level): runtime enforce on/off for the stand floor.
+    if (root.contains("floor_enabled")) {
+        if (!readOptionalBool(root, "floor_enabled", &cmd.floor_enabled)) return false;
+        cmd.has_floor_enabled = true;
     }
 
     // SetSafetyRoiBounds payload (top-level: the ROI box is global). Both
