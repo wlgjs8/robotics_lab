@@ -1,8 +1,9 @@
-"""stereo_worker가 publish하는 pointcloud(ZMQ)를 구독해 stand 프레임으로 변환·보관.
+"""stereo_worker가 publish하는 pointcloud(ZMQ)를 구독해 보관.
 
-stereo_worker(camera_server 컨테이너)가 `stereo.cloud` 토픽으로 카메라 광학 좌표계의
-XYZRGB 클라우드를 PUB한다. 여기서 T_stand_cam을 적용해 stand 프레임으로 옮긴 뒤
-GUI 메인 루프가 viser 씬에 렌더한다. rb_gui는 torch 불필요 — numpy+zmq만.
+stereo_worker(camera_server 컨테이너)가 `stereo.cloud` 토픽으로 **카메라 광학 좌표계**의
+XYZRGB 클라우드를 PUB한다. 여기서는 그대로(카메라 프레임) 저장만 하고, stand 프레임 배치는
+viser 씬에서 `/stereo_cam` 프레임(=T_stand_cam)의 자식으로 렌더해서 처리한다(기즈모 수동
+캘리브레이션 지원). rb_gui는 torch 불필요 — numpy+zmq만.
 
 publish 계약: multipart [topic, header_json{seq,ts_ns,n,frame}, xyz_f32(Nx3), rgb_u8(Nx3)].
 """
@@ -13,10 +14,10 @@ import threading
 import time
 import numpy as np
 
-_DEFAULT_T_STAND_CAM = os.environ.get("RB_GUI_T_STAND_CAM", "/home/plaif/workspace/T_stand_cam.npy")
+DEFAULT_T_STAND_CAM = os.environ.get("RB_GUI_T_STAND_CAM", "/home/plaif/workspace/T_stand_cam.npy")
 
 
-def _load_T_stand_cam(path: str) -> np.ndarray:
+def load_T_stand_cam(path: str = DEFAULT_T_STAND_CAM) -> np.ndarray:
     try:
         T = np.load(path)
         if T.shape == (4, 4):
@@ -26,8 +27,49 @@ def _load_T_stand_cam(path: str) -> np.ndarray:
     return np.eye(4)
 
 
+def save_T_stand_cam(T: np.ndarray, path: str = DEFAULT_T_STAND_CAM) -> tuple[bool, str]:
+    try:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        np.save(path, np.asarray(T, dtype=np.float64))
+        return True, path
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def mat_to_wxyz(R: np.ndarray) -> np.ndarray:
+    m = np.asarray(R, dtype=np.float64)
+    t = np.trace(m)
+    if t > 0:
+        s = np.sqrt(t + 1.0) * 2
+        w, x, y, z = 0.25*s, (m[2,1]-m[1,2])/s, (m[0,2]-m[2,0])/s, (m[1,0]-m[0,1])/s
+    elif m[0,0] > m[1,1] and m[0,0] > m[2,2]:
+        s = np.sqrt(1.0+m[0,0]-m[1,1]-m[2,2])*2
+        w, x, y, z = (m[2,1]-m[1,2])/s, 0.25*s, (m[0,1]+m[1,0])/s, (m[0,2]+m[2,0])/s
+    elif m[1,1] > m[2,2]:
+        s = np.sqrt(1.0+m[1,1]-m[0,0]-m[2,2])*2
+        w, x, y, z = (m[0,2]-m[2,0])/s, (m[0,1]+m[1,0])/s, 0.25*s, (m[1,2]+m[2,1])/s
+    else:
+        s = np.sqrt(1.0+m[2,2]-m[0,0]-m[1,1])*2
+        w, x, y, z = (m[1,0]-m[0,1])/s, (m[0,2]+m[2,0])/s, (m[1,2]+m[2,1])/s, 0.25*s
+    q = np.array([w, x, y, z]); return q/np.linalg.norm(q)
+
+
+def wxyz_to_mat(wxyz) -> np.ndarray:
+    w, x, y, z = np.asarray(wxyz, dtype=np.float64)
+    n = w*w+x*x+y*y+z*z
+    if n < 1e-12:
+        return np.eye(3)
+    w, x, y, z = np.array([w, x, y, z])/np.sqrt(n)
+    return np.array([
+        [1-2*(y*y+z*z), 2*(x*y-z*w),   2*(x*z+y*w)],
+        [2*(x*y+z*w),   1-2*(x*x+z*z), 2*(y*z-x*w)],
+        [2*(x*z-y*w),   2*(y*z+x*w),   1-2*(x*x+y*y)]])
+
+
 class StereoCloudStore:
-    """스레드 안전 최신 클라우드 보관 (stand 프레임 XYZ + RGB)."""
+    """스레드 안전 최신 클라우드 보관 (카메라 프레임 XYZ + RGB)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -42,7 +84,7 @@ class StereoCloudStore:
             self._recv_monotonic = time.monotonic()
 
     def latest(self):
-        """returns (xyz, rgb, seq, age_ms) or None."""
+        """returns (xyz_cam, rgb, seq, age_ms) or None."""
         with self._lock:
             if self._xyz is None:
                 return None
@@ -52,13 +94,10 @@ class StereoCloudStore:
 
 class StereoCloudReceiver:
     def __init__(self, store: StereoCloudStore, endpoint: str = "tcp://127.0.0.1:5601",
-                 topic: str = "stereo.cloud", t_stand_cam_path: str = _DEFAULT_T_STAND_CAM) -> None:
+                 topic: str = "stereo.cloud") -> None:
         self.store = store
         self.endpoint = endpoint
         self.topic = topic
-        self._T = _load_T_stand_cam(t_stand_cam_path)
-        self._R = self._T[:3, :3].astype(np.float32)
-        self._t = self._T[:3, 3].astype(np.float32)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -99,11 +138,10 @@ class StereoCloudReceiver:
                 n = int(meta.get("n", 0))
                 if n <= 0:
                     continue
-                xyz_cam = np.frombuffer(xyz_b, dtype=np.float32).reshape(n, 3)
+                xyz = np.frombuffer(xyz_b, dtype=np.float32).reshape(n, 3)
                 rgb = np.frombuffer(rgb_b, dtype=np.uint8).reshape(n, 3)
-                xyz_stand = xyz_cam @ self._R.T + self._t  # camera -> stand
-                self.store.update(np.ascontiguousarray(xyz_stand),
-                                  np.ascontiguousarray(rgb), int(meta.get("seq", -1)))
+                self.store.update(np.ascontiguousarray(xyz), np.ascontiguousarray(rgb),
+                                  int(meta.get("seq", -1)))
             except Exception:
                 continue
         sock.close(linger=0)

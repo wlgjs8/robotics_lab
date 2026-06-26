@@ -52,6 +52,15 @@ class CloudPublisher:
                                    np.ascontiguousarray(xyz, np.float32).tobytes(),
                                    np.ascontiguousarray(rgb, np.uint8).tobytes()])
 
+    def publish_boxes(self, seq, boxes, frame="stand"):
+        """박스 pose(T_stand_box)를 stereo.boxes 토픽으로 publish (같은 PUB 소켓)."""
+        payload = {"seq": int(seq), "frame": frame, "boxes": [
+            {"T": [float(v) for v in b["T"].flatten()],
+             "dims": [float(v) for v in b["dims"]],
+             "footprint": [float(v) for v in b["footprint"]],
+             "n": int(b["n"])} for b in boxes]}
+        self._sock.send_multipart([b"stereo.boxes", self._json.dumps(payload).encode()])
+
 
 def cmd_run(args):
     import sys
@@ -78,8 +87,18 @@ def cmd_run(args):
     reader = BundleReader(endpoint=BUNDLE_ENDPOINT)
     pub = CloudPublisher(CLOUD_PUB_BIND, CLOUD_TOPIC)
 
+    detector = None
+    if os.environ.get("STEREO_DETECT", "1") != "0":
+        try:
+            from box_detect import BoxDetector
+            detector = BoxDetector(K, baseline, use_icp=os.environ.get("STEREO_DETECT_ICP", "1") != "0")
+            print(f"[run] box detect: ON (icp={detector.use_icp})", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[run] box detect OFF: {e}", flush=True)
+
     seq = 0
     fps_t, fps_n, fps = time.time(), 0, 0.0
+    n_boxes = 0
     warned_rgb = False
     while True:
         frames = reader.poll(want, timeout_ms=500)
@@ -96,11 +115,19 @@ def cmd_run(args):
         if xyz.shape[0] == 0:
             continue  # 유효 점 없음(예: fp16 NaN/범위밖) -> publish/통계 건너뜀
         pub.publish(seq, time.time_ns(), xyz, rgb)
+        if detector is not None:
+            try:
+                boxes = detector.detect(disp)
+                n_boxes = len(boxes)
+                pub.publish_boxes(seq, boxes)
+            except Exception as e:  # noqa: BLE001
+                if seq % 60 == 0:
+                    print(f"[run] detect err: {e}", flush=True)
         seq += 1
         fps_n += 1
         if time.time() - fps_t > 1.0:
             fps = fps_n / (time.time() - fps_t); fps_t = time.time(); fps_n = 0
-            print(f"[run] fps={fps:.1f} cloud_pts={xyz.shape[0]} "
+            print(f"[run] fps={fps:.1f} cloud_pts={xyz.shape[0]} boxes={n_boxes} "
                   f"z[{xyz[:,2].min():.2f},{xyz[:,2].max():.2f}]m", flush=True)
         if args.max_frames and seq >= args.max_frames:
             print(f"[run] reached max_frames={args.max_frames}, exit", flush=True)

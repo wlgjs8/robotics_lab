@@ -48,7 +48,14 @@ from .geometry import (
 )
 from .models import ArmSnapshot, CircleOverlaySnapshot, Pose6D, StateSnapshot
 from .overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
-from .pointcloud_receiver import StereoCloudReceiver, StereoCloudStore
+from .pointcloud_receiver import (
+    StereoCloudReceiver,
+    StereoCloudStore,
+    load_T_stand_cam,
+    save_T_stand_cam,
+    mat_to_wxyz,
+    wxyz_to_mat,
+)
 from .plane_fit import fit_plane, tilt_deg
 from .safety import OperatorSafety, normalize_observed_mode_backend
 from .scene import (
@@ -2962,16 +2969,75 @@ def build_gui(
             handles["packets"] = server.gui.add_text("state packets", initial_value="0 received / 0 invalid", disabled=True)
 
         with _adv_tabs.add_tab("Pointcloud"):
-            handles["pc_enable"] = server.gui.add_checkbox("스테레오 pointcloud 표시", initial_value=False)
+            _pc = _load_gui_settings()
+            handles["pc_enable"] = server.gui.add_checkbox(
+                "스테레오 pointcloud 표시", initial_value=bool(_pc.get("pc_enable", False)))
             handles["pc_size"] = server.gui.add_slider(
-                "point size", min=0.001, max=0.02, step=0.001, initial_value=0.004)
+                "point size", min=0.001, max=0.02, step=0.001,
+                initial_value=float(_pc.get("pc_size", 0.004)))
             handles["pc_max_k"] = server.gui.add_slider(
-                "최대 표시 점수(k)", min=10, max=300, step=10, initial_value=80)
+                "최대 표시 점수(k)", min=10, max=300, step=10,
+                initial_value=int(_pc.get("pc_max_k", 80)))
+            handles["pc_dmin"] = server.gui.add_slider(
+                "depth min (m)", min=0.1, max=4.0, step=0.05,
+                initial_value=float(_pc.get("pc_dmin", 0.2)))
+            handles["pc_dmax"] = server.gui.add_slider(
+                "depth max (m)", min=0.1, max=4.0, step=0.05,
+                initial_value=float(_pc.get("pc_dmax", 3.0)))
             handles["pc_status"] = server.gui.add_text(
                 "pointcloud status", initial_value="off", disabled=True)
+            # 설정 영속화: 변경 시 settings.json에 저장 (재시작 후에도 유지)
+            for _k in ("pc_enable", "pc_size", "pc_max_k", "pc_dmin", "pc_dmax"):
+                handles[_k].on_update(lambda _evt: _persist_pc_settings(handles))
+
+            with server.gui.add_folder("수동 캘리브레이션 (T_stand_cam)", expand_by_default=False):
+                handles["pc_calib_mode"] = server.gui.add_checkbox("캘리브레이션 모드(기즈모)", initial_value=False)
+                handles["pc_calib_save"] = server.gui.add_button("💾 캘리브레이션 저장")
+                handles["pc_calib_reset"] = server.gui.add_button("↩ 저장값으로 리셋")
+                handles["pc_calib_status"] = server.gui.add_text(
+                    "calib pose", initial_value="(기즈모로 URDF 로봇팔과 정렬 후 저장)", disabled=True)
+
+            # 클라우드 부모 프레임(=T_stand_cam) + 캘리브용 기즈모 (씬 노드)
+            T0 = load_T_stand_cam()
+            handles["_T_stand_cam_init"] = T0
+            handles["pc_cam_frame"] = server.scene.add_frame(
+                "/stereo_cam", show_axes=False,
+                wxyz=tuple(mat_to_wxyz(T0[:3, :3])), position=tuple(T0[:3, 3]))
+            handles["pc_cam_gizmo"] = server.scene.add_transform_controls(
+                "/stereo_cam_gizmo", scale=0.3, line_width=2.5, depth_test=False, visible=False,
+                wxyz=tuple(mat_to_wxyz(T0[:3, :3])), position=tuple(T0[:3, 3]))
+
+            @handles["pc_calib_save"].on_click
+            def _(_evt) -> None:
+                import numpy as np
+                g = handles["pc_cam_gizmo"]
+                T = np.eye(4); T[:3, :3] = wxyz_to_mat(g.wxyz); T[:3, 3] = np.array(g.position)
+                ok, msg = save_T_stand_cam(T)
+                handles["pc_calib_status"].value = (f"✅ 저장: {msg}" if ok else f"❌ {msg}")
+
+            @handles["pc_calib_reset"].on_click
+            def _(_evt) -> None:
+                T = load_T_stand_cam()
+                for h in (handles["pc_cam_gizmo"], handles["pc_cam_frame"]):
+                    h.wxyz = tuple(mat_to_wxyz(T[:3, :3])); h.position = tuple(T[:3, 3])
+                handles["pc_calib_status"].value = "저장값으로 리셋됨"
 
     handles["_server"] = server
     return handles
+
+
+def _persist_pc_settings(handles: dict[str, Any]) -> None:
+    """Pointcloud 표시 설정을 settings.json에 병합 저장 (재시작 후 유지)."""
+    try:
+        s = _load_gui_settings()
+        s["pc_enable"] = bool(handles["pc_enable"].value)
+        s["pc_size"] = float(handles["pc_size"].value)
+        s["pc_max_k"] = int(handles["pc_max_k"].value)
+        s["pc_dmin"] = float(handles["pc_dmin"].value)
+        s["pc_dmax"] = float(handles["pc_dmax"].value)
+        _save_gui_settings(s)
+    except Exception:
+        pass
 
 
 def _latest_circle_overlay(
@@ -3303,7 +3369,9 @@ def _update_lease_owner(
 
 
 def _update_stereo_cloud(handles: dict[str, Any]) -> None:
-    """stereo_worker 클라우드를 viser 씬(/stand 프레임)에 렌더. 토글 off면 숨김."""
+    """stereo_worker 클라우드를 /stereo_cam(=T_stand_cam) 프레임의 자식으로 렌더.
+    클라우드는 카메라 좌표계 점이고, 부모 프레임이 stand 배치를 담당. 캘리브 모드에선
+    기즈모로 그 프레임을 옮겨 URDF 로봇팔과 정렬한다."""
     import numpy as np
     toggle = handles.get("pc_enable")
     server = handles.get("_server")
@@ -3311,6 +3379,22 @@ def _update_stereo_cloud(handles: dict[str, Any]) -> None:
     status = handles.get("pc_status")
     if toggle is None or server is None or store is None:
         return
+
+    # 캘리브레이션 모드: 기즈모 표시 + 기즈모 pose를 클라우드 부모 프레임에 복사
+    gizmo = handles.get("pc_cam_gizmo")
+    frame = handles.get("pc_cam_frame")
+    calib = handles.get("pc_calib_mode")
+    calib_on = bool(getattr(calib, "value", False))
+    if gizmo is not None:
+        gizmo.visible = calib_on
+        if calib_on and frame is not None:
+            frame.wxyz = gizmo.wxyz
+            frame.position = gizmo.position
+            cs = handles.get("pc_calib_status")
+            if cs is not None:
+                p = np.array(gizmo.position)
+                cs.value = f"xyz=({p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f}) m"
+
     if not toggle.value:
         h = handles.get("pc_handle")
         if h is not None:
@@ -3324,24 +3408,39 @@ def _update_stereo_cloud(handles: dict[str, Any]) -> None:
             status.value = "waiting for stereo_worker (5601)…"
         return
     xyz, rgb, seq, age_ms = data
-    # 새 프레임일 때만 재전송 (10Hz마다 같은 클라우드 재전송 방지)
-    if seq == handles.get("_pc_last_seq") and handles.get("pc_handle") is not None:
+    dmin = float(handles["pc_dmin"].value) if handles.get("pc_dmin") else 0.0
+    dmax = float(handles["pc_dmax"].value) if handles.get("pc_dmax") else 1e9
+    max_pts = int(handles["pc_max_k"].value) * 1000 if handles.get("pc_max_k") else 80000
+    psize = float(handles["pc_size"].value) if handles.get("pc_size") else 0.004
+    # seq/필터/표시값이 모두 그대로면 재전송 생략 (10Hz 중복 방지). 슬라이더 변경 시엔 즉시 갱신.
+    key = (seq, round(dmin, 3), round(dmax, 3), max_pts, round(psize, 4))
+    if key == handles.get("_pc_last_key") and handles.get("pc_handle") is not None:
         handles["pc_handle"].visible = True
+        return
+    # depth(=카메라 z) 범위 밖 점 제거
+    z = xyz[:, 2]
+    m = (z >= dmin) & (z <= dmax)
+    xyz, rgb = xyz[m], rgb[m]
+    if xyz.shape[0] == 0:
+        h = handles.get("pc_handle")
+        if h is not None:
+            h.visible = False
         if status is not None:
-            status.value = f"{xyz.shape[0]} pts, age {age_ms:.0f}ms (seq {seq})"
+            status.value = f"depth {dmin:.2f}~{dmax:.2f}m 범위 내 점 없음"
+        handles["_pc_last_key"] = key
         return
     # 표시 다운샘플 (웹소켓 부하 제한)
-    max_pts = int(handles["pc_max_k"].value) * 1000 if handles.get("pc_max_k") else 80000
-    if xyz.shape[0] > max_pts:
-        idx = np.random.default_rng(seq if seq >= 0 else 0).choice(xyz.shape[0], max_pts, replace=False)
+    n_in = xyz.shape[0]
+    if n_in > max_pts:
+        idx = np.random.default_rng(seq if seq >= 0 else 0).choice(n_in, max_pts, replace=False)
         xyz, rgb = xyz[idx], rgb[idx]
-    psize = float(handles["pc_size"].value) if handles.get("pc_size") else 0.004
+    # /stereo_cam 의 자식 -> 부모 프레임(T_stand_cam)이 stand 배치 적용. 점은 카메라 좌표계.
     handles["pc_handle"] = server.scene.add_point_cloud(
-        "/stand/stereo_cloud", points=xyz.astype(np.float32), colors=rgb.astype(np.uint8),
+        "/stereo_cam/cloud", points=xyz.astype(np.float32), colors=rgb.astype(np.uint8),
         point_size=psize, point_shape="rounded")
-    handles["_pc_last_seq"] = seq
+    handles["_pc_last_key"] = key
     if status is not None:
-        status.value = f"{xyz.shape[0]} pts, age {age_ms:.0f}ms (seq {seq})"
+        status.value = f"{xyz.shape[0]}/{n_in} pts, depth {dmin:.2f}~{dmax:.2f}m, age {age_ms:.0f}ms (seq {seq})"
 
 
 def update_gui(
