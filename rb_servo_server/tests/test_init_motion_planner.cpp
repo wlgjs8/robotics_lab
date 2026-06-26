@@ -244,6 +244,61 @@ static bool run() {
         std::cout << "SKIP (4b/4c): rb3_730e kinematics URDF not found\n";
     }
 
+    // ---- (5) Gradient escape from a near-collision start. Raise a thin ground slab
+    // toward the arms until `init` is JUST near-collision (not clear, but shallow) while
+    // a clear goal still exists. Before the escape, RRT could not extend out of such a
+    // start (tree_start stayed at the root) and planning failed; with the escape the
+    // planner climbs out along increasing clearance and reaches the goal. ----
+    {
+        // A ground slab whose top sits at stand z=0.09 leaves `init` in shallow near-
+        // collision (~4.5 mm, below the clearance gate) while the base-rotated goal
+        // {30,-30,80,...} stays clear. Before the escape the RRT could not extend out of
+        // `init` (tree_start stayed at the root, planning failed); the gradient escape
+        // climbs `init` upward into the clear region, then plans on to the goal.
+        const JointArray esc_goal_l = {30.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+        const JointArray esc_goal_r = {30.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+        CollisionMonitorConfig s = cfg;
+        ExtraCollisionShape box;
+        box.name = "ground_plane";
+        box.shape = "box";
+        box.parent_frame = "stand";
+        box.size_m = {6.0, 6.0, 0.10};
+        box.xyz_m = {0.0, 0.0, 0.09 - 0.05};  // slab top surface at z = 0.09
+        s.extra_collision.push_back(box);
+        InitMotionPlanner p(s, makePlannerConfig(), qmin, qmax);
+
+        const bool init_near = !p.configClear(init, init) &&
+                               p.minClearance(init, init) > 0.0005;  // shallow, positive
+        const bool goal_ok = p.configClear(esc_goal_l, esc_goal_r);
+        if (init_near && goal_ok) {
+            std::cout << "escape scene: start_clear_mm=" << p.minClearance(init, init) * 1000.0
+                      << " goal_clear_mm=" << p.minClearance(esc_goal_l, esc_goal_r) * 1000.0 << "\n";
+            InitMotionPlanResult r = p.plan(init, init, esc_goal_l, esc_goal_r);
+            std::cout << "escape plan: success=" << r.success
+                      << " wps=" << r.waypoints.size() << " (" << r.message << ")\n";
+            RB_CHECK(r.success);
+            RB_CHECK(r.waypoints.size() >= 2);
+            // First waypoint is the (near-collision) start; last reaches the goal.
+            for (int i = 0; i < kDof; ++i) {
+                RB_CHECK(std::abs(r.waypoints.front().first[i] - init[i]) < 1e-6);
+                RB_CHECK(std::abs(r.waypoints.front().second[i] - init[i]) < 1e-6);
+                RB_CHECK(std::abs(r.waypoints.back().first[i] - esc_goal_l[i]) < 1e-6);
+                RB_CHECK(std::abs(r.waypoints.back().second[i] - esc_goal_r[i]) < 1e-6);
+            }
+            // The start really was near-collision (escape was needed); the goal is clear.
+            RB_CHECK(!p.configClear(r.waypoints.front().first, r.waypoints.front().second));
+            RB_CHECK(p.configClear(r.waypoints.back().first, r.waypoints.back().second));
+            // The path crosses from the near-collision region into the clear region.
+            bool became_clear = false;
+            for (const auto& w : r.waypoints) {
+                if (p.configClear(w.first, w.second)) { became_clear = true; break; }
+            }
+            RB_CHECK(became_clear);
+        } else {
+            std::cout << "SKIP (5): geometry differs; could not stage near-collision start\n";
+        }
+    }
+
     std::cout << "test_init_motion_planner: OK\n";
     return true;
 }

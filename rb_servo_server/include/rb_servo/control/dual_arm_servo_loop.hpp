@@ -394,8 +394,16 @@ private:
         std::future<InitMotionPlanResult> future;
         std::vector<std::pair<JointArray, JointArray>> waypoints;
         std::size_t index = 0;
+        int escape_waypoints = 0;  // leading sub-threshold escape waypoints (follow precisely)
         std::string message;
         uint64_t start_ns = 0;  // steady-clock stamp when this sequence began (runaway bound)
+        // Progress-aware execution timeout: the smallest max-joint distance-to-goal seen so
+        // far and when it last improved. A move that keeps closing on the goal is NOT killed
+        // by the wall-clock budget; a genuine stall (no progress for the stall window) fails
+        // closed FAST instead of holding motion authority for the full budget.
+        double best_dist_deg = 0.0;
+        uint64_t last_progress_ns = 0;
+        uint64_t last_exec_log_ns = 0;  // throttle for the streaming-progress diagnostic
     };
     InitMotionExec init_motion_exec_;
 
@@ -415,6 +423,7 @@ private:
         std::future<InitMotionLinearResult> future;
         std::vector<std::pair<JointArray, JointArray>> waypoints;
         std::size_t index = 0;
+        int escape_waypoints = 0;  // leading sub-threshold escape waypoints (follow precisely)
         std::string message;
         uint64_t start_ns = 0;
     };
@@ -439,7 +448,8 @@ private:
     std::pair<JointArray, JointArray> pursueWaypoints(
         const std::vector<std::pair<JointArray, JointArray>>& waypoints,
         std::size_t& index,
-        bool& done
+        bool& done,
+        int escape_count = 0
     ) const;
     CollisionVerdict last_collision_verdict_{};
     // Floor plane constraint (safety.floor_constraint): runtime-adjustable plane
@@ -539,6 +549,7 @@ PursuitStep pursueWaypointsStep(
     const JointArray& cur_right,
     std::size_t& index,
     double waypoint_tol_deg,
-    double lookahead_deg);
+    double lookahead_deg,
+    int escape_count = 0);
 
 }  // namespace rb_servo

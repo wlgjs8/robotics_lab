@@ -134,11 +134,47 @@ static bool test_degenerate_segment_is_passed() {
     return true;
 }
 
+// The gradient-escape head (leading `escape_count` waypoints) must be followed PRECISELY:
+// lookahead is suppressed so the command is the immediate next waypoint, never a far
+// lookahead node that would cut the corner back toward the obstacle the escape climbs out
+// of. Past the escape, the normal lookahead resumes.
+static bool test_escape_head_followed_precisely() {
+    // 7 nodes along joint0: 0,5,10,...,30.
+    std::vector<WP> w;
+    for (double j0 = 0.0; j0 <= 30.0 + 1e-9; j0 += 5.0) w.push_back(lwp(j0, 0.0));
+    const JointArray cur_l = w.front().first;   // sitting at node 0
+    const JointArray cur_r = w.front().second;
+
+    // No escape: 25 deg lookahead aims far ahead (chord 25 <= 25 -> node 5, j0=25).
+    {
+        std::size_t idx = 0;
+        const PursuitStep s = pursueWaypointsStep(w, cur_l, cur_r, idx, 1.5, 25.0, /*escape=*/0);
+        RB_CHECK(s.left[0] >= 20.0);  // aimed far ahead
+    }
+    // Escape head covers nodes 0..3: the target must be the IMMEDIATE next node (j0=5),
+    // not the far lookahead node.
+    {
+        std::size_t idx = 0;
+        const PursuitStep s = pursueWaypointsStep(w, cur_l, cur_r, idx, 1.5, 25.0, /*escape=*/4);
+        RB_CHECK(std::abs(s.left[0] - 5.0) < 1e-9);
+    }
+    // Once past the escape head (current pose at node 5, escape_count=4), the normal
+    // lookahead resumes and aims far ahead again.
+    {
+        std::size_t idx = 0;
+        const PursuitStep s = pursueWaypointsStep(w, w[5].first, w[5].second, idx, 1.5, 25.0,
+                                                  /*escape=*/4);
+        RB_CHECK(s.left[0] >= w[5].first[0] + 1e-9);  // advanced beyond node 5
+    }
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok = test_projection_advances_past_cut_corner() && ok;
     ok = test_corner_path_reaches_goal_without_stall() && ok;
     ok = test_degenerate_segment_is_passed() && ok;
+    ok = test_escape_head_followed_precisely() && ok;
     if (!ok) {
         std::cerr << "test_init_motion_pursuit: FAILED\n";
         return 1;

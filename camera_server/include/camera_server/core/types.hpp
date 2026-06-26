@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace camera_server {
@@ -29,6 +30,10 @@ struct CameraConfig {
   bool required{true};
   CameraStreamConfig color;
   CameraStreamConfig depth;
+  // RealSense 스테레오 IR 페어 (D435f 등). ir_left=infrared index 1, ir_right=index 2.
+  // Fast-FoundationStereo 입력용. 보통 format "y8".
+  CameraStreamConfig ir_left;
+  CameraStreamConfig ir_right;
 };
 
 struct FrameMeta {
@@ -100,6 +105,17 @@ struct HealthSnapshot {
 
 inline std::string stream_key(const std::string& camera, const std::string& stream) {
   return camera + "." + stream;
+}
+
+// 카메라의 활성 스트림 (이름, 설정) 목록. shm/health/stats/검증 등 열거에 공통 사용한다.
+// (realsense enable / 프레임 라우팅은 스트림 타입이 달라 별도 처리.)
+inline std::vector<std::pair<std::string, CameraStreamConfig>> enabled_streams(const CameraConfig& cam) {
+  std::vector<std::pair<std::string, CameraStreamConfig>> out;
+  if (cam.color.enabled) out.emplace_back("color", cam.color);
+  if (cam.depth.enabled) out.emplace_back("depth", cam.depth);
+  if (cam.ir_left.enabled) out.emplace_back("ir_left", cam.ir_left);
+  if (cam.ir_right.enabled) out.emplace_back("ir_right", cam.ir_right);
+  return out;
 }
 
 }  // namespace camera_server

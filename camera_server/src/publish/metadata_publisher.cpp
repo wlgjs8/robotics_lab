@@ -111,7 +111,8 @@ std::string health_to_json(const HealthSnapshot& h) {
     first_cam = false;
     os << '\"' << esc(cam) << "\":{\"serial\":\"" << esc(h.camera_serial.count(cam) ? h.camera_serial.at(cam) : "")
        << "\",\"connected\":" << (connected ? "true" : "false");
-    for (const auto& suffix : {std::string("color"), std::string("depth")}) {
+    for (const auto& suffix : {std::string("color"), std::string("depth"),
+                               std::string("ir_left"), std::string("ir_right")}) {
       const auto key = stream_key(cam, suffix);
       auto it = h.stream_stats.find(key);
       if (it == h.stream_stats.end()) continue;

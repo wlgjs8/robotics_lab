@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <random>
@@ -127,6 +128,74 @@ struct InitMotionPlanner::Impl {
         return !v.hard_violation &&
                v.self_min_clearance_m > clear_threshold_m &&
                v.external_min_clearance_m > external_clear_threshold_m;
+    }
+
+    // One collision evaluation of a combined config, plus the per-category clearance
+    // gate applied to its verdict (mirrors clear() but lets the caller reuse the verdict
+    // and its min-clearance without re-evaluating).
+    CollisionVerdict eval(const Config& c) {
+        JointArray l{}, r{};
+        split(c, &l, &r);
+        return oracle->evalOnce(l, r);
+    }
+    bool isClear(const CollisionVerdict& v) const {
+        return !v.hard_violation &&
+               v.self_min_clearance_m > clear_threshold_m &&
+               v.external_min_clearance_m > external_clear_threshold_m;
+    }
+
+    // Gradient-ascent escape from a sub-threshold (near-collision) start. The bidirectional
+    // RRT cannot extend out of such a start because every one-step edge is still below the
+    // clearance gate (e.g., a gripper resting a few mm off the floor). Here we step along
+    // the forward-difference gradient of min-clearance, line-searched so clearance STRICTLY
+    // increases each step, until the per-category gate (clear) holds or progress stalls.
+    // Returns start..escaped (>=1 node, last node clear) on success, or empty on failure.
+    // Every emitted node has higher clearance than the previous, so executing the escape
+    // moves the arm monotonically AWAY from the obstacle.
+    std::vector<Config> escapeToClear(const Config& start, double step_deg, int max_steps) {
+        std::vector<Config> path{start};
+        Config cur = start;
+        const double eps = std::max(1e-2, 0.1 * step_deg);  // perturbation, deg
+        for (int it = 0; it < max_steps; ++it) {
+            const CollisionVerdict v0 = eval(cur);
+            if (isClear(v0)) return path;
+            const double c0 = v0.min_clearance_m;
+            // Forward-difference gradient of min-clearance wrt each combined joint.
+            Config grad{};
+            double gnorm = 0.0;
+            for (int k = 0; k < kCombined; ++k) {
+                const int j = k % kDof;
+                Config cp = cur;
+                cp[k] += eps;
+                if (q_max_deg[j] > q_min_deg[j]) cp[k] = std::min(cp[k], q_max_deg[j]);
+                grad[k] = (eval(cp).min_clearance_m - c0) / eps;
+                gnorm += grad[k] * grad[k];
+            }
+            gnorm = std::sqrt(gnorm);
+            if (gnorm < 1e-9) break;  // no ascent direction -> stuck
+            // Line search: step step_deg along the unit gradient, halving until the
+            // min-clearance strictly increases (or the step shrinks below a floor).
+            bool improved = false;
+            double s = step_deg;
+            Config next = cur;
+            for (int ls = 0; ls < 8; ++ls) {
+                next = cur;
+                for (int k = 0; k < kCombined; ++k) {
+                    const int j = k % kDof;
+                    next[k] += grad[k] / gnorm * s;
+                    if (q_max_deg[j] > q_min_deg[j]) {
+                        next[k] = std::clamp(next[k], q_min_deg[j], q_max_deg[j]);
+                    }
+                }
+                if (eval(next).min_clearance_m > c0 + 1e-9) { improved = true; break; }
+                s *= 0.5;
+                if (s < 1e-2) break;
+            }
+            if (!improved) break;  // cannot climb further
+            cur = next;
+            path.push_back(cur);
+        }
+        return isClear(eval(cur)) ? path : std::vector<Config>{};
     }
 
     // Validate the open segment (from, to]; the `from` endpoint is intentionally
@@ -289,14 +358,43 @@ InitMotionPlanResult InitMotionPlanner::plan(
 
     const double step_deg = std::max(1e-3, d.cfg.step_size_rad * kRadToDeg);
 
-    // Per-joint sampling band: [min(start,goal) - margin, max(start,goal) + margin]
+    // Gradient escape: if the START pose is below the clearance gate (e.g., a gripper
+    // resting a few mm off the floor after teleop), the bidirectional RRT cannot extend
+    // out of it (every one-step edge is still sub-threshold). Climb along increasing
+    // min-clearance until clear, then plan the rest from there; the escape segment (which
+    // moves strictly AWAY from the obstacle) is prepended to the path below.
+    std::vector<Config> escape_prefix;
+    Config rrt_start = start;
+    if (!d.clear(start)) {
+        escape_prefix = d.escapeToClear(start, step_deg, /*max_steps=*/40);
+        if (escape_prefix.size() < 2 || !d.clear(escape_prefix.back())) {
+            std::ostringstream m;
+            m << "init motion plan: start in near-collision and gradient escape failed"
+              << " (start_clear_m=" << d.minClearance(start)
+              << ", escaped_clear_m="
+              << (escape_prefix.empty() ? d.minClearance(start)
+                                        : d.minClearance(escape_prefix.back()))
+              << ", escape_steps=" << (escape_prefix.empty() ? 0 : escape_prefix.size() - 1)
+              << ", thresh_self_m=" << d.clear_threshold_m
+              << ", thresh_ext_m=" << d.external_clear_threshold_m << ")";
+            result.message = m.str();
+            return result;
+        }
+        rrt_start = escape_prefix.back();
+        std::cerr << "[INFO] InitMotion: start near-collision (clear_m="
+                  << d.minClearance(start) << "); gradient-escaped in "
+                  << (escape_prefix.size() - 1) << " step(s) to clear_m="
+                  << d.minClearance(rrt_start) << "\n";
+    }
+
+    // Per-joint sampling band: [min(rrt_start,goal) - margin, max(rrt_start,goal) + margin]
     // clamped to the configured joint limits — keeps planning fast and avoids the
     // full +/-360 rbpodo range.
     Config lo{}, hi{};
     for (int k = 0; k < kCombined; ++k) {
         const int j = k % kDof;
-        const double a = std::min(start[k], goal[k]) - d.cfg.sample_margin_deg;
-        const double b = std::max(start[k], goal[k]) + d.cfg.sample_margin_deg;
+        const double a = std::min(rrt_start[k], goal[k]) - d.cfg.sample_margin_deg;
+        const double b = std::max(rrt_start[k], goal[k]) + d.cfg.sample_margin_deg;
         lo[k] = (d.q_max_deg[j] > d.q_min_deg[j]) ? std::max(a, d.q_min_deg[j]) : a;
         hi[k] = (d.q_max_deg[j] > d.q_min_deg[j]) ? std::min(b, d.q_max_deg[j]) : b;
         if (hi[k] < lo[k]) std::swap(hi[k], lo[k]);
@@ -305,12 +403,12 @@ InitMotionPlanResult InitMotionPlanner::plan(
     std::vector<Config> raw;
 
     // Fast path: the straight joint-space edge is already collision-free.
-    if (d.edgeClear(start, goal)) {
-        raw = {start, goal};
+    if (d.edgeClear(rrt_start, goal)) {
+        raw = {rrt_start, goal};
     } else {
-        // Bidirectional RRT-Connect. trees[0] rooted at start, trees[1] at goal; the
+        // Bidirectional RRT-Connect. trees[0] rooted at rrt_start, trees[1] at goal; the
         // last-added node of each tree is its connection endpoint on success.
-        std::vector<Impl::Node> tree_a{{start, -1}};
+        std::vector<Impl::Node> tree_a{{rrt_start, -1}};
         std::vector<Impl::Node> tree_b{{goal, -1}};
         std::vector<Impl::Node>* trees[2] = {&tree_a, &tree_b};
         std::uniform_real_distribution<double> u(0.0, 1.0);
@@ -348,7 +446,7 @@ InitMotionPlanResult InitMotionPlanner::plan(
               << " (iters=" << iter << "/" << d.cfg.max_iterations
               << ", time=" << result.planning_time_s << "/" << d.cfg.max_planning_time_sec << "s"
               << ", tree_start=" << tree_a.size() << ", tree_goal=" << tree_b.size()
-              << ", start_clear_m=" << d.minClearance(start)
+              << ", start_clear_m=" << d.minClearance(rrt_start)
               << ", goal_clear_m=" << d.minClearance(goal)
               << ", thresh_m=" << d.clear_threshold_m
               << ", sample_margin_deg=" << d.cfg.sample_margin_deg << ")";
@@ -363,8 +461,22 @@ InitMotionPlanResult InitMotionPlanner::plan(
         raw.insert(raw.end(), goal_path.begin() + 1, goal_path.end());  // drop dup q_new
     }
 
+    // Shortcut the RRT/straight portion FIRST (from rrt_start), then prepend the escape
+    // segment untouched. Doing it in this order keeps the escape prefix exact so its
+    // densified length (the leading waypoints to follow precisely) is known.
     d.shortcut(raw);
+    int escape_waypoints = 0;
+    if (!escape_prefix.empty()) {
+        // Densified length of the escape segment = the leading waypoints of the final
+        // path (densify is segment-local, so the escape head densifies identically).
+        escape_waypoints = static_cast<int>(d.densify(escape_prefix).size());
+        std::vector<Config> combined = std::move(escape_prefix);
+        combined.insert(combined.end(), raw.begin() + 1, raw.end());  // drop dup rrt_start
+        raw = std::move(combined);
+    }
+
     const std::vector<Config> dense = d.densify(raw);
+    result.escape_waypoints = escape_waypoints;
 
     result.waypoints.reserve(dense.size());
     for (const Config& c : dense) {
@@ -485,6 +597,7 @@ InitMotionLinearResult InitMotionPlanner::planLinearMove(
     if (plan_res.success && !plan_res.waypoints.empty()) {
         res.decision = InitMotionLinearResult::Decision::Detour;
         res.waypoints = std::move(plan_res.waypoints);
+        res.escape_waypoints = plan_res.escape_waypoints;
         res.message = "detour: " + plan_res.message;
     } else {
         res.decision = InitMotionLinearResult::Decision::Failed;

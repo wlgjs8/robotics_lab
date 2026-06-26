@@ -120,6 +120,12 @@ AppConfig load_config(const std::string& path) {
       cam.depth.enabled = false;
       cam.depth.format = "z16";
       cam.depth = parse_stream(n["streams"]["depth"], cam.depth);
+      cam.ir_left.enabled = false;
+      cam.ir_left.format = "y8";
+      cam.ir_left = parse_stream(n["streams"]["ir_left"], cam.ir_left);
+      cam.ir_right.enabled = false;
+      cam.ir_right.format = "y8";
+      cam.ir_right = parse_stream(n["streams"]["ir_right"], cam.ir_right);
       cfg.cameras.push_back(cam);
     }
   }
@@ -153,8 +159,10 @@ AppConfig load_config(const std::string& path) {
 std::vector<std::string> required_stream_keys(const AppConfig& cfg) {
   std::vector<std::string> keys;
   for (const auto& cam : cfg.cameras) {
-    if (cam.color.enabled) keys.push_back(stream_key(cam.name, "color"));
-    if (cam.depth.enabled) keys.push_back(stream_key(cam.name, "depth"));
+    for (const auto& [name, scfg] : enabled_streams(cam)) {
+      (void)scfg;
+      keys.push_back(stream_key(cam.name, name));
+    }
   }
   return keys;
 }
@@ -163,8 +171,10 @@ uint64_t required_shared_memory_bytes(const AppConfig& cfg) {
   // Header + stream descriptors + slots. Keep this conservative and aligned.
   uint64_t total = 4096;
   for (const auto& cam : cfg.cameras) {
-    if (cam.color.enabled) total += cfg.shared_memory.ring_slots * (256 + aligned_payload_bytes(cam.color));
-    if (cam.depth.enabled) total += cfg.shared_memory.ring_slots * (256 + aligned_payload_bytes(cam.depth));
+    for (const auto& [name, scfg] : enabled_streams(cam)) {
+      (void)name;
+      total += cfg.shared_memory.ring_slots * (256 + aligned_payload_bytes(scfg));
+    }
   }
   return ((total + 4095) / 4096) * 4096;
 }
@@ -209,6 +219,9 @@ void validate_config(const AppConfig& cfg) {
       if (cam.depth.enabled) {
         throw std::runtime_error("uvc camera " + cam.name + " does not support a depth stream");
       }
+      if (cam.ir_left.enabled || cam.ir_right.enabled) {
+        throw std::runtime_error("uvc camera " + cam.name + " does not support infrared streams");
+      }
     } else {
       if (cam.required && cam.serial.empty()) throw std::runtime_error("required camera " + cam.name + " has empty serial");
       if (is_disallowed_serial_placeholder(cam.serial)) {
@@ -218,13 +231,10 @@ void validate_config(const AppConfig& cfg) {
         throw std::runtime_error("camera " + cam.name + " uses MOCK_* serial but server.simulate_cameras=false");
       }
     }
-    const CameraStreamConfig streams[] = {cam.color, cam.depth};
-    const char* names[] = {"color", "depth"};
-    for (size_t i = 0; i < 2; ++i) {
-      if (!streams[i].enabled) continue;
-      if (streams[i].width <= 0 || streams[i].height <= 0) throw std::runtime_error(cam.name + "." + names[i] + " dimensions must be positive");
-      if (streams[i].fps <= 0) throw std::runtime_error(cam.name + "." + names[i] + " fps must be positive");
-      (void)bytes_per_pixel_for_format(streams[i].format);
+    for (const auto& [name, scfg] : enabled_streams(cam)) {
+      if (scfg.width <= 0 || scfg.height <= 0) throw std::runtime_error(cam.name + "." + name + " dimensions must be positive");
+      if (scfg.fps <= 0) throw std::runtime_error(cam.name + "." + name + " fps must be positive");
+      (void)bytes_per_pixel_for_format(scfg.format);
     }
   }
   const uint64_t configured = cfg.shared_memory.size_mb * 1024ull * 1024ull;

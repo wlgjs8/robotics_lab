@@ -48,6 +48,7 @@ from .geometry import (
 )
 from .models import ArmSnapshot, CircleOverlaySnapshot, Pose6D, StateSnapshot
 from .overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
+from .pointcloud_receiver import StereoCloudReceiver, StereoCloudStore
 from .plane_fit import fit_plane, tilt_deg
 from .safety import OperatorSafety, normalize_observed_mode_backend
 from .scene import (
@@ -2960,6 +2961,16 @@ def build_gui(
             handles["logger"] = server.gui.add_text("logger health", initial_value="unknown", disabled=True)
             handles["packets"] = server.gui.add_text("state packets", initial_value="0 received / 0 invalid", disabled=True)
 
+        with _adv_tabs.add_tab("Pointcloud"):
+            handles["pc_enable"] = server.gui.add_checkbox("스테레오 pointcloud 표시", initial_value=False)
+            handles["pc_size"] = server.gui.add_slider(
+                "point size", min=0.001, max=0.02, step=0.001, initial_value=0.004)
+            handles["pc_max_k"] = server.gui.add_slider(
+                "최대 표시 점수(k)", min=10, max=300, step=10, initial_value=80)
+            handles["pc_status"] = server.gui.add_text(
+                "pointcloud status", initial_value="off", disabled=True)
+
+    handles["_server"] = server
     return handles
 
 
@@ -3291,12 +3302,55 @@ def _update_lease_owner(
         handle.value = f"held by {owner} — stop or release it before the GUI can take control"
 
 
+def _update_stereo_cloud(handles: dict[str, Any]) -> None:
+    """stereo_worker 클라우드를 viser 씬(/stand 프레임)에 렌더. 토글 off면 숨김."""
+    import numpy as np
+    toggle = handles.get("pc_enable")
+    server = handles.get("_server")
+    store = handles.get("_stereo_store")
+    status = handles.get("pc_status")
+    if toggle is None or server is None or store is None:
+        return
+    if not toggle.value:
+        h = handles.get("pc_handle")
+        if h is not None:
+            h.visible = False
+        if status is not None:
+            status.value = "off"
+        return
+    data = store.latest()
+    if data is None:
+        if status is not None:
+            status.value = "waiting for stereo_worker (5601)…"
+        return
+    xyz, rgb, seq, age_ms = data
+    # 새 프레임일 때만 재전송 (10Hz마다 같은 클라우드 재전송 방지)
+    if seq == handles.get("_pc_last_seq") and handles.get("pc_handle") is not None:
+        handles["pc_handle"].visible = True
+        if status is not None:
+            status.value = f"{xyz.shape[0]} pts, age {age_ms:.0f}ms (seq {seq})"
+        return
+    # 표시 다운샘플 (웹소켓 부하 제한)
+    max_pts = int(handles["pc_max_k"].value) * 1000 if handles.get("pc_max_k") else 80000
+    if xyz.shape[0] > max_pts:
+        idx = np.random.default_rng(seq if seq >= 0 else 0).choice(xyz.shape[0], max_pts, replace=False)
+        xyz, rgb = xyz[idx], rgb[idx]
+    psize = float(handles["pc_size"].value) if handles.get("pc_size") else 0.004
+    handles["pc_handle"] = server.scene.add_point_cloud(
+        "/stand/stereo_cloud", points=xyz.astype(np.float32), colors=rgb.astype(np.uint8),
+        point_size=psize, point_shape="rounded")
+    handles["_pc_last_seq"] = seq
+    if status is not None:
+        status.value = f"{xyz.shape[0]} pts, age {age_ms:.0f}ms (seq {seq})"
+
+
 def update_gui(
     handles: dict[str, Any],
     safety: OperatorSafety,
     store: StateStore,
     overlay_store: CircleOverlayStore | None = None,
 ) -> None:
+    _update_stereo_cloud(handles)  # 로봇 상태와 무관 — 항상 갱신
     disabled_states = safety.control_disabled_states()
     disabled_reasons = safety.control_disabled_reasons()
     for mode, button in handles.get("lifecycle_buttons", {}).items():
@@ -3568,6 +3622,116 @@ def update_gui(
     handles["packets"].value = f"{store.received_packets} received / {store.invalid_packets} invalid"
 
 
+_VISER_WASD_PATCH_MARKER = "rb-disable-wasd-keys"
+_VISER_WASD_BUNDLE_MARKER = "rb-wasd-bundle-patched"
+
+
+def _patch_viser_bundle_wasd(html: str) -> str:
+    """Source-level kill of the W/A/S/D camera keys inside viser's client bundle.
+
+    viser embeds its JS bundle zstd-compressed in index.html (`data-c`, decompressed
+    size `data-cs`) and binds keys with hold-event: `new Gg("KeyW",1e3/60)` etc.,
+    listening on `document`. We decompress the bundle, rename ONLY the W/A/S/D key
+    codes to bogus codes (so `event.code` never matches -> the hold never fires),
+    recompress, and re-embed. Q/E (up/down), arrows, and mouse are untouched; 'a' is
+    freed. Same-length renames keep the decompressed size (`data-cs`) valid.
+
+    Best-effort: returns html unchanged if zstandard is unavailable, the binding
+    pattern is absent (already patched / a different viser build), or the round-trip
+    check fails — so we never write a bundle the browser cannot decode."""
+    if _VISER_WASD_BUNDLE_MARKER in html:
+        return html  # already patched; skip the (expensive) decompress
+    try:
+        import base64
+        import re
+
+        import zstandard as zstd
+    except Exception:
+        return html
+    m = re.search(r'data-c="([^"]*)"', html)
+    mcs = re.search(r'data-cs="(\d+)"', html)
+    if not m or not mcs:
+        return html
+    expected = int(mcs.group(1))
+    try:
+        js = (
+            zstd.ZstdDecompressor()
+            .decompress(base64.b64decode(m.group(1)), max_output_size=expected + 64)
+            .decode("utf-8")
+        )
+    except Exception:
+        return html
+    patched = js
+    for code, repl in (("KeyW", "XzzW"), ("KeyA", "XzzA"), ("KeyS", "XzzS"), ("KeyD", "XzzD")):
+        patched = patched.replace(f'"{code}",1e3/60', f'"{repl}",1e3/60')
+    if patched == js:
+        return html  # pattern not found -> nothing to do
+    payload = patched.encode("utf-8")
+    if len(payload) != expected:
+        return html  # size drift guard: never write a bundle that won't fit data-cs
+    new_blob = zstd.ZstdCompressor().compress(payload)
+    try:  # verify the recompressed frame round-trips before committing
+        if zstd.ZstdDecompressor().decompress(new_blob, max_output_size=expected + 64) != payload:
+            return html
+    except Exception:
+        return html
+    new_html = html[: m.start(1)] + base64.b64encode(new_blob).decode("ascii") + html[m.end(1):]
+    # Cheap marker so subsequent launches skip the decompress.
+    return new_html.replace("<head>", "<head><!--" + _VISER_WASD_BUNDLE_MARKER + "-->", 1)
+
+
+def _disable_viser_wasd_keys() -> None:
+    """Disable viser's WASD camera fly-movement (W/A/S/D) in the served client.
+
+    Q/E (up/down), the arrow keys, and mouse drag/zoom are kept; 'a' is freed (it
+    does nothing). viser bakes these key handlers into its frontend bundle with NO
+    Python API to disable them, so we patch the served client index.html two ways:
+      1. Source-level: rename the W/A/S/D hold-event key codes in the JS bundle so
+         the bindings never fire (the robust fix — see _patch_viser_bundle_wasd).
+      2. Fallback: inject a capture-phase key blocker (covers builds where the
+         bundle pattern is absent or zstandard is unavailable).
+
+    Idempotent + best-effort: skipped when already patched, re-applied every launch
+    (survives a viser reinstall / client autobuild), and a missing/read-only client
+    is logged and skipped — never fatal to GUI startup. NOTE: the browser must load
+    the freshly-patched page (a normal reload; hard-refresh if a tab was left open)."""
+    try:
+        import viser
+
+        index = os.path.join(
+            os.path.dirname(os.path.abspath(viser.__file__)), "client", "build", "index.html"
+        )
+        with open(index, "r", encoding="utf-8") as fh:
+            html = fh.read()
+        original = html
+        html = _patch_viser_bundle_wasd(html)
+        if _VISER_WASD_PATCH_MARKER not in html:
+            script = (
+                '<script id="' + _VISER_WASD_PATCH_MARKER + '">'
+                "(function(){var B={KeyW:1,KeyA:1,KeyS:1,KeyD:1};"
+                "function t(e){if(!e)return false;var g=(e.tagName||'').toUpperCase();"
+                "return g==='INPUT'||g==='TEXTAREA'||g==='SELECT'||e.isContentEditable;}"
+                "function b(e){if(!B[e.code]||t(e.target))return;"
+                "e.stopImmediatePropagation();e.preventDefault();}"
+                "window.addEventListener('keydown',b,true);"
+                "window.addEventListener('keyup',b,true);})();</script>"
+            )
+            html = html.replace("<head>", "<head>" + script, 1) if "<head>" in html else script + html
+        if html != original:
+            with open(index, "w", encoding="utf-8") as fh:
+                fh.write(html)
+            print(
+                "rb_servo_gui: disabled viser WASD camera keys (Q/E, arrows, mouse kept; "
+                "reload the GUI page)",
+                flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001 - cosmetic patch must never block GUI startup
+        print(
+            f"rb_servo_gui: could not patch viser WASD keys ({type(exc).__name__}: {exc})",
+            flush=True,
+        )
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     print(format_scene_asset_startup_status(), flush=True)
@@ -3601,6 +3765,11 @@ def main(argv: list[str] | None = None) -> None:
     store = StateStore()
     receiver = StateReceiver(store, host=state_host, port=state_port)
     receiver.start()
+    # 스테레오 pointcloud 워커(camera_server 컨테이너) 구독. 고급→Pointcloud 토글로 표시.
+    stereo_store = StereoCloudStore()
+    stereo_endpoint = os.environ.get("RB_GUI_STEREO_CLOUD_ENDPOINT", "tcp://127.0.0.1:5601")
+    stereo_receiver = StereoCloudReceiver(stereo_store, endpoint=stereo_endpoint)
+    stereo_receiver.start()
     circle_overlay_bind = _circle_overlay_bind_from_args_env(args)
     overlay_store: CircleOverlayStore | None = None
     overlay_receiver: CircleOverlayReceiver | None = None
@@ -3621,7 +3790,13 @@ def main(argv: list[str] | None = None) -> None:
         init_motion_timeout_sec=init_motion_timeout_sec,
     )
     server = viser.ViserServer(host=host, port=port)
+    # viser's WASD camera fly-movement is baked into its client bundle with no
+    # Python toggle; patch the served client to disable W/A/S/D (Q/E, arrows, mouse
+    # kept). Done after ViserServer init (post client-autobuild) and before clients
+    # connect. See _disable_viser_wasd_keys.
+    _disable_viser_wasd_keys()
     handles = build_gui(server, safety, store, overlay_store=overlay_store)
+    handles["_stereo_store"] = stereo_store
     overlay_status = (
         f", circle overlay UDP {circle_overlay_bind[0]}:{circle_overlay_bind[1]}"
         if circle_overlay_bind is not None
@@ -3638,6 +3813,7 @@ def main(argv: list[str] | None = None) -> None:
             time.sleep(0.1)
     finally:
         receiver.stop()
+        stereo_receiver.stop()
         if overlay_receiver is not None:
             overlay_receiver.stop()
 

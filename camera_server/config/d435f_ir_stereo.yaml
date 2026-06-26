@@ -1,0 +1,76 @@
+# D435f head 단독: RGB + IR-left + IR-right (raw depth 미사용).
+# IR 스테레오 페어 -> Fast-FoundationStereo로 disparity 추론 -> RGB매핑 pointcloud.
+# 848x480@30: USB 대역폭 여유 + 모델 권장(width<1000). USB3에서 1280x720도 가능.
+server:
+  name: camera_server
+  mode: capture_only
+  clock: monotonic_raw
+  simulate_cameras: false
+
+shared_memory:
+  name: "/camera_server_frames"
+  size_mb: 1024
+  ring_slots: 4
+  unlink_on_start: true
+
+metadata:
+  transport: zmq_pub
+  pub_bind: "tcp://127.0.0.1:5600"
+  health_topic: "camera.health"
+  bundle_topic: "camera.bundle"
+
+sync:
+  mode: software
+  master_camera: head
+  bundle_policy: nearest_timestamp
+  max_bundle_time_diff_ms: 10.0
+  publish_incomplete_bundles: false
+
+cameras:
+  head:
+    serial: "313522072863"   # D435f
+    required: true
+    streams:
+      color:
+        enabled: true
+        width: 848
+        height: 480
+        fps: 15
+        format: rgb8
+      depth:
+        enabled: false
+        width: 848
+        height: 480
+        fps: 15
+        format: z16
+      ir_left:               # infrared index 1
+        enabled: true
+        width: 848
+        height: 480
+        fps: 15
+        format: y8
+      ir_right:              # infrared index 2
+        enabled: true
+        width: 848
+        height: 480
+        fps: 15
+        format: y8
+
+recording:
+  enabled: false
+  output_dir: "/data/episodes"
+  queue_capacity_frames: 300
+  writer_threads: 4
+  drop_policy: drop_oldest
+  raw_format: true
+
+health:
+  publish_rate_hz: 1
+  warn_if_frame_age_ms_gt: 100
+  warn_if_drop_count_increases: true
+  warn_if_bundle_skew_ms_gt: 10
+
+reconnect:
+  enabled: false
+  max_attempts: 0
+  retry_interval_ms: 1000

@@ -76,8 +76,7 @@ class MockCameraDevice final : public ICameraDevice {
       next += period;
       ++frame_no;
       const uint64_t t = now_ns(clock_);
-      emit_stream("color", cfg_.color, frame_no, t);
-      emit_stream("depth", cfg_.depth, frame_no, t + 100000);
+      for (const auto& [name, scfg] : enabled_streams(cfg_)) emit_stream(name, scfg, frame_no, t);
       std::this_thread::sleep_until(next);
     }
   }
@@ -112,6 +111,14 @@ class RealSenseDevice final : public ICameraDevice {
     }
     if (cfg_.depth.enabled) {
       rs_cfg.enable_stream(RS2_STREAM_DEPTH, cfg_.depth.width, cfg_.depth.height, RS2_FORMAT_Z16, cfg_.depth.fps);
+    }
+    if (cfg_.ir_left.enabled) {
+      rs_cfg.enable_stream(RS2_STREAM_INFRARED, 1, cfg_.ir_left.width, cfg_.ir_left.height,
+                           cfg_.ir_left.format == "y16" ? RS2_FORMAT_Y16 : RS2_FORMAT_Y8, cfg_.ir_left.fps);
+    }
+    if (cfg_.ir_right.enabled) {
+      rs_cfg.enable_stream(RS2_STREAM_INFRARED, 2, cfg_.ir_right.width, cfg_.ir_right.height,
+                           cfg_.ir_right.format == "y16" ? RS2_FORMAT_Y16 : RS2_FORMAT_Y8, cfg_.ir_right.fps);
     }
     pipe_.start(rs_cfg, [this](const rs2::frame& frame) { on_frame(frame); });
   }
@@ -278,11 +285,24 @@ class RealSenseDevice final : public ICameraDevice {
           auto depth = fs.get_depth_frame();
           if (depth) on_video_frame(depth, "depth", cfg_.depth, host_t);
         }
+        if (cfg_.ir_left.enabled) {
+          auto ir = fs.get_infrared_frame(1);
+          if (ir) on_video_frame(ir, "ir_left", cfg_.ir_left, host_t);
+        }
+        if (cfg_.ir_right.enabled) {
+          auto ir = fs.get_infrared_frame(2);
+          if (ir) on_video_frame(ir, "ir_right", cfg_.ir_right, host_t);
+        }
       } else if (auto vf = frame.as<rs2::video_frame>()) {
         const auto profile = vf.get_profile().stream_type();
         const uint64_t host_t = now_ns(clock_);
         if (profile == RS2_STREAM_COLOR && cfg_.color.enabled) on_video_frame(vf, "color", cfg_.color, host_t);
         if (profile == RS2_STREAM_DEPTH && cfg_.depth.enabled) on_video_frame(vf, "depth", cfg_.depth, host_t);
+        if (profile == RS2_STREAM_INFRARED) {
+          const int si = vf.get_profile().stream_index();
+          if (si == 1 && cfg_.ir_left.enabled) on_video_frame(vf, "ir_left", cfg_.ir_left, host_t);
+          else if (si == 2 && cfg_.ir_right.enabled) on_video_frame(vf, "ir_right", cfg_.ir_right, host_t);
+        }
       }
     } catch (const std::exception& e) {
       std::cerr << "[CAM] RealSense callback error for " << cfg_.name << ": " << e.what() << '\n';

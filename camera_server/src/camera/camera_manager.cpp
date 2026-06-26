@@ -15,8 +15,10 @@ CameraManager::CameraManager(const AppConfig& cfg, SharedMemoryRingBuffer& shm, 
       metadata_queue_(std::max<uint32_t>(32, cfg.recording.queue_capacity_frames)) {
   for (const auto& cam : cfg_.cameras) {
     connected_[cam.name] = false;
-    if (cam.color.enabled) stats_[stream_key(cam.name, "color")] = {};
-    if (cam.depth.enabled) stats_[stream_key(cam.name, "depth")] = {};
+    for (const auto& [name, scfg] : enabled_streams(cam)) {
+      (void)scfg;
+      stats_[stream_key(cam.name, name)] = {};
+    }
   }
 }
 CameraManager::~CameraManager() { stop(); }

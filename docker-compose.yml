@@ -18,6 +18,7 @@ services:
       rb-servo.role: "hardware-free-mock-camera"
       rb-servo.hardware: "none"
 
+  # camera_server 단일 컨테이너: C++ 캡처(librealsense) + GPU 스테레오 추론(Fast-FoundationStereo).
   camera_server:
     profiles: ["real_camera"]
     build:
@@ -29,6 +30,14 @@ services:
     shm_size: "2gb"
     network_mode: host
     privileged: true
+    # GPU (스테레오 추론용; Blackwell)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     devices:
       - /dev/bus/usb:/dev/bus/usb
     volumes:
@@ -36,6 +45,9 @@ services:
       - /run/udev:/run/udev:ro
       - ./camera_server/config:/app/config:ro
       - ./camera_server/episodes:/data/episodes
+      # 스테레오 모델 코드/가중치(큰 파일)는 이미지에 굽지 않고 마운트
+      - ./submodules/Fast-FoundationStereo:/app/Fast-FoundationStereo
+      - ./camera_server/stereo_worker:/app/stereo_worker
     environment:
       # Container path; override with CAMERA_CONFIG (see Makefile camera-real-up).
       CAMERA_SERVER_CONFIG: ${CAMERA_CONFIG:-/app/config/triple_realsense.yaml}
@@ -43,10 +55,12 @@ services:
       # capture PC (.40) and this inference PC share identical camera settings.
       # Empty value disables it (falls back to driver defaults).
       CAMERA_SERVER_REALSENSE_JSON: ${CAMERA_REALSENSE_JSON:-/app/config/realsense_d405_advanced.json}
+      FFS_DIR: /app/Fast-FoundationStereo
+      STEREO_WEIGHTS: /app/Fast-FoundationStereo/weights/23-36-37/model_best_bp2_serialize.pth
     command: ["--config", "${CAMERA_CONFIG:-/app/config/triple_realsense.yaml}"]
     labels:
       rb-servo.role: "real-camera"
-      rb-servo.hardware: "realsense"
+      rb-servo.hardware: "realsense+gpu"
 
 networks:
   rb_servo_net:

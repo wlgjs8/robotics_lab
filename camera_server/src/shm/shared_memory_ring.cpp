@@ -99,8 +99,7 @@ void SharedMemoryRingBuffer::create(const AppConfig& cfg) {
 
   uint32_t stream_count = 0;
   for (const auto& cam : cfg.cameras) {
-    if (cam.color.enabled) ++stream_count;
-    if (cam.depth.enabled) ++stream_count;
+    stream_count += static_cast<uint32_t>(enabled_streams(cam).size());
   }
   if (stream_count > shm_layout::kMaxStreams) throw std::runtime_error("too many streams for shm layout");
   header->stream_count = stream_count;
@@ -123,8 +122,7 @@ void SharedMemoryRingBuffer::create(const AppConfig& cfg) {
     cursor += d.slot_bytes * d.slot_count;
   };
   for (const auto& cam : cfg.cameras) {
-    if (cam.color.enabled) add_stream(cam, "color", cam.color);
-    if (cam.depth.enabled) add_stream(cam, "depth", cam.depth);
+    for (const auto& [name, scfg] : enabled_streams(cam)) add_stream(cam, name, scfg);
   }
   if (cursor > size_bytes_) throw std::runtime_error("computed shared memory layout exceeds configured size");
   load_descriptors();

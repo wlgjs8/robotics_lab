@@ -14,6 +14,7 @@ _MISSING_BUNDLE_AGE_US = 2**62
 # (z16) frames; those are skipped in poll() so they don't drop the whole bundle.
 _COLOR_FORMATS = frozenset({"bgr8", "rgb8", "bgra8", "rgba8"})
 _DEPTH_FORMATS = frozenset({"z16", "mono16"})  # opt-in (include_depth); decoded as uint16 (H,W)
+_IR_FORMATS = frozenset({"y8", "mono8"})  # opt-in (include_ir); decoded as uint8 (H,W) IR-left/right
 
 
 def bundle_clock_ns() -> int:
@@ -115,6 +116,7 @@ class CameraBundleClient:
         *,
         max_age_ms: float = 100.0,
         include_depth: bool = False,
+        include_ir: bool = False,
     ):
         try:
             import numpy  # noqa: F401
@@ -147,6 +149,7 @@ class CameraBundleClient:
         self._topic = topic
         self._max_age_ms = float(max_age_ms)
         self._include_depth = bool(include_depth)  # opt-in z16 decode (collection only)
+        self._include_ir = bool(include_ir)  # opt-in y8 IR decode (stereo worker)
         self._shm_cache = _ShmCache()
         self._latest: CameraBundle | None = None
         self._closed = False
@@ -186,7 +189,9 @@ class CameraBundleClient:
             # client decodes color only (UNLESS include_depth: then z16 is kept
             # as a uint16 frame, for collection/RGB-D capture).
             fmt = str(frame_meta.get("format", "")).lower()
-            if fmt not in _COLOR_FORMATS and not (self._include_depth and fmt in _DEPTH_FORMATS):
+            if (fmt not in _COLOR_FORMATS
+                    and not (self._include_depth and fmt in _DEPTH_FORMATS)
+                    and not (self._include_ir and fmt in _IR_FORMATS)):
                 continue
             try:
                 decoded[str(cam_name)] = self._decode_frame(str(cam_name), frame_meta)
@@ -287,6 +292,15 @@ class CameraBundleClient:
             return CameraFrame(
                 camera_name=camera_name, width=width, height=height,
                 pixels=np.ascontiguousarray(depth), format=fmt,
+                frame_number=int(frame_meta.get("frame_number", 0) or 0),
+                host_arrival_time_ns=int(frame_meta.get("host_arrival_time_ns", 0) or 0),
+                sensor_timestamp_ns=int(frame_meta.get("sensor_timestamp_ns", 0) or 0),
+            )
+        if fmt in _IR_FORMATS:  # y8/mono8 -> uint8 (H,W) IR
+            ir = arr.reshape(height, stride)[:, :width]
+            return CameraFrame(
+                camera_name=camera_name, width=width, height=height,
+                pixels=np.ascontiguousarray(ir), format=fmt,
                 frame_number=int(frame_meta.get("frame_number", 0) or 0),
                 host_arrival_time_ns=int(frame_meta.get("host_arrival_time_ns", 0) or 0),
                 sensor_timestamp_ns=int(frame_meta.get("sensor_timestamp_ns", 0) or 0),

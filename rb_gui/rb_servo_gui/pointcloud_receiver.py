@@ -1,0 +1,109 @@
+"""stereo_worker가 publish하는 pointcloud(ZMQ)를 구독해 stand 프레임으로 변환·보관.
+
+stereo_worker(camera_server 컨테이너)가 `stereo.cloud` 토픽으로 카메라 광학 좌표계의
+XYZRGB 클라우드를 PUB한다. 여기서 T_stand_cam을 적용해 stand 프레임으로 옮긴 뒤
+GUI 메인 루프가 viser 씬에 렌더한다. rb_gui는 torch 불필요 — numpy+zmq만.
+
+publish 계약: multipart [topic, header_json{seq,ts_ns,n,frame}, xyz_f32(Nx3), rgb_u8(Nx3)].
+"""
+from __future__ import annotations
+import json
+import os
+import threading
+import time
+import numpy as np
+
+_DEFAULT_T_STAND_CAM = os.environ.get("RB_GUI_T_STAND_CAM", "/home/plaif/workspace/T_stand_cam.npy")
+
+
+def _load_T_stand_cam(path: str) -> np.ndarray:
+    try:
+        T = np.load(path)
+        if T.shape == (4, 4):
+            return T.astype(np.float64)
+    except Exception:
+        pass
+    return np.eye(4)
+
+
+class StereoCloudStore:
+    """스레드 안전 최신 클라우드 보관 (stand 프레임 XYZ + RGB)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._xyz: np.ndarray | None = None
+        self._rgb: np.ndarray | None = None
+        self._seq: int = -1
+        self._recv_monotonic: float = 0.0
+
+    def update(self, xyz: np.ndarray, rgb: np.ndarray, seq: int) -> None:
+        with self._lock:
+            self._xyz, self._rgb, self._seq = xyz, rgb, seq
+            self._recv_monotonic = time.monotonic()
+
+    def latest(self):
+        """returns (xyz, rgb, seq, age_ms) or None."""
+        with self._lock:
+            if self._xyz is None:
+                return None
+            age_ms = (time.monotonic() - self._recv_monotonic) * 1000.0
+            return self._xyz, self._rgb, self._seq, age_ms
+
+
+class StereoCloudReceiver:
+    def __init__(self, store: StereoCloudStore, endpoint: str = "tcp://127.0.0.1:5601",
+                 topic: str = "stereo.cloud", t_stand_cam_path: str = _DEFAULT_T_STAND_CAM) -> None:
+        self.store = store
+        self.endpoint = endpoint
+        self.topic = topic
+        self._T = _load_T_stand_cam(t_stand_cam_path)
+        self._R = self._T[:3, :3].astype(np.float32)
+        self._t = self._T[:3, 3].astype(np.float32)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="rb-gui-stereo-cloud", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        try:
+            import zmq
+        except Exception:
+            print("StereoCloudReceiver: pyzmq 없음 — pointcloud 비활성", flush=True)
+            return
+        ctx = zmq.Context.instance()
+        sock = ctx.socket(zmq.SUB)
+        sock.setsockopt_string(zmq.SUBSCRIBE, self.topic)
+        sock.setsockopt(zmq.RCVHWM, 4)
+        sock.connect(self.endpoint)
+        poller = zmq.Poller()
+        poller.register(sock, zmq.POLLIN)
+        while not self._stop.is_set():
+            if not dict(poller.poll(200)):
+                continue
+            try:
+                parts = sock.recv_multipart()
+                if len(parts) != 4:
+                    continue
+                _topic, header, xyz_b, rgb_b = parts
+                meta = json.loads(header.decode("utf-8", "replace"))
+                n = int(meta.get("n", 0))
+                if n <= 0:
+                    continue
+                xyz_cam = np.frombuffer(xyz_b, dtype=np.float32).reshape(n, 3)
+                rgb = np.frombuffer(rgb_b, dtype=np.uint8).reshape(n, 3)
+                xyz_stand = xyz_cam @ self._R.T + self._t  # camera -> stand
+                self.store.update(np.ascontiguousarray(xyz_stand),
+                                  np.ascontiguousarray(rgb), int(meta.get("seq", -1)))
+            except Exception:
+                continue
+        sock.close(linger=0)

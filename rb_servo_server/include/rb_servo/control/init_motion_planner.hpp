@@ -44,6 +44,10 @@ struct InitMotionPlanResult {
     std::string message;       // human-readable outcome / failure reason
     int iterations = 0;        // RRT iterations consumed
     double planning_time_s = 0.0;
+    // Number of LEADING waypoints that form the gradient-escape segment (when the start
+    // was in near-collision). These are sub-threshold and must be followed precisely (no
+    // pure-pursuit corner-cutting back into the obstacle). 0 when no escape was needed.
+    int escape_waypoints = 0;
 };
 
 // Outcome of a collision-free TcpLinearMove decision.
@@ -56,6 +60,9 @@ struct InitMotionLinearResult {
     std::vector<std::pair<JointArray, JointArray>> waypoints;
     std::string message;
     double planning_time_s = 0.0;
+    // Leading gradient-escape waypoints in `waypoints` (Detour only); see
+    // InitMotionPlanResult::escape_waypoints. 0 when no escape was needed.
+    int escape_waypoints = 0;
     // Max per-joint angle (over both arms) between the start pose and the IK'd goal.
     // ~0 means the requested TCP target is essentially the current pose (e.g., the GUI
     // target marker is following current TCP) -> the move is a near no-op. Diagnostic.

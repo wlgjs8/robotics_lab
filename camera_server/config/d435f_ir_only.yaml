@@ -1,0 +1,75 @@
+# USB2 검증용: D435 IR 페어만 (color/depth 비활성). camera_server IR 플러밍 확인.
+# RGB까지 동시 스트림은 USB3 필요(USB2는 3-스트림 조합 resolve 불가).
+server:
+  name: camera_server
+  mode: capture_only
+  clock: monotonic_raw
+  simulate_cameras: false
+
+shared_memory:
+  name: "/camera_server_frames"
+  size_mb: 1024
+  ring_slots: 4
+  unlink_on_start: true
+
+metadata:
+  transport: zmq_pub
+  pub_bind: "tcp://127.0.0.1:5600"
+  health_topic: "camera.health"
+  bundle_topic: "camera.bundle"
+
+sync:
+  mode: software
+  master_camera: head
+  bundle_policy: nearest_timestamp
+  max_bundle_time_diff_ms: 10.0
+  publish_incomplete_bundles: false
+
+cameras:
+  head:
+    serial: "313522072863"
+    required: true
+    streams:
+      color:
+        enabled: false
+        width: 640
+        height: 480
+        fps: 30
+        format: rgb8
+      depth:
+        enabled: false
+        width: 640
+        height: 480
+        fps: 30
+        format: z16
+      ir_left:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 30
+        format: y8
+      ir_right:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 30
+        format: y8
+
+recording:
+  enabled: false
+  output_dir: "/data/episodes"
+  queue_capacity_frames: 300
+  writer_threads: 4
+  drop_policy: drop_oldest
+  raw_format: true
+
+health:
+  publish_rate_hz: 1
+  warn_if_frame_age_ms_gt: 100
+  warn_if_drop_count_increases: true
+  warn_if_bundle_skew_ms_gt: 10
+
+reconnect:
+  enabled: false
+  max_attempts: 0
+  retry_interval_ms: 1000

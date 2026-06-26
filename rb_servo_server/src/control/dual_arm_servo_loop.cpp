@@ -5321,17 +5321,29 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         }
     }
 
-    // Runaway bound: a committed sequence that has not finished within the configured
-    // budget gives up (Failed -> hold) so a permanently barrier-blocked corner cannot
-    // hold motion authority forever.
+    // Runaway bound (progress-aware): a committed sequence gives up (Failed -> hold) so a
+    // permanently barrier-blocked corner cannot hold motion authority forever. A move that
+    // keeps CLOSING on the goal is not killed by the wall-clock budget (a slow escape that
+    // crawls out of a near-collision still completes); a genuine STALL (no progress for the
+    // stall window) fails closed FAST instead of waiting out the full budget.
     if (sequence_active && ex.start_ns != 0) {
-        const double age_s = static_cast<double>(nowSteadyNs() - ex.start_ns) * 1e-9;
-        if (age_s > config_.safety.init_motion_planner.execution_timeout_sec) {
+        const uint64_t now_ns = nowSteadyNs();
+        const double age_s = static_cast<double>(now_ns - ex.start_ns) * 1e-9;
+        const double stall_window_s =
+            std::min(6.0, config_.safety.init_motion_planner.execution_timeout_sec);
+        const double since_progress_s = ex.last_progress_ns != 0
+            ? static_cast<double>(now_ns - ex.last_progress_ns) * 1e-9 : 0.0;
+        const bool absolute_timeout =
+            age_s > config_.safety.init_motion_planner.execution_timeout_sec;
+        const bool stalled = ex.status == InitMotionStatus::Executing &&
+                             ex.last_progress_ns != 0 && since_progress_s > stall_window_s;
+        if (absolute_timeout || stalled) {
             ex.status = InitMotionStatus::Failed;
-            ex.message = "execution timeout";
-            std::cerr << "[WARN] InitMotion: execution exceeded "
-                      << config_.safety.init_motion_planner.execution_timeout_sec
-                      << " s budget; holding (fail-closed)\n";
+            ex.message = stalled ? "execution stalled (no progress)" : "execution timeout";
+            std::cerr << "[WARN] InitMotion: " << ex.message
+                      << " (age=" << age_s << "s, since_progress=" << since_progress_s
+                      << "s, wp=" << ex.index << "/" << ex.waypoints.size()
+                      << "); holding (fail-closed)\n";
         }
     }
 
@@ -5342,10 +5354,16 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         if (result.success && !result.waypoints.empty()) {
             ex.waypoints = std::move(result.waypoints);
             ex.index = 0;
+            ex.escape_waypoints = result.escape_waypoints;
             ex.status = InitMotionStatus::Executing;
             ex.message = "executing";
+            // Reset progress tracking for the progress-aware execution timeout.
+            ex.best_dist_deg = std::numeric_limits<double>::infinity();
+            ex.last_progress_ns = nowSteadyNs();
+            ex.last_exec_log_ns = 0;
             std::cerr << "[INFO] InitMotion: plan found ("
                       << ex.waypoints.size() << " waypoints, "
+                      << result.escape_waypoints << " escape, "
                       << result.iterations << " iters, "
                       << result.planning_time_s << " s); streaming\n";
         } else {
@@ -5359,8 +5377,34 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     switch (ex.status) {
         case InitMotionStatus::Executing: {
             bool done = false;
+            // Follow the gradient-escape head precisely (escape_waypoints), then pure-pursuit.
             const std::pair<JointArray, JointArray> wp =
-                pursueWaypoints(ex.waypoints, ex.index, done);
+                pursueWaypoints(ex.waypoints, ex.index, done, ex.escape_waypoints);
+            if (!ex.waypoints.empty()) {
+                // Progress = max-joint distance from the current sent pose to the final
+                // waypoint. Closing on it (by > a noise floor) refreshes the stall timer.
+                const auto& goal_wp = ex.waypoints.back();
+                double dist = 0.0;
+                for (int i = 0; i < kDof; ++i) {
+                    dist = std::max(dist, std::abs(left_prev_sent_q_deg_[i] - goal_wp.first[i]));
+                    dist = std::max(dist, std::abs(right_prev_sent_q_deg_[i] - goal_wp.second[i]));
+                }
+                const uint64_t now_ns = nowSteadyNs();
+                if (dist < ex.best_dist_deg - 0.05) {
+                    ex.best_dist_deg = dist;
+                    ex.last_progress_ns = now_ns;
+                }
+                // Throttled (~1 Hz) streaming-progress diagnostic: which waypoint, whether
+                // still in the escape head, and how far from the goal — so a stall location
+                // is visible in the log.
+                if (ex.last_exec_log_ns == 0 || (now_ns - ex.last_exec_log_ns) > 1000000000ULL) {
+                    ex.last_exec_log_ns = now_ns;
+                    std::cerr << "[INFO] InitMotion: streaming wp " << ex.index << "/"
+                              << ex.waypoints.size() << " (escape=" << ex.escape_waypoints
+                              << ", dist_to_goal=" << dist << " deg, best=" << ex.best_dist_deg
+                              << " deg)\n";
+                }
+            }
             if (done) {
                 ex.status = InitMotionStatus::Done;
                 ex.message = "done";
@@ -5390,7 +5434,8 @@ PursuitStep pursueWaypointsStep(
     const JointArray& cur_right,
     std::size_t& index,
     double waypoint_tol_deg,
-    double lookahead_deg
+    double lookahead_deg,
+    int escape_count
 ) {
     PursuitStep out;
     out.left = cur_left;
@@ -5440,14 +5485,22 @@ PursuitStep pursueWaypointsStep(
            segFraction(waypoints[index], waypoints[index + 1]) >= 1.0) {
         ++index;
     }
-    // Pure-pursuit: aim at the farthest forward waypoint still within `lookahead_deg` of
+    // Inside the gradient-escape head (the leading sub-threshold waypoints), follow the
+    // path PRECISELY — lookahead 0 aims at the immediate next waypoint only, so the
+    // pure-pursuit chord cannot cut the escape corner back into the obstacle it is
+    // climbing out of (which would trip the reactive barrier and stall). Past the escape
+    // the normal lookahead resumes for near-max-velocity streaming.
+    const bool in_escape = escape_count > 0 &&
+                           index < static_cast<std::size_t>(escape_count);
+    const double lookahead_eff = in_escape ? 0.0 : lookahead_deg;
+    // Pure-pursuit: aim at the farthest forward waypoint still within `lookahead_eff` of
     // the current pose, so the downstream servo runs near max velocity (no stop-and-go at
     // every densified node). Start at index+1 so the command always leads forward and
     // never re-aims at the node behind us. The path stays the planned collision-free
     // polyline; any corner the chord cuts into a keep-out is braked by the reactive
     // barrier (slow only at that corner, never collide).
     std::size_t tgt = std::min(index + 1, n - 1);
-    while (tgt + 1 < n && chord(waypoints[tgt + 1]) <= lookahead_deg) {
+    while (tgt + 1 < n && chord(waypoints[tgt + 1]) <= lookahead_eff) {
         ++tgt;
     }
     out.left = waypoints[tgt].first;
@@ -5462,7 +5515,8 @@ PursuitStep pursueWaypointsStep(
 std::pair<JointArray, JointArray> DualArmServoLoop::pursueWaypoints(
     const std::vector<std::pair<JointArray, JointArray>>& waypoints,
     std::size_t& index,
-    bool& done
+    bool& done,
+    int escape_count
 ) const {
     const PursuitStep step = pursueWaypointsStep(
         waypoints,
@@ -5470,7 +5524,8 @@ std::pair<JointArray, JointArray> DualArmServoLoop::pursueWaypoints(
         right_prev_sent_q_deg_,
         index,
         config_.safety.init_motion_planner.waypoint_tol_deg,
-        config_.safety.init_motion_planner.execution_lookahead_deg);
+        config_.safety.init_motion_planner.execution_lookahead_deg,
+        escape_count);
     done = step.done;
     return {step.left, step.right};
 }
@@ -5609,6 +5664,7 @@ DualArmCommand DualArmServoLoop::applyCollisionFreeLinearMove(
         } else if (r.decision == InitMotionLinearResult::Decision::Detour) {
             lx.waypoints = std::move(r.waypoints);
             lx.index = 0;
+            lx.escape_waypoints = r.escape_waypoints;
             lx.status = LinearMoveStatus::Detour;
             lx.message = "detour";
             std::cerr << "[INFO] TcpLinearMove(collision-free): straight path blocked; "
@@ -5632,7 +5688,7 @@ DualArmCommand DualArmServoLoop::applyCollisionFreeLinearMove(
         case LinearMoveStatus::Detour: {
             bool done = false;
             const std::pair<JointArray, JointArray> wp =
-                pursueWaypoints(lx.waypoints, lx.index, done);
+                pursueWaypoints(lx.waypoints, lx.index, done, lx.escape_waypoints);
             if (done) {
                 lx.status = LinearMoveStatus::Done;
                 lx.message = "done";

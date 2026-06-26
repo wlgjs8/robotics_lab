@@ -266,8 +266,8 @@ safety:
       # (3 mm) than the robot keeps from itself (7 mm). The InitMotion planner applies the
       # same external d_hard to floor pairs (vs self pairs at the self margin).
       external:
-        d_hard_m: 0.003
-        d_slow_m: 0.025
+        d_hard_m: 0.002
+        d_slow_m: 0.015
         a_brake_m_s2: 3.0
         hyst_m: 0.010
         recover_speed_m_s: 0.0
